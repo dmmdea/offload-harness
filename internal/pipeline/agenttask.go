@@ -1705,8 +1705,9 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 // ONE completion and never the chat lane), 0 keeps the full repackMaxAttempts.
 // opts is what else this call is handed beside its context (repackOpts): with a
 // wall and a decode rate, each attempt is sized against the time left before the
-// wall's end plus the grace, clamped to what that buys or skipped when it cannot
-// buy the answer; with a trace, each attempt is recorded for the wire.
+// later of the wall's end and the re-pack's owed end (F44), plus the grace,
+// clamped to what that buys or skipped when it cannot buy the answer; with a
+// trace, each attempt is recorded for the wire.
 //
 // tokensOut is the generation of EVERY attempt, the failed ones included: it was
 // seat time spent whether or not the answer was usable (register C-80).
@@ -2449,14 +2450,17 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 // where the schema wants a number, "true" where it wants a bool, and, the other
 // way, a bare 7 where it wants the string "7" (register C-80: a research digest's
 // `numbers` list holds strings, and the chat lane answered JSON numbers for it).
-// It reads a property and every item of an array property. Found live on the
-// FreeToken gpt-oss seat (2026-08-27/28): the model answers correctly and quotes
-// every scalar, so each typed contract abstained after a CORRECT answer.
+// It reads every property and every item of an array property, at EVERY depth along
+// the schema's `properties` and `items` (F43: the grammar of a llama.cpp seat quotes
+// a list of numbers or booleans wherever it sits, and this is what turns it back).
+// Found live on the FreeToken gpt-oss seat (2026-08-27/28): the model answers
+// correctly and quotes every scalar, so each typed contract abstained after a
+// CORRECT answer.
 // Coercion is deterministic and lossless — a value is converted only when the
 // schema demands the type AND its text says the same thing in that type — and the
 // result must re-validate in full before it counts. Anything beyond scalar
-// re-typing (missing fields, wrong structure, null, nested values) still fails
-// honestly.
+// re-typing (missing fields, wrong structure, null, an object where a scalar goes)
+// still fails honestly.
 //
 // Numbers are decoded with UseNumber, so they stay the text the seat wrote: 12.50
 // becomes the string "12.50", never "12.5", and a number nothing touched comes
@@ -2468,7 +2472,10 @@ func coerceToSchema(content []byte, schema map[string]any) ([]byte, bool) {
 
 // coerceToSchemaNoted is coerceToSchema that also names what it re-typed, one entry
 // per field in name order ("id", or "numbers (3 items)" for a list), so the object a
-// run delivers is never silently different from the one the seat wrote.
+// run delivers is never silently different from the one the seat wrote. A field below
+// the top is named by its path: "meta.owner.id", and "rows[].scores (3 items)" for the
+// scalar items of the lists inside every object of a list (the count is over all of
+// them).
 func coerceToSchemaNoted(content []byte, schema map[string]any) ([]byte, []string, bool) {
 	dec := json.NewDecoder(bytes.NewReader(content))
 	dec.UseNumber()
@@ -2483,7 +2490,46 @@ func coerceToSchemaNoted(content []byte, schema map[string]any) ([]byte, []strin
 	if !ok {
 		return nil, nil, false
 	}
-	var changed []string
+	lg := &coerceLog{items: map[string]int{}}
+	coerceProps(obj, props, "", lg)
+	changed := lg.notes()
+	if len(changed) == 0 {
+		return nil, nil, false
+	}
+	fixed, merr := json.Marshal(obj)
+	if merr != nil {
+		return nil, nil, false
+	}
+	if validator.Validate(fixed, schema) != nil {
+		return nil, nil, false
+	}
+	return fixed, changed, true
+}
+
+// coerceLog is what one coercion re-typed: the scalar fields by path, and the count of
+// re-typed items per list path.
+type coerceLog struct {
+	scalars []string
+	items   map[string]int
+}
+
+// notes is the log as the note entries, sorted: "id", "numbers (3 items)", "s (1 item)".
+func (lg *coerceLog) notes() []string {
+	out := append([]string(nil), lg.scalars...)
+	for path, n := range lg.items {
+		unit := "items"
+		if n == 1 {
+			unit = "item"
+		}
+		out = append(out, fmt.Sprintf("%s (%d %s)", path, n, unit))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// coerceProps re-types the properties of one decoded object along its schema's `properties`,
+// in place. path is the object's own path ("" at the top).
+func coerceProps(obj map[string]any, props map[string]any, path string, lg *coerceLog) {
 	for name, raw := range props {
 		spec, ok := raw.(map[string]any)
 		if !ok {
@@ -2493,45 +2539,51 @@ func coerceToSchemaNoted(content []byte, schema map[string]any) ([]byte, []strin
 		if !present {
 			continue
 		}
-		want, _ := spec["type"].(string)
-		if want == "array" {
-			items, _ := spec["items"].(map[string]any)
-			itemWant, _ := items["type"].(string)
-			if arr, ok := got.([]any); ok {
-				n := 0
-				for i, el := range arr {
-					if v, ok := coerceScalar(el, itemWant); ok {
-						arr[i] = v
-						n++
-					}
-				}
-				if n > 0 {
-					unit := "items"
-					if n == 1 {
-						unit = "item"
-					}
-					changed = append(changed, fmt.Sprintf("%s (%d %s)", name, n, unit))
+		obj[name] = coerceValue(got, spec, joinCoercePath(path, name), lg)
+	}
+}
+
+// coerceValue re-types one decoded value along its schema and returns it: a list is read item by
+// item (a scalar item is re-typed to the items' type, and counted against the list's path; an
+// object or list item is read along the items' schema, its own paths below "<path>[]"), an
+// object is read along its `properties`, and a scalar is re-typed to the schema's type. A value
+// the schema does not describe by its shape is returned as it came.
+func coerceValue(v any, spec map[string]any, path string, lg *coerceLog) any {
+	switch t := v.(type) {
+	case []any:
+		items, _ := spec["items"].(map[string]any)
+		itemWant, _ := items["type"].(string)
+		for i, el := range t {
+			switch el.(type) {
+			case []any, map[string]any:
+				t[i] = coerceValue(el, items, path+"[]", lg)
+			default:
+				if nv, ok := coerceScalar(el, itemWant); ok {
+					t[i] = nv
+					lg.items[path]++
 				}
 			}
-			continue
 		}
-		if v, ok := coerceScalar(got, want); ok {
-			obj[name] = v
-			changed = append(changed, name)
+		return t
+	case map[string]any:
+		if props, ok := spec["properties"].(map[string]any); ok {
+			coerceProps(t, props, path, lg)
 		}
+		return t
 	}
-	if len(changed) == 0 {
-		return nil, nil, false
+	want, _ := spec["type"].(string)
+	if nv, ok := coerceScalar(v, want); ok {
+		lg.scalars = append(lg.scalars, path)
+		return nv
 	}
-	sort.Strings(changed)
-	fixed, merr := json.Marshal(obj)
-	if merr != nil {
-		return nil, nil, false
+	return v
+}
+
+func joinCoercePath(path, name string) string {
+	if path == "" {
+		return name
 	}
-	if validator.Validate(fixed, schema) != nil {
-		return nil, nil, false
-	}
-	return fixed, changed, true
+	return path + "." + name
 }
 
 // coercedNote is what an attempt's record and the run's repack_note say when the

@@ -143,6 +143,17 @@ is handed the list (`GPU_LEASE_UNLOAD_MODELS`). A single-card seat's run-cap lin
 [GPU lease](../../systems/gpu-lease.md), "Drain, unload and the render lane". Pinned by `TestDrainWaitsOnlyForIntersectingRuns`,
 `TestUnloadSeatOnlyUnloadsIntersectingModels` and `TestRunCapCountsPerCardForSingleCardSeats`.
 
+## Amendment 2026-10-11: the leased cards' seats are placed by layers, else by the serving config (register F15)
+
+The 2026-10-02 extension above reads a seat as being on the leased cards when its declared pin (`config.ModelPins`) intersects them. That
+was the whole of placement then; since register F15 a model is placed by `layers`, else by the device pin of its entry in the serving
+config (`LeaseScope.Locate`, `internal/gpualloc`), and a model placed on another card stays resident under a card lease. A model that
+nothing places is still read as on the leased cards, and so is every model when the card table cannot be read, so every doubt keeps
+today's direction. The unload list handed to the render lane (`GPU_LEASE_UNLOAD_MODELS`) is built from the llama-swap roster only when
+the roster was READ: a roster that could not be read makes no list at all, and the lane keeps its own rule, every model off the memory
+stack, because nothing then says what is resident and a list built from the config alone could leave a resident model on the leased
+card. The decision above is unchanged: the drain waits for runs on the leased cards.
+
 ## Evidence
 
 llama-swap log 2026-09-14 (two drain windows of 61 polls at 7 ms each, the 3m26.9s

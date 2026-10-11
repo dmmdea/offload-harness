@@ -414,22 +414,57 @@ func TestTheUnloadListIsScopedFromTheTableTheCallAlreadyHolds(t *testing.T) {
 	}
 }
 
-// A roster that cannot be read must not become "unload everything": the call is still handed a
-// list, the models the config declares judged like any other (register F15). The old answer left the
-// variable unset, and the render lane read that as every model off the memory stack.
-func TestAnUnreadableRosterStillHandsTheRenderLaneTheConfigSeatsOnItsCard(t *testing.T) {
-	f := newAdmitFixture(t, func(c *config.Config) { c.Endpoint = "http://127.0.0.1:1" })
-	ch := f.image(nil)
-	probe := f.waitStarted(1)[0]
-	if probe.Env["COMFY_CARD_UUID"] != admitUUIDA {
-		t.Fatalf("premise: the call runs on card A, got %q", probe.Env["COMFY_CARD_UUID"])
-	}
-	if got := probe.Env["GPU_LEASE_UNLOAD_MODELS"]; got != "seat-a" {
-		t.Errorf("with no roster card A's render may unload %q, want the config's seat on card A only (never the unset variable)", got)
-	}
-	f.letRunnersGo()
-	if r := f.await(ch); !r.OK {
-		t.Fatalf("%+v", r)
+// admitLogBuf is a log sink the admission's goroutines and the unload list's own writer may share.
+type admitLogBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *admitLogBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *admitLogBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// A roster that could NOT be read is not an empty roster: nothing says what is resident, so the call is
+// handed NO list and the render lane keeps its own rule, every model off the memory stack (register
+// F15). The old answer judged only the models the config declares: with no layers and no serving config
+// a roster timeout unloaded nothing, and with layers a resident model neither the layers nor the yaml
+// name stayed on the leased card. The admission says why.
+func TestAnUnreadableRosterLeavesTheRenderLaneOnItsOwnRule(t *testing.T) {
+	for name, tweak := range map[string]func(c *config.Config){
+		"layers only":                     func(c *config.Config) { c.Endpoint = "http://127.0.0.1:1" },
+		"no layers and no serving config": func(c *config.Config) { c.Endpoint = "http://127.0.0.1:1"; c.Layers = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			logged := &admitLogBuf{}
+			oldOut, oldFlags := log.Writer(), log.Flags()
+			log.SetOutput(logged)
+			t.Cleanup(func() { log.SetOutput(oldOut); log.SetFlags(oldFlags) })
+			f := newAdmitFixture(t, tweak)
+			ch := f.image(nil)
+			probe := f.waitStarted(1)[0]
+			if probe.Env["COMFY_CARD_UUID"] != admitUUIDA {
+				t.Fatalf("premise: the call runs on card A, got %q", probe.Env["COMFY_CARD_UUID"])
+			}
+			if got, has := probe.Env["GPU_LEASE_UNLOAD_MODELS"]; has {
+				t.Errorf("with the roster unreadable the call must be handed no list (the lane then unloads every model off the memory stack), got %q", got)
+			}
+			f.letRunnersGo()
+			if r := f.await(ch); !r.OK {
+				t.Fatalf("%+v", r)
+			}
+			out := logged.String()
+			if !strings.Contains(out, "roster could not be read") || !strings.Contains(out, "own rule") {
+				t.Errorf("the admission must say it fell back because the roster could not be read:\n%s", out)
+			}
+		})
 	}
 }
 

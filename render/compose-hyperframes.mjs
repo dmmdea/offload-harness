@@ -807,10 +807,12 @@ export async function runCompose(argv, { log = (s) => process.stdout.write(s + "
   const extractCacheDir = join(ctx.cacheDir, "extract");
   for (const d of [workRoot, tempDir, extractCacheDir]) mkdirSync(d, { recursive: true });
   const work = mkdtempSync(join(workRoot, "job-"));
-  if (!isDirEmpty(work) || existsSync(join(work, ".env"))) throw new ComposeError("BAD_INPUT", `work dir ${work} is not fresh`);
-  const env = buildChildEnv(parentEnv, { home: ctx.home, tempDir, ffmpeg, ffprobe, browser, extractCacheDir });
   const keep = !!f["keep-work"];
+  // the `try` opens right after the folder exists: anything that throws from here on (the freshness check,
+  // the child environment) still removes it
   try {
+    if (!isDirEmpty(work) || existsSync(join(work, ".env"))) throw new ComposeError("BAD_INPUT", `work dir ${work} is not fresh`);
+    const env = buildChildEnv(parentEnv, { home: ctx.home, tempDir, ffmpeg, ffprobe, browser, extractCacheDir });
     // 1. the project
     let projectDir;
     let templateManifest = {};

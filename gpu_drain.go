@@ -688,11 +688,13 @@ func (s leaseScope) touchesRun(r gpuactivity.Run) bool { return s.TouchesRun(r) 
 // that holds leaseIDs (internal/gpualloc.UnloadModels): every model of the roster except the memory
 // stack and the models POSITIVELY placed on another card (by layers, else by the serving config's
 // device pin). A model placed on a leased card goes, and so does a model nothing places: its card is
-// unknown, and the render needs its card, as before F15. The candidates are the llama-swap roster,
-// else the models the config declares and the serving config lists. ok is false only for a
-// whole-node lease (nothing to narrow: it holds every card, so the render lane keeps its own rule).
-func unloadModelsFor(ctx context.Context, cfg config.Config, roster []string, leaseIDs []string) ([]string, bool) {
-	return gpualloc.UnloadModels(ctx, cfg, roster, leaseIDs, cardTableDeps(), os.Stderr)
+// unknown, and the render needs its card, as before F15. The candidates are the llama-swap roster, or
+// the models the config declares and the serving config lists when the roster was read and is empty.
+// rosterErr is the roster read's error: a roster that could not be read makes ok false, so the render
+// lane keeps its own rule (every model off the memory stack). ok is false too for a whole-node lease
+// (nothing to narrow: it holds every card, so the render lane keeps its own rule).
+func unloadModelsFor(ctx context.Context, cfg config.Config, roster []string, rosterErr error, leaseIDs []string) ([]string, bool) {
+	return gpualloc.UnloadModels(ctx, cfg, roster, rosterErr, leaseIDs, cardTableDeps(), os.Stderr)
 }
 
 // unloadModelsEnv renders the list as the environment variable the render lane reads
@@ -731,11 +733,12 @@ var rosterIDsFn = func(ctx context.Context, endpoint string) ([]string, error) {
 
 // wrapperUnloadEnv is the GPU_LEASE_UNLOAD_MODELS entry a device lease's wrapped command is
 // handed (plan P5): the render lane's freeLlamaSwap unloads exactly that list instead of every
-// model off the memory stack. "" only for a whole-node lease, which holds every card and so leaves
-// the lane on its own rule. A card lease ALWAYS gets a list (register F15): when the roster cannot
-// be read the candidates are the models the config declares and the serving config lists, and with
-// no llama-swap endpoint it is the none sentinel. An unset variable would be read by the lane as
-// "every model off the memory stack", the render emptying the seats that are placed on other cards.
+// model off the memory stack. "" for a whole-node lease, which holds every card and so leaves the
+// lane on its own rule, and "" for a card lease whose roster could not be read: nothing then says what
+// is resident, a list built from the config alone could leave a resident model on the leased card (or,
+// on a box that declares nothing, unload nothing), so the lane keeps its own rule and the wrapper says
+// so. Otherwise a card lease gets a list (register F15), and with no llama-swap endpoint it is the
+// none sentinel.
 func wrapperUnloadEnv(ctx context.Context, cfg config.Config, leaseIDs []string) string {
 	if len(leaseIDs) == 0 {
 		return ""
@@ -744,11 +747,8 @@ func wrapperUnloadEnv(ctx context.Context, cfg config.Config, leaseIDs []string)
 		return unloadModelsEnv(nil, true)
 	}
 	roster, err := rosterIDsFn(ctx, cfg.Endpoint)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gpu reserve: the llama-swap roster could not be read (%v): the candidates for the render lane are the models the config declares and the serving config lists\n", err)
-		roster = nil
-	}
-	models, known := unloadModelsFor(ctx, cfg, roster, leaseIDs)
+	// UnloadModels says why when err is not nil: the roster could not be read, so no list is made.
+	models, known := unloadModelsFor(ctx, cfg, roster, err, leaseIDs)
 	return unloadModelsEnv(models, known)
 }
 

@@ -209,8 +209,9 @@ type repackFit struct {
 }
 
 // fit sizes one attempt against the time left: before the earlier of the run's
-// own deadline (its liveness ceiling) and the wall's end plus the grace, at the
-// seat's rate. An attempt whose budget fits is sent as it is; one that does not is
+// own deadline (its liveness ceiling) and the later of the wall's end and the
+// re-pack's owed end (F44), plus the grace, at the seat's rate. An attempt whose
+// budget fits is sent as it is; one that does not is
 // clamped to the tokens the time buys, as long as that still holds the answer
 // (least, the answer's own size in tokens); one that cannot is skipped, and the
 // note says why. It is a token budget and a deadline check, never a transport
@@ -472,55 +473,95 @@ const (
 // and a loop that ended before the cap closed itself), so without this it was
 // published as the structured result. It says what it found, or "" for an object
 // that reads as content. An empty item is the schema's empty value, never a loop.
+//
+// An item is a scalar or a composite: since F43 a llama.cpp seat writes a list of
+// OBJECTS (and of lists) in its grammar, and a loop closes inside those as well. Every
+// list at every depth is read, an object's lists and the lists inside a list's objects
+// alike, and a finding names the field by its path ("meta.labels", "rows[2].tags").
 func degenerateList(content []byte, source string) string {
 	var obj map[string]any
 	if json.Unmarshal(content, &obj) != nil {
 		return ""
 	}
-	names := make([]string, 0, len(obj))
-	for name := range obj {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		arr, _ := obj[name].([]any)
-		if len(arr) < repackLoopRun {
-			continue
+	return loopInValue(obj, "", source)
+}
+
+// loopInValue walks one decoded value for a looping list, objects in sorted key order so the
+// finding is the same on every read. A list is judged before the values inside its elements.
+func loopInValue(v any, path, source string) string {
+	switch t := v.(type) {
+	case map[string]any:
+		names := make([]string, 0, len(t))
+		for name := range t {
+			names = append(names, name)
 		}
-		items := make([]string, len(arr))
-		for i, el := range arr {
-			items[i] = listItemText(el)
+		sort.Strings(names)
+		for _, name := range names {
+			sub := name
+			if path != "" {
+				sub = path + "." + name
+			}
+			if why := loopInValue(t[name], sub, source); why != "" {
+				return why
+			}
 		}
-		for period := 1; period <= repackLoopMaxPeriod; period++ {
-			for i := 0; i+period*repackLoopRun <= len(items); {
-				k := 1
-				for i+(k+1)*period <= len(items) && equalItems(items[i:i+period], items[i+k*period:i+(k+1)*period]) {
-					k++
+	case []any:
+		if why := loopInList(t, path, source); why != "" {
+			return why
+		}
+		for i, el := range t {
+			switch el.(type) {
+			case map[string]any, []any:
+				if why := loopInValue(el, fmt.Sprintf("%s[%d]", path, i), source); why != "" {
+					return why
 				}
-				if k < repackLoopRun {
-					i++
-					continue
-				}
-				if first := items[i]; first != "" {
-					if held := strings.Count(source, first); held < k {
-						quoted := make([]string, period)
-						for j := range quoted {
-							quoted[j] = strconv.Quote(items[i+j])
-						}
-						return fmt.Sprintf("repeated the list item %s %d times in a row in %q and the answer holds %q %d time(s): a loop, not content",
-							strings.Join(quoted, ", "), k, name, first, held)
-					}
-				}
-				i += k * period
 			}
 		}
 	}
 	return ""
 }
 
+// loopInList is the run test over ONE list: name is its path.
+func loopInList(arr []any, name, source string) string {
+	if len(arr) < repackLoopRun {
+		return ""
+	}
+	items := make([]string, len(arr))
+	for i, el := range arr {
+		items[i] = listItemText(el)
+	}
+	for period := 1; period <= repackLoopMaxPeriod; period++ {
+		for i := 0; i+period*repackLoopRun <= len(items); {
+			k := 1
+			for i+(k+1)*period <= len(items) && equalItems(items[i:i+period], items[i+k*period:i+(k+1)*period]) {
+				k++
+			}
+			if k < repackLoopRun {
+				i++
+				continue
+			}
+			if first := items[i]; first != "" {
+				measure := listItemMeasure(arr[i], first)
+				if held := heldCount(source, measure); held < k {
+					quoted := make([]string, period)
+					for j := range quoted {
+						quoted[j] = strconv.Quote(clipItem(items[i+j]))
+					}
+					return fmt.Sprintf("repeated the list item %s %d times in a row in %q and the answer holds %q %d time(s): a loop, not content",
+						strings.Join(quoted, ", "), k, name, clipItem(measure), held)
+				}
+			}
+			i += k * period
+		}
+	}
+	return ""
+}
+
 // listItemText is a list element as the text it would have in the answer: the
-// string itself, a number or boolean as written, and "" for a nested value (which
-// is never compared).
+// string itself, a number or boolean as written, and for a nested value its compact
+// JSON (an object's keys sorted, so two spellings of one object are one item). ""
+// for the schema's empty value: an empty string, an empty list or object, or a
+// composite holding nothing but empty values and zeros, which is never a loop.
 func listItemText(el any) string {
 	switch v := el.(type) {
 	case string:
@@ -529,8 +570,112 @@ func listItemText(el any) string {
 		return strconv.FormatFloat(v, 'f', -1, 64)
 	case bool:
 		return strconv.FormatBool(v)
+	case map[string]any, []any:
+		if emptyValue(v) {
+			return ""
+		}
+		b, err := json.Marshal(v)
+		if err != nil {
+			return ""
+		}
+		return string(b)
 	}
 	return ""
+}
+
+// emptyValue reports whether a decoded value holds nothing a reader could call content:
+// null, an empty string, false, zero, and a list or object whose every element is one of
+// those, at any depth.
+func emptyValue(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return true
+	case string:
+		return t == ""
+	case bool:
+		return !t
+	case float64:
+		return t == 0
+	case []any:
+		for _, el := range t {
+			if !emptyValue(el) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		for _, el := range t {
+			if !emptyValue(el) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// listItemMeasure is the text whose count in the answer says how often the answer holds
+// the item. A scalar is its own text. Prose does not hold a JSON object whole, it holds the
+// words in it, so for a composite the measure is the longest string inside it (the first,
+// in key order, when several tie): "" when the composite holds no string, and then the repeat
+// alone is the finding. CHOSEN, not measured.
+func listItemMeasure(el any, text string) string {
+	switch el.(type) {
+	case map[string]any, []any:
+		return longestString(el)
+	}
+	return text
+}
+
+// longestString is the longest string inside a decoded value, objects read in sorted key order.
+func longestString(v any) string {
+	best := ""
+	switch t := v.(type) {
+	case string:
+		return t
+	case []any:
+		for _, el := range t {
+			if s := longestString(el); len(s) > len(best) {
+				best = s
+			}
+		}
+	case map[string]any:
+		names := make([]string, 0, len(t))
+		for name := range t {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if s := longestString(t[name]); len(s) > len(best) {
+				best = s
+			}
+		}
+	}
+	return best
+}
+
+// heldCount is how often the answer holds a measure: strings.Count, which counts an empty
+// measure as every position, is never asked about "".
+func heldCount(source, measure string) int {
+	if measure == "" {
+		return 0
+	}
+	return strings.Count(source, measure)
+}
+
+// repackItemClip bounds a list item quoted in a finding: a JSON object is long, and the text
+// lands in a ledger row, a defer reason and the node log.
+const repackItemClip = 100
+
+func clipItem(s string) string {
+	if len(s) <= repackItemClip {
+		return s
+	}
+	cut := repackItemClip
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }
 
 func equalItems(a, b []string) bool {
