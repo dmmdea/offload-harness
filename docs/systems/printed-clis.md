@@ -262,6 +262,9 @@ the fleet node's reclaimable-VRAM verdict, and the STT unload. Run the harness's
 3. **No binaries, no run reports.** Enforced by `.gitignore`.
 4. **Every printed CLI has a CI job, and the `govulncheck` job scans it.** A module invisible to the
    root `./...` and absent from CI is a module that is not actually tested, or scanned.
+   `TestEveryTrackedGoModuleIsScannedOrNamedAsExcluded` holds the second half: it finds every tracked
+   `go.mod`, so a new printed CLI fails it until it is in the scan loop of `ci.yml` and in
+   `govulncheckModules`.
 5. **Tests pass on a bare runner.** A printed CLI's `go test ./...` must be green with no live
    server, no model volume, and no reference deployment. Tests that genuinely need one of those
    `t.Skip` with the reason; they never fail for absence.
@@ -288,7 +291,10 @@ vulnerabilities, each for `GOOS=linux` and `GOOS=windows`, under the compiler th
 its own, and the harness's `./...` never reaches a nested module. A vulnerability that is merely
 present in a required module and never called (today: x/text in both modules) does not fail it; a
 called one does. The fix for a finding in a vendored tree is the same as for any other change to it:
-upstream, then re-vendor (the regenerate / re-vendor cycle above).
+upstream, then re-vendor (the regenerate / re-vendor cycle above). The only `go.mod` files it does not
+scan are the two write-door contract fixtures under `contracts/write-door/`, named with their reason in
+`govulncheckExcluded` (`ci_govulncheck_job_test.go`): they are task modules a coding-agent contract
+hands to the agent, not shipped code.
 
 The Printing Press verify-mode variables (`PRINTING_PRESS_VERIFY`, `PRINTING_PRESS_VERIFY_LIVE_HTTP`,
 `PRINTING_PRESS_DOGFOOD`) govern the Printing Press's own verify and dogfood runners, not `go test`,

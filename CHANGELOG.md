@@ -44,6 +44,9 @@ Versioning: [SemVer](https://semver.org/).
   without the line and `toolchain default` are cases), govulncheck must be built under that GOTOOLCHAIN and be on PATH, each of the
   three modules must be scanned for each of the two systems with `-show version ./...` under that GOTOOLCHAIN, and a finding or an
   error in any one of the six must fail the step.
+  `TestEveryTrackedGoModuleIsScannedOrNamedAsExcluded` closes "every module": it lists the tracked `go.mod` files and fails for one
+  that is neither in the scan set nor named, with its reason, among the exclusions (today the two write-door contract fixtures), so a
+  new printed CLI cannot go unscanned with every check green (`TestModuleScanCheckReportsEachProblem` holds each way it can fail).
   `TestGoModPinCheckReportsEachProblem` proves each rule of the pin check (a missing, invalid, too old or below-the-go-line
   toolchain, and x/sys, x/text and go-sdk gone back) on parsed go.mod text, because a real go.mod with an older module no longer
   builds; `TestGoVersionCompareIsNumeric` holds the comparators to numbers (go1.27.10 above go1.27.2, v0.100.0 above v0.48.0).

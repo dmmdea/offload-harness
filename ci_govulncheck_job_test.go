@@ -23,7 +23,10 @@ package main
 
 import (
 	"fmt"
+	"path"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -39,6 +42,60 @@ var (
 	govulncheckModules = []string{".", "tools/comfyui", "tools/llamaswap"}
 	govulncheckOSes    = []string{"linux", "windows"}
 )
+
+// govulncheckExcluded are the directories that hold a go.mod and are deliberately not scanned, each with the
+// reason. A scan reads the code that ships, and these modules are not part of it. Every other go.mod in the
+// tree must be in govulncheckModules (TestEveryTrackedGoModuleIsScannedOrNamedAsExcluded), so a new printed CLI
+// is scanned or this list says why it is not.
+var govulncheckExcluded = map[string]string{
+	"contracts/write-door/t1": "a task module of a write-door agent contract (contract.json beside it): the work the contract hands " +
+		"the agent, with a planted bug; it is not built into the harness and ships nothing",
+	"contracts/write-door/t2": "a task module of a write-door agent contract (contract.json beside it): the work the contract hands " +
+		"the agent; it is not built into the harness and ships nothing",
+}
+
+// moduleScanProblems compares the directories that hold a go.mod (found) with the ones the govulncheck job
+// scans and the ones named as excluded, and says what does not add up. The first two are slash paths relative
+// to the repository root, "." for the root module.
+func moduleScanProblems(found, scanned []string, excluded map[string]string) []string {
+	var problems []string
+	has := map[string]bool{}
+	for _, d := range found {
+		has[d] = true
+	}
+	inScan := map[string]bool{}
+	for _, d := range scanned {
+		inScan[d] = true
+	}
+	sorted := append([]string(nil), found...)
+	sort.Strings(sorted)
+	for _, d := range sorted {
+		_, isExcluded := excluded[d]
+		switch {
+		case inScan[d] && isExcluded:
+			problems = append(problems, d+" is both scanned and excluded: it is one or the other")
+		case !inScan[d] && !isExcluded:
+			problems = append(problems, d+" holds a go.mod and the govulncheck job does not scan it: add it to the loop in ci.yml "+
+				"and to govulncheckModules, or name it in govulncheckExcluded with the reason it ships nothing")
+		}
+	}
+	for _, d := range scanned {
+		if !has[d] {
+			problems = append(problems, "govulncheckModules names "+d+", which holds no go.mod")
+		}
+	}
+	var stale []string
+	for d := range excluded {
+		if !has[d] {
+			stale = append(stale, d)
+		}
+	}
+	sort.Strings(stale)
+	for _, d := range stale {
+		problems = append(problems, "govulncheckExcluded names "+d+", which holds no go.mod: remove the stale entry")
+	}
+	return problems
+}
 
 // govulncheckJob is the job that scans, with the indexes of its steps.
 type govulncheckJob struct {
@@ -292,4 +349,82 @@ func TestCIRunsGovulncheckOnEveryModuleOnBothOSes(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestEveryTrackedGoModuleIsScannedOrNamedAsExcluded: "every module" is a fact about the tree, not about the two
+// lists that repeat it (the loop in ci.yml and govulncheckModules). The printed CLIs under tools/ are separate
+// modules the root's ./... never reaches, so a new one is invisible to every other check; this one finds it by
+// its go.mod. The job test above holds ci.yml's loop to govulncheckModules exactly, so the chain is closed:
+// tree, list, workflow.
+func TestEveryTrackedGoModuleIsScannedOrNamedAsExcluded(t *testing.T) {
+	files, _ := trackedFiles(t)
+	var found []string
+	for _, f := range files {
+		if p := filepath.ToSlash(f); path.Base(p) == "go.mod" {
+			found = append(found, path.Dir(p))
+		}
+	}
+	if !hasModuleDir(found, ".") {
+		t.Fatalf("the tracked files hold no root go.mod (%d files, go.mod directories %v): the check went blind", len(files), found)
+	}
+	for _, p := range moduleScanProblems(found, govulncheckModules, govulncheckExcluded) {
+		t.Error(p)
+	}
+	for dir, why := range govulncheckExcluded {
+		if strings.TrimSpace(why) == "" {
+			t.Errorf("govulncheckExcluded names %s without a reason", dir)
+		}
+	}
+}
+
+// TestModuleScanCheckReportsEachProblem: the check above says what is wrong for each way the tree, the list and
+// the exclusions can disagree, and nothing for a tree that agrees with them.
+func TestModuleScanCheckReportsEachProblem(t *testing.T) {
+	scanned := []string{".", "tools/comfyui", "tools/llamaswap"}
+	excluded := map[string]string{"contracts/write-door/t1": "a fixture"}
+	cases := []struct {
+		name    string
+		found   []string
+		scanned []string
+		expect  []string // substrings, one per expected problem, in order; none for a tree that agrees
+	}{
+		{"every module scanned, the fixture excluded",
+			[]string{".", "tools/comfyui", "tools/llamaswap", "contracts/write-door/t1"}, scanned, nil},
+		{"a new printed CLI",
+			[]string{".", "tools/comfyui", "tools/llamaswap", "tools/newcli", "contracts/write-door/t1"}, scanned,
+			[]string{"tools/newcli holds a go.mod and the govulncheck job does not scan it"}},
+		{"a new module nobody listed, two of them, in order",
+			[]string{".", "tools/comfyui", "tools/llamaswap", "tools/zeta", "tools/alpha", "contracts/write-door/t1"}, scanned,
+			[]string{"tools/alpha holds a go.mod", "tools/zeta holds a go.mod"}},
+		{"a scanned module whose go.mod is gone",
+			[]string{".", "tools/comfyui", "contracts/write-door/t1"}, scanned,
+			[]string{"govulncheckModules names tools/llamaswap, which holds no go.mod"}},
+		{"an exclusion whose go.mod is gone",
+			[]string{".", "tools/comfyui", "tools/llamaswap"}, scanned,
+			[]string{"govulncheckExcluded names contracts/write-door/t1, which holds no go.mod"}},
+		{"a module both scanned and excluded",
+			[]string{".", "tools/comfyui", "tools/llamaswap", "contracts/write-door/t1"}, append([]string{"contracts/write-door/t1"}, scanned...),
+			[]string{"contracts/write-door/t1 is both scanned and excluded"}},
+	}
+	for _, c := range cases {
+		got := moduleScanProblems(c.found, c.scanned, excluded)
+		if len(got) != len(c.expect) {
+			t.Errorf("%s: reported %v, want %d problem(s) %v", c.name, got, len(c.expect), c.expect)
+			continue
+		}
+		for i, want := range c.expect {
+			if !strings.Contains(got[i], want) {
+				t.Errorf("%s: problem %d is %q, want it to contain %q", c.name, i, got[i], want)
+			}
+		}
+	}
+}
+
+func hasModuleDir(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
