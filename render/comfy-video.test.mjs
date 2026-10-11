@@ -386,7 +386,7 @@ test("generate() takes its graph from buildGraphForRun, the one call that lets -
   const to = src.indexOf("async function main(");
   assert.ok(from >= 0 && to > from, "generate() is declared before main() in comfy-video.mjs");
   const code = src.slice(from, to).replace(/\/\/[^\n]*/g, "");
-  assert.match(code, /const \{ graph, seed, model \} = await buildGraphForRun\(pos, flags, API\);/, "generate() awaits buildGraphForRun(pos, flags, API) for its graph");
+  assert.match(code, /const \{ graph, seed, model \} = await buildGraphForRun\(pos, flags, API(, \{ multicard \})?\);/, "generate() awaits buildGraphForRun(pos, flags, API) for its graph (the card-only placement adds its plan as the fourth argument)");
   assert.doesNotMatch(code, /buildGraphFromArgs\(/, "generate() must not build the graph around the card read");
   assert.match(code, /submitChecked\(\{ api: API, graph,/, "and it submits that graph");
 });

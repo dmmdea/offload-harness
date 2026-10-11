@@ -121,6 +121,8 @@ type Facts struct {
 	// ReserveVRAMGiB is VRAM the runner holds back for the display (its --reserve-vram); 0 = the
 	// cfg's imagegen_reserve_vram, else the runners' own 1.0.
 	ReserveVRAMGiB float64
+	// CardsGiB is the total VRAM of EACH card of the leased set (none = unknown). Only the card-only Wan placement reads it.
+	CardsGiB []float64
 	// Stat reports a file's size; nil = os.Stat. A table in tests, because a 24 GiB fixture is not an option.
 	Stat func(path string) (size int64, ok bool)
 	// Env reads an environment variable (COMFY_CKPT and friends); nil = none set.
@@ -154,6 +156,18 @@ func LargestCardGiB(cards []gpuprobe.Card, ids []string) float64 {
 		best = math.Max(best, c.VRAMTotalGiB)
 	}
 	return best
+}
+
+// LeasedCardsGiB is the total VRAM of each card among ids (lease ids; none = every card), in the table's order.
+func LeasedCardsGiB(cards []gpuprobe.Card, ids []string) []float64 {
+	var out []float64
+	for _, c := range cards {
+		if len(ids) > 0 && !containsFold(ids, c.LeaseID()) {
+			continue
+		}
+		out = append(out, c.VRAMTotalGiB)
+	}
+	return out
 }
 
 func containsFold(list []string, s string) bool {
@@ -195,10 +209,41 @@ type slot struct {
 	from  string // "file" (size read), "default" (the documented per-family size), "" (unknown)
 }
 
+// wanActivationsGiB is what a Wan 2.2 sampler needs beyond the weights at the film's geometry (720x1280, 81 frames: 75,600
+// tokens): 8.0 GiB live and 9.7-11.0 GiB with the allocator's slack and the VAE encode, measured on the card-only placement
+// (benchmarks 2026-10-11). The top of that range, so an estimate errs toward declaring.
+const wanActivationsGiB = 11.0
+
+// wanResidentDefaultGiB is the share of each Wan expert the card-only placement keeps on the compute card when the call names none:
+// render/wf-wan22-i2v.mjs WAN_RESIDENT_GB_DEFAULT (a test pins the two together).
+const wanResidentDefaultGiB = 3.0
+
+// wanStorageOverheadGiB is what the storage card holds besides the donor blocks of the expert in use: the VAE (0.24 GiB), the CUDA
+// context and the allocator's slack. Measured on the benchmark pair: the storage card peaked at 11.1 GiB (NVML) with 10.3 GiB of donor
+// blocks (the 13.3 GiB expert less its 3 GiB resident share), so 0.8.
+const wanStorageOverheadGiB = 0.8
+
+// CardOnly is the card-only Wan placement a call asked for (--wan-placement multicard on the Wan 2.2 graph), and what the call says about it.
+type CardOnly struct {
+	// ResidentGiB is --wan-resident-gb: the share of each expert kept on the compute card.
+	ResidentGiB float64
+}
+
 // estimate is the rule: the files the family loads, sized, and counted in full when together they
 // do not fit the card. files are what the binding names (mediacap's tables); family picks the
 // documented fallbacks and the roles the family is known to load.
 func estimate(family string, files []mediacap.ModelFile, f Facts) (Need, bool) {
+	return estimateWith(family, files, f, nil)
+}
+
+// estimateWith is estimate for a call that may ask for the card-only Wan placement (co: --wan-placement multicard on the Wan 2.2
+// graph). That placement does not stream weights from RAM: the two experts load one after the other (the first is gone before the
+// second lands) and the text encoder is gone before the first expert, so what has to fit is the largest STAGE, on each of the TWO
+// cards the lease holds: the larger card computes (its resident share of the expert + the sampler's activations) and the other holds
+// the donor blocks (the rest of the expert + the VAE and the CUDA context). When both fit, the call declares 0 (measured on two
+// equal cards: 13.3 and 11.1 GiB at the peak, 2.3 GiB of host growth over ComfyUI's idle). Anything that is not exactly that (one
+// card, three, no table, a card too small for its stage) is the ordinary estimate, which counts the whole set.
+func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOnly) (Need, bool) {
 	roots := mediacap.ModelRoots(f.Cfg.ComfyDir)
 	defaults := familySizes[family]
 	stat := f.Stat
@@ -248,6 +293,24 @@ func estimate(family string, files []mediacap.ModelFile, f Facts) (Need, bool) {
 		src = SourceFamilyDefault
 	}
 	set := strings.Join(parts, " + ")
+	if co != nil && len(f.CardsGiB) == 2 {
+		var expert float64
+		for _, s := range slots {
+			if s.role == mediacap.RoleDiffusion && s.gib > expert {
+				expert = s.gib
+			}
+		}
+		small, large := f.CardsGiB[0], f.CardsGiB[1]
+		if small > large {
+			small, large = large, small
+		}
+		reserve := f.reserve()
+		compute := co.ResidentGiB + wanActivationsGiB
+		storage := expert - co.ResidentGiB + wanStorageOverheadGiB
+		if expert > 0 && small > 0 && compute <= large-reserve && storage <= small-reserve {
+			return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB expert + %.1f GiB of film-size activations = %.1f GiB (of %.1f usable) and the storage card %.1f GiB of donor blocks + %.1f GiB for the VAE and the context = %.1f GiB (of %.1f usable), so each card fits its stage, and the weights are mapped read-only: no weights stream from RAM (the set is %s)", family, small, large, co.ResidentGiB, expert, wanActivationsGiB, compute, large-reserve, expert-co.ResidentGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
+		}
+	}
 	usable := f.VRAMGiB - f.reserve()
 	if f.VRAMGiB > 0 && total <= usable {
 		return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: %s = %.1f GiB fits the %.1f GiB card (%.1f GiB usable), so no weights stream from RAM", family, set, total, f.VRAMGiB, usable)}, true

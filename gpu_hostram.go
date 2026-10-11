@@ -45,10 +45,14 @@ func resolveReserveHostRAMWith(ramGiven bool, ramGiB float64, class gpulease.Cla
 	facts := hostneed.Facts{Cfg: cfg, Env: os.Getenv}
 	_, recognised := hostneed.ParseRenderCall(cmdArgs)
 	if readCards && !ramGiven && (recognised || class == gpulease.ClassMedia) {
+		// CardsGiB is each leased card's size: the card-only Wan placement (comfy-video.mjs --wan-placement multicard) runs on
+		// exactly two of them and is sized against the pair, where every other call is sized against the largest one.
 		if known != nil {
 			facts.VRAMGiB = hostneed.LargestCardGiB(known, ids)
+			facts.CardsGiB = hostneed.LeasedCardsGiB(known, ids)
 		} else if cards, _, err := cardTable(context.Background(), cfg); err == nil {
 			facts.VRAMGiB = hostneed.LargestCardGiB(cards, ids)
+			facts.CardsGiB = hostneed.LeasedCardsGiB(cards, ids)
 		}
 	}
 	need := hostneed.Resolve(req, facts)

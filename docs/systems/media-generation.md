@@ -51,6 +51,7 @@ pinned, env-scrubbed and machine-gated. See
 - How is a named opt-in family (Qwen-Image-2.1) selected, and what does its result carry?
 - Which card does a ComfyUI route render on, and how is that pinned per binding?
 - How do video, animate, voice and music run on an iGPU-only box, and how is CPU placement refused?
+- How does a film-size Wan 2.2 clip run on two cards with no host RAM, and what does the runner refuse?
 
 ## Scope
 
@@ -575,6 +576,110 @@ nothing for them (the pipeline passes the flag whatever the family, as it does `
 branches never read it). WAN-Animate-2 already used the plain `VAEDecode`. The effect on the tiers: none. No tier seeds
 the key, so every tier decodes `tiled` on a Wan render, exactly as before the key existed; a box opts in to `plain` or
 `auto` by setting `videogen_wan_decode` itself.
+
+**Card-only Wan: `--wan-placement multicard`** (`render/wan-multicard.mjs`, `render/comfyui-ext/`; the placement was measured
+2026-10-11 on two RTX 5060 Ti 16 GB). A Wan 2.2 14B fp8 expert is 13.3 GiB and a film-size clip (720x1280, 81 frames, 75,600 tokens)
+needs 9.7-11.0 GiB more for the sampler's activations, so it fits no single 16 GB card. The single-card way out is ComfyUI's dynamic
+VRAM, which streams the experts through host RAM: the host pays the whole file, and a `gpu reserve` declares about 33 GiB for it.
+`--wan-placement multicard` spends a second card instead of host RAM. `single`, the default, is today's graph and launch, byte for byte.
+
+| Flag | Meaning |
+|---|---|
+| `--wan-placement single\|multicard` | `single` (default) changes nothing. `multicard` is the placement below; `--high-unet` / `--low-unet` must name the fp8 safetensors experts. |
+| `--wan-cards <a>,<b>` | The two cards, as nvidia-smi indices or UUIDs, for a call made outside a lease. Under a lease the lease's cards (`GPU_LEASE_DEVICES`, else the lease's own record) are the authority and this can only confirm them: a card the lease does not hold is refused. With neither, the UUIDs in `CUDA_VISIBLE_DEVICES`. |
+| `--wan-resident-gb N` | GiB of each expert kept on the compute card (default 3, the measured split; at most what the compute card holds beside the sampler's activations at the call's geometry: 5.1 GiB at film size on a 15.9 GiB card). The rest sits on the storage card. |
+| `--wan-decode plain` | Under multicard: save the sampled latent, free both cards, then the plain `VAEDecode` (below). `tiled` and `auto` keep their meaning. |
+| `--wan-loader` | Not read under multicard (the placement is the loader). `native`, which a film driver may still pass, is ignored with one stderr line. |
+
+**The placement.** Two cards, numbered in the order of `CUDA_VISIBLE_DEVICES`: the runner lists the UUIDs storage first, so the first
+is `cuda:0` whatever its nvidia-smi index. `cuda:0` is the STORAGE card: text encoder, VAE and the donor blocks of the expert in use
+(about 10.3 GiB). `cuda:1` is the COMPUTE card: 3 GiB of the expert resident plus the sampler's activations. Each expert loads through the
+DisTorch2 loader with `compute_device cuda:1` and the allocation `cuda:1,3gb;cuda:0,*`; the donor blocks stream to the compute card one at a
+time over the card-to-card copy (about 6 GiB/s, no peer access: roughly 1.7 s of a 250 s step). The text encoder has to stay on `cuda:0`:
+on `cuda:1` the ComfyUI process aborts. The larger card computes; two equal cards keep the order the lease lists them.
+
+**Which cards, and what is refused before anything starts.** `planMulticard` reads the driver's card table
+(`nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.free,display_active,display_attached`; a failed query is asked once more
+before a driver is taken to lack `display_attached`) and refuses, with the reason: no cards named, a dangling `--wan-cards`, anything but
+exactly two, a token that names no card, a `--wan-cards` card the lease does not hold, a card that drives a display (`display_active`
+Enabled or `display_attached` Yes, the harness's own rule, so a monitor on a sleeping screen counts) and a card whose display state the
+driver does not report (never assumed screenless). It also refuses what was not measured or cannot run, in the same place, before the
+lease slot is taken, llama-swap is unloaded or ComfyUI starts: `--fast`, a GGUF expert, an expert nobody named (`--high-unet` and
+`--low-unet` are required: the builder's defaults are GGUF), another family (`--model ltx25`, a `--graph` file), a `--wan-resident-gb`
+the compute card cannot hold beside the sampler (the card's size less 0.5 GiB for the context less the sampler's activations at the call's
+geometry: the measured 10.3 GiB at the film's 75,600 tokens, scaled by the tokens, never under 2 GiB, so 5.1 GiB at most at film size), and
+the placement's own flags lost to an `=` (`--wan-placement=multicard`, or `--seed=7 --wan-placement multicard`: this runner's parser does
+not split `=`, so the flag is lost or swallowed, and the lease sizing, which does split it, would declare no host RAM for a call that then
+ran single; write each flag as `--name value`). After ComfyUI is up and before the graph is POSTed the runner compares the
+`/system_stats` device list with the pair (count, then size in order), and asks for the harness's node pack under every decode; a mismatch
+is `WAN-PLACEMENT-MISMATCH`, a missing pack `WAN-PLACEMENT-PACK`, with nothing submitted.
+
+**The launch.** The runner starts its own ComfyUI, a keyed instance `mc-<storage uuid head>-<compute uuid head>`: its own port (from
+`--api` or `COMFY_API`, which must not be the unkeyed instance's 8188; with neither it falls back to the per-card port, and a ComfyUI
+already holding that port stops the run, which a stderr line says up front), its output and temp folders under the install's
+`instances/<key>/`, and its launch marker and console log (`offload-comfyui-<key>.log`) beside the install. That is the existing
+keyed-instance mechanism, which writes into the install's tree but never into its `custom_nodes`, settings or models. The argv is the
+harness's own (`--disable-smart-memory --cache-none --reserve-vram`) plus `--gpu-only --disable-pinned-memory`,
+`--extra-model-paths-config render/comfyui-ext/extra_model_paths.yaml`, and `--disable-all-custom-nodes --whitelist-custom-nodes` naming the
+install's MultiGPU and VideoHelperSuite packs (found by name, case-insensitively, in its `custom_nodes`) and the harness's own pack. The
+child env is `CUDA_VISIBLE_DEVICES=<storage uuid>,<compute uuid>`, `CUDA_DEVICE_ORDER=PCI_BUS_ID` and `OFFLOAD_RO_LOAD=1`. For that launch
+only, the caller's `COMFY_CARD_UUID`, `COMFY_CUDA_DEVICE` and `COMFY_DYNAMIC_VRAM` are dropped, because a single-card pin and dynamic VRAM
+contradict a two-card `--gpu-only` placement, and `COMFY_INSTANCE` is set, so a film driver's existing environment can stay as it is. A
+running ComfyUI is reused only when its launch marker proves it is this instance, on this pair, in this order (`reuseVerdict`); otherwise it
+is replaced or refused, as for a card pin.
+
+**The harness-owned ComfyUI code (`render/comfyui-ext/`).** ComfyUI reads `custom_nodes` from any `--extra-model-paths-config` yaml, after
+the install's own `extra_model_paths.yaml`, so the harness's node folder (`nodes/offload_multicard`) is an extra search path and nothing is
+installed into the shared ComfyUI. It holds two things. First, a read-only safetensors reader, switched on by `OFFLOAD_RO_LOAD=1`: with
+dynamic VRAM off, ComfyUI opens a safetensors file copy-on-write, which Windows charges to system commit in full at map time (measured:
++13.3 GiB per expert, +14.7 GiB of private bytes on the stock loader); mapped read-only the same file charges nothing. On this driver every
+VRAM allocation is also charged 1:1 to the process's private bytes and to commit, so a card-only run reads "private +17 GiB, commit
++20-40 GiB" while using about 2 GiB of real host memory; host growth is private growth minus the VRAM growth on the leased cards. If the
+reader cannot be installed the pack fails to import, and the runner, which asks for the pack's node before every run whatever the decode,
+stops with `WAN-PLACEMENT-PACK` before any GPU work. The reader assumes nothing writes into a loaded weight in place (the map is read-only,
+so such a write would crash ComfyUI with a Windows access violation, not corrupt the file); none exists on the Wan load path read at
+ComfyUI 0.38.0, where `--gpu-only` copies the weights to the card. The pack check proves the pack loaded, which installs the reader whenever
+the launch env asks for it; a hand-started instance with the same argv but without `OFFLOAD_RO_LOAD=1` would pass it without the reader
+(the launch marker records argv, not env), and the runner never starts one that way. Second, `OffloadFreeForDecode`, below.
+
+**Decode under multicard.** The plain decode needs about 10 GiB beyond the weights (measured +10.0 GiB at the film latent, 34 s) and the
+experts' donor blocks sit on the decode card. With `--gpu-only` the offload device is the card itself, so ComfyUI's own unload frees
+nothing; an expert leaves the cards when its model patcher loses its last Python reference, which is when the sampler that used it
+completes (`--cache-none` drops its inputs). The pass-through node `OffloadFreeForDecode` (id 21, between the last sampler and the
+`VAEDecode`) is meant to make that certain, and shows it. It saves the sampled latent first (`latents/render_wan`; a `LATENT` line names it, because an
+80-minute sample is never worth losing to a failed decode), collects garbage, returns every card's cached blocks to the driver, logs each
+card's free memory before and after, and stops the run with `OFFLOAD-DECODE-NOFIT` and the numbers when the VAE's card has less free than
+85 % of ComfyUI's decode estimate (the measured need was 83 % of it). A stop is deliberate: ComfyUI would otherwise retry the decode tiled,
+with its own temporal chunking, which is the seam the plain decode exists to avoid. After a successful run the runner also searches the
+console for `Ran out of memory when regular VAE decoding` and says `WAN-DECODE-FALLBACK`. `tiled` under multicard is today's
+`VAEDecodeTiled` (256/64, temporal 32/8): it fits beside the expert (+2.3 GiB measured) and it seams at frames 24 and 48.
+
+**Host RAM.** `gpu reserve --devices <a>,<b> -- node render/comfy-video.mjs ... --wan-placement multicard` declares 0 when each of the
+two leased cards fits its own stage, as the runner will place it (`hostneed.estimateWith`, `Facts.CardsGiB`, each card's size less the
+runner's `--reserve-vram`): the larger card computes, so it must hold the resident share of the expert (`--wan-resident-gb`, default 3)
+plus 11 GiB of film-size activations, and the other holds the rest of the expert plus 0.8 GiB for the VAE and the context (the benchmark's
+storage card peaked at 11.1 GiB with 10.3 GiB of blocks). A sum would pass a 24 GiB card beside an 8 GiB one; the 8 GiB card cannot hold the
+donor blocks. The reserve counts: a `--reserve-vram` of 1.9 GiB or more no longer fits two 15.9 GiB cards, and that call takes the ordinary
+estimate (the lease it needs then declares the whole set, or `--ram 0` explicitly). One card, three (a whole-node lease), no card table,
+no fit, another family or no flag keep the ordinary estimate, the whole set (33 GiB). Measured host growth in the benchmark was 2.3 GiB
+over ComfyUI's idle, inside the headroom the brake keeps anyway. The pipeline's media admission has no multicard door: every typed door leases one card, so the placement
+is reached through the render helper under an explicit `gpu reserve --devices`.
+
+**Measured.** The recipe comes from a benchmark of 2026-10-11 on two RTX 5060 Ti 16 GB, the two non-display cards of a three-card box.
+At the film's geometry (720x1280x81) with 4 of the 20 steps it ran at 250 s per step on either expert, with a peak of 13.3 GiB on the
+compute card and 11.1 GiB on the storage card (of 15.9), and a host growth of 2.3 GiB over ComfyUI's idle 3.2 GiB; no black or blank
+frame. One 5060 Ti alone ran out of memory in the first sampler step, and a 5060 Ti with the display card either hit the display
+card's cap or ran out of memory. That benchmark decoded tiled and was not a quality sample. The 20-step clip of this build, with the
+plain decode after the cards are freed and the frame check at 24 and 48, was queued behind another lease on the first card when this
+section was written, so its numbers are not here yet.
+
+**What it says when it refuses.** `WAN-PLACEMENT: ...` (cards, display card, missing pack: nothing launched);
+`WAN-PLACEMENT-MISMATCH` (ComfyUI's devices are not the pinned pair: nothing submitted); `WAN-PLACEMENT-PACK` (the harness's pack failed
+to import, so the read-only reader is not there: read the console log; nothing submitted); `WAN-PLACEMENT-NOTE` (the decode is the tiled
+one, which seams at frames 24 and 48); `OFFLOAD-DECODE-NOFIT` (the cards were not freed enough for a plain decode: the
+latent is in the instance's output folder under `latents/`); `WAN-DECODE-FALLBACK` (the clip decoded tiled after all: check frames 24
+and 48).
+
 
 **LTX-2.5** (`videogen_family: "ltx25"`) is the measured 32 GB-class video seat (2026-08-12
 three-way, bound 2026-08-14, behavior-proven 2026-08-15): the 22B distilled int8 DiT renders
@@ -1652,6 +1757,17 @@ recorded as known offenders with their reason rather than silently skipped — a
   [`render/comfy-video.mjs`](../../render/comfy-video.mjs) — the Wan 2.2 graph and its runner: the
   decode mode (`chooseWanDecode` is the one rule), the `/system_stats` card read (`readRenderCard`)
   and `buildGraphForRun`, the single path from flags to a graph
+- [`render/wan-multicard.mjs`](../../render/wan-multicard.mjs) — the card-only placement
+  (`--wan-placement multicard`): the card table, the choice and refusal of the two cards (`resolveWanCards`), the ComfyUI launch
+  it needs (`multicardLaunch`, `multicardEnv`), the device check (`checkComfyDevices`) and `planMulticard`, the one call the
+  runner makes before anything starts; [`render/wan-multicard.test.mjs`](../../render/wan-multicard.test.mjs) pins it
+- [`render/comfyui-ext/extra_model_paths.yaml`](../../render/comfyui-ext/extra_model_paths.yaml) and
+  [`render/comfyui-ext/nodes/offload_multicard/__init__.py`](../../render/comfyui-ext/nodes/offload_multicard/__init__.py) — the
+  harness-owned ComfyUI code the placement loads through `--extra-model-paths-config`: the read-only safetensors reader and
+  `OffloadFreeForDecode` ([tests](../../render/comfyui-ext/test_offload_multicard.py), run by
+  [`render/comfyui-ext.test.mjs`](../../render/comfyui-ext.test.mjs))
+- [`internal/hostneed/hostneed.go`](../../internal/hostneed/hostneed.go) — `estimateWith`: a card-only Wan call declares 0 host RAM
+  when each leased card fits its own stage
 - [`render/comfy-edit.mjs`](../../render/comfy-edit.mjs) /
   [`render/wf-qwen-image-edit.mjs`](../../render/wf-qwen-image-edit.mjs) — the generative edit
   lifecycle and its graph builder
