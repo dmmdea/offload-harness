@@ -245,6 +245,12 @@ func readLedger(path, scale string) (map[string][]point, int, error) {
 			continue // skip malformed / partial trailing lines
 		}
 
+		// Filter: a test, bake or measurement row carries a fixture's margin, not the box's (register F48):
+		// calibrating the live thresholds on it would move them for traffic nobody sent.
+		if ledger.ClassOf(e) != "" {
+			continue
+		}
+
 		// Filter: cache hits and zero-margin rows carry no useful calibration signal.
 		if e.CacheHit || e.Margin == 0 {
 			continue

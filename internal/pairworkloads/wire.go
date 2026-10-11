@@ -62,7 +62,9 @@ func (e *Emitter) SetWireHeaders(h http.Header) {
 	if name := e.AskerName(); name != "" {
 		h.Set(core.AskerHeader, name)
 	}
-	if !e.Enabled() {
+	// A suppressed run (a bake, a measurement, a test: Config.Suppressed) cards nothing and asks nobody to:
+	// a node reads the absence of the header as "the asker cards it", which is exactly the silence wanted.
+	if !e.Enabled() && !e.suppressed() {
 		h.Set(core.PairCardHeader, core.PairCardNode)
 	}
 }
@@ -90,17 +92,17 @@ func ModeFor(cfg config.Config) ModeInfo {
 	return cachedEmitter(cfg).Mode()
 }
 
-// cachedEmitter is the identity-only emitter for cfg, one per (enabled, endpoint, app dir, node-info
-// URL, relay).
+// cachedEmitter is the identity-only emitter for cfg, one per (enabled, suppressed, endpoint, app dir,
+// node-info URL, relay).
 func cachedEmitter(cfg config.Config) *Emitter {
 	c := FromConfig(cfg)
-	key := strings.Join([]string{boolKey(c.Enabled), c.Endpoint, strings.TrimSpace(os.Getenv("OFFLOAD_PAIR_APPDIR")), c.NodeInfoURL, c.Relay.signature()}, "|")
+	key := strings.Join([]string{boolKey(c.Enabled), boolKey(c.Suppressed), c.Endpoint, strings.TrimSpace(os.Getenv("OFFLOAD_PAIR_APPDIR")), c.NodeInfoURL, c.Relay.signature()}, "|")
 	wireMu.Lock()
 	defer wireMu.Unlock()
 	e, ok := wireEmitters[key]
 	if !ok {
 		// No state dir: this emitter only reads identity, it never emits a frame.
-		e = New(Config{Enabled: c.Enabled, Endpoint: c.Endpoint, NodeInfoURL: c.NodeInfoURL, Relay: c.Relay})
+		e = New(Config{Enabled: c.Enabled, Suppressed: c.Suppressed, Endpoint: c.Endpoint, NodeInfoURL: c.NodeInfoURL, Relay: c.Relay})
 		wireEmitters[key] = e
 	}
 	return e

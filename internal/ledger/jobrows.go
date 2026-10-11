@@ -1,11 +1,5 @@
 package ledger
 
-import (
-	"bufio"
-	"encoding/json"
-	"os"
-)
-
 // Inner rows and the job rule (register C-62, 0.143.0).
 //
 // A delegator-local job writes an INNER `agent` row (ParentJobID = the
@@ -59,34 +53,4 @@ func JobRows(entries []Entry) []Entry {
 		}
 	}
 	return out
-}
-
-// parentJobIDsInFile is ParentJobIDs over a ledger file, streamed (the
-// summary's first pass). A missing file has no parents.
-func parentJobIDsInFile(path string) (map[string]bool, error) {
-	ids := map[string]bool{}
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return ids, nil
-		}
-		return nil, err
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 16<<20)
-	for sc.Scan() {
-		var e struct {
-			JobID       string `json:"job_id"`
-			ParentJobID string `json:"parent_job_id"`
-			Phase       string `json:"phase"`
-		}
-		if json.Unmarshal(sc.Bytes(), &e) != nil {
-			continue
-		}
-		if e.JobID != "" && e.ParentJobID == "" && e.Phase != PhaseStarted {
-			ids[e.JobID] = true
-		}
-	}
-	return ids, sc.Err()
 }

@@ -243,6 +243,9 @@ func readLedger(path string) ([]ledger.Entry, error) {
 		if json.Unmarshal(line, &e) != nil {
 			continue // skip malformed
 		}
+		if ledger.ClassOf(e) != "" {
+			continue // test, bake and measurement rows are not the traffic the router serves (register F48)
+		}
 		out = append(out, e)
 	}
 	return out, sc.Err()

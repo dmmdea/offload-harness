@@ -349,6 +349,56 @@ Versioning: [SemVer](https://semver.org/).
   `TestVisionColdLoadWaitOffLeavesTheLoadToTheRequest` pin the bound, the free resident case, the off-box case and the off switch;
   stubbing the wait out, removing its bound and removing the off-box guard each fail the test that names them.
 
+### Fixed — test, bake and measurement traffic no longer lands on the production ledger views or the PAIR dashboard (register F48, job-error class C23)
+
+- **The defect.** In 48 hours, 42 PAIR cards for a seat named `bake` that no endpoint served (`agent seat "bake" is not in the
+  endpoint's served roster`, connection refused on the bake's own port) and 444 ledger rows for a fixture seat reached the
+  operator's production surfaces, so every error rate and the fleet-share figure read off the ledger mixed test traffic with real
+  work. Nothing marked a row or a card as a bake, a measurement or a test.
+- **A row now carries its run class.** `run_class` (`test`, `bake`, `measurement`, or an operator label) is settled in `Record`, the
+  one path every writer takes, and is absent on every production row, so an ordinary row is byte-identical to before. It comes
+  from, in order: the writer; the process (`LOCAL_OFFLOAD_RUN_CLASS=bake`, any clean lower-case label, or a class-prefixed
+  `LOCAL_OFFLOAD_ORIGIN` such as `bake:run-7`; `production` sets nothing); a test binary that opened a ledger outside its own
+  throwaway directory (`test`: this is how test rows reached the real ledger); and what the row declares, so rows already on
+  disk read the same way: a call pinned with `pin_reason: measurement`, the `cli:fleet-measure` and `cli:fleet-smoke` doors, and
+  the `go-test` origin the repo's suites set. `ledger.ClassOf` is the one reading of it. **Nothing is guessed from a seat name**: a
+  seat that is not in the served roster is a real misconfiguration (a mistyped `agent_model` fails exactly like the bake's seat) and
+  stays on every view.
+- **The views leave it out and say so.** `ledger`, `loupe`, `stats` and `audit-sample` skip the labelled jobs by default and report
+  how many they skipped per class (`excluded_non_production` in the `ledger` and `loupe` JSON, a `left out:` line, a note on stderr
+  for `stats` and `audit-sample`, whose stdout keeps its shape); `--include-test-traffic` counts them again. The inner `agent` row of a
+  labelled job is skipped with its parent, so a measurement's savings do not leak into `tokens_saved`. `ledger.SummarizeFile`
+  and `TopDeferReasons` default the same way (`SummarizeFileWith` / `TopDeferReasonsWith` include them), `ledger.ReadProduction`
+  and `ledger.ProductionRows` are the filtered readers, and `ledger.ReadAll` stays the raw one. The confidence calibration, the
+  tier health report, the router and the correctness head are fitted on production rows only: a fixture's margin would move the
+  live thresholds. `TestEveryRawLedgerReaderFiltersTestTraffic` fails when a new report reads the raw rows without dropping them.
+- **PAIR.** A process with a run class opens no card (`pairworkloads.Config.Suppressed`, through the gate every card already
+  uses) and asks no fleet node to card its jobs: an asker with no emitter sends `X-Offload-Pair-Card: node`, which would have put
+  the card back on the node, so a suppressed asker sends the asker name and no card header. A delegation pinned for `measurement`
+  opens none and its dispatch deletes the card header (a thin client with no emitter would otherwise have the serving node open
+  the card), `Begin` and the remote-call card refuse the `fleet-measure` door (the asker's row is still written), and the ledger
+  observer cards no row of a class. `LOCAL_OFFLOAD_PAIR_TEST_CARDS=1` keeps the cards of a labelled run
+  (to test PAIR itself); `fleet-smoke` keeps its card; the `go-test` origin labels rows only, because the repo's own tests build
+  real emitters against fixture ingresses.
+- **Not covered.** (1) A run is labelled only when its tool says so: nothing is guessed from a seat name, because a seat that is
+  not in the served roster is exactly what a mistyped `agent_model` looks like and must stay on every view, so the bake tool that
+  produced the 42 cards has to set `LOCAL_OFFLOAD_RUN_CLASS=bake` (or pin its calls for `measurement`). (2) The class does not
+  ride the fleet wire: a fleet node's own ledger row for work it ran for a labelled asker is unlabelled (its card is not opened,
+  because the asker sends no card header), and the media and vision lanes' asker headers know the config, not the door, so a
+  `fleet-measure` render from a box with no PAIR emitter that overflows to a node still has the node open its card. (3) The
+  harness-share gate and any other reader outside this repository that sums the ledger itself must skip rows with `run_class` set
+  (and `origin_session: go-test` for rows written before the label).
+- Tests: `TestOriginResolvesTheRunClassFromTheEnvironmentThenTheOriginPrefix`, `TestClassOfReadsTheLabelThenTheOriginThenWhatTheCallerDeclared`,
+  `TestRecordStampsTheRunClassOnEveryRowAndLeavesProductionRowsByteIdentical`,
+  `TestATestBinaryWritingOutsideItsTempDirectoryLabelsItsRowsTest`, `TestSummarizeFileExcludesNonProductionTrafficByDefaultAndSaysSo`,
+  `TestProductionRowsDropsLabelledRowsAndTheInnerRowsOfLabelledJobsAndCountsThem` (ledger);
+  `TestFromConfigOpensNoCardsForANonProductionRun`, `TestASuppressedAskerDoesNotAskTheNodeToCard`,
+  `TestTheLedgerObserverCardsNoRowOfANonProductionClass`, `TestBeginOpensNoCardForTheMeasureDoor`,
+  `TestARemoteCallThroughTheMeasureDoorOpensNoCardButStillWritesItsRow` (pairworkloads);
+  `TestAMeasurementPinnedDelegationOpensNoPairCard`, `TestAMeasurementPinnedDispatchAsksNoNodeToCard` (delegate);
+  `TestLedgerCommandLeavesOutTestTrafficAndSaysSo`, `TestLoupeLeavesOutTestTrafficAndSaysSo`, `TestStatsAndAuditSampleLeaveOutTestTraffic`
+  (root); the four `...ProductionRowsOnly` tests of the health, calibration, router and confhead packages.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)
