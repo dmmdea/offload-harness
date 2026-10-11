@@ -191,6 +191,12 @@ func evidenceTail(h *Holder) string {
 func (p *ProgressState) unknownWhy() string {
 	switch {
 	case p.Problem == "" || p.Problem == "does not exist":
+		if gpulease.IsMintedProgressFile(p.File) {
+			// The wrapper's own file: created when its command starts, removed when the command ends. Before and
+			// after, the lease is queued, draining, unloading the seat or warming it back, and "the path is wrong"
+			// would accuse a healthy lease (a drain of an hour is ordinary).
+			return "does not exist: the wrapper creates it when its command starts and removes it when the command ends, so it is absent while the lease queues, drains, unloads the seat or warms it back"
+		}
 		if p.StallSec > 0 && p.AgeSec > p.StallSec {
 			return fmt.Sprintf("has not appeared in %s, past its %s stall window: the job has not written to it or the path is wrong",
 				secs(p.AgeSec), secs(p.StallSec))

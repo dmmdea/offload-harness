@@ -15,6 +15,7 @@ import { comfyUp as _comfyUp, ensureComfy as _ensureComfy, resolveComfyDir, reso
 import { freeHarnessInstance } from "./comfy-family.mjs";
 import { parseManifest as _parse, manifestHash as _hash } from "./manifest.mjs";
 import { satisfyManifest, defaultSatisfyDeps } from "./manifest-satisfy.mjs";
+import { leaseBeat } from "./lease-progress.mjs";
 import { preflightGraph } from "./preflight-graph-file.mjs";
 import { allOutputsByNode } from "./comfy-output.mjs";
 import { readOwner as _readOwner, writeOwner as _writeOwner } from "./comfy-ownership.mjs";
@@ -192,7 +193,7 @@ async function main() {
   const comfyPy = resolveComfyPy(comfyDir);
   const instance = resolveInstance({ api, env: process.env });
   const cmCli = process.env.COMFY_CM_CLI || join(comfyDir, "custom_nodes/ComfyUI-Manager/cm-cli.py");
-  const satDeps = defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli });
+  const satDeps = { ...defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }), beat: (line) => leaseBeat(line, { force: true }) };
 
   const run = () => runGraphFlow(
     { graph, manifest, outDir: flags["out-dir"] || ".", resultPath: flags.result || "run-graph-result.json", api, comfyDir, reserveVram },

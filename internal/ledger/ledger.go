@@ -248,8 +248,9 @@ type Entry struct {
 	// it a second time. Absent on every row the observer cards.
 	CardByCaller bool `json:"card_by_caller,omitempty"`
 	// ReasonCode is the closed-set code for why the job ended the way it did (see
-	// reasoncode.go), written on every agent_delegate row: ReasonOK for a job that
-	// completed, so its presence never depends on the job having failed.
+	// reasoncode.go), written on every agent_delegate row (ReasonOK for a job that
+	// completed, so its presence never depends on the job having failed) and on every
+	// deferred row of any other task. Absent on a row of another task that did not defer.
 	ReasonCode string `json:"reason_code,omitempty"`
 	// Phase is empty on every ordinary row — a finished record — and PhaseStarted
 	// on the dispatch marker a delegator writes when it hands a job to a seat, so a
@@ -350,10 +351,11 @@ func (l *Ledger) Record(e Entry) error {
 	// call ShortReason).
 	e.Reason = capAt(e.Reason, maxStoredReasonLen)
 	e.Placement = truncateReason(e.Placement)
-	// Every agent_delegate row carries a reason code from the closed set, whatever
-	// the writer knew: settled HERE, on the one path every writer takes, so no
-	// record site can leave it off or invent a member.
-	if e.Task == "agent_delegate" {
+	// Every agent_delegate row and every deferred row of any task carries a reason code from the
+	// closed set, whatever the writer knew: settled HERE, on the one path every writer takes, so no
+	// record site can leave it off or invent a member (F22: the code was settled for agent_delegate
+	// alone, and the other doors' defers had a free-text reason and nothing to group by).
+	if e.Task == "agent_delegate" || e.Deferred {
 		e.ReasonCode = settleReasonCode(e)
 	}
 	// Provenance and the one token figure are stamped HERE, on the one path

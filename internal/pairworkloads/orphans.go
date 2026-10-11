@@ -78,6 +78,7 @@ package pairworkloads
 // disabled emitter writes and sweeps nothing.
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -150,6 +151,153 @@ type openMarker struct {
 	// card, kept so a sweep can rebuild the relay body (Endpoint is then the relay's route URL).
 	Relay *relayMeta                 `json:"relay,omitempty"`
 	Info  map[string]json.RawMessage `json:"workload_info"`
+	// delegation is what the delegator's intent ledger says about this marker's job when a sweep looks at
+	// it (delegationOpen, delegationRecovered, or ""). Set by the sweep, never stored in the marker.
+	delegation string
+}
+
+// What the intent ledger (<state root>/delegate-intent.jsonl) says about a delegation whose delegator died.
+const (
+	delegationOpen      = "open"      // the dispatch was acked and nothing has closed it: the node may still be running the job
+	delegationRecovered = "recovered" // a recovery pass found the node's finished answer and filed it
+)
+
+// orphanText is the failure text of an orphaned card: OrphanError (the words consumers match) and what the
+// sweep knows. A card the sweep closes is one whose producer died without reporting an outcome, so the job
+// died with it unless something else was running it. The text says which process was gone, whether the job
+// had started and for how long, and that nobody reported an outcome; it cannot say who ended the process
+// (the register holds a pid and a start time, not a cause), so it names the causes it has seen. A
+// delegation's card says that the node may have finished the job and where its result lands (C03). It has
+// to fit CardErrorMax whole, or the card cuts exactly the part that says what happened.
+func orphanText(m openMarker, now time.Time) string {
+	state := infoString(m.Info, "state")
+	who := "its process"
+	if m.PID > 0 {
+		who = "pid " + strconv.Itoa(m.PID)
+	}
+	since := ""
+	if started := infoInt(m.Info, "startedAt"); state == "running" && started > 0 {
+		since = shortElapsed(now.Sub(time.UnixMilli(started)))
+	}
+	var detail string
+	switch {
+	case m.delegation == delegationRecovered:
+		detail = "delegator " + who + " gone; the node reported the job's end; see delegate-recovered/"
+	case m.delegation == delegationOpen:
+		in := ""
+		if since != "" {
+			in = " " + since + " in"
+		}
+		detail = "delegator " + who + " gone" + in + "; the node may still finish it, see delegate-recovered/"
+	case state == "queued" && neverMarksWorking(m.Info):
+		// A call card of a lane that cannot mark its work started (transcribe) is "queued" while the engine runs:
+		// "it never started" would be false about a transcription killed mid-decode. Say how long the call had
+		// been open and that no outcome came.
+		into := ""
+		if created := infoInt(m.Info, "createdAt"); created > 0 {
+			into = " " + shortElapsed(now.Sub(time.UnixMilli(created))) + " in"
+		}
+		detail = who + " gone" + into + ", no outcome reported (killed, console closed or reboot)"
+	case state == "queued":
+		detail = who + " gone while queued: it never started, no outcome reported"
+	case state == "running":
+		into := ""
+		if since != "" {
+			into = " " + since + " into the run"
+		}
+		detail = who + " gone" + into + ", no outcome reported (killed, console closed or reboot)"
+	default:
+		detail = who + " gone, no outcome reported"
+	}
+	return OrphanError + ": " + detail
+}
+
+// shortElapsed is a duration to the minute for a card: "<1m", "7m", "2h", "7h5m".
+func shortElapsed(d time.Duration) string {
+	m := int(d.Round(time.Minute) / time.Minute)
+	switch {
+	case m < 1:
+		return "<1m"
+	case m < 60:
+		return strconv.Itoa(m) + "m"
+	case m%60 == 0:
+		return strconv.Itoa(m/60) + "h"
+	}
+	return strconv.Itoa(m/60) + "h" + strconv.Itoa(m%60) + "m"
+}
+
+func infoString(info map[string]json.RawMessage, key string) string {
+	var v string
+	if raw, ok := info[key]; ok && json.Unmarshal(raw, &v) == nil {
+		return v
+	}
+	return ""
+}
+
+func infoInt(info map[string]json.RawMessage, key string) int64 {
+	var v float64
+	if raw, ok := info[key]; ok && json.Unmarshal(raw, &v) == nil {
+		return int64(v)
+	}
+	return 0
+}
+
+// neverMarksWorking reports whether a card is the call card of a task whose lane never marks its work
+// started (tasksThatNeverMarkWorking): a card opened by Begin has the id "call-<ms>-<n>" and names its task as
+// its model.
+func neverMarksWorking(info map[string]json.RawMessage) bool {
+	return strings.HasPrefix(infoString(info, "id"), "call-") && tasksThatNeverMarkWorking[infoString(info, "model")]
+}
+
+// isSeatCard reports whether a card is a seat-watch stretch (seatwatch.go): direct traffic on a vLLM seat,
+// produced by the watcher in fleet-serve and not by a harness job.
+func isSeatCard(info map[string]json.RawMessage) bool {
+	return infoString(info, "requesterId") == SeatRequester
+}
+
+// delegationOf reads what the delegator's intent ledger (<state root>/delegate-intent.jsonl, written by
+// internal/delegate) says about the job of a delegation card whose delegator died: delegationOpen when the
+// dispatch was acked and nothing closed it, delegationRecovered when a recovery pass filed the node's
+// finished answer, "" for anything else (not a delegation, no ledger, a job closed some other way). A
+// delegation's id is "agd-..." and its markers are the only ones that read the ledger. Best effort: any
+// failure to read it is "", the card then says what any orphan's does.
+func (e *Emitter) delegationOf(m openMarker) string {
+	id := infoString(m.Info, "id")
+	if !strings.HasPrefix(id, "agd-") {
+		return ""
+	}
+	dir := e.registerDir()
+	if dir == "" {
+		return ""
+	}
+	f, err := os.Open(filepath.Join(filepath.Dir(dir), "delegate-intent.jsonl"))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	state := ""
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1<<20)
+	for sc.Scan() {
+		var ev struct {
+			E    string `json:"e"`
+			Job  string `json:"job"`
+			Note string `json:"note"`
+		}
+		if json.Unmarshal(sc.Bytes(), &ev) != nil || ev.Job != id {
+			continue
+		}
+		switch ev.E {
+		case "d":
+			state = delegationOpen
+		case "ok":
+			state = ""
+			if strings.HasPrefix(ev.Note, "recovered to") {
+				state = delegationRecovered
+			}
+		}
+	}
+	return state
 }
 
 // markerEndpoint is the ingress a marker's card lives on: the endpoint it
@@ -553,6 +701,9 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 			removeRetrying(lock)
 			continue
 		}
+		if !m.Pending {
+			m.delegation = e.delegationOf(m)
+		}
 		build := e.sweepFrameFn
 		if build == nil {
 			build = sweepFrame
@@ -672,7 +823,14 @@ func (e *Emitter) reapLock(lock string, selfPID int) {
 // sweepFrame is the frame a sweep sends for a marker: a pending terminal
 // frame as its producer built it, or the "failed" frame of an orphan.
 func sweepFrame(m openMarker, now time.Time) ([]byte, error) {
-	method, info := MethodFor("failed"), orphanInfo(m.Info, now)
+	state := "failed"
+	if isSeatCard(m.Info) {
+		// A seat-watch stretch is not a harness job: its producer is the watcher, and the watcher dying says
+		// nothing about the seat or its callers, so it is closed as a clean stop closes it (seatwatch.go
+		// closeAll) and not as "harness process exited before the job finished" (C04).
+		state = "completed"
+	}
+	method, info := MethodFor(state), orphanInfo(m, now)
 	if m.Pending {
 		var state string
 		_ = json.Unmarshal(m.Info["state"], &state)
@@ -701,14 +859,21 @@ func (e *Emitter) postMarker(ctx context.Context, m openMarker, body []byte) err
 }
 
 // orphanInfo is the terminal workloadInfo for an orphaned card: the in-flight
-// frame's identity and timestamps unchanged, state failed, completed now.
-func orphanInfo(in map[string]json.RawMessage, now time.Time) map[string]json.RawMessage {
+// frame's identity and timestamps unchanged, state failed with what the sweep knows
+// (orphanText), completed now. A seat-watch stretch closes as completed with no error.
+func orphanInfo(m openMarker, now time.Time) map[string]json.RawMessage {
+	in := m.Info
 	out := make(map[string]json.RawMessage, len(in)+3)
 	for k, v := range in {
 		out[k] = v
 	}
-	out["state"] = mustJSON("failed")
-	out["error"] = mustJSON(CardError(OrphanError))
+	if isSeatCard(in) {
+		out["state"] = mustJSON("completed")
+		delete(out, "error")
+	} else {
+		out["state"] = mustJSON("failed")
+		out["error"] = mustJSON(CardError(orphanText(m, now)))
+	}
 	out["completedAt"] = json.RawMessage(strconv.FormatInt(now.UnixMilli(), 10))
 	return out
 }

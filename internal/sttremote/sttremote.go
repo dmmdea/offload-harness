@@ -252,6 +252,10 @@ func prepareUpload(cfg config.Config, audio string) (upload, error) {
 			return upload{path: ogg, ext: "ogg", size: ofi.Size(), durationSec: float64(ofi.Size()) / opusBytesPerSec, cleanup: cleanup}, nil
 		}
 		cleanup()
+	} else if errors.Is(cerr, audioio.ErrNoAudioStream) {
+		// Sending the original would only make a node repeat the conversion and fail on the same file with
+		// ffmpeg's words (F21, 2026-10-09: one call was routed to a second node for that).
+		return upload{}, cerr
 	} else {
 		log.Printf("sttremote: converting %q to Opus failed, sending the original file: %v", audio, cerr)
 	}
@@ -311,6 +315,12 @@ func callWith(ctx context.Context, cfg config.Config, req core.Request, h core.R
 	}
 	up, err := prepareUpload(cfg, req.Audio)
 	if err != nil {
+		if errors.Is(err, audioio.ErrNoAudioStream) {
+			// The same defer, class and error class the local door files (pipeline.runTranscribe).
+			res := core.Deferf(audioio.ErrNoAudioStream.Error(), "", core.Meta{ErrClass: core.ErrClassBadInput})
+			res.DeferClass = core.DeferClassContract
+			return res, nil
+		}
 		return core.Deferf("audio convert: "+err.Error(), "", core.Meta{}), nil
 	}
 	defer up.cleanup()

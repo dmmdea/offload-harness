@@ -48,28 +48,67 @@ import (
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
+// gpuVerbs are the subcommands runGPU dispatches, in the order the usage lists them. `hold` is the hidden
+// holder a --detach reserve spawns and is not documented.
+var gpuVerbs = []string{"status", "cards", "reserve", "release", "doctor", "owner-flags", "hold"}
+
 func runGPU(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: local-offload gpu <status|cards|reserve|release|doctor|owner-flags> [flags]")
+		return errors.New(gpuUsageLine)
 	}
-	switch args[0] {
+	// A --config in front of the subcommand belongs to the subcommand, as it does in front of any other
+	// verb (main.go hoistGlobalConfig); without this `gpu --config x status` dispatched on "--config" and
+	// failed as an unknown subcommand (F35).
+	sub, rest, ok := hoistGlobalConfig(args)
+	if !ok {
+		return errors.New(gpuUsageLine)
+	}
+	switch sub {
+	case "-h", "-help", "--help", "help":
+		fmt.Print(gpuUsage())
+		return nil
 	case "status":
-		return runGPUStatus(args[1:])
+		return runGPUStatus(rest)
 	case "reserve":
-		return runGPUReserve(args[1:])
+		return runGPUReserve(rest)
 	case "release":
-		return runGPURelease(args[1:])
+		return runGPURelease(rest)
 	case "hold":
-		return runGPUHold(args[1:])
+		return runGPUHold(rest)
 	case "cards":
-		return runGPUCards(args[1:])
+		return runGPUCards(rest)
 	case "doctor":
-		return runGPUDoctor(args[1:])
+		return runGPUDoctor(rest)
 	case "owner-flags":
-		return runGPUOwnerFlags(args[1:])
+		return runGPUOwnerFlags(rest)
 	default:
-		return fmt.Errorf("unknown gpu subcommand %q (want status, cards, reserve, release, doctor or owner-flags)", args[0])
+		return fmt.Errorf("unknown gpu subcommand %q (want status, cards, reserve, release, doctor or owner-flags; `local-offload gpu --help` lists them)", sub)
 	}
+}
+
+// gpuUsageLine is the one-line usage a bare `gpu` (or a `gpu --config x` with no subcommand) is refused with.
+const gpuUsageLine = "usage: local-offload gpu [--config <path>] <status|cards|reserve|release|doctor|owner-flags> [flags] (local-offload gpu --help lists them)"
+
+// gpuUsage is what `gpu --help` prints on stdout: every documented subcommand once, and where the flags of
+// each are (the sub-verbs' own flag sets print them on --help).
+func gpuUsage() string {
+	return `local-offload gpu: the machine-wide GPU lease (who holds the cards, and a place in line for everyone else)
+
+Usage:
+  local-offload gpu [--config <path>] <subcommand> [flags]
+
+Subcommands:
+  gpu status [--json]                    who holds the cards, the queue behind them, and what the holder is doing (verdict and note)
+  gpu cards [--json]                     the card table, with each card's holder
+  gpu reserve [flags] -- <command...>    hold the cards for exactly as long as <command> runs, queueing behind a current holder
+  gpu reserve --detach [flags]           hold the cards in a background process until it is released (needs an explicit --for)
+  gpu release [--epoch N] [--warm-seat]  release the lease held (or only epoch N, if it is still current); --warm-seat loads the agent seat back
+  gpu doctor [--scan dir] [--write-audit] [--json]
+                                         audit the lease readers on this host (harness binaries and gpu-lock.mjs copies)
+  gpu owner-flags [--pid N]              print the owner flags for the calling process tree, to splice into a launcher that detaches
+
+--config <path> may come before the subcommand or after it. "local-offload gpu <subcommand> --help" lists that subcommand's flags.
+`
 }
 
 // openLease resolves the state root the same way every consumer does, so the CLI can
@@ -408,6 +447,9 @@ func runGPUReserve(args []string) error {
 	if len(cmdArgs) > 0 && *detach {
 		return errors.New("--detach and a wrapped command are mutually exclusive")
 	}
+	if *detach && owner.wantsMintedProgress() {
+		return errors.New("--progress-file auto mints a file for the command the wrapper form runs; a --detach hold wraps none and runs several over its life, so name the file the jobs append to (--progress-file <path> --stall <window>)")
+	}
 
 	m, err := openLease(fs)
 	if err != nil {
@@ -428,6 +470,31 @@ func runGPUReserve(args []string) error {
 	}
 	if w := progressFileWarning(opts.ProgressFile); w != "" {
 		fmt.Fprintln(os.Stderr, w)
+	}
+	// A wrapped command that runs a render helper which heartbeats (or that asked for the minted file with
+	// --progress-file auto) gets the contract the caller did not declare (F8): without one the lease has
+	// nothing to renew on and is labelled expired at the end of its first term while the render is
+	// healthy. Only the wrapper form: a detached hold wraps no command to hand a file to.
+	autoProgress, autoWhat := "", ""
+	if !*detach {
+		dir := gpulease.ProgressDir(m.Root())
+		asked := owner.wantsMintedProgress()
+		if p, what, ok := autoProgressFile(opts, cmdArgs, dir, os.Getpid(), time.Now(), asked); ok {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				// Said, never fatal: the render runs under the lease as it always did, unjudged by a contract.
+				fmt.Fprintf(os.Stderr, "gpu reserve: could not create %s for a progress contract (%v); the lease will not renew on progress\n", dir, err)
+				opts.Stall = 0 // a window with no file is refused by the lease; --progress-file auto --stall <d> must not turn a full disk into a refusal
+			} else {
+				gpulease.SweepMintedProgress(dir, mintedProgressMaxAge, time.Now())
+				stall := autoProgressStall
+				if opts.Stall > 0 { // --progress-file auto --stall <d>: the caller's window
+					stall = opts.Stall
+				}
+				opts.ProgressFile, opts.Stall = p, stall
+				autoProgress, autoWhat = p, what
+				fmt.Fprintln(os.Stderr, autoProgressSentence(p, what, stall, asked))
+			}
+		}
 	}
 	// A window above the cap on a term is accepted whole and never shortened; say so once, here,
 	// where it is asked for (the hidden holder of --detach would print into a log nobody reads).
@@ -530,12 +597,27 @@ func runGPUReserve(args []string) error {
 	// after a cut command loaded the seat onto the next lease's exclusive card,
 	// and a warm ahead of a queued --unload-seat is a load bought for nothing).
 	// The warm is heartbeat for its length; the lease outlives the command by
-	// exactly the warm.
+	// exactly the warm. A command ended on SIGTERM is the exception (C02): a console close, a logoff or a
+	// shutdown gives the process about five seconds, and a seat reload is minutes, so the lease is released
+	// without waiting for the reload (the ComfyUI instances kept under it are still stopped first, a step
+	// bounded at 60 s that is usually seconds) and the warm stays owed (the marker is the debt; the next holder to release, `gpu
+	// release --warm-seat` or the seat's next request pays it).
+	endedOnTerm := false
 	finish := func() {
+		// A progress file this wrapper minted goes with the command it was minted for, and FIRST: left in place
+		// through the seat's warm-back (minutes) it would go stale and `gpu status` would read the lease
+		// stalled while it is only loading the seat. Absent it reads unknown, never stalled, and the status
+		// line says why (gpuactivity unknownWhy).
+		if autoProgress != "" {
+			_ = os.Remove(autoProgress)
+		}
 		// The instances kept under this lease go first: they hold VRAM the seat's warm-back and
 		// the next holder both want, and they live no longer than the lease (gpu_instances.go).
 		stopInstancesOfLease(cfg, lease, os.Stderr)
-		if *unload {
+		switch {
+		case *unload && endedOnTerm:
+			fmt.Fprintln(os.Stderr, warmSkippedOnTermSentence)
+		case *unload:
 			warmBackGuarded(cfg, leaseWarmGuard(m, lease), os.Stderr)
 		}
 		_ = lease.Release()
@@ -588,8 +670,11 @@ func runGPUReserve(args []string) error {
 		}
 	}
 	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, os.Interrupt)
+	signal.Notify(sigc, wrapperSignals...)
 	defer signal.Stop(sigc)
+	if wrapperSignalFeed != nil {
+		go wrapperSignalFeed(sigc)
+	}
 
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -630,6 +715,16 @@ func runGPUReserve(args []string) error {
 		// under it reports no card of its own.
 		cmd.Env = append(cmd.Env, pairworkloads.UnderLeaseEnv+"=1")
 	}
+	if opts.ProgressFile != "" {
+		// The command is told where the lease's progress file is, whether this wrapper minted it or the
+		// caller declared it (render/lease-progress.mjs appends to it).
+		cmd.Env = append(cmd.Env, gpuProgressFileEnv+"="+opts.ProgressFile)
+	}
+	if autoProgress != "" {
+		if err := startAutoProgress(autoProgress, autoWhat, time.Now()); err != nil {
+			fmt.Fprintf(os.Stderr, "gpu reserve: could not create the progress file %s (%v); the lease reads its progress as unknown until the helper creates it\n", autoProgress, err)
+		}
+	}
 	if err := cmd.Start(); err != nil {
 		err = fmt.Errorf("starting wrapped command: %w", err)
 		card.finish(err)
@@ -656,8 +751,9 @@ func runGPUReserve(args []string) error {
 			}
 			card.finish(err)
 			return err
-		case <-sigc:
-			why = " (interrupted)"
+		case sig := <-sigc:
+			why = signalWhy(sig)
+			endedOnTerm = endsGraceBounded(sig)
 			_ = cmd.Process.Kill()
 		case <-tick.C:
 			// LOSING THE LEASE MUST BE LOUD. Discarding this error left the wrapped

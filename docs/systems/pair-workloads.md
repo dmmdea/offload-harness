@@ -550,7 +550,18 @@ fleet-serve's **seat watcher** closes that gap:
   the seat, engine `vllm`, requester `llama-swap/direct`, on this box); two idle polls complete
   it at the last busy poll. The seat leaving `/running` with a card open fails it ("seat exited
   while serving direct traffic"), as do metrics unreadable for a minute. Stopping fleet-serve
-  completes open cards.
+  completes open cards. Two more paths could hold a card open for as long as the watcher lived, and are now bounded
+  (C04, 2026-10-09: a card stayed open 642 s and was closed "harness process exited" by the next
+  fleet-serve's first sweep; **which path, if either, held that card was not established**: the stretch may have been
+  real, with the fleet-serve that watched it stopped by a deploy swap, and a ten-minute stretch of direct traffic is
+  legitimate): **llama-swap itself not answering** for the same minute (30 polls) fails
+  every open card ("llama-swap stopped answering while this seat served direct traffic"; llama-swap owns
+  the seat processes, so a llama-swap that does not come back took the seat with it), exactly once; and
+  **the harness's own load on the seat staying unresolvable** for a minute (the roster unreadable and a
+  marker naming something it does not know, so direct traffic cannot be told from the harness's) completes the
+  card at the last poll that saw it busy, as a shutdown does, since nothing says it failed. Both counts are of
+  consecutive polls and reset on one poll that answers or resolves. The one-minute figure is the existing
+  `seatUnreadableLimit`, a chosen bound, not a measurement.
 - One card per busy **stretch** of a seat, not per request: a seat's gauge counts requests, it
   does not name them.
 - vLLM seats only. The llama.cpp seats here are cascade rungs and the mem0 embedder, whose
@@ -611,9 +622,51 @@ side can know the producer died, so the harness retires its own orphans:
 - **Sweep.** A marker is an orphan when its pid is dead (`gpulease.PIDAlive`), its pid now belongs
   to a different process (`gpulease.ProcessStart` differs), or it is older than 24 h
   (`OpenMaxAge`, the leak cap). The sweep sends the terminal frame the producer never sent — state
-  `failed`, error "harness process exited before the job finished", the in-flight frame's id,
-  origin, node, engine, requester and timestamps unchanged (the same card), `completedAt` = now —
-  then deletes the marker.
+  `failed`, error "harness process exited before the job finished" followed by what the sweep knows
+  (below), the in-flight frame's id, origin, node, engine, requester and timestamps unchanged (the same
+  card), `completedAt` = now — then deletes the marker.
+- **What the closing text says (C02, C03, 2026-10-09).** The red card is correct where the job died with
+  its process (a render killed 7 hours in by a console close or a `taskkill /T /F` is a failed job), so it is
+  kept; it used to say the same eight words whatever happened, and now says what the sweep can know, in
+  at most `CardErrorMax` (140) characters so the card never cuts it: the process (`pid N`, or "its
+  process" for a relayed card, which has none of this box), whether the job was still queued ("gone while
+  queued: it never started, no outcome reported") or running ("gone 7m into the run, no outcome reported
+  (killed, console closed or reboot)"). "Queued" proves "it never started" only where the producer marks its card
+  running when its work starts: a lease card, a delegation, and a media call (its lane marks the card running once it
+  holds the GPU). A **transcription** never does (the wait is inside llama-swap, so its lane cannot tell when the
+  engine starts; `internal/pairworkloads/calls.go`), so its card is queued from the first frame to the last and the
+  sweep says only how long the call had been open: "gone 9m in, no outcome reported (killed, console closed or
+  reboot)" (`tasksThatNeverMarkWorking`, pinned to `internal/pipeline` by `TestOnlyTranscribeNeverMarksWorking`). It
+  cannot say who ended the process: the register holds a pid and a
+  start time, not a cause, so it names the causes it has seen and no more. A **delegation's** card ("agd-"
+  id) reads the delegator's intent ledger (`<state root>/delegate-intent.jsonl`, `internal/delegate`):
+  while the dispatch is still open it says "the node may still finish it, see delegate-recovered/", and once
+  a recovery pass has filed the node's answer "the node reported the job's end; see delegate-recovered/" (the pass
+  files a node's answer for state `done` and for state `error` alike, so the card does not say the job finished; the
+  file holds the state and the result). C03: a job a node finished and a recovery pass filed minutes after the sweep
+  had closed its card, which said it never finished. The card keeps the text it was closed with: a recovery that
+  lands after the sweep (the observed case: the sweep at 08:24:07, the recovery at 08:25) does not rewrite it, so
+  that card keeps reading "the node may still finish it" and stays red; the answer is in `delegate-recovered/`.
+  The state stays `failed` either way, because the CALL did fail (its caller got no answer); whether PAIR
+  would let a later `completed` frame replace a card that is already terminal is not something this tree can
+  establish (it merges frames by lifecycle rank, queued < running < terminal), so none is sent. A **seat-watch**
+  card (requester `llama-swap/direct`) is not a harness job at all, so its orphan is closed `completed` with no
+  error, as a clean stop closes it. Its `completedAt` is the moment the sweep found the watcher gone: the register
+  holds the stretch's start and not its last busy poll, so after a long outage the stretch can read longer than the
+  traffic it carried.
+- **The wrapper answers a console close itself.** `gpu reserve -- <command>` asks for `SIGTERM` as well as
+  `os.Interrupt` (`gpu_signals.go`). Go on Windows delivers a console close, a logoff and a shutdown as
+  `SIGTERM`, and ends the process only after its handler has had its grace, so the wrapper kills its command,
+  closes its card with "terminated: its console was closed, or the session is ending or the machine is shutting
+  down" and releases its lease instead of dying silent (the 01:09:59 incident: five card-scoped leases and two
+  queued ones, exit `0xC000013A`). With `--drain --unload-seat` it skips the seat's warm-back (a reload of
+  minutes inside a grace of seconds, with a model loading while the machine goes down) and releases the lease right
+  after stopping the ComfyUI instances kept under it (a step bounded at 60 s, usually seconds): the warm stays owed in the seat marker, and `gpu release --warm-seat` or the seat's next request pays
+  it. A Ctrl-C has no deadline and still warms the seat back first. A `taskkill /F` or a `SIGKILL` gives the process no signal; nothing in-process
+  can answer it and the sweep's text above covers it. Verified here: the signal set, the text, and (through a seam that delivers the signal to a wrapper running in a
+  child process) that a SIGTERM releases the lease with no warm-back while a Ctrl-C still warms. Not verified:
+  delivery of a real console close, which cannot be driven from a test; and the cause of that incident, which
+  was never established (no peer tool call, no binary swap, no logoff in the evidence).
 - **Endpoint scoping.** A sweep closes only the markers of **its own endpoint**: the marker's
   `endpoint` and the sweeper's `pair_workloads_endpoint` must name the same ingress (compared as
   scheme, case-insensitive host, port — a scheme's default port is the same as none — and path). A
@@ -643,8 +696,8 @@ side can know the producer died, so the harness retires its own orphans:
   48 h give-up. A lock whose sweeper died, or older than 5 min, is
   removed by a later pass.
 - **Seat-watch cards** go through the same `Emit`, so a fleet-serve killed with a direct-traffic
-  card open leaves a marker the next sweep closes. A clean stop still completes open cards
-  (`closeAll`).
+  card open leaves a marker the next sweep closes, as `completed` (since C04; it was `failed`, a red
+  card for a watcher's death). A clean stop completes open cards (`closeAll`).
 - A disabled emitter (key off, or PAIR not installed) writes and sweeps nothing.
 - **Tests must isolate their state root.** Every test that builds an **enabled** emitter (or runs
   anything that does: a lease card, a delegation) must give it its own state root (`StateDir` or

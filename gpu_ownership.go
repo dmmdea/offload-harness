@@ -49,11 +49,17 @@ func addOwnershipFlags(fs *flag.FlagSet) *ownershipFlags {
 		ownerStartMs: fs.Int64("owner-start-ms", 0, "the start identity of --owner-pid, so a recycled pid reads as gone (`gpu owner-flags` prints it)"),
 		ownerRemote:  fs.Bool("owner-remote", false, "the lease is asked for from another host: its owner cannot be probed from here, so it is treated as unattended"),
 		unattended:   fs.Bool("unattended", false, "nobody is expected at the desk: the lease is judged by its progress contract and its window, never by whether its owner is still around; requires an explicit --for, --progress-file and --stall"),
-		progressFile: fs.String("progress-file", "", "a file the job appends to as it works; the lease reads held-stalled when it stops moving for --stall. A relative path is resolved against this command's working directory and recorded absolute (every reader looks for the same file)"),
+		progressFile: fs.String("progress-file", "", "a file the job appends to as it works; the lease reads held-stalled when it stops moving for --stall. A relative path is resolved against this command's working directory and recorded absolute (every reader looks for the same file). `auto` (the wrapper form only) mints one and hands it to the command in GPU_LEASE_PROGRESS_FILE; --stall then defaults to 15m. A command that runs a render helper gets the same without asking"),
 		stall:        fs.Duration("stall", 0, "how long --progress-file may go without moving before the lease reads as stalled"),
 		yieldGrace:   fs.Duration("yield-grace", 0, "how long the job needs to stop cleanly when asked to (recorded for the takeover command; nothing is ever killed inside it)"),
 		onYield:      fs.String("on-yield", "", "the command that makes the job stop at a clean boundary (for example `touch work/STOP`); recorded verbatim, with this command's working directory, for the takeover command"),
 	}
+}
+
+// wantsMintedProgress reports `--progress-file auto`: the caller asks the wrapper to mint the progress file
+// (gpu_progress.go) instead of naming one. The word is not a path and is never resolved or recorded as one.
+func (o *ownershipFlags) wantsMintedProgress() bool {
+	return strings.EqualFold(strings.TrimSpace(*o.progressFile), "auto")
 }
 
 // apply resolves the owner (flags win; the environment supplies a session only) and
@@ -66,7 +72,7 @@ func (o *ownershipFlags) apply(opts *gpulease.Options, getenv func(string) strin
 	opts.Owner = gpulease.ResolveOwner(*o.ownerSession, *o.ownerPID, *o.ownerStartMs, *o.ownerRemote, env)
 	opts.Unattended = *o.unattended
 	opts.ProgressFile = ""
-	if p := strings.TrimSpace(*o.progressFile); p != "" {
+	if p := strings.TrimSpace(*o.progressFile); p != "" && !o.wantsMintedProgress() {
 		abs, err := filepath.Abs(p)
 		if err != nil {
 			return fmt.Errorf("--progress-file %q cannot be resolved to an absolute path: %w", p, err)
@@ -82,7 +88,7 @@ func (o *ownershipFlags) apply(opts *gpulease.Options, getenv func(string) strin
 // validate enforces the bounded-claim contract before anything is acquired. forGiven says
 // whether --for was passed explicitly: the 45 minute default is not a declared window.
 func (o *ownershipFlags) validate(forGiven bool) error {
-	file := strings.TrimSpace(*o.progressFile) != ""
+	file := strings.TrimSpace(*o.progressFile) != "" && !o.wantsMintedProgress()
 	stall := *o.stall > 0
 	if *o.unattended {
 		var missing []string
@@ -90,7 +96,7 @@ func (o *ownershipFlags) validate(forGiven bool) error {
 			missing = append(missing, "an explicit --for (the window the job declares)")
 		}
 		if !file {
-			missing = append(missing, "--progress-file (the file the job appends to)")
+			missing = append(missing, "--progress-file (the file the job appends to: a path, not `auto`)")
 		}
 		if !stall {
 			missing = append(missing, "--stall (how long that file may stay still)")
@@ -102,7 +108,7 @@ func (o *ownershipFlags) validate(forGiven bool) error {
 	switch {
 	case file && !stall:
 		return errors.New("--progress-file needs --stall: the window in which the file must move")
-	case stall && !file:
+	case stall && !file && !o.wantsMintedProgress():
 		return errors.New("--stall needs --progress-file: the file that must move inside the window")
 	}
 	// The command is recorded verbatim for the takeover to run, so one that cannot be

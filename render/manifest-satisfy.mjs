@@ -58,8 +58,14 @@ export function modelCandidates(relPath, comfyDir, extraRoots) {
 
 export async function satisfyModels(models, deps) {
   const { comfyDir, exists, download, sha256, sentinelOk, writeSentinel, extraRoots = {} } = deps;
+  // beat (optional) tells the lease's progress file which model the satisfier is on (lease-progress.mjs): this
+  // step runs before ComfyUI exists, so no poll loop is beating, and a manifest of several large models is the one
+  // place a run-graph job is quiet for longer than a lease's stall window. One model's download or hash can still
+  // outlast it; that stretch reads held-stalled until the next beat.
+  const beat = typeof deps.beat === "function" ? deps.beat : () => {};
   const unverified = [];
   for (const m of models || []) {
+    beat(`manifest: checking ${m.path}`);
     const abs = join(comfyDir, m.path);
     // Presence resolves across ComfyUI's FULL search path, not just comfyDir. A model that
     // lives only on a secondary tree (e.g. the V: Optane drive registered via
@@ -83,8 +89,10 @@ export async function satisfyModels(models, deps) {
       }
     }
     if (!m.source_url) return defer("MODEL_DOWNLOAD_FAILED", m.path, "missing on disk and no source_url");
+    beat(`manifest: downloading ${m.path}`);
     try { await download(m.source_url, abs); }
     catch (e) { return defer("MODEL_DOWNLOAD_FAILED", m.path, String(e.message || e)); }
+    beat(`manifest: downloaded ${m.path}`);
     if (m.sha256) {
       // Guard the post-download hash read AND the sentinel write: an FS failure here
       // must defer typed, not escape as an untyped process crash (the sentinel write
