@@ -48,6 +48,10 @@ func runProbe(name string, args []string) int {
 		} else {
 			fmt.Printf("write OK\n")
 		}
+	case "tamper":
+		// Every way a command could change the entry at args[0] (a linked worktree's .git
+		// file), one line per attempt (see tamper).
+		tamper(args[0])
 	case "dial":
 		c, err := net.DialTimeout("tcp", args[0], 2*time.Second)
 		if err != nil {

@@ -654,7 +654,11 @@ The **coding agent** (`local-agent`) is designed **safe-by-default** for a model
     shipping tool's stance on native Windows; an AppContainer network-deny layer is future work.
   - **On Linux** `run` (and `run_shell`, `--allow-shell`, **Linux only**) route through the Landlock +
     seccomp + user-namespace OS cage: no network, filesystem confined to the worktree, syscalls
-    limited.
+    limited. Inside it `.git` is read-only, so a command cannot plant a hook or aim git at a
+    directory of its own: a read-only tmpfs over a `.git` directory, and for a linked worktree
+    (`git worktree add`, where `.git` is a pointer file) a read-only bind of that file, which still
+    reads. Where the kernel refuses that mount the run goes ahead and the cage says so in a
+    `[sandbox]` line at the start of stderr.
 - **Prompt-injection defenses.** Untrusted web content pulled by `web_fetch` is **fenced** before it
   reaches the planner, and fetch is **egress-allowlisted** (deny-all unless you name hosts with
   `--egress-host`), so injected instructions can't redirect the agent to arbitrary endpoints.

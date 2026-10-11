@@ -739,11 +739,26 @@ the user nowhere does not give) is a folder the command cannot write; one whose 
 restored is left writable by every low-integrity process, and the next run takes that label for the
 folder's own, so it does not heal; one whose prior label cannot be read is cleared, not restored; a
 deadline whose kill of the job fails is not in force. On Linux, `<worktree>/.git` stays writable
-where the kernel refuses its read-only mask. In each case the command still runs (failing closed is
-a separate decision, not taken) and the cage puts a line starting with `[sandbox] ` ahead of the
-command's own stderr, appends the same text to the error of a run that fails before the command
-starts, and, on Windows, logs it once. `run` and `run_shell` return stderr to the model, so the
-model reads the note too.
+where the kernel refuses its read-only mask: the empty tmpfs over a `.git` directory, or the
+read-only bind of a `.git` file onto itself (below). In each case the command still runs (failing
+closed is a separate decision, not taken) and the cage puts a line starting with `[sandbox] ` ahead
+of the command's own stderr, appends the same text to the error of a run that fails before the
+command starts, and, on Windows, logs it once. `run` and `run_shell` return stderr to the model, so
+the model reads the note too.
+
+**The shell path's `.git` mask covers a linked worktree** (`sandbox.maskDotGit`, Linux). With a
+writable worktree the cage makes `<worktree>/.git` read-only inside its private mount namespace, so
+a command can neither plant a git hook nor aim the host's git at a directory of its own. A `.git`
+DIRECTORY gets an empty read-only tmpfs. A `.git` FILE, which is what `git worktree add` leaves in
+a linked worktree (`gitdir: <repo>/.git/worktrees/<name>`), is bind-mounted onto itself read-only:
+it still reads, since git finds its git directory through it, and it cannot be rewritten,
+truncated, appended to, unlinked, renamed over or renamed away, nor reached through a second name (a
+link to it is refused, because the new name would be on another mount). The git directory itself is
+outside the cage's write roots already; the pointer in the worktree is what the mask protects. The
+remount names every flag a user namespace locks on the mount (read-only, nosuid, nodev, noexec) and
+no atime flag, so it works on a worktree under a mount that carries them (a shared-memory mount is
+nosuid and nodev, as is a tmpfs `/tmp` on many systems). A `.git` that is a symlink is left alone,
+because a mount follows the link.
 
 **The caged child's environment is built, never inherited, on both platforms** (`sandbox.cageEnv`,
 `sandbox.EnvAllowlist`). Linux execs with a fixed `PATH` plus `HOME`/`TMPDIR` pointed at the run's

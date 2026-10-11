@@ -125,9 +125,12 @@ func runWorker() error {
 	// git hook or rewrite .git/config to execute LATER, on the HOST, when the human
 	// runs git outside the cage. The P2 write broker denies .git writes for exactly
 	// this reason; the shell path's containment is the cage (not path-string
-	// filtering), so mirror the protection here with an empty read-only tmpfs over
-	// the real .git. Only for a writable worktree holding a real .git directory; the
-	// mount lives in this private namespace and never touches the host's tree.
+	// filtering), so mirror the protection here: an empty read-only tmpfs over a .git
+	// DIRECTORY, and over a .git FILE (the "gitdir: <path>" pointer of a linked worktree,
+	// which is how the harness's own worktrees are made) a read-only bind of the file onto
+	// itself, because a command that can rewrite the pointer aims the host's git at a
+	// directory the command controls. Only for a writable worktree; the mounts live in this
+	// private namespace and never touch the host's tree.
 	//
 	// A mount the kernel refuses (an unprivileged user namespace that may not mount, as in
 	// some container and CI sandboxes) does not stop the run, and it is not silent either:
@@ -242,26 +245,70 @@ func dirExists(p string) bool {
 	return err == nil && fi.IsDir()
 }
 
+// isRegularFile reports whether p ITSELF is a regular file (links are not followed). A symlink to a
+// file does not count: a mount follows the link, so it would land on the target and leave the link,
+// which sits in the writable worktree, free to be replaced.
+func isRegularFile(p string) bool {
+	fi, err := os.Lstat(p)
+	return err == nil && fi.Mode().IsRegular()
+}
+
 // mountFunc has the shape of unix.Mount, so a test can stand in for a kernel that refuses.
 type mountFunc func(source, target, fstype string, flags uintptr, data string) error
 
-// maskDotGit mounts an empty read-only tmpfs over <worktree>/.git, for a writable worktree that
-// holds a real .git directory (see runWorker for why). It returns "" when the mask is in place or
-// does not apply, and a note when the mount was refused: then the command still runs, with
-// <worktree>/.git writable like the rest of the worktree, which is exactly what the mask exists
-// to prevent, and the caller must be told.
+// maskDotGit makes <worktree>/.git read-only for the command, for a writable worktree (see runWorker
+// for why): an empty read-only tmpfs over a .git directory, a read-only bind of the file onto itself
+// where .git is a file (maskDotGitFile). It returns "" when the mask is in place or does not apply
+// (no .git, or one that is neither a directory nor a regular file: a symlink, say, which no mount
+// can protect), and a note when a mount was refused: then the command still runs, with
+// <worktree>/.git writable like the rest of the worktree, which is exactly what the mask exists to
+// prevent, and the caller must be told.
 func maskDotGit(spec Spec, mount mountFunc) string {
 	if !spec.WorktreeWritable {
 		return ""
 	}
 	gp := filepath.Join(spec.Worktree, ".git")
-	if !dirExists(gp) {
-		return ""
-	}
-	if err := mount("tmpfs", gp, "tmpfs", unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
-		return fmt.Sprintf("%s is NOT masked read-only (mount: %v): a command in this cage can write into it, hooks included", gp, err)
+	switch {
+	case dirExists(gp):
+		if err := mount("tmpfs", gp, "tmpfs", unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
+			return fmt.Sprintf("%s is NOT masked read-only (mount: %v): a command in this cage can write into it, hooks included", gp, err)
+		}
+	case isRegularFile(gp):
+		return maskDotGitFile(gp, mount)
 	}
 	return ""
+}
+
+// dotGitFileRemount is the flag set of the read-only remount in maskDotGitFile. A user namespace
+// LOCKS the nosuid, nodev, noexec, read-only and atime flags of every mount it inherits from the
+// host, and the kernel refuses (EPERM) a remount that clears one of them, so the remount repeats the
+// first four wherever the worktree sits (a shared-memory mount and a systemd /tmp are nosuid and
+// nodev) and names no atime flag at all, which makes the kernel keep the mount's own (mount(2): a
+// remount naming none preserves them, since Linux 3.17; the cage runs on 6.7 and later).
+const dotGitFileRemount = unix.MS_BIND | unix.MS_REMOUNT | unix.MS_RDONLY | unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC
+
+// maskDotGitFile makes the .git FILE of a linked worktree read-only. The file stays readable (git
+// reads it to find its git directory) and cannot be rewritten, truncated, unlinked or renamed over:
+// a bind mount of the file onto itself, then a read-only remount of that bind (a bind mount takes
+// its flags only through a remount). The read-only flag belongs to the mount, not to the inode, so a
+// second name for the file on the worktree's own mount would be a way around it; none can be made,
+// because a link across the two mounts is refused (EXDEV). The real git directory sits outside the
+// worktree and outside the cage's write roots already; the pointer is what this protects. A refused
+// step is a note, and a refused bind is not followed by a remount.
+func maskDotGitFile(gp string, mount mountFunc) string {
+	if err := mount(gp, gp, "", unix.MS_BIND, ""); err != nil {
+		return dotGitFileNote(gp, "bind mount", err)
+	}
+	if err := mount("", gp, "", dotGitFileRemount, ""); err != nil {
+		return dotGitFileNote(gp, "read-only remount", err)
+	}
+	return ""
+}
+
+// dotGitFileNote is the note for a .git file that is not masked: the file, the step the kernel
+// refused and why, and what the caller lost.
+func dotGitFileNote(gp, step string, err error) string {
+	return fmt.Sprintf("%s is NOT masked read-only (%s: %v): a command in this cage can write into it and point git at a directory of its own", gp, step, err)
 }
 
 // installArchGuard adds a tiny classic-BPF seccomp filter that KILLs any syscall
