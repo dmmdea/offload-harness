@@ -71,6 +71,40 @@ func TestTheCardSaysWhichSignalEndedTheCommand(t *testing.T) {
 	}
 }
 
+// The cards' cause text is quoted in the CHANGELOG and in the system docs, and one quote went stale when the code's text changed:
+// the C02 entry kept the first wording ("terminated: its console was closed, or the session is ending or the machine is shutting
+// down") after the card began to say the cause is likely and a plain kill is the same signal. A quote of the SIGTERM clause must be
+// the code's text whole, and the retired wording must not come back.
+func TestTheDocsQuoteTheSIGTERMCardTextTheCodeProduces(t *testing.T) {
+	const marker = "ended on SIGTERM: "
+	for _, name := range []string{"CHANGELOG.md", "docs/systems/pair-workloads.md", "docs/systems/gpu-lease.md"} {
+		raw, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := strings.Join(strings.Fields(string(raw)), " ") // a quote wraps across lines
+		for _, retired := range []string{"its console was closed, or the session is ending", "terminated: its console was closed"} {
+			if strings.Contains(text, retired) {
+				t.Errorf("%s still quotes the retired card text %q", name, retired)
+			}
+		}
+		quotes := 0
+		for rest := text; ; quotes++ {
+			i := strings.Index(rest, marker)
+			if i < 0 {
+				break
+			}
+			rest = rest[i+len(marker):]
+			if !strings.HasPrefix(rest, termCauseLikely) {
+				t.Errorf("%s quotes the SIGTERM clause as %.90q, the code says %q", name, rest, termCauseLikely)
+			}
+		}
+		if name == "CHANGELOG.md" && quotes == 0 {
+			t.Errorf("%s no longer quotes the SIGTERM clause at all: the check has nothing to compare", name)
+		}
+	}
+}
+
 // The wrapper's loop is long and drives a real command, so the wiring is pinned where it is made: the
 // signals it asks for are wrapperSignals (not a literal os.Interrupt that would drop SIGTERM again), they are asked
 // for FIRST (before the lease is opened: the handler used to be registered after the queue wait and the drain) and the

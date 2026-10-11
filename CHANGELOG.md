@@ -334,8 +334,9 @@ Versioning: [SemVer](https://semver.org/).
   fits the 140-character card whole, and still starts with the words consumers match. It cannot say who ended the process: the
   register holds a pid and a start time. `gpu reserve -- <command>` now also asks for `SIGTERM`: Go on Windows delivers a console
   close, a logoff and a shutdown as `SIGTERM` and ends the process only after its handler has had its grace, so the wrapper kills
-  its command, closes its card ("terminated: its console was closed, or the session is ending or the machine is shutting down")
-  and releases its lease instead of dying silent. With `--drain --unload-seat` it skips the seat's warm-back (a reload of
+  its command, closes its card (the exit status, then "(ended on SIGTERM: likely a console close, a logoff or a shutdown; a plain
+  kill sends it too)": the cause is given as likely, because a plain kill sends the same signal) and releases its lease instead of
+  dying silent. With `--drain --unload-seat` it skips the seat's warm-back (a reload of
   minutes inside a grace of seconds, with a model loading while the machine goes down) and releases the lease right after
   stopping the ComfyUI instances kept under it (a step bounded at 60 s, usually seconds): the warm stays owed in the seat marker, and `gpu release --warm-seat` or the seat's next request pays it. A Ctrl-C has
   no such deadline and still warms the seat back first. A `taskkill /F` gives no signal; the sweep's text covers it. The cause of
@@ -375,7 +376,13 @@ Versioning: [SemVer](https://semver.org/).
   of a seat that was resident now records the debt; a warm of a seat that is in fact still loaded costs one health request,
   `TestASignalDuringTheUnloadRequestLeavesTheWarmOwed`); and the SIGTERM card text for the pre-start stage was 141 characters
   against the 140 the card keeps, so it ended "never start..." (the cause clause is shortened and every stage text is asserted to
-  fit whole, `TestEveryStageTextFitsTheCardWhole`). **A second signal is still dropped, and that is now said instead of justified
+  fit whole, `TestEveryStageTextFitsTheCardWhole`). The stage tests became deterministic or reached further: the pre-card
+  checkpoint test waits for the watch to record the signal (`wrapperBeforeCard`; before, it relied on the scheduler running the
+  feed and the watch first, and failed with a delay injected into the watch), `--cards` is driven through `gpu reserve` itself
+  (`TestASignalWhileChoosingCardsThroughTheReserveEndsTheWait`: the lease line's cancel and the allocator's wake-up sleep are wired
+  by the wrapper, which the loop-level test above could not see), and the re-queue is driven from a cancelled unload to the signal
+  (`TestASignalWhileQueuedAgainAfterACancelledUnload...`), the one path where a wrapper that queues again owes a warm.
+  **A second signal is still dropped, and that is now said instead of justified
   by the OS:** the OS ends the process after its grace for a console close, a logoff and a shutdown only, so a second Ctrl-C or a
   plain kill during a stage that never consults the signal (the plan's card-table read, up to 20 s; the stop of the ComfyUI instances
   kept under the lease, up to 60 s; the seat's warm-back after a Ctrl-C, minutes) waits for that stage, where before this batch the
@@ -396,7 +403,12 @@ Versioning: [SemVer](https://semver.org/).
 - **Cards and logs no longer claim a cause they cannot know.** `signalWhy` and the warm-skipped sentence said the console was
   closed, or the session was ending, or the machine shutting down, for any SIGTERM; a plain kill sends the same signal (and on
   Linux it is the only way it comes). They now name the signal and give the causes as likely ("ended on SIGTERM: likely a console
-  close, a logoff or a shutdown; a plain kill sends it too"). The sweep's log line counted every card it closed as
+  close, a logoff or a shutdown; a plain kill sends it too"). The sentence the wrapper prints in place of the seat's warm-back says
+  what the signal ended: "the command was ended on SIGTERM" only when a command ran; for a signal that found the wrapper earlier it
+  says the wrapper was ended at that stage ("the wrapper was ended on SIGTERM while draining the seat, before its command started",
+  likewise "while queued, ...", and "the wrapper was ended on SIGTERM before its command started" for the last stage, which names
+  that itself), where it used to say the command was ended even when none had ever run (`warmSkippedOnTerm`). The sweep's log line
+  counted every card it closed as
   "harness process exited before the job finished", which is false of a seat-watch stretch (closed completed since C04) and of a
   terminal frame its producer built and could not post: the count is split by kind, and a sweep that closed orphans alone logs the
   line it always did.
@@ -406,7 +418,10 @@ Versioning: [SemVer](https://semver.org/).
   retry (5 s, then 15 s) was unreachable here: a `nvidia-smi` that was merely slow made every probe answer "not judged" at 4 s,
   silently. Both probes (image and `run_graph`) now read through `laneCardTable`: 4 s, one retry under 10 s, one `media lane probe`
   log line when the table is still unread (none when the caller's own context ended: a client that disconnected mid-probe is not a
-  card-table fault, `TestTheLaneProbeLogsNothingWhenTheCallerWentAway`). **The 10 s is chosen, not measured** (shorter than the
+  card-table fault, `TestTheLaneProbeLogsNothingWhenTheCallerWentAway`). A table that stays unreadable fails every question the
+  same way, and a ticket scan asks once per waiting ticket every 10 s, so the line is written for the first occurrence and then once
+  a minute per probe and cause while the fault lasts (`laneFaultLog`, kept per process;
+  `TestTheLaneProbeLogsAPersistentCardTableFaultOncePerMinute`). **The 10 s is chosen, not measured** (shorter than the
   admission's 15 s because a ticket scan asks the lane question once per waiting ticket: worst case 14 s per question, not 20).
 - **F56: the host-RAM calibration reads a high percentile of the last twenty runs, clamped, and says so once per key.** It took
   the all-time max of a key's resident peaks, so one inflated run raised a family's declaration until `footprints.json` was
@@ -432,7 +447,10 @@ Versioning: [SemVer](https://semver.org/).
   takes declares on those cards: on a mixed box a krea2 render pinned to a 16 GiB card declared 32.8 GiB at the grant and 0 in the
   pre-filter, so a waiter that waits only on host RAM was not counted ahead of it (`askRAMFor`). The grant already asked the cards
   before the memory on both paths, and `BuildInput` already fed the allocator what granted leases have yet to load, but nothing
-  pinned either (the swap and the deleted line left every test green); both are pinned now.
+  pinned either (the swap and the deleted line left every test green); both are pinned now. The admission's half of the sizing is
+  pinned by the size it asks for (`TestTheAdmissionSizesItsFigureOnTheCardsThePlanNames` drives the real admission and records the
+  VRAM of each sizing request), not by its answer: the queued answer is the same whichever card the figure was sized on, so no test
+  of the answer can tell the two apart (the earlier pin searched the source text for the call).
 - **F60: the sd.cpp lanes declare the weights they park in RAM.** The class default is the largest ComfyUI family a box binds, so an
   sd.cpp-only node declared 0 for its image, video and animate lanes and the 5.5 to 6.2 GiB `--offload-to-cpu` parks in RAM there
   were outside the brake. `hostneed.ForSdcpp` sizes the bound files in full when the lane's extra args carry the flag (nothing
@@ -442,7 +460,7 @@ Versioning: [SemVer](https://semver.org/).
   are summed and worded as a **lower bound** (`Need.Unsized` names the rest by binding key), and the lane says once per lane and set
   of files which it could not size; when none can be sized the class default stands and the lane says that once too.
   **It is an estimate from the files' sizes, not a measurement, and says so**; the need carries the lane's footprint key, so
-  three measured runs raise it like a ComfyUI family's. Not covered: the audio.cpp lanes, the animate lane's depth model, and
+  three measured runs raise it like a ComfyUI family's. Not covered (the named limits, last bullet of this batch): the audio.cpp lanes, the animate lane's depth model, and
   `gpu reserve` around an sd.cpp helper (the CLI recognises only the ComfyUI helpers).
 - **F63: the deletion-guard test no longer depends on which shell started `go test`.** On a plain PowerShell PATH the name `bash` is
   the WSL launcher, which drops the backslashes of the Windows script path, so the test failed from PowerShell and passed from Git
@@ -456,9 +474,13 @@ Versioning: [SemVer](https://semver.org/).
   the final gate of this batch. The embedded marker now ends in a NUL (`embeddedBuildMarker`; the doctor's JSON still shows it without),
   which every reader, old and new, stops at; before, any literal added anywhere could have done the same.
 - **Not changed, and said.** The `--detach` form's hidden holder queues in its own process and has no signal handling of its own
-  here. The comment on `keepLoop` in `internal/mediaremote/scan.go` now says a lane question is bounded by `laneProbeBound` plus
+  here. F60's three limits, one by one: the audio.cpp voice and music lanes keep the class default (0 on a node that binds no
+  ComfyUI family), so what they park, if anything, is outside the brake; the animate lane's depth model (a separate, small binary)
+  is not counted in its figure; and `gpu reserve` around an sd.cpp helper declares the class default or what `--ram` says, not the
+  weights `--offload-to-cpu` parks (the CLI recognises only the ComfyUI helpers). The comment on `keepLoop` in
+  `internal/mediaremote/scan.go` now says a lane question is bounded by `laneProbeBound` plus
   the retry (a comment-only change in a file the ticket queue's branch also owns). Nothing here was measured on a node: every figure
-  above that is new (10 s, 20, 90, 2x) is chosen, and no real `gpu reserve`, ComfyUI, PAIR or llama-swap was touched.
+  above that is new (10 s, 20, 90, 2x, a minute) is chosen, and no real `gpu reserve`, ComfyUI, PAIR or llama-swap was touched.
 
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
 

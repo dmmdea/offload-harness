@@ -1664,7 +1664,8 @@ seconds), the wrapper says the warm-back was skipped, and the warm stays owed (t
 (or queued again after a lease lost during the drain), choosing cards, draining, or between the end of the drain and the
 command's start, is answered too (the handler is registered before anything else, `pair-workloads.md`): the
 queue wait ends (`Options.Cancel`), the lease is released, the command never starts, the seat is not warmed, and the wrapper
-claims a warm owed only when the seat was unloaded. A signal that cancels the unload request itself leaves the warm owed
+claims a warm owed only when the seat was unloaded (and then says the wrapper was ended at that stage, never that a command
+was: none ran). A signal that cancels the unload request itself leaves the warm owed
 whenever the seat was resident, because llama-swap may have finished the unload the client stopped waiting for (a warm of a seat
 that is in fact still loaded is one health request). A Ctrl-C has no such deadline and still warms. A second signal is not acted
 on: the OS ends the process after its grace for a console close, a logoff and a shutdown only, so a second Ctrl-C or a plain kill

@@ -1997,7 +1997,7 @@ place in line, epoch, waiter, ledger row, PAIR card or ComfyUI instance) and rem
 `gpulease.Manager.ReadOnly`, a view that skips the records the line's readers prune as housekeeping (an expired place in line, a
 waiter that stopped polling) and leaves them on disk (`TestMediaLaneFreeWritesNothing`, with a state for each). It says free when it cannot say: a lease the process
 inherited (`gpu reserve -- local-offload ...`), a card table that does not read in 4 s, nor in the one 10 s retry that follows a read that ran out of time (both chosen, not measured; the
-retry is the admission's rule at a shorter bound, and a table still unread leaves one `media lane probe` line in the log, F55), a task or a binding
+retry is the admission's rule at a shorter bound, and a table still unread leaves a `media lane probe` line in the log, once a minute per probe and cause while the fault lasts, F55), a task or a binding
 it does not model (sd.cpp, an unknown family). A call that resumes a place
 in line (a ticket's local run) counts only the callers that arrived before that place, on every plan, because the lease queue serves
 a resumed place by arrival time (`TestMediaLaneFreeOrdersByArrivalForACallThatResumesItsPlace`); a new arrival counts every other
