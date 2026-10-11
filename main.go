@@ -1164,10 +1164,14 @@ func runRunGraph(args []string) error {
 	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 	_ = fs.Parse(args)
 
-	params, err := runGraphParams(args)
+	params, cleanupInline, err := runGraphParams(args)
 	if err != nil {
 		return err
 	}
+	// The temp files an inline --graph-json or --manifest-json became are this call's own, and go when it ends, whichever way it ends:
+	// the pipeline that cannot open (below), an answer, a deferral. Registered before anything else can return. A graph ticket this
+	// call made is not left holding them: it keeps its own copy of the bytes (internal/mediaremote/ticket.go writeBodies).
+	defer cleanupInline()
 
 	cfg, src := loadCfgWithSource(fs)
 	p, cleanup, err := openPipeline(cfg)
@@ -1200,7 +1204,12 @@ func runRunGraph(args []string) error {
 // inline JSON is materialized to a temp file whose path is threaded on (the runner reads
 // files). Kept independent of runRunGraph's pipeline wiring so the arg contract is unit-
 // testable without a ComfyUI/pipeline.
-func runGraphParams(args []string) (map[string]any, error) {
+//
+// The returned cleanup is never nil and removes the temp files THIS call made for inline JSON (a file
+// the caller named with --graph or --manifest is never touched); on an error there is nothing to clean,
+// because a half-made pair is removed before the error returns.
+func runGraphParams(args []string) (map[string]any, func(), error) {
+	noop := func() {}
 	fs := flag.NewFlagSet("run-graph-params", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.String("config", "", "config file path")
@@ -1217,26 +1226,31 @@ func runGraphParams(args []string) (map[string]any, error) {
 	fs.String("route", "", "")
 	fs.Var(new(repeatedFlag), "remote", "")
 	if err := fs.Parse(args); err != nil {
-		return nil, err
+		return nil, noop, err
 	}
 	if *graph == "" && *graphJSON == "" {
-		return nil, fmt.Errorf("run-graph: --graph or --graph-json required")
+		return nil, noop, fmt.Errorf("run-graph: --graph or --graph-json required")
 	}
 	var floor *float64
 	if s := strings.TrimSpace(*minVRAM); s != "" {
 		v, err := strconv.ParseFloat(s, 64)
 		if err != nil || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
-			return nil, fmt.Errorf("run-graph: --min-vram-gb must be a number of GB, 0 or more; got %q", s)
+			return nil, noop, fmt.Errorf("run-graph: --min-vram-gb must be a number of GB, 0 or more; got %q", s)
 		}
 		floor = &v
 	}
-	graphPath, err := materializeArg(*graph, *graphJSON, "run-graph-*.json")
+	graphPath, cleanGraph, err := materializeArg(*graph, *graphJSON, "run-graph-*.json")
 	if err != nil {
-		return nil, fmt.Errorf("graph: %w", err)
+		return nil, noop, fmt.Errorf("graph: %w", err)
 	}
-	manifestPath, err := materializeArg(*manifest, *manifestJSON, "run-graph-manifest-*.json")
+	manifestPath, cleanManifest, err := materializeArg(*manifest, *manifestJSON, "run-graph-manifest-*.json")
 	if err != nil {
-		return nil, fmt.Errorf("manifest: %w", err)
+		cleanGraph() // the graph's file was made for a call that now ends
+		return nil, noop, fmt.Errorf("manifest: %w", err)
+	}
+	cleanup := func() {
+		cleanGraph()
+		cleanManifest()
 	}
 	params := map[string]any{
 		"graph_path":    graphPath,
@@ -1250,27 +1264,40 @@ func runGraphParams(args []string) (map[string]any, error) {
 	if f := strings.TrimSpace(*family); f != "" {
 		params["model_family"] = f
 	}
-	return params, nil
+	return params, cleanup, nil
 }
 
+// createTemp makes the temp file an inline graph or manifest is written to; a seam, so that a test can make the write fail.
+var createTemp = os.CreateTemp
+
 // materializeArg returns path if set, else writes inline json to a temp file and returns
-// that path (the runner reads files, not inline). Empty+empty → ("", nil).
-func materializeArg(path, inline, pattern string) (string, error) {
+// that path (the runner reads files, not inline). Empty+empty → no path and no error.
+//
+// The cleanup it returns is never nil and removes only a file THIS call made: it does nothing for a path
+// the caller named, nor for an empty one. A write that fails removes its own file before the error returns.
+func materializeArg(path, inline, pattern string) (string, func(), error) {
+	noop := func() {}
 	if path != "" {
-		return path, nil
+		return path, noop, nil
 	}
 	if inline == "" {
-		return "", nil
+		return "", noop, nil
 	}
-	f, err := os.CreateTemp("", pattern)
+	f, err := createTemp("", pattern)
 	if err != nil {
-		return "", err
+		return "", noop, err
 	}
-	defer f.Close()
-	if _, err := f.WriteString(inline); err != nil {
-		return "", err
+	name := f.Name()
+	_, werr := f.WriteString(inline)
+	cerr := f.Close() // closed before any removal: Windows will not delete a file that is still open
+	if werr == nil {
+		werr = cerr
 	}
-	return f.Name(), nil
+	if werr != nil {
+		_ = os.Remove(name)
+		return "", noop, werr
+	}
+	return name, func() { _ = os.Remove(name) }, nil
 }
 
 // runGenerateSVG handles `local-offload generate-svg <kind> --spec '<json>' [--spec-file path] [--out file.svg] [--json]`.

@@ -897,6 +897,41 @@ Versioning: [SemVer](https://semver.org/).
   `lo-pairworkloads-state-…`, `lo-mediaremote-state-…`). `TestMainIsolatesTheStateRoot`, `TestMainIsolatesTheHomeAndTheLedger` and
   `TestRunIsolatedFailsClosed` are unchanged.
 
+### Fixed — `offload_run_graph` and `run-graph` remove the temp files an inline graph or manifest became, whichever way the call ends (F79)
+
+- **The defect.** The runner reads files, so an inline `graph_json` / `manifest_json` (the MCP door) or `--graph-json` /
+  `--manifest-json` (the CLI) is written to a temp file (`run-graph-*.json`, `run-graph-manifest-*.json`) and its path is threaded on.
+  Nothing removed it: every inline call left one file (a graph) or two (graph and manifest) in the OS temp dir for good, on every exit
+  of the call (an answer, a deferral, a refusal, a ticket queued), and the CLI left them too when the pipeline could not open. A write
+  that failed left the file it had just made, and a manifest that could not be written left the graph file made before it. One run of
+  the `internal/mcpserver` tests left 26 of them (25 `run-graph-*`, 1 `run-graph-manifest-*`) and one run of the root package's tests
+  left 3, counted with the temp dir pointed at an empty folder on Windows. The fleet node's twin (`fleetnode.buildRunGraph`) already returned a cleanup; the door and the CLI did not.
+- **The fix.** `materialize` (MCP) and `materializeArg` (CLI) return a cleanup that is never nil and removes only the file THIS call
+  made: it does nothing for a path the caller named (`graph_path`, `manifest_path`, `--graph`, `--manifest`, or a `graph_path` given
+  together with a `graph_json`), nor for an empty one. `handleRunGraph` defers each cleanup right after the file exists, so an answer,
+  a deferral, a refusal inside `RunWith`, a manifest that cannot be written and a panic all remove both files; `runGraphParams` returns
+  one cleanup for the pair and `runRunGraph` defers it before the pipeline opens, so the exit at `openPipeline` is covered too. A write
+  that fails closes its file and then removes it (Windows does not delete a file that is still open: `os.Remove` of an open file fails
+  with "being used by another process", read on Go 1.27.1), and a manifest that cannot be written removes the graph file with it.
+- **Why removing them is safe.** A graph ticket keeps its own copy of the graph and the manifest as the plan holds them
+  (`body-<id>-graph.json`, `body-<id>-manifest.json`) and its key, its node payload, its local run and an adopter all read those, never
+  the caller's paths; a graph queued by a call that has returned still runs.
+  `TestAGraphTicketStillRunsOnThisMachinesLaneOnceTheDoorHasRemovedItsInlineFiles` admits a graph, removes the caller's files the way the
+  door does, frees the lane and requires the lane to run the bytes the call was made with; it fails when the ticket reads the caller's
+  path instead of its copy.
+- **Tests, written first and red.** `internal/mcpserver`: `TestRunGraphDoorRemovesItsInlineTempFilesOnEveryExit` (six exits),
+  `TestRunGraphDoorHandsTheRunnerTheInlineBytesWhileItRuns` (removal is not early), `TestRunGraphDoorNeverRemovesACallersOwnFiles`,
+  `TestMaterializeCleanupRemovesOnlyTheFileThisCallMade`. Root: `TestRunGraphParamsInlineJSONIsRemovedByItsCleanup`,
+  `TestRunGraphParamsLeavesACallersOwnFilesAlone`, `TestRunGraphParamsRemovesTheGraphFileWhenTheManifestCannotBeWritten`,
+  `TestMaterializeArgRemovesItsOwnFileWhenTheWriteFails`, `TestRunGraphCLIRemovesItsTempFilesWhenThePipelineCannotOpen`. The write
+  failures are made with a one-line seam (`createTemp`) that hands back a file opened for reading only. Red before, root package on a
+  Windows PC against a cleanup that removes nothing: `the cleanup left [run-graph-….json run-graph-manifest-….json] in the OS temp dir`,
+  `the file of a failed write was left`, and `run-graph left [...] in the OS temp dir after it failed to open the pipeline`.
+  After: 0 `run-graph*` entries left by the `internal/mcpserver` tests on Windows (26 before) and by a whole run of the root package's
+  tests on Windows and on Linux (3 before).
+- **Not covered.** Files an earlier release left in the OS temp dir stay until someone removes them (this is a one-time cleanup, not
+  code), and a call that is killed (a second Ctrl-C, a kill) leaves the files of that one call.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)

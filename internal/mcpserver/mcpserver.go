@@ -2061,20 +2061,26 @@ func (s *Server) handleRunGraph(ctx context.Context, req *mcp.CallToolRequest) (
 	}
 	// Inline graph_json/manifest_json are written to a temp file whose path is threaded
 	// on (the mjs reads files, not inline). Empty+empty manifest → "" (manifest optional).
-	graphPath, err := materialize(in.GraphPath, in.GraphJSON, "run-graph-*.json")
+	graphPath, cleanGraph, err := materialize(in.GraphPath, in.GraphJSON, "run-graph-*.json")
 	if err != nil {
 		res, _ := jsonResult(map[string]any{"deferred": true, "reason": "bad arguments: graph: " + err.Error()})
 		return res, nil
 	}
+	// The temp files an inline graph_json or manifest_json became are this call's own, and go when it returns, whichever way it
+	// returns (an answer, a deferral, a refusal, a ticket queued, a panic). A ticket this call made is not left holding them: it keeps
+	// its own copy of the bytes (internal/mediaremote/ticket.go writeBodies), which is what lets a queued graph run after the call
+	// is over. A file the caller named is never one of them.
+	defer cleanGraph()
 	if graphPath == "" {
 		res, _ := jsonResult(map[string]any{"deferred": true, "reason": "bad arguments: graph_path or graph_json required"})
 		return res, nil
 	}
-	manifestPath, err := materialize(in.ManifestPath, in.ManifestJSON, "run-graph-manifest-*.json")
+	manifestPath, cleanManifest, err := materialize(in.ManifestPath, in.ManifestJSON, "run-graph-manifest-*.json")
 	if err != nil {
 		res, _ := jsonResult(map[string]any{"deferred": true, "reason": "bad arguments: manifest: " + err.Error()})
 		return res, nil
 	}
+	defer cleanManifest()
 	params := map[string]any{
 		"graph_path":    graphPath,
 		"manifest_path": manifestPath,
@@ -2098,25 +2104,38 @@ func (s *Server) handleRunGraph(ctx context.Context, req *mcp.CallToolRequest) (
 }
 
 // materialize returns path if set, else writes inline json to a temp file and returns
-// that path (the mjs reads files, not inline). Empty+empty → ("", nil) for the optional
-// manifest; a required graph is validated by the caller when this returns "".
-func materialize(path, inline, pattern string) (string, error) {
+// that path (the mjs reads files, not inline). Empty+empty → no path and no error, for the
+// optional manifest; a required graph is validated by the caller when this returns "".
+//
+// The cleanup it returns is never nil and removes only a file THIS call made: it does nothing for a path
+// the caller named, nor for an empty one. A write that fails removes its own file before the error returns.
+func materialize(path, inline, pattern string) (string, func(), error) {
+	noop := func() {}
 	if path != "" {
-		return path, nil
+		return path, noop, nil
 	}
 	if inline == "" {
-		return "", nil
+		return "", noop, nil
 	}
-	f, err := os.CreateTemp("", pattern)
+	f, err := createTemp("", pattern)
 	if err != nil {
-		return "", err
+		return "", noop, err
 	}
-	defer f.Close()
-	if _, err := f.WriteString(inline); err != nil {
-		return "", err
+	name := f.Name()
+	_, werr := f.WriteString(inline)
+	cerr := f.Close() // closed before any removal: Windows will not delete a file that is still open
+	if werr == nil {
+		werr = cerr
 	}
-	return f.Name(), nil
+	if werr != nil {
+		_ = os.Remove(name)
+		return "", noop, werr
+	}
+	return name, func() { _ = os.Remove(name) }, nil
 }
+
+// createTemp makes the temp file an inline graph or manifest is written to; a seam, so that a test can make the write fail.
+var createTemp = os.CreateTemp
 
 func (s *Server) handleGenerateSVG(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
