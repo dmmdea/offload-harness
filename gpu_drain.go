@@ -684,12 +684,16 @@ func (s leaseScope) touchesPins(pins []string) bool           { return s.Touches
 func (s leaseScope) touches(model string) bool                { return s.Touches(model) }
 func (s leaseScope) touchesRun(r gpuactivity.Run) bool        { return s.TouchesRun(r) }
 func (s leaseScope) split(models []string) (on, off []string) { return s.Split(models) }
+func (s leaseScope) splitPlaced(models []string) (on, off, unplaced []string) {
+	return s.SplitPlaced(models)
+}
 
 // unloadModelsFor is the model-id list the render lane's freeLlamaSwap unloads under a lease
-// that holds leaseIDs (internal/gpualloc.UnloadModels): the llama-swap roster, minus the memory
-// stack, minus every seat pinned to cards the lease does not hold. A model nobody declared a pin
-// for stays on the list (it could be anywhere). ok is false for a whole-node lease (nothing to
-// narrow: the render lane keeps its own rule) and when the roster is empty.
+// that holds leaseIDs (internal/gpualloc.UnloadModels): the models the config and the card table
+// POSITIVELY place on a leased card, minus the memory stack. A model placed on another card stays,
+// and so does a model whose card is not known (it could be anywhere: said, not unloaded). The
+// candidates are the llama-swap roster, else the config's declared seats. ok is false only for a
+// whole-node lease (nothing to narrow: it holds every card, so the render lane keeps its own rule).
 func unloadModelsFor(ctx context.Context, cfg config.Config, roster []string, leaseIDs []string) ([]string, bool) {
 	return gpualloc.UnloadModels(ctx, cfg, roster, leaseIDs, cardTableDeps(), os.Stderr)
 }
@@ -730,16 +734,22 @@ var rosterIDsFn = func(ctx context.Context, endpoint string) ([]string, error) {
 
 // wrapperUnloadEnv is the GPU_LEASE_UNLOAD_MODELS entry a device lease's wrapped command is
 // handed (plan P5): the render lane's freeLlamaSwap unloads exactly that list instead of every
-// model off the memory stack. "" for a whole-node lease, and whenever the roster cannot be read
-// (the render lane then keeps its own rule, which only ever unloads more, never less).
+// model off the memory stack. "" only for a whole-node lease, which holds every card and so leaves
+// the lane on its own rule. A card lease ALWAYS gets a list (register F15): when the roster cannot
+// be read it is the seats the config places on the leased cards, and with no llama-swap endpoint it
+// is the none sentinel. An unset variable would be read by the lane as "every model off the memory
+// stack", the render emptying the seats on the cards it does not hold.
 func wrapperUnloadEnv(ctx context.Context, cfg config.Config, leaseIDs []string) string {
-	if len(leaseIDs) == 0 || strings.TrimSpace(cfg.Endpoint) == "" {
+	if len(leaseIDs) == 0 {
 		return ""
+	}
+	if strings.TrimSpace(cfg.Endpoint) == "" {
+		return unloadModelsEnv(nil, true)
 	}
 	roster, err := rosterIDsFn(ctx, cfg.Endpoint)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gpu reserve: the llama-swap roster could not be read (%v): the render lane keeps its own rule and unloads every model off the memory stack, not only the seats on the leased cards\n", err)
-		return ""
+		fmt.Fprintf(os.Stderr, "gpu reserve: the llama-swap roster could not be read (%v): the render lane is handed the seats the config places on the leased cards, and no other model\n", err)
+		roster = nil
 	}
 	models, known := unloadModelsFor(ctx, cfg, roster, leaseIDs)
 	return unloadModelsEnv(models, known)
@@ -851,9 +861,17 @@ func maintainSeatScoped(ctx context.Context, cfg config.Config, restamp restampe
 		// A lease that holds some cards takes the seats on those cards and leaves the rest
 		// resident (plan P5). A seat that stays is also protected from the total unload route:
 		// GET /unload ignores ?model=, so it would take the card-0 seat down with the card-2 one.
-		others, leftAlone := scope.split(others)
-		if len(leftAlone) > 0 {
-			fmt.Fprintf(os.Stderr, "gpu reserve: left resident (not on the leased cards): %s\n", strings.Join(leftAlone, ", "))
+		//
+		// POSITIVE knowledge only: an unload evicts a model for good, so a resident whose card is not
+		// known (nobody declared it, its pin cannot be placed, the card table was not read) stays,
+		// and is named. The drain keeps the opposite direction: a doubt waits.
+		others, offCards, unplaced := scope.splitPlaced(others)
+		leftAlone := append(append([]string(nil), offCards...), unplaced...)
+		if len(offCards) > 0 {
+			fmt.Fprintf(os.Stderr, "gpu reserve: left resident (not on the leased cards): %s\n", strings.Join(offCards, ", "))
+		}
+		if len(unplaced) > 0 {
+			fmt.Fprintf(os.Stderr, "gpu reserve: left resident, placement unknown (the config does not place them on a card, or the card table was not read): %s\n", strings.Join(unplaced, ", "))
 		}
 		// The legacy GET /unload is total, so it may run only when no stack member
 		// is resident; an unreadable /running cannot show that, so it protects the

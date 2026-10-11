@@ -22,11 +22,14 @@ type LeaseScope struct {
 	ids     []string
 	cards   []gpuprobe.Card
 	cardsOK bool
+	// cardsWhy says why the table is unusable: the read's error, or that it listed no card.
+	cardsWhy string
 }
 
 // NewLeaseScope reads the card table once (deps.CardTable, which retries a read that ran out of
 // time) for a lease holding ids (lease ids). A table it cannot read is said once on warn (nil =
-// silent) and every seat is then treated as on the leased cards.
+// silent): Touches then reads every seat as on the leased cards (a drain waits, a fence holds) and
+// Placement reads no seat as placed (an unload takes nothing it cannot place).
 func NewLeaseScope(ctx context.Context, cfg config.Config, ids []string, deps Deps, warn io.Writer) LeaseScope {
 	s := LeaseScope{cfg: cfg, ids: ids}
 	if len(ids) == 0 {
@@ -34,14 +37,17 @@ func NewLeaseScope(ctx context.Context, cfg config.Config, ids []string, deps De
 	}
 	cards, _, err := deps.CardTable(ctx, cfg)
 	s.cards, s.cardsOK = cards, err == nil && len(cards) > 0
-	if !s.cardsOK && warn != nil {
-		// The fallback is right (every doubt fences) and silent, until now: the operator would
-		// believe a seat on another card was spared.
-		why := "no card was listed"
+	if !s.cardsOK {
+		s.cardsWhy = "no card was listed"
 		if err != nil {
-			why = err.Error()
+			s.cardsWhy = err.Error()
 		}
-		fmt.Fprintf(warn, "gpu reserve: the card table could not be read (%s): every seat is treated as sitting on the leased cards, so the drain and unload act as for the whole node\n", why)
+		if warn != nil {
+			// The drain keeps its direction (every doubt waits: a seat is treated as on the leased
+			// cards); an unload takes the opposite one (only a seat placed on a leased card goes).
+			// Said, because the operator would otherwise believe the card table had been read.
+			fmt.Fprintf(warn, "gpu reserve: the card table could not be read (%s): the drain waits for every run on the node, and no seat but the configured agent seat can be placed on a card, so only that one is unloaded\n", s.cardsWhy)
+		}
 	}
 	return s
 }
@@ -59,6 +65,40 @@ func (s LeaseScope) TouchesPins(pins []string) bool {
 		return true
 	}
 	return gpulease.Info{Held: true, Devices: s.ids}.Touches(rids)
+}
+
+// CardsReadable reports whether the card table was read: only then can a pin be placed on a card.
+func (s LeaseScope) CardsReadable() bool { return !s.Bounded() || s.cardsOK }
+
+// CardsWhy says why the card table could not be used ("" when it was).
+func (s LeaseScope) CardsWhy() string { return s.cardsWhy }
+
+// Placement says where the seat serving model sits, by POSITIVE knowledge only: known is true when
+// the config declares the seat's pins and the card table places every one of them, and then on says
+// whether any of those cards is a leased one. A model nobody declared, a pin the table cannot
+// place and a table that cannot be read are known=false: the placement is not known, and on is
+// false with it. A whole-node lease holds every card, so every seat is on it and known.
+//
+// This is the reading an UNLOAD takes, because an unload evicts a model for good (plan P5, F15).
+// Touches reads the same facts in the other direction (a doubt is "on the leased cards"), which is
+// right for a drain or a fence: waiting for a run that is not there costs a moment, and unloading a
+// seat that is not there costs someone's work.
+func (s LeaseScope) Placement(model string) (on, known bool) {
+	if !s.Bounded() {
+		return true, true
+	}
+	if !s.cardsOK {
+		return false, false
+	}
+	pins, ok := s.cfg.ModelPins(model)
+	if !ok {
+		return false, false
+	}
+	rids, ok := gpulease.ResolvePins(pins, s.cards)
+	if !ok {
+		return false, false
+	}
+	return gpulease.Info{Held: true, Devices: s.ids}.Touches(rids), true
 }
 
 // Touches reports whether the seat serving model sits on the leased cards.
@@ -94,6 +134,23 @@ func (s LeaseScope) Split(models []string) (on, off []string) {
 	return on, off
 }
 
+// SplitPlaced divides models for an unload: on are the ones positively placed on a leased card,
+// off the ones positively placed elsewhere, unplaced the ones whose card is not known. Only on is
+// unloaded; off and unplaced stay resident, and the caller names the unplaced.
+func (s LeaseScope) SplitPlaced(models []string) (on, off, unplaced []string) {
+	for _, m := range models {
+		switch placed, known := s.Placement(m); {
+		case !known:
+			unplaced = append(unplaced, m)
+		case placed:
+			on = append(on, m)
+		default:
+			off = append(off, m)
+		}
+	}
+	return on, off, unplaced
+}
+
 // EffectiveMemoryStack is the memory stack a lease never unloads: the config's, else the default.
 func EffectiveMemoryStack(cfg config.Config) []string {
 	if len(cfg.MemoryStack) == 0 {
@@ -103,29 +160,59 @@ func EffectiveMemoryStack(cfg config.Config) []string {
 }
 
 // UnloadModels is the model-id list the render lane's freeLlamaSwap unloads under a lease that
-// holds leaseIDs: the llama-swap roster, minus the memory stack, minus every seat pinned to
-// cards the lease does not hold. A model nobody declared a pin for stays on the list (it could
-// be anywhere). ok is false for a whole-node lease (nothing to narrow: the render lane keeps its
-// own rule) and when the roster is empty.
+// holds leaseIDs: the models that are POSITIVELY placed on a leased card (LeaseScope.Placement),
+// minus the memory stack. A model placed on another card stays, and so does a model whose card is
+// not known (nobody declared it, its pin cannot be placed, the card table cannot be read): "it could
+// be anywhere" is a reason to say so, never a reason to unload it, because an unload evicts work the
+// render may not need gone (register F15; the operator's rule that a render must not evict what it
+// does not need to). warn, when not nil, names what was left resident and why, once.
+//
+// The candidates are the llama-swap roster. When the roster is empty or could not be read the
+// candidates are the seats the config itself declares (Config.LayerSeatModels): the list is then
+// the config's seats on the leased cards, said so, and never the unknown list the render lane reads
+// as "every model off the memory stack".
+//
+// ok is false only for a whole-node lease (no ids): it holds every card, so nothing narrows and the
+// render lane keeps its own rule. A card lease always has a list, empty when nothing is placed on
+// its cards (exported as the none sentinel by UnloadEnv).
 func UnloadModels(ctx context.Context, cfg config.Config, roster []string, leaseIDs []string, deps Deps, warn io.Writer) ([]string, bool) {
-	if len(leaseIDs) == 0 || len(roster) == 0 {
+	if len(leaseIDs) == 0 {
 		return nil, false
 	}
-	scope := NewLeaseScope(ctx, cfg, leaseIDs, deps, warn)
+	candidates, fromConfig := roster, false
+	if len(candidates) == 0 {
+		candidates, fromConfig = cfg.LayerSeatModels(), true
+	}
 	keep := map[string]bool{}
 	for _, m := range EffectiveMemoryStack(cfg) {
 		keep[strings.ToLower(strings.TrimSpace(m))] = true
 	}
-	var out []string
-	for _, id := range roster {
-		if keep[strings.ToLower(strings.TrimSpace(id))] {
+	var models []string
+	seen := map[string]bool{}
+	for _, id := range candidates {
+		k := strings.ToLower(strings.TrimSpace(id))
+		if k == "" || keep[k] || seen[k] {
 			continue
 		}
-		if scope.Touches(id) {
-			out = append(out, id)
-		}
+		seen[k] = true
+		models = append(models, id)
 	}
-	return out, true
+	if fromConfig && warn != nil {
+		fmt.Fprintf(warn, "gpu reserve: the llama-swap roster is empty or could not be read: the unload list is the seats the config places on the leased cards, nothing else\n")
+	}
+	if len(models) == 0 {
+		return nil, true
+	}
+	scope := NewLeaseScope(ctx, cfg, leaseIDs, deps, nil)
+	on, _, unplaced := scope.SplitPlaced(models)
+	if len(unplaced) > 0 && warn != nil {
+		why := "the config does not place them on a card"
+		if !scope.CardsReadable() {
+			why = "the card table could not be read (" + scope.CardsWhy() + "), so no seat can be placed on a card"
+		}
+		fmt.Fprintf(warn, "gpu reserve: left resident, placement unknown (%s): %s\n", why, strings.Join(unplaced, ", "))
+	}
+	return on, true
 }
 
 // UnloadEnv renders the list as the environment variable the render lane reads
