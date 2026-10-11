@@ -6,6 +6,109 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a test that earned a remembered incoherent-seat verdict no longer leaves it for the next test on the same loopback address (F78)
+
+- **The hole.** The incoherent-seat memo (`internal/pipeline/coherence.go`) is one table for the whole process, keyed by endpoint and
+  seat for ten minutes, and a run on a seat that is already resident defers on a remembered verdict without asking the seat anything.
+  A test's fake server gets a loopback port the OS can hand to a later fake, and the tests that earn a broken verdict
+  (`TestRunAgentTaskDefersAnIncoherentSeatAfterColdLoad` and `TestNoWallIsReportedUntilTheWallStarts` in `internal/pipeline`;
+  `TestAgentRunDefersAnIncoherentSeat`, `TestAgentRunDefersAWarmRunOnTheRememberedIncoherentSeat` and
+  `TestAgentRunIncoherentSeatDefersCarrySizing` in `internal/mcpserver`) left it behind; only the tests of the memo itself cleared
+  theirs. The register names `TestTheWarmUpKeepsItsBudgetAfterAWaitInLine` as the victim: it takes the warm path against a fresh fake
+  and would defer on a verdict that was earned elsewhere.
+- **The fix (test code only).** `agentFake.server` drops every verdict filed under its server's endpoint, whichever seat it names,
+  when the test that asked for it ends (the endpoint is matched whole, so a server on `:1234` never takes `:12345` with it), and
+  `coherenceSeatServer` clears the seat it serves the same way.
+- **Tests, written first and red.** `TestAnIncoherentSeatVerdictDoesNotOutliveTheTestThatEarnedIt` in both packages runs the cold load in
+  a subtest, asserts the verdict IS remembered there (so the check after it cannot pass vacuously) and that it is gone once the subtest
+  has returned. Red before: `the verdict on seat "seat-x" outlived the test that earned it` (pipeline, and for a second seat on the
+  same endpoint) and `... "agent-pool" outlived ...` (mcpserver). The three tests the register names pass 30 repetitions in a row; that
+  does not force the port reuse, so the new tests are the proof.
+
+### Fixed — the root, pairworkloads and mediaremote suites left a state-root folder in the OS temp dir for every copy of their test binary that a test re-launches (F77b)
+
+- **The defect.** Each of the three packages makes a throwaway state root in its `TestMain` (`lo-root-state-*`, `lo-pairworkloads-state-*`,
+  `lo-mediaremote-state-*`) and removes it after `m.Run`. They also re-launch their own test binary (the helper processes of the gpu verb
+  tests, a child that sends a frame and is killed, the holder of a queue lock). A copy runs `TestMain` too, and a copy that is killed or
+  ends by `os.Exit` from inside a test never reaches the removal, so every launch left a root of its own. Counted with the temp dir pointed
+  at an empty folder on Windows, one run of `internal/pairworkloads` left 2 and one run of `internal/mediaremote` left 1, and one run of the root package's tests left 20 (on Windows and on Linux alike).
+- **The fix (test code only).** The suite process exports `LO_ROOT_SUITE_STATE_ROOT`, `LO_PAIRWORKLOADS_SUITE_STATE_ROOT` or
+  `LO_MEDIAREMOTE_SUITE_STATE_ROOT` once its root exists, set to that root's path, and every re-launch site already passes the process
+  environment on. A copy shares the root of the suite that launched it and makes none, but only when the environment agrees three ways:
+  the variable names a root, `LOCAL_OFFLOAD_STATE_DIR` points at the same one, and it is one of the package's own throwaway roots and
+  still on disk; anything less gets a root of its own, as before (the net exists to keep the suite off the machine-wide root, so it
+  fails closed). The root package's copy still runs on the same known host reading as the suite.
+- **Tests, written first and red.** `TestARelaunchedTestBinaryLeavesNothingInTheTempDir` in each package re-launches the test binary at a
+  helper that ends with `os.Exit(0)` from inside the test, with `TMP`, `TEMP` and `TMPDIR` on its environment pointed at an empty folder,
+  and requires the folder to stay empty; `TestACopyTrustsTheSuitesStateRootOnlyWhenTheEnvironmentAgreesWithIt` holds the three conditions.
+  Red before (Windows): `a re-launched copy of the test binary left 1 entries in its temp dir, want none: [lo-root-state-…]` (and
+  `lo-pairworkloads-state-…`, `lo-mediaremote-state-…`). `TestMainIsolatesTheStateRoot`, `TestMainIsolatesTheHomeAndTheLedger` and
+  `TestRunIsolatedFailsClosed` are unchanged.
+- **Review round: a re-launched copy of the root suite also checks the home and the origin.** The copy skips `runIsolated`, which is
+  also what pins `LOCAL_OFFLOAD_HOME` (to the root's `home` folder) and `LOCAL_OFFLOAD_ORIGIN` (to `go-test`), the ledger guard of
+  2026-10-03 (1,204 fixture rows written to the operator's real ledger); the copy read both from the environment of whichever test
+  launched it, unchecked, so a launcher that had cleared or moved them would have run `config.Default()` on the real home. A copy now
+  trusts the suite's root only when the home and the origin also agree (five conditions); otherwise it makes a root of its own, which
+  pins them, as it did before F77b. Red before: the home-not-set, home-outside-the-root, home-is-the-root, origin-not-set and
+  origin-of-another-writer cases of `TestACopyTrustsTheSuitesStateRootOnlyWhenTheEnvironmentAgreesWithIt` returned `trusted=true`;
+  deleting either check turns its cases red.
+- **Review round: `internal/pairworkloads` now fails closed.** Its `TestMain` logged and ran the suite anyway when `os.MkdirTemp` or
+  either `os.Setenv` failed, so a suite whose setup failed ran against the machine-wide state root, while its comment and
+  `docs/systems/pair-workloads.md` called it fail-closed (the F77b suite variable had copied the idiom). It now goes through a
+  `runIsolated` like the root, `internal/delegate`, `internal/mcpserver` and `internal/mediaremote`: any of the three failures returns 1
+  without running a test and removes the directory it made. `TestRunIsolatedFailsClosed` is new there; red before: `code = 0, ran = true;
+  want 1, false` for the mkdir, state-dir and suite-variable cases (and the removal assertions fail when the deferred removal is dropped).
+  The docs paragraph no longer lists `internal/pipeline` among the fail-closed packages: its `TestMain` fails open on purpose (its own
+  comment says so) and the paragraph now says that.
+
+### Fixed — `offload_run_graph` and `run-graph` remove the temp files an inline graph or manifest became, whichever way the call ends (F79)
+
+- **The defect.** The runner reads files, so an inline `graph_json` / `manifest_json` (the MCP door) or `--graph-json` /
+  `--manifest-json` (the CLI) is written to a temp file (`run-graph-*.json`, `run-graph-manifest-*.json`) and its path is threaded on.
+  Nothing removed it: every inline call left one file (a graph) or two (graph and manifest) in the OS temp dir for good, on every exit
+  of the call (an answer, a deferral, a refusal, a ticket queued), and the CLI left them too when the pipeline could not open. A write
+  that failed left the file it had just made, and a manifest that could not be written left the graph file made before it. One run of
+  the `internal/mcpserver` tests left 26 of them (25 `run-graph-*`, 1 `run-graph-manifest-*`) and one run of the root package's tests
+  left 3, counted with the temp dir pointed at an empty folder on Windows. The fleet node's twin (`fleetnode.buildRunGraph`) already returned a cleanup; the door and the CLI did not.
+- **The fix.** `materialize` (MCP) and `materializeArg` (CLI) return a cleanup that is never nil and removes only the file THIS call
+  made: it does nothing for a path the caller named (`graph_path`, `manifest_path`, `--graph`, `--manifest`, or a `graph_path` given
+  together with a `graph_json`), nor for an empty one. `handleRunGraph` defers each cleanup right after the file exists, so an answer,
+  a deferral, a refusal inside `RunWith`, a manifest that cannot be written and a panic all remove both files; `runGraphParams` returns
+  one cleanup for the pair and `runRunGraph` defers it before the pipeline opens, so the exit at `openPipeline` is covered too. A write
+  that fails closes its file and then removes it (Windows does not delete a file that is still open: `os.Remove` of an open file fails
+  with "being used by another process", read on Go 1.27.1), and a manifest that cannot be written removes the graph file with it.
+- **Why removing them is safe.** A graph ticket keeps its own copy of the graph and the manifest as the plan holds them
+  (`body-<id>-graph.json`, `body-<id>-manifest.json`) and its key, its node payload, its local run and an adopter all read those, never
+  the caller's paths; a graph queued by a call that has returned still runs.
+  `TestAGraphTicketStillRunsOnThisMachinesLaneOnceTheDoorHasRemovedItsInlineFiles` admits a graph, removes the caller's files the way the
+  door does, frees the lane and requires the lane to run the bytes the call was made with; it fails when the ticket reads the caller's
+  path instead of its copy.
+- **Tests, written first and red.** `internal/mcpserver`: `TestRunGraphDoorRemovesItsInlineTempFilesOnEveryExit` (six exits),
+  `TestRunGraphDoorHandsTheRunnerTheInlineBytesWhileItRuns` (removal is not early), `TestRunGraphDoorNeverRemovesACallersOwnFiles`,
+  `TestMaterializeCleanupRemovesOnlyTheFileThisCallMade`. Root: `TestRunGraphParamsInlineJSONIsRemovedByItsCleanup`,
+  `TestRunGraphParamsLeavesACallersOwnFilesAlone`, `TestRunGraphParamsRemovesTheGraphFileWhenTheManifestCannotBeWritten`,
+  `TestMaterializeArgRemovesItsOwnFileWhenTheWriteFails`, `TestRunGraphCLIRemovesItsTempFilesWhenThePipelineCannotOpen`. The write
+  failures are made with a one-line seam (`createTemp`) that hands back a file opened for reading only. Red before, root package on a
+  Windows PC against a cleanup that removes nothing: `the cleanup left [run-graph-….json run-graph-manifest-….json] in the OS temp dir`,
+  `the file of a failed write was left`, and `run-graph left [...] in the OS temp dir after it failed to open the pipeline`.
+  After: 0 `run-graph*` entries left by the `internal/mcpserver` tests on Windows (26 before) and by a whole run of the root package's
+  tests on Windows and on Linux (3 before).
+- **Review round: a delete that is refused for a moment is waited out, and one that still fails is named.** The cleanup made one
+  `os.Remove` and dropped the error, so on Windows a scanner (or a runner that had only just exited) holding the file for a moment
+  brought the leak back with nothing to say so; the write-error branches dropped it the same way. Both doors now delete through one
+  helper (`removeInlineTemp`, in `internal/mcpserver` and in the root package) that tries again for about half a second (20 attempts,
+  25 ms apart, as `removeRunGraphEnvelope` does for the envelope), treats a file that is not there as done, and, when the file still
+  resists, writes one line naming it and the reason (to the log in the MCP server, to stderr in the CLI). Red before, on a Windows PC,
+  in `internal/mcpserver` (and the same four as `TestMaterializeArg...` in the root package): `TestMaterializeCleanupWaitsOutAFileHeldForAMoment`
+  (a delete refused three times left the file), `TestMaterializeCleanupNamesAFileItCannotRemove` (no line),
+  `TestMaterializeRemovesTheFileOfAFailedWriteEvenWhenItIsHeldForAMoment` and
+  `TestMaterializeCleanupOutwaitsAHandleThatIsClosedAMomentLater` (a real open handle, no seam: the cleanup returned and left the file).
+  One attempt, no line, a missing file counted as a failure and the failed-write branch left out of the helper each turn their own test red.
+- **Not covered.** Files an earlier release left in the OS temp dir stay until someone removes them (this is a one-time cleanup, not
+  code), and a call that is killed (a second Ctrl-C, a kill) leaves the files of that one call.
+
+## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
+
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)
 
 - **The defect (register F15, from the 0.176.0 notes).** The render helper cleared "every non-keep-set model whatever card it sits
@@ -35,16 +138,24 @@ Versioning: [SemVer](https://semver.org/).
 - **What a lease unloads.** `LeaseScope.Judge`: a model placed on a leased card goes; **a model placed on another card, by `layers`
   or by the serving config pin, stays** (the F15 gain); a model whose placement is unknown goes, exactly as before F15, because
   the render needs its card (a `proxy:` seat with no `layers` entry is unloaded under any card lease); the memory stack never goes.
+  That judgement runs on a roster that was READ. A roster that could not be read is not judged at all: see "A card lease gets a
+  list" below.
   A lease that names every card the table lists is still the whole node (`holdsAll`: a one-card box's only card, all three of
   three). `Touches` is the same reading, so the drain and the agent seat agree with the unload. The card table unreadable: every
   model is unknown and goes, as before.
 - **The lane says what it did and why.** One line per reason, from `gpualloc.Explain`, in the wrapper's stderr and the media
   admission's log: `unloaded, placed on a leased card by layers: ...`, `left resident, placed elsewhere by the serving config
   pin: ...`, `unloaded, placement unknown (it is a proxy: seat, ...): ...`. The render helper logs the models it left on a list.
-- **A card lease always gets a list.** `wrapperUnloadEnv` (`gpu reserve --devices`) and the media admission's `unloadEnv` export
-  `GPU_LEASE_UNLOAD_MODELS=-` when there is nothing to unload (no endpoint, nothing the verdicts select) instead of leaving the
-  variable unset; with the roster unreadable the candidates are the models `layers` declare and the serving config lists. Only a
-  whole-node lease has no list. `gpu reserve --unload-seat` judges the other residents with the same verdicts.
+- **A card lease gets a list, unless the roster could not be read.** `wrapperUnloadEnv` (`gpu reserve --devices`) and the media
+  admission's `unloadEnv` export `GPU_LEASE_UNLOAD_MODELS=-` when there is nothing to unload (no endpoint, nothing the verdicts
+  select) instead of leaving the variable unset. A whole-node lease has no list, and neither has a card lease whose llama-swap
+  roster could not be read: that is not an empty roster, nothing says what is resident, and a list built from the config alone is
+  never complete (with `layers` only, a resident model neither they nor the serving config name would never be judged and would
+  stay on the leased card; with neither, the list is empty and the lane unloads nothing). `gpualloc.UnloadModels` takes the
+  roster read's error and returns no list for it, whatever the config declares, so the variable stays unset and
+  `render/gpu-lock.mjs` keeps its own rule, every model off the memory stack, exactly as before F15; the wrapper and the media
+  admission log that they fell back because the roster could not be read. A roster that was read and is empty means nothing is
+  resident and is judged like any other. `gpu reserve --unload-seat` judges the other residents with the same verdicts.
 - **Between renders.** The unload is elected once per lease, so a seat that came back onto the leased cards stayed for the rest of
   the lease. A job that lost the election under a card lease with a non-empty list now reads that list against `/running` again
   before it submits (`withGpuSlot` `reclear`); `freeLlamaSwap` unloads a listed model only when it is resident, so a card that is
@@ -56,19 +167,23 @@ Versioning: [SemVer](https://semver.org/).
   that ignores the serving config pins). `internal/gpualloc`: a model nothing places is on the list, the serving config's pins place a
   model `layers` do not (UUID, index with and without the PCI order, alias, a pair spanning the leased card), `layers` outrank the
   serving config, a `proxy:` seat, an entry with no env pin and a cmd-only pin are unknown, an unreadable or unset serving config
-  is said once, no roster judges what the config declares and lists, no card table unloads every model, the memory stack stays out
+  is said once, an unreadable roster makes no list whatever the config declares (nothing placed, `layers` only, `layers` and a serving config) while a roster read and empty still has one, no card table unloads every model, the memory stack stays out
   even when placed on a leased card, a lease on every card is the whole node. Root: the same through `unloadModelsFor`,
   `--unload-seat` (layers and the serving config), the wrapper form end to end, the roster-unreadable and no-endpoint wrappers,
-  the unplaceable pin and the unreadable table. Pipeline: an unreadable roster still hands the call a list; the serving config
+  the unplaceable pin and the unreadable table. Pipeline: an unreadable roster hands the call no list and says why; the serving config
   keeps a model on card C off card A's list. `render/`: a later job re-clears under a card lease with a list and under no other,
   a card lease with no list says so and unloads as before, a list names what stays. `internal/modelaffinity`: a media lease fences
   its own cards through every door exactly as an exclusive text lease does and lets a free card through, and the fence starts when
   the drain ends. Each rule has a mutant that turns its test red (unknown stays, serving pins ignored, the proxy rule, the PCI
   order rule, the serving config outranking `layers`, aliases, the hold-every-card reading, the memory-stack filter, the verdicts
-  in `--unload-seat`, the unset variable on a roster error and on a missing endpoint, the pipeline's roster fallback, the media
+  in `--unload-seat`, the unset variable on a missing endpoint, the roster-error branch of `UnloadModels` and each caller dropping the roster error, the media
   clause, the draining clause and the per-card scoping of the fence, the Node no-list log, the re-clear and its card condition,
   the left-resident log).
-- **Not changed, and not verified here.** First and most important for a box without `layers`: the unload now knows from the
+- **Not changed, and not verified here.** First, a limit of the fix: the roster read is the one input the unload cannot check. When
+  it fails, F15's gain is off for that lease: the render lane keeps its own rule and unloads every model off the memory stack, the
+  seats placed on other cards included, and says so; this is the safe direction (a card that stays occupied fails the render, a
+  seat that is reloaded costs a warm-up), chosen over a list built from the config, which can leave a resident model on the leased
+  card. A roster that was read and is empty is trusted to mean nothing is resident. Second, for a box without `layers`: the unload now knows from the
   serving config which card a model is on, and the load fence does not. The fence (`modelaffinity`, armed from `config.ModelPins`)
   still places a model through `layers` only, so on such a box a text load waits for any media lease, whatever card it is on,
   exactly as before this change; reading the serving config there is a separate change. Also: a client that is not the harness can still load a model onto a leased card; the re-clear removes it
@@ -125,6 +240,15 @@ Versioning: [SemVer](https://semver.org/).
   FLEET-NODE.md, the operator guide): a list of numbers, booleans or enum values (quoted by the grammar, converted back by the
   re-pack's coercion), a type list, `anyOf`, `oneOf`, `allOf` and `$ref`. Every property a schema lists is required by the grammar,
   at every depth, whether or not the schema's own `required` names it.
+- **The coercion follows the schema to every depth.** The conversion above was promised at every depth and done at the top level only
+  (`coerceToSchemaNoted` read the schema's top-level properties and the items of top-level lists), so a numeric or boolean list inside an
+  object or inside a list of objects could never validate on a seat that obeys the grammar: every grammar attempt failed `at
+  '/meta/scores/0': got string, want number`, and the delegator's one-completion rescue could not deliver such a schema at all. It now
+  reads every property and every list item along the schema's `properties` and `items`, with the same lossless rule and the same
+  full re-validation, and the note names a nested field by its path (`meta.scores (2 items)`, `rows[].scores (3 items)`, `meta.owner.id`);
+  the top level is named as before. Red before: `internal/pipeline/agenttask_repackcoerce_nested_test.go` (the table; the premise that the
+  grammar quotes the list and refuses the real one; a seat that obeys the grammar, through `repackStructured` and through a run). Six
+  mutations of the fix were each caught.
 
 ### Fixed — a structured re-pack is owed the time its own answer needs, so a loop that overran a short wall no longer skips it (F44/C13)
 
@@ -155,7 +279,7 @@ Versioning: [SemVer](https://semver.org/).
 - **Tests.** `internal/pipeline/agenttask_repackowed_test.go`: a 2 s wall and a loop that ends at 2.4 s (red before: `skipped: 0 s left to
   the wall + 0 s grace`), a slow seat with an instant loop (red before: `60 s left ... buys 29 tokens < the answer's 69`), the ceiling that
   cannot hold it, the owed time not renewed for a later attempt, `repackOwed` and the later-of-two-ends arithmetic. Two tests whose premise
-  was the defect (`TestRunAgentTaskRepackIsSkippedWhenTheWallCannotBuyTheAnswer`, the review-lane subtest `a re-pack the wall could not buy`)
+  was the defect (`TestRunAgentTaskRepackIsSkippedWhenTheCeilingCannotBuyTheAnswer`, the review-lane subtest `a re-pack the wall could not buy`)
   now pin the ceiling-bound skip. Four mutations of the fix were each caught. ADR 0055 item 10, `docs/systems/fleet-node.md`.
 
 ### Fixed — a re-pack that loops is asked differently the next time, and a looped list is not published (C14)
@@ -175,8 +299,12 @@ Versioning: [SemVer](https://semver.org/).
   the cap) does not. The lane on the wire reads `grammar+no-repeat`, `json_schema+no-repeat` or `chat+no-repeat`. A complete object whose
   list repeats one item (or a block of two or three) at least 6 times in a row, where the answer it was written from holds the item fewer
   times, is not published: the attempt fails as `re-pack repeated the list item "x" N times in a row ...`, marks the call, and ends as an
-  abstention naming the item when every attempt does it. The detector keeps its two original tests and their order and adds a third pass
-  for a block of 65 to 192 bytes in the last 1,024 (whitespace still reads the last 256).
+  abstention naming the item when every attempt does it. An item may be a string, a number, a boolean, an object or a list (F43 lets a
+  llama.cpp seat write a list of objects, and a loop closes inside those as well): an object or a list is compared by its compact JSON with
+  the keys sorted, one that holds nothing but empty values (`{}`, `""`, `0`, `false`) is never a loop, the answer is taken to hold an object
+  as often as it holds the longest string in it (an object with no string in it is judged by its repeat alone), a finding clips a long item
+  to 100 bytes, and every list is read at every depth, named by its path (`meta.labels`, `rows[2].tags`). The detector keeps its two original
+  tests and their order and adds a third pass for a block of 65 to 192 bytes in the last 1,024 (whitespace still reads the last 256).
 - **Chosen, not measured, and unverified.** `frequency_penalty` 0.5, the run of 6, the period of 3, the 1,024/192 window. No seat was
   replayed with the penalty: that it ends a loop on the fleet's seats is the mechanism's expectation, and its fidelity cost on an honest copy
   (paid only on an attempt after a failure) is unmeasured. llama.cpp's sampler (count in the last `penalty_last_n` tokens times the penalty,
@@ -186,6 +314,8 @@ Versioning: [SemVer](https://semver.org/).
   same length before it defers. Compiling `maxItems` into the grammar was left out: it cannot be verified without a live llama.cpp compile.
 - **Tests.** `internal/pipeline/agenttask_repackloop_test.go` (a greedy-seat fake that loops until the request is conditioned: red before on
   the register's own shape, `attempt 2/3 ... chat re-pack truncated ... degenerate`; the published repeated list; the detector),
+  `internal/pipeline/repack_objectloop_test.go` (a list of objects, a list of lists and a list at depth: the detector's table, and a seat that
+  obeys the grammar and loops inside it, end to end: red before, the eight-object list was published as the result),
   `internal/llamaclient/frequencypenalty_test.go` (the key only on request, the option-free body byte-identical). Three existing tests
   pinned the old flow (a loop goes straight to the chat lane) and now pin the new one; the chat lane's time-skip test moved to a cut that is
   no loop. 18 mutations of the fix were each caught (the run threshold survived once because its test was written in terms of the constant,
@@ -371,7 +501,10 @@ Versioning: [SemVer](https://semver.org/).
   and `TopDeferReasons` default the same way (`SummarizeFileWith` / `TopDeferReasonsWith` include them), `ledger.ReadProduction`
   and `ledger.ProductionRows` are the filtered readers, and `ledger.ReadAll` stays the raw one. The confidence calibration, the
   tier health report, the router and the correctness head are fitted on production rows only: a fixture's margin would move the
-  live thresholds. `TestEveryRawLedgerReaderFiltersTestTraffic` fails when a new report reads the raw rows without dropping them.
+  live thresholds. The calibration, the health report and the router read the file with their own scanners, and they judge the rows
+  TOGETHER (`ledger.ProductionRows`), so the inner `agent` row of a measurement-pinned job, which names its parent and carries no
+  class of its own, leaves with its parent as it does in the views above (a first version judged each row alone and counted it).
+  `TestEveryRawLedgerReaderFiltersTestTraffic` fails when a new report reads the raw rows without dropping them.
 - **PAIR.** A process with a run class opens no card (`pairworkloads.Config.Suppressed`, through the gate every card already
   uses) and asks no fleet node to card its jobs: an asker with no emitter sends `X-Offload-Pair-Card: node`, which would have put
   the card back on the node, so a suppressed asker sends the asker name and no card header. A delegation pinned for `measurement`
@@ -397,7 +530,9 @@ Versioning: [SemVer](https://semver.org/).
   `TestARemoteCallThroughTheMeasureDoorOpensNoCardButStillWritesItsRow` (pairworkloads);
   `TestAMeasurementPinnedDelegationOpensNoPairCard`, `TestAMeasurementPinnedDispatchAsksNoNodeToCard` (delegate);
   `TestLedgerCommandLeavesOutTestTrafficAndSaysSo`, `TestLoupeLeavesOutTestTrafficAndSaysSo`, `TestStatsAndAuditSampleLeaveOutTestTraffic`
-  (root); the four `...ProductionRowsOnly` tests of the health, calibration, router and confhead packages.
+  (root); the four `...ProductionRowsOnly` tests of the health, calibration, router and confhead packages, and the inner-row twins of
+  three of them (`TestHealthLeavesOutTheInnerRowOfALabelledJob`, `TestRouterTrainsWithoutTheInnerRowsOfALabelledJob`,
+  `TestCalibrationLeavesOutTheInnerRowsOfALabelledJob`: red before, three mutants each caught).
 
 ### Added — a busy whole-node graph is a ticket in the cluster queue, and a node's "I do not hold this file" is about that ticket only (S5, ADR 0083 Amendment 1)
 
@@ -718,6 +853,15 @@ Versioning: [SemVer](https://semver.org/).
   - The log line for a read that is given up on is once per stalled read; the line for a caller that stops waiting (the 20 s bound of one file) is one per file it stopped waiting for, and no test pins that one.
   - `mediacap.ImageRecipe` has no production caller (its comment says so); it stays because tests and documents name it, and
     deleting it is a separate cleanup.
+- **Found in the integration review, fixed.** (1) The lane reading a call hands its ticket's first scan was dated from the ticket and not
+  from the question: the door asks the lane, then waits on the identity (up to 20 s for each weight file), then makes the ticket, so a lane
+  that freed during that wait was still taken for held and the ticket waited one more scan or went to an idle node. The reading now carries
+  the instant it was made and the scan reuses it only inside the 2 s `verdictFresh`
+  (`TestTheFirstScanReusesTheLaneReadingOnlyWhileItIsFresh`, three mutants caught). (2) The batch's order, the lane first and the
+  identity only after a held lane, was pinned for the single call and not for `generate-image --batch`: moving the identity above the
+  lane question passed every test of the package. `TestBatchOnAFreeLaneNeverWaitsOnAFingerprintRead` (every read held, the batch returns,
+  zero reads) and its control `TestBatchOnABusyLaneReadsTheFingerprintsOnlyAfterTheLaneWasAsked` now pin it, and the mutant that builds the
+  identity first is killed by both.
 
 ### Fixed — the hardening batch: a console close at any stage of `gpu reserve`, `gpu owner-flags --config`, voice cards, honest cause wording, and the host-RAM guard's loose ends (F55, F56, F57, F58, F60, F63)
 
@@ -858,106 +1002,66 @@ Versioning: [SemVer](https://semver.org/).
   failed 46 and 50 times in 400 on a Windows PC and never in 800 on Linux; `TestAProbeMemoThatBeganAtTheInstantOfTheRefusalIsNotReused`
   pins the boundary on the readings themselves.
 
-### Fixed — a test that earned a remembered incoherent-seat verdict no longer leaves it for the next test on the same loopback address (F78)
+### Fixed — tests that depended on the machine that ran them (no product change)
 
-- **The hole.** The incoherent-seat memo (`internal/pipeline/coherence.go`) is one table for the whole process, keyed by endpoint and
-  seat for ten minutes, and a run on a seat that is already resident defers on a remembered verdict without asking the seat anything.
-  A test's fake server gets a loopback port the OS can hand to a later fake, and the tests that earn a broken verdict
-  (`TestRunAgentTaskDefersAnIncoherentSeatAfterColdLoad` and `TestNoWallIsReportedUntilTheWallStarts` in `internal/pipeline`;
-  `TestAgentRunDefersAnIncoherentSeat`, `TestAgentRunDefersAWarmRunOnTheRememberedIncoherentSeat` and
-  `TestAgentRunIncoherentSeatDefersCarrySizing` in `internal/mcpserver`) left it behind; only the tests of the memo itself cleared
-  theirs. The register names `TestTheWarmUpKeepsItsBudgetAfterAWaitInLine` as the victim: it takes the warm path against a fresh fake
-  and would defer on a verdict that was earned elsewhere.
-- **The fix (test code only).** `agentFake.server` drops every verdict filed under its server's endpoint, whichever seat it names,
-  when the test that asked for it ends (the endpoint is matched whole, so a server on `:1234` never takes `:12345` with it), and
-  `coherenceSeatServer` clears the seat it serves the same way.
-- **Tests, written first and red.** `TestAnIncoherentSeatVerdictDoesNotOutliveTheTestThatEarnedIt` in both packages runs the cold load in
-  a subtest, asserts the verdict IS remembered there (so the check after it cannot pass vacuously) and that it is gone once the subtest
-  has returned. Red before: `the verdict on seat "seat-x" outlived the test that earned it` (pipeline, and for a second seat on the
-  same endpoint) and `... "agent-pool" outlived ...` (mcpserver). The three tests the register names pass 30 repetitions in a row; that
-  does not force the port reuse, so the new tests are the proof.
+- **`internal/sandbox` `TestWindowsLowILWriteConfinement` passed only when the temp directory sat under the user profile.** The cage lowers a worktree's mandatory integrity label for a run, which needs `WRITE_OWNER` on it, and owning a directory does not grant that. On a drive whose root ACL gives Authenticated Users "Modify" and the user nothing by name, the label change is refused ("Access is denied"), `Run` goes on without lowering (best effort, fails safe) and a low-integrity child cannot write the worktree, so the test failed on any temp directory off the profile. The test's worktree now comes from `labelableTempDir`, which grants the owner an explicit full-control entry and leaves the labelling to `Run`, so the test proves the cage's labelling and not the temp directory's inherited ACL (disabling `applyLowIntegrityLabel` fails it on every drive). `TestWindowsRelabelRevertedAfterRun` takes the same directory: on such a drive it had passed without ever seeing a label to revert (a no-op revert passed it). That entry changes no product code: the cage still proceeds unlabelled when the label change is refused, and as of the next section it says so.
+- **The root package's `TestGenerateImageBatchExitCodesThroughTheBuiltBinary` failed whenever the machine's committed memory was high.** The test's config named a family the host-RAM guard cannot size but bound no ComfyUI install, and on Windows an unset `comfy_dir` is the reference install, so the unsizable family fell back to the media class default (the largest render family the box binds, 33.1 GiB of Wan 2.2 weights). The built binary is a child process and reads the real host, so at 89.9 GiB committed of 127.7 it deferred the batch as "waiting for host RAM" and exited 0 where 0, 4 and 1 were expected. The fixture now sets `comfy_dir` to `""` (`hostneed.ClassDefault`: no ComfyUI install bound, nothing to size, so the batch declares no host RAM and the brake has nothing to judge), and the test fails on every host, not only a loaded one, if the child ever logs a host-RAM declaration again. Config only: no production seam was added, and the in-process batch tests, which already ran on a stand-in host, now declare nothing as well.
+- **`internal/sandbox` `TestCageMasksDotGit` failed on any host that refuses the cage's unprivileged mounts.** The mask it proves is a tmpfs mounted over `<worktree>/.git` inside the worker's user and mount namespace, and a host can refuse that mount while the rest of the cage works. The test skipped only when `GITHUB_ACTIONS` was `true`, so on a host whose AppArmor restricts unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns=1`, the Ubuntu 24.04 default; measured on one of the two Linux hosts the cage tests were gated on, where the mount fails with `permission denied`) the write reached the real `.git` and the test failed with `SECURITY:`, on the base commit of this branch as well. It now asks the cage whether the mask was refused (`hostRefusesTheCagesMounts`, the control `TestCageMasksTheDotGitFileOfALinkedWorktree` uses), checks that the note is the one callers are promised (`[sandbox] ... NOT masked read-only (mount: ...)`), and skips with that note as the measured reason; on the host above it went from a failure to a skip, and on the host where the mount works it still runs for real. The skip depends on the note: a host that refuses the mount and says nothing is not skipped and fails the assertion as before (with `maskDotGit` made to swallow the refusal, the test fails on that host), and `TestCageSaysWhenDotGitIsNotMasked` holds the cage to saying so everywhere. The blanket skip on `GITHUB_ACTIONS` is gone: a runner that refuses the mount skips with the cage's note, and one that allows it now runs the assertion. Test only.
 
-### Fixed — the root, pairworkloads and mediaremote suites left a state-root folder in the OS temp dir for every copy of their test binary that a test re-launches (F77b)
+### Fixed — the cage said nothing when it could not make a folder writable, put a label back, end a command at its deadline, or mask `.git`
 
-- **The defect.** Each of the three packages makes a throwaway state root in its `TestMain` (`lo-root-state-*`, `lo-pairworkloads-state-*`,
-  `lo-mediaremote-state-*`) and removes it after `m.Run`. They also re-launch their own test binary (the helper processes of the gpu verb
-  tests, a child that sends a frame and is killed, the holder of a queue lock). A copy runs `TestMain` too, and a copy that is killed or
-  ends by `os.Exit` from inside a test never reaches the removal, so every launch left a root of its own. Counted with the temp dir pointed
-  at an empty folder on Windows, one run of `internal/pairworkloads` left 2 and one run of `internal/mediaremote` left 1, and one run of the root package's tests left 20 (on Windows and on Linux alike).
-- **The fix (test code only).** The suite process exports `LO_ROOT_SUITE_STATE_ROOT`, `LO_PAIRWORKLOADS_SUITE_STATE_ROOT` or
-  `LO_MEDIAREMOTE_SUITE_STATE_ROOT` once its root exists, set to that root's path, and every re-launch site already passes the process
-  environment on. A copy shares the root of the suite that launched it and makes none, but only when the environment agrees three ways:
-  the variable names a root, `LOCAL_OFFLOAD_STATE_DIR` points at the same one, and it is one of the package's own throwaway roots and
-  still on disk; anything less gets a root of its own, as before (the net exists to keep the suite off the machine-wide root, so it
-  fails closed). The root package's copy still runs on the same known host reading as the suite.
-- **Tests, written first and red.** `TestARelaunchedTestBinaryLeavesNothingInTheTempDir` in each package re-launches the test binary at a
-  helper that ends with `os.Exit(0)` from inside the test, with `TMP`, `TEMP` and `TMPDIR` on its environment pointed at an empty folder,
-  and requires the folder to stay empty; `TestACopyTrustsTheSuitesStateRootOnlyWhenTheEnvironmentAgreesWithIt` holds the three conditions.
-  Red before (Windows): `a re-launched copy of the test binary left 1 entries in its temp dir, want none: [lo-root-state-…]` (and
-  `lo-pairworkloads-state-…`, `lo-mediaremote-state-…`). `TestMainIsolatesTheStateRoot`, `TestMainIsolatesTheHomeAndTheLedger` and
-  `TestRunIsolatedFailsClosed` are unchanged.
-- **Review round: a re-launched copy of the root suite also checks the home and the origin.** The copy skips `runIsolated`, which is
-  also what pins `LOCAL_OFFLOAD_HOME` (to the root's `home` folder) and `LOCAL_OFFLOAD_ORIGIN` (to `go-test`), the ledger guard of
-  2026-10-03 (1,204 fixture rows written to the operator's real ledger); the copy read both from the environment of whichever test
-  launched it, unchecked, so a launcher that had cleared or moved them would have run `config.Default()` on the real home. A copy now
-  trusts the suite's root only when the home and the origin also agree (five conditions); otherwise it makes a root of its own, which
-  pins them, as it did before F77b. Red before: the home-not-set, home-outside-the-root, home-is-the-root, origin-not-set and
-  origin-of-another-writer cases of `TestACopyTrustsTheSuitesStateRootOnlyWhenTheEnvironmentAgreesWithIt` returned `trusted=true`;
-  deleting either check turns its cases red.
-- **Review round: `internal/pairworkloads` now fails closed.** Its `TestMain` logged and ran the suite anyway when `os.MkdirTemp` or
-  either `os.Setenv` failed, so a suite whose setup failed ran against the machine-wide state root, while its comment and
-  `docs/systems/pair-workloads.md` called it fail-closed (the F77b suite variable had copied the idiom). It now goes through a
-  `runIsolated` like the root, `internal/delegate`, `internal/mcpserver` and `internal/mediaremote`: any of the three failures returns 1
-  without running a test and removes the directory it made. `TestRunIsolatedFailsClosed` is new there; red before: `code = 0, ran = true;
-  want 1, false` for the mkdir, state-dir and suite-variable cases (and the removal assertions fail when the deferred removal is dropped).
-  The docs paragraph no longer lists `internal/pipeline` among the fail-closed packages: its `TestMain` fails open on purpose (its own
-  comment says so) and the paragraph now says that.
+- **The defect.** On Windows `Run` lowers the mandatory integrity label of the worktree (when it is writable) and of the scratch folder so its low-integrity child can write them, and restores the label afterwards. Each step can fail, and each failure was dropped. Setting a label needs `WRITE_OWNER` on the folder, which owning a directory does not grant and which a data drive whose root ACL names the user nowhere does not either: the lowering was refused, `Run` went on, and the child could not write a folder the caller had asked to be writable. The caller saw the child's own `Access is denied` and nothing that explained it. A restore that was refused left the folder at low integrity, writable by every low-integrity process on the machine, with nobody told, and the next run read that leftover label as the folder's own and restored it again, so it never healed: that is the worst of the failures. A prior label that could not be read was taken for "no label", so the restore removed whatever label the folder had. A kill of the command's job at its deadline that failed left `Run` waiting for the command to finish by itself, with the caller's time limit not in force, and the timeout note then said the command had been killed.
+- **The fix.** Each is now a note. `Run` puts a line starting with `[sandbox] ` ahead of the command's own stderr in `Result.Stderr`, naming the folder (or the limit) and the cause; appends the same text to the error of a run that fails before the command starts (there is no stderr then); and logs it once (`sandbox: ...`). The wording says what the caller lost (a folder it cannot write, a label that was not restored, a deadline that was not enforced), not "confinement is off": a refused lowering fails safe, because the child runs at low integrity either way. A failed kill no longer claims a kill. A run with nothing to report is what it was, byte for byte. **Whether the command runs is unchanged**: it still runs when a label is refused or a kill fails. Failing closed there is a separate decision, parked with the operator. The Win32 calls go through three package variables (`setLabelSACL`, `getLabelSD`, `terminateJob`), so `TestWindowsLabelRefusalIsReportedToTheCaller` and six more refuse them on demand and assert the exact cause and folder in `Result.Stderr`, in the error and in the log, instead of depending on the ACLs of the machine that runs them (a clean run asserts the opposite: nothing on stderr, nothing logged).
+- **The same defect on Linux.** The read-only tmpfs over `<worktree>/.git`, which keeps a shell with a writable worktree from planting a git hook that fires on the host later, is a mount, and the worker dropped its error. Where the kernel refuses it (an unprivileged user namespace that may not mount, as in some container and CI sandboxes) the shell ran with a writable `.git` and nobody was told. The worker now writes `[sandbox] <worktree>/.git is NOT masked read-only (mount: ...)` to stderr after its last refusable step and right before the exec (`TestMaskDotGitSaysWhenTheKernelRefusesTheMount`, and `TestCageSaysWhenDotGitIsNotMasked`, which ties the note to what the kernel actually did on the host it runs on). `Result.Refused` reads through such lines, so a worker that wrote one and then failed to exec is still a refusal and not a command that exited 127 (`TestRefusedByReadsThroughNotes`). The mask is still not fail-closed.
+- **Looked at and left alone, with the reason.** Linux: the `/proc` mount and the mount-propagation call (defense in depth behind Landlock, which denies `/proc` whether or not the mount worked); the two `setrlimit` calls (documented best effort; a failure leaves the stricter limit already in force); `IgnoreIfMissing` on the Landlock rules (a skipped grant only removes access). Windows: the inheritance flag on the capture pipes' read ends and the `TerminateProcess` of a child whose job assignment failed (it never ran); the pipe reads and the handle closes (result fidelity, not confinement).
 
-### Fixed — `offload_run_graph` and `run-graph` remove the temp files an inline graph or manifest became, whichever way the call ends (F79)
+### Fixed — the Linux cage left a linked worktree's `.git` file writable, so a command could aim the host's git at a directory of its own
 
-- **The defect.** The runner reads files, so an inline `graph_json` / `manifest_json` (the MCP door) or `--graph-json` /
-  `--manifest-json` (the CLI) is written to a temp file (`run-graph-*.json`, `run-graph-manifest-*.json`) and its path is threaded on.
-  Nothing removed it: every inline call left one file (a graph) or two (graph and manifest) in the OS temp dir for good, on every exit
-  of the call (an answer, a deferral, a refusal, a ticket queued), and the CLI left them too when the pipeline could not open. A write
-  that failed left the file it had just made, and a manifest that could not be written left the graph file made before it. One run of
-  the `internal/mcpserver` tests left 26 of them (25 `run-graph-*`, 1 `run-graph-manifest-*`) and one run of the root package's tests
-  left 3, counted with the temp dir pointed at an empty folder on Windows. The fleet node's twin (`fleetnode.buildRunGraph`) already returned a cleanup; the door and the CLI did not.
-- **The fix.** `materialize` (MCP) and `materializeArg` (CLI) return a cleanup that is never nil and removes only the file THIS call
-  made: it does nothing for a path the caller named (`graph_path`, `manifest_path`, `--graph`, `--manifest`, or a `graph_path` given
-  together with a `graph_json`), nor for an empty one. `handleRunGraph` defers each cleanup right after the file exists, so an answer,
-  a deferral, a refusal inside `RunWith`, a manifest that cannot be written and a panic all remove both files; `runGraphParams` returns
-  one cleanup for the pair and `runRunGraph` defers it before the pipeline opens, so the exit at `openPipeline` is covered too. A write
-  that fails closes its file and then removes it (Windows does not delete a file that is still open: `os.Remove` of an open file fails
-  with "being used by another process", read on Go 1.27.1), and a manifest that cannot be written removes the graph file with it.
-- **Why removing them is safe.** A graph ticket keeps its own copy of the graph and the manifest as the plan holds them
-  (`body-<id>-graph.json`, `body-<id>-manifest.json`) and its key, its node payload, its local run and an adopter all read those, never
-  the caller's paths; a graph queued by a call that has returned still runs.
-  `TestAGraphTicketStillRunsOnThisMachinesLaneOnceTheDoorHasRemovedItsInlineFiles` admits a graph, removes the caller's files the way the
-  door does, frees the lane and requires the lane to run the bytes the call was made with; it fails when the ticket reads the caller's
-  path instead of its copy.
-- **Tests, written first and red.** `internal/mcpserver`: `TestRunGraphDoorRemovesItsInlineTempFilesOnEveryExit` (six exits),
-  `TestRunGraphDoorHandsTheRunnerTheInlineBytesWhileItRuns` (removal is not early), `TestRunGraphDoorNeverRemovesACallersOwnFiles`,
-  `TestMaterializeCleanupRemovesOnlyTheFileThisCallMade`. Root: `TestRunGraphParamsInlineJSONIsRemovedByItsCleanup`,
-  `TestRunGraphParamsLeavesACallersOwnFilesAlone`, `TestRunGraphParamsRemovesTheGraphFileWhenTheManifestCannotBeWritten`,
-  `TestMaterializeArgRemovesItsOwnFileWhenTheWriteFails`, `TestRunGraphCLIRemovesItsTempFilesWhenThePipelineCannotOpen`. The write
-  failures are made with a one-line seam (`createTemp`) that hands back a file opened for reading only. Red before, root package on a
-  Windows PC against a cleanup that removes nothing: `the cleanup left [run-graph-….json run-graph-manifest-….json] in the OS temp dir`,
-  `the file of a failed write was left`, and `run-graph left [...] in the OS temp dir after it failed to open the pipeline`.
-  After: 0 `run-graph*` entries left by the `internal/mcpserver` tests on Windows (26 before) and by a whole run of the root package's
-  tests on Windows and on Linux (3 before).
-- **Review round: a delete that is refused for a moment is waited out, and one that still fails is named.** The cleanup made one
-  `os.Remove` and dropped the error, so on Windows a scanner (or a runner that had only just exited) holding the file for a moment
-  brought the leak back with nothing to say so; the write-error branches dropped it the same way. Both doors now delete through one
-  helper (`removeInlineTemp`, in `internal/mcpserver` and in the root package) that tries again for about half a second (20 attempts,
-  25 ms apart, as `removeRunGraphEnvelope` does for the envelope), treats a file that is not there as done, and, when the file still
-  resists, writes one line naming it and the reason (to the log in the MCP server, to stderr in the CLI). Red before, on a Windows PC,
-  in `internal/mcpserver` (and the same four as `TestMaterializeArg...` in the root package): `TestMaterializeCleanupWaitsOutAFileHeldForAMoment`
-  (a delete refused three times left the file), `TestMaterializeCleanupNamesAFileItCannotRemove` (no line),
-  `TestMaterializeRemovesTheFileOfAFailedWriteEvenWhenItIsHeldForAMoment` and
-  `TestMaterializeCleanupOutwaitsAHandleThatIsClosedAMomentLater` (a real open handle, no seam: the cleanup returned and left the file).
-  One attempt, no line, a missing file counted as a failure and the failed-write branch left out of the helper each turn their own test red.
-- **Not covered.** Files an earlier release left in the OS temp dir stay until someone removes them (this is a one-time cleanup, not
-  code), and a call that is killed (a second Ctrl-C, a kill) leaves the files of that one call.
+- **The defect.** The cage masks `<worktree>/.git` for a shell with a writable worktree, so that it cannot plant a git hook or rewrite a config that runs later, on the host, the next time git is used there. It did so only where `.git` is a directory. In a linked worktree, which is how the harness's own worktrees are made (`git worktree add`), `.git` is a FILE holding `gitdir: <repo>/.git/worktrees/<name>`, and nothing masked it. The git directory it names is outside the cage's write roots, but the pointer sits in the writable worktree: a command could rewrite the file, or rename another over it, to name a directory it controls, hooks and config included, and the next git command run on the host in that worktree would follow it. Measured on two Linux hosts before the fix: rewrite, append, truncate, a hard link written through, rename over and rename away of the file all succeeded, and the cage said nothing.
+- **The fix.** For a writable worktree whose `.git` is a regular file, the worker bind-mounts the file onto itself and remounts that bind read-only (`maskDotGitFile`), in the cage's private mount namespace, so nothing on the host changes. Measured with the worktree under the temp directory and under a shared-memory mount: the file still reads (git run in the cage over the worktree reports its status and its history), and every attempt above is refused: rewrite, append and truncate with `EROFS`, a link to it with `EXDEV` (the read-only flag belongs to the mount, so a second name on the worktree's own mount would be a way around it, and a link across the two mounts is refused), rename over, rename away and remove with `EBUSY`; the file is byte for byte what it was. The remount names read-only, nosuid, nodev and noexec and no atime flag, because a user namespace locks those flags on every mount it inherits and the kernel refuses a remount that clears one (measured: with the nosuid, nodev and noexec left out, the remount of a worktree under the shared-memory mount, which is nosuid and nodev, fails with `operation not permitted`), and a remount that names no atime flag keeps the mount's own. A refused bind or remount is the same kind of note as the directory's, `[sandbox] <worktree>/.git is NOT masked read-only (bind mount: ...)` or `(read-only remount: ...)`, written before the exec. The command still runs, as it does when the directory mask is refused, and failing closed stays a separate decision.
+- **Tests.** `TestCageMasksTheDotGitFileOfALinkedWorktree` builds the linked worktree with git itself, makes seven attempts from inside the cage, and fails with `SECURITY:` unless every one is refused and the entry is still the same file with the same bytes; it runs on the temp directory and on a shared-memory mount, where the locked flags bite. `TestCageSaysWhenTheDotGitFileIsNotMasked` ties the note to what the kernel did (a write reaches the file exactly when the cage says it is not masked) and runs on every host. `TestCageStillReadsALinkedWorktree` runs `git status` and `git log` in the cage over the masked worktree. `TestMaskDotGitFileBindsItReadOnly`, `TestMaskDotGitFileSaysWhenTheKernelRefuses` and `TestMaskDotGitFileStaysQuietWhenThereIsNothingToSay` stand in for the kernel and pin the two calls and their flags, the note for either refusal, and the cases that make no mount. A host that refuses the cage's unprivileged mounts, as a CI runner or a host whose AppArmor restricts unprivileged user namespaces does, cannot show the mask: the first test then asks the directory mask whether the host mounts at all and skips with the cage's note when it does not, and fails when the host mounts over a `.git` directory and refuses the file.
+- **Looked at and left alone, with the reason.** A `.git` inside a nested repository below the worktree root, which the mask never covered, directory or file. (A `.git` that is a symlink is reported, below.) The cage grants no read of a linked worktree's git directory (`run` and `run_shell` pass no `ReadDirs`), so `git status` in the cage over a linked worktree reports `fatal: not a git repository: <git directory>` unless the caller grants that directory (measured with the mask in place; the mask is on the pointer file, not on the git directory, and the tests above grant it as a caller that wants git to work there must): that predates the mask, and granting reads is a separate decision.
+
+### Fixed — a Windows run whose exit status could not be read reported exit 0, which every caller reads as success
+
+- **The defect.** `Run` reads how the command ended with `GetExitCodeProcess` and set `Result.ExitCode` only when the call succeeded. When it failed, the command had run and its output was in hand, and `ExitCode` stayed at its zero value: the run read as a success, which is what every caller takes 0 to mean (`run` and `run_shell` print `exit=0` for it). A command that had failed, or that the job had ended, was reported as having worked, with nothing to say otherwise.
+- **The fix.** The call goes through a package variable (`readExitCode`), like the three Win32 calls the notes above cover. When it fails, `ExitCode` is -1 (`noExitStatus`, the value `os.ProcessState.ExitCode` gives a process it has no code for) and the caller gets a note ahead of the command's stderr, `[sandbox] the command's exit status could not be read (GetExitCodeProcess: ...): its exit code is reported as -1, not 0, because a run whose outcome is unknown is not a success`, which is also logged once. That is how this file already reports a run that went ahead with a caveat (a command that exits non-zero comes back as a code and no error, one ended at its deadline as a code and a note), so the run is otherwise as it was: no error, no refusal, the output kept, and `internal/agent` shows the model `exit=-1` with the note in its stderr. `Result` documents the value.
+- **Tests.** `TestWindowsUnreadableExitStatusIsNotTakenForSuccess` makes the read fail on demand and asserts the exact code, the cause in `Result.Stderr` (leading) and once in the log, and that the output is kept; `TestWindowsExitCodeReachesTheCaller` is the control: with the real call, exit codes 0, 1, 3 and 42 come back as they are, with nothing on stderr and nothing logged. Both have skip stubs on the other platforms. Each of three mutations (the error ignored again, the note dropped, the code left at 0) fails the first test; the same overlay with the unmutated file passes.
+
+### Fixed — a `.git` symlink in a writable worktree was unprotected, and the Linux cage said nothing
+
+- **The defect.** `maskDotGit` mounts over `.git` where it is a directory or a regular file and returned nothing for anything else, and a symbolic link was something else: a mount follows the link, so none can protect the link itself, which sits in the writable worktree. A command in the cage could remove it and put a `.git` of its own in its place (a link or a directory), and the next git command run on the host in that worktree would follow it, as it would have followed a rewritten pointer file. A link to a directory was only half covered (the tmpfs went over the target, which protects the target and not the link), and for a link to a file or to nothing the cage did nothing at all. Neither `git worktree add` nor `git init` makes such a link, and nothing told the caller one was there.
+- **The fix.** The cage reports it: `[sandbox] <worktree>/.git is a symbolic link: it cannot be masked read-only, so a command in this cage can replace it and point git at a directory of its own`, to stderr just before the exec like every other note, for a link to a file, to a directory and to nothing. The command still runs, and what the cage did before it still does: a link to a directory keeps the read-only tmpfs over its target, and a refusal of that mount is reported too, in the same line. A worktree the command cannot write and a worktree with no `.git` get no note. The check is on the link itself (`Lstat`), so a link to a regular file is no longer taken for the file it points at.
+- **Tests.** `TestMaskDotGitSaysWhenDotGitIsASymlink` stands in for the kernel and pins the note, the mounts made (none for a link to a file or to nothing, one for a link to a directory) and the quiet cases. `TestCageSaysWhenDotGitIsASymlink` runs the real cage for each kind of link, asserts that the note leads stderr and that it is true: the command removes the link and puts one of its own there, and the host sees it afterwards. It does not depend on what the host's kernel allows. The case that pinned "no mount and no note" for a symlink in `TestMaskDotGitFileStaysQuietWhenThereIsNothingToSay` is gone with that behavior.
+
+### Fixed
+
+- Tests on Windows: the fake `ffmpeg` of the `audioio`, `fleetnode`, `pipeline` and `sttremote` tests was a hard link to the running test binary, which some Windows hosts will not unlink ("Access is denied" in the `TempDir` cleanup, 51 cleanup failures on one host); it is now a copy installed by the new `internal/fakeexe` test helper, which removes its own directory and starts the stand-in once so its slow first start is outside a test's time budget (test-only, no product code changed).
+- The `internal/fakeexe` test helper keeps a stand-in's folder inside the calling test's own `t.TempDir` (removed first, with a bounded retry on Windows) instead of a folder of its own in the shared temp directory, and a stand-in that runs tests instead of answering as a tool cannot start another (the warm-up start exits in the helper's `init`; one that reaches `Dir` or `Install` exits with status 97), so a killed run leaves nothing outside its own temp root and the helper cannot recurse (`TestAHelperCallStaysInsideTheTestsOwnTempDirAndIsGoneWhenItsTestEnds`, `TestAWarmUpStartExitsBeforeAnyTestRuns`, `TestAStandInThatRunsTestsRefusesToInstallAnother`).
+
+### Fixed — a run of the render tests left about 150 folders in the OS temp dir, and three pieces of render code left scratch behind
+
+- **The defect.** `node --test render/*.test.mjs` made its scratch folders with a bare `mkdtempSync(join(tmpdir(), ...))`. Most tests
+  never removed theirs and some removed theirs with an `rmSync` on the success path only, so one run left 149 folders (counted with
+  the OS temp dir pointed at an empty folder), and a workstation that runs the suite all day collected thousands of them on its system
+  drive (4,674 matching folders, about 0.9 GB, in one OS temp dir).
+- **The fix, in the tests.** New `render/test-scratch.mjs`: `scratchDir(t, prefix)` makes the folder and registers its removal with the test
+  that asked for it, so it goes when that test ends. node:test runs a test's `after` hooks whether the test passed or failed, so a failing
+  run leaves nothing either (`render/test-scratch.test.mjs` proves it with a child run that fails on purpose). 72 raw `mkdtempSync` calls in
+  21 test files use it, and the fixture builders (`fixture`, `keyedHarness`, `cliFixture`, ...) take the test's `t` and pass it on. A call
+  without `t` is refused before any folder is made. The same file fails on a new raw `mkdtemp` in a render test or in one of its two
+  support modules unless it is listed there with the reason its removal is on every path (22 remain, each removed in a `finally`, by an
+  exit hook, or by the test's own after-hook).
+- **The fix, in the code.** Three places in `render/` made scratch and did not remove it on every path. `igpu-stub.mjs` (test support)
+  built its Windows launcher into one per-machine cache folder, `igpu-stub-launcher-v1`, that nothing removed, and every process that
+  raced to build it left its own `build-<pid>-<ms>` folder inside it; it is now built per process into a folder that goes when the
+  process ends (a cold build measured 0.8 s). `manifest-satisfy.mjs`: `resolveDeps` wrote the host-constraints file and the
+  unified pack lock as pid-named files in the OS temp dir and never removed them, so every provisioning run left two; both now live in a
+  folder of the step's own that is removed when the step ends, passed or failed. `compose-hyperframes.mjs`: the render work dir was
+  made a few statements before the `try` whose `finally` removes it, so a throw in between left an empty `job-*` folder in the cache for
+  good; the `try` now opens right after the folder exists. Each has a test that fails without the change.
+- **Measured (Windows).** With the OS temp dir pointed at an empty folder, one run of `node --test render/*.test.mjs` left 149 folders before
+  and 0 after (twice); the 1,286 tests that were there are all still there and pass (23 skipped, as before), and the run has 12 more.
 
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 

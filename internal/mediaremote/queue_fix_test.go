@@ -639,6 +639,9 @@ func TestARunningTicketsPlaceIsNotKeptAlive(t *testing.T) {
 	lt.mu.Lock()
 	lt.running, lt.t.State = true, stPlaced
 	lt.mu.Unlock()
+	// A keeper tick that decided "waiting" just before the state changed touches the place just after it: let that one land
+	// (a tick is ~43 ms at the test's rhythm) before the count is taken, or it reads as a touch of a ticket that is not waiting.
+	time.Sleep(150 * time.Millisecond)
 	before := e.lr.keptCount(tf.Place)
 	time.Sleep(300 * time.Millisecond) // seven keeper ticks at the test's rhythm
 	if got := e.lr.keptCount(tf.Place) - before; got != 0 {

@@ -18,22 +18,22 @@
 // markers are real files under a scratch directory.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, statSync, utimesSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, readdirSync, statSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import * as L from "./comfy-lifecycle.mjs";
 import * as O from "./comfy-ownership.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 const BASE_FLAGS = ["--disable-smart-memory", "--cache-none", "--reserve-vram", "1.0"];
 const profile = { cudaDevice: "", dynamicVram: "" };
 const boom = (what) => () => { throw new Error(what); };
-const scratch = () => mkdtempSync(join(tmpdir(), "comfy-restamp-"));
+const scratch = (t) => scratchDir(t, "comfy-restamp-");
 const markerFile = (dir, key) => join(dir, `.offload-launch-${key}.json`);
 const readMarker = (dir, key) => JSON.parse(readFileSync(markerFile(dir, key), "utf8"));
 
 /** A kept instance of key `side` on a port nothing here contacts, launched under `leaseEpoch`. */
-function keptInstance({ leaseEpoch } = {}) {
-  const dir = scratch();
+function keptInstance(t, { leaseEpoch } = {}) {
+  const dir = scratch(t);
   const argv = ["main.py", ...BASE_FLAGS, "--port", "8190", "--output-directory", join(dir, "instances", "side", "output"), "--temp-directory", join(dir, "instances", "side")];
   const rec = { pid: 77, ownerPid: 5151, args: argv, profile, key: "side", port: 8190 };
   if (leaseEpoch !== undefined) rec.leaseEpoch = leaseEpoch;
@@ -51,8 +51,8 @@ function reuse({ dir, argv }, env, extra = {}) {
   });
 }
 
-test("reusing a kept instance under a new lease takes its marker over", async () => {
-  const k = keptInstance({ leaseEpoch: 5 });
+test("reusing a kept instance under a new lease takes its marker over", async (t) => {
+  const k = keptInstance(t, { leaseEpoch: 5 });
   const before = readMarker(k.dir, "side");
   assert.equal(await reuse(k, { GPU_LEASE_EPOCH: "6" }), null, "the instance is reused, not launched");
   const after = readMarker(k.dir, "side");
@@ -61,9 +61,9 @@ test("reusing a kept instance under a new lease takes its marker over", async ()
   assert.deepEqual({ ...after, leaseEpoch: undefined }, { ...before, leaseEpoch: undefined });
 });
 
-test("reusing it under the same lease, or outside a lease, leaves the marker byte for byte alone", async () => {
+test("reusing it under the same lease, or outside a lease, leaves the marker byte for byte alone", async (t) => {
   for (const env of [{ GPU_LEASE_EPOCH: "5" }, {}]) {
-    const k = keptInstance({ leaseEpoch: 5 });
+    const k = keptInstance(t, { leaseEpoch: 5 });
     const raw = readFileSync(markerFile(k.dir, "side"), "utf8");
     const old = new Date(2020, 0, 1);
     utimesSync(markerFile(k.dir, "side"), old, old);
@@ -73,15 +73,15 @@ test("reusing it under the same lease, or outside a lease, leaves the marker byt
   }
 });
 
-test("an instance that was never a lease's is not claimed by a lease that reuses it", async () => {
-  const k = keptInstance(); // a marker with no epoch: the operator's own kept instance
+test("an instance that was never a lease's is not claimed by a lease that reuses it", async (t) => {
+  const k = keptInstance(t); // a marker with no epoch: the operator's own kept instance
   const raw = readFileSync(markerFile(k.dir, "side"), "utf8");
   assert.equal(await reuse(k, { GPU_LEASE_EPOCH: "6" }), null);
   assert.equal(readFileSync(markerFile(k.dir, "side"), "utf8"), raw, "taking it over would have the lease stop an instance it never started");
 });
 
-test("a re-stamp that cannot be written is said, and the instance is still reused", async () => {
-  const k = keptInstance({ leaseEpoch: 5 });
+test("a re-stamp that cannot be written is said, and the instance is still reused", async (t) => {
+  const k = keptInstance(t, { leaseEpoch: 5 });
   const lines = [];
   const child = await reuse(k, { GPU_LEASE_EPOCH: "6" }, {
     log: (l) => lines.push(l),
@@ -92,8 +92,8 @@ test("a re-stamp that cannot be written is said, and the instance is still reuse
   assert.match(lines.join("\n"), /still names lease epoch 5/);
 });
 
-test("the default instance has no lease epoch and is never re-stamped", async () => {
-  const dir = scratch();
+test("the default instance has no lease epoch and is never re-stamped", async (t) => {
+  const dir = scratch(t);
   const argv = ["main.py", ...BASE_FLAGS];
   O.writeLaunchOwner(dir, { pid: 77, ownerPid: 5151, args: argv, profile });
   const raw = readFileSync(join(dir, ".offload-launch.json"), "utf8");
@@ -109,8 +109,8 @@ test("the default instance has no lease epoch and is never re-stamped", async ()
 
 // ---- restampLaunchOwner itself ---------------------------------------------------------------
 
-test("restampLaunchOwner changes the epoch and nothing else", () => {
-  const k = keptInstance({ leaseEpoch: 5 });
+test("restampLaunchOwner changes the epoch and nothing else", (t) => {
+  const k = keptInstance(t, { leaseEpoch: 5 });
   const before = readMarker(k.dir, "side");
   assert.deepEqual(O.restampLaunchOwner(k.dir, "side", 9), { changed: true, previous: 5 });
   const after = readMarker(k.dir, "side");
@@ -121,21 +121,21 @@ test("restampLaunchOwner changes the epoch and nothing else", () => {
   assert.equal(readdirSync(k.dir).filter((f) => f.endsWith(".tmp")).length, 0, "no temporary file is left behind");
 });
 
-test("restampLaunchOwner leaves an epochless, absent or foreign marker alone", () => {
-  const none = keptInstance();
+test("restampLaunchOwner leaves an epochless, absent or foreign marker alone", (t) => {
+  const none = keptInstance(t);
   assert.deepEqual(O.restampLaunchOwner(none.dir, "side", 9), { changed: false, why: "the marker names no lease" });
   assert.equal(readMarker(none.dir, "side").leaseEpoch, undefined);
-  const empty = scratch();
+  const empty = scratch(t);
   assert.deepEqual(O.restampLaunchOwner(empty, "side", 9), { changed: false, why: "no marker" });
-  const k = keptInstance({ leaseEpoch: 5 });
+  const k = keptInstance(t, { leaseEpoch: 5 });
   assert.deepEqual(O.restampLaunchOwner(k.dir, "other", 9), { changed: false, why: "no marker" });
   assert.deepEqual(O.restampLaunchOwner(k.dir, "side", 5), { changed: false, why: "already this lease's" });
 });
 
 // ---- a kept launch whose marker cannot be written is said ----------------------------------
 
-test("a kept instance whose launch marker cannot be written says so: nothing can stop it by its lease", async () => {
-  const dir = scratch();
+test("a kept instance whose launch marker cannot be written says so: nothing can stop it by its lease", async (t) => {
+  const dir = scratch(t);
   const lines = [];
   let up = false;
   await L.ensureComfy({
@@ -151,8 +151,8 @@ test("a kept instance whose launch marker cannot be written says so: nothing can
   assert.match(warn[0], /lease/);
 });
 
-test("a launch that is not kept stays silent about its marker, as before", async () => {
-  const dir = scratch();
+test("a launch that is not kept stays silent about its marker, as before", async (t) => {
+  const dir = scratch(t);
   const lines = [];
   let up = false;
   await L.ensureComfy({

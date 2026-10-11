@@ -5,8 +5,7 @@
 // 5); and a never-ready spawn is killed + throws.
 import { test } from "node:test";
 import assert from "node:assert";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
@@ -15,6 +14,7 @@ import {
   LIST_GPUS_TIMEOUT_MS, LIST_GPUS_RETRY_TIMEOUT_MS,
   comfyLogPath, rotateComfyLog, tailComfyLog, COMFY_LOG_TAIL_LINES,
 } from "./comfy-lifecycle.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 // A bound ComfyUI dir, injected so the lifecycle tests exercise the SPAWN path on
 // every OS. Without it they inherited the platform default — "C:/ComfyUI" on Windows,
@@ -190,8 +190,8 @@ test("COMFY_EXTRA_ARGS appends verbatim launch flags (J4 seam); unset = byte-ide
 // and otherwise fell back to a bare "python", which on Ubuntu is either absent or the
 // system interpreter without torch. render/tts.mjs already probed both families — this
 // is that pattern, applied where it was missed.
-test("resolveComfyPy: finds a POSIX venv python", () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-py-"));
+test("resolveComfyPy: finds a POSIX venv python", (t) => {
+  const dir = scratchDir(t, "comfy-py-");
   mkdirSync(join(dir, ".venv/bin"), { recursive: true });
   writeFileSync(join(dir, ".venv/bin/python"), "");
   assert.equal(resolveComfyPy(dir, {}), join(dir, ".venv/bin/python"));
@@ -201,8 +201,8 @@ test("resolveComfyPy: an explicit COMFY_PY always wins", () => {
   assert.equal(resolveComfyPy("/anything", { COMFY_PY: "/opt/py" }), "/opt/py");
 });
 
-test("resolveComfyPy: Windows candidates keep priority (Windows resolution unchanged)", () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-py-"));
+test("resolveComfyPy: Windows candidates keep priority (Windows resolution unchanged)", (t) => {
+  const dir = scratchDir(t, "comfy-py-");
   mkdirSync(join(dir, ".venv/Scripts"), { recursive: true });
   mkdirSync(join(dir, ".venv/bin"), { recursive: true });
   writeFileSync(join(dir, ".venv/Scripts/python.exe"), "");
@@ -210,8 +210,8 @@ test("resolveComfyPy: Windows candidates keep priority (Windows resolution uncha
   assert.equal(resolveComfyPy(dir, {}), join(dir, ".venv/Scripts/python.exe"));
 });
 
-test("resolveComfyPy: no venv falls back to the platform's interpreter name", () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-py-"));
+test("resolveComfyPy: no venv falls back to the platform's interpreter name", (t) => {
+  const dir = scratchDir(t, "comfy-py-");
   assert.equal(resolveComfyPy(dir, {}), process.platform === "win32" ? "python" : "python3");
 });
 
@@ -377,8 +377,8 @@ test("comfyLogPath: beside the ComfyUI install, matching the .offload-*.json mar
   assert.equal(comfyLogPath("/some/comfy"), join("/some/comfy", "offload-comfyui.log"));
 });
 
-test("ensureComfy captures a spawned ComfyUI's stdout+stderr to the rotating log file", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-log-"));
+test("ensureComfy captures a spawned ComfyUI's stdout+stderr to the rotating log file", async (t) => {
+  const dir = scratchDir(t, "comfy-log-");
   let ups = 0;
   const child = await ensureComfy({
     comfyUp: async () => (ups++ > 0), // first poll: down (spawns); then up
@@ -403,8 +403,8 @@ test("ensureComfy captures a spawned ComfyUI's stdout+stderr to the rotating log
   assert.ok(logged.includes("[Errno 28] No space left on device"), `log missing stderr line: ${logged}`);
 });
 
-test("captured ComfyUI output is capped so a long-lived batch session cannot grow the log unbounded", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-log-cap-"));
+test("captured ComfyUI output is capped so a long-lived batch session cannot grow the log unbounded", async (t) => {
+  const dir = scratchDir(t, "comfy-log-cap-");
   let ups = 0;
   await ensureComfy({
     comfyUp: async () => (ups++ > 0),
@@ -426,8 +426,8 @@ test("captured ComfyUI output is capped so a long-lived batch session cannot gro
   assert.ok(size < 6 * 1024 * 1024, `log grew past its 5MB cap: ${size} bytes`);
 });
 
-test("rotateComfyLog: ages out old numbered logs, keeping only the configured number of previous runs", () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-log-rotate-"));
+test("rotateComfyLog: ages out old numbered logs, keeping only the configured number of previous runs", (t) => {
+  const dir = scratchDir(t, "comfy-log-rotate-");
   const base = comfyLogPath(dir);
   writeFileSync(base, "run-current\n");
   writeFileSync(`${base}.1`, "run-1\n");
@@ -441,13 +441,13 @@ test("rotateComfyLog: ages out old numbered logs, keeping only the configured nu
   assert.equal(existsSync(`${base}.4`), false, "only the configured number of previous runs are kept");
 });
 
-test("rotateComfyLog: a totally fresh comfyDir (first run ever) is a safe no-op", () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-log-rotate-fresh-"));
+test("rotateComfyLog: a totally fresh comfyDir (first run ever) is a safe no-op", (t) => {
+  const dir = scratchDir(t, "comfy-log-rotate-fresh-");
   assert.doesNotThrow(() => rotateComfyLog(dir));
 });
 
-test("tailComfyLog: the last N lines; empty string (never a throw) when nothing has been captured", () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-log-tail-"));
+test("tailComfyLog: the last N lines; empty string (never a throw) when nothing has been captured", (t) => {
+  const dir = scratchDir(t, "comfy-log-tail-");
   assert.equal(tailComfyLog(dir), "", "no log yet = empty, not a throw");
   const lines = Array.from({ length: 30 }, (_, i) => `line ${i}`);
   writeFileSync(comfyLogPath(dir), lines.join("\n") + "\n");
@@ -461,8 +461,8 @@ test("tailComfyLog: the last N lines; empty string (never a throw) when nothing 
 // EventEmitter throws synchronously for an "error" event with no listener, so
 // this test IS the assertion: reaching the end without an uncaught exception
 // (node:test fails the test itself on one) proves the listener is attached.
-test("captureComfyOutput never crashes on a stdout/stderr stream error (EPIPE-class)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-log-streamerr-"));
+test("captureComfyOutput never crashes on a stdout/stderr stream error (EPIPE-class)", async (t) => {
+  const dir = scratchDir(t, "comfy-log-streamerr-");
   let ups = 0;
   const child = await ensureComfy({
     comfyUp: async () => (ups++ > 0),

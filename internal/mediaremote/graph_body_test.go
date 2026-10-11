@@ -320,7 +320,7 @@ func TestALosingCreateLeavesNoCopies(t *testing.T) {
 	st, _ := storeFor(e.cfg)
 	req := e.req(krea2Graph, nil)
 	winner := admitOn(t, q1, e.cfg, e.lr, req)
-	lt, existing, err := q2.create(context.Background(), e.cfg, e.lr, req, nil, Wait{}, st, reqKey(req), localID{}, heldLane(), time.Time{})
+	lt, existing, err := q2.create(context.Background(), e.cfg, e.lr, req, nil, Wait{}, st, reqKey(req), localID{}, heldLane(), time.Now(), time.Time{})
 	if err != nil || lt != nil || existing == nil || existing.ID != winner.snapshot().ID {
 		t.Fatalf("the second create finds the first ticket: lt=%v existing=%+v err=%v", lt, existing, err)
 	}
@@ -338,7 +338,7 @@ func TestACreatedGraphTicketIsKeyedByWhatItHolds(t *testing.T) {
 	q, _ := manual(t)
 	st, _ := storeFor(e.cfg)
 	req := e.req(krea2Graph, nil)
-	lt, _, err := q.create(context.Background(), e.cfg, e.lr, req, nil, Wait{}, st, "a-key-made-from-an-earlier-reading", localID{}, heldLane(), time.Time{})
+	lt, _, err := q.create(context.Background(), e.cfg, e.lr, req, nil, Wait{}, st, "a-key-made-from-an-earlier-reading", localID{}, heldLane(), time.Now(), time.Time{})
 	if err != nil || lt == nil {
 		t.Fatalf("create: lt=%v err=%v", lt, err)
 	}

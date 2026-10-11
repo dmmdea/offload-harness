@@ -9,10 +9,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { scratchDir } from "./test-scratch.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GOOD = Buffer.from("the previous good file");
@@ -38,8 +38,8 @@ test("atomic_out.py --selftest passes on a bare python", { skip: !PY && "no pyth
 
 // stub modules for tts_chatterbox.py: torchaudio.save writes a few bytes and, in STUB_SAVE=full mode,
 // then fails the way a full disk does
-function stubTorch() {
-  const dir = mkdtempSync(join(tmpdir(), "tts-stub-"));
+function stubTorch(t) {
+  const dir = scratchDir(t, "tts-stub-");
   writeFileSync(join(dir, "torch.py"), [
     "class _T:",
     "    def dim(self): return 2",
@@ -77,34 +77,34 @@ function stubTorch() {
   return dir;
 }
 
-function runTts(out, mode) {
-  const stubs = stubTorch();
+function runTts(t, out, mode) {
+  const stubs = stubTorch(t);
   return spawnSync(PY, [join(HERE, "tts_chatterbox.py"), "--out", out, "--text", "hola"], {
     encoding: "utf8",
     env: pyEnv({ PYTHONPATH: stubs, STUB_SAVE: mode, TTS_DEVICE: "cpu", HF_HUB_OFFLINE: "1" }),
   });
 }
 
-test("tts_chatterbox.py delivers the wav through the atomic helper: a good run replaces the file and leaves nothing beside it", { skip: !PY && "no python 3 on PATH" }, () => {
-  const d = mkdtempSync(join(tmpdir(), "tts-out-")); const out = join(d, "voice.wav");
+test("tts_chatterbox.py delivers the wav through the atomic helper: a good run replaces the file and leaves nothing beside it", { skip: !PY && "no python 3 on PATH" }, (t) => {
+  const d = scratchDir(t, "tts-out-"); const out = join(d, "voice.wav");
   writeFileSync(out, GOOD);
-  const r = runTts(out, "ok");
+  const r = runTts(t, out, "ok");
   assert.equal(r.status, 0, r.stderr);
   assert.equal(readFileSync(out, "utf8"), "RIFFxxxxWAVE");
   assert.deepEqual(names(d), ["voice.wav"]);
 });
 
-test("tts_chatterbox.py: a full disk during the save fails the worker, keeps the previous wav and leaves no partial file", { skip: !PY && "no python 3 on PATH" }, () => {
-  const d = mkdtempSync(join(tmpdir(), "tts-out-")); const out = join(d, "voice.wav");
+test("tts_chatterbox.py: a full disk during the save fails the worker, keeps the previous wav and leaves no partial file", { skip: !PY && "no python 3 on PATH" }, (t) => {
+  const d = scratchDir(t, "tts-out-"); const out = join(d, "voice.wav");
   writeFileSync(out, GOOD);
-  const r = runTts(out, "full");
+  const r = runTts(t, out, "full");
   assert.notEqual(r.status, 0, "the worker must fail loud");
   assert.match(r.stderr, /No space left on device/);
   assert.deepEqual(readFileSync(out), GOOD, "the previous good wav must survive");
   assert.deepEqual(names(d), ["voice.wav"], "and no partial file may remain");
 
   const fresh = join(d, "new.wav");
-  assert.notEqual(runTts(fresh, "full").status, 0);
+  assert.notEqual(runTts(t, fresh, "full").status, 0);
   assert.deepEqual(names(d), ["voice.wav"], "a failed first delivery leaves no file at all at the output path");
 });
 
@@ -117,8 +117,8 @@ function editRequest(d, out) {
   return JSON.stringify({ image, ops: [{ op: "resize", width: 4 }], out });
 }
 
-test("edit_image.py delivers through the atomic helper: a good run replaces the file and leaves nothing beside it", { skip: (!PY && "no python 3 on PATH") || (!PIL && "no PIL") }, () => {
-  const d = mkdtempSync(join(tmpdir(), "edit-out-")); const out = join(d, "out.png");
+test("edit_image.py delivers through the atomic helper: a good run replaces the file and leaves nothing beside it", { skip: (!PY && "no python 3 on PATH") || (!PIL && "no PIL") }, (t) => {
+  const d = scratchDir(t, "edit-out-"); const out = join(d, "out.png");
   writeFileSync(out, GOOD);
   const r = spawnSync(PY, [join(HERE, "edit_image.py")], { input: editRequest(d, out), encoding: "utf8", env: pyEnv() });
   assert.equal(r.status, 0, r.stdout + r.stderr);
@@ -126,8 +126,8 @@ test("edit_image.py delivers through the atomic helper: a good run replaces the 
   assert.deepEqual(names(d), ["in.png", "out.png"]);
 });
 
-test("edit_image.py: a full disk during the save fails the worker, keeps the previous image and leaves no partial file", { skip: (!PY && "no python 3 on PATH") || (!PIL && "no PIL") }, () => {
-  const d = mkdtempSync(join(tmpdir(), "edit-out-")); const out = join(d, "out.png");
+test("edit_image.py: a full disk during the save fails the worker, keeps the previous image and leaves no partial file", { skip: (!PY && "no python 3 on PATH") || (!PIL && "no PIL") }, (t) => {
+  const d = scratchDir(t, "edit-out-"); const out = join(d, "out.png");
   writeFileSync(out, GOOD);
   // run the real worker with PIL's save replaced by one that writes a few bytes and then hits a full disk
   const driver = join(d, "driver.py");

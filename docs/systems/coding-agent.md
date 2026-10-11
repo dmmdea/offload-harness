@@ -731,6 +731,41 @@ writes outside the worktree are blocked by MIC, but **network egress is not seve
 the worktree are not blocked**. The source calls this "HONEST RESIDUAL RISK (documented, not hidden)"
 and the tool description the model sees says the same.
 
+**What the cage could not do for a run is said, not swallowed** (`internal/sandbox`, `Result.Stderr`).
+A step that confines or un-confines a run can fail without making the run unsafe to start, and the
+caller still has to hear of it. On native Windows, a worktree or scratch folder whose low-integrity
+label cannot be lowered (the label change needs `WRITE_OWNER`, which a data drive whose root ACL names
+the user nowhere does not give) is a folder the command cannot write; one whose label cannot be
+restored is left writable by every low-integrity process, and the next run takes that label for the
+folder's own, so it does not heal; one whose prior label cannot be read is cleared, not restored; a
+deadline whose kill of the job fails is not in force; a command whose exit status cannot be read
+(`GetExitCodeProcess` fails) reports exit code -1, not the 0 that every caller reads as success. On
+Linux, `<worktree>/.git` stays writable where the kernel refuses its read-only mask: the empty tmpfs
+over a `.git` directory, or the read-only bind of a `.git` file onto itself (below); and a `.git`
+that is a symbolic link cannot be masked at all (below). In each case
+the command still runs (failing closed is a separate decision, not taken) and the cage puts a line
+starting with `[sandbox] ` ahead of the command's own stderr, appends the same text to the error of
+a run that fails before the command starts, and, on Windows, logs it once. `run` and `run_shell`
+return stderr to the model, so the model reads the note too.
+
+**The shell path's `.git` mask covers a linked worktree** (`sandbox.maskDotGit`, Linux). With a
+writable worktree the cage makes `<worktree>/.git` read-only inside its private mount namespace, so
+a command can neither plant a git hook nor aim the host's git at a directory of its own. A `.git`
+DIRECTORY gets an empty read-only tmpfs. A `.git` FILE, which is what `git worktree add` leaves in
+a linked worktree (`gitdir: <repo>/.git/worktrees/<name>`), is bind-mounted onto itself read-only:
+it still reads, since git finds its git directory through it, and it cannot be rewritten,
+truncated, appended to, unlinked, renamed over or renamed away, nor reached through a second name (a
+link to it is refused, because the new name would be on another mount). The git directory itself is
+outside the cage's write roots already; the pointer in the worktree is what the mask protects. The
+remount names every flag a user namespace locks on the mount (read-only, nosuid, nodev, noexec) and
+no atime flag, so it works on a worktree under a mount that carries them (a shared-memory mount is
+nosuid and nodev, as is a tmpfs `/tmp` on many systems). A `.git` that is a symbolic link no mount
+can protect, because a mount follows the link and lands on its target, and the link itself sits in
+the writable worktree: a command can replace it and point git at a directory of its own. The cage
+says so in a `[sandbox]` note (`<worktree>/.git is a symbolic link: it cannot be masked read-only,
+...`) for a link to a file, to a directory and to nothing, and the run goes ahead. A link to a
+directory keeps what the cage always did with it, the read-only tmpfs over the target.
+
 **The caged child's environment is built, never inherited, on both platforms** (`sandbox.cageEnv`,
 `sandbox.EnvAllowlist`). Linux execs with a fixed `PATH` plus `HOME`/`TMPDIR` pointed at the run's
 scratch dir; Windows passes CreateProcess an explicit UTF-16 block of the same shape — a closed
@@ -806,6 +841,9 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - Assuming `--profile` and `--two-tier` are unconditionally exclusive. Only a non-default profile
   conflicts.
 - Assuming the Windows cage is equivalent to the Linux one. It is weaker, deliberately and visibly.
+- Reading an `Access is denied` from a Windows `run` as the command's own failure. Look at the top of
+  stderr first: a `[sandbox]` line there says the cage could not make a folder writable (or restore its
+  label), and why.
 - Pointing `--audit` inside the worktree — a startup error, on purpose.
 
 ## Source map

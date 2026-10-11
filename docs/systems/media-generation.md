@@ -1210,11 +1210,12 @@ take, which is every model of the roster except the memory stack and the models 
 another card (`gpualloc.UnloadModels`, the rule `gpu reserve --devices` uses). A model is placed by `layers`,
 else by the device pin of its entry in the serving config (`serving_config_path`); a seat placed on another
 card stays, and a model nothing places goes (a `proxy:` seat with no `layers` entry is unloaded under any
-card lease). A card call always gets the variable: with the roster unreadable the candidates are the models
-`layers` declare and the serving config lists, with no llama-swap endpoint it is `-`. An unset variable
-would make the runner unload every model off the memory stack, and a render on one card would empty the
-seats placed on the others (register C-86, F15); a runner that does find a lease on cards with no list
-unloads every model off the memory stack and says that it had none (`render/gpu-lock.mjs`). The post-run
+card lease). A card call gets the variable whenever the roster was read: with no llama-swap endpoint it is `-`, and with
+the roster unreadable it gets none, because nothing then says what is resident and a list built from the config alone is
+never complete: the render lane keeps its own rule (every model off the memory stack) and the log says why. An unset variable
+makes the runner unload every model off the memory stack, so a render on one card empties the seats placed on the others
+(register C-86, F15): the price of an unreadable roster, taken because it is the safe direction. A runner that finds a lease
+on cards with no list unloads every model off the memory stack and says that it had none (`render/gpu-lock.mjs`). The post-run
 `/free` goes to the endpoint the runner was given.
 
 **In-process slots.** `mediaSlot`, a single slot for the whole process, is now a set with one slot per
@@ -1598,6 +1599,16 @@ so a broken binding surfaces even when llama-swap is down.
 `render/*.test.mjs` (run with `node --test` from the repo root) covers the lock, lifecycle, batch
 semantics, and output parsing. Go-side coverage sits in `internal/pipeline/` for the media dispatch
 and defer paths, and `internal/mediacap/` for the derived verdicts.
+
+A run of the suite leaves nothing in the OS temp dir. A test that needs a folder takes it from
+`scratchDir(t, prefix)` (`render/test-scratch.mjs`), which removes it when the test ends, passed or failed;
+`render/test-scratch.test.mjs` fails on a new bare `mkdtemp` in a render test or in its support modules (the few
+that remain are listed there with the reason each is removed on every path) and when the Windows stub launcher of
+`igpu-stub.mjs` leaves anything behind. The runners' own scratch is held to the same rule: `makeTempDir`
+(`igpu-engine.mjs`) removes its folder on every exit path, signals included, and sweeps what a killed runner
+left; the compose work dir and the provisioning scratch of `manifest-satisfy.mjs` are removed when their step
+ends, passed or failed (`igpu-lifecycle.test.mjs`, `compose-hyperframes.test.mjs` and
+`manifest-satisfy.test.mjs` pin them).
 
 `render/compose-hyperframes.test.mjs` also pins the shipped compose templates: the offline, deterministic and
 declared-variable contract, the ported templates' provenance, the retained licence texts by hash, the residue gate
@@ -2181,7 +2192,7 @@ MCP runner, wraps the lease manager's place-keeping tokens and adds no admission
 ticket's arrival time on the cards the real admission would queue the call on (the pin, or the card the allocator would pick),
 touched on its own rhythm (a place holds its cards for 30 s after its last touch; a keeper touches every waiting ticket's place every
 scan interval, ~10 s, without waiting for the scan, because a scan visits its tickets one after another and each visit asks one lane
-question of up to 4 s, so a place touched only at its ticket's turn would lapse once enough tickets wait:
+question of up to 14 s (the card table's 4 s read and, when that ran out, its one 10 s retry), so a place touched only at its ticket's turn would lapse once enough tickets wait:
 `TestAPlaceIsTouchedWhileASlowScanIsRunning`), left again with the SAME arrival time if it lapsed, let go when the ticket ends, and spent by the final local run through the `waiter_token` path every
 resumed call takes. A caller that arrives after the ticket queues behind it. A host that does not lease cards keeps no places: the
 ticket waits without local seniority and its answer says so. The lane question for a call that resumes a place is ordered by arrival
@@ -2209,8 +2220,8 @@ lane is free there, so no job sits parked on a node that frees later than anothe
 is tried per scan; a node that refuses or bounces the job is left alone (5 s for a full node that names no `Retry-After`, 60 s
 and then 300 s for a bounce) and the ticket tries the next at its next scan. A ticket never gives up on a lane; it ends after 8 h
 without one. A freed lane is noticed within one scan interval (at most 12 s) plus the time the previous scan took, since a scan visits
-its tickets one after another and each costs one lane question: that is N reads per interval for N waiting tickets, each bounded
-by 4 s and a few hundred milliseconds when the table reads.
+its tickets one after another and each costs one lane question: that is N reads per interval for N waiting tickets, each a few hundred
+milliseconds when the table reads and bounded by 14 s when it does not (the 4 s read and its one 10 s retry).
 
 **A node a job of this machine has a claim on is in use for every scanner on the machine.** Reading the tickets and then sending would
 leave the window in which two processes both read a node idle and both send it a job. A claim file per node (`use-<hash>.json`) is written
@@ -2356,7 +2367,8 @@ because a graph carries its prompt text), takes its key from those bytes, and
   `TestATicketAsksANodeThatRefusedItAgainAfterAWhile`, `TestAFileRefusalMovesTheGraphOnAtOnce`, and on the node
   `TestAGraphFileRefusalCarriesTheNotCapableWord`, `TestARouteThatIsNotReadyIsNotSaidToBeNotCapable`).
 - **A graph that reads input files is a local-only ticket.** A node can match such a file only by name, so the ticket is never offered
-  to a node: it reads no roster, matches no node (so it holds none against a younger ticket) and runs when this machine's lane serves
+  to a node: it reads no roster, matches no node (so, once its first scan has run, it holds none against a younger ticket; before that it
+  is first in line for every node, like any ticket not yet scanned) and runs when this machine's lane serves
   it. It is still a ticket: one per request, a place and a position in this machine's line, and every answer carries `fleet_note`
   (and the same sentence in its reason) saying why the fleet was not asked
   (`TestAGraphThatReadsAnInputFileIsALocalOnlyTicketThatKeepsItsPlace`, `TestALocalOnlyGraphTicketIsNeverMovedAndHoldsNoNodeAgainOthers`).
