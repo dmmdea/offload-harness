@@ -334,6 +334,12 @@ func Snapshot(ctx context.Context, opts Options) View {
 		}
 	}
 
+	// The driver's own fault events for the leased cards (C-83-B): facts under the lease, read only while one is held
+	// and the GPU sample is on, and never an input to the verdict below.
+	if opts.DriverEvents != nil && opts.SampleGPU && v.Held {
+		v.readDriverEvents(ctx, opts.DriverEvents)
+	}
+
 	v.Verdict, v.Note = Assess(v)
 	return v
 }
@@ -746,6 +752,19 @@ func (v View) Map() map[string]any {
 	if t := trespassOf(v); len(t) > 0 {
 		m["device_trespass"] = t
 	}
+	// The driver's fault events on the leased cards (C-83-B): absent unless there is something to say.
+	if len(v.DriverEvents) > 0 {
+		m["driver_events"] = v.DriverEvents
+	}
+	if v.DriverEventsTotal > len(v.DriverEvents) {
+		m["driver_events_total"] = v.DriverEventsTotal
+	}
+	if v.DriverEventsUnattributed > 0 {
+		m["driver_events_unattributed"] = v.DriverEventsUnattributed
+	}
+	if v.DriverEventsNote != "" {
+		m["driver_events_note"] = v.DriverEventsNote
+	}
 	return m
 }
 
@@ -780,6 +799,21 @@ func (v View) Lines() []string {
 		out = append(out, "cards: "+strings.Join(cards, " | "))
 	} else if v.GPUErr != "" {
 		out = append(out, "cards: "+v.GPUErr)
+	}
+	if len(v.DriverEvents) > 0 {
+		out = append(out, fmt.Sprintf("driver events on the leased card(s), last 24 h (facts, not a verdict): %d", max(v.DriverEventsTotal, len(v.DriverEvents))))
+		for _, e := range v.DriverEvents {
+			out = append(out, "  "+e.Line())
+		}
+		if v.DriverEventsTotal > len(v.DriverEvents) {
+			out = append(out, fmt.Sprintf("  ... and %d older (the newest %d are listed)", v.DriverEventsTotal-len(v.DriverEvents), len(v.DriverEvents)))
+		}
+	}
+	if v.DriverEventsUnattributed > 0 {
+		out = append(out, fmt.Sprintf("driver events: %d more in the log name no card this box can place, so no card's list holds them", v.DriverEventsUnattributed))
+	}
+	if v.DriverEventsNote != "" {
+		out = append(out, v.DriverEventsNote)
 	}
 	return out
 }

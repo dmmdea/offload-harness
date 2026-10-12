@@ -1495,7 +1495,9 @@ func drainDeadline(explicit time.Duration, queuedAt time.Time, wait time.Duratio
 // activityOptions is the activity read the gpu verbs make: this box's lease
 // root, its llama-swap and its agent seat, with a utilization sample.
 func activityOptions(cfg config.Config) gpuactivity.Options {
-	return gpuactivity.Options{LockOverride: cfg.GPULockPath, StateDir: cfg.StateDir, Endpoint: cfg.Endpoint, Seat: cfg.AgentPlannerModel(""), SampleGPU: true, Scope: modelaffinity.ScopeFunc(cfg.GPULockPath, cfg.StateDir), OrphanGrace: cfg.GPUOrphanGrace(), ComfyDir: cfg.ComfyDir}
+	return gpuactivity.Options{LockOverride: cfg.GPULockPath, StateDir: cfg.StateDir, Endpoint: cfg.Endpoint, Seat: cfg.AgentPlannerModel(""), SampleGPU: true, Scope: modelaffinity.ScopeFunc(cfg.GPULockPath, cfg.StateDir), OrphanGrace: cfg.GPUOrphanGrace(), ComfyDir: cfg.ComfyDir,
+		// The driver's own fault events for the leased card (C-83-B), cached 60 s and read only while a lease is held.
+		DriverEvents: gpuactivity.ReadDriverEvents}
 }
 
 // warmOwedIsStale reports whether the owed-warm marker is provably moot: the card is free of

@@ -29,7 +29,7 @@ const (
 	busTable = "0, GPU-aaaa0000-x, 00000000:17:00.0\n1, GPU-bbbb0000-x, 00000000:65:00.0\n2, GPU-cccc0000-x, 00000000:B5:00.0\n"
 
 	// A journalctl -o short-unix line and a dmesg --time-format iso line, with a placeholder host.
-	journalXid = "1760199949.098666 testhost kernel: NVRM: Xid (PCI:0000:b5:00): 79, pid=1234, name=python3, GPU has fallen off the bus.\n"
+	journalXid = "1791709549.098666 testhost kernel: NVRM: Xid (PCI:0000:b5:00): 79, pid=1234, name=python3, GPU has fallen off the bus.\n"
 	dmesgXid   = "2026-10-11T04:05:49,123456-05:00 kern  :err   : NVRM: Xid (PCI:0000:65:00): 13, Graphics Exception: ESR 0x404600=0x80000000\n"
 )
 
@@ -86,7 +86,7 @@ func TestParseWinEventsReadsASequenceAndStopsOnNoise(t *testing.T) {
 }
 
 func TestParseKernelLogXidLine(t *testing.T) {
-	evs := ParseKernelLog("1760199948.5 testhost kernel: audit: not an xid line\n" + journalXid + dmesgXid)
+	evs := ParseKernelLog("1791709548.5 testhost kernel: audit: not an xid line\n" + journalXid + dmesgXid)
 	if len(evs) != 2 {
 		t.Fatalf("two Xid lines among three, got %d: %+v", len(evs), evs)
 	}
@@ -94,7 +94,7 @@ func TestParseKernelLogXidLine(t *testing.T) {
 	if j.Source != "Xid" || j.ID != 79 || j.Bus != "b5:00" || !strings.Contains(j.Text, "GPU has fallen off the bus") {
 		t.Errorf("journal line = %+v", j)
 	}
-	if want := time.Unix(1760199949, 98666000).UTC(); !j.At.Equal(want) {
+	if want := time.Unix(1791709549, 98666000).UTC(); !j.At.Equal(want) {
 		t.Errorf("journal line time = %v, want %v", j.At, want)
 	}
 	d := evs[1]

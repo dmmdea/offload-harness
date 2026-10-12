@@ -937,7 +937,7 @@ func localLeaseViewWithActivity(ctx context.Context, cfg config.Config) (map[str
 	// busy-outside / stale-holder / free, and for a held lease that is not healthy
 	// held-stalled / held-orphaned / held-overdue / tree-orphan. A session used to read "held" as
 	// "refuse"; now it can read whether the holder is actually using the cards.
-	act := gpuactivity.Snapshot(ctx, gpuactivity.Options{LockOverride: cfg.GPULockPath, StateDir: cfg.StateDir, Endpoint: cfg.Endpoint, Seat: cfg.AgentPlannerModel(""), SampleGPU: statusSamplesGPU, Sampler: statusGPUSampler, ProcSampler: statusGPUProcSampler, Scope: modelaffinity.ScopeFunc(cfg.GPULockPath, cfg.StateDir), OrphanGrace: cfg.GPUOrphanGrace(), ComfyDir: cfg.ComfyDir})
+	act := gpuactivity.Snapshot(ctx, gpuactivity.Options{LockOverride: cfg.GPULockPath, StateDir: cfg.StateDir, Endpoint: cfg.Endpoint, Seat: cfg.AgentPlannerModel(""), SampleGPU: statusSamplesGPU, Sampler: statusGPUSampler, ProcSampler: statusGPUProcSampler, Scope: modelaffinity.ScopeFunc(cfg.GPULockPath, cfg.StateDir), OrphanGrace: cfg.GPUOrphanGrace(), ComfyDir: cfg.ComfyDir, DriverEvents: statusDriverEventsReader()})
 	view := map[string]any{
 		"held":       info.Held,
 		"queue_with": gpulease.QueueHint,
@@ -4807,6 +4807,15 @@ var statusSamplesGPU = true
 // statusFixture sets it nil, so a test that turns the sample on with a fake sampler never starts PowerShell. A test
 // that wants events sets its own reader.
 var statusDriverEvents = gpuactivity.ReadDriverEvents
+
+// statusDriverEventsReader is the reader handed to the activity snapshot: off (nil) while the GPU sample is off, so a
+// test that skips nvidia-smi never reads a log either.
+func statusDriverEventsReader() func(context.Context) ([]gpuactivity.DriverEvent, error) {
+	if !statusSamplesGPU {
+		return nil
+	}
+	return statusDriverEvents
+}
 
 // statusGPUSampler lets a test FAKE the per-card numbers offload_status samples,
 // instead of only turning the sample on/off. The held vs held-idle vs
