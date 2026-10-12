@@ -39,7 +39,7 @@ func TestRunAgentTaskAWriteDoorRunThatHitItsCeilingKeepsTheCeilingWhenItsRootIsG
 			return
 		}
 		_ = os.RemoveAll(ctxDir) // after the edit landed; no tool is called again
-		select {                  // past the 2 s ceiling, inside the 60 s stall floor
+		select {                 // past the 2 s ceiling, inside the 60 s stall floor
 		case <-time.After(6 * time.Second):
 		case <-r.Context().Done():
 		}
