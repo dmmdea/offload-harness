@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.182.1] - 2026-10-12 - the card-only qwen-image-2.1 bf16 image recipe is held back, and a node that passes a job back is paused with its own reason
+
 ### Fixed — the card-only qwen-image-2.1 bf16 image recipe is held back: ComfyUI builds its 16.33 GiB text encoder whole on the storage card, and no 16 GB pair can place it
 
 - **The defect.** The 0.182.0 live acceptance ran a card-only `generate-image` on the `qwen-image-2.1/bf16` row of `render/multicard-recipes.json` (basis `predicted`, family `qwen-image-2.1`) and ComfyUI ran out of memory 1.4 s after the prompt began, before the sampler. Its console shows `read-only map of qwen3vl_8b_bf16.safetensors: 750 tensors, 16.33 GiB`, then the MultiGPU patch returning `cuda:0` as the text-encoder device, then `torch.OutOfMemoryError: Allocation on device 0 would exceed allowed memory` with 14.10 GiB allocated, 1.16 GiB requested and a 15.90 GiB device limit, raised while the encoder's output layer was being built. The 2511 edit passed the same acceptance.
