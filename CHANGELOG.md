@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
+
 ### Fixed — `TestTheAnchoredClockDropsTheAdmissionAllowance` no longer fails on a loaded box for a cost that is not the poll budget
 
 - **The defect.** The test failed on a loaded Linux gate host and passed on an idle one. Run alone with 8 concurrent workers of 25 runs each (load about 2 on 16 cores) it failed 161 of 200 at the 0.182.0 merge and 179 of 200 at 0.181.0, with elapsed times of 600.1 to 694.7 ms against its 600 ms line (wall 300 ms plus the 300 ms admission allowance). In ordinary whole-package gates it failed once in thirty or more (600.25 ms on a Windows host that was running other gates; that run was not traced).
