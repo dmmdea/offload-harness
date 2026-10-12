@@ -12,7 +12,7 @@
       "unet": { "loader": "plain" },
       "clip": { "loader": "distorch2", "residentGb": 5 },
       "basis": "predicted",
-      "blocked": "the card-only placement puts this recipe's int8 DiT on cuda:1, and no run has: the benchmark arms the row cites ran the int8 DiT on cuda:0 with the bf16 text encoder on cuda:1, the reverse. A comfy_kitchen int8 model run through ComfyUI-MultiGPU with the compute device off cuda:0 is a recorded illegal memory access in the int8 dispatch path (upstream issue 220, unfixed; it is why the pooled LTX-2.5 seat keeps compute cuda:0). Run one int8 arm with the DiT on cuda:1, then clear \"blocked\" on this row in render/multicard-recipes.json and Blocked in internal/mediacap/multicard.go; or bind the bf16 DiT, which has a recipe",
+      "blocked": "the card-only placement puts this recipe's int8 DiT on cuda:1, and no run has: the benchmark arms the row cites ran the int8 DiT on cuda:0 with the bf16 text encoder on cuda:1, the reverse. A comfy_kitchen int8 model run through ComfyUI-MultiGPU with the compute device off cuda:0 is a recorded illegal memory access in the int8 dispatch path (upstream issue 220, unfixed; it is why the pooled LTX-2.5 seat keeps compute cuda:0). Run one int8 arm with the DiT on cuda:1, then clear \"blocked\" on this row in render/multicard-recipes.json and Blocked in internal/mediacap/multicard.go; the bf16 DiT row of this family is held back too (the 16.33 GiB bf16 text encoder this row also names cannot be built on the storage card), so lifting this row needs that fixed as well, and no qwen-image-2.1 file has a card-only recipe today",
       "peakGiB": { "compute": 9.0, "storage": 13.6 },
       "activationsGiB": 2.2,
       "packs": ["multigpu"],
@@ -28,10 +28,11 @@
       "unet": { "loader": "distorch2", "residentGb": 8 },
       "clip": { "loader": "distorch2", "residentGb": 5 },
       "basis": "predicted",
+      "blocked": "under --gpu-only ComfyUI builds the whole 16.33 GiB bf16 text encoder on the storage card (cuda:0, a 15.9 GiB card) before the DisTorch2 allocation that splits it is applied, so a live card-only run of this recipe ran out of memory 1.4 s in, with 14.10 GiB allocated, while the encoder was still being built; no resident share or peak figure in this row changes that. A loader that builds the text encoder per card, or one measured arm that fits the pair, lifts it: then clear blocked on this row in render/multicard-recipes.json and Blocked in internal/mediacap/multicard.go",
       "peakGiB": { "compute": 10.8, "storage": 14.2 },
       "activationsGiB": 2.5,
       "packs": ["multigpu"],
-      "evidence": "Benchmark 2026-10-11, bf16 DiT (13.3 GiB): all-VRAM across two cards 357.5 s against 356 s on the lane's prior, pixel-identical to the single-card render; two plain pins still offloaded 1.5 GiB of the DiT to RAM (380.9 s), which is why the DiT is split by allocation here. That all-VRAM arm used the display card as the donor; no arm ran this split on two non-display cards, so the 8 GiB resident share is arithmetic (compute 8 + 2.5 activations + 0.3 context; storage the 13.3 GiB text-encoder share + VAE + context at the text-encode stage) and the peaks are predicted."
+      "evidence": "Benchmark 2026-10-11, bf16 DiT (13.3 GiB): all-VRAM across two cards 357.5 s against 356 s on the lane's prior, pixel-identical to the single-card render; two plain pins still offloaded 1.5 GiB of the DiT to RAM (380.9 s), which is why the DiT is split by allocation here. That all-VRAM arm used the display card as the donor; no arm ran this split on two non-display cards, so the 8 GiB resident share is arithmetic (compute 8 + 2.5 activations + 0.3 context; storage the 13.3 GiB text-encoder share + VAE + context at the text-encode stage) and the peaks are predicted. Correction, 0.182.1: the 13.3 GiB text-encoder share above is the size of the bf16 DiT file (13.25 GiB), not of the encoder, which is 16.33 GiB (11.3 GiB after a 5 GiB resident share); and a live card-only run never reached the sampler, because ComfyUI builds the whole encoder on the storage card before the split applies (see blocked)."
     },
     {
       "id": "qwen-image/gguf-q5_1",
