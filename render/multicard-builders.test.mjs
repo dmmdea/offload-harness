@@ -26,23 +26,17 @@ test("2.1 int8_convrot multicard is held back: the builder refuses it by name in
   assert.equal(buildQwenImage21({ ...QI21, unet: INT8 })["1"].class_type, "UNETLoader");
 });
 
-test("2.1 bf16 multicard: only the three loaders change; every other node is the single graph's, link for link", () => {
+// The bf16 row's loaders (the DiT through DisTorch2 with its resident share on cuda:1, the text encoder split over both cards, the VAE on cuda:0) are pinned as the
+// held-back row's data by multicard-recipes.test.mjs; here the builder refuses the row by name, because under --gpu-only ComfyUI builds the whole 16.33 GiB
+// text encoder on the 15.9 GiB storage card before the split applies, and a graph built from the row would run out of memory there.
+test("2.1 bf16 multicard is held back: the builder refuses it by name instead of building a graph whose text encoder is built whole on the storage card", () => {
+  assert.throws(() => buildQwenImage21({ ...QI21, placement: "multicard" }), /qwen-image-2\.1\/bf16.*held back.*16\.33 GiB bf16 text encoder/s);
+  assert.throws(() => buildQwenImage21({ ...QI21, placement: "multicard", residentGb: 6 }), /qwen-image-2\.1\/bf16.*held back/s);
+  assert.throws(() => buildQwenImage21({ ...QI21, unet: "qwen_image_2.1_uc_bf16.safetensors", placement: "multicard" }), /qwen-image-2\.1\/bf16.*held back/s);
+  // the single graph of the same file is untouched: the stock loaders, and no MultiGPU class anywhere in it
   const single = buildQwenImage21({ ...QI21 });
-  const g = buildQwenImage21({ ...QI21, placement: "multicard" });
-  assert.deepEqual(rest(g), rest(single));
-  assert.equal(g["2"].class_type, "CLIPLoaderDisTorch2MultiGPU");
-  assert.equal(g["2"].inputs.device, "cuda:0");
-  assert.deepEqual(g["3"], { class_type: "VAELoaderMultiGPU", inputs: { vae_name: QI21.vae, device: "cuda:0" } });
-  assert.ok(!classes(g).includes("UNETLoader") && !classes(g).includes("CLIPLoader") && !classes(g).includes("VAELoader"), "no stock loader is left beside the MultiGPU ones");
-});
-
-test("2.1 bf16 multicard: the DiT through DisTorch2, compute on cuda:1, the resident share in the allocation", () => {
-  const g = buildQwenImage21({ ...QI21, placement: "multicard" });
-  assert.equal(g["1"].class_type, "UNETLoaderDisTorch2MultiGPU");
-  assert.equal(g["1"].inputs.compute_device, "cuda:1");
-  assert.equal(g["1"].inputs.expert_mode_allocations, allocationString(8));
-  assert.equal(g["1"].inputs.eject_models, false);
-  assert.equal(buildQwenImage21({ ...QI21, placement: "multicard", residentGb: 6 })["1"].inputs.expert_mode_allocations, "cuda:1,6gb;cuda:0,*");
+  assert.deepEqual([single["1"].class_type, single["2"].class_type, single["3"].class_type], ["UNETLoader", "CLIPLoader", "VAELoader"]);
+  assert.ok(!classes(single).some((c) => /MultiGPU/.test(c)), "no MultiGPU class in the single graph");
 });
 
 test("2.1: with no placement, or single, the graph is the one built before placements existed", () => {
@@ -151,11 +145,11 @@ const build = (argv, extra = {}) => buildRenderGraph({ pos: POS, flags: flagsOf(
 const QI21_ARGV = ["--family", "qwen-image-2.1", "--ckpt", BF16, "--clip", QI21.clip, "--vae", QI21.vae];
 
 test("comfy-render: --placement multicard builds the multicard graph of the family, handed the plan the runner made", () => {
-  const { graph } = build([...QI21_ARGV, "--placement", "multicard"], { multicard: { residentGb: 8 } });
-  assert.equal(graph["1"].class_type, "UNETLoaderDisTorch2MultiGPU");
-  assert.equal(graph["1"].inputs.expert_mode_allocations, allocationString(8));
   const g2 = build(["--family", "qwen-image", "--ckpt", "qwen-image-2512-Q5_1.gguf", "--placement", "multicard"], { multicard: { residentGb: 3 } }).graph;
   assert.equal(g2["1"].class_type, "UnetLoaderGGUFDisTorch2MultiGPU");
+  assert.equal(g2["1"].inputs.expert_mode_allocations, allocationString(3));
+  // the 2.1 bf16 binding is held back: even handed a plan, the runner's graph entry refuses it by name instead of building the split
+  assert.throws(() => build([...QI21_ARGV, "--placement", "multicard"], { multicard: { residentGb: 8 } }), (e) => e instanceof UsageError && /qwen-image-2\.1\/bf16.*held back/s.test(e.message));
 });
 
 test("comfy-render: a --placement multicard that was not planned is refused, never built as the single placement", () => {
@@ -171,7 +165,8 @@ test("comfy-render: --placement single, and none, are the single graph; an unkno
 test("comfy-render: the pool flags stay refused on 2.1 (a different placement), with or without --placement", () => {
   for (const k of ["--pool-vvram", "--pool-compute", "--pool-donor"]) {
     assert.throws(() => build([...QI21_ARGV, k, "12"]), (e) => e instanceof UsageError && /no pooled loader wired/.test(e.message), k);
-    assert.throws(() => build([...QI21_ARGV, k, "12", "--placement", "multicard"], { multicard: { residentGb: 8 } }), (e) => e instanceof UsageError && /no pooled loader wired/.test(e.message), k + " with multicard");
+    // with the placement the recipe is looked up first, and both 2.1 rows are held back: the call is refused, by the hold
+    assert.throws(() => build([...QI21_ARGV, k, "12", "--placement", "multicard"], { multicard: { residentGb: 8 } }), (e) => e instanceof UsageError && /held back/.test(e.message), k + " with multicard");
   }
 });
 

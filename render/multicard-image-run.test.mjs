@@ -25,10 +25,10 @@ const CARDS = W.parseCardTable([
   `2, ${U2}, Test GPU A, 16311, 16050, Disabled, No`,
 ].join("\n"));
 const LEASE = { GPU_LEASE_DEVICES: "gpu-cccc3333-dddd-eeee-ffff-000000000000,gpu-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" };
-// the plan the runners are handed: the real planner on the synthetic table (2.1 bf16: 8 GiB of the DiT resident, peaks 10.8 / 14.2 GiB)
+// the plan the runners are handed: the real planner on the synthetic table (2512 Q5_1 GGUF, the launchable image row: 3 GiB of the DiT resident, peaks 4.9 / 12.6 GiB)
 const PLAN = I.planImageMulticard({
-  route: "image", family: "qwen-image-2.1", unet: "qwen_image_2.1_bf16.safetensors", clip: "qwen3vl_8b_bf16.safetensors",
-  flags: { placement: "multicard" }, env: { ...LEASE }, comfyDir: "/c", cards: () => CARDS, listFn: () => ["ComfyUI-MultiGPU"],
+  route: "image", family: "qwen-image", unet: "qwen-image-2512-Q5_1.gguf", clip: undefined,
+  flags: { placement: "multicard" }, env: { ...LEASE }, comfyDir: "/c", cards: () => CARDS, listFn: () => ["ComfyUI-MultiGPU", "ComfyUI-GGUF"],
 });
 const KEY = PLAN.launch.key;
 const GRAPH = { "9": { class_type: "SaveImage", inputs: {} }, "11": { class_type: "VAEDecode", inputs: {} } };
@@ -196,8 +196,8 @@ test("the poll's watch is the placement's out-of-memory watch, in the image word
   assert.match(msg, /\[ERROR\] Got an OOM, unloading all loaded models\./);
   assert.match(msg, new RegExp(`offload-comfyui-${KEY}\\.log`));
   assert.match(msg, /ComfyUI must be restarted/);
-  assert.match(msg, /qwen-image-2\.1\/bf16/, "the recipe");
-  assert.match(msg, /10\.8 GiB.*compute card.*14\.2 GiB.*storage card/s, "the per-card peaks it was held to");
+  assert.match(msg, /qwen-image\/gguf-q5_1/, "the recipe");
+  assert.match(msg, /4\.9 GiB.*compute card.*12\.6 GiB.*storage card/s, "the per-card peaks it was held to");
   assert.match(msg, /15\.9 GiB/, "and the cards it had");
   assert.ok(!/WAN/.test(msg), msg);
 });
