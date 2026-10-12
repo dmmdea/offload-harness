@@ -742,24 +742,32 @@ spelling (`--placement=multicard` is a refusal, not a silent single).
 | Route | Binding | DiT loader / text-encoder loader | Peak per card, compute / storage (GiB) | Basis |
 |---|---|---|---|---|
 | image | `qwen-image-2.1`, int8 convrot DiT, bf16 text encoder | plain pin / DisTorch2 (5 GiB on the compute card) | 9.0 / 13.6 | predicted, **held back** (below) |
-| image | `qwen-image-2.1`, bf16 DiT, bf16 text encoder | DisTorch2 (8 GiB resident) / DisTorch2 (5 GiB) | 10.8 / 14.2 | predicted |
+| image | `qwen-image-2.1`, bf16 DiT, bf16 text encoder | DisTorch2 (8 GiB resident) / DisTorch2 (5 GiB) | 10.8 / 14.2 | predicted, **held back** (below) |
 | image | `qwen-image` 2512, Q5_1 GGUF, fp8 text encoder | GGUF DisTorch2 (3 GiB resident) / plain | 4.9 / 12.6 | predicted |
 | edit | `qwen-image-edit-2511`, fp8mixed DiT, fp8 text encoder | DisTorch2 (9 GiB resident), bypass LoRA / plain | 13.0 / 11.0, at the 2.0 MP canvas cap | **measured** |
 | edit | `qwen-image-edit-2511`, Q5_1 GGUF, fp8 text encoder | GGUF DisTorch2 (3 GiB resident) / plain | 5.6 / 12.6, at the 2.0 MP canvas cap | predicted |
 
-**A row can be held back.** The int8 convrot row puts a comfy_kitchen int8 DiT on `cuda:1`. ComfyUI-MultiGPU's int8 dispatch path has a recorded illegal
+**A row can be held back, and both `qwen-image-2.1` rows are.** The int8 convrot row puts a comfy_kitchen int8 DiT on `cuda:1`. ComfyUI-MultiGPU's int8 dispatch path has a recorded illegal
 memory access when the compute device is not `cuda:0` (upstream issue 220, unfixed; it is why the pooled LTX-2.5 seat keeps compute `cuda:0`), and the
 benchmark arms the row cites ran the int8 DiT on `cuda:0` with the bf16 text encoder on `cuda:1`, the reverse of the recipe, so the placement itself never ran.
-The row therefore carries a `blocked` sentence (`render/multicard-recipes.json`, `Blocked` in `internal/mediacap/multicard.go`, pinned together): it stays in the
+The bf16 row is held back for its text encoder. Under `--gpu-only` ComfyUI takes the text encoder's initial device from the text-encoder device (`cuda:0`, the
+storage card) and builds the whole 16.33 GiB bf16 encoder there, before the DisTorch2 allocation string that splits it is attached; on a 15.9 GiB card that is
+out of memory (the one live card-only run of the row failed 1.4 s in, with 14.10 GiB allocated, building the encoder's output layer), so no resident share or
+peak figure in the row can place it on any 16 GB pair. No benchmark arm ran this split on two non-display cards (the row's evidence says so), and the 13.3 GiB the
+row's evidence line called the encoder's share is the bf16 DiT file's size, not the encoder's. An fp8 encoder (8.74 GiB), as the edit rows use, is built whole on `cuda:0` and fits, which is why those rows run.
+Each held-back row therefore carries a `blocked` sentence (`render/multicard-recipes.json`, `Blocked` in `internal/mediacap/multicard.go`, pinned together): it stays in the
 table for the proof arm, but it is no recipe. `findRecipe` refuses it by name for every caller (the planner, the builders, the runners), `FindMulticardRow` does not
 return it, so the host-RAM estimate, the doctor and the typed doors see a binding without a recipe, and the door's refusal says which row is held back and why. One int8
-arm with the DiT on `cuda:1` lifts it (clear `blocked` and `Blocked`); binding the bf16 DiT needs nothing.
+arm with the DiT on `cuda:1`, and a loader that builds the bf16 encoder per card (or one measured arm that fits the pair), lift them (clear `blocked` and `Blocked`);
+the int8 row names the same bf16 encoder, so it needs the second as well. Until then no `qwen-image-2.1` file has a card-only recipe, and the only launchable
+card-only IMAGE row is the 2512 Q5_1 GGUF, still predicted (the edit rows are unchanged). The load-time warning of `imagegen_placement` agrees: a box that binds
+`qwen-image-2.1` to `multicard` is told at load that every render will be refused.
 
 **Measured and predicted.** A row is *measured* only when its per-card peaks were read in a run that used the read-only loader. Only the 2511
 fp8mixed edit has one (2026-10-11 benchmark, section 4.6: 1.47 MP on two RTX 5060 Ti 16 GB, 145.5 s, 9.4 s per step, peaks 11.9 GiB on the compute card and
 10.9 GiB on the storage card, 1.87 GiB of host growth; one card cannot hold the model and the merging LoRA loader ran out of memory, which is
 why the recipe uses the bypass loader). Every image arm of that benchmark ran the stock loader, which charges each weight file to host
-commit, so the other four rows keep what the arms showed (the 2.1 int8 and bf16 arms ran pixel-identical to the single-card render) and
+commit, so the other four rows keep what the arms showed (the 2.1 int8 and bf16 arms ran pixel-identical to the single-card render; both 2.1 rows are held back) and
 the split shares and peaks are arithmetic from them: they are *predicted*, and the file says so per row (`basis`, `evidence`). A live run
 with the read-only loader promotes a row: flip `basis` in `render/multicard-recipes.json` and `Measured` in `internal/mediacap/multicard.go`
 (`TestTheMulticardRowsAreTheRunnersRecipes` fails until both agree).
@@ -779,7 +787,8 @@ with the read-only loader promotes a row: flip `basis` in `render/multicard-reci
   a call on another node.
 - *No recipe, no lease.* A binding that has no row in `render/multicard-recipes.json` (krea2, which keeps its `--pool-*` seat; 2512 bf16, 38 GiB, which
   fits no card; sdxl; hidream; the 2.1 edit; an int8, int4 or nf4 text encoder, whose render moved off the bf16 one by 28.65 dB PSNR against the 30 dB
-  gate; the int8 convrot DiT, whose row is held back) is refused before any lease is spent, naming the key. The same goes for an edit binding whose
+  gate; the 2.1 int8 convrot and bf16 DiTs, whose rows are held back, so the reason names the row and says why) is refused before any lease is spent, naming
+  the key. The same goes for an edit binding whose
   `gen_edit_megapixels` pins a canvas above the recipe's 2.0 MP cap, which the runner honours verbatim: the peaks are scaled to the cap, and a larger canvas
   has no measured or scaled figure. The runner refuses the same bindings by name, as a second line of defence.
 - *The runner gets the lease's cards and nothing else.* `--placement multicard` and `GPU_LEASE_DEVICES`; no `COMFY_CARD_UUID` or `COMFY_API` (the pair has
@@ -801,8 +810,8 @@ the storage card, so the DiT's total is the invariant (`recipePeaks`): a larger 
 storage card, whose room is the thinner. For the fp8mixed edit (19.1 GiB DiT, 9 GiB resident, 11.0 GiB on the storage card) `--resident-gb 5` is 15.0 GiB there
 against the 14.9 GiB a 16 GB card has left after the reserve, and the whole DiT on one card ran out of memory at load in the benchmark; the runner refuses such a
 split naming the storage card and the figure, and the Go declaration keeps the ordinary estimate (the Wan estimator already computes it this way). A larger share
-does not lower the storage figure, since no run measured that; for the 2.1 bf16 row, whose storage peak is its text-encoder stage, a smaller share is therefore
-refused somewhat early, on the conservative side.
+does not lower the storage figure, since no run measured that (the held-back 2.1 bf16 row, whose storage peak is its text-encoder stage, would be refused somewhat
+early on a smaller share, on the conservative side).
 
 **What the runner checks, and watches.** Before it submits, `verifyImagePlacement` compares ComfyUI's device list with the pinned pair and asks `/object_info`
 for the harness's pack and for the recipe's own loader classes: a class the pack does not register is `MISSING_NODE` with its pack hint, an answer it cannot get
@@ -826,11 +835,13 @@ a *predicted* row and a binding with no recipe keep the ordinary streaming figur
 nobody has measured would admit on a guess; this errs toward waiting for the host's room. `gpu reserve` around `comfy-generate.mjs`, `comfy-render.mjs` or
 `comfy-edit.mjs` with `--placement multicard` reads the same recipe (`Facts.Placement`, `--resident-gb`, `--megapixels`).
 
-**Not measured, said once.** The int8 convrot DiT on `cuda:1` has not been run at all (the row is held back); the out-of-memory watch, the tiled-decode verdict
+**Not measured, said once.** The int8 convrot DiT on `cuda:1` has not been run at all (the row is held back), and the bf16 row has been run once, card-only, and
+did not reach the sampler (the row is held back: the encoder is built whole on the storage card); the out-of-memory watch, the tiled-decode verdict
 and the loader-input check are tested against fakes and the benchmark's log lines, not against a live wedge; the typed edit door records no footprint or host peak
-(the single-card edit route never did), so nothing yet cross-checks a measured zero against the host's real growth. The read-only reader has not been run on the bf16 text encoder (the tests use fakes of the loaders);
+(the single-card edit route never did), so nothing yet cross-checks a measured zero against the host's real growth. The read-only reader mapped the bf16 text encoder in that one live run (750 tensors, 16.33 GiB), but nothing has run it past the
+build (the other tests use fakes of the loaders);
 the installed ComfyUI-MultiGPU is a newer commit than the one the benchmark pinned (the loader classes the recipes name are present, checked by name);
-the bf16 split shares and the 2512 Q5_1 peaks are arithmetic; the port fallback for a pair instance with neither `--api` nor `COMFY_API` is untested; the lane
+the 2512 Q5_1 peaks are arithmetic (the held-back bf16 row's split shares are too); the port fallback for a pair instance with neither `--api` nor `COMFY_API` is untested; the lane
 probe answers for the image route, not for the edit route; and a box with three non-display cards is refused until a pair is named with `gpu reserve --devices`,
 because which two of three is a measurement nobody made.
 
@@ -2407,6 +2418,13 @@ failure (the last holds; each miss is one line on the process's stderr, once per
 `TestADeadNodeIsLoggedOncePerBackoffStepNotPerScan`), a `Retry-After` pauses a node for that long (jittered once), and a node that took a call and passed it
 back is left alone for 60 s and then 300 s per consecutive bounce (only a call it serves clears the count; a health read does
 not): a node that reads idle but whose own grant refuses every job would otherwise park each call for its whole `gpu_wait_ms`.
+The paused node's row carries the node's own reason (`it took the last call and passed it back: gpu busy: waiting for host RAM: ...`;
+a lease it could not take reads `refused`, `it took the last call and could not take its lease: ...`), and a job adopted from a process
+that ended is paused the same way and under the same name (address and node id). The reason is quoted on one line, its address
+redacted, capped at 600 bytes. Before this, a card-held bounce read "another job held its card" whatever the node said, so a host
+short of RAM was told as a held card, and an adopted job's pause read so for every class, a lease it could not take included
+(`TestABouncedRowSaysWhyTheNodePassedTheCallBack`, `TestAnAdoptedJobTheNodePassedBackGoesBackInLine`,
+`TestAPassedBackReasonIsQuotedOnOneLineAndCapped`).
 Chosen constants, not measurements (`TestABounceIsRememberedAndTheNodeComesBackAtTheNextStep`,
 `TestARetryAfterHoldsTheNodeAndReadsAsRefused`, `TestARefusedDialMovesOnAndBacksTheNodeOff`, `TestABouncedAttemptGoesBackToWaitingAndTheNextScanTriesTheNextNode`).
 A node that answers 503 or 429 with no `Retry-After` is left alone for the first step (5 s; a graph's 503 that carries no refusal word is
@@ -2434,7 +2452,7 @@ line for it), `busy` (the node holds a lease: `holder` is its class, reason and 
 machine is running there), `not-capable` (the key that differs, in the config key's own name, and the family of this machine that
 WOULD match: `send family=<ours> to use its <theirs>`; or the release, or the refine, the route or the steps rule), `unreachable`,
 `refused`, `bounced` or `skipped`; a node being left alone says why (`bounced`: it had the call and passed it back; `refused`: it
-answered the dispatch with a refusal; `unreachable`: it did not answer) and for how long, and `since` is when the ticket first found
+answered the dispatch with a refusal, or took the job and could not take its lease; `unreachable`: it did not answer) and for how long, and `since` is when the ticket first found
 the node in that state. A node absent from `delegate_remotes` is not named: nothing in the config says it exists.
 
 **What does not overflow.** A call under a lease its process inherited, a call on a box with no `delegate_remotes`, and anything but an

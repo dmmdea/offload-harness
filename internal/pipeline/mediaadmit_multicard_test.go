@@ -255,24 +255,36 @@ func TestAMulticardCallIsNeverDegradedToTheWholeNode(t *testing.T) {
 }
 
 // A binding the recipe table has no row for is refused before any lease is spent, naming the key, because the runner would refuse it by name
-// after the pair had been held and the host's memory declared: krea2 (it keeps --pool-*), 2512 bf16 (38 GiB fits no card), sdxl.
+// after the pair had been held and the host's memory declared: krea2 (it keeps --pool-*), 2512 bf16 (38 GiB fits no card), sdxl. A row that exists and is
+// held back is refused the same way, and says which row and why: the 2.1 int8 DiT (its DiT on cuda:1 never ran) and the 2.1 bf16 DiT (ComfyUI builds its
+// whole 16.33 GiB text encoder on the 15.9 GiB storage card before the DisTorch2 split applies; a live card-only run ran out of memory 1.4 s in).
 func TestAMulticardBindingWithNoRecipeIsRefusedBeforeAnyLease(t *testing.T) {
-	for name, bind := range map[string]func(*config.Config){
-		"krea2": func(c *config.Config) {
+	for _, tc := range []struct {
+		name string
+		bind func(*config.Config)
+		// held lists the words a held-back row's refusal must carry (empty = the binding has no row at all)
+		held []string
+	}{
+		{name: "krea2", bind: func(c *config.Config) {
 			krea2Binding(c)
 			c.ImageGenPlacement = "multicard"
-		},
-		"2512 bf16": func(c *config.Config) {
+		}},
+		{name: "2512 bf16", bind: func(c *config.Config) {
 			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenPlacement = "qwen-image", "qwen_image_2512_bf16.safetensors", "multicard"
-		},
-		"sdxl": func(c *config.Config) { c.ImageGenPlacement = "multicard" },
-		// a row that exists and is held back (its int8 DiT on cuda:1 never ran): refused before a lease, with the reason
-		"2.1 int8 DiT, held back": func(c *config.Config) {
+		}},
+		{name: "sdxl", bind: func(c *config.Config) { c.ImageGenPlacement = "multicard" }},
+		{name: "2.1 int8 DiT, held back", bind: func(c *config.Config) {
 			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenCLIP, c.ImageGenPlacement = "qwen-image-2.1", "qwen_image_2.1_int8_convrot.safetensors", "qwen3vl_8b_bf16.safetensors", "multicard"
-		},
+		}, held: []string{"qwen-image-2.1/int8_convrot", "held back", "illegal memory access"}},
+		{name: "2.1 bf16 DiT, held back", bind: func(c *config.Config) {
+			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenCLIP, c.ImageGenPlacement = "qwen-image-2.1", "qwen_image_2.1_bf16.safetensors", "qwen3vl_8b_bf16.safetensors", "multicard"
+		}, held: []string{"qwen-image-2.1/bf16", "held back", "text encoder", "16.33 GiB", "15.9 GiB"}},
+		{name: "2.1 bf16 DiT of the fast family, held back", bind: func(c *config.Config) {
+			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenCLIP, c.ImageGenPlacement = "qwen-image-2.1", "qwen_image_2.1_uc_bf16.safetensors", "qwen3vl_8b_bf16.safetensors", "multicard"
+		}, held: []string{"qwen-image-2.1/bf16", "held back", "text encoder", "16.33 GiB", "15.9 GiB"}},
 	} {
-		t.Run(name, func(t *testing.T) {
-			f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: bind})
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: tc.bind})
 			res := f.await(f.image(nil))
 			if res.OK || res.Meta.ErrClass != core.ErrClassGPULeaseUnavailable || !strings.Contains(res.Reason, "no card-only recipe") || !strings.Contains(res.Reason, "imagegen_placement") {
 				t.Fatalf("want a refusal naming the missing recipe and the key, got ok=%v class=%q: %s", res.OK, res.Meta.ErrClass, res.Reason)
@@ -281,12 +293,14 @@ func TestAMulticardBindingWithNoRecipeIsRefusedBeforeAnyLease(t *testing.T) {
 				t.Errorf("%d lease/runner/place for a call the runner would refuse", n)
 			}
 			// a row that exists and is held back says which one and why, so the operator knows it is a hold and not a gap in the table
-			if strings.Contains(name, "held back") && (!strings.Contains(res.Reason, "qwen-image-2.1/int8_convrot") || !strings.Contains(res.Reason, "held back") || !strings.Contains(res.Reason, "illegal memory access")) {
-				t.Errorf("the refusal of a held-back row must name it and say why: %s", res.Reason)
+			for _, want := range tc.held {
+				if !strings.Contains(res.Reason, want) {
+					t.Errorf("the refusal of a held-back row must say %q: %s", want, res.Reason)
+				}
 			}
-			// and the recipes the table "has" are the ones that can launch, not the held-back one
-			if strings.Contains(name, "held back") && strings.Contains(res.Reason, "has qwen-image-2.1/int8_convrot") {
-				t.Errorf("the list of recipes offers the held-back row: %s", res.Reason)
+			// and the recipes the table "has" are the ones that can launch, not the held-back ones: today the 2512 Q5_1 GGUF alone on the image route
+			if len(tc.held) > 0 && !strings.Contains(res.Reason, "multicard-recipes.json has qwen-image/gguf-q5_1)") {
+				t.Errorf("the list of recipes offers a held-back row: %s", res.Reason)
 			}
 		})
 	}
@@ -414,18 +428,16 @@ func TestAMulticardCallAndASingleCardCallNeverShareACard(t *testing.T) {
 func TestANamedFamilyThatAsksForMulticardLeasesThePairAndTheDefaultStaysOnOneCard(t *testing.T) {
 	overlay := func(c *config.Config) {
 		c.ImageGenFamilies = map[string]config.FamilyOverlay{
-			"qi21-pair": {
-				"license": []byte(`"Qwen Research License"`), "commercial_use": []byte(`false`),
-				"imagegen_family":    []byte(`"qwen-image-2.1"`),
-				"imagegen_ckpt":      []byte(`"qwen_image_2.1_bf16.safetensors"`),
-				"imagegen_clip":      []byte(`"qwen3vl_8b_bf16.safetensors"`),
-				"imagegen_vae":       []byte(`"qwen_image_2.1_vae_bf16.safetensors"`),
+			"qi-pair": {
+				"license": []byte(`"Apache-2.0"`), "commercial_use": []byte(`true`),
+				"imagegen_family":    []byte(`"qwen-image"`),
+				"imagegen_ckpt":      []byte(`"qwen-image-2512-Q5_1.gguf"`),
 				"imagegen_placement": []byte(`"multicard"`),
 			},
 		}
 	}
 	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: overlay})
-	named := f.image(map[string]any{"family": "qi21-pair"})
+	named := f.image(map[string]any{"family": "qi-pair"})
 	probes := f.waitStarted(1)
 	if probes[0].Env["GPU_LEASE_DEVICES"] != pairEnv() || probes[0].Env["COMFY_CARD_UUID"] != "" || !strings.Contains(strings.Join(probes[0].Argv, " "), "--placement multicard") {
 		t.Errorf("the named family runs on the pair: %+v", probes[0])
