@@ -82,10 +82,20 @@ function Stop-Sleepers([int[]]$ProcessIds) {
     }
 }
 
+# Invoke-Native: runs a command and returns its output as plain text plus its exit code. Windows PowerShell 5.1 turns a native
+# command's stderr lines into error records and, under -ErrorAction Stop, throws on the first one; a usage error is an
+# expected output here, so the preference is relaxed for the call and the records are read back as their messages.
+function Invoke-Native([scriptblock]$Command) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $text = (& $Command 2>&1 | ForEach-Object { "$_" } | Out-String)
+        $script:Rc = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prev }
+    return ($text -replace "`r", '')
+}
 function Run([string[]]$TripArgs) {
-    $text = & $psExe @psArgs -File $tripwire @TripArgs 2>&1 | Out-String
-    $script:Rc = $LASTEXITCODE
-    $script:Out = $text -replace "`r", ''
+    $script:Out = Invoke-Native { & $psExe @psArgs -File $tripwire @TripArgs }
 }
 function Verdict-Of { if ($script:Out -match '(?m)^TRIPWIRE-VERDICT: ([A-Z-]+)') { return $Matches[1] } return '' }
 function Folders-In { return @(Get-ChildItem -LiteralPath $root -Directory -Filter 'test-temp-tripwire.*' -ErrorAction SilentlyContinue).Count }
@@ -192,7 +202,7 @@ try {
         @('tmp1', 'tmp*')
     )
     foreach ($row in $table) {
-        $got = (& $psExe @psArgs -File $tripwire -NamePrefix $row[0] 2>&1 | Out-String).Trim()
+        $got = (Invoke-Native { & $psExe @psArgs -File $tripwire -NamePrefix $row[0] }).Trim()
         Expect "prefix of $($row[0])" $got $row[1]
     }
 
@@ -209,15 +219,14 @@ try {
             Clean-Kept
             $shArgs = @($shellMixed, '--dir', $rootMixed, '--module', $fixtureMixed, '--pkgs', $pk)
             if ($common -contains '-AllowSystemDrive') { $shArgs += '--allow-system-drive' }
-            $script:Out = (& $bashExe @shArgs 2>&1 | Out-String) -replace "`r", ''
-            $script:Rc = $LASTEXITCODE
+            $script:Out = Invoke-Native { & $bashExe @shArgs }
             Expect "twin agrees on ${pk}: exit" $script:Rc $psRc
             Expect "twin agrees on ${pk}: verdict" (Verdict-Of) $psVerdict
             Expect "twin agrees on ${pk}: leak lines" (Leak-Lines) $psLeaks
             Clean-Kept
         }
         foreach ($row in $table[0..1] + $table[3..5]) {
-            $got = (& $bashExe $shellMixed --name-prefix $row[0] 2>&1 | Out-String).Trim()
+            $got = (Invoke-Native { & $bashExe $shellMixed --name-prefix $row[0] }).Trim()
             Expect "shell twin prefix of $($row[0])" $got $row[1]
         }
     } else {

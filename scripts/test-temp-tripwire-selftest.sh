@@ -185,6 +185,8 @@ else
 			pids="$pids $printed_pids"
 			expect "spawner with --remove: exit" "$rc" 2
 			expect "spawner with --remove: the folder is still kept while the process runs" "$(folders_in)" 1
+			kept=$(find "$root" -mindepth 1 -maxdepth 1 -name 'test-temp-tripwire.*' -type d | head -n 1)
+			expect "spawner with --remove: nothing in the folder was touched (the note beside the running image is still there)" "$(ls -A1 "$kept" 2>/dev/null | grep -c '^tripwire-note.txt$' | tr -d ' ')" 1
 		else
 			skipped "spawner: no /proc on this host"
 		fi
