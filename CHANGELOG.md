@@ -456,6 +456,15 @@ routed call could never be placed on a node. The new real-gate test reproduces i
   One attempt, no line, a missing file counted as a failure and the failed-write branch left out of the helper each turn their own test red.
 - **Not covered.** Files an earlier release left in the OS temp dir stay until someone removes them (this is a one-time cleanup, not
   code), and a call that is killed (a second Ctrl-C, a kill) leaves the files of that one call.
+### Added — a mutation harness whose RED has to compile (register H-17)
+
+- **`scripts/mutation-check.sh` and its PowerShell twin `scripts/mutation-check.ps1`** are the one proof that a test can fail. They run the
+  unmutated control arm (which must pass), apply a single-line mutation and assert it landed (line endings compared normalised, so an LF
+  pattern cannot fake a pass on a CRLF file), compile the test binary first (a mutant that does not build is `BAD-MUTANT`, never `RED`),
+  report `RED` or `SURVIVED`, and restore the file byte for byte on every path, including a signal or Ctrl-C; each prints the applied
+  mutation and a final `MUTATION-VERDICT:` line. The self-tests (`scripts/mutation-check-selftest.sh`, `.ps1`) show every verdict on the
+  fixture module `scripts/testdata/mutfixture`; `CONTRIBUTING.md` and `docs/systems/security.md` (invariant I5) point at the harness. No
+  Go package is touched.
 
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 
