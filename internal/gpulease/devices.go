@@ -936,23 +936,26 @@ func (m *Manager) releaseV2(epoch uint64) error {
 
 // restampV2 rewrites one device lease's record in place, under the epoch lock.
 func (m *Manager) restampV2(epoch uint64, fn func(*Meta)) error {
-	return m.withEpochLock(func() error {
-		rec, err := readEpochRecord(m.leaseDir(), epoch)
-		if err != nil {
-			return fmt.Errorf("gpulease: restamp: the lease is gone (epoch %d)", epoch)
-		}
-		if !claimsNameEpoch(m.leaseDir(), rec) {
-			return fmt.Errorf("gpulease: restamp: fenced out — a card of epoch %d is claimed by another holder", epoch)
-		}
-		devices := rec.Devices
-		fn(rec)
-		rec.Epoch = epoch
-		rec.Devices = devices
-		if rec.State == "" || rec.State == stateGranting {
-			rec.State = stateActive
-		}
-		return writeEpochRecord(m.leaseDir(), rec)
-	})
+	return m.withEpochLock(func() error { return m.restampV2Locked(epoch, fn) })
+}
+
+// restampV2Locked is restampV2 for a caller that holds the epoch lock.
+func (m *Manager) restampV2Locked(epoch uint64, fn func(*Meta)) error {
+	rec, err := readEpochRecord(m.leaseDir(), epoch)
+	if err != nil {
+		return fmt.Errorf("gpulease: restamp: the lease is gone (epoch %d)", epoch)
+	}
+	if !claimsNameEpoch(m.leaseDir(), rec) {
+		return fmt.Errorf("gpulease: restamp: fenced out — a card of epoch %d is claimed by another holder", epoch)
+	}
+	devices := rec.Devices
+	fn(rec)
+	rec.Epoch = epoch
+	rec.Devices = devices
+	if rec.State == "" || rec.State == stateGranting {
+		rec.State = stateActive
+	}
+	return writeEpochRecord(m.leaseDir(), rec)
 }
 
 // releaseByEpochV2 is ReleaseByEpoch's device-lease half. handled is false when the
