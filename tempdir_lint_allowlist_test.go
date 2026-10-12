@@ -31,6 +31,7 @@ var relaunchExempt = map[string]string{
 	"internal/gpulease":    "a started copy (GPULEASE_HELPER_ROOT or GPULEASE_HELPER_HOLD_MIB set) runs a helper in TestMain that works in the lease root its parent names, a t.TempDir, and exits before any test; the other uses only read the image path of the running binary",
 	"internal/hfinstall":   "the copy runs TestHelperProcess, which prints two JSON lines and exits 1; the package has no TestMain and no init",
 	"internal/mediaops":    "a started copy (MEDIAOPS_FAKE_TOOL set) acts as the fake tool in TestMain, writes only the output path its argv names and exits before any test",
+	"internal/proctree":    "a started copy runs only TestHelperProcess, which starts at most one more copy of itself, writes the pid file its parent names (inside the parent test's t.TempDir) and sleeps; the package has no TestMain and no init, so a copy makes no folder of its own",
 	"internal/sandbox":     "a started copy is the cage worker or an escape probe: TestMain applies the cage and execs the command it is given, or prints one result line, and exits before any test; neither makes a folder",
 	"internal/sttremote":   "a started copy under the name ffmpeg writes its last argument in the init and exits before any test; the package has no TestMain",
 	"internal/winexec":     "a started copy runs only TestConsoleHelper, a Windows-only helper that prints what it thinks of its console and starts at most one more copy of itself; the package has no TestMain and no init, and no test of it makes a folder in the OS temp dir for a copy",

@@ -142,6 +142,16 @@ func StopForLease(ctx context.Context, comfyDir string, epoch uint64, d Deps) []
 }
 
 func stopOne(ctx context.Context, path string, m Marker, epoch uint64, d Deps) Outcome {
+	return stopInstance(ctx, path, m, epoch, false, d)
+}
+
+// stopInstance proves the instance a marker names is the harness's own and stops it. epoch is the
+// lease the stop is done for (the lease's holder releasing it): the marker is read again at the
+// moment of the stop and the instance is left if another lease took it over. epoch 0 is an
+// explicit stop of the marker's instance whatever lease launched it (a takeover): the marker must
+// still name the same process. interrupt asks the instance to stop the prompt it is running
+// before its models are dropped; a lease's own release stops an instance that is idle and does not.
+func stopInstance(ctx context.Context, path string, m Marker, epoch uint64, interrupt bool, d Deps) Outcome {
 	o := Outcome{Key: m.Key, PID: m.PID, Port: m.Port}
 	if !d.Alive(m.PID) {
 		_ = os.Remove(path)
@@ -154,6 +164,10 @@ func stopOne(ctx context.Context, path string, m Marker, epoch uint64, d Deps) O
 			o.Why = fmt.Sprintf("process %d began after the launch marker was written, so the pid was recycled and is not the instance; marker cleared, nothing killed", m.PID)
 			return o
 		}
+	}
+	if m.Port <= 0 {
+		o.Why = "the launch marker records no port and none was given, so the instance cannot be asked for its launch argv and is not shown to be the harness's own; left running"
+		return o
 	}
 	base := fmt.Sprintf("http://127.0.0.1:%d", m.Port)
 	client := d.Client
@@ -176,7 +190,11 @@ func stopOne(ctx context.Context, path string, m Marker, epoch uint64, d Deps) O
 		o.Why = why
 		return o
 	}
-	// Drop its models first: if the kill does not take, the card is at least empty.
+	// Tell it to stop what it is running, then drop its models: if the kill does not take, the
+	// card is at least empty.
+	if interrupt {
+		postInterrupt(ctx, client, base)
+	}
 	postFree(ctx, client, base)
 	if err := d.Kill(m.PID); err != nil {
 		o.Why = fmt.Sprintf("could not stop process %d: %v; still running", m.PID, err)
@@ -222,6 +240,9 @@ func (d Deps) proveArgv(ctx context.Context, c *http.Client, base string) ([]str
 // this lease's ("" = it still is): the marker is gone or unreadable, names another process, or
 // names another lease (the next lease re-stamped it when it reused the instance).
 func stillThisLeases(path string, pid int, epoch uint64) string {
+	if epoch == 0 {
+		return stillTheSameInstance(path, pid)
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "its launch marker vanished while the instance was being checked, so it is not shown to still be this lease's; left running"
@@ -295,6 +316,114 @@ func postFree(ctx context.Context, c *http.Client, base string) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if resp, err := c.Do(req); err == nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		resp.Body.Close()
+	}
+}
+
+// stillTheSameInstance re-reads the marker of an explicit stop and says why the instance is no
+// longer shown to be the one that was proved ("" = it still is): the marker is gone or unreadable,
+// or names another process.
+func stillTheSameInstance(path string, pid int) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "its launch marker vanished while the instance was being checked, so it is not shown to be the same instance; left running"
+	}
+	var now Marker
+	if json.Unmarshal(b, &now) != nil {
+		return "its launch marker became unreadable while the instance was being checked; left running"
+	}
+	if now.PID != pid {
+		return fmt.Sprintf("its launch marker now names process %d, not %d: the instance was relaunched while it was being checked; left running", now.PID, pid)
+	}
+	return ""
+}
+
+// StopMarker stops the instance a launch marker names, whatever lease launched it: the primitive
+// an explicit takeover uses (plan P10, used by P11) for a ComfyUI instance that is not a
+// descendant of the lease's wrapper. key "" is the default instance's marker (.offload-launch.json,
+// which records no port: port names it, and is used only when the marker has none). It asks the
+// instance to stop the prompt it is running (POST /interrupt), drops its models (POST /free) and
+// kills the marker's pid, but only after the same proof the lease's own holder gives: the pid is
+// alive, it did not begin after the marker was written, and the endpoint reports exactly the argv
+// the launcher recorded. Anything short of that is left running and reported, never killed.
+func StopMarker(ctx context.Context, comfyDir, key string, port int, d Deps) Outcome {
+	o := Outcome{Key: key}
+	if strings.TrimSpace(comfyDir) == "" {
+		o.Why = "no ComfyUI directory is configured, so there is no launch marker to read"
+		return o
+	}
+	file := ".offload-launch.json"
+	if key != "" {
+		file = markerPrefix + key + markerSuffix
+	}
+	path := filepath.Join(comfyDir, file)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		o.Why = fmt.Sprintf("no launch marker %s (%v)", file, err)
+		return o
+	}
+	var m Marker
+	if json.Unmarshal(b, &m) != nil || m.PID <= 0 || (key != "" && m.Key != key) {
+		o.Why = fmt.Sprintf("the launch marker %s is not a complete record of an instance; nothing is stopped", file)
+		return o
+	}
+	if m.Port <= 0 {
+		m.Port = port
+	}
+	return stopInstance(ctx, path, m, 0, true, d)
+}
+
+// PIDsOfOtherLeases lists the live processes the launch markers in comfyDir tie to a lease other
+// than epoch. A wrapper that lost its lease stops its own tree and must spare these: an instance
+// it kept and another lease reused is that lease's job now. A marker that names no lease (the
+// default instance, or one kept outside any lease) is nobody else's and is not listed. start is the process start
+// time (Unix ms; nil = not checked): a pid that began after its marker was written was recycled and is not listed.
+func PIDsOfOtherLeases(comfyDir string, epoch uint64, alive func(int) bool, start func(int) (int64, bool)) []int {
+	if strings.TrimSpace(comfyDir) == "" || alive == nil {
+		return nil
+	}
+	entries, err := os.ReadDir(comfyDir)
+	if err != nil {
+		return nil
+	}
+	var out []int
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, markerPrefix) || !strings.HasSuffix(name, markerSuffix) {
+			continue
+		}
+		b, rerr := os.ReadFile(filepath.Join(comfyDir, name))
+		if rerr != nil {
+			continue
+		}
+		var m Marker
+		if json.Unmarshal(b, &m) != nil || m.PID <= 0 || m.LeaseEpoch == nil || *m.LeaseEpoch == epoch {
+			continue
+		}
+		if !alive(m.PID) {
+			continue
+		}
+		// Liveness is not identity: a marker a crashed instance left behind names a pid that may since belong to any
+		// process, one of the wrapper's own included. The same proof the stop applies: a process that began after the
+		// marker was written (plus the launcher's slack) is not the instance the marker describes.
+		if m.StartedAt > 0 && start != nil {
+			if began, ok := start(m.PID); ok && began > m.StartedAt+startSlackMs {
+				continue
+			}
+		}
+		out = append(out, m.PID)
+	}
+	return out
+}
+
+// postInterrupt asks the instance to stop the prompt it is running. Best effort.
+func postInterrupt(ctx context.Context, c *http.Client, base string) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/interrupt", nil)
+	if err != nil {
+		return
+	}
 	if resp, err := c.Do(req); err == nil {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 		resp.Body.Close()

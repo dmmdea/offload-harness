@@ -90,6 +90,8 @@ type Holder struct {
 	OwnerNote     string         `json:"owner_note,omitempty"`
 	OrphanMarkErr string         `json:"orphan_marker_error,omitempty"`
 	TreeOrphan    bool           `json:"tree_orphan,omitempty"`
+	TreePIDs      []int          `json:"tree_pids,omitempty"`
+	TreeWhy       string         `json:"tree_why,omitempty"`
 	Progress      *ProgressState `json:"progress,omitempty"`
 	// Facts are information about a lease that has no owner and no progress contract
 	// (newest ComfyUI output, ComfyUI log): never an input to the verdict.
@@ -404,7 +406,7 @@ func Assess(v View) (verdict, note string) {
 		}
 		return VerdictWorking, "the lease is held AND work is in flight on the seat: " + work + holderTail(v)
 	case v.Held && h != nil && h.TreeOrphan:
-		return VerdictTreeOrphan, "the lease's wrapper is gone but the job it started is still alive and holds the cards: the claim is kept until that job ends or is taken over" + takeoverHint(h) + holderTail(v)
+		return VerdictTreeOrphan, treeOrphanNote(h) + treeOrphanHint(h) + holderTail(v)
 	case v.Held && h != nil && h.Stalled:
 		return VerdictHeldStalled, stalledNote(h) + takeoverHint(h) + factsTail(h) + holderTail(v)
 	case v.Held && h != nil && h.Orphaned:

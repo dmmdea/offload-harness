@@ -124,6 +124,63 @@ func (m *Manager) heldGiB(holderPID int) (float64, bool) {
 	return descendantsResidentGiB(holderPID)
 }
 
+// holderKey is what the memory a lease has loaded is measured from, and what leases are pooled by. A live holder is its
+// pid. A tree-orphan's holder is dead, and the job it started is not below that pid (Linux reparents it; Windows reaches it
+// only through the dead pid's parent links, and not at all once the pid is reused), so it stands alone, keyed by its epoch
+// and measured from the members it recorded.
+type holderKey struct {
+	pid   int
+	epoch uint64
+}
+
+func holderOf(l Info) holderKey {
+	if l.TreeOrphan {
+		return holderKey{epoch: l.Epoch}
+	}
+	return holderKey{pid: l.PID}
+}
+
+// heldOf is what the processes of a lease's job hold RESIDENT right now: below its holder (heldGiB), or, for a tree-orphan,
+// the live members the reader found for it and everything below them (membersResidentGiB).
+func (m *Manager) heldOf(l Info) (float64, bool) {
+	if l.TreeOrphan {
+		return membersResidentGiB(l.TreeLive)
+	}
+	return m.heldGiB(l.PID)
+}
+
+// membersResidentGiB sums the resident memory of every listed member and of each process below it (a member can have
+// started more since the record was written), counting a process once. Unlike descendantsResidentGiB the roots are counted:
+// they are the job itself, not a long-lived holder.
+func membersResidentGiB(members []TreeMember) (float64, bool) {
+	seen := map[int]bool{}
+	var bytes uint64
+	readAny := false
+	for _, mem := range members {
+		if mem.PID <= 0 {
+			continue
+		}
+		tree, err := ProcessTree(mem.PID)
+		if err != nil {
+			continue
+		}
+		readAny = true
+		for _, p := range tree {
+			if seen[p.PID] {
+				continue
+			}
+			seen[p.PID] = true
+			if _, res, ok := processMemory(p.PID); ok {
+				bytes += res
+			}
+		}
+	}
+	if !readAny && len(members) > 0 {
+		return 0, false
+	}
+	return float64(bytes) / (1 << 30), true
+}
+
 // descendantsResidentGiB sums the resident memory (the working set) of every process below holderPID, not
 // the holder itself. A wrapper lease's holder is `gpu reserve`, a few MiB, and the job is below it; a pipeline
 // lease's holder is the long-lived server, whose own memory is not the job's and must not be subtracted from
@@ -181,29 +238,40 @@ func TreeMemory(root int) (privateGiB, residentGiB float64, err error) {
 // share a holder pid are pooled (the pipeline holds one lease per card in one server process, and
 // their runners are all below it, so a lease-by-lease subtraction would credit each lease with the
 // others' memory and count nothing pending): declared minus held, per holder, never below zero.
-// held reports what the processes below a holder hold RESIDENT now (descendantsResidentGiB), the unit a
-// declaration is in; a holder it cannot read holds nothing, so its whole declared need is pending.
-func pendingGiB(live []Info, held func(holderPID int) (float64, bool)) float64 {
-	declared := map[int]float64{}
+// held reports what the processes of a lease's job hold RESIDENT now, the unit a declaration is in: the ones below its
+// holder (descendantsResidentGiB), or, for a tree-orphan whose holder is dead, its recorded live members (heldOf). A
+// holder it cannot read holds nothing, so its whole declared need is pending.
+func pendingGiB(live []Info, held func(l Info) (float64, bool)) float64 {
+	declared := map[holderKey]float64{}
+	probe := map[holderKey]Info{}
 	for _, l := range live {
 		if l.HostRAMGiB > 0 {
-			declared[l.PID] += l.HostRAMGiB
+			k := holderOf(l)
+			declared[k] += l.HostRAMGiB
+			if _, ok := probe[k]; !ok {
+				probe[k] = l
+			}
 		}
 	}
-	pids := make([]int, 0, len(declared))
-	for pid := range declared {
-		pids = append(pids, pid)
+	keys := make([]holderKey, 0, len(declared))
+	for k := range declared {
+		keys = append(keys, k)
 	}
-	sort.Ints(pids)
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].pid != keys[j].pid {
+			return keys[i].pid < keys[j].pid
+		}
+		return keys[i].epoch < keys[j].epoch
+	})
 	var pending float64
-	for _, pid := range pids {
+	for _, k := range keys {
 		have := 0.0
-		if pid > 0 {
-			if g, ok := held(pid); ok {
+		if k.pid > 0 || k.epoch > 0 {
+			if g, ok := held(probe[k]); ok {
 				have = g
 			}
 		}
-		if rest := declared[pid] - have; rest > 0 {
+		if rest := declared[k] - have; rest > 0 {
 			pending += rest
 		}
 	}
@@ -212,7 +280,7 @@ func pendingGiB(live []Info, held func(holderPID int) (float64, bool)) float64 {
 
 // HostRAMPending is pendingGiB over the leases live right now, for the readers that apply the same
 // rule before a grant (the card allocator's pre-filter) or report it (status).
-func (m *Manager) HostRAMPending() float64 { return pendingGiB(m.Leases(), m.heldGiB) }
+func (m *Manager) HostRAMPending() float64 { return pendingGiB(m.Leases(), m.heldOf) }
 
 // DeclaredHostRAMGiB is the sum of the host RAM the live leases declared.
 func DeclaredHostRAMGiB(leases []Info) float64 {
@@ -237,7 +305,7 @@ func DeclaredHostRAMGiB(leases []Info) float64 {
 type hostReading struct {
 	mem   gpuprobe.HostMemory
 	memOK bool
-	held  map[int]heldReading // by holder pid
+	held  map[holderKey]heldReading // by holder (a live holder's pid, a tree-orphan's epoch)
 }
 
 type heldReading struct {
@@ -245,9 +313,9 @@ type heldReading struct {
 	ok  bool
 }
 
-// heldGiB is Manager.heldGiB from the reading: the figure taken early for a holder that was live then, else "cannot be read".
-func (r *hostReading) heldGiB(pid int) (float64, bool) {
-	h, ok := r.held[pid]
+// heldOf is Manager.heldOf from the reading: the figure taken early for a holder that was live then, else "cannot be read".
+func (r *hostReading) heldOf(l Info) (float64, bool) {
+	h, ok := r.held[holderOf(l)]
 	if !ok {
 		return 0, false
 	}
@@ -261,17 +329,18 @@ func (m *Manager) readHost(needGiB float64) *hostReading {
 	if needGiB <= 0 {
 		return nil
 	}
-	r := &hostReading{held: map[int]heldReading{}}
+	r := &hostReading{held: map[holderKey]heldReading{}}
 	r.mem, r.memOK = m.hostMemory()
 	for _, l := range m.Leases() {
-		if l.HostRAMGiB <= 0 || l.PID <= 0 {
+		k := holderOf(l)
+		if l.HostRAMGiB <= 0 || (k.pid <= 0 && k.epoch == 0) {
 			continue
 		}
-		if _, done := r.held[l.PID]; done {
+		if _, done := r.held[k]; done {
 			continue
 		}
-		g, ok := m.heldGiB(l.PID)
-		r.held[l.PID] = heldReading{g, ok}
+		g, ok := m.heldOf(l)
+		r.held[k] = heldReading{g, ok}
 	}
 	return r
 }
@@ -288,7 +357,7 @@ func (m *Manager) hostRAMCheckWith(needGiB float64, live []Info, r *hostReading)
 	}
 	var pending float64
 	if len(live) > 0 {
-		pending = pendingGiB(live, r.heldGiB)
+		pending = pendingGiB(live, r.heldOf)
 	}
 	return gpuprobe.HostRAMAdmits(r.mem, r.memOK, needGiB, pending, m.HostRAMHeadroom())
 }
@@ -315,7 +384,7 @@ func (m *Manager) hostRAMCheckAgainst(needGiB float64, live []Info) gpuprobe.Hos
 	mem, ok := m.hostMemory()
 	var pending float64
 	if len(live) > 0 {
-		pending = pendingGiB(live, m.heldGiB)
+		pending = pendingGiB(live, m.heldOf)
 	}
 	return gpuprobe.HostRAMAdmits(mem, ok, needGiB, pending, m.HostRAMHeadroom())
 }

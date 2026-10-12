@@ -45,6 +45,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
+	"github.com/dmmdea/offload-harness/internal/proctree"
 	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
@@ -406,6 +407,7 @@ func runGPUReserve(args []string) error {
 	ramFlag := fs.Float64("ram", 0, "GiB of host RAM the job will load, declared on the lease and admitted against committed memory (0 = needs no host RAM). Unset, it is estimated: from the model files of a render helper call whose weights do not fit the card (render/comfy-generate.mjs, comfy-edit, comfy-video, comfy-inpaint, comfy-render), else for a media lease the largest ComfyUI render family this box binds (an sd.cpp binding is not counted: a node that binds only sd.cpp declares 0), and 0 for a text lease. A grant waits, in the same queue, while committed memory + this + what running leases have yet to load would exceed physical RAM less gpu_host_ram_headroom_gib, or while the available RAM less this and the unloaded part would fall under that headroom. With --unload-seat the host is asked AFTER the seat is unloaded, while the cards are held, because the memory it needs may be the seat's own (F82)")
 	owner := addOwnershipFlags(fs)
 	releaseAtExpiry := fs.Bool("release-at-expiry", false, "with --detach: the hidden holder releases the card at --for, as it did before leases had terms (default: it renews its term while the owner vouches for the job, else labels the lease expired and keeps holding; nothing is ever released by a deadline)")
+	dieWithWrapper := fs.Bool("die-with-wrapper", false, "wrapper form: end the command's whole process tree when this wrapper exits or dies (Windows: the job object is created kill-on-close). Off by default, because it makes the wrapper a single point of failure for a long render; without it a dead wrapper's job keeps running and its lease keeps the cards as a tree-orphan until the job ends. Refused where the platform has no handle whose closing ends a tree, and when the command cannot be put in the job. A ComfyUI instance another lease took over is spared and the guarantee stops at it (the job stops killing on close once something is spared)")
 	_ = fs.Parse(args)
 	if *unload {
 		*exclusive = true // a cleared card that the next text call refills is not cleared
@@ -436,6 +438,12 @@ func runGPUReserve(args []string) error {
 	}
 	if *releaseAtExpiry && !*detach {
 		return errors.New("--release-at-expiry is for --detach: a detached holder releases the card at its --for deadline with it, instead of renewing or labelling the lease expired; the wrapper form holds the lease exactly as long as its command runs, so it has no deadline to release at")
+	}
+	if *dieWithWrapper && *detach {
+		return errors.New("--die-with-wrapper is for the wrapper form: a detached holder runs no command whose tree could end with it")
+	}
+	if *dieWithWrapper && !proctree.SupportsDieWithWrapper() {
+		return errors.New("--die-with-wrapper is not supported on this platform: there is no handle whose closing ends a whole process tree. Without it the command's tree keeps running if this wrapper dies, and its lease keeps the cards as a tree-orphan until the job ends")
 	}
 	if *unload && !*drain {
 		return errors.New("--unload-seat requires --drain: never unload a seat with a request in flight")
@@ -653,6 +661,9 @@ func runGPUReserve(args []string) error {
 	// release --warm-seat` or the seat's next request pays it).
 	endedOnTerm := false
 	endedAt := "" // the stage a signal found the wrapper in when its command never ran ("" = the command ran), for the sentence below
+	// closeTree lets go of the command's containment once it has started (gpu_tree.go). With
+	// --die-with-wrapper that ends whatever of the tree is still running; without it, nothing.
+	closeTree := func() {}
 	finish := func() {
 		// A progress file this wrapper minted goes with the command it was minted for, and FIRST: left in place
 		// through the seat's warm-back (minutes) it would go stale and `gpu status` would read the lease
@@ -664,6 +675,7 @@ func runGPUReserve(args []string) error {
 		// The instances kept under this lease go first: they hold VRAM the seat's warm-back and
 		// the next holder both want, and they live no longer than the lease (gpu_instances.go).
 		stopInstancesOfLease(cfg, lease, os.Stderr)
+		closeTree()
 		switch {
 		case *unload && endedOnTerm && m.SeatWarmOwed() != "":
 			fmt.Fprintln(os.Stderr, warmSkippedOnTerm(endedAt))
@@ -793,7 +805,8 @@ func runGPUReserve(args []string) error {
 	}
 	// A lease holds cards; it does not confine the command. A reservation that named or
 	// allocated its cards pins the command to them unless the command pins itself (see
-	// confineWrapped), and the wrapper says so when a pin of its own falls outside them.
+	// confineWrapped); a pin of its own (COMFY_CUDA_DEVICE, COMFY_CARD_UUID) that falls outside them is
+	// re-pinned onto the held card and the wrapper says so, and the command always starts (GPU-F9).
 	if plan.Explicit {
 		// Read through the retry: a command's own pin (a bare index it inherited) resolves to a card only with
 		// the table, and without one the wrapper REPLACES a pin it could have confirmed. The UUID of a card
@@ -820,11 +833,21 @@ func runGPUReserve(args []string) error {
 			fmt.Fprintf(os.Stderr, "gpu reserve: could not create the progress file %s (%v); the lease reads its progress as unknown until the helper creates it\n", autoProgress, err)
 		}
 	}
-	if err := cmd.Start(); err != nil {
+	// The command starts inside a containment the OS can enumerate and stop as a whole (a job
+	// object, a process group), so a lost lease ends what it started and not just the command, and
+	// so the tree can be recorded in the lease for a reader that finds this wrapper gone.
+	tree, err := proctree.Start(cmd, proctree.Options{DieWithWrapper: *dieWithWrapper})
+	if err != nil {
 		err = fmt.Errorf("starting wrapped command: %w", err)
 		card.finish(err)
 		return err
 	}
+	closeTree = func() { closeWrappedTree(tree, cfg, lease.Epoch(), os.Stderr) }
+	if w := tree.Warning(); w != "" {
+		fmt.Fprintf(os.Stderr, "gpu reserve: warning: %s; if the lease is lost only the command and what the process table shows below it are stopped\n", w)
+	}
+	recorder := newTreeRecorder(lease, tree, os.Stderr)
+	recorder.record()
 	card.running()
 	if wrapperCommandStarted != nil {
 		wrapperCommandStarted()
@@ -855,7 +878,7 @@ func runGPUReserve(args []string) error {
 			why = signalWhy(sig)
 			endedOnTerm = endsGraceBounded(sig)
 			sigDone = nil
-			_ = cmd.Process.Kill()
+			stopWrappedTree(tree, cmd, cfg, lease.Epoch(), os.Stderr)
 		case <-tick.C:
 			// LOSING THE LEASE MUST BE LOUD. Discarding this error left the wrapped
 			// benchmark running with no reservation while a render tore its tier down
@@ -866,11 +889,14 @@ func runGPUReserve(args []string) error {
 				fmt.Fprintf(os.Stderr,
 					"gpu reserve: LEASE LOST (%v) — the GPU is no longer reserved for this command; killing it\n", err)
 				why = " (lease lost)"
-				_ = cmd.Process.Kill()
+				stopWrappedTree(tree, cmd, cfg, lease.Epoch(), os.Stderr)
 			} else {
 				// The heartbeat is the proof the lease is still ours; only then is its term asked
 				// about. A term that ends is renewed or labelled, never a reason to stop the command.
 				terms.tick()
+				// And the tree is recorded for a reader that finds this wrapper gone (only when the
+				// set of processes changed: the record rewrite takes the epoch lock).
+				recorder.record()
 			}
 		}
 	}

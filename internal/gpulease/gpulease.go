@@ -350,6 +350,10 @@ type Meta struct {
 	// is a statement by a binary that could have declared cards, so a whole-node record
 	// carrying it means the whole node and is never narrowed by inference.
 	Format int `json:"format,omitempty"`
+
+	// Tree is the process tree the wrapper started, recorded by the wrapper (plan P10): pid and
+	// start identity of each member, rewritten when the set changes. See tree.go.
+	Tree []TreeMember `json:"tree,omitempty"`
 }
 
 // RecordFormat is the Meta.Format every binary that understands card-scoped leases stamps.
@@ -436,6 +440,12 @@ type Info struct {
 	// Each(), or it judges one lease and is blind to the rest. Each entry carries its own
 	// epoch only (Epochs has one element) and no Leases of its own.
 	Leases []Info
+	// TreeOrphan: the lease's wrapper is gone (dead, or its pid recycled) but a process of the
+	// job it started is still alive, so the claim is kept. TreeLive are those processes and
+	// TreeWhy the evidence for them (tree.go).
+	TreeOrphan bool
+	TreeLive   []TreeMember
+	TreeWhy    string
 }
 
 // Each returns the leases an Info describes, one Info per lease: Leases when several are
@@ -1089,6 +1099,12 @@ func probeWritable(dir string) error {
 // for its full declared window. Requiring BOTH staleness and expiry for the
 // liveness-independent path, while letting provable death reclaim immediately,
 // is the only combination that survives both.
+//
+// "Provably gone" is about the WRAPPER, not the job it started (plan P10, tree.go): a holder whose
+// pid is dead or recycled is reclaimable only if no member of the tree it recorded is still the
+// process that was recorded. This pure rule reads the record alone: a lease that recorded no tree has no member to hold it,
+// so it is freed at once. The reader (reader.judge in tree.go) first folds in the other evidence that ties a live process to
+// such a lease (a launch marker, or on Windows a child of the dead wrapper), and a lease with none alive is freed as before.
 func Reclaimable(m *Meta, now time.Time, heartbeatTTL time.Duration, procStart func(int) (int64, bool)) bool {
 	if m == nil {
 		return true // no/unreadable meta => stale, same rule the .mjs used
@@ -1097,15 +1113,13 @@ func Reclaimable(m *Meta, now time.Time, heartbeatTTL time.Duration, procStart f
 		// No identifiable holder: fall back to the declared window alone.
 		return now.UnixMilli() > m.ExpiresAtMs
 	}
-	if !pidAlive(m.Holder.PID) {
-		return true // provably gone
-	}
-	// Alive pid, but is it the SAME process? A recycled pid otherwise reads as a
-	// live holder forever.
-	if m.Holder.StartTimeMs != 0 {
-		if st, ok := procStart(m.Holder.PID); ok && st != m.Holder.StartTimeMs {
-			return true // pid was recycled; the original holder is gone
-		}
+	if wrapperGone(m, procStart) {
+		// The wrapper is provably gone (its pid is dead, or alive but recycled for another
+		// process). That proves the WRAPPER is gone, not the job it started: while a member of
+		// the tree it recorded is still alive the card is in use and the claim is kept (plan
+		// P10, tree.go). With no recorded member alive this rule frees the lease at once; the reader that has found a
+		// live process by the other evidence passes it in Tree, so it is held.
+		return len(liveMembers(m.Tree, procStart)) == 0
 	}
 	nowMs := now.UnixMilli()
 	heartbeatStale := m.RenewedAtMs > 0 && nowMs-m.RenewedAtMs > heartbeatTTL.Milliseconds()
@@ -1125,8 +1139,9 @@ func (m *Manager) reclaimable(meta *Meta, now time.Time) bool {
 	if meta == nil {
 		return true
 	}
-	effective := *meta
-	effective.RenewedAtMs = m.lastHeartbeat(meta)
+	r := m.reader()
+	r.now = now
+	effective, _ := r.judge(meta)
 	return Reclaimable(&effective, now, m.heartbeatTTL, m.procStart)
 }
 
@@ -1274,6 +1289,8 @@ type Lease struct {
 	// per-card claims, not meta.json. devices are the cards it holds.
 	v2      bool
 	devices []string
+	// tree is the last process tree this holder recorded (tree.go).
+	tree treeState
 	// done is set once by the first Release. Atomic because a holder's
 	// release paths can run concurrently (a deferred Release beside a cleanup
 	// or signal path) — a plain bool was a data race under -race.
@@ -2026,6 +2043,10 @@ func (m *Manager) restampLocked(epoch uint64, fn func(*Meta)) error {
 	return m.restampWholeLocked(epoch, fn)
 }
 
+// restampWholeHook is a test seam, called by restampWholeLocked after it read the record and before it writes it back. nil in
+// production.
+var restampWholeHook func()
+
 // restampWholeLocked is the whole-node half of Restamp; the caller holds the epoch lock.
 func (m *Manager) restampWholeLocked(epoch uint64, fn func(*Meta)) error {
 	meta, err := m.readMeta()
@@ -2034,6 +2055,9 @@ func (m *Manager) restampWholeLocked(epoch uint64, fn func(*Meta)) error {
 	}
 	if meta.Epoch != epoch {
 		return fmt.Errorf("gpulease: restamp: fenced out — our epoch %d, current epoch %d", epoch, meta.Epoch)
+	}
+	if h := restampWholeHook; h != nil {
+		h() // a test seam: what happens between reading the record and writing it back
 	}
 	fn(meta)
 	meta.Epoch = epoch
@@ -2104,20 +2128,27 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 	if released, handled, err := m.releaseByEpochV2(epoch); handled {
 		return released, err
 	}
-	meta, err := m.readMeta()
-	if err != nil || meta == nil {
-		return false, nil // nothing held
-	}
-	if epoch != 0 && meta.Epoch != epoch {
-		return false, errLeaseMovedOn(epoch, meta.Epoch)
-	}
-	// Drop the CLAIM only. Removing the container would delete a directory another
-	// acquirer may be working inside.
-	m.clearUnloadMarkers()
-	if err := removeClaim(m.metaPath()); err != nil {
-		return false, fmt.Errorf("gpulease: releasing lease: %w", err)
-	}
-	return true, nil
+	// Under the epoch lock, like the restamp that rewrites this record: an unlocked release between a restamp's read of the
+	// record and its rename put the record back, and the lease an operator had just ended was held again.
+	var released bool
+	lerr := m.withEpochLock(func() error {
+		meta, err := m.readMeta()
+		if err != nil || meta == nil {
+			return nil // nothing held
+		}
+		if epoch != 0 && meta.Epoch != epoch {
+			return errLeaseMovedOn(epoch, meta.Epoch)
+		}
+		// Drop the CLAIM only. Removing the container would delete a directory another
+		// acquirer may be working inside.
+		m.clearUnloadMarkers()
+		if err := removeClaim(m.metaPath()); err != nil {
+			return fmt.Errorf("gpulease: releasing lease: %w", err)
+		}
+		released = true
+		return nil
+	})
+	return released, lerr
 }
 
 // ReleaseTarget names the lease ReleaseByEpoch(epoch) would end, without ending it, or the

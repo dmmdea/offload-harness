@@ -137,8 +137,10 @@ func TestConfineWrappedRules(t *testing.T) {
 	if c := confineWrapped(true, held, []string{"python"}, inside, cards); len(c.Env) != 0 || c.Note != "" {
 		t.Fatalf("a pin inside the held set is the command's own business: %+v", c)
 	}
-	// The command pins itself OUTSIDE the held set: not overridden (ComfyUI overwrites
-	// CUDA_VISIBLE_DEVICES from --cuda-device itself), but said out loud.
+	// The command pins itself OUTSIDE the held set with a variable of the PROGRAM'S own: it is moved onto the
+	// held card (GPU-F9: ComfyUI overwrites CUDA_VISIBLE_DEVICES from its own pin, so the wrapper rewrites the
+	// pin itself, here to the held card's ComfyUI device 2) and said out loud; the full table is in
+	// gpu_reserve_repin_test.go.
 	outside := func(k string) string {
 		if k == "COMFY_CUDA_DEVICE" {
 			return "1" // ComfyUI order 1,0,2 -> nvidia index 0
@@ -146,8 +148,8 @@ func TestConfineWrappedRules(t *testing.T) {
 		return ""
 	}
 	c = confineWrapped(true, held, []string{"python"}, outside, cards)
-	if len(c.Env) != 0 || !strings.Contains(c.Note, "gpu-aaaa0000-x") || !strings.Contains(c.Note, "not confined") {
-		t.Fatalf("a pin outside the held set must be reported, naming the card: %+v", c)
+	if strings.Join(c.Env, "|") != "COMFY_CUDA_DEVICE=2" || !strings.Contains(c.Note, "gpu-aaaa0000-x") || !strings.Contains(c.Note, "re-pinned") {
+		t.Fatalf("a pin outside the held set must be moved onto the held card and reported, naming the card: %+v", c)
 	}
 	// A pin that cannot be resolved cannot be confirmed to be inside: said, too. The pin
 	// is the program's own (ComfyUI resets the variable from --cuda-device), so it is not

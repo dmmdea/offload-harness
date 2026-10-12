@@ -45,10 +45,12 @@ func orphanGraceOrDefault(grace time.Duration) time.Duration {
 }
 
 // Escalation is the standing verdict word of a lease that is not healthy, in precedence
-// order (stalled, then orphaned, then overdue), or "" for a lease that is. The words are
-// the verdicts `gpu status` prints (held-stalled and so on).
+// order (tree-orphan, then stalled, then orphaned, then overdue), or "" for a lease that is.
+// The words are the verdicts `gpu status` prints (held-stalled and so on).
 func (st Standing) Escalation() string {
 	switch {
+	case st.TreeOrphan:
+		return "tree-orphan"
 	case st.Stalled:
 		return "held-stalled"
 	case st.Orphaned:
@@ -62,6 +64,19 @@ func (st Standing) Escalation() string {
 // TakeoverCommand is the command that frees a lease whose holder will not, for epoch.
 func TakeoverCommand(epoch uint64) string {
 	return fmt.Sprintf("local-offload gpu takeover --epoch %d", epoch)
+}
+
+// ReleaseCommand is the command that ends a lease's claim at once, for epoch. It is the one command that frees a
+// tree-orphan today: it stops only the ComfyUI instances kept under that lease and nothing else, so the rest of the
+// job keeps running on the card, which is why it is never run on a guess.
+func ReleaseCommand(epoch uint64) string {
+	return fmt.Sprintf("local-offload gpu release --epoch %d", epoch)
+}
+
+// TreeOrphanFreeing is the sentence that tells a reader how a tree-orphan ends: by itself when the job's processes are
+// gone, or at once by ReleaseCommand, with what that does and does not stop.
+func TreeOrphanFreeing(epoch uint64) string {
+	return fmt.Sprintf("it frees itself when the job's processes are gone, or a human-authorised session ends the claim now with `%s` (it stops only the ComfyUI instances kept under the lease; the rest of the job keeps running on the card)", ReleaseCommand(epoch))
 }
 
 // ExplainHeld describes, for a waiter, why the lease info is not a healthy one, or returns
@@ -92,6 +107,8 @@ func (m *Manager) ExplainHeld(info Info, grace time.Duration) string {
 	now := m.now()
 	var why string
 	switch word {
+	case "tree-orphan":
+		why = fmt.Sprintf("its wrapper (pid %d) is gone but the job it started is still running, so the card is in use: %s", info.PID, st.TreeWhy)
 	case "held-stalled":
 		why = fmt.Sprintf("its progress file %s showed no activity for %s, past its %s stall window",
 			filepath.Base(st.Progress.File), roundDur(st.Progress.Age), roundDur(st.Progress.Stall))
@@ -124,6 +141,9 @@ func (m *Manager) ExplainHeld(info Info, grace time.Duration) string {
 			c = string(r[:99]) + "…"
 		}
 		s += "; running: " + c
+	}
+	if word == "tree-orphan" {
+		return s + "; nothing reclaims or kills it: " + TreeOrphanFreeing(info.Epoch)
 	}
 	return s + fmt.Sprintf("; nothing reclaims or kills it: a human-authorised session frees it with `%s` (not in this build yet: until it ships, ask whoever owns it or the operator)", TakeoverCommand(info.Epoch))
 }

@@ -381,8 +381,11 @@ local-offload gpu reserve --class media -- <your command>
 ```
 
 On a host with card-scoped leases enabled, hold only the cards the job uses so the others keep working:
-`gpu reserve --class media --devices 2 -- <cmd>` (named cards), `--cards 2` (the allocator picks two free, non-display cards),
-or no flag at all when `<cmd>` pins itself with `CUDA_VISIBLE_DEVICES`, `--cuda-device` or `COMFY_CUDA_DEVICE`. `gpu cards`
+`gpu reserve --class media --devices 2 -- <cmd>` (named cards), `--cards 2` (the allocator picks two free cards; the display card only up to `gpu_display_cap_pct`, default 60 percent of its VRAM with the desktop's use counted, and only when you state `--vram`; set the key to `0` when you need the screen's card to yourself),
+or no flag at all when `<cmd>` pins itself with `CUDA_VISIBLE_DEVICES`, `--cuda-device` or `COMFY_CUDA_DEVICE`. A command that carries a
+`COMFY_CUDA_DEVICE` or `COMFY_CARD_UUID` pointing at a card the lease does not hold is never refused: the wrapper rewrites that
+variable to the held card, prints one `re-pinned` line and starts the command (a `--cuda-device` on its command line is the
+program's own argv and only draws a warning). `gpu cards`
 shows each card and its holder; `gpu doctor --write-audit` is what turns the feature on for a host (see
 [GPU lease](systems/gpu-lease.md#reserving-cards-the-card-table-and-the-reader-audit-plan-p3)). Point `gpu doctor --scan` at
 every repository that carries its own copy of the harness binary, and read its "not searched" list: a green audit covers only
@@ -1236,7 +1239,7 @@ is running: seat idle, cards quiet — the holder is draining, queued, loading, 
 lease that is not healthy `held-stalled` (its progress file stopped moving), `held-orphaned` (its owner has been gone
 past `gpu_orphan_grace_min`), `held-overdue` (its declared window ended, its holder still heartbeats; a lease whose term was not renewed is labelled
 expired and says why) and `tree-orphan`
-(not produced yet) — see "Who asked for a lease" and "Terms" in docs/systems/gpu-lease.md — and an
+(the wrapper is gone, the job it started is still running, the card stays claimed until the job ends; `gpu release --epoch N` ends the claim at once and leaves the job running; `gpu reserve --die-with-wrapper` makes a Windows wrapper's death end its job instead, except an instance another lease took over, which is spared and the wrapper says so, and it is refused when the command cannot be put in the job) — see "Who asked for a lease" and "Terms" in docs/systems/gpu-lease.md — and an
 `activity` block with the seat's load state and in-flight count, every registered run (kind, pid, origin,
 goal excerpt, phase, step, tokens, age), a utilization/memory sample per card with the processes on them
 (a display card's processes that nvidia-smi cannot size, the Windows desktop, are one count per card in

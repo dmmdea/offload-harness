@@ -182,11 +182,21 @@ type confinement struct {
 // reliably).
 //
 // A command that pins itself is another matter, and the two kinds of pin differ:
-//   - `--cuda-device` on its command line and COMFY_CUDA_DEVICE are the PROGRAM's own choice
-//     (ComfyUI resets CUDA_VISIBLE_DEVICES from its flag), so overriding the variable would
-//     be futile and a bare index the lease did not count the same way would land on the
-//     wrong card: those are left alone, and the wrapper says so when the pin falls outside
-//     the held cards or cannot be resolved.
+//   - COMFY_CUDA_DEVICE and COMFY_CARD_UUID are the PROGRAM's own choice (ComfyUI resets
+//     CUDA_VISIBLE_DEVICES from the card they name), so setting the variable would be futile.
+//     When one of them reaches outside the held cards, or cannot be resolved, the wrapper
+//     RE-PINS it (GPU-F9): it rewrites that same variable, in the kind the program used, to
+//     the held card (an index to the held card's ComfyUI device index from the card table, never
+//     the nvidia-smi index; a uuid to the held card's uuid) and says so on one line. It never
+//     refuses: the command starts, on the leased card. See gpulease.PlanRepin for the rules
+//     (k cards under n >= k, the order a CUDA_DEVICE_ORDER=PCI_BUS_ID command counts in) and for
+//     what is NOT moved.
+//   - `--cuda-device` on its command line is the program's own argv, which the wrapper does not
+//     rewrite: it is left alone, and the wrapper says so when the pin falls outside the held
+//     cards or cannot be resolved. An environment pin beside an argv one is not moved either,
+//     because the program obeys its argv. A `--cuda-device` in COMFY_EXTRA_ARGS is not read at
+//     all (no note), and an environment pin beside it IS re-pinned: the render layer drops the
+//     extra args' flag whenever COMFY_CUDA_DEVICE or COMFY_CARD_UUID is set.
 //   - a CUDA_VISIBLE_DEVICES the command merely INHERITS (the operator's shell) is not a
 //     choice about this job: when it reaches outside the held cards, or cannot be resolved,
 //     it is REPLACED with the held cards (the wrapper's value is the last in the child's
@@ -198,6 +208,73 @@ func confineWrapped(explicit bool, held, cmdArgs []string, env func(string) stri
 	if !explicit || len(held) == 0 {
 		return confinement{}
 	}
+	base := confineHeld(held, cmdArgs, env, cards)
+	if gpulease.HasCudaDeviceFlag(cmdArgs) {
+		return base // the program obeys its argv, which is not rewritten
+	}
+	// An index in the command's environment is read in the order the CHILD runs under: its own, or nvidia-smi's when the
+	// wrapper sets CUDA_DEVICE_ORDER=PCI_BUS_ID for it.
+	pci := gpulease.ReadsPCIOrder(env) || containsID(base.Env, "CUDA_DEVICE_ORDER=PCI_BUS_ID")
+	plan := gpulease.PlanRepin(held, env, cards, pci)
+	// With no inherited CUDA_VISIBLE_DEVICES and no argv flag the command's own COMFY_CUDA_DEVICE is its only evidence of
+	// where it runs, and the old report-only note was about that very pin.
+	inherited := strings.TrimSpace(env("CUDA_VISIBLE_DEVICES"))
+	onlyIndexPin := inherited == "" || inherited == "-1"
+	if len(plan.Repins) == 0 {
+		if onlyIndexPin && plan.IsInside("COMFY_CUDA_DEVICE") {
+			return confinement{} // inside the lease in the order the child reads it: the command's own business
+		}
+		if len(plan.NotMoved) > 0 {
+			if base.Note != "" {
+				base.Note += " [not re-pinned: " + strings.Join(plan.NotMoved, "; ") + "]"
+			} else {
+				// The generic confinement said nothing (an inherited CUDA_VISIBLE_DEVICES that names a held card makes it
+				// empty), so this is the only report of a pin the wrapper cannot move: the command starts on cards outside
+				// its lease, and the operator is told so.
+				base.Note = fmt.Sprintf("the command pins itself (COMFY_CUDA_DEVICE=%s) outside the cards this lease holds (%s) [not re-pinned: %s]: it is not confined to the lease and may trespass on cards another lease can be granted",
+					strings.Join(strings.Fields(env("COMFY_CUDA_DEVICE")), ""), strings.Join(held, ", "), strings.Join(plan.NotMoved, "; "))
+			}
+		}
+		return base
+	}
+	c := base
+	if onlyIndexPin {
+		for _, r := range plan.Repins {
+			if r.Var == "COMFY_CUDA_DEVICE" {
+				c = confinement{} // the report-only note was about the pin that is moved now
+			}
+		}
+	}
+	lines := make([]string, 0, len(plan.Repins))
+	for _, r := range plan.Repins {
+		c.Env = append(c.Env, r.Env())
+		lines = append(lines, repinLine(r, held, cards))
+	}
+	if c.Note != "" {
+		lines = append([]string{c.Note}, lines...)
+	}
+	if len(plan.NotMoved) > 0 {
+		lines = append(lines, "[not re-pinned: "+strings.Join(plan.NotMoved, "; ")+"]")
+	}
+	c.Note = strings.Join(lines, "; ")
+	return c
+}
+
+// repinLine is the one line that names a moved pin: the old pin, where it pointed, the new pin and the lease.
+func repinLine(r gpulease.Repin, held []string, cards []gpuprobe.Card) string {
+	was := "outside this lease"
+	if r.Unresolved != nil {
+		was = "cannot be resolved to a card: " + strings.TrimPrefix(r.Unresolved.Error(), gpulease.ErrDeviceUnresolved.Error()+": ")
+	} else if len(r.From) > 0 {
+		was = strings.Join(r.From, ", ") + ", outside this lease"
+	}
+	return fmt.Sprintf("the command pinned itself with %s=%s (%s); re-pinned to %s=%s so it starts on the card this lease holds (%s)",
+		r.Var, r.Old, was, r.Var, r.New, strings.Join(held, ", "))
+}
+
+// confineHeld is the confinement of a command to the held cards before any pin of its own is moved: pin it when it names
+// no card, and report (or, for an inherited CUDA_VISIBLE_DEVICES, replace) a pin that falls outside.
+func confineHeld(held, cmdArgs []string, env func(string) string, cards []gpuprobe.Card) confinement {
 	pin := confinement{}
 	uuids := make([]string, 0, len(held))
 	for _, id := range held {
@@ -235,17 +312,7 @@ func confineWrapped(explicit bool, held, cmdArgs []string, env func(string) stri
 // driverUUID is the UUID as the driver reports it for a lease id (the lease records it
 // lower-cased). With no card table it is rebuilt: the driver's form is "GPU-" and the
 // lower-case hex the lease id already carries.
-func driverUUID(id string, cards []gpuprobe.Card) string {
-	for _, c := range cards {
-		if c.LeaseID() == id {
-			return strings.TrimSpace(c.UUID)
-		}
-	}
-	if rest, ok := strings.CutPrefix(id, "gpu-"); ok {
-		return "GPU-" + rest
-	}
-	return id
-}
+func driverUUID(id string, cards []gpuprobe.Card) string { return gpulease.DriverUUID(id, cards) }
 
 func containsID(list []string, id string) bool {
 	for _, x := range list {

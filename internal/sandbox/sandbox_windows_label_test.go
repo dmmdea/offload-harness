@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/dmmdea/offload-harness/internal/proctree"
 )
 
 // The cage lowers the mandatory integrity label of the run's folders so that a low-integrity
@@ -337,7 +339,7 @@ func TestWindowsKillFailureAtTheDeadlineIsReported(t *testing.T) {
 	logged := captureLog(t)
 	realKill := terminateJob
 	t.Cleanup(func() { terminateJob = realKill })
-	terminateJob = func(job windows.Handle, exitCode uint32) error {
+	terminateJob = func(job *proctree.Job, exitCode uint32) error {
 		_ = realKill(job, exitCode)
 		return errRefused
 	}
