@@ -112,3 +112,22 @@ func TestStatusFixtureLeavesTheDriverEventReaderOff(t *testing.T) {
 		t.Fatal("statusFixture must set the driver-event reader nil")
 	}
 }
+
+// A section computes only what it returns. The brief returns the verdict line and the per-card table, neither of which
+// reads a driver event, so a held lease must not make it start the PowerShell read (about 0.6 s, bounded at 8 s) only to
+// throw the answer away; the gpu_lease section and the full answer, which do return the events, read once.
+func TestBriefMakesNoDriverEventReadButTheLeaseSectionDoes(t *testing.T) {
+	s := leasedStatus(t, nil, nil)
+	reads := 0
+	statusDriverEvents = func(context.Context) ([]gpuactivity.DriverEvent, error) { reads++; return nil, nil }
+	for _, tc := range []struct {
+		section string
+		want    int
+	}{{"brief", 0}, {"gpu_lease", 1}, {"all", 1}, {"fleet", 0}} {
+		reads = 0
+		_ = statusCall(t, s, json.RawMessage(`{"section":"`+tc.section+`"}`))
+		if reads != tc.want {
+			t.Errorf("section %s read the driver events %d time(s), want %d", tc.section, reads, tc.want)
+		}
+	}
+}

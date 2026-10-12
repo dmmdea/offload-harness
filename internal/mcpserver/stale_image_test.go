@@ -304,3 +304,23 @@ func TestProcessBlockSaysWhenItsOwnStartupHashIsUnknown(t *testing.T) {
 		t.Fatalf("the missing hash must be explained (the self-hash failed, rows carry no harness_build_sha256), got note %q in %v", note, block)
 	}
 }
+
+// offload_status's description tells a caller to start with section:"brief", and CLAUDE.md makes it the first call of
+// every delegating session: a stale server must be visible THERE, not only in the full answer or when asked for by name.
+func TestStatusBriefCarriesTheStaleImage(t *testing.T) {
+	s, _, _ := statusFixture(t)
+	path := filepath.Join(t.TempDir(), "local-offload.exe")
+	st := installImage(t, path, "0.182.0")
+	s.startup = &st
+	swapImage(t, path, imageBody("0.183.0"))
+	brief := decodeObject(t, statusCall(t, s, json.RawMessage(`{"section":"brief"}`)))
+	block, _ := brief["process"].(map[string]any)
+	if block == nil || block["stale_image"] != true || block["installed_version"] != "0.183.0" || block["version"] != "0.182.0" {
+		t.Fatalf("the brief must carry the process block with the stale image: %v", brief["process"])
+	}
+	// A server that holds no identity has no block there either (absent, as in the full answer), never a null.
+	s.startup = nil
+	if _, present := decodeObject(t, statusCall(t, s, json.RawMessage(`{"section":"brief"}`)))["process"]; present {
+		t.Fatal("a server with no startup identity published a process block in the brief")
+	}
+}

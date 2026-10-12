@@ -317,8 +317,12 @@ func TestStatusBriefIsTheFleetPlusTwoVerdictLinesAndTheCardTable(t *testing.T) {
 	briefRaw := norm(statusCall(t, s, json.RawMessage(`{"section":"brief"}`)))
 	brief := decodeObject(t, briefRaw)
 
-	if keys := sortedKeys(brief); !reflect.DeepEqual(keys, []string{"fleet", "gpu_cards", "gpu_lease_verdict", "local_verdict"}) {
-		t.Fatalf("brief keys = %v, want [fleet gpu_cards gpu_lease_verdict local_verdict]", keys)
+	// process: the stale-image signal (D-36) rides the call the tool's own description tells a caller to make first.
+	if keys := sortedKeys(brief); !reflect.DeepEqual(keys, []string{"fleet", "gpu_cards", "gpu_lease_verdict", "local_verdict", "process"}) {
+		t.Fatalf("brief keys = %v, want [fleet gpu_cards gpu_lease_verdict local_verdict process]", keys)
+	}
+	if !reflect.DeepEqual(brief["process"], full["process"]) {
+		t.Fatalf("brief.process must be the full answer's process block.\n got: %v\nwant: %v", brief["process"], full["process"])
 	}
 	if !reflect.DeepEqual(brief["fleet"], full["fleet"]) {
 		t.Fatalf("brief.fleet must be the full fleet block.\n got: %v\nwant: %v", brief["fleet"], full["fleet"])

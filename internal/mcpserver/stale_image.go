@@ -56,17 +56,19 @@ var hashInstalledImage = func(path string) (string, error) {
 // test makes one read fail.
 var readInstalledVersion = gpulease.ReadBuildMarkerVersion
 
-// installedImages caches what the last moved installed file hashed and stated, keyed by its stat.
+// installedImages caches what the last moved installed file hashed and stated, keyed by its stat. Only a read that
+// succeeded is kept: a failed one (an antivirus or indexer lock on the freshly renamed file, a sharing violation) is a
+// moment, and the file's stat does not change afterwards, so a failure cached against the stat would read "unknown" for
+// the life of the process. The hash and the marker are kept apart, so a retry repeats only the read that failed.
 type installedImages struct {
 	mu      sync.Mutex
-	have    bool
 	path    string
 	size    int64
 	mod     time.Time
+	shaOK   bool
 	sha     string
+	verOK   bool
 	version string
-	hashErr error
-	markErr error
 }
 
 // imageCheck is one comparison of the installed file with the startup identity.
@@ -94,8 +96,14 @@ func (s *Server) statusProcess() any {
 	if chk.stale != nil {
 		block["stale_image"] = *chk.stale
 	}
-	if chk.note != "" {
-		block["note"] = chk.note
+	note := chk.note
+	if st.SHA256 == "" {
+		// Said on every path, the stat-equal one included: the self-hash failure was only logged (to an MCP server's
+		// stderr), and without this the block and every ledger row of the process just lack the hash with no reason.
+		note = joinNotes(note, "this process's self-hash failed at start, so build_sha256 is absent and its ledger rows carry no harness_build_sha256 (restart to retry)")
+	}
+	if note != "" {
+		block["note"] = note
 	}
 	return block
 }
@@ -117,23 +125,51 @@ func (c *installedImages) check(st buildinfo.Startup) imageCheck {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.have || c.path != st.Path || c.size != fi.Size() || !c.mod.Equal(fi.ModTime()) {
-		c.path, c.size, c.mod, c.have = st.Path, fi.Size(), fi.ModTime(), true
-		c.sha, c.hashErr = hashInstalledImage(st.Path)
-		c.version, c.markErr = readInstalledVersion(st.Path)
+	if c.path != st.Path || c.size != fi.Size() || !c.mod.Equal(fi.ModTime()) {
+		c.path, c.size, c.mod = st.Path, fi.Size(), fi.ModTime()
+		c.shaOK, c.sha, c.verOK, c.version = false, "", false, ""
+	}
+	var hashErr, markErr error
+	if !c.shaOK {
+		if sha, err := hashInstalledImage(st.Path); err != nil {
+			hashErr = err
+		} else {
+			c.sha, c.shaOK = sha, true
+		}
+	}
+	if !c.verOK {
+		if v, err := readInstalledVersion(st.Path); err != nil {
+			markErr = err
+		} else {
+			c.version, c.verOK = v, true
+		}
 	}
 	out := imageCheck{}
-	if c.markErr == nil {
+	if c.verOK {
 		out.installedVersion = c.version
 	}
 	switch {
-	case c.hashErr != nil:
-		out.note = fmt.Sprintf("the installed image %s cannot be read (%v), so whether this process is stale is unknown", st.Path, c.hashErr)
+	case hashErr != nil:
+		out.note = fmt.Sprintf("the installed image %s cannot be read (%v), so whether this process is stale is unknown", st.Path, hashErr)
 	case st.SHA256 == "":
 		out.note = "the hash of the image this process started from is unknown (its self-hash failed at start), so it cannot be compared with the installed build"
 	default:
 		stale := c.sha != st.SHA256
 		out.stale = &stale
 	}
+	if markErr != nil && hashErr == nil {
+		out.note = joinNotes(out.note, fmt.Sprintf("the build marker of the installed image %s cannot be read (%v), so installed_version is not given", st.Path, markErr))
+	}
 	return out
+}
+
+// joinNotes joins two notes with "; ", either of which may be empty.
+func joinNotes(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	return a + "; " + b
 }
