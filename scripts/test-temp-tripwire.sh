@@ -26,7 +26,10 @@
 #   --allow-system-drive  accept a PARENT on the system drive. Without it the script refuses and creates nothing.
 #   --remove              remove the folder at the end of a LEAK run too (a CLEAN run always removes its empty folder). Never
 #                         done while a process still runs from it.
-#   --tail N              lines of go test output to show when it fails (default 20; 0 = none)
+#   --tail N              how much go test output to show when it fails: the last N lines, and ahead of them (when the output is
+#                         longer than N) the lines that name what failed -- each "--- FAIL" and "panic:" with the indented lines under
+#                         it, and each "FAIL pkg" line -- because go test prints one "ok" line per later package and the tail alone
+#                         holds nothing else on a whole-module run (default 20; 0 = none)
 #   --verbose             show the full go test output
 #   --name-prefix NAME    print the name prefix a leaked entry NAME is counted under, and exit (a check, no run)
 #   --help                this text
@@ -39,18 +42,29 @@
 #   PROCESSES     2   a process still runs from an image inside the folder (listed with its pid); it wins over LEAK,
 #                     the leaked entries are listed as well
 #   TESTS-FAILED  3   go test failed and the folder is empty: the tests that did not run were not watched
-#   REFUSED       4   PARENT is on the system drive and --allow-system-drive was not given: nothing was created or run
-#   (bad arguments exit 64 and print no verdict)
+#   REFUSED       4   PARENT is on the system drive, or the host cannot tell (a stat that takes no -c, no SystemDrive), and
+#                     --allow-system-drive was not given: nothing was created or run
+#   (bad arguments exit 64 and print no verdict; a temp folder that vanished during the run exits 70 and prints none, because what was
+#   left in it cannot be read)
 # A LEAK or PROCESSES run keeps the folder (it is the evidence) and prints its path; remove it by an explicit list, or
 # run with --remove. When go test fails and the folder is not empty, the verdict is still LEAK or PROCESSES.
+# An interrupted run (INT, TERM or HUP) stops go test's whole process group -- go and every test binary it started, INT first so
+# go test cleans its own work, then TERM, then KILL, each given a bounded time -- names any process that still runs from the
+# folder, keeps the folder, removes its own capture and exits 130. It prints no verdict line.
 #
 # Platform notes. The process check reads /proc/PID/exe, so it needs Linux; where there is no /proc, or only an
 # emulated one that lists just its own processes (Git Bash on Windows), the check is skipped, the output says so, and the
-# verdict line carries "process check skipped": use the PowerShell twin there. "System drive" means the filesystem that holds / (same device), or, where SystemDrive is set (Windows), the
-# drive letter it names. A legitimate leaver is never ignored silently: fix the test, or list the file in the allowlist of
-# tempdir_lint_test.go with its reason.
+# verdict line carries "process check skipped": use the PowerShell twin there. Without the check a folder that holds entries is
+# not removed, not even with --remove, because a process might still run from it. "System drive" means the filesystem that
+# holds / (same device), or, where SystemDrive is set (Windows), the drive letter it names; where neither can be decided the
+# script refuses, as it does for the system drive. A legitimate leaver is never ignored silently: fix the test, or name its
+# prefix and reason in scripts/test-temp-tripwire.ignore (the Usage block above).
+# What it cannot see. Only a child that inherits TMP, TEMP and TMPDIR writes into the watched folder. A child started with a
+# scrubbed environment (the browse sidecar gets an allowlisted one) or a test that names a fixed directory (/dev/shm) writes
+# elsewhere, and a CLEAN verdict says nothing about that; the lint's relaunch-proof test is what covers the scrubbed copy.
 
 set -u
+set -m # job control: go test runs in its own process group, so an interrupt can stop it AND the test binaries it started
 
 PROG=test-temp-tripwire
 
@@ -59,6 +73,7 @@ EXIT_LEAK=1
 EXIT_PROCESSES=2
 EXIT_TESTS_FAILED=3
 EXIT_REFUSED=4
+EXIT_VANISHED=70
 EXIT_USAGE=64
 
 parent='' pkgs='./...' module='' goargs='' allow_system=0 remove=0 tail_n=20 verbose=0 ignore_file='' ignore_explicit=0
@@ -83,6 +98,19 @@ prefixes() {
 		if (match(name, /[0-9]+$/)) { print substr(name, 1, RSTART - 1) "*" ext; next }
 		print name ext
 	}'
+}
+
+# failure_digest FILE: the lines of go test output that name what failed -- every "--- FAIL", "panic:", "fatal error:" and
+# "running tests:" line with the indented lines under it, and every "FAIL pkg" line -- at most 40. The tail cannot do this on a
+# whole-module run: go test prints one "ok" line per package after the failing one.
+failure_digest() {
+	awk -v max=40 '
+		function emit(l) { if (n < max) print "  ! " l; else if (n == max) print "  ! ... more in the run: --verbose shows all of it"; n++ }
+		/^(--- FAIL|panic: |fatal error: |running tests:)/ { cont = 1; emit($0); next }
+		/^FAIL[ \t]/ { cont = 0; emit($0); next }
+		/^[ \t]/ && cont { emit($0); next }
+		{ cont = 0 }
+	' "$1"
 }
 
 die_usage() {
@@ -157,22 +185,29 @@ parent=$(cd "$parent" && pwd -P) || die_usage "cannot enter --dir"
 
 # ------------------------------------------------------------------------------------------- system drive
 
-on_system_drive() { # on_system_drive PATH: 0 when PATH is on the system drive
+on_system_drive() { # on_system_drive PATH: 0 when PATH is on the system drive, 1 when it is not, 2 when this host cannot tell
 	local p=$1 want dev_p dev_root
 	if [ -n "${SYSTEMDRIVE:-${SystemDrive:-}}" ] && command -v cygpath >/dev/null 2>&1; then
 		want=$(printf '%s' "${SYSTEMDRIVE:-$SystemDrive}" | tr 'A-Z' 'a-z')
 		case $(cygpath -m "$p" | tr 'A-Z' 'a-z') in "$want"/* | "$want") return 0 ;; esac
 	fi
-	dev_p=$(stat -c %d "$p" 2>/dev/null) || return 1
-	dev_root=$(stat -c %d / 2>/dev/null) || return 1
-	[ -n "$dev_p" ] && [ "$dev_p" = "$dev_root" ]
+	dev_p=$(stat -c %d "$p" 2>/dev/null) && dev_root=$(stat -c %d / 2>/dev/null) && [ -n "$dev_p" ] && [ -n "$dev_root" ] || return 2
+	[ "$dev_p" = "$dev_root" ]
 }
 
-if [ "$allow_system" = 0 ] && on_system_drive "$parent"; then
-	say refused "'$parent' is on the system drive: the temp dir of a run is not pointed there, because a leak would fill it; give --dir on a data drive, or --allow-system-drive to accept it"
-	echo "TRIPWIRE-VERDICT: REFUSED ($parent is on the system drive; nothing was created or run)"
+sys_rc=0
+on_system_drive "$parent" || sys_rc=$?
+if [ "$allow_system" = 0 ] && [ "$sys_rc" != 1 ]; then
+	if [ "$sys_rc" = 0 ]; then
+		say refused "'$parent' is on the system drive: the temp dir of a run is not pointed there, because a leak would fill it; give --dir on a data drive, or --allow-system-drive to accept it"
+		echo "TRIPWIRE-VERDICT: REFUSED ($parent is on the system drive; nothing was created or run)"
+	else
+		say refused "this host cannot tell whether '$parent' is on the system drive (stat -c %d failed and no SystemDrive names it): give --dir on a data drive and --allow-system-drive to accept the risk"
+		echo "TRIPWIRE-VERDICT: REFUSED (cannot tell whether $parent is on the system drive; nothing was created or run)"
+	fi
 	exit "$EXIT_REFUSED"
 fi
+
 
 # ------------------------------------------------------------------------------------------------- the run
 
@@ -183,12 +218,63 @@ folder=$(mktemp -d "${parent%/}/test-temp-tripwire.XXXXXX") || {
 folder=$(cd "$folder" && pwd -P)
 say folder "$folder"
 
-# go test runs in its own process group so a signal to this script reaches it, and the folder is reported on every exit.
+procs=0 proc_check=1
+
+# count_processes: counts, and names, the processes that run from an image inside $folder. Sets procs and proc_check (0 when the
+# check cannot run here).
+count_processes() {
+	local p exe
+	procs=0 proc_check=1
+	case $(uname -s 2>/dev/null) in MINGW* | MSYS* | CYGWIN*) proc_check=0 ;; esac # their /proc lists only their own processes
+	if [ "$proc_check" = 1 ] && [ -r /proc/self/exe ]; then
+		for p in /proc/[0-9]*; do
+			exe=$(readlink "$p/exe" 2>/dev/null) || continue
+			exe=${exe% (deleted)}
+			case $exe in
+			"$folder"/*)
+				say process "pid ${p#/proc/}  $exe"
+				procs=$((procs + 1))
+				;;
+			esac
+		done
+	else
+		proc_check=0
+		say note "no usable /proc here: the process check is skipped; use the PowerShell twin on this host"
+	fi
+}
+
+# group_alive PID: 0 while the process group PID leads (or, where groups cannot be addressed, the process PID) has a member
+group_alive() { kill -0 -- "-$1" 2>/dev/null || kill -0 "$1" 2>/dev/null; }
+
+# stop_group PID: stops the process group job control gave go test -- go and every test binary it started. INT first, which is
+# what a Ctrl-C would have sent, so go test ends its test binaries and cleans its own work; then TERM; then KILL. Each step gets
+# a bounded time (10 s, 5 s, 5 s), and the next one runs only when a member is still there.
+stop_group() {
+	local sig i limit
+	for sig in INT TERM KILL; do
+		group_alive "$1" || return 0
+		kill -"$sig" -- "-$1" 2>/dev/null || kill -"$sig" "$1" 2>/dev/null
+		limit=25
+		[ "$sig" = INT ] && limit=50
+		for ((i = 0; i < limit; i++)); do
+			group_alive "$1" || return 0
+			sleep 0.2
+		done
+	done
+}
+
+# The run is interrupted (INT, TERM, HUP): go test is stopped together with the test binaries it started, the folder is kept as
+# evidence with the processes that still run from it named, and the script's own capture goes.
 out="$folder.go.out"
 child=''
 on_signal() {
-	[ -n "$child" ] && kill -TERM "$child" 2>/dev/null
-	say interrupted "the run was stopped; the folder is $folder"
+	trap '' INT TERM HUP # a second signal must not cut the cleanup short
+	[ -n "$child" ] && stop_group "$child"
+	child=''
+	say interrupted "the run was stopped; the folder is $folder (kept as evidence; remove it by an explicit list when it has been read)"
+	count_processes
+	[ "$procs" != 0 ] && say interrupted "$procs process(es) still run from images inside the folder"
+	case $out in "${parent%/}"/test-temp-tripwire.*.go.out) rm -f -- "$out" ;; esac
 	exit 130
 }
 trap on_signal INT TERM HUP
@@ -198,7 +284,7 @@ start=$(date +%s)
 (
 	cd "$module" || exit 125
 	exec env TMP="$folder" TEMP="$folder" TMPDIR="$folder" GOTMPDIR="$folder" go test -count=1 $goargs $pkgs
-) >"$out" 2>&1 &
+) >"$out" 2>&1 </dev/null &
 child=$!
 wait "$child"
 rc=$?
@@ -209,12 +295,27 @@ say "go test" "$pkgs (exit $rc, ${secs}s)"
 if [ "$verbose" = 1 ]; then
 	cat "$out"
 elif [ "$rc" != 0 ] && [ "$tail_n" != 0 ]; then
+	if [ "$(wc -l <"$out" | tr -d ' ')" -gt "$tail_n" ]; then # the tail does not show it all: name what failed first
+		digest=$(failure_digest "$out")
+		if [ -n "$digest" ]; then
+			say failed "what go test reported as failed (the last $tail_n lines follow)"
+			printf '%s\n' "$digest"
+		fi
+	fi
 	tail -n "$tail_n" "$out" | sed 's/^/  | /'
 fi
 
 # ------------------------------------------------------------------------------------------ what is left
 
-entries=$(cd "$folder" && ls -A1 2>/dev/null | sort)
+# A folder that is gone was removed by something during the run (a test that removes its own temp dir, say): an empty listing of it
+# would read as CLEAN, so it is an error.
+if [ ! -d "$folder" ]; then
+	printf '%s: the temp folder %s is gone: something removed it during the run, so what was left cannot be read\n' "$PROG" "$folder" >&2
+	case $out in "${parent%/}"/test-temp-tripwire.*.go.out) rm -f -- "$out" ;; esac
+	exit "$EXIT_VANISHED"
+fi
+
+entries=$(cd "$folder" && ls -A1 | sort)
 n_total=0
 [ -n "$entries" ] && n_total=$(printf '%s\n' "$entries" | wc -l | tr -d ' ')
 
@@ -246,23 +347,8 @@ if [ "$n_total" != 0 ]; then
 	printf '%s\n' "$split" | awk -F'\t' -v prog="$PROG" '$1 == "I" { printf "%s: ignored   %5s  %s  (%s)\n", prog, $2, $3, $4 }'
 fi
 
-procs=0 proc_check=1
-case $(uname -s 2>/dev/null) in MINGW* | MSYS* | CYGWIN*) proc_check=0 ;; esac # their /proc lists only their own processes
-if [ "$proc_check" = 1 ] && [ -r /proc/self/exe ]; then
-	for p in /proc/[0-9]*; do
-		exe=$(readlink "$p/exe" 2>/dev/null) || continue
-		exe=${exe% (deleted)}
-		case $exe in
-		"$folder"/*)
-			say process "pid ${p#/proc/}  $exe"
-			procs=$((procs + 1))
-			;;
-		esac
-	done
-else
-	proc_check=0
-	say note "no usable /proc here: the process check is skipped; use the PowerShell twin on this host"
-fi
+
+count_processes
 
 skip_note=''
 [ "$proc_check" = 0 ] && skip_note=', process check skipped'
@@ -284,12 +370,23 @@ else
 	code=$EXIT_CLEAN
 fi
 
-# The empty folder of a run that left nothing goes. A folder with entries is the evidence: kept unless --remove, and
-# never removed while a process runs from it. The go test capture is always the script's own file and always goes.
-if [ "$procs" = 0 ] && { [ "$n_entries" = 0 ] || [ "$remove" = 1 ]; }; then
+# The empty folder of a run that left nothing goes. A folder with entries is the evidence: kept unless --remove, and never
+# removed while a process runs from it -- nor when the process check could not run, because one might. The go test capture is
+# always the script's own file and always goes.
+remove_ok=0
+if [ "$procs" = 0 ]; then
+	if [ "$n_total" = 0 ]; then
+		remove_ok=1
+	elif [ "$proc_check" = 1 ] && { [ "$n_entries" = 0 ] || [ "$remove" = 1 ]; }; then
+		remove_ok=1
+	fi
+fi
+if [ "$remove_ok" = 1 ]; then
 	case $folder in
 	"${parent%/}"/test-temp-tripwire.*) rm -rf -- "$folder" ;;
 	esac
+elif [ "$procs" = 0 ] && [ "$proc_check" = 0 ]; then
+	say kept "$folder (the process check could not run, so a process might still run from it; remove it by an explicit list when it has been read)"
 else
 	say kept "$folder (remove it by an explicit list when it has been read)"
 fi

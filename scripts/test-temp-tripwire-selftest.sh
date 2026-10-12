@@ -11,9 +11,14 @@
 #   TESTS-FAILED  ./failing  a failing test, nothing left         exit 3, no folder left
 #   REFUSED       --dir /    a folder on the system drive         exit 4, nothing created
 #   usage errors, a leak beside a failing package, the name-prefix rules, and -- when pwsh is on PATH -- the PowerShell twin
-#   giving the same verdicts, exit codes and leak lines on the same fixture.
+#   giving the same verdicts, exit codes and leak lines on the same fixture. Also pinned (review round): a failure followed by a
+#   passing package is named although the tail shows one line; a stat that fails refuses the folder; a host without a usable
+#   /proc says so and does not remove a folder with entries; a temp folder removed during the run exits 70; and, on Linux, a
+#   run interrupted by TERM or HUP leaves no test binary running from the folder, keeps the folder and removes its capture
+#   (./hanger, a test that sleeps 40 s, is the binary).
 #
 # Usage: bash scripts/test-temp-tripwire-selftest.sh      (needs the Go toolchain on PATH; exits 1 if any check fails)
+# TRIPWIRE_SELFTEST_FAILFAST=1 ends the run at the first failed check (a mutation check needs only the first red).
 # TRIPWIRE_SELFTEST_NO_SPAWNER=1 leaves out the PROCESSES case (where the sleeper cannot be killed the run waits for it to end).
 # Scratch: $TRIPWIRE_SELFTEST_DIR, else $TMPDIR, else /tmp; it should be on a data drive (the script refuses the system
 # drive, and the self-test then passes --allow-system-drive for the cases that need a folder). Removed on exit.
@@ -72,7 +77,11 @@ skip=0
 out='' rc=0
 
 ok() { pass=$((pass + 1)); printf 'ok    %s\n' "$1"; }
-bad() { fail=$((fail + 1)); printf 'FAIL  %s\n' "$1"; }
+bad() {
+	fail=$((fail + 1))
+	printf 'FAIL  %s\n' "$1"
+	[ -z "${TRIPWIRE_SELFTEST_FAILFAST:-}" ] || exit 1
+}
 skipped() { skip=$((skip + 1)); printf 'skip  %s\n' "$1"; }
 
 expect() { # expect WHAT GOT WANT
@@ -90,6 +99,21 @@ run() { # run ARGS... : the tripwire with ARGS; sets out and rc
 	rc=$?
 }
 verdict_of() { printf '%s\n' "$out" | sed -n 's/^TRIPWIRE-VERDICT: \([A-Z-]*\).*/\1/p' | tail -n 1; }
+# proc_ok: 1 where the tripwire can look at running processes (a real /proc), 0 where it says it cannot (Git Bash's emulated one)
+proc_ok=1
+case $(uname -s 2>/dev/null) in MINGW* | MSYS* | CYGWIN*) proc_ok=0 ;; esac
+[ -r /proc/self/exe ] || proc_ok=0
+# procs_under DIR: the pids of the processes that run from an image inside DIR (Linux only)
+procs_under() {
+	local p exe
+	[ "$proc_ok" = 1 ] || return 0
+	for p in /proc/[0-9]*; do
+		exe=$(readlink "$p/exe" 2>/dev/null) || continue
+		exe=${exe% (deleted)}
+		case $exe in "$1"/*) printf '%s\n' "${p#/proc/}" ;; esac
+	done
+}
+stray_captures() { find "$root" -mindepth 1 -maxdepth 1 -name 'test-temp-tripwire.*.go.out' 2>/dev/null | wc -l | tr -d ' '; }
 folders_in() { find "$root" -mindepth 1 -maxdepth 1 -name 'test-temp-tripwire.*' 2>/dev/null | wc -l | tr -d ' '; }
 leak_lines() { printf '%s\n' "$out" | grep -E '^test-temp-tripwire:  +[0-9]+  ' | sed 's/^test-temp-tripwire: *//'; }
 
@@ -140,7 +164,13 @@ cleanup_kept() { case $kept in "$root"/test-temp-tripwire.*) remove_tree "$kept"
 cleanup_kept
 run "${common[@]}" --pkgs ./leaker --remove
 expect "leak with --remove: exit is still LEAK" "$rc" 1
-expect "leak with --remove: the folder is removed" "$(folders_in)" 0
+if [ "$proc_ok" = 1 ]; then
+	expect "leak with --remove: the folder is removed" "$(folders_in)" 0
+else
+	# no process check here: the folder is not removed while a process might still run from it
+	expect "leak with --remove, no process check: the folder is kept" "$(folders_in)" 1
+	cleanup_kept_all
+fi
 
 # --- the reasoned ignore list
 printf '# a comment\n\ntripwire-leak-*\tthe fixture leaves these on purpose\n' >"$root/ignore.txt"
@@ -150,7 +180,12 @@ expect "ignore list naming the leak: verdict" "$(verdict_of)" CLEAN
 expect_has "ignore list naming the leak: the group is printed with its reason, not hidden" "$out" "ignored       3  tripwire-leak-*  (the fixture leaves these on purpose)"
 expect_lacks "ignore list naming the leak: it is not reported as a leak" "$out" "test-temp-tripwire: left"
 expect_has "ignore list naming the leak: the verdict says how many were not counted" "$out" "3 entries named by the ignore list were not counted"
-expect "ignore list naming the leak: the folder goes" "$(folders_in)" 0
+if [ "$proc_ok" = 1 ]; then
+	expect "ignore list naming the leak: the folder goes" "$(folders_in)" 0
+else
+	expect "ignore list naming the leak, no process check: the folder is kept (it holds entries)" "$(folders_in)" 1
+	cleanup_kept_all
+fi
 printf 'something-else-*\tnot what the fixture leaves\n' >"$root/ignore-other.txt"
 run "${common[@]}" --pkgs ./leaker --ignore-file "$root/ignore-other.txt"
 expect "ignore list naming something else: exit" "$rc" 1
@@ -170,6 +205,7 @@ cp -R "$fixture" "$root/fixmod" && mkdir -p "$root/fixmod/scripts" && printf 'tr
 run --dir "$root" --module "$root/fixmod" ${allow:+"$allow"} --pkgs ./leaker
 expect "default ignore list: exit" "$rc" 0
 expect_has "default ignore list: the reason is printed" "$out" "(the default list names it)"
+cleanup_kept_all
 
 # --- TESTS-FAILED
 run "${common[@]}" --pkgs ./failing
@@ -183,6 +219,67 @@ run "${common[@]}" --pkgs "./leaker ./failing"
 expect "leak beside a failing package: exit" "$rc" 1
 expect "leak beside a failing package: verdict" "$(verdict_of)" LEAK
 cleanup_kept_all
+
+# --- a failure that is not at the end of the output is still named. go test prints one "ok" line per later package, so the last
+# lines of a whole-module run hold only "ok" lines; the failing test and its message have to be reported on their own.
+run "${common[@]}" --pkgs "./failing ./clean" --tail 1
+expect "failure followed by a passing package, --tail 1: exit" "$rc" 3
+expect "failure followed by a passing package, --tail 1: verdict" "$(verdict_of)" TESTS-FAILED
+expect_has "failure followed by a passing package, --tail 1: the failing test is named" "$out" "--- FAIL: TestFails"
+expect_has "failure followed by a passing package, --tail 1: its message is shown" "$out" "this test fails on purpose"
+expect "failure followed by a passing package: the empty folder is gone" "$(folders_in)" 0
+expect "failure followed by a passing package: no capture is left beside it" "$(stray_captures)" 0
+run "${common[@]}" --pkgs ./failing --tail 0
+expect_lacks "--tail 0 shows no go test output" "$out" "this test fails on purpose"
+cleanup_kept_all
+
+# --- a refusal that cannot be decided is a refusal. A host whose stat does not take -c (BSD, BusyBox) cannot say which
+# filesystem holds the folder; the guard must not read that as "not the system drive".
+if [ -z "$allow" ]; then
+	mkdir -p "$root/stub-stat"
+	printf '#!/bin/sh\nexit 1\n' >"$root/stub-stat/stat"
+	chmod +x "$root/stub-stat/stat"
+	out=$(PATH="$root/stub-stat:$PATH" "$bash_bin" "$tripwire" --dir "$root" --module "$fixture" --pkgs ./clean 2>&1)
+	rc=$?
+	expect "stat that fails: exit (refused)" "$rc" 4
+	expect "stat that fails: verdict" "$(verdict_of)" REFUSED
+	expect_has "stat that fails: the output says it could not tell" "$out" "cannot tell"
+	expect "stat that fails: nothing was created" "$(folders_in)" 0
+	out=$(PATH="$root/stub-stat:$PATH" "$bash_bin" "$tripwire" --dir "$root" --module "$fixture" --pkgs ./clean --allow-system-drive 2>&1)
+	rc=$?
+	expect "stat that fails, with --allow-system-drive: the run goes ahead" "$rc" 0
+else
+	skipped "stat that fails: the scratch root is on the system drive, so the guard is not what decides here"
+fi
+
+# --- a process check that cannot run is said, and the folder is not removed on its account. A uname that answers like Git Bash
+# makes this host look like one without a usable /proc.
+mkdir -p "$root/stub-uname"
+printf '#!/bin/sh\necho MINGW64_NT-10.0\n' >"$root/stub-uname/uname"
+chmod +x "$root/stub-uname/uname"
+out=$(PATH="$root/stub-uname:$PATH" "$bash_bin" "$tripwire" "${common[@]}" --pkgs ./clean 2>&1)
+rc=$?
+expect "no process check, nothing left: exit" "$rc" 0
+expect_has "no process check, nothing left: the verdict says the check was skipped" "$out" "process check skipped"
+expect "no process check, nothing left: the empty folder is gone" "$(folders_in)" 0
+out=$(PATH="$root/stub-uname:$PATH" "$bash_bin" "$tripwire" "${common[@]}" --pkgs ./leaker --remove 2>&1)
+rc=$?
+expect "no process check, a leak, --remove: exit" "$rc" 1
+expect_has "no process check, a leak, --remove: the verdict says the check was skipped" "$out" "process check skipped"
+expect "no process check, a leak, --remove: the folder is kept, because a process might run from it" "$(folders_in)" 1
+cleanup_kept_all
+
+# --- a temp folder that vanishes during the run is an error, not a clean run. A go that deletes the folder it was given stands in
+# for a test that removes its own temp dir: an empty listing of a folder that is gone would read as CLEAN.
+mkdir -p "$root/stub-go"
+printf '#!/bin/sh\nrm -rf "$GOTMPDIR"\nexit 0\n' >"$root/stub-go/go"
+chmod +x "$root/stub-go/go"
+out=$(PATH="$root/stub-go:$PATH" "$bash_bin" "$tripwire" "${common[@]}" --pkgs ./clean 2>&1)
+rc=$?
+expect "folder removed during the run: exit" "$rc" 70
+expect_has "folder removed during the run: the output says it is gone" "$out" "is gone"
+expect "folder removed during the run: no verdict is printed" "$(verdict_of)" ""
+expect "folder removed during the run: no capture is left beside it" "$(stray_captures)" 0
 
 # --- PROCESSES
 if [ -n "${TRIPWIRE_SELFTEST_NO_SPAWNER:-}" ]; then
@@ -228,6 +325,55 @@ else
 	cleanup_kept_all
 	# a sleeper the case started on a host whose process check is skipped ends by itself within its bounded sleep; the
 	# scratch removal below waits for the image to be free only where the OS needs that
+fi
+
+# --- an interrupted run stops the test binaries it started, not only go. A run is stopped while the ./hanger test binary is
+# running from inside the watched folder; afterwards no process may run from the scratch root, the capture file must be gone,
+# the folder stays as evidence, and the exit code is the interrupt's (130). Linux only: the check reads /proc and signals the
+# process group that job control gives the go test.
+interrupt_case() { # interrupt_case SIGNAL
+	local sig=$1 pid waited=0 alive=0 left strays
+	"$bash_bin" "$tripwire" "${common[@]}" --pkgs ./hanger >"$root/interrupt.out" 2>&1 &
+	pid=$!
+	while [ "$waited" -lt 600 ] && [ -z "$(procs_under "$root")" ]; do sleep 0.2; waited=$((waited + 1)); done
+	if [ -z "$(procs_under "$root")" ]; then
+		bad "interrupt $sig: the hanger test binary never ran from the folder (waited 120 s)"
+		kill "$pid" 2>/dev/null
+		return
+	fi
+	pids="$pids $(procs_under "$root" | tr '\n' ' ')" # the cleanup at the end kills any survivor
+	kill -"$sig" "$pid"
+	for _ in $(seq 1 200); do kill -0 "$pid" 2>/dev/null || break; sleep 0.3; done
+	if kill -0 "$pid" 2>/dev/null; then
+		bad "interrupt $sig: the tripwire is still running 60 s after the signal"
+		kill -KILL "$pid" 2>/dev/null
+	else
+		wait "$pid" 2>/dev/null
+		rc=$?
+		expect "interrupt $sig: exit code" "$rc" 130
+	fi
+	out=$(cat "$root/interrupt.out")
+	expect_has "interrupt $sig: it says the run was stopped" "$out" "interrupted"
+	left=$(procs_under "$root" | tr '\n' ' ')
+	expect "interrupt $sig: no process runs from the scratch root afterwards" "$left" ""
+	expect "interrupt $sig: the folder is kept as evidence" "$(find "$root" -mindepth 1 -maxdepth 1 -type d -name 'test-temp-tripwire.*' | wc -l | tr -d ' ')" 1
+	strays=$(stray_captures)
+	expect "interrupt $sig: the go test capture is gone" "$strays" 0
+	for p in $left; do kill -KILL "$p" 2>/dev/null; done
+	cleanup_kept_all
+	remove_tree "$root/interrupt.out"
+}
+if [ "$proc_ok" = 1 ] && [ -d "$fixture/hanger" ]; then
+	interrupt_case TERM
+	# a SIGHUP that was ignored when this self-test started (nohup) is ignored by every script it starts and cannot be trapped
+	sig_ign=$(awk '/^SigIgn/ { print $2 }' /proc/$$/status 2>/dev/null)
+	if [ -n "$sig_ign" ] && [ $((0x$sig_ign & 1)) -ne 0 ]; then
+		skipped "interrupt HUP: SIGHUP is ignored in this shell (started with nohup), so the tripwire cannot trap it"
+	else
+		interrupt_case HUP
+	fi
+else
+	skipped "interrupt: needs a real /proc and process groups (a Linux host); the PowerShell twin is stopped through its own self-test"
 fi
 
 # --- the name-prefix rules (the PowerShell twin is held to the same table)

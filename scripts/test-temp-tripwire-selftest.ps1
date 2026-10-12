@@ -11,11 +11,16 @@
 #   TESTS-FAILED  ./failing  a failing test, nothing left         exit 3, no folder left
 #   REFUSED       the system drive                                 exit 4, nothing created
 #   usage errors, a leak beside a failing package, the name-prefix rules, and -- when a Git bash is on PATH -- the shell
-#   twin giving the same verdicts, exit codes and leak lines on the same fixture.
+#   twin giving the same verdicts, exit codes and leak lines on the same fixture. Also pinned (review round): a failure followed
+#   by a passing package is named although the tail shows one line; a missing SystemDrive refuses the folder; a process query
+#   that fails is said and does not remove a folder with entries; a temp folder removed during the run exits 70; and a run whose
+#   pipeline is stopped answers within 20 s while ./hanger (a test that sleeps 40 s) runs, leaves no test binary running from the
+#   folder, keeps the folder and removes its captures.
 #
 # Usage: pwsh -File scripts/test-temp-tripwire-selftest.ps1      (needs the Go toolchain on PATH; exits 1 if any check fails)
 # Scratch: $env:TRIPWIRE_SELFTEST_DIR, else the system temp dir; it should be on a data drive (the script refuses the system
 # drive, and the self-test then passes -AllowSystemDrive for the cases that need a folder). Removed on exit.
+# TRIPWIRE_SELFTEST_FAILFAST=1 ends the run at the first failed check (a mutation check needs only the first red).
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -56,7 +61,11 @@ $script:Rc = 0
 $script:Pids = @()
 
 function Ok([string]$What) { $script:Pass++; Write-Host "ok    $What" }
-function Bad([string]$What) { $script:Fail++; Write-Host "FAIL  $What" }
+function Bad([string]$What) {
+    $script:Fail++
+    Write-Host "FAIL  $What"
+    if ($env:TRIPWIRE_SELFTEST_FAILFAST) { throw 'stopped at the first failed check (TRIPWIRE_SELFTEST_FAILFAST)' }
+}
 function Skipped([string]$What) { $script:Skip++; Write-Host "skip  $What" }
 function Expect([string]$What, $Got, $Want) {
     if ("$Got" -eq "$Want") { Ok $What } else { Bad "${What}: got '$Got', want '$Want'" }
@@ -103,6 +112,12 @@ function Leak-Lines {
     return (($script:Out -split "`n" | Where-Object { $_ -match '^test-temp-tripwire:  +[0-9]+  ' } | ForEach-Object { $_ -replace '^test-temp-tripwire: *', '' }) -join "`n")
 }
 function Clean-Kept { Get-ChildItem -LiteralPath $root -Directory -Filter 'test-temp-tripwire.*' -ErrorAction SilentlyContinue | ForEach-Object { Remove-Tree $_.FullName } }
+# Stray-Captures: the go test capture files a run leaves beside its folder (the script owns them and always removes them)
+function Stray-Captures { return @(Get-ChildItem -LiteralPath $root -File -Filter 'test-temp-tripwire.*' -ErrorAction SilentlyContinue).Count }
+# Get-RunningFrom: the processes (Windows) that run from an image inside DIR
+function Get-RunningFrom([string]$Dir) {
+    return @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ExecutablePath | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Dir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) })
+}
 
 try {
     # --- usage errors (no verdict line, exit 64)
@@ -199,6 +214,52 @@ try {
     Expect 'leak beside a failing package: verdict' (Verdict-Of) 'LEAK'
     Clean-Kept
 
+    # --- a failure that is not at the end of the output is still named. go test prints one "ok" line per later package, so the
+    # last lines of a whole-module run hold only "ok" lines; the failing test and its message have to be reported on their own.
+    Run ($common + @('-Pkgs', './failing ./clean', '-Tail', '1'))
+    Expect 'failure followed by a passing package, -Tail 1: exit' $script:Rc 3
+    Expect 'failure followed by a passing package, -Tail 1: verdict' (Verdict-Of) 'TESTS-FAILED'
+    Expect-Has 'failure followed by a passing package, -Tail 1: the failing test is named' $script:Out '--- FAIL: TestFails'
+    Expect-Has 'failure followed by a passing package, -Tail 1: its message is shown' $script:Out 'this test fails on purpose'
+    Expect 'failure followed by a passing package: the empty folder is gone' (Folders-In) 0
+    Expect 'failure followed by a passing package: no capture is left beside it' (Stray-Captures) 0
+    Run ($common + @('-Pkgs', './failing', '-Tail', '0'))
+    if ($script:Out.Contains('this test fails on purpose')) { Bad '-Tail 0 shows no go test output: it shows the message' } else { Ok '-Tail 0 shows no go test output' }
+    Clean-Kept
+
+    # --- a refusal that cannot be decided is a refusal. Without SystemDrive the guard cannot say which drive is the system drive,
+    # and must not read that as "not the system drive". (A child process, so the variable is gone for the script only.)
+    if ($onWindows -and -not ($common -contains '-AllowSystemDrive')) {
+        $cmd = "`$env:SystemDrive = ''; & '$tripwire' -Dir '$root' -Module '$fixture' -Pkgs './clean'; exit `$LASTEXITCODE"
+        $script:Out = Invoke-Native { & $psExe @psArgs -Command $cmd }
+        Expect 'no SystemDrive: exit (refused)' $script:Rc 4
+        Expect 'no SystemDrive: verdict' (Verdict-Of) 'REFUSED'
+        Expect-Has 'no SystemDrive: the output says it could not tell' $script:Out 'cannot tell'
+        Expect 'no SystemDrive: nothing was created' (Folders-In) 0
+    } else {
+        Skipped 'no SystemDrive: Windows only, and the scratch root must be off the system drive'
+    }
+
+    # --- a process check that cannot run is said, and the folder is not removed on its account. The query is made to fail by a
+    # function of the same name in the caller's scope (a function wins over a cmdlet).
+    if ($onWindows) {
+        $allowArg = if ($common -contains '-AllowSystemDrive') { ' -AllowSystemDrive' } else { '' }
+        $cmd = "function Get-CimInstance { [CmdletBinding()] param([string]`$ClassName, [string[]]`$Property) Write-Error 'injected failure' }; & '$tripwire' -Dir '$root' -Module '$fixture' -Pkgs './clean'$allowArg; exit `$LASTEXITCODE"
+        $script:Out = Invoke-Native { & $psExe @psArgs -Command $cmd }
+        Expect 'process query fails, nothing left: exit' $script:Rc 0
+        Expect-Has 'process query fails, nothing left: the verdict says the check was skipped' $script:Out 'process check skipped'
+        Expect-Has 'process query fails, nothing left: the output says why' $script:Out 'injected failure'
+        Expect 'process query fails, nothing left: the empty folder is gone' (Folders-In) 0
+        $cmd = "function Get-CimInstance { [CmdletBinding()] param([string]`$ClassName, [string[]]`$Property) Write-Error 'injected failure' }; & '$tripwire' -Dir '$root' -Module '$fixture' -Pkgs './leaker' -Remove$allowArg; exit `$LASTEXITCODE"
+        $script:Out = Invoke-Native { & $psExe @psArgs -Command $cmd }
+        Expect 'process query fails, a leak, -Remove: exit' $script:Rc 1
+        Expect-Has 'process query fails, a leak, -Remove: the verdict says the check was skipped' $script:Out 'process check skipped'
+        Expect 'process query fails, a leak, -Remove: the folder is kept, because a process might run from it' (Folders-In) 1
+        Clean-Kept
+    } else {
+        Skipped 'process query fails: the query is Win32_Process, Windows only'
+    }
+
     # --- PROCESSES
     Run ($common + @('-Pkgs', './spawner'))
     $printed = @([regex]::Matches($script:Out, '(?m)^test-temp-tripwire: process   pid ([0-9]+) ') | ForEach-Object { [int]$_.Groups[1].Value })
@@ -224,6 +285,60 @@ try {
     }
     Stop-Sleepers $printed
     Clean-Kept
+
+    # --- an interrupted run stops the test binaries it started, not only go, and answers the interrupt at once. The run is a script
+    # in a runspace of this process that is stopped (as Ctrl-C stops a pipeline) while the ./hanger test binary, which sleeps 40 s,
+    # runs from the watched folder. A wait that cannot be interrupted makes the stop take the whole 40 s; the survivors, the folder
+    # and the capture files are read from the disk afterwards.
+    if ($onWindows) {
+        $jobAllow = ($common -contains '-AllowSystemDrive')
+        $runner = [powershell]::Create()
+        $null = $runner.AddScript({
+                param($tw, $dir, $mod, $allow)
+                if ($allow) { & $tw -Dir $dir -Module $mod -Pkgs './hanger' -AllowSystemDrive } else { & $tw -Dir $dir -Module $mod -Pkgs './hanger' }
+            }).AddArgument($tripwire).AddArgument($root).AddArgument($fixture).AddArgument($jobAllow)
+        $async = $runner.BeginInvoke()
+        $running = $false
+        for ($i = 0; $i -lt 240 -and -not $running; $i++) { Start-Sleep -Milliseconds 500; $running = @(Get-RunningFrom $root).Count -gt 0 }
+        if (-not $running) {
+            Bad 'interrupt: the hanger test binary never ran from the folder (waited 120 s)'
+            $runner.Stop()
+        } else {
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            $runner.Stop()
+            $took = [int]$watch.Elapsed.TotalSeconds
+            if ($took -le 20) { Ok "interrupt: the run stopped within 20 s of the signal (took $took s; the test sleeps 40 s)" } else { Bad "interrupt: the run took $took s to stop (the test sleeps 40 s): the wait for go test cannot be interrupted" }
+            $survivors = @(Get-RunningFrom $root)
+            $script:Pids += @($survivors | ForEach-Object { [int]$_.ProcessId })
+            Expect 'interrupt: no process runs from the scratch root afterwards' $survivors.Count 0
+            Expect 'interrupt: the folder is kept as evidence' (Folders-In) 1
+            Expect 'interrupt: the go test captures are gone' (Stray-Captures) 0
+            $said = (@($runner.Streams.Information | ForEach-Object { "$_" }) -join "`n")
+            Expect-Has 'interrupt: it says the run did not finish' $said 'did not finish'
+        }
+        $runner.Dispose()
+        Stop-Sleepers $script:Pids
+        Clean-Kept
+    } else {
+        Skipped 'interrupt: the runspace-stop case is Windows only (the shell self-test stops its own twin on Linux)'
+    }
+
+    # --- a temp folder that vanishes during the run is an error, not a clean run. A go that deletes the folder it was given stands
+    # in for a test that removes its own temp dir; the script must say so (exit 70) instead of reading an empty listing as CLEAN.
+    if ($onWindows) {
+        $stubGo = Join-Path $root 'stub-go'
+        New-Item -ItemType Directory -Path $stubGo -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $stubGo 'go.cmd'), "@echo off`r`nrd /s /q `"%GOTMPDIR%`"`r`nexit /b 0`r`n")
+        $allowArg = if ($common -contains '-AllowSystemDrive') { ' -AllowSystemDrive' } else { '' }
+        $cmd = "`$env:PATH = '$stubGo;' + `$env:PATH; & '$tripwire' -Dir '$root' -Module '$fixture' -Pkgs './clean'$allowArg; exit `$LASTEXITCODE"
+        $script:Out = Invoke-Native { & $psExe @psArgs -Command $cmd }
+        Expect 'folder removed during the run: exit' $script:Rc 70
+        Expect-Has 'folder removed during the run: the output says it is gone' $script:Out 'is gone'
+        Expect 'folder removed during the run: no verdict is printed' (Verdict-Of) ''
+        Expect 'folder removed during the run: no capture is left beside it' (Stray-Captures) 0
+    } else {
+        Skipped 'folder removed during the run: the stand-in go is a .cmd, Windows only'
+    }
 
     # --- the name-prefix rules (the shell twin is held to the same table)
     $table = @(
