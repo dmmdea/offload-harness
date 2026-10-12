@@ -1,0 +1,8 @@
+//go:build !windows
+
+package spawner
+
+import "os/exec"
+
+// hideWindow has nothing to do where there are no console windows.
+func hideWindow(cmd *exec.Cmd) {}
