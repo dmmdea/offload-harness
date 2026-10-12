@@ -702,7 +702,7 @@ is `--ram 0` on that `gpu reserve`, because the card-only placement keeps its we
 commit 090fbd95, the tip of this branch before its second review round; that round's fixes were not re-run on the cards.
 The film geometry (720x1280x81, 20 steps, boundary at 10, cfg 3.5, fp8 experts, plain decode) ran at 250.5 s per step on both experts: the runner
 took 5136 s (85.6 min), of which 67 s to the first step, 24 s for the hand-over to the second expert and 31.5 s from the free node to the finished
-video (the free node released both cards in 1.1 s, leaving 14.4 GiB on each; the plain decode asks about 10.2). Per card (nvidia-smi): the compute card
+video (the free node released both cards in 1.1 s, leaving 14.4 and 14.6 GiB free; the plain decode asks about 10.2). Per card (nvidia-smi): the compute card
 13.3 to 13.65 GiB while the first expert samples, 15.18 GiB (95.3 % of the card, with 3.0 GiB of the expert resident) at the peak, which comes about 90 s
 before the hand-over, and 14.9 GiB steady while the second samples; the storage card 10.86 GiB (68 %). The compute card therefore keeps a margin of
 0.7 GiB at the peak, and each GiB more kept resident is a GiB less of it: the runner refuses more than 3.2 GiB at this geometry, and a larger clip needs
