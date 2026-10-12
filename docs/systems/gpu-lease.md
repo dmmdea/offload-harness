@@ -34,6 +34,10 @@ other on a single shared card.
 | `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
 | `internal/gpucards` | the per-card view (`Rows`, `LeaseRows`, `QueueRows`, `Table`, `Section`) that `gpu status`, `gpu cards` and `offload_status` brief all render |
 | `internal/gpulease/proc*.go` | per-platform liveness and process-start identity, exported so no consumer keeps a second copy |
+| `internal/gpulease/tree.go` | **a dead wrapper with a live tree keeps its claim (plan P10, ADR 0084)**: the recorded tree (`Meta.Tree`, `Lease.RecordTree`), `judge` (the one place a reader decides what a record's tree is), the launch-marker and process-table evidence, and the armed ComfyUI directory (`SetComfyDir`, called from `modelaffinity.SetComfyDir`) |
+| `internal/proctree` | **process-tree containment and the stop primitives (plan P10)**: `Start` runs a command in a job object (Windows) or its own session and process group (Unix), `PIDs`, `Terminate`, `TerminateExcept`; `Job` is the job object the agent shell's cage (`internal/sandbox`) is built on too; `PlanStop` and `Stop` stop only a recorded tree or a launch marker's process and report anything else on a card as not ours |
+| `gpu_tree.go` | the wrapper's side: `treeRecorder` (writes the tree into the lease record when the set changes), `stopWrappedTree` (the whole tree, sparing an instance another lease took over) |
+| `internal/comfyinst` | stops the ComfyUI instances a lease kept (`StopForLease`), and the primitives an explicit takeover will use (`StopMarker`: interrupt, free, kill after the launch fingerprint is verified; `PIDsOfOtherLeases`) |
 | `internal/pipeline/pipeline.go` | takes the `media` lease around **every** generation call site (image ComfyUI + sdcpp, inpaint, image batch, run-graph, video, audio) and threads `GPU_LEASE_*` to the runner; inherits an ambient lease instead of re-acquiring; owns the in-process slot (`mediaSlot`) that arbitrates jobs sharing one inherited lease |
 | `gpu_cmd.go` | the `gpu status\|reserve\|release\|hold` verbs, wrapper and `--detach` forms |
 | `gpu_terms.go` | the holders' side of terms: the tick the wrapper form and the detached holder run at the end of a term, the over-cap warning, and the argv of the hidden holder (`--release-at-expiry`) |
@@ -1275,8 +1279,8 @@ told which lease, what is wrong, for how long, what is running and the command t
 later change), and the message says so: until it ships, ask whoever owns the lease or the operator.
 `gpu_orphan_grace_min` (default 15) is installed once at config load, so every surface reads the same grace.
 
-**Not in this change, on purpose:** the process-tree record behind `tree-orphan`, the takeover and yield commands,
-`gpu release` routing. A lease past its window with a live holder is surfaced as `held-overdue` and nothing else happens
+**Not in this change, on purpose:** the takeover and yield commands, `gpu release` routing (the process-tree record behind
+`tree-orphan` is [its own section](#a-dead-wrapper-with-a-live-tree-keeps-its-claim-plan-p10-adr-0084)). A lease past its window with a live holder is surfaced as `held-overdue` and nothing else happens
 to it; what its holder does at the end of a term is the next section.
 
 ## Terms: a window is a term, and a term ends in a renewal or a label (ADR 0070)
@@ -1824,6 +1828,118 @@ lane's own weights; it does not explain the whole figure. A ComfyUI process laun
 private about seven minutes after launch (a reading on the reference box, from a session, not recorded in this repository), so the footprint of a single lane is unmeasured here and the S1 acceptance runs
 record it (see "Known limits").
 
+## A dead wrapper with a live tree keeps its claim (plan P10, ADR 0084)
+
+*A wrapper that is gone proves the wrapper is gone, not the job.* Until this change the reclaim rule read "the holder's pid
+is dead" as "the card is free": a wrapper that was killed, crashed or lost its session left the command it started running
+on a card that was truly in use, and the next acquirer was handed that card at once (two jobs on one card). When the lease
+was lost the wrapper stopped only its direct child, so a grandchild kept the card the same way.
+
+**The rule.** The wrapper starts its command inside a containment (below) and records the processes of the tree it started,
+pid and start identity of each, in the lease record (`tree`, additive and `omitempty`; an older reader ignores it). A lease
+whose wrapper is **gone** (its pid dead, or alive but a different process: a recycled pid) is **not reclaimable while any
+recorded member is alive by pid AND start identity**. The lease then reads **`tree-orphan`**: it stays held, fenced and
+claimed on its cards, and a waiter is told so. The reclaim rule for a lease whose wrapper is alive is untouched (the
+heartbeat-and-window conjunction), and so is the rule for a lease that recorded no tree and whose wrapper is gone: free at once.
+
+**Bounded by observation, never by a timer.** Every read of the lease checks the members again, by pid and start identity.
+A pid recycled for an unrelated process cannot hold a card (its start identity differs), a member whose start identity cannot
+be read stays held (a safety check does not turn itself off), and the card frees itself at the first read after its members
+are gone, with no clock involved: hours past its declared window and heartbeat a tree-orphan is still held while its members
+live (invariant I3, expiry never frees a card). Nothing here kills a process.
+
+**Where the members come from**, in order, and the later sources only while the wrapper is gone and no recorded member is alive:
+
+1. **The record.** The wrapper writes its tree at start and on its 15 s tick, rewriting the record (under the epoch lock)
+   only when the set of processes changed. The tree is what the containment lists (a job object's processes on Windows; the
+   process group and the descendants reachable through live parent links on Linux) plus what the process table shows below the
+   command. The wrapper itself is not a member.
+2. **A launch marker.** A ComfyUI instance can sit outside the wrapper's job. Its launch marker (`.offload-launch-<key>.json`
+   in the ComfyUI directory, armed from `comfy_dir` at config load by `modelaffinity.SetComfyDir`, the one call that also arms
+   the marker reader of the seat scoper) names the lease epoch it was launched under; a marker that names this epoch, whose
+   process is alive and did not begin after the marker was written (a recycled pid), keeps the claim. A marker that names no
+   lease (the default instance) ties only to a lease that recorded no tree, when it began at or after that lease and no other
+   lease record exists in the directory (it cannot be told apart from another lease's otherwise); one that began before the
+   lease is a leftover and proves nothing.
+3. **The process table, for a lease that recorded no tree** (a wrapper that predates this change). Windows keeps a child's
+   parent link when the parent dies, so the children of the dead wrapper's pid that began at or after the lease are found; Linux
+   reparents them, so the walk finds none. A wrapper pid that is alive but recycled is never walked: its children are another
+   process's.
+
+The driver's per-process compute listing is **not** evidence. Under WDDM it names no process for most of them, and a process
+on a card cannot be attributed to a lease by itself; `proctree.PlanStop` reports such a process as `card still busy by pid N
+(not ours)` and never touches it.
+
+**The wrapper.** `gpu reserve ... -- <command>` now starts its command through `internal/proctree`:
+
+- *Windows:* the child is created suspended, assigned to a job object and resumed, so it cannot spawn a process that escapes the
+  job before it is inside; every descendant joins the job, including a process started detached. If the OS refuses the job (an
+  enclosing job that cannot be nested, an access failure) the command still runs, uncontained, and the wrapper says so on
+  stderr; a lost lease then stops the command and what the process table shows below it.
+- *Unix:* the child leads its own session and process group, and the group is signalled as a whole (`kill(-pgid)`). (`Pdeathsig`
+  is not used: it is delivered per thread and covers the direct child only.)
+- *A lost lease or an interrupt stops the whole tree*, not just the command, **except** a live ComfyUI instance whose launch
+  marker names a lease other than this one: a kept instance another lease reused was re-stamped to it, and killing it would kill
+  that lease's job. The wrapper says what it left running. (`stopInstancesOfLease` already leaves such an instance alone when
+  the lease is not ours; the tree stop follows the same rule.) A signal that ends the wrapper (the console closing, a logoff)
+  stops the tree the same way, inside the few seconds the OS grants.
+- *Letting go of the tree leaves it running.* If the wrapper exits or dies, the job keeps running and its lease becomes a
+  tree-orphan, unless the reserve was started with **`--die-with-wrapper`** (Windows: the job is created kill-on-close, so the
+  wrapper exiting or dying ends the tree). It is **opt-in and off by default** because it makes the wrapper a single point of
+  failure for a long render. A platform with no handle whose closing ends a tree (Linux) refuses the flag before the reserve
+  queues for a card, and so does `--detach` (a detached holder runs no command).
+
+**What a reader sees.** The verdict `tree-orphan` (it leads the precedence; the brief line leads with `ORPHANED`),
+`gpu status` (`wrapper: pid N is GONE, but the job it started is still running (pid ...): TREE-ORPHAN`, then the evidence),
+`activity.holder` (`tree_orphan`, `tree_pids`, `tree_why`), the sentence a waiter reads (`lease epoch N is tree-orphan: its
+wrapper (pid P) is gone but the job it started is still running ...`), and `/fleet/health` (`tree_orphan` on the lease entry
+and the singular block, verdict `tree-orphan`; the lease is `busy` like any held lease). The allocator treats a tree-orphan's
+cards as claimed, so a `--cards N` reserve is handed other cards, and a seat warm-back does not load over them (it waits for
+the last live lease on the seat's cards).
+
+**What ends a tree-orphan.** It ends by itself at the first read after its members are gone. To end it sooner, the one command
+that does it today is `local-offload gpu release --epoch N`, and every surface above names it (the takeover verb the other
+escalated verdicts point to does not exist in this build and is not offered here). `gpu release --epoch N` ends the claim at
+once and stops only the ComfyUI instances kept under the lease; **the rest of the job keeps running on the card**, unfenced, so it
+is run by a human who has seen that the job is dead or disposable. Nothing in the harness runs it on its own. What should happen
+to an overdue or orphan tree by policy (ask the holder to yield, or hold) is a decision for after this ships.
+
+**The stop primitives a takeover will use** are in this change and have no caller yet. `proctree.PlanStop` decides what may be
+stopped (the recorded tree and launch-marker processes, nothing else) and `proctree.Stop` re-checks each member by pid and
+start identity right before it signals it, polls until it is gone and returns one outcome per member, so a caller that frees
+a claim can require the tree verified dead (`AllGone`). `comfyinst.StopMarker` asks a marker's instance to stop its running
+prompt (`POST /interrupt`), drops its models (`POST /free`) and kills the marker's pid, only after the proof a lease's own
+holder gives (alive, did not begin after the marker, the endpoint reports exactly the argv the launcher recorded). On Windows
+the job's stop confirms on the process handle that a pid it was listed is still a member of the job before it ends it.
+
+**Cross-version (invariant I7).** A reader built before this change ignores `tree` and reclaims a dead wrapper's lease at once,
+as it always did (`TestOldReaderStillReclaimsATreeOrphanRecord` runs the preserved old reader against one). The rule holds on a
+host where every reader (CLI, MCP server, fleet daemon, a media repo's separate binary copy) is this build; `gpu doctor` lists
+the readers older than the record format, and this change does not move the audit's line (it is a reader improvement, and a
+reader that lacks it is no worse than before), so **a host is protected only once every reader on it has been restarted on this
+build**: after the deploy run `gpu doctor` and cycle the MCP servers, and compare build versions, because the audit's
+`FormatSignature` is not bumped and cannot tell. Nothing is written that an older reader misreads: the key is additive.
+
+**Limits, said plainly.**
+
+- The recorded tree is at most one tick (15 s) behind. A process started, and orphaned, in that window is held only if a launch
+  marker or the process table names it; a wrapper that dies in its first seconds still has its command recorded (the tree is
+  written right after the start).
+- A wrapper that is alive but wedged (alive pid, stale heartbeat, window over) is still reclaimed by the conjunction, tree or no
+  tree: this change is about a wrapper that is gone.
+- A lease taken by the harness's own pipeline (a media call) records no tree. A render child that outlives a crashed server is
+  found by the process-table walk on Windows and by the launch marker for a keyed instance; on Linux only the marker.
+- A Unix wrapper cannot make its tree die with it (`--die-with-wrapper` is refused there); the tree-orphan rule is the protection.
+  Its command also leads its own session, so a terminal hang-up that used to reach the command (it shared the wrapper's session)
+  now ends only the wrapper: the job keeps running and its lease keeps the cards as a tree-orphan.
+- The wrapper holds the lease exactly as long as its COMMAND runs. A command that exits and leaves processes running (a daemon it
+  started) releases the lease at its exit as it always did; those processes are not stopped (a kept ComfyUI instance is, by the
+  release) and not claimed. `--die-with-wrapper` ends them with the wrapper on Windows.
+- Free-by-observation means the claim ends when the members do, which for a job that has hung is never: that is what
+  `gpu release --epoch N` is for. A takeover that also stops the job, and the policy that would run it, are later changes.
+- A console host the OS starts for a command that has no console of its own (a wrapper started with no console) is a descendant
+  of the command and is recorded with it; it exits with the command, and the claim frees at the first read after it has.
+
 ## The fleet reads leases per card (plan P7)
 
 What the lease says about a box used to stop at the box: another node saw one `lease` block, the lowest epoch's, and read the
@@ -2270,7 +2386,7 @@ fence: the pre-0.117.0 warm-up loaded the seat straight past an exclusive hold.
 | `held-stalled` | the lease carries a progress contract (`--progress-file` and `--stall`) and the file did not move inside its window. The holder is alive and heartbeating; nothing is reclaimed or killed |
 | `held-orphaned` | an ATTENDED lease whose owner (session or process) has been gone for longer than `gpu_orphan_grace_min` (default 15 minutes): nobody is expected back for it. Never produced for an unattended, remote or unknown-owner lease. Nothing is reclaimed or killed |
 | `held-overdue` | the declared window ended and the holder is still alive and heartbeating. Informational: a declared window is not a ceiling for a live holder, so nothing is reclaimed. A holder whose owner vouches for the job renews its term instead (see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)); when it does not, the lease is labelled **expired** and the note says why (the `--for` default is 45 minutes, so a wrapper that never declared a window and has no live owner reads overdue after that while it still heartbeats) |
-| `tree-orphan` | the wrapper is gone but the job it started still holds the cards. In the vocabulary so the precedence is complete; **not produced by this build** (it needs the wrapper to record its process tree) |
+| `tree-orphan` | the wrapper is gone but the job it started is still running, so the card is in use and the claim is kept (see [A dead wrapper with a live tree](#a-dead-wrapper-with-a-live-tree-keeps-its-claim-plan-p10-adr-0084)): a recorded member of its process tree is alive by pid and start identity, or a launch marker or the process table ties a live process to it. It leads the precedence. Nothing is reclaimed or killed; it ends when the members are gone, or at once by `gpu release --epoch N`, which leaves the job running |
 | `loaded-idle` | no lease; the seat is resident with nothing in flight (unloads at its ttl) |
 | `busy-outside` | no lease, seat idle, cards busy — work the harness does not own (the processes are listed; a display card's unsized desktop is counted, not named) |
 | `stale-holder` | a lease record whose holder is gone; the next acquirer reclaims it |
@@ -2372,6 +2488,12 @@ request posted straight to llama-swap by anything outside the harness is outside
 
 ## Known gaps
 
+- **A tree-orphan is held until its members are gone, and nothing yet stops one.** The tree record, the `tree-orphan` verdict and the
+  stop primitives exist (see [A dead wrapper with a live tree](#a-dead-wrapper-with-a-live-tree-keeps-its-claim-plan-p10-adr-0084)),
+  but the takeover that stops a tree and frees the claim is a later change (and the policy that would run it, `gpu.on_overdue`, a
+  decision after this ships), so a hung job whose wrapper died is freed by an operator stopping its processes or running
+  `gpu release --epoch N`, which ends the claim and leaves the job running. A reader built before the change still reclaims a dead
+  wrapper's lease at once, and the recorded tree is at most one tick behind.
 - **The warm-back's reload retry rests on llama-swap's source, not on a captured incident.** The 500 body of the incident
   that prompted it was never recorded, the retry class keys on llama-swap's message text, and a re-send during the old
   server's teardown was not measured against a live instance. The failure line now carries the status and a snippet of the

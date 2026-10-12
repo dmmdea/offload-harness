@@ -148,8 +148,8 @@ silent.
   recorded it.
 - A waiter is told a command that does not exist yet. That is deliberate: the sentence is the contract the takeover
   change implements, and until then the message names whoever to ask.
-- Remaining work, in order: the process tree record that produces `tree-orphan`, takeover and cooperative yield (the
-  consumer of the expired label), `gpu release` routing.
+- The process tree record that produces `tree-orphan` has shipped ([ADR 0084](0084-a-dead-wrapper-with-a-live-process-tree-keeps-its-claim.md)).
+  Remaining work, in order: takeover and cooperative yield (the consumer of the expired label), `gpu release` routing.
 
 ## Alternatives considered
 

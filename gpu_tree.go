@@ -1,6 +1,6 @@
 package main
 
-// The wrapper's side of process-tree containment (plan P10, ADR 0072).
+// The wrapper's side of process-tree containment (plan P10, ADR 0084).
 //
 // A wrapper that runs a command under a lease records the tree it started in the lease record,
 // so that a reader that finds the wrapper gone can tell whether the job it started is still
