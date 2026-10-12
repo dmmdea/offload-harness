@@ -163,7 +163,7 @@ func planMulticard(need mediaNeed, cards []gpuprobe.Card, tableErr error) (media
 		}
 		return mediaPlan{}, &errMulticard{fmt.Sprintf("%s is multicard, which runs on exactly two non-display cards, and this box has %d (%s)%s: %s, or unset %s", key, len(ids), have, note, gpuReserveHint, key)}
 	}
-	return mediaPlan{ids: ids}, nil
+	return mediaPlan{ids: ids, pair: true}, nil
 }
 
 // noCardLeases is the answer of a card-only call on a host that cannot lease cards: no lease can name the two cards, and the whole-node lease the call
@@ -209,6 +209,7 @@ func (p *Pipeline) acquireInheritedPair(ctx context.Context, inherited, held []s
 	var once sync.Once
 	return mediaGrant{
 		Env:     append(append([]string(nil), inherited...), append([]string{"GPU_LEASE_DEVICES=" + strings.Join(held, ",")}, p.lockEnv()...)...),
+		Devices: append([]string(nil), ids...),
 		Release: func() { once.Do(func() { mediaSlots.release(ids) }) },
 	}, true, "", nil
 }

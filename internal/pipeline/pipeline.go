@@ -1680,6 +1680,7 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	payload := imageResultPayload(outPath, req.Params, seed, fam)
 	addRefineData(payload, p.cfg.ImageGenRefinerModel, refined, renderPrompt, refineNote)
+	grant.name(payload) // a card-only call says which two cards it ran on; any other answer is unchanged
 	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
@@ -2211,6 +2212,7 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 		payload["transparent"] = true
 	}
 	addLicenseData(payload, fam)
+	grant.name(payload) // a card-only call says which two cards it ran on; any other answer is unchanged
 	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
@@ -2552,6 +2554,10 @@ func (p *Pipeline) RunImageBatchWaiting(ctx context.Context, family string, jobs
 	// single path resolves for a request without one): every item is tagged with it (ADR 0058).
 	for i, it := range items {
 		items[i].tagLicense(fam)
+		// A batch on the card-only placement says which two cards it ran on, on every item; any other batch's items are unchanged.
+		if len(grant.Devices) > 0 {
+			items[i].Devices = append([]string(nil), grant.Devices...)
+		}
 		// Refiner outcome onto the item (single-path result-key parity: with a
 		// refiner configured every item says refined true/false). Set BEFORE the
 		// ledger loop reads `items` so callers and records agree.

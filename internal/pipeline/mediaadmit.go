@@ -347,6 +347,14 @@ type mediaGrant struct {
 	Release func()
 }
 
+// name adds the cards a card-only call ran on to its answer as "devices", the key the queued answer names them under. A grant that holds no such pair
+// leaves the answer exactly as it was.
+func (g mediaGrant) name(payload map[string]any) {
+	if len(g.Devices) > 0 {
+		payload["devices"] = g.Devices
+	}
+}
+
 // launch applies the grant to a binding's launch profile: a call on a per-card instance is
 // pinned by the card's uuid at the instance's endpoint, and the legacy device index goes blank
 // (the runner refuses both).
@@ -436,6 +444,7 @@ type mediaPlan struct {
 	auto     bool     // the allocator picks the card
 	ids      []string // the cards, when fixed (lease ids)
 	instance bool     // run in the per-card instance of ids[0]
+	pair     bool     // ids are the card-only placement's two non-display cards (needMulticard), which the call's answer names
 }
 
 // planMedia turns a need into a plan. cards is the card table (nil when it could not be read).
@@ -1263,6 +1272,9 @@ func (p *Pipeline) grantCards(ctx context.Context, m *gpulease.Manager, lease *g
 	// The card is ours from here: the call's PAIR card turns running.
 	core.MarkWorking(ctx)
 	g := mediaGrant{Env: p.mediaGrantEnv(lease, ids, p.unloadEnv(ctx, ids, cards)), Release: release}
+	if plan.pair {
+		g.Devices = append([]string(nil), ids...)
+	}
 	if plan.instance {
 		if c, ok := lookupCard(cards, ids[0]); ok {
 			g.Card, g.API = &c, p.instanceEndpoint(c)
