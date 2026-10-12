@@ -6,6 +6,44 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — nothing the harness or its tests start opens a console window on the desktop
+
+- **The defect.** On Windows a console program started by a process with no console of its own (a runner or a test child started
+  detached, a service, a launcher started hidden) gets a NEW visible console window unless it is started hidden, and with Windows
+  Terminal as the default terminal that window is a Windows Terminal window on the operator's desktop. A window watcher saw them
+  while the render suite ran: Windows Terminal hosting windows and one titled `taskkill.exe`. The cause was 86 child-process calls in
+  `render/` that passed no `windowsHide`: 25 in production modules (the engine's `killTree` `taskkill`, its `ps` probes, ffmpeg and
+  ffprobe in `audio-qa`, `igpu-qa` and the animate/video runners, the `nvidia-smi` and sd-cli listings, the attached ComfyUI launch,
+  the manifest installers, the tts and sdcpp attached runs) and 61 in the tests and their support, among them the scripts the tests
+  write into a string and run in a detached child. On the Go side the `taskkill` calls (`gpugen`, `mediaops`, `nodeswap`), the starts
+  of the render runners and the tool probes (`nvidia-smi`, ffmpeg, the hardware detectors) were built with a bare `exec.Command`,
+  and the accelerator sidecar launcher set `HideWindow` but not `CREATE_NO_WINDOW`.
+- **The fix in `render/`.** `windowsHide: true` on all 86 calls, every other option unchanged (in `manifest-satisfy.mjs` the flag
+  follows the caller's spread, so a caller cannot drop it). The Windows stub launcher that `igpu-stub.mjs` compiles starts its target
+  with `CREATE_NO_WINDOW` and `HideWindow` as well: a launcher started detached has no console to hand on, and the node child it
+  starts would open a window of its own. `comfy-keep.test.mjs` had pinned the defect (`windowsHide` undefined for the attached
+  ComfyUI launch); it now asserts the house rule for that launch too.
+- **The fix in Go.** `internal/winexec` gains `Command`, `CommandContext` and `HideWindow`: `CREATE_NO_WINDOW` plus `HideWindow`
+  on Windows, the plain command elsewhere, other `SysProcAttr` fields and creation flags kept. The three hand-copied `hideWindow`
+  helpers (root, `accelclient`, `nodeswap`) are now one: the root helper delegates to it and the other two are gone. 32 constructors in
+  22 files use it. Left as they were, each listed with its reason in the lint: the command an operator names after `--` in
+  `gpu reserve` (it keeps the console it inherits and may be interactive), the detached holder (already hidden through the same
+  helper) and the `leakdigest` developer tool. `tools/comfyui`'s ffprobe runner is hidden with a local helper. The cage
+  (`internal/sandbox`, Linux only) is untouched, and the two `cobratree/shellout.go` files of `tools/` are Printing Press output
+  (`DO NOT EDIT`): the same one-line change belongs in the generator's template.
+- **Locked in.** `render/no-visible-windows.test.mjs` (scanner: `render/spawn-scan.mjs`) reads every source under `render/`, the
+  scripts held in strings included, and fails with `file:line` on any `spawn`, `spawnSync`, `execFile`, `exec`, `fork`, `*Sync` or
+  injected `spawnImpl` call without `windowsHide: true`. `TestNoDirectExecInProduction` (`internal/winexec`) fails on any direct
+  `exec.Command` / `exec.CommandContext` in a non-test file of the root module that builds for Windows unless it is listed with a
+  reason; a count that goes up or down fails too.
+- **Red before.** The render lint fails on the 0.181.0 tree with 86 calls; the Go lint fails with 31 `file:function` sites (32
+  constructors). Mutation checks: removing `windowsHide: true` from the engine's `taskkill` call (production), from the
+  `taskkill` in `comfy-keep.test.mjs` (test) and from the detached child script in `igpu-lifecycle.test.mjs` (a string) each turn the
+  render lint red on exactly that line; putting `exec.Command` back in `gpugen`'s `killTree`, dropping `CREATE_NO_WINDOW` from
+  `HideWindow`, and dropping the hide from the `comfyui` ffprobe runner each turn the Go tests red. Live: the fixed render suite
+  (1315 tests, 0 failed) ran under a watcher that logs every new visible top-level window every 60 ms; it saw no console window
+  (no Windows Terminal host, no `ConsoleWindowClass`, no `PseudoConsoleWindow`) during the run.
+
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)

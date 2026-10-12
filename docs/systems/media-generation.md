@@ -1610,6 +1610,12 @@ left; the compose work dir and the provisioning scratch of `manifest-satisfy.mjs
 ends, passed or failed (`igpu-lifecycle.test.mjs`, `compose-hyperframes.test.mjs` and
 `manifest-satisfy.test.mjs` pin them).
 
+No child process the suite starts may open a console window. Every `spawn` / `spawnSync` call in `render/` (tests, test support
+and the scripts the tests write into strings included) sets `windowsHide: true`, and `render/no-visible-windows.test.mjs` fails
+with `file:line` on one that does not. The Go side builds its children with `winexec.Command` / `winexec.CommandContext`
+(`internal/winexec`), and `TestNoDirectExecInProduction` there lists the few direct `os/exec` constructors that stay, each with
+its reason.
+
 `render/compose-hyperframes.test.mjs` also pins the shipped compose templates: the offline, deterministic and
 declared-variable contract, the ported templates' provenance, the retained licence texts by hash, the residue gate
 (no creator names, brand palette, placeholder copy or CDN host), the no-scale-above-1 guard for the ports, the
