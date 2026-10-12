@@ -356,6 +356,106 @@ routed call could never be placed on a node. The new real-gate test reproduces i
   a guard-refused entry classed `infrastructure`, an agent lane that is off still a target, the last layer taken, the
   `route=remote` class forced to `config`, the contract error ignored, the deferral class, placement or finished answer dropped,
   and the two refusal texts.
+### Fixed — a test that earned a remembered incoherent-seat verdict no longer leaves it for the next test on the same loopback address (F78)
+
+- **The hole.** The incoherent-seat memo (`internal/pipeline/coherence.go`) is one table for the whole process, keyed by endpoint and
+  seat for ten minutes, and a run on a seat that is already resident defers on a remembered verdict without asking the seat anything.
+  A test's fake server gets a loopback port the OS can hand to a later fake, and the tests that earn a broken verdict
+  (`TestRunAgentTaskDefersAnIncoherentSeatAfterColdLoad` and `TestNoWallIsReportedUntilTheWallStarts` in `internal/pipeline`;
+  `TestAgentRunDefersAnIncoherentSeat`, `TestAgentRunDefersAWarmRunOnTheRememberedIncoherentSeat` and
+  `TestAgentRunIncoherentSeatDefersCarrySizing` in `internal/mcpserver`) left it behind; only the tests of the memo itself cleared
+  theirs. The register names `TestTheWarmUpKeepsItsBudgetAfterAWaitInLine` as the victim: it takes the warm path against a fresh fake
+  and would defer on a verdict that was earned elsewhere.
+- **The fix (test code only).** `agentFake.server` drops every verdict filed under its server's endpoint, whichever seat it names,
+  when the test that asked for it ends (the endpoint is matched whole, so a server on `:1234` never takes `:12345` with it), and
+  `coherenceSeatServer` clears the seat it serves the same way.
+- **Tests, written first and red.** `TestAnIncoherentSeatVerdictDoesNotOutliveTheTestThatEarnedIt` in both packages runs the cold load in
+  a subtest, asserts the verdict IS remembered there (so the check after it cannot pass vacuously) and that it is gone once the subtest
+  has returned. Red before: `the verdict on seat "seat-x" outlived the test that earned it` (pipeline, and for a second seat on the
+  same endpoint) and `... "agent-pool" outlived ...` (mcpserver). The three tests the register names pass 30 repetitions in a row; that
+  does not force the port reuse, so the new tests are the proof.
+
+### Fixed — the root, pairworkloads and mediaremote suites left a state-root folder in the OS temp dir for every copy of their test binary that a test re-launches (F77b)
+
+- **The defect.** Each of the three packages makes a throwaway state root in its `TestMain` (`lo-root-state-*`, `lo-pairworkloads-state-*`,
+  `lo-mediaremote-state-*`) and removes it after `m.Run`. They also re-launch their own test binary (the helper processes of the gpu verb
+  tests, a child that sends a frame and is killed, the holder of a queue lock). A copy runs `TestMain` too, and a copy that is killed or
+  ends by `os.Exit` from inside a test never reaches the removal, so every launch left a root of its own. Counted with the temp dir pointed
+  at an empty folder on Windows, one run of `internal/pairworkloads` left 2 and one run of `internal/mediaremote` left 1, and one run of the root package's tests left 20 (on Windows and on Linux alike).
+- **The fix (test code only).** The suite process exports `LO_ROOT_SUITE_STATE_ROOT`, `LO_PAIRWORKLOADS_SUITE_STATE_ROOT` or
+  `LO_MEDIAREMOTE_SUITE_STATE_ROOT` once its root exists, set to that root's path, and every re-launch site already passes the process
+  environment on. A copy shares the root of the suite that launched it and makes none, but only when the environment agrees three ways:
+  the variable names a root, `LOCAL_OFFLOAD_STATE_DIR` points at the same one, and it is one of the package's own throwaway roots and
+  still on disk; anything less gets a root of its own, as before (the net exists to keep the suite off the machine-wide root, so it
+  fails closed). The root package's copy still runs on the same known host reading as the suite.
+- **Tests, written first and red.** `TestARelaunchedTestBinaryLeavesNothingInTheTempDir` in each package re-launches the test binary at a
+  helper that ends with `os.Exit(0)` from inside the test, with `TMP`, `TEMP` and `TMPDIR` on its environment pointed at an empty folder,
+  and requires the folder to stay empty; `TestACopyTrustsTheSuitesStateRootOnlyWhenTheEnvironmentAgreesWithIt` holds the three conditions.
+  Red before (Windows): `a re-launched copy of the test binary left 1 entries in its temp dir, want none: [lo-root-state-…]` (and
+  `lo-pairworkloads-state-…`, `lo-mediaremote-state-…`). `TestMainIsolatesTheStateRoot`, `TestMainIsolatesTheHomeAndTheLedger` and
+  `TestRunIsolatedFailsClosed` are unchanged.
+- **Review round: a re-launched copy of the root suite also checks the home and the origin.** The copy skips `runIsolated`, which is
+  also what pins `LOCAL_OFFLOAD_HOME` (to the root's `home` folder) and `LOCAL_OFFLOAD_ORIGIN` (to `go-test`), the ledger guard of
+  2026-10-03 (1,204 fixture rows written to the operator's real ledger); the copy read both from the environment of whichever test
+  launched it, unchecked, so a launcher that had cleared or moved them would have run `config.Default()` on the real home. A copy now
+  trusts the suite's root only when the home and the origin also agree (five conditions); otherwise it makes a root of its own, which
+  pins them, as it did before F77b. Red before: the home-not-set, home-outside-the-root, home-is-the-root, origin-not-set and
+  origin-of-another-writer cases of `TestACopyTrustsTheSuitesStateRootOnlyWhenTheEnvironmentAgreesWithIt` returned `trusted=true`;
+  deleting either check turns its cases red.
+- **Review round: `internal/pairworkloads` now fails closed.** Its `TestMain` logged and ran the suite anyway when `os.MkdirTemp` or
+  either `os.Setenv` failed, so a suite whose setup failed ran against the machine-wide state root, while its comment and
+  `docs/systems/pair-workloads.md` called it fail-closed (the F77b suite variable had copied the idiom). It now goes through a
+  `runIsolated` like the root, `internal/delegate`, `internal/mcpserver` and `internal/mediaremote`: any of the three failures returns 1
+  without running a test and removes the directory it made. `TestRunIsolatedFailsClosed` is new there; red before: `code = 0, ran = true;
+  want 1, false` for the mkdir, state-dir and suite-variable cases (and the removal assertions fail when the deferred removal is dropped).
+  The docs paragraph no longer lists `internal/pipeline` among the fail-closed packages: its `TestMain` fails open on purpose (its own
+  comment says so) and the paragraph now says that.
+
+### Fixed — `offload_run_graph` and `run-graph` remove the temp files an inline graph or manifest became, whichever way the call ends (F79)
+
+- **The defect.** The runner reads files, so an inline `graph_json` / `manifest_json` (the MCP door) or `--graph-json` /
+  `--manifest-json` (the CLI) is written to a temp file (`run-graph-*.json`, `run-graph-manifest-*.json`) and its path is threaded on.
+  Nothing removed it: every inline call left one file (a graph) or two (graph and manifest) in the OS temp dir for good, on every exit
+  of the call (an answer, a deferral, a refusal, a ticket queued), and the CLI left them too when the pipeline could not open. A write
+  that failed left the file it had just made, and a manifest that could not be written left the graph file made before it. One run of
+  the `internal/mcpserver` tests left 26 of them (25 `run-graph-*`, 1 `run-graph-manifest-*`) and one run of the root package's tests
+  left 3, counted with the temp dir pointed at an empty folder on Windows. The fleet node's twin (`fleetnode.buildRunGraph`) already returned a cleanup; the door and the CLI did not.
+- **The fix.** `materialize` (MCP) and `materializeArg` (CLI) return a cleanup that is never nil and removes only the file THIS call
+  made: it does nothing for a path the caller named (`graph_path`, `manifest_path`, `--graph`, `--manifest`, or a `graph_path` given
+  together with a `graph_json`), nor for an empty one. `handleRunGraph` defers each cleanup right after the file exists, so an answer,
+  a deferral, a refusal inside `RunWith`, a manifest that cannot be written and a panic all remove both files; `runGraphParams` returns
+  one cleanup for the pair and `runRunGraph` defers it before the pipeline opens, so the exit at `openPipeline` is covered too. A write
+  that fails closes its file and then removes it (Windows does not delete a file that is still open: `os.Remove` of an open file fails
+  with "being used by another process", read on Go 1.27.1), and a manifest that cannot be written removes the graph file with it.
+- **Why removing them is safe.** A graph ticket keeps its own copy of the graph and the manifest as the plan holds them
+  (`body-<id>-graph.json`, `body-<id>-manifest.json`) and its key, its node payload, its local run and an adopter all read those, never
+  the caller's paths; a graph queued by a call that has returned still runs.
+  `TestAGraphTicketStillRunsOnThisMachinesLaneOnceTheDoorHasRemovedItsInlineFiles` admits a graph, removes the caller's files the way the
+  door does, frees the lane and requires the lane to run the bytes the call was made with; it fails when the ticket reads the caller's
+  path instead of its copy.
+- **Tests, written first and red.** `internal/mcpserver`: `TestRunGraphDoorRemovesItsInlineTempFilesOnEveryExit` (six exits),
+  `TestRunGraphDoorHandsTheRunnerTheInlineBytesWhileItRuns` (removal is not early), `TestRunGraphDoorNeverRemovesACallersOwnFiles`,
+  `TestMaterializeCleanupRemovesOnlyTheFileThisCallMade`. Root: `TestRunGraphParamsInlineJSONIsRemovedByItsCleanup`,
+  `TestRunGraphParamsLeavesACallersOwnFilesAlone`, `TestRunGraphParamsRemovesTheGraphFileWhenTheManifestCannotBeWritten`,
+  `TestMaterializeArgRemovesItsOwnFileWhenTheWriteFails`, `TestRunGraphCLIRemovesItsTempFilesWhenThePipelineCannotOpen`. The write
+  failures are made with a one-line seam (`createTemp`) that hands back a file opened for reading only. Red before, root package on a
+  Windows PC against a cleanup that removes nothing: `the cleanup left [run-graph-….json run-graph-manifest-….json] in the OS temp dir`,
+  `the file of a failed write was left`, and `run-graph left [...] in the OS temp dir after it failed to open the pipeline`.
+  After: 0 `run-graph*` entries left by the `internal/mcpserver` tests on Windows (26 before) and by a whole run of the root package's
+  tests on Windows and on Linux (3 before).
+- **Review round: a delete that is refused for a moment is waited out, and one that still fails is named.** The cleanup made one
+  `os.Remove` and dropped the error, so on Windows a scanner (or a runner that had only just exited) holding the file for a moment
+  brought the leak back with nothing to say so; the write-error branches dropped it the same way. Both doors now delete through one
+  helper (`removeInlineTemp`, in `internal/mcpserver` and in the root package) that tries again for about half a second (20 attempts,
+  25 ms apart, as `removeRunGraphEnvelope` does for the envelope), treats a file that is not there as done, and, when the file still
+  resists, writes one line naming it and the reason (to the log in the MCP server, to stderr in the CLI). Red before, on a Windows PC,
+  in `internal/mcpserver` (and the same four as `TestMaterializeArg...` in the root package): `TestMaterializeCleanupWaitsOutAFileHeldForAMoment`
+  (a delete refused three times left the file), `TestMaterializeCleanupNamesAFileItCannotRemove` (no line),
+  `TestMaterializeRemovesTheFileOfAFailedWriteEvenWhenItIsHeldForAMoment` and
+  `TestMaterializeCleanupOutwaitsAHandleThatIsClosedAMomentLater` (a real open handle, no seam: the cleanup returned and left the file).
+  One attempt, no line, a missing file counted as a failure and the failed-write branch left out of the helper each turn their own test red.
+- **Not covered.** Files an earlier release left in the OS temp dir stay until someone removes them (this is a one-time cleanup, not
+  code), and a call that is killed (a second Ctrl-C, a kill) leaves the files of that one call.
 
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 

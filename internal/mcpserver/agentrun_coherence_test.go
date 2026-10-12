@@ -47,6 +47,10 @@ func coherenceSeatServer(t *testing.T, seat string, chat func(body map[string]an
 			http.NotFound(w, r)
 		}
 	}))
+	// The incoherent-seat memo is process-wide and keyed by this server's address, which the OS may hand to a later server: a
+	// verdict the test earned on this seat must not outlive it (coherence_isolation_test.go). A probe that ran and was not broken
+	// is the exported way to clear a seat.
+	t.Cleanup(func() { pipeline.RememberCoherence(srv.URL, seat, pipeline.CoherenceVerdict{Ran: true}) })
 	return srv, &chats
 }
 

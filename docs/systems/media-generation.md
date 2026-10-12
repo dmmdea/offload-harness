@@ -2328,7 +2328,10 @@ scan looks at the fleet (`TestMediaLaneFreeGraphIsFreeWhenTheCardTableCannotBeRe
 - **Identity is the graph's content.** The key is the sha256 of the task and the parameters without the `waiter_token`, with the
   graph and the manifest taken as what they say (canonical JSON: keys sorted, whitespace dropped, numbers as written) in place of the
   paths they were read from. The MCP door writes an inline `graph_json` to a new temp file on every call, so a key made of the path
-  would make every resend a new job; and a file edited under the same path is another graph. `out_dir`, `reserve_vram`,
+  would make every resend a new job; and a file edited under the same path is another graph. The door removes those temp files when
+  its call returns (`run-graph` the ones of `--graph-json` and `--manifest-json`), waiting out a delete that Windows refuses for a
+  moment (about half a second) and naming on stderr a file that still cannot go; a file the caller named is never removed, and the
+  ticket needs none of them because it keeps its own copy of the bytes (next item). `out_dir`, `reserve_vram`,
   `min_vram_gb` and `model_family` are part of the key (the same graph sent to another folder is another job). One ticket per identical
   request, from either of two processes, and `waiter_token=mq-...` collects it (`TestABusyGraphIsATicketAndTheSameGraphAttachesToIt`,
   `TestAGraphsKeyIsItsContent`, `TestTwoProcessesAskingForOneGraphAtOnceMakeOneTicket`). The ticket mints no seed and sends no

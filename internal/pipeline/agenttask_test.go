@@ -248,7 +248,7 @@ func (f *agentFake) seat() string {
 
 func (f *agentFake) server(t *testing.T) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if os.Getenv("AGENTFAKE_TRACE") != "" {
 			log.Printf("FAKE %s %s", r.Method, r.URL.Path)
 		}
@@ -456,6 +456,10 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			http.NotFound(w, r)
 		}
 	}))
+	// The incoherent-seat memo is process-wide and keyed by this server's address, which the OS may hand to a later server: a
+	// verdict the test earned here must not outlive it (coherence_isolation_test.go).
+	t.Cleanup(func() { forgetCoherenceOf(srv.URL) })
+	return srv
 }
 
 func doneChat(content string) string {
