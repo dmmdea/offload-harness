@@ -1,7 +1,8 @@
 // wan-multicard.mjs — the card-only placement for Wan 2.2 14B fp8 I2V (comfy-video.mjs --wan-placement multicard).
 //
 // WHAT IT IS. The two experts (13.3 GiB each) do not fit one 16 GiB card with the activations of a film-size
-// clip (720x1280x81 needs about 9.7-11 GiB beyond the weights), and the host-RAM way out (ComfyUI's dynamic-VRAM
+// clip (720x1280x81 needs about 12.2 GiB beyond the 3 GiB of an expert kept resident: the film-size run's 15.18 GiB peak; the 4-step benchmark
+// ended before that peak and read 9.7-11.0), and the host-RAM way out (ComfyUI's dynamic-VRAM
 // streaming) costs the host the whole file. This placement uses TWO cards instead and no host RAM:
 //   cuda:0 = the STORAGE card: text encoder, VAE and the donor blocks of the expert in use (about 10.3 GiB);
 //   cuda:1 = the COMPUTE card: a resident share of the expert (3 GiB) plus the sampler's activations; the donor
@@ -338,12 +339,16 @@ export function wanGeometry(flags) {
  *   WAN_FILM_ACTIVATIONS_GIB   what the compute card holds beyond the resident weights at the film's size (720x1280x81, 75,600 tokens): the
  *                              film-size run's compute-card peak, 15.18 GiB (nvidia-smi, 90 s before the hand-over to the second expert), less its 3 GiB resident
  *                              share, which already holds the allocator's slack and the CUDA context;
- *   WAN_COMPUTE_CONTEXT_GIB    what the compute card keeps free beyond that figure, for the CUDA context and the driver: with it a 15.9 GiB card
- *                              takes 3.2 GiB of an expert resident at film size (15.9 - 12.2 - 0.5), the film-size run's measured 3 with 0.2 to spare;
+ *   WAN_COMPUTE_CONTEXT_GIB    a margin the compute card keeps free beyond that figure, CHOSEN and not measured (the figure above is the card's total in
+ *                              use, so it already holds a CUDA context; the film-size run left 0.7 GiB free at its peak and this keeps 0.5 of it): with
+ *                              it a 15.9 GiB card takes 3.2 GiB of an expert resident at film size (15.9 - 12.2 - 0.5). Only a 3.0 GiB share was ever
+ *                              run; 3.2 is the planner's ceiling, not a measured share;
  *   WAN_STORAGE_OVERHEAD_GIB   what the storage card holds besides the donor blocks: the VAE, the CUDA context and the allocator's slack;
  *   WAN_EXPERT_GIB             an fp8 expert (internal/hostneed's documented Wan 2.2 size, rounded up).
  */
 export const WAN_FILM_ACTIVATIONS_GIB = 12.2;
+/** The tokens of the film clip (720x1280x81, see wanGeometry): the largest size anything was measured at. Above it the planner has no figure (geometryNote). */
+export const WAN_FILM_TOKENS = 75600;
 export const WAN_COMPUTE_CONTEXT_GIB = 0.5;
 export const WAN_STORAGE_OVERHEAD_GIB = 0.8;
 export const WAN_EXPERT_GIB = 13.4;
@@ -357,7 +362,9 @@ const DEFAULT_RESERVE_GIB = 1.0;
 /**
  * wanActivationsGib: the sampler's activations on the compute card at this many tokens. The benchmark reserved 2.19 GiB at 7,800 tokens, 3.66 at
  * 14,040, 5.31 at 20,280 (5.67 on the native allocator, 6.16 with sage attention) and 5.50 at 32,400; 0.31 GiB per 1,000 tokens is never under
- * any of them. The film's own size is the cap: the full model there was measured at 12.2 GiB beyond its resident share (the film-size run), so nothing above it asks for more.
+ * any of them. The film's own size is where the measurements end: the full model there was measured at 12.2 GiB beyond its resident share (the film-size run),
+ * and the planner has no figure above it, so it holds 12.2 there. The activations are expected to grow with the tokens, which is why a bigger clip is
+ * said to be unsized (geometryNote) and not read as one that needs no more.
  */
 export function wanActivationsGib(tokens) {
   return Math.min(WAN_FILM_ACTIVATIONS_GIB, Math.max(ACTIVATIONS_FLOOR_GIB, (tokens / 1000) * ACTIVATIONS_GIB_PER_1000_TOKENS));
@@ -367,7 +374,7 @@ export function wanActivationsGib(tokens) {
  * checkResident: a resident share one of the two cards cannot hold would run out of memory in the first sampler step, 80 minutes into a
  * film-size run's lease, with both cards held. The compute card holds the share and the sampler's activations; the storage card holds the rest of
  * the expert (the donor blocks), the VAE and the context. The compute card must hold the share + the activations + WAN_COMPUTE_CONTEXT_GIB, which is
- * the measured peak plus a margin (15.9 - 12.2 - 0.5 = 3.2 GiB at film size, and the measured 3 passes); the storage card must fit its blocks inside its
+ * the measured peak plus a chosen margin (15.9 - 12.2 - 0.5 = 3.2 GiB at film size, and the measured 3 passes); the storage card must fit its blocks inside its
  * size less --reserve-vram, which is ComfyUI's model-load margin and not an activation ceiling, so the compute card's check does not use it. Both
  * with the figures internal/hostneed declares against, at this geometry (the smaller the clip, the less the activations need).
  */
@@ -391,6 +398,20 @@ function checkResident(residentGb, pair, flags) {
       : "no resident share fits both cards at this geometry: lease two larger cards";
     throw placementError(`--wan-resident-gb ${residentGb} leaves the storage card (idx ${pair.storage.index}, ${storageGib.toFixed(1)} GiB) ${donor.toFixed(1)} GiB of donor blocks + ${WAN_STORAGE_OVERHEAD_GIB} GiB for the VAE and the context = ${stored.toFixed(1)} GiB against ${usable.toFixed(1)} GiB usable (the card less ${reserve} GiB of --reserve-vram): ${way}`);
   }
+}
+
+/**
+ * geometryNote: what the planner says about a clip bigger than the film's (720x1280x81), "" at the film's size and under. Nothing above that size was
+ * measured: wanActivationsGib holds the film's 12.2 GiB there while the sampler's activations are expected to grow with the tokens, so the resident-share
+ * check passes a bigger clip on a figure that is soft, and the run could run out of memory on the compute card with both cards held. The planner does not
+ * refuse what it cannot size (the documented intent is that a bigger clip may run); it says so before the check, with what a proportional extrapolation
+ * gives, and leaves the share and the wait to the caller.
+ */
+export function geometryNote(flags) {
+  const { w, h, f, tokens } = wanGeometry(flags);
+  if (tokens <= WAN_FILM_TOKENS) return "";
+  const proportional = (WAN_FILM_ACTIVATIONS_GIB * tokens) / WAN_FILM_TOKENS;
+  return `WAN-GEOMETRY-NOTE: ${w}x${h}x${f} (${tokens} tokens) is bigger than the measured film clip (720x1280x81, ${WAN_FILM_TOKENS} tokens): nothing above it was measured, so the planner holds the sampler's activations at the film's ${WAN_FILM_ACTIVATIONS_GIB} GiB, and in proportion to its tokens they would be about ${proportional.toFixed(1)} GiB; the resident-share check is only as good as that figure. Lower --wan-resident-gb (or use a smaller clip) if the compute card runs short, and pass --wait-sec (the ${MULTICARD_WAIT_SEC} s default is the film's)`;
 }
 
 /** confirmWithLease: --wan-cards may name the two cards when no lease does; when a lease holds cards it can only confirm them. */
@@ -432,6 +453,8 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   const { tokens, source } = wanCardTokens({ flags, env, leaseDevicesFn });
   const pair = resolveWanCards({ tokens, source, cards: cards() });
   if (source === "--wan-cards") confirmWithLease(pair, leaseDevicesFn(env));
+  const unsized = geometryNote(flags);
+  if (unsized) say(unsized);
   checkResident(residentGb, pair, flags);
   const launch = launchFn(pair, { comfyDir });
   const plan = { pair, launch, residentGb, env: multicardEnv(env, launch) };

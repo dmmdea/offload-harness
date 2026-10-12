@@ -350,7 +350,7 @@ export async function generate(out, API, pos, flags, multicard, io = {}) {
   // chose, by flag or environment, is theirs.
   const chosen = flags["wait-sec"] || x.env.COMFY_WAIT_SEC;
   const waitSec = Number(chosen || (multicard ? MULTICARD_WAIT_SEC : 5400));
-  if (multicard && !chosen) x.stderr(`WAN-WAIT-NOTE: no --wait-sec or COMFY_WAIT_SEC, so the wait for the video is ${MULTICARD_WAIT_SEC} s (the 20-step film recipe measured about 5170 s); pass --wait-sec <seconds> to change it`);
+  if (multicard && !chosen) x.stderr(`WAN-WAIT-NOTE: no --wait-sec or COMFY_WAIT_SEC, so the wait for the video is ${MULTICARD_WAIT_SEC} s (the 20-step film recipe was projected at about 5170 s and measured 5136 s of runner wall); pass --wait-sec <seconds> to change it`);
   const h = await x.poll({
     api: API, promptId, waitSec,
     isDone: (entry) => !!firstOutputFile(entry.outputs, graph),

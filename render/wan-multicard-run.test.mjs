@@ -236,6 +236,9 @@ test("generate() under multicard gives the wait 2 h unless the caller chose a bu
   const dflt = await run({}, {}, PLAN);
   assert.equal(dflt.wait, 7200);
   assert.ok(dflt.err.some((l) => /^WAN-WAIT-NOTE: .*7200 s.*--wait-sec/.test(l)), dflt.err.join("\n"));
+  // 5170 s is the projection from the 4-step benchmark; the film-size run's runner wall was 5136 s. The note must not call the projection a measurement.
+  assert.ok(dflt.err.some((l) => /^WAN-WAIT-NOTE: .*projected at about 5170 s.*measured 5136 s of runner wall/.test(l)), dflt.err.join("\n"));
+  assert.ok(!dflt.err.some((l) => /measured about 5170/.test(l)), "5170 s was never measured");
   const flag = await run({ "wait-sec": "9000" }, { COMFY_WAIT_SEC: "999" }, PLAN);
   assert.equal(flag.wait, 9000);
   assert.ok(!flag.err.some((l) => /WAN-WAIT-NOTE/.test(l)), "a budget the caller chose needs no note");

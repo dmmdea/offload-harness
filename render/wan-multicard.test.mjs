@@ -663,14 +663,50 @@ test("--wan-resident-gb above what the compute card can hold beside the sampler'
   assert.throws(() => planWith({ ...film, "wan-resident-gb": "3.3" }), /--wan-resident-gb 3\.3 .*720x1280x81 \(75600 tokens\).*at most 3\.2/);
   assert.throws(() => planWith({ ...film, "wan-resident-gb": "4" }), /--wan-resident-gb 4 .*at most 3\.2/);
   assert.throws(() => planWith({ ...film, "wan-resident-gb": "8" }), /--wan-resident-gb 8 /);
-  // a bigger clip than the film's needs no more than the film's figure says (the cap)
+  // a bigger clip than the film's is held at the film's figure (the planner has no measurement above it, and says so: geometryNote)
   assert.equal(planWith({ width: "1280", height: "1280", frames: "121", "wan-resident-gb": "3.2" }).residentGb, 3.2);
   assert.throws(() => planWith({ width: "1280", height: "1280", frames: "121", "wan-resident-gb": "3.3" }), /--wan-resident-gb 3\.3 /);
-  // --reserve-vram does not take the compute card's room: the measured recipe under a 2 GiB reserve is the same call
+  // --reserve-vram does not take the compute card's room (its check is the storage card's). The film-size run itself ran at the runner's default reserve of 1.0;
+  // that a larger one leaves the compute card's peak where it was is assumed, not measured.
   assert.equal(planWith({ ...film, "reserve-vram": "2", "wan-resident-gb": "3" }).residentGb, 3);
   // a small clip needs little: the estimate has a 2 GiB floor (480x832x17: 7,800 tokens, 2.4 GiB)
   assert.equal(planWith({ width: "480", height: "832", frames: "17", "wan-resident-gb": "12" }).residentGb, 12, "15.9 - 2.4 - 0.5 = 13.0 GiB at most");
   assert.throws(() => planWith({ width: "480", height: "832", frames: "17", "wan-resident-gb": "14" }), /--wan-resident-gb 14 .*at most 13\.0/);
+});
+
+test("WAN_FILM_TOKENS is the measured film clip's geometry (720x1280x81), the size above which the planner has no measurement", () => {
+  assert.equal(M.WAN_FILM_TOKENS, 75600);
+  assert.equal(M.wanGeometry({ width: "720", height: "1280", frames: "81" }).tokens, M.WAN_FILM_TOKENS);
+  assert.equal(M.wanGeometry({ width: "1280", height: "720", frames: "81" }).tokens, M.WAN_FILM_TOKENS, "the same tokens in the other orientation");
+});
+
+test("a clip bigger than the film's is admitted at the film's figure, and the planner says it has no measurement above the film's size", () => {
+  // wanActivationsGib holds the figure at the film-size run's 12.2 GiB above 75,600 tokens. The sampler's activations grow with the tokens, so
+  // the resident-share check there is only as good as that figure: the planner does not refuse what it cannot size, it says so before the check,
+  // with the number a proportional extrapolation gives, and leaves the share (and the wait) to the caller.
+  const said = [];
+  const say = (l) => said.push(l);
+  const notes = () => said.filter((l) => /^WAN-GEOMETRY-NOTE: /.test(l));
+  for (const flags of [{}, { width: "720", height: "1280", frames: "81" }, { width: "1280", height: "720", frames: "81" }, { width: "480", height: "832", frames: "17" }]) {
+    planWith({ ...flags, "wan-resident-gb": "3" }, { say });
+    assert.deepEqual(notes(), [], JSON.stringify(flags) + " is at or under the film's size: nothing to say");
+  }
+  const big = { width: "1280", height: "1280", frames: "121", "wan-resident-gb": "3" };
+  planWith(big, { say });
+  assert.equal(notes().length, 1, said.join("\n"));
+  assert.match(notes()[0], /1280x1280x121 \(198400 tokens\) is bigger than the measured film clip \(720x1280x81, 75600 tokens\)/);
+  assert.match(notes()[0], /holds the sampler's activations at the film's 12\.2 GiB/);
+  assert.match(notes()[0], /in proportion to its tokens .*about 32\.0 GiB/);
+  assert.match(notes()[0], /--wan-resident-gb/);
+  assert.match(notes()[0], /--wait-sec/);
+  // one latent frame more than the film (85 frames: 79,200 tokens) is already past what was measured
+  said.length = 0;
+  planWith({ width: "720", height: "1280", frames: "85", "wan-resident-gb": "3" }, { say });
+  assert.match(notes()[0] || "", /720x1280x85 \(79200 tokens\)/);
+  // a refusal still carries the note ahead of it: the reader sees why the figure is soft before the numbers it produced
+  said.length = 0;
+  assert.throws(() => planWith({ ...big, "wan-resident-gb": "40" }, { say }), /--wan-resident-gb 40 /);
+  assert.equal(notes().length, 1, "the note comes before the refusal");
 });
 
 test("wanActivationsGib is never under the benchmark's reserved allocator peaks (RESULTS 3.5) and is capped at the film's figure", () => {
@@ -679,7 +715,7 @@ test("wanActivationsGib is never under the benchmark's reserved allocator peaks 
     assert.ok(M.wanActivationsGib(tokens) >= reserved, `${tokens} tokens: ${M.wanActivationsGib(tokens)} GiB against a measured ${reserved}`);
   }
   assert.equal(M.wanActivationsGib(75600), M.WAN_FILM_ACTIVATIONS_GIB, "the film's size is the cap");
-  assert.equal(M.wanActivationsGib(200000), M.WAN_FILM_ACTIVATIONS_GIB, "and nothing above it asks for more");
+  assert.equal(M.wanActivationsGib(200000), M.WAN_FILM_ACTIVATIONS_GIB, "and the planner holds it there: nothing above the film's size was measured");
   assert.equal(M.wanActivationsGib(100), 2, "a floor under a tiny clip");
   assert.equal(M.WAN_FILM_ACTIVATIONS_GIB, 12.2, "the film-size run's compute-card peak (15.18 GiB) less its 3 GiB resident share, the figure internal/hostneed declares against");
   assert.equal(M.WAN_COMPUTE_CONTEXT_GIB, 0.5, "the CUDA context kept beyond it: 15.9 - 12.2 - 0.5 = 3.2 GiB, the film-size ceiling");
