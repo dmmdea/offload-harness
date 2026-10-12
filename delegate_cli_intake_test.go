@@ -29,10 +29,12 @@ func intakeSpec(goal string, contextPaths ...string) delegate.SubtaskSpec {
 // door, and the lints stay on the subtasks they belong to.
 func TestCLIIntakeKeepsTheValidSubtasksAndTheirPositions(t *testing.T) {
 	root := t.TempDir()
+	third := intakeSpec("third")
+	third.Acceptance = []string{"nonempty:summary"} // shape-only: the intake lint has something to say about it
 	specs := []delegate.SubtaskSpec{
 		intakeSpec("first"),
 		intakeSpec("refused", "no-such-scratch-file.txt"),
-		intakeSpec("third"),
+		third,
 	}
 	batch, lints, err := cliIntake(specs, root, core.AgentContextMaxBytes, "cli:delegate", "subtask", nil)
 	if err != nil {
@@ -46,8 +48,12 @@ func TestCLIIntakeKeepsTheValidSubtasksAndTheirPositions(t *testing.T) {
 			t.Errorf("contract %d = goal %q door %q at %d, want %q on cli:delegate at %d", k, batch.Contracts[k].Goal, batch.Contracts[k].Door, batch.Indices[k], want, []int{0, 2}[k])
 		}
 	}
-	if len(lints) != 3 || lints[1] != nil {
-		t.Errorf("lints = %v, want one slot per subtask sent and none for the refused one", lints)
+	want := delegate.LintAcceptance(batch.Contracts[1])
+	if len(want) == 0 {
+		t.Fatal("the third subtask draws no intake lint: the fixture no longer proves the lints stay on their own subtasks")
+	}
+	if len(lints) != 3 || lints[1] != nil || strings.Join(lints[2], "|") != strings.Join(want, "|") {
+		t.Errorf("lints = %v, want one slot per subtask sent, none for the refused one, and the third's own lint at position 2: %v", lints, want)
 	}
 	// The spliced answer is one result per subtask sent, the refusal in its own place.
 	results, sum := batch.Splice([]delegate.PlacedResult{{}, {}}, delegate.Summary{Succeeded: 2}, "subtask", nil)
@@ -149,6 +155,15 @@ func TestTheCLIVerbsPrepareEachSubtaskOnItsOwnAndSpliceTheRefusals(t *testing.T)
 				t.Fatalf("%s not found in main.go: the scan is broken", tc.verb)
 			}
 			var intake, engine, splice, wire, direct token.Pos
+			named := func(call *ast.CallExpr, name string) bool {
+				for _, a := range call.Args {
+					if id, ok := a.(*ast.Ident); ok && id.Name == name {
+						return true
+					}
+				}
+				return false
+			}
+			researchIDs := true // a research page is named by its place in the url list, in the intake error and in the splice
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
@@ -158,6 +173,9 @@ func TestTheCLIVerbsPrepareEachSubtaskOnItsOwnAndSpliceTheRefusals(t *testing.T)
 				case *ast.Ident:
 					if fun.Name == "cliIntake" {
 						intake = call.Pos()
+						if tc.verb == "runResearch" && !named(call, "resultSources") {
+							researchIDs = false
+						}
 					}
 				case *ast.SelectorExpr:
 					x, _ := fun.X.(*ast.Ident)
@@ -170,6 +188,9 @@ func TestTheCLIVerbsPrepareEachSubtaskOnItsOwnAndSpliceTheRefusals(t *testing.T)
 						direct = call.Pos()
 					case fun.Sel.Name == "Splice":
 						splice = call.Pos()
+						if tc.verb == "runResearch" && !named(call, "resultSources") {
+							researchIDs = false
+						}
 					}
 				}
 				return true
@@ -182,6 +203,9 @@ func TestTheCLIVerbsPrepareEachSubtaskOnItsOwnAndSpliceTheRefusals(t *testing.T)
 			}
 			if intake == token.NoPos || !(intake < engine) {
 				t.Errorf("%s does not prepare its subtasks through cliIntake before the engine runs", tc.verb)
+			}
+			if !researchIDs {
+				t.Errorf("runResearch does not hand resultSources to cliIntake and Splice: a refused page would be named by the contract's place, not the url list's")
 			}
 			if splice == token.NoPos || !(engine < splice && splice < wire) {
 				t.Errorf("%s does not splice the refused subtasks back (batch.Splice) between the engine's results and the body: the answer would hold fewer results than subtasks sent", tc.verb)
