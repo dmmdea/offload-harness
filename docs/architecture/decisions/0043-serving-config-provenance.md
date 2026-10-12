@@ -131,6 +131,52 @@ sweep is then one poll instead of three ssh sessions.
   re-verifies all eight shipped templates.
 - **ADR 0042 is not in this tree.** This ADR takes 0043 by instruction; the gap is intentional.
 
+## Amendment 2026-10-12 (0.184.0; register W4 and A-87)
+
+The rule audit this ADR names as blind to staleness (`internal/servingtmpl/audit.go`) reads three
+more things, and the stamp turned out to be the evidence two of them need.
+
+- **The every-expert placement (W4, rule `cpu-moe`).** INV-1 sanctions one host-RAM use for experts,
+  a measured partial `--n-cpu-moe N`; the bare `--cpu-moe` (and `-cmoe`, the draft-model forms and
+  the `LLAMA_ARG_CPU_MOE` environment twin) parks every expert layer in RAM. The seed gate saw
+  `profiles.json` only, so a hand-edited live file could carry it. `servingtmpl.AuditCPUMoE` reads
+  parsed entries (cmd, env, macros expanded), never the raw text, because a stamped file records
+  `"moe_26b": "--cpu-moe -ngl 999"` in its own comment. It is pure and exemption-free; **its two
+  callers hold different evidence and each reads its own.** `install render` runs the gate BEFORE
+  the stamp exists (the stamp is prepended after the rule audit), so `renderGate` exempts from the
+  resolved profile: the cpu backend (no card to overflow from) and the off-matrix defaults'
+  literal. `audit-yaml` holds a file, so it exempts from a *verbatim* stamp: one whose spec hash is
+  the hash of the basis it carries and whose body still hashes to `body_sha256`. A verbatim cpu
+  render is clean; a verbatim off-matrix render (`render.fallback_backend` set) prints the finding
+  as a `note:` line and does not fail the audit; an unstamped file, or one edited since its stamp,
+  is judged as a box with a card, and the finding says so. A stamp that cannot vouch for the body
+  exempts nothing.
+- **A device pin on identical cards (A-87, rules `pin-by-index` and `pin-unresolved`).** An index is
+  the card's place on the PCI bus; on a box with two cards of one model nothing in the config says
+  which was meant, and a reordering (this board re-enumerates on power loss) moves the seat
+  silently. `servingtmpl.AuditPins` reads each entry as llama-swap runs it against the box's own
+  card table (`gpuprobe`, through `audit-yaml`'s `renderCardTable` seam, read only for a file that
+  pins a device): an index is flagged when it names a card whose model name another card shares
+  (a unique card's index is unambiguous; an entry without `CUDA_DEVICE_ORDER=PCI_BUS_ID` is judged
+  by the weaker form, any plain index while two cards share a name), and a UUID that matches no
+  card is flagged always, because CUDA hides every device from the first pin it cannot resolve.
+  **Severity follows who maintains the file.** A seed cannot carry a UUID, so the seeded index pins
+  of a verbatim render are the renderer's own output: a `note:`, never a failure, or the only way to
+  satisfy the rule would be a hand edit, which turns the file HAND-EDITED and red under
+  `--against-render`. The same pin in an unstamped or edited file is its maintainer's choice and a
+  violation. With no readable card table the audit says `no card table: pin rules not applied` and
+  its exit status is unchanged; it never passes silently.
+- **What stays open.** The installer still writes the bare form in three places (the selftest R4.2
+  remediation, the `install.ps1` unknown-profile fallback and `fallbackProfile` for the CUDA
+  family), so the off-matrix exemption is a concession, not a policy; a yaml that R4.2 remediated
+  reads as a `cpu-moe` finding on its next audit, which is the gate working on a hand edit. A-86
+  (each resident sits on the card its tier intended) needs the tier's layer table, which
+  `CheckComposite` has at render and `audit-yaml` does not, and the promotion of the seeded-pin
+  note to a failure waits for an installer step that substitutes UUIDs.
+- Tests: `TestAuditCPUMoERefusesTheBareFlagInEverySpelling`, `TestRenderGateExemptsOnlyTheCPUBackendAndTheOffMatrixLiteral`,
+  `TestAuditYAMLReadsTheExemptionFromTheStamp`, `TestAuditPinsRefusesAnIndexPinOnIdenticalCards`,
+  `TestAuditYAMLNotesASeededIndexPinOnAVerbatimRender`.
+
 ## Evidence
 
 Register A-39 / commit 5e249dd (0.113.32) raising `ampere-16` `ctx_size` 32768 → 131072, and
