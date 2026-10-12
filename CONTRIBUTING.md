@@ -83,7 +83,9 @@ binary once left 22,434 folders and about 70 GB in under two hours. Two things g
   unless `--allow-system-drive` is given). A leaver that is legitimate (there is none today, so the list is empty) is named in
   `scripts/test-temp-tripwire.ignore`, one `NAME-PREFIX`, a tab and a reason per line: the tripwire prints it with its reason and
   does not count it, so an ignore is never silent. A whole-module run loads the machine, so run it on a spare host with
-  `nice -n 19 bash scripts/test-temp-tripwire.sh --dir <data drive folder> --go-args "-p 1"`, or pass `--pkgs` a subset.
+  `nice -n 19 bash scripts/test-temp-tripwire.sh --dir <data drive folder> --go-args "-p 1 -timeout 45m"`, or pass `--pkgs` a subset. The timeout matters: `internal/pipeline` takes
+  about ten minutes, which is go test's default timeout, and a test binary that times out is killed before it cleans up, so its temp
+  state would read as a leak.
   `bash scripts/test-temp-tripwire-selftest.sh` (or `pwsh -File scripts/test-temp-tripwire-selftest.ps1`) shows every verdict on
   the fixture module `scripts/testdata/tripwirefixture`. When go test fails, the failing tests and their messages are printed
   ahead of the tail of the output, because go test prints one `ok` line per later package; an interrupted run (Ctrl-C, `kill`)

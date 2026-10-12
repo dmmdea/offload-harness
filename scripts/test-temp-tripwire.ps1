@@ -20,7 +20,9 @@
 #   -Pkgs "PKG ..."      the packages, space separated (default ./...). A whole-module run loads the machine: run it
 #                        at low priority on a spare host, or pass a subset.
 #   -Module DIR          the Go module to test (default: the current directory)
-#   -GoArgs "ARG ..."    extra go test arguments, space separated, e.g. "-p 1 -short" (-count=1 is always passed)
+#   -GoArgs "ARG ..."    extra go test arguments, space separated, e.g. "-p 1 -short" (-count=1 is always passed). A whole-module
+#                        run needs "-timeout 45m": internal/pipeline takes about ten minutes, go test's default timeout, and a test
+#                        binary that times out is killed before it cleans up, so its temp state would read as a leak
 #   -IgnoreFile FILE     the reasoned ignore list (default: scripts\test-temp-tripwire.ignore in the module, when it exists):
 #                        one entry per line, "NAME-PREFIX<TAB>reason", # comments and blank lines allowed. An entry left in the
 #                        temp folder whose prefix is listed is not a leak; it is printed with its reason, never silently. A line
