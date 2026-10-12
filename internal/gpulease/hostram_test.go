@@ -417,12 +417,12 @@ func TestHostRAMOnTheRecordIsAdditive(t *testing.T) {
 // card, and all their runners are below it), never goes below zero, and counts the whole declared
 // need of a holder whose memory cannot be read.
 func TestPendingPoolsLeasesByHolder(t *testing.T) {
-	held := func(m map[int]float64, unreadable ...int) func(int) (float64, bool) {
+	held := func(m map[int]float64, unreadable ...int) func(Info) (float64, bool) {
 		bad := map[int]bool{}
 		for _, p := range unreadable {
 			bad[p] = true
 		}
-		return func(pid int) (float64, bool) { return m[pid], !bad[pid] }
+		return func(l Info) (float64, bool) { return m[l.PID], !bad[l.PID] }
 	}
 	live := []Info{
 		{Epoch: 1, PID: 100, HostRAMGiB: 20},
