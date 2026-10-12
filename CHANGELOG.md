@@ -789,6 +789,10 @@ measurement, in both places that draw this line.
   cap is judged on the VRAM in use now and a stale table misstates that; the new `mediaAllocInput` is pinned both ways. A media call declares
   no VRAM footprint, so under a cap below 100 the typed media tools still do not take the display card: that waits for a measured VRAM footprint
   to be fed to the allocator (register P13, item 2).
+- **The refusal reads right.** The display card refused over its cap is skipped as `vram`, as the opened card's floor always was, so a media
+  call's `gpu busy` answer would have read `card 1 vram`. `gpulease.Skip` gains `Display` (the card table's rule) and
+  `gpualloc.SkipSummary` says `card 1 vram (display card)` beside any reason but `display`
+  (`TestSkipSummaryNamesTheDisplayCardBesideAReasonThatDoesNot`); the full sentence, with the cap, stays in the skip's detail.
 - **What you will see.** A display card with no resident seat sorts first (nothing to evict), so with the pair seat loaded `gpu reserve --cards 1
   --vram 6` now prefers the screen's card to an eviction; `gpu_display_cap_pct: 0` restores the old order. The cap bounds admission only:
   nothing limits a job after it is placed, so the footprint has to be a measured peak, and one number per request cannot describe a donor slice
