@@ -137,16 +137,20 @@ func TestAMulticardImageBindingLeasesTwoNonDisplayCardsAndPassesThePlacement(t *
 	}
 }
 
-// The display card is never part of the set, with the operator at the desk or away: the allocator's rule lets an away operator's screen card be
-// auto-assigned to a ONE-card call, and the placement is not that.
-func TestTheMulticardPairNeverIncludesTheDisplayCardWhetherTheOperatorIsAwayOrNot(t *testing.T) {
-	for _, away := range []bool{false, true} {
-		f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: multicardBinding})
-		f.away = away
+// The display card is never part of the set, whatever the display cap: the allocator may give the screen's card to a ONE-card call up to
+// gpu_display_cap_pct (A-RAM-15), and the placement is not that: the pair is named, not allocated.
+func TestTheMulticardPairNeverIncludesTheDisplayCardWhateverTheDisplayCap(t *testing.T) {
+	zero, whole := 0, 100
+	for _, capPct := range []*int{nil, &zero, &whole} {
+		name := "default"
+		if capPct != nil {
+			name = fmt.Sprint(*capPct)
+		}
+		f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: func(c *config.Config) { multicardBinding(c); c.GPUDisplayCapPct = capPct }})
 		ch := f.image(nil)
 		probes := f.waitStarted(1)
 		if got := probes[0].Env["GPU_LEASE_DEVICES"]; got != pairEnv() {
-			t.Errorf("away=%v: GPU_LEASE_DEVICES = %q, want the two non-display cards", away, got)
+			t.Errorf("cap %s: GPU_LEASE_DEVICES = %q, want the two non-display cards", name, got)
 		}
 		f.letRunnersGo()
 		f.await(ch)

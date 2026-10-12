@@ -331,7 +331,8 @@ A review of the two items above found six defects at their edges. None changes w
   prints and does not count, so an ignore is never silent); the review round below moves the lock out of `TMPDIR` and the list is empty.
 - **Found on the way.** `TestEveryTrackedGoModuleIsScannedOrNamedAsExcluded` fails on the 0.182.0 candidate (shown by a remote run at the lint's first commit):
   `scripts/testdata/mutfixture` holds a tracked `go.mod` that the govulncheck job does not scan and `govulncheckExcluded` did not name. Both fixture
-  modules (that one and the tripwire's) are named now, with the reason they ship nothing.
+  modules (that one and the tripwire's) are named now, with the reason they ship nothing (the 0.182.0 release had already named
+  `mutfixture`; the tripwire's fixture is the new one).
 - **Measured** with the PowerShell twin on Windows, `go test -p 1` over the root package, `fleetnode`, `pipeline`, `pairworkloads`, `mediaremote`, `mcpserver`
   and `delegate`, the temp dir on an empty folder of a data drive. Before the leak fixes (0.181.0): 79 entries in 8 prefixes — `run-graph-*.json` 28 and
   `run-graph-manifest-*.json` 1 (F79), `lo-root-state-*` 20, `fleetnode-compose-cache-*` 13 and `lo-pipeline-lease-*` 13 (F77), `lo-pairworkloads-state-*` 2 and

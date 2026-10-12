@@ -766,8 +766,8 @@ with the read-only loader promotes a row: flip `basis` in `render/multicard-reci
 
 **What the typed door does.** A binding that asks for the placement takes its own need kind in the media admission (`needMulticard`):
 
-- *The pair is named, not allocated.* The plan is the box's two non-display cards, as a set. The display card is never in it, with the operator at the
-  desk or away (the allocator lets an away operator's screen card be auto-assigned to a ONE-card call; this is not that), and a card whose display state
+- *The pair is named, not allocated.* The plan is the box's two non-display cards, as a set. The display card is never in it, whatever the
+  display cap (the allocator may give the screen's card to a ONE-card call up to `gpu_display_cap_pct`; this is not that), and a card whose display state
   the driver did not report is not counted. A box without exactly two such cards (one, or three on a larger box) answers `gpu_lease_unavailable` with the
   count and the way out (`local-offload gpu reserve --devices <card>,<card> -- <command>`), and runs nothing.
 - *It queues like any lease.* A held card of the pair is a place in line whose token names both cards (`gpu_queued`, a capacity defer), never a run on

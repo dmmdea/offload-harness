@@ -239,6 +239,9 @@ What the allocator does now:
   the screen's card closed (`AllocInput.DisplayStale`, the cap itself unchanged and the skip naming the table, not
   the key), because the cap is judged on the VRAM in use now and a stale table misstates exactly that.
 
+The card-only pair of the 2026-10-11 amendment is unaffected: it is named, not allocated, and still never holds the
+display card. The away-operator opening it contrasts with is replaced by this cap, which is for a one-card call.
+
 Consequences to know. A display card with no resident seat sorts first (nothing to evict), so with the pair seat
 loaded, `gpu reserve --cards 1 --vram 6` now prefers the screen's card to an eviction; that is the rule working, and
 `gpu_display_cap_pct: 0` restores the old order. The cap bounds admission only: nothing limits a job after it is

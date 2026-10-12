@@ -45,7 +45,7 @@ func TestAllocatorHandsAWaiterAnotherCardWhileACardIsTreeOrphaned(t *testing.T) 
 		t.Fatalf("the fixture must be a tree-orphan: %+v", info)
 	}
 
-	in, err := BuildInput(context.Background(), m, config.Config{}, Need{}, hostDeps(cards, true)) // the operator is away: the display card is allocatable too
+	in, err := BuildInput(context.Background(), m, config.Config{}, Need{}, hostDeps(cards)) // no footprint is declared, so the display card stays closed under the cap
 	if err != nil {
 		t.Fatal(err)
 	}

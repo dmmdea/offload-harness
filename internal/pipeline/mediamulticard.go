@@ -7,7 +7,7 @@ package pipeline
 // instance of the pair; the door's job is to lease the cards and say which. So the need takes the box's two non-display cards, as a SET:
 //
 //   - the plan is NAMED, never allocated: the pair is the box's two non-display cards, or the call is refused with the reason. The display card is never in it,
-//     with the operator at the desk or away (the allocator's away-operator rule is for a one-card call), and a card whose display state the driver did not
+//     whatever the display cap (the allocator's gpu_display_cap_pct is for a one-card call), and a card whose display state the driver did not
 //     report is not counted (unknown is never "not the screen");
 //   - it is queued like any lease: a held card of the pair is a place in line (the token names the pair), never a one-card run;
 //   - it is NEVER degraded to the whole node or to the default instance: a host that does not lease cards, an unreadable card table and a box without exactly
