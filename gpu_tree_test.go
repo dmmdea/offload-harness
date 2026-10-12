@@ -103,16 +103,69 @@ func readPID(t *testing.T, path string) int {
 	return 0
 }
 
+// writeTreeConfig writes the config a real wrapper runs under over leaseFixture's, and returns the
+// ComfyUI directory it names. A test that gives no config gets a scratch state root AND a scratch
+// comfy_dir: a config with no comfy_dir resolves, on Windows, to the machine's real ComfyUI
+// install, whose launch markers the wrapper would then read.
+func writeTreeConfig(t *testing.T, cfgPath string, m *gpulease.Manager, cfgJSON string) string {
+	t.Helper()
+	if cfgJSON == "" {
+		cfgJSON = `{"state_dir": STATE, "comfy_dir": ` + strconv.Quote(t.TempDir()) + `}`
+	}
+	body := strings.ReplaceAll(cfgJSON, "STATE", strconv.Quote(m.Root()))
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		ComfyDir string `json:"comfy_dir"`
+	}
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		t.Fatalf("the wrapper's config is not JSON: %v\n%s", err, body)
+	}
+	return parsed.ComfyDir
+}
+
+// machineStateRedirects are the environment variables that point the lease directory or the
+// configuration at somewhere other than the scratch root a test gives its wrapper.
+var machineStateRedirects = []string{"GPU_LOCK", "LOCAL_OFFLOAD_STATE_DIR", "LOCAL_OFFLOAD_CONFIG"}
+
+// isolateFromMachineState clears them for the test, so the parent's lease Manager and the
+// wrapper both resolve the scratch root: a Manager that honoured GPU_LOCK would let the test's
+// ReleaseByEpoch act on the machine's real lease. Call it before leaseFixture.
+func isolateFromMachineState(t *testing.T) {
+	t.Helper()
+	for _, name := range machineStateRedirects {
+		t.Setenv(name, "")
+	}
+}
+
+// treeEnv is the environment of a real wrapper: the parent's without the redirects, plus extra.
+func treeEnv(extra ...string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		redirect := false
+		for _, bad := range machineStateRedirects {
+			redirect = redirect || strings.EqualFold(name, bad)
+		}
+		if !redirect {
+			env = append(env, kv)
+		}
+	}
+	return append(env, extra...)
+}
+
 // startTreeRun starts a wrapper whose command starts a grandchild, and returns once both exist.
 // extra are more `gpu reserve` flags; cfgJSON replaces the scratch config's body when not empty.
 func startTreeRun(t *testing.T, cfgJSON string, extra ...string) *treeRun {
 	t.Helper()
+	isolateFromMachineState(t)
 	cfg, m := leaseFixture(t)
-	if cfgJSON != "" {
-		if err := os.WriteFile(cfg, []byte(strings.ReplaceAll(cfgJSON, "STATE", strconv.Quote(m.Root()))), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+	comfy := writeTreeConfig(t, cfg, m, cfgJSON)
+	// The parent reads launch markers from the same scratch directory its wrapper does.
+	prevComfy := gpulease.ComfyDir()
+	gpulease.SetComfyDir(comfy)
+	t.Cleanup(func() { gpulease.SetComfyDir(prevComfy) })
 	dir := t.TempDir()
 	cmdFile, grandFile := filepath.Join(dir, "cmd.pid"), filepath.Join(dir, "grand.pid")
 	args := append([]string{"--config", cfg, "--class", "media", "--for", "1h", "--wait", "0", "--reason", "tree test"}, extra...)
@@ -125,7 +178,7 @@ func startTreeRun(t *testing.T, cfgJSON string, extra ...string) *treeRun {
 	}
 	t.Cleanup(func() { _ = errFile.Close() })
 	run.wrapper = exec.Command(os.Args[0], "-test.run=^TestHelperRunWrapper$", "-test.timeout=200s")
-	run.wrapper.Env = append(os.Environ(), "LO_WRAPPER_ARGS="+string(b), "LO_CMD_PIDFILE="+cmdFile, "LO_GRAND_PIDFILE="+grandFile)
+	run.wrapper.Env = treeEnv("LO_WRAPPER_ARGS="+string(b), "LO_CMD_PIDFILE="+cmdFile, "LO_GRAND_PIDFILE="+grandFile)
 	run.wrapper.Stderr = errFile
 	if err := run.wrapper.Start(); err != nil {
 		t.Fatal(err)
@@ -318,9 +371,9 @@ func TestLeaseLostSparesAnInstanceAnotherLeaseTookOver(t *testing.T) {
 	epoch := run.m.Inspect().Epoch
 	marker, _ := json.Marshal(map[string]any{
 		"startedAt": time.Now().Add(-time.Hour).UnixMilli(), "pid": run.grand, "ownerPid": run.cmdPID,
-		"args": []string{"main.py"}, "key": "p8190", "port": 8190, "leaseEpoch": epoch + 100,
+		"args": []string{"main.py"}, "key": "p1", "port": 1, "leaseEpoch": epoch + 100,
 	})
-	if err := os.WriteFile(filepath.Join(comfy, ".offload-launch-p8190.json"), marker, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(comfy, ".offload-launch-p1.json"), marker, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if released, err := run.m.ReleaseByEpoch(epoch); err != nil || !released {
