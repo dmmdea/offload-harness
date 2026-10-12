@@ -6,6 +6,7 @@ import assert from "node:assert";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { isolatedRunnerEnv } from "./test-isolation.mjs";
 import { buildSdVideoArgs, resolveParams, splitPositionals, missingFlags, parseArgs, vaeTileOverlap } from "./sdcpp-video.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -140,7 +141,7 @@ test("missingFlags / parseArgs", () => {
 });
 
 function run(args) {
-  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 30000 });
+  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 30000, env: isolatedRunnerEnv() });
 }
 
 test("the -- terminator: a prompt that starts with -- is a positional, flags after the positionals still parse", () => {
