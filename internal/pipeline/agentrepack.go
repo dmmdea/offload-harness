@@ -150,6 +150,10 @@ type repackOpts struct {
 	// all: it fails open, like every other sizing decision that needs a rate.
 	TokS      float64
 	RateBasis string
+	// NeedWhat names what sized the least a skip compares the time with, in the words the note
+	// uses: "the answer's" when "" (the answer-based figure, expectedRepackTokens) and "the
+	// object's" when the schema bounded the re-pack lower (repackLeast).
+	NeedWhat string
 	// Trace, when set, receives one record per attempt, for the wire.
 	Trace *repackTrace
 }
@@ -249,8 +253,12 @@ func (o repackOpts) fit(now, ctxDeadline time.Time, budget, least int) repackFit
 	if o.RateBasis != "" {
 		basis = " (rate: " + o.RateBasis + ")"
 	}
+	need := o.NeedWhat
+	if need == "" {
+		need = "the answer's"
+	}
 	return repackFit{Skip: true, Note: fmt.Sprintf(
-		"re-pack skipped: %.0f s left to %s at %.1f tok/s buys %d tokens < the answer's %d%s", left.Seconds(), what, o.TokS, buys, least, basis)}
+		"re-pack skipped: %.0f s left to %s at %.1f tok/s buys %d tokens < %s %d%s", left.Seconds(), what, o.TokS, buys, need, least, basis)}
 }
 
 // boundEnd is where the time a re-pack may use ends before the grace: the wall's
@@ -276,10 +284,7 @@ func (o repackOpts) boundEnd() (time.Time, string) {
 // is known: the wall bound then does no arithmetic at all, so there is nothing to
 // extend.
 func repackOwed(output string, tokS float64) time.Duration {
-	if tokS <= 0 {
-		return 0
-	}
-	return time.Duration(float64(expectedRepackTokens(output)) / tokS * agent.RepackMargin * float64(time.Second))
+	return repackOwedTokens(expectedRepackTokens(output), tokS)
 }
 
 // repackSkipErr marks a re-pack that was not sent, or not sent again, because the
@@ -349,6 +354,10 @@ type repackTrace struct {
 	// schema ("" when it was returned as the seat wrote it): the delivered object is
 	// then not byte for byte what the seat wrote, and nothing else says so.
 	Coerced string
+	// Trimmed says how many list items the delivered object kept of the ones its answer held
+	// ("kept 10 of 11 list items ...", core.ListsTrimmed) when it kept fewer, "" when it kept
+	// them all: the answer rides beside the object, and nothing else says the object is short.
+	Trimmed string
 }
 
 // setCoerced records that the object the call returned was re-typed. A nil trace
@@ -356,6 +365,14 @@ type repackTrace struct {
 func (tr *repackTrace) setCoerced(note string) {
 	if tr != nil {
 		tr.Coerced = note
+	}
+}
+
+// setTrimmed records that the object the call returned holds fewer list items than its
+// answer did. A nil trace records nothing.
+func (tr *repackTrace) setTrimmed(note string) {
+	if tr != nil {
+		tr.Trimmed = note
 	}
 }
 

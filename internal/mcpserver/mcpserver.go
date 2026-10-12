@@ -59,7 +59,8 @@ import (
 )
 
 // rescueFunc is the rescue a delegation hands the engine: the injected seam, else
-// this server's pipeline (one re-pack completion on its own agent seat).
+// this server's pipeline (pipeline.RescueRepack: the lossless reading, then one re-pack completion on
+// its own agent seat or, when that seat is cold, on the node that wrote the answer).
 func (s *Server) rescueFunc() delegate.RescueFunc {
 	if s.rescue != nil {
 		return s.rescue

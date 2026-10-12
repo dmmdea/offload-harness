@@ -98,9 +98,20 @@ func rescueSchemaMiss(ctx context.Context, rescue RescueFunc, contract core.Agen
 		budget = rescueFloor
 	}
 	rescueStart := time.Now()
+	// The node that wrote the answer, for a rescue that can re-pack where the seat is hot. Not when
+	// that seat just failed the node's own re-pack (originSeatFailed): it is the last place to send
+	// the rescue first. The seat is the wire's, else the one the run was placed on (the fallback
+	// runRemote fills in before finish).
+	if pr.ranBase != "" && !originSeatFailed(pr.Result) {
+		seat := strings.TrimSpace(pr.Result.Seat)
+		if seat == "" {
+			seat = strings.TrimSpace(pr.Seat)
+		}
+		ctx = WithRescueOrigin(ctx, RescueOrigin{Base: pr.ranBase, Seat: seat, Node: pr.Result.NodeID})
+	}
 	got, err := rescue(ctx, contract, pr.Result.Output, budget)
 	if err == nil {
-		err = validateRescued(contract, got.Structured)
+		err = validateRescued(contract, got.Structured, pr.Result.Output)
 	}
 	if err != nil {
 		// The defer stands and may be re-placed (a seat lost in the re-pack is): the wall
@@ -139,8 +150,9 @@ func rescueSchemaMiss(ctx context.Context, rescue RescueFunc, contract core.Agen
 
 // validateRescued holds a rescue to the schema the contract's answer is held to
 // (its own, with every field the acceptance reads required), whatever produced
-// the object: the delegator delivers nothing it has not validated itself.
-func validateRescued(contract core.AgentContract, structured json.RawMessage) error {
+// the object: the delegator delivers nothing it has not validated itself. answer is the
+// finished answer the object was written from, which it is also read against.
+func validateRescued(contract core.AgentContract, structured json.RawMessage, answer string) error {
 	if len(structured) == 0 {
 		return fmt.Errorf("the rescue returned no structured object")
 	}
@@ -157,7 +169,24 @@ func validateRescued(contract core.AgentContract, structured json.RawMessage) er
 	if err := validator.Validate(structured, schema); err != nil {
 		return fmt.Errorf("the rescued object does not validate: %w", err)
 	}
+	// Valid is not faithful: an object that emptied the lists its answer held is no rescue.
+	if why := listFidelityFailure(contract, structured, answer); why != "" {
+		return fmt.Errorf("the rescued object is hollow: %s", why)
+	}
 	return nil
+}
+
+// originSeatFailed reports that the node's own re-pack failed because its seat did: the class is
+// infrastructure, which is how the node files a re-pack that stalled, could not reach its seat, or
+// found it busy past the wait (a seat lost under the run is the same class). The node sets
+// schema_miss on every failure arm of its re-pack, these included, and SchemaMissRescuable does not
+// read the class, so a rescue would otherwise call the seat that just wedged first. That call is
+// bounded by an allowance of at least the 120 s flat re-pack bound while the rescue's budget floors
+// at 120 s: a hung seat would spend all of it and leave this box's own seat no try. A budget defer
+// (the time left could not buy the re-pack, so it was never sent), an abstention (the seat answered
+// and the object failed) and a node that names no class keep the origin.
+func originSeatFailed(w core.AgentWireResult) bool {
+	return w.DeferClass == core.DeferClassInfrastructure
 }
 
 // joinRepackNote appends a finding to the result's repack_note.
@@ -175,4 +204,37 @@ func clipReason(s string) string {
 		s = s[:240] + "…"
 	}
 	return s
+}
+
+// RescueOrigin is where a finished answer was written: the node whose agent loop produced it, and
+// the seat that wrote it. The delegator's rescue is handed it (WithRescueOrigin) because that node
+// holds its seat hot: it has just decoded the answer, so a one-completion re-pack there waits for
+// no load, and it does not depend on THIS box's seat being resident or its cards being free. It is
+// not handed when the node's own re-pack failed for its seat's health (originSeatFailed).
+type RescueOrigin struct {
+	// Base is the node's dial base, as the run used it.
+	Base string
+	// Seat is the seat that wrote the answer on that node (the wire result's seat).
+	Seat string
+	// Node is the node's id, for a note.
+	Node string
+}
+
+type rescueOriginKey struct{}
+
+// WithRescueOrigin returns ctx carrying o for a RescueFunc to read. The RescueFunc signature is
+// unchanged, so every door that wires a rescue keeps working, and one that ignores the origin is
+// exactly the rescue it always was.
+func WithRescueOrigin(ctx context.Context, o RescueOrigin) context.Context {
+	return context.WithValue(ctx, rescueOriginKey{}, o)
+}
+
+// RescueOriginFrom reads the origin a rescue was handed: ok is false when the result did not come
+// from a node (a local run) or the node named no seat.
+func RescueOriginFrom(ctx context.Context) (RescueOrigin, bool) {
+	o, ok := ctx.Value(rescueOriginKey{}).(RescueOrigin)
+	if !ok || strings.TrimSpace(o.Base) == "" || strings.TrimSpace(o.Seat) == "" {
+		return RescueOrigin{}, false
+	}
+	return o, true
 }

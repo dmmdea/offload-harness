@@ -7103,6 +7103,12 @@ func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 			failures = append(failures, reason)
 		}
 	}
+	// Beside the contract's own checks, the object is read against its answer (fidelity.go):
+	// no check names the lists a node's re-pack may have emptied. A no-op for a contract with no
+	// schema or no list in it, which is every contract of the single-seat ask lane.
+	if why := listFidelityFailure(contract, wire.Structured, wire.Output); why != "" {
+		failures = append(failures, why)
+	}
 	return failures
 }
 
