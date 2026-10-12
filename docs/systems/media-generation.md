@@ -743,6 +743,11 @@ with the read-only loader promotes a row: flip `basis` in `render/multicard-reci
   an instance of its own, keyed by the two cards and shared with the Wan placement), no `comfy_cuda_device` pin and no dynamic VRAM (both contradict two
   cards under `--gpu-only`; the runner would drop them for the launch anyway), and no `--pool-*` (a pool is another placement). The operator's
   `comfy_extra_args` are theirs and stay.
+- *The finished answer names the pair.* A generate-image, edit-image or batch that ran on the pair adds `devices` to its success answer: the two lease ids,
+  sorted, the key and spelling the queued answer already uses (`TestAMulticardImageBindingLeasesTwoNonDisplayCardsAndPassesThePlacement`). Under a parent
+  lease they are the parent's two cards. A batch carries them on every item it rendered here, so the item `generate-image --batch` prints has them too. A call
+  that did not hold the pair (the one-card lease, a pool that holds two cards, a named family without the key, `single`) adds nothing: its answer is byte for
+  byte what it was.
 - *Under a parent lease* (`local-offload gpu reserve --devices <a>,<b> -- <command>`) the call runs inside it on both cards, if the lease holds exactly two
   non-display cards of this box; one card, the whole node and a lease that includes the display card are refused with the reason.
 - *The lane probe and the place-in-line keeper read the same named plan*, so a router sees a held card of the pair as a busy lane, and the differential

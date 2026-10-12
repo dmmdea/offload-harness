@@ -6,6 +6,21 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a card-only generate-image, edit-image and batch answer names the two cards it ran on
+
+Only the queued answer of a call on the card-only placement carried the leased cards (`devices`); the answer of a call that ran, the one a caller reads, did not.
+The grant now holds the pair's lease ids (`mediaGrant.Devices`), set where the pair is granted: `grantCards` for a plan the placement named (`mediaPlan.pair`, set by
+`planMulticard`, so a pool or a declared lease that holds two cards is not it) and `acquireInheritedPair` for a parent lease on exactly two non-display cards. The
+success answers of `runGenerateImage` and `runEditImage`, and every `ImageBatchItem` rendered here, add them as `devices` (the key and the lease-id spelling the
+queued answer uses); the CLI's batch output layers the item's own JSON under its row, so `generate-image --batch` prints them too. A grant without the pair adds
+nothing: every other call, with or without `imagegen_placement` / `gen_edit_placement` set to `single`, answers byte for byte as before. Documented in
+`docs/systems/media-generation.md` ("What the typed door does").
+Red before (the call succeeds, the key is missing): `TestAMulticardImageBindingLeasesTwoNonDisplayCardsAndPassesThePlacement`, `TestAnInheritedLeaseOnTwoCardsServesAMulticardImageCallOnBothCards`,
+`TestANamedFamilyThatAsksForMulticardLeasesThePairAndTheDefaultStaysOnOneCard`, `TestTheEditDoorLeasesTwoNonDisplayCardsForAMulticardBinding`,
+`TestAnImageBatchOnAMulticardBindingLeasesThePairOnce`. Guards for the other side: a plain edit, the default binding of the same node, a pooled two-card call and a batch
+without the placement carry no `devices` key (`TestAnImageBatchWithoutThePlacementNamesNoCards`, `TestPoolRouteRequestsPoolCards`). Seven mutants of the fix compile and
+each turns a named test red (grantCards, acquireInheritedPair, the generate and edit answers, the batch items, a two-card gate, an every-lease gate).
+
 ### Fixed — the card-only image and edit placement's review round: a smaller resident share, the canvas cap, a held-back int8 row, the console watch, the tiled decode, the loader preflight and a zero that was never said
 
 Seven findings from the review of the branch, each proved by a test seen failing for the right reason and by a mutant of its fix (the mutant compiles, the test goes
