@@ -217,10 +217,12 @@ Two further facts shaped the design:
   "this process runs under the lease" is **per lease**: consumers walk `Info.Each()` and a child of lease A is exempt from A
   alone. The writer is a per-host switch, default off, because a binary that predates the format reads a directory holding
   only device leases as free; it needs both the config key and a green reader audit marker (`gpu/reader-audit.json`,
-  written by `gpu doctor`), enforced in code by `ApplyCardScopedConfig`. **Deviation from plan rev 2, pending acceptance:**
+  written by `gpu doctor`), enforced in code by `ApplyCardScopedConfig`. **Deviation from plan rev 2, accepted (2026-10-12):**
   the synthetic pid-0 `meta.json` umbrella the plan specified is not written. Its premise was verified against the real
   0.158.3 and 0.160.0 binaries (a pid-0 record is held for its declared window and reclaimed after it), so it was dropped as
-  a second source of truth, not because it failed; the audit gate stands in for it until the plan owner decides. Pinned by
+  a second source of truth, not because it failed; the audit gate stands in for it, and the plan owner accepted that on
+  2026-10-11 after a green `gpu doctor` on the reference box (the four umbrella tests the plan named were never written and are
+  superseded, see the GPU lease guide). Pinned by
   `TestSecondDeviceLeaseSurvivesFirstEpochRelease`, `TestHigherEpochDeviceLeaseIsNeverFencedByALowerOne`,
   `TestWholeNodeAndDeviceGrantsNeverBothWinConcurrently`, `TestNoCardEverHasTwoClaims*` and
   `TestOldReaderFixtureSeesFreeOverV2DirAndTheFlagIsWhatGatesIt`. See [GPU lease](../../systems/gpu-lease.md).

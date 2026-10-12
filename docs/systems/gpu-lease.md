@@ -471,7 +471,7 @@ later waiter queues behind. A waiter whose process is gone or stopped polling is
 binary older than this change (and to any Node reader that still compares `meta.json`). That is the one cross-version
 hazard, and it is gated by a mechanism, not by good intentions: the writer needs the green reader audit marker (above).
 
-**Deviation from the plan, pending acceptance.** Plan rev 2 (section 2, P2 scope) specified a synthetic pid-0 `meta.json`
+**Deviation from the plan, accepted (2026-10-12).** Plan rev 2 (section 2, P2 scope) specified a synthetic pid-0 `meta.json`
 "umbrella" over any set of device leases, so that a pre-v2 writer would queue behind it. This change does **not** write
 one. The premise of the umbrella was checked against the real binaries on the build host and **holds**: a `meta.json`
 with `holder.pid = 0` and a future `expires_at_ms` makes `gpu reserve` of 0.158.3 and of 0.160.0 queue and then refuse
@@ -480,9 +480,16 @@ dropped for a design reason, not because it would not work: it is a second sourc
 re-stamped on every grant, release and extension and be judged by every reader as "not a real lease", and its only
 audience is a binary the audit is meant to find and replace. The cost of dropping it is that a pre-v2 writer that is
 **not** found by the audit double-books a host that has the switch on (measured with a byte-identical older wrapper in the
-review of this change). Until the plan owner or the operator accepts the deviation, plan P2's acceptance is **not**
-met; the umbrella can be restored later without a format change. No 0.152.x build is on the build host, so
-none was tested. Two hard gates stand in for the umbrella, and the second is now code:
+review of this change). **The plan owner accepted the deviation (decision of 2026-10-11, recorded here with 0.183.0):
+the umbrella stays dropped.** The safety trade-off was checked, not assumed: a `gpu doctor` run on the reference box on
+2026-10-11 was green, meaning every reader it reached there (the CLI, the MCP servers, the fleet daemon, the render lock
+script) understood the per-epoch fence and nothing older than the record format was found, so the audit gate below is
+doing the work the umbrella would have done. The umbrella can be restored later without a format change if a host ever
+runs a reader the audit cannot reach. No 0.152.x build is on the build host, so none was tested. The four tests the plan
+named for the umbrella (`TestUmbrellaIsPidZeroAndRestampedOnGrantAndRelease`, `TestWrapperOfHigherEpochNotKilledByUmbrella`,
+`TestLegacyReclaimDoesNotFreeUmbrellaWhileSiblingLeaseLive`, `TestOldReaderFixtureSeesHeldOverV2Dir`) were never written and
+are **superseded**: there is no umbrella to pin, and `TestOldReaderFixtureSeesFreeOverV2DirAndTheFlagIsWhatGatesIt` pins the
+hazard that replaces the last of them. Two hard gates stand in for the umbrella, and the second is now code:
 
 1. the switch stays off until the reader audit is green (`gpu doctor` scans every binary copy including the
    node-swap backups an automatic rollback restores, the images of running fleet-node and MCP processes, the deployed
@@ -550,7 +557,7 @@ retry would hold the mutex against every other poller of the gate. What a media 
 | form | meaning |
 |---|---|
 | `gpu reserve --devices 0,GPU-aaaa ...` | exactly these cards (an nvidia-smi index or a UUID prefix of at least four characters; ambiguous or unknown is an error). The operator's word: the display card is allowed, and a busy card is a place in line, FIFO behind its holder. |
-| `gpu reserve --cards 2` or `--cards 1..3` | the allocator picks (below). Never the display card while the operator is at the desk; with `operator_presence` reading away it may take that card, but only while the display layer's desktop floor stays free after `--vram`, and never with no `--vram` ("The display card, once the operator is away", below). |
+| `gpu reserve --cards 2` or `--cards 1..3` | the allocator picks (below). The display card is allocatable up to `gpu_display_cap_pct` (default 60 percent of its VRAM, the desktop's own use included) at any presence, only with a declared `--vram`, and never when the cap is 0 ("The display card is allocatable up to a cap", below). |
 | `gpu reserve --whole-node ...` | everything, as before. |
 | `gpu reserve ... -- <cmd>` | the cards `<cmd>` names itself: `CUDA_VISIBLE_DEVICES` (a UUID, or an index in PCI order when `CUDA_DEVICE_ORDER=PCI_BUS_ID`, else in ComfyUI order), else `--cuda-device N`, else `COMFY_CUDA_DEVICE`. Nothing named means the whole node. |
 
@@ -638,42 +645,58 @@ unreadable host-memory reading refuses only when a RAM need was declared, and a 
 request at once. On Windows (WDDM) nvidia-smi lists no per-process
 rows for compute apps, so `foreign-busy` is Linux-only evidence today.
 
-**The display card, once the operator is away.** `operator_presence` is one key with two readers: the display layer's
-`presence` guard ([composite-tier.md](composite-tier.md)) and this allocator. Set to `auto` (the console locked, or idle
-past `operator_idle_sec`, and nothing fullscreen) or to `away` (the operator's override, which reads away whatever the desk is
-doing), it lets the allocator take the display card too, and an opened card is still the desktop's, so it is held to the floor
-the display layer keeps: allocatable only while its free VRAM, less `--vram`, still leaves `display_floor_gib` (the largest
-floor declared by a layer guarded by `display_floor`; a box that declares none is judged as it was before this rule). The
-arithmetic is the layer's own (`free − footprint ≥ floor`), so the two doors onto the card cannot disagree about it, and it
-applies to the display card alone: a pair card is judged by the footprint, as it always was. A job that gives no `--vram`
-never takes the display card, because a footprint nobody declared cannot be shown to leave the floor (the layer's guard
-refuses a seat with no display footprint the same way); a media call whose `comfy_cuda_device` is empty declares none, so
-it picks among the other cards. `--devices` names the card on the operator's word and is never second-guessed. The skip
-reads `vram` and names the floor, and a display card that could not clear the floor is not queued on while a lease holds it
-(waiting would not fix it). A display twin that is loaded counts as a resident seat of the display card, each loaded
-twin costed at the layer's `display_footprint_gib` (both twins loaded cost twice that), so the card is not ranked as an
-empty one while it holds a twin: taking it would evict the twins, and the order prices that. When llama-swap's `/running`
-cannot be read the display layer's models are counted as loaded, so the display card sorts as occupied rather than as the
-empty card it might be; other layers' seats contribute nothing then, as before
-(`TestAnOpenedDisplayCardIsHeldToTheDesktopFloor`, `TestALoadedTwinOnTheDisplayCardIsAnEvictionNotAnEmptyCard`,
-`TestResidentFromCountsALoadedModelMapTwinOnItsCard`, `TestPickAutoDoesNotHandOutTheDisplayCardBelowTheLayersFloor`).
+**The display card is allocatable up to a cap, at any presence (`gpu_display_cap_pct`, 0.183.0).** The operator's rule of
+2026-10-11: the display card may be used up to 60 percent at all times, unless he says he needs it. The allocator used to read
+`operator_presence` (never the card at the desk, the card above the layer's floor when away); it now reads no presence at all.
+One key, `gpu_display_cap_pct` (a whole number of percent, default 60 when unset, `0` closes the card to the allocator, `100` is
+the whole card, a value outside `0..100` refuses the load by name; unset and `0` are different values): the display card is
+allocatable while the VRAM in use now, **the desktop's own included**, plus the request's declared footprint is at most that share
+of its total VRAM. The arithmetic is the display layer's own (`free − footprint ≥ floor`) with the floor set to the rest of the
+card, so the two doors onto the card cannot disagree about it; where the layers also declare an absolute `display_floor_gib`, the
+larger of the two floors holds. On the reference box (the display card with 2.6 GiB in use of 15.9) a 6 GiB request can land
+there and a 7.5 GiB one cannot, and the skip names the cap. The cap applies to the display card alone: a pair card is judged by
+the footprint, as it always was.
+
+- **`gpu_display_cap_pct: 0` is the operator's "I need the card" switch.** The card is skipped as `display` and the skip names the
+  key, whatever the desk is doing. Nothing watches the desk any more: a locked screen, an idle desk and a game on the card are one
+  question, answered by the VRAM in use at the moment of the pick.
+- **A footprint is needed to be held to a share.** A job that gives no `--vram` is not given the display card under a cap below 100
+  (the layer's guard refuses a seat with no display footprint the same way); a media call declares no VRAM footprint, so the typed
+  media tools do not take the display card until a measured footprint is fed to the allocator. `--devices` names the card on the
+  operator's word and is never second-guessed.
+- **An unknown display stays closed.** A reading that could not say which card the monitor is on marks every card `display-unknown`
+  and none of them is handed out, whatever the cap.
+- **The cap bounds admission only.** Nothing limits a job after it is placed, so the footprint has to be a measured peak, and one
+  number per request cannot describe a donor slice beside a compute share. A display card with no resident seat sorts first (nothing
+  to evict), so with the pair seat loaded `gpu reserve --cards 1 --vram 6` now prefers the screen's card to an eviction;
+  `gpu_display_cap_pct: 0` restores the old order.
+- A display twin that is loaded counts as a resident seat of the display card, each loaded twin costed at the layer's
+  `display_footprint_gib` (both twins loaded cost twice that), so the card is not ranked as an empty one while it holds a twin:
+  taking it would evict the twins, and the order prices that. When llama-swap's `/running` cannot be read the display layer's
+  models are counted as loaded, so the display card sorts as occupied rather than as the empty card it might be; other layers'
+  seats contribute nothing then, as before. A display card that could not clear the cap is not queued on while a lease holds it
+  (waiting would not fix it). The llama-swap twin guards (`display_floor` and `presence`, `internal/placement/guards.go`) are
+  unchanged: `operator_presence` still decides them and nothing else
+  (`TestAllocatorOpensTheDisplayCardWithinTheCapWithoutPresence`, `TestAllocatorRefusesTheDisplayCardPastTheCapAndNamesIt`,
+  `TestAllocatorCapZeroKeepsTheDisplayCardClosed`, `TestAllocatorUndeclaredFootprintStaysRefusedOnTheDisplayCard`,
+  `TestAllocatorDisplayUnknownStaysClosedUnderTheCap`, `TestALoadedTwinOnTheDisplayCardIsAnEvictionNotAnEmptyCard`).
 
 **A queued request is asked again at the grant.** The cards a `--cards` request or an auto-placed media call queues on
-are chosen from the operator's presence and the display card's free VRAM as they are at the enqueue, and a place in line
+are chosen from the display cap and the display card's VRAM in use as they are at the enqueue, and a place in line
 can be hours long. When the cards come free the grant puts the desktop rule again from fresh readings
-(`gpulease.Options.GrantCheck`, `gpulease.DesktopRefusals`, built by `gpualloc.GrantCheck`): the display card, or a card
-that may be it on a reading that could not say, while the operator is back at the desk, and the display card under its
-floor. The check runs with the cards already claimed by the request, because a claim that is checked before it is made can
+(`gpulease.Options.GrantCheck`, `gpulease.DesktopRefusals`, built by `gpualloc.GrantCheck`): the display card past its cap
+(it grew while the request waited), the display card once the operator has closed it (`gpu_display_cap_pct: 0`), and a card
+that may be the display card on a reading that could not say. The check runs with the cards already claimed by the request, because a claim that is checked before it is made can
 be skipped by a lease that is mid-release; a refused grant is released at once and the request chooses again from the same
 fresh readings, so it takes another card it still fits, queues on what qualifies now, or keeps polling for the display card
 to qualify until its `--wait` ends. The second choice keeps the arrival time of the first (`Options.QueuedSince`), so the
 place in line is not lost to it. `--devices` is the operator's word and carries no check
-(`TestAQueuedLeaseIsNotGrantedTheDisplayCardOnceTheOperatorIsBack`, `TestAQueuedMediaCallIsNotGrantedTheDisplayCardOnceTheOperatorIsBack`).
+(`TestDesktopRefusalsAppliesTheCapAtGrantTime`).
 
-**A lease already running on the display card is not revoked when the operator returns.** The post-admission watcher
-([composite-tier.md](composite-tier.md), ADR 0075) unloads the display layer's llama-swap twins and nothing else: it never
-stops a process and never releases a lease. A `--cards` job or a media render that took the display card while the operator
-was away keeps it after they come back. The desktop floor was checked once, when the card was claimed
+**A lease already running on the display card is not revoked when the operator returns or closes the card.** The post-admission
+watcher ([composite-tier.md](composite-tier.md), ADR 0075) unloads the display layer's llama-swap twins and nothing else: it never
+stops a process and never releases a lease. A `--cards` job or a media render that took the display card keeps it after the
+operator comes back, and after `gpu_display_cap_pct` is set to 0. The cap was checked once, when the card was claimed
 (`free - footprint >= floor`), so what protects the desktop afterwards is the footprint the job declared with `--vram`, the
 window it declared with `--for` (the lease expires then), and the operator, who can end it with `gpu release`. A job that
 grows past its declared footprint, or a game that takes the memory, can break the floor while the lease runs, and nothing
@@ -1622,7 +1645,7 @@ Every figure this rule uses is the harness's: chosen or measured, and labelled a
 * **What each render held is recorded, not guessed.** Every sampled GPU render records, beside its VRAM peak, the peak
   PRIVATE and the peak RESIDENT memory of its process tree (`gpulease.TreeMemory`, sampled by gpugen on the same tick) into
   the footprint store as `host_peak_gb` and `host_resident_peak_gb` with the number of runs (`host_runs`); both ride
-  `/fleet/health` `model_footprints[]` additively. Two quantities on purpose: they differ exactly where the open question
+  `/fleet/health` `model_footprints[]` additively. Two quantities on purpose: they differ exactly where the VRAM charge
   below bites. The media admission reads them back (`Pipeline.calibratedRAM`) and **raises** a declaration to the measured
   resident figure once at least three runs exist (`hostPeakMinRuns`, chosen), for the image and video routes. It only
   raises: the sampled tree can miss memory (a ComfyUI instance kept from an earlier lease and reused is not under the
@@ -1643,23 +1666,31 @@ Every figure this rule uses is the harness's: chosen or measured, and labelled a
   `host_resident_peak_gb` stay the all-time maxima, a peak being a peak. Edit, inpaint, animate and music keep the estimate
   from their model files until their sampling keys carry a family.
 
-* **Does a GPU process's WDDM allocation count toward its private bytes / commit? Partly measured, not settled.**
-  *Measured 2026-10-10 on the reference 3-card box, read-only* (Windows performance counters, no lease, nothing started; 60
-  readings at 3 s intervals, one GPU process steady the whole time): a ComfyUI server (`--disable-smart-memory --cache-none`) read
-  private 27.8 GiB, working set 16.1 GiB, GPU Process Memory dedicated 9.55 GiB, shared 13.58 GiB, total committed 23.13 GiB.
-  `private - working set` is 11.7 GiB against 9.55 GiB of dedicated VRAM: consistent with dedicated card allocations being
-  charged to private bytes and not being resident, and with shared GPU memory (system RAM the driver backs) being resident.
-  It is one process in one steady state, and a second process on the box (the screenshot tool) did not fit the same
-  arithmetic (`private - working set` 0.84 GiB under its 1.03 GiB dedicated), so it is evidence, not proof. *Reported, not
-  reproduced here:* a llama-server with every layer on the card showed 29.2 GiB private beside 25.7 GiB of VRAM. *Measured as
-  a control:* committed-but-untouched memory reads as private and not as resident (256 MiB: private 305 MiB, resident 13 MiB),
-  so "private is not RAM" is true of the process model on this OS, whatever the driver does. *Observed by earlier watchers,
-  same box:* commit above physical RAM (129.5 against 127.7 GiB) with one lane running, 47 GiB free and 2.3 GiB of page file in
-  use, unchanged for hours. **UNVERIFIED:** whether the system commit counter itself moves by a lane's VRAM when the lane
-  starts (the one thing that would settle it needs a lease and a lane, which is the S1 acceptance run), and the whole question
-  on the other nodes. Until then the rule requires both terms (above) and the not-yet-loaded sum is in resident units.
-  Settling the question would say whether a declaration in resident units under-states a lane's commit (the measured case
-  under "Known limits" says it can); it would not by itself make the rule a bound on what the box commits.
+* **Does a GPU process's allocation count toward its private bytes and the system commit? Yes on the reference driver (measured
+  2026-10-11); the brake is unchanged, and the limits are below.**
+  *The measurement.* On the reference three-card box (127.7 GiB physical, commit limit 187.7 GiB, Windows driver model), a
+  4.0 GiB `cudaMalloc` on a card raised the process's private bytes by 4.0 GiB (and system commit by 4.1 GiB), a 2.0 GiB one on
+  the display card by 2.0 GiB, and both fell back when the memory was freed: **every VRAM allocation is charged 1:1 to the
+  process's private bytes and to system commit**, on top of a CUDA context of about 2 GiB. A card-only Wan run therefore showed
+  private bytes 17 GiB over its baseline and system commit moving 82, 113, 83 GiB (the VRAM charge 23.8 GiB, an idle ComfyUI
+  3.2 GiB, host growth 2.3 GiB, the rest other tenants) while the host's available RAM never fell under 45 GiB in 33 recorded
+  runs. The stock ComfyUI loader (dynamic VRAM off) maps every safetensors file copy-on-write and Windows charges the whole
+  file to commit at map time (14.73 GiB on one Wan expert); a read-only loader adds nothing. This replaces the earlier
+  one-process observation (2026-10-10), which was consistent with it and could not settle it.
+  *What it means for the brake.* The brake's commit term counts card-resident weights as host memory: system commit sits
+  tens of GiB above what the host really uses, so commit says nothing about paging by itself. **The brake is unchanged**: it
+  still reads committed memory plus the declared need against physical RAM less the headroom, and available RAM is the paging
+  signal beside it (decided 2026-10-11, F70). What keeps card-only work moving is the declaration: a recipe
+  whose weights all sit on the cards (card-only placement, the read-only loader) declares **`--ram 0`**, which is the brake's own
+  unit (host memory the lane adds to commit), and a need of 0 is always admitted. A recipe that streams weights from RAM declares
+  them in full and waits behind the brake as before.
+  *Limits.* **One driver on one box:** the 1:1 charge was measured on the reference box's Windows driver and not on any other node
+  or driver version, so another host's commit says nothing until it is measured there. **Commit counters are system-wide:** other
+  tenants move them by tens of GiB (133 GiB before one run), so only a process tree's own private bytes are attributable to a
+  run. **A declaration of 0 is a statement about the recipe, not a measurement of the run:** the figures above are growth of
+  1.3 to 3.7 GiB for a card-only run, inside the headroom the brake keeps anyway, and a card-only recipe that loses its
+  read-only loader declares the file sizes it would then add to commit. Whether a lane's VRAM moves the commit counter at the
+  moment it starts, on a node other than the reference box, is not measured.
 
 * **Pages-in per second is not a paging signal on this box.** `\Memory\Pages Input/sec` read 0 to 1168 pages/s in the quiet
   sample with the page file flat, because it counts every file-backed read as well. Say "paging" only from page-file growth or
@@ -1937,8 +1968,10 @@ build**: after the deploy run `gpu doctor` and cycle the MCP servers, and compar
   release) and not claimed. `--die-with-wrapper` ends them with the wrapper on Windows.
 - Free-by-observation means the claim ends when the members do, which for a job that has hung is never: that is what
   `gpu release --epoch N` is for. A takeover that also stops the job, and the policy that would run it, are later changes.
-- A console host the OS starts for a command that has no console of its own (a wrapper started with no console) is a descendant
-  of the command and is recorded with it; it exits with the command, and the claim frees at the first read after it has.
+- A wrapper started with no console (so its command is given a console of its own) records one more member than the job: in a
+  Windows test the extra member outlived the command and its grandchild by more than one read, and the claim stayed until it
+  was gone. What that member was, and how long it lingers, is not established; a wrapper that shares its terminal's console
+  records no such member.
 
 ## The fleet reads leases per card (plan P7)
 

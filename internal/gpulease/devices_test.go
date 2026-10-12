@@ -558,7 +558,7 @@ func TestLegacyMetaWithoutDevicesIsWholeNode(t *testing.T) {
 // ---- cross-version: what a pre-v2 reader makes of a v2 directory --------------------
 
 // THE HAZARD, PINNED. There is no synthetic meta.json over a device lease (the
-// umbrella is a deviation from plan rev 2 pending acceptance: see the P2 notes in
+// umbrella is a deviation from plan rev 2, accepted 2026-10-12: see the P2 notes in
 // docs/systems/gpu-lease.md), so a binary that predates this format reads a v2-only
 // directory as a FREE card. What keeps that from ever mattering is the writer gate: it
 // stays off on a host until the reader audit is green. The test pins both halves, so a

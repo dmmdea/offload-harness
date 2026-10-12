@@ -846,6 +846,25 @@ measurement, in both places that draw this line.
   line without the release command), each reverted in turn fails a test it names. Docs: ADR 0084, `docs/systems/gpu-lease.md` ("A dead
   wrapper with a live tree keeps its claim"), `docs/OPERATOR-GUIDE.md`.
 
+### Changed — records: the dropped pid-0 umbrella is accepted, the VRAM-charge measurement is stated with its limits, and the display card's cap is told in the lease guide (P2, F70, A-RAM-15)
+
+- **P2: the pid-0 `meta.json` umbrella stays dropped, and that is now the decision, not a pending deviation.** ADR 0018 and
+  `docs/systems/gpu-lease.md` said "Deviation from plan rev 2, pending acceptance" and that the plan's P2 acceptance was not met. The plan
+  owner accepted it on 2026-10-11, after a green `gpu doctor` on the reference box (every reader it reached understood the per-epoch
+  fence; nothing older than the record format was found), so the audit gate does the work the umbrella would have done. The four tests the
+  plan named for the umbrella were never written and are recorded as superseded (the old-reader fixture test pins the hazard that replaces
+  the last of them). The umbrella can be restored later without a format change.
+- **F70: the VRAM-charge question is answered, with its limits.** The "partly measured, not settled" passage of the lease guide is
+  replaced by the 2026-10-11 measurement: on the reference box's Windows driver every VRAM allocation is charged 1:1 to the process's
+  private bytes and to system commit (a 4.0 GiB `cudaMalloc` raised private bytes by 4.0 GiB), the stock ComfyUI loader charges the whole
+  weight file to commit (14.73 GiB on one Wan expert), and a card-only run moves system commit by tens of GiB while available RAM stays
+  above 45 GiB. The guide says what is unchanged (the brake still reads commit and available RAM; a card-only recipe declares `--ram 0`,
+  which is always admitted) and what is not known (one driver on one box, system-wide counters, other nodes unmeasured). Documentation
+  only: no admission code changes.
+- **The display card (A-RAM-15, `gpu_display_cap_pct`).** The allocator section of the lease guide and the operator guide tell the cap
+  that the display-cap change introduces: the card is allocatable up to 60 percent of its VRAM at any presence (the desktop's use counted),
+  only with a declared `--vram`, `0` closes it, an unknown display stays closed, and the cap bounds admission only.
+
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)

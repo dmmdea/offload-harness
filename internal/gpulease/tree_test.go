@@ -639,3 +639,32 @@ func TestStandingCarriesTheTreeOrphanAndLeadsTheEscalation(t *testing.T) {
 		t.Fatalf("the worst standing across the leases is the tree-orphan: %+v", st)
 	}
 }
+
+// The one command that frees a tree-orphan today is `gpu release --epoch N`, and the surfaces name it: it ends the claim at
+// once although the job it started is still running (it does not stop that job), and the next acquirer is granted the card.
+func TestReleaseByEpochEndsATreeOrphanAtOnceAndLeavesItsJobRunning(t *testing.T) {
+	m, _ := scopedManager(t)
+	l := mustDevices(t, m, card0)
+	if err := l.RecordTree([]TreeMember{{PID: 9001, StartMs: 4242}}); err != nil {
+		t.Fatal(err)
+	}
+	set := liveSet(t, 9001, 5000) // the wrapper (this process) reads as gone, the job lives
+	waiter := asPID(m, 5000)
+	if _, err := waiter.TryAcquire(ClassMedia, Options{Reason: "next", Devices: []string{card0}, TTL: time.Hour}); err == nil {
+		t.Fatal("setup: the card of a dead wrapper with a live tree must be held")
+	}
+	epoch := l.Epoch()
+	released, err := m.ReleaseByEpoch(epoch)
+	if err != nil || !released {
+		t.Fatalf("gpu release --epoch %d must end a tree-orphan's claim: released=%v err=%v", epoch, released, err)
+	}
+	if !pidAlive(9001) {
+		t.Fatal("releasing the claim must not touch the job (the lease package stops no process)")
+	}
+	got, err := waiter.TryAcquire(ClassMedia, Options{Reason: "next", Devices: []string{card0}, TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("the card is free for the next acquirer once the claim is released: %v", err)
+	}
+	_ = got.Release()
+	set(5000)
+}

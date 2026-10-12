@@ -381,7 +381,7 @@ local-offload gpu reserve --class media -- <your command>
 ```
 
 On a host with card-scoped leases enabled, hold only the cards the job uses so the others keep working:
-`gpu reserve --class media --devices 2 -- <cmd>` (named cards), `--cards 2` (the allocator picks two free, non-display cards),
+`gpu reserve --class media --devices 2 -- <cmd>` (named cards), `--cards 2` (the allocator picks two free cards; the display card only up to `gpu_display_cap_pct`, default 60 percent of its VRAM with the desktop's use counted, and only when you state `--vram`; set the key to `0` when you need the screen's card to yourself),
 or no flag at all when `<cmd>` pins itself with `CUDA_VISIBLE_DEVICES`, `--cuda-device` or `COMFY_CUDA_DEVICE`. A command that carries a
 `COMFY_CUDA_DEVICE` or `COMFY_CARD_UUID` pointing at a card the lease does not hold is never refused: the wrapper rewrites that
 variable to the held card, prints one `re-pinned` line and starts the command (a `--cuda-device` on its command line is the
