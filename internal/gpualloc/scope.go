@@ -15,7 +15,8 @@ import (
 // LeaseScope says which seats sit on the cards a lease holds (plan P5, register C-86): a drain
 // and an unload under a lease clear THOSE cards, not the node. A whole-node lease (no ids)
 // reaches every seat. A model is placed by what the box declares: its `layers` seat pin, else the
-// device pin of its entry in the serving config (serving.go). A model that neither places, a pin
+// device pin of its entry in the serving config (internal/servingcfg, the same reader the load
+// fence places a model with, Config.ModelPins). A model that neither places, a pin
 // the card table cannot place, or a card table that cannot be read leaves the placement UNKNOWN,
 // and the direction of every doubt is the whole-node behaviour: an unknown model is on the leased
 // cards. What a positive placement buys (register F15) is that a model placed on ANOTHER card
@@ -113,7 +114,7 @@ func (s LeaseScope) Locate(model string) Located {
 		return Located{Why: "the card table could not be read (" + s.cardsWhy + ")"}
 	}
 	leased := gpulease.Info{Held: true, Devices: s.ids}
-	if pins, ok := s.cfg.ModelPins(model); ok {
+	if pins, ok := s.cfg.LayerPins(model); ok {
 		rids, rok := gpulease.ResolvePins(pins, s.cards)
 		if !rok {
 			return Located{Why: "layers pin it to a card the card table cannot place"}
@@ -125,7 +126,7 @@ func (s LeaseScope) Locate(model string) Located {
 	if st.problem != "" {
 		return Located{Why: st.problem}
 	}
-	pin, ok := st.pins[strings.ToLower(strings.TrimSpace(model))]
+	pin, ok := st.snap.Pin(model)
 	if !ok {
 		return Located{Why: "layers do not declare it and the serving config does not list it"}
 	}

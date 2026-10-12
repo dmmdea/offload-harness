@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/servingcfg"
 )
 
 // LayerSeat is one served seat inside a layer (ADR 0052): the model, the device
@@ -153,18 +154,40 @@ func (c Config) Composite() bool {
 	return len(c.Layers) > 0
 }
 
-// ModelPins is the device pin of a model name, read from the declared layers: the pins of
+// ModelPins is the device pin of a model name: where the box says the seat that serves it is
+// launched. It is what the model-affinity load gate is armed with (Load), so a render on one card
+// fences only the seats on that card; the callers that narrow the same lease to one seat (the text
+// and vision auto routes, the delegator's run-cap line) ask it too.
+//
+// The declared layers place a model first (LayerPins). A model no layer declares is placed by its
+// entry in the serving config (serving_config_path, read by internal/servingcfg), exactly as the
+// lease's unload list places it (gpualloc.LeaseScope.Locate, register F15). On a box that declares
+// no layers, as the installer's tier seeds leave it, that is what lets a lease on one card fence
+// only the seats on that card (register C-86a). The serving config counts only through the env pin
+// of its entry, with F15's strictness: a bare index only beside CUDA_DEVICE_ORDER=PCI_BUS_ID, while
+// a proxy: seat, an entry that pins nothing in env and an alias two entries claim differently
+// place nothing.
+//
+// ok is false for a model neither places (and for a serving config that is unset or unreadable):
+// the gate reads that as every card, which is the answer it gave before it could place a seat.
+func (c Config) ModelPins(model string) ([]string, bool) {
+	if pins, ok := c.LayerPins(model); ok {
+		return pins, true
+	}
+	return servingcfg.PinsOf(c.ServingConfigPath, model)
+}
+
+// LayerPins is the device pin of a model name read from the declared layers alone: the pins of
 // every seat that serves it (a model declared on two seats sits on the union of their
-// cards, in first-seen order). It is what the model-affinity load gate is armed with
-// (Load), so a render on one card fences only the seats on that card.
+// cards, in first-seen order). ModelPins adds the serving config behind it; the unload list asks
+// the layers alone first so that it can say which of the two placed a model (LeaseScope.Locate).
 //
 // A seat is matched by its model name, by a router seat's model_map twin, and, for the
 // router seat that declares neither (the single layer's, "its models come from the cascade"),
 // by the cascade's rung models: model, triage_model and escalation_model. Names compare
 // case-insensitively. ok is false for a model no layer declares, an alias a layer does not
-// spell, and a box with no layers at all: the gate reads that as every card, which is the
-// answer it gave before layers existed.
-func (c Config) ModelPins(model string) ([]string, bool) {
+// spell, and a box with no layers at all.
+func (c Config) LayerPins(model string) ([]string, bool) {
 	model = strings.TrimSpace(model)
 	if model == "" || len(c.Layers) == 0 {
 		return nil, false

@@ -1865,6 +1865,13 @@ type Config struct {
 	//
 	// The node only READS it. Nothing in the harness rewrites a live serving
 	// config; re-rendering is `install render`, run by a human.
+	//
+	// It is also where a model that `layers` do not declare is placed: the env
+	// CUDA_VISIBLE_DEVICES of its entry names its card, which the GPU lease's
+	// unload list (register F15) and the load gate (register C-86a, ModelPins) read
+	// through internal/servingcfg, so that a lease on one card leaves the seats on
+	// the others alone. Unset, unreadable or not listing the model, the model is on
+	// every card and a lease fences it, as it always did.
 	ServingConfigPath string `json:"serving_config_path,omitempty"`
 	// FleetQueueHost — Option B, ADR 0030, DARK by default: when true THIS
 	// node's fleet server also hosts the consolidated pull queue (durable
@@ -2411,9 +2418,10 @@ func loadArmed(path string) (Config, error) {
 	}
 	// The gate also learns which cards each seat sits on, so a lease on one card fences
 	// only the seats on that card (plan P4). Armed here for the same reason the lease
-	// directory is: the pins are a property of the box's layers, and a launcher that read
-	// them separately could disagree with the gate. A box with no layers arms nothing the
-	// gate can use, and every lease then fences every seat, as it always did.
+	// directory is: the pins are a property of the box (its layers, else the serving
+	// config its seats are launched from, register C-86a), and a launcher that read them
+	// separately could disagree with the gate. A model neither places is on every card,
+	// and a lease then fences it, as it always did.
 	modelaffinity.SetSeatPins(c.ModelPins)
 	modelaffinity.SetCardOrder(c.GPUComfyOrder)
 	modelaffinity.SetComfyDir(c.ComfyDir)

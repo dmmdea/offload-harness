@@ -49,10 +49,10 @@ other on a single shared card.
 | `internal/gpulock` | the read-only vision gate; the held rule is `gpulease.InspectDir`'s, read through the caller's own narrowing (`WaitFreeScoped`: the vision pre-check passes the seat-narrowed reading the text gate uses) |
 | `internal/modelaffinity/gpuwait.go` | READ-ONLY: text admissions that would make llama-swap load a model wait out a `media` holder (ADR 0026); armed from `config.Load` via `LeaseDir` |
 | `internal/modelaffinity/upstream.go` | READ-ONLY: `AwaitUpstream`, the ONE builder of a llama-swap `/upstream/<model>/…` URL, and `AwaitModelRoute`, the builder for a model-dispatched route (`/v1/chat/completions`, `/v1/embeddings`, …) sent without `Admit` — every probe, tokenizer, warm-up, transcription, chat-lane forward and embedding passes the same fence as a generation (see "Probes pass the fence too") |
-| `gpu_drain.go` (`leaseScope`, `maintainSeatScoped`, `unloadModelsFor`), `internal/gpualloc/scope.go` (`LeaseScope.Locate`, `Judge`, `UnloadModels`), `internal/gpualloc/serving.go` (`ServingPins`), `render/gpu-lock.mjs` (`parseUnloadModels`, `leaseDevices`) | plan P5 and F15: the drain waits for the runs on the leased cards, the unload takes the models placed on them or not placed at all and leaves the models placed on other cards (by `layers`, else by the serving config pin), and the render lane unloads the list the wrapper exports (`GPU_LEASE_UNLOAD_MODELS`) |
+| `gpu_drain.go` (`leaseScope`, `maintainSeatScoped`, `unloadModelsFor`), `internal/gpualloc/scope.go` (`LeaseScope.Locate`, `Judge`, `UnloadModels`), `internal/gpualloc/serving.go` (`servingState`), `internal/servingcfg` (`Load`, `PinsOf`, `Pins`: the one reader of the serving config's pins, shared with the load fence), `render/gpu-lock.mjs` (`parseUnloadModels`, `leaseDevices`) | plan P5 and F15: the drain waits for the runs on the leased cards, the unload takes the models placed on them or not placed at all and leaves the models placed on other cards (by `layers`, else by the serving config pin), and the render lane unloads the list the wrapper exports (`GPU_LEASE_UNLOAD_MODELS`) |
 | `internal/modelaffinity/seatscope.go`, `scoper.go`, `seatyield.go` | the gate's per-seat reading (`SetSeatPins`, `ScopeToPins`, `SeatLease`, `CardsHeld`), the production wiring of the evidence rule (`InspectLease` for the load gate, which remembers what it sees; `PeekLease`, `ScopeInfo`, `ScopeFunc`, `ScopeLeases` for inspectors, which write nothing), and the seat race rule (`YieldIfFenced`) |
 | `internal/mcpserver` | registers the session this MCP server serves in the session registry at start and removes it at exit |
-| `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib` (default 8, chosen and not measured; `Load` installs it process-wide, `gpulease.SetDefaultHostRAMHeadroom`), `agent_seat_host_ram_gib` (the host RAM the agent seat holds once loaded, for the warm-back; unset = `hostneed.DefaultSeatHostGiB`), `gpu_orphan_grace_min`, `gpu_max_term_min`, `gpu_max_total_min`; `ModelPins` (a model's device pins, read from the layers) |
+| `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib` (default 8, chosen and not measured; `Load` installs it process-wide, `gpulease.SetDefaultHostRAMHeadroom`), `agent_seat_host_ram_gib` (the host RAM the agent seat holds once loaded, for the warm-back; unset = `hostneed.DefaultSeatHostGiB`), `gpu_orphan_grace_min`, `gpu_max_term_min`, `gpu_max_total_min`; `ModelPins` (a model's device pins: `LayerPins`, the layers' reading, else the serving config's through `internal/servingcfg`), `serving_config_path` (the llama-swap yaml that places the models `layers` do not declare, for the unload list and the load fence) |
 
 ## Why it exists
 
@@ -734,15 +734,17 @@ default) and whose cards the evidence rule can name.*
 held lease sit on a card **this seat** is pinned to". The seat's pin is the layer seat's `device` (the pin it is launched with:
 nvidia-smi indices under `CUDA_DEVICE_ORDER=PCI_BUS_ID`, or a GPU UUID prefix), read by `config.ModelPins(model)`: the pins
 of every seat that serves the model (the union when it is declared twice), a router seat's `model_map` twins, and, for the
-router seat that declares no model, the cascade's rung models. `config.Load` arms it into the load gate beside the lease
+router seat that declares no model, the cascade's rung models. A model no layer declares is placed by its entry in the serving
+config, the reading the unload list makes ("Placement from the serving config" below; until C-86a a box without `layers` placed
+nothing and every lease fenced every seat). `config.Load` arms it into the load gate beside the lease
 directory (`modelaffinity.SetSeatPins`), with `gpu_comfy_order`, `comfy_dir` and the memory stack. The arithmetic is three
 methods on `gpulease.Info`: `EffectiveDevices` (the declared cards, else the inferred ones, else none, which is the whole
 node), `Touches(ids)` and `For(ids)`, which narrows an inspection to the leases that touch the cards and leaves every
 existing predicate (`Held`, `blocksLoad`, `BlocksNewRun`, `Reserved`, `Fenced`, `ForeignFence`) unchanged and unaware.
 `gpulease.ResolvePins` turns a seat's pins into lease ids through the card table.
 
-**The direction of every doubt is "fence".** A model nobody declared a pin for (an alias a layer does not spell, a seat on a
-box with no layers), a pin the card table cannot place (an index no card has, an ambiguous prefix, a card named twice), a
+**The direction of every doubt is "fence".** A model nothing places (an alias a layer does not spell and the serving config does
+not list, a `proxy:` seat, an entry that pins no device in env), a pin the card table cannot place (an index no card has, an ambiguous prefix, a card named twice), a
 card table that cannot be read, a whole-node lease, and a long-context contract (it runs on a long seat that the agent chain
 does not describe) all read as every card, which is the answer the gate gave before card-scoped leases existed. Narrowing
 happens only on a positive resolution. The card table is an nvidia-smi exec, so it is read only when a held lease actually
@@ -945,16 +947,45 @@ NO list").
 **Placement from the serving config (F15).** A box that declares no `layers` has no declared card for any seat (the installer's
 tier seeds do not write `layers`), so `layers` alone placed nothing there. `serving_config_path` is the llama-swap yaml the box
 runs, and nearly every llama.cpp model in it pins its cards with an env entry, `CUDA_VISIBLE_DEVICES=<uuid>[,<uuid>]` (GPU UUIDs,
-sometimes indices). `gpualloc.ServingPins` reads that pin for each model id and alias, and `LeaseScope.Locate` matches it against
+sometimes indices). `internal/servingcfg` reads that pin for each model id and alias, and `LeaseScope.Locate` matches it against
 the card table when `layers` do not declare the model (a model both declare keeps the `layers` reading). Only the env pin counts;
 device flags in `cmd` are never read. Unknown, with the reason: an entry whose env names no device (an unpinned dual-card
 `-sm layer` / `--tensor-split` entry), a `proxy:` seat (a vLLM engine: its cards are pinned in its own unit, so **a `proxy:` seat
 with no `layers` entry is unloaded under any card lease**), a pin that is a macro, an alias two entries claim with different pins, a
 bare index when the entry does not also set `CUDA_DEVICE_ORDER=PCI_BUS_ID` (without it a CUDA index is not an nvidia-smi index),
-and every model when the file cannot be read or `serving_config_path` is unset (said once). The file is read per lease, only when a
-model needs it (`TestServingPinsReadsOnlyTheEnvPin`, `TestUnloadModelsPlacesWhatLayersDoNotDeclareFromTheServingConfig`,
-`TestUnloadModelsSaysOnceWhenTheServingConfigCannotBeRead`). The load fence still places a model through `layers` only, so on a box
-without them a text load waits for any media lease, whatever card it is on.
+and every model when the file cannot be read or `serving_config_path` is unset (said once). The unload list reads the file per lease,
+only when a model needs it (`TestServingPinsReadsOnlyTheEnvPin` in `internal/servingcfg`,
+`TestUnloadModelsPlacesWhatLayersDoNotDeclareFromTheServingConfig`, `TestUnloadModelsSaysOnceWhenTheServingConfigCannotBeRead`).
+
+**The load fence places a model the same way (C-86a).** `config.ModelPins`, the function `Load` arms the fence with
+(`modelaffinity.SetSeatPins`), asks the layers first (`Config.LayerPins`) and then the same serving config through the same reader
+(`servingcfg.PinsOf`), with the same strictness. Until C-86a the fence read `layers` only, so on a box without them every lease
+fenced every seat: a media lease on one card held back a text load for a model the serving config pins to another card, which
+`gpu reserve` had been leaving resident since F15. Now a media lease on one card fences the models the serving config pins to that
+card, the pairs that span it and every model nothing places, and a load for a model pinned to another card goes through at once
+(`TestAOneCardLeaseFencesOnlyTheSeatsTheServingConfigPlacesOnThatCard`, in both directions). Everything listed as unknown above
+stays fenced by any lease, and so do a whole-node lease, a card table that cannot be read and a serving config that is unset,
+missing or not YAML (`TestTheFenceStaysClosedWhereTheServingConfigCannotPlaceAModel`). A serving config that is set and cannot be
+read is not left invisible: the refusal a blocked load prints names only the lease holder, so the fence's reader says once per
+cause, in the process log (stderr), `servingcfg: the serving config at <path> cannot be read (<cause>): the load fence places no
+model by it, so a lease on any card fences every seat the layers do not place`. It says it again when the cause changes or when
+the same fault returns after the file read cleanly; an unset path is the default and says nothing
+(`TestPinsOfSaysOnceThatTheServingConfigCannotBeRead`, `TestPinsOfSaysNothingWhereThereIsNothingWrong`,
+`TestPinsOfSaysItAgainWhenTheSameFaultReturnsAfterTheFileWasRead`, `TestModelPinsSaysOnceThatTheServingConfigCannotBeRead`). The
+fence and the unload list cannot disagree about a model: both read one parser and `layers` outrank the file in both
+(`TestTheLoadFenceAndTheUnloadListPlaceEveryModelAlike`, `TestLayersOutrankTheServingConfigForTheFence`). The fence's own lookups of a
+seat's pins (`ScopeToModel`, which every admission, wait and yield goes through, and `SeatCards`) happen only when a held lease
+names cards, so under an idle box or a whole-node lease the fence does not touch the file
+(`TestSeatPinsAreNotLookedUpWhenNoLeaseNamesCards`, `TestOnlyTheFencesOwnLookupsWaitForALeaseThatNamesCards`). Every other reader of
+`Config.ModelPins` asks on every call, an idle box included: `PinsFor` (the cards an agent run records), the text and vision auto
+routes and the delegator's run-cap line each cost a Stat of the file per call. The file is Stat-ed on each lookup and parsed again
+when its modification time or size changes, or when it changed less than three seconds before it was read, so a long-lived process
+(the MCP server, the fleet node) follows a llama-swap config reload on its next poll without a restart
+(`TestTheFenceFollowsAnEditOfTheServingConfigWithoutARestart`, `TestTheServingPinsAreReReadWhenTheYamlChangesSize`,
+`TestLoadDoesNotTrustAReadOfAFileChangedInsideTheRacyWindow`). The same pins answer every reader of `Config.ModelPins`: the
+waiter's place in line (`SeatCards`), `PinsFor` (the cards a run records), the text and vision auto routes and the delegator's run-cap
+line. **Not changed:** a vLLM seat. Its serving entry is a `proxy:` (its cards live in its own unit) and `vllm_seats` carries names,
+not cards, so a lease on any card still fences it; placing it needs the unit's pin, a separate change.
 
 **Between renders (F15).** A `media` lease is not stamped exclusive (`Meta.Exclusive` is a text-lease flag), but the load
 fence does not read the flag for it: `blocksLoadOne` gates `ClassMedia` from the end of its drain (a draining hold waits for the

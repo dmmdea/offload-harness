@@ -107,6 +107,92 @@ Versioning: [SemVer](https://semver.org/).
   spawn the step goes red, which is what it is for; a weaker test of the environment block alone would not close this item. Phase 2
   widens the step to the whole `./internal/sandbox/...` package once the tests that cover the exit-status reading are merged, and this
   test changes with it.
+### Fixed — on a box with no `layers`, a media lease on one card no longer fences the text models pinned to the other cards (C-86a)
+
+- **The defect (register C-86a, the operator's complaint that routing is per card and fleet-wide).** The load fence (`modelaffinity`:
+  `Admit`, `AwaitUpstream`, `AwaitRunSlot`) narrows a lease to the cards of the seat that loads, and it learns a seat's cards from one
+  place, `Config.ModelPins`, which read the declared `layers` and nothing else. The installer's tier seeds write no `layers`, so on such
+  a box every harness text load waited for a media lease on ANY card: a render on card 2 held back a text model pinned to card 0. F15
+  had taught the unload side to place a model by the `CUDA_VISIBLE_DEVICES` of its entry in the serving config
+  (`serving_config_path`, the llama-swap yaml the box runs) and named the fence as the half it left.
+- **The fence places a model the way the unload list does.** `Config.ModelPins` asks the layers first (new `Config.LayerPins`, the
+  previous body) and then the serving config's env pin, through the one reader both sides share, with F15's strictness unchanged: only
+  the env pin counts; a bare index only beside `CUDA_DEVICE_ORDER=PCI_BUS_ID`; a `proxy:` seat (both vLLM seats), an entry that pins no
+  device in env, a macro and an alias two entries claim with different pins place nothing. A media lease on one card now fences the models
+  the file pins to that card, the pairs that span it and every model nothing places, and a text load for a model pinned to another card goes
+  through at once; the mirror lease fences the other half. Layers outrank the file for a model both declare, as in the unload list.
+  Everything that reads the pins gets the same answer: the waiter's place in line (`SeatCards`), `PinsFor` (the cards a run records, so
+  on such a box a seat pinned to one card now shares that card's run-cap line, as it does with layers), the text and vision auto routes,
+  the delegator's run-cap line and the warm-back guard.
+- **One reader, in a leaf package.** `ServingPins` and its parser moved from `internal/gpualloc` to the new `internal/servingcfg`:
+  `gpualloc` imports `config` and `config` imports `modelaffinity`, so the fence could not import it from where it was. What counts as a
+  pin did not change. `LeaseScope.Locate` reads the file through `servingcfg.Load` and asks `LayerPins` for the layers half, so its lines
+  (`placed elsewhere by the serving config pin: ...`) are unchanged. A parity test walks every model of a fixture and every one-card lease
+  and asks the fence and the unload list: they cannot place a model differently.
+- **A reload is followed without a restart.** The MCP server and the fleet node live for days and llama-swap's config is edited under
+  them. `servingcfg.Load` Stats the file on every call and parses it again only when its modification time or size changed, or when it
+  changed less than three seconds before the read (a rewrite in the same clock tick, to the same size, would otherwise hide behind the
+  same pair: the rule git applies to its index). An unchanged file costs one Stat, a memo is never served for a file that is gone, and the
+  memo holds at most 16 files.
+- **The fence's idle path pays nothing new; the other readers pay a Stat.** The fence's own readers (`ScopeToModel`, which `Admit`,
+  `AwaitUpstream`, `AwaitRunSlot`, the seat yield and `SeatLease` go through, and `SeatCards`) look a seat's pins up only for a lease
+  that names cards, so under an idle box and a whole-node lease (which touches every seat whatever its pin) the fence never touches the
+  file. `PinsFor` and the other callers of `Config.ModelPins` are not fence reads and ask on every call, an idle box included: the agent
+  run's recorded cards, the text and vision auto routes and the delegator's run-cap line. Before this change those were an in-memory
+  lookup of the layers; for a model no layer places, each now costs a Stat of the serving config, and a parse on the first call, after an
+  edit and within three seconds of one. (A review found the first wording of this bullet, of the `seatscope.go` header and of
+  `docs/systems/gpu-lease.md` wider than the code: it said an idle box never touched the file.)
+- **Fail closed, everywhere, and said once.** A serving config that is unset, missing or not YAML, a card table that cannot be read, a
+  whole-node lease, a model the file does not list and every entry listed above as placing nothing keep the fence where it was: any
+  lease fences them. A serving config that is set and cannot be read used to switch the narrowing off with no word, and the refusal a
+  blocked load prints names only the lease holder, so it read as the fence's old behaviour. The fence's reader now says, once per
+  cause and per path, in the process log: `servingcfg: the serving config at <path> cannot be read (<cause>): the load fence places no
+  model by it, so a lease on any card fences every seat the layers do not place`. The same fault coming back after the file read
+  cleanly is said again; an unset path is the default and says nothing, and neither does a model a layer places (the file is not read).
+- **Tests, written first and red on the previous tree.** `internal/config`: the fallback for each kind of entry
+  (`TestModelPinsFallBackToTheServingConfigOnABoxWithNoLayers`), a box with layers still placing the models they do not declare
+  (`TestLayersOutrankTheServingConfigForTheFence`), the copy-on-read (`TestModelPinsFromTheServingConfigAreACopy`), and the fence end to
+  end through `Load` and a real card-scoped lease: a card-0 lease admits the card-2 models at once with no waiter registered, fences the
+  card-0 models, the pairs, the vLLM `proxy:` seats and the unlisted, and the mirror lease fences the other half
+  (`TestAOneCardLeaseFencesOnlyTheSeatsTheServingConfigPlacesOnThatCard`); an edit of the file moves a model off a leased card on the next
+  poll (`TestTheFenceFollowsAnEditOfTheServingConfigWithoutARestart`). `internal/gpualloc`: the fence/unload parity
+  (`TestTheLoadFenceAndTheUnloadListPlaceEveryModelAlike`). `internal/modelaffinity`: an idle box and a whole-node lease look no pins up
+  (`TestSeatPinsAreNotLookedUpWhenNoLeaseNamesCards`). Green on the previous tree on purpose, as guards of the fail-closed direction
+  (`TestTheFenceStaysClosedWhereTheServingConfigCannotPlaceAModel`, `TestModelPinsServingConfigThatCannotBeReadPlacesNothing`; the
+  mutants below are what show they bite). Added beside them and not red first, because they need the new package: the real-file wiring
+  in `internal/modelaffinity` (`TestASeatPinnedByTheServingConfigLoadsUnderALeaseOnAnotherCard`,
+  `TestAProxySeatAndAnUnpinnedEntryStayFencedByAnyLease`: that package cannot import `config`, so they show the fence resolves a yaml's
+  full-UUID pins, not that `Load` arms them) and the parser and memo tests that moved or were added with `internal/servingcfg`, which
+  the mutants below turn red.
+- **Mutants.** Twenty-one small mutants (a line or a few), each shown to compile (`go vet` over the package and its tests) and to have landed, each
+  restored byte for byte, each turning a named test red: the fallback removed, the serving config outranking layers, `Load` arming the
+  layers' reading, `Locate` asking `ModelPins`, `LayerPins` reading the file, the pins looked up on an idle box, a fence that does not
+  narrow, the memo never hitting, ignoring the size, ignoring the modification time, unbounded, with no racy window, serving a file that is
+  gone, or wording a missing file as a Stat; the copy-on-read dropped, names compared case-sensitively, and each of F15's five parser
+  rules (proxy, bare index, contested alias, macro, an entry that pins nothing in env). One survived at first: the copy tests ran on a file
+  edited moments ago, which the racy rule never memoises, so they passed with the copy removed; they settle the file now.
+- **Review round (two LOW findings, both confirmed against the code).**
+  1. *The fence discarded the serving-config read error.* Said once per cause now (the "said once" bullet above). Red first on the
+     previous tree: `TestPinsOfSaysOnceThatTheServingConfigCannotBeRead` and `TestPinsOfSaysItAgainWhenTheSameFaultReturnsAfterTheFileWasRead`
+     heard nothing. `TestModelPinsSaysOnceThatTheServingConfigCannotBeRead` ties it to `Config.ModelPins`, the door every caller asks, and
+     to the two quiet cases (a model a layer places, an unset path). `TestPinsOfSaysNothingWhereThereIsNothingWrong` and
+     `TestTheMemoryOfWhatWasSaidIsBounded` were green on the previous tree on purpose, as guards of the quiet direction.
+  2. *The cost claim was wider than the code.* Narrowed to the fence's own lookups (the bullet above). The implementation was right and
+     the prose was wrong, so the behaviour test (`TestOnlyTheFencesOwnLookupsWaitForALeaseThatNamesCards`: `ScopeToModel`,
+     `SeatLease` and `AwaitRunSlot` look nothing up on an idle box or under a whole-node lease, `PinsFor` looks up on every call) was
+     green before the wording changed. What was red first is `TestTheDocsDoNotClaimAnIdleBoxNeverTouchesTheServingConfig` (root), which
+     refused the four retired phrasings in this file, `docs/systems/gpu-lease.md` and the `seatscope.go` header.
+  3. *Mutants.* Nine small ones, each shown to compile (`go vet`), each restored byte for byte, each turning a named test red: the note
+     removed, the once-guard removed, an unset path that says too, a recovered file that is not forgotten, a memory kept for all paths
+     together, a memory that is unbounded, the serving config asked before the layers, `ScopeToModel` that looks up whatever the lease,
+     `PinsFor` that waits for a lease. A tenth, the three retired phrasings restored, turns the docs test red in each of its files.
+- **Not changed, and not verified here.** A vLLM seat is a `proxy:` entry in the serving config (its cards are pinned in its own unit) and
+  `vllm_seats` carries names, not cards, so a lease on any card still fences it, and so the agent seat on a box that serves it through
+  vLLM; placing it needs the unit's pin, a separate change. The fence is not a placement: nothing here chooses a seat or a card. No
+  live lease was taken. The committed reader was run read-only over the serving config of one box (21 models: eight pinned to card 0
+  only, five to card 2 only, six to both, the two vLLM seats unknown) and its card table, and the end-to-end tests ran on synthetic card
+  tables; the live proof (a one-card lease, a short render, `/running` before and after, a text call for a model pinned to the other card)
+  is owed to a quiet card window.
 
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 
@@ -184,10 +270,11 @@ Versioning: [SemVer](https://semver.org/).
   it fails, F15's gain is off for that lease: the render lane keeps its own rule and unloads every model off the memory stack, the
   seats placed on other cards included, and says so; this is the safe direction (a card that stays occupied fails the render, a
   seat that is reloaded costs a warm-up), chosen over a list built from the config, which can leave a resident model on the leased
-  card. A roster that was read and is empty is trusted to mean nothing is resident. Second, for a box without `layers`: the unload now knows from the
-  serving config which card a model is on, and the load fence does not. The fence (`modelaffinity`, armed from `config.ModelPins`)
-  still places a model through `layers` only, so on such a box a text load waits for any media lease, whatever card it is on,
-  exactly as before this change; reading the serving config there is a separate change. Also: a client that is not the harness can still load a model onto a leased card; the re-clear removes it
+  card. A roster that was read and is empty is trusted to mean nothing is resident. Second, for a box without `layers`: this entry made
+  the unload know from the serving config which card a model is on, and left the load fence not knowing. The fence (`modelaffinity`,
+  armed from `config.ModelPins`) placed a model through `layers` only, so on such a box a text load waited for any media lease,
+  whatever card it was on. A later change (register C-86a) gives the fence the same serving config pin through the same reader.
+  Also: a client that is not the harness can still load a model onto a leased card; the re-clear removes it
   before the next render, it does not stop it, and it unloads what the first job's unload would have (a model whose placement is
   unknown, in-flight requests drained first, then forced). The serving config is a path in the harness config that no default
   fills in: a box that does not set `serving_config_path` has no model placed by it. Two parallel jobs of one lease can both read the

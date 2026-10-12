@@ -4,9 +4,10 @@
 // on the box wait, cards 0 and 1 included. Now it asks the narrower question: does a held
 // lease sit on a card THIS seat is pinned to. The seat's pin is declared in the box's
 // layers (config: LayerSeat.Device, PCI-order indices, the same pin the seat is launched
-// with), so it is ARMED from config.Load (SetSeatPins) rather than imported: config
-// imports this package, and a second resolution order is how a gate and a launcher come to
-// disagree.
+// with) and, for a model no layer declares, in the serving config it is launched from (the
+// env CUDA_VISIBLE_DEVICES of its entry; register C-86a), so it is ARMED from config.Load
+// (SetSeatPins, with Config.ModelPins) rather than imported: config imports this package,
+// and a second resolution order is how a gate and a launcher come to disagree.
 //
 // THE DIRECTION OF EVERY DOUBT IS "FENCE". A model nobody declared a pin for, a pin the card
 // table cannot place, a card table that cannot be read, a whole-node lease: each reads as
@@ -15,7 +16,14 @@
 //
 // COST. The card table is an nvidia-smi exec, so it is read only when a held lease actually
 // names cards (a whole-node lease or an idle box never need it) and memoised for
-// cardTableTTL; the unfenced path still pays one ReadFile, as before.
+// cardTableTTL; the unfenced path still pays one ReadFile, as before. The fence's own readers
+// (ScopeToModel, which Admit, AwaitUpstream, AwaitRunSlot, the seat yield and SeatLease all go
+// through, and SeatCards) look a seat's pins up on the same condition, and no sooner: they include
+// the serving config, which costs a Stat of the file, and an idle box or a whole-node lease has no
+// use for them. That is the fence's cost and not every reader's. PinsFor, and the callers of
+// Config.ModelPins that never read a lease (the agent run's recorded cards, the text and vision
+// auto routes, the delegator's run-cap line), ask on every call, an idle box included, and pay that
+// Stat each time (a parse only on the first call, after an edit and within three seconds of one).
 package modelaffinity
 
 import (
@@ -55,9 +63,10 @@ var (
 )
 
 // SetSeatPins arms the seat-to-cards map: for a model name it returns the device pins of
-// the layer seat(s) that serve it (PCI-order indices or UUID prefixes) and whether the
-// model is declared at all. config.Load arms it, beside SetGPULease. nil disarms it, which
-// reads every model as unknown: every lease fences every seat.
+// the seat(s) that serve it (PCI-order indices or UUID prefixes; read from the layers, else
+// from the serving config) and whether the model is placed at all. config.Load arms it,
+// beside SetGPULease. nil disarms it, which reads every model as unknown: every lease fences
+// every seat.
 func SetSeatPins(fn func(model string) ([]string, bool)) {
 	seatMu.Lock()
 	seatPins = fn
@@ -144,8 +153,12 @@ func ScopeToPins(info gpulease.Info, pins []string) gpulease.Info {
 	return info.For(ids)
 }
 
-// ScopeToModel is ScopeToPins for the seat serving model.
+// ScopeToModel is ScopeToPins for the seat serving model. The pins are looked up only for a lease
+// that names cards: nothing else narrows, and the lookup reads the serving config.
 func ScopeToModel(info gpulease.Info, model string) gpulease.Info {
+	if !info.Held || !namesCards(info) {
+		return info
+	}
 	pins, ok := pinsOf(model)
 	if !ok {
 		return info
