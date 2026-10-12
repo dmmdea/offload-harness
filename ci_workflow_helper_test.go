@@ -461,7 +461,7 @@ func TestCIScriptSandboxStartsAStepLikeTheRunner(t *testing.T) {
 // TestCIScriptSandboxKeepsAStepsTempFilesInsideItself: a step that makes a temp file (the Windows cage step starts with
 // `log=$(mktemp)`) makes it in the sandbox's own folder, which t.TempDir removes, and not in the host's temp dir. The
 // sandbox passed the host's temp dir through, and the suite left one tmp.XXXXXXXXXX file of go test output in it for every
-// run of such a step: 21 in one run of the root package, found by the temp-folder tripwire (GPU-I8c).
+// run of such a step: 18 in one run of the whole suite, found by the temp-folder tripwire (GPU-I8c).
 func TestCIScriptSandboxKeepsAStepsTempFilesInsideItself(t *testing.T) {
 	sb := newCIScriptSandbox(t)
 	if out, rc := sb.run("mktemp > /dev/null"); rc != 0 {

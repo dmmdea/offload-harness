@@ -764,6 +764,72 @@ measurement, in both places that draw this line.
   `render/testdata/wan22-single-graphs.json` (made by the builder as it stood at the 0.181.0 release tip) and no warning. The VAE and
   text-encoder loaders swapped for their multi-GPU twins in the single graph each fail all nine of its graphs (the VAE one passed the old tests).
 
+### Added — one lint over every test file keeps tests out of the OS temp dir, and a tripwire script shows what a run leaves behind (GPU-I8, GPU-I8c)
+
+- **The gap.** F77 and F77b stopped test packages from leaving folders in the OS temp dir (C: on Windows), and each fix came with a lint
+  that read ONE package, so the next package to do the same was covered by nothing. No check saw a temp file that production code makes
+  for a test (F79's inline graph JSON), or the folder a started copy of a test binary leaves because it exits before its cleanup.
+- **The lint.** `tempdir_lint_test.go` (root package) reads every `*_test.go` file of the module with `go/parser` (not a regular
+  expression on text; `tools/`, `testdata`, `node_modules` and any directory with a `go.mod` of its own are left out) and fails on a
+  direct use of the OS temp dir that `tempdir_lint_allowlist_test.go` does not list with its count and the reason its folder is gone on
+  every path: `os.MkdirTemp` / `os.CreateTemp` / `ioutil.TempDir` / `ioutil.TempFile` with an empty directory, any `os.TempDir`, `TMP`,
+  `TEMP` or `TMPDIR` read from the environment, and `os.MkdirTemp` / `os.CreateTemp` passed as a value (the `runIsolated(m, os.MkdirTemp, ...)`
+  shape, where the empty argument is supplied somewhere the lint cannot read). `t.TempDir()` and a named directory are clean. A new use
+  fails naming file and form; a use that went away fails until the count comes down. The second rule is for copies: a package whose
+  tests start their own test binary (`os.Args[0]`, `os.Executable`) holds `TestARelaunchedTestBinaryLeavesNothingInTheTempDir` (checked on
+  its body: it starts the binary, points TMP, TEMP and TMPDIR, and reads the folder back), or is listed in `relaunchExempt` with the
+  reason a started copy leaves nothing, or in `relaunchNeverStarted` when the tests only read the path (the lint checks that no
+  `exec.Command`, `exec.CommandContext` or `os.StartProcess` takes it). An exemption is void when the package's `TestMain`, `init`
+  functions or package-level variables themselves use the OS temp dir, because every started copy runs them.
+- **The lists, generated at the 0.182.0 tip** with `TEMPDIR_LINT_PRINT=1`: 9 uses in 9 files (4 direct calls and 5 `os.MkdirTemp` handed to
+  `runIsolated`; `git grep` of the same forms finds the same 9), 5 packages that hold the proof (root, `fleetnode`, `mediaremote`,
+  `pairworkloads`, `pipeline`), 12 exempt packages and 2 that only read the path. The two F77 per-package lints (`TestTestsReachForTheOSTempDirOnlyWhereItsRemovalIsOnEveryPath`
+  in `internal/fleetnode` and `internal/pipeline`) are deleted; the relaunch test each file also held moved, unchanged apart from a
+  `nosemgrep` note, to `relaunch_leak_test.go` like the three sibling packages. `internal/exemplars` is the one entry that could be
+  `t.TempDir()` (its helper removes the folder with `t.Cleanup`, so it is listed with that reason).
+- **The tripwire.** `scripts/test-temp-tripwire.sh` (PowerShell twin `scripts/test-temp-tripwire.ps1`) sets `TMP`, `TEMP`, `TMPDIR` and
+  `GOTMPDIR` to a fresh empty folder, runs `go test -count=1` over `--pkgs` (default `./...`), and ends with one `TRIPWIRE-VERDICT`
+  line: `CLEAN` (0), `LEAK` (1, what is left by name prefix with a count, such as `lo-x-state-*`), `PROCESSES` (2, an image running
+  from the folder, with its pid; wins over `LEAK`), `TESTS-FAILED` (3) or `REFUSED` (4). `--dir` is required and a folder on the system drive is
+  refused unless `--allow-system-drive` is given. A `LEAK` or `PROCESSES` run keeps the folder as evidence and never removes one a process runs
+  from; a `CLEAN` run removes its empty folder. This is the check for what a static lint cannot see: production code's temp files and
+  started copies of the test binary.
+- **Tests, red first.** The scanner was a stub when `TestTempLintSeesEveryFormOfRawTempUse` and `TestTempLintSeesAProofOnlyWhenItReallyRelaunches`
+  were first run: every form case failed (`forms = map[], want map[os.MkdirTemp(empty):1]`). With the real scanner and empty lists,
+  `TestTestsReachForTheOSTempDirOnlyWhereItsRemovalIsOnEveryPath` named the 9 files and `TestEveryRelaunchingPackageProvesItLeavesNothing`
+  the 12 packages. Synthetic trees prove that a leak in any package is named by file and form and that `tools/`, `testdata`, `node_modules`
+  and nested modules are skipped. The tripwire has self-tests (`scripts/test-temp-tripwire-selftest.sh` and `.ps1`, on the fixture module
+  `scripts/testdata/tripwirefixture`: a clean package, a leaker, a spawner that leaves a process running from the folder, a failing
+  package) that assert verdict, exit code and the disk afterwards, and that the two twins agree on verdict, exit code and leak lines.
+- **Mutation-checked** with `scripts/mutation-check.sh`, each mutant RED: the lint, 16 (a dropped form, the value-pass rule, the allowlist
+  lookup, the fewer-than-listed check, the hook check, relaunch detection, each of the three variables the proof must point, the read-back,
+  the start check, nested-module and `testdata` skipping); the tripwire, 12 on the PowerShell twin and 16 on the shell twin (the refusal, each
+  verdict, the evidence kept, `--remove`, the prefix rules, the ignore list; five of the shell ones are Linux-only rules, run on a Linux host
+  where the self-test also found a real `PROCESSES` verdict). One PowerShell mutant first SURVIVED (a removal while a process ran is invisible on
+  Windows, which will not delete a running image); the fixture now leaves a note file beside the image and the self-tests require it to survive.
+- **What the first dry run of the whole suite found, and fixed** (test code only). The tripwire's run of `./...` on the 0.182.0 tree, with the temp
+  dir on a data disk, left three kinds of entry. (1) 18 `tmp.XXXXXXXXXX` files of go test output: the sandbox that runs `ci.yml`'s step
+  scripts passed the host's temp dir through and the Windows cage step starts with `log=$(mktemp)`; a step now gets `TMPDIR`, `TMP` and
+  `TEMP` inside the sandbox (`TestCIScriptSandboxKeepsAStepsTempFilesInsideItself`, red first and mutation-checked). (2) One `TestRunImageBatchWaitingEndsOnInterruptAndLeavesNoLease*`
+  tree: the test abandons a wait on purpose, and the wait gave the card back after the test's temp dir was gone, recreating `gpu/lease/...` under
+  it (39 of 40 runs, and the same folder on the pre-0.182 base on Windows); the test now waits for the abandoned wait to leave the line,
+  and with that wait removed 6 of 10 runs leave the tree again (mutation-checked with the tripwire as the test). (3) One `seat_fg.stale-mp.tests.lock.d`:
+  the seat launcher shell test keeps a box-wide `flock` target in the temp dir on purpose, so that two runs on one machine take turns on the
+  scratch ports it shares; it is named in `scripts/test-temp-tripwire.ignore` (one `NAME-PREFIX`, a tab and a reason per line, which the
+  tripwire prints and does not count, so an ignore is never silent).
+- **Found on the way.** `TestEveryTrackedGoModuleIsScannedOrNamedAsExcluded` fails on the 0.182.0 candidate (shown by a remote run at the lint's first commit):
+  `scripts/testdata/mutfixture` holds a tracked `go.mod` that the govulncheck job does not scan and `govulncheckExcluded` did not name. Both fixture
+  modules (that one and the tripwire's) are named now, with the reason they ship nothing.
+- **Measured** with the PowerShell twin on Windows, `go test -p 1` over the root package, `fleetnode`, `pipeline`, `pairworkloads`, `mediaremote`, `mcpserver`
+  and `delegate`, the temp dir on an empty folder of a data drive. Before the leak fixes (0.181.0): 79 entries in 8 prefixes — `run-graph-*.json` 28 and
+  `run-graph-manifest-*.json` 1 (F79), `lo-root-state-*` 20, `fleetnode-compose-cache-*` 13 and `lo-pipeline-lease-*` 13 (F77), `lo-pairworkloads-state-*` 2 and
+  `lo-mediaremote-state-*` 1 (F77b), and the interrupted-batch tree 1. After this branch, the same packages on the same machine: nothing left, verdict `CLEAN` (1,571 s). A first run of the set ended `TESTS-FAILED` with the
+  folder empty because `internal/mcpserver` failed once (54 s in); it passed in the four runs that followed (alone through the gate, twice through
+  the tripwire, and in the repeat of the whole set), and which test failed was not captured, so it is open, not a temp leak. On Linux, `go test -p 1 ./...`
+  over the whole module, niced, with the temp dir on a separate data disk: every package passed (1,844 s) and the verdict is `CLEAN`, with the one
+  ignored entry printed with its reason. The Windows PowerShell 5.1 self-test (54 checks) and a tripwire run over twelve packages that start
+  copies of their test binary or keep a state root both ended clean on a second Windows machine.
+
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)
