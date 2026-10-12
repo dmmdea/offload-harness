@@ -7190,6 +7190,20 @@ func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 // wrong token (401), a node that is down (dial refused), and a stale VRAM
 // snapshot (503) all end as "not a candidate", and dropping the error made
 // them indistinguishable from a node that merely failed the gate.
+// strikeOnFingerprint strikes base in the caller's Quarantine when any failed
+// acceptance is a DOCUMENT FINGERPRINT check (research.DocFingerprint tags its
+// regex with the named group `docanchor`). Contract-caused failures — a
+// user's over-strict contains:, a thin page's min_items — never strike.
+func (r *runner) strikeOnFingerprint(base string, failures []string) {
+	if r.quarantine == nil || !failsDocumentFingerprint(failures) {
+		return
+	}
+	if r.quarantine.Strike(base) {
+		r.quarantined.Add(1)
+		log.Printf("delegate: node %s quarantined for %s after off-document answers (document fingerprint failed at least twice, and more often than it passed)", base, DefaultQuarantineTTL)
+	}
+}
+
 // noteFingerprint is the runner's reading of one result against the document fingerprint: a contract that carries the
 // check and failed it is a strike against the node, one that carries it and PASSED is a pass (Quarantine.Pass), and one that
 // carries none says nothing about the node. The local seat has no call here, as for strikeOnFingerprint.
@@ -7203,20 +7217,6 @@ func (r *runner) noteFingerprint(base string, contract core.AgentContract, failu
 	case failsDocumentFingerprint(contract.Acceptance):
 		// the check is on the contract (failsDocumentFingerprint reads the tag in either form) and did not fail
 		r.quarantine.Pass(base)
-	}
-}
-
-// strikeOnFingerprint strikes base in the caller's Quarantine when any failed
-// acceptance is a DOCUMENT FINGERPRINT check (research.DocFingerprint tags its
-// regex with the named group `docanchor`). Contract-caused failures — a
-// user's over-strict contains:, a thin page's min_items — never strike.
-func (r *runner) strikeOnFingerprint(base string, failures []string) {
-	if r.quarantine == nil || !failsDocumentFingerprint(failures) {
-		return
-	}
-	if r.quarantine.Strike(base) {
-		r.quarantined.Add(1)
-		log.Printf("delegate: node %s quarantined for %s after 2 off-document answers (document fingerprint failed twice)", base, DefaultQuarantineTTL)
 	}
 }
 
