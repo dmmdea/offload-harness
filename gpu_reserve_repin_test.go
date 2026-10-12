@@ -10,6 +10,7 @@ package main
 // device 1, index 2 is device 2 (fixtureCards, spec "1,0,2").
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -379,18 +380,54 @@ func TestHelperRepinChild(t *testing.T) {
 	os.Exit(7)
 }
 
+// repinDriverCmd builds the child process of a repin verb test and the file its wrapped command writes the card variables to.
+// It is the one place the driver's environment and configuration are made, so the hermetic test (gpu_tree_hermetic_test.go)
+// can check what a real wrapper of these tests is able to reach.
+func repinDriverCmd(t *testing.T, cfg string, reserveArgs, env []string) (cmd *exec.Cmd, out string) {
+	t.Helper()
+	out = t.TempDir() + "/env.txt"
+	scratchComfyDir(t, cfg)
+	args := append([]string{"--config", cfg, "--class", "media", "--wait", "0"}, reserveArgs...)
+	args = append(args, "--", os.Args[0], "-test.run=^TestHelperRepinChild$", "-test.timeout=60s")
+	cmd = exec.Command(os.Args[0], "-test.run=^TestHelperRepinDriver$", "-test.timeout=120s")
+	hideWindow(cmd)
+	// treeEnv: the parent's environment without the variables that redirect the lease or the config (gpu_tree_test.go).
+	cmd.Env = append(treeEnv("LO_REPIN_ARGS="+strings.Join(args, "\n"), "LO_HELPER_ENV_OUT="+out,
+		"CUDA_VISIBLE_DEVICES=", "CUDA_DEVICE_ORDER=", "COMFY_CUDA_DEVICE=", "COMFY_CARD_UUID="), env...)
+	return cmd, out
+}
+
+// scratchComfyDir gives the fixture config a scratch comfy_dir when it names none: a config with no comfy_dir resolves, on
+// Windows, to the machine's real ComfyUI install, whose launch markers a real wrapper reads and, at its end, acts on. The
+// rest of the fixture's settings are kept.
+func scratchComfyDir(t *testing.T, cfgPath string) {
+	t.Helper()
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("the fixture config is not JSON: %v\n%s", err, raw)
+	}
+	if s, _ := cfg["comfy_dir"].(string); s != "" {
+		return
+	}
+	cfg["comfy_dir"] = t.TempDir()
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // runRepinReserve runs `gpu reserve <args> -- <repin child>` in a child process with the given environment entries and
 // returns the wrapper's exit code, its stderr and the card variables the wrapped command saw.
 func runRepinReserve(t *testing.T, cfg string, reserveArgs, env []string) (code int, stderr string, seen string) {
 	t.Helper()
-	out := t.TempDir() + "/env.txt"
-	args := append([]string{"--config", cfg, "--class", "media", "--wait", "0"}, reserveArgs...)
-	args = append(args, "--", os.Args[0], "-test.run=^TestHelperRepinChild$", "-test.timeout=60s")
-	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperRepinDriver$", "-test.timeout=120s")
-	hideWindow(cmd)
-	cmd.Env = append(os.Environ(), "LO_REPIN_ARGS="+strings.Join(args, "\n"), "LO_HELPER_ENV_OUT="+out,
-		"CUDA_VISIBLE_DEVICES=", "CUDA_DEVICE_ORDER=", "COMFY_CUDA_DEVICE=", "COMFY_CARD_UUID=")
-	cmd.Env = append(cmd.Env, env...)
+	cmd, out := repinDriverCmd(t, cfg, reserveArgs, env)
 	var errBuf strings.Builder
 	cmd.Stderr = &errBuf
 	err := cmd.Run()
@@ -417,6 +454,7 @@ func seenValue(seen, key string) string {
 }
 
 func TestGPUReserveRepinStartsTheCommandOnTheHeldCard(t *testing.T) {
+	isolateFromMachineState(t)
 	cfg, _ := scopedLeaseFixture(t)
 	// `gpu reserve --devices 0` (the lease holds nvidia index 0) with a command pinned to ComfyUI device 2.
 	code, stderr, seen := runRepinReserve(t, cfg, []string{"--devices", "0"}, []string{"COMFY_CUDA_DEVICE=2"})
@@ -447,6 +485,7 @@ func TestGPUReserveRepinStartsTheCommandOnTheHeldCard(t *testing.T) {
 // A flag-off host, a whole-node lease and a lease derived from the command's own pin never reach the re-pin: the
 // command starts with exactly the pin it had.
 func TestGPUReserveFlagOffWholeNodeAndDerivedLeasesAreByteForByte(t *testing.T) {
+	isolateFromMachineState(t)
 	scopedCfg, _ := scopedLeaseFixture(t)
 	offCfg, _ := leaseFixture(t)
 	for name, tc := range map[string]struct {

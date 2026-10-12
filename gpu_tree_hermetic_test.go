@@ -94,3 +94,58 @@ func sameDir(a, b string) bool {
 func isUnder(p, dir string) bool {
 	return strings.HasPrefix(strings.ToLower(filepath.ToSlash(filepath.Clean(p))), strings.ToLower(filepath.ToSlash(filepath.Clean(dir)))+"/")
 }
+
+// The repin verb tests run a real `gpu reserve` too (TestHelperRepinDriver), and the same hazard applies to them: their driver
+// inherits the parent's environment, where GPU_LOCK, LOCAL_OFFLOAD_STATE_DIR and LOCAL_OFFLOAD_CONFIG redirect the lease or the
+// configuration away from the scratch root, and their fixture config names no comfy_dir, which resolves to the machine's real
+// ComfyUI install on Windows, whose live launch markers the wrapper reads and stops at its end when one names the scratch
+// lease's epoch (epochs of a fresh scratch lease start at 1). The driver must be unable to reach any of it, whatever the
+// developer's shell holds, so it does not depend on the calling test remembering to clear it.
+func TestRepinVerbTestsNeverReachTheMachinesLeaseConfigOrComfyInstall(t *testing.T) {
+	isolateFromMachineState(t)
+	cfg, _ := scopedLeaseFixture(t)
+	// A developer shell that has the redirects set, whatever the test did before building its driver.
+	elsewhere := t.TempDir()
+	for _, name := range machineStateRedirects {
+		t.Setenv(name, filepath.Join(elsewhere, name))
+	}
+
+	cmd, _ := repinDriverCmd(t, cfg, []string{"--devices", "0"}, []string{"COMFY_CUDA_DEVICE=2"})
+	for _, kv := range cmd.Env {
+		name, value, _ := strings.Cut(kv, "=")
+		for _, bad := range machineStateRedirects {
+			if strings.EqualFold(name, bad) && value != "" {
+				t.Errorf("the repin driver inherits %s=%s, which redirects the lease or the config away from scratch", name, value)
+			}
+		}
+	}
+	var sawPin bool
+	for _, kv := range cmd.Env {
+		sawPin = sawPin || kv == "COMFY_CUDA_DEVICE=2"
+	}
+	if !sawPin {
+		t.Error("the driver drops the variables the test passes to it")
+	}
+
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("the driver's config is not JSON: %v\n%s", err, raw)
+	}
+	comfy, _ := parsed["comfy_dir"].(string)
+	if comfy == "" {
+		t.Fatalf("the driver's config names no comfy_dir, so the wrapper resolves it to the machine's real ComfyUI install: %s", raw)
+	}
+	if sameDir(comfy, config.DefaultComfyDir()) {
+		t.Fatalf("comfy_dir %q is the machine's real ComfyUI install", comfy)
+	}
+	if scratch := filepath.Dir(elsewhere); !isUnder(comfy, scratch) {
+		t.Fatalf("comfy_dir %q is not a scratch directory (not under this test's temp directory %s)", comfy, scratch)
+	}
+	if parsed["gpu_card_scoped_leases"] != true {
+		t.Errorf("the fixture's own settings are kept: %s", raw)
+	}
+}
