@@ -252,6 +252,24 @@ export function parseInflightMetrics(text) {
   return seen ? total : null;
 }
 
+// The /running states of a seat that cannot have a request in flight (register F81). llama-swap lists every
+// process that is not stopped, in one of three states: starting, ready, stopping (internal/process:
+// StateStarting, StateReady, StateStopping; RunningStatus leaves out stopped and shutdown).
+//   starting  the upstream is not serving: a request to the seat is held by llama-swap for the whole load
+//             (register D-92: 4 min on a big seat), so a /slots probe sat until its own deadline, three
+//             rounds and a grace in all (~17 s on every render start while a seat was starting), and there
+//             was no request on the upstream to wait for.
+//   stopping  the upstream is being killed and llama-swap does not wait for what it is serving (Unload: "in-flight
+//             requests ... are not waited for"), and a request to a stopping seat is queued until the stop is
+//             done and then STARTS it again (EnsureReady: "stopping -> waits for the stop to finish, then
+//             starts"): the probe would load the model the drain exists to clear, the hazard the /running gate
+//             below was written against.
+// Anything else is probed: "ready" above all, and also a seat listed with no state (older builds) or with one
+// this code has never seen, because a probe of an idle seat costs one read, while a skipped seat that was
+// busy loses its request. The Go-side drain reads the same two states the same way (internal/seatload:
+// Starting, Stopping).
+const NO_REQUEST_STATES = new Set(["starting", "stopping"]);
+
 export async function quiesceLlamaSwap(ids, {
   api = process.env.LLAMA_SWAP_API || "http://localhost:11436",
   timeoutMs = 60_000, pollMs = 500, graceMs = 1_500,
@@ -261,13 +279,19 @@ export async function quiesceLlamaSwap(ids, {
   const unknown = new Set();
   const started = nowFn();
 
-  // Which models does the server consider loaded? Used to disambiguate a 404.
+  // Which models does the server consider loaded, and in what state? Used to disambiguate a 404, and to
+  // leave alone a seat that cannot have a request in flight (NO_REQUEST_STATES). A Map of id -> lowercased
+  // state ("" when /running gives none); .has() is the loaded test as before.
   const loaded = async () => {
     try {
       const r = await fetchImpl(`${api}/running`, { signal: withTimeout(requestTimeoutMs) });
       if (!r.ok) return null;
       const j = await r.json();
-      return new Set((j.running || []).map((m) => m.model).filter(Boolean));
+      const seats = new Map();
+      for (const e of j.running || []) {
+        if (e && e.model) seats.set(e.model, typeof e.state === "string" ? e.state.trim().toLowerCase() : "");
+      }
+      return seats;
     } catch { return null; }
   };
 
@@ -293,6 +317,7 @@ export async function quiesceLlamaSwap(ids, {
   const busy = async (id, loadedSet) => {
     if (!loadedSet) { unknown.add(id); return false; } // blind: never probe
     if (!loadedSet.has(id)) return false;              // not loaded: nothing in flight
+    if (NO_REQUEST_STATES.has(loadedSet.get(id))) return false; // starting or stopping: nothing in flight, and a probe would hang or reload it
     try {
       const r = await fetchImpl(`${api}/upstream/${id}/slots`, { signal: withTimeout(requestTimeoutMs) });
       if (r.status === 404 || r.status === 501) {
