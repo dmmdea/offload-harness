@@ -2886,6 +2886,15 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	if err != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": "bad read_root: " + err.Error()})
 	}
+	// Whether the read root exists as the call comes in (register C-79). A root the run's
+	// tools later cannot open was either taken under the run, which is the box's fault, or
+	// never there: a typo, which agent.Build lets through (it only makes the path absolute)
+	// and which fails the same way at the first tool call. Only this stat can tell the two
+	// apart, and only the first is infrastructure.
+	rootExisted := false
+	if fi, serr := os.Stat(absRoot); serr == nil && fi.IsDir() {
+		rootExisted = true
+	}
 	// The planner follows agent_model (per-call > seat > workhorse;
 	// config.AgentPlannerModel). The IN-LOOP offload tools follow the planner
 	// too (0.115.18, register D-88): they used to stay on the workhorse "for
@@ -3309,6 +3318,13 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		// the run whose caller must not blindly retry. Dropping the ledger here
 		// would hide the one record that matters most.
 		dout := map[string]any{"deferred": true, "reason": rerr.Error(), "steps": res.Steps}
+		if rootExisted && agent.RootGoneOf(rerr) != nil {
+			// Register C-79: the read root was there when the call came in and the run's
+			// tools can no longer open it. The directory was taken under the run, which no
+			// action of the seat undoes: the box's fault, so the class is infrastructure.
+			// The reason (rerr's text) opens core.RootGoneReason and names the root.
+			dout["defer_class"] = string(core.DeferClassInfrastructure)
+		}
 		if modelaffinity.IsLeaseRefusal(rerr) {
 			// A render or an exclusive hold took the card mid-run and the run's
 			// next request waited it out (2026-09-22): congestion, re-placeable.

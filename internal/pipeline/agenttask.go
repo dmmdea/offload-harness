@@ -738,6 +738,15 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 		d, derr := openWriteDoor(contextDir, contract)
 		if derr != nil {
+			// The read root being gone is the box's fault, not the door's (register C-79):
+			// the run waited for its seat (the cordon, the pre-flight, a cold load that can
+			// take minutes) between materializing its context dir and opening the door, and
+			// a sweep, a cleaner or an operator can take the dir in that window. Filed as a
+			// `write` defer it would tell the operator to opt a node in, and the delegator
+			// would not re-place it.
+			if gone := agent.CheckWorkspaceRoot(contextDir); gone != nil {
+				return deferWire(core.DeferClassInfrastructure, rootGoneReason(gone))
+			}
 			// A write_root that cannot be resolved or created here is a
 			// node-side condition, not a claim about the contract's work.
 			return deferWire(core.DeferClassWrite, derr.Error())
@@ -1079,7 +1088,19 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// its step budget or its wall may still have made a real, reviewable change,
 	// and a door that only published on the success path would throw that away
 	// exactly when the caller most needs to see what the seat did.
-	if door != nil {
+	//
+	// Except for a run whose workspace root is gone (register C-79): the write root lives
+	// inside it, so there is no write set to render, and a snapshot of a tree that is not
+	// there reads as every file deleted: a diff the caller would be invited to apply. The
+	// run defers as infrastructure below, with no diff. The loop reports the loss when a
+	// tool found it (the first line), and nothing reports a tree that went after the seat's
+	// last tool call, so a door that is about to render the tree asks for itself. A run with
+	// no door is not asked: the root is only read for it, and its finished answer stands.
+	rootGone := agent.RootGoneOf(rerr) // nil unless the loop ended on the tool's lost-root report
+	if door != nil && rootGone == nil {
+		rootGone = agent.CheckWorkspaceRoot(contextDir)
+	}
+	if door != nil && rootGone == nil {
 		diff, files, note, derr := closeWriteDoor(door)
 		wire.Diff, wire.DiffFiles, wire.WriteNote = diff, files, note
 		if derr != nil {
@@ -1125,6 +1146,16 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		wire.PrefillTokens = pf.PrefillTokens
 		wire.CacheTokens = pf.CacheTokens
 		wire.PrefillMS = pf.PrefillMS
+	}
+	// The run's workspace root is gone (register C-79): its own file tools could not open it
+	// and the loop ended the run on the report, instead of letting the seat answer from
+	// nothing as it used to (the delegator then scored the answer as the model's failure),
+	// or the write door found the tree lost where no tool was there to report it. The fault
+	// is the box's: infrastructure. Judged before every other arm because it is a typed
+	// cause no monitor verdict can outrank, and before the error check because the door's
+	// finding comes with no error.
+	if rootGone != nil {
+		return deferWire(core.DeferClassInfrastructure, rootGoneReason(rootGone))
 	}
 	if rerr != nil {
 		// A GPU-lease refusal FIRST (2026-09-22): a render or an exclusive hold

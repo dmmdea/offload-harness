@@ -4332,6 +4332,15 @@ const minRetrySec = 10
 // another node — and the wait the node spent on the dead seat is credited back
 // the same way, with the wall of a delegator-side rescue that failed first (a seat
 // lost in the structured re-pack is rescued before it is re-placed).
+//
+// The fourth is the lost-root defer (register C-79, RootGoneDefer): the run's own
+// workspace root, which the executing node materialized for it, could not be
+// opened, so the seat never read its documents. The fault is that run's
+// directory, not the seat and not the contract, and the same contract placed
+// again materializes a root of its own. Before the node filed it as
+// infrastructure the seat's "I could not read the file" was a failed
+// verification, which this function retries: the better class must not take the
+// recovery with it.
 func retryable(pr PlacedResult) bool {
 	if pr.Err != "" {
 		return false
@@ -4340,6 +4349,9 @@ func retryable(pr PlacedResult) bool {
 		return true
 	}
 	if admissionDefer(pr.Result) || SeatDownDefer(pr.Result) {
+		return true
+	}
+	if RootGoneDefer(pr.Result) {
 		return true
 	}
 	return pr.Result.Deferred && pr.Result.DeferClass == core.DeferClassAbstention

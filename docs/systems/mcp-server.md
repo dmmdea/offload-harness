@@ -196,7 +196,10 @@ the caller's to use, and the result says so with `output_truncated: true`, the l
 opened at when the loop's fit narrowed it, not the fit predicted at run start (a complete answer carries none of the three). A resolved planner absent from the endpoint's served roster fails loud with
 `deferred: true` naming the model, never a silent fall back to the workhorse — "served" means
 matched against canonical ids **or** `meta.llamaswap.aliases`, since a tier-seeded `agent_model`
-is normally an alias. Every response
+is normally an alias. A read root the run's tools cannot open ends the run at once with `deferred: true` and a reason
+that opens `workspace root unavailable: <root>:` (register C-79), where the seat used to be left to answer from nothing;
+the call carries `defer_class: infrastructure` when the root existed as it came in, and none for a `read_root` that never
+existed (a typo, which looks the same at the first tool call). Every response
 carries the effect ledger (`effects` counts + `effects_flagged` records) on success AND deferred
 paths, the step `trace` (per tool call: tool, status, `obs_chars`, `rule` — 0.113.22, ADR 0036)
 with `rules_fired` and, when the box has an `agent_env_rules` table, its summary as `env_rules`;

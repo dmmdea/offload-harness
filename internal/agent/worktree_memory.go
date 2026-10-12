@@ -111,9 +111,9 @@ func updatePlanTool(worktree string) Tool {
 			if strings.TrimSpace(in.Plan) == "" {
 				return "NOT recorded: plan is empty; provide the current plan as a terse checklist", nil
 			}
-			r, err := os.OpenRoot(worktree)
+			r, err := openWorkspaceRoot(worktree)
 			if err != nil {
-				return "", fmt.Errorf("workspace root unavailable: %w", err)
+				return "", err
 			}
 			defer r.Close()
 			if err := r.MkdirAll(".agent", 0o755); err != nil {

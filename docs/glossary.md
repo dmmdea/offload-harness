@@ -353,7 +353,8 @@ One entry of a contract's `setup_actions` (ADR 0036 P2, 0.113.24): a `{tool, arg
 loop replays before the model's first turn, through the seat's env rules and dispatch, landing in the
 transcript as a tool call plus its result — so the first turn already holds what the model would have
 spent its first steps fetching (a `read_file` of the document it must digest). Charged to the wall, never
-to `max_steps`; bounded to half the compaction budget; a failure is an observation, not an abort. A node
+to `max_steps`; bounded to half the compaction budget; a failure is an observation, not an abort (except
+a tool that cannot open the workspace root, which ends the run: register C-79). A node
 with `agent_seed_context_reads` on prepends one read per context doc itself. Reported as `setup_ran`
 and as step-0 trace entries marked `setup`.
 
