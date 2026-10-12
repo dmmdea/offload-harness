@@ -234,6 +234,9 @@ func flatEnv(v any) string {
 	return ""
 }
 
+// AuditCPUMoE is the W4 rule (stub: the tests come first).
+func AuditCPUMoE(text string) []Violation { return nil }
+
 // Violations formats an audit result as one line per violation.
 func Violations(vs []Violation) string {
 	lines := make([]string, 0, len(vs))
