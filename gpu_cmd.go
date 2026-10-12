@@ -595,7 +595,7 @@ func runGPUReserve(args []string) error {
 			if awaitRAM > 0 {
 				await := func(o gpulease.AwaitHostRAMOptions) error { return m.AwaitHostRAM(epoch, o) }
 				if err := awaitHostRAMHeld(context.Background(), await, hostRAMDeadline(queuedAt, *wait), *wait, os.Stderr); err != nil {
-					return detachedMaintainError(m, epoch, err)
+					return detachedHostRAMError(m, epoch, err)
 				}
 			}
 		}

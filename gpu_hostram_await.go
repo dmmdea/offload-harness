@@ -29,6 +29,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -88,4 +89,21 @@ func awaitHostRAMHeld(ctx context.Context, await func(gpulease.AwaitHostRAMOptio
 		fmt.Fprintf(out, "gpu reserve: the host has the room: admitted after %s of waiting for the memory\n", time.Since(start).Round(time.Second))
 	}
 	return nil
+}
+
+// detachedHostRAMError is detachedMaintainError for a detached holder whose host-RAM wait failed (the host never had
+// the room inside --wait, or the wait was cancelled). The lease is kept, as after a failed drain: the cards stay
+// reserved and work keeps routing elsewhere. What a failed step must not keep is the stamp it left on the record: the
+// exclusive stamp is put on once the drain succeeded, before this wait, and left on it cordons the text lane on those
+// cards (and fences the seat that is now unloaded) for the rest of --for, which is how one failed drain became a box
+// refused for 8 hours (register C-50, S-31; the drain path clears DRAINING for the same reason). So it is taken off, and
+// the way out names the release that also warms the seat back, because the seat is cold.
+func detachedHostRAMError(m *gpulease.Manager, epoch uint64, err error) error {
+	if info := m.Inspect(); info.Held && info.HoldsEpoch(epoch) {
+		if serr := m.Restamp(epoch, func(mt *gpulease.Meta) { mt.Exclusive = false }); serr != nil {
+			fmt.Fprintf(os.Stderr, "gpu reserve: could not take the exclusive stamp off the lease after the failed wait for host RAM: %v\n", serr)
+		}
+		return fmt.Errorf("%w (the lease is still held and no longer exclusive; the seat is unloaded: `gpu release --warm-seat` frees the lease and warms the seat back, `gpu release` frees it and leaves the warm owed)", err)
+	}
+	return detachedMaintainError(m, epoch, err)
 }

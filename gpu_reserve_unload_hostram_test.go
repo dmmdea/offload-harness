@@ -273,15 +273,24 @@ func TestADetachedUnloadSeatLeaseThatTheHostNeverAdmitsFailsAndSaysTheLeaseIsHel
 	if err == nil {
 		t.Fatalf("the host never admitted the lease: the detached reserve must fail\n%s", stderr)
 	}
-	for _, want := range []string{"waiting for host RAM: needs 30.0 GiB, committed 90.0 of 100.0 GiB physical", "the lease is still held", "gpu release"} {
+	// The seat is unloaded, so the way out names the release that warms it back too.
+	for _, want := range []string{"waiting for host RAM: needs 30.0 GiB, committed 90.0 of 100.0 GiB physical", "the lease is still held", "gpu release", "--warm-seat"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the failure must say %q: %v", want, err)
 		}
 	}
 	if info := m.Inspect(); !info.Held {
 		t.Error("a failed detached maintain leaves the lease held")
-	} else if info.HostRAMGiB != 0 {
-		t.Errorf("the host did not admit the lease: it must not declare any RAM, got %.1f GiB", info.HostRAMGiB)
+	} else {
+		if info.HostRAMGiB != 0 {
+			t.Errorf("the host did not admit the lease: it must not declare any RAM, got %.1f GiB", info.HostRAMGiB)
+		}
+		// A failed step must not cordon the box for the rest of the window (register C-50, S-31: a failed drain clears the
+		// DRAINING stamp for the same reason). The exclusive stamp is put on once the drain succeeded; the host's refusal comes
+		// after it, and the lease it leaves is held and not exclusive.
+		if info.Exclusive {
+			t.Error("a detached lease whose host RAM wait failed keeps the exclusive stamp: the text lane on its cards stays cordoned for the rest of --for")
+		}
 	}
 }
 
