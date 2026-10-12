@@ -221,6 +221,10 @@ deterministic classifier over the delegation-log corpus: every failed or deferre
 failure axis, evaluated in a published precedence order and stopping at the first hit — `seat-infra` (a defer class of
 infrastructure/config/contract, or a placement failure with no defer class) → `call-deadline` (a reason that opens
 `call deadline reached`: the whole-call deadline of ADR 0065 cut the subtask, so it says nothing about the seat's speed) →
+`capacity` (a defer class of capacity, or a dispatch a node answered with 503/429 "queue full" in a row written before
+delegators marked refusals: the fleet was busy, which is neither a wall nor a seat, and its remedy names
+`agent_call_deadline_sec` / `agent_placement_wait_sec`, never `timeout_sec`, which does not bound that wait; it sits
+ahead of `timeout` because every wait bounded by the call words itself with the bare word "deadline") →
 `timeout` → `budget` → `abstention` (an
 "output failed schema" reason is `schema-miss / invalid`) → `schema-miss` (min_items/nonempty; sub-axes
 `two-step-grounded` = context docs and ≤ 2 steps, `invalid`) → `anchor-miss` (contains/not_contains/regex; same sub-axis) →
@@ -229,6 +233,9 @@ per axis the hits over the rows ELIGIBLE for it (trace axes count only rows with
 the deciding fact, the most repeated reason for seat-infra/timeout/unclassified, and the pre-authored remedy where the
 closed vocabulary has a lever (`agent_seed_context_reads`, `agent_env_rules.max_observation_tokens` /
 `max_calls_per_tool` / `rewrite_error`, with the value derivation in words) or "not a rule matter" where it has none.
+A row a delegator marked `refusal` (a node's capacity refusal at dispatch, which the capacity wait outlasts and the
+subtask is re-placed from) is no failure: it is not a bad row, it is on no axis, and the report counts it on its own
+`refusals` line outside `rows`, so a fan-out that met a full node reads as the place in line it was.
 `--verdicts` writes every row's verdict for an agreement check. It proposes nothing on its own and applies nothing. Why a
 classifier first: the design council read the day's corpus (1,187 rows, 649 bad) — ~70 % were wall timeouts and seat
 errors no rule shapes, only 16 rows carried a trace, and a digest-8 gate cannot fail for axes it never exercises. P3b (a

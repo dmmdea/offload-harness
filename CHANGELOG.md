@@ -6,6 +6,26 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The rigger filed a busy fleet as a wall timeout and a node's "queue full" as a broken serving stack.** In one day's report
+  24 of the 26 bad rows of the local agent pool were capacity defers ("capacity wait: no node had room ... the call's
+  deadline"), and every one of them landed on the `timeout` axis, whose remedy is "raise `timeout_sec`": the wall-timeout
+  pattern matches the bare word "deadline", and `timeout_sec` never bounds that wait (ADR 0073). Thirteen more rows were
+  dispatches a node had answered 503 "queue full" and the delegator outwaited and re-placed, and `seat-infra` ("fix the
+  serving stack") took them although no seat was asked. There is now a `capacity` axis, behind `call-deadline` and ahead of
+  `timeout`: a row of defer class capacity lands on it whatever its words, and so does a row with no class whose error is a
+  node's 503/429 "queue full" / "shed" / "no idle execution slot" answer (a row from a delegator that predates the
+  marker below). Its remedy names `agent_call_deadline_sec` and `agent_placement_wait_sec`, the keys that bound the wait.
+  A dial that never reached the node and a 503 about something other than room stay `seat-infra`. A row carrying the new
+  `refusal` marker (`{"status":503,"retry_after_sec":N}`; delegators write it on a capacity-refused attempt) is not a bad
+  row at all: it is counted on the report's own `refusals` line, outside `rows`, so a fan-out that met a full node reads as
+  the place in line it was. The call-deadline and the wall-timeout verdicts are unchanged (`rig/calldeadline_test.go`). Tests
+  `internal/rig/capacity_test.go`, written first: red before with, for example, `held slot, the 0.180.0 wording: classified
+  "timeout"`, `no deadline word at all: classified "unclassified"` and `an unmarked 503 queue full row classified "seat-infra"`;
+  five mutations (the capacity-class check off, 429 dropped from the pattern, a refused row counted bad, refusals counted in
+  `rows`, the precedence swapped) each turn them red. Docs: `docs/systems/coding-agent.md` (the rigger paragraph).
+
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 
 ### Fixed — `TestTheAnchoredClockDropsTheAdmissionAllowance` no longer fails on a loaded box for a cost that is not the poll budget
