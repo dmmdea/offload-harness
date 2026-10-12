@@ -187,3 +187,43 @@ func TestDisarmKillOnCloseIsANoOpWhereNothingKills(t *testing.T) {
 		t.Fatalf("an uncontained tree: %v", err)
 	}
 }
+
+// The caller that asked for --die-with-wrapper asked for a guarantee, and a command that could not be put in the job has none:
+// it is refused (and the suspended child stopped), exactly as when the job object cannot be created at all. Running it
+// uncontained with a warning would leave a render alive after the wrapper dies, which is what the flag exists to prevent.
+func TestACommandThatCannotBeAssignedIsRefusedWhenDieWithWrapperWasAsked(t *testing.T) {
+	orig := assignProcess
+	assignProcess = func(job, proc windows.Handle) error { return syscall.Errno(5) }
+	t.Cleanup(func() { assignProcess = orig })
+
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
+	hideChild(cmd)
+	cmd.Env = append(os.Environ(), "PROCTREE_HELPER=parent", "PROCTREE_PIDFILE="+pidFile)
+	tr, err := Start(cmd, Options{DieWithWrapper: true})
+	if err == nil {
+		_ = tr.Terminate()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+		t.Fatalf("a command that cannot be contained was started although --die-with-wrapper was asked for (warning %q)", tr.Warning())
+	}
+	if !strings.Contains(err.Error(), "die-with-wrapper") {
+		t.Errorf("the refusal names the flag it could not honour: %v", err)
+	}
+	if cmd.Process == nil {
+		t.Fatal("setup: the child was never started, so the test proves nothing about stopping it")
+	}
+	done := make(chan struct{})
+	go func() { _, _ = cmd.Process.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("the suspended child was left behind after the refusal")
+	}
+	if _, serr := os.Stat(pidFile); serr == nil {
+		t.Error("the refused command ran far enough to start its own child")
+	}
+}
