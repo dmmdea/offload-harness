@@ -196,14 +196,13 @@ func TestBuildInputAfterARetryIsTheSameInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Cards) != len(want.Cards) || got.AllowDisplay != want.AllowDisplay || got.HostMemOK != want.HostMemOK {
+	if len(got.Cards) != len(want.Cards) || got.DisplayCapPct != want.DisplayCapPct || got.HostMemOK != want.HostMemOK {
 		t.Errorf("slow = %+v\nquick = %+v", got, want)
 	}
 }
 
 func withHost(d Deps) Deps {
 	d.HostMemory = func() (gpuprobe.HostMemory, bool) { return roomyHostMemory, true }
-	d.Presence = func(config.Config) (bool, bool) { return true, false }
 	return d
 }
 

@@ -9,8 +9,10 @@ package pipeline
 //   - a single-card route (image, edit, inpaint, upscale, animate, music, un-pooled video) asks
 //     the allocator for ONE card, holds a lease on it, and runs in the ComfyUI instance bound to
 //     that card (its own port, directories and launch marker, pinned by GPU uuid). Two such calls
-//     run on two cards at once; the display card is never auto-assigned while the operator is at
-//     the desk (the shared rule in gpuprobe, which reads display_attached as well as
+//     run on two cards at once; the display card is open to the allocator only up to the
+//     operator's cap (gpu_display_cap_pct) and to a call that declares a VRAM footprint, which a
+//     media call does not yet, so it is not auto-assigned to one today (which card is the display
+//     card is the shared rule in gpuprobe, which reads display_attached as well as
 //     display_active);
 //   - an EXPLICIT pin (comfy_cuda_device) is a hard constraint, never re-picked: the call queues
 //     for that card, FIFO, however many others are free. The pin is in ComfyUI's order, so it is
@@ -900,7 +902,7 @@ func keepPlace(m *gpulease.Manager, id string) (stop func()) {
 // which are the screen's and what they hold do not change in the seconds a call is placed in, and
 // who holds what comes from the lease directory, read fresh every time. Two things are kept
 // conservative: the screen's card stays closed to the call (the free VRAM that decides whether the
-// operator's desktop keeps its floor is the one thing a stale table could misstate), and the call
+// operator's desktop keeps its cap is the one thing a stale table could misstate), and the call
 // does not ask nvidia-smi again, so a wedged driver costs one retry per call and not one per stage.
 type tableReads struct {
 	cards []gpuprobe.Card // the newest table this call read
@@ -929,6 +931,34 @@ func (r *tableReads) note() string {
 		return ""
 	}
 	return fmt.Sprintf("the card table could not be re-read (%v): this call was placed from the table it read %s, with the screen's card kept closed to it", r.cause, r.age)
+}
+
+// mediaAllocInput is the allocator's input for a call that names no card. On a live table it is exactly
+// gpualloc.BuildInput's: the display card is open up to the operator's cap (gpu_display_cap_pct) and the door
+// forces nothing, so a call that declares a VRAM footprint (Need.VRAMGiB) can be given the screen's card
+// within it. When the table cannot be re-read the call goes on from the one it has (tableReads), and then
+// the display card is closed for that input (AllocInput.DisplayStale): the cap is judged on the VRAM in use now,
+// which is the one number a stale table can misstate, so the screen's card stays closed to a call placed from it,
+// as F24 kept it. The cap itself stays what the config says, so the skip names the table, not the key.
+func (p *Pipeline) mediaAllocInput(ctx context.Context, m *gpulease.Manager, need gpualloc.Need, reads *tableReads) (gpulease.AllocInput, error) {
+	if !reads.stood() {
+		in, berr := gpualloc.BuildInput(ctx, m, p.cfg, need, p.alloc)
+		if berr == nil {
+			reads.cards, reads.at = in.Cards, time.Now()
+			return in, nil
+		}
+		var unread *gpualloc.CardTableError
+		if !errors.As(berr, &unread) || ctx.Err() != nil {
+			return in, berr // not the table, or nobody is waiting for the answer any more
+		}
+		reads.fail(unread.Err)
+	}
+	stored := p.alloc
+	table := reads.cards
+	stored.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return table, "", nil }
+	in, berr := gpualloc.BuildInput(ctx, m, p.cfg, need, stored)
+	in.DisplayStale = true
+	return in, berr
 }
 
 // acquireCards holds a lease on the planned cards, allocating the card when the plan says so. A card
@@ -978,29 +1008,11 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	// call's need is read against the largest card (the smallest answer), so it never refuses what
 	// the grant, which knows the card, would admit.
 	build := func() (gpulease.AllocInput, error) {
-		allocNeed := gpualloc.Need{Claimed: claimedNow(), RAMGiB: askRAM}
-		if !reads.stood() {
-			in, berr := gpualloc.BuildInput(ctx, m, p.cfg, allocNeed, p.alloc)
-			if berr == nil {
-				reads.cards, reads.at = in.Cards, time.Now()
-				return in, nil
-			}
-			var unread *gpualloc.CardTableError
-			if !errors.As(berr, &unread) || ctx.Err() != nil {
-				return in, berr // not the table, or nobody is waiting for the answer any more
-			}
-			reads.fail(unread.Err)
-		}
-		stored := p.alloc
-		table := reads.cards
-		stored.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return table, "", nil }
-		in, berr := gpualloc.BuildInput(ctx, m, p.cfg, allocNeed, stored)
-		in.AllowDisplay = false
-		return in, berr
+		return p.mediaAllocInput(ctx, m, gpualloc.Need{Claimed: claimedNow(), RAMGiB: askRAM}, reads)
 	}
 
-	// An auto plan chooses its card from the operator's presence and the desktop floor as they are
-	// when it chooses, and the place in line it takes can be long. The grant puts the same rule again
+	// An auto plan chooses its card from the display card's cap and the VRAM in use as they are when it
+	// chooses, and the place in line it takes can be long. The grant puts the same rule again
 	// (GrantCheck): a card that no longer qualifies is given back and the choice is made again from
 	// fresh readings, with the arrival time kept, so the screen's card is never granted because it was
 	// open when the call joined the line.

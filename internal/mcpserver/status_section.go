@@ -301,7 +301,11 @@ func gpuLeaseVerdictLine(view map[string]any) string {
 		if holder != nil && holder.Epoch != 0 {
 			epoch = holder.Epoch
 		}
-		if epoch != 0 {
+		switch {
+		case epoch == 0:
+		case word == gpuactivity.VerdictTreeOrphan:
+			b.WriteString("; " + gpulease.TreeOrphanFreeing(epoch))
+		default:
 			fmt.Fprintf(&b, "; a human-authorised session frees it with: %s (not in this build yet: until it ships, ask whoever owns it or the operator)", gpulease.TakeoverCommand(epoch))
 		}
 	}

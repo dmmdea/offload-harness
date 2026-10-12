@@ -593,3 +593,46 @@ func TestNoteSaysWhenTheOwnerCannotBeTrustedFromHere(t *testing.T) {
 		t.Errorf("the ordinary untracked case stays in `gpu status`, not in every note: %s", n)
 	}
 }
+
+// A wrapper that is gone while the job it started lives is not a stale holder: the card is in
+// use, the claim is kept, and the verdict says so in the words of the precedence (plan P10).
+func TestTreeOrphanLeaseIsAVerdictNeverStale(t *testing.T) {
+	self := os.Getpid()
+	start, _ := gpulease.ProcessStart(self)
+	root, _ := leaseFixture(t, func(rec map[string]any) {
+		rec["holder"] = map[string]any{"pid": deadOwnerPID, "start_time_ms": 0}
+		rec["expires_at_ms"] = time.Now().Add(-time.Hour).UnixMilli() // window long over: no timer frees it
+		rec["renewed_at_ms"] = time.Now().Add(-3 * time.Hour).UnixMilli()
+		rec["tree"] = []map[string]any{{"pid": self, "start_ms": start}}
+		rec["command"] = "python film.py"
+	})
+	got := snap(root, 0, nil)
+	if got.Verdict != VerdictTreeOrphan {
+		t.Fatalf("a dead wrapper over a live tree reads tree-orphan, got %s (%s)", got.Verdict, got.Note)
+	}
+	if got.Stale || !got.Held || got.Holder == nil || !got.Holder.TreeOrphan {
+		t.Fatalf("held, not stale, holder marked: %+v", got)
+	}
+	if got.Holder.Alive {
+		t.Fatalf("the wrapper is not alive: %+v", got.Holder)
+	}
+	if len(got.Holder.TreePIDs) != 1 || got.Holder.TreePIDs[0] != self {
+		t.Fatalf("the live members are named: %+v", got.Holder)
+	}
+	for _, want := range []string{"pid " + strconv.Itoa(self), "wrapper", "gpu release --epoch 41", "the rest of the job keeps running"} {
+		if !strings.Contains(got.Note, want) {
+			t.Errorf("note lacks %q: %s", want, got.Note)
+		}
+	}
+	if strings.Contains(got.Note, "gpu takeover") {
+		t.Errorf("a tree-orphan is not sent to a command that is not in this build: %s", got.Note)
+	}
+	// When the members are gone the same record is a stale holder again, with no clock change.
+	root2, _ := leaseFixture(t, func(rec map[string]any) {
+		rec["holder"] = map[string]any{"pid": deadOwnerPID, "start_time_ms": 0}
+		rec["tree"] = []map[string]any{{"pid": deadOwnerPID - 1, "start_ms": 5}}
+	})
+	if got := snap(root2, 0, nil); got.Verdict != VerdictStaleHolder {
+		t.Fatalf("a dead wrapper whose members are gone is a stale holder, got %s (%s)", got.Verdict, got.Note)
+	}
+}

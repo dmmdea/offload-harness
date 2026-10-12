@@ -102,6 +102,15 @@ func TestRunImageBatchWaitingEndsOnInterruptAndLeavesNoLease(t *testing.T) {
 	// Let go of the card: the abandoned wait may take it, and must release it at once.
 	_ = holder.Release()
 	deadline := time.Now().Add(10 * time.Second)
+	// The abandoned wait is still in line, polling. It leaves the line when it is granted the card and gives it back at once, and
+	// that is the last thing it does in the lease folder: wait for it, so that it does not recreate the folder after the test's
+	// temp dir is gone (it left one tree in the OS temp dir per run, 39 of 40 runs, found by the temp-folder tripwire).
+	for len(f.m.Waiters()) > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the abandoned wait is still in line after %v: %d waiter(s)", 10*time.Second, len(f.m.Waiters()))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	for {
 		l, err := f.m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "after", TTL: time.Minute, Devices: []string{leaseIDOf(admitUUIDC)}})
 		if err == nil {

@@ -846,8 +846,8 @@ func runWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	if len(subtasks) == 0 {
 		return nil, Summary{}, fmt.Errorf("delegate: at least one subtask required")
 	}
-	if len(subtasks) > limit {
-		return nil, Summary{}, fmt.Errorf("delegate: %d subtasks exceeds the max of %d", len(subtasks), limit)
+	if err := checkSubtaskLimit(len(subtasks), limit); err != nil {
+		return nil, Summary{}, err
 	}
 	// The whole-call deadline (ADR 0065): from here every placement, probe, poll
 	// and local run answers to a context that ends at RunOptions.Deadline. nil =
@@ -1569,10 +1569,12 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 			}
 		case held != "":
 			first.RetryNote = "retry skipped: " + held + " and no other node is eligible; " + retryHeldWhy(held)
-		case SeatDownDefer(first.Result):
+		case SeatDownDefer(first.Result), RootGoneDefer(first.Result):
 			// The defer promises a second placement on another node: when there is no
 			// other node the caller must be told it was considered and why it did not
-			// happen, not left with a retryable defer and an empty note.
+			// happen, not left with a retryable defer and an empty note. The seat-down
+			// defer (ADR 0066) and the lost-root defer (register C-79) are the two whose
+			// promise is that sentence.
 			why := "every eligible node was already tried or is not eligible"
 			switch {
 			case r.route == "local":
@@ -1580,7 +1582,11 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 			case r.remotePinned():
 				why += "; " + r.remotePinWhy()
 			}
-			first.RetryNote = fmt.Sprintf("retry skipped: the seat on %s went down and no other node could take the contract (%s)", nodeLabel(first), why)
+			what := "the seat on " + nodeLabel(first) + " went down"
+			if RootGoneDefer(first.Result) {
+				what = "the run on " + nodeLabel(first) + " lost its workspace root"
+			}
+			first.RetryNote = fmt.Sprintf("retry skipped: %s and no other node could take the contract (%s)", what, why)
 		case r.remotePinned():
 			// A reasoned remote pin retries on another fleet node or not at all (alternativeNode): when there is no other
 			// node, a failed verification, an abstention or an admission defer would otherwise be published with no note
@@ -1765,9 +1771,14 @@ func (r *runner) retryFloorSec() int {
 // that honestly records a ~270 s cold load publishes a ~390 s min_turn, above
 // any default contract — although the seat that is about to run the retry has
 // nothing to do with it.
+//
+// A lost-root defer (register C-79) is the second: the seat served the run, but the fault
+// is that run's directory, and the retry goes to another node, so the number read here
+// would be a seat the retry never uses. The configured floor stands and the retry seat's
+// own floor applies once it is chosen.
 func (r *runner) retryFloorFor(first PlacedResult) (int, string) {
 	floor := r.retryFloorSec()
-	if m := first.Result.MinTurnSec; m > floor && !SeatDownDefer(first.Result) {
+	if m := first.Result.MinTurnSec; m > floor && !SeatDownDefer(first.Result) && !RootGoneDefer(first.Result) {
 		return m, fmt.Sprintf(", min_turn_sec of the seat on %s", nodeLabel(first))
 	}
 	return floor, retryFloorSource(floor)
@@ -4332,6 +4343,15 @@ const minRetrySec = 10
 // another node — and the wait the node spent on the dead seat is credited back
 // the same way, with the wall of a delegator-side rescue that failed first (a seat
 // lost in the structured re-pack is rescued before it is re-placed).
+//
+// The fourth is the lost-root defer (register C-79, RootGoneDefer): the run's own
+// workspace root, which the executing node materialized for it, could not be
+// opened, so the seat never read its documents. The fault is that run's
+// directory, not the seat and not the contract, and the same contract placed
+// again materializes a root of its own. Before the node filed it as
+// infrastructure the seat's "I could not read the file" was a failed
+// verification, which this function retries: the better class must not take the
+// recovery with it.
 func retryable(pr PlacedResult) bool {
 	if pr.Err != "" {
 		return false
@@ -4340,6 +4360,9 @@ func retryable(pr PlacedResult) bool {
 		return true
 	}
 	if admissionDefer(pr.Result) || SeatDownDefer(pr.Result) {
+		return true
+	}
+	if RootGoneDefer(pr.Result) {
 		return true
 	}
 	return pr.Result.Deferred && pr.Result.DeferClass == core.DeferClassAbstention
@@ -4453,11 +4476,21 @@ func admissionDefer(r core.AgentWireResult) bool {
 // re-placement the defer is promised. The credit is bounded by one full contract
 // wall (core.AgentTimeoutSecCap): neither a node's number nor a slow rescue buys
 // the retry more than that.
+//
+// A lost-root defer (register C-79) is credited its admission, bounded the same way, and
+// nothing else: the node's cold load happened before the contract's wall began, so the
+// retry's budget must not be charged for it, while the wall the run spent working before
+// its directory went was work (the fault is the box's, but that time is the contract's).
 func admissionCredit(pr PlacedResult) time.Duration {
 	secs := 0.0
 	switch {
 	case admissionDefer(pr.Result):
 		secs = pr.Result.AdmissionWaitSec
+	case RootGoneDefer(pr.Result):
+		secs = pr.Result.AdmissionWaitSec
+		if secs > core.AgentTimeoutSecCap {
+			secs = core.AgentTimeoutSecCap
+		}
 	case SeatDownDefer(pr.Result):
 		secs = pr.Result.AdmissionWaitSec + pr.Result.SeatDownWaitSec + pr.rescueSpent.Seconds()
 		if secs > core.AgentTimeoutSecCap {

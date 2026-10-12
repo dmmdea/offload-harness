@@ -6,6 +6,493 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
+
+### Fixed — `TestTheAnchoredClockDropsTheAdmissionAllowance` no longer fails on a loaded box for a cost that is not the poll budget
+
+- **The defect.** The test failed on a loaded Linux gate host and passed on an idle one. Run alone with 8 concurrent workers of 25 runs each (load about 2 on 16 cores) it failed 161 of 200 at the 0.182.0 merge and 179 of 200 at 0.181.0, with elapsed times of 600.1 to 694.7 ms against its 600 ms line (wall 300 ms plus the 300 ms admission allowance). In ordinary whole-package gates it failed once in thirty or more (600.25 ms on a Windows host that was running other gates; that run was not traced).
+- **The cause, measured.** The delegator was right. In 315 failing runs traced across two stress sets the clock anchored on the first running poll (2 to 14 ms after Run began), the poll loop left 350.05 to 353.98 ms later (0.03 to 4.0 ms past its 350 ms deadline) and gave up without a request, because the job was last seen running. The rest of Run's elapsed time sat in the first result a process records: `buildinfo.BuildSHA256` hashes the whole running executable once per process, and that took 245 to 335 ms (median 267 ms) for the 30 MB test binary on the loaded host, against 56 to 60 ms for the 23 MB Windows test binary on an idle workstation. Everything after it, the corpus line, the ledger row and the PAIR terminal, took 0.7 to 2.8 ms. The test compared Run's whole elapsed time with the budget, so 350 ms of poll plus 245 ms of hash crossed 600 ms and the fastest failures landed at 600.1 ms. In a whole-package run an earlier test has normally paid the hash already. As a control, the unchanged test run in one process after another test that records failed 0 of 200 under the same load.
+- **The fix.** The product is unchanged. The fake node now stamps the first poll it serves (the one that publishes the started wall, where the clock anchors) and the last, and the test asserts the span between them stays under wall plus grace plus half the admission allowance (500 ms; the anchored budget is 350 ms and the allowance, if it were back in, makes it 650 ms). The lower bound, that the delegator does not abandon a job inside the node's own wall, stays on Run's elapsed time, where extra bookkeeping can only help it.
+- **Tests.** Under the same 8 x 25 stress the test failed 161 of 200 before and 0 of 200 after, and 0 of 200 again with 12 CPU spinners competing (load 7.4). Two mutations turn it red: adding `admissionSlack()` back into `anchoredPollBound` (poll held 648 ms) and skipping the anchor so the dispatch-time bound with the allowance stays in force (poll held 648 ms).
+- **Not changed, for a follow-up.** The first record in a process still hashes the executable on the finishing path, so the first result of a short-lived delegator process returns that much later (about 56 to 60 ms idle, up to 335 ms measured under load). It happens after the job is given up or answered, so it holds no node and no budget; hashing at process start would remove it from the answer's path.
+
+### Changed — a command pinned to a card outside its lease is moved onto the leased card, never refused (GPU-F9)
+
+- **What was wrong.** `gpu reserve --devices 0 -- <cmd>` pinned the command to the held card with `CUDA_VISIBLE_DEVICES`, but a command
+  that carried a pin of its own (`COMFY_CUDA_DEVICE`, `COMFY_CARD_UUID`) was left alone and only warned about: ComfyUI and the render
+  layer turn that variable into the card they run on and reset `CUDA_VISIBLE_DEVICES` from it, so the job ran on the card it named,
+  outside the lease, and another session could be holding that card. The warning was the whole defence.
+- **The fix is a move, not a refusal.** With an explicit lease (`--devices` or `--cards`), a program pin that falls outside the held
+  cards, or cannot be resolved to a card, is rewritten to the held card and the command starts: `COMFY_CUDA_DEVICE` becomes the held
+  card's ComfyUI device index from the card table (`gpu_comfy_order`; never the nvidia-smi index the lease is keyed by),
+  `COMFY_CARD_UUID` becomes the held card's driver uuid, each in its own kind (the render layer refuses an index beside a uuid, and a
+  uuid turns an unkeyed launch into a keyed instance on another port). One stderr line names the old pin, the new pin and the lease. A
+  pin of k cards under a lease of n >= k cards maps to the first k held cards in the order the index is counted in; more cards than the
+  lease holds, a `--cuda-device` on the command line (the program's own argv), and a held card whose device index
+  is unknown (no `gpu_comfy_order` on a multi-card box: no guess) keep the old warning, now with the reason. A `--cuda-device` in
+  `COMFY_EXTRA_ARGS` is not read by the wrapper (no warning, and an environment pin beside it is moved: the render layer drops the
+  extra args' flag when one is set). The index is read and
+  written in the order the child runs under (`CUDA_DEVICE_ORDER=PCI_BUS_ID` makes it nvidia-smi's). The pin is judged on its own beside
+  an inherited `CUDA_VISIBLE_DEVICES`. The wrapper never exits non-zero for a pin, and there is no `--allow-outside-pin`.
+  A flag-off host, a `--whole-node` lease and a lease derived from the command's own pin never reach the re-pin.
+- **Tests.** `gpu_reserve_repin_test.go` (fourteen, including the verb run in a child process: the wrapped command exits 7 and the wrapper
+  returns 7 with the command started on the held card; a frozen copy of the old `confineWrapped` is the oracle that every input without
+  an outside program pin gets the old answer) and `internal/gpulease/repin_test.go` (seven), written first. Red before: the re-pin tests
+  failed on the tree without the change with, for example, `the child must be started on the held card's ComfyUI device (1), got env ""`
+  and, through the verb, `the command must start on the held card (ComfyUI device 1), saw "2"`; the guards (pin inside the lease, argv
+  pin, the oracle, flag-off/whole-node/derived) hold before and after. Mutation-checked with `scripts/mutation-check.sh`: eleven changes,
+  each reverted in turn fails a test it names. Docs: `docs/systems/gpu-lease.md` ("A pin outside the lease is moved, never refused"),
+  `docs/OPERATOR-GUIDE.md`, ADR 0018 (amendment of 2026-10-12).
+
+### Changed — a dead wrapper with a live process tree keeps its claim (GPU-I3, GPU routing P10)
+
+- **What was wrong.** The reclaim rule read "the wrapper's pid is gone" as "the job is gone". It is not: a wrapper that was killed,
+  crashed or lost its session left the command it started running on a card in use, and the next acquirer was handed that card at
+  once (two jobs on one card). When a lease was lost the wrapper also stopped only its direct child, so a grandchild kept the card
+  the same way. The observation side (`tree-orphan` in `gpu status`, `offload_status`, the allocator) existed and nothing produced it.
+- **The wrapper records what it started.** `gpu reserve ... -- <command>` runs its command inside a containment (a job object on
+  Windows, created suspended and resumed once the child is inside; its own session and process group on Unix) and writes the tree,
+  the pid and start identity of each process, into the lease record (`tree`, additive and `omitempty`), rewriting it only when the
+  set changes. New package `internal/proctree`; the agent shell's cage builds on the same job object type, with its kill-failure
+  report kept.
+- **A dead wrapper over a live tree keeps its claim, and the lease reads `tree-orphan`.** A lease whose wrapper is gone (pid dead, or
+  alive but recycled) is not reclaimable while any recorded member is alive by pid AND start identity. It is bounded by observation,
+  never by a timer: every read checks the members again, so a recycled pid cannot hold a card, a card frees itself at the first
+  read after its members are gone, and hours past its window and heartbeat a tree-orphan is still held while its members live.
+  A lease whose wrapper is alive is judged exactly as before. A lease that recorded no tree (a wrapper that predates this change, the
+  pipeline's own leases, a detached holder) and whose wrapper is gone is reclaimed at once unless a live process is tied to it: a
+  launch marker that names the lease epoch (or a default-instance marker that began at or after it with no other lease present) or,
+  on Windows, a child of the dead wrapper in the process table that began after the lease; with none alive it is reclaimed as before. The driver's compute listing is not used: under WDDM it names no process for most.
+- **A lost lease or an interrupt stops the whole tree**, not just the command, except a live ComfyUI instance whose launch marker
+  names another lease (a kept instance another lease reused is that lease's job now); the wrapper says what it left running. An OS
+  that refuses the containment still runs the command, uncontained, and says so. **On Unix the command now leads its own session**, so a
+  terminal hang-up that used to reach it ends only the wrapper; the job keeps running and its lease keeps the cards as a tree-orphan.
+- **`--die-with-wrapper` (opt-in, off by default)** ends the tree when the wrapper exits or dies (Windows: the job is created
+  kill-on-close). It is off because it makes the wrapper a single point of failure for a long render; Linux has no handle whose
+  closing ends a tree and refuses the flag before the reserve queues.
+- **What a reader sees, and what frees it.** The `tree-orphan` verdict (it leads the precedence; the brief line leads with
+  `ORPHANED`), the `wrapper: pid N is GONE, but the job it started is still running` lines of `gpu status`,
+  `activity.holder.tree_pids`, the waiter's sentence, `tree_orphan` and the `tree-orphan` verdict on `/fleet/health` leases
+  (additive). The waiter, `gpu status` and the brief line name the one command that frees a tree-orphan today, `gpu release
+  --epoch N` (the takeover verb does not exist in this build and is not offered): it ends the claim at once, stops only the ComfyUI
+  instances kept under the lease, and leaves the rest of the job running. The allocator treats a tree-orphan's cards as claimed, so a
+  `--cards N` waiter is handed other cards, and a seat warm-back does not load over them.
+- **The marker directory is armed in one place.** The lease readers read launch markers from `comfy_dir`; `modelaffinity.SetComfyDir`
+  (already called from `config.loadArmed` with the same directory) now arms them too, so `config.go` is untouched.
+- **The stop primitives a takeover needs are built and wired to nothing.** `proctree.PlanStop` and `Stop` stop only a recorded tree or a
+  launch marker's process, re-check each member's start identity right before signalling and verify it dead, and report anything else
+  on a card as `card still busy by pid N (not ours)`; `comfyinst.StopMarker` interrupts, frees and kills a marker's instance after the
+  same fingerprint proof a lease's own holder gives; the Windows job confirms on the process handle that a pid it was listed is still
+  in the job before it ends it.
+- **Cross-version, and the deploy note.** A reader built before this change ignores `tree` and reclaims a dead wrapper's lease at
+  once, as it always did (pinned against the preserved old reader). A host is protected only once every reader on it is this
+  build: after the deploy run `gpu doctor`, restart the MCP servers and the fleet daemon, and compare build versions, because the
+  audit's `FormatSignature` is not bumped. The key is additive, so nothing an older reader reads becomes wrong. Nothing is killed
+  by a deadline or by another process.
+- **Tests.** Ported test-first from the P10 branch (`internal/gpulease/tree_test.go`, `internal/proctree/*_test.go`,
+  `internal/comfyinst/stopmarker_test.go`, `internal/gpualloc/treeorphan_test.go`, `gpu_tree_test.go`, `gpu_tree_warm_test.go`,
+  `gpu_tree_hermetic_test.go`, and the Windows job tests), including a real wrapper killed with a real grandchild beside it (a scratch
+  lease directory and a scratch ComfyUI directory, no card). The tests that name the command that frees a tree-orphan were written
+  first against the old wording and failed on it. Mutation-checked with `scripts/mutation-check.sh`: twelve changes (Reclaimable
+  ignoring the tree, the start identity dropped, a timer that frees, a wrapper that records nothing, a healthy wrapper read through the
+  process table, a lost lease that stops only the direct child, the protected set unused, the waiter sent to the takeover verb, the
+  Windows stop ending a pid outside the job, the marker directory not armed, a marker of another lease holding this one, the brief
+  line without the release command), each reverted in turn fails a test it names. Docs: ADR 0084, `docs/systems/gpu-lease.md` ("A dead
+  wrapper with a live tree keeps its claim"), `docs/OPERATOR-GUIDE.md`.
+
+### Changed — records: the dropped pid-0 umbrella is accepted, the VRAM-charge measurement is stated with its limits, and the display card's cap is told in the lease guide (P2, F70, A-RAM-15)
+
+- **P2: the pid-0 `meta.json` umbrella stays dropped, and that is now the decision, not a pending deviation.** ADR 0018 and
+  `docs/systems/gpu-lease.md` said "Deviation from plan rev 2, pending acceptance" and that the plan's P2 acceptance was not met. The plan
+  owner accepted it on 2026-10-11, after a green `gpu doctor` on the reference box (every reader it reached understood the per-epoch
+  fence; nothing older than the record format was found), so the audit gate does the work the umbrella would have done. The four tests the
+  plan named for the umbrella were never written and are recorded as superseded (the old-reader fixture test pins the hazard that replaces
+  the last of them). The umbrella can be restored later without a format change.
+- **F70: the VRAM-charge question is answered, with its limits.** The "partly measured, not settled" passage of the lease guide is
+  replaced by the 2026-10-11 measurement: on the reference box's Windows driver every VRAM allocation is charged 1:1 to the process's
+  private bytes and to system commit (a 4.0 GiB `cudaMalloc` raised private bytes by 4.0 GiB), the stock ComfyUI loader charges the whole
+  weight file to commit (14.73 GiB on one Wan expert), and a card-only run moves system commit by tens of GiB while available RAM stays
+  above 45 GiB. The guide says what is unchanged (the brake still reads commit and available RAM; a card-only recipe declares `--ram 0`,
+  which is always admitted) and what is not known (one driver on one box, system-wide counters, other nodes unmeasured). Documentation
+  only: no admission code changes.
+- **The display card (A-RAM-15, `gpu_display_cap_pct`).** The allocator section of the lease guide and the operator guide tell the cap
+  that the display-cap change introduces: the card is allocatable up to 60 percent of its VRAM at any presence (the desktop's use counted),
+  only with a declared `--vram`, `0` closes it, an unknown display stays closed, and the cap bounds admission only.
+
+### Fixed — the lease-guards review round: `--die-with-wrapper` no longer ends an instance another lease took over, a tree-orphan's host RAM is no longer charged twice, and the docs say what the code does (GPU-F9, GPU-I3 / P10)
+
+An independent review of GPU-F9 and GPU-I3 (the P10 port) found seventeen entries over twelve distinct defects; each was read against the
+source, scored with Jev, and either fixed red-first or answered. Every fix has a test that failed before it and a mutant that turns
+that test red (`scripts/mutation-check.sh`).
+
+- **`--die-with-wrapper` (Windows) killed what the wrapper had just said it spared.** A lost-lease wrapper spares a ComfyUI instance
+  another lease re-stamped, but its `finish()` then closed the last handle of the kill-on-close job and Windows ended every process
+  still in it, the spared one included, which ended the other lease's job. The job is now disarmed once something is spared (after
+  everything else of the tree is ended), at the lost-lease stop and again at `finish()`, and the wrapper says the guarantee stops at
+  that instance (`proctree.Tree.DisarmKillOnClose`). The flag's help and the lease guide carry the carve-out.
+- **`--die-with-wrapper` was silently not honoured when the command could not be put in the job.** The command ran uncontained with a
+  warning that never named the flag; a 20-hour render outlived the wrapper that was meant to take it down. It is refused now, as when
+  the job object cannot be created.
+- **A pin the wrapper cannot move was invisible beside an inherited `CUDA_VISIBLE_DEVICES`.** More cards pinned than the lease holds, or
+  a held card with no known ComfyUI index, was reported only by appending to a note the generic confinement had made, and an inherited
+  variable naming a held card makes that confinement silent: the command started on cards outside its lease with nothing printed. The
+  trespass sentence with the reason is now printed in that case, and a moved uuid pin no longer hides an index pin that stayed.
+- **A tree-orphan's declared host RAM was charged again as still to load.** The guard measured the processes below the lease's holder,
+  which for a tree-orphan is the dead wrapper (the job is reparented away on Linux), so about nothing was subtracted and every later
+  grant that declared RAM waited behind a host-RAM message for as long as the orphan lived. A tree-orphan now stands alone and is
+  measured from its recorded live members.
+- **A stale launch marker whose pid was recycled made a lost-lease wrapper spare a process of its own tree.** `PIDsOfOtherLeases` now
+  applies the start-versus-marker proof the stop already used.
+- **The recorder listed the console host.** On Windows the recorded tree was the job's list unioned with the process table, which added
+  `conhost.exe` (a child of a command that has a console of its own, not in the job); a recorded member that is not the job can keep
+  a dead wrapper's claim after the job is gone. With a contained command on Windows the record is the job's exact list.
+- **The F9 docs promised a warning no code prints.** A `--cuda-device` in `COMFY_EXTRA_ARGS` is not read by the wrapper (no warning),
+  and an environment pin beside it is moved and wins (the render layer drops the extra args' flag). The guide, ADR 0018, the F9 entry
+  above and the code comments now say so, and a test pins both halves.
+- **Four statements said a lease that recorded no tree is "free at once" while the code, the next sentence and the ADR hold it on a live
+  tied process.** They now say: reclaimed at once unless a launch marker or, on Windows, a child of the dead wrapper ties a live process
+  to it; with none alive, exactly as before (a judge-level test pins that). The guide, ADR 0084 and the `Reclaimable` comment also say
+  what a recorded tree cannot cover: it is frozen when the wrapper dies, and the process table is read only for a lease that recorded
+  none, so a process started after the last record that outlives every recorded member is not held (the accepted limit).
+- **A whole-node `gpu release` could be undone by a restamp in flight (found by the Windows root gate, not by the review).** A restamp
+  reads the lease record, writes a replacement and renames it over the record, all under the epoch lock; the whole-node release
+  removed the claim without taking that lock, so a release that landed between the restamp's read and its rename was followed by the
+  rename, which put the record back and left the lease the operator had just ended held, with its wrapper none the wiser. The
+  wrapper's tree record (a restamp right after its command starts) made the window reachable, and it surfaced once the recorder no
+  longer walked the whole process table on Windows (that walk took about 20 ms on the development box and more on the slower
+  hosts, and had delayed the restamp past the release the handoff test issues): `TestReserveDoesNotWarmBackAfterLosingTheLease`
+  failed on both Windows hosts. The release now takes the epoch lock.
+- **Answered, not changed.** An overdue tree-orphan is ranked last in `/fleet/health` and is not a refusal, exactly as every overdue
+  lease since 0.113.27 (a refusing node keeps the capacity wait from asking the one remote that could take the work); the field comment
+  said "never freed" without saying that, and a test now pins both halves.
+- **Tests.** The repin verb tests take the isolation every real-wrapper test needs (the lease and config redirects stripped from the
+  driver, a scratch `comfy_dir`), the real-wrapper helper spawns are window-less with a source pin over the files that start them, the
+  launch markers the lease-lost tests write carry the start time of the process they name, and the tree-orphan test polls for the claim
+  to free instead of reading it once.
+
+### Fixed — one bad subtask (or research page) no longer rejects the valid ones in the same call (D-111, part 1)
+
+`agent_delegate` returned ONE flat `deferred: true, reason: "subtask N: ..."` for the whole call the moment any subtask failed intake (a `context_paths` file that is not there, a context past the box's cap, a blank goal), so a valid sibling never ran: a call that listed one scratch file that was missing lost the answer to the other subtask too. `offload_research` did the same for a page whose contract failed intake.
+
+- **Each subtask is prepared on its own.** `delegate.PrepareBatchWithCap(specs, readRoot, cap)` prepares every spec exactly as `PrepareContractWithCap` does and returns the valid contracts with their original positions beside the per-position rejections; preparing one spec never depends on another. The valid contracts go to the runner as before.
+- **A rejection is a contract-class defer at its own position.** The call answers one result per subtask sent, in the order sent. The rejected one is `deferred: true`, `defer_class: contract` (the caller's mistake, not a broken stack), `reason: "subtask N: <cause>"` (`source N:` for a research page, N being the page's place in the `urls` list), on no node and no seat, and it writes no ledger row. It counts in `summary.deferred` and not in `summary.infrastructure` or `lost_to_stack`, so the call is not error-flagged for it. `acceptance_lint` stays aligned with the original positions.
+- **Two refusals stay whole-call.** The 8-subtask cap is read off the subtasks SENT (`delegate.CheckSubtaskCount`, the words `RunWith` uses), so nine subtasks with one bad one are refused for their number exactly as before and a rejection never makes room. A call with no valid subtask keeps its flat defer, which now names every bad subtask (`subtask 0: ...; subtask 2: ...`; one bad subtask reads as before).
+- **Read `results[i]` by input position and tolerate a contract-class defer inside a delivered call.** The tool descriptions and `docs/systems/mcp-server.md` say so.
+- **Not in this change: `extra_read_roots`** (attaching files from outside `read_root`). It widens the delegator-side reader with no read floor at intake, and the inlined bytes can travel to fleet nodes; it waits for that floor. The `delegate` (`--contract`) and `research` command-line verbs follow the same rule since the fix round below.
+- **Tests, written first and red** against the unfixed code: the runner never ran for the valid subtask (`the runner ran [], want exactly the valid subtask`), the call carried no results, the flat defer named only subtask 0, nine subtasks with one bad one answered `subtask 0: ...` instead of the cap, and an oversize research page deferred the other two pages. Mutants, each compiled and each killed: a rejection counted as infrastructure, the rejection's class changed, the lints indexed by contract instead of by input position (both doors), the cap read off the prepared contracts, any rejection refusing the whole call, the flat reason naming only the first, the rejections not spliced back (both doors), a research page named by its contract's place, the cap lifted to the batch bound, the skipped count dropped, the valid contracts' positions lost.
+
+### Fixed — a run whose workspace root vanished defers as infrastructure and is re-placed once, instead of answering from nothing (C-79)
+
+When the directory under a run is taken (a startup sweep did it before C-78; a cleaner, an indexer or an operator still can), every file tool answered `workspace root unavailable`. The loop fed that back as an ordinary observation, the seat wrote a final answer from nothing ("I could not read the file"), and the delegator scored the answer `failed_verification`: a fault of the box filed as the model's.
+
+- **A tool that cannot open the workspace root says so with a type, and the run ends on it.** `read_file`, `list_dir`, `search_files`, `summarize_file`, the write door's tools and `update_plan` return an `agent.RootGoneError` (the same words the seat has always seen), and `Loop.Run` returns it once the turn's calls are recorded, before the seat is given another turn, or before the first turn when a replayed context read finds the root gone. A file that is missing inside a root that opens is still an observation, and for a run with no write door a root lost after its last tool call changes nothing: the finished answer stands. Behaviour change, accepted: a run that had already found its answer and then loses its directory on the next tool call is stopped at that call rather than let go on.
+- **The node files `defer_class: infrastructure`** with a reason that opens `workspace root unavailable: <root>: <cause>` (`core.RootGoneReason`), a trace that carries the failed call, and no answer. The delegator's in-process local placement and a fleet node's job run the same function, so both are covered. The `agent_run` door answers `deferred: true` with the reason, and files `defer_class: infrastructure` when the read root existed as the call came in; a `read_root` that never existed is a typo that `agent.Build` lets through (it only makes the path absolute), which fails the same way at the first tool call and stays classless, like every other loop error at that door. The ledger files it under `reason_code: infrastructure`, never `seat_down` (pinned for the operating systems' own causes).
+- **A write-door run whose tree is gone before the door opens, or by the time it closes, defers the same way and publishes no diff.** The door's deliverable is a diff of the tree, so it asks for the tree itself where no tool is there to report the loss. A read root lost while the run waited for its seat used to file a `write` defer, the class that says another node may have opted in and that the delegator does not re-place; a tree lost after the seat's last tool call used to publish the snapshot of a directory that was not there as a diff deleting every file, beside a finished answer.
+- **The delegator re-places it once on another node when one can take it** (`delegate.RootGoneDefer`, the fourth `infrastructure` defer worth a retry, after the coherence, warm-up and seat-down ones), so the better class does not take away the second chance the failed verification used to get. It matches the reason's prefix only: a node without this change keeps filing the same fault as a failed answer, and every other `infrastructure` defer keeps the retry rule it had. On top of the named-seat `agent_run` (D-125) and the final-answer fit (D-102) of this release, which own the same door and function.
+- **Tests, written first and red** against this base (the new types and the defer helpers present, nothing wired): `scope.open` on a removed root returned a wrapped `*fmt.wrapError`, not a `*RootGoneError`, from every tool; the loop gave the seat a second turn and the run ended `done` with `I could not read the file.`; the replayed context read did the same; the local and node-side runs published that answer instead of deferring; the write door filed a `write` defer for a root lost before it opened and published a diff deleting every file for one lost after the last call; `RootGoneDefer` was not retry-eligible and the contract was not re-placed on the second node; `agent_run` answered a root vanished mid-run with a finished answer instead of deferring. Guards that pass by design on the unfixed code: a missing file inside an open root, a failing tool inside an open root, a root lost after the last read of a run with no door, a read root that never existed, the ledger code for the operating systems' causes. Mutants, each compiled and each killed: the typed error dropped from either dispatch path or from the replay, the replay's report ignored, `scope.open` and `update_plan` back on the raw open, any tool error ending the run, the retry rule without the lost-root case, the match without its prefix, the `agent_run` class without the existed-at-entry check or with it always false, the door's own root check dropped before it opens and before it closes, a door-less run asked for its root, the defer filed under another class, and the reason without the root it names.
+
+### Fixed — fix round of the delegate-intake branch: what a mixed call says about itself, the CLI verbs, and the second placement of a lost-root run (D-111, C-79)
+
+A review of the two items above found six defects at their edges. None changes what a call that went well returns; each is a place where the new behaviour said the wrong thing, or did less than the same change on the other surface.
+
+- **Progress notifications of a mixed call speak in the caller's numbers.** The engine is handed only the subtasks that passed intake, so its events numbered them among those: for `[ok, refused, ok]` the third subtask announced itself as `subtask 2 of 2` and the call ended at `2 of 2 done` while returning three results. `PreparedBatch.MapProgress` puts each event on the subtask's input position and the call's real total and counts the refused subtasks as done from the start; the opening says `delegating 3 subtask(s), 1 refused at intake`, and the heartbeat counts them too. A call with nothing refused reports exactly what it did. Both doors (`agent_delegate`, `offload_research`).
+- **A call the engine refuses as a whole still names the subtasks intake refused.** An unknown `route`, say, leaves nothing to run and no result to splice a rejection into, and the rejections were dropped: the caller fixed the route and met the malformed subtask only on the retry. The whole-call defer now ends `; also refused at intake: subtask 1: ...` (`source N:` for a research page, by its place in the `urls` list), and the two command-line verbs return the engine's error the same way. `PreparedBatch.AlsoRefused`, `cliEngineErr`.
+- **The `delegate --contract` and `research` command-line verbs follow the rule too** (`main.go`, which the plan did not name: the invariant held on the two MCP doors only). Both prepare each subtask or page on their own through `cliIntake`, run the valid ones, and print the refused ones as contract-class defers at their own positions; they exit 0 for them, as for every contract-class defer. A file with nothing valid in it is refused naming every bad subtask (it named the first), a research page by its place in the url list (it was named by the contract's place), and the eight-subtask cap is read off the file before anything is prepared, so a rejection never makes room under it.
+- **A lost-root defer's second placement is budgeted like a seat-down defer's.** The first-pass retry floor read the min_turn of the seat that served the run, a seat the retry never uses (it goes to another node, whose own floor still applies once it is chosen), so a flagship that records a ~270 s cold load refused the re-placement the defer is promised on a 300 s contract. The node's `admission_wait_sec` (a cold load before the contract's wall began) was charged to the retry's budget; it is credited back now, bounded by one contract wall. Nothing else is: the wall the run spent working before its directory went was work.
+- **A lost-root defer with nowhere to go says so.** With one node, `route=local`, or every eligible node already tried, the defer was published with an empty `retry_note`; it now reads `retry skipped: the run on <node> lost its workspace root and no other node could take the contract (<why>)`, in the words of the seat-down defer's note.
+- **A tree the write door finds gone no longer outranks the cause the loop ended on.** The node-side check ran whatever ended the run and was filed ahead of every other cause, so a write-door run that hit its ceiling (or lost its seat, or its card) and whose job directory also went was filed as root-gone: the budget signal the delegator sizes contracts from was hidden, and a seat-down defer lost its own credit. The check still withholds the write set (a snapshot of a tree that is not there reads as every file deleted) and now says so in `write_note`; it makes the lost root the run's cause only when the loop ended cleanly, and a root the loop's own tool found gone still ends the run, as before.
+- **Tests, written first and red** (the delegate, mcpserver and root ones against the unfixed code, the pipeline one against the unfixed precedence): the retry skipped on `floor 387s, min_turn_sec of the seat on node-a` with the 300 s budget 299 s unspent; the credit was 0; the note was empty on both nowhere-to-go shapes; the third subtask announced `subtask 2 of 2`; the engine's error carried no rejection; a ceiling beside a gone tree was filed as `workspace root unavailable:`; and on the CLI the all-rejected file named `subtask 0` only, nine subtasks with one bad one answered `subtask 0: ...` instead of the cap, and neither verb prepared through the helper or spliced. Mutants (`scripts/mutation-check.sh`), each compiled and each killed: the lost-root case dropped from the first-pass floor exemption, from the credit and from the nowhere-to-go note; the progress mapping's index, total and done count each dropped, the refused count dropped from the reporter, the reporter's total taken from the valid subset; the rejections left off the engine's error (both doors, both verbs); the lost root made the run's cause beside a ceiling, the write-set guard dropped (the diff then deletes every file) and the note emptied; on the CLI, the cap read off nothing, a page's place in the url list dropped, the lints indexed by contract, the splice dropped from either verb, the all-rejected refusal removed, the door tag dropped, and the engine's error returned bare from the helper or from either verb.
+
+### Changed — the display card is allocatable up to a cap at all times, and the operator's presence neither opens nor closes it (A-RAM-15, `gpu_display_cap_pct`)
+
+- **The rule.** The operator's order of 2026-10-11: the display card may be used up to 60 percent at all times, unless he says he needs it.
+  The card allocator behind `gpu reserve --cards N` and the media admission path did the opposite: it never handed the card the monitor is
+  attached to to an unnamed request while `operator_presence` read present (the default), and with the key set to `away` or `auto` it opened
+  the card only above the display layer's `display_floor_gib`. The presence reading is gone from the allocator; the card is bounded by a share
+  of its VRAM instead.
+- **The key.** `gpu_display_cap_pct`: whole percent, default 60 when unset, `0` closes the card to the allocator (the "I need it" switch, and
+  not the same value as unset), `100` is the whole card, a value outside `0..100` refuses the load naming the key (and reads as closed, never as
+  the whole card, where a caller goes on with the refused value anyway: `Load` hands back the Config beside its error and `gpu reserve` proceeds
+  on it). The display card is
+  allocatable while the VRAM in use now (the desktop's included) plus the request's declared footprint is at most that share of its total.
+  That is the display layer's `display_floor` arithmetic (`free - footprint >= floor`) with the floor set to the rest of the card; a
+  `display_floor_gib` the layers also declare still holds when it is the larger of the two. On the reference three-card box (display card with
+  2.6 GiB in use of 15.9) a 6 GiB request can land there and a 7.5 GiB one cannot, and the skip says `gpu_display_cap_pct 60 % of 15.9 GiB`.
+  `AllocInput.DisplayCapPct` replaces `AllowDisplay`, and `gpualloc.Deps.Presence` goes with its only reader.
+- **The switch is live.** A process never reloads its config, so the value read at start would leave the switch dead for a `gpu reserve --wait 8h`
+  already in line, a detached holder, and the long-lived MCP server that places media calls. `Config.LiveGPUDisplayCap` re-reads
+  `gpu_display_cap_pct` from the file the Config was read from (`Load` records it, `Config.WithSource`) each time `gpualloc.BuildInput` builds
+  the allocator's input, so the pick and the grant-time check both see a `0` written after they started. A file that cannot be read at that
+  moment (an editor part-way through a save) keeps the last value read from it, never the load-time one; a key removed reads as the default 60;
+  a Config with no source file answers with its own value. `GPUDisplayCap` stays the value at load.
+- **What stays closed.** A request that declares no footprint (`--vram`) is not given the display card under a cap below 100 (at 100 with no
+  `display_floor_gib` declared the whole card is open and nothing is held to a footprint, so a request that declares none, every media call, is
+  given it with no VRAM check on that card, as on any other; `TestACapOf100WithNoDeclaredFloorTakesAJobThatDeclaresNoFootprint` pins the
+  exception and the three places it stops); a reading
+  that could not say which card the monitor is on keeps every card closed whatever the cap (before, an operator-away setting overrode that,
+  so a degraded reading now refuses the cards of a multi-card box as it always did at the desk); `--devices` still names any card on the
+  operator's word. The llama-swap twin guards (`display_floor`, `presence` in `internal/placement/guards.go`) are untouched.
+- **The grant asks again.** A request queued on the display card is put to the same rule when its turn comes (`DesktopRefusals` through
+  `GrantCheck`): a card that grew past the cap while the request waited, or that the operator closed meanwhile, is given back and the request
+  chooses again with its place in line kept.
+- **The media door.** It forces nothing on a live card table. On a table it could not refresh (F24) it still keeps the screen's card closed
+  (`AllocInput.DisplayStale`; the cap stays what the config says and the skip says the card table could not be re-read, not that the key is 0),
+  because the cap is judged on the VRAM in use now and a stale table misstates that; the new `mediaAllocInput` is pinned both ways. A media call declares
+  no VRAM footprint, so under a cap below 100 the typed media tools still do not take the display card: that waits for a measured VRAM footprint
+  to be fed to the allocator (register P13, item 2).
+- **The refusal reads right.** The display card refused over its cap is skipped as `vram`, as the opened card's floor always was, so a media
+  call's `gpu busy` answer would have read `card 1 vram`. `gpulease.Skip` gains `Display` (the card table's rule) and
+  `gpualloc.SkipSummary` says `card 1 vram (display card)` beside any reason but `display`
+  (`TestSkipSummaryNamesTheDisplayCardBesideAReasonThatDoesNot`); the full sentence, with the cap, stays in the skip's detail.
+- **What you will see.** A display card with no resident seat sorts first (nothing to evict), so with the pair seat loaded `gpu reserve --cards 1
+  --vram 6` now prefers the screen's card to an eviction; `gpu_display_cap_pct: 0` restores the old order. The cap bounds admission only:
+  nothing limits a job after it is placed, so the footprint has to be a measured peak, and one number per request cannot describe a donor slice
+  beside a compute share.
+- **Tests, written first.** Red before (the field was inert, so the allocator still read the old rule): `TestAllocatorOpensTheDisplayCardWithinTheCapWithoutPresence`
+  (got `[gpu-aaaa0000]`, the display card skipped as `display`), `TestAllocatorRefusesTheDisplayCardPastTheCapAndNamesIt` (footprints 6, 6.9 and 6.94
+  not taken, and every refusal skipped as `display` instead of `vram` naming the cap), `TestAllocatorUndeclaredFootprintStaysRefusedOnTheDisplayCard`,
+  `TestAllocatorCapZeroKeepsTheDisplayCardClosed` (the skip did not name the key), `TestAllocatorDisplayCardWithoutATotalStaysClosedUnderTheCap`,
+  `TestADeclaredFloorHoldsAboveTheCapWhenItIsStricter`, `TestAMultiCardRequestTakesTheDisplayCardOnlyWhereItClearsTheCap` (2 allocatable of 3 wanted),
+  `TestAHeldDisplayCardThatCouldNotClearTheCapIsNotQueuedOn` (footprint 6 not waitable), `TestDesktopRefusalsAppliesTheCapAtGrantTime` (refused within
+  the cap), and `TestGPUDisplayCapPctDefaultsTo60AndRejectsOutOfRange` (`got 0`, want 60). Three guards hold before and after
+  (`TestAllocatorDisplayUnknownStaysClosedUnderTheCap`, `TestTheCapTouchesOnlyTheDisplayCard`, `TestACapWithNoDisplayCardInTheReadingChangesNothing`).
+  The `gpualloc`, `pipeline` and root tests could not fail on the old tree except by not compiling (the field and the dependency they use
+  did not exist); each is pinned by the mutants below instead.
+- **Tests that encoded the superseded rule** (the display card is open only while the operator is away): the plan counted two, there are
+  more, and each is named in the commit. Rewritten on the cap: `TestTheFloorDoesNotOpenTheDisplayCardAtTheDesk`, `TestAllocatorDisplayCardIsAllocatableOnlyWhenTheCallerSaysSo`,
+  `TestDesktopRefusalsNamesTheDisplayCardOnceTheOperatorIsBack`, `TestBuildInputOperatorAwayAllowsTheDisplayCard`, `TestPickAutoNeverTakesTheAttachedCardAtTheDesk`,
+  `TestTheDisplayCardIsAllocatableOnlyWhenTheOperatorIsAway`, `TestAQueuedMediaCallIsNotGrantedTheDisplayCardOnceTheOperatorIsBack` and the six
+  `gpu_reserve_grantcheck_test.go` tests; removed because an unknown display is now always closed: `TestAllocatorAllowsAnUnknownDisplayCardWhenTheOperatorIsAway`,
+  `TestAnUnknownDisplayCardIsHeldToTheDesktopFloor`, `TestAnUnknownDisplayReadingRefusesTheCardThatWouldLeaveTheDesktopTooLittle`.
+- **Mutation-checked** with `scripts/mutation-check.sh` (each mutant compiles, runs through the RAM guard, and is restored byte for byte): seventeen
+  changes, each RED on the test it names. In the allocator: the cap term dropped from the floor, the used/free sign flipped, the footprint
+  requirement dropped, a cap of 0 treated as open, an unknown display let through, the declared floor ignored, the grant-time check ignoring the
+  cap, an unknown total let through, and the float tolerance removed (it survived the first table, which landed on the cap in a way floating
+  point happens to round up; `TestAJobThatLandsExactlyOnTheCapIsAdmittedDespiteFloatError` uses 3.9 + 2.1 of 10, where 6.1 - 2.1 is
+  3.9999999999999996, and kills it). In `BuildInput`: the cap not carried, the declared floor not carried. In the config key: the default
+  closed, the range check dropped. At the media door: the stale-table closure removed, the card forced shut on a live table. In the summary: the display-card cue dropped,
+  the skip not carrying `Display`. The root test
+  (`gpu_reserve_displaycap_test.go`, and the rewritten grant-check tests) runs only on the remote gate and was not mutated.
+- **Review fix round** (five findings, each fixed or refuted in its commit). Red before: a refused `600` read as a cap of 100
+  (`TestARefusedGPUDisplayCapReadsAsClosedForACallerThatProceedsOnTheValue`, got 100, want 0, and its row in
+  `TestBuildInputOpensTheDisplayCardAtTheCapWhateverThePresence`); the stale-table skip said `gpu_display_cap_pct is 0` to an operator whose config
+  says 60 (`TestAPlacementFromAStaleTableKeepsTheDisplayCardClosed`; the allocator pin is `TestAStaleTableClosesTheDisplayCardAndTheSkipNamesTheTable`);
+  the switch written after start was not seen (`TestTheDisplayCapSwitchFollowsTheFileTheConfigWasReadFrom`, `TestBuildInputFollowsTheDisplayCapSwitchInTheConfigFile`,
+  `TestTheMediaDoorSeesTheOperatorsSwitchWrittenAfterTheServerStarted`; the six grant-check tests in `gpu_reserve_grantcheck_test.go` now build their input through
+  `gpualloc.BuildInput` from a config file, and the three that close the card write `0` to that file, instead of flipping an in-memory counter no
+  production path can touch). Ten more mutants, each RED: the refused value clamped back to 100; the stale flag unset, its skip
+  detail the cap's, and the flag ignored by `displayOpen`; the cap-100 exception removed from `floorApplies`; `BuildInput` reading the snapshot
+  (red on the `gpualloc` and the `pipeline` test); `LiveGPUDisplayCap` ignoring the source, not remembering the last value read, and `Load` not
+  recording the file. Four comments that still described the presence rule now describe the cap.
+- Docs: ADR 0039 (Amendment 2026-10-12), `docs/systems/media-generation.md` ("The allocator and the display card"), the `--cards` help text.
+
+### Added — one lint over every test file keeps tests out of the OS temp dir, and a tripwire script shows what a run leaves behind (GPU-I8, GPU-I8c)
+
+- **The gap.** F77 and F77b stopped test packages from leaving folders in the OS temp dir (C: on Windows), and each fix came with a lint
+  that read ONE package, so the next package to do the same was covered by nothing. No check saw a temp file that production code makes
+  for a test (F79's inline graph JSON), or the folder a started copy of a test binary leaves because it exits before its cleanup.
+- **The lint.** `tempdir_lint_test.go` (root package) reads every `*_test.go` file of the module with `go/parser` (not a regular
+  expression on text; `testdata`, `node_modules` and any directory with a `go.mod` of its own are left out, which is how the `tools/` modules go: a directory merely called `tools` or `bin` is scanned like any other) and fails on a
+  direct use of the OS temp dir that `tempdir_lint_allowlist_test.go` does not list with its count and the reason its folder is gone on
+  every path: `os.MkdirTemp` / `os.CreateTemp` / `ioutil.TempDir` / `ioutil.TempFile` with an empty directory, any `os.TempDir`, `TMP`,
+  `TEMP` or `TMPDIR` read from the environment, and `os.MkdirTemp` / `os.CreateTemp` passed as a value (the `runIsolated(m, os.MkdirTemp, ...)`
+  shape, where the empty argument is supplied somewhere the lint cannot read). `t.TempDir()` and a named directory are clean. A new use
+  fails naming file and form; a use that went away fails until the count comes down. The second rule is for copies: a package whose
+  tests start their own test binary (`os.Args[0]`, `os.Executable`) holds `TestARelaunchedTestBinaryLeavesNothingInTheTempDir` (checked on
+  its body: it starts the binary, points TMP, TEMP and TMPDIR, and reads the folder back), or is listed in `relaunchExempt` with the
+  reason a started copy leaves nothing, or in `relaunchNeverStarted` when the tests only read the path (the lint checks that no
+  `exec.Command`, `exec.CommandContext` or `os.StartProcess` takes it). An exemption is void when the package's `TestMain`, `init`
+  functions or package-level variables themselves use the OS temp dir, because every started copy runs them.
+- **The lists, generated at the 0.182.0 tip** with `TEMPDIR_LINT_PRINT=1`: 9 uses in 9 files (4 direct calls and 5 `os.MkdirTemp` handed to
+  `runIsolated`; `git grep` of the same forms finds the same 9), 5 packages that hold the proof (root, `fleetnode`, `mediaremote`,
+  `pairworkloads`, `pipeline`), 10 exempt packages and 2 that only read the path. The two F77 per-package lints (`TestTestsReachForTheOSTempDirOnlyWhereItsRemovalIsOnEveryPath`
+  in `internal/fleetnode` and `internal/pipeline`) are deleted; the relaunch test each file also held moved, unchanged apart from a
+  `nosemgrep` note, to `relaunch_leak_test.go` like the three sibling packages. `internal/exemplars` is the one entry that could be
+  `t.TempDir()` (its helper removes the folder with `t.Cleanup`, so it is listed with that reason).
+- **The tripwire.** `scripts/test-temp-tripwire.sh` (PowerShell twin `scripts/test-temp-tripwire.ps1`) sets `TMP`, `TEMP`, `TMPDIR` and
+  `GOTMPDIR` to a fresh empty folder, runs `go test -count=1` over `--pkgs` (default `./...`), and ends with one `TRIPWIRE-VERDICT`
+  line: `CLEAN` (0), `LEAK` (1, what is left by name prefix with a count, such as `lo-x-state-*`), `PROCESSES` (2, an image running
+  from the folder, with its pid; wins over `LEAK`), `TESTS-FAILED` (3) or `REFUSED` (4). `--dir` is required and a folder on the system drive is
+  refused unless `--allow-system-drive` is given. A `LEAK` or `PROCESSES` run keeps the folder as evidence and never removes one a process runs
+  from; a `CLEAN` run removes its empty folder. This is the check for what a static lint cannot see: production code's temp files and
+  started copies of the test binary.
+- **Tests, red first.** The scanner was a stub when `TestTempLintSeesEveryFormOfRawTempUse` and `TestTempLintSeesAProofOnlyWhenItReallyRelaunches`
+  were first run: every form case failed (`forms = map[], want map[os.MkdirTemp(empty):1]`). With the real scanner and empty lists,
+  `TestTestsReachForTheOSTempDirOnlyWhereItsRemovalIsOnEveryPath` named the 9 files and `TestEveryRelaunchingPackageProvesItLeavesNothing`
+  the 12 packages. Synthetic trees prove that a leak in any package is named by file and form and that `testdata`, `node_modules`
+  and nested modules (the `tools/` ones among them) are skipped while a directory that is only called `tools` or `bin` is not. The tripwire has self-tests (`scripts/test-temp-tripwire-selftest.sh` and `.ps1`, on the fixture module
+  `scripts/testdata/tripwirefixture`: a clean package, a leaker, a spawner that leaves a process running from the folder, a failing
+  package) that assert verdict, exit code and the disk afterwards, and that the two twins agree on verdict, exit code and leak lines.
+- **Mutation-checked** with `scripts/mutation-check.sh`, each mutant RED: the lint, 16 (a dropped form, the value-pass rule, the allowlist
+  lookup, the fewer-than-listed check, the hook check, relaunch detection, each of the three variables the proof must point, the read-back,
+  the start check, nested-module and `testdata` skipping); the tripwire, 12 on the PowerShell twin and 16 on the shell twin (the refusal, each
+  verdict, the evidence kept, `--remove`, the prefix rules, the ignore list; five of the shell ones are Linux-only rules, run on a Linux host
+  where the self-test also found a real `PROCESSES` verdict). One PowerShell mutant first SURVIVED (a removal while a process ran is invisible on
+  Windows, which will not delete a running image); the fixture now leaves a note file beside the image and the self-tests require it to survive.
+- **What the first dry run of the whole suite found, and fixed** (test code only). The tripwire's run of `./...` on the 0.182.0 tree, with the temp
+  dir on a data disk, left three kinds of entry. (1) 18 `tmp.XXXXXXXXXX` files of go test output: the sandbox that runs `ci.yml`'s step
+  scripts passed the host's temp dir through and the Windows cage step starts with `log=$(mktemp)`; a step now gets `TMPDIR`, `TMP` and
+  `TEMP` inside the sandbox (`TestCIScriptSandboxKeepsAStepsTempFilesInsideItself`, red first and mutation-checked). (2) One `TestRunImageBatchWaitingEndsOnInterruptAndLeavesNoLease*`
+  tree: the test abandons a wait on purpose, and the wait gave the card back after the test's temp dir was gone, recreating `gpu/lease/...` under
+  it (39 of 40 runs, and the same folder on the pre-0.182 base on Windows); the test now waits for the abandoned wait to leave the line,
+  and with that wait removed 6 of 10 runs leave the tree again (mutation-checked with the tripwire as the test). (3) One `seat_fg.stale-mp.tests.lock.d`:
+  the seat launcher shell test keeps a `flock` target in the temp dir so that two runs on one machine take turns on the scratch ports they
+  share. It was first named in `scripts/test-temp-tripwire.ignore` (one `NAME-PREFIX`, a tab and a reason per line, which the tripwire
+  prints and does not count, so an ignore is never silent); the review round below moves the lock out of `TMPDIR` and the list is empty.
+- **Found on the way.** `TestEveryTrackedGoModuleIsScannedOrNamedAsExcluded` fails on the 0.182.0 candidate (shown by a remote run at the lint's first commit):
+  `scripts/testdata/mutfixture` holds a tracked `go.mod` that the govulncheck job does not scan and `govulncheckExcluded` did not name. Both fixture
+  modules (that one and the tripwire's) are named now, with the reason they ship nothing (the 0.182.0 release had already named
+  `mutfixture`; the tripwire's fixture is the new one).
+- **Measured** with the PowerShell twin on Windows, `go test -p 1` over the root package, `fleetnode`, `pipeline`, `pairworkloads`, `mediaremote`, `mcpserver`
+  and `delegate`, the temp dir on an empty folder of a data drive. Before the leak fixes (0.181.0): 79 entries in 8 prefixes — `run-graph-*.json` 28 and
+  `run-graph-manifest-*.json` 1 (F79), `lo-root-state-*` 20, `fleetnode-compose-cache-*` 13 and `lo-pipeline-lease-*` 13 (F77), `lo-pairworkloads-state-*` 2 and
+  `lo-mediaremote-state-*` 1 (F77b), and the interrupted-batch tree 1. After this branch, the same packages on the same machine: nothing left, verdict `CLEAN` (1,571 s). A first run of the set ended `TESTS-FAILED` with the
+  folder empty because `internal/mcpserver` failed once (54 s in); it passed in the four runs that followed (alone through the gate, twice through
+  the tripwire, and in the repeat of the whole set), and which test failed was not captured, so it is open, not a temp leak. On Linux, `go test -p 1 ./...`
+  over the whole module, niced, with the temp dir on a separate data disk: at the first dry run every package passed (1,844 s) and the verdict was
+  `CLEAN` with one ignored entry printed with its reason; after the review round, at the branch's last code commit (`-p 1 -timeout 45m ./...`),
+  every package passed (1,921 s) and the verdict is `CLEAN` with nothing ignored. On Windows a run with the same flags over `internal/pipeline` and
+  `internal/vllmseat` ended `CLEAN` (720 s); a run without `-timeout 45m` had ended `LEAK` when `internal/pipeline` hit go test's
+  ten-minute default and was killed mid-test, and its failure digest named the timeout and the test that was running. The Windows PowerShell 5.1 self-test (98 checks at the branch tip) and a tripwire run over twelve packages that start
+  copies of their test binary or keep a state root both ended clean on a second Windows machine.
+
+### Fixed — the temp-dir tripwire keeps the failure it saw, stops what it started when it is interrupted and says when it could not look; the lint stops skipping a directory by its name (GPU-I8, GPU-I8c, review round)
+
+A review of the lint and the tripwire above made 11 findings (10 distinct claims). Each was read against the code: six were defects in the scripts, the lint and a
+shell test, three were documentation, and one holds only once another branch is merged. Every fix below was seen red first on the unfixed script or test.
+
+- **A failure far from the end of the output was lost.** The shell tripwire showed the last 20 lines of `go test` and deleted the
+  capture, and `go test -p 1 ./...` prints one `ok` line per package after the failing one, so the failing test of a whole-module run
+  was in neither (the first dry run above ended `TESTS-FAILED` and which test failed was not recorded). When the output is longer than
+  the tail, both twins now print the `--- FAIL`, `panic:` and `FAIL pkg` lines, each with the indented lines under it (at most 40),
+  ahead of the tail. Red: `--tail 1` over a failing package followed by a passing one showed `FAIL` and nothing else.
+- **An interrupt stopped go and left the test binaries.** The shell tripwire signalled one pid; on Linux a `TERM` to the script left
+  `hang.test` running from the kept folder and the capture file beside it, and no process check ran. It now runs `go test` under job
+  control and stops the process group (`INT`, then `TERM`, then `KILL`, 10 s, 5 s and 5 s at most), names what still runs from the folder,
+  keeps the folder, removes its capture and exits 130; a fixture test that ignores `INT` and `TERM` needs the `KILL` step. The
+  PowerShell twin sat in one `WaitForExit()` that a stopped pipeline cannot interrupt: stopping it took the whole 40 s of the fixture
+  test (39 s measured). It waits in half-second slices now, ends the process tree with `taskkill /T /F` and removes its captures.
+- **Checks that failed open now say so.** A failed process query read as "no process" (PowerShell), a `stat` that fails or a missing
+  `SystemDrive` read as "not the system drive", and a temp folder that something removed during the run read as an empty, `CLEAN`
+  listing. The verdict line now carries `process check skipped`, the run is `REFUSED` when the host cannot place the folder, and a
+  vanished folder exits 70 without a verdict. A folder that holds entries is not removed, not even with `--remove`, when the process
+  check could not run, because a process might still run from it.
+- **The lint skipped any directory named `tools` or `bin`, at any depth.** A main-module package such as `internal/tools` would have
+  gone unlinted with the lint green. The real `tools/` modules each hold a `go.mod`, which the go.mod rule already skips, and no
+  main-module test file lives under a directory of either name; only a `go.mod`, `testdata`, `node_modules` and `.git` leave a directory
+  out now. Red: the synthetic tree's `a/tools`, `a/bin` and `bin` leaks were not found.
+- **The seat launcher shell test's lock was one lock per `TMPDIR`.** `seat_fg.stale-mp.tests.sh` took its "one run at a time per box"
+  lock under `${TMPDIR:-/tmp}`, so runs with a temp dir of their own (a gate run beside another agent's, a run under the tripwire) took
+  different locks and could share the scratch ports. The folder is `/tmp/seat_fg.stale-mp.tests.lock.d` now (`SEAT_FG_TEST_LOCK_ROOT`
+  moves it), a Linux test holds the lock at both paths and requires the SKIP line to name the one that is not `TMPDIR`, and the
+  tripwire's ignore entry for it, whose reason had been false under the tripwire, is gone: `scripts/test-temp-tripwire.ignore` is empty,
+  and the dry run above now ends `CLEAN` with nothing ignored. One empty `1777` folder stays in `/tmp` on a box that runs the test, as it
+  did before for a run without `TMPDIR`.
+- **Documentation.** The tripwire's platform notes sent an operator to the Go lint's allowlist for a leaver the tripwire reports; they
+  name `scripts/test-temp-tripwire.ignore`. The headers, `CONTRIBUTING.md` and the entry above now say what the tripwire cannot see: only a
+  child that inherits `TMP`, `TEMP` and `TMPDIR` writes into the watched folder, so a child with a scrubbed environment (the browse
+  sidecar's) or a test that names a fixed directory (`/dev/shm`) writes elsewhere and a `CLEAN` says nothing about it. The count above
+  read "12 exempt packages"; it is 10 exempt and 2 that only read the path (12 without a proof).
+- **Holds only after a merge.** Two packages that other changes add start their own test binary: `internal/proctree`
+  (`feat/0183-lease-guards`) and `internal/winexec` (the no-visible-windows change). Merged with this branch,
+  `TestEveryRelaunchingPackageProvesItLeavesNothing` fails until `relaunchExempt` names each; this branch cannot name them first, because
+  the lint also fails an exemption for a package that does not exist. The merged trees with those entries added pass the lint.
+- **The relaunch rule did not see a start through `winexec`.** The no-visible-windows change starts the test's own binary with
+  `winexec.Command`, the `exec.Command` whose child opens no window on Windows, and the rule only knew `os/exec`: merged with that
+  change the proof tests of `fleetnode`, `mediaremote`, `pairworkloads` and `pipeline` read as stubs and the lint failed for all four.
+  `winexec.Command`, `CommandContext`, `CommandDetached` and `CommandIfNoConsole` count as starts now (matched by the tail of the import
+  path, so the lint names no module). Red: five synthetic cases, each a real proof started through one of them.
+- **Tests.** The shell self-test runs 87 checks on Linux (one skipped: the PowerShell twin is not on that host) and the PowerShell
+  self-test 98, under PowerShell 7 and under Windows PowerShell 5.1; they take `TRIPWIRE_SELFTEST_FAILFAST=1` and (PowerShell)
+  `TRIPWIRE_SELFTEST_ONLY=tag,...` so that a mutation check runs seconds, not the suite. The interrupt cases stop `./hanger`, a test that
+  ignores `INT` and `TERM` and starts an unwaited copy of itself: go test ends its own test binary when it is interrupted, so only a
+  stop that reaches the whole process group and ends with a kill leaves nothing running. Mutation-checked with
+  `scripts/mutation-check.sh` and `.ps1`, each mutant RED: 14 on the shell twin (a digest never shown, a continuation line dropped, a
+  failing `stat` read as "not the system drive", an undecided guard not refusing, a signal to the leader only, no `KILL` step, a wrong
+  exit code, `TERM` not trapped, no job control, the removal gate ignoring a skipped check, the skip note dropped, a vanished folder
+  ignored, the capture kept, an empty folder kept), 13 on the PowerShell twin (the same rules, plus a wait that is not sliced, a
+  single-process kill and no stop in `finally`), 5 on the lint (a dropped `winexec` branch, `winexec.CommandContext` known to
+  `os/exec` only, a `winexec` match loosened to any import path ending in the word, `tools` skipped again, `bin` skipped again) and 1 on
+  the lock (keyed to `TMPDIR` again). The leader-only signal first SURVIVED twice, and that was a gap in the tests, not a rule that did
+  not matter: the interrupt cases counted any process under the scratch folder instead of waiting for the fixture's two, and with one test
+  binary go test's own handling of an interrupt hid the difference; both are fixed above.
+
+### Fixed — the media-job door answers 413 at once for a body that declares itself over the cap, instead of holding the node's only upload slot while it drains (CT-53)
+
+- **The defect.** `POST /fleet/media-job` took the node's one in-flight slot first and, for a `Content-Length` over
+  `fleet_media_inputs_max_mb` (in base64, plus 64 KiB), then read the body up to the cap before it answered `413`. A fleet-token
+  holder that declared 8 GiB and sent 20 bytes got no answer for the whole 15-minute window, and held the slot meanwhile, so the
+  next upload queued behind it and was answered `503` after the slot wait (seen live on a media-job door, 2026-10-08).
+- **The fix.** The size check sits right after the door (`403`) and bearer (`401`) checks, before the slot: a declared length over
+  the cap is answered `413 request body too large` with `Connection: close` and the body is never read. The check is strictly
+  over the cap (a body of exactly the cap is still read), the wording is unchanged, and a body with no declared length (chunked)
+  still meets the reader's cap as before (`413` once it passes it). `readMediaJobBody` no longer drains a declared-oversize body either
+  (it returned no error and no bytes when such a body ended early); it returns the typed error the handler maps to `413`.
+- **What it does not cover (stated, not fixed).** Only a body that DECLARES itself over the cap is answered at once. A body that
+  declares an in-cap length (or none, chunked) and then stalls still holds the slot until its bytes arrive or the 15-minute window
+  ends: that is the door's existing design, and an idle-body deadline would be new behaviour with its own risk to slow links, so it is
+  left as a follow-up. More bytes than were declared are not answered `413` either: net/http hands the handler exactly the declared
+  number of bytes and reads the excess as the client's next request, so the declared bytes are judged as the body (a `400` unless
+  they are a media-job body). The CT-50 entry below and the `readMediaJobBody` comment said otherwise; the comment is corrected, the
+  over-read probe stays for a caller that builds the request itself, and `media_job_framing_test.go` pins what happens on the wire.
+- **The stt upload door had the same defect and gets the same fix.** `POST /fleet/stt` took one of its two upload slots before it
+  read the body, so a token holder that declared an oversize `Content-Length` and sent 20 bytes held a slot for the 10-minute window,
+  and two of them shut every upload out. A declared length over `fleet_stt_upload_max_mb` (in base64, plus slack) is now refused at
+  once, after the bearer check and before a slot, the body unread, `Connection: close`. The door's answer for a body over its cap is
+  `400` (it always was, and its client reads every refusal alike), so the status and the wording are unchanged and only the time
+  they are given in is. Tests (`stt_upload_declared_oversize_test.go`, the media-job door's rules on this door): a raw TCP client
+  declaring 8 GiB and sending 20 bytes gets the `400` inside 2 s, also while both slots are held and without taking either; a
+  client that streams the body is not read (under 64 KiB); the connection is closed; a request without the bearer is still `401`
+  and a body of exactly the cap is still read. Before the fix the first client got no answer in 2 s and 64 MiB of the second
+  client's body had been read.
+- **Tests** (`media_job_declared_oversize_test.go`): a raw TCP client declaring 8 GiB and sending 20 bytes gets `HTTP/1.1 413`
+  inside 2 s, also while another upload holds the slot; a client that streams the body is not read (the server has read under
+  64 KiB; before the fix it had read 128 MiB of a refused body); the connection is closed after the answer; a body of exactly the
+  cap is read and one byte over is `413`; the body of a declared-oversize request is never read at the handler, and `403` and
+  `401` still come before `413`. Documented in `docs/systems/fleet-node.md` (the media-job and stt upload doors).
+
+### Fixed — the seat-rate store's lock waits out a Windows delete that is still pending instead of losing the run's sample (D-120)
+
+- **The defect.** `seatrate.Update` takes an exclusive lock file beside the store. On Windows, removing a file whose handle is
+  still open only marks it delete-pending, and an exclusive create in that window fails with `ACCESS_DENIED`, not "already
+  exists". `Update` returned that raw, so the run that finished while another run's lock was being deleted lost its rate and
+  cold-load sample (the caller logs `seat-rates store not updated` and goes on), and `TestUpdateSerialisesConcurrentWriters`
+  failed one gate run in five (2026-09-17). Measured on a Windows PC under 4 concurrent copies of the old test: 1 of 60 runs
+  failed with `open ...seat-rates.json.lock: Access is denied.`
+- **The fix.** The denial waits like a held lock, inside the existing 2 s lock window (the rule `gpulease`'s claim and epoch lock
+  already follow). At the deadline a held lock is still plain `ErrLocked`; a denial that never clears (a directory this process
+  cannot write) returns an error that wraps both `ErrLocked` and the open error, so the cause is named after at most 2 s. Any
+  other failure to open the lock is returned at once, as before.
+- **A stale lock that cannot be removed ends at the deadline.** The takeover of a lock older than 30 s retried at once whether or
+  not the removal worked, so a stale lock another process held open spun the caller with no deadline. It now retries at once only
+  after a removal that worked (or found the file gone) and otherwise waits out the window.
+- **The rename that publishes the save had the same race (review follow-up).** The store is read without the lock (`seatrate.Load`
+  from the delegate, the fleet node and the pipeline), Go opens files on Windows without delete sharing, and a rename over a file a
+  reader has open fails with `Access is denied`; `Update` handed that error to its caller, which drops the sample exactly as the
+  lock-create denial did. Measured on a Windows PC with the retry removed: an `Update` while a reader held the store open failed at
+  once with `rename ...: Access is denied.`. The rename now asks again for up to 2 s, inside `Update`'s lock, when it is refused
+  with a permission error or (Windows) a sharing or lock violation, the two codes Go does not map to a permission error; any other
+  rename error, and a denial that outlasts the window, is returned as the rename error itself (not as `ErrLocked`), with the
+  temp file removed and the previous store untouched. 60 runs (4 workers x 15) of the `Update` tests passed on a Windows PC.
+- **A lock that cannot be released is logged.** `defer os.Remove(lock)` discarded its error, so a lock a scanner held open stayed
+  for 30 s and every writer in that time skipped its sample with only `store locked by another writer` to show for it. The failed
+  removal is now logged once, naming the lock and the cause; `Update`'s result is unchanged, since its save may have landed.
+- **The `ErrLocked` comment and the test helper.** The comment now says what the code returns (a lock not taken within the window,
+  held or refused, the refusal wrapped beside it). The helper that asks again after `ErrLocked` retried a refusal that never clears
+  (an unwritable directory) for its five minutes; it now reports a refusal after three lock windows in a row and still waits out
+  contention (one window that ends in a denial among contention windows is not a verdict).
+- **Tests** (`update_lock_test.go`, the open and the stale removal through package variables so the denial can be injected): a
+  denial three times then success stores the sample once with no lock left; a persistent denial returns within the window with
+  both causes and nothing left behind; a live lock is still `ErrLocked` and is left in place; any other open error is returned at
+  once; an unremovable stale lock ends at the deadline with a bounded number of attempts. The concurrent-writers test asks again
+  after the designed `ErrLocked`, so it measures serialisation and not how long twelve writers take on a loaded host. The rename
+  and the release have their own (`save_rename_test.go`, `save_rename_windows_test.go`, `update_helper_test.go`): a rename denied
+  three times then granted stores the sample once with nothing left behind; the corrupt-store replacement is retried too; a
+  persistent denial ends after the window, names the rename and is not `ErrLocked`; any other rename error is returned at once; a
+  reader holding the real store open for 300 ms no longer loses the sample; sharing and lock violations are retried; a failed
+  release is logged once and a clean one says nothing; the helper reports a refusal after three windows and keeps waiting out
+  contention.
+
 ## [0.182.1] - 2026-10-12 - the card-only qwen-image-2.1 bf16 image recipe is held back, and a node that passes a job back is paused with its own reason
 
 ### Fixed — the card-only qwen-image-2.1 bf16 image recipe is held back: ComfyUI builds its 16.33 GiB text encoder whole on the storage card, and no 16 GB pair can place it

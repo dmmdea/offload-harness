@@ -44,16 +44,9 @@ func TestAllocatorDoesNotAutoAssignACardWhenTheDisplayIsUnknown(t *testing.T) {
 	}
 }
 
-// The operator being away is the one override the display rule has, and it covers this case too.
-func TestAllocatorAllowsAnUnknownDisplayCardWhenTheOperatorIsAway(t *testing.T) {
-	in := baseInput()
-	in.Cards = unknownDisplayCards()
-	in.AllowDisplay = true
-	got, err := Allocate(in)
-	if err != nil || len(got.Devices) != 1 {
-		t.Fatalf("with the operator away an unknown display is not a reason to refuse: %+v %v", got, err)
-	}
-}
+// No setting of the cap opens such a card (TestAllocatorDisplayUnknownStaysClosedUnderTheCap): before the
+// cap the operator being away overrode the display rule here, and that override went with the presence
+// reading, so a degraded reading closes the cards as it did at the desk.
 
 // A good reading marks nothing, so the allocator is exactly what it was.
 func TestAllocatorIgnoresTheMarkOnAKnownReading(t *testing.T) {

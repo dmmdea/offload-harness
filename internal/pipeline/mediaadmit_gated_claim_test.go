@@ -7,7 +7,7 @@ package pipeline
 //
 // A test lands a waiter in that window through the seam the call under test has. A call that names
 // no card is allocated (gpualloc.BuildInput) and the allocator's last read of live state is
-// alloc.Presence (afterTheAllocation). A call that NAMES its cards (a pin, a pool, a declared
+// alloc.HostMemory (afterTheAllocation). A call that NAMES its cards (a pin, a pool, a declared
 // device) has nothing to choose and reads no card table (F24): it reads only what is claimed
 // (gpualloc.Claims), the allocator's input never runs for it, and the pipeline's afterClaimsRead
 // seam sits right after that read (afterTheClaimsRead). The tests that pin a card drive the second,
@@ -27,6 +27,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
 // afterTheAllocation runs fn once, from inside the allocator's last read of live state, for a call
@@ -39,10 +40,10 @@ func (f *admitFixture) afterTheAllocation(fn func()) (reads *atomic.Int64) {
 	f.t.Helper()
 	reads = &atomic.Int64{}
 	var once sync.Once
-	f.p.alloc.Presence = func(config.Config) (bool, bool) {
+	f.p.alloc.HostMemory = func() (gpuprobe.HostMemory, bool) {
 		reads.Add(1)
 		once.Do(fn)
-		return true, f.away
+		return roomyHostMem, true
 	}
 	return reads
 }

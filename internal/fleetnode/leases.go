@@ -60,7 +60,7 @@ type LeaseEntry struct {
 	// LeaseStanding is embedded so orphaned and stalled sit flat on the entry.
 	LeaseStanding
 	// Verdict is one word for what the lease is doing, in the precedence `gpu status` uses:
-	// held-stalled, held-orphaned, held-overdue, else held. "held" is the absence of news and
+	// tree-orphan, held-stalled, held-orphaned, held-overdue, else held. "held" is the absence of news and
 	// does not claim the holder is working.
 	Verdict string `json:"verdict"`
 }
@@ -96,7 +96,7 @@ func readLeases(info gpulease.Info, now time.Time, cfgSec int, standing func(gpu
 			Epoch: l.Epoch, Class: string(l.Class), Devices: leaseIDs(l.EffectiveDevices()),
 			Scope: string(l.ScopeKind()), RemainingSec: h.RemainingSec,
 			Busy: h.Busy, Overdue: h.Overdue || st.Overdue, Exclusive: l.Exclusive, Draining: l.Draining,
-			LeaseStanding: LeaseStanding{Orphaned: st.Orphaned, Stalled: st.Stalled},
+			LeaseStanding: LeaseStanding{Orphaned: st.Orphaned, Stalled: st.Stalled, TreeOrphan: st.TreeOrphan},
 		}
 		if !l.ExpiresAt.IsZero() && l.ExpiresAt.UnixMilli() > 0 {
 			e.Until = h.Until
@@ -106,6 +106,8 @@ func readLeases(info gpulease.Info, now time.Time, cfgSec int, standing func(gpu
 		}
 		e.Verdict = "held"
 		switch {
+		case e.TreeOrphan:
+			e.Verdict = "tree-orphan"
 		case e.Stalled:
 			e.Verdict = "held-stalled"
 		case e.Orphaned:
@@ -122,6 +124,7 @@ func readLeases(info gpulease.Info, now time.Time, cfgSec int, standing func(gpu
 	for _, e := range rd.entries {
 		rd.block.Orphaned = rd.block.Orphaned || e.Orphaned
 		rd.block.Stalled = rd.block.Stalled || e.Stalled
+		rd.block.TreeOrphan = rd.block.TreeOrphan || e.TreeOrphan
 	}
 	if len(rd.entries) < 2 {
 		return rd

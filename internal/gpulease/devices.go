@@ -227,18 +227,17 @@ type liveLease struct {
 
 // legacy reads meta.json: the record (nil when absent or unparseable) and whether it is
 // a live lease (not reclaimable by the shared rule).
-func (r reader) legacy() (*Meta, bool) {
+func (r reader) legacy() (*Meta, bool, treeReading) {
 	b, err := os.ReadFile(filepath.Join(r.dir, metaFileName))
 	if err != nil {
-		return nil, false
+		return nil, false, treeReading{}
 	}
 	var meta Meta
 	if json.Unmarshal(b, &meta) != nil {
-		return nil, false
+		return nil, false, treeReading{}
 	}
-	effective := meta
-	effective.RenewedAtMs = heartbeatAt(r.dir, &meta)
-	return &meta, !Reclaimable(&effective, r.now, r.hbTTL, r.procStart)
+	effective, tree := r.judge(&meta)
+	return &meta, !Reclaimable(&effective, r.now, r.hbTTL, r.procStart), tree
 }
 
 // v2Judged is one e/<epoch>.json with the reader's verdict.
@@ -250,6 +249,8 @@ type v2Judged struct {
 	// Debris: a grant older than the grace window, or an active lease that is
 	// reclaimable. A reader treats it as absent; only an acquirer removes it.
 	Debris bool
+	// Tree is what the reader found out about the tree of a lease whose wrapper is gone.
+	Tree treeReading
 }
 
 func (r reader) grantInFlight(m *Meta) bool {
@@ -280,10 +281,10 @@ func (r reader) v2() []v2Judged {
 			j.Live = r.grantInFlight(rec)
 			j.Debris = !j.Live
 		} else {
-			effective := *rec
-			effective.RenewedAtMs = heartbeatAt(r.dir, rec)
+			effective, tree := r.judge(rec)
 			j.Debris = Reclaimable(&effective, r.now, r.hbTTL, r.procStart)
 			j.Live = !j.Debris
+			j.Tree = tree
 		}
 		out = append(out, j)
 	}
@@ -295,9 +296,10 @@ func (r reader) v2() []v2Judged {
 // HoldsEpoch answers for any of them.
 func (r reader) live() []liveLease {
 	var out []liveLease
-	if meta, ok := r.legacy(); ok {
+	if meta, ok, tree := r.legacy(); ok {
 		info := infoFrom(meta, r.now)
 		info.HeartbeatAt = time.UnixMilli(heartbeatAt(r.dir, meta))
+		info.applyTree(tree)
 		out = append(out, liveLease{Meta: *meta, Info: info})
 	}
 	for _, j := range r.v2() {
@@ -307,6 +309,7 @@ func (r reader) live() []liveLease {
 		rec := j.Meta
 		info := infoFrom(&rec, r.now)
 		info.HeartbeatAt = time.UnixMilli(heartbeatAt(r.dir, &rec))
+		info.applyTree(j.Tree)
 		out = append(out, liveLease{Meta: rec, Info: info, V2: true})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Meta.Epoch < out[j].Meta.Epoch })
@@ -380,7 +383,7 @@ func (r reader) detail() (Info, *Meta, bool) {
 		info.Leases = perLease(ll)
 		return info, &meta, false
 	}
-	if meta, _ := r.legacy(); meta != nil {
+	if meta, _, _ := r.legacy(); meta != nil {
 		return Info{}, meta, true
 	}
 	for _, j := range r.v2() {
@@ -401,11 +404,10 @@ func (r reader) epochIsCurrent(epoch uint64) bool {
 		if rec.State == stateGranting {
 			return false
 		}
-		effective := *rec
-		effective.RenewedAtMs = heartbeatAt(r.dir, rec)
+		effective, _ := r.judge(rec)
 		return !Reclaimable(&effective, r.now, r.hbTTL, r.procStart) && claimsNameEpoch(r.dir, rec)
 	}
-	meta, live := r.legacy()
+	meta, live, _ := r.legacy()
 	return live && meta.Epoch == epoch
 }
 
@@ -560,10 +562,12 @@ func (m *Manager) grantDevicesLocked(class Class, opts Options, devs []string, h
 	r := m.reader()
 
 	// (3) a live whole-node record fences every device request.
-	meta, live := r.legacy()
+	meta, live, tree := r.legacy()
 	switch {
 	case meta != nil && live:
-		return nil, m.heldErr(infoFrom(meta, m.now())), nil
+		info := infoFrom(meta, m.now())
+		info.applyTree(tree)
+		return nil, m.heldErr(info), nil
 	case meta != nil: // a reclaimable whole-node claim: remove only that record
 		if err := removeClaim(m.metaPath()); err != nil {
 			return nil, nil, fmt.Errorf("gpulease: cannot reclaim the stale lease at %s: %w", m.metaPath(), err)
@@ -684,6 +688,7 @@ func (m *Manager) verifyNoDeviceLeases(epoch uint64) error {
 		for _, j := range m.reader().v2() {
 			if j.Live {
 				info := infoFrom(&j.Meta, m.now())
+				info.applyTree(j.Tree)
 				conflict = &info
 				break
 			}

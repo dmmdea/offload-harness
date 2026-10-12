@@ -23,10 +23,11 @@ func (e *ErrGrantRefused) Error() string {
 // and is NOT an ErrGrantRefused, because the cards are then still held and the caller must not go on
 // as if they were free.
 //
-// WHY THIS EXISTS: a request queued while the operator was away was decided against the presence
-// guard and the desktop floor at ENQUEUE. FIFO can take hours; the operator may have come back, or a
-// game may have taken the card's memory, by the time the front of the line is reached. Nothing
-// re-asked, so the queue handed the screen's card to a job the guard would now refuse.
+// WHY THIS EXISTS: a request queued on the display card was decided against the rule for that card at
+// ENQUEUE (the presence guard and the desktop floor until A-RAM-15, the card's cap and the VRAM in use
+// since). FIFO can take hours; the operator may have closed the card, or a game may have taken its
+// memory, by the time the front of the line is reached. Nothing re-asked, so the queue handed the
+// screen's card to a job the rule would now refuse.
 //
 // WHY AFTER THE GRANT AND NOT BEFORE IT: a check made before the claim has to know that the cards are
 // free, and a lease that is mid-release reads as held for an instant and is then claimable, so a

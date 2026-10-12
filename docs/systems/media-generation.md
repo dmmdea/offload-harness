@@ -774,8 +774,8 @@ with the read-only loader promotes a row: flip `basis` in `render/multicard-reci
 
 **What the typed door does.** A binding that asks for the placement takes its own need kind in the media admission (`needMulticard`):
 
-- *The pair is named, not allocated.* The plan is the box's two non-display cards, as a set. The display card is never in it, with the operator at the
-  desk or away (the allocator lets an away operator's screen card be auto-assigned to a ONE-card call; this is not that), and a card whose display state
+- *The pair is named, not allocated.* The plan is the box's two non-display cards, as a set. The display card is never in it, whatever the
+  display cap (the allocator may give the screen's card to a ONE-card call up to `gpu_display_cap_pct`; this is not that), and a card whose display state
   the driver did not report is not counted. A box without exactly two such cards (one, or three on a larger box) answers `gpu_lease_unavailable` with the
   count and the way out (`local-offload gpu reserve --devices <card>,<card> -- <command>`), and runs nothing.
 - *It queues like any lease.* A held card of the pair is a place in line whose token names both cards (`gpu_queued`, a capacity defer), never a run on
@@ -1444,13 +1444,12 @@ can resume, a busy defer for the rest) until the first is done
 
 **The allocator and the display card.** An unpinned single-card call takes the allocator's card
 (`gpu_lease`, "The allocator"): not claimed by a live lease, not promised to a caller waiting in line
-(below), not held by another job in this process, with the free VRAM and host RAM, and never the display
-card while the operator is at the desk. The display card is the one whose `display_active` reads Enabled
-**or** whose `display_attached` reads Yes (`gpuprobe.ScreenCardUUIDs`, the card table's rule); it is auto-assigned only when
-`operator_presence` says the operator is away, and then only while the display layer's desktop floor stays free
-after the call's footprint (a media call declares none, so an unpinned call never takes it: it picks among the other
-cards; `gpu_lease`, "The display card, once the operator is away"). An explicit pin may always name it (the
-operator's word). Ties go to a card with no resident seat, then the cheapest eviction, then the lowest id.
+(below), not held by another job in this process, with the free VRAM and host RAM. The display card is the one whose
+`display_active` reads Enabled **or** whose `display_attached` reads Yes (`gpuprobe.ScreenCardUUIDs`, the card table's rule);
+it is auto-assigned at any presence, but only while the VRAM in use plus the call's footprint stays within
+`gpu_display_cap_pct` of it (default 60; 0 closes it; ADR 0039, amendment 2026-10-12). A media call declares no
+footprint, so an unpinned call never takes it under a cap below 100: it picks among the other cards. An explicit pin may always name it (the operator's word). Ties go to a card with no resident seat, then
+the cheapest eviction, then the lowest id.
 
 **An explicit pin is a hard constraint.** It is never re-picked: the call queues, FIFO, for the card it
 names, however many others are free. It still runs in the per-card instance, not in the default one, so

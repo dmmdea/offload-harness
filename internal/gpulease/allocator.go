@@ -5,13 +5,15 @@ package gpulease
 // assembles, so it imports neither placement nor config, and every term of the rule has
 // a test.
 //
-// A card is ALLOCATABLE when it is: not quarantined, not a display card (I6, unless the
-// caller says the operator is away), not claimed by a live lease (a whole-node lease
-// claims every card), not busy under a foreign compute process, and its free VRAM fits
-// the footprint; and the HOST's memory admits the RAM the job declares (gpuprobe.HostRAMAdmits,
-// the rule the lease grant itself applies, hostram.go).
-// A display card the caller has opened keeps the desktop floor on top of that: its free
-// VRAM less the footprint must still leave AllocInput.DisplayFloorGiB (fitsCard).
+// A card is ALLOCATABLE when it is: not quarantined, not a display card whose cap is closed
+// (AllocInput.DisplayCapPct 0) and not one the reading could not place, not claimed by a live
+// lease (a whole-node lease claims every card), not busy under a foreign compute process, and
+// its free VRAM fits the footprint; and the HOST's memory admits the RAM the job declares
+// (gpuprobe.HostRAMAdmits, the rule the lease grant itself applies, hostram.go).
+// The display card is open to the allocator at all times, up to a share of its total VRAM
+// (A-RAM-15, the operator's 60 percent rule): the VRAM in use now, the desktop's included, plus
+// the job's declared footprint must stay at or under DisplayCapPct of the card (fitsCard).
+// Nothing about the operator's presence enters: 0 percent is the "I need the card" switch.
 // Order among allocatable cards: no resident seat first, then the cheapest eviction, then
 // the lowest id.
 //
@@ -47,6 +49,17 @@ const (
 	ReasonVRAM           = "vram"
 )
 
+// The words of the two display skips, one place for the allocator's pick and the grant-time check.
+const (
+	displayClosedDetail  = "the operator's screen; gpu_display_cap_pct is 0, so it is not auto-assigned"
+	displayStaleDetail   = "the operator's screen; this call was placed from a card table that could not be re-read, so how much of the card is in use now is not known and it is not auto-assigned"
+	displayUnknownDetail = "this reading could not say which card the monitor is on; no card is auto-assigned until one can"
+)
+
+// capEpsilonGiB absorbs the float error of a share of a total (15.9 x 40 / 100 is not exactly 6.36), so a
+// job that lands exactly on the cap is not refused by the last bit of a division.
+const capEpsilonGiB = 1e-6
+
 // ResidentInfo is what is loaded on one card that taking it would evict.
 type ResidentInfo struct {
 	Seats   []string
@@ -65,15 +78,25 @@ type AllocInput struct {
 	ForeignBusy map[string]string
 	// Resident maps a lease id to the seats loaded on that card.
 	Resident map[string]ResidentInfo
-	// AllowDisplay lets the display card be auto-assigned. The caller sets it only when
-	// the presence guard says the operator is away.
-	AllowDisplay bool
-	// DisplayFloorGiB is the VRAM the desktop keeps on a display card that AllowDisplay has
-	// opened: such a card is allocatable only while its free VRAM, less the job's footprint,
-	// still leaves this much (the display layer's display_floor arithmetic,
-	// internal/placement/guards.go, so the two doors onto the card agree). 0 = no floor
-	// declared, the behaviour before this field existed. It applies to the display card
-	// only; every other card is judged by the footprint alone.
+	// DisplayCapPct is how much of a display card's total VRAM jobs may fill, the desktop's own
+	// use included (config gpu_display_cap_pct, default 60, A-RAM-15): the card is allocatable only
+	// while the VRAM in use now plus the job's declared footprint is at most this share of it,
+	// which is the display layer's display_floor arithmetic (free - footprint >= floor) with the
+	// floor set to the rest of the card. 0 = closed, the operator's "I need the card" switch, and
+	// the zero value of the field. 100 = the whole card: with no DisplayFloorGiB declared nothing is
+	// held back, so no footprint is needed there either (every other cap refuses a job that declares none). It applies to the display card only; every
+	// other card is judged by the footprint alone. A card whose reading could not say where the
+	// monitor is (DisplayUnknown) stays closed whatever this says.
+	DisplayCapPct int
+	// DisplayStale closes the display card whatever the cap says: the caller is placing the call from a card
+	// table it could not refresh, and the cap is judged on the VRAM in use now, the one number a stale table
+	// misstates. It is a reading's doing, not the operator's, so DisplayCapPct keeps what the config says and
+	// the skip says why the card is closed (the table, not a gpu_display_cap_pct of 0 nobody wrote).
+	DisplayStale bool
+	// DisplayFloorGiB is a floor the display layer declares in absolute terms (display_floor_gib,
+	// internal/placement/guards.go) and keeps on the display card on top of the cap: the card keeps
+	// the LARGER of this and the cap's remainder, so a stricter declaration still holds and the
+	// two doors onto the card agree. 0 = none declared.
 	DisplayFloorGiB float64
 	// FootprintGiB is the VRAM the job needs free on EACH card (0 = not declared).
 	FootprintGiB float64
@@ -94,6 +117,9 @@ type Skip struct {
 	Index  int    `json:"index"`
 	Reason string `json:"reason"`
 	Detail string `json:"detail,omitempty"`
+	// Display marks the operator's screen card (the card table's rule), so a one-line summary of why cards
+	// were skipped can say "vram (display card)" when it is the cap that refused it, not just "vram".
+	Display bool `json:"display,omitempty"`
 }
 
 // Allocation is the cards taken (lease ids, in the order chosen) and what was skipped.
@@ -152,7 +178,7 @@ func Allocate(in AllocInput) (Allocation, error) {
 	var ok, claimedFit []cand
 	var skipped []Skip
 	skip := func(c gpuprobe.Card, id, reason, detail string) {
-		skipped = append(skipped, Skip{ID: id, Index: c.NvidiaIndex, Reason: reason, Detail: detail})
+		skipped = append(skipped, Skip{ID: id, Index: c.NvidiaIndex, Reason: reason, Detail: detail, Display: c.Display})
 	}
 	for _, c := range in.Cards {
 		id := c.LeaseID()
@@ -160,10 +186,10 @@ func Allocate(in AllocInput) (Allocation, error) {
 		switch {
 		case in.Quarantined[id]:
 			skip(c, id, ReasonQuarantined, "")
-		case c.Display && !in.AllowDisplay:
-			skip(c, id, ReasonDisplay, "the operator's screen; never auto-assigned while they are at the desk")
-		case c.DisplayUnknown && !in.AllowDisplay:
-			skip(c, id, ReasonDisplayUnknown, "this reading could not say which card the monitor is on; no card is auto-assigned until one can")
+		case c.Display && !in.displayOpen():
+			skip(c, id, ReasonDisplay, in.displayClosedWhy())
+		case c.DisplayUnknown:
+			skip(c, id, ReasonDisplayUnknown, displayUnknownDetail)
 		case in.WholeNodeHeld || in.Claimed[id]:
 			detail := "held by a live lease"
 			if in.WholeNodeHeld {
@@ -227,23 +253,54 @@ func fits(c gpuprobe.Card, needGiB float64) bool {
 	return needGiB <= 0 || c.VRAMFreeGiB >= needGiB
 }
 
-// floorApplies: the desktop floor is in force on this card. It is the display card's alone (a pair
-// card is judged by the footprint, as it always was), and only where a floor was declared. A card
-// of a reading that could not say which card the monitor is on (DisplayUnknown, set on every card
-// of a degraded reading, none of them Display) counts as the display card: "unknown" is never "not
-// the monitor", so an operator-away request that AllowDisplay lets through still has to leave the
-// desktop its floor on whichever card the screen turns out to be on.
-func (in AllocInput) floorApplies(c gpuprobe.Card) bool {
-	return (c.Display || c.DisplayUnknown) && in.DisplayFloorGiB > 0
+// displayOpen: the cap lets the allocator consider the display card at all, and the table it reads from is
+// not one the caller could not refresh.
+func (in AllocInput) displayOpen() bool { return in.DisplayCapPct > 0 && !in.DisplayStale }
+
+// displayClosedWhy is the skip detail of a display card that displayOpen refuses. The operator's switch (a cap
+// of 0) is named first when both are true: it is the cause that outlasts the reading.
+func (in AllocInput) displayClosedWhy() string {
+	if in.DisplayCapPct <= 0 {
+		return displayClosedDetail
+	}
+	return displayStaleDetail
 }
 
-// fitsCard is fits plus the desktop floor. A display card that AllowDisplay has opened is still the
-// desktop's: the job must leave DisplayFloorGiB free after it loads, which is the display layer's
-// own display_floor arithmetic (free − footprint ≥ floor). A footprint left undeclared cannot be
-// shown to leave anything, so on the display card it refuses, as the layer's guard refuses a seat
-// with no display footprint "before any arithmetic": judging it as free ≥ floor would let a 10 GiB
-// render onto a card with 12 free, to leave the desktop 2. Nothing unloads a lease's work once it
-// is placed, so the refusal has to come before the claim.
+// floorApplies: the display card's cap is in force on this card. It is the display card's alone (a pair
+// card is judged by the footprint, as it always was), and only while the cap is open and holds something
+// back: at 100 percent with no declared floor the whole card is the job's and nothing is checked. A card
+// of a reading that could not say which card the monitor is on (DisplayUnknown) never gets here: it is
+// closed before the cap is asked.
+func (in AllocInput) floorApplies(c gpuprobe.Card) bool {
+	return c.Display && in.displayOpen() && (in.DisplayCapPct < 100 || in.DisplayFloorGiB > 0)
+}
+
+// displayFloorGiB is the VRAM that must still be free on the display card c after the job loads: the rest of
+// the card past the cap, (100 - cap) percent of its total, or the display layer's declared absolute floor,
+// whichever is larger. ok is false when the cap needs a total the reading did not give.
+func (in AllocInput) displayFloorGiB(c gpuprobe.Card) (floor float64, ok bool) {
+	floor = in.DisplayFloorGiB
+	if in.DisplayCapPct >= 100 {
+		return floor, true
+	}
+	if c.VRAMTotalGiB <= 0 {
+		return 0, false
+	}
+	if rest := c.VRAMTotalGiB * float64(100-in.DisplayCapPct) / 100; rest > floor {
+		floor = rest
+	}
+	return floor, true
+}
+
+// fitsCard is fits plus the display card's cap. The VRAM in use now (the desktop's included) plus the footprint
+// must stay at or under DisplayCapPct of the card, which is the display layer's own display_floor arithmetic
+// (free - footprint >= floor) with the floor set to the rest of the card (displayFloorGiB). A footprint left
+// undeclared cannot be shown to stay under anything, so on the display card it refuses, as the layer's guard
+// refuses a seat with no display footprint "before any arithmetic": judging it as free >= floor would let a
+// 10 GiB render onto a card with 12 free, to leave the desktop 2. Nothing unloads a lease's work once it is
+// placed, so the refusal has to come before the claim. The one exception is the whole card (a cap of 100 with
+// no declared floor, floorApplies): nothing is held back there, so there is no share to hold a footprint to, and
+// the card is judged as any other is.
 func (in AllocInput) fitsCard(c gpuprobe.Card) bool {
 	if !fits(c, in.FootprintGiB) {
 		return false
@@ -251,20 +308,22 @@ func (in AllocInput) fitsCard(c gpuprobe.Card) bool {
 	if !in.floorApplies(c) {
 		return true
 	}
-	return in.FootprintGiB > 0 && c.VRAMFreeGiB-in.FootprintGiB >= in.DisplayFloorGiB
+	floor, ok := in.displayFloorGiB(c)
+	return ok && in.FootprintGiB > 0 && c.VRAMFreeGiB-in.FootprintGiB >= floor-capEpsilonGiB
 }
 
 // DesktopRefusals is the desktop rule alone, put again to cards a request already chose: of ids, the
-// cards that rule refuses on this reading. A queued request is chosen at enqueue, against the
-// operator's presence and the floor as they were then; when its turn comes the caller builds a fresh
+// cards that rule refuses on this reading. A queued request is chosen at enqueue, against the display
+// card's cap and the VRAM in use as they were then; when its turn comes the caller builds a fresh
 // AllocInput and asks this before the claim (Options.GrantCheck), so a card the allocator would no
 // longer open is not handed over because it was open once.
 //
 // It judges the desktop's reasons only, which are the ones that change while a request waits: the
-// display card (or a card that may be, on a reading that could not say) while the operator is at the
-// desk, and the display card under its floor. Other skips are not repeated here: a card another lease
-// has taken since is the claim's to refuse (ErrHeld), and the rest were never a reason the FIFO
-// position could be lost over. Each refusal is a Skip with the allocator's own reason and detail.
+// display card once the operator has closed it (cap 0), a card that may be the display card on a
+// reading that could not say, and the display card past its cap because the desktop or a game has
+// grown on it. Other skips are not repeated here: a card another lease has taken since is the claim's
+// to refuse (ErrHeld), and the rest were never a reason the FIFO position could be lost over. Each
+// refusal is a Skip with the allocator's own reason and detail.
 func DesktopRefusals(in AllocInput, ids []string) []Skip {
 	want := make(map[string]bool, len(ids))
 	for _, id := range ids {
@@ -277,32 +336,39 @@ func DesktopRefusals(in AllocInput, ids []string) []Skip {
 			continue
 		}
 		switch {
-		case c.Display && !in.AllowDisplay:
-			out = append(out, Skip{ID: id, Index: c.NvidiaIndex, Reason: ReasonDisplay, Detail: "the operator's screen; never auto-assigned while they are at the desk"})
-		case c.DisplayUnknown && !in.AllowDisplay:
-			out = append(out, Skip{ID: id, Index: c.NvidiaIndex, Reason: ReasonDisplayUnknown, Detail: "this reading could not say which card the monitor is on; no card is auto-assigned until one can"})
+		case c.Display && !in.displayOpen():
+			out = append(out, Skip{ID: id, Index: c.NvidiaIndex, Reason: ReasonDisplay, Detail: in.displayClosedWhy(), Display: true})
+		case c.DisplayUnknown:
+			out = append(out, Skip{ID: id, Index: c.NvidiaIndex, Reason: ReasonDisplayUnknown, Detail: displayUnknownDetail})
 		case in.floorApplies(c) && !in.fitsCard(c):
-			out = append(out, Skip{ID: id, Index: c.NvidiaIndex, Reason: ReasonVRAM, Detail: in.vramDetail(c)})
+			out = append(out, Skip{ID: id, Index: c.NvidiaIndex, Reason: ReasonVRAM, Detail: in.vramDetail(c), Display: c.Display})
 		}
 	}
 	return out
 }
 
-// vramDetail says why a card that does not fit was skipped, naming the desktop floor where that is
+// vramDetail says why a card that does not fit was skipped, naming the display card's cap where that is
 // what refused it.
 func (in AllocInput) vramDetail(c gpuprobe.Card) string {
 	detail := fmt.Sprintf("%.1f GiB free, %.1f GiB needed", c.VRAMFreeGiB, in.FootprintGiB)
 	if !in.floorApplies(c) {
 		return detail
 	}
-	which := "the display card"
-	if !c.Display {
-		which = "a card that may be the display card (the reading could not say which is)"
+	floor, ok := in.displayFloorGiB(c)
+	if !ok {
+		return fmt.Sprintf("%.1f GiB free on the display card, whose total VRAM this reading did not give, so its gpu_display_cap_pct of %d %% cannot be applied", c.VRAMFreeGiB, in.DisplayCapPct)
+	}
+	cap := fmt.Sprintf("the cap is gpu_display_cap_pct %d %% of %.1f GiB (the desktop and jobs together)", in.DisplayCapPct, c.VRAMTotalGiB)
+	switch {
+	case in.DisplayCapPct >= 100:
+		cap = fmt.Sprintf("the declared display_floor_gib is %.1f GiB and gpu_display_cap_pct is %d %%", in.DisplayFloorGiB, in.DisplayCapPct)
+	case in.DisplayFloorGiB > floor-capEpsilonGiB:
+		cap = fmt.Sprintf("the declared display_floor_gib of %.1f GiB binds, stricter than the cap of gpu_display_cap_pct %d %% of %.1f GiB", in.DisplayFloorGiB, in.DisplayCapPct, c.VRAMTotalGiB)
 	}
 	if in.FootprintGiB <= 0 {
-		return fmt.Sprintf("%.1f GiB free on %s, whose desktop floor is %.1f GiB: a job that declares no footprint (--vram) cannot be shown to leave it", c.VRAMFreeGiB, which, in.DisplayFloorGiB)
+		return fmt.Sprintf("%.1f GiB free on the display card, whose desktop floor is %.1f GiB (%s): a job that declares no footprint (--vram) cannot be shown to stay under the cap", c.VRAMFreeGiB, floor, cap)
 	}
-	return detail + fmt.Sprintf(" on %s, which leaves %.1f GiB, under the desktop floor of %.1f GiB", which, c.VRAMFreeGiB-in.FootprintGiB, in.DisplayFloorGiB)
+	return detail + fmt.Sprintf(" on the display card, which leaves %.1f GiB, under its desktop floor of %.1f GiB (%s)", c.VRAMFreeGiB-in.FootprintGiB, floor, cap)
 }
 
 // QuarantinedCards reads the `quarantine.<id>` sidecars beside the lease record: cards

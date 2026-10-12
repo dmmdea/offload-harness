@@ -645,6 +645,11 @@ type Standing struct {
 	OwnerNote string
 	// OrphanMarkErr is set when the orphan marker could not be recorded or cleared.
 	OrphanMarkErr string
+	// TreeOrphan: the lease's wrapper is gone but a process of the job it started is alive
+	// (plan P10); TreeLive are those processes and TreeWhy the evidence. The claim is kept.
+	TreeOrphan bool
+	TreeLive   []TreeMember
+	TreeWhy    string
 }
 
 // ObserverAt returns a Manager bound to an explicit lease directory, for a verdict path
@@ -671,6 +676,9 @@ func (m *Manager) standing(info Info, grace time.Duration, stamp bool) Standing 
 	grace = orphanGraceOrDefault(grace)
 	now := m.now()
 	st := Standing{Epoch: info.Epoch, Unattended: info.Unattended}
+	if info.TreeOrphan {
+		st.TreeOrphan, st.TreeLive, st.TreeWhy = true, info.TreeLive, info.TreeWhy
+	}
 	state, note, since, merr := m.observeOwner(info, stamp)
 	if merr != nil {
 		st.OrphanMarkErr = merr.Error()
@@ -705,6 +713,8 @@ func (m *Manager) StandingAll(info Info, grace time.Duration) Standing {
 	var out Standing
 	rank := func(st Standing) int {
 		switch st.Escalation() {
+		case "tree-orphan":
+			return 4
 		case "held-stalled":
 			return 3
 		case "held-orphaned":
@@ -717,10 +727,11 @@ func (m *Manager) StandingAll(info Info, grace time.Duration) Standing {
 	for i, l := range info.Each() {
 		st := m.Standing(l, grace)
 		orphaned, overdue, stalled := out.Orphaned || st.Orphaned, out.Overdue || st.Overdue, out.Stalled || st.Stalled
+		treeOrphan := out.TreeOrphan || st.TreeOrphan
 		if i == 0 || rank(st) > rank(out) {
 			out = st
 		}
-		out.Orphaned, out.Overdue, out.Stalled = orphaned, overdue, stalled
+		out.Orphaned, out.Overdue, out.Stalled, out.TreeOrphan = orphaned, overdue, stalled, treeOrphan
 	}
 	return out
 }

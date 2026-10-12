@@ -51,8 +51,9 @@ func layersView(ctx context.Context, cfg config.Config) []placement.LayerRow {
 }
 
 // withDisplayStatus adds, to the local block of offload_status, what a composite box owes about the
-// display card's gate: the operator-presence reading and mode (the layer's presence guard and the card
-// allocator both read that key), and the post-admission guard's heartbeat and last action (ADR 0075).
+// display card's gate: the operator-presence reading and mode (the layer's presence guard reads that key;
+// the card allocator does not, it admits the display card by gpu_display_cap_pct), and the post-admission
+// guard's heartbeat and last action (ADR 0075).
 // A box that seeds no layers gets its block back untouched, which is what keeps its payload byte for
 // byte what it was (the golden pins it); display_guard is omitted unless the watcher has something
 // to say.
@@ -68,8 +69,8 @@ func withDisplayStatus(ctx context.Context, cfg config.Config, local map[string]
 }
 
 // presenceView is the operator-presence reading offload_status publishes beside the layer rows, on a
-// composite box only (the key is the display card's gate: the layer's presence guard and the card
-// allocator both read it). It is the probe's own reading for the configured mode, from the same 2 s
+// composite box only (the key is the display layer's gate: its presence guard reads it, the card
+// allocator does not). It is the probe's own reading for the configured mode, from the same 2 s
 // memo the guards read through, so what an operator reads here is what the guards just saw. It never
 // blocks the call: a probe that does not answer inside layersViewTimeout is reported as such, with the
 // mode, which is configuration and needs no probe.

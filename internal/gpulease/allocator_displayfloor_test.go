@@ -6,10 +6,11 @@ import (
 	"testing"
 )
 
-// The display card an operator-away request has opened (AllowDisplay) is still the desktop's.
-// It is allocatable only while free VRAM, less what the job puts there, leaves the floor the
-// display layer keeps: the same arithmetic as the layer's display_floor guard, so the two
-// doors onto that card cannot disagree about it.
+// The display card the cap has opened (DisplayCapPct) is still the desktop's. It is allocatable only
+// while free VRAM, less what the job puts there, leaves the floor the display layer declares
+// (DisplayFloorGiB): the same arithmetic as the layer's display_floor guard, so the two doors onto
+// that card cannot disagree about it. These tests open the card to its whole VRAM (cap 100) so the
+// declared floor is the only bound in play; allocator_displaycap_test.go holds the cap itself.
 
 // pairResident is the box with the pair seat loaded on cards 0 and 2, so the display card is
 // the one with no resident seat and would sort first.
@@ -22,7 +23,7 @@ func pairResident() map[string]ResidentInfo {
 
 func openedDisplayInput(footprint, floor float64) AllocInput {
 	in := baseInput() // card 1 is the display card with 12 GiB free
-	in.AllowDisplay = true
+	in.DisplayCapPct = 100
 	in.FootprintGiB = footprint
 	in.DisplayFloorGiB = floor
 	in.Resident = pairResident()
@@ -92,7 +93,7 @@ func TestAnUndeclaredFootprintOnTheDisplayCardSaysHowToDeclareIt(t *testing.T) {
 // pair card that a 15 GiB job leaves with 0.5 GiB free is allocatable, as it always was.
 func TestTheDesktopFloorTouchesOnlyTheDisplayCard(t *testing.T) {
 	in := baseInput()
-	in.AllowDisplay = true
+	in.DisplayCapPct = 100
 	in.FootprintGiB = 15
 	in.DisplayFloorGiB = 4
 	a, err := Allocate(in)
@@ -104,16 +105,17 @@ func TestTheDesktopFloorTouchesOnlyTheDisplayCard(t *testing.T) {
 	}
 }
 
-// With the operator at the desk the display card is not allocatable at all, floor or no floor.
-func TestTheFloorDoesNotOpenTheDisplayCardAtTheDesk(t *testing.T) {
+// A declared floor opens nothing: with the cap at 0 (the operator needs the card) the display card is not
+// allocatable at all, floor or no floor.
+func TestADeclaredFloorDoesNotOpenAClosedDisplayCard(t *testing.T) {
 	in := openedDisplayInput(2, 4)
-	in.AllowDisplay = false
+	in.DisplayCapPct = 0
 	a, err := Allocate(in)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := skipReason(a, "gpu-bbbb0000"); got != ReasonDisplay {
-		t.Fatalf("at the desk the display card is %q, got %q", ReasonDisplay, got)
+		t.Fatalf("with the cap closed the display card is %q, got %q", ReasonDisplay, got)
 	}
 }
 
@@ -154,7 +156,7 @@ func TestAHeldDisplayCardThatCouldNotClearTheFloorIsNotQueuedOn(t *testing.T) {
 // it does not sort ahead of a card that costs less to take.
 func TestALoadedTwinOnTheDisplayCardIsAnEvictionNotAnEmptyCard(t *testing.T) {
 	in := baseInput()
-	in.AllowDisplay = true
+	in.DisplayCapPct = 100
 	in.FootprintGiB = 2
 	in.DisplayFloorGiB = 4
 	in.Min, in.Max = 1, 1
@@ -182,75 +184,5 @@ func TestALoadedTwinOnTheDisplayCardIsAnEvictionNotAnEmptyCard(t *testing.T) {
 	}
 	if len(a.Devices) != 1 || a.Devices[0] != "gpu-bbbb0000" {
 		t.Fatalf("with no resident seat seen on it the display card sorts first, got %v", a.Devices)
-	}
-}
-
-// A transient display query failure marks every card DisplayUnknown and none Display. With the
-// operator away (AllowDisplay) the request is let through, but "unknown" is never "not the
-// monitor": the floor has to hold on every card, because any of them may be the one the screen
-// is on. A floor that only checked Display would let the job take the desktop's memory on that
-// reading.
-func TestAnUnknownDisplayCardIsHeldToTheDesktopFloor(t *testing.T) {
-	cases := []struct {
-		name      string
-		footprint float64
-		floor     float64
-		wantTaken bool
-	}{
-		{"a job that leaves the floor on every card", 6, 4, true},
-		{"a job that would leave card 1 under the floor", 9, 4, true}, // the other cards still take it
-		{"a job no card can take with the floor kept", 13, 4, false},
-		{"no footprint declared cannot be shown to keep the floor", 0, 4, false},
-		{"no floor declared is the behaviour before the floor existed", 13, 0, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			in := baseInput()
-			in.Cards = unknownDisplayCards()
-			in.AllowDisplay = true
-			in.FootprintGiB = tc.footprint
-			in.DisplayFloorGiB = tc.floor
-			a, err := Allocate(in)
-			if !tc.wantTaken {
-				var none *NoCardsError
-				if !errors.As(err, &none) {
-					t.Fatalf("every card is under the floor: want a NoCardsError, got %+v %v", a, err)
-				}
-				return
-			}
-			if err != nil || len(a.Devices) != 1 {
-				t.Fatalf("a card clears the floor: %+v %v", a, err)
-			}
-		})
-	}
-}
-
-// The unknown-display reading with a footprint that fits only without the floor: card 1 has 12
-// GiB free, 11 needed leaves 1, under a 4 GiB floor. Card 1 is refused on the floor even though no
-// card is flagged Display; the cards with more room still take the job.
-func TestAnUnknownDisplayReadingRefusesTheCardThatWouldLeaveTheDesktopTooLittle(t *testing.T) {
-	in := baseInput()
-	in.Cards = unknownDisplayCards()
-	in.AllowDisplay = true
-	in.FootprintGiB = 11 // card 0: 15.5 -> 4.5 left, card 1: 12 -> 1 left, card 2: 15.9 -> 4.9 left
-	in.DisplayFloorGiB = 4
-	in.Min, in.Max = 1, 3
-	a, err := Allocate(in)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range a.Devices {
-		if id == "gpu-bbbb0000" {
-			t.Fatalf("card 1 would be left with 1 GiB under a 4 GiB floor yet was allocated: %v", a.Devices)
-		}
-	}
-	if got := skipReason(a, "gpu-bbbb0000"); got != ReasonVRAM {
-		t.Fatalf("card 1 must be skipped on VRAM, got %q (skipped %+v)", got, a.Skipped)
-	}
-	// And the card the floor was kept on says so.
-	for _, s := range a.Skipped {
-		if s.ID == "gpu-bbbb0000" && !strings.Contains(s.Detail, "desktop floor") {
-			t.Errorf("skip detail must name the desktop floor, got %q", s.Detail)
-		}
 	}
 }

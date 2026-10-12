@@ -152,7 +152,6 @@ func TestMediaLaneFreeGraphNeverRefusesAGrant(t *testing.T) {
 	for _, c := range graphLaneCases() {
 		t.Run(c.name, func(t *testing.T) {
 			f := newAdmitFixtureWith(t, c.spec)
-			f.away = c.away
 			if c.setup != nil {
 				c.setup(t, f)
 			}
@@ -220,7 +219,6 @@ func TestMediaLaneFreeGraphWritesNothing(t *testing.T) {
 	for _, c := range graphLaneCases() {
 		t.Run(c.name, func(t *testing.T) {
 			f := newAdmitFixtureWith(t, c.spec)
-			f.away = c.away
 			if c.setup != nil {
 				c.setup(t, f)
 			}

@@ -21,7 +21,7 @@ other on a single shared card.
 |---|---|
 | `internal/gpulease/gpulease.go` | **the only implementation**: `LeaseDir` (the one resolver), acquire/release, epoch fencing, the reclaim conjunction, `InspectDir` (the one read path) |
 | `internal/gpulease/devices.go` | **card-scoped leases (record v2)**: device-id normalisation, the conflict rule, the grant (one critical section under the epoch lock), the per-epoch fence, per-lease release and restamp, the debris sweep, and the one reader (`reader`) every inspector shares |
-| `internal/gpulease/allocator.go` | the **card allocator** behind `gpu reserve --cards`: a pure function over an input the CLI assembles (cards, claims, quarantine, foreign busy, resident seats, presence, host RAM), plus the quarantine sidecar reader |
+| `internal/gpulease/allocator.go` | the **card allocator** behind `gpu reserve --cards`: a pure function over an input the CLI assembles (cards, claims, quarantine, foreign busy, resident seats, the display cap, host RAM), plus the quarantine sidecar reader |
 | `internal/gpulease/cmddevices.go` | the default card set of a wrapped command: `CUDA_VISIBLE_DEVICES`, `--cuda-device`, `COMFY_CUDA_DEVICE` turned into cards, refusing instead of guessing |
 | `internal/gpulease/effective.go`, `infer.go`, `proctree*.go` | **what a lease holds, as a seat reads it (plan P4)**: `Info.EffectiveDevices/Touches/For`, `ResolvePins`, the legacy-lease evidence rule (`Scoper`, applied only to a record an older binary wrote: `Info.Legacy`; the `seen.<epoch>` sidecar, the scope ledger) and the process-tree reader it runs on |
 | `internal/gpulease/term.go` | **terms (plan P9)**: `PlanTerm` (what a requested window comes to), the installed limits (`SetDefaultTerms`), and `AdvanceTerm`, the one place a term ends in a renewal or the expired label (see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)) |
@@ -34,6 +34,10 @@ other on a single shared card.
 | `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
 | `internal/gpucards` | the per-card view (`Rows`, `LeaseRows`, `QueueRows`, `Table`, `Section`) that `gpu status`, `gpu cards` and `offload_status` brief all render |
 | `internal/gpulease/proc*.go` | per-platform liveness and process-start identity, exported so no consumer keeps a second copy |
+| `internal/gpulease/tree.go` | **a dead wrapper with a live tree keeps its claim (plan P10, ADR 0084)**: the recorded tree (`Meta.Tree`, `Lease.RecordTree`), `judge` (the one place a reader decides what a record's tree is), the launch-marker and process-table evidence, and the armed ComfyUI directory (`SetComfyDir`, called from `modelaffinity.SetComfyDir`) |
+| `internal/proctree` | **process-tree containment and the stop primitives (plan P10)**: `Start` runs a command in a job object (Windows) or its own session and process group (Unix), `PIDs`, `Terminate`, `TerminateExcept`; `Job` is the job object the agent shell's cage (`internal/sandbox`) is built on too; `PlanStop` and `Stop` stop only a recorded tree or a launch marker's process and report anything else on a card as not ours |
+| `gpu_tree.go` | the wrapper's side: `treeRecorder` (writes the tree into the lease record when the set changes), `stopWrappedTree` (the whole tree, sparing an instance another lease took over) |
+| `internal/comfyinst` | stops the ComfyUI instances a lease kept (`StopForLease`), and the primitives an explicit takeover will use (`StopMarker`: interrupt, free, kill after the launch fingerprint is verified; `PIDsOfOtherLeases`) |
 | `internal/pipeline/pipeline.go` | takes the `media` lease around **every** generation call site (image ComfyUI + sdcpp, inpaint, image batch, run-graph, video, audio) and threads `GPU_LEASE_*` to the runner; inherits an ambient lease instead of re-acquiring; owns the in-process slot (`mediaSlot`) that arbitrates jobs sharing one inherited lease |
 | `gpu_cmd.go` | the `gpu status\|reserve\|release\|hold` verbs, wrapper and `--detach` forms |
 | `gpu_terms.go` | the holders' side of terms: the tick the wrapper form and the detached holder run at the end of a term, the over-cap warning, and the argv of the hidden holder (`--release-at-expiry`) |
@@ -467,7 +471,7 @@ later waiter queues behind. A waiter whose process is gone or stopped polling is
 binary older than this change (and to any Node reader that still compares `meta.json`). That is the one cross-version
 hazard, and it is gated by a mechanism, not by good intentions: the writer needs the green reader audit marker (above).
 
-**Deviation from the plan, pending acceptance.** Plan rev 2 (section 2, P2 scope) specified a synthetic pid-0 `meta.json`
+**Deviation from the plan, accepted (2026-10-12).** Plan rev 2 (section 2, P2 scope) specified a synthetic pid-0 `meta.json`
 "umbrella" over any set of device leases, so that a pre-v2 writer would queue behind it. This change does **not** write
 one. The premise of the umbrella was checked against the real binaries on the build host and **holds**: a `meta.json`
 with `holder.pid = 0` and a future `expires_at_ms` makes `gpu reserve` of 0.158.3 and of 0.160.0 queue and then refuse
@@ -476,9 +480,16 @@ dropped for a design reason, not because it would not work: it is a second sourc
 re-stamped on every grant, release and extension and be judged by every reader as "not a real lease", and its only
 audience is a binary the audit is meant to find and replace. The cost of dropping it is that a pre-v2 writer that is
 **not** found by the audit double-books a host that has the switch on (measured with a byte-identical older wrapper in the
-review of this change). Until the plan owner or the operator accepts the deviation, plan P2's acceptance is **not**
-met; the umbrella can be restored later without a format change. No 0.152.x build is on the build host, so
-none was tested. Two hard gates stand in for the umbrella, and the second is now code:
+review of this change). **The plan owner accepted the deviation (decision of 2026-10-11, recorded here with 0.183.0):
+the umbrella stays dropped.** The safety trade-off was checked, not assumed: a `gpu doctor` run on the reference box on
+2026-10-11 was green, meaning every reader it reached there (the CLI, the MCP servers, the fleet daemon, the render lock
+script) understood the per-epoch fence and nothing older than the record format was found, so the audit gate below is
+doing the work the umbrella would have done. The umbrella can be restored later without a format change if a host ever
+runs a reader the audit cannot reach. No 0.152.x build is on the build host, so none was tested. The four tests the plan
+named for the umbrella (`TestUmbrellaIsPidZeroAndRestampedOnGrantAndRelease`, `TestWrapperOfHigherEpochNotKilledByUmbrella`,
+`TestLegacyReclaimDoesNotFreeUmbrellaWhileSiblingLeaseLive`, `TestOldReaderFixtureSeesHeldOverV2Dir`) were never written and
+are **superseded**: there is no umbrella to pin, and `TestOldReaderFixtureSeesFreeOverV2DirAndTheFlagIsWhatGatesIt` pins the
+hazard that replaces the last of them. Two hard gates stand in for the umbrella, and the second is now code:
 
 1. the switch stays off until the reader audit is green (`gpu doctor` scans every binary copy including the
    node-swap backups an automatic rollback restores, the images of running fleet-node and MCP processes, the deployed
@@ -546,7 +557,7 @@ retry would hold the mutex against every other poller of the gate. What a media 
 | form | meaning |
 |---|---|
 | `gpu reserve --devices 0,GPU-aaaa ...` | exactly these cards (an nvidia-smi index or a UUID prefix of at least four characters; ambiguous or unknown is an error). The operator's word: the display card is allowed, and a busy card is a place in line, FIFO behind its holder. |
-| `gpu reserve --cards 2` or `--cards 1..3` | the allocator picks (below). Never the display card while the operator is at the desk; with `operator_presence` reading away it may take that card, but only while the display layer's desktop floor stays free after `--vram`, and never with no `--vram` ("The display card, once the operator is away", below). |
+| `gpu reserve --cards 2` or `--cards 1..3` | the allocator picks (below). The display card is allocatable up to `gpu_display_cap_pct` (default 60 percent of its VRAM, the desktop's own use included) at any presence, only with a declared `--vram`, and never when the cap is 0 ("The display card is allocatable up to a cap", below). |
 | `gpu reserve --whole-node ...` | everything, as before. |
 | `gpu reserve ... -- <cmd>` | the cards `<cmd>` names itself: `CUDA_VISIBLE_DEVICES` (a UUID, or an index in PCI order when `CUDA_DEVICE_ORDER=PCI_BUS_ID`, else in ComfyUI order), else `--cuda-device N`, else `COMFY_CUDA_DEVICE`. Nothing named means the whole node. |
 
@@ -562,16 +573,66 @@ hold, and an unpinned CUDA job runs on the fastest-first card, which on the refe
 allocator refuses to hand out) while the held cards sit idle. So when the cards were **named** (`--devices`) or **allocated**
 (`--cards`), the wrapper also gives the command `CUDA_VISIBLE_DEVICES=<driver UUIDs of the held cards>` and
 `CUDA_DEVICE_ORDER=PCI_BUS_ID`, which pins reliably (plan P13 spike). It does **not** when the lease is the whole node, or when
-the set was derived from the command's own pin. A command that pins itself keeps its pin when the pin is the program's own
-(`--cuda-device` on its command line, `COMFY_CUDA_DEVICE`, which ComfyUI turns into `CUDA_VISIBLE_DEVICES` itself, so an
-override would be futile): the wrapper warns on stderr when that pin falls outside the held cards or cannot be resolved. A
-`CUDA_VISIBLE_DEVICES` the command merely **inherits** from the operator's shell is replaced with the held cards when it
+the set was derived from the command's own pin. A command that pins itself with a variable of the program's own
+(`COMFY_CUDA_DEVICE` or `COMFY_CARD_UUID`, which the render layer turns into the card ComfyUI runs on, and ComfyUI resets
+`CUDA_VISIBLE_DEVICES` from it, so setting that variable would be futile) is **re-pinned**: when its pin falls outside the held
+cards or cannot be resolved, the wrapper rewrites that same variable to the held card, says so on one line, and starts the
+command ("A pin outside the lease is moved, never refused", below). The program's own argv (`--cuda-device` on its command line)
+is not rewritten; the wrapper warns on stderr when such a pin falls outside the held cards or cannot be resolved. A
+`--cuda-device` in `COMFY_EXTRA_ARGS` is not read by the wrapper at all: nothing is printed for it, and the render layer drops it
+whenever `COMFY_CUDA_DEVICE` or `COMFY_CARD_UUID` is set (`launchFlags` in `render/comfy-lifecycle.mjs`), so an environment pin
+beside it IS re-pinned and wins; a pin in the extra args alone is unconfined, the trespass `gpu status` flags (F34). A `CUDA_VISIBLE_DEVICES` the command merely **inherits** from the operator's shell is replaced with the held cards when it
 reaches outside them or cannot be resolved (and the wrapper says so); one inside the held cards is tighter than the lease and
 is left alone (`TestConfineWrappedRules`, `TestGPUReserveDevicesPinsTheChildToTheHeldCards`,
 `TestGPUReserveReplacesAnInheritedPinThatReachesOutsideTheLease`). Two limits remain: a program that sets its own
 pin after it starts is not confined (ComfyUI's `--cuda-device` overwrites `CUDA_VISIBLE_DEVICES`; one instance per card is
-plan P13), and `GPU_LEASE_DEVICES` is for a command that wants to read the set itself. `--drain` and `--unload-seat` take
+plan P13; a launcher that picks its card inside the child, for instance a film recipe whose own code defaults
+`COMFY_CUDA_DEVICE` to a fixed index, is invisible to the wrapper and stays what `gpu status` flags as a possible
+device-trespass, F34), and `GPU_LEASE_DEVICES` is for a command that wants to read the set itself. `--drain` and `--unload-seat` take
 the cards the lease holds and leave the seats on the others (plan P5, below).
+
+**A pin outside the lease is moved, never refused (GPU-F9, 0.183.0).** A reserved lease (`--devices` or `--cards`) names the card the job runs on. A command that carries a card pin of its own
+that points elsewhere used to start with a stderr warning and run on the other card. Refusing it (an earlier design) turned a
+card the operator named into a failed job; the rule is the one the house applies everywhere else, a busy or wrong card is
+a place to move to, never a refusal. The wrapper therefore **rewrites the program's own variable to the held card**, prints
+one line naming the old pin, the new pin and the lease, starts the command, and never exits non-zero because of a pin.
+
+| the command carries | outside the held cards, or cannot be resolved | inside the held cards |
+|---|---|---|
+| `COMFY_CUDA_DEVICE=<index list>` | the variable becomes the held card's **ComfyUI device index** from the card table (`gpu_comfy_order`), never the nvidia-smi index the lease is keyed by; the launch stays an unkeyed one | untouched, nothing said |
+| `COMFY_CARD_UUID=<uuid>` | the variable becomes the held card's **driver uuid**; no index is written beside it | untouched; the lease still pins the rest of the command as before |
+| `--cuda-device N` on the command line | **not rewritten** (the program's own argv): the stderr warning stays, and an environment pin beside an argv one is not moved either, because the program obeys its argv | untouched |
+| `--cuda-device N` in `COMFY_EXTRA_ARGS` | **not read** by the wrapper, so no warning: when `COMFY_CUDA_DEVICE` or `COMFY_CARD_UUID` is set beside it the environment pin is re-pinned as above and wins (the render layer drops the extra args' flag), and with no environment pin it is an unconfined pin the wrapper does not see (F34) | untouched |
+
+Rules, each pinned by a test (`gpu_reserve_repin_test.go`, `internal/gpulease/repin_test.go`):
+
+- **The kind of pin is kept.** The render layer refuses an index beside a card uuid (`COMFY-INSTANCE-CONFLICT`), and a uuid turns
+  an unkeyed launch into a keyed per-card instance with its own port and directories. An index pin becomes an index, a uuid
+  pin a uuid.
+- **No guess.** When the held card's device index is not known (`gpu_comfy_order` is not declared and the box has several
+  cards) an index pin is **not** rewritten and the old warning stays, with the reason added (`[not re-pinned: ...]`); the same holds
+  for a pin of more cards than the lease holds. When nothing else would have said anything (an inherited `CUDA_VISIBLE_DEVICES`
+  that names a held card makes the generic confinement silent), the wrapper prints that sentence itself: a pin it cannot move
+  is never a silent trespass. Switching
+  an index pin to a uuid to get around that would start a different instance on another port, which is not a move toward the
+  leased card but a change of launch. A uuid pin needs no order and is always moved.
+- **The order is the child's.** A device index is counted in ComfyUI's fastest-first order unless the child's environment says
+  `CUDA_DEVICE_ORDER=PCI_BUS_ID` (the command's own, or the one the wrapper sets when it replaces an inherited
+  `CUDA_VISIBLE_DEVICES`), which makes it nvidia-smi's. The pin is judged and rewritten in the order the child will read it.
+- **k cards under n >= k.** A pin of k cards under a lease of n >= k cards maps to the first k held cards in the order the index
+  is counted in (ascending, as a comma list). A pin of more cards than the lease holds has no card to put the extra ones on and
+  keeps the old warning. A repeated index is one card.
+- **A program pin is judged on its own.** The shell's inherited `CUDA_VISIBLE_DEVICES` is replaced as before when it reaches
+  outside the lease, and left alone when it is inside; a `COMFY_CUDA_DEVICE` or `COMFY_CARD_UUID` beside it is judged and moved
+  independently, because the program resets `CUDA_VISIBLE_DEVICES` from its own pin.
+- **A blank value is no pin.** A uuid-bound launch blanks `COMFY_CUDA_DEVICE` on purpose; a blank index beside a uuid inside the
+  lease starts unchanged, with no index entry added.
+- **Unchanged paths.** A host with card-scoped leases off, a `--whole-node` lease and a lease derived from the command's own pin
+  never reach the re-pin: the command starts with the pin it had (`TestGPUReserveFlagOffWholeNodeAndDerivedLeasesAreByteForByte`),
+  and for every input without a program pin outside the lease the confinement is the one the wrapper computed before
+  (`TestConfineWrappedWithoutAnOutsideProgramPinIsTheOldAnswer`).
+
+There is no override flag: nothing is refused, so there is nothing to override.
 
 **The allocator.** A card is allocatable when it is not quarantined (`quarantine.<id>` sidecars, which P12 will write),
 not the display card (the card whose `display_active` reads Enabled **or** whose `display_attached` reads Yes: with the screen asleep
@@ -590,42 +651,58 @@ unreadable host-memory reading refuses only when a RAM need was declared, and a 
 request at once. On Windows (WDDM) nvidia-smi lists no per-process
 rows for compute apps, so `foreign-busy` is Linux-only evidence today.
 
-**The display card, once the operator is away.** `operator_presence` is one key with two readers: the display layer's
-`presence` guard ([composite-tier.md](composite-tier.md)) and this allocator. Set to `auto` (the console locked, or idle
-past `operator_idle_sec`, and nothing fullscreen) or to `away` (the operator's override, which reads away whatever the desk is
-doing), it lets the allocator take the display card too, and an opened card is still the desktop's, so it is held to the floor
-the display layer keeps: allocatable only while its free VRAM, less `--vram`, still leaves `display_floor_gib` (the largest
-floor declared by a layer guarded by `display_floor`; a box that declares none is judged as it was before this rule). The
-arithmetic is the layer's own (`free − footprint ≥ floor`), so the two doors onto the card cannot disagree about it, and it
-applies to the display card alone: a pair card is judged by the footprint, as it always was. A job that gives no `--vram`
-never takes the display card, because a footprint nobody declared cannot be shown to leave the floor (the layer's guard
-refuses a seat with no display footprint the same way); a media call whose `comfy_cuda_device` is empty declares none, so
-it picks among the other cards. `--devices` names the card on the operator's word and is never second-guessed. The skip
-reads `vram` and names the floor, and a display card that could not clear the floor is not queued on while a lease holds it
-(waiting would not fix it). A display twin that is loaded counts as a resident seat of the display card, each loaded
-twin costed at the layer's `display_footprint_gib` (both twins loaded cost twice that), so the card is not ranked as an
-empty one while it holds a twin: taking it would evict the twins, and the order prices that. When llama-swap's `/running`
-cannot be read the display layer's models are counted as loaded, so the display card sorts as occupied rather than as the
-empty card it might be; other layers' seats contribute nothing then, as before
-(`TestAnOpenedDisplayCardIsHeldToTheDesktopFloor`, `TestALoadedTwinOnTheDisplayCardIsAnEvictionNotAnEmptyCard`,
-`TestResidentFromCountsALoadedModelMapTwinOnItsCard`, `TestPickAutoDoesNotHandOutTheDisplayCardBelowTheLayersFloor`).
+**The display card is allocatable up to a cap, at any presence (`gpu_display_cap_pct`, 0.183.0).** The operator's rule of
+2026-10-11: the display card may be used up to 60 percent at all times, unless he says he needs it. The allocator used to read
+`operator_presence` (never the card at the desk, the card above the layer's floor when away); it now reads no presence at all.
+One key, `gpu_display_cap_pct` (a whole number of percent, default 60 when unset, `0` closes the card to the allocator, `100` is
+the whole card, a value outside `0..100` refuses the load by name; unset and `0` are different values): the display card is
+allocatable while the VRAM in use now, **the desktop's own included**, plus the request's declared footprint is at most that share
+of its total VRAM. The arithmetic is the display layer's own (`free − footprint ≥ floor`) with the floor set to the rest of the
+card, so the two doors onto the card cannot disagree about it; where the layers also declare an absolute `display_floor_gib`, the
+larger of the two floors holds. On the reference box (the display card with 2.6 GiB in use of 15.9) a 6 GiB request can land
+there and a 7.5 GiB one cannot, and the skip names the cap. The cap applies to the display card alone: a pair card is judged by
+the footprint, as it always was.
+
+- **`gpu_display_cap_pct: 0` is the operator's "I need the card" switch.** The card is skipped as `display` and the skip names the
+  key, whatever the desk is doing. Nothing watches the desk any more: a locked screen, an idle desk and a game on the card are one
+  question, answered by the VRAM in use at the moment of the pick.
+- **A footprint is needed to be held to a share.** A job that gives no `--vram` is not given the display card under a cap below 100
+  (the layer's guard refuses a seat with no display footprint the same way); a media call declares no VRAM footprint, so the typed
+  media tools do not take the display card until a measured footprint is fed to the allocator. `--devices` names the card on the
+  operator's word and is never second-guessed.
+- **An unknown display stays closed.** A reading that could not say which card the monitor is on marks every card `display-unknown`
+  and none of them is handed out, whatever the cap.
+- **The cap bounds admission only.** Nothing limits a job after it is placed, so the footprint has to be a measured peak, and one
+  number per request cannot describe a donor slice beside a compute share. A display card with no resident seat sorts first (nothing
+  to evict), so with the pair seat loaded `gpu reserve --cards 1 --vram 6` now prefers the screen's card to an eviction;
+  `gpu_display_cap_pct: 0` restores the old order.
+- A display twin that is loaded counts as a resident seat of the display card, each loaded twin costed at the layer's
+  `display_footprint_gib` (both twins loaded cost twice that), so the card is not ranked as an empty one while it holds a twin:
+  taking it would evict the twins, and the order prices that. When llama-swap's `/running` cannot be read the display layer's
+  models are counted as loaded, so the display card sorts as occupied rather than as the empty card it might be; other layers'
+  seats contribute nothing then, as before. A display card that could not clear the cap is not queued on while a lease holds it
+  (waiting would not fix it). The llama-swap twin guards (`display_floor` and `presence`, `internal/placement/guards.go`) are
+  unchanged: `operator_presence` still decides them and nothing else
+  (`TestAllocatorOpensTheDisplayCardWithinTheCapWithoutPresence`, `TestAllocatorRefusesTheDisplayCardPastTheCapAndNamesIt`,
+  `TestAllocatorCapZeroKeepsTheDisplayCardClosed`, `TestAllocatorUndeclaredFootprintStaysRefusedOnTheDisplayCard`,
+  `TestAllocatorDisplayUnknownStaysClosedUnderTheCap`, `TestALoadedTwinOnTheDisplayCardIsAnEvictionNotAnEmptyCard`).
 
 **A queued request is asked again at the grant.** The cards a `--cards` request or an auto-placed media call queues on
-are chosen from the operator's presence and the display card's free VRAM as they are at the enqueue, and a place in line
+are chosen from the display cap and the display card's VRAM in use as they are at the enqueue, and a place in line
 can be hours long. When the cards come free the grant puts the desktop rule again from fresh readings
-(`gpulease.Options.GrantCheck`, `gpulease.DesktopRefusals`, built by `gpualloc.GrantCheck`): the display card, or a card
-that may be it on a reading that could not say, while the operator is back at the desk, and the display card under its
-floor. The check runs with the cards already claimed by the request, because a claim that is checked before it is made can
+(`gpulease.Options.GrantCheck`, `gpulease.DesktopRefusals`, built by `gpualloc.GrantCheck`): the display card past its cap
+(it grew while the request waited), the display card once the operator has closed it (`gpu_display_cap_pct: 0`), and a card
+that may be the display card on a reading that could not say. The check runs with the cards already claimed by the request, because a claim that is checked before it is made can
 be skipped by a lease that is mid-release; a refused grant is released at once and the request chooses again from the same
 fresh readings, so it takes another card it still fits, queues on what qualifies now, or keeps polling for the display card
 to qualify until its `--wait` ends. The second choice keeps the arrival time of the first (`Options.QueuedSince`), so the
 place in line is not lost to it. `--devices` is the operator's word and carries no check
-(`TestAQueuedLeaseIsNotGrantedTheDisplayCardOnceTheOperatorIsBack`, `TestAQueuedMediaCallIsNotGrantedTheDisplayCardOnceTheOperatorIsBack`).
+(`TestDesktopRefusalsAppliesTheCapAtGrantTime`).
 
-**A lease already running on the display card is not revoked when the operator returns.** The post-admission watcher
-([composite-tier.md](composite-tier.md), ADR 0075) unloads the display layer's llama-swap twins and nothing else: it never
-stops a process and never releases a lease. A `--cards` job or a media render that took the display card while the operator
-was away keeps it after they come back. The desktop floor was checked once, when the card was claimed
+**A lease already running on the display card is not revoked when the operator returns or closes the card.** The post-admission
+watcher ([composite-tier.md](composite-tier.md), ADR 0075) unloads the display layer's llama-swap twins and nothing else: it never
+stops a process and never releases a lease. A `--cards` job or a media render that took the display card keeps it after the
+operator comes back, and after `gpu_display_cap_pct` is set to 0. The cap was checked once, when the card was claimed
 (`free - footprint >= floor`), so what protects the desktop afterwards is the footprint the job declared with `--vram`, the
 window it declared with `--for` (the lease expires then), and the operator, who can end it with `gpu release`. A job that
 grows past its declared footprint, or a game that takes the memory, can break the floor while the lease runs, and nothing
@@ -1231,8 +1308,8 @@ told which lease, what is wrong, for how long, what is running and the command t
 later change), and the message says so: until it ships, ask whoever owns the lease or the operator.
 `gpu_orphan_grace_min` (default 15) is installed once at config load, so every surface reads the same grace.
 
-**Not in this change, on purpose:** the process-tree record behind `tree-orphan`, the takeover and yield commands,
-`gpu release` routing. A lease past its window with a live holder is surfaced as `held-overdue` and nothing else happens
+**Not in this change, on purpose:** the takeover and yield commands, `gpu release` routing (the process-tree record behind
+`tree-orphan` is [its own section](#a-dead-wrapper-with-a-live-tree-keeps-its-claim-plan-p10-adr-0084)). A lease past its window with a live holder is surfaced as `held-overdue` and nothing else happens
 to it; what its holder does at the end of a term is the next section.
 
 ## Terms: a window is a term, and a term ends in a renewal or a label (ADR 0070)
@@ -1574,7 +1651,7 @@ Every figure this rule uses is the harness's: chosen or measured, and labelled a
 * **What each render held is recorded, not guessed.** Every sampled GPU render records, beside its VRAM peak, the peak
   PRIVATE and the peak RESIDENT memory of its process tree (`gpulease.TreeMemory`, sampled by gpugen on the same tick) into
   the footprint store as `host_peak_gb` and `host_resident_peak_gb` with the number of runs (`host_runs`); both ride
-  `/fleet/health` `model_footprints[]` additively. Two quantities on purpose: they differ exactly where the open question
+  `/fleet/health` `model_footprints[]` additively. Two quantities on purpose: they differ exactly where the VRAM charge
   below bites. The media admission reads them back (`Pipeline.calibratedRAM`) and **raises** a declaration to the measured
   resident figure once at least three runs exist (`hostPeakMinRuns`, chosen), for the image and video routes. It only
   raises: the sampled tree can miss memory (a ComfyUI instance kept from an earlier lease and reused is not under the
@@ -1595,23 +1672,31 @@ Every figure this rule uses is the harness's: chosen or measured, and labelled a
   `host_resident_peak_gb` stay the all-time maxima, a peak being a peak. Edit, inpaint, animate and music keep the estimate
   from their model files until their sampling keys carry a family.
 
-* **Does a GPU process's WDDM allocation count toward its private bytes / commit? Partly measured, not settled.**
-  *Measured 2026-10-10 on the reference 3-card box, read-only* (Windows performance counters, no lease, nothing started; 60
-  readings at 3 s intervals, one GPU process steady the whole time): a ComfyUI server (`--disable-smart-memory --cache-none`) read
-  private 27.8 GiB, working set 16.1 GiB, GPU Process Memory dedicated 9.55 GiB, shared 13.58 GiB, total committed 23.13 GiB.
-  `private - working set` is 11.7 GiB against 9.55 GiB of dedicated VRAM: consistent with dedicated card allocations being
-  charged to private bytes and not being resident, and with shared GPU memory (system RAM the driver backs) being resident.
-  It is one process in one steady state, and a second process on the box (the screenshot tool) did not fit the same
-  arithmetic (`private - working set` 0.84 GiB under its 1.03 GiB dedicated), so it is evidence, not proof. *Reported, not
-  reproduced here:* a llama-server with every layer on the card showed 29.2 GiB private beside 25.7 GiB of VRAM. *Measured as
-  a control:* committed-but-untouched memory reads as private and not as resident (256 MiB: private 305 MiB, resident 13 MiB),
-  so "private is not RAM" is true of the process model on this OS, whatever the driver does. *Observed by earlier watchers,
-  same box:* commit above physical RAM (129.5 against 127.7 GiB) with one lane running, 47 GiB free and 2.3 GiB of page file in
-  use, unchanged for hours. **UNVERIFIED:** whether the system commit counter itself moves by a lane's VRAM when the lane
-  starts (the one thing that would settle it needs a lease and a lane, which is the S1 acceptance run), and the whole question
-  on the other nodes. Until then the rule requires both terms (above) and the not-yet-loaded sum is in resident units.
-  Settling the question would say whether a declaration in resident units under-states a lane's commit (the measured case
-  under "Known limits" says it can); it would not by itself make the rule a bound on what the box commits.
+* **Does a GPU process's allocation count toward its private bytes and the system commit? Yes on the reference driver (measured
+  2026-10-11); the brake is unchanged, and the limits are below.**
+  *The measurement.* On the reference three-card box (127.7 GiB physical, commit limit 187.7 GiB, Windows driver model), a
+  4.0 GiB `cudaMalloc` on a card raised the process's private bytes by 4.0 GiB (and system commit by 4.1 GiB), a 2.0 GiB one on
+  the display card by 2.0 GiB, and both fell back when the memory was freed: **every VRAM allocation is charged 1:1 to the
+  process's private bytes and to system commit**, on top of a CUDA context of about 2 GiB. A card-only Wan run therefore showed
+  private bytes 17 GiB over its baseline and system commit moving 82, 113, 83 GiB (the VRAM charge 23.8 GiB, an idle ComfyUI
+  3.2 GiB, host growth 2.3 GiB, the rest other tenants) while the host's available RAM never fell under 45 GiB in 33 recorded
+  runs. The stock ComfyUI loader (dynamic VRAM off) maps every safetensors file copy-on-write and Windows charges the whole
+  file to commit at map time (14.73 GiB on one Wan expert); a read-only loader adds nothing. This replaces the earlier
+  one-process observation (2026-10-10), which was consistent with it and could not settle it.
+  *What it means for the brake.* The brake's commit term counts card-resident weights as host memory: system commit sits
+  tens of GiB above what the host really uses, so commit says nothing about paging by itself. **The brake is unchanged**: it
+  still reads committed memory plus the declared need against physical RAM less the headroom, and available RAM is the paging
+  signal beside it (decided 2026-10-11, F70). What keeps card-only work moving is the declaration: a recipe
+  whose weights all sit on the cards (card-only placement, the read-only loader) declares **`--ram 0`**, which is the brake's own
+  unit (host memory the lane adds to commit), and a need of 0 is always admitted. A recipe that streams weights from RAM declares
+  them in full and waits behind the brake as before.
+  *Limits.* **One driver on one box:** the 1:1 charge was measured on the reference box's Windows driver and not on any other node
+  or driver version, so another host's commit says nothing until it is measured there. **Commit counters are system-wide:** other
+  tenants move them by tens of GiB (133 GiB before one run), so only a process tree's own private bytes are attributable to a
+  run. **A declaration of 0 is a statement about the recipe, not a measurement of the run:** the figures above are growth of
+  1.3 to 3.7 GiB for a card-only run, inside the headroom the brake keeps anyway, and a card-only recipe that loses its
+  read-only loader declares the file sizes it would then add to commit. Whether a lane's VRAM moves the commit counter at the
+  moment it starts, on a node other than the reference box, is not measured.
 
 * **Pages-in per second is not a paging signal on this box.** `\Memory\Pages Input/sec` read 0 to 1168 pages/s in the quiet
   sample with the page file flat, because it counts every file-backed read as well. Say "paging" only from page-file growth or
@@ -1779,6 +1864,142 @@ instance (`--keep-comfy`)" in [media-generation.md](media-generation.md). It clo
 lane's own weights; it does not explain the whole figure. A ComfyUI process launched fresh on 2026-10-10 held the same 57.7 GiB
 private about seven minutes after launch (a reading on the reference box, from a session, not recorded in this repository), so the footprint of a single lane is unmeasured here and the S1 acceptance runs
 record it (see "Known limits").
+
+## A dead wrapper with a live tree keeps its claim (plan P10, ADR 0084)
+
+*A wrapper that is gone proves the wrapper is gone, not the job.* Until this change the reclaim rule read "the holder's pid
+is dead" as "the card is free": a wrapper that was killed, crashed or lost its session left the command it started running
+on a card that was truly in use, and the next acquirer was handed that card at once (two jobs on one card). When the lease
+was lost the wrapper stopped only its direct child, so a grandchild kept the card the same way.
+
+**The rule.** The wrapper starts its command inside a containment (below) and records the processes of the tree it started,
+pid and start identity of each, in the lease record (`tree`, additive and `omitempty`; an older reader ignores it). A lease
+whose wrapper is **gone** (its pid dead, or alive but a different process: a recycled pid) is **not reclaimable while any
+recorded member is alive by pid AND start identity**. The lease then reads **`tree-orphan`**: it stays held, fenced and
+claimed on its cards, and a waiter is told so. The reclaim rule for a lease whose wrapper is alive is untouched (the
+heartbeat-and-window conjunction). A lease that recorded no tree and whose wrapper is gone has no record to hold it: it is free at
+once **unless** the reader can tie a live process to it by the other evidence below (a launch marker, or on Windows a child of the
+dead wrapper that began after the lease). With none alive it is reclaimed exactly as before.
+
+**Bounded by observation, never by a timer.** Every read of the lease checks the members again, by pid and start identity.
+A pid recycled for an unrelated process cannot hold a card (its start identity differs), a member whose start identity cannot
+be read stays held (a safety check does not turn itself off), and the card frees itself at the first read after its members
+are gone, with no clock involved: hours past its declared window and heartbeat a tree-orphan is still held while its members
+live (invariant I3, expiry never frees a card). Nothing here kills a process.
+
+**Where the members come from**, in order, and the later sources only while the wrapper is gone and no recorded member is alive:
+
+1. **The record.** The wrapper writes its tree at start and on its 15 s tick, rewriting the record (under the epoch lock)
+   only when the set of processes changed. The tree is what the containment lists: on Windows, with a contained command, the job
+   object's processes and nothing else (the job is exact, descendants that outlived their parent included; the console host the OS
+   starts as a child of a command that has a console of its own is not in it, and recording it could keep a claim for a job that is
+   gone); on Linux the process group plus the descendants reachable through live parent links, and for a command that runs
+   uncontained the process table below the command is the only source. The wrapper itself is not a member. The record is frozen
+   when the wrapper dies: the reader does not consult the process table for a lease that recorded a tree.
+2. **A launch marker.** A ComfyUI instance can sit outside the wrapper's job. Its launch marker (`.offload-launch-<key>.json`
+   in the ComfyUI directory, armed from `comfy_dir` at config load by `modelaffinity.SetComfyDir`, the one call that also arms
+   the marker reader of the seat scoper) names the lease epoch it was launched under; a marker that names this epoch, whose
+   process is alive and did not begin after the marker was written (a recycled pid), keeps the claim. A marker that names no
+   lease (the default instance) ties only to a lease that recorded no tree, when it began at or after that lease and no other
+   lease record exists in the directory (it cannot be told apart from another lease's otherwise); one that began before the
+   lease is a leftover and proves nothing.
+3. **The process table, for a lease that recorded no tree** (a wrapper that predates this change). Windows keeps a child's
+   parent link when the parent dies, so the children of the dead wrapper's pid that began at or after the lease are found; Linux
+   reparents them, so the walk finds none. A wrapper pid that is alive but recycled is never walked: its children are another
+   process's.
+
+The driver's per-process compute listing is **not** evidence. Under WDDM it names no process for most of them, and a process
+on a card cannot be attributed to a lease by itself; `proctree.PlanStop` reports such a process as `card still busy by pid N
+(not ours)` and never touches it.
+
+**The wrapper.** `gpu reserve ... -- <command>` now starts its command through `internal/proctree`:
+
+- *Windows:* the child is created suspended, assigned to a job object and resumed, so it cannot spawn a process that escapes the
+  job before it is inside; every descendant joins the job, including a process started detached. If the OS refuses the job (an
+  enclosing job that cannot be nested, an access failure) the command still runs, uncontained, and the wrapper says so on
+  stderr; a lost lease then stops the command and what the process table shows below it. Under `--die-with-wrapper` the same
+  failure is a **refusal** (the suspended child is stopped and the reserve returns an error), because the caller asked for a
+  guarantee the command cannot get; running it uncontained would leave a render alive after the wrapper dies.
+- *Unix:* the child leads its own session and process group, and the group is signalled as a whole (`kill(-pgid)`). (`Pdeathsig`
+  is not used: it is delivered per thread and covers the direct child only.)
+- *A lost lease or an interrupt stops the whole tree*, not just the command, **except** a live ComfyUI instance whose launch
+  marker names a lease other than this one: a kept instance another lease reused was re-stamped to it, and killing it would kill
+  that lease's job. The wrapper says what it left running. (`stopInstancesOfLease` already leaves such an instance alone when
+  the lease is not ours; the tree stop follows the same rule.) A signal that ends the wrapper (the console closing, a logoff)
+  stops the tree the same way, inside the few seconds the OS grants.
+- *Letting go of the tree leaves it running.* If the wrapper exits or dies, the job keeps running and its lease becomes a
+  tree-orphan, unless the reserve was started with **`--die-with-wrapper`** (Windows: the job is created kill-on-close, so the
+  wrapper exiting or dying ends the tree). It is **opt-in and off by default** because it makes the wrapper a single point of
+  failure for a long render. A platform with no handle whose closing ends a tree (Linux) refuses the flag before the reserve
+  queues for a card, and so does `--detach` (a detached holder runs no command). **One carve-out:** a ComfyUI instance whose launch
+  marker names another lease (a kept instance a later lease reused) is spared by the lost-lease stop, and a kill-on-close job
+  would end it a moment later when the wrapper lets go of the job. So once the wrapper has spared a process it ends everything
+  else of the tree first, clears the job's kill-on-close, says so (`--die-with-wrapper no longer applies to this command's tree`),
+  and only then lets go; the same is done when the wrapper finishes and finds such an instance in the job without the lease
+  having been lost on its last tick (`proctree.Tree.DisarmKillOnClose`).
+
+**What a reader sees.** The verdict `tree-orphan` (it leads the precedence; the brief line leads with `ORPHANED`),
+`gpu status` (`wrapper: pid N is GONE, but the job it started is still running (pid ...): TREE-ORPHAN`, then the evidence),
+`activity.holder` (`tree_orphan`, `tree_pids`, `tree_why`), the sentence a waiter reads (`lease epoch N is tree-orphan: its
+wrapper (pid P) is gone but the job it started is still running ...`), and `/fleet/health` (`tree_orphan` on the lease entry
+and the singular block, verdict `tree-orphan`; the lease is `busy` like any held lease: inside its declared window it closes its
+cards to new work, and past the window it is ranked last and is not a refusal, as every overdue lease has been since 0.113.27,
+because dispatch queues behind a lease and a node that refused here would keep the capacity wait from asking the one remote that
+could take the work). The host-RAM guard measures what a tree-orphan has loaded from its live members, not from the dead
+wrapper's pid, so the declared need of a job that is running is not charged a second time as still to load. The allocator treats a tree-orphan's
+cards as claimed, so a `--cards N` reserve is handed other cards, and a seat warm-back does not load over them (it waits for
+the last live lease on the seat's cards).
+
+**What ends a tree-orphan.** It ends by itself at the first read after its members are gone. To end it sooner, the one command
+that does it today is `local-offload gpu release --epoch N`, and every surface above names it (the takeover verb the other
+escalated verdicts point to does not exist in this build and is not offered here). `gpu release --epoch N` ends the claim at
+once and stops only the ComfyUI instances kept under the lease; **the rest of the job keeps running on the card**, unfenced, so it
+is run by a human who has seen that the job is dead or disposable. Nothing in the harness runs it on its own. What should happen
+to an overdue or orphan tree by policy (ask the holder to yield, or hold) is a decision for after this ships.
+
+**The stop primitives a takeover will use** are in this change and have no caller yet. `proctree.PlanStop` decides what may be
+stopped (the recorded tree and launch-marker processes, nothing else) and `proctree.Stop` re-checks each member by pid and
+start identity right before it signals it, polls until it is gone and returns one outcome per member, so a caller that frees
+a claim can require the tree verified dead (`AllGone`). `comfyinst.StopMarker` asks a marker's instance to stop its running
+prompt (`POST /interrupt`), drops its models (`POST /free`) and kills the marker's pid, only after the proof a lease's own
+holder gives (alive, did not begin after the marker, the endpoint reports exactly the argv the launcher recorded). On Windows
+the job's stop confirms on the process handle that a pid it was listed is still a member of the job before it ends it.
+
+**Cross-version (invariant I7).** A reader built before this change ignores `tree` and reclaims a dead wrapper's lease at once,
+as it always did (`TestOldReaderStillReclaimsATreeOrphanRecord` runs the preserved old reader against one). The rule holds on a
+host where every reader (CLI, MCP server, fleet daemon, a media repo's separate binary copy) is this build; `gpu doctor` lists
+the readers older than the record format, and this change does not move the audit's line (it is a reader improvement, and a
+reader that lacks it is no worse than before), so **a host is protected only once every reader on it has been restarted on this
+build**: after the deploy run `gpu doctor` and cycle the MCP servers, and compare build versions, because the audit's
+`FormatSignature` is not bumped and cannot tell. Nothing is written that an older reader misreads: the key is additive.
+
+**Limits, said plainly.**
+
+- The recorded tree is at most one tick (15 s) behind while the wrapper lives, and **frozen when it dies**. A lease that recorded a
+  tree is held by that record and by a launch marker that names its epoch; the process table is read only for a lease that
+  recorded none. So a process the command started after the last record, and that outlives every recorded member, is not held
+  (unless a marker names the lease): the card can be handed on under it. The window is one tick wide, it needs the wrapper to
+  die inside it and the recorded members to exit before that process, and it is the accepted limit of recording rather than
+  enumerating; a wrapper that dies in its first seconds still has its command recorded (the tree is written right after the
+  start).
+- A wrapper that is alive but wedged (alive pid, stale heartbeat, window over) is still reclaimed by the conjunction, tree or no
+  tree: this change is about a wrapper that is gone.
+- A lease taken by the harness's own pipeline (a media call) records no tree. A render child that outlives a crashed server is
+  found by the process-table walk on Windows and by the launch marker for a keyed instance; on Linux only the marker.
+- A Unix wrapper cannot make its tree die with it (`--die-with-wrapper` is refused there); the tree-orphan rule is the protection.
+  Its command also leads its own session, so a terminal hang-up that used to reach the command (it shared the wrapper's session)
+  now ends only the wrapper: the job keeps running and its lease keeps the cards as a tree-orphan.
+- The wrapper holds the lease exactly as long as its COMMAND runs. A command that exits and leaves processes running (a daemon it
+  started) releases the lease at its exit as it always did; those processes are not stopped (a kept ComfyUI instance is, by the
+  release) and not claimed. `--die-with-wrapper` ends them with the wrapper on Windows.
+- Free-by-observation means the claim ends when the members do, which for a job that has hung is never: that is what
+  `gpu release --epoch N` is for. A takeover that also stops the job, and the policy that would run it, are later changes.
+- A Windows command that runs in a console of its own (its wrapper has none) is given a console host (`conhost.exe`) by the OS, a
+  child of the command that is not in the job. The recorder used to union the job's list with the process table, so it recorded
+  that console host too, and a recorded member that is not the job can keep a dead wrapper's claim after the job is gone. That is
+  the extra member the first measurement saw; on Windows, with a contained command, the record is now the job's exact list. A
+  console host the OS makes for a descendant's own console is in the job and exits a moment after its last client, so a card
+  frees a moment after the last real process, never later.
 
 ## The fleet reads leases per card (plan P7)
 
@@ -2226,7 +2447,7 @@ fence: the pre-0.117.0 warm-up loaded the seat straight past an exclusive hold.
 | `held-stalled` | the lease carries a progress contract (`--progress-file` and `--stall`) and the file did not move inside its window. The holder is alive and heartbeating; nothing is reclaimed or killed |
 | `held-orphaned` | an ATTENDED lease whose owner (session or process) has been gone for longer than `gpu_orphan_grace_min` (default 15 minutes): nobody is expected back for it. Never produced for an unattended, remote or unknown-owner lease. Nothing is reclaimed or killed |
 | `held-overdue` | the declared window ended and the holder is still alive and heartbeating. Informational: a declared window is not a ceiling for a live holder, so nothing is reclaimed. A holder whose owner vouches for the job renews its term instead (see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)); when it does not, the lease is labelled **expired** and the note says why (the `--for` default is 45 minutes, so a wrapper that never declared a window and has no live owner reads overdue after that while it still heartbeats) |
-| `tree-orphan` | the wrapper is gone but the job it started still holds the cards. In the vocabulary so the precedence is complete; **not produced by this build** (it needs the wrapper to record its process tree) |
+| `tree-orphan` | the wrapper is gone but the job it started is still running, so the card is in use and the claim is kept (see [A dead wrapper with a live tree](#a-dead-wrapper-with-a-live-tree-keeps-its-claim-plan-p10-adr-0084)): a recorded member of its process tree is alive by pid and start identity, or a launch marker or the process table ties a live process to it. It leads the precedence. Nothing is reclaimed or killed; it ends when the members are gone, or at once by `gpu release --epoch N`, which leaves the job running |
 | `loaded-idle` | no lease; the seat is resident with nothing in flight (unloads at its ttl) |
 | `busy-outside` | no lease, seat idle, cards busy — work the harness does not own (the processes are listed; a display card's unsized desktop is counted, not named) |
 | `stale-holder` | a lease record whose holder is gone; the next acquirer reclaims it |
@@ -2328,6 +2549,12 @@ request posted straight to llama-swap by anything outside the harness is outside
 
 ## Known gaps
 
+- **A tree-orphan is held until its members are gone, and nothing yet stops one.** The tree record, the `tree-orphan` verdict and the
+  stop primitives exist (see [A dead wrapper with a live tree](#a-dead-wrapper-with-a-live-tree-keeps-its-claim-plan-p10-adr-0084)),
+  but the takeover that stops a tree and frees the claim is a later change (and the policy that would run it, `gpu.on_overdue`, a
+  decision after this ships), so a hung job whose wrapper died is freed by an operator stopping its processes or running
+  `gpu release --epoch N`, which ends the claim and leaves the job running. A reader built before the change still reclaims a dead
+  wrapper's lease at once, and the recorded tree is at most one tick behind.
 - **The warm-back's reload retry rests on llama-swap's source, not on a captured incident.** The 500 body of the incident
   that prompted it was never recorded, the retry class keys on llama-swap's message text, and a re-send during the old
   server's teardown was not measured against a live instance. The failure line now carries the status and a snippet of the

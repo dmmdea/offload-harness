@@ -50,7 +50,10 @@ import (
 //     itself, which is exactly the pre-key behaviour.
 //   - a failing action (unknown tool, tool error) becomes its error
 //     observation, never an abort; the trace's Step-0 entries carry the
-//     per-action status and SetupRan counts what actually executed.
+//     per-action status and SetupRan counts what actually executed. The one
+//     exception is a tool that could not open the workspace root (register
+//     C-79): the replay still records every action, and the run then ends on
+//     the *RootGoneError before any model turn.
 
 // SetupAction is the loop-local form of core.AgentSetupAction: the tool by
 // name and its argument object as raw JSON.
@@ -99,11 +102,14 @@ func SetupRan(effects []EffectRecord) int {
 // replaySetup runs the installed setup actions and returns the transcript
 // with the replay appended (one assistant turn + one tool result per action
 // that was attempted), recording each action in effects/ruleHits and pinning
-// each result id. No actions = the transcript untouched.
-func (l *Loop) replaySetup(ctx context.Context, msgs []Msg, pinned map[string]bool, effects *[]EffectRecord, ruleHits *[]EnvRuleHit, ruleState *EnvRuleState, exactCalls map[string]int, firstCallID map[string]string) []Msg {
+// each result id. No actions = the transcript untouched. The *RootGoneError is the
+// first action's report that its tool could not open the workspace root (nil when
+// none did); the caller ends the run on it.
+func (l *Loop) replaySetup(ctx context.Context, msgs []Msg, pinned map[string]bool, effects *[]EffectRecord, ruleHits *[]EnvRuleHit, ruleState *EnvRuleState, exactCalls map[string]int, firstCallID map[string]string) ([]Msg, *RootGoneError) {
 	if len(l.setup) == 0 {
-		return msgs
+		return msgs, nil
 	}
+	var gone *RootGoneError
 	budget := l.setupBudgetTokens()
 	spent := 0
 	var calls []ToolCall
@@ -146,7 +152,11 @@ func (l *Loop) replaySetup(ctx context.Context, msgs []Msg, pinned map[string]bo
 		} else {
 			// dispatch, not dispatchOrThrottle: no breaker reads, no breaker
 			// writes — see the accounting note at the top of this file.
-			content, isErr, eff = l.dispatch(ctx, call)
+			var g *RootGoneError
+			content, isErr, eff, g = l.dispatch(ctx, call)
+			if g != nil && gone == nil {
+				gone = g
+			}
 		}
 		if l.envRules != nil && eff != EffectNone {
 			obs := EnvObservation{Content: content, IsError: isErr}
@@ -200,11 +210,11 @@ func (l *Loop) replaySetup(ctx context.Context, msgs []Msg, pinned map[string]bo
 		spent += estimateTokens([]Msg{{Role: "tool", Content: content}})
 	}
 	if len(calls) == 0 {
-		return msgs
+		return msgs, gone
 	}
 	head := Msg{Role: "assistant", ToolCalls: calls,
 		Content: fmt.Sprintf("setup: %d action(s) replayed from the contract before the first turn; their results follow. Use them — the documents they return are already in front of you.", len(calls))}
 	msgs = append(msgs, head)
 	msgs = append(msgs, results...)
-	return msgs
+	return msgs, gone
 }

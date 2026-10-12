@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -364,11 +365,48 @@ func (s *Store) Save() error {
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, s.path); err != nil {
+	if err := renameOntoStore(tmp, s.path); err != nil {
 		os.Remove(tmp)
 		return err
 	}
 	return nil
+}
+
+// renameStore is os.Rename. It is a variable only so a test can inject the denial Windows gives a
+// rename over a file another process has open.
+var renameStore = os.Rename
+
+// renamePoll is the pause between attempts to rename the saved store onto its path. It is shorter than
+// lockPoll because the window being waited out is a reader's open handle, which lasts microseconds.
+const renamePoll = 5 * time.Millisecond
+
+// renameOntoStore renames the temp file onto the store, asking again for up to lockWait when the rename
+// is refused for a reason that clears on its own.
+//
+// WHY: the store is read WITHOUT the lock (Load, from the delegate, the fleet node and the pipeline, so
+// that a reader never waits on a writer). On Windows os.Open grants FILE_SHARE_READ|FILE_SHARE_WRITE and
+// never FILE_SHARE_DELETE, and a rename over a file has to delete the old directory entry, so a rename
+// that lands while any reader has the store open fails with "Access is denied" although nothing is
+// wrong: the reader lets go microseconds later. Update used to hand that error to its caller, which logs
+// "seat-rates store not updated" and drops the run's sample (D-120's symptom, on the rename instead of
+// the lock create). The wait stays inside Update's lock, so no other writer can slip in between.
+// Anything that is not a denial, or a denial that outlasts lockWait, is returned as it is.
+func renameOntoStore(tmp, path string) error {
+	deadline := time.Now().Add(lockWait)
+	for {
+		err := renameStore(tmp, path)
+		if err == nil || !transientRename(err) || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(renamePoll)
+	}
+}
+
+// transientRename reports whether a refused rename may be granted by asking again. A permission denial
+// is the portable answer (Windows reports ERROR_ACCESS_DENIED as one); the Windows file in this package
+// adds the sharing and lock violations, which Go does not map to a permission error.
+func transientRename(err error) bool {
+	return errors.Is(err, os.ErrPermission) || platformTransientRename(err)
 }
 
 const (
@@ -382,9 +420,38 @@ const (
 	lockStale = 30 * time.Second
 )
 
-// ErrLocked is returned by Update when another writer held the store for the
-// whole lockWait window.
+// ErrLocked is returned by Update when it could not take the store's lock within
+// lockWait: another writer held it for the whole window, or creating the lock file
+// was refused for the whole window (on Windows a denial can be a delete still
+// pending, so it is waited on like a held lock; a directory this process cannot
+// write ends the same way). The second case wraps the refusal beside ErrLocked, so
+// errors.Is(err, os.ErrPermission) tells the two apart. In both the store is
+// untouched and the caller skips that one observation. A failure after the lock was
+// taken (the save) is never ErrLocked.
 var ErrLocked = errors.New("seatrate: store locked by another writer")
+
+// openLock creates the lock file exclusively. It is a variable only so a test can inject the
+// access-denied answer Windows gives while a deleted lock is still pending removal.
+var openLock = func(name string) (*os.File, error) {
+	return os.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+}
+
+// removeLock removes the lock file, both a stale one and the writer's own at the end of Update. A
+// variable for the same reason: a test cannot make the removal fail the way a held handle does on
+// Windows without it.
+var removeLock = os.Remove
+
+// releaseLock removes the lock file Update took. A removal that fails (on Windows a scanner or indexer
+// holding the file open without delete sharing) leaves the lock behind until it is old enough to be taken
+// over (lockStale), and every writer meanwhile waits lockWait and skips its sample. That is not Update's
+// result: the save it ran under the lock may well have landed. So it is said here, once, naming the lock
+// and the cause, instead of leaving the skipped samples with no explanation. A lock that is already gone
+// is not a failure.
+func releaseLock(lock string) {
+	if err := removeLock(lock); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("seatrate: the lock %s could not be removed (%v): writers skip their samples until it is %s old", lock, err, lockStale)
+	}
+}
 
 // Update applies fn to the store at path under an exclusive lock — load, fn,
 // save as ONE step. tmp+rename alone protects a reader from a half-written
@@ -404,24 +471,39 @@ func Update(path string, fn func(*Store)) error {
 	lock := path + ".lock"
 	deadline := time.Now().Add(lockWait)
 	for {
-		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		f, err := openLock(lock)
 		if err == nil {
 			f.Close()
 			break
 		}
-		if !errors.Is(err, os.ErrExist) {
+		// Contention on Windows does not always look like "already exists": removing a
+		// file whose handle is still open only marks it delete-PENDING, and an exclusive
+		// create issued in that window fails with ACCESS_DENIED. That is another writer
+		// finishing, so it waits like a held lock (the same rule gpulease's own claim and
+		// epoch lock follow). A directory this process cannot write is refused with the
+		// same denial every time and ends at the deadline below.
+		if !errors.Is(err, os.ErrExist) && !errors.Is(err, os.ErrPermission) {
 			return err
 		}
 		if st, serr := os.Stat(lock); serr == nil && time.Since(st.ModTime()) > lockStale {
-			os.Remove(lock) // a dead writer's lock; the next attempt takes it
-			continue
+			// A dead writer's lock; the next attempt takes it. Only a removal that worked
+			// (or found the file already gone) retries at once: a stale lock that cannot be
+			// removed waits out the deadline like any held lock instead of spinning.
+			if rerr := removeLock(lock); rerr == nil || errors.Is(rerr, os.ErrNotExist) {
+				continue
+			}
 		}
 		if time.Now().After(deadline) {
-			return ErrLocked
+			if errors.Is(err, os.ErrExist) {
+				return ErrLocked
+			}
+			// Both causes stay in the chain: the caller skips the sample as for a held lock
+			// (errors.Is ErrLocked), and an unwritable directory is still named.
+			return fmt.Errorf("%w: the lock file could not be created within %s: %w", ErrLocked, lockWait, err)
 		}
 		time.Sleep(lockPoll)
 	}
-	defer os.Remove(lock)
+	defer releaseLock(lock)
 	s, lerr := Load(path)
 	if lerr != nil {
 		// A corrupt store is replaced by what this run knows — the error is

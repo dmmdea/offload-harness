@@ -1,0 +1,5 @@
+# The tripwire's reasoned ignore list: NAME-PREFIX, a TAB, the reason. A prefix is the label the tripwire prints for a group of
+# leaked entries (such as lo-x-state-*). An entry named here is not counted as a leak; it is printed with its reason. Add one only
+# for a leaver that is legitimate, with the reason in the same line, and never to hide a test that should use t.TempDir().
+# An entry matches by name prefix only: what is inside the entry is not looked at, so say in the reason what it holds.
+# No test leaves anything legitimate today, so the list is empty.

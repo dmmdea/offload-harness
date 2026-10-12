@@ -1972,6 +1972,12 @@ type LeaseStanding struct {
 	Orphaned bool `json:"orphaned,omitempty"`
 	// Stalled: the lease's progress file did not move inside its stall window.
 	Stalled bool `json:"stalled,omitempty"`
+	// TreeOrphan: the lease's wrapper is gone but the job it started is still running, so the
+	// claim is kept (plan P10). The card is in use, and the lease layer never frees it by a clock. On this wire it is
+	// busy and refuses work for its cards exactly as any held lease does: within its declared window it closes them, and
+	// past the window it is ranked last (overdue) and is not a refusal, because dispatch queues behind it instead of
+	// turning work away (the 0.113.27 rule for every overdue lease, kept: a tree-orphan is no exception to it).
+	TreeOrphan bool `json:"tree_orphan,omitempty"`
 }
 
 // FleetBusyLeaseSecDefault is the remaining-time threshold above which a held

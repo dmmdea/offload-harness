@@ -738,6 +738,15 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 		d, derr := openWriteDoor(contextDir, contract)
 		if derr != nil {
+			// The read root being gone is the box's fault, not the door's (register C-79):
+			// the run waited for its seat (the cordon, the pre-flight, a cold load that can
+			// take minutes) between materializing its context dir and opening the door, and
+			// a sweep, a cleaner or an operator can take the dir in that window. Filed as a
+			// `write` defer it would tell the operator to opt a node in, and the delegator
+			// would not re-place it.
+			if gone := agent.CheckWorkspaceRoot(contextDir); gone != nil {
+				return deferWire(core.DeferClassInfrastructure, rootGoneReason(gone))
+			}
 			// A write_root that cannot be resolved or created here is a
 			// node-side condition, not a claim about the contract's work.
 			return deferWire(core.DeferClassWrite, derr.Error())
@@ -1079,7 +1088,33 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// its step budget or its wall may still have made a real, reviewable change,
 	// and a door that only published on the success path would throw that away
 	// exactly when the caller most needs to see what the seat did.
-	if door != nil {
+	//
+	// Except for a run whose workspace root is gone (register C-79): the write root lives
+	// inside it, so there is no write set to render, and a snapshot of a tree that is not
+	// there reads as every file deleted: a diff the caller would be invited to apply. The
+	// run publishes no diff, and defers as infrastructure below when nothing else ended it.
+	// The loop reports the loss when a tool found it (the first line), and nothing reports a
+	// tree that went after the seat's last tool call, so a door that is about to render the
+	// tree asks for itself (doorGone). A run with no door is not asked: the root is only
+	// read for it, and its finished answer stands.
+	rootGone := agent.RootGoneOf(rerr) // nil unless the loop ended on the tool's lost-root report
+	var doorGone *agent.RootGoneError  // the tree the write door was about to render, found gone
+	if door != nil && rootGone == nil {
+		doorGone = agent.CheckWorkspaceRoot(contextDir)
+	}
+	if doorGone != nil {
+		// No diff whatever ended the run. Only a run the loop ended cleanly takes the lost root as its
+		// cause: when the loop ended on a cause of its own (a ceiling or a wall, a seat that went down, a
+		// card taken by a lease), that cause stands and is filed below, with the note saying the write
+		// set was withheld. Filed as root-gone it would hide a budget signal the delegator sizes from, and
+		// a seat-down defer's own credit; and a tree found gone here was not what stopped the run.
+		wire.WriteNote = "write set withheld: the run's workspace root could not be opened when the write door closed (" +
+			doorGone.Root + ": " + doorGone.Cause() + ")"
+		if rerr == nil {
+			rootGone = doorGone
+		}
+	}
+	if door != nil && rootGone == nil && doorGone == nil {
 		diff, files, note, derr := closeWriteDoor(door)
 		wire.Diff, wire.DiffFiles, wire.WriteNote = diff, files, note
 		if derr != nil {
@@ -1125,6 +1160,17 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		wire.PrefillTokens = pf.PrefillTokens
 		wire.CacheTokens = pf.CacheTokens
 		wire.PrefillMS = pf.PrefillMS
+	}
+	// The run's workspace root is gone (register C-79): its own file tools could not open it
+	// and the loop ended the run on the report, instead of letting the seat answer from
+	// nothing as it used to (the delegator then scored the answer as the model's failure),
+	// or the write door found the tree lost where no tool was there to report it. The fault
+	// is the box's: infrastructure. Judged before every other arm because the loop ended ON it,
+	// so no verdict about the seat or the clock can outrank it, and before the error check
+	// because a tree the door found gone after a clean finish comes with no error. A tree the
+	// door found gone beside an error of the loop's own is not here: see doorGone above.
+	if rootGone != nil {
+		return deferWire(core.DeferClassInfrastructure, rootGoneReason(rootGone))
 	}
 	if rerr != nil {
 		// A GPU-lease refusal FIRST (2026-09-22): a render or an exclusive hold

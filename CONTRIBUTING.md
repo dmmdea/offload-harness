@@ -60,6 +60,39 @@ tests caught it) or `SURVIVED` (they did not); and restores the file byte for by
 `MUTATION-VERDICT:` line, with the mutation it printed, in the pull request. `bash scripts/mutation-check-selftest.sh` (or
 `pwsh -File scripts/mutation-check-selftest.ps1`) shows every verdict on a fixture under `scripts/testdata/`.
 
+## Keeping tests out of the OS temp dir
+
+A test takes its scratch space from `t.TempDir()`, which `testing` removes when the test ends. A test that makes a folder
+or file in the OS temp dir (C: on Windows) and does not remove it on every path adds one more every run; a stand-in test
+binary once left 22,434 folders and about 70 GB in under two hours. Two things guard this, and neither replaces the other.
+
+- **The lint, `tempdir_lint_test.go` in the root package.** It reads every `*_test.go` file of the module and fails on a
+  direct use of the OS temp dir that `tempdir_lint_allowlist_test.go` does not list with its count and the reason its folder
+  is gone on every path: `os.MkdirTemp` / `os.CreateTemp` / `ioutil.TempDir` / `ioutil.TempFile` with an empty directory,
+  any `os.TempDir`, `TMP`, `TEMP` or `TMPDIR` read from the environment, and `os.MkdirTemp` passed as a value. It also
+  requires every package whose tests start a copy of their own test binary to hold
+  `TestARelaunchedTestBinaryLeavesNothingInTheTempDir` (see `internal/mediaremote/relaunch_leak_test.go`) or to be listed in
+  `relaunchExempt` with the reason a started copy leaves nothing. Prefer `t.TempDir()` to a new entry. To regenerate the
+  keys, run `TEMPDIR_LINT_PRINT=1 go test . -run 'TestTestsReachForTheOSTempDirOnlyWhereItsRemovalIsOnEveryPath|TestEveryRelaunchingPackageProvesItLeavesNothing' -v`
+  and write the reasons after reading the code.
+- **The tripwire, `scripts/test-temp-tripwire.sh`** (PowerShell twin `scripts/test-temp-tripwire.ps1`). A lint cannot see a
+  temp file made by production code that a test calls, or a copy of the test binary that exits before its cleanup. The
+  tripwire points `TMP`, `TEMP`, `TMPDIR` and `GOTMPDIR` at a fresh folder, runs `go test -count=1`, and ends with a
+  `TRIPWIRE-VERDICT` line: `CLEAN`, `LEAK` (what is left, by name prefix with a count), `PROCESSES` (an image still running
+  from the folder) or `TESTS-FAILED`. `--dir` is required and must not be on the system drive (it refuses with `REFUSED`
+  unless `--allow-system-drive` is given). A leaver that is legitimate (there is none today, so the list is empty) is named in
+  `scripts/test-temp-tripwire.ignore`, one `NAME-PREFIX`, a tab and a reason per line: the tripwire prints it with its reason and
+  does not count it, so an ignore is never silent. A whole-module run loads the machine, so run it on a spare host with
+  `nice -n 19 bash scripts/test-temp-tripwire.sh --dir <data drive folder> --go-args "-p 1 -timeout 45m"`, or pass `--pkgs` a subset. The timeout matters: `internal/pipeline` takes
+  about ten minutes, which is go test's default timeout, and a test binary that times out is killed before it cleans up, so its temp
+  state would read as a leak.
+  `bash scripts/test-temp-tripwire-selftest.sh` (or `pwsh -File scripts/test-temp-tripwire-selftest.ps1`) shows every verdict on
+  the fixture module `scripts/testdata/tripwirefixture`. When go test fails, the failing tests and their messages are printed
+  ahead of the tail of the output, because go test prints one `ok` line per later package; an interrupted run (Ctrl-C, `kill`)
+  stops go test and every test binary it started, and exits 130. The tripwire sees only what a child writes under `TMP`, `TEMP`
+  and `TMPDIR`: a child started with a scrubbed environment, or a test that names a fixed directory such as `/dev/shm`, writes
+  elsewhere and a `CLEAN` says nothing about it (the lint's relaunch-proof test is what covers the scrubbed copy).
+
 ## Documentation
 
 Documentation lives in [`docs/`](docs/README.md) and is part of the change, not a follow-up.

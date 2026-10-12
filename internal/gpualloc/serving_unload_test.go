@@ -70,7 +70,7 @@ func TestUnloadModelsPlacesWhatLayersDoNotDeclareFromTheServingConfig(t *testing
 		"yaml-unpinned", "yaml-cmd-only", "yaml-proxy", "yaml-macro", "not-in-yaml", "on-card-0", "embed",
 	}
 	var warn bytes.Buffer
-	got, ok := UnloadModels(context.Background(), servingCfg(t), roster, nil, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
+	got, ok := UnloadModels(context.Background(), servingCfg(t), roster, nil, []string{cards[2].LeaseID()}, hostDeps(cards), &warn)
 	if !ok {
 		t.Fatal("a card lease has a list")
 	}
@@ -99,7 +99,7 @@ func TestUnloadModelsSaysOnceWhenTheServingConfigCannotBeRead(t *testing.T) {
 	cfg := scopedCfg()
 	cfg.ServingConfigPath = filepath.Join(t.TempDir(), "gone.yaml")
 	var warn bytes.Buffer
-	got, ok := UnloadModels(context.Background(), cfg, []string{"on-card-0", "on-card-2", "x", "y"}, nil, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
+	got, ok := UnloadModels(context.Background(), cfg, []string{"on-card-0", "on-card-2", "x", "y"}, nil, []string{cards[2].LeaseID()}, hostDeps(cards), &warn)
 	if !ok {
 		t.Fatal("a card lease has a list")
 	}
@@ -112,7 +112,7 @@ func TestUnloadModelsSaysOnceWhenTheServingConfigCannotBeRead(t *testing.T) {
 	}
 	// With layers declaring every model the serving config is never needed, so it is never read.
 	warn.Reset()
-	if _, ok := UnloadModels(context.Background(), cfg, []string{"on-card-0", "on-card-2"}, nil, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn); !ok {
+	if _, ok := UnloadModels(context.Background(), cfg, []string{"on-card-0", "on-card-2"}, nil, []string{cards[2].LeaseID()}, hostDeps(cards), &warn); !ok {
 		t.Fatal("a card lease has a list")
 	}
 	if strings.Contains(warn.String(), "serving config") {
@@ -126,7 +126,7 @@ func TestUnloadModelsSaysOnceWhenTheServingConfigCannotBeRead(t *testing.T) {
 func TestUnloadModelsWithAnUnreadableRosterDoesNotFallBackToTheServingConfigsModels(t *testing.T) {
 	cards := threeCards()
 	var warn bytes.Buffer
-	got, ok := UnloadModels(context.Background(), servingCfg(t), nil, errors.New("roster refused"), []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
+	got, ok := UnloadModels(context.Background(), servingCfg(t), nil, errors.New("roster refused"), []string{cards[2].LeaseID()}, hostDeps(cards), &warn)
 	if ok || got != nil {
 		t.Fatalf("list = %v ok=%v, want no list: the render lane keeps its own rule", got, ok)
 	}
@@ -141,7 +141,7 @@ func TestUnloadModelsWithAnUnreadableRosterDoesNotFallBackToTheServingConfigsMod
 func TestUnloadModelsWithAnEmptyRosterThatWasReadAlsoListsTheServingConfigsModels(t *testing.T) {
 	cards := threeCards()
 	var warn bytes.Buffer
-	got, ok := UnloadModels(context.Background(), servingCfg(t), nil, nil, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
+	got, ok := UnloadModels(context.Background(), servingCfg(t), nil, nil, []string{cards[2].LeaseID()}, hostDeps(cards), &warn)
 	if !ok {
 		t.Fatal("a card lease has a list")
 	}

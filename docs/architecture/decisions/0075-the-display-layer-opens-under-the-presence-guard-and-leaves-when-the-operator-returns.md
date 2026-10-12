@@ -157,3 +157,12 @@ Reading the code before opening it found five gaps, any of which would have turn
   display layer's declaration.
 - [ADR 0066](0066-a-seat-that-goes-down-is-waited-for-and-the-failed-step-reissued.md): the agent loop's recovery from a seat
   that goes down.
+
+## Amendment 2026-10-12 (A-RAM-15: the card allocator no longer reads presence)
+
+`operator_presence` has one reader again: the display layer's llama-swap twin guards (`display_floor` and `presence`,
+`internal/placement/guards.go`), which this ADR decided and which are unchanged. The card allocator behind
+`gpu reserve --cards N` and the media admission path no longer reads it: the display card is allocatable up to
+`gpu_display_cap_pct` of its VRAM (default 60, the desktop's own use included) at any presence, for a request that
+declares its footprint, and never while the key is 0 ([ADR 0039](0039-a-held-card-is-a-place-in-line.md), amendment
+2026-10-12). The first gap above ("one key with two readers") describes the code before that change.
