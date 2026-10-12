@@ -6,6 +6,34 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a scanner the first ticket started no longer scans that ticket a second time at once, and the test that counts the first scan's lane questions counts the first scan's alone (found in the 0.181.0 merge gates; 0.181.0 code and test)
+
+- **What failed, and that the merge is not the cause.** After this branch took 0.181.0, the gate of `internal/mediaremote` failed
+  `TestTheFirstScanReusesTheLaneReadingOnlyWhileItIsFresh` on two Linux gate hosts (`probes 2, want 1` on one, `probes 3, want 2` on the
+  other) where the same package had passed at the 0.181.0 commit on one of them. The branch touches nothing in that package. Run alone,
+  4 workers of 40 runs on each host, the test failed at the 0.181.0 commit as it did at the merge: 50 and 52 of 160 on one host, 13 and
+  7 of 160 on the other. It is a race in 0.181.0 (code and test), and the one pass at the 0.181.0 commit was luck.
+- **The cause is in two parts.** (1) `register` started the scanner for the process's first ticket and also woke it. The wake-up is a
+  token that waits in the channel, so the new scanner took the ticket in its first scan, found the token and scanned the same ticket
+  again at once. That second scan found the reading the first had reused gone and asked the lane again: a second card-table read within
+  milliseconds of the first, which is the read the reuse (`verdictFresh`) exists to save. At the production rhythm of 10 s, the lane had
+  been asked twice 300 ms after the first scan in each of four tries. (2) The test counted every question its lane runner was asked after
+  the call returned, so it saw the second scan's whenever that scan beat the test goroutine, and the tests' 40 ms rhythm brings a further
+  scan about 40 ms later; its "reused" half also relied on 250 ms of wall clock between the question and the scan, which a loaded host
+  does not give.
+- **The fix.** `register` wakes the scanner only when the registration did not start it. A ticket made while the scanner runs still wakes
+  it (a scanner asleep in its 10 s timer would otherwise leave that ticket's call waiting up to 12 s for its first scan). The test makes the
+  ticket and runs its first scan by hand on a queue with no scanner: the "reused" half gives the reading a minute, the "asked again" half
+  keeps 250 ms against an identity wait of 600 ms (a slower host only makes the reading older). The assertions are unchanged, exactly 1
+  and exactly 2. ADR 0083 item 5 says that the ticket that starts the scanner is not woken for.
+- **Tests, written first and red.** `TestANewScannerLooksAtItsFirstTicketOnce` (the scanner as production runs it, a 10 s rhythm, so a
+  lane question inside 300 ms of the first scan can only come from the wake-up) failed before the fix (`probes 2 within 300 ms, want 1`)
+  and passes after; `TestATicketMadeWhileTheScannerSleepsIsScannedAtOnce` pins the other half (the second ticket's call answers well
+  inside the 8 s that the rhythm could make it wait). Five mutants were run, each compiled and each killed: the wake-up for a started
+  scanner back, no wake-up for a running scanner, the reuse ignoring the reading's age, no reuse at all, and the age counted from the
+  ticket (the defect the test was first written for). With the fix, the three tests together, 4 workers of 40 runs on each of the same two
+  hosts under the same load: 0 of 160 failed on either.
+
 ### Fixed — a named-seat `agent_run` is never retried on this box's own seat, a deferral never publishes another seat's answer, and a final cut at its budget says so (D-125, D-102, register D-134)
 
 A fix round on the two `agent_run` entries below, from two independent reviews of the branch: five findings, three defects.
