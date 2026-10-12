@@ -12,6 +12,101 @@ Versioning: [SemVer](https://semver.org/).
 ### Fixed — the seat-stub tests run on a machine whose PowerShell 7 is a Store install
 
 - `internal/vllmseat` runs the rendered seat stubs under every PowerShell on PATH. PowerShell 7 puts its own install folder first on the PATH of what it starts; for a Store (MSIX) install that folder is the package under Program Files\WindowsApps, and a test run under such a PowerShell found pwsh.exe there and could not start it ("Access is denied"), so every scenario under it failed without testing anything. Each PowerShell is now started once with an empty command first; one that cannot be started is left out and the test log names it, while one that starts and then fails is kept, so a broken script still fails.
+### Added — the Go toolchain that ships is pinned in go.mod, and CI scans the root module and both printed CLIs for known vulnerabilities on linux and windows (H-26)
+
+- **The gap.** `go.mod` said `go 1.26.7`, which is only the oldest compiler allowed to build the module. The compiler behind every
+  shipped binary was whatever each box happened to have, CI floated on setup-go's `1.26.x`, and nothing in the repository scanned for
+  known vulnerabilities at all: a Go advisory fixed in a patch release would have shipped unnoticed. Measured on the workstation
+  with the vulnerability database of 2026-10-08, the root module built with go1.27.1 calls eleven standard-library advisories on both
+  operating systems (GO-2026-6603, 6604, 6605, 6607, 6608, 6609, 6610, 6611, 6612, 6613, 6617), and built with go1.27.2 it calls
+  none.
+- **The pin.** `go.mod` gains `toolchain go1.27.2`; the `go` line, x/sys v0.48.0, x/text v0.41.0 and go-sdk v1.7.0 stay. With
+  GOTOOLCHAIN at its default the go command downloads that release (from the module proxy, checked against the checksum database,
+  into the module cache) on the first build in this tree when the installed Go is older, and builds with it; a box on a newer Go
+  keeps its own. `GOTOOLCHAIN=local` refuses the download and builds with the installed compiler, and says nothing about the line it
+  ignored (measured: a build with go1.27.1 installed and the line present succeeds and reports go1.27.1), so an offline build on an
+  older Go needs it. The oldest compiler the module accepts is unchanged. `build` and `installer-windows` keep `go-version:
+  '1.26.x'` and switch to the pinned compiler through the same line, which holds for setup-go@v5 (its v5.6.0 source never mentions
+  GOTOOLCHAIN or the toolchain directive) and not for v6, which exports `GOTOOLCHAIN=local`. Each of the two jobs then asks the go
+  command itself, in a step of its own right after Set up Go (`go env GOVERSION`), and fails unless the answer is exactly the release
+  go.mod's toolchain line names: a switch that stopped working (a runner image that exports `GOTOOLCHAIN=local`, a changed action)
+  would otherwise leave both jobs green on go1.26.x, judging a compiler that does not ship. The step's log line names both
+  releases (`go.mod names go1.27.2; the go command runs go1.27.2`). A bump to v6 must switch to
+  `go-version-file: go.mod` and drop `go-version` (which would win), and `TestCISetupGoLeavesTheToolchainSwitchAlone` fails until it
+  does and accepts exactly that (`TestSetupGoRuleKnowsTheMigrationFromV5` holds the rule in a table: v6 or v7 reading go.mod passes;
+  v6 with a version range, with both inputs, reading another file, or pinned by a commit hash does not).
+- **The scan.** A new `govulncheck` job (ubuntu-latest, the standard free runner, no module cache) reads GOTOOLCHAIN from go.mod's
+  toolchain line (a go.mod without the line fails the step instead of scanning unpinned), installs `govulncheck@v1.8.0` with it,
+  and scans `.`, `tools/comfyui` and `tools/llamaswap` for `GOOS=linux` and `GOOS=windows`: the printed CLIs are separate modules the
+  root's `./...` never reaches, and some advisories name one OS. A finding (exit 3) or a scan that could not run (exit 1, for
+  example an unreachable database) fails the step for any of the six scans, and all six always run. The log opens each scan with
+  `Go: go1.27.2` and `Scanner: govulncheck@v1.8.0`. The scanner is pinned to a tag; the advisory data is not, so a new advisory turns
+  the job red between releases and the fix is a bump of the toolchain pin (also raise `toolchainFloor` in
+  `gomod_toolchain_pin_test.go`) or of the dependency.
+- **Not called, so green: the module findings of today.** The scans report these as present in a required module and not reached by
+  any call: x/net v0.58.0 in the root module's linux build graph only (GO-2026-6603, 6610, 6611, 6612, 6617, fixed in v0.60.0; the
+  windows graph does not contain the module), x/text v0.39.0 in `tools/comfyui` (GO-2026-6629, fixed in v0.41.0) and x/text v0.14.0
+  in `tools/llamaswap` (GO-2026-6629, and GO-2026-5970 fixed in v0.39.0). None is touched here: the printed CLIs are vendored.
+- **Tests, written first and red.** `TestRootGoModPinsAPatchedToolchain` (no toolchain line) and
+  `TestCIRunsGovulncheckOnEveryModuleOnBothOSes` (no govulncheck in ci.yml) failed on the tree before the change. The job test runs
+  the job's own scripts under bash with stand-ins for go and govulncheck, as the runner starts a step (`bash -e -o pipefail`) and,
+  for the install step, under a bare bash too: the toolchain step must read go.mod (a made-up version proves it; a CRLF file, a file
+  without the line and `toolchain default` are cases), govulncheck must be built under that GOTOOLCHAIN and be on PATH, each of the
+  three modules must be scanned for each of the two systems with `-show version ./...` under that GOTOOLCHAIN, and a finding or an
+  error in any one of the six must fail the step while the other five still run (counted, as the runner starts the step and under a
+  bare bash) and an `::error::` line names the module and system that failed. The job and each of its steps must carry no `if` and no
+  `continue-on-error`, of any value (`TestCIGateSwitchesAreSeen` holds that check on parsed text): a proof switched off without being
+  deleted passed every structure test.
+  `TestEveryTrackedGoModuleIsScannedOrNamedAsExcluded` closes "every module": it lists the tracked `go.mod` files and fails for one
+  that is neither in the scan set nor named, with its reason, among the exclusions (today the two write-door contract fixtures), so a
+  new printed CLI cannot go unscanned with every check green (`TestModuleScanCheckReportsEachProblem` holds each way it can fail).
+  `TestGoModPinCheckReportsEachProblem` proves each rule of the pin check (a missing, invalid, too old or below-the-go-line
+  toolchain, and x/sys, x/text and go-sdk gone back) on parsed go.mod text, because a real go.mod with an older module no longer
+  builds; `TestGoVersionCompareIsNumeric` holds the comparators to numbers (go1.27.10 above go1.27.2, v0.100.0 above v0.48.0).
+  `TestCIJobsProveTheCompilerGoModNames` finds the jobs that set up Go and compile the root module (not the printed-CLI jobs, which have
+  no toolchain line, and not the govulncheck job, which pins GOTOOLCHAIN itself), requires the proof step after setup-go, before any
+  other go command, with `shell: bash` and no `if` or `continue-on-error`, and runs its script with a stand-in go: the release the
+  line names passes (LF and CRLF go.mod, a go command that prints a carriage return); an older compiler, a newer one, a prefix of
+  the release, a longer release that begins with it, nothing, a failing `go env`, no toolchain line and `toolchain default` fail with
+  the versions named in the log.
+  The shared loader and the bash sandbox are in `ci_workflow_helper_test.go`.
+- **What is not shown.** No hosted-runner run of this change exists yet. The steps were run end to end on the workstation under
+  Git Bash with the real go and govulncheck: all six scans exit 0 under go1.27.2 (38 s); with `toolchain go1.27.1` planted in go.mod
+  the toolchain step follows it and all six scans fail (eleven called standard-library advisories in the root module, nine in each
+  printed CLI); with the vulnerability database unreachable all six fail; a planted call into x/text v0.39.0 (GO-2026-6629) exits 3.
+  The proof step's own script, run end to end on the workstation with the real go (installed go1.27.1, `toolchain go1.27.2`): with
+  GOTOOLCHAIN at its default it prints `go.mod names go1.27.2; the go command runs go1.27.2` and exits 0; with `GOTOOLCHAIN=local`
+  it prints the error line and exits 1. The first run of `build` and `installer-windows` on the go1.27 line is the first CI has seen
+  of it.
+
+### Added — the Windows cage's environment proof runs on a Windows runner on every change (D-98, phase 1)
+
+- **The gap.** The Windows cage hands its child an explicit environment block instead of the parent's (until 0.117.7 it passed
+  `nil`, which means "inherit", so every `run` child received the delegator's credentials). `TestWindowsChildDoesNotInheritParentSecrets`
+  and `TestWindowsChildGetsTheAllowlistedEnvironment` prove it, and on every other system the same names are skipped stubs. The
+  `build` job runs `go test ./...` on Linux, where both are skips, and the one job on a Windows runner never ran `go test`: the proof
+  ran only on a developer's own Windows machine, and a regression could merge with every check green.
+- **The step.** `installer-windows` runs, right after Set up Go and before the PowerShell self-tests so that an unrelated failure there
+  cannot hide it, `go test -count=1 -timeout 5m -v -run '^TestWindowsChild' ./internal/sandbox/` in bash and then requires the
+  `--- PASS:` line of each of the two tests. `go test` exits 0 when the pattern matches nothing and when the tests skip (measured: `-run
+  ^TestNothingMatchesHere` prints "no tests to run" and exits 0), so the exit code alone proves nothing; bash, which the runner starts
+  with pipefail, keeps a failing test from hiding behind the pipe to tee; the PASS line must be a line of its own, not the same words
+  inside other output. Only the standard `windows-latest` label is used (a larger runner is always billed).
+- **Tests, written first and red.** `TestCIRunsTheWindowsCageProofOnWindows` failed on the tree before the change (no step of any job runs
+  `go test` on `./internal/sandbox`). It requires the step in a job whose `runs-on` is exactly `windows-latest`, after setup-go and
+  before any PowerShell step, with `shell: bash`, and runs the step's own script, as the runner starts it and under a bare bash,
+  against a stand-in `go` that plays back real `go test -v` output: both proofs passing exits 0; either one skipped, no test run, the
+  PASS words only quoted inside other output, only subtests' indented PASS lines, a longer-named sibling passing while the proof is
+  skipped (`-run` is a prefix pattern), no output at all, or `go test` failing after printing both PASS lines (only pipefail catches
+  that) exits non-zero. It also requires `-count=1` (a cached result would replay the PASS lines), `-v`, `-timeout`, the anchored
+  `-run` and the package, and that the step and its job carry no `if` and no `continue-on-error`.
+- **What is not shown.** The first run of the cage (CreateProcessAsUser, the job object and the low-integrity token) on a hosted runner has
+  not happened. Both proofs pass on the workstation, and the step's script run end to end there with the real `go test` exits 0, and exits 1
+  with an error line per test when the pattern matches nothing; with the environment block of `CreateProcessAsUser` replaced by `nil` (the
+  0.117.7 defect) both proofs fail on the workstation ("the caged child inherited GITHUB_TOKEN"). If the runner refuses the low-integrity
+  spawn the step goes red, which is what it is for; a weaker test of the environment block alone would not close this item. Phase 2
+  widens the step to the whole `./internal/sandbox/...` package once the tests that cover the exit-status reading are merged, and this
+  test changes with it.
 
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 
