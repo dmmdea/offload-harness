@@ -3,14 +3,133 @@ package mcpserver
 // stale_image.go: offload_status's process block (D-36).
 //
 // A rename-swap deploy replaces the installed binary while every MCP server already running keeps the image it
-// started from, so a session can write rows with old behaviour for days and nothing says so. The block names the
-// image this process runs and compares it with the file now at the path it started from (STUB, red-first).
+// started from, so a session can write rows with old behaviour for days and nothing says so (the register counted 13
+// of 18 MCP processes older than the deployed build). The block names the image this process runs - the version and
+// the build hash it stamps on its rows - and compares it with the file now at the path it started from:
+//
+//	stale_image true     the installed bytes differ from the image this process started from
+//	stale_image false    they are equal (or the file is the very one the process started from)
+//	no stale_image key   the installed file cannot be read: a note says why, and "fresh" is never the answer to a failure
+//
+// The block is built from the startup identity the Server holds (Run takes it from buildinfo.CaptureStartup), not from
+// the process global, so a test injects a fixed identity and the test binary's own hash never reaches a pinned answer.
+//
+// A status call must not hash a 60 MB executable every time (245 to 335 ms under load, measured for 0.183.0). The
+// installed file's stat is compared with the one the process saw at start: unchanged means it is the same file and
+// nothing is read; a moved stat is the only reason to hash, and the result is cached per stat.
 
-// holdStartup takes the startup identity Run serves under (STUB).
-func (s *Server) holdStartup() {}
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"os"
+	"sync"
+	"time"
 
-// statusProcess builds the process block, or nil when the Server holds no startup identity (STUB).
-func (s *Server) statusProcess() any { return nil }
+	"github.com/dmmdea/offload-harness/internal/buildinfo"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
+)
 
-// hashInstalledImage is the seam the installed file is hashed through (STUB).
-var hashInstalledImage = func(path string) (string, error) { return "", nil }
+// holdStartup takes the startup identity Run serves under: the image this process began from, hashed once at start.
+func (s *Server) holdStartup() {
+	st := buildinfo.CaptureStartup()
+	s.startup = &st
+}
+
+// hashInstalledImage is the seam the installed file is hashed through: a test counts how often a status call reads
+// the whole executable.
+var hashInstalledImage = func(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// installedImages caches what the last moved installed file hashed and stated, keyed by its stat.
+type installedImages struct {
+	mu      sync.Mutex
+	have    bool
+	path    string
+	size    int64
+	mod     time.Time
+	sha     string
+	version string
+	hashErr error
+	markErr error
+}
+
+// imageCheck is one comparison of the installed file with the startup identity.
+type imageCheck struct {
+	stale            *bool
+	installedVersion string
+	note             string
+}
+
+// statusProcess builds the process block, or nil (absent from the full answer, `{}` when asked for by name, as pair
+// does) when the Server holds no startup identity.
+func (s *Server) statusProcess() any {
+	st := s.startup
+	if st == nil {
+		return nil
+	}
+	block := map[string]any{"version": st.Version}
+	if st.SHA256 != "" {
+		block["build_sha256"] = st.SHA256
+	}
+	chk := s.installed.check(*st)
+	if chk.installedVersion != "" {
+		block["installed_version"] = chk.installedVersion
+	}
+	if chk.stale != nil {
+		block["stale_image"] = *chk.stale
+	}
+	if chk.note != "" {
+		block["note"] = chk.note
+	}
+	return block
+}
+
+// check compares the installed file at the startup path with the startup identity.
+func (c *installedImages) check(st buildinfo.Startup) imageCheck {
+	if st.Path == "" {
+		return imageCheck{note: "the path this process started from is unknown, so the installed build cannot be compared with it"}
+	}
+	fi, err := os.Stat(st.Path)
+	if err != nil {
+		return imageCheck{note: fmt.Sprintf("the installed image %s cannot be read (%v), so whether this process is stale is unknown", st.Path, err)}
+	}
+	if fi.Size() == st.Size && fi.ModTime().Equal(st.ModTime) {
+		// The same file the process started from: nothing was replaced, nothing to read.
+		fresh := false
+		return imageCheck{stale: &fresh, installedVersion: st.Version}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.have || c.path != st.Path || c.size != fi.Size() || !c.mod.Equal(fi.ModTime()) {
+		c.path, c.size, c.mod, c.have = st.Path, fi.Size(), fi.ModTime(), true
+		c.sha, c.hashErr = hashInstalledImage(st.Path)
+		c.version, c.markErr = gpulease.ReadBuildMarkerVersion(st.Path)
+	}
+	out := imageCheck{}
+	if c.markErr == nil {
+		out.installedVersion = c.version
+	}
+	switch {
+	case c.hashErr != nil:
+		out.note = fmt.Sprintf("the installed image %s cannot be read (%v), so whether this process is stale is unknown", st.Path, c.hashErr)
+	case st.SHA256 == "":
+		out.note = "the hash of the image this process started from is unknown (its self-hash failed at start), so it cannot be compared with the installed build"
+	default:
+		stale := c.sha != st.SHA256
+		out.stale = &stale
+	}
+	return out
+}

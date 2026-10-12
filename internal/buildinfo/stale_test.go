@@ -44,6 +44,7 @@ func useImage(t *testing.T, body string) string {
 func resetForTest() {
 	buildOnce = sync.Once{}
 	buildSHA = ""
+	buildImage = image{}
 	startupMu.Lock()
 	startup = nil
 	startupMu.Unlock()

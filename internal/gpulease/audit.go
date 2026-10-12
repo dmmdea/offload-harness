@@ -36,6 +36,7 @@ package gpulease
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -356,8 +357,16 @@ var buildMarkerRE = regexp.MustCompile(regexp.QuoteMeta(BuildMarkerPrefix) + `(\
 
 // ReadBuildMarkerVersion returns the build version the file at path states in its build marker ("" with no error when
 // the file carries none: a binary that predates the marker). It is the audit's own reader (scanInto), so a doctor row
-// and a stale-image check can never read two different versions out of one file (STUB, red-first).
-func ReadBuildMarkerVersion(path string) (string, error) { return "", nil }
+// and a stale-image check can never read two different versions out of one file. A file that cannot be opened or
+// read is an error, never "no marker": the caller must not take a failure for a fresh image.
+func ReadBuildMarkerVersion(path string) (string, error) {
+	var it AuditItem
+	scanInto(&it, path)
+	if it.Err != "" {
+		return "", errors.New(it.Err)
+	}
+	return it.Version, nil
+}
 
 // scanInto reads the file in chunks, looking for the signature, a harness identity marker
 // and the build marker.
