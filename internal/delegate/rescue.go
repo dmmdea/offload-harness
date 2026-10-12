@@ -76,19 +76,6 @@ func SchemaMissRescuable(w core.AgentWireResult) bool {
 		(strings.HasPrefix(w.Reason, core.RepackFailedReason) || strings.HasPrefix(w.Reason, core.SchemaFailedReason))
 }
 
-// originSeatFailed reports that the node's own re-pack failed because its seat did: the class is
-// infrastructure, which is how the node files a re-pack that stalled, could not reach its seat, or
-// found it busy past the wait (a seat lost under the run is the same class). The node sets
-// schema_miss on every failure arm of its re-pack, these included, and SchemaMissRescuable does not
-// read the class, so a rescue would otherwise call the seat that just wedged first. That call is
-// bounded by an allowance of at least the 120 s flat re-pack bound while the rescue's budget floors
-// at 120 s: a hung seat would spend all of it and leave this box's own seat no try. A budget defer
-// (the time left could not buy the re-pack, so it was never sent), an abstention (the seat answered
-// and the object failed) and a node that names no class keep the origin.
-func originSeatFailed(w core.AgentWireResult) bool {
-	return w.DeferClass == core.DeferClassInfrastructure
-}
-
 // rescueSchemaMiss turns a deferred schema miss into a delivered result when the
 // delegator can structure the finished answer, and runs acceptance over it like
 // any other result. It runs inside finish, BEFORE the row is recorded, so the
@@ -187,6 +174,19 @@ func validateRescued(contract core.AgentContract, structured json.RawMessage, an
 		return fmt.Errorf("the rescued object is hollow: %s", why)
 	}
 	return nil
+}
+
+// originSeatFailed reports that the node's own re-pack failed because its seat did: the class is
+// infrastructure, which is how the node files a re-pack that stalled, could not reach its seat, or
+// found it busy past the wait (a seat lost under the run is the same class). The node sets
+// schema_miss on every failure arm of its re-pack, these included, and SchemaMissRescuable does not
+// read the class, so a rescue would otherwise call the seat that just wedged first. That call is
+// bounded by an allowance of at least the 120 s flat re-pack bound while the rescue's budget floors
+// at 120 s: a hung seat would spend all of it and leave this box's own seat no try. A budget defer
+// (the time left could not buy the re-pack, so it was never sent), an abstention (the seat answered
+// and the object failed) and a node that names no class keep the origin.
+func originSeatFailed(w core.AgentWireResult) bool {
+	return w.DeferClass == core.DeferClassInfrastructure
 }
 
 // joinRepackNote appends a finding to the result's repack_note.

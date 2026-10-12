@@ -410,7 +410,9 @@ determine if a job is truly still going" — was not met by any of the three sur
       origin node's seat through the node's chat door (register C-41b, the bearer-gated route modelled on
       ADR 0040's vision lane) with the fleet bearer. That call waits for no load here and, being off-box, never waits on this
       box's GPU lease (register C-41c); it carries `WithLocalBusy`, so it leaves the box or is refused
-      before any request and never falls through to a same-named seat on this box's cards. A node that
+      before any request and never falls through to a same-named seat on this box's cards. The node is not
+      handed over when its own re-pack failed for its seat's health (defer class `infrastructure`): the seat
+      that just wedged would take the whole budget of a call that hangs. A node that
       cannot take it (no chat door, an invalid or hollow object, the budget spent) leaves this box's seat,
       warmed first, the budget that is left (at least 20 s, or the rescue stops). A failed rescue names
       every rung. Unverified: that the origin node's seat is still resident when the rescue runs (it has
@@ -420,7 +422,10 @@ determine if a job is truly still going" — was not met by any of the three sur
       re-pack that kept the shape and lost the lists (`core.ListsEmptied`; see
       [coding-agent.md](../../systems/coding-agent.md)). It is in this ADR because it is the
       re-pack's other outcome of the same delegation, and because its refusal is an `abstention` that
-      carries the finished answer, which the rescue then reads the same way.
+      carries the finished answer, which the rescue then reads the same way. A refusal can be false (an
+      answer that lists what it checked, beside a truly empty schema list), and then it costs a second
+      agent run on another node, not a wrong success: the prompt after a refusal does not tell the seat
+      to copy a list no schema field is named for.
 
 ## Consequences
 

@@ -575,7 +575,13 @@ chat door with the fleet bearer (the delegator hands the rescue that node in its
 `delegate.WithRescueOrigin`; the node has just decoded the answer and holds the seat hot, waits for no
 load here, and never queues behind this box's GPU lease, because the call carries `WithLocalBusy` and
 leaves the box or does not run); and last this box's seat, warmed first outside the allowance, with the
-budget the node left. An unreadable `/running` leaves the rescue on its own seat, as before. The rescue
+budget the node left. The node is not handed over when its own re-pack failed for its seat's health (defer
+class `infrastructure`: a stall, an unreachable or busy seat, a seat lost under the run): the seat that just
+wedged is the last place to send the rescue first, and a call there that hangs would spend the whole budget
+(its allowance is at least the 120 s flat bound, the rescue's budget floors at 120 s) and leave this box's own
+seat no try. A budget defer, an abstention and a node that names no class keep the node. The seat that wrote
+the answer is the wire's, else the one the run was placed on. An unreadable `/running` leaves the rescue on
+its own seat, as before, and now says so in the log. The rescue
 validates the object, reads it against its answer (see "A re-pack is read against its answer" below),
 and lets the ordinary delegator-side acceptance decide; a failed rescue names every rung it tried, the
 node and the warm-up included. (A rescue on this box's cold seat under another session's lease used to
@@ -602,18 +608,31 @@ not that it kept the content, and the acceptance checks read fields (`contains:`
 because the re-pack prompt said "use empty values when a field is absent" beside a text none of whose keys
 had the requested names. `core.ListsEmptied` is the check: a list the schema asks for that the answer
 holds under the same path is compared with that list alone (an answer that says `"stale": []` has nothing
-to lose); only when the answer shares no list path with the schema do the lists it holds under other keys
-count, and then the object must hold some item in the lists the schema asks for. An object that carries the
-list itself lost nothing, and a prose answer is not judged. The node refuses such an object on every lane
+to lose); only when the answer shares no list path with the schema do the lists it holds under other paths
+count (a list nested under an object counts, at its path, `report.outdated`; an answer that is itself a JSON
+array, bare or fenced, is one list; a property declared `type: ["array","null"]` is a list), and then the
+object must hold some item in the lists the schema asks for. An object that carries the list itself lost
+nothing, and a prose answer is not judged (nothing can be counted, so a prose answer whose list was lost is
+published). The node refuses such an object on every lane
 (the next attempt carries the finding ahead of the text; all refused is an abstention with the answer in
 `output`), `EvalAcceptance` reads every result the same way (a failed verification, which the delegator
 retries on another node), and `RescueRepack` refuses a hollow rescue. The prompts changed with it: a text
-that is a JSON object is told so, with its keys listed (shapes and counts, never content), and the bound a
-schema puts on a list (`maxItems`) is stated on every lane. A result that kept fewer list items than its
-answer held says so in `repack_note` (`kept 10 of 11 list items from "outdated_sentences" (maxItems 10)`).
+that is a JSON object (or array) is told so, with its keys or items described (shapes and counts, never
+content), and the bound a schema puts on a list (`maxItems`) is stated on every lane. A result that kept
+fewer list items than its answer held says so in `repack_note` (`kept 10 of 11 list items from
+"outdated_sentences" (maxItems 10)`); a partial loss is a note and not a refusal, because the object is
+faithful as far as it goes, the answer rides beside it, and a threshold would also refuse an object whose
+list is legitimately shorter than an unrelated list of the answer's (the two cannot be told apart by key).
 The cost of the check is a false refusal in one shape: an answer that lists what it checked under another
-key, beside a schema list that is legitimately empty, is refused (an honest defer with the answer attached),
-because nothing deterministic tells the two lists apart.
+key, beside a schema list that is legitimately empty, is refused, because nothing deterministic tells the
+two lists apart. What that costs is an abstention defer with the answer attached, then the delegator's
+rescue (which refuses the same object), then a re-placement: the delegator re-places an abstention once on
+another node, which is a SECOND FULL AGENT RUN, and a truthful answer reproduces the refusal there. It is
+not a wrong success: the attempt after a refusal names only the lists that were lost, sends a list into the
+field of the same name, and for any other list says to copy it only if it is the content of a requested
+list field, and that a field the text says is empty stays empty (a prompt that told the seat to write the
+text's lists into the list fields made an obedient seat publish the files an answer had checked as stale
+ones).
 
 The two surfaces report that verdict differently, on purpose, and they agree on the case that
 matters. **The CLI exits non-zero on `summary.infrastructure > 0`** — an exit code sits beside the
