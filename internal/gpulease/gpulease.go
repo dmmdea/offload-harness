@@ -593,7 +593,7 @@ type Options struct {
 	// GrantCheck, when set, is asked of a QUEUED acquire at the moment the cards are granted to it
 	// (VetGrant): an error gives the grant back and ends the wait with ErrGrantRefused instead of
 	// handing the cards over. It is how a caller whose admission rested on readings that can change
-	// while it waits (the operator's presence, the desktop floor on the display card) re-asks them at
+	// while it waits (the display card's cap and the VRAM in use on it) re-asks them at
 	// the grant and not only at the enqueue. It runs with the cards already claimed by this request,
 	// so a reader of the lease directory sees its own claim.
 	GrantCheck func() error

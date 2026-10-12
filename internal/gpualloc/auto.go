@@ -78,11 +78,11 @@ func PickAuto(plan Plan, wait time.Duration, build func() (gpulease.AllocInput, 
 const pickPollEvery = 2 * time.Second
 
 // GrantCheck is the check a queued request makes when its turn comes (gpulease.Options.GrantCheck).
-// The set it was queued on was chosen against the operator's presence and the desktop floor as they
-// were at the enqueue, and a place in line can be hours long: the allocator's input is built again
-// (build, the same reader that chose the set), so presence and the display card's free VRAM are read
+// The set it was queued on was chosen against the display card's cap and the VRAM in use as they were
+// at the enqueue, and a place in line can be hours long: the allocator's input is built again
+// (build, the same reader that chose the set), so the cap and the display card's free VRAM are read
 // as they are at the grant, and the desktop rule (gpulease.DesktopRefusals) is put to ids. A card
-// table that cannot be read refuses too: a grant that cannot be shown to keep the desktop its floor
+// table that cannot be read refuses too: a grant that cannot be shown to keep the desktop its share
 // is not made.
 //
 // The check runs with the cards already granted to the request (gpulease.VetGrant), so the lease

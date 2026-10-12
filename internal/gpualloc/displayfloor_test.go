@@ -192,7 +192,7 @@ func TestResidentSeatsIsStillEmptyWithoutADisplayLayerOrAnEndpoint(t *testing.T)
 }
 
 // Through the shared builder: with /running unreadable the allocator input carries the display card as
-// occupied, and with the operator away the picker prefers the card with nothing on it.
+// occupied, and the picker prefers the card with nothing on it.
 func TestBuildInputOrdersTheDisplayCardLastWhenRunningCannotBeRead(t *testing.T) {
 	m := scratchManager(t)
 	cfg := displayCfg()

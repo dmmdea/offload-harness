@@ -237,7 +237,7 @@ func BuildInput(ctx context.Context, m *gpulease.Manager, cfg config.Config, nee
 // cannot be read the display layer's models are counted as loaded, each costed as a loaded twin is,
 // and the display card sorts as occupied. Other layers' seats still contribute nothing then: nothing
 // about them is conservative to assume, and the cost of treating a card as busy falls on the display
-// card alone, which the allocator only opens while the operator is away.
+// card alone, which the allocator opens only within its cap.
 func ResidentSeats(ctx context.Context, cfg config.Config, cards []gpuprobe.Card, client *http.Client) map[string]gpulease.ResidentInfo {
 	if len(cfg.Layers) == 0 || cfg.Endpoint == "" {
 		return map[string]gpulease.ResidentInfo{}
