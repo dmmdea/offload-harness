@@ -133,7 +133,7 @@ func TestAutoContractIsNotAbandonedDuringTheNodesAdmissionWindow(t *testing.T) {
 // elapsed time is NOT that budget. It also holds the bookkeeping after the poll
 // loop ends, and the first result a process records hashes the whole
 // executable once (buildinfo.BuildSHA256): 245-335 ms for this 30 MB test
-// binary on a loaded Linux gate host, 65 ms on an idle workstation. Held against
+// binary on a loaded Linux gate host, 56-60 ms on an idle workstation. Held against
 // wall + admissionSlack() (600 ms) that failed 150-179 of every 200 loaded runs
 // of this test alone, while the poll loop itself ended 0.1-3.5 ms past its
 // deadline in every one of them.
