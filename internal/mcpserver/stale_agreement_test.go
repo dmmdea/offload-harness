@@ -12,6 +12,7 @@ package mcpserver
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -203,5 +204,42 @@ func TestAServerWithNoCapturedIdentityStartsTheGuardFromItsOwnFile(t *testing.T)
 	}
 	if note := s.staleBinaryNote(buildinfo.Version); note != "" {
 		t.Fatalf("a server on the executable it started from carries the note %q", note)
+	}
+}
+
+// TestAGonePathIsStaleWithoutComparingAnything: there is nothing to read at a path that is gone (an OS that unlinks the
+// old file), so the guard says so and no hash is attempted; process.stale_image gives no verdict there (the installed
+// file cannot be read), and the note does not claim its bytes were compared or could not be.
+func TestAGonePathIsStaleWithoutComparingAnything(t *testing.T) {
+	s, _, path := serverOnInstalledImage(t, "0.183.0")
+	hashes := 0
+	real := hashInstalledImage
+	hashInstalledImage = func(p string) (string, error) { hashes++; return real(p) }
+	t.Cleanup(func() { hashInstalledImage = real })
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	staleImage, note := bothSignals(t, s)
+	if staleImage != nil {
+		t.Fatalf("process.stale_image = %v for a file that is gone, want the key absent", staleImage)
+	}
+	if !strings.Contains(note, "no longer at its path") || strings.Contains(note, "compared") {
+		t.Fatalf("stale_binary = %q, want the note that the file is gone, with no claim about its bytes", note)
+	}
+	// The process block's own check hashes nothing either: the stat fails first. No read of the gone file anywhere.
+	if hashes != 0 {
+		t.Fatalf("a gone file was hashed %d time(s)", hashes)
+	}
+}
+
+// The watch itself asks for no comparison when the path is gone.
+func TestAGonePathAsksForNoComparison(t *testing.T) {
+	exe := &staleMovableExe{cur: staleExeThen}
+	w := newExeWatch(exe.read)
+	exe.set(exeStamp{Missing: true}, nil)
+	asked := 0
+	note := w.staleNoteWith(buildinfo.Version, func() imageCheck { asked++; return imageCheck{} })
+	if asked != 0 || !strings.Contains(note, "no longer") {
+		t.Fatalf("asked for %d comparison(s), note %q: a path that is gone is stale without one", asked, note)
 	}
 }
