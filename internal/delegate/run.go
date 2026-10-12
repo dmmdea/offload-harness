@@ -2411,7 +2411,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		iterStart := time.Now()
 		remaining := pl.remaining(start, budget)
 		if remaining < minRetrySec {
-			return r.exhaustedSettled(contract, pr, refusals, budgetSpent(remaining, budget, len(refusals)), iterStart)
+			return r.exhaustedSettled(contract, pr, pl, refusals, budgetSpent(remaining, budget, len(refusals)), iterStart)
 		}
 		// Selection BLOCKS (fetchViews). Bound it by what is actually left, so
 		// the probe cannot outlive the budget it is probing on behalf of.
@@ -2441,7 +2441,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 			if pl.capacityRefusal || reserved {
 				return r.awaitCapacity(ctx, i, contract, start, budget, pl, pr, refusals, why)
 			}
-			return r.exhaustedSettled(contract, pr, refusals, why, iterStart)
+			return r.exhaustedSettled(contract, pr, pl, refusals, why, iterStart)
 		}
 		// RE-MEASURE. `remaining` above was true when taken and the probe may
 		// have consumed most of it; committing the stale number to the wire is
@@ -2450,7 +2450,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		// abandoned here costs neither a slot in the bound nor an exclusion.
 		remaining = pl.remaining(start, budget)
 		if remaining < minRetrySec {
-			return r.exhaustedSettled(contract, pr, refusals, budgetSpent(remaining, budget, len(refusals)), iterStart)
+			return r.exhaustedSettled(contract, pr, pl, refusals, budgetSpent(remaining, budget, len(refusals)), iterStart)
 		}
 		pl.tried[next.base] = true
 		if next.base != "" {
@@ -2744,7 +2744,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			}
 			return r.settle(contract, r.reservedDefer(localView, r.localLease(contract), 0, seed.pendingReason, nil), pl, waitStart)
 		}
-		return r.exhaustedSettled(contract, seed, refusals, why, waitStart)
+		return r.exhaustedSettled(contract, seed, pl, refusals, why, waitStart)
 	}
 	deadline := cw.deadline
 	spanStart := waitStart
@@ -2872,7 +2872,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// never a `placement refused` failure naming a refusal nobody made.
 	budgetGone := func(remaining int) PlacedResult {
 		if len(refusals) > 0 {
-			return r.exhaustedSettled(contract, seed, refusals, budgetSpent(remaining, budget, len(refusals)), waitStart)
+			return r.exhaustedSettled(contract, seed, pl, refusals, budgetSpent(remaining, budget, len(refusals)), waitStart)
 		}
 		return r.settle(contract, r.waitBudgetDefer(localView, seed, idle, budgetSpent(remaining, budget, pl.attempts), pl.waitNote), pl, waitStart)
 	}
@@ -3379,7 +3379,7 @@ func (r *runner) runDecided(ctx context.Context, i int, contract core.AgentContr
 	remaining := pl.remaining(start, budget)
 	if remaining < minRetrySec {
 		if len(refusals) > 0 {
-			return r.exhaustedSettled(contract, seed, refusals, budgetSpent(remaining, budget, len(refusals)), waitStart)
+			return r.exhaustedSettled(contract, seed, pl, refusals, budgetSpent(remaining, budget, len(refusals)), waitStart)
 		}
 		local := r.localView()
 		reason := fmt.Sprintf("%s: %s — the decided seat %s was not started", budgetSpent(remaining, budget, pl.attempts), note, dec.Seat)
@@ -4367,8 +4367,11 @@ func exhausted(last PlacedResult, refusals []string, why string) PlacedResult {
 // steer the cut's wording ("was still running on the local seat") or its node and seat; the
 // attempt's own intent was closed by its finish. since is when the span the closing row
 // measures began.
-func (r *runner) exhaustedSettled(contract core.AgentContract, last PlacedResult, refusals []string, why string, since time.Time) PlacedResult {
-	refusedLast := last.refusalRow
+func (r *runner) exhaustedSettled(contract core.AgentContract, last PlacedResult, pl *placements, refusals []string, why string, since time.Time) PlacedResult {
+	// The row of the latest attempt that wrote one, which is what settle() reads too: the seed is the last attempt only when
+	// it went through finish, and a pseudo-attempt (a replacement the process gate turned away, a deal's overflow) returns
+	// before it, with no row and no mark, in front of a refused attempt whose row is the only record there is.
+	refusedLast := last.refusalRow || (pl != nil && pl.lastRowRefusal)
 	pr := exhausted(last, refusals, why)
 	if !r.call.reached() {
 		if refusedLast {

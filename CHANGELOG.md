@@ -50,7 +50,13 @@ Versioning: [SemVer](https://semver.org/).
   rows back through the rigger, so the writer and the reader cannot drift. Eight mutations (the marker never set, the closing row
   skipped for a refusal, the failure's terminal row skipped, the marker left off the line, the flag kept on the published
   outcome, the mark kept after a landing, the fleet page folding a marked row, its field dropped from the decode) each turn
-  them red. Docs: ADR 0073 (amendment 2026-10-12), `docs/systems/fleet-overview.md`, `docs/OPERATOR-GUIDE.md`.
+  them red. The chain's own ending reads the placements ledger (the row of the latest attempt that wrote one, as `settle` does)
+  and not only the seed it is handed: a replacement the process gate turned away returns before it writes a row, so a wait that
+  began at the gate after a refusal and ended on the budget had left the refusal-marked row as the only record of the lost
+  subtask (`TestAChainEndedAfterAGatedTurnAwayFilesATerminalRowWhenTheLastRowWasARefusal`, red before with `the failure carries
+  no job id: the refused attempt's row is a refusal, so no row says how the subtask ended`; four more mutations, one on each
+  reading of the ledger and the seed). Docs: ADR 0073 (amendment 2026-10-12), `docs/systems/fleet-overview.md`,
+  `docs/OPERATOR-GUIDE.md`.
 - **An MCP server whose binary was replaced after it started now says so on the doors a release changes.** A server is spawned
   once per client and keeps the executable image it started from. Two servers that had started on 0.180.0 were still stamping
   their corpus rows with it eight hours after a 0.181.0 and then a 0.182.0 binary had been swapped in on disk, so the
