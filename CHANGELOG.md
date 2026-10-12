@@ -47,10 +47,12 @@ Versioning: [SemVer](https://semver.org/).
   outcome, the mark kept after a landing, the fleet page folding a marked row, its field dropped from the decode) each turn
   them red. Docs: ADR 0073 (amendment 2026-10-12), `docs/systems/fleet-overview.md`, `docs/OPERATOR-GUIDE.md`.
 - **An MCP server whose binary was replaced after it started now says so on the doors a release changes.** A server is spawned
-  once per client and keeps the executable image it started from. The capacity-wait fix of 0.181.0 (a wait that holds a run slot
-  gives it up and keeps waiting) was on disk a day before 24 subtasks were lost to the old ending, because every one of them was
-  served by a delegator process that predated the release (all 24 rows are stamped with the old version) and nothing in the
-  server noticed its binary had changed. The server now reads the size and modification time of its own executable at start and
+  once per client and keeps the executable image it started from. Two servers that had started on 0.180.0 were still stamping
+  their corpus rows with it eight hours after a 0.181.0 and then a 0.182.0 binary had been swapped in on disk, so the
+  capacity-wait fix those releases carry (a wait that holds a run slot gives it up and keeps waiting) could not run for any
+  call they served, and nothing in the server noticed its binary had changed. (The 24 subtasks that a day's report shows lost
+  to the old ending were served before that fix existed; the next saturated fan-out through a server that outlives a release is
+  what this guards.) The server now reads the size and modification time of its own executable at start and
   compares them with the file on disk when `agent_delegate`, `offload_research` or `offload_status` answers: a difference, or a
   path that is gone, puts a top-level `stale_binary` string on the answer (running version, the two stamps, "restart the MCP
   client to load it") and one line in the log. The work still runs and nothing is interrupted or re-executed, a stat that fails

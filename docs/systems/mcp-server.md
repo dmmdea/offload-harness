@@ -816,8 +816,8 @@ read-only unless deliberately widened. See
 
 - **A server that started before the binary it runs was replaced says so (`stale_binary`).** An MCP server is spawned once
   per client and keeps the executable image it started from, so a release swapped in on disk afterwards is not in that
-  process; in one day 24 subtasks were lost to a capacity wait the next release had already fixed, served by delegators that
-  predated it. The server reads the size and modification time of its own executable at start
+  process: two servers that had started on 0.180.0 were still stamping their rows with it eight hours after a 0.181.0 and then
+  a 0.182.0 binary had been swapped in, so the capacity-wait fix those releases carry could not run for them. The server reads the size and modification time of its own executable at start
   (`internal/mcpserver/stalebinary.go`) and compares them with the file on disk when `agent_delegate`, `offload_research` or
   `offload_status` answers. When they differ, or the path is gone (an OS that unlinks the old file), the answer carries a
   top-level `stale_binary` string naming the running version and the two stamps and saying to restart the MCP client, and the
