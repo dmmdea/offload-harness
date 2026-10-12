@@ -161,11 +161,21 @@ Versioning: [SemVer](https://semver.org/).
   (`retry skipped: ... after choosing a retry node (floor ...s, min_turn_sec published by <node>)`) are unchanged, and a retry
   node that publishes no rate still falls back to the first attempt's number, said in the note. Not changed, on purpose: the
   retry's wait for a busy retry seat keeps its placement-wait TTL (ADR 0073 decision 3: it is an optional second opinion on an
-  answer the subtask already holds), and a retry that finds no node keeps the notes it had (two tests pin the empty note of a bare
-  route's skipped retry). Config, for the operator: with `agent_retry_min_sec` at 300 a default 300 s contract can never retry,
+  answer the subtask already holds). Config, for the operator: with `agent_retry_min_sec` at 300 a default 300 s contract can never retry,
   since what is left is always under it. Tests `internal/delegate/retry_first_seat_floor_test.go`, written first: red before with
   `retry skipped: 299s of the 300s timeout_sec budget left after the first attempt (floor 1112s, min_turn_sec of the seat on
   node-a)`; three mutations turn them red. Docs: `docs/OPERATOR-GUIDE.md`.
+- **A retry that found no node to go to is no longer published with an empty note.** When the engine considered the second
+  placement of a wrong answer or an honest abstention and no other node could take the contract, the result carried an empty
+  `retry_note` unless it was one of a few named shapes (a fence, a reservation, the call's deadline, a reasoned pin, or a defer that
+  promises a second placement: seat-down, lost-root, forced-final tool call). It read as a retry nobody considered, and a research
+  page skipped this way left nothing to log and nothing to fix. The note is now always there: `retry skipped: no other node could
+  take the contract after the first attempt on <node> (<outcome>); every eligible node was already tried or is not eligible`
+  (or `route local places nothing on another node`). Two tests that pinned the empty note of a bare route's skipped retry
+  (`TestRunRetryNeverLandsOnASeatTheSubtaskAlreadyUsed`, `TestTheBareRemoteRoutesRetryNoteNamesNoPinOnASeatlessBox`) now pin the
+  generic note, and the second still asserts that no pin wording appears where nothing was pinned. Tests
+  `internal/delegate/retry_nowhere_test.go`, written first: red before with `retry_note = "", want it to contain "retry
+  skipped"`; three mutations turn them red. Docs: `docs/systems/fleet-node.md`.
 
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 

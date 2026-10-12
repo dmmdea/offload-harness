@@ -53,8 +53,10 @@ func TestTheBareRemoteRoutesRetryNoteNamesNoPinOnASeatlessBox(t *testing.T) {
 					if pr.RetryNote != want {
 						t.Errorf("retry_note = %q, want %q", pr.RetryNote, want)
 					}
-				} else if pr.RetryNote != "" {
-					t.Errorf("retry_note = %q, want none: nothing was pinned, and the bare route's skipped retry says nothing else", pr.RetryNote)
+				} else if !strings.HasPrefix(pr.RetryNote, "retry skipped: no other node could take the contract after the first attempt on node-a") {
+					// Nothing was pinned, so the note names no pin (asserted above); it still says the retry was considered and why
+					// it did not happen, since a skip with no note reads as a retry nobody considered (retry_nowhere_test.go).
+					t.Errorf("retry_note = %q, want the generic skipped-retry note: the bare route's skipped retry says why, without a pin", pr.RetryNote)
 				}
 			})
 		}

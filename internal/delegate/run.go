@@ -1586,13 +1586,7 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 			// happen, not left with a retryable defer and an empty note. The seat-down
 			// defer (ADR 0066), the lost-root defer (register C-79) and the forced-final
 			// tool-call defer are the ones whose promise is that sentence.
-			why := "every eligible node was already tried or is not eligible"
-			switch {
-			case r.route == "local":
-				why = "route local places nothing on another node"
-			case r.remotePinned():
-				why += "; " + r.remotePinWhy()
-			}
+			why := r.noRetryNodeWhy()
 			what := "the seat on " + nodeLabel(first) + " went down"
 			if RootGoneDefer(first.Result) {
 				what = "the run on " + nodeLabel(first) + " lost its workspace root"
@@ -1607,6 +1601,12 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 			// and read as a retry nobody considered. The pin is the reason there is no local retry, so the note names it.
 			first.RetryNote = fmt.Sprintf("retry skipped: no other fleet node could take the contract after the first attempt on %s (%s); %s",
 				nodeLabel(first), attemptOutcome(first), r.remotePinWhy())
+		default:
+			// Every other skip says why too (the operator's rule: a job's trouble is logged, not silent). A wrong answer or an
+			// abstention with nowhere to go used to be published with an empty note, which reads as a retry nobody
+			// considered; a research page skipped this way left nothing to log and nothing to fix.
+			first.RetryNote = fmt.Sprintf("retry skipped: no other node could take the contract after the first attempt on %s (%s); %s",
+				nodeLabel(first), attemptOutcome(first), r.noRetryNodeWhy())
 		}
 		return first
 	}
@@ -1770,6 +1770,18 @@ func (r *runner) retryFloorSec() int {
 		return r.cfg.AgentRetryMinSec
 	}
 	return minRetrySec
+}
+
+// noRetryNodeWhy is the words for a retry that found no node to go to.
+func (r *runner) noRetryNodeWhy() string {
+	why := "every eligible node was already tried or is not eligible"
+	switch {
+	case r.route == "local":
+		why = "route local places nothing on another node"
+	case r.remotePinned():
+		why += "; " + r.remotePinWhy()
+	}
+	return why
 }
 
 // firstPassRetryFloor is the floor a verification retry is judged against BEFORE a retry node is chosen: the configured one
