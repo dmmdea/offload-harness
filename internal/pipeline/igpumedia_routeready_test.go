@@ -279,3 +279,30 @@ func TestTheLaneAndTheNodeDoorReadTheSameVerdict(t *testing.T) {
 		})
 	}
 }
+
+// TestAVideoFamilyThatIsNotTheDefaultIsJudgedOnItsOwnRoute: mediacap derives the default sdcpp family as "generate_video" and every
+// other one as "generate_video:<family>". A request that names the second must be judged on ITS files, not the default's.
+func TestAVideoFamilyThatIsNotTheDefaultIsJudgedOnItsOwnRoute(t *testing.T) {
+	requireNodePipeline(t)
+	dir := t.TempDir()
+	cfg, _ := routeLanes()[0].cfg(t, dir)
+	alt := cfg.VideoGenFamilies["fastwan"]
+	alt.SdcppModel = weightFile(t, dir, "alt-model.gguf")
+	cfg.VideoGenFamilies["altwan"] = alt
+
+	req := videoReq(dir, map[string]any{"model": "altwan"})
+	p := &Pipeline{cfg: cfg}
+	if res := p.Run(context.Background(), req); !res.OK {
+		t.Fatalf("a non-default family with every file present must run, got defer %q (class %q)", res.Reason, res.Meta.ErrClass)
+	}
+
+	// the ALTERNATIVE family's weight goes missing: the default family still runs, the alternative defers on its own route
+	if err := os.Remove(alt.SdcppModel); err != nil {
+		t.Fatal(err)
+	}
+	res := p.Run(context.Background(), videoReq(dir, map[string]any{"model": "altwan"}))
+	mustDeferWith(t, res, "route_not_ready", "route generate_video:altwan", "sdcpp_model="+alt.SdcppModel)
+	if res := p.Run(context.Background(), videoReq(dir, nil)); !res.OK {
+		t.Fatalf("the default family has every file and must still run, got defer %q (class %q)", res.Reason, res.Meta.ErrClass)
+	}
+}

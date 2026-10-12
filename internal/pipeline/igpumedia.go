@@ -348,6 +348,10 @@ func (p *Pipeline) runGenerateVideoSdcpp(ctx context.Context, req core.Request, 
 	if berr != nil {
 		return p.deferGen(req, meta, start, len(req.Input), "video generation refused: "+berr.Error())
 	}
+	// CT-54: a weight the family binds and the disk lacks is a typed defer BEFORE the lease, as the node door answers it.
+	if res, notReady := p.routeReadyOrDefer(req, meta, start, p.cfg, videoRouteName(p.cfg, renderFamily), "video generation"); notReady {
+		return res
+	}
 	seed := paramIntOr(req.Params, "seed", 0)
 	if seed <= 0 {
 		seed = mintSeed()
@@ -542,6 +546,10 @@ func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Reques
 	if derr != nil {
 		return p.deferGen(req, meta, start, len(req.Input), "character animation refused: "+derr.Error())
 	}
+	// CT-54: see the video lane.
+	if res, notReady := p.routeReadyOrDefer(req, meta, start, cfg, "animate_character", "character animation"); notReady {
+		return res
+	}
 	seed := paramIntOr(req.Params, "seed", 0)
 	if seed <= 0 {
 		seed = mintSeed()
@@ -693,6 +701,10 @@ func (p *Pipeline) runGenerateAudioAudiocpp(ctx context.Context, req core.Reques
 	bin, berr := resolveEngineBin("audiocpp_bin", cfg.AudiocppBin)
 	if berr != nil {
 		return p.deferGen(req, meta, start, len(req.Input), "audio generation refused: "+berr.Error())
+	}
+	// CT-54: see the video lane.
+	if res, notReady := p.routeReadyOrDefer(req, meta, start, cfg, "generate_audio:"+kind, "audio generation"); notReady {
+		return res
 	}
 	seed := paramIntOr(req.Params, "seed", 0)
 	if seed <= 0 {

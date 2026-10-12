@@ -152,9 +152,13 @@ var errClassCodes = map[string]string{
 	"out_dir_unwritable": ReasonInfrastructure, "tts_endpoint": ReasonInfrastructure, "lane_unavailable": ReasonInfrastructure,
 	"engine_crashed": ReasonInfrastructure, "gpu_reset": ReasonInfrastructure, "cpu_placement": ReasonInfrastructure,
 	"cpu_backend_refused": ReasonInfrastructure, "illegal_instruction": ReasonInfrastructure,
+	// A ComfyUI that stopped answering or answers with a broken CUDA context (D-38, issue #72).
+	"comfy_unusable": ReasonInfrastructure,
 	// The box or the binding cannot do what was asked as configured.
 	"not_configured": ReasonConfig, "binary_not_absolute": ReasonConfig, "model_incompatible": ReasonConfig,
 	"device_invalid": ReasonConfig, "ffmpeg_unavailable": ReasonConfig,
+	// A route the config binds whose file is gone (CT-54): another node may serve it, this one is misconfigured now.
+	"route_not_ready": ReasonConfig,
 	// The request itself is what no node can run.
 	"token_cap_exceeded": ReasonContract, "extra_args_refused": ReasonContract,
 	// The engine ran and its output failed the quality gate.

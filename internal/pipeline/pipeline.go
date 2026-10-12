@@ -1765,6 +1765,12 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 	// Ledger/health tier: the sdcpp engine is its own tier keyed by the bound model
 	// file — never the ComfyUI labels (health.groupByTier must not merge engines).
 	meta.Model = "sdcpp:" + filepath.Base(cfg.SdcppModel)
+	// CT-54: a weight the binding names and the disk lacks is a typed defer before anything is created, refined or leased. cfg is
+	// the resolved binding (a named family's overlay renders under its own copy), and a derivation of it names its route
+	// "generate_image".
+	if res, notReady := p.routeReadyOrDefer(req, meta, start, cfg, "generate_image", "image generation"); notReady {
+		return res
+	}
 	// Same seed-pinning contract as the ComfyUI path: the reported seed must be the
 	// seed actually rendered, so mint one before the run when the caller sent none.
 	seed := paramIntOr(req.Params, "seed", 0)
