@@ -46,6 +46,19 @@ Versioning: [SemVer](https://semver.org/).
   skipped for a refusal, the failure's terminal row skipped, the marker left off the line, the flag kept on the published
   outcome, the mark kept after a landing, the fleet page folding a marked row, its field dropped from the decode) each turn
   them red. Docs: ADR 0073 (amendment 2026-10-12), `docs/systems/fleet-overview.md`, `docs/OPERATOR-GUIDE.md`.
+- **An MCP server whose binary was replaced after it started now says so on the doors a release changes.** A server is spawned
+  once per client and keeps the executable image it started from. The capacity-wait fix of 0.181.0 (a wait that holds a run slot
+  gives it up and keeps waiting) was on disk a day before 24 subtasks were lost to the old ending, because every one of them was
+  served by a delegator process that predated the release (all 24 rows are stamped with the old version) and nothing in the
+  server noticed its binary had changed. The server now reads the size and modification time of its own executable at start and
+  compares them with the file on disk when `agent_delegate`, `offload_research` or `offload_status` answers: a difference, or a
+  path that is gone, puts a top-level `stale_binary` string on the answer (running version, the two stamps, "restart the MCP
+  client to load it") and one line in the log. The work still runs and nothing is interrupted or re-executed, a stat that fails
+  for another reason says nothing, and the version on disk is not read (it would mean running the new binary). Tests
+  `internal/mcpserver/stalebinary_test.go`, written first: red before with `agent_delegate: no stale_binary note in [summary
+  results]` on a server whose executable stamp had moved, on all three doors; seven mutations (size or modification time
+  dropped from the comparison, the start-stamp guard, the vanished-path branch, and each door's wiring) each turn them red.
+  Docs: `docs/systems/mcp-server.md`.
 
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 

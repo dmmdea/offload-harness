@@ -28,6 +28,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/askcache"
 	"github.com/dmmdea/offload-harness/internal/askjob"
+	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/cache"
 	"github.com/dmmdea/offload-harness/internal/composeremote"
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -167,11 +168,15 @@ type Server struct {
 	// LOCAL_OFFLOAD_ORIGIN, else CLAUDE_CODE_SESSION_ID). A field so a test names its own
 	// session instead of reading the developer's.
 	originSession func() string
+
+	// exe is the stale-binary guard: the executable this server started from, compared with the file on disk when
+	// a door whose behaviour a release changes answers (stalebinary.go).
+	exe *exeWatch
 }
 
 func New(p *pipeline.Pipeline) *Server {
 	return &Server{p: p, askCache: askcache.New(), quarantine: delegate.NewQuarantine(0), pins: delegate.NewPinTally(), tenant: delegate.DefaultTenant(),
-		originSession: func() string { return ledger.ProcessOrigin().Session }}
+		originSession: func() string { return ledger.ProcessOrigin().Session }, exe: newExeWatch(readOwnExecutable)}
 }
 
 // WithConfigSource records the config file this server runs on, so a node added to its delegate_remotes joins the running
@@ -670,6 +675,9 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		return bad, nil
 	}
 	payload := s.statusPayload(ctx, s.p.Cfg(), section)
+	if note := s.staleBinaryNote(buildinfo.Version); note != "" {
+		payload["stale_binary"] = note
+	}
 	if s.configErr != nil {
 		// FIRST key, not just present: this is the one tool still answering while
 		// every other one defers, so the reason has to be the first thing read —
@@ -4353,7 +4361,7 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	results, sum = batch.Splice(results, sum, "subtask", nil)
 	// WireResponse is a struct, so "summary" marshals FIRST (roast delta 14) —
 	// jsonResult over a map would alphabetize results ahead of it.
-	res, jerr := jsonResult(delegate.WireResponse(results, sum, lints))
+	res, jerr := jsonResult(delegateWire{ResponseWire: delegate.WireResponse(results, sum, lints), StaleBinary: s.staleBinaryNote(buildinfo.Version)})
 	if jerr != nil || res == nil {
 		return res, jerr
 	}
@@ -4663,6 +4671,15 @@ type researchWire struct {
 	Results       any    `json:"results"`
 	ResultSources []int  `json:"result_sources"`
 	Sources       any    `json:"sources"` // []research.Source after untrusted.Value
+	// StaleBinary: the executable on disk is no longer the one this server started from (stalebinary.go).
+	StaleBinary string `json:"stale_binary,omitempty"`
+}
+
+// delegateWire is agent_delegate's answer: the engine's response, summary first, and the stale-binary note when
+// the executable this server started from has changed on disk.
+type delegateWire struct {
+	delegate.ResponseWire
+	StaleBinary string `json:"stale_binary,omitempty"`
 }
 
 // handleResearch — offload_research. Fetch (guarded, delegator-side) → Build
@@ -4778,6 +4795,7 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 	res, jerr := jsonResult(researchWire{
 		Summary: wire.Summary, Untrusted: researchUntrustedNotice, Partial: rerr != nil, Error: partialErr,
 		Results: untrustedOrNote(wire.Results), ResultSources: resultSources[:len(results)], Sources: untrustedOrNote(sources),
+		StaleBinary: s.staleBinaryNote(buildinfo.Version),
 	})
 	if jerr != nil || res == nil {
 		return res, jerr

@@ -814,6 +814,16 @@ read-only unless deliberately widened. See
 
 ## Observability and debugging
 
+- **A server that started before the binary it runs was replaced says so (`stale_binary`).** An MCP server is spawned once
+  per client and keeps the executable image it started from, so a release swapped in on disk afterwards is not in that
+  process; in one day 24 subtasks were lost to a capacity wait the next release had already fixed, served by delegators that
+  predated it. The server reads the size and modification time of its own executable at start
+  (`internal/mcpserver/stalebinary.go`) and compares them with the file on disk when `agent_delegate`, `offload_research` or
+  `offload_status` answers. When they differ, or the path is gone (an OS that unlinks the old file), the answer carries a
+  top-level `stale_binary` string naming the running version and the two stamps and saying to restart the MCP client, and the
+  log says it once. It never exits, re-executes or cuts a call (that would drop the jobs the server holds), a stat that fails
+  for any other reason says nothing, and a server that could not read its own file at start has nothing to compare with.
+  The running version is the compiled-in one; the version on disk is not read (that would run the new binary).
 - `offload_status` reports harness state to the calling agent: the configured model roster (the one
   table in `config.ModelRoutes`, shared with `doctor`/`acceptance`/`report`), a live `/v1/models`
   probe through [`internal/swapclient`](../../internal/swapclient/swapclient.go), and
