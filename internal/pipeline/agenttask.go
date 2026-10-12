@@ -1419,7 +1419,12 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// Anchored here, once, so the later attempts of the call share one bound.
 	var owedEnd time.Time
 	owedCap := ""
-	if owed := repackOwed(res.Output, repackTokS); owed > 0 {
+	// Owed what the re-pack has to WRITE (repackLeast), not what the answer weighs: the same
+	// figure the skip test compares the time with, so the two cannot disagree.
+	var outSchemaMap map[string]any
+	_ = json.Unmarshal(outSchema, &outSchemaMap) // it parsed at intake; nil falls back to the answer's size
+	owedTokens, _ := repackLeast(outSchemaMap, res.Output)
+	if owed := repackOwedTokens(owedTokens, repackTokS); owed > 0 {
 		owedEnd = repackStart.Add(owed)
 		// Not owed past the call's deadline: the delegator's whole call ends at
 		// agent_call_deadline_sec (ADR 0065; this node's own setting stands in for the
@@ -1889,12 +1894,17 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		lastRaw, lastBound, lastAttemptNum = raw, bound, attemptNum
 	}
 	budget := repackBudget(output)
-	// least is the smallest an attempt may be sized to: the answer's own size in
-	// tokens. skipped is set when the time left could not buy even that, and no
-	// further attempt is sent (repackOpts.fit). floorTokens is the smallest the NEXT
-	// grammar attempt may be sized to: least, raised to what the answer needs once a
-	// cut attempt has shown it needs more (the resend below).
-	least := expectedRepackTokens(output)
+	// least is the smallest an attempt may be sized to: what the re-pack has to write,
+	// which is the answer's own size in tokens unless the schema bounds the object lower
+	// (repackLeast: a title, ten strings and a flag are a few hundred tokens whatever the
+	// length of the answer they are read from). skipped is set when the time left could
+	// not buy even that, and no further attempt is sent (repackOpts.fit). floorTokens is
+	// the smallest the NEXT grammar attempt may be sized to: least, raised to what the
+	// answer needs once a cut attempt has shown it needs more (the resend below).
+	least, bySchema := repackLeast(schema, output)
+	if bySchema {
+		opts.NeedWhat = "the object's"
+	}
 	floorTokens := least
 	// guard is set once an attempt of this call has looped (a cut that more tokens
 	// cannot cure, or a complete object that repeats a list item): every attempt
