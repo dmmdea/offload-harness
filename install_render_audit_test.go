@@ -5,9 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/servingtmpl"
 )
 
@@ -262,4 +264,166 @@ func TestAuditYAMLReadsTheExemptionFromTheStamp(t *testing.T) {
 			t.Fatalf("a hand-edited body is not the render its stamp describes; err=%v:\n%s", err, out)
 		}
 	})
+}
+
+// ---- A-87: a pin on identical cards is by UUID, and every UUID names a card -------------------------
+
+const (
+	boxCardA = "GPU-aaaa1111-0000-0000-0000-000000000001"
+	boxCardB = "GPU-bbbb2222-0000-0000-0000-000000000002"
+	boxCardC = "GPU-cccc3333-0000-0000-0000-000000000003"
+)
+
+// threeCardTable is a box with two identical cards and the display card between them on the bus.
+func threeCardTable() []gpuprobe.Device {
+	return []gpuprobe.Device{
+		{Index: 0, UUID: boxCardA, Name: "NVIDIA GeForce RTX 5060 Ti"},
+		{Index: 1, UUID: boxCardB, Name: "NVIDIA GeForce RTX 5070 Ti"},
+		{Index: 2, UUID: boxCardC, Name: "NVIDIA GeForce RTX 5060 Ti"},
+	}
+}
+
+// auditYAMLWithTable runs `audit-yaml` over text with a given card table.
+func auditYAMLWithTable(t *testing.T, devs []gpuprobe.Device, tableErr error, text string) (string, error) {
+	t.Helper()
+	withCardTable(t, devs, tableErr)
+	path := filepath.Join(t.TempDir(), "llama-swap.yaml")
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	out := captureStdout(t, func() { runErr = runAuditYAML([]string{path}) })
+	return out, runErr
+}
+
+func pinnedYAML(pin string) string {
+	return "models:\n  seat:\n    ttl: 300\n    env: [\"CUDA_VISIBLE_DEVICES=" + pin + "\", CUDA_DEVICE_ORDER=PCI_BUS_ID]\n    cmd: /bin/llama-server -m m.gguf -ngl 99 --port ${PORT}\n"
+}
+
+func TestAuditYAMLAppliesThePinRulesWithTheBoxCardTable(t *testing.T) {
+	t.Run("an index pin on identical cards in a hand-maintained file fails", func(t *testing.T) {
+		out, err := auditYAMLWithTable(t, threeCardTable(), nil, pinnedYAML("0,2"))
+		if err == nil {
+			t.Fatalf("audit-yaml passed CUDA_VISIBLE_DEVICES=0,2 on two identical cards:\n%s", out)
+		}
+		if n := strings.Count(out, "pin-by-index (seat): "); n != 1 {
+			t.Errorf("want exactly one `pin-by-index (seat): ...` line, got %d:\n%s", n, out)
+		}
+		if !strings.Contains(out, "NVIDIA GeForce RTX 5060 Ti") {
+			t.Errorf("the finding names the identical cards:\n%s", out)
+		}
+		if strings.Contains(out, ": OK") {
+			t.Errorf("a refused file must not also print OK:\n%s", out)
+		}
+	})
+	t.Run("the same file pinned by UUID prints OK", func(t *testing.T) {
+		out, err := auditYAMLWithTable(t, threeCardTable(), nil, pinnedYAML(boxCardA+","+boxCardC))
+		if err != nil || !strings.Contains(out, ": OK") {
+			t.Fatalf("a UUID pin on identical cards is the sanctioned form; err=%v:\n%s", err, out)
+		}
+	})
+	t.Run("three distinct card names: the index pin prints OK", func(t *testing.T) {
+		devs := threeCardTable()
+		devs[2].Name = "NVIDIA GeForce RTX 4090"
+		out, err := auditYAMLWithTable(t, devs, nil, pinnedYAML("0,2"))
+		if err != nil || !strings.Contains(out, ": OK") {
+			t.Fatalf("no two cards share a name; err=%v:\n%s", err, out)
+		}
+	})
+	t.Run("a UUID of a card that is not in the table fails", func(t *testing.T) {
+		out, err := auditYAMLWithTable(t, threeCardTable(), nil, pinnedYAML("GPU-dead0000-0000-0000-0000-00000000dead"))
+		if err == nil || !strings.Contains(out, "pin-unresolved (seat): ") {
+			t.Fatalf("a pin that names no card must fail; err=%v:\n%s", err, out)
+		}
+	})
+}
+
+// A fresh render of a tier whose seeds pin by index is not the maintainer's choice: the seed cannot
+// carry a UUID. It is reported as a note and never fails the audit, or the only way to satisfy the rule
+// would be a hand edit, which turns the file HAND-EDITED and red under --against-render.
+func TestAuditYAMLNotesASeededIndexPinOnAVerbatimRender(t *testing.T) {
+	res, err := deriveRender(embeddedProfiles, renderReq("blackwell-3x16", "windows", &pinnedVLLM{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamped, err := servingtmpl.Stamp(res.Config, res.Basis, stampedAtFixed())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What the seeds pin by index, counted from the render itself.
+	want := 0
+	for _, m := range regexp.MustCompile(`CUDA_VISIBLE_DEVICES=([0-9,]+)`).FindAllStringSubmatch(res.Config, -1) {
+		for _, idx := range strings.Split(m[1], ",") {
+			if idx == "0" || idx == "2" {
+				want++
+				break
+			}
+		}
+	}
+	if want < 5 {
+		t.Fatalf("control: the render pins only %d entries on the identical cards, so the rule would be tested against nothing", want)
+	}
+
+	out, runErr := auditYAMLWithTable(t, threeCardTable(), nil, stamped)
+	if runErr != nil {
+		t.Fatalf("a verbatim render must not fail the audit over its own seeds: %v\n%s", runErr, out)
+	}
+	notes := 0
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "note: ") && strings.Contains(l, "pin-by-index (") {
+			notes++
+		}
+	}
+	if notes != want {
+		t.Errorf("want one `note:` per entry pinned on the identical cards (%d), got %d:\n%s", want, notes, out)
+	}
+	if !strings.Contains(out, ": OK") {
+		t.Errorf("the rule audit is clean and says so:\n%s", out)
+	}
+
+	// The same text with the stamp removed is a hand-maintained file: the pin is its maintainer's choice.
+	if out, runErr := auditYAMLWithTable(t, threeCardTable(), nil, res.Config); runErr == nil || !strings.Contains(out, "pin-by-index (") {
+		t.Errorf("the unstamped copy of the same render is judged as a hand-maintained file; err=%v:\n%s", runErr, out)
+	}
+	// A UUID that names no card is a violation in a verbatim render too: no seed ever writes one.
+	bad := strings.Replace(res.Config, "CUDA_VISIBLE_DEVICES=2,", "CUDA_VISIBLE_DEVICES=GPU-dead0000-0000-0000-0000-00000000dead,", 1)
+	if bad == res.Config {
+		t.Fatal("the control edit found no CUDA_VISIBLE_DEVICES=2 to replace")
+	}
+	badStamped, err := servingtmpl.Stamp(bad, res.Basis, stampedAtFixed())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, runErr := auditYAMLWithTable(t, threeCardTable(), nil, badStamped); runErr == nil || !strings.Contains(out, "pin-unresolved (") {
+		t.Errorf("a UUID that names no card fails even a verbatim render; err=%v:\n%s", runErr, out)
+	}
+}
+
+func TestAuditYAMLSaysWhenThePinRulesCouldNotRun(t *testing.T) {
+	out, err := auditYAMLWithTable(t, nil, errors.New("nvidia-smi: not found"), pinnedYAML("0,2"))
+	if err != nil {
+		t.Fatalf("a missing card table must not change the exit status: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "no card table: pin rules not applied") {
+		t.Errorf("a silent pass would read as a clean audit; the output must say the pin rules did not run:\n%s", out)
+	}
+}
+
+// nvidia-smi is not run for a file that pins nothing: a CPU-only or Vulkan box has none to run.
+func TestAuditYAMLDoesNotReadTheCardTableWhenNothingPins(t *testing.T) {
+	prev := renderCardTable
+	renderCardTable = func() ([]gpuprobe.Device, error) {
+		t.Error("the card table was read for a file that pins no device")
+		return nil, nil
+	}
+	t.Cleanup(func() { renderCardTable = prev })
+	path := filepath.Join(t.TempDir(), "llama-swap.yaml")
+	if err := os.WriteFile(path, []byte("models:\n  m:\n    ttl: 300\n    cmd: /bin/llama-server -m m.gguf --port ${PORT}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	out := captureStdout(t, func() { runErr = runAuditYAML([]string{path}) })
+	if runErr != nil || strings.Contains(out, "no card table") {
+		t.Fatalf("a file with no pin needs no card table; err=%v:\n%s", runErr, out)
+	}
 }

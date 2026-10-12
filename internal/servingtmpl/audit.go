@@ -21,6 +21,8 @@ import (
 	"unicode"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
 // Violation is one broken rule in one place of a serving config.
@@ -320,6 +322,11 @@ func AuditCPUMoE(text string) []Violation {
 	sort.Slice(out, func(i, j int) bool { return out[i].Where < out[j].Where })
 	return out
 }
+
+// AuditPins and PinsCUDADevices are the A-87 rule (stubs: the tests come first).
+func AuditPins(text string, cards []gpuprobe.Card) []Violation { return nil }
+
+func PinsCUDADevices(text string) bool { return false }
 
 // Violations formats an audit result as one line per violation.
 func Violations(vs []Violation) string {
