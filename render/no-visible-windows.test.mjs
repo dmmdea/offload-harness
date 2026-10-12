@@ -107,6 +107,89 @@ test("scanner: the tokenizer handles nested templates, regexes with quotes, and 
   assert.equal(usesChildProcess('// import { spawn } from "node:child_process";\nconst a = 1;'), false);
 });
 
+// ---- 1b. call shapes the scanner must not be fooled by ---------------------------------------------------
+// Each case below started a child without windowsHide: true and passed the first version of the scanner.
+
+const CP_HEAD = 'import { spawn, spawnSync, execFile, exec } from "node:child_process";\n';
+
+test("scanner: every way of binding a child_process function is followed", () => {
+  assert.equal(bad('import cp, { spawn } from "node:child_process";\nspawn("x", []);').length, 1, "default plus named import");
+  assert.equal(bad('import cp, { spawn } from "node:child_process";\ncp.spawn("x", []);').length, 1, "the default import is the namespace");
+  assert.equal(bad('import cp from "node:child_process";\nconst { spawn } = cp;\nspawn("x", []);').length, 1, "destructured from a bound namespace");
+  assert.equal(bad('const cp = require("node:child_process");\nconst { spawn: run } = cp;\nrun("x", []);').length, 1, "destructured with a rename");
+  assert.equal(bad("const { spawn } = require(`child_process`);\nspawn(\"x\", []);").length, 1, "a template literal specifier");
+  assert.equal(bad('const spawn = require("child_process").spawn;\nspawn("x", [], {});').length, 1, "a function picked off the require chain is a function, not a namespace");
+  assert.equal(bad('const spawn = require("child_process").spawn;\nspawn("x", [], { windowsHide: true });').length, 0);
+  assert.equal(bad('const run = require("node:child_process").execFileSync;\nrun("x", []);').length, 1, "picked and renamed");
+  assert.equal(bad('const run = (await import("node:child_process")).spawnSync;\nrun("x", []);').length, 1, "picked off a dynamic import");
+});
+
+test("scanner: the options are the last non-callback argument, and only an object literal's own windowsHide counts", () => {
+  assert.equal(bad(CP_HEAD + 'execFile("x", [], (e) => { spawn("y", [], { windowsHide: true }); });').length, 1, "a hidden spawn inside the callback must not vouch for the execFile");
+  assert.equal(bad(CP_HEAD + 'execFile("x", [], { windowsHide: true }, (e) => {});').length, 0);
+  assert.equal(bad(CP_HEAD + 'exec("x", { windowsHide: true }, (e) => {});').length, 0);
+  assert.equal(bad(CP_HEAD + 'exec("x", (e) => {});').length, 1, "a callback is not options");
+  assert.equal(bad(CP_HEAD + 'execFile("x", [], opts, done);').length, 1, "options nothing in the file defines, a callback by name");
+  assert.equal(bad(CP_HEAD + 'spawn("x", [], { env: { windowsHide: true } });').length, 1, "a nested object is not the option");
+  assert.equal(bad(CP_HEAD + 'spawn("x", [], { stdio: "ignore", ...{ windowsHide: true } });').length, 1, "a spread is not a literal true");
+  assert.equal(bad(CP_HEAD + 'spawn("x", [], { windowsHide: true, ...{ windowsHide: false } });').length, 1, "a later spread can override");
+  assert.equal(bad(CP_HEAD + 'spawn("x", [], { windowsHide: true, ...extra });').length, 1, "a later spread can override");
+  assert.equal(bad(CP_HEAD + 'spawn("x", [], { windowsHide: true, windowsHide: false });').length, 1, "a later property overrides");
+  assert.equal(bad(CP_HEAD + 'spawn("x", [], { windowsHide: false, windowsHide: true });').length, 0, "the last property wins");
+  assert.equal(bad(CP_HEAD + 'spawn("x", [], { ...extra, windowsHide: true });').length, 0, "a spread before the flag cannot override it");
+  assert.equal(bad(CP_HEAD + 'spawn("x", [], cond ? { windowsHide: true } : {});').length, 1, "an expression is not an object literal");
+  assert.equal(bad(CP_HEAD + 'spawn("x", ["a"]);').length, 1, "an argument list is not options");
+});
+
+test("scanner: an options name is resolved in its scope, not across the file", () => {
+  const two = CP_HEAD + 'function a() { const opts = { windowsHide: true }; spawn("a", [], opts); }\nfunction b(opts) { spawn("b", [], opts); }\n';
+  const sites = bad(two);
+  assert.equal(sites.length, 1, "only the call in b");
+  assert.equal(sites[0].line, 3);
+  assert.equal(bad(CP_HEAD + 'const opts = { windowsHide: true };\nfunction b(opts) { spawn("b", [], opts); }').length, 1, "a parameter shadows the outer object");
+  assert.equal(bad(CP_HEAD + 'const opts = { windowsHide: true };\nconst f = (opts) => spawn("b", [], opts);').length, 1, "an arrow parameter shadows it too");
+  assert.equal(bad(CP_HEAD + 'const opts = { windowsHide: true };\nfunction b(x) { return spawn("b", [], opts); }').length, 0, "an outer object nothing shadows");
+  assert.equal(bad(CP_HEAD + 'function a() { const o = { windowsHide: true }; return () => spawn("x", [], o); }').length, 0, "an inner closure sees it");
+  assert.equal(bad(CP_HEAD + 'function a() { const o = { windowsHide: true }; }\nfunction c() { return spawn("x", [], o); }').length, 1, "a block's object is out of sight after it");
+  assert.equal(bad(CP_HEAD + 'spawn("x", [], o);\nconst o = { windowsHide: true };').length, 1, "declared after the call");
+  assert.equal(bad(CP_HEAD + 'let o = { windowsHide: true };\no = {};\nspawn("x", [], o);').length, 1, "a let can be reassigned");
+  assert.equal(bad(CP_HEAD + 'const o = { windowsHide: true };\no.windowsHide = false;\nspawn("x", [], o);').length, 1, "the flag is overwritten later");
+  assert.equal(bad(CP_HEAD + 'const o = { stdio: "ignore" };\nspawn("x", [], o);').length, 1, "a declared object without the flag");
+  assert.equal(bad(CP_HEAD + 'const base = { windowsHide: true };\nconst o = { ...base, stdio: "ignore" };\nspawn("x", [], o);').length, 1, "an object built by spread is not followed");
+});
+
+test("scanner: optional calls, call / apply / bind and aliases through a conditional are calls", () => {
+  assert.equal(bad(CP_HEAD + 'spawn?.("x", []);').length, 1, "optional call");
+  assert.equal(bad(CP_HEAD + 'spawn.call(null, "x", []);').length, 1, "call without options");
+  assert.equal(bad(CP_HEAD + 'spawn.call(null, "x", [], { windowsHide: true });').length, 0, "call with options (the first argument is `this`)");
+  assert.equal(bad(CP_HEAD + 'spawn.apply(null, ["x", []]);').length, 1, "apply cannot be read");
+  assert.equal(bad(CP_HEAD + 'const run = spawn.bind(null);\nrun("x", []);').length, 1, "bind hides the call");
+  assert.equal(bad(CP_HEAD + 'const run = c ? spawn : spawnSync;\nrun("x", []);').length, 1, "an alias chosen by a conditional");
+  assert.equal(bad(CP_HEAD + 'const run = c ? spawn : spawnSync;\nrun("x", [], { windowsHide: true });').length, 0);
+  assert.equal(bad(CP_HEAD + 'const run = other ?? spawn;\nrun("x", []);').length, 1, "an alias chosen by ??");
+  assert.equal(bad(CP_HEAD + 'const run = other || spawn;\nrun("x", []);').length, 1, "an alias chosen by ||");
+});
+
+test("scanner: a child_process function used as a value, or a promisified one, is not lost", () => {
+  assert.equal(bad(CP_HEAD + 'use(spawn);').length, 1, "passed as an argument");
+  assert.equal(bad(CP_HEAD + 'const t = { spawn };').length, 1, "stored in an object");
+  assert.equal(bad(CP_HEAD + 'const t = [spawn][0];').length, 1, "stored in an array");
+  assert.equal(bad(CP_HEAD + 'Reflect.apply(spawn, null, ["x", []]);').length, 1, "applied by Reflect");
+  assert.equal(bad('import * as cp from "node:child_process";\nuse(cp);').length, 1, "the namespace passed as an argument");
+  assert.equal(bad(CP_HEAD + 'const run = promisify(execFile);\nawait run("x", []);').length, 1, "promisify(execFile)");
+  assert.equal(bad(CP_HEAD + 'const run = util.promisify(execFile);\nawait run("x", [], { windowsHide: true });').length, 0);
+  assert.equal(bad(CP_HEAD + 'async function f({ spawnImpl = spawn } = {}) { return spawnImpl("x", []); }').length, 1, "a default of the real spawn is an alias");
+  assert.equal(bad(CP_HEAD + 'async function f({ spawnImpl = spawn } = {}) { return spawnImpl("x", [], { windowsHide: true }); }').length, 0);
+});
+
+test("scanner: only a rest parameter's arguments are forwarded unjudged", () => {
+  assert.equal(bad(CP_HEAD + 'function f(...a) { return spawn(...a); }').length, 0, "a rest parameter forwards its caller's arguments");
+  assert.equal(bad(CP_HEAD + 'const f = (...a) => spawn(...a);').length, 0);
+  assert.equal(bad(CP_HEAD + 'const args = ["x", []];\nspawn(...args);').length, 1, "an array this file builds is not the caller's");
+  assert.equal(bad(CP_HEAD + 'function f(...a) { return 1; }\nspawn(...a);').length, 1, "a rest parameter out of scope");
+  assert.equal(bad(CP_HEAD + 'function f(...a) { return spawn("x", ...a); }').length, 1, "extra leading arguments are not a plain forward");
+});
+
 // ---- 2. the rule ---------------------------------------------------------------------------------------
 
 // every source under render/ that can start a process. _third_party is vendored code; the node_modules a
@@ -124,7 +207,8 @@ function sources(dir) {
   return out;
 }
 
-// files that load child_process and start nothing themselves, with the reason
+// files that load child_process and start nothing themselves, with the reason. Such a file may also hold the
+// module as a value (`cp[name]`, which wraps a function by name); a call it makes is still judged.
 const NO_OWN_CALLS = {
   "testdata/clock-preload.cjs": "wraps cp.spawn / cp.spawnSync for a test and hands every call's arguments on unchanged: the options are the caller's",
 };
@@ -148,7 +232,11 @@ test("every child-process call in render/ sets windowsHide: true (no console win
     calls += sites.length;
     // a file that imports child_process and shows no call is a scanner that went blind, not a clean file
     if (usesChildProcess(src) && sites.length === 0 && !(rel in NO_OWN_CALLS)) blind.push(rel);
-    for (const s of sites) if (!s.ok) violations.push(`${rel}:${s.line}  ${s.call}  (${s.why})`);
+    for (const s of sites) {
+      if (s.ok) continue;
+      if (rel in NO_OWN_CALLS && s.why.startsWith("the child_process module ")) continue; // the wrapper holds the module as a value
+      violations.push(`${rel}:${s.line}  ${s.call}  (${s.why})`);
+    }
   }
   assert.ok(calls > 50, `the scan found only ${calls} child-process calls: it is blind`);
   assert.deepEqual(blind, [], "these files import child_process but the scan found no call in them");

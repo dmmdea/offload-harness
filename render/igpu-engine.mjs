@@ -1054,7 +1054,7 @@ export function encodeMp4(ffmpeg, src, dst, fps, timeoutMs = 0, opts = {}) {
   const unregister = registerCleanup(rm);
   try {
     const r = spawnSync(ffmpeg, mp4Args(src, partial, fps, mp4Opts), {
-      encoding: "utf8", windowsHide: true, ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: "SIGKILL" } : {}),
+      encoding: "utf8", ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: "SIGKILL" } : {}), windowsHide: true,
     });
     if (r.error || r.status !== 0 || !existsSync(partial)) {
       const timedOut = r.error && r.error.code === "ETIMEDOUT";
