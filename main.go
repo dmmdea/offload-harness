@@ -2001,11 +2001,11 @@ func splitFourArgs(args []string, valueFlags map[string]bool) (first, second, th
 	ended, fenced := false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if !ended && a == "--" {
+		if endsFlags(a, ended) {
 			ended = true
 			continue
 		}
-		if !ended && strings.HasPrefix(a, "-") && a != "-" {
+		if isFlagArg(a, ended) {
 			flags = append(flags, a)
 			name := strings.TrimLeft(a, "-")
 			if strings.ContainsRune(name, '=') {
@@ -2036,11 +2036,11 @@ func splitThreeArgs(args []string, valueFlags map[string]bool) (first, second, t
 	ended, fenced := false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if !ended && a == "--" {
+		if endsFlags(a, ended) {
 			ended = true
 			continue
 		}
-		if !ended && strings.HasPrefix(a, "-") && a != "-" {
+		if isFlagArg(a, ended) {
 			flags = append(flags, a)
 			name := strings.TrimLeft(a, "-")
 			if strings.ContainsRune(name, '=') {
@@ -2075,11 +2075,11 @@ func splitTwoArgs(args []string, valueFlags map[string]bool) (first, second stri
 	ended, fenced := false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if !ended && a == "--" {
+		if endsFlags(a, ended) {
 			ended = true
 			continue
 		}
-		if !ended && strings.HasPrefix(a, "-") && a != "-" {
+		if isFlagArg(a, ended) {
 			flags = append(flags, a)
 			name := strings.TrimLeft(a, "-")
 			if strings.ContainsRune(name, '=') {
@@ -2101,6 +2101,15 @@ func splitTwoArgs(args []string, valueFlags map[string]bool) (first, second stri
 		}
 	}
 	return first, second, flags
+}
+
+// endsFlags reports whether tok is the bare "--" that ends flag handling. Only the first one does: after it, "--" is a positional.
+func endsFlags(tok string, ended bool) bool { return !ended && tok == "--" }
+
+// isFlagArg reports whether tok is read as a flag by the positional splitters: it starts with "-", it is not the lone "-" (the
+// stdin positional) and no bare "--" has ended the flags.
+func isFlagArg(tok string, ended bool) bool {
+	return !ended && strings.HasPrefix(tok, "-") && tok != "-"
 }
 
 // overflowArg hands a positional the splitter has no slot for on to the flags the caller gives fs.Parse
@@ -4804,19 +4813,11 @@ func splitArgs(args []string, valueFlags map[string]bool) (positional string, fl
 	ended, fenced := false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if !ended && a == "--" {
+		if endsFlags(a, ended) {
 			ended = true
 			continue
 		}
-		if a == "-" { // stdin indicator is a positional, not a flag
-			if positional == "" {
-				positional = a
-			} else {
-				flags = overflowArg(flags, a, ended, &fenced)
-			}
-			continue
-		}
-		if !ended && strings.HasPrefix(a, "-") {
+		if isFlagArg(a, ended) { // a lone "-" (the stdin indicator) is not a flag: it falls through to the positional rule
 			flags = append(flags, a)
 			name := strings.TrimLeft(a, "-")
 			if strings.ContainsRune(name, '=') {
