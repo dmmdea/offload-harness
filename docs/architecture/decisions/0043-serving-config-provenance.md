@@ -158,14 +158,27 @@ more things, and the stamp turned out to be the evidence two of them need.
   card table (`gpuprobe`, through `audit-yaml`'s `renderCardTable` seam, read only for a file that
   pins a device): an index is flagged when it names a card whose model name another card shares
   (a unique card's index is unambiguous; an entry without `CUDA_DEVICE_ORDER=PCI_BUS_ID` is judged
-  by the weaker form, any plain index while two cards share a name), and a UUID that matches no
-  card is flagged always, because CUDA hides every device from the first pin it cannot resolve.
+  by the weaker form, any plain index while two cards share a name), and a pin that names no card
+  is flagged always, because CUDA hides every device from the first pin it cannot resolve: a UUID
+  that matches no card, an index that no card has (under `CUDA_DEVICE_ORDER=PCI_BUS_ID` the
+  nvidia-smi index of a card on the table, otherwise a position past the last card), and a token
+  that is neither a plain index nor a `GPU-` UUID (a typo, a bare UUID, a non-ASCII hyphen). `-1`
+  and a MIG instance id are not judged.
   **Severity follows who maintains the file.** A seed cannot carry a UUID, so the seeded index pins
   of a verbatim render are the renderer's own output: a `note:`, never a failure, or the only way to
   satisfy the rule would be a hand edit, which turns the file HAND-EDITED and red under
   `--against-render`. The same pin in an unstamped or edited file is its maintainer's choice and a
   violation. With no readable card table the audit says `no card table: pin rules not applied` and
   its exit status is unchanged; it never passes silently.
+  **The table is the auditing box's, and the rules are valid only for that box's own file.**
+  Nothing in a file or its stamp says which machine it belongs to (the stamp records the render's
+  paths and listen address, not the cards), and `audit-yaml` may be run on a file kept on another
+  machine. Judged against the wrong cards, its UUID pins fail `pin-unresolved` and the audit exits 1
+  on a comparison that means nothing. The default stays the box's own file; `audit-yaml
+  --other-box` says the files belong to another machine, skips the pin rules with a `note:` line
+  that says why (the card table is not read) and leaves every other rule running. A box id in the
+  stamp would let the audit tell for itself, but the stamp is a closed input set that `spec_sha256`
+  hashes, so that is a change to its format, left for a decision.
 - **What stays open.** The installer still writes the bare form in three places (the selftest R4.2
   remediation, the `install.ps1` unknown-profile fallback and `fallbackProfile` for the CUDA
   family), so the off-matrix exemption is a concession, not a policy; a yaml that R4.2 remediated
@@ -175,6 +188,7 @@ more things, and the stamp turned out to be the evidence two of them need.
   note to a failure waits for an installer step that substitutes UUIDs.
 - Tests: `TestAuditCPUMoERefusesTheBareFlagInEverySpelling`, `TestRenderGateExemptsOnlyTheCPUBackendAndTheOffMatrixLiteral`,
   `TestAuditYAMLReadsTheExemptionFromTheStamp`, `TestAuditPinsRefusesAnIndexPinOnIdenticalCards`,
+  `TestAuditPinsRefusesAPinThatNamesNoCard`, `TestAuditYAMLOtherBoxSkipsThePinRules`,
   `TestAuditYAMLNotesASeededIndexPinOnAVerbatimRender`.
 
 ## Evidence

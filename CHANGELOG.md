@@ -78,6 +78,35 @@ Versioning: [SemVer](https://semver.org/).
 - **Mutation proof.** Deleting the `Backend == "cpu"` skip, the `cpu_moe` clause, the `explicit` branch, the `VLLMSeat != nil` branch or
   the workhorse read from `config_seed.model` each turns a named synthetic test red.
 
+### Fixed — review round on the cpu-moe and pin audit rules (A-87, W4)
+
+- **A pin that names no card is a finding, not a pass.** `AuditPins` judged only a `GPU-` UUID that matched no card, so
+  `CUDA_VISIBLE_DEVICES=7` on a three-card box, or a typo, a bare UUID without its prefix or a UUID with a non-ASCII hyphen, printed `OK`
+  while CUDA hid every device from that pin on, the same hazard `pin-unresolved` documents for a UUID (a seat on fewer cards than it was
+  sized for, or on none). `pin-unresolved` now also covers an index that no card has (under `CUDA_DEVICE_ORDER=PCI_BUS_ID` the nvidia-smi
+  index of a card on the table, otherwise a position past the last card) and any token that is neither a plain index nor a `GPU-` UUID.
+  `PinsCUDADevices` counts those tokens, so the card table is read for a file that holds only such a pin. `-1` (it hides every card, so it
+  is no pin on one) and a MIG instance id (a slice of a data-centre card, which a table of whole cards cannot resolve) are not judged. An
+  index that names no card no longer also counts toward the ambiguity rule, so it is one finding and not two. It is a violation in a
+  verbatim render too: a seed that pins index 2 on a two-card box is a render for a bigger box, and a note would excuse it into a dead seat.
+- **`audit-yaml --other-box`.** The pin rules compare a file's pins with the cards of the machine that runs the audit, and nothing in a
+  file or its stamp says which machine it belongs to. A file kept on another machine (the stamp records that machine's paths so the replay
+  does not call it stale) failed `pin-unresolved` on its own UUIDs and exited 1, where before this branch the same call printed `OK`. The
+  default is unchanged. `--other-box` says the files belong to another machine: the pin rules are skipped with a `note:` line that says why
+  and the card table is not read; every other rule still runs. Every pin finding now ends with what it was judged against and the flag.
+- **Four tests that passed without the rule they name.** A mutant of each survived the servingtmpl tests at the first review commit
+  (`5da1e386`): dropping `--spec-draft-cpu-moe` from the spelling table, matching the `GPU-` prefix case-sensitively (the lower-case UUID case
+  expected zero findings, so it passed either way), reading the env pin over the inline command pin, and treating `-1` as an index. Each now
+  has a case that turns red under it: a row for the spelling, a lower-case UUID that names no card, an entry that pins in both places (in
+  both directions), and `-1` on a box where two cards share a name.
+- **Tests.** The no-card cases were written first and seen red (each of the first nine table cases found 0 findings: the audit was
+  silent; the flag tests failed on the card table being read, the missing note and the missing hint). Mutants, each turned red by a named test: the card-count bound, the
+  PCI-order lookup, the unreadable-token branch, counting such a token as a pin, the MIG exemption, the `-1` exemption, the empty-token
+  exemption, an unresolved index counted as ambiguous, the flag ignored, the flag skipping the pin-less file check, the hint dropped, the
+  flag silencing every rule, and a verbatim render noting every pin finding.
+- **Not changed.** `CUDA_VISIBLE_DEVICES=-1` is still judged by no rule: it hides every card, which `cvd-empty` names only for the empty
+  value. That is a different rule from this one and a change to `Audit`, which runs over every shipped template.
+
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 
 ### Fixed — `TestTheAnchoredClockDropsTheAdmissionAllowance` no longer fails on a loaded box for a cost that is not the poll budget
