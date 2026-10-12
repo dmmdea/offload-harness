@@ -91,6 +91,39 @@ func (b PreparedBatch) FlatReason(label string, ids []int) string {
 	return strings.Join(parts, "; ")
 }
 
+// AlsoRefused words a whole-call defer that came from somewhere other than intake (the engine
+// refused the call, so nothing ran and there is no result to splice a rejection into) so that it
+// still names the subtasks intake refused: "<reason>; also refused at intake: subtask 1: ...". A
+// caller who fixes the engine's complaint and resubmits meets nothing it was not told. A call with
+// nothing refused gets reason back untouched.
+func (b PreparedBatch) AlsoRefused(reason, label string, ids []int) string {
+	if len(b.Rejections) == 0 {
+		return reason
+	}
+	return reason + "; also refused at intake: " + b.FlatReason(label, ids)
+}
+
+// MapProgress turns the callback the engine reports through into one that speaks in the
+// caller's numbers. The engine is handed only Contracts, so its events number subtasks among
+// the valid ones and total only those: for input [ok, bad, ok] the third subtask would be
+// announced as "2 of 2". The mapped event carries the subtask's input position (where its result
+// sits in the answer), the call's full Total, and a Done count that includes the subtasks intake
+// refused, which are finished before anything runs. A nil callback stays nil (the engine reports
+// nothing then), and a batch with no rejections returns fn itself: its numbers were already right.
+func (b PreparedBatch) MapProgress(fn func(ProgressEvent)) func(ProgressEvent) {
+	if fn == nil || len(b.Rejections) == 0 {
+		return fn
+	}
+	return func(ev ProgressEvent) {
+		if ev.Index >= 0 && ev.Index < len(b.Indices) {
+			ev.Index = b.Indices[ev.Index]
+		}
+		ev.Total = b.Total
+		ev.Done += len(b.Rejections)
+		fn(ev)
+	}
+}
+
 // rejectedResult is what the caller receives for a subtask the intake refused: a contract
 // class defer with the rejection as its reason, on no node and no seat. Unplaced marks it as
 // a result no node ran (a surface that tells "the node answered and deferred" from "no node

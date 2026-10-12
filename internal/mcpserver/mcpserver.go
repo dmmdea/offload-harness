@@ -4335,12 +4335,16 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	// agent_delegate work (silent-failure review, 2026-09-02).
 	deadline := s.callDeadlineAt(entered)
 	// Progress notifications, only for a request that supplied a progress token.
-	onProgress, stopProgress := s.startProgress(ctx, req, len(contracts), deadline)
+	// The reporter speaks in the caller's numbers (register D-111): the subtasks sent, each at its input position,
+	// the refused ones done from the start. The engine only knows the valid subset.
+	onProgress, stopProgress := s.startBatchProgress(ctx, req, batch, deadline)
 	defer stopProgress()
 	results, sum, rerr := delegate.RunWith(ctx, s.p.Cfg(), localRun, contracts, in.Route, in.Remotes,
 		s.agentDelegateOptions(in.Priority, in.PinReason, deadline, onProgress))
 	if rerr != nil {
-		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
+		// Nothing ran, so there is no result to splice a rejection into: the whole-call defer names the engine's
+		// complaint and also the subtasks intake refused, so fixing the first does not meet the second on the retry.
+		return jsonResult(map[string]any{"deferred": true, "reason": batch.AlsoRefused(rerr.Error(), "subtask", nil)})
 	}
 	// The subtasks intake refused go back among the results at their own positions: one result per
 	// subtask sent, in the order sent. Each is a contract-class defer (the caller's mistake, not a
@@ -4752,13 +4756,14 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 	// list would be, in order, and a chunk error returns WITH the results already
 	// obtained, rendered as partial rather than dropped.
 	// Progress notifications, only for a request that supplied a progress token.
-	onProgress, stopProgress := s.startProgress(ctx, req, len(contracts), deadline)
+	onProgress, stopProgress := s.startBatchProgress(ctx, req, batch, deadline)
 	defer stopProgress()
 	results, sum, rerr := delegate.RunBatched(ctx, s.p.Cfg(), localRun, contracts, route, nil,
 		&delegate.RunOptions{Quarantine: s.quarantine, Deadline: deadline, OnProgress: onProgress, Rescue: s.rescueFunc(),
 			PinReason: in.PinReason, PinNeedsReason: true, PinTally: s.pins})
 	if rerr != nil && len(results) == 0 {
-		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error(), "untrusted": researchUntrustedNotice,
+		// As agent_delegate: the engine's complaint, and the pages intake refused, by their place in the url list.
+		return jsonResult(map[string]any{"deferred": true, "reason": batch.AlsoRefused(rerr.Error(), "source", resultSources), "untrusted": researchUntrustedNotice,
 			"sources": untrustedOrNote(sources)})
 	}
 	results, sum = batch.Splice(results, sum, "source", resultSources)
