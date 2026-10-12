@@ -52,6 +52,7 @@ func TestHelperSpawnGrandchild(t *testing.T) {
 		return
 	}
 	grand := exec.Command(os.Args[0], "-test.run=^TestHelperLongSleep$", "-test.timeout=200s")
+	hideWindow(grand)
 	grand.Env = append(os.Environ(), "LO_LONG_SLEEP=1")
 	if err := grand.Start(); err != nil {
 		os.Exit(92)
@@ -178,6 +179,7 @@ func startTreeRun(t *testing.T, cfgJSON string, extra ...string) *treeRun {
 	}
 	t.Cleanup(func() { _ = errFile.Close() })
 	run.wrapper = exec.Command(os.Args[0], "-test.run=^TestHelperRunWrapper$", "-test.timeout=200s")
+	hideWindow(run.wrapper)
 	run.wrapper.Env = treeEnv("LO_WRAPPER_ARGS="+string(b), "LO_CMD_PIDFILE="+cmdFile, "LO_GRAND_PIDFILE="+grandFile)
 	run.wrapper.Stderr = errFile
 	if err := run.wrapper.Start(); err != nil {
@@ -333,7 +335,17 @@ func TestKilledWrapperLiveGrandchildLeavesCardClaimedAsTreeOrphan(t *testing.T) 
 	killProcess(run.cmdPID)
 	waitDead(t, "the grandchild", run.grand, 15*time.Second)
 	waitDead(t, "the command", run.cmdPID, 15*time.Second)
-	got, err := run.m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "next job", TTL: time.Hour})
+	// The claim is observed, not timed: it frees at the first read after the last member is gone. The command and the
+	// grandchild are gone, but a console host the OS made for the grandchild's console is a member of the job too (it is in
+	// the job's list) and exits a moment after its last client, so the first read can still see it.
+	var got *gpulease.Lease
+	for deadline := time.Now().Add(20 * time.Second); ; {
+		got, err = run.m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "next job", TTL: time.Hour})
+		if err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	if err != nil {
 		t.Fatalf("the claim frees itself once the job is gone: %v", err)
 	}
@@ -390,7 +402,7 @@ func TestCommandEndsWhileAnotherLeaseHoldsAnInstanceInTheDieWithWrapperJob(t *te
 	run := startTreeRun(t, `{"state_dir": STATE, "comfy_dir": `+strconv.Quote(comfy)+`}`, "--die-with-wrapper")
 	epoch := run.m.Inspect().Epoch
 	marker, _ := json.Marshal(map[string]any{
-		"startedAt": time.Now().Add(-time.Hour).UnixMilli(), "pid": run.grand, "ownerPid": run.cmdPID,
+		"startedAt": time.Now().UnixMilli(), "pid": run.grand, "ownerPid": run.cmdPID,
 		"args": []string{"main.py"}, "key": "p1", "port": 1, "leaseEpoch": epoch + 100,
 	})
 	if err := os.WriteFile(filepath.Join(comfy, ".offload-launch-p1.json"), marker, 0o644); err != nil {
@@ -416,7 +428,7 @@ func leaseLostSparesAnInstance(t *testing.T, extra ...string) {
 	run := startTreeRun(t, `{"state_dir": STATE, "comfy_dir": `+strconv.Quote(comfy)+`}`, extra...)
 	epoch := run.m.Inspect().Epoch
 	marker, _ := json.Marshal(map[string]any{
-		"startedAt": time.Now().Add(-time.Hour).UnixMilli(), "pid": run.grand, "ownerPid": run.cmdPID,
+		"startedAt": time.Now().UnixMilli(), "pid": run.grand, "ownerPid": run.cmdPID,
 		"args": []string{"main.py"}, "key": "p1", "port": 1, "leaseEpoch": epoch + 100,
 	})
 	if err := os.WriteFile(filepath.Join(comfy, ".offload-launch-p1.json"), marker, 0o644); err != nil {

@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -30,10 +31,13 @@ type treeRecorder struct {
 	tree   *proctree.Tree
 	out    io.Writer
 	warned bool
+	// walk and goos are seams: the process-table walk and the platform the recorder decides for.
+	walk func(root int) ([]gpulease.TreeProc, error)
+	goos string
 }
 
 func newTreeRecorder(lease *gpulease.Lease, tree *proctree.Tree, out io.Writer) *treeRecorder {
-	return &treeRecorder{lease: lease, tree: tree, out: out}
+	return &treeRecorder{lease: lease, tree: tree, out: out, walk: gpulease.ProcessTree, goos: runtime.GOOS}
 }
 
 // members are the live processes of the command's tree, each with the start identity a reader
@@ -48,9 +52,17 @@ func (r *treeRecorder) members() []gpulease.TreeMember {
 			pids[pid] = true
 		}
 	}
-	if procs, err := gpulease.ProcessTree(r.tree.PID()); err == nil {
-		for _, p := range procs {
-			pids[p.PID] = true
+	// On Windows a contained command's job IS the tree: it lists every process in it, descendants that outlived their parent
+	// included, and a process outside it is not the job. The parent-link walk adds exactly such a process, the console host
+	// (conhost.exe) the OS starts as a child of a command whose wrapper has no console, and that process can outlive the job,
+	// holding a dead wrapper's claim as a tree-orphan for a job that is gone (measured: a recorded tree of the command and a
+	// console host, the card still claimed after both of the command's processes had exited). Elsewhere, and for a command
+	// that runs uncontained, the walk stays: a second opinion where a process can leave its group, the only source otherwise.
+	if !(r.goos == "windows" && r.tree.Contained()) {
+		if procs, err := r.walk(r.tree.PID()); err == nil {
+			for _, p := range procs {
+				pids[p.PID] = true
+			}
 		}
 	}
 	pids[r.tree.PID()] = true

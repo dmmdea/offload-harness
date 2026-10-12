@@ -149,3 +149,36 @@ func TestRepinVerbTestsNeverReachTheMachinesLeaseConfigOrComfyInstall(t *testing
 		t.Errorf("the fixture's own settings are kept: %s", raw)
 	}
 }
+
+// Operator order: no process a test starts may show a window. The real-wrapper tests re-execute the test binary as the wrapper, the
+// wrapped command and its grandchild; on Windows a console child of a parent with no console opens its own window unless it
+// is created window-less, and its descendants inherit what it got. Every spawn in these files hides its child, named by the
+// variable that holds it.
+func TestRealWrapperTestSpawnsAreWindowless(t *testing.T) {
+	for _, file := range []string{"gpu_tree_test.go", "gpu_reserve_repin_test.go"} {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+		for i, ln := range lines {
+			idx := strings.Index(ln, "exec.Command(")
+			if idx < 0 || strings.HasPrefix(strings.TrimSpace(ln), "//") {
+				continue
+			}
+			head := strings.TrimSpace(ln[:idx])
+			name := strings.TrimSpace(strings.TrimRight(strings.TrimSuffix(strings.TrimSuffix(head, ":="), "="), " "))
+			if name == "" {
+				t.Errorf("%s:%d: an exec.Command whose child is not held in a variable cannot be hidden: %s", file, i+1, strings.TrimSpace(ln))
+				continue
+			}
+			end := i + 8
+			if end > len(lines) {
+				end = len(lines)
+			}
+			if !strings.Contains(strings.Join(lines[i:end], "\n"), "hideWindow("+name+")") {
+				t.Errorf("%s:%d: %s is started without hideWindow(%s): it can flash a console window on Windows", file, i+1, name, name)
+			}
+		}
+	}
+}
