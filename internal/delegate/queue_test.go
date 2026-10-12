@@ -78,11 +78,10 @@ func TestRunQueueRouteEndToEnd(t *testing.T) {
 	if !strings.Contains(pr.PlacementReason, "route=queue") {
 		t.Fatalf("placement = %q", pr.PlacementReason)
 	}
-	// D-32: the holder places a queued subtask and this side records no run (no ranLocal, no ranBase), so the row
-	// carries no ran_on even though a claiming node answered. Pinned so the gap is a decision, not a surprise: a fix
-	// changes this assertion and the "Where a result ran" paragraph of docs/systems/fleet-node.md together.
-	if raw, _ := json.Marshal(WireResponse(results, sum, nil)); strings.Contains(string(raw), `"ran_on"`) {
-		t.Fatalf("a queue-lane row published ran_on: %s", raw)
+	// D-32: a claiming node answered, so the row says where it ran. The queue lane records no run of its own (the holder
+	// places a job and a claim loop takes it), and a finished answer is what marks the node.
+	if v, present := ranOnOf(t, pr); !present || v != "node" {
+		t.Fatalf("a queue-lane row a claiming node answered: ran_on = %q (present %v), want \"node\"", v, present)
 	}
 }
 

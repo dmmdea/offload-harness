@@ -8,11 +8,13 @@ package delegate
 // run there. The queue lane's finished answers are the other rows that carried no ran_on at all.
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 )
 
@@ -79,5 +81,38 @@ func TestRanOnIsAbsentForAJobTheNodeTookBackAtTheCallDeadline(t *testing.T) {
 	}
 	if v, present := ranOnOf(t, r); present {
 		t.Fatalf("ran_on = %q on a job the node confirmed it took back before it started: the key must be absent (reason %q)", v, r.Result.Reason)
+	}
+}
+
+// TestRanOnOfTheQueueLaneAtTheCallDeadline: a claimant finishes one of two jobs and holds the other, and the deadline's last
+// look at the holder returns the finished answer as the poll would have: that row names the node, the held one (a defer
+// nobody answered) names none.
+func TestRanOnOfTheQueueLaneAtTheCallDeadline(t *testing.T) {
+	widenUnwind(t, 2*time.Second)
+	holder := queueHolder(t)
+	cfg := config.Config{FleetQueueHolder: holder.url, StateDir: t.TempDir()}
+	go func() {
+		for _, job := range claimAll(t, holder.q, 2) {
+			if strings.Contains(goalOf(t, job), "two") {
+				w, _ := json.Marshal(core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "claimant", Seat: "seat-x", Output: "job two is done", StopReason: "done"})
+				if err := holder.q.Ack(job.ID, "claimant", w, ""); err != nil {
+					t.Errorf("ack: %v", err)
+				}
+			}
+		}
+	}()
+
+	results, _, _ := runWithin(t, 4*time.Second, cfg, nil,
+		[]core.AgentContract{queueContract("which shipment one?"), queueContract("which shipment two?")}, "queue", nil, deadlineIn(1200*time.Millisecond), nil)
+
+	done, held := results[1], results[0]
+	if done.Err != "" || done.Result.Deferred || done.Node != "claimant" || !held.Result.Deferred {
+		t.Fatalf("done = %+v, held = %+v, want the finished job returned and the held one deferred", done, held)
+	}
+	if v, present := ranOnOf(t, done); !present || v != "node" {
+		t.Fatalf("the job a claimant finished: ran_on = %q (present %v), want \"node\"", v, present)
+	}
+	if v, present := ranOnOf(t, held); present {
+		t.Fatalf("the job nobody answered: ran_on = %q, want the key absent", v)
 	}
 }
