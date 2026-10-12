@@ -1,0 +1,4 @@
+# The tripwire's reasoned ignore list: NAME-PREFIX, a TAB, the reason. A prefix is the label the tripwire prints for a group of
+# leaked entries (such as lo-x-state-*). An entry named here is not counted as a leak; it is printed with its reason. Add one only
+# for a leaver that is legitimate, with the reason in the same line, and never to hide a test that should use t.TempDir().
+seat_fg.stale-mp.tests.lock.d	the lock folder of the seat launcher shell test (setup/templates/vllm-seat/seat_fg.stale-mp.tests.sh): a flock target in the box-wide temp dir that must outlive a run, because two runs on one box find the same folder to take turns on the shared scratch ports; it is empty

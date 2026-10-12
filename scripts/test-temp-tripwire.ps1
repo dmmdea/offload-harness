@@ -20,6 +20,10 @@
 #                        at low priority on a spare host, or pass a subset.
 #   -Module DIR          the Go module to test (default: the current directory)
 #   -GoArgs "ARG ..."    extra go test arguments, space separated, e.g. "-p 1 -short" (-count=1 is always passed)
+#   -IgnoreFile FILE     the reasoned ignore list (default: scripts\test-temp-tripwire.ignore in the module, when it exists):
+#                        one entry per line, "NAME-PREFIX<TAB>reason", # comments and blank lines allowed. An entry left in the
+#                        temp folder whose prefix is listed is not a leak; it is printed with its reason, never silently. A line
+#                        with no reason is a usage error. For the leaver that is legitimate (a lock folder that must outlive a run).
 #   -AllowSystemDrive    accept a PARENT on the system drive. Without it the script refuses and creates nothing.
 #   -Remove              remove the folder at the end of a LEAK run too (a CLEAN run always removes its empty folder). Never
 #                        done while a process still runs from it.
@@ -29,11 +33,12 @@
 #   -Help                this text
 #
 # Verdicts. The last line of the output is always "TRIPWIRE-VERDICT: <verdict> ..." and the exit code follows:
-#   CLEAN         0   go test passed and the folder is empty: nothing was left
+#   CLEAN         0   go test passed and the folder is empty (or holds only entries the ignore list names, each printed with
+#                     its reason): nothing was left
 #   LEAK          1   the folder holds entries; they are listed by name prefix with their count ("lo-x-state-*")
 #   PROCESSES     2   a process still runs from an image inside the folder (listed with its pid); it wins over LEAK,
 #                     the leaked entries are listed as well
-#   TESTS-FAILED  3   go test failed and the folder is empty: the tests that did not run were not watched
+#   TESTS-FAILED  3   go test failed and nothing was left: the tests that did not run were not watched
 #   REFUSED       4   PARENT is on the system drive and -AllowSystemDrive was not given: nothing was created or run
 #   (bad arguments exit 64 and print no verdict)
 # A LEAK or PROCESSES run keeps the folder (it is the evidence) and prints its path; remove it by an explicit list, or
@@ -50,6 +55,7 @@ param(
     [string]$Pkgs = './...',
     [string]$Module,
     [string]$GoArgs = '',
+    [string]$IgnoreFile,
     [switch]$AllowSystemDrive,
     [switch]$Remove,
     [int]$Tail = 20,
@@ -121,6 +127,28 @@ if (-not $goCmd) { Exit-Usage 'the Go toolchain is not on PATH' }
 
 $parent = (Resolve-Path -LiteralPath $Dir).ProviderPath
 
+# the reasoned ignore list: read and checked before anything runs, so a malformed list never costs a run
+$ignoreMap = @{}
+$ignorePath = $null
+if ($PSBoundParameters.ContainsKey('IgnoreFile')) {
+    if (-not (Test-Path -LiteralPath $IgnoreFile -PathType Leaf)) { Exit-Usage "-IgnoreFile '$IgnoreFile' is not an existing file" }
+    $ignorePath = (Resolve-Path -LiteralPath $IgnoreFile).ProviderPath
+} elseif (Test-Path -LiteralPath (Join-Path $Module 'scripts\test-temp-tripwire.ignore') -PathType Leaf) {
+    $ignorePath = Join-Path $Module 'scripts\test-temp-tripwire.ignore'
+}
+if ($ignorePath) {
+    $lineNo = 0
+    foreach ($line in (Get-Content -LiteralPath $ignorePath)) {
+        $lineNo++
+        if ($line -match '^\s*(#|$)') { continue }
+        $parts = $line -split "`t", 2
+        if ($parts.Count -lt 2 -or -not $parts[0].Trim() -or -not $parts[1].Trim()) {
+            Exit-Usage "line ${lineNo}: $line of the ignore list has no name prefix, a tab and a reason"
+        }
+        $ignoreMap[$parts[0].Trim()] = $parts[1].Trim()
+    }
+}
+
 # ------------------------------------------------------------------------------------------- system drive
 
 function Test-SystemDrive([string]$Path) {
@@ -189,13 +217,22 @@ if ($VerbosePreference -eq 'Continue') {
 # ------------------------------------------------------------------------------------------ what is left
 
 $entries = @(Get-ChildItem -LiteralPath $folder -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name } | Sort-Object)
-$nEntries = $entries.Count
+$nTotal = $entries.Count
+$nEntries = 0
 $nPrefixes = 0
-if ($nEntries -gt 0) {
-    Say 'left' "$nEntries entries"
+$nIgnored = 0
+if ($nTotal -gt 0) {
     $groups = @($entries | ForEach-Object { Get-Prefix $_ } | Group-Object | Sort-Object @{ Expression = 'Count'; Descending = $true }, @{ Expression = 'Name'; Descending = $false })
-    $nPrefixes = $groups.Count
-    foreach ($g in $groups) { Write-Host ('{0}:   {1,5}  {2}' -f $script:Prog, $g.Count, $g.Name) }
+    $leaks = @($groups | Where-Object { -not $ignoreMap.ContainsKey($_.Name) })
+    $ignored = @($groups | Where-Object { $ignoreMap.ContainsKey($_.Name) })
+    foreach ($g in $leaks) { $nEntries += $g.Count }
+    foreach ($g in $ignored) { $nIgnored += $g.Count }
+    $nPrefixes = $leaks.Count
+    if ($nEntries -gt 0) {
+        Say 'left' "$nEntries entries"
+        foreach ($g in $leaks) { Write-Host ('{0}:   {1,5}  {2}' -f $script:Prog, $g.Count, $g.Name) }
+    }
+    foreach ($g in $ignored) { Write-Host ('{0}: ignored   {1,5}  {2}  ({3})' -f $script:Prog, $g.Count, $g.Name, $ignoreMap[$g.Name]) }
 }
 
 $procs = 0
@@ -228,10 +265,12 @@ if ($procs -gt 0) {
     $verdict = "LEAK ($nEntries entries left in $nPrefixes name prefix(es) under $folder)"
     $code = 1
 } elseif ($rc -ne 0) {
-    $verdict = "TESTS-FAILED (go test exited $rc and the folder is empty: the tests that did not run were not watched)"
+    $verdict = "TESTS-FAILED (go test exited $rc and nothing was left: the tests that did not run were not watched)"
     $code = 3
 } else {
-    $verdict = 'CLEAN (go test passed and nothing was left in the temp folder)'
+    $ignoredNote = ''
+    if ($nIgnored -gt 0) { $ignoredNote = "; $nIgnored entries named by the ignore list were not counted" }
+    $verdict = "CLEAN (go test passed and nothing was left in the temp folder$ignoredNote)"
     $code = 0
 }
 

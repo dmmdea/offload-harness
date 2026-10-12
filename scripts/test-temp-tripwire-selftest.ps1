@@ -151,6 +151,41 @@ try {
     Expect 'leak with -Remove: exit is still LEAK' $script:Rc 1
     Expect 'leak with -Remove: the folder is removed' (Folders-In) 0
 
+    # --- the reasoned ignore list
+    $tab = [string][char]9
+    [IO.File]::WriteAllText((Join-Path $root 'ignore.txt'), "# a comment`n`ntripwire-leak-*${tab}the fixture leaves these on purpose`n")
+    Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'ignore.txt')))
+    Expect 'ignore list naming the leak: exit' $script:Rc 0
+    Expect 'ignore list naming the leak: verdict' (Verdict-Of) 'CLEAN'
+    Expect-Has 'ignore list naming the leak: the group is printed with its reason, not hidden' $script:Out 'ignored       3  tripwire-leak-*  (the fixture leaves these on purpose)'
+    if ($script:Out.Contains('test-temp-tripwire: left')) { Bad 'ignore list naming the leak: it is reported as a leak' } else { Ok 'ignore list naming the leak: it is not reported as a leak' }
+    Expect-Has 'ignore list naming the leak: the verdict says how many were not counted' $script:Out '3 entries named by the ignore list were not counted'
+    Expect 'ignore list naming the leak: the folder goes' (Folders-In) 0
+    [IO.File]::WriteAllText((Join-Path $root 'ignore-other.txt'), "something-else-*${tab}not what the fixture leaves`n")
+    Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'ignore-other.txt')))
+    Expect 'ignore list naming something else: exit' $script:Rc 1
+    Expect 'ignore list naming something else: verdict' (Verdict-Of) 'LEAK'
+    Clean-Kept
+    [IO.File]::WriteAllText((Join-Path $root 'ignore-noreason.txt'), "tripwire-leak-*`n")
+    Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'ignore-noreason.txt')))
+    Expect 'ignore line with no reason: exit' $script:Rc 64
+    [IO.File]::WriteAllText((Join-Path $root 'ignore-blank.txt'), "tripwire-leak-*${tab}   `n")
+    Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'ignore-blank.txt')))
+    Expect 'ignore line with a blank reason: exit' $script:Rc 64
+    Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'no-such-file.txt')))
+    Expect 'ignore file that does not exist: exit' $script:Rc 64
+    Expect 'a rejected ignore list ran nothing' (Folders-In) 0
+    # the default list: scripts\test-temp-tripwire.ignore in the module, found without being named
+    $fixmod = Join-Path $root 'fixmod'
+    Copy-Item -LiteralPath $fixture -Destination $fixmod -Recurse
+    New-Item -ItemType Directory -Path (Join-Path $fixmod 'scripts') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $fixmod 'scripts\test-temp-tripwire.ignore'), "tripwire-leak-*${tab}the default list names it`n")
+    $defaultArgs = @('-Dir', $root, '-Module', $fixmod)
+    if ($common -contains '-AllowSystemDrive') { $defaultArgs += '-AllowSystemDrive' }
+    Run ($defaultArgs + @('-Pkgs', './leaker'))
+    Expect 'default ignore list: exit' $script:Rc 0
+    Expect-Has 'default ignore list: the reason is printed' $script:Out '(the default list names it)'
+
     # --- TESTS-FAILED
     Run ($common + @('-Pkgs', './failing'))
     Expect 'failing: exit' $script:Rc 3

@@ -135,11 +135,41 @@ expect "leak: the folder is kept as evidence" "$(folders_in)" 1
 kept=$(find "$root" -mindepth 1 -maxdepth 1 -name 'test-temp-tripwire.*' -type d | head -n 1)
 expect "leak: the folder holds exactly the three leaked entries on disk" "$(ls -A1 "$kept" | wc -l | tr -d ' ')" 3
 expect "leak: the folder that was removed by its own test is not among them" "$(ls -A1 "$kept" | grep -c 'tripwire-clean-' | tr -d ' ')" 0
+cleanup_kept_all() { find "$root" -mindepth 1 -maxdepth 1 -name 'test-temp-tripwire.*' -type d | while read -r d; do remove_tree "$d"; done; }
 cleanup_kept() { case $kept in "$root"/test-temp-tripwire.*) remove_tree "$kept" ;; esac; }
 cleanup_kept
 run "${common[@]}" --pkgs ./leaker --remove
 expect "leak with --remove: exit is still LEAK" "$rc" 1
 expect "leak with --remove: the folder is removed" "$(folders_in)" 0
+
+# --- the reasoned ignore list
+printf '# a comment\n\ntripwire-leak-*\tthe fixture leaves these on purpose\n' >"$root/ignore.txt"
+run "${common[@]}" --pkgs ./leaker --ignore-file "$root/ignore.txt"
+expect "ignore list naming the leak: exit" "$rc" 0
+expect "ignore list naming the leak: verdict" "$(verdict_of)" CLEAN
+expect_has "ignore list naming the leak: the group is printed with its reason, not hidden" "$out" "ignored       3  tripwire-leak-*  (the fixture leaves these on purpose)"
+expect_lacks "ignore list naming the leak: it is not reported as a leak" "$out" "test-temp-tripwire: left"
+expect_has "ignore list naming the leak: the verdict says how many were not counted" "$out" "3 entries named by the ignore list were not counted"
+expect "ignore list naming the leak: the folder goes" "$(folders_in)" 0
+printf 'something-else-*\tnot what the fixture leaves\n' >"$root/ignore-other.txt"
+run "${common[@]}" --pkgs ./leaker --ignore-file "$root/ignore-other.txt"
+expect "ignore list naming something else: exit" "$rc" 1
+expect "ignore list naming something else: verdict" "$(verdict_of)" LEAK
+cleanup_kept_all
+printf 'tripwire-leak-*\n' >"$root/ignore-noreason.txt"
+run "${common[@]}" --pkgs ./leaker --ignore-file "$root/ignore-noreason.txt"
+expect "ignore line with no reason: exit" "$rc" 64
+printf 'tripwire-leak-*\t   \n' >"$root/ignore-blank.txt"
+run "${common[@]}" --pkgs ./leaker --ignore-file "$root/ignore-blank.txt"
+expect "ignore line with a blank reason: exit" "$rc" 64
+run "${common[@]}" --pkgs ./leaker --ignore-file "$root/no-such-file.txt"
+expect "ignore file that does not exist: exit" "$rc" 64
+expect "a rejected ignore list ran nothing" "$(folders_in)" 0
+# the default list: scripts/test-temp-tripwire.ignore in the module, found without being named
+cp -R "$fixture" "$root/fixmod" && mkdir -p "$root/fixmod/scripts" && printf 'tripwire-leak-*\tthe default list names it\n' >"$root/fixmod/scripts/test-temp-tripwire.ignore"
+run --dir "$root" --module "$root/fixmod" ${allow:+"$allow"} --pkgs ./leaker
+expect "default ignore list: exit" "$rc" 0
+expect_has "default ignore list: the reason is printed" "$out" "(the default list names it)"
 
 # --- TESTS-FAILED
 run "${common[@]}" --pkgs ./failing
@@ -152,7 +182,6 @@ expect "failing: the empty folder is gone" "$(folders_in)" 0
 run "${common[@]}" --pkgs "./leaker ./failing"
 expect "leak beside a failing package: exit" "$rc" 1
 expect "leak beside a failing package: verdict" "$(verdict_of)" LEAK
-cleanup_kept_all() { find "$root" -mindepth 1 -maxdepth 1 -name 'test-temp-tripwire.*' -type d | while read -r d; do remove_tree "$d"; done; }
 cleanup_kept_all
 
 # --- PROCESSES

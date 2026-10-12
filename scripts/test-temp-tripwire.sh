@@ -19,6 +19,10 @@
 #                         niced on a spare host (nice -n 19 bash scripts/test-temp-tripwire.sh ...), or pass a subset.
 #   --module DIR          the Go module to test (default: the current directory)
 #   --go-args "ARG ..."   extra go test arguments, space separated, e.g. "-p 1 -short" (-count=1 is always passed)
+#   --ignore-file FILE    the reasoned ignore list (default: scripts/test-temp-tripwire.ignore in the module, when it exists):
+#                         one entry per line, "NAME-PREFIX<TAB>reason", # comments and blank lines allowed. An entry left in the
+#                         temp folder whose prefix is listed is not a leak; it is printed with its reason, never silently. A line
+#                         with no reason is a usage error. For the leaver that is legitimate (a lock folder that must outlive a run).
 #   --allow-system-drive  accept a PARENT on the system drive. Without it the script refuses and creates nothing.
 #   --remove              remove the folder at the end of a LEAK run too (a CLEAN run always removes its empty folder). Never
 #                         done while a process still runs from it.
@@ -29,7 +33,8 @@
 #   Only the "--opt value" spelling is accepted.
 #
 # Verdicts. The last line of the output is always "TRIPWIRE-VERDICT: <verdict> ..." and the exit code follows:
-#   CLEAN         0   go test passed and the folder is empty: nothing was left
+#   CLEAN         0   go test passed and the folder is empty (or holds only entries the ignore list names, each printed with
+#                     its reason): nothing was left
 #   LEAK          1   the folder holds entries; they are listed by name prefix with their count ("lo-x-state-*")
 #   PROCESSES     2   a process still runs from an image inside the folder (listed with its pid); it wins over LEAK,
 #                     the leaked entries are listed as well
@@ -56,7 +61,7 @@ EXIT_TESTS_FAILED=3
 EXIT_REFUSED=4
 EXIT_USAGE=64
 
-parent='' pkgs='./...' module='' goargs='' allow_system=0 remove=0 tail_n=20 verbose=0
+parent='' pkgs='./...' module='' goargs='' allow_system=0 remove=0 tail_n=20 verbose=0 ignore_file='' ignore_explicit=0
 unset name_prefix
 
 say() { printf '%s: %-9s %s\n' "$PROG" "$1" "$2"; }
@@ -88,7 +93,7 @@ die_usage() {
 
 while [ $# -gt 0 ]; do
 	case $1 in
-	--dir | --pkgs | --module | --go-args | --tail | --name-prefix)
+	--dir | --pkgs | --module | --go-args | --tail | --name-prefix | --ignore-file)
 		[ $# -ge 2 ] || die_usage "$1 needs a value"
 		case $1 in
 		--dir) parent=$2 ;;
@@ -97,6 +102,7 @@ while [ $# -gt 0 ]; do
 		--go-args) goargs=$2 ;;
 		--tail) tail_n=$2 ;;
 		--name-prefix) name_prefix=$2 ;;
+		--ignore-file) ignore_file=$2 ignore_explicit=1 ;;
 		esac
 		shift 2
 		;;
@@ -121,8 +127,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -n "${name_prefix+x}" ]; then # a check, not a run
-	printf '%s
-' "$name_prefix" | prefixes
+	printf '%s\n' "$name_prefix" | prefixes
 	exit 0
 fi
 
@@ -137,6 +142,16 @@ else
 fi
 [ -f "$module/go.mod" ] || die_usage "no go.mod in '$module': run from the module root or pass --module"
 command -v go >/dev/null 2>&1 || die_usage "the Go toolchain is not on PATH"
+
+# the reasoned ignore list: read and checked before anything runs, so a malformed list never costs a run
+if [ "$ignore_explicit" = 0 ] && [ -f "$module/scripts/test-temp-tripwire.ignore" ]; then
+	ignore_file="$module/scripts/test-temp-tripwire.ignore"
+fi
+if [ -n "$ignore_file" ]; then
+	[ -f "$ignore_file" ] || die_usage "--ignore-file '$ignore_file' is not an existing file"
+	bad=$(tr -d '\r' <"$ignore_file" | awk -F'\t' '/^[ \t]*(#|$)/ { next } { l = $1; r = $2; gsub(/^[ \t]+|[ \t]+$/, "", l); gsub(/^[ \t]+|[ \t]+$/, "", r); if (NF < 2 || l == "" || r == "") print NR ": " $0 }' | head -n 1)
+	[ -z "$bad" ] || die_usage "line $bad of the ignore list has no name prefix, a tab and a reason"
+fi
 
 parent=$(cd "$parent" && pwd -P) || die_usage "cannot enter --dir"
 
@@ -200,20 +215,35 @@ fi
 # ------------------------------------------------------------------------------------------ what is left
 
 entries=$(cd "$folder" && ls -A1 2>/dev/null | sort)
-n_entries=0
-[ -n "$entries" ] && n_entries=$(printf '%s
-' "$entries" | wc -l | tr -d ' ')
+n_total=0
+[ -n "$entries" ] && n_total=$(printf '%s\n' "$entries" | wc -l | tr -d ' ')
 
-n_prefixes=0
-if [ "$n_entries" != 0 ]; then
-	say left "$n_entries entries"
-	summary=$(printf '%s
-' "$entries" | prefixes | sort | uniq -c | sort -k1,1nr -k2)
-	n_prefixes=$(printf '%s
-' "$summary" | wc -l | tr -d ' ')
-	printf '%s
-' "$summary" | while read -r count prefix; do printf '%s:   %5s  %s
-' "$PROG" "$count" "$prefix"; done
+# Group by name prefix, then split the groups the reasoned ignore list names (printed with their reason) from the leaks.
+# A line of $split is "L<TAB>count<TAB>prefix" for a leak and "I<TAB>count<TAB>prefix<TAB>reason" for an ignored group.
+n_entries=0 n_prefixes=0 n_ignored=0
+if [ "$n_total" != 0 ]; then
+	summary=$(printf '%s\n' "$entries" | prefixes | sort | uniq -c | sort -k1,1nr -k2)
+	split=$(printf '%s\n' "$summary" | awk -v list="$ignore_file" '
+		BEGIN {
+			FS = "\t"
+			while (list != "" && (getline line < list) > 0) {
+				sub(/\r$/, "", line)
+				if (line ~ /^[ \t]*(#|$)/) continue
+				split(line, f, "\t"); label = f[1]; reason = f[2]
+				gsub(/^[ \t]+|[ \t]+$/, "", label); gsub(/^[ \t]+|[ \t]+$/, "", reason)
+				why[label] = reason
+			}
+			FS = " "
+		}
+		{ c = $1; sub(/^ *[0-9]+ /, ""); if ($0 in why) print "I\t" c "\t" $0 "\t" why[$0]; else print "L\t" c "\t" $0 }')
+	n_entries=$(printf '%s\n' "$split" | awk -F'\t' '$1 == "L" { n += $2 } END { print n + 0 }')
+	n_ignored=$(printf '%s\n' "$split" | awk -F'\t' '$1 == "I" { n += $2 } END { print n + 0 }')
+	n_prefixes=$(printf '%s\n' "$split" | awk -F'\t' '$1 == "L" { n++ } END { print n + 0 }')
+	if [ "$n_entries" != 0 ]; then
+		say left "$n_entries entries"
+		printf '%s\n' "$split" | awk -F'\t' -v prog="$PROG" '$1 == "L" { printf "%s:   %5s  %s\n", prog, $2, $3 }'
+	fi
+	printf '%s\n' "$split" | awk -F'\t' -v prog="$PROG" '$1 == "I" { printf "%s: ignored   %5s  %s  (%s)\n", prog, $2, $3, $4 }'
 fi
 
 procs=0 proc_check=1
@@ -245,10 +275,12 @@ elif [ "$n_entries" != 0 ]; then
 	verdict="LEAK ($n_entries entries left in $n_prefixes name prefix(es) under $folder$skip_note)"
 	code=$EXIT_LEAK
 elif [ "$rc" != 0 ]; then
-	verdict="TESTS-FAILED (go test exited $rc and the folder is empty: the tests that did not run were not watched$skip_note)"
+	verdict="TESTS-FAILED (go test exited $rc and nothing was left: the tests that did not run were not watched$skip_note)"
 	code=$EXIT_TESTS_FAILED
 else
-	verdict="CLEAN (go test passed and nothing was left in the temp folder$skip_note)"
+	ignored_note=''
+	[ "$n_ignored" != 0 ] && ignored_note="; $n_ignored entries named by the ignore list were not counted"
+	verdict="CLEAN (go test passed and nothing was left in the temp folder$ignored_note$skip_note)"
 	code=$EXIT_CLEAN
 fi
 
