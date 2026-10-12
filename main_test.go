@@ -518,3 +518,177 @@ func TestRunGraphArgsRequireGraph(t *testing.T) {
 		t.Fatal("expected error when neither --graph nor --graph-json is given")
 	}
 }
+
+// ---- CT-52: a bare "--" ends the flags --------------------------------------------------
+//
+// The four positional splitters (splitArgs, splitTwoArgs, splitThreeArgs, splitFourArgs) sent every token
+// that starts with "-" to the flags, so a positional that begins with a dash (a lyrics section marker such
+// as "--- Intro ---", a prompt that opens with "-") was lost: `generate-audio out.wav "--- Intro ---"`
+// left the text empty. A bare "--" now ends flag handling in all four: every later token is a positional,
+// in order, even when it starts with "-". The user's "--" is consumed by the helper; when a positional
+// arrives that the helper has no slot for, ONE helper-written "--" goes in front of it in the returned
+// flags, so the caller's fs.Parse stops there and cannot read a leading dash as a flag.
+
+// splitAdapters runs each splitter through one shape: the positionals it found (always arity long) and its flags.
+var splitAdapters = []struct {
+	name  string
+	arity int
+	run   func(args []string, valueFlags map[string]bool) ([]string, []string)
+}{
+	{"splitArgs", 1, func(a []string, v map[string]bool) ([]string, []string) {
+		p, f := splitArgs(a, v)
+		return []string{p}, f
+	}},
+	{"splitTwoArgs", 2, func(a []string, v map[string]bool) ([]string, []string) {
+		x, y, f := splitTwoArgs(a, v)
+		return []string{x, y}, f
+	}},
+	{"splitThreeArgs", 3, func(a []string, v map[string]bool) ([]string, []string) {
+		x, y, z, f := splitThreeArgs(a, v)
+		return []string{x, y, z}, f
+	}},
+	{"splitFourArgs", 4, func(a []string, v map[string]bool) ([]string, []string) {
+		w, x, y, z, f := splitFourArgs(a, v)
+		return []string{w, x, y, z}, f
+	}},
+}
+
+var splitTestValueFlags = map[string]bool{"voice": true, "config": true, "seed": true}
+
+// positionalsFor is n distinct positionals, the LAST one starting with dashes.
+func positionalsFor(n int) []string {
+	out := make([]string, 0, n)
+	for i := 1; i < n; i++ {
+		out = append(out, "p"+string(rune('0'+i)))
+	}
+	return append(out, "--- Intro ---")
+}
+
+// TestSplitTwoArgsBareDashDashEndsFlags is the register's case: `generate-audio out.wav -- "--- Intro ---"`
+// returns both positionals and no flags. Before the fix the second positional came back empty.
+func TestSplitTwoArgsBareDashDashEndsFlags(t *testing.T) {
+	first, second, flags := splitTwoArgs([]string{"out.wav", "--", "--- Intro ---"}, splitTestValueFlags)
+	if first != "out.wav" || second != "--- Intro ---" || len(flags) != 0 {
+		t.Fatalf("splitTwoArgs(out.wav -- \"--- Intro ---\") = (%q, %q, %v); want (out.wav, --- Intro ---, no flags)", first, second, flags)
+	}
+	// the terminator may come first, and a flag before it still works
+	first, second, flags = splitTwoArgs([]string{"--voice", "finetuned", "--", "out.wav", "-starts-with-a-dash"}, splitTestValueFlags)
+	if first != "out.wav" || second != "-starts-with-a-dash" || !reflect.DeepEqual(flags, []string{"--voice", "finetuned"}) {
+		t.Fatalf("got (%q, %q, %v); want (out.wav, -starts-with-a-dash, [--voice finetuned])", first, second, flags)
+	}
+}
+
+func TestSplitThreeArgsBareDashDashEndsFlags(t *testing.T) {
+	first, second, third, flags := splitThreeArgs([]string{"out.mp4", "still.png", "--", "- a prompt that opens with a dash"}, splitTestValueFlags)
+	if first != "out.mp4" || second != "still.png" || third != "- a prompt that opens with a dash" || len(flags) != 0 {
+		t.Fatalf("splitThreeArgs = (%q, %q, %q, %v); want the dash-led prompt as the third positional and no flags", first, second, third, flags)
+	}
+}
+
+func TestSplitFourArgsBareDashDashEndsFlags(t *testing.T) {
+	first, second, third, fourth, flags := splitFourArgs([]string{"--seed", "7", "out.mp4", "ref.png", "driver.mp4", "--", "--- the prompt ---"}, splitTestValueFlags)
+	if first != "out.mp4" || second != "ref.png" || third != "driver.mp4" || fourth != "--- the prompt ---" || !reflect.DeepEqual(flags, []string{"--seed", "7"}) {
+		t.Fatalf("splitFourArgs = (%q, %q, %q, %q, %v); want the dash-led prompt as the fourth positional and [--seed 7] as the flags", first, second, third, fourth, flags)
+	}
+}
+
+func TestSplitArgsBareDashDashEndsFlags(t *testing.T) {
+	pos, flags := splitArgs([]string{"--config", "c.json", "--", "--not-a-flag"}, splitTestValueFlags)
+	if pos != "--not-a-flag" || !reflect.DeepEqual(flags, []string{"--config", "c.json"}) {
+		t.Fatalf("splitArgs = (%q, %v); want the dash-led token as the positional and [--config c.json] as the flags", pos, flags)
+	}
+}
+
+// TestSplitEveryHelperEndsFlagsAtTheTerminator runs the same property through all four splitters at their own arity.
+func TestSplitEveryHelperEndsFlagsAtTheTerminator(t *testing.T) {
+	for _, ad := range splitAdapters {
+		t.Run(ad.name, func(t *testing.T) {
+			want := positionalsFor(ad.arity)
+			got, flags := ad.run(append([]string{"--"}, want...), splitTestValueFlags)
+			if !reflect.DeepEqual(got, want) || len(flags) != 0 {
+				t.Fatalf("%s(-- %v) = (%v, %v); want (%v, no flags)", ad.name, want, got, flags, want)
+			}
+		})
+	}
+}
+
+// TestSplitArgsKeepsALoneDashAsThePositional: a lone "-" is the stdin positional, before and after the terminator.
+func TestSplitArgsKeepsALoneDashAsThePositional(t *testing.T) {
+	for _, in := range [][]string{{"-"}, {"--", "-"}, {"--json", "-"}} {
+		pos, _ := splitArgs(in, splitTestValueFlags)
+		if pos != "-" {
+			t.Errorf("splitArgs(%v) positional = %q; want the lone dash", in, pos)
+		}
+	}
+}
+
+// TestSplitArgsFlagsBeforeTheTerminatorStillWork: everything before "--" is parsed as it always was.
+func TestSplitArgsFlagsBeforeTheTerminatorStillWork(t *testing.T) {
+	first, second, flags := splitTwoArgs([]string{"--voice", "x", "out.wav", "--", "-t"}, splitTestValueFlags)
+	if first != "out.wav" || second != "-t" || !reflect.DeepEqual(flags, []string{"--voice", "x"}) {
+		t.Fatalf("splitTwoArgs = (%q, %q, %v); want (out.wav, -t, [--voice x])", first, second, flags)
+	}
+}
+
+// TestSplitTwoArgsOverArityAfterTheTerminatorIsHandedToParseBehindOneDashDash: a positional past the arity still
+// goes to the flags (as it always did), but once the terminator was seen the helper puts ONE "--" of its own in
+// front of the first such token, so fs.Parse stops there and "--voice" after the terminator is never a flag.
+func TestSplitTwoArgsOverArityAfterTheTerminatorIsHandedToParseBehindOneDashDash(t *testing.T) {
+	first, second, flags := splitTwoArgs([]string{"out.wav", "--", "A", "--voice", "x"}, splitTestValueFlags)
+	if first != "out.wav" || second != "A" {
+		t.Fatalf("positionals = (%q, %q); want (out.wav, A)", first, second)
+	}
+	if want := []string{"--", "--voice", "x"}; !reflect.DeepEqual(flags, want) {
+		t.Fatalf("flags = %v; want exactly %v (one helper-written --, then the overflow in order)", flags, want)
+	}
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	voice := fs.String("voice", "", "")
+	if err := fs.Parse(flags); err != nil || *voice != "" {
+		t.Fatalf("fs.Parse(%v) set --voice=%q (err %v); a token after the terminator must never be read as a flag", flags, *voice, err)
+	}
+	// with no overflow the flags stay empty: the helper writes no -- of its own
+	if _, _, flags := splitTwoArgs([]string{"out.wav", "--", "A"}, splitTestValueFlags); len(flags) != 0 {
+		t.Fatalf("flags = %v; want none when nothing overflowed", flags)
+	}
+	// an overflow BEFORE the terminator is unchanged, and the one-"--" rule holds across several overflow tokens
+	_, _, flags = splitTwoArgs([]string{"a", "b", "c", "--", "-d", "-e"}, splitTestValueFlags)
+	if want := []string{"c", "--", "-d", "-e"}; !reflect.DeepEqual(flags, want) {
+		t.Fatalf("flags = %v; want %v", flags, want)
+	}
+}
+
+// TestSplitHelpersOverArityFenceTheirOverflow runs the over-arity rule through all four splitters.
+func TestSplitHelpersOverArityFenceTheirOverflow(t *testing.T) {
+	for _, ad := range splitAdapters {
+		t.Run(ad.name, func(t *testing.T) {
+			in := append([]string{"--"}, positionalsFor(ad.arity)...)
+			in = append(in, "--voice", "x")
+			got, flags := ad.run(in, splitTestValueFlags)
+			if want := positionalsFor(ad.arity); !reflect.DeepEqual(got, want) {
+				t.Fatalf("positionals = %v; want %v", got, want)
+			}
+			if want := []string{"--", "--voice", "x"}; !reflect.DeepEqual(flags, want) {
+				t.Fatalf("flags = %v; want %v", flags, want)
+			}
+		})
+	}
+}
+
+// TestSplitHelpersLeaveAnOverflowAloneWithoutATerminator: with no "--" in the arguments the helpers return
+// exactly what they returned before (a positional past the arity goes to the flags with no fence), so no
+// existing call changes meaning.
+func TestSplitHelpersLeaveAnOverflowAloneWithoutATerminator(t *testing.T) {
+	_, _, flags := splitTwoArgs([]string{"a", "b", "c", "--voice", "x"}, splitTestValueFlags)
+	if want := []string{"c", "--voice", "x"}; !reflect.DeepEqual(flags, want) {
+		t.Fatalf("flags = %v; want %v", flags, want)
+	}
+}
+
+// TestSplitValueFlagStillTakesAFollowingDashDashAsItsValue: "--" directly after a value flag is that flag's value
+// (the flag package's own rule), not the terminator.
+func TestSplitValueFlagStillTakesAFollowingDashDashAsItsValue(t *testing.T) {
+	first, second, flags := splitTwoArgs([]string{"--voice", "--", "out.wav", "text"}, splitTestValueFlags)
+	if first != "out.wav" || second != "text" || !reflect.DeepEqual(flags, []string{"--voice", "--"}) {
+		t.Fatalf("splitTwoArgs = (%q, %q, %v); want (out.wav, text, [--voice --])", first, second, flags)
+	}
+}
