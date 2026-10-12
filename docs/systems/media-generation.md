@@ -1611,10 +1611,20 @@ ends, passed or failed (`igpu-lifecycle.test.mjs`, `compose-hyperframes.test.mjs
 `manifest-satisfy.test.mjs` pin them).
 
 No child process the suite starts may open a console window. Every `spawn` / `spawnSync` call in `render/` (tests, test support
-and the scripts the tests write into strings included) sets `windowsHide: true`, and `render/no-visible-windows.test.mjs` fails
-with `file:line` on one that does not. The Go side builds its children with `winexec.Command` / `winexec.CommandContext`
-(`internal/winexec`), and `TestNoDirectExecInProduction` there lists the few direct `os/exec` constructors that stay, each with
-its reason.
+and the scripts the tests write into strings included) sets `windowsHide: true` in its options object, and
+`render/no-visible-windows.test.mjs` fails with `file:line` on one that does not (and on a child_process function used as a
+value, which hides its calls). A child with `stdio: "inherit"` stays on the operator's console whatever `windowsHide` says, so
+Ctrl-C still reaches the attached sd-cli / tts / comfy-render runs (`render/console-share.test.mjs` measures it). The Go side
+builds its children with `winexec.Command` / `winexec.CommandContext` (`internal/winexec`): the child's own window is hidden
+always, and it gets `CREATE_NO_WINDOW` only when the parent has no console to hand on, so under a terminal it shares the console
+and gets the operator's Ctrl-C as before; a child that must outlive its parent is `CommandDetached`, the command an operator
+names after `--` in `gpu reserve` is `CommandIfNoConsole`, and the Windows cage starts its child with `CREATE_NO_WINDOW` and
+`SW_HIDE`. `TestEveryChildProcessStartIsHidden` there reads every Go file of the repository that builds for Windows (tests and
+the `tools/` modules included) and lists the few process starts that stay unhidden, each with its reason.
+The flags are asserted by tests; the desktop itself is watched by `node scripts/window-watch-run.mjs -- <compiled test binary>`, which runs a
+binary with no console of its own (the case that opens windows; use `go test -c`, because `go.exe` is itself a console program) while
+`scripts/window-watch.ps1` logs every new top-level window, and exits 3 when a console window appeared (`--selftest` is its positive control; `--hidden-console` starts the command with a window-less console
+of its own, which the render suite needs because `node --test` starts every test file with a plain `spawn`).
 
 `render/compose-hyperframes.test.mjs` also pins the shipped compose templates: the offline, deterministic and
 declared-variable contract, the ported templates' provenance, the retained licence texts by hash, the residue gate

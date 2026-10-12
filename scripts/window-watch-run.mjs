@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // window-watch-run.mjs - run a command with NO console of its own and report every window that appears.
 //
-//   node scripts/window-watch-run.mjs [--out <dir>] [--interval-ms 30] [--cwd <dir>] [--timeout-sec 3600] -- <exe> [args...]
+//   node scripts/window-watch-run.mjs [--out <dir>] [--interval-ms 30] [--cwd <dir>] [--timeout-sec 3600] [--hidden-console] -- <exe> [args...]
 //   node scripts/window-watch-run.mjs --selftest
 //
 // The rule it checks: a console program started by a process that has no console of its own gets a NEW console
@@ -9,6 +9,11 @@
 // children it starts are what would open windows. scripts/window-watch.ps1 polls the desktop meanwhile and logs
 // each new window. Run a compiled test binary (`go test -c`) rather than `go test`: go.exe is itself a console
 // program and would open a window of its own when started with no console.
+//
+// --hidden-console starts the command with a console of its own that has no window instead (CREATE_NO_WINDOW), for a
+// command whose OWN runner starts children without hiding them (`node --test` starts every test file with a plain
+// spawn: started with no console, it opens a Windows Terminal window per file, whatever the files do). The children of
+// the code under test still start console-less where the code starts them detached, which is what the watch is for.
 //
 // Exit codes: 0 the command ended and no console window appeared; 3 a console window appeared (Windows
 // Terminal host, console host or pseudo console); 2 a usage error or a watcher that did not start; otherwise
@@ -19,7 +24,7 @@
 // Node starting a detached child with DETACHED_PROCESS (libuv), i.e. with no console at all; the console tests in
 // internal/winexec start their helpers the same way and read the child's console back.
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,7 +35,7 @@ const CONSOLE_CLASSES = new Set(["ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function usage(msg) {
-  process.stderr.write(`${msg ? msg + "\n" : ""}usage: node scripts/window-watch-run.mjs [--out <dir>] [--interval-ms N] [--cwd <dir>] [--timeout-sec N] -- <exe> [args...]\n       node scripts/window-watch-run.mjs --selftest\n`);
+  process.stderr.write(`${msg ? msg + "\n" : ""}usage: node scripts/window-watch-run.mjs [--out <dir>] [--interval-ms N] [--cwd <dir>] [--timeout-sec N] [--hidden-console] -- <exe> [args...]\n       node scripts/window-watch-run.mjs --selftest\n`);
   process.exit(2);
 }
 
@@ -67,7 +72,19 @@ async function finish(w) {
 }
 
 // runDetached: the command with no console of its own, its output in a file
-function runDetached(exe, args, { cwd, outFile, timeoutSec }) {
+function runDetached(exe, args, { cwd, outFile, timeoutSec, hiddenConsole = false }) {
+  if (hiddenConsole) {
+    // piped stdio + windowsHide: libuv adds CREATE_NO_WINDOW, so the child owns a console that has no window
+    return new Promise((res) => {
+      const sink = createWriteStream(outFile);
+      const child = spawn(exe, args, { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      child.stdout.pipe(sink, { end: false });
+      child.stderr.pipe(sink, { end: false });
+      const timer = setTimeout(() => { try { process.kill(child.pid); } catch { /* gone */ } }, timeoutSec * 1000);
+      child.on("error", (e) => { clearTimeout(timer); sink.end(); res({ code: 2, error: e.message }); });
+      child.on("close", (code) => { clearTimeout(timer); sink.end(() => res({ code: code ?? 1 })); });
+    });
+  }
   const fd = openSync(outFile, "w");
   return new Promise((res) => {
     const child = spawn(exe, args, { cwd, detached: true, stdio: ["ignore", fd, fd] });
@@ -105,9 +122,10 @@ async function main() {
   if (argv[0] === "--selftest") process.exit(await selftest());
   const dash = argv.indexOf("--");
   if (dash < 0 || dash === argv.length - 1) usage("no command after --");
-  const opts = { out: "", interval: 30, cwd: process.cwd(), timeout: 3600 };
+  const opts = { out: "", interval: 30, cwd: process.cwd(), timeout: 3600, hiddenConsole: false };
   for (let i = 0; i < dash; i += 2) {
     const k = argv[i], v = argv[i + 1];
+    if (k === "--hidden-console") { opts.hiddenConsole = true; i--; continue; }
     if (v === undefined) usage(`${k} needs a value`);
     if (k === "--out") opts.out = resolve(v);
     else if (k === "--interval-ms") opts.interval = Number(v);
@@ -122,7 +140,7 @@ async function main() {
   if (!(await ready(w))) { process.stderr.write("the watcher did not start\n"); process.exit(2); }
   const outFile = join(work, "command.out");
   const started = Date.now();
-  const r = await runDetached(exe, args, { cwd: opts.cwd, outFile, timeoutSec: opts.timeout });
+  const r = await runDetached(exe, args, { cwd: opts.cwd, outFile, timeoutSec: opts.timeout, hiddenConsole: opts.hiddenConsole });
   await sleep(1500); // windows of children that outlived the command
   const seen = await finish(w);
   const consoles = seen.windows.filter((x) => x.console);
