@@ -24,7 +24,8 @@ Versioning: [SemVer](https://semver.org/).
   that follows is unchanged; what changes with the skip is what the drain says. The Go-side drain reads both states without probing
   the upstream (`internal/seatload`) and waits a load in progress out, because the request that triggered the load is waiting on the
   engine. The render helper does not wait, by decision (register F81), and before the skip it waited only as long as its probes lasted:
-  a load that finished inside the three 5 s deadlines let the probe read a real slot and the drain then waited for that request, and
+  by the code's path (register D-92 says llama-swap holds the request for the load; not observed live) a load that finished inside the
+  three 5 s deadlines let the probe read a real slot and the drain then waited for that request, and
   any other starting seat was unloaded after the same 17 s with `could not read /slots for: <seat>`. With the skip alone a starting
   seat ended the drain as verified idle and the unload went out with no line, so the drain now returns the seats it skipped for a
   load in progress as `starting` (the last round's, also when it ends at its deadline), and `freeLlamaSwap` logs one line for them:
