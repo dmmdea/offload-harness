@@ -69,6 +69,10 @@ type progressReporter struct {
 	closed atomic.Bool
 	warn   sync.Once
 
+	// refused is how many of total subtasks intake refused before anything ran (register
+	// D-111): they are done from the start, and the opening says so.
+	refused int
+
 	// seq and lastDone belong to the run loop alone.
 	seq      float64
 	lastDone int
@@ -87,12 +91,24 @@ type progressReporter struct {
 // request that did not ask for it, and a unit test's bare request has no session
 // at all.
 func (s *Server) startProgress(ctx context.Context, req *mcp.CallToolRequest, total int, deadline time.Time) (onProgress func(delegate.ProgressEvent), stop func()) {
-	p := newProgressReporter(req, total, deadline, "")
+	return s.startBatchProgress(ctx, req, delegate.PreparedBatch{Total: total}, deadline)
+}
+
+// startBatchProgress is startProgress for a call whose subtasks went through per-subtask
+// intake (register D-111). The engine is handed only the subtasks that passed, so its events
+// number them among those: the reporter speaks in the caller's numbers instead (the total is
+// the subtasks SENT, an event's index is the subtask's input position, which is where its
+// result sits in the answer), and the subtasks intake refused count as done from the start,
+// so "N of M done" can reach the M results the call returns. A call with nothing refused is
+// startProgress exactly.
+func (s *Server) startBatchProgress(ctx context.Context, req *mcp.CallToolRequest, batch delegate.PreparedBatch, deadline time.Time) (onProgress func(delegate.ProgressEvent), stop func()) {
+	p := newProgressReporter(req, batch.Total, deadline, "")
 	if p == nil {
 		return nil, func() {}
 	}
+	p.noteRefused(len(batch.Rejections))
 	go p.run(ctx)
-	return p.observe, p.stop
+	return batch.MapProgress(p.observe), p.stop
 }
 
 // startHeartbeat is startProgress for a call with no subtasks (register C-89): the
@@ -197,6 +213,13 @@ func (p *progressReporter) drain(ctx context.Context) {
 	}
 }
 
+// noteRefused records the subtasks intake refused before anything ran (register D-111): they are
+// done from the start, so a heartbeat sent before the engine's first event does not deny the
+// answer the call already holds for them, and the opening says why the count starts above zero.
+func (p *progressReporter) noteRefused(n int) {
+	p.refused, p.lastDone = n, n
+}
+
 // send writes one notification, bounded, and never fails the call: progress is
 // courtesy, and a client that dropped its end is the client's business.
 func (p *progressReporter) send(ctx context.Context, msg string) {
@@ -223,6 +246,9 @@ func (p *progressReporter) write(ctx context.Context, msg string) {
 func (p *progressReporter) opening() string {
 	if p.label != "" {
 		return p.label + " started"
+	}
+	if p.refused > 0 {
+		return fmt.Sprintf("delegating %d subtask(s), %d refused at intake%s", p.total, p.refused, p.deadlineNote())
 	}
 	return fmt.Sprintf("delegating %d subtask(s)%s", p.total, p.deadlineNote())
 }

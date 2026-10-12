@@ -195,6 +195,24 @@ const SeatNotServingReason = "seat not serving: "
 // serves) without matching prose.
 const SeatWarmFailedReason = "seat warm-up failed: "
 
+// RootGoneReason prefixes the defer a run files when its own file tools, or its write
+// door, could not open its workspace root (register C-79): the directory the seat reads
+// (the contract's context documents, or the write door's tree) was no longer there,
+// because a sweep, a cleaner or an operator took it, or the disk under it failed,
+// and every file tool answered "workspace root unavailable". The fault is the
+// box's, never the contract's or the model's, so the class is `infrastructure`.
+// Before it the seat was left to write a final answer from nothing ("I could not
+// read the file") and the run was scored as a failed verification.
+//
+// Like SeatDownReason it is a CONSTANT and a reason prefix, not a new defer
+// class, so a node without it still reads as a plain infrastructure defer in a
+// mixed-version fleet. The loop's own tool error opens with the same words
+// (agent.RootGoneError), the executing node writes the defer with it
+// (pipeline.runAgentTask) and the delegator matches on it
+// (delegate.RootGoneDefer) to give the contract a second placement, which
+// materializes a root of its own.
+const RootGoneReason = "workspace root unavailable: "
+
 // The reason prefixes of a FINISHED loop whose structured re-pack failed
 // (register C-66, PR-4). The executing node writes them (pipeline.runAgentTask:
 // "structured re-pack unreachable: ...", "structured re-pack attempt 3/3 cut by

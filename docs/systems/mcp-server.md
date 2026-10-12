@@ -196,7 +196,10 @@ the caller's to use, and the result says so with `output_truncated: true`, the l
 opened at when the loop's fit narrowed it, not the fit predicted at run start (a complete answer carries none of the three). A resolved planner absent from the endpoint's served roster fails loud with
 `deferred: true` naming the model, never a silent fall back to the workhorse — "served" means
 matched against canonical ids **or** `meta.llamaswap.aliases`, since a tier-seeded `agent_model`
-is normally an alias. Every response
+is normally an alias. A read root the run's tools cannot open ends the run at once with `deferred: true` and a reason
+that opens `workspace root unavailable: <root>:` (register C-79), where the seat used to be left to answer from nothing;
+the call carries `defer_class: infrastructure` when the root existed as it came in, and none for a `read_root` that never
+existed (a typo, which looks the same at the first tool call). Every response
 carries the effect ledger (`effects` counts + `effects_flagged` records) on success AND deferred
 paths, the step `trace` (per tool call: tool, status, `obs_chars`, `rule` — 0.113.22, ADR 0036)
 with `rules_fired` and, when the box has an `agent_env_rules` table, its summary as `env_rules`;
@@ -326,6 +329,39 @@ defers naming why. The response names `node`, `placement`, `seat`, `model` (the 
 - **No wire field and no node changed,** so it works against the nodes as deployed. Running a seat that is not a node's
   agent seat needs the contract to name it (a wire field and a node-side change that widens what a fleet-token holder can
   make a node load); that larger design is not here.
+
+#### One bad subtask does not reject the others (register D-111)
+
+`agent_delegate` prepares each subtask on its own (`delegate.PrepareBatchWithCap`) and `offload_research` does the same
+for each page's contract. A call used to be refused whole at the first subtask that failed intake (a `context_paths` file
+that is not there, a context past the box's cap, a blank goal), so a valid sibling never ran. Now:
+
+- **A rejected subtask is a defer at its own position.** The call answers one result per subtask sent, in the order
+  sent. The rejected one is `deferred: true` with `defer_class: contract` (the caller's mistake, not a broken stack) and a
+  `reason` that opens `subtask N:` (`source N:` for a research page, N being the page's place in the `urls` list) and
+  names the cause. It is counted in `summary.deferred` and never in `summary.infrastructure` or `lost_to_stack`. No node or
+  seat was chosen for it, and it writes no ledger row: nothing was placed.
+- **The valid subtasks run** as they always did, and the call is flagged `isError` by the same rule as any other result
+  (nothing succeeded and something failed, was lost or was skipped), so a rejection beside a delivered answer is a
+  successful call. `acceptance_lint` stays on the result it belongs to.
+- **A caller that reads `results[i]` by index must tolerate a contract-class defer inside an otherwise delivered call.**
+  The position of a result is the position of the subtask.
+- **Two refusals stay whole-call.** More than 8 subtasks (`agent_delegate`) is refused for its number, counted on the
+  subtasks sent, so one bad subtask among nine does not make room. A call with no valid subtask keeps its flat
+  `deferred: true` answer, now naming every bad subtask (`subtask 0: ...; subtask 2: ...`). The same answer also names
+  the subtasks intake refused when the engine itself refuses the whole call and nothing runs (an unknown `route`, say):
+  `<the engine's reason>; also refused at intake: subtask 1: ...`, so fixing the first complaint does not meet the second
+  on the retry (`offload_research` names a page by its place in the `urls` list).
+- **Progress notifications speak in the caller's numbers.** The engine is handed only the valid subtasks, so a mixed call
+  reports `subtask K of N` with K the subtask's position in the call (where its result sits) and N the number sent, counts the
+  refused subtasks as done from the start (`N of N done` is reachable) and opens with `delegating N subtask(s), M refused at
+  intake`. A call with nothing refused reports exactly what it always did.
+- **The command-line verbs follow the same rule.** `local-offload delegate --contract` and `local-offload research` prepare
+  each subtask or page on their own, run the valid ones and print the refused ones as contract-class defers at their own
+  positions (exit code 0, as every contract-class defer is); a file with nothing valid, or more than 8 subtasks, is refused whole
+  as before, the refusal naming every bad subtask.
+- `extra_read_roots` (attaching files from outside `read_root`) is not part of this: it needs a read floor at intake
+  first, because the delegator-side reader would otherwise widen what a model-written call can send to fleet nodes.
 
 #### The whole-call deadline (ADR 0065)
 

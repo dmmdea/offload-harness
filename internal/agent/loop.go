@@ -943,7 +943,10 @@ type budgetState struct {
 }
 
 // Run executes the loop for objective until the model stops, the step budget is
-// exhausted, or the context is cancelled.
+// exhausted, or the context is cancelled. It also ends the run, with a
+// *RootGoneError and a Result whose StopReason is "error", when a tool cannot open
+// the workspace root (register C-79): the seat is not given another turn to answer
+// from nothing.
 func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	var bs budgetState
 	res, err := l.run(ctx, objective, &bs)
@@ -1110,7 +1113,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 	// Setup replay (setup.go): the contract's pre-actions land AFTER the
 	// protected preamble (pinned, compactable past their budget) and BEFORE
 	// the first model turn; they spend no step and feed no breaker.
-	msgs = l.replaySetup(ctx, msgs, pinned, &effects, &ruleHits, ruleState, exactCalls, firstCallID)
+	msgs, rootGone := l.replaySetup(ctx, msgs, pinned, &effects, &ruleHits, ruleState, exactCalls, firstCallID)
 	// refusedRepeat counts identical calls that did NOT run (D-49): after two,
 	// the tool's spec is withheld and the model is told to answer — a refused
 	// call that keeps its spec costs a full model turn per repeat (2026-09-10:
@@ -1159,7 +1162,17 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		return Result{Steps: steps, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted,
 			TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
 	}
+	// rootGoneResult is the error Result for a run whose tools could not open the
+	// workspace root (register C-79): the same shape as seatDownResult, built from the
+	// same run-locals, with the *RootGoneError returned beside it.
+	rootGoneResult := func(steps int) Result { return seatDownResult(steps) }
 
+	if rootGone != nil {
+		// A replayed context read found the root gone. No model turn has run and none is
+		// spent: the seat would answer from a transcript whose only reads failed, with no
+		// call of its own for the loop to end on.
+		return rootGoneResult(0), rootGone
+	}
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
 			return Result{Steps: step, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, err
@@ -1685,6 +1698,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			var eff EffectStatus
 			var blocked *EnvBlocked
 			var argNotes []string
+			var gone *RootGoneError
 			if l.envRules != nil {
 				var hits []EnvRuleHit
 				act, blocked, hits = l.envRules.FilterAction(ruleState, act)
@@ -1705,7 +1719,10 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 					disabledTools[call.Name] = true
 				}
 			} else {
-				content, isErr, eff = l.dispatchOrThrottle(ctx, call, msgs, exactCalls, sameNameCalls, disabledTools, firstCallID, pinned, reExecuted, reads)
+				content, isErr, eff, gone = l.dispatchOrThrottle(ctx, call, msgs, exactCalls, sameNameCalls, disabledTools, firstCallID, pinned, reExecuted, reads)
+				if gone != nil && rootGone == nil {
+					rootGone = gone
+				}
 				if eff != EffectNone {
 					ruleState.Executed(call.Name)
 				}
@@ -1780,6 +1797,13 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			l.pager.NoteFetched(content)
 			msgs = append(msgs, Msg{Role: "tool", ToolCallID: call.ID, Content: content, IsError: isErr})
 		}
+		if rootGone != nil {
+			// A tool could not open the workspace root (register C-79). Every call of this
+			// turn has its effect record and its result; the run ends here, before the seat
+			// is given another turn to write an answer from nothing. The failure is the
+			// box's, so it is returned typed and the caller files it as such.
+			return rootGoneResult(step + 1), rootGone
+		}
 		if answerNowFor != "" {
 			// One user turn, after this step's results, once per withdrawn
 			// tool: the transcript already holds the evidence the model has.
@@ -1821,9 +1845,9 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 // the model at destroyed bytes with no recovery path — so the call is
 // re-executed ONCE per pair (reExecuted bounds it) and the FRESH result is
 // pinned instead; msgs is the live transcript that check reads.
-func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg, exactCalls, sameNameCalls map[string]int, disabledTools map[string]bool, firstCallID map[string]string, pinned map[string]bool, reExecuted map[string]bool, reads *readLedger) (string, bool, EffectStatus) {
+func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg, exactCalls, sameNameCalls map[string]int, disabledTools map[string]bool, firstCallID map[string]string, pinned map[string]bool, reExecuted map[string]bool, reads *readLedger) (string, bool, EffectStatus, *RootGoneError) {
 	if disabledTools[call.Name] {
-		return fmt.Sprintf("NOT executed: %s has been disabled for the rest of this task (too many repeated calls). It is no longer offered — use a different tool or your existing results to continue.", call.Name), true, EffectNone
+		return fmt.Sprintf("NOT executed: %s has been disabled for the rest of this task (too many repeated calls). It is no longer offered — use a different tool or your existing results to continue.", call.Name), true, EffectNone, nil
 	}
 	// Unattended park (WithParkHighRisk): the model's own security_risk on an
 	// effectful tool defers the call to review — an explicit high, or a
@@ -1841,7 +1865,7 @@ func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg
 				if l.parkRecord != nil {
 					l.parkRecord(call.Name, call.Args, risk)
 				}
-				return fmt.Sprintf("PARKED for operator review: you flagged this %s call security_risk=%s, and this is an unattended run. It was NOT executed. If the task can proceed without it, continue; otherwise finish and report what remains.", call.Name, risk), false, EffectNone
+				return fmt.Sprintf("PARKED for operator review: you flagged this %s call security_risk=%s, and this is an unattended run. It was NOT executed. If the task can proceed without it, continue; otherwise finish and report what remains.", call.Name, risk), false, EffectNone, nil
 			}
 		}
 	}
@@ -1869,14 +1893,14 @@ func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg
 		if calls := reads.callCount(call.Name); calls > 0 {
 			n = calls // paged read_file calls are not in the capped count; say how many calls there really were
 		}
-		return fmt.Sprintf("NOT executed: %s has now been called %d times in this task — that is enough, and it is now DISABLED for the rest of this task. Proceed with the remaining steps using what you already have; %s is no longer available.", call.Name, n, call.Name), true, EffectNone
+		return fmt.Sprintf("NOT executed: %s has now been called %d times in this task — that is enough, and it is now DISABLED for the rest of this task. Proceed with the remaining steps using what you already have; %s is no longer available.", call.Name, n, call.Name), true, EffectNone, nil
 	}
 	// The read budget is checked where the name cap is, before the exact-repeat
 	// check, for the same reason: a model repeating a call after the budget ran
 	// out must reach the withdrawal, not be refused as a repeat for ever.
 	if why := reads.spent(call.Name); why != "" {
 		disabledTools[call.Name] = true
-		return why, true, EffectNone
+		return why, true, EffectNone, nil
 	}
 	if exactCalls[key] > 1 {
 		id := firstCallID[key]
@@ -1892,12 +1916,12 @@ func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg
 			pinned[call.ID] = true
 			return l.dispatch(ctx, call)
 		}
-		return fmt.Sprintf("NOT executed: you already called %s with these exact same arguments earlier in this task and you already have that result. Do NOT repeat this call — use the result you already have and move on to the NEXT step of the task.", call.Name), true, EffectNone
+		return fmt.Sprintf("NOT executed: you already called %s with these exact same arguments earlier in this task and you already have that result. Do NOT repeat this call — use the result you already have and move on to the NEXT step of the task.", call.Name), true, EffectNone, nil
 	}
 	if _, seen := firstCallID[key]; !seen {
 		firstCallID[key] = call.ID
 	}
-	out, isErr, eff := l.dispatch(ctx, call)
+	out, isErr, eff, gone := l.dispatch(ctx, call)
 	if page && pageGaveNothing(out, isErr, eff) {
 		// A page that failed, was refused as not performed, or began past the end
 		// of the file is not progress, and it costs the read budget next to
@@ -1906,7 +1930,7 @@ func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg
 		// crosses the line completes, as it does under the budget.
 		sameNameCalls[call.Name]++
 	}
-	return out, isErr, eff
+	return out, isErr, eff, gone
 }
 
 // resultDestroyed reports whether the tool result for callID no longer exists
@@ -1921,15 +1945,19 @@ func resultDestroyed(msgs []Msg, callID string) bool {
 	return true // no trace of it left at all
 }
 
-// dispatch runs one tool call, returning (resultText, isError, effect). An
+// dispatch runs one tool call, returning (resultText, isError, effect, gone). An
 // unknown tool or an Exec error becomes an is_error result the model can react
-// to — the loop never panics or aborts on tool failure. The EffectStatus is the
+// to — the loop never panics on tool failure, and a failing tool does not end
+// the run. The one exception is a tool that could not open the workspace root:
+// its result is the same observation, and gone carries the *RootGoneError so the
+// caller can end the run on it (register C-79) instead of letting the seat answer
+// from nothing. gone is nil for every other outcome. The EffectStatus is the
 // honest execution accounting (effects.go): committed/failed ran to completion,
 // unknown was started-then-abandoned, none never executed.
-func (l *Loop) dispatch(ctx context.Context, call ToolCall) (string, bool, EffectStatus) {
+func (l *Loop) dispatch(ctx context.Context, call ToolCall) (string, bool, EffectStatus, *RootGoneError) {
 	t, ok := l.tools[call.Name]
 	if !ok {
-		return fmt.Sprintf("error: unknown tool %q", call.Name), true, EffectNone
+		return fmt.Sprintf("error: unknown tool %q", call.Name), true, EffectNone, nil
 	}
 	budget := t.Timeout
 	if budget <= 0 {
@@ -1948,11 +1976,11 @@ func (l *Loop) dispatch(ctx context.Context, call ToolCall) (string, bool, Effec
 		out, err := t.Exec(ctx, call.Args) // capping explicitly disabled
 		if err != nil {
 			if IsNotPerformed(err) { // refusal: model sees plain content, ledger sees none
-				return err.Error(), false, EffectNone
+				return err.Error(), false, EffectNone, nil
 			}
-			return fmt.Sprintf("error: %v", err), true, EffectFailed
+			return fmt.Sprintf("error: %v", err), true, EffectFailed, RootGoneOf(err)
 		}
-		return out, false, EffectCommitted
+		return out, false, EffectCommitted, nil
 	}
 
 	tctx, cancel := context.WithTimeout(ctx, budget)
@@ -1982,11 +2010,11 @@ func (l *Loop) dispatch(ctx context.Context, call ToolCall) (string, bool, Effec
 	case r := <-done:
 		if r.err != nil {
 			if IsNotPerformed(r.err) { // refusal: model sees plain content, ledger sees none
-				return r.err.Error(), false, EffectNone
+				return r.err.Error(), false, EffectNone, nil
 			}
-			return fmt.Sprintf("error: %v", r.err), true, EffectFailed
+			return fmt.Sprintf("error: %v", r.err), true, EffectFailed, RootGoneOf(r.err)
 		}
-		return r.out, false, EffectCommitted
+		return r.out, false, EffectCommitted, nil
 	case <-tctx.Done():
 		// Both abandonment paths are EffectUnknown: the goroutine was started
 		// and may still be mutating the world when we stop waiting — the exact
@@ -1996,10 +2024,10 @@ func (l *Loop) dispatch(ctx context.Context, call ToolCall) (string, bool, Effec
 		// Distinguish OUR cap from the run's own deadline. If the parent is also
 		// done the whole run ended, and blaming the tool would be a lie.
 		if ctx.Err() != nil {
-			return fmt.Sprintf("error: run cancelled during %s: %v", call.Name, ctx.Err()), true, EffectUnknown
+			return fmt.Sprintf("error: run cancelled during %s: %v", call.Name, ctx.Err()), true, EffectUnknown, nil
 		}
 		return fmt.Sprintf("error: tool %s exceeded its %s budget and was cancelled; "+
-			"try a narrower request, or a different tool", call.Name, budget), true, EffectUnknown
+			"try a narrower request, or a different tool", call.Name, budget), true, EffectUnknown, nil
 	}
 }
 

@@ -178,7 +178,9 @@ type scope struct {
 // open returns the root handle plus the validated relative name, or an error.
 // It rejects absolute and volume-qualified inputs (e.g. "C:\\x", "C:x",
 // "\\\\host\\share") up front for a clear message; os.Root then enforces the
-// rest (.., reparse points) at the syscall layer. Caller must Close the *os.Root.
+// rest (.., reparse points) at the syscall layer. A root that cannot be opened is
+// a *RootGoneError, which the loop ends the run on (register C-79). Caller must
+// Close the *os.Root.
 func (s *scope) open(rel string) (*os.Root, string, error) {
 	if rel == "" {
 		rel = "."
@@ -186,9 +188,9 @@ func (s *scope) open(rel string) (*os.Root, string, error) {
 	if filepath.IsAbs(rel) || filepath.VolumeName(rel) != "" {
 		return nil, "", fmt.Errorf("path must be relative to the workspace root (no absolute or volume-qualified paths): %q", rel)
 	}
-	r, err := os.OpenRoot(s.root)
+	r, err := openWorkspaceRoot(s.root)
 	if err != nil {
-		return nil, "", fmt.Errorf("workspace root unavailable: %w", err)
+		return nil, "", err
 	}
 	return r, rel, nil
 }

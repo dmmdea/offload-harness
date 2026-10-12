@@ -207,7 +207,8 @@ loop-boundary cap apply as on any call; the results are PINNED for compaction (t
 them) but sit OUTSIDE the protected preamble, and the whole replay is bounded to half the
 compaction budget — past it the remaining actions are recorded not-run (`none`, note `setup
 budget …`) and the model reads for itself, exactly the pre-key behaviour. A failing action (unknown
-tool, tool error) is its error observation, never an abort. Every action is a Step-0
+tool, tool error) is its error observation, never an abort, except that a tool that cannot open the
+workspace root ends the run before the first model turn (register C-79). Every action is a Step-0
 `EffectRecord` with `Setup: true`; the wire result and `agent_run` report `setup_ran` (executed =
 committed or failed) and the trace's step-0 entries carry `setup: true`. A node one release behind
 ignores the field (the contract decoder keeps unknown fields for exactly this mixed-fleet case) and
@@ -715,6 +716,15 @@ MCP. Capability defaults are an interface, not an implementation detail.
 ## Error handling
 
 Tool errors become `is_error` results the model can react to; the loop never panics on tool failure.
+One report ends the run instead (register C-79): a tool that cannot open the workspace root returns an
+`agent.RootGoneError`, and `Loop.Run` returns it (the result's `stop_reason` is `error`) once the turn's
+calls are recorded, so the seat is not given another turn to answer from nothing. The pipeline files the
+run as an `infrastructure` defer ([defer shapes](fleet-node.md#defer-shapes-and-their-classes)); a file
+that is missing inside a root that opens stays an observation. A run with a write door asks the same question
+itself (`agent.CheckWorkspaceRoot`) when the door opens and again before it renders its diff, because a tree
+lost before the first or after the last tool call has no tool to report it. A tree it finds gone is never rendered as a diff;
+it becomes the run's cause only when the loop ended cleanly (a cause the loop ended on itself, such as the ceiling, keeps its class
+and the `write_note` says the write set was withheld).
 A `Chat` call can also fail before it reaches llama-swap, with a `*modelaffinity.WaitError`: the
 seat was parked behind another model's batch for longer than its bound. The error names the base,
 the model wanted and the model that held the slot.
