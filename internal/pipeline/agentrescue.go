@@ -147,19 +147,24 @@ func (p *Pipeline) RescueRepack(ctx context.Context, contract core.AgentContract
 	return delegate.Rescued{Structured: structured, Seat: seat, TokensOut: tokens, How: how}, nil
 }
 
+// rescueResidencyUnread is rescueSeatResident's answer when it could not read: unknown, and said so,
+// because the path it picks (this box's seat, warmed) is a different one from the node's.
+func rescueResidencyUnread(seat string, err error) (resident, known bool) {
+	log.Printf("rescue re-pack: could not tell whether seat %s is resident (%v); the node that wrote the answer is not asked, this box's seat is used", seat, err)
+	return false, false
+}
+
 // rescueSeatResident reads whether this box's agent seat is loaded: one /running read, the seat
 // matched under its alias too. known is false when the read failed, and then the rescue stays where
 // it always was: "could not tell" never moves work off the box.
 func (p *Pipeline) rescueSeatResident(ctx context.Context, seat string) (resident, known bool) {
 	sc, err := swapclient.New(p.cfg.Endpoint, admissionPoll)
 	if err != nil {
-		log.Printf("rescue re-pack: could not tell whether seat %s is resident (%v); the node that wrote the answer is not asked, this box's seat is used", seat, err)
-		return false, false
+		return rescueResidencyUnread(seat, err)
 	}
 	rows, err := sc.Running(ctx)
 	if err != nil {
-		log.Printf("rescue re-pack: could not tell whether seat %s is resident (%v); the node that wrote the answer is not asked, this box's seat is used", seat, err)
-		return false, false
+		return rescueResidencyUnread(seat, err)
 	}
 	m := newSeatMatcher(p.cfg.Endpoint, seat)
 	ready := func() bool {

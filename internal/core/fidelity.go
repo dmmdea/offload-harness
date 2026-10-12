@@ -79,9 +79,6 @@ func AnswerList(text string) ([]any, bool) {
 		}
 		t = strings.TrimSpace(inner)
 	}
-	if !strings.HasPrefix(t, "[") || !strings.HasSuffix(t, "]") {
-		return nil, false
-	}
 	var arr []any
 	if json.Unmarshal([]byte(t), &arr) != nil {
 		return nil, false

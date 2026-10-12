@@ -118,10 +118,24 @@ func TestListsEmptiedReadsAnAnswerThatIsAJSONArray(t *testing.T) {
 		"footnote":        "The guide is current; nothing is stale [1].",
 		"aside in prose":  strings.Repeat("The guide was read in full. ", 20) + `Example: ["a","b","c"]. ` + strings.Repeat("Nothing else was found. ", 20),
 		"number elements": "[1, 2, 3]",
+		"fenced aside":    strings.Repeat("The guide was read in full. ", 20) + "```json\n[\"a\",\"b\",\"c\"]\n```" + strings.Repeat("Nothing else was found. ", 20),
+		"prose then list": "The stale sentences are: [\"a\", \"b\"] and nothing else, which I checked twice.",
 	} {
 		if got := ListsEmptied([]byte(hollowObject), schema, text); got != "" {
 			t.Errorf("%s: finding %q, want none", name, got)
 		}
+	}
+}
+
+// A list of the answer at a path the schema defines with another type is that field's value (a
+// type error the validator reports), not a list the schema has no word for.
+func TestListsEmptiedLeavesAListAtAPathTheSchemaDefinesAlone(t *testing.T) {
+	schema := schemaOf(t, `{"properties":{"stale":{"type":"array","items":{"type":"string"}},"tags":{"type":"string"},"report":{"type":"object","properties":{"items":{"type":"array","items":{"type":"string"}},"owner":{"type":"string"}}}}}`)
+	if got := ListsEmptied([]byte(`{"stale":[],"tags":"x"}`), schema, `{"tags":["x","y"]}`); got != "" {
+		t.Fatalf("a list under a top-level property the schema defines: finding %q", got)
+	}
+	if got := ListsEmptied([]byte(`{"stale":[],"report":{"items":[],"owner":"x"}}`), schema, `{"report":{"owner":["x","y"]}}`); got != "" {
+		t.Fatalf("a list under a nested property the schema defines: finding %q", got)
 	}
 }
 
