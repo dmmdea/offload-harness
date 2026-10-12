@@ -1610,6 +1610,20 @@ left; the compose work dir and the provisioning scratch of `manifest-satisfy.mjs
 ends, passed or failed (`igpu-lifecycle.test.mjs`, `compose-hyperframes.test.mjs` and
 `manifest-satisfy.test.mjs` pin them).
 
+A run of the suite touches neither the llama-swap nor the GPU lease of the machine it runs on (register F80). A runner a test
+spawns reaches `withGpuSlot`, whose default `freeLlamaSwap` lists the models of `LLAMA_SWAP_API` (default: the machine's own), drains
+every seat off the memory stack and sends a real unload; a seat that is still starting held that drain for 3 x 5 s, and a
+drain that finished unloaded a seat that was serving someone. A suite that runs under `gpu reserve` also hands every runner
+that lease (`GPU_LEASE_*`): the runner would fence against it and claim its once-per-lease unload marker. So a test spawns a
+runner with `env: isolatedRunnerEnv({ ...what it needs })` (`render/test-isolation.mjs`: `LLAMA_SWAP_API` is a loopback port
+nothing listens on, `LLAMA_SWAP_*` and `GPU_LEASE_*` are dropped; what the test passes explicitly wins), and an in-process
+`withGpuSlot` names `freeLlamaSwap` and `lease` (`null`, or the lease the test means). `render/test-isolation.test.mjs` scans
+every render test and fails on a runner spawn whose own call does not pass an env that closes both (each spawn is judged on its
+call, so a spawn added beside an isolated one fails) and on an in-process call that names neither; its
+fixtures pin what the scan catches and lets through. A test that needs a llama-swap with behaviour starts
+`render/fake-llama-swap.mjs` on a loopback port (per-seat state and `/slots` answers, a request log, `close()` destroys the
+sockets a hung request still holds) and hands the runner its `url`.
+
 `render/compose-hyperframes.test.mjs` also pins the shipped compose templates: the offline, deterministic and
 declared-variable contract, the ported templates' provenance, the retained licence texts by hash, the residue gate
 (no creator names, brand palette, placeholder copy or CDN host), the no-scale-above-1 guard for the ports, the

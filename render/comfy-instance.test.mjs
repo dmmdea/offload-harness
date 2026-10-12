@@ -24,6 +24,7 @@ import * as RG from "./comfy-run-graph.mjs";
 import * as L from "./comfy-lifecycle.mjs";
 import * as O from "./comfy-ownership.mjs";
 import { scratchDir } from "./test-scratch.mjs";
+import { isolatedRunnerEnv } from "./test-isolation.mjs";
 
 // Synthetic ids: the keyless leak-gate shape rule treats a repeated-nibble head as a placeholder.
 const U0 = "GPU-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -561,7 +562,7 @@ test("withGpuSlot: an explicit api on the default port frees that api and leaves
 });
 
 test("withGpuSlot: a lane with no ComfyUI never resolves an instance, so a bad instance env cannot break the voice lane", async () => {
-  await withGpuSlot({ comfyManaged: false, lease: null, noLock: true, instanceEnv: { COMFY_CARD_UUID: "garbage" } }, async () => {});
+  await withGpuSlot({ comfyManaged: false, lease: null, noLock: true, freeLlamaSwap: async () => {}, instanceEnv: { COMFY_CARD_UUID: "garbage" } }, async () => {});
 });
 
 test("every render runner resolves its api through the instance and hands it to withGpuSlot", () => {
@@ -609,7 +610,7 @@ test("run-graph takes its ComfyUI start and free from instanceDeps, never straig
 test("run-graph: a bad instance env is a typed defer in the result file and exit 0, never an untyped exit 1", (t) => {
   const dir = scratch(t); const result = join(dir, "r.json");
   const r = spawnSync(process.execPath, [fileURLToPath(new URL("./comfy-run-graph.mjs", import.meta.url)), "--graph", join(dir, "nope.json"), "--result", result],
-    { encoding: "utf8", env: { ...process.env, COMFY_CARD_UUID: "1", COMFY_INSTANCE: "" }, timeout: 60000 });
+    { encoding: "utf8", env: isolatedRunnerEnv({ COMFY_CARD_UUID: "1", COMFY_INSTANCE: "" }), timeout: 60000, windowsHide: true });
   assert.equal(r.status, 0, "exit " + r.status + ": " + r.stderr);
   const out = JSON.parse(readFileSync(result, "utf8"));
   assert.equal(out.deferred, true);

@@ -345,6 +345,26 @@ cannot be read (older llama-server, `--no-slots`), it reports `drained:false` an
 unobservable tiers, and the caller logs that it proceeded without a verified drain instead of
 pretending. A stuck tier times out rather than deadlocking the render queue.
 
+**A seat that cannot have a request in flight is not probed (register F81).** `/running` lists every process that
+is not stopped, each in one of three states: `starting`, `ready` or `stopping`. The drain reads the state with the
+list and skips a seat in `starting` or `stopping`: nothing is in flight on it, so nothing is waited for and nothing is
+named unknown. A `starting` seat is not serving: llama-swap holds a request for the whole load (4 min on the
+largest seat), so the `/slots` probe sat until its own 5 s deadline, three rounds and a grace in all (17.6 s measured
+against a fake llama-swap), and that was added to every render start while any seat was loading. A `stopping` seat is
+being killed (an unload does not wait for what it serves), and a request to it is queued behind the stop and then
+starts the seat again, the same hazard the `/running` gate above was written against. The unload that follows is
+unchanged: a seat that is starting or stopping is still on the list the render clears. A `ready` seat is always
+probed, and so is a seat listed with no state (older llama-swap builds) or with a state this code does not know: a
+probe of an idle seat costs one read, and a skipped busy seat loses its request. The Go-side drain
+(`internal/seatload`) reads the same two states and does not probe the upstream of either; it then waits a load in
+progress and a stop out before it counts the seat idle, because the request that triggered a load is waiting on the engine.
+The render helper does not wait a load out, by decision. It used to wait only as long as its probes lasted (three 5 s
+deadlines): by the code's path (not observed live) a seat whose load finished inside that window and then had a request in flight was waited for, and any other
+starting seat was unloaded after the same 17 s with `could not read /slots`. Skipping the probe removes those seconds; the
+unload that follows aborts the request that triggered the load, so the drain returns the seats it skipped for a load in
+progress as `starting` and `freeLlamaSwap` logs one line for them (`unloading <seat> while its load is in progress ...; a
+request waiting on it is aborted`). A seat that is stopping says nothing: it is already leaving.
+
 ## Windows file semantics the lease depends on
 
 Two behaviours that do not exist on POSIX shape the implementation, and both were found by a

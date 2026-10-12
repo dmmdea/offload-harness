@@ -6,6 +6,7 @@ import assert from "node:assert";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { isolatedRunnerEnv } from "./test-isolation.mjs";
 import { tmpdir } from "node:os";
 import {
   resolveParams, buildExtractArgs, buildDepthArgs, depthEnv, buildSdAnimateArgs, framesToRender, OUTPUT_FPS, DRIVER_FPS,
@@ -109,7 +110,7 @@ test("framesToRender: the request when the driver has enough, else the largest 4
 });
 
 function run(args) {
-  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 30000 });
+  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 30000, windowsHide: true, env: isolatedRunnerEnv() });
 }
 
 test("the script refuses a cpu backend before touching anything (exit 1, CPU_BACKEND_REFUSED)", () => {
