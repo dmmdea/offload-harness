@@ -15,8 +15,13 @@ package gpuactivity
 //
 // READ-ONLY, HIDDEN, BOUNDED. Every child starts through internal/winexec (no console window), the Windows read is one
 // PowerShell from System32 with a profile-less, non-interactive, read-only Get-WinEvent over a 24 h window and a cap,
-// and the whole read is bounded at 8 s. The answer is cached for 60 s (failures too), so a status poll does not start a
-// process per call.
+// the log read is bounded at 8 s and the card-table query has its own 4 s. The answer is cached for 60 s (failures
+// too) IN THIS PROCESS, so a poll of a long-lived process (the MCP server) starts no child per call; each `gpu status`
+// is a fresh process and pays one read (about 0.6 to 0.9 s on Windows).
+//
+// A READ THAT IS SHORT SAYS SO. A record that is not XML after good ones, a journalctl that could not be read (dmesg
+// holds this boot only), and a card table that could not be read (the events are returned, unplaced) all return the
+// events AND a reason, which the snapshot carries as a note: an empty or short list is never silent about why.
 //
 // ATTRIBUTION is by PCI bus and device: the record's GPUID is the bus and device in hex ("b500" = bus b5, device 00),
 // the kernel line names them as PCI:0000:b5:00, and nvidia-smi's pci.bus_id ends B5:00.0. The bus table is a second
@@ -86,6 +91,8 @@ var ErrNoDriverEventSource = errors.New("gpuactivity: no driver event source on 
 const (
 	// driverEventWindow is how far back the readers look.
 	driverEventWindow = 24 * time.Hour
+	// driverTableTimeout bounds the card-table query (one nvidia-smi), apart from the log read.
+	driverTableTimeout = smiTimeout
 	// driverEventTTL is how long one answer (or failure) is reused.
 	driverEventTTL = 60 * time.Second
 	// driverEventRetryTTL is how long an answer is reused whose events could not be placed because the card table was
@@ -110,8 +117,8 @@ var ErrCardTableUnreadable = errors.New("the card table could not be read")
 var (
 	// driverEventTimeout bounds the log read (the child process); the card-table query has its own budget.
 	driverEventTimeout = 8 * time.Second
-	driverEventsGOOS = runtime.GOOS
-	driverNow        = time.Now
+	driverEventsGOOS   = runtime.GOOS
+	driverNow          = time.Now
 	// runChild starts one child process through internal/winexec (hidden on Windows) and returns its stdout; a
 	// non-zero exit carries the child's stderr in the error.
 	runChild = func(ctx context.Context, name string, args ...string) (string, error) {
@@ -139,7 +146,11 @@ func squeeze(s string, max int) string {
 // --- parsers ---
 
 var (
-	gpuIDRE = regexp.MustCompile(`(?i)GPUID:\s*([0-9a-f]{2})([0-9a-f]{2})\b`)
+	// gpuIDRE reads the GPUID the driver prints: the PCI bus and device as ONE hex number, (bus<<8 | device), printed
+	// WITHOUT leading zeros. A card on bus b5 logs "b500", but a card on bus 01 logs "100" (read from a one-card box,
+	// both "Error occurred on GPUID: 100" and "UCodeReset TDR occurred on GPUID:100"), and bus 00 would log one digit.
+	// The card table is keyed by the padded "01:00", so the number is split and padded, never matched as 2+2 digits.
+	gpuIDRE = regexp.MustCompile(`(?i)GPUID:\s*([0-9a-f]{1,4})\b`)
 	pciRE   = regexp.MustCompile(`(?i)PCI:(?:[0-9a-f]{4}:)?([0-9a-f]{2}):([0-9a-f]{2})`)
 	xidRE   = regexp.MustCompile(`(?i)NVRM: Xid \(PCI:(?:[0-9a-f]{4}:)?([0-9a-f]{2}):([0-9a-f]{2})(?:\.[0-9a-f])?\):\s*(\d+)\s*(.*)$`)
 	busIDRE = regexp.MustCompile(`(?i)(?:[0-9a-f]+:)?([0-9a-f]{2}):([0-9a-f]{2})\.[0-9a-f]\s*$`)
@@ -148,7 +159,10 @@ var (
 // busOf reads the PCI bus and device an event's message names, "" when it names none.
 func busOf(text string) string {
 	if g := gpuIDRE.FindStringSubmatch(text); g != nil {
-		return strings.ToLower(g[1]) + ":" + strings.ToLower(g[2])
+		if n, err := strconv.ParseUint(g[1], 16, 16); err == nil {
+			return fmt.Sprintf("%02x:%02x", n>>8, n&0xff)
+		}
+		return ""
 	}
 	if p := pciRE.FindStringSubmatch(text); p != nil {
 		return strings.ToLower(p[1]) + ":" + strings.ToLower(p[2])
@@ -337,36 +351,55 @@ func readWindowsEvents(ctx context.Context) ([]DriverEvent, error) {
 	if perr != nil && len(evs) == 0 {
 		return nil, perr
 	}
+	if perr != nil {
+		// The records are newest first, so what a bad record cuts off is the OLDER events: the list is real but may be
+		// short, and a reader of it must be told, not left to take the head for the whole set.
+		return evs, &readIssue{msg: fmt.Sprintf("the event log read stopped after %d record(s) (%v), so older events may be missing", len(evs), perr)}
+	}
 	return evs, nil
 }
 
+// readKernelEvents reads the NVRM Xid lines of the kernel log for the window. journalctl is asked for the kernel
+// transport as a MATCH and not with -k/--dmesg: -k implies -b, the current boot only, and an Xid such as 79 (a card
+// that fell off the bus) often ends in a reboot, so a fault before the reboot would be invisible under a "last 24 h"
+// label (measured on a Linux host with four boots in its journal: seven days read 2528 lines with -k and 4226 across
+// every boot). The dmesg fallback is the current boot's ring buffer only, and says so.
 func readKernelEvents(ctx context.Context) ([]DriverEvent, error) {
-	out, jerr := runChild(ctx, "journalctl", "-k", "--no-pager", "-o", "short-unix", "--since", "24 hours ago")
+	out, jerr := runChild(ctx, "journalctl", "--no-pager", "-o", "short-unix", "--since", "24 hours ago", "_TRANSPORT=kernel")
 	if jerr != nil {
 		dout, derr := runChild(ctx, "dmesg", "--time-format", "iso")
 		if derr != nil {
 			return nil, fmt.Errorf("journalctl: %v; dmesg: %v", jerr, derr)
 		}
-		out = dout
+		return ParseKernelLog(dout), &readIssue{msg: fmt.Sprintf("journalctl could not be read (%v), so only this boot's kernel ring buffer (dmesg) was read: a fault before the last reboot is not shown", jerr)}
 	}
 	return ParseKernelLog(out), nil
 }
 
+// readIssue is a problem that left a read usable but short or less exact: whatever events came back are real, and the
+// reason rides as a note ("driver events incomplete: ...") instead of failing the read.
+type readIssue struct{ msg string }
+
+func (e *readIssue) Error() string { return e.msg }
+
 // readDriverEvents is one uncached read: the OS's log, the window, then the card for each event's bus.
 func readDriverEvents(ctx context.Context, now time.Time) ([]DriverEvent, error) {
-	ctx, cancel := context.WithTimeout(ctx, driverEventTimeout)
+	logCtx, cancel := context.WithTimeout(ctx, driverEventTimeout)
 	defer cancel()
 	var evs []DriverEvent
 	var err error
 	switch driverEventsGOOS {
 	case "windows":
-		evs, err = readWindowsEvents(ctx)
+		evs, err = readWindowsEvents(logCtx)
 	case "linux":
-		evs, err = readKernelEvents(ctx)
+		evs, err = readKernelEvents(logCtx)
 	default:
 		return nil, ErrNoDriverEventSource
 	}
-	if err != nil {
+	// A readIssue leaves the read usable (the events are real, the list may be short or this-boot-only) and travels
+	// with the answer as a note; any other error is a read that failed.
+	var issue *readIssue
+	if err != nil && !errors.As(err, &issue) {
 		return nil, err
 	}
 	// Inside the window; an event whose time could not be read is kept (an unknown time must not read as "long ago").
@@ -378,20 +411,31 @@ func readDriverEvents(ctx context.Context, now time.Time) ([]DriverEvent, error)
 		}
 	}
 	if len(kept) == 0 {
-		return nil, nil
+		return nil, err
 	}
-	// The card for each bus. A table that cannot be read leaves the events unplaced; they are not lost.
-	if out, terr := smiRun(ctx, "--query-gpu=index,uuid,pci.bus_id", "--format=csv,noheader"); terr == nil {
-		kept = AttributeEvents(kept, ParseBusTable(out))
+	// The card for each bus, from a query with its own budget: a log read that spent its 8 s must not leave nvidia-smi
+	// nothing, and a fault is exactly when the log is slow. A table that cannot be read leaves the events unplaced (they
+	// are not lost) and the answer says so with the cause: it is not "events that name no card".
+	tctx, tcancel := context.WithTimeout(ctx, driverTableTimeout)
+	defer tcancel()
+	out, terr := smiRun(tctx, "--query-gpu=index,uuid,pci.bus_id", "--format=csv,noheader")
+	if terr != nil {
+		tableErr := fmt.Errorf("%w (nvidia-smi: %v): %d driver event(s) in the last 24 h were not placed on cards", ErrCardTableUnreadable, terr, len(kept))
+		if err != nil {
+			return kept, fmt.Errorf("%w; %w", err, tableErr)
+		}
+		return kept, tableErr
 	}
-	return kept, nil
+	return AttributeEvents(kept, ParseBusTable(out)), err
 }
 
-// driverCache is the 60 s memory of the last read.
+// driverCache is the memory of the last read: driverEventTTL for an answer, driverEventRetryTTL for one whose card
+// table could not be read.
 var driverCache struct {
 	mu     sync.Mutex
 	have   bool
 	at     time.Time
+	ttl    time.Duration
 	events []DriverEvent
 	err    error
 }
@@ -404,18 +448,24 @@ func resetDriverEvents() {
 }
 
 // ReadDriverEvents is the production reader behind Options.DriverEvents: this machine's recent driver fault events,
-// each placed on its card when the card table allows. Cached for 60 s, a failure included, so a status poll starts no
-// process per call. ErrNoDriverEventSource means this OS has no source.
+// each placed on its card when the card table allows. Cached for 60 s in this process (a failure included), so a poll
+// of a long-lived process (the MCP server) starts no child per call; an answer that could not place its events because
+// the card table was unreadable is cached for 10 s only. The cache lives in process memory: every `gpu status` is a
+// fresh process and pays one read. ErrNoDriverEventSource means this OS has no source.
 func ReadDriverEvents(ctx context.Context) ([]DriverEvent, error) {
 	driverCache.mu.Lock()
 	defer driverCache.mu.Unlock()
 	now := driverNow()
-	if driverCache.have && now.Sub(driverCache.at) < driverEventTTL {
+	if driverCache.have && now.Sub(driverCache.at) < driverCache.ttl {
 		return append([]DriverEvent(nil), driverCache.events...), driverCache.err
 	}
 	evs, err := readDriverEvents(ctx, now)
 	if ctx.Err() == nil {
-		driverCache.have, driverCache.at, driverCache.events, driverCache.err = true, now, evs, err
+		ttl := driverEventTTL
+		if errors.Is(err, ErrCardTableUnreadable) {
+			ttl = driverEventRetryTTL
+		}
+		driverCache.have, driverCache.at, driverCache.ttl, driverCache.events, driverCache.err = true, now, ttl, evs, err
 	}
 	return append([]DriverEvent(nil), evs...), err
 }
@@ -446,21 +496,33 @@ func leasedCards(v View) (all bool, ids map[string]bool) {
 
 // readDriverEvents fills the view's driver-event fields from the reader: the events on the leased cards, newest first
 // and capped, the count of those that name no card this box can place, or the note that they could not be read.
+//
+// A reader that returns events WITH an error read something real but short or less exact (a log read that stopped part
+// way, a dmesg that holds this boot only, a card table that could not be read): the events show and the note says
+// "incomplete" with the reason. When the card table was the cause, the events it left unplaced are not counted as
+// naming no card: that would blame the event for what the table did.
 func (v *View) readDriverEvents(ctx context.Context, read func(context.Context) ([]DriverEvent, error)) {
 	evs, err := read(ctx)
 	if errors.Is(err, ErrNoDriverEventSource) {
 		return
 	}
-	if err != nil && len(evs) == 0 {
-		v.DriverEventsNote = "driver events unavailable: " + err.Error()
-		return
+	tableDown := errors.Is(err, ErrCardTableUnreadable)
+	if err != nil {
+		var issue *readIssue
+		if len(evs) == 0 && !tableDown && !errors.As(err, &issue) {
+			v.DriverEventsNote = "driver events unavailable: " + err.Error()
+			return
+		}
+		v.DriverEventsNote = "driver events incomplete: " + err.Error()
 	}
 	all, ids := leasedCards(*v)
 	var mine []DriverEvent
 	for _, e := range evs {
 		switch {
 		case e.UUID == "":
-			v.DriverEventsUnattributed++
+			if !tableDown {
+				v.DriverEventsUnattributed++
+			}
 		case all || ids[strings.ToLower(e.UUID)]:
 			mine = append(mine, e)
 		}
