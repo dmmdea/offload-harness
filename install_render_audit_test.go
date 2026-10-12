@@ -331,7 +331,7 @@ func TestAuditYAMLAppliesThePinRulesWithTheBoxCardTable(t *testing.T) {
 		}
 	})
 	t.Run("a UUID of a card that is not in the table fails", func(t *testing.T) {
-		out, err := auditYAMLWithTable(t, threeCardTable(), nil, pinnedYAML("GPU-dead0000-0000-0000-0000-00000000dead"))
+		out, err := auditYAMLWithTable(t, threeCardTable(), nil, pinnedYAML("GPU-dddd0000-0000-0000-0000-000000000000"))
 		if err == nil || !strings.Contains(out, "pin-unresolved (seat): ") {
 			t.Fatalf("a pin that names no card must fail; err=%v:\n%s", err, out)
 		}
@@ -386,7 +386,7 @@ func TestAuditYAMLNotesASeededIndexPinOnAVerbatimRender(t *testing.T) {
 		t.Errorf("the unstamped copy of the same render is judged as a hand-maintained file; err=%v:\n%s", runErr, out)
 	}
 	// A UUID that names no card is a violation in a verbatim render too: no seed ever writes one.
-	bad := strings.Replace(res.Config, "CUDA_VISIBLE_DEVICES=2,", "CUDA_VISIBLE_DEVICES=GPU-dead0000-0000-0000-0000-00000000dead,", 1)
+	bad := strings.Replace(res.Config, "CUDA_VISIBLE_DEVICES=2,", "CUDA_VISIBLE_DEVICES=GPU-dddd0000-0000-0000-0000-000000000000,", 1)
 	if bad == res.Config {
 		t.Fatal("the control edit found no CUDA_VISIBLE_DEVICES=2 to replace")
 	}

@@ -123,8 +123,8 @@ func TestAuditPinsNeverCallsNamelessCardsIdentical(t *testing.T) {
 func TestAuditPinsRefusesAUuidThatNamesNoCard(t *testing.T) {
 	cfg := pinCfg(
 		pinEntry("good", pinCard5060A, true),
-		pinEntry("moved", "GPU-dead0000-0000-0000-0000-00000000dead", true),
-		pinEntry("mixed", pinCard5060B+",GPU-beef0000-0000-0000-0000-00000000beef", true),
+		pinEntry("moved", "GPU-dddd0000-0000-0000-0000-000000000000", true),
+		pinEntry("mixed", pinCard5060B+",GPU-eeee0000-0000-0000-0000-000000000000", true),
 	)
 	vs := AuditPins(cfg, threeCardBox())
 	if len(vs) != 2 {
