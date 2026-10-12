@@ -846,8 +846,8 @@ func runWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	if len(subtasks) == 0 {
 		return nil, Summary{}, fmt.Errorf("delegate: at least one subtask required")
 	}
-	if len(subtasks) > limit {
-		return nil, Summary{}, fmt.Errorf("delegate: %d subtasks exceeds the max of %d", len(subtasks), limit)
+	if err := checkSubtaskLimit(len(subtasks), limit); err != nil {
+		return nil, Summary{}, err
 	}
 	// The whole-call deadline (ADR 0065): from here every placement, probe, poll
 	// and local run answers to a context that ends at RunOptions.Deadline. nil =

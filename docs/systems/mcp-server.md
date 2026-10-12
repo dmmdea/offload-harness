@@ -327,6 +327,28 @@ defers naming why. The response names `node`, `placement`, `seat`, `model` (the 
   agent seat needs the contract to name it (a wire field and a node-side change that widens what a fleet-token holder can
   make a node load); that larger design is not here.
 
+#### One bad subtask does not reject the others (register D-111)
+
+`agent_delegate` prepares each subtask on its own (`delegate.PrepareBatchWithCap`) and `offload_research` does the same
+for each page's contract. A call used to be refused whole at the first subtask that failed intake (a `context_paths` file
+that is not there, a context past the box's cap, a blank goal), so a valid sibling never ran. Now:
+
+- **A rejected subtask is a defer at its own position.** The call answers one result per subtask sent, in the order
+  sent. The rejected one is `deferred: true` with `defer_class: contract` (the caller's mistake, not a broken stack) and a
+  `reason` that opens `subtask N:` (`source N:` for a research page, N being the page's place in the `urls` list) and
+  names the cause. It is counted in `summary.deferred` and never in `summary.infrastructure` or `lost_to_stack`. No node or
+  seat was chosen for it, and it writes no ledger row: nothing was placed.
+- **The valid subtasks run** as they always did, and the call is flagged `isError` by the same rule as any other result
+  (nothing succeeded and something failed, was lost or was skipped), so a rejection beside a delivered answer is a
+  successful call. `acceptance_lint` stays on the result it belongs to.
+- **A caller that reads `results[i]` by index must tolerate a contract-class defer inside an otherwise delivered call.**
+  The position of a result is the position of the subtask.
+- **Two refusals stay whole-call.** More than 8 subtasks (`agent_delegate`) is refused for its number, counted on the
+  subtasks sent, so one bad subtask among nine does not make room. A call with no valid subtask keeps its flat
+  `deferred: true` answer, now naming every bad subtask (`subtask 0: ...; subtask 2: ...`).
+- `extra_read_roots` (attaching files from outside `read_root`) is not part of this: it needs a read floor at intake
+  first, because the delegator-side reader would otherwise widen what a model-written call can send to fleet nodes.
+
 #### The whole-call deadline (ADR 0065)
 
 The MCP client aborts a tool call at its own limit (1,800 s in the reference setup) and drops the
