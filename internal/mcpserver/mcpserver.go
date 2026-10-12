@@ -185,7 +185,7 @@ type Server struct {
 
 func New(p *pipeline.Pipeline) *Server {
 	return &Server{p: p, askCache: askcache.New(), quarantine: delegate.NewQuarantine(0), pins: delegate.NewPinTally(), tenant: delegate.DefaultTenant(),
-		originSession: func() string { return ledger.ProcessOrigin().Session }, exe: newExeWatch(readOwnExecutable)}
+		originSession: func() string { return ledger.ProcessOrigin().Session }, exe: newServerExeWatch()}
 }
 
 // WithConfigSource records the config file this server runs on, so a node added to its delegate_remotes joins the running
