@@ -11,11 +11,15 @@
 package fleetnode
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
 // MemProbe returns the current GPU memory capacity/usage in GiB. It is the
@@ -54,6 +58,19 @@ type DeviceProbe func() ([]GPUDevice, error)
 // 2-field CSV contract (and its other caller, the pipeline's per-process
 // footprint delta sampler) never breaks.
 func SmiDeviceProbe(run func() (string, error)) DeviceProbe {
+	return smiDeviceProbeWith(run, gpuprobe.ReadThermal, time.Now, stderrLogf)
+}
+
+// thermalReader reads the optional thermal query (gpuprobe.ReadThermal in production, a fake in tests).
+type thermalReader func(ctx context.Context) ([]gpuprobe.Thermal, error)
+
+// stderrLogf is where the one line about a failing thermal query goes.
+func stderrLogf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
+
+// smiDeviceProbeWith is SmiDeviceProbe over injected thermal reader, clock and log.
+func smiDeviceProbeWith(run func() (string, error), thermal thermalReader, now func() time.Time, logf func(string, ...any)) DeviceProbe {
 	return func() ([]GPUDevice, error) {
 		out, err := run()
 		if err != nil {

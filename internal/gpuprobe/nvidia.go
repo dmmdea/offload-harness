@@ -63,6 +63,14 @@ type Device struct {
 	// the reading cannot say which card the monitor is on. A driver that refuses the field has
 	// no such mark (the rule rests on display_active alone, as it always did).
 	AttachedUnknown bool `json:"attached_unknown,omitempty"`
+	// TemperatureC is nvidia-smi temperature.gpu in degrees C and ThrottleReasons the clock event reasons
+	// active when it was read (the NVML bits, named: ThrottleReasonNames). Neither rides the per-device query
+	// above: ReadThermal asks for them in a second, optional query, so an old driver that refuses a thermal
+	// column can never take the memory reading down with it. Absent is never "cool" and never "not throttled":
+	// the query failed, was not due, or the driver answered [N/A] or [Not Supported] for the card. A pointer,
+	// so a reading is told from none.
+	TemperatureC    *int     `json:"temperature_c,omitempty"`
+	ThrottleReasons []string `json:"throttle_reasons,omitempty"`
 }
 
 // DrivesDisplay is the placement answer to "is this the operator's screen": display_active

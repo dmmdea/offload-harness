@@ -1,6 +1,7 @@
 package gpuprobe
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -94,7 +95,7 @@ func TestParseSmiMemoryDevices_MultiDevice(t *testing.T) {
 		{Index: 1, UUID: "GPU-bbbbbbbb-0000-0000-0000-000000000000", Name: "NVIDIA GeForce RTX 4090", TotalGiB: 24576.0 / 1024, FreeGiB: (24576.0 - 2048) / 1024},
 	}
 	for i, d := range devices {
-		if d != want[i] {
+		if !reflect.DeepEqual(d, want[i]) { // Device carries a slice since F11: not comparable with !=
 			t.Errorf("devices[%d] = %+v, want %+v", i, d, want[i])
 		}
 	}

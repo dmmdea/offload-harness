@@ -3,6 +3,7 @@ package fleetnode
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -84,7 +85,7 @@ func TestParseSmiMemoryDevices_MultiDevice(t *testing.T) {
 		{Index: 1, UUID: "GPU-bbbbbbbb-0000-0000-0000-000000000000", Name: "NVIDIA GeForce RTX 4090", TotalGiB: 24576.0 / 1024, FreeGiB: (24576.0 - 2048) / 1024},
 	}
 	for i, d := range devices {
-		if d != want[i] {
+		if !reflect.DeepEqual(d, want[i]) {
 			t.Errorf("devices[%d] = %+v, want %+v", i, d, want[i])
 		}
 	}
@@ -169,7 +170,7 @@ func TestSelectHeadlineDevice_UUIDNotFoundFallsBackAndWarns(t *testing.T) {
 		t.Fatalf("warning = %q, want a non-empty warning naming %q", warning, typoUUID)
 	}
 	want := HeadlineDevice(devices)
-	if head != want {
+	if !reflect.DeepEqual(head, want) {
 		t.Fatalf("SelectHeadlineDevice fallback = %+v, want HeadlineDevice's pick %+v", head, want)
 	}
 }
@@ -185,7 +186,7 @@ func TestSelectHeadlineDevice_UnsetUUIDUnchanged(t *testing.T) {
 	if warning != "" {
 		t.Fatalf("warning = %q, want none when primary_gpu_uuid is unset", warning)
 	}
-	if want := HeadlineDevice(devices); head != want {
+	if want := HeadlineDevice(devices); !reflect.DeepEqual(head, want) {
 		t.Fatalf("SelectHeadlineDevice(unset) = %+v, want HeadlineDevice's pick %+v", head, want)
 	}
 }
@@ -198,7 +199,7 @@ func TestSelectHeadlineDevice_PinnedUUIDOnSingleGPUBox(t *testing.T) {
 	if warning != "" {
 		t.Fatalf("warning = %q, want none", warning)
 	}
-	if head != devices[0] {
+	if !reflect.DeepEqual(head, devices[0]) {
 		t.Fatalf("SelectHeadlineDevice = %+v, want the sole device %+v", head, devices[0])
 	}
 }
