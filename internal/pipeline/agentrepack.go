@@ -349,6 +349,10 @@ type repackTrace struct {
 	// schema ("" when it was returned as the seat wrote it): the delivered object is
 	// then not byte for byte what the seat wrote, and nothing else says so.
 	Coerced string
+	// Trimmed says how many list items the delivered object kept of the ones its answer held
+	// ("kept 10 of 11 list items ...", core.ListsTrimmed) when it kept fewer, "" when it kept
+	// them all: the answer rides beside the object, and nothing else says the object is short.
+	Trimmed string
 }
 
 // setCoerced records that the object the call returned was re-typed. A nil trace
@@ -356,6 +360,14 @@ type repackTrace struct {
 func (tr *repackTrace) setCoerced(note string) {
 	if tr != nil {
 		tr.Coerced = note
+	}
+}
+
+// setTrimmed records that the object the call returned holds fewer list items than its
+// answer did. A nil trace records nothing.
+func (tr *repackTrace) setTrimmed(note string) {
+	if tr != nil {
+		tr.Trimmed = note
 	}
 }
 

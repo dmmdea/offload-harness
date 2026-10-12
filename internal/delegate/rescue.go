@@ -100,7 +100,7 @@ func rescueSchemaMiss(ctx context.Context, rescue RescueFunc, contract core.Agen
 	rescueStart := time.Now()
 	got, err := rescue(ctx, contract, pr.Result.Output, budget)
 	if err == nil {
-		err = validateRescued(contract, got.Structured)
+		err = validateRescued(contract, got.Structured, pr.Result.Output)
 	}
 	if err != nil {
 		// The defer stands and may be re-placed (a seat lost in the re-pack is): the wall
@@ -139,8 +139,9 @@ func rescueSchemaMiss(ctx context.Context, rescue RescueFunc, contract core.Agen
 
 // validateRescued holds a rescue to the schema the contract's answer is held to
 // (its own, with every field the acceptance reads required), whatever produced
-// the object: the delegator delivers nothing it has not validated itself.
-func validateRescued(contract core.AgentContract, structured json.RawMessage) error {
+// the object: the delegator delivers nothing it has not validated itself. answer is the
+// finished answer the object was written from, which it is also read against.
+func validateRescued(contract core.AgentContract, structured json.RawMessage, answer string) error {
 	if len(structured) == 0 {
 		return fmt.Errorf("the rescue returned no structured object")
 	}
@@ -156,6 +157,10 @@ func validateRescued(contract core.AgentContract, structured json.RawMessage) er
 	}
 	if err := validator.Validate(structured, schema); err != nil {
 		return fmt.Errorf("the rescued object does not validate: %w", err)
+	}
+	// Valid is not faithful: an object that emptied the lists its answer held is no rescue.
+	if why := listFidelityFailure(contract, structured, answer); why != "" {
+		return fmt.Errorf("the rescued object is hollow: %s", why)
 	}
 	return nil
 }

@@ -1555,7 +1555,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 	}
 	wire.Structured = structured
-	wire.RepackNote = joinAdmissionNotes(wire.RepackNote, trace.Coerced, streamNote)
+	wire.RepackNote = joinAdmissionNotes(wire.RepackNote, trace.Coerced, trace.Trimmed, streamNote)
 	return finish(wire)
 }
 
@@ -1830,12 +1830,27 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	if lane == "grammar" {
 		props, _ = gbnf.JSONSchema(fields)["properties"].(map[string]any)
 	}
-	system := "You extract structured data from text. Output ONLY a JSON object with exactly the requested fields. Use empty values when a field is absent. " + repackTypeRule
-	user := fmt.Sprintf("Extract these fields from the text: %s.\n\nTEXT:\n%s", repackFieldList(names, props), output)
-	// The conditioned prompt carries the no-repeat sentence BEFORE the text: a seat
-	// doing an extraction reads what follows TEXT: as more text, and may write the
-	// sentence back as a list item.
-	userGuarded := fmt.Sprintf("Extract these fields from the text: %s.\n\n%s\n\nTEXT:\n%s", repackFieldList(names, props), repackNoRepeatNote, output)
+	//
+	// A TEXT that is itself a JSON object is told so (agentrepackfidelity.go): "use empty
+	// values when a field is absent" beside a text whose keys are not the requested names
+	// found every field absent and wrote an empty list for eleven stale sentences.
+	source := newRepackSource(output)
+	system := "You extract structured data from text. Output ONLY a JSON object with exactly the requested fields. " + source.absentRule() + " " + repackTypeRule
+	fieldList := repackFieldList(names, props)
+	// correction is set once an attempt's object was refused for emptying the lists the
+	// TEXT holds: the attempts after it are told so (a greedy seat asked the same question
+	// twice answers it the same way).
+	correction := ""
+	// The notes ride AHEAD of the text, and the conditioned prompt's no-repeat sentence
+	// with them: a seat doing an extraction reads what follows TEXT: as more text, and may
+	// write the sentence back as a list item.
+	userFor := func(guarded bool) string {
+		notes := []string{limitsNote(schema), source.keysNote(), correction}
+		if guarded {
+			notes = append(notes, repackNoRepeatNote)
+		}
+		return repackUserPrompt("Extract these fields from the text", fieldList, notes, output)
+	}
 
 	// ONE set of lane-probe closures for the WHOLE call (register D-85/D-108,
 	// W-19): before this, repackClient built a fresh FleetLaneGates cache and
@@ -1936,9 +1951,9 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		// the busy hold and the stall watch are untouched). An attempt that cannot
 		// buy the answer is not sent, and neither is any later one: time only runs
 		// out (register C-80).
-		attemptLane, attemptUser, attemptOpts := lane, user, structuredOpts
+		attemptLane, attemptUser, attemptOpts := lane, userFor(false), structuredOpts
 		if guard {
-			attemptLane, attemptUser = lane+"+no-repeat", userGuarded
+			attemptLane, attemptUser = lane+"+no-repeat", userFor(true)
 			attemptOpts = append(append([]llamaclient.GenOption(nil), structuredOpts...), llamaclient.WithFrequencyPenalty(repackLoopPenalty))
 		}
 		fit := opts.fit(time.Now(), deadlineOf(ctx), budget, floorTokens)
@@ -2093,10 +2108,21 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 			guard = true
 			continue
 		}
+		// A complete, valid object that holds none of the list items its TEXT holds is
+		// not a structuring of it (core.ListsEmptied): it is not published, and the next
+		// attempt is told what this one left out.
+		if why := core.ListsEmptied(delivered, schema, output); why != "" {
+			ferr := errors.New("re-pack " + why)
+			note(attempts, attemptLane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(ferr))
+			recordFailure(ferr, boundFor(attemptTimeout), attempts)
+			correction = source.correction()
+			continue
+		}
 		note(attempts, attemptLane, sent, clampedFrom, gres, time.Since(attemptStart), coercedWhy)
 		if coercedWhy != "" {
 			opts.Trace.setCoerced(coercedWhy)
 		}
+		opts.Trace.setTrimmed(core.ListsTrimmed(delivered, schema, output))
 		return json.RawMessage(delivered), tokensOut, false, attempts, nil
 	}
 	// FINAL fallback: one grammar-FREE attempt over /v1/chat/completions.
@@ -2144,11 +2170,12 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 			chatOpts = append(chatOpts, llamaclient.WithFrequencyPenalty(repackLoopPenalty))
 		}
 		chatStart := time.Now()
-		structured, cres, chatCoerced, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatSent, chatClampNote, guard, chatOpts...)
+		structured, cres, chatCoerced, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatSent, chatClampNote, guard, correction, chatOpts...)
 		tokensOut += cres.TokensOut
 		if cerr == nil {
 			note(attempts, chatLane, chatSent, chatClamped, cres, time.Since(chatStart), chatCoerced)
 			opts.Trace.setCoerced(chatCoerced)
+			opts.Trace.setTrimmed(core.ListsTrimmed(structured, schema, output))
 			return structured, tokensOut, false, attempts, nil
 		}
 		note(attempts, chatLane, chatSent, chatClamped, cres, time.Since(chatStart), repackWhy(cerr))
@@ -2204,7 +2231,7 @@ func outerObject(text string) string {
 // directWrapperMax is the most prose (fences, "Here is the result:", a
 // closing line) that may surround an object for directStructured to take it
 // as the answer when the object is under half of the text.
-const directWrapperMax = 200
+const directWrapperMax = core.AnswerWrapperMax
 
 // directStructured reports whether the loop's final text, trimmed to its
 // outermost {...} span (fences and prose around it are fine), already
@@ -2435,7 +2462,7 @@ func repackBudget(output string) int {
 // returned error; repackViaChat makes no infrastructure/budget/abstention
 // judgment of its own. The GenResult is whatever completion came back, usable or
 // not (zero when none did), so the caller can count and record a failed attempt.
-func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string, budget int, clampNote string, noRepeat bool, extra ...llamaclient.GenOption) (json.RawMessage, llamaclient.GenResult, string, error) {
+func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string, budget int, clampNote string, noRepeat bool, correction string, extra ...llamaclient.GenOption) (json.RawMessage, llamaclient.GenResult, string, error) {
 	props, _ := schema["properties"].(map[string]any)
 	names := make([]string, 0, len(props))
 	for name := range props {
@@ -2446,13 +2473,23 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 	// instruction here ended "numbers unquoted, strings quoted", which a seat read
 	// together with a field called `numbers` and answered bare JSON numbers for a
 	// list of strings (register C-80).
-	system := "You extract structured data from text. Output ONLY a JSON object — no prose, no code fences. " + repackTypeRule
-	user := fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\nTEXT:\n%s", repackFieldList(names, props), output)
+	//
+	// The chat prompt never carried "use empty values when a field is absent", but a TEXT that
+	// is itself a JSON object is told so here too (agentrepackfidelity.go), and the bound the
+	// schema puts on a list rides with the fields.
+	source := newRepackSource(output)
+	system := "You extract structured data from text. Output ONLY a JSON object — no prose, no code fences. "
+	if source.obj != nil {
+		system += objectTextRule + " "
+	}
+	system += repackTypeRule
+	notes := []string{limitsNote(schema), source.keysNote(), correction}
 	if noRepeat {
 		// An earlier attempt of this call looped: this one is told not to, before the
 		// text (the caller also sends the frequency penalty in extra).
-		user = fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\n%s\n\nTEXT:\n%s", repackFieldList(names, props), repackNoRepeatNote, output)
+		notes = append(notes, repackNoRepeatNote)
 	}
+	user := repackUserPrompt("Extract these fields from the text as a JSON object", repackFieldList(names, props), notes, output)
 	gres, gerr := client.Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, extra...)...)
 	if gerr != nil {
 		return nil, partialOf(gres, gerr), "", gerr
@@ -2469,10 +2506,16 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 		if loopWhy := degenerateList(fixed, output); loopWhy != "" {
 			return nil, gres, "", errors.New("chat re-pack " + loopWhy)
 		}
+		if why := core.ListsEmptied(fixed, schema, output); why != "" {
+			return nil, gres, "", errors.New("chat re-pack " + why)
+		}
 		return json.RawMessage(fixed), gres, coercedNote(changed), nil
 	}
 	if loopWhy := degenerateList([]byte(content), output); loopWhy != "" {
 		return nil, gres, "", errors.New("chat re-pack " + loopWhy)
+	}
+	if why := core.ListsEmptied([]byte(content), schema, output); why != "" {
+		return nil, gres, "", errors.New("chat re-pack " + why)
 	}
 	return json.RawMessage(content), gres, "", nil
 }
