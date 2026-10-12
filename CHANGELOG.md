@@ -826,8 +826,11 @@ measurement, in both places that draw this line.
   `lo-mediaremote-state-*` 1 (F77b), and the interrupted-batch tree 1. After this branch, the same packages on the same machine: nothing left, verdict `CLEAN` (1,571 s). A first run of the set ended `TESTS-FAILED` with the
   folder empty because `internal/mcpserver` failed once (54 s in); it passed in the four runs that followed (alone through the gate, twice through
   the tripwire, and in the repeat of the whole set), and which test failed was not captured, so it is open, not a temp leak. On Linux, `go test -p 1 ./...`
-  over the whole module, niced, with the temp dir on a separate data disk: every package passed (1,844 s) and the verdict is `CLEAN`, with the one
-  ignored entry printed with its reason. The Windows PowerShell 5.1 self-test (54 checks) and a tripwire run over twelve packages that start
+  over the whole module, niced, with the temp dir on a separate data disk: at the first dry run every package passed (1,844 s) and the verdict was
+  `CLEAN` with one ignored entry printed with its reason; after the review round, at the branch's last code commit (`-p 1 -timeout 45m ./...`),
+  every package passed (1,921 s) and the verdict is `CLEAN` with nothing ignored. On Windows a run with the same flags over `internal/pipeline` and
+  `internal/vllmseat` ended `CLEAN` (720 s); a run without `-timeout 45m` had ended `LEAK` when `internal/pipeline` hit go test's
+  ten-minute default and was killed mid-test, and its failure digest named the timeout and the test that was running. The Windows PowerShell 5.1 self-test (98 checks at the branch tip) and a tripwire run over twelve packages that start
   copies of their test binary or keep a state root both ended clean on a second Windows machine.
 
 ### Fixed — the temp-dir tripwire keeps the failure it saw, stops what it started when it is interrupted and says when it could not look; the lint stops skipping a directory by its name (GPU-I8, GPU-I8c, review round)
