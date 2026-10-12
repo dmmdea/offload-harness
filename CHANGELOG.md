@@ -6,6 +6,44 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — the media-job door answers 413 at once for a body that declares itself over the cap, instead of holding the node's only upload slot while it drains (CT-53)
+
+- **The defect.** `POST /fleet/media-job` took the node's one in-flight slot first and, for a `Content-Length` over
+  `fleet_media_inputs_max_mb` (in base64, plus 64 KiB), then read the body up to the cap before it answered `413`. A fleet-token
+  holder that declared 8 GiB and sent 20 bytes got no answer for the whole 15-minute window, and held the slot meanwhile, so the
+  next upload queued behind it and was answered `503` after the slot wait (seen live on a media-job door, 2026-10-08).
+- **The fix.** The size check sits right after the door (`403`) and bearer (`401`) checks, before the slot: a declared length over
+  the cap is answered `413 request body too large` with `Connection: close` and the body is never read. The check is strictly
+  over the cap (a body of exactly the cap is still read), the wording is unchanged, and a body with no declared length, or longer
+  than it declared, still meets the reader's cap as before. `readMediaJobBody` no longer drains a declared-oversize body either
+  (it returned no error and no bytes when such a body ended early); it returns the typed error the handler maps to `413`.
+- **Tests** (`media_job_declared_oversize_test.go`): a raw TCP client declaring 8 GiB and sending 20 bytes gets `HTTP/1.1 413`
+  inside 2 s, also while another upload holds the slot; a client that streams the body is not read (the server has read under
+  64 KiB; before the fix it had read 128 MiB of a refused body); the connection is closed after the answer; a body of exactly the
+  cap is read and one byte over is `413`; the body of a declared-oversize request is never read at the handler, and `403` and
+  `401` still come before `413`. Documented in `docs/systems/fleet-node.md` (the media-job door).
+
+### Fixed — the seat-rate store's lock waits out a Windows delete that is still pending instead of losing the run's sample (D-120)
+
+- **The defect.** `seatrate.Update` takes an exclusive lock file beside the store. On Windows, removing a file whose handle is
+  still open only marks it delete-pending, and an exclusive create in that window fails with `ACCESS_DENIED`, not "already
+  exists". `Update` returned that raw, so the run that finished while another run's lock was being deleted lost its rate and
+  cold-load sample (the caller logs `seat-rates store not updated` and goes on), and `TestUpdateSerialisesConcurrentWriters`
+  failed one gate run in five (2026-09-17). Measured on a Windows PC under 4 concurrent copies of the old test: 1 of 60 runs
+  failed with `open ...seat-rates.json.lock: Access is denied.`
+- **The fix.** The denial waits like a held lock, inside the existing 2 s lock window (the rule `gpulease`'s claim and epoch lock
+  already follow). At the deadline a held lock is still plain `ErrLocked`; a denial that never clears (a directory this process
+  cannot write) returns an error that wraps both `ErrLocked` and the open error, so the cause is named after at most 2 s. Any
+  other failure to open the lock is returned at once, as before.
+- **A stale lock that cannot be removed ends at the deadline.** The takeover of a lock older than 30 s retried at once whether or
+  not the removal worked, so a stale lock another process held open spun the caller with no deadline. It now retries at once only
+  after a removal that worked (or found the file gone) and otherwise waits out the window.
+- **Tests** (`update_lock_test.go`, the open and the stale removal through package variables so the denial can be injected): a
+  denial three times then success stores the sample once with no lock left; a persistent denial returns within the window with
+  both causes and nothing left behind; a live lock is still `ErrLocked` and is left in place; any other open error is returned at
+  once; an unremovable stale lock ends at the deadline with a bounded number of attempts. The concurrent-writers test asks again
+  after the designed `ErrLocked`, so it measures serialisation and not how long twelve writers take on a loaded host.
+
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)

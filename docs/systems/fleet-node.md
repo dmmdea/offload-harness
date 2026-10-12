@@ -1860,7 +1860,12 @@ in the bundle. The fields that may be files are `video-gen.still`, `animate.ref`
   task is also runnable). Closed, it answers
   403; without the bearer, 401; both before a byte of the body is read. `media-job` is token-gated, so the same task over
   `/fleet/dispatch` needs the bearer too, and its jobs are masked from tokenless polls and feeds.
-- The body is capped at `fleet_media_inputs_max_mb` (default 256, compressed) in base64 plus 64 KiB (413 over it), is JSON
+- The body is capped at `fleet_media_inputs_max_mb` (default 256, compressed) in base64 plus 64 KiB (413 over it). A request that
+  DECLARES a longer `Content-Length` is answered `413` at once with `Connection: close`, right after the door and bearer checks:
+  before the in-flight slot below is taken and without reading the body, so a client that declares 8 GiB and sends 20 bytes
+  neither holds the slot nor waits out the window (register CT-53; the node used to take the slot and drain the body up to the
+  cap first, and a second upload queued behind it for the slot wait). A body with no declared length, or longer than it
+  declared, is cut off at the cap by the reader and answered `413` too. The body is JSON
   only, and unknown fields are a 400. A token holder gets a 15-minute read and write window; a writer that cannot carry the
   extended deadlines is logged once per process per route. The body is held once while the job is admitted (the bundle is
   base64-decoded straight out of it into the one decoded copy, and the admission closure keeps only the job id and task type),
