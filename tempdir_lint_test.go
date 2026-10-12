@@ -608,6 +608,9 @@ func TestARelaunchedTestBinaryLeavesNothingInTheTempDir(t *testing.T) {}`, false
 		{"a proof that never points the temp dir", replaceOnce(real, `"TMP="+tmp, "TEMP="+tmp, "TMPDIR="+tmp`, `"X=1"`), true, true, false},
 		{"a proof that never reads the folder back", replaceOnce(real, `os.ReadDir(tmp)`, `os.Stat(tmp)`), true, true, false},
 		{"a proof that points only TMP", replaceOnce(real, `, "TEMP="+tmp, "TMPDIR="+tmp`, ``), true, true, false},
+		{"a proof that leaves out TMPDIR", replaceOnce(real, `, "TMPDIR="+tmp`, ``), true, true, false},
+		{"a proof that leaves out TEMP", replaceOnce(real, `"TEMP="+tmp, `, ``), true, true, false},
+		{"a proof that leaves out TMP", replaceOnce(real, `"TMP="+tmp, `, ``), true, true, false},
 		{"another test name does not count", replaceOnce(real, "TestARelaunchedTestBinaryLeavesNothingInTheTempDir", "TestSomethingElse"), true, true, false},
 		{"os.Args[1] is not the test binary", `package p
 import "os"
