@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // ciWorkflow is the part of a GitHub Actions workflow file these tests read.
@@ -354,7 +356,7 @@ func (s *ciScriptSandbox) runWith(flags []string, script string, extraEnv ...str
 	file := s.file("step.sh", strings.ReplaceAll(script, "\r\n", "\n"))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, s.bash, append(flags, file)...)
+	cmd := winexec.CommandContext(ctx, s.bash, append(flags, file)...)
 	cmd.Dir = s.dir
 	cmd.Env = s.environ(extraEnv)
 	out, err := cmd.CombinedOutput()

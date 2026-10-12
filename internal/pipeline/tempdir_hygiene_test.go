@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // The suite re-launches its own test binary as the browse sidecar stand-in (TestBrowseHelperProcess), and
@@ -25,7 +27,7 @@ import (
 // a fresh folder, and requires the folder to be empty when the stand-in is gone.
 func TestARelaunchedTestBinaryLeavesNothingInTheTempDir(t *testing.T) {
 	tmp := t.TempDir()
-	cmd := exec.Command(os.Args[0], browseHelperArg)
+	cmd := winexec.Command(os.Args[0], browseHelperArg)
 	// The environment production gives the sidecar is an allowlist (browseRunnerEnv), so nothing the suite set
 	// in its own environment reaches the copy. The temp dir is pointed at the fresh folder on top of it; TMPDIR
 	// is not on the allowlist, so on Unix the copy would otherwise write to the system temp dir and this

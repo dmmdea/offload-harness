@@ -138,7 +138,7 @@ func powerShellHosts(t testing.TB) []string {
 func startsHere(path string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	err := exec.CommandContext(ctx, path, "-NoProfile", "-NonInteractive", "-Command", "exit 0").Run()
+	err := winexec.CommandContext(ctx, path, "-NoProfile", "-NonInteractive", "-Command", "exit 0").Run()
 	var exit *exec.ExitError
 	if err == nil || (errors.As(err, &exit) && ctx.Err() == nil) {
 		return nil

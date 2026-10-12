@@ -8,11 +8,12 @@ package fleetnode
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // The suite re-launches its own test binary: the stand-in ffmpeg of stt_e2e_test.go and the dead-owner
@@ -23,7 +24,7 @@ import (
 // with the temp dir pointed at a fresh folder and requires the folder to be empty when the helper is gone.
 func TestARelaunchedTestBinaryLeavesNothingInTheTempDir(t *testing.T) {
 	tmp := t.TempDir()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestSweepHelperExitNow$")
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestSweepHelperExitNow$")
 	cmd.Env = append(os.Environ(), "FLEETNODE_SWEEP_HELPER=1", "TMP="+tmp, "TEMP="+tmp, "TMPDIR="+tmp)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("helper process: %v\n%s", err, out)

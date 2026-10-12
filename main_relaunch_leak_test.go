@@ -7,10 +7,11 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // relaunchLeakHelperEnv asks the helper below to act; without it the helper is an ordinary skipped test.
@@ -31,7 +32,7 @@ func TestRelaunchLeakHelperProcess(t *testing.T) {
 // environment only, so the parent's is untouched.
 func TestARelaunchedTestBinaryLeavesNothingInTheTempDir(t *testing.T) {
 	tmp := t.TempDir()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestRelaunchLeakHelperProcess$", "-test.timeout=60s")
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestRelaunchLeakHelperProcess$", "-test.timeout=60s")
 	cmd.Env = append(os.Environ(), relaunchLeakHelperEnv+"=1", "TMP="+tmp, "TEMP="+tmp, "TMPDIR="+tmp)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
