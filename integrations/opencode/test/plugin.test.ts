@@ -363,6 +363,26 @@ describe("delegate digest", () => {
     const d = delegateDigest(wire({ placement: "route=spread → local (slot 1 of 2)" }, { ran_on: "node", placement: misread }));
     expect(d).toContain("1 local, 1 remote of 2");
   });
+  // A result no seat ran (a defer the delegator filed as unplaced) carries no ran_on, and its placement text ("... and no node took it")
+  // names no seat, so reading the text counted it as a node's. It is neither local nor remote.
+  const unplaced = { deferred: true, placement: "route=auto, and no node took it" };
+  it("delegateDigest counts a deferred result with no ran_on as neither local nor remote, and does not call that a pair", () => {
+    const d = delegateDigest(wire({ ran_on: "local", placement: "route=auto → local (headroom)" }, unplaced));
+    expect(d).toContain("1 local, 0 remote of 2");
+    expect(d).not.toContain("pair landed");
+    expect(d).toContain("did NOT land");
+    expect(d).toContain("1 contract(s) deferred");
+  });
+  it("delegateDigest does not say all local when the rest ran nowhere", () => {
+    const d = delegateDigest(wire({ ran_on: "local", placement: "local" }, unplaced));
+    expect(d).not.toContain("all local");
+    expect(delegateDigest(wire({ ran_on: "local", placement: "local" }, { ran_on: "local", placement: "local" }))).toContain("all local");
+  });
+  it("delegateDigest keeps counting a deferred result a node answered (ran_on node) as remote, and a lone defer as no pair", () => {
+    const d = delegateDigest(wire({ ran_on: "local", placement: "local" }, { ran_on: "node", deferred: true, placement: misread }));
+    expect(d).toContain("1 local, 1 remote of 2");
+    expect(delegateDigest(wire(unplaced))).toContain("0 local, 0 remote of 1.");
+  });
   it("delegateDigest does not call a pair all-local when ran_on says a node ran it", () => {
     const d = delegateDigest(wire({ ran_on: "local", placement: "local" }, { ran_on: "node", placement: misread }));
     expect(d).not.toContain("did NOT land");
