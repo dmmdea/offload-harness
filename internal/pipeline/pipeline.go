@@ -2390,13 +2390,43 @@ func parseBatchResults(raw []byte, norm []ImageBatchJob) []ImageBatchItem {
 	return items
 }
 
+// The rows a batch that stopped itself leaves (render/batch-jobs.mjs, the cross-process contract of runBatchJobs):
+//   - a job the batch never started is recorded "not run: <why>" for the stop (a ComfyUI that can run no more work, a full disk);
+//   - the job that hit an unusable ComfyUI is recorded with its child's reason, "comfy-render exited 3: ..."
+//     (renderExitError, RENDER_EXIT_SERVER_UNUSABLE).
+//
+// TestBatchErrClassFilesTheAbortRowsWithTheBatchsTypedClass and the end-to-end batch test run the real runBatchJobs, so a change to
+// either text turns them red.
+const (
+	batchNotRunPrefix         = "not run: "
+	batchServerUnusablePrefix = "comfy-render exited 3"
+)
+
 // batchErrClass classifies a failed batch item for the ledger's ErrClass, mirroring
 // the single path's classifyErr. A job with no recorded result line died with the
-// batch itself, so the batch-level error (gerr) is its true cause; a job with its own
-// error line is classified from that. Pure.
+// batch itself, so the batch-level error (gerr) is its true cause; so is a job the
+// batch stopped on or never ran, when gerr carries a class gpugen decided structurally
+// (a *gpugen.RunError: the IGPU_CLASS= line the batch's output ends with, or a deadline):
+// without that, a ComfyUI that died mid-batch filed every row "other", the words of
+// "not run: ComfyUI became unusable at job 3/6 (...)" naming no class (D-38, issue #72).
+// A job with its own error line is classified from that: one that failed on its own before
+// the stop keeps the class its own words give. Pure.
 func batchErrClass(itemErr string, gerr error) string {
-	if gerr != nil && strings.Contains(itemErr, "no result recorded") {
-		return classifyErr(gerr)
+	if gerr != nil {
+		if strings.Contains(itemErr, "no result recorded") {
+			return classifyErr(gerr)
+		}
+		var re *gpugen.RunError
+		if errors.As(gerr, &re) && re.Class != "" {
+			switch {
+			case strings.HasPrefix(itemErr, batchNotRunPrefix):
+				return re.Class
+			// the row of the job the batch stopped on describes only the ComfyUI class: another typed class (a deadline, a reset)
+			// is not what that child's exit 3 said.
+			case re.Class == "comfy_unusable" && strings.HasPrefix(itemErr, batchServerUnusablePrefix):
+				return re.Class
+			}
+		}
 	}
 	return classifyErr(fmt.Errorf("%s", itemErr))
 }
