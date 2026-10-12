@@ -108,14 +108,20 @@ func GrantCheck(build func() (gpulease.AllocInput, error), ids []string) func() 
 	}
 }
 
-// SkipSummary is the one line that says why cards were skipped.
+// SkipSummary is the one line that says why cards were skipped. The operator's screen card says so beside a
+// reason that does not (a media call refused over the display card's cap reads "card 1 vram (display card)",
+// not a bare "card 1 vram"); the full sentence, with the cap, is the skip's Detail.
 func SkipSummary(e *gpulease.NoCardsError) string {
 	var parts []string
 	if e.HostReason != "" {
 		parts = append(parts, e.HostReason)
 	}
 	for _, s := range e.Skipped {
-		parts = append(parts, fmt.Sprintf("card %d %s", s.Index, s.Reason))
+		part := fmt.Sprintf("card %d %s", s.Index, s.Reason)
+		if s.Display && s.Reason != gpulease.ReasonDisplay {
+			part += " (display card)"
+		}
+		parts = append(parts, part)
 	}
 	if len(parts) == 0 {
 		return "no card qualifies"

@@ -594,3 +594,16 @@ func TestPickAutoPollsAreBoundedWhateverTheClockDoes(t *testing.T) {
 		t.Fatal("the loop never polled at all: this test no longer exercises the poll path")
 	}
 }
+
+// The one-line summary of a refusal says when the card refused is the operator's screen, beside a reason that
+// does not say so (the cap reads "vram"), so a media call's "gpu busy" answer is not a bare "card 1 vram".
+func TestSkipSummaryNamesTheDisplayCardBesideAReasonThatDoesNot(t *testing.T) {
+	got := SkipSummary(&gpulease.NoCardsError{Skipped: []gpulease.Skip{
+		{Index: 0, Reason: gpulease.ReasonClaimed},
+		{Index: 1, Reason: gpulease.ReasonVRAM, Display: true},
+		{Index: 2, Reason: gpulease.ReasonDisplay, Display: true},
+	}})
+	if want := "card 0 claimed, card 1 vram (display card), card 2 display"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+}

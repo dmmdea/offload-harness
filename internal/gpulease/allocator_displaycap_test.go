@@ -82,8 +82,8 @@ func TestAllocatorRefusesTheDisplayCardPastTheCapAndNamesIt(t *testing.T) {
 			continue
 		}
 		s := skipOf(a, "gpu-bbbb0000")
-		if s.Reason != ReasonVRAM {
-			t.Errorf("footprint %v: the display card must be skipped as %q, got %+v", tc.footprint, ReasonVRAM, s)
+		if s.Reason != ReasonVRAM || !s.Display {
+			t.Errorf("footprint %v: the display card must be skipped as %q and marked as the display card, got %+v", tc.footprint, ReasonVRAM, s)
 		}
 		for _, want := range []string{"60 %", "cap", "desktop floor"} {
 			if !strings.Contains(s.Detail, want) {

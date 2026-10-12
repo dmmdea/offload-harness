@@ -110,6 +110,9 @@ type Skip struct {
 	Index  int    `json:"index"`
 	Reason string `json:"reason"`
 	Detail string `json:"detail,omitempty"`
+	// Display marks the operator's screen card (the card table's rule), so a one-line summary of why cards
+	// were skipped can say "vram (display card)" when it is the cap that refused it, not just "vram".
+	Display bool `json:"display,omitempty"`
 }
 
 // Allocation is the cards taken (lease ids, in the order chosen) and what was skipped.
@@ -168,7 +171,7 @@ func Allocate(in AllocInput) (Allocation, error) {
 	var ok, claimedFit []cand
 	var skipped []Skip
 	skip := func(c gpuprobe.Card, id, reason, detail string) {
-		skipped = append(skipped, Skip{ID: id, Index: c.NvidiaIndex, Reason: reason, Detail: detail})
+		skipped = append(skipped, Skip{ID: id, Index: c.NvidiaIndex, Reason: reason, Detail: detail, Display: c.Display})
 	}
 	for _, c := range in.Cards {
 		id := c.LeaseID()
@@ -315,11 +318,11 @@ func DesktopRefusals(in AllocInput, ids []string) []Skip {
 		}
 		switch {
 		case c.Display && !in.displayOpen():
-			out = append(out, Skip{ID: id, Index: c.NvidiaIndex, Reason: ReasonDisplay, Detail: displayClosedDetail})
+			out = append(out, Skip{ID: id, Index: c.NvidiaIndex, Reason: ReasonDisplay, Detail: displayClosedDetail, Display: true})
 		case c.DisplayUnknown:
 			out = append(out, Skip{ID: id, Index: c.NvidiaIndex, Reason: ReasonDisplayUnknown, Detail: displayUnknownDetail})
 		case in.floorApplies(c) && !in.fitsCard(c):
-			out = append(out, Skip{ID: id, Index: c.NvidiaIndex, Reason: ReasonVRAM, Detail: in.vramDetail(c)})
+			out = append(out, Skip{ID: id, Index: c.NvidiaIndex, Reason: ReasonVRAM, Detail: in.vramDetail(c), Display: c.Display})
 		}
 	}
 	return out

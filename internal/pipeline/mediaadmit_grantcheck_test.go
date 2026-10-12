@@ -32,8 +32,8 @@ func TestAMediaCallThatDeclaresNoFootprintIsNotQueuedOnTheDisplayCard(t *testing
 	if res.OK {
 		t.Fatalf("the call ran with only the screen's card to run on: %s", res.Reason)
 	}
-	if !strings.Contains(res.Reason, "display") || !strings.Contains(res.Reason, "footprint") {
-		t.Errorf("the answer must say the display card is why and that no footprint was declared: %q", res.Reason)
+	if !strings.Contains(res.Reason, "card 1 vram (display card)") {
+		t.Errorf("the answer must say it is the display card that was refused on VRAM, not a bare 'vram': %q", res.Reason)
 	}
 	if ws := f.m.Waiters(); len(ws) != 0 {
 		t.Errorf("a call that cannot be shown to stay under the cap must not hold a place on the display card: %+v", ws)
