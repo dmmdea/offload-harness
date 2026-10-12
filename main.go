@@ -2818,6 +2818,10 @@ func reportPipelineJobsSweep(w io.Writer, swept, kept int, serr error) {
 // node is a contract violation the dispatcher treats as broken. SIGINT drains
 // in-flight jobs for up to 30s before exiting.
 func runFleetServe(args []string) error {
+	// D-36, as runMCP: take the identity of the image this process started from BEFORE anything else runs. A node is as
+	// long-lived as an MCP server and stamps harness_build_sha256 on its agent answers, so a deploy that lands after it
+	// started must not be hashed, at the first answer, as the image it runs.
+	buildinfo.CaptureStartup()
 	fs := flag.NewFlagSet("fleet-serve", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	listenFlag := fs.String("listen", "", "listen address (default: config fleet_listen, 127.0.0.1:18811)")
