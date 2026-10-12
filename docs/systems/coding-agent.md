@@ -722,7 +722,9 @@ calls are recorded, so the seat is not given another turn to answer from nothing
 run as an `infrastructure` defer ([defer shapes](fleet-node.md#defer-shapes-and-their-classes)); a file
 that is missing inside a root that opens stays an observation. A run with a write door asks the same question
 itself (`agent.CheckWorkspaceRoot`) when the door opens and again before it renders its diff, because a tree
-lost before the first or after the last tool call has no tool to report it.
+lost before the first or after the last tool call has no tool to report it. A tree it finds gone is never rendered as a diff;
+it becomes the run's cause only when the loop ended cleanly (a cause the loop ended on itself, such as the ceiling, keeps its class
+and the `write_note` says the write set was withheld).
 A `Chat` call can also fail before it reaches llama-swap, with a `*modelaffinity.WaitError`: the
 seat was parked behind another model's batch for longer than its bound. The error names the base,
 the model wanted and the model that held the slot.

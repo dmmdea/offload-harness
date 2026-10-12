@@ -348,7 +348,18 @@ that is not there, a context past the box's cap, a blank goal), so a valid sibli
   The position of a result is the position of the subtask.
 - **Two refusals stay whole-call.** More than 8 subtasks (`agent_delegate`) is refused for its number, counted on the
   subtasks sent, so one bad subtask among nine does not make room. A call with no valid subtask keeps its flat
-  `deferred: true` answer, now naming every bad subtask (`subtask 0: ...; subtask 2: ...`).
+  `deferred: true` answer, now naming every bad subtask (`subtask 0: ...; subtask 2: ...`). The same answer also names
+  the subtasks intake refused when the engine itself refuses the whole call and nothing runs (an unknown `route`, say):
+  `<the engine's reason>; also refused at intake: subtask 1: ...`, so fixing the first complaint does not meet the second
+  on the retry (`offload_research` names a page by its place in the `urls` list).
+- **Progress notifications speak in the caller's numbers.** The engine is handed only the valid subtasks, so a mixed call
+  reports `subtask K of N` with K the subtask's position in the call (where its result sits) and N the number sent, counts the
+  refused subtasks as done from the start (`N of N done` is reachable) and opens with `delegating N subtask(s), M refused at
+  intake`. A call with nothing refused reports exactly what it always did.
+- **The command-line verbs follow the same rule.** `local-offload delegate --contract` and `local-offload research` prepare
+  each subtask or page on their own, run the valid ones and print the refused ones as contract-class defers at their own
+  positions (exit code 0, as every contract-class defer is); a file with nothing valid, or more than 8 subtasks, is refused whole
+  as before, the refusal naming every bad subtask.
 - `extra_read_roots` (attaching files from outside `read_root`) is not part of this: it needs a read floor at intake
   first, because the delegator-side reader would otherwise widen what a model-written call can send to fleet nodes.
 
