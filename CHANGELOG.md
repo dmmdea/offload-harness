@@ -120,6 +120,20 @@ Versioning: [SemVer](https://semver.org/).
   `line 1 is 125999 runes: the seat's read_file would cut it at 2000 and the rest would be out of reach`; five mutations (the
   wrap not applied, the early return, the break window, the hard-cut width, the cap constant) turn them red. Docs:
   `docs/systems/mcp-server.md`.
+- **The document fingerprint no longer fails an honest "not on page" digest or a plural/singular restatement.** The research
+  acceptance check is a wrong-document tripwire: one any-of alternation of the page's own prose words, kept off the goal's
+  vocabulary. Nine of 254 research answers in two days failed it, and every one was a faithful or honest-absence digest, none
+  off-document (a digest that names the document correctly and quotes it verbatim failed for writing "specification" where the
+  page's anchor was "specifications"; another was five "not on page" and a verdict). The goal tells the seat to write exactly
+  that, in the goal's own words, which the anchors exclude by construction, so an honest absence could never pass. The check now
+  ends with an honest-absence alternative (`research.AbstentionAlt`: "not on the page", "does not contain/address/mention/…",
+  "not documented/stated/…"; "not found" stays out, it is an error) and matches each anchor in its singular, excluding the goal's
+  words in the singular too, so an echoed goal still cannot pass. The check stays one regex tagged `docanchor`, and the
+  confident digest of another page, the empty answer and "could not read the file" still fail it. Tests
+  `internal/research/anchors_abstention_test.go`, written first: red before with, for example, `an honest absence was failed as
+  off-document: "The page does not address it."` and `a faithful restatement was failed for its inflection`; five mutations (the
+  alternative dropped, the singular off, the goal exclusion on the singular off, a phrase dropped, `not found` added) turn them
+  red. Docs: `docs/systems/mcp-server.md`.
 
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 

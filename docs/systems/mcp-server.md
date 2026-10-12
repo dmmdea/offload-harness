@@ -466,6 +466,11 @@ regex (tagged `docanchor`) over the page's top prose content words — taken fro
 and the headings that introduce them, never from identifier-shaped tokens, UI or markup
 vocabulary, and never from the goal (0.141.1, register C-65), so an echoed goal cannot pass as
 verified while a faithful digest passes by restating any one of about two dozen words.
+Two faithful shapes used to fail it and now pass (0.184.0): an **honest absence** (the last alternative of the regex is
+`research.AbstentionAlt`: "not on page", "the page does not address it", "does not contain/mention/…", "not documented/stated/…",
+and not "not found", which is an error), because the goal tells the seat to say exactly that, in the goal's own vocabulary, which
+the anchors exclude by construction; and an **inflection** (each anchor is matched in its singular, so "programmer" restates a
+page that says "programmers"; the goal's own words are excluded in the singular too, so an echoed goal still cannot pass).
 
 What a digest owes beyond that is one design (register C-74): **presence is declared,
 non-emptiness is asked for only where the caller marked it, and the default digest owes that it

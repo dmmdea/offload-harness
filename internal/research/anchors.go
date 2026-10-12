@@ -160,7 +160,9 @@ func Anchors(text, goal string, n int) []string {
 	}
 	var cands []cand
 	for w, wt := range proseWords(text) {
-		if strings.Contains(goalLower, w) {
+		// Neither the word nor its singular may be the goal's: AnchorCheck matches on the singular, so a plural
+		// anchor whose singular the goal uses would let the goal echoed back restate the page.
+		if strings.Contains(goalLower, w) || strings.Contains(goalLower, singular(w)) {
 			continue
 		}
 		cands = append(cands, cand{w, min(wt, 6) + float64(min(len(w), 12))/24})
@@ -189,12 +191,32 @@ func Anchor(text, goal string) string {
 	return ""
 }
 
+// AbstentionAlt is the last alternative of every page's check: the words of an HONEST ABSENCE. The research goal tells the
+// seat to say so when the page does not carry what was asked ("the page does not address it", and the callers' own
+// "not on page"), in the goal's vocabulary, which the anchors exclude by construction, so a faithful "nothing here" digest
+// could never restate a page word and failed a check that exists to catch the opposite fault. An absence says nothing about
+// any document, so it cannot be about the wrong one. Deliberately absent: "not found" and "could not read the file", which
+// are an error and stay failures.
+const AbstentionAlt = `not on (?:the )?page|does not (?:contain|address|document|specify|describe|mention|state|cover)|no mention|not (?:documented|stated|specified|mentioned|covered|present)`
+
+// singular is a word without its plural s (a digest that writes "programmer" restates a page that says "programmers"), when
+// what is left is still a word the check would have chosen. A match is a substring match, so the shorter form also matches
+// the longer one.
+func singular(w string) string {
+	if len(w)-1 >= minWordLen && strings.HasSuffix(w, "s") && !strings.HasSuffix(w, "ss") {
+		return w[:len(w)-1]
+	}
+	return w
+}
+
 // AnchorCheck is the ONE acceptance line the research lane emits for a page: a
 // case-insensitive alternation of the page's top prose words, tagged with the
 // named group `docanchor` (delegate.strikeOnFingerprint keys on it, so a
 // contract-caused failure never quarantines a node). A faithful digest passes
-// by restating ANY of them; an answer about another document, or an echo of
-// the goal (no goal word is ever included), does not. It is a wrong-document
+// by restating ANY of them (in the singular, so an inflection does not fail it);
+// an answer about another document, or an echo of the goal (no goal word is ever
+// included, nor its singular), does not. The last alternative is AbstentionAlt:
+// an honest "not on page" passes. It is a wrong-document
 // tripwire, not a quality gate: lexical overlap is a poor faithfulness metric
 // (Maynez et al. 2020; Cao et al. 2022), so the bar is one word of
 // twenty-four. A page with fewer than minAnchorWords usable words yields "" —
@@ -204,10 +226,11 @@ func AnchorCheck(text, goal string) string {
 	if len(toks) < minAnchorWords {
 		return ""
 	}
-	q := make([]string, len(toks))
-	for i, t := range toks {
-		q[i] = regexp.QuoteMeta(t)
+	q := make([]string, 0, len(toks)+1)
+	for _, t := range toks {
+		q = append(q, regexp.QuoteMeta(singular(t)))
 	}
+	q = append(q, AbstentionAlt)
 	return "regex:(?i)(?P<docanchor>" + strings.Join(q, "|") + ")"
 }
 
