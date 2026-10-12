@@ -124,7 +124,7 @@ export function parseCardTable(text) {
  * unknown, which the selection refuses.
  */
 export function queryCards(spawnSync = nodeSpawnSync) {
-  const ask = (fields) => spawnSync("nvidia-smi", [`--query-gpu=${fields}`, "--format=csv,noheader,nounits"], { encoding: "utf8", timeout: 30000 });
+  const ask = (fields) => spawnSync("nvidia-smi", [`--query-gpu=${fields}`, "--format=csv,noheader,nounits"], { encoding: "utf8", timeout: 30000, windowsHide: true });
   const failed = (r) => !r || r.status !== 0 || !r.stdout;
   let r = ask(QUERY);
   if (failed(r)) r = ask(QUERY);
