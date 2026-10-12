@@ -103,14 +103,14 @@ verdict_of() { printf '%s\n' "$out" | sed -n 's/^TRIPWIRE-VERDICT: \([A-Z-]*\).*
 proc_ok=1
 case $(uname -s 2>/dev/null) in MINGW* | MSYS* | CYGWIN*) proc_ok=0 ;; esac
 [ -r /proc/self/exe ] || proc_ok=0
-# procs_under DIR: the pids of the processes that run from an image inside DIR (Linux only)
+# procs_under DIR [NAME]: the pids of the processes that run from an image inside DIR (Linux only); with NAME, only images of that name
 procs_under() {
 	local p exe
 	[ "$proc_ok" = 1 ] || return 0
 	for p in /proc/[0-9]*; do
 		exe=$(readlink "$p/exe" 2>/dev/null) || continue
 		exe=${exe% (deleted)}
-		case $exe in "$1"/*) printf '%s\n' "${p#/proc/}" ;; esac
+		case $exe in "$1"/*) { [ -z "${2:-}" ] || [ "${exe##*/}" = "$2" ]; } && printf '%s\n' "${p#/proc/}" ;; esac
 	done
 }
 stray_captures() { find "$root" -mindepth 1 -maxdepth 1 -name 'test-temp-tripwire.*.go.out' 2>/dev/null | wc -l | tr -d ' '; }
@@ -335,9 +335,10 @@ interrupt_case() { # interrupt_case SIGNAL
 	local sig=$1 pid waited=0 alive=0 left strays
 	"$bash_bin" "$tripwire" "${common[@]}" --pkgs ./hanger >"$root/interrupt.out" 2>&1 &
 	pid=$!
-	while [ "$waited" -lt 600 ] && [ -z "$(procs_under "$root")" ]; do sleep 0.2; waited=$((waited + 1)); done
-	if [ -z "$(procs_under "$root")" ]; then
-		bad "interrupt $sig: the hanger test binary never ran from the folder (waited 120 s)"
+	# both processes: the test binary and the copy of itself it starts; a stop before the copy exists proves nothing about the copy
+	while [ "$waited" -lt 600 ] && [ "$(procs_under "$root" hanger.test | wc -l | tr -d ' ')" -lt 2 ]; do sleep 0.2; waited=$((waited + 1)); done
+	if [ "$(procs_under "$root" hanger.test | wc -l | tr -d ' ')" -lt 2 ]; then
+		bad "interrupt $sig: the hanger test binary and its copy never both ran from the folder (waited 120 s)"
 		kill "$pid" 2>/dev/null
 		return
 	fi

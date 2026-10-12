@@ -122,9 +122,12 @@ function Leak-Lines {
 function Clean-Kept { Get-ChildItem -LiteralPath $root -Directory -Filter 'test-temp-tripwire.*' -ErrorAction SilentlyContinue | ForEach-Object { Remove-Tree $_.FullName } }
 # Stray-Captures: the go test capture files a run leaves beside its folder (the script owns them and always removes them)
 function Stray-Captures { return @(Get-ChildItem -LiteralPath $root -File -Filter 'test-temp-tripwire.*' -ErrorAction SilentlyContinue).Count }
-# Get-RunningFrom: the processes (Windows) that run from an image inside DIR
-function Get-RunningFrom([string]$Dir) {
-    return @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ExecutablePath | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Dir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) })
+# Get-RunningFrom: the processes (Windows) that run from an image inside DIR, only those of image NAME when it is given
+function Get-RunningFrom([string]$Dir, [string]$Name = '') {
+    return @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ExecutablePath | Where-Object {
+            $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Dir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -and
+            (-not $Name -or (Split-Path -Leaf $_.ExecutablePath) -eq $Name)
+        })
 }
 
 try {
@@ -334,9 +337,9 @@ try {
                 }).AddArgument($tripwire).AddArgument($root).AddArgument($fixture).AddArgument($jobAllow)
             $async = $runner.BeginInvoke()
             $running = $false
-            for ($i = 0; $i -lt 240 -and -not $running; $i++) { Start-Sleep -Milliseconds 500; $running = @(Get-RunningFrom $root).Count -gt 0 }
+            for ($i = 0; $i -lt 240 -and -not $running; $i++) { Start-Sleep -Milliseconds 500; $running = @(Get-RunningFrom $root 'hanger.test.exe').Count -ge 2 }
             if (-not $running) {
-                Bad 'interrupt: the hanger test binary never ran from the folder (waited 120 s)'
+                Bad 'interrupt: the hanger test binary and its copy never both ran from the folder (waited 120 s)'
                 $runner.Stop()
             } else {
                 $watch = [Diagnostics.Stopwatch]::StartNew()
