@@ -1442,6 +1442,12 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		p.recordDefer(req.Task, meta, len(req.Audio), "empty transcript")
 		return core.Deferf("empty transcript", "", meta)
 	}
+	// The word times of a drifted transcript (issue #169) are named where an operator reads: the
+	// verdict is also published in the payload below, but a run that nobody reads the payload of
+	// would otherwise cut audio at the wrong words without a trace.
+	if tr.WordsReliable != nil && !*tr.WordsReliable {
+		log.Printf("transcribe: word times of %q drift up to %.1f s from their segments (issue #169): words_reliable=false", filepath.Base(req.Audio), tr.WordsDriftSec)
+	}
 
 	// Write the full payload to disk (the pointer pattern) — best-effort: a write
 	// failure does not fail the result (the inline data still carries the answer).
@@ -1496,6 +1502,8 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		SRTPath:           srtPath,
 		TextPath:          txtPath,
 		JSONPath:          jsonPath,
+		WordsReliable:     tr.WordsReliable,
+		WordsDriftSec:     tr.WordsDriftSec,
 	}
 	data, _ := json.Marshal(out)
 	// Storing under a non-content key is what turns a transient read failure into
@@ -1542,6 +1550,13 @@ type transcribeResult struct {
 	SRTPath           string              `json:"srt_path"`
 	TextPath          string              `json:"text_path"`
 	JSONPath          string              `json:"json_path"`
+	// WordsReliable and WordsDriftSec are sttclient's word-time verdict (issue #169): false when the
+	// first word of some segment starts 0.5 s or more away from that segment's start, with the largest
+	// such gap in seconds (later words are not checked); absent when the transcript carries no word times, or when an entry cached by a build
+	// older than the check is served (no verdict is not a verdict of true). The segment file stays a
+	// bare array, so a reader of json_path alone does not see them.
+	WordsReliable *bool   `json:"words_reliable,omitempty"`
+	WordsDriftSec float64 `json:"words_drift_sec,omitempty"`
 }
 
 // mediaBase returns <MediaDir>/<sanitized-basename>-<8hex of ident> as the
