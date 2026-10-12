@@ -366,8 +366,54 @@ func TestDieWithWrapperIsOptIn(t *testing.T) {
 // marker. The wrapper that LOST its lease must not take that instance down with its own tree: it
 // is another lease's job now. Everything else of its tree goes.
 func TestLeaseLostSparesAnInstanceAnotherLeaseTookOver(t *testing.T) {
+	leaseLostSparesAnInstance(t)
+}
+
+// The same with --die-with-wrapper, where the job object is created kill-on-close. Sparing the instance at the lease-lost
+// tick is not enough there: the wrapper's finish() lets go of the job, and closing the last handle of a kill-on-close
+// job ends every process still in it, the spared instance included. The wrapper must disarm the kill before it lets go.
+func TestLeaseLostSparesAnInstanceAnotherLeaseTookOverEvenWithDieWithWrapper(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("--die-with-wrapper is a Windows job-object guarantee; other platforms refuse it (TestDieWithWrapperIsOptIn)")
+	}
+	leaseLostSparesAnInstance(t, "--die-with-wrapper")
+}
+
+// The instance can change hands after the wrapper's last look at the lease, and the wrapper then ends the ordinary way,
+// its command exiting with the lease still its own. The wrapper's finish() lets go of a kill-on-close job all the same,
+// so the sparing has to happen there too and not only on the tick that finds the lease gone.
+func TestCommandEndsWhileAnotherLeaseHoldsAnInstanceInTheDieWithWrapperJob(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("--die-with-wrapper is a Windows job-object guarantee; other platforms refuse it (TestDieWithWrapperIsOptIn)")
+	}
 	comfy := t.TempDir()
-	run := startTreeRun(t, `{"state_dir": STATE, "comfy_dir": `+strconv.Quote(comfy)+`}`)
+	run := startTreeRun(t, `{"state_dir": STATE, "comfy_dir": `+strconv.Quote(comfy)+`}`, "--die-with-wrapper")
+	epoch := run.m.Inspect().Epoch
+	marker, _ := json.Marshal(map[string]any{
+		"startedAt": time.Now().Add(-time.Hour).UnixMilli(), "pid": run.grand, "ownerPid": run.cmdPID,
+		"args": []string{"main.py"}, "key": "p1", "port": 1, "leaseEpoch": epoch + 100,
+	})
+	if err := os.WriteFile(filepath.Join(comfy, ".offload-launch-p1.json"), marker, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	killProcess(run.cmdPID) // the command ends; the lease is still this wrapper's
+	select {
+	case <-run.exited:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the wrapper never exited after its command ended")
+	}
+	if !gpulease.PIDAlive(run.grand) {
+		t.Fatalf("the instance another lease took over died when the wrapper let go of its kill-on-close job:\n%s", run.stderrText())
+	}
+	if !strings.Contains(run.stderrText(), "--die-with-wrapper no longer applies") {
+		t.Errorf("the wrapper says why the guarantee it was asked for stopped at that instance:\n%s", run.stderrText())
+	}
+}
+
+func leaseLostSparesAnInstance(t *testing.T, extra ...string) {
+	t.Helper()
+	comfy := t.TempDir()
+	run := startTreeRun(t, `{"state_dir": STATE, "comfy_dir": `+strconv.Quote(comfy)+`}`, extra...)
 	epoch := run.m.Inspect().Epoch
 	marker, _ := json.Marshal(map[string]any{
 		"startedAt": time.Now().Add(-time.Hour).UnixMilli(), "pid": run.grand, "ownerPid": run.cmdPID,

@@ -837,7 +837,7 @@ func runGPUReserve(args []string) error {
 		card.finish(err)
 		return err
 	}
-	closeTree = func() { _ = tree.Close() }
+	closeTree = func() { closeWrappedTree(tree, cfg, lease.Epoch(), os.Stderr) }
 	if w := tree.Warning(); w != "" {
 		fmt.Fprintf(os.Stderr, "gpu reserve: warning: %s; if the lease is lost only the command and what the process table shows below it are stopped\n", w)
 	}

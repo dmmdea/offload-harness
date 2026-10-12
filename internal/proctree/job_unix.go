@@ -110,3 +110,6 @@ func (p *platform) close() error { return nil }
 
 // KillsOnClose is always false on Unix: closing a process group ends nothing.
 func (t *Tree) KillsOnClose() bool { return false }
+
+// DisarmKillOnClose has nothing to clear on Unix: no handle ends the tree when it closes.
+func (t *Tree) DisarmKillOnClose() error { return nil }

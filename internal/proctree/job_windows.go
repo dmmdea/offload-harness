@@ -101,6 +101,28 @@ func (j *Job) KillsOnClose() (bool, error) {
 	return info.BasicLimitInformation.LimitFlags&windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE != 0, nil
 }
 
+// DisarmKillOnClose clears KILL_ON_JOB_CLOSE, so that closing the last handle leaves the job's processes running. It
+// reads the job's current extended limits and writes them back without the one flag, so any other limit stays. A job
+// that kills on close and has to let a member live (a process another lease took over) is disarmed first and closed
+// after; the members that must die are ended by TerminateExcept before.
+func (j *Job) DisarmKillOnClose() error {
+	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	var n uint32
+	if err := windows.QueryInformationJobObject(j.h, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), &n); err != nil {
+		return fmt.Errorf("QueryInformationJobObject: %w", err)
+	}
+	if info.BasicLimitInformation.LimitFlags&windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE == 0 {
+		return nil
+	}
+	info.BasicLimitInformation.LimitFlags &^= windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	if _, err := windows.SetInformationJobObject(j.h, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
+		return fmt.Errorf("SetInformationJobObject: %w", err)
+	}
+	return nil
+}
+
 // PIDs lists the processes in the job.
 func (j *Job) PIDs() ([]int, error) {
 	const header = 8 // NumberOfAssignedProcesses, NumberOfProcessIdsInList (two DWORDs)
@@ -300,4 +322,14 @@ func (t *Tree) KillsOnClose() bool {
 	}
 	ok, _ := t.p.job.KillsOnClose()
 	return ok
+}
+
+// DisarmKillOnClose clears the kill-on-close of the tree's job, so that Close (or the wrapper dying) leaves the processes
+// still in it running. The wrapper does it when a member must outlive it, a ComfyUI instance another lease took over,
+// after ending everything else (TerminateExcept). It is a no-op on a tree that is uncontained or does not kill on close.
+func (t *Tree) DisarmKillOnClose() error {
+	if t.p.job == nil {
+		return nil
+	}
+	return t.p.job.DisarmKillOnClose()
 }

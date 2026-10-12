@@ -124,7 +124,45 @@ func stopWrappedTree(tree *proctree.Tree, cmd *exec.Cmd, cfg config.Config, epoc
 			parts[i] = fmt.Sprintf("pid %d", p)
 		}
 		fmt.Fprintf(out, "gpu reserve: left running %s: a ComfyUI instance this lease kept, which another lease took over and is running a job on, so it is that lease's now\n", strings.Join(parts, ", "))
+		disarmKillOnClose(tree, out)
 	}
+}
+
+// disarmKillOnClose is what keeps a spared process alive under --die-with-wrapper. The job of such a wrapper kills every
+// process still in it when its last handle closes, and the wrapper's own exit closes it: a process left running above
+// would die a moment later, and with it the job another lease is running on it. So once something is spared the job stops
+// killing on close; the rest of the tree has been ended before this is called.
+func disarmKillOnClose(tree *proctree.Tree, out io.Writer) {
+	if tree == nil || !tree.KillsOnClose() {
+		return
+	}
+	if err := tree.DisarmKillOnClose(); err != nil {
+		fmt.Fprintf(out, "gpu reserve: could not stop --die-with-wrapper from ending the process left running above (%v); it dies with this wrapper\n", err)
+		return
+	}
+	fmt.Fprintln(out, "gpu reserve: --die-with-wrapper no longer applies to this command's tree: a process another lease took over lives in it and is not this wrapper's to end")
+}
+
+// closeWrappedTree lets go of the command's containment when the wrapper finishes. Under --die-with-wrapper that ends
+// whatever of the tree is still running, except a ComfyUI instance a later lease took over (its launch marker names
+// another lease): that one is spared even when the lease was not lost on this wrapper's last tick, so the kill-on-close
+// job ends the rest first and is disarmed before the handle closes.
+func closeWrappedTree(tree *proctree.Tree, cfg config.Config, epoch uint64, out io.Writer) {
+	if tree == nil {
+		return
+	}
+	if tree.KillsOnClose() {
+		if protect := protectedFromOtherLeases(cfg, epoch); len(protect) > 0 {
+			left, err := tree.TerminateExcept(protect)
+			if err != nil {
+				fmt.Fprintf(out, "gpu reserve: could not stop every process of the command's tree: %v\n", err)
+			}
+			if len(left) > 0 {
+				disarmKillOnClose(tree, out)
+			}
+		}
+	}
+	_ = tree.Close()
 }
 
 // killBelow is the uncontained fallback: the command, then what the process table shows below it,

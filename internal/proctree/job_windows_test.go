@@ -153,3 +153,37 @@ func TestKillMemberLeavesAProcessThatIsNotInTheJob(t *testing.T) {
 		t.Fatal("a process that is not in the job was ended")
 	}
 }
+
+// Disarming the kill-on-close is what lets a spared member outlive the wrapper's handle: the job stops killing on close,
+// the tree is still listed, and closing the handle ends nothing.
+func TestDisarmKillOnCloseLetsTheJobOutliveItsHandle(t *testing.T) {
+	tr, parent, grand := treeFixture(t, Options{DieWithWrapper: true})
+	if !tr.KillsOnClose() {
+		t.Fatal("setup: a DieWithWrapper job kills on close")
+	}
+	if err := tr.DisarmKillOnClose(); err != nil {
+		t.Fatalf("DisarmKillOnClose: %v", err)
+	}
+	if tr.KillsOnClose() {
+		t.Fatal("the job still kills on close after it was disarmed")
+	}
+	if err := tr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(700 * time.Millisecond)
+	if !alive(parent) || !alive(grand) {
+		t.Fatalf("closing a disarmed job ended its processes (command alive=%v, grandchild alive=%v)", alive(parent), alive(grand))
+	}
+}
+
+// A job that never killed on close has nothing to disarm, and an uncontained tree is not an error.
+func TestDisarmKillOnCloseIsANoOpWhereNothingKills(t *testing.T) {
+	tr, _, _ := treeFixture(t, Options{})
+	if err := tr.DisarmKillOnClose(); err != nil {
+		t.Fatalf("a job that does not kill on close: %v", err)
+	}
+	var none Tree
+	if err := none.DisarmKillOnClose(); err != nil {
+		t.Fatalf("an uncontained tree: %v", err)
+	}
+}
