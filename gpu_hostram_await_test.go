@@ -9,7 +9,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -240,4 +242,58 @@ func TestGPUStatusShowsHostRAMAskedAndNotYetAdmitted(t *testing.T) {
 			t.Errorf("the text status says the whole-node lease waits for the host:\n%s", out)
 		}
 	})
+}
+
+// A SIGNAL DURING THE WAIT FOR THE HOST. The seat is unloaded (and its warm-back owed), the cards are held, the host never has
+// the room; the signal ends the wait at once, the wrapper says it was ended while waiting for host RAM and before its command
+// started, the lease is released, and the warm stays owed without a reload inside the five-second grace.
+func TestASignalDuringTheWaitForHostRAMEndsItAndLeavesTheWarmOwed(t *testing.T) {
+	f := &orderedSwap{drainSwap: &drainSwap{}}
+	f.loaded.Store(true)
+	cfgPath, m := handoffFixture(t, f)
+	useSeatBackedHost(t, f.loaded.Load, 95, 90) // the unload frees too little: the wait goes on
+
+	oldFeed := wrapperSignalFeed
+	var feed chan<- os.Signal
+	ready := make(chan struct{})
+	wrapperSignalFeed = func(c chan<- os.Signal) { feed = c; close(ready) }
+	t.Cleanup(func() { wrapperSignalFeed = oldFeed })
+	go func() {
+		<-ready
+		deadline := time.Now().Add(20 * time.Second)
+		for f.unloads.Load() == 0 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		time.Sleep(600 * time.Millisecond) // the unload is done and the host is being asked
+		feed <- syscall.SIGTERM
+	}()
+
+	args, epochFile := unloadSeatReserve(t, cfgPath, "--wait", "30s", "--drain", "--unload-seat", "--ram", "30")
+	start := time.Now()
+	var err error
+	stderr := captureStderr(t, func() { err = runGPUReserve(args) })
+	if err == nil || !strings.Contains(err.Error(), "SIGTERM") || !strings.Contains(err.Error(), "while waiting for host RAM") {
+		t.Fatalf("a signal during the wait ends the reserve naming it and the stage: %v\n%s", err, stderr)
+	}
+	if time.Since(start) > 15*time.Second {
+		t.Errorf("the signal did not end the wait at once: %s", time.Since(start))
+	}
+	if fileExists(epochFile) {
+		t.Error("the command must not start after the signal")
+	}
+	if n := f.unloads.Load(); n != 1 {
+		t.Errorf("the seat was unloaded once before the wait: unloads=%d", n)
+	}
+	if n := f.warms.Load(); n != 0 {
+		t.Errorf("a wrapper ended on SIGTERM does not warm the seat back inside the grace: warms=%d", n)
+	}
+	if owed := m.SeatWarmOwed(); owed != "seat" {
+		t.Errorf("the seat was unloaded for this lease: the warm stays owed, owed=%q\n%s", owed, stderr)
+	}
+	if !strings.Contains(stderr, "the wrapper was ended on SIGTERM while waiting for host RAM, before its command started") {
+		t.Errorf("the sentence says the wrapper was ended while waiting for host RAM:\n%s", stderr)
+	}
+	if info := m.Inspect(); info.Held {
+		t.Errorf("the lease must be released: %+v", info)
+	}
 }
