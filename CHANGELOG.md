@@ -813,13 +813,14 @@ measurement, in both places that draw this line.
   `TestTheDisplayCardIsAllocatableOnlyWhenTheOperatorIsAway`, `TestAQueuedMediaCallIsNotGrantedTheDisplayCardOnceTheOperatorIsBack` and the six
   `gpu_reserve_grantcheck_test.go` tests; removed because an unknown display is now always closed: `TestAllocatorAllowsAnUnknownDisplayCardWhenTheOperatorIsAway`,
   `TestAnUnknownDisplayCardIsHeldToTheDesktopFloor`, `TestAnUnknownDisplayReadingRefusesTheCardThatWouldLeaveTheDesktopTooLittle`.
-- **Mutation-checked** with `scripts/mutation-check.sh` (each mutant compiles, runs through the RAM guard, and is restored byte for byte): fifteen
+- **Mutation-checked** with `scripts/mutation-check.sh` (each mutant compiles, runs through the RAM guard, and is restored byte for byte): seventeen
   changes, each RED on the test it names. In the allocator: the cap term dropped from the floor, the used/free sign flipped, the footprint
   requirement dropped, a cap of 0 treated as open, an unknown display let through, the declared floor ignored, the grant-time check ignoring the
   cap, an unknown total let through, and the float tolerance removed (it survived the first table, which landed on the cap in a way floating
   point happens to round up; `TestAJobThatLandsExactlyOnTheCapIsAdmittedDespiteFloatError` uses 3.9 + 2.1 of 10, where 6.1 - 2.1 is
   3.9999999999999996, and kills it). In `BuildInput`: the cap not carried, the declared floor not carried. In the config key: the default
-  closed, the range check dropped. At the media door: the stale-table closure removed, the card forced shut on a live table. The root test
+  closed, the range check dropped. At the media door: the stale-table closure removed, the card forced shut on a live table. In the summary: the display-card cue dropped,
+  the skip not carrying `Display`. The root test
   (`gpu_reserve_displaycap_test.go`, and the rewritten grant-check tests) runs only on the remote gate and was not mutated.
 - Docs: ADR 0039 (Amendment 2026-10-12), `docs/systems/media-generation.md` ("The allocator and the display card"), the `--cards` help text.
 
