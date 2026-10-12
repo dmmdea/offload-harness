@@ -11,17 +11,40 @@ import (
 )
 
 // updateThroughContention is Update that does not give up on contention. Update returns ErrLocked
-// when another writer held the store for its whole lockWait (2 s), by design: a run is never blocked
+// when it could not take the store's lock within its lockWait (2 s), by design: a run is never blocked
 // by the store, the caller skips that one observation and the next run records again. That is the
 // right answer for a run and the wrong one for a test that asks whether twelve writers who all get in
 // are all kept. Twelve writers queued behind one lock file take longer than 2 s on a saturated host,
 // and ErrLocked leaves the store untouched, so asking again cannot double-count. Every OTHER error is
-// returned as it is: a failure that is not contention must not be hidden by a retry.
+// returned as it is: a failure that is not contention must not be hidden by a retry, and a lock create
+// that is refused window after window (see retryContention) is not contention either.
 func updateThroughContention(path string, fn func(*Store)) error {
-	deadline := time.Now().Add(5 * time.Minute) // only a lock that never frees reaches this
+	return retryContention(func() error { return Update(path, fn) }, 5*time.Minute) // only a lock that never frees reaches this
+}
+
+// maxDeniedWindows is how many lock windows in a row may end in a refused create before
+// retryContention reports the refusal. One window can end that way by chance under heavy contention on
+// Windows (the last attempt of the window landed on a delete still pending, the other writers' work),
+// so a single one is not a verdict. A directory that cannot be written ends every window that way and
+// surfaces after maxDeniedWindows x lockWait instead of after the whole contention deadline.
+const maxDeniedWindows = 3
+
+// retryContention calls update until it returns something other than ErrLocked, for at most `within`.
+// An ErrLocked that also carries a permission denial (Update's answer to a lock create refused for the
+// whole window) counts toward maxDeniedWindows, and any other ErrLocked starts the count again.
+func retryContention(update func() error, within time.Duration) error {
+	deadline := time.Now().Add(within)
+	denied := 0
 	for {
-		err := Update(path, fn)
+		err := update()
 		if !errors.Is(err, ErrLocked) || time.Now().After(deadline) {
+			return err
+		}
+		if !errors.Is(err, fs.ErrPermission) {
+			denied = 0
+			continue
+		}
+		if denied++; denied >= maxDeniedWindows {
 			return err
 		}
 	}
