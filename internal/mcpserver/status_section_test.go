@@ -114,6 +114,10 @@ func statusFixture(t *testing.T) (*Server, config.Config, func(string) string) {
 	t.Setenv("GPU_LOCK", "")
 	statusSamplesGPU = false
 	t.Cleanup(func() { statusSamplesGPU = true })
+	// No driver-event reader: a test that turns the GPU sample on with a fake sampler must not start PowerShell.
+	oldDriverEvents := statusDriverEvents
+	statusDriverEvents = nil
+	t.Cleanup(func() { statusDriverEvents = oldDriverEvents })
 
 	cfg := config.Default()
 	cfg.Endpoint = upstream.URL

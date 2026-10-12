@@ -4802,6 +4802,12 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 // statusSamplesGPU lets a test skip the nvidia-smi sample in offload_status.
 var statusSamplesGPU = true
 
+// statusDriverEvents is the reader of the driver's recent fault events behind gpu_lease.activity.driver_events
+// (C-83-B): production is gpuactivity.ReadDriverEvents (cached 60 s). It is wired only while the GPU sample is on, and
+// statusFixture sets it nil, so a test that turns the sample on with a fake sampler never starts PowerShell. A test
+// that wants events sets its own reader.
+var statusDriverEvents = gpuactivity.ReadDriverEvents
+
 // statusGPUSampler lets a test FAKE the per-card numbers offload_status samples,
 // instead of only turning the sample on/off. The held vs held-idle vs
 // held-working verdict (internal/gpuactivity.Assess) branches on the actual

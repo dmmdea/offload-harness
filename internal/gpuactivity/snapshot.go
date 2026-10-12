@@ -52,6 +52,11 @@ type Options struct {
 	// ComfyDir is the ComfyUI install, read for the activity facts of a lease that has no
 	// owner and no progress contract. "" = none.
 	ComfyDir string
+	// DriverEvents reads the driver's recent fault events (nvlddmkm on Windows, NVRM Xid on Linux), already
+	// attributed to cards (ReadDriverEvents is the production reader). nil = off: a box that wires none prints
+	// byte-identically to before. Read only while a lease is held and the GPU sample is on, and shown as facts, never
+	// as a verdict input.
+	DriverEvents func(ctx context.Context) ([]DriverEvent, error)
 }
 
 // Holder describes the lease holder beyond the lease record.
@@ -152,6 +157,17 @@ type View struct {
 	// OtherDevices are the cards every OTHER live lease sits on (lease ids): work on them is
 	// not the primary lease's holder's.
 	OtherDevices []string
+
+	// DriverEvents are the driver's recent fault events on the LEASED cards, newest first (C-83-B). Facts, never a
+	// verdict input: a fault and a kill look alike in the log, and telling them apart takes A-128's kill test.
+	DriverEvents []DriverEvent
+	// DriverEventsTotal is how many events the leased cards had before the list was capped (0 = not capped).
+	DriverEventsTotal int
+	// DriverEventsUnattributed counts the events in the window that name no card this box can place, so they are in
+	// no card's list: said, so an empty list is not read as "no faults".
+	DriverEventsUnattributed int
+	// DriverEventsNote says why the events could not be read (a reader failure is a note, never an error).
+	DriverEventsNote string
 }
 
 // trespassOf lists the cards that are busy under a bounded lease but outside its cards, with
