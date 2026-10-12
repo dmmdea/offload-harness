@@ -361,20 +361,29 @@ func pinOf(m map[string]any, macros map[string]string) (entryPin, bool) {
 	return entryPin{value: v, pci: cudaOrderPCIRe.MatchString(env) || cudaOrderPCIRe.MatchString(cmd)}, true
 }
 
-// pinTokens splits a CUDA_VISIBLE_DEVICES value into its plain indices and its GPU UUIDs. An empty
-// value (Audit's cvd-empty rule), -1 and anything else that is neither are ignored here.
-func pinTokens(value string) (indices []int, uuids []string) {
+// pinTokens splits a CUDA_VISIBLE_DEVICES value into its plain indices, its GPU UUIDs, and the tokens
+// that are neither (a typo, a bare UUID without its GPU- prefix, a token with a non-ASCII hyphen): CUDA
+// cannot resolve those either. Four things are not judged here: an empty value or an empty token between
+// commas (Audit's cvd-empty rule owns the empty value), -1 (it hides every card, so it is no pin on a
+// card), and a MIG instance id (a slice of a data-centre card, which a table of whole cards cannot
+// resolve).
+func pinTokens(value string) (indices []int, uuids []string, others []string) {
 	for _, tok := range strings.Split(value, ",") {
 		tok = strings.Trim(strings.TrimSpace(tok), `"'`)
-		if n, err := strconv.Atoi(tok); err == nil && n >= 0 && tok != "" && tok[0] != '+' {
+		if tok == "" || tok == "-1" || (len(tok) >= 4 && strings.EqualFold(tok[:4], "MIG-")) {
+			continue
+		}
+		if n, err := strconv.Atoi(tok); err == nil && n >= 0 && tok[0] != '+' {
 			indices = append(indices, n)
 			continue
 		}
 		if len(tok) >= 4 && strings.EqualFold(tok[:4], "GPU-") {
 			uuids = append(uuids, tok)
+			continue
 		}
+		others = append(others, tok)
 	}
-	return indices, uuids
+	return indices, uuids, others
 }
 
 // PinsCUDADevices reports whether any entry pins CUDA devices, so a caller reads the box's card table
@@ -390,7 +399,7 @@ func PinsCUDADevices(text string) bool {
 	macros := macroTable(doc.Macros)
 	for _, m := range doc.Models {
 		if p, ok := pinOf(m, macros); ok {
-			if idx, uu := pinTokens(p.value); len(idx)+len(uu) > 0 {
+			if idx, uu, other := pinTokens(p.value); len(idx)+len(uu)+len(other) > 0 {
 				return true
 			}
 		}
@@ -411,9 +420,11 @@ func PinsCUDADevices(text string) bool {
 //     an entry that does not set it is judged by the weaker form: any plain index while two cards share a
 //     name. A card table that gives no model names cannot show two cards to be identical, so it never
 //     makes an index ambiguous.
-//   - pin-unresolved: a GPU UUID (or UUID prefix) that matches no card, or several: CUDA hides every
-//     device from the first one it cannot resolve, so the seat runs on fewer cards than it was sized for
-//     or on none (INV-1).
+//   - pin-unresolved: a pin that names no card: a GPU UUID (or UUID prefix) that matches no card, or
+//     several; a plain index that no card has (under PCI_BUS_ID the nvidia-smi index of a card on the
+//     table, otherwise a position past the last card); or a token that is neither a plain index nor a
+//     GPU- UUID. CUDA hides every device from the first pin it cannot resolve, so the seat runs on fewer
+//     cards than it was sized for or on none (INV-1). -1 and a MIG instance id are not judged.
 //
 // The severity is the caller's, because only it holds the stamp: a seed cannot carry a UUID, so the
 // index pins of a verbatim render are the renderer's own output and a note, while the same pin in a
@@ -470,13 +481,31 @@ func AuditPins(text string, cards []gpuprobe.Card) []Violation {
 		if !ok {
 			continue
 		}
-		indices, uuids := pinTokens(pin.value)
+		tokenIndices, uuids, others := pinTokens(pin.value)
 
 		var unresolved []string
 		for _, u := range uuids {
 			if _, err := gpuprobe.ResolveCards(cards, []string{u}); err != nil {
 				unresolved = append(unresolved, fmt.Sprintf("%s (%v)", u, err))
 			}
+		}
+		// An index names a card when a card has that nvidia-smi index (CUDA_DEVICE_ORDER=PCI_BUS_ID), and
+		// otherwise when it is a position among the box's cards in CUDA's own order, which only the count
+		// can bound.
+		var indices []int // the indices that name a card
+		for _, ix := range tokenIndices {
+			named := ix < len(cards)
+			if pin.pci {
+				_, named = cardAt[ix]
+			}
+			if named {
+				indices = append(indices, ix)
+				continue
+			}
+			unresolved = append(unresolved, fmt.Sprintf("index %d (this box has cards %s)", ix, cardIndexList(pin.pci, cardAt, len(cards))))
+		}
+		for _, o := range others {
+			unresolved = append(unresolved, fmt.Sprintf("%q (neither a plain index nor a GPU- UUID)", o))
 		}
 		if len(unresolved) > 0 {
 			out = append(out, Violation{Rule: "pin-unresolved", Where: name, Text: fmt.Sprintf(
@@ -537,4 +566,25 @@ func Violations(vs []Violation) string {
 		lines = append(lines, v.String())
 	}
 	return strings.Join(lines, "\n")
+}
+
+// cardIndexList names the indices a CUDA_VISIBLE_DEVICES index can take on this box, for a finding: the
+// nvidia-smi indices of the cards under PCI_BUS_ID, and 0..n-1 in CUDA's own order.
+func cardIndexList(pci bool, cardAt map[int]gpuprobe.Card, n int) string {
+	var ix []int
+	if pci {
+		for i := range cardAt {
+			ix = append(ix, i)
+		}
+		sort.Ints(ix)
+	} else {
+		for i := 0; i < n; i++ {
+			ix = append(ix, i)
+		}
+	}
+	parts := make([]string, len(ix))
+	for i, x := range ix {
+		parts[i] = strconv.Itoa(x)
+	}
+	return strings.Join(parts, ", ")
 }
