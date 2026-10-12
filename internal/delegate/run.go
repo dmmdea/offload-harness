@@ -2003,6 +2003,15 @@ type placements struct {
 	lastRowRefusal bool
 }
 
+// isRefusalRow: the row of this attempt is a node's capacity refusal AT DISPATCH, a place in line. A job the node
+// acked and then took back (refuseAsWithdrawn, refuseAsNeverRan: a queue deadline it confirmed, a record that says
+// it never ran) is filed with the same 503 but is not that: the node held it under an id the delegator's intent
+// ledger and the node's own record know, and when nothing else takes the subtask that row, under that id, is the
+// subtask's record.
+func isRefusalRow(pr PlacedResult) bool {
+	return pr.refused && pr.Err != "" && capacityRefusal(pr.refusalStatus) && !pr.withdrawn && pr.nodeNeverRan == ""
+}
+
 // countAttempt files one attempt that went through attempt's finish and so wrote its row.
 func (pl *placements) countAttempt(pr PlacedResult) {
 	pl.attempts++
@@ -5778,7 +5787,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		}
 		// A dispatch a node refused for capacity is re-placed or waited out by the engine, so its row is a refusal,
 		// not an outcome. Whatever ends the subtask without a node taking it writes a terminal row of its own.
-		pr.refusalRow = pr.refused && pr.Err != "" && capacityRefusal(pr.refusalStatus)
+		pr.refusalRow = isRefusalRow(pr)
 		r.record(contract, pr)
 		r.pairTerminal(jobID, &pr)
 		return pr

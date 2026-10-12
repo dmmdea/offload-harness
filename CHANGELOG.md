@@ -37,7 +37,12 @@ Versioning: [SemVer](https://semver.org/).
   chain that ends as the "placement refused" failure each write a terminal row under a job id of their own (the way a cut chain
   already did, ADR 0065), and the caller is handed that id. The fleet page and `top` no longer raise a `delegation` error for
   a marked row and show it as `refused (re-placed)`. The cooldown, the re-placement and the wait are unchanged, and so are the
-  rows of a refusal that is not about capacity. A test that pinned the old "the attempt's row alone" ending
+  rows of a refusal that is not about capacity and of a job the node acked and then took back (a queue deadline it confirmed,
+  a record that says it never ran): that job was held under an id the node's record and the intent ledger know, so its row is
+  not a refusal mark and the failure of a subtask nobody else took keeps that id (found by the lenovo gate:
+  `TestWithdrawAgainstTheRealNodeHandler` read the node's record under the published id, and a first version of the mark had
+  replaced it). The ledger now holds two rows where a lone refused dispatch with the wait off ended the subtask (the attempt
+  and the "placement refused" failure; `TestOnlyAJobANodeAckedCarriesAFleetJobID` pinned one). A test that pinned the old "the attempt's row alone" ending
   (`TestASettledOutcomeThatIsNotACutKeepsItsAttemptsRow`) is rewritten to pin the new one. Tests
   `internal/delegate/refusal_row_test.go` and `internal/fleetview/refusal_test.go`, written first: red before with, for
   example, `a 503 refusal inside the wait is a bare error row, want a refusal marker`, `the terminal row = ... deferred:false

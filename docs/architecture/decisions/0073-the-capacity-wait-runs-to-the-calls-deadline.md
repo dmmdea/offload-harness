@@ -194,7 +194,10 @@ really was lost and it read as a dispatch error.
    attempts that came before. A subtask the last attempt of which was not a capacity refusal keeps its attempt's row as its
    record, as before.
 3. **Not changed.** What the delegator does with the refusal (the cooldown, the re-placement, the wait) and the rows of a
-   non-capacity refusal (404, 409, a dial that never reached the node).
+   non-capacity refusal (404, 409, a dial that never reached the node). A job the node ACKED and then took back (a queue
+   deadline it confirmed, or its own record saying it never ran: `refuseAsWithdrawn`, `refuseAsNeverRan`) is filed as the same
+   503 but is not a dispatch-time refusal and carries no mark: the node held it under an id its record and the delegator's
+   intent ledger know, and when nothing else takes the subtask the published failure keeps that id.
 
 ## Consequences
 

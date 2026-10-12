@@ -259,6 +259,29 @@ func TestAPlacementRefusedByEveryNodeFilesATerminalRow(t *testing.T) {
 	}
 }
 
+// TestAJobTheNodeAckedAndTookBackIsNotARefusalRow: the 503 the delegator files for a withdrawn or never-run job is
+// not the node's answer to a dispatch. The node held that job under its id, the intent ledger closed it, and the
+// published result of a subtask nobody else took must keep that id (TestWithdrawAgainstTheRealNodeHandler).
+func TestAJobTheNodeAckedAndTookBackIsNotARefusalRow(t *testing.T) {
+	refused := PlacedResult{refused: true, refusalStatus: http.StatusServiceUnavailable, Err: "dispatch: status 503: queue full"}
+	if !isRefusalRow(refused) {
+		t.Fatalf("a dispatch the node answered 503 is not a refusal row")
+	}
+	for name, mark := range map[string]func(*PlacedResult){
+		"withdrawn":  func(pr *PlacedResult) { pr.refuseAsWithdrawn(time.Second) },
+		"never ran":  func(pr *PlacedResult) { pr.refuseAsNeverRan("reaped: not started", time.Second) },
+		"not a 503":  func(pr *PlacedResult) { pr.refusalStatus = http.StatusNotFound },
+		"no error":   func(pr *PlacedResult) { pr.Err = "" },
+		"not refuse": func(pr *PlacedResult) { pr.refused = false },
+	} {
+		pr := refused
+		mark(&pr)
+		if isRefusalRow(pr) {
+			t.Errorf("%s: classified as a refusal row", name)
+		}
+	}
+}
+
 // TestAnAttemptThatLandedClearsTheRefusalMark: the mark is about the LATEST attempt's row. A subtask refused once and
 // then taken has its answer's row to stand for it, so a later wait of the same subtask (a verification retry that
 // finds no seat) is not owed a closing row on account of the old refusal.
