@@ -114,3 +114,28 @@ func TestLeaseRowsShowAnInferredSeatScope(t *testing.T) {
 		}
 	}
 }
+
+// A lease that holds its cards and has not been admitted by the host yet (F82) shows the figure it asked for as
+// host_ram_wait_gib and declares nothing; an admitted one shows host_ram_gib alone; one that did neither grows no key.
+func TestLeaseRowsShowHostRAMAskedAndNotYetAdmitted(t *testing.T) {
+	waiting := LeaseRows([]gpulease.Info{{Held: true, Epoch: 7, Class: gpulease.ClassMedia, HostRAMWaitGiB: 30.04}})[0]
+	if waiting["host_ram_wait_gib"] != 30.0 {
+		t.Errorf("host_ram_wait_gib = %v, want 30", waiting["host_ram_wait_gib"])
+	}
+	if _, ok := waiting["host_ram_gib"]; ok {
+		t.Error("a lease the host has not admitted declares nothing")
+	}
+	admitted := LeaseRows([]gpulease.Info{{Held: true, Epoch: 8, Class: gpulease.ClassMedia, HostRAMGiB: 30}})[0]
+	if admitted["host_ram_gib"] != 30.0 {
+		t.Errorf("host_ram_gib = %v, want 30", admitted["host_ram_gib"])
+	}
+	if _, ok := admitted["host_ram_wait_gib"]; ok {
+		t.Error("an admitted lease waits for nothing")
+	}
+	bare := LeaseRows([]gpulease.Info{{Held: true, Epoch: 9, Class: gpulease.ClassText}})[0]
+	for _, k := range []string{"host_ram_gib", "host_ram_wait_gib"} {
+		if _, ok := bare[k]; ok {
+			t.Errorf("a lease with nothing to declare or await must not grow a %q key", k)
+		}
+	}
+}

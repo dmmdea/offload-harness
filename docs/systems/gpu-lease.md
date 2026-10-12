@@ -28,7 +28,8 @@ other on a single shared card.
 | `internal/gpulease/audit.go`, `procimages_*.go` | the **reader audit** behind `gpu doctor`: finds harness binaries, Node readers and running images, and writes the reader-audit marker |
 | `internal/gpuprobe/cards.go` | the **card table** (UUID-keyed, index spaces side by side) |
 | `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmits` (the ONE admission rule), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
-| `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases (what the processes below the holder hold RESIDENT, the unit a declaration is in), `Manager.HostRAMPending` |
+| `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases (what the processes below the holder hold RESIDENT, the unit a declaration is in), `Manager.HostRAMPending`; and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
+| `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMHeld`), and what a detached holder keeps when that wait fails (`detachedHostRAMError`) |
 | `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card, else the media class default (see "Host RAM") |
 | `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
 | `internal/gpucards` | the per-card view (`Rows`, `LeaseRows`, `QueueRows`, `Table`, `Section`) that `gpu status`, `gpu cards` and `offload_status` brief all render |
@@ -1638,6 +1639,102 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
 * **Not done, on purpose.** The owed warm is not counted as *pending* when another lease is admitted. The seat was unloaded to
   make room for that very lease, and its reload happens after the lease ends, so reserving room for it at the lease's grant
   would count the memory twice; the reload is admitted when it is attempted.
+
+### A lease that unloads the seat is compared to the host after the unload (F82)
+
+**The deadlock.** `gpu reserve --ram N --drain --unload-seat` compared its `N` to the host inside `Acquire`, and drained and
+unloaded the seat only after the lease was held (`detachMaintain`, `maintainSeatScoped`). When the memory it needed was the
+memory the seat held, the grant waited for commit that its own unload would have freed, and the unload ran only after the
+grant: a film lease that declared its host RAM waited about six hours while the 3-card vLLM seat held 67 GiB of the host's commit.
+It is the class of the DRAINING stamp ([The drain waits for runs](#the-drain-waits-for-runs-inside-the-queue-budget-0117-0-adr-0041),
+`gpu_drain.go`): a gate in front of the step that clears it. The brake must never block the unload that clears it.
+
+**The order now**, for a lease that asks for `--unload-seat`, declares host RAM, whose unload can free memory for it and whose host
+can be read (`gpu_hostram_await.go`):
+
+0. **Whether the order applies is decided before the grant, from facts that do not change while the lease queues.** The unload must
+   reach a model on the cards the lease holds (`unloadReachesLease`): the agent seat placed on them, or a model the roster lists that
+   is placed on them or placed nowhere, with the unload's own resolution of doubt (a card table or a roster that cannot be read, a
+   model nothing places and a lease that names no card all count as reaching). A lease whose every listed model is positively placed
+   on other cards frees nothing for itself, so it keeps the comparison in the grant, queues without holding its cards, and the
+   reserve says so (`TestACardLeaseWhoseUnloadReachesNothingIsComparedToTheHostInTheGrant`; the other half, a resident on the leased
+   card that is not the agent seat, keeps the order: `TestACardLeaseWhoseUnloadReachesAnotherResidentStillDefers`). Residency is
+   deliberately not asked: a seat that is cold when the reserve starts may be loaded when the grant comes. And the host must be
+   readable: a host whose memory cannot be read cannot show that the unload makes room, and the look after the unload would refuse for
+   the same reason until its deadline with the seat cycled, so that lease keeps the grant's comparison too
+   (`TestAnUnreadableHostKeepsTheGrantsComparisonForALeaseThatUnloadsTheSeat`).
+1. **A need no state of the box could ever admit is refused at once**, before anything is taken or unloaded (`screenDeferredHostRAM`,
+   `Manager.HostRAMCheck`): waiting cannot help, and a seat cycle for a lease that can never run is bought for nothing.
+2. **The grant takes the place in line and the cards and compares nothing.** `Options.HostRAMGiB` is 0 for it and the figure
+   travels as `Options.HostRAMWaitGiB`, stamped on the record as `host_ram_wait_gib` (additive and omitted when 0: an older reader
+   ignores it and reads a lease that declares nothing yet). The card allocator's host term is off for the same reason
+   (`reserveDeviceFlags.ramGiB` is the gate figure). The lease is stamped DRAINING, so the cards are fenced and no seat reloads
+   onto them.
+3. **The drain and the unload run, as they always did**, under the lease and its heartbeat.
+4. **Then the host is asked** (`Manager.AwaitHostRAM`), still holding the cards, with the grant's own words (`waiting for host
+   RAM: needs ...`, printed once) and inside the same `--wait`: the rest of the queue budget measured from when the reserve began
+   queueing, never under the drain floor (`hostRAMDeadline`). The check and the stamp that turns `host_ram_wait_gib` into
+   `host_ram_gib` are **one critical section under the epoch lock**, so two leases cannot both take the last headroom
+   (`TestConcurrentAwaitsCannotBothTakeTheLastHeadroom`).
+5. **The command starts.**
+
+**It is a reorder, not a looser check.** `AwaitHostRAM` puts the figure to the same function the grant does
+(`gpuprobe.HostRAMAdmits` through `hostRAMRefusalWith`): the same host reading, the same headroom, the not-yet-loaded part of every
+lease that has been admitted, the same sentence. Over a table of hosts, needs and running leases it admits and refuses exactly
+where the grant does (`TestTheAwaitAdmitsExactlyWhereTheGrantDoes`). If the unload frees too little the lease keeps its cards,
+keeps waiting inside `--wait`, and ends with the host-RAM refusal; the command never runs, the seat was unloaded, so its warm-back
+stays owed and is itself refused by the same rule (`TestAnUnloadSeatLeaseStillWaitsWhenTheUnloadDoesNotFreeEnough`). A lease
+**without** `--unload-seat` behaves exactly as before, `--drain` alone included: a drain frees no host memory, so cordoning the
+seat for a wait it cannot shorten would only cost the seat's callers (`TestALeaseWithoutUnloadSeatKeepsTheOldOrder`).
+
+**Each form.**
+
+| form | where the order is made | why it cannot deadlock |
+|---|---|---|
+| wrapper (`gpu reserve ... -- <cmd>`) | `runGPUReserve`: `maintainSeatScoped`, then `awaitHostRAMHeld` under the same heartbeat and the same cancel as the drain | the grant compares nothing; the wait runs after the unload |
+| `--detach` | the parent: `detachMaintain`, then `awaitHostRAMHeld` against the held epoch (`Manager.AwaitHostRAM`). The hidden holder is started with `--ram 0 --ram-wait N` (`holdArgs`) | the holder compares nothing in its grant (`TestTheDetachedHolderOfAnUnloadSeatLeaseTakesItsCardsAndComparesNothing`); a host that never has the room fails the parent like a failed drain: non-zero, the lease still held, with the exclusive stamp taken off (the way a failed drain clears DRAINING, so one failed step does not cordon the box for the rest of `--for`; `detachedHostRAMError`), and the way out in the message: `gpu release --warm-seat` frees the lease and warms the cold seat back, `gpu release` leaves the warm owed |
+| `gpu hold` (the hidden holder verb itself) | none: it has no drain and no unload of its own, only what the parent hands it | it declares exactly what it is given. `--ram N` is compared in its grant, as before; nothing frees host memory for it, so there is no unload to wait behind. The `--detach` parent passes the figure as `--ram-wait` instead |
+| `--devices` and `--cards` | the same two code paths; `--cards` allocates with a host term of 0 and the allocator's queue treats the request as one that declares nothing. `--devices` knows its cards before the grant and applies step 0 to them. `--cards` chooses its cards after the grant, so step 0 cannot be asked beforehand and it always defers: an allocation that lands on cards the unload does not reach holds them while the host is short, and the wait line (it says the drain and the unload are done, not that the seat was cleared) is true for it | `TestACardLeaseWithUnloadSeatIsNotHeldByTheHostRAMItsOwnUnloadFrees`, `TestACardsRequestWithUnloadSeatIsNotHeldByTheHostRAMItsOwnUnloadFrees` |
+
+A signal during the wait ends it at once (`stageHostRAM`, "while waiting for host RAM"): the wrapper is released, and the warm
+stays owed with the same sentence as a signal during the drain. A lease lost during the wait is taken again on the same cards and
+the drain starts over under the new lease, as for a lease lost during the drain.
+
+**What a lease shows while it waits.** It is held, not queued: its record carries `host_ram_wait_gib`, it declares nothing
+(`host_ram_gib` is absent), and it is not marked `waiting_for: host-ram` (that mark belongs to a request that does not hold its
+cards yet). `gpu status` says `host RAM N GiB asked, not yet admitted` on the lease line and `offload_status` carries
+`host_ram_wait_gib` on the lease row. Once admitted the row shows `host_ram_gib` alone.
+
+**Three consequences, stated.**
+
+- *A lease that declares nothing in the grant passes a front waiter that waits only on host RAM* (the G6 rule above), and it must:
+  that waiter is short of memory the seat holds, and a lease that unloads the seat, queued behind it, could never clear it. The
+  cost is G6's own: when the memory recovers the waiter waits for the cards the lease took. The passing lease still asks the host
+  for its own figure before its command starts, so nothing is admitted past the line
+  (`TestADeferredLeasePassesAWaiterThatWaitsOnlyOnMemoryAndStillAsksTheHost`).
+- *While it waits the lease claims no host RAM*, so a grant on other cards that fits is admitted ahead of it, and the lease then
+  waits for what that grant has yet to load (`TestAGrantThatFitsIsAdmittedAheadOfAWaitingLeaseAndTheLeaseThenCountsIt`). This
+  is the "nothing reserves a waiter's memory against a declaring request on *disjoint* cards" limit above, unchanged. The
+  alternative, keeping the figure on the record as declared from the grant on, makes two such leases count each other's figure as
+  still to load, and a host that fits one of them would admit neither (`TestTwoWaitingLeasesAreAdmittedOneAfterTheOther`).
+- *A shortage the unload does not cure costs the cards held and the seat cold until `--wait` ends it.* When the memory is held by
+  something the unload does not touch (another lane, a foreign process), or the seat was already cold and there was nothing to
+  free (residency is not asked before the grant), the lease has done its unload and holds its cards,
+  exclusive, for the whole wait (8 h by default; `--wait 0` still gets the drain floor, `hostRAMDeadline`), and ends with the
+  host-RAM refusal, its command never run and, when the seat had been loaded, its warm-back owed (and refused by the same rule while the host stays short). Before
+  F82 such a lease queued with the seat untouched and the cards free. Nothing before the grant can tell this apart from the film
+  shape, and the reason is stated so nobody "fixes" it by screening: how much of the host's commit the seat holds is not
+  measured (`agent_seat_host_ram_gib` is a floor the operator states and its default, `hostneed.DefaultSeatHostGiB`, is a chosen
+  21 GiB; the film seat held 67 GiB), so subtracting a seat figure from the commit before the grant would refuse exactly the case
+  this reorder exists for on a node that states no figure, and any prediction made when the reserve starts is stale when the grant
+  comes, hours later, so one that sent the lease back to the grant would bring the deadlock back whenever the cause changed in
+  between. The comparison after the unload is the decision. The only screens before the grant are the ones that do not depend
+  on the host's state: a need above physical RAM less the headroom, an unload that reaches nothing on the lease's cards, a host that
+  cannot be read. The lever is `--wait` (and Ctrl-C, which ends the wait and releases the wrapper's lease).
+
+**Not covered.** The media admission in `internal/pipeline` takes its lease with the declared figure compared in the grant, and the
+render lane unloads the seat from inside that lease (`claimLeaseUnload`, `freeLlamaSwap`); it asks for no `--unload-seat`, so this
+reorder does not apply to it.
 
 ### What `gpu status` and `offload_status` show
 

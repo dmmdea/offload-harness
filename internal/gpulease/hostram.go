@@ -32,11 +32,23 @@ package gpulease
 // as any other waiter, marked `waiting_for: host-ram` on its record; a refusal waiting cannot cure
 // (the need exceeds what this box can ever admit) is the same type with Impossible set and ends the
 // request at once.
+//
+// A lease that unloads the agent seat for itself (`gpu reserve --unload-seat`, F82) is the one exception to
+// WHEN the comparison is made, never to WHAT it compares: the memory it would wait for is held by the seat its
+// own unload frees, and the unload runs only once the lease holds its cards, so a comparison in the grant waits
+// for a grant it can only get by being granted. Such a lease takes its cards declaring nothing
+// (Options.HostRAMWaitGiB, stamped on the record as host_ram_wait_gib and read by no grant), the CLI drains and
+// unloads, and AwaitHostRAM (below) then puts the one rule to the one need under the epoch lock and, in the same
+// critical section, turns the waiting figure into the declared one. Until it does the lease counts as having
+// loaded and claimed nothing, which is true: no command runs before the admission.
 
 import (
+	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"sync/atomic"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
@@ -343,4 +355,109 @@ func (m *Manager) hostRAMRefusal(opts Options, live []Info) *ErrHostRAM {
 		return &ErrHostRAM{chk}
 	}
 	return nil
+}
+
+// AwaitHostRAMOptions bound one AwaitHostRAM.
+type AwaitHostRAMOptions struct {
+	// Deadline ends the wait with the refusal it last had. The zero time, or one already past, is a single attempt.
+	Deadline time.Time
+	// Cancel, when closed, ends the wait with ErrCancelled (a signal, a lost lease).
+	Cancel <-chan struct{}
+	// OnWait is called ONCE, at the first refusal of a wait that will go on (Deadline in the future): the CLI says
+	// there that the lease holds its cards and is waiting for the host. Once, because a line per poll is a
+	// notification per second in the session that wraps the reserve.
+	OnWait func(*ErrHostRAM)
+}
+
+// AwaitHostRAM admits the host RAM a lease asked for after it cleared the seat (Options.HostRAMWaitGiB) and
+// returns nil when the host admitted it, which is also what a lease that waits for nothing answers. It
+// returns the *ErrHostRAM it last had when the Deadline passes (Impossible at once when no state of the box could
+// ever admit the figure), ErrCancelled when Cancel closes, and an error when the lease is gone.
+//
+// It is the grant's comparison at a later moment, not a looser one. The figure is put to HostRAMAdmits with the
+// same host reading, the same headroom and the not-yet-loaded part of every lease that HAS been admitted, and
+// the decision and the stamp that makes the figure the lease's declared need (HostRAMGiB, the field every other
+// grant counts) happen under the epoch lock, so two leases cannot both take the last headroom: the second one's
+// check sees the first one's record. A lease that is still waiting declares nothing, so two of them never wait for
+// each other's figure: whichever the lock serves first is admitted and the other counts it. (A design that kept
+// the figure on the record from the grant on would make each count the other's as still to load, and a host that
+// fits one of them would admit neither.) The cost, stated: while it waits a lease holds no claim on host RAM,
+// so a grant on other cards that fits is admitted ahead of it and the lease then waits for that grant's load.
+func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
+	told := false
+	for {
+		need, found := awaitedFigure(m.Leases(), epoch)
+		if !found {
+			return fmt.Errorf("gpulease: host RAM: the lease is gone (epoch %d)", epoch)
+		}
+		if need <= 0 {
+			return nil // admitted already (or nothing was deferred)
+		}
+		if cancelled(o.Cancel) {
+			return ErrCancelled
+		}
+		reading := m.readHost(need) // before the lock, compared inside it (F57)
+		var refused *ErrHostRAM
+		var gone bool
+		err := m.withEpochLock(func() error {
+			live := m.Leases()
+			cur, still := awaitedFigure(live, epoch)
+			if !still {
+				gone = true
+				return nil
+			}
+			if cur <= 0 {
+				return nil // another caller of this epoch admitted it between the read and the lock
+			}
+			if r := m.hostRAMRefusalWith(Options{HostRAMGiB: cur}, live, reading); r != nil {
+				refused = r
+				return nil
+			}
+			return m.restampLocked(epoch, func(mt *Meta) {
+				mt.HostRAMGiB = cur
+				mt.HostRAMWaitGiB = 0
+			})
+		})
+		switch {
+		case err != nil:
+			return err
+		case gone:
+			return fmt.Errorf("gpulease: host RAM: the lease is gone (epoch %d)", epoch)
+		case refused == nil:
+			return nil
+		case refused.Impossible:
+			return refused
+		}
+		remaining := o.Deadline.Sub(m.now())
+		if remaining <= 0 {
+			return refused
+		}
+		if !told && o.OnWait != nil {
+			told = true
+			o.OnWait(refused)
+		}
+		m.pauseOrCancel(min(m.pollInterval(), remaining), o.Cancel)
+		if cancelled(o.Cancel) {
+			return ErrCancelled
+		}
+	}
+}
+
+// awaitedFigure is the host RAM the live lease with this epoch is waiting to have admitted (0 = none), and whether the
+// lease is live at all.
+func awaitedFigure(live []Info, epoch uint64) (float64, bool) {
+	for _, l := range live {
+		if l.Epoch == epoch {
+			return l.HostRAMWaitGiB, true
+		}
+	}
+	return 0, false
+}
+
+// AwaitHostRAM is Manager.AwaitHostRAM for the lease's own holder.
+func (l *Lease) AwaitHostRAM(o AwaitHostRAMOptions) error {
+	if l.done.Load() {
+		return errors.New("gpulease: lease already released")
+	}
+	return l.mgr.AwaitHostRAM(l.epoch, o)
 }
