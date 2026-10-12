@@ -64,8 +64,10 @@ func TestRealWrapperTestsNeverReachTheMachinesLeaseConfigOrComfyInstall(t *testi
 	if sameDir(comfy, config.DefaultComfyDir()) {
 		t.Fatalf("comfy_dir %q is the machine's real ComfyUI install", comfy)
 	}
-	if !isUnder(comfy, os.TempDir()) {
-		t.Fatalf("comfy_dir %q is not a scratch directory (not under %s)", comfy, os.TempDir())
+	// Scratch means this test's own temp directory: a sibling of the one taken above. (os.TempDir() is not the yardstick: the
+	// testing package may place t.TempDir() under GOTMPDIR, which is not TMPDIR.)
+	if scratch := filepath.Dir(elsewhere); !isUnder(comfy, scratch) {
+		t.Fatalf("comfy_dir %q is not a scratch directory (not under this test's temp directory %s)", comfy, scratch)
 	}
 
 	var sawExtra bool
