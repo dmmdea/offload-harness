@@ -1370,8 +1370,11 @@ type Config struct {
 	// the card. The operator's rule of 2026-10-11: the display card may be used up to 60 percent at all times unless
 	// he says he needs it, so no presence reading opens or closes it any more; 0 is the "I need it" switch and keeps
 	// the card closed to the allocator. A pointer because unset (60) and 0 (closed) must differ; 1..100 are shares, and
-	// a value outside 0..100 refuses the load by name. It bounds ADMISSION only: nothing limits a job after it is
-	// placed, and a job that declares no footprint (`--vram`) is not given the card. The llama-swap twin guards
+	// a value outside 0..100 refuses the load by name (and reads as closed where a caller goes on with it anyway). It
+	// bounds ADMISSION only: nothing limits a job after it is placed, and a job that declares no footprint (`--vram`)
+	// is not given the card, except at 100 with no display_floor_gib declared: that is the whole card, nothing is held
+	// back to hold a footprint to, and a job that declares none (every media call) is given it with no VRAM check on
+	// that card, as on any other. The llama-swap twin guards
 	// (display_floor, presence on the display layer) are separate and unchanged.
 	GPUDisplayCapPct *int `json:"gpu_display_cap_pct,omitempty"`
 	// AgentSeatHostRAMGiB is the host RAM the agent seat holds once it is loaded (resident set plus any staged

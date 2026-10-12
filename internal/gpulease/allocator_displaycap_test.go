@@ -336,3 +336,33 @@ func TestAStaleTableClosesTheDisplayCardAndTheSkipNamesTheTable(t *testing.T) {
 		t.Errorf("a cap of 0 is named even when the table is stale too: %q", s.Detail)
 	}
 }
+
+// A cap of 100 with no declared display_floor_gib is the whole card (the operator giving it): nothing is held
+// back, so there is no share to hold a footprint to, and a job that declares none (every media call) is given
+// the card as it would be given any other. This is the one place the footprint requirement stops, and it is
+// deliberate (the key's doc comment, the --cards help, ADR 0039 and the CHANGELOG say so); the three neighbours
+// below pin where it does not reach: one point under the whole card, a declared floor, and a footprint that
+// does not fit the free VRAM.
+func TestACapOf100WithNoDeclaredFloorTakesAJobThatDeclaresNoFootprint(t *testing.T) {
+	taken := func(footprint float64, capPct int, floor float64) bool {
+		in := capInput(footprint, capPct)
+		in.DisplayFloorGiB = floor
+		a, err := Allocate(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(a.Devices) == 1 && a.Devices[0] == "gpu-bbbb0000"
+	}
+	if !taken(0, 100, 0) {
+		t.Error("the whole card, no floor declared: a job that declares no footprint is given it (it sorts first, nothing resident)")
+	}
+	if taken(0, 99, 0) {
+		t.Error("one point under the whole card holds a share back, and a job that declares no footprint cannot be held to it")
+	}
+	if taken(0, 100, 4) {
+		t.Error("a declared display_floor_gib is held back even at 100, so an undeclared footprint cannot be shown to keep it")
+	}
+	if taken(14, 100, 0) {
+		t.Error("the whole card is not more than the card has free: 14 GiB does not fit 13.3 free")
+	}
+}

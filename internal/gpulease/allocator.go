@@ -83,7 +83,8 @@ type AllocInput struct {
 	// while the VRAM in use now plus the job's declared footprint is at most this share of it,
 	// which is the display layer's display_floor arithmetic (free - footprint >= floor) with the
 	// floor set to the rest of the card. 0 = closed, the operator's "I need the card" switch, and
-	// the zero value of the field. 100 = the whole card. It applies to the display card only; every
+	// the zero value of the field. 100 = the whole card: with no DisplayFloorGiB declared nothing is
+	// held back, so no footprint is needed there either (every other cap refuses a job that declares none). It applies to the display card only; every
 	// other card is judged by the footprint alone. A card whose reading could not say where the
 	// monitor is (DisplayUnknown) stays closed whatever this says.
 	DisplayCapPct int
@@ -297,7 +298,9 @@ func (in AllocInput) displayFloorGiB(c gpuprobe.Card) (floor float64, ok bool) {
 // undeclared cannot be shown to stay under anything, so on the display card it refuses, as the layer's guard
 // refuses a seat with no display footprint "before any arithmetic": judging it as free >= floor would let a
 // 10 GiB render onto a card with 12 free, to leave the desktop 2. Nothing unloads a lease's work once it is
-// placed, so the refusal has to come before the claim.
+// placed, so the refusal has to come before the claim. The one exception is the whole card (a cap of 100 with
+// no declared floor, floorApplies): nothing is held back there, so there is no share to hold a footprint to, and
+// the card is judged as any other is.
 func (in AllocInput) fitsCard(c gpuprobe.Card) bool {
 	if !fits(c, in.FootprintGiB) {
 		return false
