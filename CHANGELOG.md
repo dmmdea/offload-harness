@@ -770,7 +770,7 @@ measurement, in both places that draw this line.
   that read ONE package, so the next package to do the same was covered by nothing. No check saw a temp file that production code makes
   for a test (F79's inline graph JSON), or the folder a started copy of a test binary leaves because it exits before its cleanup.
 - **The lint.** `tempdir_lint_test.go` (root package) reads every `*_test.go` file of the module with `go/parser` (not a regular
-  expression on text; `tools/`, `testdata`, `node_modules` and any directory with a `go.mod` of its own are left out) and fails on a
+  expression on text; `testdata`, `node_modules` and any directory with a `go.mod` of its own are left out, which is how the `tools/` modules go: a directory merely called `tools` or `bin` is scanned like any other) and fails on a
   direct use of the OS temp dir that `tempdir_lint_allowlist_test.go` does not list with its count and the reason its folder is gone on
   every path: `os.MkdirTemp` / `os.CreateTemp` / `ioutil.TempDir` / `ioutil.TempFile` with an empty directory, any `os.TempDir`, `TMP`,
   `TEMP` or `TMPDIR` read from the environment, and `os.MkdirTemp` / `os.CreateTemp` passed as a value (the `runIsolated(m, os.MkdirTemp, ...)`
@@ -783,7 +783,7 @@ measurement, in both places that draw this line.
   functions or package-level variables themselves use the OS temp dir, because every started copy runs them.
 - **The lists, generated at the 0.182.0 tip** with `TEMPDIR_LINT_PRINT=1`: 9 uses in 9 files (4 direct calls and 5 `os.MkdirTemp` handed to
   `runIsolated`; `git grep` of the same forms finds the same 9), 5 packages that hold the proof (root, `fleetnode`, `mediaremote`,
-  `pairworkloads`, `pipeline`), 12 exempt packages and 2 that only read the path. The two F77 per-package lints (`TestTestsReachForTheOSTempDirOnlyWhereItsRemovalIsOnEveryPath`
+  `pairworkloads`, `pipeline`), 10 exempt packages and 2 that only read the path. The two F77 per-package lints (`TestTestsReachForTheOSTempDirOnlyWhereItsRemovalIsOnEveryPath`
   in `internal/fleetnode` and `internal/pipeline`) are deleted; the relaunch test each file also held moved, unchanged apart from a
   `nosemgrep` note, to `relaunch_leak_test.go` like the three sibling packages. `internal/exemplars` is the one entry that could be
   `t.TempDir()` (its helper removes the folder with `t.Cleanup`, so it is listed with that reason).
@@ -797,8 +797,8 @@ measurement, in both places that draw this line.
 - **Tests, red first.** The scanner was a stub when `TestTempLintSeesEveryFormOfRawTempUse` and `TestTempLintSeesAProofOnlyWhenItReallyRelaunches`
   were first run: every form case failed (`forms = map[], want map[os.MkdirTemp(empty):1]`). With the real scanner and empty lists,
   `TestTestsReachForTheOSTempDirOnlyWhereItsRemovalIsOnEveryPath` named the 9 files and `TestEveryRelaunchingPackageProvesItLeavesNothing`
-  the 12 packages. Synthetic trees prove that a leak in any package is named by file and form and that `tools/`, `testdata`, `node_modules`
-  and nested modules are skipped. The tripwire has self-tests (`scripts/test-temp-tripwire-selftest.sh` and `.ps1`, on the fixture module
+  the 12 packages. Synthetic trees prove that a leak in any package is named by file and form and that `testdata`, `node_modules`
+  and nested modules (the `tools/` ones among them) are skipped while a directory that is only called `tools` or `bin` is not. The tripwire has self-tests (`scripts/test-temp-tripwire-selftest.sh` and `.ps1`, on the fixture module
   `scripts/testdata/tripwirefixture`: a clean package, a leaker, a spawner that leaves a process running from the folder, a failing
   package) that assert verdict, exit code and the disk afterwards, and that the two twins agree on verdict, exit code and leak lines.
 - **Mutation-checked** with `scripts/mutation-check.sh`, each mutant RED: the lint, 16 (a dropped form, the value-pass rule, the allowlist
@@ -814,9 +814,9 @@ measurement, in both places that draw this line.
   tree: the test abandons a wait on purpose, and the wait gave the card back after the test's temp dir was gone, recreating `gpu/lease/...` under
   it (39 of 40 runs, and the same folder on the pre-0.182 base on Windows); the test now waits for the abandoned wait to leave the line,
   and with that wait removed 6 of 10 runs leave the tree again (mutation-checked with the tripwire as the test). (3) One `seat_fg.stale-mp.tests.lock.d`:
-  the seat launcher shell test keeps a box-wide `flock` target in the temp dir on purpose, so that two runs on one machine take turns on the
-  scratch ports it shares; it is named in `scripts/test-temp-tripwire.ignore` (one `NAME-PREFIX`, a tab and a reason per line, which the
-  tripwire prints and does not count, so an ignore is never silent).
+  the seat launcher shell test keeps a `flock` target in the temp dir so that two runs on one machine take turns on the scratch ports they
+  share. It was first named in `scripts/test-temp-tripwire.ignore` (one `NAME-PREFIX`, a tab and a reason per line, which the tripwire
+  prints and does not count, so an ignore is never silent); the review round below moves the lock out of `TMPDIR` and the list is empty.
 - **Found on the way.** `TestEveryTrackedGoModuleIsScannedOrNamedAsExcluded` fails on the 0.182.0 candidate (shown by a remote run at the lint's first commit):
   `scripts/testdata/mutfixture` holds a tracked `go.mod` that the govulncheck job does not scan and `govulncheckExcluded` did not name. Both fixture
   modules (that one and the tripwire's) are named now, with the reason they ship nothing.
@@ -829,6 +829,55 @@ measurement, in both places that draw this line.
   over the whole module, niced, with the temp dir on a separate data disk: every package passed (1,844 s) and the verdict is `CLEAN`, with the one
   ignored entry printed with its reason. The Windows PowerShell 5.1 self-test (54 checks) and a tripwire run over twelve packages that start
   copies of their test binary or keep a state root both ended clean on a second Windows machine.
+
+### Fixed — the temp-dir tripwire keeps the failure it saw, stops what it started when it is interrupted and says when it could not look; the lint stops skipping a directory by its name (GPU-I8, GPU-I8c, review round)
+
+A review of the lint and the tripwire above made 11 findings (10 distinct claims). Each was read against the code: six were defects in the scripts, the lint and a
+shell test, three were documentation, and one holds only once another branch is merged. Every fix below was seen red first on the unfixed script or test.
+
+- **A failure far from the end of the output was lost.** The shell tripwire showed the last 20 lines of `go test` and deleted the
+  capture, and `go test -p 1 ./...` prints one `ok` line per package after the failing one, so the failing test of a whole-module run
+  was in neither (the first dry run above ended `TESTS-FAILED` and which test failed was not recorded). When the output is longer than
+  the tail, both twins now print the `--- FAIL`, `panic:` and `FAIL pkg` lines, each with the indented lines under it (at most 40),
+  ahead of the tail. Red: `--tail 1` over a failing package followed by a passing one showed `FAIL` and nothing else.
+- **An interrupt stopped go and left the test binaries.** The shell tripwire signalled one pid; on Linux a `TERM` to the script left
+  `hang.test` running from the kept folder and the capture file beside it, and no process check ran. It now runs `go test` under job
+  control and stops the process group (`INT`, then `TERM`, then `KILL`, 10 s, 5 s and 5 s at most), names what still runs from the folder,
+  keeps the folder, removes its capture and exits 130; a fixture test that ignores `INT` and `TERM` needs the `KILL` step. The
+  PowerShell twin sat in one `WaitForExit()` that a stopped pipeline cannot interrupt: stopping it took the whole 40 s of the fixture
+  test (39 s measured). It waits in half-second slices now, ends the process tree with `taskkill /T /F` and removes its captures.
+- **Checks that failed open now say so.** A failed process query read as "no process" (PowerShell), a `stat` that fails or a missing
+  `SystemDrive` read as "not the system drive", and a temp folder that something removed during the run read as an empty, `CLEAN`
+  listing. The verdict line now carries `process check skipped`, the run is `REFUSED` when the host cannot place the folder, and a
+  vanished folder exits 70 without a verdict. A folder that holds entries is not removed, not even with `--remove`, when the process
+  check could not run, because a process might still run from it.
+- **The lint skipped any directory named `tools` or `bin`, at any depth.** A main-module package such as `internal/tools` would have
+  gone unlinted with the lint green. The real `tools/` modules each hold a `go.mod`, which the go.mod rule already skips, and no
+  main-module test file lives under a directory of either name; only a `go.mod`, `testdata`, `node_modules` and `.git` leave a directory
+  out now. Red: the synthetic tree's `a/tools`, `a/bin` and `bin` leaks were not found.
+- **The seat launcher shell test's lock was one lock per `TMPDIR`.** `seat_fg.stale-mp.tests.sh` took its "one run at a time per box"
+  lock under `${TMPDIR:-/tmp}`, so runs with a temp dir of their own (a gate run beside another agent's, a run under the tripwire) took
+  different locks and could share the scratch ports. The folder is `/tmp/seat_fg.stale-mp.tests.lock.d` now (`SEAT_FG_TEST_LOCK_ROOT`
+  moves it), a Linux test holds the lock at both paths and requires the SKIP line to name the one that is not `TMPDIR`, and the
+  tripwire's ignore entry for it, whose reason had been false under the tripwire, is gone: `scripts/test-temp-tripwire.ignore` is empty,
+  and the dry run above now ends `CLEAN` with nothing ignored. One empty `1777` folder stays in `/tmp` on a box that runs the test, as it
+  did before for a run without `TMPDIR`.
+- **Documentation.** The tripwire's platform notes sent an operator to the Go lint's allowlist for a leaver the tripwire reports; they
+  name `scripts/test-temp-tripwire.ignore`. The headers, `CONTRIBUTING.md` and the entry above now say what the tripwire cannot see: only a
+  child that inherits `TMP`, `TEMP` and `TMPDIR` writes into the watched folder, so a child with a scrubbed environment (the browse
+  sidecar's) or a test that names a fixed directory (`/dev/shm`) writes elsewhere and a `CLEAN` says nothing about it. The count above
+  read "12 exempt packages"; it is 10 exempt and 2 that only read the path (12 without a proof).
+- **Holds only after a merge.** `feat/0183-lease-guards` adds `internal/proctree`, whose tests start their own test binary. Merged
+  with this branch, `TestEveryRelaunchingPackageProvesItLeavesNothing` fails until `relaunchExempt` names the package; this branch
+  cannot name it first, because the lint also fails an exemption for a package that does not exist. The merged tree with that one entry added passes
+  the lint.
+- **Tests.** The shell self-test runs 87 checks on Linux (one skipped: the PowerShell twin is not on that host) and the PowerShell
+  self-test 95, under PowerShell 7 and under Windows PowerShell 5.1; they take `TRIPWIRE_SELFTEST_FAILFAST=1` and (PowerShell) `TRIPWIRE_SELFTEST_ONLY=tag,...`
+  so that a mutation check runs seconds, not the suite. Mutation-checked with `scripts/mutation-check.sh` and `.ps1`, each mutant RED:
+  14 on the shell twin (a digest never shown, a continuation line dropped, a failing `stat` read as "not the system drive", an
+  undecided guard not refusing, a signal to the leader only, no `KILL` step, a wrong exit code, `TERM` not trapped, no job control, the
+  removal gate ignoring a skipped check, the skip note dropped, a vanished folder ignored, the capture kept, an empty folder kept) and
+  13 on the PowerShell twin (the same rules, plus a wait that is not sliced, a single-process kill and no stop in `finally`).
 
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 
