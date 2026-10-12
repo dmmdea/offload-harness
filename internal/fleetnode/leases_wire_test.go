@@ -567,3 +567,27 @@ func TestHealthPublishesATreeOrphanLease(t *testing.T) {
 		t.Fatalf("a healthy lease puts no tree_orphan key on the wire: %v", plain[0])
 	}
 }
+
+// A tree-orphan whose declared window has passed keeps the same wire rule as every overdue lease (0.113.27): the card is
+// claimed and published as a tree-orphan and busy, the node ranks last for it, and it is NOT a refusal, because dispatch
+// queues behind a lease instead of turning work away and a node that refused here would keep the capacity wait from asking
+// the one remote that could take the work. Within its window the same lease closes its cards.
+func TestAnOverdueTreeOrphanIsRankedLastNotRefused(t *testing.T) {
+	standing := func(gpulease.Info) gpulease.Standing { return gpulease.Standing{TreeOrphan: true} }
+	all := []string{leaseIDOf(testUUIDa), leaseIDOf(testUUIDb), leaseIDOf(testUUIDc)}
+
+	overdue := liveLease(7, gpulease.ClassMedia, all, -2*time.Hour)
+	m := rawHealth(t, leasedNode(t, overdue, standing, nil))
+	e := leaseEntries(t, m)[0]
+	if e["tree_orphan"] != true || e["verdict"] != "tree-orphan" || e["overdue"] != true || e["busy"] != true {
+		t.Fatalf("an overdue tree-orphan is published as a tree-orphan, busy and overdue: %v", e)
+	}
+	if high, idle := satOf(t, m); high || !idle {
+		t.Fatalf("saturation high=%v idle_slot=%v: an overdue lease is ranked last and is not a refusal", high, idle)
+	}
+
+	within := liveLease(8, gpulease.ClassMedia, all, 3*time.Hour)
+	if high, idle := satOf(t, rawHealth(t, leasedNode(t, within, standing, nil))); !high || idle {
+		t.Fatalf("saturation high=%v idle_slot=%v: a tree-orphan inside its window holding every card closes the node", high, idle)
+	}
+}
