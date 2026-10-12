@@ -434,7 +434,7 @@ func TestARefusedUnloadOfAResidentSeatWritesNoDebt(t *testing.T) {
 // that loses exactly the end that says what happened ("... never start..."). Every stage text, for every signal the wrapper
 // asks for, fits whole.
 func TestEveryStageTextFitsTheCardWhole(t *testing.T) {
-	stages := map[string]string{"before the card": stageBeforeCard, "queued": stageQueued, "draining": stageDraining, "before the start": stageBeforeStart}
+	stages := map[string]string{"before the card": stageBeforeCard, "queued": stageQueued, "draining": stageDraining, "host RAM": stageHostRAM, "before the start": stageBeforeStart}
 	for sname, stage := range stages {
 		for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP} {
 			text := endedBySignal(sig, stage).Error()

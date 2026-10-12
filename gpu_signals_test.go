@@ -51,7 +51,7 @@ func TestTheCardSaysWhichSignalEndedTheCommand(t *testing.T) {
 	if n := len([]rune(signalWhy(syscall.SIGTERM) + " exit status 1")); n > 140-20 {
 		t.Errorf("the card clause is %d characters; the card shows 140 in all and the exit status goes before it", n)
 	}
-	for _, stage := range []string{"", stageQueued, stageDraining, stageBeforeStart} {
+	for _, stage := range []string{"", stageQueued, stageDraining, stageHostRAM, stageBeforeStart} {
 		sentence := warmSkippedOnTerm(stage)
 		for _, claim := range []string{"its console was closed", "the session is ending", "the machine is shutting down"} {
 			if strings.Contains(sentence, claim) {
