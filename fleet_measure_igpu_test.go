@@ -85,6 +85,15 @@ func TestFleetMeasureProbesAnSdcppVideoAndAnAudiocppMusicBox(t *testing.T) {
 	if err := os.WriteFile(bin, []byte("x"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// CT-54: a lane refuses, before the lease, a route whose weight file is missing, so the weights this box binds are real files
+	weight := func(name string) string {
+		p := filepath.Join(home, name)
+		if err := os.WriteFile(p, []byte("weights"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	model, vae, t5 := weight("model.gguf"), weight("vae.safetensors"), weight("t5.gguf")
 
 	cfg := config.Default()
 	cfg.MediaDir = media
@@ -94,13 +103,14 @@ func TestFleetMeasureProbesAnSdcppVideoAndAnAudiocppMusicBox(t *testing.T) {
 	cfg.VideoGenFamily = "fastwan"
 	cfg.VideoGenSdcppScript = stub
 	cfg.VideoGenFamilies = map[string]config.VideoFamilyBinding{"fastwan": {
-		Engine: config.EngineSdcpp, SdcppBin: bin, SdcppModel: "m", SdcppVAE: "v", SdcppT5xxl: "t", SdcppBackend: "vulkan0",
+		Engine: config.EngineSdcpp, SdcppBin: bin, SdcppModel: model, SdcppVAE: vae, SdcppT5xxl: t5, SdcppBackend: "vulkan0",
 	}}
 	cfg.MusicGenEngine = config.EngineAudiocpp
 	cfg.AudiocppScript = stub
-	cfg.AudiocppBin, cfg.AudiocppMusicModel, cfg.AudiocppBackend = bin, "m", "vulkan"
+	cfg.AudiocppBin, cfg.AudiocppMusicModel, cfg.AudiocppBackend = bin, model, "vulkan"
 
-	stderr, _ := captureFleetMeasure(t, writeFleetMeasureCfg(t, cfg, "videogen_script", "musicgen_script", "imagegen_script"))
+	// ffmpeg is blanked too: the derivation must not depend on ffmpeg and ffprobe being on the test host's PATH (the stub runners call neither)
+	stderr, _ := captureFleetMeasure(t, writeFleetMeasureCfg(t, cfg, "videogen_script", "musicgen_script", "imagegen_script", "ffmpeg_path"))
 	for _, skipped := range []string{"video-gen: skipped", "audio-gen: skipped"} {
 		if strings.Contains(stderr, skipped) {
 			t.Errorf("a box that binds the sdcpp video family and audio.cpp music must be probed, got %q in:\n%s", skipped, stderr)
