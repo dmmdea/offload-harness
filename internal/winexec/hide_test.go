@@ -12,9 +12,15 @@ import (
 const createNoWindowFlag = 0x08000000
 
 func TestHideWindow_ReturnsTheSameCommand(t *testing.T) {
-	cmd := exec.Command("whatever")
-	if got := HideWindow(cmd); got != cmd {
-		t.Fatalf("HideWindow returned a different *exec.Cmd")
+	for name, hide := range map[string]func(*exec.Cmd) *exec.Cmd{
+		"HideWindow":            HideWindow,
+		"HideWindowDetached":    HideWindowDetached,
+		"HideWindowIfNoConsole": HideWindowIfNoConsole,
+	} {
+		cmd := exec.Command("whatever")
+		if got := hide(cmd); got != cmd {
+			t.Fatalf("%s returned a different *exec.Cmd", name)
+		}
 	}
 }
 

@@ -17,9 +17,15 @@ func assertHidden(t *testing.T, name string, cmd *exec.Cmd) {
 }
 
 func TestHideWindow_IsANoopOutsideWindows(t *testing.T) {
-	cmd := exec.Command("whatever")
-	HideWindow(cmd)
-	if cmd.SysProcAttr != nil {
-		t.Fatalf("SysProcAttr = %+v, want nil: there is no console window to hide here", cmd.SysProcAttr)
+	for name, cmd := range map[string]*exec.Cmd{
+		"HideWindow":            HideWindow(exec.Command("whatever")),
+		"HideWindowDetached":    HideWindowDetached(exec.Command("whatever")),
+		"HideWindowIfNoConsole": HideWindowIfNoConsole(exec.Command("whatever")),
+		"CommandDetached":       CommandDetached("whatever"),
+		"CommandIfNoConsole":    CommandIfNoConsole("whatever"),
+	} {
+		if cmd.SysProcAttr != nil {
+			t.Errorf("%s: SysProcAttr = %+v, want nil: there is no console window to hide here", name, cmd.SysProcAttr)
+		}
 	}
 }

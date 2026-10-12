@@ -72,9 +72,9 @@ func SpawnCmd(cmdPath string, idleSec int) func() error {
 	return func() error {
 		var cmd *exec.Cmd
 		if runtime.GOOS == "windows" {
-			cmd = winexec.Command("cmd.exe", "/c", cmdPath, "--idle-sec", strconv.Itoa(idleSec))
+			cmd = winexec.CommandDetached("cmd.exe", "/c", cmdPath, "--idle-sec", strconv.Itoa(idleSec))
 		} else {
-			cmd = winexec.Command("sh", "-c", cmdPath+" --idle-sec "+strconv.Itoa(idleSec))
+			cmd = winexec.CommandDetached("sh", "-c", cmdPath+" --idle-sec "+strconv.Itoa(idleSec))
 		}
 		if err := cmd.Start(); err != nil {
 			return err

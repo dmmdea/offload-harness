@@ -70,12 +70,13 @@ type directExecEntry struct {
 
 // directExecAllowlist: "file:func" -> the direct os/exec constructors that may stay.
 var directExecAllowlist = map[string]directExecEntry{
-	"internal/winexec/hide.go:Command":        {1, "the sanctioned constructor itself"},
-	"internal/winexec/hide.go:CommandContext": {1, "the sanctioned constructor itself"},
-	"gpu_cmd.go:runGPUReserve":                {1, "the command the operator names after `--` is theirs: it keeps the console it inherits (stdin, stdout and stderr are the operator's own), so it may be interactive"},
-	"gpu_cmd.go:detachHolder":                 {1, "hidden through hideWindow on the next line (gpu_hide_windows.go, which is winexec.HideWindow): the detached holder must never own a window, closing one kills the hold"},
-	"cmd/leakdigest/main.go:git":              {1, "a developer gate tool run from a terminal that reads git output; it is not one of the harness's running processes"},
-	"cmd/leakdigest/main.go:newRefFS":         {1, "a developer gate tool run from a terminal that reads git output; it is not one of the harness's running processes"},
+	"internal/winexec/hide.go:Command":            {1, "the sanctioned constructor itself"},
+	"internal/winexec/hide.go:CommandContext":     {1, "the sanctioned constructor itself"},
+	"internal/winexec/hide.go:CommandDetached":    {1, "the sanctioned constructor itself"},
+	"internal/winexec/hide.go:CommandIfNoConsole": {1, "the sanctioned constructor itself"},
+	"gpu_cmd.go:detachHolder":                     {1, "hidden through hideWindow on the next line (gpu_hide_windows.go, which is winexec.HideWindow): the detached holder must never own a window, closing one kills the hold"},
+	"cmd/leakdigest/main.go:git":                  {1, "a developer gate tool run from a terminal that reads git output; it is not one of the harness's running processes"},
+	"cmd/leakdigest/main.go:newRefFS":             {1, "a developer gate tool run from a terminal that reads git output; it is not one of the harness's running processes"},
 }
 
 // moduleRoot: the directory of the go.mod that holds this package.
