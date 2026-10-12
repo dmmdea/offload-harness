@@ -183,9 +183,17 @@ placement, answered or deferred, carries `wall_estimate_sec` / `min_turn_sec` / 
 64-token final (`seatrate.MinViableSec`, the delegator's `feasibleFinal` floor, never the max-final `min_turn_sec` that
 ADR 0050 rejects as a refusal; it does not depend on `max_steps`) is refused with `deferred: true`, `defer_class: budget`,
 `steps: 0` and the numbers; a
-seat with no rate is never refused. D-102 is PARTIAL: a wall above that floor but below the estimate (the row's own 420 s
-against a `min_turn_sec` of 807 s) still runs and can still die at the hard deadline; the cure (the D-95 final-budget fit
-on this door, or an operator decision on a literal `min_turn_sec` refusal) is open as register D-134. A resolved planner absent from the endpoint's served roster fails loud with
+seat with no rate is never refused. **A wall above that floor but below the estimate (the row's own 420 s against a `min_turn_sec` of
+807 s) runs, and its final answer is fitted to the wall that is left (register D-134):** the loop carries the D-95 final-budget fit
+(`pipeline.InstallFinalFit`, the same function the delegation door's node calls), so at the forced final step the answer opens at
+the largest budget the remaining wall can decode at the seat's rate instead of the configured worst case (4x the step budget, up to 8,192
+tokens), floored at 1,024, off the live clock; the tool steps are untouched. The rate is the one the wall gate sized the run from, so a
+named or placed seat with no rate of its own is left as it was. The answer, and a run that died at its wall, then carry `final_budget_fit`
+(the budget the forced final opened at) and `budget_note` (the arithmetic), only when the fit narrowed something (a run whose own final was not narrowed, because it answered early, was cut before its forced final or reached it with wall to spare, carries the fit predicted when its wall started, as the node's result does); a wall that buys fewer
+than 1,024 tokens of final keeps the floor, and `budget_note` says the wall will be the stop. A final the seat ended on that budget
+(`finish_reason: length`) is a partial, and the fit makes that end likelier on purpose: it is still published as `output`, because a cut answer is
+the caller's to use, and the result says so with `output_truncated: true`, the loop's own `stop_note` and a `truncation_note` naming the budget the final
+opened at when the loop's fit narrowed it, not the fit predicted at run start (a complete answer carries none of the three). A resolved planner absent from the endpoint's served roster fails loud with
 `deferred: true` naming the model, never a silent fall back to the workhorse — "served" means
 matched against canonical ids **or** `meta.llamaswap.aliases`, since a tier-seeded `agent_model`
 is normally an alias. Every response
@@ -259,14 +267,65 @@ Since 0.130.2 (register C-46) `route` is accepted on **`agent_run` and `offload_
 doors ran local unconditionally before, so a remote seat could not be named from this box at all.
 `remote` / `auto` / `spread` / `queue` sends the call as ONE contract through the delegator's
 single-contract path, and the response names `node`, `placement`, `seat` and `executed_on`. The two
-doors put different things on the wire: for `agent_run` neither `read_root` nor `model` travels — the
-executing node reads its own root and runs its own seat, so it is for self-contained goals and
-`setup_actions` — while for `offload_ask` the files ride inline, so any node can answer. `local` keeps
-the old behaviour exactly, and so does an omitted route on `agent_run`. An omitted route on `offload_ask`
+doors put different things on the wire: for `agent_run` `read_root` and `judge` do not travel — the
+executing node reads its own root, and the response carries `notes` naming each of the two the caller passed — so it is for
+self-contained goals and `setup_actions`, while for `offload_ask` the files ride inline, so any node can answer.
+An `agent_run` contract carries a flat `{answer}` `output_schema` (register D-125). It was built with none, and the
+delegator refuses a schema-less contract on every node (`noschema`: remote output merges only after a mechanical
+check, and a node's own ack refuses it too), so a routed `agent_run` could never be placed on a node; the prose is still the
+`output`, and the node's `{answer}` object rides beside it as `structured`. A deferral carries the node's `defer_class`,
+its `node` and `placement`, and, when only the structuring failed, the finished answer as `output` flagged
+`schema_miss`, the way `offload_ask` does. `local` keeps
+the old behaviour exactly, and so does an omitted route on `agent_run`, unless it names a model this box does not serve
+(next section). An omitted route on `offload_ask`
 runs local too, except when loading the agent seat would unload another vLLM seat that holds the cards
 (the seat guard's verdict; 0.165.2): the ask then takes `auto`, and the response carries a `route_note`
 naming that seat. The ask is self-contained, so nothing is lost by moving it; `agent_run` reads its
 `read_root` on this box and stays.
+
+#### A seat only the fleet runs: `agent_run(model: <seat>)` (register D-125)
+
+`agent_run` checked the `model` it was given against this box's llama-swap roster only and refused a name that roster
+lacks, however many fleet nodes ran it. A name this box does not serve is now looked up on the fleet. With no route (or
+`route: "remote"`) the door reads the roster's health once (`rosterprobe.Probe`, the read every single-shot lane shares:
+concurrent, bounded at 5 s a node, a down node named and not waited on) and takes the nodes that advertise the agent lane
+and whose `agent_seat` is the name, without regard to case. A composite node whose layer has an agent-role seat with that
+model is taken too, and the contract then names the layer (register A-100). One contract names one layer, so nodes that
+run the name as their own agent seat are preferred, and when only layered nodes serve it the first one's layer wins and only
+the nodes that serve it from that layer are asked.
+ONE contract goes through the delegator at `route=remote` with `remotes` narrowed to those nodes (a call's own list replaces the
+configured roster, and is checked against it), so it runs on exactly one of them, placed by the usual gate: a node whose
+card is leased, or that cannot hold the wall, is passed over for another that serves the name, and with none left the call
+defers naming why. The response names `node`, `placement`, `seat`, `model` (the seat that ran it), `route` and
+`executed_on`, and carries no sizing of this box: the wall is the executing node's expectation (ADR 0055).
+
+- **It honours a name only when it IS a node's agent seat.** The contract names no seat, so the node runs its own agent
+  seat. A name a node merely serves (an alias, a non-agent seat) is refused naming the seat that node does run; nothing is
+  guessed. A router seat's `model_map` twins are not matched either.
+- **The answer is checked against the name.** A node that changed its agent seat between the probe and the dispatch runs
+  another seat; an answer whose `seat` differs from the name is withheld and deferred (`defer_class: config`). The finished
+  prose a deferral carries (`schema_miss`) is checked the same way: from a seat other than the name, or from a node that reports
+  none, it is not published, and the node's own reason and class stay with a clause saying what was withheld.
+- **The contract is a reasoned remote pin (`pin_reason: operator`), so its second chance is never this box's seat.** The caller
+  named the model, so the placement is theirs, and the delegator retries an attempt it retries (a seat that abstained, a seat
+  that went down) on another of the nodes that run the name, or does not retry. A bare `route=remote` would retry remote -> local,
+  which for a named seat runs the whole goal on this box's own agent seat, a different model, only for the door to withhold that
+  answer. `offload_status` counts the call under `pins.reasoned.operator`; an `agent_run` that names no model keeps the bare remote
+  route and is still counted as `unreasoned`.
+- **A name nobody runs keeps the roster sentence and says where the fleet looked,** one clause per node (its id, its agent
+  seat, and a name it serves without running it as its agent seat). `defer_class` is `config` when every node answered and
+  `infrastructure` when one did not; the reason names that node. A box with no `delegate_remotes` has nobody to ask and
+  refuses exactly as before. With `route: "remote"` the roster sentence is not used (this box's roster was never consulted):
+  the reason says no fleet node runs the model and where the fleet looked.
+- **The fork is narrow.** A name this box serves runs here and never reads the fleet; `route: "local"` never asks it
+  whatever the name; `route: "auto"`, `"spread"` and `"queue"` with a model are refused (`defer_class: contract`, `steps: 0`,
+  nothing asked) because they place by capacity, not by seat name, and the model used to be ignored without a word; a
+  local roster that cannot be read leaves the call on this box, where the loop's first request reports the real transport
+  error. `allow_browse` cannot travel (the browse tool drives this machine's own browser) and is refused when the name
+  could only run on a node.
+- **No wire field and no node changed,** so it works against the nodes as deployed. Running a seat that is not a node's
+  agent seat needs the contract to name it (a wire field and a node-side change that widens what a fleet-token holder can
+  make a node load); that larger design is not here.
 
 #### The whole-call deadline (ADR 0065)
 

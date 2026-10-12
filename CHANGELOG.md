@@ -193,6 +193,169 @@ Versioning: [SemVer](https://semver.org/).
   only, five to card 2 only, six to both, the two vLLM seats unknown) and its card table, and the end-to-end tests ran on synthetic card
   tables; the live proof (a one-card lease, a short render, `/running` before and after, a text call for a model pinned to the other card)
   is owed to a quiet card window.
+### Fixed — a scanner the first ticket started no longer scans that ticket a second time at once, and the test that counts the first scan's lane questions counts the first scan's alone (found in the 0.181.0 merge gates; 0.181.0 code and test)
+
+- **What failed, and that the merge is not the cause.** After this branch took 0.181.0, the gate of `internal/mediaremote` failed
+  `TestTheFirstScanReusesTheLaneReadingOnlyWhileItIsFresh` on two Linux gate hosts (`probes 2, want 1` on one, `probes 3, want 2` on the
+  other) where the same package had passed at the 0.181.0 commit on one of them. The branch touches nothing in that package. Run alone,
+  4 workers of 40 runs on each host, the test failed at the 0.181.0 commit as it did at the merge: 50 and 52 of 160 on one host, 13 and
+  7 of 160 on the other. It is a race in 0.181.0 (code and test), and the one pass at the 0.181.0 commit was luck.
+- **The cause is in two parts.** (1) `register` started the scanner for the process's first ticket and also woke it. The wake-up is a
+  token that waits in the channel, so the new scanner took the ticket in its first scan, found the token and scanned the same ticket
+  again at once. That second scan found the reading the first had reused gone and asked the lane again: a second card-table read within
+  milliseconds of the first, which is the read the reuse (`verdictFresh`) exists to save. At the production rhythm of 10 s, the lane had
+  been asked twice 300 ms after the first scan in each of four tries. (2) The test counted every question its lane runner was asked after
+  the call returned, so it saw the second scan's whenever that scan beat the test goroutine, and the tests' 40 ms rhythm brings a further
+  scan about 40 ms later; its "reused" half also relied on 250 ms of wall clock between the question and the scan, which a loaded host
+  does not give.
+- **The fix.** `register` wakes the scanner only when the registration did not start it. A ticket made while the scanner runs still wakes
+  it (a scanner asleep in its 10 s timer would otherwise leave that ticket's call waiting up to 12 s for its first scan). The test makes the
+  ticket and runs its first scan by hand on a queue with no scanner: the "reused" half gives the reading a minute, the "asked again" half
+  keeps 250 ms against an identity wait of 600 ms (a slower host only makes the reading older). The assertions are unchanged, exactly 1
+  and exactly 2. ADR 0083 item 5 says that the ticket that starts the scanner is not woken for.
+- **Tests, written first and red.** `TestANewScannerLooksAtItsFirstTicketOnce` (the scanner as production runs it, a 10 s rhythm, so a
+  lane question inside 300 ms of the first scan can only come from the wake-up) failed before the fix (`probes 2 within 300 ms, want 1`)
+  and passes after; `TestATicketMadeWhileTheScannerSleepsIsScannedAtOnce` pins the other half (the second ticket's call answers well
+  inside the 8 s that the rhythm could make it wait). Five mutants were run, each compiled and each killed: the wake-up for a started
+  scanner back, no wake-up for a running scanner, the reuse ignoring the reading's age, no reuse at all, and the age counted from the
+  ticket (the defect the test was first written for). With the fix, the three tests together, 4 workers of 40 runs on each of the same two
+  hosts under the same load: 0 of 160 failed on either.
+
+### Fixed — a named-seat `agent_run` is never retried on this box's own seat, a deferral never publishes another seat's answer, and a final cut at its budget says so (D-125, D-102, register D-134)
+
+A fix round on the two `agent_run` entries below, from two independent reviews of the branch: five findings, three defects.
+
+- **A named seat's second chance is another node that runs it, or none; it was this box's own agent seat.** `agent_run(model: <seat>)`
+  handed the delegator a bare `route=remote`, and a bare remote route keeps the engine's remote -> local retry: when the node's first
+  attempt abstained (the new flat `{answer}` schema makes a cut or empty final likely) or its seat went down, the retry ran the whole
+  goal on THIS box's agent seat, a different model. The door then withheld that clean answer for a seat mismatch and blamed the node
+  (`answered from seat "<this box's seat>", not the model named: its agent seat changed after the fleet was read`), after this box's GPU
+  had done the work, and the first attempt's real reason was gone. The contract of a named seat is now a reasoned remote pin
+  (`pin_reason: operator`, the caller having chosen the placement by naming the model), which the engine already obeys to the end of the
+  subtask: the retry goes to another node whose agent seat is the name, and with none the node's own deferral stays the result. First
+  placement is unchanged (it never fell back to local), and `offload_status` counts the call under `pins.reasoned.operator` instead of
+  `unreasoned`; an `agent_run` that names no model keeps the bare remote route and its remote -> local retry.
+- **The seat check covers a deferral's finished answer.** The check that withholds an answer from a seat other than the named one sat
+  behind the deferral's return, so a deferral carrying the loop's finished prose (`schema_miss`) published that prose as `output`
+  whatever seat wrote it. The prose is now held back when the seat that wrote it is not the name, or is not reported; the deferral keeps
+  the node's own reason and class, and the reason gains a clause saying what was withheld. A deferral from the named seat keeps its prose.
+- **A final cut at its budget is published as cut.** The final-answer fit (D-134) opens the forced final narrower than the configured budget
+  on purpose, and a final the seat ends on that budget (`finish_reason: length`) is marked by the loop (`OutputTruncated`) but ended
+  `done`, and the local `agent_run` door never read the mark: the half-sentence was published as a clean success. It is still the `output`
+  (a partial is the caller's to use), and the result now carries `output_truncated: true`, the loop's `stop_note` and a `truncation_note` that
+  names the budget the loop's fit opened the final at, when it narrowed it (not the fit predicted at run start), and points at `budget_note`.
+  A complete answer carries none of the three.
+- **Tests, written first and red.** Each failed on the unfixed code for the reason in its finding: the named-seat retry (abstention and
+  seat-down, one node and two) ran this box's seat and published the false seat-change reason; the deferral test published another seat's
+  prose and an unreported seat's; the cut-final test published no flag. Mutants, each compiled and each killed: the pin reason dropped, the
+  deferral's seat check disabled, the truncation flag never published, the fit clause of the truncation note dropped.
+
+### Fixed — `agent_run` fits its final answer to the wall that is left, so a wall between the minimal-answer floor and the estimate answers instead of being cut (D-102, register D-134)
+
+`agent_run` runs its loop under a context deadline, and the loop was built without the final-budget fit (register D-95) that the
+delegation node installs. D-102 sized the run and refused a wall below one tool step and a minimal answer, and left the
+register's own case admitted: a 420 s wall against a `min_turn_sec` of 807 s and an estimate of 928 s, which the INV-5 rider
+(ADR 0050) forbids refusing on. That run spent its tool steps and then opened the forced final answer at the configured budget (4x
+the step budget, up to 8,192 tokens): 476 s of decode on a 17.2 tok/s seat, against a wall with at most 420 s in it, so it was cut
+at the deadline with no answer. This closes what D-102 left PARTIAL: the case is still admitted, and is now usable.
+
+- **The cure is the fit, not a refusal.** At the forced final step the loop now opens the answer at the largest budget the wall that
+  is LEFT can decode at the seat's measured rate, `(remaining − max(10 %, 6 s)) × tok/s`, never above the configured final and
+  floored at 1,024 tokens (the D-95 arithmetic, read off the live clock). The register's case, rebuilt from the seat-rate arithmetic
+  (a 17.2 tok/s seat with a 330 s cold load, an 8,192-token final, ten steps, thinking off), opens its final at no more than about
+  6,500 tokens with the whole wall left, and at about 4,600 (270 s of decode) once the tool steps have spent the 121 s the estimate
+  gives them, instead of 8,192 (476 s). The tool steps are untouched. Nothing new is refused, so there is no INV-5 conflict, and the
+  `min_turn_sec` refusal the row offered as the alternative is not needed.
+- **The rate is the one the wall gate sized the run from.** A model the caller names, or a seat that placement picks, with no rate
+  of its own is left exactly as before: no fit, the configured final. The agent seat's `agent_seat_tok_s` is not lent to it.
+- **Published under the delegation wire's names.** The answer, and a run that died at its wall, carry `final_budget_fit` (the budget
+  the forced final opened at) and `budget_note` (the arithmetic: `final 8192 → 6501 to fit 420 s at 17.2 tok/s`), only when the fit
+  narrowed something. What the loop ran at supersedes the fit predicted when the wall started, as on the node; a run cut before its
+  forced final carries the prediction, and so does one that answered early or reached its forced final with wall to spare: the
+  estimate charges the seat's remembered cold load against the wall and admission pays it outside the wall, so a wall just under the
+  estimate predicts a narrowing the live clock never asks for (900 s against 928 s predicts a 6,174-token final, and the final opens
+  at 8,192). A wall with room, a seat with no rate and a run that neither the prediction nor the loop narrowed carry neither field,
+  and the wall refusal, which starts no run, carries neither.
+- **One copy of the arithmetic.** `pipeline.InstallFinalFit` installs the fit on the loop and returns the run-start figure, and both
+  agent doors call it, so they cannot size one run differently. The node's behaviour is unchanged (a characterisation test, run
+  before the move and after it, passes on both sides), and `TestAgentRunSizesTheRunStartFinalLikeTheNodeDoes` compares the two
+  doors' published sizing on the register's case byte for byte.
+- **What it does not do.** The fit narrows the final answer. It does not shorten the tool steps, so a run whose tool steps outlast
+  the wall still ends at the deadline, and a wall that buys fewer than 1,024 tokens of final at the seat's rate keeps the floor and
+  the deadline stays the stop (`budget_note` says `the wall will be the stop`). A wall below one tool step and a minimal answer is
+  still refused (D-102).
+- **Observed, not changed.** The node runs its loop under the liveness ceiling (ADR 0055), at least twice its wall, so its live fit
+  has room until a run nears the ceiling: on the register's case the node's forced final opens at 8,192 while its published
+  run-start fit says 1,024 (measured this release on a seat that answers every step with a tool call until the forced final). On a
+  run the fit left alone the node publishes the configured budget as `final_budget_fit`, where its docs say both fields are absent.
+- **Tests, written first and red.** The four door tests failed on the unfixed tree (the forced final opened at 8,192 and
+  `final_budget_fit` was absent: the wall-fit case, the door-against-node comparison, the run cut before its forced final, the
+  prediction published when the loop's own final was not narrowed) and the two installer tests failed against a no-op installer.
+  Three tests pass on both sides of the fix and guard it from the other direction: a seat with no rate, a named model with no rate
+  of its own and a wall with room publish no fit; the wall refusal carries none; and the node's published run-start fit is
+  unchanged by the move. Mutants, each compiled and each killed: the installer's closure returning the configured budget, the
+  closure never installed, a raised budget, the answer or the deferral left unstamped, the door installing with no rate, the node
+  no longer calling the shared function, the stamp ignoring its own narrowing rule.
+
+### Added — `agent_run(model: <seat>)` runs on the fleet node whose agent seat is that model, and every routed `agent_run` carries the schema the gate requires (D-125, C-46)
+
+Two defects shared one door. `agent_run` checked the `model` it was given against this box's llama-swap roster and refused any
+name that roster lacks (`explicitly requested model … is not in the endpoint's served roster`), however many fleet nodes ran
+it, so a seat another node runs could not be asked for by name from a box that does not serve it. And a routed `agent_run`
+(`route: remote | auto | spread | queue`, register C-46) built its contract with no `output_schema`, which the delegator refuses on
+every node as `noschema` (remote output merges only after a mechanical check) and which a node's own ack refuses too, so a
+routed call could never be placed on a node. The new real-gate test reproduces it on the unchanged tree:
+`route=remote: the contract carries no output_schema … node-a: noschema; node-b: noschema`.
+
+- **A name this box does not serve is looked up on the fleet.** With no route, or `route: "remote"`, the door reads the roster's
+  health once (`rosterprobe.Probe`, the read the single-shot lanes share: concurrent, 5 s a node, a down node named and not waited
+  on), takes the nodes that advertise the agent lane and whose `agent_seat` is the name (without regard to case), and sends ONE
+  contract through the delegator at `route=remote` with its remotes narrowed to them (a call's own list replaces the configured
+  roster and is checked against it). It runs on exactly one of them, placed by the usual gate. A composite node whose layer has an
+  agent-role seat of that model counts too, and the contract names the layer (register A-100); nodes that run the name as their own
+  agent seat are preferred, and one contract names one layer, so the first layered node's layer wins and only the nodes that serve
+  it from that layer are asked. The response names `node`, `placement`, `seat`, `model` (the seat that ran it), `route` and
+  `executed_on`, and carries no sizing of this box (the wall is the executing node's expectation, ADR 0055).
+- **It honours a name only when it IS a node's agent seat.** The contract names no seat, so the node runs its own agent seat, and
+  no wire field and no node changed: it works against the nodes as deployed. A name a node merely serves (an alias, a non-agent
+  seat) is refused naming the seat that node does run; nothing is guessed. The answer is checked against the name: a node that
+  changed its agent seat between the read and the dispatch runs another seat, and an answer whose `seat` differs is withheld
+  (`defer_class: config`). Running a seat that is not a node's agent seat needs the contract to name it, a wire change that widens
+  what a fleet-token holder can make a node load; it is not here.
+- **A name nobody runs keeps the roster sentence and says where the fleet looked,** one clause per node (its id, its agent seat,
+  a name it serves without running it as its agent seat, an agent lane that is off, a node that did not answer). `defer_class` is
+  `config` when every node answered and `infrastructure` when one did not, and the reason names that node; an entry the tailnet
+  guard never dials is the roster's to fix and stays `config`. A box with no `delegate_remotes` refuses byte for byte as before.
+- **The fork is narrow, and a model that cannot be honoured is no longer dropped.** A name this box serves runs here and never
+  reads the fleet; `route: "local"` never asks it whatever the name is; a local roster that cannot be read leaves the call on this
+  box. `route: "auto"`, `"spread"` and `"queue"` with a model are now refused (`defer_class: contract`, `steps: 0`, nothing asked of
+  the fleet, the reason names `route=remote`): they place by capacity, not by seat name, and the model used to be ignored without a
+  word. `route: "remote"` with a model asks the fleet whatever this box serves. `allow_browse` cannot travel (the browse tool drives
+  this machine's own browser) and is refused when the name could only run on a node.
+- **Every routed `agent_run` now passes the gate.** The goal goes through the delegation intake as a contract with a flat
+  `{answer}` `output_schema` (flat and string-only, like `offload_ask`'s): the wire's own ceilings (12 steps, 900 s) apply at the door, a field
+  the intake refuses (a thinking policy, a setup action) is refused there naming it (`defer_class: contract`), and a call with no
+  `timeout_sec` lets the executing node size the wall. The prose is still the `output` and the node's `{answer}` object rides
+  beside it as `structured`. `read_root` and `judge` do not travel, and the response's `notes` name each one the caller passed. A
+  deferral carries the node's `defer_class`, its `node` and `placement`, its steps and, when only the structuring failed, the
+  finished prose as `output` flagged `schema_miss`, as `offload_ask` does; the delegator's rescue of such an answer stays unwired
+  on this door.
+- **Tests, written first and red.** The fixture drives the real door at a real local roster and real scripted fleet nodes
+  (`/fleet/health`, `/fleet/dispatch`, `/fleet/jobs/{id}`) through the real delegator, and reads the engine's arguments through the
+  dispatch seam where a test needs them. With the door change removed, 23 of the 27 tests fail (the roster refusal for every named
+  seat, `noschema` for every routed call, a model on `auto`/`spread`/`queue` dispatched and ignored, no class, no notes, no
+  placement) and the other 4 pass on both sides: three guards (a locally served name and `route: "local"` never read the fleet; a
+  box with no nodes refuses as it did) and the unit test of the ledger guard's reading. The fixture keeps the ledger and every state path in a directory the test owns, checks
+  that configuration, and checks that the operator's real ledger took no row of the run (a fixture that sets its home after
+  the default configuration has fixed the ledger path writes to the real ledger; the package's `TestMain` records one such
+  incident). 24 mutants were run, each compiled and each killed after two survivors led to two more tests (the preference for
+  plain nodes over layered ones, and which layered node's layer is taken):
+  matching `served_models` instead of the agent seat, the engine handed the whole roster, a withheld answer published, no
+  schema, a model on `auto` ignored, forced local asking the fleet, an unreachable node classed `config`, the layer never named, the
+  fleet asked for a served name, notes dropped, a browse grant let through, the roster check dropped, the model not published,
+  a guard-refused entry classed `infrastructure`, an agent lane that is off still a target, the last layer taken, the
+  `route=remote` class forced to `config`, the contract error ignored, the deferral class, placement or finished answer dropped,
+  and the two refusal texts.
 
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 

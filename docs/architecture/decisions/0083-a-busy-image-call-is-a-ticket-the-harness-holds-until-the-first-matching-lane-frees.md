@@ -55,7 +55,9 @@ make the caller retry. Three things were still wrong once every lane was busy.
    time, so a caller behind it never holds the card against it. Without this two tickets on one idle card each read the other's
    place as in its way and neither would start.
 5. **One scanner per process decides; a goroutine per ticket in flight acts.** The scanner starts with the process's first ticket,
-   looks at its tickets every 10 s +/- 20 % (a chosen transport constant) oldest first, and ends with the last one. A scan
+   looks at its tickets every 10 s +/- 20 % (a chosen transport constant) oldest first, and ends with the last one. A ticket made while it
+   runs wakes it for an immediate scan; the ticket that starts it does not, because its first scan is the start (the lane reading the call
+   made is reused by that scan and is not asked for again a moment later). A scan
    decides and never runs a job, so a local run that waits in the lease line does not stall the scan of another ticket or the
    touch that keeps each ticket's place alive. For a waiting ticket it: keeps the place; **starts the local run when the lane
    question says the ticket would be served now** (at most one ticket per scan, the oldest) **and could read the lane** (a lane
