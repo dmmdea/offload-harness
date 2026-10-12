@@ -139,11 +139,11 @@ var (
 
 // busOf reads the PCI bus and device an event's message names, "" when it names none.
 func busOf(text string) string {
-	if m := gpuIDRE.FindStringSubmatch(text); m != nil {
-		return strings.ToLower(m[1]) + ":" + strings.ToLower(m[2])
+	if g := gpuIDRE.FindStringSubmatch(text); g != nil {
+		return strings.ToLower(g[1]) + ":" + strings.ToLower(g[2])
 	}
-	if m := pciRE.FindStringSubmatch(text); m != nil {
-		return strings.ToLower(m[1]) + ":" + strings.ToLower(m[2])
+	if p := pciRE.FindStringSubmatch(text); p != nil {
+		return strings.ToLower(p[1]) + ":" + strings.ToLower(p[2])
 	}
 	return ""
 }

@@ -40,7 +40,40 @@ Versioning: [SemVer](https://semver.org/).
   after the media-door branch that owns that file. A `stale_image` column on ledger rows is not added: a reader compares the
   row's hash with the deployed one.
 
-## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
+### Added — `gpu status` and `offload_status` show the driver's fault events for the leased card (C-83-B, A-128 part 3)
+
+- **What was missing.** A card that faults under a lease leaves one line in the driver's log (Windows: the System log, provider
+  `nvlddmkm`, id 153 `Error occurred on GPUID: b500`; Linux: `NVRM: Xid (PCI:0000:b5:00): 79, ...` in the kernel log), and nothing
+  in the harness showed it: 181 id-153 events since 2026-09-22 on the reference box were found by hand, weeks after the fact.
+- **What it does now.** `gpuactivity.ReadDriverEvents` reads the last 24 h and places each event on its card by PCI bus and device
+  (the record's GPUID `b500` is bus `b5`, device `00`; `nvidia-smi --query-gpu=index,uuid,pci.bus_id` ends `B5:00.0`; a second
+  small query inside `gpuactivity`, so the card sample is unchanged). The activity snapshot keeps the events of the cards the lease
+  holds (every card for a whole-node lease), newest first and capped at 20, counts those that name no card this box can place
+  (`driver_events_unattributed`: the Windows id 13 Graphics Exception records, 420 in 96 h on the reference box, carry no GPUID),
+  and carries a reader failure as `driver_events_note`. They print in `gpu status` (text, and `--json` under `activity`) and ride
+  in `offload_status.gpu_lease.activity`. **Facts, never a verdict**: a fault and a kill look alike in the log (A-128's kill test
+  tells them apart and is queued), so an event never moves the verdict, the brief line or any gate; a box with no source prints
+  byte-identically to before.
+- **Read-only, hidden, bounded.** Windows: one `powershell.exe` from System32 (`-NoProfile -NonInteractive`), a read-only
+  `Get-WinEvent` over the System log's `nvlddmkm` provider (24 h, the newest 1000, each record as XML; a log with no match is an
+  empty answer). Linux: `journalctl -k -o short-unix`, then `dmesg --time-format iso`. Every child starts through
+  `internal/winexec` (`TestEveryChildProcessStartIsHidden` stays green), the whole read is bounded at 8 s, and the answer is
+  cached for 60 s (failures too) so a status poll starts no process per call. The record's host name, user and device object
+  path are not carried. The reader is called only while a lease is held and the GPU sample is on.
+- **Checked live, read-only.** The production reader on the reference workstation: a 24 h window with no match returned no events
+  and no error in 0.6 s; a 96 h window through the same child and pipe returned 434 records (420 id 13, 14 id 153), all parsed, the
+  14 id-153 ones placed on cards 1 and 2 by the bus table.
+- **Tests.** `internal/gpuactivity/driverevents_test.go` (the parsers over a fixture of two real records hand-reduced with the
+  host name replaced, the kernel-log lines in journalctl and dmesg forms, the bus table in either case, the readers behind their
+  seams: one System32 PowerShell that is read-only, journalctl then dmesg, the window, the card table failing, the 60 s cache and a
+  cached failure; the snapshot: only the leased cards' events, whole-node, newest first and capped, unplaced counted, nothing read
+  without a lease or the GPU sample, no key for a box with no source, a reader failure as a note, the verdict untouched),
+  `internal/mcpserver/driver_events_status_test.go` and `gpu_status_driverevents_test.go` (both surfaces), written first and seen
+  red.
+- **Not changed, for a follow-up.** A-128's kill test (does killing a healthy render mid-sampling log id 153?) is queued, not
+  built, so these events stay facts. The Linux `Xid` line shape is the documented one: neither Linux gate host has an NVIDIA card
+  to have logged one.
+ - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 
 ### Fixed — `TestTheAnchoredClockDropsTheAdmissionAllowance` no longer fails on a loaded box for a cost that is not the poll budget
 

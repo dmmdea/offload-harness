@@ -863,6 +863,11 @@ read-only unless deliberately widened. See
   `gpu doctor` marks the running processes older than the installed build
   ([gpu-lease.md](gpu-lease.md)). Ledger rows do not get a `stale_image` column: a
   reader compares a row's hash with the deployed one.
+- **Driver events on the leased cards (C-83-B).** While a lease is held and the GPU sample is on, `gpu_lease.activity` carries
+  `driver_events` (the NVIDIA driver's recent fault events for the leased cards: Windows `nvlddmkm` System-log records, Linux
+  `NVRM: Xid` kernel-log lines), `driver_events_unattributed` and `driver_events_note` as facts that never move the verdict;
+  the reader is `statusDriverEvents` (wired only with the GPU sample, nil in the test fixture so no test starts PowerShell).
+  See [gpu-lease.md](gpu-lease.md#the-drivers-own-fault-events-for-the-leased-cards-c-83-b).
 - `local-offload doctor` checks the serving layer the tools depend on, and prints the same derived
   media routes — a route bound to a file that is absent exits non-zero.
 - **The most common operational surprise:** an MCP client holds its server process for the session,
