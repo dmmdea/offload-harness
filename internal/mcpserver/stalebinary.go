@@ -17,7 +17,13 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/buildinfo"
 )
+
+// startupIdentity is the seam the identity this process captured at start is read through (buildinfo.StartupIdentity):
+// a test names the image a process "started from" without capturing the test binary's own.
+var startupIdentity = buildinfo.StartupIdentity
 
 // exeStamp identifies the executable image a server runs from, cheap enough to read on every call.
 type exeStamp struct {
