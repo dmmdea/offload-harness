@@ -907,8 +907,9 @@ that test red (`scripts/mutation-check.sh`).
   removed the claim without taking that lock, so a release that landed between the restamp's read and its rename was followed by the
   rename, which put the record back and left the lease the operator had just ended held, with its wrapper none the wiser. The
   wrapper's tree record (a restamp right after its command starts) made the window reachable, and it surfaced once the recorder no
-  longer walked the whole process table on Windows (the slow walk had pushed the restamp past any release a test could issue): the
-  handoff test `TestReserveDoesNotWarmBackAfterLosingTheLease` failed on both Windows hosts. The release now takes the epoch lock.
+  longer walked the whole process table on Windows (that walk took about 20 ms on the development box and more on the slower
+  hosts, and had delayed the restamp past the release the handoff test issues): `TestReserveDoesNotWarmBackAfterLosingTheLease`
+  failed on both Windows hosts. The release now takes the epoch lock.
 - **Answered, not changed.** An overdue tree-orphan is ranked last in `/fleet/health` and is not a refusal, exactly as every overdue
   lease since 0.113.27 (a refusing node keeps the capacity wait from asking the one remote that could take the work); the field comment
   said "never freed" without saying that, and a test now pins both halves.
