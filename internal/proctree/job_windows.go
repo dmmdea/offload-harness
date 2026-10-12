@@ -236,11 +236,38 @@ func (p *platform) terminateExcept(t *Tree, protect map[int]bool) ([]int, error)
 			left = append(left, pid)
 			continue
 		}
-		if kerr := killPID(pid); kerr != nil && firstErr == nil {
+		if kerr := p.job.killMember(pid); kerr != nil && firstErr == nil {
 			firstErr = kerr
 		}
 	}
 	return left, firstErr
+}
+
+var procIsProcessInJob = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
+
+// killMember ends one process of the job after confirming, on the process handle itself, that it
+// is still in the job. The pids were listed a moment ago: one that exited and was reused since is
+// not a member, and a stop that only ever touches the tree's own processes leaves it alone.
+func (j *Job) killMember(pid int) error {
+	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		if err == windows.ERROR_INVALID_PARAMETER { // no such process: already gone
+			return nil
+		}
+		return fmt.Errorf("OpenProcess(%d): %w", pid, err)
+	}
+	defer windows.CloseHandle(h)
+	var in int32
+	if r, _, e := procIsProcessInJob.Call(uintptr(h), uintptr(j.h), uintptr(unsafe.Pointer(&in))); r == 0 {
+		return fmt.Errorf("IsProcessInJob(%d): %w", pid, e)
+	}
+	if in == 0 {
+		return nil // not a member of this job any more
+	}
+	if err := windows.TerminateProcess(h, 1); err != nil {
+		return fmt.Errorf("TerminateProcess(%d): %w", pid, err)
+	}
+	return nil
 }
 
 // killPID ends one process by pid. A process that is already gone is not an error.

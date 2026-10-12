@@ -84,3 +84,72 @@ func atoi(s string) int {
 	}
 	return n
 }
+
+// The command is created SUSPENDED and resumed only once it is inside the job, so it cannot spawn
+// a process that escapes the job first. The assignment is slowed down here and the child must not
+// have run at all by the time it happens.
+func TestTheChildDoesNotRunUntilItIsInsideTheJob(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	ranEarly := false
+	orig := assignProcess
+	assignProcess = func(job, proc windows.Handle) error {
+		time.Sleep(900 * time.Millisecond) // a running child would have started its own child by now
+		if _, err := os.Stat(pidFile); err == nil {
+			ranEarly = true
+		}
+		return orig(job, proc)
+	}
+	t.Cleanup(func() { assignProcess = orig })
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
+	hideChild(cmd)
+	cmd.Env = append(os.Environ(), "PROCTREE_HELPER=parent", "PROCTREE_PIDFILE="+pidFile)
+	tr, err := Start(cmd, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = tr.Terminate()
+		_ = tr.Close()
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+	if ranEarly {
+		t.Fatal("the command ran before it was inside the job object: whatever it spawned first would have escaped")
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(pidFile); err == nil {
+			return // and it runs once resumed
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the command was never resumed")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// Only a member of the job is ever ended by a protected stop: a process that is not in it (a pid
+// reused since the list was read) is left alone.
+func TestKillMemberLeavesAProcessThatIsNotInTheJob(t *testing.T) {
+	foreign := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
+	hideChild(foreign)
+	foreign.Env = append(os.Environ(), "PROCTREE_HELPER=sleeper")
+	if err := foreign.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reaped := make(chan struct{})
+	go func() { _ = foreign.Wait(); close(reaped) }()
+	t.Cleanup(func() { _ = foreign.Process.Kill(); <-reaped })
+	job, err := NewJob(JobLimits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = job.Close() })
+	if err := job.killMember(foreign.Process.Pid); err != nil {
+		t.Fatalf("killMember: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if !alive(foreign.Process.Pid) {
+		t.Fatal("a process that is not in the job was ended")
+	}
+}

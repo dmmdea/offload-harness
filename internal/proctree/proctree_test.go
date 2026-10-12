@@ -26,7 +26,7 @@ func TestHelperProcess(t *testing.T) {
 	if role == "" {
 		t.Skip("helper process only")
 	}
-	if role == "parent" {
+	if role == "parent" || role == "leaver" {
 		child := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
 		hideChild(child)
 		child.Env = append(os.Environ(), "PROCTREE_HELPER=sleeper")
@@ -34,6 +34,9 @@ func TestHelperProcess(t *testing.T) {
 			os.Exit(3)
 		}
 		_ = os.WriteFile(os.Getenv("PROCTREE_PIDFILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o644)
+		if role == "leaver" {
+			os.Exit(0) // leaves its child running: the child's parent is gone
+		}
 	}
 	time.Sleep(90 * time.Second)
 }
@@ -42,10 +45,17 @@ func TestHelperProcess(t *testing.T) {
 // the tree, the parent's pid and the grandchild's pid once the grandchild exists.
 func treeFixture(t *testing.T, opts Options) (tr *Tree, parent, grand int) {
 	t.Helper()
+	return roleFixture(t, "parent", opts)
+}
+
+// roleFixture is treeFixture for a helper role ("parent" stays; "leaver" exits at once and leaves
+// its child running).
+func roleFixture(t *testing.T, role string, opts Options) (tr *Tree, parent, grand int) {
+	t.Helper()
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
 	hideChild(cmd)
-	cmd.Env = append(os.Environ(), "PROCTREE_HELPER=parent", "PROCTREE_PIDFILE="+pidFile)
+	cmd.Env = append(os.Environ(), "PROCTREE_HELPER="+role, "PROCTREE_PIDFILE="+pidFile)
 	tr, err := Start(cmd, opts)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -177,4 +187,29 @@ func TestTerminateExceptSparesTheProtectedAndKillsTheRest(t *testing.T) {
 	if len(left) != 1 || left[0] != grand {
 		t.Fatalf("left = %v, want [%d]", left, grand)
 	}
+}
+
+// A member whose parent has exited is still a member: the command leaves its child running and
+// exits, so the child is reparented, but it is still in the job (Windows) or the group (Unix) and
+// is found and stopped with the tree. Walking parent links alone would lose it.
+func TestTerminateKillsAMemberWhoseParentExited(t *testing.T) {
+	tr, parent, grand := roleFixture(t, "leaver", Options{})
+	waitGone(t, "the leaving command", parent, 15*time.Second)
+	pids, err := tr.PIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range pids {
+		if p == grand {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the orphaned grandchild %d is still a member of the tree, members = %v", grand, pids)
+	}
+	if err := tr.Terminate(); err != nil {
+		t.Fatalf("Terminate: %v", err)
+	}
+	waitGone(t, "the orphaned grandchild", grand, 15*time.Second)
 }

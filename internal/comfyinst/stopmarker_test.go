@@ -71,7 +71,7 @@ func TestStopMarkerNeedsAPortForTheDefaultInstance(t *testing.T) {
 	delete(rec, "port")
 	writeMarker(t, dir, ".offload-launch.json", rec)
 
-	if got := StopMarker(context.Background(), dir, "", 0, host.deps(in)); got.Stopped || len(host.killedPIDs()) != 0 || !strings.Contains(got.Why, "port") {
+	if got := StopMarker(context.Background(), dir, "", 0, host.deps(in)); got.Stopped || len(host.killedPIDs()) != 0 || !strings.Contains(got.Why, "records no port") {
 		t.Fatalf("with no port the instance is left running and the reason says so: %+v", got)
 	}
 	if got := StopMarker(context.Background(), dir, "", in.port(t), host.deps(in)); !got.Stopped {
@@ -146,5 +146,30 @@ func TestPIDsOfOtherLeasesNamesOnlyLiveInstancesOfOtherLeases(t *testing.T) {
 	}
 	if got := PIDsOfOtherLeases("", 7, host.deps(nil).Alive); got != nil {
 		t.Fatalf("no comfy dir: %v", got)
+	}
+}
+
+// The proof takes a round trip to the instance; if the marker is rewritten for another process in
+// that window (the instance was relaunched), the explicit stop leaves it alone.
+func TestStopMarkerLeavesAnInstanceRelaunchedDuringTheProof(t *testing.T) {
+	dir := t.TempDir()
+	in := startInstance(t, testArgs)
+	host := newHost()
+	host.alive[4242] = true
+	host.start[4242] = 1_760_000_000_000 - 4000
+	writeMarker(t, dir, ".offload-launch-gaaaa1111.json", keyedMarker(in.port(t), 4242, 7, nil))
+	in.onStats = func() {
+		writeMarker(t, dir, ".offload-launch-gaaaa1111.json", keyedMarker(in.port(t), 5555, 7, nil))
+	}
+
+	got := StopMarker(context.Background(), dir, "gaaaa1111", 0, host.deps(in))
+
+	if got.Stopped || !strings.Contains(got.Why, "relaunched") {
+		t.Fatalf("outcome = %+v, want the relaunched instance reported and left", got)
+	}
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if in.interrupted != 0 || in.freed != 0 || len(host.killedPIDs()) != 0 {
+		t.Fatalf("a relaunched instance was touched: interrupted %d freed %d killed %v", in.interrupted, in.freed, host.killedPIDs())
 	}
 }

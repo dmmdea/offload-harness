@@ -35,6 +35,9 @@ func TestHelperRunWrapper(t *testing.T) {
 		os.Exit(90)
 	}
 	wrapperTickEvery = 150 * time.Millisecond
+	if ms, err := strconv.Atoi(os.Getenv("LO_WRAPPER_TICK_MS")); err == nil && ms > 0 {
+		wrapperTickEvery = time.Duration(ms) * time.Millisecond
+	}
 	if err := runGPUReserve(args); err != nil {
 		os.Stderr.WriteString("wrapper error: " + err.Error() + "\n")
 		os.Exit(91)
@@ -196,6 +199,27 @@ func TestWrapperRecordsItsTreeInTheLeaseRecord(t *testing.T) {
 			t.Errorf("the wrapper itself is not a member of the tree it started: %+v", mem)
 		}
 	}
+}
+
+// The tree is written right after the command starts, not at the first tick: a wrapper that dies
+// in its first seconds must still have its command on record. The tick here is an hour long, so
+// only the initial write can explain a record.
+func TestWrapperRecordsItsCommandBeforeTheFirstTick(t *testing.T) {
+	t.Setenv("LO_WRAPPER_TICK_MS", "3600000")
+	run := startTreeRun(t, "")
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, meta, _ := gpulease.InspectDirDetail(run.m.Dir()); meta != nil {
+			for _, mem := range meta.Tree {
+				if mem.PID == run.cmdPID {
+					return
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_, meta, _ := gpulease.InspectDirDetail(run.m.Dir())
+	t.Fatalf("the command (pid %d) was not on record before the first tick: %+v", run.cmdPID, meta)
 }
 
 // THE FIX FOR THE DOUBLE-BOOKING: a lease lost while its command runs ends the command AND what

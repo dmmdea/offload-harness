@@ -73,8 +73,37 @@ func TestWrapperDeadTreeAliveDoesNotFreeCard(t *testing.T) {
 		t.Fatalf("the claim of a tree-orphan lease must stay on disk, claims: %v", claims)
 	}
 	// Only the cards of the orphan stay claimed: a waiter that wants another card gets it.
-	if _, err := waiter.TryAcquire(ClassMedia, Options{Reason: "other card", Devices: []string{card1}, TTL: time.Hour}); err != nil {
+	other, err := waiter.TryAcquire(ClassMedia, Options{Reason: "other card", Devices: []string{card1}, TTL: time.Hour})
+	if err != nil {
 		t.Fatalf("a card the orphan does not hold must stay free: %v", err)
+	}
+	defer func() { _ = other.Release() }()
+	// That grant swept the directory for debris. A tree-orphan is a live lease, not debris: its
+	// claim and its record are exactly as they were.
+	if claims := claimFiles(t, m); claims[card0] == "" || !exists(epochRecordPath(m.leaseDir(), l.Epoch())) {
+		t.Fatalf("the debris sweep of another grant removed a tree-orphan's claim or record: claims %v", claims)
+	}
+}
+
+// A wrapper that is ALIVE is a healthy lease whatever its tree does: nothing is read from the
+// process table for it, and it is never a tree-orphan.
+func TestAHealthyWrapperIsNeverATreeOrphan(t *testing.T) {
+	m, _ := scopedManager(t)
+	l := mustDevices(t, m, card0)
+	if err := l.RecordTree([]TreeMember{{PID: 9001, StartMs: 4242}}); err != nil {
+		t.Fatal(err)
+	}
+	liveSet(t, 9001, os.Getpid()) // the wrapper (this process) and its member are both alive
+	walked := false
+	orig := processTreeFn
+	processTreeFn = func(int) ([]TreeProc, error) { walked = true; return nil, nil }
+	t.Cleanup(func() { processTreeFn = orig })
+	info := m.Inspect()
+	if !info.Held || info.TreeOrphan || len(info.TreeLive) != 0 {
+		t.Fatalf("a lease with a live wrapper is not a tree-orphan: %+v", info)
+	}
+	if walked {
+		t.Fatal("the process table was read for a lease whose wrapper is alive")
 	}
 }
 
@@ -483,11 +512,15 @@ func TestLegacyLeaseTreeIsFoundByWalkingTheDeadWrappersChildren(t *testing.T) {
 				set = append(set, 100)
 			}
 			liveSet(t, set...)
+			started := map[int]int64{}
+			for _, p := range c.walk {
+				started[p.PID] = p.StartMs
+			}
 			m.procStart = func(pid int) (int64, bool) {
 				if pid == 100 {
 					return 999_999, true // not the start the record holds (4242): recycled when alive
 				}
-				return leaseStart.Add(time.Minute).UnixMilli(), true
+				return started[pid], true // a member keeps the start the walk read: only the age rule can drop it
 			}
 			info := m.Inspect()
 			if c.wantMember == 0 {
@@ -582,16 +615,21 @@ func TestStandingCarriesTheTreeOrphanAndLeadsTheEscalation(t *testing.T) {
 		t.Fatalf("tree-orphan outranks stalled, orphaned and overdue, got %q", got)
 	}
 	m, _ := scopedManager(t)
-	l := mustDevices(t, m, card0)
-	if err := l.RecordTree([]TreeMember{{PID: 9001, StartMs: 4242}}); err != nil {
-		t.Fatal(err)
-	}
+	// Every holder reads as alive while the leases are taken (a grant sweeps the leases whose
+	// holder is gone); the orphan's wrapper dies afterwards.
+	set := liveSet(t, 5000, 9001, os.Getpid())
+	// The healthy lease has the LOWER epoch, so the worst standing is the orphan only if the
+	// precedence says so: taking the first lease would hide it.
 	healthy, err := asPID(m, 5000).TryAcquire(ClassMedia, Options{Reason: "healthy", Devices: []string{card1}, TTL: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = healthy.Release() }()
-	liveSet(t, 9001, 5000)
+	l := mustDevices(t, m, card0)
+	if err := l.RecordTree([]TreeMember{{PID: 9001, StartMs: 4242}}); err != nil {
+		t.Fatal(err)
+	}
+	set(9001, 5000)
 	infos := m.Leases()
 	if len(infos) != 2 {
 		t.Fatalf("both leases are live: %+v", infos)
