@@ -810,7 +810,7 @@ func (v View) Lines() []string {
 		}
 	}
 	if v.DriverEventsUnattributed > 0 {
-		out = append(out, fmt.Sprintf("driver events: %d more in the log name no card this box can place, so no card's list holds them", v.DriverEventsUnattributed))
+		out = append(out, fmt.Sprintf("driver events: %d more in the last 24 h name no card this box can place (for instance a Windows id 13 Graphics Exception), so no card's list holds them", v.DriverEventsUnattributed))
 	}
 	if v.DriverEventsNote != "" {
 		out = append(out, v.DriverEventsNote)

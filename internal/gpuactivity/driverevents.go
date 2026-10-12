@@ -90,8 +90,10 @@ const (
 	driverEventTimeout = 8 * time.Second
 	// driverEventTTL is how long one answer (or failure) is reused.
 	driverEventTTL = 60 * time.Second
-	// maxWinEvents caps the Windows read: a storm cannot make the child's output unbounded.
-	maxWinEvents = 500
+	// maxWinEvents caps the Windows read (the newest this many): a storm cannot make the child's output unbounded.
+	// The reference box logged 420 id-13 "Graphics Exception" records (which name no card) beside 14 id-153 ones in
+	// 96 h, so the cap leaves room for a day of both.
+	maxWinEvents = 1000
 	// maxDriverEventsShown caps the list a View carries (newest first).
 	maxDriverEventsShown = 20
 	// maxEventText caps one event's message.
@@ -304,7 +306,7 @@ func AttributeEvents(evs []DriverEvent, table map[string]BusCard) []DriverEvent 
 // winEventScript is the one command the Windows reader runs: read-only Get-WinEvent over the System log's nvlddmkm
 // provider for the last 24 h, newest first, capped, each record as XML. A log with no matching event is an empty
 // answer (exit 0); any other failure exits 2 with its message on stderr.
-const winEventScript = `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; try { Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='nvlddmkm'; StartTime=(Get-Date).AddHours(-24)} -MaxEvents 500 | ForEach-Object { $_.ToXml() } } catch { if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { exit 0 }; [Console]::Error.WriteLine($_.Exception.Message); exit 2 }`
+var winEventScript = fmt.Sprintf(`$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; try { Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='nvlddmkm'; StartTime=(Get-Date).AddHours(-%d)} -MaxEvents %d | ForEach-Object { $_.ToXml() } } catch { if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { exit 0 }; [Console]::Error.WriteLine($_.Exception.Message); exit 2 }`, int(driverEventWindow/time.Hour), maxWinEvents)
 
 // powershellPath is the System32 Windows PowerShell, by full path: the reader must not find a different one on PATH.
 func powershellPath() string {

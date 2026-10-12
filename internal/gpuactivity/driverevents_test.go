@@ -553,3 +553,26 @@ func TestReadDriverEventsIsSafeConcurrently(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// A record that names no card (the reference box logs hundreds of id-13 "Graphics Exception" ones beside the id-153
+// ones that carry a GPUID) parses with no bus: it is counted by the snapshot, never guessed onto a card.
+func TestAnEventWithNoGPUIDParsesWithNoBus(t *testing.T) {
+	rec := `<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='nvlddmkm'/><EventID Qualifiers='0'>13</EventID><Level>2</Level><TimeCreated SystemTime='2026-10-11T09:05:49.0000000Z'/><Computer>host.example.invalid</Computer></System><EventData><Data>\Device\0000013b</Data><Data>Graphics Exception: ESR 0x55a7b0=0xb040020 0x55a7b4=0x4</Data></EventData></Event>`
+	evs, err := ParseWinEvents(rec)
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("one record: %+v %v", evs, err)
+	}
+	if evs[0].ID != 13 || evs[0].Bus != "" || !strings.HasPrefix(evs[0].Text, "Graphics Exception") {
+		t.Errorf("an event with no GPUID has no bus: %+v", evs[0])
+	}
+	if got := AttributeEvents(evs, ParseBusTable(busTable)); got[0].UUID != "" {
+		t.Errorf("no bus, no card: %+v", got[0])
+	}
+}
+
+// The window and the cap in the PowerShell text are the constants the Go side states, not a second copy that can drift.
+func TestTheWindowsScriptCarriesTheWindowAndTheCapOfTheConstants(t *testing.T) {
+	if !strings.Contains(winEventScript, "AddHours(-24)") || !strings.Contains(winEventScript, "-MaxEvents 1000") {
+		t.Fatalf("the script must state a 24 h window and a 1000-record cap:\n%s", winEventScript)
+	}
+}
