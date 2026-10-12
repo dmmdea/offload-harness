@@ -108,7 +108,7 @@ func TestLeaseViewCarriesAnInferredScope(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(m.Dir(), "seen."+strconv.FormatUint(l.Epoch(), 10)), []byte(sidecar), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, act := localLeaseViewWithActivity(context.Background(), cfg)
+	_, act := localLeaseViewWithActivity(context.Background(), cfg, true)
 	if act.Holder == nil || len(act.Holder.Devices) == 0 {
 		t.Fatalf("the holder of a scoped legacy lease carries its cards, got %+v", act.Holder)
 	}
