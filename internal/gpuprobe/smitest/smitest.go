@@ -26,7 +26,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -36,6 +35,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // The synthetic cards the stand-in reports (repeated-nibble heads, the shape the leak gate treats as
@@ -107,7 +107,7 @@ func Install(t testing.TB, steps ...Step) *Stand {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if out, err := exec.CommandContext(ctx, dst, warmArg).CombinedOutput(); err != nil {
+	if out, err := winexec.CommandContext(ctx, dst, warmArg).CombinedOutput(); err != nil {
 		t.Fatalf("smitest: the stand-in does not start (does this package's TestMain call smitest.MaybeRun first?): %v\n%s", err, out)
 	}
 	return &Stand{state: state}

@@ -15,10 +15,6 @@ import (
 	"time"
 )
 
-// hideWindow is a no-op off Windows: there is no console window to hide
-// (same convention as gpu_hide_other.go / internal/accelclient/sidecar_other.go).
-func hideWindow(*exec.Cmd) {}
-
 // platformDeps reports NO holders on non-Windows — never an error — rather
 // than faking a Linux/macOS process-holder story this package does not
 // implement. This is not a missing feature: a live Linux binary can be

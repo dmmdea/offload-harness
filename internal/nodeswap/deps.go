@@ -12,7 +12,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // DefaultDeps wires the real, cross-platform half of Deps. The two
@@ -207,17 +207,15 @@ func inspectGPULease(lockPath, stateDir string) (GPULeaseInfo, error) {
 }
 
 // runPowerShell shells out with no visible window — every spawned console on
-// this operator's machines must stay hidden (house rule; see
-// deps_windows.go's hideWindow, applied here too since this file is the one
-// that actually invokes powershell.exe).
+// this operator's machines must stay hidden (house rule; winexec.CommandContext
+// builds the command hidden).
 func runPowerShell(ctx context.Context, timeout time.Duration, command string) (string, error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(runCtx, "powershell", "-NoProfile", "-NonInteractive", "-Command", command)
-	hideWindow(cmd)
+	cmd := winexec.CommandContext(runCtx, "powershell", "-NoProfile", "-NonInteractive", "-Command", command)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

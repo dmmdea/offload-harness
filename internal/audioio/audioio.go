@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // ErrNoAudioStream is what a conversion returns for an input that has no audio stream to convert: a
@@ -83,7 +85,7 @@ func ConvertToWav16k(audioPath, ffmpegPath string) (string, func(), error) {
 	cleanup := func() { _ = os.RemoveAll(dir) }
 
 	out := filepath.Join(dir, "audio16k.wav")
-	cmd := exec.Command(ffmpegPath, buildFFmpegArgs(audioPath, out)...)
+	cmd := winexec.Command(ffmpegPath, buildFFmpegArgs(audioPath, out)...)
 	if o, err := cmd.CombinedOutput(); err != nil {
 		cleanup()
 		return "", nil, convertFailure(audioPath, o, err)
@@ -133,7 +135,7 @@ func ConvertToOpus16k(audioPath, ffmpegPath string) (string, func(), error) {
 	cleanup := func() { _ = os.RemoveAll(dir) }
 
 	out := filepath.Join(dir, "audio16k.ogg")
-	cmd := exec.Command(ffmpegPath, buildOpusArgs(audioPath, out)...)
+	cmd := winexec.Command(ffmpegPath, buildOpusArgs(audioPath, out)...)
 	if o, err := cmd.CombinedOutput(); err != nil {
 		cleanup()
 		return "", nil, convertFailure(audioPath, o, err)

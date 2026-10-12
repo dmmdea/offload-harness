@@ -15,7 +15,6 @@ import (
 	"math/big"
 	"math/rand"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -67,6 +66,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/tasks"
 	"github.com/dmmdea/offload-harness/internal/verifier"
 	"github.com/dmmdea/offload-harness/internal/videoio"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 type tierOverrides struct {
@@ -3903,7 +3903,7 @@ func globalDeltaSampleFunc(run func() (string, error)) func(childPid int) (float
 // runNvidiaSmiMemory shells the global VRAM query the global-delta sampler
 // parses (the same query fleet-serve's 2s health sampler runs).
 func runNvidiaSmiMemory() (string, error) {
-	out, err := exec.Command("nvidia-smi", "--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits").Output()
+	out, err := winexec.Command("nvidia-smi", "--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits").Output()
 	return string(out), err
 }
 

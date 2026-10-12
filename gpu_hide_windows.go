@@ -4,7 +4,8 @@ package main
 
 import (
 	"os/exec"
-	"syscall"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // hideWindow makes a spawned child window-less on Windows.
@@ -13,12 +14,8 @@ import (
 // kills the process behind it — a detached GPU holder that dies silently leaves the
 // card unreserved while its operator believes it is protected, which is worse than
 // never having reserved it. CREATE_NO_WINDOW plus HideWindow covers both the console
-// allocation and the window itself.
+// allocation and the window itself. The flags live in winexec.HideWindow, the one
+// place every hidden child is built.
 func hideWindow(cmd *exec.Cmd) {
-	const createNoWindow = 0x08000000
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-	}
-	cmd.SysProcAttr.HideWindow = true
-	cmd.SysProcAttr.CreationFlags |= createNoWindow
+	winexec.HideWindow(cmd)
 }

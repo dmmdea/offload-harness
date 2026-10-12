@@ -42,13 +42,14 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 const (
@@ -167,7 +168,7 @@ func addDir(list, dir string) string {
 func warm(exe string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, exe)
+	cmd := winexec.CommandContext(ctx, exe)
 	cmd.Env = append(os.Environ(), warmEnv+"=1")
 	warmed.Add(1)
 	_ = cmd.Run()

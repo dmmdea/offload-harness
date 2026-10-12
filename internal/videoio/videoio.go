@@ -7,13 +7,13 @@ package videoio
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/imageio"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // buildFFmpegArgs builds the ffmpeg argument list: decode videoPath, sample at
@@ -79,7 +79,7 @@ func SampleFramesWindow(videoPath, ffmpegPath string, start, dur, fps float64, m
 	defer os.RemoveAll(dir)
 
 	pattern := filepath.Join(dir, "frame_%03d.jpg")
-	cmd := exec.Command(ffmpegPath, buildFFmpegWindowArgs(videoPath, pattern, start, dur, fps, maxFrames, width)...)
+	cmd := winexec.Command(ffmpegPath, buildFFmpegWindowArgs(videoPath, pattern, start, dur, fps, maxFrames, width)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("videoio: ffmpeg failed: %w (%s)", err, string(out))
 	}
@@ -123,7 +123,7 @@ func Duration(videoPath, ffmpegPath string) (float64, error) {
 	if _, err := os.Stat(videoPath); err != nil {
 		return 0, fmt.Errorf("videoio: video %q: %w", videoPath, err)
 	}
-	cmd := exec.Command(ProbePath(ffmpegPath), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", videoPath)
+	cmd := winexec.Command(ProbePath(ffmpegPath), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", videoPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("videoio: ffprobe failed: %w (%s)", err, string(out))
@@ -154,7 +154,7 @@ func SampleFrames(videoPath, ffmpegPath string, fps float64, maxFrames, width, m
 	defer os.RemoveAll(dir)
 
 	pattern := filepath.Join(dir, "frame_%03d.jpg")
-	cmd := exec.Command(ffmpegPath, buildFFmpegArgs(videoPath, pattern, fps, maxFrames, width)...)
+	cmd := winexec.Command(ffmpegPath, buildFFmpegArgs(videoPath, pattern, fps, maxFrames, width)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("videoio: ffmpeg failed: %w (%s)", err, string(out))
 	}

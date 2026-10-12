@@ -11,12 +11,12 @@ import (
 	"flag"
 	"fmt"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 	"io"
 	"log"
 	"math"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -2435,7 +2435,7 @@ func parseContractFile(path string) ([]delegate.SubtaskSpec, error) {
 // rather than extended: the pipeline's per-process footprint delta sampler
 // also depends on this exact 2-field shape).
 func nvidiaSmiMemory() (string, error) {
-	out, err := exec.Command("nvidia-smi", "--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits").Output()
+	out, err := winexec.Command("nvidia-smi", "--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits").Output()
 	return string(out), err
 }
 
@@ -2593,7 +2593,7 @@ func gpuArchFromName(name string) string {
 // (best-effort: "" when the query fails — the probe already proved the GPU
 // works, and the arch mapper turns "" into the vendor fallback).
 func nvidiaSmiGPUName() string {
-	out, err := exec.Command("nvidia-smi", "--query-gpu=name", "--format=csv,noheader").Output()
+	out, err := winexec.Command("nvidia-smi", "--query-gpu=name", "--format=csv,noheader").Output()
 	if err != nil {
 		return ""
 	}

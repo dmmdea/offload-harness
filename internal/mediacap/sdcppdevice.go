@@ -22,10 +22,11 @@ package mediacap
 
 import (
 	"context"
-	"os/exec"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // sdcppDeviceListTimeout bounds the `--list-devices` probe (review finding,
@@ -128,7 +129,7 @@ type sdcppDeviceLister func(bin string) (string, error)
 func ExecSdcppDeviceLister(bin string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), sdcppDeviceListTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, bin, "--list-devices").CombinedOutput()
+	out, err := winexec.CommandContext(ctx, bin, "--list-devices").CombinedOutput()
 	return string(out), err
 }
 
