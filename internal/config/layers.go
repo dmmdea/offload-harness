@@ -230,9 +230,9 @@ func (c Config) LayerPins(model string) ([]string, bool) {
 
 // DisplayFloorGiB is the desktop floor the declared layers keep on the display card: the largest
 // display_floor_gib among the layers guarded by display_floor, 0 when none declares one. The card
-// allocator reads it, so that a display card the presence key has opened (gpu reserve --cards, an
-// auto-placed media call) is held to the SAME free-VRAM floor the display layer's own guard keeps,
-// not only to the layer's placement path. A floor with no display_floor guard behind it is not in
+// allocator reads it, so that the display card it opens up to gpu_display_cap_pct (gpu reserve
+// --cards, an auto-placed media call) is also held to the SAME free-VRAM floor the display layer's
+// own guard keeps when that is stricter than the cap, not only to the layer's placement path. A floor with no display_floor guard behind it is not in
 // force (the guard is what applies it), exactly as ValidateLayers reads the pair.
 func (c Config) DisplayFloorGiB() float64 {
 	floor := 0.0

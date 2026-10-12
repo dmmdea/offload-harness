@@ -313,7 +313,7 @@ func acquireAutoCards(m *gpulease.Manager, class gpulease.Class, opts gpulease.O
 		// sees them and the loop makes progress; the cap only bounds a pathological churn, after
 		// which the picked set is queued on like any other.
 		if !free || lost >= maxAutoClaimRetries {
-			// The set was chosen against the operator's presence and the desktop floor as they are
+			// The set was chosen against the display card's cap and the VRAM in use on it as they are
 			// NOW, and a place in line can be hours long. When the card comes free the same rule is
 			// asked again from fresh readings (GrantCheck): if the display card no longer qualifies
 			// the grant is refused, and this loop chooses again: another card the request still fits,
