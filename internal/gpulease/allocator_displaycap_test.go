@@ -283,3 +283,20 @@ func TestACapWithNoDisplayCardInTheReadingChangesNothing(t *testing.T) {
 		t.Fatalf("with no display card the cap has nothing to hold: %v %v", a.Devices, err)
 	}
 }
+
+// A job that lands exactly on the cap is admitted. The share of a total is not exact in floating point
+// (10 x 40 / 100 is fine, but 6.1 - 2.1 is 3.9999999999999996, under 4), so the comparison holds a tolerance far
+// below anything a card reports: 3.9 GiB in use of 10 plus a declared 2.1 is exactly 60 percent.
+func TestAJobThatLandsExactlyOnTheCapIsAdmittedDespiteFloatError(t *testing.T) {
+	in := capInput(2.1, 60)
+	in.Cards[1].VRAMTotalGiB, in.Cards[1].VRAMFreeGiB = 10, 6.1
+	a, err := Allocate(in)
+	if err != nil || len(a.Devices) != 1 || a.Devices[0] != "gpu-bbbb0000" {
+		t.Fatalf("3.9 in use + 2.1 declared = 6.0 of 10 is exactly the 60 percent cap: want the display card, got %v %v (skipped %+v)", a.Devices, err, a.Skipped)
+	}
+	in = capInput(2.2, 60) // a tenth of a GiB over
+	in.Cards[1].VRAMTotalGiB, in.Cards[1].VRAMFreeGiB = 10, 6.1
+	if a, err = Allocate(in); err != nil || a.Devices[0] == "gpu-bbbb0000" {
+		t.Fatalf("0.1 GiB over the cap is over: %v %v", a.Devices, err)
+	}
+}
