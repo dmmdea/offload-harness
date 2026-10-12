@@ -9,6 +9,7 @@ package fleetnode
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -163,4 +164,41 @@ func TestSmiDeviceProbePublishesTheThermalAnswerOnALaterTick(t *testing.T) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
+}
+
+// An answer is aged from when its query STARTED: its data was taken then, and counting from the moment the query returned
+// would publish a stale "cool" for as long as the query ran past the 90 s the field promises.
+func TestAThermalAnswerIsAgedFromWhenItsQueryStarted(t *testing.T) {
+	clk := newThermalClock()
+	var calls int
+	var mu sync.Mutex
+	read := func(ctx context.Context) ([]gpuprobe.Thermal, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			clk.advance(50 * time.Second) // the first query takes 50 s of the node's time
+			return hotCard0(), nil
+		}
+		return nil, errors.New("nvidia-smi: exit status 9")
+	}
+	p, cache := newSmiProbe(smiRun(smiTwoCards), read, clk.now, (&logLines{}).logf)
+	if _, err := p(); err != nil { // t = 0: starts the query, which returns at t = 50
+		t.Fatal(err)
+	}
+	cache.wg.Wait()
+	tick := func(label string, want bool) {
+		t.Helper()
+		devs, err := p()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cache.wg.Wait()
+		if got := devs[0].TemperatureC != nil; got != want {
+			t.Fatalf("%s: device 0 carries a temperature = %v, want %v", label, got, want)
+		}
+	}
+	tick("t=50, the answer's data is 50 s old", true)
+	clk.advance(41 * time.Second)
+	tick("t=91, the answer's data is 91 s old although it returned 41 s ago", false)
 }
