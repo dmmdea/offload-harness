@@ -811,6 +811,18 @@ read or examined, or a process table that cannot be listed is a finding, not a p
 audit is not green. `--write-audit` records the verdict as `gpu/reader-audit.json`, **red as well as green**, so a stale green
 cannot outlive a newer old binary.
 
+**Running processes older than the installed build (D-36).** A rename-swap deploy replaces the installed binary while every
+process already running keeps the image it started from. For each running binary the audit reached, `gpu doctor` compares
+the version its build marker states with the installed build's, read from the **installed file** (the doctor's own
+executable path, through the audit's own marker reader `gpulease.ReadBuildMarkerVersion`, so one file cannot read two
+versions): the older ones carry `older_than_installed` in `--json` and an "older than the installed build" line in the text,
+followed by a summary with their pids. It is information and not a finding: the exit status and the reader-audit marker do
+not move. The installed file is read, not the doctor's compiled-in version, because the doctor may itself be a pre-swap
+process. A binary with no build marker, or a version that is not `major.minor.patch`, is never called older (unknown stays
+unknown), and when the installed version cannot be read a note says no comparison was made. The comparison is by version:
+two builds of one version are not told apart here (the MCP server's `process` block compares bytes,
+[mcp-server.md](mcp-server.md)).
+
 **What green does and does not mean.** Green means every reader the audit *reached* is aware. The output lists what it
 scanned **and what it did not enter** (directories past the depth cap, 3 levels below a scan root unless `--depth` says
 otherwise, and `node_modules` and `.git`), and a green with gaps says so on the verdict line. By design it cannot reach: a

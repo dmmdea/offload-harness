@@ -829,7 +829,7 @@ read-only unless deliberately widened. See
 - **One block, or the brief form (0.137.0).** `offload_status` takes one optional argument,
   `section`. No argument (or `all`) is the whole payload, byte-identical to the answer before the
   argument existed. A block name (`local`, `media`, `remote`, `accelerators`, `reuse`, `fleet`,
-  `kv_cache_server`, `gpu_lease`, `pair`) returns `{<block>: …}` and computes nothing else: the fleet block
+  `kv_cache_server`, `gpu_lease`, `pair`, `media_queue`, `process`) returns `{<block>: …}` and computes nothing else: the fleet block
   runs no nvidia-smi, the lease block probes no node. `accelerators` asked for by name on a box that
   lists none is `{}`, never `null`. `pair` is reported only with `pair_workloads_enabled` on: `{mode, relay?, reason?}`, which way
   this box's PAIR emitter reports (`local ingress`, `node-info fallback`, `relay` with the member's route URL, or `off` with
@@ -844,6 +844,25 @@ read-only unless deliberately widened. See
   dispatch and the schema's enum. Measured on the reference box (2026-09-22, three fleet nodes, a
   media lease held): full 18,768 bytes, `brief` 4,426 (23.6%), `fleet` 3,786 (20.2%), `gpu_lease`
   8,028 (42.8% of the full answer).
+- **`process`: which image this server runs, and whether the installed build has moved on (D-36).** A rename-swap
+  deploy replaces the installed binary while every MCP server already running keeps the image it started from, so a
+  session could write rows with old behaviour for days and nothing said so (the register counted 13 of 18 MCP processes
+  older than the deployed build). The block is `{version, build_sha256, installed_version?, stale_image?, note?}`:
+  the version and the build hash this process stamps on its rows, and the comparison with the file now at the path it
+  started from. `stale_image` is `true` when the installed bytes differ, `false` when they are equal, and **absent with
+  a `note` when the installed file cannot be read** (never "fresh" on a failure); `installed_version` is the build
+  marker the installed file carries. `mcpserver.Run` takes the identity from `buildinfo.CaptureStartup()` and holds it on
+  the `Server`, so the block is built from what the server holds and not from the process global; a server that holds
+  none (the test seam, or a node process that does not capture one) has no `process` block, and asked for by name it is
+  `{}`, as `pair`'s is. The hash is the one every row carries: `buildinfo.BuildSHA256` used to hash the executable
+  lazily at its first call, so a process whose first delegation came after a swap stamped its rows with the NEW
+  build's hash; `CaptureStartup` takes that one latch at start. A short CLI call never captures and keeps the lazy path
+  (no 60 MB hash per hook invocation). A status call does not hash the installed file either: its stat is compared with
+  the one the process saw at start, and only a moved stat is hashed (once per stat, then cached). A process that
+  started before this build shows no block at all: it predates the field, so the first proof is the next restart.
+  `gpu doctor` marks the running processes older than the installed build
+  ([gpu-lease.md](gpu-lease.md)). Ledger rows do not get a `stale_image` column: a
+  reader compares a row's hash with the deployed one.
 - `local-offload doctor` checks the serving layer the tools depend on, and prints the same derived
   media routes — a route bound to a file that is absent exits non-zero.
 - **The most common operational surprise:** an MCP client holds its server process for the session,
@@ -859,7 +878,11 @@ manifest is a repo-root file.
 `status_section_test.go` covers `offload_status`'s `section` argument over the in-memory MCP
 transport: the default against the golden in `testdata/`, each block alone, the brief form, the
 refusals, `config_error` ordering, the schema's enum, and that the fleet section never samples the
-GPUs.
+GPUs. The fixture holds a fixed startup identity (a fixture version over a fixture installed image), so the
+`process` block is in the pinned answer with constant values and the test binary's own build hash never reaches the
+golden. `stale_image_test.go` covers the block itself: stale after a swap to another version, fresh for the same
+bytes, unknown (no key, a note) for an unreadable installed file, and no hash while the installed file's stat is
+unchanged.
 
 ## Common pitfalls
 
@@ -875,6 +898,8 @@ GPUs.
   handlers
 - [`internal/mcpserver/status_section.go`](../../internal/mcpserver/status_section.go) —
   `offload_status`'s block table, `section` parsing and the brief lines
+- [`internal/mcpserver/stale_image.go`](../../internal/mcpserver/stale_image.go) — the `process` block: the
+  startup identity the server holds and the stale-image comparison
 - [`internal/askjob`](../../internal/askjob/ask.go) — `offload_ask`’s contract builder (goal,
   output schema, and the grounded acceptance anchor)
 - [`internal/askcache`](../../internal/askcache/askcache.go) — `offload_ask`’s content-addressed,

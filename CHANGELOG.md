@@ -6,6 +6,40 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — `offload_status` names the image an MCP server runs and says when the installed build has moved on (D-36)
+
+- **What was wrong.** A rename-swap deploy replaces the installed binary while every MCP server already running keeps the
+  image it started from, so a session wrote rows with old behaviour for days and nothing said so: `offload_status` announced
+  only the version it started with, and `gpu doctor` listed 13 older-build harness processes beside 10 current ones
+  (2026-10-11) for the operator to compare by eye. Underneath, `buildinfo.BuildSHA256` hashed the executable lazily at its first
+  call, so a long-lived process whose first delegation came after a swap hashed the NEW file at the path it started from and
+  stamped its rows `harness_build_sha256` of a build it was not running.
+- **The fix.** `buildinfo.CaptureStartup()` takes that one latch at start (the version, the hash, the path and the stat of the
+  image, read through one handle), and `mcpserver.Run` calls it and holds the identity on the `Server`. `offload_status` gains a
+  `process` block `{version, build_sha256, installed_version?, stale_image?, note?}`, built from the identity the server holds
+  (absent for a server that holds none, `{}` when asked for by name, as `pair` is): `stale_image` is `true` when the installed
+  bytes differ from the image the process started from, `false` when they are equal, and absent with a `note` when the installed
+  file cannot be read. A status call hashes the installed file only once its stat has moved from the one the process saw at
+  start, and caches the result per stat. `gpu doctor` marks each running binary older than the installed build
+  (`older_than_installed` in `--json`, a line and a summary with the pids in the text), reading the installed version from the
+  installed file through the audit's own marker reader (`gpulease.ReadBuildMarkerVersion`, exported from the audit's scan).
+  A short CLI call never captures and keeps the lazy hash, so a hook invocation does not hash the whole executable.
+- **The default answer moves.** The full `offload_status` answer gains the `process` block, so
+  `testdata/offload_status_default.golden.json` is re-pinned (`OFFLOAD_UPDATE_GOLDEN=1`) and `statusFixture` injects a fixed
+  startup identity: the pinned answer carries constant values and never the test binary's own hash.
+- **Tests.** `internal/buildinfo/stale_test.go` (the hash after a swap is the captured image's, once-only capture, the lazy path
+  for a process that never captures, an unreadable image is absent and not invented), `internal/gpulease/buildmarker_test.go`
+  (the exported reader, across a read-chunk edge, no marker, missing file), `internal/mcpserver/stale_image_test.go` (stale
+  after a swap in both directions, fresh for the same bytes, unknown for an unreadable file, no hash while the stat is
+  unchanged, the block in the full answer, the injected identity and never the test binary's, absent without an identity, `Run`'s
+  identity equals the pair a row carries) and `gpu_doctor_stale_test.go` (older marked, the installed version read from the file
+  and not the doctor's own constant, no marker is never older, an unreadable installed version is said and compares nothing),
+  written first and seen red.
+- **Not changed.** Processes started before this build show no block (they predate the field), so the real-world proof is the
+  next rename-swap. The fleet node (`runFleetServe`) does not capture yet: that is one call in `main.go`, left to a follow-up
+  after the media-door branch that owns that file. A `stale_image` column on ledger rows is not added: a reader compares the
+  row's hash with the deployed one.
+
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 
 ### Fixed — `TestTheAnchoredClockDropsTheAdmissionAllowance` no longer fails on a loaded box for a cost that is not the poll budget
