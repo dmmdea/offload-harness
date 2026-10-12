@@ -754,7 +754,7 @@ The bf16 row is held back for its text encoder. Under `--gpu-only` ComfyUI takes
 storage card) and builds the whole 16.33 GiB bf16 encoder there, before the DisTorch2 allocation string that splits it is attached; on a 15.9 GiB card that is
 out of memory (the one live card-only run of the row failed 1.4 s in, with 14.10 GiB allocated, building the encoder's output layer), so no resident share or
 peak figure in the row can place it on any 16 GB pair. No benchmark arm ran this split on two non-display cards (the row's evidence says so), and the 13.3 GiB the
-row's evidence line called the encoder's share is the bf16 DiT file's size, not the encoder's. A fp8 encoder (8.74 GiB), as the measured edit rows use, is built whole on `cuda:0` and fits, which is why those rows run.
+row's evidence line called the encoder's share is the bf16 DiT file's size, not the encoder's. An fp8 encoder (8.74 GiB), as the edit rows use, is built whole on `cuda:0` and fits, which is why those rows run.
 Each held-back row therefore carries a `blocked` sentence (`render/multicard-recipes.json`, `Blocked` in `internal/mediacap/multicard.go`, pinned together): it stays in the
 table for the proof arm, but it is no recipe. `findRecipe` refuses it by name for every caller (the planner, the builders, the runners), `FindMulticardRow` does not
 return it, so the host-RAM estimate, the doctor and the typed doors see a binding without a recipe, and the door's refusal says which row is held back and why. One int8
