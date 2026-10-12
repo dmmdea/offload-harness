@@ -214,6 +214,7 @@ type ciScriptSandbox struct {
 	log      string // the stand-ins append the calls they receive here
 	envFile  string // GITHUB_ENV
 	pathFile string // GITHUB_PATH
+	tmp      string // the temp dir of a step (TMPDIR)
 }
 
 func newCIScriptSandbox(t *testing.T) *ciScriptSandbox {
@@ -228,8 +229,9 @@ func newCIScriptSandbox(t *testing.T) *ciScriptSandbox {
 		log:      filepath.Join(root, "calls.log"),
 		envFile:  filepath.Join(root, "github_env"),
 		pathFile: filepath.Join(root, "github_path"),
+		tmp:      filepath.Join(root, "tmp"),
 	}
-	for _, d := range []string{s.dir, s.bin, s.scripts} {
+	for _, d := range []string{s.dir, s.bin, s.scripts, s.tmp} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatalf("scratch directory: %v", err)
 		}
@@ -298,7 +300,7 @@ func (s *ciScriptSandbox) file(name, content string) string {
 
 // environ is the environment of a step: the host's, minus everything that would let a variable of the
 // developer's own shell (a GITHUB_* token, a GOTOOLCHAIN override) change the outcome, plus the
-// runner's file commands and the stand-ins on PATH. extra wins over all of it.
+// runner's file commands, the sandbox's own temp dir and the stand-ins on PATH. extra wins over all of it.
 func (s *ciScriptSandbox) environ(extra []string) []string {
 	var env []string
 	for _, kv := range os.Environ() {
@@ -316,6 +318,11 @@ func (s *ciScriptSandbox) environ(extra []string) []string {
 		"GITHUB_ENV="+filepath.ToSlash(s.envFile),
 		"GITHUB_PATH="+filepath.ToSlash(s.pathFile),
 		"FAKE_LOG="+filepath.ToSlash(s.log),
+		// A step's own temp files (the Windows cage step starts with `log=$(mktemp)`) go in the sandbox, which t.TempDir
+		// removes, and not in the host's temp dir.
+		"TMPDIR="+filepath.ToSlash(s.tmp),
+		"TMP="+filepath.ToSlash(s.tmp),
+		"TEMP="+filepath.ToSlash(s.tmp),
 	)
 	return append(env, extra...)
 }
@@ -450,6 +457,24 @@ func TestCIScriptSandboxStartsAStepLikeTheRunner(t *testing.T) {
 		if out, rc := sb.runPlain(c.script); rc != 0 || !strings.Contains(out, "reached") {
 			t.Errorf("%s, under a bare bash: the step must carry on (rc=%d, output=%q)", c.name, rc, out)
 		}
+	}
+}
+
+// TestCIScriptSandboxKeepsAStepsTempFilesInsideItself: a step that makes a temp file (the Windows cage step starts with
+// `log=$(mktemp)`) makes it in the sandbox's own folder, which t.TempDir removes, and not in the host's temp dir. The
+// sandbox passed the host's temp dir through, and the suite left one tmp.XXXXXXXXXX file of go test output in it for every
+// run of such a step: 18 in one run of the whole suite, found by the temp-folder tripwire (GPU-I8c).
+func TestCIScriptSandboxKeepsAStepsTempFilesInsideItself(t *testing.T) {
+	sb := newCIScriptSandbox(t)
+	if out, rc := sb.run("mktemp > /dev/null"); rc != 0 {
+		t.Fatalf("the step failed (rc=%d): %s", rc, out)
+	}
+	entries, err := os.ReadDir(sb.tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "tmp.") {
+		t.Errorf("the temp file the step made is not in the sandbox's temp folder %s: %v", sb.tmp, entries)
 	}
 }
 
