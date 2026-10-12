@@ -149,6 +149,23 @@ exits **3** on it (1 for any other failure, 2 for a caller mistake). A `--no-lif
 exits 3 when its parent's server answers `/system_stats` with an error three times while it waits
 for it, and when the server never answers at all.
 
+**A dead ComfyUI is a typed class on the Go side, and the two calls that had no bound have one (D-38, issue #72).**
+- **The class.** On a *server unusable* failure `comfy-render.mjs` prints the usual `RENDER FAILED: <why>` line and, on a line of its
+  own after it, `IGPU_CLASS=comfy_unusable` (the form `gpugen.Generate` reads from the retained output of any child, the same
+  marker the iGPU engines print), then exits 3. `comfy-generate.mjs` relays its child's stderr unchanged
+  (`relayRenderChild` in `batch-jobs.mjs`), so the line reaches the output the Go side reads. `Generate` returns a `RunError` of class
+  `comfy_unusable`, `pipeline.classifyErr` now honours a typed `RunError` class like `gpugen.ClassifyErr` does (it used to re-guess
+  from the words of the message), and the ledger row carries `err_class` `comfy_unusable` (reason code `infrastructure`) instead of
+  `other`. Only the image runner (`comfy-render.mjs`, through `comfy-generate.mjs`) prints the line today; the video, animate, music,
+  edit, inpaint, upscale and run-graph runners raise the same *server unusable* error but do not print it yet, so their failures
+  still read from the words of their message.
+- **The bounds.** `POST /prompt` and `GET /view` passed no `AbortSignal` (the `/system_stats`, `/queue` and `/history` calls always
+  did), so a ComfyUI that accepts the connection and never answers held the exclusive GPU slot. `rawSubmit` is bounded by
+  `SUBMIT_TIMEOUT_MS` (120 s: the call validates and queues, it does not run) and `fetchView` by `VIEW_TIMEOUT_MS` (600 s), which
+  covers the **whole** request, the body read included (ComfyUI is on loopback, so 600 s is a ceiling for a multi-GB video, not an
+  estimate of its transfer). Both take a `timeoutMs` a test can shorten; a timed-out call rejects with
+  `ComfyUI POST /prompt timeout: no complete answer within <N> ms ...` (or `GET /view`), which the Go side classes `timeout`.
+
 **Picking the produced file from `/history` never trusts node-id order alone (found 2026-09-23).**
 `comfy-output.mjs`'s `firstOutputFile()` scans the `/history` outputs object for the first node
 carrying a file descriptor; JS enumerates integer-like object keys in ASCENDING NUMERIC order
@@ -420,6 +437,8 @@ CLI verbs `generate-image` (`--family`, `--transparent`), `inpaint-image`, `gene
 `transparent` on `offload_edit_image_generative`). The generative instruction edit is MCP-only
 (`offload_edit_image_generative`); ad-hoc runs use `render/comfy-edit.mjs` directly. The
 composition lane is also a fleet task (`compose-video`), restricted to vetted templates.
+A bare `--` ends the flags on every one of these verbs (CT-52): `generate-audio out.wav -- "--- Intro ---"` keeps a text that starts with
+a dash, and so do `generate-video`, `animate-character` and the verbs that take one file or text (a lone `-` is still stdin).
 
 ## Dependencies
 
@@ -1639,6 +1658,15 @@ Every runner takes `--timeout-sec`; the pipeline passes its timeout minus a 15 s
 - **Flags first, then `--`, then the positionals.** The pipeline sends `--sd-bin ... --model ... -- <out> [<still>] "<prompt>"` (animate: `-- <out> <ref> <driver> "<prompt>"`; audio: `-- <out> "<text>"`), and every runner's `parseArgs` treats a bare `--` as the end of flag parsing. A prompt, TTS text or lyrics that starts with `--` (a section marker such as `--- Intro ---`) therefore stays a positional instead of being read as a flag that swallows the next token. A hand run may still put the positionals first when none of them starts with `--`.
 - **One binary-resolution rule.** The Go side resolves each bound engine binary (`sdcpp_bin`, `animategen_sdcpp_bin`, `animategen_depth_bin`, `audiocpp_bin`) with `mediaops.ResolveBinary` (an explicit path is stat'd, a bare name is looked up on PATH, which is exactly what `doctor` and `offload_status` report) and passes the ABSOLUTE path; a value that resolves to nothing is a defer naming the key, before the lease. The runners refuse a non-absolute `--sd-bin` / `--depth-bin` / `--bin` with `BINARY_NOT_ABSOLUTE`, so a bare `sd-cli` that `doctor` shows CONFIGURED can no longer pass doctor and then fail every call.
 - **The output directory is made up front.** The pipeline creates the directory the result lands in before it takes the lease and reports the `MkdirAll` error as a defer (`cannot create the output directory ...`); the runner repeats the check and fails with `OUT_DIR_UNWRITABLE` before it spawns anything, so a render never ends in "cannot write the output" after minutes of GPU time.
+- **A bound route whose file is gone is a typed defer before the lease (CT-54).** The five engine lanes (sdcpp video, sdcpp animate,
+  audio.cpp voice and music, the sdcpp image lane) read the same `mediacap` derivation the fleet node's door, `doctor` and
+  `offload_status` read, after their own checks of the bindings (and, on the iGPU lanes, of the engine binary) and before the output
+  directory, the seed, the prompt refiner and the lease. A route that derives BOUND-BUT-MISSING (the config binds it and a weight, the runner script, ffmpeg or ffprobe is not
+  there) defers with `err_class` `route_not_ready`; the reason names the route, the config key and the missing path, and says another
+  node may serve it. Before this a local call took the media lease, spawned the runner and deferred `other` ("--model not found")
+  milliseconds later, while a node answered the same condition typed (503). A route that is NOT CONFIGURED (nothing bound) keeps the
+  lane's own "is not configured" sentence and no class. The class is a config fault of the box in the closed reason set, and no
+  circuit breaker counts it (the breaker judges the llama tiers).
 - **Backend values are each engine's own.** sd.cpp (`sdcpp_backend`, `animategen_sdcpp_backend`) takes `vulkan` or `vulkanN` (`vulkan0`). audio.cpp (`audiocpp_backend`) takes `vulkan` only, and the device index is the separate `audiocpp_device` key (`--backend vulkan --device 0`); `vulkan0` is not an audio.cpp value, and config load, mediacap, the pipeline and the runner all say so (with the `audiocpp_device` hint) instead of leaving the CLI to reject it at run time. audio.cpp itself also knows `cuda`, `hip`, `rocm` and `metal`, but they are refused here (`cpu_backend_refused`) until a real captured log of their buffer names and an evidence pattern for them exist: the runner proves a run was on the GPU by `<component>.weights.buffer_name Vulkan<N>` lines, so a binding to another backend would read CONFIGURED and then end every call as `CPU_PLACEMENT` "no GPU evidence" even when it ran on that GPU. A non-numeric `audiocpp_device` is its own error (`DEVICE_INVALID`, `err_class` `device_invalid`), not a backend refusal.
 - **Output gates.** An engine that exits 0 is not a finished job: a clip is checked for black and frozen output, audio for dead air (below), and a gate fails CLOSED: the dead-air pass must have EXITED 0 AND printed ebur128's `Summary:` block, which ffmpeg prints only at the very end and from which the integrated loudness is read (every per-tick line also carries an `I:`, so a pass killed after a few ticks would otherwise report a loudness and an empty silence list that reads "no silence"); a pass that exited non-zero, died of a signal or printed no Summary (or a build without `silencedetect` / `ebur128`), and a clip whose length ffmpeg could not read, is `UNMEASURABLE` (`unmeasurable`), never "clean" and never described as "no picture". A frame counts as black when 99.9 % of its pixels are (`blackdetect` `pic_th=0.999`, in `render/igpu-qa.mjs`): the 0.98 default rejected legitimate low-key footage, a dark field with a candle flame or the moon in it (0.75 % to 1.5 % of the frame), as `black_clip`, a full failure that is never retried; a pure black clip still fails, and a clip fails when 95 % of it is black. A result is written to a hidden partial file beside its delivery path and renamed onto it only after the gate passed: a failed, rejected or deadline-killed run leaves no partial and never overwrites (or deletes) a good file already at the same path, which is deterministic when the caller names no `out`.
 - **Typed failures survive gpugen.** A runner ends every typed failure with one short machine line, `IGPU_CLASS=<class>`, after its (long) human line. `gpugen.Generate` reads the class from the last such line anywhere in the output it captured (256 KiB), never from the 400-byte display tail: the real `GPU_RESET` line is about 470 bytes with its token at the start, so a tail-only classifier read it as a timeout. The error is a `gpugen.RunError` carrying that class, and its reason keeps the runner's labelled line (`GPU_RESET: ...`). `render/testdata/` logs replayed through the real runners, `Generate` and `ClassifyErr` pin every class (`internal/gpugen/igpu_runner_chain_test.go`).
@@ -1651,6 +1679,8 @@ The typed errors a lane can return (`meta.err_class` in parentheses; the runner 
 | `CPU_BACKEND_REFUSED` | `cpu_backend_refused` | the backend is not an accepted GPU value for that engine |
 | `EXTRA_ARGS_REFUSED` | `extra_args_refused` | an extra-args element changes the backend or placement (not `--offload-to-cpu`, which is sanctioned spill) |
 | `TOKEN_CAP_EXCEEDED` | `token_cap_exceeded` | the request is over the configured latent-token cap |
+| (the pipeline, before the lease) | `route_not_ready` | the route is BOUND-BUT-MISSING: the config binds it and a file it names is gone (CT-54, below) |
+| `IGPU_CLASS=comfy_unusable` (the ComfyUI image runner) | `comfy_unusable` | the ComfyUI server stopped answering or answers with a broken CUDA context (D-38); the runner exits 3 |
 | `GPU_RESET` | `gpu_reset` | the engine log reports a lost device (never retried) |
 | `ILLEGAL_INSTRUCTION` | `illegal_instruction` | SIGILL / exit 132: the binary uses CPU instructions this CPU lacks |
 | `MODEL_INCOMPATIBLE` | `model_incompatible` | sd-cli refused the model file (`model metadata validation failed`) |
