@@ -755,6 +755,8 @@ func runInstallRender(args []string) error {
 //   - The spill ceiling (H-01, INV-1): `--n-cpu-moe` above the tier's measured spill
 //     (`n_cpu_moe_max`), and a partial placement that names no N (which renders the
 //     every-expert form), are refused.
+//   - The every-expert placement (W4, INV-1): a bare `--cpu-moe` in a render is refused unless the
+//     profile says why it is there (cpuMoeExempt).
 //   - D5 (ADR 0052): a tier that declares layers must render the CHECKED UNION of what it
 //     declares: every layer seat defined, every seat on the cards its layer declares, every
 //     composed capability present. The tier shipped a media block copied from the 2-card tier
@@ -768,6 +770,13 @@ func renderGate(res renderResult) error {
 	}
 	if vs := spillViolations(res); len(vs) != 0 {
 		return fmt.Errorf("tier %s: the rendered config spills experts to the CPU beyond the tier's measured spill (INV-1) — not written:\n%s", res.TierID, servingtmpl.Violations(vs))
+	}
+	// After spillViolations on purpose: a partial placement that names no N renders the every-expert
+	// form too, and its own refusal ("no N") is the one that tells the operator what to fix.
+	if !cpuMoeExempt(res.Profile) {
+		if vs := servingtmpl.AuditCPUMoE(res.Config); len(vs) != 0 {
+			return fmt.Errorf("tier %s: the rendered config parks every expert in host RAM (INV-1: the cards do the inference, RAM is overflow only) — not written:\n%s", res.TierID, servingtmpl.Violations(vs))
+		}
 	}
 	if len(res.Profile.Composes) > 0 || len(res.Layers) > 0 {
 		if err := servingtmpl.CheckComposite(res.Config, servingtmpl.CompositeDecl{
@@ -937,6 +946,67 @@ func localPinResolver() func(string) (string, bool) {
 	}
 }
 
+// cpuMoeExempt says whether a RESOLVED render may carry the every-expert `--cpu-moe`: the cpu backend
+// has no card to overflow from, and the off-matrix defaults (fallbackProfile's moeLiteral, the same
+// discriminator spillViolations uses) are literal flag strings that must stay byte-identical to what
+// the installer has always written for a box that is not on the tier matrix. The evidence is the
+// profile and not a stamp, because renderGate runs BEFORE the stamp exists. The second half is a
+// concession to the installer, not a policy: when the installer stops writing the literal, it goes.
+func cpuMoeExempt(p servingProfile) bool { return p.Backend == "cpu" || p.moeLiteral != "" }
+
+// verbatimStamp returns the basis a file's stamp records when the file is a VERBATIM render: it carries
+// a stamp, the stamp's spec hash is the hash of the basis it carries, and the body below it still hashes
+// to what was rendered (the first three checks of servingtmpl.AgainstRender, which this is the
+// yes/no form of). Anything else (no stamp, an edited stamp, an edited body) is a file whose stamp
+// cannot vouch for what it contains, and a rule that exempts on a stamp must not read one.
+func verbatimStamp(text string) (servingtmpl.SpecBasis, bool) {
+	st, ok := servingtmpl.ParseStamp(text)
+	if !ok {
+		return servingtmpl.SpecBasis{}, false
+	}
+	b, err := st.Basis()
+	if err != nil {
+		return servingtmpl.SpecBasis{}, false
+	}
+	if got, _, err := servingtmpl.SpecHash(b); err != nil || got != st.SpecSHA256 {
+		return servingtmpl.SpecBasis{}, false
+	}
+	if servingtmpl.SHA256Hex([]byte(st.Body)) != st.BodySHA256 {
+		return servingtmpl.SpecBasis{}, false
+	}
+	return b, true
+}
+
+// auditCPUMoEFile is the W4 rule over a LIVE file, with the exemption read from the file's stamp: a
+// verbatim render whose backend is cpu has no card to overflow from (clean); a verbatim off-matrix
+// render (render.fallback_backend set) is what the installer writes for a box that is not on the tier
+// matrix, so it is reported as a note and does not fail the audit; anything else, including a file
+// with no stamp or one edited since, is judged as a box with a card, and the finding says so.
+func auditCPUMoEFile(text string) (violations, notes []servingtmpl.Violation) {
+	vs := servingtmpl.AuditCPUMoE(text)
+	if len(vs) == 0 {
+		return nil, nil
+	}
+	basis, verbatim := verbatimStamp(text)
+	switch {
+	case verbatim && basis.Params.Backend == "cpu":
+		return nil, nil
+	case verbatim && basis.Render.FallbackBackend != "":
+		for i := range vs {
+			vs[i].Text += " [off-matrix render: the installer writes this form for a box that is not on the tier matrix; reported, not failed]"
+		}
+		return nil, vs
+	}
+	why := "unstamped file: judged as a box with a card; only a stamp recording the cpu backend exempts it"
+	if _, stamped := servingtmpl.ParseStamp(text); stamped {
+		why = "the stamp no longer matches the file (edited after the render), so the backend it records is not trusted: judged as a box with a card"
+	}
+	for i := range vs {
+		vs[i].Text += " [" + why + "]"
+	}
+	return vs, nil
+}
+
 // spillViolations is the INV-1 spill rule for one resolved render: the text-level ceiling
 // (any `--n-cpu-moe N` in the rendered config above the tier's `n_cpu_moe_max`) plus the one
 // thing text cannot show: a tier that names the partial placement with no N, which
@@ -985,6 +1055,10 @@ func seatIDs(seats []*vllmseat.Spec) map[string]bool {
 // gate that gets ignored, and the point of this one is that STALE is rare and
 // means something. UNSTAMPED still prints, as a finding.
 //
+// The every-expert `--cpu-moe` (W4) is refused on a file judged to have a card; the exemptions are
+// read from the file's own stamp (auditCPUMoEFile). A finding the stamp explains prints as a
+// `note:` line and does not fail the audit.
+//
 // FLAGS COME BEFORE FILES (`audit-yaml --against-render FILE...`): Go's flag
 // package stops parsing at the first non-flag argument.
 func runAuditYAML(args []string) error {
@@ -1002,6 +1076,14 @@ func runAuditYAML(args []string) error {
 			return fmt.Errorf("audit-yaml: %w", err)
 		}
 		vs := servingtmpl.Audit(string(b))
+		moe, notes := auditCPUMoEFile(string(b))
+		vs = append(vs, moe...)
+		sort.SliceStable(vs, func(i, j int) bool {
+			if vs[i].Rule != vs[j].Rule {
+				return vs[i].Rule < vs[j].Rule
+			}
+			return vs[i].Where < vs[j].Where
+		})
 		var doc struct {
 			Models map[string]any `yaml:"models"`
 		}
@@ -1011,6 +1093,11 @@ func runAuditYAML(args []string) error {
 		} else {
 			bad++
 			fmt.Printf("%s: %d violation(s)\n%s\n", path, len(vs), servingtmpl.Violations(vs))
+		}
+		// A note is a finding the file's own stamp explains: printed (stdout, like every other note
+		// here), never counted.
+		for _, n := range notes {
+			fmt.Printf("note: %s: %s\n", path, n)
 		}
 		if !*against {
 			continue

@@ -18,13 +18,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
 
 // Violation is one broken rule in one place of a serving config.
 type Violation struct {
-	Rule  string // the rule id: ttl, ngl0, cvd-empty, persistent, preload
+	Rule  string // the rule id: ttl, ngl0, cvd-empty, persistent, preload, n-cpu-moe, cpu-moe
 	Where string // model / group name, or "top-level"
 	Text  string // the operator-facing sentence
 }
@@ -124,9 +125,9 @@ var (
 // every entry, reading each entry the way llama-swap runs it (a `${name}` macro is replaced
 // by its text first: the templates keep their shared flags in `macros:`), and reports every
 // offender (sorted by entry) so a fix is one pass. The
-// every-expert `--cpu-moe` is a different rule, owned at the table level (a GPU tier may
-// not seed `cpu_moe`), and a document that does not parse is Audit's finding, not this
-// rule's: reporting it twice would only bury it.
+// every-expert `--cpu-moe` is a different rule (AuditCPUMoE, whose exemptions belong to its
+// callers; the table level also refuses a GPU tier that seeds `cpu_moe`), and a document that
+// does not parse is Audit's finding, not this rule's: reporting it twice would only bury it.
 func AuditSpill(text string, maxNCPUMoE int) []Violation {
 	var doc struct {
 		Models map[string]map[string]any `yaml:"models"`
@@ -234,8 +235,91 @@ func flatEnv(v any) string {
 	return ""
 }
 
-// AuditCPUMoE is the W4 rule (stub: the tests come first).
-func AuditCPUMoE(text string) []Violation { return nil }
+var (
+	// cpuMoeFlags are llama.cpp's every-expert placement in every spelling: `--cpu-moe` and its
+	// short form, and the same two for the draft model of a speculative pair (`--cpu-moe-draft`,
+	// `--spec-draft-cpu-moe`, `-cmoed`), whose experts are just as much in host RAM.
+	cpuMoeFlags = map[string]bool{
+		"--cpu-moe": true, "-cmoe": true,
+		"--spec-draft-cpu-moe": true, "--cpu-moe-draft": true, "-cmoed": true,
+	}
+	// cpuMoeEnvRe matches the environment twins of those flags, with the value (bare or quoted)
+	// so a switched-off twin (`LLAMA_ARG_CPU_MOE=0`) is told from a set one.
+	cpuMoeEnvRe = regexp.MustCompile(`(?:^|[\s,\["'])(LLAMA_ARG_CPU_MOE|LLAMA_ARG_SPEC_DRAFT_CPU_MOE)=(?:"([^"]*)"|'([^']*)'|([^\s"',\]]*))`)
+)
+
+// cpuMoeEnvSet says whether an environment twin's value turns the flag on. llama.cpp documents
+// true/1/on/enabled as on and false/0/off/disabled as off for its boolean options (the llama-server
+// README); what it does with any other string is not documented, so this reads it as ON: a gate that
+// must not miss a placement refuses an unknown spelling rather than assuming llama.cpp ignores it.
+// An empty value is a variable that is present but not set to anything, which is off.
+func cpuMoeEnvSet(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "0", "false", "off", "disabled":
+		return false
+	}
+	return true
+}
+
+// AuditCPUMoE is the W4 rule Audit cannot carry, because the exemption belongs to the caller: the
+// EVERY-expert placement, `--cpu-moe` (INV-1). The cards do the inference and RAM is overflow only;
+// the one sanctioned host-RAM use for experts is a PARTIAL spill, `--n-cpu-moe N`, up to a measured N
+// (AuditSpill). The bare form parks every expert layer of the model in host RAM. It checks the flag in
+// every spelling and its LLAMA_ARG_CPU_MOE environment twin, and the draft-model forms, on every entry,
+// reading each entry the way llama-swap runs it (a `${name}` macro is replaced by its text first).
+//
+// It is pure and exemption-free. The cpu backend has no card to overflow from, and an off-matrix render
+// writes the literal on purpose; whether either applies is the caller's evidence to read (`install
+// render` holds the resolved profile and runs before the stamp exists; `audit-yaml` holds the file and
+// its stamp). It reads parsed entries, never the raw text: a stamped file carries
+// `"moe_26b": "--cpu-moe -ngl 999"` in its stamp comment. One finding per offending entry, sorted by
+// entry; a document that does not parse is Audit's finding, not this rule's.
+func AuditCPUMoE(text string) []Violation {
+	var doc struct {
+		Models map[string]map[string]any `yaml:"models"`
+		Macros any                       `yaml:"macros"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
+		return nil
+	}
+	macros := macroTable(doc.Macros)
+	var out []Violation
+	for name, m := range doc.Models {
+		cmd, _ := m["cmd"].(string)
+		cmd = expandMacros(cmd, macros)
+		env := expandMacros(flatEnv(m["env"]), macros)
+		var found []string
+		see := func(spelling string) {
+			for _, f := range found {
+				if f == spelling {
+					return
+				}
+			}
+			found = append(found, spelling)
+		}
+		for _, tok := range strings.FieldsFunc(cmd, func(r rune) bool { return unicode.IsSpace(r) || r == '"' || r == '\'' }) {
+			if cpuMoeFlags[tok] {
+				see(tok)
+			}
+		}
+		for _, from := range []string{env, cmd} {
+			for _, mm := range cpuMoeEnvRe.FindAllStringSubmatch(from, -1) {
+				if cpuMoeEnvSet(mm[2] + mm[3] + mm[4]) {
+					see(mm[1])
+				}
+			}
+		}
+		if len(found) == 0 {
+			continue
+		}
+		out = append(out, Violation{Rule: "cpu-moe", Where: name, Text: fmt.Sprintf(
+			"%s keeps every expert layer of the model in host RAM (INV-1: the cards do the inference and RAM is overflow only; "+
+				"the sanctioned spill is a measured partial --n-cpu-moe N, never the every-expert form)",
+			strings.Join(found, ", "))})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Where < out[j].Where })
+	return out
+}
 
 // Violations formats an audit result as one line per violation.
 func Violations(vs []Violation) string {
