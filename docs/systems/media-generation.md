@@ -2410,8 +2410,11 @@ back is left alone for 60 s and then 300 s per consecutive bounce (only a call i
 not): a node that reads idle but whose own grant refuses every job would otherwise park each call for its whole `gpu_wait_ms`.
 The paused node's row carries the node's own reason (`it took the last call and passed it back: gpu busy: waiting for host RAM: ...`;
 a lease it could not take reads `refused`, `it took the last call and could not take its lease: ...`), and a job adopted from a process
-that ended is paused the same way. Before 0.182.1 every bounce read "another job held its card", so a host short of RAM was told as a
-held card (`TestABouncedRowSaysWhyTheNodePassedTheCallBack`, `TestAnAdoptedJobTheNodePassedBackGoesBackInLine`).
+that ended is paused the same way and under the same name (address and node id). The reason is quoted on one line, its address
+redacted, capped at 600 bytes. Before this, a card-held bounce read "another job held its card" whatever the node said, so a host
+short of RAM was told as a held card, and an adopted job's pause read so for every class, a lease it could not take included
+(`TestABouncedRowSaysWhyTheNodePassedTheCallBack`, `TestAnAdoptedJobTheNodePassedBackGoesBackInLine`,
+`TestAPassedBackReasonIsQuotedOnOneLineAndCapped`).
 Chosen constants, not measurements (`TestABounceIsRememberedAndTheNodeComesBackAtTheNextStep`,
 `TestARetryAfterHoldsTheNodeAndReadsAsRefused`, `TestARefusedDialMovesOnAndBacksTheNodeOff`, `TestABouncedAttemptGoesBackToWaitingAndTheNextScanTriesTheNextNode`).
 A node that answers 503 or 429 with no `Retry-After` is left alone for the first step (5 s; a graph's 503 that carries no refusal word is
@@ -2439,7 +2442,7 @@ line for it), `busy` (the node holds a lease: `holder` is its class, reason and 
 machine is running there), `not-capable` (the key that differs, in the config key's own name, and the family of this machine that
 WOULD match: `send family=<ours> to use its <theirs>`; or the release, or the refine, the route or the steps rule), `unreachable`,
 `refused`, `bounced` or `skipped`; a node being left alone says why (`bounced`: it had the call and passed it back; `refused`: it
-answered the dispatch with a refusal; `unreachable`: it did not answer) and for how long, and `since` is when the ticket first found
+answered the dispatch with a refusal, or took the job and could not take its lease; `unreachable`: it did not answer) and for how long, and `since` is when the ticket first found
 the node in that state. A node absent from `delegate_remotes` is not named: nothing in the config says it exists.
 
 **What does not overflow.** A call under a lease its process inherited, a call on a box with no `delegate_remotes`, and anything but an
