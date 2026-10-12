@@ -272,6 +272,8 @@ function Get-FailureDigest([string[]]$Lines) {
 
 $outFile = $folder + '.go.out'
 $errFile = $folder + '.go.err'
+# Remove-Captures: the go test captures sit beside the folder, are the script's own, and always go
+function Remove-Captures { foreach ($f in $outFile, $errFile) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } } }
 $saved = @{}
 foreach ($v in 'TMP', 'TEMP', 'TMPDIR', 'GOTMPDIR') { $saved[$v] = [Environment]::GetEnvironmentVariable($v, 'Process') }
 $rc = 1
@@ -303,7 +305,7 @@ try {
             foreach ($q in $left.List) { Say 'process' ("pid {0}  {1}" -f $q.Id, $q.Path) }
             Say 'interrupted' "$($left.List.Count) process(es) still run from images inside the folder"
         }
-        foreach ($f in $outFile, $errFile) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }
+        Remove-Captures
     }
 }
 $secs = [int]$sw.Elapsed.TotalSeconds
@@ -328,7 +330,7 @@ if ($VerbosePreference -eq 'Continue') {
 
 if (-not (Test-Path -LiteralPath $folder -PathType Container)) {
     [Console]::Error.WriteLine("$($script:Prog): the temp folder $folder is gone: something removed it during the run, so what was left cannot be read")
-    foreach ($f in $outFile, $errFile) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }
+    Remove-Captures
     exit 70
 }
 
@@ -400,7 +402,7 @@ if ($removeOk) {
 } else {
     Say 'kept' "$folder (remove it by an explicit list when it has been read)"
 }
-foreach ($f in $outFile, $errFile) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }
+Remove-Captures
 
 Write-Host "TRIPWIRE-VERDICT: $verdict"
 exit $code

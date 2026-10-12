@@ -21,6 +21,8 @@
 # Scratch: $env:TRIPWIRE_SELFTEST_DIR, else the system temp dir; it should be on a data drive (the script refuses the system
 # drive, and the self-test then passes -AllowSystemDrive for the cases that need a folder). Removed on exit.
 # TRIPWIRE_SELFTEST_FAILFAST=1 ends the run at the first failed check (a mutation check needs only the first red).
+# TRIPWIRE_SELFTEST_ONLY=tag,tag runs only the sections with those tags (base, digest, sysdrive, procquery, processes, interrupt,
+# vanish, prefix); the setup that decides whether the scratch root needs the system-drive override always runs.
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -67,6 +69,12 @@ function Bad([string]$What) {
     if ($env:TRIPWIRE_SELFTEST_FAILFAST) { throw 'stopped at the first failed check (TRIPWIRE_SELFTEST_FAILFAST)' }
 }
 function Skipped([string]$What) { $script:Skip++; Write-Host "skip  $What" }
+# Want TAG: true when TRIPWIRE_SELFTEST_ONLY is not set, or lists TAG (comma separated). A mutation check runs only the sections its
+# mutant can fail; the setup that decides whether the scratch root needs the system-drive override always runs.
+function Want([string]$Tag) {
+    if (-not $env:TRIPWIRE_SELFTEST_ONLY) { return $true }
+    return (($env:TRIPWIRE_SELFTEST_ONLY -split ',') -contains $Tag)
+}
 function Expect([string]$What, $Got, $Want) {
     if ("$Got" -eq "$Want") { Ok $What } else { Bad "${What}: got '$Got', want '$Want'" }
 }
@@ -121,21 +129,25 @@ function Get-RunningFrom([string]$Dir) {
 
 try {
     # --- usage errors (no verdict line, exit 64)
-    Run @()
-    Expect 'no -Dir: exit' $script:Rc 64
-    Run @('-Dir', (Join-Path $root 'does-not-exist'), '-Module', $fixture)
-    Expect '-Dir that does not exist: exit' $script:Rc 64
-    Run @('-Dir', $root, '-Module', $root)
-    Expect 'no go.mod in -Module: exit' $script:Rc 64
-    Expect 'usage errors print no verdict' (Verdict-Of) ''
+    if (Want 'base') {
+        Run @()
+        Expect 'no -Dir: exit' $script:Rc 64
+        Run @('-Dir', (Join-Path $root 'does-not-exist'), '-Module', $fixture)
+        Expect '-Dir that does not exist: exit' $script:Rc 64
+        Run @('-Dir', $root, '-Module', $root)
+        Expect 'no go.mod in -Module: exit' $script:Rc 64
+        Expect 'usage errors print no verdict' (Verdict-Of) ''
+    }
 
     # --- the system drive is refused, and nothing is created
-    $sysDir = if ($onWindows) { "$($env:SystemDrive)\" } else { '/' }
-    $before = @(Get-ChildItem -LiteralPath $sysDir -Filter 'test-temp-tripwire.*' -ErrorAction SilentlyContinue).Count
-    Run @('-Dir', $sysDir, '-Module', $fixture, '-Pkgs', './clean')
-    Expect 'system drive: exit' $script:Rc 4
-    Expect 'system drive: verdict' (Verdict-Of) 'REFUSED'
-    Expect 'system drive: nothing was created there' @(Get-ChildItem -LiteralPath $sysDir -Filter 'test-temp-tripwire.*' -ErrorAction SilentlyContinue).Count $before
+    if (Want 'base') {
+        $sysDir = if ($onWindows) { "$($env:SystemDrive)\" } else { '/' }
+        $before = @(Get-ChildItem -LiteralPath $sysDir -Filter 'test-temp-tripwire.*' -ErrorAction SilentlyContinue).Count
+        Run @('-Dir', $sysDir, '-Module', $fixture, '-Pkgs', './clean')
+        Expect 'system drive: exit' $script:Rc 4
+        Expect 'system drive: verdict' (Verdict-Of) 'REFUSED'
+        Expect 'system drive: nothing was created there' @(Get-ChildItem -LiteralPath $sysDir -Filter 'test-temp-tripwire.*' -ErrorAction SilentlyContinue).Count $before
+    }
 
     # --- whether the scratch root itself is on the system drive decides whether the cases below need the override
     Run @('-Dir', $root, '-Module', $fixture, '-Pkgs', './clean')
@@ -146,241 +158,267 @@ try {
     }
 
     # --- CLEAN
-    Run ($common + @('-Pkgs', './clean'))
-    Expect 'clean: exit' $script:Rc 0
-    Expect 'clean: verdict' (Verdict-Of) 'CLEAN'
-    Expect 'clean: the empty folder is gone' (Folders-In) 0
+    if (Want 'base') {
+        Run ($common + @('-Pkgs', './clean'))
+        Expect 'clean: exit' $script:Rc 0
+        Expect 'clean: verdict' (Verdict-Of) 'CLEAN'
+        Expect 'clean: the empty folder is gone' (Folders-In) 0
+    }
 
     # --- LEAK
-    Run ($common + @('-Pkgs', './leaker'))
-    Expect 'leak: exit' $script:Rc 1
-    Expect 'leak: verdict' (Verdict-Of) 'LEAK'
-    Expect 'leak: the three leaked folders are counted under one prefix' (Leak-Lines) '3  tripwire-leak-*'
-    Expect 'leak: the folder is kept as evidence' (Folders-In) 1
-    $kept = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'test-temp-tripwire.*')[0].FullName
-    $inside = @(Get-ChildItem -LiteralPath $kept -Force)
-    Expect 'leak: the folder holds exactly the three leaked entries on disk' $inside.Count 3
-    Expect 'leak: the folder that was removed by its own test is not among them' @($inside | Where-Object { $_.Name -like 'tripwire-clean-*' }).Count 0
-    Clean-Kept
-    Run ($common + @('-Pkgs', './leaker', '-Remove'))
-    Expect 'leak with -Remove: exit is still LEAK' $script:Rc 1
-    Expect 'leak with -Remove: the folder is removed' (Folders-In) 0
+    if (Want 'base') {
+        Run ($common + @('-Pkgs', './leaker'))
+        Expect 'leak: exit' $script:Rc 1
+        Expect 'leak: verdict' (Verdict-Of) 'LEAK'
+        Expect 'leak: the three leaked folders are counted under one prefix' (Leak-Lines) '3  tripwire-leak-*'
+        Expect 'leak: the folder is kept as evidence' (Folders-In) 1
+        $kept = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'test-temp-tripwire.*')[0].FullName
+        $inside = @(Get-ChildItem -LiteralPath $kept -Force)
+        Expect 'leak: the folder holds exactly the three leaked entries on disk' $inside.Count 3
+        Expect 'leak: the folder that was removed by its own test is not among them' @($inside | Where-Object { $_.Name -like 'tripwire-clean-*' }).Count 0
+        Clean-Kept
+        Run ($common + @('-Pkgs', './leaker', '-Remove'))
+        Expect 'leak with -Remove: exit is still LEAK' $script:Rc 1
+        Expect 'leak with -Remove: the folder is removed' (Folders-In) 0
+    }
 
     # --- the reasoned ignore list
-    $tab = [string][char]9
-    [IO.File]::WriteAllText((Join-Path $root 'ignore.txt'), "# a comment`n`ntripwire-leak-*${tab}the fixture leaves these on purpose`n")
-    Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'ignore.txt')))
-    Expect 'ignore list naming the leak: exit' $script:Rc 0
-    Expect 'ignore list naming the leak: verdict' (Verdict-Of) 'CLEAN'
-    Expect-Has 'ignore list naming the leak: the group is printed with its reason, not hidden' $script:Out 'ignored       3  tripwire-leak-*  (the fixture leaves these on purpose)'
-    if ($script:Out.Contains('test-temp-tripwire: left')) { Bad 'ignore list naming the leak: it is reported as a leak' } else { Ok 'ignore list naming the leak: it is not reported as a leak' }
-    Expect-Has 'ignore list naming the leak: the verdict says how many were not counted' $script:Out '3 entries named by the ignore list were not counted'
-    Expect 'ignore list naming the leak: the folder goes' (Folders-In) 0
-    [IO.File]::WriteAllText((Join-Path $root 'ignore-other.txt'), "something-else-*${tab}not what the fixture leaves`n")
-    Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'ignore-other.txt')))
-    Expect 'ignore list naming something else: exit' $script:Rc 1
-    Expect 'ignore list naming something else: verdict' (Verdict-Of) 'LEAK'
-    Clean-Kept
-    [IO.File]::WriteAllText((Join-Path $root 'ignore-noreason.txt'), "tripwire-leak-*`n")
-    Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'ignore-noreason.txt')))
-    Expect 'ignore line with no reason: exit' $script:Rc 64
-    [IO.File]::WriteAllText((Join-Path $root 'ignore-blank.txt'), "tripwire-leak-*${tab}   `n")
-    Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'ignore-blank.txt')))
-    Expect 'ignore line with a blank reason: exit' $script:Rc 64
-    Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'no-such-file.txt')))
-    Expect 'ignore file that does not exist: exit' $script:Rc 64
-    Expect 'a rejected ignore list ran nothing' (Folders-In) 0
-    # the default list: scripts\test-temp-tripwire.ignore in the module, found without being named
-    $fixmod = Join-Path $root 'fixmod'
-    Copy-Item -LiteralPath $fixture -Destination $fixmod -Recurse
-    New-Item -ItemType Directory -Path (Join-Path $fixmod 'scripts') | Out-Null
-    [IO.File]::WriteAllText((Join-Path $fixmod 'scripts\test-temp-tripwire.ignore'), "tripwire-leak-*${tab}the default list names it`n")
-    $defaultArgs = @('-Dir', $root, '-Module', $fixmod)
-    if ($common -contains '-AllowSystemDrive') { $defaultArgs += '-AllowSystemDrive' }
-    Run ($defaultArgs + @('-Pkgs', './leaker'))
-    Expect 'default ignore list: exit' $script:Rc 0
-    Expect-Has 'default ignore list: the reason is printed' $script:Out '(the default list names it)'
+    if (Want 'base') {
+        $tab = [string][char]9
+        [IO.File]::WriteAllText((Join-Path $root 'ignore.txt'), "# a comment`n`ntripwire-leak-*${tab}the fixture leaves these on purpose`n")
+        Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'ignore.txt')))
+        Expect 'ignore list naming the leak: exit' $script:Rc 0
+        Expect 'ignore list naming the leak: verdict' (Verdict-Of) 'CLEAN'
+        Expect-Has 'ignore list naming the leak: the group is printed with its reason, not hidden' $script:Out 'ignored       3  tripwire-leak-*  (the fixture leaves these on purpose)'
+        if ($script:Out.Contains('test-temp-tripwire: left')) { Bad 'ignore list naming the leak: it is reported as a leak' } else { Ok 'ignore list naming the leak: it is not reported as a leak' }
+        Expect-Has 'ignore list naming the leak: the verdict says how many were not counted' $script:Out '3 entries named by the ignore list were not counted'
+        Expect 'ignore list naming the leak: the folder goes' (Folders-In) 0
+        [IO.File]::WriteAllText((Join-Path $root 'ignore-other.txt'), "something-else-*${tab}not what the fixture leaves`n")
+        Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'ignore-other.txt')))
+        Expect 'ignore list naming something else: exit' $script:Rc 1
+        Expect 'ignore list naming something else: verdict' (Verdict-Of) 'LEAK'
+        Clean-Kept
+        [IO.File]::WriteAllText((Join-Path $root 'ignore-noreason.txt'), "tripwire-leak-*`n")
+        Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'ignore-noreason.txt')))
+        Expect 'ignore line with no reason: exit' $script:Rc 64
+        [IO.File]::WriteAllText((Join-Path $root 'ignore-blank.txt'), "tripwire-leak-*${tab}   `n")
+        Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'ignore-blank.txt')))
+        Expect 'ignore line with a blank reason: exit' $script:Rc 64
+        Run ($common + @('-Pkgs', './leaker', '-IgnoreFile', (Join-Path $root 'no-such-file.txt')))
+        Expect 'ignore file that does not exist: exit' $script:Rc 64
+        Expect 'a rejected ignore list ran nothing' (Folders-In) 0
+        # the default list: scripts\test-temp-tripwire.ignore in the module, found without being named
+        $fixmod = Join-Path $root 'fixmod'
+        Copy-Item -LiteralPath $fixture -Destination $fixmod -Recurse
+        New-Item -ItemType Directory -Path (Join-Path $fixmod 'scripts') | Out-Null
+        [IO.File]::WriteAllText((Join-Path $fixmod 'scripts\test-temp-tripwire.ignore'), "tripwire-leak-*${tab}the default list names it`n")
+        $defaultArgs = @('-Dir', $root, '-Module', $fixmod)
+        if ($common -contains '-AllowSystemDrive') { $defaultArgs += '-AllowSystemDrive' }
+        Run ($defaultArgs + @('-Pkgs', './leaker'))
+        Expect 'default ignore list: exit' $script:Rc 0
+        Expect-Has 'default ignore list: the reason is printed' $script:Out '(the default list names it)'
+    }
 
     # --- TESTS-FAILED
-    Run ($common + @('-Pkgs', './failing'))
-    Expect 'failing: exit' $script:Rc 3
-    Expect 'failing: verdict' (Verdict-Of) 'TESTS-FAILED'
-    Expect-Has 'failing: the go test output is shown' $script:Out 'this test fails on purpose'
-    Expect 'failing: the empty folder is gone' (Folders-In) 0
+    if (Want 'base') {
+        Run ($common + @('-Pkgs', './failing'))
+        Expect 'failing: exit' $script:Rc 3
+        Expect 'failing: verdict' (Verdict-Of) 'TESTS-FAILED'
+        Expect-Has 'failing: the go test output is shown' $script:Out 'this test fails on purpose'
+        Expect 'failing: the empty folder is gone' (Folders-In) 0
+    }
 
     # --- a leak beside a failing package is still a LEAK
-    Run ($common + @('-Pkgs', './leaker ./failing'))
-    Expect 'leak beside a failing package: exit' $script:Rc 1
-    Expect 'leak beside a failing package: verdict' (Verdict-Of) 'LEAK'
-    Clean-Kept
+    if (Want 'base') {
+        Run ($common + @('-Pkgs', './leaker ./failing'))
+        Expect 'leak beside a failing package: exit' $script:Rc 1
+        Expect 'leak beside a failing package: verdict' (Verdict-Of) 'LEAK'
+        Clean-Kept
+    }
 
     # --- a failure that is not at the end of the output is still named. go test prints one "ok" line per later package, so the
     # last lines of a whole-module run hold only "ok" lines; the failing test and its message have to be reported on their own.
-    Run ($common + @('-Pkgs', './failing ./clean', '-Tail', '1'))
-    Expect 'failure followed by a passing package, -Tail 1: exit' $script:Rc 3
-    Expect 'failure followed by a passing package, -Tail 1: verdict' (Verdict-Of) 'TESTS-FAILED'
-    Expect-Has 'failure followed by a passing package, -Tail 1: the failing test is named' $script:Out '--- FAIL: TestFails'
-    Expect-Has 'failure followed by a passing package, -Tail 1: its message is shown' $script:Out 'this test fails on purpose'
-    Expect 'failure followed by a passing package: the empty folder is gone' (Folders-In) 0
-    Expect 'failure followed by a passing package: no capture is left beside it' (Stray-Captures) 0
-    Run ($common + @('-Pkgs', './failing', '-Tail', '0'))
-    if ($script:Out.Contains('this test fails on purpose')) { Bad '-Tail 0 shows no go test output: it shows the message' } else { Ok '-Tail 0 shows no go test output' }
-    Clean-Kept
+    if (Want 'digest') {
+        Run ($common + @('-Pkgs', './failing ./clean', '-Tail', '1'))
+        Expect 'failure followed by a passing package, -Tail 1: exit' $script:Rc 3
+        Expect 'failure followed by a passing package, -Tail 1: verdict' (Verdict-Of) 'TESTS-FAILED'
+        Expect-Has 'failure followed by a passing package, -Tail 1: the failing test is named' $script:Out '--- FAIL: TestFails'
+        Expect-Has 'failure followed by a passing package, -Tail 1: its message is shown' $script:Out 'this test fails on purpose'
+        Expect 'failure followed by a passing package: the empty folder is gone' (Folders-In) 0
+        Expect 'failure followed by a passing package: no capture is left beside it' (Stray-Captures) 0
+        Run ($common + @('-Pkgs', './failing', '-Tail', '0'))
+        if ($script:Out.Contains('this test fails on purpose')) { Bad '-Tail 0 shows no go test output: it shows the message' } else { Ok '-Tail 0 shows no go test output' }
+        Clean-Kept
+    }
 
     # --- a refusal that cannot be decided is a refusal. Without SystemDrive the guard cannot say which drive is the system drive,
     # and must not read that as "not the system drive". (A child process, so the variable is gone for the script only.)
-    if ($onWindows -and -not ($common -contains '-AllowSystemDrive')) {
-        $cmd = "`$env:SystemDrive = ''; & '$tripwire' -Dir '$root' -Module '$fixture' -Pkgs './clean'; exit `$LASTEXITCODE"
-        $script:Out = Invoke-Native { & $psExe @psArgs -Command $cmd }
-        Expect 'no SystemDrive: exit (refused)' $script:Rc 4
-        Expect 'no SystemDrive: verdict' (Verdict-Of) 'REFUSED'
-        Expect-Has 'no SystemDrive: the output says it could not tell' $script:Out 'cannot tell'
-        Expect 'no SystemDrive: nothing was created' (Folders-In) 0
-    } else {
-        Skipped 'no SystemDrive: Windows only, and the scratch root must be off the system drive'
+    if (Want 'sysdrive') {
+        if ($onWindows -and -not ($common -contains '-AllowSystemDrive')) {
+            $cmd = "`$env:SystemDrive = ''; & '$tripwire' -Dir '$root' -Module '$fixture' -Pkgs './clean'; exit `$LASTEXITCODE"
+            $script:Out = Invoke-Native { & $psExe @psArgs -Command $cmd }
+            Expect 'no SystemDrive: exit (refused)' $script:Rc 4
+            Expect 'no SystemDrive: verdict' (Verdict-Of) 'REFUSED'
+            Expect-Has 'no SystemDrive: the output says it could not tell' $script:Out 'cannot tell'
+            Expect 'no SystemDrive: nothing was created' (Folders-In) 0
+        } else {
+            Skipped 'no SystemDrive: Windows only, and the scratch root must be off the system drive'
+        }
     }
 
     # --- a process check that cannot run is said, and the folder is not removed on its account. The query is made to fail by a
     # function of the same name in the caller's scope (a function wins over a cmdlet).
-    if ($onWindows) {
-        $allowArg = if ($common -contains '-AllowSystemDrive') { ' -AllowSystemDrive' } else { '' }
-        $cmd = "function Get-CimInstance { [CmdletBinding()] param([string]`$ClassName, [string[]]`$Property) Write-Error 'injected failure' }; & '$tripwire' -Dir '$root' -Module '$fixture' -Pkgs './clean'$allowArg; exit `$LASTEXITCODE"
-        $script:Out = Invoke-Native { & $psExe @psArgs -Command $cmd }
-        Expect 'process query fails, nothing left: exit' $script:Rc 0
-        Expect-Has 'process query fails, nothing left: the verdict says the check was skipped' $script:Out 'process check skipped'
-        Expect-Has 'process query fails, nothing left: the output says why' $script:Out 'injected failure'
-        Expect 'process query fails, nothing left: the empty folder is gone' (Folders-In) 0
-        $cmd = "function Get-CimInstance { [CmdletBinding()] param([string]`$ClassName, [string[]]`$Property) Write-Error 'injected failure' }; & '$tripwire' -Dir '$root' -Module '$fixture' -Pkgs './leaker' -Remove$allowArg; exit `$LASTEXITCODE"
-        $script:Out = Invoke-Native { & $psExe @psArgs -Command $cmd }
-        Expect 'process query fails, a leak, -Remove: exit' $script:Rc 1
-        Expect-Has 'process query fails, a leak, -Remove: the verdict says the check was skipped' $script:Out 'process check skipped'
-        Expect 'process query fails, a leak, -Remove: the folder is kept, because a process might run from it' (Folders-In) 1
-        Clean-Kept
-    } else {
-        Skipped 'process query fails: the query is Win32_Process, Windows only'
+    if (Want 'procquery') {
+        if ($onWindows) {
+            $allowArg = if ($common -contains '-AllowSystemDrive') { ' -AllowSystemDrive' } else { '' }
+            $cmd = "function Get-CimInstance { [CmdletBinding()] param([string]`$ClassName, [string[]]`$Property) Write-Error 'injected failure' }; & '$tripwire' -Dir '$root' -Module '$fixture' -Pkgs './clean'$allowArg; exit `$LASTEXITCODE"
+            $script:Out = Invoke-Native { & $psExe @psArgs -Command $cmd }
+            Expect 'process query fails, nothing left: exit' $script:Rc 0
+            Expect-Has 'process query fails, nothing left: the verdict says the check was skipped' $script:Out 'process check skipped'
+            Expect-Has 'process query fails, nothing left: the output says why' $script:Out 'injected failure'
+            Expect 'process query fails, nothing left: the empty folder is gone' (Folders-In) 0
+            $cmd = "function Get-CimInstance { [CmdletBinding()] param([string]`$ClassName, [string[]]`$Property) Write-Error 'injected failure' }; & '$tripwire' -Dir '$root' -Module '$fixture' -Pkgs './leaker' -Remove$allowArg; exit `$LASTEXITCODE"
+            $script:Out = Invoke-Native { & $psExe @psArgs -Command $cmd }
+            Expect 'process query fails, a leak, -Remove: exit' $script:Rc 1
+            Expect-Has 'process query fails, a leak, -Remove: the verdict says the check was skipped' $script:Out 'process check skipped'
+            Expect 'process query fails, a leak, -Remove: the folder is kept, because a process might run from it' (Folders-In) 1
+            Clean-Kept
+        } else {
+            Skipped 'process query fails: the query is Win32_Process, Windows only'
+        }
     }
 
     # --- PROCESSES
-    Run ($common + @('-Pkgs', './spawner'))
-    $printed = @([regex]::Matches($script:Out, '(?m)^test-temp-tripwire: process   pid ([0-9]+) ') | ForEach-Object { [int]$_.Groups[1].Value })
-    $script:Pids += $printed
-    Expect 'spawner: exit' $script:Rc 2
-    Expect 'spawner: verdict' (Verdict-Of) 'PROCESSES'
-    Expect-Has 'spawner: the image under the folder is named' $script:Out 'tripwire-sleeper'
-    if ($printed.Count -ge 1) { Ok 'spawner: a pid was printed' } else { Bad 'spawner: no pid was printed' }
-    Expect 'spawner: the folder is kept while the process runs' (Folders-In) 1
-    Stop-Sleepers $printed
-    Clean-Kept
-    # the folder of a run is never removed while a process runs from it, whatever was asked
-    Run ($common + @('-Pkgs', './spawner', '-Remove'))
-    $printed = @([regex]::Matches($script:Out, '(?m)^test-temp-tripwire: process   pid ([0-9]+) ') | ForEach-Object { [int]$_.Groups[1].Value })
-    $script:Pids += $printed
-    Expect 'spawner with -Remove: exit' $script:Rc 2
-    Expect 'spawner with -Remove: the folder is still kept while the process runs' (Folders-In) 1
-    $keptDirs = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'test-temp-tripwire.*')
-    if ($keptDirs.Count -eq 1) {
-        Expect 'spawner with -Remove: nothing in the folder was touched (the note beside the running image is still there)' @(Get-ChildItem -LiteralPath $keptDirs[0].FullName -Force | Where-Object { $_.Name -eq 'tripwire-note.txt' }).Count 1
-    } else {
-        Bad 'spawner with -Remove: the kept folder is not there to look in'
+    if (Want 'processes') {
+        Run ($common + @('-Pkgs', './spawner'))
+        $printed = @([regex]::Matches($script:Out, '(?m)^test-temp-tripwire: process   pid ([0-9]+) ') | ForEach-Object { [int]$_.Groups[1].Value })
+        $script:Pids += $printed
+        Expect 'spawner: exit' $script:Rc 2
+        Expect 'spawner: verdict' (Verdict-Of) 'PROCESSES'
+        Expect-Has 'spawner: the image under the folder is named' $script:Out 'tripwire-sleeper'
+        if ($printed.Count -ge 1) { Ok 'spawner: a pid was printed' } else { Bad 'spawner: no pid was printed' }
+        Expect 'spawner: the folder is kept while the process runs' (Folders-In) 1
+        Stop-Sleepers $printed
+        Clean-Kept
+        # the folder of a run is never removed while a process runs from it, whatever was asked
+        Run ($common + @('-Pkgs', './spawner', '-Remove'))
+        $printed = @([regex]::Matches($script:Out, '(?m)^test-temp-tripwire: process   pid ([0-9]+) ') | ForEach-Object { [int]$_.Groups[1].Value })
+        $script:Pids += $printed
+        Expect 'spawner with -Remove: exit' $script:Rc 2
+        Expect 'spawner with -Remove: the folder is still kept while the process runs' (Folders-In) 1
+        $keptDirs = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'test-temp-tripwire.*')
+        if ($keptDirs.Count -eq 1) {
+            Expect 'spawner with -Remove: nothing in the folder was touched (the note beside the running image is still there)' @(Get-ChildItem -LiteralPath $keptDirs[0].FullName -Force | Where-Object { $_.Name -eq 'tripwire-note.txt' }).Count 1
+        } else {
+            Bad 'spawner with -Remove: the kept folder is not there to look in'
+        }
+        Stop-Sleepers $printed
+        Clean-Kept
     }
-    Stop-Sleepers $printed
-    Clean-Kept
 
     # --- an interrupted run stops the test binaries it started, not only go, and answers the interrupt at once. The run is a script
     # in a runspace of this process that is stopped (as Ctrl-C stops a pipeline) while the ./hanger test binary, which sleeps 40 s,
     # runs from the watched folder. A wait that cannot be interrupted makes the stop take the whole 40 s; the survivors, the folder
     # and the capture files are read from the disk afterwards.
-    if ($onWindows) {
-        $jobAllow = ($common -contains '-AllowSystemDrive')
-        $runner = [powershell]::Create()
-        $null = $runner.AddScript({
-                param($tw, $dir, $mod, $allow)
-                if ($allow) { & $tw -Dir $dir -Module $mod -Pkgs './hanger' -AllowSystemDrive } else { & $tw -Dir $dir -Module $mod -Pkgs './hanger' }
-            }).AddArgument($tripwire).AddArgument($root).AddArgument($fixture).AddArgument($jobAllow)
-        $async = $runner.BeginInvoke()
-        $running = $false
-        for ($i = 0; $i -lt 240 -and -not $running; $i++) { Start-Sleep -Milliseconds 500; $running = @(Get-RunningFrom $root).Count -gt 0 }
-        if (-not $running) {
-            Bad 'interrupt: the hanger test binary never ran from the folder (waited 120 s)'
-            $runner.Stop()
+    if (Want 'interrupt') {
+        if ($onWindows) {
+            $jobAllow = ($common -contains '-AllowSystemDrive')
+            $runner = [powershell]::Create()
+            $null = $runner.AddScript({
+                    param($tw, $dir, $mod, $allow)
+                    if ($allow) { & $tw -Dir $dir -Module $mod -Pkgs './hanger' -AllowSystemDrive } else { & $tw -Dir $dir -Module $mod -Pkgs './hanger' }
+                }).AddArgument($tripwire).AddArgument($root).AddArgument($fixture).AddArgument($jobAllow)
+            $async = $runner.BeginInvoke()
+            $running = $false
+            for ($i = 0; $i -lt 240 -and -not $running; $i++) { Start-Sleep -Milliseconds 500; $running = @(Get-RunningFrom $root).Count -gt 0 }
+            if (-not $running) {
+                Bad 'interrupt: the hanger test binary never ran from the folder (waited 120 s)'
+                $runner.Stop()
+            } else {
+                $watch = [Diagnostics.Stopwatch]::StartNew()
+                $runner.Stop()
+                $took = [int]$watch.Elapsed.TotalSeconds
+                if ($took -le 20) { Ok "interrupt: the run stopped within 20 s of the signal (took $took s; the test sleeps 40 s)" } else { Bad "interrupt: the run took $took s to stop (the test sleeps 40 s): the wait for go test cannot be interrupted" }
+                $survivors = @(Get-RunningFrom $root)
+                $script:Pids += @($survivors | ForEach-Object { [int]$_.ProcessId })
+                Expect 'interrupt: no process runs from the scratch root afterwards' $survivors.Count 0
+                Expect 'interrupt: the folder is kept as evidence' (Folders-In) 1
+                Expect 'interrupt: the go test captures are gone' (Stray-Captures) 0
+                $said = (@($runner.Streams.Information | ForEach-Object { "$_" }) -join "`n")
+                Expect-Has 'interrupt: it says the run did not finish' $said 'did not finish'
+            }
+            $runner.Dispose()
+            Stop-Sleepers $script:Pids
+            Clean-Kept
         } else {
-            $watch = [Diagnostics.Stopwatch]::StartNew()
-            $runner.Stop()
-            $took = [int]$watch.Elapsed.TotalSeconds
-            if ($took -le 20) { Ok "interrupt: the run stopped within 20 s of the signal (took $took s; the test sleeps 40 s)" } else { Bad "interrupt: the run took $took s to stop (the test sleeps 40 s): the wait for go test cannot be interrupted" }
-            $survivors = @(Get-RunningFrom $root)
-            $script:Pids += @($survivors | ForEach-Object { [int]$_.ProcessId })
-            Expect 'interrupt: no process runs from the scratch root afterwards' $survivors.Count 0
-            Expect 'interrupt: the folder is kept as evidence' (Folders-In) 1
-            Expect 'interrupt: the go test captures are gone' (Stray-Captures) 0
-            $said = (@($runner.Streams.Information | ForEach-Object { "$_" }) -join "`n")
-            Expect-Has 'interrupt: it says the run did not finish' $said 'did not finish'
+            Skipped 'interrupt: the runspace-stop case is Windows only (the shell self-test stops its own twin on Linux)'
         }
-        $runner.Dispose()
-        Stop-Sleepers $script:Pids
-        Clean-Kept
-    } else {
-        Skipped 'interrupt: the runspace-stop case is Windows only (the shell self-test stops its own twin on Linux)'
     }
 
     # --- a temp folder that vanishes during the run is an error, not a clean run. A go that deletes the folder it was given stands
     # in for a test that removes its own temp dir; the script must say so (exit 70) instead of reading an empty listing as CLEAN.
-    if ($onWindows) {
-        $stubGo = Join-Path $root 'stub-go'
-        New-Item -ItemType Directory -Path $stubGo -Force | Out-Null
-        [IO.File]::WriteAllText((Join-Path $stubGo 'go.cmd'), "@echo off`r`nrd /s /q `"%GOTMPDIR%`"`r`nexit /b 0`r`n")
-        $allowArg = if ($common -contains '-AllowSystemDrive') { ' -AllowSystemDrive' } else { '' }
-        $cmd = "`$env:PATH = '$stubGo;' + `$env:PATH; & '$tripwire' -Dir '$root' -Module '$fixture' -Pkgs './clean'$allowArg; exit `$LASTEXITCODE"
-        $script:Out = Invoke-Native { & $psExe @psArgs -Command $cmd }
-        Expect 'folder removed during the run: exit' $script:Rc 70
-        Expect-Has 'folder removed during the run: the output says it is gone' $script:Out 'is gone'
-        Expect 'folder removed during the run: no verdict is printed' (Verdict-Of) ''
-        Expect 'folder removed during the run: no capture is left beside it' (Stray-Captures) 0
-    } else {
-        Skipped 'folder removed during the run: the stand-in go is a .cmd, Windows only'
+    if (Want 'vanish') {
+        if ($onWindows) {
+            $stubGo = Join-Path $root 'stub-go'
+            New-Item -ItemType Directory -Path $stubGo -Force | Out-Null
+            [IO.File]::WriteAllText((Join-Path $stubGo 'go.cmd'), "@echo off`r`nrd /s /q `"%GOTMPDIR%`"`r`nexit /b 0`r`n")
+            $allowArg = if ($common -contains '-AllowSystemDrive') { ' -AllowSystemDrive' } else { '' }
+            $cmd = "`$env:PATH = '$stubGo;' + `$env:PATH; & '$tripwire' -Dir '$root' -Module '$fixture' -Pkgs './clean'$allowArg; exit `$LASTEXITCODE"
+            $script:Out = Invoke-Native { & $psExe @psArgs -Command $cmd }
+            Expect 'folder removed during the run: exit' $script:Rc 70
+            Expect-Has 'folder removed during the run: the output says it is gone' $script:Out 'is gone'
+            Expect 'folder removed during the run: no verdict is printed' (Verdict-Of) ''
+            Expect 'folder removed during the run: no capture is left beside it' (Stray-Captures) 0
+        } else {
+            Skipped 'folder removed during the run: the stand-in go is a .cmd, Windows only'
+        }
     }
 
     # --- the name-prefix rules (the shell twin is held to the same table)
-    $table = @(
-        @('lo-pipeline-lease-482910377', 'lo-pipeline-lease-*'),
-        @('run-graph-12.json', 'run-graph-*.json'),
-        @('run-graph-manifest-9981.json', 'run-graph-manifest-*.json'),
-        @('abc.k3Jd9Q', 'abc.*'),
-        @('lo-x-state-aB3dE9', 'lo-x-state-*'),
-        @('plain-name', 'plain-name'),
-        @('tripwire-sleeper.exe', 'tripwire-sleeper.exe'),
-        @('tmp1', 'tmp*')
-    )
-    foreach ($row in $table) {
-        $got = (Invoke-Native { & $psExe @psArgs -File $tripwire -NamePrefix $row[0] }).Trim()
-        Expect "prefix of $($row[0])" $got $row[1]
+    if (Want 'prefix') {
+        $table = @(
+            @('lo-pipeline-lease-482910377', 'lo-pipeline-lease-*'),
+            @('run-graph-12.json', 'run-graph-*.json'),
+            @('run-graph-manifest-9981.json', 'run-graph-manifest-*.json'),
+            @('abc.k3Jd9Q', 'abc.*'),
+            @('lo-x-state-aB3dE9', 'lo-x-state-*'),
+            @('plain-name', 'plain-name'),
+            @('tripwire-sleeper.exe', 'tripwire-sleeper.exe'),
+            @('tmp1', 'tmp*')
+        )
+        foreach ($row in $table) {
+            $got = (Invoke-Native { & $psExe @psArgs -File $tripwire -NamePrefix $row[0] }).Trim()
+            Expect "prefix of $($row[0])" $got $row[1]
+        }
     }
 
     # --- the shell twin agrees on the same fixture (a Git bash; the WSL launcher in System32 is not it)
-    $bash = @(Get-Command bash -All -ErrorAction SilentlyContinue | Where-Object { $_.Source -and $_.Source -notmatch '\\(System32|WindowsApps)\\' } | ForEach-Object { $_.Source })
-    if ($bash.Count -ge 1 -and (Test-Path -LiteralPath $shell)) {
-        $bashExe = $bash[0]
-        $rootMixed = $root -replace '\\', '/'
-        $fixtureMixed = $fixture -replace '\\', '/'
-        $shellMixed = $shell -replace '\\', '/'
-        foreach ($pk in './clean', './leaker', './failing') {
-            Run ($common + @('-Pkgs', $pk))
-            $psVerdict = Verdict-Of; $psRc = $script:Rc; $psLeaks = Leak-Lines
-            Clean-Kept
-            $shArgs = @($shellMixed, '--dir', $rootMixed, '--module', $fixtureMixed, '--pkgs', $pk)
-            if ($common -contains '-AllowSystemDrive') { $shArgs += '--allow-system-drive' }
-            $script:Out = Invoke-Native { & $bashExe @shArgs }
-            Expect "twin agrees on ${pk}: exit" $script:Rc $psRc
-            Expect "twin agrees on ${pk}: verdict" (Verdict-Of) $psVerdict
-            Expect "twin agrees on ${pk}: leak lines" (Leak-Lines) $psLeaks
-            Clean-Kept
+    if (Want 'prefix') {
+        $bash = @(Get-Command bash -All -ErrorAction SilentlyContinue | Where-Object { $_.Source -and $_.Source -notmatch '\\(System32|WindowsApps)\\' } | ForEach-Object { $_.Source })
+        if ($bash.Count -ge 1 -and (Test-Path -LiteralPath $shell)) {
+            $bashExe = $bash[0]
+            $rootMixed = $root -replace '\\', '/'
+            $fixtureMixed = $fixture -replace '\\', '/'
+            $shellMixed = $shell -replace '\\', '/'
+            foreach ($pk in './clean', './leaker', './failing') {
+                Run ($common + @('-Pkgs', $pk))
+                $psVerdict = Verdict-Of; $psRc = $script:Rc; $psLeaks = Leak-Lines
+                Clean-Kept
+                $shArgs = @($shellMixed, '--dir', $rootMixed, '--module', $fixtureMixed, '--pkgs', $pk)
+                if ($common -contains '-AllowSystemDrive') { $shArgs += '--allow-system-drive' }
+                $script:Out = Invoke-Native { & $bashExe @shArgs }
+                Expect "twin agrees on ${pk}: exit" $script:Rc $psRc
+                Expect "twin agrees on ${pk}: verdict" (Verdict-Of) $psVerdict
+                Expect "twin agrees on ${pk}: leak lines" (Leak-Lines) $psLeaks
+                Clean-Kept
+            }
+            foreach ($row in $table[0..1] + $table[3..5]) {
+                $got = (Invoke-Native { & $bashExe $shellMixed --name-prefix $row[0] }).Trim()
+                Expect "shell twin prefix of $($row[0])" $got $row[1]
+            }
+        } else {
+            Skipped 'the shell twin is not on this host (no Git bash on PATH): its self-test runs there'
         }
-        foreach ($row in $table[0..1] + $table[3..5]) {
-            $got = (Invoke-Native { & $bashExe $shellMixed --name-prefix $row[0] }).Trim()
-            Expect "shell twin prefix of $($row[0])" $got $row[1]
-        }
-    } else {
-        Skipped 'the shell twin is not on this host (no Git bash on PATH): its self-test runs there'
     }
 } finally {
     Stop-Sleepers $script:Pids

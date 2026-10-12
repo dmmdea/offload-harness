@@ -267,6 +267,8 @@ stop_group() {
 # evidence with the processes that still run from it named, and the script's own capture goes.
 out="$folder.go.out"
 child=''
+# drop_capture: the go test capture is the script's own file beside the folder and always goes
+drop_capture() { case $out in "${parent%/}"/test-temp-tripwire.*.go.out) rm -f -- "$out" ;; esac; }
 on_signal() {
 	trap '' INT TERM HUP # a second signal must not cut the cleanup short
 	[ -n "$child" ] && stop_group "$child"
@@ -274,7 +276,7 @@ on_signal() {
 	say interrupted "the run was stopped; the folder is $folder (kept as evidence; remove it by an explicit list when it has been read)"
 	count_processes
 	[ "$procs" != 0 ] && say interrupted "$procs process(es) still run from images inside the folder"
-	case $out in "${parent%/}"/test-temp-tripwire.*.go.out) rm -f -- "$out" ;; esac
+	drop_capture
 	exit 130
 }
 trap on_signal INT TERM HUP
@@ -311,7 +313,7 @@ fi
 # would read as CLEAN, so it is an error.
 if [ ! -d "$folder" ]; then
 	printf '%s: the temp folder %s is gone: something removed it during the run, so what was left cannot be read\n' "$PROG" "$folder" >&2
-	case $out in "${parent%/}"/test-temp-tripwire.*.go.out) rm -f -- "$out" ;; esac
+	drop_capture
 	exit "$EXIT_VANISHED"
 fi
 
@@ -390,7 +392,7 @@ elif [ "$procs" = 0 ] && [ "$proc_check" = 0 ]; then
 else
 	say kept "$folder (remove it by an explicit list when it has been read)"
 fi
-case $out in "${parent%/}"/test-temp-tripwire.*.go.out) rm -f -- "$out" ;; esac
+drop_capture
 
 echo "TRIPWIRE-VERDICT: $verdict"
 exit "$code"
