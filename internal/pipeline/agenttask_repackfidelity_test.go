@@ -162,9 +162,10 @@ func TestRepackPromptListsTheKeysOfAnAnswerThatIsAnObject(t *testing.T) {
 		if strings.Contains(system, emptyRule) {
 			t.Errorf("%s: the system prompt still tells the extractor to leave a field empty when it finds no key of that name:\n%s", lane, system)
 		}
-		for _, want := range []string{`"outdated_sentences"`, "11", `"quote"`, `"release_note_says"`, "at most 10"} {
-			if !strings.Contains(user, want) {
-				t.Errorf("%s: the user prompt does not say %s:\n%s", lane, want, preamble(user))
+		// The instructions, not the text: the answer itself holds every one of these words.
+		for _, want := range []string{`"outdated_sentences" (array of 11 objects with fields "quote", "release_note_says")`, `"doc_title" (string)`, "at most 10"} {
+			if !strings.Contains(preamble(user), want) {
+				t.Errorf("%s: the instructions do not say %s:\n%s", lane, want, preamble(user))
 			}
 		}
 		if !strings.Contains(system+user, "empty value only") {

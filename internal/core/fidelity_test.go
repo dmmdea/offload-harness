@@ -166,3 +166,24 @@ func TestListsTrimmedSaysWhenTheObjectKeptFewerItemsThanTheAnswerHeld(t *testing
 		t.Fatalf("a prose answer: note %q, want none", got)
 	}
 }
+
+// An object that carries the answer's extra list itself has lost nothing: a direct answer IS the
+// object, extra keys and all, and the delegator reads every result against its answer, so a
+// schema whose list is optional and absent from a direct answer must not read as emptied.
+func TestListsEmptiedCountsAnOrphanListTheObjectCarriesItself(t *testing.T) {
+	schema := schemaOf(t, `{"type":"object","properties":{"verdict":{"type":"string"},"issues":{"type":"array","items":{"type":"string"}}},"required":["verdict"]}`)
+	answer := `{"verdict":"ok","checked":["a.go","b.go"]}`
+	if got := ListsEmptied([]byte(answer), schema, answer); got != "" {
+		t.Fatalf("a direct answer was read as having lost its own list: %q", got)
+	}
+	// The same list carried under the same key with its items intact, beside an empty schema list.
+	if got := ListsEmptied([]byte(`{"verdict":"ok","issues":[],"checked":["a.go","b.go"]}`), schema, answer); got != "" {
+		t.Fatalf("an object that kept the extra list was read as having lost it: %q", got)
+	}
+	// An object that dropped it is the loss the check exists for. The cost: an answer whose extra
+	// list is not content for the schema's (a list of files checked, beside an empty issues list)
+	// is refused as well, an honest defer with the finished answer attached.
+	if got := ListsEmptied([]byte(`{"verdict":"ok","issues":[]}`), schema, answer); got == "" {
+		t.Fatalf("an object that dropped the answer's only list was not refused")
+	}
+}

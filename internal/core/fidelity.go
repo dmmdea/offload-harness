@@ -235,10 +235,18 @@ func compareLists(structured []byte, schema map[string]any, answer string) (empt
 			continue
 		}
 		l, _ := src[name].([]any)
-		if n := ContentItems(l); n > 0 {
-			orphans = append(orphans, name)
-			heldTotal += n
+		n := ContentItems(l)
+		if n == 0 {
+			continue
 		}
+		// An object that carries the list itself, under the key the answer used, lost nothing: a
+		// direct answer IS the object, extra keys and all, and the delegator reads every result
+		// against its answer.
+		if carried, _ := obj[name].([]any); ContentItems(carried) >= n {
+			continue
+		}
+		orphans = append(orphans, name)
+		heldTotal += n
 	}
 	if heldTotal == 0 {
 		return nil, nil
