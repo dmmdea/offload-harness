@@ -297,11 +297,15 @@ const (
 // placedWhere says where a published result was placed. Unplaced results are the ones no node ran (a capacity defer,
 // a shed, a subtask the call ended before it started); so are the ones a node refused, alone or as the end of a
 // refusal chain (exhausted keeps the dial base of the node that answered last, so the retry note can name it, but it
-// clears the node and says in its error that none of them ran the subtask). The others were placed on the local seat
-// (ranLocal) or on the node whose dial base they ran on.
+// clears the node and says in its error that none of them ran the subtask). A job the node itself said it will never
+// run is the same: withdrawn (it confirmed it took the job back before it started) and nodeNeverRan (its own record of
+// a job it never ran) are the refusal's marks that outlive the call deadline's cut, which clears the refused flag
+// because the row is a defer by then, and a cut row must still say nobody ran it. The others were placed on the local
+// seat (ranLocal) or on the node whose dial base they ran on, which includes a job the deadline cut while the node
+// still held it: it may start there.
 func placedWhere(pr PlacedResult) int {
 	switch {
-	case pr.Unplaced, pr.refused:
+	case pr.Unplaced, pr.refused, pr.withdrawn, pr.nodeNeverRan != "":
 		return placedNowhere
 	case pr.ranLocal:
 		return placedLocal
