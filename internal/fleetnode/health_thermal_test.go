@@ -115,7 +115,7 @@ func probeOnce(t *testing.T, p DeviceProbe) []GPUDevice {
 func TestSmiDeviceProbeQueriesThermalAtMostOncePerWindow(t *testing.T) {
 	clk := newThermalClock()
 	th := &fakeThermal{rows: hotCard0()}
-	p := smiDeviceProbeWith(smiRun(smiTwoCards), th.read, clk.now, (&logLines{}).logf)
+	p := settledProbe(smiRun(smiTwoCards), th.read, clk.now, (&logLines{}).logf)
 	for i := 0; i < 15; i++ { // 15 ticks at 2 s: t = 0 .. 28 s
 		devs := probeOnce(t, p)
 		if devs[0].TemperatureC == nil || *devs[0].TemperatureC != 83 {
@@ -134,7 +134,7 @@ func TestSmiDeviceProbeQueriesThermalAtMostOncePerWindow(t *testing.T) {
 
 func TestSmiDeviceProbeMergesThermalForTheCardsThatHaveIt(t *testing.T) {
 	th := &fakeThermal{rows: hotCard0()}
-	p := smiDeviceProbeWith(smiRun(smiTwoCards), th.read, newThermalClock().now, (&logLines{}).logf)
+	p := settledProbe(smiRun(smiTwoCards), th.read, newThermalClock().now, (&logLines{}).logf)
 	devs := probeOnce(t, p)
 	if devs[0].TemperatureC == nil || *devs[0].TemperatureC != 83 ||
 		!reflect.DeepEqual(devs[0].ThrottleReasons, []string{"sw_thermal_slowdown", "hw_thermal_slowdown"}) {
@@ -148,7 +148,7 @@ func TestSmiDeviceProbeMergesThermalForTheCardsThatHaveIt(t *testing.T) {
 func TestSmiDeviceProbeDropsAThermalAnswerOlderThanNinetySeconds(t *testing.T) {
 	clk := newThermalClock()
 	th := &fakeThermal{rows: hotCard0()}
-	p := smiDeviceProbeWith(smiRun(smiTwoCards), th.read, clk.now, (&logLines{}).logf)
+	p := settledProbe(smiRun(smiTwoCards), th.read, clk.now, (&logLines{}).logf)
 
 	carries := func(label string, want bool) {
 		t.Helper()
@@ -190,7 +190,7 @@ func TestSmiDeviceProbeBacksOffAfterAFailureAndLogsOncePerOutage(t *testing.T) {
 	clk := newThermalClock()
 	th := &fakeThermal{err: errors.New("nvidia-smi: not on PATH")}
 	lg := &logLines{}
-	p := smiDeviceProbeWith(smiRun(smiTwoCards), th.read, clk.now, lg.logf)
+	p := settledProbe(smiRun(smiTwoCards), th.read, clk.now, lg.logf)
 	for i := 0; i < 75; i++ { // 150 s of 2 s ticks
 		devs := probeOnce(t, p)
 		if devs[0].TemperatureC != nil || len(devs[0].ThrottleReasons) != 0 {
@@ -223,7 +223,7 @@ func TestSmiDeviceProbeBacksOffAfterAFailureAndLogsOncePerOutage(t *testing.T) {
 
 func TestSmiDeviceProbeBoundsTheThermalReadWithADeadline(t *testing.T) {
 	th := &fakeThermal{rows: hotCard0()}
-	p := smiDeviceProbeWith(smiRun(smiTwoCards), th.read, newThermalClock().now, (&logLines{}).logf)
+	p := settledProbe(smiRun(smiTwoCards), th.read, newThermalClock().now, (&logLines{}).logf)
 	probeOnce(t, p)
 	if len(th.deadlines) != 1 || th.deadlines[0] <= 0 || th.deadlines[0] > 15*time.Second {
 		t.Fatalf("thermal read deadlines = %v, want one deadline within 15 s: a wedged driver must not hold the sampler", th.deadlines)
@@ -237,7 +237,7 @@ func TestSmiDeviceProbeLeavesTheMemoryReadingAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	th := &fakeThermal{rows: hotCard0()}
-	got := probeOnce(t, smiDeviceProbeWith(smiRun(smiTwoCards), th.read, newThermalClock().now, (&logLines{}).logf))
+	got := probeOnce(t, settledProbe(smiRun(smiTwoCards), th.read, newThermalClock().now, (&logLines{}).logf))
 	for i := range got {
 		g := got[i]
 		g.TemperatureC, g.ThrottleReasons = nil, nil
@@ -245,7 +245,7 @@ func TestSmiDeviceProbeLeavesTheMemoryReadingAlone(t *testing.T) {
 			t.Errorf("device %d changed beyond the thermal fields:\n got %+v\nwant %+v", i, g, want[i])
 		}
 	}
-	failing := smiDeviceProbeWith(func() (string, error) { return "", errors.New("boom") }, th.read, newThermalClock().now, (&logLines{}).logf)
+	failing := settledProbe(func() (string, error) { return "", errors.New("boom") }, th.read, newThermalClock().now, (&logLines{}).logf)
 	if _, err := failing(); err == nil || !strings.Contains(err.Error(), "nvidia-smi") {
 		t.Fatalf("a failing nvidia-smi run answered %v, want the nvidia-smi error", err)
 	}
@@ -280,7 +280,7 @@ func healthDevices(t *testing.T, p DeviceProbe) (raw json.RawMessage, devs []map
 
 func TestHealthGPUDevicesCarryTemperatureWhenKnown(t *testing.T) {
 	th := &fakeThermal{rows: hotCard0()}
-	_, devs := healthDevices(t, smiDeviceProbeWith(smiRun(smiTwoCards), th.read, newThermalClock().now, (&logLines{}).logf))
+	_, devs := healthDevices(t, settledProbe(smiRun(smiTwoCards), th.read, newThermalClock().now, (&logLines{}).logf))
 	if len(devs) != 2 {
 		t.Fatalf("gpu_devices = %v, want 2", devs)
 	}
@@ -300,7 +300,7 @@ func TestHealthGPUDevicesCarryTemperatureWhenKnown(t *testing.T) {
 // The guard: a node whose thermal query fails publishes exactly the payload a node without the query publishes.
 func TestHealthWithoutAThermalProbeIsByteIdentical(t *testing.T) {
 	failing := &fakeThermal{err: errors.New("nvidia-smi: exit status 9")}
-	got, _ := healthDevices(t, smiDeviceProbeWith(smiRun(smiTwoCards), failing.read, newThermalClock().now, (&logLines{}).logf))
+	got, _ := healthDevices(t, settledProbe(smiRun(smiTwoCards), failing.read, newThermalClock().now, (&logLines{}).logf))
 	baseline, _ := healthDevices(t, func() ([]GPUDevice, error) { return ParseSmiMemoryDevices(smiTwoCards) })
 	if string(got) != string(baseline) {
 		t.Fatalf("gpu_devices with a failing thermal query differs from the payload without one:\n got %s\nwant %s", got, baseline)

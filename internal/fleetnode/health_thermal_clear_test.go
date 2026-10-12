@@ -15,7 +15,7 @@ func TestHealthGPUDevicesTellAClearReadFromNoRead(t *testing.T) {
 		{Index: 0, UUID: thermalUUID0, TemperatureC: tempOf(41), ThrottleReasons: []string{}}, // read: nothing limiting
 		{Index: 1, UUID: thermalUUID1, TemperatureC: tempOf(52)},                              // the throttle column was not read
 	}}
-	raw, devs := healthDevices(t, smiDeviceProbeWith(smiRun(smiTwoCards), th.read, newThermalClock().now, (&logLines{}).logf))
+	raw, devs := healthDevices(t, settledProbe(smiRun(smiTwoCards), th.read, newThermalClock().now, (&logLines{}).logf))
 	if len(devs) != 2 {
 		t.Fatalf("gpu_devices = %s, want 2", raw)
 	}
