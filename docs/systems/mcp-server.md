@@ -847,8 +847,12 @@ read-only unless deliberately widened. See
   `offload_status` answers. When they differ, or the path is gone (an OS that unlinks the old file), the answer carries a
   top-level `stale_binary` string naming the running version and the two stamps and saying to restart the MCP client, and the
   log says it once. It never exits, re-executes or cuts a call (that would drop the jobs the server holds), a stat that fails
-  for any other reason says nothing, and a server that could not read its own file at start has nothing to compare with.
+  for any other reason accuses nothing, and a server that could not read its own file at start has nothing to compare with.
   The running version is the compiled-in one; the version on disk is not read (that would run the new binary).
+  The guard says when it is not watching, because a guard against a silent failure must not be one: a server that could not
+  stamp its own executable at start (or whose path was already gone) logs one `the stale-binary guard is inactive` line with the
+  reason, and a stat that fails later is logged once; `offload_status` carries a top-level `stale_binary_guard` string
+  (`inactive: ...` for the first, `unreadable: ...` for as long as the second lasts) and no such key while the guard is watching.
 - `offload_status` reports harness state to the calling agent: the configured model roster (the one
   table in `config.ModelRoutes`, shared with `doctor`/`acceptance`/`report`), a live `/v1/models`
   probe through [`internal/swapclient`](../../internal/swapclient/swapclient.go), and

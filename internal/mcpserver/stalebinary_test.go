@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -226,5 +227,130 @@ func TestAServerOnItsOwnExecutableIsNotStale(t *testing.T) {
 	}
 	if note := s.staleBinaryNote(buildinfo.Version); note != "" {
 		t.Fatalf("a server on the executable it started from carries the note %q", note)
+	}
+}
+
+// staleLog redirects the standard logger into a buffer for one test (the pattern of rungraph_tempfiles_test.go); the
+// buffer takes a lock because the logger's writers and the test's reader may be different goroutines.
+type staleLog struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (l *staleLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *staleLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+func captureStaleLog(t *testing.T) *staleLog {
+	t.Helper()
+	l := &staleLog{}
+	prev, flags := log.Writer(), log.Flags()
+	log.SetOutput(l)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prev); log.SetFlags(flags) })
+	return l
+}
+
+// TestAGuardThatCannotStampItsOwnExecutableSaysSo: the guard exists to stop a silent failure, so it must not become one.
+// A server that cannot read the stamp of its own executable at start has nothing to compare with and never accuses, which
+// from outside is a server that is fresh; the log and the status door say it is not watching.
+func TestAGuardThatCannotStampItsOwnExecutableSaysSo(t *testing.T) {
+	logged := captureStaleLog(t)
+	exe := &staleMovableExe{err: errors.New("no executable path")}
+	s := delegateTestServer(t, staleLocalRun())
+	s.exe = newExeWatch(exe.read)
+
+	if got := logged.String(); !strings.Contains(got, "stale-binary guard") || !strings.Contains(got, "inactive") || !strings.Contains(got, "no executable path") {
+		t.Fatalf("log %q: want one line saying the guard is inactive and why", got)
+	}
+	for i := 0; i < 3; i++ {
+		if note := s.staleBinaryNote(buildinfo.Version); note != "" {
+			t.Fatalf("an inactive guard accused: %q", note)
+		}
+	}
+	if n := strings.Count(logged.String(), "inactive"); n != 1 {
+		t.Fatalf("the inactive line was logged %d times, want once", n)
+	}
+
+	res, err := s.handleStatus(context.Background(), callReq(`{"section":"brief"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decodeResult(t, res)
+	guard, _ := m["stale_binary_guard"].(string)
+	if !strings.Contains(guard, "inactive") || !strings.Contains(guard, "no executable path") {
+		t.Fatalf("status carries stale_binary_guard %q (keys %v), want it to say the guard is inactive and why", guard, staleKeys(m))
+	}
+	if m["stale_binary"] != nil {
+		t.Fatalf("an inactive guard put a stale_binary note on the status door: %v", m["stale_binary"])
+	}
+}
+
+// TestAGuardWhoseExecutableIsGoneAtStartSaysSoToo: a path that is already missing at start is no baseline either.
+func TestAGuardWhoseExecutableIsGoneAtStartSaysSoToo(t *testing.T) {
+	logged := captureStaleLog(t)
+	exe := &staleMovableExe{cur: exeStamp{Missing: true}}
+	w := newExeWatch(exe.read)
+	if w.known || !strings.Contains(logged.String(), "inactive") || !strings.Contains(logged.String(), "gone") {
+		t.Fatalf("known=%v log=%q, want an inactive guard that says the executable was gone at start", w.known, logged.String())
+	}
+}
+
+// TestAStatFailureLaterIsLoggedOnceAndShownOnTheStatusDoor: a stat that fails after a good start still proves nothing about
+// the image (no accusation), but the guard is blind for as long as it fails, and says that once in the log and while it
+// lasts on the status door.
+func TestAStatFailureLaterIsLoggedOnceAndShownOnTheStatusDoor(t *testing.T) {
+	logged := captureStaleLog(t)
+	exe := &staleMovableExe{cur: staleExeThen}
+	s := delegateTestServer(t, staleLocalRun())
+	s.exe = newExeWatch(exe.read)
+	if strings.Contains(logged.String(), "inactive") {
+		t.Fatalf("a guard that started well logged %q", logged.String())
+	}
+	exe.set(exeStamp{}, errors.New("permission denied"))
+	for i := 0; i < 4; i++ {
+		if note := s.staleBinaryNote(buildinfo.Version); note != "" {
+			t.Fatalf("a failed stat accused: %q", note)
+		}
+	}
+	if n := strings.Count(logged.String(), "permission denied"); n != 1 {
+		t.Fatalf("the failure was logged %d times (log %q), want once", n, logged.String())
+	}
+	res, err := s.handleStatus(context.Background(), callReq(`{"section":"brief"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if guard, _ := decodeResult(t, res)["stale_binary_guard"].(string); !strings.Contains(guard, "permission denied") {
+		t.Fatalf("status stale_binary_guard %q, want the failure while it lasts", guard)
+	}
+	// it reads again: the guard is back, the status door stops saying so, and a NEW failure is a new line
+	exe.set(staleExeThen, nil)
+	res, err = s.handleStatus(context.Background(), callReq(`{"section":"brief"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := decodeResult(t, res); m["stale_binary_guard"] != nil {
+		t.Fatalf("status still carries stale_binary_guard %v after the stamp could be read again", m["stale_binary_guard"])
+	}
+}
+
+// TestAWatchingGuardAddsNothingToTheStatusDoor: the key exists only when the guard is not watching.
+func TestAWatchingGuardAddsNothingToTheStatusDoor(t *testing.T) {
+	captureStaleLog(t)
+	s := delegateTestServer(t, staleLocalRun())
+	res, err := s.handleStatus(context.Background(), callReq(`{"section":"brief"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := decodeResult(t, res); m["stale_binary_guard"] != nil {
+		t.Fatalf("a watching guard put stale_binary_guard %v on the status door", m["stale_binary_guard"])
 	}
 }

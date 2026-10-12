@@ -125,3 +125,30 @@ func TestARemoteResultIsNotedAgainstTheNodesQuarantine(t *testing.T) {
 		t.Errorf("node that answered about another document: %d strike(s), %d pass(es), want 1 and 0", len(q.strikes[off]), len(q.passes[off]))
 	}
 }
+
+// The limit of the majority rule is stated, not accidental (quarantine.go): a node that misses the fingerprint 4 times beside
+// 6 passes is not quarantined, and that is acceptable only because a missed fingerprint keeps its cross-seat retry, so the
+// misses are never delivered. Both halves are pinned here, so a change to either is a decision.
+func TestAPartialMisserIsNotQuarantinedBecauseItsMissesAreRetriedElsewhere(t *testing.T) {
+	q := NewQuarantine(10 * time.Minute)
+	base := "http://node-a:18811"
+	for i := 0; i < 6; i++ {
+		q.Pass(base)
+	}
+	for i := 0; i < 4; i++ {
+		q.Strike(base)
+	}
+	if q.Blocked(base) {
+		t.Fatal("4 misses beside 6 passes quarantined the node: the stated limit of the majority rule moved")
+	}
+	c := fingerprintContract()
+	c.Door = "offload_research"
+	missed := PlacedResult{AcceptanceFailures: []string{fpCheck + ": pattern did not match output"}}
+	if skipsRetryAsResearchAcceptanceOnly(c, missed) {
+		t.Fatal("a missed fingerprint no longer keeps its cross-seat retry: the miss would be delivered, and the limit above would not be acceptable")
+	}
+	other := PlacedResult{AcceptanceFailures: []string{"nonempty:answer: field absent"}}
+	if !skipsRetryAsResearchAcceptanceOnly(c, other) {
+		t.Fatal("control: an acceptance failure that is not the fingerprint is not retried on another seat")
+	}
+}

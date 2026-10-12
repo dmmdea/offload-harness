@@ -59,28 +59,69 @@ func stampOf(p string) (exeStamp, error) {
 type exeWatch struct {
 	read func() (exeStamp, error)
 	// started is the stamp read when the server was built; known says it was readable. A server that could not
-	// read its own file at start has nothing to compare with and never accuses.
-	started exeStamp
-	known   bool
-	logged  sync.Once
+	// read its own file at start has nothing to compare with and never accuses, and says that it does not watch
+	// (inactive, in the log once and on the status door): a guard whose whole purpose is to stop a silent failure
+	// must not be one.
+	started  exeStamp
+	known    bool
+	inactive string
+	logged   sync.Once
+	// blind is the last stat error that was not "the path is gone" (nil while the stamp reads). The first failure
+	// is logged once (blindLogged); the status door shows it for as long as it lasts.
+	mu          sync.Mutex
+	blind       error
+	blindLogged sync.Once
 }
 
 func newExeWatch(read func() (exeStamp, error)) *exeWatch {
 	w := &exeWatch{read: read}
-	if st, err := read(); err == nil && !st.Missing {
+	st, err := read()
+	switch {
+	case err != nil:
+		w.inactive = "the stamp of its own executable could not be read at start: " + err.Error()
+	case st.Missing:
+		w.inactive = "the executable it started from is already gone from its path"
+	default:
 		w.started, w.known = st, true
+	}
+	if w.inactive != "" {
+		log.Printf("mcpserver: the stale-binary guard is inactive: %s. A binary swapped in on disk after this point will not be reported by this server.", w.inactive)
 	}
 	return w
 }
 
+// guardState is "" while the guard is watching, and otherwise the sentence the status door carries: why it is not
+// (inactive since start) or that its stamp cannot be read right now (the stat error).
+func (w *exeWatch) guardState() string {
+	if w == nil {
+		return ""
+	}
+	if w.inactive != "" {
+		return "inactive: " + w.inactive
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.blind != nil {
+		return "unreadable: the stamp of the executable could not be read on the last check (" + w.blind.Error() + "), so no image change is reported until it can"
+	}
+	return ""
+}
+
 // staleNote is "" while the file on disk is the one this process started from, and otherwise the sentence the
-// doors carry. A stat that fails for any reason but "the path is gone" proves nothing and says nothing.
+// doors carry. A stat that fails for any reason but "the path is gone" proves nothing about the image, so it accuses
+// nothing; it is logged once and shown on the status door while it lasts (guardState).
 func (w *exeWatch) staleNote(version string) string {
 	if w == nil || !w.known || w.read == nil {
 		return ""
 	}
 	now, err := w.read()
+	w.mu.Lock()
+	w.blind = err
+	w.mu.Unlock()
 	if err != nil {
+		w.blindLogged.Do(func() {
+			log.Printf("mcpserver: the stale-binary guard could not read the stamp of the executable (%v); it reports nothing while it cannot", err)
+		})
 		return ""
 	}
 	if !now.Missing && now.Size == w.started.Size && now.ModTime.Equal(w.started.ModTime) {

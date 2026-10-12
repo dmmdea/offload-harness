@@ -24,7 +24,12 @@ Versioning: [SemVer](https://semver.org/).
   `internal/rig/capacity_test.go`, written first: red before with, for example, `held slot, the 0.180.0 wording: classified
   "timeout"`, `no deadline word at all: classified "unclassified"` and `an unmarked 503 queue full row classified "seat-infra"`;
   five mutations (the capacity-class check off, 429 dropped from the pattern, a refused row counted bad, refusals counted in
-  `rows`, the precedence swapped) each turn them red. Docs: `docs/systems/coding-agent.md` (the rigger paragraph).
+  `rows`, the precedence swapped) each turn them red. The `agent_rig` tool description, which is what the delegating model reads,
+  publishes the same order (it still listed the old one, so a caller would have filed a full fleet under `timeout` and a
+  forced-final tool call under `budget`), names the wait keys as the capacity lever and the `refusals` line; a test reads
+  `rig.Precedence` and holds the description to it in order (`internal/mcpserver/agent_rig_description_test.go`, red before with
+  `axis "capacity" is missing from the description's precedence order`, and three mutations). Docs:
+  `docs/systems/coding-agent.md` (the rigger paragraph).
 - **A node's capacity refusal is a place in line in the delegation log, on the fleet page and in the rigger, and a subtask
   lost to a full fleet now has a row that says so.** The capacity wait outlasts a node's 503 or 429 at dispatch, but the
   refused attempt's corpus row was an ordinary error row (`deferred` false, `acceptance_pass` false), so thirteen of them in one
@@ -67,10 +72,16 @@ Versioning: [SemVer](https://semver.org/).
   compares them with the file on disk when `agent_delegate`, `offload_research` or `offload_status` answers: a difference, or a
   path that is gone, puts a top-level `stale_binary` string on the answer (running version, the two stamps, "restart the MCP
   client to load it") and one line in the log. The work still runs and nothing is interrupted or re-executed, a stat that fails
-  for another reason says nothing, and the version on disk is not read (it would mean running the new binary). Tests
+  for another reason accuses nothing, and the version on disk is not read (it would mean running the new binary). The guard says
+  when it is not watching, because a guard against a silent failure must not be one: a server that could not stamp its own
+  executable at start (or whose path was already gone) logs one `the stale-binary guard is inactive` line with the reason, a stat
+  that fails later is logged once, and `offload_status` carries a top-level `stale_binary_guard` string (`inactive: ...` for the
+  first, `unreadable: ...` for as long as the second lasts), absent while the guard is watching. Tests
   `internal/mcpserver/stalebinary_test.go`, written first: red before with `agent_delegate: no stale_binary note in [summary
-  results]` on a server whose executable stamp had moved, on all three doors; seven mutations (size or modification time
-  dropped from the comparison, the start-stamp guard, the vanished-path branch, and each door's wiring) each turn them red.
+  results]` on a server whose executable stamp had moved, on all three doors, and, for the inactive guard, `log "": want one
+  line saying the guard is inactive and why`; thirteen mutations (size or modification time dropped from the comparison, the
+  start-stamp guard, the vanished-path branch, each door's wiring, and on the inactive guard: the log line, the once-only log, the
+  remembered failure, the reported state, the gone-at-start reason, the status key) each turn them red.
   Docs: `docs/systems/mcp-server.md`.
 - **A forced final step the seat answers with a tool call is re-asked once, with the offence quoted, instead of ending the run.**
   The last step of a multi-step run offers no tools and asks for the answer (D-89). One seat family wrote a tool call there,
@@ -180,7 +191,11 @@ Versioning: [SemVer](https://semver.org/).
   quarantine now needs at least two strikes that OUTNUMBER the node's passes of the same window: `Quarantine.Pass` records a result
   that carried the fingerprint check and passed it (`runner.noteFingerprint`, at the remote result and at the delegator-side
   rescue), a result with no such check says nothing, and passes age out with the strikes. A node with no passes is quarantined on
-  its second strike exactly as before. The quarantine stays per server process and is never persisted. Tests
+  its second strike exactly as before. An honest absence (the entry above) is neither a pass nor a strike. A stated limit, on
+  purpose: a node that answers about the wrong document less often than about the right one (4 misses beside 6 passes in the
+  window) is not quarantined, because a failed fingerprint keeps its cross-seat retry, so such a node delivers no wrong digest
+  and each miss costs one retry elsewhere, while idling a node on a lexical check costs the fleet a whole seat for the window. The
+  quarantine stays per server process and is never persisted. Tests
   `internal/delegate/quarantine_pass_test.go`, written first: red before with `two failures after three passes quarantined a node
   that answers about the right document`; six mutations (the outnumber rule, the two-strike floor, the pass record, the
   carries-the-check guard, the call site, the window) turn them red. Docs: `docs/OPERATOR-GUIDE.md`.
