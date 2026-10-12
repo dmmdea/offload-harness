@@ -408,6 +408,20 @@ func passedBack(res core.Result) bool {
 	return !res.OK && (core.CardHeld(res.Meta.ErrClass) || res.Meta.ErrClass == core.ErrClassGPULeaseUnavailable)
 }
 
+// passBack is how a pause for a passed-back job reads: a lease the node could not take is a refusal, anything else a
+// bounce, and the cause carries the node's own reason. A host short of RAM answers with the same class as a held card, so
+// a fixed "another job held its card" told that host as a card someone else held.
+func passBack(res core.Result) (state, cause string) {
+	state, cause = "bounced", "it took the last call and passed it back"
+	if res.Meta.ErrClass == core.ErrClassGPULeaseUnavailable {
+		state, cause = "refused", "it took the last call and could not take its lease"
+	}
+	if why := strings.Join(strings.Fields(res.Reason), " "); why != "" {
+		return state, cause + ": " + why
+	}
+	return state, cause
+}
+
 // attempt sends the call to c under jobID and brings the result back. The caller mints the id BEFORE it records the claim, so
 // the ticket on disk names the job from the instant it may be on the node (a process that ends in between leaves an id an
 // adopter can ask the node about).
@@ -445,7 +459,8 @@ func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planne
 			// quiet, the node is left alone for a while (it read idle and refused anyway: it will again), and the call
 			// goes on, under a fresh job id.
 			h.Bounce(res)
-			left := placer.bounced(c.base, c.shown, "bounced", "it took the last call and passed it back: another job held its card")
+			state, cause := passBack(res)
+			left := placer.bounced(c.base, c.shown, state, cause)
 			return attemptResult{kind: attemptBounce, row: ClusterRow{Node: c.shown, State: "bounced",
 				Why: fmt.Sprintf("had the call and passed it back: %s; not offered another call for %s", res.Reason, left.Round(time.Second))}}
 		case !res.OK && res.Meta.ErrClass == core.ErrClassGPULeaseUnavailable:
@@ -453,7 +468,8 @@ func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planne
 			// state of it admits): nothing ran there either, and a call the fleet could still serve is not ended by one
 			// node's fault.
 			h.Bounce(res)
-			left := placer.bounced(c.base, c.shown, "refused", "it took the last call and could not take its lease")
+			state, cause := passBack(res)
+			left := placer.bounced(c.base, c.shown, state, cause)
 			return attemptResult{kind: attemptBounce, row: ClusterRow{Node: c.shown, State: "refused",
 				Why: fmt.Sprintf("took the call and could not take its lease, so nothing ran: %s; not offered another call for %s", res.Reason, left.Round(time.Second))}}
 		}

@@ -6,6 +6,12 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a node that passes a job back is paused with its own reason, not "another job held its card"
+
+- **The defect.** When a node took a job and passed it back, the placer paused it with a fixed cause: "it took the last call and passed it back: another job held its card". A host short of RAM refuses with the same class as a held card (`gpu_busy`), so its row said a card was held when no lease existed. On the 0.182.0 live run this sent the diagnosis of fourteen render refusals looking for a lease; the real cause was the node's committed memory. A job adopted from a process that ended was paused the same way for every class, so a lease the node could not take read "bounced" instead of "refused".
+- **The fix.** One helper, `passBack` (`internal/mediaremote/place.go`), gives the pause on both paths (dispatch and adopted job): the cause carries the node's own reason, and `gpu_lease_unavailable` reads `refused`.
+- **Tests.** `TestABouncedRowSaysWhyTheNodePassedTheCallBack` (new) and `TestAnAdoptedJobTheNodePassedBackGoesBackInLine` (extended, all three classes) failed before the fix and pass after. The whole `internal/mediaremote` package passes.
+
 ## [0.182.0] - 2026-10-12 - a lease that unloads the seat is no longer held by the RAM that unload frees, Wan and image renders run card-only on two cards, agent_run reaches a named seat anywhere in the fleet, and nothing the harness starts opens a window
 
 ### Fixed — a human waiting at the CLI is told the ticket is queued even when its first scan ran before the wait began

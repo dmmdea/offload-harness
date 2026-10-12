@@ -2408,6 +2408,10 @@ failure (the last holds; each miss is one line on the process's stderr, once per
 `TestADeadNodeIsLoggedOncePerBackoffStepNotPerScan`), a `Retry-After` pauses a node for that long (jittered once), and a node that took a call and passed it
 back is left alone for 60 s and then 300 s per consecutive bounce (only a call it serves clears the count; a health read does
 not): a node that reads idle but whose own grant refuses every job would otherwise park each call for its whole `gpu_wait_ms`.
+The paused node's row carries the node's own reason (`it took the last call and passed it back: gpu busy: waiting for host RAM: ...`;
+a lease it could not take reads `refused`, `it took the last call and could not take its lease: ...`), and a job adopted from a process
+that ended is paused the same way. Before 0.182.1 every bounce read "another job held its card", so a host short of RAM was told as a
+held card (`TestABouncedRowSaysWhyTheNodePassedTheCallBack`, `TestAnAdoptedJobTheNodePassedBackGoesBackInLine`).
 Chosen constants, not measurements (`TestABounceIsRememberedAndTheNodeComesBackAtTheNextStep`,
 `TestARetryAfterHoldsTheNodeAndReadsAsRefused`, `TestARefusedDialMovesOnAndBacksTheNodeOff`, `TestABouncedAttemptGoesBackToWaitingAndTheNextScanTriesTheNextNode`).
 A node that answers 503 or 429 with no `Retry-After` is left alone for the first step (5 s; a graph's 503 that carries no refusal word is
