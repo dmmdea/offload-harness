@@ -86,7 +86,7 @@ func (r *treeRecorder) record() {
 // kept instance that a later lease reused was re-stamped to that lease, and killing it would kill
 // the job that lease is running on it.
 func protectedFromOtherLeases(cfg config.Config, epoch uint64) map[int]bool {
-	pids := comfyinst.PIDsOfOtherLeases(cfg.ComfyDir, epoch, gpulease.PIDAlive)
+	pids := comfyinst.PIDsOfOtherLeases(cfg.ComfyDir, epoch, gpulease.PIDAlive, comfyinst.RealDeps().Start)
 	if len(pids) == 0 {
 		return nil
 	}

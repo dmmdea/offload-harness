@@ -140,11 +140,11 @@ func TestPIDsOfOtherLeasesNamesOnlyLiveInstancesOfOtherLeases(t *testing.T) {
 	writeMarker(t, dir, ".offload-launch-dead.json", keyedMarker(8192, 105, 9, map[string]any{"key": "dead"}))
 	writeMarker(t, dir, ".offload-launch.json", map[string]any{"startedAt": 1, "pid": 104, "args": []string{"main.py"}})
 
-	got := PIDsOfOtherLeases(dir, 7, host.deps(nil).Alive)
+	got := PIDsOfOtherLeases(dir, 7, host.deps(nil).Alive, host.deps(nil).Start)
 	if len(got) != 1 || got[0] != 102 {
 		t.Fatalf("PIDsOfOtherLeases = %v, want only 102 (another lease's, alive)", got)
 	}
-	if got := PIDsOfOtherLeases("", 7, host.deps(nil).Alive); got != nil {
+	if got := PIDsOfOtherLeases("", 7, host.deps(nil).Alive, host.deps(nil).Start); got != nil {
 		t.Fatalf("no comfy dir: %v", got)
 	}
 }
@@ -171,5 +171,23 @@ func TestStopMarkerLeavesAnInstanceRelaunchedDuringTheProof(t *testing.T) {
 	defer in.mu.Unlock()
 	if in.interrupted != 0 || in.freed != 0 || len(host.killedPIDs()) != 0 {
 		t.Fatalf("a relaunched instance was touched: interrupted %d freed %d killed %v", in.interrupted, in.freed, host.killedPIDs())
+	}
+}
+
+// A marker left by a crashed instance whose pid was recycled into another process (it began after the marker was written)
+// does not describe a ComfyUI instance, so a lost-lease wrapper must not spare that process: liveness alone is not identity.
+func TestPIDsOfOtherLeasesIgnoresAMarkerWhosePidWasRecycled(t *testing.T) {
+	dir := t.TempDir()
+	host := newHost()
+	host.alive[102], host.alive[106] = true, true
+	host.start[102] = 1_760_000_000_000 - 4000   // the instance, begun just before its marker
+	host.start[106] = 1_760_000_000_000 + 600_000 // a process that began ten minutes after the marker: a recycled pid
+	writeMarker(t, dir, ".offload-launch-theirs.json", keyedMarker(8190, 102, 8, map[string]any{"key": "theirs"}))
+	writeMarker(t, dir, ".offload-launch-stale.json", keyedMarker(8191, 106, 9, map[string]any{"key": "stale"}))
+
+	d := host.deps(nil)
+	got := PIDsOfOtherLeases(dir, 7, d.Alive, d.Start)
+	if len(got) != 1 || got[0] != 102 {
+		t.Fatalf("PIDsOfOtherLeases = %v, want only 102: pid 106 began long after its marker, so it is not that instance", got)
 	}
 }

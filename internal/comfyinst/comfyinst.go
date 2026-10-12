@@ -378,8 +378,9 @@ func StopMarker(ctx context.Context, comfyDir, key string, port int, d Deps) Out
 // PIDsOfOtherLeases lists the live processes the launch markers in comfyDir tie to a lease other
 // than epoch. A wrapper that lost its lease stops its own tree and must spare these: an instance
 // it kept and another lease reused is that lease's job now. A marker that names no lease (the
-// default instance, or one kept outside any lease) is nobody else's and is not listed.
-func PIDsOfOtherLeases(comfyDir string, epoch uint64, alive func(int) bool) []int {
+// default instance, or one kept outside any lease) is nobody else's and is not listed. start is the process start
+// time (Unix ms; nil = not checked): a pid that began after its marker was written was recycled and is not listed.
+func PIDsOfOtherLeases(comfyDir string, epoch uint64, alive func(int) bool, start func(int) (int64, bool)) []int {
 	if strings.TrimSpace(comfyDir) == "" || alive == nil {
 		return nil
 	}
@@ -401,9 +402,18 @@ func PIDsOfOtherLeases(comfyDir string, epoch uint64, alive func(int) bool) []in
 		if json.Unmarshal(b, &m) != nil || m.PID <= 0 || m.LeaseEpoch == nil || *m.LeaseEpoch == epoch {
 			continue
 		}
-		if alive(m.PID) {
-			out = append(out, m.PID)
+		if !alive(m.PID) {
+			continue
 		}
+		// Liveness is not identity: a marker a crashed instance left behind names a pid that may since belong to any
+		// process, one of the wrapper's own included. The same proof the stop applies: a process that began after the
+		// marker was written (plus the launcher's slack) is not the instance the marker describes.
+		if m.StartedAt > 0 && start != nil {
+			if began, ok := start(m.PID); ok && began > m.StartedAt+startSlackMs {
+				continue
+			}
+		}
+		out = append(out, m.PID)
 	}
 	return out
 }
