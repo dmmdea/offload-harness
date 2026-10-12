@@ -559,9 +559,15 @@ func runGPUReserve(args []string) error {
 	// allocator's host term and the queue's pass rule see a lease that declares nothing; the figure travels as
 	// HostRAMWaitGiB and AwaitHostRAM admits it once the seat is cleared. A need no state of the box could ever
 	// admit is refused here, before anything is taken or unloaded, as it always was.
-	gateRAM, awaitRAM := hostRAMSplit(*unload, need.GiB)
-	if err := refuseImpossibleHostRAM(m, awaitRAM, *wait); err != nil {
-		return err
+	defers := *unload && need.GiB > 0
+	if defers && !unloadReachesLease(context.Background(), reserveCfg, plan.IDs, planCards) {
+		fmt.Fprintf(os.Stderr, "gpu reserve: --unload-seat reaches no model on the leased cards (%s), so nothing it frees can make room for this lease: its %.1f GiB of host RAM is compared in the grant, as for a lease that unloads nothing\n", strings.Join(plan.IDs, ", "), need.GiB)
+		defers = false
+	}
+	gateRAM, awaitRAM := hostRAMSplit(defers, need.GiB)
+	gateRAM, awaitRAM, herr := screenDeferredHostRAM(m, gateRAM, awaitRAM, *wait, os.Stderr)
+	if herr != nil {
+		return herr
 	}
 	opts.HostRAMGiB, opts.HostRAMWaitGiB = gateRAM, awaitRAM
 	devFlags.ramGiB = gateRAM // the card allocator's pre-filter reads the same figure

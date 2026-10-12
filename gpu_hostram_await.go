@@ -32,29 +32,73 @@ import (
 	"os"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/gpualloc"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
 // hostRAMSplit says how a reserve's resolved host-RAM need is handled. gate is what the grant compares to the host (and
-// declares); later is what is asked of the host after the seat has been cleared. A lease that unloads the seat defers
-// everything it declares; any other lease, and a need of 0, compares in the grant exactly as before.
-func hostRAMSplit(unloadSeat bool, needGiB float64) (gate, later float64) {
-	if unloadSeat && needGiB > 0 {
+// declares); later is what is asked of the host after the seat has been cleared. defers is whether the lease's own
+// unload can free host memory for it (--unload-seat, and the unload reaches a model: unloadReachesLease) and the host can
+// be read (screenDeferredHostRAM); a lease that defers declares nothing in the grant, any other lease, and a need of 0,
+// compares in the grant exactly as before.
+func hostRAMSplit(defers bool, needGiB float64) (gate, later float64) {
+	if defers && needGiB > 0 {
 		return 0, needGiB
 	}
 	return needGiB, 0
 }
 
-// refuseImpossibleHostRAM is the grant's own answer to a need no state of the box can admit, given before anything is
-// taken or unloaded: nil when the need is admissible some day.
-func refuseImpossibleHostRAM(m *gpulease.Manager, needGiB float64, wait time.Duration) error {
-	if needGiB <= 0 {
-		return nil
+// unloadReachesLease says whether the unload that --unload-seat asks for can take down anything on the cards a lease holds
+// (lease ids; none = the whole node, or the cards an allocation has not chosen yet): the agent seat, or a model the roster
+// lists that is placed on those cards or placed nowhere. It is the question maintainSeatScoped answers when it runs, put
+// before the grant from the same facts (the card table, the layers' pins, the serving config, the roster), and it
+// resolves doubt the way the unload does: a table that cannot be read, a model nothing places and a roster that cannot be
+// read all count as reaching, so only a lease whose every listed model is positively placed on other cards is told that its
+// unload frees nothing for it. A config without a seat target also answers true: the unload refuses at once, so nothing
+// waits behind it. The facts are placements and the roster, which do not change while a lease queues; residency does, and is
+// deliberately not asked (a seat that is cold when the reserve starts may be loaded when the grant comes).
+//
+// cards is the table the caller already read for the plan (nil = read it here).
+func unloadReachesLease(ctx context.Context, cfg config.Config, ids []string, cards []gpuprobe.Card) bool {
+	if len(ids) == 0 {
+		return true
 	}
-	if chk := m.HostRAMCheck(needGiB); !chk.OK && chk.Impossible {
-		return heldHint(&gpulease.ErrHostRAM{HostRAMCheck: chk}, wait)
+	endpoint, model, err := seatTarget(cfg)
+	if err != nil {
+		return true
 	}
-	return nil
+	deps := cardTableDeps()
+	if len(cards) > 0 {
+		deps.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return cards, "", nil }
+	}
+	if gpualloc.NewLeaseScope(ctx, cfg, ids, deps, nil).Touches(model) {
+		return true
+	}
+	roster, rerr := rosterIDsFn(ctx, endpoint)
+	models, known := gpualloc.UnloadModels(ctx, cfg, roster, rerr, ids, deps, nil)
+	return !known || len(models) > 0
+}
+
+// screenDeferredHostRAM is the grant's own answer to a deferred need, given before anything is taken or unloaded. A need no
+// state of the box can admit is refused at once (waiting cannot help, and a seat cycle for a lease that can never run is
+// bought for nothing). A host whose memory cannot be read is not asked after the unload either: the look would refuse for
+// the same reason until its deadline, with the seat cycled and the cards held, so the lease keeps the grant's comparison,
+// which waits in the queue for a readable host as it did before F82. Anything else passes unchanged.
+func screenDeferredHostRAM(m *gpulease.Manager, gate, later float64, wait time.Duration, out io.Writer) (float64, float64, error) {
+	if later <= 0 {
+		return gate, later, nil
+	}
+	chk := m.HostRAMCheck(later)
+	switch {
+	case !chk.OK && chk.Impossible:
+		return gate, later, heldHint(&gpulease.ErrHostRAM{HostRAMCheck: chk}, wait)
+	case !chk.OK && chk.Unreadable:
+		fmt.Fprintf(out, "gpu reserve: the host's memory cannot be read, so nothing can show that the unload makes room for the %.1f GiB: it is compared in the grant, as for a lease that unloads nothing, and the seat is left alone until the host can be read\n", later)
+		return later, 0, nil
+	}
+	return gate, later, nil
 }
 
 // hostRAMDeadline is how long the host-RAM wait after the unload may run: the rest of the queue budget (--wait,
@@ -78,7 +122,7 @@ func awaitHostRAMHeld(ctx context.Context, await func(gpulease.AwaitHostRAMOptio
 		Cancel:   ctx.Done(),
 		OnWait: func(e *gpulease.ErrHostRAM) {
 			told = true
-			fmt.Fprintf(out, "gpu reserve: %s — the seat is cleared and the cards are held; waiting up to %s for the host to have the room\n",
+			fmt.Fprintf(out, "gpu reserve: %s — the drain and the unload are done and the cards are held; waiting up to %s for the host to have the room\n",
 				e.Error(), time.Until(deadline).Round(time.Second))
 		},
 	})

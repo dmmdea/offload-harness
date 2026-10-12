@@ -119,13 +119,18 @@ func TestAwaitHostRAMHeldTellsOnceAndAdmits(t *testing.T) {
 		t.Errorf("the deadline reaches the wait: %v", gotDeadline)
 	}
 	text := out.String()
-	for _, want := range []string{short.Why, "the seat is cleared and the cards are held", "the host has the room"} {
+	for _, want := range []string{short.Why, "the drain and the unload are done and the cards are held", "the host has the room"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the wait says %q:\n%s", want, text)
 		}
 	}
 	if n := strings.Count(text, short.Why); n != 1 {
 		t.Errorf("the shortage is told once, not per poll: %d times", n)
+	}
+	// A lease whose unload reached nothing (an allocation that chose cards the seat is not on) also waits here; the sentence
+	// must not say the seat was cleared.
+	if strings.Contains(text, "the seat is cleared") {
+		t.Errorf("the wait claims the seat was cleared, which is not so for every lease that waits here:\n%s", text)
 	}
 
 	// A host that has the room at the first look says nothing at all.

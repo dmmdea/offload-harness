@@ -18,6 +18,8 @@ package main
 // does when the VM gives the pages back).
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -356,5 +358,149 @@ func TestACardsRequestWithUnloadSeatIsNotHeldByTheHostRAMItsOwnUnloadFrees(t *te
 	}
 	if !fileExists(epochFile) {
 		t.Errorf("the wrapped command never ran\n%s", stderr)
+	}
+}
+
+// WHEN THE ORDER APPLIES. The deferral exists for the host memory this lease's own unload frees. A lease whose unload
+// reaches no model at all (the agent seat sits on cards the lease does not hold, and so does everything else the
+// roster lists) frees nothing for it, so it is compared to the host in the grant, like a lease that unloads nothing:
+// queued, the cards free, the seat untouched. Deferring it would take its cards, stamp them exclusive and hold them
+// for the whole --wait for a shortage the unload cannot touch.
+func TestACardLeaseWhoseUnloadReachesNothingIsComparedToTheHostInTheGrant(t *testing.T) {
+	f := newMultiSeatSwap("gemma-4-26b-agent", "embeddinggemma")
+	f.agentSeat = "gemma-4-26b-agent" // placed on card 0 by the fixture's layers; the lease holds card 2
+	srv := swapWithRoster(f, "gemma-4-26b-agent", "embeddinggemma")
+	defer srv.Close()
+	old := maintenanceClient
+	maintenanceClient = srv.Client()
+	t.Cleanup(func() { maintenanceClient = old })
+	cfgPath := cardLeaseWrapperFixture(t, srv.URL, "gemma-4-26b-agent")
+	cardSeatHost(t, f, "gemma-4-26b-agent", 95, 40) // the host is short because of something the lease does not unload
+	shortFloor(t, 400*time.Millisecond)
+	epochFile := filepath.Join(t.TempDir(), "epoch")
+	t.Setenv("LO_HELPER_EPOCH_FILE", epochFile)
+	args := append([]string{"--config", cfgPath, "--wait", "2s", "--class", "media", "--devices", "2", "--drain", "--unload-seat", "--ram", "30", "--reason", "card 2 film"},
+		helperCmdFor("TestHelperRecordEpoch")...)
+	var err error
+	stderr := captureStderr(t, func() { err = runGPUReserve(args) })
+	if err == nil || !strings.Contains(err.Error(), "waiting for host RAM: needs 30.0 GiB, committed 95.0 of 100.0 GiB physical") {
+		t.Fatalf("the grant refuses the figure, as it does for a lease that unloads nothing: %v\n%s", err, stderr)
+	}
+	for _, held := range []string{"neither drained nor unloaded", "lease stamped exclusive", "the cards are held"} {
+		if strings.Contains(stderr, held) {
+			t.Errorf("the lease took its cards although its unload reaches nothing (%q in the output):\n%s", held, stderr)
+		}
+	}
+	if !strings.Contains(stderr, "compared in the grant") {
+		t.Errorf("the reserve says why it keeps the comparison in the grant:\n%s", stderr)
+	}
+	if got := sortedCalls(f); len(got) != 0 {
+		t.Errorf("nothing is unloaded for a lease that was never granted, got %v", got)
+	}
+	if fileExists(epochFile) {
+		t.Error("the command ran although the grant was refused")
+	}
+}
+
+// And the other half of the rule: the agent seat is on another card, but a model the roster lists IS placed on the leased
+// card, and the lease's unload takes it down (unloadOthers), so the host memory that model holds is the lease's own to
+// free. That lease keeps the order.
+func TestACardLeaseWhoseUnloadReachesAnotherResidentStillDefers(t *testing.T) {
+	f := newMultiSeatSwap("gemma-4-26b-agent", "qwen3-vl-8b", "embeddinggemma")
+	f.agentSeat = "gemma-4-26b-agent"
+	srv := swapWithRoster(f, "gemma-4-26b-agent", "qwen3-vl-8b", "embeddinggemma")
+	defer srv.Close()
+	old := maintenanceClient
+	maintenanceClient = srv.Client()
+	t.Cleanup(func() { maintenanceClient = old })
+	cfgPath := cardLeaseWrapperFixture(t, srv.URL, "gemma-4-26b-agent")
+	cardSeatHost(t, f, "qwen3-vl-8b", 95, 40) // the vision seat on card 2 holds the memory
+	epochFile := filepath.Join(t.TempDir(), "epoch")
+	t.Setenv("LO_HELPER_EPOCH_FILE", epochFile)
+	args := append([]string{"--config", cfgPath, "--wait", "6s", "--class", "media", "--devices", "2", "--drain", "--unload-seat", "--ram", "30", "--reason", "card 2 film"},
+		helperCmdFor("TestHelperRecordEpoch")...)
+	var err error
+	stderr := captureStderr(t, func() { err = runGPUReserve(args) })
+	if err != nil {
+		t.Fatalf("a lease whose unload takes down the resident that holds the memory is not held by it: %v\n%s", err, stderr)
+	}
+	if !fileExists(epochFile) {
+		t.Errorf("the wrapped command never ran\n%s", stderr)
+	}
+	if got := strings.Join(sortedCalls(f), ","); got != "qwen3-vl-8b" {
+		t.Errorf("the lease unloads the model on its card and leaves the seat on card 0, got %q", got)
+	}
+}
+
+// unloadReachesLease follows the unload's own rule of doubt (whole-node behaviour): a lease with no named cards, a roster
+// that cannot be read and a config without a seat all keep the order, because the unload may reach anything.
+func TestUnloadReachesLeaseFollowsTheUnloadsOwnRuleOfDoubt(t *testing.T) {
+	f := newMultiSeatSwap("gemma-4-26b-agent", "embeddinggemma")
+	srv := swapWithRoster(f, "gemma-4-26b-agent", "embeddinggemma")
+	defer srv.Close()
+	cfgPath := cardLeaseWrapperFixture(t, srv.URL, "gemma-4-26b-agent")
+	cfg := loadCfgPath(cfgPath)
+	card2 := []string{"gpu-cccc0000-x"}
+	ctx := context.Background()
+
+	if unloadReachesLease(ctx, cfg, card2, nil) {
+		t.Error("the seat is on card 0 and nothing else is listed for card 2: the unload reaches nothing")
+	}
+	if !unloadReachesLease(ctx, cfg, []string{"gpu-aaaa0000-x"}, nil) {
+		t.Error("the seat is on card 0: a lease on card 0 reaches it")
+	}
+	if !unloadReachesLease(ctx, cfg, nil, nil) {
+		t.Error("a lease that names no card is the whole node (or an allocation not made yet): the unload reaches the seat")
+	}
+	old := rosterIDsFn
+	rosterIDsFn = func(context.Context, string) ([]string, error) { return nil, errors.New("roster down") }
+	t.Cleanup(func() { rosterIDsFn = old })
+	if !unloadReachesLease(ctx, cfg, card2, nil) {
+		t.Error("a roster that cannot be read says nothing about what is resident: the doubt keeps the order")
+	}
+	rosterIDsFn = old
+	noSeat := cfg
+	noSeat.Endpoint = ""
+	if !unloadReachesLease(ctx, noSeat, card2, nil) {
+		t.Error("a config without an endpoint makes the unload refuse at once; nothing waits, so the order is left as it was")
+	}
+}
+
+// useUnreadableHost installs a host whose memory counters cannot be read, on both readings of it.
+func useUnreadableHost(t *testing.T) {
+	t.Helper()
+	read := func() (gpuprobe.HostMemory, bool) { return gpuprobe.HostMemory{}, false }
+	restore := gpuprobe.UseHostMemoryReader(read)
+	old := hostMemoryFn
+	hostMemoryFn = read
+	t.Cleanup(func() { restore(); hostMemoryFn = old })
+}
+
+// A host whose memory cannot be read cannot show that the unload makes room (the look after the unload would refuse for the
+// same reason until its deadline), so the seat is not cycled for it: the figure is compared in the grant, which waits for a
+// readable host exactly as it did before F82, with the seat untouched and the cards free.
+func TestAnUnreadableHostKeepsTheGrantsComparisonForALeaseThatUnloadsTheSeat(t *testing.T) {
+	if !gpuprobe.HostMemorySupported {
+		t.Skip("this platform has no host memory reader, so no reading is ever refused as unreadable")
+	}
+	f := &orderedSwap{drainSwap: &drainSwap{}}
+	f.loaded.Store(true)
+	cfgPath, m := handoffFixture(t, f)
+	useUnreadableHost(t)
+	shortFloor(t, 400*time.Millisecond)
+	args, epochFile := unloadSeatReserve(t, cfgPath, "--wait", "2s", "--drain", "--unload-seat", "--ram", "30")
+	var err error
+	stderr := captureStderr(t, func() { err = runGPUReserve(args) })
+	if err == nil || !strings.Contains(err.Error(), "memory cannot be read") {
+		t.Fatalf("the grant refuses a figure it cannot show to fit: %v\n%s", err, stderr)
+	}
+	if n := f.unloads.Load(); n != 0 {
+		t.Errorf("the seat was cycled for a lease the host could not be asked about: unloads=%d\n%s", n, stderr)
+	}
+	if fileExists(epochFile) {
+		t.Error("the command ran although the grant was refused")
+	}
+	if info := m.Inspect(); info.Held {
+		t.Errorf("a refused reserve holds nothing, got %+v", info)
 	}
 }
