@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 const toolCallText = "<tool_call>\n<function=search_files>\n</function>\n</tool_call>"
@@ -140,5 +142,93 @@ func TestForcedFinalAnswerThatIsNotAToolCallIsNotReasked(t *testing.T) {
 	}
 	if res.StopReason != "done" || client.calls != 2 || strings.Contains(res.StopNote, "re-asked") {
 		t.Fatalf("stop=%q calls=%d note=%q, want the answer taken at once with no re-ask", res.StopReason, client.calls, res.StopNote)
+	}
+}
+
+// timedClient is a fakeClient whose answers take a set time, so a step has a measured wall and a context deadline can
+// fall inside a call, as it does on a real seat.
+type timedClient struct {
+	*fakeClient
+	took []time.Duration // per call, in order; a call past the end is instant
+}
+
+func (c *timedClient) Chat(ctx context.Context, msgs []Msg, specs []ToolSpec, maxTokens int) (Completion, error) {
+	if i := c.fakeClient.calls; i < len(c.took) && c.took[i] > 0 {
+		select {
+		case <-time.After(c.took[i]):
+		case <-ctx.Done():
+			c.fakeClient.calls++ // the seat was asked
+			return Completion{}, ctx.Err()
+		}
+	}
+	return c.fakeClient.Chat(ctx, msgs, specs, maxTokens)
+}
+
+// TestForcedFinalReaskNeedsTheWallForAnotherTurnWhenNoRateIsKnown: a contract without an output_schema (and a seat
+// with no known rate) has no list-cap floor, and the gate used to fail open there, so the re-ask was spent whatever
+// wall was left: the deadline then fell INSIDE the re-ask, the run ended as an error with the offence lost, and the
+// delegator, which only re-places the forced-final budget defer, never gave the contract another seat. The turn just
+// made is the measure of the next one: with less wall left than that, there is no re-ask and the run ends on the
+// budget stop that carries the evidence.
+func TestForcedFinalReaskNeedsTheWallForAnotherTurnWhenNoRateIsKnown(t *testing.T) {
+	execs := 0
+	base := &fakeClient{script: []Completion{searchCall("c1", "a"), asTextCall(), answerOf("too late")}}
+	client := &timedClient{fakeClient: base, took: []time.Duration{0, 300 * time.Millisecond, 300 * time.Millisecond}}
+	loop := NewLoop(client, oneTool(&execs), 2) // no WithCutFinalReissue: listCapMinTurn is 0
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	res, err := loop.Run(ctx, "extract")
+	if err != nil {
+		t.Fatalf("the run ended in an error (%v) with stop %q: the re-ask was spent with 200 ms of wall left and the deadline fell inside it", err, res.StopReason)
+	}
+	if res.StopReason != "budget" || !strings.Contains(res.StopNote, core.ForcedFinalToolCallReason) || strings.Contains(res.StopNote, "re-asked") {
+		t.Fatalf("stop=%q note=%q, want the forced-final budget stop with the offence, and no re-ask", res.StopReason, res.StopNote)
+	}
+	if base.calls != 2 {
+		t.Fatalf("the seat was called %d times, want 2: no wall for a re-ask", base.calls)
+	}
+}
+
+// The control: the same run with the wall for it re-asks and takes the answer.
+func TestForcedFinalReaskIsSpentWhenTheWallHoldsAnotherTurnAndNoRateIsKnown(t *testing.T) {
+	execs := 0
+	base := &fakeClient{script: []Completion{searchCall("c1", "a"), asTextCall(), answerOf("the answer")}}
+	client := &timedClient{fakeClient: base, took: []time.Duration{0, 100 * time.Millisecond, 100 * time.Millisecond}}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	res, err := NewLoop(client, oneTool(&execs), 2).Run(ctx, "extract")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StopReason != "done" || res.Output != "the answer" || base.calls != 3 {
+		t.Fatalf("stop=%q output=%q calls=%d, want the re-asked answer after 3 calls", res.StopReason, res.Output, base.calls)
+	}
+}
+
+// And with no deadline at all there is no wall to run out of.
+func TestForcedFinalReaskWithNoDeadlineIsAlwaysSpent(t *testing.T) {
+	execs := 0
+	client := &fakeClient{script: []Completion{searchCall("c1", "a"), asTextCall(), answerOf("the answer")}}
+	res, err := NewLoop(client, oneTool(&execs), 2).Run(context.Background(), "extract")
+	if err != nil || res.StopReason != "done" || client.calls != 3 {
+		t.Fatalf("err=%v stop=%q calls=%d, want the re-ask spent", err, res.StopReason, client.calls)
+	}
+}
+
+// The re-ask is the same request with a quoted turn added, so it can take longer than the call it follows: the wall must
+// hold the last turn plus a margin, not only the last turn. Here the wall left after the final call (about 340 ms) holds the
+// call that was just made (300 ms) but not the re-ask, which takes 350 ms.
+func TestForcedFinalReaskKeepsAMarginOverTheLastTurn(t *testing.T) {
+	execs := 0
+	base := &fakeClient{script: []Completion{searchCall("c1", "a"), asTextCall(), answerOf("too late")}}
+	client := &timedClient{fakeClient: base, took: []time.Duration{0, 300 * time.Millisecond, 350 * time.Millisecond}}
+	ctx, cancel := context.WithTimeout(context.Background(), 640*time.Millisecond)
+	defer cancel()
+	res, err := NewLoop(client, oneTool(&execs), 2).Run(ctx, "extract")
+	if err != nil {
+		t.Fatalf("the run ended in an error (%v): the re-ask was spent on a wall that held the last turn and not the next", err)
+	}
+	if res.StopReason != "budget" || base.calls != 2 {
+		t.Fatalf("stop=%q calls=%d, want the budget stop after 2 calls", res.StopReason, base.calls)
 	}
 }

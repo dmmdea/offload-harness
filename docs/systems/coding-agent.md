@@ -82,8 +82,9 @@ run (D-89) offers no tools and opens with the answer-now turn. One seat family a
 (`<tool_call><function=...>`, since no parser runs on a request without tools) or parsed into a call: 35 of the 106 runs of that
 family that reached a forced final, against none of 241 on every other seat, with 30 of the 35 holding more than half their wall
 and the evidence they needed already in the transcript. The run used to end there on `budget` with the text thrown away. The
-loop now asks again, once (`finalReasked`), when the wall holds one more turn (`wallHoldsOneMoreTurn`, the gate the list-cap
-re-issue uses), with a request that differs from the first because the decode of this step is greedy and an identical request
+loop now asks again, once (`finalReasked`), when the wall holds one more turn (`wallHoldsAnotherFinal`: the seat's list-cap floor
+where one is known and always the wall of the final call just made plus a quarter, so a contract without an output_schema, or a
+seat with no known rate, is gated too; the list-cap re-issue's own gate fails open there), with a request that differs from the first because the decode of this step is greedy and an identical request
 repeats itself: the offending text (or the tool name and arguments) is quoted back in a new user turn, the seat is told that
 nothing it writes as a call will run and to begin with the answer in the requested shape, and the offending turn stays out of the
 transcript. The re-ask spends no step, runs at the same budget with thinking off, and both completions are in `calls[]` as forced

@@ -75,7 +75,11 @@ Versioning: [SemVer](https://semver.org/).
   prompt: a user turn that quotes the offending text (or the tool and its arguments), says nothing written as a call will run,
   forbids the tool syntax and says to begin with the answer in the requested shape; the poisoned turn is kept out of the
   transcript, the answer-now turn is not repeated, the step is not spent, and the budget and thinking-off are those of the first
-  final. It is gated on the wall holding one more turn (the gate the list-cap re-issue uses) and bounded at one: a second tool
+  final. It is gated on the wall and bounded at one. The gate is the seat's list-cap floor where one is known and, in every case,
+  the wall of the final call just made plus a quarter (`wallHoldsAnotherFinal`), because the list-cap re-issue's own gate fails
+  open for a contract without an output_schema and for a seat with no known rate, and a re-ask spent there let the deadline fall
+  INSIDE the call: the run ended as an error with the offence lost, and the delegator, which re-places only the forced-final
+  budget defer, never gave the contract another seat. A second tool
   call ends the run on `budget` as before, now with both replies quoted in `stop_note` (`core.ForcedFinalToolCallReason` opens
   it, and sits inside the defer reason). An answer is `done` and `stop_note` says the seat first wrote a tool call and was
   re-asked once. **Not measured on a live seat** (no model was started for this change): whether a quoted-back, stricter
@@ -85,8 +89,12 @@ Versioning: [SemVer](https://semver.org/).
   re-ask (a full re-prefill, about 30 s). Tests `internal/agent/forced_final_reask_test.go`, written first: red before with
   `stop="budget" output="" steps=2, want the re-asked answer as a finished run in 2 steps` and `the seat was called 2 times,
   want 3: one re-ask and no more`; the two tests that pinned the one-shot give-up (`TestForcedFinalToolCallIsNotExecuted`,
-  `TestForcedFinalToolCallWrittenAsTextIsABudgetStop`) now script two offences in a row. Six mutations (the wall gate, the bound
-  of one, the quoted text, the poisoned turn kept, each note) each turn them red. Docs: `docs/systems/coding-agent.md`,
+  `TestForcedFinalToolCallWrittenAsTextIsABudgetStop`) now script two offences in a row; the wall tests (a contract with no
+  rate, a margin over the last turn, no deadline at all) were red before with `the run ended in an error (fakeClient: script
+  exhausted) with stop "error": the re-ask was spent with 200 ms of wall left and the deadline fell inside it`. Thirteen mutations
+  (the wall gate, the bound of one, the quoted text, the poisoned turn kept, each note, and on the gate: the measured turn not
+  read, no margin, the seat's floor ignored, a comparison too strict, a missing deadline read as a limit, the last turn not
+  passed, the original gate back) each turn them red. Docs: `docs/systems/coding-agent.md`,
   `docs/OPERATOR-GUIDE.md`.
 - **A forced-final tool call is its own shape in the rigger and gets a second seat, instead of "a task too large: split it".**
   The shape (the forced final step answered with a tool call, again after the re-ask above) ended on `stop_reason` `budget`,

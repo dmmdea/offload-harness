@@ -1670,7 +1670,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			note := ""
 			if offence, quoted, ok := finalOffence(comp.Msg); ok {
 				l.prefill.Observe(comp.Serve)
-				if !finalReasked && l.wallHoldsOneMoreTurn(ctx) {
+				if !finalReasked && l.wallHoldsAnotherFinal(ctx, time.Duration(callRec.Ms)*time.Millisecond) {
 					finalReasked, firstOffence = true, offence
 					msgs = append(msgs, Msg{Role: "user", Content: finalReaskTurn(quoted)})
 					step-- // the re-ask does not spend a step
@@ -2135,6 +2135,26 @@ func (l *Loop) wallHoldsOneMoreTurn(ctx context.Context) bool {
 		return true
 	}
 	return time.Until(dl) >= l.listCapMinTurn
+}
+
+// wallHoldsAnotherFinal reports whether the wall that is left can hold one more forced-final turn: the re-ask of a
+// final step the seat answered with a tool call. It is wallHoldsOneMoreTurn with a second measure that does not depend
+// on a rate being known. That gate fails open for a contract without an output_schema (the list-cap floor is installed
+// only for one) and for a seat with no known rate, and a re-ask spent on a wall that cannot hold it ends in a deadline
+// INSIDE the call: the run is an error with the offence lost, and the delegator, which re-places only the forced-final
+// budget defer, never gives the contract another seat. The turn just made (last) is the measure of the next one, the same
+// request with a quoted turn added, so the wall must hold the larger of the seat's floor and that wall plus a quarter for
+// the added prefill. No deadline is no limit.
+func (l *Loop) wallHoldsAnotherFinal(ctx context.Context, last time.Duration) bool {
+	dl, hasWall := ctx.Deadline()
+	if !hasWall {
+		return true
+	}
+	need := l.listCapMinTurn
+	if measured := last + last/4; measured > need {
+		need = measured
+	}
+	return time.Until(dl) >= need
 }
 
 // persist best-effort records the run outcome to memory. Defer-not-crash: any
