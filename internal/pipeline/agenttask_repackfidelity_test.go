@@ -343,3 +343,38 @@ func TestRunAgentTaskRepackRefusesAnEmptiedObjectThatNeededCoercion(t *testing.T
 		}
 	})
 }
+
+// A prose answer under a schema that bounds no list gets the prompts the re-pack always sent, byte for
+// byte, on both lanes: nothing about the fidelity reading or the key listing reaches it.
+func TestRepackPromptsForAProseAnswerAreUnchanged(t *testing.T) {
+	const answer = "The answer is 42."
+	fake := &agentFake{
+		rosterIDs:    []string{agentTestSeat},
+		loop:         func(int64) string { return doneChat(answer) },
+		repack:       func(int64) string { return `{"wrong":"shape"}` }, // both grammar attempts fail validation
+		chatFallback: func(int64) string { return doneChat(`{"answer":"42"}`) },
+		repackBodies: make(chan map[string]any, 4),
+		chatBodies:   make(chan map[string]any, 4),
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	wire := decodeWire(t, agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract())))
+	if wire.Deferred {
+		t.Fatalf("deferred (%s): %s", wire.DeferClass, wire.Reason)
+	}
+	system, user := promptOf(t, nextBody(t, fake.repackBodies, "grammar re-pack"))
+	if want := "You extract structured data from text. Output ONLY a JSON object with exactly the requested fields. Use empty values when a field is absent. " + repackTypeRule; system != want {
+		t.Errorf("grammar system prompt changed:\n%s", system)
+	}
+	if want := "Extract these fields from the text: \"answer\" (string).\n\nTEXT:\n" + answer; user != want {
+		t.Errorf("grammar user prompt changed:\n%q", user)
+	}
+	system, user = promptOf(t, nextBody(t, fake.chatBodies, "chat re-pack"))
+	if want := "You extract structured data from text. Output ONLY a JSON object — no prose, no code fences. " + repackTypeRule; system != want {
+		t.Errorf("chat system prompt changed:\n%s", system)
+	}
+	if want := "Extract these fields from the text as a JSON object: \"answer\" (string).\n\nTEXT:\n" + answer; user != want {
+		t.Errorf("chat user prompt changed:\n%q", user)
+	}
+}

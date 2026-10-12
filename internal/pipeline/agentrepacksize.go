@@ -14,9 +14,10 @@ import (
 // re-pack was thought of as re-writing the answer as JSON. That is the cap, not the need, for a
 // schema made of many short slots: a title, at most ten strings, a flag and a note bound what the
 // extraction can emit whatever the answer's length. The recorded re-pack of a 7,126 character
-// answer produced about 200 tokens, and was skipped because its 2,439-token "size" was more than
-// the 2,330 tokens the call's last 476 seconds buy at 4.9 tokens a second. The finished answer was
-// lost to a budget defer for a re-pack that needed under a minute.
+// answer was skipped because its 2,439-token "size" was more than the 2,330 tokens the call's
+// last 476 seconds buy at 4.9 tokens a second (a comparable re-pack that did run, six items on a
+// faster seat, wrote 228 tokens). The finished answer was lost to a budget defer for a re-pack
+// the schema bounds well under the time the call had left.
 //
 // It is the cap for a schema of one or two free-text fields. {answer: string} is the flat shape
 // every remote agent_run carries, and its one string IS the answer restated; a digest schema's

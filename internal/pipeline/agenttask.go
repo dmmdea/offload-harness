@@ -1896,8 +1896,8 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	budget := repackBudget(output)
 	// least is the smallest an attempt may be sized to: what the re-pack has to write,
 	// which is the answer's own size in tokens unless the schema bounds the object lower
-	// (repackLeast: a title, ten strings and a flag are a few hundred tokens whatever the
-	// length of the answer they are read from). skipped is set when the time left could
+	// (repackLeast: a bounded set of short fields, whatever the length of the answer they
+	// are read from). skipped is set when the time left could
 	// not buy even that, and no further attempt is sent (repackOpts.fit). floorTokens is
 	// the smallest the NEXT grammar attempt may be sized to: least, raised to what the
 	// answer needs once a cut attempt has shown it needs more (the resend below).

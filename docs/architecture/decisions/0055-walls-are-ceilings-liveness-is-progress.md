@@ -380,7 +380,8 @@ determine if a job is truly still going" — was not met by any of the three sur
     - **The output is bounded by the schema.** A 7,126-character answer, a schema of a title, at most
       ten strings, a flag and a note, and a seat at 4.9 tok/s: the skip test priced the re-pack at 2,439
       tokens against the 2,330 that the call's last 476 s buy (the call's deadline capped the owed
-      time), and skipped it. The object was about 200 tokens. `repackLeast` is now the smaller of the
+      time), and skipped it. The object was small: its re-pack never ran, and the comparable one that did
+      (the control subtask's, six items on a faster seat) wrote 228 tokens. `repackLeast` is now the smaller of the
       answer-based figure and the schema's bound (`repackSchemaTokens`): a boolean or number 8 to 12
       tokens, a string with a declared `maxLength` or `enum` exactly, any other string 128 tokens
       (about 400 characters: chosen, not measured), a list only with `maxItems`, an object only with
@@ -389,8 +390,7 @@ determine if a job is truly still going" — was not met by any of the three sur
       free-text fields (`repackRestatingSlots`, chosen, not measured): the flat `{answer: string}` every
       remote `agent_run` carries is its one string, the whole answer restated, and a digest's summary
       is most of it. Three or more free slots, a list of ten strings counting as ten, are an extraction
-      into parts, which is the recorded case (twelve slots, about 1,600 tokens by this estimate, about
-      200 written). The skip floor, the chat lane's
+      into parts, which is the recorded case (twelve slots, about 1,600 tokens by this estimate). The skip floor, the chat lane's
       floor, the resend floor and the owed time (`repackOwedTokens`, still `1.5 x` the tokens at the
       seat's rate, `agent.RepackMargin`) all read that one figure, so the skip test and the time the
       re-pack is owed cannot disagree. A skip the schema sized says `< the object's N`. The liveness

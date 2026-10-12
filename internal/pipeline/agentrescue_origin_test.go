@@ -28,7 +28,6 @@ type originNode struct {
 	hits  atomic.Int64
 	auth  atomic.Value // string
 	model atomic.Value // string
-	user  atomic.Value // string
 }
 
 func newOriginNode(t *testing.T, seat string, chatLane bool, reply func(n int64) string) *originNode {
@@ -46,8 +45,6 @@ func newOriginNode(t *testing.T, seat string, chatLane bool, reply func(n int64)
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			m, _ := body["model"].(string)
 			n.model.Store(m)
-			_, u := promptOf(t, body)
-			n.user.Store(u)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(doneChat(reply(count))))
 		default:
@@ -289,5 +286,20 @@ func TestRescueRepackNotesAnObjectThatKeptFewerItemsThanItsAnswerHeld(t *testing
 	got, err := p.RescueRepack(node.ctx("origin-seat"), fidelityContract(), answer, 0)
 	if err != nil || !strings.Contains(got.How, "kept 10 of 11") {
 		t.Fatalf("rescued = %+v err = %v, want the note that ten of eleven items were kept", got, err)
+	}
+}
+
+// The origin call is aimed at one named node: a seat pin this box keeps for its own cascade (a
+// seat_endpoints entry that happens to name the origin's seat) must not divert it.
+func TestRescueRepackIgnoresASeatPinForTheOriginsSeat(t *testing.T) {
+	node := newOriginNode(t, "origin-seat", true, func(int64) string { return `{"answer":"42"}` })
+	_, srv := coldBox(t)
+	p := admissionTestPipeline(t, srv.URL, 5)
+	p.cfg.FleetAuthToken = "tok"
+	p.cfg.SeatEndpoints = map[string]string{"origin-seat": "http://127.0.0.1:1"} // nothing listens there
+
+	got, err := p.RescueRepack(node.ctx("origin-seat"), testContract(), rescueAnswer, 0)
+	if err != nil || string(got.Structured) != `{"answer":"42"}` || node.hits.Load() != 1 {
+		t.Fatalf("rescued = %+v err = %v node calls = %d, want the node's object: a pin kept for this box's cascade must not divert the call", got, err, node.hits.Load())
 	}
 }
