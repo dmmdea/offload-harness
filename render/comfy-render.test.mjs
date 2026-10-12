@@ -11,6 +11,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildRenderGraph, parseRenderArgs, parseBoolFlag, UsageError, KNOWN_FAMILIES, BOOL_FLAGS, waitServer } from "./comfy-render.mjs";
 import * as renderMod from "./comfy-render.mjs";
+import { submitGraph } from "./comfy-submit.mjs";
 import { rgbaPrompt } from "./wf-qwen-image-21.mjs";
 import { scratchDir } from "./test-scratch.mjs";
 import { isolatedRunnerEnv } from "./test-isolation.mjs";
@@ -239,6 +240,19 @@ test("reportRenderFailure: any other failure prints only the failure line (no cl
   const lines = [];
   renderMod.reportRenderFailure(new Error("view fetch 404"), (...a) => lines.push(a.join(" ")));
   assert.deepEqual(lines, ["RENDER FAILED: view fetch 404"]);
+});
+
+test("a POST /prompt that times out ends the render like a dead server: exit 3 and the class line, which is what stops a --batch", async () => {
+  // a fetch that honours its signal and never answers: the ComfyUI that accepts the connection and wedges (D-38)
+  const stalled = (url, opts = {}) => new Promise((_, reject) => { opts.signal.addEventListener("abort", () => reject(opts.signal.reason), { once: true }); });
+  const err = await submitGraph({ api: "http://comfy.invalid", graph: {}, clientId: "c", cli: null, fetchImpl: stalled, submitTimeoutMs: 60 }).then(() => null, (e) => e);
+  assert.ok(err, "the stalled POST /prompt must reject at its bound");
+  assert.equal(renderMod.renderExitCode(err), 3);
+  const lines = [];
+  renderMod.reportRenderFailure(err, (...a) => lines.push(a.join(" ")));
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^RENDER FAILED: ComfyUI POST \/prompt timeout/);
+  assert.equal(lines[1], "IGPU_CLASS=comfy_unusable");
 });
 
 test("the real comfy-render script: a ComfyUI answering HTTP 500 ends with exit 3 and IGPU_CLASS=comfy_unusable on its own stderr line", async (t) => {

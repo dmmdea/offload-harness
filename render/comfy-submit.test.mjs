@@ -912,6 +912,30 @@ test("rawSubmit rejects a POST /prompt that never answers, naming the call and t
   assert.match(r.error.message, /timeout/i);
 });
 
+// A ComfyUI that takes a connection and does not answer POST /prompt for the whole bound is wedged on the path every later job
+// must take: the batch parent reads only the child's exit code and its RENDER FAILED line, so the timeout has to arrive as a
+// serverUnusable failure (exit 3, the class line) or runBatchJobs goes on and pays the bound again on every remaining job while
+// the batch holds the lease (C-83 was the same shape: jobs 3-6 failed over 57 minutes against one poisoned server).
+test("a POST /prompt that times out is marked serverUnusable, so a --batch stops on it and the class line is printed", async () => {
+  const r = await settles(submit.rawSubmit({ api: "http://comfy.invalid", graph: { 1: {} }, clientId: "c", fetchImpl: stalledFetch(), timeoutMs: 60 }));
+  assert.ok(!r.hung && r.ok === false);
+  assert.equal(r.error.timedOut, true, "the timeout flag stays: it says WHICH condition ended the call");
+  assert.equal(r.error.serverUnusable, true, "a server that does not answer POST /prompt can run no later job");
+  assert.equal(submit.comfyUnusableClassLine(r.error), "IGPU_CLASS=comfy_unusable");
+  // through the production caller too
+  const s = await settles(submitGraph({ api: "http://comfy.invalid", graph: {}, clientId: "c", cli: null, fetchImpl: stalledFetch(), submitTimeoutMs: 60 }));
+  assert.ok(!s.hung && s.ok === false);
+  assert.equal(s.error.serverUnusable, true);
+});
+
+test("a GET /view that times out is NOT marked serverUnusable: the render finished and its output is on disk", async () => {
+  const r = await settles(fetchView({ api: "http://comfy.invalid", file: { filename: "a.png" }, fetchImpl: stalledFetch(), timeoutMs: 60 }));
+  assert.ok(!r.hung && r.ok === false);
+  assert.equal(r.error.timedOut, true);
+  assert.ok(!r.error.serverUnusable, "a stalled output fetch must not stop a batch whose later jobs may still be served");
+  assert.equal(submit.comfyUnusableClassLine(r.error), "");
+});
+
 test("fetchView rejects a GET /view that never answers, naming the call and the bound", async () => {
   const r = await settles(fetchView({ api: "http://comfy.invalid", file: { filename: "a.png" }, fetchImpl: stalledFetch(), timeoutMs: 60 }));
   assert.ok(!r.hung, "fetchView never settled: a ComfyUI that stops answering GET /view holds the GPU slot");
