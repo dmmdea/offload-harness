@@ -877,12 +877,19 @@ shell test, three were documentation, and one holds only once another branch is 
   `winexec.Command`, `CommandContext`, `CommandDetached` and `CommandIfNoConsole` count as starts now (matched by the tail of the import
   path, so the lint names no module). Red: five synthetic cases, each a real proof started through one of them.
 - **Tests.** The shell self-test runs 87 checks on Linux (one skipped: the PowerShell twin is not on that host) and the PowerShell
-  self-test 95, under PowerShell 7 and under Windows PowerShell 5.1; they take `TRIPWIRE_SELFTEST_FAILFAST=1` and (PowerShell) `TRIPWIRE_SELFTEST_ONLY=tag,...`
-  so that a mutation check runs seconds, not the suite. Mutation-checked with `scripts/mutation-check.sh` and `.ps1`, each mutant RED:
-  14 on the shell twin (a digest never shown, a continuation line dropped, a failing `stat` read as "not the system drive", an
-  undecided guard not refusing, a signal to the leader only, no `KILL` step, a wrong exit code, `TERM` not trapped, no job control, the
-  removal gate ignoring a skipped check, the skip note dropped, a vanished folder ignored, the capture kept, an empty folder kept) and
-  13 on the PowerShell twin (the same rules, plus a wait that is not sliced, a single-process kill and no stop in `finally`).
+  self-test 98, under PowerShell 7 and under Windows PowerShell 5.1; they take `TRIPWIRE_SELFTEST_FAILFAST=1` and (PowerShell)
+  `TRIPWIRE_SELFTEST_ONLY=tag,...` so that a mutation check runs seconds, not the suite. The interrupt cases stop `./hanger`, a test that
+  ignores `INT` and `TERM` and starts an unwaited copy of itself: go test ends its own test binary when it is interrupted, so only a
+  stop that reaches the whole process group and ends with a kill leaves nothing running. Mutation-checked with
+  `scripts/mutation-check.sh` and `.ps1`, each mutant RED: 14 on the shell twin (a digest never shown, a continuation line dropped, a
+  failing `stat` read as "not the system drive", an undecided guard not refusing, a signal to the leader only, no `KILL` step, a wrong
+  exit code, `TERM` not trapped, no job control, the removal gate ignoring a skipped check, the skip note dropped, a vanished folder
+  ignored, the capture kept, an empty folder kept), 13 on the PowerShell twin (the same rules, plus a wait that is not sliced, a
+  single-process kill and no stop in `finally`), 5 on the lint (a dropped `winexec` branch, `winexec.CommandContext` known to
+  `os/exec` only, a `winexec` match loosened to any import path ending in the word, `tools` skipped again, `bin` skipped again) and 1 on
+  the lock (keyed to `TMPDIR` again). The leader-only signal first SURVIVED twice, and that was a gap in the tests, not a rule that did
+  not matter: the interrupt cases counted any process under the scratch folder instead of waiting for the fixture's two, and with one test
+  binary go test's own handling of an interrupt hid the difference; both are fixed above.
 
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 
