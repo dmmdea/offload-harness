@@ -183,6 +183,49 @@ type Result struct {
 	Duration float64   `json:"duration"`
 	Text     string    `json:"text"`
 	Segments []Segment `json:"segments"`
+	// WordsReliable is the self-check of the word timestamps (D-38, issue #169): false when the FIRST
+	// word of some segment starts wordDriftThresholdSec or more away from that segment's start, true
+	// when the first word of every segment that carries words starts within it, nil (the key is
+	// absent) when no segment carries words. True is a statement about those first words only: a
+	// later word that sits far outside its segment still reads true (words[0] is the issue's own
+	// formula, and a stricter bound on every word waits for a measurement of honest audio). It flags
+	// the symptom and names no cause: whisper-server was seen to hand back word times lagging their
+	// segment by minutes on a long file, and a consumer that cuts audio at whole-word boundaries needs
+	// to know not to trust them. Set by Transcribe from checkWordDrift; pipeline and sttremote publish
+	// it in the transcribe payload.
+	WordsReliable *bool `json:"words_reliable,omitempty"`
+	// WordsDriftSec is the largest |segment.start - words[0].start| over the segments that carry
+	// words, in seconds: the number behind WordsReliable. Zero (and absent) when WordsReliable is nil
+	// or the words agree to the millisecond.
+	WordsDriftSec float64 `json:"words_drift_sec,omitempty"`
+}
+
+// wordDriftThresholdSec is the drift at which the word times stop being believed: the issue's own
+// ask (#169), 0.5 s. A segment's start and its first word's start are both whisper's estimates and
+// differ by a few hundred milliseconds of leading silence on honest audio; the failure this exists
+// for is off by tens of seconds.
+const wordDriftThresholdSec = 0.5
+
+// checkWordDrift is the pure self-check behind Result.WordsReliable: the largest
+// |segment.start - words[0].start| over the segments that carry words, and whether it stays
+// below threshold. It returns (nil, 0) when no segment carries words, so a transcript with no
+// word array (the OpenAI path, a model that sends none) gets no verdict.
+func checkWordDrift(segs []Segment, threshold float64) (reliable *bool, driftSec float64) {
+	judged := false
+	for _, s := range segs {
+		if len(s.Words) == 0 {
+			continue
+		}
+		judged = true
+		if d := math.Abs(s.Start - s.Words[0].Start); d > driftSec {
+			driftSec = d
+		}
+	}
+	if !judged {
+		return nil, 0
+	}
+	ok := driftSec < threshold
+	return &ok, driftSec
 }
 
 // Params are the per-request decode knobs whisper-server accepts as form fields.
@@ -369,6 +412,10 @@ func (c *Client) Transcribe(ctx context.Context, model, wavPath string, p Params
 	if strings.TrimSpace(out.Text) == "" && len(out.Segments) == 0 {
 		return Result{}, fmt.Errorf("whisper-server answered with an empty transcript: %w", ErrUpstreamNoSpeech)
 	}
+	// The words[] the upstream returned are checked against the segments they belong to (issue #169):
+	// a transcript whose word times lag or lead their segment says words_reliable:false, and the
+	// number behind it. Set here, after the decode, because the upstream never sends these keys.
+	out.WordsReliable, out.WordsDriftSec = checkWordDrift(out.Segments, wordDriftThresholdSec)
 	return out, nil
 }
 

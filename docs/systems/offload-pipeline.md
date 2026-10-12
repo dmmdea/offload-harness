@@ -267,6 +267,26 @@ claim that the audio is silent. The OpenAI protocol never reads no-speech off a 
 path crashes on such audio). What the rule cannot see is another process doing the same to the same
 upstream: an alone call that dies that way reads as no speech.
 
+Transcription also checks its own **word times** (D-38, issue #169). whisper-server's `verbose_json` carries a
+`words[]` array per segment and `internal/sttclient` hands it on untouched; on a long file those word times have
+been seen to lag their segment by minutes (up to 152 s on a 730 s file), which breaks any consumer that cuts audio
+at word boundaries. `Transcribe` therefore takes the largest `|segment.start - words[0].start|` over the segments
+that carry words and compares it with 0.5 s, the issue's own threshold. `Result.WordsReliable` is `false` at or
+above it, `true` below it and absent when no segment carries words (the OpenAI protocol never does);
+`Result.WordsDriftSec` is that largest gap in seconds. The check reads the **first word of each segment** only, so
+`true` means those first words start within 0.5 s of their segments' starts and says nothing about a later word of
+the same segment; widening it to every word waits for a measurement of honest audio. The flag names the symptom,
+not the cause: where the per-chunk offsets are lost is not found, so #169 stays open until a long file run through
+a speech seat under its lease shows it.
+
+The verdict is published as `words_reliable` and `words_drift_sec` (both omitempty) in the `offload_transcribe`
+payload: the pipeline sets them from the `Result`, a drifted transcript also writes one log line naming the symptom
+and issue #169, the result cache stores the payload with them, and `internal/sttremote` re-publishes the node's
+verdict in the answer it builds on the asking box. An absent key means no verdict (no word times, an entry cached
+by a build older than the check, or a node older than the check), never `true`. The keys are additive, so a node
+and an asker of different builds keep working. The `.segments.json` file stays a bare segment array and carries no
+verdict: a reader that takes only the file path out of the payload has to read `words_reliable` from the payload.
+
 ## Important flows
 
 - [../flows/cascade-escalation-and-defer.md](../flows/cascade-escalation-and-defer.md) — the walk in
