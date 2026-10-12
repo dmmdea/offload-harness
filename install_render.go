@@ -1099,6 +1099,7 @@ func seatIDs(seats []*vllmseat.Spec) map[string]bool {
 func runAuditYAML(args []string) error {
 	fs := flag.NewFlagSet("audit-yaml", flag.ExitOnError)
 	against := fs.Bool("against-render", false, "also re-derive each file from THIS binary's tier seeds and report MATCH / STALE(keys) / UNSTAMPED / HAND-EDITED")
+	_ = fs.Bool("other-box", false, "STUB")
 	_ = fs.Parse(args)
 	files := fs.Args()
 	if len(files) == 0 {

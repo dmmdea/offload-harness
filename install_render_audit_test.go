@@ -283,8 +283,8 @@ func threeCardTable() []gpuprobe.Device {
 	}
 }
 
-// auditYAMLWithTable runs `audit-yaml` over text with a given card table.
-func auditYAMLWithTable(t *testing.T, devs []gpuprobe.Device, tableErr error, text string) (string, error) {
+// auditYAMLWithTable runs `audit-yaml` over text with a given card table. Flags come before the file.
+func auditYAMLWithTable(t *testing.T, devs []gpuprobe.Device, tableErr error, text string, flags ...string) (string, error) {
 	t.Helper()
 	withCardTable(t, devs, tableErr)
 	path := filepath.Join(t.TempDir(), "llama-swap.yaml")
@@ -292,7 +292,7 @@ func auditYAMLWithTable(t *testing.T, devs []gpuprobe.Device, tableErr error, te
 		t.Fatal(err)
 	}
 	var runErr error
-	out := captureStdout(t, func() { runErr = runAuditYAML([]string{path}) })
+	out := captureStdout(t, func() { runErr = runAuditYAML(append(flags, path)) })
 	return out, runErr
 }
 
@@ -465,4 +465,88 @@ func TestVerbatimStampAgreesWithTheProvenanceVerdict(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A pin that names no card leaves the seat on fewer cards than it was sized for, or on none. An index
+// is the form a render writes, so it is judged in a verbatim render too (a seed's index pin that no
+// card has is a render for a bigger box than this one, which a note would excuse into a dead seat).
+func TestAuditYAMLRefusesAnIndexThatNamesNoCard(t *testing.T) {
+	t.Run("a hand-maintained file", func(t *testing.T) {
+		out, err := auditYAMLWithTable(t, threeCardTable(), nil, pinnedYAML("7"))
+		if err == nil || !strings.Contains(out, "pin-unresolved (seat): ") || !strings.Contains(out, "index 7") {
+			t.Fatalf("an index past the last card must fail and name the index; err=%v:\n%s", err, out)
+		}
+	})
+	t.Run("a word the rules cannot read as a card", func(t *testing.T) {
+		out, err := auditYAMLWithTable(t, threeCardTable(), nil, pinnedYAML("gpu_abc"))
+		if err == nil || !strings.Contains(out, "pin-unresolved (seat): ") {
+			t.Fatalf("a token that is neither an index nor a UUID must fail; err=%v:\n%s", err, out)
+		}
+	})
+	t.Run("a verbatim render for three cards on a box with two", func(t *testing.T) {
+		res, err := deriveRender(embeddedProfiles, renderReq("blackwell-3x16", "windows", &pinnedVLLM{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		stamped, err := servingtmpl.Stamp(res.Config, res.Basis, stampedAtFixed())
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, runErr := auditYAMLWithTable(t, threeCardTable()[:2], nil, stamped)
+		if runErr == nil || !strings.Contains(out, "pin-unresolved (") {
+			t.Fatalf("a seed that pins index 2 on a two-card box leaves its seats on no card; err=%v:\n%s", runErr, out)
+		}
+	})
+}
+
+// The pin rules compare a file's pins with the box that runs the audit. A file that belongs to another
+// machine has the other machine's UUIDs, so the comparison is wrong; the caller who knows says so.
+func TestAuditYAMLOtherBoxSkipsThePinRules(t *testing.T) {
+	foreign := pinnedYAML("GPU-dddd0000-0000-0000-0000-000000000000")
+	t.Run("by default a pin that names no card on this box fails and says how to audit a foreign file", func(t *testing.T) {
+		out, err := auditYAMLWithTable(t, threeCardTable(), nil, foreign)
+		if err == nil || !strings.Contains(out, "pin-unresolved (seat): ") {
+			t.Fatalf("the default is unchanged: this box's cards are the table; err=%v:\n%s", err, out)
+		}
+		if !strings.Contains(out, "--other-box") {
+			t.Errorf("a finding that may be a foreign file must name the flag that says so:\n%s", out)
+		}
+	})
+	t.Run("the flag skips the rules, says so and never reads the card table", func(t *testing.T) {
+		prev := renderCardTable
+		renderCardTable = func() ([]gpuprobe.Device, error) {
+			t.Error("the card table was read for a file the caller said belongs to another machine")
+			return nil, nil
+		}
+		t.Cleanup(func() { renderCardTable = prev })
+		path := filepath.Join(t.TempDir(), "llama-swap.yaml")
+		if err := os.WriteFile(path, []byte(foreign), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		out := captureStdout(t, func() { err = runAuditYAML([]string{"--other-box", path}) })
+		if err != nil || !strings.Contains(out, ": OK") {
+			t.Fatalf("with the pin rules off the file is clean; err=%v:\n%s", err, out)
+		}
+		if !strings.Contains(out, "note: "+path+": ") || !strings.Contains(out, "pin rules not applied") || !strings.Contains(out, "--other-box") {
+			t.Errorf("a silent pass would read as a clean audit; the output must say the pin rules did not run and why:\n%s", out)
+		}
+	})
+	t.Run("the flag does not switch off any other rule", func(t *testing.T) {
+		bad := strings.Replace(foreign, "ttl: 300", "ttl: 0", 1)
+		bad = strings.Replace(bad, "-ngl 99", "-ngl 99 --cpu-moe", 1)
+		out, err := auditYAMLWithTable(t, threeCardTable(), nil, bad, "--other-box")
+		if err == nil || !strings.Contains(out, "ttl (seat): ") || !strings.Contains(out, "cpu-moe (seat): ") {
+			t.Fatalf("--other-box skips the pin rules and nothing else; err=%v:\n%s", err, out)
+		}
+		if strings.Contains(out, "pin-unresolved") {
+			t.Errorf("the pin rules were skipped:\n%s", out)
+		}
+	})
+	t.Run("a file that pins nothing is silent about it", func(t *testing.T) {
+		out, err := auditYAMLWithTable(t, threeCardTable(), nil, "models:\n  m:\n    ttl: 300\n    cmd: /bin/llama-server -m m.gguf --port ${PORT}\n", "--other-box")
+		if err != nil || strings.Contains(out, "pin rules") {
+			t.Fatalf("nothing pins, so there is nothing to skip; err=%v:\n%s", err, out)
+		}
+	})
 }
