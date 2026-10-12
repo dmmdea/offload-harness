@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"encoding/json"
+	"log"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 )
@@ -17,7 +18,10 @@ func listFidelityFailure(contract core.AgentContract, structured json.RawMessage
 		return ""
 	}
 	var schema map[string]any
-	if json.Unmarshal(contract.OutputSchema, &schema) != nil {
+	if err := json.Unmarshal(contract.OutputSchema, &schema); err != nil {
+		// Not a finding (a broken contract is not the node's fault), but not silent either: the
+		// result goes on without having been read against its answer.
+		log.Printf("delegate: the contract's output_schema does not parse (%v); the structured result was not read against its answer", err)
 		return ""
 	}
 	if why := core.ListsEmptied(structured, schema, answer); why != "" {

@@ -40,7 +40,10 @@ const rescueSecondTry = 20 * time.Second
 //     behind this box's GPU lease (register C-41c). The recorded rescue found this
 //     box's seat cold under another session's lease, warmed it, and was cut at its
 //     120 s allowance: a finished, correct answer lost for a seat that was never
-//     the natural place to re-pack it;
+//     the natural place to re-pack it. The delegator hands the origin only when the node's own
+//     re-pack did not fail for its seat's health (a stall, an unreachable or busy seat, class
+//     infrastructure): the seat that just wedged is not the first place to send the rescue, and a
+//     hung call there would spend the whole budget before this box's own seat got a try;
 //  4. this box's seat after all, warmed first, when the node could not take the call
 //     (an older build with no chat door, a refused or hollow object) and time remains.
 //
@@ -150,10 +153,12 @@ func (p *Pipeline) RescueRepack(ctx context.Context, contract core.AgentContract
 func (p *Pipeline) rescueSeatResident(ctx context.Context, seat string) (resident, known bool) {
 	sc, err := swapclient.New(p.cfg.Endpoint, admissionPoll)
 	if err != nil {
+		log.Printf("rescue re-pack: could not tell whether seat %s is resident (%v); the node that wrote the answer is not asked, this box's seat is used", seat, err)
 		return false, false
 	}
 	rows, err := sc.Running(ctx)
 	if err != nil {
+		log.Printf("rescue re-pack: could not tell whether seat %s is resident (%v); the node that wrote the answer is not asked, this box's seat is used", seat, err)
 		return false, false
 	}
 	m := newSeatMatcher(p.cfg.Endpoint, seat)

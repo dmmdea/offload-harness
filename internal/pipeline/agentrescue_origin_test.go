@@ -303,3 +303,22 @@ func TestRescueRepackIgnoresASeatPinForTheOriginsSeat(t *testing.T) {
 		t.Fatalf("rescued = %+v err = %v node calls = %d, want the node's object: a pin kept for this box's cascade must not divert the call", got, err, node.hits.Load())
 	}
 }
+
+// "Could not tell" keeps the rescue on this box, and says so: an unreadable /running used to move
+// the rescue onto its own seat (a cold load, minutes) in silence, with the node that holds the
+// answer's seat hot never asked and nothing in the log to say why.
+func TestRescueRepackSaysWhenItCannotTellWhetherItsSeatIsResident(t *testing.T) {
+	logged := captureLog(t)
+	node := newOriginNode(t, "origin-seat", true, func(int64) string { return `{"answer":"from the node"}` })
+	fake := &agentFake{rosterIDs: []string{agentTestSeat}, repack: func(int64) string { return `{"answer":"42"}` }} // no /running route: 404
+	srv := fake.server(t)
+	p := admissionTestPipeline(t, srv.URL, 5)
+	p.cfg.FleetAuthToken = "tok"
+
+	if _, err := p.RescueRepack(node.ctx("origin-seat"), testContract(), rescueAnswer, 0); err != nil {
+		t.Fatalf("rescue: %v", err)
+	}
+	if out := logged.String(); !strings.Contains(out, "could not tell whether") || !strings.Contains(out, agentTestSeat) {
+		t.Fatalf("log = %q, want the unread residency named with the seat", out)
+	}
+}
