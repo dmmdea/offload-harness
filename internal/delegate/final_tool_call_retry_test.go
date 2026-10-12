@@ -58,7 +58,9 @@ func TestANothingProducedRetryDoesNotWaitOutThePlacementWait(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
 	compressWait(t, 20*time.Millisecond, 0)
 	nodeA, urlA := eligibleNode(t, "node-a", "unused")
-	nodeA.pollByJob = func(jobID string, n int64) (map[string]any, int) { return doneWire(t, finalToolCallWire("node-a")), 200 }
+	nodeA.pollByJob = func(jobID string, n int64) (map[string]any, int) {
+		return doneWire(t, finalToolCallWire("node-a")), 200
+	}
 	nodeB, urlB := eligibleNode(t, "node-b", "the answer from B")
 	nodeB.maxConcurrentJobs, nodeB.jobsRunning, nodeB.queueDepth = 4, 4, 4
 	contract := remoteContract()
@@ -116,7 +118,9 @@ func TestANothingProducedRetryIsNotRefusedForTheFailedSeatsMinTurn(t *testing.T)
 func TestAVerificationRetryStillKeepsTheBusyCheckAndTheFailedSeatsFloor(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
 	nodeA, urlA := eligibleNode(t, "node-a", "unused")
-	nodeA.pollByJob = func(jobID string, n int64) (map[string]any, int) { return doneWire(t, wrongAnswerWire("node-a", 0)), 200 }
+	nodeA.pollByJob = func(jobID string, n int64) (map[string]any, int) {
+		return doneWire(t, wrongAnswerWire("node-a", 0)), 200
+	}
 	nodeB, urlB := eligibleNode(t, "node-b", "zorblax from B")
 	nodeB.maxConcurrentJobs, nodeB.jobsRunning, nodeB.queueDepth = 4, 4, 4
 	cfg := testCfg(t)
