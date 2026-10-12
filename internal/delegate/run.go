@@ -1533,10 +1533,15 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// floor is seat-aware through config (agent_retry_min_sec, D-46): a cold
 	// load plus one turn at max_tokens on the retry seat, never the bare 10 s
 	// that let a 296 s retry burn a thinking seat for nothing.
-	// First pass, BEFORE a retry node is chosen: the configured floor raised by
-	// the first attempt's own min_turn (the seat we know about). This is the
-	// cheap refusal; the retry SEAT's floor is applied below once it is known.
-	floor, floorSrc := r.retryFloorFor(first)
+	// First pass, BEFORE a retry node is chosen: the configured floor and nothing else. This is
+	// the cheap refusal; the retry SEAT's floor is applied below once it is known. It used to be
+	// raised by the first attempt's own min_turn, but the retry goes to a DIFFERENT node, so that
+	// number belongs to a seat the retry will never use (retryFloorFor already exempted the
+	// seat-down and lost-root defers for exactly this reason): a seat whose cold load plus two
+	// 8,192-token turns is measured at 1,112 s took 20 to 325 s to give the answer, and 14 of 14
+	// retries of a day were refused for it before any node was asked. A retry seat that publishes
+	// no rate still falls back to the first attempt's number in retryFloorOn, said in the note.
+	floor, floorSrc := r.firstPassRetryFloor()
 	remaining := pl.remaining(start, budget)
 	if remaining < floor {
 		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after the first attempt (floor %ds%s)", remaining, budget, floor, floorSrc)
@@ -1765,6 +1770,14 @@ func (r *runner) retryFloorSec() int {
 		return r.cfg.AgentRetryMinSec
 	}
 	return minRetrySec
+}
+
+// firstPassRetryFloor is the floor a verification retry is judged against BEFORE a retry node is chosen: the configured one
+// (agent_retry_min_sec, else the 10 s minimum) and nothing about the first attempt's seat. retryFloorOn applies the chosen
+// node's own floor.
+func (r *runner) firstPassRetryFloor() (int, string) {
+	floor := r.retryFloorSec()
+	return floor, retryFloorSource(floor)
 }
 
 // retryFloorFor (0.115.21, register D-03) is the seat's OWN floor when the

@@ -1063,7 +1063,9 @@ min_turn of the seat the retry lands on)` — a remote node's `/fleet/health` `s
 load) at its own `seat_budget`, the local seat's `seat-rates.json`, plus the re-pack term for a schema contract; the
 retry note names the publisher, and only a node that publishes no rate falls back to the first attempt's
 `min_turn_sec` (the 2026-09-10 shape: a 201 s floor from the 4B cleared, the retry landed on the 27B whose own floor
-was ≈ 484 s). `seat_budget` is also what a caller reads to MATCH budgets across seats — a delegator's config does not
+was ≈ 484 s). Since 0.184.0 the cheap check made BEFORE a retry node is chosen reads `agent_retry_min_sec` alone: it used to
+read the first attempt's `min_turn_sec` too, a number that belongs to a seat the retry never uses, and 7 of the 14 retries skipped in one day
+were refused for it ("floor 1112s, min_turn_sec of the seat on <node>") before any node was asked. `seat_budget` is also what a caller reads to MATCH budgets across seats — a delegator's config does not
 travel with the contract. Reference (2026-09-10, ledger-01 on both
 seats): the <node-b> 27B TP2 seat at ~30 tok/s needs ≈ 600 s thinking off / ≈ 730 s auto INCLUDING a 210 s cold load for a
 12-step, 8,192-token-final contract — a 600 s box default is at the edge and 900 s is the honest wall; the <node-c> 4B at

@@ -147,6 +147,25 @@ Versioning: [SemVer](https://semver.org/).
   `internal/delegate/quarantine_pass_test.go`, written first: red before with `two failures after three passes quarantined a node
   that answers about the right document`; six mutations (the outnumber rule, the two-strike floor, the pass record, the
   carries-the-check guard, the call site, the window) turn them red. Docs: `docs/OPERATOR-GUIDE.md`.
+- **A verification retry is no longer refused for the first seat's `min_turn_sec` before a retry node is even chosen.** The retry
+  of a wrong answer (or an honest abstention, or the forced-final tool call above) goes to a DIFFERENT node, and the node it goes to
+  has its own floor, applied once it is chosen (`retryFloorOn`: its published `seat_rate`, the cold load and the final turn plus
+  the re-pack at its own rate). But the cheap check before that read the first attempt's own `min_turn_sec` for every retryable
+  shape except two (the seat-down and lost-root defers, exempted for exactly this reason), so a research digest that failed
+  acceptance on a seat whose cold load and two 8,192-token turns are measured at 1,112 s (3,379 s on a slow unified-memory
+  node, 889 to 951 s on the local pool) was refused its retry on a 300 s or 600 s contract before any node was asked, although
+  that seat had taken 20 to 325 s to give the answer: in one day 7 of the 14 verification retries skipped were refused that way
+  (the others fell to other rules: the chosen node's own floor, a busy retry seat, a fenced local seat, a rescue with no budget
+  left). The check before a node is chosen now reads the
+  configured floor (`agent_retry_min_sec`, else 10 s) alone; the chosen node's own floor, the budget left and the retry note
+  (`retry skipped: ... after choosing a retry node (floor ...s, min_turn_sec published by <node>)`) are unchanged, and a retry
+  node that publishes no rate still falls back to the first attempt's number, said in the note. Not changed, on purpose: the
+  retry's wait for a busy retry seat keeps its placement-wait TTL (ADR 0073 decision 3: it is an optional second opinion on an
+  answer the subtask already holds), and a retry that finds no node keeps the notes it had (two tests pin the empty note of a bare
+  route's skipped retry). Config, for the operator: with `agent_retry_min_sec` at 300 a default 300 s contract can never retry,
+  since what is left is always under it. Tests `internal/delegate/retry_first_seat_floor_test.go`, written first: red before with
+  `retry skipped: 299s of the 300s timeout_sec budget left after the first attempt (floor 1112s, min_turn_sec of the seat on
+  node-a)`; three mutations turn them red. Docs: `docs/OPERATOR-GUIDE.md`.
 
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 
