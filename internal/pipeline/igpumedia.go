@@ -321,6 +321,13 @@ func (p *Pipeline) runGenerateVideoSdcpp(ctx context.Context, req core.Request, 
 			return p.deferGen(req, meta, start, len(req.Input), fmt.Sprintf("video family %q is bound to sdcpp but %s is not configured", renderFamily, m.key))
 		}
 	}
+	// CT-54: a file the family binds (a weight, the engine binary, the runner script) and the disk lacks is a typed defer BEFORE the lease,
+	// as the node door answers it. After the lane's own unset-key checks above (a key left unset keeps the lane's sentence, which names
+	// it) and before the script and the binary are resolved below: those resolutions defer untyped, so asking later never reached
+	// the verdict for a moved binary or a gone script.
+	if res, notReady := p.routeReadyOrDefer(req, meta, start, p.cfg, videoRouteName(p.cfg, renderFamily), "video generation"); notReady {
+		return res
+	}
 	script, serr := resolveIGPUScript(p.cfg.VideoGenSdcppScript, defaultSdcppVideoScript)
 	if serr != nil {
 		return p.deferGen(req, meta, start, len(req.Input), serr.Error())
@@ -347,10 +354,6 @@ func (p *Pipeline) runGenerateVideoSdcpp(ctx context.Context, req core.Request, 
 	bin, berr := resolveEngineBin("sdcpp_bin", fb.SdcppBin)
 	if berr != nil {
 		return p.deferGen(req, meta, start, len(req.Input), "video generation refused: "+berr.Error())
-	}
-	// CT-54: a weight the family binds and the disk lacks is a typed defer BEFORE the lease, as the node door answers it.
-	if res, notReady := p.routeReadyOrDefer(req, meta, start, p.cfg, videoRouteName(p.cfg, renderFamily), "video generation"); notReady {
-		return res
 	}
 	seed := paramIntOr(req.Params, "seed", 0)
 	if seed <= 0 {
@@ -513,6 +516,10 @@ func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Reques
 			return p.deferGen(req, meta, start, len(req.Input), "animategen_engine is sdcpp but "+m.key+" is not configured")
 		}
 	}
+	// CT-54: see the video lane (the gate stands before the script and the binaries are resolved).
+	if res, notReady := p.routeReadyOrDefer(req, meta, start, cfg, "animate_character", "character animation"); notReady {
+		return res
+	}
 	script, serr := resolveIGPUScript(cfg.AnimateGenSdcppScript, defaultSdcppAnimateScript)
 	if serr != nil {
 		return p.deferGen(req, meta, start, len(req.Input), serr.Error())
@@ -545,10 +552,6 @@ func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Reques
 	depthBin, derr := resolveEngineBin("animategen_depth_bin", cfg.AnimateGenDepthBin)
 	if derr != nil {
 		return p.deferGen(req, meta, start, len(req.Input), "character animation refused: "+derr.Error())
-	}
-	// CT-54: see the video lane.
-	if res, notReady := p.routeReadyOrDefer(req, meta, start, cfg, "animate_character", "character animation"); notReady {
-		return res
 	}
 	seed := paramIntOr(req.Params, "seed", 0)
 	if seed <= 0 {
@@ -694,6 +697,10 @@ func (p *Pipeline) runGenerateAudioAudiocpp(ctx context.Context, req core.Reques
 	if strings.TrimSpace(model) == "" {
 		return p.deferGen(req, meta, start, len(req.Input), fmt.Sprintf("%s is audiocpp but audiocpp_%s_model is not configured", engineKey, kind))
 	}
+	// CT-54: see the video lane (the gate stands before the script and the binary are resolved).
+	if res, notReady := p.routeReadyOrDefer(req, meta, start, cfg, "generate_audio:"+kind, "audio generation"); notReady {
+		return res
+	}
 	script, serr := resolveIGPUScript(cfg.AudiocppScript, defaultAudiocppScript)
 	if serr != nil {
 		return p.deferGen(req, meta, start, len(req.Input), serr.Error())
@@ -701,10 +708,6 @@ func (p *Pipeline) runGenerateAudioAudiocpp(ctx context.Context, req core.Reques
 	bin, berr := resolveEngineBin("audiocpp_bin", cfg.AudiocppBin)
 	if berr != nil {
 		return p.deferGen(req, meta, start, len(req.Input), "audio generation refused: "+berr.Error())
-	}
-	// CT-54: see the video lane.
-	if res, notReady := p.routeReadyOrDefer(req, meta, start, cfg, "generate_audio:"+kind, "audio generation"); notReady {
-		return res
 	}
 	seed := paramIntOr(req.Params, "seed", 0)
 	if seed <= 0 {
