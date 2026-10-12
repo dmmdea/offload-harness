@@ -428,6 +428,14 @@ limit that does not depend on it.
 
 ### The research lane (`offload_research`)
 
+*A page is handed to the seat in lines it can read (0.184.0).* The agent's `read_file` cuts every line at 2,000 characters and
+pages by line, so the rest of a longer line is out of the seat's reach: a page that arrives as one 98,304-character line gave it
+its first 2,020 characters, and research runs on such pages reached the forced final step in 38 of 117 cases against 36 of 1,283
+for pages with ordinary lines. `research.Build` therefore wraps each context document at `research.MaxLineChars` (1,800, pinned
+under `agent.ReadFileLineCap`): at the last space in the final quarter of the window, in the middle of a run with no space, never
+inside a rune, with the space becoming the newline and nothing else added or removed. A page whose lines all fit is handed over
+byte for byte; the fetched text that anchors, fingerprints and verifies quotes is the page as fetched.
+
 `offload_research` is the one-call answer to "this leg needs the web, so it goes to a cloud
 subagent". It takes a goal and up to 12 public URLs, fetches every page DELEGATOR-side under
 a public-web guard in TWO halves, strips it to text (dependency-free

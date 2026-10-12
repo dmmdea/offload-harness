@@ -231,9 +231,14 @@ func (s *scope) listDir(_ context.Context, args string) (string, error) {
 	return strings.Join(names, "\n"), nil
 }
 
+// ReadFileLineCap is the longest line read_file returns: a longer one is cut there and marked, and its rest cannot be
+// reached (offset and limit count lines). Exported so the producers of context documents (research.MaxLineChars) can be
+// pinned under it.
+const ReadFileLineCap = 2000
+
 const (
-	defaultReadLimit = 2000 // default number of lines returned by read_file
-	maxLineChars     = 2000 // per-line character cap (rune-safe); over-long lines get " (line truncated)"
+	defaultReadLimit = 2000            // default number of lines returned by read_file
+	maxLineChars     = ReadFileLineCap // per-line character cap (rune-safe); over-long lines get " (line truncated)"
 )
 
 func (s *scope) readFile(_ context.Context, args string) (string, error) {

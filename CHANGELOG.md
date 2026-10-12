@@ -103,6 +103,23 @@ Versioning: [SemVer](https://semver.org/).
   `internal/delegate/final_tool_call_test.go`, written first: red before with `classified "budget" ... want final-tool-call` and
   `retried=0 deferred=true note=""`; seven mutations turn them red. Docs: `docs/systems/coding-agent.md`,
   `docs/systems/fleet-node.md`.
+- **A research page that is one very long line is handed to the seat in lines it can read.** The agent's `read_file` cuts every
+  line at 2,000 characters (`(line truncated)`) and its `offset`/`limit` count lines, so the rest of a longer line cannot be
+  reached at all. Two of the three forced-final rows of the day were such pages: one was a single 98,304-character line (the seat
+  could read its first 2,020 characters), the other had two lines holding 97,544 of its 98,299 characters (4,806 were
+  reachable), and no final ask can ground an answer in text the seat never saw. Across the corpus, research runs on a page with
+  an unreadable line reached the forced final step in 38 of 117 cases against 36 of 1,283 for pages of ordinary lines (the
+  failure rate once there is about the same, 30% against 41%, so this is what makes the cap get reached, not what the seat does
+  at it). `research.Build` now wraps each context document at `research.MaxLineChars` (1,800, pinned under the new exported
+  `agent.ReadFileLineCap` by a test in the MCP server package): at the last space in the final quarter of the window, in the
+  middle of a run with no space (a base64 blob), never inside a rune; the space becomes the newline and nothing else is added or
+  removed, and a page whose lines all fit is handed over byte for byte. The text that anchors, fingerprints and verifies quotes
+  is the page as fetched, so those checks are unchanged. Not changed: a context document supplied by a caller of
+  `agent_delegate` (its lines are the caller's; `read_file` still truncates them and says so). Tests
+  `internal/research/build_wrap_test.go` and `internal/mcpserver/readable_context_test.go`, written first: red before with
+  `line 1 is 125999 runes: the seat's read_file would cut it at 2000 and the rest would be out of reach`; five mutations (the
+  wrap not applied, the early return, the break window, the hard-cut width, the cap constant) turn them red. Docs:
+  `docs/systems/mcp-server.md`.
 
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 
