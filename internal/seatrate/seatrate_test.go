@@ -152,7 +152,7 @@ func TestUpdateSerialisesConcurrentWriters(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs <- Update(path, func(s *Store) {
+			errs <- updateThroughContention(path, func(s *Store) {
 				s.Observe("agent-pool", 30+float64(i), 0, time.Now())
 			})
 		}(i)

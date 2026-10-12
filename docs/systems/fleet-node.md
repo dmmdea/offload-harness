@@ -392,7 +392,10 @@ implications.
     joins the bearer rule when the node has a `fleet_auth_token` (a node with none is unchanged), and both stt lanes,
     pushed and pulled, share one FIFO cap, `fleet_stt_max_concurrent` (default 1): a job over it waits and never fails,
     and neither lane counts against `fleet_max_concurrent_jobs`. At most two uploads are in flight (a third waits up to
-    30 s, then a re-placeable `503`). The transcript outputs (`stt-<digits>-<8 hex>.srt|txt|segments.json`) are removed when
+    30 s, then a re-placeable `503`). A request that DECLARES a `Content-Length` over the body cap is refused `400 request body too
+    large` at once, right after the bearer check: before it takes or waits for a slot, with its body unread and `Connection: close`
+    (the media-job door's CT-53 rule), so it can neither hold one of the two slots nor queue for one; a body that declares an in-cap
+    length and then stalls still holds its slot until its bytes arrive or the 10-minute window ends. The transcript outputs (`stt-<digits>-<8 hex>.srt|txt|segments.json`) are removed when
     the job record is evicted or after `fleet_stt_transcript_ttl_min` (default 30, a negative value keeps them; swept at
     startup and on the janitor tick), and on a node with a token `GET /fleet/media` serves them only to a bearer holder
     (so do a project render, `composeproj-<16 hex>.*`, a media-job render, `mediajob-<16 hex>.*`, and the legacy path-taking
@@ -1861,7 +1864,15 @@ in the bundle. The fields that may be files are `video-gen.still`, `animate.ref`
   task is also runnable). Closed, it answers
   403; without the bearer, 401; both before a byte of the body is read. `media-job` is token-gated, so the same task over
   `/fleet/dispatch` needs the bearer too, and its jobs are masked from tokenless polls and feeds.
-- The body is capped at `fleet_media_inputs_max_mb` (default 256, compressed) in base64 plus 64 KiB (413 over it), is JSON
+- The body is capped at `fleet_media_inputs_max_mb` (default 256, compressed) in base64 plus 64 KiB (413 over it). A request that
+  DECLARES a longer `Content-Length` is answered `413` at once with `Connection: close`, right after the door and bearer checks:
+  before the in-flight slot below is taken and without reading the body, so a client that declares 8 GiB and sends 20 bytes
+  neither holds the slot nor waits out the window (register CT-53; the node used to take the slot and drain the body up to the
+  cap first, and a second upload queued behind it for the slot wait). A body with no declared length (chunked) is cut off at the cap by the reader and answered `413` too. Only a body that DECLARES
+  itself over the cap is answered at once: one that declares an in-cap length (or none) and then stalls still holds the slot until its
+  bytes arrive or the 15-minute window ends, which is this door's existing design (an idle-body deadline is not part of it). More bytes
+  than were declared are not a `413` either: net/http hands the handler exactly the declared number of bytes and reads the excess as
+  the client's next request, so the declared bytes are judged as the body (a `400` unless they are a media-job body). The body is JSON
   only, and unknown fields are a 400. A token holder gets a 15-minute read and write window; a writer that cannot carry the
   extended deadlines is logged once per process per route. The body is held once while the job is admitted (the bundle is
   base64-decoded straight out of it into the one decoded copy, and the admission closure keeps only the job id and task type),

@@ -6,6 +6,82 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — the media-job door answers 413 at once for a body that declares itself over the cap, instead of holding the node's only upload slot while it drains (CT-53)
+
+- **The defect.** `POST /fleet/media-job` took the node's one in-flight slot first and, for a `Content-Length` over
+  `fleet_media_inputs_max_mb` (in base64, plus 64 KiB), then read the body up to the cap before it answered `413`. A fleet-token
+  holder that declared 8 GiB and sent 20 bytes got no answer for the whole 15-minute window, and held the slot meanwhile, so the
+  next upload queued behind it and was answered `503` after the slot wait (seen live on a media-job door, 2026-10-08).
+- **The fix.** The size check sits right after the door (`403`) and bearer (`401`) checks, before the slot: a declared length over
+  the cap is answered `413 request body too large` with `Connection: close` and the body is never read. The check is strictly
+  over the cap (a body of exactly the cap is still read), the wording is unchanged, and a body with no declared length (chunked)
+  still meets the reader's cap as before (`413` once it passes it). `readMediaJobBody` no longer drains a declared-oversize body either
+  (it returned no error and no bytes when such a body ended early); it returns the typed error the handler maps to `413`.
+- **What it does not cover (stated, not fixed).** Only a body that DECLARES itself over the cap is answered at once. A body that
+  declares an in-cap length (or none, chunked) and then stalls still holds the slot until its bytes arrive or the 15-minute window
+  ends: that is the door's existing design, and an idle-body deadline would be new behaviour with its own risk to slow links, so it is
+  left as a follow-up. More bytes than were declared are not answered `413` either: net/http hands the handler exactly the declared
+  number of bytes and reads the excess as the client's next request, so the declared bytes are judged as the body (a `400` unless
+  they are a media-job body). The CT-50 entry below and the `readMediaJobBody` comment said otherwise; the comment is corrected, the
+  over-read probe stays for a caller that builds the request itself, and `media_job_framing_test.go` pins what happens on the wire.
+- **The stt upload door had the same defect and gets the same fix.** `POST /fleet/stt` took one of its two upload slots before it
+  read the body, so a token holder that declared an oversize `Content-Length` and sent 20 bytes held a slot for the 10-minute window,
+  and two of them shut every upload out. A declared length over `fleet_stt_upload_max_mb` (in base64, plus slack) is now refused at
+  once, after the bearer check and before a slot, the body unread, `Connection: close`. The door's answer for a body over its cap is
+  `400` (it always was, and its client reads every refusal alike), so the status and the wording are unchanged and only the time
+  they are given in is. Tests (`stt_upload_declared_oversize_test.go`, the media-job door's rules on this door): a raw TCP client
+  declaring 8 GiB and sending 20 bytes gets the `400` inside 2 s, also while both slots are held and without taking either; a
+  client that streams the body is not read (under 64 KiB); the connection is closed; a request without the bearer is still `401`
+  and a body of exactly the cap is still read. Before the fix the first client got no answer in 2 s and 64 MiB of the second
+  client's body had been read.
+- **Tests** (`media_job_declared_oversize_test.go`): a raw TCP client declaring 8 GiB and sending 20 bytes gets `HTTP/1.1 413`
+  inside 2 s, also while another upload holds the slot; a client that streams the body is not read (the server has read under
+  64 KiB; before the fix it had read 128 MiB of a refused body); the connection is closed after the answer; a body of exactly the
+  cap is read and one byte over is `413`; the body of a declared-oversize request is never read at the handler, and `403` and
+  `401` still come before `413`. Documented in `docs/systems/fleet-node.md` (the media-job and stt upload doors).
+
+### Fixed — the seat-rate store's lock waits out a Windows delete that is still pending instead of losing the run's sample (D-120)
+
+- **The defect.** `seatrate.Update` takes an exclusive lock file beside the store. On Windows, removing a file whose handle is
+  still open only marks it delete-pending, and an exclusive create in that window fails with `ACCESS_DENIED`, not "already
+  exists". `Update` returned that raw, so the run that finished while another run's lock was being deleted lost its rate and
+  cold-load sample (the caller logs `seat-rates store not updated` and goes on), and `TestUpdateSerialisesConcurrentWriters`
+  failed one gate run in five (2026-09-17). Measured on a Windows PC under 4 concurrent copies of the old test: 1 of 60 runs
+  failed with `open ...seat-rates.json.lock: Access is denied.`
+- **The fix.** The denial waits like a held lock, inside the existing 2 s lock window (the rule `gpulease`'s claim and epoch lock
+  already follow). At the deadline a held lock is still plain `ErrLocked`; a denial that never clears (a directory this process
+  cannot write) returns an error that wraps both `ErrLocked` and the open error, so the cause is named after at most 2 s. Any
+  other failure to open the lock is returned at once, as before.
+- **A stale lock that cannot be removed ends at the deadline.** The takeover of a lock older than 30 s retried at once whether or
+  not the removal worked, so a stale lock another process held open spun the caller with no deadline. It now retries at once only
+  after a removal that worked (or found the file gone) and otherwise waits out the window.
+- **The rename that publishes the save had the same race (review follow-up).** The store is read without the lock (`seatrate.Load`
+  from the delegate, the fleet node and the pipeline), Go opens files on Windows without delete sharing, and a rename over a file a
+  reader has open fails with `Access is denied`; `Update` handed that error to its caller, which drops the sample exactly as the
+  lock-create denial did. Measured on a Windows PC with the retry removed: an `Update` while a reader held the store open failed at
+  once with `rename ...: Access is denied.`. The rename now asks again for up to 2 s, inside `Update`'s lock, when it is refused
+  with a permission error or (Windows) a sharing or lock violation, the two codes Go does not map to a permission error; any other
+  rename error, and a denial that outlasts the window, is returned as the rename error itself (not as `ErrLocked`), with the
+  temp file removed and the previous store untouched. 60 runs (4 workers x 15) of the `Update` tests passed on a Windows PC.
+- **A lock that cannot be released is logged.** `defer os.Remove(lock)` discarded its error, so a lock a scanner held open stayed
+  for 30 s and every writer in that time skipped its sample with only `store locked by another writer` to show for it. The failed
+  removal is now logged once, naming the lock and the cause; `Update`'s result is unchanged, since its save may have landed.
+- **The `ErrLocked` comment and the test helper.** The comment now says what the code returns (a lock not taken within the window,
+  held or refused, the refusal wrapped beside it). The helper that asks again after `ErrLocked` retried a refusal that never clears
+  (an unwritable directory) for its five minutes; it now reports a refusal after three lock windows in a row and still waits out
+  contention (one window that ends in a denial among contention windows is not a verdict).
+- **Tests** (`update_lock_test.go`, the open and the stale removal through package variables so the denial can be injected): a
+  denial three times then success stores the sample once with no lock left; a persistent denial returns within the window with
+  both causes and nothing left behind; a live lock is still `ErrLocked` and is left in place; any other open error is returned at
+  once; an unremovable stale lock ends at the deadline with a bounded number of attempts. The concurrent-writers test asks again
+  after the designed `ErrLocked`, so it measures serialisation and not how long twelve writers take on a loaded host. The rename
+  and the release have their own (`save_rename_test.go`, `save_rename_windows_test.go`, `update_helper_test.go`): a rename denied
+  three times then granted stores the sample once with nothing left behind; the corrupt-store replacement is retried too; a
+  persistent denial ends after the window, names the rename and is not `ErrLocked`; any other rename error is returned at once; a
+  reader holding the real store open for 300 ms no longer loses the sample; sharing and lock violations are retried; a failed
+  release is logged once and a clean one says nothing; the helper reports a refusal after three windows and keeps waiting out
+  contention.
+
 ## [0.182.0] - 2026-10-12 - a lease that unloads the seat is no longer held by the RAM that unload frees, Wan and image renders run card-only on two cards, agent_run reaches a named seat anywhere in the fleet, and nothing the harness starts opens a window
 
 ### Fixed — a human waiting at the CLI is told the ticket is queued even when its first scan ran before the wait began
