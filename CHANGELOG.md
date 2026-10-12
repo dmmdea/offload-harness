@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.182.0] - 2026-10-12 - a lease that unloads the seat is no longer held by the RAM that unload frees, Wan and image renders run card-only on two cards, agent_run reaches a named seat anywhere in the fleet, and nothing the harness starts opens a window
+
 ### Security — golang.org/x/net v0.60.0
 
 - The module requires golang.org/x/net v0.60.0 (was v0.58.0), with golang.org/x/text v0.42.0 and golang.org/x/sync v0.23.0 that it brings. A binary scan of the 0.181.0 release (`govulncheck -mode=binary`) found five advisories in x/net v0.58.0 that the code does not call: GO-2026-6603, GO-2026-6610, GO-2026-6611, GO-2026-6612 and GO-2026-6617, all fixed in v0.60.0. After the bump, `govulncheck ./...` reports no vulnerabilities in the module, and none in the tools/llamaswap and tools/comfyui modules.
