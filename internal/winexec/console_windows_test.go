@@ -29,6 +29,7 @@ import (
 const detachedProcess = 0x00000008 // DETACHED_PROCESS
 
 var procGetConsoleProcessListTest = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleProcessList")
+var procSetConsoleCtrlHandlerTest = windows.NewLazySystemDLL("kernel32.dll").NewProc("SetConsoleCtrlHandler")
 
 // consolePIDs: the processes on this process's console, nil when it has none.
 func consolePIDs() []uint32 {
@@ -94,6 +95,9 @@ func TestConsoleHelper(t *testing.T) {
 			mk = CommandDetached
 		}
 		signal.Notify(make(chan os.Signal, 1), os.Interrupt) // this helper sits on the console the event goes to, and must outlive it
+		// A test runner started with CREATE_NEW_PROCESS_GROUP (Node's detached: true does) has Ctrl-C switched off for its whole
+		// subtree, and a helper started from it inherits that. Switch it back on, for this helper and the child it starts next.
+		procSetConsoleCtrlHandlerTest.Call(0, 0)
 		c := mk(self, "-test.run=^TestConsoleHelper$", "-test.count=1", "wait")
 		stdout, err := c.StdoutPipe()
 		if err != nil {
