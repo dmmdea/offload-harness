@@ -357,8 +357,13 @@ unchanged: a seat that is starting or stopping is still on the list the render c
 probed, and so is a seat listed with no state (older llama-swap builds) or with a state this code does not know: a
 probe of an idle seat costs one read, and a skipped busy seat loses its request. The Go-side drain
 (`internal/seatload`) reads the same two states and does not probe the upstream of either; it then waits a load in
-progress and a stop out before it counts the seat idle. The render helper never waited for a `starting` seat (it gave
-up after three probe deadlines and unloaded), so skipping the probe changes the time, not the outcome.
+progress and a stop out before it counts the seat idle, because the request that triggered a load is waiting on the engine.
+The render helper does not wait a load out, by decision. It used to wait only as long as its probes lasted (three 5 s
+deadlines): a seat whose load finished inside that window and then had a request in flight was waited for, and any other
+starting seat was unloaded after the same 17 s with `could not read /slots`. Skipping the probe removes those seconds; the
+unload that follows aborts the request that triggered the load, so the drain returns the seats it skipped for a load in
+progress as `starting` and `freeLlamaSwap` logs one line for them (`unloading <seat> while its load is in progress ...; a
+request waiting on it is aborted`). A seat that is stopping says nothing: it is already leaving.
 
 ## Windows file semantics the lease depends on
 

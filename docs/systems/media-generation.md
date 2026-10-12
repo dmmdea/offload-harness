@@ -1618,7 +1618,8 @@ that lease (`GPU_LEASE_*`): the runner would fence against it and claim its once
 runner with `env: isolatedRunnerEnv({ ...what it needs })` (`render/test-isolation.mjs`: `LLAMA_SWAP_API` is a loopback port
 nothing listens on, `LLAMA_SWAP_*` and `GPU_LEASE_*` are dropped; what the test passes explicitly wins), and an in-process
 `withGpuSlot` names `freeLlamaSwap` and `lease` (`null`, or the lease the test means). `render/test-isolation.test.mjs` scans
-every render test and fails on a runner spawned without both closings and on an in-process call that names neither; its
+every render test and fails on a runner spawn whose own call does not pass an env that closes both (each spawn is judged on its
+call, so a spawn added beside an isolated one fails) and on an in-process call that names neither; its
 fixtures pin what the scan catches and lets through. A test that needs a llama-swap with behaviour starts
 `render/fake-llama-swap.mjs` on a loopback port (per-seat state and `/slots` answers, a request log, `close()` destroys the
 sockets a hung request still holds) and hands the runner its `url`.

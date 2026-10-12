@@ -21,15 +21,29 @@ Versioning: [SemVer](https://semver.org/).
   to drain and is not named unknown. The same drain over the same seat: `26 ms` and no upstream request (`stopping`: `45 ms`).
   Everything else is probed exactly as before: a `ready` seat above all (a ready seat whose `/slots` never answers still costs the
   17.6 s and is still named unknown), a seat listed with no state (older builds) or with a state this code does not know. The unload
-  that follows is unchanged. The Go-side drain already read both states without probing the upstream (`internal/seatload`); it also
-  waits them out, which the render helper never did for a starting seat (it gave up after three deadlines and unloaded).
-- **Tests.** `render/gpu-lock-drain-state.test.mjs` (12 tests) runs the real drain and `freeLlamaSwap` against the fake llama-swap
-  below: starting and stopping seats (four spellings of the state) are not probed and end the drain at once; a ready seat with a busy
-  slot is waited for until idle (the control); a ready seat that never answers is probed and named unknown; a starting and a stopping
-  seat beside a busy ready one leave the ready one waited for; a seat with no state, an empty state, an unknown state and `ready` is
-  probed as before; a render start behind a starting seat takes under a second and still sends the unload. Red before: six of the
-  twelve failed, each with the upstream requests it should not have sent. Reverting the skip fails those six; a rule written as
-  `state !== "ready"` fails nine (the no-state, empty and unknown-state controls among them); skipping `ready` fails four.
+  that follows is unchanged; what changes with the skip is what the drain says. The Go-side drain reads both states without probing
+  the upstream (`internal/seatload`) and waits a load in progress out, because the request that triggered the load is waiting on the
+  engine. The render helper does not wait, by decision (register F81), and before the skip it waited only as long as its probes lasted:
+  a load that finished inside the three 5 s deadlines let the probe read a real slot and the drain then waited for that request, and
+  any other starting seat was unloaded after the same 17 s with `could not read /slots for: <seat>`. With the skip alone a starting
+  seat ended the drain as verified idle and the unload went out with no line, so the drain now returns the seats it skipped for a
+  load in progress as `starting` (the last round's, also when it ends at its deadline), and `freeLlamaSwap` logs one line for them:
+  `unloading <seat> while its load is in progress (the drain does not wait for a seat that is starting); a request waiting on it is
+  aborted`. A stopping seat says nothing: it is already leaving. The one outcome that differs from before is a load that would have
+  finished inside the old 17 s window with a request in flight: that request is no longer waited for, and the line is its trace.
+- **Tests.** `render/gpu-lock-drain-state.test.mjs` (17 tests) runs the real drain and `freeLlamaSwap` against the fake llama-swap
+  below: starting and stopping seats (four spellings of the state) are not probed and end the drain at once, and the starting ones are
+  named in the result; a ready seat with a busy slot is waited for until idle (the control); a ready seat that never answers is probed
+  and named unknown; a starting and a stopping seat beside a busy ready one leave the ready one waited for; a seat that finished
+  loading while the drain waited on another is probed from then on and not named; a seat with no state, an empty state, an unknown
+  state and `ready` is probed as before; a render start behind a starting seat takes under a second, still sends the unload and says
+  so in one line; two starting seats are named in the plural; a stopping seat and a ready one say nothing; a drain that ends at its
+  deadline still names the starting seat. Red before: of the first twelve tests six failed, each with the upstream requests it should
+  not have sent, and of the fourteen that stood when the naming was added eight failed. Reverting the skip fails nine of the
+  seventeen; skipping `ready` too fails six; a rule written as `state !== "ready"` fails three of them (the no-state, empty and
+  unknown-state controls) and six tests of `gpu-lock.test.mjs`, whose fake seats carry no state: nine in all. Each part of the naming
+  (recording a starting seat, leaving a stopping one out, the per-round list, the list on the deadline return, the log line, its
+  plural) has a mutant that turns a test red.
 
 ### Fixed — the render tests no longer reach the llama-swap or the GPU lease of the machine they run on (F80)
 
@@ -39,18 +53,25 @@ Versioning: [SemVer](https://semver.org/).
   which put the test over its own 15 s wall (15.7 s, red against a fake llama-swap with one starting seat), and a drain that finished
   sent a real unload of a live seat. The audit found the same gap in six more test files that spawn a runner (`audiocpp-generate`,
   `comfy-edit`, `comfy-instance`, `comfy-render` with three spawns, `sdcpp-animate`, `sdcpp-video`) and in four that call `withGpuSlot`
-  in process (`comfy-instance` and `lease-progress` reached the default `freeLlamaSwap`; with `comfy-unkeyed-api` and `comfy-keep`
-  all four took the default lease, which is the parent's `GPU_LEASE_*`). A spawned runner inherited `GPU_LEASE_*` too, unless the test
+  in process (`comfy-instance` and `lease-progress` reached the default `freeLlamaSwap`; `comfy-keep`, `comfy-unkeyed-api` and
+  `lease-progress` took the default lease, which is the parent's `GPU_LEASE_*`, while `comfy-instance` already passed `lease: null`).
+  A spawned runner inherited `GPU_LEASE_*` too, unless the test
   scrubbed it by hand (`comfy-edit` and `comfy-render` did, for the lease only).
 - **The fix.** `render/test-isolation.mjs`: `isolatedRunnerEnv(extra, base)` gives a child `LLAMA_SWAP_API=http://127.0.0.1:9` (a port
   nothing listens on: the drain gets a refused connection and handles it at once), drops every `LLAMA_SWAP_*` and `GPU_LEASE_*`
   variable, and lets what the test passes win. The spawning tests use it; the in-process calls name `freeLlamaSwap: async () => {}` and
   `lease: null`. `render/fake-llama-swap.mjs` is a small llama-swap on a loopback port for tests that need behaviour: per-seat state,
   `/slots` that answers, hangs or changes per call, every request recorded, `close()` destroys the sockets a hung request holds.
-- **The guard.** `render/test-isolation.test.mjs` scans every render test and the test support that spawns runners: a runner spawned
-  without both closings, an in-process `withGpuSlot` that names neither `freeLlamaSwap` nor `lease`, and a `freeLlamaSwap` or
-  `quiesceLlamaSwap` call with no endpoint or fetch, fail. Its fixtures pin what it catches and lets through. Run on the tree before
-  the fixes it listed nine violations; with the isolation of `comfy-keep.test.mjs` put back to the old line it fails on that file.
+- **The guard.** `render/test-isolation.test.mjs` scans every render test and the test support that spawns runners: a runner spawn
+  whose own call does not pass an isolated env, an in-process `withGpuSlot` that names neither `freeLlamaSwap` nor `lease`, and a
+  `freeLlamaSwap` or `quiesceLlamaSwap` call with no endpoint or fetch, fail. Each runner spawn is judged on the env its call passes
+  (the helper or both closings in the call, a name declared in the same test or at the top of the file, a parameter judged by what
+  every caller hands it, or a builder the file declares): isolation written for one spawn vouches for no other, so a runner spawn
+  added to a file that already isolates one fails, and node spelled as a name bound to `process.execPath`, as `"node"` or as `fork()`
+  counts as a node spawn. An env that reaches the call through a member (`sb.env`) or an import is not traced and is judged by the
+  file as a whole, as far as the first version of the scan went. Its fixtures pin what it catches and lets through. Run on the tree
+  before the fixes the first version listed twelve violations and the per-spawn scan lists fourteen (`comfy-render.test.mjs` spawns
+  three runners); with the isolation of `comfy-keep.test.mjs` put back to the old line it fails on that file.
 - **Proof.** With the parent environment pointing at a fake llama-swap whose one seat is starting and never answers `/slots`, the old
   test fails at 15.7 s (three `/slots` requests on the fake), the fixed test passes at 1.7 s with no request on the fake, and the old
   environment line put back fails at 15.6 s again.
