@@ -6,6 +6,30 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — a vLLM seat bound to a cache server is refused when its batch is smaller than the cache chunk (H-33)
+
+- **What was wrong.** A seat bound to an LMCache store declares `chunk_size`, which must equal the engine's unified KV block (784 for the
+  Qwen3.8-27B hybrid with fp16 KV, 1568 with fp8, which doubles it), and the engine's per-step token budget
+  (`--max-num-batched-tokens`) has to cover at least one block. `Spec.Validate` checked `chunk_size > 0` and nothing else, so a seat could
+  be authored, rebound through `install vllm-seat --config` (which replaces the chunk from the box's binding), and rendered with a batch
+  below the chunk it was registered with. The two shipped store-backed seats satisfy it (batch 3135, chunk 1568), so nothing in the tree
+  had ever shown the gap.
+- **The fix.** `Spec.validate` now refuses a seat with a cache server whose declared `max_num_batched_tokens` is below its `chunk_size`
+  and names both numbers and the cause (`max_num_batched_tokens 1024 is below the cache server's chunk_size 1568 ...`). One rule serves
+  the tier table (`Validate`), the extra seats (`ValidateExtra`) and the render (`Artifacts` re-validates after a binding replaced the
+  chunk). Equal is accepted. Docs: `docs/systems/cache-server.md` (invariants).
+- **Named limits.** `ChunkSize` is declared to equal the unified block and LMCache refuses a mismatch at registration, which is why
+  `batch >= chunk` is the checkable form of "batch >= block". The block itself is a model-and-dtype property known only as measured pairs,
+  not a `Spec` field, so a storeless fp8 seat with a small batch (the shipped storeless seats run 2048 and 4096) stays unguarded, and an
+  undeclared batch (0) is not compared. No upper bound is enforced (the measured seats run one token under two blocks).
+- **Tests.** Red before the rule: `TestASeatWhoseBatchIsSmallerThanTheCacheChunkIsRefused` failed in all four subtests (`lane_seat`,
+  `extra_seat`, `render`, `one_token_under`) with `a store-backed seat whose max_num_batched_tokens is below the cache chunk_size must be
+  refused; Validate returned nil`; the four guards (`TestASeatWhoseBatchEqualsTheChunkIsAccepted`, `TestAStorelessSeatIsNotJudgedByTheChunk`,
+  `TestASeatThatDeclaresNoBatchIsNotJudgedByTheChunk`, `TestTheMeasuredFP8SeatsKeepTheirChunk`) passed. Five single-line mutants each turn
+  one named test red (`scripts/mutation-check.sh`, verdict `RED`, file restored byte for byte): `<` to `<=` (the equal-batch guard), the chunk
+  read as 1568 for a storeless seat (the storeless guard), dropping `MaxBatchedTokens > 0` (the undeclared-batch guard), the chunk read as 0
+  beside a store (the refusal test) and the two numbers swapped in the message (the refusal test).
+
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 
 ### Fixed — `TestTheAnchoredClockDropsTheAdmissionAllowance` no longer fails on a loaded box for a cost that is not the poll budget

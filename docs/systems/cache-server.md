@@ -218,6 +218,12 @@ eviction and after a restart — hit counters alone do not prove fidelity).
 - Optional, off by default, never a dependency of the install.
 - The store address is private (LAN/tailnet); public addresses are refused at load.
 - Chunk = engine unified block size; a mismatch fails engine registration loudly.
+- **A seat bound to a store runs `max_num_batched_tokens` >= `chunk_size`** (H-33). The chunk equals the unified KV block, and the
+  engine's per-step token budget has to cover at least one block, so `Spec.Validate` (the tier table, the extra seats and the render
+  after a `--config` binding replaced the chunk) refuses a smaller batch and names both numbers. The shipped store-backed seats run
+  batch 3135 against chunk 1568 (one token under two blocks, the measured operating point; no upper bound is enforced). **Named limits:**
+  a storeless seat has no chunk to compare, so a storeless fp8 seat with a small batch is not guarded (the block is a model-and-dtype
+  property known only as measured pairs, not a `Spec` field), and an undeclared batch (0) is not compared.
 - One namespace per stack generation.
 - One binding per seat; at most one box default. A seat with no binding FAILS `doctor` — an
   unexplained absence is not an opt-out, and the tier stays optional through the explicit one.
