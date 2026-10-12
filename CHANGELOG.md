@@ -66,9 +66,10 @@ Versioning: [SemVer](https://semver.org/).
   binary and the runner script of the video lane, the engine binary, the depth binary and the script of the animate lane, binary and
   script of voice and of music, binary and script of the image lane; each first asserts that mediacap reads the route CONFIGURED, then
   BOUND-BUT-MISSING once the file is gone, then that the lane defers `route_not_ready` naming the key and the path, takes no lease,
-  creates no output directory and files one ledger row of class `config`). Red before, on the code with the hook after the resolutions:
-  the cases in which the lane resolved the script or the binary itself came back with an empty `err_class` (the lane's "not found"
-  sentence), and the image lane's script defer carried the default model tier instead of its sdcpp model. `TestAnUnboundRouteKeepsItsOldDefer`
+  creates no output directory and files one ledger row of class `config`). Red before, on the code with the hook after the resolutions
+  (run again on an extract of the red-tests commit): ten of the eleven cases came back with an empty `err_class` (the lane's "not found"
+  sentence); the eleventh, the image lane's engine binary, is a guard (that lane never resolves the binary itself and already deferred
+  typed). The image lane's script defer also carried the default model tier instead of its sdcpp model. `TestAnUnboundRouteKeepsItsOldDefer`
   used to unset the VAE only, a route mediacap reads BOUND-BUT-MISSING, under the name of the nothing-bound case; it now clears every
   required key of four lanes (premise: NOT CONFIGURED), and the half-bound case is `TestARouteWithAKeyLeftUnsetKeepsTheLanesOwnSentence`
   (premise: what mediacap reads for each route). Five more mutants (`scripts/mutation-check.sh`, all `RED`): the video lane's required-key
