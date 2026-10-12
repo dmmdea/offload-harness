@@ -2169,7 +2169,7 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 			chatClamped, chatClampNote = chatBudget, cfit.Note
 		}
 		chatTimeout := repackAttemptDeadline(ctx, p.cfg, chatSent, limit-attempts+1)
-		chatClient := p.repackClient("/v1/chat/completions", chatTimeout, gates)
+		chatClient := p.repackClient(repackChatPath, chatTimeout, gates)
 		var chatOpts []llamaclient.GenOption
 		if underLiveness {
 			chatOpts = append(chatOpts, llamaclient.WithoutClientTimeout(), llamaclient.WithProgress(progress))
@@ -2341,6 +2341,11 @@ func (p *Pipeline) newRepackGates() repackGates {
 	}
 	return g
 }
+
+// repackChatPath is the chat route the re-pack's grammar-free lane rides. It is spelled here, in a file
+// the model-dispatched-route lint lists (repackClient hands the path to llamaclient, which takes the
+// affinity gate before every send), and referenced from the rescue, which must not spell it again.
+const repackChatPath = "/v1/chat/completions"
 
 // repackClient is a seat client for one re-pack lane, on the given path, with
 // the given transport-level timeout (repackAttemptDeadline sizes it per

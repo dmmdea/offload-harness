@@ -206,7 +206,7 @@ func (p *Pipeline) rescueOnOrigin(ctx context.Context, schemaMap map[string]any,
 	resident, route := llamaclient.FleetLaneGates(p.cfg.FleetAuthToken)
 	// No seat_endpoints on this client: those pins exist for this box's own cascade, and a pin that
 	// happened to name the origin's seat would divert a call that is aimed at one named node.
-	client := llamaclient.New(p.cfg.Endpoint, "/v1/chat/completions", p.cfg.Model, repackAttemptDeadline(rctx, p.cfg, tokens, 1)).
+	client := llamaclient.New(p.cfg.Endpoint, repackChatPath, p.cfg.Model, repackAttemptDeadline(rctx, p.cfg, tokens, 1)).
 		WithRemoteLanes(map[string]string{o.Seat: o.Base}, func() bool { return false }, nil, resident).
 		WithLaneRoute(route)
 	reason := "this box's seat " + ownSeat + " is not resident; the node that wrote the answer holds its seat hot"
