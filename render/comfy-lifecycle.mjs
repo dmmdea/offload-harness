@@ -208,7 +208,7 @@ export const LIST_GPUS_RETRY_TIMEOUT_MS = 30000;
 export function listGpusWith(spawnSync = nodeSpawnSync, warn = (line) => console.error(line)) {
   const ask = (timeout) => {
     try {
-      return spawnSync("nvidia-smi", ["-L"], { encoding: "utf8", timeout });
+      return spawnSync("nvidia-smi", ["-L"], { encoding: "utf8", timeout, windowsHide: true });
     } catch {
       return null;
     }
@@ -824,7 +824,7 @@ export async function ensureComfy(opts = {}) {
     }
     try { child?.unref?.(); } catch {}
   } else {
-    child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: ["ignore", "pipe", "pipe"], detached: false, env: spawnEnv });
+    child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: ["ignore", "pipe", "pipe"], detached: false, env: spawnEnv, windowsHide: true });
     captureComfyOutput(child, comfyDir, key);
   }
   // Record the launch so a later job can tell this instance from a foreign one (the

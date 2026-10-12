@@ -138,7 +138,7 @@ test("the real script exits 2 on a caller mistake, before the GPU slot is touche
     [["--ref", img], /takes ONE image/],
   ]) {
     const r = spawnSync(process.execPath, [SCRIPT, join(dir, "o.png"), img, "edit it", "--unet", "u.gguf", ...extra],
-      { encoding: "utf8", timeout: 30000, env: { ...process.env, GPU_LEASE_DIR: "", GPU_LEASE_EPOCH: "", GPU_LEASE_CLASS: "" } });
+      { encoding: "utf8", timeout: 30000, env: { ...process.env, GPU_LEASE_DIR: "", GPU_LEASE_EPOCH: "", GPU_LEASE_CLASS: "" }, windowsHide: true });
     assert.equal(r.status, 2, `exit ${r.status}; stderr: ${r.stderr}`);
     assert.match(r.stderr, re);
     assert.doesNotMatch(r.stderr, /GPU lease missing/, "refused before withGpuSlot");

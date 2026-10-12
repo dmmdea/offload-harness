@@ -282,7 +282,8 @@ export function scanSource(src) {
         if (obj && HIDE.test(codeText(src, kind, open, obj.close, false))) { sites.push({ name, line, call: shown, ok: true, why: `options object ${last} sets windowsHide: true` }); continue; }
       }
     }
-    sites.push({ name, line, call: shown, ok: false, why: "no `windowsHide: true` in the call's options" });
+    // where the call sits, for a tool that edits it
+    sites.push({ name, line, call: shown, ok: false, why: "no `windowsHide: true` in the call's options", index, paren, close: read.close, parts: read.parts, inString });
   }
   return sites;
 }

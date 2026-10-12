@@ -58,7 +58,7 @@ function freePort() {
 
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } };
 function killTree(pid) {
-  if (process.platform === "win32") spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)]);
+  if (process.platform === "win32") spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], { windowsHide: true });
   else { try { process.kill(pid, "SIGKILL"); } catch {} }
 }
 
@@ -92,7 +92,7 @@ test("a runner given keep-comfy exits after its job while the instance it launch
 
   child = spawn(process.execPath, [runner], {
     env: { ...process.env, COMFY_DIR: comfyDir, COMFY_PY: process.execPath, COMFY_INSTANCE: "keepcase", TEST_API: api, COMFY_START_WAIT_SEC: "30" },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
   });
   let stdout = "", stderr = "";
   child.stdout.on("data", (d) => (stdout += d));
@@ -173,7 +173,7 @@ test("a non-kept launch is unchanged: piped, attached, not unref'd", async (t) =
   });
   assert.deepEqual(seen.stdio, ["ignore", "pipe", "pipe"]);
   assert.equal(seen.detached, false);
-  assert.equal(seen.windowsHide, undefined);
+  assert.equal(seen.windowsHide, true, "house rule: no visible console windows - the attached launch is hidden like the kept one");
   assert.equal(child.unrefCalls, 0);
 });
 

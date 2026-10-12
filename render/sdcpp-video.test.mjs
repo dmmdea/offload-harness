@@ -140,7 +140,7 @@ test("missingFlags / parseArgs", () => {
 });
 
 function run(args) {
-  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 30000 });
+  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 30000, windowsHide: true });
 }
 
 test("the -- terminator: a prompt that starts with -- is a positional, flags after the positionals still parse", () => {

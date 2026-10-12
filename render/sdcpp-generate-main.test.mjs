@@ -41,7 +41,7 @@ function runMain(sb, stubSpec) {
   const env = { ...process.env, SDCPP_BIN: bin, GGML_VK_VISIBLE_DEVICES: "0", LLAMA_SWAP_API: "http://127.0.0.1:9" };
   for (const k of Object.keys(env)) if (k.startsWith("GPU_LEASE")) delete env[k];
   return new Promise((resolve) => {
-    const c = spawn(process.execPath, [join(HERE, "sdcpp-generate.mjs"), sb.out, "a red bike", "--no-lock"], { env, stdio: ["ignore", "pipe", "pipe"] });
+    const c = spawn(process.execPath, [join(HERE, "sdcpp-generate.mjs"), sb.out, "a red bike", "--no-lock"], { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let stdout = "", stderr = "";
     c.stdout.on("data", (d) => { stdout += d; });
     c.stderr.on("data", (d) => { stderr += d; });

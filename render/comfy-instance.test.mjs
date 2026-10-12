@@ -609,7 +609,7 @@ test("run-graph takes its ComfyUI start and free from instanceDeps, never straig
 test("run-graph: a bad instance env is a typed defer in the result file and exit 0, never an untyped exit 1", (t) => {
   const dir = scratch(t); const result = join(dir, "r.json");
   const r = spawnSync(process.execPath, [fileURLToPath(new URL("./comfy-run-graph.mjs", import.meta.url)), "--graph", join(dir, "nope.json"), "--result", result],
-    { encoding: "utf8", env: { ...process.env, COMFY_CARD_UUID: "1", COMFY_INSTANCE: "" }, timeout: 60000 });
+    { encoding: "utf8", env: { ...process.env, COMFY_CARD_UUID: "1", COMFY_INSTANCE: "" }, timeout: 60000, windowsHide: true });
   assert.equal(r.status, 0, "exit " + r.status + ": " + r.stderr);
   const out = JSON.parse(readFileSync(result, "utf8"));
   assert.equal(out.deferred, true);

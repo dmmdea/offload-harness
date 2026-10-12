@@ -13,7 +13,8 @@
 // every source under render/ and fails on the calls that do not, naming file:line. spawn-scan.mjs is the
 // scanner; section 1 pins what it understands, section 2 is the rule.
 //
-// There is no allow-list: the one call that cannot take the flag would be listed here with its reason.
+// There is no allow-list of calls: a call that genuinely could not take the flag would be listed here with its
+// reason (NO_OWN_CALLS below only names the one file that loads child_process and starts nothing itself).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";

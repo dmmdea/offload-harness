@@ -74,7 +74,7 @@ test("scratchDir: a test that FAILS still has its folder removed (the success-pa
     "});",
     "",
   ].join("\n"));
-  const r = spawnSync(process.execPath, ["--test", probe], { env: { ...childEnv(tmp), PROBE_TOLD: told }, encoding: "utf8" });
+  const r = spawnSync(process.execPath, ["--test", probe], { env: { ...childEnv(tmp), PROBE_TOLD: told }, encoding: "utf8", windowsHide: true });
   assert.notEqual(r.status, 0, "the probe test fails on purpose:\n" + r.stdout + r.stderr);
   assert.match(r.stdout + r.stderr, /fails on purpose/, "and it failed for that reason");
   const made = readFileSync(told, "utf8");
@@ -106,7 +106,7 @@ test("removeTree: removes a tree with its contents, and a folder that is already
 test("igpu-stub: a process that builds a stub executable leaves nothing in its OS temp dir (the Windows launcher was a cache nobody removed)", (t) => {
   const priv = scratchDir(t, "scratch-stub-");
   const code = `import { stubAvailable } from ${JSON.stringify(pathToFileURL(join(HERE, "igpu-stub.mjs")).href)}; process.stdout.write(String(stubAvailable()));`;
-  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env: childEnv(priv), encoding: "utf8" });
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env: childEnv(priv), encoding: "utf8", windowsHide: true });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^(true|false)$/);
   assert.deepEqual(readdirSync(priv), [], "the launcher it built (or tried to) is gone with the process");

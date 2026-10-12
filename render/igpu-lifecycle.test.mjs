@@ -81,7 +81,7 @@ function setup(t, kind) {
   } else {
     script = "sdcpp-animate.mjs";
     const drv = join(work, "driver.mp4");
-    const r = spawnSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=96x64:d=1:r=16", "-c:v", "libx264", "-pix_fmt", "yuv420p", drv]);
+    const r = spawnSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=96x64:d=1:r=16", "-c:v", "libx264", "-pix_fmt", "yuv420p", drv], { windowsHide: true });
     assert.equal(r.status, 0, String(r.stderr));
     // the depth engine is the first (and here the hanging) engine
     const sd = makeStub(work, "sd-cli", { log: SD_HEADER });
@@ -110,11 +110,11 @@ for (const kind of KINDS) {
       const parentJs = join(sb.work, "parent.mjs");
       writeFileSync(parentJs, `import {spawn} from "node:child_process"; import {writeFileSync} from "node:fs";
 const [info, ...cmd] = process.argv.slice(2);
-const c = spawn(cmd[0], cmd.slice(1), {stdio: "ignore", env: process.env, detached: true}); // detached: on Windows a child of a killed parent shares its fate otherwise
+const c = spawn(cmd[0], cmd.slice(1), {stdio: "ignore", env: process.env, detached: true, windowsHide: true}); // detached: on Windows a child of a killed parent shares its fate otherwise
 writeFileSync(info, String(c.pid));
 setInterval(() => {}, 1000);`);
       const info = join(sb.work, "runner.pid");
-      parent = spawn(process.execPath, [parentJs, info, process.execPath, sb.script, ...sb.args], { env: sb.env, stdio: "ignore" });
+      parent = spawn(process.execPath, [parentJs, info, process.execPath, sb.script, ...sb.args], { env: sb.env, stdio: "ignore", windowsHide: true });
       runnerPid = await waitFor(() => readPid(info), 30000, "the runner to start");
       const enginePid = await waitFor(() => readPid(sb.pidFile), 60000, "the engine to start (the host may be too loaded)");
       assert.ok(tempDirs(sb).length > 0, "the runner made its temp dir");
@@ -138,7 +138,7 @@ for (const kind of KINDS) {
       const sb = setup(t, kind);
       let child;
       try {
-        child = spawn(process.execPath, [sb.script, ...sb.args], { env: sb.env, stdio: ["ignore", "ignore", "pipe"] });
+        child = spawn(process.execPath, [sb.script, ...sb.args], { env: sb.env, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
         let stderr = "";
         child.stderr.on("data", (d) => { stderr += d; });
         const closed = new Promise((resolve) => child.on("close", (c, s) => resolve({ c, s })));
@@ -166,7 +166,7 @@ test("video runner: the engine is in the runner's process group; SIGKILL of that
   const sb = setup(t, "video");
   let runner;
   try {
-    runner = spawn(process.execPath, [sb.script, ...sb.args], { env: sb.env, stdio: "ignore", detached: true }); // detached = its own group, as gpugen's Setpgid makes it
+    runner = spawn(process.execPath, [sb.script, ...sb.args], { env: sb.env, stdio: "ignore", detached: true, windowsHide: true }); // detached = its own group, as gpugen's Setpgid makes it
     const enginePid = await waitFor(() => readPid(sb.pidFile), 60000, "the engine to start (the host may be too loaded)");
     const pgrp = (pid) => Number(readFileSync(`/proc/${pid}/stat`, "utf8").split(")")[1].trim().split(" ")[2]);
     assert.equal(pgrp(enginePid), runner.pid, "the engine must be in the RUNNER's group (a detached engine would survive the group kill)");
@@ -177,7 +177,7 @@ test("video runner: the engine is in the runner's process group; SIGKILL of that
     assert.deepEqual(tempDirs(sb), leaked, "a SIGKILLed runner cannot clean up: its temp dir is still there ...");
     // ... and the next job's makeTempDir sweeps it
     const mod = pathToFileURL(join(here, "igpu-engine.mjs")).href;
-    const r = spawnSync(process.execPath, ["--input-type=module", "-e", `import {makeTempDir} from ${JSON.stringify(mod)}; const t = makeTempDir("sdcpp-video-"); t.cleanup();`], { env: sb.env, encoding: "utf8" });
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", `import {makeTempDir} from ${JSON.stringify(mod)}; const t = makeTempDir("sdcpp-video-"); t.cleanup();`], { env: sb.env, encoding: "utf8", windowsHide: true });
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(tempDirs(sb), [], "swept by the next job");
   } finally {
@@ -196,7 +196,7 @@ test("sweepStaleTempDirs: removes the dir of a dead owner, keeps a live owner's,
       writeFileSync(join(d, "frame.png"), "x");
       return d;
     };
-    const gone = spawnSync(process.execPath, ["-e", "0"]); // a pid that is certainly dead afterwards
+    const gone = spawnSync(process.execPath, ["-e", "0"], { windowsHide: true }); // a pid that is certainly dead afterwards
     assert.equal(gone.status, 0);
     const dead = mk("sdcpp-video-dead", gone.pid ?? 2147483646);
     const live = mk("sdcpp-video-live", process.ppid > 1 ? process.ppid : process.pid);
@@ -229,7 +229,7 @@ test("installLifecycle: told to stop it asks for the pids, kills, WAITS for them
     process.emit("SIGINT"); // a second signal while dying changes nothing
     setTimeout(() => {}, 50);
   `;
-  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8" });
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8", windowsHide: true });
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(JSON.parse(r.stdout.trim()), ["pids", "kill", "wait:111,222", "cleanup", "exit:143"]);
 });
@@ -244,7 +244,7 @@ test("installLifecycle: an engine that is still there after the wait is reported
     } });
     process.emit("SIGHUP");
   `;
-  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8" });
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8", windowsHide: true });
   assert.equal(r.stdout.trim(), "exit:129");
   assert.match(r.stderr, /engine process\(es\) 4242 still present after 3000 ms/);
 });
@@ -278,7 +278,7 @@ test("descendantsOf: every descendant, deepest first; unrelated processes are no
 });
 
 test("pidGone: a zombie (a killed child not yet reaped) counts as gone, a live process does not", { skip: process.platform !== "linux" && "reads /proc" }, () => {
-  const c = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });
+  const c = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore", windowsHide: true });
   const pid = c.pid;
   assert.equal(pidGone(pid), false);
   process.kill(pid, "SIGKILL");
@@ -301,7 +301,7 @@ test("the process 'exit' hook removes the temp dirs of a runner that exits (or t
     const base = mkdtempSync(join(tmpdir(), "igpu-exit-"));
     try {
       const code = `import {makeTempDir} from ${JSON.stringify(mod)}; const t = makeTempDir("exit-hook-"); console.log(t.dir); ${how};`;
-      const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env: { ...process.env, TEMP: base, TMP: base, TMPDIR: base }, encoding: "utf8" });
+      const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env: { ...process.env, TEMP: base, TMP: base, TMPDIR: base }, encoding: "utf8", windowsHide: true });
       const dir = r.stdout.trim().split("\n")[0];
       assert.ok(dir.startsWith(base), `the temp dir is under the private TEMP: ${dir}`);
       assert.ok(!existsSync(dir), `${how}: the temp dir must be removed by the exit hook`);
@@ -326,7 +326,7 @@ test("the process 'exit' hook kills an engine that is still live when the runner
   `;
   let enginePid = 0;
   try {
-    const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8" });
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8", windowsHide: true });
     enginePid = Number(r.stdout.trim());
     assert.ok(enginePid > 0, `the engine's pid was printed: ${r.stdout} ${r.stderr}`);
     assert.equal(r.status, 1, "the runner died of the uncaught error, with no signal involved");
@@ -354,7 +354,7 @@ test("the process 'exit' hook asks for the pids, kills, WAITS for them and only 
     } });
     throw new Error("uncaught in the runner");
   `;
-  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8" });
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8", windowsHide: true });
   assert.equal(r.status, 1, r.stderr);
   assert.deepEqual(JSON.parse(r.stdout), ["pids", "kill", "wait:111,222", "cleanup"]);
 });
@@ -376,7 +376,7 @@ test("enginePids on real children: a live engine is listed with its descendants;
   assert.deepEqual(enginePids(), [], "no engine, nothing to find");
   const dir = scratchDir(t, "igpu-pids-");
   const gpid = join(dir, "grandchild.pid");
-  const script = `const { spawn } = require("node:child_process"); const g = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const script = `const { spawn } = require("node:child_process"); const g = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
     require("node:fs").writeFileSync(${JSON.stringify(gpid)}, String(g.pid)); setInterval(() => {}, 1000);`;
   const e = startEngine(script);
   try {
@@ -395,7 +395,7 @@ test("enginePids on real children: an engine that has exited but whose pipes are
   // the engine starts a helper that inherits its stderr pipe and outlives it, then exits at once: its 'exit' has
   // fired and exitCode is set, but 'close' (which removes it from the live set) waits for the helper to let go
   const script = `const { spawn } = require("node:child_process");
-    spawn(process.execPath, ["-e", "setTimeout(() => {}, 3000)"], { stdio: ["ignore", "ignore", "inherit"] }).unref();`;
+    spawn(process.execPath, ["-e", "setTimeout(() => {}, 3000)"], { stdio: ["ignore", "ignore", "inherit"], windowsHide: true }).unref();`;
   const e = startEngine(script);
   await waitFor(() => e.child && e.child.exitCode !== null, 30000, "the engine to exit");
   assert.equal(e.child.exitCode, 0);

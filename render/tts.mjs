@@ -83,7 +83,7 @@ async function main() {
   }
   const args = [worker, ...buildWorkerArgs(out, text, flags)];
   await withGpuSlot({ noLock: flags["no-lock"], comfyManaged: false }, async () => {
-    const code = await new Promise((res) => spawn(TTS_PY, args, { stdio: "inherit" }).on("close", res));
+    const code = await new Promise((res) => spawn(TTS_PY, args, { stdio: "inherit", windowsHide: true }).on("close", res));
     if (code !== 0) throw new Error("tts worker exited " + code);
     console.log("WROTE", out);
   });

@@ -48,6 +48,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 func main() {
@@ -61,6 +62,9 @@ func main() {
 	args := append([]string{lines[1], lines[2]}, os.Args[1:]...)
 	c := exec.Command(lines[0], args...)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	// a launcher started detached has no console to hand on, and a console program it starts would open a
+	// window of its own: 0x08000000 is CREATE_NO_WINDOW
+	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 	if err := c.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			os.Exit(ee.ExitCode())
@@ -85,7 +89,7 @@ function windowsLauncher() {
   process.once("exit", remove);
   writeFileSync(join(dir, "launcher.go"), LAUNCHER_GO);
   const exe = join(dir, "launcher.exe");
-  const r = spawnSync("go", ["build", "-o", exe, "launcher.go"], { cwd: dir, encoding: "utf8", env: { ...process.env, GOFLAGS: "" } });
+  const r = spawnSync("go", ["build", "-o", exe, "launcher.go"], { cwd: dir, encoding: "utf8", env: { ...process.env, GOFLAGS: "" }, windowsHide: true });
   if (r.status !== 0 || !existsSync(exe)) {
     remove();
     throw new Error("cannot build the stub launcher with go: " + (r.stderr || r.error?.message || "unknown"));
@@ -277,7 +281,7 @@ function runAsEngine() {
     const frames = Number(argAfter(argv, "--video-frames") || 5) + (w.extraFrames || 0);
     // black: an all-black clip; frozen: one still colour (not black, never changing); else a moving test pattern
     const src = w.black ? `color=c=black:s=${width}x${height}:r=${fps}` : w.frozen ? `color=c=0x2060c0:s=${width}x${height}:r=${fps}` : `testsrc2=s=${width}x${height}:r=${fps}`;
-    const r = spawnSync(w.ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", src, "-frames:v", String(frames), "-an", out], { encoding: "utf8" });
+    const r = spawnSync(w.ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", src, "-frames:v", String(frames), "-an", out], { encoding: "utf8", windowsHide: true });
     if (r.status !== 0) {
       writeStderr("stub: ffmpeg failed: " + r.stderr + "\n");
       process.exit(99);
