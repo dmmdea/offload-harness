@@ -170,7 +170,12 @@ export const VIEW_TIMEOUT_MS = 600_000;
 // withDeadline: run `call(signal)` under an AbortSignal that fires after timeoutMs. A call that ends because the signal fired
 // rejects with an error that names the call and the bound (the bare "operation was aborted due to timeout" names neither);
 // any other failure passes through untouched, so an answered error status keeps its httpStatus.
-async function withDeadline(what, timeoutMs, call) {
+// `unusable` says the stall condemns the server: the error is then serverUnusable (comfy-render.mjs exits RENDER_EXIT_SERVER_UNUSABLE
+// and prints the class line, so a --batch parent stops instead of paying the bound on every later job). POST /prompt is that call: it
+// only validates and queues, so a server that does not answer it for two minutes cannot take a later job either, and the parent
+// reads nothing of the child but its exit code and its RENDER FAILED line. GET /view is not: the render has finished, its output
+// is on disk, and a later job's own submit and poll decide whether the server still serves.
+async function withDeadline(what, timeoutMs, call, { unusable = false } = {}) {
   const signal = AbortSignal.timeout(timeoutMs);
   try {
     return await call(signal);
@@ -178,6 +183,7 @@ async function withDeadline(what, timeoutMs, call) {
     if (!signal.aborted) throw cause;
     const e = new Error(`ComfyUI ${what} timeout: no complete answer within ${timeoutMs} ms (the server accepted the connection and stopped answering); aborting to release the GPU slot`);
     e.timedOut = true;
+    if (unusable) e.serverUnusable = true;
     e.cause = cause;
     throw e;
   }
@@ -322,7 +328,7 @@ export async function rawSubmit({ api, graph, clientId, fetchImpl = fetch, timeo
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ prompt: graph, client_id: clientId }),
     signal,
-  }));
+  }), { unusable: true });
   // A 200 with no prompt_id (proxy interference, API drift) must fail HERE: polling
   // /history/undefined answers 200 {} forever, which would hold the exclusive GPU slot
   // for the whole budget before dying with a misleading "no output produced in time".
