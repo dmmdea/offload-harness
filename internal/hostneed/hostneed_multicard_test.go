@@ -69,7 +69,7 @@ func TestACardOnlyImageCallWithAMeasuredRowDeclaresTheRowOnTwoLeasedCards(t *tes
 
 func TestACardOnlyImageCallWithoutAMeasuredRowKeepsTheOrdinaryEstimate(t *testing.T) {
 	f := imgFacts(t, 15.9, 15.9)
-	for name, cmd := range map[string]string{"2.1 bf16": img21Cmd, "2512 GGUF": img2512Cmd, "2511 GGUF": editGgufCmd} {
+	for name, cmd := range map[string]string{"2512 GGUF": img2512Cmd, "2511 GGUF": editGgufCmd} {
 		got, plain := need(t, cmd, f), need(t, without(cmd), f)
 		if got.GiB != plain.GiB || got.Source != plain.Source || got.GiB <= 0 {
 			t.Errorf("%s: %v, want the ordinary %v (a predicted row declares nothing less than the set until a run with the read-only loader has measured its host growth)", name, got, plain)
@@ -90,10 +90,16 @@ func TestThePlacementFlagMeansNothingToAFamilyWithoutARecipe(t *testing.T) {
 		"2.1 int8 text encoder": strings.Replace(img21Cmd, "qwen3vl_8b_bf16", "qwen3vl_8b_int8", 1),
 		// the int8_convrot DiT has a row that is held back (its DiT on cuda:1 was never run), so it is no recipe: the runner refuses it by name
 		"2.1 int8 DiT": strings.Replace(img21Cmd, "qwen_image_2.1_bf16", "qwen_image_2.1_int8_convrot", 1),
+		// the bf16 DiT's row is held back too (ComfyUI builds its whole 16.33 GiB text encoder on the 15.9 GiB storage card before the split applies): no recipe
+		"2.1 bf16 DiT, held back":                    img21Cmd,
+		"2.1 bf16 DiT of the fast family, held back": strings.Replace(img21Cmd, "qwen_image_2.1_bf16", "qwen_image_2.1_uc_bf16", 1),
 	} {
 		got, plain := need(t, cmd, f), need(t, without(cmd), f)
 		if got != plain {
 			t.Errorf("%s: with the flag %v, without %v: no recipe, so the flag is the runner's refusal and not this package's business", name, got, plain)
+		}
+		if strings.Contains(name, "held back") && (got.GiB <= 0 || got.CardOnly || strings.Contains(got.Detail, "card-only") || strings.Contains(got.Detail, "predicted")) {
+			t.Errorf("%s: %v: a held-back row declares the ordinary streaming figure and names no recipe", name, got)
 		}
 	}
 }
@@ -214,9 +220,14 @@ func TestTheEditRouteReadsThePlacementFromTheFacts(t *testing.T) {
 	if n, ok := ForRoute(RouteEdit, cfg, f); !ok || n.GiB != 0 || !strings.Contains(n.Detail, "qwen-image-edit-2511/fp8mixed") {
 		t.Fatalf("with the binding's placement: %v %v, want 0", n, ok)
 	}
-	img := config.Config{ComfyDir: f.Cfg.ComfyDir, ImageGenFamily: "qwen-image-2.1", ImageGenCkpt: "qwen_image_2.1_bf16.safetensors", ImageGenCLIP: "qwen3vl_8b_bf16.safetensors"}
+	img := config.Config{ComfyDir: f.Cfg.ComfyDir, ImageGenFamily: "qwen-image", ImageGenCkpt: "qwen-image-2512-Q5_1.gguf"}
 	if n, ok := ForRoute(RouteImage, img, f); !ok || n.GiB <= 0 || !strings.Contains(n.Detail, "predicted") {
 		t.Fatalf("a predicted row declares the set: %v %v", n, ok)
+	}
+	// the 2.1 bf16 row is held back, so the same placement is no recipe there: the ordinary estimate, with no card-only note
+	held := config.Config{ComfyDir: f.Cfg.ComfyDir, ImageGenFamily: "qwen-image-2.1", ImageGenCkpt: "qwen_image_2.1_bf16.safetensors", ImageGenCLIP: "qwen3vl_8b_bf16.safetensors"}
+	if n, ok := ForRoute(RouteImage, held, f); !ok || n.GiB <= 0 || strings.Contains(n.Detail, "card-only") || strings.Contains(n.Detail, "predicted") {
+		t.Fatalf("a held-back row is no recipe, so the ordinary estimate: %v %v", n, ok)
 	}
 	// the other routes do not read it
 	f.Placement = PlacementMulticard
@@ -249,7 +260,8 @@ func TestOnlyAMeasuredCardOnlyDeclarationIsMarkedCardOnly(t *testing.T) {
 		cmd string
 		f   Facts
 	}{
-		"a predicted row":                      {img21Cmd, two},
+		"a predicted row":                      {img2512Cmd, two},
+		"a held-back row":                      {img21Cmd, two},
 		"a row that does not fit":              {editFp8Cmd, imgFacts(t, 12, 12)},
 		"one card":                             {editFp8Cmd, imgFacts(t, 15.9)},
 		"no placement":                         {without(editFp8Cmd), two},

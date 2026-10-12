@@ -12,8 +12,13 @@
 // own pool flags, SDXL and HiDream fit one card); an int8 TEXT ENCODER (PSNR 28.65 dB against the 30 dB gate in the benchmark;
 // the int8_convrot DiT is a different file and a recipe of its own, held back for now: its `blocked` sentence says why); a text
 // encoder other than the one the recipe was built for.
+// A row can be HELD BACK: it stays in the table (its data is the proof arm's), carries a `blocked` sentence that says why, and
+// findRecipe refuses it by name, so no planner, builder or door treats it as a recipe. Both qwen-image-2.1 rows are held back today:
+// int8_convrot (its DiT on cuda:1 never ran) and bf16 (under --gpu-only ComfyUI builds the whole 16.33 GiB text encoder on the 15.9 GiB
+// storage card before the DisTorch2 split is applied, and ran out of memory there). The launchable image row is the 2512 Q5_1 GGUF.
 // An fp8 text encoder is never placed on cuda:1 (two measured runs aborted the process there), so a recipe pins it whole to
-// cuda:0; only a bf16 encoder too big for one card is split, and a test walks every recipe to keep it that way.
+// cuda:0; only a bf16 encoder too big for one card is split (the two held-back 2.1 rows are the ones that do), and a test walks every
+// recipe to keep it that way.
 //
 // Classes are the ones ComfyUI-MultiGPU's own NODE_CLASS_MAPPINGS registers (read from the installed pack's __init__.py): the
 // plain UNETLoaderMultiGPU / CLIPLoaderMultiGPU / VAELoaderMultiGPU (input `device`), the UNETLoaderDisTorch2MultiGPU and
@@ -53,8 +58,26 @@ const FAMILY_HINTS = Object.freeze({
   sdxl: "it fits one card, so there is nothing to place across two",
   "hidream-o1": "it fits one card pair only with host RAM and was never measured card-only",
   "hidream-o1-dev": "it fits one card pair only with host RAM and was never measured card-only",
-  "qwen-image-2.1": "only the bf16 safetensors DiT has a launchable recipe (the int8_convrot one is held back, see the row's `blocked`)",
+  "qwen-image-2.1": "no DiT of this family has a launchable recipe today: the int8_convrot and the bf16 rows are both held back (see each row's `blocked`)",
 });
+
+// The hints above describe the IMAGE route's rows. The edit route has its own, because a family can have rows on one route and none on the other:
+// qwen-image-2.1 has two image rows (both held back) and no edit row, and its edit graph takes no placement argument, so lifting the image holds would not give it one.
+const EDIT_FAMILY_HINTS = Object.freeze({
+  "qwen-image-2.1": "the 2.1 edit graph has no card-only placement (it takes no placement argument), so there is no recipe for it to hold back or lift",
+});
+
+/**
+ * routeOffer: what the table offers on a route, as one sentence read from the table itself: the launchable rows, then the held-back ones. Written by hand it went
+ * stale: it listed qwen-image-2.1 as having recipes after both of that family's rows were held back.
+ */
+function routeOffer(route) {
+  const mine = RECIPES.filter((r) => r.route === route);
+  const launchable = mine.filter((r) => !r.blocked).map((r) => r.id);
+  const held = mine.filter((r) => r.blocked).map((r) => r.id);
+  const offer = launchable.length ? `the card-only ${route} placement has recipes for ${launchable.join(", ")} only` : `the card-only ${route} placement has no launchable recipe`;
+  return held.length ? `${offer}; ${held.join(", ")} ${held.length === 1 ? "is" : "are"} held back (see each row's \`blocked\`)` : offer;
+}
 
 /**
  * findRecipe: the recipe for a call, or a RecipeRefusal that says why there is none. route is "image" or "edit"; family is the
@@ -66,7 +89,9 @@ export function findRecipe({ route, family, unet, clip } = {}) {
   const rows = RECIPES.filter((r) => r.route === route && r.family === fam);
   const noRecipe = (why) => new RecipeRefusal(`no measured card-only recipe for ${fam}${route === "edit" ? " edit" : ""}${unet ? ` (${unet})` : ""}: ${why}`);
   if (rows.length === 0) {
-    throw noRecipe(FAMILY_HINTS[fam] || "the card-only placement has recipes for qwen-image-2.1, qwen-image (the Q5_1 GGUF) and the 2511 edit only");
+    // an edit hint says why the family has no edit row and is followed by what the route does offer; an image hint stands alone; a family with neither gets the offer
+    if (route === "edit") throw noRecipe([EDIT_FAMILY_HINTS[fam], routeOffer(route)].filter(Boolean).join("; "));
+    throw noRecipe(FAMILY_HINTS[fam] || routeOffer(route));
   }
   const unetName = String(unet || "").trim();
   if (!unetName) throw new RecipeRefusal(`the card-only placement needs the DiT file to pick its recipe for ${fam}${route === "edit" ? " edit" : ""}: name it (--ckpt, or --unet on the edit route)`);
@@ -104,7 +129,7 @@ export function allocationString(residentGb) {
  * recipePeaks: the per-card VRAM peak (GiB) a call on this recipe is held to at a given resident share (null = the recipe's own, or a plain pin that has none).
  * The DiT's total is the invariant: --resident-gb keeps that many GiB of it on the compute card and the allocation string sends the REMAINDER to the storage
  * card. A larger share raises the compute peak; a smaller one puts the same bytes on the storage card. The storage figure is never lowered by a larger share,
- * because no run measured that: the recipe's own stands. For a recipe whose storage peak is its text-encoder stage (the 2.1 bf16 one) a smaller share is
+ * because no run measured that: the recipe's own stands. For a recipe whose storage peak is its text-encoder stage (the 2.1 bf16 one, now held back) a smaller share is
  * therefore refused somewhat early, on the conservative side.
  */
 export function recipePeaks(row, residentGb) {
