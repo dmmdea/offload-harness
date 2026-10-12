@@ -951,7 +951,9 @@ test("submitGraph passes its raw POST the submit bound (the production caller of
 
 test("a real socket that accepts and never answers: the raw POST /prompt and fetchView both end at their bound", async () => {
   const sockets = new Set();
-  const server = createServer(() => { /* accept the request, never answer */ });
+  // the handler accepts the request and never answers it (a line comment on purpose: the scratch-folder lint in test-scratch.test.mjs
+  // strips block comments across the whole file, and this file's header already holds an opening marker)
+  const server = createServer(() => {});
   server.on("connection", (s) => { sockets.add(s); s.on("close", () => sockets.delete(s)); });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const api = `http://127.0.0.1:${server.address().port}`;
