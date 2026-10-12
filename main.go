@@ -2384,7 +2384,7 @@ func runDelegate(args []string) error {
 	results, sum, err := delegate.RunWith(context.Background(), cfg, p.RunAgentContract, batch.Contracts, *route, remotes,
 		cliPinOptions(*priority, *tenant, p.RescueRepack, *pinReason))
 	if err != nil {
-		return err
+		return cliEngineErr(err, batch, "subtask", nil)
 	}
 	// The refused subtasks go back among the results at their own positions: one result per subtask in the file, in
 	// order, each a contract-class defer (the file's mistake, not a broken stack), which delegateExitErr leaves at exit 0.
@@ -4985,7 +4985,7 @@ func runResearch(args []string) error {
 	results, sum, err := delegate.RunBatched(context.Background(), cfg, p.RunAgentContract, batch.Contracts, *route, nil,
 		cliPinOptions(0, "", p.RescueRepack, *pinReason))
 	if err != nil && len(results) == 0 {
-		return err
+		return cliEngineErr(err, batch, "source", resultSources)
 	}
 	results, sum = batch.Splice(results, sum, "source", resultSources)
 	// A chunk error after some pages finished: render the finished pages and
