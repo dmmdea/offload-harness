@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -224,5 +225,65 @@ func TestRepackSkipNoteNamesWhatSizedIt(t *testing.T) {
 	o.NeedWhat = "the object's"
 	if f := o.fit(now, time.Time{}, 1024, 500); !f.Skip || !strings.Contains(f.Note, "the object's 500") {
 		t.Fatalf("fit = %+v, want the skip to name the object's size once the schema sized it", f)
+	}
+}
+
+// A slow loop leaves the wall spent, and the re-pack is then owed the time it needs (register F44/C13).
+// What it needs is what it WRITES: a 3,000-character answer re-packed into {answer: string} owes about
+// 150 tokens at 100 tok/s (2.3 s), not the 1,064 tokens the answer weighs (16 s). The request carries
+// what that time buys, not the whole 1,512-token budget a 16-second allowance would have let through.
+func TestRunAgentTaskRepackIsOwedWhatItWritesNotWhatTheAnswerWeighs(t *testing.T) {
+	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	answer := answerInLines(3000)
+	fake := okRepackFake()
+	fake.loopStream = func(_ int64, _ map[string]any, w http.ResponseWriter, r *http.Request) {
+		select { // a loop that ends 0.4 s past its 2 s wall
+		case <-r.Context().Done():
+			return
+		case <-time.After(2400 * time.Millisecond):
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(doneChat(answer)))
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	contract := testContract()
+	contract.TimeoutSec = 2
+	wire := decodeWire(t, rateTestPipeline(t, srv.URL, 100).Run(context.Background(), agentTestRequest(t, contract)))
+	if wire.Deferred {
+		t.Fatalf("deferred (%s): %s\nrepack_note: %s", wire.DeferClass, wire.Reason, wire.RepackNote)
+	}
+	mt := maxTokensOf(t, <-fake.repackBodies)
+	if mt < 150 || mt > 320 {
+		t.Fatalf("max_tokens = %d, want what the 2.3 s owed for the object (plus the 0.1 s of grace) buy, not the %d budget a 16 s allowance would let through", mt, repackBudget(answer))
+	}
+	if d := wire.RepackAttemptsDetail; len(d) != 1 || d[0].ClampedFrom != repackBudget(answer) {
+		t.Fatalf("detail = %+v, want one attempt clamped from the %d budget", d, repackBudget(answer))
+	}
+}
+
+// A schema-sized re-pack that the time still cannot buy is skipped, and the note says it was the
+// object's size that was compared, not the answer's.
+func TestRunAgentTaskRepackSkipNamesTheObjectWhenTheSchemaSizedIt(t *testing.T) {
+	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	answer := answerInLines(3000)
+	fake := okRepackFake()
+	fake.loop = func(int64) string { return doneChat(answer) }
+	srv := fake.server(t)
+	defer srv.Close()
+
+	p := rateTestPipeline(t, srv.URL, 100)
+	cfg := p.Cfg()
+	cfg.AgentCallDeadlineSec = 1 // the call's last 1.1 s buy 110 tokens at 100 tok/s: under the object's 154
+	p.cfg = cfg
+	contract := testContract()
+	contract.TimeoutSec = 1
+	wire := decodeWire(t, p.Run(context.Background(), agentTestRequest(t, contract)))
+	if got := fake.grammarCNT.Load() + fake.chatFallbackCNT.Load(); got != 0 {
+		t.Fatalf("re-pack requests = %d, want 0", got)
+	}
+	if !wire.Deferred || wire.DeferClass != core.DeferClassBudget || !strings.Contains(wire.RepackNote, "< the object's") {
+		t.Fatalf("deferred=%v class=%q note=%q, want a budget defer whose note names the object's size", wire.Deferred, wire.DeferClass, wire.RepackNote)
 	}
 }

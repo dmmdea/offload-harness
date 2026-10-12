@@ -98,6 +98,10 @@ func rescueSchemaMiss(ctx context.Context, rescue RescueFunc, contract core.Agen
 		budget = rescueFloor
 	}
 	rescueStart := time.Now()
+	// The node that wrote the answer, for a rescue that can re-pack where the seat is hot.
+	if pr.ranBase != "" {
+		ctx = WithRescueOrigin(ctx, RescueOrigin{Base: pr.ranBase, Seat: pr.Result.Seat, Node: pr.Result.NodeID})
+	}
 	got, err := rescue(ctx, contract, pr.Result.Output, budget)
 	if err == nil {
 		err = validateRescued(contract, got.Structured, pr.Result.Output)
@@ -180,4 +184,36 @@ func clipReason(s string) string {
 		s = s[:240] + "…"
 	}
 	return s
+}
+
+// RescueOrigin is where a finished answer was written: the node whose agent loop produced it, and
+// the seat that wrote it. The delegator's rescue is handed it (WithRescueOrigin) because that node
+// holds its seat hot: it has just decoded the answer, so a one-completion re-pack there waits for
+// no load, and it does not depend on THIS box's seat being resident or its cards being free.
+type RescueOrigin struct {
+	// Base is the node's dial base, as the run used it.
+	Base string
+	// Seat is the seat that wrote the answer on that node (the wire result's seat).
+	Seat string
+	// Node is the node's id, for a note.
+	Node string
+}
+
+type rescueOriginKey struct{}
+
+// WithRescueOrigin returns ctx carrying o for a RescueFunc to read. The RescueFunc signature is
+// unchanged, so every door that wires a rescue keeps working, and one that ignores the origin is
+// exactly the rescue it always was.
+func WithRescueOrigin(ctx context.Context, o RescueOrigin) context.Context {
+	return context.WithValue(ctx, rescueOriginKey{}, o)
+}
+
+// RescueOriginFrom reads the origin a rescue was handed: ok is false when the result did not come
+// from a node (a local run) or the node named no seat.
+func RescueOriginFrom(ctx context.Context) (RescueOrigin, bool) {
+	o, ok := ctx.Value(rescueOriginKey{}).(RescueOrigin)
+	if !ok || strings.TrimSpace(o.Base) == "" || strings.TrimSpace(o.Seat) == "" {
+		return RescueOrigin{}, false
+	}
+	return o, true
 }
