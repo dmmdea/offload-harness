@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // writeFakeLeaseReader writes a 2 MiB executable-shaped file under any name: it carries the
@@ -135,7 +135,7 @@ func TestEveryBinaryThatLinksTheLeaseReaderCarriesTheSignature(t *testing.T) {
 		if runtime.GOOS == "windows" {
 			exe += ".exe"
 		}
-		if out, err := exec.Command("go", "build", "-o", exe, pkg).CombinedOutput(); err != nil {
+		if out, err := winexec.Command("go", "build", "-o", exe, pkg).CombinedOutput(); err != nil {
 			t.Fatalf("go build %s: %v\n%s", pkg, err, out)
 		}
 		r := gpulease.Audit(gpulease.AuditOptions{Files: []string{exe}})
@@ -158,7 +158,7 @@ func TestARenamedCopyOfABuiltBinaryIsFoundAndJudged(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		built += ".exe"
 	}
-	if out, err := exec.Command("go", "build", "-o", built, "./cmd/local-agent").CombinedOutput(); err != nil {
+	if out, err := winexec.Command("go", "build", "-o", built, "./cmd/local-agent").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	b, err := os.ReadFile(built)
@@ -180,7 +180,7 @@ func TestARenamedCopyOfABuiltBinaryIsFoundAndJudged(t *testing.T) {
 // include the lease package.
 func packagesLinkingTheLeaseReader(t *testing.T) []string {
 	t.Helper()
-	out, err := exec.Command("go", "list", "-f", "{{.ImportPath}}\t{{.Name}}\t{{join .Deps \" \"}}", "./cmd/...").Output()
+	out, err := winexec.Command("go", "list", "-f", "{{.ImportPath}}\t{{.Name}}\t{{join .Deps \" \"}}", "./cmd/...").Output()
 	if err != nil {
 		t.Fatalf("go list: %v", err)
 	}

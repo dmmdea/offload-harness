@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // TestHelperSleep is the standard Go helper-process trick: it is a no-op unless the
@@ -19,7 +21,7 @@ func TestHelperSleep(t *testing.T) {
 // spawnHelper starts this test binary as a live child process.
 func spawnHelper(t *testing.T) *exec.Cmd {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=TestHelperSleep", "-test.timeout=60s")
+	cmd := winexec.Command(os.Args[0], "-test.run=TestHelperSleep", "-test.timeout=60s")
 	cmd.Env = append(os.Environ(), "LO_HELPER_SLEEP=1")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("spawn helper: %v", err)

@@ -901,6 +901,7 @@ func main() {
 		bin += ".exe"
 	}
 	cmd := exec.Command("go", "build", "-o", bin, src)
+	hideWindow(cmd) // a go build started by a console-less test run must not open a window
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build argv helper: %v\n%s", err, out)
 	}

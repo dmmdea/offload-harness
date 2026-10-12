@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -29,6 +28,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // heldReason is the reason a real queued answer carries (pipeline.errGPUQueued.Error).
@@ -621,7 +621,7 @@ func TestACallThatAnsweredAndWasKilledLeavesNothingForTheSweep(t *testing.T) {
 		return
 	}
 	r := newCloseRig(t, 200*time.Millisecond)
-	cmd := exec.Command(os.Args[0], "-test.run=^TestACallThatAnsweredAndWasKilledLeavesNothingForTheSweep$")
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestACallThatAnsweredAndWasKilledLeavesNothingForTheSweep$")
 	cmd.Env = append(os.Environ(), "PAIRWORKLOADS_CLOSE_CHILD=1", "PAIRWORKLOADS_URL="+r.url, "PAIRWORKLOADS_APPDIR="+r.appDir,
 		"PAIRWORKLOADS_DIR="+r.dir, "PAIRWORKLOADS_LEDGER="+filepath.Join(t.TempDir(), "ledger.jsonl"))
 	out, err := cmd.StdoutPipe()

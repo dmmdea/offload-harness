@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 func TestBuildFFmpegArgs(t *testing.T) {
@@ -32,7 +34,7 @@ func TestConvertIntegration(t *testing.T) {
 	tmp := t.TempDir()
 	src := tmp + "/tone.wav"
 	// 1s 440Hz sine at 44.1kHz stereo — exercises downmix + resample.
-	if out, err := exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1:sample_rate=44100", "-ac", "2", src).CombinedOutput(); err != nil {
+	if out, err := winexec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1:sample_rate=44100", "-ac", "2", src).CombinedOutput(); err != nil {
 		t.Skipf("could not synth test audio: %v (%s)", err, out)
 	}
 	wav, cleanup, err := ConvertToWav16k(src, "ffmpeg")

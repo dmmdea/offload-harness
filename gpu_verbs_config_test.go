@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // TestHelperGPUVerbDriver runs `gpu` with the arguments in LO_GPU_VERB_ARGS (one per line). A no-op unless set.
@@ -40,7 +42,7 @@ func TestEveryGPUVerbAcceptsTheHoistedConfig(t *testing.T) {
 				"before the verb": {"--config", cfg, verb, "--help"},
 				"after the verb":  {verb, "--config", cfg, "--help"},
 			} {
-				cmd := exec.Command(os.Args[0], "-test.run=^TestHelperGPUVerbDriver$", "-test.timeout=60s")
+				cmd := winexec.Command(os.Args[0], "-test.run=^TestHelperGPUVerbDriver$", "-test.timeout=60s")
 				cmd.Env = append(os.Environ(), "LO_GPU_VERB_ARGS="+strings.Join(args, "\n"))
 				done := make(chan struct{})
 				var out []byte

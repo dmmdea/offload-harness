@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // TestDeletionGuardRefusesAnUndeclaredDeletion drives scripts/check-deletions.sh
@@ -215,11 +217,11 @@ func (r *synthRepo) rev(ref string) string {
 // run invokes the guard in the synthetic repo and returns its combined output.
 func (r *synthRepo) run(script string, base, head string) (string, error) {
 	r.t.Helper()
-	return r.finish(exec.Command(r.bash, script, base, head))
+	return r.finish(winexec.Command(r.bash, script, base, head))
 }
 
 func (r *synthRepo) exec(args ...string) (string, error) {
-	return r.finish(exec.Command("git", args...))
+	return r.finish(winexec.Command("git", args...))
 }
 
 // finish runs a command in the synthetic repo under the sandboxed environment.

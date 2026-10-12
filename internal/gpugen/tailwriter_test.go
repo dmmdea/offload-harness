@@ -22,6 +22,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // TestTailWriterCapConstant locks the documented 256 KiB cap.
@@ -91,7 +93,7 @@ func TestTailWriterMultipleWritesUnderCapConcatenate(t *testing.T) {
 //     bounded").
 func TestTailWriterOverCapKeepsLastCapBytes(t *testing.T) {
 	const capacity = 4096
-	const chunkSize = 777    // odd size, does not divide the cap or the total evenly
+	const chunkSize = 777       // odd size, does not divide the cap or the total evenly
 	const totalTarget = 1 << 20 // 1 MiB
 
 	w := newTailWriter(capacity)
@@ -257,7 +259,7 @@ func TestCallSitesBoundRealChildOutputOverCap(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			exe, script, args := chunkedStdoutScript()
-			cmd := exec.Command(exe, append([]string{script}, args...)...)
+			cmd := winexec.Command(exe, append([]string{script}, args...)...)
 			tw := newTailWriter(tailWriterCap)
 			if err := tc.run(cmd, tw); err != nil {
 				t.Fatalf("child failed unexpectedly: %v", err)

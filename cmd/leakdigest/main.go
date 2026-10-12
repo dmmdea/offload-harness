@@ -36,6 +36,7 @@ import (
 	"sync"
 
 	"github.com/dmmdea/offload-harness/internal/leakgate"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 const usage = `usage:
@@ -363,7 +364,7 @@ func cmdPatterns(args []string, stdout io.Writer) error {
 // ---- git plumbing (the library spawns nothing)
 
 func git(dir string, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd := winexec.Command("git", append([]string{"-C", dir}, args...)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -415,7 +416,7 @@ type refFS struct {
 }
 
 func newRefFS(repo string, files []leakgate.TrackedFile) (*refFS, error) {
-	cmd := exec.Command("git", "-C", repo, "cat-file", "--batch")
+	cmd := winexec.Command("git", "-C", repo, "cat-file", "--batch")
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

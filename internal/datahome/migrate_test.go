@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/volumes"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // tree writes files (rel path -> content) under dir, each stamped an hour in the past
@@ -332,7 +332,7 @@ func makeLink(t *testing.T, target, link string) {
 		return
 	}
 	if runtime.GOOS == "windows" {
-		if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err == nil {
+		if out, err := winexec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err == nil {
 			return
 		} else {
 			t.Skipf("cannot create a symlink or a junction here: %v %s", err, out)

@@ -141,15 +141,14 @@ func glueRunUpstreamOpen(cmd *cobra.Command, flags *rootFlags, target string, la
 // glueOpenBrowser opens a URL with the platform's default handler, without a
 // visible console window on Windows (house rule: no flashing consoles).
 func glueOpenBrowser(target string) error {
-	var c *exec.Cmd
+	name, args := "xdg-open", []string{target}
 	switch runtime.GOOS {
 	case "windows":
-		c = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
+		name, args = "rundll32", []string{"url.dll,FileProtocolHandler", target}
 	case "darwin":
-		c = exec.Command("open", target)
-	default:
-		c = exec.Command("xdg-open", target)
+		name, args = "open", []string{target}
 	}
+	c := exec.Command(name, args...)
 	hideSpawnedWindow(c)
 	return c.Start()
 }

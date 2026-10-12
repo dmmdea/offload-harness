@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // probeEnv makes TestNestedProbe do its work. Only the child that TestAStandInThatRunsTestsRefusesToInstallAnother
@@ -53,7 +55,7 @@ func TestAStandInRunsAndItsDirectoryIsRemovedWhenItsTestEnds(t *testing.T) {
 	var exe string
 	t.Run("use", func(t *testing.T) {
 		exe = Place(t, "standin")
-		out, err := exec.Command(exe).CombinedOutput()
+		out, err := winexec.Command(exe).CombinedOutput()
 		if err != nil || string(out) != "stand-in ran" {
 			t.Fatalf("running %s: %q, %v, want the stand-in's answer", exe, out, err)
 		}
@@ -151,7 +153,7 @@ func TestOnWindowsInstallStartsTheStandInOnce(t *testing.T) {
 	if got := warmed.Load() - before; got != 1 {
 		t.Errorf("Install made %d warm-up starts, want 1", got)
 	}
-	out, err := exec.Command(exe).CombinedOutput()
+	out, err := winexec.Command(exe).CombinedOutput()
 	if err != nil || string(out) != "stand-in ran" {
 		t.Fatalf("the stand-in does not run after Install's warm-up: %q, %v", out, err)
 	}
@@ -180,7 +182,7 @@ func TestAWarmUpStartExitsBeforeAnyTestRuns(t *testing.T) {
 	exe := copyTo(t, "unanswered")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, exe, "-test.v")
+	cmd := winexec.CommandContext(ctx, exe, "-test.v")
 	cmd.Env = append(os.Environ(), warmEnv+"=1")
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -257,7 +259,7 @@ func TestAStandInThatRunsTestsRefusesToInstallAnother(t *testing.T) {
 	exe := copyTo(t, "unanswered")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestNestedProbe$", "-test.timeout=30s")
+	cmd := winexec.CommandContext(ctx, exe, "-test.run=^TestNestedProbe$", "-test.timeout=30s")
 	cmd.Env = append(os.Environ(), probeEnv+"=1", dirsEnv+"="+filepath.Dir(exe))
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out

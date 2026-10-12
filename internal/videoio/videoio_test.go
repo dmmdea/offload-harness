@@ -4,6 +4,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 func TestBuildFFmpegArgs(t *testing.T) {
@@ -30,7 +32,7 @@ func TestSampleFramesIntegration(t *testing.T) {
 	}
 	tmp := t.TempDir()
 	src := tmp + "/src.mp4"
-	if out, err := exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=5", src).CombinedOutput(); err != nil {
+	if out, err := winexec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=5", src).CombinedOutput(); err != nil {
 		t.Skipf("could not synth test video: %v (%s)", err, out)
 	}
 	uris, err := SampleFrames(src, "ffmpeg", 1.0, 4, 320, 6000000)

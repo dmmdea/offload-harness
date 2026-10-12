@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // ---- the directory lock --------------------------------------------------------------------------------------------------
@@ -80,7 +80,7 @@ func TestACrashedHoldersLockIsFreedWhenItsProcessEnds(t *testing.T) {
 	}
 	dir := filepath.Join(t.TempDir(), queueDirName)
 	st := &store{dir: dir}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestACrashedHoldersLockIsFreedWhenItsProcessEnds$")
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestACrashedHoldersLockIsFreedWhenItsProcessEnds$")
 	cmd.Env = append(os.Environ(), "MR_LOCK_HOLDER_DIR="+dir)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

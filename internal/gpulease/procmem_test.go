@@ -3,11 +3,12 @@ package gpulease
 import (
 	"bufio"
 	"os"
-	"os/exec"
 	"runtime"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // holdHelper is the test binary acting as a process that holds memory: it touches the number of MiB
@@ -88,7 +89,7 @@ func TestDescendantsResidentGiBCountsTheChildrenAndNotTheHolder(t *testing.T) {
 		t.Skip("no private-memory reader on this platform")
 	}
 	const mib = 96
-	cmd := exec.Command(os.Args[0])
+	cmd := winexec.Command(os.Args[0])
 	cmd.Env = append(os.Environ(), "GPULEASE_HELPER_HOLD_MIB="+strconv.Itoa(mib))
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -149,7 +150,7 @@ func TestTreeMemoryCountsTheRootAndTheChildren(t *testing.T) {
 		t.Skip("no process-memory reader on this platform")
 	}
 	const mib = 96
-	cmd := exec.Command(os.Args[0])
+	cmd := winexec.Command(os.Args[0])
 	cmd.Env = append(os.Environ(), "GPULEASE_HELPER_HOLD_MIB="+strconv.Itoa(mib))
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -204,7 +205,7 @@ func TestHeldCountsWhatIsResidentNotWhatIsMerelyCommitted(t *testing.T) {
 		t.Skip("untouched anonymous memory is not private on Linux (RssAnon), so there is no difference to show here")
 	}
 	const mib = 256
-	cmd := exec.Command(os.Args[0])
+	cmd := winexec.Command(os.Args[0])
 	cmd.Env = append(os.Environ(), "GPULEASE_HELPER_HOLD_MIB="+strconv.Itoa(mib), "GPULEASE_HELPER_TOUCH=0")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

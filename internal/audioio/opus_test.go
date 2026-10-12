@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/fakeexe"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // The test binary doubles as a fake ffmpeg: started under a name whose stem is "ffmpeg" it records
@@ -128,7 +129,7 @@ func TestConvertToOpus16kIntegration(t *testing.T) {
 	}
 	tmp := t.TempDir()
 	src := filepath.Join(tmp, "tone.wav")
-	if out, err := exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2:sample_rate=44100", "-ac", "2", src).CombinedOutput(); err != nil {
+	if out, err := winexec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2:sample_rate=44100", "-ac", "2", src).CombinedOutput(); err != nil {
 		t.Skipf("could not synth test audio: %v (%s)", err, out)
 	}
 	ogg, cleanup, err := ConvertToOpus16k(src, "ffmpeg")
@@ -145,7 +146,7 @@ func TestConvertToOpus16kIntegration(t *testing.T) {
 		t.Errorf("ogg is %d bytes for 2 s of audio, want well under %d (32 kbps is about 8 KB)", fi.Size(), wavSize/20)
 	}
 	if probe, perr := exec.LookPath("ffprobe"); perr == nil {
-		out, err := exec.Command(probe, "-v", "error", "-show_entries", "stream=codec_name,sample_rate,channels", "-of", "csv=p=0", ogg).CombinedOutput()
+		out, err := winexec.Command(probe, "-v", "error", "-show_entries", "stream=codec_name,sample_rate,channels", "-of", "csv=p=0", ogg).CombinedOutput()
 		if err != nil {
 			t.Fatalf("ffprobe: %v (%s)", err, out)
 		}

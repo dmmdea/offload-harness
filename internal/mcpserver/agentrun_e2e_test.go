@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -34,7 +34,7 @@ func TestAgentRunMCPLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(t.TempDir(), "harness"+exeSuffix())
-	build := exec.Command("go", "build", "-o", bin, ".")
+	build := winexec.Command("go", "build", "-o", bin, ".")
 	build.Dir = repoRoot
 	if out, berr := build.CombinedOutput(); berr != nil {
 		t.Fatalf("build harness: %v\n%s", berr, out)
@@ -44,7 +44,7 @@ func TestAgentRunMCPLive(t *testing.T) {
 	defer cancel()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "agent-run-e2e", Version: "1"}, nil)
-	sess, err := client.Connect(ctx, &mcp.CommandTransport{Command: exec.Command(bin, "mcp")}, nil)
+	sess, err := client.Connect(ctx, &mcp.CommandTransport{Command: winexec.Command(bin, "mcp")}, nil)
 	if err != nil {
 		t.Fatalf("connect to spawned MCP server: %v", err)
 	}

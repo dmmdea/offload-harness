@@ -3,15 +3,18 @@
 package winexec
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -51,6 +54,9 @@ func joinPIDs(p []uint32) string {
 //	pids       print the processes on this process's console
 //	shared     start a child with Command (a parent with a console must hand it on) and print its answer
 //	detached   start a child with CommandDetached and print its answer
+//	wait       say READY and sleep: the child the Ctrl-C modes start
+//	ctrlc      start a "wait" child with Command, send Ctrl-C to this console, print whether the child ended
+//	ctrlc-detached   the same with CommandDetached
 func TestConsoleHelper(t *testing.T) {
 	args := flag.Args()
 	if len(args) == 0 {
@@ -79,6 +85,44 @@ func TestConsoleHelper(t *testing.T) {
 	case "detached":
 		fmt.Printf("OUTER %d\n", os.Getpid())
 		child(CommandDetached)
+	case "wait":
+		fmt.Println("READY")
+		time.Sleep(30 * time.Second)
+	case "ctrlc", "ctrlc-detached":
+		mk := Command
+		if args[0] == "ctrlc-detached" {
+			mk = CommandDetached
+		}
+		signal.Notify(make(chan os.Signal, 1), os.Interrupt) // this helper sits on the console the event goes to, and must outlive it
+		c := mk(self, "-test.run=^TestConsoleHelper$", "-test.count=1", "wait")
+		stdout, err := c.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		ready := make(chan bool, 1)
+		go func() { ready <- bufio.NewScanner(stdout).Scan() }()
+		select {
+		case <-ready:
+		case <-time.After(20 * time.Second):
+			t.Fatal("the child never said READY")
+		}
+		// CTRL_C_EVENT to process group 0: every process on this console that has not switched Ctrl-C off
+		if err := windows.GenerateConsoleCtrlEvent(windows.CTRL_C_EVENT, 0); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- c.Wait() }()
+		select {
+		case <-done:
+			fmt.Println("CHILD exited")
+		case <-time.After(5 * time.Second):
+			fmt.Println("CHILD alive")
+			_ = c.Process.Kill()
+			<-done
+		}
 	default:
 		t.Fatalf("unknown helper mode %q", args[0])
 	}
@@ -140,6 +184,20 @@ func TestCommandDetached_ChildLeavesTheParentsConsole(t *testing.T) {
 	list, self := childConsole(t, out)
 	if containsPID(list, strconv.Itoa(pid)) || len(list) != 1 || list[0] != self {
 		t.Errorf("a detached child must own a console of its own (hidden): console processes %v, parent %d, child %s", list, pid, self)
+	}
+}
+
+// The user-visible half of sharing the console: the operator's Ctrl-C reaches the child. The helper owns a
+// hidden console, starts a child, and sends CTRL_C_EVENT to that console (the helper catches it itself); a
+// child started with Command is on the console and ends, a CommandDetached one is not and keeps running.
+func TestCtrlC_ReachesAChildOfCommand_AndNotACommandDetachedOne(t *testing.T) {
+	_, shared := runHelper(t, createNoWindowFlag, "ctrlc")
+	if !strings.Contains(shared, "CHILD exited") {
+		t.Errorf("the operator's Ctrl-C must reach a child started by Command from a parent that has a console, or an interrupted run leaves it running with no window to show it: %q", shared)
+	}
+	_, detached := runHelper(t, createNoWindowFlag, "ctrlc-detached")
+	if !strings.Contains(detached, "CHILD alive") {
+		t.Errorf("a CommandDetached child sits on a console of its own and must not get its parent's Ctrl-C: %q", detached)
 	}
 }
 

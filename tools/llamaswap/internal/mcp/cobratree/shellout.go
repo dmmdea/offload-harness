@@ -286,11 +286,20 @@ func SplitShellArgs(s string) []string {
 	return tokens
 }
 
+// newCLICommand builds the command that runs the companion CLI. It is hidden on Windows (see hideWindow):
+// the CLI is a console program and this server is normally started without a console, so an unhidden
+// child would open a console window on the operator's desktop for every tool call.
+func newCLICommand(ctx context.Context, binPath string, args []string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, binPath, args...) // #nosec G204 -- trusted companion CLI path, args pre-tokenized.
+	hideWindow(cmd)
+	return cmd
+}
+
 // RunCLICommand executes the companion CLI while preserving stdout as the
 // machine-readable channel. Stderr is included only in error text so post-run
 // telemetry or quota output cannot corrupt JSON results.
 func RunCLICommand(ctx context.Context, binPath string, args []string) (string, error) {
-	cmd := exec.CommandContext(ctx, binPath, args...) // #nosec G204 -- trusted companion CLI path, args pre-tokenized.
+	cmd := newCLICommand(ctx, binPath, args)
 	stdout := newCappedCapture()
 	stderr := newCappedCapture()
 	cmd.Stdout = stdout

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // stopMarker is the file seat-cmdstop.ps1 leaves in the seat directory when llama-swap asks the seat to stop, and the one
@@ -184,7 +186,7 @@ func runStub(t *testing.T, host, artifact, scenario, readCost string, pre func(d
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, host, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+	out, err := winexec.CommandContext(ctx, host, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
 		"-File", driver, "-Stub", stub, "-Scenario", scenario, "-Calls", callLog, "-Marker", filepath.Join(dir, stopMarker), "-ReadCost", readCost).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s: the driver failed (%v):\n%s", scenario, err, out)

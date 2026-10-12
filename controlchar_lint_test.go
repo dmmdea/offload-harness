@@ -3,11 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // A C0 control character inside a source or config file is never intentional here,
@@ -110,7 +111,7 @@ func TestNoStrayControlCharacters(t *testing.T) {
 // to everything on disk — which is the behaviour this replaced.
 func trackedFiles(t *testing.T) ([]string, bool) {
 	t.Helper()
-	out, err := exec.Command("git", "ls-files", "-z").Output()
+	out, err := winexec.Command("git", "ls-files", "-z").Output()
 	if err == nil {
 		var files []string
 		for _, p := range strings.Split(string(out), "\x00") {
