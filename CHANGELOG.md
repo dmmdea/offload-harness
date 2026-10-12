@@ -25,8 +25,8 @@ Versioning: [SemVer](https://semver.org/).
   ComfyUI launch); it now asserts the house rule for that launch too.
 - **The fix in Go.** `internal/winexec` gains `Command`, `CommandContext` and `HideWindow`: `CREATE_NO_WINDOW` plus `HideWindow`
   on Windows, the plain command elsewhere, other `SysProcAttr` fields and creation flags kept. The three hand-copied `hideWindow`
-  helpers (root, `accelclient`, `nodeswap`) are now one: the root helper delegates to it and the other two are gone. 32 constructors in
-  22 files use it. Left as they were, each listed with its reason in the lint: the command an operator names after `--` in
+  helpers (root, `accelclient`, `nodeswap`) are now one: the root helper delegates to it and the other two are gone. 28 constructors in
+  21 files use it. Left as they were, each listed with its reason in the lint: the command an operator names after `--` in
   `gpu reserve` (it keeps the console it inherits and may be interactive), the detached holder (already hidden through the same
   helper) and the `leakdigest` developer tool. `tools/comfyui`'s ffprobe runner is hidden with a local helper. The cage
   (`internal/sandbox`, Linux only) is untouched, and the two `cobratree/shellout.go` files of `tools/` are Printing Press output
@@ -37,10 +37,10 @@ Versioning: [SemVer](https://semver.org/).
   `exec.Command` / `exec.CommandContext` in a non-test file of the root module that builds for Windows unless it is listed with a
   reason; a count that goes up or down fails too.
 - **Red before.** The render lint fails on the 0.181.0 tree with 86 calls; the Go lint fails with 31 `file:function` sites (32
-  constructors). Mutation checks: removing `windowsHide: true` from the engine's `taskkill` call (production), from the
+  constructors, 4 of which stay and are listed). Mutation checks: removing `windowsHide: true` from the engine's `taskkill` call (production), from the
   `taskkill` in `comfy-keep.test.mjs` (test) and from the detached child script in `igpu-lifecycle.test.mjs` (a string) each turn the
-  render lint red on exactly that line; putting `exec.Command` back in `gpugen`'s `killTree`, dropping `CREATE_NO_WINDOW` from
-  `HideWindow`, and dropping the hide from the `comfyui` ffprobe runner each turn the Go tests red. Live: the fixed render suite
+  render lint red on exactly that line; putting `exec.Command` back in `mediaops`'s `killTree` or in the accelerator sidecar launcher, dropping
+  `CREATE_NO_WINDOW` from `HideWindow`, and dropping the hide from the `comfyui` ffprobe runner each turn the Go tests red. Live: the fixed render suite
   (1315 tests, 0 failed) ran under a watcher that logs every new visible top-level window every 60 ms; it saw no console window
   (no Windows Terminal host, no `ConsoleWindowClass`, no `PseudoConsoleWindow`) during the run.
 

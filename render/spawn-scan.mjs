@@ -19,6 +19,9 @@
 // A call is fine when the text of its arguments holds `windowsHide: true`, or when its last argument is
 // a name this file declares as an object that holds it.
 //
+// What it does not follow: a child_process function passed around as a value (`promisify(execFile)`, a
+// wrapper stored in a table). Call the function itself, with its options, where it is used.
+//
 // Dependency-free (Node 18+ built-ins only).
 
 const FUNCS = ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"];
