@@ -221,7 +221,9 @@ func TestStaleImageRetriesAfterATransientHashFailure(t *testing.T) {
 	swapImage(t, path, imageBody("0.183.0"))
 	real := hashInstalledImage
 	fail := true
+	hashes := 0
 	hashInstalledImage = func(p string) (string, error) {
+		hashes++
 		if fail {
 			fail = false
 			return "", errors.New("the process cannot access the file because it is being used by another process")
@@ -240,6 +242,17 @@ func TestStaleImageRetriesAfterATransientHashFailure(t *testing.T) {
 	second := processBlock(t, s)
 	if second["stale_image"] != true || second["installed_version"] != "0.183.0" {
 		t.Fatalf("the file is readable on the next call and differs: the answer must be stale_image true, got %v", second)
+	}
+	if _, present := second["note"]; present {
+		t.Errorf("a clean read carries no note: %v", second)
+	}
+	// The retry itself, not only its outcome: a latched failure that left an empty hash behind would also read "stale".
+	if hashes != 2 {
+		t.Errorf("the failed hash is retried once and the good one kept: the installed file was hashed %d time(s), want 2", hashes)
+	}
+	processBlock(t, s)
+	if hashes != 2 {
+		t.Errorf("a successful hash is cached against the stat: hashed %d time(s) after a third call, want 2", hashes)
 	}
 }
 
