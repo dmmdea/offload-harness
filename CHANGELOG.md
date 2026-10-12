@@ -10,8 +10,8 @@ Versioning: [SemVer](https://semver.org/).
 
 - **The deadlock.** `gpu reserve --ram N --drain --unload-seat` compared `N` to the host's committed memory inside the grant, and
   drained and unloaded the seat only after the lease was held. When the memory it needed was the memory the seat held, the grant
-  waited for commit that its own unload would have freed: a film lease asked for 60 GiB while the 3-card vLLM seat held 67 GiB of
-  the host's commit and waited about six hours. Same class as the DRAINING stamp of 0.117.0 (a gate in front of the step that
+  waited for commit that its own unload would have freed: a film lease that declared its host RAM waited about six hours while the
+  3-card vLLM seat held 67 GiB of the host's commit. Same class as the DRAINING stamp of 0.117.0 (a gate in front of the step that
   clears it).
 - **The order now (a reorder, not a looser check).** A lease that asks for `--unload-seat` and declares host RAM takes its place in
   line and its cards first, declaring nothing (the figure travels as `Options.HostRAMWaitGiB`, stamped on the record as
@@ -21,14 +21,28 @@ Versioning: [SemVer](https://semver.org/).
   lease's declared need are one critical section under the epoch lock, so two leases cannot both take the last headroom. If the
   unload frees too little the lease keeps its cards, keeps waiting, and ends with the host-RAM refusal; its command never runs and
   the seat's warm-back stays owed. A need no state of the box could ever admit is still refused at once, before the seat is touched.
-  A lease without `--unload-seat`, `--drain` alone included, is unchanged.
+  The order applies to a lease whose unload can free memory for it and whose host can be read; every other lease compares in the
+  grant exactly as before: one without `--unload-seat` (`--drain` alone included), one whose unload reaches no model on its cards
+  (a `--devices` lease on cards that neither the agent seat nor any other model the roster lists is placed on: the reserve says so
+  and the lease queues without holding them), and one whose host memory cannot be read (the look after the unload would refuse for
+  the same reason, with the seat cycled and the cards held).
 - **Every form.** The wrapper, `--detach` (the parent asks the host after `detachMaintain`; the hidden holder is started with
   `--ram 0 --ram-wait N` and compares nothing in its grant) and `--devices` / `--cards` (the allocator's host term and the queue's
   pass rule see a request that declares nothing). `gpu hold` has no unload of its own and declares what it is given. `gpu status`
   and the lease rows show `host_ram_wait_gib` ("host RAM N GiB asked, not yet admitted") until the host admits it. A signal during
-  the wait ends it with "while waiting for host RAM".
+  the wait ends it with "while waiting for host RAM". `--cards` chooses its cards after the grant, so it cannot ask beforehand
+  whether the unload reaches them and still defers: an allocation that lands on cards the unload does not reach holds them while
+  the host is short (the wait line says the drain and the unload are done, which is true for it). A detached holder whose wait for
+  host RAM fails stays held, as after a failed drain, but its exclusive stamp is taken off and the error names `gpu release
+  --warm-seat`, because the seat is cold.
 - **Stated consequences.** A lease that declares nothing in the grant passes a front waiter that waits only on host RAM (the G6 rule)
   and a grant that fits on other cards goes ahead of it while it waits; the media admission in `internal/pipeline` is not changed.
+  A shortage the unload does not cure (another lane or a foreign process holds the memory) costs the cards held, exclusive, and the
+  seat cold until `--wait` ends it, where the grant used to queue without touching either. No screen before the grant can tell the
+  two apart: how much of the host's commit the seat holds is not measured here (`agent_seat_host_ram_gib` is a floor the operator
+  states, its default a chosen 21 GiB, and the film seat held 67 GiB), and a prediction taken when the reserve starts is stale when
+  the grant comes, so one that sent the lease back to the grant would bring the deadlock back whenever the cause changed in between.
+  Only a need above physical RAM less the headroom is refused beforehand.
   Details: `docs/systems/gpu-lease.md`, "A lease that unloads the seat is compared to the host after the unload".
 - Tests: `gpu_reserve_unload_hostram_test.go`, `gpu_hostram_await_test.go`, `internal/gpulease/hostram_await_test.go`.
 

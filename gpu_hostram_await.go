@@ -4,11 +4,12 @@ package main
 //
 // `gpu reserve --ram N --drain --unload-seat` used to be compared to the host inside Acquire, and the drain and the
 // unload ran only after the lease was held. The memory it waited for was held by the seat its own unload frees: a
-// film lease asked for 60 GiB while the 3-card seat held 67 GiB of the host's commit, and it waited about six hours
-// for a grant it could only get by being granted (the same class as the DRAINING stamp, gpu_drain.go, 0.117.0: the
-// gate in front of the step that clears it).
+// film lease that declared its host RAM waited about six hours while the 3-card seat held 67 GiB of the host's
+// commit, for a grant it could only get by being granted (the same class as the DRAINING stamp, gpu_drain.go, 0.117.0:
+// the gate in front of the step that clears it).
 //
-// The order now, for a lease that asks for --unload-seat and declares host RAM:
+// The order now, for a lease that asks for --unload-seat, declares host RAM, whose unload reaches a model on its cards
+// (unloadReachesLease) and whose host can be read (screenDeferredHostRAM):
 //
 //  1. the need is refused at once when no state of the box could ever admit it (waiting cannot help, and a seat
 //     cycle for a lease that can never run is bought for nothing);
@@ -21,9 +22,15 @@ package main
 //     section that admitted it;
 //  5. the command starts.
 //
-// A lease without --unload-seat is untouched: --drain alone frees no host memory, so a lease that only drains
-// keeps the comparison in the grant (cordoning the seat for a wait the drain cannot shorten would only cost the
-// seat's callers).
+// Every other lease is untouched and compares in the grant: a lease without --unload-seat (--drain alone frees no host
+// memory, so cordoning the seat for a wait the drain cannot shorten would only cost the seat's callers), a lease whose
+// unload reaches nothing on its cards (nothing it frees can make room for it), and a lease whose host cannot be read
+// (the look after the unload would refuse for the same reason until its deadline). What no screen can know before the
+// grant is whether the unload frees ENOUGH: how much of the host's commit the seat holds is not measured, the figure the
+// config can state (agent_seat_host_ram_gib) is a floor and its default is a chosen one, and a prediction taken when the
+// reserve starts is stale when the grant comes, hours later; a screen that sent the lease back to the grant on it would
+// bring the deadlock back whenever the cause changed in between. So the comparison after the unload is the decision, and
+// a shortage the unload does not cure costs the cards held (exclusive) and the seat cold until --wait ends it.
 
 import (
 	"context"

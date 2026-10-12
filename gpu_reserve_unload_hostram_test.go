@@ -4,9 +4,9 @@ package main
 // frees.
 //
 // THE DEADLOCK. `gpu reserve --ram N --drain --unload-seat` admitted its host RAM inside Acquire, and the drain
-// and the unload ran only after the lease was held. A film lease asked for 60 GiB of host RAM while the agent
-// seat held 67 GiB of it (the 3-card vLLM seat's WSL VM), so the grant waited for commit the seat was holding and
-// the seat was unloaded by the lease that was waiting to be granted: it waited about six hours. The same class as
+// and the unload ran only after the lease was held. A film lease declared host RAM while the agent seat held 67 GiB
+// of it (the 3-card vLLM seat's WSL VM), so the grant waited for commit the seat was holding and the seat was
+// unloaded by the lease that was waiting to be granted: it waited about six hours. The same class as
 // the DRAINING stamp (gpu_drain.go, 0.117.0): the gate at the front of the step that would clear it.
 //
 // THE ORDER NOW. The grant admits the cards, the drain and the unload run, and THEN the host-RAM check is put
