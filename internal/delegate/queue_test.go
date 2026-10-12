@@ -78,6 +78,11 @@ func TestRunQueueRouteEndToEnd(t *testing.T) {
 	if !strings.Contains(pr.PlacementReason, "route=queue") {
 		t.Fatalf("placement = %q", pr.PlacementReason)
 	}
+	// D-32: a claiming node answered, so the row says where it ran. The queue lane records no run of its own (the holder
+	// places a job and a claim loop takes it), and a finished answer is what marks the node.
+	if v, present := ranOnOf(t, pr); !present || v != "node" {
+		t.Fatalf("a queue-lane row a claiming node answered: ran_on = %q (present %v), want \"node\"", v, present)
+	}
 }
 
 // TestRunQueueRouteGuards: the route refuses without a holder, and refuses

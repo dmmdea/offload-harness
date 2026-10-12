@@ -264,6 +264,48 @@ fleet-dispatcher decodes health with a plain `json.Decoder` (no `DisallowUnknown
 anywhere in its `internal/`), so an extra field it doesn't know about is silently ignored, not a
 wire error, on any node — single-GPU included.
 
+**Temperature and throttle reasons.** On an `nvidia-smi` node each `gpu_devices[]` row may also carry
+`temperature_c` (an integer, degrees C, nvidia-smi `temperature.gpu`) and `throttle_reasons` (an array naming the
+clock event reasons active on the card). An absent `temperature_c` means "not read", never "cool": a node that
+predates the fields, a driver that answers `[N/A]` for the card, a thermal query that failed and an answer older than
+90 s all read the same way. `throttle_reasons` has three states, so an absent key is never "not throttled": the names of
+the reasons active; `[]` when the card was read and nothing limits its clocks (no reason beyond idle); and no key when
+the throttle column was not read (a node that predates it, a driver that answers `[N/A]` or `[Not Supported]` or has
+no throttle field, a failed query, an answer older than 90 s). A `temperature_c` outside 1 to 150 is a garbled counter
+and is left out. Placement does not read either field; whether a heat-soaked node is demoted is a separate decision.
+
+```json
+{"index": 0, "uuid": "GPU-1111aaaa-2222-3333-4444-555566667777", "name": "NVIDIA GeForce RTX 5060 Ti", "vram_total_gb": 15.93, "vram_free_gb": 15.08,
+ "temperature_c": 83, "throttle_reasons": ["sw_thermal_slowdown", "hw_thermal_slowdown"]}
+```
+
+A card the query read with nothing limiting its clocks reads `"temperature_c": 41, "throttle_reasons": []`; one whose throttle
+column was not read carries `temperature_c` alone.
+
+They come from a second, optional query (`index,uuid,temperature.gpu` plus the throttle field), never from the
+per-device memory query above, so a driver that refuses a thermal column cannot cost the memory reading; the row is
+matched to its card by UUID, never by index. The sampler ticks every 2 s but the thermal query runs **at most once per
+30 s** (one extra `nvidia-smi` process per 30 s on each node), a failed query is not retried sooner than 60 s and is
+logged once per outage, an answer older than 90 s (counted from when its query started) is dropped rather than
+published, and the read is bounded at 10 s. The query runs on a goroutine of its own, one at a time, and the 2 s probe
+only reads what the last one stored, so a hung `nvidia-smi` delays neither the memory reading the placement guards use
+nor the node's start; its answer reaches the next tick. The throttle field is named `clocks_throttle_reasons.active` on older drivers and `clocks_event_reasons.active` on newer
+ones: the reader asks for the older name first, asks for the renamed one when the driver refuses the first (the name
+that worked is remembered, so the refusal costs one spawn once), and falls back to the temperature alone when the
+driver knows neither. The bits are NVML's, read from its header (`nvml.h`, the `nvmlClocksEventReason*` and
+`nvmlClocksThrottleReason*` defines):
+
+`0x2` `applications_clocks_setting`, `0x4` `sw_power_cap`, `0x8` `hw_slowdown`, `0x10` `sync_boost`, `0x20`
+`sw_thermal_slowdown`, `0x40` `hw_thermal_slowdown`, `0x80` `hw_power_brake_slowdown`, `0x100` `display_clock_setting`,
+`0x200` `board_limit`, `0x400` `reliability`. `0x1` (the clocks dropped because the GPU is idle) is never listed, and a
+bit above the table is published as `unknown:0x<bit>` so a header that grows later is not silently dropped.
+
+`board_limit` and `reliability` are in the CUDA 13.4 header and not in 13.3's. `reliability` is the reliability policy
+limiting the clocks; it has been read on every card of a healthy three-card box, so read the list beside
+`temperature_c`, not as an alarm of its own. The delegator decodes the rows into the same `gpuprobe.Device`
+(`delegate.NodeView.Devices`), so both fields reach it with no change on its side, and a delegator built before them
+ignores them.
+
 **Why this exists:** `nvidia-smi` enumerates devices in PCI bus order — that order has no
 relationship to which device a render actually runs on. A CUDA app (ComfyUI included) can bind
 its `cuda:0` to a different physical card via `CUDA_DEVICE_ORDER=FASTEST_FIRST`, so trusting
