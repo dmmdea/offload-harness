@@ -85,7 +85,7 @@ test("say names the recipe, the two cards and their roles, once", () => {
   const lines = [];
   plan({ say: (l) => lines.push(l) });
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /^placement: multicard on the GPU lease: storage cuda:0 = idx 2 .*; compute cuda:1 = idx 0 .*; recipe qwen-image-2\.1\/bf16, 8 GiB of the DiT resident on the compute card; basis predicted/);
+  assert.match(lines[0], /^placement: multicard on the GPU lease: storage cuda:0 = idx 0 .*; compute cuda:1 = idx 2 .*; recipe qwen-image-2\.1\/bf16, 8 GiB of the DiT resident on the compute card; basis predicted/);
 });
 
 test("--resident-gb reaches the plan; a plain-pin recipe refuses it; one the compute card cannot hold beside the activations is refused with the numbers", () => {
@@ -93,7 +93,7 @@ test("--resident-gb reaches the plan; a plain-pin recipe refuses it; one the com
   // the one plain-pin recipe (int8_convrot) is held back, so the planner refuses it by name whatever else the call says, before any card table is read
   assert.throws(() => plan({ unet: "qwen_image_2.1_int8_convrot.safetensors", flags: { placement: "multicard", "resident-gb": "3" }, cards: never }), /int8_convrot.*held back/s);
   assert.throws(() => plan({ unet: "qwen_image_2.1_int8_convrot.safetensors", cards: never }), /int8_convrot.*held back/s);
-  assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "14" } }), /--resident-gb 14.*compute card \(idx 0, 15\.9 GiB\).*2\.5 GiB for the sampler's activations.*at most 12\.9 GiB/s);
+  assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "14" } }), /--resident-gb 14.*compute card \(idx 2, 15\.9 GiB\).*2\.5 GiB for the sampler's activations.*at most 12\.9 GiB/s);
 });
 
 test("a recipe whose per-card peak does not fit the leased cards (after --reserve-vram) is refused with the card and the figure", () => {
@@ -121,7 +121,7 @@ test("a resident share below the recipe's moves the same bytes onto the storage 
   // fp8mixed: 19.1 GiB DiT, 9 GiB resident, 11.0 GiB on the storage card at the row's share. A share of 5 is 15.0 GiB there against 14.9 usable.
   assert.equal(plan(share(8)).residentGb, 8, "8 GiB: 12.0 GiB on the storage card fits");
   assert.equal(plan(share(6)).residentGb, 6, "6 GiB: 14.0 GiB on the storage card fits");
-  assert.throws(() => plan(share(5)), /needs the storage card \(idx 2.*to hold 15\.0 GiB.*14\.9 GiB usable after --reserve-vram 1/s);
+  assert.throws(() => plan(share(5)), /needs the storage card \(idx 0.*to hold 15\.0 GiB.*14\.9 GiB usable after --reserve-vram 1/s);
   assert.throws(() => plan(share(0)), /needs the storage card.*to hold 20\.0 GiB/s, "the whole DiT on the storage card is the benchmark's out-of-memory at load");
   // a larger share does not lower the storage figure: no run measured it, so the row's own 11.0 stands (and the compute card refuses it first at 14.9)
   assert.equal(plan(share(10)).residentGb, 10);
@@ -153,7 +153,7 @@ test("refused with the reason: one card, three cards, the display card, a displa
 });
 
 test("--cards names the pair only when no lease does, and can only confirm a lease's cards", () => {
-  assert.equal(plan({ flags: { placement: "multicard", cards: "2,0" }, env: {} }).pair.compute.index, 0);
+  assert.equal(plan({ flags: { placement: "multicard", cards: "2,0" }, env: {} }).pair.compute.index, 2);
   assert.equal(plan({ flags: { placement: "multicard", cards: `${U2},${U0}` }, env: { ...LEASE } }).launch.key.startsWith("mc-"), true);
   const one = { GPU_LEASE_DEVICES: "gpu-cccc3333-dddd-eeee-ffff-000000000000" };
   assert.throws(() => plan({ flags: { placement: "multicard", cards: "2,0" }, env: { ...one } }), /--cards names idx 0, which the GPU lease does not hold.*can only confirm/s);
