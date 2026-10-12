@@ -73,7 +73,8 @@ Versioning: [SemVer](https://semver.org/).
 - **Not changed, for a follow-up.** A-128's kill test (does killing a healthy render mid-sampling log id 153?) is queued, not
   built, so these events stay facts. The Linux `Xid` line shape is the documented one: neither Linux gate host has an NVIDIA card
   to have logged one.
- - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
+
+## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 
 ### Fixed — `TestTheAnchoredClockDropsTheAdmissionAllowance` no longer fails on a loaded box for a cost that is not the poll budget
 
