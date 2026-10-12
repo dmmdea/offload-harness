@@ -228,7 +228,7 @@ export function interpretListDevicesResult(r) {
 // stream across versions). Synchronous — this runs once, before the GPU slot is
 // even taken, and every other step in main() is already sequential.
 export function defaultListDevices(bin) {
-  return interpretListDevicesResult(spawnSync(bin, ["--list-devices"], { encoding: "utf8", timeout: 15000 }));
+  return interpretListDevicesResult(spawnSync(bin, ["--list-devices"], { encoding: "utf8", timeout: 15000, windowsHide: true }));
 }
 
 async function main() {
@@ -261,7 +261,7 @@ async function main() {
   const args = buildSdArgs(staged, prompt, flags, extra);
   await withGpuSlot({ noLock: flags["no-lock"], comfyManaged: false }, async () => {
     try {
-      const code = await new Promise((res) => spawn(bin, args, { stdio: "inherit" }).on("close", res));
+      const code = await new Promise((res) => spawn(bin, args, { stdio: "inherit", windowsHide: true }).on("close", res));
       if (code !== 0) throw new Error("sd-cli exited " + code);
       const made = statSync(staged, { throwIfNoEntry: false });
       if (!made || made.size === 0) throw new Error(`sd-cli exited 0 but produced ${made ? "an empty file" : "no output"} at ${out}`);

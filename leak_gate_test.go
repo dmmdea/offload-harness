@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
@@ -16,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/leakgate"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // The leak gate (H-55). This repository is PUBLIC and the list of names it must
@@ -119,7 +119,7 @@ func leakGateSummary(t *testing.T, line string) {
 // tracked file (the existing trackedFiles helper hides the mode, so a symlink or
 // a submodule would be invisible to it).
 func leakGateGitFiles() ([]leakgate.TrackedFile, error) {
-	out, err := exec.Command("git", "ls-files", "-z", "-s").Output()
+	out, err := winexec.Command("git", "ls-files", "-z", "-s").Output()
 	if err != nil {
 		return nil, err
 	}

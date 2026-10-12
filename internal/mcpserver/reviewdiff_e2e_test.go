@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // TestReviewDiffMCPLive is the live proof that the clean-context review lane works end to
@@ -33,7 +34,7 @@ func TestReviewDiffMCPLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	git := exec.Command("git", "diff", "HEAD~1")
+	git := winexec.Command("git", "diff", "HEAD~1")
 	git.Dir = repoRoot
 	diff, gerr := git.Output()
 	if gerr != nil || len(strings.TrimSpace(string(diff))) == 0 {
@@ -41,7 +42,7 @@ func TestReviewDiffMCPLive(t *testing.T) {
 	}
 
 	bin := filepath.Join(t.TempDir(), "harness"+exeSuffix())
-	build := exec.Command("go", "build", "-o", bin, ".")
+	build := winexec.Command("go", "build", "-o", bin, ".")
 	build.Dir = repoRoot
 	if out, berr := build.CombinedOutput(); berr != nil {
 		t.Fatalf("build harness: %v\n%s", berr, out)
@@ -51,7 +52,7 @@ func TestReviewDiffMCPLive(t *testing.T) {
 	defer cancel()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "review-e2e", Version: "1"}, nil)
-	sess, err := client.Connect(ctx, &mcp.CommandTransport{Command: exec.Command(bin, "mcp")}, nil)
+	sess, err := client.Connect(ctx, &mcp.CommandTransport{Command: winexec.Command(bin, "mcp")}, nil)
 	if err != nil {
 		t.Fatalf("connect to spawned MCP server: %v", err)
 	}

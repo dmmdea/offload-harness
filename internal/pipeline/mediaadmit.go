@@ -71,10 +71,11 @@ import (
 type mediaKind int
 
 const (
-	needWhole    mediaKind = iota // the whole node (and the default instance): the legacy lease
-	needSingle                    // one card: the allocator's, or the explicit pin's
-	needPooled                    // the cards a pool's keys name
-	needDeclared                  // cards the operator declared (run-graph `devices`)
+	needWhole     mediaKind = iota // the whole node (and the default instance): the legacy lease
+	needSingle                     // one card: the allocator's, or the explicit pin's
+	needPooled                     // the cards a pool's keys name
+	needDeclared                   // cards the operator declared (run-graph `devices`)
+	needMulticard                  // the box's two non-display cards, leased as a set (imagegen_placement / gen_edit_placement: multicard)
 )
 
 // mediaNeed is what one media call asks of the GPU.
@@ -102,6 +103,14 @@ type mediaNeed struct {
 	// hook uses), so a declaration can be raised to what those renders were measured to hold (calibratedRAM). The
 	// zero value is not calibrated; only the image and video routes set it.
 	Foot footKey
+	// RAMPair is RAM for a card-only call (needMulticard): it also reads the VRAM of EACH card of the lease, because the recipe's verdict is on the two
+	// cards together. Set instead of RAM, never beside it.
+	RAMPair func(vramGiB float64, cardsGiB []float64) hostneed.Need
+	// PlacementKey is the config key that asked for the card-only placement (needMulticard), for the answers that tell the operator what to change.
+	PlacementKey string
+	// Refusal, when not empty, is why the call is refused before any lease is spent (a card-only binding with no recipe). The runner would refuse it
+	// by name after the pair was held and the host's memory declared.
+	Refusal string
 }
 
 // footKey is a footprint-store identity: family, quant, task.
@@ -219,7 +228,7 @@ func classDefaultRAM(cfg config.Config) func(float64) hostneed.Need {
 // is one the caller already tried and could not read, so it is not read again). Said once per
 // distinct answer in the log, the way a fallback to the whole node is.
 func (p *Pipeline) declaredRAM(ctx context.Context, need mediaNeed, cards []gpuprobe.Card, ids []string) float64 {
-	if need.RAM == nil {
+	if need.RAM == nil && need.RAMPair == nil {
 		return 0
 	}
 	if cards == nil {
@@ -227,8 +236,14 @@ func (p *Pipeline) declaredRAM(ctx context.Context, need mediaNeed, cards []gpup
 			cards = t
 		}
 	}
-	n := p.calibratedRAM(need.RAM(hostneed.LargestCardGiB(cards, ids)), need.Foot)
-	if n.GiB > 0 {
+	var declared hostneed.Need
+	if need.RAMPair != nil {
+		declared = need.RAMPair(hostneed.LargestCardGiB(cards, ids), hostneed.LeasedCardsGiB(cards, ids))
+	} else {
+		declared = need.RAM(hostneed.LargestCardGiB(cards, ids))
+	}
+	n := p.calibratedRAM(declared, need.Foot)
+	if n.GiB > 0 || n.CardOnly { // a measured card-only 0 is said too: nothing corrects it afterwards, so the log is where a false one can be seen
 		key := "declaring host RAM: " + n.String()
 		if n.Source == hostneed.SourceMeasured {
 			// A measured declaration's text carries the run counts, which move with every render: the note is made once
@@ -288,10 +303,22 @@ func declaredNeed(devices []string, token string) mediaNeed {
 func imageNeed(cfg config.Config, token string) mediaNeed {
 	fam, quant := imageFootprintKey(cfg)
 	foot := footKey{fam, quant, "image-gen"}
+	if cfg.ImageMulticard() {
+		// The card-only placement ignores the pool keys and the pin: the pair is the lease's (mediamulticard.go).
+		return multicardNeed(hostneed.RouteImage, cfg, token).withFootprint(foot)
+	}
 	if cfg.ImagePooled() {
 		return pooledNeed(token, cfg.ImageGenPoolCompute, cfg.ImageGenPoolDonor).declaresRAM(routeRAM(hostneed.RouteImage, cfg)).withFootprint(foot)
 	}
 	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteImage, cfg)).withFootprint(foot)
+}
+
+// editNeed is the need of the generative-edit route for the resolved binding.
+func editNeed(cfg config.Config, token string) mediaNeed {
+	if cfg.EditMulticard() {
+		return multicardNeed(hostneed.RouteEdit, cfg, token)
+	}
+	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteEdit, cfg))
 }
 
 // videoNeed is the need of the video route: pooled, or a single card like image generation.
@@ -313,8 +340,19 @@ type mediaGrant struct {
 	// Card and API are set when the call runs in the ComfyUI instance bound to one card.
 	Card *gpuprobe.Card
 	API  string
+	// Devices are the lease ids of the two cards a card-only call (needMulticard) runs on, sorted. Set only when the grant holds that pair, so the answer
+	// of every other call names no cards; the image, edit and batch answers carry them as "devices", the key the queued answer already uses.
+	Devices []string
 	// Release gives everything back; call it exactly when the render is done (it is idempotent).
 	Release func()
+}
+
+// name adds the cards a card-only call ran on to its answer as "devices", the key the queued answer names them under. A grant that holds no such pair
+// leaves the answer exactly as it was.
+func (g mediaGrant) name(payload map[string]any) {
+	if len(g.Devices) > 0 {
+		payload["devices"] = g.Devices
+	}
 }
 
 // launch applies the grant to a binding's launch profile: a call on a per-card instance is
@@ -406,6 +444,7 @@ type mediaPlan struct {
 	auto     bool     // the allocator picks the card
 	ids      []string // the cards, when fixed (lease ids)
 	instance bool     // run in the per-card instance of ids[0]
+	pair     bool     // ids are the card-only placement's two non-display cards (needMulticard), which the call's answer names
 }
 
 // planMedia turns a need into a plan. cards is the card table (nil when it could not be read).
@@ -418,6 +457,10 @@ func planMedia(need mediaNeed, cards []gpuprobe.Card, tableErr error) (mediaPlan
 	}
 	if need.Kind == needWhole {
 		return whole("")
+	}
+	if need.Kind == needMulticard {
+		// Never the whole node, never one card: the pair, or the reason there is none.
+		return planMulticard(need, cards, tableErr)
 	}
 	if tableErr != nil || len(cards) == 0 {
 		// Said by the caller, on every such call and in the answer (unreadableAtAdmission): the
@@ -609,6 +652,9 @@ func (p *Pipeline) stopKeptInstances(epoch uint64) {
 // file comment for what a call asks for; a call that needs the whole node, or runs on a host that
 // cannot lease cards, takes the whole-node lease exactly as it always did (acquireWholeNode).
 func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wait time.Duration, need mediaNeed) (mediaGrant, error) {
+	if need.Refusal != "" {
+		return mediaGrant{}, &errMulticard{why: need.Refusal}
+	}
 	start := time.Now()
 	// tableNote is set when the call asked for the whole node ONLY because the card table could not
 	// be read: the answer says so.
@@ -745,6 +791,9 @@ func (p *Pipeline) acquireCardScoped(ctx context.Context, reason string, ttl, wa
 	}
 	m, err := p.scopedManager()
 	if err != nil || !m.CardScoped() {
+		if need.Kind == needMulticard {
+			return mediaGrant{}, true, "", noCardLeases(need, err) // a whole-node lease names no cards, and the placement needs two
+		}
 		return mediaGrant{}, false, "", nil // the legacy path reports the open error, or runs as before
 	}
 	cards, _, terr := p.alloc.CardTable(ctx, p.cfg)
@@ -1223,6 +1272,9 @@ func (p *Pipeline) grantCards(ctx context.Context, m *gpulease.Manager, lease *g
 	// The card is ours from here: the call's PAIR card turns running.
 	core.MarkWorking(ctx)
 	g := mediaGrant{Env: p.mediaGrantEnv(lease, ids, p.unloadEnv(ctx, ids, cards)), Release: release}
+	if plan.pair {
+		g.Devices = append([]string(nil), ids...)
+	}
 	if plan.instance {
 		if c, ok := lookupCard(cards, ids[0]); ok {
 			g.Card, g.API = &c, p.instanceEndpoint(c)
@@ -1274,6 +1326,9 @@ func (p *Pipeline) acquireInherited(ctx context.Context, inherited []string, wai
 		if id = strings.ToLower(strings.TrimSpace(id)); id != "" {
 			held = append(held, id)
 		}
+	}
+	if need.Kind == needMulticard {
+		return p.acquireInheritedPair(ctx, inherited, held, wait, need)
 	}
 	if len(held) == 0 || need.Kind != needSingle {
 		return mediaGrant{}, false, "", nil

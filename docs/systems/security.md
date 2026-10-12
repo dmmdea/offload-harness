@@ -27,6 +27,15 @@ refuses any gate that interrupts work before it has counted its own false positi
 | I6 | **Additive, flag-gated, reversible.** | Capabilities default off; each change reverts with one commit or one config key. No new daemon, listener, scheduler or route without the operator's yes. |
 | I7 | **Public/private split.** | Framework docs in a public repository carry no hostnames, paths or secrets; per-node facts live in the private operations notes. |
 
+**Proving I5.** The way to show a gate can fail is [`scripts/mutation-check.sh`](../../scripts/mutation-check.sh) (PowerShell twin
+`scripts/mutation-check.ps1`), not an ad hoc script that counts any failing test as a kill: that scored a mutant that did not
+compile as killed, and let an LF pattern that missed a CRLF file report the unchanged tree's result. The harness runs the
+unmutated control arm, applies one single-line mutation and asserts it landed (line endings compared normalised), compiles the
+test binary before running the tests (a mutant that does not build is `BAD-MUTANT`, never `RED`), reports `RED` or `SURVIVED`,
+and restores the file byte for byte even when interrupted. It prints the applied mutation with every verdict, which is the
+"mutation shown applied" this invariant asks for, so a gate's proof quotes its `MUTATION-VERDICT:` line. The self-test
+(`scripts/mutation-check-selftest.sh` and `.ps1`) exercises it on the fixture module `scripts/testdata/mutfixture`.
+
 ## The layers
 
 Each layer lists what exists today, what the standard adds, its default and the gate that proves it.
@@ -156,6 +165,7 @@ R1–R6 are MUST, R7–R9 SHOULD.
 | listen, tailnet and public-web guards | `internal/netguard/netguard.go`, `tailnet.go`, `publicnet.go` |
 | credential binding for the NVIDIA key | `internal/nimclient/nimclient.go` (`IsHostedNVIDIA`, `KeyForBase`) |
 | bare-client gate (G2) | `bare_http_client_lint_test.go`, `bare_http_client_allowlist_test.go` |
+| mutation proof harness (I5) | `scripts/mutation-check.sh`, `scripts/mutation-check.ps1`; self-test `scripts/mutation-check-selftest.sh`, `scripts/mutation-check-selftest.ps1` over `scripts/testdata/mutfixture` |
 | untrusted-content fences | `internal/agent/fetchtool.go` (`fenceUntrusted`), `internal/agent/browsetool.go`; the shared rules in `internal/untrusted`, applied to research bodies in `internal/mcpserver` (G13) |
 | fleet node listeners and the fleet bearer | `internal/fleetnode/server.go`, `main.go` (`fleetServeParams`) |
 | posture report | `main.go` (`doctor`) |

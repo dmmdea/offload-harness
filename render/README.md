@@ -38,6 +38,7 @@ node render/comfy-render.mjs out.png "an abstract product hero" \
 - Writes a single PNG to the output path you give; first run after a model swap is slow on a low‑VRAM card. The poller waits **30 min by default**, tunable with `--wait-sec` or `COMFY_WAIT_SEC` (the Go harness sets `COMFY_WAIT_SEC` to match its own timeout, and its process-tree kill stays the hard stop). A ComfyUI that stops answering *mid-render* aborts early after `COMFY_DEAD_SEC` (default 240 s) to release the GPU slot — consecutive failed polls, not a slow one: a healthy server still answers `/history` with no output yet and resets the counter. `COMFY_WAIT_SEC` is wall-clock time, not a poll count (0.158.1). A ComfyUI that answers HTTP but can no longer render (a sticky CUDA error leaves `/history` empty and `/system_stats` answering an error) ends the wait after two HTTP-error answers from `/system_stats` in a row, probed 15 s apart, with a *server unusable* error; `comfy-render.mjs` then exits 3 (1 for any other failure, 2 for a caller mistake) and `comfy-generate.mjs --batch` stops at that job.
 - **The output is written atomically (0.178.0).** The png (and every other output of the helpers in this directory) goes to a staged sibling, `<out>.partial-<pid>-<n>`, in the same directory and is renamed over `<out>` only after the write finished, so a failed render never leaves a file at `<out>` and a good file already there is kept. Before, `writeFileSync(out, …)` truncated the target first: on 2026-10-09 a full data drive left 21 zero-byte PNGs in a 36-picture batch, and a skip-existing script reads a zero-byte file as finished. A failed write names the output in its error (`ENOSPC: no space left on device, write (writing <out>)`); an empty payload is refused. A runner killed mid-write can leave a `*.partial-<pid>-<n>` file; it never carries the output's name. The helper is `atomic-out.mjs` (`atomic_out.py` for the Python workers).
 - **`--batch` exit codes (`comfy-generate.mjs`, `comfy-inpaint.mjs`).** `0` every job rendered; `4` the batch ran every job and at least one failed (the rows with `"ok":false` in the `--results` file name them, and the last log line gives the counts); `1` the batch could not run to the end: a setup error, a ComfyUI that became unusable (above), or a full disk (`ENOSPC`, `EDQUOT`, `EROFS`), where the failed job and every later job get a row (`not run: the disk is full at job N/M, writing <out> …`; the inpaint batch writes its `_row: "aborted"` line with `reason: "disk_full"`); `2` usage. `local-offload generate-image --batch` ends with the same codes. Until 0.178.0 a batch with failed jobs exited 0, so a caller had to grep the log for `RENDER FAILED`. `4` is not `3` on purpose: `3` is `comfy-render.mjs`'s *server unusable* code for its parent. The results file format did not change. The table, with the Go door, is in `docs/systems/media-generation.md`.
+- **Every child process starts hidden.** Every `spawn`, `spawnSync`, `execFile`, `exec` and `fork` call in this directory - production modules, test support, tests, and the scripts a test writes into a string and runs - sets `windowsHide: true` in its options object (the last argument that is not a callback; a `const` object literal declared in scope that sets it counts, a spread or a computed key after it does not, and a child_process function used as a value is refused because its calls cannot be read). On Windows a console program started by a process with no console of its own (a detached runner, a service) otherwise opens a window of its own, a Windows Terminal window on the desktop. `no-visible-windows.test.mjs` fails with `file:line` on a call without it. A child started with `stdio: "inherit"` (the sd-cli, tts and comfy-render runs) stays on the operator's console whatever `windowsHide` says, so Ctrl-C still reaches it; `console-share.test.mjs` measures that and pins that those three runs inherit stdio.
 - Standalone tool (not part of the Go binary) — generation is a different stack (PyTorch/diffusion) from the GGUF text/vision tiers, and is intentionally kept separate.
 
 ---
@@ -100,6 +101,13 @@ node render/comfy-video.mjs <out.mp4> <still.png> "<prompt>" \
      # another one before its first job; the end-of-run /free is awaited and loud (COMFY-FREE-WARN).
 node render/comfy-video.mjs out.mp4 still.png "<prompt>" --model wan --frames 49   # secondary
 node render/comfy-video.mjs out.mp4 still.png "<prompt>" --wan-decode plain       # wan: tiled (default) | plain | auto
+node render/comfy-video.mjs out.mp4 still.png "<prompt>" --high-unet <fp8 high> --low-unet <fp8 low> \
+     --wan-decode plain --wan-placement multicard    # wan on the TWO non-display cards of a lease, no host RAM
+     # run it under `local-offload gpu reserve --devices <a>,<b> --class media --ram 0 -- ...`, flags spelled `--flag value` (not `--flag=value`);
+     # [--api http://127.0.0.1:<own port>] [--wan-resident-gb 3 (3.2 at most at film size; a clip bigger than the film's was not measured, and the planner says so: WAN-GEOMETRY-NOTE)] [--wan-cards <a>,<b>, outside a lease]
+     # [--wait-sec N: 7200 by default under multicard, the 20-step film recipe measured 5136 s of runner wall]; the run watches ComfyUI's console
+     # (WAN-OOM ends the wait when its prompt worker died of an out-of-memory error); a plain decode that ComfyUI retried tiled fails
+     # the run (WAN-DECODE-FALLBACK, the clip kept as <out>.seamed.<ext>); docs/systems/media-generation.md, "Card-only Wan"
 node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyUI, no gen
 ```
 
@@ -121,6 +129,25 @@ node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyU
   the whole render after sampling. The default flips to `auto` only after a live acceptance render at that shape
   shows a decode close to the measured 38 s and no `Ran out of memory when regular VAE decoding` line in the ComfyUI log. Hunyuan 1.5 and
   LTX 2.5 are not touched by it. Detail: `docs/systems/media-generation.md`.
+- **Wan 2.2 on two cards and no host RAM, `--wan-placement multicard`** (default `single`, today's graph). The text encoder and VAE
+  load on `cuda:0`, each fp8 expert through DisTorch2 with compute on `cuda:1` and `cuda:1,3gb;cuda:0,*`; the two cards are the lease's
+  (`--wan-cards` only names them when no lease does), never a display card or one whose display state is unknown, and the runner launches its own ComfyUI on them (`--gpu-only`, a read-only safetensors
+  reader and a free-then-plain-decode node from `render/comfyui-ext`, through `--extra-model-paths-config`, nothing installed into the
+  shared ComfyUI). Under `--wan-decode plain` the experts are freed from both cards before the plain `VAEDecode`, and the sampled latent
+  is saved first. `--wan-loader` is not read, and a GGUF or unnamed expert and `--fast` are refused before anything starts (not measured). A driver script that wraps the helper is not a recognised render helper, so its lease declares the class default unless its `gpu reserve` passes `--ram 0` (the verb says so on a second line). Detail and numbers:
+  `docs/systems/media-generation.md`.
+- **Qwen-Image on two cards, `--placement multicard`** (`comfy-generate.mjs`, `comfy-render.mjs`, `comfy-edit.mjs`; default `single`, today's graph, byte for byte). The text encoder and the VAE
+  load on one leased non-display card and the DiT on the other, or split between them, through the MultiGPU loaders, with the
+  recipe of `render/multicard-recipes.json` (the 2.1 int8 and bf16, the 2512 Q5_1 GGUF, the 2511 edit fp8mixed and Q5_1; krea2, 2512 bf16 and sdxl have none and are refused by
+  name). The two cards are the lease's (`--cards` only names them when no lease does), never a display card, and the runner starts its
+  own keyed ComfyUI on them, the one the Wan placement uses. Run it under `local-offload gpu reserve --devices <a>,<b> -- node render/comfy-edit.mjs
+  out.png in.png "<instruction>" --unet <fp8mixed file> --placement multicard`, flags spelled `--flag value`; `[--resident-gb N]` moves the DiT's share on the
+  compute card (the DiT's total is the invariant: a smaller share puts the same bytes on the storage card, and a split that card cannot hold is refused). Only the 2511
+  fp8mixed edit has a *measured* row, so it alone declares 0 host RAM (and `gpu reserve` says so); the others declare the ordinary estimate until a run with the
+  read-only loader promotes them. The 2.1 int8 convrot row is held back (its DiT on `cuda:1` never ran) and refused by name; an edit canvas pinned above the recipe's
+  2.0 MP cap is refused before anything starts. The runner checks the recipe's loader classes and their inputs against `/object_info` before it submits, watches the pair's
+  ComfyUI console while it waits (`IMAGE-PLACEMENT-OOM` ends a wait on a worker that died of an out-of-memory error), and keeps an image whose VAE decode ComfyUI retried tiled
+  beside the requested path as `<name>.tiled.<ext>` (`IMAGE-DECODE-FALLBACK`). `docs/systems/media-generation.md`, "Card-only image and edit".
 - **`--reserve-vram 2.0`** keeps headroom for the Windows display/WDDM (too low → a decode spike
   kills the whole process with no traceback).
 - **Qwen2.5-VL fp8 text encoder CPU-offloads automatically** (~free with 64 GB RAM, saves 4–6 GB).

@@ -5,12 +5,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/hwdetect"
 	"github.com/dmmdea/offload-harness/internal/tierseed"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // hailortcliRun executes `hailortcli <args...>` for accelerator detection
@@ -27,7 +27,7 @@ var sysfsRead = func(path string) (string, error) {
 }
 
 var hailortcliRun = func(args ...string) (string, error) {
-	out, err := exec.Command("hailortcli", args...).Output()
+	out, err := winexec.Command("hailortcli", args...).Output()
 	if err != nil {
 		return "", err
 	}

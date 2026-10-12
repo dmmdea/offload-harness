@@ -1,6 +1,7 @@
 package hostneed
 
 import (
+	"math"
 	"strconv"
 	"strings"
 
@@ -74,7 +75,7 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 	// loads is as unknown to the caller as what run-graph loads, and the media class default stands in.
 	// Sizing it as the helper's default family declared 0 for a 40 GiB graph (SDXL fits the card) and
 	// the wrong family for a video one (review of 2026-10-10).
-	if strings.TrimSpace(c.Flags["graph"]) != "" {
+	if c.RunsOwnGraph() {
 		return Need{}, false
 	}
 	if v := c.Flags["reserve-vram"]; v != "" {
@@ -88,11 +89,17 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 		cfg.ImageGenFamily = c.Flags["family"]
 		cfg.ImageGenCkpt = firstNonEmpty(c.Flags["ckpt"], f.env("COMFY_CKPT"))
 		cfg.ImageGenCLIP = c.Flags["clip"]
+		// --placement multicard asks for the card-only recipe of the family (hostneed/multicard.go); --resident-gb moves its resident share.
+		f = f.withPlacementFlags(c.Flags)
 		return ForRoute(RouteImage, cfg, f)
 	case RouteEdit:
 		cfg.GenEditFamily = c.Flags["family"]
 		cfg.GenEditUnet = firstNonEmpty(c.Flags["unet"], f.env("COMFY_EDIT_UNET"))
 		cfg.GenEditCLIP = c.Flags["clip"]
+		f = f.withPlacementFlags(c.Flags)
+		if mp := megapixelsFlag(firstNonEmpty(c.Flags["megapixels"], f.env("COMFY_EDIT_MEGAPIXELS"))); mp > 0 {
+			f.Megapixels = mp
+		}
 		return ForRoute(RouteEdit, cfg, f)
 	case RouteInpaint:
 		if strings.EqualFold(c.Flags["family"], "qwen") {
@@ -120,9 +127,62 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 			Transformer: c.Flags["transformer"], UnetHigh: c.Flags["high-unet"],
 			UnetLow: c.Flags["low-unet"], TextEncoder: c.Flags["text-encoder"],
 		}
-		return estimate(model, mediacap.VideoModelFilesFor(model, fb), f)
+		// The card-only Wan placement (--wan-placement multicard) is read for the Wan graph alone: no other family has it.
+		var cardOnly *CardOnly
+		if model == "wan22" && strings.EqualFold(strings.TrimSpace(c.Flags["wan-placement"]), "multicard") {
+			cardOnly = &CardOnly{ResidentGiB: wanResidentGiB(c.Flags)}
+		}
+		return estimateWith(model, mediacap.VideoModelFilesFor(model, fb), f, cardOnly)
 	}
 	return Need{}, false
+}
+
+// wanResidentGiB reads --wan-resident-gb (the share of each Wan expert the card-only placement keeps on the compute card). The runner
+// refuses a value it cannot read or one outside 0..64 before it starts, so sizing the call as the default one is only ever a sizing.
+func wanResidentGiB(flags map[string]string) float64 {
+	raw, ok := flags["wan-resident-gb"]
+	if !ok {
+		return wanResidentDefaultGiB
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsNaN(v) || v < 0 || v > 64 {
+		return wanResidentDefaultGiB
+	}
+	return v
+}
+
+// withPlacementFlags puts the placement flags a call carries over the facts: a flag the call does not carry leaves the facts' own (the pipeline's binding).
+func (f Facts) withPlacementFlags(flags map[string]string) Facts {
+	if v, ok := flags["placement"]; ok {
+		f.Placement = v
+	}
+	if v := residentGiBFlag(flags); v != nil {
+		f.ResidentGiB = v
+	}
+	return f
+}
+
+// residentGiBFlag reads --resident-gb (the card-only image placement's resident share of the DiT on the compute card): nil when absent or when the
+// runner would refuse it (not a number from 0 to 64), in which case the call is sized with the recipe's own share.
+func residentGiBFlag(flags map[string]string) *float64 {
+	raw, ok := flags["resident-gb"]
+	if !ok {
+		return nil
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsNaN(v) || v < 0 || v > 64 {
+		return nil
+	}
+	return &v
+}
+
+// megapixelsFlag reads an edit canvas in megapixels: 0 when absent or unreadable (the runner's own: the source's size, capped).
+func megapixelsFlag(raw string) float64 {
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
+		return 0
+	}
+	return v
 }
 
 func firstNonEmpty(vals ...string) string {

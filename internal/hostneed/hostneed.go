@@ -78,6 +78,9 @@ type Need struct {
 	// together with a figure that is then a LOWER BOUND, or alone when nothing could be sized; the caller says so once.
 	// A string, not a slice, so a Need stays comparable.
 	Unsized string
+	// CardOnly marks the 0 a measured card-only recipe earns (the image and edit placement, estimatePlaced). A 0 is otherwise the silent default of a
+	// declaration; this one is said wherever a figure is, with its Detail, because nothing can correct it afterwards (calibratedRAM leaves 0 alone).
+	CardOnly bool
 }
 
 func (n Need) String() string {
@@ -121,6 +124,15 @@ type Facts struct {
 	// ReserveVRAMGiB is VRAM the runner holds back for the display (its --reserve-vram); 0 = the
 	// cfg's imagegen_reserve_vram, else the runners' own 1.0.
 	ReserveVRAMGiB float64
+	// CardsGiB is the total VRAM of EACH card of the leased set (none = unknown). Only the card-only placements read it.
+	CardsGiB []float64
+	// Placement is the placement the call asked for: "" is the single placement (today's), PlacementMulticard the card-only recipe of the image and edit
+	// routes (--placement multicard, imagegen_placement / gen_edit_placement). Only those two routes read it; ClassDefault never does.
+	Placement string
+	// ResidentGiB overrides a split recipe's share of the DiT kept on the compute card (--resident-gb); nil = the recipe's own.
+	ResidentGiB *float64
+	// Megapixels is the edit canvas the call pins (--megapixels, gen_edit_megapixels); 0 = the runner's own (the source's size, capped at 2.0 MP).
+	Megapixels float64
 	// Stat reports a file's size; nil = os.Stat. A table in tests, because a 24 GiB fixture is not an option.
 	Stat func(path string) (size int64, ok bool)
 	// Env reads an environment variable (COMFY_CKPT and friends); nil = none set.
@@ -154,6 +166,18 @@ func LargestCardGiB(cards []gpuprobe.Card, ids []string) float64 {
 		best = math.Max(best, c.VRAMTotalGiB)
 	}
 	return best
+}
+
+// LeasedCardsGiB is the total VRAM of each card among ids (lease ids; none = every card), in the table's order.
+func LeasedCardsGiB(cards []gpuprobe.Card, ids []string) []float64 {
+	var out []float64
+	for _, c := range cards {
+		if len(ids) > 0 && !containsFold(ids, c.LeaseID()) {
+			continue
+		}
+		out = append(out, c.VRAMTotalGiB)
+	}
+	return out
 }
 
 func containsFold(list []string, s string) bool {
@@ -195,10 +219,50 @@ type slot struct {
 	from  string // "file" (size read), "default" (the documented per-family size), "" (unknown)
 }
 
+// wanActivationsGiB is what the compute card holds beyond the resident weights at the film's geometry (720x1280, 81 frames: 75,600
+// tokens): the film-size run's compute-card peak, 15.18 GiB (nvidia-smi, from about 2485 s, 90 s before the hand-over to the second expert), less its
+// 3.0 GiB resident share (2026-10-11, 20 steps, plain decode, --ram 0). The 4-step benchmark before it had read 9.7-11.0 GiB: it ended at about
+// 1000 s, before the peak. render/wan-multicard.mjs WAN_FILM_ACTIVATIONS_GIB (a test pins the two together). This sizing reads no geometry: it
+// declares against the film's figure for any clip. A smaller clip needs less (the runner's planner scales it down), so the sizing is conservative there;
+// a bigger one was not measured, and the runner holds it at this figure too and says so (WAN-GEOMETRY-NOTE), so no sizing here claims to know it.
+const wanActivationsGiB = 12.2
+
+// wanResidentDefaultGiB is the share of each Wan expert the card-only placement keeps on the compute card when the call names none:
+// render/wf-wan22-i2v.mjs WAN_RESIDENT_GB_DEFAULT (a test pins the two together).
+const wanResidentDefaultGiB = 3.0
+
+// wanComputeContextGiB is a margin the compute card keeps free beyond the activations, for the CUDA context and the driver: CHOSEN, not measured (the
+// 12.2 above is the card's total in use, so it already holds a context; the film-size run left 0.7 GiB free at its peak and this keeps 0.5 of it).
+// render/wan-multicard.mjs WAN_COMPUTE_CONTEXT_GIB (a test pins the two together). With it a 15.9 GiB card takes 3.2 GiB of an expert resident at
+// film size, the runner's own ceiling (15.9 - 12.2 - 0.5); only a 3.0 GiB share was ever run.
+const wanComputeContextGiB = 0.5
+
+// wanStorageOverheadGiB is what the storage card holds besides the donor blocks of the expert in use: the VAE (0.24 GiB), the CUDA
+// context and the allocator's slack. Measured on the benchmark pair: the storage card peaked at 11.1 GiB (NVML) with 10.3 GiB of donor
+// blocks (the 13.3 GiB expert less its 3 GiB resident share), so 0.8.
+const wanStorageOverheadGiB = 0.8
+
+// CardOnly is the card-only Wan placement a call asked for (--wan-placement multicard on the Wan 2.2 graph), and what the call says about it.
+type CardOnly struct {
+	// ResidentGiB is --wan-resident-gb: the share of each expert kept on the compute card.
+	ResidentGiB float64
+}
+
 // estimate is the rule: the files the family loads, sized, and counted in full when together they
 // do not fit the card. files are what the binding names (mediacap's tables); family picks the
 // documented fallbacks and the roles the family is known to load.
 func estimate(family string, files []mediacap.ModelFile, f Facts) (Need, bool) {
+	return estimateWith(family, files, f, nil)
+}
+
+// estimateWith is estimate for a call that may ask for the card-only Wan placement (co: --wan-placement multicard on the Wan 2.2
+// graph). That placement does not stream weights from RAM: the two experts load one after the other (the first is gone before the
+// second lands) and the text encoder is gone before the first expert, so what has to fit is the largest STAGE, on each of the TWO
+// cards the lease holds: the larger card computes (its resident share of the expert + the sampler's activations + the CUDA context) and the
+// other holds the donor blocks (the rest of the expert + the VAE and the CUDA context). When both fit, the call declares 0 (measured on two
+// equal cards at film size: 15.18 and 10.86 GiB at the peak, 2.3 GiB of host growth over ComfyUI's idle). Anything that is not exactly that (one
+// card, three, no table, a card too small for its stage) is the ordinary estimate, which counts the whole set.
+func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOnly) (Need, bool) {
 	roots := mediacap.ModelRoots(f.Cfg.ComfyDir)
 	defaults := familySizes[family]
 	stat := f.Stat
@@ -248,6 +312,27 @@ func estimate(family string, files []mediacap.ModelFile, f Facts) (Need, bool) {
 		src = SourceFamilyDefault
 	}
 	set := strings.Join(parts, " + ")
+	if co != nil && len(f.CardsGiB) == 2 {
+		var expert float64
+		for _, s := range slots {
+			if s.role == mediacap.RoleDiffusion && s.gib > expert {
+				expert = s.gib
+			}
+		}
+		small, large := f.CardsGiB[0], f.CardsGiB[1]
+		if small > large {
+			small, large = large, small
+		}
+		// The compute card is held to what was measured, its peak plus the context: --reserve-vram is ComfyUI's model-load margin, not an activation
+		// ceiling, and with the film-size run's 12.2 GiB it would refuse the call that run measured (3.0 + 12.2 = 15.2 > 14.9). It stays the storage
+		// card's margin.
+		reserve := f.reserve()
+		compute := co.ResidentGiB + wanActivationsGiB + wanComputeContextGiB
+		storage := expert - co.ResidentGiB + wanStorageOverheadGiB
+		if expert > 0 && small > 0 && compute <= large && storage <= small-reserve {
+			return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB expert + %.1f GiB of film-size activations + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card) and the storage card %.1f GiB of donor blocks + %.1f GiB for the VAE and the context = %.1f GiB (of %.1f usable), so each card fits its stage, and the weights are mapped read-only: no weights stream from RAM (the set is %s)", family, small, large, co.ResidentGiB, expert, wanActivationsGiB, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
+		}
+	}
 	usable := f.VRAMGiB - f.reserve()
 	if f.VRAMGiB > 0 && total <= usable {
 		return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: %s = %.1f GiB fits the %.1f GiB card (%.1f GiB usable), so no weights stream from RAM", family, set, total, f.VRAMGiB, usable)}, true
@@ -276,13 +361,13 @@ func ForRoute(route Route, cfg config.Config, f Facts) (Need, bool) {
 		if fam == "" {
 			fam = "sdxl"
 		}
-		return estimate(fam, mediacap.ImageModelFiles(cfg), f)
+		return estimatePlaced(RouteImage, fam, mediacap.ImageModelFiles(cfg), f)
 	case RouteEdit:
 		fam := strings.TrimSpace(cfg.GenEditFamily)
 		if fam == "" {
 			fam = config.EditFamily2511
 		}
-		return estimate(fam, mediacap.EditModelFiles(cfg), f)
+		return estimatePlaced(RouteEdit, fam, mediacap.EditModelFiles(cfg), f)
 	case RouteInpaint:
 		return estimate("sdxl", mediacap.InpaintModelFiles(cfg), f)
 	case RouteVideo:
@@ -374,6 +459,8 @@ func videoFamily(fam string) string {
 // lanes do not stop at it (F60): they declare the larger of it and the weights they park themselves (ForSdcpp, wired in
 // internal/pipeline sdcppDeclared), so on that box the `--offload-to-cpu` spill is inside the guard, as an estimate.
 func ClassDefault(f Facts) Need {
+	// A placement is a call's word, not the box's: the class default is the largest family this box binds in its ordinary placement.
+	f.Placement, f.ResidentGiB, f.Megapixels = "", nil, 0
 	cfg := f.Cfg
 	if strings.TrimSpace(cfg.ComfyDir) == "" {
 		return Need{Source: SourceNone, Detail: "no ComfyUI install is bound on this box, so there is no render family to size"}

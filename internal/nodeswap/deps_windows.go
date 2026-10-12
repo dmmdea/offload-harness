@@ -6,27 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
-)
 
-// hideWindow makes a spawned child window-less — same convention as
-// gpu_hide_windows.go and internal/accelclient/sidecar_windows.go: a visible
-// console on this operator's desktop gets closed by hand, which kills
-// whatever ran inside it (house rule, windows-shell-traps memory,
-// "invisible-shell-invocations").
-func hideWindow(cmd *exec.Cmd) {
-	const createNoWindow = 0x08000000
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-	}
-	cmd.SysProcAttr.HideWindow = true
-	cmd.SysProcAttr.CreationFlags |= createNoWindow
-}
+	"github.com/dmmdea/offload-harness/internal/winexec"
+)
 
 func platformDeps(d *Deps) {
 	d.FindProcessesByExe = findProcessesByExeWindows
@@ -103,7 +89,7 @@ func parseCimRows(out []byte) ([]cimProcRow, error) {
 // the identical reason: Stop-Process needs an owned handle and can be
 // blocked by the same ACL edge cases taskkill routes around at the OS level.
 func stopProcessWindows(pid int) error {
-	out, err := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid)).CombinedOutput()
+	out, err := winexec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid)).CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		// "not found" means it already exited — not a failure to report as one.

@@ -210,7 +210,10 @@ func (q *queueRT) stop() {
 // scannerAuto: tests that drive the scan by hand turn the scanner off.
 var scannerAuto = true
 
-// register makes lt visible to the scanner and wakes it.
+// register makes lt visible to the scanner and, when the scanner is already running, wakes it. A scanner that this registration
+// starts takes the ticket in its first scan (lt is in q.live before the goroutine exists) and is not woken: the wake-up is a token
+// that waits in the channel, so one given to a scanner that was just started outlived the scan it was for and made the scanner scan
+// the same ticket again the moment the first scan ended, a second lane question within milliseconds of the first.
 func (q *queueRT) register(lt *liveTicket) {
 	q.mu.Lock()
 	q.live[lt.t.ID] = lt
@@ -222,6 +225,7 @@ func (q *queueRT) register(lt *liveTicket) {
 	q.mu.Unlock()
 	if start {
 		go q.scanLoop()
+		return
 	}
 	q.nudge()
 }
@@ -797,7 +801,9 @@ func (h *ticketHandle) Dispatched(base, nodeID, jobID string) {
 func (lt *liveTicket) say(key, line string) {
 	lt.mu.Lock()
 	fn, same := lt.notify, key == lt.saidKey
-	if key != "" {
+	// A line goes on record as said only when there is someone to say it to: a scan can reach a ticket before its waiter has set
+	// Notify, and a key recorded then made the waiter's own first look at the same standing a repeat, so it was never told.
+	if key != "" && fn != nil {
 		lt.saidKey = key
 	}
 	lt.mu.Unlock()

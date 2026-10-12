@@ -4,6 +4,8 @@ import (
 	"os/exec"
 	"runtime"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // TestInstallShDryRunRules runs setup/install.tests.sh: install.sh's --llama-bin rule (required
@@ -18,7 +20,7 @@ func TestInstallShDryRunRules(t *testing.T) {
 	if err != nil {
 		t.Skip("no bash")
 	}
-	out, err := exec.Command(bash, "setup/install.tests.sh").CombinedOutput()
+	out, err := winexec.Command(bash, "setup/install.tests.sh").CombinedOutput()
 	if err != nil {
 		t.Fatalf("setup/install.tests.sh failed: %v\n%s", err, out)
 	}

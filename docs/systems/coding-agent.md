@@ -575,8 +575,9 @@ context ended is never rescued. The delivered result carries `repack_note: "resc
 is counted as a success; prose nothing validated is still never one, so a rescue that cannot produce a
 validated object leaves the defer exactly as the node sent it, and it is still counted here. The rescue
 is wired on `agent_delegate`, `offload_research` and the CLI verbs `delegate` and `research`. It is
-deliberately not wired on three doors, for three different reasons: `agent_run` carries no
-`output_schema`, so there is nothing to structure; the review lane's fenced-seat fallthrough exists
+deliberately not wired on three doors, for three different reasons: `agent_run` at a route carries only the flat
+`{answer}` `output_schema` the delegator requires of every remote run (register D-125), so there is nothing worth
+structuring, and a deferred call carries the node's finished prose as `output` flagged `schema_miss`, as `offload_ask` does; the review lane's fenced-seat fallthrough exists
 because the local seat is the one another session's lease fences, and a rescue there would queue behind
 that very lease (the lane instead reads a skipped or cut re-pack's raw lines itself, through its own
 filters and without a second completion: `reviewlane.Salvage`, see [mcp-server.md](mcp-server.md)); and `offload_ask` at a named remote route keeps its own handling of a finished answer
@@ -774,7 +775,11 @@ copy-by-name allowlist (`SystemRoot`, `SystemDrive`, `windir`, `PATH`, `PATHEXT`
 `TEMP`/`TMP`/`TMPDIR` set to the scratch dir. Nothing else crosses: no `GITHUB_TOKEN`, no
 `MEM0_API_KEY`, no fleet token, no `APPDATA`/`LOCALAPPDATA` pointing at the real profile. Until
 0.117.7 the Windows side passed a nil `lpEnvironment`, which means "inherit the caller's block",
-so a `run` child received the delegator's whole environment.
+so a `run` child received the delegator's whole environment. The proof is
+`TestWindowsChildDoesNotInheritParentSecrets` and `TestWindowsChildGetsTheAllowlistedEnvironment`
+(`internal/sandbox`); they are skipped stubs on every other system, so CI runs them on a Windows
+runner (the `installer-windows` job) and requires their `--- PASS:` lines, because `go test` exits 0
+for a skipped or unmatched test (D-98).
 
 **Reads of secret material pass a read floor** (register SF-07, `internal/agent/readfloor.go`).
 Every tool that reads file content consults one gate: `read_file`, `summarize_file`, `search_files`,

@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // The synthetic list: made-up names, never a name from the operator's list (the
@@ -31,7 +33,7 @@ func gitIn(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	full := append([]string{"-c", "core.autocrlf=false", "-c", "core.hooksPath=" + filepath.Join(dir, "no-hooks"), "-c", "commit.gpgsign=false",
 		"-c", "user.name=Test", "-c", "user.email=test@example.com", "-C", dir}, args...)
-	cmd := exec.Command("git", full...)
+	cmd := winexec.Command("git", full...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}

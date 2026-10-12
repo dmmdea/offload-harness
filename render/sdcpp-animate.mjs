@@ -187,7 +187,7 @@ async function main() {
     // 1. the driver's frames
     deadline.enforce("driver frame extraction");
     const ex = spawnSync(ffmpeg, buildExtractArgs({ driver, framesDir: framesTmp.dir, width: p.width, height: p.height, frames: p.frames }),
-      { encoding: "utf8", ...(deadline.active ? { timeout: deadline.remainingMs(), killSignal: "SIGKILL" } : {}) });
+      { encoding: "utf8", ...(deadline.active ? { timeout: deadline.remainingMs(), killSignal: "SIGKILL" } : {}), windowsHide: true });
     if (ex.error || ex.status !== 0) {
       const timedOut = ex.error && ex.error.code === "ETIMEDOUT";
       throw new Error((timedOut ? "driver frame extraction timeout (killed): " : "driver frame extraction failed: ") + (ex.error ? ex.error.message : String(ex.stderr || "").trim().slice(-300)));

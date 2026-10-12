@@ -4,12 +4,15 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 )
 
 // The sizes below are the incident's lane, read off the reference box's model tree: the bf16 Krea 2
@@ -537,5 +540,313 @@ func TestAnSdcppOnlyBoxDeclaresNothing(t *testing.T) {
 	f.Cfg.GenEditScript, f.Cfg.GenEditFamily, f.Cfg.GenEditUnet = "render/comfy-edit.mjs", "", "qwen_image_edit_2511_fp8mixed.safetensors"
 	if n := ClassDefault(f); !near(n.GiB, 19.12+8.74) || !strings.Contains(n.Detail, "edit") {
 		t.Errorf("a ComfyUI edit family beside the sd.cpp bindings decides the class default, got %v", n)
+	}
+}
+
+// THE CARD-ONLY WAN PLACEMENT (comfy-video.mjs --wan-placement multicard, measured 2026-10-11). The two experts never sit on the
+// cards together and the text encoder is gone before the first expert lands, so the set does not have to fit ONE card, and it does
+// not have to fit as a sum either: what must fit is each card's own stage (the larger card's resident share + the film-size activations + the
+// CUDA context, the other card's donor blocks + the VAE and the context) on the TWO
+// cards the lease holds. Measured (the film-size run): 15.18 + 10.86 GiB in use across the pair at the peak, 2.3 GiB of host growth, so the call declares 0.
+const wanMulticardCmd = "node render/comfy-video.mjs o.mp4 s.png p --model wan --high-unet hi.safetensors --low-unet lo.safetensors --text-encoder te.safetensors --wan-placement multicard"
+
+func wanFacts(t *testing.T, cards ...float64) Facts {
+	dir, stat := comfyTree(t, map[string]float64{"hi.safetensors": 13.3, "lo.safetensors": 13.4, "te.safetensors": 6.3})
+	f := Facts{Cfg: config.Config{ComfyDir: dir}, Stat: stat, CardsGiB: cards}
+	for _, c := range cards {
+		if c > f.VRAMGiB {
+			f.VRAMGiB = c
+		}
+	}
+	return f
+}
+
+func wanNeed(t *testing.T, cmd string, f Facts) Need {
+	t.Helper()
+	return Resolve(Request{Class: gpulease.ClassMedia, Args: strings.Fields(cmd)}, f)
+}
+
+func TestAMulticardWanCallOnTwoLeasedCardsDeclaresNothing(t *testing.T) {
+	n := wanNeed(t, wanMulticardCmd, wanFacts(t, 15.9, 15.9))
+	if n.GiB != 0 || n.Source != SourceEstimate {
+		t.Fatalf("a multicard Wan call whose stages fit the two leased cards streams nothing from RAM: %v", n)
+	}
+	for _, want := range []string{"multicard", "2 leased cards", "13.4", "fits"} {
+		if !strings.Contains(n.Detail, want) {
+			t.Errorf("the detail must say why (%q missing): %q", want, n.Detail)
+		}
+	}
+	// the flag in its --name=value form is the same call
+	if n := wanNeed(t, strings.Replace(wanMulticardCmd, "--wan-placement multicard", "--wan-placement=multicard", 1), wanFacts(t, 15.9, 15.9)); n.GiB != 0 {
+		t.Fatalf("--wan-placement=multicard: %v", n)
+	}
+}
+
+// The default placement is untouched: the same call without the flag, or with the single placement, on the same two cards.
+func TestTheSingleWanPlacementIsSizedAsItAlwaysWas(t *testing.T) {
+	for _, cmd := range []string{
+		strings.Replace(wanMulticardCmd, " --wan-placement multicard", "", 1),
+		strings.Replace(wanMulticardCmd, "--wan-placement multicard", "--wan-placement single", 1),
+	} {
+		n := wanNeed(t, cmd, wanFacts(t, 15.9, 15.9))
+		if !near(n.GiB, 13.3+13.4+6.3) || !strings.Contains(n.Detail, "does not fit") {
+			t.Fatalf("a call that does not ask for the card-only placement is sized against the ONE largest card: %v", n)
+		}
+	}
+}
+
+// The placement runs on exactly two cards. One card, three cards or an unreadable table are not that placement, so the
+// ordinary (conservative) estimate stands.
+func TestAMulticardWanCallThatDoesNotHoldTwoCardsKeepsTheOrdinaryEstimate(t *testing.T) {
+	for name, cards := range map[string][]float64{"one card": {15.9}, "three cards": {15.9, 15.9, 15.9}, "no table": nil} {
+		f := wanFacts(t, cards...)
+		if len(cards) == 0 {
+			f.VRAMGiB = 0
+		}
+		if n := wanNeed(t, wanMulticardCmd, f); !near(n.GiB, 13.3+13.4+6.3) {
+			t.Errorf("%s: %v, want the ordinary 33.0", name, n)
+		}
+	}
+}
+
+// What must fit is each card's own stage: the LARGER card computes (its resident share of an expert + the film-size activations + the CUDA
+// context) and the other holds the donor blocks (the rest of the expert + the VAE and the CUDA context). Two 8 GiB cards cannot, two 24 GiB cards can, and
+// the SUM of two unequal cards proves nothing: 24 + 8 GiB adds up to plenty, but the 8 GiB card cannot hold a 10.4 GiB donor share.
+func TestAMulticardWanCallThatDoesNotFitTheLeasedPairIsSizedAsBefore(t *testing.T) {
+	ordinary := func(name string, n Need) {
+		t.Helper()
+		if !near(n.GiB, 13.3+13.4+6.3) || !strings.Contains(n.Detail, "does not fit") {
+			t.Fatalf("%s: %v, want the ordinary 33.0 that does not fit", name, n)
+		}
+	}
+	ordinary("two 8 GiB cards", wanNeed(t, wanMulticardCmd, wanFacts(t, 8, 8)))
+	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 24, 24)); n.GiB != 0 {
+		t.Fatalf("two 24 GiB cards: %v, want 0", n)
+	}
+	// unequal cards: a big card and a small one that cannot hold the donor share (13.4 - 3 + 0.8 = 11.2 GiB beside the 1 GiB reserve)
+	ordinary("24 + 8 GiB", wanNeed(t, wanMulticardCmd, wanFacts(t, 24, 8)))
+	ordinary("8 + 24 GiB, the other order", wanNeed(t, wanMulticardCmd, wanFacts(t, 8, 24)))
+	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 13)); n.GiB != 0 {
+		t.Fatalf("16 + 13 GiB: the 16 GiB card computes (3 + 12.2 + 0.5 = 15.7 of 16) and the 13 GiB card holds 11.2 of 12 usable: %v, want 0", n)
+	}
+	// the storage card's margin is the VAE and the context beside the donor blocks: 10.4 GiB of blocks fit a 11.7 GiB card (10.7 usable) only
+	// without them, 11.2 GiB do not (the benchmark's storage card peaked at 11.1 GiB with 10.3 GiB of blocks)
+	ordinary("16 + 11.7 GiB", wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 11.7)))
+	ordinary("16 + 12.1 GiB: 11.1 usable against the 11.2 the measured 0.8 GiB overhead asks for", wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 12.1)))
+	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 12.5)); n.GiB != 0 {
+		t.Fatalf("16 + 12.5 GiB (11.5 usable >= 11.2): %v, want 0", n)
+	}
+	// the compute card: resident 3 + 12.2 GiB of activations + 0.5 GiB of CUDA context must fit its size (15.7 GiB; the reserve is the storage card's)
+	ordinary("2 x 14.5 GiB", wanNeed(t, wanMulticardCmd, wanFacts(t, 14.5, 14.5)))
+	ordinary("2 x 15.1 GiB, which the 11.0 GiB figure and the reserve admitted (3 + 12.2 + 0.5 = 15.7 > 15.1)", wanNeed(t, wanMulticardCmd, wanFacts(t, 15.1, 15.1)))
+	ordinary("2 x 15.6 GiB", wanNeed(t, wanMulticardCmd, wanFacts(t, 15.6, 15.6)))
+	for _, size := range []float64{15.7, 15.8} {
+		if n := wanNeed(t, wanMulticardCmd, wanFacts(t, size, size)); n.GiB != 0 {
+			t.Fatalf("2 x %v GiB (3 + 12.2 + 0.5 = 15.7 fits): %v, want 0", size, n)
+		}
+	}
+	// --reserve-vram is the runner's: a larger reserve takes more of the STORAGE card (the donor blocks and the VAE need 11.2 GiB of 15.9 less the reserve)
+	ordinary("a 5 GiB reserve on 2 x 15.9 GiB (10.9 usable on the storage card)", wanNeed(t, wanMulticardCmd+" --reserve-vram 5", wanFacts(t, 15.9, 15.9)))
+	if n := wanNeed(t, wanMulticardCmd+" --reserve-vram 4", wanFacts(t, 15.9, 15.9)); n.GiB != 0 {
+		t.Fatalf("a 4 GiB reserve on 2 x 15.9 GiB (11.9 usable >= 11.2 on the storage card): %v, want 0", n)
+	}
+	// a card whose size is unknown (0) is no pair
+	ordinary("a zero-size card", wanNeed(t, wanMulticardCmd, wanFacts(t, 0, 15.9)))
+}
+
+// The resident share is the call's --wan-resident-gb (default 3, the runner's own): a bigger share needs more of the compute card and
+// less of the storage card.
+func TestTheResidentShareIsReadFromTheCall(t *testing.T) {
+	two := wanFacts(t, 15.9, 15.9)
+	ordinary := func(name string, n Need) {
+		t.Helper()
+		if !near(n.GiB, 13.3+13.4+6.3) {
+			t.Fatalf("%s: %v, want the ordinary 33.0", name, n)
+		}
+	}
+	ordinary("a 6 GiB share (6 + 12.2 + 0.5 = 18.7 > 15.9 on the compute card)", wanNeed(t, wanMulticardCmd+" --wan-resident-gb 6", two))
+	if n := wanNeed(t, wanMulticardCmd+" --wan-resident-gb 0", two); n.GiB != 0 {
+		t.Fatalf("a 0 GiB share (everything on the storage card: 13.4 + 0.8 = 14.2 of 14.9 usable): %v, want 0", n)
+	}
+	if n := wanNeed(t, wanMulticardCmd+" --wan-resident-gb=3.2", two); n.GiB != 0 {
+		t.Fatalf("the --name=value form is read as the flag: %v, want 0", n)
+	}
+	ordinary("the --name=value form with a 3.5 GiB share (3.5 + 12.2 + 0.5 = 16.2 > 15.9)", wanNeed(t, wanMulticardCmd+" --wan-resident-gb=3.5", two))
+	// an unreadable or out-of-range value is the default (the runner refuses such a call before it starts)
+	for _, bad := range []string{"x", "-1", "65", "NaN", "Inf"} {
+		if n := wanNeed(t, wanMulticardCmd+" --wan-resident-gb "+bad, two); n.GiB != 0 {
+			t.Fatalf("--wan-resident-gb %s: %v, want the default share (0 on two 15.9 GiB cards)", bad, n)
+		}
+	}
+	// the storage card holds the rest of the expert: a 0 GiB share does not fit a 12 GiB card beside a 16 GiB one
+	ordinary("a 0 GiB share on 16 + 12 GiB", wanNeed(t, wanMulticardCmd+" --wan-resident-gb 0", wanFacts(t, 16, 12)))
+	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 13)); n.GiB != 0 {
+		t.Fatalf("the default 3 GiB share on 16 + 13 GiB (the 13 GiB card holds 11.2 GiB, 12 usable): %v, want 0", n)
+	}
+}
+
+// THE FILM-SIZE RUN IS THE ACCEPTANCE CRITERION. On 2026-10-11 the film (720x1280x81, 20 steps, plain decode) ran on two RTX 5060 Ti 16 GB with
+// --ram 0 and the runner's default share of 3 GiB: the compute card peaked at 15.18 GiB (3.0 resident + 12.2 beyond it), the storage card at 10.86 GiB,
+// and the host grew by 2.3 GiB. The runner's planner (render/wan-multicard.mjs) admits a share up to the card less those 12.2 GiB less a 0.5 GiB context,
+// 3.2 GiB on a 15.9 GiB card. This sizing must agree with both: a call the planner admits and that was measured to run declares 0, and one it refuses
+// does not, or the lease sends the measured call to the 46.8 GiB class default, which the host-RAM brake then holds back for hours.
+func TestTheMeasuredFilmSizeRunDeclaresNothingUpToThePlannersCeiling(t *testing.T) {
+	two := wanFacts(t, 15.9, 15.9)
+	ordinary := func(name string, n Need) {
+		t.Helper()
+		if !near(n.GiB, 13.3+13.4+6.3) || !strings.Contains(n.Detail, "does not fit") {
+			t.Fatalf("%s: %v, want the ordinary 33.0 that does not fit", name, n)
+		}
+	}
+	declaresNothing := func(name string, n Need) {
+		t.Helper()
+		if n.GiB != 0 || !strings.Contains(n.Detail, "card-only") {
+			t.Fatalf("%s: %v, want the card-only 0 (the film-size run was measured to run with --ram 0)", name, n)
+		}
+	}
+	declaresNothing("the runner's default share on 2 x 15.9 GiB", wanNeed(t, wanMulticardCmd, two))
+	for _, share := range []string{"3", "3.0", "3.2"} {
+		declaresNothing("a "+share+" GiB share on 2 x 15.9 GiB", wanNeed(t, wanMulticardCmd+" --wan-resident-gb "+share, two))
+	}
+	for _, share := range []string{"3.3", "3.5", "4"} {
+		ordinary("a "+share+" GiB share, above the planner's 3.2 GiB ceiling", wanNeed(t, wanMulticardCmd+" --wan-resident-gb "+share, two))
+	}
+	// --reserve-vram is ComfyUI's model-load margin, not an activation ceiling, so the compute card's check does not use it: a 2 GiB reserve declares what the
+	// default does. The film-size run itself ran at the runner's default reserve of 1.0; that a larger one leaves the compute card's peak where it was is assumed, not measured.
+	declaresNothing("the measured share under a 2 GiB --reserve-vram", wanNeed(t, wanMulticardCmd+" --reserve-vram 2", two))
+	// the real cards: 16,311 MiB is 15.93 GiB, so the ceiling is 3.22
+	realCards := wanFacts(t, 16311.0/1024, 16311.0/1024)
+	declaresNothing("a 3 GiB share on two 16,311 MiB cards", wanNeed(t, wanMulticardCmd, realCards))
+	declaresNothing("a 3.22 GiB share on two 16,311 MiB cards", wanNeed(t, wanMulticardCmd+" --wan-resident-gb 3.22", realCards))
+	ordinary("a 3.25 GiB share on two 16,311 MiB cards", wanNeed(t, wanMulticardCmd+" --wan-resident-gb 3.25", realCards))
+}
+
+// The two sides agree where it matters: the ceiling the runner's planner draws from ITS constants is the one this sizing draws from its own.
+func TestTheComputeCardCeilingIsTheRunnersCeiling(t *testing.T) {
+	activations := wanRunnerConst(t, "WAN_FILM_ACTIVATIONS_GIB")
+	contextGiB := wanRunnerConst(t, "WAN_COMPUTE_CONTEXT_GIB")
+	const card = 15.9
+	ceiling := math.Round((card-activations-contextGiB)*10) / 10 // the planner's "at most" at film size, to a tenth, as it prints it
+	if ceiling <= 0 {
+		t.Fatalf("the runner's constants leave no room for a resident share on a %v GiB card: %v + %v", card, activations, contextGiB)
+	}
+	at := wanNeed(t, wanMulticardCmd+" --wan-resident-gb "+strconv.FormatFloat(ceiling, 'f', 1, 64), wanFacts(t, card, card))
+	above := wanNeed(t, wanMulticardCmd+" --wan-resident-gb "+strconv.FormatFloat(ceiling+0.1, 'f', 1, 64), wanFacts(t, card, card))
+	if at.GiB != 0 {
+		t.Errorf("the runner admits a %.1f GiB share at film size on a %v GiB card (%v + %v), this sizing must declare 0 for it: %v", ceiling, card, activations, contextGiB, at)
+	}
+	if above.GiB == 0 {
+		t.Errorf("the runner refuses a %.1f GiB share at film size on a %v GiB card, this sizing must not declare 0 for it: %v", ceiling+0.1, card, above)
+	}
+}
+
+// The default share is the runner's: render/wf-wan22-i2v.mjs names it, and the two must stay one number (a different default here would
+// size a call the runner then runs differently).
+func TestTheResidentDefaultMirrorsTheRunner(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "render", "wf-wan22-i2v.mjs"))
+	if err != nil {
+		t.Skipf("the render folder is not beside this package: %v", err)
+	}
+	m := regexp.MustCompile(`WAN_RESIDENT_GB_DEFAULT = ([0-9.]+);`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal("render/wf-wan22-i2v.mjs no longer defines WAN_RESIDENT_GB_DEFAULT; this package reads it")
+	}
+	got, _ := strconv.ParseFloat(string(m[1]), 64)
+	if got != wanResidentDefaultGiB {
+		t.Fatalf("the runner keeps %v GiB of each expert resident by default, this package assumes %v", got, wanResidentDefaultGiB)
+	}
+	if !regexp.MustCompile(`WAN_PLACEMENTS = Object\.freeze\(\["single", "multicard"\]\)`).Match(src) {
+		t.Fatal("the runner's placements are no longer single|multicard; --wan-placement multicard is what this package sizes")
+	}
+}
+
+// Only the Wan graph has this placement: the flag on another family, or on a --graph file, is not read as it.
+//
+// The pair is two 24 GiB cards on purpose: the card-only stage maths (a share of the expert + 12.2 GiB of activations on one card, the rest of the
+// expert + 0.8 GiB on the other) cannot fit LTX 2.5's 20 GiB transformer on two 16 GiB cards, so there the figure is the ordinary one with or
+// without the model == "wan22" guard in RenderCall.Estimate, and a test on such a pair passes with the guard deleted (the review of
+// 2026-10-11 deleted it and nothing failed). On 24 GiB cards the unguarded code would declare 0 for a call that streams the whole set.
+func TestTheMulticardFlagMeansNothingToAnotherFamily(t *testing.T) {
+	f := ltxFacts(t, 24)
+	f.CardsGiB = []float64{24, 24}
+	ltx := func(flags string) Need {
+		return Resolve(Request{Class: gpulease.ClassMedia, Args: strings.Fields("node render/comfy-video.mjs o.mp4 s.png p " + flags)}, f)
+	}
+	a, b := ltx("--model ltx25"), ltx("--model ltx25 --wan-placement multicard")
+	if a.GiB <= 0 {
+		t.Fatalf("the premise of this test: ltx25 does not fit one 24 GiB card and streams from RAM, got %v", a)
+	}
+	if a.GiB != b.GiB || a.Detail != b.Detail {
+		t.Fatalf("ltx25 with the flag = %v, without = %v", b, a)
+	}
+	for _, n := range []Need{a, b} {
+		if strings.Contains(n.Detail, "card-only") {
+			t.Fatalf("another family's declaration must never talk about the card-only placement: %v", n)
+		}
+	}
+	// the Wan call on the same pair is the one that does fit it, so the two figures differ by the placement alone
+	w := wanFacts(t, 24, 24)
+	if n := wanNeed(t, wanMulticardCmd, w); n.GiB != 0 || !strings.Contains(n.Detail, "card-only") {
+		t.Fatalf("the Wan call on two 24 GiB cards: %v, want the card-only 0", n)
+	}
+}
+
+// The stage sizes are the runner's: render/wan-multicard.mjs checks the same two stages (the compute card and the storage card) against the
+// cards it was given before it starts, and a different number on either side would make the lease declare for a placement the runner then
+// refuses, or run one the lease sized against other figures. A test reads the runner's constants and fails when they drift.
+func TestTheStageSizesMirrorTheRunner(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "render", "wan-multicard.mjs"))
+	if err != nil {
+		t.Skipf("the render folder is not beside this package: %v", err)
+	}
+	read := func(name string) float64 { return wanRunnerConstFrom(t, src, name) }
+	if got := read("WAN_FILM_ACTIVATIONS_GIB"); got != wanActivationsGiB {
+		t.Fatalf("the runner sizes the film's activations at %v GiB, this package at %v", got, wanActivationsGiB)
+	}
+	if got := read("WAN_COMPUTE_CONTEXT_GIB"); got != wanComputeContextGiB {
+		t.Fatalf("the runner keeps %v GiB of the compute card for the CUDA context, this package %v", got, wanComputeContextGiB)
+	}
+	if got := read("WAN_STORAGE_OVERHEAD_GIB"); got != wanStorageOverheadGiB {
+		t.Fatalf("the runner sizes the storage card's overhead at %v GiB, this package at %v", got, wanStorageOverheadGiB)
+	}
+	if got, want := read("WAN_EXPERT_GIB"), familySizes["wan22"][mediacap.RoleDiffusion][0]; got != want {
+		t.Fatalf("the runner sizes an expert at %v GiB, this package's documented Wan 2.2 expert is %v", got, want)
+	}
+}
+
+// wanRunnerConst is an exported constant of render/wan-multicard.mjs (`export const NAME = 1.5;`).
+func wanRunnerConst(t *testing.T, name string) float64 {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join("..", "..", "render", "wan-multicard.mjs"))
+	if err != nil {
+		t.Skipf("the render folder is not beside this package: %v", err)
+	}
+	return wanRunnerConstFrom(t, src, name)
+}
+
+func wanRunnerConstFrom(t *testing.T, src []byte, name string) float64 {
+	t.Helper()
+	m := regexp.MustCompile(`export const ` + name + ` = ([0-9.]+);`).FindSubmatch(src)
+	if m == nil {
+		t.Fatalf("render/wan-multicard.mjs no longer exports %s; this package reads it", name)
+	}
+	v, _ := strconv.ParseFloat(string(m[1]), 64)
+	return v
+}
+
+func TestLeasedCardsGiB(t *testing.T) {
+	cards := []gpuprobe.Card{
+		{UUID: "GPU-aaaa0000", VRAMTotalGiB: 16},
+		{UUID: "GPU-bbbb0000", VRAMTotalGiB: 24},
+		{UUID: "GPU-cccc0000", VRAMTotalGiB: 8},
+	}
+	if got := LeasedCardsGiB(cards, []string{cards[0].LeaseID(), cards[2].LeaseID()}); len(got) != 2 || got[0] != 16 || got[1] != 8 {
+		t.Fatalf("the leased cards, in table order: %v, want [16 8]", got)
+	}
+	if got := LeasedCardsGiB(cards, nil); len(got) != 3 {
+		t.Fatalf("no ids is every card: %v", got)
+	}
+	if got := LeasedCardsGiB(nil, nil); len(got) != 0 {
+		t.Fatalf("no card table: %v, want none (unknown)", got)
 	}
 }

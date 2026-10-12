@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // resolveGuardBash picks the bash that runs the guard. bash is its path; skip, when not empty, says why the guard cannot
@@ -87,7 +89,7 @@ func withBashOnPath(env []string, bash string) []string {
 func guardBash(t *testing.T) string {
 	t.Helper()
 	gitExec := func() (string, error) {
-		out, err := exec.Command("git", "--exec-path").Output()
+		out, err := winexec.Command("git", "--exec-path").Output()
 		return string(out), err
 	}
 	exists := func(p string) bool {

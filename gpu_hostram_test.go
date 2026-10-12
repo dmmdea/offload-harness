@@ -615,3 +615,105 @@ func TestTheHostRAMEstimateReusesTheTableThePlanRead(t *testing.T) {
 		t.Errorf("without the plan's table the estimate reads it once, read %d time(s)", reads)
 	}
 }
+
+// The card-only Wan placement (comfy-video.mjs --wan-placement multicard) runs on the TWO cards the lease holds and
+// streams nothing from RAM, so a `gpu reserve --devices a,b` wrapping that call declares 0 where the same call without the
+// flag declares the whole set (33.1 GiB), which is what the host-RAM grant waited on. The estimate needs each leased card's
+// size, not only the largest one.
+func TestAMulticardWanCallDeclaresNothingOnTheTwoLeasedCards(t *testing.T) {
+	useCardTable(t, "")
+	table, _ := gpuprobe.BuildCards([]gpuprobe.Device{
+		{Index: 0, UUID: "GPU-aaaa0000-x", Name: "T", TotalGiB: 15.9, FreeGiB: 15.9, UtilKnown: true},
+		{Index: 1, UUID: "GPU-bbbb0000-x", Name: "T", TotalGiB: 15.9, FreeGiB: 13.7, UtilKnown: true},
+		{Index: 2, UUID: "GPU-cccc0000-x", Name: "T", TotalGiB: 15.9, FreeGiB: 15.9, UtilKnown: true},
+	}, "")
+	pair := []string{table[0].LeaseID(), table[2].LeaseID()}
+	cfg := config.Config{ComfyDir: t.TempDir()}
+	call := strings.Fields("node render/comfy-video.mjs o.mp4 s.png p --model wan --high-unet hi.safetensors --low-unet lo.safetensors")
+	var out bytes.Buffer
+
+	n := resolveReserveHostRAMWith(false, 0, gpulease.ClassMedia, append(call, "--wan-placement", "multicard"), pair, cfg, true, table, &out)
+	if n.GiB != 0 || n.Source == hostneed.SourceExplicit || !strings.Contains(n.Detail, "2 leased cards") {
+		t.Fatalf("a multicard Wan call on the two leased cards must declare 0 from the estimate, got %v", n)
+	}
+	n = resolveReserveHostRAMWith(false, 0, gpulease.ClassMedia, call, pair, cfg, true, table, &out)
+	if math.Abs(n.GiB-33.1) > 0.01 {
+		t.Fatalf("the same call without the flag is sized as it always was (13.4 + 13.4 + 6.3 on one card), got %v", n)
+	}
+	// the whole node (no named cards) is three cards, which is not the placement: the ordinary estimate stands
+	n = resolveReserveHostRAMWith(false, 0, gpulease.ClassMedia, append(call, "--wan-placement", "multicard"), nil, cfg, true, table, &out)
+	if math.Abs(n.GiB-33.1) > 0.01 {
+		t.Fatalf("a multicard call on a whole-node lease holds three cards, not two, and keeps the ordinary estimate, got %v", n)
+	}
+	// one leased card cannot be the placement either
+	n = resolveReserveHostRAMWith(false, 0, gpulease.ClassMedia, append(call, "--wan-placement", "multicard"), pair[:1], cfg, true, table, &out)
+	if math.Abs(n.GiB-33.1) > 0.01 {
+		t.Fatalf("a multicard call on one leased card keeps the ordinary estimate, got %v", n)
+	}
+}
+
+// The same declaration when the estimate reads the card table ITSELF (resolveReserveHostRAM: the plan handed none over). The branch that reads it
+// must hand the estimate each leased card's size too; without that a multicard call on two fitting cards silently declares the ordinary 33.1 GiB, which is
+// the lease wait the placement exists to remove (the review of 2026-10-11 deleted the assignment and every test still passed).
+func TestAMulticardWanCallDeclaresNothingWhenTheEstimateReadsTheCardTableItself(t *testing.T) {
+	useCardTable(t, "")
+	cfg := config.Config{ComfyDir: t.TempDir()}
+	cards, _, err := cardTableFn(context.Background(), cfg)
+	if err != nil || len(cards) != 3 {
+		t.Fatalf("the synthetic card table: %v cards, err %v", len(cards), err)
+	}
+	pair := []string{cards[0].LeaseID(), cards[2].LeaseID()}
+	call := strings.Fields("node render/comfy-video.mjs o.mp4 s.png p --model wan --high-unet hi.safetensors --low-unet lo.safetensors")
+	reads := 0
+	inner := cardTableFn
+	cardTableFn = func(ctx context.Context, c config.Config) ([]gpuprobe.Card, string, error) {
+		reads++
+		return inner(ctx, c)
+	}
+	t.Cleanup(func() { cardTableFn = inner })
+	var out bytes.Buffer
+
+	n := resolveReserveHostRAM(false, 0, gpulease.ClassMedia, append(call, "--wan-placement", "multicard"), pair, cfg, true, &out)
+	if reads != 1 {
+		t.Fatalf("the estimate was to read the card table once itself, read %d time(s)", reads)
+	}
+	if n.GiB != 0 || n.Source == hostneed.SourceExplicit || !strings.Contains(n.Detail, "2 leased cards") {
+		t.Fatalf("a multicard Wan call on the two leased cards must declare 0 from the estimate when it reads the table itself, got %v", n)
+	}
+	n = resolveReserveHostRAM(false, 0, gpulease.ClassMedia, call, pair, cfg, true, &out)
+	if math.Abs(n.GiB-33.1) > 0.01 {
+		t.Fatalf("the same call without the flag is sized as it always was, got %v", n)
+	}
+}
+
+// A measured card-only image or edit call declares 0, and a 0 is otherwise the silent default of a declaration, so the verb says it, with the detail that
+// explains it: a false 0 (the read-only reader not engaged, a pack upgrade that changed the loaders) would stream silently, and an operator reading the
+// lease's output is the one place that can notice it.
+func TestAMeasuredCardOnlyEditCallSaysItDeclaresNothing(t *testing.T) {
+	useCardTable(t, "")
+	table, _ := gpuprobe.BuildCards([]gpuprobe.Device{
+		{Index: 0, UUID: "GPU-aaaa0000-x", Name: "T", TotalGiB: 15.9, FreeGiB: 15.9, UtilKnown: true},
+		{Index: 1, UUID: "GPU-bbbb0000-x", Name: "T", TotalGiB: 15.9, FreeGiB: 13.7, UtilKnown: true},
+		{Index: 2, UUID: "GPU-cccc0000-x", Name: "T", TotalGiB: 15.9, FreeGiB: 15.9, UtilKnown: true},
+	}, "")
+	pair := []string{table[0].LeaseID(), table[2].LeaseID()}
+	cfg := config.Config{ComfyDir: t.TempDir()}
+	call := strings.Fields("node render/comfy-edit.mjs o.png in.png p --unet qwen_image_edit_2511_fp8mixed.safetensors")
+	var out bytes.Buffer
+
+	n := resolveReserveHostRAMWith(false, 0, gpulease.ClassMedia, append(call, "--placement", "multicard"), pair, cfg, true, table, &out)
+	if n.GiB != 0 || !n.CardOnly || n.Source == hostneed.SourceExplicit {
+		t.Fatalf("a multicard 2511 fp8mixed edit on the two leased cards declares 0 from the estimate, marked card-only, got %+v", n)
+	}
+	for _, want := range []string{"gpu reserve: declaring 0.0 GiB host RAM", "card-only placement", "read-only safetensors loader"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the verb must say the zero and why (%q missing):\n%s", want, out.String())
+		}
+	}
+	// the same call on one leased card is the ordinary figure, printed as it always was
+	out.Reset()
+	n = resolveReserveHostRAMWith(false, 0, gpulease.ClassMedia, append(call, "--placement", "multicard"), pair[:1], cfg, true, table, &out)
+	if n.GiB <= 0 || n.CardOnly || !strings.Contains(out.String(), "gpu reserve: declaring") {
+		t.Errorf("one leased card: %+v / %q, want the ordinary figure said", n, out.String())
+	}
+}

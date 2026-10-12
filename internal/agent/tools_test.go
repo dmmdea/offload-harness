@@ -6,12 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // jsonStr JSON-encodes s (handles Windows backslashes safely for embedding in a JSON arg).
@@ -92,7 +93,7 @@ func TestReadFileRejectsWindowsJunctionEscape(t *testing.T) {
 		t.Fatal(err)
 	}
 	jx := filepath.Join(root, "jx")
-	if out, err := exec.Command("cmd", "/c", "mklink", "/J", jx, parent).CombinedOutput(); err != nil {
+	if out, err := winexec.Command("cmd", "/c", "mklink", "/J", jx, parent).CombinedOutput(); err != nil {
 		t.Skipf("could not create junction (mklink /J): %v — %s", err, out)
 	}
 	tools, _ := ReadOnlyTools(root, nil, nil)

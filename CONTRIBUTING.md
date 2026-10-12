@@ -17,6 +17,18 @@ go test ./...    # run the full test suite
 All three must pass before you open a pull request. The tests do not require a running
 llama.cpp server.
 
+`go.mod` names the compiler the harness ships with (`toolchain go1.27.2`; the `go` line is only the
+oldest one allowed). With `GOTOOLCHAIN` at its default, a Go older than that downloads the release
+on the first build in this tree (from the module proxy, into the module cache) and builds with it.
+`GOTOOLCHAIN=local` builds with the installed Go instead and ignores the line without a message,
+which is the way to build offline. CI does not build that way: its `build` and `installer-windows`
+jobs fail unless the go command runs exactly the release the line names. CI also scans the harness
+module and both printed CLIs for known vulnerabilities, for linux and windows, in the `govulncheck`
+job. To run one scan by hand: `go install golang.org/x/vuln/cmd/govulncheck@v1.8.0`, then
+`govulncheck ./...` in the module's directory (`GOOS=windows govulncheck ./...` for the other
+system). A finding fails the job; the fix is a newer toolchain pin in `go.mod` (and the floor in
+`gomod_toolchain_pin_test.go`) or a newer dependency.
+
 ## Guidelines
 
 - **Keep changes scoped.** One focused change per PR. Avoid drive-by refactors, renames, or
@@ -33,6 +45,20 @@ llama.cpp server.
   front a hosted model, so visible page text can leave the machine. See
   [ADR 0001](docs/architecture/decisions/0001-defer-never-cloud-fallback.md) and
   [ADR 0060](docs/architecture/decisions/0060-opt-in-browse-lane-drives-the-operators-browser.md).)
+
+## Proving a test can fail
+
+A test that has only ever passed proves nothing, so a fix or a new gate is shown to work by making it fail on purpose:
+apply one single-line mutation that removes the control and watch the test go red. Do that with
+[`scripts/mutation-check.sh`](scripts/mutation-check.sh) (PowerShell twin: [`scripts/mutation-check.ps1`](scripts/mutation-check.ps1)),
+not with an ad hoc `sed` plus `go test` that counts any failure as a kill. From the module root it takes the file, the
+mutation (`--old`/`--new`, or `--marker` to pick the line) and either a Go package (`--pkg ./internal/x --run TestX`) or your
+own `--test` and `--compile` commands, and it runs the unmutated control arm, which must pass; applies the mutation and asserts
+it landed, comparing with line endings normalised so a CRLF file cannot fake a pass; compiles the test binary before
+running the tests, so a mutant that does not build is reported `BAD-MUTANT` and never counted as a kill; reports `RED` (the
+tests caught it) or `SURVIVED` (they did not); and restores the file byte for byte, even when interrupted. Quote the final
+`MUTATION-VERDICT:` line, with the mutation it printed, in the pull request. `bash scripts/mutation-check-selftest.sh` (or
+`pwsh -File scripts/mutation-check-selftest.ps1`) shows every verdict on a fixture under `scripts/testdata/`.
 
 ## Documentation
 

@@ -1,0 +1,1963 @@
+{
+ "sdxl default": {
+  "via": "render",
+  "pos": [
+   "out.png",
+   "a clay character in a tunnel",
+   "7"
+  ],
+  "flags": {},
+  "env": {},
+  "built": {
+   "graph": {
+    "3": {
+     "class_type": "KSampler",
+     "inputs": {
+      "seed": 7,
+      "steps": 30,
+      "cfg": 7,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 1,
+      "model": [
+       "4",
+       0
+      ],
+      "positive": [
+       "6",
+       0
+      ],
+      "negative": [
+       "7",
+       0
+      ],
+      "latent_image": [
+       "5",
+       0
+      ]
+     }
+    },
+    "4": {
+     "class_type": "CheckpointLoaderSimple",
+     "inputs": {
+      "ckpt_name": "RealVisXL_V5.0_fp16.safetensors"
+     }
+    },
+    "5": {
+     "class_type": "EmptyLatentImage",
+     "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+     }
+    },
+    "6": {
+     "class_type": "CLIPTextEncode",
+     "inputs": {
+      "text": "a clay character in a tunnel",
+      "clip": [
+       "4",
+       1
+      ]
+     }
+    },
+    "7": {
+     "class_type": "CLIPTextEncode",
+     "inputs": {
+      "text": "",
+      "clip": [
+       "4",
+       1
+      ]
+     }
+    },
+    "8": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "3",
+       0
+      ],
+      "vae": [
+       "10",
+       0
+      ]
+     }
+    },
+    "9": {
+     "class_type": "SaveImage",
+     "inputs": {
+      "filename_prefix": "render",
+      "images": [
+       "8",
+       0
+      ]
+     }
+    },
+    "10": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "sdxl_vae.safetensors"
+     }
+    }
+   },
+   "seed": 7,
+   "width": 1024,
+   "height": 1024
+  }
+ },
+ "hidream-o1": {
+  "via": "render",
+  "pos": [
+   "out.png",
+   "a clay character in a tunnel",
+   "7"
+  ],
+  "flags": {
+   "family": "hidream-o1",
+   "ckpt": "o1_bf16.safetensors"
+  },
+  "env": {},
+  "built": {
+   "graph": {
+    "3": {
+     "class_type": "SamplerCustom",
+     "inputs": {
+      "model": [
+       "21",
+       0
+      ],
+      "add_noise": true,
+      "noise_seed": 7,
+      "cfg": 5,
+      "positive": [
+       "6",
+       0
+      ],
+      "negative": [
+       "7",
+       0
+      ],
+      "sampler": [
+       "23",
+       0
+      ],
+      "sigmas": [
+       "22",
+       0
+      ],
+      "latent_image": [
+       "5",
+       0
+      ]
+     }
+    },
+    "4": {
+     "class_type": "CheckpointLoaderSimple",
+     "inputs": {
+      "ckpt_name": "o1_bf16.safetensors"
+     }
+    },
+    "5": {
+     "class_type": "EmptyHiDreamO1LatentImage",
+     "inputs": {
+      "width": 2048,
+      "height": 2048,
+      "batch_size": 1
+     }
+    },
+    "6": {
+     "class_type": "CLIPTextEncode",
+     "inputs": {
+      "text": "a clay character in a tunnel",
+      "clip": [
+       "4",
+       1
+      ]
+     }
+    },
+    "7": {
+     "class_type": "CLIPTextEncode",
+     "inputs": {
+      "text": "",
+      "clip": [
+       "4",
+       1
+      ]
+     }
+    },
+    "8": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "3",
+       0
+      ],
+      "vae": [
+       "4",
+       2
+      ]
+     }
+    },
+    "9": {
+     "class_type": "SaveImage",
+     "inputs": {
+      "filename_prefix": "render",
+      "images": [
+       "8",
+       0
+      ]
+     }
+    },
+    "20": {
+     "class_type": "ModelNoiseScale",
+     "inputs": {
+      "model": [
+       "4",
+       0
+      ],
+      "noise_scale": 8
+     }
+    },
+    "21": {
+     "class_type": "HiDreamO1PatchSeamSmoothing",
+     "inputs": {
+      "model": [
+       "20",
+       0
+      ],
+      "start_percent": 0.8,
+      "end_percent": 1,
+      "pattern": "single_shift",
+      "passes": "ramp_2_4",
+      "blend": "median",
+      "strength": 1
+     }
+    },
+    "22": {
+     "class_type": "BasicScheduler",
+     "inputs": {
+      "model": [
+       "20",
+       0
+      ],
+      "scheduler": "normal",
+      "steps": 40,
+      "denoise": 1
+     }
+    },
+    "23": {
+     "class_type": "KSamplerSelect",
+     "inputs": {
+      "sampler_name": "dpmpp_2m_sde_gpu"
+     }
+    }
+   },
+   "seed": 7,
+   "width": 2048,
+   "height": 2048
+  }
+ },
+ "krea2 single": {
+  "via": "render",
+  "pos": [
+   "out.png",
+   "a clay character in a tunnel",
+   "7"
+  ],
+  "flags": {
+   "family": "krea2",
+   "ckpt": "krea2_bf16.safetensors"
+  },
+  "env": {},
+  "built": {
+   "graph": {
+    "1": {
+     "class_type": "UNETLoader",
+     "inputs": {
+      "unet_name": "krea2_bf16.safetensors",
+      "weight_dtype": "default"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen3vl_4b_bf16.safetensors",
+      "type": "krea2",
+      "device": "default"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+     }
+    },
+    "6": {
+     "class_type": "CLIPTextEncode",
+     "inputs": {
+      "text": "a clay character in a tunnel",
+      "clip": [
+       "2",
+       0
+      ]
+     }
+    },
+    "7": {
+     "class_type": "ConditioningZeroOut",
+     "inputs": {
+      "conditioning": [
+       "6",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "EmptyLatentImage",
+     "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+     }
+    },
+    "9": {
+     "class_type": "KSampler",
+     "inputs": {
+      "seed": 7,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+       "1",
+       0
+      ],
+      "positive": [
+       "6",
+       0
+      ],
+      "negative": [
+       "7",
+       0
+      ],
+      "latent_image": [
+       "8",
+       0
+      ]
+     }
+    },
+    "10": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "9",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "11": {
+     "class_type": "SaveImage",
+     "inputs": {
+      "filename_prefix": "render",
+      "images": [
+       "10",
+       0
+      ]
+     }
+    }
+   },
+   "seed": 7,
+   "width": 1024,
+   "height": 1024
+  }
+ },
+ "krea2 pooled": {
+  "via": "render",
+  "pos": [
+   "out.png",
+   "a clay character in a tunnel",
+   "7"
+  ],
+  "flags": {
+   "family": "krea2",
+   "ckpt": "krea2_bf16.safetensors",
+   "pool-vvram": "12",
+   "pool-compute": "cuda:1",
+   "pool-donor": "cuda:2"
+  },
+  "env": {},
+  "built": {
+   "graph": {
+    "1": {
+     "class_type": "UNETLoaderDisTorch2MultiGPU",
+     "inputs": {
+      "unet_name": "krea2_bf16.safetensors",
+      "weight_dtype": "default",
+      "compute_device": "cuda:1",
+      "virtual_vram_gb": 12,
+      "donor_device": "cuda:2",
+      "expert_mode_allocations": "",
+      "eject_models": true
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoaderMultiGPU",
+     "inputs": {
+      "clip_name": "qwen3vl_4b_bf16.safetensors",
+      "type": "krea2",
+      "device": "cuda:2"
+     }
+    },
+    "3": {
+     "class_type": "VAELoaderMultiGPU",
+     "inputs": {
+      "vae_name": "qwen_image_vae.safetensors",
+      "device": "cuda:2"
+     }
+    },
+    "6": {
+     "class_type": "CLIPTextEncode",
+     "inputs": {
+      "text": "a clay character in a tunnel",
+      "clip": [
+       "2",
+       0
+      ]
+     }
+    },
+    "7": {
+     "class_type": "ConditioningZeroOut",
+     "inputs": {
+      "conditioning": [
+       "6",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "EmptyLatentImage",
+     "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+     }
+    },
+    "9": {
+     "class_type": "KSampler",
+     "inputs": {
+      "seed": 7,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+       "1",
+       0
+      ],
+      "positive": [
+       "6",
+       0
+      ],
+      "negative": [
+       "7",
+       0
+      ],
+      "latent_image": [
+       "8",
+       0
+      ]
+     }
+    },
+    "10": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "9",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "11": {
+     "class_type": "SaveImage",
+     "inputs": {
+      "filename_prefix": "render",
+      "images": [
+       "10",
+       0
+      ]
+     }
+    }
+   },
+   "seed": 7,
+   "width": 1024,
+   "height": 1024
+  }
+ },
+ "qwen-image gguf full": {
+  "via": "render",
+  "pos": [
+   "out.png",
+   "a clay character in a tunnel",
+   "7"
+  ],
+  "flags": {
+   "family": "qwen-image",
+   "ckpt": "qwen-image-2512-Q5_1.gguf"
+  },
+  "env": {},
+  "built": {
+   "graph": {
+    "1": {
+     "class_type": "UnetLoaderGGUF",
+     "inputs": {
+      "unet_name": "qwen-image-2512-Q5_1.gguf"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+     }
+    },
+    "5": {
+     "class_type": "ModelSamplingAuraFlow",
+     "inputs": {
+      "model": [
+       "1",
+       0
+      ],
+      "shift": 3.1
+     }
+    },
+    "6": {
+     "class_type": "CLIPTextEncode",
+     "inputs": {
+      "text": "a clay character in a tunnel",
+      "clip": [
+       "2",
+       0
+      ]
+     }
+    },
+    "7": {
+     "class_type": "ConditioningZeroOut",
+     "inputs": {
+      "conditioning": [
+       "6",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "EmptySD3LatentImage",
+     "inputs": {
+      "width": 1328,
+      "height": 1328,
+      "batch_size": 1
+     }
+    },
+    "9": {
+     "class_type": "KSampler",
+     "inputs": {
+      "seed": 7,
+      "steps": 50,
+      "cfg": 4,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+       "5",
+       0
+      ],
+      "positive": [
+       "6",
+       0
+      ],
+      "negative": [
+       "7",
+       0
+      ],
+      "latent_image": [
+       "8",
+       0
+      ]
+     }
+    },
+    "10": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "9",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "11": {
+     "class_type": "SaveImage",
+     "inputs": {
+      "filename_prefix": "render",
+      "images": [
+       "10",
+       0
+      ]
+     }
+    }
+   },
+   "seed": 7,
+   "width": 1328,
+   "height": 1328
+  }
+ },
+ "qwen-image gguf lightning4": {
+  "via": "render",
+  "pos": [
+   "out.png",
+   "a clay character in a tunnel",
+   "7"
+  ],
+  "flags": {
+   "family": "qwen-image",
+   "ckpt": "qwen-image-2512-Q5_1.gguf",
+   "preset": "lightning4"
+  },
+  "env": {},
+  "built": {
+   "graph": {
+    "1": {
+     "class_type": "UnetLoaderGGUF",
+     "inputs": {
+      "unet_name": "qwen-image-2512-Q5_1.gguf"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+     }
+    },
+    "4": {
+     "class_type": "LoraLoaderModelOnly",
+     "inputs": {
+      "model": [
+       "1",
+       0
+      ],
+      "lora_name": "Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors",
+      "strength_model": 1
+     }
+    },
+    "5": {
+     "class_type": "ModelSamplingAuraFlow",
+     "inputs": {
+      "model": [
+       "4",
+       0
+      ],
+      "shift": 3.1
+     }
+    },
+    "6": {
+     "class_type": "CLIPTextEncode",
+     "inputs": {
+      "text": "a clay character in a tunnel",
+      "clip": [
+       "2",
+       0
+      ]
+     }
+    },
+    "7": {
+     "class_type": "ConditioningZeroOut",
+     "inputs": {
+      "conditioning": [
+       "6",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "EmptySD3LatentImage",
+     "inputs": {
+      "width": 1328,
+      "height": 1328,
+      "batch_size": 1
+     }
+    },
+    "9": {
+     "class_type": "KSampler",
+     "inputs": {
+      "seed": 7,
+      "steps": 4,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+       "5",
+       0
+      ],
+      "positive": [
+       "6",
+       0
+      ],
+      "negative": [
+       "7",
+       0
+      ],
+      "latent_image": [
+       "8",
+       0
+      ]
+     }
+    },
+    "10": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "9",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "11": {
+     "class_type": "SaveImage",
+     "inputs": {
+      "filename_prefix": "render",
+      "images": [
+       "10",
+       0
+      ]
+     }
+    }
+   },
+   "seed": 7,
+   "width": 1328,
+   "height": 1328
+  }
+ },
+ "qwen-image safetensors": {
+  "via": "render",
+  "pos": [
+   "out.png",
+   "a clay character in a tunnel",
+   "7"
+  ],
+  "flags": {
+   "family": "qwen-image",
+   "ckpt": "qwen_image_2512_bf16.safetensors",
+   "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+  },
+  "env": {},
+  "built": {
+   "graph": {
+    "1": {
+     "class_type": "UNETLoader",
+     "inputs": {
+      "unet_name": "qwen_image_2512_bf16.safetensors",
+      "weight_dtype": "default"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+     }
+    },
+    "5": {
+     "class_type": "ModelSamplingAuraFlow",
+     "inputs": {
+      "model": [
+       "1",
+       0
+      ],
+      "shift": 3.1
+     }
+    },
+    "6": {
+     "class_type": "CLIPTextEncode",
+     "inputs": {
+      "text": "a clay character in a tunnel",
+      "clip": [
+       "2",
+       0
+      ]
+     }
+    },
+    "7": {
+     "class_type": "ConditioningZeroOut",
+     "inputs": {
+      "conditioning": [
+       "6",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "EmptySD3LatentImage",
+     "inputs": {
+      "width": 1328,
+      "height": 1328,
+      "batch_size": 1
+     }
+    },
+    "9": {
+     "class_type": "KSampler",
+     "inputs": {
+      "seed": 7,
+      "steps": 50,
+      "cfg": 4,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+       "5",
+       0
+      ],
+      "positive": [
+       "6",
+       0
+      ],
+      "negative": [
+       "7",
+       0
+      ],
+      "latent_image": [
+       "8",
+       0
+      ]
+     }
+    },
+    "10": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "9",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "11": {
+     "class_type": "SaveImage",
+     "inputs": {
+      "filename_prefix": "render",
+      "images": [
+       "10",
+       0
+      ]
+     }
+    }
+   },
+   "seed": 7,
+   "width": 1328,
+   "height": 1328
+  }
+ },
+ "qwen-image-2.1 int8 official": {
+  "via": "render",
+  "pos": [
+   "out.png",
+   "a clay character in a tunnel",
+   "7"
+  ],
+  "flags": {
+   "family": "qwen-image-2.1",
+   "clip": "qwen3vl_8b_bf16.safetensors",
+   "vae": "qwen_image_2.1_vae_bf16.safetensors",
+   "ckpt": "qwen_image_2.1_int8_convrot.safetensors"
+  },
+  "env": {},
+  "built": {
+   "graph": {
+    "1": {
+     "class_type": "UNETLoader",
+     "inputs": {
+      "unet_name": "qwen_image_2.1_int8_convrot.safetensors",
+      "weight_dtype": "default"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen3vl_8b_bf16.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+     }
+    },
+    "4": {
+     "class_type": "TextEncodeQwenImage21",
+     "inputs": {
+      "clip": [
+       "2",
+       0
+      ],
+      "prompt": "a clay character in a tunnel",
+      "negative_prompt": "",
+      "resolution": 1024
+     }
+    },
+    "5": {
+     "class_type": "EmptyLatentImage",
+     "inputs": {
+      "width": 2048,
+      "height": 2048,
+      "batch_size": 1
+     }
+    },
+    "6": {
+     "class_type": "RandomNoise",
+     "inputs": {
+      "noise_seed": 7
+     }
+    },
+    "7": {
+     "class_type": "BasicGuider",
+     "inputs": {
+      "model": [
+       "1",
+       0
+      ],
+      "conditioning": [
+       "4",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "KSamplerSelect",
+     "inputs": {
+      "sampler_name": "euler"
+     }
+    },
+    "9": {
+     "class_type": "ManualSigmas",
+     "inputs": {
+      "sigmas": "1.00000000, 0.99264598, 0.98501299, 0.97708484, 0.96884409, 0.96027187, 0.95134776, 0.94204966, 0.93235354, 0.92223329, 0.91166046, 0.90060400, 0.88902994, 0.87690106, 0.86417651, 0.85081127, 0.83675573, 0.82195498, 0.80634814, 0.78986751, 0.77243760, 0.75397397, 0.73438183, 0.71355447, 0.69137127, 0.66769538, 0.64237088, 0.61521938, 0.58603576, 0.55458302, 0.52058581, 0.48372234, 0.44361419, 0.39981325, 0.35178490, 0.29888612, 0.24033648, 0.17517943, 0.10222958, 0.02000000, 0.00000000"
+     }
+    },
+    "10": {
+     "class_type": "SamplerCustomAdvanced",
+     "inputs": {
+      "noise": [
+       "6",
+       0
+      ],
+      "guider": [
+       "7",
+       0
+      ],
+      "sampler": [
+       "8",
+       0
+      ],
+      "sigmas": [
+       "9",
+       0
+      ],
+      "latent_image": [
+       "5",
+       0
+      ]
+     }
+    },
+    "11": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "10",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "12": {
+     "class_type": "SplitImageWithAlpha",
+     "inputs": {
+      "image": [
+       "11",
+       0
+      ]
+     }
+    },
+    "13": {
+     "class_type": "SaveImage",
+     "inputs": {
+      "filename_prefix": "render",
+      "images": [
+       "12",
+       0
+      ]
+     }
+    }
+   },
+   "seed": 7,
+   "width": 2048,
+   "height": 2048
+  }
+ },
+ "qwen-image-2.1 bf16 comfy schedule": {
+  "via": "render",
+  "pos": [
+   "out.png",
+   "a clay character in a tunnel",
+   "7"
+  ],
+  "flags": {
+   "family": "qwen-image-2.1",
+   "clip": "qwen3vl_8b_bf16.safetensors",
+   "vae": "qwen_image_2.1_vae_bf16.safetensors",
+   "ckpt": "qwen_image_2.1_bf16.safetensors",
+   "schedule": "comfy"
+  },
+  "env": {},
+  "built": {
+   "graph": {
+    "1": {
+     "class_type": "UNETLoader",
+     "inputs": {
+      "unet_name": "qwen_image_2.1_bf16.safetensors",
+      "weight_dtype": "default"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen3vl_8b_bf16.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+     }
+    },
+    "4": {
+     "class_type": "TextEncodeQwenImage21",
+     "inputs": {
+      "clip": [
+       "2",
+       0
+      ],
+      "prompt": "a clay character in a tunnel",
+      "negative_prompt": "",
+      "resolution": 1024
+     }
+    },
+    "5": {
+     "class_type": "EmptyLatentImage",
+     "inputs": {
+      "width": 2048,
+      "height": 2048,
+      "batch_size": 1
+     }
+    },
+    "10": {
+     "class_type": "KSampler",
+     "inputs": {
+      "seed": 7,
+      "steps": 40,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+       "1",
+       0
+      ],
+      "positive": [
+       "4",
+       0
+      ],
+      "negative": [
+       "4",
+       1
+      ],
+      "latent_image": [
+       "5",
+       0
+      ]
+     }
+    },
+    "11": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "10",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "12": {
+     "class_type": "SplitImageWithAlpha",
+     "inputs": {
+      "image": [
+       "11",
+       0
+      ]
+     }
+    },
+    "13": {
+     "class_type": "SaveImage",
+     "inputs": {
+      "filename_prefix": "render",
+      "images": [
+       "12",
+       0
+      ]
+     }
+    }
+   },
+   "seed": 7,
+   "width": 2048,
+   "height": 2048
+  }
+ },
+ "qwen-image-2.1 bf16 transparent": {
+  "via": "render",
+  "pos": [
+   "out.png",
+   "a clay character in a tunnel",
+   "7"
+  ],
+  "flags": {
+   "family": "qwen-image-2.1",
+   "clip": "qwen3vl_8b_bf16.safetensors",
+   "vae": "qwen_image_2.1_vae_bf16.safetensors",
+   "ckpt": "qwen_image_2.1_bf16.safetensors",
+   "transparent": "1"
+  },
+  "env": {},
+  "built": {
+   "graph": {
+    "1": {
+     "class_type": "UNETLoader",
+     "inputs": {
+      "unet_name": "qwen_image_2.1_bf16.safetensors",
+      "weight_dtype": "default"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen3vl_8b_bf16.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+     }
+    },
+    "4": {
+     "class_type": "TextEncodeQwenImage21",
+     "inputs": {
+      "clip": [
+       "2",
+       0
+      ],
+      "prompt": "This is an RGBA image with transparency. a clay character in a tunnel. The image has alpha channel and the background is transparent.",
+      "negative_prompt": "",
+      "resolution": 1024
+     }
+    },
+    "5": {
+     "class_type": "EmptyLatentImage",
+     "inputs": {
+      "width": 2048,
+      "height": 2048,
+      "batch_size": 1
+     }
+    },
+    "6": {
+     "class_type": "RandomNoise",
+     "inputs": {
+      "noise_seed": 7
+     }
+    },
+    "7": {
+     "class_type": "BasicGuider",
+     "inputs": {
+      "model": [
+       "1",
+       0
+      ],
+      "conditioning": [
+       "4",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "KSamplerSelect",
+     "inputs": {
+      "sampler_name": "euler"
+     }
+    },
+    "9": {
+     "class_type": "ManualSigmas",
+     "inputs": {
+      "sigmas": "1.00000000, 0.99264598, 0.98501299, 0.97708484, 0.96884409, 0.96027187, 0.95134776, 0.94204966, 0.93235354, 0.92223329, 0.91166046, 0.90060400, 0.88902994, 0.87690106, 0.86417651, 0.85081127, 0.83675573, 0.82195498, 0.80634814, 0.78986751, 0.77243760, 0.75397397, 0.73438183, 0.71355447, 0.69137127, 0.66769538, 0.64237088, 0.61521938, 0.58603576, 0.55458302, 0.52058581, 0.48372234, 0.44361419, 0.39981325, 0.35178490, 0.29888612, 0.24033648, 0.17517943, 0.10222958, 0.02000000, 0.00000000"
+     }
+    },
+    "10": {
+     "class_type": "SamplerCustomAdvanced",
+     "inputs": {
+      "noise": [
+       "6",
+       0
+      ],
+      "guider": [
+       "7",
+       0
+      ],
+      "sampler": [
+       "8",
+       0
+      ],
+      "sigmas": [
+       "9",
+       0
+      ],
+      "latent_image": [
+       "5",
+       0
+      ]
+     }
+    },
+    "11": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "10",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "13": {
+     "class_type": "SaveImage",
+     "inputs": {
+      "filename_prefix": "render",
+      "images": [
+       "11",
+       0
+      ]
+     }
+    }
+   },
+   "seed": 7,
+   "width": 2048,
+   "height": 2048
+  }
+ },
+ "edit 2511 gguf lightning8": {
+  "via": "edit",
+  "pos": [
+   "out.png",
+   "in.png",
+   "change the light to orange"
+  ],
+  "flags": {
+   "unet": "qwen-image-edit-2511-Q5_1.gguf",
+   "seed": "7"
+  },
+  "refs": [],
+  "built": {
+   "1": {
+    "class_type": "UnetLoaderGGUF",
+    "inputs": {
+     "unet_name": "qwen-image-edit-2511-Q5_1.gguf"
+    }
+   },
+   "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+     "type": "qwen_image",
+     "device": "default"
+    }
+   },
+   "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "qwen_image_vae.safetensors"
+    }
+   },
+   "4": {
+    "class_type": "LoadImage",
+    "inputs": {
+     "image": "staged_0.png"
+    }
+   },
+   "5": {
+    "class_type": "ImageScaleToTotalPixels",
+    "inputs": {
+     "image": [
+      "4",
+      0
+     ],
+     "upscale_method": "lanczos",
+     "megapixels": 1.47265625,
+     "resolution_steps": 16
+    }
+   },
+   "6": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+     "model": [
+      "1",
+      0
+     ],
+     "lora_name": "Qwen-Image-Edit-2511-Lightning-8steps-V1.0-bf16.safetensors",
+     "strength_model": 1
+    }
+   },
+   "7": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+     "model": [
+      "6",
+      0
+     ],
+     "shift": 3.1
+    }
+   },
+   "8": {
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "inputs": {
+     "clip": [
+      "2",
+      0
+     ],
+     "prompt": "change the light to orange",
+     "vae": [
+      "3",
+      0
+     ],
+     "image1": [
+      "5",
+      0
+     ]
+    }
+   },
+   "9": {
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "inputs": {
+     "clip": [
+      "2",
+      0
+     ],
+     "prompt": "",
+     "vae": [
+      "3",
+      0
+     ],
+     "image1": [
+      "5",
+      0
+     ]
+    }
+   },
+   "10": {
+    "class_type": "VAEEncode",
+    "inputs": {
+     "pixels": [
+      "5",
+      0
+     ],
+     "vae": [
+      "3",
+      0
+     ]
+    }
+   },
+   "11": {
+    "class_type": "KSampler",
+    "inputs": {
+     "seed": 7,
+     "steps": 8,
+     "cfg": 1,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "denoise": 1,
+     "model": [
+      "7",
+      0
+     ],
+     "positive": [
+      "8",
+      0
+     ],
+     "negative": [
+      "9",
+      0
+     ],
+     "latent_image": [
+      "10",
+      0
+     ]
+    }
+   },
+   "12": {
+    "class_type": "VAEDecode",
+    "inputs": {
+     "samples": [
+      "11",
+      0
+     ],
+     "vae": [
+      "3",
+      0
+     ]
+    }
+   },
+   "13": {
+    "class_type": "SaveImage",
+    "inputs": {
+     "filename_prefix": "edit",
+     "images": [
+      "12",
+      0
+     ]
+    }
+   }
+  }
+ },
+ "edit 2511 fp8mixed lightning8": {
+  "via": "edit",
+  "pos": [
+   "out.png",
+   "in.png",
+   "change the light to orange"
+  ],
+  "flags": {
+   "unet": "qwen_image_edit_2511_fp8mixed.safetensors",
+   "seed": "7"
+  },
+  "refs": [],
+  "built": {
+   "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+     "unet_name": "qwen_image_edit_2511_fp8mixed.safetensors",
+     "weight_dtype": "default"
+    }
+   },
+   "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+     "type": "qwen_image",
+     "device": "default"
+    }
+   },
+   "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "qwen_image_vae.safetensors"
+    }
+   },
+   "4": {
+    "class_type": "LoadImage",
+    "inputs": {
+     "image": "staged_0.png"
+    }
+   },
+   "5": {
+    "class_type": "ImageScaleToTotalPixels",
+    "inputs": {
+     "image": [
+      "4",
+      0
+     ],
+     "upscale_method": "lanczos",
+     "megapixels": 1.47265625,
+     "resolution_steps": 16
+    }
+   },
+   "6": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+     "model": [
+      "1",
+      0
+     ],
+     "lora_name": "Qwen-Image-Edit-2511-Lightning-8steps-V1.0-bf16.safetensors",
+     "strength_model": 1
+    }
+   },
+   "7": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+     "model": [
+      "6",
+      0
+     ],
+     "shift": 3.1
+    }
+   },
+   "8": {
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "inputs": {
+     "clip": [
+      "2",
+      0
+     ],
+     "prompt": "change the light to orange",
+     "vae": [
+      "3",
+      0
+     ],
+     "image1": [
+      "5",
+      0
+     ]
+    }
+   },
+   "9": {
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "inputs": {
+     "clip": [
+      "2",
+      0
+     ],
+     "prompt": "",
+     "vae": [
+      "3",
+      0
+     ],
+     "image1": [
+      "5",
+      0
+     ]
+    }
+   },
+   "10": {
+    "class_type": "VAEEncode",
+    "inputs": {
+     "pixels": [
+      "5",
+      0
+     ],
+     "vae": [
+      "3",
+      0
+     ]
+    }
+   },
+   "11": {
+    "class_type": "KSampler",
+    "inputs": {
+     "seed": 7,
+     "steps": 8,
+     "cfg": 1,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "denoise": 1,
+     "model": [
+      "7",
+      0
+     ],
+     "positive": [
+      "8",
+      0
+     ],
+     "negative": [
+      "9",
+      0
+     ],
+     "latent_image": [
+      "10",
+      0
+     ]
+    }
+   },
+   "12": {
+    "class_type": "VAEDecode",
+    "inputs": {
+     "samples": [
+      "11",
+      0
+     ],
+     "vae": [
+      "3",
+      0
+     ]
+    }
+   },
+   "13": {
+    "class_type": "SaveImage",
+    "inputs": {
+     "filename_prefix": "edit",
+     "images": [
+      "12",
+      0
+     ]
+    }
+   }
+  }
+ },
+ "edit 2511 gguf full preset": {
+  "via": "edit",
+  "pos": [
+   "out.png",
+   "in.png",
+   "change the light to orange"
+  ],
+  "flags": {
+   "unet": "qwen-image-edit-2511-Q5_1.gguf",
+   "preset": "full",
+   "seed": "7"
+  },
+  "refs": [],
+  "built": {
+   "1": {
+    "class_type": "UnetLoaderGGUF",
+    "inputs": {
+     "unet_name": "qwen-image-edit-2511-Q5_1.gguf"
+    }
+   },
+   "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+     "type": "qwen_image",
+     "device": "default"
+    }
+   },
+   "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "qwen_image_vae.safetensors"
+    }
+   },
+   "4": {
+    "class_type": "LoadImage",
+    "inputs": {
+     "image": "staged_0.png"
+    }
+   },
+   "5": {
+    "class_type": "ImageScaleToTotalPixels",
+    "inputs": {
+     "image": [
+      "4",
+      0
+     ],
+     "upscale_method": "lanczos",
+     "megapixels": 1.47265625,
+     "resolution_steps": 16
+    }
+   },
+   "7": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+     "model": [
+      "1",
+      0
+     ],
+     "shift": 3.1
+    }
+   },
+   "8": {
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "inputs": {
+     "clip": [
+      "2",
+      0
+     ],
+     "prompt": "change the light to orange",
+     "vae": [
+      "3",
+      0
+     ],
+     "image1": [
+      "5",
+      0
+     ]
+    }
+   },
+   "9": {
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "inputs": {
+     "clip": [
+      "2",
+      0
+     ],
+     "prompt": "",
+     "vae": [
+      "3",
+      0
+     ],
+     "image1": [
+      "5",
+      0
+     ]
+    }
+   },
+   "10": {
+    "class_type": "VAEEncode",
+    "inputs": {
+     "pixels": [
+      "5",
+      0
+     ],
+     "vae": [
+      "3",
+      0
+     ]
+    }
+   },
+   "11": {
+    "class_type": "KSampler",
+    "inputs": {
+     "seed": 7,
+     "steps": 40,
+     "cfg": 3,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "denoise": 1,
+     "model": [
+      "7",
+      0
+     ],
+     "positive": [
+      "8",
+      0
+     ],
+     "negative": [
+      "9",
+      0
+     ],
+     "latent_image": [
+      "10",
+      0
+     ]
+    }
+   },
+   "12": {
+    "class_type": "VAEDecode",
+    "inputs": {
+     "samples": [
+      "11",
+      0
+     ],
+     "vae": [
+      "3",
+      0
+     ]
+    }
+   },
+   "13": {
+    "class_type": "SaveImage",
+    "inputs": {
+     "filename_prefix": "edit",
+     "images": [
+      "12",
+      0
+     ]
+    }
+   }
+  }
+ },
+ "edit 2.1 bf16": {
+  "via": "edit",
+  "pos": [
+   "out.png",
+   "in.png",
+   "change the light to orange"
+  ],
+  "flags": {
+   "unet": "qwen_image_2.1_bf16.safetensors",
+   "family": "qwen-image-2.1",
+   "clip": "qwen3vl_8b_bf16.safetensors",
+   "vae": "qwen_image_2.1_vae_bf16.safetensors",
+   "seed": "7"
+  },
+  "refs": [],
+  "built": {
+   "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+     "unet_name": "qwen_image_2.1_bf16.safetensors",
+     "weight_dtype": "default"
+    }
+   },
+   "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "qwen3vl_8b_bf16.safetensors",
+     "type": "qwen_image",
+     "device": "default"
+    }
+   },
+   "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    }
+   },
+   "4": {
+    "class_type": "QwenImage21Cache",
+    "inputs": {
+     "model": [
+      "1",
+      0
+     ],
+     "device": "auto",
+     "dtype": "default"
+    }
+   },
+   "5": {
+    "class_type": "TextEncodeQwenImage21",
+    "inputs": {
+     "clip": [
+      "2",
+      0
+     ],
+     "vae": [
+      "3",
+      0
+     ],
+     "prompt": "change the light to orange",
+     "negative_prompt": "",
+     "resolution": 1024,
+     "images.image_1": [
+      "20",
+      0
+     ]
+    }
+   },
+   "10": {
+    "class_type": "KSampler",
+    "inputs": {
+     "seed": 7,
+     "steps": 40,
+     "cfg": 1,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "denoise": 1,
+     "model": [
+      "4",
+      0
+     ],
+     "positive": [
+      "5",
+      0
+     ],
+     "negative": [
+      "5",
+      1
+     ],
+     "latent_image": [
+      "5",
+      2
+     ]
+    }
+   },
+   "11": {
+    "class_type": "VAEDecode",
+    "inputs": {
+     "samples": [
+      "10",
+      0
+     ],
+     "vae": [
+      "3",
+      0
+     ]
+    }
+   },
+   "12": {
+    "class_type": "SplitImageWithAlpha",
+    "inputs": {
+     "image": [
+      "11",
+      0
+     ]
+    }
+   },
+   "13": {
+    "class_type": "SaveImage",
+    "inputs": {
+     "filename_prefix": "edit",
+     "images": [
+      "12",
+      0
+     ]
+    }
+   },
+   "20": {
+    "class_type": "LoadImage",
+    "inputs": {
+     "image": "staged_0.png"
+    }
+   }
+  }
+ }
+}

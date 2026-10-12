@@ -7,12 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // orphanRig is one PAIR ingress, one PAIR app dir and one register directory
@@ -313,7 +314,7 @@ func TestKilledProcessCardIsClosed(t *testing.T) {
 		return
 	}
 	r := newOrphanRig(t)
-	cmd := exec.Command(os.Args[0], "-test.run=^TestKilledProcessCardIsClosed$")
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestKilledProcessCardIsClosed$")
 	cmd.Env = append(os.Environ(), "PAIRWORKLOADS_ORPHAN_CHILD=1", "PAIRWORKLOADS_URL="+r.url,
 		"PAIRWORKLOADS_APPDIR="+r.appDir, "PAIRWORKLOADS_DIR="+r.dir)
 	out, err := cmd.StdoutPipe()

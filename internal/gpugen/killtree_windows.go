@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // setProcessGroup is a no-op on Windows: taskkill /T already reaps the whole tree.
@@ -18,6 +20,6 @@ func killTree(p *os.Process) error {
 	if p == nil {
 		return nil
 	}
-	_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(p.Pid)).Run()
+	_ = winexec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(p.Pid)).Run()
 	return nil
 }

@@ -233,10 +233,18 @@ type Availability struct {
 // SystemLookPath is the default LookPathFunc.
 func SystemLookPath(file string) (string, error) { return exec.LookPath(file) }
 
+// systemCommand builds the command SystemRunner runs, hidden: ffprobe is a console program, and a
+// console program started by a process with no console of its own would open a window on Windows.
+func systemCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	hideWindow(cmd)
+	return cmd
+}
+
 // SystemRunner is the default RunFunc. ffprobe writes diagnostics to stderr, so
 // a failure carries the last stderr line rather than a bare exit status.
 func SystemRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := systemCommand(ctx, name, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

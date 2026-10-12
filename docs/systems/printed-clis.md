@@ -260,8 +260,11 @@ the fleet node's reclaimable-VRAM verdict, and the STT unload. Run the harness's
 2. **Generated files are not hand-edited here.** Fix upstream and re-vendor; use
    `.printing-press-patches/` only for deviations that cannot live upstream.
 3. **No binaries, no run reports.** Enforced by `.gitignore`.
-4. **Every printed CLI has a CI job.** A module invisible to the root `./...` and absent from CI is a
-   module that is not actually tested.
+4. **Every printed CLI has a CI job, and the `govulncheck` job scans it.** A module invisible to the
+   root `./...` and absent from CI is a module that is not actually tested, or scanned.
+   `TestEveryTrackedGoModuleIsScannedOrNamedAsExcluded` holds the second half: it finds every tracked
+   `go.mod`, so a new printed CLI fails it until it is in the scan loop of `ci.yml` and in
+   `govulncheckModules`.
 5. **Tests pass on a bare runner.** A printed CLI's `go test ./...` must be green with no live
    server, no model volume, and no reference deployment. Tests that genuinely need one of those
    `t.Skip` with the reason; they never fail for absence.
@@ -281,6 +284,17 @@ go test ./... -count=1
 
 CI runs each as a dedicated job in `.github/workflows/ci.yml` — `tools-comfyui` and
 `tools-llamaswap` — parallel to the harness `build` job. Neither excludes any package.
+
+A fourth job, `govulncheck` (H-26), scans both modules and the harness module for known
+vulnerabilities, each for `GOOS=linux` and `GOOS=windows`, under the compiler the harness
+`go.mod`'s `toolchain` line names. It reads that line itself because a printed CLI carries none of
+its own, and the harness's `./...` never reaches a nested module. A vulnerability that is merely
+present in a required module and never called (today: x/text in both modules) does not fail it; a
+called one does. The fix for a finding in a vendored tree is the same as for any other change to it:
+upstream, then re-vendor (the regenerate / re-vendor cycle above). The only `go.mod` files it does not
+scan are the two write-door contract fixtures under `contracts/write-door/`, named with their reason in
+`govulncheckExcluded` (`ci_govulncheck_job_test.go`): they are task modules a coding-agent contract
+hands to the agent, not shipped code.
 
 The Printing Press verify-mode variables (`PRINTING_PRESS_VERIFY`, `PRINTING_PRESS_VERIFY_LIVE_HTTP`,
 `PRINTING_PRESS_DOGFOOD`) govern the Printing Press's own verify and dogfood runners, not `go test`,
@@ -353,7 +367,7 @@ Linux box with no Go toolchain — that is the harness of the check, not a defec
   for the vendored trees.
 - [`tools/comfyui/Makefile`](../../tools/comfyui/Makefile) — `build`, `build-mcp`, `test`, `lint`.
 - [`.gitignore`](../../.gitignore) — the `tools/*/` exclusion rules.
-- `.github/workflows/ci.yml` — the `tools-comfyui` job.
+- `.github/workflows/ci.yml` — the `tools-comfyui`, `tools-llamaswap` and `govulncheck` jobs.
 
 ## Related docs
 

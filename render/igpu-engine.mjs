@@ -660,7 +660,7 @@ export function processTable() {
         } catch { /* gone while we looked */ }
       }
     } else {
-      const r = spawnSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8" });
+      const r = spawnSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8", windowsHide: true });
       for (const line of String(r.stdout || "").split("\n")) {
         const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
         if (m) table.set(Number(m[1]), Number(m[2]));
@@ -694,7 +694,7 @@ export function killTree(child) {
   if (!child || child.pid === undefined || child.exitCode !== null || child.signalCode) return;
   try {
     if (process.platform === "win32") {
-      spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
       return;
     }
     try { process.kill(-child.pid, "SIGKILL"); } catch { /* not a group leader: the normal case */ }
@@ -736,7 +736,7 @@ export function pidGone(pid) {
       const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
       return /^[ZX]/.test(stat.slice(stat.lastIndexOf(")") + 2));
     }
-    const r = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+    const r = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8", windowsHide: true });
     return r.status !== 0 || /^\s*Z/.test(String(r.stdout || ""));
   } catch {
     return true; // /proc/<pid> vanished between the two calls
@@ -1054,7 +1054,7 @@ export function encodeMp4(ffmpeg, src, dst, fps, timeoutMs = 0, opts = {}) {
   const unregister = registerCleanup(rm);
   try {
     const r = spawnSync(ffmpeg, mp4Args(src, partial, fps, mp4Opts), {
-      encoding: "utf8", ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: "SIGKILL" } : {}),
+      encoding: "utf8", ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: "SIGKILL" } : {}), windowsHide: true,
     });
     if (r.error || r.status !== 0 || !existsSync(partial)) {
       const timedOut = r.error && r.error.code === "ETIMEDOUT";

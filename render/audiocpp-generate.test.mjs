@@ -6,6 +6,7 @@ import assert from "node:assert";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { isolatedRunnerEnv } from "./test-isolation.mjs";
 import { buildAudiocppArgs, parseArgs } from "./audiocpp-generate.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -94,7 +95,7 @@ test("an unknown kind throws", () => {
 });
 
 function run(args) {
-  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 30000 });
+  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 30000, windowsHide: true, env: isolatedRunnerEnv() });
 }
 
 test("the script refuses a cpu backend before touching anything (exit 1, CPU_BACKEND_REFUSED)", () => {

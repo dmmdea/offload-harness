@@ -19,6 +19,8 @@
 //        [--megapixels F] \
 //        [--clip name] [--vae name] [--sampler s] [--scheduler s] [--shift F] \
 //        [--seed N] [--api http://127.0.0.1:8188] [--no-lock] [--reserve-vram F]
+//        [--placement single|multicard [--resident-gb N] [--cards <a>,<b>]]   # multicard: the 2511 edit on the TWO non-display cards of a lease
+//                                      # (docs/systems/media-generation.md, "Card-only image and edit"); flags spelled `--flag value`
 //   node render/comfy-edit.mjs <out.png> <target> "<instruction>" --family qwen-image-2.1 \
 //        --unet qwen_image_2.1_bf16.safetensors --clip qwen3vl_8b_bf16.safetensors \
 //        --vae qwen_image_2.1_vae_bf16.safetensors [--ref <image2> --ref <image3> ...] \
@@ -34,7 +36,10 @@ import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { familySignature } from "./comfy-family.mjs";
-import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
+import { COMFY_DIR, comfyApi, comfyLogCursor } from "./comfy-lifecycle.mjs";
+import { assertNodeClasses } from "./comfy-nodes.mjs";
+import { planImageMulticard, lifecycleOptions, verifyImagePlacement, imagePlacementMode, beginPlacedWatch, settlePlacedRun } from "./multicard-image.mjs";
+import { findRecipe, RecipeRefusal } from "./multicard-recipes.mjs";
 import { stagedInputName } from "./comfy-input.mjs";
 import { buildQwenImageEdit, QWEN_EDIT_PRESETS, resolveEditMegapixels } from "./wf-qwen-image-edit.mjs";
 import {
@@ -84,7 +89,7 @@ function boolFlag(name, v) {
  * that turns the staged filenames into the graph. measure(path) returns the file's
  * {width,height} (injectable; only the 2511 canvas needs it).
  */
-export function planEdit({ pos, flags, refs = [], env = process.env, measure = (p) => imageSize(readFileSync(p)), exists = defaultExists, random = Math.random }) {
+export function planEdit({ pos, flags, refs = [], env = process.env, measure = (p) => imageSize(readFileSync(p)), exists = defaultExists, random = Math.random, multicard }) {
   const [out, imagePath, prompt] = pos;
   if (!out || !imagePath || !prompt) throw new UsageError('usage: node comfy-edit.mjs <out.png> <image> "<instruction>" [flags]');
   const family = flags.family || EDIT_DEFAULT_FAMILY;
@@ -93,6 +98,20 @@ export function planEdit({ pos, flags, refs = [], env = process.env, measure = (
   }
   const unet = flags.unet || env.COMFY_EDIT_UNET;
   if (!unet) throw new UsageError("error: --unet is required (this machine's edit_unet binding)");
+  // --placement single (today's graph, the default) | multicard (the card-only recipe of render/multicard-recipes.mjs). The plan (the two cards
+  // and their launch) is made by the runner before it gets here; a graph is never built as "multicard" without one, and never as single.
+  let placementMode;
+  try { placementMode = imagePlacementMode(flags); } catch (e) { throw new UsageError("error: " + e.message); }
+  let recipe = null;
+  if (placementMode === "multicard") {
+    if (!multicard) throw new UsageError("error: --placement multicard needs the plan the runner makes before it builds a graph (the two cards and their launch); a direct call of planEdit has none");
+    try {
+      recipe = findRecipe({ route: "edit", family, unet, clip: flags.clip });
+    } catch (e) {
+      if (e instanceof RecipeRefusal) throw new UsageError("error: " + e.message);
+      throw e;
+    }
+  }
   const seed = Number(flags.seed || Math.floor(random() * 1e15));
   for (const p of [imagePath, ...refs]) {
     if (!p) throw new UsageError("error: --ref needs a path");
@@ -123,10 +142,17 @@ export function planEdit({ pos, flags, refs = [], env = process.env, measure = (
     let src = { width: 0, height: 0 };
     try { src = measure(imagePath); } catch { /* size stays unknown */ }
     const megapixels = resolveEditMegapixels({ configured: configuredMP, width: src.width, height: src.height });
+    // The card-only recipe's peaks are scaled to a canvas of at most recipe.maxMegapixels. resolveEditMegapixels holds a canvas it derives from the source to the
+    // cap itself, but honours a pinned one verbatim, and a pinned canvas above the cap is one no peak was measured or scaled for: on a 16 GB card it is the
+    // out-of-memory with both cards held. Refused here, before anything is started.
+    if (recipe && recipe.maxMegapixels > 0 && megapixels > recipe.maxMegapixels) {
+      const via = flags.megapixels ? `--megapixels ${flags.megapixels}` : `COMFY_EDIT_MEGAPIXELS ${env.COMFY_EDIT_MEGAPIXELS} (gen_edit_megapixels reaches the runner as --megapixels)`;
+      throw new UsageError(`error: ${via} pins a ${megapixels} MP edit canvas, and the card-only recipe ${recipe.id} is scaled to at most ${recipe.maxMegapixels.toFixed(1)} MP (its compute card holds ${recipe.activationsGiB} GiB of activations there, and a larger canvas needs more than the two cards have left): pin ${recipe.maxMegapixels.toFixed(1)} or less, or drop --placement multicard; nothing was started`);
+    }
     const srcNote = src.width > 0 ? `${src.width}x${src.height}` : "size-unknown";
     return {
       family, sources: [imagePath], seed,
-      describe: `family ${family} preset ${presetName} steps ${steps} cfg ${cfg} ${lora ? "lora " + lora : "no-lora"} src ${srcNote} mp ${megapixels}`,
+      describe: `family ${family} preset ${presetName} steps ${steps} cfg ${cfg} ${lora ? "lora " + lora : "no-lora"} src ${srcNote} mp ${megapixels}${recipe ? ` placement multicard (${recipe.id})` : ""}`,
       build: (staged) => buildQwenImageEdit({
         image: staged[0], prompt,
         negative: flags.negative || "",
@@ -140,6 +166,7 @@ export function planEdit({ pos, flags, refs = [], env = process.env, measure = (
         scheduler: flags.scheduler || undefined,
         shift: Number(flags.shift || 0) || undefined,
         seed,
+        ...(recipe ? { placement: "multicard", residentGb: multicard.residentGb ?? undefined } : {}),
       }),
     };
   }
@@ -214,12 +241,63 @@ export function unstageInputs(staged, { inputDir, unlink = unlinkSync } = {}) {
   for (const n of staged) { try { unlink(join(inputDir, n)); } catch {} }
 }
 
+// The outside world renderEdit() touches, replaced by recording fakes in render/multicard-image-run.test.mjs; the defaults are the real calls.
+// The poll is a literal `pollOutputs(` call: gpu_progress_test.go finds the render helpers that heartbeat by it.
+export const RENDER_IO = Object.freeze({
+  verifyPlacement: verifyImagePlacement, preflight: assertNodeClasses, logCursor: comfyLogCursor, stage: stageInputs, unstage: unstageInputs, resolveCli,
+  submit: submitGraph, poll: (opts) => pollOutputs(opts), view: fetchView, write: writeFileAtomic, finalize: finalizeRun,
+  stdout: (...a) => console.log(...a), stderr: (...a) => console.error(...a), env: process.env, comfyDir: COMFY_DIR,
+});
+
+/** renderEdit: what the run does once it holds the GPU slot: check the placement, stage the inputs, submit, wait, write, finalize, unstage. */
+export async function renderEdit({ out, API, plan, placement, inputDir }, io = {}) {
+  const x = { ...RENDER_IO, ...io };
+  // The card-only placement: the running ComfyUI's own cards must be the pinned pair and the harness's pack must have loaded, before
+  // anything is staged or posted (a mismatch submits nothing).
+  if (placement) await x.verifyPlacement(API, placement);
+  const staged = [];
+  try {
+    x.stage(plan.sources, staged, { inputDir });
+    const graph = plan.build(staged);
+    // Shared submission/polling/retrieval (comfy-submit.mjs): CLI-preferred submit with
+    // byte-identical raw fallback; hardened poll loop (dead-server watchdog).
+    const cli = x.resolveCli();
+    // The card-only placement: the graph's node classes are asked for before it is posted, and the instance's console is watched while the prompt runs
+    // (an out-of-memory wedge ComfyUI does not report, a decode it retried tiled); the cursor is made BEFORE the submit.
+    if (placement) await x.preflight(API, graph, { comfyDir: x.comfyDir });
+    const watch = beginPlacedWatch(placement, { cursorFn: x.logCursor, comfyDir: x.comfyDir, say: x.stderr });
+    const { promptId } = await x.submit({ api: API, graph, clientId: "edit-" + plan.seed, cli });
+    x.stdout("queued", promptId, "seed", plan.seed, plan.describe);
+    const waitSec = Number(x.env.COMFY_WAIT_SEC || 1800);
+    const h = await x.poll({
+      api: API, promptId, waitSec,
+      isDone: (entry) => !!firstOutputFile(entry.outputs, graph),
+      noOutputMsg: "no edited image produced in time",
+      onExecError: () => x.finalize({ api: API, promptId, cli }),
+      ...(watch ? { watch } : {}),
+    });
+    const file = firstOutputFile(h.outputs, graph);
+    const bytes = await x.view({ api: API, file });
+    await settlePlacedRun({ watch, plan: placement, out, bytes, write: x.write, finalize: () => x.finalize({ api: API, promptId, cli }), stderr: x.stderr });
+    x.stdout("WROTE", out);
+    await x.finalize({ api: API, promptId, cli });
+  } finally {
+    x.unstage(staged, { inputDir });
+  }
+}
+
 async function main() {
   const { pos, flags, refs } = parseEditArgs(process.argv.slice(2));
-  const API = comfyApi(flags.api);
+  // The card-only placement is planned first: it refuses, before anything is launched, every request it cannot honour (no recipe, no cards
+  // named, not two, a display card). Its own environment names the instance, so the api and the lease slot read it too.
+  let placement = null;
+  try {
+    placement = planImageMulticard({ route: "edit", family: flags.family || EDIT_DEFAULT_FAMILY, unet: flags.unet || process.env.COMFY_EDIT_UNET, clip: flags.clip, flags, comfyDir: COMFY_DIR, say: (m) => console.error(m) });
+  } catch (e) { console.error("PLACEMENT REFUSED: " + e.message); process.exit(2); }
+  const API = comfyApi(flags.api, placement ? placement.env : process.env);
   let plan;
   try {
-    plan = planEdit({ pos, flags, refs });
+    plan = planEdit({ pos, flags, refs, multicard: placement });
   } catch (e) {
     if (e instanceof UsageError) { console.error(e.message); process.exit(2); }
     throw e;
@@ -227,35 +305,12 @@ async function main() {
   const out = pos[0];
   const inputDir = join(COMFY_DIR, "input");
 
-  async function render() {
-    const staged = [];
-    try {
-      stageInputs(plan.sources, staged, { inputDir });
-      const graph = plan.build(staged);
-      // Shared submission/polling/retrieval (comfy-submit.mjs): CLI-preferred submit with
-      // byte-identical raw fallback; hardened poll loop (dead-server watchdog).
-      const cli = resolveCli();
-      const { promptId } = await submitGraph({ api: API, graph, clientId: "edit-" + plan.seed, cli });
-      console.log("queued", promptId, "seed", plan.seed, plan.describe);
-      const waitSec = Number(process.env.COMFY_WAIT_SEC || 1800);
-      const h = await pollOutputs({
-        api: API, promptId, waitSec,
-        isDone: (entry) => !!firstOutputFile(entry.outputs, graph),
-        noOutputMsg: "no edited image produced in time",
-        onExecError: () => finalizeRun({ api: API, promptId, cli }),
-      });
-      const file = firstOutputFile(h.outputs, graph);
-      writeFileAtomic(out, await fetchView({ api: API, file }));
-      console.log("WROTE", out);
-      await finalizeRun({ api: API, promptId, cli });
-    } finally {
-      unstageInputs(staged, { inputDir });
-    }
-  }
+  const render = () => renderEdit({ out, API, plan, placement, inputDir });
 
   await withGpuSlot(
     { noLock: flags["no-lock"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],
-      family: familySignature(flags.family || EDIT_DEFAULT_FAMILY, flags.unet || process.env.COMFY_EDIT_UNET) },
+      family: familySignature(flags.family || EDIT_DEFAULT_FAMILY, flags.unet || process.env.COMFY_EDIT_UNET),
+      ...lifecycleOptions(placement) },
     render,
   );
 }

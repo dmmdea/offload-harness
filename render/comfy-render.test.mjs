@@ -12,6 +12,7 @@ import { buildRenderGraph, parseRenderArgs, parseBoolFlag, UsageError, KNOWN_FAM
 import * as renderMod from "./comfy-render.mjs";
 import { rgbaPrompt } from "./wf-qwen-image-21.mjs";
 import { scratchDir } from "./test-scratch.mjs";
+import { isolatedRunnerEnv } from "./test-isolation.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, "comfy-render.mjs");
@@ -37,7 +38,7 @@ test("unknown --family is a UsageError that names it and the known set", () => {
 test("unknown --family exits 2 through the real script, before any ComfyUI work", (t) => {
   const dir = scratchDir(t, "comfy-render-");
   const r = spawnSync(process.execPath, [SCRIPT, join(dir, "o.png"), "a prompt", "--family", "sdxl-turbo",
-    "--api", "http://127.0.0.1:9"], { encoding: "utf8", timeout: 30000 });
+    "--api", "http://127.0.0.1:9"], { encoding: "utf8", timeout: 30000, windowsHide: true, env: isolatedRunnerEnv() });
   assert.equal(r.status, 2, `exit ${r.status}; stderr: ${r.stderr}`);
   assert.match(r.stderr, /unknown --family 'sdxl-turbo'/);
   assert.doesNotMatch(r.stderr, /not reachable/, "must refuse before polling ComfyUI");
@@ -156,10 +157,9 @@ test("standalone (no --no-lifecycle): self-manages via withGpuSlot — refuses f
   // — proof the self-managed lifecycle is actually wired into main(), without needing a
   // real ComfyUI or a slow poll budget in this test.
   const dir = scratchDir(t, "comfy-render-");
-  const env = { ...process.env };
-  delete env.GPU_LEASE_DIR; delete env.GPU_LEASE_EPOCH; delete env.GPU_LEASE_CLASS;
+  const env = isolatedRunnerEnv();
   const r = spawnSync(process.execPath, [SCRIPT, join(dir, "o.png"), "a prompt", "--api", "http://127.0.0.1:9"],
-    { encoding: "utf8", timeout: 15000, env });
+    { encoding: "utf8", timeout: 15000, windowsHide: true, env });
   assert.equal(r.status, 1, `exit ${r.status}; stderr: ${r.stderr}`);
   assert.match(r.stderr, /GPU lease missing/);
 });
@@ -173,11 +173,10 @@ test("--no-lifecycle: skips withGpuSlot entirely — unset lease does not block 
   // a forced kill (signal set / ETIMEDOUT) after that short window is itself the proof
   // the process was still alive and polling, not refused-and-exited like the sibling test.
   const dir = scratchDir(t, "comfy-render-");
-  const env = { ...process.env };
-  delete env.GPU_LEASE_DIR; delete env.GPU_LEASE_EPOCH; delete env.GPU_LEASE_CLASS;
+  const env = isolatedRunnerEnv();
   const r = spawnSync(process.execPath,
     [SCRIPT, join(dir, "o.png"), "a prompt", "--api", "http://127.0.0.1:9", "--no-lifecycle"],
-    { encoding: "utf8", timeout: 3000, env });
+    { encoding: "utf8", timeout: 3000, windowsHide: true, env });
   assert.ok(r.signal || (r.error && r.error.code === "ETIMEDOUT"), `expected the process to still be running (polling) when killed, got status=${r.status} signal=${r.signal} error=${r.error}`);
   assert.doesNotMatch(r.stderr || "", /GPU lease missing/, "must not require a lease under --no-lifecycle");
 });

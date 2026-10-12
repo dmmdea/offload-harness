@@ -513,7 +513,7 @@ func TestResolveCfgPath(t *testing.T) {
 }
 
 func TestRunGraphArgsRequireGraph(t *testing.T) {
-	_, err := runGraphParams([]string{}) // no --graph/--graph-json
+	_, _, err := runGraphParams([]string{}) // no --graph/--graph-json
 	if err == nil {
 		t.Fatal("expected error when neither --graph nor --graph-json is given")
 	}

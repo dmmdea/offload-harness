@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 func writeFile(t *testing.T, root, rel, body string) {
@@ -480,9 +482,9 @@ func TestPackRefusesAnIrregularFile(t *testing.T) {
 	d := project(t, map[string]string{"index.html": "x"})
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(d, "assets"), t.TempDir())
+		cmd = winexec.Command("cmd", "/c", "mklink", "/J", filepath.Join(d, "assets"), t.TempDir())
 	} else {
-		cmd = exec.Command("mkfifo", filepath.Join(d, "pipe"))
+		cmd = winexec.Command("mkfifo", filepath.Join(d, "pipe"))
 	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("cannot create an irregular file here: %v: %s", err, out)

@@ -137,9 +137,12 @@ func TestPoolRouteRequestsPoolCards(t *testing.T) {
 		t.Errorf("GPU_LEASE_DEVICES = %q, want %q", env["GPU_LEASE_DEVICES"], strings.Join(want, ","))
 	}
 	f.letRunnersGo()
-	if r := f.await(ch); !r.OK {
+	r := f.await(ch)
+	if !r.OK {
 		t.Fatalf("%+v", r)
 	}
+	// a pool holds two cards too, but it is not the card-only pair: its answer names no cards, as it never did
+	wantAnswerNamesNoCards(t, "a pooled call", r)
 }
 
 // Two default-instance jobs must never run at once, and the lease is what keeps them apart: on a

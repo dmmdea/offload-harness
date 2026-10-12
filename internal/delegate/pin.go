@@ -29,7 +29,9 @@
 // fenced local seat, and offload_ask / agent_run pass their own route through. The ones that run inside the MCP server and
 // reach the engine (the review lane's fallthrough, and the remote route of offload_ask and agent_run) are counted as
 // unreasoned, so that part of the gap is visible in offload_status. An explicit route local on offload_ask or agent_run
-// runs on this box's seat without reaching the engine, and is counted nowhere.
+// runs on this box's seat without reaching the engine, and is counted nowhere. One call of those carries a reason: an
+// agent_run that names a model to run on a fleet node (register D-125) hands the engine PinOperator, because the caller
+// chose the placement, and its retry stays on a node that runs the name (remotePinned).
 
 package delegate
 
@@ -180,8 +182,10 @@ func (r *runner) remoteHint() bool { return r.pin.hint && r.pin.asked == "remote
 // fleet node and on no other place, and that holds for its second chance as much as for its first (alternativeNode).
 // It is the reason that makes the pin one this box obeys to the end, because a reasoned pin is what the ledger rows and
 // offload_status say placement obeyed. It is not the route: the bare remote route of a caller with no reason channel
-// (fleet-smoke, the review lane's fallthrough, offload_ask, agent_run) keeps the retry it has always had, remote -> local,
-// and a reasonless remote hint is placed as auto and may retry on the seat (ADR 0078 decisions 3 and 5).
+// (fleet-smoke, the review lane's fallthrough, offload_ask, agent_run with no model) keeps the retry it has always had,
+// remote -> local, and a reasonless remote hint is placed as auto and may retry on the seat (ADR 0078 decisions 3 and 5).
+// An agent_run that names a model is reasoned (PinOperator): it asked for a fleet node's seat, and the local seat is no
+// place for its second chance.
 func (r *runner) remotePinned() bool { return r.pin.reason != "" && r.pin.asked == "remote" }
 
 // remotePinWhy is the words a reasoned remote pin adds to a retry that has nowhere to go, or to a retry that went to a
@@ -233,7 +237,7 @@ type PinStats struct {
 	// Unreasoned counts the subtasks of calls that pinned placement through a caller with no pin_reason channel and
 	// reached the engine (the review lane's remote fallthrough and the remote route of offload_ask and agent_run; an
 	// explicit local route on those two runs on this box's seat without reaching it, and is counted nowhere): they stay
-	// authoritative.
+	// authoritative. An agent_run that names a model is not among them: it carries PinOperator and counts in Reasoned.
 	Unreasoned int
 }
 

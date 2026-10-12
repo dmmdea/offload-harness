@@ -252,6 +252,27 @@ export function parseInflightMetrics(text) {
   return seen ? total : null;
 }
 
+// The /running states of a seat that cannot have a request in flight (register F81). llama-swap lists every
+// process that is not stopped, in one of three states: starting, ready, stopping (internal/process:
+// StateStarting, StateReady, StateStopping; RunningStatus leaves out stopped and shutdown).
+//   starting  the upstream is not serving: a request to the seat is held by llama-swap for the whole load
+//             (register D-92: 4 min on a big seat), so a /slots probe sat until its own deadline, three
+//             rounds and a grace in all (~17 s on every render start while a seat was starting), and there
+//             was no request on the upstream to wait for.
+//   stopping  the upstream is being killed and llama-swap does not wait for what it is serving (Unload: "in-flight
+//             requests ... are not waited for"), and a request to a stopping seat is queued until the stop is
+//             done and then STARTS it again (EnsureReady: "stopping -> waits for the stop to finish, then
+//             starts"): the probe would load the model the drain exists to clear, the hazard the /running gate
+//             below was written against.
+// Anything else is probed: "ready" above all, and also a seat listed with no state (older builds) or with one
+// this code has never seen, because a probe of an idle seat costs one read, while a skipped seat that was
+// busy loses its request. The Go-side drain reads the same two states the same way (internal/seatload:
+// Starting, Stopping), but waits a load in progress out, because the request that triggered it is waiting on
+// the engine. This helper does not wait (seconds on every render start, and nothing on the upstream to read),
+// so the unload that follows kills that request, and the drain says which seats that concerns: `starting` in its
+// result, which freeLlamaSwap turns into one log line. A stopping seat is already leaving and is not named.
+const NO_REQUEST_STATES = new Set(["starting", "stopping"]);
+
 export async function quiesceLlamaSwap(ids, {
   api = process.env.LLAMA_SWAP_API || "http://localhost:11436",
   timeoutMs = 60_000, pollMs = 500, graceMs = 1_500,
@@ -259,15 +280,22 @@ export async function quiesceLlamaSwap(ids, {
 } = {}) {
   const deadline = nowFn() + timeoutMs;
   const unknown = new Set();
+  const starting = new Set(); // seats skipped because a load is in progress: nothing waited for them
   const started = nowFn();
 
-  // Which models does the server consider loaded? Used to disambiguate a 404.
+  // Which models does the server consider loaded, and in what state? Used to disambiguate a 404, and to
+  // leave alone a seat that cannot have a request in flight (NO_REQUEST_STATES). A Map of id -> lowercased
+  // state ("" when /running gives none); .has() is the loaded test as before.
   const loaded = async () => {
     try {
       const r = await fetchImpl(`${api}/running`, { signal: withTimeout(requestTimeoutMs) });
       if (!r.ok) return null;
       const j = await r.json();
-      return new Set((j.running || []).map((m) => m.model).filter(Boolean));
+      const seats = new Map();
+      for (const e of j.running || []) {
+        if (e && e.model) seats.set(e.model, typeof e.state === "string" ? e.state.trim().toLowerCase() : "");
+      }
+      return seats;
     } catch { return null; }
   };
 
@@ -293,6 +321,11 @@ export async function quiesceLlamaSwap(ids, {
   const busy = async (id, loadedSet) => {
     if (!loadedSet) { unknown.add(id); return false; } // blind: never probe
     if (!loadedSet.has(id)) return false;              // not loaded: nothing in flight
+    const state = loadedSet.get(id);
+    if (NO_REQUEST_STATES.has(state)) { // starting or stopping: nothing in flight on its upstream, and a probe would hang or reload it
+      if (state === "starting") starting.add(id); // the request that triggered the load dies with the unload that follows: the caller says so
+      return false;
+    }
     try {
       const r = await fetchImpl(`${api}/upstream/${id}/slots`, { signal: withTimeout(requestTimeoutMs) });
       if (r.status === 404 || r.status === 501) {
@@ -318,6 +351,7 @@ export async function quiesceLlamaSwap(ids, {
   let unknownRounds = 0;
   for (;;) {
     unknown.clear(); // judge each round on its own evidence, not a stale transient
+    starting.clear();
     const loadedSet = await loaded();
     const flags = await Promise.all(ids.map((id) => busy(id, loadedSet)));
     if (!flags.some(Boolean)) {
@@ -327,7 +361,7 @@ export async function quiesceLlamaSwap(ids, {
       unknownRounds = 0;
     }
     if (nowFn() >= deadline) {
-      return { drained: false, waitedMs: nowFn() - started, unknown: [...unknown] };
+      return { drained: false, waitedMs: nowFn() - started, unknown: [...unknown], starting: [...starting] };
     }
     await new Promise((r) => setTimeout(r, pollMs));
   }
@@ -336,7 +370,7 @@ export async function quiesceLlamaSwap(ids, {
     // claiming a drain we did not verify.
     await new Promise((r) => setTimeout(r, graceMs));
   }
-  return { drained: unknown.size === 0, waitedMs: nowFn() - started, unknown: [...unknown] };
+  return { drained: unknown.size === 0, waitedMs: nowFn() - started, unknown: [...unknown], starting: [...starting] };
 }
 
 // freeLlamaSwap: free the GPU-resident llama-swap models so their VRAM goes to a gen
@@ -407,6 +441,12 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
       // we proceed and say so.
       log(`freeLlamaSwap: proceeding without a verified drain after ${res.waitedMs}ms` +
           (res.unknown.length ? ` (could not read /slots for: ${res.unknown.join(",")})` : ""));
+    }
+    if (Array.isArray(res.starting) && res.starting.length > 0) {
+      // The Go-side drain waits a load in progress out; this one does not, by decision (F81), and the unload below
+      // kills the request that triggered the load. Said, so an aborted request has a trace.
+      const n = res.starting.length;
+      log(`freeLlamaSwap: unloading ${res.starting.join(",")} while ${n === 1 ? "its load is" : "their loads are"} in progress (the drain does not wait for a seat that is starting); a request waiting on ${n === 1 ? "it" : "them"} is aborted`);
     }
   } catch (e) {
     log(`freeLlamaSwap: drain failed (${e && e.message}); proceeding to unload`);
@@ -510,6 +550,10 @@ export async function withGpuSlot(opts, fn) {
     reserveVram,
     api,
     instanceEnv = process.env,
+    // launch: the card-only (multicard) ComfyUI launch (wan-multicard.mjs multicardLaunch). When given, ensureComfy launches with
+    // it and reads `instanceEnv` as its environment (the same one the instance was resolved from). Absent, ensureComfy is called
+    // with exactly the options it always was.
+    launch = null,
     freeLlamaSwap: freeLS = freeLlamaSwap,
     ensureComfy = defaultEnsureComfy,
     freeComfy: freeCfy = freeComfy,
@@ -600,6 +644,7 @@ export async function withGpuSlot(opts, fn) {
         // this runner's event loop, and its lease's holder stops it. Absent unless asked, so the
         // call is unchanged for a runner that tears its own ComfyUI down.
         ...(keepComfy ? { keep: true } : {}),
+        ...(launch ? { launch, env: instanceEnv } : {}),
       });
     }
     if (comfyManaged && family) {

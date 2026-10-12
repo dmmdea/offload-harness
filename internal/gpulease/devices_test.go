@@ -20,6 +20,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 const (
@@ -960,7 +962,7 @@ func contendHelper() int {
 }
 
 func newHelperCmd(self, root string, i int) *exec.Cmd {
-	cmd := exec.Command(self, "-test.run=^$")
+	cmd := winexec.Command(self, "-test.run=^$")
 	cmd.Env = append(os.Environ(), "GPULEASE_HELPER_ROOT="+root, "GPULEASE_HELPER_ID="+strconv.Itoa(i), "GPULEASE_HELPER_ITERS=40")
 	return cmd
 }

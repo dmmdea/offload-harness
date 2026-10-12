@@ -13,7 +13,6 @@ package main
 import (
 	"context"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // driveWrapperAt runs `gpu reserve args` in a child (this test binary, TestHelperWrapperDriver) that delivers sig at the
@@ -29,7 +29,7 @@ import (
 // command's exit code, so a wrapper that started its command cannot be observed from inside the test binary.
 func driveWrapperAt(t *testing.T, args []string, at, sig string) string {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperWrapperDriver$", "-test.timeout=90s")
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestHelperWrapperDriver$", "-test.timeout=90s")
 	cmd.Env = append(os.Environ(),
 		"LO_WRAP_ARGS="+strings.Join(args, "\n"),
 		"LO_WRAP_SIGNAL="+sig,
@@ -434,7 +434,7 @@ func TestARefusedUnloadOfAResidentSeatWritesNoDebt(t *testing.T) {
 // that loses exactly the end that says what happened ("... never start..."). Every stage text, for every signal the wrapper
 // asks for, fits whole.
 func TestEveryStageTextFitsTheCardWhole(t *testing.T) {
-	stages := map[string]string{"before the card": stageBeforeCard, "queued": stageQueued, "draining": stageDraining, "before the start": stageBeforeStart}
+	stages := map[string]string{"before the card": stageBeforeCard, "queued": stageQueued, "draining": stageDraining, "host RAM": stageHostRAM, "before the start": stageBeforeStart}
 	for sname, stage := range stages {
 		for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP} {
 			text := endedBySignal(sig, stage).Error()

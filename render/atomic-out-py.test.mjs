@@ -19,19 +19,19 @@ const GOOD = Buffer.from("the previous good file");
 
 function findPython() {
   for (const c of [process.env.TTS_PY, "python3", "python"].filter(Boolean)) {
-    const r = spawnSync(c, ["-c", "import sys; print(sys.version_info[0])"], { encoding: "utf8" });
+    const r = spawnSync(c, ["-c", "import sys; print(sys.version_info[0])"], { encoding: "utf8", windowsHide: true });
     if (!r.error && r.status === 0 && r.stdout.trim() === "3") return c;
   }
   return null;
 }
 const PY = findPython();
-const PIL = PY && spawnSync(PY, ["-c", "import PIL"]).status === 0;
+const PIL = PY && spawnSync(PY, ["-c", "import PIL"], { windowsHide: true }).status === 0;
 const names = (d) => readdirSync(d).sort();
 // no bytecode beside the workers: the sibling import would otherwise leave a render/__pycache__ behind
 const pyEnv = (extra = {}) => ({ ...process.env, PYTHONDONTWRITEBYTECODE: "1", ...extra });
 
 test("atomic_out.py --selftest passes on a bare python", { skip: !PY && "no python 3 on PATH" }, () => {
-  const r = spawnSync(PY, [join(HERE, "atomic_out.py"), "--selftest"], { encoding: "utf8", env: pyEnv() });
+  const r = spawnSync(PY, [join(HERE, "atomic_out.py"), "--selftest"], { encoding: "utf8", env: pyEnv(), windowsHide: true });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /SELFTEST PASS/);
 });
@@ -80,7 +80,7 @@ function stubTorch(t) {
 function runTts(t, out, mode) {
   const stubs = stubTorch(t);
   return spawnSync(PY, [join(HERE, "tts_chatterbox.py"), "--out", out, "--text", "hola"], {
-    encoding: "utf8",
+    encoding: "utf8", windowsHide: true,
     env: pyEnv({ PYTHONPATH: stubs, STUB_SAVE: mode, TTS_DEVICE: "cpu", HF_HUB_OFFLINE: "1" }),
   });
 }
@@ -120,7 +120,7 @@ function editRequest(d, out) {
 test("edit_image.py delivers through the atomic helper: a good run replaces the file and leaves nothing beside it", { skip: (!PY && "no python 3 on PATH") || (!PIL && "no PIL") }, (t) => {
   const d = scratchDir(t, "edit-out-"); const out = join(d, "out.png");
   writeFileSync(out, GOOD);
-  const r = spawnSync(PY, [join(HERE, "edit_image.py")], { input: editRequest(d, out), encoding: "utf8", env: pyEnv() });
+  const r = spawnSync(PY, [join(HERE, "edit_image.py")], { input: editRequest(d, out), encoding: "utf8", env: pyEnv(), windowsHide: true });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.ok(readFileSync(out).subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])), "the new png is at out");
   assert.deepEqual(names(d), ["in.png", "out.png"]);
@@ -143,7 +143,7 @@ test("edit_image.py: a full disk during the save fails the worker, keeps the pre
     "runpy.run_path(sys.argv_path, run_name='__main__')",
     "",
   ].join("\n").replace("sys.argv_path", JSON.stringify(join(HERE, "edit_image.py"))));
-  const r = spawnSync(PY, [driver], { input: editRequest(d, out), encoding: "utf8", env: pyEnv() });
+  const r = spawnSync(PY, [driver], { input: editRequest(d, out), encoding: "utf8", env: pyEnv(), windowsHide: true });
   assert.equal(r.status, 3, "a failed save is the worker's defer-class exit; " + r.stdout + r.stderr);
   assert.match(r.stdout, /No space left on device/);
   assert.deepEqual(readFileSync(out), GOOD, "the previous good image must survive");

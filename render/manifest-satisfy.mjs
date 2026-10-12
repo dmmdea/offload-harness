@@ -319,7 +319,7 @@ export function buildHostConstraints(freezeText) {
 
 async function run(cmd, opts = {}) {
   return new Promise((resolve, reject) => {
-    const c = nodeSpawn(cmd[0], cmd.slice(1), { stdio: "pipe", ...opts });
+    const c = nodeSpawn(cmd[0], cmd.slice(1), { stdio: "pipe", ...opts, windowsHide: true });
     let err = "";
     c.stderr.on("data", (d) => (err += d));
     c.on("error", reject);
@@ -330,7 +330,7 @@ async function run(cmd, opts = {}) {
 // runOut: like run() but resolves with trimmed stdout (used to read `git rev-parse HEAD`).
 async function runOut(cmd, opts = {}) {
   return new Promise((resolve, reject) => {
-    const c = nodeSpawn(cmd[0], cmd.slice(1), { stdio: ["ignore", "pipe", "pipe"], ...opts });
+    const c = nodeSpawn(cmd[0], cmd.slice(1), { stdio: ["ignore", "pipe", "pipe"], ...opts, windowsHide: true });
     let out = "", err = "";
     c.stdout.on("data", (d) => (out += d));
     c.stderr.on("data", (d) => (err += d));

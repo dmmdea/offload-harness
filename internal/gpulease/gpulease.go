@@ -275,6 +275,14 @@ type Meta struct {
 	// hold it. Additive and omitempty: a record without it declares nothing, which every reader
 	// (including a binary that predates the field, which ignores it) takes to mean "adds no host RAM".
 	HostRAMGiB float64 `json:"host_ram_gib,omitempty"`
+	// HostRAMWaitGiB (F82) is host RAM the holder will ask the host for AFTER it has cleared the agent seat
+	// (`gpu reserve --unload-seat`): the grant took the cards without comparing it to the host, because the
+	// memory it waits for is held by the seat its own unload frees. It is not a claim. HostRAMGiB stays 0, so
+	// no other grant counts it as still to load, until Manager.AwaitHostRAM admits it: that check and the move
+	// of the figure into HostRAMGiB (and the clearing of this field) are one critical section under the epoch
+	// lock, the same admission rule at the same point in every other lease's view. Additive and omitempty:
+	// an older reader ignores it and reads a lease that declares nothing yet.
+	HostRAMWaitGiB float64 `json:"host_ram_wait_gib,omitempty"`
 
 	// --- record v2 (card-scoped leases). Every field is omitempty and unknown to a
 	// pre-v2 reader, which ignores it: a record without Devices is whole-node. ---
@@ -368,6 +376,8 @@ type Info struct {
 	Command string
 	// HostRAMGiB mirrors Meta.HostRAMGiB: the host RAM the holder declared (0 = none declared).
 	HostRAMGiB float64
+	// HostRAMWaitGiB mirrors Meta.HostRAMWaitGiB: host RAM the holder asked for and the host has not admitted yet.
+	HostRAMWaitGiB float64
 	// HeartbeatAt is the holder's last renewal (the per-epoch heartbeat file,
 	// else the acquisition stamp). Zero when unknown.
 	HeartbeatAt time.Time
@@ -533,6 +543,13 @@ type Options struct {
 	// from it. Once, because a line per poll is a notification per second in the session that wraps
 	// the reserve.
 	OnHostRAMWait func(*ErrHostRAM)
+	// HostRAMWaitGiB (F82) is host RAM the holder will ask for after it has cleared the agent seat itself, for a lease
+	// that unloads the seat (`gpu reserve --unload-seat`): the grant neither compares it to the host nor declares it
+	// (HostRAMGiB is 0 for it), because the memory it would wait for is held by the seat the lease's own unload frees.
+	// It is stamped on the record (Meta.HostRAMWaitGiB) and admitted afterwards by Manager.AwaitHostRAM, by the one
+	// rule, while the cards are still held. A caller sets either this or HostRAMGiB, not both: HostRAMGiB wins (the
+	// grant admits it as always) and this is then ignored.
+	HostRAMWaitGiB float64
 	// Devices names the cards the lease holds, by GPU UUID (plan invariant I2). Empty
 	// is a WHOLE-NODE lease, the only kind that existed before record v2. A non-empty
 	// set writes a v2 lease (per-card claims) and is refused unless the host has
@@ -1190,6 +1207,7 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		Command:    meta.Command,
 		HostRAMGiB: meta.HostRAMGiB,
 
+		HostRAMWaitGiB: meta.HostRAMWaitGiB,
 		Devices:        append([]string(nil), meta.Devices...),
 		Epochs:         []uint64{meta.Epoch},
 		Group:          meta.Group,
@@ -1732,6 +1750,11 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 	}
 	now := m.now()
 	start, _ := m.procStart(m.pid)
+	// A need the grant admits (HostRAMGiB) is not also one to await: the admitted figure wins.
+	awaiting := 0.0
+	if opts.HostRAMGiB <= 0 {
+		awaiting = max(opts.HostRAMWaitGiB, 0)
+	}
 	meta := Meta{
 		Epoch:        epoch,
 		Class:        class,
@@ -1747,6 +1770,7 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 		Command:      clipCommand(opts.Command),
 		HostRAMGiB:   max(opts.HostRAMGiB, 0),
 
+		HostRAMWaitGiB: awaiting,
 		Group:          strings.TrimSpace(opts.Group),
 		WrapperVersion: strings.TrimSpace(opts.WrapperVersion),
 	}
@@ -1989,40 +2013,53 @@ func (m *Manager) Restamp(epoch uint64, fn func(*Meta)) error {
 	if _, serr := os.Stat(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
 		return m.restampV2(epoch, fn)
 	}
-	return m.withEpochLock(func() error {
-		meta, err := m.readMeta()
-		if err != nil || meta == nil {
-			return fmt.Errorf("gpulease: restamp: the lease is gone (epoch %d)", epoch)
-		}
-		if meta.Epoch != epoch {
-			return fmt.Errorf("gpulease: restamp: fenced out — our epoch %d, current epoch %d", epoch, meta.Epoch)
-		}
-		fn(meta)
-		meta.Epoch = epoch
-		b, merr := json.Marshal(meta)
-		if merr != nil {
-			return fmt.Errorf("gpulease: encoding lease record: %w", merr)
-		}
-		tmp := m.metaPath() + ".restamp"
-		if werr := os.WriteFile(tmp, b, 0o666); werr != nil {
-			return fmt.Errorf("gpulease: restamp: %w", werr)
-		}
-		// renameReplacing retries the Windows sharing/access-denied error a
-		// concurrent reader's open handle on meta.json produces — Inspect()
-		// polling from this or another process (a drain's own heartbeat
-		// loop, `gpu status`, offload_status) has no coordination with this
-		// write. Without the retry this rename failed outright under that
-		// race (TestReserveRenewsTheLeaseWhileDraining,
-		// TestReserveRenewsTheLeaseWhileWarmingBack, ~1/24 full Windows
-		// runs) — a PRODUCTION defect too: a failed restamp here means the
-		// DRAINING stamp never clears, cordoning the seat for the rest of
-		// the lease's window (register C-50/S-31).
-		if rerr := renameReplacing(tmp, m.metaPath()); rerr != nil {
-			_ = os.Remove(tmp)
-			return fmt.Errorf("gpulease: restamp: %w", rerr)
-		}
-		return nil
-	})
+	return m.withEpochLock(func() error { return m.restampWholeLocked(epoch, fn) })
+}
+
+// restampLocked is Restamp for a caller that already holds the epoch lock: the check-and-stamp of AwaitHostRAM
+// reads the leases, decides and writes the record in ONE critical section, so the stamp that turns a waiting
+// need into a declared one cannot be separated from the comparison that admitted it.
+func (m *Manager) restampLocked(epoch uint64, fn func(*Meta)) error {
+	if _, serr := os.Stat(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
+		return m.restampV2Locked(epoch, fn)
+	}
+	return m.restampWholeLocked(epoch, fn)
+}
+
+// restampWholeLocked is the whole-node half of Restamp; the caller holds the epoch lock.
+func (m *Manager) restampWholeLocked(epoch uint64, fn func(*Meta)) error {
+	meta, err := m.readMeta()
+	if err != nil || meta == nil {
+		return fmt.Errorf("gpulease: restamp: the lease is gone (epoch %d)", epoch)
+	}
+	if meta.Epoch != epoch {
+		return fmt.Errorf("gpulease: restamp: fenced out — our epoch %d, current epoch %d", epoch, meta.Epoch)
+	}
+	fn(meta)
+	meta.Epoch = epoch
+	b, merr := json.Marshal(meta)
+	if merr != nil {
+		return fmt.Errorf("gpulease: encoding lease record: %w", merr)
+	}
+	tmp := m.metaPath() + ".restamp"
+	if werr := os.WriteFile(tmp, b, 0o666); werr != nil {
+		return fmt.Errorf("gpulease: restamp: %w", werr)
+	}
+	// renameReplacing retries the Windows sharing/access-denied error a
+	// concurrent reader's open handle on meta.json produces — Inspect()
+	// polling from this or another process (a drain's own heartbeat
+	// loop, `gpu status`, offload_status) has no coordination with this
+	// write. Without the retry this rename failed outright under that
+	// race (TestReserveRenewsTheLeaseWhileDraining,
+	// TestReserveRenewsTheLeaseWhileWarmingBack, ~1/24 full Windows
+	// runs) — a PRODUCTION defect too: a failed restamp here means the
+	// DRAINING stamp never clears, cordoning the seat for the rest of
+	// the lease's window (register C-50/S-31).
+	if rerr := renameReplacing(tmp, m.metaPath()); rerr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("gpulease: restamp: %w", rerr)
+	}
+	return nil
 }
 
 // Restamp is Manager.Restamp for the lease's own holder.

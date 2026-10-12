@@ -39,6 +39,8 @@
 // caller picks a preset; QWEN_IMAGE_PRESETS is the source of truth for the
 // pairing (template widgets: full = 50/4, lightning4 = 4/1 + LoRA).
 
+import { findRecipe, multicardLoaders, PLACEMENTS, PLACEMENT_DEFAULT } from "./multicard-recipes.mjs";
+
 /** Sampler settings that go with each base/LoRA combination (template widgets). */
 export const QWEN_IMAGE_PRESETS = {
   // The shipped 2512 template's un-distilled recipe.
@@ -61,6 +63,9 @@ export function buildQwenImage({
   width = 1328, height = 1328,   // template-native 1:1; the official aspect table is all /16
   seed = Math.floor(Math.random() * 1e15),
   filenamePrefix = "render",
+  // placement: "single" (default, the graph that always was) | "multicard" (the card-only recipe for the Q5_1 GGUF, two cards, no host RAM;
+  // render/multicard-recipes.mjs). residentGb overrides the recipe's share of the DiT on the compute card; the single placement ignores it.
+  placement = PLACEMENT_DEFAULT, residentGb,
 } = {}) {
   if (!prompt) throw new Error("buildQwenImage: prompt is required");
   if (!unet) throw new Error("buildQwenImage: unet is required");
@@ -87,7 +92,11 @@ export function buildQwenImage({
   width = Math.max(64, Math.floor(width / 16) * 16);
   height = Math.max(64, Math.floor(height / 16) * 16);
 
-  const g = {
+  if (!PLACEMENTS.includes(placement)) {
+    throw new Error(`buildQwenImage: placement must be ${PLACEMENTS.join("|")}, got ${JSON.stringify(placement)}`);
+  }
+  const recipe = placement === "multicard" ? findRecipe({ route: "image", family: "qwen-image", unet, clip }) : null;
+  const g = recipe ? multicardLoaders(recipe, { unet, clip, vae, residentGb }) : {
     "1": isGGUF
       ? { class_type: "UnetLoaderGGUF", inputs: { unet_name: unet } }
       : { class_type: "UNETLoader", inputs: { unet_name: unet, weight_dtype: "default" } },
@@ -98,7 +107,7 @@ export function buildQwenImage({
   // LoRA rides the MODEL only — the text encoder is a separate CLIPLoader here.
   const modelSrc = lora ? "4" : "1";
   if (lora) {
-    g["4"] = { class_type: "LoraLoaderModelOnly", inputs: { model: ["1", 0], lora_name: lora, strength_model: loraStrength } };
+    g["4"] = { class_type: recipe ? recipe.loraLoader : "LoraLoaderModelOnly", inputs: { model: ["1", 0], lora_name: lora, strength_model: loraStrength } };
   }
   g["5"] = { class_type: "ModelSamplingAuraFlow", inputs: { model: [modelSrc, 0], shift } };
 

@@ -319,6 +319,16 @@ func musicNeeds() []needFile {
 // graph names (qwen-image and the 2511 edit load a .gguf through ComfyUI-GGUF; a pooled
 // krea2 seat loads through ComfyUI-MultiGPU). Every other image graph is core.
 func imageNodeClasses(cfg config.Config) []string {
+	// A card-only binding (imagegen_placement: multicard) loads through the recipe's MultiGPU classes, whatever its single-card graph would name.
+	if cfg.ImageMulticard() {
+		fam := cfg.ImageGenFamily
+		if fam == "" {
+			fam = "sdxl"
+		}
+		if row := FindMulticardRow("image", fam, ImageModelFiles(cfg)); row != nil {
+			return row.NodeClasses()
+		}
+	}
 	switch {
 	case cfg.ImageGenFamily == "qwen-image" && isGGUF(cfg.ImageGenCkpt):
 		return []string{"UnetLoaderGGUF"}
@@ -331,6 +341,15 @@ func imageNodeClasses(cfg config.Config) []string {
 }
 
 func editNodeClasses(cfg config.Config) []string {
+	if cfg.EditMulticard() {
+		fam := cfg.GenEditFamily
+		if fam == "" {
+			fam = config.EditFamily2511
+		}
+		if row := FindMulticardRow("edit", fam, EditModelFiles(cfg)); row != nil {
+			return row.NodeClasses()
+		}
+	}
 	if cfg.GenEditFamily != config.FamilyQwenImage21 && isGGUF(cfg.GenEditUnet) {
 		return []string{"UnetLoaderGGUF"}
 	}
@@ -378,6 +397,9 @@ var classPacks = map[string][]string{
 	"UnetLoaderGGUF":                  {"ComfyUI-GGUF"},
 	"CLIPLoaderMultiGPU":              {"ComfyUI-MultiGPU"},
 	"VAELoaderMultiGPU":               {"ComfyUI-MultiGPU"},
+	// the card-only image and edit recipes (multicard.go): the plain DiT pin and the DisTorch2 text-encoder loader
+	"UNETLoaderMultiGPU":          {"ComfyUI-MultiGPU"},
+	"CLIPLoaderDisTorch2MultiGPU": {"ComfyUI-MultiGPU"},
 }
 
 // NodeCheck answers "can this ComfyUI build these node classes?".

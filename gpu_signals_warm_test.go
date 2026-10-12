@@ -14,12 +14,13 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // TestHelperWrapperDriver runs `gpu reserve` with the arguments in LO_WRAP_ARGS (one per line) and delivers
@@ -71,7 +72,7 @@ func signalledReserve(t *testing.T, sig string) (f *orderedSwap, owed string, he
 	cfgPath, m := handoffFixture(t, f)
 	args := []string{"--config", cfgPath, "--wait", "30s", "--drain", "--unload-seat", "--reason", "grace"}
 	args = append(args, helperCmdFor("TestHelperSleepMs")...)
-	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperWrapperDriver$", "-test.timeout=90s")
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestHelperWrapperDriver$", "-test.timeout=90s")
 	cmd.Env = append(os.Environ(),
 		"LO_WRAP_ARGS="+strings.Join(args, "\n"),
 		"LO_WRAP_SIGNAL="+sig,

@@ -53,6 +53,8 @@
 // the prefix KV-cache placement is a binding choice (device auto|gpu|cpu|off —
 // "off" and "gpu" stay out of the host-RAM prefetch path of ComfyUI #16443).
 
+import { findRecipe, multicardLoaders, PLACEMENTS, PLACEMENT_DEFAULT } from "./multicard-recipes.mjs";
+
 /** The official sampling recipe (QwenLM README: 40 steps, guidance 1; diffusers true_cfg_scale=1.0). */
 export const QWEN_IMAGE_21_RECIPE = Object.freeze({ steps: 40, cfg: 1.0, sampler: "euler", scheduler: "simple" });
 
@@ -219,7 +221,7 @@ function requireResolution(r) {
   }
 }
 
-function loaders({ unet, clip, vae }) {
+function loaders({ unet, clip, vae, placement = PLACEMENT_DEFAULT, residentGb }) {
   requireName(unet, "unet (the 2.1 diffusion model, e.g. qwen_image_2.1_bf16.safetensors)");
   requireName(clip, "clip (the Qwen3-VL-8B text encoder, e.g. qwen3vl_8b_bf16.safetensors)");
   requireName(vae, "vae (the 2.1 RGBA VAE, e.g. qwen_image_2.1_vae_bf16.safetensors)");
@@ -227,6 +229,13 @@ function loaders({ unet, clip, vae }) {
     // No GGUF loader is wired: 2.1 GGUFs need the leejet ComfyUI-GGUF fork, and the
     // city96 pack most boxes carry reports "Unknown model architecture".
     throw new Error("buildQwenImage21: no GGUF loader is wired for qwen-image-2.1 — bind a .safetensors UNET (bf16 or int8_convrot)");
+  }
+  if (!PLACEMENTS.includes(placement)) {
+    throw new Error(`buildQwenImage21: placement must be ${PLACEMENTS.join("|")}, got ${JSON.stringify(placement)}`);
+  }
+  if (placement === "multicard") {
+    // The card-only placement (render/multicard-recipes.mjs): the loaders of the recipe for this DiT file, nothing else of the graph changes.
+    return multicardLoaders(findRecipe({ route: "image", family: "qwen-image-2.1", unet, clip }), { unet, clip, vae, residentGb });
   }
   return {
     "1": { class_type: "UNETLoader", inputs: { unet_name: unet, weight_dtype: "default" } },
@@ -265,6 +274,9 @@ export function buildQwenImage21({
   resolution = QWEN_IMAGE_21_RESOLUTION,
   seed = Math.floor(Math.random() * 1e15),
   filenamePrefix = "render",
+  // placement: "single" (default, the graph that always was) | "multicard" (the card-only recipe for the DiT file, two cards, no host RAM;
+  // render/multicard-recipes.mjs). residentGb overrides the recipe's share of a split DiT on the compute card; the single placement ignores it.
+  placement = PLACEMENT_DEFAULT, residentGb,
 } = {}) {
   if (typeof prompt !== "string" || !prompt.trim()) throw new Error("buildQwenImage21: prompt is required");
   if (!QWEN_IMAGE_21_SCHEDULES.includes(schedule)) {
@@ -276,7 +288,7 @@ export function buildQwenImage21({
   const W = snapDim(width);
   const H = snapDim(height);
 
-  const g = loaders({ unet, clip, vae });
+  const g = loaders({ unet, clip, vae, placement, residentGb });
   g["4"] = {
     class_type: "TextEncodeQwenImage21",
     inputs: {

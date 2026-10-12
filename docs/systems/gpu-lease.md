@@ -28,7 +28,8 @@ other on a single shared card.
 | `internal/gpulease/audit.go`, `procimages_*.go` | the **reader audit** behind `gpu doctor`: finds harness binaries, Node readers and running images, and writes the reader-audit marker |
 | `internal/gpuprobe/cards.go` | the **card table** (UUID-keyed, index spaces side by side) |
 | `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmits` (the ONE admission rule), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
-| `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases (what the processes below the holder hold RESIDENT, the unit a declaration is in), `Manager.HostRAMPending` |
+| `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases (what the processes below the holder hold RESIDENT, the unit a declaration is in), `Manager.HostRAMPending`; and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
+| `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMHeld`), and what a detached holder keeps when that wait fails (`detachedHostRAMError`) |
 | `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card, else the media class default (see "Host RAM") |
 | `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
 | `internal/gpucards` | the per-card view (`Rows`, `LeaseRows`, `QueueRows`, `Table`, `Section`) that `gpu status`, `gpu cards` and `offload_status` brief all render |
@@ -44,15 +45,15 @@ other on a single shared card.
 | `gpu_drain.go` | `--drain`: waits until the seat's gauge AND the run registry are empty, inside the queue budget; restamps `draining` → `exclusive`; unload / warm-back |
 | `internal/gpuactivity` | the RUN REGISTRY (`<state root>/gpu/activity/`, one record per agent loop in flight) and the activity reading behind `gpu status` / `offload_status.gpu_lease` (`verdict`, `activity`) — ADR 0041; `holders.go` derives each live lease's standing, `facts.go` the activity facts of a legacy lease, `snapshot.go` (`View.Map`, `splitProcesses`) the one JSON shape both surfaces read, with a display card's unsized processes folded into one count per card |
 | `internal/seatload` | the seat's in-flight reading: llama-swap's `/running` (and the roster, for an alias), then the loaded seat's own `/metrics` or `/slots` at the `proxy` `/running` reports — never through `/upstream`, which resets the idle unload timer; a `starting` seat is reported without touching the seat |
-| `gpu_hide_windows.go`, `gpu_hide_other.go` | hidden spawn for the detached holder (a visible console gets closed, killing the hold) |
+| `gpu_hide_windows.go`, `gpu_hide_other.go` | hidden spawn for the detached holder (a visible console gets closed, killing the hold): it always gets a hidden console of its own, whatever terminal launched it (`winexec.HideWindowDetached`); the flags live in `internal/winexec`, the one place every hidden child is built |
 | `render/gpu-lock.mjs` | READ-ONLY participant: honours + fences an inherited lease, elects one unloader, drains, ComfyUI lifecycle. **Does not acquire.** |
 | `internal/gpulock` | the read-only vision gate; the held rule is `gpulease.InspectDir`'s, read through the caller's own narrowing (`WaitFreeScoped`: the vision pre-check passes the seat-narrowed reading the text gate uses) |
 | `internal/modelaffinity/gpuwait.go` | READ-ONLY: text admissions that would make llama-swap load a model wait out a `media` holder (ADR 0026); armed from `config.Load` via `LeaseDir` |
 | `internal/modelaffinity/upstream.go` | READ-ONLY: `AwaitUpstream`, the ONE builder of a llama-swap `/upstream/<model>/…` URL, and `AwaitModelRoute`, the builder for a model-dispatched route (`/v1/chat/completions`, `/v1/embeddings`, …) sent without `Admit` — every probe, tokenizer, warm-up, transcription, chat-lane forward and embedding passes the same fence as a generation (see "Probes pass the fence too") |
-| `gpu_drain.go` (`leaseScope`, `maintainSeatScoped`, `unloadModelsFor`), `internal/gpualloc/scope.go` (`LeaseScope.Locate`, `Judge`, `UnloadModels`), `internal/gpualloc/serving.go` (`ServingPins`), `render/gpu-lock.mjs` (`parseUnloadModels`, `leaseDevices`) | plan P5 and F15: the drain waits for the runs on the leased cards, the unload takes the models placed on them or not placed at all and leaves the models placed on other cards (by `layers`, else by the serving config pin), and the render lane unloads the list the wrapper exports (`GPU_LEASE_UNLOAD_MODELS`) |
+| `gpu_drain.go` (`leaseScope`, `maintainSeatScoped`, `unloadModelsFor`), `internal/gpualloc/scope.go` (`LeaseScope.Locate`, `Judge`, `UnloadModels`), `internal/gpualloc/serving.go` (`servingState`), `internal/servingcfg` (`Load`, `PinsOf`, `Pins`: the one reader of the serving config's pins, shared with the load fence), `render/gpu-lock.mjs` (`parseUnloadModels`, `leaseDevices`) | plan P5 and F15: the drain waits for the runs on the leased cards, the unload takes the models placed on them or not placed at all and leaves the models placed on other cards (by `layers`, else by the serving config pin), and the render lane unloads the list the wrapper exports (`GPU_LEASE_UNLOAD_MODELS`) |
 | `internal/modelaffinity/seatscope.go`, `scoper.go`, `seatyield.go` | the gate's per-seat reading (`SetSeatPins`, `ScopeToPins`, `SeatLease`, `CardsHeld`), the production wiring of the evidence rule (`InspectLease` for the load gate, which remembers what it sees; `PeekLease`, `ScopeInfo`, `ScopeFunc`, `ScopeLeases` for inspectors, which write nothing), and the seat race rule (`YieldIfFenced`) |
 | `internal/mcpserver` | registers the session this MCP server serves in the session registry at start and removes it at exit |
-| `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib` (default 8, chosen and not measured; `Load` installs it process-wide, `gpulease.SetDefaultHostRAMHeadroom`), `agent_seat_host_ram_gib` (the host RAM the agent seat holds once loaded, for the warm-back; unset = `hostneed.DefaultSeatHostGiB`), `gpu_orphan_grace_min`, `gpu_max_term_min`, `gpu_max_total_min`; `ModelPins` (a model's device pins, read from the layers) |
+| `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib` (default 8, chosen and not measured; `Load` installs it process-wide, `gpulease.SetDefaultHostRAMHeadroom`), `agent_seat_host_ram_gib` (the host RAM the agent seat holds once loaded, for the warm-back; unset = `hostneed.DefaultSeatHostGiB`), `gpu_orphan_grace_min`, `gpu_max_term_min`, `gpu_max_total_min`; `ModelPins` (a model's device pins: `LayerPins`, the layers' reading, else the serving config's through `internal/servingcfg`), `serving_config_path` (the llama-swap yaml that places the models `layers` do not declare, for the unload list and the load fence) |
 
 ## Why it exists
 
@@ -344,6 +345,26 @@ So `freeLlamaSwap` drains before it unloads. `quiesceLlamaSwap` polls each tier'
 cannot be read (older llama-server, `--no-slots`), it reports `drained:false` and names the
 unobservable tiers, and the caller logs that it proceeded without a verified drain instead of
 pretending. A stuck tier times out rather than deadlocking the render queue.
+
+**A seat that cannot have a request in flight is not probed (register F81).** `/running` lists every process that
+is not stopped, each in one of three states: `starting`, `ready` or `stopping`. The drain reads the state with the
+list and skips a seat in `starting` or `stopping`: nothing is in flight on it, so nothing is waited for and nothing is
+named unknown. A `starting` seat is not serving: llama-swap holds a request for the whole load (4 min on the
+largest seat), so the `/slots` probe sat until its own 5 s deadline, three rounds and a grace in all (17.6 s measured
+against a fake llama-swap), and that was added to every render start while any seat was loading. A `stopping` seat is
+being killed (an unload does not wait for what it serves), and a request to it is queued behind the stop and then
+starts the seat again, the same hazard the `/running` gate above was written against. The unload that follows is
+unchanged: a seat that is starting or stopping is still on the list the render clears. A `ready` seat is always
+probed, and so is a seat listed with no state (older llama-swap builds) or with a state this code does not know: a
+probe of an idle seat costs one read, and a skipped busy seat loses its request. The Go-side drain
+(`internal/seatload`) reads the same two states and does not probe the upstream of either; it then waits a load in
+progress and a stop out before it counts the seat idle, because the request that triggered a load is waiting on the engine.
+The render helper does not wait a load out, by decision. It used to wait only as long as its probes lasted (three 5 s
+deadlines): by the code's path (not observed live) a seat whose load finished inside that window and then had a request in flight was waited for, and any other
+starting seat was unloaded after the same 17 s with `could not read /slots`. Skipping the probe removes those seconds; the
+unload that follows aborts the request that triggered the load, so the drain returns the seats it skipped for a load in
+progress as `starting` and `freeLlamaSwap` logs one line for them (`unloading <seat> while its load is in progress ...; a
+request waiting on it is aborted`). A seat that is stopping says nothing: it is already leaving.
 
 ## Windows file semantics the lease depends on
 
@@ -734,15 +755,17 @@ default) and whose cards the evidence rule can name.*
 held lease sit on a card **this seat** is pinned to". The seat's pin is the layer seat's `device` (the pin it is launched with:
 nvidia-smi indices under `CUDA_DEVICE_ORDER=PCI_BUS_ID`, or a GPU UUID prefix), read by `config.ModelPins(model)`: the pins
 of every seat that serves the model (the union when it is declared twice), a router seat's `model_map` twins, and, for the
-router seat that declares no model, the cascade's rung models. `config.Load` arms it into the load gate beside the lease
+router seat that declares no model, the cascade's rung models. A model no layer declares is placed by its entry in the serving
+config, the reading the unload list makes ("Placement from the serving config" below; until C-86a a box without `layers` placed
+nothing and every lease fenced every seat). `config.Load` arms it into the load gate beside the lease
 directory (`modelaffinity.SetSeatPins`), with `gpu_comfy_order`, `comfy_dir` and the memory stack. The arithmetic is three
 methods on `gpulease.Info`: `EffectiveDevices` (the declared cards, else the inferred ones, else none, which is the whole
 node), `Touches(ids)` and `For(ids)`, which narrows an inspection to the leases that touch the cards and leaves every
 existing predicate (`Held`, `blocksLoad`, `BlocksNewRun`, `Reserved`, `Fenced`, `ForeignFence`) unchanged and unaware.
 `gpulease.ResolvePins` turns a seat's pins into lease ids through the card table.
 
-**The direction of every doubt is "fence".** A model nobody declared a pin for (an alias a layer does not spell, a seat on a
-box with no layers), a pin the card table cannot place (an index no card has, an ambiguous prefix, a card named twice), a
+**The direction of every doubt is "fence".** A model nothing places (an alias a layer does not spell and the serving config does
+not list, a `proxy:` seat, an entry that pins no device in env), a pin the card table cannot place (an index no card has, an ambiguous prefix, a card named twice), a
 card table that cannot be read, a whole-node lease, and a long-context contract (it runs on a long seat that the agent chain
 does not describe) all read as every card, which is the answer the gate gave before card-scoped leases existed. Narrowing
 happens only on a positive resolution. The card table is an nvidia-smi exec, so it is read only when a held lease actually
@@ -945,16 +968,45 @@ NO list").
 **Placement from the serving config (F15).** A box that declares no `layers` has no declared card for any seat (the installer's
 tier seeds do not write `layers`), so `layers` alone placed nothing there. `serving_config_path` is the llama-swap yaml the box
 runs, and nearly every llama.cpp model in it pins its cards with an env entry, `CUDA_VISIBLE_DEVICES=<uuid>[,<uuid>]` (GPU UUIDs,
-sometimes indices). `gpualloc.ServingPins` reads that pin for each model id and alias, and `LeaseScope.Locate` matches it against
+sometimes indices). `internal/servingcfg` reads that pin for each model id and alias, and `LeaseScope.Locate` matches it against
 the card table when `layers` do not declare the model (a model both declare keeps the `layers` reading). Only the env pin counts;
 device flags in `cmd` are never read. Unknown, with the reason: an entry whose env names no device (an unpinned dual-card
 `-sm layer` / `--tensor-split` entry), a `proxy:` seat (a vLLM engine: its cards are pinned in its own unit, so **a `proxy:` seat
 with no `layers` entry is unloaded under any card lease**), a pin that is a macro, an alias two entries claim with different pins, a
 bare index when the entry does not also set `CUDA_DEVICE_ORDER=PCI_BUS_ID` (without it a CUDA index is not an nvidia-smi index),
-and every model when the file cannot be read or `serving_config_path` is unset (said once). The file is read per lease, only when a
-model needs it (`TestServingPinsReadsOnlyTheEnvPin`, `TestUnloadModelsPlacesWhatLayersDoNotDeclareFromTheServingConfig`,
-`TestUnloadModelsSaysOnceWhenTheServingConfigCannotBeRead`). The load fence still places a model through `layers` only, so on a box
-without them a text load waits for any media lease, whatever card it is on.
+and every model when the file cannot be read or `serving_config_path` is unset (said once). The unload list reads the file per lease,
+only when a model needs it (`TestServingPinsReadsOnlyTheEnvPin` in `internal/servingcfg`,
+`TestUnloadModelsPlacesWhatLayersDoNotDeclareFromTheServingConfig`, `TestUnloadModelsSaysOnceWhenTheServingConfigCannotBeRead`).
+
+**The load fence places a model the same way (C-86a).** `config.ModelPins`, the function `Load` arms the fence with
+(`modelaffinity.SetSeatPins`), asks the layers first (`Config.LayerPins`) and then the same serving config through the same reader
+(`servingcfg.PinsOf`), with the same strictness. Until C-86a the fence read `layers` only, so on a box without them every lease
+fenced every seat: a media lease on one card held back a text load for a model the serving config pins to another card, which
+`gpu reserve` had been leaving resident since F15. Now a media lease on one card fences the models the serving config pins to that
+card, the pairs that span it and every model nothing places, and a load for a model pinned to another card goes through at once
+(`TestAOneCardLeaseFencesOnlyTheSeatsTheServingConfigPlacesOnThatCard`, in both directions). Everything listed as unknown above
+stays fenced by any lease, and so do a whole-node lease, a card table that cannot be read and a serving config that is unset,
+missing or not YAML (`TestTheFenceStaysClosedWhereTheServingConfigCannotPlaceAModel`). A serving config that is set and cannot be
+read is not left invisible: the refusal a blocked load prints names only the lease holder, so the fence's reader says once per
+cause, in the process log (stderr), `servingcfg: the serving config at <path> cannot be read (<cause>): the load fence places no
+model by it, so a lease on any card fences every seat the layers do not place`. It says it again when the cause changes or when
+the same fault returns after the file read cleanly; an unset path is the default and says nothing
+(`TestPinsOfSaysOnceThatTheServingConfigCannotBeRead`, `TestPinsOfSaysNothingWhereThereIsNothingWrong`,
+`TestPinsOfSaysItAgainWhenTheSameFaultReturnsAfterTheFileWasRead`, `TestModelPinsSaysOnceThatTheServingConfigCannotBeRead`). The
+fence and the unload list cannot disagree about a model: both read one parser and `layers` outrank the file in both
+(`TestTheLoadFenceAndTheUnloadListPlaceEveryModelAlike`, `TestLayersOutrankTheServingConfigForTheFence`). The fence's own lookups of a
+seat's pins (`ScopeToModel`, which every admission, wait and yield goes through, and `SeatCards`) happen only when a held lease
+names cards, so under an idle box or a whole-node lease the fence does not touch the file
+(`TestSeatPinsAreNotLookedUpWhenNoLeaseNamesCards`, `TestOnlyTheFencesOwnLookupsWaitForALeaseThatNamesCards`). Every other reader of
+`Config.ModelPins` asks on every call, an idle box included: `PinsFor` (the cards an agent run records), the text and vision auto
+routes and the delegator's run-cap line each cost a Stat of the file per call. The file is Stat-ed on each lookup and parsed again
+when its modification time or size changes, or when it changed less than three seconds before it was read, so a long-lived process
+(the MCP server, the fleet node) follows a llama-swap config reload on its next poll without a restart
+(`TestTheFenceFollowsAnEditOfTheServingConfigWithoutARestart`, `TestTheServingPinsAreReReadWhenTheYamlChangesSize`,
+`TestLoadDoesNotTrustAReadOfAFileChangedInsideTheRacyWindow`). The same pins answer every reader of `Config.ModelPins`: the
+waiter's place in line (`SeatCards`), `PinsFor` (the cards a run records), the text and vision auto routes and the delegator's run-cap
+line. **Not changed:** a vLLM seat. Its serving entry is a `proxy:` (its cards live in its own unit) and `vllm_seats` carries names,
+not cards, so a lease on any card still fences it; placing it needs the unit's pin, a separate change.
 
 **Between renders (F15).** A `media` lease is not stamped exclusive (`Meta.Exclusive` is a text-lease flag), but the load
 fence does not read the flag for it: `blocksLoadOne` gates `ClassMedia` from the end of its drain (a draining hold waits for the
@@ -1313,6 +1365,20 @@ binary ignores it, and a record without it declares nothing). Where the number c
 | the **media class default** | for a media lease with no `--ram` and no recognised call: the largest estimate over the render families **this box binds** (`imagegen_*`, `gen_edit_*`, `videogen_*`, named families; a binding on the sd.cpp engine is not counted, on whichever route it is, a video family included), so a 32 GiB node is not held to a 128 GiB node's numbers; 0 when nothing is bound. It is never clamped to fit the box: a default that cannot be admitted is refused with the reason and `--ram` as the way out. |
 | a text lease | 0: the harness cannot size an arbitrary wrapped command, so a text reservation declares nothing unless `--ram` says (the agent seat's own reload is sized where the harness does it, below). |
 
+**When the figure is the class default, the verb says why** (F71, `classDefaultHint`;
+`TestReserveNamesTheUnrecognisedWrapperWhenItDeclaresTheClassDefault`, `TestReserveNamesTheGraphWhenARecognisedHelperRunsOne`,
+`TestReserveNamesTheUnsizedHelperWhenItsFilesCannotBeSized`, `TestTheHintChangesNoFigure`). The class default is a figure for a call the
+lease could not read, and the declaring line (`gpu reserve: declaring <N> GiB host RAM (class default: ...)`) does not tell a caller whose
+weights sit on the cards that it is theirs to correct: a driver script around card-only renders declared 46.8 GiB for weights that sat on
+two cards and waited a queue cycle for host RAM it never used. So when the declared figure is the class default and `--ram` was not given,
+ONE more line follows the declaring line and names how the call reached the default: nothing is wrapped (a `--detach` hold); the wrapped
+command is not a recognised render helper (a driver script, a Python wrapper, `comfy-run-graph.mjs`; the helpers that are recognised are
+named, from the same table that recognises them); a recognised helper runs its own `--graph`; or a recognised helper's weight files could
+not be sized. The line ends with the way out: `--ram <GiB>` states the real figure, and `--ram 0` is the answer when the weights sit on the
+cards. It is printed for none of: an explicit `--ram` (0 or any figure), a figure estimated from the helper's own files, a text lease that
+wraps no render helper, or a box whose class default is 0. The declaring line stays one line (the new one never contains the word a script
+greps it by), and no figure, lease record or queue behaviour changes.
+
 **Why the full file size and not the overflow.** ComfyUI's dynamic VRAM stages the whole file in host memory ("Model Krea2
 prepared for dynamic VRAM loading. 24449MB Staged", the encoder "8463MB Staged" in the incident lane's own console log),
 and its RAM-pressure cache keeps it there between prompts. The same principle says a set that fits the card streams nothing
@@ -1587,6 +1653,102 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
 * **Not done, on purpose.** The owed warm is not counted as *pending* when another lease is admitted. The seat was unloaded to
   make room for that very lease, and its reload happens after the lease ends, so reserving room for it at the lease's grant
   would count the memory twice; the reload is admitted when it is attempted.
+
+### A lease that unloads the seat is compared to the host after the unload (F82)
+
+**The deadlock.** `gpu reserve --ram N --drain --unload-seat` compared its `N` to the host inside `Acquire`, and drained and
+unloaded the seat only after the lease was held (`detachMaintain`, `maintainSeatScoped`). When the memory it needed was the
+memory the seat held, the grant waited for commit that its own unload would have freed, and the unload ran only after the
+grant: a film lease that declared its host RAM waited about six hours while the 3-card vLLM seat held 67 GiB of the host's commit.
+It is the class of the DRAINING stamp ([The drain waits for runs](#the-drain-waits-for-runs-inside-the-queue-budget-0117-0-adr-0041),
+`gpu_drain.go`): a gate in front of the step that clears it. The brake must never block the unload that clears it.
+
+**The order now**, for a lease that asks for `--unload-seat`, declares host RAM, whose unload can free memory for it and whose host
+can be read (`gpu_hostram_await.go`):
+
+0. **Whether the order applies is decided before the grant, from facts that do not change while the lease queues.** The unload must
+   reach a model on the cards the lease holds (`unloadReachesLease`): the agent seat placed on them, or a model the roster lists that
+   is placed on them or placed nowhere, with the unload's own resolution of doubt (a card table or a roster that cannot be read, a
+   model nothing places and a lease that names no card all count as reaching). A lease whose every listed model is positively placed
+   on other cards frees nothing for itself, so it keeps the comparison in the grant, queues without holding its cards, and the
+   reserve says so (`TestACardLeaseWhoseUnloadReachesNothingIsComparedToTheHostInTheGrant`; the other half, a resident on the leased
+   card that is not the agent seat, keeps the order: `TestACardLeaseWhoseUnloadReachesAnotherResidentStillDefers`). Residency is
+   deliberately not asked: a seat that is cold when the reserve starts may be loaded when the grant comes. And the host must be
+   readable: a host whose memory cannot be read cannot show that the unload makes room, and the look after the unload would refuse for
+   the same reason until its deadline with the seat cycled, so that lease keeps the grant's comparison too
+   (`TestAnUnreadableHostKeepsTheGrantsComparisonForALeaseThatUnloadsTheSeat`).
+1. **A need no state of the box could ever admit is refused at once**, before anything is taken or unloaded (`screenDeferredHostRAM`,
+   `Manager.HostRAMCheck`): waiting cannot help, and a seat cycle for a lease that can never run is bought for nothing.
+2. **The grant takes the place in line and the cards and compares nothing.** `Options.HostRAMGiB` is 0 for it and the figure
+   travels as `Options.HostRAMWaitGiB`, stamped on the record as `host_ram_wait_gib` (additive and omitted when 0: an older reader
+   ignores it and reads a lease that declares nothing yet). The card allocator's host term is off for the same reason
+   (`reserveDeviceFlags.ramGiB` is the gate figure). The lease is stamped DRAINING, so the cards are fenced and no seat reloads
+   onto them.
+3. **The drain and the unload run, as they always did**, under the lease and its heartbeat.
+4. **Then the host is asked** (`Manager.AwaitHostRAM`), still holding the cards, with the grant's own words (`waiting for host
+   RAM: needs ...`, printed once) and inside the same `--wait`: the rest of the queue budget measured from when the reserve began
+   queueing, never under the drain floor (`hostRAMDeadline`). The check and the stamp that turns `host_ram_wait_gib` into
+   `host_ram_gib` are **one critical section under the epoch lock**, so two leases cannot both take the last headroom
+   (`TestConcurrentAwaitsCannotBothTakeTheLastHeadroom`).
+5. **The command starts.**
+
+**It is a reorder, not a looser check.** `AwaitHostRAM` puts the figure to the same function the grant does
+(`gpuprobe.HostRAMAdmits` through `hostRAMRefusalWith`): the same host reading, the same headroom, the not-yet-loaded part of every
+lease that has been admitted, the same sentence. Over a table of hosts, needs and running leases it admits and refuses exactly
+where the grant does (`TestTheAwaitAdmitsExactlyWhereTheGrantDoes`). If the unload frees too little the lease keeps its cards,
+keeps waiting inside `--wait`, and ends with the host-RAM refusal; the command never runs, the seat was unloaded, so its warm-back
+stays owed and is itself refused by the same rule (`TestAnUnloadSeatLeaseStillWaitsWhenTheUnloadDoesNotFreeEnough`). A lease
+**without** `--unload-seat` behaves exactly as before, `--drain` alone included: a drain frees no host memory, so cordoning the
+seat for a wait it cannot shorten would only cost the seat's callers (`TestALeaseWithoutUnloadSeatKeepsTheOldOrder`).
+
+**Each form.**
+
+| form | where the order is made | why it cannot deadlock |
+|---|---|---|
+| wrapper (`gpu reserve ... -- <cmd>`) | `runGPUReserve`: `maintainSeatScoped`, then `awaitHostRAMHeld` under the same heartbeat and the same cancel as the drain | the grant compares nothing; the wait runs after the unload |
+| `--detach` | the parent: `detachMaintain`, then `awaitHostRAMHeld` against the held epoch (`Manager.AwaitHostRAM`). The hidden holder is started with `--ram 0 --ram-wait N` (`holdArgs`) | the holder compares nothing in its grant (`TestTheDetachedHolderOfAnUnloadSeatLeaseTakesItsCardsAndComparesNothing`); a host that never has the room fails the parent like a failed drain: non-zero, the lease still held, with the exclusive stamp taken off (the way a failed drain clears DRAINING, so one failed step does not cordon the box for the rest of `--for`; `detachedHostRAMError`), and the way out in the message: `gpu release --warm-seat` frees the lease and warms the cold seat back, `gpu release` leaves the warm owed |
+| `gpu hold` (the hidden holder verb itself) | none: it has no drain and no unload of its own, only what the parent hands it | it declares exactly what it is given. `--ram N` is compared in its grant, as before; nothing frees host memory for it, so there is no unload to wait behind. The `--detach` parent passes the figure as `--ram-wait` instead |
+| `--devices` and `--cards` | the same two code paths; `--cards` allocates with a host term of 0 and the allocator's queue treats the request as one that declares nothing. `--devices` knows its cards before the grant and applies step 0 to them. `--cards` chooses its cards after the grant, so step 0 cannot be asked beforehand and it always defers: an allocation that lands on cards the unload does not reach holds them while the host is short, and the wait line (it says the drain and the unload are done, not that the seat was cleared) is true for it | `TestACardLeaseWithUnloadSeatIsNotHeldByTheHostRAMItsOwnUnloadFrees`, `TestACardsRequestWithUnloadSeatIsNotHeldByTheHostRAMItsOwnUnloadFrees` |
+
+A signal during the wait ends it at once (`stageHostRAM`, "while waiting for host RAM"): the wrapper is released, and the warm
+stays owed with the same sentence as a signal during the drain. A lease lost during the wait is taken again on the same cards and
+the drain starts over under the new lease, as for a lease lost during the drain.
+
+**What a lease shows while it waits.** It is held, not queued: its record carries `host_ram_wait_gib`, it declares nothing
+(`host_ram_gib` is absent), and it is not marked `waiting_for: host-ram` (that mark belongs to a request that does not hold its
+cards yet). `gpu status` says `host RAM N GiB asked, not yet admitted` on the lease line and `offload_status` carries
+`host_ram_wait_gib` on the lease row. Once admitted the row shows `host_ram_gib` alone.
+
+**Three consequences, stated.**
+
+- *A lease that declares nothing in the grant passes a front waiter that waits only on host RAM* (the G6 rule above), and it must:
+  that waiter is short of memory the seat holds, and a lease that unloads the seat, queued behind it, could never clear it. The
+  cost is G6's own: when the memory recovers the waiter waits for the cards the lease took. The passing lease still asks the host
+  for its own figure before its command starts, so nothing is admitted past the line
+  (`TestADeferredLeasePassesAWaiterThatWaitsOnlyOnMemoryAndStillAsksTheHost`).
+- *While it waits the lease claims no host RAM*, so a grant on other cards that fits is admitted ahead of it, and the lease then
+  waits for what that grant has yet to load (`TestAGrantThatFitsIsAdmittedAheadOfAWaitingLeaseAndTheLeaseThenCountsIt`). This
+  is the "nothing reserves a waiter's memory against a declaring request on *disjoint* cards" limit above, unchanged. The
+  alternative, keeping the figure on the record as declared from the grant on, makes two such leases count each other's figure as
+  still to load, and a host that fits one of them would admit neither (`TestTwoWaitingLeasesAreAdmittedOneAfterTheOther`).
+- *A shortage the unload does not cure costs the cards held and the seat cold until `--wait` ends it.* When the memory is held by
+  something the unload does not touch (another lane, a foreign process), or the seat was already cold and there was nothing to
+  free (residency is not asked before the grant), the lease has done its unload and holds its cards,
+  exclusive, for the whole wait (8 h by default; `--wait 0` still gets the drain floor, `hostRAMDeadline`), and ends with the
+  host-RAM refusal, its command never run and, when the seat had been loaded, its warm-back owed (and refused by the same rule while the host stays short). Before
+  F82 such a lease queued with the seat untouched and the cards free. Nothing before the grant can tell this apart from the film
+  shape, and the reason is stated so nobody "fixes" it by screening: how much of the host's commit the seat holds is not
+  measured (`agent_seat_host_ram_gib` is a floor the operator states and its default, `hostneed.DefaultSeatHostGiB`, is a chosen
+  21 GiB; the film seat held 67 GiB), so subtracting a seat figure from the commit before the grant would refuse exactly the case
+  this reorder exists for on a node that states no figure, and any prediction made when the reserve starts is stale when the grant
+  comes, hours later, so one that sent the lease back to the grant would bring the deadlock back whenever the cause changed in
+  between. The comparison after the unload is the decision. The only screens before the grant are the ones that do not depend
+  on the host's state: a need above physical RAM less the headroom, an unload that reaches nothing on the lease's cards, a host that
+  cannot be read. The lever is `--wait` (and Ctrl-C, which ends the wait and releases the wrapper's lease).
+
+**Not covered.** The media admission in `internal/pipeline` takes its lease with the declared figure compared in the grant, and the
+render lane unloads the seat from inside that lease (`claimLeaseUnload`, `freeLlamaSwap`); it asks for no `--unload-seat`, so this
+reorder does not apply to it.
 
 ### What `gpu status` and `offload_status` show
 

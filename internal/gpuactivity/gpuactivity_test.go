@@ -3,11 +3,12 @@ package gpuactivity
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // TestHelperExitNow is a helper process that exits at once — a real, dead pid
@@ -20,7 +21,7 @@ func TestHelperExitNow(t *testing.T) {
 
 func deadPID(t *testing.T) int {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=TestHelperExitNow")
+	cmd := winexec.Command(os.Args[0], "-test.run=TestHelperExitNow")
 	cmd.Env = append(os.Environ(), "GPUACTIVITY_HELPER=1")
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("helper: %v", err)

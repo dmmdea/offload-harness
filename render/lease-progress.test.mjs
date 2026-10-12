@@ -326,7 +326,7 @@ test("pollOutputs: an unwritable progress file does not fail the render", async 
 test("withGpuSlot tells the lease's progress file once the slot is ready, before the work runs", async () => {
   const events = [];
   const result = await withGpuSlot({
-    noLock: true, comfyManaged: false,
+    noLock: true, comfyManaged: false, lease: null, freeLlamaSwap: async () => {},
     beat: (detail, opts) => events.push(["beat", detail, opts]),
   }, async () => { events.push(["fn"]); return "ok"; });
   assert.equal(result, "ok");
@@ -429,7 +429,7 @@ function scrubbedEnv(comfyDir, extra) {
 
 function run(script, args, env) {
   return new Promise((resolve, reject) => {
-    const c = spawn(process.execPath, [script, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    const c = spawn(process.execPath, [script, ...args], { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let stdout = "", stderr = "";
     c.stdout.on("data", (d) => { stdout += d; });
     c.stderr.on("data", (d) => { stderr += d; });

@@ -29,7 +29,7 @@ const OTHER = "http://127.0.0.1:8189";
 const slot = (api, instanceEnv = {}) => {
   const seen = { ensure: null, free: null };
   return withGpuSlot({
-    noLock: true, api, instanceEnv, comfyManaged: true,
+    noLock: true, lease: null, api, instanceEnv, comfyManaged: true,
     ensureComfy: async (o) => { seen.ensure = o; return null; },
     freeComfy: async (...a) => { seen.free = a; },
     freeLlamaSwap: async () => {},

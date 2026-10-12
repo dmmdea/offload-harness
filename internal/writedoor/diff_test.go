@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // TestTakeSkipsNonRegularAndRecordsTree pins the two snapshot invariants the
@@ -13,11 +15,11 @@ import (
 // slash-separated relative path, and nothing else is.
 func TestTakeSkipsNonRegularAndRecordsTree(t *testing.T) {
 	root := t.TempDir()
-	mustWrite(t, filepath.Join(root, "a.txt"), "one" + "\n")
+	mustWrite(t, filepath.Join(root, "a.txt"), "one"+"\n")
 	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	mustWrite(t, filepath.Join(root, "sub", "b.txt"), "two" + "\n")
+	mustWrite(t, filepath.Join(root, "sub", "b.txt"), "two"+"\n")
 
 	snap, err := Take(root)
 	if err != nil {
@@ -129,7 +131,7 @@ func TestUnifiedDiffAppliesWithGit(t *testing.T) {
 			}
 			patch := filepath.Join(work, "p.diff")
 			mustWrite(t, patch, diff)
-			if out, err := exec.Command("git", "-C", work, "apply", "--whitespace=nowarn", "p.diff").CombinedOutput(); err != nil {
+			if out, err := winexec.Command("git", "-C", work, "apply", "--whitespace=nowarn", "p.diff").CombinedOutput(); err != nil {
 				t.Fatalf("git apply refused the diff (%v): %s"+"\n"+"--- diff ---"+"\n"+"%s", err, out, diff)
 			}
 			got, err := os.ReadFile(target)
@@ -195,7 +197,7 @@ func mustWrite(t *testing.T, path, content string) {
 
 func run(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
-	cmd := exec.Command(name, args...)
+	cmd := winexec.Command(name, args...)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%s %v: %v: %s", name, args, err, out)

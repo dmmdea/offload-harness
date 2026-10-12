@@ -131,7 +131,7 @@ function fixture(t, behavior = {}, probe = probeDoc()) {
     "--cache-dir", cache, "--templates-dir", templates];
   const run = (args, extraEnv = {}) => {
     const r = spawnSync(process.execPath, [RUNNER, ...args], {
-      encoding: "utf8", env: { ...process.env, ...SECRETS, ...ALSO_DROPPED, ...extraEnv }, timeout: 60000,
+      encoding: "utf8", env: { ...process.env, ...SECRETS, ...ALSO_DROPPED, ...extraEnv }, timeout: 60000, windowsHide: true,
     });
     const lines = (r.stdout || "").trim().split(/\r?\n/);
     let last = null;

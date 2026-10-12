@@ -32,6 +32,7 @@ export function defaultRun(cmd, args, { timeoutMs = 0 } = {}) {
   return spawnSync(cmd, args, {
     encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
     ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: "SIGKILL" } : {}),
+    windowsHide: true, // last: nothing spread above can switch it off
   });
 }
 

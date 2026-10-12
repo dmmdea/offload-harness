@@ -6,6 +6,953 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.182.0] - 2026-10-12 - a lease that unloads the seat is no longer held by the RAM that unload frees, Wan and image renders run card-only on two cards, agent_run reaches a named seat anywhere in the fleet, and nothing the harness starts opens a window
+
+### Fixed — a human waiting at the CLI is told the ticket is queued even when its first scan ran before the wait began
+
+- **The defect.** A ticket's first scan can run before the CLI's wait loop has set its `Notify`. That scan's "queued" line went nowhere, but `say` still recorded its key as said, so the wait loop's own first look at the same standing was dropped as a repeat. The human was then told nothing until the ticket started. It was a 0.181.0 race, seen on a slow CI runner as `TestCLIBlocksAndCancelsUndispatched` "timed out waiting: the human is told it is queued". The test passes 100 times out of 100 alone, at this release and at 0.181.0.
+- **The fix.** `say` records a standing as said only when there is a `Notify` to say it to (`internal/mediaremote/scan.go`).
+- **Tests.** `TestAStandingSaidBeforeTheNotifyIsSetIsToldOnceItIs` failed before the fix (0 lines told) and passes after. The whole `internal/mediaremote` package passes.
+
+### Security — golang.org/x/net v0.60.0
+
+- The module requires golang.org/x/net v0.60.0 (was v0.58.0), with golang.org/x/text v0.42.0 and golang.org/x/sync v0.23.0 that it brings. A binary scan of the 0.181.0 release (`govulncheck -mode=binary`) found five advisories in x/net v0.58.0 that the code does not call: GO-2026-6603, GO-2026-6610, GO-2026-6611, GO-2026-6612 and GO-2026-6617, all fixed in v0.60.0. After the bump, `govulncheck ./...` reports no vulnerabilities in the module, and none in the tools/llamaswap and tools/comfyui modules.
+### Fixed — the seat-stub tests run on a machine whose PowerShell 7 is a Store install
+
+- `internal/vllmseat` runs the rendered seat stubs under every PowerShell on PATH. PowerShell 7 puts its own install folder first on the PATH of what it starts; for a Store (MSIX) install that folder is the package under Program Files\WindowsApps, and a test run under such a PowerShell found pwsh.exe there and could not start it ("Access is denied"), so every scenario under it failed without testing anything. Each PowerShell is now started once with an empty command first; one that cannot be started is left out and the test log names it, while one that starts and then fails is kept, so a broken script still fails.
+### Added — the Go toolchain that ships is pinned in go.mod, and CI scans the root module and both printed CLIs for known vulnerabilities on linux and windows (H-26)
+
+- **The gap.** `go.mod` said `go 1.26.7`, which is only the oldest compiler allowed to build the module. The compiler behind every
+  shipped binary was whatever each box happened to have, CI floated on setup-go's `1.26.x`, and nothing in the repository scanned for
+  known vulnerabilities at all: a Go advisory fixed in a patch release would have shipped unnoticed. Measured on the workstation
+  with the vulnerability database of 2026-10-08, the root module built with go1.27.1 calls eleven standard-library advisories on both
+  operating systems (GO-2026-6603, 6604, 6605, 6607, 6608, 6609, 6610, 6611, 6612, 6613, 6617), and built with go1.27.2 it calls
+  none.
+- **The pin.** `go.mod` gains `toolchain go1.27.2`; the `go` line, x/sys v0.48.0, x/text v0.41.0 and go-sdk v1.7.0 stay. With
+  GOTOOLCHAIN at its default the go command downloads that release (from the module proxy, checked against the checksum database,
+  into the module cache) on the first build in this tree when the installed Go is older, and builds with it; a box on a newer Go
+  keeps its own. `GOTOOLCHAIN=local` refuses the download and builds with the installed compiler, and says nothing about the line it
+  ignored (measured: a build with go1.27.1 installed and the line present succeeds and reports go1.27.1), so an offline build on an
+  older Go needs it. The oldest compiler the module accepts is unchanged. `build` and `installer-windows` keep `go-version:
+  '1.26.x'` and switch to the pinned compiler through the same line, which holds for setup-go@v5 (its v5.6.0 source never mentions
+  GOTOOLCHAIN or the toolchain directive) and not for v6, which exports `GOTOOLCHAIN=local`. Each of the two jobs then asks the go
+  command itself, in a step of its own right after Set up Go (`go env GOVERSION`), and fails unless the answer is exactly the release
+  go.mod's toolchain line names: a switch that stopped working (a runner image that exports `GOTOOLCHAIN=local`, a changed action)
+  would otherwise leave both jobs green on go1.26.x, judging a compiler that does not ship. The step's log line names both
+  releases (`go.mod names go1.27.2; the go command runs go1.27.2`). A bump to v6 must switch to
+  `go-version-file: go.mod` and drop `go-version` (which would win), and `TestCISetupGoLeavesTheToolchainSwitchAlone` fails until it
+  does and accepts exactly that (`TestSetupGoRuleKnowsTheMigrationFromV5` holds the rule in a table: v6 or v7 reading go.mod passes;
+  v6 with a version range, with both inputs, reading another file, or pinned by a commit hash does not).
+- **The scan.** A new `govulncheck` job (ubuntu-latest, the standard free runner, no module cache) reads GOTOOLCHAIN from go.mod's
+  toolchain line (a go.mod without the line fails the step instead of scanning unpinned), installs `govulncheck@v1.8.0` with it,
+  and scans `.`, `tools/comfyui` and `tools/llamaswap` for `GOOS=linux` and `GOOS=windows`: the printed CLIs are separate modules the
+  root's `./...` never reaches, and some advisories name one OS. A finding (exit 3) or a scan that could not run (exit 1, for
+  example an unreachable database) fails the step for any of the six scans, and all six always run. The log opens each scan with
+  `Go: go1.27.2` and `Scanner: govulncheck@v1.8.0`. The scanner is pinned to a tag; the advisory data is not, so a new advisory turns
+  the job red between releases and the fix is a bump of the toolchain pin (also raise `toolchainFloor` in
+  `gomod_toolchain_pin_test.go`) or of the dependency.
+- **Not called, so green: the module findings of today.** The scans report these as present in a required module and not reached by
+  any call: x/net v0.58.0 in the root module's linux build graph only (GO-2026-6603, 6610, 6611, 6612, 6617, fixed in v0.60.0; the
+  windows graph does not contain the module), x/text v0.39.0 in `tools/comfyui` (GO-2026-6629, fixed in v0.41.0) and x/text v0.14.0
+  in `tools/llamaswap` (GO-2026-6629, and GO-2026-5970 fixed in v0.39.0). None is touched here: the printed CLIs are vendored.
+- **Tests, written first and red.** `TestRootGoModPinsAPatchedToolchain` (no toolchain line) and
+  `TestCIRunsGovulncheckOnEveryModuleOnBothOSes` (no govulncheck in ci.yml) failed on the tree before the change. The job test runs
+  the job's own scripts under bash with stand-ins for go and govulncheck, as the runner starts a step (`bash -e -o pipefail`) and,
+  for the install step, under a bare bash too: the toolchain step must read go.mod (a made-up version proves it; a CRLF file, a file
+  without the line and `toolchain default` are cases), govulncheck must be built under that GOTOOLCHAIN and be on PATH, each of the
+  three modules must be scanned for each of the two systems with `-show version ./...` under that GOTOOLCHAIN, and a finding or an
+  error in any one of the six must fail the step while the other five still run (counted, as the runner starts the step and under a
+  bare bash) and an `::error::` line names the module and system that failed. The job and each of its steps must carry no `if` and no
+  `continue-on-error`, of any value (`TestCIGateSwitchesAreSeen` holds that check on parsed text): a proof switched off without being
+  deleted passed every structure test.
+  `TestEveryTrackedGoModuleIsScannedOrNamedAsExcluded` closes "every module": it lists the tracked `go.mod` files and fails for one
+  that is neither in the scan set nor named, with its reason, among the exclusions (today the two write-door contract fixtures), so a
+  new printed CLI cannot go unscanned with every check green (`TestModuleScanCheckReportsEachProblem` holds each way it can fail).
+  `TestGoModPinCheckReportsEachProblem` proves each rule of the pin check (a missing, invalid, too old or below-the-go-line
+  toolchain, and x/sys, x/text and go-sdk gone back) on parsed go.mod text, because a real go.mod with an older module no longer
+  builds; `TestGoVersionCompareIsNumeric` holds the comparators to numbers (go1.27.10 above go1.27.2, v0.100.0 above v0.48.0).
+  `TestCIJobsProveTheCompilerGoModNames` finds the jobs that set up Go and compile the root module (not the printed-CLI jobs, which have
+  no toolchain line, and not the govulncheck job, which pins GOTOOLCHAIN itself), requires the proof step after setup-go, before any
+  other go command, with `shell: bash` and no `if` or `continue-on-error`, and runs its script with a stand-in go: the release the
+  line names passes (LF and CRLF go.mod, a go command that prints a carriage return); an older compiler, a newer one, a prefix of
+  the release, a longer release that begins with it, nothing, a failing `go env`, no toolchain line and `toolchain default` fail with
+  the versions named in the log.
+  The shared loader and the bash sandbox are in `ci_workflow_helper_test.go`.
+- **What is not shown.** No hosted-runner run of this change exists yet. The steps were run end to end on the workstation under
+  Git Bash with the real go and govulncheck: all six scans exit 0 under go1.27.2 (38 s); with `toolchain go1.27.1` planted in go.mod
+  the toolchain step follows it and all six scans fail (eleven called standard-library advisories in the root module, nine in each
+  printed CLI); with the vulnerability database unreachable all six fail; a planted call into x/text v0.39.0 (GO-2026-6629) exits 3.
+  The proof step's own script, run end to end on the workstation with the real go (installed go1.27.1, `toolchain go1.27.2`): with
+  GOTOOLCHAIN at its default it prints `go.mod names go1.27.2; the go command runs go1.27.2` and exits 0; with `GOTOOLCHAIN=local`
+  it prints the error line and exits 1. The first run of `build` and `installer-windows` on the go1.27 line is the first CI has seen
+  of it.
+
+### Added — the Windows cage's environment proof runs on a Windows runner on every change (D-98, phase 1)
+
+- **The gap.** The Windows cage hands its child an explicit environment block instead of the parent's (until 0.117.7 it passed
+  `nil`, which means "inherit", so every `run` child received the delegator's credentials). `TestWindowsChildDoesNotInheritParentSecrets`
+  and `TestWindowsChildGetsTheAllowlistedEnvironment` prove it, and on every other system the same names are skipped stubs. The
+  `build` job runs `go test ./...` on Linux, where both are skips, and the one job on a Windows runner never ran `go test`: the proof
+  ran only on a developer's own Windows machine, and a regression could merge with every check green.
+- **The step.** `installer-windows` runs, right after Set up Go and before the PowerShell self-tests so that an unrelated failure there
+  cannot hide it, `go test -count=1 -timeout 5m -v -run '^TestWindowsChild' ./internal/sandbox/` in bash and then requires the
+  `--- PASS:` line of each of the two tests. `go test` exits 0 when the pattern matches nothing and when the tests skip (measured: `-run
+  ^TestNothingMatchesHere` prints "no tests to run" and exits 0), so the exit code alone proves nothing; bash, which the runner starts
+  with pipefail, keeps a failing test from hiding behind the pipe to tee; the PASS line must be a line of its own, not the same words
+  inside other output. Only the standard `windows-latest` label is used (a larger runner is always billed).
+- **Tests, written first and red.** `TestCIRunsTheWindowsCageProofOnWindows` failed on the tree before the change (no step of any job runs
+  `go test` on `./internal/sandbox`). It requires the step in a job whose `runs-on` is exactly `windows-latest`, after setup-go and
+  before any PowerShell step, with `shell: bash`, and runs the step's own script, as the runner starts it and under a bare bash,
+  against a stand-in `go` that plays back real `go test -v` output: both proofs passing exits 0; either one skipped, no test run, the
+  PASS words only quoted inside other output, only subtests' indented PASS lines, a longer-named sibling passing while the proof is
+  skipped (`-run` is a prefix pattern), no output at all, or `go test` failing after printing both PASS lines (only pipefail catches
+  that) exits non-zero. It also requires `-count=1` (a cached result would replay the PASS lines), `-v`, `-timeout`, the anchored
+  `-run` and the package, and that the step and its job carry no `if` and no `continue-on-error`.
+- **What is not shown.** The first run of the cage (CreateProcessAsUser, the job object and the low-integrity token) on a hosted runner has
+  not happened. Both proofs pass on the workstation, and the step's script run end to end there with the real `go test` exits 0, and exits 1
+  with an error line per test when the pattern matches nothing; with the environment block of `CreateProcessAsUser` replaced by `nil` (the
+  0.117.7 defect) both proofs fail on the workstation ("the caged child inherited GITHUB_TOKEN"). If the runner refuses the low-integrity
+  spawn the step goes red, which is what it is for; a weaker test of the environment block alone would not close this item. Phase 2
+  widens the step to the whole `./internal/sandbox/...` package once the tests that cover the exit-status reading are merged, and this
+  test changes with it.
+### Fixed — on a box with no `layers`, a media lease on one card no longer fences the text models pinned to the other cards (C-86a)
+
+- **The defect (register C-86a, the operator's complaint that routing is per card and fleet-wide).** The load fence (`modelaffinity`:
+  `Admit`, `AwaitUpstream`, `AwaitRunSlot`) narrows a lease to the cards of the seat that loads, and it learns a seat's cards from one
+  place, `Config.ModelPins`, which read the declared `layers` and nothing else. The installer's tier seeds write no `layers`, so on such
+  a box every harness text load waited for a media lease on ANY card: a render on card 2 held back a text model pinned to card 0. F15
+  had taught the unload side to place a model by the `CUDA_VISIBLE_DEVICES` of its entry in the serving config
+  (`serving_config_path`, the llama-swap yaml the box runs) and named the fence as the half it left.
+- **The fence places a model the way the unload list does.** `Config.ModelPins` asks the layers first (new `Config.LayerPins`, the
+  previous body) and then the serving config's env pin, through the one reader both sides share, with F15's strictness unchanged: only
+  the env pin counts; a bare index only beside `CUDA_DEVICE_ORDER=PCI_BUS_ID`; a `proxy:` seat (both vLLM seats), an entry that pins no
+  device in env, a macro and an alias two entries claim with different pins place nothing. A media lease on one card now fences the models
+  the file pins to that card, the pairs that span it and every model nothing places, and a text load for a model pinned to another card goes
+  through at once; the mirror lease fences the other half. Layers outrank the file for a model both declare, as in the unload list.
+  Everything that reads the pins gets the same answer: the waiter's place in line (`SeatCards`), `PinsFor` (the cards a run records, so
+  on such a box a seat pinned to one card now shares that card's run-cap line, as it does with layers), the text and vision auto routes,
+  the delegator's run-cap line and the warm-back guard.
+- **One reader, in a leaf package.** `ServingPins` and its parser moved from `internal/gpualloc` to the new `internal/servingcfg`:
+  `gpualloc` imports `config` and `config` imports `modelaffinity`, so the fence could not import it from where it was. What counts as a
+  pin did not change. `LeaseScope.Locate` reads the file through `servingcfg.Load` and asks `LayerPins` for the layers half, so its lines
+  (`placed elsewhere by the serving config pin: ...`) are unchanged. A parity test walks every model of a fixture and every one-card lease
+  and asks the fence and the unload list: they cannot place a model differently.
+- **A reload is followed without a restart.** The MCP server and the fleet node live for days and llama-swap's config is edited under
+  them. `servingcfg.Load` Stats the file on every call and parses it again only when its modification time or size changed, or when it
+  changed less than three seconds before the read (a rewrite in the same clock tick, to the same size, would otherwise hide behind the
+  same pair: the rule git applies to its index). An unchanged file costs one Stat, a memo is never served for a file that is gone, and the
+  memo holds at most 16 files.
+- **The fence's idle path pays nothing new; the other readers pay a Stat.** The fence's own readers (`ScopeToModel`, which `Admit`,
+  `AwaitUpstream`, `AwaitRunSlot`, the seat yield and `SeatLease` go through, and `SeatCards`) look a seat's pins up only for a lease
+  that names cards, so under an idle box and a whole-node lease (which touches every seat whatever its pin) the fence never touches the
+  file. `PinsFor` and the other callers of `Config.ModelPins` are not fence reads and ask on every call, an idle box included: the agent
+  run's recorded cards, the text and vision auto routes and the delegator's run-cap line. Before this change those were an in-memory
+  lookup of the layers; for a model no layer places, each now costs a Stat of the serving config, and a parse on the first call, after an
+  edit and within three seconds of one. (A review found the first wording of this bullet, of the `seatscope.go` header and of
+  `docs/systems/gpu-lease.md` wider than the code: it said an idle box never touched the file.)
+- **Fail closed, everywhere, and said once.** A serving config that is unset, missing or not YAML, a card table that cannot be read, a
+  whole-node lease, a model the file does not list and every entry listed above as placing nothing keep the fence where it was: any
+  lease fences them. A serving config that is set and cannot be read used to switch the narrowing off with no word, and the refusal a
+  blocked load prints names only the lease holder, so it read as the fence's old behaviour. The fence's reader now says, once per
+  cause and per path, in the process log: `servingcfg: the serving config at <path> cannot be read (<cause>): the load fence places no
+  model by it, so a lease on any card fences every seat the layers do not place`. The same fault coming back after the file read
+  cleanly is said again; an unset path is the default and says nothing, and neither does a model a layer places (the file is not read).
+- **Tests, written first and red on the previous tree.** `internal/config`: the fallback for each kind of entry
+  (`TestModelPinsFallBackToTheServingConfigOnABoxWithNoLayers`), a box with layers still placing the models they do not declare
+  (`TestLayersOutrankTheServingConfigForTheFence`), the copy-on-read (`TestModelPinsFromTheServingConfigAreACopy`), and the fence end to
+  end through `Load` and a real card-scoped lease: a card-0 lease admits the card-2 models at once with no waiter registered, fences the
+  card-0 models, the pairs, the vLLM `proxy:` seats and the unlisted, and the mirror lease fences the other half
+  (`TestAOneCardLeaseFencesOnlyTheSeatsTheServingConfigPlacesOnThatCard`); an edit of the file moves a model off a leased card on the next
+  poll (`TestTheFenceFollowsAnEditOfTheServingConfigWithoutARestart`). `internal/gpualloc`: the fence/unload parity
+  (`TestTheLoadFenceAndTheUnloadListPlaceEveryModelAlike`). `internal/modelaffinity`: an idle box and a whole-node lease look no pins up
+  (`TestSeatPinsAreNotLookedUpWhenNoLeaseNamesCards`). Green on the previous tree on purpose, as guards of the fail-closed direction
+  (`TestTheFenceStaysClosedWhereTheServingConfigCannotPlaceAModel`, `TestModelPinsServingConfigThatCannotBeReadPlacesNothing`; the
+  mutants below are what show they bite). Added beside them and not red first, because they need the new package: the real-file wiring
+  in `internal/modelaffinity` (`TestASeatPinnedByTheServingConfigLoadsUnderALeaseOnAnotherCard`,
+  `TestAProxySeatAndAnUnpinnedEntryStayFencedByAnyLease`: that package cannot import `config`, so they show the fence resolves a yaml's
+  full-UUID pins, not that `Load` arms them) and the parser and memo tests that moved or were added with `internal/servingcfg`, which
+  the mutants below turn red.
+- **Mutants.** Twenty-one small mutants (a line or a few), each shown to compile (`go vet` over the package and its tests) and to have landed, each
+  restored byte for byte, each turning a named test red: the fallback removed, the serving config outranking layers, `Load` arming the
+  layers' reading, `Locate` asking `ModelPins`, `LayerPins` reading the file, the pins looked up on an idle box, a fence that does not
+  narrow, the memo never hitting, ignoring the size, ignoring the modification time, unbounded, with no racy window, serving a file that is
+  gone, or wording a missing file as a Stat; the copy-on-read dropped, names compared case-sensitively, and each of F15's five parser
+  rules (proxy, bare index, contested alias, macro, an entry that pins nothing in env). One survived at first: the copy tests ran on a file
+  edited moments ago, which the racy rule never memoises, so they passed with the copy removed; they settle the file now.
+- **Review round (two LOW findings, both confirmed against the code).**
+  1. *The fence discarded the serving-config read error.* Said once per cause now (the "said once" bullet above). Red first on the
+     previous tree: `TestPinsOfSaysOnceThatTheServingConfigCannotBeRead` and `TestPinsOfSaysItAgainWhenTheSameFaultReturnsAfterTheFileWasRead`
+     heard nothing. `TestModelPinsSaysOnceThatTheServingConfigCannotBeRead` ties it to `Config.ModelPins`, the door every caller asks, and
+     to the two quiet cases (a model a layer places, an unset path). `TestPinsOfSaysNothingWhereThereIsNothingWrong` and
+     `TestTheMemoryOfWhatWasSaidIsBounded` were green on the previous tree on purpose, as guards of the quiet direction.
+  2. *The cost claim was wider than the code.* Narrowed to the fence's own lookups (the bullet above). The implementation was right and
+     the prose was wrong, so the behaviour test (`TestOnlyTheFencesOwnLookupsWaitForALeaseThatNamesCards`: `ScopeToModel`,
+     `SeatLease` and `AwaitRunSlot` look nothing up on an idle box or under a whole-node lease, `PinsFor` looks up on every call) was
+     green before the wording changed. What was red first is `TestTheDocsDoNotClaimAnIdleBoxNeverTouchesTheServingConfig` (root), which
+     refused the four retired phrasings in this file, `docs/systems/gpu-lease.md` and the `seatscope.go` header.
+  3. *Mutants.* Nine small ones, each shown to compile (`go vet`), each restored byte for byte, each turning a named test red: the note
+     removed, the once-guard removed, an unset path that says too, a recovered file that is not forgotten, a memory kept for all paths
+     together, a memory that is unbounded, the serving config asked before the layers, `ScopeToModel` that looks up whatever the lease,
+     `PinsFor` that waits for a lease. A tenth, the three retired phrasings restored, turns the docs test red in each of its files.
+- **Not changed, and not verified here.** A vLLM seat is a `proxy:` entry in the serving config (its cards are pinned in its own unit) and
+  `vllm_seats` carries names, not cards, so a lease on any card still fences it, and so the agent seat on a box that serves it through
+  vLLM; placing it needs the unit's pin, a separate change. The fence is not a placement: nothing here chooses a seat or a card. No
+  live lease was taken. The committed reader was run read-only over the serving config of one box (21 models: eight pinned to card 0
+  only, five to card 2 only, six to both, the two vLLM seats unknown) and its card table, and the end-to-end tests ran on synthetic card
+  tables; the live proof (a one-card lease, a short render, `/running` before and after, a text call for a model pinned to the other card)
+  is owed to a quiet card window.
+### Fixed — a scanner the first ticket started no longer scans that ticket a second time at once, and the test that counts the first scan's lane questions counts the first scan's alone (found in the 0.181.0 merge gates; 0.181.0 code and test)
+
+- **What failed, and that the merge is not the cause.** After this branch took 0.181.0, the gate of `internal/mediaremote` failed
+  `TestTheFirstScanReusesTheLaneReadingOnlyWhileItIsFresh` on two Linux gate hosts (`probes 2, want 1` on one, `probes 3, want 2` on the
+  other) where the same package had passed at the 0.181.0 commit on one of them. The branch touches nothing in that package. Run alone,
+  4 workers of 40 runs on each host, the test failed at the 0.181.0 commit as it did at the merge: 50 and 52 of 160 on one host, 13 and
+  7 of 160 on the other. It is a race in 0.181.0 (code and test), and the one pass at the 0.181.0 commit was luck.
+- **The cause is in two parts.** (1) `register` started the scanner for the process's first ticket and also woke it. The wake-up is a
+  token that waits in the channel, so the new scanner took the ticket in its first scan, found the token and scanned the same ticket
+  again at once. That second scan found the reading the first had reused gone and asked the lane again: a second card-table read within
+  milliseconds of the first, which is the read the reuse (`verdictFresh`) exists to save. At the production rhythm of 10 s, the lane had
+  been asked twice 300 ms after the first scan in each of four tries. (2) The test counted every question its lane runner was asked after
+  the call returned, so it saw the second scan's whenever that scan beat the test goroutine, and the tests' 40 ms rhythm brings a further
+  scan about 40 ms later; its "reused" half also relied on 250 ms of wall clock between the question and the scan, which a loaded host
+  does not give.
+- **The fix.** `register` wakes the scanner only when the registration did not start it. A ticket made while the scanner runs still wakes
+  it (a scanner asleep in its 10 s timer would otherwise leave that ticket's call waiting up to 12 s for its first scan). The test makes the
+  ticket and runs its first scan by hand on a queue with no scanner: the "reused" half gives the reading a minute, the "asked again" half
+  keeps 250 ms against an identity wait of 600 ms (a slower host only makes the reading older). The assertions are unchanged, exactly 1
+  and exactly 2. ADR 0083 item 5 says that the ticket that starts the scanner is not woken for.
+- **Tests, written first and red.** `TestANewScannerLooksAtItsFirstTicketOnce` (the scanner as production runs it, a 10 s rhythm, so a
+  lane question inside 300 ms of the first scan can only come from the wake-up) failed before the fix (`probes 2 within 300 ms, want 1`)
+  and passes after; `TestATicketMadeWhileTheScannerSleepsIsScannedAtOnce` pins the other half (the second ticket's call answers well
+  inside the 8 s that the rhythm could make it wait). Five mutants were run, each compiled and each killed: the wake-up for a started
+  scanner back, no wake-up for a running scanner, the reuse ignoring the reading's age, no reuse at all, and the age counted from the
+  ticket (the defect the test was first written for). With the fix, the three tests together, 4 workers of 40 runs on each of the same two
+  hosts under the same load: 0 of 160 failed on either.
+
+### Fixed — a named-seat `agent_run` is never retried on this box's own seat, a deferral never publishes another seat's answer, and a final cut at its budget says so (D-125, D-102, register D-134)
+
+A fix round on the two `agent_run` entries below, from two independent reviews of the branch: five findings, three defects.
+
+- **A named seat's second chance is another node that runs it, or none; it was this box's own agent seat.** `agent_run(model: <seat>)`
+  handed the delegator a bare `route=remote`, and a bare remote route keeps the engine's remote -> local retry: when the node's first
+  attempt abstained (the new flat `{answer}` schema makes a cut or empty final likely) or its seat went down, the retry ran the whole
+  goal on THIS box's agent seat, a different model. The door then withheld that clean answer for a seat mismatch and blamed the node
+  (`answered from seat "<this box's seat>", not the model named: its agent seat changed after the fleet was read`), after this box's GPU
+  had done the work, and the first attempt's real reason was gone. The contract of a named seat is now a reasoned remote pin
+  (`pin_reason: operator`, the caller having chosen the placement by naming the model), which the engine already obeys to the end of the
+  subtask: the retry goes to another node whose agent seat is the name, and with none the node's own deferral stays the result. First
+  placement is unchanged (it never fell back to local), and `offload_status` counts the call under `pins.reasoned.operator` instead of
+  `unreasoned`; an `agent_run` that names no model keeps the bare remote route and its remote -> local retry.
+- **The seat check covers a deferral's finished answer.** The check that withholds an answer from a seat other than the named one sat
+  behind the deferral's return, so a deferral carrying the loop's finished prose (`schema_miss`) published that prose as `output`
+  whatever seat wrote it. The prose is now held back when the seat that wrote it is not the name, or is not reported; the deferral keeps
+  the node's own reason and class, and the reason gains a clause saying what was withheld. A deferral from the named seat keeps its prose.
+- **A final cut at its budget is published as cut.** The final-answer fit (D-134) opens the forced final narrower than the configured budget
+  on purpose, and a final the seat ends on that budget (`finish_reason: length`) is marked by the loop (`OutputTruncated`) but ended
+  `done`, and the local `agent_run` door never read the mark: the half-sentence was published as a clean success. It is still the `output`
+  (a partial is the caller's to use), and the result now carries `output_truncated: true`, the loop's `stop_note` and a `truncation_note` that
+  names the budget the loop's fit opened the final at, when it narrowed it (not the fit predicted at run start), and points at `budget_note`.
+  A complete answer carries none of the three.
+- **Tests, written first and red.** Each failed on the unfixed code for the reason in its finding: the named-seat retry (abstention and
+  seat-down, one node and two) ran this box's seat and published the false seat-change reason; the deferral test published another seat's
+  prose and an unreported seat's; the cut-final test published no flag. Mutants, each compiled and each killed: the pin reason dropped, the
+  deferral's seat check disabled, the truncation flag never published, the fit clause of the truncation note dropped.
+
+### Fixed — `agent_run` fits its final answer to the wall that is left, so a wall between the minimal-answer floor and the estimate answers instead of being cut (D-102, register D-134)
+
+`agent_run` runs its loop under a context deadline, and the loop was built without the final-budget fit (register D-95) that the
+delegation node installs. D-102 sized the run and refused a wall below one tool step and a minimal answer, and left the
+register's own case admitted: a 420 s wall against a `min_turn_sec` of 807 s and an estimate of 928 s, which the INV-5 rider
+(ADR 0050) forbids refusing on. That run spent its tool steps and then opened the forced final answer at the configured budget (4x
+the step budget, up to 8,192 tokens): 476 s of decode on a 17.2 tok/s seat, against a wall with at most 420 s in it, so it was cut
+at the deadline with no answer. This closes what D-102 left PARTIAL: the case is still admitted, and is now usable.
+
+- **The cure is the fit, not a refusal.** At the forced final step the loop now opens the answer at the largest budget the wall that
+  is LEFT can decode at the seat's measured rate, `(remaining − max(10 %, 6 s)) × tok/s`, never above the configured final and
+  floored at 1,024 tokens (the D-95 arithmetic, read off the live clock). The register's case, rebuilt from the seat-rate arithmetic
+  (a 17.2 tok/s seat with a 330 s cold load, an 8,192-token final, ten steps, thinking off), opens its final at no more than about
+  6,500 tokens with the whole wall left, and at about 4,600 (270 s of decode) once the tool steps have spent the 121 s the estimate
+  gives them, instead of 8,192 (476 s). The tool steps are untouched. Nothing new is refused, so there is no INV-5 conflict, and the
+  `min_turn_sec` refusal the row offered as the alternative is not needed.
+- **The rate is the one the wall gate sized the run from.** A model the caller names, or a seat that placement picks, with no rate
+  of its own is left exactly as before: no fit, the configured final. The agent seat's `agent_seat_tok_s` is not lent to it.
+- **Published under the delegation wire's names.** The answer, and a run that died at its wall, carry `final_budget_fit` (the budget
+  the forced final opened at) and `budget_note` (the arithmetic: `final 8192 → 6501 to fit 420 s at 17.2 tok/s`), only when the fit
+  narrowed something. What the loop ran at supersedes the fit predicted when the wall started, as on the node; a run cut before its
+  forced final carries the prediction, and so does one that answered early or reached its forced final with wall to spare: the
+  estimate charges the seat's remembered cold load against the wall and admission pays it outside the wall, so a wall just under the
+  estimate predicts a narrowing the live clock never asks for (900 s against 928 s predicts a 6,174-token final, and the final opens
+  at 8,192). A wall with room, a seat with no rate and a run that neither the prediction nor the loop narrowed carry neither field,
+  and the wall refusal, which starts no run, carries neither.
+- **One copy of the arithmetic.** `pipeline.InstallFinalFit` installs the fit on the loop and returns the run-start figure, and both
+  agent doors call it, so they cannot size one run differently. The node's behaviour is unchanged (a characterisation test, run
+  before the move and after it, passes on both sides), and `TestAgentRunSizesTheRunStartFinalLikeTheNodeDoes` compares the two
+  doors' published sizing on the register's case byte for byte.
+- **What it does not do.** The fit narrows the final answer. It does not shorten the tool steps, so a run whose tool steps outlast
+  the wall still ends at the deadline, and a wall that buys fewer than 1,024 tokens of final at the seat's rate keeps the floor and
+  the deadline stays the stop (`budget_note` says `the wall will be the stop`). A wall below one tool step and a minimal answer is
+  still refused (D-102).
+- **Observed, not changed.** The node runs its loop under the liveness ceiling (ADR 0055), at least twice its wall, so its live fit
+  has room until a run nears the ceiling: on the register's case the node's forced final opens at 8,192 while its published
+  run-start fit says 1,024 (measured this release on a seat that answers every step with a tool call until the forced final). On a
+  run the fit left alone the node publishes the configured budget as `final_budget_fit`, where its docs say both fields are absent.
+- **Tests, written first and red.** The four door tests failed on the unfixed tree (the forced final opened at 8,192 and
+  `final_budget_fit` was absent: the wall-fit case, the door-against-node comparison, the run cut before its forced final, the
+  prediction published when the loop's own final was not narrowed) and the two installer tests failed against a no-op installer.
+  Three tests pass on both sides of the fix and guard it from the other direction: a seat with no rate, a named model with no rate
+  of its own and a wall with room publish no fit; the wall refusal carries none; and the node's published run-start fit is
+  unchanged by the move. Mutants, each compiled and each killed: the installer's closure returning the configured budget, the
+  closure never installed, a raised budget, the answer or the deferral left unstamped, the door installing with no rate, the node
+  no longer calling the shared function, the stamp ignoring its own narrowing rule.
+
+### Added — `agent_run(model: <seat>)` runs on the fleet node whose agent seat is that model, and every routed `agent_run` carries the schema the gate requires (D-125, C-46)
+
+Two defects shared one door. `agent_run` checked the `model` it was given against this box's llama-swap roster and refused any
+name that roster lacks (`explicitly requested model … is not in the endpoint's served roster`), however many fleet nodes ran
+it, so a seat another node runs could not be asked for by name from a box that does not serve it. And a routed `agent_run`
+(`route: remote | auto | spread | queue`, register C-46) built its contract with no `output_schema`, which the delegator refuses on
+every node as `noschema` (remote output merges only after a mechanical check) and which a node's own ack refuses too, so a
+routed call could never be placed on a node. The new real-gate test reproduces it on the unchanged tree:
+`route=remote: the contract carries no output_schema … node-a: noschema; node-b: noschema`.
+
+- **A name this box does not serve is looked up on the fleet.** With no route, or `route: "remote"`, the door reads the roster's
+  health once (`rosterprobe.Probe`, the read the single-shot lanes share: concurrent, 5 s a node, a down node named and not waited
+  on), takes the nodes that advertise the agent lane and whose `agent_seat` is the name (without regard to case), and sends ONE
+  contract through the delegator at `route=remote` with its remotes narrowed to them (a call's own list replaces the configured
+  roster and is checked against it). It runs on exactly one of them, placed by the usual gate. A composite node whose layer has an
+  agent-role seat of that model counts too, and the contract names the layer (register A-100); nodes that run the name as their own
+  agent seat are preferred, and one contract names one layer, so the first layered node's layer wins and only the nodes that serve
+  it from that layer are asked. The response names `node`, `placement`, `seat`, `model` (the seat that ran it), `route` and
+  `executed_on`, and carries no sizing of this box (the wall is the executing node's expectation, ADR 0055).
+- **It honours a name only when it IS a node's agent seat.** The contract names no seat, so the node runs its own agent seat, and
+  no wire field and no node changed: it works against the nodes as deployed. A name a node merely serves (an alias, a non-agent
+  seat) is refused naming the seat that node does run; nothing is guessed. The answer is checked against the name: a node that
+  changed its agent seat between the read and the dispatch runs another seat, and an answer whose `seat` differs is withheld
+  (`defer_class: config`). Running a seat that is not a node's agent seat needs the contract to name it, a wire change that widens
+  what a fleet-token holder can make a node load; it is not here.
+- **A name nobody runs keeps the roster sentence and says where the fleet looked,** one clause per node (its id, its agent seat,
+  a name it serves without running it as its agent seat, an agent lane that is off, a node that did not answer). `defer_class` is
+  `config` when every node answered and `infrastructure` when one did not, and the reason names that node; an entry the tailnet
+  guard never dials is the roster's to fix and stays `config`. A box with no `delegate_remotes` refuses byte for byte as before.
+- **The fork is narrow, and a model that cannot be honoured is no longer dropped.** A name this box serves runs here and never
+  reads the fleet; `route: "local"` never asks it whatever the name is; a local roster that cannot be read leaves the call on this
+  box. `route: "auto"`, `"spread"` and `"queue"` with a model are now refused (`defer_class: contract`, `steps: 0`, nothing asked of
+  the fleet, the reason names `route=remote`): they place by capacity, not by seat name, and the model used to be ignored without a
+  word. `route: "remote"` with a model asks the fleet whatever this box serves. `allow_browse` cannot travel (the browse tool drives
+  this machine's own browser) and is refused when the name could only run on a node.
+- **Every routed `agent_run` now passes the gate.** The goal goes through the delegation intake as a contract with a flat
+  `{answer}` `output_schema` (flat and string-only, like `offload_ask`'s): the wire's own ceilings (12 steps, 900 s) apply at the door, a field
+  the intake refuses (a thinking policy, a setup action) is refused there naming it (`defer_class: contract`), and a call with no
+  `timeout_sec` lets the executing node size the wall. The prose is still the `output` and the node's `{answer}` object rides
+  beside it as `structured`. `read_root` and `judge` do not travel, and the response's `notes` name each one the caller passed. A
+  deferral carries the node's `defer_class`, its `node` and `placement`, its steps and, when only the structuring failed, the
+  finished prose as `output` flagged `schema_miss`, as `offload_ask` does; the delegator's rescue of such an answer stays unwired
+  on this door.
+- **Tests, written first and red.** The fixture drives the real door at a real local roster and real scripted fleet nodes
+  (`/fleet/health`, `/fleet/dispatch`, `/fleet/jobs/{id}`) through the real delegator, and reads the engine's arguments through the
+  dispatch seam where a test needs them. With the door change removed, 23 of the 27 tests fail (the roster refusal for every named
+  seat, `noschema` for every routed call, a model on `auto`/`spread`/`queue` dispatched and ignored, no class, no notes, no
+  placement) and the other 4 pass on both sides: three guards (a locally served name and `route: "local"` never read the fleet; a
+  box with no nodes refuses as it did) and the unit test of the ledger guard's reading. The fixture keeps the ledger and every state path in a directory the test owns, checks
+  that configuration, and checks that the operator's real ledger took no row of the run (a fixture that sets its home after
+  the default configuration has fixed the ledger path writes to the real ledger; the package's `TestMain` records one such
+  incident). 24 mutants were run, each compiled and each killed after two survivors led to two more tests (the preference for
+  plain nodes over layered ones, and which layered node's layer is taken):
+  matching `served_models` instead of the agent seat, the engine handed the whole roster, a withheld answer published, no
+  schema, a model on `auto` ignored, forced local asking the fleet, an unreachable node classed `config`, the layer never named, the
+  fleet asked for a served name, notes dropped, a browse grant let through, the roster check dropped, the model not published,
+  a guard-refused entry classed `infrastructure`, an agent lane that is off still a target, the last layer taken, the
+  `route=remote` class forced to `config`, the contract error ignored, the deferral class, placement or finished answer dropped,
+  and the two refusal texts.
+### Fixed — a test that earned a remembered incoherent-seat verdict no longer leaves it for the next test on the same loopback address (F78)
+
+- **The hole.** The incoherent-seat memo (`internal/pipeline/coherence.go`) is one table for the whole process, keyed by endpoint and
+  seat for ten minutes, and a run on a seat that is already resident defers on a remembered verdict without asking the seat anything.
+  A test's fake server gets a loopback port the OS can hand to a later fake, and the tests that earn a broken verdict
+  (`TestRunAgentTaskDefersAnIncoherentSeatAfterColdLoad` and `TestNoWallIsReportedUntilTheWallStarts` in `internal/pipeline`;
+  `TestAgentRunDefersAnIncoherentSeat`, `TestAgentRunDefersAWarmRunOnTheRememberedIncoherentSeat` and
+  `TestAgentRunIncoherentSeatDefersCarrySizing` in `internal/mcpserver`) left it behind; only the tests of the memo itself cleared
+  theirs. The register names `TestTheWarmUpKeepsItsBudgetAfterAWaitInLine` as the victim: it takes the warm path against a fresh fake
+  and would defer on a verdict that was earned elsewhere.
+- **The fix (test code only).** `agentFake.server` drops every verdict filed under its server's endpoint, whichever seat it names,
+  when the test that asked for it ends (the endpoint is matched whole, so a server on `:1234` never takes `:12345` with it), and
+  `coherenceSeatServer` clears the seat it serves the same way.
+- **Tests, written first and red.** `TestAnIncoherentSeatVerdictDoesNotOutliveTheTestThatEarnedIt` in both packages runs the cold load in
+  a subtest, asserts the verdict IS remembered there (so the check after it cannot pass vacuously) and that it is gone once the subtest
+  has returned. Red before: `the verdict on seat "seat-x" outlived the test that earned it` (pipeline, and for a second seat on the
+  same endpoint) and `... "agent-pool" outlived ...` (mcpserver). The three tests the register names pass 30 repetitions in a row; that
+  does not force the port reuse, so the new tests are the proof.
+
+### Fixed — the root, pairworkloads and mediaremote suites left a state-root folder in the OS temp dir for every copy of their test binary that a test re-launches (F77b)
+
+- **The defect.** Each of the three packages makes a throwaway state root in its `TestMain` (`lo-root-state-*`, `lo-pairworkloads-state-*`,
+  `lo-mediaremote-state-*`) and removes it after `m.Run`. They also re-launch their own test binary (the helper processes of the gpu verb
+  tests, a child that sends a frame and is killed, the holder of a queue lock). A copy runs `TestMain` too, and a copy that is killed or
+  ends by `os.Exit` from inside a test never reaches the removal, so every launch left a root of its own. Counted with the temp dir pointed
+  at an empty folder on Windows, one run of `internal/pairworkloads` left 2 and one run of `internal/mediaremote` left 1, and one run of the root package's tests left 20 (on Windows and on Linux alike).
+- **The fix (test code only).** The suite process exports `LO_ROOT_SUITE_STATE_ROOT`, `LO_PAIRWORKLOADS_SUITE_STATE_ROOT` or
+  `LO_MEDIAREMOTE_SUITE_STATE_ROOT` once its root exists, set to that root's path, and every re-launch site already passes the process
+  environment on. A copy shares the root of the suite that launched it and makes none, but only when the environment agrees three ways:
+  the variable names a root, `LOCAL_OFFLOAD_STATE_DIR` points at the same one, and it is one of the package's own throwaway roots and
+  still on disk; anything less gets a root of its own, as before (the net exists to keep the suite off the machine-wide root, so it
+  fails closed). The root package's copy still runs on the same known host reading as the suite.
+- **Tests, written first and red.** `TestARelaunchedTestBinaryLeavesNothingInTheTempDir` in each package re-launches the test binary at a
+  helper that ends with `os.Exit(0)` from inside the test, with `TMP`, `TEMP` and `TMPDIR` on its environment pointed at an empty folder,
+  and requires the folder to stay empty; `TestACopyTrustsTheSuitesStateRootOnlyWhenTheEnvironmentAgreesWithIt` holds the three conditions.
+  Red before (Windows): `a re-launched copy of the test binary left 1 entries in its temp dir, want none: [lo-root-state-…]` (and
+  `lo-pairworkloads-state-…`, `lo-mediaremote-state-…`). `TestMainIsolatesTheStateRoot`, `TestMainIsolatesTheHomeAndTheLedger` and
+  `TestRunIsolatedFailsClosed` are unchanged.
+- **Review round: a re-launched copy of the root suite also checks the home and the origin.** The copy skips `runIsolated`, which is
+  also what pins `LOCAL_OFFLOAD_HOME` (to the root's `home` folder) and `LOCAL_OFFLOAD_ORIGIN` (to `go-test`), the ledger guard of
+  2026-10-03 (1,204 fixture rows written to the operator's real ledger); the copy read both from the environment of whichever test
+  launched it, unchecked, so a launcher that had cleared or moved them would have run `config.Default()` on the real home. A copy now
+  trusts the suite's root only when the home and the origin also agree (five conditions); otherwise it makes a root of its own, which
+  pins them, as it did before F77b. Red before: the home-not-set, home-outside-the-root, home-is-the-root, origin-not-set and
+  origin-of-another-writer cases of `TestACopyTrustsTheSuitesStateRootOnlyWhenTheEnvironmentAgreesWithIt` returned `trusted=true`;
+  deleting either check turns its cases red.
+- **Review round: `internal/pairworkloads` now fails closed.** Its `TestMain` logged and ran the suite anyway when `os.MkdirTemp` or
+  either `os.Setenv` failed, so a suite whose setup failed ran against the machine-wide state root, while its comment and
+  `docs/systems/pair-workloads.md` called it fail-closed (the F77b suite variable had copied the idiom). It now goes through a
+  `runIsolated` like the root, `internal/delegate`, `internal/mcpserver` and `internal/mediaremote`: any of the three failures returns 1
+  without running a test and removes the directory it made. `TestRunIsolatedFailsClosed` is new there; red before: `code = 0, ran = true;
+  want 1, false` for the mkdir, state-dir and suite-variable cases (and the removal assertions fail when the deferred removal is dropped).
+  The docs paragraph no longer lists `internal/pipeline` among the fail-closed packages: its `TestMain` fails open on purpose (its own
+  comment says so) and the paragraph now says that.
+
+### Fixed — `offload_run_graph` and `run-graph` remove the temp files an inline graph or manifest became, whichever way the call ends (F79)
+
+- **The defect.** The runner reads files, so an inline `graph_json` / `manifest_json` (the MCP door) or `--graph-json` /
+  `--manifest-json` (the CLI) is written to a temp file (`run-graph-*.json`, `run-graph-manifest-*.json`) and its path is threaded on.
+  Nothing removed it: every inline call left one file (a graph) or two (graph and manifest) in the OS temp dir for good, on every exit
+  of the call (an answer, a deferral, a refusal, a ticket queued), and the CLI left them too when the pipeline could not open. A write
+  that failed left the file it had just made, and a manifest that could not be written left the graph file made before it. One run of
+  the `internal/mcpserver` tests left 26 of them (25 `run-graph-*`, 1 `run-graph-manifest-*`) and one run of the root package's tests
+  left 3, counted with the temp dir pointed at an empty folder on Windows. The fleet node's twin (`fleetnode.buildRunGraph`) already returned a cleanup; the door and the CLI did not.
+- **The fix.** `materialize` (MCP) and `materializeArg` (CLI) return a cleanup that is never nil and removes only the file THIS call
+  made: it does nothing for a path the caller named (`graph_path`, `manifest_path`, `--graph`, `--manifest`, or a `graph_path` given
+  together with a `graph_json`), nor for an empty one. `handleRunGraph` defers each cleanup right after the file exists, so an answer,
+  a deferral, a refusal inside `RunWith`, a manifest that cannot be written and a panic all remove both files; `runGraphParams` returns
+  one cleanup for the pair and `runRunGraph` defers it before the pipeline opens, so the exit at `openPipeline` is covered too. A write
+  that fails closes its file and then removes it (Windows does not delete a file that is still open: `os.Remove` of an open file fails
+  with "being used by another process", read on Go 1.27.1), and a manifest that cannot be written removes the graph file with it.
+- **Why removing them is safe.** A graph ticket keeps its own copy of the graph and the manifest as the plan holds them
+  (`body-<id>-graph.json`, `body-<id>-manifest.json`) and its key, its node payload, its local run and an adopter all read those, never
+  the caller's paths; a graph queued by a call that has returned still runs.
+  `TestAGraphTicketStillRunsOnThisMachinesLaneOnceTheDoorHasRemovedItsInlineFiles` admits a graph, removes the caller's files the way the
+  door does, frees the lane and requires the lane to run the bytes the call was made with; it fails when the ticket reads the caller's
+  path instead of its copy.
+- **Tests, written first and red.** `internal/mcpserver`: `TestRunGraphDoorRemovesItsInlineTempFilesOnEveryExit` (six exits),
+  `TestRunGraphDoorHandsTheRunnerTheInlineBytesWhileItRuns` (removal is not early), `TestRunGraphDoorNeverRemovesACallersOwnFiles`,
+  `TestMaterializeCleanupRemovesOnlyTheFileThisCallMade`. Root: `TestRunGraphParamsInlineJSONIsRemovedByItsCleanup`,
+  `TestRunGraphParamsLeavesACallersOwnFilesAlone`, `TestRunGraphParamsRemovesTheGraphFileWhenTheManifestCannotBeWritten`,
+  `TestMaterializeArgRemovesItsOwnFileWhenTheWriteFails`, `TestRunGraphCLIRemovesItsTempFilesWhenThePipelineCannotOpen`. The write
+  failures are made with a one-line seam (`createTemp`) that hands back a file opened for reading only. Red before, root package on a
+  Windows PC against a cleanup that removes nothing: `the cleanup left [run-graph-….json run-graph-manifest-….json] in the OS temp dir`,
+  `the file of a failed write was left`, and `run-graph left [...] in the OS temp dir after it failed to open the pipeline`.
+  After: 0 `run-graph*` entries left by the `internal/mcpserver` tests on Windows (26 before) and by a whole run of the root package's
+  tests on Windows and on Linux (3 before).
+- **Review round: a delete that is refused for a moment is waited out, and one that still fails is named.** The cleanup made one
+  `os.Remove` and dropped the error, so on Windows a scanner (or a runner that had only just exited) holding the file for a moment
+  brought the leak back with nothing to say so; the write-error branches dropped it the same way. Both doors now delete through one
+  helper (`removeInlineTemp`, in `internal/mcpserver` and in the root package) that tries again for about half a second (20 attempts,
+  25 ms apart, as `removeRunGraphEnvelope` does for the envelope), treats a file that is not there as done, and, when the file still
+  resists, writes one line naming it and the reason (to the log in the MCP server, to stderr in the CLI). Red before, on a Windows PC,
+  in `internal/mcpserver` (and the same four as `TestMaterializeArg...` in the root package): `TestMaterializeCleanupWaitsOutAFileHeldForAMoment`
+  (a delete refused three times left the file), `TestMaterializeCleanupNamesAFileItCannotRemove` (no line),
+  `TestMaterializeRemovesTheFileOfAFailedWriteEvenWhenItIsHeldForAMoment` and
+  `TestMaterializeCleanupOutwaitsAHandleThatIsClosedAMomentLater` (a real open handle, no seam: the cleanup returned and left the file).
+  One attempt, no line, a missing file counted as a failure and the failed-write branch left out of the helper each turn their own test red.
+- **Not covered.** Files an earlier release left in the OS temp dir stay until someone removes them (this is a one-time cleanup, not
+  code), and a call that is killed (a second Ctrl-C, a kill) leaves the files of that one call.
+### Added — a mutation harness whose RED has to compile (register H-17)
+
+- **`scripts/mutation-check.sh` and its PowerShell twin `scripts/mutation-check.ps1`** are the one proof that a test can fail. They run the
+  unmutated control arm (which must pass), apply a single-line mutation and assert it landed (line endings compared normalised, so an LF
+  pattern cannot fake a pass on a CRLF file), compile the test binary first (a mutant that does not build is `BAD-MUTANT`, never `RED`),
+  report `RED` or `SURVIVED`, and restore the file byte for byte on every path, including a signal or Ctrl-C; each prints the applied
+  mutation and a final `MUTATION-VERDICT:` line. The self-tests (`scripts/mutation-check-selftest.sh`, `.ps1`) show every verdict on the
+  fixture module `scripts/testdata/mutfixture`; `CONTRIBUTING.md` and `docs/systems/security.md` (invariant I5) point at the harness. No
+  Go package is touched.
+### Fixed — the fleetnode and pipeline tests left a folder in the OS temp dir for the suite and one for every copy of the test binary they re-launch
+
+- **The defect.** `internal/fleetnode`'s tests made their compose cache folder in an `init()` (`os.MkdirTemp("", ...)`) and nothing removed
+  it; `internal/pipeline`'s `TestMain` made a throwaway state root and removed it only after a normal run. Both packages re-launch their own
+  test binary (the stand-in ffmpeg, the dead-owner helper, the browse sidecar stand-in). A copy runs the package's `init()` functions and
+  `TestMain` too, and a copy that exits from a test, or is killed, never reaches a cleanup, so every launch left a folder: one run of each
+  package left 13 (counted with the OS temp dir pointed at an empty folder), and a workstation that runs the gate all day collected them on
+  its system drive. Test code only: no production code makes either folder.
+- **The fix.** Each fleetnode test that needs a compose cache takes its own `t.TempDir()` through `ComposeCacheDir` (taken before
+  `newTestServer`, so the server's drain finishes before the folder goes), and `init()` makes nothing but a table entry. The pipeline's
+  `TestMain` recognizes the re-launched browse sidecar stand-in by its argument (the sidecar's environment is an allowlist, so nothing the
+  suite sets can reach it) and starts no state root for it; the suite still removes its one root. `TestARelaunchedTestBinaryLeavesNothingInTheTempDir`
+  (one per package) launches a re-launched copy the way the suite does, with the temp dir pointed at an empty folder, and requires it to stay
+  empty; `TestTestsReachForTheOSTempDirOnlyWhereItsRemovalIsOnEveryPath` fails on a new direct `os.MkdirTemp("", ...)`, `os.CreateTemp("", ...)`
+  or `os.TempDir()` in a test file of either package unless it is listed with the reason its folder is removed on every path. Each was shown
+  to fail without the fix (the lint in pipeline by adding one raw call).
+- **Measured** on Windows with TMP, TEMP and GOTMPDIR pointed at an empty folder, `go test -count=1 -v`: fleetnode 13 folders left before, 0
+  after (three runs); pipeline 13 before, 0 after. The same tests are there and pass: fleetnode 880 passed and 5 skipped before, 882 and 5 after;
+  pipeline 1497 passed and 1 skipped before, 1499 and 1 after (the two new tests each).
+### Fixed — the render drain no longer waits on a seat that cannot have a request in flight (F81)
+
+- **The defect.** `quiesceLlamaSwap` (`render/gpu-lock.mjs`) probed `/upstream/<id>/slots` of every seat `/running` listed, whatever its
+  state. llama-swap lists a process in `starting`, `ready` or `stopping` (the source of `internal/process`: `StateStarting`,
+  `StateReady`, `StateStopping`; `stopped` and `shutdown` are not listed). A `starting` seat is not serving, and llama-swap holds
+  a request to it for the whole load, so the probe sat until its own 5 s deadline: three rounds, two polls and a grace, 17.6 s
+  measured against a fake llama-swap with one starting seat (`17588 ms`, three upstream requests), added to every render start while
+  any seat was loading. No request could be in flight on that seat, so there was nothing to wait for. A `stopping` seat is worse than
+  slow: the router queues a request behind the stop and then starts the seat again (`EnsureReady`: "stopping -> waits for the stop to
+  finish, then starts"), so the probe would load the model the drain exists to clear, the hazard the `/running` gate was already
+  written against.
+- **The fix.** The drain keeps the state it reads from `/running` and skips a seat in `starting` or `stopping`: it counts as nothing
+  to drain and is not named unknown. The same drain over the same seat: `26 ms` and no upstream request (`stopping`: `45 ms`).
+  Everything else is probed exactly as before: a `ready` seat above all (a ready seat whose `/slots` never answers still costs the
+  17.6 s and is still named unknown), a seat listed with no state (older builds) or with a state this code does not know. The unload
+  that follows is unchanged; what changes with the skip is what the drain says. The Go-side drain reads both states without probing
+  the upstream (`internal/seatload`) and waits a load in progress out, because the request that triggered the load is waiting on the
+  engine. The render helper does not wait, by decision (register F81), and before the skip it waited only as long as its probes lasted:
+  by the code's path (register D-92 says llama-swap holds the request for the load; not observed live) a load that finished inside the
+  three 5 s deadlines let the probe read a real slot and the drain then waited for that request, and
+  any other starting seat was unloaded after the same 17 s with `could not read /slots for: <seat>`. With the skip alone a starting
+  seat ended the drain as verified idle and the unload went out with no line, so the drain now returns the seats it skipped for a
+  load in progress as `starting` (the last round's, also when it ends at its deadline), and `freeLlamaSwap` logs one line for them:
+  `unloading <seat> while its load is in progress (the drain does not wait for a seat that is starting); a request waiting on it is
+  aborted`. A stopping seat says nothing: it is already leaving. The one outcome that differs from before is a load that would have
+  finished inside the old 17 s window with a request in flight: that request is no longer waited for, and the line is its trace.
+- **Tests.** `render/gpu-lock-drain-state.test.mjs` (17 tests) runs the real drain and `freeLlamaSwap` against the fake llama-swap
+  below: starting and stopping seats (four spellings of the state) are not probed and end the drain at once, and the starting ones are
+  named in the result; a ready seat with a busy slot is waited for until idle (the control); a ready seat that never answers is probed
+  and named unknown; a starting and a stopping seat beside a busy ready one leave the ready one waited for; a seat that finished
+  loading while the drain waited on another is probed from then on and not named; a seat with no state, an empty state, an unknown
+  state and `ready` is probed as before; a render start behind a starting seat takes under a second, still sends the unload and says
+  so in one line; two starting seats are named in the plural; a stopping seat and a ready one say nothing; a drain that ends at its
+  deadline still names the starting seat. Red before: of the first twelve tests six failed, each with the upstream requests it should
+  not have sent, and of the fourteen that stood when the naming was added eight failed. Reverting the skip fails nine of the
+  seventeen; skipping `ready` too fails six; a rule written as `state !== "ready"` fails three of them (the no-state, empty and
+  unknown-state controls) and six tests of `gpu-lock.test.mjs`, whose fake seats carry no state: nine in all. Each part of the naming
+  (recording a starting seat, leaving a stopping one out, the per-round list, the list on the deadline return, the log line, its
+  plural) has a mutant that turns a test red.
+
+### Fixed — the render tests no longer reach the llama-swap or the GPU lease of the machine they run on (F80)
+
+- **The defect.** `comfy-keep.test.mjs` ("a runner given keep-comfy exits after its job while the instance it launched stays up") spawns
+  a runner that calls `withGpuSlot({ noLock })` with the default `freeLlamaSwap`, so the runner drained the llama-swap named by the
+  parent environment (`LLAMA_SWAP_API`, default the machine's own). A seat that was still starting held the drain's probe for 3 x 5 s,
+  which put the test over its own 15 s wall (15.7 s, red against a fake llama-swap with one starting seat), and a drain that finished
+  sent a real unload of a live seat. The audit found the same gap in six more test files that spawn a runner (`audiocpp-generate`,
+  `comfy-edit`, `comfy-instance`, `comfy-render` with three spawns, `sdcpp-animate`, `sdcpp-video`) and in four that call `withGpuSlot`
+  in process (`comfy-instance` and `lease-progress` reached the default `freeLlamaSwap`; `comfy-keep`, `comfy-unkeyed-api` and
+  `lease-progress` took the default lease, which is the parent's `GPU_LEASE_*`, while `comfy-instance` already passed `lease: null`).
+  A spawned runner inherited `GPU_LEASE_*` too, unless the test
+  scrubbed it by hand (`comfy-edit` and `comfy-render` did, for the lease only).
+- **The fix.** `render/test-isolation.mjs`: `isolatedRunnerEnv(extra, base)` gives a child `LLAMA_SWAP_API=http://127.0.0.1:9` (a port
+  nothing listens on: the drain gets a refused connection and handles it at once), drops every `LLAMA_SWAP_*` and `GPU_LEASE_*`
+  variable, and lets what the test passes win. The spawning tests use it; the in-process calls name `freeLlamaSwap: async () => {}` and
+  `lease: null`. `render/fake-llama-swap.mjs` is a small llama-swap on a loopback port for tests that need behaviour: per-seat state,
+  `/slots` that answers, hangs or changes per call, every request recorded, `close()` destroys the sockets a hung request holds.
+- **The guard.** `render/test-isolation.test.mjs` scans every render test and the test support that spawns runners: a runner spawn
+  whose own call does not pass an isolated env, an in-process `withGpuSlot` that names neither `freeLlamaSwap` nor `lease`, and a
+  `freeLlamaSwap` or `quiesceLlamaSwap` call with no endpoint or fetch, fail. Each runner spawn is judged on the env its call passes
+  (the helper or both closings in the call, a name declared in the same test or at the top of the file, a parameter judged by what
+  every caller hands it, or a builder the file declares): isolation written for one spawn vouches for no other, so a runner spawn
+  added to a file that already isolates one fails, and node spelled as a name bound to `process.execPath`, as `"node"` or as `fork()`
+  counts as a node spawn. An env that reaches the call through a member (`sb.env`) or an import is not traced and is judged by the
+  file as a whole, as far as the first version of the scan went. Its fixtures pin what it catches and lets through. Run on the tree
+  before the fixes the first version listed twelve violations and the per-spawn scan lists fourteen (`comfy-render.test.mjs` spawns
+  three runners); with the isolation of `comfy-keep.test.mjs` put back to the old line it fails on that file.
+- **Proof.** With the parent environment pointing at a fake llama-swap whose one seat is starting and never answers `/slots`, the old
+  test fails at 15.7 s (three `/slots` requests on the fake), the fixed test passes at 1.7 s with no request on the fake, and the old
+  environment line put back fails at 15.6 s again.
+### Fixed — a lease that unloads the agent seat is no longer held back by the host RAM that unload frees (F82)
+
+- **The deadlock.** `gpu reserve --ram N --drain --unload-seat` compared `N` to the host's committed memory inside the grant, and
+  drained and unloaded the seat only after the lease was held. When the memory it needed was the memory the seat held, the grant
+  waited for commit that its own unload would have freed: a film lease that declared its host RAM waited about six hours while the
+  3-card vLLM seat held 67 GiB of the host's commit. Same class as the DRAINING stamp of 0.117.0 (a gate in front of the step that
+  clears it).
+- **The order now (a reorder, not a looser check).** A lease that asks for `--unload-seat` and declares host RAM takes its place in
+  line and its cards first, declaring nothing (the figure travels as `Options.HostRAMWaitGiB`, stamped on the record as
+  `host_ram_wait_gib`), is drained and unloaded as before, and only then is the figure put to the host (`Manager.AwaitHostRAM`),
+  still holding the cards, inside the same `--wait`, with the grant's own sentence printed once. The comparison is the grant's
+  function over the same reading, headroom and not-yet-loaded sum, and the check and the stamp that turns the wait into the
+  lease's declared need are one critical section under the epoch lock, so two leases cannot both take the last headroom. If the
+  unload frees too little the lease keeps its cards, keeps waiting, and ends with the host-RAM refusal; its command never runs and
+  the seat's warm-back stays owed. A need no state of the box could ever admit is still refused at once, before the seat is touched.
+  The order applies to a lease whose unload can free memory for it and whose host can be read; every other lease compares in the
+  grant exactly as before: one without `--unload-seat` (`--drain` alone included), one whose unload reaches no model on its cards
+  (a `--devices` lease on cards that neither the agent seat nor any other model the roster lists is placed on: the reserve says so
+  and the lease queues without holding them), and one whose host memory cannot be read (the look after the unload would refuse for
+  the same reason, with the seat cycled and the cards held).
+- **Every form.** The wrapper, `--detach` (the parent asks the host after `detachMaintain`; the hidden holder is started with
+  `--ram 0 --ram-wait N` and compares nothing in its grant) and `--devices` / `--cards` (the allocator's host term and the queue's
+  pass rule see a request that declares nothing). `gpu hold` has no unload of its own and declares what it is given. `gpu status`
+  and the lease rows show `host_ram_wait_gib` ("host RAM N GiB asked, not yet admitted") until the host admits it. A signal during
+  the wait ends it with "while waiting for host RAM". `--cards` chooses its cards after the grant, so it cannot ask beforehand
+  whether the unload reaches them and still defers: an allocation that lands on cards the unload does not reach holds them while
+  the host is short (the wait line says the drain and the unload are done, which is true for it). A detached holder whose wait for
+  host RAM fails stays held, as after a failed drain, but its exclusive stamp is taken off and the error names `gpu release
+  --warm-seat`, because the seat is cold.
+- **Stated consequences.** A lease that declares nothing in the grant passes a front waiter that waits only on host RAM (the G6 rule)
+  and a grant that fits on other cards goes ahead of it while it waits; the media admission in `internal/pipeline` is not changed.
+  A shortage the unload does not cure (another lane or a foreign process holds the memory, or the seat was already cold and there
+  was nothing to free) costs the cards held, exclusive, and the
+  seat cold until `--wait` ends it, where the grant used to queue without touching either. No screen before the grant can tell the
+  two apart: how much of the host's commit the seat holds is not measured here (`agent_seat_host_ram_gib` is a floor the operator
+  states, its default a chosen 21 GiB, and the film seat held 67 GiB), and a prediction taken when the reserve starts is stale when
+  the grant comes, so one that sent the lease back to the grant would bring the deadlock back whenever the cause changed in between.
+  Only a need above physical RAM less the headroom is refused beforehand.
+  Details: `docs/systems/gpu-lease.md`, "A lease that unloads the seat is compared to the host after the unload".
+- Tests: `gpu_reserve_unload_hostram_test.go`, `gpu_hostram_await_test.go`, `internal/gpulease/hostram_await_test.go`.
+### Fixed — a card-only generate-image, edit-image and batch answer names the two cards it ran on
+
+Only the queued answer of a call on the card-only placement carried the leased cards (`devices`); the answer of a call that ran, the one a caller reads, did not.
+The grant now holds the pair's lease ids (`mediaGrant.Devices`), set where the pair is granted: `grantCards` for a plan the placement named (`mediaPlan.pair`, set by
+`planMulticard`, so a pool or a declared lease that holds two cards is not it) and `acquireInheritedPair` for a parent lease on exactly two non-display cards. The
+success answers of `runGenerateImage` and `runEditImage`, and every `ImageBatchItem` rendered here, add them as `devices` (the key and the lease-id spelling the
+queued answer uses); the CLI's batch output layers the item's own JSON under its row, so `generate-image --batch` prints them too. A grant without the pair adds
+nothing: every other call, with or without `imagegen_placement` / `gen_edit_placement` set to `single`, answers byte for byte as before. Documented in
+`docs/systems/media-generation.md` ("What the typed door does").
+Red before (the call succeeds, the key is missing): `TestAMulticardImageBindingLeasesTwoNonDisplayCardsAndPassesThePlacement`, `TestAnInheritedLeaseOnTwoCardsServesAMulticardImageCallOnBothCards`,
+`TestANamedFamilyThatAsksForMulticardLeasesThePairAndTheDefaultStaysOnOneCard`, `TestTheEditDoorLeasesTwoNonDisplayCardsForAMulticardBinding`,
+`TestAnImageBatchOnAMulticardBindingLeasesThePairOnce`. Guards for the other side: a plain edit, the default binding of the same node, a pooled two-card call and a batch
+without the placement carry no `devices` key (`TestAnImageBatchWithoutThePlacementNamesNoCards`, `TestPoolRouteRequestsPoolCards`). Seven mutants of the fix compile and
+each turns a named test red (grantCards, acquireInheritedPair, the generate and edit answers, the batch items, a two-card gate, an every-lease gate).
+
+### Fixed — the card-only image and edit placement's review round: a smaller resident share, the canvas cap, a held-back int8 row, the console watch, the tiled decode, the loader preflight and a zero that was never said
+
+Seven findings from the review of the branch, each proved by a test seen failing for the right reason and by a mutant of its fix (the mutant compiles, the test goes
+red, the file is restored byte for byte).
+
+- **`--resident-gb` below a recipe's share moves the bytes to the storage card.** Both planners shifted only the compute peak, so `--resident-gb 5` on the fp8mixed
+  edit (19.1 GiB DiT, 9 GiB resident, 11.0 GiB on the storage card) declared 0 host RAM and was accepted, although 15.0 GiB does not fit the 14.9 GiB a 16 GB card has left, and
+  the whole DiT on one card ran out of memory at load in the benchmark. `recipePeaks` (JS) and `estimatePlaced` (Go) now treat the DiT's total as the invariant: a smaller
+  share adds the difference to the storage peak, a larger one does not lower it (no run measured that). The Go declaration keeps the ordinary estimate and the runner
+  refuses, naming the card and the figure.
+  Red before: `TestTheResidentShareIsReadFromTheImageCall` (a 5 GiB share declared 0.0 GiB with the storage card at 11.0), "a resident share below the recipe's moves the same
+  bytes onto the storage card" (`--resident-gb 5` and `0` were accepted).
+- **The edit canvas cap is enforced.** `maxMegapixels` was read only by the Go declaration; the runner honours `--megapixels`, `COMFY_EDIT_MEGAPIXELS` and
+  `gen_edit_megapixels` verbatim, so a card-only edit pinned at 4 MP held both cards and ran out of memory. `planEdit` now refuses a pinned canvas above the recipe's cap before
+  anything starts, and the typed door refuses `gen_edit_megapixels` above it before any lease. The 2511 GGUF edit row, which claimed the 2.0 MP cap while keeping its 1.47 MP
+  compute figure, is scaled to the cap like the fp8mixed row (activations 1.9 -> 2.6 GiB, compute peak 4.9 -> 5.6 GiB). Said in the finding and not done: a warning at config
+  load, because `internal/config` cannot read the recipe table (`mediacap` imports it); the door's refusal says the same before any lease.
+  Red before: "a canvas the call pins above the recipe's cap is refused before ComfyUI starts", `TestAMulticardEditBindingThatPinsACanvasAboveTheRecipesCapIsRefusedBeforeAnyLease`
+  (a 4 MP and a 2.01 MP canvas leased the pair), "a row with a canvas cap holds the activations of that cap".
+- **The 2.1 int8 convrot row is held back.** It puts a comfy_kitchen int8 DiT on `cuda:1`; the repo's notes record an illegal memory access in that path off `cuda:0`
+  (upstream issue 220, unfixed), and the benchmark arms the row cites ran the int8 DiT on `cuda:0` with the text encoder on `cuda:1`, the reverse. A row may now carry a
+  `blocked` sentence (`render/multicard-recipes.json`, `Blocked` in `internal/mediacap/multicard.go`, pinned together): `findRecipe` refuses it by name for every caller,
+  `FindMulticardRow` does not return it (so the estimate, the doctor and the typed doors see no recipe), and the door's refusal says which row is held back and why. One int8 arm
+  with the DiT on `cuda:1` lifts it. Red before: "the int8_convrot recipe is held back" (JS), `TestAHeldBackRowIsNotARecipeAndSaysWhy` (Go), the pipeline refusal case "2.1 int8 DiT, held back".
+- **The runners watch the console.** A DisTorch2 out-of-memory error that kills ComfyUI's prompt worker leaves `/history` empty and `/system_stats` answering, so the poll
+  waited out its whole budget with both cards leased. `generate()` (`comfy-render.mjs`) and the new `renderEdit()` (`comfy-edit.mjs`) make the
+  console cursor of the pair's instance before the submit and hand the poll a `watch`: `IMAGE-PLACEMENT-OOM` ends the wait at once, with the console line, the recipe and its
+  per-card peaks. The pieces are the Wan runner's own (`comfyLogCursor`, the `watch` hook of `pollOutputs`, `oomWedgeLine`, `createOomWatch`), taken from that branch
+  verbatim so the two merge as one change. Red before: `console-watch.test.mjs` (the pieces, which did not exist here), "the poll's watch is the placement's out-of-memory watch".
+- **A tiled decode is not delivered as a clean success.** ComfyUI retries a VAE decode that ran out of memory tiled, and says so only in its console; the Wan runner reports it,
+  the image runners did not. The finished image is now kept beside the requested path as `<name>.tiled.<ext>` and the run fails with `IMAGE-DECODE-FALLBACK` (the Wan runner's
+  rule: nothing is thrown away, nothing seamed is shipped as asked); a console that cannot be read to the end says `IMAGE-DECODE-UNVERIFIED` and delivers. The same decode
+  fallback on the single placement stays as it was. Red before: "a decode that ComfyUI retried tiled is not written to the requested path".
+- **The recipe's loaders are checked before the POST.** `verifyImagePlacement` asked only for `OffloadFreeForDecode`, so the `MISSING_NODE` pack hints the branch added for
+  `UNETLoaderMultiGPU` and `CLIPLoaderDisTorch2MultiGPU` were unreachable and a missing loader surfaced as a bare rejected POST after the pair was leased. It now asks `/object_info`
+  for the recipe's loader classes (a missing one is `MISSING_NODE` with its pack hint, an unanswered question a refusal), refuses a loader that no longer declares an input the
+  recipe sets (`IMAGE-PLACEMENT-NODE-INPUT`: ComfyUI drops an undeclared input without a word, so a renamed `expert_mode_allocations` would run with no split), and the graph's classes,
+  the LoRA loader included, are preflighted just before the POST. `comfy-nodes.mjs` gains `fetchNodeInfo`, which `missingNodeClasses` now rides on. Red before: "verifyImagePlacement asks for the recipe's own loader classes too" and its three siblings.
+- **A measured card-only zero is said.** `declaredRAM` logged only a figure above 0 and `gpu reserve` printed only one, so the zero a measured recipe earns was never explained
+  anywhere (the docs promised it "declares 0, and says so"), and `calibratedRAM` leaves 0 alone, so nothing could correct a false one. `hostneed.Need` gains `CardOnly`; the
+  pipeline's log (once per key) and `gpu reserve` print the zero with its reason. A card-only image run also records its VRAM peak and host growth under its own footprint key
+  (the quant carries `+multicard`) instead of the single-card one, whose p90 a declaration is raised to. Red before: `TestOnlyAMeasuredCardOnlyDeclarationIsMarkedCardOnly`,
+  `TestAMeasuredCardOnlyEditCallSaysItDeclaresNothing`, `TestAMeasuredCardOnlyDeclarationOfZeroIsSaidInTheLogOncePerKey`, `TestTheCardOnlyPlacementHasItsOwnFootprintKey`.
+- **Not fixed, said once.** The typed edit door passes no sampling, so it records no footprint or host peak and nothing cross-checks a measured zero against the host's real
+  growth; the single-card edit route never did either, and sampling a door is a feature, not a fix of this branch (open, in the report). The new watch, verdict and input
+  check are proved against fakes and the benchmark's log lines, not a live wedge.
+- **Testing seam.** `generate()` (`comfy-render.mjs`) and `renderEdit()` (`comfy-edit.mjs`) take their outside world as an `io` object whose defaults are the real calls, the way
+  `comfy-video.mjs` does, so `multicard-image-run.test.mjs` pins the order of a run (verify, stage, preflight, cursor, submit, poll, write, finalize, unstage) instead of grepping
+  the source. Without a placement the order and the poll's options are today's.
+
+### Added — `--placement multicard` for Qwen-Image generation and edit: the text encoder and VAE on one leased non-display card, the DiT on the other, and the typed image and edit doors that lease the pair (`imagegen_placement`, `gen_edit_placement`)
+
+- **What it is.** The Wan card-only placement (below) generalised to the image routes. `comfy-generate.mjs`, `comfy-render.mjs` and `comfy-edit.mjs` take
+  `--placement single|multicard`, `--resident-gb` and `--cards` (the Wan flags without the `wan-` prefix). Under `multicard` the loaders of the graph are the
+  ComfyUI-MultiGPU ones, per the recipe of `render/multicard-recipes.json`: the text encoder and VAE on `cuda:0` (storage), the DiT on `cuda:1` (compute) whole or
+  split by a DisTorch2 allocation (`cuda:1,<N>gb;cuda:0,*`), all through the pair's keyed ComfyUI instance and the read-only safetensors reader the Wan
+  placement ships. Five recipes: Qwen-Image-2.1 int8 and bf16, Qwen-Image 2512 Q5_1 GGUF, Qwen-Image-Edit 2511 fp8mixed and Q5_1 GGUF. krea2, 2512 bf16,
+  sdxl, hidream, the 2.1 edit, an int8, int4 or nf4 text encoder, a text encoder the recipe was not built for and a `--graph` file are refused by name before anything starts.
+  `single`, the default, is the graph, argv and launch it was (the fourteen graphs built before are pinned node for node by a golden test).
+- **Measured and predicted, said per row.** Only the 2511 fp8mixed edit was measured with the read-only loader (145.5 s at 1.47 MP on two 16 GB cards, 1.87 GiB of
+  host growth). Every image arm of the 2026-10-11 benchmark ran the stock loader, so the other four rows are `predicted` (`basis` in the JSON, `Measured` in
+  `internal/mediacap/multicard.go`, pinned together by a test) and declare the ordinary host-RAM estimate; a live run with the read-only loader promotes a row.
+- **The typed doors.** `imagegen_placement` and `gen_edit_placement` (`""`/`single`, or `multicard`; unset by default, family-overlay keys) take a new need kind in the media
+  admission: the box's TWO non-display cards, named as a set, never the display card (at the desk or away) and never a card whose display state is unknown. A held card of
+  the pair is a place in line (the token names both); two multicard calls serialize and a multicard call never shares a card with a single-card one; the batch
+  takes one pair. A box without exactly two such cards, a host that does not lease cards and an unreadable card table answer `gpu_lease_unavailable` with the
+  reason and the way out (`gpu reserve --devices`), and run nothing: never one card, never the whole node. A binding with no recipe is refused before any
+  lease, naming the key. The runner gets `--placement multicard` and `GPU_LEASE_DEVICES`, and no per-card instance, pin, dynamic VRAM or `--pool-*`. Under
+  a parent lease the call runs on both its cards if it holds exactly two non-display cards, and is refused with the reason otherwise. The lane probe and the
+  place-in-line keeper read the same plan, and the differential table of lane states gains the card-only states. A binding without the key takes exactly the lease,
+  argv and declaration it always did (pinned).
+- **Host RAM.** `hostneed.estimatePlaced` sizes the declaration on the pair (`Facts.Placement`, `ResidentGiB`, `Megapixels`): 0 only for a measured recipe whose
+  per-card peaks fit the two cards less `--reserve-vram`; one card, three, no fit, an edit canvas over the recipe's cap, a predicted row and no recipe keep the
+  ordinary estimate, with the reason in the declaring line. `gpu reserve` around the three runners reads the same recipe from their flags.
+- **Config.** Both keys are validated (`""`, `single`, `multicard`), carried by named-family overlays, and warned about at load when the placement cannot work: no recipe for
+  the family, the sd.cpp engine, pool keys that are ignored, a `comfy_cuda_device` pin or `comfy_dynamic_vram` it does not apply, a host with card-scoped leases off.
+- **Not measured.** The read-only reader on the int8 convrot DiT and the bf16 text encoder (the tests use fakes of the loaders); the bf16 split shares and the 2512
+  Q5_1 peaks (arithmetic from the benchmark's arms); the port fallback of a pair instance with neither `--api` nor `COMFY_API`; the installed ComfyUI-MultiGPU is a newer
+  commit than the benchmark's pin (the loader classes the recipes name are present); the lane probe covers the image route, not the edit route; a box with three
+  non-display cards is refused until `gpu reserve --devices` names the pair.
+- **Docs.** `docs/systems/media-generation.md` ("Card-only image and edit"), `render/README.md`, ADR 0039 (Amendment 2026-10-11).
+
+### Added — `comfy-video.mjs --wan-placement multicard`: the card-only Wan 2.2 placement on the two non-display cards of a lease, with no host RAM
+
+- **What it is.** One Wan 2.2 14B fp8 expert is 13.3 GiB and a film-size clip (720x1280x81) needs 12.2 GiB more for the sampler beyond the 3 GiB of the
+  expert kept resident (the film-size run's compute-card peak, 15.18 GiB, less those 3; the 4-step benchmark before it had read 9.7 to 11.0), so
+  the clip fits no single 16 GB card, and the single-card way out (ComfyUI's dynamic VRAM) streams the experts through host RAM and costs
+  the host the whole file. `--wan-placement multicard` spends a second card instead: `cuda:0` stores the text encoder, the VAE and the
+  donor blocks of the expert in use, `cuda:1` computes with 3 GiB of the expert resident (`--wan-resident-gb`), and each expert loads
+  through DisTorch2 with `cuda:1,3gb;cuda:0,*`. `single` stays the default and its graph, argv and launch are byte for byte what they were
+  (pinned by tests). Measured on two RTX 5060 Ti 16 GB, 2026-10-11: a 4-step benchmark of the film recipe (250 s per step, 13.3 and
+  11.1 GiB, 2.3 GiB of host growth), then the full film-size clip in one media lease with `--ram 0`, run on commit 090fbd95, the tip of this branch before
+  the second review round (that round's fixes were not re-run on the cards): 720x1280x81, 20 steps, plain decode, 250.5 s per step on both experts, runner
+  wall 5136 s (85.6 min), the plain decode 31.5 s after the free node released both cards in 1.1 s; 15.18 GiB peak on the compute card (95.3 %, with 3.0 GiB
+  of the expert resident; 14.9 steady) and 10.86 GiB on the storage card; host growth 2.33 GiB steady beyond the VRAM charge. Frame check CLEAN: the chroma
+  step into the joins 24, 48 and 72 is z 1.92, 1.17 and 0.0 where the tiled decode measures z 6 to 18, the frame differences at the joins 24 and 48 are 0.69x and
+  0.82x the clip's median, no frozen or repeated frame, the walk continuous through both joins. The
+  Qwen-Image-Edit 2511 call at the film's full preset also runs on the pair (9 GiB of the DiT resident on the compute card, 15.98 s per step, 10.5 and
+  10.6 GiB per card).
+- **The two cards are the lease's.** They come from `GPU_LEASE_DEVICES` (else the lease's record); `--wan-cards <a>,<b>` names them only
+  when no lease does, and under a lease it can only confirm them (a card the lease does not hold is refused). They are read against the
+  driver's card table and refused unless there are exactly two, neither drives a display (`display_active` or `display_attached`) and
+  the driver reports the display state of both (an unknown one is refused, never assumed screenless). The larger card computes; ComfyUI
+  numbers its cards in the order of `CUDA_VISIBLE_DEVICES`, which the runner sets from the two UUIDs storage first (of two equal cards the
+  higher UUID computes, the order the lease sorts in), and the running
+  ComfyUI's device list and the harness's node pack are checked before anything is submitted.
+- **The launch.** The runner starts its own keyed ComfyUI (`mc-<uuid heads>`) with `--gpu-only --disable-pinned-memory`, the harness's
+  node folder through `--extra-model-paths-config` and the custom-node whitelist the measurement ran with. The caller's
+  `COMFY_CARD_UUID`, `COMFY_CUDA_DEVICE` and `COMFY_DYNAMIC_VRAM` are dropped for that launch (a single-card pin and dynamic VRAM
+  contradict it), and `--wan-loader` is not read (one stderr line when `native` was asked). `ensureComfy` takes a `launch` and records
+  the pair in its launch marker, so a running ComfyUI is reused only when it is this instance on this pair in this order. Refused before
+  the lease slot, llama-swap or ComfyUI are touched: `--fast`, a GGUF or unnamed expert (`--high-unet` / `--low-unet` are required), another
+  family, a `--graph` file, a `--wan-resident-gb` that one of the two cards cannot hold at the call's geometry (3.2 GiB of an expert at most at film size, from the film-size
+  run's measured compute-card peak; the storage card must hold the rest of the expert beside the VAE), a UUID prefix that names two cards, and the placement's own flags lost to an `=` (`--wan-placement=multicard`, or `--seed=7 --wan-placement multicard`: the runner's
+  parser does not split it while the lease sizing does; write each flag as `--name value`).
+- **`render/comfyui-ext`, the harness's own ComfyUI code (the shared install is not written to).** A read-only safetensors reader
+  (`OFFLOAD_RO_LOAD=1`): stock ComfyUI maps a safetensors file copy-on-write, which Windows charges to commit in full (+13.3 GiB per
+  expert); mapped read-only it charges nothing. And `OffloadFreeForDecode`, a pass-through latent node between the last sampler and the
+  plain `VAEDecode`: it saves the sampled latent, frees both cards of the experts (with `--gpu-only` ComfyUI's own unload frees nothing; the
+  experts leave when their patchers lose their last reference), logs each card's memory, and stops the run with `OFFLOAD-DECODE-NOFIT`
+  and the numbers when the decode card cannot hold a plain decode, because ComfyUI would retry it tiled with its own temporal chunking,
+  the seam the plain decode exists to avoid. A plain decode whose console shows that retry fails the run (`WAN-DECODE-FALLBACK`, the clip kept beside the requested path).
+  `--wan-decode tiled` and `auto` keep their meaning, and a tiled decode under multicard says once where its temporal tiles meet (frames 24, 48 and 72 at the film's size). The
+  runner asks for the pack's node before every run, under any decode (`WAN-PLACEMENT-PACK`), because the reader that keeps the experts out
+  of host commit lives in the same pack; a missing-node message for the harness's own pack says it failed to import, not "install it".
+- **Host RAM.** `gpu reserve --devices <a>,<b> -- node render/comfy-video.mjs ... --wan-placement multicard` declares 0 when each leased
+  card fits its own stage (`hostneed.estimateWith`, new `Facts.CardsGiB` / `LeasedCardsGiB`): the larger card, the resident share of the
+  expert (`--wan-resident-gb`, default 3) plus 12.2 GiB of film-size activations and a chosen 0.5 GiB margin for the CUDA context, the other the rest of the expert
+  plus 0.8 GiB inside its size less `--reserve-vram`; one card,
+  three, no card table, no fit, another family or no flag keep the ordinary estimate. The pipeline's media admission has no multicard door
+  yet (every typed door leases one card).
+- **Tests.** 45 new render tests (44 in `wan-multicard.test.mjs`, and `comfyui-ext.test.mjs`, which runs the 14 Python tests of the node
+  pack) and the host-RAM tests, written red first, and mutation-checked; the review round of 2026-10-11 (the entry below) found mutants that survived and closed them. The one
+  existing test that pinned `generate()`'s source takes the plan as a fourth argument. An independent review before the first run found
+  the `=` spelling, the pack check under the tiled decode, `--wan-cards` over a lease, late refusals, an unknown display state and a
+  sum-based host-RAM fit; each is fixed here. Docs: `docs/systems/media-generation.md`, "Card-only Wan".
+
+### Fixed — the card-only Wan placement, the second review round: what the merged branch got wrong or could not prove
+
+An independent review of the merged branch found sixteen things (two HIGH, six MEDIUM, eight LOW; three pairs were the same defect reported
+twice). All are fixed or answered here. Each change of behaviour was written red first; the findings that are about a missing test (the Wan-only
+guard's test, `main()` and `generate()`, the host-RAM branch that reads the card table) are pins that pass on this tree, each proved by the one-line
+mutant that makes it fail. Every fix was mutation-checked: reverted in turn it fails a test it names, the mutant parsing or compiling, the restore
+byte-identical.
+
+- **A flag spelled with `=` that swallowed the placement's own flag, in the `=` spelling (HIGH).** `--seed=7 --wan-placement=multicard` and
+  `--steps --wan-placement=multicard --wan-decode plain` reach this runner's parser (which does not split `=`) as the value of the flag before
+  them, so the placement flag was lost and the single placement ran, while the lease sizing (which does split it) declared the card-only 0 GiB: no
+  launch, no `--gpu-only`, the experts streamed through host RAM under a lease that declared none. `refuseEqualsSpelling` now matches the
+  swallowed token as `--wan-x` and as `--wan-x=...`, for all three flags.
+- **An out-of-memory wedge ComfyUI does not report (HIGH).** After an OOM inside the DisTorch2 distribution ComfyUI's node handler logs `Got an OOM,
+  unloading all loaded models`, the unload runs out of memory as well and the prompt worker thread dies; `/history` stays empty, `/system_stats` and
+  `/queue` keep answering and the lease keeps beating, so the poll waited out its whole budget with both cards leased. `pollOutputs` takes an optional
+  `watch`; the multicard run hands it a reader (`comfyLogCursor`, made before the prompt is submitted so an earlier run's lines in a kept instance's
+  log do not count) of the instance's console that matches only the two lines that mean the worker is gone, never the recoverable ones in the same
+  log (`WAN-OOM`; a console it cannot see is said once, `WAN-OOM-WATCH`).
+- **The wait budget (MEDIUM, reported twice).** The 20-step film recipe was projected at about 5,170 s (the film-size run then took 5,136 s of runner wall) and the single-card default left 4.5 percent. A
+  card-only run waits 7,200 s unless `--wait-sec` or `COMFY_WAIT_SEC` says otherwise, and says which budget it used (`WAN-WAIT-NOTE`, which names 5,170 s as the projection and 5,136 s as the measured runner wall).
+- **The resident-share guard (MEDIUM, reported twice) and the storage card (LOW).** The guard admitted 5.1 GiB at film size where the benchmark says 4 is
+  too thin, and scaled the activations linearly where the benchmark measured about twice that at mid sizes. It now holds both cards to the figures the
+  lease declares against (the film's activations, the benchmark's reserved allocator peaks as an envelope below it, the storage card's 13.4 - share + 0.8
+  GiB inside its size less `--reserve-vram`): 3.9 GiB at most at film size on the 11.0 GiB and the reserve of that round, 3.2 GiB on the film-size run's
+  12.2 GiB and the 0.5 GiB context margin of the entry below. A pair such as 24 + 8 GiB is refused before anything starts, with the share that would fit.
+  A Go test fails when the runner's and `internal/hostneed`'s figures drift apart. A UUID prefix that names two cards is refused (it resolved to the first).
+- **A plain decode that ComfyUI retried tiled (MEDIUM).** It wrote the seamed clip to the requested path and exited 0, from the tail of a log that a
+  kept instance shares with earlier runs, and read an unreadable log as "no fallback". It is now judged by this run's console: the clip is kept as
+  `<name>.seamed<ext>`, the latent is named and the run fails (`WAN-DECODE-FALLBACK`); an unreadable console says `WAN-DECODE-UNVERIFIED`.
+- **The tiled decode's seams (LOW)** were named as "frames 24 and 48"; `tiledSeamFrames` reproduces ComfyUI's tiling (24, 48 and 72 at the film's size)
+  and the note names the boundaries of the clip being made.
+- **A failed prompt's exception message (LOW)** was cut by a 500-character slice of the status; it now reaches the error whole, for every runner that
+  polls through `comfy-submit.mjs`.
+- **Equal cards (LOW)** took their roles from the order they were named in, so `--wan-cards 0,2` gave the opposite of the lease's split; the lower UUID
+  now stores, as the lease's sorted order did in the benchmark. The runtime device check also compares the model name (the display card is another
+  model of the same 16 GB class) and its docstring says what it cannot prove (two cards of one model).
+- **`--enable-dynamic-vram` in `COMFY_EXTRA_ARGS` (LOW)** re-enabled streaming beside `--gpu-only`; it is dropped from a multicard launch, and a
+  running ComfyUI whose argv turns dynamic VRAM on is not reused.
+- **Tests that could not fail (MEDIUM, LOW).** `TestTheMulticardFlagMeansNothingToAnotherFamily` used two 16 GiB cards where the Wan-only guard changes
+  nothing (it passed with the guard deleted); it now uses two 24 GiB cards. The branch of `resolveReserveHostRAMWith` that reads the card table itself
+  had no test. `main()`'s wiring and `generate()`'s post-run steps had none: `planRun` and `generate` take their calls from tables and
+  `render/wan-multicard-run.test.mjs` drives them (seven one-line mutants the reviewer found surviving are killed; the source pin of `generate()`'s order is
+  a behaviour test now). 34 new render tests (33 net: a source-text pin was replaced by a behaviour test) and 2 Go tests.
+- **Answered, not changed.** The reviewer's claim that the CHANGELOG's "every mutant fails a test" was overstated was right for the first round; that
+  sentence now points here. No live run was made in this round: everything above is proved with fakes and with the benchmark's logs, not on the
+  cards. The 20-step acceptance run is the one in the entry above, made on 090fbd95, the tip before this round (720x1280x81, 20 steps, plain decode,
+  250.5 s per step, 5136 s of runner wall, host growth 2.33 GiB, frame check CLEAN, 15.18 GiB on the compute card and 10.86 GiB on the storage card); this round's
+  changes were not re-run on the cards.
+
+### Fixed — the card-only Wan placement follows the film-size run: 12.2 GiB of activations, a 0.5 GiB context on the compute card, 3.2 GiB of share at most
+
+The independent check of the fix round found that the run's numbers contradicted the guard's. The film-size run (commit 090fbd95, the tip before the
+second review round) peaked at 15.18 GiB on the compute card with 3.0 GiB of the expert resident, so the sampler side is 12.2 GiB, not the 11.0
+(the top of the 4-step benchmark's 9.7 to 11.0, which ended at about 1000 s, before the peak at about 2485 s). The acceptance criterion follows the
+measurement, in both places that draw this line.
+
+- **The figure.** `WAN_FILM_ACTIVATIONS_GIB` in `render/wan-multicard.mjs` and `wanActivationsGiB` in `internal/hostneed` are 12.2 (a Go test pins them
+  together, and the new `WAN_COMPUTE_CONTEXT_GIB` / `wanComputeContextGiB`, 0.5, the same way `wanResidentDefaultGiB` is pinned).
+- **The compute card's margin is the CUDA context, not `--reserve-vram`.** Both the runner's resident-share guard and the lease sizing held the
+  compute card to its size less `--reserve-vram` (1.0 GiB by default), ComfyUI's model-load margin and not an activation ceiling. With 12.2 GiB
+  that refuses the measured call: 15.9 - 12.2 - 1.0 = 2.7 GiB against the runner's own default of 3 (the guard), and 3.0 + 12.2 = 15.2 > 14.9 (the
+  sizing, which would then declare the whole 33 GiB set for a call measured to run with `--ram 0`, and the host-RAM brake holds a grant that size back
+  for hours). The compute card now needs the share + 12.2 + a 0.5 GiB context margin (chosen, not measured: the 12.2 already holds a context, and only a 3.0 GiB share was ever run) to fit its size: 3.2 GiB of share at most at film size on a 15.9 GiB card,
+  and the guard and the sizing admit the same shares (a Go test draws the ceiling from the runner's constants and checks both sides of it).
+  `--reserve-vram` is the storage card's margin and nothing else; that check is unchanged (the run's 10.86 GiB sits inside the 11.2 it predicts).
+- **Red before.** The new render assertions failed with the figure at 12.2 and the old margin (the measured recipe refused, `at most 2.7 GiB`); the Go
+  tests failed with 11.0 (a 3.3 GiB share declared 0 where the runner refuses it, the mirror test saw 12.2 against 11) and, with only the constant
+  raised, with the measured call itself declared as the ordinary 33.0 GiB. Mutants, each compiling and restored byte for byte: the Go figure back to
+  11.0, the old reserve check, no context term, a 0.4 context, the compute check against the smaller card, no reserve on the storage card (red in 5, 5,
+  4, 4, 2 and 1 Go tests); the render margin back to `--reserve-vram` (red).
+- **Behaviour change to know.** A `--reserve-vram` above the default no longer shrinks the compute card's share (`--reserve-vram 2` with the default
+  share used to be refused at film size; the film-size run itself ran at the runner's default reserve of 1.0, so that a larger reserve leaves the compute card's peak where it was is assumed, not measured); it shrinks the storage card's room, as before.
+- **A clip bigger than the film's is said to be unsized.** The planner holds the sampler's activations at the film-size run's 12.2 GiB from 75,600 tokens up, because nothing
+  above the film's size was measured, while the activations are expected to grow with the tokens. It still admits such a clip (the documented intent is that a bigger clip may run), but prints `WAN-GEOMETRY-NOTE` before the resident-share
+  check: the clip's size, the film's, the figure it holds, what a proportional extrapolation gives (about 32.0 GiB at 1280x1280x121), and the advice to lower `--wan-resident-gb`
+  and to pass `--wait-sec`. Nothing is said at the film's size or under. The lease sizing reads no geometry and declares against the film's figure for any clip (its comment says
+  so). Red before: the new note test and the `WAN_FILM_TOKENS` test failed (no note, no constant); mutants, each parsing and restored byte for byte: the note never said, said only
+  after the check, said at the film's own size, an always-empty note, the extrapolation unscaled, the film's token count off by one, the `--wait-sec` advice dropped (red in 1 to 2 tests each).
+
+### Fixed — `gpu reserve` says why its declared figure is the media class default, and that `--ram` states the real one (F71)
+
+- **The defect (register F71).** A `gpu reserve` around a command the estimator does not recognise (a driver script that runs several
+  renders, a Python wrapper), around a recognised helper that runs its own `--graph`, or around a recognised helper whose weight files
+  cannot be sized, declares the media class default: the largest ComfyUI family the box binds, counted in full as if it streamed from RAM
+  (Qwen-Image 2512 on the reference box: 38.0 + 8.8 = 46.8 GiB). The declaring line said "class default" inside its parenthesis and nothing
+  else, so a caller whose weights sat on the cards (the card-only Wan placement above) could not tell that the figure was not theirs,
+  declared 46.8 GiB, and waited a queue cycle for host RAM it never used.
+- **The fix.** The declaring line is unchanged. When its figure is the class default and the operator gave no `--ram`, ONE more line
+  follows it with the reason (no command is wrapped, as in a `--detach` hold; the wrapped command is not a recognised render helper, the
+  helpers named from the table that recognises them; a recognised helper runs its own `--graph`; or a recognised helper's weight files
+  could not be sized) and the way out: `--ram <GiB>` states the real figure, `--ram 0` when the weights sit on the cards. No line when the
+  operator gave `--ram` (0 included), when the figure was estimated from the helper's own files, for a text lease, or on a box whose class
+  default is 0. The line never contains the word the declaring line is grepped by, and no figure, lease record or queue behaviour changes.
+  `internal/hostneed` gains `RenderHelpers` and `RenderCall.RunsOwnGraph`, the two answers the line reads (`Estimate` asks the same
+  function about `--graph`, so the line and the estimate cannot disagree).
+- **Tests.** `gpu_hostram_hint_test.go` (seven: the four reasons, the cases that print nothing more, the invariant that the hint changes
+  no figure, and one through `runGPUReserve` on stderr) and `internal/hostneed/helpers_test.go` (two), written first. Red before: the five
+  that pin the line failed on the tree without the fix, each with "want the declaring line and exactly one line of why, got 1 line(s)"; the
+  other two hold before the change and guard it. Mutation-checked: fourteen changes (ten to the line and its guards, four to the two
+  hostneed answers), each reverted in turn fails a test it names. Docs: `docs/systems/gpu-lease.md` ("Host RAM"),
+  `docs/systems/media-generation.md` ("Card-only Wan") and `render/README.md`.
+
+### Added — the single placement of the Wan graph is pinned to the graph the builder made before placements existed (no product change)
+
+- **Why.** The merged `wan-multicard.test.mjs` compares `placement: "single"` with the default placement, which shows the two agree with
+  each other and not with what was built before: with the single graph's stock `VAELoader` replaced by the multi-GPU loader, every test of
+  the four files that cover the builder and the scratch scan still passed. A differential run of the base builder against the merged one over
+  103 argument sets (309 builder comparisons, 24 decode-chooser cases and the exported constants) found no difference.
+- **The pin.** `render/wan-single-golden.test.mjs` builds nine graphs (GGUF and fp8 experts; the auto, native and forced DisTorch2 loaders;
+  tiled, plain and auto decode; fast; an upscale; a short clip with a negative prompt, steps, cfg, boundary and shift) with no placement
+  argument, with `placement: "single"` and with a `residentGb` the single placement must ignore, and requires the graph held in
+  `render/testdata/wan22-single-graphs.json` (made by the builder as it stood at the 0.181.0 release tip) and no warning. The VAE and
+  text-encoder loaders swapped for their multi-GPU twins in the single graph each fail all nine of its graphs (the VAE one passed the old tests).
+### Fixed — nothing the harness or its tests start opens a console window on the desktop
+
+- **The defect.** On Windows a console program started by a process with no console of its own (a runner or a test child started
+  detached, a service, a launcher started hidden) gets a NEW visible console window unless it is started hidden, and with Windows
+  Terminal as the default terminal that window is a Windows Terminal window on the operator's desktop. A window watcher saw them
+  while the render suite ran: Windows Terminal hosting windows and one titled `taskkill.exe`. The cause was 86 child-process calls in
+  `render/` that passed no `windowsHide`: 25 in production modules (the engine's `killTree` `taskkill`, its `ps` probes, ffmpeg and
+  ffprobe in `audio-qa`, `igpu-qa` and the animate/video runners, the `nvidia-smi` and sd-cli listings, the attached ComfyUI launch,
+  the manifest installers, the tts and sdcpp attached runs) and 61 in the tests and their support, among them the scripts the tests
+  write into a string and run in a detached child. On the Go side the `taskkill` calls (`gpugen`, `mediaops`, `nodeswap`), the starts
+  of the render runners and the tool probes (`nvidia-smi`, ffmpeg, the hardware detectors) were built with a bare `exec.Command`,
+  and the accelerator sidecar launcher set `HideWindow` but not `CREATE_NO_WINDOW`. Three more places started console programs the
+  same way and were found by the review of this fix: the Windows cage (`internal/sandbox`), which the agent's `run` tool reaches
+  whenever `--allow-run` is set, with `go`, `python`, `node`, `npm`, `cargo` and `git` on its allow-list; the children of 48 Go test
+  files (ffmpeg, ffprobe, python, node, the built binary itself); and the companion-CLI runner of the two printed CLIs under `tools/`.
+- **The rule in Go (`internal/winexec`): a hidden child stays on its parent's console unless the parent has none.** `HideWindow`,
+  `Command` and `CommandContext` always hide the child's own window (`SW_HIDE`) and add `CREATE_NO_WINDOW` only when
+  `GetConsoleProcessList` says this process has no console to hand on (a hidden console, which `GetConsoleWindow` would miss,
+  counts as one). The first version of this fix put `CREATE_NO_WINDOW` on every child, which moves the child to a console of its own:
+  the operator's Ctrl-C and a closed terminal no longer reached it, so an interrupted `local-offload` (the `npm ci` of
+  `install hyperframes`, any media runner on a verb without a signal handler) left a hidden process running with no window to show it.
+  A window can only appear when the parent has no console, so that is the only case that needs the flag. Two siblings cover the
+  children that are not simply waited for: `HideWindowDetached` / `CommandDetached` always give the child a hidden console of its own
+  (the detached GPU holder, which must survive a closed terminal, and the accelerator sidecar launcher), and
+  `HideWindowIfNoConsole` / `CommandIfNoConsole` leave the command an operator names after `--` in `gpu reserve` exactly as before
+  when there is a terminal (it may be interactive or open a window they want) and hide it when there is none, which closes the
+  exemption that let a wrapped console program open a window under a console-less parent. The tests start real processes (helpers
+  with a hidden console or none at all, so none of them can open a window) and read `GetConsoleProcessList` in the child.
+- **The cage.** `sandbox_windows.go` called `CreateProcessAsUser` with `CREATE_SUSPENDED|CREATE_UNICODE_ENVIRONMENT` and
+  `STARTF_USESTDHANDLES` only. It now also passes `CREATE_NO_WINDOW` and `STARTF_USESHOWWINDOW` with `SW_HIDE`: the caged command
+  has every handle piped and is ended by its job object, never by a Ctrl-C, so it is always alone on a hidden console. An earlier
+  version of this entry said the cage was Linux only and untouched; that was wrong.
+- **The fix in `render/`.** `windowsHide: true` on all 86 calls, every other option unchanged (in `manifest-satisfy.mjs` the flag
+  follows the caller's spread, so a caller cannot drop it; in `igpu-engine.mjs` and `igpu-qa.mjs` it now comes after the timeout
+  spread). The Windows stub launcher that `igpu-stub.mjs` compiles starts its target with `CREATE_NO_WINDOW` and `HideWindow` as
+  well: a launcher started detached has no console to hand on, and the node child it starts would open a window of its own.
+  `comfy-keep.test.mjs` had pinned the defect (`windowsHide` undefined for the attached ComfyUI launch); it now asserts the house rule
+  for that launch too. `windowsHide: true` does not move a child that inherits stdio off the operator's console (libuv adds
+  `CREATE_NO_WINDOW` only when no stdio is inherited), so the attached sd-cli, tts and comfy-render runs keep their Ctrl-C;
+  `render/console-share.test.mjs` measures it with real processes and pins that the three runs inherit stdio.
+- **The fix for the Go tests and `tools/`.** 73 constructors in 48 Go test files of the root module (plus 3 in `internal/winexec`'s
+  own tests) are `winexec.Command` / `winexec.CommandContext` now, and `cmd/leakdigest` builds its `git` children the same way, so it
+  needs no exemption. `tools/comfyui` and `tools/llamaswap` (separate modules, which cannot import `winexec`) hide the
+  `cobratree` companion-CLI runner through a `newCLICommand` + `hideWindow` pair and hide the `go build` of their test helper;
+  the two edits to generated `shellout.go` files are recorded in each tree's patch register (`0006-hide-companion-cli-window.patch`,
+  `internal-mcp-cobratree-shellout.go.md`), with the upstream template change still owed. `glueOpenBrowser` builds one command
+  instead of three, so its single hide call covers it.
+- **Locked in.** `render/no-visible-windows.test.mjs` (scanner: `render/spawn-scan.mjs`) reads every source under `render/`, the
+  scripts held in strings included. The options of a `spawn`, `spawnSync`, `execFile`, `exec`, `fork`, `*Sync` or injected
+  `spawnImpl` call (the last argument that is not a callback) must be an object literal whose own `windowsHide` ends up `true`, with
+  no spread or computed key after it, or a name that resolves in the call's scope to a `const` object literal that does. The scanner
+  follows `import cp, { spawn }`, `{ spawn } = cp`, `= require("child_process").spawn`, backtick specifiers, `spawn?.(`,
+  `spawn.call(`, aliases chosen by `?:` / `??` / `||`, and `promisify(execFile)`; a child_process function or the module used as a
+  value (`use(spawn)`, `.bind`, `.apply`) is refused. `TestEveryChildProcessStartIsHidden` (`internal/winexec`) reads every Go file
+  of the repository that builds for Windows, tests and the `tools/` modules included, and fails on a call of `exec.Command` /
+  `exec.CommandContext`, one of them used as a value, an `exec.Cmd` literal, `os.StartProcess` / `syscall.StartProcess` or a
+  `CreateProcess*` call unless its own function hides it (a hide call per start, or both `CREATE_NO_WINDOW` and `SW_HIDE` for a
+  `CreateProcess*`) or it is listed with a reason; two `internal/winexec` test helpers are the only entries.
+- **Red before.** The render lint fails on the 0.181.0 tree with 86 calls; the first version of the Go lint failed with 31
+  `file:function` sites. Against the reviewed head the scanner's six new test groups (every call shape above) fail on the old
+  scanner, and the stricter scanner flagged two real sites (`igpu-engine.mjs`, `igpu-qa.mjs`: a spread after the flag). The extended Go
+  lint listed 75 `file:function` sites (87 starts: 80 in 53 test files, 7 in production files), and the new `winexec`, cage and
+  `cobratree` tests failed on the unconditional helper, the unhidden cage and the unhidden runner. Mutation checks, each red with a
+  mutant that compiles or parses: for the Go rule, `CREATE_NO_WINDOW` always or never set, dropped from `HideWindowDetached`,
+  `SW_HIDE` dropped, `processHasConsole` always true, `HideWindowIfNoConsole` always hiding, `Command` or `CommandDetached` left
+  unhidden; for the cage, each of `CREATE_NO_WINDOW`, `STARTF_USESHOWWINDOW` and `SW_HIDE` dropped; for the scanner, 15 mutants (each
+  rule switched off); for `console-share`, the inherited probe piped, the piped probe inheriting, and each of the three attached runs
+  piped.
+- **Live.** `scripts/window-watch-run.mjs` (with `scripts/window-watch.ps1`) polls the desktop with `EnumWindows` (every 30 ms or so) while a
+  command runs and exits 3 when a console window appeared; its `--selftest` makes a child create a hidden window and requires the log to
+  list it. The review measured 22 new console windows on the 0.181.0 tree in 130 s and none on the reviewed head. At this head, with
+  zero new windows each time: the render suite (1325 tests, 1302 passed, 23 skipped, 0 failed; 2765 polls over 119 s; started with a
+  hidden console, because `node --test` starts every test file with a plain `spawn` and opened a Windows Terminal window per file when
+  it was started with no console at all, an effect of the runner and not of the suite), and the compiled test binaries of 22 Go packages,
+  each started with no console of its own (`cmd/leakdigest` and `internal/` `agent`, `audioio`, `comfyinst`, `composebundle`, `datahome`,
+  `fakeexe`, `fleetnode`, `gpuactivity`, `gpugen`, `gpulease`, `gpuprobe/smitest`, `mediacap`, `mediaops`, `mediaremote`,
+  `pairworkloads`, `sandbox`, `sttremote`, `videoio`, `vllmseat`, `winexec`, `writedoor`; 9,825 polls over 424 s). That run also found a
+  defect in a new test: the Ctrl-C test failed in a runner started with `CREATE_NEW_PROCESS_GROUP`, which switches Ctrl-C off for its
+  whole subtree; the test's helper now switches it back on. Not watched: the root package, `internal/pipeline`, `internal/mcpserver`,
+  the `tools/` modules and the other Go packages, which the lint and the flag tests cover but nothing has watched. The 0.181.0 tree was
+  not re-run live, because that would put windows on the screen.
+- **Not covered.** The two printed CLIs outside this repository owe the same `shellout.go` patch and the generator template the
+  same change (the registers say so). Python and shell programs (the accelerator test servers, the setup browse runner, the
+  reference `ffdump.py`) are developer tools run from a terminal and are not scanned.
+
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)

@@ -2,10 +2,11 @@ package gpulease
 
 import (
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 func TestDescendantsOfFollowsParentLinks(t *testing.T) {
@@ -73,7 +74,7 @@ func TestHelperSleepsForTheProcessTreeTest(t *testing.T) {
 // with the command line it was started with. This is the only place a ComfyUI `--cuda-device`
 // can be read for a lease whose wrapper is an old binary.
 func TestProcessTreeReadsAChildsCommandLine(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=TestHelperSleepsForTheProcessTreeTest", "treeprobe", "--cuda-device", "3", "--tree-probe-marker")
+	cmd := winexec.Command(os.Args[0], "-test.run=TestHelperSleepsForTheProcessTreeTest", "treeprobe", "--cuda-device", "3", "--tree-probe-marker")
 	cmd.Env = append(os.Environ(), "GPULEASE_TREE_HELPER=1")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)

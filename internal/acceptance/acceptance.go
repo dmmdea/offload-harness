@@ -22,11 +22,12 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // Status is a check's outcome.
@@ -112,7 +113,7 @@ func Runnable(ctx context.Context, label, bin string, args ...string) Check {
 	}
 	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(cctx, bin, args...).CombinedOutput()
+	out, err := winexec.CommandContext(cctx, bin, args...).CombinedOutput()
 	if err != nil {
 		detail := strings.TrimSpace(string(out))
 		if len(detail) > 200 {

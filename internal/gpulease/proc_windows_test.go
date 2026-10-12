@@ -4,8 +4,9 @@ package gpulease
 
 import (
 	"os"
-	"os/exec"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // The cross-security-context case, pinned.
@@ -26,7 +27,7 @@ func TestInaccessibleSystemProcessReadsAsAlive(t *testing.T) {
 	}
 	// If we are running elevated, pid 4 may be genuinely openable and readable; only
 	// treat it as a failure when the process really does exist.
-	out, err := exec.Command("tasklist", "/FI", "PID eq 4", "/NH").Output()
+	out, err := winexec.Command("tasklist", "/FI", "PID eq 4", "/NH").Output()
 	if err == nil && len(out) > 0 {
 		t.Fatal("the System process (pid 4) read as DEAD; a cross-context holder would be " +
 			"reclaimed immediately via the provably-gone fast path")
@@ -38,7 +39,7 @@ func TestInaccessibleSystemProcessReadsAsAlive(t *testing.T) {
 // is dead. Without this, "treat failures as alive" could silently degrade into "always
 // alive", which would strand the GPU behind crashed holders forever.
 func TestLiveChildIsAliveAndExitedChildIsDead(t *testing.T) {
-	cmd := exec.Command("cmd", "/c", "pause")
+	cmd := winexec.Command("cmd", "/c", "pause")
 	cmd.Stdin = nil
 	if err := cmd.Start(); err != nil {
 		t.Skipf("could not spawn a probe child: %v", err)

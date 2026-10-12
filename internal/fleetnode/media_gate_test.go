@@ -297,7 +297,7 @@ func TestSTTUploadResultRefreshesTheOutputsClock(t *testing.T) {
 // A project render's output carries the gated stem, so /fleet/media serves it only to a bearer holder
 // from the first byte (no registry to lose across a restart, and no window while it renders).
 func TestComposeProjectOutputsCarryTheGatedStem(t *testing.T) {
-	cfg := projectCfg()
+	cfg := projectCfg(t)
 	cfg.MediaDir = t.TempDir()
 	payload := projectPayload(func(p *ComposeProjectPayload) { p.JobID = "proj-stem" }, map[string]string{"index.html": "<p>x</p>"})
 	req, cleanup, err := BuildRequest(context.Background(), cfg, true, ComposeProjectTask, payload)

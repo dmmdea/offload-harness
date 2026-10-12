@@ -29,6 +29,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // nodeHelper reads the shared record through render/gpu-lock.mjs and reports what Node
@@ -92,7 +94,7 @@ func runNode(t *testing.T, leaseDir string, epoch uint64) nodeResult {
 	if err := os.WriteFile(script, []byte(strings.Replace(nodeHelper, "%MJS%", mjsURL, 1)), 0o666); err != nil {
 		t.Fatalf("write helper: %v", err)
 	}
-	out, err := exec.Command(nodeExe, script, leaseDir, itoa(epoch)).CombinedOutput()
+	out, err := winexec.Command(nodeExe, script, leaseDir, itoa(epoch)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("node helper failed: %v\n%s", err, out)
 	}

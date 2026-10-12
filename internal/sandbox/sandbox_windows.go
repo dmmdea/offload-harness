@@ -322,7 +322,14 @@ func run(ctx context.Context, spec Spec, notes *runNotes) (Result, error) {
 
 	var si windows.StartupInfo
 	si.Cb = uint32(unsafe.Sizeof(si))
-	si.Flags = windows.STARTF_USESTDHANDLES
+	// The command runs for an agent with every handle piped and, whatever the cage's own process has, no
+	// console of its own to hand on: a console program (go, git, node, python) started that way by a process
+	// with no console gets a NEW console window, a Windows Terminal window on the operator's desktop by
+	// default. So it is started hidden (SW_HIDE for a window of its own) and with CREATE_NO_WINDOW (below)
+	// on a console it owns, which also leaves it off the operator's terminal: the job object, not a Ctrl-C,
+	// is what ends it.
+	si.Flags = windows.STARTF_USESTDHANDLES | windows.STARTF_USESHOWWINDOW
+	si.ShowWindow = windows.SW_HIDE
 	si.StdOutput = stdoutW
 	si.StdErr = stderrW
 	si.StdInput = 0
@@ -355,7 +362,7 @@ func run(ctx context.Context, spec Spec, notes *runNotes) (Result, error) {
 		// CREATE_UNICODE_ENVIRONMENT is not optional with a UTF-16 block: without
 		// it CreateProcess reads the same bytes as ANSI and the child's environment
 		// comes out as one truncated entry.
-		windows.CREATE_SUSPENDED|windows.CREATE_UNICODE_ENVIRONMENT,
+		windows.CREATE_SUSPENDED|windows.CREATE_UNICODE_ENVIRONMENT|windows.CREATE_NO_WINDOW,
 		envp, // the explicit allowlist block (cageEnv) — NEVER nil, which means "inherit"
 		cwd,
 		&si,

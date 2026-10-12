@@ -55,7 +55,7 @@ export function runNode(script, args, sb, { timeoutMs = 170000, preload = [], en
   const execArgv = preload.flatMap((p) => ["--require", p]);
   return new Promise((resolve) => {
     const t0 = Date.now();
-    const c = spawn(process.execPath, [...execArgv, join(here, script), ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    const c = spawn(process.execPath, [...execArgv, join(here, script), ...args], { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let stdout = "";
     let stderr = "";
     c.stdout.on("data", (d) => { stdout += d; });
@@ -78,7 +78,7 @@ export function videoSetup(sb, spec, extra = []) {
 
 export function animateSetup(sb, { sd = {}, depth = {}, extra = [] } = {}) {
   const drv = join(sb.work, "driver.mp4");
-  const r = spawnSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=96x64:d=1:r=16", "-c:v", "libx264", "-pix_fmt", "yuv420p", drv]);
+  const r = spawnSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=96x64:d=1:r=16", "-c:v", "libx264", "-pix_fmt", "yuv420p", drv], { windowsHide: true });
   if (r.status !== 0) throw new Error("cannot make the driver clip: " + String(r.stderr));
   const sdRec = join(sb.work, "sd.jsonl");
   const dRec = join(sb.work, "depth.jsonl");

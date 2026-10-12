@@ -54,10 +54,10 @@ export function resolveFfmpeg(env = process.env) {
   const explicit = env.FFMPEG_PATH;
   if (explicit) {
     if (existsSync(explicit)) return explicit;
-    const probe = spawnSync(explicit, ["-version"], { stdio: "ignore" });
+    const probe = spawnSync(explicit, ["-version"], { stdio: "ignore", windowsHide: true });
     return probe.error ? "" : explicit;
   }
-  const probe = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" });
+  const probe = spawnSync("ffmpeg", ["-version"], { stdio: "ignore", windowsHide: true });
   return probe.error ? "" : "ffmpeg";
 }
 
@@ -89,7 +89,7 @@ export function resolveFfprobe(ffmpegPath) {
     const sibling = join(dir, "ffprobe" + ext);
     if (existsSync(sibling)) return sibling;
   }
-  const probe = spawnSync("ffprobe", ["-version"], { stdio: "ignore" });
+  const probe = spawnSync("ffprobe", ["-version"], { stdio: "ignore", windowsHide: true });
   return probe.error ? "" : "ffprobe";
 }
 
@@ -107,7 +107,7 @@ export function durationSec(ffprobePath, file, { timeoutMs = 0 } = {}) {
   const r = spawnSync(ffprobePath, [
     "-v", "error", "-show_entries", "format=duration",
     "-of", "default=noprint_wrappers=1:nokey=1", file,
-  ], { encoding: "utf8", ...boundedBy(timeoutMs) });
+  ], { encoding: "utf8", ...boundedBy(timeoutMs), windowsHide: true });
   if (r.error && r.error.code === "ETIMEDOUT") throw new Error(`ffprobe duration timeout (killed): ${r.error.message}`);
   const n = Number(String(r.stdout || "").trim());
   return Number.isFinite(n) && n > 0 ? n : 0;
@@ -164,7 +164,7 @@ export function measure(ffmpegPath, ffprobePath, file, { noiseDB = -45, minSilen
     "-hide_banner", "-nostats", "-i", file,
     "-af", `silencedetect=noise=${noiseDB}dB:d=${minSilenceSec},ebur128=peak=true`,
     "-f", "null", "-",
-  ], { encoding: "utf8", ...boundedBy(left) });
+  ], { encoding: "utf8", ...boundedBy(left), windowsHide: true });
   if (r.error) {
     if (r.error.code === "ETIMEDOUT") throw new Error(`ffmpeg loudness/silence measurement timeout (killed): ${r.error.message}`);
     return null;
@@ -230,7 +230,7 @@ export function normalizeLoudness(ffmpegPath, file, tmpOut) {
     "-hide_banner", "-loglevel", "error", "-y", "-i", file,
     "-af", `loudnorm=I=${LOUDNESS_TARGET_LUFS}:TP=${TRUE_PEAK_TARGET_DBTP}:LRA=${LOUDNESS_RANGE_TARGET_LU}`,
     tmpOut,
-  ], { encoding: "utf8" });
+  ], { encoding: "utf8", windowsHide: true });
   return !r.error && r.status === 0 && existsSync(tmpOut);
 }
 
@@ -254,7 +254,7 @@ export function trimToSeconds(ffmpegPath, file, seconds, tmpOut, { fadeSec = 1.0
     "-t", String(seconds),
     "-af", `afade=t=out:st=${fadeStart}:d=${fadeSec}`,
     tmpOut,
-  ], { encoding: "utf8" });
+  ], { encoding: "utf8", windowsHide: true });
   return !r.error && r.status === 0 && existsSync(tmpOut);
 }
 

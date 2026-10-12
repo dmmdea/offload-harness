@@ -7,12 +7,13 @@ package mediacap
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"sort"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 func TestScanGraphFindsEveryLoaderFileOnce(t *testing.T) {
@@ -243,7 +244,7 @@ var dirLinks = map[string]func(link, target string) error{
 		if runtime.GOOS != "windows" {
 			return os.ErrInvalid
 		}
-		return exec.Command("cmd", "/c", "mklink", "/J", link, target).Run()
+		return winexec.Command("cmd", "/c", "mklink", "/J", link, target).Run()
 	},
 }
 

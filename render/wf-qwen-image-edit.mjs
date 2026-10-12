@@ -50,6 +50,8 @@
 // overridden" into a plausible-looking ruin — it is either the size you asked for or
 // the size the seat caps you at.
 
+import { findRecipe, multicardLoaders, PLACEMENTS, PLACEMENT_DEFAULT } from "./multicard-recipes.mjs";
+
 /**
  * Ceiling on the edit canvas when the caller does not name one.
  *
@@ -124,6 +126,9 @@ export function buildQwenImageEdit({
   shift = 3.1,
   seed = Math.floor(Math.random() * 1e15),
   filenamePrefix = "edit",
+  // placement: "single" (default, the graph that always was) | "multicard" (the card-only recipe for the fp8mixed or Q5_1 GGUF DiT, two
+  // cards, no host RAM; render/multicard-recipes.mjs). residentGb overrides the recipe's share of the DiT on the compute card.
+  placement = PLACEMENT_DEFAULT, residentGb,
 } = {}) {
   if (!image) throw new Error("buildQwenImageEdit: image (staged input filename) is required");
   if (!prompt) throw new Error("buildQwenImageEdit: prompt is required");
@@ -146,12 +151,18 @@ export function buildQwenImageEdit({
     throw new Error(`buildQwenImageEdit: loader must be auto|gguf|unet, got ${loader}`);
   }
 
+  if (!PLACEMENTS.includes(placement)) {
+    throw new Error(`buildQwenImageEdit: placement must be ${PLACEMENTS.join("|")}, got ${JSON.stringify(placement)}`);
+  }
+  const recipe = placement === "multicard" ? findRecipe({ route: "edit", family: "qwen-image-edit-2511", unet, clip }) : null;
   const g = {
-    "1": isGGUF
-      ? { class_type: "UnetLoaderGGUF", inputs: { unet_name: unet } }
-      : { class_type: "UNETLoader", inputs: { unet_name: unet, weight_dtype: "default" } },
-    "2": { class_type: "CLIPLoader", inputs: { clip_name: clip, type: "qwen_image", device: "default" } },
-    "3": { class_type: "VAELoader", inputs: { vae_name: vae } },
+    ...(recipe ? multicardLoaders(recipe, { unet, clip, vae, residentGb }) : {
+      "1": isGGUF
+        ? { class_type: "UnetLoaderGGUF", inputs: { unet_name: unet } }
+        : { class_type: "UNETLoader", inputs: { unet_name: unet, weight_dtype: "default" } },
+      "2": { class_type: "CLIPLoader", inputs: { clip_name: clip, type: "qwen_image", device: "default" } },
+      "3": { class_type: "VAELoader", inputs: { vae_name: vae } },
+    }),
     "4": { class_type: "LoadImage", inputs: { image } },
     // The working canvas — and therefore the OUTPUT resolution, since this feeds
     // VAEEncode -> KSampler.latent_image at denoise 1.0. `resolution_steps: 16` keeps
@@ -172,7 +183,8 @@ export function buildQwenImageEdit({
   // LoRA rides the MODEL only — the text encoder is a separate CLIPLoader here.
   const modelSrc = lora ? "6" : "1";
   if (lora) {
-    g["6"] = { class_type: "LoraLoaderModelOnly", inputs: { model: ["1", 0], lora_name: lora, strength_model: loraStrength } };
+    // The bypass loader (card-only fp8mixed recipe) leaves the LoRA unmerged: the merging one ran out of memory requantising on the storage card.
+    g["6"] = { class_type: recipe ? recipe.loraLoader : "LoraLoaderModelOnly", inputs: { model: ["1", 0], lora_name: lora, strength_model: loraStrength } };
   }
   g["7"] = { class_type: "ModelSamplingAuraFlow", inputs: { model: [modelSrc, 0], shift } };
 

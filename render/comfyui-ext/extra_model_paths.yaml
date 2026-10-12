@@ -1,0 +1,8 @@
+# ComfyUI-side code the harness ships for the card-only (multicard) Wan 2.2 placement.
+#
+# render/wan-multicard.mjs passes this file to ComfyUI with --extra-model-paths-config on a multicard
+# launch, and nothing else touches the install: `custom_nodes` is an extra search path, read relative
+# to THIS file, so the shared ComfyUI install keeps its own custom_nodes, settings and models as they are.
+# ComfyUI reads the install's own extra_model_paths.yaml first and this one after it.
+offload_harness:
+    custom_nodes: nodes
