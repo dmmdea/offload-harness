@@ -47,6 +47,12 @@ func sortedTiers(doc seedRulesDoc) []string {
 	return names
 }
 
+// checkNoGPUTierParksTheMoE and checkAgentSeatsAreChosen are the rule bodies (stubs: the synthetic
+// fixtures in seed_rules_fixture_test.go come first).
+func checkNoGPUTierParksTheMoE(doc seedRulesDoc) []string { return nil }
+
+func checkAgentSeatsAreChosen(doc seedRulesDoc) []string { return nil }
+
 // TestNoGPUTierParksTheMoEExpertsInRAM enforces the operator's hard rule of 2026-09-10 02:00
 // ("THE THREE CARDS DO THE INFERENCE — RAM IS OVERFLOW ONLY"): a --cpu-moe that parks most expert
 // layers in RAM is forbidden; only a PARTIAL spill of a model that does not fit its card is
