@@ -114,7 +114,7 @@ func TestBuildInputNamesAFailedCardTable(t *testing.T) {
 // and reads no presence, so the answer is the same whatever operator_presence says.
 func TestBuildInputOpensTheDisplayCardAtTheCapWhateverThePresence(t *testing.T) {
 	m := scratchManager(t)
-	zero, thirtyFive := 0, 35
+	zero, thirtyFive, refused := 0, 35, 600
 	for _, tc := range []struct {
 		name     string
 		presence string
@@ -127,6 +127,8 @@ func TestBuildInputOpensTheDisplayCardAtTheCapWhateverThePresence(t *testing.T) 
 		{"auto", "auto", nil, 60},
 		{"a configured share", "present", &thirtyFive, 35},
 		{"the operator needs the card", "away", &zero, 0},
+		// Load refuses 600 by name but returns the Config beside the error, and the one-shot verbs go on with it.
+		{"a refused 600 reads as closed, not as the whole card", "present", &refused, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Config{OperatorPresence: tc.presence, GPUDisplayCapPct: tc.cap}

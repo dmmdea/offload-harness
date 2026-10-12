@@ -27,20 +27,18 @@ func (c Config) GPUHostRAMHeadroom() float64 {
 const DefaultGPUDisplayCapPct = 60
 
 // GPUDisplayCap is gpu_display_cap_pct with the default applied: 60 when unset, and 0 (the card closed to the
-// allocator) only when the operator wrote 0. A value Load refused never gets here; one set by hand on a Config
-// is clamped into 0..100 so the arithmetic downstream cannot be handed a share that is not one.
+// allocator) only when the operator wrote 0. A value that is not a share (below 0 or above 100) reads as 0, closed,
+// never as the whole card: Load refuses it by name, but it returns the Config beside that error and the one-shot
+// verbs (gpu reserve among them) go on with the value, so a typo of 600 for 60 must not open the desktop's memory
+// to a job. A Config set by hand takes the same rule.
 func (c Config) GPUDisplayCap() int {
 	if c.GPUDisplayCapPct == nil {
 		return DefaultGPUDisplayCapPct
 	}
-	switch v := *c.GPUDisplayCapPct; {
-	case v < 0:
-		return 0
-	case v > 100:
-		return 100
-	default:
+	if v := *c.GPUDisplayCapPct; v >= 0 && v <= 100 {
 		return v
 	}
+	return 0
 }
 
 // validateGPUDisplayCap refuses a gpu_display_cap_pct that is not a share of the card, by name: a typo of 600 for
