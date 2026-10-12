@@ -22,6 +22,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 )
 
 // Version is the single authoritative compiled-in version. main.go's
@@ -33,7 +34,34 @@ const Version = "0.183.0"
 var (
 	buildOnce sync.Once
 	buildSHA  string
+
+	// executable is the seam for the path of the running image: os.Executable in production, a fixture file in a
+	// test (what os.Executable answers for a process whose image was renamed differs by OS, so the test chooses it).
+	executable = os.Executable
 )
+
+// Startup is the identity of the image a process started from: the version compiled into it, the SHA-256 of the
+// executable as it was when the process began, and where that executable was (its stat, so a later reader can tell
+// whether the file at the path is still the one the process started from without hashing it again).
+type Startup struct {
+	Version string
+	// SHA256 is "" when the self-hash failed (see BuildSHA256: absent means unknown, never a value).
+	SHA256  string
+	Path    string
+	Size    int64
+	ModTime time.Time
+}
+
+var (
+	startupMu sync.Mutex
+	startup   *Startup
+)
+
+// CaptureStartup records the startup identity (STUB, red-first).
+func CaptureStartup() Startup { return Startup{Version: Version} }
+
+// StartupIdentity returns the identity CaptureStartup recorded (STUB, red-first).
+func StartupIdentity() (Startup, bool) { return Startup{}, false }
 
 // BuildSHA256 returns the hex SHA-256 of the running executable, computed
 // once per process. It returns "" when the executable cannot be resolved or
@@ -53,7 +81,7 @@ func BuildSHA256() string {
 		fail := func(stage string, err error) {
 			log.Printf("buildinfo: executable self-hash failed (%s: %v); harness_build_sha256 will be ABSENT on every row this process writes — restart to retry", stage, err)
 		}
-		exe, err := os.Executable()
+		exe, err := executable()
 		if err != nil {
 			fail("resolve", err)
 			return

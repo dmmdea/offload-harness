@@ -83,6 +83,9 @@ var statusBlockTable = []statusBlock{
 		}
 		return nil
 	}},
+	// The image this process started from and whether the installed build has moved on since (D-36): reported
+	// whenever the Server holds a startup identity (Run takes one), absent for a server that holds none.
+	{"process", func(s *Server, _ context.Context, _ config.Config) any { return s.statusProcess() }},
 }
 
 // statusSectionValues is the section enum: the two composites, then every block.

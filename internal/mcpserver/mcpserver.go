@@ -28,6 +28,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/askcache"
 	"github.com/dmmdea/offload-harness/internal/askjob"
+	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/cache"
 	"github.com/dmmdea/offload-harness/internal/composeremote"
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -167,6 +168,12 @@ type Server struct {
 	// LOCAL_OFFLOAD_ORIGIN, else CLAUDE_CODE_SESSION_ID). A field so a test names its own
 	// session instead of reading the developer's.
 	originSession func() string
+
+	// startup is the identity of the image this server started from (buildinfo.CaptureStartup, taken by Run), and the
+	// source of offload_status's process block: the block is built from what the Server holds, never from the process
+	// global, so a test injects a fixed identity and the test binary's own hash never reaches a pinned answer. nil
+	// (a server that was not Run, the test seam) means the block is absent, as pair's is.
+	startup *buildinfo.Startup
 }
 
 func New(p *pipeline.Pipeline) *Server {
@@ -350,6 +357,7 @@ func parseArgs(raw json.RawMessage, in any) *mcp.CallToolResult {
 
 // Run serves the MCP tools on stdin/stdout until the client disconnects.
 func (s *Server) Run(ctx context.Context, version string) error {
+	s.holdStartup()
 	return s.serve(ctx, version, &mcp.StdioTransport{})
 }
 
