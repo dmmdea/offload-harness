@@ -267,7 +267,10 @@ export function parseInflightMetrics(text) {
 // Anything else is probed: "ready" above all, and also a seat listed with no state (older builds) or with one
 // this code has never seen, because a probe of an idle seat costs one read, while a skipped seat that was
 // busy loses its request. The Go-side drain reads the same two states the same way (internal/seatload:
-// Starting, Stopping).
+// Starting, Stopping), but waits a load in progress out, because the request that triggered it is waiting on
+// the engine. This helper does not wait (seconds on every render start, and nothing on the upstream to read),
+// so the unload that follows kills that request, and the drain says which seats that concerns: `starting` in its
+// result, which freeLlamaSwap turns into one log line. A stopping seat is already leaving and is not named.
 const NO_REQUEST_STATES = new Set(["starting", "stopping"]);
 
 export async function quiesceLlamaSwap(ids, {
@@ -277,6 +280,7 @@ export async function quiesceLlamaSwap(ids, {
 } = {}) {
   const deadline = nowFn() + timeoutMs;
   const unknown = new Set();
+  const starting = new Set(); // seats skipped because a load is in progress: nothing waited for them
   const started = nowFn();
 
   // Which models does the server consider loaded, and in what state? Used to disambiguate a 404, and to
@@ -317,7 +321,11 @@ export async function quiesceLlamaSwap(ids, {
   const busy = async (id, loadedSet) => {
     if (!loadedSet) { unknown.add(id); return false; } // blind: never probe
     if (!loadedSet.has(id)) return false;              // not loaded: nothing in flight
-    if (NO_REQUEST_STATES.has(loadedSet.get(id))) return false; // starting or stopping: nothing in flight, and a probe would hang or reload it
+    const state = loadedSet.get(id);
+    if (NO_REQUEST_STATES.has(state)) { // starting or stopping: nothing in flight on its upstream, and a probe would hang or reload it
+      if (state === "starting") starting.add(id); // the request that triggered the load dies with the unload that follows: the caller says so
+      return false;
+    }
     try {
       const r = await fetchImpl(`${api}/upstream/${id}/slots`, { signal: withTimeout(requestTimeoutMs) });
       if (r.status === 404 || r.status === 501) {
@@ -343,6 +351,7 @@ export async function quiesceLlamaSwap(ids, {
   let unknownRounds = 0;
   for (;;) {
     unknown.clear(); // judge each round on its own evidence, not a stale transient
+    starting.clear();
     const loadedSet = await loaded();
     const flags = await Promise.all(ids.map((id) => busy(id, loadedSet)));
     if (!flags.some(Boolean)) {
@@ -352,7 +361,7 @@ export async function quiesceLlamaSwap(ids, {
       unknownRounds = 0;
     }
     if (nowFn() >= deadline) {
-      return { drained: false, waitedMs: nowFn() - started, unknown: [...unknown] };
+      return { drained: false, waitedMs: nowFn() - started, unknown: [...unknown], starting: [...starting] };
     }
     await new Promise((r) => setTimeout(r, pollMs));
   }
@@ -361,7 +370,7 @@ export async function quiesceLlamaSwap(ids, {
     // claiming a drain we did not verify.
     await new Promise((r) => setTimeout(r, graceMs));
   }
-  return { drained: unknown.size === 0, waitedMs: nowFn() - started, unknown: [...unknown] };
+  return { drained: unknown.size === 0, waitedMs: nowFn() - started, unknown: [...unknown], starting: [...starting] };
 }
 
 // freeLlamaSwap: free the GPU-resident llama-swap models so their VRAM goes to a gen
@@ -432,6 +441,12 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
       // we proceed and say so.
       log(`freeLlamaSwap: proceeding without a verified drain after ${res.waitedMs}ms` +
           (res.unknown.length ? ` (could not read /slots for: ${res.unknown.join(",")})` : ""));
+    }
+    if (Array.isArray(res.starting) && res.starting.length > 0) {
+      // The Go-side drain waits a load in progress out; this one does not, by decision (F81), and the unload below
+      // kills the request that triggered the load. Said, so an aborted request has a trace.
+      const n = res.starting.length;
+      log(`freeLlamaSwap: unloading ${res.starting.join(",")} while ${n === 1 ? "its load is" : "their loads are"} in progress (the drain does not wait for a seat that is starting); a request waiting on ${n === 1 ? "it" : "them"} is aborted`);
     }
   } catch (e) {
     log(`freeLlamaSwap: drain failed (${e && e.message}); proceeding to unload`);
