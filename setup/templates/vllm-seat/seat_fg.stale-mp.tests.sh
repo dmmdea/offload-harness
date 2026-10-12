@@ -26,9 +26,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # making. flock(1) itself holds the lock (-o: nothing this run starts inherits it), so it is released when this run ends. The
 # lock is a DIRECTORY (world-writable, sticky), not a file: with fs.protected_regular=2 (the Ubuntu default) a lock file that
 # one user created cannot be opened by another in a sticky /tmp, and a root run after an unprivileged one (or the reverse)
-# would fail instead of skipping. Any user can open a directory to lock it.
+# would fail instead of skipping. Any user can open a directory to lock it. The folder is one path for the whole box, never the
+# caller's TMPDIR: a lock under TMPDIR is a different lock for every run that has a temp dir of its own (a gate run beside another
+# agent's, a run under the temp-folder tripwire), and those runs would then share the scratch ports. SEAT_FG_TEST_LOCK_ROOT moves
+# it (the unit test of this lock does).
 if [ -z "${SEAT_FG_TEST_LOCKED:-}" ] && command -v flock >/dev/null; then
-  LOCKDIR="${TMPDIR:-/tmp}/seat_fg.stale-mp.tests.lock.d"
+  LOCKDIR="${SEAT_FG_TEST_LOCK_ROOT:-/tmp}/seat_fg.stale-mp.tests.lock.d"
   [ -d "$LOCKDIR" ] || mkdir -m 1777 "$LOCKDIR" 2>/dev/null
   if [ -d "$LOCKDIR" ]; then
     SEAT_FG_TEST_LOCKED=1 flock -n -o -E 99 "$LOCKDIR" bash "$0" "$@"; rc=$?
