@@ -1099,6 +1099,10 @@ func probeWritable(dir string) error {
 // for its full declared window. Requiring BOTH staleness and expiry for the
 // liveness-independent path, while letting provable death reclaim immediately,
 // is the only combination that survives both.
+//
+// "Provably gone" is about the WRAPPER, not the job it started (plan P10, tree.go): a holder whose
+// pid is dead or recycled is reclaimable only if no member of the tree it recorded is still the
+// process that was recorded. A lease that recorded no tree is freed at once, as before.
 func Reclaimable(m *Meta, now time.Time, heartbeatTTL time.Duration, procStart func(int) (int64, bool)) bool {
 	if m == nil {
 		return true // no/unreadable meta => stale, same rule the .mjs used
