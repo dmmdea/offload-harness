@@ -93,7 +93,7 @@ Versioning: [SemVer](https://semver.org/).
   file or its stamp says which machine it belongs to. A file kept on another machine (the stamp records that machine's paths so the replay
   does not call it stale) failed `pin-unresolved` on its own UUIDs and exited 1, where before this branch the same call printed `OK`. The
   default is unchanged. `--other-box` says the files belong to another machine: the pin rules are skipped with a `note:` line that says why
-  and the card table is not read; every other rule still runs. Every pin finding now ends with what it was judged against and the flag.
+  and the card table is not read; every other rule still runs. Every pin violation now ends with what it was judged against and the flag (a `note:` for a verbatim render's seeded index pin does not).
 - **Four tests that passed without the rule they name.** A mutant of each survived the servingtmpl tests at the first review commit
   (`5da1e386`): dropping `--spec-draft-cpu-moe` from the spelling table, matching the `GPU-` prefix case-sensitively (the lower-case UUID case
   expected zero findings, so it passed either way), reading the env pin over the inline command pin, and treating `-1` as an index. Each now
@@ -103,7 +103,9 @@ Versioning: [SemVer](https://semver.org/).
   silent; the flag tests failed on the card table being read, the missing note and the missing hint). Mutants, each turned red by a named test: the card-count bound, the
   PCI-order lookup, the unreadable-token branch, counting such a token as a pin, the MIG exemption, the `-1` exemption, the empty-token
   exemption, an unresolved index counted as ambiguous, the flag ignored, the flag skipping the pin-less file check, the hint dropped, the
-  flag silencing every rule, and a verbatim render noting every pin finding.
+  flag silencing every rule, and a verbatim render noting every pin finding. A guard walks every tier on both operating systems against a
+  box of eight distinct cards and finds no pin the rules cannot place (`TestRenderedTiersPinOnlyWhatThePinRulesCanRead`; it goes red when an
+  index stops being read as one).
 - **Not changed.** `CUDA_VISIBLE_DEVICES=-1` is still judged by no rule: it hides every card, which `cvd-empty` names only for the empty
   value. That is a different rule from this one and a change to `Audit`, which runs over every shipped template.
 

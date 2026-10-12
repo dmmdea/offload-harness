@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -549,4 +550,45 @@ func TestAuditYAMLOtherBoxSkipsThePinRules(t *testing.T) {
 			t.Fatalf("nothing pins, so there is nothing to skip; err=%v:\n%s", err, out)
 		}
 	})
+}
+
+// The pin rules read every token of a CUDA_VISIBLE_DEVICES value, and one they cannot read as a card is a
+// violation. This is the guard that no shipped tier renders such a token: it walks every tier on both
+// operating systems against a box with eight cards of eight different models, so the only findings
+// possible are a pin that names no card or a token the rules cannot read.
+func TestRenderedTiersPinOnlyWhatThePinRulesCanRead(t *testing.T) {
+	var doc struct {
+		Profiles map[string]servingProfile `json:"profiles"`
+	}
+	if err := json.Unmarshal(embeddedProfiles, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var cards []gpuprobe.Card
+	for i := 0; i < 8; i++ {
+		cards = append(cards, gpuprobe.Card{
+			UUID: fmt.Sprintf("GPU-%08x-0000-0000-0000-000000000000", i+1), NvidiaIndex: i, Name: fmt.Sprintf("Model %d", i),
+		})
+	}
+	pinRe := regexp.MustCompile(`CUDA_VISIBLE_DEVICES=`)
+	walked, pins := 0, 0
+	for _, tier := range sortedKeys(doc.Profiles) {
+		for _, goos := range []string{"linux", "windows"} {
+			res, err := deriveRender(embeddedProfiles, renderReq(tier, goos, &pinnedVLLM{}))
+			if err != nil {
+				if strings.Contains(err.Error(), "no serving template") {
+					continue
+				}
+				t.Errorf("tier %s (%s) does not render: %v", tier, goos, err)
+				continue
+			}
+			walked++
+			pins += len(pinRe.FindAllString(res.Config, -1))
+			if vs := servingtmpl.AuditPins(res.Config, cards); len(vs) != 0 {
+				t.Errorf("tier %s (%s) renders a pin the pin rules cannot place on a box of eight distinct cards:\n%s", tier, goos, servingtmpl.Violations(vs))
+			}
+		}
+	}
+	if walked < 20 || pins < 20 {
+		t.Fatalf("walked %d tier renders holding %d pins — the guard went blind", walked, pins)
+	}
 }

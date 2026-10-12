@@ -1021,7 +1021,7 @@ func auditCPUMoEFile(text string) (violations, notes []servingtmpl.Violation) {
 // that was rendered or kept on another machine (audit-yaml may be run on one: the stamp records that
 // machine's paths so the replay does not call it stale) is compared with the wrong cards and fails on
 // its UUIDs. The caller who knows says so (otherBox, the --other-box flag): the rules are skipped with
-// a line that says why, and every other rule still runs. Every finding says what table it was judged
+// a line that says why, and every other rule still runs. Every violation says what table it was judged
 // against and how to audit a foreign file.
 func auditPinsFile(text string, otherBox bool) (violations, notes []servingtmpl.Violation, skipped string) {
 	if !servingtmpl.PinsCUDADevices(text) {
