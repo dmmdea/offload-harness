@@ -37,7 +37,8 @@ Versioning: [SemVer](https://semver.org/).
   --warm-seat`, because the seat is cold.
 - **Stated consequences.** A lease that declares nothing in the grant passes a front waiter that waits only on host RAM (the G6 rule)
   and a grant that fits on other cards goes ahead of it while it waits; the media admission in `internal/pipeline` is not changed.
-  A shortage the unload does not cure (another lane or a foreign process holds the memory) costs the cards held, exclusive, and the
+  A shortage the unload does not cure (another lane or a foreign process holds the memory, or the seat was already cold and there
+  was nothing to free) costs the cards held, exclusive, and the
   seat cold until `--wait` ends it, where the grant used to queue without touching either. No screen before the grant can tell the
   two apart: how much of the host's commit the seat holds is not measured here (`agent_seat_host_ram_gib` is a floor the operator
   states, its default a chosen 21 GiB, and the film seat held 67 GiB), and a prediction taken when the reserve starts is stale when

@@ -1667,9 +1667,10 @@ cards yet). `gpu status` says `host RAM N GiB asked, not yet admitted` on the le
   alternative, keeping the figure on the record as declared from the grant on, makes two such leases count each other's figure as
   still to load, and a host that fits one of them would admit neither (`TestTwoWaitingLeasesAreAdmittedOneAfterTheOther`).
 - *A shortage the unload does not cure costs the cards held and the seat cold until `--wait` ends it.* When the memory is held by
-  something the unload does not touch (another lane, a foreign process), the lease has unloaded the seat and holds its cards,
+  something the unload does not touch (another lane, a foreign process), or the seat was already cold and there was nothing to
+  free (residency is not asked before the grant), the lease has done its unload and holds its cards,
   exclusive, for the whole wait (8 h by default; `--wait 0` still gets the drain floor, `hostRAMDeadline`), and ends with the
-  host-RAM refusal, its command never run and the warm-back owed (and refused by the same rule while the host stays short). Before
+  host-RAM refusal, its command never run and, when the seat had been loaded, its warm-back owed (and refused by the same rule while the host stays short). Before
   F82 such a lease queued with the seat untouched and the cards free. Nothing before the grant can tell this apart from the film
   shape, and the reason is stated so nobody "fixes" it by screening: how much of the host's commit the seat holds is not
   measured (`agent_seat_host_ram_gib` is a floor the operator states and its default, `hostneed.DefaultSeatHostGiB`, is a chosen
