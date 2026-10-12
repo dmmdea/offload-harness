@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,44 +48,29 @@ func sortedTiers(doc seedRulesDoc) []string {
 	return names
 }
 
-// checkNoGPUTierParksTheMoE and checkAgentSeatsAreChosen are the rule bodies (stubs: the synthetic
-// fixtures in seed_rules_fixture_test.go come first).
-func checkNoGPUTierParksTheMoE(doc seedRulesDoc) []string { return nil }
-
-func checkAgentSeatsAreChosen(doc seedRulesDoc) []string { return nil }
-
-// TestNoGPUTierParksTheMoEExpertsInRAM enforces the operator's hard rule of 2026-09-10 02:00
-// ("THE THREE CARDS DO THE INFERENCE — RAM IS OVERFLOW ONLY"): a --cpu-moe that parks most expert
-// layers in RAM is forbidden; only a PARTIAL spill of a model that does not fit its card is
-// sanctioned. `moe_26b: "cpu_moe"` renders --cpu-moe — every expert in RAM — so no tier that has a
-// GPU may seed it. The `cpu` tier is exempt only because it has no card to overflow FROM.
-//
-// It exists because the rule was written, recorded, and then not applied to the seeds: four tiers
-// kept "cpu_moe", and <node-a> served the 26B that way live until 2026-09-21.
-func TestNoGPUTierParksTheMoEExpertsInRAM(t *testing.T) {
-	doc := loadSeedRulesDoc(t)
+// checkNoGPUTierParksTheMoE is the body of TestNoGPUTierParksTheMoEExpertsInRAM over a decoded
+// document, one finding per offending tier. It is a function of its document so that
+// seed_rules_fixture_test.go can hand it one that must be refused (W0.1): a gate that is only ever
+// shown the real, clean seeds has never been seen to fail.
+func checkNoGPUTierParksTheMoE(doc seedRulesDoc) []string {
+	var out []string
 	for _, name := range sortedTiers(doc) {
 		p := doc.Profiles[name]
 		if p.Backend == "cpu" {
 			continue
 		}
 		if p.Include26B && p.MoE26B == "cpu_moe" {
-			t.Errorf("%s (backend %q) seeds moe_26b \"cpu_moe\": that parks every expert in RAM on a box with a GPU. "+
-				"Fit it on the card (\"gpu\") or drop it (include_26b false, moe_26b \"drop\")", name, p.Backend)
+			out = append(out, fmt.Sprintf("%s (backend %q) seeds moe_26b \"cpu_moe\": that parks every expert in RAM on a box with a GPU. "+
+				"Fit it on the card (\"gpu\") or drop it (include_26b false, moe_26b \"drop\")", name, p.Backend))
 		}
 	}
+	return out
 }
 
-// TestEveryAgentSeatIsChosenNotDerived forbids a tier from getting its agent planner seat by the
-// silent resident_tier fallback (internal/tierseed/tierseed.go, "derive only when resident_tier
-// DIFFERS from the row's effective workhorse"). An agent seat is a measured choice: it must be
-// named in config_seed.agent_model, or bound by a vllm_seat.
-//
-// The fallback is how amd-gcn shipped gemma4-e2b as its agent seat — the one model measured to FAIL
-// the agent contract on that very box (18.6 s, 2026-09-20), while the seat that PASSED three times
-// (qwen3.5-4b-agent) existed only as a hand edit on the node, so every fresh install lost it.
-func TestEveryAgentSeatIsChosenNotDerived(t *testing.T) {
-	doc := loadSeedRulesDoc(t)
+// checkAgentSeatsAreChosen is the body of TestEveryAgentSeatIsChosenNotDerived over a decoded
+// document, one finding per tier that derives its agent seat.
+func checkAgentSeatsAreChosen(doc seedRulesDoc) []string {
+	var out []string
 	for _, name := range sortedTiers(doc) {
 		p := doc.Profiles[name]
 		if _, explicit := p.ConfigSeed["agent_model"]; explicit || p.VLLMSeat != nil || p.ResidentTier == "" {
@@ -98,9 +84,38 @@ func TestEveryAgentSeatIsChosenNotDerived(t *testing.T) {
 			}
 		}
 		if p.ResidentTier != workhorse {
-			t.Errorf("%s derives its agent seat from resident_tier %q: name the measured agent in "+
-				"config_seed.agent_model instead", name, p.ResidentTier)
+			out = append(out, fmt.Sprintf("%s derives its agent seat from resident_tier %q: name the measured agent in "+
+				"config_seed.agent_model instead", name, p.ResidentTier))
 		}
+	}
+	return out
+}
+
+// TestNoGPUTierParksTheMoEExpertsInRAM enforces the operator's hard rule of 2026-09-10 02:00
+// ("THE THREE CARDS DO THE INFERENCE — RAM IS OVERFLOW ONLY"): a --cpu-moe that parks most expert
+// layers in RAM is forbidden; only a PARTIAL spill of a model that does not fit its card is
+// sanctioned. `moe_26b: "cpu_moe"` renders --cpu-moe — every expert in RAM — so no tier that has a
+// GPU may seed it. The `cpu` tier is exempt only because it has no card to overflow FROM.
+//
+// It exists because the rule was written, recorded, and then not applied to the seeds: four tiers
+// kept "cpu_moe", and <node-a> served the 26B that way live until 2026-09-21.
+func TestNoGPUTierParksTheMoEExpertsInRAM(t *testing.T) {
+	for _, finding := range checkNoGPUTierParksTheMoE(loadSeedRulesDoc(t)) {
+		t.Error(finding)
+	}
+}
+
+// TestEveryAgentSeatIsChosenNotDerived forbids a tier from getting its agent planner seat by the
+// silent resident_tier fallback (internal/tierseed/tierseed.go, "derive only when resident_tier
+// DIFFERS from the row's effective workhorse"). An agent seat is a measured choice: it must be
+// named in config_seed.agent_model, or bound by a vllm_seat.
+//
+// The fallback is how amd-gcn shipped gemma4-e2b as its agent seat — the one model measured to FAIL
+// the agent contract on that very box (18.6 s, 2026-09-20), while the seat that PASSED three times
+// (qwen3.5-4b-agent) existed only as a hand edit on the node, so every fresh install lost it.
+func TestEveryAgentSeatIsChosenNotDerived(t *testing.T) {
+	for _, finding := range checkAgentSeatsAreChosen(loadSeedRulesDoc(t)) {
+		t.Error(finding)
 	}
 }
 
