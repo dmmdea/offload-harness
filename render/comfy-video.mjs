@@ -28,6 +28,15 @@
 //   chosen node and why go to stderr. LTX 2.5 and Hunyuan 1.5 ignore it (they keep VAEDecodeTiled).
 //   --upscale-model: post-decode ESRGAN upscale (+ --upscale-width/height to resize, e.g.
 //   720p->1080p).
+//   --wan-placement single|multicard (wan only; single, today's, is the default): multicard is the CARD-ONLY placement on the
+//   two non-display cards of a lease, no host RAM (render/wan-multicard.mjs; docs/systems/media-generation.md, "Card-only Wan").
+//   It reads the two cards from the lease (GPU_LEASE_DEVICES) or --wan-cards <card>,<card> (nvidia-smi indices or UUIDs), refuses
+//   a display card, launches its own ComfyUI on them (--gpu-only, a read-only safetensors reader, the harness's node folder) and
+//   builds the graph with the DisTorch2 loaders: --wan-resident-gb N (default 3) is the GiB of each expert kept on the compute card.
+//   --wan-decode plain under multicard frees both cards of the experts before the plain VAEDecode and saves the sampled latent
+//   (a LATENT line names it); a plain decode that ComfyUI retried tiled fails the run (WAN-DECODE-FALLBACK) and keeps the clip beside <out> as
+//   <name>.seamed<ext>; --wan-loader is not used. Needs --high-unet / --low-unet to name the fp8 safetensors experts. The wait is 7200 s unless
+//   --wait-sec / COMFY_WAIT_SEC say otherwise, and the run watches the instance's console for an out-of-memory wedge (WAN-OOM).
 //
 // Before anything is submitted, every node class the graph names is checked against the
 // running ComfyUI's /object_info (render/comfy-nodes.mjs): a missing custom-node pack is a
@@ -36,16 +45,17 @@ import { readFileSync, existsSync } from "node:fs";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { familySignature } from "./comfy-family.mjs";
-import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
+import { COMFY_DIR, comfyApi, comfyLogPath, comfyLogCursor } from "./comfy-lifecycle.mjs";
 import { stageInput as stageToInput } from "./comfy-input.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
-import { assertNodeClasses } from "./comfy-nodes.mjs";
+import { assertNodeClasses, missingNodeClasses } from "./comfy-nodes.mjs";
 import { buildHunyuan15I2V } from "./wf-hunyuan15-i2v.mjs";
 import { buildWan22I2V, chooseWanDecode, WAN_DECODE_MODES, WAN_DECODE_DEFAULT } from "./wf-wan22-i2v.mjs";
 import { buildLtx25I2V } from "./wf-ltx25-i2v.mjs";
 import { buildH3AV } from "./wf-h3-av.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
+import { planMulticard, checkComfyDevices, portNote, createOomWatch, MULTICARD_WAIT_SEC, wanGeometry, tiledSeamFrames, describeFrames } from "./wan-multicard.mjs";
 
 // BOOL_FLAGS take no value. --fast was missing from this list, so the parser took the
 // NEXT token as its value: a trailing --fast (the harness appends it after --hero) read
@@ -140,7 +150,7 @@ function stageInput(stillPath) {
 // into ComfyUI's input dir and returns the name LoadImage reads (injectable for tests).
 // vramTotalBytes is the render card's total VRAM when the caller has read it (buildGraphForRun
 // does); only the Wan graph's --wan-decode auto reads it, and without it auto builds the tiled decode.
-export function buildGraphFromArgs(pos, flags, { stage = stageInput, vramTotalBytes } = {}) {
+export function buildGraphFromArgs(pos, flags, { stage = stageInput, vramTotalBytes, multicard } = {}) {
   // model default is wan (Hunyuan needs files absent on this box). Declared here (NOT at
   // the graph-selection line) so the width/length ternaries below and the log line can
   // read it without a temporal-dead-zone ReferenceError.
@@ -235,7 +245,8 @@ export function buildGraphFromArgs(pos, flags, { stage = stageInput, vramTotalBy
     } else {
       // The decode mode goes to the Wan builder alone: Hunyuan 1.5 and LTX 2.5 keep their own
       // VAEDecodeTiled (other VAEs, never measured), so their calls above are untouched by it.
-      graph = model === "hunyuan" ? buildHunyuan15I2V(common) : buildWan22I2V({ ...common, decode: wanDecodeMode(flags), vramTotalBytes });
+      // multicard (planMulticard) is the card-only placement; absent, the call is the one that always was.
+      graph = model === "hunyuan" ? buildHunyuan15I2V(common) : buildWan22I2V({ ...common, decode: wanDecodeMode(flags), vramTotalBytes, ...(multicard ? { placement: "multicard", residentGb: multicard.residentGb } : {}) });
     }
   }
   return { graph, seed, model };
@@ -257,13 +268,18 @@ function wanDecodeLine(mode, card, graph) {
 // file. A run buildGraphFromArgs would refuse for a missing still or prompt reads nothing either: it
 // exits right after, and exiting with a socket still closing is the Windows crash main() warns about.
 // Every Wan run logs its decode (log defaults to stderr).
-export async function buildGraphForRun(pos, flags, api, { stage = stageInput, fetchImpl = fetch, log = (m) => console.error(m) } = {}) {
+export async function buildGraphForRun(pos, flags, api, { stage = stageInput, fetchImpl = fetch, log = (m) => console.error(m), multicard } = {}) {
   const wan = runsWanGraph(flags);
   const mode = wan ? wanDecodeMode(flags) : undefined; // a bad --wan-decode throws before anything is staged
   const buildable = !!pos[1] && !!(pos[2] || flags.prompt);
   const card = wan && mode === "auto" && buildable ? await readRenderCard(api, { fetchImpl }) : undefined;
-  const built = buildGraphFromArgs(pos, flags, { stage, vramTotalBytes: card?.vramTotal });
+  const built = buildGraphFromArgs(pos, flags, { stage, vramTotalBytes: card?.vramTotal, multicard });
   if (wan) log(wanDecodeLine(mode, card, built.graph));
+  // Under multicard the decode that was not asked for is the tiled one (the default), which fits beside the expert and seams the clip: said once.
+  if (wan && multicard && Object.values(built.graph).some((n) => n.class_type === "VAEDecodeTiled")) {
+    const seams = describeFrames(tiledSeamFrames(wanGeometry(flags).f));
+    log(`WAN-PLACEMENT-NOTE: the tiled decode under multicard fits beside the expert (+2.3 GiB measured) but tiles the decode, so the clip can seam where its tiles meet${seams ? `, in time at ${seams}` : ""}; --wan-decode plain frees both cards of the experts first and decodes in one pass`);
+  }
   return built;
 }
 
@@ -275,39 +291,136 @@ export async function submitChecked({ api, graph, clientId, cli, fetchImpl = fet
   return submit({ api, graph, clientId, cli });
 }
 
-async function generate(out, API, pos, flags) {
-  const { graph, seed, model } = await buildGraphForRun(pos, flags, API);
+// verifyMulticardDevices: ComfyUI numbers its cards in the order of the CUDA_VISIBLE_DEVICES it was launched with, and the graph
+// names cuda:0 (storage) and cuda:1 (compute). Before anything is submitted, the running ComfyUI's own device list is compared with the
+// two cards it was pinned to; a mismatch stops the run with nothing on the cards. An unreadable /system_stats is a refusal too.
+export async function verifyMulticardDevices(api, plan, { fetchImpl = fetch } = {}) {
+  let body;
+  try {
+    const r = await fetchImpl(`${api}/system_stats`, { signal: AbortSignal.timeout(8000) });
+    if (!r || !r.ok) throw new Error(`HTTP ${r?.status}`);
+    body = await r.json();
+  } catch (e) {
+    throw new Error(`WAN-PLACEMENT-MISMATCH: GET /system_stats gave no device list (${e?.message || e}), so the cards ComfyUI numbered cannot be checked`);
+  }
+  const problems = checkComfyDevices(body?.devices, plan.pair);
+  if (problems.length) throw new Error(`WAN-PLACEMENT-MISMATCH: ${problems.join("; ")}. Nothing was submitted.`);
+}
+
+// verifyMulticardPack: the harness's node pack (render/comfyui-ext) is what installs the read-only safetensors reader, and it raises on import
+// when it cannot, so a pack that is not registered means each expert would charge its whole file to host commit. The graph names one of its classes
+// only under the plain decode, so the node-class preflight alone would let any other decode run without the reader: this asks for it every time,
+// and, unlike that preflight, an answer that cannot be had is a refusal too (the server just answered /system_stats).
+export async function verifyMulticardPack(api, plan, { fetchImpl = fetch } = {}) {
+  const res = await missingNodeClasses(api, { 1: { class_type: "OffloadFreeForDecode" } }, { fetchImpl });
+  if (!res.checked) throw new Error(`WAN-PLACEMENT-PACK: cannot tell whether the harness's node pack (offload_multicard) loaded: ${res.reason}. Nothing was submitted.`);
+  if (res.missing.length) {
+    throw new Error(`WAN-PLACEMENT-PACK: ComfyUI at ${api} has no OffloadFreeForDecode, so the harness's node pack offload_multicard failed to import (it refuses to load when its read-only safetensors reader cannot be installed, and without that reader each expert would charge its whole file to host commit): ComfyUI's console log says why (${comfyLogPath(COMFY_DIR, plan.launch.key)}). Nothing was submitted.`);
+  }
+}
+
+// The calls generate() makes to the outside world, as one table a test can replace entry by entry (generate's last argument). The
+// defaults are the real ones; nothing else about the function changes.
+export const GENERATE_IO = Object.freeze({
+  verifyDevices: verifyMulticardDevices, verifyPack: verifyMulticardPack, buildGraph: buildGraphForRun, submit: submitChecked,
+  // a literal call, not the bare function: gpu_progress_test.go finds the render helpers that heartbeat (gpulease.HeartbeatHelperNames) by their `pollOutputs(` call
+  poll: (opts) => pollOutputs(opts), view: fetchView, write: writeFileAtomic, logCursor: comfyLogCursor, finalize: finalizeRun, resolveCli,
+  stdout: (...a) => console.log(...a), stderr: (...a) => console.error(...a), env: process.env, comfyDir: COMFY_DIR,
+});
+
+export async function generate(out, API, pos, flags, multicard, io = {}) {
+  const x = { ...GENERATE_IO, ...io };
+  if (multicard) {
+    await x.verifyDevices(API, multicard);
+    await x.verifyPack(API, multicard);
+  }
+  const { graph, seed, model } = await x.buildGraph(pos, flags, API, { multicard });
   // Shared submission/polling/retrieval (comfy-submit.mjs): CLI-preferred submit with
   // byte-identical raw fallback; hardened poll loop (dead-server watchdog).
-  const cli = resolveCli();
-  const { promptId } = await submitChecked({ api: API, graph, clientId: "video-" + seed, cli });
-  console.log("queued", promptId, flags.graph ? `(graph ${flags.graph})` : `${model} seed ${seed}`);
+  const cli = x.resolveCli();
+  // Under multicard the instance's console is watched while the prompt runs (an out-of-memory wedge ComfyUI does not report). The cursor is
+  // made BEFORE the submit, so it reads this run's lines and not an earlier run's.
+  const watch = multicard ? createOomWatch({ cursor: x.logCursor(x.comfyDir, multicard.launch.key), say: x.stderr }) : null;
+  const { promptId } = await x.submit({ api: API, graph, clientId: "video-" + seed, cli });
+  x.stdout("queued", promptId, flags.graph ? `(graph ${flags.graph})` : `${model} seed ${seed}`);
   // Poll budget: the native quality recipe at 720p legitimately exceeds the old ~20-min
   // ceiling. Default 90 min; the Go harness passes COMFY_WAIT_SEC aligned to its own
   // videogen timeout and its process-tree kill remains the hard stop.
-  const waitSec = Number(flags["wait-sec"] || process.env.COMFY_WAIT_SEC || 5400);
-  const h = await pollOutputs({
+  // The card-only placement samples for about 86 minutes at the film's size, so its default is longer (MULTICARD_WAIT_SEC); a budget the caller
+  // chose, by flag or environment, is theirs.
+  const chosen = flags["wait-sec"] || x.env.COMFY_WAIT_SEC;
+  const waitSec = Number(chosen || (multicard ? MULTICARD_WAIT_SEC : 5400));
+  if (multicard && !chosen) x.stderr(`WAN-WAIT-NOTE: no --wait-sec or COMFY_WAIT_SEC, so the wait for the video is ${MULTICARD_WAIT_SEC} s (the 20-step film recipe was projected at about 5170 s and measured 5136 s of runner wall); pass --wait-sec <seconds> to change it`);
+  const h = await x.poll({
     api: API, promptId, waitSec,
     isDone: (entry) => !!firstOutputFile(entry.outputs, graph),
     noOutputMsg: "no video produced in time",
-    onExecError: () => finalizeRun({ api: API, promptId, cli }),
+    onExecError: () => x.finalize({ api: API, promptId, cli }),
+    ...(watch ? { watch } : {}),
   });
   const file = firstOutputFile(h.outputs, graph);
-  writeFileAtomic(out, await fetchView({ api: API, file }));
-  console.log("WROTE", out);
-  await finalizeRun({ api: API, promptId, cli });
+  const bytes = await x.view({ api: API, file });
+  // multicard + plain decode: the sampled latent the free node saved (the line a failed decode's message carries too).
+  const latents = (h.outputs?.["21"]?.latents || []).map((f) => (f.subfolder ? `${f.subfolder}/${f.filename}` : f.filename));
+  const sayLatents = () => { for (const l of latents) x.stdout(`LATENT ${l} (in ComfyUI's output directory)`); };
+  // --wan-decode plain asks for ONE decode pass, a clip without seams. ComfyUI retries a plain decode that ran out of memory TILED, with temporal tiles it
+  // sizes itself, and that clip can seam where its tiles meet: judged by what THIS run's console said (the watch's cursor began before the submit), never
+  // by the tail of a log that a kept instance shares with earlier runs. The tiled decode (the default) is the decode that was asked for.
+  const plain = !!watch && Object.values(graph).some((n) => n.class_type === "VAEDecode");
+  if (watch) watch.drain();
+  const verdict = watch ? watch.verdict : "clean";
+  const log = comfyLogPath(x.comfyDir, multicard ? multicard.launch.key : "");
+  if (plain && verdict === "fallback") {
+    // The finished clip is kept beside the requested path, not thrown away (the sample cost the whole run), and the run fails: a caller that keys on
+    // the exit code or on WROTE must not ship the seams.
+    const seamed = seamedPath(out);
+    x.write(seamed, bytes);
+    sayLatents();
+    await x.finalize({ api: API, promptId, cli });
+    throw new Error(`WAN-DECODE-FALLBACK: ComfyUI ran out of memory in the plain decode and retried it tiled with temporal tiles of its own, so the clip is not the single-pass decode that was asked for and can seam where its tiles meet (console: ${log}). The finished clip was kept as ${seamed} instead of ${out}${latents.length ? `; the sampled latent is ${latents.join(", ")} in ComfyUI's output directory, to decode again with more room` : ""}.`);
+  }
+  x.write(out, bytes);
+  x.stdout("WROTE", out);
+  sayLatents();
+  if (plain && verdict === "blind") {
+    x.stderr(`WAN-DECODE-UNVERIFIED: ComfyUI's console (${log}) could not be read to the end (it is missing, or its capture reached the 5 MB cap), so whether ComfyUI retried the plain decode tiled is unknown; check the clip for seams where temporal tiles would meet`);
+  }
+  await x.finalize({ api: API, promptId, cli });
+}
+
+/** seamedPath: where a clip that is not the one that was asked for is kept, beside the requested path (out/o.mp4 -> out/o.seamed.mp4). */
+export function seamedPath(out) {
+  const dot = out.lastIndexOf("."), slash = Math.max(out.lastIndexOf("/"), out.lastIndexOf("\\"));
+  return dot > slash + 1 ? `${out.slice(0, dot)}.seamed${out.slice(dot)}` : `${out}.seamed`;
+}
+
+const USAGE = 'usage: node comfy-video.mjs <out.mp4> <still> "<prompt>" [--model hunyuan|wan] [flags]   |   <out.mp4> --graph wf.json';
+
+/**
+ * planRun: everything main() decides before it takes the GPU. The card-only placement is planned first: it refuses, before anything is
+ * launched, every request it cannot honour (no cards named, not two, a display card). Its own environment names the instance, so the api and
+ * the lease slot read it too. `slot` is withGpuSlot's options: the card-only launch and its environment ride in it only for that placement.
+ */
+export function planRun(argv, { env = process.env, comfyDir = COMFY_DIR, planFn = planMulticard, say = (m) => console.error(m) } = {}) {
+  const { pos, flags } = parseArgs(argv);
+  const multicard = planFn({ flags, env, comfyDir, isWanGraph: runsWanGraph(flags), say });
+  const api = comfyApi(flags.api, multicard ? multicard.env : env);
+  const note = multicard ? portNote(flags, multicard.env, api) : "";
+  const slot = {
+    noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api, reserveVram: flags["reserve-vram"],
+    family: familySignature("video-" + (flags.model || "wan"), flags.transformer || flags["high-unet"]),
+    ...(multicard ? { launch: multicard.launch, instanceEnv: multicard.env } : {}),
+  };
+  return { pos, flags, out: pos[0], multicard, api, note, slot };
 }
 
 async function main() {
-  const { pos, flags } = parseArgs(process.argv.slice(2));
-  const out = pos[0];
-  const API = comfyApi(flags.api);
-  if (!out) { console.error('usage: node comfy-video.mjs <out.mp4> <still> "<prompt>" [--model hunyuan|wan] [flags]   |   <out.mp4> --graph wf.json'); process.exit(2); }
-  await withGpuSlot(
-    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],
-      family: familySignature("video-" + (flags.model || "wan"), flags.transformer || flags["high-unet"]) },
-    () => generate(out, API, pos, flags),
-  );
+  const run = planRun(process.argv.slice(2));
+  const API = run.api;
+  if (run.note) console.error(run.note);
+  if (!run.out) { console.error(USAGE); process.exit(2); }
+  // run.slot already says it (planRun builds it); the literal below is what comfy-instance.test.mjs lints every runner for: a managed slot that gets the api.
+  await withGpuSlot({ ...run.slot, comfyManaged: true, api: API }, () => generate(run.out, API, run.pos, run.flags, run.multicard));
 }
 
 // Run only as a script (the harness spawns this file), never on import — the test imports

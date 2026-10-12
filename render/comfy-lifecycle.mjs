@@ -6,7 +6,7 @@
 // caller still tears the session down at the batch boundary). tts.mjs does
 // NOT use this (its Chatterbox worker is not ComfyUI; it passes comfyManaged:false to
 // withGpuSlot). Dependency-free; deps are injectable purely for tests.
-import { existsSync, createWriteStream, renameSync, rmSync, readFileSync, mkdirSync, openSync, closeSync, readSync, fstatSync, writeFileSync } from "node:fs";
+import { existsSync, createWriteStream, renameSync, rmSync, readFileSync, mkdirSync, openSync, closeSync, readSync, fstatSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_process";
@@ -279,7 +279,7 @@ export function resolveLaunchProfile(env = process.env) {
   return { cudaDevice, dynamicVram, ...(cardUuid ? { cardUuid } : {}) };
 }
 
-const profileRequested = (p) => !!(p && (p.cudaDevice || p.dynamicVram || p.cardUuid));
+const profileRequested = (p) => !!(p && (p.cudaDevice || p.dynamicVram || p.cardUuid || p.multicard));
 
 /** Remove every `flag value` pair (and a `flag=value` form) from an argv list. */
 function stripValued(args, flag) {
@@ -299,18 +299,23 @@ function stripValued(args, flag) {
  * or --default-device the extra args carry — argparse takes the last occurrence, so
  * leaving them in would silently override the binding.
  */
-export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "", profile = { cudaDevice: "", dynamicVram: "" }, instance = null, comfyDir = "", warn = () => {} } = {}) {
+export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "", profile = { cudaDevice: "", dynamicVram: "" }, instance = null, comfyDir = "", warn = () => {}, launch = null } = {}) {
   const flags = ["--disable-smart-memory"];
   // warm: a BATCH session keeps ComfyUI's model cache ON so the checkpoint loads once
   // for N renders; the caller still tears the whole session down at the batch boundary
   // (zero-always-warm moves from per-render to per-batch). Default stays cache-none.
   if (!warm) flags.push("--cache-none");
   flags.push("--reserve-vram", String(reserveVram || "1.0"));
+  // A multicard launch (render/wan-multicard.mjs multicardLaunch) adds the flags its placement needs right after the base ones:
+  // --gpu-only, --disable-pinned-memory, the harness's extra-model-paths yaml and the custom-node whitelist. Its two cards are
+  // pinned by uuid in the child env, so a --cuda-device / --default-device in the extra args (main.py would rewrite
+  // CUDA_VISIBLE_DEVICES from it) is dropped, said, exactly as for a single card pinned by uuid. Nothing is added without `launch`.
+  if (launch && Array.isArray(launch.flags)) flags.push(...launch.flags);
   // J4 seam: COMFY_EXTRA_ARGS appends verbatim (whitespace-split) launch flags —
   // the per-box escape hatch for non-CUDA backends (--directml, device pinning)
   // without touching shared code. Empty/unset = byte-identical launch.
   let extra = String(extraArgs || "").split(/\s+/).filter(Boolean);
-  if (profile.cardUuid) {
+  if (profile.cardUuid || profile.multicard) {
     // A card pin by uuid lives in the child env (CUDA_VISIBLE_DEVICES), never in a flag:
     // --cuda-device would rewrite that env from an index in a different order.
     const had = extra.some((f) => /^--(cuda|default)-device(=|$)/.test(f));
@@ -319,6 +324,13 @@ export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "",
   } else if (profile.cudaDevice) {
     extra = stripValued(stripValued(extra, "--cuda-device"), "--default-device");
     flags.push("--cuda-device", profile.cudaDevice);
+  }
+  if (profile.multicard) {
+    // ComfyUI's main.py starts dynamic VRAM whenever --enable-dynamic-vram is given, beside --gpu-only too (cli_args.enables_dynamic_vram checks it first), and
+    // the operator's extra args land after the placement's flags: it would stream the experts through host RAM under a lease that declared none.
+    const had = extra.includes("--enable-dynamic-vram");
+    extra = extra.filter((f) => f !== "--enable-dynamic-vram");
+    if (had) warn("COMFY-INSTANCE-WARN: the extra args carry --enable-dynamic-vram, which ComfyUI honours even beside --gpu-only and which would stream the experts through host RAM under a card-only lease; dropped");
   }
   if (profile.dynamicVram === "on") {
     extra = extra.filter((f) => f !== "--disable-dynamic-vram");
@@ -390,6 +402,13 @@ export function profileMismatch(argv, profile) {
       why.push(`it runs with dynamic VRAM ${on ? "on" : "off"}; this binding needs it ${profile.dynamicVram}`);
     }
   }
+  if (profile.multicard) {
+    // The two cards are provable only by the launch marker (reuseVerdict); the argv can still disprove the placement.
+    if (!argv.map(String).includes("--gpu-only")) why.push("it runs without --gpu-only, which the multicard placement needs (dynamic VRAM off, everything on the cards)");
+    const got = argvFlagValue(argv, "--cuda-device");
+    if (got !== null) why.push(`it runs with --cuda-device ${got}, which overrides the multicard pin by uuid`);
+    if (argvDynamicVram(argv)) why.push("it runs with dynamic VRAM on, which the multicard placement needs off (--gpu-only keeps everything on the cards; --enable-dynamic-vram turns the streaming back on)");
+  }
   return why.join("; ");
 }
 
@@ -453,13 +472,24 @@ export async function reuseVerdict({ api, comfyDir, profile, key = "", port = nu
   // names, and two cards of one model are indistinguishable), so it is provable only by
   // the keyed launch marker: the instance is ours (live pid + the exact argv) AND was
   // launched on this very card. Anything else is a mismatch, never a pass.
-  const marker = comfyDir && (reason || key || profile.cardUuid) ? (key ? readLaunch(comfyDir, key) : readLaunch(comfyDir)) : null;
+  const marker = comfyDir && (reason || key || profile.cardUuid || profile.multicard) ? (key ? readLaunch(comfyDir, key) : readLaunch(comfyDir)) : null;
   if (!reason && profile.cardUuid) {
     const got = harnessLaunched(marker, argv, alive) ? String((marker.profile && marker.profile.cardUuid) || "") : null;
     if (got === null) {
       reason = `its card pin cannot be read from a running process, and no launch marker of this harness proves it was started on card ${profile.cardUuid}`;
     } else if (got.toLowerCase() !== profile.cardUuid.toLowerCase()) {
       reason = `it was launched ${got ? "on card " + got : "with no card pin"}; this binding needs card ${profile.cardUuid}`;
+    }
+  }
+  if (!reason && profile.multicard) {
+    // Same proof as a single card's: the pair cannot be read off a running process, only off the launch marker of an instance
+    // that is ours (live pid + the exact argv) and was launched on these two cards in this order (storage first).
+    const got = harnessLaunched(marker, argv, alive) ? ((marker.profile && marker.profile.multicard && marker.profile.multicard.cards) || []) : null;
+    const want = profile.multicard.cards || [];
+    if (got === null) {
+      reason = `its two cards cannot be read from a running process, and no launch marker of this harness proves it was started on ${want.join(" + ")}`;
+    } else if (got.map((c) => String(c).toLowerCase()).join(",") !== want.map((c) => String(c).toLowerCase()).join(",")) {
+      reason = `it was launched on ${got.length ? got.join(" + ") : "no card pair"}; this binding needs ${want.join(" + ")} (storage card first)`;
     }
   }
   if (!reason && key) {
@@ -556,7 +586,8 @@ const COMFY_LOG_TAIL_WINDOW_BYTES = 256 * 1024;
 
 /** tailComfyLog: the last `n` lines of THIS run's ComfyUI console capture, or ""
  * when there is none (no harness-managed launch this run, or nothing captured yet).
- * Synchronous — only ever called once, on a render failure, never on the happy path.
+ * Synchronous — called once on a render failure, and once after a successful multicard run
+ * (comfy-video.mjs reads it for ComfyUI's tiled-decode retry); never on any other happy path.
  * Reads only the last COMFY_LOG_TAIL_WINDOW_BYTES of the file; when that window starts
  * inside a line, the cut line is dropped rather than shown half. */
 export function tailComfyLog(comfyDir = COMFY_DIR, n = COMFY_LOG_TAIL_LINES, key = "") {
@@ -576,6 +607,50 @@ export function tailComfyLog(comfyDir = COMFY_DIR, n = COMFY_LOG_TAIL_LINES, key
   } finally {
     if (fd !== undefined) { try { closeSync(fd); } catch {} }
   }
+}
+
+/** The most one comfyLogCursor read takes, and how much of the last read it keeps to finish a line the end of a read cut. */
+const COMFY_LOG_CURSOR_MAX_READ_BYTES = 8 * 1024 * 1024;
+const COMFY_LOG_CURSOR_CARRY_CHARS = 256;
+
+/**
+ * comfyLogCursor: a reader of what this instance's ComfyUI console gains from now on. tailComfyLog answers "what did the console end with"
+ * once, after the fact; the cursor answers "what has it said since the run began", again and again while the run waits, without reading the
+ * file twice or mistaking an earlier run's lines (a kept instance's log holds them) for this one's. `read()` returns { text, state }:
+ * text is what was appended since the last read, prefixed with the tail of the one before it so a line cut by the end of a read is whole in
+ * the next; state is "ok", "absent" (no console file: nothing captured, or a ComfyUI this harness did not start) or "capped" (the capture
+ * reached its 5 MB cap, after which ComfyUI's output is no longer written: everything later is invisible). A file that is shorter than the
+ * cursor's position was replaced and is read from its start; one that appears later is read from its start. Never throws.
+ */
+export function comfyLogCursor(comfyDir = COMFY_DIR, key = "") {
+  const path = comfyLogPath(comfyDir, key);
+  let offset = null; // null: the file did not exist when the cursor was made
+  try { offset = statSync(path).size; } catch { /* absent */ }
+  let carry = "";
+  return {
+    path,
+    read() {
+      let size;
+      try { size = statSync(path).size; } catch { return { text: "", state: "absent" }; }
+      if (offset === null || size < offset) { offset = 0; carry = ""; }
+      if (size === offset) return { text: "", state: "ok" };
+      const len = Math.min(size - offset, COMFY_LOG_CURSOR_MAX_READ_BYTES);
+      const buf = Buffer.alloc(len);
+      let fd;
+      try {
+        fd = openSync(path, "r");
+        readSync(fd, buf, 0, len, offset);
+      } catch {
+        return { text: "", state: "absent" };
+      } finally {
+        if (fd !== undefined) { try { closeSync(fd); } catch {} }
+      }
+      offset += len;
+      const text = carry + buf.toString("utf8");
+      carry = text.slice(-COMFY_LOG_CURSOR_CARRY_CHARS);
+      return { text, state: /offload-comfyui\.log capped at/.test(text) ? "capped" : "ok" };
+    },
+  };
 }
 
 /** captureComfyOutput: pipes a just-spawned ComfyUI child's stdout+stderr into the
@@ -670,6 +745,9 @@ export async function ensureComfy(opts = {}) {
     spawn = nodeSpawn,
     envFor = cudaVisibleEnv,
     env = process.env,
+    // launch: the card-only (multicard) placement's launch (render/wan-multicard.mjs multicardLaunch): extra flags, the two cards
+    // to pin by uuid (storage first) and the env the placement needs. Absent = every launch behaves exactly as before.
+    launch = null,
     systemArgv = fetchSystemArgv,
     readLaunch = readLaunchOwner,
     writeLaunch = writeLaunchOwner,
@@ -699,6 +777,7 @@ export async function ensureComfy(opts = {}) {
   const instance = resolveInstance({ api: apiOpt || process.env.COMFY_API, env });
   const { api, key } = instance;
   const profile = resolveLaunchProfile(env);
+  if (launch) profile.multicard = { cards: [...launch.cards] };
   // Can this call launch an instance on `api` at all? A keyed instance owns its --port; the
   // default endpoint is what an unlaunched ComfyUI listens on; an UNKEYED instance on any other
   // endpoint has no --port of its own, so only the operator's own extra args can put it there.
@@ -771,7 +850,7 @@ export async function ensureComfy(opts = {}) {
     const { outputDir, tempDir } = instancePaths(comfyDir, key);
     for (const d of [outputDir, tempDir]) { try { mkdirs(d); } catch {} }
   }
-  const flags = launchFlags({ reserveVram, warm, extraArgs: env.COMFY_EXTRA_ARGS, profile, instance: key ? instance : null, comfyDir, warn: log });
+  const flags = launchFlags({ reserveVram, warm, extraArgs: env.COMFY_EXTRA_ARGS, profile, instance: key ? instance : null, comfyDir, warn: log, launch });
   // A --cuda-device launch has already scoped the cards (main.py rewrites
   // CUDA_VISIBLE_DEVICES to it), so the multi-GPU visibility restore below does not
   // apply — and neither does its --disable-pinned-memory: one visible card is not the
@@ -779,12 +858,15 @@ export async function ensureComfy(opts = {}) {
   // (dynamic VRAM) bf16 DiT fast.
   // A card-bound instance is pinned by uuid in the child env, which is the whole pin:
   // one visible card, so neither the multi-GPU restore nor --cuda-device applies.
-  const spawnEnv = profile.cardUuid ? { ...env, CUDA_VISIBLE_DEVICES: profile.cardUuid }
+  // A multicard launch pins its two cards by uuid, storage card first: CUDA numbers the visible cards in that order, so the first
+  // is cuda:0 whatever its nvidia-smi index, and the graph's cuda:0 / cuda:1 are the cards the lease holds.
+  const spawnEnv = launch ? { ...env, CUDA_VISIBLE_DEVICES: launch.cudaVisibleDevices, ...(launch.env || {}) }
+    : profile.cardUuid ? { ...env, CUDA_VISIBLE_DEVICES: profile.cardUuid }
     : flags.includes("--cuda-device") ? env : envFor();
   // A keyed instance with no card is not pinned to anything: it sees every card its
   // environment shows, the display card included. That is the operator's explicit choice
   // (a side-by-side instance, a test), so it is allowed, but never silent.
-  if (key && !profile.cardUuid && env.CUDA_VISIBLE_DEVICES === undefined && !flags.includes("--cuda-device")) {
+  if (key && !launch && !profile.cardUuid && env.CUDA_VISIBLE_DEVICES === undefined && !flags.includes("--cuda-device")) {
     log(`COMFY-INSTANCE-WARN: instance '${key}' is not bound to a card (no COMFY_CARD_UUID), so nothing pins it: it sees every card this environment shows, the display card included`);
   }
   // Upstream's own guidance for the multi-GPU Windows path it now hides by default:

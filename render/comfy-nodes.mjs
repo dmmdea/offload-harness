@@ -38,7 +38,13 @@ export const NODE_PACKS = Object.freeze({
   // DiT's own DisTorch2 loader above.
   CLIPLoaderMultiGPU: `ComfyUI-MultiGPU (https://github.com/pollockjj/ComfyUI-MultiGPU)${MULTIGPU_ARCHIVAL_NOTE}`,
   VAELoaderMultiGPU: `ComfyUI-MultiGPU (https://github.com/pollockjj/ComfyUI-MultiGPU)${MULTIGPU_ARCHIVAL_NOTE}`,
+  // The harness's own pack (render/comfyui-ext), which --wan-placement multicard adds through --extra-model-paths-config and
+  // never installs into custom_nodes. Missing means the pack failed to import: the reason is in ComfyUI's console log.
+  OffloadFreeForDecode: "offload_multicard, the harness's own pack in render/comfyui-ext (loaded by --wan-placement multicard; when it is missing it failed to import, see ComfyUI's console log)",
 });
+
+// The classes of the packs this harness ships itself (render/comfyui-ext): never installed into a ComfyUI's custom_nodes.
+const HARNESS_OWN_CLASSES = new Set(["OffloadFreeForDecode"]);
 
 // graphClasses: the distinct class_type values of an API-format graph, in first-seen order.
 export function graphClasses(graph) {
@@ -78,7 +84,13 @@ export async function missingNodeClasses(api, graph, { fetchImpl = fetch, timeou
 export function missingNodeMessage(api, missing, comfyDir = "") {
   const parts = missing.map((cls) => (NODE_PACKS[cls] ? `${cls} (custom node pack ${NODE_PACKS[cls]})` : cls));
   const where = comfyDir ? `${comfyDir.replace(/[\\/]+$/, "")}/custom_nodes` : "ComfyUI's custom_nodes";
-  return `MISSING_NODE: ComfyUI at ${api} has no node class ${parts.join(", ")} — install the pack into ${where} and restart ComfyUI (\`local-offload doctor\` lists every route's node classes). Nothing was submitted.`;
+  // The harness's own pack is never installed into custom_nodes (--wan-placement multicard loads it through --extra-model-paths-config), so for it the
+  // sentence is not "install it": it is that it failed to import.
+  const installable = missing.some((cls) => !HARNESS_OWN_CLASSES.has(cls));
+  const tail = installable
+    ? ` — install the pack into ${where} and restart ComfyUI (\`local-offload doctor\` lists every route's node classes).`
+    : " — the harness's own pack is never installed into custom_nodes (--wan-placement multicard loads it through --extra-model-paths-config), so it failed to import: ComfyUI's console log says why.";
+  return `MISSING_NODE: ComfyUI at ${api} has no node class ${parts.join(", ")}${tail} Nothing was submitted.`;
 }
 
 // assertNodeClasses throws MISSING_NODE when the server positively lacks a class, and logs

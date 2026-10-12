@@ -550,6 +550,10 @@ export async function withGpuSlot(opts, fn) {
     reserveVram,
     api,
     instanceEnv = process.env,
+    // launch: the card-only (multicard) ComfyUI launch (wan-multicard.mjs multicardLaunch). When given, ensureComfy launches with
+    // it and reads `instanceEnv` as its environment (the same one the instance was resolved from). Absent, ensureComfy is called
+    // with exactly the options it always was.
+    launch = null,
     freeLlamaSwap: freeLS = freeLlamaSwap,
     ensureComfy = defaultEnsureComfy,
     freeComfy: freeCfy = freeComfy,
@@ -640,6 +644,7 @@ export async function withGpuSlot(opts, fn) {
         // this runner's event loop, and its lease's holder stops it. Absent unless asked, so the
         // call is unchanged for a runner that tears its own ComfyUI down.
         ...(keepComfy ? { keep: true } : {}),
+        ...(launch ? { launch, env: instanceEnv } : {}),
       });
     }
     if (comfyManaged && family) {

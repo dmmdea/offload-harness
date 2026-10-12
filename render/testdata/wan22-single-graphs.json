@@ -1,0 +1,1926 @@
+{
+ "gguf experts, auto loader, tiled decode (today's default)": {
+  "args": {
+   "imagePath": "s.png",
+   "prompt": "a drive-by of a sports car",
+   "seed": 7,
+   "width": 720,
+   "height": 1280,
+   "length": 81
+  },
+  "graph": {
+   "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+     "image": "s.png"
+    }
+   },
+   "2": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "wan_2.1_vae.safetensors"
+    }
+   },
+   "3": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "type": "wan"
+    }
+   },
+   "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "a drive-by of a sports car"
+    }
+   },
+   "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+    }
+   },
+   "6": {
+    "class_type": "WanImageToVideo",
+    "inputs": {
+     "positive": [
+      "4",
+      0
+     ],
+     "negative": [
+      "5",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "width": 720,
+     "height": 1280,
+     "length": 81,
+     "batch_size": 1,
+     "start_image": [
+      "1",
+      0
+     ]
+    }
+   },
+   "7": {
+    "class_type": "UnetLoaderGGUFDisTorch2MultiGPU",
+    "inputs": {
+     "unet_name": "wan2.2_i2v_high_noise_14B_Q4_K_S.gguf",
+     "compute_device": "cuda:0",
+     "virtual_vram_gb": 7,
+     "donor_device": "cpu",
+     "eject_models": true
+    }
+   },
+   "8": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "7",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "9": {
+    "class_type": "UnetLoaderGGUFDisTorch2MultiGPU",
+    "inputs": {
+     "unet_name": "wan2.2_i2v_low_noise_14B_Q4_K_M.gguf",
+     "compute_device": "cuda:0",
+     "virtual_vram_gb": 7,
+     "donor_device": "cpu",
+     "eject_models": true
+    }
+   },
+   "10": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "9",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "11": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "8",
+      0
+     ],
+     "add_noise": "enable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "6",
+      2
+     ],
+     "start_at_step": 0,
+     "end_at_step": 10,
+     "return_with_leftover_noise": "enable"
+    }
+   },
+   "12": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "10",
+      0
+     ],
+     "add_noise": "disable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "11",
+      0
+     ],
+     "start_at_step": 10,
+     "end_at_step": 10000,
+     "return_with_leftover_noise": "disable"
+    }
+   },
+   "13": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+     "samples": [
+      "12",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "tile_size": 256,
+     "overlap": 64,
+     "temporal_size": 32,
+     "temporal_overlap": 8
+    }
+   },
+   "14": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+     "images": [
+      "13",
+      0
+     ],
+     "frame_rate": 16,
+     "loop_count": 0,
+     "filename_prefix": "render_wan",
+     "format": "video/h264-mp4",
+     "pingpong": false,
+     "save_output": true
+    }
+   }
+  }
+ },
+ "fp8 experts, auto loader (the plain UNETLoader), tiled decode": {
+  "args": {
+   "imagePath": "s.png",
+   "prompt": "a drive-by of a sports car",
+   "seed": 7,
+   "width": 720,
+   "height": 1280,
+   "length": 81,
+   "highUnet": "high_fp8.safetensors",
+   "lowUnet": "low_fp8.safetensors"
+  },
+  "graph": {
+   "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+     "image": "s.png"
+    }
+   },
+   "2": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "wan_2.1_vae.safetensors"
+    }
+   },
+   "3": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "type": "wan"
+    }
+   },
+   "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "a drive-by of a sports car"
+    }
+   },
+   "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+    }
+   },
+   "6": {
+    "class_type": "WanImageToVideo",
+    "inputs": {
+     "positive": [
+      "4",
+      0
+     ],
+     "negative": [
+      "5",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "width": 720,
+     "height": 1280,
+     "length": 81,
+     "batch_size": 1,
+     "start_image": [
+      "1",
+      0
+     ]
+    }
+   },
+   "7": {
+    "class_type": "UNETLoader",
+    "inputs": {
+     "unet_name": "high_fp8.safetensors",
+     "weight_dtype": "default"
+    }
+   },
+   "8": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "7",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "9": {
+    "class_type": "UNETLoader",
+    "inputs": {
+     "unet_name": "low_fp8.safetensors",
+     "weight_dtype": "default"
+    }
+   },
+   "10": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "9",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "11": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "8",
+      0
+     ],
+     "add_noise": "enable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "6",
+      2
+     ],
+     "start_at_step": 0,
+     "end_at_step": 10,
+     "return_with_leftover_noise": "enable"
+    }
+   },
+   "12": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "10",
+      0
+     ],
+     "add_noise": "disable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "11",
+      0
+     ],
+     "start_at_step": 10,
+     "end_at_step": 10000,
+     "return_with_leftover_noise": "disable"
+    }
+   },
+   "13": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+     "samples": [
+      "12",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "tile_size": 256,
+     "overlap": 64,
+     "temporal_size": 32,
+     "temporal_overlap": 8
+    }
+   },
+   "14": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+     "images": [
+      "13",
+      0
+     ],
+     "frame_rate": 16,
+     "loop_count": 0,
+     "filename_prefix": "render_wan",
+     "format": "video/h264-mp4",
+     "pingpong": false,
+     "save_output": true
+    }
+   }
+  }
+ },
+ "fp8 experts, plain decode": {
+  "args": {
+   "imagePath": "s.png",
+   "prompt": "a drive-by of a sports car",
+   "seed": 7,
+   "width": 720,
+   "height": 1280,
+   "length": 81,
+   "highUnet": "high_fp8.safetensors",
+   "lowUnet": "low_fp8.safetensors",
+   "decode": "plain"
+  },
+  "graph": {
+   "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+     "image": "s.png"
+    }
+   },
+   "2": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "wan_2.1_vae.safetensors"
+    }
+   },
+   "3": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "type": "wan"
+    }
+   },
+   "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "a drive-by of a sports car"
+    }
+   },
+   "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+    }
+   },
+   "6": {
+    "class_type": "WanImageToVideo",
+    "inputs": {
+     "positive": [
+      "4",
+      0
+     ],
+     "negative": [
+      "5",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "width": 720,
+     "height": 1280,
+     "length": 81,
+     "batch_size": 1,
+     "start_image": [
+      "1",
+      0
+     ]
+    }
+   },
+   "7": {
+    "class_type": "UNETLoader",
+    "inputs": {
+     "unet_name": "high_fp8.safetensors",
+     "weight_dtype": "default"
+    }
+   },
+   "8": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "7",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "9": {
+    "class_type": "UNETLoader",
+    "inputs": {
+     "unet_name": "low_fp8.safetensors",
+     "weight_dtype": "default"
+    }
+   },
+   "10": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "9",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "11": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "8",
+      0
+     ],
+     "add_noise": "enable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "6",
+      2
+     ],
+     "start_at_step": 0,
+     "end_at_step": 10,
+     "return_with_leftover_noise": "enable"
+    }
+   },
+   "12": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "10",
+      0
+     ],
+     "add_noise": "disable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "11",
+      0
+     ],
+     "start_at_step": 10,
+     "end_at_step": 10000,
+     "return_with_leftover_noise": "disable"
+    }
+   },
+   "13": {
+    "class_type": "VAEDecode",
+    "inputs": {
+     "samples": [
+      "12",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ]
+    }
+   },
+   "14": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+     "images": [
+      "13",
+      0
+     ],
+     "frame_rate": 16,
+     "loop_count": 0,
+     "filename_prefix": "render_wan",
+     "format": "video/h264-mp4",
+     "pingpong": false,
+     "save_output": true
+    }
+   }
+  }
+ },
+ "fp8 experts, auto decode on a 16 GiB card": {
+  "args": {
+   "imagePath": "s.png",
+   "prompt": "a drive-by of a sports car",
+   "seed": 7,
+   "width": 720,
+   "height": 1280,
+   "length": 81,
+   "highUnet": "high_fp8.safetensors",
+   "lowUnet": "low_fp8.safetensors",
+   "decode": "auto",
+   "vramTotalBytes": 17179869184
+  },
+  "graph": {
+   "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+     "image": "s.png"
+    }
+   },
+   "2": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "wan_2.1_vae.safetensors"
+    }
+   },
+   "3": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "type": "wan"
+    }
+   },
+   "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "a drive-by of a sports car"
+    }
+   },
+   "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+    }
+   },
+   "6": {
+    "class_type": "WanImageToVideo",
+    "inputs": {
+     "positive": [
+      "4",
+      0
+     ],
+     "negative": [
+      "5",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "width": 720,
+     "height": 1280,
+     "length": 81,
+     "batch_size": 1,
+     "start_image": [
+      "1",
+      0
+     ]
+    }
+   },
+   "7": {
+    "class_type": "UNETLoader",
+    "inputs": {
+     "unet_name": "high_fp8.safetensors",
+     "weight_dtype": "default"
+    }
+   },
+   "8": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "7",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "9": {
+    "class_type": "UNETLoader",
+    "inputs": {
+     "unet_name": "low_fp8.safetensors",
+     "weight_dtype": "default"
+    }
+   },
+   "10": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "9",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "11": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "8",
+      0
+     ],
+     "add_noise": "enable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "6",
+      2
+     ],
+     "start_at_step": 0,
+     "end_at_step": 10,
+     "return_with_leftover_noise": "enable"
+    }
+   },
+   "12": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "10",
+      0
+     ],
+     "add_noise": "disable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "11",
+      0
+     ],
+     "start_at_step": 10,
+     "end_at_step": 10000,
+     "return_with_leftover_noise": "disable"
+    }
+   },
+   "13": {
+    "class_type": "VAEDecode",
+    "inputs": {
+     "samples": [
+      "12",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ]
+    }
+   },
+   "14": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+     "images": [
+      "13",
+      0
+     ],
+     "frame_rate": 16,
+     "loop_count": 0,
+     "filename_prefix": "render_wan",
+     "format": "video/h264-mp4",
+     "pingpong": false,
+     "save_output": true
+    }
+   }
+  }
+ },
+ "gguf experts, fast (the distill LoRAs)": {
+  "args": {
+   "imagePath": "s.png",
+   "prompt": "a drive-by of a sports car",
+   "seed": 7,
+   "width": 720,
+   "height": 1280,
+   "length": 81,
+   "fast": true
+  },
+  "graph": {
+   "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+     "image": "s.png"
+    }
+   },
+   "2": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "wan_2.1_vae.safetensors"
+    }
+   },
+   "3": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "type": "wan"
+    }
+   },
+   "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "a drive-by of a sports car"
+    }
+   },
+   "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+    }
+   },
+   "6": {
+    "class_type": "WanImageToVideo",
+    "inputs": {
+     "positive": [
+      "4",
+      0
+     ],
+     "negative": [
+      "5",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "width": 720,
+     "height": 1280,
+     "length": 81,
+     "batch_size": 1,
+     "start_image": [
+      "1",
+      0
+     ]
+    }
+   },
+   "7": {
+    "class_type": "UnetLoaderGGUFDisTorch2MultiGPU",
+    "inputs": {
+     "unet_name": "wan2.2_i2v_high_noise_14B_Q4_K_S.gguf",
+     "compute_device": "cuda:0",
+     "virtual_vram_gb": 7,
+     "donor_device": "cpu",
+     "eject_models": true
+    }
+   },
+   "8": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "15",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "9": {
+    "class_type": "UnetLoaderGGUFDisTorch2MultiGPU",
+    "inputs": {
+     "unet_name": "wan2.2_i2v_low_noise_14B_Q4_K_M.gguf",
+     "compute_device": "cuda:0",
+     "virtual_vram_gb": 7,
+     "donor_device": "cpu",
+     "eject_models": true
+    }
+   },
+   "10": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "16",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "11": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "8",
+      0
+     ],
+     "add_noise": "enable",
+     "noise_seed": 7,
+     "steps": 8,
+     "cfg": 3,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "6",
+      2
+     ],
+     "start_at_step": 0,
+     "end_at_step": 4,
+     "return_with_leftover_noise": "enable"
+    }
+   },
+   "12": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "10",
+      0
+     ],
+     "add_noise": "disable",
+     "noise_seed": 7,
+     "steps": 8,
+     "cfg": 1,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "11",
+      0
+     ],
+     "start_at_step": 4,
+     "end_at_step": 10000,
+     "return_with_leftover_noise": "disable"
+    }
+   },
+   "13": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+     "samples": [
+      "12",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "tile_size": 256,
+     "overlap": 64,
+     "temporal_size": 32,
+     "temporal_overlap": 8
+    }
+   },
+   "14": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+     "images": [
+      "13",
+      0
+     ],
+     "frame_rate": 16,
+     "loop_count": 0,
+     "filename_prefix": "render_wan",
+     "format": "video/h264-mp4",
+     "pingpong": false,
+     "save_output": true
+    }
+   },
+   "15": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+     "model": [
+      "7",
+      0
+     ],
+     "lora_name": "Wan_2_2_I2V_A14B_HIGH_lightx2v_4step_lora_260412_rank_64_fp16.safetensors",
+     "strength_model": 0.7
+    }
+   },
+   "16": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+     "model": [
+      "9",
+      0
+     ],
+     "lora_name": "Wan_2_2_I2V_A14B_LOW_lightx2v_4step_lora_260412_rank_64_fp16.safetensors",
+     "strength_model": 1
+    }
+   }
+  }
+ },
+ "gguf experts, upscale after the decode": {
+  "args": {
+   "imagePath": "s.png",
+   "prompt": "a drive-by of a sports car",
+   "seed": 7,
+   "width": 720,
+   "height": 1280,
+   "length": 81,
+   "upscaleModel": "u.pth",
+   "upscaleWidth": 1920,
+   "upscaleHeight": 1080,
+   "upscaleMethod": "bicubic"
+  },
+  "graph": {
+   "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+     "image": "s.png"
+    }
+   },
+   "2": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "wan_2.1_vae.safetensors"
+    }
+   },
+   "3": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "type": "wan"
+    }
+   },
+   "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "a drive-by of a sports car"
+    }
+   },
+   "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+    }
+   },
+   "6": {
+    "class_type": "WanImageToVideo",
+    "inputs": {
+     "positive": [
+      "4",
+      0
+     ],
+     "negative": [
+      "5",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "width": 720,
+     "height": 1280,
+     "length": 81,
+     "batch_size": 1,
+     "start_image": [
+      "1",
+      0
+     ]
+    }
+   },
+   "7": {
+    "class_type": "UnetLoaderGGUFDisTorch2MultiGPU",
+    "inputs": {
+     "unet_name": "wan2.2_i2v_high_noise_14B_Q4_K_S.gguf",
+     "compute_device": "cuda:0",
+     "virtual_vram_gb": 7,
+     "donor_device": "cpu",
+     "eject_models": true
+    }
+   },
+   "8": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "7",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "9": {
+    "class_type": "UnetLoaderGGUFDisTorch2MultiGPU",
+    "inputs": {
+     "unet_name": "wan2.2_i2v_low_noise_14B_Q4_K_M.gguf",
+     "compute_device": "cuda:0",
+     "virtual_vram_gb": 7,
+     "donor_device": "cpu",
+     "eject_models": true
+    }
+   },
+   "10": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "9",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "11": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "8",
+      0
+     ],
+     "add_noise": "enable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "6",
+      2
+     ],
+     "start_at_step": 0,
+     "end_at_step": 10,
+     "return_with_leftover_noise": "enable"
+    }
+   },
+   "12": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "10",
+      0
+     ],
+     "add_noise": "disable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "11",
+      0
+     ],
+     "start_at_step": 10,
+     "end_at_step": 10000,
+     "return_with_leftover_noise": "disable"
+    }
+   },
+   "13": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+     "samples": [
+      "12",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "tile_size": 256,
+     "overlap": 64,
+     "temporal_size": 32,
+     "temporal_overlap": 8
+    }
+   },
+   "14": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+     "images": [
+      "19",
+      0
+     ],
+     "frame_rate": 16,
+     "loop_count": 0,
+     "filename_prefix": "render_wan",
+     "format": "video/h264-mp4",
+     "pingpong": false,
+     "save_output": true
+    }
+   },
+   "17": {
+    "class_type": "UpscaleModelLoader",
+    "inputs": {
+     "model_name": "u.pth"
+    }
+   },
+   "18": {
+    "class_type": "ImageUpscaleWithModel",
+    "inputs": {
+     "upscale_model": [
+      "17",
+      0
+     ],
+     "image": [
+      "13",
+      0
+     ]
+    }
+   },
+   "19": {
+    "class_type": "ImageScale",
+    "inputs": {
+     "image": [
+      "18",
+      0
+     ],
+     "width": 1920,
+     "height": 1080,
+     "upscale_method": "bicubic",
+     "crop": "disabled"
+    }
+   }
+  }
+ },
+ "fp8 experts through the forced DisTorch2 wrapper": {
+  "args": {
+   "imagePath": "s.png",
+   "prompt": "a drive-by of a sports car",
+   "seed": 7,
+   "width": 720,
+   "height": 1280,
+   "length": 81,
+   "highUnet": "high_fp8.safetensors",
+   "lowUnet": "low_fp8.safetensors",
+   "loader": "gguf-distorch"
+  },
+  "graph": {
+   "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+     "image": "s.png"
+    }
+   },
+   "2": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "wan_2.1_vae.safetensors"
+    }
+   },
+   "3": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "type": "wan"
+    }
+   },
+   "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "a drive-by of a sports car"
+    }
+   },
+   "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+    }
+   },
+   "6": {
+    "class_type": "WanImageToVideo",
+    "inputs": {
+     "positive": [
+      "4",
+      0
+     ],
+     "negative": [
+      "5",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "width": 720,
+     "height": 1280,
+     "length": 81,
+     "batch_size": 1,
+     "start_image": [
+      "1",
+      0
+     ]
+    }
+   },
+   "7": {
+    "class_type": "UNETLoaderDisTorch2MultiGPU",
+    "inputs": {
+     "unet_name": "high_fp8.safetensors",
+     "weight_dtype": "default",
+     "compute_device": "cuda:0",
+     "virtual_vram_gb": 7,
+     "donor_device": "cpu",
+     "eject_models": true
+    }
+   },
+   "8": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "7",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "9": {
+    "class_type": "UNETLoaderDisTorch2MultiGPU",
+    "inputs": {
+     "unet_name": "low_fp8.safetensors",
+     "weight_dtype": "default",
+     "compute_device": "cuda:0",
+     "virtual_vram_gb": 7,
+     "donor_device": "cpu",
+     "eject_models": true
+    }
+   },
+   "10": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "9",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "11": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "8",
+      0
+     ],
+     "add_noise": "enable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "6",
+      2
+     ],
+     "start_at_step": 0,
+     "end_at_step": 10,
+     "return_with_leftover_noise": "enable"
+    }
+   },
+   "12": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "10",
+      0
+     ],
+     "add_noise": "disable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "11",
+      0
+     ],
+     "start_at_step": 10,
+     "end_at_step": 10000,
+     "return_with_leftover_noise": "disable"
+    }
+   },
+   "13": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+     "samples": [
+      "12",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "tile_size": 256,
+     "overlap": 64,
+     "temporal_size": 32,
+     "temporal_overlap": 8
+    }
+   },
+   "14": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+     "images": [
+      "13",
+      0
+     ],
+     "frame_rate": 16,
+     "loop_count": 0,
+     "filename_prefix": "render_wan",
+     "format": "video/h264-mp4",
+     "pingpong": false,
+     "save_output": true
+    }
+   }
+  }
+ },
+ "one fp8 and one gguf expert, auto loader": {
+  "args": {
+   "imagePath": "s.png",
+   "prompt": "a drive-by of a sports car",
+   "seed": 7,
+   "width": 720,
+   "height": 1280,
+   "length": 81,
+   "highUnet": "high_fp8.safetensors",
+   "lowUnet": "low_Q4.gguf"
+  },
+  "graph": {
+   "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+     "image": "s.png"
+    }
+   },
+   "2": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "wan_2.1_vae.safetensors"
+    }
+   },
+   "3": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "type": "wan"
+    }
+   },
+   "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "a drive-by of a sports car"
+    }
+   },
+   "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+    }
+   },
+   "6": {
+    "class_type": "WanImageToVideo",
+    "inputs": {
+     "positive": [
+      "4",
+      0
+     ],
+     "negative": [
+      "5",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "width": 720,
+     "height": 1280,
+     "length": 81,
+     "batch_size": 1,
+     "start_image": [
+      "1",
+      0
+     ]
+    }
+   },
+   "7": {
+    "class_type": "UNETLoader",
+    "inputs": {
+     "unet_name": "high_fp8.safetensors",
+     "weight_dtype": "default"
+    }
+   },
+   "8": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "7",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "9": {
+    "class_type": "UnetLoaderGGUFDisTorch2MultiGPU",
+    "inputs": {
+     "unet_name": "low_Q4.gguf",
+     "compute_device": "cuda:0",
+     "virtual_vram_gb": 7,
+     "donor_device": "cpu",
+     "eject_models": true
+    }
+   },
+   "10": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "9",
+      0
+     ],
+     "shift": 5
+    }
+   },
+   "11": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "8",
+      0
+     ],
+     "add_noise": "enable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "6",
+      2
+     ],
+     "start_at_step": 0,
+     "end_at_step": 10,
+     "return_with_leftover_noise": "enable"
+    }
+   },
+   "12": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "10",
+      0
+     ],
+     "add_noise": "disable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "11",
+      0
+     ],
+     "start_at_step": 10,
+     "end_at_step": 10000,
+     "return_with_leftover_noise": "disable"
+    }
+   },
+   "13": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+     "samples": [
+      "12",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "tile_size": 256,
+     "overlap": 64,
+     "temporal_size": 32,
+     "temporal_overlap": 8
+    }
+   },
+   "14": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+     "images": [
+      "13",
+      0
+     ],
+     "frame_rate": 16,
+     "loop_count": 0,
+     "filename_prefix": "render_wan",
+     "format": "video/h264-mp4",
+     "pingpong": false,
+     "save_output": true
+    }
+   }
+  }
+ },
+ "a short clip with a negative prompt, steps, cfg, boundary and shift": {
+  "args": {
+   "imagePath": "s.png",
+   "prompt": "a drive-by of a sports car",
+   "seed": 7,
+   "width": 480,
+   "height": 848,
+   "length": 49,
+   "negative": "blurry",
+   "steps": 20,
+   "cfg": 3.5,
+   "boundaryStep": 3,
+   "shift": 8,
+   "virtualVramGb": 12
+  },
+  "graph": {
+   "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+     "image": "s.png"
+    }
+   },
+   "2": {
+    "class_type": "VAELoader",
+    "inputs": {
+     "vae_name": "wan_2.1_vae.safetensors"
+    }
+   },
+   "3": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+     "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+     "type": "wan"
+    }
+   },
+   "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "a drive-by of a sports car"
+    }
+   },
+   "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+     "clip": [
+      "3",
+      0
+     ],
+     "text": "blurry"
+    }
+   },
+   "6": {
+    "class_type": "WanImageToVideo",
+    "inputs": {
+     "positive": [
+      "4",
+      0
+     ],
+     "negative": [
+      "5",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "width": 480,
+     "height": 848,
+     "length": 49,
+     "batch_size": 1,
+     "start_image": [
+      "1",
+      0
+     ]
+    }
+   },
+   "7": {
+    "class_type": "UnetLoaderGGUFDisTorch2MultiGPU",
+    "inputs": {
+     "unet_name": "wan2.2_i2v_high_noise_14B_Q4_K_S.gguf",
+     "compute_device": "cuda:0",
+     "virtual_vram_gb": 12,
+     "donor_device": "cpu",
+     "eject_models": true
+    }
+   },
+   "8": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "7",
+      0
+     ],
+     "shift": 8
+    }
+   },
+   "9": {
+    "class_type": "UnetLoaderGGUFDisTorch2MultiGPU",
+    "inputs": {
+     "unet_name": "wan2.2_i2v_low_noise_14B_Q4_K_M.gguf",
+     "compute_device": "cuda:0",
+     "virtual_vram_gb": 12,
+     "donor_device": "cpu",
+     "eject_models": true
+    }
+   },
+   "10": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+     "model": [
+      "9",
+      0
+     ],
+     "shift": 8
+    }
+   },
+   "11": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "8",
+      0
+     ],
+     "add_noise": "enable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "6",
+      2
+     ],
+     "start_at_step": 0,
+     "end_at_step": 3,
+     "return_with_leftover_noise": "enable"
+    }
+   },
+   "12": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+     "model": [
+      "10",
+      0
+     ],
+     "add_noise": "disable",
+     "noise_seed": 7,
+     "steps": 20,
+     "cfg": 3.5,
+     "sampler_name": "euler",
+     "scheduler": "simple",
+     "positive": [
+      "6",
+      0
+     ],
+     "negative": [
+      "6",
+      1
+     ],
+     "latent_image": [
+      "11",
+      0
+     ],
+     "start_at_step": 3,
+     "end_at_step": 10000,
+     "return_with_leftover_noise": "disable"
+    }
+   },
+   "13": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+     "samples": [
+      "12",
+      0
+     ],
+     "vae": [
+      "2",
+      0
+     ],
+     "tile_size": 256,
+     "overlap": 64,
+     "temporal_size": 32,
+     "temporal_overlap": 8
+    }
+   },
+   "14": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+     "images": [
+      "13",
+      0
+     ],
+     "frame_rate": 16,
+     "loop_count": 0,
+     "filename_prefix": "render_wan",
+     "format": "video/h264-mp4",
+     "pingpong": false,
+     "save_output": true
+    }
+   }
+  }
+ }
+}

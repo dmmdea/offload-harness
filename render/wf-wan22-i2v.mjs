@@ -39,6 +39,17 @@
 //   --cache-none, so a failed decode is a failed render. Only THIS graph reads it: LTX 2.5 and Hunyuan 1.5
 //   decode through other VAEs nobody measured and keep VAEDecodeTiled.
 
+// PLACEMENT (placement; helper flag --wan-placement, render/wan-multicard.mjs):
+//   • single (default): today's graph, byte for byte, one render card.
+//   • multicard: the card-only placement on TWO cards and no host RAM, measured on two 16 GB cards at 720x1280x81. The text
+//     encoder and the VAE load on cuda:0 (the storage card; the text encoder on cuda:1 kills the ComfyUI process); each
+//     expert loads through the DisTorch2 loader with its compute on cuda:1 and the allocation "cuda:1,<resident>gb;cuda:0,*",
+//     so <resident> GiB of it stays on the compute card and the rest sits on the storage card and streams over block by block.
+//     --wan-loader is not read (the placement IS the loader), a GGUF expert and --fast are refused (neither was measured).
+//     With the plain decode a node (OffloadFreeForDecode, render/comfyui-ext) sits between the last sampler and the VAEDecode:
+//     it saves the sampled latent, frees both cards of the experts and checks the decode card, because a plain decode needs
+//     about 10 GiB the experts hold. Which decode node is built is still the decode mode's call (chooseWanDecode).
+
 // Official Wan training-time negative (Wan-Video/Wan2.2 wan/configs/shared_config.py,
 // sample_neg_prompt — the model is tuned against it; works with English positives).
 export const WAN_OFFICIAL_NEGATIVE = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走";
@@ -50,6 +61,18 @@ export const WAN_DECODE_DEFAULT = "tiled";
 // report ~15.9 GiB); a card under 12 GiB was not measured and keeps the tiled decode. A nominal 12 GB card
 // sits on the cut and was never read, so which side it lands on is not claimed: pin plain or tiled there.
 export const WAN_PLAIN_DECODE_MIN_VRAM_BYTES = 12 * 1024 ** 3;
+
+export const WAN_PLACEMENTS = Object.freeze(["single", "multicard"]);
+// single is today's graph; multicard is the card-only placement and needs the two cards of a lease (render/wan-multicard.mjs).
+export const WAN_PLACEMENT_DEFAULT = "single";
+// GiB of each expert that stays on the compute card in the multicard placement: the measured split on two 16 GB cards at the
+// film's geometry (compute card 15.18 GiB, storage card 10.86 GiB at the peak of the film-size run). More resident weight is faster and
+// leaves the activations less room (12.2 GiB beyond the resident share at 720x1280x81), so it is a per-card figure and a flag
+// (--wan-resident-gb), not a law.
+export const WAN_RESIDENT_GB_DEFAULT = 3;
+// ComfyUI numbers the two cards in the order of CUDA_VISIBLE_DEVICES, which the runner sets storage first.
+export const WAN_STORAGE_DEVICE = "cuda:0";
+export const WAN_COMPUTE_DEVICE = "cuda:1";
 
 const gib = (bytes) => (bytes / 1024 ** 3).toFixed(1);
 
@@ -102,6 +125,10 @@ export function buildWan22I2V({
   // vramTotalBytes is the render card's total VRAM, which only "auto" reads; left undefined (a caller
   // that never looked at the card, preflight-graph.mjs) auto builds the tiled decode, as before.
   decode = WAN_DECODE_DEFAULT, vramTotalBytes,
+  // placement (helper flag --wan-placement): "single" (default, today's graph) | "multicard" (the card-only placement on two
+  // cards, see the PLACEMENT note in the header). residentGb is the multicard share of each expert kept on the compute card.
+  // warn takes the one-line notes (stderr by default).
+  placement = WAN_PLACEMENT_DEFAULT, residentGb = WAN_RESIDENT_GB_DEFAULT, warn = (line) => console.error(line),
 } = {}) {
   if (!imagePath) throw new Error("buildWan22I2V: imagePath is required");
   if (!prompt) throw new Error("buildWan22I2V: prompt is required");
@@ -109,8 +136,28 @@ export function buildWan22I2V({
     throw new Error(`buildWan22I2V: loader must be auto|native|gguf-distorch, got ${JSON.stringify(loader)}`);
   }
   const decodeNode = chooseWanDecode(decode, vramTotalBytes).node; // also refuses an unknown decode
+  if (!WAN_PLACEMENTS.includes(placement)) {
+    throw new Error(`buildWan22I2V: placement must be ${WAN_PLACEMENTS.join("|")}, got ${JSON.stringify(placement)}`);
+  }
+  const multicard = placement === "multicard";
   void hero; // accepted, ignored: the native path is the default
   const useLora = !!fast;
+  if (multicard) {
+    // Only what was measured is built: the fp8 safetensors experts on the native recipe. A GGUF expert fits one card, and the
+    // distill LoRAs were never run through the DisTorch2 split, so neither is guessed at.
+    if (useLora) throw new Error('buildWan22I2V: placement:"multicard" was measured on the native recipe only; drop fast (or use placement:"single")');
+    for (const unet of [highUnet, lowUnet]) {
+      if (/\.gguf$/i.test(unet)) {
+        throw new Error(`buildWan22I2V: placement:"multicard" was measured with the fp8 safetensors experts, and ${unet} is a GGUF file (it fits one card: use placement:"single")`);
+      }
+    }
+    if (!Number.isFinite(residentGb) || residentGb < 0) {
+      throw new Error(`buildWan22I2V: residentGb must be a number of GiB, 0 or more, got ${JSON.stringify(residentGb)}`);
+    }
+    if (loader === "native") {
+      warn('buildWan22I2V: placement:"multicard" loads the experts through DisTorch2, so loader:"native" is not used');
+    }
+  }
   if (!negative) negative = WAN_OFFICIAL_NEGATIVE;
   // Mode defaults (0 = unset; explicit caller values always win):
   //   native: 20 steps, cfg 3.5 both experts.
@@ -132,7 +179,13 @@ export function buildWan22I2V({
   // MultiGPU dependency. ComfyUI's own dynamic-VRAM streaming (comfy_dynamic_vram
   // on the launch profile, not a graph input) does the RAM/VRAM offload instead.
   const native = (unet) => ({ class_type: "UNETLoader", inputs: { unet_name: unet, weight_dtype: "default" } });
+  // multicard: the DisTorch2 loader with compute on the compute card and the allocation string that keeps `residentGb` GiB of the
+  // expert there and the rest ("*") on the storage card. virtual_vram_gb 0 and donor "cpu" are inputs the loader requires and does
+  // not use here (the string names only cards: measured, no host growth); eject_models false as measured.
+  const allocation = multicard ? `${WAN_COMPUTE_DEVICE},${Number(residentGb.toFixed(2))}gb;${WAN_STORAGE_DEVICE},*` : "";
+  const multicardLoader = (unet) => ({ class_type: "UNETLoaderDisTorch2MultiGPU", inputs: { unet_name: unet, weight_dtype: "default", compute_device: WAN_COMPUTE_DEVICE, virtual_vram_gb: 0.0, donor_device: "cpu", expert_mode_allocations: allocation, eject_models: false } });
   const loaderFor = (unet) => {
+    if (multicard) return multicardLoader(unet);
     const isGguf = /\.gguf$/i.test(unet);
     if (loader === "native") {
       if (isGguf) {
@@ -147,8 +200,8 @@ export function buildWan22I2V({
 
   const g = {
     "1": { class_type: "LoadImage", inputs: { image: imagePath } },
-    "2": { class_type: "VAELoader", inputs: { vae_name: vae } },
-    "3": { class_type: "CLIPLoader", inputs: { clip_name: textEncoder, type: "wan" } },
+    "2": multicard ? { class_type: "VAELoaderMultiGPU", inputs: { vae_name: vae, device: WAN_STORAGE_DEVICE } } : { class_type: "VAELoader", inputs: { vae_name: vae } },
+    "3": multicard ? { class_type: "CLIPLoaderMultiGPU", inputs: { clip_name: textEncoder, type: "wan", device: WAN_STORAGE_DEVICE } } : { class_type: "CLIPLoader", inputs: { clip_name: textEncoder, type: "wan" } },
     "4": { class_type: "CLIPTextEncode", inputs: { clip: ["3", 0], text: prompt } },
     "5": { class_type: "CLIPTextEncode", inputs: { clip: ["3", 0], text: negative } },
     "6": { class_type: "WanImageToVideo", inputs: { positive: ["4", 0], negative: ["5", 0], vae: ["2", 0], width, height, length, batch_size: 1, start_image: ["1", 0] } },
@@ -164,6 +217,13 @@ export function buildWan22I2V({
       ? { class_type: "VAEDecode", inputs: { samples: ["12", 0], vae: ["2", 0] } }
       : { class_type: "VAEDecodeTiled", inputs: { samples: ["12", 0], vae: ["2", 0], tile_size: 256, overlap: 64, temporal_size: 32, temporal_overlap: 8 } },
   };
+  if (multicard && decodeNode === "VAEDecode") {
+    // The plain decode needs about 10 GiB the experts hold until their last reference is gone. This pass-through node saves the
+    // sampled latent (an 80-minute sample is never worth losing to a failed decode), frees both cards, and stops the run with
+    // the numbers when the decode card still cannot hold the decode. Id 21: 15-20 belong to the LoRA, upscale and other branches.
+    g["21"] = { class_type: "OffloadFreeForDecode", inputs: { samples: ["12", 0], vae: ["2", 0], save_prefix: "latents/render_wan" } };
+    g["13"].inputs.samples = ["21", 0];
+  }
   if (useLora) {
     g["15"] = { class_type: "LoraLoaderModelOnly", inputs: { model: ["7", 0], lora_name: highLora, strength_model: highLoraStrength } };
     g["16"] = { class_type: "LoraLoaderModelOnly", inputs: { model: ["9", 0], lora_name: lowLora, strength_model: lowLoraStrength } };

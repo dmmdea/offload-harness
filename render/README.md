@@ -100,6 +100,13 @@ node render/comfy-video.mjs <out.mp4> <still.png> "<prompt>" \
      # another one before its first job; the end-of-run /free is awaited and loud (COMFY-FREE-WARN).
 node render/comfy-video.mjs out.mp4 still.png "<prompt>" --model wan --frames 49   # secondary
 node render/comfy-video.mjs out.mp4 still.png "<prompt>" --wan-decode plain       # wan: tiled (default) | plain | auto
+node render/comfy-video.mjs out.mp4 still.png "<prompt>" --high-unet <fp8 high> --low-unet <fp8 low> \
+     --wan-decode plain --wan-placement multicard    # wan on the TWO non-display cards of a lease, no host RAM
+     # run it under `local-offload gpu reserve --devices <a>,<b> --class media --ram 0 -- ...`, flags spelled `--flag value` (not `--flag=value`);
+     # [--api http://127.0.0.1:<own port>] [--wan-resident-gb 3 (3.2 at most at film size; a clip bigger than the film's was not measured, and the planner says so: WAN-GEOMETRY-NOTE)] [--wan-cards <a>,<b>, outside a lease]
+     # [--wait-sec N: 7200 by default under multicard, the 20-step film recipe measured 5136 s of runner wall]; the run watches ComfyUI's console
+     # (WAN-OOM ends the wait when its prompt worker died of an out-of-memory error); a plain decode that ComfyUI retried tiled fails
+     # the run (WAN-DECODE-FALLBACK, the clip kept as <out>.seamed.<ext>); docs/systems/media-generation.md, "Card-only Wan"
 node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyUI, no gen
 ```
 
@@ -121,6 +128,13 @@ node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyU
   the whole render after sampling. The default flips to `auto` only after a live acceptance render at that shape
   shows a decode close to the measured 38 s and no `Ran out of memory when regular VAE decoding` line in the ComfyUI log. Hunyuan 1.5 and
   LTX 2.5 are not touched by it. Detail: `docs/systems/media-generation.md`.
+- **Wan 2.2 on two cards and no host RAM, `--wan-placement multicard`** (default `single`, today's graph). The text encoder and VAE
+  load on `cuda:0`, each fp8 expert through DisTorch2 with compute on `cuda:1` and `cuda:1,3gb;cuda:0,*`; the two cards are the lease's
+  (`--wan-cards` only names them when no lease does), never a display card or one whose display state is unknown, and the runner launches its own ComfyUI on them (`--gpu-only`, a read-only safetensors
+  reader and a free-then-plain-decode node from `render/comfyui-ext`, through `--extra-model-paths-config`, nothing installed into the
+  shared ComfyUI). Under `--wan-decode plain` the experts are freed from both cards before the plain `VAEDecode`, and the sampled latent
+  is saved first. `--wan-loader` is not read, and a GGUF or unnamed expert and `--fast` are refused before anything starts (not measured). A driver script that wraps the helper is not a recognised render helper, so its lease declares the class default unless its `gpu reserve` passes `--ram 0` (the verb says so on a second line). Detail and numbers:
+  `docs/systems/media-generation.md`.
 - **`--reserve-vram 2.0`** keeps headroom for the Windows display/WDDM (too low → a decode spike
   kills the whole process with no traceback).
 - **Qwen2.5-VL fp8 text encoder CPU-offloads automatically** (~free with 64 GB RAM, saves 4–6 GB).

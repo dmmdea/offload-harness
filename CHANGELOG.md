@@ -594,6 +594,175 @@ routed call could never be placed on a node. The new real-gate test reproduces i
   Only a need above physical RAM less the headroom is refused beforehand.
   Details: `docs/systems/gpu-lease.md`, "A lease that unloads the seat is compared to the host after the unload".
 - Tests: `gpu_reserve_unload_hostram_test.go`, `gpu_hostram_await_test.go`, `internal/gpulease/hostram_await_test.go`.
+### Added — `comfy-video.mjs --wan-placement multicard`: the card-only Wan 2.2 placement on the two non-display cards of a lease, with no host RAM
+
+- **What it is.** One Wan 2.2 14B fp8 expert is 13.3 GiB and a film-size clip (720x1280x81) needs 12.2 GiB more for the sampler beyond the 3 GiB of the
+  expert kept resident (the film-size run's compute-card peak, 15.18 GiB, less those 3; the 4-step benchmark before it had read 9.7 to 11.0), so
+  the clip fits no single 16 GB card, and the single-card way out (ComfyUI's dynamic VRAM) streams the experts through host RAM and costs
+  the host the whole file. `--wan-placement multicard` spends a second card instead: `cuda:0` stores the text encoder, the VAE and the
+  donor blocks of the expert in use, `cuda:1` computes with 3 GiB of the expert resident (`--wan-resident-gb`), and each expert loads
+  through DisTorch2 with `cuda:1,3gb;cuda:0,*`. `single` stays the default and its graph, argv and launch are byte for byte what they were
+  (pinned by tests). Measured on two RTX 5060 Ti 16 GB, 2026-10-11: a 4-step benchmark of the film recipe (250 s per step, 13.3 and
+  11.1 GiB, 2.3 GiB of host growth), then the full film-size clip in one media lease with `--ram 0`, run on commit 090fbd95, the tip of this branch before
+  the second review round (that round's fixes were not re-run on the cards): 720x1280x81, 20 steps, plain decode, 250.5 s per step on both experts, runner
+  wall 5136 s (85.6 min), the plain decode 31.5 s after the free node released both cards in 1.1 s; 15.18 GiB peak on the compute card (95.3 %, with 3.0 GiB
+  of the expert resident; 14.9 steady) and 10.86 GiB on the storage card; host growth 2.33 GiB steady beyond the VRAM charge. Frame check CLEAN: the chroma
+  step into the joins 24, 48 and 72 is z 1.92, 1.17 and 0.0 where the tiled decode measures z 6 to 18, the frame differences at the joins 24 and 48 are 0.69x and
+  0.82x the clip's median, no frozen or repeated frame, the walk continuous through both joins. The
+  Qwen-Image-Edit 2511 call at the film's full preset also runs on the pair (9 GiB of the DiT resident on the compute card, 15.98 s per step, 10.5 and
+  10.6 GiB per card).
+- **The two cards are the lease's.** They come from `GPU_LEASE_DEVICES` (else the lease's record); `--wan-cards <a>,<b>` names them only
+  when no lease does, and under a lease it can only confirm them (a card the lease does not hold is refused). They are read against the
+  driver's card table and refused unless there are exactly two, neither drives a display (`display_active` or `display_attached`) and
+  the driver reports the display state of both (an unknown one is refused, never assumed screenless). The larger card computes; ComfyUI
+  numbers its cards in the order of `CUDA_VISIBLE_DEVICES`, which the runner sets from the two UUIDs storage first (of two equal cards the
+  higher UUID computes, the order the lease sorts in), and the running
+  ComfyUI's device list and the harness's node pack are checked before anything is submitted.
+- **The launch.** The runner starts its own keyed ComfyUI (`mc-<uuid heads>`) with `--gpu-only --disable-pinned-memory`, the harness's
+  node folder through `--extra-model-paths-config` and the custom-node whitelist the measurement ran with. The caller's
+  `COMFY_CARD_UUID`, `COMFY_CUDA_DEVICE` and `COMFY_DYNAMIC_VRAM` are dropped for that launch (a single-card pin and dynamic VRAM
+  contradict it), and `--wan-loader` is not read (one stderr line when `native` was asked). `ensureComfy` takes a `launch` and records
+  the pair in its launch marker, so a running ComfyUI is reused only when it is this instance on this pair in this order. Refused before
+  the lease slot, llama-swap or ComfyUI are touched: `--fast`, a GGUF or unnamed expert (`--high-unet` / `--low-unet` are required), another
+  family, a `--graph` file, a `--wan-resident-gb` that one of the two cards cannot hold at the call's geometry (3.2 GiB of an expert at most at film size, from the film-size
+  run's measured compute-card peak; the storage card must hold the rest of the expert beside the VAE), a UUID prefix that names two cards, and the placement's own flags lost to an `=` (`--wan-placement=multicard`, or `--seed=7 --wan-placement multicard`: the runner's
+  parser does not split it while the lease sizing does; write each flag as `--name value`).
+- **`render/comfyui-ext`, the harness's own ComfyUI code (the shared install is not written to).** A read-only safetensors reader
+  (`OFFLOAD_RO_LOAD=1`): stock ComfyUI maps a safetensors file copy-on-write, which Windows charges to commit in full (+13.3 GiB per
+  expert); mapped read-only it charges nothing. And `OffloadFreeForDecode`, a pass-through latent node between the last sampler and the
+  plain `VAEDecode`: it saves the sampled latent, frees both cards of the experts (with `--gpu-only` ComfyUI's own unload frees nothing; the
+  experts leave when their patchers lose their last reference), logs each card's memory, and stops the run with `OFFLOAD-DECODE-NOFIT`
+  and the numbers when the decode card cannot hold a plain decode, because ComfyUI would retry it tiled with its own temporal chunking,
+  the seam the plain decode exists to avoid. A plain decode whose console shows that retry fails the run (`WAN-DECODE-FALLBACK`, the clip kept beside the requested path).
+  `--wan-decode tiled` and `auto` keep their meaning, and a tiled decode under multicard says once where its temporal tiles meet (frames 24, 48 and 72 at the film's size). The
+  runner asks for the pack's node before every run, under any decode (`WAN-PLACEMENT-PACK`), because the reader that keeps the experts out
+  of host commit lives in the same pack; a missing-node message for the harness's own pack says it failed to import, not "install it".
+- **Host RAM.** `gpu reserve --devices <a>,<b> -- node render/comfy-video.mjs ... --wan-placement multicard` declares 0 when each leased
+  card fits its own stage (`hostneed.estimateWith`, new `Facts.CardsGiB` / `LeasedCardsGiB`): the larger card, the resident share of the
+  expert (`--wan-resident-gb`, default 3) plus 12.2 GiB of film-size activations and a chosen 0.5 GiB margin for the CUDA context, the other the rest of the expert
+  plus 0.8 GiB inside its size less `--reserve-vram`; one card,
+  three, no card table, no fit, another family or no flag keep the ordinary estimate. The pipeline's media admission has no multicard door
+  yet (every typed door leases one card).
+- **Tests.** 45 new render tests (44 in `wan-multicard.test.mjs`, and `comfyui-ext.test.mjs`, which runs the 14 Python tests of the node
+  pack) and the host-RAM tests, written red first, and mutation-checked; the review round of 2026-10-11 (the entry below) found mutants that survived and closed them. The one
+  existing test that pinned `generate()`'s source takes the plan as a fourth argument. An independent review before the first run found
+  the `=` spelling, the pack check under the tiled decode, `--wan-cards` over a lease, late refusals, an unknown display state and a
+  sum-based host-RAM fit; each is fixed here. Docs: `docs/systems/media-generation.md`, "Card-only Wan".
+
+### Fixed — the card-only Wan placement, the second review round: what the merged branch got wrong or could not prove
+
+An independent review of the merged branch found sixteen things (two HIGH, six MEDIUM, eight LOW; three pairs were the same defect reported
+twice). All are fixed or answered here. Each change of behaviour was written red first; the findings that are about a missing test (the Wan-only
+guard's test, `main()` and `generate()`, the host-RAM branch that reads the card table) are pins that pass on this tree, each proved by the one-line
+mutant that makes it fail. Every fix was mutation-checked: reverted in turn it fails a test it names, the mutant parsing or compiling, the restore
+byte-identical.
+
+- **A flag spelled with `=` that swallowed the placement's own flag, in the `=` spelling (HIGH).** `--seed=7 --wan-placement=multicard` and
+  `--steps --wan-placement=multicard --wan-decode plain` reach this runner's parser (which does not split `=`) as the value of the flag before
+  them, so the placement flag was lost and the single placement ran, while the lease sizing (which does split it) declared the card-only 0 GiB: no
+  launch, no `--gpu-only`, the experts streamed through host RAM under a lease that declared none. `refuseEqualsSpelling` now matches the
+  swallowed token as `--wan-x` and as `--wan-x=...`, for all three flags.
+- **An out-of-memory wedge ComfyUI does not report (HIGH).** After an OOM inside the DisTorch2 distribution ComfyUI's node handler logs `Got an OOM,
+  unloading all loaded models`, the unload runs out of memory as well and the prompt worker thread dies; `/history` stays empty, `/system_stats` and
+  `/queue` keep answering and the lease keeps beating, so the poll waited out its whole budget with both cards leased. `pollOutputs` takes an optional
+  `watch`; the multicard run hands it a reader (`comfyLogCursor`, made before the prompt is submitted so an earlier run's lines in a kept instance's
+  log do not count) of the instance's console that matches only the two lines that mean the worker is gone, never the recoverable ones in the same
+  log (`WAN-OOM`; a console it cannot see is said once, `WAN-OOM-WATCH`).
+- **The wait budget (MEDIUM, reported twice).** The 20-step film recipe was projected at about 5,170 s (the film-size run then took 5,136 s of runner wall) and the single-card default left 4.5 percent. A
+  card-only run waits 7,200 s unless `--wait-sec` or `COMFY_WAIT_SEC` says otherwise, and says which budget it used (`WAN-WAIT-NOTE`, which names 5,170 s as the projection and 5,136 s as the measured runner wall).
+- **The resident-share guard (MEDIUM, reported twice) and the storage card (LOW).** The guard admitted 5.1 GiB at film size where the benchmark says 4 is
+  too thin, and scaled the activations linearly where the benchmark measured about twice that at mid sizes. It now holds both cards to the figures the
+  lease declares against (the film's activations, the benchmark's reserved allocator peaks as an envelope below it, the storage card's 13.4 - share + 0.8
+  GiB inside its size less `--reserve-vram`): 3.9 GiB at most at film size on the 11.0 GiB and the reserve of that round, 3.2 GiB on the film-size run's
+  12.2 GiB and the 0.5 GiB context margin of the entry below. A pair such as 24 + 8 GiB is refused before anything starts, with the share that would fit.
+  A Go test fails when the runner's and `internal/hostneed`'s figures drift apart. A UUID prefix that names two cards is refused (it resolved to the first).
+- **A plain decode that ComfyUI retried tiled (MEDIUM).** It wrote the seamed clip to the requested path and exited 0, from the tail of a log that a
+  kept instance shares with earlier runs, and read an unreadable log as "no fallback". It is now judged by this run's console: the clip is kept as
+  `<name>.seamed<ext>`, the latent is named and the run fails (`WAN-DECODE-FALLBACK`); an unreadable console says `WAN-DECODE-UNVERIFIED`.
+- **The tiled decode's seams (LOW)** were named as "frames 24 and 48"; `tiledSeamFrames` reproduces ComfyUI's tiling (24, 48 and 72 at the film's size)
+  and the note names the boundaries of the clip being made.
+- **A failed prompt's exception message (LOW)** was cut by a 500-character slice of the status; it now reaches the error whole, for every runner that
+  polls through `comfy-submit.mjs`.
+- **Equal cards (LOW)** took their roles from the order they were named in, so `--wan-cards 0,2` gave the opposite of the lease's split; the lower UUID
+  now stores, as the lease's sorted order did in the benchmark. The runtime device check also compares the model name (the display card is another
+  model of the same 16 GB class) and its docstring says what it cannot prove (two cards of one model).
+- **`--enable-dynamic-vram` in `COMFY_EXTRA_ARGS` (LOW)** re-enabled streaming beside `--gpu-only`; it is dropped from a multicard launch, and a
+  running ComfyUI whose argv turns dynamic VRAM on is not reused.
+- **Tests that could not fail (MEDIUM, LOW).** `TestTheMulticardFlagMeansNothingToAnotherFamily` used two 16 GiB cards where the Wan-only guard changes
+  nothing (it passed with the guard deleted); it now uses two 24 GiB cards. The branch of `resolveReserveHostRAMWith` that reads the card table itself
+  had no test. `main()`'s wiring and `generate()`'s post-run steps had none: `planRun` and `generate` take their calls from tables and
+  `render/wan-multicard-run.test.mjs` drives them (seven one-line mutants the reviewer found surviving are killed; the source pin of `generate()`'s order is
+  a behaviour test now). 34 new render tests (33 net: a source-text pin was replaced by a behaviour test) and 2 Go tests.
+- **Answered, not changed.** The reviewer's claim that the CHANGELOG's "every mutant fails a test" was overstated was right for the first round; that
+  sentence now points here. No live run was made in this round: everything above is proved with fakes and with the benchmark's logs, not on the
+  cards. The 20-step acceptance run is the one in the entry above, made on 090fbd95, the tip before this round (720x1280x81, 20 steps, plain decode,
+  250.5 s per step, 5136 s of runner wall, host growth 2.33 GiB, frame check CLEAN, 15.18 GiB on the compute card and 10.86 GiB on the storage card); this round's
+  changes were not re-run on the cards.
+
+### Fixed — the card-only Wan placement follows the film-size run: 12.2 GiB of activations, a 0.5 GiB context on the compute card, 3.2 GiB of share at most
+
+The independent check of the fix round found that the run's numbers contradicted the guard's. The film-size run (commit 090fbd95, the tip before the
+second review round) peaked at 15.18 GiB on the compute card with 3.0 GiB of the expert resident, so the sampler side is 12.2 GiB, not the 11.0
+(the top of the 4-step benchmark's 9.7 to 11.0, which ended at about 1000 s, before the peak at about 2485 s). The acceptance criterion follows the
+measurement, in both places that draw this line.
+
+- **The figure.** `WAN_FILM_ACTIVATIONS_GIB` in `render/wan-multicard.mjs` and `wanActivationsGiB` in `internal/hostneed` are 12.2 (a Go test pins them
+  together, and the new `WAN_COMPUTE_CONTEXT_GIB` / `wanComputeContextGiB`, 0.5, the same way `wanResidentDefaultGiB` is pinned).
+- **The compute card's margin is the CUDA context, not `--reserve-vram`.** Both the runner's resident-share guard and the lease sizing held the
+  compute card to its size less `--reserve-vram` (1.0 GiB by default), ComfyUI's model-load margin and not an activation ceiling. With 12.2 GiB
+  that refuses the measured call: 15.9 - 12.2 - 1.0 = 2.7 GiB against the runner's own default of 3 (the guard), and 3.0 + 12.2 = 15.2 > 14.9 (the
+  sizing, which would then declare the whole 33 GiB set for a call measured to run with `--ram 0`, and the host-RAM brake holds a grant that size back
+  for hours). The compute card now needs the share + 12.2 + a 0.5 GiB context margin (chosen, not measured: the 12.2 already holds a context, and only a 3.0 GiB share was ever run) to fit its size: 3.2 GiB of share at most at film size on a 15.9 GiB card,
+  and the guard and the sizing admit the same shares (a Go test draws the ceiling from the runner's constants and checks both sides of it).
+  `--reserve-vram` is the storage card's margin and nothing else; that check is unchanged (the run's 10.86 GiB sits inside the 11.2 it predicts).
+- **Red before.** The new render assertions failed with the figure at 12.2 and the old margin (the measured recipe refused, `at most 2.7 GiB`); the Go
+  tests failed with 11.0 (a 3.3 GiB share declared 0 where the runner refuses it, the mirror test saw 12.2 against 11) and, with only the constant
+  raised, with the measured call itself declared as the ordinary 33.0 GiB. Mutants, each compiling and restored byte for byte: the Go figure back to
+  11.0, the old reserve check, no context term, a 0.4 context, the compute check against the smaller card, no reserve on the storage card (red in 5, 5,
+  4, 4, 2 and 1 Go tests); the render margin back to `--reserve-vram` (red).
+- **Behaviour change to know.** A `--reserve-vram` above the default no longer shrinks the compute card's share (`--reserve-vram 2` with the default
+  share used to be refused at film size; the film-size run itself ran at the runner's default reserve of 1.0, so that a larger reserve leaves the compute card's peak where it was is assumed, not measured); it shrinks the storage card's room, as before.
+- **A clip bigger than the film's is said to be unsized.** The planner holds the sampler's activations at the film-size run's 12.2 GiB from 75,600 tokens up, because nothing
+  above the film's size was measured, while the activations are expected to grow with the tokens. It still admits such a clip (the documented intent is that a bigger clip may run), but prints `WAN-GEOMETRY-NOTE` before the resident-share
+  check: the clip's size, the film's, the figure it holds, what a proportional extrapolation gives (about 32.0 GiB at 1280x1280x121), and the advice to lower `--wan-resident-gb`
+  and to pass `--wait-sec`. Nothing is said at the film's size or under. The lease sizing reads no geometry and declares against the film's figure for any clip (its comment says
+  so). Red before: the new note test and the `WAN_FILM_TOKENS` test failed (no note, no constant); mutants, each parsing and restored byte for byte: the note never said, said only
+  after the check, said at the film's own size, an always-empty note, the extrapolation unscaled, the film's token count off by one, the `--wait-sec` advice dropped (red in 1 to 2 tests each).
+
+### Fixed — `gpu reserve` says why its declared figure is the media class default, and that `--ram` states the real one (F71)
+
+- **The defect (register F71).** A `gpu reserve` around a command the estimator does not recognise (a driver script that runs several
+  renders, a Python wrapper), around a recognised helper that runs its own `--graph`, or around a recognised helper whose weight files
+  cannot be sized, declares the media class default: the largest ComfyUI family the box binds, counted in full as if it streamed from RAM
+  (Qwen-Image 2512 on the reference box: 38.0 + 8.8 = 46.8 GiB). The declaring line said "class default" inside its parenthesis and nothing
+  else, so a caller whose weights sat on the cards (the card-only Wan placement above) could not tell that the figure was not theirs,
+  declared 46.8 GiB, and waited a queue cycle for host RAM it never used.
+- **The fix.** The declaring line is unchanged. When its figure is the class default and the operator gave no `--ram`, ONE more line
+  follows it with the reason (no command is wrapped, as in a `--detach` hold; the wrapped command is not a recognised render helper, the
+  helpers named from the table that recognises them; a recognised helper runs its own `--graph`; or a recognised helper's weight files
+  could not be sized) and the way out: `--ram <GiB>` states the real figure, `--ram 0` when the weights sit on the cards. No line when the
+  operator gave `--ram` (0 included), when the figure was estimated from the helper's own files, for a text lease, or on a box whose class
+  default is 0. The line never contains the word the declaring line is grepped by, and no figure, lease record or queue behaviour changes.
+  `internal/hostneed` gains `RenderHelpers` and `RenderCall.RunsOwnGraph`, the two answers the line reads (`Estimate` asks the same
+  function about `--graph`, so the line and the estimate cannot disagree).
+- **Tests.** `gpu_hostram_hint_test.go` (seven: the four reasons, the cases that print nothing more, the invariant that the hint changes
+  no figure, and one through `runGPUReserve` on stderr) and `internal/hostneed/helpers_test.go` (two), written first. Red before: the five
+  that pin the line failed on the tree without the fix, each with "want the declaring line and exactly one line of why, got 1 line(s)"; the
+  other two hold before the change and guard it. Mutation-checked: fourteen changes (ten to the line and its guards, four to the two
+  hostneed answers), each reverted in turn fails a test it names. Docs: `docs/systems/gpu-lease.md` ("Host RAM"),
+  `docs/systems/media-generation.md` ("Card-only Wan") and `render/README.md`.
+
+### Added — the single placement of the Wan graph is pinned to the graph the builder made before placements existed (no product change)
+
+- **Why.** The merged `wan-multicard.test.mjs` compares `placement: "single"` with the default placement, which shows the two agree with
+  each other and not with what was built before: with the single graph's stock `VAELoader` replaced by the multi-GPU loader, every test of
+  the four files that cover the builder and the scratch scan still passed. A differential run of the base builder against the merged one over
+  103 argument sets (309 builder comparisons, 24 decode-chooser cases and the exported constants) found no difference.
+- **The pin.** `render/wan-single-golden.test.mjs` builds nine graphs (GGUF and fp8 experts; the auto, native and forced DisTorch2 loaders;
+  tiled, plain and auto decode; fast; an upscale; a short clip with a negative prompt, steps, cfg, boundary and shift) with no placement
+  argument, with `placement: "single"` and with a `residentGb` the single placement must ignore, and requires the graph held in
+  `render/testdata/wan22-single-graphs.json` (made by the builder as it stood at the 0.181.0 release tip) and no warning. The VAE and
+  text-encoder loaders swapped for their multi-GPU twins in the single graph each fail all nine of its graphs (the VAE one passed the old tests).
 
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 

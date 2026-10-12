@@ -407,6 +407,31 @@ test("pollOutputs: an exec-error status throws with the unified prefix and fires
   assert.ok(hooked, "onExecError must run before the throw");
 });
 
+test("pollOutputs: ComfyUI's own exception message reaches the error whole, even when the status is long enough for the 500-character cut to lose it", async () => {
+  const c = clock();
+  const message = "OFFLOAD-DECODE-NOFIT: cuda:0 has 6.1 GiB free and the plain decode needs 10.0 GiB; the sampled latent is saved as latents/wan_00001_.latent";
+  const status = {
+    status_str: "error", completed: false,
+    messages: [
+      ["execution_start", { prompt_id: "p1", timestamp: 1 }],
+      ["execution_cached", { nodes: [], prompt_id: "p1", timestamp: 2 }],
+      ["execution_error", {
+        prompt_id: "p1", node_id: "21", node_type: "OffloadFreeForDecode", executed: Array.from({ length: 20 }, (_, i) => String(i + 1)),
+        exception_message: message, exception_type: "RuntimeError", traceback: ["  File \"execution.py\", line 1, in execute\n"], current_inputs: {}, current_outputs: {},
+      }],
+    ],
+  };
+  assert.ok(!JSON.stringify(status).slice(0, 500).includes("latents/wan_00001_.latent"), "premise: the cut lands before the message");
+  const fetchImpl = async () => entry({ p1: { outputs: {}, status } });
+  const err = await pollOutputs({ api: "http://x", promptId: "p1", waitSec: 60, isDone: () => false, fetchImpl, sleep: c.sleep, now: c.now, env: {} }).then(() => null, (e) => e);
+  assert.match(err.message, /^ComfyUI exec error: \{"status_str":"error"/, "the unified prefix is what it was");
+  assert.ok(err.message.includes(message), err.message);
+  assert.match(err.message, /OffloadFreeForDecode.*RuntimeError/s, "and it says which node raised what");
+  // a status that is short enough to show whole says nothing twice
+  const short = await pollOutputs({ api: "http://x", promptId: "p1", waitSec: 60, isDone: () => false, fetchImpl: async () => entry({ p1: { outputs: {}, status: { status_str: "error", messages: [["execution_error", { exception_message: "boom", node_type: "N", exception_type: "E" }]] } } }), sleep: c.sleep, now: c.now, env: {} }).then(() => null, (e) => e);
+  assert.equal(short.message.split("boom").length - 1, 1, short.message);
+});
+
 test("pollOutputs: budget exhaustion throws the caller's message", async () => {
   const c = clock();
   const fetchImpl = async () => entry({});
@@ -785,4 +810,56 @@ test("pollOutputs: an error status whose BODY read fails still counts as an answ
     fetchImpl, sleep: c.sleep, now: c.now, env: { COMFY_DEAD_SEC: "10" },
   });
   assert.equal(h.outputs[9].images[0].filename, "ok.png");
+});
+
+// ---------------------------------------------------------------------------------------
+// pollOutputs: the watch hook (a wedge the server does not report)
+// ---------------------------------------------------------------------------------------
+// A ComfyUI whose prompt worker died after an out-of-memory error keeps answering HTTP: /history lists nothing, /system_stats is healthy, /queue
+// still shows the prompt, and the lease keeps beating. Nothing the poll asks the server can tell, so a caller that can read the server's
+// console hands the poll a `watch` that does: a message ends the wait.
+
+test("pollOutputs: a watch that reports a wedge ends the wait with a server-unusable error, and is asked no more often than every 15 s", async () => {
+  const c = clock();
+  const start = c.now();
+  const asked = [];
+  const fetchImpl = async (url) => (isStats(url) ? entry({ system: {}, devices: [] }) : entry({}));
+  const err = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 5400, isDone: () => false,
+    watch: () => { asked.push(c.now() - start); return asked.length < 4 ? null : "WAN-OOM: the worker died"; },
+    fetchImpl, sleep: c.sleep, now: c.now, env: {},
+  }).then(() => null, (e) => e);
+  assert.ok(err, "a wedged prompt must not be waited on for the whole budget");
+  assert.match(err.message, /^WAN-OOM: the worker died/);
+  assert.equal(err.serverUnusable, true, "no later job can run on a worker that is gone");
+  assert.equal(asked.length, 4);
+  for (let i = 1; i < asked.length; i++) assert.ok(asked[i] - asked[i - 1] >= 15_000, `asked ${asked[i] - asked[i - 1]} ms after the last time`);
+  assert.ok((c.now() - start) / 1000 <= 90, `ended within about a minute, spent ${(c.now() - start) / 1000} s`);
+});
+
+test("pollOutputs: a watch that throws or rejects is best-effort, never the end of the wait", async () => {
+  const c = clock();
+  let polls = 0, asked = 0;
+  const fetchImpl = async (url) => {
+    if (isStats(url)) return entry({ system: {} });
+    polls++;
+    return polls < 40 ? entry({}) : entry({ p1: { outputs: { 9: { images: [{ filename: "a.png" }] } }, status: { status_str: "success" } } });
+  };
+  const h = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 600, isDone: (e) => !!e.outputs?.[9]?.images?.[0],
+    watch: async () => { asked++; if (asked % 2) throw new Error("the log cannot be read"); return Promise.reject(new Error("nor this")); },
+    fetchImpl, sleep: c.sleep, now: c.now, env: {},
+  });
+  assert.equal(h.outputs[9].images[0].filename, "a.png");
+  assert.ok(asked >= 2, "it was asked, and the failures did not stop the wait");
+});
+
+test("pollOutputs: a prompt that ComfyUI itself reports as failed is reported with ComfyUI's own words, whatever the watch would say", async () => {
+  const c = clock();
+  const status = { status_str: "error", messages: [] };
+  const fetchImpl = async () => entry({ p1: { outputs: {}, status } });
+  await assert.rejects(
+    pollOutputs({ api: "http://x", promptId: "p1", waitSec: 60, isDone: () => false, watch: () => "WAN-OOM: would pre-empt", fetchImpl, sleep: c.sleep, now: c.now, env: {} }),
+    /^Error: ComfyUI exec error: /,
+  );
 });

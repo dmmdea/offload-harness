@@ -25,7 +25,9 @@
 // WHAT IT DOES NOT CATCH: a prompt that sits in ComfyUI's running queue with a wedged sampler while HTTP
 // keeps answering and /system_stats stays healthy. ComfyUI offers no polled step counter (its progress
 // events are websocket-only and this tree is dependency-free), so that case is bounded by the poll
-// budget (COMFY_WAIT_SEC) and the lease's maximum total, not by a stall verdict.
+// budget (COMFY_WAIT_SEC) and the lease's maximum total, not by a stall verdict. (The one wedge that is known to
+// leave a ComfyUI in that state, a prompt worker killed by an out-of-memory error, is caught on the card-only Wan
+// run by a watch on the instance's console: pollOutputs' `watch`, wan-multicard.mjs createOomWatch.)
 //
 // The beat is appended, never written over: the file may be a log the caller keeps for its own purposes
 // (--progress-file /abs/work/log.jsonl), and the lease reads only its modification time and the last
