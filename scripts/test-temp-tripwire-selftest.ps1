@@ -137,6 +137,10 @@ try {
         Run @('-Dir', $root, '-Module', $root)
         Expect 'no go.mod in -Module: exit' $script:Rc 64
         Expect 'usage errors print no verdict' (Verdict-Of) ''
+        Run @('-Help')
+        Expect '-Help: exit' $script:Rc 0
+        Expect-Has '-Help: prints the header' $script:Out 'What it cannot see'
+        if ($script:Out.Contains('Get-FailureDigest')) { Bad '-Help: prints comments from further down the file' } else { Ok '-Help: stops at the end of the header' }
     }
 
     # --- the system drive is refused, and nothing is created

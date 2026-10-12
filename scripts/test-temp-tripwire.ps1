@@ -113,7 +113,9 @@ function Get-Prefix([string]$Name) {
 }
 
 if ($Help) {
-    Get-Content -LiteralPath $PSCommandPath | Where-Object { $_ -match '^#' } | ForEach-Object { $_ -replace '^# ?', '' }
+    # the header: the comment block that opens the file, not the comments further down
+    $header = @(Get-Content -LiteralPath $PSCommandPath)
+    for ($i = 0; $i -lt $header.Count -and $header[$i] -match '^#'; $i++) { $header[$i] -replace '^# ?', '' }
     exit 0
 }
 if ($PSBoundParameters.ContainsKey('NamePrefix')) {
