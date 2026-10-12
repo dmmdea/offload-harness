@@ -562,16 +562,60 @@ hold, and an unpinned CUDA job runs on the fastest-first card, which on the refe
 allocator refuses to hand out) while the held cards sit idle. So when the cards were **named** (`--devices`) or **allocated**
 (`--cards`), the wrapper also gives the command `CUDA_VISIBLE_DEVICES=<driver UUIDs of the held cards>` and
 `CUDA_DEVICE_ORDER=PCI_BUS_ID`, which pins reliably (plan P13 spike). It does **not** when the lease is the whole node, or when
-the set was derived from the command's own pin. A command that pins itself keeps its pin when the pin is the program's own
-(`--cuda-device` on its command line, `COMFY_CUDA_DEVICE`, which ComfyUI turns into `CUDA_VISIBLE_DEVICES` itself, so an
-override would be futile): the wrapper warns on stderr when that pin falls outside the held cards or cannot be resolved. A
-`CUDA_VISIBLE_DEVICES` the command merely **inherits** from the operator's shell is replaced with the held cards when it
+the set was derived from the command's own pin. A command that pins itself with a variable of the program's own
+(`COMFY_CUDA_DEVICE` or `COMFY_CARD_UUID`, which the render layer turns into the card ComfyUI runs on, and ComfyUI resets
+`CUDA_VISIBLE_DEVICES` from it, so setting that variable would be futile) is **re-pinned**: when its pin falls outside the held
+cards or cannot be resolved, the wrapper rewrites that same variable to the held card, says so on one line, and starts the
+command ("A pin outside the lease is moved, never refused", below). The program's argv (`--cuda-device` on its command line, or
+one in `COMFY_EXTRA_ARGS`) is not rewritten; the wrapper warns on stderr when such a pin falls outside the held cards or cannot
+be resolved. A `CUDA_VISIBLE_DEVICES` the command merely **inherits** from the operator's shell is replaced with the held cards when it
 reaches outside them or cannot be resolved (and the wrapper says so); one inside the held cards is tighter than the lease and
 is left alone (`TestConfineWrappedRules`, `TestGPUReserveDevicesPinsTheChildToTheHeldCards`,
 `TestGPUReserveReplacesAnInheritedPinThatReachesOutsideTheLease`). Two limits remain: a program that sets its own
 pin after it starts is not confined (ComfyUI's `--cuda-device` overwrites `CUDA_VISIBLE_DEVICES`; one instance per card is
-plan P13), and `GPU_LEASE_DEVICES` is for a command that wants to read the set itself. `--drain` and `--unload-seat` take
+plan P13; a launcher that picks its card inside the child, for instance a film recipe whose own code defaults
+`COMFY_CUDA_DEVICE` to a fixed index, is invisible to the wrapper and stays what `gpu status` flags as a possible
+device-trespass, F34), and `GPU_LEASE_DEVICES` is for a command that wants to read the set itself. `--drain` and `--unload-seat` take
 the cards the lease holds and leave the seats on the others (plan P5, below).
+
+**A pin outside the lease is moved, never refused (GPU-F9, 0.183.0).** A reserved lease (`--devices` or `--cards`) names the card the job runs on. A command that carries a card pin of its own
+that points elsewhere used to start with a stderr warning and run on the other card. Refusing it (an earlier design) turned a
+card the operator named into a failed job; the rule is the one the house applies everywhere else, a busy or wrong card is
+a place to move to, never a refusal. The wrapper therefore **rewrites the program's own variable to the held card**, prints
+one line naming the old pin, the new pin and the lease, starts the command, and never exits non-zero because of a pin.
+
+| the command carries | outside the held cards, or cannot be resolved | inside the held cards |
+|---|---|---|
+| `COMFY_CUDA_DEVICE=<index list>` | the variable becomes the held card's **ComfyUI device index** from the card table (`gpu_comfy_order`), never the nvidia-smi index the lease is keyed by; the launch stays an unkeyed one | untouched, nothing said |
+| `COMFY_CARD_UUID=<uuid>` | the variable becomes the held card's **driver uuid**; no index is written beside it | untouched; the lease still pins the rest of the command as before |
+| `--cuda-device N` on the command line, or in `COMFY_EXTRA_ARGS` | **not rewritten** (the program's own argv): the stderr warning stays, and an environment pin beside an argv one is not moved either, because the program obeys its argv | untouched |
+
+Rules, each pinned by a test (`gpu_reserve_repin_test.go`, `internal/gpulease/repin_test.go`):
+
+- **The kind of pin is kept.** The render layer refuses an index beside a card uuid (`COMFY-INSTANCE-CONFLICT`), and a uuid turns
+  an unkeyed launch into a keyed per-card instance with its own port and directories. An index pin becomes an index, a uuid
+  pin a uuid.
+- **No guess.** When the held card's device index is not known (`gpu_comfy_order` is not declared and the box has several
+  cards) an index pin is **not** rewritten and the old warning stays, with the reason added (`[not re-pinned: ...]`). Switching
+  an index pin to a uuid to get around that would start a different instance on another port, which is not a move toward the
+  leased card but a change of launch. A uuid pin needs no order and is always moved.
+- **The order is the child's.** A device index is counted in ComfyUI's fastest-first order unless the child's environment says
+  `CUDA_DEVICE_ORDER=PCI_BUS_ID` (the command's own, or the one the wrapper sets when it replaces an inherited
+  `CUDA_VISIBLE_DEVICES`), which makes it nvidia-smi's. The pin is judged and rewritten in the order the child will read it.
+- **k cards under n >= k.** A pin of k cards under a lease of n >= k cards maps to the first k held cards in the order the index
+  is counted in (ascending, as a comma list). A pin of more cards than the lease holds has no card to put the extra ones on and
+  keeps the old warning. A repeated index is one card.
+- **A program pin is judged on its own.** The shell's inherited `CUDA_VISIBLE_DEVICES` is replaced as before when it reaches
+  outside the lease, and left alone when it is inside; a `COMFY_CUDA_DEVICE` or `COMFY_CARD_UUID` beside it is judged and moved
+  independently, because the program resets `CUDA_VISIBLE_DEVICES` from its own pin.
+- **A blank value is no pin.** A uuid-bound launch blanks `COMFY_CUDA_DEVICE` on purpose; a blank index beside a uuid inside the
+  lease starts unchanged, with no index entry added.
+- **Unchanged paths.** A host with card-scoped leases off, a `--whole-node` lease and a lease derived from the command's own pin
+  never reach the re-pin: the command starts with the pin it had (`TestGPUReserveFlagOffWholeNodeAndDerivedLeasesAreByteForByte`),
+  and for every input without a program pin outside the lease the confinement is the one the wrapper computed before
+  (`TestConfineWrappedWithoutAnOutsideProgramPinIsTheOldAnswer`).
+
+There is no override flag: nothing is refused, so there is nothing to override.
 
 **The allocator.** A card is allocatable when it is not quarantined (`quarantine.<id>` sidecars, which P12 will write),
 not the display card (the card whose `display_active` reads Enabled **or** whose `display_attached` reads Yes: with the screen asleep

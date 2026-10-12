@@ -382,7 +382,10 @@ local-offload gpu reserve --class media -- <your command>
 
 On a host with card-scoped leases enabled, hold only the cards the job uses so the others keep working:
 `gpu reserve --class media --devices 2 -- <cmd>` (named cards), `--cards 2` (the allocator picks two free, non-display cards),
-or no flag at all when `<cmd>` pins itself with `CUDA_VISIBLE_DEVICES`, `--cuda-device` or `COMFY_CUDA_DEVICE`. `gpu cards`
+or no flag at all when `<cmd>` pins itself with `CUDA_VISIBLE_DEVICES`, `--cuda-device` or `COMFY_CUDA_DEVICE`. A command that carries a
+`COMFY_CUDA_DEVICE` or `COMFY_CARD_UUID` pointing at a card the lease does not hold is never refused: the wrapper rewrites that
+variable to the held card, prints one `re-pinned` line and starts the command (a `--cuda-device` on its command line is the
+program's own argv and only draws a warning). `gpu cards`
 shows each card and its holder; `gpu doctor --write-audit` is what turns the feature on for a host (see
 [GPU lease](systems/gpu-lease.md#reserving-cards-the-card-table-and-the-reader-audit-plan-p3)). Point `gpu doctor --scan` at
 every repository that carries its own copy of the harness binary, and read its "not searched" list: a green audit covers only

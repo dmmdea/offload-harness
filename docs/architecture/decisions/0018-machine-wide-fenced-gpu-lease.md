@@ -246,6 +246,14 @@ Two further facts shaped the design:
   `TestAllocatorSkipsWhenHostRamHeadroomLow`, `TestAllocatorPrefersCardWithNoResidentSeat`,
   `TestDoctorFlagsNonFormatAwareBinary`, `TestDoctorFlagsNodeReaderWithoutPerEpochFence`, `TestStatusJSONHasPerCardRows` and
   `TestPlanFlagOffHostNeitherReadsCardsNorDerivesDevices`. See [GPU lease](../../systems/gpu-lease.md).
+- **Amended 2026-10-12 (GPU-F9): a pin outside the lease is moved, never refused.** The P3 amendment above left a command's
+  own `COMFY_CUDA_DEVICE` alone and warned when it fell outside the lease, so a card the operator named was trespassed on with
+  nothing but a log line. The decision is not to refuse (a card that is not the one named is a place to move to, as everywhere
+  in this lease) but to **rewrite the program's own pin variable to the held card**: `COMFY_CUDA_DEVICE` becomes the held card's
+  ComfyUI device index from the card table, `COMFY_CARD_UUID` the held card's driver uuid, each in its own kind (the render layer
+  refuses an index beside a uuid and a uuid keys another instance). A held card whose device index is not known is not guessed;
+  the old warning stays with the reason. The program's argv (`--cuda-device`, or one in `COMFY_EXTRA_ARGS`) is not rewritten.
+  The command always starts, and no `--allow-outside-pin` exists. See [GPU lease](../../systems/gpu-lease.md).
 - **Extended 2026-10-01 (register C-87):** the memory stack is not CPU-only on every box, so "the CPU memory stack"
   in the Context table no longer describes it there: it is small and, on the three-card reference box, served on the
   utility card, and on a single-card tier it shares the render card. That row's zero still stands, because

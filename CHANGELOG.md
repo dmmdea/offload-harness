@@ -764,6 +764,32 @@ measurement, in both places that draw this line.
   `render/testdata/wan22-single-graphs.json` (made by the builder as it stood at the 0.181.0 release tip) and no warning. The VAE and
   text-encoder loaders swapped for their multi-GPU twins in the single graph each fail all nine of its graphs (the VAE one passed the old tests).
 
+### Changed — a command pinned to a card outside its lease is moved onto the leased card, never refused (GPU-F9)
+
+- **What was wrong.** `gpu reserve --devices 0 -- <cmd>` pinned the command to the held card with `CUDA_VISIBLE_DEVICES`, but a command
+  that carried a pin of its own (`COMFY_CUDA_DEVICE`, `COMFY_CARD_UUID`) was left alone and only warned about: ComfyUI and the render
+  layer turn that variable into the card they run on and reset `CUDA_VISIBLE_DEVICES` from it, so the job ran on the card it named,
+  outside the lease, and another session could be holding that card. The warning was the whole defence.
+- **The fix is a move, not a refusal.** With an explicit lease (`--devices` or `--cards`), a program pin that falls outside the held
+  cards, or cannot be resolved to a card, is rewritten to the held card and the command starts: `COMFY_CUDA_DEVICE` becomes the held
+  card's ComfyUI device index from the card table (`gpu_comfy_order`; never the nvidia-smi index the lease is keyed by),
+  `COMFY_CARD_UUID` becomes the held card's driver uuid, each in its own kind (the render layer refuses an index beside a uuid, and a
+  uuid turns an unkeyed launch into a keyed instance on another port). One stderr line names the old pin, the new pin and the lease. A
+  pin of k cards under a lease of n >= k cards maps to the first k held cards in the order the index is counted in; more cards than the
+  lease holds, a `--cuda-device` on the command line or in `COMFY_EXTRA_ARGS` (the program's own argv), and a held card whose device index
+  is unknown (no `gpu_comfy_order` on a multi-card box: no guess) keep the old warning, now with the reason. The index is read and
+  written in the order the child runs under (`CUDA_DEVICE_ORDER=PCI_BUS_ID` makes it nvidia-smi's). The pin is judged on its own beside
+  an inherited `CUDA_VISIBLE_DEVICES`. The wrapper never exits non-zero for a pin, and there is no `--allow-outside-pin`.
+  A flag-off host, a `--whole-node` lease and a lease derived from the command's own pin never reach the re-pin.
+- **Tests.** `gpu_reserve_repin_test.go` (fourteen, including the verb run in a child process: the wrapped command exits 7 and the wrapper
+  returns 7 with the command started on the held card; a frozen copy of the old `confineWrapped` is the oracle that every input without
+  an outside program pin gets the old answer) and `internal/gpulease/repin_test.go` (seven), written first. Red before: the re-pin tests
+  failed on the tree without the change with, for example, `the child must be started on the held card's ComfyUI device (1), got env ""`
+  and, through the verb, `the command must start on the held card (ComfyUI device 1), saw "2"`; the guards (pin inside the lease, argv
+  pin, the oracle, flag-off/whole-node/derived) hold before and after. Mutation-checked with `scripts/mutation-check.sh`: eleven changes,
+  each reverted in turn fails a test it names. Docs: `docs/systems/gpu-lease.md` ("A pin outside the lease is moved, never refused"),
+  `docs/OPERATOR-GUIDE.md`, ADR 0018 (amendment of 2026-10-12).
+
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)

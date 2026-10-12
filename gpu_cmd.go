@@ -788,7 +788,8 @@ func runGPUReserve(args []string) error {
 	}
 	// A lease holds cards; it does not confine the command. A reservation that named or
 	// allocated its cards pins the command to them unless the command pins itself (see
-	// confineWrapped), and the wrapper says so when a pin of its own falls outside them.
+	// confineWrapped); a pin of its own (COMFY_CUDA_DEVICE, COMFY_CARD_UUID) that falls outside them is
+	// re-pinned onto the held card and the wrapper says so, and the command always starts (GPU-F9).
 	if plan.Explicit {
 		// Read through the retry: a command's own pin (a bare index it inherited) resolves to a card only with
 		// the table, and without one the wrapper REPLACES a pin it could have confirmed. The UUID of a card
