@@ -86,10 +86,12 @@ var ErrNoDriverEventSource = errors.New("gpuactivity: no driver event source on 
 const (
 	// driverEventWindow is how far back the readers look.
 	driverEventWindow = 24 * time.Hour
-	// driverEventTimeout bounds one whole read (the child process and the bus query).
-	driverEventTimeout = 8 * time.Second
 	// driverEventTTL is how long one answer (or failure) is reused.
 	driverEventTTL = 60 * time.Second
+	// driverEventRetryTTL is how long an answer is reused whose events could not be placed because the card table was
+	// unreadable: far shorter, since that failure is likeliest at the moment of a fault (a resetting driver answers
+	// nvidia-smi late) and a minute of "not placed" would hide the very event that was looked for.
+	driverEventRetryTTL = 10 * time.Second
 	// maxWinEvents caps the Windows read (the newest this many): a storm cannot make the child's output unbounded.
 	// The reference box logged 420 id-13 "Graphics Exception" records (which name no card) beside 14 id-153 ones in
 	// 96 h, so the cap leaves room for a day of both.
@@ -100,8 +102,14 @@ const (
 	maxEventText = 200
 )
 
+// ErrCardTableUnreadable marks a read whose events could not be placed on cards because the card table (the second
+// nvidia-smi query) could not be read: the events are returned, unplaced, with this error wrapped in the reason.
+var ErrCardTableUnreadable = errors.New("the card table could not be read")
+
 // Seams, so a test reads a canned log on any OS.
 var (
+	// driverEventTimeout bounds the log read (the child process); the card-table query has its own budget.
+	driverEventTimeout = 8 * time.Second
 	driverEventsGOOS = runtime.GOOS
 	driverNow        = time.Now
 	// runChild starts one child process through internal/winexec (hidden on Windows) and returns its stdout; a

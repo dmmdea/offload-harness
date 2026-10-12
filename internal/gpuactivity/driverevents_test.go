@@ -216,7 +216,7 @@ func TestReadDriverEventsOnLinuxReadsTheKernelLogAndFallsBackToDmesg(t *testing.
 	driverSeams(t, "linux", func(n string, a []string) (string, error) {
 		names = append(names, n)
 		if n == "journalctl" {
-			if !strings.Contains(strings.Join(a, " "), "-k") || !strings.Contains(strings.Join(a, " "), "short-unix") {
+			if !strings.Contains(strings.Join(a, " "), "_TRANSPORT=kernel") || !strings.Contains(strings.Join(a, " "), "short-unix") {
 				t.Errorf("journalctl must read the kernel log with unix times: %v", a)
 			}
 			return "", errors.New("journalctl: not permitted")
@@ -224,8 +224,8 @@ func TestReadDriverEventsOnLinuxReadsTheKernelLogAndFallsBackToDmesg(t *testing.
 		return dmesgXid, nil
 	}, smiBusTable)
 	evs, err := ReadDriverEvents(context.Background())
-	if err != nil {
-		t.Fatalf("dmesg answers when journalctl cannot: %v", err)
+	if len(evs) != 1 {
+		t.Fatalf("dmesg answers when journalctl cannot: %v %+v", err, evs)
 	}
 	if strings.Join(names, ",") != "journalctl,dmesg" {
 		t.Errorf("journalctl first, dmesg on its failure, got %v", names)
@@ -276,20 +276,8 @@ func TestReadDriverEventsDropsWhatIsOutsideTheWindow(t *testing.T) {
 	}
 }
 
-// A card table that cannot be read leaves the events unplaced; the events themselves are not lost.
-func TestReadDriverEventsKeepsTheEventsWhenTheCardTableCannotBeRead(t *testing.T) {
-	driverSeams(t, "windows", func(string, []string) (string, error) { return fixtureXML(t), nil },
-		func([]string) (string, error) { return "", errors.New("nvidia-smi: not found") })
-	evs, err := ReadDriverEvents(context.Background())
-	if err != nil || len(evs) != 2 {
-		t.Fatalf("the events survive a missing card table: %+v %v", evs, err)
-	}
-	for _, e := range evs {
-		if e.UUID != "" {
-			t.Errorf("no table, no placement: %+v", e)
-		}
-	}
-}
+// (A card table that cannot be read is TestReadDriverEventsSaysWhenTheCardTableCannotBeRead, in
+// driverevents_fixround_test.go: the events survive unplaced AND the error names the table.)
 
 // 60 s: a status poll must not start PowerShell every time.
 func TestReadDriverEventsIsCachedForSixtySeconds(t *testing.T) {
