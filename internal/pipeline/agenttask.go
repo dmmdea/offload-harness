@@ -2125,7 +2125,7 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 			ferr := errors.New("re-pack " + why)
 			note(attempts, attemptLane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(ferr))
 			recordFailure(ferr, boundFor(attemptTimeout), attempts)
-			correction = source.correction()
+			correction = source.correction(core.ListsLost(delivered, schema, output), core.SchemaListSites(schema))
 			continue
 		}
 		note(attempts, attemptLane, sent, clampedFrom, gres, time.Since(attemptStart), coercedWhy)
@@ -2494,8 +2494,8 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 	// schema puts on a list rides with the fields.
 	source := newRepackSource(output)
 	system := "You extract structured data from text. Output ONLY a JSON object — no prose, no code fences. "
-	if source.obj != nil {
-		system += objectTextRule + " "
+	if rule := source.absentRule(); rule != emptyValuesRule {
+		system += rule + " "
 	}
 	system += repackTypeRule
 	notes := []string{limitsNote(schema), source.keysNote(), correction}

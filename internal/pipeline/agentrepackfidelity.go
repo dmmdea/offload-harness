@@ -26,18 +26,25 @@ import (
 //     seat learns it);
 //   - an object that comes back with every list the schema asks for empty, over a text that
 //     holds list items, is refused (core.ListsEmptied), and the next attempt is told what the
-//     refused one left out.
+//     refused one left out. It is told conditionally for a list no schema field is named for: the
+//     refusal can be a false one (an answer that lists what it checked beside a truly empty
+//     field), and a seat that obeys "write those items into the list fields" would turn it into a
+//     fabricated list published as a success.
 
 // repackSource is the text a re-pack reads, as far as its prompts and its checks care: whether it
 // is itself a JSON object, and which lists it holds.
 type repackSource struct {
 	obj map[string]any // the TEXT decoded when it is a JSON object, else nil
+	arr []any          // the TEXT decoded when it is a JSON array (and no object), else nil
 }
 
 // newRepackSource reads the final answer once per re-pack call.
 func newRepackSource(output string) repackSource {
-	obj, _ := core.AnswerObject(output)
-	return repackSource{obj: obj}
+	if obj, ok := core.AnswerObject(output); ok {
+		return repackSource{obj: obj}
+	}
+	arr, _ := core.AnswerList(output)
+	return repackSource{arr: arr}
 }
 
 // emptyValuesRule is the sentence both prompts carried before: right for a prose TEXT.
@@ -48,12 +55,19 @@ const emptyValuesRule = "Use empty values when a field is absent."
 // field absent.
 const objectTextRule = "The TEXT is itself a JSON object whose keys need not be the requested field names: take each requested field from the key whose content matches it (a list of strings from the main text of each item of the matching list), and use an empty value only for a field that no key of the TEXT holds content for."
 
+// listTextRule is the same rule for a TEXT that is a JSON array: there are no keys to match, and
+// "use empty values when a field is absent" would make every field absent.
+const listTextRule = "The TEXT is itself a JSON array, not an object with the requested field names: take each requested list field from its items (a list of strings from the main text of each item), and use an empty value only for a field that no part of the TEXT holds content for."
+
 // absentRule is the system prompt's sentence about fields the TEXT does not hold.
 func (s repackSource) absentRule() string {
-	if s.obj == nil {
-		return emptyValuesRule
+	switch {
+	case s.obj != nil:
+		return objectTextRule
+	case s.arr != nil:
+		return listTextRule
 	}
-	return objectTextRule
+	return emptyValuesRule
 }
 
 // repackKeysCap bounds how many keys of the TEXT the listing names.
@@ -63,6 +77,10 @@ const repackKeysCap = 40
 // shape, never the content, which is in the TEXT once. "" for a prose TEXT.
 func (s repackSource) keysNote() string {
 	if s.obj == nil {
+		if s.arr != nil {
+			// "TEXT holds:", not "TEXT:", which marks where the text follows.
+			return "The TEXT holds: " + listShape(s.arr) + "."
+		}
 		return ""
 	}
 	names := sortedKeys(s.obj)
@@ -179,24 +197,47 @@ func sortedKeys(m map[string]any) []string {
 	return names
 }
 
-// correction is what the attempt after a refused one is told: the previous object left every
-// list empty, and where the TEXT holds list items. "" when the TEXT holds none (and then a
-// refusal could not have been for this reason).
-func (s repackSource) correction() string {
-	if s.obj == nil {
-		return ""
-	}
-	var where []string
-	for _, name := range sortedKeys(s.obj) {
-		list, _ := s.obj[name].([]any)
-		if n := core.ContentItems(list); n > 0 {
-			where = append(where, fmt.Sprintf("%q (%d items)", name, n))
+// correction is what the attempt after a refused one is told: the previous object left the lists
+// the TEXT holds empty, and which lists those are. "" when nothing was lost (and then a refusal
+// could not have been for this reason).
+//
+// A list the schema has a field of the same name for is sent into that field. A list no field is
+// named for is NOT: the refusal reads by key, and an answer's list of what it checked, beside a
+// schema list that is truly empty, is refused the same way as stale sentences under another name.
+// A prompt that said "write those items into the list fields" made a seat that obeyed it publish
+// the checked files as stale ones, a fabricated success. Such a list is copied only if it is the
+// content of a requested list field, and a field the TEXT says is empty stays empty. Only the lists
+// that were lost are named, never every list the TEXT holds.
+func (s repackSource) correction(lost []core.ListLoss, sites []core.ListSite) string {
+	var same, other []string
+	for _, l := range lost {
+		name := fmt.Sprintf("%q", l.Path)
+		if l.Path == "" {
+			name = "the TEXT's own list"
+		}
+		item := fmt.Sprintf("%s (%d items)", name, l.Held)
+		if l.Shared {
+			same = append(same, item)
+		} else {
+			other = append(other, item)
 		}
 	}
-	if len(where) == 0 {
-		return ""
+	var parts []string
+	if len(same) > 0 {
+		parts = append(parts, "A previous attempt to write this object left "+strings.Join(same, ", ")+" empty, although the TEXT holds list items under the same name. Write those items into the field of that name, one list item for each of them, in the order the TEXT gives them.")
 	}
-	return "A previous attempt to write this object left every list empty, although the TEXT holds list items under " + strings.Join(where, ", ") + ". Write those items into the list fields, one list item for each of them, in the order the TEXT gives them."
+	if len(other) > 0 {
+		fields := make([]string, len(sites))
+		for i, site := range sites {
+			fields[i] = fmt.Sprintf("%q", site.Label())
+		}
+		lead := "A previous attempt to write this object left every list empty, although the TEXT holds list items under "
+		if len(same) > 0 {
+			lead = "The TEXT also holds list items under "
+		}
+		parts = append(parts, lead+strings.Join(other, ", ")+", which no requested field is named for. If one of those lists is the content of a requested list field ("+strings.Join(fields, ", ")+"), write its items into that field, one list item for each of them, in the order the TEXT gives them. A field the TEXT says is empty, or that none of those lists is the content of, stays empty.")
+	}
+	return strings.Join(parts, " ")
 }
 
 // limitsNote states the bound the schema puts on each of its lists, from the contract's own

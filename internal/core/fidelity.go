@@ -19,10 +19,18 @@ import (
 // sentences were published as none. Nothing compared the object with its source.
 //
 // The comparison here is the one cheap, deterministic fact that exposes that failure without a
-// second model: the answer is a JSON object that holds list items, and the object that claims to
-// be its structuring holds none of them in any list the schema asks for. It judges lists only,
-// and only an answer that IS a JSON object: a prose answer has no list to count, and a guess at
-// one would reject honest work.
+// second model: the answer is a JSON object (or a JSON array) that holds list items, and the
+// object that claims to be its structuring holds none of them in any list the schema asks for. It
+// judges lists only, and only an answer that IS JSON: a prose answer has no list to count, and a
+// guess at one would reject honest work. So the check has two edges, both documented where the
+// result is described. A prose answer whose list was lost is published (nothing can be counted).
+// And a refusal can be wrong: an answer that lists what it checked under a key of its own, beside a
+// schema list that is legitimately empty, looks exactly like stale sentences under another name.
+// That refusal is an abstention defer with the finished answer attached, and the delegator
+// re-places an abstention once on another node, which is a second full run. It is never a wrong
+// success on its own; what keeps the retry from making it one is the prompt a refused attempt is
+// followed by, which says to copy a list only if it is the content of a requested field
+// (agentrepackfidelity.go).
 
 // AnswerWrapperMax is the most prose (fences, "Here is the result:", a closing line) that may
 // surround a JSON object for it to count as the answer when the object is under half of the text.
@@ -48,6 +56,54 @@ func AnswerObject(text string) (map[string]any, bool) {
 	return obj, true
 }
 
+// AnswerList decodes the JSON array a final answer IS: the whole text, or the one fenced block of
+// it when the text around the fence is a short lead-in, as a list. It is stricter than AnswerObject
+// on purpose: an array of anything is also how prose writes a footnote or an example, so the
+// array must BE the answer (nothing but a fence and a short lead-in around it) before its items
+// count, and only items that can hold a finding do (an object, a text, a list), never a number.
+func AnswerList(text string) ([]any, bool) {
+	t := strings.TrimSpace(text)
+	if a := strings.Index(t, "```"); a >= 0 {
+		rest := t[a+3:]
+		nl := strings.Index(rest, "\n")
+		b := -1
+		if nl >= 0 {
+			b = strings.Index(rest[nl+1:], "```")
+		}
+		if b < 0 {
+			return nil, false
+		}
+		inner := rest[nl+1 : nl+1+b]
+		if outside := len(t) - (3 + nl + 1 + b + 3); outside > AnswerWrapperMax {
+			return nil, false
+		}
+		t = strings.TrimSpace(inner)
+	}
+	if !strings.HasPrefix(t, "[") || !strings.HasSuffix(t, "]") {
+		return nil, false
+	}
+	var arr []any
+	if json.Unmarshal([]byte(t), &arr) != nil {
+		return nil, false
+	}
+	return arr, true
+}
+
+// answerItems counts the items of an answer that is itself a list: those that hold content and
+// can be a finding (not a bare number or flag).
+func answerItems(list []any) int {
+	n := 0
+	for _, el := range list {
+		switch el.(type) {
+		case string, map[string]any, []any:
+			if !emptyJSON(el) {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 // ListsEmptied says so when a structured object lost the lists its answer held: "" when it did
 // not, else one finding per emptied list, each ready to stand alone in a defer reason or an
 // acceptance failure. schema is the contract's output schema (only its array properties are
@@ -56,12 +112,22 @@ func AnswerObject(text string) (map[string]any, bool) {
 // The comparison is by key. A list the schema asks for and the answer also has under the same
 // path is compared with that list and nothing else: an answer that says `"stale": []` has
 // nothing to lose, whatever else it lists. Only when the answer shares no list path with the
-// schema do its lists under keys the schema does not define count, and then the object must hold
-// SOME item in the lists the schema asks for. A legitimately empty answer therefore passes, and a
-// false reject costs an honest defer with the finished answer attached, never a wrong success.
+// schema do its lists under paths the schema does not define count (at any depth of nested
+// objects, and an answer that is itself a list counts as one), and then the object must hold SOME
+// item in the lists the schema asks for. A legitimately empty answer that says so with the
+// schema's own key therefore passes. One that lists what it checked under a key of its own does
+// not, and that false refusal costs an honest defer and a re-placement, not a wrong success (see
+// the header for what keeps it so).
 func ListsEmptied(structured []byte, schema map[string]any, answer string) string {
-	emptied, _ := compareLists(structured, schema, answer)
-	return strings.Join(emptied, "; ")
+	return strings.Join(compareLists(structured, schema, answer).emptied, "; ")
+}
+
+// ListsLost returns the lists the refusal of ListsEmptied is about (nil when there is none): the
+// same-named list that came back empty, or the lists of the answer no schema list is named for.
+// The prompt that follows a refused attempt is built from it, so it names what was lost and not
+// every list the answer holds.
+func ListsLost(structured []byte, schema map[string]any, answer string) []ListLoss {
+	return compareLists(structured, schema, answer).lost
 }
 
 // ListsTrimmed says how many list items a structured object kept when it kept fewer than its
@@ -69,8 +135,14 @@ func ListsEmptied(structured []byte, schema map[string]any, answer string) strin
 // maxItems the answer broke, or a seat that dropped items. It is a note for the result, not a
 // reason to reject: the object is faithful as far as it goes, and the answer rides beside it.
 func ListsTrimmed(structured []byte, schema map[string]any, answer string) string {
-	_, trimmed := compareLists(structured, schema, answer)
-	return strings.Join(trimmed, "; ")
+	return strings.Join(compareLists(structured, schema, answer).trimmed, "; ")
+}
+
+// ListLoss is a list of the answer that the object did not carry.
+type ListLoss struct {
+	Path   string // where the answer held it: "stale", "report.outdated"; "" for an answer that is itself a list
+	Held   int    // its items that hold content
+	Shared bool   // the schema has a list of this very path, which is the one that came back short
 }
 
 // ListSite is one array property of the schema: its path ("report.items") and its spec.
@@ -87,6 +159,22 @@ func (s ListSite) MaxItems() int {
 		return int(m)
 	}
 	return 0
+}
+
+// SchemaTypeIs reports whether a schema spec declares the type, either as the string form
+// ("array") or among a list of types (["array","null"], how a nullable list is written).
+func SchemaTypeIs(spec map[string]any, typ string) bool {
+	switch t := spec["type"].(type) {
+	case string:
+		return t == typ
+	case []any:
+		for _, el := range t {
+			if s, ok := el.(string); ok && s == typ {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // SchemaListSites returns the array properties of a schema, through the properties of nested
@@ -107,7 +195,7 @@ func SchemaListSites(schema map[string]any) []ListSite {
 				continue
 			}
 			path := append(append([]string(nil), prefix...), name)
-			if typ, _ := sub["type"].(string); typ == "array" {
+			if SchemaTypeIs(sub, "array") {
 				sites = append(sites, ListSite{Path: path, Spec: sub})
 				continue
 			}
@@ -178,22 +266,79 @@ func emptyJSON(v any) bool {
 	return false
 }
 
-// compareLists is the one reading behind ListsEmptied and ListsTrimmed.
-func compareLists(structured []byte, schema map[string]any, answer string) (emptied, trimmed []string) {
+// listReading is what comparing a structured object with its answer found.
+type listReading struct {
+	emptied []string   // refusals, one sentence each
+	trimmed []string   // notes: the object kept fewer items than the answer held
+	lost    []ListLoss // the lists the refusals are about
+}
+
+// answerList is a list the answer holds: where, and how many of its items hold content.
+type answerList struct {
+	path []string // key path from the answer's root; nil for an answer that is itself a list
+	n    int
+}
+
+func (l answerList) label() string { return strings.Join(l.path, ".") }
+
+// collectLists walks an answer object through its nested objects (never into a list: the items of
+// a list are the list's content) and appends every list that holds content, in key order.
+func collectLists(obj map[string]any, prefix []string, out *[]answerList, depth int) {
+	if depth > 8 {
+		return
+	}
+	names := make([]string, 0, len(obj))
+	for name := range obj {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		path := append(append([]string(nil), prefix...), name)
+		switch v := obj[name].(type) {
+		case []any:
+			if n := ContentItems(v); n > 0 {
+				*out = append(*out, answerList{path: path, n: n})
+			}
+		case map[string]any:
+			collectLists(v, path, out, depth+1)
+		}
+	}
+}
+
+// schemaDefines reports whether the schema has a property at the path, of any type: a list of the
+// answer under a path the schema names is that property's content, wherever it sits, and not a
+// list the schema has no word for.
+func schemaDefines(schema map[string]any, path []string) bool {
+	cur := schema
+	for i, name := range path {
+		props, _ := cur["properties"].(map[string]any)
+		raw, ok := props[name]
+		if !ok {
+			return false
+		}
+		if i == len(path)-1 {
+			return true
+		}
+		cur, _ = raw.(map[string]any)
+		if cur == nil {
+			return false
+		}
+	}
+	return false
+}
+
+// compareLists is the one reading behind ListsEmptied, ListsLost and ListsTrimmed.
+func compareLists(structured []byte, schema map[string]any, answer string) (r listReading) {
 	if schema == nil {
-		return nil, nil
+		return r
 	}
 	var obj map[string]any
 	if json.Unmarshal(structured, &obj) != nil || obj == nil {
-		return nil, nil
-	}
-	src, ok := AnswerObject(answer)
-	if !ok {
-		return nil, nil
+		return r
 	}
 	sites := SchemaListSites(schema)
 	if len(sites) == 0 {
-		return nil, nil
+		return r
 	}
 	// The delivered count at a site.
 	got := func(s ListSite) int {
@@ -201,55 +346,60 @@ func compareLists(structured []byte, schema map[string]any, answer string) (empt
 		return ContentItems(l)
 	}
 
-	shared := false
-	for _, s := range sites {
-		srcList, has := listAt(src, s.Path)
-		if !has || srcList == nil {
-			continue
+	// The lists the answer holds. An answer that is a JSON object is read by path; one that is
+	// itself a JSON array IS one list, with no key.
+	var held []answerList
+	src, isObject := AnswerObject(answer)
+	if isObject {
+		shared := false
+		for _, s := range sites {
+			srcList, has := listAt(src, s.Path)
+			if !has || srcList == nil {
+				continue
+			}
+			shared = true
+			n, kept := ContentItems(srcList), got(s)
+			switch {
+			case n > 0 && kept == 0:
+				r.emptied = append(r.emptied, fmt.Sprintf("emptied %q: the answer holds %d list items under %q and the object holds none", s.Label(), n, s.Label()))
+				r.lost = append(r.lost, ListLoss{Path: s.Label(), Held: n, Shared: true})
+			case kept < n:
+				r.trimmed = append(r.trimmed, fmt.Sprintf("kept %d of %d list items under %q%s", kept, n, s.Label(), maxItemsTail(s.Spec, kept)))
+			}
 		}
-		shared = true
-		held, kept := ContentItems(srcList), got(s)
-		switch {
-		case held > 0 && kept == 0:
-			emptied = append(emptied, fmt.Sprintf("emptied %q: the answer holds %d list items under %q and the object holds none", s.Label(), held, s.Label()))
-		case kept < held:
-			trimmed = append(trimmed, fmt.Sprintf("kept %d of %d list items under %q%s", kept, held, s.Label(), maxItemsTail(s.Spec, kept)))
+		if shared {
+			return r
 		}
-	}
-	if shared {
-		return emptied, trimmed
+		collectLists(src, nil, &held, 0)
+	} else if arr, ok := AnswerList(answer); ok {
+		if n := answerItems(arr); n > 0 {
+			held = []answerList{{n: n}}
+		}
+	} else {
+		return r
 	}
 
-	// The answer shares no list with the schema: the lists it holds under keys the schema does
-	// not define are the ones the object was to be written from.
-	props, _ := schema["properties"].(map[string]any)
-	var orphans []string
+	// The answer shares no list with the schema: the lists it holds at paths the schema does not
+	// define are the ones the object was to be written from.
+	var orphans []answerList
 	heldTotal := 0
-	names := make([]string, 0, len(src))
-	for name := range src {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if _, defined := props[name]; defined {
-			continue
+	for _, l := range held {
+		if len(l.path) > 0 {
+			if schemaDefines(schema, l.path) {
+				continue
+			}
+			// An object that carries the list itself, at the path the answer used, lost nothing: a
+			// direct answer IS the object, extra keys and all, and the delegator reads every result
+			// against its answer.
+			if carried, _ := listAt(obj, l.path); ContentItems(carried) >= l.n {
+				continue
+			}
 		}
-		l, _ := src[name].([]any)
-		n := ContentItems(l)
-		if n == 0 {
-			continue
-		}
-		// An object that carries the list itself, under the key the answer used, lost nothing: a
-		// direct answer IS the object, extra keys and all, and the delegator reads every result
-		// against its answer.
-		if carried, _ := obj[name].([]any); ContentItems(carried) >= n {
-			continue
-		}
-		orphans = append(orphans, name)
-		heldTotal += n
+		orphans = append(orphans, l)
+		heldTotal += l.n
 	}
 	if heldTotal == 0 {
-		return nil, nil
+		return r
 	}
 	labels := make([]string, len(sites))
 	keptTotal := 0
@@ -258,20 +408,28 @@ func compareLists(structured []byte, schema map[string]any, answer string) (empt
 		keptTotal += got(s)
 	}
 	from := make([]string, len(orphans))
-	for i, name := range orphans {
-		from[i] = fmt.Sprintf("%q", name)
+	for i, l := range orphans {
+		if len(l.path) == 0 {
+			from[i] = "the answer's own list"
+			continue
+		}
+		from[i] = fmt.Sprintf("%q", l.label())
 	}
 	if keptTotal == 0 {
-		return []string{fmt.Sprintf("emptied %s: the answer holds %d list items under %s and the object holds none", strings.Join(labels, ", "), heldTotal, strings.Join(from, ", "))}, nil
+		r.emptied = []string{fmt.Sprintf("emptied %s: the answer holds %d list items under %s and the object holds none", strings.Join(labels, ", "), heldTotal, strings.Join(from, ", "))}
+		for _, l := range orphans {
+			r.lost = append(r.lost, ListLoss{Path: l.label(), Held: l.n})
+		}
+		return r
 	}
 	if keptTotal < heldTotal {
 		tail := ""
 		if len(sites) == 1 {
 			tail = maxItemsTail(sites[0].Spec, keptTotal)
 		}
-		trimmed = append(trimmed, fmt.Sprintf("kept %d of %d list items from %s%s", keptTotal, heldTotal, strings.Join(from, ", "), tail))
+		r.trimmed = append(r.trimmed, fmt.Sprintf("kept %d of %d list items from %s%s", keptTotal, heldTotal, strings.Join(from, ", "), tail))
 	}
-	return nil, trimmed
+	return r
 }
 
 // maxItemsTail says " (maxItems N)" when the list kept exactly the bound its schema sets, which is
