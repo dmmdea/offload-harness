@@ -12,6 +12,8 @@ import { EventEmitter } from "node:events";
 import {
   resolveCli, runCli, parseCliJson, submitGraph, pollOutputs, fetchView, finalizeRun,
 } from "./comfy-submit.mjs";
+// The D-38 (#72) additions are read off the namespace so a missing export fails ITS test, not the whole file.
+import * as submit from "./comfy-submit.mjs";
 
 // ---------------------------------------------------------------------------------------
 // helpers
@@ -862,4 +864,124 @@ test("pollOutputs: a prompt that ComfyUI itself reports as failed is reported wi
     pollOutputs({ api: "http://x", promptId: "p1", waitSec: 60, isDone: () => false, watch: () => "WAN-OOM: would pre-empt", fetchImpl, sleep: c.sleep, now: c.now, env: {} }),
     /^Error: ComfyUI exec error: /,
   );
+});
+
+// ---------------------------------------------------------------------------------------
+// D-38 (#72): POST /prompt and GET /view are bounded
+// ---------------------------------------------------------------------------------------
+//
+// rawSubmit and fetchView passed no AbortSignal (the /system_stats, /queue and /history calls always did), so a
+// ComfyUI that accepts the connection and never answers held the exclusive GPU slot for as long as the runner's
+// whole-process timeout. Each call is now bounded: SUBMIT_TIMEOUT_MS for POST /prompt (it validates and queues, it
+// does not run) and VIEW_TIMEOUT_MS for GET /view, which covers the BODY read too. Every test here races the call
+// against its own sentinel timer, so the failure today is an assertion, not a hung test runner.
+
+// settles: how a promise ended within `ms`, or { hung: true }. The timer is cleared, so it keeps nothing alive.
+async function settles(promise, ms = 3000) {
+  let timer;
+  const sentinel = new Promise((resolve) => { timer = setTimeout(() => resolve({ hung: true }), ms); });
+  try {
+    return await Promise.race([promise.then((value) => ({ ok: true, value }), (error) => ({ ok: false, error })), sentinel]);
+  } finally { clearTimeout(timer); }
+}
+
+// stalledFetch: a fetchImpl that honours its signal and otherwise never answers. calls keeps every (url, opts).
+function stalledFetch(calls = []) {
+  return (url, opts = {}) => new Promise((resolve, reject) => {
+    calls.push({ url, opts });
+    const s = opts.signal;
+    if (s) {
+      if (s.aborted) return reject(s.reason);
+      s.addEventListener("abort", () => reject(s.reason), { once: true });
+    }
+  });
+}
+
+test("the timeouts are exported constants a test can shorten: 120 s to queue a prompt, 600 s to fetch an output", () => {
+  assert.equal(submit.SUBMIT_TIMEOUT_MS, 120_000);
+  assert.equal(submit.VIEW_TIMEOUT_MS, 600_000);
+});
+
+test("rawSubmit rejects a POST /prompt that never answers, naming the call and the bound", async () => {
+  assert.equal(typeof submit.rawSubmit, "function", "comfy-submit.mjs must export rawSubmit");
+  const r = await settles(submit.rawSubmit({ api: "http://comfy.invalid", graph: { 1: {} }, clientId: "c", fetchImpl: stalledFetch(), timeoutMs: 60 }));
+  assert.ok(!r.hung, "rawSubmit never settled: a ComfyUI that accepts the connection and never answers holds the GPU slot");
+  assert.equal(r.ok, false);
+  assert.match(r.error.message, /POST \/prompt/);
+  assert.match(r.error.message, /60 ms/);
+  assert.match(r.error.message, /timeout/i);
+});
+
+test("fetchView rejects a GET /view that never answers, naming the call and the bound", async () => {
+  const r = await settles(fetchView({ api: "http://comfy.invalid", file: { filename: "a.png" }, fetchImpl: stalledFetch(), timeoutMs: 60 }));
+  assert.ok(!r.hung, "fetchView never settled: a ComfyUI that stops answering GET /view holds the GPU slot");
+  assert.equal(r.ok, false);
+  assert.match(r.error.message, /GET \/view/);
+  assert.match(r.error.message, /60 ms/);
+  assert.match(r.error.message, /timeout/i);
+});
+
+test("fetchView bounds the whole request: a body that stalls after the headers is cut at the same bound", async () => {
+  // the headers arrive at once; arrayBuffer() only settles when the signal aborts (as undici's does mid-body)
+  const fetchImpl = (url, opts = {}) => Promise.resolve({
+    ok: true, status: 200,
+    arrayBuffer: () => new Promise((_, reject) => { opts.signal.addEventListener("abort", () => reject(opts.signal.reason), { once: true }); }),
+  });
+  const r = await settles(fetchView({ api: "http://comfy.invalid", file: { filename: "big.mp4" }, fetchImpl, timeoutMs: 60 }));
+  assert.ok(!r.hung, "the body read was not bounded");
+  assert.equal(r.ok, false);
+  assert.match(r.error.message, /GET \/view/);
+});
+
+test("both calls pass an AbortSignal", async () => {
+  const calls = [];
+  const ok = (body) => ({ ok: true, status: 200, json: async () => body, arrayBuffer: async () => new ArrayBuffer(1) });
+  await submit.rawSubmit({ api: "http://x", graph: {}, clientId: "c", fetchImpl: async (url, opts) => { calls.push({ url, opts }); return ok({ prompt_id: "p1" }); } });
+  await fetchView({ api: "http://x", file: { filename: "a.png" }, fetchImpl: async (url, opts) => { calls.push({ url, opts }); return ok({}); } });
+  assert.equal(calls.length, 2);
+  for (const c of calls) assert.ok(c.opts && c.opts.signal instanceof AbortSignal, `${c.url} carries no AbortSignal`);
+});
+
+test("submitGraph passes its raw POST the submit bound (the production caller of rawSubmit)", async () => {
+  const r = await settles(submitGraph({ api: "http://comfy.invalid", graph: {}, clientId: "c", cli: null, fetchImpl: stalledFetch(), submitTimeoutMs: 60 }));
+  assert.ok(!r.hung, "submitGraph's raw path never settled");
+  assert.equal(r.ok, false);
+  assert.match(r.error.message, /POST \/prompt/);
+});
+
+test("a real socket that accepts and never answers: the raw POST /prompt and fetchView both end at their bound", async () => {
+  const sockets = new Set();
+  const server = createServer(() => { /* accept the request, never answer */ });
+  server.on("connection", (s) => { sockets.add(s); s.on("close", () => sockets.delete(s)); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const api = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const a = await settles(submitGraph({ api, graph: {}, clientId: "c", cli: null, submitTimeoutMs: 150 }), 5000);
+    assert.ok(!a.hung && a.ok === false, "the raw POST /prompt did not end at its bound on a real socket");
+    const b = await settles(fetchView({ api, file: { filename: "a.png" }, timeoutMs: 150 }), 5000);
+    assert.ok(!b.hung && b.ok === false, "fetchView did not end at its bound on a real socket");
+  } finally {
+    for (const s of sockets) s.destroy();
+    server.close();
+  }
+});
+
+test("the healthy paths are unchanged: a prompt that answers is queued, an output that answers comes back byte for byte", async () => {
+  const srv = await serve((req, res) => {
+    if (req.url === "/prompt") { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify({ prompt_id: "pid-7" })); }
+    else res.end(Buffer.from([1, 2, 3]));
+  });
+  try {
+    const q = await submitGraph({ api: srv.api, graph: {}, clientId: "c", cli: null });
+    assert.equal(q.promptId, "pid-7");
+    assert.deepEqual(await fetchView({ api: srv.api, file: { filename: "a.png" } }), Buffer.from([1, 2, 3]));
+  } finally { srv.close(); }
+});
+
+test("comfyUnusableClassLine: only a serverUnusable error names the class, on a line of its own", () => {
+  assert.equal(typeof submit.comfyUnusableClassLine, "function", "comfy-submit.mjs must export comfyUnusableClassLine");
+  const unusable = submit.serverUnusableError("ComfyUI stopped answering mid-render");
+  assert.equal(submit.comfyUnusableClassLine(unusable), "IGPU_CLASS=comfy_unusable");
+  assert.equal(submit.comfyUnusableClassLine(new Error("view fetch 404")), "");
+  assert.equal(submit.comfyUnusableClassLine(null), "");
 });

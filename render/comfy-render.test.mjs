@@ -4,7 +4,8 @@
 // sees exit codes, not exceptions.
 import { test } from "node:test";
 import assert from "node:assert";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -215,4 +216,45 @@ test("renderExitCode: a serverUnusable failure exits 3 so a batch parent stops; 
   assert.equal(renderMod.renderExitCode(e), 3);
   assert.equal(renderMod.renderExitCode(new Error("ordinary")), 1);
   assert.equal(renderMod.renderExitCode(undefined), 1);
+});
+
+// ---- D-38 (#72): a serverUnusable failure names its class on a line of its own ----------------------------------
+//
+// The Go side (internal/gpugen) reads "IGPU_CLASS=<class>" from the retained output of any runner; comfy-render exits 3
+// for a ComfyUI that can run no more work, and now says so in the one form Go reads, so the ledger files it as
+// comfy_unusable and not "other".
+
+test("reportRenderFailure: a serverUnusable error prints the failure line, then the class line on its own line", () => {
+  assert.equal(typeof renderMod.reportRenderFailure, "function", "comfy-render.mjs must export reportRenderFailure");
+  const lines = [];
+  const e = new Error("ComfyUI stopped answering mid-render"); e.serverUnusable = true;
+  renderMod.reportRenderFailure(e, (...a) => lines.push(a.join(" ")));
+  assert.deepEqual(lines, ["RENDER FAILED: ComfyUI stopped answering mid-render", "IGPU_CLASS=comfy_unusable"]);
+});
+
+test("reportRenderFailure: any other failure prints only the failure line (no class is invented)", () => {
+  assert.equal(typeof renderMod.reportRenderFailure, "function");
+  const lines = [];
+  renderMod.reportRenderFailure(new Error("view fetch 404"), (...a) => lines.push(a.join(" ")));
+  assert.deepEqual(lines, ["RENDER FAILED: view fetch 404"]);
+});
+
+test("the real comfy-render script: a ComfyUI answering HTTP 500 ends with exit 3 and IGPU_CLASS=comfy_unusable on its own stderr line", async (t) => {
+  // A --no-lifecycle child is what comfy-generate.mjs runs. Its waitServer reads GET /system_stats; three HTTP 500 answers
+  // are the C-83 verdict (a poisoned CUDA context), after about four seconds of probes.
+  const dir = scratchDir(t, "comfy-render-");
+  const server = createServer((req, res) => { res.statusCode = 500; res.end("cuda error"); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const api = `http://127.0.0.1:${server.address().port}`;
+    const child = spawn(process.execPath, [SCRIPT, join(dir, "o.png"), "a prompt", "--api", api, "--no-lifecycle"],
+      { windowsHide: true, env: isolatedRunnerEnv(), stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (d) => { stderr += d; });
+    const code = await new Promise((resolve) => child.on("close", resolve));
+    assert.equal(code, 3, `exit ${code}; stderr: ${stderr}`);
+    assert.match(stderr, /^RENDER FAILED: .*HTTP 500.*$/m);
+    assert.match(stderr, /^IGPU_CLASS=comfy_unusable\r?$/m, `no class line on its own line in: ${stderr}`);
+  } finally { server.close(); }
 });
