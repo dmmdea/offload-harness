@@ -29,7 +29,7 @@ other on a single shared card.
 | `internal/gpuprobe/cards.go` | the **card table** (UUID-keyed, index spaces side by side) |
 | `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmits` (the ONE admission rule), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
 | `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases (what the processes below the holder hold RESIDENT, the unit a declaration is in), `Manager.HostRAMPending`; and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
-| `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), the refusal of a need no state of the box admits (`refuseImpossibleHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMHeld`) |
+| `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMHeld`), and what a detached holder keeps when that wait fails (`detachedHostRAMError`) |
 | `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card, else the media class default (see "Host RAM") |
 | `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
 | `internal/gpucards` | the per-card view (`Rows`, `LeaseRows`, `QueueRows`, `Table`, `Section`) that `gpu status`, `gpu cards` and `offload_status` brief all render |
@@ -1662,7 +1662,7 @@ cards yet). `gpu status` says `host RAM N GiB asked, not yet admitted` on the le
   for its own figure before its command starts, so nothing is admitted past the line
   (`TestADeferredLeasePassesAWaiterThatWaitsOnlyOnMemoryAndStillAsksTheHost`).
 - *While it waits the lease claims no host RAM*, so a grant on other cards that fits is admitted ahead of it, and the lease then
-  waits for what that grant has yet to load (`TestAGrantThatFitsIsAdmittedAheadOfAWaitingLeaseAndTheLeaseThenCounts`...). This
+  waits for what that grant has yet to load (`TestAGrantThatFitsIsAdmittedAheadOfAWaitingLeaseAndTheLeaseThenCountsIt`). This
   is the "nothing reserves a waiter's memory against a declaring request on *disjoint* cards" limit above, unchanged. The
   alternative, keeping the figure on the record as declared from the grant on, makes two such leases count each other's figure as
   still to load, and a host that fits one of them would admit neither (`TestTwoWaitingLeasesAreAdmittedOneAfterTheOther`).
