@@ -8,6 +8,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,20 +75,26 @@ func TestAPlacementFromAStaleTableKeepsTheDisplayCardClosed(t *testing.T) {
 	if !reads.stood() {
 		t.Fatal("setup: the re-read failed, so the call goes on from the table it has")
 	}
-	if in.DisplayCapPct != 0 {
-		t.Fatalf("the cap is judged on VRAM in use now, which a stale table misstates: the screen's card stays closed, got a cap of %d", in.DisplayCapPct)
+	// The operator's cap is what the config says (the default 60 here): the closure is the table's doing, so
+	// the input must not claim the operator closed the card.
+	if in.DisplayCapPct != 60 {
+		t.Errorf("the configured cap is not changed by a table that could not be re-read, got %d", in.DisplayCapPct)
 	}
 	a, err := pickOne(t, in)
 	if err != nil || a.Devices[0] == leaseIDOf(admitUUIDB) {
-		t.Fatalf("the call is placed off the screen's card: %v %v", a.Devices, err)
+		t.Fatalf("the cap is judged on VRAM in use now, which a stale table misstates: the call is placed off the screen's card: %v %v", a.Devices, err)
 	}
-	var shown bool
-	for _, s := range a.Skipped {
+	var shown *gpulease.Skip
+	for i, s := range a.Skipped {
 		if s.ID == leaseIDOf(admitUUIDB) && s.Reason == gpulease.ReasonDisplay {
-			shown = true
+			shown = &a.Skipped[i]
 		}
 	}
-	if !shown {
-		t.Errorf("the screen's card is skipped as %q: %+v", gpulease.ReasonDisplay, a.Skipped)
+	if shown == nil {
+		t.Fatalf("the screen's card is skipped as %q: %+v", gpulease.ReasonDisplay, a.Skipped)
+	}
+	// The skip names the cause that is true: the table, not a gpu_display_cap_pct of 0 the operator never wrote.
+	if strings.Contains(shown.Detail, "gpu_display_cap_pct is 0") || !strings.Contains(shown.Detail, "could not be re-read") {
+		t.Errorf("the skip must say the card table could not be re-read, and not that the key is 0: %q", shown.Detail)
 	}
 }

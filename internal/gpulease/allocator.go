@@ -52,6 +52,7 @@ const (
 // The words of the two display skips, one place for the allocator's pick and the grant-time check.
 const (
 	displayClosedDetail  = "the operator's screen; gpu_display_cap_pct is 0, so it is not auto-assigned"
+	displayStaleDetail   = "the operator's screen; this call was placed from a card table that could not be re-read, so how much of the card is in use now is not known and it is not auto-assigned"
 	displayUnknownDetail = "this reading could not say which card the monitor is on; no card is auto-assigned until one can"
 )
 
@@ -86,6 +87,11 @@ type AllocInput struct {
 	// other card is judged by the footprint alone. A card whose reading could not say where the
 	// monitor is (DisplayUnknown) stays closed whatever this says.
 	DisplayCapPct int
+	// DisplayStale closes the display card whatever the cap says: the caller is placing the call from a card
+	// table it could not refresh, and the cap is judged on the VRAM in use now, the one number a stale table
+	// misstates. It is a reading's doing, not the operator's, so DisplayCapPct keeps what the config says and
+	// the skip says why the card is closed (the table, not a gpu_display_cap_pct of 0 nobody wrote).
+	DisplayStale bool
 	// DisplayFloorGiB is a floor the display layer declares in absolute terms (display_floor_gib,
 	// internal/placement/guards.go) and keeps on the display card on top of the cap: the card keeps
 	// the LARGER of this and the cap's remainder, so a stricter declaration still holds and the
@@ -180,7 +186,7 @@ func Allocate(in AllocInput) (Allocation, error) {
 		case in.Quarantined[id]:
 			skip(c, id, ReasonQuarantined, "")
 		case c.Display && !in.displayOpen():
-			skip(c, id, ReasonDisplay, displayClosedDetail)
+			skip(c, id, ReasonDisplay, in.displayClosedWhy())
 		case c.DisplayUnknown:
 			skip(c, id, ReasonDisplayUnknown, displayUnknownDetail)
 		case in.WholeNodeHeld || in.Claimed[id]:
@@ -246,8 +252,18 @@ func fits(c gpuprobe.Card, needGiB float64) bool {
 	return needGiB <= 0 || c.VRAMFreeGiB >= needGiB
 }
 
-// displayOpen: the cap lets the allocator consider the display card at all.
-func (in AllocInput) displayOpen() bool { return in.DisplayCapPct > 0 }
+// displayOpen: the cap lets the allocator consider the display card at all, and the table it reads from is
+// not one the caller could not refresh.
+func (in AllocInput) displayOpen() bool { return in.DisplayCapPct > 0 && !in.DisplayStale }
+
+// displayClosedWhy is the skip detail of a display card that displayOpen refuses. The operator's switch (a cap
+// of 0) is named first when both are true: it is the cause that outlasts the reading.
+func (in AllocInput) displayClosedWhy() string {
+	if in.DisplayCapPct <= 0 {
+		return displayClosedDetail
+	}
+	return displayStaleDetail
+}
 
 // floorApplies: the display card's cap is in force on this card. It is the display card's alone (a pair
 // card is judged by the footprint, as it always was), and only while the cap is open and holds something
@@ -318,7 +334,7 @@ func DesktopRefusals(in AllocInput, ids []string) []Skip {
 		}
 		switch {
 		case c.Display && !in.displayOpen():
-			out = append(out, Skip{ID: id, Index: c.NvidiaIndex, Reason: ReasonDisplay, Detail: displayClosedDetail, Display: true})
+			out = append(out, Skip{ID: id, Index: c.NvidiaIndex, Reason: ReasonDisplay, Detail: in.displayClosedWhy(), Display: true})
 		case c.DisplayUnknown:
 			out = append(out, Skip{ID: id, Index: c.NvidiaIndex, Reason: ReasonDisplayUnknown, Detail: displayUnknownDetail})
 		case in.floorApplies(c) && !in.fitsCard(c):

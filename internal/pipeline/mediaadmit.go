@@ -9,8 +9,10 @@ package pipeline
 //   - a single-card route (image, edit, inpaint, upscale, animate, music, un-pooled video) asks
 //     the allocator for ONE card, holds a lease on it, and runs in the ComfyUI instance bound to
 //     that card (its own port, directories and launch marker, pinned by GPU uuid). Two such calls
-//     run on two cards at once; the display card is never auto-assigned while the operator is at
-//     the desk (the shared rule in gpuprobe, which reads display_attached as well as
+//     run on two cards at once; the display card is open to the allocator only up to the
+//     operator's cap (gpu_display_cap_pct) and to a call that declares a VRAM footprint, which a
+//     media call does not yet, so it is not auto-assigned to one today (which card is the display
+//     card is the shared rule in gpuprobe, which reads display_attached as well as
 //     display_active);
 //   - an EXPLICIT pin (comfy_cuda_device) is a hard constraint, never re-picked: the call queues
 //     for that card, FIFO, however many others are free. The pin is in ComfyUI's order, so it is
@@ -886,8 +888,9 @@ func (r *tableReads) note() string {
 // gpualloc.BuildInput's: the display card is open up to the operator's cap (gpu_display_cap_pct) and the door
 // forces nothing, so a call that declares a VRAM footprint (Need.VRAMGiB) can be given the screen's card
 // within it. When the table cannot be re-read the call goes on from the one it has (tableReads), and then
-// the cap is held at 0 for that input: the cap is judged on the VRAM in use now, which is the one number a
-// stale table can misstate, so the screen's card stays closed to a call placed from it, as F24 kept it.
+// the display card is closed for that input (AllocInput.DisplayStale): the cap is judged on the VRAM in use now,
+// which is the one number a stale table can misstate, so the screen's card stays closed to a call placed from it,
+// as F24 kept it. The cap itself stays what the config says, so the skip names the table, not the key.
 func (p *Pipeline) mediaAllocInput(ctx context.Context, m *gpulease.Manager, need gpualloc.Need, reads *tableReads) (gpulease.AllocInput, error) {
 	if !reads.stood() {
 		in, berr := gpualloc.BuildInput(ctx, m, p.cfg, need, p.alloc)
@@ -905,7 +908,7 @@ func (p *Pipeline) mediaAllocInput(ctx context.Context, m *gpulease.Manager, nee
 	table := reads.cards
 	stored.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return table, "", nil }
 	in, berr := gpualloc.BuildInput(ctx, m, p.cfg, need, stored)
-	in.DisplayCapPct = 0
+	in.DisplayStale = true
 	return in, berr
 }
 

@@ -300,3 +300,39 @@ func TestAJobThatLandsExactlyOnTheCapIsAdmittedDespiteFloatError(t *testing.T) {
 		t.Fatalf("0.1 GiB over the cap is over: %v %v", a.Devices, err)
 	}
 }
+
+// A call placed from a card table the caller could not refresh keeps the screen's card closed (the cap is judged
+// on VRAM in use now, which a stale table misstates), and the skip says that: the cap is what the operator
+// configured, and the card is closed by the table, not by a gpu_display_cap_pct of 0 nobody wrote.
+func TestAStaleTableClosesTheDisplayCardAndTheSkipNamesTheTable(t *testing.T) {
+	in := capInput(2, 60)
+	in.DisplayStale = true
+	a, err := Allocate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.Devices) != 1 || a.Devices[0] == "gpu-bbbb0000" {
+		t.Fatalf("a stale table keeps the display card closed whatever the cap: %v", a.Devices)
+	}
+	s := skipOf(a, "gpu-bbbb0000")
+	if s.Reason != ReasonDisplay || !s.Display {
+		t.Fatalf("the closed card is skipped as %q and marked as the display card, got %+v", ReasonDisplay, s)
+	}
+	if !strings.Contains(s.Detail, "could not be re-read") || strings.Contains(s.Detail, "gpu_display_cap_pct is 0") {
+		t.Errorf("the skip names the table, not a cap of 0: %q", s.Detail)
+	}
+	// The grant-time check puts the same rule again, in the same words.
+	refused := DesktopRefusals(in, []string{"gpu-bbbb0000"})
+	if len(refused) != 1 || refused[0].Reason != ReasonDisplay || !strings.Contains(refused[0].Detail, "could not be re-read") {
+		t.Errorf("the grant-time check refuses the display card for the same reason: %+v", refused)
+	}
+	// The operator's switch outranks it: with the cap at 0 the skip names the key, whatever the table.
+	in.DisplayCapPct = 0
+	a, err = Allocate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s = skipOf(a, "gpu-bbbb0000"); !strings.Contains(s.Detail, "gpu_display_cap_pct is 0") {
+		t.Errorf("a cap of 0 is named even when the table is stale too: %q", s.Detail)
+	}
+}
