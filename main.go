@@ -2397,6 +2397,28 @@ func runDelegate(args []string) error {
 	return delegateExitErr(sum)
 }
 
+// cliIntake prepares a CLI verb's subtasks one by one (register D-111), the verbs' half of what the MCP doors do: a
+// subtask that fails intake no longer rejects the valid ones beside it. The returned batch holds the contracts that passed
+// (tagged with the verb's door, in input order, each with its input position) and the rejections, and the verb splices
+// those back among the engine's results (PreparedBatch.Splice) so the answer holds one result per subtask sent. The lints
+// are kept by INPUT position, as the wire builder reads them. The error is only for a call with nothing valid in it, and it
+// names every bad subtask: label and ids word it as the MCP doors do ("subtask 2: ...", or "source 4: ..." for a research
+// page, named by its place in the url list; nil ids = the input position).
+func cliIntake(specs []delegate.SubtaskSpec, readRoot string, capBytes int, door, label string, ids []int) (delegate.PreparedBatch, [][]string, error) {
+	batch := delegate.PrepareBatchWithCap(specs, readRoot, capBytes)
+	if batch.AllRejected() {
+		return batch, nil, fmt.Errorf("%s", batch.FlatReason(label, ids))
+	}
+	lints := make([][]string, len(specs))
+	for k := range batch.Contracts {
+		batch.Contracts[k].Door = door
+		// Linted on the PREPARED contract (context_paths already inlined: grounding is judged against everything the
+		// sub-agent will see).
+		lints[batch.Indices[k]] = delegate.LintAcceptance(batch.Contracts[k])
+	}
+	return batch, lints, nil
+}
+
 // cliPinOptions builds the engine's options for the delegate and research verbs, the CLI doors that offer pin_reason (ADR
 // 0078): a --route local or remote without --pin-reason is a hint that placement may override, exactly as it is on the MCP
 // tools; with one it is the pin it always was, and the reason is recorded. One builder, so the rescue and the door's half
