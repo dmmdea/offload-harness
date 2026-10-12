@@ -4,7 +4,6 @@ package proctree
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -12,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // A job object that refuses the child (an enclosing job that cannot be nested, an access
@@ -23,7 +24,7 @@ func TestACommandThatCannotBeAssignedToAJobStillRunsAndSaysSo(t *testing.T) {
 	t.Cleanup(func() { assignProcess = orig })
 
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
-	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
 	hideChild(cmd)
 	cmd.Env = append(os.Environ(), "PROCTREE_HELPER=parent", "PROCTREE_PIDFILE="+pidFile)
 	tr, err := Start(cmd, Options{})
@@ -100,7 +101,7 @@ func TestTheChildDoesNotRunUntilItIsInsideTheJob(t *testing.T) {
 		return orig(job, proc)
 	}
 	t.Cleanup(func() { assignProcess = orig })
-	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
 	hideChild(cmd)
 	cmd.Env = append(os.Environ(), "PROCTREE_HELPER=parent", "PROCTREE_PIDFILE="+pidFile)
 	tr, err := Start(cmd, Options{})
@@ -131,7 +132,7 @@ func TestTheChildDoesNotRunUntilItIsInsideTheJob(t *testing.T) {
 // Only a member of the job is ever ended by a protected stop: a process that is not in it (a pid
 // reused since the list was read) is left alone.
 func TestKillMemberLeavesAProcessThatIsNotInTheJob(t *testing.T) {
-	foreign := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
+	foreign := winexec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
 	hideChild(foreign)
 	foreign.Env = append(os.Environ(), "PROCTREE_HELPER=sleeper")
 	if err := foreign.Start(); err != nil {
@@ -197,7 +198,7 @@ func TestACommandThatCannotBeAssignedIsRefusedWhenDieWithWrapperWasAsked(t *test
 	t.Cleanup(func() { assignProcess = orig })
 
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
-	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
 	hideChild(cmd)
 	cmd.Env = append(os.Environ(), "PROCTREE_HELPER=parent", "PROCTREE_PIDFILE="+pidFile)
 	tr, err := Start(cmd, Options{DieWithWrapper: true})

@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // startHoldChild starts the test binary as a process that holds mib MiB resident and returns it once it says so.
@@ -22,7 +24,7 @@ func startHoldChild(t *testing.T, mib int) *exec.Cmd {
 	if _, ok := privateBytes(os.Getpid()); !ok {
 		t.Skip("no private-memory reader on this platform")
 	}
-	cmd := exec.Command(os.Args[0])
+	cmd := winexec.Command(os.Args[0])
 	hideProc(cmd)
 	cmd.Env = append(os.Environ(), "GPULEASE_HELPER_HOLD_MIB="+strconv.Itoa(mib))
 	stdin, err := cmd.StdinPipe()

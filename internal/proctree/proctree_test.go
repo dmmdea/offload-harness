@@ -2,7 +2,6 @@ package proctree
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // alive is the lease package's own liveness rule, so a test and the reclaim rule never disagree
@@ -27,7 +27,7 @@ func TestHelperProcess(t *testing.T) {
 		t.Skip("helper process only")
 	}
 	if role == "parent" || role == "leaver" {
-		child := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
+		child := winexec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
 		hideChild(child)
 		child.Env = append(os.Environ(), "PROCTREE_HELPER=sleeper")
 		if err := child.Start(); err != nil {
@@ -53,7 +53,7 @@ func treeFixture(t *testing.T, opts Options) (tr *Tree, parent, grand int) {
 func roleFixture(t *testing.T, role string, opts Options) (tr *Tree, parent, grand int) {
 	t.Helper()
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
-	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestHelperProcess$", "-test.timeout=120s")
 	hideChild(cmd)
 	cmd.Env = append(os.Environ(), "PROCTREE_HELPER="+role, "PROCTREE_PIDFILE="+pidFile)
 	tr, err := Start(cmd, opts)
@@ -142,7 +142,7 @@ func TestTerminateKillsTheWholeTree(t *testing.T) {
 // tree-orphan rule possible); with the option, letting go ends it.
 func TestDieWithWrapperIsOptIn(t *testing.T) {
 	if runtime.GOOS != "windows" {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestHelperProcess$")
+		cmd := winexec.Command(os.Args[0], "-test.run=^TestHelperProcess$")
 		hideChild(cmd)
 		if _, err := Start(cmd, Options{DieWithWrapper: true}); err != ErrDieWithWrapperUnsupported {
 			t.Fatalf("a platform that cannot honour die-with-wrapper must refuse it loudly, got %v", err)
