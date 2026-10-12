@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,5 +207,100 @@ func TestRunHoldsTheStartupIdentityOfThisProcess(t *testing.T) {
 	}
 	if sha, _ := block["build_sha256"].(string); sha == "" || sha != buildinfo.BuildSHA256() {
 		t.Errorf("process.build_sha256 = %v, want the hash rows carry, %s", block["build_sha256"], buildinfo.BuildSHA256())
+	}
+}
+
+// A failed read is a moment, not a verdict. An antivirus or indexer lock on the freshly renamed file makes ONE read
+// fail, and the file's stat does not change afterwards, so a failure cached against the stat would read "unknown" for
+// the life of the process while the file is readable and differs: the deploy this block exists to report on.
+func TestStaleImageRetriesAfterATransientHashFailure(t *testing.T) {
+	s, _, _ := statusFixture(t)
+	path := filepath.Join(t.TempDir(), "local-offload.exe")
+	st := installImage(t, path, "0.182.0")
+	s.startup = &st
+	swapImage(t, path, imageBody("0.183.0"))
+	real := hashInstalledImage
+	fail := true
+	hashInstalledImage = func(p string) (string, error) {
+		if fail {
+			fail = false
+			return "", errors.New("the process cannot access the file because it is being used by another process")
+		}
+		return real(p)
+	}
+	t.Cleanup(func() { hashInstalledImage = real })
+
+	first := processBlock(t, s)
+	if _, present := first["stale_image"]; present {
+		t.Fatalf("a failed read must not answer either way: %v", first)
+	}
+	if note, _ := first["note"].(string); !strings.Contains(note, "cannot be read") {
+		t.Errorf("the failed read must be said, got note %q", note)
+	}
+	second := processBlock(t, s)
+	if second["stale_image"] != true || second["installed_version"] != "0.183.0" {
+		t.Fatalf("the file is readable on the next call and differs: the answer must be stale_image true, got %v", second)
+	}
+}
+
+// The same for the build marker, and a marker that cannot be read is said, not silently left out: installed_version
+// is absent, and the note says why. The hash that did succeed is kept (a 60 MB read is not repeated for it).
+func TestStaleImageRetriesAfterATransientMarkerFailureAndSaysSoMeanwhile(t *testing.T) {
+	s, _, _ := statusFixture(t)
+	path := filepath.Join(t.TempDir(), "local-offload.exe")
+	st := installImage(t, path, "0.182.0")
+	s.startup = &st
+	swapImage(t, path, imageBody("0.183.0"))
+	hashes := 0
+	realHash, realMark := hashInstalledImage, readInstalledVersion
+	hashInstalledImage = func(p string) (string, error) { hashes++; return realHash(p) }
+	failMark := true
+	readInstalledVersion = func(p string) (string, error) {
+		if failMark {
+			failMark = false
+			return "", errors.New("read error at the build marker")
+		}
+		return realMark(p)
+	}
+	t.Cleanup(func() { hashInstalledImage, readInstalledVersion = realHash, realMark })
+
+	first := processBlock(t, s)
+	if first["stale_image"] != true {
+		t.Errorf("the hash was read, so the comparison is made: %v", first)
+	}
+	if _, present := first["installed_version"]; present {
+		t.Errorf("an unreadable marker leaves installed_version out: %v", first)
+	}
+	if note, _ := first["note"].(string); !strings.Contains(note, "build marker") {
+		t.Errorf("the missing installed_version must be explained, got note %q", note)
+	}
+	second := processBlock(t, s)
+	if second["installed_version"] != "0.183.0" || second["stale_image"] != true {
+		t.Fatalf("the marker is readable on the next call: %v", second)
+	}
+	if _, present := second["note"]; present {
+		t.Errorf("a clean read carries no note: %v", second)
+	}
+	if hashes != 1 {
+		t.Errorf("only the failed read is retried: the installed file was hashed %d time(s), want once", hashes)
+	}
+}
+
+// A process whose own start-up hash failed has no build_sha256 to publish, and says so on EVERY path, the fast one
+// (the installed file's stat is the one the process started from) included: its ledger rows then carry no
+// harness_build_sha256 either, and nothing else on the status surface tells the reader why.
+func TestProcessBlockSaysWhenItsOwnStartupHashIsUnknown(t *testing.T) {
+	s, _, _ := statusFixture(t)
+	path := filepath.Join(t.TempDir(), "local-offload.exe")
+	st := installImage(t, path, "0.183.0")
+	st.SHA256 = "" // the self-hash failed at start, after the stat was taken
+	s.startup = &st
+	block := processBlock(t, s)
+	if _, present := block["build_sha256"]; present {
+		t.Fatalf("an unknown hash is absent, never invented: %v", block)
+	}
+	note, _ := block["note"].(string)
+	if !strings.Contains(note, "harness_build_sha256") || !strings.Contains(note, "self-hash") {
+		t.Fatalf("the missing hash must be explained (the self-hash failed, rows carry no harness_build_sha256), got note %q in %v", note, block)
 	}
 }

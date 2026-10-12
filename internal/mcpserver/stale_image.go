@@ -52,6 +52,10 @@ var hashInstalledImage = func(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// readInstalledVersion is the seam the installed file's build marker is read through (the audit's own reader), so a
+// test makes one read fail.
+var readInstalledVersion = gpulease.ReadBuildMarkerVersion
+
 // installedImages caches what the last moved installed file hashed and stated, keyed by its stat.
 type installedImages struct {
 	mu      sync.Mutex
@@ -116,7 +120,7 @@ func (c *installedImages) check(st buildinfo.Startup) imageCheck {
 	if !c.have || c.path != st.Path || c.size != fi.Size() || !c.mod.Equal(fi.ModTime()) {
 		c.path, c.size, c.mod, c.have = st.Path, fi.Size(), fi.ModTime(), true
 		c.sha, c.hashErr = hashInstalledImage(st.Path)
-		c.version, c.markErr = gpulease.ReadBuildMarkerVersion(st.Path)
+		c.version, c.markErr = readInstalledVersion(st.Path)
 	}
 	out := imageCheck{}
 	if c.markErr == nil {
