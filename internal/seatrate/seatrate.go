@@ -49,7 +49,7 @@ const (
 	// tokens on the 27B, measured: 213,785 prompt tokens over 12 steps in a
 	// 381 s wall of which ~300 s were the final answer). Named here so the
 	// note can print them and a reader can refute them.
-	toolStepTokens = 128
+	toolStepTokens  = 128
 	stepOverheadSec = 6
 )
 

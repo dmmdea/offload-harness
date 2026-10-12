@@ -205,7 +205,7 @@ func TestUnloadModelsKeepsSeatsPlacedOnOtherCardsAndTheMemoryStack(t *testing.T)
 	cards := threeCards()
 	roster := []string{"on-card-0", "on-card-2", "pair", "embed", "unpinned"}
 	var warn bytes.Buffer
-	got, ok := UnloadModels(context.Background(), scopedCfg(), roster, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
+	got, ok := UnloadModels(context.Background(), scopedCfg(), roster, nil, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
 	if !ok {
 		t.Fatal("a card lease has a list")
 	}
@@ -231,7 +231,7 @@ func TestUnloadModelsKeepsSeatsPlacedOnOtherCardsAndTheMemoryStack(t *testing.T)
 	if strings.Contains(out, "embed") {
 		t.Errorf("the memory stack is neither unloaded nor judged:\n%s", out)
 	}
-	if _, ok := UnloadModels(context.Background(), scopedCfg(), roster, nil, hostDeps(cards, false), nil); ok {
+	if _, ok := UnloadModels(context.Background(), scopedCfg(), roster, nil, nil, hostDeps(cards, false), nil); ok {
 		t.Error("a whole-node lease has no list: it holds every card, so the render lane keeps its own rule")
 	}
 }
@@ -241,7 +241,7 @@ func TestUnloadModelsKeepsSeatsPlacedOnOtherCardsAndTheMemoryStack(t *testing.T)
 func TestUnloadModelsOnABoxThatPlacesNothingUnloadsEveryModelButTheStack(t *testing.T) {
 	cards := threeCards()
 	var warn bytes.Buffer
-	got, ok := UnloadModels(context.Background(), config.Config{MemoryStack: []string{"embed"}}, []string{"a", "b", "embed"}, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
+	got, ok := UnloadModels(context.Background(), config.Config{MemoryStack: []string{"embed"}}, []string{"a", "b", "embed"}, nil, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
 	if !ok || len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Fatalf("list = %v ok=%v, want a and b", got, ok)
 	}
@@ -257,44 +257,75 @@ func TestUnloadModelsOnABoxThatPlacesNothingUnloadsEveryModelButTheStack(t *test
 func TestUnloadModelsOnALeaseThatHoldsEveryCardListsEveryModelButTheStack(t *testing.T) {
 	cards := threeCards()
 	all := []string{cards[0].LeaseID(), cards[1].LeaseID(), cards[2].LeaseID()}
-	got, ok := UnloadModels(context.Background(), scopedCfg(), []string{"on-card-0", "b", "embed"}, all, hostDeps(cards, false), nil)
+	got, ok := UnloadModels(context.Background(), scopedCfg(), []string{"on-card-0", "b", "embed"}, nil, all, hostDeps(cards, false), nil)
 	if !ok || len(got) != 2 || got[0] != "on-card-0" || got[1] != "b" {
 		t.Fatalf("three cards of three: list = %v ok=%v, want on-card-0 and b (even the seat layers put on card 0; the memory stack never leaves)", got, ok)
 	}
 	one := cards[:1]
-	got, ok = UnloadModels(context.Background(), config.Config{MemoryStack: []string{"embed"}}, []string{"a", "b", "embed"}, []string{one[0].LeaseID()}, hostDeps(one, false), nil)
+	got, ok = UnloadModels(context.Background(), config.Config{MemoryStack: []string{"embed"}}, []string{"a", "b", "embed"}, nil, []string{one[0].LeaseID()}, hostDeps(one, false), nil)
 	if !ok || len(got) != 2 {
 		t.Fatalf("the only card of a one-card box: list = %v ok=%v, want a and b", got, ok)
 	}
 	// Two of three is a card lease: the seat layers put on card 0 is placed on a leased card (0 and 1 are
 	// held), and the seat on card 2 is placed elsewhere.
-	got, ok = UnloadModels(context.Background(), scopedCfg(), []string{"on-card-0", "on-card-2", "embed"}, all[:2], hostDeps(cards, false), nil)
+	got, ok = UnloadModels(context.Background(), scopedCfg(), []string{"on-card-0", "on-card-2", "embed"}, nil, all[:2], hostDeps(cards, false), nil)
 	if !ok || len(got) != 1 || got[0] != "on-card-0" {
 		t.Fatalf("two cards of three: list = %v ok=%v, want on-card-0 only", got, ok)
 	}
 }
 
-// Without the roster the lease still has a list: the models the config declares (layers) and the
-// serving config lists, judged like any other. It is never the unknown list the render lane reads
-// as "every model off the memory stack".
-func TestUnloadModelsWithoutARosterJudgesTheModelsTheConfigDeclares(t *testing.T) {
+// A roster that could not be read is not an empty roster. Nothing says what is resident, so a list built
+// from the config alone is never complete: with layers only, a resident model neither the layers nor the
+// serving config name would never be judged and would stay on the leased card, and on a box that
+// declares nothing the list would be empty and the lane would unload nothing. The answer is no list
+// (ok false) whatever the config declares: the render lane keeps its own rule, every model off the
+// memory stack, and the lane says why. A roster handed along with the error is ignored.
+func TestUnloadModelsWithAnUnreadableRosterMakesNoListAndSaysWhy(t *testing.T) {
 	cards := threeCards()
-	var warn bytes.Buffer
+	for name, cfg := range map[string]config.Config{
+		"no layers and no serving config": {MemoryStack: []string{"embed"}},
+		"layers only":                     scopedCfg(),
+		"layers and a serving config":     servingCfg(t),
+	} {
+		for _, roster := range [][]string{nil, {"on-card-0", "stray-model", "embed"}} {
+			var warn bytes.Buffer
+			got, ok := UnloadModels(context.Background(), cfg, roster, errors.New("roster refused"), []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
+			if ok || got != nil {
+				t.Errorf("%s, roster %v: list = %v ok=%v, want no list: the lane keeps its own rule", name, roster, got, ok)
+			}
+			if env := UnloadEnv(got, ok); env != "" {
+				t.Errorf("%s, roster %v: env = %q, want the variable unset, never the none sentinel", name, roster, env)
+			}
+			for _, want := range []string{"roster could not be read", "roster refused", "own rule"} {
+				if !strings.Contains(warn.String(), want) {
+					t.Errorf("%s, roster %v: the lane must say %q:\n%s", name, roster, want, warn.String())
+				}
+			}
+			if strings.Contains(warn.String(), "unloaded, ") || strings.Contains(warn.String(), "left resident, ") {
+				t.Errorf("%s, roster %v: nothing is judged when the roster cannot be read:\n%s", name, roster, warn.String())
+			}
+		}
+	}
+}
+
+// A roster that WAS read and is empty means nothing is resident: the card lease still has a list (the
+// none sentinel on a box that places nothing), never the unset variable, and a seat placed on another
+// card is never on it.
+func TestUnloadModelsWithAnEmptyRosterThatWasReadStillHasAList(t *testing.T) {
+	cards := threeCards()
 	for _, roster := range [][]string{nil, {}} {
-		warn.Reset()
-		got, ok := UnloadModels(context.Background(), scopedCfg(), roster, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
+		got, ok := UnloadModels(context.Background(), config.Config{MemoryStack: []string{"embed"}}, roster, nil, []string{cards[2].LeaseID()}, hostDeps(cards, false), nil)
+		if !ok || UnloadEnv(got, ok) != "GPU_LEASE_UNLOAD_MODELS=-" {
+			t.Errorf("roster %v, nothing placed: list = %v ok=%v, want the none sentinel", roster, got, ok)
+		}
+		got, ok = UnloadModels(context.Background(), scopedCfg(), roster, nil, []string{cards[2].LeaseID()}, hostDeps(cards, false), nil)
 		if !ok {
-			t.Fatalf("roster %v: a card lease always has a list", roster)
+			t.Fatalf("roster %v: a card lease with a read roster has a list", roster)
 		}
-		have := map[string]bool{}
 		for _, id := range got {
-			have[id] = true
-		}
-		if len(got) != 2 || !have["on-card-2"] || !have["pair"] {
-			t.Errorf("roster %v: list = %v, want the config's two seats on card 2 (the seat on card 0 stays)", roster, got)
-		}
-		if !strings.Contains(warn.String(), "roster") {
-			t.Errorf("roster %v: the lane must say it worked from the config's models: %q", roster, warn.String())
+			if id == "on-card-0" || id == "embed" {
+				t.Errorf("roster %v: %q must not be unloaded by a card-2 lease: list %v", roster, id, got)
+			}
 		}
 	}
 }
@@ -307,7 +338,7 @@ func TestUnloadModelsWithoutACardTableUnloadsEveryModelAndSaysWhy(t *testing.T) 
 		return nil, "", errors.New("no smi")
 	}
 	var warn bytes.Buffer
-	got, ok := UnloadModels(context.Background(), scopedCfg(), []string{"on-card-0", "on-card-2", "embed"}, []string{"gpu-cccc3333-dddd-eeee-ffff-000000000000"}, d, &warn)
+	got, ok := UnloadModels(context.Background(), scopedCfg(), []string{"on-card-0", "on-card-2", "embed"}, nil, []string{"gpu-cccc3333-dddd-eeee-ffff-000000000000"}, d, &warn)
 	if !ok || len(got) != 2 {
 		t.Fatalf("list = %v ok=%v, want both seats (the doubt unloads), the memory stack still kept", got, ok)
 	}

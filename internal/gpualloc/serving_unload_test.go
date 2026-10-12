@@ -3,6 +3,7 @@ package gpualloc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -69,7 +70,7 @@ func TestUnloadModelsPlacesWhatLayersDoNotDeclareFromTheServingConfig(t *testing
 		"yaml-unpinned", "yaml-cmd-only", "yaml-proxy", "yaml-macro", "not-in-yaml", "on-card-0", "embed",
 	}
 	var warn bytes.Buffer
-	got, ok := UnloadModels(context.Background(), servingCfg(t), roster, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
+	got, ok := UnloadModels(context.Background(), servingCfg(t), roster, nil, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
 	if !ok {
 		t.Fatal("a card lease has a list")
 	}
@@ -98,7 +99,7 @@ func TestUnloadModelsSaysOnceWhenTheServingConfigCannotBeRead(t *testing.T) {
 	cfg := scopedCfg()
 	cfg.ServingConfigPath = filepath.Join(t.TempDir(), "gone.yaml")
 	var warn bytes.Buffer
-	got, ok := UnloadModels(context.Background(), cfg, []string{"on-card-0", "on-card-2", "x", "y"}, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
+	got, ok := UnloadModels(context.Background(), cfg, []string{"on-card-0", "on-card-2", "x", "y"}, nil, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
 	if !ok {
 		t.Fatal("a card lease has a list")
 	}
@@ -111,7 +112,7 @@ func TestUnloadModelsSaysOnceWhenTheServingConfigCannotBeRead(t *testing.T) {
 	}
 	// With layers declaring every model the serving config is never needed, so it is never read.
 	warn.Reset()
-	if _, ok := UnloadModels(context.Background(), cfg, []string{"on-card-0", "on-card-2"}, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn); !ok {
+	if _, ok := UnloadModels(context.Background(), cfg, []string{"on-card-0", "on-card-2"}, nil, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn); !ok {
 		t.Fatal("a card lease has a list")
 	}
 	if strings.Contains(warn.String(), "serving config") {
@@ -119,11 +120,28 @@ func TestUnloadModelsSaysOnceWhenTheServingConfigCannotBeRead(t *testing.T) {
 	}
 }
 
-// Without the roster the candidates are the models layers declare and the serving config lists.
-func TestUnloadModelsWithoutARosterAlsoListsTheServingConfigsModels(t *testing.T) {
+// The serving config's models are not a substitute for a roster that could not be read: the yaml says
+// what the box can serve, not what is resident. With the read failed there is no list, whatever the yaml
+// names, and nothing is judged.
+func TestUnloadModelsWithAnUnreadableRosterDoesNotFallBackToTheServingConfigsModels(t *testing.T) {
 	cards := threeCards()
 	var warn bytes.Buffer
-	got, ok := UnloadModels(context.Background(), servingCfg(t), nil, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
+	got, ok := UnloadModels(context.Background(), servingCfg(t), nil, errors.New("roster refused"), []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
+	if ok || got != nil {
+		t.Fatalf("list = %v ok=%v, want no list: the render lane keeps its own rule", got, ok)
+	}
+	for _, id := range []string{"yaml-card2", "yaml-pair", "yaml-proxy", "yaml-unpinned", "on-card-2", "pair"} {
+		if strings.Contains(warn.String(), id) {
+			t.Errorf("%s is a candidate of the config, not of a roster: it must not be judged:\n%s", id, warn.String())
+		}
+	}
+}
+
+// With the roster read and empty the candidates are the models layers declare and the serving config lists.
+func TestUnloadModelsWithAnEmptyRosterThatWasReadAlsoListsTheServingConfigsModels(t *testing.T) {
+	cards := threeCards()
+	var warn bytes.Buffer
+	got, ok := UnloadModels(context.Background(), servingCfg(t), nil, nil, []string{cards[2].LeaseID()}, hostDeps(cards, false), &warn)
 	if !ok {
 		t.Fatal("a card lease has a list")
 	}

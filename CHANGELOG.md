@@ -183,6 +183,8 @@ red, the file is restored byte for byte).
   `render/testdata/wan22-single-graphs.json` (made by the builder as it stood at the 0.181.0 release tip) and no warning. The VAE and
   text-encoder loaders swapped for their multi-GPU twins in the single graph each fail all nine of its graphs (the VAE one passed the old tests).
 
+## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
+
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)
 
 - **The defect (register F15, from the 0.176.0 notes).** The render helper cleared "every non-keep-set model whatever card it sits
@@ -212,16 +214,24 @@ red, the file is restored byte for byte).
 - **What a lease unloads.** `LeaseScope.Judge`: a model placed on a leased card goes; **a model placed on another card, by `layers`
   or by the serving config pin, stays** (the F15 gain); a model whose placement is unknown goes, exactly as before F15, because
   the render needs its card (a `proxy:` seat with no `layers` entry is unloaded under any card lease); the memory stack never goes.
+  That judgement runs on a roster that was READ. A roster that could not be read is not judged at all: see "A card lease gets a
+  list" below.
   A lease that names every card the table lists is still the whole node (`holdsAll`: a one-card box's only card, all three of
   three). `Touches` is the same reading, so the drain and the agent seat agree with the unload. The card table unreadable: every
   model is unknown and goes, as before.
 - **The lane says what it did and why.** One line per reason, from `gpualloc.Explain`, in the wrapper's stderr and the media
   admission's log: `unloaded, placed on a leased card by layers: ...`, `left resident, placed elsewhere by the serving config
   pin: ...`, `unloaded, placement unknown (it is a proxy: seat, ...): ...`. The render helper logs the models it left on a list.
-- **A card lease always gets a list.** `wrapperUnloadEnv` (`gpu reserve --devices`) and the media admission's `unloadEnv` export
-  `GPU_LEASE_UNLOAD_MODELS=-` when there is nothing to unload (no endpoint, nothing the verdicts select) instead of leaving the
-  variable unset; with the roster unreadable the candidates are the models `layers` declare and the serving config lists. Only a
-  whole-node lease has no list. `gpu reserve --unload-seat` judges the other residents with the same verdicts.
+- **A card lease gets a list, unless the roster could not be read.** `wrapperUnloadEnv` (`gpu reserve --devices`) and the media
+  admission's `unloadEnv` export `GPU_LEASE_UNLOAD_MODELS=-` when there is nothing to unload (no endpoint, nothing the verdicts
+  select) instead of leaving the variable unset. A whole-node lease has no list, and neither has a card lease whose llama-swap
+  roster could not be read: that is not an empty roster, nothing says what is resident, and a list built from the config alone is
+  never complete (with `layers` only, a resident model neither they nor the serving config name would never be judged and would
+  stay on the leased card; with neither, the list is empty and the lane unloads nothing). `gpualloc.UnloadModels` takes the
+  roster read's error and returns no list for it, whatever the config declares, so the variable stays unset and
+  `render/gpu-lock.mjs` keeps its own rule, every model off the memory stack, exactly as before F15; the wrapper and the media
+  admission log that they fell back because the roster could not be read. A roster that was read and is empty means nothing is
+  resident and is judged like any other. `gpu reserve --unload-seat` judges the other residents with the same verdicts.
 - **Between renders.** The unload is elected once per lease, so a seat that came back onto the leased cards stayed for the rest of
   the lease. A job that lost the election under a card lease with a non-empty list now reads that list against `/running` again
   before it submits (`withGpuSlot` `reclear`); `freeLlamaSwap` unloads a listed model only when it is resident, so a card that is
@@ -233,19 +243,23 @@ red, the file is restored byte for byte).
   that ignores the serving config pins). `internal/gpualloc`: a model nothing places is on the list, the serving config's pins place a
   model `layers` do not (UUID, index with and without the PCI order, alias, a pair spanning the leased card), `layers` outrank the
   serving config, a `proxy:` seat, an entry with no env pin and a cmd-only pin are unknown, an unreadable or unset serving config
-  is said once, no roster judges what the config declares and lists, no card table unloads every model, the memory stack stays out
+  is said once, an unreadable roster makes no list whatever the config declares (nothing placed, `layers` only, `layers` and a serving config) while a roster read and empty still has one, no card table unloads every model, the memory stack stays out
   even when placed on a leased card, a lease on every card is the whole node. Root: the same through `unloadModelsFor`,
   `--unload-seat` (layers and the serving config), the wrapper form end to end, the roster-unreadable and no-endpoint wrappers,
-  the unplaceable pin and the unreadable table. Pipeline: an unreadable roster still hands the call a list; the serving config
+  the unplaceable pin and the unreadable table. Pipeline: an unreadable roster hands the call no list and says why; the serving config
   keeps a model on card C off card A's list. `render/`: a later job re-clears under a card lease with a list and under no other,
   a card lease with no list says so and unloads as before, a list names what stays. `internal/modelaffinity`: a media lease fences
   its own cards through every door exactly as an exclusive text lease does and lets a free card through, and the fence starts when
   the drain ends. Each rule has a mutant that turns its test red (unknown stays, serving pins ignored, the proxy rule, the PCI
   order rule, the serving config outranking `layers`, aliases, the hold-every-card reading, the memory-stack filter, the verdicts
-  in `--unload-seat`, the unset variable on a roster error and on a missing endpoint, the pipeline's roster fallback, the media
+  in `--unload-seat`, the unset variable on a missing endpoint, the roster-error branch of `UnloadModels` and each caller dropping the roster error, the media
   clause, the draining clause and the per-card scoping of the fence, the Node no-list log, the re-clear and its card condition,
   the left-resident log).
-- **Not changed, and not verified here.** First and most important for a box without `layers`: the unload now knows from the
+- **Not changed, and not verified here.** First, a limit of the fix: the roster read is the one input the unload cannot check. When
+  it fails, F15's gain is off for that lease: the render lane keeps its own rule and unloads every model off the memory stack, the
+  seats placed on other cards included, and says so; this is the safe direction (a card that stays occupied fails the render, a
+  seat that is reloaded costs a warm-up), chosen over a list built from the config, which can leave a resident model on the leased
+  card. A roster that was read and is empty is trusted to mean nothing is resident. Second, for a box without `layers`: the unload now knows from the
   serving config which card a model is on, and the load fence does not. The fence (`modelaffinity`, armed from `config.ModelPins`)
   still places a model through `layers` only, so on such a box a text load waits for any media lease, whatever card it is on,
   exactly as before this change; reading the serving config there is a separate change. Also: a client that is not the harness can still load a model onto a leased card; the re-clear removes it
@@ -302,6 +316,15 @@ red, the file is restored byte for byte).
   FLEET-NODE.md, the operator guide): a list of numbers, booleans or enum values (quoted by the grammar, converted back by the
   re-pack's coercion), a type list, `anyOf`, `oneOf`, `allOf` and `$ref`. Every property a schema lists is required by the grammar,
   at every depth, whether or not the schema's own `required` names it.
+- **The coercion follows the schema to every depth.** The conversion above was promised at every depth and done at the top level only
+  (`coerceToSchemaNoted` read the schema's top-level properties and the items of top-level lists), so a numeric or boolean list inside an
+  object or inside a list of objects could never validate on a seat that obeys the grammar: every grammar attempt failed `at
+  '/meta/scores/0': got string, want number`, and the delegator's one-completion rescue could not deliver such a schema at all. It now
+  reads every property and every list item along the schema's `properties` and `items`, with the same lossless rule and the same
+  full re-validation, and the note names a nested field by its path (`meta.scores (2 items)`, `rows[].scores (3 items)`, `meta.owner.id`);
+  the top level is named as before. Red before: `internal/pipeline/agenttask_repackcoerce_nested_test.go` (the table; the premise that the
+  grammar quotes the list and refuses the real one; a seat that obeys the grammar, through `repackStructured` and through a run). Six
+  mutations of the fix were each caught.
 
 ### Fixed — a structured re-pack is owed the time its own answer needs, so a loop that overran a short wall no longer skips it (F44/C13)
 
@@ -332,7 +355,7 @@ red, the file is restored byte for byte).
 - **Tests.** `internal/pipeline/agenttask_repackowed_test.go`: a 2 s wall and a loop that ends at 2.4 s (red before: `skipped: 0 s left to
   the wall + 0 s grace`), a slow seat with an instant loop (red before: `60 s left ... buys 29 tokens < the answer's 69`), the ceiling that
   cannot hold it, the owed time not renewed for a later attempt, `repackOwed` and the later-of-two-ends arithmetic. Two tests whose premise
-  was the defect (`TestRunAgentTaskRepackIsSkippedWhenTheWallCannotBuyTheAnswer`, the review-lane subtest `a re-pack the wall could not buy`)
+  was the defect (`TestRunAgentTaskRepackIsSkippedWhenTheCeilingCannotBuyTheAnswer`, the review-lane subtest `a re-pack the wall could not buy`)
   now pin the ceiling-bound skip. Four mutations of the fix were each caught. ADR 0055 item 10, `docs/systems/fleet-node.md`.
 
 ### Fixed — a re-pack that loops is asked differently the next time, and a looped list is not published (C14)
@@ -352,8 +375,12 @@ red, the file is restored byte for byte).
   the cap) does not. The lane on the wire reads `grammar+no-repeat`, `json_schema+no-repeat` or `chat+no-repeat`. A complete object whose
   list repeats one item (or a block of two or three) at least 6 times in a row, where the answer it was written from holds the item fewer
   times, is not published: the attempt fails as `re-pack repeated the list item "x" N times in a row ...`, marks the call, and ends as an
-  abstention naming the item when every attempt does it. The detector keeps its two original tests and their order and adds a third pass
-  for a block of 65 to 192 bytes in the last 1,024 (whitespace still reads the last 256).
+  abstention naming the item when every attempt does it. An item may be a string, a number, a boolean, an object or a list (F43 lets a
+  llama.cpp seat write a list of objects, and a loop closes inside those as well): an object or a list is compared by its compact JSON with
+  the keys sorted, one that holds nothing but empty values (`{}`, `""`, `0`, `false`) is never a loop, the answer is taken to hold an object
+  as often as it holds the longest string in it (an object with no string in it is judged by its repeat alone), a finding clips a long item
+  to 100 bytes, and every list is read at every depth, named by its path (`meta.labels`, `rows[2].tags`). The detector keeps its two original
+  tests and their order and adds a third pass for a block of 65 to 192 bytes in the last 1,024 (whitespace still reads the last 256).
 - **Chosen, not measured, and unverified.** `frequency_penalty` 0.5, the run of 6, the period of 3, the 1,024/192 window. No seat was
   replayed with the penalty: that it ends a loop on the fleet's seats is the mechanism's expectation, and its fidelity cost on an honest copy
   (paid only on an attempt after a failure) is unmeasured. llama.cpp's sampler (count in the last `penalty_last_n` tokens times the penalty,
@@ -363,6 +390,8 @@ red, the file is restored byte for byte).
   same length before it defers. Compiling `maxItems` into the grammar was left out: it cannot be verified without a live llama.cpp compile.
 - **Tests.** `internal/pipeline/agenttask_repackloop_test.go` (a greedy-seat fake that loops until the request is conditioned: red before on
   the register's own shape, `attempt 2/3 ... chat re-pack truncated ... degenerate`; the published repeated list; the detector),
+  `internal/pipeline/repack_objectloop_test.go` (a list of objects, a list of lists and a list at depth: the detector's table, and a seat that
+  obeys the grammar and loops inside it, end to end: red before, the eight-object list was published as the result),
   `internal/llamaclient/frequencypenalty_test.go` (the key only on request, the option-free body byte-identical). Three existing tests
   pinned the old flow (a loop goes straight to the chat lane) and now pin the new one; the chat lane's time-skip test moved to a cut that is
   no loop. 18 mutations of the fix were each caught (the run threshold survived once because its test was written in terms of the constant,
@@ -548,7 +577,10 @@ red, the file is restored byte for byte).
   and `TopDeferReasons` default the same way (`SummarizeFileWith` / `TopDeferReasonsWith` include them), `ledger.ReadProduction`
   and `ledger.ProductionRows` are the filtered readers, and `ledger.ReadAll` stays the raw one. The confidence calibration, the
   tier health report, the router and the correctness head are fitted on production rows only: a fixture's margin would move the
-  live thresholds. `TestEveryRawLedgerReaderFiltersTestTraffic` fails when a new report reads the raw rows without dropping them.
+  live thresholds. The calibration, the health report and the router read the file with their own scanners, and they judge the rows
+  TOGETHER (`ledger.ProductionRows`), so the inner `agent` row of a measurement-pinned job, which names its parent and carries no
+  class of its own, leaves with its parent as it does in the views above (a first version judged each row alone and counted it).
+  `TestEveryRawLedgerReaderFiltersTestTraffic` fails when a new report reads the raw rows without dropping them.
 - **PAIR.** A process with a run class opens no card (`pairworkloads.Config.Suppressed`, through the gate every card already
   uses) and asks no fleet node to card its jobs: an asker with no emitter sends `X-Offload-Pair-Card: node`, which would have put
   the card back on the node, so a suppressed asker sends the asker name and no card header. A delegation pinned for `measurement`
@@ -574,7 +606,9 @@ red, the file is restored byte for byte).
   `TestARemoteCallThroughTheMeasureDoorOpensNoCardButStillWritesItsRow` (pairworkloads);
   `TestAMeasurementPinnedDelegationOpensNoPairCard`, `TestAMeasurementPinnedDispatchAsksNoNodeToCard` (delegate);
   `TestLedgerCommandLeavesOutTestTrafficAndSaysSo`, `TestLoupeLeavesOutTestTrafficAndSaysSo`, `TestStatsAndAuditSampleLeaveOutTestTraffic`
-  (root); the four `...ProductionRowsOnly` tests of the health, calibration, router and confhead packages.
+  (root); the four `...ProductionRowsOnly` tests of the health, calibration, router and confhead packages, and the inner-row twins of
+  three of them (`TestHealthLeavesOutTheInnerRowOfALabelledJob`, `TestRouterTrainsWithoutTheInnerRowsOfALabelledJob`,
+  `TestCalibrationLeavesOutTheInnerRowsOfALabelledJob`: red before, three mutants each caught).
 
 ### Added — a busy whole-node graph is a ticket in the cluster queue, and a node's "I do not hold this file" is about that ticket only (S5, ADR 0083 Amendment 1)
 
@@ -895,6 +929,15 @@ red, the file is restored byte for byte).
   - The log line for a read that is given up on is once per stalled read; the line for a caller that stops waiting (the 20 s bound of one file) is one per file it stopped waiting for, and no test pins that one.
   - `mediacap.ImageRecipe` has no production caller (its comment says so); it stays because tests and documents name it, and
     deleting it is a separate cleanup.
+- **Found in the integration review, fixed.** (1) The lane reading a call hands its ticket's first scan was dated from the ticket and not
+  from the question: the door asks the lane, then waits on the identity (up to 20 s for each weight file), then makes the ticket, so a lane
+  that freed during that wait was still taken for held and the ticket waited one more scan or went to an idle node. The reading now carries
+  the instant it was made and the scan reuses it only inside the 2 s `verdictFresh`
+  (`TestTheFirstScanReusesTheLaneReadingOnlyWhileItIsFresh`, three mutants caught). (2) The batch's order, the lane first and the
+  identity only after a held lane, was pinned for the single call and not for `generate-image --batch`: moving the identity above the
+  lane question passed every test of the package. `TestBatchOnAFreeLaneNeverWaitsOnAFingerprintRead` (every read held, the batch returns,
+  zero reads) and its control `TestBatchOnABusyLaneReadsTheFingerprintsOnlyAfterTheLaneWasAsked` now pin it, and the mutant that builds the
+  identity first is killed by both.
 
 ### Fixed — the hardening batch: a console close at any stage of `gpu reserve`, `gpu owner-flags --config`, voice cards, honest cause wording, and the host-RAM guard's loose ends (F55, F56, F57, F58, F60, F63)
 

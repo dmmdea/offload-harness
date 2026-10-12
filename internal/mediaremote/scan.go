@@ -130,8 +130,10 @@ type liveTicket struct {
 	firstAt time.Time
 }
 
-// verdictFresh is how long the reading a call made at creation may stand in for the first scan's. Chosen.
-const verdictFresh = 2 * time.Second
+// verdictFresh is how long the reading a call made when it asked the lane may stand in for the first scan's: the age counts from
+// the question (firstAt), not from the ticket, because the call can wait on its identity between the two. Chosen. A var so a
+// test can shorten it, as firstScanBound.
+var verdictFresh = 2 * time.Second
 
 // notCapableAgain is how long a ticket leaves a node that refused it at the door (the graph names a file the node does not
 // hold) before it asks that node again. Chosen, not measured: the longest pause the placer puts on any node (maxCooldown), because
