@@ -102,9 +102,9 @@ const (
 type ResultWire struct {
 	Node string `json:"node"`
 	Seat string `json:"seat"`
-	// Placement is the placement REASON, a string — the opencode plugin and
-	// fleet_smoke read it as text (council R4), so the composite decision is
-	// published beside it as Placed, never folded into it.
+	// Placement is the placement REASON, a string — read as text (council R4) — so the composite decision is
+	// published beside it as Placed, never folded into it. Where the subtask RAN is RanOn, not a word in this text:
+	// the opencode plugin reads RanOn first and this text only when a result has none.
 	Placement string `json:"placement"`
 	// RanOn (D-32) says where the subtask RAN, as a closed value: RanOnLocal, the delegator's own seat, or RanOnNode, a
 	// fleet node. Absent when no seat ran the work (a defer, a shed, a refusal chain, a subtask that never started) and on a
@@ -426,6 +426,14 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 		// Set beside, not inside, the literal above: a key longer than every other would
 		// re-align the whole block.
 		rw.RepackAttemptsDetail = firstRepackAttempts(pr.Result.RepackAttemptsDetail, wireRepackAttemptsMax)
+		// Where it ran (D-32): the one decision that already writes the hint clause and the pin tallies. A result no
+		// seat ran (placedNowhere) keeps the key off the row.
+		switch placedWhere(pr) {
+		case placedLocal:
+			rw.RanOn = RanOnLocal
+		case placedRemote:
+			rw.RanOn = RanOnNode
+		}
 		if pr.Err != "" {
 			rw.Failed = true
 			rw.Reason = pr.Err

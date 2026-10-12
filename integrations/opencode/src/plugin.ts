@@ -768,7 +768,20 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
 // read exactly as before.
 const HINT_CLAUSE = /^route=(?:local|remote) was a hint \(no pin_reason\)(?:, (?:honoured|overridden): placed on ([^;]+))?/;
 
-export function ranLocally(placement: string): boolean {
+// The part of a published result that says where it ran: `ran_on` ("local" or "node", D-32), stamped by the delegator from the
+// decision that writes the hint clause, and the placement text it always carried. `ran_on` is absent on a result no seat ran
+// (a defer, a shed) and on a result from a node that predates it.
+export type WhereRan = { ran_on?: string; placement?: string };
+
+// Where a result ran. Given a result, `ran_on` decides when it says "local" or "node"; any other value (absent, or one a later
+// node adds) falls back to the placement text, read as it always was. Given the placement text alone, that reading.
+export function ranLocally(result: string | WhereRan): boolean {
+  if (typeof result !== "string") {
+    if (result.ran_on === "local") return true;
+    if (result.ran_on === "node") return false;
+    return ranLocally(result.placement ?? "");
+  }
+  const placement = result;
   const clause = HINT_CLAUSE.exec(placement);
   if (clause?.[1] !== undefined) return clause[1] === "the local seat";
   return /local/i.test(clause ? placement.slice(clause[0].length) : placement);
@@ -780,10 +793,10 @@ export function delegateDigest(raw: string): string | null {
   try {
     const start = raw.indexOf("{");
     if (start < 0) return null;
-    const parsed = JSON.parse(raw.slice(start)) as { summary?: Record<string, number>; results?: Array<{ placement?: string; deferred?: boolean; reason?: string; retried_on?: string; failed?: boolean }> };
+    const parsed = JSON.parse(raw.slice(start)) as { summary?: Record<string, number>; results?: Array<{ ran_on?: string; placement?: string; deferred?: boolean; reason?: string; retried_on?: string; failed?: boolean }> };
     const results = parsed.results ?? [];
     if (results.length === 0) return null;
-    const local = results.filter((r) => ranLocally(r.placement ?? "")).length;
+    const local = results.filter((r) => ranLocally(r)).length;
     const remote = results.length - local;
     const infra = parsed.summary?.infrastructure ?? 0;
     const deferred = results.filter((r) => r.deferred).length;
