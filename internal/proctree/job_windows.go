@@ -223,7 +223,7 @@ func start(cmd *exec.Cmd, opts Options) (*Tree, error) {
 			return nil, fmt.Errorf("proctree: the command (pid %d) could not be put in a job object, so --die-with-wrapper cannot be honoured: %w", cmd.Process.Pid, aerr)
 		}
 		// Run it uncontained rather than not at all.
-		t.warning ="the command could not be put in a job object (" + aerr.Error() + "); it runs uncontained"
+		t.warning = "the command could not be put in a job object (" + aerr.Error() + "); it runs uncontained"
 		_ = job.Close()
 	} else {
 		t.p.job = job

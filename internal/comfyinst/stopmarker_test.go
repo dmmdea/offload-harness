@@ -180,7 +180,7 @@ func TestPIDsOfOtherLeasesIgnoresAMarkerWhosePidWasRecycled(t *testing.T) {
 	dir := t.TempDir()
 	host := newHost()
 	host.alive[102], host.alive[106] = true, true
-	host.start[102] = 1_760_000_000_000 - 4000   // the instance, begun just before its marker
+	host.start[102] = 1_760_000_000_000 - 4000    // the instance, begun just before its marker
 	host.start[106] = 1_760_000_000_000 + 600_000 // a process that began ten minutes after the marker: a recycled pid
 	writeMarker(t, dir, ".offload-launch-theirs.json", keyedMarker(8190, 102, 8, map[string]any{"key": "theirs"}))
 	writeMarker(t, dir, ".offload-launch-stale.json", keyedMarker(8191, 106, 9, map[string]any{"key": "stale"}))
