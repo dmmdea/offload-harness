@@ -6,6 +6,10 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Security — golang.org/x/net v0.60.0
+
+- The module requires golang.org/x/net v0.60.0 (was v0.58.0), with golang.org/x/text v0.42.0 and golang.org/x/sync v0.23.0 that it brings. A binary scan of the 0.181.0 release (`govulncheck -mode=binary`) found five advisories in x/net v0.58.0 that the code does not call: GO-2026-6603, GO-2026-6610, GO-2026-6611, GO-2026-6612 and GO-2026-6617, all fixed in v0.60.0. After the bump, `govulncheck ./...` reports no vulnerabilities in the module, and none in the tools/llamaswap and tools/comfyui modules.
+
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)
