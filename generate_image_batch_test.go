@@ -448,6 +448,36 @@ func TestBatchPayloadReportsRefineFallbacksOnlyWhereTheyWereMeasured(t *testing.
 	}
 }
 
+// A batch that rendered here on the card-only placement says which two cards it ran on, on every item it rendered, in the JSON
+// the command prints (the item's own JSON is laid under its row). A row no warm item stands for, and a warm item of a batch that
+// held no pair, carry no devices key.
+func TestBatchPayloadCarriesTheCardsAWarmItemRanOn(t *testing.T) {
+	pair := []string{"gpu-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee", "gpu-cccc3333-dddd-eeee-ffff-000000000000"}
+	rows := []mediaremote.BatchRow{
+		{I: 0, Out: "a", OK: true, Verdict: mediaremote.VerdictRendered},
+		{I: 1, Out: "b", OK: true, Verdict: mediaremote.VerdictRendered},
+		{I: 2, Out: "c", OK: true, Verdict: mediaremote.VerdictRendered},
+	}
+	b := &mediaremote.Batch{Rows: rows, Mode: mediaremote.ModeWarm, WarmJobs: []int{0, 1}}
+	warm := []pipeline.ImageBatchItem{{Out: "a", OK: true, Devices: pair}, {Out: "b", OK: true, Devices: pair}}
+	items := batchPayload(b, config.FamilyInfo{}, true, warm, false)["items"].([]map[string]any)
+	for i := 0; i < 2; i++ {
+		got, ok := items[i]["devices"].([]any)
+		if !ok || len(got) != 2 || got[0] != pair[0] || got[1] != pair[1] {
+			t.Errorf("item %d printed devices = %v, want the pair %v", i, items[i]["devices"], pair)
+		}
+	}
+	if _, has := items[2]["devices"]; has {
+		t.Errorf("item 2 was not rendered by the warm call, so it names no cards of this machine: %v", items[2])
+	}
+	plain := []pipeline.ImageBatchItem{{Out: "a", OK: true}, {Out: "b", OK: true}}
+	for i, it := range batchPayload(b, config.FamilyInfo{}, true, plain, false)["items"].([]map[string]any) {
+		if _, has := it["devices"]; has {
+			t.Errorf("item %d of a batch that held no pair printed devices: %v", i, it)
+		}
+	}
+}
+
 // Where the recipe was never compared (serial), the printed batch must not stamp THIS machine's family and licence on a
 // picture some node rendered: the item carries the node's own words, and the header names no family at all.
 func TestBatchPayloadSerialCarriesNoLocalFamilyOrLicense(t *testing.T) {

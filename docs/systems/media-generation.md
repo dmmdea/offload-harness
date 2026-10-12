@@ -459,6 +459,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 |---|---|
 | Image | `imagegen_family`, `imagegen_ckpt`, `imagegen_vae`, `imagegen_steps/cfg/sampler/scheduler`, `imagegen_preset/clip/lora/lora_strength/shift` (qwen-image knobs), `imagegen_pool_vvram_gb/pool_compute/pool_donor` (krea2 pooled loading), `imagegen_refiner_model/refiner_timeout_sec` (opt-in prompt refiner) |
 | Inpaint | `inpaint_ckpt`, `inpaint_vae`, `inpaint_steps/cfg/sampler/scheduler` |
+| Card-only placement (opt-in, unset by default) | `imagegen_placement`, `gen_edit_placement`: `""`/`single` (the one-card lease every box has always taken) or `multicard` (the two non-display cards of the box; "Card-only image and edit"); both are family-overlay keys |
 | Generative edit | `gen_edit_script`, `gen_edit_unet`, `gen_edit_preset` (`full`/`lightning8`/`lightning4`), `gen_edit_clip/vae/lora/lora_strength`, `gen_edit_steps/cfg/sampler/scheduler`, `gen_edit_megapixels` (0 = follow the source, held within 0.9-2.0), `gen_edit_timeout_sec` |
 | Upscale | `upscale_script` (shipped default `render/comfy-upscale.mjs`), `upscale_model` (ComfyUI `upscale_models/` filename; empty = `videogen_upscale_model`), `upscale_timeout_sec` (600) |
 | Video | `videogen_family` (`""`/`wan22` = Wan 2.2; `ltx25` = LTX-2.5 joint-AV), `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model`, `videogen_wan_virtual_vram_gb`, `videogen_wan_decode` (`tiled` default; `plain`/`auto` opt-in) (Wan keys); `videogen_transformer`, `videogen_video_vae`, `videogen_audio_vae`, `videogen_latent_upscaler`, `videogen_fps`, `videogen_pool_vvram_gb/pool_compute/pool_donor` (LTX-2.5 keys) |
@@ -692,8 +693,8 @@ card's (with it on the compute card the measured call, 3.0 + 12.2 = 15.2 GiB, wo
 33 GiB set): a `--reserve-vram` above 4.7 GiB no longer fits the donor blocks on a 15.9 GiB storage card, and that call takes the ordinary
 estimate (the lease it needs then declares the whole set, or `--ram 0` explicitly). One card, three (a whole-node lease), no card table,
 no fit, another family or no flag keep the ordinary estimate, the whole set (33 GiB). Measured host growth in the benchmark was 2.3 GiB
-over ComfyUI's idle, inside the headroom the brake keeps anyway. The pipeline's media admission has no multicard door: every typed door leases one card, so the placement
-is reached through the render helper under an explicit `gpu reserve --devices`.
+over ComfyUI's idle, inside the headroom the brake keeps anyway. The typed VIDEO door has no multicard door yet (it leases one card, or its pool's), so the Wan placement
+is reached through the render helper under an explicit `gpu reserve --devices`; the typed image and edit doors have one ("Card-only image and edit", below).
 A driver script that wraps the helper is not itself a recognised render helper, so a lease around the script declares the media class
 default (the largest bound family's figure) whatever the helper inside it does; the verb says so on a second line (F71), and the way out
 is `--ram 0` on that `gpu reserve`, because the card-only placement keeps its weights on the two cards.
@@ -725,6 +726,113 @@ retried tiled after all: the run fails, the clip is kept as `<name>.seamed<ext>`
 console could not be read to the end, so whether it was retried is unknown); `WAN-OOM` (the prompt worker died of an out-of-memory error
 and the wait ended; ComfyUI must be restarted); `WAN-OOM-WATCH` (the console cannot be watched); `WAN-WAIT-NOTE` (the default budget
 was used).
+
+**Card-only image and edit: `imagegen_placement` / `gen_edit_placement` = `multicard`** (`render/multicard-image.mjs`,
+`render/multicard-recipes.json`, `internal/pipeline/mediamulticard.go`; [ADR 0039](../architecture/decisions/0039-a-held-card-is-a-place-in-line.md),
+Amendment 2026-10-11). The Wan placement above spends a second card instead of host RAM; the Qwen-Image image and edit routes can do the same.
+It is opt-in per box (and per family overlay), UNSET by default, and no tier seeds it: a box that sets nothing renders exactly what it
+rendered, with the same lease, the same argv and the same host-RAM declaration (each pinned by a test). The text encoder and the VAE sit on
+one leased non-display card (cuda:0, the STORAGE card) and the DiT on the other (cuda:1, the COMPUTE card), whole or split between them
+through the ComfyUI-MultiGPU loaders, with every weight file mapped read-only (`OFFLOAD_RO_LOAD=1`, the pack `offload_multicard` of the Wan
+placement), so nothing streams from host RAM. The runners take the placement as `--placement single|multicard` (`comfy-generate.mjs`,
+`comfy-render.mjs` and `comfy-edit.mjs`), `--resident-gb N` (the DiT's share kept on the compute card; only a split recipe has one) and `--cards <a>,<b>`
+(only outside a lease; under one it can only confirm the lease's cards): the Wan flags without the `wan-` prefix, with the same refusal of the `=`
+spelling (`--placement=multicard` is a refusal, not a silent single).
+
+| Route | Binding | DiT loader / text-encoder loader | Peak per card, compute / storage (GiB) | Basis |
+|---|---|---|---|---|
+| image | `qwen-image-2.1`, int8 convrot DiT, bf16 text encoder | plain pin / DisTorch2 (5 GiB on the compute card) | 9.0 / 13.6 | predicted, **held back** (below) |
+| image | `qwen-image-2.1`, bf16 DiT, bf16 text encoder | DisTorch2 (8 GiB resident) / DisTorch2 (5 GiB) | 10.8 / 14.2 | predicted |
+| image | `qwen-image` 2512, Q5_1 GGUF, fp8 text encoder | GGUF DisTorch2 (3 GiB resident) / plain | 4.9 / 12.6 | predicted |
+| edit | `qwen-image-edit-2511`, fp8mixed DiT, fp8 text encoder | DisTorch2 (9 GiB resident), bypass LoRA / plain | 13.0 / 11.0, at the 2.0 MP canvas cap | **measured** |
+| edit | `qwen-image-edit-2511`, Q5_1 GGUF, fp8 text encoder | GGUF DisTorch2 (3 GiB resident) / plain | 5.6 / 12.6, at the 2.0 MP canvas cap | predicted |
+
+**A row can be held back.** The int8 convrot row puts a comfy_kitchen int8 DiT on `cuda:1`. ComfyUI-MultiGPU's int8 dispatch path has a recorded illegal
+memory access when the compute device is not `cuda:0` (upstream issue 220, unfixed; it is why the pooled LTX-2.5 seat keeps compute `cuda:0`), and the
+benchmark arms the row cites ran the int8 DiT on `cuda:0` with the bf16 text encoder on `cuda:1`, the reverse of the recipe, so the placement itself never ran.
+The row therefore carries a `blocked` sentence (`render/multicard-recipes.json`, `Blocked` in `internal/mediacap/multicard.go`, pinned together): it stays in the
+table for the proof arm, but it is no recipe. `findRecipe` refuses it by name for every caller (the planner, the builders, the runners), `FindMulticardRow` does not
+return it, so the host-RAM estimate, the doctor and the typed doors see a binding without a recipe, and the door's refusal says which row is held back and why. One int8
+arm with the DiT on `cuda:1` lifts it (clear `blocked` and `Blocked`); binding the bf16 DiT needs nothing.
+
+**Measured and predicted.** A row is *measured* only when its per-card peaks were read in a run that used the read-only loader. Only the 2511
+fp8mixed edit has one (2026-10-11 benchmark, section 4.6: 1.47 MP on two RTX 5060 Ti 16 GB, 145.5 s, 9.4 s per step, peaks 11.9 GiB on the compute card and
+10.9 GiB on the storage card, 1.87 GiB of host growth; one card cannot hold the model and the merging LoRA loader ran out of memory, which is
+why the recipe uses the bypass loader). Every image arm of that benchmark ran the stock loader, which charges each weight file to host
+commit, so the other four rows keep what the arms showed (the 2.1 int8 and bf16 arms ran pixel-identical to the single-card render) and
+the split shares and peaks are arithmetic from them: they are *predicted*, and the file says so per row (`basis`, `evidence`). A live run
+with the read-only loader promotes a row: flip `basis` in `render/multicard-recipes.json` and `Measured` in `internal/mediacap/multicard.go`
+(`TestTheMulticardRowsAreTheRunnersRecipes` fails until both agree).
+
+**What the typed door does.** A binding that asks for the placement takes its own need kind in the media admission (`needMulticard`):
+
+- *The pair is named, not allocated.* The plan is the box's two non-display cards, as a set. The display card is never in it, with the operator at the
+  desk or away (the allocator lets an away operator's screen card be auto-assigned to a ONE-card call; this is not that), and a card whose display state
+  the driver did not report is not counted. A box without exactly two such cards (one, or three on a larger box) answers `gpu_lease_unavailable` with the
+  count and the way out (`local-offload gpu reserve --devices <card>,<card> -- <command>`), and runs nothing.
+- *It queues like any lease.* A held card of the pair is a place in line whose token names both cards (`gpu_queued`, a capacity defer), never a run on
+  the one that is free. Two multicard calls serialize, and a multicard call and a single-card call never share a card (the in-process slots are
+  set-based). The batch takes one pair for the whole batch.
+- *It is never degraded.* A host that does not lease cards (`gpu_card_scoped_leases` off, or no green reader audit), an unreadable card table and a
+  lease directory that will not open each answer `gpu_lease_unavailable` with the reason; the call does not fall back to the whole node or to the
+  default instance, where the runner would refuse a call that names no cards, every time, after the node was held for it. A router may place such
+  a call on another node.
+- *No recipe, no lease.* A binding that has no row in `render/multicard-recipes.json` (krea2, which keeps its `--pool-*` seat; 2512 bf16, 38 GiB, which
+  fits no card; sdxl; hidream; the 2.1 edit; an int8, int4 or nf4 text encoder, whose render moved off the bf16 one by 28.65 dB PSNR against the 30 dB
+  gate; the int8 convrot DiT, whose row is held back) is refused before any lease is spent, naming the key. The same goes for an edit binding whose
+  `gen_edit_megapixels` pins a canvas above the recipe's 2.0 MP cap, which the runner honours verbatim: the peaks are scaled to the cap, and a larger canvas
+  has no measured or scaled figure. The runner refuses the same bindings by name, as a second line of defence.
+- *The runner gets the lease's cards and nothing else.* `--placement multicard` and `GPU_LEASE_DEVICES`; no `COMFY_CARD_UUID` or `COMFY_API` (the pair has
+  an instance of its own, keyed by the two cards and shared with the Wan placement), no `comfy_cuda_device` pin and no dynamic VRAM (both contradict two
+  cards under `--gpu-only`; the runner would drop them for the launch anyway), and no `--pool-*` (a pool is another placement). The operator's
+  `comfy_extra_args` are theirs and stay.
+- *The finished answer names the pair.* A generate-image, edit-image or batch that ran on the pair adds `devices` to its success answer: the two lease ids,
+  sorted, the key and spelling the queued answer already uses (`TestAMulticardImageBindingLeasesTwoNonDisplayCardsAndPassesThePlacement`). Under a parent
+  lease they are the parent's two cards. A batch carries them on every item it rendered here, so the item `generate-image --batch` prints has them too. A call
+  that did not hold the pair (the one-card lease, a pool that holds two cards, a named family without the key, `single`) adds nothing: its answer is byte for
+  byte what it was.
+- *Under a parent lease* (`local-offload gpu reserve --devices <a>,<b> -- <command>`) the call runs inside it on both cards, if the lease holds exactly two
+  non-display cards of this box; one card, the whole node and a lease that includes the display card are refused with the reason.
+- *The lane probe and the place-in-line keeper read the same named plan*, so a router sees a held card of the pair as a busy lane, and the differential
+  table of lane states (`TestMediaLaneFreeNeverRefusesAGrant`) covers the card-only states.
+
+**The resident share moves bytes both ways.** `--resident-gb N` keeps N GiB of the DiT on the compute card and the allocation string sends the REMAINDER to
+the storage card, so the DiT's total is the invariant (`recipePeaks`): a larger share raises the compute card's peak, a smaller one puts the same bytes on the
+storage card, whose room is the thinner. For the fp8mixed edit (19.1 GiB DiT, 9 GiB resident, 11.0 GiB on the storage card) `--resident-gb 5` is 15.0 GiB there
+against the 14.9 GiB a 16 GB card has left after the reserve, and the whole DiT on one card ran out of memory at load in the benchmark; the runner refuses such a
+split naming the storage card and the figure, and the Go declaration keeps the ordinary estimate (the Wan estimator already computes it this way). A larger share
+does not lower the storage figure, since no run measured that; for the 2.1 bf16 row, whose storage peak is its text-encoder stage, a smaller share is therefore
+refused somewhat early, on the conservative side.
+
+**What the runner checks, and watches.** Before it submits, `verifyImagePlacement` compares ComfyUI's device list with the pinned pair and asks `/object_info`
+for the harness's pack and for the recipe's own loader classes: a class the pack does not register is `MISSING_NODE` with its pack hint, an answer it cannot get
+is a refusal, and a loader that no longer declares an input the recipe sets (ComfyUI drops an undeclared input without a word, so a renamed
+`expert_mode_allocations` would run with no split at all) is `IMAGE-PLACEMENT-NODE-INPUT`; the graph's classes, the LoRA loader included, are preflighted just before
+the POST. A pinned edit canvas above the recipe's cap is a usage error before anything starts. While the prompt runs the poll is handed a watch on the pair's
+own ComfyUI console, made before the submit (the Wan runner's: `comfyLogCursor`, `createOomWatch`): an out-of-memory error inside DisTorch2 that kills the prompt
+worker leaves `/history` empty and `/system_stats` answering, so without it the wait would run to the end of its budget with both cards leased; the watch ends it
+at once with `IMAGE-PLACEMENT-OOM` (the console line, the recipe and its per-card peaks, the restart). When the prompt finishes the same console says whether
+ComfyUI retried the VAE decode tiled after an out-of-memory error (`Ran out of memory when regular VAE decoding`): such an image is not the single-pass decode
+the recipe was measured on and can show seams, so it is kept beside the requested path as `<name>.tiled.<ext>` and the run fails with `IMAGE-DECODE-FALLBACK`;
+a console that cannot be read to the end (missing, or its 5 MB capture capped) says `IMAGE-DECODE-UNVERIFIED` and delivers, since unknown is not a fallback. A
+run with no placement is exactly what it was: no preflight, no cursor, no watch.
+
+**Host RAM.** The declaration is sized on the PAIR, not on the largest card (`hostneed.estimatePlaced`, `Facts.CardsGiB`). A *measured* recipe whose per-card
+peaks fit the two leased cards, each less the runner's `--reserve-vram`, declares 0, and says so: the declaration carries a `CardOnly` mark, and both the
+pipeline's log (once per key) and `gpu reserve` print it with its reason ("measured with the read-only safetensors loader ... so no weights stream from RAM"),
+because nothing can correct a 0 afterwards (`calibratedRAM` leaves 0 alone) and a false one would stream silently. A card-only image run records its VRAM peak and
+host growth under its own footprint key (the quant carries `+multicard`), not the single-card one. A call that pins an edit canvas above the recipe's cap, a lease of any number of cards but two, a recipe that does not fit,
+a *predicted* row and a binding with no recipe keep the ordinary streaming figure, with the reason in the declaring line. Declaring the figure of a row
+nobody has measured would admit on a guess; this errs toward waiting for the host's room. `gpu reserve` around `comfy-generate.mjs`, `comfy-render.mjs` or
+`comfy-edit.mjs` with `--placement multicard` reads the same recipe (`Facts.Placement`, `--resident-gb`, `--megapixels`).
+
+**Not measured, said once.** The int8 convrot DiT on `cuda:1` has not been run at all (the row is held back); the out-of-memory watch, the tiled-decode verdict
+and the loader-input check are tested against fakes and the benchmark's log lines, not against a live wedge; the typed edit door records no footprint or host peak
+(the single-card edit route never did), so nothing yet cross-checks a measured zero against the host's real growth. The read-only reader has not been run on the bf16 text encoder (the tests use fakes of the loaders);
+the installed ComfyUI-MultiGPU is a newer commit than the one the benchmark pinned (the loader classes the recipes name are present, checked by name);
+the bf16 split shares and the 2512 Q5_1 peaks are arithmetic; the port fallback for a pair instance with neither `--api` nor `COMFY_API` is untested; the lane
+probe answers for the image route, not for the edit route; and a box with three non-display cards is refused until a pair is named with `gpu reserve --devices`,
+because which two of three is a measurement nobody made.
 
 
 **LTX-2.5** (`videogen_family: "ltx25"`) is the measured 32 GB-class video seat (2026-08-12
@@ -1829,6 +1937,15 @@ recorded as known offenders with their reason rather than silently skipped — a
   [`render/comfyui-ext.test.mjs`](../../render/comfyui-ext.test.mjs))
 - [`internal/hostneed/hostneed.go`](../../internal/hostneed/hostneed.go) — `estimateWith`: a card-only Wan call declares 0 host RAM
   when each leased card fits its own stage
+- [`render/multicard-recipes.json`](../../render/multicard-recipes.json) /
+  [`render/multicard-recipes.mjs`](../../render/multicard-recipes.mjs) /
+  [`render/multicard-image.mjs`](../../render/multicard-image.mjs) — the card-only image and edit placement
+  (`--placement multicard`): the recipe table (loaders, resident shares, per-card peaks, `basis`), the loader nodes a graph names and the
+  refusals by name, and the planner and launch the three image runners make before anything starts; the tests are beside them
+- [`internal/mediacap/multicard.go`](../../internal/mediacap/multicard.go),
+  [`internal/hostneed/multicard.go`](../../internal/hostneed/multicard.go) and
+  [`internal/pipeline/mediamulticard.go`](../../internal/pipeline/mediamulticard.go) — the Go side: the recipe table's copy (pinned to the
+  JSON by a test), the host-RAM verdict on the pair, and the typed doors' two-card need
 - [`render/comfy-edit.mjs`](../../render/comfy-edit.mjs) /
   [`render/wf-qwen-image-edit.mjs`](../../render/wf-qwen-image-edit.mjs) — the generative edit
   lifecycle and its graph builder

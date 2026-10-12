@@ -58,7 +58,7 @@ func resolveReserveHostRAMWith(ramGiven bool, ramGiB float64, class gpulease.Cla
 		}
 	}
 	need := hostneed.Resolve(req, facts)
-	if need.GiB > 0 || need.Source == hostneed.SourceExplicit {
+	if need.GiB > 0 || need.Source == hostneed.SourceExplicit || need.CardOnly { // a measured card-only 0 is said, with why: nothing corrects it afterwards
 		fmt.Fprintf(out, "gpu reserve: declaring %s\n", need)
 		if hint := classDefaultHint(need, cmdArgs, call, recognised); hint != "" {
 			fmt.Fprintln(out, hint)

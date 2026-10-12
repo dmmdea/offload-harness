@@ -18,7 +18,9 @@ export const JOB_PARAM_FLAGS = ["negative", "width", "height", "steps", "seed"];
 // schedule/transparent (qwen-image-2.1) ride this list for the same reason: the
 // wrapper's collector is derived from it, so a flag missing here is a flag the
 // harness sends and comfy-render never sees.
-export const SHARED_BINDING_FLAGS = ["ckpt", "vae", "cfg", "sampler", "scheduler", "family", "preset", "clip", "lora", "lora-strength", "shift", "pool-vvram", "pool-compute", "pool-donor", "schedule", "transparent"];
+// placement/resident-gb/cards (render/multicard-image.mjs) are the card-only placement: where a machine puts the model is its config, never a
+// prompt's, and the child render needs them to build the graph and to verify the pair before it submits.
+export const SHARED_BINDING_FLAGS = ["ckpt", "vae", "cfg", "sampler", "scheduler", "family", "preset", "clip", "lora", "lora-strength", "shift", "pool-vvram", "pool-compute", "pool-donor", "schedule", "transparent", "placement", "resident-gb", "cards"];
 const JOB_PARAMS = JOB_PARAM_FLAGS;
 const SHARED_ONLY = SHARED_BINDING_FLAGS;
 

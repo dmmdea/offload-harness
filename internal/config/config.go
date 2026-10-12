@@ -766,6 +766,11 @@ type Config struct {
 	ImageGenPoolVvramGB float64 `json:"imagegen_pool_vvram_gb,omitempty"`
 	ImageGenPoolCompute string  `json:"imagegen_pool_compute,omitempty"`
 	ImageGenPoolDonor   string  `json:"imagegen_pool_donor,omitempty"`
+	// ImageGenPlacement asks the typed image door for the CARD-ONLY placement ("multicard"; ""/"single" = today's one-card lease): two leased
+	// non-display cards, the text encoder and VAE on one and the DiT on the other or split between them, no host RAM (render/multicard-recipes.json
+	// names the families that have a recipe: qwen-image-2.1 and the qwen-image Q5_1 GGUF). It is a binding key of the named-family overlays. UNSET by
+	// default on every box: a box binds it only once its rows have been measured live (docs/systems/media-generation.md, "Card-only image and edit").
+	ImageGenPlacement string `json:"imagegen_placement,omitempty"`
 	// ImageGenSchedule picks the qwen-image-2.1 sigma schedule: "official" (the
 	// model repo's diffusers scheduler — dynamic mu, exponential shift,
 	// shift_terminal 0.02 — computed by the builder), "comfy" (ComfyUI's fixed model
@@ -906,6 +911,9 @@ type Config struct {
 	// (up to 10 images, the first the target; no presets). The 2.1 weights are
 	// non-commercial, so bind it as a named gen_edit_families overlay (ADR 0058).
 	GenEditFamily string `json:"gen_edit_family,omitempty"`
+	// GenEditPlacement is ImageGenPlacement for the generative edit door ("multicard"; ""/"single" = one card): the 2511 fp8mixed or Q5_1 GGUF
+	// DiT split over two leased non-display cards. Unset by default; a binding key of the gen_edit_families overlays.
+	GenEditPlacement string `json:"gen_edit_placement,omitempty"`
 	// GenEditResolution is the 2.1 encoder's reference size (px, a multiple of 32 up
 	// to 4096; references are resized to about resolution^2). 0 = the builder default,
 	// 1024 (the official default). qwen-image-2.1 only.
@@ -2886,7 +2894,73 @@ func warnImageBindingTo(c Config, w io.Writer, where string) {
 			fmt.Fprintf(w, "warning: %scomfy_cuda_device %q is not applied to the pooled image seat — its pool keys (imagegen_pool_compute/donor) place it; the pin applies to the single-card routes only\n", where, c.ComfyCudaDevice)
 		}
 	}
+	if c.ImageMulticard() {
+		fam := c.ImageGenFamily
+		if fam == "" {
+			fam = "sdxl"
+		}
+		if !imageRecipeFamilies[fam] {
+			fmt.Fprintf(w, "warning: %simagegen_placement is multicard but imagegen_family is %q — it has no card-only recipe (render/multicard-recipes.json: %s on the image route), so EVERY render will be refused before a lease is spent; unset the placement or bind a family that has a recipe\n", where, fam, sortedKeys(imageRecipeFamilies))
+		}
+		if c.ImageGenEngine == "sdcpp" {
+			fmt.Fprintf(w, "warning: %simagegen_placement is multicard but imagegen_engine is \"sdcpp\" — the card-only placement is a ComfyUI placement; the sd.cpp runner never reads it\n", where)
+		}
+		if c.ImageGenPoolVvramGB > 0 || c.ImageGenPoolCompute != "" || c.ImageGenPoolDonor != "" {
+			fmt.Fprintf(w, "warning: %simagegen_pool_vvram_gb/compute/donor are ignored under imagegen_placement multicard — a pooled seat is another placement; the card-only recipe places the DiT itself\n", where)
+		}
+		warnMulticardLaunchTo(c, w, where, "imagegen_placement", "image")
+	}
 }
+
+// warnMulticardLaunchTo carries the launch traps both multicard seats share: the settings the card-only launch ignores, and the host that cannot
+// lease the two cards at all. key and seat name the binding in the message.
+func warnMulticardLaunchTo(c Config, w io.Writer, where, key, seat string) {
+	if c.ComfyCudaDevice != "" {
+		fmt.Fprintf(w, "warning: %scomfy_cuda_device %q is not applied to the multicard %s seat (%s) — the lease's two cards place it; the pin applies to the single-card routes only\n", where, c.ComfyCudaDevice, seat, key)
+	}
+	if c.ComfyDynamicVRAM == "on" {
+		fmt.Fprintf(w, "warning: %scomfy_dynamic_vram is on while the %s seat is multicard (%s) — the card-only launch runs --gpu-only (dynamic VRAM off) and ignores the setting\n", where, seat, key)
+	}
+	if !c.GPUCardScopedLeases {
+		noun := "render"
+		if seat == "edit" {
+			noun = "edit"
+		}
+		fmt.Fprintf(w, "warning: %s%s is multicard but gpu_card_scoped_leases is off — the call holds the whole node and names no cards, so the runner refuses it and EVERY %s will be refused; turn card-scoped leases on (after a green reader audit) or unset the placement\n", where, key, noun)
+	}
+}
+
+// imageRecipeFamilies / editRecipeFamilies are the graph families that have a card-only recipe (render/multicard-recipes.json; a test in
+// internal/mediacap pins them to it). A family outside them, bound to a multicard placement, is refused by the runner by name on every call.
+var (
+	imageRecipeFamilies = map[string]bool{FamilyQwenImage21: true, "qwen-image": true}
+	editRecipeFamilies  = map[string]bool{EditFamily2511: true}
+)
+
+func sortedKeys(m map[string]bool) string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return strings.Join(out, " and ")
+}
+
+// ImageMulticard reports an image binding that asks for the card-only placement (imagegen_placement: multicard).
+func (c Config) ImageMulticard() bool {
+	return strings.TrimSpace(c.ImageGenPlacement) == PlacementMulticard
+}
+
+// EditMulticard reports an edit binding that asks for the card-only placement (gen_edit_placement: multicard).
+func (c Config) EditMulticard() bool {
+	return strings.TrimSpace(c.GenEditPlacement) == PlacementMulticard
+}
+
+// The values of imagegen_placement and gen_edit_placement: "" and "single" are the one-card lease every box has always taken.
+const (
+	PlacementSingle    = "single"
+	PlacementMulticard = "multicard"
+)
 
 // warnEditBindingTo carries the edit seat's traps for one (effective) binding.
 func warnEditBindingTo(c Config, w io.Writer, where string) {
@@ -2908,6 +2982,12 @@ func warnEditBindingTo(c Config, w io.Writer, where string) {
 		if where == "" {
 			fmt.Fprintln(w, "warning: gen_edit_family is qwen-image-2.1 on the DEFAULT edit binding — ADR 0058 ships it only as a named gen_edit_families opt-in")
 		}
+	}
+	if c.EditMulticard() {
+		if fam := c.defaultEditName(); !editRecipeFamilies[fam] {
+			fmt.Fprintf(w, "warning: %sgen_edit_placement is multicard but gen_edit_family is %q — it has no card-only recipe (render/multicard-recipes.json: %s on the edit route), so EVERY edit will be refused before a lease is spent; unset the placement or bind a family that has a recipe\n", where, fam, sortedKeys(editRecipeFamilies))
+		}
+		warnMulticardLaunchTo(c, w, where, "gen_edit_placement", "edit")
 	}
 }
 

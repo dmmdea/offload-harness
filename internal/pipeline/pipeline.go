@@ -1680,6 +1680,7 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	payload := imageResultPayload(outPath, req.Params, seed, fam)
 	addRefineData(payload, p.cfg.ImageGenRefinerModel, refined, renderPrompt, refineNote)
+	grant.name(payload) // a card-only call says which two cards it ran on; any other answer is unchanged
 	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
@@ -2178,11 +2179,15 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 		Resolution:  cfg.GenEditResolution,
 		CacheDevice: cfg.GenEditCacheDevice,
 		Schedule:    cfg.GenEditSchedule,
+		Placement:   cfg.GenEditPlacement,
 		// The edit route renders on ONE card: the device pin applies.
 		Launch: comfyLaunch(cfg, true),
 	}
+	if cfg.EditMulticard() {
+		m.Launch = multicardLaunch(cfg) // two cards: no pin, no dynamic VRAM
+	}
 	timeout := time.Duration(cfg.GenEditTimeoutSec) * time.Second
-	grant, lerr := p.acquireMediaLease(ctx, "edit", timeout, p.gpuWait(), singleCardNeed(cfg, paramStr(req.Params, "waiter_token")).declaresRAM(routeRAM(hostneed.RouteEdit, cfg)).resumableBy(req))
+	grant, lerr := p.acquireMediaLease(ctx, "edit", timeout, p.gpuWait(), editNeed(cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -2207,6 +2212,7 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 		payload["transparent"] = true
 	}
 	addLicenseData(payload, fam)
+	grant.name(payload) // a card-only call says which two cards it ran on; any other answer is unchanged
 	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
@@ -2278,6 +2284,9 @@ type ImageBatchItem struct {
 	Family        string `json:"family"`
 	License       string `json:"license,omitempty"`
 	CommercialUse *bool  `json:"commercial_use,omitempty"`
+	// Devices are the two cards a batch on the card-only placement ran on (the lease ids, as the queued answer names them). Only a batch
+	// that held that pair carries them; every other item is byte-identical to what it was.
+	Devices []string `json:"devices,omitempty"`
 }
 
 // tagLicense stamps a batch item with the rendering binding's family and license —
@@ -2545,6 +2554,10 @@ func (p *Pipeline) RunImageBatchWaiting(ctx context.Context, family string, jobs
 	// single path resolves for a request without one): every item is tagged with it (ADR 0058).
 	for i, it := range items {
 		items[i].tagLicense(fam)
+		// A batch on the card-only placement says which two cards it ran on, on every item; any other batch's items are unchanged.
+		if len(grant.Devices) > 0 {
+			items[i].Devices = append([]string(nil), grant.Devices...)
+		}
 		// Refiner outcome onto the item (single-path result-key parity: with a
 		// refiner configured every item says refined true/false). Set BEFORE the
 		// ledger loop reads `items` so callers and records agree.
@@ -3916,7 +3929,7 @@ func runNvidiaSmiMemory() (string, error) {
 // added to imagegen.Model gets mapped here.
 
 func imageModelFromConfig(cfg config.Config) imagegen.Model {
-	return imagegen.Model{
+	m := imagegen.Model{
 		Ckpt:         cfg.ImageGenCkpt,
 		VAE:          cfg.ImageGenVAE,
 		Steps:        cfg.ImageGenSteps,
@@ -3934,10 +3947,18 @@ func imageModelFromConfig(cfg config.Config) imagegen.Model {
 		PoolCompute:  cfg.ImageGenPoolCompute,
 		PoolDonor:    cfg.ImageGenPoolDonor,
 		Schedule:     cfg.ImageGenSchedule,
+		Placement:    cfg.ImageGenPlacement,
 		// A pooled seat is placed by its pool keys; the device pin is for the
 		// single-card shape only (see comfyLaunch).
 		Launch: comfyLaunch(cfg, !cfg.ImagePooled()),
 	}
+	if cfg.ImageMulticard() {
+		// The card-only placement is another placement than a pool: the recipe places the DiT itself on the lease's two cards, so the pool keys are not
+		// passed (the runner refuses them beside it) and neither is the single-card launch (mediamulticard.go).
+		m.PoolVvramGB, m.PoolCompute, m.PoolDonor = 0, "", ""
+		m.Launch = multicardLaunch(cfg)
+	}
+	return m
 }
 
 // comfyLaunch maps a binding's comfy_* keys onto the runner's launch profile.
@@ -4051,6 +4072,15 @@ func imageFootprintKey(cfg config.Config) (family, quant string) {
 				quant = q
 				break
 			}
+		}
+	}
+	// The card-only placement peaks per card and its host growth is the read-only loader's: a bucket of its own, not the single-card one it would pull toward
+	// numbers true of neither (the VRAM peak, and the host p90 a single-card declaration is raised to).
+	if cfg.ImageMulticard() {
+		if quant == "" {
+			quant = "multicard"
+		} else {
+			quant += "+multicard"
 		}
 	}
 	return family, quant

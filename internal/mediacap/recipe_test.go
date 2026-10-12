@@ -304,7 +304,7 @@ var (
 		"imagegen_license": "Another License", "imagegen_commercial_use": true,
 	}
 	localKeys = map[string]any{
-		"imagegen_pool_vvram_gb": 12.0, "imagegen_pool_compute": "cuda:0", "imagegen_pool_donor": "cuda:1",
+		"imagegen_pool_vvram_gb": 12.0, "imagegen_pool_compute": "cuda:0", "imagegen_pool_donor": "cuda:1", "imagegen_placement": "multicard",
 		"sdcpp_model": "m.gguf", "sdcpp_model_kind": "dit", "sdcpp_vae": "v.safetensors", "sdcpp_clip_l": "l.safetensors",
 		"sdcpp_clip_g": "g.safetensors", "sdcpp_t5xxl": "t5.safetensors", "sdcpp_llm": "llm.gguf", "sdcpp_extra_args": []string{"--x"},
 		// not in the clear list at all: inherited, or the node's launch

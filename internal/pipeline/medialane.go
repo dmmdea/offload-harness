@@ -160,6 +160,9 @@ func (p *Pipeline) resolveLane(ctx context.Context, req core.Request) (ln laneOf
 	}
 	ln.token = paramStr(req.Params, "waiter_token")
 	ln.need = imageNeed(cfg, ln.token)
+	if ln.need.Refusal != "" {
+		return ln, ln.need.Refusal, false // the admission refuses it before any lease; the lane is not in question
+	}
 
 	// A call that runs under a lease its parent holds (`gpu reserve -- local-offload ...`) has a card chosen for it.
 	if inherited, ierr := ambientLeaseEnv(); ierr != nil || inherited != nil {

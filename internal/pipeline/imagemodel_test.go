@@ -32,6 +32,7 @@ func TestImageModelFromConfig(t *testing.T) {
 		ImageGenPoolCompute:  "cuda:0",
 		ImageGenPoolDonor:    "cuda:1",
 		ImageGenSchedule:     "official",
+		ImageGenPlacement:    "single", // not "multicard": that drops the pool keys this test maps (TestTheImageModelOfAMulticardBindingDropsThePoolAndTheSingleCardLaunch)
 		ComfyCudaDevice:      "2",
 		ComfyDynamicVRAM:     "off",
 		ComfyExtraArgs:       "--verbose",
@@ -45,7 +46,7 @@ func TestImageModelFromConfig(t *testing.T) {
 		m.LoRA != cfg.ImageGenLoRA || m.LoRAStrength != cfg.ImageGenLoRAStrength ||
 		m.Shift != cfg.ImageGenShift || m.PoolVvramGB != cfg.ImageGenPoolVvramGB ||
 		m.PoolCompute != cfg.ImageGenPoolCompute || m.PoolDonor != cfg.ImageGenPoolDonor ||
-		m.Schedule != cfg.ImageGenSchedule || m.Launch.DynamicVRAM != cfg.ComfyDynamicVRAM || m.Launch.ExtraArgs != cfg.ComfyExtraArgs {
+		m.Schedule != cfg.ImageGenSchedule || m.Placement != cfg.ImageGenPlacement || m.Launch.DynamicVRAM != cfg.ComfyDynamicVRAM || m.Launch.ExtraArgs != cfg.ComfyExtraArgs {
 		t.Fatalf("field mapping mismatch: %+v", m)
 	}
 

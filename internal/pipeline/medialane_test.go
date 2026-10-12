@@ -296,7 +296,7 @@ func laneCases() []laneCase {
 // The converse is not required (the prober may call free a lane the grant then refuses), except where the state is
 // one the prober reads: there it must see it, or it would never place anything.
 func TestMediaLaneFreeNeverRefusesAGrant(t *testing.T) {
-	for _, c := range laneCases() {
+	for _, c := range allLaneCases() {
 		t.Run(c.name, func(t *testing.T) {
 			f := newAdmitFixtureWith(t, c.spec)
 			f.away = c.away
@@ -381,7 +381,7 @@ func TestMediaLaneFreeWritesNothing(t *testing.T) {
 		sort.Strings(out)
 		return out
 	}
-	for _, c := range laneCases() {
+	for _, c := range allLaneCases() {
 		t.Run(c.name, func(t *testing.T) {
 			f := newAdmitFixtureWith(t, c.spec)
 			f.away = c.away

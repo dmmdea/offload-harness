@@ -89,11 +89,17 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 		cfg.ImageGenFamily = c.Flags["family"]
 		cfg.ImageGenCkpt = firstNonEmpty(c.Flags["ckpt"], f.env("COMFY_CKPT"))
 		cfg.ImageGenCLIP = c.Flags["clip"]
+		// --placement multicard asks for the card-only recipe of the family (hostneed/multicard.go); --resident-gb moves its resident share.
+		f = f.withPlacementFlags(c.Flags)
 		return ForRoute(RouteImage, cfg, f)
 	case RouteEdit:
 		cfg.GenEditFamily = c.Flags["family"]
 		cfg.GenEditUnet = firstNonEmpty(c.Flags["unet"], f.env("COMFY_EDIT_UNET"))
 		cfg.GenEditCLIP = c.Flags["clip"]
+		f = f.withPlacementFlags(c.Flags)
+		if mp := megapixelsFlag(firstNonEmpty(c.Flags["megapixels"], f.env("COMFY_EDIT_MEGAPIXELS"))); mp > 0 {
+			f.Megapixels = mp
+		}
 		return ForRoute(RouteEdit, cfg, f)
 	case RouteInpaint:
 		if strings.EqualFold(c.Flags["family"], "qwen") {
@@ -141,6 +147,40 @@ func wanResidentGiB(flags map[string]string) float64 {
 	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
 	if err != nil || math.IsNaN(v) || v < 0 || v > 64 {
 		return wanResidentDefaultGiB
+	}
+	return v
+}
+
+// withPlacementFlags puts the placement flags a call carries over the facts: a flag the call does not carry leaves the facts' own (the pipeline's binding).
+func (f Facts) withPlacementFlags(flags map[string]string) Facts {
+	if v, ok := flags["placement"]; ok {
+		f.Placement = v
+	}
+	if v := residentGiBFlag(flags); v != nil {
+		f.ResidentGiB = v
+	}
+	return f
+}
+
+// residentGiBFlag reads --resident-gb (the card-only image placement's resident share of the DiT on the compute card): nil when absent or when the
+// runner would refuse it (not a number from 0 to 64), in which case the call is sized with the recipe's own share.
+func residentGiBFlag(flags map[string]string) *float64 {
+	raw, ok := flags["resident-gb"]
+	if !ok {
+		return nil
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsNaN(v) || v < 0 || v > 64 {
+		return nil
+	}
+	return &v
+}
+
+// megapixelsFlag reads an edit canvas in megapixels: 0 when absent or unreadable (the runner's own: the source's size, capped).
+func megapixelsFlag(raw string) float64 {
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
+		return 0
 	}
 	return v
 }

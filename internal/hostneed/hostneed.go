@@ -78,6 +78,9 @@ type Need struct {
 	// together with a figure that is then a LOWER BOUND, or alone when nothing could be sized; the caller says so once.
 	// A string, not a slice, so a Need stays comparable.
 	Unsized string
+	// CardOnly marks the 0 a measured card-only recipe earns (the image and edit placement, estimatePlaced). A 0 is otherwise the silent default of a
+	// declaration; this one is said wherever a figure is, with its Detail, because nothing can correct it afterwards (calibratedRAM leaves 0 alone).
+	CardOnly bool
 }
 
 func (n Need) String() string {
@@ -121,8 +124,15 @@ type Facts struct {
 	// ReserveVRAMGiB is VRAM the runner holds back for the display (its --reserve-vram); 0 = the
 	// cfg's imagegen_reserve_vram, else the runners' own 1.0.
 	ReserveVRAMGiB float64
-	// CardsGiB is the total VRAM of EACH card of the leased set (none = unknown). Only the card-only Wan placement reads it.
+	// CardsGiB is the total VRAM of EACH card of the leased set (none = unknown). Only the card-only placements read it.
 	CardsGiB []float64
+	// Placement is the placement the call asked for: "" is the single placement (today's), PlacementMulticard the card-only recipe of the image and edit
+	// routes (--placement multicard, imagegen_placement / gen_edit_placement). Only those two routes read it; ClassDefault never does.
+	Placement string
+	// ResidentGiB overrides a split recipe's share of the DiT kept on the compute card (--resident-gb); nil = the recipe's own.
+	ResidentGiB *float64
+	// Megapixels is the edit canvas the call pins (--megapixels, gen_edit_megapixels); 0 = the runner's own (the source's size, capped at 2.0 MP).
+	Megapixels float64
 	// Stat reports a file's size; nil = os.Stat. A table in tests, because a 24 GiB fixture is not an option.
 	Stat func(path string) (size int64, ok bool)
 	// Env reads an environment variable (COMFY_CKPT and friends); nil = none set.
@@ -351,13 +361,13 @@ func ForRoute(route Route, cfg config.Config, f Facts) (Need, bool) {
 		if fam == "" {
 			fam = "sdxl"
 		}
-		return estimate(fam, mediacap.ImageModelFiles(cfg), f)
+		return estimatePlaced(RouteImage, fam, mediacap.ImageModelFiles(cfg), f)
 	case RouteEdit:
 		fam := strings.TrimSpace(cfg.GenEditFamily)
 		if fam == "" {
 			fam = config.EditFamily2511
 		}
-		return estimate(fam, mediacap.EditModelFiles(cfg), f)
+		return estimatePlaced(RouteEdit, fam, mediacap.EditModelFiles(cfg), f)
 	case RouteInpaint:
 		return estimate("sdxl", mediacap.InpaintModelFiles(cfg), f)
 	case RouteVideo:
@@ -449,6 +459,8 @@ func videoFamily(fam string) string {
 // lanes do not stop at it (F60): they declare the larger of it and the weights they park themselves (ForSdcpp, wired in
 // internal/pipeline sdcppDeclared), so on that box the `--offload-to-cpu` spill is inside the guard, as an estimate.
 func ClassDefault(f Facts) Need {
+	// A placement is a call's word, not the box's: the class default is the largest family this box binds in its ordinary placement.
+	f.Placement, f.ResidentGiB, f.Megapixels = "", nil, 0
 	cfg := f.Cfg
 	if strings.TrimSpace(cfg.ComfyDir) == "" {
 		return Need{Source: SourceNone, Detail: "no ComfyUI install is bound on this box, so there is no render family to size"}

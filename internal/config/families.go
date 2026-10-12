@@ -271,7 +271,7 @@ var imageOverlay = overlayKind{
 		"imagegen_ckpt", "imagegen_family", "imagegen_vae", "imagegen_steps", "imagegen_cfg",
 		"imagegen_sampler", "imagegen_scheduler", "imagegen_preset", "imagegen_clip", "imagegen_lora",
 		"imagegen_lora_strength", "imagegen_shift", "imagegen_pool_vvram_gb", "imagegen_pool_compute",
-		"imagegen_pool_donor", "imagegen_schedule", "imagegen_license", "imagegen_commercial_use",
+		"imagegen_pool_donor", "imagegen_placement", "imagegen_schedule", "imagegen_license", "imagegen_commercial_use",
 		"sdcpp_model", "sdcpp_model_kind", "sdcpp_vae", "sdcpp_clip_l", "sdcpp_clip_g", "sdcpp_t5xxl",
 		"sdcpp_llm", "sdcpp_extra_args",
 	},
@@ -300,7 +300,7 @@ var editOverlay = overlayKind{
 		"gen_edit_unet", "gen_edit_family", "gen_edit_preset", "gen_edit_lora", "gen_edit_lora_strength",
 		"gen_edit_clip", "gen_edit_vae", "gen_edit_steps", "gen_edit_cfg", "gen_edit_sampler",
 		"gen_edit_scheduler", "gen_edit_schedule", "gen_edit_megapixels", "gen_edit_resolution", "gen_edit_cache_device",
-		"gen_edit_license", "gen_edit_commercial_use",
+		"gen_edit_placement", "gen_edit_license", "gen_edit_commercial_use",
 	},
 	inherited: []string{"gen_edit_script", "gen_edit_timeout_sec"},
 	forbidden: map[string]string{
@@ -423,6 +423,13 @@ var cudaDeviceRe = regexp.MustCompile(`^\d+(,\d+)*$`)
 // config door — never as a runner exit 2 on every render. where prefixes the key
 // ("" at the top level, `imagegen_families["x"].` inside an overlay).
 func validateMediaEnums(c Config, where string) error {
+	for _, kv := range [][2]string{{"imagegen_placement", c.ImageGenPlacement}, {"gen_edit_placement", c.GenEditPlacement}} {
+		switch strings.TrimSpace(kv[1]) {
+		case "", PlacementSingle, PlacementMulticard:
+		default:
+			return fmt.Errorf("%s%s: unknown placement %q (valid: \"\", %q, %q)", where, kv[0], kv[1], PlacementSingle, PlacementMulticard)
+		}
+	}
 	switch strings.TrimSpace(c.ImageGenSchedule) {
 	case "", "official", "comfy", "turbo":
 	default:
