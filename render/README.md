@@ -138,13 +138,13 @@ node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyU
   `docs/systems/media-generation.md`.
 - **Qwen-Image on two cards, `--placement multicard`** (`comfy-generate.mjs`, `comfy-render.mjs`, `comfy-edit.mjs`; default `single`, today's graph, byte for byte). The text encoder and the VAE
   load on one leased non-display card and the DiT on the other, or split between them, through the MultiGPU loaders, with the
-  recipe of `render/multicard-recipes.json` (the 2.1 int8 and bf16, the 2512 Q5_1 GGUF, the 2511 edit fp8mixed and Q5_1; krea2, 2512 bf16 and sdxl have none and are refused by
-  name). The two cards are the lease's (`--cards` only names them when no lease does), never a display card, and the runner starts its
+  recipe of `render/multicard-recipes.json` (the 2512 Q5_1 GGUF and the 2511 edit fp8mixed and Q5_1; the 2.1 int8 convrot and bf16 rows are held back, and krea2, 2512 bf16 and sdxl
+  have none: all refused by name). The two cards are the lease's (`--cards` only names them when no lease does), never a display card, and the runner starts its
   own keyed ComfyUI on them, the one the Wan placement uses. Run it under `local-offload gpu reserve --devices <a>,<b> -- node render/comfy-edit.mjs
   out.png in.png "<instruction>" --unet <fp8mixed file> --placement multicard`, flags spelled `--flag value`; `[--resident-gb N]` moves the DiT's share on the
   compute card (the DiT's total is the invariant: a smaller share puts the same bytes on the storage card, and a split that card cannot hold is refused). Only the 2511
   fp8mixed edit has a *measured* row, so it alone declares 0 host RAM (and `gpu reserve` says so); the others declare the ordinary estimate until a run with the
-  read-only loader promotes them. The 2.1 int8 convrot row is held back (its DiT on `cuda:1` never ran) and refused by name; an edit canvas pinned above the recipe's
+  read-only loader promotes them. The two 2.1 rows are held back (the int8 DiT on `cuda:1` never ran; the bf16 row's 16.33 GiB text encoder is built whole on the storage card before the split applies) and refused by name; an edit canvas pinned above the recipe's
   2.0 MP cap is refused before anything starts. The runner checks the recipe's loader classes and their inputs against `/object_info` before it submits, watches the pair's
   ComfyUI console while it waits (`IMAGE-PLACEMENT-OOM` ends a wait on a worker that died of an out-of-memory error), and keeps an image whose VAE decode ComfyUI retried tiled
   beside the requested path as `<name>.tiled.<ext>` (`IMAGE-DECODE-FALLBACK`). `docs/systems/media-generation.md`, "Card-only image and edit".
