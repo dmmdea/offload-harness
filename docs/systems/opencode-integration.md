@@ -34,9 +34,9 @@ on this side.
 
 | Field | What it says | What the plugin does with it |
 |---|---|---|
-| `results[].ran_on` | `local` (the delegator's own seat ran it) or `node` (a fleet node did); absent when no seat ran the subtask, on a `route: "queue"` result, and on a result from a delegator that predates it ([fleet-node.md](fleet-node.md), "Where a result ran") | Read first: `local` and `node` decide the local and remote counts. Any other value falls back to the placement text |
+| `results[].ran_on` | `local` (the delegator's own seat ran it) or `node` (a fleet node did); absent when no seat ran the subtask and on a result from a delegator that predates it ([fleet-node.md](fleet-node.md), "Where a result ran") | Read first: `local` and `node` decide the local and remote counts. Any other value falls back to the placement text |
 | `results[].placement` | the placement reason in words; for a call whose route was a hint (ADR 0078) it opens with a clause naming the route the caller hinted and where the result was placed | The fallback when `ran_on` is absent: the clause is read first (the word `local` inside it names the hint, not the place), then the word `local` in the text as before |
-| `results[].deferred` | the subtask was deferred | Counted into the "contract(s) deferred" line |
+| `results[].deferred` | the subtask was deferred | Counted into the "contract(s) deferred" line. A deferred result with no `ran_on` is also left out of the local and the remote count (no seat ran it, so it cannot make "pair landed"), unless its placement text names the local seat, which a delegator that predates `ran_on` still writes for a defer on its own seat |
 | `summary.infrastructure` | defers that blame the stack or the config | A line when above 0 |
 | `results` (its length) | one row per subtask | The total, and whether a pair of two or more landed (at least one remote) |
 

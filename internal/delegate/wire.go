@@ -107,10 +107,13 @@ type ResultWire struct {
 	// the opencode plugin reads RanOn first and this text only when a result has none.
 	Placement string `json:"placement"`
 	// RanOn (D-32) says where the subtask RAN, as a closed value: RanOnLocal, the delegator's own seat, or RanOnNode, a
-	// fleet node. Absent when no seat ran the work (a defer, a shed, a refusal chain, a subtask that never started) and on a
-	// result from a delegator that predates it. It is stamped in one place, WireResponse, from placedWhere: the decision
-	// that also writes the hint clause and the pin tallies, so it cannot disagree with them. Placement stays the reason, in
-	// words; a reader that wants the location reads this, never the word "local" in that text.
+	// fleet node (a route queue answer a claiming node filed reads node). Absent when no seat ran the work (a defer, a shed,
+	// a refusal chain, a subtask that never started, a job a node took back or whose record says it never ran, even when the
+	// call deadline cut the row afterwards) and on a result from a delegator that predates it. A job the deadline cut while a
+	// node still held it reads node: it was placed and dispatched there and may start. It is stamped in one place,
+	// WireResponse, from placedWhere: the decision that also writes the hint clause and the pin tallies, so it cannot
+	// disagree with them. Placement stays the reason, in words; a reader that wants the location reads this, never the word
+	// "local" in that text.
 	RanOn string `json:"ran_on,omitempty"`
 	// PinReason (ADR 0078) is the closed reason the caller pinned the call under (privacy, locality, measurement,
 	// operator). Present only on a call pinned with one; a route local or remote that gave none is a hint, and the
