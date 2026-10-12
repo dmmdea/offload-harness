@@ -77,6 +77,20 @@ Three limits keep a weak model from burning the budget on nothing:
   hunting through tools. A `max_calls_per_tool` env rule on `read_file` is a separate, explicit cap
   and still counts every call.
 
+**The forced final step is re-asked once when the seat answers it with a tool call (0.184.0).** The last step of a multi-step
+run (D-89) offers no tools and opens with the answer-now turn. One seat family answers it with a tool call written as text
+(`<tool_call><function=...>`, since no parser runs on a request without tools) or parsed into a call: 35 of the 106 runs of that
+family that reached a forced final, against none of 241 on every other seat, with 30 of the 35 holding more than half their wall
+and the evidence they needed already in the transcript. The run used to end there on `budget` with the text thrown away. The
+loop now asks again, once (`finalReasked`), when the wall holds one more turn (`wallHoldsOneMoreTurn`, the gate the list-cap
+re-issue uses), with a request that differs from the first because the decode of this step is greedy and an identical request
+repeats itself: the offending text (or the tool name and arguments) is quoted back in a new user turn, the seat is told that
+nothing it writes as a call will run and to begin with the answer in the requested shape, and the offending turn stays out of the
+transcript. The re-ask spends no step, runs at the same budget with thinking off, and both completions are in `calls[]` as forced
+finals. A seat that answers it with a tool call again ends the run on `budget` as before, with both replies quoted in `stop_note`;
+an answer is `done` with `stop_note` saying the seat first wrote a tool call and was re-asked once. The rigger files the
+failed shape as `final-tool-call`, not `budget` ("split it"), and the delegator gives the contract to another seat once.
+
 The ordering here is load-bearing and documented in the code: the name cap must be checked before the
 exact-repeat check, or a model stuck on an identical call matches the repeat branch forever and never
 reaches the branch that disables the tool.

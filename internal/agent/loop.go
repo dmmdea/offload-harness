@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dmmdea/offload-harness/internal/contextbudget"
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 // ToolCall is one tool invocation the model requested.
@@ -484,6 +485,31 @@ const defaultMaxSameTool = 8
 // last step of a multi-step run offers no tools and asks for the answer.
 // Exported so a test double standing in for a seat can recognise the call.
 const FinalAnswerTurn = "This is the final step of this run and no tools are available any more. Answer the task now, in the requested shape, from what you have already read. Where something could not be found, say so inside the answer; do not ask for more steps or more tools."
+
+// finalOffence reads a reply to the tool-less forced final step: when it is a tool call (parsed by the engine, or
+// written as text because no parser runs on a request without tools) it returns how the stop note says so, and the
+// text to quote back to the seat. ok=false is an ordinary answer.
+func finalOffence(m Msg) (offence, quoted string, ok bool) {
+	if n := len(m.ToolCalls); n > 0 {
+		first := m.ToolCalls[0]
+		return fmt.Sprintf("the seat answered with %d tool call(s) (first: %s)", n, first.Name),
+			fmt.Sprintf("a call to %s with the arguments %s", first.Name, clip(first.Args, 160)), true
+	}
+	if UnparsedToolCallMarker(m.Content) != "" {
+		text := clip(strings.TrimSpace(m.Content), 200)
+		return fmt.Sprintf("the seat wrote a tool call as text (%q)", text), text, true
+	}
+	return "", "", false
+}
+
+// finalReaskTurn is the user turn that re-asks a forced final step the seat answered with a tool call. It differs
+// from FinalAnswerTurn on purpose: it names what the seat did, says what happened to it, and says how to begin.
+func finalReaskTurn(quoted string) string {
+	return "Your last reply was not an answer. It was a tool call: " + quoted + "\n\nThere are no tools in this step, so that call did not run " +
+		"and has been discarded, and writing another will not run either. Do not write <tool_call>, <function=...> or any other tool syntax. " +
+		"Begin your reply with the answer itself, in the requested shape, using only what the tool results above already contain; " +
+		"where something could not be found, say so inside the answer."
+}
 
 // defaultToolTimeout bounds ONE tool call. Until this existed, Loop.dispatch
 // handed t.Exec the whole run context with no deadline, so a single tool could
@@ -1121,6 +1147,10 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 	refusedRepeat := map[string]int{}
 	answerNowFor := ""
 	finalTurnAdded := false
+	// finalReasked bounds the forced-final re-ask at ONE per run, and firstOffence is what the seat wrote the first
+	// time: the evidence the stop note names if it writes a tool call again (finalOffence, finalReaskTurn).
+	finalReasked := false
+	firstOffence := ""
 	// finalTokens resolves the final answer's budget for the call about to be
 	// made and records the fit on this run (D-95). A closure over run-locals
 	// rather than Loop state: --serve shares one *Loop.
@@ -1627,17 +1657,31 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		if finalStep {
 			// No tools were offered and the answer was asked for. A tool call now
 			// (parsed, or written as text because no parser ran on a tool-less
-			// request) cannot be followed by anything: nothing executes, and the
-			// run ends on `budget` with the evidence in stop_note — never the
+			// request) cannot be followed by anything: nothing executes. The seat is
+			// RE-ASKED ONCE with a different prompt (the decode of this step is
+			// greedy, so the same request would repeat itself): its offending text
+			// quoted back, the news that nothing it writes as a call will run, and
+			// the turn itself kept out of the transcript. A seat family wrote a
+			// tool call here in 35 of the 106 runs that reached a forced final (none
+			// of 241 on every other seat) with most of the wall unspent, and the run
+			// used to END, on `budget`, with the text thrown away. A second offence
+			// ends the run on `budget` with the evidence in stop_note, never the
 			// seat-configuration error an unparsed marker means on other steps.
 			note := ""
-			if n := len(comp.Msg.ToolCalls); n > 0 {
-				note = fmt.Sprintf("forced final step: no tools were offered and the answer was asked for, and the seat answered with %d tool call(s) (first: %s) — nothing executed", n, comp.Msg.ToolCalls[0].Name)
-			} else if marker := UnparsedToolCallMarker(comp.Msg.Content); marker != "" {
-				note = fmt.Sprintf("forced final step: no tools were offered and the answer was asked for, and the seat wrote a tool call as text (%q) — nothing executed", marker)
+			if offence, quoted, ok := finalOffence(comp.Msg); ok {
+				l.prefill.Observe(comp.Serve)
+				if !finalReasked && l.wallHoldsOneMoreTurn(ctx) {
+					finalReasked, firstOffence = true, offence
+					msgs = append(msgs, Msg{Role: "user", Content: finalReaskTurn(quoted)})
+					step-- // the re-ask does not spend a step
+					continue
+				}
+				note = core.ForcedFinalToolCallReason + ", and " + offence + " — nothing executed"
+				if finalReasked {
+					note += "; the seat had already been re-asked once with its first reply quoted (it " + firstOffence + ") and did it again"
+				}
 			}
 			if note != "" {
-				l.prefill.Observe(comp.Serve)
 				res := Result{Steps: step + 1, StopReason: "budget", StopNote: note, Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
 				if l.batchJudge {
 					res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
@@ -1671,6 +1715,9 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			}
 			if finalStep {
 				res.StopNote = fmt.Sprintf("forced final answer: the %d-step budget was reached, so the last step offered no tools and asked for the answer (D-89)", l.maxSteps)
+				if finalReasked {
+					res.StopNote += fmt.Sprintf("; the seat first %s and was re-asked once with that quoted", firstOffence)
+				}
 			}
 			// The repetition note leads: it is why this answer is short and
 			// flagged cut, and an operator greps it (D-95b).

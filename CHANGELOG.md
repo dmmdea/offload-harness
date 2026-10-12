@@ -66,6 +66,28 @@ Versioning: [SemVer](https://semver.org/).
   results]` on a server whose executable stamp had moved, on all three doors; seven mutations (size or modification time
   dropped from the comparison, the start-stamp guard, the vanished-path branch, and each door's wiring) each turn them red.
   Docs: `docs/systems/mcp-server.md`.
+- **A forced final step the seat answers with a tool call is re-asked once, with the offence quoted, instead of ending the run.**
+  The last step of a multi-step run offers no tools and asks for the answer (D-89). One seat family wrote a tool call there,
+  as text (`<tool_call><function=...>`) or parsed, in 35 of the 106 runs that reached a forced final (none of 241 on every other
+  seat), 30 of the 35 with more than half their wall unspent and the evidence they needed already read: the run returned
+  `budget` the moment it happened, with the seat's text thrown away and only the marker kept. A bare retry would have been a
+  no-op, because the decode of that step is greedy (`temperature=0` in the logged call records), so the re-ask changes the
+  prompt: a user turn that quotes the offending text (or the tool and its arguments), says nothing written as a call will run,
+  forbids the tool syntax and says to begin with the answer in the requested shape; the poisoned turn is kept out of the
+  transcript, the answer-now turn is not repeated, the step is not spent, and the budget and thinking-off are those of the first
+  final. It is gated on the wall holding one more turn (the gate the list-cap re-issue uses) and bounded at one: a second tool
+  call ends the run on `budget` as before, now with both replies quoted in `stop_note` (`core.ForcedFinalToolCallReason` opens
+  it, and sits inside the defer reason). An answer is `done` and `stop_note` says the seat first wrote a tool call and was
+  re-asked once. **Not measured on a live seat** (no model was started for this change): whether a quoted-back, stricter
+  instruction stops this family writing the call is an inference from the history-continuation reading and from the tail
+  correlation in the corpus (44% failures when two of the last three trace entries were refused repeats, 9% otherwise); the
+  fallback, if a replay of the logged contracts shows it still fails, is to render the tool turns as plain observations for the
+  re-ask (a full re-prefill, about 30 s). Tests `internal/agent/forced_final_reask_test.go`, written first: red before with
+  `stop="budget" output="" steps=2, want the re-asked answer as a finished run in 2 steps` and `the seat was called 2 times,
+  want 3: one re-ask and no more`; the two tests that pinned the one-shot give-up (`TestForcedFinalToolCallIsNotExecuted`,
+  `TestForcedFinalToolCallWrittenAsTextIsABudgetStop`) now script two offences in a row. Six mutations (the wall gate, the bound
+  of one, the quoted text, the poisoned turn kept, each note) each turn them red. Docs: `docs/systems/coding-agent.md`,
+  `docs/OPERATOR-GUIDE.md`.
 
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 

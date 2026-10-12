@@ -1950,7 +1950,8 @@ Loop accounting on the wire (0.115.20): every `results[]` row carries the node's
 `stop_reason`, `stop_note` and `output_truncated` as the node reported them. Read them before
 trusting a `done`: `stop_note` beginning `forced final answer` means the step budget ran out
 and the last step extracted the answer without tools (0.115.19, register D-89) — a correct
-answer from an incomplete exploration; `output_truncated: true` means the final completion
+answer from an incomplete exploration (since 0.184.0 it may add that the seat first answered
+that step with a tool call and was re-asked once with it quoted: the answer is the second reply); `output_truncated: true` means the final completion
 ended on `length` and the text is a partial. Both used to be visible only in the delegation log.
 
 Acceptance lint (0.88.0, warn-only): every subtask's acceptance is linted at intake and the

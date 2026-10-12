@@ -64,11 +64,11 @@ func TestForcedFinalStepOffersNoToolsAndAsksForTheAnswer(t *testing.T) {
 	}
 }
 
-// A tool call returned on the forced final step is never executed: the run
-// ends "budget" with the evidence in stop_note.
+// A tool call returned on the forced final step is never executed: when the seat does it again after being
+// re-asked (forced_final_reask_test.go), the run ends "budget" with the evidence in stop_note.
 func TestForcedFinalToolCallIsNotExecuted(t *testing.T) {
 	execs := 0
-	client := &fakeClient{script: []Completion{searchCall("c1", "a"), searchCall("c2", "b")}}
+	client := &fakeClient{script: []Completion{searchCall("c1", "a"), searchCall("c2", "b"), searchCall("c3", "c")}}
 	res, err := NewLoop(client, oneTool(&execs), 2).Run(context.Background(), "extract")
 	if err != nil {
 		t.Fatal(err)
@@ -80,13 +80,12 @@ func TestForcedFinalToolCallIsNotExecuted(t *testing.T) {
 
 // A tool call written as TEXT on the tool-less final step (no parser runs on a
 // request without tools) is a budget stop with a note — not the seat
-// tool-call-parser error an unparsed marker means on any other step.
+// tool-call-parser error an unparsed marker means on any other step. Written twice, because the first
+// is re-asked (forced_final_reask_test.go).
 func TestForcedFinalToolCallWrittenAsTextIsABudgetStop(t *testing.T) {
 	execs := 0
-	client := &fakeClient{script: []Completion{
-		searchCall("c1", "a"),
-		{Msg: Msg{Role: "assistant", Content: "<tool_call>\n<function=search_files>\n</function>\n</tool_call>"}, FinishReason: "stop"},
-	}}
+	asText := Completion{Msg: Msg{Role: "assistant", Content: "<tool_call>\n<function=search_files>\n</function>\n</tool_call>"}, FinishReason: "stop"}
+	client := &fakeClient{script: []Completion{searchCall("c1", "a"), asText, asText}}
 	res, err := NewLoop(client, oneTool(&execs), 2).Run(context.Background(), "extract")
 	if err != nil {
 		t.Fatalf("a tool call written as text on the forced final must not be the parser error: %v", err)
