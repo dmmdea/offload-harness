@@ -183,6 +183,31 @@ type Result struct {
 	Duration float64   `json:"duration"`
 	Text     string    `json:"text"`
 	Segments []Segment `json:"segments"`
+	// WordsReliable is the self-check of the word timestamps (D-38, issue #169): false when the words[]
+	// of some segment sit at times that disagree with the segment's own start by wordDriftThresholdSec
+	// or more, true when every segment that carries words agrees, nil (the key is absent) when no
+	// segment carries words. It flags the symptom and names no cause: whisper-server was seen to hand
+	// back word times lagging their segment by minutes on a long file, and a consumer that cuts audio
+	// at whole-word boundaries needs to know not to trust them. Set by Transcribe from checkWordDrift.
+	WordsReliable *bool `json:"words_reliable,omitempty"`
+	// WordsDriftSec is the largest |segment.start - words[0].start| over the segments that carry
+	// words, in seconds: the number behind WordsReliable. Zero (and absent) when WordsReliable is nil
+	// or the words agree to the millisecond.
+	WordsDriftSec float64 `json:"words_drift_sec,omitempty"`
+}
+
+// wordDriftThresholdSec is the drift at which the word times stop being believed: the issue's own
+// ask (#169), 0.5 s. A segment's start and its first word's start are both whisper's estimates and
+// differ by a few hundred milliseconds of leading silence on honest audio; the failure this exists
+// for is off by tens of seconds.
+const wordDriftThresholdSec = 0.5
+
+// checkWordDrift is the pure self-check behind Result.WordsReliable: the largest
+// |segment.start - words[0].start| over the segments that carry words, and whether it stays
+// below threshold. It returns (nil, 0) when no segment carries words, so a transcript with no
+// word array (the OpenAI path, a model that sends none) gets no verdict.
+func checkWordDrift(segs []Segment, threshold float64) (reliable *bool, driftSec float64) {
+	return nil, 0
 }
 
 // Params are the per-request decode knobs whisper-server accepts as form fields.

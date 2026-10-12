@@ -1,0 +1,51 @@
+{
+  "language": "english",
+  "duration": 130.2,
+  "text": " Welcome to the review. First we cover the schedule. Then we cover the budget.",
+  "segments": [
+    {
+      "id": 0,
+      "start": 0.0,
+      "end": 3.2,
+      "text": " Welcome to the review.",
+      "words": [
+        {"word": " Welcome", "start": 0.0, "end": 0.6, "probability": 0.97},
+        {"word": " to", "start": 0.6, "end": 0.8, "probability": 0.99},
+        {"word": " the", "start": 0.8, "end": 1.0, "probability": 0.99},
+        {"word": " review.", "start": 1.0, "end": 3.2, "probability": 0.95}
+      ],
+      "avg_logprob": -0.21,
+      "no_speech_prob": 0.01
+    },
+    {
+      "id": 1,
+      "start": 100.0,
+      "end": 104.0,
+      "text": " First we cover the schedule.",
+      "words": [
+        {"word": " First", "start": 41.2, "end": 41.7, "probability": 0.96},
+        {"word": " we", "start": 41.7, "end": 41.9, "probability": 0.99},
+        {"word": " cover", "start": 41.9, "end": 42.3, "probability": 0.98},
+        {"word": " the", "start": 42.3, "end": 42.5, "probability": 0.99},
+        {"word": " schedule.", "start": 42.5, "end": 43.4, "probability": 0.94}
+      ],
+      "avg_logprob": -0.18,
+      "no_speech_prob": 0.02
+    },
+    {
+      "id": 2,
+      "start": 120.5,
+      "end": 124.0,
+      "text": " Then we cover the budget.",
+      "words": [
+        {"word": " Then", "start": 62.0, "end": 62.4, "probability": 0.97},
+        {"word": " we", "start": 62.4, "end": 62.6, "probability": 0.99},
+        {"word": " cover", "start": 62.6, "end": 63.0, "probability": 0.98},
+        {"word": " the", "start": 63.0, "end": 63.2, "probability": 0.99},
+        {"word": " budget.", "start": 63.2, "end": 64.1, "probability": 0.93}
+      ],
+      "avg_logprob": -0.19,
+      "no_speech_prob": 0.01
+    }
+  ]
+}
