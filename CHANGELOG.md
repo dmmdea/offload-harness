@@ -88,6 +88,21 @@ Versioning: [SemVer](https://semver.org/).
   `TestForcedFinalToolCallWrittenAsTextIsABudgetStop`) now script two offences in a row. Six mutations (the wall gate, the bound
   of one, the quoted text, the poisoned turn kept, each note) each turn them red. Docs: `docs/systems/coding-agent.md`,
   `docs/OPERATOR-GUIDE.md`.
+- **A forced-final tool call is its own shape in the rigger and gets a second seat, instead of "a task too large: split it".**
+  The shape (the forced final step answered with a tool call, again after the re-ask above) ended on `stop_reason` `budget`,
+  and the rigger filed it on the `budget` axis, whose remedy reads "a run at the cap with no loop axis is a task too large for
+  one contract: split it". It was not: in the three rows of the day the seat had read the whole document (or all that read_file
+  could give it) and used 43 s of 600 s, 16 s of 299 s and 86 s of 485 s; and because `budget` outranks `loop` and
+  `tool-misuse` in the precedence, the refused repeats in their traces never surfaced. The rigger now has a `final-tool-call`
+  axis, ahead of `budget` and keyed on `core.ForcedFinalToolCallReason`, whose remedy says cutting the contract up cannot help.
+  And the delegator treats the shape as the fifth defer worth a second placement (`delegate.FinalToolCallDefer`, beside the
+  seat-down and lost-root defers): it is a property of that seat (none of 241 forced finals on every other seat did it), the
+  contract is sound and the wall mostly unspent, and a plain step-budget defer, which a second seat does not fix, stays as it
+  was. With nowhere to place it the caller gets `retry skipped: the seat on <node> wrote a tool call as its final answer and no
+  other node could take the contract (...)` instead of an empty note. Tests `internal/rig/final_tool_call_test.go` and
+  `internal/delegate/final_tool_call_test.go`, written first: red before with `classified "budget" ... want final-tool-call` and
+  `retried=0 deferred=true note=""`; seven mutations turn them red. Docs: `docs/systems/coding-agent.md`,
+  `docs/systems/fleet-node.md`.
 
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 

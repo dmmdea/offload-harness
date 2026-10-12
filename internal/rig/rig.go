@@ -42,6 +42,7 @@ const (
 	AxisCallDeadline     Axis = "call-deadline"     // the whole call ran out of time before this subtask finished (ADR 0065): not evidence about the seat
 	AxisCapacity         Axis = "capacity"          // defer_class capacity: every node that could run it was busy for as long as the wait ran (ADR 0073): a full fleet, neither a seat nor a wall
 	AxisTimeout          Axis = "timeout"           // the contract's wall ran out
+	AxisFinalToolCall    Axis = "final-tool-call"   // the forced final step was answered with a tool call, even after one re-ask: the seat's template habit, not a task too large (core.ForcedFinalToolCallReason)
 	AxisBudget           Axis = "budget"            // the step budget ran out
 	AxisReasoningStarved Axis = "reasoning-starved" // stop_reason reasoning_starved / empty: the completion budget went to the think block, or the seat closed with nothing (0.115.8)
 	AxisAbstention       Axis = "abstention"        // defer_class abstention: the seat declined
@@ -54,7 +55,7 @@ const (
 )
 
 // Precedence is the evaluation order, published so the report can print it.
-var Precedence = []Axis{AxisSeatInfra, AxisCallDeadline, AxisCapacity, AxisTimeout, AxisReasoningStarved, AxisBudget, AxisAbstention, AxisSchemaMiss, AxisAnchorMiss, AxisLoop, AxisLongObservation, AxisToolMisuse, AxisUnclassified}
+var Precedence = []Axis{AxisSeatInfra, AxisCallDeadline, AxisCapacity, AxisTimeout, AxisReasoningStarved, AxisFinalToolCall, AxisBudget, AxisAbstention, AxisSchemaMiss, AxisAnchorMiss, AxisLoop, AxisLongObservation, AxisToolMisuse, AxisUnclassified}
 
 // SubTwoStepGrounded is the sub-axis (of schema-miss and anchor-miss) the P2
 // corpus read found: the contract carried context docs and the run stopped
@@ -163,6 +164,8 @@ var (
 //     2b. reasoning-starved: stop_reason "reasoning_starved" or "empty", or the
 //     reason opens with "empty final answer" (0.115.8) — the run produced no
 //     visible final on two attempts; the calls[] records carry the arithmetic.
+//     2c. final-tool-call: the reason carries core.ForcedFinalToolCallReason (the forced final step was answered with
+//     a tool call, again after one re-ask), ahead of budget, which shares its stop_reason and its prefix.
 //  3. budget: "step budget exhausted" in the reason, or stop_reason "budget".
 //  4. abstention: defer_class == "abstention" — except when the reason says
 //     the OUTPUT FAILED SCHEMA, which is schema-miss / invalid (the seat
@@ -226,6 +229,14 @@ func Classify(r Row) Verdict {
 	}
 	if stop == "reasoning_starved" || stop == "empty" || strings.HasPrefix(reason, "empty final answer") {
 		v.Axis, v.Evidence = AxisReasoningStarved, clip(firstNonEmpty(reason, "stop_reason "+stop), 120)
+		return v
+	}
+	if strings.Contains(reason, core.ForcedFinalToolCallReason) {
+		// Ahead of budget, whose stop_reason and "step budget exhausted" prefix this shape shares: the run reached its
+		// last step with the evidence it needed, the loop asked the seat for the answer, and the seat wrote a tool call
+		// instead (twice, since the loop re-asks once). The budget remedy, "split it", would send the reader to cut up
+		// a contract that was fine.
+		v.Axis, v.Evidence = AxisFinalToolCall, clip(reason, 120)
 		return v
 	}
 	if stepBudgetRe.MatchString(reason) || stop == "budget" {
@@ -337,6 +348,7 @@ var Remedies = map[Axis]Remedy{
 	AxisCallDeadline:    {Applies: "none", Rationale: "the whole call ran out of time before this subtask finished (agent_call_deadline_sec, ADR 0065): not evidence about the seat, and no rule shapes it — split the call into smaller ones or raise the deadline"},
 	AxisCapacity:        {Applies: "delegator config", Key: "agent_call_deadline_sec / agent_placement_wait_sec", Value: "a full fleet is a place in line: shorten the fan-out, add a lane, or lengthen the wait that bounds it (agent_call_deadline_sec for the MCP doors, agent_placement_wait_sec for the doors without a call deadline); NOT timeout_sec, which never bounds this wait", Rationale: "every node that could run the subtask was busy for as long as the wait ran (ADR 0073)"},
 	AxisTimeout:         {Applies: "contract", Key: "timeout_sec", Value: "raise toward the cap only when the row's steps show progress; otherwise the run was stuck, not slow", Rationale: "the wall ran out — a contract-side budget, not a rule"},
+	AxisFinalToolCall:   {Applies: "none", Rationale: "the last step offered no tools and asked for the answer, and the seat wrote a tool call instead, again after the loop re-asked once with it quoted: the seat's template keeps continuing the tool-call turns above it, not a task too large for one contract (cutting the contract up cannot help: the run had read what it needed and most of its wall was unspent). The delegator gives the contract to another seat once; a seat that does this routinely wants a different agent seat for this lane"},
 	AxisBudget:          {Applies: "contract", Key: "max_steps", Value: "the cap is 12; a run at the cap with no loop axis is a task too large for one contract — split it", Rationale: "the step budget ran out"},
 	AxisAbstention:      {Applies: "contract", Key: "goal", Value: "name the context file and tell the seat to read it first; anchor acceptance on page-only tokens", Rationale: "the seat declined — usually a goal that reads as unanswerable"},
 	AxisSchemaMiss:      {Applies: "node config", Key: "agent_seed_context_reads", Value: "true on the node (one read_file per context doc replayed before turn 1) when the sub-axis is two-step-grounded; otherwise anchor acceptance on the document", Rationale: "a schema-valid answer with empty or short fields — on grounded contracts stopping at two steps the seat answered before reading the document (the 2026-09-07 corpus finding, measured by the setup_ab A/B)"},

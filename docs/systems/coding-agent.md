@@ -239,7 +239,9 @@ infrastructure/config/contract, or a placement failure with no defer class) → 
 delegators marked refusals: the fleet was busy, which is neither a wall nor a seat, and its remedy names
 `agent_call_deadline_sec` / `agent_placement_wait_sec`, never `timeout_sec`, which does not bound that wait; it sits
 ahead of `timeout` because every wait bounded by the call words itself with the bare word "deadline") →
-`timeout` → `budget` → `abstention` (an
+`timeout` → `reasoning-starved` → `final-tool-call` (the forced final step was answered with a tool call, again after one
+re-ask: the reason carries `core.ForcedFinalToolCallReason`; ahead of `budget`, whose stop_reason and prefix it shares, so its
+remedy does not tell the reader to split a contract that had read everything it needed) → `budget` → `abstention` (an
 "output failed schema" reason is `schema-miss / invalid`) → `schema-miss` (min_items/nonempty; sub-axes
 `two-step-grounded` = context docs and ≤ 2 steps, `invalid`) → `anchor-miss` (contains/not_contains/regex; same sub-axis) →
 `loop` → `long-observation` → `tool-misuse` (the last three on trace-bearing rows only) → `unclassified`. The report gives

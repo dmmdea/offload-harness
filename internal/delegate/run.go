@@ -1575,12 +1575,12 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 			}
 		case held != "":
 			first.RetryNote = "retry skipped: " + held + " and no other node is eligible; " + retryHeldWhy(held)
-		case SeatDownDefer(first.Result), RootGoneDefer(first.Result):
+		case SeatDownDefer(first.Result), RootGoneDefer(first.Result), FinalToolCallDefer(first.Result):
 			// The defer promises a second placement on another node: when there is no
 			// other node the caller must be told it was considered and why it did not
 			// happen, not left with a retryable defer and an empty note. The seat-down
-			// defer (ADR 0066) and the lost-root defer (register C-79) are the two whose
-			// promise is that sentence.
+			// defer (ADR 0066), the lost-root defer (register C-79) and the forced-final
+			// tool-call defer are the ones whose promise is that sentence.
 			why := "every eligible node was already tried or is not eligible"
 			switch {
 			case r.route == "local":
@@ -1591,6 +1591,9 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 			what := "the seat on " + nodeLabel(first) + " went down"
 			if RootGoneDefer(first.Result) {
 				what = "the run on " + nodeLabel(first) + " lost its workspace root"
+			}
+			if FinalToolCallDefer(first.Result) {
+				what = "the seat on " + nodeLabel(first) + " wrote a tool call as its final answer"
 			}
 			first.RetryNote = fmt.Sprintf("retry skipped: %s and no other node could take the contract (%s)", what, why)
 		case r.remotePinned():
@@ -4390,6 +4393,10 @@ const minRetrySec = 10
 // infrastructure the seat's "I could not read the file" was a failed
 // verification, which this function retries: the better class must not take the
 // recovery with it.
+//
+// The fifth is the forced-final tool-call defer (FinalToolCallDefer): the seat answered the tool-less final step with a
+// tool call, even after the loop re-asked it once. A property of THIS seat, a sound contract that had read what it
+// needed, and a class (`budget`) this function otherwise leaves alone.
 func retryable(pr PlacedResult) bool {
 	if pr.Err != "" {
 		return false
@@ -4400,10 +4407,25 @@ func retryable(pr PlacedResult) bool {
 	if admissionDefer(pr.Result) || SeatDownDefer(pr.Result) {
 		return true
 	}
-	if RootGoneDefer(pr.Result) {
+	if RootGoneDefer(pr.Result) || FinalToolCallDefer(pr.Result) {
 		return true
 	}
 	return pr.Result.Deferred && pr.Result.DeferClass == core.DeferClassAbstention
+}
+
+// FinalToolCallDefer reports whether a result is the forced-final tool-call defer: a `budget` defer whose reason
+// carries core.ForcedFinalToolCallReason, i.e. the run reached its last step, which offers no tools and asks for the
+// answer, and the seat wrote a tool call instead, again after the loop re-asked it once with the offence quoted.
+//
+// It is the fifth defer worth a second placement, and for the same reason as the seat-down one: the fault is a
+// property of THIS seat (one seat family did it in 35 of 106 forced finals; the seats of every other family in none of
+// 241) and the contract is sound, so the same contract on another node is the cure. Unlike a plain step-budget defer
+// (a task too large, which another seat does not fix), the run had read what it needed and its wall was mostly
+// unspent. It is a node-filed defer, an OBSERVED terminal, so nothing still runs the contract. It matches on the
+// CONSTANT the loop writes (the phrase sits behind the "step budget exhausted (N steps): " grep key, so Contains and
+// not HasPrefix), never on other prose.
+func FinalToolCallDefer(r core.AgentWireResult) bool {
+	return r.Deferred && r.DeferClass == core.DeferClassBudget && strings.Contains(r.Reason, core.ForcedFinalToolCallReason)
 }
 
 // SeatDownDefer reports whether a result is the seat-down defer (ADR 0066,
