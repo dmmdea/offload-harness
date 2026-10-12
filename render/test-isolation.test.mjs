@@ -50,7 +50,7 @@ test("isolatedRunnerEnv: a real child whose parent names a llama-swap never reac
     const parent = { ...process.env, LLAMA_SWAP_API: fake.url, GPU_LEASE_DIR: "/lease", GPU_LEASE_EPOCH: "7" };
     const code = "const r = await fetch(process.env.LLAMA_SWAP_API + '/running', { signal: AbortSignal.timeout(3000) }).then(() => 'answered', (e) => 'refused'); " +
       "console.log(JSON.stringify({ r, lease: Object.keys(process.env).filter((k) => k.startsWith('GPU_LEASE_')) }));";
-    const out = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env: isolatedRunnerEnv({}, parent), encoding: "utf8", timeout: 30000 });
+    const out = spawnSync(process.execPath, ["--input-type=module", "-e", code], { env: isolatedRunnerEnv({}, parent), encoding: "utf8", timeout: 30000, windowsHide: true });
     assert.equal(out.status, 0, out.stderr);
     assert.deepEqual(JSON.parse(out.stdout), { r: "refused", lease: [] });
     assert.deepEqual(fake.seen, [], "the child's drain never reached the parent's llama-swap");

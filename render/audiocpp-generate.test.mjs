@@ -95,7 +95,7 @@ test("an unknown kind throws", () => {
 });
 
 function run(args) {
-  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 30000, env: isolatedRunnerEnv() });
+  return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 30000, windowsHide: true, env: isolatedRunnerEnv() });
 }
 
 test("the script refuses a cpu backend before touching anything (exit 1, CPU_BACKEND_REFUSED)", () => {

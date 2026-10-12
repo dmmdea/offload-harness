@@ -38,7 +38,7 @@ test("unknown --family is a UsageError that names it and the known set", () => {
 test("unknown --family exits 2 through the real script, before any ComfyUI work", (t) => {
   const dir = scratchDir(t, "comfy-render-");
   const r = spawnSync(process.execPath, [SCRIPT, join(dir, "o.png"), "a prompt", "--family", "sdxl-turbo",
-    "--api", "http://127.0.0.1:9"], { encoding: "utf8", timeout: 30000, env: isolatedRunnerEnv() });
+    "--api", "http://127.0.0.1:9"], { encoding: "utf8", timeout: 30000, windowsHide: true, env: isolatedRunnerEnv() });
   assert.equal(r.status, 2, `exit ${r.status}; stderr: ${r.stderr}`);
   assert.match(r.stderr, /unknown --family 'sdxl-turbo'/);
   assert.doesNotMatch(r.stderr, /not reachable/, "must refuse before polling ComfyUI");
@@ -159,7 +159,7 @@ test("standalone (no --no-lifecycle): self-manages via withGpuSlot — refuses f
   const dir = scratchDir(t, "comfy-render-");
   const env = isolatedRunnerEnv();
   const r = spawnSync(process.execPath, [SCRIPT, join(dir, "o.png"), "a prompt", "--api", "http://127.0.0.1:9"],
-    { encoding: "utf8", timeout: 15000, env });
+    { encoding: "utf8", timeout: 15000, windowsHide: true, env });
   assert.equal(r.status, 1, `exit ${r.status}; stderr: ${r.stderr}`);
   assert.match(r.stderr, /GPU lease missing/);
 });
@@ -176,7 +176,7 @@ test("--no-lifecycle: skips withGpuSlot entirely — unset lease does not block 
   const env = isolatedRunnerEnv();
   const r = spawnSync(process.execPath,
     [SCRIPT, join(dir, "o.png"), "a prompt", "--api", "http://127.0.0.1:9", "--no-lifecycle"],
-    { encoding: "utf8", timeout: 3000, env });
+    { encoding: "utf8", timeout: 3000, windowsHide: true, env });
   assert.ok(r.signal || (r.error && r.error.code === "ETIMEDOUT"), `expected the process to still be running (polling) when killed, got status=${r.status} signal=${r.signal} error=${r.error}`);
   assert.doesNotMatch(r.stderr || "", /GPU lease missing/, "must not require a lease under --no-lifecycle");
 });

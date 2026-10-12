@@ -95,7 +95,7 @@ test("a runner given keep-comfy exits after its job while the instance it launch
     // isolated: the runner calls withGpuSlot with the default freeLlamaSwap, which drains and unloads the
     // llama-swap its environment names (register F80); a seat still starting held that drain for 17.6 s
     env: isolatedRunnerEnv({ COMFY_DIR: comfyDir, COMFY_PY: process.execPath, COMFY_INSTANCE: "keepcase", TEST_API: api, COMFY_START_WAIT_SEC: "30" }),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
   });
   let stdout = "", stderr = "";
   child.stdout.on("data", (d) => (stdout += d));

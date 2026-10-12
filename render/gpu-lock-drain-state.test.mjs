@@ -103,7 +103,7 @@ test("freeLlamaSwap: a render start does not wait on a seat that is starting, an
   const t0 = Date.now();
   await freeLlamaSwap(fake.url, {
     unloadModels: null, leaseDevices: [], log: (m) => logs.push(m),
-    quiesce: (ids, o) => quiesceLlamaSwap(ids, { ...o, ...FAST }),
+    quiesce: (ids, o) => quiesceLlamaSwap(ids, { ...o, api: fake.url, ...FAST }),
   });
   const took = Date.now() - t0;
   assert.equal(fake.count("GET /upstream/"), 0, `a request reached the seat: ${fake.seen.join(", ")}`);
