@@ -6,6 +6,93 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a bare `--` ends the flags on the media CLI verbs, so a positional that starts with `-` can be passed (CT-52)
+
+- **The defect.** `splitArgs`, `splitTwoArgs`, `splitThreeArgs` and `splitFourArgs` (`main.go`) sent every token that starts with `-`
+  to the flags, so `generate-audio out.wav "--- Intro ---"` came back with an empty text (the `--- Intro ---` was a flag) and the same
+  held for a prompt that opens with a dash on `generate-video`, `animate-character` and the fifteen call sites of `splitArgs`.
+  The engine side already did it right (`runnerArgs` puts `--` before the positionals); only the CLI door lost the text.
+- **The fix.** A bare `--` ends flag handling in all four helpers: every later token is a positional, in order, even when it starts
+  with `-`; a lone `-` is still the stdin positional. The user's `--` is consumed by the helper. A positional past the helper's arity
+  still goes to the flags the caller gives `fs.Parse` (as it always did), but once the terminator was seen the helper writes ONE `--`
+  of its own in front of the first such token, so `fs.Parse` stops there and can never read a leading dash as a flag. That is a
+  deliberate departure from the backlog wording ("do not leave the `--` token in the list handed to `fs.Parse`"): the user's token is
+  never passed on, the fence is the helper's own, and a test pins the returned flags exactly. With no `--` in the arguments every
+  helper returns what it returned before. `endsFlags` and `isFlagArg` hold the two rules once. The generate-audio command line is
+  factored into `parseGenerateAudio`, as generate-video already was, so the verb's own parse is testable. Usage text and
+  `docs/OPERATOR-GUIDE.md` say so.
+- **Tests.** `main_test.go`: one terminator test per helper plus a table over all four, the lone-dash guard, the flags-before-terminator
+  guard, the over-arity fence (for every helper, and through `fs.Parse`), a no-terminator guard, a value flag that takes a following `--`
+  as its value, and the two verbs' parse. Red before (targeted runs on a Linux gate host): the dash-led text
+  came back empty from `splitTwoArgs` (`= ("out.wav", "", [-- --- Intro ---])`) and the other three. Five mutants, each applied to one line of `main.go` and run on a Linux gate host through
+  `scripts/mutation-check.sh` (every verdict line: `MUTATION-VERDICT: RED (the mutant compiles and the tests fail: the tests catch this
+  mutation)`): `endsFlags` never true and `isFlagArg` ignoring the terminator turn the per-helper terminator tests and the table over all
+  four helpers red; `isFlagArg` without its lone-dash exemption turns `TestSplitArgsKeepsALoneDashAsThePositional` red; `overflowArg`
+  without its fence turns `TestSplitTwoArgsOverArityAfterTheTerminatorIsHandedToParseBehindOneDashDash`,
+  `TestSplitHelpersOverArityFenceTheirOverflow` and `TestParseGenerateAudioCarriesADashLedTextToTheRequest` red; a fence written before
+  every overflow token turns the first two red.
+
+### Fixed — a bound media route whose weight is missing defers typed `route_not_ready` before the lease on the local path (CT-54)
+
+- **The defect.** A fleet node refuses a media job for a route it binds but cannot run (a weight deleted, an engine binary moved) at its
+  door, with a 503 and the route's verdict. The local lanes never asked: with the fastwan `sdcpp_model` pointing at a missing file a
+  local `generate-video` took the media lease, spawned the runner, and deferred `err_class` `other` ("--model not found") 31 ms later
+  (the 0.173.0 live gates, 2026-10-08, as the backlog recorded them): fail-closed, but untyped, and after a lease other callers had waited behind.
+- **The fix.** The five engine lanes (sdcpp video, sdcpp animate, audio.cpp voice and music, the sdcpp image lane) read the same
+  `mediacap` derivation the node door, `doctor` and `offload_status` read (`internal/pipeline/igpumedia_routeready.go`), after their own
+  checks of the bindings and the engine binary and before the output directory, the seed, the prompt refiner and the lease. A route that
+  derives BOUND-BUT-MISSING defers with the new `err_class` `route_not_ready`; the reason names the route, the config key and the
+  missing path and says another node may serve it. A route that is NOT CONFIGURED (nothing bound) keeps the lane's own sentence and no
+  class. A video family that is not the default is judged on its own route (`generate_video:<family>`). The ledger files the class as
+  `config` (`internal/ledger/reasoncode.go`); no circuit breaker counts it (the breaker judges the llama tiers, no media lane reaches it).
+  The test fixtures that bound weights by name only (`/models/x.gguf`, `m.gguf`) now point at real files: a route with a missing weight
+  is exactly what the lanes now refuse. 34 tests of the pipeline package and one of the root package (`TestFleetMeasureProbesAnSdcppVideoAndAnAudiocppMusicBox`) ran a
+  lane against a stub runner with the weights named and absent: they failed on a full package run before the fixture change and pass after it.
+- **Tests.** `igpumedia_routeready_test.go` (five lanes by table: the weight is deleted and the lane defers `route_not_ready` naming the
+  key and the path, takes no lease, creates no output directory, never runs the runner, and the ledger row carries the class and
+  `config`; the reason sentence; a non-default family; the guards that a complete route still runs, an unbound route keeps its old
+  sentence, and the lane agrees with `mediacap.Routes`). Red before: every lane ran (`want a typed defer, got ok=true`) and the sdcpp
+  image lane's failure was classed `other`. Nine mutants (`scripts/mutation-check.sh`, all `RED`): the derivation read as NOT CONFIGURED instead of
+  BOUND-BUT-MISSING and the route name match dropped turn the lane table, the reason test, the family test and `TestAWeightThatIsThereStillRuns` red; a
+  wrong `err_class` string turns the lane table and the reason test red; every family judged on the default route turns
+  `TestAVideoFamilyThatIsNotTheDefaultIsJudgedOnItsOwnRoute` red; each lane's hook removed in turn (video, animate, audio, image) turns that
+  lane's row of `TestEngineLanesDeferTypedBeforeTheLeaseWhenTheirWeightIsMissing` and of `TestTheLaneAndTheNodeDoorReadTheSameVerdict` red and no other; the
+  ledger table without `route_not_ready` turns the lane table's ledger assertion red.
+
+### Fixed — a dead ComfyUI is a typed class on the Go side, and `POST /prompt` and `GET /view` can time out (D-38, issue #72)
+
+- **The defect.** Two of the four follow-ups of issue #72 were still open. (2) `gpugen.ClassifyErr` and `pipeline.classifyErr` had no
+  class for a ComfyUI that stopped answering: `comfy-render.mjs` exits 3 on it (`RENDER_EXIT_SERVER_UNUSABLE`), and the Go side filed the
+  failure `other`. (3) `rawSubmit` (`POST /prompt`) and `fetchView` (`GET /view`) passed no `AbortSignal` (`/system_stats`, `/queue` and
+  `/history` always did), so a ComfyUI that accepts the connection and never answers held the exclusive GPU slot.
+- **The class.** `comfy_unusable` joins `gpugen`'s runner allow-list, so `Generate` returns a `RunError` of that class for any child
+  that prints `IGPU_CLASS=comfy_unusable` on a line of its own (it reads the retained output of any child, so no new parser).
+  `comfy-render.mjs` prints the line after its `RENDER FAILED:` line for a `serverUnusable` error (`reportRenderFailure`) and still exits
+  3; `comfy-generate.mjs` relays its child's stderr unchanged (`relayRenderChild`, moved into `batch-jobs.mjs` with the child injected so
+  the crossing is testable), so the line reaches the output the Go side reads. `pipeline.classifyErr` gets the `*gpugen.RunError` branch
+  `gpugen.ClassifyErr` already had, so the lanes that file a gen failure through it (the ComfyUI image, edit, inpaint, upscale and batch
+  lanes) record the typed class instead of re-guessing it from the words of the message (a "zoom lens timeout" read as `oom`). The
+  ledger files `comfy_unusable` as `infrastructure`. Only the image runner prints the line today; the other ComfyUI runners raise the
+  same error and are a follow-up.
+- **The bounds.** `rawSubmit` is bounded by `SUBMIT_TIMEOUT_MS` (120 s: the call validates and queues, it does not run) and `fetchView`
+  by `VIEW_TIMEOUT_MS` (600 s), which covers the whole request, the body read included. Both take a `timeoutMs` and reject with an error
+  that names the call and the bound (`ComfyUI POST /prompt timeout: no complete answer within N ms ...`), which the Go side classes
+  `timeout`; `submitGraph` takes `submitTimeoutMs`. The healthy paths are unchanged.
+- **Tests.** Go: `TestGenerateReadsComfyUnusableFromAFakeRunner` (a fake runner prints the class and exits 3), `TestRunnerClassReadsComfyUnusable`,
+  `TestRunnerClassStillIgnoresAnInventedClass`, `TestClassifyErrHonoursATypedRunErrorClass`, `TestImageLaneRecordsAComfyUnusableFailureWithItsClass`
+  (the image lane, the result and the ledger row). JS: both calls reject at their bound against an injected `fetchImpl` and against a real
+  socket that accepts and never answers (each races a sentinel timer, so the failure was an assertion and not a hung runner), both pass an
+  `AbortSignal`, the body read is bounded, the relay is verbatim, and the real `comfy-render.mjs` against a server answering HTTP 500 exits 3
+  with the class line on a line of its own. Red before: `Generate` returned an untyped `*fmt.wrapError` (the runner allow-list dropped the line), `classifyErr` answered `oom` for a typed
+  `gpu_reset` whose message said "zoom lens timeout", the image lane's ledger class for a `comfy_unusable` failure was `oom`, 14 of 103 JS tests
+  failed (all new ones; the real script exited 3 as before but printed no class line), and the three timeout tests that would hang against a
+  server that never answers ended at their sentinel timer as assertions, not as a stuck runner. Nine mutants (`scripts/mutation-check.sh`, all `RED`): the runner
+  allow-list without `comfy_unusable` (`TestGenerateReadsComfyUnusableFromAFakeRunner`, `TestRunnerClassReadsComfyUnusable`); `classifyErr`
+  without its RunError branch (`TestClassifyErrHonoursATypedRunErrorClass`, the image-lane test); the abort signal that never fires, a POST without its signal, a GET without its signal, a changed submit
+  bound (the timeout and signal tests, the real-socket test, the constants test); `comfyUnusableClassLine` always empty and
+  `reportRenderFailure` without its class line (`reportRenderFailure`, the real-script test); the relay that drops the child's stderr
+  (the two relay tests).
+
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 
 ### Fixed — `TestTheAnchoredClockDropsTheAdmissionAllowance` no longer fails on a loaded box for a cost that is not the poll budget
