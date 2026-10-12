@@ -115,8 +115,6 @@ const CLOSES_LEASE = /delete\s+[\w.]*GPU_LEASE|startsWith\(\s*["'`]GPU_LEASE|\/\
 // text that isolates: the helper, or both closings written out
 const isolatedIn = (text) => /\bisolatedRunnerEnv\s*\(/.test(text) || (CLOSES_DEAD_PORT.test(text) && CLOSES_LEASE.test(text));
 
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
 // The top-level statement that holds idx: from the last line before it that starts in column 0 with something other
 // than a closer, to the next line that starts with one. The suite writes its tests and helpers that way; a file
 // written otherwise gets a wider block, which only makes the judgement more lenient.
@@ -129,8 +127,10 @@ function topBlock(src, idx) {
 
 // the top-level block of a function or const the file declares by this name, or null
 function blockNamed(src, name) {
-  const m = new RegExp(`^(?:export\\s+)?(?:async\\s+)?(?:function\\s*\\*?\\s*|(?:const|let|var)\\s+)${escapeRe(name)}\\b`, "m").exec(src);
-  return m ? topBlock(src, m.index + 1).text : null;
+  for (const m of src.matchAll(/^(?:export\s+)?(?:async\s+)?(?:function\s*\*?\s*|(?:const|let|var)\s+)([\w$]+)/gm)) {
+    if (m[1] === name) return topBlock(src, m.index + 1).text;
+  }
+  return null;
 }
 
 // the name and parameters of the function a top-level block declares (null when it is not one)
@@ -164,12 +164,11 @@ function envVerdict(src, expr, at, depth = 0) {
     return body === null ? null : isolatedIn(body);
   }
   if (!/^[\w$]+$/.test(e)) return null;
-  const decl = (text, re) => { let last = null; for (const m of text.matchAll(re)) last = m; return last; };
+  const lastNamed = (text, re) => { let last = null; for (const m of text.matchAll(re)) if (m[1] === e) last = m; return last; };
   const initOf = (region) => envVerdict(src, region.slice(region.indexOf("=") + 1).split(/;|\n/, 1)[0], at, depth + 1);
-  const declRe = new RegExp(`\\b(?:const|let|var)\\s+${escapeRe(e)}\\s*=`, "g");
   // a declaration in the same top-level block, before the call
   const blk = topBlock(src, at);
-  const local = decl(blk.text.slice(0, at - blk.start), declRe);
+  const local = lastNamed(blk.text.slice(0, at - blk.start), /\b(?:const|let|var)\s+([\w$]+)\s*=/g);
   if (local) {
     const region = blk.text.slice(local.index, at - blk.start);
     return isolatedIn(region) ? true : initOf(region);
@@ -179,15 +178,15 @@ function envVerdict(src, expr, at, depth = 0) {
   const slot = head ? head.params.indexOf(e) : -1;
   if (slot >= 0) {
     const vs = [];
-    for (const m of src.matchAll(new RegExp(`(?<![\\w$.])${escapeRe(head.name)}\\s*\\(`, "g"))) {
-      if (/\bfunction\s*\*?\s*$/.test(src.slice(0, m.index))) continue;
+    for (const m of src.matchAll(/(?<![\w$.])([\w$]+)\s*\(/g)) {
+      if (m[1] !== head.name || /\bfunction\s*\*?\s*$/.test(src.slice(0, m.index))) continue;
       const given = splitTop(callArgs(src, m.index + m[0].length - 1))[slot];
       vs.push(given === undefined ? false : envVerdict(src, given, m.index, depth + 1)); // none given: undefined, which is the parent's env
     }
     return vs.length === 0 ? null : all(vs);
   }
   // a module-level declaration before the call
-  const top = decl(src.slice(0, at), new RegExp(`^(?:export\\s+)?(?:const|let|var)\\s+${escapeRe(e)}\\s*=`, "gm"));
+  const top = lastNamed(src.slice(0, at), /^(?:export\s+)?(?:const|let|var)\s+([\w$]+)\s*=/gm);
   if (top) {
     const region = src.slice(top.index, at);
     return isolatedIn(region) ? true : initOf(region);
