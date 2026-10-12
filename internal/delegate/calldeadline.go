@@ -774,7 +774,7 @@ func (c *callDeadline) cutQueued(cfg config.Config, subtasks []core.AgentContrac
 // failed (rescue.go): the call's context is over, and starting a seat run after the deadline
 // is exactly what the deadline exists to prevent. A rescue that cannot run leaves the defer,
 // which is what the look publishes.
-func lookAnswer(contract core.AgentContract, p jobPoll, pr *PlacedResult) {
+func lookAnswer(contract core.AgentContract, holder string, p jobPoll, pr *PlacedResult) {
 	switch p.State {
 	case "done":
 		var wire core.AgentWireResult
@@ -782,9 +782,7 @@ func lookAnswer(contract core.AgentContract, p jobPoll, pr *PlacedResult) {
 			pr.Err = "job done but data is not an AgentWireResult: " + uerr.Error()
 			return
 		}
-		pr.Result = wire
-		pr.Node = wire.NodeID
-		pr.Seat = wire.Seat
+		pr.takeQueueAnswer(wire, holder)
 		if !wire.Deferred {
 			pr.AcceptanceFailures = EvalAcceptance(contract, wire)
 		}
@@ -847,7 +845,7 @@ func (c *callDeadline) lookAtHolder(cfg config.Config, subtasks []core.AgentCont
 				// interrupted submit) left behind: a finished job is its result, a failed
 				// one is its own failure.
 				pr.Err = ""
-				lookAnswer(subtasks[i], p, pr)
+				lookAnswer(subtasks[i], holder, p, pr)
 			case p.Status == http.StatusOK && (p.State == "accepted" || p.State == "running"):
 				pr.queueSeen = p.State
 			default:
