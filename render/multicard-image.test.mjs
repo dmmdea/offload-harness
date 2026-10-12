@@ -278,7 +278,7 @@ function scrubbedEnv(comfyDir) {
   return env;
 }
 const run = (script, args, env) => new Promise((resolve, reject) => {
-  const c = spawn(process.execPath, [join(HERE, script), ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+  const c = spawn(process.execPath, [join(HERE, script), ...args], { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   let out = "", err = "";
   c.stdout.on("data", (d) => { out += d; });
   c.stderr.on("data", (d) => { err += d; });

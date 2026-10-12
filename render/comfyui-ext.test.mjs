@@ -11,7 +11,7 @@ import { COMFY_PY } from "./comfy-lifecycle.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const env = { ...process.env, CUDA_VISIBLE_DEVICES: "-1", PYTHONDONTWRITEBYTECODE: "1", PYTHONUTF8: "1" };
-const run = (args, timeout) => spawnSync(COMFY_PY, ["-B", ...args], { encoding: "utf8", env, timeout });
+const run = (args, timeout) => spawnSync(COMFY_PY, ["-B", ...args], { encoding: "utf8", env, timeout, windowsHide: true });
 
 const probe = run(["-c", "import torch, safetensors"], 180000);
 const skip = probe.error || probe.status !== 0 ? `no interpreter with torch and safetensors (${COMFY_PY})` : false;
