@@ -4496,7 +4496,7 @@ func skipsRetryAsResearchAcceptanceOnly(contract core.AgentContract, pr PlacedRe
 // `docanchor`).
 func failsDocumentFingerprint(failures []string) bool {
 	for _, f := range failures {
-		if strings.Contains(f, "(?P<docanchor>") {
+		if strings.Contains(f, docAnchorTag) {
 			return true
 		}
 	}
@@ -6674,7 +6674,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			pr.Seat = wire.Seat
 			if !wire.Deferred {
 				pr.AcceptanceFailures = EvalAcceptance(contract, wire)
-				r.noteFingerprint(base, contract, pr.AcceptanceFailures)
+				r.noteFingerprint(base, contract, wire, pr.AcceptanceFailures)
 			}
 			return pr
 		case status == http.StatusOK && state == "error":
@@ -7188,6 +7188,11 @@ func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 			continue
 		}
 		if pass, reason := chk.Eval(wire); !pass {
+			// A digest that claims nothing and says the page does not carry what was asked restates none of the page's
+			// words, and is not about another document either (HonestAbsence reads the structure, not a phrase).
+			if strings.Contains(a, docAnchorTag) && HonestAbsence(wire.Structured) {
+				continue
+			}
 			failures = append(failures, reason)
 		}
 	}
@@ -7218,8 +7223,10 @@ func (r *runner) strikeOnFingerprint(base string, failures []string) {
 
 // noteFingerprint is the runner's reading of one result against the document fingerprint: a contract that carries the
 // check and failed it is a strike against the node, one that carries it and PASSED is a pass (Quarantine.Pass), and one that
-// carries none says nothing about the node. The local seat has no call here, as for strikeOnFingerprint.
-func (r *runner) noteFingerprint(base string, contract core.AgentContract, failures []string) {
+// carries none says nothing about the node. A result the check missed that is an honest absence (excusedAbsence) is neither:
+// it did not fail the contract, but it restated nothing of the page either, so it is no evidence that the node reads the
+// right document and must not stand among its passes. The local seat has no call here, as for strikeOnFingerprint.
+func (r *runner) noteFingerprint(base string, contract core.AgentContract, wire core.AgentWireResult, failures []string) {
 	if r.quarantine == nil {
 		return
 	}
@@ -7228,7 +7235,9 @@ func (r *runner) noteFingerprint(base string, contract core.AgentContract, failu
 		r.strikeOnFingerprint(base, failures)
 	case failsDocumentFingerprint(contract.Acceptance):
 		// the check is on the contract (failsDocumentFingerprint reads the tag in either form) and did not fail
-		r.quarantine.Pass(base)
+		if !excusedAbsence(contract, wire) {
+			r.quarantine.Pass(base)
+		}
 	}
 }
 

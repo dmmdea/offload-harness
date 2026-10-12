@@ -120,20 +120,35 @@ Versioning: [SemVer](https://semver.org/).
   `line 1 is 125999 runes: the seat's read_file would cut it at 2000 and the rest would be out of reach`; five mutations (the
   wrap not applied, the early return, the break window, the hard-cut width, the cap constant) turn them red. Docs:
   `docs/systems/mcp-server.md`.
-- **The document fingerprint no longer fails an honest "not on page" digest or a plural/singular restatement.** The research
-  acceptance check is a wrong-document tripwire: one any-of alternation of the page's own prose words, kept off the goal's
-  vocabulary. Nine of 254 research answers in two days failed it, and every one was a faithful or honest-absence digest, none
-  off-document (a digest that names the document correctly and quotes it verbatim failed for writing "specification" where the
-  page's anchor was "specifications"; another was five "not on page" and a verdict). The goal tells the seat to write exactly
-  that, in the goal's own words, which the anchors exclude by construction, so an honest absence could never pass. The check now
-  ends with an honest-absence alternative (`research.AbstentionAlt`: "not on the page", "does not contain/address/mention/…",
-  "not documented/stated/…"; "not found" stays out, it is an error) and matches each anchor in its singular, excluding the goal's
-  words in the singular too, so an echoed goal still cannot pass. The check stays one regex tagged `docanchor`, and the
-  confident digest of another page, the empty answer and "could not read the file" still fail it. Tests
-  `internal/research/anchors_abstention_test.go`, written first: red before with, for example, `an honest absence was failed as
-  off-document: "The page does not address it."` and `a faithful restatement was failed for its inflection`; five mutations (the
-  alternative dropped, the singular off, the goal exclusion on the singular off, a phrase dropped, `not found` added) turn them
-  red. Docs: `docs/systems/mcp-server.md`.
+- **The document fingerprint no longer fails an honest absence or a plural/singular restatement, and no longer passes the goal
+  echoed back.** The research acceptance check is a wrong-document tripwire: one any-of alternation of the page's own prose
+  words, kept off the goal's vocabulary. Nine of 254 research answers in two days failed it, and every one was a faithful or
+  honest-absence digest, none off-document (a digest that names the document correctly and quotes it verbatim failed for
+  writing "specification" where the page's anchor was "specifications"; another was five "not on page" and a verdict). The goal
+  tells the seat to write exactly that, in the goal's own words, which the anchors exclude by construction, so an honest absence
+  could never pass. Each anchor is now matched in its singular (and the goal's words are excluded in the singular too), and an
+  honest absence is excused by the delegator from the STRUCTURE of the digest, not from a phrase in the regex:
+  `delegate.EvalAcceptance` drops the fingerprint failure of a result whose structured digest is `delegate.HonestAbsence`, an
+  object in which every string at any depth (a list entry as much as a field) is empty or a short statement (60 words at most)
+  that the page does not carry what was asked, with at least one such statement, no number or boolean, no second sentence that
+  says what the page does hold, no contrast word ("but", "however") and no report of a failure to read the file ("could not
+  read", "not found", "the file is missing"). Such a result is counted for the node as neither a strike nor a pass. An earlier
+  draft of this change appended the absence phrases to the regex as a last alternative, and that was withdrawn before release:
+  the goal itself contains them (the built goal says "does not contain" and "does not address it"), so every anchored research
+  contract read PARROT-PASSABLE in the lint that is published on the result, the goal echoed back passed the check, and a stock
+  phrase ("not specified") anywhere in a digest of the wrong document passed it. The anchors are also chosen off the whole goal
+  the seat is handed (the fixed sentences, the file's name and title, the questions) and not only the caller's: the template's
+  own "Always end with a one-sentence verdict" had made "always" an anchor on a page that uses the word. The check stays one regex
+  tagged `docanchor`, holding the page's words and nothing else. Not closed, and not closable by a lexical rule: a seat that did
+  not read the page and reports "the page does not address it" without saying it failed is delivered as an absence, as an honest
+  one is. Tests `internal/research/anchors_abstention_test.go` and `internal/delegate/absence_test.go`, written first: red before
+  with, for example, `a plain goal: the contract is flagged parrot-passable: acceptance is PARROT-PASSABLE`, `the goal echoed
+  back as the answer passed the fingerprint`, `facts about another subject, one of them hedged: passed the fingerprint` and
+  `could not read: "I could not read the file, so the page does not address the goal." passed the fingerprint`; twelve mutations
+  (the anchors chosen off the caller's goal alone, an absence alternative back in the regex, a number or boolean allowed, the
+  read-failure and contrast vetoes, the sentence rule, the vacuous-sentence guard, the word cap, the at-least-one-statement
+  guard, the excuse dropped, the excuse widened to any check, an excused absence counted as a pass) each turn them red. Docs:
+  `docs/systems/mcp-server.md`.
 - **A node that passed most of its research work is no longer quarantined by two misses of a lexical check.** A research answer
   that fails the document fingerprint (`docanchor`) is a strike against the node that served it, and the second strike inside 30
   minutes took the node out of the session's placement for 30 minutes ("quarantined until ..."), the whole point being to stop work

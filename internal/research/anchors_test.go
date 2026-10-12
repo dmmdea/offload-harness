@@ -54,7 +54,6 @@ func anchorSet(t *testing.T, text, goal string) []string {
 	}
 	inner := strings.TrimSuffix(strings.TrimPrefix(chk, "regex:(?i)("), ")")
 	inner = strings.TrimPrefix(inner, "?P<docanchor>")
-	inner = strings.TrimSuffix(inner, "|"+AbstentionAlt) // the honest-absence alternative is not an anchor word
 	return strings.Split(inner, "|")
 }
 

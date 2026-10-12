@@ -13,10 +13,12 @@ package research
 // 9 of 254 research answers in the corpus failed it, every one a faithful or honest-absence digest and none off-document.
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 )
 
 const guidePage = `Reading the flash chip with an inexpensive clip tool is the usual first step for a repair.
@@ -39,18 +41,139 @@ func passesAnchor(t *testing.T, page, goal, output string) bool {
 	return pass
 }
 
+// builtSpec builds the research contract for one page the way offload_research does, so a test judges the check and the
+// goal the seat is really handed together.
+func builtSpec(t *testing.T, page, goal string) delegate.SubtaskSpec {
+	t.Helper()
+	specs, _ := Build(Request{Goal: goal}, []Fetched{{URL: "https://docs.example/guide", FinalURL: "https://docs.example/guide", Title: "Flash chip guide", Text: page}})
+	if len(specs) != 1 {
+		t.Fatalf("Build produced %d contracts, want one", len(specs))
+	}
+	return specs[0]
+}
+
+// fingerprintFailed reports whether the contract's docanchor check fails for the result, judged by the delegator's own
+// acceptance evaluation (the only place a research result is graded).
+func fingerprintFailed(spec delegate.SubtaskSpec, wire core.AgentWireResult) bool {
+	for _, f := range delegate.EvalAcceptance(spec.AgentContract, wire) {
+		if strings.Contains(f, "(?P<docanchor>") {
+			return true
+		}
+	}
+	return false
+}
+
+// digestWire is a finished default-schema digest: the four fields the default schema declares.
+func digestWire(keyFacts, numbers, quotes []string, verdict string) core.AgentWireResult {
+	list := func(in []string) []string {
+		if in == nil {
+			return []string{}
+		}
+		return in
+	}
+	structured, _ := json.Marshal(map[string]any{"key_facts": list(keyFacts), "numbers": list(numbers), "quotes": list(quotes), "verdict": verdict})
+	return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Structured: structured, StopReason: "done"}
+}
+
+// A goal that dictates its own absence phrase (the nine corpus failures were such goals) and one that does not: the
+// honest-absence rule must hold for both, because it reads what the digest SAYS, not what the goal said.
+var absenceGoals = map[string]string{
+	"a goal that dictates the phrase": "List the supported board revisions and the pin voltage for each. Say 'not on page' for anything absent.",
+	"a plain goal":                    "List the supported board revisions and the pin voltage for each.",
+}
+
 func TestAnHonestAbsenceDigestPassesTheFingerprint(t *testing.T) {
-	const goal = "List the supported board revisions and the pin voltage for each. Say 'not on page' for anything absent."
-	for _, out := range []string{
-		"not on page",
-		"Not on the page.",
-		"The page does not address it.",
-		"The document does not mention any board revisions.",
-		"Nothing here: the page does not contain the requested numbers, so every field is empty.",
-		"The requested revisions are not documented in this text.",
+	notOnPage := []string{"not on page", "not on page", "not on page", "not on page", "not on page"}
+	withProse := digestWire(nil, nil, nil, "The page does not address it.")
+	withProse.Output = "not on page"
+	for gname, goal := range absenceGoals {
+		spec := builtSpec(t, guidePage, goal)
+		for name, wire := range map[string]core.AgentWireResult{
+			"every list empty, the verdict says so":    digestWire(nil, nil, nil, "The page does not address it."),
+			"the verdict is the whole digest":          digestWire(nil, nil, nil, "Not on the page."),
+			"five not-on-page entries and a verdict":   digestWire(notOnPage, nil, nil, "The page does not contain the requested numbers."),
+			"a verdict that names the document":        digestWire(nil, nil, nil, "The document does not mention any board revisions."),
+			"a passive form":                           digestWire(nil, nil, nil, "The requested revisions are not documented in this text."),
+			"a contraction":                            digestWire(nil, nil, nil, "The page doesn't address the pin voltage."),
+			"the same with the loop's prose beside it": withProse,
+		} {
+			if fingerprintFailed(spec, wire) {
+				t.Errorf("%s / %s: an honest absence was failed as off-document", gname, name)
+			}
+		}
+	}
+}
+
+// A stock absence phrase is not a pass for a digest that CLAIMS something: a seat that read the wrong document and
+// wrote confident facts about it can still write "not specified" in one of its fields. The tripwire exists for that digest.
+func TestAStockAbsencePhraseDoesNotRescueADigestThatClaimsSomething(t *testing.T) {
+	spec := builtSpec(t, guidePage, "Say what the guide is about.")
+	for name, wire := range map[string]core.AgentWireResult{
+		"facts about another subject, one of them hedged": digestWire(
+			[]string{"The latest stable Go release ships a rewritten scheduler.", "Garbage collector pauses are lower.", "The release date is not specified."}, nil, nil,
+			"A release note about a programming language."),
+		"a number and an absence verdict": digestWire(nil, []string{"1.24"}, nil, "The page does not address it."),
+		"a quote and an absence verdict":  digestWire(nil, nil, []string{"ships a rewritten scheduler"}, "The page does not address it."),
+		"an absence and then a claim, in the verdict itself": digestWire(nil, nil, nil,
+			"The page does not mention the date. It describes the new scheduler and the lower garbage collector pauses of the latest Go release."),
+		"an absence with a claim brought in beside it": digestWire(nil, nil, nil,
+			"The page does not mention the date, but it describes the new scheduler of the latest Go release."),
+		"an absence in one field and a claim in a list": digestWire([]string{"The page does not mention the date.", "It describes the new scheduler of the latest Go release."}, nil, nil,
+			"The page does not address it."),
 	} {
-		if !passesAnchor(t, guidePage, goal, out) {
-			t.Errorf("an honest absence was failed as off-document: %q", out)
+		if !fingerprintFailed(spec, wire) {
+			t.Errorf("%s: passed the fingerprint", name)
+		}
+	}
+}
+
+// A seat that could not read the file wrote an error, not a finding about the page, however it words the rest.
+func TestAReadFailureIsNeverAnHonestAbsence(t *testing.T) {
+	spec := builtSpec(t, guidePage, "Say what the guide is about.")
+	for name, verdict := range map[string]string{
+		"could not read":     "I could not read the file, so the page does not address the goal.",
+		"cannot open":        "The page does not contain anything I can use: I cannot open the context file.",
+		"missing file":       "The file is missing; the page does not mention the requested numbers.",
+		"an error":           "An error occurred while opening the context file, and the page does not address it.",
+		"does not exist":     "The document does not exist in the read root, so it does not contain the numbers.",
+		"not found, as ever": "The requested file was not found; the page does not address it.",
+	} {
+		if !fingerprintFailed(spec, digestWire(nil, nil, nil, verdict)) {
+			t.Errorf("%s: %q passed the fingerprint", name, verdict)
+		}
+	}
+}
+
+// The check is built from the page's words alone, so no sentence the goal contains can satisfy it: the goal echoed
+// back, as the loop's prose or as the verdict of a digest, fails, and the contract is not flagged parrot-passable.
+func TestABuiltResearchContractIsNotParrotPassable(t *testing.T) {
+	for gname, goal := range absenceGoals {
+		spec := builtSpec(t, guidePage, goal)
+		for _, w := range delegate.LintAcceptance(spec.AgentContract) {
+			if strings.Contains(w, "PARROT-PASSABLE") {
+				t.Errorf("%s: the contract is flagged parrot-passable: %s", gname, w)
+			}
+		}
+		for _, line := range spec.Acceptance {
+			if !strings.Contains(line, "(?P<docanchor>") {
+				continue
+			}
+			chk, err := core.ParseAcceptanceCheck(line)
+			if err != nil {
+				t.Fatalf("the fingerprint does not parse: %v", err)
+			}
+			if re := chk.Pattern(); re == nil || re.MatchString(spec.Goal) {
+				t.Errorf("%s: the fingerprint matches the goal the seat is handed (pattern %v)", gname, re)
+			}
+		}
+		if !fingerprintFailed(spec, core.AgentWireResult{Output: spec.Goal}) {
+			t.Errorf("%s: the goal echoed back as the answer passed the fingerprint", gname)
+		}
+		if !fingerprintFailed(spec, digestWire(nil, nil, nil, spec.Goal)) {
+			t.Errorf("%s: the goal echoed back as the verdict of an empty digest passed the fingerprint", gname)
+		}
+		if !fingerprintFailed(spec, digestWire([]string{spec.Goal}, nil, nil, "The page does not address it.")) {
+			t.Errorf("%s: the goal echoed back as a key fact passed the fingerprint", gname)
 		}
 	}
 }

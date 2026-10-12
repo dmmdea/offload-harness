@@ -83,13 +83,15 @@ func SchemaMissRescuable(w core.AgentWireResult) bool {
 // wired, no schema, an error, an object that does not validate — returns the
 // result untouched apart from a note that a rescue was tried.
 func (r *runner) rescueSchemaMiss(ctx context.Context, contract core.AgentContract, pr PlacedResult, start time.Time) PlacedResult {
-	return rescueSchemaMiss(ctx, r.rescue, contract, pr, start, func(base string, failures []string) { r.noteFingerprint(base, contract, failures) })
+	return rescueSchemaMiss(ctx, r.rescue, contract, pr, start, func(base string, w core.AgentWireResult, failures []string) {
+		r.noteFingerprint(base, contract, w, failures)
+	})
 }
 
 // rescueSchemaMiss is the rescue without a runner, for the route that has none
 // (the queue): strike, when set, is told the base of a node whose rescued object
 // fails the document fingerprint.
-func rescueSchemaMiss(ctx context.Context, rescue RescueFunc, contract core.AgentContract, pr PlacedResult, start time.Time, strike func(base string, failures []string)) PlacedResult {
+func rescueSchemaMiss(ctx context.Context, rescue RescueFunc, contract core.AgentContract, pr PlacedResult, start time.Time, strike func(base string, w core.AgentWireResult, failures []string)) PlacedResult {
 	if rescue == nil || pr.Err != "" || len(contract.OutputSchema) == 0 || !SchemaMissRescuable(pr.Result) {
 		return pr
 	}
@@ -132,7 +134,7 @@ func rescueSchemaMiss(ctx context.Context, rescue RescueFunc, contract core.Agen
 	// passes the contract's checks reads as a success (the prose alone never does).
 	pr.AcceptanceFailures = EvalAcceptance(contract, w)
 	if strike != nil && pr.ranBase != "" {
-		strike(pr.ranBase, pr.AcceptanceFailures)
+		strike(pr.ranBase, w, pr.AcceptanceFailures)
 	}
 	return pr
 }

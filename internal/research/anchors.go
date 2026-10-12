@@ -191,14 +191,6 @@ func Anchor(text, goal string) string {
 	return ""
 }
 
-// AbstentionAlt is the last alternative of every page's check: the words of an HONEST ABSENCE. The research goal tells the
-// seat to say so when the page does not carry what was asked ("the page does not address it", and the callers' own
-// "not on page"), in the goal's vocabulary, which the anchors exclude by construction, so a faithful "nothing here" digest
-// could never restate a page word and failed a check that exists to catch the opposite fault. An absence says nothing about
-// any document, so it cannot be about the wrong one. Deliberately absent: "not found" and "could not read the file", which
-// are an error and stay failures.
-const AbstentionAlt = `not on (?:the )?page|does not (?:contain|address|document|specify|describe|mention|state|cover)|no mention|not (?:documented|stated|specified|mentioned|covered|present)`
-
 // singular is a word without its plural s (a digest that writes "programmer" restates a page that says "programmers"), when
 // what is left is still a word the check would have chosen. A match is a substring match, so the shorter form also matches
 // the longer one.
@@ -215,8 +207,15 @@ func singular(w string) string {
 // contract-caused failure never quarantines a node). A faithful digest passes
 // by restating ANY of them (in the singular, so an inflection does not fail it);
 // an answer about another document, or an echo of the goal (no goal word is ever
-// included, nor its singular), does not. The last alternative is AbstentionAlt:
-// an honest "not on page" passes. It is a wrong-document
+// included, nor its singular), does not. The line holds the page's words and
+// NOTHING ELSE, on purpose: a phrase that is not a page word can only be one the
+// goal also contains (the goal's own instruction for an absence), and then the
+// goal echoed back satisfies the check, the delegator's lint rightly calls the
+// contract parrot-passable, and a stock phrase anywhere in a digest about the
+// wrong document passes it. An honest "nothing on this page" digest, which can
+// restate no page word, is excused by delegate.EvalAcceptance instead, from the
+// structure of what it says (delegate.HonestAbsence) and not from a phrase in
+// the text. It is a wrong-document
 // tripwire, not a quality gate: lexical overlap is a poor faithfulness metric
 // (Maynez et al. 2020; Cao et al. 2022), so the bar is one word of
 // twenty-four. A page with fewer than minAnchorWords usable words yields "" —
@@ -226,11 +225,10 @@ func AnchorCheck(text, goal string) string {
 	if len(toks) < minAnchorWords {
 		return ""
 	}
-	q := make([]string, 0, len(toks)+1)
+	q := make([]string, 0, len(toks))
 	for _, t := range toks {
 		q = append(q, regexp.QuoteMeta(singular(t)))
 	}
-	q = append(q, AbstentionAlt)
 	return "regex:(?i)(?P<docanchor>" + strings.Join(q, "|") + ")"
 }
 

@@ -81,20 +81,20 @@ func TestNoteFingerprintCountsPassesAndStrikes(t *testing.T) {
 	withCheck, without := fingerprintContract(), remoteContract()
 
 	for i := 0; i < 3; i++ {
-		r.noteFingerprint(base, withCheck, nil) // passed
+		r.noteFingerprint(base, withCheck, core.AgentWireResult{}, nil) // passed
 	}
-	r.noteFingerprint(base, withCheck, []string{fpCheck + ": pattern did not match output"})
-	r.noteFingerprint(base, withCheck, []string{fpCheck + ": pattern did not match output"})
+	r.noteFingerprint(base, withCheck, core.AgentWireResult{}, []string{fpCheck + ": pattern did not match output"})
+	r.noteFingerprint(base, withCheck, core.AgentWireResult{}, []string{fpCheck + ": pattern did not match output"})
 	if q.Blocked(base) || r.quarantined.Load() != 0 {
 		t.Fatal("two failures after three passes quarantined a node that answers about the right document")
 	}
 	// a contract without the check, passing or failing, neither shields nor strikes
 	for i := 0; i < 10; i++ {
-		r.noteFingerprint(base, without, nil)
+		r.noteFingerprint(base, without, core.AgentWireResult{}, nil)
 	}
-	r.noteFingerprint(base, without, []string{"contains:zorblax: not found in output"})
-	r.noteFingerprint(base, withCheck, []string{fpCheck + ": pattern did not match output"})
-	r.noteFingerprint(base, withCheck, []string{fpCheck + ": pattern did not match output"})
+	r.noteFingerprint(base, without, core.AgentWireResult{}, []string{"contains:zorblax: not found in output"})
+	r.noteFingerprint(base, withCheck, core.AgentWireResult{}, []string{fpCheck + ": pattern did not match output"})
+	r.noteFingerprint(base, withCheck, core.AgentWireResult{}, []string{fpCheck + ": pattern did not match output"})
 	if !q.Blocked(base) || r.quarantined.Load() != 1 {
 		t.Fatalf("blocked=%v flips=%d: ten results with no fingerprint check must not have counted as passes", q.Blocked(base), r.quarantined.Load())
 	}

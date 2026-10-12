@@ -158,9 +158,6 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 			continue
 		}
 		name := DocName(i, f.FinalURL, f.URL)
-		anchor := AnchorCheck(f.Text, goal)
-		src.DocName, src.Anchor = name, anchor
-		sources = append(sources, src)
 
 		head := fmt.Sprintf("The page at %s", f.URL)
 		if f.Title != "" {
@@ -179,12 +176,18 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 			fullGoal += defaultVerdictAsk
 		}
 
+		// The anchors are chosen off the goal THE SEAT IS HANDED, not only the caller's: the fixed sentences above
+		// ("Always end with a one-sentence verdict", the file's name and title, "most important first") are the goal's
+		// words too, and a page word that is one of them would let the goal echoed back restate the page.
+		anchor := AnchorCheck(f.Text, fullGoal)
+		src.DocName, src.Anchor = name, anchor
+		src.Fingerprinted = anchor != ""
+		sources = append(sources, src)
+
 		acc := []string{}
 		if anchor != "" {
 			acc = append(acc, anchor)
 		}
-		src.Fingerprinted = anchor != ""
-		sources[len(sources)-1] = src
 		acc = append(acc, derived...)
 		acc = append(acc, req.Acceptance...)
 

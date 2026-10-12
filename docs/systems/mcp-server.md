@@ -466,11 +466,23 @@ regex (tagged `docanchor`) over the page's top prose content words — taken fro
 and the headings that introduce them, never from identifier-shaped tokens, UI or markup
 vocabulary, and never from the goal (0.141.1, register C-65), so an echoed goal cannot pass as
 verified while a faithful digest passes by restating any one of about two dozen words.
-Two faithful shapes used to fail it and now pass (0.184.0): an **honest absence** (the last alternative of the regex is
-`research.AbstentionAlt`: "not on page", "the page does not address it", "does not contain/mention/…", "not documented/stated/…",
-and not "not found", which is an error), because the goal tells the seat to say exactly that, in the goal's own vocabulary, which
-the anchors exclude by construction; and an **inflection** (each anchor is matched in its singular, so "programmer" restates a
-page that says "programmers"; the goal's own words are excluded in the singular too, so an echoed goal still cannot pass).
+Two faithful shapes used to fail it and now pass (0.184.0): an **inflection** (each anchor is matched in its singular, so
+"programmer" restates a page that says "programmers"; the goal's own words are excluded in the singular too), and an **honest
+absence**. The anchors are chosen off the whole goal the seat is handed (the fixed sentences `Build` adds, the file's name and
+title, the caller's questions), not only the caller's, and the regex holds the page's words and nothing else, so no sentence the
+goal contains satisfies it: the goal echoed back fails, and the delegator's lint does not call the contract parrot-passable.
+An honest absence restates no page word (the goal tells the seat to say so in the goal's own vocabulary, which the anchors
+exclude by construction), so it is excused by the delegator from the STRUCTURE of the digest and not from a phrase in the
+regex: `delegate.EvalAcceptance` drops the fingerprint failure of a result whose structured digest is
+`delegate.HonestAbsence`: an object in which every string at any depth (a list entry as much as a field) is empty or a short
+statement (60 words at most) that the page does not carry what was asked ("not on page", "does not contain/address/mention/…",
+"not documented/stated/…"), at least one such statement, no number or boolean, no second sentence that says what the page does
+hold, no contrast word ("but", "however", …), and no report of a failure to read the file ("could not read", "not found", "the
+file is missing": an error, not a finding). A stock phrase beside a claim, the goal echoed back, and "I could not read the file,
+so the page does not address it" still fail it. The excuse counts for the node as neither a strike nor a pass
+(`Quarantine.Pass`): an absence is no evidence that the node reads the right document. What no lexical rule can tell is a seat
+that did not read the page and reports "the page does not address it" without saying that it failed; that is delivered as an
+absence, as an honest one is, and only a second seat would tell them apart.
 
 What a digest owes beyond that is one design (register C-74): **presence is declared,
 non-emptiness is asked for only where the caller marked it, and the default digest owes that it
