@@ -386,6 +386,16 @@ const (
 // whole lockWait window.
 var ErrLocked = errors.New("seatrate: store locked by another writer")
 
+// openLock creates the lock file exclusively. It is a variable only so a test can inject the
+// access-denied answer Windows gives while a deleted lock is still pending removal.
+var openLock = func(name string) (*os.File, error) {
+	return os.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+}
+
+// removeLock removes a stale lock file. A variable for the same reason: a test cannot make the removal
+// fail the way a held handle does on Windows without it.
+var removeLock = os.Remove
+
 // Update applies fn to the store at path under an exclusive lock — load, fn,
 // save as ONE step. tmp+rename alone protects a reader from a half-written
 // file but not a writer from another writer: two processes (an MCP server
@@ -404,20 +414,35 @@ func Update(path string, fn func(*Store)) error {
 	lock := path + ".lock"
 	deadline := time.Now().Add(lockWait)
 	for {
-		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		f, err := openLock(lock)
 		if err == nil {
 			f.Close()
 			break
 		}
-		if !errors.Is(err, os.ErrExist) {
+		// Contention on Windows does not always look like "already exists": removing a
+		// file whose handle is still open only marks it delete-PENDING, and an exclusive
+		// create issued in that window fails with ACCESS_DENIED. That is another writer
+		// finishing, so it waits like a held lock (the same rule gpulease's own claim and
+		// epoch lock follow). A directory this process cannot write is refused with the
+		// same denial every time and ends at the deadline below.
+		if !errors.Is(err, os.ErrExist) && !errors.Is(err, os.ErrPermission) {
 			return err
 		}
 		if st, serr := os.Stat(lock); serr == nil && time.Since(st.ModTime()) > lockStale {
-			os.Remove(lock) // a dead writer's lock; the next attempt takes it
-			continue
+			// A dead writer's lock; the next attempt takes it. Only a removal that worked
+			// (or found the file already gone) retries at once: a stale lock that cannot be
+			// removed waits out the deadline like any held lock instead of spinning.
+			if rerr := removeLock(lock); rerr == nil || errors.Is(rerr, os.ErrNotExist) {
+				continue
+			}
 		}
 		if time.Now().After(deadline) {
-			return ErrLocked
+			if errors.Is(err, os.ErrExist) {
+				return ErrLocked
+			}
+			// Both causes stay in the chain: the caller skips the sample as for a held lock
+			// (errors.Is ErrLocked), and an unwritable directory is still named.
+			return fmt.Errorf("%w: the lock file could not be created within %s: %w", ErrLocked, lockWait, err)
 		}
 		time.Sleep(lockPoll)
 	}
