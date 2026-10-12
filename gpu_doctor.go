@@ -33,6 +33,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -124,6 +125,9 @@ func runGPUDoctor(args []string) error {
 	})
 
 	rep := gpulease.Audit(opts)
+	// D-36: a rename-swap leaves every running process on its pre-swap image. The audit already read each running
+	// image's build marker; this marks the ones older than the installed build, read from the installed FILE.
+	installed := markOlderImages(&rep, exe, doctorPathEnv(), &notes)
 	before := m.ReaderAuditResult()
 	if *write {
 		if werr := m.WriteReaderAudit(rep); werr != nil {
@@ -133,20 +137,145 @@ func runGPUDoctor(args []string) error {
 	after := m.ReaderAuditResult()
 
 	if *asJSON {
-		b, _ := json.MarshalIndent(map[string]any{
+		doc := map[string]any{
 			"green": rep.Green, "items": rep.Items, "reasons": rep.Reasons, "notes": notes,
 			"marker": after, "marker_before": before, "marker_path": m.ReaderAuditPath(),
 			"config_card_scoped_leases": cfg.GPUCardScopedLeases, "writer_enabled": m.CardScoped(),
 			"signature": gpulease.FormatSignature, "build_marker": buildMarker, "not_searched": rep.NotSearched,
-		}, "", "  ")
+		}
+		if installed != "" {
+			doc["installed_version"] = installed
+		}
+		b, _ := json.MarshalIndent(doc, "", "  ")
 		fmt.Fprintln(doctorOut, string(b))
 	} else {
-		printDoctor(doctorOut, rep, notes, scanRoots(opts), m, cfg.GPUCardScopedLeases, before, after, *write)
+		printDoctor(doctorOut, rep, notes, scanRoots(opts), m, cfg.GPUCardScopedLeases, before, after, *write, installed)
 	}
 	if !rep.Green {
 		return fmt.Errorf("reader audit is not green: %d finding(s)", len(rep.Reasons))
 	}
 	return nil
+}
+
+// markOlderImages sets Older on every RUNNING binary whose build marker states a version below the installed
+// build's, and returns the installed version ("" when none was compared). The installed version is read from the
+// installed file, the doctor's own executable, through the audit's own marker reader: the doctor may itself be a
+// pre-swap process, and comparing against its compiled-in version would then mark nothing. A version that cannot
+// be parsed, or a binary that carries no marker, is never called older: unknown stays unknown. When a running image
+// had a version to compare and the comparison could not be made, a note says why and which cause it was: the
+// doctor's path is unresolved, its file states no version, or the doctor is not the harness binary PATH resolves
+// (a worktree or dev build run beside a deployed copy), which is not "the installed build" and would send the
+// operator to restart deployed processes for nothing.
+func markOlderImages(rep *gpulease.AuditReport, exe, pathEnv string, notes *[]string) string {
+	var comparable []*gpulease.AuditItem
+	for i := range rep.Items {
+		it := &rep.Items[i]
+		if it.Kind != gpulease.KindBinary || len(it.PIDs) == 0 {
+			continue
+		}
+		if _, ok := parseBuildVersion(it.Version); ok {
+			comparable = append(comparable, it)
+		}
+	}
+	if exe != "" && !isPathCopy(exe, pathEnv) {
+		if len(comparable) > 0 {
+			*notes = append(*notes, "running processes were not compared with an installed build: this doctor ("+exe+") is not the harness binary on PATH, so its own build is not the installed one; run the doctor from the deployed binary")
+		}
+		return ""
+	}
+	installed, ierr := "", error(nil)
+	if exe != "" {
+		installed, ierr = gpulease.ReadBuildMarkerVersion(exe)
+	}
+	want, haveWant := parseBuildVersion(installed)
+	if haveWant {
+		for _, it := range comparable {
+			if got, _ := parseBuildVersion(it.Version); versionBelow(got, want) {
+				it.Older = true
+			}
+		}
+		return installed
+	}
+	if len(comparable) > 0 {
+		why := "the installed build carries no build marker"
+		switch {
+		case exe == "":
+			why = "the installed executable path could not be resolved"
+		case ierr != nil:
+			why = ierr.Error()
+		}
+		*notes = append(*notes, "installed build version unknown ("+why+"): running processes were not compared with it")
+	}
+	return ""
+}
+
+// isPathCopy reports whether exe can be the installed harness binary: true unless PATH holds a harness binary of the
+// same name and exe is none of them (a worktree or dev build beside a deployed copy). With nothing on PATH to
+// contradict it, the doctor's own file is taken to be the installed one.
+func isPathCopy(exe, pathEnv string) bool {
+	base := filepath.Base(exe)
+	named := false
+	for _, c := range pathCandidates(pathEnv) {
+		if !strings.EqualFold(filepath.Base(c), base) {
+			continue
+		}
+		named = true
+		if sameFile(c, exe) || strings.EqualFold(filepath.Clean(c), filepath.Clean(exe)) {
+			return true
+		}
+	}
+	return !named
+}
+
+// olderPIDs lists the pids of the running binaries marked Older.
+func olderPIDs(rep gpulease.AuditReport) []string {
+	var out []string
+	for _, it := range rep.Items {
+		if !it.Older {
+			continue
+		}
+		for _, p := range it.PIDs {
+			out = append(out, strconv.Itoa(p))
+		}
+	}
+	return out
+}
+
+// parseBuildVersion reads the leading major.minor.patch of a build version ("0.183.0", "9.9.9-fixture").
+func parseBuildVersion(v string) ([3]int, bool) {
+	var out [3]int
+	rest := strings.TrimSpace(v)
+	for i := 0; i < 3; i++ {
+		j := 0
+		for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+			j++
+		}
+		if j == 0 {
+			return out, false
+		}
+		n, err := strconv.Atoi(rest[:j])
+		if err != nil {
+			return out, false
+		}
+		out[i] = n
+		rest = rest[j:]
+		if i < 2 {
+			if rest == "" || rest[0] != '.' {
+				return out, false
+			}
+			rest = rest[1:]
+		}
+	}
+	return out, true
+}
+
+func versionBelow(a, b [3]int) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
 }
 
 // renderScriptDirs lists the existing directories that hold the configured render
@@ -241,7 +370,7 @@ func pathCandidates(pathEnv string) []string {
 func scanRoots(o gpulease.AuditOptions) []string { return o.Roots }
 
 func printDoctor(w io.Writer, rep gpulease.AuditReport, notes, roots []string, m *gpulease.Manager,
-	configOn bool, before, after string, wrote bool) {
+	configOn bool, before, after string, wrote bool, installed string) {
 	fmt.Fprintf(w, "gpu doctor: reader audit for the GPU lease on this host (state root %s)\n", m.Root())
 	fmt.Fprintf(w, "  card-scoped leases: config gpu_card_scoped_leases=%v, reader-audit marker %s, writer %s\n",
 		configOn, after, onOff(m.CardScoped()))
@@ -278,7 +407,14 @@ func printDoctor(w io.Writer, rep gpulease.AuditReport, notes, roots []string, m
 				extra += "  error: " + it.Err
 			}
 			fmt.Fprintf(w, "         found: %s\n", extra)
+			if it.Older {
+				fmt.Fprintf(w, "         older than the installed build %s: this process still runs its pre-swap image\n", installed)
+			}
 		}
+	}
+	if older := olderPIDs(rep); len(older) > 0 {
+		fmt.Fprintf(w, "  running processes older than the installed build %s: %d (pid %s); a rename-swap deploy leaves them on their old image, so restart them to run the installed build (an MCP server: /mcp reconnect)\n",
+			installed, len(older), strings.Join(older, ", "))
 	}
 	if len(roots) > 0 {
 		fmt.Fprintf(w, "  scanned: %s (pass --scan <dir> for every media repository that carries its own copy)\n", strings.Join(roots, ", "))
