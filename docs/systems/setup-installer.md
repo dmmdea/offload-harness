@@ -545,6 +545,14 @@ the served config is unchanged and only the stamp is behind.
 `UNSTAMPED` deliberately does not exit 1: every config on the fleet predates stamping, and a
 gate that is red on every box from day one is a gate nobody reads.
 
+**The device-pin rules judge the file against THIS box's cards.** A `CUDA_VISIBLE_DEVICES` pin
+that names no card on the box that runs the audit (`pin-unresolved`: a UUID no card has, an index
+past the last card, a token that is neither an index nor a `GPU-` UUID) and an index on identical
+cards (`pin-by-index`) are read from `nvidia-smi` on that box, and only for a file that pins a
+device. The stamp records the render's paths, not its cards, so a file that belongs to another
+machine would fail on its own UUIDs: pass `--other-box` (before the files) to skip the pin rules
+for it. A note line says they were skipped, and every other rule still runs.
+
 #### The config half: `audit-config`
 
 `audit-yaml` audits the serving YAML. It never looked at `config.json`, and that is where the

@@ -6,6 +6,109 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — `audit-yaml` and the write gate refuse the every-expert `--cpu-moe` (W4)
+
+- **The gap.** INV-1 (the cards do the inference, RAM is overflow only) sanctions one host-RAM use for experts: a measured partial
+  `--n-cpu-moe N`. The bare `--cpu-moe` parks every expert layer in RAM. Nothing read a live file for it: `AuditSpill` matches only the
+  partial form, and the seed gate `TestNoGPUTierParksTheMoEExpertsInRAM` reads `profiles.json`, so a hand-edited yaml could carry it
+  undetected.
+- **The rule.** `servingtmpl.AuditCPUMoE` (rule id `cpu-moe`) reads parsed entries (cmd, env, macros expanded) and refuses `--cpu-moe`,
+  `-cmoe`, the draft-model forms (`--cpu-moe-draft`, `--spec-draft-cpu-moe`, `-cmoed`) and the environment twins
+  (`LLAMA_ARG_CPU_MOE`, `LLAMA_ARG_SPEC_DRAFT_CPU_MOE`, any value but an explicit off). It never scans raw text: a stamped file records
+  `"moe_26b": "--cpu-moe -ngl 999"` in its own stamp comment. The partial `--n-cpu-moe N`, `-ncmoe N` and `LLAMA_ARG_CPU_MOE=0` are not
+  this rule's. It is pure and exemption-free.
+- **Two callers, two sources of evidence.** `install render` runs the gate before the stamp exists, so `renderGate` exempts from the
+  resolved profile: the cpu backend (no card to overflow from) and the off-matrix defaults' literal (`--cpu-moe -ngl 999`, which the
+  installer still writes for a box that is not on the tier matrix). It runs after the spill refusal, so a partial placement that names no
+  N keeps its more specific "no N" message. `audit-yaml` holds a file and reads its stamp, trusted only when it is a verbatim render (the
+  spec hash is the hash of the basis it carries and the body still hashes to `body_sha256`): a verbatim cpu render is clean, a verbatim
+  off-matrix render prints the finding as a `note:` line and does not fail the audit, and an unstamped file or one edited since its stamp
+  is judged as a box with a card and the finding says so. An edited stamp exempts nothing.
+- **Not changed (needs a decision).** The installer still writes the bare form in three places: the selftest R4.2 remediation
+  (`setup/selftest.ps1`), the `install.ps1` unknown-profile fallback and `fallbackProfile` for the CUDA family. They are untouched, and
+  the exemptions above keep each of them working; a yaml that R4.2 remediated reads as a `cpu-moe` finding on its next audit.
+  `--override-tensor` placements are not read either.
+- **Tests.** `internal/servingtmpl/audit_cpumoe_test.go` and the root `install_render_audit_test.go`, written first and seen red
+  (`AuditCPUMoE` a no-op: the spelling table found 0 of 12 offenders; `renderGate` passed a table GPU tier carrying the flag; `audit-yaml`
+  printed OK for it). Guards that were green before and after: the partial spill and the off switches, the stamp comment, the existing
+  "no N" refusal, and every shipped tier on both OSes (`TestRenderedTiersCarryNoBareCPUMoE`). Mutants, each turned red by a named test:
+  the `-cmoe` spelling, the environment twin, macro expansion of cmd and of env, each exemption in `renderGate`, an exemption read from a
+  stamp at render time, the cpu exemption in `audit-yaml`, and an unstamped file passing. Read-only, a built binary over a live yaml
+  with two `--n-cpu-moe 14` entries prints `OK`.
+- ADR 0043 gains an amendment that says which evidence each caller reads.
+
+### Added — `audit-yaml` flags an index pin on identical cards and a UUID that names no card (A-87; A-86 stays open)
+
+- **The gap.** `CheckComposite` compares a composite tier's pins at render, and an index and a UUID cannot be shown to be the same card
+  without the box's table. A live yaml that pins `CUDA_VISIBLE_DEVICES=0,2` on two identical cards records nothing about which card was
+  meant, and a reordering of the PCI enumeration (the shipped triple-card template records that its board does it on power loss) moves the seat silently. Nothing asserted
+  that every pin on such a box is by UUID.
+- **The rules.** `servingtmpl.AuditPins` reads each entry as llama-swap runs it (macros expanded; the last setting wins, an inline one
+  over the env list) against the box's card table. `pin-by-index`: a plain index that names a card whose model name another card also
+  carries (the index of a card no other resembles names exactly one card and is left alone; an entry without
+  `CUDA_DEVICE_ORDER=PCI_BUS_ID` is judged by the weaker form, any plain index while two cards share a name; cards with no model name are
+  never called identical). `pin-unresolved`: a `GPU-` UUID or prefix that matches no card, because CUDA hides every device from the first
+  pin it cannot resolve.
+- **Severity follows who maintains the file.** A seed cannot carry a UUID, so the seeded index pins of a verbatim render
+  (`win-triple-blackwell`) are the renderer's own output: a `note:` per entry, exit status unchanged, or the only way to satisfy the rule
+  would be a hand edit, which turns the file HAND-EDITED and red under `--against-render`. The same pin in an unstamped or edited file is
+  its maintainer's choice and a violation. A UUID that names no card is a violation in either. `audit-yaml` reads the table through the
+  existing `renderCardTable` seam and only for a file that pins a device; with no readable table it prints
+  `note: <file>: no card table: pin rules not applied (...)` and the exit status is unchanged, never a silent pass.
+- **Not in this item.** A-86 stays open: comparing each resident to the card its tier intended needs the tier's layer table, which
+  `CheckComposite` has at render and `audit-yaml` does not. The PCI bus id the register row also accepts is not in `gpuprobe.Card`, so
+  only a UUID is the stable form. Promoting the seeded-pin note to a failure waits for an installer step that substitutes UUIDs.
+- **Tests.** `internal/servingtmpl/audit_pins_test.go` and the root `install_render_audit_test.go`, written first and seen red with the
+  rule a no-op (the identical-cards, unresolved-UUID, macro and inline-pin tests failed; `audit-yaml` printed OK for `0,2`). Guards: a
+  unique card's index, UUID pins on identical cards, three distinct names, nameless cards, no card table, and that a file with no pin
+  never reads the table. Mutants, each turned red by a named test: the stamp-state split (both directions), the shared-name condition,
+  the unresolved-UUID rule and the weaker no-PCI-order form. On a three-card box a freshly rendered `blackwell-3x16` audits OK with 13
+  notes and exit 0, and the live yaml of that box (19 UUID pins) audits OK.
+
+### Changed — the hard-rule seed gates are shown to fail on synthetic fixtures (W0.1)
+
+- **The gap.** `TestNoGPUTierParksTheMoEExpertsInRAM` and `TestEveryAgentSeatIsChosenNotDerived` read the real `profiles.json` only, so a
+  gate that went blind (a skip that swallowed everything, a branch that never fires) passed for as long as the real seeds were clean. The
+  0.132.4 note says all three seed gates "were RED on the previous seeds"; no mutation proof was recorded.
+- **The change.** The two rule bodies are `checkNoGPUTierParksTheMoE` and `checkAgentSeatsAreChosen`, functions of a decoded document;
+  the real-document tests call them unchanged in effect. `seed_rules_fixture_test.go` hands them synthetic documents: a cuda tier that
+  seeds `cpu_moe` is refused and names the tier; the cpu tier, a tier that drops or fits the 26B, a `vllm_seat`, an explicit
+  `config_seed.agent_model` beside a differing `resident_tier`, the workhorse read from `config_seed.model` and the harness default are
+  guards; a tier that derives its agent seat from `resident_tier` is refused.
+- **Mutation proof.** Deleting the `Backend == "cpu"` skip, the `cpu_moe` clause, the `explicit` branch, the `VLLMSeat != nil` branch or
+  the workhorse read from `config_seed.model` each turns a named synthetic test red.
+
+### Fixed — review round on the cpu-moe and pin audit rules (A-87, W4)
+
+- **A pin that names no card is a finding, not a pass.** `AuditPins` judged only a `GPU-` UUID that matched no card, so
+  `CUDA_VISIBLE_DEVICES=7` on a three-card box, or a typo, a bare UUID without its prefix or a UUID with a non-ASCII hyphen, printed `OK`
+  while CUDA hid every device from that pin on, the same hazard `pin-unresolved` documents for a UUID (a seat on fewer cards than it was
+  sized for, or on none). `pin-unresolved` now also covers an index that no card has (under `CUDA_DEVICE_ORDER=PCI_BUS_ID` the nvidia-smi
+  index of a card on the table, otherwise a position past the last card) and any token that is neither a plain index nor a `GPU-` UUID.
+  `PinsCUDADevices` counts those tokens, so the card table is read for a file that holds only such a pin. `-1` (it hides every card, so it
+  is no pin on one) and a MIG instance id (a slice of a data-centre card, which a table of whole cards cannot resolve) are not judged. An
+  index that names no card no longer also counts toward the ambiguity rule, so it is one finding and not two. It is a violation in a
+  verbatim render too: a seed that pins index 2 on a two-card box is a render for a bigger box, and a note would excuse it into a dead seat.
+- **`audit-yaml --other-box`.** The pin rules compare a file's pins with the cards of the machine that runs the audit, and nothing in a
+  file or its stamp says which machine it belongs to. A file kept on another machine (the stamp records that machine's paths so the replay
+  does not call it stale) failed `pin-unresolved` on its own UUIDs and exited 1, where before this branch the same call printed `OK`. The
+  default is unchanged. `--other-box` says the files belong to another machine: the pin rules are skipped with a `note:` line that says why
+  and the card table is not read; every other rule still runs. Every pin violation now ends with what it was judged against and the flag (a `note:` for a verbatim render's seeded index pin does not).
+- **Four tests that passed without the rule they name.** A mutant of each survived the servingtmpl tests at the first review commit
+  (`5da1e386`): dropping `--spec-draft-cpu-moe` from the spelling table, matching the `GPU-` prefix case-sensitively (the lower-case UUID case
+  expected zero findings, so it passed either way), reading the env pin over the inline command pin, and treating `-1` as an index. Each now
+  has a case that turns red under it: a row for the spelling, a lower-case UUID that names no card, an entry that pins in both places (in
+  both directions), and `-1` on a box where two cards share a name.
+- **Tests.** The no-card cases were written first and seen red (each of the first nine table cases found 0 findings: the audit was
+  silent; the flag tests failed on the card table being read, the missing note and the missing hint). Mutants, each turned red by a named test: the card-count bound, the
+  PCI-order lookup, the unreadable-token branch, counting such a token as a pin, the MIG exemption, the `-1` exemption, the empty-token
+  exemption, an unresolved index counted as ambiguous, the flag ignored, the flag skipping the pin-less file check, the hint dropped, the
+  flag silencing every rule, and a verbatim render noting every pin finding. A guard walks every tier on both operating systems against a
+  box of eight distinct cards and finds no pin the rules cannot place (`TestRenderedTiersPinOnlyWhatThePinRulesCanRead`; it goes red when an
+  index stops being read as one).
+- **Not changed.** `CUDA_VISIBLE_DEVICES=-1` is still judged by no rule: it hides every card, which `cvd-empty` names only for the empty
+  value. That is a different rule from this one and a change to `Audit`, which runs over every shipped template.
+
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 
 ### Fixed — `TestTheAnchoredClockDropsTheAdmissionAllowance` no longer fails on a loaded box for a cost that is not the poll budget

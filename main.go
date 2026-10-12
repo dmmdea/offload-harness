@@ -332,9 +332,10 @@ Usage:
   local-offload rig --seat <alias> [--since 7d] [--node ID] [--out report.json] [--json]   the seat rigger (ADR 0036 P3a): classify this box's delegation-log failures for a seat onto ONE axis each (published precedence), weights over eligible rows, evidence job ids, the pre-authored remedy per axis — proposes and applies nothing
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
-  local-offload audit-yaml [--against-render] FILE...
+  local-offload audit-yaml [--against-render] [--other-box] FILE...
                                          check live llama-swap config(s) against the operator rules (INV-1/INV-2: no -ngl 0, no empty CUDA_VISIBLE_DEVICES, ttl 300 everywhere, no persistent group, no preload).
                                          --against-render also re-derives each file from THIS binary's tier seeds and reports MATCH / STALE(keys) / UNSTAMPED / HAND-EDITED.
+                                         The CUDA_VISIBLE_DEVICES pin rules compare a file with THIS box's cards (nvidia-smi); --other-box says the files belong to another machine and skips them.
   local-offload audit-config [--config PATH] [--tier NAME] [--json] [--all]
                                          compare this node's live config.json against the seed its tier would install; lists every seed-owned key that is DIFFERENT, LIVE-ONLY (hand-wired, never written back to profiles.json) or SEED-ONLY. Exit 1 on drift.
                                          --ram-tier defaults to THIS machine's detected RAM tier (the header names it, GB included); for another node's config (--config/--goos/--home) pass --ram-tier min|low|mid|high|none. A RAM probe that reads 0 GB is refused, never read as min.
