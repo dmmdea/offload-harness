@@ -171,7 +171,9 @@ Versioning: [SemVer](https://semver.org/).
   contract read PARROT-PASSABLE in the lint that is published on the result, the goal echoed back passed the check, and a stock
   phrase ("not specified") anywhere in a digest of the wrong document passed it. The anchors are also chosen off the whole goal
   the seat is handed (the fixed sentences, the file's name and title, the questions) and not only the caller's: the template's
-  own "Always end with a one-sentence verdict" had made "always" an anchor on a page that uses the word. The check stays one regex
+  own "Always end with a one-sentence verdict" had made "always" an anchor on a page that uses the word. The cost is a smaller
+  pool: a page word that also appears in the goal's fixed sentences, or in the page's own title or file name, is no longer an
+  anchor (a page too thin to leave 4 usable words, `minAnchorWords`, has no fingerprint, as before). The check stays one regex
   tagged `docanchor`, holding the page's words and nothing else. Not closed, and not closable by a lexical rule: a seat that did
   not read the page and reports "the page does not address it" without saying it failed is delivered as an absence, as an honest
   one is. Tests `internal/research/anchors_abstention_test.go` and `internal/delegate/absence_test.go`, written first: red before
@@ -193,8 +195,8 @@ Versioning: [SemVer](https://semver.org/).
   rescue), a result with no such check says nothing, and passes age out with the strikes. A node with no passes is quarantined on
   its second strike exactly as before. An honest absence (the entry above) is neither a pass nor a strike. A stated limit, on
   purpose: a node that answers about the wrong document less often than about the right one (4 misses beside 6 passes in the
-  window) is not quarantined, because a failed fingerprint keeps its cross-seat retry, so such a node delivers no wrong digest
-  and each miss costs one retry elsewhere, while idling a node on a lexical check costs the fleet a whole seat for the window. The
+  window) is not quarantined, because a failed fingerprint keeps its cross-seat retry, so such a node's miss is never delivered
+  as verified (one whose retry cannot be placed is published as a failed verification) and each miss costs one retry elsewhere, while idling a node on a lexical check costs the fleet a whole seat for the window. The
   quarantine stays per server process and is never persisted. Tests
   `internal/delegate/quarantine_pass_test.go`, written first: red before with `two failures after three passes quarantined a node
   that answers about the right document`; six mutations (the outnumber rule, the two-strike floor, the pass record, the

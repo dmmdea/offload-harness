@@ -32,8 +32,8 @@ import (
 //
 // A stated limit, on purpose: a node that answers about the wrong document less often than about the right one (4 misses
 // beside 6 passes in the window) is not quarantined. The tripwire fails the RESULT, and a failed fingerprint keeps its
-// cross-seat retry (skipsRetryAsResearchAcceptanceOnly), so such a node delivers no wrong digest: each miss costs one retry on
-// another node. Idling a node on a lexical check costs the fleet a whole seat for the window, which is the larger loss, and
+// cross-seat retry (skipsRetryAsResearchAcceptanceOnly), so such a node's miss is never delivered as verified: each miss costs
+// one retry on another node (a miss whose retry cannot be placed is published as failed verification, not as an answer). Idling a node on a lexical check costs the fleet a whole seat for the window, which is the larger loss, and
 // the one rule that measured it (a node that passed 48 of 51 and was out for 30 minutes after two misses) is what the majority
 // rule answers. An honest absence is neither a pass nor a strike (noteFingerprint), so it neither shields nor condemns.
 type Quarantine struct {
