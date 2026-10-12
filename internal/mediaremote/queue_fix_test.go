@@ -316,6 +316,17 @@ func TestAnAdoptedJobTheNodePassedBackGoesBackInLine(t *testing.T) {
 			if got := len(n.posts()); got != 1 {
 				t.Errorf("the node that passed the job back is left alone: the one POST is the dead owner's, got %d", got)
 			}
+			// The pause is told as the dispatch path tells it: the node's own reason, and a lease it could not take is a
+			// refusal, not a bounce off a held card.
+			want := "bounced"
+			if class == core.ErrClassGPULeaseUnavailable {
+				want = "refused"
+			}
+			if z, ok := placer.backedOff(n.srv.URL); !ok || z.state != want || !strings.Contains(z.cause, "the card is held by another job") {
+				t.Errorf("the node is paused as %s, with its own reason: %+v (%v)", want, z, ok)
+			} else if z.shown != nodeShown(n.srv.URL, "node-a") || !strings.HasSuffix(z.shown, " (node-a)") {
+				t.Errorf("the pause names the node as the dispatch path does, address and id: %q", z.shown)
+			}
 		})
 	}
 }
