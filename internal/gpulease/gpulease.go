@@ -2043,6 +2043,10 @@ func (m *Manager) restampLocked(epoch uint64, fn func(*Meta)) error {
 	return m.restampWholeLocked(epoch, fn)
 }
 
+// restampWholeHook is a test seam, called by restampWholeLocked after it read the record and before it writes it back. nil in
+// production.
+var restampWholeHook func()
+
 // restampWholeLocked is the whole-node half of Restamp; the caller holds the epoch lock.
 func (m *Manager) restampWholeLocked(epoch uint64, fn func(*Meta)) error {
 	meta, err := m.readMeta()
@@ -2051,6 +2055,9 @@ func (m *Manager) restampWholeLocked(epoch uint64, fn func(*Meta)) error {
 	}
 	if meta.Epoch != epoch {
 		return fmt.Errorf("gpulease: restamp: fenced out — our epoch %d, current epoch %d", epoch, meta.Epoch)
+	}
+	if h := restampWholeHook; h != nil {
+		h() // a test seam: what happens between reading the record and writing it back
 	}
 	fn(meta)
 	meta.Epoch = epoch
@@ -2121,20 +2128,27 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 	if released, handled, err := m.releaseByEpochV2(epoch); handled {
 		return released, err
 	}
-	meta, err := m.readMeta()
-	if err != nil || meta == nil {
-		return false, nil // nothing held
-	}
-	if epoch != 0 && meta.Epoch != epoch {
-		return false, errLeaseMovedOn(epoch, meta.Epoch)
-	}
-	// Drop the CLAIM only. Removing the container would delete a directory another
-	// acquirer may be working inside.
-	m.clearUnloadMarkers()
-	if err := removeClaim(m.metaPath()); err != nil {
-		return false, fmt.Errorf("gpulease: releasing lease: %w", err)
-	}
-	return true, nil
+	// Under the epoch lock, like the restamp that rewrites this record: an unlocked release between a restamp's read of the
+	// record and its rename put the record back, and the lease an operator had just ended was held again.
+	var released bool
+	lerr := m.withEpochLock(func() error {
+		meta, err := m.readMeta()
+		if err != nil || meta == nil {
+			return nil // nothing held
+		}
+		if epoch != 0 && meta.Epoch != epoch {
+			return errLeaseMovedOn(epoch, meta.Epoch)
+		}
+		// Drop the CLAIM only. Removing the container would delete a directory another
+		// acquirer may be working inside.
+		m.clearUnloadMarkers()
+		if err := removeClaim(m.metaPath()); err != nil {
+			return fmt.Errorf("gpulease: releasing lease: %w", err)
+		}
+		released = true
+		return nil
+	})
+	return released, lerr
 }
 
 // ReleaseTarget names the lease ReleaseByEpoch(epoch) would end, without ending it, or the

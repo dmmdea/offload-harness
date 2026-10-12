@@ -902,6 +902,13 @@ that test red (`scripts/mutation-check.sh`).
   to it; with none alive, exactly as before (a judge-level test pins that). The guide, ADR 0084 and the `Reclaimable` comment also say
   what a recorded tree cannot cover: it is frozen when the wrapper dies, and the process table is read only for a lease that recorded
   none, so a process started after the last record that outlives every recorded member is not held (the accepted limit).
+- **A whole-node `gpu release` could be undone by a restamp in flight (found by the Windows root gate, not by the review).** A restamp
+  reads the lease record, writes a replacement and renames it over the record, all under the epoch lock; the whole-node release
+  removed the claim without taking that lock, so a release that landed between the restamp's read and its rename was followed by the
+  rename, which put the record back and left the lease the operator had just ended held, with its wrapper none the wiser. The
+  wrapper's tree record (a restamp right after its command starts) made the window reachable, and it surfaced once the recorder no
+  longer walked the whole process table on Windows (the slow walk had pushed the restamp past any release a test could issue): the
+  handoff test `TestReserveDoesNotWarmBackAfterLosingTheLease` failed on both Windows hosts. The release now takes the epoch lock.
 - **Answered, not changed.** An overdue tree-orphan is ranked last in `/fleet/health` and is not a refusal, exactly as every overdue
   lease since 0.113.27 (a refusing node keeps the capacity wait from asking the one remote that could take the work); the field comment
   said "never freed" without saying that, and a test now pins both halves.
