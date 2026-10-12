@@ -14,6 +14,7 @@
 #   giving the same verdicts, exit codes and leak lines on the same fixture.
 #
 # Usage: bash scripts/test-temp-tripwire-selftest.sh      (needs the Go toolchain on PATH; exits 1 if any check fails)
+# TRIPWIRE_SELFTEST_NO_SPAWNER=1 leaves out the PROCESSES case (where the sleeper cannot be killed the run waits for it to end).
 # Scratch: $TRIPWIRE_SELFTEST_DIR, else $TMPDIR, else /tmp; it should be on a data drive (the script refuses the system
 # drive, and the self-test then passes --allow-system-drive for the cases that need a folder). Removed on exit.
 
@@ -155,33 +156,48 @@ cleanup_kept_all() { find "$root" -mindepth 1 -maxdepth 1 -name 'test-temp-tripw
 cleanup_kept_all
 
 # --- PROCESSES
-run "${common[@]}" --pkgs ./spawner
-printed_pids=$(printf '%s\n' "$out" | sed -n 's/^test-temp-tripwire: process   pid \([0-9]*\) .*/\1/p')
-pids="$pids $printed_pids"
-case $(uname -s 2>/dev/null) in
-MINGW* | MSYS* | CYGWIN*)
-	expect "spawner without a usable /proc: exit (a leak, not a process verdict)" "$rc" 1
-	expect_has "spawner without a usable /proc: the skip is said" "$out" "process check skipped"
-	;;
-*)
-	if [ -r /proc/self/exe ]; then
-		expect "spawner: exit" "$rc" 2
-		expect "spawner: verdict" "$(verdict_of)" PROCESSES
-		expect_has "spawner: the image under the folder is named" "$out" "/tripwire-sleeper"
-		[ -n "$printed_pids" ] && ok "spawner: a pid was printed" || bad "spawner: no pid was printed"
-		expect "spawner: the folder is kept while the process runs" "$(folders_in)" 1
-	else
-		skipped "spawner: no /proc on this host"
-	fi
-	;;
-esac
-for p in $printed_pids; do kill "$p" 2>/dev/null; done
-for p in $printed_pids; do
-	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do kill -0 "$p" 2>/dev/null || break; sleep 0.3; done
-done
-cleanup_kept_all
-# a sleeper the case started on a host whose process check is skipped ends by itself within its bounded sleep; the
-# scratch removal below waits for the image to be free only where the OS needs that
+if [ -n "${TRIPWIRE_SELFTEST_NO_SPAWNER:-}" ]; then
+	skipped "spawner: TRIPWIRE_SELFTEST_NO_SPAWNER is set (for a host where the sleeper cannot be killed and the run would wait for it to end)"
+else
+	run "${common[@]}" --pkgs ./spawner
+	printed_pids=$(printf '%s\n' "$out" | sed -n 's/^test-temp-tripwire: process   pid \([0-9]*\) .*/\1/p')
+	pids="$pids $printed_pids"
+	case $(uname -s 2>/dev/null) in
+	MINGW* | MSYS* | CYGWIN*)
+		expect "spawner without a usable /proc: exit (a leak, not a process verdict)" "$rc" 1
+		expect_has "spawner without a usable /proc: the skip is said" "$out" "process check skipped"
+		;;
+	*)
+		if [ -r /proc/self/exe ]; then
+			expect "spawner: exit" "$rc" 2
+			expect "spawner: verdict" "$(verdict_of)" PROCESSES
+			expect_has "spawner: the image under the folder is named" "$out" "/tripwire-sleeper"
+			[ -n "$printed_pids" ] && ok "spawner: a pid was printed" || bad "spawner: no pid was printed"
+			expect "spawner: the folder is kept while the process runs" "$(folders_in)" 1
+			# the folder of a run is never removed while a process runs from it, whatever was asked
+			for p in $printed_pids; do kill "$p" 2>/dev/null; done
+			for p in $printed_pids; do
+				for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do kill -0 "$p" 2>/dev/null || break; sleep 0.3; done
+			done
+			cleanup_kept_all
+			run "${common[@]}" --pkgs ./spawner --remove
+			printed_pids=$(printf '%s\n' "$out" | sed -n 's/^test-temp-tripwire: process   pid \([0-9]*\) .*/\1/p')
+			pids="$pids $printed_pids"
+			expect "spawner with --remove: exit" "$rc" 2
+			expect "spawner with --remove: the folder is still kept while the process runs" "$(folders_in)" 1
+		else
+			skipped "spawner: no /proc on this host"
+		fi
+		;;
+	esac
+	for p in $printed_pids; do kill "$p" 2>/dev/null; done
+	for p in $printed_pids; do
+		for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do kill -0 "$p" 2>/dev/null || break; sleep 0.3; done
+	done
+	cleanup_kept_all
+	# a sleeper the case started on a host whose process check is skipped ends by itself within its bounded sleep; the
+	# scratch removal below waits for the image to be free only where the OS needs that
+fi
 
 # --- the name-prefix rules (the PowerShell twin is held to the same table)
 table() {
@@ -217,7 +233,7 @@ if command -v pwsh >/dev/null 2>&1 && [ -f "$twin" ]; then
 		cleanup_kept_all
 		out=$(pwsh -NoProfile -File "$twin_native" -Dir "$root_native" -Module "$fixture_native" -Pkgs "$case_pkgs" ${twin_allow[@]+"${twin_allow[@]}"} 2>&1)
 		rc=$?
-		out=$(printf '%s' "$out" | tr -d '')
+		out=$(printf '%s' "$out" | tr -d '\r')
 		expect "twin agrees on $case_pkgs: exit" "$rc" "$sh_rc"
 		expect "twin agrees on $case_pkgs: verdict" "$(verdict_of)" "$sh_verdict"
 		expect "twin agrees on $case_pkgs: leak lines" "$(leak_lines)" "$sh_leaks"

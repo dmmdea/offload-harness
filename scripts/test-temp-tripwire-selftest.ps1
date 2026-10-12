@@ -162,6 +162,14 @@ try {
     Expect 'spawner: the folder is kept while the process runs' (Folders-In) 1
     Stop-Sleepers $printed
     Clean-Kept
+    # the folder of a run is never removed while a process runs from it, whatever was asked
+    Run ($common + @('-Pkgs', './spawner', '-Remove'))
+    $printed = @([regex]::Matches($script:Out, '(?m)^test-temp-tripwire: process   pid ([0-9]+) ') | ForEach-Object { [int]$_.Groups[1].Value })
+    $script:Pids += $printed
+    Expect 'spawner with -Remove: exit' $script:Rc 2
+    Expect 'spawner with -Remove: the folder is still kept while the process runs' (Folders-In) 1
+    Stop-Sleepers $printed
+    Clean-Kept
 
     # --- the name-prefix rules (the shell twin is held to the same table)
     $table = @(
