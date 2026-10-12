@@ -1656,7 +1656,44 @@ func buildAudioParams(f audioFlags) map[string]any {
 // `node render/tts.mjs out.wav "text"` CLI. It synthesizes on the LOCAL GPU for
 // free via the same runGenerateAudio pipeline branch the MCP tool uses.
 func runGenerateAudio(args []string) error {
-	fs := flag.NewFlagSet("generate-audio", flag.ExitOnError)
+	c, err := parseGenerateAudio(args, flag.ExitOnError)
+	if err != nil {
+		return err
+	}
+
+	cfg := loadCfg(c.fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	params := buildAudioParams(c.audio)
+	res := mediaremote.Run(context.Background(), cfg, p, core.Request{
+		Task:   core.TaskGenerateAudio,
+		Door:   "cli:generate-audio",
+		Input:  c.text,
+		Params: params,
+	}, c.route, c.remotes)
+	emitResult(res, c.asJSON, "", c.compact)
+	return nil
+}
+
+// generateAudioCLI is one parsed `generate-audio` command line.
+type generateAudioCLI struct {
+	fs      *flag.FlagSet
+	audio   audioFlags
+	text    string
+	asJSON  bool
+	compact bool
+	route   string
+	remotes []string
+}
+
+// parseGenerateAudio parses the generate-audio command line (factored out of runGenerateAudio, like
+// parseGenerateVideo, so the positionals can be tested without a render).
+func parseGenerateAudio(args []string, errorHandling flag.ErrorHandling) (generateAudioCLI, error) {
+	fs := flag.NewFlagSet("generate-audio", errorHandling)
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	kind := fs.String("kind", "voice", "voice (Chatterbox TTS) | music (ACE-Step)")
@@ -1669,8 +1706,8 @@ func runGenerateAudio(args []string) error {
 	reserveVRAM := fs.Float64("reserve-vram", 0, "music: VRAM held back for the display")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0077)")
-	var remotes repeatedFlag
-	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
+	remotes := new(repeatedFlag)
+	fs.Var(remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 
 	// generate-audio takes TWO positionals (out path, text); the rest are flags.
 	out, text, flagArgs := splitTwoArgs(args, map[string]bool{
@@ -1678,31 +1715,22 @@ func runGenerateAudio(args []string) error {
 		"seconds": true, "seed": true, "reserve-vram": true, "tts-voice": true,
 		"route": true, "remote": true,
 	})
-	_ = fs.Parse(flagArgs)
+	if err := fs.Parse(flagArgs); err != nil {
+		return generateAudioCLI{}, err
+	}
 
 	if out == "" || text == "" {
-		return fmt.Errorf("generate-audio requires an output path and text: local-offload generate-audio <out.wav> \"<text>\" [--kind voice|music] [--lang es]")
+		return generateAudioCLI{}, fmt.Errorf("generate-audio requires an output path and text: local-offload generate-audio <out.wav> \"<text>\" [--kind voice|music] [--lang es]")
 	}
-
-	cfg := loadCfg(fs)
-	p, cleanup, err := openPipeline(cfg)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
-	params := buildAudioParams(audioFlags{
-		kind: *kind, voice: *voice, ttsVoice: *ttsVoice, clone: *clone, lang: *lang, out: out,
-		seconds: *seconds, seed: *seed, reserveVRAM: *reserveVRAM,
-	})
-	res := mediaremote.Run(context.Background(), cfg, p, core.Request{
-		Task:   core.TaskGenerateAudio,
-		Door:   "cli:generate-audio",
-		Input:  text,
-		Params: params,
-	}, *route, remotes)
-	emitResult(res, *asJSON, "", *compactFlag)
-	return nil
+	return generateAudioCLI{
+		fs: fs,
+		audio: audioFlags{
+			kind: *kind, voice: *voice, ttsVoice: *ttsVoice, clone: *clone, lang: *lang, out: out,
+			seconds: *seconds, seed: *seed, reserveVRAM: *reserveVRAM,
+		},
+		text: text, asJSON: *asJSON, compact: *compactFlag,
+		route: *route, remotes: *remotes,
+	}, nil
 }
 
 // videoFlags is the parsed CLI input for `generate-video`. Factored out so the

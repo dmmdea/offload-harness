@@ -692,3 +692,36 @@ func TestSplitValueFlagStillTakesAFollowingDashDashAsItsValue(t *testing.T) {
 		t.Fatalf("splitTwoArgs = (%q, %q, %v); want (out.wav, text, [--voice --])", first, second, flags)
 	}
 }
+
+// TestParseGenerateAudioCarriesADashLedTextToTheRequest drives the generate-audio verb's own parse (the caller of
+// splitTwoArgs): the lyrics marker after `--` reaches the request text instead of leaving it empty.
+func TestParseGenerateAudioCarriesADashLedTextToTheRequest(t *testing.T) {
+	c, err := parseGenerateAudio([]string{"out.wav", "--kind", "music", "--", "--- Intro ---\nla la la"}, flag.ContinueOnError)
+	if err != nil {
+		t.Fatalf("parseGenerateAudio: %v (the text was lost to the flag handling)", err)
+	}
+	if c.text != "--- Intro ---\nla la la" || c.audio.out != "out.wav" || c.audio.kind != "music" {
+		t.Fatalf("parseGenerateAudio = text %q out %q kind %q; want the dash-led text, out.wav and music", c.text, c.audio.out, c.audio.kind)
+	}
+	// the ordinary shape is unchanged
+	c, err = parseGenerateAudio([]string{"out.wav", "hola mundo", "--lang", "es"}, flag.ContinueOnError)
+	if err != nil || c.text != "hola mundo" || c.audio.lang != "es" {
+		t.Fatalf("parseGenerateAudio(ordinary) = text %q lang %q err %v; want hola mundo / es", c.text, c.audio.lang, err)
+	}
+	// a token past the two positionals is never read as a flag once the terminator was typed
+	c, err = parseGenerateAudio([]string{"out.wav", "--", "text", "--voice", "finetuned"}, flag.ContinueOnError)
+	if err != nil || c.text != "text" || c.audio.voice != "" {
+		t.Fatalf("parseGenerateAudio(over arity) = text %q voice %q err %v; want text with no voice flag set", c.text, c.audio.voice, err)
+	}
+}
+
+// TestParseGenerateVideoCarriesADashLedPromptToTheRequest is the same through the generate-video verb (splitThreeArgs).
+func TestParseGenerateVideoCarriesADashLedPromptToTheRequest(t *testing.T) {
+	c, err := parseGenerateVideo([]string{"o.mp4", "s.png", "--fast", "--", "- push in slowly"}, flag.ContinueOnError)
+	if err != nil {
+		t.Fatalf("parseGenerateVideo: %v", err)
+	}
+	if c.prompt != "- push in slowly" || c.video.out != "o.mp4" || c.video.still != "s.png" || !c.video.fast {
+		t.Fatalf("parseGenerateVideo = prompt %q out %q still %q fast %v; want the dash-led prompt intact and --fast still parsed", c.prompt, c.video.out, c.video.still, c.video.fast)
+	}
+}
