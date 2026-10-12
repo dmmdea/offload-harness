@@ -241,3 +241,53 @@ func TestRescueRepackOwnSeatFailureCarriesTheWarmUpNote(t *testing.T) {
 		t.Fatalf("error = %v, want the warm-up named: a rescue whose own seat was cold must say whether the load spent its window", err)
 	}
 }
+
+// The rescue's budget is one budget: a node that spent it leaves nothing to warm this box's seat with,
+// and the caller's re-placement is credited the time the rescue did not waste.
+func TestRescueRepackDoesNotWarmItsOwnSeatWhenTheNodeSpentTheBudget(t *testing.T) {
+	node := newOriginNode(t, "origin-seat", true, func(int64) string {
+		time.Sleep(300 * time.Millisecond)
+		return `{"wrong":"shape"}`
+	})
+	fake, srv := coldBox(t)
+	p := admissionTestPipeline(t, srv.URL, 30)
+	p.cfg.FleetAuthToken = "tok"
+
+	_, err := p.RescueRepack(node.ctx("origin-seat"), testContract(), rescueAnswer, 700*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "too little") || !strings.Contains(err.Error(), "node-o") {
+		t.Fatalf("error = %v, want the node's failure and the budget it left named", err)
+	}
+	if fake.upstreamCNT.Load() != 0 || node.hits.Load() != 1 {
+		t.Fatalf("warm requests = %d node calls = %d, want no warm-up and one call to the node", fake.upstreamCNT.Load(), node.hits.Load())
+	}
+}
+
+// With budget to spare, a node that cannot take the call leaves this box's seat the whole of what is left.
+func TestRescueRepackUsesItsOwnSeatWithTheBudgetTheNodeLeft(t *testing.T) {
+	defer compressLiveness(t, 300*time.Millisecond, 100*time.Millisecond, 1800)()
+	defer compressRepackBound(t, 300*time.Millisecond)()
+	node := newOriginNode(t, "origin-seat", false, func(int64) string { return `{"answer":"from the node"}` })
+	fake := coldRescueFake(50 * time.Millisecond)
+	srv := fake.server(t)
+	p := admissionTestPipeline(t, srv.URL, 30)
+	p.cfg.FleetAuthToken = "tok"
+
+	got, err := p.RescueRepack(node.ctx("origin-seat"), testContract(), rescueAnswer, 60*time.Second)
+	if err != nil || string(got.Structured) != `{"answer":"42"}` || got.Seat != agentTestSeat {
+		t.Fatalf("rescued = %+v err = %v, want the object this box's seat wrote", got, err)
+	}
+}
+
+// The origin's object that kept fewer list items than its answer held says so in the note.
+func TestRescueRepackNotesAnObjectThatKeptFewerItemsThanItsAnswerHeld(t *testing.T) {
+	answer := invertedKeysAnswer(t, 5411)
+	node := newOriginNode(t, "origin-seat", true, func(int64) string { return faithfulObject() })
+	_, srv := coldBox(t)
+	p := admissionTestPipeline(t, srv.URL, -1)
+	p.cfg.FleetAuthToken = "tok"
+
+	got, err := p.RescueRepack(node.ctx("origin-seat"), fidelityContract(), answer, 0)
+	if err != nil || !strings.Contains(got.How, "kept 10 of 11") {
+		t.Fatalf("rescued = %+v err = %v, want the note that ten of eleven items were kept", got, err)
+	}
+}
