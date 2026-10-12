@@ -328,11 +328,13 @@ func analyzeTestSource(fset *token.FileSet, name string, src any) (tempFile, err
 	return res, nil
 }
 
-// skipTestDir reports whether the walk leaves a directory out: other modules (tools/, the fixtures, the contract
-// modules: any directory with a go.mod of its own), test data, dependencies and the repository's own folder.
+// skipTestDir reports whether the walk leaves a directory out: other modules (the repository's tools/ modules, the fixtures, the
+// contract modules: any directory with a go.mod of its own), test data, dependencies and the repository's own folder. It goes by
+// what a directory IS, never by a name that a package of this module could also carry: a directory called tools or bin is
+// scanned like any other unless it holds a go.mod.
 func skipTestDir(path, name string) bool {
 	switch name {
-	case ".git", "tools", "testdata", "node_modules", "bin":
+	case ".git", "testdata", "node_modules":
 		return true
 	}
 	if path == "." {
@@ -645,7 +647,8 @@ func replaceOnce(s, old, new string) string {
 
 // TestASyntheticLeakInAnyPackageIsNamedByFileAndForm builds a small module tree, scans it the way the real lint
 // scans the repository and requires: a leak in any directory is found and named by file and form; the directories
-// the lint leaves out (tools, testdata, node_modules, a nested module) are left out; and a listed use is quiet.
+// the lint leaves out (testdata, node_modules and a nested module, which is how the repository's tools/ modules go) are left
+// out while a directory that only has the name of one (a/tools, a/bin, bin) is scanned like any other; and a listed use is quiet.
 func TestASyntheticLeakInAnyPackageIsNamedByFileAndForm(t *testing.T) {
 	root := t.TempDir()
 	write := func(rel, src string) {
@@ -664,7 +667,11 @@ func TestASyntheticLeakInAnyPackageIsNamedByFileAndForm(t *testing.T) {
 	write("root_test.go", "package p\nimport \"os\"\nfunc f() string { return os.TempDir() }\n")
 	write("clean/clean_test.go", "package p\nimport \"testing\"\nfunc TestX(t *testing.T) { _ = t.TempDir() }\n")
 	write("listed/listed_test.go", leak)
+	write("tools/go.mod", "module tools\n")
 	write("tools/leak_test.go", leak)
+	write("a/tools/leak_test.go", leak)
+	write("a/bin/leak_test.go", leak)
+	write("bin/leak_test.go", leak)
 	write("a/testdata/leak_test.go", leak)
 	write("node_modules/x/leak_test.go", leak)
 	write("nested/go.mod", "module nested\n")
@@ -678,19 +685,22 @@ func TestASyntheticLeakInAnyPackageIsNamedByFileAndForm(t *testing.T) {
 	got := tempUseSites(files)
 	want := map[string]int{
 		"a/deep/er/leaky_test.go:os.MkdirTemp(empty)": 1,
+		"a/tools/leak_test.go:os.MkdirTemp(empty)":    1,
+		"a/bin/leak_test.go:os.MkdirTemp(empty)":      1,
+		"bin/leak_test.go:os.MkdirTemp(empty)":        1,
 		"root_test.go:os.TempDir":                     1,
 		"listed/listed_test.go:os.MkdirTemp(empty)":   1,
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("sites = %v, want %v (tools, testdata, node_modules, a nested module and non-test files are left out)", got, want)
+		t.Fatalf("sites = %v, want %v (testdata, node_modules, a nested module and non-test files are left out; a directory named tools or bin is not)", got, want)
 	}
 	problems := tempUseProblems(got, map[string]tempAllow{
 		"listed/listed_test.go:os.MkdirTemp(empty)": {1, "removed by a deferred RemoveAll"},
 	})
-	if len(problems) != 2 {
-		t.Fatalf("problems = %q, want exactly the two unlisted uses", problems)
+	if len(problems) != 5 {
+		t.Fatalf("problems = %q, want exactly the five unlisted uses", problems)
 	}
-	for _, want := range []string{"a/deep/er/leaky_test.go uses the OS temp dir 1 time(s) as os.MkdirTemp(empty)", "root_test.go uses the OS temp dir 1 time(s) as os.TempDir"} {
+	for _, want := range []string{"a/deep/er/leaky_test.go uses the OS temp dir 1 time(s) as os.MkdirTemp(empty)", "root_test.go uses the OS temp dir 1 time(s) as os.TempDir", "a/tools/leak_test.go uses the OS temp dir 1 time(s) as os.MkdirTemp(empty)", "a/bin/leak_test.go uses the OS temp dir 1 time(s) as os.MkdirTemp(empty)", "bin/leak_test.go uses the OS temp dir 1 time(s) as os.MkdirTemp(empty)"} {
 		found := false
 		for _, p := range problems {
 			found = found || strings.HasPrefix(p, want)
