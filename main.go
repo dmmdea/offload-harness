@@ -302,6 +302,8 @@ Usage:
   local-offload extract-image <image-path> --schema schema.json [--json]
   local-offload assess-image <image-path> [--brief "..."] [--json]
   local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned|endpoint] [--tts-voice NAME] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
+                                         a bare -- ends the flags, so text that starts with a dash is kept: generate-audio out.wav -- "--- Intro ---"
+                                         (the same for generate-video, animate-character and the verbs that take one file, text or prompt)
   local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false] [--family NAME] [--transparent]
   local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N]
                                          N prompts: ONE warm ComfyUI session when this machine's lane is free, else each job a ticket on the
@@ -1993,11 +1995,17 @@ func runAnimateCharacter(args []string) error {
 // splitFourArgs separates the FIRST FOUR positionals (out path + ref image +
 // driver video + prompt) from flags, mirroring splitThreeArgs. Used by
 // animate-character, whose CLI shape is `<out> <ref> <driver> "<prompt>" [flags]`.
+// A bare "--" ends the flags (see overflowArg for what happens to an extra positional).
 func splitFourArgs(args []string, valueFlags map[string]bool) (first, second, third, fourth string, flags []string) {
 	var pos []string
+	ended, fenced := false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if strings.HasPrefix(a, "-") && a != "-" {
+		if !ended && a == "--" {
+			ended = true
+			continue
+		}
+		if !ended && strings.HasPrefix(a, "-") && a != "-" {
 			flags = append(flags, a)
 			name := strings.TrimLeft(a, "-")
 			if strings.ContainsRune(name, '=') {
@@ -2012,7 +2020,7 @@ func splitFourArgs(args []string, valueFlags map[string]bool) (first, second, th
 		if len(pos) < 4 {
 			pos = append(pos, a)
 		} else {
-			flags = append(flags, a)
+			flags = overflowArg(flags, a, ended, &fenced)
 		}
 	}
 	pos = append(pos, "", "", "", "")
@@ -2023,11 +2031,16 @@ func splitFourArgs(args []string, valueFlags map[string]bool) (first, second, th
 // prompt) from flags, treating the named value-flags as consuming the following
 // token. Used by generate-video, whose CLI shape is `<out> <still> "<prompt>"
 // [flags]`. A fourth+ positional is dropped onto flags (harmless; FlagSet ignores
-// trailing positionals).
+// trailing positionals). A bare "--" ends the flags (see overflowArg).
 func splitThreeArgs(args []string, valueFlags map[string]bool) (first, second, third string, flags []string) {
+	ended, fenced := false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if strings.HasPrefix(a, "-") && a != "-" {
+		if !ended && a == "--" {
+			ended = true
+			continue
+		}
+		if !ended && strings.HasPrefix(a, "-") && a != "-" {
 			flags = append(flags, a)
 			name := strings.TrimLeft(a, "-")
 			if strings.ContainsRune(name, '=') {
@@ -2047,7 +2060,7 @@ func splitThreeArgs(args []string, valueFlags map[string]bool) (first, second, t
 		case third == "":
 			third = a
 		default:
-			flags = append(flags, a)
+			flags = overflowArg(flags, a, ended, &fenced)
 		}
 	}
 	return first, second, third, flags
@@ -2056,11 +2069,17 @@ func splitThreeArgs(args []string, valueFlags map[string]bool) (first, second, t
 // splitTwoArgs separates the FIRST TWO positionals (e.g. out path + text) from
 // flags, treating the named value-flags as consuming the following token. Used by
 // generate-audio, whose CLI shape is `<out> "<text>" [flags]`. A third+ positional
-// is dropped onto flags (harmless; FlagSet ignores trailing positionals).
+// is dropped onto flags (harmless; FlagSet ignores trailing positionals). A bare
+// "--" ends the flags (see overflowArg).
 func splitTwoArgs(args []string, valueFlags map[string]bool) (first, second string, flags []string) {
+	ended, fenced := false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if strings.HasPrefix(a, "-") && a != "-" {
+		if !ended && a == "--" {
+			ended = true
+			continue
+		}
+		if !ended && strings.HasPrefix(a, "-") && a != "-" {
 			flags = append(flags, a)
 			name := strings.TrimLeft(a, "-")
 			if strings.ContainsRune(name, '=') {
@@ -2078,10 +2097,24 @@ func splitTwoArgs(args []string, valueFlags map[string]bool) (first, second stri
 		case second == "":
 			second = a
 		default:
-			flags = append(flags, a)
+			flags = overflowArg(flags, a, ended, &fenced)
 		}
 	}
 	return first, second, flags
+}
+
+// overflowArg hands a positional the splitter has no slot for on to the flags the caller gives fs.Parse
+// (as the splitters always did: Parse stops at the first non-flag, so the extra is harmless). Once a bare
+// "--" has ended the flags, the extra token may start with a dash, and Parse would read it as a flag, so
+// ONE "--" of the splitter's own goes in front of the first such token: Parse stops there and nothing
+// after the user's terminator is ever a flag. The user's own "--" is never passed on. fenced is the
+// splitter's "my -- is already in" state.
+func overflowArg(flags []string, tok string, ended bool, fenced *bool) []string {
+	if ended && !*fenced {
+		flags = append(flags, "--")
+		*fenced = true
+	}
+	return append(flags, tok)
 }
 
 // runOCR handles `local-offload ocr <image-path> [--json]`. Like vqa the
@@ -4764,18 +4797,26 @@ func applyBatchRefineDefault(jobs []pipeline.ImageBatchJob, refine bool) {
 	}
 }
 
+// splitArgs separates the FIRST positional from flags, treating the named value-flags as consuming the
+// following token. A lone "-" is the stdin positional. A bare "--" ends the flags: every later token is a
+// positional, even one that starts with "-" (see overflowArg for what happens to an extra one).
 func splitArgs(args []string, valueFlags map[string]bool) (positional string, flags []string) {
+	ended, fenced := false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if !ended && a == "--" {
+			ended = true
+			continue
+		}
 		if a == "-" { // stdin indicator is a positional, not a flag
 			if positional == "" {
 				positional = a
 			} else {
-				flags = append(flags, a)
+				flags = overflowArg(flags, a, ended, &fenced)
 			}
 			continue
 		}
-		if strings.HasPrefix(a, "-") {
+		if !ended && strings.HasPrefix(a, "-") {
 			flags = append(flags, a)
 			name := strings.TrimLeft(a, "-")
 			if strings.ContainsRune(name, '=') {
@@ -4790,7 +4831,7 @@ func splitArgs(args []string, valueFlags map[string]bool) (positional string, fl
 		if positional == "" {
 			positional = a
 		} else {
-			flags = append(flags, a)
+			flags = overflowArg(flags, a, ended, &fenced)
 		}
 	}
 	return positional, flags
