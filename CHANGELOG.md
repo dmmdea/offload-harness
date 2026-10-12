@@ -6,6 +6,10 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Docs — the composite-tier guide no longer says the display card is closed to every placement until the operator sets presence
+
+- `docs/systems/composite-tier.md` said `operator_presence` keeps the display card closed and that no placement touches it until the key is `auto`. Since 0.183.0 that holds for the display layer's twins only: the card allocator behind `gpu reserve --cards` and the media admission path reads no presence and may use the display card up to `gpu_display_cap_pct` (ADR 0039, amendment 2026-10-12). Both sentences now say which placement they mean. Found by a fleet audit of the 0.183.0 docs.
+
 ### Added — a transcript whose word times drift from their segment says `words_reliable: false` (D-38, issue #169: the flag; the cause stays open)
 
 - **What was wrong.** Issue #169: on a long file whisper-server's per-word times lagged the segment they belong to by minutes (up to -152 s on a 730 s file). `internal/sttclient` passed the `words[]` array through and nothing compared it with its segment, so a consumer that cuts audio at word boundaries had no way to tell the times were wrong.
