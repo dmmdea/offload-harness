@@ -247,6 +247,9 @@ func TestSdcppQwenImage21FamilyOnlyNodeRendersTransparent(t *testing.T) {
 	t.Setenv("RUNNER_PROBE", probe)
 	t.Setenv("PNG_SRC", src)
 	stubJSON, _ := json.Marshal(stub)
+	// CT-54: the sdcpp lane refuses, before the lease, a route whose binary or weight is missing, so both are real files
+	binJSON, _ := json.Marshal(igpuBin(t, dir, "sd-cli"))
+	modelJSON, _ := json.Marshal(weightFile(t, dir, "qwen_image_2.1-Q8_0.gguf"))
 	cfg := config.Default()
 	cfg.MediaDir = dir
 	// No cfg.ImageGenScript / cfg.ImageGenEngine at all — the family is the ONLY
@@ -256,9 +259,9 @@ func TestSdcppQwenImage21FamilyOnlyNodeRendersTransparent(t *testing.T) {
 			"license": []byte(`"Qwen Research License"`), "commercial_use": []byte(`false`),
 			"imagegen_family": []byte(`"qwen-image-2.1"`),
 			"imagegen_engine": []byte(`"sdcpp"`),
-			"sdcpp_bin":       []byte(`"sd-cli"`),
+			"sdcpp_bin":       binJSON,
 			"sdcpp_script":    stubJSON,
-			"sdcpp_model":     []byte(`"qwen_image_2.1-Q8_0.gguf"`),
+			"sdcpp_model":     modelJSON,
 		},
 	}
 	p := &Pipeline{cfg: cfg}
@@ -422,6 +425,7 @@ func TestLaunchProfileReachesEveryComfyRouteAndThePinOnlyTheSingleCardOnes(t *te
 			cfg.ComfyExtraArgs = "--verbose"
 			stub := writeProbeRunner(t, dir)
 			tc.setup(t, &cfg, stub, dir)
+			presentWeights(t, dir, &cfg) // CT-54: the engine cases bind weights by name only
 			p := &Pipeline{cfg: cfg}
 			tc.invoke(t, p, dir)
 			got := readProbe(t, probe)

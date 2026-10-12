@@ -156,6 +156,39 @@ async function jfetch(fetchImpl, url, opts) {
   return r.json();
 }
 
+// The bounds on the two calls that used to carry none (D-38, issue #72): /system_stats, /queue and /history always had an
+// AbortSignal, but POST /prompt and GET /view did not, so a ComfyUI that accepts the connection and never answers held the
+// exclusive GPU slot for as long as the runner's whole-process timeout. Exported so a test can name them; the callers take
+// a `timeoutMs` to shorten them.
+//   SUBMIT_TIMEOUT_MS  POST /prompt validates the graph and queues it, it does not run it: two minutes is generous.
+//   VIEW_TIMEOUT_MS    GET /view returns a finished output and the bound covers the WHOLE request, the body read included
+//                      (fetchView reads it with arrayBuffer(), and an abort signal covers that). ComfyUI is on loopback, so
+//                      ten minutes is a ceiling for a multi-GB video, not an estimate of its transfer.
+export const SUBMIT_TIMEOUT_MS = 120_000;
+export const VIEW_TIMEOUT_MS = 600_000;
+
+// withDeadline: run `call(signal)` under an AbortSignal that fires after timeoutMs. A call that ends because the signal fired
+// rejects with an error that names the call and the bound (the bare "operation was aborted due to timeout" names neither);
+// any other failure passes through untouched, so an answered error status keeps its httpStatus.
+// `unusable` says the stall condemns the server: the error is then serverUnusable (comfy-render.mjs exits RENDER_EXIT_SERVER_UNUSABLE
+// and prints the class line, so a --batch parent stops instead of paying the bound on every later job). POST /prompt is that call: it
+// only validates and queues, so a server that does not answer it for two minutes cannot take a later job either, and the parent
+// reads nothing of the child but its exit code and its RENDER FAILED line. GET /view is not: the render has finished, its output
+// is on disk, and a later job's own submit and poll decide whether the server still serves.
+async function withDeadline(what, timeoutMs, call, { unusable = false } = {}) {
+  const signal = AbortSignal.timeout(timeoutMs);
+  try {
+    return await call(signal);
+  } catch (cause) {
+    if (!signal.aborted) throw cause;
+    const e = new Error(`ComfyUI ${what} timeout: no complete answer within ${timeoutMs} ms (the server accepted the connection and stopped answering); aborting to release the GPU slot`);
+    e.timedOut = true;
+    if (unusable) e.serverUnusable = true;
+    e.cause = cause;
+    throw e;
+  }
+}
+
 // submitGraph: queue a graph, preferring the CLI, and return { promptId, via }.
 //
 // CLI path notes (each is a deliberate exact-behavior decision, ledgered 2026-08-14):
@@ -172,7 +205,7 @@ async function jfetch(fetchImpl, url, opts) {
 //                 which IS today's always-POST behavior.
 //   client_id     the CLI sends its fixed "comfyui-pp-cli" (no --client-id flag yet —
 //                 surfaced as an upstream gap); the raw path keeps the per-run id.
-export async function submitGraph({ api, graph, clientId, cli, fetchImpl = fetch, spawnImpl = spawn, stderr = process.stderr }) {
+export async function submitGraph({ api, graph, clientId, cli, fetchImpl = fetch, spawnImpl = spawn, stderr = process.stderr, submitTimeoutMs = SUBMIT_TIMEOUT_MS }) {
   if (cli) {
     const env = { COMFYUI_BASE_URL: api };
     const input = JSON.stringify(graph);
@@ -189,7 +222,7 @@ export async function submitGraph({ api, graph, clientId, cli, fetchImpl = fetch
         // binary EXISTS but is broken or the box is exhausted — falling back there
         // would both lie about the cause and silently swap submission semantics.
         stderr.write("comfy-submit: comfyui-pp-cli not found on PATH (raw HTTP submission; set COMFYUI_PP_CLI or `make -C tools/comfyui build` to enable the CLI path)\n");
-        return rawSubmit({ api, graph, clientId, fetchImpl });
+        return rawSubmit({ api, graph, clientId, fetchImpl, timeoutMs: submitTimeoutMs });
       }
       // env/repo-bin resolved to a real file, or a PATH binary failed for a reason
       // other than absence: that is an error, not a tier.
@@ -238,7 +271,7 @@ export async function submitGraph({ api, graph, clientId, cli, fetchImpl = fetch
     }
     if (r.code !== 0) {
       submitFailure(r, "submit"); // throws on server-verdict codes
-      return rawSubmit({ api, graph, clientId, fetchImpl });
+      return rawSubmit({ api, graph, clientId, fetchImpl, timeoutMs: submitTimeoutMs });
     }
     const out = parseCliJson(r.stdout);
     if (!out.attached) return accept(r);
@@ -281,20 +314,21 @@ export async function submitGraph({ api, graph, clientId, cli, fetchImpl = fetch
     }
     if (r.code !== 0) {
       submitFailure(r, "submit --force"); // throws on server-verdict codes
-      return rawSubmit({ api, graph, clientId, fetchImpl });
+      return rawSubmit({ api, graph, clientId, fetchImpl, timeoutMs: submitTimeoutMs });
     }
     return accept(r);
   }
-  return rawSubmit({ api, graph, clientId, fetchImpl });
+  return rawSubmit({ api, graph, clientId, fetchImpl, timeoutMs: submitTimeoutMs });
 }
 
-// rawSubmit: the exact POST the six runners used to carry (body byte-shape preserved).
-async function rawSubmit({ api, graph, clientId, fetchImpl = fetch }) {
-  const resp = await jfetch(fetchImpl, api + "/prompt", {
+// rawSubmit: the exact POST the six runners used to carry (body byte-shape preserved), now bounded by timeoutMs.
+export async function rawSubmit({ api, graph, clientId, fetchImpl = fetch, timeoutMs = SUBMIT_TIMEOUT_MS }) {
+  const resp = await withDeadline("POST /prompt", timeoutMs, (signal) => jfetch(fetchImpl, api + "/prompt", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ prompt: graph, client_id: clientId }),
-  });
+    signal,
+  }), { unusable: true });
   // A 200 with no prompt_id (proxy interference, API drift) must fail HERE: polling
   // /history/undefined answers 200 {} forever, which would hold the exclusive GPU slot
   // for the whole budget before dying with a misleading "no output produced in time".
@@ -316,6 +350,14 @@ export function serverUnusableError(message) {
   const e = new Error(message);
   e.serverUnusable = true;
   return e;
+}
+
+// comfyUnusableClassLine: the one machine line a runner ends a serverUnusable failure with, "IGPU_CLASS=comfy_unusable", or ""
+// for any other failure. internal/gpugen reads the class from the retained output of ANY child by this exact whole-line form
+// (the iGPU engines print the same marker from igpu-engine.mjs), so the ledger files a dead ComfyUI as comfy_unusable and not
+// "other" (D-38, issue #72). It travels with exit RENDER_EXIT_SERVER_UNUSABLE (batch-jobs.mjs); print it on a line of its own.
+export function comfyUnusableClassLine(err) {
+  return err && err.serverUnusable ? "IGPU_CLASS=comfy_unusable" : "";
 }
 
 // How often a prompt that /history does not list yet triggers a GET /system_stats, and
@@ -489,12 +531,15 @@ export async function pollOutputs({
 // Output retrieval (KEEP-raw by design — see header)
 // ---------------------------------------------------------------------------------------
 
-// fetchView: GET /view for one output descriptor and return the raw bytes.
-export async function fetchView({ api, file, fetchImpl = fetch }) {
+// fetchView: GET /view for one output descriptor and return the raw bytes. timeoutMs bounds the whole request, the body read
+// included (see VIEW_TIMEOUT_MS).
+export async function fetchView({ api, file, fetchImpl = fetch, timeoutMs = VIEW_TIMEOUT_MS }) {
   const q = new URLSearchParams({ filename: file.filename, subfolder: file.subfolder || "", type: file.type || "output" });
-  const r = await fetchImpl(`${api}/view?` + q.toString());
-  if (!r.ok) throw new Error("view fetch " + r.status);
-  return Buffer.from(await r.arrayBuffer());
+  return withDeadline("GET /view", timeoutMs, async (signal) => {
+    const r = await fetchImpl(`${api}/view?` + q.toString(), { signal });
+    if (!r.ok) throw new Error("view fetch " + r.status);
+    return Buffer.from(await r.arrayBuffer());
+  });
 }
 
 // ---------------------------------------------------------------------------------------

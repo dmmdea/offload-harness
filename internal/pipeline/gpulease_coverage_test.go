@@ -320,6 +320,7 @@ func TestEveryGPUTaskRunsUnderALease(t *testing.T) {
 			cfg.MediaDir = dir
 			stub := writeLeaseProbeStub(t, dir)
 			tc.setup(t, &cfg, stub, dir)
+			presentWeights(t, dir, &cfg) // CT-54: the engine cases bind weights by name only
 
 			p := &Pipeline{cfg: cfg}
 			tc.invoke(t, p, dir)

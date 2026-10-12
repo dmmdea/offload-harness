@@ -6,6 +6,131 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a bare `--` ends the flags on the media CLI verbs, so a positional that starts with `-` can be passed (CT-52)
+
+- **The defect.** `splitArgs`, `splitTwoArgs`, `splitThreeArgs` and `splitFourArgs` (`main.go`) sent every token that starts with `-`
+  to the flags, so `generate-audio out.wav "--- Intro ---"` came back with an empty text (the `--- Intro ---` was a flag) and the same
+  held for a prompt that opens with a dash on `generate-video`, `animate-character` and the fifteen call sites of `splitArgs`.
+  The engine side already did it right (`runnerArgs` puts `--` before the positionals); only the CLI door lost the text.
+- **The fix.** A bare `--` ends flag handling in all four helpers: every later token is a positional, in order, even when it starts
+  with `-`; a lone `-` is still the stdin positional. The user's `--` is consumed by the helper. A positional past the helper's arity
+  still goes to the flags the caller gives `fs.Parse` (as it always did), but once the terminator was seen the helper writes ONE `--`
+  of its own in front of the first such token, so `fs.Parse` stops there and can never read a leading dash as a flag. That is a
+  deliberate departure from the backlog wording ("do not leave the `--` token in the list handed to `fs.Parse`"): the user's token is
+  never passed on, the fence is the helper's own, and a test pins the returned flags exactly. With no `--` in the arguments every
+  helper returns what it returned before. `endsFlags` and `isFlagArg` hold the two rules once. The generate-audio command line is
+  factored into `parseGenerateAudio`, as generate-video already was, so the verb's own parse is testable. Usage text and
+  `docs/OPERATOR-GUIDE.md` say so.
+- **Tests.** `main_test.go`: one terminator test per helper plus a table over all four, the lone-dash guard, the flags-before-terminator
+  guard, the over-arity fence (for every helper, and through `fs.Parse`), a no-terminator guard, a value flag that takes a following `--`
+  as its value, and the two verbs' parse. Red before (targeted runs on a Linux gate host): the dash-led text
+  came back empty from `splitTwoArgs` (`= ("out.wav", "", [-- --- Intro ---])`) and the other three. Five mutants, each applied to one line of `main.go` and run on a Linux gate host through
+  `scripts/mutation-check.sh` (every verdict line: `MUTATION-VERDICT: RED (the mutant compiles and the tests fail: the tests catch this
+  mutation)`): `endsFlags` never true and `isFlagArg` ignoring the terminator turn the per-helper terminator tests and the table over all
+  four helpers red; `isFlagArg` without its lone-dash exemption turns `TestSplitArgsKeepsALoneDashAsThePositional` red; `overflowArg`
+  without its fence turns `TestSplitTwoArgsOverArityAfterTheTerminatorIsHandedToParseBehindOneDashDash`,
+  `TestSplitHelpersOverArityFenceTheirOverflow` and `TestParseGenerateAudioCarriesADashLedTextToTheRequest` red; a fence written before
+  every overflow token turns the first two red.
+
+### Fixed — a bound media route whose weight is missing defers typed `route_not_ready` before the lease on the local path (CT-54)
+
+- **The defect.** A fleet node refuses a media job for a route it binds but cannot run (a weight deleted, an engine binary moved) at its
+  door, with a 503 and the route's verdict. The local lanes never asked: with the fastwan `sdcpp_model` pointing at a missing file a
+  local `generate-video` took the media lease, spawned the runner, and deferred `err_class` `other` ("--model not found") 31 ms later
+  (the 0.173.0 live gates, 2026-10-08, as the backlog recorded them): fail-closed, but untyped, and after a lease other callers had waited behind.
+- **The fix.** The five engine lanes (sdcpp video, sdcpp animate, audio.cpp voice and music, the sdcpp image lane) read the same
+  `mediacap` derivation the node door, `doctor` and `offload_status` read (`internal/pipeline/igpumedia_routeready.go`), after their own
+  checks that every required key is set and before they resolve the runner script and the engine binary, create the output directory, mint
+  the seed, refine the prompt or take the lease. A route that derives BOUND-BUT-MISSING (a weight, the engine binary or the runner script
+  is not there) defers with the new `err_class` `route_not_ready`; the reason names the route, the config key and the missing path and says
+  another node may serve it. A required key left unset (nothing bound, or one key of several: mediacap reads the second BOUND-BUT-MISSING
+  on the video, animate and audio routes) keeps the lane's own sentence, which names the key, and no class; that is a configuration gap,
+  not a missing file, and the sdcpp image route reads it NOT CONFIGURED anyway. (Fix round: the hook first stood after the lanes' script and
+  binary resolutions, so a moved binary or a gone script still deferred untyped while the docs said they were typed; it moved above them.)
+  A video family that is not the default is judged on its own route (`generate_video:<family>`). The ledger files the class as
+  `config` (`internal/ledger/reasoncode.go`); no circuit breaker counts it (the breaker judges the llama tiers, no media lane reaches it).
+  The test fixtures that bound weights by name only (`/models/x.gguf`, `m.gguf`) now point at real files: a route with a missing weight
+  is exactly what the lanes now refuse. 34 tests of the pipeline package and one of the root package (`TestFleetMeasureProbesAnSdcppVideoAndAnAudiocppMusicBox`) ran a
+  lane against a stub runner with the weights named and absent: they failed on a full package run before the fixture change and pass after it.
+- **Tests.** `igpumedia_routeready_test.go` (five lanes by table: the weight is deleted and the lane defers `route_not_ready` naming the
+  key and the path, takes no lease, creates no output directory, never runs the runner, and the ledger row carries the class and
+  `config`; the reason sentence; a non-default family; the guards that a complete route still runs, an unbound route keeps its old
+  sentence, and the lane agrees with `mediacap.Routes`). Red before: every lane ran (`want a typed defer, got ok=true`) and the sdcpp
+  image lane's failure was classed `other`. Nine mutants (`scripts/mutation-check.sh`, all `RED`): the derivation read as NOT CONFIGURED instead of
+  BOUND-BUT-MISSING and the route name match dropped turn the lane table, the reason test, the family test and `TestAWeightThatIsThereStillRuns` red; a
+  wrong `err_class` string turns the lane table and the reason test red; every family judged on the default route turns
+  `TestAVideoFamilyThatIsNotTheDefaultIsJudgedOnItsOwnRoute` red; each lane's hook removed in turn (video, animate, audio, image) turns that
+  lane's row of `TestEngineLanesDeferTypedBeforeTheLeaseWhenTheirWeightIsMissing` and of `TestTheLaneAndTheNodeDoorReadTheSameVerdict` red and no other; the
+  ledger table without `route_not_ready` turns the lane table's ledger assertion red.
+  Fix round: `igpumedia_routeready_files_test.go` `TestEngineLanesDeferTypedBeforeTheLeaseWhenTheirBinaryOrScriptIsMissing` (the engine
+  binary and the runner script of the video lane, the engine binary, the depth binary and the script of the animate lane, binary and
+  script of voice and of music, binary and script of the image lane; each first asserts that mediacap reads the route CONFIGURED, then
+  BOUND-BUT-MISSING once the file is gone, then that the lane defers `route_not_ready` naming the key and the path, takes no lease,
+  creates no output directory and files one ledger row of class `config`). Red before, on the code with the hook after the resolutions
+  (run again on an extract of the red-tests commit): ten of the eleven cases came back with an empty `err_class` (the lane's "not found"
+  sentence); the eleventh, the image lane's engine binary, is a guard (that lane never resolves the binary itself and already deferred
+  typed). The image lane's script defer also carried the default model tier instead of its sdcpp model. `TestAnUnboundRouteKeepsItsOldDefer`
+  used to unset the VAE only, a route mediacap reads BOUND-BUT-MISSING, under the name of the nothing-bound case; it now clears every
+  required key of four lanes (premise: NOT CONFIGURED), and the half-bound case is `TestARouteWithAKeyLeftUnsetKeepsTheLanesOwnSentence`
+  (premise: what mediacap reads for each route). Five more mutants (`scripts/mutation-check.sh`, all `RED`): the video lane's required-key
+  checks removed turns the half-bound test's video row red; each lane's hook removed in turn (video, animate, audio, image) turns that
+  lane's row of `TestTheLaneAndTheNodeDoorReadTheSameVerdict` red.
+
+### Fixed — a dead ComfyUI is a typed class on the Go side, and `POST /prompt` and `GET /view` can time out (D-38, issue #72)
+
+- **The defect.** Two of the four follow-ups of issue #72 were still open. (2) `gpugen.ClassifyErr` and `pipeline.classifyErr` had no
+  class for a ComfyUI that stopped answering: `comfy-render.mjs` exits 3 on it (`RENDER_EXIT_SERVER_UNUSABLE`), and the Go side filed the
+  failure `other`. (3) `rawSubmit` (`POST /prompt`) and `fetchView` (`GET /view`) passed no `AbortSignal` (`/system_stats`, `/queue` and
+  `/history` always did), so a ComfyUI that accepts the connection and never answers held the exclusive GPU slot.
+- **The class.** `comfy_unusable` joins `gpugen`'s runner allow-list, so `Generate` returns a `RunError` of that class for any child
+  that prints `IGPU_CLASS=comfy_unusable` on a line of its own (it reads the retained output of any child, so no new parser).
+  `comfy-render.mjs` prints the line after its `RENDER FAILED:` line for a `serverUnusable` error (`reportRenderFailure`) and still exits
+  3; `comfy-generate.mjs` relays its child's stderr unchanged (`relayRenderChild`, moved into `batch-jobs.mjs` with the child injected so
+  the crossing is testable), so the line reaches the output the Go side reads. `pipeline.classifyErr` gets the `*gpugen.RunError` branch
+  `gpugen.ClassifyErr` already had, so the lanes that file a gen failure through it (the ComfyUI image, edit, inpaint and upscale lanes)
+  record the typed class instead of re-guessing it from the words of the message (a "zoom lens timeout" read as `oom`). The ledger files
+  `comfy_unusable` as `infrastructure`. The image `--batch` needed more (fix round): a batch that meets a dead ComfyUI stops and writes a
+  row for every job (the one it stopped on, `comfy-render exited 3: ...`, and `not run: ComfyUI became unusable at job i/N (...)` for each
+  later one), so `batchErrClass` never reached the batch error and read the words of each row, which name no class: a C-83 batch filed
+  every row `other`. `batchErrClass` now files the not-run rows, and the exit-3 row when the batch's class is `comfy_unusable`, with the
+  batch's typed class; a job that failed on its own before the stop keeps the class its words give. Only the image runner prints the line
+  today; the other ComfyUI runners (the inpaint `--batch` among them) raise the same error and are a follow-up.
+- **The bounds.** `rawSubmit` is bounded by `SUBMIT_TIMEOUT_MS` (120 s: the call validates and queues, it does not run) and `fetchView`
+  by `VIEW_TIMEOUT_MS` (600 s), which covers the whole request, the body read included. Both take a `timeoutMs` and reject with an error
+  that names the call and the bound (`ComfyUI POST /prompt timeout: no complete answer within N ms ...`); `submitGraph` takes
+  `submitTimeoutMs`. A timed-out `POST /prompt` is also marked *server unusable* (fix round: the flag a timed-out call carried, `timedOut`,
+  had no reader, so a `--batch` went on and paid 120 s on every later job against a ComfyUI that was wedged on that path): the render
+  exits 3 with the class line, a `--batch` stops, and the Go side files `comfy_unusable`. A timed-out `GET /view` is not marked: the render
+  has finished and its output is on disk, so it stays a plain failure and the Go side classes it `timeout`. The healthy paths are
+  unchanged.
+- **Tests.** Go: `TestGenerateReadsComfyUnusableFromAFakeRunner` (a fake runner prints the class and exits 3), `TestRunnerClassReadsComfyUnusable`,
+  `TestRunnerClassStillIgnoresAnInventedClass`, `TestClassifyErrHonoursATypedRunErrorClass`, `TestImageLaneRecordsAComfyUnusableFailureWithItsClass`
+  (the image lane, the result and the ledger row). JS: both calls reject at their bound against an injected `fetchImpl` and against a real
+  socket that accepts and never answers (each races a sentinel timer, so the failure was an assertion and not a hung runner), both pass an
+  `AbortSignal`, the body read is bounded, the relay is verbatim, and the real `comfy-render.mjs` against a server answering HTTP 500 exits 3
+  with the class line on a line of its own. Red before: `Generate` returned an untyped `*fmt.wrapError` (the runner allow-list dropped the line), `classifyErr` answered `oom` for a typed
+  `gpu_reset` whose message said "zoom lens timeout", the image lane's ledger class for a `comfy_unusable` failure was `oom`, 14 of 103 JS tests
+  failed (all new ones; the real script exited 3 as before but printed no class line), and the three timeout tests that would hang against a
+  server that never answers ended at their sentinel timer as assertions, not as a stuck runner. Nine mutants (`scripts/mutation-check.sh`, all `RED`): the runner
+  allow-list without `comfy_unusable` (`TestGenerateReadsComfyUnusableFromAFakeRunner`, `TestRunnerClassReadsComfyUnusable`); `classifyErr`
+  without its RunError branch (`TestClassifyErrHonoursATypedRunErrorClass`, the image-lane test); the abort signal that never fires, a POST without its signal, a GET without its signal, a changed submit
+  bound (the timeout and signal tests, the real-socket test, the constants test); `comfyUnusableClassLine` always empty and
+  `reportRenderFailure` without its class line (`reportRenderFailure`, the real-script test); the relay that drops the child's stderr
+  (the two relay tests).
+  Fix round, three findings. (1) The batch rows: `imagebatch_comfy_unusable_test.go` runs the REAL `runBatchJobs` of `render/batch-jobs.mjs`
+  in a stub batch parent (job 1 renders, job 2 fails on its own with an out-of-memory, job 3 exits 3 with the class line, jobs 4-5 are never
+  run) through `RunImageBatch`; red before: the four failed jobs were filed `[oom other other other]`, now `[oom comfy_unusable
+  comfy_unusable comfy_unusable]`. `TestBatchErrClassFilesTheAbortRowsWithTheBatchsTypedClass` (a word trap, "zoom lens timeout", does not
+  move an abort row; a job that failed on its own keeps its class) and `TestBatchErrClassKeepsReadingWordsWithoutATypedBatchError` (no
+  batch error, an untyped one, a deadline batch's own row, a full-disk not-run row, and an exit-3 row under a `gpu_reset` batch are all
+  unchanged). Five mutants, all `RED`: the not-run rows ignoring the typed class, the exit-3 row taking any typed class, the exit-3 row
+  never typed, every failed row taking the batch's class, and the typed branch removed. (2) A timed-out `POST /prompt` is marked server
+  unusable and a timed-out `GET /view` is not: `comfy-submit.test.mjs` pins both (and the class line), `comfy-render.test.mjs` pins the
+  exit code 3 and the two lines; red before: the render exited 1 and printed no class line. Two mutants, both `RED`: the mark removed
+  (the two POST tests), and every deadline marked (the GET guard). (3) The real-script test of `comfy-render.test.mjs` now bounds its child
+  (30 s kill timer, an error handler): against a mutant that holds the child open for 90 s the old test was still running at 45 s and
+  printed no result, the new one failed at 30.06 s with the bound in its message.
+
 ### Added — `audit-yaml` and the write gate refuse the every-expert `--cpu-moe` (W4)
 
 - **The gap.** INV-1 (the cards do the inference, RAM is overflow only) sanctions one host-RAM use for experts: a measured partial

@@ -85,6 +85,7 @@ func sdcppVideoCfg(t *testing.T, dir string) config.Config {
 		Steps: 3, CFG: 1, FlowShift: 3, Sampler: "euler", FPS: 24, Width: 832, Height: 480, Frames: 49,
 		License: "Apache-2.0", CommercialUse: &yes,
 	}}
+	presentWeights(t, dir, &cfg) // CT-54: a lane refuses, before the lease, a route whose weight is missing
 	return cfg
 }
 
@@ -128,9 +129,10 @@ func TestRunGenerateVideo_SdcppFamilyRunsTheSdcppScriptWithBoundPathsAndNormaliz
 	if pos := igpuPositionals(t, args); len(pos) != 3 || pos[0] != out || pos[1] != still || pos[2] != "a calm sea" {
 		t.Errorf("positionals = %v, want <out> <still> <prompt> after the -- terminator", pos)
 	}
+	fb := p.cfg.VideoGenFamilies["fastwan"]
 	want := map[string]string{
-		"sd-bin": p.cfg.VideoGenFamilies["fastwan"].SdcppBin, "model": "/models/wan-ti2v-5b-q8_0.gguf", "high-noise-model": "/models/high.gguf",
-		"vae": "/models/wan2.2_vae.safetensors", "t5xxl": "/models/umt5.gguf", "backend": "vulkan0",
+		"sd-bin": fb.SdcppBin, "model": fb.SdcppModel, "high-noise-model": fb.SdcppHighNoiseModel,
+		"vae": fb.SdcppVAE, "t5xxl": fb.SdcppT5xxl, "backend": "vulkan0",
 		"frames": "49", "width": "832", "height": "480", "fps": "24", "steps": "3", "cfg": "1", "flow-shift": "3",
 		"sampler": "euler", "seed": "7", "negative": "blurry", "extra-args": `["--flag with space"]`,
 		// the runner times itself out 15 s before gpugen's kill (videogen_timeout_sec default 1500)
@@ -193,6 +195,7 @@ func TestRunAnimateCharacter_SdcppEngineRunsTheAnimateScript(t *testing.T) {
 	cfg.AnimateGenDepthExtraArgs = []string{"--y"}
 	cfg.AnimateGenSteps, cfg.AnimateGenCFG, cfg.AnimateGenFlowShift = 20, 6, 5
 	cfg.AnimateGenWidth, cfg.AnimateGenHeight = 854, 480
+	presentWeights(t, dir, &cfg)
 	p := &Pipeline{cfg: cfg}
 	res := p.Run(context.Background(), core.Request{
 		Task: core.TaskAnimateCharacter, Input: "a knight", Image: "ref.png", Video: "drive.mp4",
@@ -204,8 +207,8 @@ func TestRunAnimateCharacter_SdcppEngineRunsTheAnimateScript(t *testing.T) {
 		t.Errorf("positionals = %v", pos)
 	}
 	want := map[string]string{
-		"sd-bin": cfg.AnimateGenSdcppBin, "model": "/models/wan2.1-vace-1.3b-q8_0.gguf", "vae": "/models/wan_2.1_vae.safetensors",
-		"t5xxl": "/models/umt5.gguf", "backend": "vulkan0", "depth-bin": cfg.AnimateGenDepthBin, "depth-model": "/models/depth.gguf",
+		"sd-bin": cfg.AnimateGenSdcppBin, "model": cfg.AnimateGenSdcppModel, "vae": cfg.AnimateGenSdcppVAE,
+		"t5xxl": cfg.AnimateGenSdcppT5xxl, "backend": "vulkan0", "depth-bin": cfg.AnimateGenDepthBin, "depth-model": cfg.AnimateGenDepthModel,
 		"frames": "81", "width": "832", "height": "480", "steps": "20", "cfg": "6", "flow-shift": "5", "seed": "9",
 		"extra-args": `["--x"]`, "depth-extra-args": `["--y"]`, "timeout-sec": "1785",
 	}
@@ -230,6 +233,7 @@ func audiocppCfg(t *testing.T, dir string) config.Config {
 	cfg.AudiocppBin, cfg.AudiocppBackend, cfg.AudiocppDevice = igpuBin(t, dir, "audiocpp_cli"), "vulkan", "0"
 	cfg.AudiocppVoiceModel, cfg.AudiocppMusicModel = "/models/chatterbox-q8_0.gguf", "/models/ace-step-1.5-turbo-bf16.gguf"
 	cfg.AudiocppExtraArgs = []string{"--threads", "4"}
+	presentWeights(t, dir, &cfg)
 	return cfg
 }
 
@@ -258,7 +262,7 @@ func TestRunGenerateAudio_AudiocppVoiceAndMusicRouteToTheirScript(t *testing.T) 
 	if pos := igpuPositionals(t, args); len(pos) != 2 || pos[0] != v.AudioPath || pos[1] != "hola mundo" || igpuFlag(args, "kind") != "voice" {
 		t.Errorf("voice positionals = %v", pos)
 	}
-	for k, w := range map[string]string{"bin": p.cfg.AudiocppBin, "family": "chatterbox", "model": "/models/chatterbox-q8_0.gguf",
+	for k, w := range map[string]string{"bin": p.cfg.AudiocppBin, "family": "chatterbox", "model": p.cfg.AudiocppVoiceModel,
 		"backend": "vulkan", "device": "0", "clone": "/refs/me.wav", "lang": "es", "seed": "5", "extra-args": `["--threads","4"]`, "timeout-sec": "705"} {
 		if got := igpuFlag(args, k); got != w {
 			t.Errorf("voice --%s = %q, want %q", k, got, w)
@@ -280,7 +284,7 @@ func TestRunGenerateAudio_AudiocppVoiceAndMusicRouteToTheirScript(t *testing.T) 
 		t.Errorf("music result = %+v", v)
 	}
 	args = readArgs(t, v.AudioPath)
-	for k, w := range map[string]string{"kind": "music", "family": "ace_step", "model": "/models/ace-step-1.5-turbo-bf16.gguf",
+	for k, w := range map[string]string{"kind": "music", "family": "ace_step", "model": p.cfg.AudiocppMusicModel,
 		"seconds": "30", "lyrics": "la la", "seed": "6"} {
 		if got := igpuFlag(args, k); got != w {
 			t.Errorf("music --%s = %q, want %q", k, got, w)
@@ -473,6 +477,7 @@ func animateCfg(t *testing.T, dir string) config.Config {
 	cfg.AnimateGenSdcppVAE, cfg.AnimateGenSdcppT5xxl = "/models/wan_2.1_vae.safetensors", "/models/umt5.gguf"
 	cfg.AnimateGenSdcppBackend = "vulkan0"
 	cfg.AnimateGenDepthBin, cfg.AnimateGenDepthModel = igpuBin(t, dir, "da3-cli"), "/models/depth.gguf"
+	presentWeights(t, dir, &cfg)
 	return cfg
 }
 

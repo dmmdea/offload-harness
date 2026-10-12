@@ -4,18 +4,22 @@
 // sees exit codes, not exceptions.
 import { test } from "node:test";
 import assert from "node:assert";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildRenderGraph, parseRenderArgs, parseBoolFlag, UsageError, KNOWN_FAMILIES, BOOL_FLAGS, waitServer } from "./comfy-render.mjs";
 import * as renderMod from "./comfy-render.mjs";
+import { submitGraph } from "./comfy-submit.mjs";
 import { rgbaPrompt } from "./wf-qwen-image-21.mjs";
 import { scratchDir } from "./test-scratch.mjs";
 import { isolatedRunnerEnv } from "./test-isolation.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, "comfy-render.mjs");
+// The bound on a real-script child the test spawns asynchronously (the spawnSync tests of this file carry the same 30 s).
+const REAL_SCRIPT_TIMEOUT_MS = 30_000;
 
 const classes = (g) => Object.values(g).map((n) => n.class_type);
 const one = (g, cls) => {
@@ -215,4 +219,66 @@ test("renderExitCode: a serverUnusable failure exits 3 so a batch parent stops; 
   assert.equal(renderMod.renderExitCode(e), 3);
   assert.equal(renderMod.renderExitCode(new Error("ordinary")), 1);
   assert.equal(renderMod.renderExitCode(undefined), 1);
+});
+
+// ---- D-38 (#72): a serverUnusable failure names its class on a line of its own ----------------------------------
+//
+// The Go side (internal/gpugen) reads "IGPU_CLASS=<class>" from the retained output of any runner; comfy-render exits 3
+// for a ComfyUI that can run no more work, and now says so in the one form Go reads, so the ledger files it as
+// comfy_unusable and not "other".
+
+test("reportRenderFailure: a serverUnusable error prints the failure line, then the class line on its own line", () => {
+  assert.equal(typeof renderMod.reportRenderFailure, "function", "comfy-render.mjs must export reportRenderFailure");
+  const lines = [];
+  const e = new Error("ComfyUI stopped answering mid-render"); e.serverUnusable = true;
+  renderMod.reportRenderFailure(e, (...a) => lines.push(a.join(" ")));
+  assert.deepEqual(lines, ["RENDER FAILED: ComfyUI stopped answering mid-render", "IGPU_CLASS=comfy_unusable"]);
+});
+
+test("reportRenderFailure: any other failure prints only the failure line (no class is invented)", () => {
+  assert.equal(typeof renderMod.reportRenderFailure, "function");
+  const lines = [];
+  renderMod.reportRenderFailure(new Error("view fetch 404"), (...a) => lines.push(a.join(" ")));
+  assert.deepEqual(lines, ["RENDER FAILED: view fetch 404"]);
+});
+
+test("a POST /prompt that times out ends the render like a dead server: exit 3 and the class line, which is what stops a --batch", async () => {
+  // a fetch that honours its signal and never answers: the ComfyUI that accepts the connection and wedges (D-38)
+  const stalled = (url, opts = {}) => new Promise((_, reject) => { opts.signal.addEventListener("abort", () => reject(opts.signal.reason), { once: true }); });
+  const err = await submitGraph({ api: "http://comfy.invalid", graph: {}, clientId: "c", cli: null, fetchImpl: stalled, submitTimeoutMs: 60 }).then(() => null, (e) => e);
+  assert.ok(err, "the stalled POST /prompt must reject at its bound");
+  assert.equal(renderMod.renderExitCode(err), 3);
+  const lines = [];
+  renderMod.reportRenderFailure(err, (...a) => lines.push(a.join(" ")));
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^RENDER FAILED: ComfyUI POST \/prompt timeout/);
+  assert.equal(lines[1], "IGPU_CLASS=comfy_unusable");
+});
+
+test("the real comfy-render script: a ComfyUI answering HTTP 500 ends with exit 3 and IGPU_CLASS=comfy_unusable on its own stderr line", async (t) => {
+  // A --no-lifecycle child is what comfy-generate.mjs runs. Its waitServer reads GET /system_stats; three HTTP 500 answers
+  // are the C-83 verdict (a poisoned CUDA context), after about four seconds of probes.
+  const dir = scratchDir(t, "comfy-render-");
+  const server = createServer((req, res) => { res.statusCode = 500; res.end("cuda error"); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const api = `http://127.0.0.1:${server.address().port}`;
+    const child = spawn(process.execPath, [SCRIPT, join(dir, "o.png"), "a prompt", "--api", api, "--no-lifecycle"],
+      { windowsHide: true, env: isolatedRunnerEnv(), stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (d) => { stderr += d; });
+    // Bounded like the spawnSync tests of this file: a script that never reaches its verdict (or a spawn that fails) ends the test
+    // as an assertion at the bound, and the child is killed, never left running behind a hung suite.
+    const { code, timedOut, spawnError } = await new Promise((resolve) => {
+      const timer = setTimeout(() => { child.kill(); resolve({ code: null, timedOut: true }); }, REAL_SCRIPT_TIMEOUT_MS);
+      child.on("close", (c) => { clearTimeout(timer); resolve({ code: c }); });
+      child.on("error", (e) => { clearTimeout(timer); resolve({ code: null, spawnError: e }); });
+    });
+    assert.ok(!spawnError, `the script did not start: ${spawnError && spawnError.message}`);
+    assert.ok(!timedOut, `the script was still running after ${REAL_SCRIPT_TIMEOUT_MS} ms and was killed; stderr so far: ${stderr}`);
+    assert.equal(code, 3, `exit ${code}; stderr: ${stderr}`);
+    assert.match(stderr, /^RENDER FAILED: .*HTTP 500.*$/m);
+    assert.match(stderr, /^IGPU_CLASS=comfy_unusable\r?$/m, `no class line on its own line in: ${stderr}`);
+  } finally { server.close(); }
 });

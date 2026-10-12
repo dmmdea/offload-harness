@@ -34,7 +34,7 @@ import { withGpuSlot } from "./gpu-lock.mjs";
 import { familySignature } from "./comfy-family.mjs";
 import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
 import { planImageMulticard, lifecycleOptions } from "./multicard-image.mjs";
-import { parseJobs, jobArgs, runBatchJobs, renderExitError, batchExitCode, batchEndLine, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
+import { parseJobs, jobArgs, runBatchJobs, relayRenderChild, batchExitCode, batchEndLine, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
 import { leaseBeat } from "./lease-progress.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -65,19 +65,14 @@ const API = comfyApi(flags.api, placement ? placement.env : process.env);
 // path (comfy-render.mjs can also self-manage when run standalone — gap 4 — but here
 // it must not, or its own teardown would free/unload ComfyUI's model after EVERY job
 // in a --batch session, defeating the whole point of the warm session).
-// The child's stderr is relayed as it arrives and its tail kept: its "RENDER FAILED:" line
-// becomes the job's error, and exit RENDER_EXIT_SERVER_UNUSABLE marks the error
-// serverUnusable, which stops a --batch (C-83). "close", not "exit": the tail must be
-// complete before the reason is read from it.
+// The child's stderr is relayed as it arrives and its tail kept (relayRenderChild, batch-jobs.mjs): its
+// "RENDER FAILED:" line becomes the job's error, exit RENDER_EXIT_SERVER_UNUSABLE marks the error
+// serverUnusable, which stops a --batch (C-83), and the child's "IGPU_CLASS=comfy_unusable" line reaches this
+// process's own stderr, which is where the Go side reads the class (D-38, issue #72).
 function runRenderArgs(tail) {
   const args = [join(__dirname, "comfy-render.mjs"), ...tail, "--no-lifecycle"];
-  return new Promise((resolve, reject) => {
-    const c = spawn("node", args, { stdio: ["inherit", "inherit", "pipe"], windowsHide: true });
-    let errTail = "";
-    c.stderr.on("data", (d) => { process.stderr.write(d); errTail = (errTail + d).slice(-8192); });
-    c.on("close", (code) => (code === 0 ? resolve() : reject(renderExitError(code, errTail))));
-    c.on("error", reject);
-  });
+  const c = spawn("node", args, { stdio: ["inherit", "inherit", "pipe"], windowsHide: true });
+  return relayRenderChild(c, { write: (d) => process.stderr.write(d) });
 }
 
 // The collector is DERIVED from batch-jobs.mjs's emit lists — one source of

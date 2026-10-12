@@ -294,7 +294,7 @@ func TestTheHighNoiseExpertsRecipeReachesTheRunnerOnlyWhenBound(t *testing.T) {
 	cfg.VideoGenFamilies["fastwan"] = fb
 	out, _, _ := decodeVideo(t, (&Pipeline{cfg: cfg}).Run(context.Background(), videoReq(dir, nil)))
 	args := readArgs(t, out)
-	for k, v := range map[string]string{"high-noise-model": "/models/high.gguf", "high-noise-cfg": "1", "high-noise-steps": "2", "high-noise-sampler": "euler"} {
+	for k, v := range map[string]string{"high-noise-model": fb.SdcppHighNoiseModel, "high-noise-cfg": "1", "high-noise-steps": "2", "high-noise-sampler": "euler"} {
 		if got := igpuFlag(args, k); got != v {
 			t.Errorf("--%s = %q, want %q (%v)", k, got, v, args)
 		}

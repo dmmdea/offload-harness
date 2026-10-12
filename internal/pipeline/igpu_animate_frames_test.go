@@ -52,7 +52,10 @@ func seededAmdGcnAnimate(t *testing.T) (config.Config, string) {
 		t.Fatalf("the amd-gcn seed no longer binds the sdcpp animate lane with a token cap (engine %q cap %d): this gate went blind",
 			cfg.AnimateGenEngine, cfg.AnimateGenSdcppMaxTokens)
 	}
-	for _, bin := range []string{cfg.AnimateGenSdcppBin, cfg.AnimateGenDepthBin} {
+	// the two binaries the lane stats, and (CT-54: the lane refuses a route whose weight is missing, before the lease) the four
+	// weight files the seed binds, all at the seeded paths under the install home
+	for _, bin := range []string{cfg.AnimateGenSdcppBin, cfg.AnimateGenDepthBin, cfg.AnimateGenSdcppModel, cfg.AnimateGenSdcppVAE,
+		cfg.AnimateGenSdcppT5xxl, cfg.AnimateGenDepthModel} {
 		if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -60,6 +63,7 @@ func seededAmdGcnAnimate(t *testing.T) (config.Config, string) {
 			t.Fatal(err)
 		}
 	}
+	cfg.FFmpegPath = "" // the derivation must not depend on ffmpeg and ffprobe being on the test host's PATH; the stub runner calls neither
 	dir := t.TempDir()
 	cfg.MediaDir = dir
 	cfg.AnimateGenSdcppScript = writeIGPUArgStub(t, dir)

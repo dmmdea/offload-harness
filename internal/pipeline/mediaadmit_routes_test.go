@@ -452,6 +452,7 @@ func TestLaunchProfileOnACardScopedHostBindsEverySingleCardRoute(t *testing.T) {
 			cfg.Endpoint = "" // no roster: the unload list is its own test
 			stub := writeProbeRunner(t, dir)
 			tc.setup(t, &cfg, stub, dir)
+			presentWeights(t, dir, &cfg) // CT-54: the engine cases bind weights by name only
 			devs, _ := gpuprobe.BuildCards([]gpuprobe.Device{
 				{Index: 0, UUID: admitUUIDA, TotalGiB: 16, FreeGiB: 15, UtilKnown: true},
 				{Index: 1, UUID: admitUUIDB, TotalGiB: 16, FreeGiB: 14, UtilKnown: true, DisplayAttached: true},

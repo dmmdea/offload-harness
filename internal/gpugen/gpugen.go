@@ -338,6 +338,9 @@ var runnerClasses = map[string]bool{
 	"depth_frames_invalid": true, "model_incompatible": true, "binary_not_absolute": true,
 	"out_dir_unwritable": true, "dead_air": true, "ffmpeg_unavailable": true, "unmeasurable": true,
 	"engine_crashed": true, "oom": true, "device_invalid": true, "timeout": true,
+	// The ComfyUI runners (render/comfy-render.mjs, relayed by comfy-generate.mjs) end a failure that says the server can run no
+	// later job (it vanished, or answers HTTP with a broken CUDA context) with this class and exit RENDER_EXIT_SERVER_UNUSABLE.
+	"comfy_unusable": true,
 }
 
 // runnerClass is the class of the LAST valid IGPU_CLASS= line in the captured output, "" when
