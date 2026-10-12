@@ -126,15 +126,36 @@ func TestAutoContractIsNotAbandonedDuringTheNodesAdmissionWindow(t *testing.T) {
 // knows exactly where its clock began, so the budget becomes the node's own
 // wall plus transport slack FROM THAT INSTANT — D-116's tightening is kept,
 // not traded away for the admission fix.
+//
+// What is measured is the poll budget, read at the node: from the instant it
+// served the poll that published the started wall (where the delegator anchors)
+// to the instant it served the last poll the delegator still made. Run's own
+// elapsed time is NOT that budget. It also holds the bookkeeping after the poll
+// loop ends, and the first result a process records hashes the whole
+// executable once (buildinfo.BuildSHA256): 245-335 ms for this 30 MB test
+// binary on a loaded Linux gate host, 56-60 ms on an idle workstation. Held against
+// wall + admissionSlack() (600 ms) that failed 150-179 of every 200 loaded runs
+// of this test alone, while the poll loop itself ended 0.1-3.5 ms past its
+// deadline in every one of them.
 func TestTheAnchoredClockDropsTheAdmissionAllowance(t *testing.T) {
 	compressPolls(t, 2*time.Millisecond, 50*time.Millisecond)
 	compressWallUnit(t, time.Millisecond)
+	var mu sync.Mutex
+	var firstPoll, lastPoll time.Time
 	node := &fakeNode{
 		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
 		seatRate:   map[string]any{"tok_s": 200.0, "cold_load_sec": 1.0, "samples": 6, "min_turn_sec": 22},
 		seatBudget: map[string]any{"step_tokens": 1024, "final_tokens": 4096, "thinking": "auto"},
-		// A warm seat: the wall starts at once — and never ends.
+		// A warm seat: the wall starts at once — and never ends. Every poll
+		// publishes it, so the first poll served is the one the clock anchors on.
 		pollState: func(int64) (map[string]any, int) {
+			now := time.Now()
+			mu.Lock()
+			if firstPoll.IsZero() {
+				firstPoll = now
+			}
+			lastPoll = now
+			mu.Unlock()
 			return map[string]any{"state": "running", "wall_sec": core.AgentTimeoutSecDefault}, http.StatusOK
 		},
 	}
@@ -152,8 +173,16 @@ func TestTheAnchoredClockDropsTheAdmissionAllowance(t *testing.T) {
 	if elapsed < wall {
 		t.Fatalf("abandoned after %s, inside the node's own %s wall", elapsed, wall)
 	}
-	if withSlack := wall + admissionSlack(); elapsed >= withSlack {
-		t.Fatalf("abandoned after %s: the admission allowance was still in the budget (%s) although the node had published a started wall", elapsed, withSlack)
+	mu.Lock()
+	held := lastPoll.Sub(firstPoll)
+	mu.Unlock()
+	// The anchored budget is wall + grace from the first poll (350 ms here); the
+	// allowance, if it were still in, would hold the poll to 650 ms. The margin is
+	// half the allowance, so scheduler delay on a loaded box has the same room on
+	// either side of the line, and it stays below the allowance by construction.
+	margin := admissionSlack() / 2
+	if limit := wall + pollGrace + margin; held >= limit {
+		t.Fatalf("the delegator kept polling for %s after the node published a started wall: the admission allowance (%s) was still in the budget, want under %s (wall %s + grace %s + margin %s)", held, admissionSlack(), limit, wall, pollGrace, margin)
 	}
 	if reason := results[0].Result.Reason; strings.Contains(reason, "allowed for the node's admission") {
 		t.Fatalf("reason = %q, want no admission clause once the wall has started", reason)
