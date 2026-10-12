@@ -608,9 +608,9 @@ Enabled or `display_attached` Yes, the harness's own rule, so a monitor on a sle
 driver does not report (never assumed screenless). It also refuses what was not measured or cannot run, in the same place, before the
 lease slot is taken, llama-swap is unloaded or ComfyUI starts: `--fast`, a GGUF expert, an expert nobody named (`--high-unet` and
 `--low-unet` are required: the builder's defaults are GGUF), another family (`--model ltx25`, a `--graph` file), a `--wan-resident-gb`
-that one of the two cards cannot hold at the call's geometry (the compute card: its size less 0.5 GiB for the CUDA context, less the sampler's
+that one of the two cards cannot hold at the call's geometry (the compute card: its size less a chosen 0.5 GiB margin for the CUDA context, less the sampler's
 activations, the benchmark's reserved allocator peaks as an envelope of 0.31 GiB per 1,000 tokens (never under 2 GiB) capped at the film-size run's
-measured 12.2 GiB beyond the resident share, so 3.2 GiB of an expert at most at film size and 9.1 at the default 832x480x49; the storage card: the
+measured 12.2 GiB beyond the resident share (above the film's size nothing was measured: a bigger clip is held at 12.2 and a `WAN-GEOMETRY-NOTE` says so before the check, with what a proportional extrapolation gives, leaving the share and `--wait-sec` to the caller), so 3.2 GiB of an expert at most at film size and 9.1 at the default 832x480x49; the storage card: the
 rest of the 13.4 GiB expert plus 0.8 GiB for the VAE and the context inside its size less `--reserve-vram`, 1 GiB by default, so a 24 GiB card beside
 an 8 GiB one is refused with the share that would fit), a UUID prefix that names two cards, and
 the placement's own flags lost to an `=` (`--wan-placement=multicard`, or `--seed=7 --wan-placement multicard`: this runner's parser does
@@ -681,7 +681,7 @@ said once (`WAN-OOM-WATCH`) and the wait is then bounded by the budget alone. A 
 **Host RAM.** `gpu reserve --devices <a>,<b> -- node render/comfy-video.mjs ... --wan-placement multicard` declares 0 when each of the
 two leased cards fits its own stage, as the runner will place it (`hostneed.estimateWith`, `Facts.CardsGiB`, each card's size): the larger
 card computes, so it must hold the resident share of the expert (`--wan-resident-gb`, default 3) plus 12.2 GiB of film-size activations (the
-film-size run's compute-card peak, 15.18 GiB, less its 3 GiB resident share) plus 0.5 GiB for the CUDA context, which is 15.7 GiB with the default
+film-size run's compute-card peak, 15.18 GiB, less its 3 GiB resident share) plus a 0.5 GiB margin for the CUDA context (chosen, not measured: the 12.2 already holds a context, and the film-size run left 0.7 GiB free at its peak), which is 15.7 GiB with the default
 share and 3.2 GiB of share at most on a 15.9 GiB card; the other holds the rest of the expert plus 0.8 GiB for the VAE and the context inside its
 size less `--reserve-vram` (the film-size run's storage card peaked at 10.86 GiB, the 4-step benchmark's at 11.1 GiB with 10.3 GiB of blocks). The
 runner checks the same two stages before it starts, with the same figures (a Go test fails when its `WAN_FILM_ACTIVATIONS_GIB`,
@@ -705,7 +705,7 @@ took 5136 s (85.6 min), of which 67 s to the first step, 24 s for the hand-over 
 video (the free node released both cards in 1.1 s, leaving 14.4 and 14.6 GiB free; the plain decode asks about 10.2). Per card (nvidia-smi): the compute card
 13.3 to 13.65 GiB while the first expert samples, 15.18 GiB (95.3 % of the card, with 3.0 GiB of the expert resident) at the peak, which comes about 90 s
 before the hand-over, and 14.9 GiB steady while the second samples; the storage card 10.86 GiB (68 %). The compute card therefore keeps a margin of
-0.7 GiB at the peak, and each GiB more kept resident is a GiB less of it: the runner refuses more than 3.2 GiB at this geometry, and a larger clip needs
+0.7 GiB at the peak, and each GiB more kept resident is a GiB less of it: the runner refuses more than 3.2 GiB at this geometry (only a 3.0 GiB share was run; 3.2 is the planner's ceiling, with its 0.5 GiB context margin chosen), and a larger clip, which was not measured, is held at the same 12.2 GiB with a `WAN-GEOMETRY-NOTE` although its activations are expected to grow with its tokens, so it probably needs
 a smaller `--wan-resident-gb`. Host RAM: ComfyUI idles at 2.9 GiB private; beyond the 1:1 VRAM charge its growth is 2.33 GiB steady (2.6 at most),
 with two working-set peaks of 15 GiB lasting under 15 s each (the experts' read-only maps being read at the first load and at the hand-over; file-backed,
 not commit). A first benchmark of the same recipe, 4 of the 20 steps with the tiled decode, gave the same 250 s per step and 13.3 and 11.1 GiB, which

@@ -711,7 +711,8 @@ func TestTheMeasuredFilmSizeRunDeclaresNothingUpToThePlannersCeiling(t *testing.
 	for _, share := range []string{"3.3", "3.5", "4"} {
 		ordinary("a "+share+" GiB share, above the planner's 3.2 GiB ceiling", wanNeed(t, wanMulticardCmd+" --wan-resident-gb "+share, two))
 	}
-	// --reserve-vram is ComfyUI's model-load margin, not an activation ceiling: the measured recipe under a 2 GiB reserve is the same call
+	// --reserve-vram is ComfyUI's model-load margin, not an activation ceiling, so the compute card's check does not use it: a 2 GiB reserve declares what the
+	// default does. The film-size run itself ran at the runner's default reserve of 1.0; that a larger one leaves the compute card's peak where it was is assumed, not measured.
 	declaresNothing("the measured share under a 2 GiB --reserve-vram", wanNeed(t, wanMulticardCmd+" --reserve-vram 2", two))
 	// the real cards: 16,311 MiB is 15.93 GiB, so the ceiling is 3.22
 	realCards := wanFacts(t, 16311.0/1024, 16311.0/1024)

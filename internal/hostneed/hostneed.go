@@ -212,16 +212,19 @@ type slot struct {
 // wanActivationsGiB is what the compute card holds beyond the resident weights at the film's geometry (720x1280, 81 frames: 75,600
 // tokens): the film-size run's compute-card peak, 15.18 GiB (nvidia-smi, from about 2485 s, 90 s before the hand-over to the second expert), less its
 // 3.0 GiB resident share (2026-10-11, 20 steps, plain decode, --ram 0). The 4-step benchmark before it had read 9.7-11.0 GiB: it ended at about
-// 1000 s, before the peak. render/wan-multicard.mjs WAN_FILM_ACTIVATIONS_GIB (a test pins the two together).
+// 1000 s, before the peak. render/wan-multicard.mjs WAN_FILM_ACTIVATIONS_GIB (a test pins the two together). This sizing reads no geometry: it
+// declares against the film's figure for any clip. A smaller clip needs less (the runner's planner scales it down), so the sizing is conservative there;
+// a bigger one was not measured, and the runner holds it at this figure too and says so (WAN-GEOMETRY-NOTE), so no sizing here claims to know it.
 const wanActivationsGiB = 12.2
 
 // wanResidentDefaultGiB is the share of each Wan expert the card-only placement keeps on the compute card when the call names none:
 // render/wf-wan22-i2v.mjs WAN_RESIDENT_GB_DEFAULT (a test pins the two together).
 const wanResidentDefaultGiB = 3.0
 
-// wanComputeContextGiB is what the compute card keeps free beyond the activations, for the CUDA context and the driver: render/wan-multicard.mjs
-// WAN_COMPUTE_CONTEXT_GIB (a test pins the two together). With it a 15.9 GiB card takes 3.2 GiB of an expert resident at film size, the runner's
-// own ceiling (15.9 - 12.2 - 0.5).
+// wanComputeContextGiB is a margin the compute card keeps free beyond the activations, for the CUDA context and the driver: CHOSEN, not measured (the
+// 12.2 above is the card's total in use, so it already holds a context; the film-size run left 0.7 GiB free at its peak and this keeps 0.5 of it).
+// render/wan-multicard.mjs WAN_COMPUTE_CONTEXT_GIB (a test pins the two together). With it a 15.9 GiB card takes 3.2 GiB of an expert resident at
+// film size, the runner's own ceiling (15.9 - 12.2 - 0.5); only a 3.0 GiB share was ever run.
 const wanComputeContextGiB = 0.5
 
 // wanStorageOverheadGiB is what the storage card holds besides the donor blocks of the expert in use: the VAE (0.24 GiB), the CUDA
