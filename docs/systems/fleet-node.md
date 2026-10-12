@@ -284,6 +284,15 @@ must not quietly revert to guessing forever). `ParseSmiMemory` (2-field, first-l
 unchanged — it has a caller outside this path (the per-process footprint delta sampler below) that
 must not silently change behavior.
 
+**Temperature and throttle reasons (F11).** Each `gpu_devices[]` row of an `nvidia-smi` node may carry `temperature_c` and
+`throttle_reasons`, merged in `fleetnode.SmiDeviceProbe` from a second, optional query (`gpuprobe.ReadThermal`) so the
+shared per-device query never gains a column an old driver refuses and `main.go`, `vram.go` and `server.go` are not
+involved. The cache lives in the probe: the thermal query runs at most once per 30 s whatever the 2 s tick, a failed one
+backs off 60 s and logs once per outage, an answer older than 90 s is dropped, the read is bounded at 10 s, and cards
+are matched by UUID. The field is `clocks_throttle_reasons.active` or, on a driver that renamed it,
+`clocks_event_reasons.active`; the temperature alone is the last fallback. Absent means not read. The names, the bit
+table and the wire example are in [FLEET-NODE.md](../FLEET-NODE.md), "Multi-GPU: `gpu_devices[]`".
+
 **Per-render footprints** use **per-process PDH counters as primary**, with a global-delta sampler as
 fallback. On Windows the sampler reads `\GPU Process Memory(*)\Dedicated Usage`, enumerates
 instances, and sums only the render's own process tree — or Dedicated **plus Shared** in the

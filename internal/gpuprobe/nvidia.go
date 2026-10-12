@@ -147,10 +147,16 @@ const (
 )
 
 // refusesAttached reports whether a failed full query is the driver saying it does not know
-// display_attached, as opposed to nvidia-smi failing for some other reason. nvidia-smi names the
-// field (`Field "display_attached" is not a valid field to query.`, on STDOUT, status 2), so the
-// output, the error text and an ExitError's stderr are all read.
+// display_attached, as opposed to nvidia-smi failing for some other reason.
 func refusesAttached(out string, err error) bool {
+	return refusesField(out, err, "display_attached")
+}
+
+// refusesField reports whether a failed query is the driver saying it does not know the query field
+// `field`, as opposed to nvidia-smi failing for some other reason. nvidia-smi names the field
+// (`Field "display_attached" is not a valid field to query.`, on STDOUT, status 2), so the output, the
+// error text and an ExitError's stderr are all read, and the exit status is not.
+func refusesField(out string, err error, field string) bool {
 	text := strings.ToLower(out)
 	if err != nil {
 		text += " " + strings.ToLower(err.Error())
@@ -159,7 +165,7 @@ func refusesAttached(out string, err error) bool {
 			text += " " + strings.ToLower(string(ee.Stderr))
 		}
 	}
-	if !strings.Contains(text, "display_attached") {
+	if !strings.Contains(text, strings.ToLower(field)) {
 		return false
 	}
 	for _, w := range []string{"not a valid", "invalid", "unknown field", "unrecognized", "unrecognised", "unsupported"} {

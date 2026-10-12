@@ -13,10 +13,12 @@ package fleetnode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
@@ -61,6 +63,19 @@ func SmiDeviceProbe(run func() (string, error)) DeviceProbe {
 	return smiDeviceProbeWith(run, gpuprobe.ReadThermal, time.Now, stderrLogf)
 }
 
+// The thermal cadence. The sampler ticks every 2 s, and a second nvidia-smi per tick would double the spawns on a
+// host the harness shares with other work (and on the thermal-care box it would add heat of its own), so the
+// thermal query runs at most once per thermalEvery whatever the tick. A failed query is not retried sooner than
+// thermalBackoff and says so once. An answer older than thermalMaxAge is dropped, never published: a stale
+// "cool" next to a card that has since heat-soaked is the one thing this field must not do. The read is bounded
+// by thermalTimeout, which the per-device query (no deadline of its own) does not have.
+const (
+	thermalEvery   = 30 * time.Second
+	thermalBackoff = 60 * time.Second
+	thermalMaxAge  = 90 * time.Second
+	thermalTimeout = 10 * time.Second
+)
+
 // thermalReader reads the optional thermal query (gpuprobe.ReadThermal in production, a fake in tests).
 type thermalReader func(ctx context.Context) ([]gpuprobe.Thermal, error)
 
@@ -69,15 +84,79 @@ func stderrLogf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
 
-// smiDeviceProbeWith is SmiDeviceProbe over injected thermal reader, clock and log.
+// smiDeviceProbeWith is SmiDeviceProbe over an injected thermal reader, clock and log. A nil reader is no thermal
+// at all: the probe is then exactly the memory probe it was before F11.
 func smiDeviceProbeWith(run func() (string, error), thermal thermalReader, now func() time.Time, logf func(string, ...any)) DeviceProbe {
+	var cache *thermalCache
+	if thermal != nil {
+		if now == nil {
+			now = time.Now
+		}
+		if logf == nil {
+			logf = stderrLogf
+		}
+		cache = &thermalCache{read: thermal, now: now, logf: logf}
+	}
 	return func() ([]GPUDevice, error) {
 		out, err := run()
 		if err != nil {
 			return nil, fmt.Errorf("nvidia-smi: %w", err)
 		}
-		return ParseSmiMemoryDevices(out)
+		devs, err := ParseSmiMemoryDevices(out)
+		if err != nil {
+			return nil, err
+		}
+		if cache != nil {
+			cache.merge(devs)
+		}
+		return devs, nil
 	}
+}
+
+// thermalCache holds the last thermal answer and decides when the next query is due. The sampler is one goroutine,
+// so the lock only guards a future second caller.
+type thermalCache struct {
+	mu      sync.Mutex
+	read    thermalReader
+	now     func() time.Time
+	logf    func(string, ...any)
+	rows    []gpuprobe.Thermal
+	at      time.Time // when rows were read
+	have    bool
+	nextTry time.Time
+	warned  bool // the current outage has been logged
+}
+
+// merge puts the thermal values on devs, reading them first when the query is due. A dropped or missing answer
+// leaves the devices exactly as the memory query made them.
+func (c *thermalCache) merge(devs []GPUDevice) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	if !now.Before(c.nextTry) {
+		c.refresh(now)
+	}
+	if c.have && now.Sub(c.at) <= thermalMaxAge {
+		gpuprobe.MergeThermal(devs, c.rows)
+	}
+}
+
+func (c *thermalCache) refresh(now time.Time) {
+	ctx, cancel := context.WithTimeout(context.Background(), thermalTimeout)
+	rows, err := c.read(ctx)
+	cancel()
+	if err == nil && len(rows) == 0 {
+		err = errors.New("the query answered no card")
+	}
+	if err != nil {
+		c.nextTry = now.Add(thermalBackoff)
+		if !c.warned {
+			c.warned = true
+			c.logf("[fleet-serve] warning: gpu temperature and throttle reasons are not being read (%v); retrying no sooner than every %s, and publishing none while the last answer is older than %s", err, thermalBackoff, thermalMaxAge)
+		}
+		return
+	}
+	c.rows, c.at, c.have, c.nextTry, c.warned = rows, now, true, now.Add(thermalEvery), false
 }
 
 // InstalledInfo is the slice of the installer's manifest ($OFFLOAD_HOME/
