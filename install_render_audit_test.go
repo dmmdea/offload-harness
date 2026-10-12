@@ -427,3 +427,42 @@ func TestAuditYAMLDoesNotReadTheCardTableWhenNothingPins(t *testing.T) {
 		t.Fatalf("a file with no pin needs no card table; err=%v:\n%s", runErr, out)
 	}
 }
+
+// verbatimStamp is the yes/no form of the first checks of servingtmpl.AgainstRender, and both audits
+// that exempt on a stamp (W4's off-matrix note, A-87's severity split) read it. If the two ever
+// disagree, a file reported HAND-EDITED would still be trusted by the exemption.
+func TestVerbatimStampAgreesWithTheProvenanceVerdict(t *testing.T) {
+	res := tierRender(t, "cpu")
+	stamped, err := servingtmpl.Stamp(res.Config, res.Basis, stampedAtFixed())
+	if err != nil {
+		t.Fatal(err)
+	}
+	edit := func(from, to string) string {
+		out := strings.Replace(stamped, from, to, 1)
+		if out == stamped {
+			t.Fatalf("the control edit found no %q", from)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name      string
+		text      string
+		wantOK    bool
+		wantState servingtmpl.State
+	}{
+		{"an intact render", stamped, true, servingtmpl.StateMatch},
+		{"no stamp at all", res.Config, false, servingtmpl.StateUnstamped},
+		{"a body edited after the stamp", edit("\nmodels:\n", "\nmodels:\n  # edited\n"), false, servingtmpl.StateHandEdited},
+		{"a basis edited after the stamp", edit(`"goos":"linux"`, `"goos":"windows"`), false, servingtmpl.StateHandEdited},
+		{"a spec hash edited", edit("# spec_sha256: ", "# spec_sha256: 0"), false, servingtmpl.StateHandEdited},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := verbatimStamp(tc.text); ok != tc.wantOK {
+				t.Errorf("verbatimStamp ok = %v, want %v", ok, tc.wantOK)
+			}
+			if got := provenanceOf(tc.text).State; got != tc.wantState {
+				t.Errorf("the provenance verdict = %s, want %s: the two readers disagree about this file", got, tc.wantState)
+			}
+		})
+	}
+}

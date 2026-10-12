@@ -123,3 +123,14 @@ func TestAuditCPUMoEIsSilentOnADocumentThatDoesNotParse(t *testing.T) {
 		t.Fatalf("an unparseable document is Audit's finding, not this rule's:\n%s", Violations(vs))
 	}
 }
+
+// The shipped templates carry the placement as a token the tier fills (__MOE_26B__), never as a
+// literal flag: a template that hard-coded the every-expert form would put it on every tier that
+// uses it, whatever that tier's seeds say.
+func TestEveryTemplateCarriesNoLiteralCPUMoE(t *testing.T) {
+	for _, name := range templateNames(t) {
+		if vs := AuditCPUMoE(string(readTemplate(t, name))); len(vs) != 0 {
+			t.Errorf("%s:\n%s", name, Violations(vs))
+		}
+	}
+}
