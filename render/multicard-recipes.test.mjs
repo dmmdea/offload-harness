@@ -111,6 +111,41 @@ test("a (family, quant) with no recipe is refused by name, never guessed", () =>
   assert.match(refusal({ route: "image", family: "qwen-image-2.1" }), /needs the DiT file/, "no DiT named: nothing to match a recipe against");
 });
 
+// The sentence a family with no row at all gets (comfy-generate and comfy-edit hand planImageMulticard whatever --family says, with no closed-set gate in front of
+// it) is read from the table, so it cannot name a recipe the table holds back or leave out one it launches: it listed qwen-image-2.1 as having recipes after both of
+// that family's rows were held back.
+test("the refusal of a family with no row names the route's launchable rows and its held-back ones, read from the table", () => {
+  for (const route of ["image", "edit"]) {
+    const rows = RECIPES.filter((r) => r.route === route);
+    const msg = refusal({ route, family: "z-image-turbo", unet: "z.safetensors" });
+    assert.match(msg, /no measured card-only recipe for z-image-turbo( edit)? \(z\.safetensors\)/, route);
+    const [, offered = "", held = ""] = /recipes for (.*?) only(.*)$/s.exec(msg) || [];
+    assert.ok(offered, `${route}: the sentence says which rows have a recipe: ${msg}`);
+    for (const r of rows.filter((x) => !x.blocked)) assert.ok(offered.includes(r.id), `${route}: ${r.id} is launchable and is listed: ${msg}`);
+    for (const r of rows.filter((x) => x.blocked)) {
+      assert.ok(!offered.includes(r.id), `${route}: ${r.id} is held back and is not offered: ${msg}`);
+      assert.ok(held.includes(r.id), `${route}: ${r.id} is named as held back: ${msg}`);
+    }
+    if (rows.some((x) => x.blocked)) assert.match(held, /held back/, route);
+    else assert.doesNotMatch(msg, /held back/, route + ": a route with no held-back row says nothing of a hold");
+  }
+  // the old sentence, by name: both qwen-image-2.1 rows are held back, so the image route does not list the family as having recipes
+  assert.doesNotMatch(refusal({ route: "image", family: "flux", unet: "flux.safetensors" }), /recipes for qwen-image-2\.1/);
+  assert.match(refusal({ route: "image", family: "flux", unet: "flux.safetensors" }), /qwen-image\/gguf-q5_1/);
+});
+
+// The qwen-image-2.1 hint is written for the image route (its two rows). The edit route has no row for the family, and the 2.1 edit graph takes no placement at all,
+// so lifting the image rows' holds would not give it a recipe: the edit refusal says that, and names nothing as held back.
+test("the edit route's refusal of qwen-image-2.1 says the 2.1 edit graph has no card-only placement, not that image rows are held back", () => {
+  const msg = refusal({ route: "edit", family: "qwen-image-2.1", unet: "qwen_image_2.1_bf16.safetensors", clip: "qwen3vl_8b_bf16.safetensors" });
+  assert.match(msg, /no measured card-only recipe for qwen-image-2\.1 edit/);
+  assert.match(msg, /2\.1 edit graph has no card-only placement/);
+  assert.doesNotMatch(msg, /held back|int8_convrot|\bbf16 rows\b/, "the image rows' holds are not the edit route's business");
+  assert.match(msg, /qwen-image-edit-2511\/fp8mixed/, "it still says which edit rows do have a recipe");
+  // the image route keeps the hint that stops an unmatched 2.1 DiT file reading as "bind one of the rows listed before it"
+  assert.match(refusal({ ...QI21, unet: "qwen_image_2.1_fp8.safetensors" }), /the recipes of this family are int8_convrot, bf16; no DiT of this family has a launchable recipe today.*held back/s);
+});
+
 test("an int8 text encoder is never placed: it failed the 30 dB gate (PSNR 28.65), whatever the recipe", () => {
   assert.match(refusal({ ...QI21, unet: "qwen_image_2.1_bf16.safetensors", clip: "qwen3vl_8b_int8.safetensors" }), /int8.*30 dB/s);
   assert.match(refusal({ ...QI21, unet: "qwen_image_2.1_int8_convrot.safetensors", clip: "qwen3vl_8b_int8_convrot.safetensors" }), /int8.*30 dB/s);

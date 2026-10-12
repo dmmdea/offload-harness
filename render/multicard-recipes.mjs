@@ -61,6 +61,24 @@ const FAMILY_HINTS = Object.freeze({
   "qwen-image-2.1": "no DiT of this family has a launchable recipe today: the int8_convrot and the bf16 rows are both held back (see each row's `blocked`)",
 });
 
+// The hints above describe the IMAGE route's rows. The edit route has its own, because a family can have rows on one route and none on the other:
+// qwen-image-2.1 has two image rows (both held back) and no edit row, and its edit graph takes no placement argument, so lifting the image holds would not give it one.
+const EDIT_FAMILY_HINTS = Object.freeze({
+  "qwen-image-2.1": "the 2.1 edit graph has no card-only placement (it takes no placement argument), so there is no recipe for it to hold back or lift",
+});
+
+/**
+ * routeOffer: what the table offers on a route, as one sentence read from the table itself: the launchable rows, then the held-back ones. Written by hand it went
+ * stale: it listed qwen-image-2.1 as having recipes after both of that family's rows were held back.
+ */
+function routeOffer(route) {
+  const mine = RECIPES.filter((r) => r.route === route);
+  const launchable = mine.filter((r) => !r.blocked).map((r) => r.id);
+  const held = mine.filter((r) => r.blocked).map((r) => r.id);
+  const offer = launchable.length ? `the card-only ${route} placement has recipes for ${launchable.join(", ")} only` : `the card-only ${route} placement has no launchable recipe`;
+  return held.length ? `${offer}; ${held.join(", ")} ${held.length === 1 ? "is" : "are"} held back (see each row's \`blocked\`)` : offer;
+}
+
 /**
  * findRecipe: the recipe for a call, or a RecipeRefusal that says why there is none. route is "image" or "edit"; family is the
  * graph family ("" is the generic SDXL graph on the image route and the 2511 graph on the edit route); unet is the DiT file the
@@ -71,7 +89,9 @@ export function findRecipe({ route, family, unet, clip } = {}) {
   const rows = RECIPES.filter((r) => r.route === route && r.family === fam);
   const noRecipe = (why) => new RecipeRefusal(`no measured card-only recipe for ${fam}${route === "edit" ? " edit" : ""}${unet ? ` (${unet})` : ""}: ${why}`);
   if (rows.length === 0) {
-    throw noRecipe(FAMILY_HINTS[fam] || "the card-only placement has recipes for qwen-image-2.1, qwen-image (the Q5_1 GGUF) and the 2511 edit only");
+    // an edit hint says why the family has no edit row and is followed by what the route does offer; an image hint stands alone; a family with neither gets the offer
+    if (route === "edit") throw noRecipe([EDIT_FAMILY_HINTS[fam], routeOffer(route)].filter(Boolean).join("; "));
+    throw noRecipe(FAMILY_HINTS[fam] || routeOffer(route));
   }
   const unetName = String(unet || "").trim();
   if (!unetName) throw new RecipeRefusal(`the card-only placement needs the DiT file to pick its recipe for ${fam}${route === "edit" ? " edit" : ""}: name it (--ckpt, or --unet on the edit route)`);
