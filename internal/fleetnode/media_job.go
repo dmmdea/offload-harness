@@ -182,7 +182,10 @@ func refuseMediaJobTooLarge(w http.ResponseWriter, limit int64) {
 // readMediaJobBody reads the whole body into ONE buffer of exactly Content-Length bytes when the client sent
 // it (io.ReadAll would grow by doubling, and bytes.Buffer.ReadFrom regrows once fewer than 512 bytes are
 // free, either of which leaves garbage the size of the body behind it). After the declared length it probes
-// one more byte: a body longer than it declared is refused as too large, as one over the cap is.
+// one more byte: a body longer than it declared is refused as too large, as one over the cap is. Over a
+// socket that probe finds nothing, because net/http gives a handler exactly Content-Length bytes and reads
+// what the client sent past them as its next request; the probe guards a caller that builds the request
+// itself (a unit test, a wrapper) with a body that runs past its declared length.
 func readMediaJobBody(r *http.Request, limit int64) ([]byte, error) {
 	if r.ContentLength > limit {
 		// The handler refuses a declared-oversize body before it gets here. A caller that gets here anyway

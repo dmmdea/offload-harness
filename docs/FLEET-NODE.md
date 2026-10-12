@@ -1288,7 +1288,9 @@ default 48, which is 64 MiB of base64 on the wire plus 64 KiB of slack) in base6
 is read**, and a caller that passed it gets a 10-minute read and write window (the blanket 30 s would cut 64 MiB on an
 ordinary link). The body is read before the admission gates (a known job id must still re-ack, so the id is read
 first), so at most two uploads are in flight (`sttUploadInFlightMax`): a third waits for a slot up to 30 s, then gets a
-re-placeable `503` with `Retry-After`. The audio is parsed in place and decoded once (no string or second buffer of the
+re-placeable `503` with `Retry-After`. A request that **declares** a `Content-Length` over the body cap is refused `400 request
+body too large` at once, right after the bearer check, before it takes or waits for a slot and with its body unread
+(`Connection: close`). The audio is parsed in place and decoded once (no string or second buffer of the
 base64), so the peak per upload is the body plus the decoded bytes. Everything after the body read is the shared `admit`
 path.
 
