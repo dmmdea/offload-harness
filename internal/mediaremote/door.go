@@ -392,11 +392,13 @@ func (q *queueRT) adopt(ctx context.Context, cfg config.Config, runner Runner, r
 		core.NameNode(h, t.Base, t.Node, t.Job)
 		res, err := collect(actx, cfg, lt.req, lt.pl, t.Base, t.Node, t.Job, start, &ticketHandle{RemoteAttribution: h, lt: lt})
 		if err == nil && passedBack(res) {
-			// The node took the job and passed it back (another job held its card): nothing ran, as for a live owner's job. The
-			// ticket re-enters the line and the node is left alone for a while, instead of the caller being handed a gpu_busy
-			// failure for a job that can still run.
+			// The node took the job and passed it back (another job held its card, a host short of RAM, a lease it could not
+			// take): nothing ran, as for a live owner's job. The ticket re-enters the line and the node is left alone for a
+			// while, paused as the dispatch path pauses it, instead of the caller being handed a gpu_busy failure for a job
+			// that can still run.
 			h.Discard("the node passed the adopted job back; the ticket goes on to the next lane that frees")
-			placer.bounced(t.Base, t.Node, "bounced", "it took the last call and passed it back: another job held its card")
+			state, cause := passBack(res)
+			placer.bounced(t.Base, t.Node, state, cause)
 			lt.backToWaiting(t.Base)
 			lt.q.nudge()
 			return
