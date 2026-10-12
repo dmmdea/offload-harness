@@ -18,7 +18,7 @@ import (
 // with the temp dir pointed at a fresh folder and requires the folder to be empty when the helper is gone.
 func TestARelaunchedTestBinaryLeavesNothingInTheTempDir(t *testing.T) {
 	tmp := t.TempDir()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestSweepHelperExitNow$")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSweepHelperExitNow$") // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command — the test binary itself, a fixed argument list
 	cmd.Env = append(os.Environ(), "FLEETNODE_SWEEP_HELPER=1", "TMP="+tmp, "TEMP="+tmp, "TMPDIR="+tmp)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("helper process: %v\n%s", err, out)

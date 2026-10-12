@@ -50,7 +50,12 @@ func TestLeavesAProcessRunningFromTheTempFolder(t *testing.T) {
 	if err := dst.Close(); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(image, "-test.run=^TestSleeper$", "-test.timeout=90s")
+	// A second entry that is not an image: a run that removed the folder while the process ran would delete this file even
+	// where the operating system will not let it delete the running image, so a self-test can see the attempt.
+	if err := os.WriteFile(filepath.Join(os.TempDir(), "tripwire-note.txt"), []byte("left behind"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(image, "-test.run=^TestSleeper$", "-test.timeout=90s") // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command — a copy of the test binary the test just made, a fixed argument list
 	cmd.Env = append(os.Environ(), sleeperEnv+"=1")
 	hideWindow(cmd)
 	if err := cmd.Start(); err != nil {

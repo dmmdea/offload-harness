@@ -39,6 +39,9 @@ $env:GOWORK = 'off'
 $env:GOTOOLCHAIN = 'local' # the fixture is a module of its own; never resolve it through a workspace
 
 $onWindows = ($PSVersionTable.PSVersion.Major -lt 6) -or [bool](Get-Variable -Name IsWindows -ValueOnly -ErrorAction SilentlyContinue)
+# a host whose execution policy is Restricted still runs the scripts under test
+$psArgs = @('-NoProfile')
+if ($onWindows) { $psArgs += @('-ExecutionPolicy', 'Bypass') }
 $base = $env:TRIPWIRE_SELFTEST_DIR
 if (-not $base) { $base = [IO.Path]::GetTempPath() }
 $base = (Resolve-Path -LiteralPath $base).ProviderPath.TrimEnd('\', '/')
@@ -80,7 +83,7 @@ function Stop-Sleepers([int[]]$ProcessIds) {
 }
 
 function Run([string[]]$TripArgs) {
-    $text = & $psExe -NoProfile -File $tripwire @TripArgs 2>&1 | Out-String
+    $text = & $psExe @psArgs -File $tripwire @TripArgs 2>&1 | Out-String
     $script:Rc = $LASTEXITCODE
     $script:Out = $text -replace "`r", ''
 }
@@ -168,6 +171,12 @@ try {
     $script:Pids += $printed
     Expect 'spawner with -Remove: exit' $script:Rc 2
     Expect 'spawner with -Remove: the folder is still kept while the process runs' (Folders-In) 1
+    $keptDirs = @(Get-ChildItem -LiteralPath $root -Directory -Filter 'test-temp-tripwire.*')
+    if ($keptDirs.Count -eq 1) {
+        Expect 'spawner with -Remove: nothing in the folder was touched (the note beside the running image is still there)' @(Get-ChildItem -LiteralPath $keptDirs[0].FullName -Force | Where-Object { $_.Name -eq 'tripwire-note.txt' }).Count 1
+    } else {
+        Bad 'spawner with -Remove: the kept folder is not there to look in'
+    }
     Stop-Sleepers $printed
     Clean-Kept
 
@@ -183,7 +192,7 @@ try {
         @('tmp1', 'tmp*')
     )
     foreach ($row in $table) {
-        $got = (& $psExe -NoProfile -File $tripwire -NamePrefix $row[0] 2>&1 | Out-String).Trim()
+        $got = (& $psExe @psArgs -File $tripwire -NamePrefix $row[0] 2>&1 | Out-String).Trim()
         Expect "prefix of $($row[0])" $got $row[1]
     }
 
