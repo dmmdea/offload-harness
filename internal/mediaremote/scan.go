@@ -801,7 +801,9 @@ func (h *ticketHandle) Dispatched(base, nodeID, jobID string) {
 func (lt *liveTicket) say(key, line string) {
 	lt.mu.Lock()
 	fn, same := lt.notify, key == lt.saidKey
-	if key != "" {
+	// A line goes on record as said only when there is someone to say it to: a scan can reach a ticket before its waiter has set
+	// Notify, and a key recorded then made the waiter's own first look at the same standing a repeat, so it was never told.
+	if key != "" && fn != nil {
 		lt.saidKey = key
 	}
 	lt.mu.Unlock()

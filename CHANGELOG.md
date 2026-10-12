@@ -8,6 +8,12 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [0.182.0] - 2026-10-12 - a lease that unloads the seat is no longer held by the RAM that unload frees, Wan and image renders run card-only on two cards, agent_run reaches a named seat anywhere in the fleet, and nothing the harness starts opens a window
 
+### Fixed — a human waiting at the CLI is told the ticket is queued even when its first scan ran before the wait began
+
+- **The defect.** A ticket's first scan can run before the CLI's wait loop has set its `Notify`. That scan's "queued" line went nowhere, but `say` still recorded its key as said, so the wait loop's own first look at the same standing was dropped as a repeat. The human was then told nothing until the ticket started. It was a 0.181.0 race, seen on a slow CI runner as `TestCLIBlocksAndCancelsUndispatched` "timed out waiting: the human is told it is queued". The test passes 100 times out of 100 alone, at this release and at 0.181.0.
+- **The fix.** `say` records a standing as said only when there is a `Notify` to say it to (`internal/mediaremote/scan.go`).
+- **Tests.** `TestAStandingSaidBeforeTheNotifyIsSetIsToldOnceItIs` failed before the fix (0 lines told) and passes after. The whole `internal/mediaremote` package passes.
+
 ### Security — golang.org/x/net v0.60.0
 
 - The module requires golang.org/x/net v0.60.0 (was v0.58.0), with golang.org/x/text v0.42.0 and golang.org/x/sync v0.23.0 that it brings. A binary scan of the 0.181.0 release (`govulncheck -mode=binary`) found five advisories in x/net v0.58.0 that the code does not call: GO-2026-6603, GO-2026-6610, GO-2026-6611, GO-2026-6612 and GO-2026-6617, all fixed in v0.60.0. After the bump, `govulncheck ./...` reports no vulnerabilities in the module, and none in the tools/llamaswap and tools/comfyui modules.
