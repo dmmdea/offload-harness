@@ -43,6 +43,8 @@ func TestAuditCPUMoERefusesTheBareFlagInEverySpelling(t *testing.T) {
 		{"LLAMA_ARG_CPU_MOE=enabled in env", cpuMoeEntry("m26", "/bin/llama-server -m m.gguf", "LLAMA_ARG_CPU_MOE=enabled"), "LLAMA_ARG_CPU_MOE"},
 		{"the draft model's flag", cpuMoeEntry("m26", "/bin/llama-server -m m.gguf --cpu-moe-draft -ngl 999"), "--cpu-moe-draft"},
 		{"the draft model's short form", cpuMoeEntry("m26", "/bin/llama-server -m m.gguf -cmoed"), "-cmoed"},
+		// One row per spelling in cpuMoeFlags: a spelling no row names can be deleted from the table and nothing notices.
+		{"the draft model's spec-draft spelling", cpuMoeEntry("m26", "/bin/llama-server -m m.gguf --spec-draft-cpu-moe -ngl 999"), "--spec-draft-cpu-moe"},
 		{"the draft model's environment twin", cpuMoeEntry("m26", "/bin/llama-server -m m.gguf", "LLAMA_ARG_SPEC_DRAFT_CPU_MOE=1"), "LLAMA_ARG_SPEC_DRAFT_CPU_MOE"},
 		{"the flag inside a macro an entry uses",
 			"macros:\n  moe: \"--cpu-moe -ngl 999\"\nmodels:\n  m26:\n    ttl: 300\n    cmd: >-\n      /bin/llama-server -m m.gguf ${moe}\n", "--cpu-moe"},
