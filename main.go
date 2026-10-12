@@ -2419,6 +2419,16 @@ func cliIntake(specs []delegate.SubtaskSpec, readRoot string, capBytes int, door
 	return batch, lints, nil
 }
 
+// cliEngineErr is the error a verb returns when the engine refuses the whole call, so that nothing ran and there is no result
+// to splice a refusal into: the engine's own error (kept wrapped, so errors.Is still sees it), and the subtasks intake refused
+// beside it, so fixing the first complaint does not meet the second on the retry (the MCP doors word the same sentence).
+func cliEngineErr(err error, batch delegate.PreparedBatch, label string, ids []int) error {
+	if len(batch.Rejections) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w; also refused at intake: %s", err, batch.FlatReason(label, ids))
+}
+
 // cliPinOptions builds the engine's options for the delegate and research verbs, the CLI doors that offer pin_reason (ADR
 // 0078): a --route local or remote without --pin-reason is a hint that placement may override, exactly as it is on the MCP
 // tools; with one it is the pin it always was, and the reason is recorded. One builder, so the rescue and the door's half

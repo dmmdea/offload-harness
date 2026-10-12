@@ -9,6 +9,7 @@ package main
 // so the behaviour is pinned in the intake helper and the wiring is pinned at the source.
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -88,6 +89,30 @@ func TestCLIIntakeNamesAPageByItsPlaceInTheURLList(t *testing.T) {
 	}
 }
 
+// The engine refuses the whole call (an unknown route, say): the verb's error keeps the engine's own error and also names the
+// subtasks intake refused, as the MCP doors' whole-call defer does.
+func TestCLIEngineErrorStillNamesTheIntakeRejections(t *testing.T) {
+	batch, _, err := cliIntake([]delegate.SubtaskSpec{intakeSpec("ok"), intakeSpec("refused", "gone.txt")}, t.TempDir(), core.AgentContextMaxBytes, "cli:delegate", "subtask", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := errors.New(`delegate: route "x" not recognized`)
+	got := cliEngineErr(engine, batch, "subtask", nil)
+	if !errors.Is(got, engine) {
+		t.Errorf("err = %v: the engine's own error must stay wrapped", got)
+	}
+	if !strings.Contains(got.Error(), `route "x" not recognized; also refused at intake: subtask 1:`) || !strings.Contains(got.Error(), "gone.txt") {
+		t.Errorf("err = %q, want the engine's error followed by the refused subtask", got)
+	}
+	clean, _, err := cliIntake([]delegate.SubtaskSpec{intakeSpec("ok")}, t.TempDir(), core.AgentContextMaxBytes, "cli:delegate", "subtask", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cliEngineErr(engine, clean, "subtask", nil); got != engine {
+		t.Errorf("err = %v, want the engine's error untouched when nothing was refused", got)
+	}
+}
+
 func writeDelegateCLIConfig(t *testing.T) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "config.json")
@@ -154,7 +179,7 @@ func TestTheCLIVerbsPrepareEachSubtaskOnItsOwnAndSpliceTheRefusals(t *testing.T)
 			if fn == nil {
 				t.Fatalf("%s not found in main.go: the scan is broken", tc.verb)
 			}
-			var intake, engine, splice, wire, direct token.Pos
+			var intake, engine, splice, wire, direct, engineErr token.Pos
 			named := func(call *ast.CallExpr, name string) bool {
 				for _, a := range call.Args {
 					if id, ok := a.(*ast.Ident); ok && id.Name == name {
@@ -171,6 +196,12 @@ func TestTheCLIVerbsPrepareEachSubtaskOnItsOwnAndSpliceTheRefusals(t *testing.T)
 				}
 				switch fun := call.Fun.(type) {
 				case *ast.Ident:
+					if fun.Name == "cliEngineErr" {
+						engineErr = call.Pos()
+						if tc.verb == "runResearch" && !named(call, "resultSources") {
+							researchIDs = false
+						}
+					}
 					if fun.Name == "cliIntake" {
 						intake = call.Pos()
 						if tc.verb == "runResearch" && !named(call, "resultSources") {
@@ -203,6 +234,9 @@ func TestTheCLIVerbsPrepareEachSubtaskOnItsOwnAndSpliceTheRefusals(t *testing.T)
 			}
 			if intake == token.NoPos || !(intake < engine) {
 				t.Errorf("%s does not prepare its subtasks through cliIntake before the engine runs", tc.verb)
+			}
+			if engineErr == token.NoPos || !(engine < engineErr) {
+				t.Errorf("%s does not return the engine's error through cliEngineErr: a call the engine refuses would hide the subtasks intake already refused", tc.verb)
 			}
 			if !researchIDs {
 				t.Errorf("runResearch does not hand resultSources to cliIntake and Splice: a refused page would be named by the contract's place, not the url list's")
