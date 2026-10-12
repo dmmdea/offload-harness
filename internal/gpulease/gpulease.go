@@ -1102,7 +1102,9 @@ func probeWritable(dir string) error {
 //
 // "Provably gone" is about the WRAPPER, not the job it started (plan P10, tree.go): a holder whose
 // pid is dead or recycled is reclaimable only if no member of the tree it recorded is still the
-// process that was recorded. A lease that recorded no tree is freed at once, as before.
+// process that was recorded. This pure rule reads the record alone: a lease that recorded no tree has no member to hold it,
+// so it is freed at once. The reader (reader.judge in tree.go) first folds in the other evidence that ties a live process to
+// such a lease (a launch marker, or on Windows a child of the dead wrapper), and a lease with none alive is freed as before.
 func Reclaimable(m *Meta, now time.Time, heartbeatTTL time.Duration, procStart func(int) (int64, bool)) bool {
 	if m == nil {
 		return true // no/unreadable meta => stale, same rule the .mjs used
@@ -1115,7 +1117,8 @@ func Reclaimable(m *Meta, now time.Time, heartbeatTTL time.Duration, procStart f
 		// The wrapper is provably gone (its pid is dead, or alive but recycled for another
 		// process). That proves the WRAPPER is gone, not the job it started: while a member of
 		// the tree it recorded is still alive the card is in use and the claim is kept (plan
-		// P10, tree.go). A lease that recorded no tree is freed at once, as it always was.
+		// P10, tree.go). With no recorded member alive this rule frees the lease at once; the reader that has found a
+		// live process by the other evidence passes it in Tree, so it is held.
 		return len(liveMembers(m.Tree, procStart)) == 0
 	}
 	nowMs := now.UnixMilli()

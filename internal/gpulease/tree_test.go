@@ -668,3 +668,27 @@ func TestReleaseByEpochEndsATreeOrphanAtOnceAndLeavesItsJobRunning(t *testing.T)
 	_ = got.Release()
 	set(5000)
 }
+
+// "A lease that recorded no tree reclaims as before" holds when nothing the reader can tie to the lease is alive: a pipeline
+// lease, a detached holder or a wrapper of an older build whose holder died is handed on at once, exactly as it always was. The
+// reader does hold such a lease when a launch marker or (Windows) a child of the dead wrapper ties a live process to it
+// (TestLegacyLeaseWithNoTreeIsHeldByATiedDefaultMarkerOnly, TestLegacyLeaseTreeIsFoundByWalkingTheDeadWrappersChildren): that is
+// the evidence rule, not a recorded tree, and it needs a live process.
+func TestLegacyLeaseWithNoTreeAndNoLiveProcessIsReclaimedAtOnce(t *testing.T) {
+	m, _ := scopedManager(t)
+	old := mustDevices(t, m, card0) // no tree is recorded for it
+	liveSet(t, 5000)                // the wrapper (this process) reads as gone; nothing else is alive
+
+	info := m.InspectFor([]string{card0})
+	if info.Held || info.TreeOrphan {
+		t.Fatalf("a lease with no recorded tree and nothing alive is not held: %+v", info)
+	}
+	next, err := asPID(m, 5000).TryAcquire(ClassMedia, Options{Reason: "next", Devices: []string{card0}, TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("the next acquirer is handed the card at once, as before: %v", err)
+	}
+	defer func() { _ = next.Release() }()
+	if next.Epoch() == old.Epoch() {
+		t.Fatalf("a new epoch is issued: %d", next.Epoch())
+	}
+}

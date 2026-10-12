@@ -577,9 +577,11 @@ the set was derived from the command's own pin. A command that pins itself with 
 (`COMFY_CUDA_DEVICE` or `COMFY_CARD_UUID`, which the render layer turns into the card ComfyUI runs on, and ComfyUI resets
 `CUDA_VISIBLE_DEVICES` from it, so setting that variable would be futile) is **re-pinned**: when its pin falls outside the held
 cards or cannot be resolved, the wrapper rewrites that same variable to the held card, says so on one line, and starts the
-command ("A pin outside the lease is moved, never refused", below). The program's argv (`--cuda-device` on its command line, or
-one in `COMFY_EXTRA_ARGS`) is not rewritten; the wrapper warns on stderr when such a pin falls outside the held cards or cannot
-be resolved. A `CUDA_VISIBLE_DEVICES` the command merely **inherits** from the operator's shell is replaced with the held cards when it
+command ("A pin outside the lease is moved, never refused", below). The program's own argv (`--cuda-device` on its command line)
+is not rewritten; the wrapper warns on stderr when such a pin falls outside the held cards or cannot be resolved. A
+`--cuda-device` in `COMFY_EXTRA_ARGS` is not read by the wrapper at all: nothing is printed for it, and the render layer drops it
+whenever `COMFY_CUDA_DEVICE` or `COMFY_CARD_UUID` is set (`launchFlags` in `render/comfy-lifecycle.mjs`), so an environment pin
+beside it IS re-pinned and wins; a pin in the extra args alone is unconfined, the trespass `gpu status` flags (F34). A `CUDA_VISIBLE_DEVICES` the command merely **inherits** from the operator's shell is replaced with the held cards when it
 reaches outside them or cannot be resolved (and the wrapper says so); one inside the held cards is tighter than the lease and
 is left alone (`TestConfineWrappedRules`, `TestGPUReserveDevicesPinsTheChildToTheHeldCards`,
 `TestGPUReserveReplacesAnInheritedPinThatReachesOutsideTheLease`). Two limits remain: a program that sets its own
@@ -599,7 +601,8 @@ one line naming the old pin, the new pin and the lease, starts the command, and 
 |---|---|---|
 | `COMFY_CUDA_DEVICE=<index list>` | the variable becomes the held card's **ComfyUI device index** from the card table (`gpu_comfy_order`), never the nvidia-smi index the lease is keyed by; the launch stays an unkeyed one | untouched, nothing said |
 | `COMFY_CARD_UUID=<uuid>` | the variable becomes the held card's **driver uuid**; no index is written beside it | untouched; the lease still pins the rest of the command as before |
-| `--cuda-device N` on the command line, or in `COMFY_EXTRA_ARGS` | **not rewritten** (the program's own argv): the stderr warning stays, and an environment pin beside an argv one is not moved either, because the program obeys its argv | untouched |
+| `--cuda-device N` on the command line | **not rewritten** (the program's own argv): the stderr warning stays, and an environment pin beside an argv one is not moved either, because the program obeys its argv | untouched |
+| `--cuda-device N` in `COMFY_EXTRA_ARGS` | **not read** by the wrapper, so no warning: when `COMFY_CUDA_DEVICE` or `COMFY_CARD_UUID` is set beside it the environment pin is re-pinned as above and wins (the render layer drops the extra args' flag), and with no environment pin it is an unconfined pin the wrapper does not see (F34) | untouched |
 
 Rules, each pinned by a test (`gpu_reserve_repin_test.go`, `internal/gpulease/repin_test.go`):
 
@@ -607,7 +610,10 @@ Rules, each pinned by a test (`gpu_reserve_repin_test.go`, `internal/gpulease/re
   an unkeyed launch into a keyed per-card instance with its own port and directories. An index pin becomes an index, a uuid
   pin a uuid.
 - **No guess.** When the held card's device index is not known (`gpu_comfy_order` is not declared and the box has several
-  cards) an index pin is **not** rewritten and the old warning stays, with the reason added (`[not re-pinned: ...]`). Switching
+  cards) an index pin is **not** rewritten and the old warning stays, with the reason added (`[not re-pinned: ...]`); the same holds
+  for a pin of more cards than the lease holds. When nothing else would have said anything (an inherited `CUDA_VISIBLE_DEVICES`
+  that names a held card makes the generic confinement silent), the wrapper prints that sentence itself: a pin it cannot move
+  is never a silent trespass. Switching
   an index pin to a uuid to get around that would start a different instance on another port, which is not a move toward the
   leased card but a change of launch. A uuid pin needs no order and is always moved.
 - **The order is the child's.** A device index is counted in ComfyUI's fastest-first order unless the child's environment says
@@ -1871,7 +1877,9 @@ pid and start identity of each, in the lease record (`tree`, additive and `omite
 whose wrapper is **gone** (its pid dead, or alive but a different process: a recycled pid) is **not reclaimable while any
 recorded member is alive by pid AND start identity**. The lease then reads **`tree-orphan`**: it stays held, fenced and
 claimed on its cards, and a waiter is told so. The reclaim rule for a lease whose wrapper is alive is untouched (the
-heartbeat-and-window conjunction), and so is the rule for a lease that recorded no tree and whose wrapper is gone: free at once.
+heartbeat-and-window conjunction). A lease that recorded no tree and whose wrapper is gone has no record to hold it: it is free at
+once **unless** the reader can tie a live process to it by the other evidence below (a launch marker, or on Windows a child of the
+dead wrapper that began after the lease). With none alive it is reclaimed exactly as before.
 
 **Bounded by observation, never by a timer.** Every read of the lease checks the members again, by pid and start identity.
 A pid recycled for an unrelated process cannot hold a card (its start identity differs), a member whose start identity cannot
@@ -1882,9 +1890,12 @@ live (invariant I3, expiry never frees a card). Nothing here kills a process.
 **Where the members come from**, in order, and the later sources only while the wrapper is gone and no recorded member is alive:
 
 1. **The record.** The wrapper writes its tree at start and on its 15 s tick, rewriting the record (under the epoch lock)
-   only when the set of processes changed. The tree is what the containment lists (a job object's processes on Windows; the
-   process group and the descendants reachable through live parent links on Linux) plus what the process table shows below the
-   command. The wrapper itself is not a member.
+   only when the set of processes changed. The tree is what the containment lists: on Windows, with a contained command, the job
+   object's processes and nothing else (the job is exact, descendants that outlived their parent included; the console host the OS
+   starts as a child of a command that has a console of its own is not in it, and recording it could keep a claim for a job that is
+   gone); on Linux the process group plus the descendants reachable through live parent links, and for a command that runs
+   uncontained the process table below the command is the only source. The wrapper itself is not a member. The record is frozen
+   when the wrapper dies: the reader does not consult the process table for a lease that recorded a tree.
 2. **A launch marker.** A ComfyUI instance can sit outside the wrapper's job. Its launch marker (`.offload-launch-<key>.json`
    in the ComfyUI directory, armed from `comfy_dir` at config load by `modelaffinity.SetComfyDir`, the one call that also arms
    the marker reader of the seat scoper) names the lease epoch it was launched under; a marker that names this epoch, whose
@@ -1906,7 +1917,9 @@ on a card cannot be attributed to a lease by itself; `proctree.PlanStop` reports
 - *Windows:* the child is created suspended, assigned to a job object and resumed, so it cannot spawn a process that escapes the
   job before it is inside; every descendant joins the job, including a process started detached. If the OS refuses the job (an
   enclosing job that cannot be nested, an access failure) the command still runs, uncontained, and the wrapper says so on
-  stderr; a lost lease then stops the command and what the process table shows below it.
+  stderr; a lost lease then stops the command and what the process table shows below it. Under `--die-with-wrapper` the same
+  failure is a **refusal** (the suspended child is stopped and the reserve returns an error), because the caller asked for a
+  guarantee the command cannot get; running it uncontained would leave a render alive after the wrapper dies.
 - *Unix:* the child leads its own session and process group, and the group is signalled as a whole (`kill(-pgid)`). (`Pdeathsig`
   is not used: it is delivered per thread and covers the direct child only.)
 - *A lost lease or an interrupt stops the whole tree*, not just the command, **except** a live ComfyUI instance whose launch
@@ -1918,13 +1931,22 @@ on a card cannot be attributed to a lease by itself; `proctree.PlanStop` reports
   tree-orphan, unless the reserve was started with **`--die-with-wrapper`** (Windows: the job is created kill-on-close, so the
   wrapper exiting or dying ends the tree). It is **opt-in and off by default** because it makes the wrapper a single point of
   failure for a long render. A platform with no handle whose closing ends a tree (Linux) refuses the flag before the reserve
-  queues for a card, and so does `--detach` (a detached holder runs no command).
+  queues for a card, and so does `--detach` (a detached holder runs no command). **One carve-out:** a ComfyUI instance whose launch
+  marker names another lease (a kept instance a later lease reused) is spared by the lost-lease stop, and a kill-on-close job
+  would end it a moment later when the wrapper lets go of the job. So once the wrapper has spared a process it ends everything
+  else of the tree first, clears the job's kill-on-close, says so (`--die-with-wrapper no longer applies to this command's tree`),
+  and only then lets go; the same is done when the wrapper finishes and finds such an instance in the job without the lease
+  having been lost on its last tick (`proctree.Tree.DisarmKillOnClose`).
 
 **What a reader sees.** The verdict `tree-orphan` (it leads the precedence; the brief line leads with `ORPHANED`),
 `gpu status` (`wrapper: pid N is GONE, but the job it started is still running (pid ...): TREE-ORPHAN`, then the evidence),
 `activity.holder` (`tree_orphan`, `tree_pids`, `tree_why`), the sentence a waiter reads (`lease epoch N is tree-orphan: its
 wrapper (pid P) is gone but the job it started is still running ...`), and `/fleet/health` (`tree_orphan` on the lease entry
-and the singular block, verdict `tree-orphan`; the lease is `busy` like any held lease). The allocator treats a tree-orphan's
+and the singular block, verdict `tree-orphan`; the lease is `busy` like any held lease: inside its declared window it closes its
+cards to new work, and past the window it is ranked last and is not a refusal, as every overdue lease has been since 0.113.27,
+because dispatch queues behind a lease and a node that refused here would keep the capacity wait from asking the one remote that
+could take the work). The host-RAM guard measures what a tree-orphan has loaded from its live members, not from the dead
+wrapper's pid, so the declared need of a job that is running is not charged a second time as still to load. The allocator treats a tree-orphan's
 cards as claimed, so a `--cards N` reserve is handed other cards, and a seat warm-back does not load over them (it waits for
 the last live lease on the seat's cards).
 
@@ -1953,9 +1975,13 @@ build**: after the deploy run `gpu doctor` and cycle the MCP servers, and compar
 
 **Limits, said plainly.**
 
-- The recorded tree is at most one tick (15 s) behind. A process started, and orphaned, in that window is held only if a launch
-  marker or the process table names it; a wrapper that dies in its first seconds still has its command recorded (the tree is
-  written right after the start).
+- The recorded tree is at most one tick (15 s) behind while the wrapper lives, and **frozen when it dies**. A lease that recorded a
+  tree is held by that record and by a launch marker that names its epoch; the process table is read only for a lease that
+  recorded none. So a process the command started after the last record, and that outlives every recorded member, is not held
+  (unless a marker names the lease): the card can be handed on under it. The window is one tick wide, it needs the wrapper to
+  die inside it and the recorded members to exit before that process, and it is the accepted limit of recording rather than
+  enumerating; a wrapper that dies in its first seconds still has its command recorded (the tree is written right after the
+  start).
 - A wrapper that is alive but wedged (alive pid, stale heartbeat, window over) is still reclaimed by the conjunction, tree or no
   tree: this change is about a wrapper that is gone.
 - A lease taken by the harness's own pipeline (a media call) records no tree. A render child that outlives a crashed server is
@@ -1968,10 +1994,12 @@ build**: after the deploy run `gpu doctor` and cycle the MCP servers, and compar
   release) and not claimed. `--die-with-wrapper` ends them with the wrapper on Windows.
 - Free-by-observation means the claim ends when the members do, which for a job that has hung is never: that is what
   `gpu release --epoch N` is for. A takeover that also stops the job, and the policy that would run it, are later changes.
-- A wrapper started with no console (so its command is given a console of its own) records one more member than the job: in a
-  Windows test the extra member outlived the command and its grandchild by more than one read, and the claim stayed until it
-  was gone. What that member was, and how long it lingers, is not established; a wrapper that shares its terminal's console
-  records no such member.
+- A Windows command that runs in a console of its own (its wrapper has none) is given a console host (`conhost.exe`) by the OS, a
+  child of the command that is not in the job. The recorder used to union the job's list with the process table, so it recorded
+  that console host too, and a recorded member that is not the job can keep a dead wrapper's claim after the job is gone. That is
+  the extra member the first measurement saw; on Windows, with a contained command, the record is now the job's exact list. A
+  console host the OS makes for a descendant's own console is in the job and exits a moment after its last client, so a card
+  frees a moment after the last real process, never later.
 
 ## The fleet reads leases per card (plan P7)
 

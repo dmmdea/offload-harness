@@ -776,8 +776,10 @@ measurement, in both places that draw this line.
   `COMFY_CARD_UUID` becomes the held card's driver uuid, each in its own kind (the render layer refuses an index beside a uuid, and a
   uuid turns an unkeyed launch into a keyed instance on another port). One stderr line names the old pin, the new pin and the lease. A
   pin of k cards under a lease of n >= k cards maps to the first k held cards in the order the index is counted in; more cards than the
-  lease holds, a `--cuda-device` on the command line or in `COMFY_EXTRA_ARGS` (the program's own argv), and a held card whose device index
-  is unknown (no `gpu_comfy_order` on a multi-card box: no guess) keep the old warning, now with the reason. The index is read and
+  lease holds, a `--cuda-device` on the command line (the program's own argv), and a held card whose device index
+  is unknown (no `gpu_comfy_order` on a multi-card box: no guess) keep the old warning, now with the reason. A `--cuda-device` in
+  `COMFY_EXTRA_ARGS` is not read by the wrapper (no warning, and an environment pin beside it is moved: the render layer drops the
+  extra args' flag when one is set). The index is read and
   written in the order the child runs under (`CUDA_DEVICE_ORDER=PCI_BUS_ID` makes it nvidia-smi's). The pin is judged on its own beside
   an inherited `CUDA_VISIBLE_DEVICES`. The wrapper never exits non-zero for a pin, and there is no `--allow-outside-pin`.
   A flag-off host, a `--whole-node` lease and a lease derived from the command's own pin never reach the re-pin.
@@ -805,10 +807,10 @@ measurement, in both places that draw this line.
   alive but recycled) is not reclaimable while any recorded member is alive by pid AND start identity. It is bounded by observation,
   never by a timer: every read checks the members again, so a recycled pid cannot hold a card, a card frees itself at the first
   read after its members are gone, and hours past its window and heartbeat a tree-orphan is still held while its members live.
-  A lease whose wrapper is alive, and a lease that recorded no tree whose wrapper is gone, are judged exactly as before. Where there
-  is no recorded tree (a wrapper that predates this change) the claim is kept by a launch marker that names the lease epoch (or, for
-  a lease that recorded no tree, a default-instance marker that began at or after it with no other lease present) and, on Windows, by
-  the dead wrapper's children in the process table. The driver's compute listing is not used: under WDDM it names no process for most.
+  A lease whose wrapper is alive is judged exactly as before. A lease that recorded no tree (a wrapper that predates this change, the
+  pipeline's own leases, a detached holder) and whose wrapper is gone is reclaimed at once unless a live process is tied to it: a
+  launch marker that names the lease epoch (or a default-instance marker that began at or after it with no other lease present) or,
+  on Windows, a child of the dead wrapper in the process table that began after the lease; with none alive it is reclaimed as before. The driver's compute listing is not used: under WDDM it names no process for most.
 - **A lost lease or an interrupt stops the whole tree**, not just the command, except a live ComfyUI instance whose launch marker
   names another lease (a kept instance another lease reused is that lease's job now); the wrapper says what it left running. An OS
   that refuses the containment still runs the command, uncontained, and says so. **On Unix the command now leads its own session**, so a
@@ -864,6 +866,49 @@ measurement, in both places that draw this line.
 - **The display card (A-RAM-15, `gpu_display_cap_pct`).** The allocator section of the lease guide and the operator guide tell the cap
   that the display-cap change introduces: the card is allocatable up to 60 percent of its VRAM at any presence (the desktop's use counted),
   only with a declared `--vram`, `0` closes it, an unknown display stays closed, and the cap bounds admission only.
+
+### Fixed — the lease-guards review round: `--die-with-wrapper` no longer ends an instance another lease took over, a tree-orphan's host RAM is no longer charged twice, and the docs say what the code does (GPU-F9, GPU-I3 / P10)
+
+An independent review of GPU-F9 and GPU-I3 (the P10 port) found fifteen entries over twelve distinct defects; each was read against the
+source, scored with Jev, and either fixed red-first or answered. Every fix has a test that failed before it and a mutant that turns
+that test red (`scripts/mutation-check.sh`).
+
+- **`--die-with-wrapper` (Windows) killed what the wrapper had just said it spared.** A lost-lease wrapper spares a ComfyUI instance
+  another lease re-stamped, but its `finish()` then closed the last handle of the kill-on-close job and Windows ended every process
+  still in it, the spared one included, which ended the other lease's job. The job is now disarmed once something is spared (after
+  everything else of the tree is ended), at the lost-lease stop and again at `finish()`, and the wrapper says the guarantee stops at
+  that instance (`proctree.Tree.DisarmKillOnClose`). The flag's help and the lease guide carry the carve-out.
+- **`--die-with-wrapper` was silently not honoured when the command could not be put in the job.** The command ran uncontained with a
+  warning that never named the flag; a 20-hour render outlived the wrapper that was meant to take it down. It is refused now, as when
+  the job object cannot be created.
+- **A pin the wrapper cannot move was invisible beside an inherited `CUDA_VISIBLE_DEVICES`.** More cards pinned than the lease holds, or
+  a held card with no known ComfyUI index, was reported only by appending to a note the generic confinement had made, and an inherited
+  variable naming a held card makes that confinement silent: the command started on cards outside its lease with nothing printed. The
+  trespass sentence with the reason is now printed in that case, and a moved uuid pin no longer hides an index pin that stayed.
+- **A tree-orphan's declared host RAM was charged again as still to load.** The guard measured the processes below the lease's holder,
+  which for a tree-orphan is the dead wrapper (the job is reparented away on Linux), so about nothing was subtracted and every later
+  grant that declared RAM waited behind a host-RAM message for as long as the orphan lived. A tree-orphan now stands alone and is
+  measured from its recorded live members.
+- **A stale launch marker whose pid was recycled made a lost-lease wrapper spare a process of its own tree.** `PIDsOfOtherLeases` now
+  applies the start-versus-marker proof the stop already used.
+- **The recorder listed the console host.** On Windows the recorded tree was the job's list unioned with the process table, which added
+  `conhost.exe` (a child of a command that has a console of its own, not in the job); a recorded member that is not the job can keep
+  a dead wrapper's claim after the job is gone. With a contained command on Windows the record is the job's exact list.
+- **The F9 docs promised a warning no code prints.** A `--cuda-device` in `COMFY_EXTRA_ARGS` is not read by the wrapper (no warning),
+  and an environment pin beside it is moved and wins (the render layer drops the extra args' flag). The guide, ADR 0018, the F9 entry
+  above and the code comments now say so, and a test pins both halves.
+- **Four statements said a lease that recorded no tree is "free at once" while the code, the next sentence and the ADR hold it on a live
+  tied process.** They now say: reclaimed at once unless a launch marker or, on Windows, a child of the dead wrapper ties a live process
+  to it; with none alive, exactly as before (a judge-level test pins that). The guide, ADR 0084 and the `Reclaimable` comment also say
+  what a recorded tree cannot cover: it is frozen when the wrapper dies, and the process table is read only for a lease that recorded
+  none, so a process started after the last record that outlives every recorded member is not held (the accepted limit).
+- **Answered, not changed.** An overdue tree-orphan is ranked last in `/fleet/health` and is not a refusal, exactly as every overdue
+  lease since 0.113.27 (a refusing node keeps the capacity wait from asking the one remote that could take the work); the field comment
+  said "never freed" without saying that, and a test now pins both halves.
+- **Tests.** The repin verb tests take the isolation every real-wrapper test needs (the lease and config redirects stripped from the
+  driver, a scratch `comfy_dir`), the real-wrapper helper spawns are window-less with a source pin over the files that start them, the
+  launch markers the lease-lost tests write carry the start time of the process they name, and the tree-orphan test polls for the claim
+  to free instead of reading it once.
 
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 

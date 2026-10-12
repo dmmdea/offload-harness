@@ -190,10 +190,12 @@ type confinement struct {
 //     refuses: the command starts, on the leased card. See gpulease.PlanRepin for the rules
 //     (k cards under n >= k, the order a CUDA_DEVICE_ORDER=PCI_BUS_ID command counts in) and for
 //     what is NOT moved.
-//   - `--cuda-device` on its command line (and one in COMFY_EXTRA_ARGS) is the program's own
-//     argv, which the wrapper does not rewrite: it is left alone, and the wrapper says so when
-//     the pin falls outside the held cards or cannot be resolved. An environment pin beside an
-//     argv one is not moved either, because the program obeys its argv.
+//   - `--cuda-device` on its command line is the program's own argv, which the wrapper does not
+//     rewrite: it is left alone, and the wrapper says so when the pin falls outside the held
+//     cards or cannot be resolved. An environment pin beside an argv one is not moved either,
+//     because the program obeys its argv. A `--cuda-device` in COMFY_EXTRA_ARGS is not read at
+//     all (no note), and an environment pin beside it IS re-pinned: the render layer drops the
+//     extra args' flag whenever COMFY_CUDA_DEVICE or COMFY_CARD_UUID is set.
 //   - a CUDA_VISIBLE_DEVICES the command merely INHERITS (the operator's shell) is not a
 //     choice about this job: when it reaches outside the held cards, or cannot be resolved,
 //     it is REPLACED with the held cards (the wrapper's value is the last in the child's

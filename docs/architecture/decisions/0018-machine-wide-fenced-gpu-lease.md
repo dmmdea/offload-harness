@@ -254,7 +254,9 @@ Two further facts shaped the design:
   in this lease) but to **rewrite the program's own pin variable to the held card**: `COMFY_CUDA_DEVICE` becomes the held card's
   ComfyUI device index from the card table, `COMFY_CARD_UUID` the held card's driver uuid, each in its own kind (the render layer
   refuses an index beside a uuid and a uuid keys another instance). A held card whose device index is not known is not guessed;
-  the old warning stays with the reason. The program's argv (`--cuda-device`, or one in `COMFY_EXTRA_ARGS`) is not rewritten.
+  the old warning stays with the reason, and is said even when nothing else would have said it. The program's own argv
+  (`--cuda-device` on the command line) is not rewritten. A `--cuda-device` in `COMFY_EXTRA_ARGS` is not read by the wrapper (no
+  warning); the render layer drops it when an environment pin is set, so an environment pin beside it is moved and wins.
   The command always starts, and no `--allow-outside-pin` exists. See [GPU lease](../../systems/gpu-lease.md).
 - **Extended 2026-10-01 (register C-87):** the memory stack is not CPU-only on every box, so "the CPU memory stack"
   in the Context table no longer describes it there: it is small and, on the three-card reference box, served on the

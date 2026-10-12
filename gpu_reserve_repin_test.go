@@ -154,10 +154,18 @@ func TestConfineWrappedLeavesAnArgvPinAndKeepsTheNote(t *testing.T) {
 	if envHasKey(c, "COMFY_CUDA_DEVICE") || !strings.Contains(c.Note, "not confined") {
 		t.Errorf("argv wins over the env pin, so the env pin is not rewritten and the note stays: env %q note %q", repinEnv(c), c.Note)
 	}
-	// A --cuda-device in COMFY_EXTRA_ARGS is the program's own argv too: not rewritten, today's behaviour.
+	// A --cuda-device in COMFY_EXTRA_ARGS is NOT read by the wrapper: nothing is rewritten or said for it (the docs once
+	// promised a warning that no code produced), and the lease still pins the rest of the command.
 	c = confineWrapped(true, held, []string{"python"}, envMap(map[string]string{"COMFY_EXTRA_ARGS": "--cuda-device 2"}), cards)
-	if envHasKey(c, "COMFY_EXTRA_ARGS") || envHasKey(c, "COMFY_CUDA_DEVICE") || envHasKey(c, "COMFY_CARD_UUID") {
-		t.Errorf("COMFY_EXTRA_ARGS is the program's argv and is not rewritten: %q", repinEnv(c))
+	if envHasKey(c, "COMFY_EXTRA_ARGS") || envHasKey(c, "COMFY_CUDA_DEVICE") || envHasKey(c, "COMFY_CARD_UUID") || c.Note != "" {
+		t.Errorf("COMFY_EXTRA_ARGS is not read: nothing is rewritten and no note is made up for it: env %q note %q", repinEnv(c), c.Note)
+	}
+	// Beside an environment pin it does not stop the re-pin: the render layer drops the extra args' flag whenever
+	// COMFY_CUDA_DEVICE or COMFY_CARD_UUID is set (launchFlags), so the environment pin is the one that decides the card.
+	c = confineWrapped(true, held, []string{"python"},
+		envMap(map[string]string{"COMFY_EXTRA_ARGS": "--cuda-device 2", "COMFY_CUDA_DEVICE": "2"}), cards)
+	if !envHas(c, "COMFY_CUDA_DEVICE=1") || envHasKey(c, "COMFY_EXTRA_ARGS") {
+		t.Errorf("the environment pin beside COMFY_EXTRA_ARGS is re-pinned and the extra args are left as they are: env %q note %q", repinEnv(c), c.Note)
 	}
 }
 

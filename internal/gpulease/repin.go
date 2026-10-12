@@ -16,8 +16,9 @@ package gpulease
 // card, and switching an index pin to a uuid would change the launch into another instance. The caller keeps its report.
 //
 // A pin of k cards under a lease of n >= k cards maps to the first k held cards in the order the index is counted in;
-// k > n has no card to put the extra ones on and is left alone. The program's own argv (`--cuda-device N`, or one in
-// COMFY_EXTRA_ARGS) is never rewritten.
+// k > n has no card to put the extra ones on and is left alone. The program's own argv (`--cuda-device N`) is never rewritten.
+// A `--cuda-device` in COMFY_EXTRA_ARGS is not read here at all: the render layer drops it when COMFY_CUDA_DEVICE or
+// COMFY_CARD_UUID is set (render/comfy-lifecycle.mjs launchFlags), so the environment pin this file rewrites is the one that wins.
 
 import (
 	"fmt"

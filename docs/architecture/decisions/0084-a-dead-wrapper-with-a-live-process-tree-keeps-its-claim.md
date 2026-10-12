@@ -31,8 +31,9 @@ an older reader silently wrong in a new way.
 identity.** The wrapper records that tree in its lease record (`tree`: pid and start identity of each member, additive
 and `omitempty`), when the set changes. A reader that finds the wrapper gone (its pid dead, or alive but a different
 process) keeps the claim while any recorded member is still the recorded process, and the lease reads `tree-orphan`,
-the verdict that leads the precedence. The heartbeat-and-window conjunction for a wrapper that is alive is untouched,
-and so is the rule for a lease that recorded no tree: free at once.
+the verdict that leads the precedence. The heartbeat-and-window conjunction for a wrapper that is alive is untouched.
+A lease that recorded no tree has no record to hold it: it is free at once unless the other evidence below ties a live
+process to it, and with none alive it is reclaimed exactly as before.
 
 **The claim is bounded by observation, never by a timer.** Every read checks the members again. A recycled pid cannot
 hold a card (its start identity differs); a card frees itself at the first read after its members are gone; hours past
@@ -55,7 +56,10 @@ job object type, so there is one implementation.
 
 **Letting go of the tree leaves it running, unless asked.** `--die-with-wrapper` (kill-on-close on Windows) is opt-in and
 off by default, because it makes the wrapper a single point of failure for a long render, and a platform with no handle
-whose closing ends a tree refuses it up front.
+whose closing ends a tree refuses it up front. A command the OS will not put in the job is refused too when the flag was
+asked for (the guarantee cannot be given), never run uncontained with a warning. One carve-out: a process the wrapper
+spares because another lease took it over (above) is not ended by the close either, so the job stops killing on close once
+something is spared, after everything else of the tree has been ended, and the wrapper says so.
 
 **The stop primitives a takeover needs are built here and wired to nothing.** `proctree.PlanStop` and `Stop` stop only a
 recorded tree or a launch marker's process, re-check each member's start identity right before signalling it, and return
@@ -68,7 +72,9 @@ interrupts, frees and kills a marker's instance after the proof a lease's own ho
   one command that frees it today, `gpu release --epoch N` (it ends the claim at once and stops only the ComfyUI
   instances kept under the lease; the rest of the job keeps running on the card, so it is run by a human who has seen
   the job is dead or disposable). The explicit takeover that also stops the job is a later change and is not offered for
-  a tree-orphan. `/fleet/health` carries `tree_orphan` on the lease entry, and a `--cards N` waiter is handed another card.
+  a tree-orphan. `/fleet/health` carries `tree_orphan` on the lease entry (busy like any held lease: past its declared window it is ranked last and
+  is not a refusal, the rule every overdue lease keeps), the host-RAM guard measures what it has loaded from its live members, and a
+  `--cards N` waiter is handed another card.
 - The rule holds where every reader is this build. A reader that predates it ignores `tree` and reclaims a dead wrapper's
   lease at once, as it always did, and the preserved old-reader fixture pins that. The change adds a key an older reader
   ignores and moves no audit line: an older reader is no worse than before, and `gpu doctor` already lists the readers
@@ -77,8 +83,10 @@ interrupts, frees and kills a marker's instance after the proof a lease's own ho
   deliberate: freeing a card under a live process is the incident, so the release is an explicit command and the job is
   left running by it; what happens to an overdue or orphan tree by policy (`gpu.on_overdue`) is a decision for after this
   ships.
-- The recorded tree is at most one tick (15 s) behind. A process started and orphaned in that window is held only if a
-  marker or the process table names it. A wrapper alive but wedged (alive pid, stale heartbeat, window over) is still
+- The recorded tree is at most one tick (15 s) behind while the wrapper lives, and frozen when it dies. A lease that recorded a
+  tree is held by that record and by a marker that names its epoch; the process table is read only for a lease that recorded
+  none, so a process started after the last record that outlives every recorded member is not held. That window is the accepted
+  limit of recording rather than enumerating. A wrapper alive but wedged (alive pid, stale heartbeat, window over) is still
   reclaimed by the conjunction: this change is about a wrapper that is gone.
 - A host is protected only once every reader on it is this build: restart the MCP servers and the fleet daemon after the
   deploy and compare build versions with `gpu doctor` (the audit's format signature is not bumped, because the change is
