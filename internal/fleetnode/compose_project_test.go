@@ -24,23 +24,24 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 )
 
-// composeProjectTestCache is the compose cache every project test extracts into (never a real path).
-var composeProjectTestCache string
-
+// init only fills the one table entry that needs a packed bundle. It makes nothing that outlives it:
+// every copy of this test binary the suite re-launches (the stand-in ffmpeg in stt_e2e_test.go, the
+// helper TestSweepHelperExitNow starts) runs the package's init functions too, and a copy that exits
+// from a test or from another init never reaches a cleanup. An init that made the compose cache folder
+// left one in the OS temp dir for the suite and one for each launch (13 in one run), and nothing removed them.
 func init() {
-	d, err := os.MkdirTemp("", "fleetnode-compose-cache-")
-	if err != nil {
-		panic(err)
-	}
-	composeProjectTestCache = d
 	remoteMediaPayloads[ComposeProjectTask] = string(projectPayload(nil, map[string]string{"index.html": "<p>hello</p>"}))
 }
 
-func projectCfg() config.Config {
+// projectCfg is a compose-project node whose compose cache is the calling test's own t.TempDir (never a
+// real path), removed when that test ends. Take it BEFORE newTestServer: cleanups run last-in first-out, so
+// the server's drain, registered later, finishes the jobs before the folder they extract into goes.
+func projectCfg(t *testing.T) config.Config {
+	t.Helper()
 	return config.Config{
 		ComposeScript: "render/compose-hyperframes.mjs", HyperframesDir: "/opt/offload/hyperframes",
 		HyperframesBrowserPath: "/opt/offload/hyperframes/chs",
-		FleetComposeProjects:   true, FleetAuthToken: "tok", ComposeCacheDir: composeProjectTestCache,
+		FleetComposeProjects:   true, FleetAuthToken: "tok", ComposeCacheDir: t.TempDir(),
 	}
 }
 
@@ -99,9 +100,10 @@ func rawTarGz(t *testing.T, name, body string) []byte {
 	return buf.Bytes()
 }
 
-func leftoverProjectDirs(t *testing.T) []string {
+// leftoverProjectDirs lists the extracted project trees under one compose cache.
+func leftoverProjectDirs(t *testing.T, cache string) []string {
 	t.Helper()
-	entries, _ := os.ReadDir(filepath.Join(composeProjectTestCache, "fleet-projects"))
+	entries, _ := os.ReadDir(filepath.Join(cache, "fleet-projects"))
 	var out []string
 	for _, e := range entries {
 		out = append(out, e.Name())
@@ -110,15 +112,16 @@ func leftoverProjectDirs(t *testing.T) []string {
 }
 
 func TestComposeProjectIsOpenOnlyWithOptInTokenAndLane(t *testing.T) {
-	if !slices.Contains(SupportedTasks(projectCfg()), ComposeProjectTask) {
-		t.Fatalf("an opted-in node with a token and the lane must advertise compose-project: %v", SupportedTasks(projectCfg()))
+	base := projectCfg(t)
+	if !slices.Contains(SupportedTasks(base), ComposeProjectTask) {
+		t.Fatalf("an opted-in node with a token and the lane must advertise compose-project: %v", SupportedTasks(base))
 	}
 	for name, mut := range map[string]func(*config.Config){
 		"not opted in": func(c *config.Config) { c.FleetComposeProjects = false },
 		"no token":     func(c *config.Config) { c.FleetAuthToken = "" },
 		"no lane":      func(c *config.Config) { c.ComposeScript = "" },
 	} {
-		cfg := projectCfg()
+		cfg := base
 		mut(&cfg)
 		if slices.Contains(SupportedTasks(cfg), ComposeProjectTask) {
 			t.Errorf("%s: compose-project advertised", name)
@@ -130,7 +133,7 @@ func TestComposeProjectIsOpenOnlyWithOptInTokenAndLane(t *testing.T) {
 }
 
 func TestComposeProjectDoorChecksTheBearerBeforeReadingTheBody(t *testing.T) {
-	cfg := projectCfg()
+	cfg := projectCfg(t)
 	cfg.FleetComposeBundleMaxMB = 1
 	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
 	huge := `{"job_id":"x","bundle":"` + strings.Repeat("A", 3<<20) + `"}`
@@ -149,7 +152,7 @@ func TestComposeProjectDoorChecksTheBearerBeforeReadingTheBody(t *testing.T) {
 		"not opted in": func(c *config.Config) { c.FleetComposeProjects = false },
 		"tokenless":    func(c *config.Config) { c.FleetAuthToken = "" },
 	} {
-		c := projectCfg()
+		c := projectCfg(t)
 		mut(&c)
 		closed, _ := newTestServer(t, c, &fakeRunner{}, nil)
 		if rec := do(t, closed, "POST", ComposeProjectPath, string(projectPayload(nil, map[string]string{"index.html": "x"})), map[string]string{"Authorization": "Bearer tok"}); rec.Code != 403 {
@@ -176,7 +179,8 @@ func (d *dirRunner) Run(_ context.Context, req core.Request) core.Result {
 
 func TestComposeProjectRendersTheExtractedProjectAndRemovesIt(t *testing.T) {
 	r := &dirRunner{}
-	s, jobs := newTestServer(t, projectCfg(), r, nil)
+	cfg := projectCfg(t)
+	s, jobs := newTestServer(t, cfg, r, nil)
 	rec := do(t, s, "POST", ComposeProjectPath, string(projectPayload(func(p *ComposeProjectPayload) { p.JobID = "proj-ok" }, map[string]string{
 		"index.html": `<link href="css/a.css" rel="stylesheet"><img src="img/x.png">`, "css/a.css": `b{background:url(../img/x.png)}`, "img/x.png": "PNG",
 	})), map[string]string{"Authorization": "Bearer tok"})
@@ -198,7 +202,7 @@ func TestComposeProjectRendersTheExtractedProjectAndRemovesIt(t *testing.T) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !r.present || !strings.HasPrefix(r.dir, filepath.Join(composeProjectTestCache, "fleet-projects")) {
+	if !r.present || !strings.HasPrefix(r.dir, filepath.Join(cfg.ComposeCacheDir, "fleet-projects")) {
 		t.Fatalf("the pipeline must render the extracted project under the compose cache, got %q (present=%v)", r.dir, r.present)
 	}
 	if _, err := os.Stat(r.dir); !os.IsNotExist(err) {
@@ -219,19 +223,20 @@ func TestComposeProjectRefusesBadPayloadsAndLeavesNothing(t *testing.T) {
 		"unsafe member": payloadFor(rawTarGz(t, "../evil.html", "x"), nil),
 		"over size cap": projectPayload(nil, map[string]string{"index.html": "x", "noise.bin": incompressible(2 << 20)}),
 	}
-	before := leftoverProjectDirs(t)
+	base := projectCfg(t)
+	before := leftoverProjectDirs(t, base.ComposeCacheDir)
 	for name, payload := range cases {
-		cfg := projectCfg()
+		cfg := base
 		cfg.FleetComposeBundleMaxMB = 1
 		if _, cleanup, err := BuildRequest(context.Background(), cfg, true, ComposeProjectTask, payload); err == nil {
 			cleanup()
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if after := leftoverProjectDirs(t); len(after) != len(before) {
+	if after := leftoverProjectDirs(t, base.ComposeCacheDir); len(after) != len(before) {
 		t.Fatalf("a refused bundle must leave no directory behind: before %v, after %v", before, after)
 	}
-	s, _ := newTestServer(t, projectCfg(), &fakeRunner{}, nil)
+	s, _ := newTestServer(t, base, &fakeRunner{}, nil)
 	rec := do(t, s, "POST", ComposeProjectPath, string(cases["ref outside"]), map[string]string{"Authorization": "Bearer tok"})
 	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "refers outside itself") {
 		t.Fatalf("over HTTP an unsafe project is a 400 naming the reason, got %d %s", rec.Code, rec.Body.String())
@@ -241,7 +246,7 @@ func TestComposeProjectRefusesBadPayloadsAndLeavesNothing(t *testing.T) {
 // A project render's state, error text and video_path belong to the token holder that sent it: a poll
 // or a feed read without the bearer must not see them (review M5), whichever path admitted the job.
 func TestComposeProjectJobsAreMaskedWithoutTheBearer(t *testing.T) {
-	s, jobs := newTestServer(t, projectCfg(), &dirRunner{}, nil)
+	s, jobs := newTestServer(t, projectCfg(t), &dirRunner{}, nil)
 	rec := do(t, s, "POST", ComposeProjectPath, string(projectPayload(func(p *ComposeProjectPayload) { p.JobID = "proj-masked" }, map[string]string{"index.html": "<p>x</p>"})), map[string]string{"Authorization": "Bearer tok"})
 	if rec.Code != 202 {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
@@ -280,7 +285,7 @@ func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error { d.write = t; re
 // A large bundle on an ordinary link outlasts the server's blanket 30 s timeouts, so a token holder's
 // request gets the door's own window (review M2); a request without the bearer never does.
 func TestComposeProjectGivesATokenHolderTimeToUpload(t *testing.T) {
-	s, _ := newTestServer(t, projectCfg(), &dirRunner{}, nil)
+	s, _ := newTestServer(t, projectCfg(t), &dirRunner{}, nil)
 	body := string(projectPayload(func(p *ComposeProjectPayload) { p.JobID = "proj-window" }, map[string]string{"index.html": "<p>x</p>"}))
 	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
 	req := httptest.NewRequest("POST", ComposeProjectPath, strings.NewReader(body))
@@ -305,7 +310,7 @@ func TestComposeProjectGivesATokenHolderTimeToUpload(t *testing.T) {
 // A node that cannot unpack (here: its compose cache is a file) answers 500, its own failure, not 400
 // "refused" (review L7).
 func TestComposeProjectNodeSideFailureIsNotARefusal(t *testing.T) {
-	cfg := projectCfg()
+	cfg := projectCfg(t)
 	blocker := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)

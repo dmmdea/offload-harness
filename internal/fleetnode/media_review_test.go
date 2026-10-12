@@ -623,7 +623,7 @@ func TestComposeProjectReportsADeadlineItCannotExtend(t *testing.T) {
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
 
-	s, _ := newTestServer(t, projectCfg(), &fakeRunner{}, nil)
+	s, _ := newTestServer(t, projectCfg(t), &fakeRunner{}, nil)
 	for i := 0; i < 3; i++ {
 		if rec := do(t, s, "POST", ComposeProjectPath, "{}", bearer()); rec.Code != 400 {
 			t.Fatalf("status %d", rec.Code)

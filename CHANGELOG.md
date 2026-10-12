@@ -465,6 +465,25 @@ routed call could never be placed on a node. The new real-gate test reproduces i
   mutation and a final `MUTATION-VERDICT:` line. The self-tests (`scripts/mutation-check-selftest.sh`, `.ps1`) show every verdict on the
   fixture module `scripts/testdata/mutfixture`; `CONTRIBUTING.md` and `docs/systems/security.md` (invariant I5) point at the harness. No
   Go package is touched.
+### Fixed — the fleetnode and pipeline tests left a folder in the OS temp dir for the suite and one for every copy of the test binary they re-launch
+
+- **The defect.** `internal/fleetnode`'s tests made their compose cache folder in an `init()` (`os.MkdirTemp("", ...)`) and nothing removed
+  it; `internal/pipeline`'s `TestMain` made a throwaway state root and removed it only after a normal run. Both packages re-launch their own
+  test binary (the stand-in ffmpeg, the dead-owner helper, the browse sidecar stand-in). A copy runs the package's `init()` functions and
+  `TestMain` too, and a copy that exits from a test, or is killed, never reaches a cleanup, so every launch left a folder: one run of each
+  package left 13 (counted with the OS temp dir pointed at an empty folder), and a workstation that runs the gate all day collected them on
+  its system drive. Test code only: no production code makes either folder.
+- **The fix.** Each fleetnode test that needs a compose cache takes its own `t.TempDir()` through `ComposeCacheDir` (taken before
+  `newTestServer`, so the server's drain finishes before the folder goes), and `init()` makes nothing but a table entry. The pipeline's
+  `TestMain` recognizes the re-launched browse sidecar stand-in by its argument (the sidecar's environment is an allowlist, so nothing the
+  suite sets can reach it) and starts no state root for it; the suite still removes its one root. `TestARelaunchedTestBinaryLeavesNothingInTheTempDir`
+  (one per package) launches a re-launched copy the way the suite does, with the temp dir pointed at an empty folder, and requires it to stay
+  empty; `TestTestsReachForTheOSTempDirOnlyWhereItsRemovalIsOnEveryPath` fails on a new direct `os.MkdirTemp("", ...)`, `os.CreateTemp("", ...)`
+  or `os.TempDir()` in a test file of either package unless it is listed with the reason its folder is removed on every path. Each was shown
+  to fail without the fix (the lint in pipeline by adding one raw call).
+- **Measured** on Windows with TMP, TEMP and GOTMPDIR pointed at an empty folder, `go test -count=1 -v`: fleetnode 13 folders left before, 0
+  after (three runs); pipeline 13 before, 0 after. The same tests are there and pass: fleetnode 880 passed and 5 skipped before, 882 and 5 after;
+  pipeline 1497 passed and 1 skipped before, 1499 and 1 after (the two new tests each).
 
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 
