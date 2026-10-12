@@ -32,8 +32,11 @@ type instance struct {
 	srv   *httptest.Server
 	mu    sync.Mutex
 	freed int
-	argv  []string // what /system_stats reports
-	down  bool     // the endpoint stops answering
+	// order is the calls made to the instance, in order (interrupt, free).
+	order       []string
+	interrupted int
+	argv        []string // what /system_stats reports
+	down        bool     // the endpoint stops answering
 	// onStats runs while /system_stats is being answered: the window between the proof and the
 	// stop, in which another lease can take the instance over.
 	onStats func()
@@ -64,6 +67,11 @@ func startInstance(t *testing.T, argv []string) *instance {
 			_ = json.NewEncoder(w).Encode(map[string]any{"system": map[string]any{"argv": in.argv}})
 		case r.URL.Path == "/free" && r.Method == http.MethodPost:
 			in.freed++
+			in.order = append(in.order, "free")
+			_, _ = w.Write([]byte("{}"))
+		case r.URL.Path == "/interrupt" && r.Method == http.MethodPost:
+			in.interrupted++
+			in.order = append(in.order, "interrupt")
 			_, _ = w.Write([]byte("{}"))
 		default:
 			http.NotFound(w, r)

@@ -15,6 +15,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/dmmdea/offload-harness/internal/proctree"
 )
 
 // This is the WINDOWS OS-cage for run_shell. Windows has no Landlock/seccomp/userns,
@@ -249,26 +251,19 @@ func run(ctx context.Context, spec Spec, notes *runNotes) (Result, error) {
 		}
 	}
 
-	// (2) JOB OBJECT with kill-on-close + active-process + memory limits.
-	job, err := windows.CreateJobObject(nil, nil)
+	// (2) JOB OBJECT with kill-on-close + active-process + memory limits. The job object
+	// itself is the shared primitive (internal/proctree), the same one a lease wrapper puts
+	// its command in.
+	job, err := proctree.NewJob(proctree.JobLimits{
+		KillOnClose:        true,
+		ActiveProcessLimit: winActiveProcessLimit,
+		ProcessMemoryLimit: uintptr(winProcessMemoryLimit),
+	})
 	if err != nil {
-		return Result{}, fmt.Errorf("CreateJobObject: %w", err)
+		return Result{}, err
 	}
 	// kill-on-job-close reaps strays even on an unexpected return path.
-	defer windows.CloseHandle(job)
-
-	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
-	info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
-		windows.JOB_OBJECT_LIMIT_ACTIVE_PROCESS |
-		windows.JOB_OBJECT_LIMIT_PROCESS_MEMORY
-	info.BasicLimitInformation.ActiveProcessLimit = winActiveProcessLimit
-	info.ProcessMemoryLimit = uintptr(winProcessMemoryLimit)
-	if _, err := windows.SetInformationJobObject(job,
-		windows.JobObjectExtendedLimitInformation,
-		uintptr(unsafe.Pointer(&info)),
-		uint32(unsafe.Sizeof(info))); err != nil {
-		return Result{}, fmt.Errorf("SetInformationJobObject: %w", err)
-	}
+	defer job.Close()
 
 	// (3) LOW-INTEGRITY duplicated primary token.
 	lowTok, tokErr := lowIntegrityToken()
@@ -373,9 +368,9 @@ func run(ctx context.Context, spec Spec, notes *runNotes) (Result, error) {
 
 	// ASSIGN to the job BEFORE resuming — closes the escape race (the child cannot
 	// run, and therefore cannot spawn escapees, until it is inside the job).
-	if err := windows.AssignProcessToJobObject(job, pi.Process); err != nil {
+	if err := job.Assign(pi.Process); err != nil {
 		windows.TerminateProcess(pi.Process, 1)
-		return Result{}, fmt.Errorf("AssignProcessToJobObject: %w", err)
+		return Result{}, err
 	}
 	// RESUME the confined child.
 	if _, err := windows.ResumeThread(pi.Thread); err != nil {
@@ -494,7 +489,7 @@ var (
 		return windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.LABEL_SECURITY_INFORMATION)
 	}
 	// terminateJob ends every process of the job; the deadline a caller sets depends on it.
-	terminateJob = windows.TerminateJobObject
+	terminateJob = func(j *proctree.Job, exitCode uint32) error { return j.Terminate(exitCode) }
 	// readExitCode reads a finished process's exit status; the ExitCode of every Result depends on it.
 	readExitCode = windows.GetExitCodeProcess
 )
