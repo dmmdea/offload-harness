@@ -109,10 +109,11 @@ Note "exit=$LASTEXITCODE"
 
 // powerShellHosts lists the PowerShells on this box, the one llama-swap's stub runs under first: Windows PowerShell 5.1 on
 // Windows, PowerShell 7 everywhere (it is what a Linux runner has). A PowerShell that is on PATH but cannot be started
-// here is left out, and the test log names it: a Store (MSIX) install of PowerShell 7 is on PATH through its app alias,
-// but starting it from a session with no desktop (a test runner over SSH) fails with "Access is denied". That says
-// nothing about the scripts under test, and without this every scenario failed on such a box. A PowerShell that starts
-// and then fails is kept, so a broken script still fails here.
+// here is left out, and the test log names it. PowerShell 7 puts its own install folder first on the PATH of what it
+// starts; for a Store (MSIX) install that folder is the package under Program Files\WindowsApps, and a test run under
+// such a PowerShell (a gate runner) finds pwsh.exe there and cannot start it ("Access is denied"). That says nothing
+// about the scripts under test, and without this every scenario failed on such a box. A PowerShell that starts and
+// then fails is kept, so a broken script still fails here.
 func powerShellHosts(t testing.TB) []string {
 	t.Helper()
 	var hosts []string
