@@ -30,6 +30,9 @@ func TestConfigExampleRoundTrips(t *testing.T) {
 		t.Fatalf("config.example.json comfy_dir = %q, want the Windows reference \"C:/ComfyUI\" — regenerate with `go generate .` on Windows", cfg.ComfyDir)
 	}
 	def.ComfyDir = cfg.ComfyDir
+	// Load remembers the file it read (Config.WithSource: the display-card switch follows that file while the
+	// process runs). The round trip compares settings, not where they were read from.
+	cfg = cfg.WithSource("")
 	if !reflect.DeepEqual(cfg, def) {
 		t.Fatalf("config.example.json does not round-trip to config.Default() — regenerate with `go generate .`\n got: %+v\nwant: %+v", cfg, def)
 	}
