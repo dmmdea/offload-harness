@@ -2364,31 +2364,31 @@ func runDelegate(args []string) error {
 	if err != nil {
 		return err
 	}
-	contracts := make([]core.AgentContract, 0, len(specs))
-	lints := make([][]string, 0, len(specs))
-	for i, spec := range specs {
-		// The BOX's cap (ADR 0052): a composite box admits a contract sized
-		// for its long seats; a plain box keeps the 256 KiB transport cap.
-		c, perr := delegate.PrepareContractWithCap(spec, *readRoot, cfg.AgentContextCapBytes())
-		if perr != nil {
-			return fmt.Errorf("subtask %d: %w", i, perr)
-		}
-		c.Door = "cli:delegate"
-		contracts = append(contracts, c)
-		// Linted on the PREPARED contract (context_paths already inlined —
-		// grounding is judged against everything the sub-agent will see).
-		lints = append(lints, delegate.LintAcceptance(c))
+	// The subtask cap is read off what the file holds, before anything is prepared: nine subtasks with one bad one are
+	// refused for their number exactly as nine good ones are (register D-111).
+	if err := delegate.CheckSubtaskCount(len(specs)); err != nil {
+		return err
+	}
+	// Each subtask is prepared on its own (register D-111): one that fails intake no longer rejects the valid ones.
+	// The BOX's cap (ADR 0052): a composite box admits a contract sized for its long seats; a plain box keeps the
+	// 256 KiB transport cap.
+	batch, lints, err := cliIntake(specs, *readRoot, cfg.AgentContextCapBytes(), "cli:delegate", "subtask", nil)
+	if err != nil {
+		return err
 	}
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-	results, sum, err := delegate.RunWith(context.Background(), cfg, p.RunAgentContract, contracts, *route, remotes,
+	results, sum, err := delegate.RunWith(context.Background(), cfg, p.RunAgentContract, batch.Contracts, *route, remotes,
 		cliPinOptions(*priority, *tenant, p.RescueRepack, *pinReason))
 	if err != nil {
 		return err
 	}
+	// The refused subtasks go back among the results at their own positions: one result per subtask in the file, in
+	// order, each a contract-class defer (the file's mistake, not a broken stack), which delegateExitErr leaves at exit 0.
+	results, sum = batch.Splice(results, sum, "subtask", nil)
 	out, err := json.MarshalIndent(delegate.WireResponse(results, sum, lints), "", "  ")
 	if err != nil {
 		return err
@@ -4959,37 +4959,35 @@ func runResearch(args []string) error {
 		fmt.Println(string(out))
 		return fmt.Errorf("no usable source")
 	}
-	contracts := make([]core.AgentContract, 0, len(specs))
-	lints := make([][]string, 0, len(specs))
-	for i, spec := range specs {
-		c, perr := delegate.PrepareContractWithCap(spec, "", cfg.AgentContextCapBytes())
-		if perr != nil {
-			return fmt.Errorf("source %d: %w", i, perr)
-		}
-		c.Door = "cli:research"
-		contracts = append(contracts, c)
-		lints = append(lints, delegate.LintAcceptance(c))
+	// Per page, the rule the delegate verb follows per subtask (register D-111): a page whose contract fails intake is a
+	// contract-class defer at its own place in the results and the pages that are fine are digested; only a call with no
+	// valid page is refused, naming every page it lost, each by its place in the url list.
+	resultSources := research.ResultSources(sources)
+	batch, lints, err := cliIntake(specs, "", cfg.AgentContextCapBytes(), "cli:research", "source", resultSources)
+	if err != nil {
+		return err
 	}
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-	results, sum, err := delegate.RunBatched(context.Background(), cfg, p.RunAgentContract, contracts, *route, nil,
+	results, sum, err := delegate.RunBatched(context.Background(), cfg, p.RunAgentContract, batch.Contracts, *route, nil,
 		cliPinOptions(0, "", p.RescueRepack, *pinReason))
 	if err != nil && len(results) == 0 {
 		return err
 	}
+	results, sum = batch.Splice(results, sum, "source", resultSources)
 	// A chunk error after some pages finished: render the finished pages and
 	// name the error (partial), never drop the work (same rule as the MCP tool).
 	partialErr := ""
 	if err != nil {
 		partialErr = err.Error()
-		lints = lints[:len(results)]
 	}
+	lints = lints[:len(results)]
 	wire := delegate.WireResponse(results, sum, lints)
 	// The same quote check as the MCP door (register F4); the results map to the pages that produced a digest.
-	research.AnnotateWire(&wire, research.ResultSources(sources), fetched)
+	research.AnnotateWire(&wire, resultSources, fetched)
 	out, err := json.MarshalIndent(struct {
 		Summary any               `json:"summary"`
 		Sources []research.Source `json:"sources"`
@@ -5002,7 +5000,7 @@ func runResearch(args []string) error {
 	}
 	fmt.Println(string(out))
 	if partialErr != "" {
-		return fmt.Errorf("research: partial — %d of %d pages ran before: %s", len(results), len(contracts), partialErr)
+		return fmt.Errorf("research: partial — %d of %d pages ran before: %s", len(results), len(specs), partialErr)
 	}
 	return delegateExitErr(sum)
 }
