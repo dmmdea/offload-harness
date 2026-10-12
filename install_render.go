@@ -1007,6 +1007,40 @@ func auditCPUMoEFile(text string) (violations, notes []servingtmpl.Violation) {
 	return vs, nil
 }
 
+// auditPinsFile is the A-87 rule over a LIVE file, against this box's own card table (read through
+// the renderCardTable seam, and only for a file that pins a device at all: a CPU-only or Vulkan box has
+// no nvidia-smi to run). The severity follows who maintains the file. A UUID that names no card is
+// always a violation. An index pin on identical cards is a violation in a file that is not a verbatim
+// render (unstamped, or edited since: the pin is its maintainer's choice), and a note in a verbatim
+// render, because the seeds pin by index (a seed cannot carry a UUID) and a fresh render would
+// otherwise be red with no way to satisfy the rule short of a hand edit, which turns the file
+// HAND-EDITED and red under --against-render. A box with no readable card table gets a line saying the
+// rules did not run, never a silent pass; the exit status is unchanged.
+func auditPinsFile(text string) (violations, notes []servingtmpl.Violation, skipped string) {
+	if !servingtmpl.PinsCUDADevices(text) {
+		return nil, nil, ""
+	}
+	devs, err := renderCardTable()
+	if err != nil || len(devs) == 0 {
+		why := "no card was listed"
+		if err != nil {
+			why = err.Error()
+		}
+		return nil, nil, "no card table: pin rules not applied (" + why + ")"
+	}
+	cards, _ := gpuprobe.BuildCards(devs, "")
+	_, verbatim := verbatimStamp(text)
+	for _, v := range servingtmpl.AuditPins(text, cards) {
+		if v.Rule == "pin-by-index" && verbatim {
+			v.Text += " [verbatim render: the seeds pin by index because a seed cannot carry a UUID; reported, not failed]"
+			notes = append(notes, v)
+			continue
+		}
+		violations = append(violations, v)
+	}
+	return violations, notes, ""
+}
+
 // spillViolations is the INV-1 spill rule for one resolved render: the text-level ceiling
 // (any `--n-cpu-moe N` in the rendered config above the tier's `n_cpu_moe_max`) plus the one
 // thing text cannot show: a tier that names the partial placement with no N, which
@@ -1057,7 +1091,8 @@ func seatIDs(seats []*vllmseat.Spec) map[string]bool {
 //
 // The every-expert `--cpu-moe` (W4) is refused on a file judged to have a card; the exemptions are
 // read from the file's own stamp (auditCPUMoEFile). A finding the stamp explains prints as a
-// `note:` line and does not fail the audit.
+// `note:` line and does not fail the audit. A device pin is read against this box's card table
+// (A-87, auditPinsFile): an index pin on identical cards and a UUID that names no card.
 //
 // FLAGS COME BEFORE FILES (`audit-yaml --against-render FILE...`): Go's flag
 // package stops parsing at the first non-flag argument.
@@ -1078,6 +1113,9 @@ func runAuditYAML(args []string) error {
 		vs := servingtmpl.Audit(string(b))
 		moe, notes := auditCPUMoEFile(string(b))
 		vs = append(vs, moe...)
+		pins, pinNotes, pinsSkipped := auditPinsFile(string(b))
+		vs = append(vs, pins...)
+		notes = append(notes, pinNotes...)
 		sort.SliceStable(vs, func(i, j int) bool {
 			if vs[i].Rule != vs[j].Rule {
 				return vs[i].Rule < vs[j].Rule
@@ -1098,6 +1136,9 @@ func runAuditYAML(args []string) error {
 		// here), never counted.
 		for _, n := range notes {
 			fmt.Printf("note: %s: %s\n", path, n)
+		}
+		if pinsSkipped != "" {
+			fmt.Printf("note: %s: %s\n", path, pinsSkipped)
 		}
 		if !*against {
 			continue

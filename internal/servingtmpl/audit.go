@@ -27,7 +27,7 @@ import (
 
 // Violation is one broken rule in one place of a serving config.
 type Violation struct {
-	Rule  string // the rule id: ttl, ngl0, cvd-empty, persistent, preload, n-cpu-moe, cpu-moe
+	Rule  string // the rule id: ttl, ngl0, cvd-empty, persistent, preload, n-cpu-moe, cpu-moe, pin-by-index, pin-unresolved
 	Where string // model / group name, or "top-level"
 	Text  string // the operator-facing sentence
 }
@@ -323,10 +323,212 @@ func AuditCPUMoE(text string) []Violation {
 	return out
 }
 
-// AuditPins and PinsCUDADevices are the A-87 rule (stubs: the tests come first).
-func AuditPins(text string, cards []gpuprobe.Card) []Violation { return nil }
+var (
+	// cvdValueRe matches a CUDA_VISIBLE_DEVICES assignment and captures its value, bare or quoted.
+	cvdValueRe = regexp.MustCompile(`(?:^|[\s,\["'])CUDA_VISIBLE_DEVICES=(?:"([^"]*)"|'([^']*)'|([^\s"']*))`)
+	// cudaOrderPCIRe matches CUDA_DEVICE_ORDER=PCI_BUS_ID, the setting that makes a CUDA index the
+	// nvidia-smi index (CUDA's own default order is fastest-first).
+	cudaOrderPCIRe = regexp.MustCompile(`(?:^|[\s,\["'])CUDA_DEVICE_ORDER=["']?PCI_BUS_ID\b`)
+)
 
-func PinsCUDADevices(text string) bool { return false }
+// entryPin is the device pin in force for one entry: its CUDA_VISIBLE_DEVICES value, and whether the
+// entry orders CUDA's devices by PCI bus id.
+type entryPin struct {
+	value string
+	pci   bool
+}
+
+// pinOf reads an entry the way llama-swap runs it: macros substituted, and when the variable is set
+// more than once the last setting wins (a setting inline in the command is applied over the env list).
+func pinOf(m map[string]any, macros map[string]string) (entryPin, bool) {
+	cmd, _ := m["cmd"].(string)
+	cmd = expandMacros(cmd, macros)
+	env := expandMacros(flatEnv(m["env"]), macros)
+	last := func(s string) (string, bool) {
+		v, found := "", false
+		for _, mm := range cvdValueRe.FindAllStringSubmatch(s, -1) {
+			v, found = mm[1]+mm[2]+mm[3], true
+		}
+		return v, found
+	}
+	v, ok := last(cmd)
+	if !ok {
+		v, ok = last(env)
+	}
+	if !ok {
+		return entryPin{}, false
+	}
+	return entryPin{value: v, pci: cudaOrderPCIRe.MatchString(env) || cudaOrderPCIRe.MatchString(cmd)}, true
+}
+
+// pinTokens splits a CUDA_VISIBLE_DEVICES value into its plain indices and its GPU UUIDs. An empty
+// value (Audit's cvd-empty rule), -1 and anything else that is neither are ignored here.
+func pinTokens(value string) (indices []int, uuids []string) {
+	for _, tok := range strings.Split(value, ",") {
+		tok = strings.Trim(strings.TrimSpace(tok), `"'`)
+		if n, err := strconv.Atoi(tok); err == nil && n >= 0 && tok != "" && tok[0] != '+' {
+			indices = append(indices, n)
+			continue
+		}
+		if len(tok) >= 4 && strings.EqualFold(tok[:4], "GPU-") {
+			uuids = append(uuids, tok)
+		}
+	}
+	return indices, uuids
+}
+
+// PinsCUDADevices reports whether any entry pins CUDA devices, so a caller reads the box's card table
+// (an nvidia-smi run) only for a file that needs it. A document that does not parse pins nothing.
+func PinsCUDADevices(text string) bool {
+	var doc struct {
+		Models map[string]map[string]any `yaml:"models"`
+		Macros any                       `yaml:"macros"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
+		return false
+	}
+	macros := macroTable(doc.Macros)
+	for _, m := range doc.Models {
+		if p, ok := pinOf(m, macros); ok {
+			if idx, uu := pinTokens(p.value); len(idx)+len(uu) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// AuditPins is the A-87 rule: on a box with two cards of the same model, a device pin is by UUID, and
+// every UUID names a card. It reads the entries of a live file against the box's own card table
+// (gpuprobe.ReadCards) and returns two kinds of finding.
+//
+//   - pin-by-index: an entry whose CUDA_VISIBLE_DEVICES is a list of plain indices at least one of which
+//     names a card whose model name another card also carries. An index is the card's place on the PCI
+//     bus; nothing in the config records which of two identical cards was meant, and a power loss or a
+//     BIOS reset that reorders enumeration moves the seat to the other one without a word. The index of a
+//     card no other card resembles names exactly one card and is left alone. An index maps to the
+//     nvidia-smi index only under CUDA_DEVICE_ORDER=PCI_BUS_ID (CUDA's default order is fastest-first), so
+//     an entry that does not set it is judged by the weaker form: any plain index while two cards share a
+//     name. A card table that gives no model names cannot show two cards to be identical, so it never
+//     makes an index ambiguous.
+//   - pin-unresolved: a GPU UUID (or UUID prefix) that matches no card, or several: CUDA hides every
+//     device from the first one it cannot resolve, so the seat runs on fewer cards than it was sized for
+//     or on none (INV-1).
+//
+// The severity is the caller's, because only it holds the stamp: a seed cannot carry a UUID, so the
+// index pins of a verbatim render are the renderer's own output and a note, while the same pin in a
+// hand-maintained file is its maintainer's choice and a violation. With no card table (cards empty)
+// there is nothing to compare with and the result is empty; the caller says so.
+func AuditPins(text string, cards []gpuprobe.Card) []Violation {
+	if len(cards) == 0 {
+		return nil
+	}
+	var doc struct {
+		Models map[string]map[string]any `yaml:"models"`
+		Macros any                       `yaml:"macros"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
+		return nil
+	}
+	macros := macroTable(doc.Macros)
+
+	// Cards that share a model name, as groups of nvidia-smi indices, keyed by the lower-cased name.
+	byName := map[string][]int{}
+	nameOf := map[string]string{}
+	cardAt := map[int]gpuprobe.Card{}
+	for _, c := range cards {
+		cardAt[c.NvidiaIndex] = c
+		if n := strings.ToLower(strings.TrimSpace(c.Name)); n != "" {
+			byName[n] = append(byName[n], c.NvidiaIndex)
+			nameOf[n] = strings.TrimSpace(c.Name)
+		}
+	}
+	var shared []string // names carried by more than one card, in order of their first card
+	for n, idx := range byName {
+		sort.Ints(idx)
+		if len(idx) > 1 {
+			shared = append(shared, n)
+		}
+	}
+	sort.Slice(shared, func(i, j int) bool { return byName[shared[i]][0] < byName[shared[j]][0] })
+	describe := func(n string) string {
+		idx := byName[n]
+		parts := make([]string, len(idx))
+		for i, x := range idx {
+			parts[i] = strconv.Itoa(x)
+		}
+		both := "both"
+		if len(idx) > 2 {
+			both = "all"
+		}
+		return fmt.Sprintf("cards %s and %s are %s %s", strings.Join(parts[:len(parts)-1], ", "), parts[len(parts)-1], both, nameOf[n])
+	}
+
+	var out []Violation
+	for name, m := range doc.Models {
+		pin, ok := pinOf(m, macros)
+		if !ok {
+			continue
+		}
+		indices, uuids := pinTokens(pin.value)
+
+		var unresolved []string
+		for _, u := range uuids {
+			if _, err := gpuprobe.ResolveCards(cards, []string{u}); err != nil {
+				unresolved = append(unresolved, fmt.Sprintf("%s (%v)", u, err))
+			}
+		}
+		if len(unresolved) > 0 {
+			out = append(out, Violation{Rule: "pin-unresolved", Where: name, Text: fmt.Sprintf(
+				"CUDA_VISIBLE_DEVICES=%s names no card on this box: %s. CUDA hides every device from the first pin it cannot resolve, "+
+					"so the seat runs on fewer cards than it was sized for, or on none (INV-1); nvidia-smi -L lists the UUIDs this box has",
+				pin.value, strings.Join(unresolved, "; "))})
+		}
+
+		var ambiguous []string // the groups of identical cards the pinned indices could mean
+		seen := map[string]bool{}
+		add := func(n string) {
+			if !seen[n] {
+				seen[n] = true
+				ambiguous = append(ambiguous, describe(n))
+			}
+		}
+		if len(indices) > 0 {
+			if pin.pci {
+				for _, ix := range indices {
+					c, found := cardAt[ix]
+					if !found {
+						continue
+					}
+					if n := strings.ToLower(strings.TrimSpace(c.Name)); len(byName[n]) > 1 {
+						add(n)
+					}
+				}
+			} else {
+				for _, n := range shared {
+					add(n)
+				}
+			}
+		}
+		if len(ambiguous) > 0 {
+			why := ""
+			if !pin.pci {
+				why = " (this entry does not set CUDA_DEVICE_ORDER=PCI_BUS_ID, so its index follows CUDA's own fastest-first order and cannot be mapped to a card at all)"
+			}
+			out = append(out, Violation{Rule: "pin-by-index", Where: name, Text: fmt.Sprintf(
+				"CUDA_VISIBLE_DEVICES=%s pins by index, but %s: an index is the card's place on the PCI bus, and a power loss or a BIOS reset "+
+					"that reorders enumeration moves the seat to the other card without a word%s. Pin by UUID instead (GPU-..., from nvidia-smi -L)",
+				pin.value, strings.Join(ambiguous, "; "), why)})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Where != out[j].Where {
+			return out[i].Where < out[j].Where
+		}
+		return out[i].Rule < out[j].Rule
+	})
+	return out
+}
 
 // Violations formats an audit result as one line per violation.
 func Violations(vs []Violation) string {
