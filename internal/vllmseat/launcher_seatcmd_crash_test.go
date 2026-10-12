@@ -2,6 +2,7 @@ package vllmseat
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,15 +108,39 @@ Note "exit=$LASTEXITCODE"
 `
 
 // powerShellHosts lists the PowerShells on this box, the one llama-swap's stub runs under first: Windows PowerShell 5.1 on
-// Windows, PowerShell 7 everywhere (it is what a Linux runner has).
-func powerShellHosts() []string {
+// Windows, PowerShell 7 everywhere (it is what a Linux runner has). A PowerShell that is on PATH but cannot be started
+// here is left out, and the test log names it: a Store (MSIX) install of PowerShell 7 is on PATH through its app alias,
+// but starting it from a session with no desktop (a test runner over SSH) fails with "Access is denied". That says
+// nothing about the scripts under test, and without this every scenario failed on such a box. A PowerShell that starts
+// and then fails is kept, so a broken script still fails here.
+func powerShellHosts(t testing.TB) []string {
+	t.Helper()
 	var hosts []string
 	for _, n := range []string{"powershell", "pwsh"} {
-		if p, err := exec.LookPath(n); err == nil {
-			hosts = append(hosts, p)
+		p, err := exec.LookPath(n)
+		if err != nil {
+			continue
 		}
+		if err := startsHere(p); err != nil {
+			t.Logf("leaving out %s: it is on PATH but does not start here: %v", p, err)
+			continue
+		}
+		hosts = append(hosts, p)
 	}
 	return hosts
+}
+
+// startsHere runs the PowerShell at path once with an empty command. It returns an error only when the process could
+// not be started (or did not finish within a minute); an exit status, whatever it is, means it started.
+func startsHere(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	err := exec.CommandContext(ctx, path, "-NoProfile", "-NonInteractive", "-Command", "exit 0").Run()
+	var exit *exec.ExitError
+	if err == nil || (errors.As(err, &exit) && ctx.Err() == nil) {
+		return nil
+	}
+	return err
 }
 
 // stubRun is what one run of a rendered stub under the driver left behind.
@@ -243,7 +268,7 @@ func countLines(s, line string) int {
 // stop task that will not start or never finishes cannot keep the stub from exiting. Runs in every PowerShell the box has
 // (5.1 is what llama-swap runs).
 func TestSeatCmdCrashExitReapsTheDeadGenerationThroughTheStopTask(t *testing.T) {
-	hosts := powerShellHosts()
+	hosts := powerShellHosts(t)
 	if len(hosts) == 0 {
 		t.Skip("no PowerShell on this box: seat-cmd.ps1 runs under it")
 	}
@@ -428,7 +453,7 @@ func seatCmdCrashScenarios(t *testing.T, host string) {
 // stop task and waiting for the port to stop answering, it leaves the marker seat-cmd.ps1 reads. If it cannot, the stop
 // goes on and the stub falls back to cleaning up after the unload, which is only redundant.
 func TestSeatCmdStopMarksAnUnloadForTheStub(t *testing.T) {
-	hosts := powerShellHosts()
+	hosts := powerShellHosts(t)
 	if len(hosts) == 0 {
 		t.Skip("no PowerShell on this box: seat-cmdstop.ps1 runs under it")
 	}

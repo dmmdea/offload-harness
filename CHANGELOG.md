@@ -6,6 +6,10 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — the seat-stub tests run on a machine whose PowerShell 7 is a Store install
+
+- `internal/vllmseat` runs the rendered seat stubs under every PowerShell on PATH. A Store (MSIX) install of PowerShell 7 is on PATH through its app alias but cannot be started from a session with no desktop (a test runner over SSH: "Access is denied"), so every scenario under it failed without testing anything. Each PowerShell is now started once with an empty command first; one that cannot be started is left out and the test log names it, while one that starts and then fails is kept, so a broken script still fails.
+
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)
