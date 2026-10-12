@@ -156,7 +156,10 @@ for it, and when the server never answers at all.
   (`relayRenderChild` in `batch-jobs.mjs`), so the line reaches the output the Go side reads. `Generate` returns a `RunError` of class
   `comfy_unusable`, `pipeline.classifyErr` now honours a typed `RunError` class like `gpugen.ClassifyErr` does (it used to re-guess
   from the words of the message), and the ledger row carries `err_class` `comfy_unusable` (reason code `infrastructure`) instead of
-  `other`. Only the image runner (`comfy-render.mjs`, through `comfy-generate.mjs`) prints the line today; the video, animate, music,
+  `other`. An image `--batch` that meets a dead ComfyUI stops (C-83) and writes a row for every job: the one it stopped on
+  (`comfy-render exited 3: ...`) and `not run: ComfyUI became unusable at job i/N (...)` for each later one. Those words name no class,
+  so `batchErrClass` files the not-run rows (and the exit-3 row) with the batch's own typed class; a job that failed on its own
+  before the stop keeps the class its words give (`oom`, `timeout`). Only the image runner (`comfy-render.mjs`, through `comfy-generate.mjs`) prints the line today; the video, animate, music,
   edit, inpaint, upscale and run-graph runners raise the same *server unusable* error but do not print it yet, so their failures
   still read from the words of their message.
 - **The bounds.** `POST /prompt` and `GET /view` passed no `AbortSignal` (the `/system_stats`, `/queue` and `/history` calls always
@@ -164,7 +167,10 @@ for it, and when the server never answers at all.
   `SUBMIT_TIMEOUT_MS` (120 s: the call validates and queues, it does not run) and `fetchView` by `VIEW_TIMEOUT_MS` (600 s), which
   covers the **whole** request, the body read included (ComfyUI is on loopback, so 600 s is a ceiling for a multi-GB video, not an
   estimate of its transfer). Both take a `timeoutMs` a test can shorten; a timed-out call rejects with
-  `ComfyUI POST /prompt timeout: no complete answer within <N> ms ...` (or `GET /view`), which the Go side classes `timeout`.
+  `ComfyUI POST /prompt timeout: no complete answer within <N> ms ...` (or `GET /view`). A timed-out `POST /prompt` is also *server
+  unusable* (a server that does not answer it can run no later job): the render exits 3 with the class line, the Go side files
+  `comfy_unusable`, and a `--batch` stops instead of paying the 120 s on every remaining job. A timed-out `GET /view` is not: the render
+  has finished and its output is on disk, so it stays a plain failure and the Go side classes it `timeout`.
 
 **Picking the produced file from `/history` never trusts node-id order alone (found 2026-09-23).**
 `comfy-output.mjs`'s `firstOutputFile()` scans the `/history` outputs object for the first node
@@ -1660,12 +1666,14 @@ Every runner takes `--timeout-sec`; the pipeline passes its timeout minus a 15 s
 - **The output directory is made up front.** The pipeline creates the directory the result lands in before it takes the lease and reports the `MkdirAll` error as a defer (`cannot create the output directory ...`); the runner repeats the check and fails with `OUT_DIR_UNWRITABLE` before it spawns anything, so a render never ends in "cannot write the output" after minutes of GPU time.
 - **A bound route whose file is gone is a typed defer before the lease (CT-54).** The five engine lanes (sdcpp video, sdcpp animate,
   audio.cpp voice and music, the sdcpp image lane) read the same `mediacap` derivation the fleet node's door, `doctor` and
-  `offload_status` read, after their own checks of the bindings (and, on the iGPU lanes, of the engine binary) and before the output
-  directory, the seed, the prompt refiner and the lease. A route that derives BOUND-BUT-MISSING (the config binds it and a weight, the runner script, ffmpeg or ffprobe is not
-  there) defers with `err_class` `route_not_ready`; the reason names the route, the config key and the missing path, and says another
+  `offload_status` read, after their own checks that every required key is set and before they resolve the runner script and the
+  engine binary, create the output directory, mint the seed, refine the prompt or take the lease. A route that derives BOUND-BUT-MISSING
+  (the config binds it and a weight, the engine binary, the runner script, ffmpeg or ffprobe is not there) defers with `err_class` `route_not_ready`; the reason names the route, the config key and the missing path, and says another
   node may serve it. Before this a local call took the media lease, spawned the runner and deferred `other` ("--model not found")
-  milliseconds later, while a node answered the same condition typed (503). A route that is NOT CONFIGURED (nothing bound) keeps the
-  lane's own "is not configured" sentence and no class. The class is a config fault of the box in the closed reason set, and no
+  milliseconds later, while a node answered the same condition typed (503). A required key left unset (nothing bound, or one key of
+  several) is the lane's own `<key> is not configured` sentence with no class: it names the key, and it comes first. (For the video,
+  animate and audio routes mediacap reads a partly bound route BOUND-BUT-MISSING, so `doctor` and the node door call it that; the sdcpp
+  image route reads one of `sdcpp_bin` / `sdcpp_model` unset as NOT CONFIGURED.) The class is a config fault of the box in the closed reason set, and no
   circuit breaker counts it (the breaker judges the llama tiers).
 - **Backend values are each engine's own.** sd.cpp (`sdcpp_backend`, `animategen_sdcpp_backend`) takes `vulkan` or `vulkanN` (`vulkan0`). audio.cpp (`audiocpp_backend`) takes `vulkan` only, and the device index is the separate `audiocpp_device` key (`--backend vulkan --device 0`); `vulkan0` is not an audio.cpp value, and config load, mediacap, the pipeline and the runner all say so (with the `audiocpp_device` hint) instead of leaving the CLI to reject it at run time. audio.cpp itself also knows `cuda`, `hip`, `rocm` and `metal`, but they are refused here (`cpu_backend_refused`) until a real captured log of their buffer names and an evidence pattern for them exist: the runner proves a run was on the GPU by `<component>.weights.buffer_name Vulkan<N>` lines, so a binding to another backend would read CONFIGURED and then end every call as `CPU_PLACEMENT` "no GPU evidence" even when it ran on that GPU. A non-numeric `audiocpp_device` is its own error (`DEVICE_INVALID`, `err_class` `device_invalid`), not a backend refusal.
 - **Output gates.** An engine that exits 0 is not a finished job: a clip is checked for black and frozen output, audio for dead air (below), and a gate fails CLOSED: the dead-air pass must have EXITED 0 AND printed ebur128's `Summary:` block, which ffmpeg prints only at the very end and from which the integrated loudness is read (every per-tick line also carries an `I:`, so a pass killed after a few ticks would otherwise report a loudness and an empty silence list that reads "no silence"); a pass that exited non-zero, died of a signal or printed no Summary (or a build without `silencedetect` / `ebur128`), and a clip whose length ffmpeg could not read, is `UNMEASURABLE` (`unmeasurable`), never "clean" and never described as "no picture". A frame counts as black when 99.9 % of its pixels are (`blackdetect` `pic_th=0.999`, in `render/igpu-qa.mjs`): the 0.98 default rejected legitimate low-key footage, a dark field with a candle flame or the moon in it (0.75 % to 1.5 % of the frame), as `black_clip`, a full failure that is never retried; a pure black clip still fails, and a clip fails when 95 % of it is black. A result is written to a hidden partial file beside its delivery path and renamed onto it only after the gate passed: a failed, rejected or deadline-killed run leaves no partial and never overwrites (or deletes) a good file already at the same path, which is deterministic when the caller names no `out`.

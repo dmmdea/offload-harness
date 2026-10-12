@@ -697,9 +697,12 @@ with a 503. A call made on that machine itself (`generate-video`, `animate-chara
 box, or the same MCP tools) now answers the same way and in the same millisecond, with `err_class` `route_not_ready`, a reason naming
 the route, the config key and the missing path, and the advice to place the job on another node; it takes no lease and creates no
 output directory. `route auto` already sends such a call to a fleet node, `doctor` and `offload_status` show the same verdict, and the
-fix is to restore the file (or unbind the route). A ComfyUI that stopped answering is `comfy_unusable` in the ledger instead of
-`other` ([media-generation.md](systems/media-generation.md)), and a `POST /prompt` or `GET /view` it never answers ends after 120 s and
-600 s.
+fix is to restore the file (or unbind the route). A required key left unset (the VAE empty while the weight and the binary are set, or
+nothing bound at all) is a configuration gap, not a missing file: the lane keeps its own `<key> is not configured` sentence, which
+names the key, with no class. A ComfyUI that stopped answering is `comfy_unusable` in the ledger instead of `other`
+([media-generation.md](systems/media-generation.md)), on every row of an image `--batch` that stopped on it (the job it stopped on and the
+jobs it never ran; a job that failed on its own earlier keeps its own class). A `POST /prompt` it never answers ends after 120 s and
+counts as that death (the render exits 3 and a `--batch` stops); a `GET /view` it never answers ends after 600 s as a plain `timeout`.
 
 **A bare `--` ends the flags on the media verbs (CT-52).** `local-offload generate-audio out.wav -- "--- Intro ---"` passes the text,
 where `"--- Intro ---"` alone was read as a flag and the text came out empty. Everything after the first `--` is a positional, in order,
