@@ -183,12 +183,16 @@ type Result struct {
 	Duration float64   `json:"duration"`
 	Text     string    `json:"text"`
 	Segments []Segment `json:"segments"`
-	// WordsReliable is the self-check of the word timestamps (D-38, issue #169): false when the words[]
-	// of some segment sit at times that disagree with the segment's own start by wordDriftThresholdSec
-	// or more, true when every segment that carries words agrees, nil (the key is absent) when no
-	// segment carries words. It flags the symptom and names no cause: whisper-server was seen to hand
-	// back word times lagging their segment by minutes on a long file, and a consumer that cuts audio
-	// at whole-word boundaries needs to know not to trust them. Set by Transcribe from checkWordDrift.
+	// WordsReliable is the self-check of the word timestamps (D-38, issue #169): false when the FIRST
+	// word of some segment starts wordDriftThresholdSec or more away from that segment's start, true
+	// when the first word of every segment that carries words starts within it, nil (the key is
+	// absent) when no segment carries words. True is a statement about those first words only: a
+	// later word that sits far outside its segment still reads true (words[0] is the issue's own
+	// formula, and a stricter bound on every word waits for a measurement of honest audio). It flags
+	// the symptom and names no cause: whisper-server was seen to hand back word times lagging their
+	// segment by minutes on a long file, and a consumer that cuts audio at whole-word boundaries needs
+	// to know not to trust them. Set by Transcribe from checkWordDrift; pipeline and sttremote publish
+	// it in the transcribe payload.
 	WordsReliable *bool `json:"words_reliable,omitempty"`
 	// WordsDriftSec is the largest |segment.start - words[0].start| over the segments that carry
 	// words, in seconds: the number behind WordsReliable. Zero (and absent) when WordsReliable is nil

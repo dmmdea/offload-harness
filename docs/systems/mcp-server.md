@@ -129,6 +129,9 @@ local. `local` pins the call to this box (a held card then defers `gpu_busy` wit
 with none eligible, returns `deferred: true` with `defer_class: capacity` (or `config` with no remotes) without touching
 the local GPU. The audio is read on this box and sent as 16 kHz mono Opus; `srt_path`, `text_path` and `json_path` are
 always files this box wrote under its own `media_dir`, and `meta.node` / `meta.placement` say where the call ran.
+When the transcript carries word times the result also has `words_reliable` and `words_drift_sec`: `false` means the
+first word of some segment starts 0.5 s or more away from its segment (issue #169, see
+[offload-pipeline.md](offload-pipeline.md)), so audio should not be cut at word boundaries from those times.
 `select` still projects the result here, whichever box ran it. `engine: "npu"` is this box's own Hailo sidecar and never
 travels: a route named there other than `local` is refused (an omitted route is not a request to travel). The CLI
 `local-offload transcribe --route` carries the same vocabulary and defaults to `local`. See
