@@ -839,8 +839,9 @@ measurement, in both places that draw this line.
   `TestBuildInputOpensTheDisplayCardAtTheCapWhateverThePresence`); the stale-table skip said `gpu_display_cap_pct is 0` to an operator whose config
   says 60 (`TestAPlacementFromAStaleTableKeepsTheDisplayCardClosed`; the allocator pin is `TestAStaleTableClosesTheDisplayCardAndTheSkipNamesTheTable`);
   the switch written after start was not seen (`TestTheDisplayCapSwitchFollowsTheFileTheConfigWasReadFrom`, `TestBuildInputFollowsTheDisplayCapSwitchInTheConfigFile`,
-  `TestTheMediaDoorSeesTheOperatorsSwitchWrittenAfterTheServerStarted`; the six grant-check tests in `gpu_reserve_grantcheck_test.go` now move the cap by
-  writing the config file, not an in-memory counter). Ten more mutants, each RED: the refused value clamped back to 100; the stale flag unset, its skip
+  `TestTheMediaDoorSeesTheOperatorsSwitchWrittenAfterTheServerStarted`; the six grant-check tests in `gpu_reserve_grantcheck_test.go` now build their input through
+  `gpualloc.BuildInput` from a config file, and the three that close the card write `0` to that file, instead of flipping an in-memory counter no
+  production path can touch). Ten more mutants, each RED: the refused value clamped back to 100; the stale flag unset, its skip
   detail the cap's, and the flag ignored by `displayOpen`; the cap-100 exception removed from `floorApplies`; `BuildInput` reading the snapshot
   (red on the `gpualloc` and the `pipeline` test); `LiveGPUDisplayCap` ignoring the source, not remembering the last value read, and `Load` not
   recording the file. Four comments that still described the presence rule now describe the cap.
