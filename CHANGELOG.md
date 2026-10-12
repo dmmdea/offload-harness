@@ -869,7 +869,7 @@ measurement, in both places that draw this line.
 
 ### Fixed — the lease-guards review round: `--die-with-wrapper` no longer ends an instance another lease took over, a tree-orphan's host RAM is no longer charged twice, and the docs say what the code does (GPU-F9, GPU-I3 / P10)
 
-An independent review of GPU-F9 and GPU-I3 (the P10 port) found fifteen entries over twelve distinct defects; each was read against the
+An independent review of GPU-F9 and GPU-I3 (the P10 port) found seventeen entries over twelve distinct defects; each was read against the
 source, scored with Jev, and either fixed red-first or answered. Every fix has a test that failed before it and a mutant that turns
 that test red (`scripts/mutation-check.sh`).
 
