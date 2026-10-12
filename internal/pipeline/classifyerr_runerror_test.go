@@ -78,9 +78,14 @@ func TestImageLaneRecordsAComfyUnusableFailureWithItsClass(t *testing.T) {
 	cfg := config.Default()
 	cfg.ImageGenScript = classScript(t, dir, "comfy_unusable")
 	cfg.MediaDir = dir
-	cfg.LedgerPath = filepath.Join(dir, "ledger.jsonl")
+	ledgerPath := filepath.Join(dir, "ledger.jsonl")
+	led, err := ledger.Open(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer led.Close()
 	isolateLease(&cfg, dir)
-	p := &Pipeline{cfg: cfg}
+	p := &Pipeline{cfg: cfg, led: led}
 
 	res := p.Run(context.Background(), core.Request{Task: core.TaskGenerateImage, Input: "a gray sphere"})
 	if res.OK || !res.Deferred {
@@ -89,7 +94,7 @@ func TestImageLaneRecordsAComfyUnusableFailureWithItsClass(t *testing.T) {
 	if res.Meta.ErrClass != "comfy_unusable" {
 		t.Fatalf("Meta.ErrClass = %q, want comfy_unusable (reason: %s)", res.Meta.ErrClass, res.Reason)
 	}
-	rows, err := ledger.ReadAll(cfg.LedgerPath)
+	rows, err := ledger.ReadAll(ledgerPath)
 	if err != nil {
 		t.Fatalf("read ledger: %v", err)
 	}

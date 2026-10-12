@@ -5342,6 +5342,13 @@ func classifyErr(err error) string {
 	if errors.Is(err, llamaclient.ErrLaneUnavailable) {
 		return errClassLaneGone
 	}
+	// A class gpugen decided structurally (the IGPU_CLASS= line the runner reported, or the "timeout" of a deadline gpugen
+	// itself observed) is exact and wins over any wording in the message, which embeds the child's last output: a
+	// "comfy_unusable" failure whose text says "the zoom lens timeout" is not an oom. gpugen.ClassifyErr reads it first too.
+	var re *gpugen.RunError
+	if errors.As(err, &re) && re.Class != "" {
+		return re.Class
+	}
 	// A full volume (0.178.0), by the typed errno or the errno token in the text, never by prose: the
 	// image lanes classify with this function, and a batch item that failed on a full drive was
 	// recorded as "other" (gpugen.IsDiskFull is the one rule, shared with gpugen.ClassifyErr).
