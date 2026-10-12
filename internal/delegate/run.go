@@ -1538,8 +1538,8 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// raised by the first attempt's own min_turn, but the retry goes to a DIFFERENT node, so that
 	// number belongs to a seat the retry will never use (retryFloorFor already exempted the
 	// seat-down and lost-root defers for exactly this reason): a seat whose cold load plus two
-	// 8,192-token turns is measured at 1,112 s took 20 to 325 s to give the answer, and 14 of 14
-	// retries of a day were refused for it before any node was asked. A retry seat that publishes
+	// 8,192-token turns is measured at 1,112 s took 20 to 325 s to give the answer, and 7 of the
+	// 14 retries skipped in one day were refused for it before any node was asked. A retry seat that publishes
 	// no rate still falls back to the first attempt's number in retryFloorOn, said in the note.
 	floor, floorSrc := r.firstPassRetryFloor()
 	remaining := pl.remaining(start, budget)
