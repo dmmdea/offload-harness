@@ -79,11 +79,15 @@ func legacyInferenceOn() bool {
 // LegacyInference reports whether the inference of legacy leases is on for this process.
 func LegacyInference() bool { return legacyInferenceOn() }
 
-// SetComfyDir arms config comfy_dir: where the ComfyUI launch marker is read from.
+// SetComfyDir arms config comfy_dir: where the ComfyUI launch marker is read from. The lease readers look in the same
+// directory when a lease's wrapper is gone: a marker ties a ComfyUI instance to the lease it was launched under, so
+// that lease keeps its claim while the instance runs (gpulease/tree.go). Arming both here keeps the directory one
+// setting with one call site (config.loadArmed).
 func SetComfyDir(dir string) {
 	comfyDirMu.Lock()
 	comfyDir = strings.TrimSpace(dir)
 	comfyDirMu.Unlock()
+	gpulease.SetComfyDir(dir)
 }
 
 func resetScopers() {
