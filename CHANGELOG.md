@@ -867,10 +867,15 @@ shell test, three were documentation, and one holds only once another branch is 
   child that inherits `TMP`, `TEMP` and `TMPDIR` writes into the watched folder, so a child with a scrubbed environment (the browse
   sidecar's) or a test that names a fixed directory (`/dev/shm`) writes elsewhere and a `CLEAN` says nothing about it. The count above
   read "12 exempt packages"; it is 10 exempt and 2 that only read the path (12 without a proof).
-- **Holds only after a merge.** `feat/0183-lease-guards` adds `internal/proctree`, whose tests start their own test binary. Merged
-  with this branch, `TestEveryRelaunchingPackageProvesItLeavesNothing` fails until `relaunchExempt` names the package; this branch
-  cannot name it first, because the lint also fails an exemption for a package that does not exist. The merged tree with that one entry added passes
-  the lint.
+- **Holds only after a merge.** Two packages that other changes add start their own test binary: `internal/proctree`
+  (`feat/0183-lease-guards`) and `internal/winexec` (the no-visible-windows change). Merged with this branch,
+  `TestEveryRelaunchingPackageProvesItLeavesNothing` fails until `relaunchExempt` names each; this branch cannot name them first, because
+  the lint also fails an exemption for a package that does not exist. The merged trees with those entries added pass the lint.
+- **The relaunch rule did not see a start through `winexec`.** The no-visible-windows change starts the test's own binary with
+  `winexec.Command`, the `exec.Command` whose child opens no window on Windows, and the rule only knew `os/exec`: merged with that
+  change the proof tests of `fleetnode`, `mediaremote`, `pairworkloads` and `pipeline` read as stubs and the lint failed for all four.
+  `winexec.Command`, `CommandContext`, `CommandDetached` and `CommandIfNoConsole` count as starts now (matched by the tail of the import
+  path, so the lint names no module). Red: five synthetic cases, each a real proof started through one of them.
 - **Tests.** The shell self-test runs 87 checks on Linux (one skipped: the PowerShell twin is not on that host) and the PowerShell
   self-test 95, under PowerShell 7 and under Windows PowerShell 5.1; they take `TRIPWIRE_SELFTEST_FAILFAST=1` and (PowerShell) `TRIPWIRE_SELFTEST_ONLY=tag,...`
   so that a mutation check runs seconds, not the suite. Mutation-checked with `scripts/mutation-check.sh` and `.ps1`, each mutant RED:

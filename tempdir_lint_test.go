@@ -62,7 +62,7 @@ type tempFile struct {
 	forms      map[string]int // form -> number of uses in the file
 	hookForms  int            // uses inside TestMain, init functions and package-level variable initializers
 	relaunches bool           // os.Args[0] or os.Executable() appears
-	starts     bool           // os.Args[0] or os.Executable() is the program of an exec.Command, exec.CommandContext or os.StartProcess call
+	starts     bool           // os.Args[0] or os.Executable() is the program of an exec.Command, exec.CommandContext, winexec.Command or os.StartProcess call
 	proof      bool           // the file holds a relaunchProofName that really relaunches, points the temp dir and reads the folder
 }
 
@@ -82,9 +82,32 @@ type tempAllow struct {
 // importName returns the local name a file gives the package imported as path, or "" when it is not imported by a
 // usable name (not imported, a blank import, a dot import).
 func importName(f *ast.File, path, def string) string {
+	return importNameWhere(f, func(p string) bool { return p == path }, def)
+}
+
+// winexecSuffix is the tail of the import path of the repository's hidden-window process starter (internal/winexec), matched by
+// its tail so that the lint names no module path.
+const winexecSuffix = "/internal/winexec"
+
+// starterNames maps the local name a file gives each package whose Command and CommandContext start a child process to the kind of
+// that package: "exec" for os/exec, "winexec" for the repository's own starter, whose Command is exec.Command with a child that
+// opens no window on Windows. A test that starts a copy of its own binary through either is starting it.
+func starterNames(f *ast.File) map[string]string {
+	starters := map[string]string{}
+	if n := importName(f, "os/exec", "exec"); n != "" {
+		starters[n] = "exec"
+	}
+	if n := importNameWhere(f, func(p string) bool { return strings.HasSuffix(p, winexecSuffix) }, "winexec"); n != "" {
+		starters[n] = "winexec"
+	}
+	return starters
+}
+
+// importNameWhere is importName for the import whose path match accepts.
+func importNameWhere(f *ast.File, match func(path string) bool, def string) string {
 	for _, imp := range f.Imports {
 		p, err := strconv.Unquote(imp.Path.Value)
-		if err != nil || p != path {
+		if err != nil || !match(p) {
 			continue
 		}
 		if imp.Name == nil {
@@ -202,9 +225,9 @@ func relaunchesItself(node ast.Node, osName string) bool {
 }
 
 // startsOwnBinary reports whether root hands the running test binary's path to a process start: the program
-// argument of exec.Command, exec.CommandContext or os.StartProcess is os.Args[0], a call to os.Executable, or a name
-// assigned from one of them. A path passed to some other function is not followed.
-func startsOwnBinary(root ast.Node, osName, execName string) bool {
+// argument of exec.Command, exec.CommandContext, their winexec twins or os.StartProcess is os.Args[0], a call to os.Executable, or a
+// name assigned from one of them. A path passed to some other function is not followed.
+func startsOwnBinary(root ast.Node, osName string, starters map[string]string) bool {
 	own := map[string]bool{}
 	mark := func(lhs []ast.Expr, rhs []ast.Expr) {
 		for i, r := range rhs {
@@ -249,10 +272,11 @@ func startsOwnBinary(root ast.Node, osName, execName string) bool {
 			return !found
 		}
 		prog := -1
+		kind := starters[pkg] // "" when pkg is not a starter package
 		switch {
-		case pkg == execName && fn == "Command", pkg == osName && fn == "StartProcess":
+		case kind == "exec" && fn == "Command", kind == "winexec" && (fn == "Command" || fn == "CommandDetached" || fn == "CommandIfNoConsole"), pkg == osName && fn == "StartProcess":
 			prog = 0
-		case pkg == execName && fn == "CommandContext":
+		case kind != "" && fn == "CommandContext":
 			prog = 1
 		}
 		if prog >= 0 && prog < len(call.Args) && isOwn(call.Args[prog]) {
@@ -264,9 +288,9 @@ func startsOwnBinary(root ast.Node, osName, execName string) bool {
 }
 
 // holdsRelaunchProof reports whether fn is a real relaunch-leaves-nothing test: it starts the test binary itself (an
-// exec call whose program is os.Args[0] or os.Executable), points TMP, TEMP and TMPDIR somewhere, and reads that folder back. A stub with the right name proves nothing.
-func holdsRelaunchProof(fn *ast.FuncDecl, osName, execName string) bool {
-	if fn.Body == nil || !startsOwnBinary(fn.Body, osName, execName) {
+// exec or winexec call whose program is os.Args[0] or os.Executable), points TMP, TEMP and TMPDIR somewhere, and reads that folder back. A stub with the right name proves nothing.
+func holdsRelaunchProof(fn *ast.FuncDecl, osName string, starters map[string]string) bool {
+	if fn.Body == nil || !startsOwnBinary(fn.Body, osName, starters) {
 		return false
 	}
 	pointed := map[string]bool{}
@@ -308,8 +332,8 @@ func analyzeTestSource(fset *token.FileSet, name string, src any) (tempFile, err
 	}
 	osName, ioutilName := importName(f, "os", "os"), importName(f, "io/ioutil", "ioutil")
 	res := tempFile{forms: map[string]int{}}
-	execName := importName(f, "os/exec", "exec")
-	res.starts = startsOwnBinary(f, osName, execName)
+	starters := starterNames(f)
+	res.starts = startsOwnBinary(f, osName, starters)
 	for _, decl := range f.Decls {
 		hook := runsInEveryCopy(decl)
 		for form, n := range inspectTempForms(decl, osName, ioutilName) {
@@ -321,7 +345,7 @@ func analyzeTestSource(fset *token.FileSet, name string, src any) (tempFile, err
 		if relaunchesItself(decl, osName) {
 			res.relaunches = true
 		}
-		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == relaunchProofName && holdsRelaunchProof(fd, osName, execName) {
+		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == relaunchProofName && holdsRelaunchProof(fd, osName, starters) {
 			res.proof = true
 		}
 	}
@@ -445,7 +469,7 @@ func relaunchProblems(pkgs map[string]pkgFacts, exempt, neverStarted map[string]
 		case isNever && !p.relaunches:
 			add("%s is in relaunchNeverStarted but its tests no longer refer to their own test binary: remove the entry", dir)
 		case isNever && p.starts:
-			add("%s is in relaunchNeverStarted but a test hands the path of its own test binary to exec.Command, exec.CommandContext or os.StartProcess: it starts a copy, so add %s or list it in relaunchExempt", dir, relaunchProofName)
+			add("%s is in relaunchNeverStarted but a test hands the path of its own test binary to exec.Command, exec.CommandContext, winexec.Command or os.StartProcess: it starts a copy, so add %s or list it in relaunchExempt", dir, relaunchProofName)
 		case isNever && p.proof:
 			add("%s holds %s and is also in relaunchNeverStarted: remove the entry, the test is the proof", dir, relaunchProofName)
 		case isNever:
@@ -603,6 +627,13 @@ func TestARelaunchedTestBinaryLeavesNothingInTheTempDir(t *testing.T) {
 		{"a real proof", real, true, true, true},
 		{"the same through a name assigned from os.Executable", viaExecutable, true, true, true},
 		{"the same through exec.CommandContext", replaceOnce(replaceOnce(real, "exec.Command(os.Args[0],", "exec.CommandContext(context.Background(), os.Args[0],"), `"os/exec"`, `"os/exec"; "context"`), true, true, true},
+		{"the same through the repository's hidden-window starter, winexec.Command", replaceOnce(replaceOnce(real, "exec.Command(os.Args[0],", "winexec.Command(os.Args[0],"), `"os/exec"`, `"example.test/mod/internal/winexec"`), true, true, true},
+		{"the same through winexec.CommandContext", replaceOnce(replaceOnce(real, "exec.Command(os.Args[0],", "winexec.CommandContext(context.Background(), os.Args[0],"), `"os/exec"`, `"example.test/mod/internal/winexec"; "context"`), true, true, true},
+		{"the same through winexec.CommandDetached", replaceOnce(replaceOnce(real, "exec.Command(os.Args[0],", "winexec.CommandDetached(os.Args[0],"), `"os/exec"`, `"example.test/mod/internal/winexec"`), true, true, true},
+		{"the same through winexec.CommandIfNoConsole", replaceOnce(replaceOnce(real, "exec.Command(os.Args[0],", "winexec.CommandIfNoConsole(os.Args[0],"), `"os/exec"`, `"example.test/mod/internal/winexec"`), true, true, true},
+		{"the same through winexec under another local name", replaceOnce(replaceOnce(real, "exec.Command(os.Args[0],", "hidden.Command(os.Args[0],"), `"os/exec"`, `hidden "example.test/mod/internal/winexec"`), true, true, true},
+		{"winexec.Command with another program is not a start of the test binary", replaceOnce(replaceOnce(real, "exec.Command(os.Args[0],", "winexec.Command(os.Args[1],"), `"os/exec"`, `"example.test/mod/internal/winexec"`), false, false, false},
+		{"a package that only ends in winexec is not the starter", replaceOnce(replaceOnce(real, "exec.Command(os.Args[0],", "winexec.Command(os.Args[0],"), `"os/exec"`, `"example.test/other/winexec"`), true, false, false},
 		{"an empty stub with the right name", `package p
 import "testing"
 func TestARelaunchedTestBinaryLeavesNothingInTheTempDir(t *testing.T) {}`, false, false, false},

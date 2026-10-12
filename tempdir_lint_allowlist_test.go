@@ -37,7 +37,7 @@ var relaunchExempt = map[string]string{
 
 // relaunchNeverStarted: every package whose tests refer to the path of their own test binary but never start a copy of
 // it, with what they do with the path. The lint fails an entry when a test of the package hands that path to
-// exec.Command, exec.CommandContext or os.StartProcess (a path passed to some other function is not followed).
+// exec.Command, exec.CommandContext, their winexec twins or os.StartProcess (a path passed to some other function is not followed).
 var relaunchNeverStarted = map[string]string{
 	"internal/delegate": "os.Executable only names the running test binary so that it can be hashed (hashOwnExecutable); no copy is started, which is why its TestMain may make the suite's state root without a copy-sharing rule",
 	"internal/nodeswap": "os.Executable only names this process's image for a lookup of running processes (platformDeps' finder); no copy is started",
