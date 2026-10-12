@@ -25,6 +25,27 @@ Versioning: [SemVer](https://semver.org/).
   "timeout"`, `no deadline word at all: classified "unclassified"` and `an unmarked 503 queue full row classified "seat-infra"`;
   five mutations (the capacity-class check off, 429 dropped from the pattern, a refused row counted bad, refusals counted in
   `rows`, the precedence swapped) each turn them red. Docs: `docs/systems/coding-agent.md` (the rigger paragraph).
+- **A node's capacity refusal is a place in line in the delegation log, on the fleet page and in the rigger, and a subtask
+  lost to a full fleet now has a row that says so.** The capacity wait outlasts a node's 503 or 429 at dispatch, but the
+  refused attempt's corpus row was an ordinary error row (`deferred` false, `acceptance_pass` false), so thirteen of them in one
+  day were filed as serving-stack failures and listed as `delegation` errors on the fleet page, while nine of the twelve
+  subtasks behind them landed on another node seconds later. The other half: a wait that ended as a capacity defer after a
+  refusal wrote no row of its own (`settle` returned when `attempts > 0`) and carried the refused attempt's job id, so for the
+  subtasks that really were lost the refusal row was the only record, and it read as a dispatch error. Now the row of a
+  capacity-refused attempt carries `refusal: {status, retry_after_sec}` (additive; the ledger row is unchanged, still deferred
+  with `reason_code` `queue_full`), and a marked row is never the end of a subtask: a wait that ends as a capacity defer and a
+  chain that ends as the "placement refused" failure each write a terminal row under a job id of their own (the way a cut chain
+  already did, ADR 0065), and the caller is handed that id. The fleet page and `top` no longer raise a `delegation` error for
+  a marked row and show it as `refused (re-placed)`. The cooldown, the re-placement and the wait are unchanged, and so are the
+  rows of a refusal that is not about capacity. A test that pinned the old "the attempt's row alone" ending
+  (`TestASettledOutcomeThatIsNotACutKeepsItsAttemptsRow`) is rewritten to pin the new one. Tests
+  `internal/delegate/refusal_row_test.go` and `internal/fleetview/refusal_test.go`, written first: red before with, for
+  example, `a 503 refusal inside the wait is a bare error row, want a refusal marker`, `the terminal row = ... deferred:false
+  ..., want deferred, class capacity` and `the errors feed carries the refused attempt as an error`; the delegate tests read the
+  rows back through the rigger, so the writer and the reader cannot drift. Eight mutations (the marker never set, the closing row
+  skipped for a refusal, the failure's terminal row skipped, the marker left off the line, the flag kept on the published
+  outcome, the mark kept after a landing, the fleet page folding a marked row, its field dropped from the decode) each turn
+  them red. Docs: ADR 0073 (amendment 2026-10-12), `docs/systems/fleet-overview.md`, `docs/OPERATOR-GUIDE.md`.
 
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 

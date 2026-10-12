@@ -257,6 +257,12 @@ type PlacedResult struct {
 	// a delegator bug rather than any node's answer.
 	refused       bool
 	refusalStatus int
+	// refusalRow marks the result of an attempt whose corpus row was written as a REFUSAL (the node answered the
+	// dispatch with a capacity refusal, 503 or 429): the row records a place in line, not the subtask's outcome,
+	// and the delegation log says so (delegationLogLine.Refusal). Set by attempt's finish, on the attempt's own
+	// result only; every row the engine writes for an outcome (settle, exhaustedSettled) clears it, because those
+	// copy a refused attempt's result and are the terminal record that refusal is not.
+	refusalRow bool
 	// retryAfterSec is the node's own Retry-After (seconds) on a 503 dispatch
 	// refusal, 0 when it sent none. It is a HINT about when the node expects a
 	// worker to free, never a promise, and it is NEVER slept on inside
@@ -1992,6 +1998,15 @@ type placements struct {
 	// recorded by settle(); one that made at least one is already in the
 	// corpus and the ledger through that attempt, the way exhausted() relies on.
 	attempts int
+	// lastRowRefusal: the row of the latest attempt was written as a refusal (PlacedResult.refusalRow). A subtask
+	// that ends without a node taking it has no row of its own then, and settle writes one.
+	lastRowRefusal bool
+}
+
+// countAttempt files one attempt that went through attempt's finish and so wrote its row.
+func (pl *placements) countAttempt(pr PlacedResult) {
+	pl.attempts++
+	pl.lastRowRefusal = pr.refusalRow
 }
 
 // settle is the telemetry close-out for an outcome NO attempt produced —
@@ -2009,7 +2024,10 @@ func (r *runner) settle(contract core.AgentContract, pr PlacedResult, pl *placem
 	cutBefore := pr.deadlineCut
 	pr = r.cutOutcome(pr, false)
 	cutHere := pr.deadlineCut && !cutBefore
-	if pl.attempts > 0 && !cutHere {
+	// A refused attempt's row is a refusal, not an outcome (delegationLogLine.Refusal), so when the last attempt's
+	// row is one, no row says how the subtask ended: this one does, as a cut's does.
+	closing := cutHere || pl.lastRowRefusal
+	if pl.attempts > 0 && !closing {
 		return pr
 	}
 	// A wait the deadline ended after refused attempts (ADR 0065 decision 2) is recorded
@@ -2018,9 +2036,10 @@ func (r *runner) settle(contract core.AgentContract, pr PlacedResult, pl *placem
 	// REFUSED dispatch, whose row already says "dispatch ... 503" for a job no node held,
 	// and a second row under it would double-count one id — and the caller is given that
 	// id, so the result, the ledger row and the corpus row are one thing.
-	if pr.JobID == "" || (cutHere && pl.attempts > 0) {
+	if pr.JobID == "" || (closing && pl.attempts > 0) {
 		pr.JobID = mintJobID()
 	}
+	pr.refusalRow = false
 	pr.wallMs = time.Since(since).Milliseconds()
 	r.record(contract, pr)
 	return pr
@@ -2335,7 +2354,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 	// Recorded whatever the outcome — a SUCCESSFUL placement must exclude its
 	// own seat from the verification retry just as firmly as a refused one.
 	pl.tried[pr.ranBase] = true
-	pl.attempts++
+	pl.countAttempt(pr)
 	if !r.isReplaceable(pr) {
 		return pr
 	}
@@ -2432,7 +2451,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 			}
 			return r.awaitCapacity(ctx, i, contract, start, budget, pl, pr, refusals, why)
 		}
-		pl.attempts++
+		pl.countAttempt(pr)
 		pr.Replacements = len(refusals)
 		if !r.isReplaceable(pr) {
 			// Some node TOOK it (or the call's deadline ended the chain before one was asked:
@@ -2937,7 +2956,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				}
 				spanStart = time.Now() // the attempt is charged; the wait resumes here
 				pl.tried[""] = true
-				pl.attempts++
+				pl.countAttempt(pr)
 				if !r.isReplaceable(pr) {
 					return r.landedAfterWait(pr, idle, refusals)
 				}
@@ -3077,7 +3096,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 					// cooled - the wait goes on and reads the fleet again next tick.
 				} else {
 					pl.tried[bases[best]] = true
-					pl.attempts++
+					pl.countAttempt(pr)
 					if !r.isReplaceable(pr) {
 						return r.landedAfterWait(pr, idle, refusals)
 					}
@@ -3209,7 +3228,7 @@ func (r *runner) hintSeatWithoutAWait(ctx context.Context, i int, contract core.
 		return PlacedResult{}, false
 	}
 	pl.tried[""] = true
-	pl.attempts++
+	pl.countAttempt(pr)
 	if capacityDeferRefusal(pr) {
 		// The line filled between the read and the run: the seat declined the job and ran nothing, so it is the refusal
 		// the caller's shed or defer names, not the result it publishes.
@@ -3341,7 +3360,7 @@ func (r *runner) runDecided(ctx context.Context, i int, contract core.AgentContr
 	forced := placement{view: r.localView(), reason: note, decided: &dec}
 	pr := r.attempt(ctx, i, replaced, &forced)
 	pl.tried[""] = true
-	pl.attempts++
+	pl.countAttempt(pr)
 	if !waited {
 		return pr
 	}
@@ -4256,6 +4275,7 @@ func replacementNote(refusals []string, landed bool) string {
 // counting it either — read as a contradiction on the wire. Err already carries
 // the same refusal list, so nothing is lost by the omission.
 func exhausted(last PlacedResult, refusals []string, why string) PlacedResult {
+	last.refusalRow = false // what is published is the chain's outcome, not the refused attempt's row
 	if capacityDeferRefusal(last) {
 		// The last thing refused was the local seat's own capacity DEFER, and
 		// nothing else had room either. That is still a defer - the fleet is
@@ -4303,12 +4323,21 @@ func exhausted(last PlacedResult, refusals []string, why string) PlacedResult {
 // attempt's own intent was closed by its finish. since is when the span the closing row
 // measures began.
 func (r *runner) exhaustedSettled(contract core.AgentContract, last PlacedResult, refusals []string, why string, since time.Time) PlacedResult {
+	refusedLast := last.refusalRow
 	pr := exhausted(last, refusals, why)
 	if !r.call.reached() {
+		if refusedLast {
+			// The row of the last refused attempt is a refusal (delegationLogLine.Refusal), so the failure the
+			// caller is handed has no row yet: it gets one under a job id of its own, like a cut chain's.
+			pr.JobID = mintJobID()
+			pr.wallMs = time.Since(since).Milliseconds()
+			r.record(contract, pr)
+		}
 		return pr
 	}
 	pr.ranLocal, pr.intentRecorded, pr.orphanable, pr.waitCapacity = false, false, false, false
 	pr.withdrawn, pr.nodeNeverRan, pr.nodeTerminal = false, "", false
+	pr.refusalRow = false
 	pr = r.cutOutcome(pr, true)
 	pr.JobID = mintJobID()
 	pr.wallMs = time.Since(since).Milliseconds()
@@ -5747,6 +5776,9 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 				r.intent.done(jobID, intentNoteTerminal)
 			}
 		}
+		// A dispatch a node refused for capacity is re-placed or waited out by the engine, so its row is a refusal,
+		// not an outcome. Whatever ends the subtask without a node taking it writes a terminal row of its own.
+		pr.refusalRow = pr.refused && pr.Err != "" && capacityRefusal(pr.refusalStatus)
 		r.record(contract, pr)
 		r.pairTerminal(jobID, &pr)
 		return pr
@@ -7772,6 +7804,19 @@ type delegationLogLine struct {
 	// (PlacedResult.Placed). Omitempty: a plain box's corpus row is unchanged,
 	// and a pre-0.116 row reads as "one implicit layer", never as unplaced.
 	Placed *core.Placed `json:"placed,omitempty"`
+	// Refusal marks a row that is a node's capacity refusal at dispatch (503 or 429), not an outcome: the engine
+	// outwaits it and re-places the subtask, whose outcome is another row (the one that landed, or the terminal
+	// row a lost subtask gets under a job id of its own). Absent on every other row, and on rows written before
+	// the marker, so a reader that sees none reads them as it always did. The rigger does not count a marked row
+	// as a failure.
+	Refusal *refusalMark `json:"refusal,omitempty"`
+}
+
+// refusalMark is the delegation log's record of one capacity refusal: the status the node sent and its own
+// Retry-After (0 = none).
+type refusalMark struct {
+	Status        int `json:"status"`
+	RetryAfterSec int `json:"retry_after_sec,omitempty"`
 }
 
 // record writes one subtask's telemetry: the delegation-log corpus line and a
@@ -7807,6 +7852,9 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 	if pr.Err == "" {
 		res := pr.Result
 		line.Result = &res
+	}
+	if pr.refusalRow {
+		line.Refusal = &refusalMark{Status: pr.refusalStatus, RetryAfterSec: pr.retryAfterSec}
 	}
 	r.corpusTried.Add(1)
 	if err := appendDelegationLog(r.cfg.BaseDir(), line); err != nil {

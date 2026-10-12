@@ -59,7 +59,7 @@ to draw a node's sparklines.
 |---|---|---|
 | `probe` | `error` | The node's `/fleet/health` fetch failed this tick (unreachable, timeout, non-200). |
 | `job` | `error` | A job in that node's `/fleet/jobs` feed reached state `error`. |
-| `delegation` | `warn` | A row in the delegation-log corpus was deferred, or ran but failed acceptance. |
+| `delegation` | `warn` | A row in the delegation-log corpus was deferred, or ran but failed acceptance. A row marked `refusal` (a node's 503/429 capacity refusal at dispatch, which the delegator outwaits before the subtask lands elsewhere) is not one: it is a place in line, shown in the delegation table as `refused (re-placed)`. |
 
 **`fleet-smoke` contract** — the harness's version of PAIR's "Test traffic" button: one grounded
 contract (harness default step budget, 60 s cap) dispatched to every configured node with
@@ -127,12 +127,14 @@ its own (`CardTiles`, `internal/fleetview/cards.go`).
 **The delegation-log fold** (`errors.go`) reads today's and yesterday's day-sharded corpus files
 (`BaseDir()/delegation-log/YYYY-MM-DD.jsonl`), keeps the last `maxDelegations` rows, and loosely
 decodes only `delegationRowFields` (`ts`, `job_id`, `node`, `seat`, `placement_reason`, `deferred`,
-`defer_class`, `acceptance_pass`, `wall_ms`, `error`) — a decode narrow enough that a future corpus
+`defer_class`, `acceptance_pass`, `wall_ms`, `error`, `refusal`) — a decode narrow enough that a future corpus
 column can never break it, and deliberately excludes `contract` (and any field pulled from it, such
 as `goal`): `/api/overview` is unauthenticated, and contract content has no business on the one route
 this package serves with no auth at all. A missing corpus file (fresh install, a delegator that has
 never run) is not an error. Every row that is `deferred` or failed acceptance becomes one `Error`
-(severity `warn`, source `delegation`), deduped on `"deleg|<job_id>"`.
+(severity `warn`, source `delegation`), deduped on `"deleg|<job_id>"`, except a row that carries the
+`refusal` marker (`{status, retry_after_sec}`, written on the row of an attempt a node refused for
+capacity): thirteen of those in one day read as thirteen failures of a fleet whose subtasks all landed.
 
 **Job errors** (`poller.go`) come from each node's `/fleet/jobs` feed: every row in state `error`
 becomes one `Error` (severity `error`, source `job`), deduped on `"<node>|<job_id>"`, with one

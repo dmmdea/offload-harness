@@ -173,6 +173,29 @@ The slot was the cost the bound existed to cap, and the subtask paid it.
    only when the earlier chunk returns, so a chunk whose waits run to the horizon leaves its later chunks to the no-room defer of
    decision 10; their subtasks would have waited on the same saturated fleet.
 
+## Amendment 2026-10-12 (a refused attempt is a place in line, and the rows say so)
+
+The wait outlasts a node's 503 or 429 at dispatch, and the attempt's corpus row was written like any other: an error, `deferred`
+false, `acceptance_pass` false, no marker. Everything that reads the corpus took it for a failed subtask: the rigger filed 13 of
+them in one day under `seat-infra` ("fix the serving stack", no seat was asked), and the fleet page listed them as `delegation`
+errors, while all but three of the 12 subtasks behind them landed on another node seconds later. The other half was a lost
+subtask with no record: when the wait ended as a capacity defer after a refused attempt, `settle` wrote no row ("the last
+attempt's row stands") and the defer carried the refused attempt's job id, so the refusal row was the only row of a subtask that
+really was lost and it read as a dispatch error.
+
+1. **A capacity-refused attempt's row carries a `refusal` marker** (`{"status":503,"retry_after_sec":N}`, additive and
+   omitted on every other row). The rigger counts a marked row on its own `refusals` line outside `rows`, and the fleet page
+   shows it as `refused (re-placed)` and raises no error for it. The ledger row of the attempt is unchanged: still `deferred`,
+   still `reason_code` `queue_full`.
+2. **A marked row is never the end of a subtask.** Whatever ends a subtask without a node taking it writes a terminal row of its
+   own under a job id of its own, the way a cut chain already did (ADR 0065 decision 2): a wait that ends as a capacity defer
+   (`settle`), and the "placement refused" failure of a chain that ran out of nodes or budget (`exhaustedSettled`). The caller is
+   handed that id, so the result, the ledger row and the corpus row are one thing, and the refusal rows beside it are the
+   attempts that came before. A subtask the last attempt of which was not a capacity refusal keeps its attempt's row as its
+   record, as before.
+3. **Not changed.** What the delegator does with the refusal (the cooldown, the re-placement, the wait) and the rows of a
+   non-capacity refusal (404, 409, a dial that never reached the node).
+
 ## Consequences
 
 - A fully saturated fleet holds the last subtask of a call to the horizon, about 24 minutes of a default call, where it

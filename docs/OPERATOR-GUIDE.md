@@ -1970,6 +1970,11 @@ llama-server actually served, hashed from live `/props`) — and the log line ad
 `delegator_version`/`delegator_build_sha256` for the acceptance/placement side. Paired
 cross-seat comparisons must refuse rows whose pins differ or are absent; absent means
 *unknown* (pre-0.81, or the seat was gone by probe time), never "same config".
+A node that answers a dispatch 503 or 429 for capacity ("queue full") is a place in line, not a
+failed subtask: the delegator outwaits it and re-places the subtask, and the attempt's corpus line
+carries `refusal: {status, retry_after_sec}`. `rig` and the fleet page read that line as a
+refusal, not a failure; the subtask's own outcome is the line that landed, or, when nothing took it,
+a terminal line under a job id of its own (a capacity defer, or the "placement refused" failure).
 
 | Failure | Fix |
 |---|---|
