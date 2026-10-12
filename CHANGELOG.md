@@ -840,11 +840,10 @@ measurement, in both places that draw this line.
   it fails, F15's gain is off for that lease: the render lane keeps its own rule and unloads every model off the memory stack, the
   seats placed on other cards included, and says so; this is the safe direction (a card that stays occupied fails the render, a
   seat that is reloaded costs a warm-up), chosen over a list built from the config, which can leave a resident model on the leased
-  card. A roster that was read and is empty is trusted to mean nothing is resident. Second, for a box without `layers`: this entry made
-  the unload know from the serving config which card a model is on, and left the load fence not knowing. The fence (`modelaffinity`,
-  armed from `config.ModelPins`) placed a model through `layers` only, so on such a box a text load waited for any media lease,
-  whatever card it was on. A later change (register C-86a) gives the fence the same serving config pin through the same reader.
-  Also: a client that is not the harness can still load a model onto a leased card; the re-clear removes it
+  card. A roster that was read and is empty is trusted to mean nothing is resident. Second, for a box without `layers`: the unload now knows from the
+  serving config which card a model is on, and the load fence does not. The fence (`modelaffinity`, armed from `config.ModelPins`)
+  still places a model through `layers` only, so on such a box a text load waits for any media lease, whatever card it is on,
+  exactly as before this change; reading the serving config there is a separate change. Also: a client that is not the harness can still load a model onto a leased card; the re-clear removes it
   before the next render, it does not stop it, and it unloads what the first job's unload would have (a model whose placement is
   unknown, in-flight requests drained first, then forced). The serving config is a path in the harness config that no default
   fills in: a box that does not set `serving_config_path` has no model placed by it. Two parallel jobs of one lease can both read the
