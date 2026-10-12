@@ -39,7 +39,7 @@ Versioning: [SemVer](https://semver.org/).
   a marked row and show it as `refused (re-placed)`. The cooldown, the re-placement and the wait are unchanged, and so are the
   rows of a refusal that is not about capacity and of a job the node acked and then took back (a queue deadline it confirmed,
   a record that says it never ran): that job was held under an id the node's record and the intent ledger know, so its row is
-  not a refusal mark and the failure of a subtask nobody else took keeps that id (found by the lenovo gate:
+  not a refusal mark and the failure of a subtask nobody else took keeps that id (found by a Linux gate host:
   `TestWithdrawAgainstTheRealNodeHandler` read the node's record under the published id, and a first version of the mark had
   replaced it). The ledger now holds two rows where a lone refused dispatch with the wait off ended the subtask (the attempt
   and the "placement refused" failure; `TestOnlyAJobANodeAckedCarriesAFleetJobID` pinned one). A test that pinned the old "the attempt's row alone" ending
