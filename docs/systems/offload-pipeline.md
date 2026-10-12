@@ -267,6 +267,17 @@ claim that the audio is silent. The OpenAI protocol never reads no-speech off a 
 path crashes on such audio). What the rule cannot see is another process doing the same to the same
 upstream: an alone call that dies that way reads as no speech.
 
+Transcription also checks its own **word times** (D-38, issue #169). whisper-server's `verbose_json` carries a
+`words[]` array per segment and `internal/sttclient` hands it on untouched; on a long file those word times have
+been seen to lag their segment by minutes (up to 152 s on a 730 s file), which breaks any consumer that cuts audio
+at word boundaries. `Transcribe` therefore takes the largest `|segment.start - words[0].start|` over the segments
+that carry words and compares it with 0.5 s, the issue's own threshold. `Result.WordsReliable` is `false` at or
+above it, `true` below it and absent when no segment carries words (the OpenAI protocol never does);
+`Result.WordsDriftSec` is that largest gap in seconds. The flag names the symptom, not the cause: where the
+per-chunk offsets are lost is not found, so #169 stays open until a long file run through a speech seat under its
+lease shows it. The two fields are set on the client's `Result` only; the `offload_transcribe` payload, the
+`.segments.json` file and `internal/sttremote`'s copy of a node's answer do not publish them yet.
+
 ## Important flows
 
 - [../flows/cascade-escalation-and-defer.md](../flows/cascade-escalation-and-defer.md) — the walk in
