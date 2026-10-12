@@ -220,24 +220,119 @@ func TestAWeightThatIsThereStillRuns(t *testing.T) {
 	}
 }
 
-// TestAnUnboundRouteKeepsItsOldDefer: a lane whose route is NOT CONFIGURED (nothing bound) keeps the lane's own
-// "is not configured" defer and its (absent) class; CT-54 speaks only for a bound route with a missing file.
+// unsetKeyLane is one lane with the config edit that leaves ONE of its required keys unset (a half-bound route) and the edit that
+// leaves ALL of them unset (nothing bound), and the key the lane's own sentence names.
+type unsetKeyLane struct {
+	name  string
+	route string
+	key   string // the key the half-bound edit leaves unset, and the lane's sentence names
+	// halfState is what mediacap reads for the half-bound edit: BOUND-BUT-MISSING for the engine routes, NOT CONFIGURED for the sdcpp
+	// image route (mediacap.routesWith reads one of sdcpp_bin/sdcpp_model unset as nothing bound, so there lane and door agree).
+	halfState mediacap.State
+	cfg       func(t *testing.T, dir string) config.Config
+	halfway   func(cfg *config.Config)
+	nothing   func(cfg *config.Config)
+	req       func(dir string) core.Request
+}
+
+func unsetKeyLanes() []unsetKeyLane {
+	return []unsetKeyLane{
+		{
+			name: "generate_video (sdcpp)", route: "generate_video", key: "sdcpp_vae", halfState: mediacap.BoundButMissing,
+			cfg: func(t *testing.T, dir string) config.Config { c, _ := routeLanes()[0].cfg(t, dir); return c },
+			halfway: func(cfg *config.Config) {
+				fb := cfg.VideoGenFamilies["fastwan"]
+				fb.SdcppVAE = ""
+				cfg.VideoGenFamilies["fastwan"] = fb
+			},
+			nothing: func(cfg *config.Config) {
+				fb := cfg.VideoGenFamilies["fastwan"]
+				fb.SdcppBin, fb.SdcppModel, fb.SdcppVAE, fb.SdcppT5xxl, fb.SdcppHighNoiseModel = "", "", "", "", ""
+				cfg.VideoGenFamilies["fastwan"] = fb
+			},
+			req: func(dir string) core.Request { return videoReq(dir, nil) },
+		},
+		{
+			name: "animate_character (sdcpp)", route: "animate_character", key: "animategen_sdcpp_vae", halfState: mediacap.BoundButMissing,
+			cfg:     func(t *testing.T, dir string) config.Config { c, _ := routeLanes()[1].cfg(t, dir); return c },
+			halfway: func(cfg *config.Config) { cfg.AnimateGenSdcppVAE = "" },
+			nothing: func(cfg *config.Config) {
+				cfg.AnimateGenSdcppBin, cfg.AnimateGenDepthBin, cfg.AnimateGenSdcppModel = "", "", ""
+				cfg.AnimateGenSdcppVAE, cfg.AnimateGenSdcppT5xxl, cfg.AnimateGenDepthModel = "", "", ""
+			},
+			req: func(dir string) core.Request { return animateReq(dir, nil) },
+		},
+		{
+			name: "generate_audio voice (audiocpp)", route: "generate_audio:voice", key: "audiocpp_voice_model", halfState: mediacap.BoundButMissing,
+			cfg:     func(t *testing.T, dir string) config.Config { c, _ := routeLanes()[2].cfg(t, dir); return c },
+			halfway: func(cfg *config.Config) { cfg.AudiocppVoiceModel = "" },
+			nothing: func(cfg *config.Config) { cfg.AudiocppBin, cfg.AudiocppVoiceModel = "", "" },
+			req:     func(dir string) core.Request { return audioReq(dir, "voice", "hola mundo", nil) },
+		},
+		{
+			name: "generate_image (sdcpp)", route: "generate_image", key: "sdcpp_model", halfState: mediacap.NotConfigured,
+			cfg:     func(t *testing.T, dir string) config.Config { c, _ := routeLanes()[4].cfg(t, dir); return c },
+			halfway: func(cfg *config.Config) { cfg.SdcppModel = "" },
+			nothing: func(cfg *config.Config) { cfg.SdcppBin, cfg.SdcppModel = "", "" },
+			req: func(dir string) core.Request {
+				return core.Request{Task: core.TaskGenerateImage, Input: "a gray sphere", Params: map[string]any{"out": filepath.Join(dir, "i.png"), "seed": 7}}
+			},
+		},
+	}
+}
+
+// TestAnUnboundRouteKeepsItsOldDefer: a lane whose route is NOT CONFIGURED (nothing bound at all) keeps the lane's own "is not
+// configured" defer and its (absent) class; CT-54 speaks only for a bound route with a missing file.
 func TestAnUnboundRouteKeepsItsOldDefer(t *testing.T) {
 	requireNodePipeline(t)
-	dir := t.TempDir()
-	cfg, _ := routeLanes()[0].cfg(t, dir)
-	fb := cfg.VideoGenFamilies["fastwan"]
-	fb.SdcppVAE = "" // a required key left unset: the lane's own message, not route_not_ready
-	cfg.VideoGenFamilies["fastwan"] = fb
-	res := (&Pipeline{cfg: cfg}).Run(context.Background(), videoReq(dir, nil))
-	if res.OK || !res.Deferred {
-		t.Fatalf("want a defer, got ok=%v", res.OK)
+	for _, lane := range unsetKeyLanes() {
+		t.Run(lane.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := lane.cfg(t, dir)
+			lane.nothing(&cfg)
+			if got := routeState(cfg, lane.route); got != mediacap.NotConfigured {
+				t.Fatalf("the premise is gone: route %s reads %s with nothing bound, want NOT CONFIGURED", lane.route, got)
+			}
+			res := (&Pipeline{cfg: cfg}).Run(context.Background(), lane.req(dir))
+			if res.OK || !res.Deferred {
+				t.Fatalf("want a defer, got ok=%v", res.OK)
+			}
+			if res.Meta.ErrClass != "" {
+				t.Errorf("ErrClass = %q, want none (the old defer is untyped)", res.Meta.ErrClass)
+			}
+			if !strings.Contains(res.Reason, "is not configured") {
+				t.Errorf("reason %q must keep the lane's own sentence", res.Reason)
+			}
+		})
 	}
-	if res.Meta.ErrClass != "" {
-		t.Errorf("ErrClass = %q, want none (the old defer is untyped)", res.Meta.ErrClass)
-	}
-	if !strings.Contains(res.Reason, "sdcpp_vae is not configured") {
-		t.Errorf("reason %q must keep the lane's own sentence", res.Reason)
+}
+
+// TestARouteWithAKeyLeftUnsetKeepsTheLanesOwnSentence: a PARTLY bound route (some required keys set, one unset) is the lane's own
+// "<key> is not configured" defer and no class, although for the video, animate and audio routes mediacap (doctor, offload_status
+// and the node door's verdict) reads it BOUND-BUT-MISSING ("<engine> is selected but <key> is unset"). Deliberate: the lane's sentence names the key and is as exact
+// as the derivation's; route_not_ready is for a bound file the disk lacks (a weight, the engine binary, the runner script).
+// The test pins the divergence so it is a decision and not a surprise.
+func TestARouteWithAKeyLeftUnsetKeepsTheLanesOwnSentence(t *testing.T) {
+	requireNodePipeline(t)
+	for _, lane := range unsetKeyLanes() {
+		t.Run(lane.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := lane.cfg(t, dir)
+			lane.halfway(&cfg)
+			if got := routeState(cfg, lane.route); got != lane.halfState {
+				t.Fatalf("the premise is gone: route %s reads %s with %s unset, want %s", lane.route, got, lane.key, lane.halfState)
+			}
+			res := (&Pipeline{cfg: cfg}).Run(context.Background(), lane.req(dir))
+			if res.OK || !res.Deferred {
+				t.Fatalf("want a defer, got ok=%v", res.OK)
+			}
+			if res.Meta.ErrClass != "" {
+				t.Errorf("ErrClass = %q, want none (the lane's own sentence is untyped)", res.Meta.ErrClass)
+			}
+			if !strings.Contains(res.Reason, lane.key) || !strings.Contains(res.Reason, "is not configured") {
+				t.Errorf("reason %q must be the lane's own sentence naming %s", res.Reason, lane.key)
+			}
+		})
 	}
 }
 
