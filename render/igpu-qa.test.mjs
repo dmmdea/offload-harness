@@ -208,7 +208,7 @@ test("convertDepthFrames: an ffmpeg failure is an error with its stderr; a conve
 const ffmpeg = resolveFfmpeg();
 const ffprobe = ffmpeg ? resolveFfprobe(ffmpeg) : "";
 const real = { skip: !ffmpeg || !ffprobe ? "no ffmpeg/ffprobe" : false };
-const ff = (...args) => spawnSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", ...args], { encoding: "utf8" });
+const ff = (...args) => spawnSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", ...args], { encoding: "utf8", windowsHide: true });
 
 test("real ffmpeg: 1-channel 16-bit depth PNGs of the model's own size become rgb24 PNGs at exactly W x H", real, () => {
   const d = scratch();

@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // Device is one parsed nvidia-smi device line: the index/uuid/name nvidia-smi
@@ -486,7 +488,7 @@ func NvidiaSmiRunner() func() (string, error) {
 			return "", err
 		}
 		return RunDisplayAware(func(withAttached bool) (string, error) {
-			out, err := exec.Command(bin, smiArgs(withAttached)...).Output()
+			out, err := winexec.Command(bin, smiArgs(withAttached)...).Output()
 			return string(out), err
 		})
 	}
@@ -539,7 +541,7 @@ func Read(ctx context.Context) ([]Device, error) {
 		return nil, fmt.Errorf("nvidia-smi: %w", err)
 	}
 	return readDisplayAware(func(withAttached bool) (string, error) {
-		out, err := exec.CommandContext(ctx, bin, smiArgs(withAttached)...).Output()
+		out, err := winexec.CommandContext(ctx, bin, smiArgs(withAttached)...).Output()
 		if err != nil && ctx.Err() != nil {
 			return "", fmt.Errorf("nvidia-smi: %w", ctx.Err())
 		}

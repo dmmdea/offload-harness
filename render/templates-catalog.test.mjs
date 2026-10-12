@@ -1666,7 +1666,7 @@ test("golden: the installed 0.1.94 package reproduces the research counts (skipp
 // mutants named in its `Kills:` comment. They are grouped by what they cover, not by mutant.
 // =============================================================================================
 const MODULE_PATH = fileURLToPath(new URL("./templates-catalog.mjs", import.meta.url));
-const spawnModule = (args) => spawnSync(process.execPath, [MODULE_PATH, ...args], { encoding: "utf8" });
+const spawnModule = (args) => spawnSync(process.execPath, [MODULE_PATH, ...args], { encoding: "utf8", windowsHide: true });
 const scratch = (prefix) => {
   const root = nfs.mkdtempSync(`${nos.tmpdir().replace(/\\/g, "/")}/${prefix}-`).replace(/\\/g, "/");
   return { root, cleanup: () => nfs.rmSync(root, { recursive: true, force: true }) };
@@ -1692,7 +1692,7 @@ test("entry: run as a script the file prints its result and exits with the verb'
 
 // Kills: entry guard `if (true)` (importing the module would run the CLI and exit 2).
 test("entry: importing the module runs nothing", () => {
-  const r = spawnSync(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(pathToFileURL(MODULE_PATH).href)}); console.log("imported");`], { encoding: "utf8" });
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(pathToFileURL(MODULE_PATH).href)}); console.log("imported");`], { encoding: "utf8", windowsHide: true });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, "imported\n");
   assert.equal(r.stderr, "");
@@ -2995,7 +2995,7 @@ test("entry: the whole file piped to `node --input-type=module -` runs the verb 
     nfs.mkdirSync(`${t.root}/comfy/models/vae`, { recursive: true });
     nfs.writeFileSync(`${t.root}/comfy/models/vae/ae.safetensors`, "x");
     nfs.writeFileSync(`${t.root}/comfy/comfyui_version.py`, '__version__ = "0.37.0"\n');
-    const piped = (args) => spawnSync(process.execPath, ["--input-type=module", "-", ...args], { input: SOURCE, encoding: "utf8", cwd: t.root });
+    const piped = (args) => spawnSync(process.execPath, ["--input-type=module", "-", ...args], { input: SOURCE, encoding: "utf8", cwd: t.root, windowsHide: true });
     const snapArgs = ["snapshot", "--comfy-dir", `${t.root}/comfy`];
     const viaPipe = piped(snapArgs);
     assert.equal(viaPipe.status, 0, viaPipe.stderr);
@@ -3020,7 +3020,7 @@ test("entry: piped, the file has no licence map of its own and --license-map sup
   const t = scratch("tc-pipe-map");
   try {
     nfs.copyFileSync(REAL_MAP_PATH, `${t.root}/templates-license-map.json`);
-    const piped = (args) => spawnSync(process.execPath, ["--input-type=module", "-", "summary", "--templates-dir", REAL_TEMPLATES, "--api-nodes-dir", API_DIR, "--json", ...args], { input: SOURCE, encoding: "utf8", cwd: t.root });
+    const piped = (args) => spawnSync(process.execPath, ["--input-type=module", "-", "summary", "--templates-dir", REAL_TEMPLATES, "--api-nodes-dir", API_DIR, "--json", ...args], { input: SOURCE, encoding: "utf8", cwd: t.root, windowsHide: true });
     const bare = piped([]);
     assert.equal(bare.status, 0, bare.stderr);
     assert.deepEqual({ ...JSON.parse(bare.stdout).license.map }, { entries: 0, evidence_dates: [] }, "a map in the working directory is not the file's own");
@@ -3036,7 +3036,7 @@ test("entry: piped, the file has no licence map of its own and --license-map sup
 // piped to node has argv[1] "-" as well.
 test("entry: a script piped to node that imports the module does not run the command line", () => {
   const source = `import { main } from ${JSON.stringify(pathToFileURL(MODULE_PATH).href)};\nconsole.log(typeof main);\n`;
-  const r = spawnSync(process.execPath, ["--input-type=module", "-", "frobnicate"], { input: source, encoding: "utf8" });
+  const r = spawnSync(process.execPath, ["--input-type=module", "-", "frobnicate"], { input: source, encoding: "utf8", windowsHide: true });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, "function\n");
   assert.equal(r.stderr, "");

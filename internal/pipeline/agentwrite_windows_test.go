@@ -4,10 +4,11 @@ package pipeline
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // TestWriteDoorRefusesAWindowsJunctionEscape is the WINDOWS half of the
@@ -32,7 +33,7 @@ func TestWriteDoorRefusesAWindowsJunctionEscape(t *testing.T) {
 	}
 
 	link := filepath.Join(read, "escape")
-	out, err := exec.Command("cmd", "/c", "mklink", "/J", link, outside).CombinedOutput()
+	out, err := winexec.Command("cmd", "/c", "mklink", "/J", link, outside).CombinedOutput()
 	if err != nil {
 		t.Skipf("mklink /J unavailable here (%v): %s", err, out)
 	}
@@ -79,7 +80,7 @@ func TestWriteDoorRefusesAJunctionNestedInsideTheWriteRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(door.root, "out")
-	if out, lerr := exec.Command("cmd", "/c", "mklink", "/J", link, outside).CombinedOutput(); lerr != nil {
+	if out, lerr := winexec.Command("cmd", "/c", "mklink", "/J", link, outside).CombinedOutput(); lerr != nil {
 		t.Skipf("mklink /J unavailable here (%v): %s", lerr, out)
 	}
 
@@ -109,7 +110,7 @@ func TestVerifyWriteRootInsideRefusesAJunction(t *testing.T) {
 	read := t.TempDir()
 	outside := t.TempDir()
 	link := filepath.Join(read, "escape")
-	if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, outside).CombinedOutput(); err != nil {
+	if out, err := winexec.Command("cmd", "/c", "mklink", "/J", link, outside).CombinedOutput(); err != nil {
 		t.Skipf("mklink /J unavailable here (%v): %s", err, out)
 	}
 	probe := filepath.Join(link, "probe.txt")

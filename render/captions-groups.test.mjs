@@ -556,7 +556,7 @@ test("command line: reads a segments.json and prints the chunks as one JSON docu
   const dir = scratchDir(t, "captions-groups-");
   const file = join(dir, "clip.segments.json");
   writeFileSync(file, JSON.stringify(TOKEN_SEGMENTS));
-  const ok = spawnSync(process.execPath, [HELPER, file, "--pace", "punchy"], { encoding: "utf8" });
+  const ok = spawnSync(process.execPath, [HELPER, file, "--pace", "punchy"], { encoding: "utf8", windowsHide: true });
   assert.equal(ok.status, 0, ok.stderr);
   const doc = JSON.parse(ok.stdout);
   assert.equal(doc.template, "captions-bar");
@@ -564,10 +564,10 @@ test("command line: reads a segments.json and prints the chunks as one JSON docu
   assert.deepEqual(doc.groups.slice(0, 3).map((g) => g.text), ["It's only $1", "a month, don't", "worry."]);
   const bad = join(dir, "bad.json");
   writeFileSync(bad, "{not json");
-  const fail = spawnSync(process.execPath, [HELPER, bad], { encoding: "utf8" });
+  const fail = spawnSync(process.execPath, [HELPER, bad], { encoding: "utf8", windowsHide: true });
   assert.notEqual(fail.status, 0);
   assert.match(fail.stderr, /captions-groups:/);
-  assert.notEqual(spawnSync(process.execPath, [HELPER], { encoding: "utf8" }).status, 0, "no file is an error");
+  assert.notEqual(spawnSync(process.execPath, [HELPER], { encoding: "utf8", windowsHide: true }).status, 0, "no file is an error");
 });
 
 // The same command line, called in process through the exported main(), so every flag can be checked for what

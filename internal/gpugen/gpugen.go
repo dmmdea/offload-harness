@@ -31,6 +31,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // ResolveScript resolves a configured render-script path for a GPU-gen runner.
@@ -202,7 +204,7 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 	defer cancel()
 
 	args := append([]string{spec.Script}, spec.Args...)
-	cmd := exec.CommandContext(cctx, exe, args...)
+	cmd := winexec.CommandContext(cctx, exe, args...)
 	cmd.Dir = spec.Dir
 	if spec.EnvExact {
 		// A non-nil empty slice, never nil: os/exec treats a nil Env as "inherit".

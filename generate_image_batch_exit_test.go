@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/imagegen"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // 2026-10-09: an overnight picture batch lost 21 of 36 pictures and exited 0, so the only way to learn
@@ -213,7 +214,7 @@ func TestGenerateImageBatchExitCodesThroughTheBuiltBinary(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		exe += ".exe"
 	}
-	if out, err := exec.Command("go", "build", "-o", exe, ".").CombinedOutput(); err != nil {
+	if out, err := winexec.Command("go", "build", "-o", exe, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	_, cfgPath, jobsPath, _ := batchHome(t)
@@ -226,7 +227,7 @@ func TestGenerateImageBatchExitCodesThroughTheBuiltBinary(t *testing.T) {
 		{"failed", 4, "generate-image --batch: 1 of 3 jobs failed (exit 4)"},
 		{"stop", 1, "error: image batch failed"},
 	} {
-		cmd := exec.Command(exe, "generate-image", "--batch", jobsPath, "--config", cfgPath, "--json")
+		cmd := winexec.Command(exe, "generate-image", "--batch", jobsPath, "--config", cfgPath, "--json")
 		cmd.Env = append(os.Environ(), "STUB_MODE="+c.mode)
 		var stdout, stderr strings.Builder
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr

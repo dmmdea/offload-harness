@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // Exec guards mirror internal/gpugen (timeout -> WHOLE process tree killed via
@@ -28,7 +30,7 @@ func runCapture(ctx context.Context, timeout time.Duration, stdin []byte, okExit
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, exe, args...)
+	cmd := winexec.CommandContext(cctx, exe, args...)
 	if len(stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -52,7 +54,7 @@ func killTree(p *os.Process) error {
 		return nil
 	}
 	if runtime.GOOS == "windows" {
-		_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(p.Pid)).Run()
+		_ = winexec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(p.Pid)).Run()
 		return nil
 	}
 	return p.Kill()

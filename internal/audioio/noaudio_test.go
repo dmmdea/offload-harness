@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // TestMain lets this test binary stand in for ffmpeg: a conversion pointed at os.Args[0] with
@@ -92,7 +94,7 @@ func TestARealVideoWithNoAudioTrackIsTyped(t *testing.T) {
 		t.Skip("ffmpeg not on PATH")
 	}
 	silent := filepath.Join(t.TempDir(), "silent.mp4")
-	if out, err := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=1", "-pix_fmt", "yuv420p", silent).CombinedOutput(); err != nil {
+	if out, err := winexec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=1", "-pix_fmt", "yuv420p", silent).CombinedOutput(); err != nil {
 		t.Skipf("could not synthesise a video with no audio track: %v (%s)", err, out)
 	}
 	if _, _, err := ConvertToWav16k(silent, ffmpeg); !errors.Is(err, ErrNoAudioStream) {

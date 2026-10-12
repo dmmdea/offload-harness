@@ -2,13 +2,13 @@ package gpuactivity
 
 import (
 	"context"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // GPU is one card as nvidia-smi reports it at the moment of the sample.
@@ -48,7 +48,7 @@ const smiTimeout = 4 * time.Second
 
 // smiRun is the nvidia-smi runner, a variable so tests inject output.
 var smiRun = func(ctx context.Context, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, "nvidia-smi", args...).Output()
+	out, err := winexec.CommandContext(ctx, "nvidia-smi", args...).Output()
 	return string(out), err
 }
 

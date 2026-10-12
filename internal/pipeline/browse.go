@@ -33,7 +33,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -47,6 +46,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gbnf"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 const (
@@ -554,7 +554,7 @@ func (p *Pipeline) runBrowse(ctx context.Context, req core.Request, meta core.Me
 	cctx, cancel := context.WithTimeout(ctx, p.browseTimeout())
 	defer cancel()
 	exe, args := browseCommand(p.cfg.BrowsePython, p.cfg.BrowseScript)
-	cmd := exec.CommandContext(cctx, exe, args...)
+	cmd := winexec.CommandContext(cctx, exe, args...)
 	cmd.Env = browseRunnerEnv(os.Environ(), runtime.GOOS)
 	cmd.Dir = work
 	cmd.Cancel = func() error { return gpugen.KillTree(cmd.Process) }

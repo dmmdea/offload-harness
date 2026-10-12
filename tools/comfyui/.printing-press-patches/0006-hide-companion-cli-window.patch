@@ -1,0 +1,135 @@
+From: Claude Code (no-visible-windows fix round, 2026-10-12) on behalf of dmmdea
+Subject: [PATCH 0006] hide the companion CLI's console window on Windows
+
+cobratree.RunCLICommand (generated shellout.go) started the companion CLI with a bare
+exec.CommandContext. It runs once per Cobra-mirror MCP tool call, in a server its host starts
+without a console; a console program started that way gets a NEW visible console window on
+Windows (a Windows Terminal window on the operator's desktop). The command is now built by
+newCLICommand, which hides it (CREATE_NO_WINDOW + SW_HIDE) through the package's hideWindow.
+New files: hide_windows.go, hide_other.go, hide_windows_test.go. The test helper that builds the
+argv-echo binary is hidden the same way.
+---
+diff --git a/internal/mcp/cobratree/hide_other.go b/internal/mcp/cobratree/hide_other.go
+new file mode 100644
+index 00000000..cd573d73
+--- /dev/null
++++ b/internal/mcp/cobratree/hide_other.go
+@@ -0,0 +1,10 @@
++// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
++
++//go:build !windows
++
++package cobratree
++
++import "os/exec"
++
++// hideWindow is a no-op off Windows: there is no console window to hide.
++func hideWindow(*exec.Cmd) {}
+diff --git a/internal/mcp/cobratree/hide_windows.go b/internal/mcp/cobratree/hide_windows.go
+new file mode 100644
+index 00000000..f6d79871
+--- /dev/null
++++ b/internal/mcp/cobratree/hide_windows.go
+@@ -0,0 +1,26 @@
++// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
++
++//go:build windows
++
++package cobratree
++
++import (
++	"os/exec"
++	"syscall"
++)
++
++// createNoWindow is the Win32 CREATE_NO_WINDOW creation flag.
++const createNoWindow = 0x08000000
++
++// hideWindow makes cmd's child window-less. A console program started by a process that has no
++// console of its own (an MCP server started hidden by its host) gets a NEW visible console window on
++// Windows unless it is started hidden, and with Windows Terminal as the default terminal that window
++// is a Windows Terminal window on the operator's desktop. CREATE_NO_WINDOW stops the console
++// allocation; HideWindow hides a window the program opens itself.
++func hideWindow(cmd *exec.Cmd) {
++	if cmd.SysProcAttr == nil {
++		cmd.SysProcAttr = &syscall.SysProcAttr{}
++	}
++	cmd.SysProcAttr.HideWindow = true
++	cmd.SysProcAttr.CreationFlags |= createNoWindow
++}
+diff --git a/internal/mcp/cobratree/hide_windows_test.go b/internal/mcp/cobratree/hide_windows_test.go
+new file mode 100644
+index 00000000..529c20d4
+--- /dev/null
++++ b/internal/mcp/cobratree/hide_windows_test.go
+@@ -0,0 +1,32 @@
++// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
++
++//go:build windows
++
++package cobratree
++
++import (
++	"context"
++	"testing"
++)
++
++// createNoWindowFlag is CREATE_NO_WINDOW, spelled in the test so a wrong constant in the code under test
++// cannot make the assertion agree with itself.
++const createNoWindowFlag = 0x08000000
++
++// The companion CLI runs once per MCP tool call, in a server its host normally starts without a console.
++// A console program started that way gets a new visible console window unless it is started hidden.
++func TestNewCLICommandIsHiddenOnWindows(t *testing.T) {
++	cmd := newCLICommand(context.Background(), "companion-cli", []string{"a", "b"})
++	if len(cmd.Args) != 3 || cmd.Args[0] != "companion-cli" || cmd.Args[1] != "a" || cmd.Args[2] != "b" {
++		t.Fatalf("argv = %v, want [companion-cli a b]", cmd.Args)
++	}
++	if cmd.SysProcAttr == nil {
++		t.Fatal("SysProcAttr is nil: the companion CLI would open a console window when its parent has no console")
++	}
++	if !cmd.SysProcAttr.HideWindow {
++		t.Error("HideWindow is not set")
++	}
++	if cmd.SysProcAttr.CreationFlags&createNoWindowFlag == 0 {
++		t.Errorf("CREATE_NO_WINDOW is not set (creation flags %#x)", cmd.SysProcAttr.CreationFlags)
++	}
++}
+diff --git a/internal/mcp/cobratree/shellout.go b/internal/mcp/cobratree/shellout.go
+index f58b8fbb..642d922b 100644
+--- a/internal/mcp/cobratree/shellout.go
++++ b/internal/mcp/cobratree/shellout.go
+@@ -317,11 +317,20 @@ func ToolResultFromCLICommand(result CLICommandResult) *mcplib.CallToolResult {
+ 	return toolResult
+ }
+ 
++// newCLICommand builds the command that runs the companion CLI. It is hidden on Windows (see hideWindow):
++// the CLI is a console program and this server is normally started without a console, so an unhidden
++// child would open a console window on the operator's desktop for every tool call.
++func newCLICommand(ctx context.Context, binPath string, args []string) *exec.Cmd {
++	cmd := exec.CommandContext(ctx, binPath, args...) // #nosec G204 -- trusted companion CLI path, args pre-tokenized.
++	hideWindow(cmd)
++	return cmd
++}
++
+ // RunCLICommand executes the companion CLI while preserving stdout as the
+ // machine-readable channel. Hint and warning stderr lines are returned
+ // separately on success so they cannot corrupt JSON results.
+ func RunCLICommand(ctx context.Context, binPath string, args []string) (CLICommandResult, error) {
+-	cmd := exec.CommandContext(ctx, binPath, args...) // #nosec G204 -- trusted companion CLI path, args pre-tokenized.
++	cmd := newCLICommand(ctx, binPath, args)
+ 	stdout := newCappedCapture()
+ 	stderr := newCappedCapture()
+ 	cmd.Stdout = stdout
+diff --git a/internal/mcp/cobratree/shellout_test.go b/internal/mcp/cobratree/shellout_test.go
+index 9c604e8c..564ac386 100644
+--- a/internal/mcp/cobratree/shellout_test.go
++++ b/internal/mcp/cobratree/shellout_test.go
+@@ -901,6 +901,7 @@ func main() {
+ 		bin += ".exe"
+ 	}
+ 	cmd := exec.Command("go", "build", "-o", bin, src)
++	hideWindow(cmd) // a go build started by a console-less test run must not open a window
+ 	if out, err := cmd.CombinedOutput(); err != nil {
+ 		t.Fatalf("build argv helper: %v\n%s", err, out)
+ 	}

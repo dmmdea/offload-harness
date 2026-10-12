@@ -18,7 +18,6 @@ import (
 	"context"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -28,6 +27,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/jobdir"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // pastMaxRunLifetime is comfortably older than jobdir.MaxRunLifetime: the
@@ -49,7 +49,7 @@ func TestSweepHelperExitNow(t *testing.T) {
 // pattern as internal/gpuactivity) so no shell or platform tool is needed.
 func deadOwnerPID(t *testing.T) int {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestSweepHelperExitNow$")
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestSweepHelperExitNow$")
 	cmd.Env = append(os.Environ(), "FLEETNODE_SWEEP_HELPER=1")
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("helper process: %v", err)

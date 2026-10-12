@@ -3,7 +3,6 @@ package hwdetect
 import (
 	"bufio"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -182,7 +181,7 @@ func ramGb() int {
 }
 
 func run(timeout time.Duration, name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	cmd := winexec.Command(name, args...)
 	done := make(chan struct{})
 	var out []byte
 	var err error

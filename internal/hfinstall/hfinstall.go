@@ -17,12 +17,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // SetupPackageName is the name the committed setup/hyperframes/package.json carries. A
@@ -479,7 +480,7 @@ func envWithNodeFirst(node string) []string {
 }
 
 func execRun(ctx context.Context, dir string, env []string, name string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := winexec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	var stdout, stderr bytes.Buffer

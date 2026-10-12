@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 func TestMain(m *testing.M) {
@@ -19,7 +21,7 @@ func TestMain(m *testing.M) {
 // with the fields asked for, in the order asked for, and every call is recorded.
 func TestTheStandInAnswersThePerDeviceQueryInTheFieldsAskedFor(t *testing.T) {
 	st := Install(t)
-	out, err := exec.Command("nvidia-smi", "--query-gpu=index,uuid,display_attached", "--format=csv,noheader,nounits").Output()
+	out, err := winexec.Command("nvidia-smi", "--query-gpu=index,uuid,display_attached", "--format=csv,noheader,nounits").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +43,7 @@ func TestTheStandInRecordsAndRefusesAnythingButThePerDeviceQuery(t *testing.T) {
 	asked := [][]string{{"-L"}, {"--query-compute-apps=pid,name", "--format=csv"}, {"pmon", "-c", "1"}, {"--query-gpu=index", "--format=csv"}}
 	for _, args := range asked {
 		var ee *exec.ExitError
-		if err := exec.Command("nvidia-smi", args...).Run(); !errors.As(err, &ee) || ee.ExitCode() != 99 {
+		if err := winexec.Command("nvidia-smi", args...).Run(); !errors.As(err, &ee) || ee.ExitCode() != 99 {
 			t.Errorf("%q: err = %v, want exit 99", args, err)
 		}
 	}
@@ -60,7 +62,7 @@ func TestTheStandInRecordsAndRefusesAnythingButThePerDeviceQuery(t *testing.T) {
 // display_attached fallback in gpuprobe keys on.
 func TestTheStandInRefusesAFieldItDoesNotKnowTheWayNvidiaSmiDoes(t *testing.T) {
 	Install(t)
-	out, err := exec.Command("nvidia-smi", "--query-gpu=index,no_such_field", "--format=csv,noheader,nounits").Output()
+	out, err := winexec.Command("nvidia-smi", "--query-gpu=index,no_such_field", "--format=csv,noheader,nounits").Output()
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) || ee.ExitCode() != 2 {
 		t.Fatalf("err = %v, want exit 2", err)
@@ -77,14 +79,14 @@ func TestACallTheDeadlineKillsStillCountsAndTheLastStepRepeats(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	start := time.Now()
-	if _, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits").Output(); err == nil {
+	if _, err := winexec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits").Output(); err == nil {
 		t.Fatal("the first call is a hang: its deadline must have killed it")
 	}
 	if took := time.Since(start); took > 10*time.Second {
 		t.Fatalf("the killed call held its caller for %v", took)
 	}
 	for i := 0; i < 2; i++ {
-		if _, err := exec.Command("nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits").Output(); err != nil {
+		if _, err := winexec.Command("nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits").Output(); err != nil {
 			t.Fatalf("call %d after the hang: %v", i+2, err)
 		}
 	}

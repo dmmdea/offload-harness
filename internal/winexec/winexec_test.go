@@ -93,7 +93,7 @@ func TestEncodedCommandArgs_TextSurvivesArgvDecoding(t *testing.T) {
 		`[System.IO.File]::WriteAllText("%s", '%s', (New-Object System.Text.UTF8Encoding($false)))`,
 		filepath.ToSlash(outFile), text)
 
-	cmd := exec.Command("powershell.exe", EncodedCommandArgs(script)...)
+	cmd := Command("powershell.exe", EncodedCommandArgs(script)...)
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("EncodedCommand invocation failed: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestSafeScriptArgs_SurvivesPowerShell5OutputMangling(t *testing.T) {
 	text := "¿VOLVERÁ EL ROTATIVO? ñ ü é"
 	echo := "Write-Output '" + text + "'"
 
-	rawCmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", echo)
+	rawCmd := Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", echo)
 	rawOut, err := rawCmd.Output()
 	if err != nil {
 		t.Fatalf("raw -Command invocation failed: %v", err)
@@ -137,7 +137,7 @@ func TestSafeScriptArgs_SurvivesPowerShell5OutputMangling(t *testing.T) {
 		t.Skip("this powershell.exe/locale did not reproduce the F-41 output mangling — nothing to prove the fix against here")
 	}
 
-	fixedCmd := exec.Command("powershell.exe", SafeScriptArgs(echo)...)
+	fixedCmd := Command("powershell.exe", SafeScriptArgs(echo)...)
 	fixedOut, err := fixedCmd.Output()
 	if err != nil {
 		t.Fatalf("SafeScriptArgs invocation failed: %v", err)

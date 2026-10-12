@@ -860,6 +860,90 @@ measurement, in both places that draw this line.
   argument, with `placement: "single"` and with a `residentGb` the single placement must ignore, and requires the graph held in
   `render/testdata/wan22-single-graphs.json` (made by the builder as it stood at the 0.181.0 release tip) and no warning. The VAE and
   text-encoder loaders swapped for their multi-GPU twins in the single graph each fail all nine of its graphs (the VAE one passed the old tests).
+### Fixed — nothing the harness or its tests start opens a console window on the desktop
+
+- **The defect.** On Windows a console program started by a process with no console of its own (a runner or a test child started
+  detached, a service, a launcher started hidden) gets a NEW visible console window unless it is started hidden, and with Windows
+  Terminal as the default terminal that window is a Windows Terminal window on the operator's desktop. A window watcher saw them
+  while the render suite ran: Windows Terminal hosting windows and one titled `taskkill.exe`. The cause was 86 child-process calls in
+  `render/` that passed no `windowsHide`: 25 in production modules (the engine's `killTree` `taskkill`, its `ps` probes, ffmpeg and
+  ffprobe in `audio-qa`, `igpu-qa` and the animate/video runners, the `nvidia-smi` and sd-cli listings, the attached ComfyUI launch,
+  the manifest installers, the tts and sdcpp attached runs) and 61 in the tests and their support, among them the scripts the tests
+  write into a string and run in a detached child. On the Go side the `taskkill` calls (`gpugen`, `mediaops`, `nodeswap`), the starts
+  of the render runners and the tool probes (`nvidia-smi`, ffmpeg, the hardware detectors) were built with a bare `exec.Command`,
+  and the accelerator sidecar launcher set `HideWindow` but not `CREATE_NO_WINDOW`. Three more places started console programs the
+  same way and were found by the review of this fix: the Windows cage (`internal/sandbox`), which the agent's `run` tool reaches
+  whenever `--allow-run` is set, with `go`, `python`, `node`, `npm`, `cargo` and `git` on its allow-list; the children of 48 Go test
+  files (ffmpeg, ffprobe, python, node, the built binary itself); and the companion-CLI runner of the two printed CLIs under `tools/`.
+- **The rule in Go (`internal/winexec`): a hidden child stays on its parent's console unless the parent has none.** `HideWindow`,
+  `Command` and `CommandContext` always hide the child's own window (`SW_HIDE`) and add `CREATE_NO_WINDOW` only when
+  `GetConsoleProcessList` says this process has no console to hand on (a hidden console, which `GetConsoleWindow` would miss,
+  counts as one). The first version of this fix put `CREATE_NO_WINDOW` on every child, which moves the child to a console of its own:
+  the operator's Ctrl-C and a closed terminal no longer reached it, so an interrupted `local-offload` (the `npm ci` of
+  `install hyperframes`, any media runner on a verb without a signal handler) left a hidden process running with no window to show it.
+  A window can only appear when the parent has no console, so that is the only case that needs the flag. Two siblings cover the
+  children that are not simply waited for: `HideWindowDetached` / `CommandDetached` always give the child a hidden console of its own
+  (the detached GPU holder, which must survive a closed terminal, and the accelerator sidecar launcher), and
+  `HideWindowIfNoConsole` / `CommandIfNoConsole` leave the command an operator names after `--` in `gpu reserve` exactly as before
+  when there is a terminal (it may be interactive or open a window they want) and hide it when there is none, which closes the
+  exemption that let a wrapped console program open a window under a console-less parent. The tests start real processes (helpers
+  with a hidden console or none at all, so none of them can open a window) and read `GetConsoleProcessList` in the child.
+- **The cage.** `sandbox_windows.go` called `CreateProcessAsUser` with `CREATE_SUSPENDED|CREATE_UNICODE_ENVIRONMENT` and
+  `STARTF_USESTDHANDLES` only. It now also passes `CREATE_NO_WINDOW` and `STARTF_USESHOWWINDOW` with `SW_HIDE`: the caged command
+  has every handle piped and is ended by its job object, never by a Ctrl-C, so it is always alone on a hidden console. An earlier
+  version of this entry said the cage was Linux only and untouched; that was wrong.
+- **The fix in `render/`.** `windowsHide: true` on all 86 calls, every other option unchanged (in `manifest-satisfy.mjs` the flag
+  follows the caller's spread, so a caller cannot drop it; in `igpu-engine.mjs` and `igpu-qa.mjs` it now comes after the timeout
+  spread). The Windows stub launcher that `igpu-stub.mjs` compiles starts its target with `CREATE_NO_WINDOW` and `HideWindow` as
+  well: a launcher started detached has no console to hand on, and the node child it starts would open a window of its own.
+  `comfy-keep.test.mjs` had pinned the defect (`windowsHide` undefined for the attached ComfyUI launch); it now asserts the house rule
+  for that launch too. `windowsHide: true` does not move a child that inherits stdio off the operator's console (libuv adds
+  `CREATE_NO_WINDOW` only when no stdio is inherited), so the attached sd-cli, tts and comfy-render runs keep their Ctrl-C;
+  `render/console-share.test.mjs` measures it with real processes and pins that the three runs inherit stdio.
+- **The fix for the Go tests and `tools/`.** 73 constructors in 48 Go test files of the root module (plus 3 in `internal/winexec`'s
+  own tests) are `winexec.Command` / `winexec.CommandContext` now, and `cmd/leakdigest` builds its `git` children the same way, so it
+  needs no exemption. `tools/comfyui` and `tools/llamaswap` (separate modules, which cannot import `winexec`) hide the
+  `cobratree` companion-CLI runner through a `newCLICommand` + `hideWindow` pair and hide the `go build` of their test helper;
+  the two edits to generated `shellout.go` files are recorded in each tree's patch register (`0006-hide-companion-cli-window.patch`,
+  `internal-mcp-cobratree-shellout.go.md`), with the upstream template change still owed. `glueOpenBrowser` builds one command
+  instead of three, so its single hide call covers it.
+- **Locked in.** `render/no-visible-windows.test.mjs` (scanner: `render/spawn-scan.mjs`) reads every source under `render/`, the
+  scripts held in strings included. The options of a `spawn`, `spawnSync`, `execFile`, `exec`, `fork`, `*Sync` or injected
+  `spawnImpl` call (the last argument that is not a callback) must be an object literal whose own `windowsHide` ends up `true`, with
+  no spread or computed key after it, or a name that resolves in the call's scope to a `const` object literal that does. The scanner
+  follows `import cp, { spawn }`, `{ spawn } = cp`, `= require("child_process").spawn`, backtick specifiers, `spawn?.(`,
+  `spawn.call(`, aliases chosen by `?:` / `??` / `||`, and `promisify(execFile)`; a child_process function or the module used as a
+  value (`use(spawn)`, `.bind`, `.apply`) is refused. `TestEveryChildProcessStartIsHidden` (`internal/winexec`) reads every Go file
+  of the repository that builds for Windows, tests and the `tools/` modules included, and fails on a call of `exec.Command` /
+  `exec.CommandContext`, one of them used as a value, an `exec.Cmd` literal, `os.StartProcess` / `syscall.StartProcess` or a
+  `CreateProcess*` call unless its own function hides it (a hide call per start, or both `CREATE_NO_WINDOW` and `SW_HIDE` for a
+  `CreateProcess*`) or it is listed with a reason; two `internal/winexec` test helpers are the only entries.
+- **Red before.** The render lint fails on the 0.181.0 tree with 86 calls; the first version of the Go lint failed with 31
+  `file:function` sites. Against the reviewed head the scanner's six new test groups (every call shape above) fail on the old
+  scanner, and the stricter scanner flagged two real sites (`igpu-engine.mjs`, `igpu-qa.mjs`: a spread after the flag). The extended Go
+  lint listed 75 `file:function` sites (87 starts: 80 in 53 test files, 7 in production files), and the new `winexec`, cage and
+  `cobratree` tests failed on the unconditional helper, the unhidden cage and the unhidden runner. Mutation checks, each red with a
+  mutant that compiles or parses: for the Go rule, `CREATE_NO_WINDOW` always or never set, dropped from `HideWindowDetached`,
+  `SW_HIDE` dropped, `processHasConsole` always true, `HideWindowIfNoConsole` always hiding, `Command` or `CommandDetached` left
+  unhidden; for the cage, each of `CREATE_NO_WINDOW`, `STARTF_USESHOWWINDOW` and `SW_HIDE` dropped; for the scanner, 15 mutants (each
+  rule switched off); for `console-share`, the inherited probe piped, the piped probe inheriting, and each of the three attached runs
+  piped.
+- **Live.** `scripts/window-watch-run.mjs` (with `scripts/window-watch.ps1`) polls the desktop with `EnumWindows` (every 30 ms or so) while a
+  command runs and exits 3 when a console window appeared; its `--selftest` makes a child create a hidden window and requires the log to
+  list it. The review measured 22 new console windows on the 0.181.0 tree in 130 s and none on the reviewed head. At this head, with
+  zero new windows each time: the render suite (1325 tests, 1302 passed, 23 skipped, 0 failed; 2765 polls over 119 s; started with a
+  hidden console, because `node --test` starts every test file with a plain `spawn` and opened a Windows Terminal window per file when
+  it was started with no console at all, an effect of the runner and not of the suite), and the compiled test binaries of 22 Go packages,
+  each started with no console of its own (`cmd/leakdigest` and `internal/` `agent`, `audioio`, `comfyinst`, `composebundle`, `datahome`,
+  `fakeexe`, `fleetnode`, `gpuactivity`, `gpugen`, `gpulease`, `gpuprobe/smitest`, `mediacap`, `mediaops`, `mediaremote`,
+  `pairworkloads`, `sandbox`, `sttremote`, `videoio`, `vllmseat`, `winexec`, `writedoor`; 9,825 polls over 424 s). That run also found a
+  defect in a new test: the Ctrl-C test failed in a runner started with `CREATE_NEW_PROCESS_GROUP`, which switches Ctrl-C off for its
+  whole subtree; the test's helper now switches it back on. Not watched: the root package, `internal/pipeline`, `internal/mcpserver`,
+  the `tools/` modules and the other Go packages, which the lint and the flag tests cover but nothing has watched. The 0.181.0 tree was
+  not re-run live, because that would put windows on the screen.
+- **Not covered.** The two printed CLIs outside this repository owe the same `shellout.go` patch and the generator template the
+  same change (the registers say so). Python and shell programs (the accelerator test servers, the setup browse runner, the
+  reference `ffdump.py`) are developer tools run from a terminal and are not scanned.
 
 ## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
 

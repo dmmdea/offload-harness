@@ -21,6 +21,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/mediahash"
 	"github.com/dmmdea/offload-harness/internal/tasks"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // These drive the REAL pipeline gates and assert on the REAL cache.
@@ -395,7 +396,7 @@ func visionKeyFor(req core.Request, built tasks.Built, meta core.Meta, extra str
 func makeSilentWav(t *testing.T, ffmpeg string) string {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "silence.wav")
-	cmd := exec.Command(ffmpeg, "-nostdin", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+	cmd := winexec.Command(ffmpeg, "-nostdin", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
 		"-t", "1", "-c:a", "pcm_s16le", "-y", out)
 	if err := cmd.Run(); err != nil {
 		t.Skipf("could not synthesise a test wav with ffmpeg: %v", err)

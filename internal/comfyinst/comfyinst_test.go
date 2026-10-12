@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // A kept ComfyUI instance lives no longer than the GPU lease it was launched under (plan P13).
@@ -491,7 +492,7 @@ func TestRealDepsAreWiredToThePlatform(t *testing.T) {
 
 func helperSleeper(t *testing.T) *exec.Cmd {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestTerminateStopsARealProcess$")
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestTerminateStopsARealProcess$")
 	cmd.Env = append(os.Environ(), "COMFYINST_SLEEPER=1")
 	return cmd
 }

@@ -158,7 +158,7 @@ function makeToneWav(ffmpeg, dir, name, toneSec, silenceSec) {
     "-hide_banner", "-loglevel", "error", "-y",
     "-f", "lavfi", "-i", filter,
     "-ar", "44100", "-ac", "2", out,
-  ], { encoding: "utf8" });
+  ], { encoding: "utf8", windowsHide: true });
   assert.equal(r.status, 0, `fixture generation failed: ${r.stderr}`);
   assert.ok(existsSync(out), "fixture file was not written");
   return out;

@@ -10,7 +10,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // graphNode is a run-graph node whose ComfyUI tree holds the given files (relative to the tree: models/<class>/..., input/...).
@@ -163,7 +163,7 @@ func TestRunGraphFilesBehindALinkedClassDirectoryAreHeld(t *testing.T) {
 			if runtime.GOOS != "windows" {
 				return os.ErrInvalid
 			}
-			return exec.Command("cmd", "/c", "mklink", "/J", link, target).Run()
+			return winexec.Command("cmd", "/c", "mklink", "/J", link, target).Run()
 		},
 	} {
 		t.Run(kind, func(t *testing.T) {

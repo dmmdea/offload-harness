@@ -72,7 +72,7 @@ const API = comfyApi(flags.api, placement ? placement.env : process.env);
 function runRenderArgs(tail) {
   const args = [join(__dirname, "comfy-render.mjs"), ...tail, "--no-lifecycle"];
   return new Promise((resolve, reject) => {
-    const c = spawn("node", args, { stdio: ["inherit", "inherit", "pipe"] });
+    const c = spawn("node", args, { stdio: ["inherit", "inherit", "pipe"], windowsHide: true });
     let errTail = "";
     c.stderr.on("data", (d) => { process.stderr.write(d); errTail = (errTail + d).slice(-8192); });
     c.on("close", (code) => (code === 0 ? resolve() : reject(renderExitError(code, errTail))));

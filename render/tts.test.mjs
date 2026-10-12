@@ -52,7 +52,7 @@ test("tts_chatterbox_ft.py skeleton: validates + defers (exit 3 + marker), stdli
   const py = process.env.TTS_PY || "python";
   const worker = join(dirname(fileURLToPath(import.meta.url)), "tts_chatterbox_ft.py");
   const r = spawnSync(py, [worker, "--out", "x.wav", "--text", "hola",
-    "--model", "/no/such/model.safetensors", "--base-dir", "/no/such/dir"], { encoding: "utf8" });
+    "--model", "/no/such/model.safetensors", "--base-dir", "/no/such/dir"], { encoding: "utf8", windowsHide: true });
   if (r.error && r.error.code === "ENOENT") return; // no python on PATH — skip
   assert.equal(r.status, 3, "skeleton must exit 3 (defer signal)");
   assert.ok((r.stderr || "").includes("FT_ENGINE_NOT_VENDORED"), "must emit the distinct marker");

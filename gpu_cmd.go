@@ -45,6 +45,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // gpuVerbs are the subcommands runGPU dispatches, in the order the usage lists them. `hold` is the hidden
@@ -766,7 +767,11 @@ func runGPUReserve(args []string) error {
 		return err
 	}
 
-	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
+	// The command the operator names is theirs: at their terminal it keeps the console it inherits (stdin,
+	// stdout and stderr are the operator's own) and may be interactive or open a window they want. Started
+	// by a process with no console (a service, a hook, a hidden launcher) nobody is there to see a window, so
+	// it is hidden like any other child (winexec.CommandIfNoConsole).
+	cmd := winexec.CommandIfNoConsole(cmdArgs[0], cmdArgs[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The child inherits the lease so any render it triggers skips its own acquire and
 	// its own unload — that is what hoists freeLlamaSwap from per-job to per-lease.

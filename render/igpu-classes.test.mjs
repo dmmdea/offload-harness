@@ -37,7 +37,7 @@ test("reportFatal: the human line, then the class line LAST; an untyped failure 
   const code = `
     import { reportFatal } from ${JSON.stringify(pathToFileURL(join(here, "igpu-engine.mjs")).href)};
     reportFatal("SDCPP VIDEO", new Error(process.argv[1]));`;
-  const run = (msg) => spawnSync(process.execPath, ["--input-type=module", "-e", code, msg], { encoding: "utf8" }).stderr.trim().split(/\r?\n/);
+  const run = (msg) => spawnSync(process.execPath, ["--input-type=module", "-e", code, msg], { encoding: "utf8", windowsHide: true }).stderr.trim().split(/\r?\n/);
   const typed = run("GPU_RESET: the GPU reset " + "x".repeat(600));
   assert.match(typed[0], /^SDCPP VIDEO FAILED: GPU_RESET:/);
   assert.ok(typed[0].length > 600);
@@ -118,7 +118,7 @@ test("failAndExit: the end of a failure survives a stderr pipe that is full and 
     for (let i = 0; i < 1600; i++) process.stderr.write("engine log line " + i + " " + "x".repeat(90) + "\\n");
     failAndExit("SDCPP VIDEO", new Error("GPU_RESET: the GPU reset"));`;
   const { spawn } = await import("node:child_process");
-  const child = spawn(process.execPath, ["--input-type=module", "-e", code], { stdio: ["ignore", "ignore", "pipe"] });
+  const child = spawn(process.execPath, ["--input-type=module", "-e", code], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
   let err = "";
   // a slow reader: one chunk, then a short pause - the child's writes outrun it and queue up
   child.stderr.on("data", (d) => {

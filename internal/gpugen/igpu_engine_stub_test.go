@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // The iGPU runners (render/sdcpp-video.mjs, sdcpp-animate.mjs, audiocpp-generate.mjs) are tested
@@ -104,7 +106,7 @@ func runStubEngine(specPath string) int {
 			} else if w.Frozen {
 				src = "color=c=0x2060c0:s=" + size + ":r=" + fps
 			}
-			cmd := exec.Command(w.FFmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", src, "-frames:v", frames, "-an", out)
+			cmd := winexec.Command(w.FFmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", src, "-frames:v", frames, "-an", out)
 			if o, err := cmd.CombinedOutput(); err != nil {
 				os.Stderr.WriteString("stub engine: ffmpeg failed: " + string(o) + "\n")
 				return 99
@@ -304,7 +306,7 @@ func (b *igpuBox) runFor(script string, args []string, out string, timeout time.
 // rawFinalLine runs the runner directly and returns its last FAILED line (to measure it).
 func (b *igpuBox) rawFinal(script string, args []string) string {
 	b.t.Helper()
-	cmd := exec.Command("node", append([]string{runnerScript(script)}, args...)...)
+	cmd := winexec.Command("node", append([]string{runnerScript(script)}, args...)...)
 	cmd.Env = append(os.Environ(), b.env()...)
 	out, _ := cmd.CombinedOutput()
 	var last string

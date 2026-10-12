@@ -7,11 +7,12 @@ import (
 	"image/color"
 	"image/png"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 func TestToSeconds(t *testing.T) {
@@ -133,7 +134,7 @@ func TestWorkerSelftest(t *testing.T) {
 		t.Skip("no PIL python resolvable on this box")
 	}
 	worker := filepath.Join("..", "..", "render", "edit_image.py")
-	out, err := exec.Command(py, worker, "--selftest").CombinedOutput()
+	out, err := winexec.Command(py, worker, "--selftest").CombinedOutput()
 	if err != nil {
 		t.Fatalf("worker selftest failed: %v\n%s", err, out)
 	}

@@ -56,7 +56,7 @@ function runNode(script, args, sb, { timeoutMs = 170000, env: extraEnv = {} } = 
   const env = { ...process.env, TEMP: sb.priv, TMP: sb.priv, TMPDIR: sb.priv, FFMPEG_PATH: ffmpeg, LLAMA_SWAP_API: "http://127.0.0.1:9", IGPU_PARENT_POLL_MS: "250", ...extraEnv };
   for (const k of Object.keys(env)) if (k.startsWith("GPU_LEASE") || k === "GGML_VK_VISIBLE_DEVICES") delete env[k];
   return new Promise((resolve) => {
-    const c = spawn(process.execPath, [join(here, script), ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    const c = spawn(process.execPath, [join(here, script), ...args], { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     let stdout = "";
     let stderr = "";
     c.stdout.on("data", (d) => { stdout += d; });
@@ -68,7 +68,7 @@ function runNode(script, args, sb, { timeoutMs = 170000, env: extraEnv = {} } = 
 
 const records = (file) => (existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
 const at = (argv, flag) => argv[argv.indexOf(flag) + 1];
-const probe = (file, entries) => spawnSync(ffprobe, ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", `stream=${entries}`, "-of", "default=nw=1", file], { encoding: "utf8" }).stdout;
+const probe = (file, entries) => spawnSync(ffprobe, ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", `stream=${entries}`, "-of", "default=nw=1", file], { encoding: "utf8", windowsHide: true }).stdout;
 const frameCount = (file) => Number(/nb_read_frames=(\d+)/.exec(probe(file, "nb_read_frames"))[1]);
 const rate = (file) => /r_frame_rate=(\S+)/.exec(probe(file, "r_frame_rate"))[1];
 // the runner's last stderr line: every typed failure ends with its IGPU_CLASS= line (internal/gpugen reads it)
@@ -278,7 +278,7 @@ test("sdcpp-video main: a bare binary name is refused (BINARY_NOT_ABSOLUTE), an 
 
 function animateSetup(sb, { sd = {}, depth = {}, extra = [] } = {}) {
   const drv = join(sb.work, "driver.mp4");
-  const r = spawnSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=96x64:d=1:r=16", "-c:v", "libx264", "-pix_fmt", "yuv420p", drv]);
+  const r = spawnSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=96x64:d=1:r=16", "-c:v", "libx264", "-pix_fmt", "yuv420p", drv], { windowsHide: true });
   assert.equal(r.status, 0, String(r.stderr));
   const sdRec = join(sb.work, "sd.jsonl");
   const dRec = join(sb.work, "depth.jsonl");
@@ -420,11 +420,11 @@ function audioSetup(sb, kind, spec, extra = []) {
 }
 
 const loudness = (file) => {
-  const r = spawnSync(ffmpeg, ["-hide_banner", "-nostats", "-i", file, "-af", "loudnorm=I=-14:TP=-1:LRA=11:print_format=json", "-f", "null", "-"], { encoding: "utf8" });
+  const r = spawnSync(ffmpeg, ["-hide_banner", "-nostats", "-i", file, "-af", "loudnorm=I=-14:TP=-1:LRA=11:print_format=json", "-f", "null", "-"], { encoding: "utf8", windowsHide: true });
   return Number(/"input_i"\s*:\s*"(-?[\d.]+)"/.exec(r.stderr)[1]);
 };
-const durationOf = (file) => Number(spawnSync(ffprobe, ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file], { encoding: "utf8" }).stdout.trim());
-const sampleRate = (file) => Number(spawnSync(ffprobe, ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate", "-of", "csv=p=0", file], { encoding: "utf8" }).stdout.trim());
+const durationOf = (file) => Number(spawnSync(ffprobe, ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file], { encoding: "utf8", windowsHide: true }).stdout.trim());
+const sampleRate = (file) => Number(spawnSync(ffprobe, ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate", "-of", "csv=p=0", file], { encoding: "utf8", windowsHide: true }).stdout.trim());
 
 test("audiocpp main (music): the argv reaches the engine, the 3 s silent tail is trimmed, the result is mastered to 48 kHz near -14 LUFS, temp dirs are gone", opts, async () => {
   const sb = sandbox();
@@ -710,7 +710,7 @@ test("sdcpp-animate main: a driver clip shorter than the request renders the lar
   try {
     const a = animateSetup(sb2);
     const short = join(sb2.work, "short.mp4");
-    const g = spawnSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=96x64:d=0.25:r=16", "-c:v", "libx264", "-pix_fmt", "yuv420p", short]);
+    const g = spawnSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=96x64:d=0.25:r=16", "-c:v", "libx264", "-pix_fmt", "yuv420p", short], { windowsHide: true });
     assert.equal(g.status, 0, String(g.stderr));
     const args = a.args.slice();
     args[args.indexOf("--") + 3] = short; // the driver positional

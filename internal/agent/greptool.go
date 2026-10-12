@@ -25,6 +25,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // maxGrepMatches is the PRIMARY bound on search_files output. The agent loop
@@ -211,7 +213,7 @@ func ripgrepArgs(baseAbs string, re *regexp.Regexp, glob string) []string {
 func grepRipgrep(ctx context.Context, rgPath, baseAbs string, re *regexp.Regexp, glob string) ([]grepMatch, bool, bool) {
 	rgArgs := ripgrepArgs(baseAbs, re, glob)
 
-	cmd := exec.CommandContext(ctx, rgPath, rgArgs...)
+	cmd := winexec.CommandContext(ctx, rgPath, rgArgs...)
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf

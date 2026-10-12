@@ -2,13 +2,13 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // The marker is embedded with a terminator, so a literal the linker lays next to it cannot become part of the version it
@@ -48,7 +48,7 @@ func TestBuiltBinaryCarriesTheFormatSignatureAndBuildMarker(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		exe += ".exe"
 	}
-	if out, err := exec.Command("go", "build", "-o", exe, ".").CombinedOutput(); err != nil {
+	if out, err := winexec.Command("go", "build", "-o", exe, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	r := gpulease.Audit(gpulease.AuditOptions{Files: []string{exe}})

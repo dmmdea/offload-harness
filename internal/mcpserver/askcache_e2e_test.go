@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // TestAskCacheMCPLive is the live proof of the ask lane's result cache, run the only way
@@ -39,7 +40,7 @@ func TestAskCacheMCPLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(t.TempDir(), "harness"+exeSuffix())
-	build := exec.Command("go", "build", "-o", bin, ".")
+	build := winexec.Command("go", "build", "-o", bin, ".")
 	build.Dir = repoRoot
 	if out, berr := build.CombinedOutput(); berr != nil {
 		t.Fatalf("build harness: %v\n%s", berr, out)
@@ -69,7 +70,7 @@ const FleetDispatchTimeoutSec = 300
 	defer cancel()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "askcache-e2e", Version: "1"}, nil)
-	sess, err := client.Connect(ctx, &mcp.CommandTransport{Command: exec.Command(bin, "mcp")}, nil)
+	sess, err := client.Connect(ctx, &mcp.CommandTransport{Command: winexec.Command(bin, "mcp")}, nil)
 	if err != nil {
 		t.Fatalf("connect to spawned MCP server: %v", err)
 	}

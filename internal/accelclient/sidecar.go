@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // ErrNoSidecarCmd: the sidecar is down and this box has no way to start it
@@ -70,10 +72,9 @@ func SpawnCmd(cmdPath string, idleSec int) func() error {
 	return func() error {
 		var cmd *exec.Cmd
 		if runtime.GOOS == "windows" {
-			cmd = exec.Command("cmd.exe", "/c", cmdPath, "--idle-sec", strconv.Itoa(idleSec))
-			hideWindow(cmd)
+			cmd = winexec.CommandDetached("cmd.exe", "/c", cmdPath, "--idle-sec", strconv.Itoa(idleSec))
 		} else {
-			cmd = exec.Command("sh", "-c", cmdPath+" --idle-sec "+strconv.Itoa(idleSec))
+			cmd = winexec.CommandDetached("sh", "-c", cmdPath+" --idle-sec "+strconv.Itoa(idleSec))
 		}
 		if err := cmd.Start(); err != nil {
 			return err

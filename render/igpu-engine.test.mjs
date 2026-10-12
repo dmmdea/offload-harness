@@ -392,7 +392,7 @@ test("runEngine: the first CPU line kills the engine AND its grandchild, and bot
     const gcFile = join(dir, "grandchild.pid");
     const script = [
       "const fs=require('fs'),cp=require('child_process');",
-      "const c=cp.spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});",
+      "const c=cp.spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});",
       "fs.writeFileSync(process.argv[1],String(process.pid));fs.writeFileSync(process.argv[2],String(c.pid));",
       "console.log('ggml_vulkan: Found 1 Vulkan devices:');console.log('t5 compute buffer size: 297.00 MB(RAM) on CPU (peak across 1 segment)');",
       "setInterval(()=>{},1000);",
@@ -507,7 +507,7 @@ test("lifecycle: SIGTERM to the runner kills its engine and removes its temp dir
   const dir = scratch();
   try {
     const info = join(dir, "info.json");
-    const h = spawn(process.execPath, [writeHarness(dir), info], { stdio: "ignore" });
+    const h = spawn(process.execPath, [writeHarness(dir), info], { stdio: "ignore", windowsHide: true });
     const { tempDir } = JSON.parse(await waitFile(info));
     const enginePid = Number(await waitFile(info + ".engine"));
     assert.ok(existsSync(tempDir));
@@ -526,9 +526,9 @@ test("lifecycle: when the parent process disappears the runner kills its engine,
     // P spawns H detached, waits until H and its engine are up, then exits: H's parent is gone
     // while H (and its engine) are running
     const p = spawn(process.execPath, ["-e",
-      `const fs=require('fs');const c=require('child_process').spawn(process.execPath,[${JSON.stringify(harness)},${JSON.stringify(info)}],{stdio:'ignore',detached:true});c.unref();` +
+      `const fs=require('fs');const c=require('child_process').spawn(process.execPath,[${JSON.stringify(harness)},${JSON.stringify(info)}],{stdio:'ignore',detached:true,windowsHide:true});c.unref();` +
       `const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(info + ".engine")})&&fs.existsSync(${JSON.stringify(info)})){clearInterval(t);setTimeout(()=>process.exit(0),200);}},50);`,
-    ], { stdio: "ignore" });
+    ], { stdio: "ignore", windowsHide: true });
     await new Promise((r) => p.on("close", r));
     const { harness: hpid, tempDir } = JSON.parse(await waitFile(info));
     const enginePid = Number(await waitFile(info + ".engine"));

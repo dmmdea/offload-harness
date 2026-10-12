@@ -6,13 +6,13 @@ package pipeline
 
 import (
 	"context"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 func TestTranscribeOfAFileWithNoAudioStreamSaysSoAndIsFiledAsABadInput(t *testing.T) {
@@ -21,7 +21,7 @@ func TestTranscribeOfAFileWithNoAudioStreamSaysSoAndIsFiledAsABadInput(t *testin
 		t.Skip("ffmpeg not on PATH; the conversion under test is a real one")
 	}
 	silent := filepath.Join(t.TempDir(), "silent.mp4")
-	if out, err := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=1", "-pix_fmt", "yuv420p", silent).CombinedOutput(); err != nil {
+	if out, err := winexec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=1", "-pix_fmt", "yuv420p", silent).CombinedOutput(); err != nil {
 		t.Skipf("could not synthesise a video with no audio track: %v (%s)", err, out)
 	}
 	ledgerPath := filepath.Join(t.TempDir(), "ledger.jsonl")
