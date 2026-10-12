@@ -11,22 +11,30 @@ import (
 //
 // The skip decision (repackOpts.fit) asks whether the time left can buy the re-pack's output. It
 // used to size that output from the ANSWER: about a token per three characters of it, because the
-// re-pack was thought of as re-writing the answer as JSON. That is the cap, not the need. A re-pack
-// is an extraction, and a schema that names a title, at most ten strings, a flag and a note bounds
-// what the extraction can emit whatever the answer's length: the recorded re-pack of a 7,126
-// character answer produced about 200 tokens, and was skipped because its 2,439-token "size" was
-// more than the 2,330 tokens the call's last 476 seconds buy at 4.9 tokens a second. The finished
-// answer was lost to a budget defer for a re-pack that needed under a minute.
+// re-pack was thought of as re-writing the answer as JSON. That is the cap, not the need, for a
+// schema made of many short slots: a title, at most ten strings, a flag and a note bound what the
+// extraction can emit whatever the answer's length. The recorded re-pack of a 7,126 character
+// answer produced about 200 tokens, and was skipped because its 2,439-token "size" was more than
+// the 2,330 tokens the call's last 476 seconds buy at 4.9 tokens a second. The finished answer was
+// lost to a budget defer for a re-pack that needed under a minute.
+//
+// It is the cap for a schema of one or two free-text fields. {answer: string} is the flat shape
+// every remote agent_run carries, and its one string IS the answer restated; a digest schema's
+// summary is most of it. Their output tracks the answer, so they keep the answer-based figure.
 //
 // repackSchemaTokens reads the bound off the schema, and repackLeast takes it when it is smaller
 // than the answer-based figure. It never raises the figure, so a schema that bounds nothing (a list
-// with no maxItems, an object that names no fields) keeps the answer-based one.
+// with no maxItems, an object that names no fields) or that is mostly one free field keeps the
+// answer-based one.
 
 const (
-	// repackStringTokens is what a string field with no declared length is estimated at: about
-	// 400 characters. CHOSEN, not measured: an extracted title, quote or note is shorter, and a
-	// field that holds a paragraph is the case a schema author bounds with maxLength.
+	// repackStringTokens is what a free string slot (no maxLength, no enum) is estimated at: about
+	// 400 characters. CHOSEN, not measured: an extracted title, quote or note is shorter.
 	repackStringTokens = 128
+	// repackRestatingSlots is how many free string slots a schema may have and still be read as a
+	// restating one: its strings are the answer in another shape, and each may hold all of it.
+	// CHOSEN, not measured. Three or more slots are an extraction into parts.
+	repackRestatingSlots = 2
 	// repackScalarTokens is a boolean or a number: `false`, `-12345.678`.
 	repackScalarTokens = 8
 	// repackKeyTokens is what a key costs beside its name: the quotes, the colon and the comma.
@@ -37,58 +45,67 @@ const (
 	repackUnbounded = math.MaxInt
 )
 
-// repackSchemaTokens estimates the most tokens an object of this schema can take, or
-// repackUnbounded when the schema leaves it open: a list without maxItems, an object that names no
-// fields.
-func repackSchemaTokens(schema map[string]any) int {
-	n := specTokens(schema, 0)
-	if n == repackUnbounded {
-		return repackUnbounded
-	}
-	return satAdd(n, repackOutputSlack)
+// specSize is the estimate for one value of a spec: its tokens (repackUnbounded when the spec
+// leaves them open) and how many free string slots it holds (a list of n such strings holds n).
+type specSize struct {
+	tokens int
+	slots  int
 }
 
-// specTokens is the estimate for one value of the given spec. depth bounds the walk of a schema
-// that nests deeper than any real one does.
-func specTokens(spec map[string]any, depth int) int {
-	if depth > 8 {
+// repackSchemaTokens estimates the most tokens an object of this schema can take, or
+// repackUnbounded when the schema leaves it open (a list without maxItems, an object that names no
+// fields) or reads as a restating one (one or two free string slots: repackRestatingSlots).
+func repackSchemaTokens(schema map[string]any) int {
+	z := specTokens(schema, 0)
+	if z.tokens == repackUnbounded || (z.slots > 0 && z.slots <= repackRestatingSlots) {
 		return repackUnbounded
+	}
+	return satAdd(z.tokens, repackOutputSlack)
+}
+
+// specTokens sizes one value of the given spec. depth bounds the walk of a schema that nests
+// deeper than any real one does.
+func specTokens(spec map[string]any, depth int) specSize {
+	open := specSize{tokens: repackUnbounded, slots: repackUnbounded}
+	if depth > 8 {
+		return open
 	}
 	switch typeName(spec) {
 	case "boolean":
-		return repackScalarTokens
+		return specSize{tokens: repackScalarTokens}
 	case "integer", "number":
-		return repackScalarTokens + 4
+		return specSize{tokens: repackScalarTokens + 4}
 	case "array":
 		bound, ok := spec["maxItems"].(float64)
 		if !ok || bound < 0 || bound > 1e6 {
-			return repackUnbounded
+			return open
 		}
 		items, _ := spec["items"].(map[string]any)
 		item := specTokens(items, depth+1) // an item with no spec reads as a string, the grammar's reading
-		if item == repackUnbounded {
-			return repackUnbounded
+		if item.tokens == repackUnbounded {
+			return open
 		}
-		return satAdd(2, satMul(int(bound), satAdd(item, 2)))
+		return specSize{tokens: satAdd(2, satMul(int(bound), satAdd(item.tokens, 2))), slots: satMul(int(bound), item.slots)}
 	case "object":
 		props, _ := spec["properties"].(map[string]any)
 		if len(props) == 0 {
-			return repackUnbounded
+			return open
 		}
-		total := 2
+		total := specSize{tokens: 2}
 		for name, raw := range props {
 			sub, _ := raw.(map[string]any)
 			v := specTokens(sub, depth+1)
-			if v == repackUnbounded {
-				return repackUnbounded
+			if v.tokens == repackUnbounded {
+				return open
 			}
-			total = satAdd(total, satAdd(repackKeyTokens+len(name)/3, v))
+			total.tokens = satAdd(total.tokens, satAdd(repackKeyTokens+len(name)/3, v.tokens))
+			total.slots = satAdd(total.slots, v.slots)
 		}
 		return total
 	}
-	// A string. A declared bound is the bound; an enum is its longest value; otherwise the estimate.
+	// A string. A declared bound is the bound; an enum is its longest value; otherwise a free slot.
 	if n, ok := spec["maxLength"].(float64); ok && n >= 0 && n <= 1e6 {
-		return int(n)/2 + 2
+		return specSize{tokens: int(n)/2 + 2}
 	}
 	if raw, ok := spec["enum"].([]any); ok && len(raw) > 0 {
 		longest := 0
@@ -97,9 +114,9 @@ func specTokens(spec map[string]any, depth int) int {
 				longest = len(s)
 			}
 		}
-		return longest/2 + 2
+		return specSize{tokens: longest/2 + 2}
 	}
-	return repackStringTokens
+	return specSize{tokens: repackStringTokens, slots: 1}
 }
 
 // repackLeast is the smallest an attempt may be sized to: what the re-pack has to write, which is

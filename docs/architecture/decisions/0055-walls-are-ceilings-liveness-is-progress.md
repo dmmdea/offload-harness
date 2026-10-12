@@ -372,6 +372,56 @@ determine if a job is truly still going" — was not met by any of the three sur
       > validator and the attempts above. The per-attempt `head` and `tail` and the new lane names
       > show in production which path an attempt took.
 
+11. **A re-pack is sized from the schema it writes to, and the delegator's rescue re-packs where the
+    seat is hot (amendment 2026-10-12, found in one delegation of three subtasks).** Items 9 and 10
+    priced the re-pack's output as the answer's length (`len/3 + 64` tokens: "the re-pack re-writes
+    the answer as JSON") and gave the rescue one place to run, the delegator's own seat. Both
+    assumptions failed on a slow seat, and the answer was lost to a budget defer.
+    - **The output is bounded by the schema.** A 7,126-character answer, a schema of a title, at most
+      ten strings, a flag and a note, and a seat at 4.9 tok/s: the skip test priced the re-pack at 2,439
+      tokens against the 2,330 that the call's last 476 s buy (the call's deadline capped the owed
+      time), and skipped it. The object was about 200 tokens. `repackLeast` is now the smaller of the
+      answer-based figure and the schema's bound (`repackSchemaTokens`): a boolean or number 8 to 12
+      tokens, a string with a declared `maxLength` or `enum` exactly, any other string 128 tokens
+      (about 400 characters: chosen, not measured), a list only with `maxItems`, an object only with
+      named fields. A schema that bounds nothing (a list with no `maxItems`, an object with no fields)
+      keeps the answer-based figure, and the schema never raises it. So does a schema of one or two
+      free-text fields (`repackRestatingSlots`, chosen, not measured): the flat `{answer: string}` every
+      remote `agent_run` carries is its one string, the whole answer restated, and a digest's summary
+      is most of it. Three or more free slots, a list of ten strings counting as ten, are an extraction
+      into parts, which is the recorded case (twelve slots, about 1,600 tokens by this estimate, about
+      200 written). The skip floor, the chat lane's
+      floor, the resend floor and the owed time (`repackOwedTokens`, still `1.5 x` the tokens at the
+      seat's rate, `agent.RepackMargin`) all read that one figure, so the skip test and the time the
+      re-pack is owed cannot disagree. A skip the schema sized says `< the object's N`. The liveness
+      allowance (item 8) stays on the answer-based size: it is `max(flat bound, estimate)`, a stall
+      bound, and a smaller estimate could only cut a seat that was producing. The ADR 0055 sentence
+      "both floors take the answer's own size as the object's size, which a condensing schema undershoots
+      and a restating one overshoots" is now true of the restating case only. The cost, stated: a bounded
+      schema whose real output runs long is sent and cut at the tokens the time buys, a `budget` defer
+      after seat time spent where it used to be one before.
+    - **The rescue goes where the seat is hot.** The recorded rescue tried this box's agent seat, found
+      it not resident with its cards under another session's exclusive lease, warmed it, queued the
+      completion behind the lease and was cut at its 120 s allowance, with the warm-up dropped from
+      the error. The delegator now hands the rescue the node that ran the loop and the seat that wrote
+      the answer (`delegate.WithRescueOrigin`, in the context: the `RescueFunc` signature is unchanged).
+      `RescueRepack` reads the lossless object, then re-packs on this box's seat when it is resident
+      (an unreadable `/running` leaves it there), and when it is not makes ONE chat completion on the
+      origin node's seat through the node's chat door (register C-41b, the bearer-gated route modelled on
+      ADR 0040's vision lane) with the fleet bearer. That call waits for no load here and, being off-box, never waits on this
+      box's GPU lease (register C-41c); it carries `WithLocalBusy`, so it leaves the box or is refused
+      before any request and never falls through to a same-named seat on this box's cards. A node that
+      cannot take it (no chat door, an invalid or hollow object, the budget spent) leaves this box's seat,
+      warmed first, the budget that is left (at least 20 s, or the rescue stops). A failed rescue names
+      every rung. Unverified: that the origin node's seat is still resident when the rescue runs (it has
+      just decoded the answer; a seat idle-unloaded after five minutes would be a cold load at the
+      node's end), and only the origin node is tried, not the fastest idle node of the fleet.
+    - **An object is read against its answer.** The validator and the acceptance checks cannot see a
+      re-pack that kept the shape and lost the lists (`core.ListsEmptied`; see
+      [coding-agent.md](../../systems/coding-agent.md)). It is in this ADR because it is the
+      re-pack's other outcome of the same delegation, and because its refusal is an `abstention` that
+      carries the finished answer, which the rescue then reads the same way.
+
 ## Consequences
 
 - A 27B seat at 1 tok/s finishes its contract. A seat that dies mid-stream (an engine error

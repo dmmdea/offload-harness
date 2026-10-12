@@ -568,9 +568,18 @@ difference: `structured re-pack unreachable` fires after the agent loop has alre
 that result publishes `output` populated, `structured` absent, `defer_class: "infrastructure"`.
 That is lost work only when the DELEGATOR's rescue also fails (register C-66, PR-4): the node flags
 such a defer `schema_miss`, and the delegator — which holds the finished answer — re-packs it
-itself before acceptance (the lossless reading first, then ONE completion on its own agent seat, not
-a registered run; a seat that is not resident is warmed first, outside the allowance), validates the
-object, and lets the ordinary delegator-side acceptance decide. A node too old to publish the flag is
+itself before acceptance, down a ladder (`pipeline.RescueRepack`): the lossless reading first; then
+ONE completion on its own agent seat when that seat is resident (not a registered run); when it is not,
+ONE chat completion on the node that wrote the answer, on the seat that wrote it, through that node's
+chat door with the fleet bearer (the delegator hands the rescue that node in its context,
+`delegate.WithRescueOrigin`; the node has just decoded the answer and holds the seat hot, waits for no
+load here, and never queues behind this box's GPU lease, because the call carries `WithLocalBusy` and
+leaves the box or does not run); and last this box's seat, warmed first outside the allowance, with the
+budget the node left. An unreadable `/running` leaves the rescue on its own seat, as before. The rescue
+validates the object, reads it against its answer (see "A re-pack is read against its answer" below),
+and lets the ordinary delegator-side acceptance decide; a failed rescue names every rung it tried, the
+node and the warm-up included. (A rescue on this box's cold seat under another session's lease used to
+queue behind the lease and be cut at its 120 s allowance.) A node too old to publish the flag is
 recognized from `stop_reason: done` and the reason prefix, and a defer whose reason says the CALLER's
 context ended is never rescued. The delivered result carries `repack_note: "rescued on <seat> …"` and
 is counted as a success; prose nothing validated is still never one, so a rescue that cannot produce a
@@ -584,6 +593,27 @@ that very lease (the lane instead reads a skipped or cut re-pack's raw lines its
 filters and without a second completion: `reviewlane.Salvage`, see [mcp-server.md](mcp-server.md)); and `offload_ask` at a named remote route keeps its own handling of a finished answer
 (its prose still reaches the caller: a deferred `offload_ask` carries it as `output`, flagged `schema_miss`), which the security review records as deliberate, so wiring it is
 outside this change. The seam is one field, `RunOptions.Rescue`, if any of them should be wired later.
+
+**A re-pack is read against its answer.** The schema validator says an object has the right shape,
+not that it kept the content, and the acceptance checks read fields (`contains:` the answer's text,
+`nonempty:` one scalar). A seat whose final answer was itself a JSON object with keys of its own
+(a list of eleven `{quote, release_note_says}` under `outdated_sentences`, where the schema asks for
+`stale: [string]`) was re-packed into `{"stale": [], "up_to_date": true, ...}` and delivered as a success,
+because the re-pack prompt said "use empty values when a field is absent" beside a text none of whose keys
+had the requested names. `core.ListsEmptied` is the check: a list the schema asks for that the answer
+holds under the same path is compared with that list alone (an answer that says `"stale": []` has nothing
+to lose); only when the answer shares no list path with the schema do the lists it holds under other keys
+count, and then the object must hold some item in the lists the schema asks for. An object that carries the
+list itself lost nothing, and a prose answer is not judged. The node refuses such an object on every lane
+(the next attempt carries the finding ahead of the text; all refused is an abstention with the answer in
+`output`), `EvalAcceptance` reads every result the same way (a failed verification, which the delegator
+retries on another node), and `RescueRepack` refuses a hollow rescue. The prompts changed with it: a text
+that is a JSON object is told so, with its keys listed (shapes and counts, never content), and the bound a
+schema puts on a list (`maxItems`) is stated on every lane. A result that kept fewer list items than its
+answer held says so in `repack_note` (`kept 10 of 11 list items from "outdated_sentences" (maxItems 10)`).
+The cost of the check is a false refusal in one shape: an answer that lists what it checked under another
+key, beside a schema list that is legitimately empty, is refused (an honest defer with the answer attached),
+because nothing deterministic tells the two lists apart.
 
 The two surfaces report that verdict differently, on purpose, and they agree on the case that
 matters. **The CLI exits non-zero on `summary.infrastructure > 0`** — an exit code sits beside the

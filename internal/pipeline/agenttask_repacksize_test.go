@@ -88,8 +88,7 @@ func TestRepackSchemaTokensBoundsOnlyWhatTheSchemaBounds(t *testing.T) {
 		schema   string
 		min, max int // inclusive; min == max == unbounded for an open schema
 	}{
-		{"booleans and numbers", `{"properties":{"ok":{"type":"boolean"},"n":{"type":"number"}}}`, 20, 100},
-		{"one free string", `{"properties":{"answer":{"type":"string"}}}`, 130, 200},
+		{"booleans and numbers only", `{"properties":{"ok":{"type":"boolean"},"n":{"type":"number"}}}`, 20, 100},
 		{"a bounded list of strings", `{"properties":{"stale":{"type":"array","items":{"type":"string"},"maxItems":10}}}`, 1300, 1700},
 		{"a list with no maxItems", `{"properties":{"stale":{"type":"array","items":{"type":"string"}}}}`, unbounded, unbounded},
 		{"a free-form object", `{"properties":{"meta":{"type":"object"}}}`, unbounded, unbounded},
@@ -97,7 +96,17 @@ func TestRepackSchemaTokensBoundsOnlyWhatTheSchemaBounds(t *testing.T) {
 		{"an enum", `{"properties":{"label":{"type":"string","enum":["low","medium","high"]}}}`, 20, 80},
 		{"a bounded list of objects", `{"properties":{"rows":{"type":"array","maxItems":3,"items":{"type":"object","properties":{"name":{"type":"string"},"n":{"type":"integer"}}}}}}`, 400, 1200},
 		{"one unbounded list among bounded fields", `{"properties":{"title":{"type":"string"},"all":{"type":"array","items":{"type":"string"}}}}`, unbounded, unbounded},
-		{"a nested object", `{"properties":{"meta":{"type":"object","properties":{"owner":{"type":"string"}}}}}`, 130, 260},
+		{"four free strings", `{"properties":{"title":{"type":"string"},"decision":{"type":"string"},"owner":{"type":"string"},"reason":{"type":"string"}}}`, 500, 650},
+		{"three free strings in a nested object", `{"properties":{"meta":{"type":"object","properties":{"owner":{"type":"string"},"repo":{"type":"string"},"ref":{"type":"string"}}}}}`, 400, 600},
+		// A schema of one or two free-text fields is a restating one: its strings are the answer in
+		// another shape, and each may hold all of it. {answer: string} is the flat shape every remote
+		// agent_run carries.
+		{"one free string (the flat answer)", `{"properties":{"answer":{"type":"string"}}}`, unbounded, unbounded},
+		{"two free strings", `{"properties":{"title":{"type":"string"},"summary":{"type":"string"}}}`, unbounded, unbounded},
+		{"one free string beside a flag and a number", `{"properties":{"note":{"type":"string"},"ok":{"type":"boolean"},"n":{"type":"integer"}}}`, unbounded, unbounded},
+		{"a nested object with one free string", `{"properties":{"meta":{"type":"object","properties":{"owner":{"type":"string"}}}}}`, unbounded, unbounded},
+		{"a list of two strings", `{"properties":{"tags":{"type":"array","maxItems":2,"items":{"type":"string"}}}}`, unbounded, unbounded},
+		{"a list of two strings and a title", `{"properties":{"title":{"type":"string"},"tags":{"type":"array","maxItems":2,"items":{"type":"string"}}}}`, 400, 700},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -149,38 +158,54 @@ func answerInLines(n int) string {
 	return b.String()
 }
 
-// The same shape end to end. A 2 s wall, a call deadline 4 s after the wall began, a seat at 100 tok/s
+// extractionContract asks for four short fields: an extraction into parts, whose output the schema
+// bounds near 560 tokens whatever the answer's length. The fake seat answers it with fourObject.
+func extractionContract() core.AgentContract {
+	c := testContract()
+	c.OutputSchema = json.RawMessage(`{"type":"object","properties":{"title":{"type":"string"},"decision":{"type":"string"},"owner":{"type":"string"},"reason":{"type":"string"}},"required":["title","decision","owner","reason"]}`)
+	return c
+}
+
+const fourObject = `{"title":"Arm C","decision":"approved","owner":"operator","reason":"recorded"}`
+
+func extractionFake(answer string) *agentFake {
+	fake := okRepackFake()
+	fake.loop = func(int64) string { return doneChat(answer) }
+	fake.repack = func(int64) string { return fourObject }
+	return fake
+}
+
+// The same shape end to end. A 2 s wall, a call deadline 7 s after the wall began, a seat at 100 tok/s
 // and a 3,000-character answer that is already written: the answer-sized re-pack (1,064 tokens, owed
-// 16 s) is capped by the call's deadline to the 410 tokens its last 4.1 s buy, and skipped. The
-// schema, `{answer: string}`, bounds the object near 150 tokens: it is sent, clamped to the 410.
+// 16 s) is capped by the call's deadline to the 710 tokens its last 7.1 s buy, and skipped. The
+// schema, four short fields, bounds the object near 560 tokens: it is sent, clamped to the 710.
 func TestRunAgentTaskRepackWhoseSchemaBoundsItsOutputIsSentWhenTheDeadlineCannotBuyTheWholeAnswer(t *testing.T) {
 	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
 	answer := answerInLines(3000)
-	fake := okRepackFake()
-	fake.loop = func(int64) string { return doneChat(answer) }
+	fake := extractionFake(answer)
 	srv := fake.server(t)
 	defer srv.Close()
 
 	p := rateTestPipeline(t, srv.URL, 100)
 	cfg := p.Cfg()
-	cfg.AgentCallDeadlineSec = 4
+	cfg.AgentCallDeadlineSec = 7
 	p.cfg = cfg
-	contract := testContract()
+	contract := extractionContract()
 	contract.TimeoutSec = 2
 	wire := decodeWire(t, p.Run(context.Background(), agentTestRequest(t, contract)))
 	if wire.Deferred {
 		t.Fatalf("deferred (%s): %s\nrepack_note: %s", wire.DeferClass, wire.Reason, wire.RepackNote)
 	}
 	if got := fake.grammarCNT.Load(); got != 1 {
-		t.Fatalf("grammar re-pack requests = %d, want 1: the schema bounds the object well under what the deadline buys", got)
+		t.Fatalf("grammar re-pack requests = %d, want 1: the schema bounds the object under what the deadline buys", got)
 	}
 	var st map[string]string
-	if err := json.Unmarshal(wire.Structured, &st); err != nil || st["answer"] != "42" {
+	if err := json.Unmarshal(wire.Structured, &st); err != nil || st["title"] != "Arm C" {
 		t.Fatalf("structured = %s (%v), want the re-packed object", wire.Structured, err)
 	}
 	mt := maxTokensOf(t, <-fake.repackBodies)
-	if mt < 150 || mt > 450 {
-		t.Fatalf("max_tokens = %d, want what the last seconds of the call's deadline buy (about 410), not the %d budget", mt, repackBudget(answer))
+	if mt < 560 || mt > 760 {
+		t.Fatalf("max_tokens = %d, want what the last seconds of the call's deadline buy (about 710), not the %d budget", mt, repackBudget(answer))
 	}
 	d := wire.RepackAttemptsDetail
 	if len(d) != 1 || d[0].Skipped || d[0].ClampedFrom != repackBudget(answer) {
@@ -188,29 +213,37 @@ func TestRunAgentTaskRepackWhoseSchemaBoundsItsOutputIsSentWhenTheDeadlineCannot
 	}
 }
 
-// A schema that bounds nothing keeps the answer-based size, so the same call is still skipped: the
-// re-pack could be as long as the answer, and the time cannot buy that.
-func TestRunAgentTaskRepackWhoseSchemaBoundsNothingIsStillSkippedAtTheCallsDeadline(t *testing.T) {
-	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
-	answer := answerInLines(3000)
-	fake := okRepackFake()
-	fake.loop = func(int64) string { return doneChat(answer) }
-	srv := fake.server(t)
-	defer srv.Close()
+// A schema that bounds nothing, or that is the answer restated, keeps the answer-based size, so the
+// same call is still skipped: the re-pack could be as long as the answer, and the time cannot buy
+// that. {answer: string} is the flat shape every remote agent_run carries.
+func TestRunAgentTaskRepackWhoseSchemaDoesNotBoundItIsStillSkippedAtTheCallsDeadline(t *testing.T) {
+	for name, schema := range map[string]string{
+		"a list with no maxItems":  `{"properties":{"items":{"type":"array","items":{"type":"string"}}},"required":["items"]}`,
+		"the flat answer (1 slot)": `{"properties":{"answer":{"type":"string"}},"required":["answer"]}`,
+		"a title and a summary":    `{"properties":{"title":{"type":"string"},"summary":{"type":"string"}},"required":["title","summary"]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
+			answer := answerInLines(3000)
+			fake := extractionFake(answer)
+			srv := fake.server(t)
+			defer srv.Close()
 
-	p := rateTestPipeline(t, srv.URL, 100)
-	cfg := p.Cfg()
-	cfg.AgentCallDeadlineSec = 4
-	p.cfg = cfg
-	contract := testContract()
-	contract.TimeoutSec = 2
-	contract.OutputSchema = json.RawMessage(`{"properties":{"items":{"type":"array","items":{"type":"string"}}},"required":["items"]}`)
-	wire := decodeWire(t, p.Run(context.Background(), agentTestRequest(t, contract)))
-	if got := fake.grammarCNT.Load() + fake.chatFallbackCNT.Load(); got != 0 {
-		t.Fatalf("re-pack requests = %d, want 0: an unbounded list may be as long as the answer", got)
-	}
-	if !wire.Deferred || wire.DeferClass != core.DeferClassBudget || !wire.SchemaMiss || !strings.Contains(wire.RepackNote, "re-pack skipped:") {
-		t.Fatalf("deferred=%v class=%q schema_miss=%v note=%q, want a budget defer carrying the finished answer", wire.Deferred, wire.DeferClass, wire.SchemaMiss, wire.RepackNote)
+			p := rateTestPipeline(t, srv.URL, 100)
+			cfg := p.Cfg()
+			cfg.AgentCallDeadlineSec = 7
+			p.cfg = cfg
+			contract := testContract()
+			contract.TimeoutSec = 2
+			contract.OutputSchema = json.RawMessage(schema)
+			wire := decodeWire(t, p.Run(context.Background(), agentTestRequest(t, contract)))
+			if got := fake.grammarCNT.Load() + fake.chatFallbackCNT.Load(); got != 0 {
+				t.Fatalf("re-pack requests = %d, want 0: this object may be as long as the answer", got)
+			}
+			if !wire.Deferred || wire.DeferClass != core.DeferClassBudget || !wire.SchemaMiss || !strings.Contains(wire.RepackNote, "< the answer's") {
+				t.Fatalf("deferred=%v class=%q schema_miss=%v note=%q, want a budget defer carrying the finished answer, sized by the answer", wire.Deferred, wire.DeferClass, wire.SchemaMiss, wire.RepackNote)
+			}
+		})
 	}
 }
 
@@ -229,13 +262,14 @@ func TestRepackSkipNoteNamesWhatSizedIt(t *testing.T) {
 }
 
 // A slow loop leaves the wall spent, and the re-pack is then owed the time it needs (register F44/C13).
-// What it needs is what it WRITES: a 3,000-character answer re-packed into {answer: string} owes about
-// 150 tokens at 100 tok/s (2.3 s), not the 1,064 tokens the answer weighs (16 s). The request carries
-// what that time buys, not the whole 1,512-token budget a 16-second allowance would have let through.
+// What it needs is what it WRITES: a 3,000-character answer re-packed into four short fields owes about
+// 560 tokens at 100 tok/s (8.4 s), not the 1,064 tokens the answer weighs (16 s). The request carries
+// what that time buys (about 850 tokens), not the whole 1,512-token budget a 16-second allowance would
+// have let through.
 func TestRunAgentTaskRepackIsOwedWhatItWritesNotWhatTheAnswerWeighs(t *testing.T) {
 	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
 	answer := answerInLines(3000)
-	fake := okRepackFake()
+	fake := extractionFake(answer)
 	fake.loopStream = func(_ int64, _ map[string]any, w http.ResponseWriter, r *http.Request) {
 		select { // a loop that ends 0.4 s past its 2 s wall
 		case <-r.Context().Done():
@@ -248,15 +282,15 @@ func TestRunAgentTaskRepackIsOwedWhatItWritesNotWhatTheAnswerWeighs(t *testing.T
 	srv := fake.server(t)
 	defer srv.Close()
 
-	contract := testContract()
+	contract := extractionContract()
 	contract.TimeoutSec = 2
 	wire := decodeWire(t, rateTestPipeline(t, srv.URL, 100).Run(context.Background(), agentTestRequest(t, contract)))
 	if wire.Deferred {
 		t.Fatalf("deferred (%s): %s\nrepack_note: %s", wire.DeferClass, wire.Reason, wire.RepackNote)
 	}
 	mt := maxTokensOf(t, <-fake.repackBodies)
-	if mt < 150 || mt > 320 {
-		t.Fatalf("max_tokens = %d, want what the 2.3 s owed for the object (plus the 0.1 s of grace) buy, not the %d budget a 16 s allowance would let through", mt, repackBudget(answer))
+	if mt < 560 || mt > 950 {
+		t.Fatalf("max_tokens = %d, want what the 8.4 s owed for the object (plus the 0.1 s of grace) buy, not the %d budget a 16 s allowance would let through", mt, repackBudget(answer))
 	}
 	if d := wire.RepackAttemptsDetail; len(d) != 1 || d[0].ClampedFrom != repackBudget(answer) {
 		t.Fatalf("detail = %+v, want one attempt clamped from the %d budget", d, repackBudget(answer))
@@ -268,16 +302,15 @@ func TestRunAgentTaskRepackIsOwedWhatItWritesNotWhatTheAnswerWeighs(t *testing.T
 func TestRunAgentTaskRepackSkipNamesTheObjectWhenTheSchemaSizedIt(t *testing.T) {
 	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
 	answer := answerInLines(3000)
-	fake := okRepackFake()
-	fake.loop = func(int64) string { return doneChat(answer) }
+	fake := extractionFake(answer)
 	srv := fake.server(t)
 	defer srv.Close()
 
 	p := rateTestPipeline(t, srv.URL, 100)
 	cfg := p.Cfg()
-	cfg.AgentCallDeadlineSec = 1 // the call's last 1.1 s buy 110 tokens at 100 tok/s: under the object's 154
+	cfg.AgentCallDeadlineSec = 1 // the call's last 1.1 s buy 110 tokens at 100 tok/s: under the object's 560
 	p.cfg = cfg
-	contract := testContract()
+	contract := extractionContract()
 	contract.TimeoutSec = 1
 	wire := decodeWire(t, p.Run(context.Background(), agentTestRequest(t, contract)))
 	if got := fake.grammarCNT.Load() + fake.chatFallbackCNT.Load(); got != 0 {
