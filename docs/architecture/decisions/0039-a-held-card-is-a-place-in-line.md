@@ -198,3 +198,54 @@ Related code: `internal/pipeline/mediamulticard.go`, `mediaadmit.go` (`needMulti
 `render/multicard-image.mjs`, `render/multicard-recipes.json`. Related docs: [media-generation.md](../../systems/media-generation.md) ("Card-only
 image and edit"); [ADR 0057](0057-placement-scores-the-cards-the-harness-can-use.md); [ADR 0075](0075-the-display-layer-opens-under-the-presence-guard-and-leaves-when-the-operator-returns.md); [ADR 0058](0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md)
 (a family overlay may carry the key).
+
+## Amendment 2026-10-12 (A-RAM-15, the display card is open to the allocator up to a cap, at any presence)
+
+The allocator behind a card-scoped lease (`gpu reserve --cards N`, the media admission path) kept the card the
+monitor is attached to out of every automatic choice while the operator was at the desk, and opened it only when
+`operator_presence` read away, above the display layer's desktop floor (ADR 0075). The place in line this ADR
+describes is the same line, so the rule for who may be put on that card belongs here too. On 2026-10-11 the
+operator replaced it: the display card may be used up to 60 percent at all times, unless he says he needs it.
+
+What the allocator does now:
+
+- **One key, `gpu_display_cap_pct`** (default 60, a whole number of percent). The display card is allocatable
+  while the VRAM in use now, the desktop's own included, plus the request's declared footprint, is at most that
+  share of its total VRAM. It is the display layer's `display_floor` arithmetic (`free - footprint >= floor`) with
+  the floor set to the rest of the card; where the layers also declare an absolute `display_floor_gib`, the larger
+  of the two floors holds. `0` is the operator's "I need the card" switch: the card is skipped as `display` and the
+  skip names the key. `100` is the whole card. A value outside `0..100` refuses the load by name, and reads as
+  closed (never as the whole card) where a caller goes on with the refused value anyway, as `gpu reserve` does.
+  Unset and `0` are different values (the field is a pointer). The switch is live: the allocator reads the key from
+  the config file each time it builds its input (`Config.LiveGPUDisplayCap`), so a `0` written while a request is in
+  line or a server is running reaches the pick and the grant-time check; a file that cannot be read at that moment
+  keeps the last value read from it.
+- **No presence term.** `operator_presence` still decides the display layer's llama-swap twin guards and nothing
+  else: the allocator reads no presence, so a locked screen, an idle desk and a game on the card are one question,
+  answered by the VRAM in use at the moment of the pick.
+- **A footprint is needed to be held to a share.** A request that declares none (no `--vram`) is not given the
+  display card under a cap below 100, as the display layer's guard refuses a seat with no display footprint. At 100
+  with no `display_floor_gib` declared there is no share to hold a footprint to, and the card is judged as any other
+  is. A media call declares no VRAM footprint today, so the media tools do not take the display card below 100 until
+  a measured footprint is fed to the allocator; `gpu reserve --cards N --vram X` does.
+- **An unknown display stays closed.** A reading that could not say which card the monitor is on marks every card
+  `display-unknown` and none of them is handed out, whatever the cap. Before, an operator-away setting overrode
+  that; with no presence reading the safe answer is the one the desk already got.
+- **The grant asks again.** The place in line was always decided against the rule as it stood at the enqueue, so
+  the grant-time check (`gpulease.DesktopRefusals`, run through `Options.GrantCheck`) puts the cap again from fresh
+  readings: a card that has grown past it while the request waited, or that the operator closed in the meantime, is
+  given back and the request chooses again, with its arrival time kept.
+- **The media door forces nothing on a live table.** On a table it could not refresh (register F24) it still keeps
+  the screen's card closed (`AllocInput.DisplayStale`, the cap itself unchanged and the skip naming the table, not
+  the key), because the cap is judged on the VRAM in use now and a stale table misstates exactly that.
+
+Consequences to know. A display card with no resident seat sorts first (nothing to evict), so with the pair seat
+loaded, `gpu reserve --cards 1 --vram 6` now prefers the screen's card to an eviction; that is the rule working, and
+`gpu_display_cap_pct: 0` restores the old order. The cap bounds admission only: nothing limits a job after it is
+placed, so the footprint has to be a measured peak, and one number per request cannot describe a donor slice beside
+a compute share. `--devices` still names any card on the operator's word. The llama-swap twin guards
+(`internal/placement/guards.go`, `display_floor` and `presence`) are unchanged.
+
+Related code: `internal/gpulease/allocator.go`, `internal/gpualloc/input.go`, `internal/config/gpucards.go`,
+`internal/pipeline/mediaadmit.go`. Related docs: [media-generation.md](../../systems/media-generation.md) ("The
+allocator and the display card"), [ADR 0075](0075-the-display-layer-opens-under-the-presence-guard-and-leaves-when-the-operator-returns.md).

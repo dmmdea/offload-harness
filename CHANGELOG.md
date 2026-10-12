@@ -6,6 +6,89 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — the display card is allocatable up to a cap at all times, and the operator's presence neither opens nor closes it (A-RAM-15, `gpu_display_cap_pct`)
+
+- **The rule.** The operator's order of 2026-10-11: the display card may be used up to 60 percent at all times, unless he says he needs it.
+  The card allocator behind `gpu reserve --cards N` and the media admission path did the opposite: it never handed the card the monitor is
+  attached to to an unnamed request while `operator_presence` read present (the default), and with the key set to `away` or `auto` it opened
+  the card only above the display layer's `display_floor_gib`. The presence reading is gone from the allocator; the card is bounded by a share
+  of its VRAM instead.
+- **The key.** `gpu_display_cap_pct`: whole percent, default 60 when unset, `0` closes the card to the allocator (the "I need it" switch, and
+  not the same value as unset), `100` is the whole card, a value outside `0..100` refuses the load naming the key (and reads as closed, never as
+  the whole card, where a caller goes on with the refused value anyway: `Load` hands back the Config beside its error and `gpu reserve` proceeds
+  on it). The display card is
+  allocatable while the VRAM in use now (the desktop's included) plus the request's declared footprint is at most that share of its total.
+  That is the display layer's `display_floor` arithmetic (`free - footprint >= floor`) with the floor set to the rest of the card; a
+  `display_floor_gib` the layers also declare still holds when it is the larger of the two. On the reference three-card box (display card with
+  2.6 GiB in use of 15.9) a 6 GiB request can land there and a 7.5 GiB one cannot, and the skip says `gpu_display_cap_pct 60 % of 15.9 GiB`.
+  `AllocInput.DisplayCapPct` replaces `AllowDisplay`, and `gpualloc.Deps.Presence` goes with its only reader.
+- **The switch is live.** A process never reloads its config, so the value read at start would leave the switch dead for a `gpu reserve --wait 8h`
+  already in line, a detached holder, and the long-lived MCP server that places media calls. `Config.LiveGPUDisplayCap` re-reads
+  `gpu_display_cap_pct` from the file the Config was read from (`Load` records it, `Config.WithSource`) each time `gpualloc.BuildInput` builds
+  the allocator's input, so the pick and the grant-time check both see a `0` written after they started. A file that cannot be read at that
+  moment (an editor part-way through a save) keeps the last value read from it, never the load-time one; a key removed reads as the default 60;
+  a Config with no source file answers with its own value. `GPUDisplayCap` stays the value at load.
+- **What stays closed.** A request that declares no footprint (`--vram`) is not given the display card under a cap below 100 (at 100 with no
+  `display_floor_gib` declared the whole card is open and nothing is held to a footprint, so a request that declares none, every media call, is
+  given it with no VRAM check on that card, as on any other; `TestACapOf100WithNoDeclaredFloorTakesAJobThatDeclaresNoFootprint` pins the
+  exception and the three places it stops); a reading
+  that could not say which card the monitor is on keeps every card closed whatever the cap (before, an operator-away setting overrode that,
+  so a degraded reading now refuses the cards of a multi-card box as it always did at the desk); `--devices` still names any card on the
+  operator's word. The llama-swap twin guards (`display_floor`, `presence` in `internal/placement/guards.go`) are untouched.
+- **The grant asks again.** A request queued on the display card is put to the same rule when its turn comes (`DesktopRefusals` through
+  `GrantCheck`): a card that grew past the cap while the request waited, or that the operator closed meanwhile, is given back and the request
+  chooses again with its place in line kept.
+- **The media door.** It forces nothing on a live card table. On a table it could not refresh (F24) it still keeps the screen's card closed
+  (`AllocInput.DisplayStale`; the cap stays what the config says and the skip says the card table could not be re-read, not that the key is 0),
+  because the cap is judged on the VRAM in use now and a stale table misstates that; the new `mediaAllocInput` is pinned both ways. A media call declares
+  no VRAM footprint, so under a cap below 100 the typed media tools still do not take the display card: that waits for a measured VRAM footprint
+  to be fed to the allocator (register P13, item 2).
+- **The refusal reads right.** The display card refused over its cap is skipped as `vram`, as the opened card's floor always was, so a media
+  call's `gpu busy` answer would have read `card 1 vram`. `gpulease.Skip` gains `Display` (the card table's rule) and
+  `gpualloc.SkipSummary` says `card 1 vram (display card)` beside any reason but `display`
+  (`TestSkipSummaryNamesTheDisplayCardBesideAReasonThatDoesNot`); the full sentence, with the cap, stays in the skip's detail.
+- **What you will see.** A display card with no resident seat sorts first (nothing to evict), so with the pair seat loaded `gpu reserve --cards 1
+  --vram 6` now prefers the screen's card to an eviction; `gpu_display_cap_pct: 0` restores the old order. The cap bounds admission only:
+  nothing limits a job after it is placed, so the footprint has to be a measured peak, and one number per request cannot describe a donor slice
+  beside a compute share.
+- **Tests, written first.** Red before (the field was inert, so the allocator still read the old rule): `TestAllocatorOpensTheDisplayCardWithinTheCapWithoutPresence`
+  (got `[gpu-aaaa0000]`, the display card skipped as `display`), `TestAllocatorRefusesTheDisplayCardPastTheCapAndNamesIt` (footprints 6, 6.9 and 6.94
+  not taken, and every refusal skipped as `display` instead of `vram` naming the cap), `TestAllocatorUndeclaredFootprintStaysRefusedOnTheDisplayCard`,
+  `TestAllocatorCapZeroKeepsTheDisplayCardClosed` (the skip did not name the key), `TestAllocatorDisplayCardWithoutATotalStaysClosedUnderTheCap`,
+  `TestADeclaredFloorHoldsAboveTheCapWhenItIsStricter`, `TestAMultiCardRequestTakesTheDisplayCardOnlyWhereItClearsTheCap` (2 allocatable of 3 wanted),
+  `TestAHeldDisplayCardThatCouldNotClearTheCapIsNotQueuedOn` (footprint 6 not waitable), `TestDesktopRefusalsAppliesTheCapAtGrantTime` (refused within
+  the cap), and `TestGPUDisplayCapPctDefaultsTo60AndRejectsOutOfRange` (`got 0`, want 60). Three guards hold before and after
+  (`TestAllocatorDisplayUnknownStaysClosedUnderTheCap`, `TestTheCapTouchesOnlyTheDisplayCard`, `TestACapWithNoDisplayCardInTheReadingChangesNothing`).
+  The `gpualloc`, `pipeline` and root tests could not fail on the old tree except by not compiling (the field and the dependency they use
+  did not exist); each is pinned by the mutants below instead.
+- **Tests that encoded the superseded rule** (the display card is open only while the operator is away): the plan counted two, there are
+  more, and each is named in the commit. Rewritten on the cap: `TestTheFloorDoesNotOpenTheDisplayCardAtTheDesk`, `TestAllocatorDisplayCardIsAllocatableOnlyWhenTheCallerSaysSo`,
+  `TestDesktopRefusalsNamesTheDisplayCardOnceTheOperatorIsBack`, `TestBuildInputOperatorAwayAllowsTheDisplayCard`, `TestPickAutoNeverTakesTheAttachedCardAtTheDesk`,
+  `TestTheDisplayCardIsAllocatableOnlyWhenTheOperatorIsAway`, `TestAQueuedMediaCallIsNotGrantedTheDisplayCardOnceTheOperatorIsBack` and the six
+  `gpu_reserve_grantcheck_test.go` tests; removed because an unknown display is now always closed: `TestAllocatorAllowsAnUnknownDisplayCardWhenTheOperatorIsAway`,
+  `TestAnUnknownDisplayCardIsHeldToTheDesktopFloor`, `TestAnUnknownDisplayReadingRefusesTheCardThatWouldLeaveTheDesktopTooLittle`.
+- **Mutation-checked** with `scripts/mutation-check.sh` (each mutant compiles, runs through the RAM guard, and is restored byte for byte): seventeen
+  changes, each RED on the test it names. In the allocator: the cap term dropped from the floor, the used/free sign flipped, the footprint
+  requirement dropped, a cap of 0 treated as open, an unknown display let through, the declared floor ignored, the grant-time check ignoring the
+  cap, an unknown total let through, and the float tolerance removed (it survived the first table, which landed on the cap in a way floating
+  point happens to round up; `TestAJobThatLandsExactlyOnTheCapIsAdmittedDespiteFloatError` uses 3.9 + 2.1 of 10, where 6.1 - 2.1 is
+  3.9999999999999996, and kills it). In `BuildInput`: the cap not carried, the declared floor not carried. In the config key: the default
+  closed, the range check dropped. At the media door: the stale-table closure removed, the card forced shut on a live table. In the summary: the display-card cue dropped,
+  the skip not carrying `Display`. The root test
+  (`gpu_reserve_displaycap_test.go`, and the rewritten grant-check tests) runs only on the remote gate and was not mutated.
+- **Review fix round** (five findings, each fixed or refuted in its commit). Red before: a refused `600` read as a cap of 100
+  (`TestARefusedGPUDisplayCapReadsAsClosedForACallerThatProceedsOnTheValue`, got 100, want 0, and its row in
+  `TestBuildInputOpensTheDisplayCardAtTheCapWhateverThePresence`); the stale-table skip said `gpu_display_cap_pct is 0` to an operator whose config
+  says 60 (`TestAPlacementFromAStaleTableKeepsTheDisplayCardClosed`; the allocator pin is `TestAStaleTableClosesTheDisplayCardAndTheSkipNamesTheTable`);
+  the switch written after start was not seen (`TestTheDisplayCapSwitchFollowsTheFileTheConfigWasReadFrom`, `TestBuildInputFollowsTheDisplayCapSwitchInTheConfigFile`,
+  `TestTheMediaDoorSeesTheOperatorsSwitchWrittenAfterTheServerStarted`; the six grant-check tests in `gpu_reserve_grantcheck_test.go` now build their input through
+  `gpualloc.BuildInput` from a config file, and the three that close the card write `0` to that file, instead of flipping an in-memory counter no
+  production path can touch). Ten more mutants, each RED: the refused value clamped back to 100; the stale flag unset, its skip
+  detail the cap's, and the flag ignored by `displayOpen`; the cap-100 exception removed from `floorApplies`; `BuildInput` reading the snapshot
+  (red on the `gpualloc` and the `pipeline` test); `LiveGPUDisplayCap` ignoring the source, not remembering the last value read, and `Load` not
+  recording the file. Four comments that still described the presence rule now describe the cap.
+- Docs: ADR 0039 (Amendment 2026-10-12), `docs/systems/media-generation.md` ("The allocator and the display card"), the `--cards` help text.
+
 ### Added — one lint over every test file keeps tests out of the OS temp dir, and a tripwire script shows what a run leaves behind (GPU-I8, GPU-I8c)
 
 - **The gap.** F77 and F77b stopped test packages from leaving folders in the OS temp dir (C: on Windows), and each fix came with a lint

@@ -78,11 +78,11 @@ func PickAuto(plan Plan, wait time.Duration, build func() (gpulease.AllocInput, 
 const pickPollEvery = 2 * time.Second
 
 // GrantCheck is the check a queued request makes when its turn comes (gpulease.Options.GrantCheck).
-// The set it was queued on was chosen against the operator's presence and the desktop floor as they
-// were at the enqueue, and a place in line can be hours long: the allocator's input is built again
-// (build, the same reader that chose the set), so presence and the display card's free VRAM are read
+// The set it was queued on was chosen against the display card's cap and the VRAM in use as they were
+// at the enqueue, and a place in line can be hours long: the allocator's input is built again
+// (build, the same reader that chose the set), so the cap and the display card's free VRAM are read
 // as they are at the grant, and the desktop rule (gpulease.DesktopRefusals) is put to ids. A card
-// table that cannot be read refuses too: a grant that cannot be shown to keep the desktop its floor
+// table that cannot be read refuses too: a grant that cannot be shown to keep the desktop its share
 // is not made.
 //
 // The check runs with the cards already granted to the request (gpulease.VetGrant), so the lease
@@ -108,14 +108,20 @@ func GrantCheck(build func() (gpulease.AllocInput, error), ids []string) func() 
 	}
 }
 
-// SkipSummary is the one line that says why cards were skipped.
+// SkipSummary is the one line that says why cards were skipped. The operator's screen card says so beside a
+// reason that does not (a media call refused over the display card's cap reads "card 1 vram (display card)",
+// not a bare "card 1 vram"); the full sentence, with the cap, is the skip's Detail.
 func SkipSummary(e *gpulease.NoCardsError) string {
 	var parts []string
 	if e.HostReason != "" {
 		parts = append(parts, e.HostReason)
 	}
 	for _, s := range e.Skipped {
-		parts = append(parts, fmt.Sprintf("card %d %s", s.Index, s.Reason))
+		part := fmt.Sprintf("card %d %s", s.Index, s.Reason)
+		if s.Display && s.Reason != gpulease.ReasonDisplay {
+			part += " (display card)"
+		}
+		parts = append(parts, part)
 	}
 	if len(parts) == 0 {
 		return "no card qualifies"

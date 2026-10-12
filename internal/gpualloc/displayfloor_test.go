@@ -82,29 +82,29 @@ func TestResidentFromKeepsTheSeatFootprintAndFallsBackToTheDisplayOne(t *testing
 	}
 }
 
-// BuildInput hands the allocator the floor the declared layers keep, beside AllowDisplay, so both
+// BuildInput hands the allocator the floor the declared layers keep, beside the display cap, so both
 // of its callers (gpu reserve --cards and the media admission path) hold the opened display card
 // to it without each carrying its own copy of the number.
 func TestBuildInputCarriesTheLayersDesktopFloor(t *testing.T) {
 	m := scratchManager(t)
 	cards := threeCards()
-	in, err := BuildInput(context.Background(), m, displayCfg(), Need{}, hostDeps(cards, true))
+	in, err := BuildInput(context.Background(), m, displayCfg(), Need{}, hostDeps(cards))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !in.AllowDisplay || in.DisplayFloorGiB != 4 {
-		t.Fatalf("AllowDisplay=%v DisplayFloorGiB=%v, want true and 4", in.AllowDisplay, in.DisplayFloorGiB)
+	if in.DisplayCapPct != 60 || in.DisplayFloorGiB != 4 {
+		t.Fatalf("DisplayCapPct=%v DisplayFloorGiB=%v, want 60 and 4", in.DisplayCapPct, in.DisplayFloorGiB)
 	}
 	// A box that declares no display_floor layer keeps the behaviour it had: no floor.
-	in, err = BuildInput(context.Background(), m, config.Config{}, Need{}, hostDeps(cards, true))
+	in, err = BuildInput(context.Background(), m, config.Config{}, Need{}, hostDeps(cards))
 	if err != nil || in.DisplayFloorGiB != 0 {
 		t.Fatalf("a plain box carries no floor: %v err %v", in.DisplayFloorGiB, err)
 	}
 }
 
-// The reason the floor exists, end to end through the shared builder and the picker: with the
-// operator away the display card has 14 GiB free, and a job that would leave it under the layer's
-// floor is placed on a pair card instead.
+// The reason the floor exists, end to end through the shared builder and the picker: the display
+// card has 14 GiB free of 16, and a job that would leave it under the desktop floor (the cap's 6.4 GiB,
+// above the layer's declared 4) is placed on a pair card instead.
 func TestPickAutoDoesNotHandOutTheDisplayCardBelowTheLayersFloor(t *testing.T) {
 	m := scratchManager(t)
 	cards := threeCards()
@@ -123,7 +123,7 @@ func TestPickAutoDoesNotHandOutTheDisplayCardBelowTheLayersFloor(t *testing.T) {
 		{"no footprint declared cannot be shown to keep the floor", 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			deps := hostDeps(cards, true)
+			deps := hostDeps(cards)
 			deps.Resident = pairLoaded
 			build := func() (gpulease.AllocInput, error) {
 				return BuildInput(context.Background(), m, displayCfg(), Need{VRAMGiB: tc.vram}, deps)
@@ -192,7 +192,7 @@ func TestResidentSeatsIsStillEmptyWithoutADisplayLayerOrAnEndpoint(t *testing.T)
 }
 
 // Through the shared builder: with /running unreadable the allocator input carries the display card as
-// occupied, and with the operator away the picker prefers the card with nothing on it.
+// occupied, and the picker prefers the card with nothing on it.
 func TestBuildInputOrdersTheDisplayCardLastWhenRunningCannotBeRead(t *testing.T) {
 	m := scratchManager(t)
 	cfg := displayCfg()
@@ -206,7 +206,7 @@ func TestBuildInputOrdersTheDisplayCardLastWhenRunningCannotBeRead(t *testing.T)
 	}
 	cards, _ := gpuprobe.BuildCards(devs, "")
 	displayID := cards[1].LeaseID()
-	in, err := BuildInput(context.Background(), m, cfg, Need{VRAMGiB: 2}, hostDeps(cards, true))
+	in, err := BuildInput(context.Background(), m, cfg, Need{VRAMGiB: 2}, hostDeps(cards))
 	if err != nil {
 		t.Fatal(err)
 	}

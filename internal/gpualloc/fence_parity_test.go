@@ -36,7 +36,7 @@ func TestTheLoadFenceAndTheUnloadListPlaceEveryModelAlike(t *testing.T) {
 	}
 	for _, leased := range cards {
 		id := leased.LeaseID()
-		scope := NewLeaseScope(context.Background(), cfg, []string{id}, hostDeps(cards, false), nil)
+		scope := NewLeaseScope(context.Background(), cfg, []string{id}, hostDeps(cards), nil)
 		lease := gpulease.Info{Held: true, Class: gpulease.ClassMedia, Epoch: 1, Devices: []string{id}}
 		for _, model := range models {
 			fenced := modelaffinity.ScopeToModel(lease, model).Held

@@ -32,7 +32,7 @@ func TestBuildInputCarriesWhatGrantedLeasesHaveYetToLoadAndTheAllocatorUsesIt(t 
 
 	// The allocator's own host: 100 GiB, 30 committed. A 40 GiB need alone fits (30 + 40 <= 100 - 8); with the 40 GiB the
 	// holder has yet to load it does not (30 + 40 + 40 > 92).
-	deps := hostDeps(cards, false)
+	deps := hostDeps(cards)
 	deps.HostMemory = func() (gpuprobe.HostMemory, bool) {
 		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 85, CommitUsedGiB: 30, CommitLimitGiB: 160}, true
 	}

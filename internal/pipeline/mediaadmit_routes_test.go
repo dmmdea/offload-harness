@@ -319,40 +319,38 @@ func TestAnUnreadableCardTableFallsBackToTheWholeNode(t *testing.T) {
 	}
 }
 
-// While the operator is at the desk the allocator never hands out the card the monitor is
-// attached to; when they are away it may.
-func TestTheDisplayCardIsAllocatableOnlyWhenTheOperatorIsAway(t *testing.T) {
-	f := newAdmitFixtureWith(t, admitSpec{})
-	a, b := f.image(nil), f.image(nil)
-	f.waitStarted(2)
-	for _, pr := range f.started() {
-		if pr.Env["COMFY_CARD_UUID"] == admitUUIDB {
-			t.Fatalf("the display card was auto-assigned at the desk: %+v", pr.Env)
+// A media call declares no VRAM footprint, and the display card is open to a job only up to its cap, which
+// needs a footprint to be held to: so at the default cap of 60 percent the card the monitor is attached to is
+// not handed to an unnamed media call, at the desk or away. The third call waits for a pair card (the cap is
+// for callers that declare a footprint: gpu reserve --cards N --vram X). Only a cap of 100, the operator
+// giving the whole card, has nothing left to hold a footprint to, and then the card takes its share of calls.
+func TestTheDisplayCardIsNotAllocatedToAMediaCallThatDeclaresNoFootprintUnderACapOfLessThan100(t *testing.T) {
+	run := func(capPct *int, want int, wantDisplay bool) {
+		f := newAdmitFixtureWith(t, admitSpec{mutate: func(c *config.Config) { c.GPUDisplayCapPct = capPct }})
+		chans := make([]<-chan core.Result, 3)
+		for i := range chans {
+			chans[i] = f.image(nil)
+		}
+		f.waitStarted(want)
+		time.Sleep(200 * time.Millisecond) // a further runner would have started by now if one could
+		seen := map[string]bool{}
+		for _, pr := range f.started() {
+			seen[pr.Env["COMFY_CARD_UUID"]] = true
+		}
+		if len(seen) != want || seen[admitUUIDB] != wantDisplay {
+			t.Errorf("cap %v: %d card(s) running, display card among them = %v; want %d and %v (%v)", capPct, len(seen), seen[admitUUIDB], want, wantDisplay, seen)
+		}
+		f.letRunnersGo()
+		for _, ch := range chans {
+			f.await(ch)
 		}
 	}
-	f.letRunnersGo()
-	f.await(a)
-	f.await(b)
-
-	g := newAdmitFixtureWith(t, admitSpec{})
-	g.away = true
-	chans := make([]<-chan core.Result, 3)
-	for i := range chans {
-		chans[i] = g.image(nil)
-	}
-	g.waitStarted(3)
-	seen := map[string]bool{}
-	for _, pr := range g.started() {
-		seen[pr.Env["COMFY_CARD_UUID"]] = true
-	}
-	if len(seen) != 3 || !seen[admitUUIDB] {
-		t.Errorf("with the operator away all three cards run one call each, the display card included: %v", seen)
-	}
-	g.letRunnersGo()
-	for _, ch := range chans {
-		g.await(ch)
-	}
+	t.Run("the default cap of 60 percent", func(t *testing.T) { run(nil, 2, false) })
+	t.Run("a cap of 0 closes the card", func(t *testing.T) { run(intPtr(0), 2, false) })
+	t.Run("a cap of 100 gives the whole card", func(t *testing.T) { run(intPtr(100), 3, true) })
 }
+
+func intPtr(v int) *int { return &v }
 
 // The runner is given a lease, an instance and a free target per route; and every instance kept
 // under the lease is stopped before the lease is released.
@@ -463,7 +461,6 @@ func TestLaunchProfileOnACardScopedHostBindsEverySingleCardRoute(t *testing.T) {
 			p.alloc = gpualloc.Deps{
 				Cards:      func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return devs, "", nil },
 				HostMemory: func() (gpuprobe.HostMemory, bool) { return roomyHostMem, true },
-				Presence:   func(config.Config) (bool, bool) { return true, false },
 			}
 			// Port 1 refuses at once: the post-run /free is not part of this test and must not wait.
 			p.instanceAPI = func(c gpuprobe.Card) string { return fmt.Sprintf("http://127.0.0.1:1/card%d", c.NvidiaIndex) }
