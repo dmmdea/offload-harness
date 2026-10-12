@@ -6,6 +6,10 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Docs — the composite-tier guide no longer says the display card is closed to every placement until the operator sets presence
+
+- `docs/systems/composite-tier.md` said `operator_presence` keeps the display card closed and that no placement touches it until the key is `auto`. Since 0.183.0 that holds for the display layer's twins only: the card allocator behind `gpu reserve --cards` and the media admission path reads no presence and may use the display card up to `gpu_display_cap_pct` (ADR 0039, amendment 2026-10-12). Both sentences now say which placement they mean. Found by a fleet audit of the 0.183.0 docs.
+
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 
 ### Fixed — `TestTheAnchoredClockDropsTheAdmissionAllowance` no longer fails on a loaded box for a cost that is not the poll budget
