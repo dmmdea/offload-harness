@@ -397,8 +397,8 @@ func (q *queueRT) adopt(ctx context.Context, cfg config.Config, runner Runner, r
 			// while, paused as the dispatch path pauses it, instead of the caller being handed a gpu_busy failure for a job
 			// that can still run.
 			h.Discard("the node passed the adopted job back; the ticket goes on to the next lane that frees")
-			state, cause := passBack(res)
-			placer.bounced(t.Base, t.Node, state, cause)
+			state, cause := passBack(t.Base, res)
+			placer.bounced(t.Base, nodeShown(t.Base, t.Node), state, cause)
 			lt.backToWaiting(t.Base)
 			lt.q.nudge()
 			return

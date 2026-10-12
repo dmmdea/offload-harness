@@ -324,6 +324,8 @@ func TestAnAdoptedJobTheNodePassedBackGoesBackInLine(t *testing.T) {
 			}
 			if z, ok := placer.backedOff(n.srv.URL); !ok || z.state != want || !strings.Contains(z.cause, "the card is held by another job") {
 				t.Errorf("the node is paused as %s, with its own reason: %+v (%v)", want, z, ok)
+			} else if z.shown != nodeShown(n.srv.URL, "node-a") || !strings.HasSuffix(z.shown, " (node-a)") {
+				t.Errorf("the pause names the node as the dispatch path does, address and id: %q", z.shown)
 			}
 		})
 	}

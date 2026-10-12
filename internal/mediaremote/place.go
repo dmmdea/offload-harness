@@ -337,7 +337,7 @@ func candidatesFor(ctx context.Context, cfg config.Config, bases []string, local
 		}
 		placer.ok(r.Base)
 		v := r.View
-		who := fmt.Sprintf("%s (%s)", r.Shown(), v.NodeID)
+		who := nodeShown(r.Base, v.NodeID)
 		if self != "" && strings.EqualFold(strings.TrimSpace(v.NodeID), self) {
 			rows = append(rows, rowAt{idx: i, base: r.Base, row: ClusterRow{Node: who, State: "skipped", Why: "this machine's own node: the lane that is not free is the one it would use"}})
 			continue
@@ -411,15 +411,31 @@ func passedBack(res core.Result) bool {
 // passBack is how a pause for a passed-back job reads: a lease the node could not take is a refusal, anything else a
 // bounce, and the cause carries the node's own reason. A host short of RAM answers with the same class as a held card, so
 // a fixed "another job held its card" told that host as a card someone else held.
-func passBack(res core.Result) (state, cause string) {
+func passBack(base string, res core.Result) (state, cause string) {
 	state, cause = "bounced", "it took the last call and passed it back"
 	if res.Meta.ErrClass == core.ErrClassGPULeaseUnavailable {
 		state, cause = "refused", "it took the last call and could not take its lease"
 	}
-	if why := strings.Join(strings.Fields(res.Reason), " "); why != "" {
+	if why := nodeReason(base, res); why != "" {
 		return state, cause + ": " + why
 	}
 	return state, cause
+}
+
+// nodeReason is a node's answer as a row may quote it: on one line, its address redacted, and capped like any other node
+// text. A pause keeps it for minutes and every ticket's row repeats it.
+func nodeReason(base string, res core.Result) string {
+	why := strings.Join(strings.Fields(res.Reason), " ")
+	if why == "" {
+		return ""
+	}
+	return cutText(rosterprobe.Scrub(base, errors.New(why)), detailMax)
+}
+
+// nodeShown names a node in a cluster row: its redacted address and its node id, the same on every path that pauses it, so
+// a row's since and the attempt it remembers match by name.
+func nodeShown(base, nodeID string) string {
+	return fmt.Sprintf("%s (%s)", rosterprobe.Member{Base: base}.Shown(), nodeID)
 }
 
 // attempt sends the call to c under jobID and brings the result back. The caller mints the id BEFORE it records the claim, so
@@ -459,19 +475,19 @@ func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planne
 			// quiet, the node is left alone for a while (it read idle and refused anyway: it will again), and the call
 			// goes on, under a fresh job id.
 			h.Bounce(res)
-			state, cause := passBack(res)
+			state, cause := passBack(c.base, res)
 			left := placer.bounced(c.base, c.shown, state, cause)
-			return attemptResult{kind: attemptBounce, row: ClusterRow{Node: c.shown, State: "bounced",
-				Why: fmt.Sprintf("had the call and passed it back: %s; not offered another call for %s", res.Reason, left.Round(time.Second))}}
+			return attemptResult{kind: attemptBounce, row: ClusterRow{Node: c.shown, State: state,
+				Why: fmt.Sprintf("had the call and passed it back: %s; not offered another call for %s", nodeReason(c.base, res), left.Round(time.Second))}}
 		case !res.OK && res.Meta.ErrClass == core.ErrClassGPULeaseUnavailable:
 			// The node accepted the job and could not take its lease (a lease location it cannot use, a host-RAM need no
 			// state of it admits): nothing ran there either, and a call the fleet could still serve is not ended by one
 			// node's fault.
 			h.Bounce(res)
-			state, cause := passBack(res)
+			state, cause := passBack(c.base, res)
 			left := placer.bounced(c.base, c.shown, state, cause)
-			return attemptResult{kind: attemptBounce, row: ClusterRow{Node: c.shown, State: "refused",
-				Why: fmt.Sprintf("took the call and could not take its lease, so nothing ran: %s; not offered another call for %s", res.Reason, left.Round(time.Second))}}
+			return attemptResult{kind: attemptBounce, row: ClusterRow{Node: c.shown, State: state,
+				Why: fmt.Sprintf("took the call and could not take its lease, so nothing ran: %s; not offered another call for %s", nodeReason(c.base, res), left.Round(time.Second))}}
 		}
 		placer.served(c.base)
 		return attemptResult{kind: attemptDone, res: res}

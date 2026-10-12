@@ -164,6 +164,22 @@ func TestABouncedRowSaysWhyTheNodePassedTheCallBack(t *testing.T) {
 	}
 }
 
+// A node's reason is quoted on one line and capped, as other node text is: a pause keeps it for minutes and every ticket's
+// row repeats it.
+func TestAPassedBackReasonIsQuotedOnOneLineAndCapped(t *testing.T) {
+	long := "gpu busy:\n waiting\tfor host RAM " + strings.Repeat("x", 2*detailMax)
+	_, cause := passBack("http://127.0.0.1:1", core.Result{Reason: long, Meta: core.Meta{ErrClass: core.ErrClassGPUBusy}})
+	if strings.ContainsAny(cause, "\n\t") || !strings.Contains(cause, "passed it back: gpu busy: waiting for host RAM x") {
+		t.Errorf("the reason is on one line: %q", cause)
+	}
+	if n := len(cause); n > len("it took the last call and passed it back: ")+detailMax+8 {
+		t.Errorf("the reason is capped near %d bytes: %d", detailMax, n)
+	}
+	if _, bare := passBack("http://127.0.0.1:1", core.Result{Meta: core.Meta{ErrClass: core.ErrClassGPUBusy}}); bare != "it took the last call and passed it back" {
+		t.Errorf("a node that gave no reason is not quoted as an empty one: %q", bare)
+	}
+}
+
 // A 503 or 429 with a Retry-After is an answer, and the node is left alone for what it asked (jittered once, capped):
 // the row says "refused", and the delegator neither probes nor posts to it meanwhile.
 func TestARetryAfterHoldsTheNodeAndReadsAsRefused(t *testing.T) {
@@ -215,8 +231,10 @@ func TestALeaseThatCannotBeTakenMovesTheCallOnAndPausesTheNode(t *testing.T) {
 	if len(ida) != 1 || len(idb) != 1 || ida[0] == idb[0] {
 		t.Errorf("each node is sent the call once, under a fresh job id: %v / %v", ida, idb)
 	}
-	if _, backed := placer.backedOff(a.srv.URL); !backed {
+	if z, backed := placer.backedOff(a.srv.URL); !backed {
 		t.Error("the node that could not take its lease is left alone")
+	} else if z.state != "refused" || !strings.Contains(z.cause, "could not take its lease: gpu lease unavailable: host RAM can never admit this need") {
+		t.Errorf("the pause is a refusal and quotes the node: %+v", z)
 	}
 	// Alone, the call stays in its own queue and the row says what happened, as a refusal and not as a bounce off a card.
 	only := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, a)
