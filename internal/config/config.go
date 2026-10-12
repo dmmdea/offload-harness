@@ -466,10 +466,10 @@ type Config struct {
 	// says so), "auto" (console session locked ⇒ away; else last input idle
 	// ≥ operator_idle_sec and the shell not busy/fullscreen ⇒ away). Defaults
 	// to present — the display card fails closed until the operator has read
-	// the probe's readings in offload_status and set auto or away. The key has two
-	// readers: the layer's presence guard and the card allocator (gpu reserve --cards,
-	// an auto-placed media call), which takes the display card only while this reads
-	// away, and then only above the layers' desktop floor (DisplayFloorGiB).
+	// the probe's readings in offload_status and set auto or away. The layer's
+	// presence guard is the key's only reader since 0.183.0: the card allocator (gpu
+	// reserve --cards, an auto-placed media call) no longer reads presence, it admits
+	// the display card by gpu_display_cap_pct (GPUDisplayCapPct) at all times.
 	OperatorPresence string `json:"operator_presence,omitempty"`
 	// OperatorIdleSec is the last-input idle threshold behind presence mode
 	// "auto". 0 = 900 (15 min): long enough that a coffee break does not admit
@@ -1364,6 +1364,16 @@ type Config struct {
 	// bounds declarations, not what a lane then commits (gpu-lease.md, "Known limits").
 	// 0 = DefaultGPUHostRAMHeadroomGiB (8).
 	GPUHostRAMHeadroomGiB float64 `json:"gpu_host_ram_headroom_gib,omitempty"`
+	// GPUDisplayCapPct (A-RAM-15, default 60) is how much of the display card's total VRAM jobs may use, the
+	// desktop's own memory included: the card allocator (`gpu reserve --cards`, the media admission path) takes the
+	// screen's card only while the VRAM in use now plus the job's declared footprint stays at or under this share of
+	// the card. The operator's rule of 2026-10-11: the display card may be used up to 60 percent at all times unless
+	// he says he needs it, so no presence reading opens or closes it any more; 0 is the "I need it" switch and keeps
+	// the card closed to the allocator. A pointer because unset (60) and 0 (closed) must differ; 1..100 are shares, and
+	// a value outside 0..100 refuses the load by name. It bounds ADMISSION only: nothing limits a job after it is
+	// placed, and a job that declares no footprint (`--vram`) is not given the card. The llama-swap twin guards
+	// (display_floor, presence on the display layer) are separate and unchanged.
+	GPUDisplayCapPct *int `json:"gpu_display_cap_pct,omitempty"`
 	// AgentSeatHostRAMGiB is the host RAM the agent seat holds once it is loaded (resident set plus any staged
 	// KV cache, GiB): what the warm-back of a seat a lease unloaded must find room for before it loads the seat
 	// again (gpu_drain.go; internal/hostneed.SeatNeed). It is a figure to MEASURE on the node that runs the seat
@@ -2516,6 +2526,10 @@ func load(path string) (Config, error) {
 	// The iGPU media engines (CT-49): a cpu or unset backend is refused here, so
 	// `doctor` (which loads the config first) fails on it by name.
 	if err := validateIGPUMedia(c); err != nil {
+		return c, err
+	}
+	// The display card's share of the allocator (A-RAM-15): a value that is not a share is refused here, by name.
+	if err := validateGPUDisplayCap(c); err != nil {
 		return c, err
 	}
 	// Install the operator's tailnet zones BEFORE any endpoint is vetted — the
