@@ -134,6 +134,19 @@ Versioning: [SemVer](https://semver.org/).
   off-document: "The page does not address it."` and `a faithful restatement was failed for its inflection`; five mutations (the
   alternative dropped, the singular off, the goal exclusion on the singular off, a phrase dropped, `not found` added) turn them
   red. Docs: `docs/systems/mcp-server.md`.
+- **A node that passed most of its research work is no longer quarantined by two misses of a lexical check.** A research answer
+  that fails the document fingerprint (`docanchor`) is a strike against the node that served it, and the second strike inside 30
+  minutes took the node out of the session's placement for 30 minutes ("quarantined until ..."), the whole point being to stop work
+  going to a node that answers about the wrong document. The check is lexical and misfired on honest answers (see the entry
+  above), so two misses of a node that had passed 48 of its 51 answers that day quarantined it while the rest of the fleet stood at
+  "queue full". A node that is truly off-document fails more often than it passes, so the
+  quarantine now needs at least two strikes that OUTNUMBER the node's passes of the same window: `Quarantine.Pass` records a result
+  that carried the fingerprint check and passed it (`runner.noteFingerprint`, at the remote result and at the delegator-side
+  rescue), a result with no such check says nothing, and passes age out with the strikes. A node with no passes is quarantined on
+  its second strike exactly as before. The quarantine stays per server process and is never persisted. Tests
+  `internal/delegate/quarantine_pass_test.go`, written first: red before with `two failures after three passes quarantined a node
+  that answers about the right document`; six mutations (the outnumber rule, the two-strike floor, the pass record, the
+  carries-the-check guard, the call site, the window) turn them red. Docs: `docs/OPERATOR-GUIDE.md`.
 
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 

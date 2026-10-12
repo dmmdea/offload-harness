@@ -6649,7 +6649,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			pr.Seat = wire.Seat
 			if !wire.Deferred {
 				pr.AcceptanceFailures = EvalAcceptance(contract, wire)
-				r.strikeOnFingerprint(base, pr.AcceptanceFailures)
+				r.noteFingerprint(base, contract, pr.AcceptanceFailures)
 			}
 			return pr
 		case status == http.StatusOK && state == "error":
@@ -7177,6 +7177,22 @@ func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 // wrong token (401), a node that is down (dial refused), and a stale VRAM
 // snapshot (503) all end as "not a candidate", and dropping the error made
 // them indistinguishable from a node that merely failed the gate.
+// noteFingerprint is the runner's reading of one result against the document fingerprint: a contract that carries the
+// check and failed it is a strike against the node, one that carries it and PASSED is a pass (Quarantine.Pass), and one that
+// carries none says nothing about the node. The local seat has no call here, as for strikeOnFingerprint.
+func (r *runner) noteFingerprint(base string, contract core.AgentContract, failures []string) {
+	if r.quarantine == nil {
+		return
+	}
+	switch {
+	case failsDocumentFingerprint(failures):
+		r.strikeOnFingerprint(base, failures)
+	case failsDocumentFingerprint(contract.Acceptance):
+		// the check is on the contract (failsDocumentFingerprint reads the tag in either form) and did not fail
+		r.quarantine.Pass(base)
+	}
+}
+
 // strikeOnFingerprint strikes base in the caller's Quarantine when any failed
 // acceptance is a DOCUMENT FINGERPRINT check (research.DocFingerprint tags its
 // regex with the named group `docanchor`). Contract-caused failures — a

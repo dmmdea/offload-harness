@@ -1379,7 +1379,9 @@ on every agent result; a defer whose reason starts with **`seat contended:`** wh
 to serve the seat: `concurrencyLimit` is not the knob), and **`seat down:`** when the seat's engine hung or died
 under the run and did not come back (ADR 0066); `summary.batches` on research
 calls that ran more than 8 pages; `summary.quarantined` when a fleet node was blocked for 30 min
-after two off-document answers (its reason appears among `probe_errors` as "quarantined until …").
+after two off-document answers that outnumber its passes of the same window (0.184.0: the fingerprint is lexical and
+misfires on an honest answer now and then, so a node that passed most of its work is not quarantined by two misses; its
+reason appears among `probe_errors` as "quarantined until …").
 
 **Capacity is your step — the wait only makes contention honest.** The 429 exists because ten
 reserved requests per model are shared by every session. Ready to paste into

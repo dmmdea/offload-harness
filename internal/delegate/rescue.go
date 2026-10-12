@@ -83,7 +83,7 @@ func SchemaMissRescuable(w core.AgentWireResult) bool {
 // wired, no schema, an error, an object that does not validate — returns the
 // result untouched apart from a note that a rescue was tried.
 func (r *runner) rescueSchemaMiss(ctx context.Context, contract core.AgentContract, pr PlacedResult, start time.Time) PlacedResult {
-	return rescueSchemaMiss(ctx, r.rescue, contract, pr, start, r.strikeOnFingerprint)
+	return rescueSchemaMiss(ctx, r.rescue, contract, pr, start, func(base string, failures []string) { r.noteFingerprint(base, contract, failures) })
 }
 
 // rescueSchemaMiss is the rescue without a runner, for the route that has none
