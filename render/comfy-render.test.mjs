@@ -17,6 +17,8 @@ import { isolatedRunnerEnv } from "./test-isolation.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, "comfy-render.mjs");
+// The bound on a real-script child the test spawns asynchronously (the spawnSync tests of this file carry the same 30 s).
+const REAL_SCRIPT_TIMEOUT_MS = 30_000;
 
 const classes = (g) => Object.values(g).map((n) => n.class_type);
 const one = (g, cls) => {
@@ -252,7 +254,15 @@ test("the real comfy-render script: a ComfyUI answering HTTP 500 ends with exit 
     let stderr = "";
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (d) => { stderr += d; });
-    const code = await new Promise((resolve) => child.on("close", resolve));
+    // Bounded like the spawnSync tests of this file: a script that never reaches its verdict (or a spawn that fails) ends the test
+    // as an assertion at the bound, and the child is killed, never left running behind a hung suite.
+    const { code, timedOut, spawnError } = await new Promise((resolve) => {
+      const timer = setTimeout(() => { child.kill(); resolve({ code: null, timedOut: true }); }, REAL_SCRIPT_TIMEOUT_MS);
+      child.on("close", (c) => { clearTimeout(timer); resolve({ code: c }); });
+      child.on("error", (e) => { clearTimeout(timer); resolve({ code: null, spawnError: e }); });
+    });
+    assert.ok(!spawnError, `the script did not start: ${spawnError && spawnError.message}`);
+    assert.ok(!timedOut, `the script was still running after ${REAL_SCRIPT_TIMEOUT_MS} ms and was killed; stderr so far: ${stderr}`);
     assert.equal(code, 3, `exit ${code}; stderr: ${stderr}`);
     assert.match(stderr, /^RENDER FAILED: .*HTTP 500.*$/m);
     assert.match(stderr, /^IGPU_CLASS=comfy_unusable\r?$/m, `no class line on its own line in: ${stderr}`);
