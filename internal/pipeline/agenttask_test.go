@@ -218,7 +218,9 @@ func probeToolCall() string {
 // carries chat_template_kwargs.enable_thinking=false — the exact wire shape the
 // live fix depends on.
 // isForcedFinalCall reports whether a chat request is the loop's forced final
-// step: its last message is the agent package's answer-now turn.
+// step: its last message is the agent package's answer-now turn, or, when the seat answered that step with a tool call and
+// was re-asked once (0.184.0), the re-ask turn that follows it. The re-ask is recognised by its opening words, and only when
+// the answer-now turn is already in the transcript, so a re-pack request that merely quotes a transcript is not taken for it.
 func isForcedFinalCall(body map[string]any) bool {
 	msgs, _ := body["messages"].([]any)
 	if len(msgs) == 0 {
@@ -226,7 +228,22 @@ func isForcedFinalCall(body map[string]any) bool {
 	}
 	last, _ := msgs[len(msgs)-1].(map[string]any)
 	content, _ := last["content"].(string)
-	return last["role"] == "user" && content == agent.FinalAnswerTurn
+	if last["role"] != "user" {
+		return false
+	}
+	if content == agent.FinalAnswerTurn {
+		return true
+	}
+	if !strings.HasPrefix(content, "Your last reply was not an answer.") {
+		return false
+	}
+	for _, m := range msgs {
+		earlier, _ := m.(map[string]any)
+		if c, _ := earlier["content"].(string); earlier["role"] == "user" && c == agent.FinalAnswerTurn {
+			return true
+		}
+	}
+	return false
 }
 
 func repackDisablesThinking(body map[string]any) bool {
@@ -1070,6 +1087,11 @@ func TestRunAgentTaskBudgetDefers(t *testing.T) {
 	}
 	if fake.grammarCNT.Load() != 0 {
 		t.Fatal("a budget defer must not spend a re-pack completion")
+	}
+	// 0.184.0: the seat that answers the forced final step with a tool call is re-asked ONCE before the run ends on budget, so
+	// the seat saw the tool-call step, the final step and the re-ask: three loop completions, no more.
+	if got := fake.loopCalls.Load(); got != 3 {
+		t.Fatalf("loop completions = %d, want 3 (one tool step, the forced final, its single re-ask)", got)
 	}
 }
 
