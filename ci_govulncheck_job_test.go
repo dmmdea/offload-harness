@@ -52,6 +52,8 @@ var govulncheckExcluded = map[string]string{
 		"the agent, with a planted bug; it is not built into the harness and ships nothing",
 	"contracts/write-door/t2": "a task module of a write-door agent contract (contract.json beside it): the work the contract hands " +
 		"the agent; it is not built into the harness and ships nothing",
+	"scripts/testdata/mutfixture": "the fixture module the mutation harness's self-tests mutate (scripts/mutation-check-selftest.sh " +
+		"and .ps1): a clamp function and its test, with no dependencies; it is not built into the harness and ships nothing",
 }
 
 // moduleScanProblems compares the directories that hold a go.mod (found) with the ones the govulncheck job
