@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -607,5 +609,50 @@ func TestSkipSummaryNamesTheDisplayCardBesideAReasonThatDoesNot(t *testing.T) {
 	}})
 	if want := "card 0 claimed, card 1 vram (display card), card 2 display"; got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
+	}
+}
+
+// The operator's "I need the card" switch (gpu_display_cap_pct 0) is read from the config file every time the
+// allocator's input is built, not once at start-up: a request queued for hours and a long-lived server hold a
+// Config that was read long before he wrote it (the grant-time check builds its input through this).
+func TestBuildInputFollowsTheDisplayCapSwitchInTheConfigFile(t *testing.T) {
+	m := scratchManager(t)
+	path := filepath.Join(t.TempDir(), "config.json")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"gpu_display_cap_pct": 60}`)
+	cfg := config.Config{}.WithSource(path) // what config.Load hands every caller: the values and the file they came from
+	build := func() gpulease.AllocInput {
+		t.Helper()
+		in, err := BuildInput(context.Background(), m, cfg, Need{VRAMGiB: 2}, hostDeps(threeCards()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return in
+	}
+	if got := build().DisplayCapPct; got != 60 {
+		t.Fatalf("the file says 60, got %d", got)
+	}
+	write(`{"gpu_display_cap_pct": 0}`) // after the Config was handed out
+	in := build()
+	if in.DisplayCapPct != 0 {
+		t.Fatalf("the operator wrote 0 after this Config was read: the next input must carry it, got %d", in.DisplayCapPct)
+	}
+	a, err := gulease2Allocate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range a.Devices {
+		if id == threeCards()[1].LeaseID() {
+			t.Fatalf("the display card was allocated after the operator closed it: %v", a.Devices)
+		}
+	}
+	write(`{"gpu_display_cap_pct": 35}`)
+	if got := build().DisplayCapPct; got != 35 {
+		t.Fatalf("a new share is followed, got %d", got)
 	}
 }

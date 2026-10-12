@@ -1,7 +1,11 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
 
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
@@ -51,4 +55,60 @@ func validateGPUDisplayCap(c Config) error {
 		return fmt.Errorf("gpu_display_cap_pct: %d is not a share of the display card (0 closes it, 100 is all of it)", v)
 	}
 	return nil
+}
+
+// WithSource returns c recording the file its values were read from, so LiveGPUDisplayCap can follow that file.
+// Load records it; a caller that builds a Config by hand and wants the switch to follow a file does it here.
+func (c Config) WithSource(path string) Config {
+	if path != "" {
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+	}
+	c.sourcePath = path
+	return c
+}
+
+// LiveGPUDisplayCap is gpu_display_cap_pct as the file this Config was read from says NOW, for the one reader
+// that must see the operator's "I need the card" switch (0) while the process runs: the card allocator's input
+// (gpualloc.BuildInput). A process never reloads its config, so GPUDisplayCap, the value at load, would leave
+// the switch dead for a `gpu reserve --wait 8h` already in line, for a detached holder, and for the long-lived
+// MCP server that places media calls. The read is one small file and one key: a plain read on every call, no
+// memo, because a memo keyed on the file's timestamp can miss a rewrite that keeps both timestamp and size.
+//
+// A file that cannot be read or decoded at this moment (an editor part-way through a save, a lock) keeps the
+// last value read from it, and before any read the value this Config holds, so a torn write never reopens a card
+// the operator has just closed. A key removed reads as the default (60), a value that is not a share as closed
+// (GPUDisplayCap). A Config with no source file answers with its own value.
+func (c Config) LiveGPUDisplayCap() int {
+	if c.sourcePath == "" {
+		return c.GPUDisplayCap()
+	}
+	if v, ok := readDisplayCap(c.sourcePath); ok {
+		lastDisplayCap.Store(c.sourcePath, v)
+		return v
+	}
+	if v, ok := lastDisplayCap.Load(c.sourcePath); ok {
+		return v.(int)
+	}
+	return c.GPUDisplayCap()
+}
+
+// lastDisplayCap is the cap last read from each config file, so a read that fails keeps it (LiveGPUDisplayCap).
+var lastDisplayCap sync.Map
+
+// readDisplayCap reads gpu_display_cap_pct from the config file at path, with Load's own decoding (a BOM is
+// stripped) and GPUDisplayCap's own meaning of the value. ok is false when the file cannot be read or decoded.
+func readDisplayCap(path string) (share int, ok bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	var key struct {
+		Cap *int `json:"gpu_display_cap_pct"`
+	}
+	if err := json.Unmarshal(StripBOM(b), &key); err != nil {
+		return 0, false
+	}
+	return Config{GPUDisplayCapPct: key.Cap}.GPUDisplayCap(), true
 }

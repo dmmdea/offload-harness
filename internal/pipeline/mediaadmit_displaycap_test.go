@@ -8,6 +8,8 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -96,5 +98,35 @@ func TestAPlacementFromAStaleTableKeepsTheDisplayCardClosed(t *testing.T) {
 	// The skip names the cause that is true: the table, not a gpu_display_cap_pct of 0 the operator never wrote.
 	if strings.Contains(shown.Detail, "gpu_display_cap_pct is 0") || !strings.Contains(shown.Detail, "could not be re-read") {
 		t.Errorf("the skip must say the card table could not be re-read, and not that the key is 0: %q", shown.Detail)
+	}
+}
+
+// The pipeline lives as long as the MCP server and never reloads its config, so the operator's switch
+// (gpu_display_cap_pct 0, written after the server started) must reach the media door through the file the
+// config was read from: the input every pick and every grant-time check builds carries what the file says now.
+func TestTheMediaDoorSeesTheOperatorsSwitchWrittenAfterTheServerStarted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"gpu_display_cap_pct": 60}`)
+	f := newAdmitFixture(t, func(c *config.Config) { *c = c.WithSource(path) })
+	capNow := func() int {
+		t.Helper()
+		in, err := f.p.mediaAllocInput(context.Background(), f.m, gpualloc.Need{VRAMGiB: 2}, &tableReads{cards: f.cards, at: time.Now()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return in.DisplayCapPct
+	}
+	if got := capNow(); got != 60 {
+		t.Fatalf("the file says 60, got %d", got)
+	}
+	write(`{"gpu_display_cap_pct": 0}`)
+	if got := capNow(); got != 0 {
+		t.Fatalf("the operator wrote 0 while the server ran: the next call's input must carry it, got %d", got)
 	}
 }

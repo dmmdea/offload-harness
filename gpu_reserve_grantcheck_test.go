@@ -2,13 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/gpualloc"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
@@ -19,13 +24,24 @@ import (
 
 // grantBox is a two-card box whose card 0 is the operator's screen (the lower id, so it is the first
 // card a request queues on), with the display card's cap and its free VRAM as variables the test moves
-// while the request waits (the operator closing the card, a game growing on it).
+// while the request waits (the operator closing the card, a game growing on it). The cap is moved the way
+// the operator moves it: by writing the config file. The Config the request holds was read when it started
+// and is never touched, as in the reserve verb.
 type grantBox struct {
-	cards  []gpuprobe.Card
-	m      *gpulease.Manager
-	capPct atomic.Int32
-	mu     sync.Mutex
-	free0  float64
+	cards   []gpuprobe.Card
+	m       *gpulease.Manager
+	cfg     config.Config
+	cfgPath string
+	mu      sync.Mutex
+	free0   float64
+}
+
+// setCap writes gpu_display_cap_pct to the config file, as the operator does.
+func (b *grantBox) setCap(t *testing.T, pct int) {
+	t.Helper()
+	if err := os.WriteFile(b.cfgPath, []byte(`{"gpu_display_cap_pct": `+strconv.Itoa(pct)+`}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func newGrantBox(t *testing.T) *grantBox {
@@ -35,25 +51,26 @@ func newGrantBox(t *testing.T) *grantBox {
 		{Index: 0, UUID: "GPU-aaaa0000-x", Name: "T", TotalGiB: 16, FreeGiB: 16, DisplayActive: true},
 		{Index: 1, UUID: "GPU-bbbb0000-x", Name: "T", TotalGiB: 16, FreeGiB: 16},
 	}, "")
-	b := &grantBox{cards: cards, m: m, free0: 16}
-	b.capPct.Store(60)
+	b := &grantBox{cards: cards, m: m, free0: 16, cfgPath: filepath.Join(t.TempDir(), "config.json")}
+	b.setCap(t, 60)
+	b.cfg = config.Config{}.WithSource(b.cfgPath) // what the verb's loadCfg holds: values and the file they came from
 	return b
 }
 
-// build reads the box as the reserve verb does: the leases that are live, the cap and the VRAM in use now.
+// build reads the box as the reserve verb does, through gpualloc.BuildInput: the leases that are live, the cap
+// the config file says now and the VRAM in use now.
 func (b *grantBox) build() (gpulease.AllocInput, error) {
-	b.mu.Lock()
-	cards := append([]gpuprobe.Card(nil), b.cards...)
-	cards[0].VRAMFreeGiB = b.free0
-	b.mu.Unlock()
-	in := gpulease.AllocInput{Cards: cards, HostMemOK: true, HostMem: roomyTestHost, Claimed: map[string]bool{},
-		DisplayCapPct: int(b.capPct.Load()), FootprintGiB: 2}
-	for _, l := range b.m.Leases() {
-		for _, d := range l.Devices {
-			in.Claimed[d] = true
-		}
+	deps := gpualloc.Deps{
+		Cards: func(context.Context, config.Config) ([]gpuprobe.Card, string, error) {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			cards := append([]gpuprobe.Card(nil), b.cards...)
+			cards[0].VRAMFreeGiB = b.free0
+			return cards, "", nil
+		},
+		HostMemory: func() (gpuprobe.HostMemory, bool) { return roomyTestHost, true },
 	}
-	return in, nil
+	return gpualloc.BuildInput(context.Background(), b.m, b.cfg, gpualloc.Need{VRAMGiB: 2}, deps)
 }
 
 // fakeClock starts at the real time (the arrival time it hands the lease queue is compared with the real
@@ -118,7 +135,7 @@ func TestAQueuedLeaseIsNotGrantedTheDisplayCardOnceTheOperatorClosesIt(t *testin
 	var out bytes.Buffer
 	done := b.queueOn(&out, clock)
 	waitForWaiter(t, b.m)
-	b.capPct.Store(0) // the operator closes the card while the request waits
+	b.setCap(t, 0) // the operator closes the card while the request waits
 	if err := holder.Release(); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +173,7 @@ func TestAQueuedLeaseMovesToAFreeCardWhenTheDisplayCardNoLongerQualifies(t *test
 	var out bytes.Buffer
 	done := b.queueOn(&out, clock)
 	waitForWaiter(t, b.m)
-	b.capPct.Store(0)
+	b.setCap(t, 0)
 	if err := holdOther.Release(); err != nil { // the other card frees up first...
 		t.Fatal(err)
 	}
@@ -244,7 +261,7 @@ func TestARefusedGrantKeepsTheArrivalTimeOfThePlaceInLine(t *testing.T) {
 	if want := clock.now().UnixMilli(); first != want {
 		t.Fatalf("setup: the first place in line carries the arrival time it was handed: %d, want %d", first, want)
 	}
-	b.capPct.Store(0)
+	b.setCap(t, 0)
 	if err := holdDisplay.Release(); err != nil { // the card it queued on frees: the grant is refused
 		t.Fatal(err)
 	}

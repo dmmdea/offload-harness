@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -60,5 +62,75 @@ func TestARefusedGPUDisplayCapReadsAsClosedForACallerThatProceedsOnTheValue(t *t
 	over := 150
 	if got := (Config{GPUDisplayCapPct: &over}).GPUDisplayCap(); got != 0 {
 		t.Errorf("a hand-set 150 reads %d, want 0 (closed)", got)
+	}
+}
+
+// A running process never reloads its config, and the operator's "I need the card" switch (gpu_display_cap_pct 0)
+// has to reach work that is already queued for hours and a long-lived server. LiveGPUDisplayCap follows the file
+// the Config was read from; the snapshot GPUDisplayCap does not.
+func TestTheDisplayCapSwitchFollowsTheFileTheConfigWasReadFrom(t *testing.T) {
+	path := writeCfg(t, `{"gpu_display_cap_pct": 60}`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewrite := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := c.LiveGPUDisplayCap(); got != 60 {
+		t.Fatalf("nothing has changed yet: the live cap is the file's 60, got %d", got)
+	}
+	rewrite(`{"gpu_display_cap_pct": 0}`) // the operator says he needs the card
+	if got := c.LiveGPUDisplayCap(); got != 0 {
+		t.Fatalf("the file now says 0 and the process holding the Config must see it, got %d", got)
+	}
+	if got := c.GPUDisplayCap(); got != 60 {
+		t.Fatalf("the snapshot is the value at load, got %d", got)
+	}
+	rewrite(`{"gpu_display_cap_pct": 35}`)
+	if got := c.LiveGPUDisplayCap(); got != 35 {
+		t.Fatalf("a new share is followed too, got %d", got)
+	}
+	rewrite(`{"gpu_display_cap_pct": 35, "model": `) // an editor part-way through a save
+	if got := c.LiveGPUDisplayCap(); got != 35 {
+		t.Fatalf("a file that cannot be read keeps the last value read from it (35), not the load-time 60: got %d", got)
+	}
+	rewrite(`{"gpu_display_cap_pct": 600}`) // the typo Load refuses by name
+	if got := c.LiveGPUDisplayCap(); got != 0 {
+		t.Fatalf("a value that is not a share reads as closed, got %d", got)
+	}
+	rewrite(`{"model": "x"}`) // the key removed: unset is the default, not the old value
+	if got := c.LiveGPUDisplayCap(); got != 60 {
+		t.Fatalf("the key removed reads as the default 60, got %d", got)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	rewrite(`{"gpu_display_cap_pct": 20}`)
+	if got := c.LiveGPUDisplayCap(); got != 20 {
+		t.Fatalf("a file replaced under the same name is followed, got %d", got)
+	}
+}
+
+// A Config that was not read from a file has nothing to follow: it answers with what it holds, and a file the
+// Config named but that is gone before any read falls back to the load-time value rather than to the default.
+func TestTheDisplayCapOfAConfigWithNoFileIsItsOwnValue(t *testing.T) {
+	zero := 0
+	if got := (Config{GPUDisplayCapPct: &zero}).LiveGPUDisplayCap(); got != 0 {
+		t.Errorf("a hand-built Config with the switch at 0 reads 0, got %d", got)
+	}
+	if got := (Config{}).LiveGPUDisplayCap(); got != 60 {
+		t.Errorf("a hand-built Config with nothing set reads the default, got %d", got)
+	}
+	thirty := 30
+	gone := Config{GPUDisplayCapPct: &thirty}.WithSource(filepath.Join(t.TempDir(), "never-written.json"))
+	if got := gone.LiveGPUDisplayCap(); got != 30 {
+		t.Errorf("a source that cannot be read at all falls back to the value the Config holds (30), got %d", got)
+	}
+	if got := Default().LiveGPUDisplayCap(); got != 60 {
+		t.Errorf("the built-in defaults read 60, got %d", got)
 	}
 }

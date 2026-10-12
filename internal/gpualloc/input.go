@@ -215,8 +215,10 @@ func BuildInput(ctx context.Context, m *gpulease.Manager, cfg config.Config, nee
 	in.HostMem, in.HostMemOK = deps.HostMemory()
 	// The display card is open up to the operator's cap at all times (gpu_display_cap_pct, default 60,
 	// A-RAM-15): the operator's presence is not read, so a locked screen, an idle desk and a game on the
-	// card are all the same question, answered by the VRAM in use now. 0 is his "I need the card" switch.
-	in.DisplayCapPct = cfg.GPUDisplayCap()
+	// card are all the same question, answered by the VRAM in use now. 0 is his "I need the card" switch, and it is
+	// read from the config file as it is NOW (LiveGPUDisplayCap): the callers hold a Config read when they started,
+	// and a request queued for hours or a long-lived server would otherwise never see the switch.
+	in.DisplayCapPct = cfg.LiveGPUDisplayCap()
 	// The display layer's declared absolute floor (display_floor_gib), read from the same declaration,
 	// keeps holding when it is stricter than the cap, so the allocator and the layer cannot disagree about
 	// how much of that card is the desktop's.
