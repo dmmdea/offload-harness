@@ -67,10 +67,13 @@ type Device struct {
 	// active when it was read (the NVML bits, named: ThrottleReasonNames). Neither rides the per-device query
 	// above: ReadThermal asks for them in a second, optional query, so an old driver that refuses a thermal
 	// column can never take the memory reading down with it. Absent is never "cool" and never "not throttled":
-	// the query failed, was not due, or the driver answered [N/A] or [Not Supported] for the card. A pointer,
-	// so a reading is told from none.
+	// the query failed, was not due, or the driver answered [N/A] or [Not Supported] for the card (or has no
+	// throttle field at all). A card read with nothing limiting its clocks (no reason beyond idle) publishes an
+	// EMPTY array, so "read, none active" is told from "not read": ThrottleReasons is nil for the second and a
+	// non-nil empty slice for the first, which is why the tag is omitzero (omitempty would drop both). A pointer
+	// for the temperature, so a reading is told from none.
 	TemperatureC    *int     `json:"temperature_c,omitempty"`
-	ThrottleReasons []string `json:"throttle_reasons,omitempty"`
+	ThrottleReasons []string `json:"throttle_reasons,omitzero"`
 }
 
 // DrivesDisplay is the placement answer to "is this the operator's screen": display_active

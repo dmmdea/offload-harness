@@ -54,8 +54,10 @@ var throttleNames = map[uint64]string{
 	0x400: "reliability",
 }
 
-// Thermal is one card's row of the thermal query, keyed by the card's UUID. A nil TemperatureC or an empty
-// ThrottleReasons is "not read", never a value.
+// Thermal is one card's row of the thermal query, keyed by the card's UUID. A nil TemperatureC is "not read", never a
+// value. ThrottleReasons has three states: nil is "not read" (the driver answered [N/A] or [Not Supported], or the query
+// had no throttle column), a non-nil empty slice is "read, and nothing is limiting the clocks" (a mask of 0, or the idle
+// bit alone), and a slice with names is the reasons active.
 type Thermal struct {
 	Index           int
 	UUID            string
@@ -126,6 +128,9 @@ func ParseThermal(out string) ([]Thermal, error) {
 		if len(f) == 4 {
 			if mask, ok := parseThrottleMask(f[3]); ok {
 				row.ThrottleReasons = ThrottleReasonNames(mask)
+				if row.ThrottleReasons == nil {
+					row.ThrottleReasons = []string{} // read, nothing active: not the same as not read
+				}
 			}
 		}
 		rows = append(rows, row)
@@ -162,8 +167,8 @@ func MergeThermal(devs []Device, rows []Thermal) {
 			v := *r.TemperatureC
 			devs[i].TemperatureC = &v
 		}
-		if len(r.ThrottleReasons) > 0 {
-			devs[i].ThrottleReasons = append([]string(nil), r.ThrottleReasons...)
+		if r.ThrottleReasons != nil {
+			devs[i].ThrottleReasons = append([]string{}, r.ThrottleReasons...) // non-nil even when empty: read, none active
 		}
 	}
 }
