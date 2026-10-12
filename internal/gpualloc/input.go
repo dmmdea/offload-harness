@@ -1,6 +1,6 @@
 // Package gpualloc is where a request for cards becomes a decision: the live state the card
 // allocator reads (the card table, the leases, the quarantine sidecars, resident seats, the
-// operator's presence, host RAM), the choice itself (PickAuto), and the rule that says which
+// display card's cap, host RAM), the choice itself (PickAuto), and the rule that says which
 // seats a lease on some cards may unload (LeaseScope, UnloadModels).
 //
 // It exists so the two callers that need a card decision read ONE rule: `gpu reserve --cards`
@@ -70,8 +70,6 @@ type Deps struct {
 	// HostMemory reads the host's memory (physical, available, commit): the reading the host-RAM
 	// rule is applied to, here and at the lease grant.
 	HostMemory func() (gpuprobe.HostMemory, bool)
-	// Presence says whether the operator is known to be away from the desk.
-	Presence func(cfg config.Config) (known, away bool)
 }
 
 // DefaultDeps is the production wiring.
@@ -107,12 +105,6 @@ func (d Deps) withDefaults() Deps {
 	}
 	if d.HostMemory == nil {
 		d.HostMemory = gpuprobe.ReadHostMemory
-	}
-	if d.Presence == nil {
-		d.Presence = func(cfg config.Config) (bool, bool) {
-			p := placement.ProbePresence(cfg.PresenceMode(), cfg.OperatorIdle())
-			return p.Known, p.Away
-		}
 	}
 	return d
 }
@@ -197,7 +189,7 @@ func Claims(m *gpulease.Manager, need Need) (wholeNodeHeld bool, claimed map[str
 }
 
 // BuildInput assembles the allocator's input from live state: the card table, the live leases,
-// quarantine sidecars, foreign compute processes, resident seats, the presence guard and host
+// quarantine sidecars, foreign compute processes, resident seats, the display card's cap and host
 // RAM. Every read is best-effort except the card table, which is the point (a *CardTableError,
 // after the one retry of Deps.CardTable); an unreadable extra reads as "nothing to report" (and,
 // for foreign processes, is empty on Windows by nvidia-smi's own limit).
@@ -221,11 +213,13 @@ func BuildInput(ctx context.Context, m *gpulease.Manager, cfg config.Config, nee
 	}
 	in.WholeNodeHeld, in.Claimed = Claims(m, need)
 	in.HostMem, in.HostMemOK = deps.HostMemory()
-	known, away := deps.Presence(cfg)
-	in.AllowDisplay = known && away
-	// The display card, once presence opens it, keeps the desktop floor the display layer guards
-	// with (display_floor_gib), read from the same declaration, so the allocator and the layer
-	// cannot disagree about how much of that card is the desktop's.
+	// The display card is open up to the operator's cap at all times (gpu_display_cap_pct, default 60,
+	// A-RAM-15): the operator's presence is not read, so a locked screen, an idle desk and a game on the
+	// card are all the same question, answered by the VRAM in use now. 0 is his "I need the card" switch.
+	in.DisplayCapPct = cfg.GPUDisplayCap()
+	// The display layer's declared absolute floor (display_floor_gib), read from the same declaration,
+	// keeps holding when it is stricter than the cap, so the allocator and the layer cannot disagree about
+	// how much of that card is the desktop's.
 	in.DisplayFloorGiB = cfg.DisplayFloorGiB()
 	return in, nil
 }

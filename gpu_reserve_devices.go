@@ -19,8 +19,9 @@ package main
 //     whole-node lease WITH a note (the wider fence is the safe direction); it never
 //     fails a reserve that worked before.
 //   - Cards named with --devices are the operator's word: queued FIFO behind whoever
-//     holds them, display card included. `--cards` never auto-assigns the display card
-//     while the operator is at the desk (I6).
+//     holds them, display card included. `--cards` auto-assigns the display card only up
+//     to its cap (gpu_display_cap_pct, default 60) and only to a request that declares
+//     its footprint (--vram); a cap of 0 closes it (A-RAM-15).
 //   - A busy card is a place in line: `--cards N` that cannot be met right now queues FIFO
 //     on a fixed set (the cards free right now first, topped up from the claimed ones that
 //     would fit) or polls until enough cards qualify for a reason a lease does not
@@ -172,7 +173,7 @@ type confinement struct {
 // confineWrapped decides how a command is kept to the cards its lease holds. THE LEASE
 // ALONE CONFINES NOTHING: a lease on cards 0 and 2 leaves the held cards idle and lets an
 // unpinned job run on CUDA's default fastest-first card, which on the reference box is the
-// display card, the very card the allocator refuses to hand out.
+// display card, the very card the allocator hands out only within its cap.
 //
 // A reservation that NAMED its cards (--devices) or had them ALLOCATED (--cards) is the
 // operator's statement of where the job runs, so a command that names no card of its own is

@@ -13,19 +13,19 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
-// A request queued while the operator was away was decided against the presence guard and the desktop
-// floor at ENQUEUE. FIFO can be hours long; the grant has to put the same rule again, from fresh
-// readings, or the queue hands the screen's card to a job the guard would now refuse.
+// A request queued on the display card was decided against the card's cap and the VRAM in use at
+// ENQUEUE. FIFO can be hours long; the grant has to put the same rule again, from fresh readings, or the
+// queue hands the screen's card to a job the cap would now refuse.
 
 // grantBox is a two-card box whose card 0 is the operator's screen (the lower id, so it is the first
-// card a request queues on), with the operator's presence and the display card's free VRAM as
-// variables the test moves while the request waits.
+// card a request queues on), with the display card's cap and its free VRAM as variables the test moves
+// while the request waits (the operator closing the card, a game growing on it).
 type grantBox struct {
-	cards []gpuprobe.Card
-	m     *gpulease.Manager
-	away  atomic.Bool
-	mu    sync.Mutex
-	free0 float64
+	cards  []gpuprobe.Card
+	m      *gpulease.Manager
+	capPct atomic.Int32
+	mu     sync.Mutex
+	free0  float64
 }
 
 func newGrantBox(t *testing.T) *grantBox {
@@ -36,18 +36,18 @@ func newGrantBox(t *testing.T) *grantBox {
 		{Index: 1, UUID: "GPU-bbbb0000-x", Name: "T", TotalGiB: 16, FreeGiB: 16},
 	}, "")
 	b := &grantBox{cards: cards, m: m, free0: 16}
-	b.away.Store(true)
+	b.capPct.Store(60)
 	return b
 }
 
-// build reads the box as the reserve verb does: the leases that are live, the presence and the floor now.
+// build reads the box as the reserve verb does: the leases that are live, the cap and the VRAM in use now.
 func (b *grantBox) build() (gpulease.AllocInput, error) {
 	b.mu.Lock()
 	cards := append([]gpuprobe.Card(nil), b.cards...)
 	cards[0].VRAMFreeGiB = b.free0
 	b.mu.Unlock()
 	in := gpulease.AllocInput{Cards: cards, HostMemOK: true, HostMem: roomyTestHost, Claimed: map[string]bool{},
-		AllowDisplay: b.away.Load(), FootprintGiB: 2, DisplayFloorGiB: 4}
+		DisplayCapPct: int(b.capPct.Load()), FootprintGiB: 2}
 	for _, l := range b.m.Leases() {
 		for _, d := range l.Devices {
 			in.Claimed[d] = true
@@ -107,9 +107,10 @@ func (b *grantBox) queueOn(out *bytes.Buffer, clock *fakeClock) chan reserveResu
 	return done
 }
 
-// Away at enqueue, present at the grant, and no other card to take: the display card is not granted,
-// and the request keeps waiting for what qualifies (here its window runs out) instead of getting it.
-func TestAQueuedLeaseIsNotGrantedTheDisplayCardOnceTheOperatorIsBack(t *testing.T) {
+// Open at enqueue, closed at the grant (the operator says he needs the card: gpu_display_cap_pct 0), and no
+// other card to take: the display card is not granted, and the request keeps waiting for what qualifies
+// (here its window runs out) instead of getting it.
+func TestAQueuedLeaseIsNotGrantedTheDisplayCardOnceTheOperatorClosesIt(t *testing.T) {
 	b := newGrantBox(t)
 	b.cards = b.cards[:1] // a one-card box: the screen's card is the only one
 	holder := holdCard(t, b.m, "gpu-aaaa0000-x")
@@ -117,7 +118,7 @@ func TestAQueuedLeaseIsNotGrantedTheDisplayCardOnceTheOperatorIsBack(t *testing.
 	var out bytes.Buffer
 	done := b.queueOn(&out, clock)
 	waitForWaiter(t, b.m)
-	b.away.Store(false) // the operator sits back down while the request waits
+	b.capPct.Store(0) // the operator closes the card while the request waits
 	if err := holder.Release(); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +127,7 @@ func TestAQueuedLeaseIsNotGrantedTheDisplayCardOnceTheOperatorIsBack(t *testing.
 		if r.lease != nil {
 			devs := r.lease.Devices()
 			_ = r.lease.Release()
-			t.Fatalf("the screen's card was granted to a queued request after the operator returned: %v", devs)
+			t.Fatalf("the screen's card was granted to a queued request after the operator closed it: %v", devs)
 		}
 		var none *gpulease.NoCardsError
 		if !errors.As(r.err, &none) || !strings.Contains(r.err.Error(), "display") {
@@ -136,7 +137,7 @@ func TestAQueuedLeaseIsNotGrantedTheDisplayCardOnceTheOperatorIsBack(t *testing.
 		t.Fatal("the request neither got a card nor gave up")
 	}
 	if !strings.Contains(out.String(), "queueing") {
-		t.Errorf("setup: with the operator away the display card is queued on: %q", out.String())
+		t.Errorf("setup: with the cap open the display card is queued on: %q", out.String())
 	}
 	if !strings.Contains(out.String(), "no longer qualify") {
 		t.Errorf("the refused grant is said once on entry to the second choice: %q", out.String())
@@ -155,7 +156,7 @@ func TestAQueuedLeaseMovesToAFreeCardWhenTheDisplayCardNoLongerQualifies(t *test
 	var out bytes.Buffer
 	done := b.queueOn(&out, clock)
 	waitForWaiter(t, b.m)
-	b.away.Store(false)
+	b.capPct.Store(0)
 	if err := holdOther.Release(); err != nil { // the other card frees up first...
 		t.Fatal(err)
 	}
@@ -169,15 +170,15 @@ func TestAQueuedLeaseMovesToAFreeCardWhenTheDisplayCardNoLongerQualifies(t *test
 		}
 		defer func() { _ = r.lease.Release() }()
 		if got := strings.Join(r.lease.Devices(), ","); got != "gpu-bbbb0000-x" {
-			t.Fatalf("the operator is back, so the screen's card is not the one: got %s", got)
+			t.Fatalf("the operator closed the screen's card, so it is not the one: got %s", got)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the request neither got a card nor gave up")
 	}
 }
 
-// Away at both ends: the grant is the plain one it always was.
-func TestAQueuedLeaseStillGetsTheDisplayCardWhileTheOperatorStaysAway(t *testing.T) {
+// Open at both ends and under the cap: the grant is the plain one it always was.
+func TestAQueuedLeaseStillGetsTheDisplayCardWhileTheCapStaysOpen(t *testing.T) {
 	b := newGrantBox(t)
 	b.cards = b.cards[:1]
 	holder := holdCard(t, b.m, "gpu-aaaa0000-x")
@@ -191,7 +192,7 @@ func TestAQueuedLeaseStillGetsTheDisplayCardWhileTheOperatorStaysAway(t *testing
 	select {
 	case r := <-done:
 		if r.err != nil {
-			t.Fatalf("operator away and the floor kept: the queued request gets its card: %v", r.err)
+			t.Fatalf("cap open and under it: the queued request gets its card: %v", r.err)
 		}
 		_ = r.lease.Release()
 	case <-time.After(10 * time.Second):
@@ -199,9 +200,9 @@ func TestAQueuedLeaseStillGetsTheDisplayCardWhileTheOperatorStaysAway(t *testing
 	}
 }
 
-// The floor is re-read at the grant as well: a game that took the display card's memory while the
-// request waited refuses the grant even though the operator is still away.
-func TestAQueuedLeaseIsNotGrantedTheDisplayCardOnceTheFloorIsGone(t *testing.T) {
+// The VRAM in use is re-read at the grant as well: a game that took the display card's memory while the
+// request waited refuses the grant even though the cap is still open.
+func TestAQueuedLeaseIsNotGrantedTheDisplayCardOnceTheCapIsPassed(t *testing.T) {
 	b := newGrantBox(t)
 	b.cards = b.cards[:1]
 	holder := holdCard(t, b.m, "gpu-aaaa0000-x")
@@ -210,7 +211,7 @@ func TestAQueuedLeaseIsNotGrantedTheDisplayCardOnceTheFloorIsGone(t *testing.T) 
 	done := b.queueOn(&out, clock)
 	waitForWaiter(t, b.m)
 	b.mu.Lock()
-	b.free0 = 5 // 5 free - 2 needed = 3 left, under the 4 GiB floor
+	b.free0 = 5 // 11 GiB in use + 2 needed = 13, over the 9.6 GiB a 60 percent cap allows on 16
 	b.mu.Unlock()
 	if err := holder.Release(); err != nil {
 		t.Fatal(err)
@@ -219,7 +220,7 @@ func TestAQueuedLeaseIsNotGrantedTheDisplayCardOnceTheFloorIsGone(t *testing.T) 
 	case r := <-done:
 		if r.lease != nil {
 			_ = r.lease.Release()
-			t.Fatal("the display card is under its floor at the grant and must not be given")
+			t.Fatal("the display card is over its cap at the grant and must not be given")
 		}
 		if r.err == nil {
 			t.Fatal("no lease and no error")
@@ -243,7 +244,7 @@ func TestARefusedGrantKeepsTheArrivalTimeOfThePlaceInLine(t *testing.T) {
 	if want := clock.now().UnixMilli(); first != want {
 		t.Fatalf("setup: the first place in line carries the arrival time it was handed: %d, want %d", first, want)
 	}
-	b.away.Store(false)
+	b.capPct.Store(0)
 	if err := holdDisplay.Release(); err != nil { // the card it queued on frees: the grant is refused
 		t.Fatal(err)
 	}
@@ -283,7 +284,7 @@ func TestARefusedGrantKeepsTheArrivalTimeOfThePlaceInLine(t *testing.T) {
 func TestAnImmediateGrantIsVettedToo(t *testing.T) {
 	b := newGrantBox(t)
 	opts := gpulease.Options{Reason: "r", TTL: time.Hour, Devices: []string{"gpu-aaaa0000-x"},
-		GrantCheck: func() error { return errors.New("operator at the desk") }}
+		GrantCheck: func() error { return errors.New("the card no longer qualifies") }}
 	lease, err := acquireQueued(b.m, gpulease.ClassMedia, opts, time.Second)
 	var refused *gpulease.ErrGrantRefused
 	if !errors.As(err, &refused) || lease != nil {

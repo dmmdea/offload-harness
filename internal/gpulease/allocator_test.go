@@ -81,17 +81,25 @@ func TestAllocatorSkipsDisplayClaimedForeignAndQuarantined(t *testing.T) {
 	}
 }
 
-func TestAllocatorDisplayCardIsAllocatableOnlyWhenTheCallerSaysSo(t *testing.T) {
+func TestAllocatorDisplayCardIsAllocatableOnlyWhenTheCapOpensIt(t *testing.T) {
 	in := baseInput()
 	in.Min, in.Max = 3, 3
 	in.Claimed = nil
 	if _, err := Allocate(in); err == nil {
-		t.Fatal("the display card must never be auto-assigned by default (I6)")
+		t.Fatal("an input that sets no cap leaves the display card closed")
 	}
-	in.AllowDisplay = true
+	in.DisplayCapPct = 100
 	a, err := Allocate(in)
 	if err != nil || len(a.Devices) != 3 {
-		t.Fatalf("with the operator away all three are allocatable: %v %v", a.Devices, err)
+		t.Fatalf("with the whole card open and no footprint to hold to it all three are allocatable: %v %v", a.Devices, err)
+	}
+	in.DisplayCapPct = 60 // a share of the card needs a footprint to be held to: none declared, none taken
+	if _, err := Allocate(in); err == nil {
+		t.Fatal("a job that declares no footprint cannot be shown to stay under a 60 percent cap, so the display card stays out")
+	}
+	in.FootprintGiB = 2 // card 1: 16 total, 12 free, so 4 in use; 4 + 2 is under 9.6
+	if a, err = Allocate(in); err != nil || len(a.Devices) != 3 {
+		t.Fatalf("a declared 2 GiB clears the 60 percent cap on the display card: %v %v", a.Devices, err)
 	}
 }
 
@@ -165,7 +173,7 @@ func TestAllocatorSkipsWhenHostRamHeadroomLow(t *testing.T) {
 func TestAllocatorPrefersCardWithNoResidentSeat(t *testing.T) {
 	in := baseInput()
 	in.Min, in.Max = 1, 1
-	in.AllowDisplay = true
+	in.DisplayCapPct = 100
 	in.Resident = map[string]ResidentInfo{
 		"gpu-aaaa0000": {Seats: []string{"seat-a"}, CostGiB: 10},
 		"gpu-bbbb0000": {Seats: []string{"seat-b"}, CostGiB: 3},
@@ -192,7 +200,7 @@ func TestAllocatorPrefersCardWithNoResidentSeat(t *testing.T) {
 
 func TestAllocatorTakesBetweenMinAndMax(t *testing.T) {
 	in := baseInput()
-	in.AllowDisplay = true
+	in.DisplayCapPct = 100
 	in.Min, in.Max = 2, 3
 	in.Claimed = map[string]bool{"gpu-bbbb0000": true}
 	a, err := Allocate(in)

@@ -47,7 +47,6 @@ func TestMediaLaneFreeNeverRefusesAGrantOverRandomStates(t *testing.T) {
 			pick := func(p float64) bool { return rng.Float64() < p }
 			sp := specs[rng.Intn(len(specs))]
 			f := newAdmitFixtureWith(t, sp.spec)
-			f.away = pick(0.3)
 			var desc []string
 
 			switch rng.Intn(4) { // 0 roomy, 1 short(95), 2 impossible, 3 short(40)
@@ -175,7 +174,7 @@ func TestMediaLaneFreeNeverRefusesAGrantOverRandomStates(t *testing.T) {
 				busy++
 			}
 			if ok && !v.Free {
-				t.Errorf("THE CONTRACT IS BROKEN: %s, operator away=%v, state %v: the probe said busy (%s) and the real wait-0 admission GRANTED", sp.name, f.away, desc, v.Why)
+				t.Errorf("THE CONTRACT IS BROKEN: %s, state %v: the probe said busy (%s) and the real wait-0 admission GRANTED", sp.name, desc, v.Why)
 			}
 		})
 	}

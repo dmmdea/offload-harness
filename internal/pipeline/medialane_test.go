@@ -98,7 +98,6 @@ func hold(t *testing.T, f *admitFixture, reason string, devices ...string) *gpul
 type laneCase struct {
 	name string
 	spec admitSpec
-	away bool
 	// setup makes the state of the lane; nil = idle.
 	setup func(t *testing.T, f *admitFixture)
 	// params makes the request's parameters, after the state exists (a resumed call carries the waiter_token of a place
@@ -142,7 +141,7 @@ func laneCases() []laneCase {
 			setup: func(t *testing.T, f *admitFixture) { hold(t, f, "r1", A); hold(t, f, "r2", C) }},
 		{name: "auto, one usable card still free", spec: std, grants: true,
 			setup: func(t *testing.T, f *admitFixture) { hold(t, f, "r1", A) }},
-		{name: "auto, only the display card is free and the operator is away", spec: std, away: true, grants: true,
+		{name: "auto, only the display card is free: a media call declares no footprint, so the cap keeps it out", spec: std, grants: false, mustSeeBusy: true,
 			setup: func(t *testing.T, f *admitFixture) { hold(t, f, "r1", A); hold(t, f, "r2", C) }},
 		{name: "whole node, idle", spec: whole, grants: true},
 		{name: "whole node, a lease is held", spec: whole, grants: false, mustSeeBusy: true,
@@ -299,7 +298,6 @@ func TestMediaLaneFreeNeverRefusesAGrant(t *testing.T) {
 	for _, c := range laneCases() {
 		t.Run(c.name, func(t *testing.T) {
 			f := newAdmitFixtureWith(t, c.spec)
-			f.away = c.away
 			if c.setup != nil {
 				c.setup(t, f)
 			}
@@ -384,7 +382,6 @@ func TestMediaLaneFreeWritesNothing(t *testing.T) {
 	for _, c := range laneCases() {
 		t.Run(c.name, func(t *testing.T) {
 			f := newAdmitFixtureWith(t, c.spec)
-			f.away = c.away
 			if c.setup != nil {
 				c.setup(t, f)
 			}

@@ -8,20 +8,20 @@ import (
 	"time"
 )
 
-// A queued request was decided against the operator's presence and the desktop floor when it joined
+// A queued request was decided against the display card's cap and the desktop floor when it joined
 // the line. The line can be hours long, so the decision is put again at the grant: DesktopRefusals is
 // the rule, Options.GrantCheck is where it is asked, and a refusal is ErrGrantRefused, never a lease.
 
-func TestDesktopRefusalsNamesTheDisplayCardOnceTheOperatorIsBack(t *testing.T) {
-	in := openedDisplayInput(2, 4) // card 1 is the display card, opened while the operator was away
+func TestDesktopRefusalsNamesTheDisplayCardOnceTheOperatorClosesIt(t *testing.T) {
+	in := openedDisplayInput(2, 4) // card 1 is the display card, opened by the cap
 	ids := []string{"gpu-bbbb0000"}
 	if got := DesktopRefusals(in, ids); len(got) != 0 {
-		t.Fatalf("operator away and the floor kept: nothing to refuse, got %+v", got)
+		t.Fatalf("cap open and the floor kept: nothing to refuse, got %+v", got)
 	}
-	in.AllowDisplay = false // the operator is back at the desk
+	in.DisplayCapPct = 0 // the operator says he needs the card (gpu_display_cap_pct 0)
 	got := DesktopRefusals(in, ids)
 	if len(got) != 1 || got[0].ID != "gpu-bbbb0000" || got[0].Reason != ReasonDisplay {
-		t.Fatalf("at the desk the display card is refused as %q, got %+v", ReasonDisplay, got)
+		t.Fatalf("with the cap closed the display card is refused as %q, got %+v", ReasonDisplay, got)
 	}
 }
 
@@ -38,12 +38,12 @@ func TestDesktopRefusalsHoldsTheFloorAtTheGrantAsAtTheEnqueue(t *testing.T) {
 	}
 }
 
-func TestDesktopRefusalsRefusesAnUnknownDisplayCardAtTheDeskAndLeavesOtherCardsAlone(t *testing.T) {
+func TestDesktopRefusalsRefusesAnUnknownDisplayCardAndLeavesOtherCardsAlone(t *testing.T) {
 	in := baseInput()
 	in.Cards = unknownDisplayCards()
 	got := DesktopRefusals(in, []string{"gpu-aaaa0000", "gpu-cccc0000"})
 	if len(got) != 2 || got[0].Reason != ReasonDisplayUnknown {
-		t.Fatalf("with the display unknown and the operator not known away, every chosen card is refused: %+v", got)
+		t.Fatalf("with the display unknown every chosen card is refused: %+v", got)
 	}
 	// A card that is not the display card is judged by the allocator at pick time, never here.
 	in2 := baseInput() // card 1 is the display card; the request chose card 0

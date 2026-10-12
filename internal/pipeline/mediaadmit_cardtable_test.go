@@ -359,24 +359,12 @@ func TestAGrantTimeReadTimeoutStillGrantsANonDisplayCard(t *testing.T) {
 	}
 }
 
-// What the unreadable table must NOT do is open the operator's screen. With the operator away and
-// no desktop floor declared the allocator does hand out the display card; a call placed on a table
-// it could not refresh keeps it closed.
+// What the unreadable table must NOT do is open the operator's screen. A media call declares no VRAM
+// footprint, so the cap keeps the display card out of its choice on a healthy table as well; the call placed
+// from a table it could not refresh must hold the same line (the stale-table half of it, with a footprint
+// declared, is pinned in TestAPlacementFromAStaleTableKeepsTheDisplayCardClosed).
 func TestADegradedReadKeepsTheDisplayCardClosed(t *testing.T) {
-	// Control: table healthy, operator away, the two other cards held: the call takes the display card.
-	ctl := newAdmitFixture(t, nil)
-	ctl.away = true
-	ctl.holdCard(admitUUIDA)
-	ctl.holdCard(admitUUIDC)
-	ch := ctl.image(nil)
-	if uuid := ctl.waitStarted(1)[0].Env["COMFY_CARD_UUID"]; uuid != admitUUIDB {
-		t.Fatalf("premise: with the operator away and no floor the display card is free for the call, got %q", uuid)
-	}
-	ctl.letRunnersGo()
-	ctl.await(ch)
-
 	f := newAdmitFixture(t, nil)
-	f.away = true
 	f.holdCard(admitUUIDA)
 	f.holdCard(admitUUIDC)
 	tbl := f.flakyTable()
