@@ -188,7 +188,9 @@ func TestRescueRepackFailureNamesEveryRungItTried(t *testing.T) {
 	defer compressRepackBound(t, 300*time.Millisecond)()
 	node := newOriginNode(t, "origin-seat", false, func(int64) string { return `{"answer":"from the node"}` })
 	fake := coldRescueFake(50 * time.Millisecond)
-	fake.repackStream = func(_ int64, _ map[string]any, w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) }
+	fake.repackStream = func(_ int64, _ map[string]any, w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
 	srv := fake.server(t)
 	p := admissionTestPipeline(t, srv.URL, 30)
 	p.cfg.FleetAuthToken = "tok"
@@ -228,7 +230,9 @@ func TestRescueRepackOwnSeatFailureCarriesTheWarmUpNote(t *testing.T) {
 	defer compressLiveness(t, 300*time.Millisecond, 100*time.Millisecond, 1800)()
 	defer compressRepackBound(t, 300*time.Millisecond)()
 	fake := coldRescueFake(50 * time.Millisecond)
-	fake.repackStream = func(_ int64, _ map[string]any, w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) }
+	fake.repackStream = func(_ int64, _ map[string]any, w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
 	srv := fake.server(t)
 	p := admissionTestPipeline(t, srv.URL, 30)
 
