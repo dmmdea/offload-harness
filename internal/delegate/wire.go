@@ -89,6 +89,12 @@ type SummaryWire struct {
 	Shed   int `json:"shed,omitempty"`
 }
 
+// The values of ResultWire.RanOn.
+const (
+	RanOnLocal = "local"
+	RanOnNode  = "node"
+)
+
 // ResultWire is one subtask's published outcome. Failed marks a
 // transport/config failure (distinct from a defer — the node never reported);
 // wall_ms is the DELEGATOR-observed round trip, not the node's own wall
@@ -100,6 +106,12 @@ type ResultWire struct {
 	// fleet_smoke read it as text (council R4), so the composite decision is
 	// published beside it as Placed, never folded into it.
 	Placement string `json:"placement"`
+	// RanOn (D-32) says where the subtask RAN, as a closed value: RanOnLocal, the delegator's own seat, or RanOnNode, a
+	// fleet node. Absent when no seat ran the work (a defer, a shed, a refusal chain, a subtask that never started) and on a
+	// result from a delegator that predates it. It is stamped in one place, WireResponse, from placedWhere: the decision
+	// that also writes the hint clause and the pin tallies, so it cannot disagree with them. Placement stays the reason, in
+	// words; a reader that wants the location reads this, never the word "local" in that text.
+	RanOn string `json:"ran_on,omitempty"`
 	// PinReason (ADR 0078) is the closed reason the caller pinned the call under (privacy, locality, measurement,
 	// operator). Present only on a call pinned with one; a route local or remote that gave none is a hint, and the
 	// placement above opens by saying whether it was honoured or overridden. omitempty — every other result

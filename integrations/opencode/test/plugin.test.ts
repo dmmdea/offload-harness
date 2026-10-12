@@ -332,6 +332,42 @@ describe("delegate digest", () => {
     for (const p of ["local", "local idle", "route=local forced", "route=spread → local (slot 1 of 2)", "retry on local after node-a failed_verification"]) expect(ranLocally(p)).toBe(true);
     for (const p of ["route=spread → node-c (slot 2 of 2)", "route=auto → node-a (headroom)", "", "capacity wait → node-a (room after 3s)"]) expect(ranLocally(p)).toBe(false);
   });
+
+  // D-32: the result carries a typed where-it-ran (results[].ran_on, "local" or "node"), stamped by the delegator from the same
+  // decision that writes the hint clause. The plugin reads it first and keeps the placement text for a result that has none (an
+  // older node, or a result no seat ran). The placement below is the shape measured on real remote rows: it names a node and says
+  // "local seat busy", so the text reading counted it as local.
+  const misread = "route=spread → node-a (slot 1 of 1); local seat busy: 1 in flight";
+  const wire = (...rs: Array<{ ran_on?: string; placement?: string; deferred?: boolean }>) => JSON.stringify({ summary: { infrastructure: 0 }, results: rs });
+  it("ranLocally reads ran_on before the placement text", () => {
+    expect(ranLocally({ ran_on: "node", placement: misread })).toBe(false);
+    expect(ranLocally({ ran_on: "node", placement: "local" })).toBe(false);
+    expect(ranLocally({ ran_on: "local", placement: "route=spread → node-c (slot 2 of 2)" })).toBe(true);
+    expect(ranLocally({ ran_on: "local" })).toBe(true);
+  });
+  it("ranLocally keeps reading the placement text when ran_on is absent or a value it does not know", () => {
+    expect(ranLocally({ placement: "route=spread → local (slot 1 of 2)" })).toBe(true);
+    expect(ranLocally({ placement: "route=auto → node-a (headroom)" })).toBe(false);
+    expect(ranLocally({ placement: misread })).toBe(true); // the old reading, unchanged for an older node
+    expect(ranLocally({ ran_on: "somewhere-new", placement: "local idle" })).toBe(true);
+    expect(ranLocally({})).toBe(false);
+  });
+  it("delegateDigest counts by ran_on when present", () => {
+    const d = delegateDigest(wire({ ran_on: "node", placement: misread }));
+    expect(d).toContain("0 local, 1 remote of 1");
+    const pair = delegateDigest(wire({ ran_on: "local", placement: "route=spread → node-c (slot 1 of 2)" }, { ran_on: "node", placement: "route=spread → node-c (slot 2 of 2)" }));
+    expect(pair).toContain("1 local, 1 remote of 2");
+    expect(pair).toContain("pair landed");
+  });
+  it("delegateDigest reads a result from an older node (no ran_on) by its placement text, beside one that has it", () => {
+    const d = delegateDigest(wire({ placement: "route=spread → local (slot 1 of 2)" }, { ran_on: "node", placement: misread }));
+    expect(d).toContain("1 local, 1 remote of 2");
+  });
+  it("delegateDigest does not call a pair all-local when ran_on says a node ran it", () => {
+    const d = delegateDigest(wire({ ran_on: "local", placement: "local" }, { ran_on: "node", placement: misread }));
+    expect(d).not.toContain("did NOT land");
+    expect(d).toContain("pair landed");
+  });
 });
 
 describe("instrument", () => {
