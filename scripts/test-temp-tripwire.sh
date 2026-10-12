@@ -4,8 +4,9 @@
 # The problem it closes. A test that makes a file or folder in the OS temp dir and never removes it adds one more every run.
 # That filled a system drive twice (a stand-in test binary left 22,434 folders and about 70 GB in under two hours), and the
 # static lint (tempdir_lint_test.go, GPU-I8) cannot see a temp file made by PRODUCTION code that a test calls (F79's inline
-# graph JSON), or a started copy of the test binary that exits before its cleanup. This script sees what is actually left:
-# it sets TMP, TEMP, TMPDIR and GOTMPDIR to a folder it creates empty, runs go test, and looks in the folder afterwards.
+# graph JSON), or a started copy of the test binary that exits before its cleanup. This script sees what is actually left in
+# the temp folder (and only there: see "What it cannot see" below): it sets TMP, TEMP, TMPDIR and GOTMPDIR to a folder it creates
+# empty, runs go test, and looks in the folder afterwards.
 # PowerShell twin: scripts/test-temp-tripwire.ps1 (same options in PascalCase, same labels, verdicts and exit codes).
 # Self-test: scripts/test-temp-tripwire-selftest.sh over the fixture module scripts/testdata/tripwirefixture.
 #
