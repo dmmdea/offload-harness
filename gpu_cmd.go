@@ -312,6 +312,9 @@ func runGPUStatus(args []string) error {
 	if info.Draining {
 		excl += "  (draining: new runs wait, in-flight runs complete)"
 	}
+	if info.HostRAMWaitGiB > 0 {
+		excl += fmt.Sprintf("  (host RAM %.1f GiB asked, not yet admitted: the seat is cleared first, then the host is asked)", info.HostRAMWaitGiB)
+	}
 	if info.Command != "" {
 		excl += "\n  running: " + info.Command
 	}
@@ -355,6 +358,9 @@ func runGPUStatus(args []string) error {
 			if l.HostRAMGiB > 0 {
 				declared = fmt.Sprintf(", host RAM %.1f GiB", l.HostRAMGiB)
 			}
+			if l.HostRAMWaitGiB > 0 {
+				declared = fmt.Sprintf(", host RAM %.1f GiB asked, not yet admitted", l.HostRAMWaitGiB)
+			}
 			fmt.Printf("  lease epoch %d: %s pid %d, %s%s%s\n", l.Epoch, l.Class, l.PID, scope, group, declared)
 		}
 	}
@@ -396,7 +402,7 @@ func runGPUReserve(args []string) error {
 	wholeNode := fs.Bool("whole-node", false, "hold the whole node (the default when the command names no card)")
 	groupFlag := fs.String("group", "", "label for leases taken together for one job (shown in `gpu status`)")
 	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card (0 = not declared)")
-	ramFlag := fs.Float64("ram", 0, "GiB of host RAM the job will load, declared on the lease and admitted against committed memory (0 = needs no host RAM). Unset, it is estimated: from the model files of a render helper call whose weights do not fit the card (render/comfy-generate.mjs, comfy-edit, comfy-video, comfy-inpaint, comfy-render), else for a media lease the largest ComfyUI render family this box binds (an sd.cpp binding is not counted: a node that binds only sd.cpp declares 0), and 0 for a text lease. A grant waits, in the same queue, while committed memory + this + what running leases have yet to load would exceed physical RAM less gpu_host_ram_headroom_gib, or while the available RAM less this and the unloaded part would fall under that headroom")
+	ramFlag := fs.Float64("ram", 0, "GiB of host RAM the job will load, declared on the lease and admitted against committed memory (0 = needs no host RAM). Unset, it is estimated: from the model files of a render helper call whose weights do not fit the card (render/comfy-generate.mjs, comfy-edit, comfy-video, comfy-inpaint, comfy-render), else for a media lease the largest ComfyUI render family this box binds (an sd.cpp binding is not counted: a node that binds only sd.cpp declares 0), and 0 for a text lease. A grant waits, in the same queue, while committed memory + this + what running leases have yet to load would exceed physical RAM less gpu_host_ram_headroom_gib, or while the available RAM less this and the unloaded part would fall under that headroom. With --unload-seat the host is asked AFTER the seat is unloaded, while the cards are held, because the memory it needs may be the seat's own (F82)")
 	owner := addOwnershipFlags(fs)
 	releaseAtExpiry := fs.Bool("release-at-expiry", false, "with --detach: the hidden holder releases the card at --for, as it did before leases had terms (default: it renews its term while the owner vouches for the job, else labels the lease expired and keeps holding; nothing is ever released by a deadline)")
 	_ = fs.Parse(args)
@@ -548,8 +554,17 @@ func runGPUReserve(args []string) error {
 	// allocated cards, the whole node, the detached holder), because the grant admits it against
 	// committed memory wherever the cards came from.
 	need := resolveReserveHostRAMWith(ramGiven, *ramFlag, gpulease.Class(*class), cmdArgs, plan.IDs, reserveCfg, m.CardScoped(), planCards, os.Stderr)
-	opts.HostRAMGiB = need.GiB
-	devFlags.ramGiB = need.GiB // the card allocator's pre-filter reads the same figure
+	// F82: a lease that unloads the seat itself is compared to the host AFTER the unload, not in the grant: the memory
+	// it would wait for is held by the seat its own unload frees (gpu_hostram_await.go). The grant, the card
+	// allocator's host term and the queue's pass rule see a lease that declares nothing; the figure travels as
+	// HostRAMWaitGiB and AwaitHostRAM admits it once the seat is cleared. A need no state of the box could ever
+	// admit is refused here, before anything is taken or unloaded, as it always was.
+	gateRAM, awaitRAM := hostRAMSplit(*unload, need.GiB)
+	if err := refuseImpossibleHostRAM(m, awaitRAM, *wait); err != nil {
+		return err
+	}
+	opts.HostRAMGiB, opts.HostRAMWaitGiB = gateRAM, awaitRAM
+	devFlags.ramGiB = gateRAM // the card allocator's pre-filter reads the same figure
 	buildAlloc := func() (gpulease.AllocInput, error) {
 		return buildAllocInput(context.Background(), m, reserveCfg, devFlags)
 	}
@@ -574,6 +589,14 @@ func runGPUReserve(args []string) error {
 		if *drain || *unload {
 			if err := detachMaintain(m, epoch, loadCfg(fs), *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter); err != nil {
 				return detachedMaintainError(m, epoch, err)
+			}
+			// The seat is cleared and the cards are held: now the host is asked (F82). The hidden holder keeps the
+			// heartbeat meanwhile; a host that never has the room fails like a failed drain, the lease still held.
+			if awaitRAM > 0 {
+				await := func(o gpulease.AwaitHostRAMOptions) error { return m.AwaitHostRAM(epoch, o) }
+				if err := awaitHostRAMHeld(context.Background(), await, hostRAMDeadline(queuedAt, *wait), *wait, os.Stderr); err != nil {
+					return detachedMaintainError(m, epoch, err)
+				}
 			}
 		}
 		return nil
@@ -669,6 +692,14 @@ func runGPUReserve(args []string) error {
 				}
 			}()
 			merr := maintainSeatScoped(mctx, cfg, lease.Restamp, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, markWarmOwed(m), lease.Devices())
+			// F82: the seat is cleared; the host is asked now, still holding the cards, under the same heartbeat and
+			// the same cancel as the drain. A lease lost or a signal received during this wait is handled below like
+			// one during the drain.
+			stage, phase := stageDraining, "the drain"
+			if merr == nil && awaitRAM > 0 {
+				stage, phase = stageHostRAM, "the wait for host RAM"
+				merr = awaitHostRAMHeld(mctx, lease.AwaitHostRAM, hostRAMDeadline(queuedAt, *wait), *wait, os.Stderr)
+			}
 			stopRenew()
 			cancelMaintain()
 			if merr == nil {
@@ -677,8 +708,8 @@ func runGPUReserve(args []string) error {
 			if sig := sw.Signal(); sig != nil {
 				// Decided before the deferred finish runs: it chooses between the warm-back and its skip by this.
 				endedOnTerm = endsGraceBounded(sig)
-				endedAt = stageDraining
-				err := endedBySignal(sig, stageDraining)
+				endedAt = stage
+				err := endedBySignal(sig, stage)
 				card.finish(err)
 				return err
 			}
@@ -698,7 +729,7 @@ func runGPUReserve(args []string) error {
 				card.finish(err)
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "gpu reserve: the lease was lost during the drain (%v); queueing for the card again, the drain starts over under the new lease\n", lost)
+			fmt.Fprintf(os.Stderr, "gpu reserve: the lease was lost during %s (%v); queueing for the card again, the drain starts over under the new lease\n", phase, lost)
 			_ = lease.Release() // gone or another holder's: Release only ever drops its own epoch
 			next, aerr := acquireQueued(m, gpulease.Class(*class), opts, requeueWait(queuedAt, *wait))
 			if aerr != nil {
@@ -1157,6 +1188,11 @@ func holdArgs(class string, dur, wait time.Duration, opts gpulease.Options, auto
 		ram = auto.ramGiB
 	}
 	args = append(args, "--ram", strconv.FormatFloat(ram, 'f', -1, 64))
+	// A lease that unloads the seat declares nothing in the grant (F82): the holder takes its cards with the figure on
+	// the record as a wait, and the parent asks the host after the unload (gpu_hostram_await.go).
+	if opts.HostRAMWaitGiB > 0 {
+		args = append(args, "--ram-wait", strconv.FormatFloat(opts.HostRAMWaitGiB, 'f', -1, 64))
+	}
 	switch {
 	case auto != nil:
 		args = append(args, "--cards", auto.cards, "--vram", strconv.FormatFloat(auto.vramGiB, 'f', -1, 64))
@@ -1189,6 +1225,7 @@ func runGPUHold(args []string) error {
 	cardsFlag := fs.String("cards", "", "hold N cards (or MIN..MAX) chosen by the allocator, allocating and claiming in this process (the parent passes its --cards)")
 	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card")
 	ramFlag := fs.Float64("ram", 0, "GiB of host RAM the lease declares (the parent resolved it: its --ram, the estimate, or the class default)")
+	ramWaitFlag := fs.Float64("ram-wait", 0, "GiB of host RAM the lease will ask the host for AFTER the parent has unloaded the agent seat (the parent passes it for --unload-seat): stamped on the record, never compared in the grant")
 	groupFlag := fs.String("group", "", "label for leases taken together for one job")
 	releaseAtExpiry := fs.Bool("release-at-expiry", false, "release the lease at --for (the pre-terms behaviour; the parent passes its --release-at-expiry)")
 	owner := addOwnershipFlags(fs)
@@ -1208,7 +1245,7 @@ func runGPUHold(args []string) error {
 	holdOpts := gpulease.Options{
 		Reason: *reason, Origin: *origin, TTL: *dur, Wait: *wait, WaitOut: true, Exclusive: *exclusive, Draining: *draining,
 		WrapperVersion: version, Devices: holdDevices, Group: strings.TrimSpace(*groupFlag),
-		HostRAMGiB: max(*ramFlag, 0),
+		HostRAMGiB: max(*ramFlag, 0), HostRAMWaitGiB: max(*ramWaitFlag, 0),
 		// This process's stderr is what the parent reads back (childReason), so the wait is told there once.
 		OnHostRAMWait: func(e *gpulease.ErrHostRAM) { fmt.Fprintf(os.Stderr, "gpu hold: %s\n", e.Error()) },
 	}

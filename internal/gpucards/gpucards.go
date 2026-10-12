@@ -133,6 +133,11 @@ func LeaseRows(leases []gpulease.Info) []map[string]any {
 		if l.HostRAMGiB > 0 {
 			row["host_ram_gib"] = round1(l.HostRAMGiB)
 		}
+		// Host RAM a lease that clears the seat asked for and the host has not admitted yet (F82): it declares nothing
+		// until then, so the next grant counts nothing for it; the figure is what an operator reads to see what it waits for.
+		if l.HostRAMWaitGiB > 0 {
+			row["host_ram_wait_gib"] = round1(l.HostRAMWaitGiB)
+		}
 		out = append(out, row)
 	}
 	return out

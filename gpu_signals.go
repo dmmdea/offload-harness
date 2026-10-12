@@ -54,6 +54,7 @@ const (
 	stageBeforeCard  = "before it asked for the card"
 	stageQueued      = "while queued"
 	stageDraining    = "while draining the seat"
+	stageHostRAM     = "while waiting for host RAM"
 	stageBeforeStart = "before its command started"
 )
 
