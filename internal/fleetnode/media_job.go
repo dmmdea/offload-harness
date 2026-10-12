@@ -115,9 +115,10 @@ const mediaJobInFlightMax = 1
 // mediaJobSlotWait is a var only so a test can shorten it.
 var mediaJobSlotWait = 30 * time.Second
 
-// handleMediaJob checks the door and the bearer BEFORE reading the body, takes one of the node's few
-// in-flight slots (held until the job is admitted or refused), then decodes the typed payload and joins the
-// shared admission path.
+// handleMediaJob checks the door and the bearer BEFORE reading the body, refuses a body whose declared length
+// is over the cap at once (413, before the slot, the body unread), takes one of the node's few in-flight
+// slots (held until the job is admitted or refused), then decodes the typed payload and joins the shared
+// admission path.
 func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 	if !s.opts.Cfg.MediaInputsAdmissible() {
 		writeError(w, http.StatusForbidden, mediaJobClosed)
@@ -125,6 +126,15 @@ func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	// A body whose declared length is over the cap is refused here, before the slot and without reading it
+	// (CT-53). It used to take the one slot first and drain the body up to the cap before answering, so a
+	// client that declared 8 GiB and sent 20 bytes held the node's only slot, unanswered, for the whole
+	// window. The bearer was checked above, so this is an answer to a token holder only.
+	limit := MediaJobBodyCap(s.opts.Cfg)
+	if r.ContentLength > limit {
+		refuseMediaJobTooLarge(w, limit)
 		return
 	}
 	// A caller that passed the bearer check holds one of the node's media-job slots from before the first
@@ -136,7 +146,6 @@ func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 	// Only a token holder gets the longer window; everyone else met the blanket timeouts above.
 	s.extendRead(w, mediaJobWindow, "the media-job door")
 	s.extendWrite(w, mediaJobWindow, "the media-job door")
-	limit := MediaJobBodyCap(s.opts.Cfg)
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	if ct := r.Header.Get("Content-Type"); ct != "" {
 		if mt, _, err := mime.ParseMediaType(ct); err != nil || mt != "application/json" {
@@ -148,7 +157,7 @@ func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body too large (limit %d bytes: fleet_media_inputs_max_mb)", limit))
+			refuseMediaJobTooLarge(w, limit)
 			return
 		}
 		writeError(w, http.StatusBadRequest, "reading media-job body: "+err.Error())
@@ -162,15 +171,25 @@ func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 	s.admit(w, r, dispatchEnvelope{JobID: head.JobID, TaskType: MediaJobTask, Payload: body})
 }
 
+// refuseMediaJobTooLarge answers 413 for a body over the cap and ends the connection (Connection: close). The
+// body that is being refused is not read, so the connection cannot carry another request, and net/http then
+// closes it after its short wait for the client to take the answer instead of draining what it has not read.
+func refuseMediaJobTooLarge(w http.ResponseWriter, limit int64) {
+	w.Header().Set("Connection", "close")
+	writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body too large (limit %d bytes: fleet_media_inputs_max_mb)", limit))
+}
+
 // readMediaJobBody reads the whole body into ONE buffer of exactly Content-Length bytes when the client sent
 // it (io.ReadAll would grow by doubling, and bytes.Buffer.ReadFrom regrows once fewer than 512 bytes are
 // free, either of which leaves garbage the size of the body behind it). After the declared length it probes
 // one more byte: a body longer than it declared is refused as too large, as one over the cap is.
 func readMediaJobBody(r *http.Request, limit int64) ([]byte, error) {
 	if r.ContentLength > limit {
-		// Let the MaxBytesReader produce the typed error the caller maps to 413.
-		_, err := io.Copy(io.Discard, r.Body)
-		return nil, err
+		// The handler refuses a declared-oversize body before it gets here. A caller that gets here anyway
+		// has the same typed error the handler maps to 413, without the body being read (draining it up to
+		// the cap held the connection for as long as the client took to send it, and a body that ended
+		// early returned no error and no bytes).
+		return nil, &http.MaxBytesError{Limit: limit}
 	}
 	if r.ContentLength > 0 {
 		buf := make([]byte, r.ContentLength)
