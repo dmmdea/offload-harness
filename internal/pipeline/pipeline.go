@@ -2282,6 +2282,9 @@ type ImageBatchItem struct {
 	Family        string `json:"family"`
 	License       string `json:"license,omitempty"`
 	CommercialUse *bool  `json:"commercial_use,omitempty"`
+	// Devices are the two cards a batch on the card-only placement ran on (the lease ids, as the queued answer names them). Only a batch
+	// that held that pair carries them; every other item is byte-identical to what it was.
+	Devices []string `json:"devices,omitempty"`
 }
 
 // tagLicense stamps a batch item with the rendering binding's family and license —

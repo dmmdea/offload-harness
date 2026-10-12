@@ -8,6 +8,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -56,6 +57,46 @@ func pairIDs() []string { return []string{leaseIDOf(admitUUIDA), leaseIDOf(admit
 
 func pairEnv() string { return strings.Join(pairIDs(), ",") }
 
+// answerDevices reads the cards a success answer names (its "devices" key, the one the queued answer uses) and whether the key is there at all.
+func answerDevices(t *testing.T, data []byte) (ids []string, present bool) {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("the answer is not a JSON object: %v: %s", err, data)
+	}
+	raw, ok := m["devices"]
+	if !ok {
+		return nil, false
+	}
+	if err := json.Unmarshal(raw, &ids); err != nil {
+		t.Fatalf("devices is not a list of card ids: %v: %s", err, raw)
+	}
+	return ids, true
+}
+
+// wantAnswerNamesThePair fails unless a finished call's answer says which two cards it ran on: the lease's own ids, the ones the queued answer names.
+func wantAnswerNamesThePair(t *testing.T, what string, res core.Result) {
+	t.Helper()
+	if !res.OK {
+		t.Fatalf("%s: the call must succeed for its answer to be read: class=%q %s", what, res.Meta.ErrClass, res.Reason)
+	}
+	ids, present := answerDevices(t, res.Data)
+	if !present || strings.Join(ids, ",") != pairEnv() {
+		t.Errorf("%s: the success answer must name the two cards it ran on (devices = %v, want %v): %s", what, ids, pairIDs(), res.Data)
+	}
+}
+
+// wantAnswerNamesNoCards fails unless a finished call's answer carries no "devices" key: a call that did not hold a pair answers as it always did.
+func wantAnswerNamesNoCards(t *testing.T, what string, res core.Result) {
+	t.Helper()
+	if !res.OK {
+		t.Fatalf("%s: the call must succeed for its answer to be read: class=%q %s", what, res.Meta.ErrClass, res.Reason)
+	}
+	if ids, present := answerDevices(t, res.Data); present {
+		t.Errorf("%s: a call that held no card-only pair names no cards, got devices = %v: %s", what, ids, res.Data)
+	}
+}
+
 func TestAMulticardImageBindingLeasesTwoNonDisplayCardsAndPassesThePlacement(t *testing.T) {
 	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: multicardBinding})
 	ch := f.image(nil)
@@ -89,7 +130,8 @@ func TestAMulticardImageBindingLeasesTwoNonDisplayCardsAndPassesThePlacement(t *
 		t.Errorf("lease env incomplete: %v", env)
 	}
 	f.letRunnersGo()
-	f.await(ch)
+	// the answer names the cards the call ran on (the queued answer already does)
+	wantAnswerNamesThePair(t, "generate-image", f.await(ch))
 	if left := f.m.Leases(); len(left) != 0 {
 		t.Errorf("leases left: %+v", left)
 	}
@@ -299,7 +341,8 @@ func TestAnInheritedLeaseOnTwoCardsServesAMulticardImageCallOnBothCards(t *testi
 		t.Errorf("second call: ok=%v class=%q %s, want the busy answer", res.OK, res.Meta.ErrClass, res.Reason)
 	}
 	f.letRunnersGo()
-	f.await(a)
+	// under the parent's lease the answer still names the two cards the call ran on
+	wantAnswerNamesThePair(t, "generate-image under a parent lease", f.await(a))
 	if r := f.await(f.image(nil)); r.Meta.ErrClass == "gpu_busy" {
 		t.Fatalf("the slots of the finished call must be released: %+v", r)
 	}
@@ -384,7 +427,7 @@ func TestANamedFamilyThatAsksForMulticardLeasesThePairAndTheDefaultStaysOnOneCar
 		t.Errorf("the named family runs on the pair: %+v", probes[0])
 	}
 	f.letRunnersGo()
-	f.await(named)
+	wantAnswerNamesThePair(t, "the named family", f.await(named))
 
 	g := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: overlay})
 	def := g.image(nil)
@@ -393,14 +436,25 @@ func TestANamedFamilyThatAsksForMulticardLeasesThePairAndTheDefaultStaysOnOneCar
 		t.Errorf("the default binding of the same node stays on one card: %+v", probes[0])
 	}
 	g.letRunnersGo()
-	g.await(def)
+	wantAnswerNamesNoCards(t, "the default binding of the same node", g.await(def))
 }
 
 // The batch takes the same lease and the same argv as the single call: one pair for the whole batch.
 func TestAnImageBatchOnAMulticardBindingLeasesThePairOnce(t *testing.T) {
 	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: multicardBinding})
 	f.letRunnersGo()
-	_, _ = f.p.RunImageBatchAs(context.Background(), "", []ImageBatchJob{{Prompt: "a calm ocean at dawn", Out: filepath.Join(f.dir, "b1.png")}, {Prompt: "a calm lake at dusk", Out: filepath.Join(f.dir, "b2.png")}})
+	items, _ := f.p.RunImageBatchAs(context.Background(), "", []ImageBatchJob{{Prompt: "a calm ocean at dawn", Out: filepath.Join(f.dir, "b1.png")}, {Prompt: "a calm lake at dusk", Out: filepath.Join(f.dir, "b2.png")}})
+	if len(items) != 2 {
+		t.Fatalf("%d items for two jobs", len(items))
+	}
+	for i, it := range items {
+		// the batch answer names the pair on every item, in the JSON the CLI prints (the CLI layers the item's own JSON under its row)
+		b, _ := json.Marshal(it)
+		ids, present := answerDevices(t, b)
+		if !present || strings.Join(ids, ",") != pairEnv() {
+			t.Errorf("item %d must name the two cards the batch ran on, got devices = %v: %s", i, ids, b)
+		}
+	}
 	probes := f.started()
 	if len(probes) != 1 {
 		t.Fatalf("%d runners for one batch, want one", len(probes))
@@ -437,7 +491,7 @@ func TestTheEditDoorLeasesTwoNonDisplayCardsForAMulticardBinding(t *testing.T) {
 		t.Errorf("the lease declares %.1f GiB of host RAM, want 0 (the measured row fits the pair)", got)
 	}
 	f.letRunnersGo()
-	f.await(ch)
+	wantAnswerNamesThePair(t, "edit-image", f.await(ch))
 }
 
 func TestAnEditBindingWithoutThePlacementIsTheSingleCardLeaseItAlwaysWas(t *testing.T) {
@@ -455,7 +509,7 @@ func TestAnEditBindingWithoutThePlacementIsTheSingleCardLeaseItAlwaysWas(t *test
 		t.Errorf("the plain fp8mixed edit declares its set on one 16 GiB card: %.1f", got)
 	}
 	f.letRunnersGo()
-	f.await(ch)
+	wantAnswerNamesNoCards(t, "a plain edit", f.await(ch))
 }
 
 // An edit binding with no recipe (the 2.1 edit family has none) is refused before a lease.
@@ -661,6 +715,23 @@ func multicardLaneCases() []laneCase {
 			setup: func(t *testing.T, f *admitFixture) { f.cards[2].Display = true }},
 		{name: "multicard with no recipe (the real admission refuses; the probe says it did not judge)", grants: false,
 			spec: admitSpec{order: admitOrder, mutate: func(c *config.Config) { krea2Binding(c); c.ImageGenPlacement = "multicard" }}},
+	}
+}
+
+// A batch on a binding without the placement answers as it always did: no item names cards, and the item marshals to the same bytes.
+func TestAnImageBatchWithoutThePlacementNamesNoCards(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
+	f.letRunnersGo()
+	items, _ := f.p.RunImageBatchAs(context.Background(), "", []ImageBatchJob{{Prompt: "a calm ocean at dawn", Out: filepath.Join(f.dir, "b1.png")}})
+	if len(items) != 1 {
+		t.Fatalf("%d items for one job", len(items))
+	}
+	if items[0].Devices != nil {
+		t.Errorf("a batch that held no pair names no cards, got %v", items[0].Devices)
+	}
+	b, _ := json.Marshal(items[0])
+	if ids, present := answerDevices(t, b); present {
+		t.Errorf("the item carries a devices key (%v): %s", ids, b)
 	}
 }
 

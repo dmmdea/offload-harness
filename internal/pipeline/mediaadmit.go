@@ -340,6 +340,9 @@ type mediaGrant struct {
 	// Card and API are set when the call runs in the ComfyUI instance bound to one card.
 	Card *gpuprobe.Card
 	API  string
+	// Devices are the lease ids of the two cards a card-only call (needMulticard) runs on, sorted. Set only when the grant holds that pair, so the answer
+	// of every other call names no cards; the image, edit and batch answers carry them as "devices", the key the queued answer already uses.
+	Devices []string
 	// Release gives everything back; call it exactly when the render is done (it is idempotent).
 	Release func()
 }
