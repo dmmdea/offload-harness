@@ -2241,6 +2241,11 @@ func emitResult(res core.Result, asJSON bool, selectCSV string, compact bool) {
 }
 
 func runMCP(args []string) error {
+	// D-36: take the identity of the image this process started from BEFORE anything else runs. The capture hashes the
+	// executable at the path os.Executable names, and on Windows that path keeps its name after a rename-swap, so a
+	// deploy landing during openPipeline would otherwise be hashed as the image this process runs. (A short CLI call
+	// never captures and keeps the lazy hash.)
+	buildinfo.CaptureStartup()
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	_ = fs.Parse(args)

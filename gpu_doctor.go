@@ -127,7 +127,7 @@ func runGPUDoctor(args []string) error {
 	rep := gpulease.Audit(opts)
 	// D-36: a rename-swap leaves every running process on its pre-swap image. The audit already read each running
 	// image's build marker; this marks the ones older than the installed build, read from the installed FILE.
-	installed := markOlderImages(&rep, exe, &notes)
+	installed := markOlderImages(&rep, exe, doctorPathEnv(), &notes)
 	before := m.ReaderAuditResult()
 	if *write {
 		if werr := m.WriteReaderAudit(rep); werr != nil {
@@ -158,43 +158,73 @@ func runGPUDoctor(args []string) error {
 }
 
 // markOlderImages sets Older on every RUNNING binary whose build marker states a version below the installed
-// build's, and returns the installed version ("" when it could not be read). The installed version is read from the
-// installed file, the doctor's own executable path, through the audit's own marker reader: the doctor may itself be
-// a pre-swap process, and comparing against its compiled-in version would then mark nothing. A version that cannot
-// be parsed, or a binary that carries no marker, is never called older: unknown stays unknown. When the installed
-// version cannot be read and a running image had a version to compare, the note says the comparison was not made.
-func markOlderImages(rep *gpulease.AuditReport, exe string, notes *[]string) string {
-	installed, ierr := "", error(nil)
-	if exe != "" {
-		installed, ierr = gpulease.ReadBuildMarkerVersion(exe)
-	}
-	want, haveWant := parseBuildVersion(installed)
-	compared := false
+// build's, and returns the installed version ("" when none was compared). The installed version is read from the
+// installed file, the doctor's own executable, through the audit's own marker reader: the doctor may itself be a
+// pre-swap process, and comparing against its compiled-in version would then mark nothing. A version that cannot
+// be parsed, or a binary that carries no marker, is never called older: unknown stays unknown. When a running image
+// had a version to compare and the comparison could not be made, a note says why and which cause it was: the
+// doctor's path is unresolved, its file states no version, or the doctor is not the harness binary PATH resolves
+// (a worktree or dev build run beside a deployed copy), which is not "the installed build" and would send the
+// operator to restart deployed processes for nothing.
+func markOlderImages(rep *gpulease.AuditReport, exe, pathEnv string, notes *[]string) string {
+	var comparable []*gpulease.AuditItem
 	for i := range rep.Items {
 		it := &rep.Items[i]
 		if it.Kind != gpulease.KindBinary || len(it.PIDs) == 0 {
 			continue
 		}
-		got, ok := parseBuildVersion(it.Version)
-		if !ok {
+		if _, ok := parseBuildVersion(it.Version); ok {
+			comparable = append(comparable, it)
+		}
+	}
+	if exe != "" && !isPathCopy(exe, pathEnv) {
+		if len(comparable) > 0 {
+			*notes = append(*notes, "running processes were not compared with an installed build: this doctor ("+exe+") is not the harness binary on PATH, so its own build is not the installed one; run the doctor from the deployed binary")
+		}
+		return ""
+	}
+	installed, ierr := "", error(nil)
+	if exe != "" {
+		installed, ierr = gpulease.ReadBuildMarkerVersion(exe)
+	}
+	want, haveWant := parseBuildVersion(installed)
+	if haveWant {
+		for _, it := range comparable {
+			if got, _ := parseBuildVersion(it.Version); versionBelow(got, want) {
+				it.Older = true
+			}
+		}
+		return installed
+	}
+	if len(comparable) > 0 {
+		why := "the installed build carries no build marker"
+		switch {
+		case exe == "":
+			why = "the installed executable path could not be resolved"
+		case ierr != nil:
+			why = ierr.Error()
+		}
+		*notes = append(*notes, "installed build version unknown ("+why+"): running processes were not compared with it")
+	}
+	return ""
+}
+
+// isPathCopy reports whether exe can be the installed harness binary: true unless PATH holds a harness binary of the
+// same name and exe is none of them (a worktree or dev build beside a deployed copy). With nothing on PATH to
+// contradict it, the doctor's own file is taken to be the installed one.
+func isPathCopy(exe, pathEnv string) bool {
+	base := filepath.Base(exe)
+	named := false
+	for _, c := range pathCandidates(pathEnv) {
+		if !strings.EqualFold(filepath.Base(c), base) {
 			continue
 		}
-		compared = true
-		if haveWant && versionBelow(got, want) {
-			it.Older = true
+		named = true
+		if sameFile(c, exe) || strings.EqualFold(filepath.Clean(c), filepath.Clean(exe)) {
+			return true
 		}
 	}
-	if !haveWant {
-		installed = ""
-		if compared {
-			why := "the installed build carries no build marker"
-			if ierr != nil {
-				why = ierr.Error()
-			}
-			*notes = append(*notes, "installed build version unknown ("+why+"): running processes were not compared with it")
-		}
-	}
-	return installed
+	return !named
 }
 
 // olderPIDs lists the pids of the running binaries marked Older.
