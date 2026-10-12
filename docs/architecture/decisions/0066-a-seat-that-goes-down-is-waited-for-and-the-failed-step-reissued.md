@@ -113,6 +113,15 @@ against a real 178-271 s), and several runs waiting on one load each appended it
    ahead of a newcomer (the question a re-placement asks, ADR 0063 decision 2), the
    retry goes to an untried remote, and to the local seat only when there is none:
    joining the line beats losing the job.
+   *Amendment 2026-10-12.* The same three treatments belong to every defer whose run
+   produced nothing, and there are three: this one, the lost-root defer (register C-79)
+   and the forced-final tool-call defer (`delegate.FinalToolCallDefer`). They share one
+   predicate, `delegate.producedNothingDefer`. Before it the lost-root defer had the
+   floor exemption only and the forced-final defer none of the three, so on a saturated
+   fleet (every remote publishes one job at a time) the retry of either stood in line
+   for the retry seat for the placement wait and was then skipped with "a shared seat
+   would only slow both", losing a job that had produced nothing, or was refused for the
+   `min_turn_sec` of the very seat that had written the tool call.
    A seat-down defer that has nowhere to go (route local, or no untried eligible node)
    says so in `retry_note`. The loop's recovery does not
    cover the structured re-pack (its request is not a step, and the finished answer is

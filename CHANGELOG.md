@@ -99,10 +99,18 @@ Versioning: [SemVer](https://semver.org/).
   seat-down and lost-root defers): it is a property of that seat (none of 241 forced finals on every other seat did it), the
   contract is sound and the wall mostly unspent, and a plain step-budget defer, which a second seat does not fix, stays as it
   was. With nowhere to place it the caller gets `retry skipped: the seat on <node> wrote a tool call as its final answer and no
-  other node could take the contract (...)` instead of an empty note. Tests `internal/rig/final_tool_call_test.go` and
-  `internal/delegate/final_tool_call_test.go`, written first: red before with `classified "budget" ... want final-tool-call` and
-  `retried=0 deferred=true note=""`; seven mutations turn them red. Docs: `docs/systems/coding-agent.md`,
-  `docs/systems/fleet-node.md`.
+  other node could take the contract (...)` instead of an empty note. Its second placement is placed the way a seat-down
+  retry is, and so is the lost-root defer's (one predicate, `delegate.producedNothingDefer`): a run that produced nothing has no
+  answer to hold, so the retry is not made to stand in line for a busy retry seat for the placement wait and then skipped
+  (every remote publishes one job at a time, so on a saturated fleet that was the normal outcome: "retry skipped: the retry seat
+  on <node> is already running another job after waiting 5s in line"), the failed seat's `min_turn_sec` is not the retry seat's
+  floor when the retry node publishes no rate (`retry skipped: 299s of the 300s timeout_sec budget left after choosing a retry
+  node (floor 1112s, min_turn_sec of the seat on <node> (the retry seat published no rate))`), and a local seat whose run-cap line
+  has no free slot is left for an untried remote. Tests `internal/rig/final_tool_call_test.go`,
+  `internal/delegate/final_tool_call_test.go` and `internal/delegate/final_tool_call_retry_test.go`, written first: red before
+  with `classified "budget" ... want final-tool-call`, `retried=0 deferred=true note=""` and the three skipped-retry notes above
+  (the lost-root defer failed the busy and local-line ones the same way); mutations turn them red. Docs:
+  `docs/systems/coding-agent.md`, `docs/systems/fleet-node.md`, ADR 0066 (amendment 2026-10-12).
 - **A research page that is one very long line is handed to the seat in lines it can read.** The agent's `read_file` cuts every
   line at 2,000 characters (`(line truncated)`) and its `offset`/`limit` count lines, so the rest of a longer line cannot be
   reached at all. Two of the three forced-final rows of the day were such pages: one was a single 98,304-character line (the seat
@@ -174,9 +182,11 @@ Versioning: [SemVer](https://semver.org/).
   left). The check before a node is chosen now reads the
   configured floor (`agent_retry_min_sec`, else 10 s) alone; the chosen node's own floor, the budget left and the retry note
   (`retry skipped: ... after choosing a retry node (floor ...s, min_turn_sec published by <node>)`) are unchanged, and a retry
-  node that publishes no rate still falls back to the first attempt's number, said in the note. Not changed, on purpose: the
-  retry's wait for a busy retry seat keeps its placement-wait TTL (ADR 0073 decision 3: it is an optional second opinion on an
-  answer the subtask already holds). Config, for the operator: with `agent_retry_min_sec` at 300 a default 300 s contract can never retry,
+  node that publishes no rate still falls back to the first attempt's number, said in the note. Not changed, on purpose: a
+  VERIFICATION retry's wait for a busy retry seat keeps its placement-wait TTL (ADR 0073 decision 3: it is an optional second
+  opinion on an answer the subtask already holds); a retry of a run that produced nothing (seat-down, lost-root, forced-final tool
+  call) holds no answer, so it neither waits for that seat nor is refused for the failed seat's `min_turn_sec` (see the
+  forced-final entry above). Config, for the operator: with `agent_retry_min_sec` at 300 a default 300 s contract can never retry,
   since what is left is always under it. Tests `internal/delegate/retry_first_seat_floor_test.go`, written first: red before with
   `retry skipped: 299s of the 300s timeout_sec budget left after the first attempt (floor 1112s, min_turn_sec of the seat on
   node-a)`; three mutations turn them red. Docs: `docs/OPERATOR-GUIDE.md`.

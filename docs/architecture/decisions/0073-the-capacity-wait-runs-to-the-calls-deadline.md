@@ -60,7 +60,9 @@ call deadline instead of a fixed TTL)", and listed the wait under "Not solved he
      would start with only the reserve left and be cut.
    - The verification retry's wait for a busy seat (`awaitRetrySeat`, ADR 0063 decision 10): an optional second opinion
      on an answer the subtask already holds, and holding that answer for the rest of the call to improve on it would cost
-     the caller more than the retry can return.
+     the caller more than the retry can return. (A retry of a run that produced nothing, a seat-down, lost-root or
+     forced-final tool-call defer, holds no answer and does not make this wait at all: ADR 0066 decision 3, amendment
+     2026-10-12.)
    - A wait that holds a run slot while subtasks of the call have not started (decision 9).
 
    The bound those waits keep is the one the wait had before this ADR: the larger of `agent_placement_wait_sec` and

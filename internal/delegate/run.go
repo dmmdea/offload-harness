@@ -1622,12 +1622,14 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// it. The retry is skipped only when the seat stayed busy for the whole wait (or
 	// the wait is switched off), and the note says how long it waited.
 	//
-	// Not for a seat-down defer (ADR 0066): this check neither waits nor skips. D-46's
-	// case is a verification retry: the first attempt PRODUCED an answer, the retry is an
-	// optional second opinion on the budget that was left, and joining a generating seat
-	// costs it the budget it needs. A seat-down defer produced nothing — declining to
-	// re-place it, or waiting out the placement wait and then declining, loses the job
-	// — and its retry carries the credited budget of the wait the dead seat cost. Busy
+	// Not for a defer that produced nothing (producedNothingDefer: the seat-down defer,
+	// ADR 0066, the lost-root defer, C-79, and the forced-final tool-call defer): this check
+	// neither waits nor skips. D-46's case is a verification retry: the first attempt
+	// PRODUCED an answer, the retry is an optional second opinion on the budget that was
+	// left, and joining a generating seat costs it the budget it needs. A defer that
+	// produced nothing — declining to re-place it, or waiting out the placement wait and
+	// then declining, loses the job — and a seat-down retry carries the credited budget of
+	// the wait the dead seat cost. Busy
 	// is a place in line, never a refusal (INV-4): the node's own queue is the line, and
 	// it answers 503 when it is full, which placeAndRun re-places at once (ADR 0063),
 	// into the bounded capacity wait when nothing has room. During the 2026-09-29 outage
@@ -1636,11 +1638,11 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	//
 	// That line is a REMOTE alternative's. The local seat answers no 503: a run forced
 	// onto it joins the run-cap line and waits there for the run's whole wall, a line the
-	// subtask cannot leave. alternativeNode therefore sends a seat-down retry to an
+	// subtask cannot leave. alternativeNode therefore sends such a retry to an
 	// untried remote while that line has no free slot ahead of a newcomer, so the
 	// exemption below never hands the retry to a full local line when there is another
 	// place to go.
-	if !SeatDownDefer(first.Result) {
+	if !producedNothingDefer(first.Result) {
 		if busy, why := r.retrySeatBusy(ctx, alt); busy {
 			w := r.awaitRetrySeat(ctx, alt, why)
 			pl.credit += w.waited
@@ -1810,9 +1812,15 @@ func (r *runner) firstPassRetryFloor() (int, string) {
 // is that run's directory, and the retry goes to another node, so the number read here
 // would be a seat the retry never uses. The configured floor stands and the retry seat's
 // own floor applies once it is chosen.
+//
+// The forced-final tool-call defer is the third, for the same reason as the first: the
+// seat is the fault, and the retry goes to a node that is not it. A retry node that
+// publishes no rate falls back to this function (retryFloorOn), so without the exemption
+// the number of the seat that wrote the tool call refused a retry that exists because of
+// that seat.
 func (r *runner) retryFloorFor(first PlacedResult) (int, string) {
 	floor := r.retryFloorSec()
-	if m := first.Result.MinTurnSec; m > floor && !SeatDownDefer(first.Result) && !RootGoneDefer(first.Result) {
+	if m := first.Result.MinTurnSec; m > floor && !producedNothingDefer(first.Result) {
 		return m, fmt.Sprintf(", min_turn_sec of the seat on %s", nodeLabel(first))
 	}
 	return floor, retryFloorSource(floor)
@@ -4453,6 +4461,16 @@ func FinalToolCallDefer(r core.AgentWireResult) bool {
 	return r.Deferred && r.DeferClass == core.DeferClassBudget && strings.Contains(r.Reason, core.ForcedFinalToolCallReason)
 }
 
+// producedNothingDefer reports whether a result is the defer of a run that delivered no answer at all, so that its second
+// placement is the job's only way to be delivered and not an optional second opinion on an answer the subtask already
+// holds: the seat-down defer (ADR 0066), the lost-root defer (register C-79) and the forced-final tool-call defer. Such a
+// retry is placed the way the seat-down one always was (ADR 0066 decision 3): the busy check of the retry seat neither waits
+// nor skips (a skipped retry is a lost job, and the node's own queue is the line), the failed seat's own min_turn_sec is not
+// the retry seat's floor, and a local line with no free slot is left for an untried remote.
+func producedNothingDefer(r core.AgentWireResult) bool {
+	return SeatDownDefer(r) || RootGoneDefer(r) || FinalToolCallDefer(r)
+}
+
 // SeatDownDefer reports whether a result is the seat-down defer (ADR 0066,
 // register C-72): an `infrastructure` defer whose reason carries
 // core.SeatDownReason, i.e. the executing node's seat went down under the run —
@@ -4723,8 +4741,8 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 			}
 			return placement{}, held, false
 		}
-		// A seat-down defer is not held for a busy retry seat (runOne, ADR 0066 decision
-		// 3): the node's own queue is the line, and its 503 is re-placed at once. That is
+		// A defer that produced nothing (producedNothingDefer) is not held for a busy retry seat
+		// (runOne, ADR 0066 decision 3): the node's own queue is the line, and its 503 is re-placed at once. That is
 		// true of a REMOTE alternative and false of the local seat, which answers no 503:
 		// a run forced onto it joins the run-cap line and waits there for the run's whole
 		// wall before it defers as capacity, a line the subtask could not leave (the
@@ -4732,7 +4750,7 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 		// that line has no free slot ahead of a newcomer, an untried remote is the better
 		// place for the retry. With none, the local seat is the only place there is, and
 		// joining its line beats losing the job.
-		if SeatDownDefer(first.Result) {
+		if producedNothingDefer(first.Result) {
 			if free, note := r.localSlotAhead(); !free {
 				if chosen, base, found := r.remoteAlternative(ctx, st, pl); found {
 					return placement{view: chosen, base: base,

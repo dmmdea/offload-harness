@@ -89,7 +89,9 @@ nothing it writes as a call will run and to begin with the answer in the request
 transcript. The re-ask spends no step, runs at the same budget with thinking off, and both completions are in `calls[]` as forced
 finals. A seat that answers it with a tool call again ends the run on `budget` as before, with both replies quoted in `stop_note`;
 an answer is `done` with `stop_note` saying the seat first wrote a tool call and was re-asked once. The rigger files the
-failed shape as `final-tool-call`, not `budget` ("split it"), and the delegator gives the contract to another seat once.
+failed shape as `final-tool-call`, not `budget` ("split it"), and the delegator gives the contract to another seat once,
+placed like a seat-down retry (`delegate.producedNothingDefer`): it is not held in line for a busy retry seat and not refused
+for the failed seat's `min_turn_sec`, because the run produced nothing and a skipped retry is a lost job.
 
 The ordering here is load-bearing and documented in the code: the name cap must be checked before the
 exact-repeat check, or a model stuck on an identical call matches the repeat branch forever and never
