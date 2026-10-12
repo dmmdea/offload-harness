@@ -298,42 +298,42 @@ test("scan: direct freeLlamaSwap / quiesceLlamaSwap calls name their endpoint or
 });
 
 test("scan: a test that spawns a runner closes both doors, or it is named", () => {
-  const spawnRunner = `const r = spawnSync(process.execPath, [join(HERE, "sdcpp-video.mjs"), ...args], { encoding: "utf8" });`;
-  const withEnv = (decl) => decl + `\n` + spawnRunner.replace(`{ encoding: "utf8" }`, `{ encoding: "utf8", env }`);
+  const spawnRunner = `const r = spawnSync(process.execPath, [join(HERE, "sdcpp-video.mjs"), ...args], { encoding: "utf8", windowsHide: true });`;
+  const withEnv = (decl) => decl + `\n` + spawnRunner.replace(`{ encoding: "utf8", windowsHide: true }`, `{ encoding: "utf8", env, windowsHide: true }`);
   assert.equal(scanSource("a.test.mjs", spawnRunner, FIX).length, 1, "no env at all");
   assert.equal(scanSource("a.test.mjs", withEnv(`const env = isolatedRunnerEnv({});`), FIX).length, 0);
   assert.equal(scanSource("a.test.mjs", withEnv(`const env = { ...process.env, LLAMA_SWAP_API: "http://127.0.0.1:9" };`), FIX).length, 1, "the llama-swap alone leaves the lease open");
   assert.equal(scanSource("a.test.mjs", withEnv(`const env = { ...process.env }; delete env.GPU_LEASE_DIR;`), FIX).length, 1, "the lease alone leaves the llama-swap open");
   assert.equal(scanSource("a.test.mjs", withEnv(`const env = { ...process.env, LLAMA_SWAP_API: "http://127.0.0.1:9" };\nfor (const k of Object.keys(env)) if (k.startsWith("GPU_LEASE")) delete env[k];`), FIX).length, 0, "both written out is accepted");
   assert.equal(scanSource("a.test.mjs", withEnv(`const env = { ...process.env, LLAMA_SWAP_API: "http://localhost:11436" };\ndelete env.GPU_LEASE_DIR;`), FIX).length, 1, "the machine's own llama-swap is not a closing");
-  assert.equal(scanSource("a.test.mjs", `const r = spawnSync("ffmpeg", ["-i", "sdcpp-video.mjs"]);`, FIX).length, 0, "a child that is not node is not a runner");
-  assert.equal(scanSource("a.test.mjs", `const r = spawnSync(process.execPath, ["--check", "captions.mjs"]);`, FIX).length, 0, "a node child that reaches no runner is out of scope");
-  assert.equal(scanSource("kit.mjs", `spawn(process.execPath, [join(here, script), ...args], { env });`, { ...FIX, spawner: true }).length, 1, "a support module that runs runners for the tests is held to the same rule");
+  assert.equal(scanSource("a.test.mjs", `const r = spawnSync("ffmpeg", ["-i", "sdcpp-video.mjs"], { windowsHide: true });`, FIX).length, 0, "a child that is not node is not a runner");
+  assert.equal(scanSource("a.test.mjs", `const r = spawnSync(process.execPath, ["--check", "captions.mjs"], { windowsHide: true });`, FIX).length, 0, "a node child that reaches no runner is out of scope");
+  assert.equal(scanSource("kit.mjs", `spawn(process.execPath, [join(here, script), ...args], { env, windowsHide: true });`, { ...FIX, spawner: true }).length, 1, "a support module that runs runners for the tests is held to the same rule");
 });
 
 // The scan judges each spawn on the environment THAT call passes (register F80, review round): isolation found
 // elsewhere in the file, for another spawn, vouches for nothing. A test added to a file that already isolates one
 // runner is the case the scan exists for.
 test("scan: every runner spawn is judged on its own env, not on the isolation found elsewhere in the file", () => {
-  const ISOLATED = `spawnSync(process.execPath, [join(HERE, "comfy-render.mjs"), "x"], { env: isolatedRunnerEnv() });`;
+  const ISOLATED = `spawnSync(process.execPath, [join(HERE, "comfy-render.mjs"), "x"], { env: isolatedRunnerEnv(), windowsHide: true });`;
   const v = (src) => scanSource("a.test.mjs", src, { runners: [...FIX.runners, "comfy-render.mjs"] }).map((s) => s.replace(/^a\.test\.mjs:/, ""));
   const three = (second) => `${ISOLATED}\n${second}\nawait Promise.resolve();`;
   assert.deepEqual(v(ISOLATED), []);
   // a second spawn in a file that isolates the first
-  const loud = v(three(`spawnSync(process.execPath, [join(HERE, "comfy-render.mjs"), "y"], { env: process.env });`));
+  const loud = v(three(`spawnSync(process.execPath, [join(HERE, "comfy-render.mjs"), "y"], { env: process.env, windowsHide: true });`));
   assert.equal(loud.length, 1, loud.join("\n"));
   assert.match(loud[0], /^2: spawns node/, "the violation names the line of the spawn that is not isolated");
-  assert.equal(v(three(`spawnSync(process.execPath, [join(HERE, "comfy-render.mjs"), "y"], { encoding: "utf8" });`)).length, 1, "no env: the child inherits the parent's");
-  assert.equal(v(three(`spawnSync(process.execPath, [join(HERE, "comfy-render.mjs"), "y"], { env: { ...process.env, COMFY_DIR: "/c" } });`)).length, 1, "an env literal that spreads the parent's and closes nothing");
-  assert.equal(v(three(`spawnSync(process.execPath, [join(HERE, "comfy-render.mjs"), "y"], { env: { ...process.env, LLAMA_SWAP_API: "http://127.0.0.1:9" } });`)).length, 1, "one closing of two");
-  assert.deepEqual(v(three(`spawnSync(process.execPath, [join(HERE, "comfy-render.mjs"), "y"], { env: isolatedRunnerEnv({ COMFY_DIR: "/c" }) });`)), [], "a second isolated spawn is fine");
-  assert.deepEqual(v(three(`spawnSync(process.execPath, [join(HERE, "comfy-render.mjs"), "y"], { env: { ...process.env, LLAMA_SWAP_API: "http://127.0.0.1:9", GPU_LEASE_DIR: "" } });`)), [], "both closings written out in the call itself");
+  assert.equal(v(three(`spawnSync(process.execPath, [join(HERE, "comfy-render.mjs"), "y"], { encoding: "utf8", windowsHide: true });`)).length, 1, "no env: the child inherits the parent's");
+  assert.equal(v(three(`spawnSync(process.execPath, [join(HERE, "comfy-render.mjs"), "y"], { env: { ...process.env, COMFY_DIR: "/c" }, windowsHide: true });`)).length, 1, "an env literal that spreads the parent's and closes nothing");
+  assert.equal(v(three(`spawnSync(process.execPath, [join(HERE, "comfy-render.mjs"), "y"], { env: { ...process.env, LLAMA_SWAP_API: "http://127.0.0.1:9" }, windowsHide: true });`)).length, 1, "one closing of two");
+  assert.deepEqual(v(three(`spawnSync(process.execPath, [join(HERE, "comfy-render.mjs"), "y"], { env: isolatedRunnerEnv({ COMFY_DIR: "/c" }), windowsHide: true });`)), [], "a second isolated spawn is fine");
+  assert.deepEqual(v(three(`spawnSync(process.execPath, [join(HERE, "comfy-render.mjs"), "y"], { env: { ...process.env, LLAMA_SWAP_API: "http://127.0.0.1:9", GPU_LEASE_DIR: "" }, windowsHide: true });`)), [], "both closings written out in the call itself");
   // an env held in a variable is judged by the declaration the call can see, not by another variable's
   assert.equal(v(`const a = isolatedRunnerEnv();\nspawnSync(process.execPath, [join(HERE, "comfy-render.mjs")], { env: a });\nconst b = { ...process.env };\nspawnSync(process.execPath, [join(HERE, "comfy-render.mjs")], { env: b });`).length, 1, "the second variable closes nothing");
   assert.deepEqual(v(`const a = isolatedRunnerEnv();\nspawnSync(process.execPath, [join(HERE, "comfy-render.mjs")], { env: a });\nspawnSync(process.execPath, [join(HERE, "comfy-render.mjs")], { env: a });`), [], "the same isolated variable twice");
-  assert.equal(v(`test("one", () => {\n  const env = isolatedRunnerEnv();\n  spawnSync(process.execPath, [join(HERE, "comfy-render.mjs")], { env });\n});\ntest("two", () => {\n  const env = { ...process.env };\n  spawnSync(process.execPath, [join(HERE, "comfy-render.mjs")], { env });\n});`).length, 1, "the same name in another test is another variable");
+  assert.equal(v(`test("one", () => {\n  const env = isolatedRunnerEnv();\n  spawnSync(process.execPath, [join(HERE, "comfy-render.mjs")], { env, windowsHide: true });\n});\ntest("two", () => {\n  const env = { ...process.env };\n  spawnSync(process.execPath, [join(HERE, "comfy-render.mjs")], { env, windowsHide: true });\n});`).length, 1, "the same name in another test is another variable");
   // a helper that takes the env as a parameter is judged by what each caller hands it
-  const helper = (call) => `function run(script, args, env) {\n  return spawnSync(process.execPath, [script, ...args], { env });\n}\n${call}`;
+  const helper = (call) => `function run(script, args, env) {\n  return spawnSync(process.execPath, [script, ...args], { env, windowsHide: true });\n}\n${call}`;
   assert.deepEqual(v(helper(`run(join(HERE, "comfy-render.mjs"), [], isolatedRunnerEnv());`)), []);
   assert.equal(v(helper(`run(join(HERE, "comfy-render.mjs"), [], process.env);\nrun(join(HERE, "comfy-render.mjs"), [], isolatedRunnerEnv());`)).length, 1, "one caller hands the parent's env");
   assert.equal(v(helper(`run(join(HERE, "comfy-render.mjs"), []);`)).length, 1, "a caller that hands none: undefined means the parent's");
@@ -343,8 +343,8 @@ test("scan: every runner spawn is judged on its own env, not on the isolation fo
   assert.equal(v(`${ISOLATED}\n` + builder(`  return { ...process.env };`)).length, 1, "a builder that closes nothing, in a file whose other spawn is isolated");
   // the other spellings of a node child
   assert.equal(v(`const NODE = process.execPath;\nspawnSync(NODE, [join(HERE, "comfy-render.mjs")], { env: process.env });`).length, 1, "node through a name bound to process.execPath");
-  assert.equal(v(`spawnSync("node", [join(HERE, "comfy-render.mjs")], { env: process.env });`).length, 1, "node by name");
-  assert.deepEqual(v(`spawnSync("node", [join(HERE, "comfy-render.mjs")], { env: isolatedRunnerEnv() });`), []);
+  assert.equal(v(`spawnSync("node", [join(HERE, "comfy-render.mjs")], { env: process.env, windowsHide: true });`).length, 1, "node by name");
+  assert.deepEqual(v(`spawnSync("node", [join(HERE, "comfy-render.mjs")], { env: isolatedRunnerEnv(), windowsHide: true });`), []);
   assert.equal(v(`fork(join(HERE, "comfy-render.mjs"), [], { env: process.env });`).length, 1, "fork runs node on its first argument");
   assert.equal(v(`execFileSync(process.execPath, [join(HERE, "comfy-render.mjs")], { encoding: "utf8" });`).length, 1);
   // what stays out of scope
