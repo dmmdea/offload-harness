@@ -207,6 +207,16 @@ func (s *Server) handleSTTUpload(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeGated(w, r, STTUploadTask) {
 		return
 	}
+	// A body whose declared length is over the cap is refused here, before the slot and without reading
+	// it (the media-job door's CT-53, same defect). It used to take a slot first and read up to the cap
+	// before it answered, so a client that declared 8 GiB and sent 20 bytes held one of the two slots,
+	// unanswered, for the whole window, and two of them shut every real upload out. The bearer was
+	// checked above, so this is an answer to a token holder only.
+	limit := STTUploadBodyCap(s.opts.Cfg)
+	if r.ContentLength > limit {
+		refuseSTTUploadTooLarge(w, limit)
+		return
+	}
 	// A caller that passed the bearer check holds one of the node's few upload slots from before the
 	// first body byte until the job is admitted (or refused): see sttUploadInFlightMax.
 	if !s.takeSTTUploadSlot(w, r) {
@@ -216,7 +226,6 @@ func (s *Server) handleSTTUpload(w http.ResponseWriter, r *http.Request) {
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Now().Add(sttUploadWindow))
 	_ = rc.SetWriteDeadline(time.Now().Add(sttUploadWindow))
-	limit := STTUploadBodyCap(s.opts.Cfg)
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	if ct := r.Header.Get("Content-Type"); ct != "" {
 		if mt, _, err := mime.ParseMediaType(ct); err != nil || mt != "application/json" {
@@ -234,7 +243,7 @@ func (s *Server) handleSTTUpload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("request body too large (limit %d bytes: fleet_stt_upload_max_mb as base64 plus slack)", limit))
+			refuseSTTUploadTooLarge(w, limit)
 			return
 		}
 		writeError(w, http.StatusBadRequest, "reading stt body: "+err.Error())
@@ -246,6 +255,17 @@ func (s *Server) handleSTTUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.admit(w, r, dispatchEnvelope{JobID: p.JobID, TaskType: STTUploadTask, Payload: body})
+}
+
+// refuseSTTUploadTooLarge answers the door's 400 for a body over the cap and ends the connection
+// (Connection: close): the body being refused is not read, so the connection cannot carry another request,
+// and net/http closes it after its short wait for the client to take the answer instead of draining what it
+// has not read. The status is the door's own for an upload over its cap (a client reads every refusal of
+// this door alike), and the wording is the one both paths, the declared length and the streamed overrun,
+// have always used.
+func refuseSTTUploadTooLarge(w http.ResponseWriter, limit int64) {
+	w.Header().Set("Connection", "close")
+	writeError(w, http.StatusBadRequest, fmt.Sprintf("request body too large (limit %d bytes: fleet_stt_upload_max_mb as base64 plus slack)", limit))
 }
 
 // buildSTTUpload turns an admitted payload into a transcribe request over a private copy of the

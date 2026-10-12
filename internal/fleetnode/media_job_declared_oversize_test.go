@@ -72,9 +72,15 @@ func serveCounting(t *testing.T, s *Server) (string, *countingListener) {
 // declaredOversize is a Content-Length no cap reaches (8 GiB).
 const declaredOversize = int64(8) << 30
 
-// dialDeclared connects and writes the headers of a POST that declares `declared` body bytes, then
-// `sent` bytes of body, then nothing.
+// dialDeclared connects and writes the headers of a POST to the media-job door that declares `declared`
+// body bytes, then `sent` bytes of body, then nothing.
 func dialDeclared(t *testing.T, addr string, declared int64, sent int, auth bool) net.Conn {
+	t.Helper()
+	return dialDeclaredTo(t, addr, MediaJobPath, declared, sent, auth)
+}
+
+// dialDeclaredTo is dialDeclared for any door's path.
+func dialDeclaredTo(t *testing.T, addr, path string, declared int64, sent int, auth bool) net.Conn {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
@@ -82,7 +88,7 @@ func dialDeclared(t *testing.T, addr string, declared int64, sent int, auth bool
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	var b strings.Builder
-	fmt.Fprintf(&b, "POST %s HTTP/1.1\r\nHost: node\r\nContent-Type: application/json\r\nContent-Length: %d\r\n", MediaJobPath, declared)
+	fmt.Fprintf(&b, "POST %s HTTP/1.1\r\nHost: node\r\nContent-Type: application/json\r\nContent-Length: %d\r\n", path, declared)
 	if auth {
 		b.WriteString("Authorization: Bearer tok\r\n")
 	}
