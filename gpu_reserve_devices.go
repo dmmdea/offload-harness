@@ -221,8 +221,16 @@ func confineWrapped(explicit bool, held, cmdArgs []string, env func(string) stri
 		if onlyIndexPin && plan.IsInside("COMFY_CUDA_DEVICE") {
 			return confinement{} // inside the lease in the order the child reads it: the command's own business
 		}
-		if len(plan.NotMoved) > 0 && base.Note != "" {
-			base.Note += " [not re-pinned: " + strings.Join(plan.NotMoved, "; ") + "]"
+		if len(plan.NotMoved) > 0 {
+			if base.Note != "" {
+				base.Note += " [not re-pinned: " + strings.Join(plan.NotMoved, "; ") + "]"
+			} else {
+				// The generic confinement said nothing (an inherited CUDA_VISIBLE_DEVICES that names a held card makes it
+				// empty), so this is the only report of a pin the wrapper cannot move: the command starts on cards outside
+				// its lease, and the operator is told so.
+				base.Note = fmt.Sprintf("the command pins itself (COMFY_CUDA_DEVICE=%s) outside the cards this lease holds (%s) [not re-pinned: %s]: it is not confined to the lease and may trespass on cards another lease can be granted",
+					strings.Join(strings.Fields(env("COMFY_CUDA_DEVICE")), ""), strings.Join(held, ", "), strings.Join(plan.NotMoved, "; "))
+			}
 		}
 		return base
 	}
@@ -241,6 +249,9 @@ func confineWrapped(explicit bool, held, cmdArgs []string, env func(string) stri
 	}
 	if c.Note != "" {
 		lines = append([]string{c.Note}, lines...)
+	}
+	if len(plan.NotMoved) > 0 {
+		lines = append(lines, "[not re-pinned: "+strings.Join(plan.NotMoved, "; ")+"]")
 	}
 	c.Note = strings.Join(lines, "; ")
 	return c

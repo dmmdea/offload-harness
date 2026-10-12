@@ -472,3 +472,49 @@ func TestGPUReserveFlagOffWholeNodeAndDerivedLeasesAreByteForByte(t *testing.T) 
 		}
 	}
 }
+
+// A pin the wrapper declines to move must still be SAID. An inherited CUDA_VISIBLE_DEVICES that names the held card makes
+// the generic confinement empty (it reads the shell's variable first), so the only report of the program's own pin was the
+// note the generic confinement carries, and there was none: the command started on cards outside its lease with nothing
+// printed. The note is the F34 trespass sentence plus the reason the pin was not moved.
+func TestConfineWrappedSaysSoWhenAPinCannotBeMovedAndNothingElseReportsIt(t *testing.T) {
+	cards := fixtureCards()
+	inherited := map[string]string{"CUDA_VISIBLE_DEVICES": "GPU-aaaa0000-x"}
+	// More cards pinned than the lease holds, beside an inherited variable that is inside the lease.
+	c := confineWrapped(true, []string{cardZero}, []string{"python"},
+		envMap(map[string]string{"CUDA_VISIBLE_DEVICES": inherited["CUDA_VISIBLE_DEVICES"], "COMFY_CUDA_DEVICE": "1,2"}), cards)
+	for _, want := range []string{"COMFY_CUDA_DEVICE=1,2", "not re-pinned", "the pin names 2 cards and the lease holds 1", "trespass"} {
+		if !strings.Contains(c.Note, want) {
+			t.Errorf("a pin that is not moved is reported, with the reason (%q missing): env %q note %q", want, repinEnv(c), c.Note)
+		}
+	}
+	if envHasKey(c, "COMFY_CUDA_DEVICE") {
+		t.Errorf("and it is still not rewritten: %q", repinEnv(c))
+	}
+	// The held card has no known ComfyUI index (the order is undeclared): the same sentence, with that reason.
+	noOrder, _ := gpuprobe.BuildCards([]gpuprobe.Device{
+		{Index: 0, UUID: "GPU-aaaa0000-x", Name: "T", TotalGiB: 16, FreeGiB: 16},
+		{Index: 1, UUID: "GPU-bbbb0000-x", Name: "T", TotalGiB: 16, FreeGiB: 16},
+		{Index: 2, UUID: "GPU-cccc0000-x", Name: "T", TotalGiB: 16, FreeGiB: 16},
+	}, "")
+	c = confineWrapped(true, []string{cardZero}, []string{"python"},
+		envMap(map[string]string{"CUDA_VISIBLE_DEVICES": inherited["CUDA_VISIBLE_DEVICES"], "COMFY_CUDA_DEVICE": "2"}), noOrder)
+	for _, want := range []string{"COMFY_CUDA_DEVICE=2", "gpu_comfy_order", "trespass"} {
+		if !strings.Contains(c.Note, want) {
+			t.Errorf("an undeclared order with an inherited variable is reported too (%q missing): env %q note %q", want, repinEnv(c), c.Note)
+		}
+	}
+}
+
+// A uuid pin that IS moved does not hide an index pin that is not: both are told in the one line.
+func TestConfineWrappedTellsAnIndexPinItCannotMoveBesideAUUIDItDidMove(t *testing.T) {
+	cards := fixtureCards()
+	c := confineWrapped(true, []string{cardZero}, []string{"python"},
+		envMap(map[string]string{"COMFY_CARD_UUID": "GPU-cccc0000-x", "COMFY_CUDA_DEVICE": "1,2"}), cards)
+	if !envHas(c, "COMFY_CARD_UUID=GPU-aaaa0000-x") {
+		t.Fatalf("setup: the uuid pin is moved: env %q note %q", repinEnv(c), c.Note)
+	}
+	if !strings.Contains(c.Note, "not re-pinned") || !strings.Contains(c.Note, "the pin names 2 cards and the lease holds 1") {
+		t.Errorf("the pin that stayed where it was is told too: %q", c.Note)
+	}
+}
