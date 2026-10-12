@@ -1496,7 +1496,8 @@ func drainDeadline(explicit time.Duration, queuedAt time.Time, wait time.Duratio
 // root, its llama-swap and its agent seat, with a utilization sample.
 func activityOptions(cfg config.Config) gpuactivity.Options {
 	return gpuactivity.Options{LockOverride: cfg.GPULockPath, StateDir: cfg.StateDir, Endpoint: cfg.Endpoint, Seat: cfg.AgentPlannerModel(""), SampleGPU: true, Scope: modelaffinity.ScopeFunc(cfg.GPULockPath, cfg.StateDir), OrphanGrace: cfg.GPUOrphanGrace(), ComfyDir: cfg.ComfyDir,
-		// The driver's own fault events for the leased card (C-83-B), cached 60 s and read only while a lease is held.
+		// The driver's own fault events for the leased card (C-83-B), read only while a lease is held. The 60 s cache is in
+		// process memory, so it serves the long-lived MCP server; every `gpu status` is a fresh process and pays one read.
 		DriverEvents: gpuactivity.ReadDriverEvents}
 }
 

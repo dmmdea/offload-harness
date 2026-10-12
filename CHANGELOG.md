@@ -15,7 +15,7 @@ Versioning: [SemVer](https://semver.org/).
   call, so a long-lived process whose first delegation came after a swap hashed the NEW file at the path it started from and
   stamped its rows `harness_build_sha256` of a build it was not running.
 - **The fix.** `buildinfo.CaptureStartup()` takes that one latch at start (the version, the hash, the path and the stat of the
-  image, read through one handle), and `mcpserver.Run` calls it and holds the identity on the `Server`. `offload_status` gains a
+  image, read through one handle); `runMCP` calls it before anything else and `mcpserver.Run` holds the identity on the `Server`. `offload_status` gains a
   `process` block `{version, build_sha256, installed_version?, stale_image?, note?}`, built from the identity the server holds
   (absent for a server that holds none, `{}` when asked for by name, as `pair` is): `stale_image` is `true` when the installed
   bytes differ from the image the process started from, `false` when they are equal, and absent with a `note` when the installed
@@ -56,9 +56,11 @@ Versioning: [SemVer](https://semver.org/).
   byte-identically to before.
 - **Read-only, hidden, bounded.** Windows: one `powershell.exe` from System32 (`-NoProfile -NonInteractive`), a read-only
   `Get-WinEvent` over the System log's `nvlddmkm` provider (24 h, the newest 1000, each record as XML; a log with no match is an
-  empty answer). Linux: `journalctl -k -o short-unix`, then `dmesg --time-format iso`. Every child starts through
-  `internal/winexec` (`TestEveryChildProcessStartIsHidden` stays green), the whole read is bounded at 8 s, and the answer is
-  cached for 60 s (failures too) so a status poll starts no process per call. The record's host name, user and device object
+  empty answer). Linux: `journalctl -o short-unix --since "24 hours ago" _TRANSPORT=kernel` (every boot in the window), then
+  `dmesg --time-format iso` (this boot only, and said). Every child starts through `internal/winexec`
+  (`TestEveryChildProcessStartIsHidden` stays green), the log read is bounded at 8 s and the card-table query has its own 4 s, and the
+  answer is cached for 60 s in the process (failures too), so a poll of the long-lived MCP server starts no child per call (each
+  `gpu status` is a fresh process and pays one read). The record's host name, user and device object
   path are not carried. The reader is called only while a lease is held and the GPU sample is on.
 - **Checked live, read-only.** The production reader on the reference workstation: a 24 h window with no match returned no events
   and no error in 0.6 s; a 96 h window through the same child and pipe returned 434 records (420 id 13, 14 id 153), all parsed, the
@@ -73,6 +75,56 @@ Versioning: [SemVer](https://semver.org/).
 - **Not changed, for a follow-up.** A-128's kill test (does killing a healthy render mid-sampling log id 153?) is queued, not
   built, so these events stay facts. The Linux `Xid` line shape is the documented one: neither Linux gate host has an NVIDIA card
   to have logged one.
+
+### Fixed — review round on the stale-image block and the driver-event reader (D-36, C-83-B)
+
+Seventeen review findings (twelve distinct), each read against the code and fixed below, with its test written first and
+seen red.
+
+- **A card on a low PCI bus was never placed (C-83-B).** The driver prints the GPUID as the unpadded hex of `(bus << 8 | device)`:
+  a card on bus `01` logs `GPUID: 100` (read from a one-card laptop's System log, both `Error occurred on GPUID: 100` and
+  `UCodeReset TDR occurred on GPUID:100`, no space after the colon). The reader matched exactly four digits, so every one-card box
+  placed none of its events and called them "no card this box can place". `busOf` now reads one to four hex digits as a number and
+  splits it; `TestBusOfReadsEveryGPUIDSpelling`, `TestParseWinEventsPlacesACardOnALowBus` (a fixture hand-reduced from those records).
+- **A failed card table was silent (C-83-B).** When `nvidia-smi --query-gpu=index,uuid,pci.bus_id` failed, every event (the leased
+  card's own fault included) was left unplaced, counted as "name no card", cached for a minute, with no note. The events now come
+  back with an error that names the table and nvidia-smi's reason (`driver events incomplete: the card table could not be read
+  (...)`), are not counted as unplaced-by-nature, are held 10 s instead of 60, and the table query has its own 4 s budget
+  instead of what the 8 s log read left. `TestReadDriverEventsSaysWhenTheCardTableCannotBeRead`, `TestTheCardTableQueryHasItsOwnBudget`,
+  `TestACardTableFailureIsRetriedSoonNotHeldForAMinute`, `TestSnapshotSaysWhenEventsCouldNotBePlacedAndDoesNotBlameThem`.
+- **A short list read as the whole (C-83-B).** A record that is not XML after good ones used to end the read silently; the older
+  events it cut off are now said (`the event log read stopped after N record(s)`). `TestAPartialWindowsReadReturnsTheEventsAndSaysItStopped`,
+  `TestSnapshotNotesAnIncompleteReadAndStillShowsTheEvents`.
+- **Linux read only the current boot (C-83-B).** `journalctl -k` implies `-b`, so a fault that preceded a reboot (an Xid 79 usually
+  ends in one) was invisible under a "last 24 h" label: on a gate host with four boots in its journal, seven days read 2528 lines
+  with `-k` and 4226 across every boot. The kernel transport is now a match (`_TRANSPORT=kernel`); the `dmesg` fallback, which holds
+  this boot only, says so. `TestTheLinuxReaderReadsEveryBootInTheWindow`, `TestTheDmesgFallbackIsSaidToBeThisBootOnly`.
+- **`gpu status` pays the read every call; the docs said it did not (C-83-B).** The 60 s cache is process memory, so it serves the
+  long-lived MCP server and not the CLI, a fresh process per call (about 0.6 s on Windows, measured). The docs and the
+  header comments now say so; no state-dir cache was added.
+- **The brief read events it threw away (C-83-B).** `offload_status {section:"brief"}` made the lease view start the PowerShell
+  read under a held lease and returned none of it. The lease view takes whether the caller returns the events; the brief passes
+  no. `TestBriefMakesNoDriverEventReadButTheLeaseSectionDoes`.
+- **The stale-image signal was missing from the brief (D-36).** The call the tool's description tells a caller to make first
+  returned no `process` block, so a stale server stayed invisible there. The brief now carries the same block under the same key
+  (absent for a server with no identity). `TestStatusBriefCarriesTheStaleImage`, and the pinned brief key set moves with it.
+- **One failed read of the installed file hid the stale image for good (D-36).** The hash and marker errors were cached against
+  the file's unchanged stat, so a sharing violation during a deploy read "unknown" for the life of the process. Only a read that
+  succeeded is kept now, the hash and the marker apart (a retry repeats only what failed), and an unreadable marker is said in the
+  note. `TestStaleImageRetriesAfterATransientHashFailure`, `TestStaleImageRetriesAfterATransientMarkerFailureAndSaysSoMeanwhile`.
+- **A process whose own start-up hash failed explained nothing (D-36).** `build_sha256` was simply absent, on the stat-equal path
+  with no note; the note now says the self-hash failed and its rows carry no `harness_build_sha256`. `TestProcessBlockSaysWhenItsOwnStartupHashIsUnknown`.
+- **The image was captured after the pipeline opened (D-36).** `runMCP` took the capture in `mcpserver.Run`, after `openPipeline`; a
+  swap landing during start-up was hashed as the image the process runs. It is the first statement of `runMCP` now.
+  `TestRunMCPCapturesTheStartupImageBeforeOpeningAnything` (a source-order pin, the repo's style for a call order).
+- **`gpu doctor`'s two wrong sentences (D-36).** An unresolved executable path was reported as "the installed build carries no
+  build marker"; and a doctor run from a worktree or dev build compared the deployed processes with a build that is not
+  installed and told the operator to restart them. The path is named as the cause now, and a doctor that is not the harness binary
+  PATH resolves compares nothing and says why (a doctor that is the PATH copy, or PATH names none, behaves as before).
+  `TestGPUDoctorBlamesAnUnresolvedExecutablePathNotAMissingMarker`, `TestGPUDoctorComparesNothingWhenItIsNotThePathCopy`, and the guard
+  `TestGPUDoctorStillMarksWhenItIsThePathCopy`.
+- **Not changed.** `runFleetServe` still does not capture (B2's file, a follow-up). The residual window between the process
+  starting and `runMCP`'s first line (the Go runtime and package init) is not closable from inside the process.
 
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 

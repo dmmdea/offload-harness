@@ -838,7 +838,8 @@ read-only unless deliberately widened. See
   meets a string there. `gpu_lease_verdict` leads with the verdict word, then what the cards are
   doing, the holder and its reason, the queue length and the queue command. `local_verdict` gives
   the local endpoint's state and served count, the local agent seat's verdict, and the roster
-  entries that are empty and so defer here. An unknown section, an unknown argument or a wrong type
+  entries that are empty and so defer here. When the server holds a startup identity the brief also carries the full
+  answer's `process` block (below), so a stale server is visible on the call a caller makes first. An unknown section, an unknown argument or a wrong type
   is a defer that lists the valid values, never a fall-back to the full dump. `config_error`, when
   set, stays the first key of every answer. The block table in `status_section.go` feeds both the
   dispatch and the schema's enum. Measured on the reference box (2026-09-22, three fleet nodes, a
@@ -860,14 +861,19 @@ read-only unless deliberately widened. See
   (no 60 MB hash per hook invocation). A status call does not hash the installed file either: its stat is compared with
   the one the process saw at start, and only a moved stat is hashed (once per stat, then cached). A process that
   started before this build shows no block at all: it predates the field, so the first proof is the next restart.
-  `gpu doctor` marks the running processes older than the installed build
+  **`section:"brief"` carries the same block** under the same key (absent for a server that holds no identity), because the
+  brief is the call the tool's description makes first and a stale server must be visible there. Only a read that
+  succeeded is cached: a hash or marker read that failed once (an antivirus or indexer lock on the freshly renamed file) is
+  retried on the next call, and a missing `installed_version` or a missing `build_sha256` (the process's own start-up
+  hash failed) comes with a `note` saying why. `gpu doctor` marks the running processes older than the installed build
   ([gpu-lease.md](gpu-lease.md)). Ledger rows do not get a `stale_image` column: a
-  reader compares a row's hash with the deployed one.
+  reader compares a row's hash with the deployed one. `mcpserver.Run` takes the identity, and `runMCP` takes it before
+  it loads the config or opens the pipeline, so a swap landing during start-up is not hashed as the image the process runs.
 - **Driver events on the leased cards (C-83-B).** While a lease is held and the GPU sample is on, `gpu_lease.activity` carries
   `driver_events` (the NVIDIA driver's recent fault events for the leased cards: Windows `nvlddmkm` System-log records, Linux
   `NVRM: Xid` kernel-log lines), `driver_events_unattributed` and `driver_events_note` as facts that never move the verdict;
   the reader is `statusDriverEvents` (wired only with the GPU sample, nil in the test fixture so no test starts PowerShell).
-  See [gpu-lease.md](gpu-lease.md#the-drivers-own-fault-events-for-the-leased-cards-c-83-b).
+  Only the `gpu_lease` section and the full answer read them: the `brief` returns none, so it starts no read. See [gpu-lease.md](gpu-lease.md#the-drivers-own-fault-events-for-the-leased-cards-c-83-b).
 - `local-offload doctor` checks the serving layer the tools depend on, and prints the same derived
   media routes — a route bound to a file that is absent exits non-zero.
 - **The most common operational surprise:** an MCP client holds its server process for the session,
