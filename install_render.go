@@ -1016,9 +1016,19 @@ func auditCPUMoEFile(text string) (violations, notes []servingtmpl.Violation) {
 // otherwise be red with no way to satisfy the rule short of a hand edit, which turns the file
 // HAND-EDITED and red under --against-render. A box with no readable card table gets a line saying the
 // rules did not run, never a silent pass; the exit status is unchanged.
-func auditPinsFile(text string) (violations, notes []servingtmpl.Violation, skipped string) {
+//
+// The table is THIS box's, and nothing in a file or its stamp says which box it belongs to, so a file
+// that was rendered or kept on another machine (audit-yaml may be run on one: the stamp records that
+// machine's paths so the replay does not call it stale) is compared with the wrong cards and fails on
+// its UUIDs. The caller who knows says so (otherBox, the --other-box flag): the rules are skipped with
+// a line that says why, and every other rule still runs. Every finding says what table it was judged
+// against and how to audit a foreign file.
+func auditPinsFile(text string, otherBox bool) (violations, notes []servingtmpl.Violation, skipped string) {
 	if !servingtmpl.PinsCUDADevices(text) {
 		return nil, nil, ""
+	}
+	if otherBox {
+		return nil, nil, "pin rules not applied (--other-box: the file belongs to another machine, and the rules compare its device pins with THIS box's cards)"
 	}
 	devs, err := renderCardTable()
 	if err != nil || len(devs) == 0 {
@@ -1036,6 +1046,7 @@ func auditPinsFile(text string) (violations, notes []servingtmpl.Violation, skip
 			notes = append(notes, v)
 			continue
 		}
+		v.Text += " [judged against THIS box's cards; for a file that belongs to another machine pass --other-box]"
 		violations = append(violations, v)
 	}
 	return violations, notes, ""
@@ -1092,14 +1103,15 @@ func seatIDs(seats []*vllmseat.Spec) map[string]bool {
 // The every-expert `--cpu-moe` (W4) is refused on a file judged to have a card; the exemptions are
 // read from the file's own stamp (auditCPUMoEFile). A finding the stamp explains prints as a
 // `note:` line and does not fail the audit. A device pin is read against this box's card table
-// (A-87, auditPinsFile): an index pin on identical cards and a UUID that names no card.
+// (A-87, auditPinsFile): an index pin on identical cards and a pin that names no card. --other-box
+// says the files belong to another machine and skips those rules, which only make sense for this box.
 //
 // FLAGS COME BEFORE FILES (`audit-yaml --against-render FILE...`): Go's flag
 // package stops parsing at the first non-flag argument.
 func runAuditYAML(args []string) error {
 	fs := flag.NewFlagSet("audit-yaml", flag.ExitOnError)
 	against := fs.Bool("against-render", false, "also re-derive each file from THIS binary's tier seeds and report MATCH / STALE(keys) / UNSTAMPED / HAND-EDITED")
-	_ = fs.Bool("other-box", false, "STUB")
+	otherBox := fs.Bool("other-box", false, "the files belong to ANOTHER machine: skip the pin rules, which compare a file's device pins with THIS box's cards (every other rule still runs)")
 	_ = fs.Parse(args)
 	files := fs.Args()
 	if len(files) == 0 {
@@ -1114,7 +1126,7 @@ func runAuditYAML(args []string) error {
 		vs := servingtmpl.Audit(string(b))
 		moe, notes := auditCPUMoEFile(string(b))
 		vs = append(vs, moe...)
-		pins, pinNotes, pinsSkipped := auditPinsFile(string(b))
+		pins, pinNotes, pinsSkipped := auditPinsFile(string(b), *otherBox)
 		vs = append(vs, pins...)
 		notes = append(notes, pinNotes...)
 		sort.SliceStable(vs, func(i, j int) bool {
