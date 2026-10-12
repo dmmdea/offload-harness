@@ -114,6 +114,22 @@ export function renderExitError(code, stderrTail = "") {
   return e;
 }
 
+// relayRenderChild: the parent's side of the child -> parent crossing, for a comfy-render child already spawned (the spawn stays
+// in comfy-generate.mjs; this stays free of I/O, `child` and `write` are injected). The child's stderr goes to `write` as it
+// arrives, UNCHANGED: the Go side reads the child's "IGPU_CLASS=comfy_unusable" line (D-38, issue #72) from the output this
+// process prints, so a relay that reflowed or dropped lines would lose the class. The last tailBytes of it are kept for the
+// reason (renderExitError reads its "RENDER FAILED:" line). Resolves on exit 0; rejects with renderExitError on any other exit
+// (serverUnusable on 3) and with the spawn error if the child never started. "close", not "exit": the tail must be complete
+// before the reason is read from it.
+export function relayRenderChild(child, { write, tailBytes = 8192 }) {
+  return new Promise((resolve, reject) => {
+    let errTail = "";
+    child.stderr.on("data", (d) => { write(d); errTail = (errTail + d).slice(-tailBytes); });
+    child.on("close", (code) => (code === 0 ? resolve() : reject(renderExitError(code, errTail))));
+    child.on("error", reject);
+  });
+}
+
 // batchExitCode: how a --batch parent that ran every job ends: 0 when none failed,
 // BATCH_EXIT_JOBS_FAILED when any did. `summary` is what runBatchJobs returns.
 export function batchExitCode(summary) {
