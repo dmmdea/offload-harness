@@ -796,11 +796,17 @@ export function delegateDigest(raw: string): string | null {
     const parsed = JSON.parse(raw.slice(start)) as { summary?: Record<string, number>; results?: Array<{ ran_on?: string; placement?: string; deferred?: boolean; reason?: string; retried_on?: string; failed?: boolean }> };
     const results = parsed.results ?? [];
     if (results.length === 0) return null;
-    const local = results.filter((r) => ranLocally(r)).length;
-    const remote = results.length - local;
+    // A deferred result with no ran_on is one no seat ran, unless its placement text says it ran on the local seat: the delegator
+    // stamps ran_on on everything it placed (a node's own defer reads "node"), so the key is missing only on a defer it filed as
+    // unplaced, or on a delegator that predates the field, and the text of the latter's local defer still reads local. A text that
+    // names no local seat ("... and no node took it") used to count as a node's, and the digest said "pair landed" for work nobody
+    // did: such a row is neither local nor remote.
+    const ranSomewhere = results.filter((r) => !(r.deferred === true && r.ran_on === undefined && !ranLocally(r)));
+    const local = ranSomewhere.filter((r) => ranLocally(r)).length;
+    const remote = ranSomewhere.length - local;
     const infra = parsed.summary?.infrastructure ?? 0;
     const deferred = results.filter((r) => r.deferred).length;
-    const lines = [`[local-offload] delegate placement: ${local} local, ${remote} remote of ${results.length}` + (results.length >= 2 && remote === 0 ? " — the pair did NOT land (all local); read results[].reason: missing output_schema, over-size, or node down." : results.length >= 2 ? " — pair landed." : ".")];
+    const lines = [`[local-offload] delegate placement: ${local} local, ${remote} remote of ${results.length}` + (results.length >= 2 && remote === 0 ? ` — the pair did NOT land (${local === results.length ? "all local" : "nothing ran on a node"}); read results[].reason: missing output_schema, over-size, or node down.` : results.length >= 2 ? " — pair landed." : ".")];
     if (infra > 0) lines.push(`[local-offload] summary.infrastructure=${infra}: a node is broken/misconfigured — fix the stack, do not read this as model failure.`);
     if (deferred > 0) lines.push(`[local-offload] ${deferred} contract(s) deferred — do those legs yourself; a defer is normal.`);
     return lines.join("\n");
