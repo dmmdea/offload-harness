@@ -56,7 +56,9 @@ loop `continue`s), which is every `proxy:` seat and every unpinned entry, and th
   (killed by `TestBriefReadsTheLiveDisplayCapNotTheOneAtLoad`, which rewrites the config file after the server is built), ignoring the declared floor, or dropping the unknown reading;
   in the note: an index with no PCI order mapped as an nvidia-smi index, a proxy seat not classified, every card judged a display card, an index or UUID pin ignoring the
   display flag, no display-card guard, seven names per group, an unknown reading ignored, the budget at the wrong cap, and the audit's cmd-over-env order inverted; in the wiring (remote gate):
-  the proxy seat not reading the table, the table read for every file, `--other-box` ignored, the note dropped, the declared floor not passed, and each call site of the table ignoring the cap.
+  the proxy seat not reading the table, the table read for every file, `--other-box` ignored, the note dropped, the declared floor not passed, and each call site of the table ignoring the cap (`gpu status` json and both text branches, `gpu cards`). One mutation survives and is equivalent
+  by construction: reading the cap at load instead of live in the one-shot verbs, where the config is loaded in the same call; the live read matters in a long-lived process, which is the brief, and
+  that mutation is killed there.
 - **No inference placement changes.** Everything here reads; nothing loads, unloads or moves a model, and the allocator's decisions are the same.
 
 ## [0.184.0] - 2026-10-12 - a busy fleet is a place in line in every row, a re-pack that empties its answer's lists is refused, every delegate result says where it ran, offload_status names the image a server runs, and the serving audit refuses a bare --cpu-moe and an index pin on identical cards
