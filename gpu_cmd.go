@@ -303,7 +303,7 @@ func runGPUStatus(args []string) error {
 		// take it, so an unreserved card is exactly when a bench is exposed — that
 		// should be visible, not inferred from silence.
 		fmt.Printf("GPU: free (unreserved)  state root: %s\n", m.Root())
-		printCardTable(cardCfg, cards, cardsNote, cardsErr, leases)
+		printCardTable(cardCfg, cards, cardsNote, cardsErr, leases) // a free host
 		fmt.Println(host.Line())
 		queueLines()
 		printActivity(act)
@@ -368,7 +368,7 @@ func runGPUStatus(args []string) error {
 			fmt.Printf("  lease epoch %d: %s pid %d, %s%s%s\n", l.Epoch, l.Class, l.PID, scope, group, declared)
 		}
 	}
-	printCardTable(cardCfg, cards, cardsNote, cardsErr, leases)
+	printCardTable(cardCfg, cards, cardsNote, cardsErr, leases) // a held host
 	fmt.Println(host.Line())
 	queueLines()
 	printActivity(act)

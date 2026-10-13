@@ -164,6 +164,16 @@ func TestGPUStatusTextOfAHeldHostCarriesTheDisplayCapLine(t *testing.T) {
 	if !strings.Contains(text, "GPU: held") || !strings.Contains(text, "display cap:") || !strings.Contains(text, "OVER by 3.4 GiB") {
 		t.Errorf("a held host's table carries the display cap line:\n%s", text)
 	}
+	// And it is the file's cap: at 95 the same card is within it.
+	writeCapConfig(t, cfg, 95)
+	text = captureStdout(t, func() {
+		if err := runGPUStatus([]string{"--config", cfg}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(text, "GPU: held") || !strings.Contains(text, "within") || strings.Contains(text, "OVER") {
+		t.Errorf("a held host at a cap of 95 says within:\n%s", text)
+	}
 }
 
 func TestGPUCardsVerbCarriesTheDisplayCapInJSONAndText(t *testing.T) {
