@@ -1284,3 +1284,53 @@ test("sage attention at film size with no resident share fits the storage card t
   assert.equal(planWith({ ...FILM, "wan-resident-gb": "0" }, { env: SAGE_ENV }).residentGb, 0);
   assert.ok(14182 / 1024 <= M.WAN_EXPERT_GIB + M.WAN_STORAGE_OVERHEAD_GIB, "13.85 GiB measured on the storage card, 14.2 assumed");
 });
+
+// ---- sage attention and the reuse of a running ComfyUI ---------------------------------------------------------------------------------
+// A kept (--keep-comfy) multicard ComfyUI keeps the flags it was launched with. A call sized for the DEFAULT attention budgets 12.2 GiB of activations at film size; an instance
+// that runs sage holds 15.2, so the share the call was admitted with can run out of memory on it. That direction is refused (an instance the harness launched is replaced). The
+// reverse, a kept default instance under a call sized for sage, only wastes a cold start and is reused.
+test("a running ComfyUI that runs sage attention is not the placement of a call sized for the default attention, and only in that direction", () => {
+  const profile = (sage) => ({ cudaDevice: "", dynamicVram: "", multicard: { cards: ["a", "b"], ...(sage === undefined ? {} : { sage }) } });
+  const base = ["main.py", "--gpu-only"];
+  // the hazard: the live argv carries the flag as it was typed, an argparse prefix of it included (the predicate of the sizing)
+  for (const flag of ["--use-sage-attention", "--use-sa", "--use-sage"]) {
+    assert.match(L.profileMismatch([...base, flag], profile(false)), /it runs with --use-sage-attention.*this launch was sized for \(the default attention\)/, flag);
+  }
+  // the controls: no flag, another attention flag, an ambiguous prefix and a longer token are not sage
+  assert.equal(L.profileMismatch([...base], profile(false)), "");
+  for (const flag of ["--use-flash-attention", "--use-s", "--use-sage-attention-extra"]) assert.equal(L.profileMismatch([...base, flag], profile(false)), "", flag);
+  // the harmless direction, and the old shape of a launch that does not say which attention it was sized for
+  assert.equal(L.profileMismatch([...base, "--use-sage-attention"], profile(true)), "");
+  assert.equal(L.profileMismatch([...base], profile(true)), "");
+  assert.equal(L.profileMismatch([...base, "--use-sage-attention"], profile(undefined)), "");
+});
+
+test("a plan records the attention it was sized for on its launch, and ensureComfy keeps it in the launch marker's profile", async (t) => {
+  assert.equal(planWith().launch.sage, false);
+  assert.equal(planWith({ ...FILM, "wan-resident-gb": "0" }, { env: SAGE_ENV }).launch.sage, true);
+  for (const sage of [true, false]) {
+    const h = lifecycleHarness(t);
+    await L.ensureComfy({ ...h.opts, launch: { ...h.launch, sage } });
+    assert.deepEqual(O.readLaunchOwner(h.dir, h.launch.key).profile.multicard, { cards: [U2, U0], sage });
+  }
+});
+
+test("reuseVerdict: a kept sage instance is replaced (ours) or refused (not ours) for a call sized for the default attention, and reused in the other cases", async (t) => {
+  const h = lifecycleHarness(t);
+  const plain = runningArgv(h);
+  const sageArgv = [...plain, "--use-sage-attention"];
+  const marker = (argv) => ({ pid: 5, args: argv, key: h.launch.key, port: 18852, profile: { multicard: { cards: h.launch.cards } } });
+  const verdictFor = (sage, mk, argv) => L.reuseVerdict({
+    api: "http://127.0.0.1:18852", comfyDir: h.dir, profile: { cudaDevice: "", dynamicVram: "", multicard: { cards: h.launch.cards, sage } }, key: h.launch.key, port: 18852,
+    systemArgv: async () => argv, readLaunch: () => mk, alive: () => true,
+  });
+  const hazard = await verdictFor(false, marker(sageArgv), sageArgv);
+  assert.equal(hazard.restart, true, "ours and not in use: replaced");
+  assert.match(hazard.reason, /it runs with --use-sage-attention.*the default attention/);
+  const foreign = await verdictFor(false, null, sageArgv);
+  assert.equal(foreign.reuse, false, "not proven ours: refused, never stopped");
+  assert.match(foreign.reason, /--use-sage-attention.*not started by this harness/);
+  assert.deepEqual(await verdictFor(true, marker(sageArgv), sageArgv), { reuse: true }, "a sage call on a sage instance");
+  assert.deepEqual(await verdictFor(false, marker(plain), plain), { reuse: true }, "a default call on a default instance");
+  assert.deepEqual(await verdictFor(true, marker(plain), plain), { reuse: true }, "a sage call on a kept default instance wastes a cold start at most, and is reused");
+});

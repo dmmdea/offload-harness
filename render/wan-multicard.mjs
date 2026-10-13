@@ -605,7 +605,8 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   const unsized = geometryNote(flags, attention);
   if (unsized) say(unsized);
   checkResident(residentGb, pair, flags, attention);
-  const launch = launchFn(pair, { comfyDir });
+  // `sage` rides the launch so ensureComfy records which attention this call was sized for, and a kept ComfyUI that runs sage under a call sized for the default is not reused
+  const launch = { ...launchFn(pair, { comfyDir }), sage: attention === "sage" };
   const plan = { pair, launch, residentGb, attention, env: multicardEnv(env, launch) };
   const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
   const sageClause = attention === "sage" ? `; sage attention (COMFY_EXTRA_ARGS): activations sized at ${wanActivationsGib(wanGeometry(flags).tokens, attention).toFixed(1)} GiB` : "";
