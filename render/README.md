@@ -222,18 +222,22 @@ node render/tts.mjs out.wav "Hola, bienvenidos a mi canal." --clone ref.wav --cf
 | `--clone <ref.wav>` | reference voice to clone (else the `TTS_REF` environment variable) | both |
 | `--lang es` | language id, default `es` | both |
 | `--engine generalist\|finetuned` | which worker; default `generalist` (stock Chatterbox multilingual) | |
-| `--model <merged.safetensors> --base-dir <dir>` | the fine-tuned engine's weights and base directory | `finetuned` only |
-| `--temperature F --cfg-weight F --exaggeration F --repetition-penalty F --min-p F --top-p F` | sampling knobs, passed to `generate()` as `temperature`, `cfg_weight`, `exaggeration`, `repetition_penalty`, `min_p`, `top_p` | both, same names |
+| `--model <merged.safetensors> --base-dir <dir>` | the fine-tuned engine's weights and base directory | `finetuned` only, and both are required with it |
+| `--temperature F --cfg-weight F --exaggeration F --repetition-penalty F --min-p F --top-p F` | sampling knobs; the generalist worker passes the ones given to `generate()` as `temperature`, `cfg_weight`, `exaggeration`, `repetition_penalty`, `min_p`, `top_p` | both workers take them under the same names; only the generalist runs `generate()` today (the fine-tuned worker is a skeleton that validates and defers with exit 3 until that engine is vendored) |
 | `--no-lock` | run without the GPU lease (standalone use only) | |
 
 A sampling flag that is not given is not passed, so the model keeps its own default (a given `0` is passed). **The
 command line is checked before the lock is taken or a worker starts (0.185.1), and a refusal exits 2 with the reason
 and the usage line:** an unknown or misspelled flag (`--cfg_weight`; the `--flag=value` spelling is not read, write
 `--flag value`), a flag with no value, a sampling value that is not a finite decimal number (`abc`, `nan`, `inf`, `1e999`,
-`0x10`), an `--engine` other than the two, `--model`/`--base-dir` without `--engine finetuned`, and a third positional
-(an unquoted text). A token is a flag only when it is shaped like one (`--` and a name), so a text that opens with dashes,
-`"--- Intro ---"`, is the text (the case `generate-audio out.wav -- "--- Intro ---"` keeps intact); a bare `--` ends the flags,
-for a text that is shaped like one (`tts.mjs out.wav -- "--hola"`). Before 0.185.1 the sampling flags reached the fine-tuned worker only, so on the default engine
+`0x10`), an `--engine` other than the two, `--model`/`--base-dir` without `--engine finetuned`, `--engine finetuned` without
+both of them (the fine-tuned worker requires both), and a third positional (an unquoted text). A token is a flag only when it
+is shaped like one (`--` and a name), so a text that opens with dashes, `"--- Intro ---"`, `---` or `-x`, is the text (the case
+`generate-audio out.wav -- "--- Intro ---"` keeps intact); a bare `--` ends the flags, for a text that is shaped like one
+(`tts.mjs out.wav -- "--hola"`). Every value reaches the worker as one `--flag=value` token (`--text=---`,
+`--temperature=-1e-2`), so a text, a path or a negative number that opens with a dash is never read as an option by the
+worker's argument parser (as a separate token argparse reads `---` and `-x` as options on every Python, and `-1e-2` on 3.11,
+and the worker then exits 2 after the lock was taken). Before 0.185.1 the sampling flags reached the fine-tuned worker only, so on the default engine
 `--cfg-weight 0.3` changed nothing, and an unknown flag was dropped without a word. The harness's own voice lane
 (`internal/pipeline/pipeline.go`) sends `--clone --lang` (generalist) or `--engine --model --base-dir --clone --lang` plus the
 configured `voicegen_ft_*` recipe (finetuned); `render/tts.test.mjs` reads `pipeline.go` and fails if tts.mjs would refuse

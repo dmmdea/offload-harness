@@ -448,13 +448,17 @@ a dash, and so do `generate-video`, `animate-character` and the verbs that take 
 
 The Chatterbox voice worker has a CLI of its own, `node render/tts.mjs <out.wav> "<text>" [flags]` (the script `voicegen_script` names;
 the Go voice lane builds this command line). The six sampling flags `--temperature --cfg-weight --exaggeration --repetition-penalty
---min-p --top-p` reach `generate()` of either engine under the same names (0.185.1; before, only the fine-tuned worker read them, so on
-the default engine they changed nothing), and only the ones given: an unset flag keeps the model's own default. The command line is
-checked before the lock (`parseCli` / `checkFlags` in `render/tts.mjs`): an unknown flag, a flag with no value, a sampling value that
-is not a finite decimal number, an `--engine` other than `generalist|finetuned`, `--model` / `--base-dir` without `--engine finetuned`
-and a third positional (an unquoted text) exit 2 with the reason and the usage line. A token is a flag only when it is shaped like one
-(`--` and a name), so a text that opens with dashes (`"--- Intro ---"`, which the CT-52 verbs keep intact) is the text, and a bare `--`
-ends the flags. Every flag `internal/pipeline/pipeline.go` sends stays accepted (`render/tts.test.mjs` reads the Go source to check). Flag table: [`render/README.md`](../../render/README.md#voice--narration--tts-chatterbox-multilingual-voice-cloning).
+--min-p --top-p` reach `generate()` of the default (generalist) engine under the model's own keyword names (0.185.1; before, only the
+fine-tuned worker read them, so on the default engine they changed nothing), and only the ones given: an unset flag keeps the model's own
+default. Both workers take the six under the same flag names, but `render/tts_chatterbox_ft.py` is still a skeleton that validates its
+arguments and defers (exit 3, `FT_ENGINE_NOT_VENDORED`), so on `--engine finetuned` they take effect once that engine is vendored. The
+command line is checked before the lock (`parseCli` / `checkFlags` in `render/tts.mjs`): an unknown flag, a flag with no value, a sampling
+value that is not a finite decimal number, an `--engine` other than `generalist|finetuned`, `--model` / `--base-dir` without
+`--engine finetuned`, `--engine finetuned` without both of them (the fine-tuned worker requires both) and a third positional (an unquoted
+text) exit 2 with the reason and the usage line. A token is a flag only when it is shaped like one (`--` and a name), so a text that opens
+with dashes (`"--- Intro ---"`, which the CT-52 verbs keep intact, `---` or `-x`) is the text, and a bare `--` ends the flags. Every value
+reaches the worker as one `--flag=value` token, so a text, a path or a negative number that opens with a dash (`--text=---`,
+`--temperature=-1e-2`) is never read as an option by the worker's argparse, which would exit 2 after the lock was taken. Every flag `internal/pipeline/pipeline.go` sends stays accepted (`render/tts.test.mjs` reads the Go source to check). Flag table: [`render/README.md`](../../render/README.md#voice--narration--tts-chatterbox-multilingual-voice-cloning).
 
 ## Dependencies
 
