@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
@@ -142,5 +143,32 @@ func TestBriefSaysWhenTheReadingCouldNotSayWhichCardTheMonitorIsOn(t *testing.T)
 		if dc != nil && dc["over_cap"] == true {
 			t.Errorf("card %v: no verdict on an unknown reading: %v", r["index"], dc)
 		}
+	}
+}
+
+// A display layer's declared display_floor_gib holds the card when it is stricter than the cap, as it does for the
+// allocator. Written after the red commit: it passes against the seam's wiring and is proven by a mutation (the floor
+// passed as 0), as the live-cap test is.
+func TestBriefHoldsTheDisplayCardToTheDeclaredFloor(t *testing.T) {
+	fixture, cfg, _ := statusFixture(t)
+	useCapSampler(t, false) // 12.97 GiB of 15.93 in use
+
+	budgetOf := func(c config.Config) float64 {
+		t.Helper()
+		s := New(pipeline.New(c, nil, nil, nil))
+		s.startup = fixture.startup
+		_, rows := briefCards(t, s)
+		dc, _ := rows[1]["display_cap"].(map[string]any)
+		if dc == nil {
+			t.Fatalf("no display_cap on the display card: %v", rows[1])
+		}
+		return dc["budget_gb"].(float64)
+	}
+	if b := budgetOf(cfg); b < 9.5 || b > 9.6 {
+		t.Fatalf("control: with no declared floor the 60 percent cap leaves about 9.56 GiB, got %v", b)
+	}
+	cfg.Layers = []config.LayerSpec{{Name: "display", Guards: []string{"display_floor"}, DisplayFloorGiB: 11}}
+	if b := budgetOf(cfg); b < 4.9 || b > 5.0 {
+		t.Errorf("a declared floor of 11 GiB on a 15.93 GiB card leaves about 4.93 GiB, got %v", b)
 	}
 }

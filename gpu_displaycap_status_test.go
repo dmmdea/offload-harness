@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpucards"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
@@ -177,5 +178,46 @@ func TestGPUCardsVerbCarriesTheDisplayCapInJSONAndText(t *testing.T) {
 	})
 	if strings.Contains(text, "OVER") || !strings.Contains(text, "could not say which card the monitor is on") {
 		t.Errorf("an unknown reading is said, not judged:\n%s", text)
+	}
+}
+
+// A display layer's declared display_floor_gib holds the card when it is stricter than the cap, as it does for the
+// allocator: the row is judged by the SAME floor the allocator reads (config.DisplayFloorGiB), not by the cap alone.
+// Written after the red commit: it passes against the seam's wiring and is proven by a mutation (the floor passed as 0).
+func TestGPUCardsHoldsTheDisplayCardToTheDeclaredFloor(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	write := func(floorGiB float64) {
+		t.Helper()
+		c := config.CompositeFixture()
+		c.StateDir = dir
+		for i := range c.Layers {
+			if c.Layers[i].DisplayFloorGiB > 0 {
+				c.Layers[i].DisplayFloorGiB = floorGiB
+			}
+		}
+		writeConfigJSON(t, cfgPath, c)
+	}
+	useQuietStatus(t, capStatusCards(8.5, false), nil) // 7.5 GiB of 16.0 in use
+
+	rowOf := func() *gpucards.DisplayCap {
+		t.Helper()
+		out := captureStdout(t, func() {
+			if err := runGPUCards([]string{"--config", cfgPath, "--json"}); err != nil {
+				t.Fatal(err)
+			}
+		})
+		rows, _ := statusRows(t, out)
+		return rows[1].DisplayCap
+	}
+	// A declared floor of 4.0 GiB is laxer than the 6.4 GiB the cap leaves: the cap binds, 7.5 is within 9.6.
+	write(4)
+	if d := rowOf(); d == nil || d.OverCap || d.BudgetGiB < 9.59 || d.BudgetGiB > 9.61 {
+		t.Fatalf("control: a laxer floor changes nothing, budget 9.6: %+v", d)
+	}
+	// A declared floor of 9.0 GiB is stricter: the budget is 7.0 GiB and 7.5 GiB in use is over it by 0.5.
+	write(9)
+	if d := rowOf(); d == nil || !d.OverCap || d.BudgetGiB < 6.99 || d.BudgetGiB > 7.01 || d.OverByGiB < 0.49 || d.OverByGiB > 0.51 {
+		t.Fatalf("a declared floor of 9.0 GiB leaves a budget of 7.0 GiB: %+v", d)
 	}
 }

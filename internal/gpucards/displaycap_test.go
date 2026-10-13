@@ -136,6 +136,10 @@ func TestDisplayCapNeverGuessesAnUnreadableTotal(t *testing.T) {
 	if d == nil || !strings.Contains(d.Unknown, "total VRAM not given") || d.OverCap || d.Closed {
 		t.Fatalf("a display card with no total is unknown, never over: %+v", d)
 	}
+	// No percentage is made of a missing total: a NaN would not even marshal.
+	if _, err := json.Marshal(d); err != nil || d.UsedPct != 0 {
+		t.Errorf("an unknown row carries no made-up share (used_pct %v, marshal: %v)", d.UsedPct, err)
+	}
 	// The positive control: with a total the same row has a verdict and no unknown.
 	if c := RowsWithCap(capTable(3.0), nil, 60, 0)[1].DisplayCap; c == nil || c.Unknown != "" {
 		t.Errorf("control: a card with a total is judged: %+v", c)
