@@ -176,6 +176,11 @@ func (w *exeWatch) staleNoteWith(version string, compare func() imageCheck) stri
 		evidence = "; the installed build is " + chk.installedVersion
 	case chk.stale == nil && compare != nil && !now.Missing:
 		evidence = "; its bytes could not be compared with the image it started from, so this rests on the changed size or time alone"
+		if chk.note != "" {
+			// Why, as offload_status's process block says it: a lock on the freshly renamed file reads differently from a
+			// start-up hash that failed, and the log line below is the only other place this is written down.
+			evidence += "; the comparison said: " + chk.note
+		}
 	}
 	note := fmt.Sprintf("this MCP server is running %s from an executable image that has changed on disk since it started "+
 		"(it started from %s; now %s%s). A long-lived server keeps the image it started from, so a fix shipped since is not in "+
