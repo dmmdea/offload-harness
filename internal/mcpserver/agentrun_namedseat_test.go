@@ -1126,3 +1126,28 @@ func TestAgentRunARoutedDeferralFromTheNamedSeatKeepsItsFinishedAnswer(t *testin
 		t.Errorf("nothing was withheld, so the reason is the node's own, got %q", reason)
 	}
 }
+
+// TestAgentRunWithholdingAnAnswerFromAnotherSeatNamesTheNodeThePlacementUsed: the reason for a withheld answer names the node
+// by the id the placement used, the same name the response's node and placement carry, not the id the node's own result stamped.
+func TestAgentRunWithholdingAnAnswerFromAnotherSeatNamesTheNodeThePlacementUsed(t *testing.T) {
+	a := newNSNode(t, "node-a", nsFastSeat, nsFastSeat)
+	s, _ := nsDoor(t, []string{nsLocalSeat}, []string{a.url}, nil)
+	var e engineArgs
+	s.reviewFleet = e.seam(core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Seat: "some-other-seat", NodeID: "host-bbbb", Output: nsAnswer, StopReason: "done"}, "node-id-aaaa")
+
+	m := runNS(t, s, nsMarker(t), map[string]any{"model": nsFastSeat})
+
+	if m["deferred"] != true {
+		t.Fatalf("an answer from another seat must be deferred, got %v", m)
+	}
+	r := nsReason(m)
+	if !strings.Contains(r, `answered from seat "some-other-seat"`) {
+		t.Fatalf("the reason must say which seat answered (control): %q", r)
+	}
+	if !strings.Contains(r, "node node-id-aaaa answered from seat") {
+		t.Errorf("the reason must name the node the placement used (node-id-aaaa): %q", r)
+	}
+	if strings.Contains(r, "host-bbbb") {
+		t.Errorf("the reason names the id the node stamped on its own result: %q", r)
+	}
+}

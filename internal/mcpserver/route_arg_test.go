@@ -124,3 +124,44 @@ func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+// A routed call names the node twice over when the node's own result called itself something else: node is the id the
+// placement used (the name the response's placement text carries), node_reported the id on the node's own result. With the
+// same id on both, only node is on the response.
+func TestARoutedAgentRunNamesBothNodeIdentities(t *testing.T) {
+	for _, tc := range []struct {
+		name, node, stamp, wantReported string
+	}{
+		{"the node's result names it by another id", "node-id-aaaa", "host-bbbb", "host-bbbb"},
+		{"the ids agree", "node-b", "node-b", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := routeServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
+				t.Error("route=remote must not run the local loop")
+				return core.AgentWireResult{}, nil
+			})
+			s.reviewFleet = func(_ context.Context, _ config.Config, _ delegate.LocalRunner, _ []core.AgentContract, _ string, _ []string, _ *delegate.RunOptions) ([]delegate.PlacedResult, delegate.Summary, error) {
+				return []delegate.PlacedResult{{Node: tc.node, Seat: "seat-b", PlacementReason: "route=remote forced → " + tc.node,
+					Result: core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Output: "from the fleet", Steps: 3, Seat: "seat-b", StopReason: "final", NodeID: tc.stamp}}}, delegate.Summary{Succeeded: 1}, nil
+			}
+			res, err := s.handleAgentRun(context.Background(), callReq(`{"goal":"summarize the standing rules in one line","route":"remote","max_steps":4,"profile":"research"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := decodeRouteResult(t, res)
+			if out["node"] != tc.node || !strings.Contains(out["placement"].(string), tc.node) {
+				t.Fatalf("the response must name the node the placement used (control): %v", out)
+			}
+			got, present := out["node_reported"]
+			if tc.wantReported == "" {
+				if present {
+					t.Errorf("node_reported = %v where the node's own id adds nothing: the key must be absent", got)
+				}
+				return
+			}
+			if got != tc.wantReported {
+				t.Errorf("node_reported = %v (present %v), want %q: the id the node's own result carried", got, present, tc.wantReported)
+			}
+		})
+	}
+}

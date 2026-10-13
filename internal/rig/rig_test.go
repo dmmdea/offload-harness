@@ -257,6 +257,50 @@ func TestBuildUnknownSeatNamesTheSeatsSeenAndCleanCorpusHasNothingToPropose(t *t
 	}
 }
 
+// A delegation-log row's `node` is the id the placement used. A row written before that was the id the node stamped on its own
+// result, which for a node launched with --node-id was the OS hostname; that stamp is still on every row, in result.node_id.
+// `rig --node` selects by either name, so a node picked by the id its card shows finds the new rows, and one picked by the old
+// name still finds the rows written before.
+func TestNodeFilterMatchesThePlacementIdAndTheIdTheNodeStamped(t *testing.T) {
+	since, until := time.Unix(1788600000, 0), time.Unix(1788800000, 0)
+	rows := []Row{
+		// written after the change: node is the placement id, the node's own stamp is the hostname
+		row("new", func(r *Row) { r.Node = "id-a"; r.Result.NodeID = "host-a" }),
+		// written before it: node is the stamp
+		row("old", func(r *Row) { r.Node = "host-a"; r.Result.NodeID = "host-a" }),
+		// another node, to prove the filter still filters
+		row("other", func(r *Row) { r.Node = "id-b"; r.Result.NodeID = "host-b" }),
+	}
+	for _, tc := range []struct {
+		node     string
+		wantRows int
+		wantJobs []string
+	}{
+		{"", 3, []string{"new", "old", "other"}}, // control: no filter selects every row
+		{"id-b", 1, []string{"other"}},           // control: a node's own id selects only its rows
+		{"id-a", 1, []string{"new"}},             // the placement id finds the new row
+		{"host-a", 2, []string{"new", "old"}},    // the old name finds both the old row and the new row's stamp
+	} {
+		rep, err := Build(rows, "seat-a", tc.node, since, until)
+		if err != nil {
+			t.Fatalf("node %q: %v", tc.node, err)
+		}
+		if rep.Rows != tc.wantRows {
+			t.Errorf("Build node %q selected %d row(s), want %d", tc.node, rep.Rows, tc.wantRows)
+		}
+		var jobs []string
+		for _, v := range Verdicts(rows, "seat-a", tc.node) {
+			jobs = append(jobs, v.JobID)
+		}
+		if strings.Join(jobs, ",") != strings.Join(tc.wantJobs, ",") {
+			t.Errorf("Verdicts node %q selected %v, want %v", tc.node, jobs, tc.wantJobs)
+		}
+	}
+	if _, err := Build(rows, "seat-a", "nobody", since, until); err == nil {
+		t.Error("a node no row names, by either id, must fail: it has no rows")
+	}
+}
+
 // TestAgreementWithBlindLabels is the acceptance instrument for the
 // classifier: RIG_SAMPLE names a JSON array of row FACTS (job_id, seat,
 // deferred, defer_class, acceptance_pass, error, reason, stop_reason, steps,
