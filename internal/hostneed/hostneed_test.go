@@ -891,6 +891,30 @@ func TestASageAttentionWanCallIsSizedForSageActivations(t *testing.T) {
 	}
 }
 
+// The hint on a sage call's ordinary detail ("--ram 0 states the real figure") answers one cause: the COMPUTE stage that the film's 15.2 GiB pushed out (a smaller
+// clip's partial share would fit it). When the storage card is the one that cannot hold its stage, the same hint would blame the geometry-blind sizing and send the
+// caller to an advice that changes nothing, so it is withheld; the ordinary set is declared in every case.
+func TestTheSageHintIsForAMissedComputeStageOnly(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cards []float64
+		hint  bool
+	}{
+		"the compute stage misses and the storage card fits (two 15.9 GiB cards)":              {[]float64{15.9, 15.9}, true},
+		"the compute stage fits a 24 GiB card, the storage card (8 GiB) cannot hold its stage": {[]float64{24, 8}, false},
+		"both stages miss: the 8 GiB storage card cannot hold its stage either":                {[]float64{15.9, 8}, false},
+	} {
+		f := wanFacts(t, tc.cards...)
+		f.Env = extraArgsEnv("--use-sage-attention")
+		n := wanNeed(t, wanMulticardCmd, f)
+		if !near(n.GiB, 13.3+13.4+6.3) || !strings.Contains(n.Detail, "does not fit") {
+			t.Errorf("%s: %v, want the ordinary 33.0 that does not fit", name, n)
+		}
+		if got := strings.Contains(n.Detail, "--ram 0"); got != tc.hint {
+			t.Errorf("%s: the --ram 0 hint present = %v, want %v: %q", name, got, tc.hint, n.Detail)
+		}
+	}
+}
+
 // The sage figure is the runner's: render/wan-multicard.mjs WAN_FILM_ACTIVATIONS_SAGE_GIB, and a different number on either side would make the lease
 // declare for a call the runner then refuses, or run one it sized against other figures.
 func TestTheSageActivationsMirrorTheRunner(t *testing.T) {

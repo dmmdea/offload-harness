@@ -351,12 +351,15 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 		}
 		compute := co.ResidentGiB + activations + wanComputeContextGiB
 		storage := expert - co.ResidentGiB + wanStorageOverheadGiB
-		if expert > 0 && small > 0 && compute <= large && storage <= small-reserve {
+		fitsStorage := expert > 0 && small > 0 && storage <= small-reserve
+		if fitsStorage && compute <= large {
 			return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB expert + %.1f GiB of %s + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card) and the storage card %.1f GiB of donor blocks + %.1f GiB for the VAE and the context = %.1f GiB (of %.1f usable), so each card fits its stage, and the weights are mapped read-only: no weights stream from RAM (the set is %s)", family, small, large, co.ResidentGiB, expert, activations, activationsWord, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
 		}
-		if co.SageAttention {
-			// The stage did not fit at the sage figure. This sizing reads no geometry, so it holds the film's 15.2 GiB for any clip: a smaller clip's partial share (the
-			// measured 65 frames at 2 GiB) lands here as the ordinary set, where it declared 0 before sage was read. Say so, and how to state the real figure.
+		if co.SageAttention && fitsStorage {
+			// Only the COMPUTE stage missed at the sage figure (the storage card fits its stage, so compute > large here). This sizing reads no geometry, so it holds the film's
+			// 15.2 GiB for any clip: a smaller clip's partial share (the measured 65 frames at 2 GiB) lands here as the ordinary set, where it declared 0 before sage was read.
+			// Say so, and how to state the real figure. When the storage card is the one that cannot hold its stage (or no expert file was found) the hint would blame the
+			// geometry for a miss it did not cause, so it is withheld.
 			sageNote = fmt.Sprintf("; --use-sage-attention in COMFY_EXTRA_ARGS sizes the activations at the film's %.1f GiB for any clip, so a smaller clip's partial share is declared the ordinary set here: --ram 0 states the real figure (it is not seen when COMFY_EXTRA_ARGS is set by an `env` prefix inside the wrapped command)", wanActivationsSageGiB)
 		}
 	}
