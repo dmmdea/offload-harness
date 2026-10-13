@@ -1379,8 +1379,8 @@ type Config struct {
 	// he says he needs it, so no presence reading opens or closes it any more; 0 is the "I need it" switch and keeps
 	// the card closed to the allocator. A pointer because unset (60) and 0 (closed) must differ; 1..100 are shares, and
 	// a value outside 0..100 refuses the load by name (and reads as closed where a caller goes on with it anyway). The
-	// switch is read from this file as it is when the allocator builds its input (LiveGPUDisplayCap), not as it was
-	// at start, so a 0 written while a request is in line or a server is running takes effect. It bounds ADMISSION only: nothing limits a job after it is placed, and a job that declares no footprint (`--vram`)
+	// switch is read from this file as it is when the allocator builds its input or a status surface prints the card
+	// table (LiveGPUDisplayCap), not as it was at start, so a 0 written while a request is in line or a server is running takes effect. It bounds ADMISSION only: nothing limits a job after it is placed, and a job that declares no footprint (`--vram`)
 	// is not given the card, except at 100 with no display_floor_gib declared: that is the whole card, nothing is held
 	// back to hold a footprint to, and a job that declares none (every media call) is given it with no VRAM check on
 	// that card, as on any other. The llama-swap twin guards
@@ -1390,7 +1390,7 @@ type Config struct {
 	GPUDisplayCapPct *int `json:"gpu_display_cap_pct,omitempty"`
 	// sourcePath is the file this Config was read from ("" = none: the defaults, or a Config built by hand). It is
 	// not a setting. A running process never reloads its config, so the one key the operator's "I need the card"
-	// switch lives in (gpu_display_cap_pct) is re-read from this file when the allocator asks (LiveGPUDisplayCap).
+	// switch lives in (gpu_display_cap_pct) is re-read from this file when the allocator or a status surface asks (LiveGPUDisplayCap).
 	sourcePath string
 	// AgentSeatHostRAMGiB is the host RAM the agent seat holds once it is loaded (resident set plus any staged
 	// KV cache, GiB): what the warm-back of a seat a lease unloaded must find room for before it loads the seat

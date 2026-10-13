@@ -936,6 +936,8 @@ test("a board power that is not reported on either card ranks nothing: today's r
   assert.deepEqual(rolesOf(same), [2, 0]);
   assert.match(rankedWhy(same), /^two cards of one size: the higher UUID computes \(board power not reported for idx 0, idx 2\)$/);
   assert.deepEqual(rolesOf(rankCards({ slowW: 180, fastW: 300, fastMiB: 16311 })), [0, 2], "and the same size with both powers read is ranked");
+  // the remark belongs to a pair within the 1 percent size band (the docs and the CHANGELOG say so): outside it the power was never going to rank the pair
+  assert.equal(rankedWhy(rankCards({ slowW: undefined, fastW: undefined, fastMiB: 16147 })), "the larger card (16311 MiB against 16147 MiB)");
 });
 
 test("board power ranks from 1.25 times the other card, inclusive, and not under it", () => {

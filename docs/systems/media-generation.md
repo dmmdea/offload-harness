@@ -632,8 +632,8 @@ byte count of a card's memory differs by a few MiB between boards of one generat
 for reads 300 W (5070 Ti) against 180 W (5060 Ti), 1.67 times, and the higher-power card sampled about 2.5 times as fast (measured 2026-10-12 on a 16 GB Blackwell
 pair with `--use-sage-attention`: about 2.5x). Every other pair takes the roles it always had: the larger card computes; of two equal cards the one with the higher
 UUID computes (the lease sorts its ids, so a pair named with `--wan-cards` in either order gets the split the benchmark measured, storage on the lower id). That
-includes a pair whose board power the driver did not report: it is ranked as before, never refused, and the plan says `board power not reported for idx N` so the
-fall-back is visible. The one line the plan says ends with `compute card chosen: <the rule>`. Board power is a proxy for speed: it can mislead for a pair whose
+includes a pair whose board power the driver did not report: it is ranked as before, never refused, and, for a pair within the 1 percent size band, the plan says `board power not reported for idx N` so the
+fall-back is visible (a pair outside the band was never going to be ranked by power, so its reason carries no such remark). The one line the plan says contains `compute card chosen: <the rule>`, followed by the sage clause under sage attention. Board power is a proxy for speed: it can mislead for a pair whose
 power and speed disagree (a hard power-capped card reads low), and `WAN_COMPUTE_UUID` (below) overrides it.
 
 `WAN_COMPUTE_UUID`, an environment variable and not a flag, names which card of the pair computes: an nvidia-smi index, a UUID, or a case-insensitive UUID prefix of 8

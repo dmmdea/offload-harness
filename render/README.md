@@ -137,7 +137,7 @@ node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyU
   (`--wan-cards` only names them when no lease does), never a display card or one whose display state is unknown; the larger card computes (`cuda:1`), except that two cards within 1% of one size are ranked by board power
   (`power.default_limit`, read by a second best-effort query; the higher one computes from 1.25x, a power the driver does not report ranks nothing), and the environment variable `WAN_COMPUTE_UUID`
   (an index, a UUID or a UUID prefix of 8+ characters) names the compute card of the pair (also for the image and edit placements below; a token that names no card is refused, one outside the pair is ignored with a note);
-  the plan's line ends with `compute card chosen: <the rule>`. The runner launches its own ComfyUI on them (`--gpu-only`, a read-only safetensors
+  the plan's line contains `compute card chosen: <the rule>`, followed by the sage clause under sage attention. The runner launches its own ComfyUI on them (`--gpu-only`, a read-only safetensors
   reader and a free-then-plain-decode node from `render/comfyui-ext`, through `--extra-model-paths-config`, nothing installed into the
   shared ComfyUI). Under `--wan-decode plain` the experts are freed from both cards before the plain `VAEDecode`, and the sampled latent
   is saved first. `--wan-loader` is not read, and a GGUF or unnamed expert and `--fast` are refused before anything starts (not measured). A driver script that wraps the helper is not a recognised render helper, so its lease declares the class default unless its `gpu reserve` passes `--ram 0` (the verb says so on a second line). Detail and numbers:

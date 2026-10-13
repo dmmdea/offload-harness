@@ -17,8 +17,8 @@ computed, by 8 MiB. One planner serves all three placements (`resolveWanCards`),
   times the lower (`POWER_RANK_RATIO`, chosen), the higher-power card computes. The pair this was written for reads 300 W against 180 W (1.67
   times); measured 2026-10-12 on a 16 GB Blackwell pair with `--use-sage-attention`: about 2.5x. Every other pair, and every pair whose power
   could not be read, takes exactly the roles it took before (the larger card computes, then the higher UUID), so a failed power read
-  reproduces the old behaviour and never refuses a run; the reason says `board power not reported for idx N`. The plan's one line ends with
-  `; compute card chosen: <the rule>`.
+  reproduces the old behaviour and never refuses a run; for a pair within the 1 percent size band the reason says `board power not reported for idx N`. The plan's one line contains
+  `; compute card chosen: <the rule>`, followed by the sage clause under sage attention.
 - **The power is a second, best-effort query.** `queryCardsRanked` (the default card source of `planMulticard` and `planImageMulticard`, with a
   `spawnSync` parameter for tests) runs the unchanged display ladder of `queryCards` first, then `nvidia-smi --query-gpu=uuid,power.default_limit`,
   asked once more when it fails and joined by lower-cased UUID. Folding the power into the display query would have cost a driver that rejects the
