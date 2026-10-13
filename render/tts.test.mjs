@@ -166,6 +166,34 @@ test("parseCli: --model and --base-dir belong to --engine finetuned; the general
   }
 });
 
+test("parseCli: --flag=value names the spelling to use, and --no-lock=1 says it takes no value", () => {
+  assert.match(parseCli([...BASE, "--cfg-weight=0.3"]).error, /--cfg-weight 0\.3/);
+  assert.match(parseCli([...BASE, "--no-lock=1"]).error, /--no-lock takes no value/);
+  assert.doesNotMatch(parseCli([...BASE, "--bogus=1"]).error, /takes its value|takes no value/, "no spelling hint for a flag that does not exist");
+});
+
+// A text that opens with dashes reaches tts.mjs from the harness: `generate-audio out.wav -- "--- Intro ---"` (CT-52) keeps the text, and
+// pipeline.go puts it second, before the flags. A token is a flag only when it is shaped like one.
+test("parseCli: a text that opens with dashes but is not shaped like a flag is the text", () => {
+  for (const text of ["--- Intro ---", "-- hola --", "--Intro--", "---", "--- ", "--1", "-- 2"]) {
+    const r = parseCli(["out.wav", text, "--clone", "/r/ref.wav", "--lang", "es"], {});
+    assert.equal(r.ok, true, `${JSON.stringify(text)}: ${r.error}`);
+    assert.equal(r.text, text);
+    assert.deepEqual(r.args, ["--out", "out.wav", "--text", text, "--lang", "es", "--ref", "/r/ref.wav"]);
+  }
+});
+
+test("parseCli: a bare -- ends the flags, so even a flag-shaped text can be given", () => {
+  const r = parseCli(["--lang", "en", "out.wav", "--", "--hola"], {});
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.text, "--hola");
+  assert.equal(r.flags.lang, "en");
+  assert.equal(parseCli(["out.wav", "--hola"], {}).ok, false, "without the terminator --hola is a flag, and an unknown one");
+  const after = parseCli(["out.wav", "--", "hola", "--lang", "en"], {});
+  assert.equal(after.ok, false, "everything after the terminator is a positional, --lang included");
+  assert.match(after.error, /extra argument/);
+});
+
 test("parseCli: --engine takes generalist or finetuned only", () => {
   for (const good of ["generalist", "finetuned"]) assert.equal(parseCli([...BASE, "--engine", good]).ok, true, good);
   const r = parseCli([...BASE, "--engine", "finetunned"]);
