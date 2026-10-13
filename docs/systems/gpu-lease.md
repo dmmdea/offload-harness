@@ -529,7 +529,8 @@ other card and on a box that flags no display card). It reads the VRAM in use no
 against the budget `gpulease.DisplayBudgetGiB` gives from `gpu_display_cap_pct` and the display layer's declared floor, which is
 the arithmetic the allocator admits by, so the two cannot disagree. The cap is read from the config file as it is when the call
 is made (`LiveGPUDisplayCap`), so a `0` written while the MCP server runs shows in the next brief. Keys: `cap_pct`, `budget_gb`,
-`used_gb`, `used_pct`, `over_cap`, `over_by_gb`, plus `closed` at a cap of `0` (the operator's "I need the card": nothing is
+`used_gb`, `used_pct`, `over_cap`, `over_by_gb` (present exactly when the card is over: four decimals of a GiB, never rounded to nothing,
+and the text line says `OVER by less than 0.1 GiB` under 0.05 GiB), plus `closed` at a cap of `0` (the operator's "I need the card": nothing is
 judged) and `unknown` with its reason when the card has no total or the reading could not say which card the monitor is on
 (`display_unknown` on every row of that reading: the allocator closes such a card too, and the text table says it once). The text
 table keeps its header and gains one `display cap:` line under the display card. It is one reading of the card and nothing more:
@@ -708,7 +709,9 @@ the footprint, as it always was.
   can run together (`matrix:`) are not summed, and points to the live row. It is never a violation and never an exit code; no
   config is read, so the cap it states is the default and says so; `--other-box` skips it. The display card is the driver's reading
   by UUID, never a remembered index, so a monitor moved to another card is followed on the next read. A single-card or headless
-  box has no flagged display card and the note is silent. The table is read for a file that pins a device **or** has a `proxy:`
+  box has no flagged display card and the note is silent, even on a reading that could not say which card the monitor is on (one
+  card has nothing to tell apart); on two or more cards such a reading gets one line saying so and naming no entry. The table is
+  read for a file that pins a device **or** has a `proxy:`
   seat (once per file, shared with the pin rules); a file with neither never runs nvidia-smi, so an unpinned entry alone is not
   named. **Deferred on purpose:** footprint-based violations (a declared layer footprint, a vLLM `gpu_memory_utilization` times the
   card, a seat-env reader) and a `doctor` row. There is no placement-neutral footprint source yet: declaring the opencode-only

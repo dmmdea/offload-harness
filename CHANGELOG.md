@@ -21,6 +21,8 @@ loop `continue`s), which is every `proxy:` seat and every unpinned entry, and th
   `over_by_gb`, `closed`, `unknown`) is on the display card's row only, in `gpu status` (text and `--json`), `gpu cards` and the
   `offload_status` brief's `gpu_cards`: the VRAM in use now, the desktop and every process counted, against the budget. The text table keeps
   its header and gains one `display cap:` line under the display card that says what is counted and that it cannot say whose memory it is.
+  `over_by_gb` is present exactly when the card is over, to four decimals of a GiB and never rounded to nothing (nvidia-smi reads whole MiB, so a
+  breach of a few MiB is a real reading), and the text line says `OVER by less than 0.1 GiB` under 0.05 GiB, never `OVER by 0.0 GiB`.
   A cap of 0 is `closed` and never over; a card with no total, and every card of a reading that could not say which card the monitor is on
   (the allocator closes such a card too), are `unknown` and not judged. The rows are built by one function, `gpucards.RowsWithCap`
   (it replaces `Rows`, and `Section` takes the same two arguments), so no surface can print the table without the verdict. The cap is read from the
@@ -28,8 +30,9 @@ loop `continue`s), which is every `proxy:` seat and every unpinned entry, and th
 - **The brief can now say "unknown".** The brief's table is built from the nvidia-smi sample its verdict already took, which dropped
   whether `display_attached` was read, so on a reading that could not tell the monitor's card it showed no display card and no cap row at all.
   `gpuactivity.GPU.AttachedUnknown` (set by `SampleGPUs`, from `RunDisplayAwareReport`, on every card of such a reading) is passed into the table.
-- **`audit-yaml`'s `display-cap-unseen` note.** For a file with a `proxy:` seat, an unpinned entry, or an entry pinned onto the display card
-  (by UUID, or by index under `CUDA_DEVICE_ORDER=PCI_BUS_ID`), it prints ONE `note:` naming those entries (at most six per group), the display card
+- **`audit-yaml`'s `display-cap-unseen` note.** For a file that has a `proxy:` seat or pins a device (the card table is read for no other file), it prints
+  ONE `note:` naming the entries that may sit on the display card: the `proxy:` seats, the entries pinned onto it (by UUID, or by index under
+  `CUDA_DEVICE_ORDER=PCI_BUS_ID`) and the unpinned entries of that file (at most six names per group, the groups on the one line), the display card
   (index and UUID tail of this reading), the default cap and its budget in GiB by the same arithmetic, saying that the yaml states no VRAM footprint
   so nothing is judged and entries that can run together (`matrix:`) are not summed, and pointing to the `gpu status` row. A plain index with no
   PCI order is named as unmappable, never guessed. It is never a violation and never an exit code, takes no `--config`, reads no config (the
@@ -38,7 +41,8 @@ loop `continue`s), which is every `proxy:` seat and every unpinned entry, and th
   (`TestAuditYAMLDoesNotReadTheCardTableWhenNothingPins` is unchanged), so an unpinned entry alone is not named.
 - **How the display card is identified.** By the driver's reading, by UUID (`display_active` or `display_attached`, `gpuprobe.Card.Display`), never an index,
   so a monitor moved to another card is followed on the next read, and an entry that was off the display card and is now on it is named without a config edit.
-  A single-card or headless box flags none, as for the allocator, and the note is silent.
+  A single-card or headless box flags none, as for the allocator, and the note is silent; a single-card box is silent even on a reading that could not say
+  which card the monitor is on (one card has nothing to tell apart), while a box of two or more cards gets one line saying so and naming no entry.
 - **What it cannot see, plainly.** The live row cannot say whose memory it is, and a model loading can flash it over for a moment. The yaml note judges
   nothing: it has no footprint to judge, and it does not read the seat env inside an engine's launcher.
 - **Deferred, with the reason.** Footprint-based violations (a declared layer footprint, a vLLM `gpu_memory_utilization` times the card, a seat-env reader)
@@ -48,8 +52,8 @@ loop `continue`s), which is every `proxy:` seat and every unpinned entry, and th
 - **Tests, written first and seen red.** A behaviour-free seam commit (types, fields and stubs), then the tests, each failing on its assertion:
   `DisplayFloorGiB(15.9, 60, 0) = (0, false), want (6.36, true)`; `the display card's row must carry the cap verdict`; `card 0: a reading from the fallback after an unexplained
   failure must say it cannot tell the monitor's card`; `the display card's row must carry display_cap` (brief); `pinned onto the display card = [], want [...]`;
-  `exactly one display-cap-unseen note line, got 0`; `the card table was read 0 times, want 1`. Two tests (the declared display floor reaching the row on the verbs and in the brief)
-  were written after the red commit and are proven by a mutation instead. Mutations, each applied alone with `scripts/mutation-check.sh`, each RED: the floor
+  `exactly one display-cap-unseen note line, got 0`; `the card table was read 0 times, want 1`. Some tests were NOT red first and are proven by a named mutation instead: the two declared-display-floor tests (`gpu cards` and the brief), the held-host `gpu status` text test and the cap-95 halves of the `gpu status` and `gpu cards` tests (each call site of the table), the two float-tolerance rows of `TestDisplayCapComparesUseToTheBudgetAndAnExactFitIsWithin` and the NaN-marshal assertion of `TestDisplayCapNeverGuessesAnUnreadableTotal` (the over comparison without its tolerance, and the no-total guard).
+  Mutations, each applied alone with `scripts/mutation-check.sh`, each RED: the floor
   uses the cap instead of the rest of the card, the larger floor no longer wins, the budget is not clamped or has no total check; the over comparison inverted or
   without the float tolerance, free compared instead of used, the cap applied to every row, a cap of 0 not closed, an unknown reading ignored or printed once
   per card, a missing total unguarded, the section or the declared floor ignoring the cap; `SampleGPUs` never marking an unknown reading; the brief reading the cap at load
@@ -59,6 +63,17 @@ loop `continue`s), which is every `proxy:` seat and every unpinned entry, and th
   the proxy seat not reading the table, the table read for every file, `--other-box` ignored, the note dropped, the declared floor not passed, and each call site of the table ignoring the cap (`gpu status` json and both text branches, `gpu cards`). One mutation survives and is equivalent
   by construction: reading the cap at load instead of live in the one-shot verbs, where the config is loaded in the same call; the live read matters in a long-lived process, which is the brief, and
   that mutation is killed there.
+- **Review round: five distinct findings (the help-text one was raised twice), four fixed and one refuted.** Each fix has its test written first and seen red on its
+  assertion (no new symbol, so each compiled against the commit before), then the fix, then one-line mutations, each RED.
+  (1) The `audit-yaml` help and the `runAuditYAML` comment promised the note to a file with an unpinned entry; the code reads the card table only for a file that pins a
+  device or has a `proxy:` seat, so the words were wrong and the behaviour stands (`TestAuditYAMLHelpDoesNotPromiseTheNoteToAFileThatNeitherPinsNorProxies`).
+  (2) The list of tests written after the red commit, above, was incomplete; it now names them all. (3) A breach under about 5 MiB gave `over_cap` true with an amount of 0
+  (the key dropped from the JSON) and the text read `OVER by 0.0 GiB`, which it also printed from 0.01 to 0.049 GiB: `over_by_gb` is now four decimals and never below 0.0001
+  for an over card, and the verdict is unchanged (still the allocator's, on unrounded values). (4) A single-card box on a reading that could not say which card the monitor
+  is on printed the "no display card known" note, against the contract that a single-card box is silent; it is silent now. The card table's `display cap: not judged` line on
+  such a one-card reading is unchanged: it mirrors the allocator, which closes that card too. (5) Refuted: the cap of six names is per group, not per line. The design
+  listed at most six names per aggregated line, one line per group; the note became one line, and a total of six would have left the later groups (the plain indices that
+  cannot be mapped, which need an operator's eye) as a bare count behind a long list of unpinned entries. The worst case is 24 names on the line, and the docs say per group.
 - **No inference placement changes.** Everything here reads; nothing loads, unloads or moves a model, and the allocator's decisions are the same.
 
 ## [0.184.0] - 2026-10-12 - a busy fleet is a place in line in every row, a re-pack that empties its answer's lists is refused, every delegate result says where it ran, offload_status names the image a server runs, and the serving audit refuses a bare --cpu-moe and an index pin on identical cards
