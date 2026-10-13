@@ -72,6 +72,8 @@ type installedImages struct {
 	sha     string
 	verOK   bool
 	version string
+	// run is the read in flight for the stat above (nil when none): see installedRead.
+	run *installedRead
 }
 
 // imageCheck is one comparison of the installed file with the startup identity.
@@ -111,7 +113,23 @@ func (s *Server) statusProcess() any {
 	return block
 }
 
-// check compares the installed file at the startup path with the startup identity.
+// installedRead is one background read of the moved installed file: its hash and its build marker, whichever the cache does
+// not hold yet. The first call that needs it starts it and every call shares it until it is recorded, so a read that stalls
+// is one read, not one per answer; a call waits for it only for installedReadWait, and a result that lands after that is
+// recorded by the next call. The fields are written by the reading goroutine before done closes and read after; settled is
+// guarded by installedImages.mu.
+type installedRead struct {
+	done             chan struct{}
+	wantSHA, wantVer bool
+	sha, version     string
+	shaErr, verErr   error
+	settled          bool
+}
+
+// check compares the installed file at the startup path with the startup identity. A moved file is read (hash, build marker) in
+// the background and waited for at most installedReadWait: a stalled read (an antivirus scan of the freshly renamed file, a
+// slow mount) must not hold the answer of a door whose results already exist, so past the wait the check gives no verdict, says
+// the read did not finish, and the next call uses what the read found.
 func (c *installedImages) check(st buildinfo.Startup) imageCheck {
 	if st.Path == "" {
 		return imageCheck{note: "the path this process started from is unknown, so the installed build cannot be compared with it"}
@@ -127,24 +145,72 @@ func (c *installedImages) check(st buildinfo.Startup) imageCheck {
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.path != st.Path || c.size != fi.Size() || !c.mod.Equal(fi.ModTime()) {
 		c.path, c.size, c.mod = st.Path, fi.Size(), fi.ModTime()
 		c.shaOK, c.sha, c.verOK, c.version = false, "", false, ""
+		c.run = nil // a read of the file as it was is no answer about this one; it finishes unobserved
+	}
+	run := c.run
+	if run == nil && (!c.shaOK || !c.verOK) {
+		run = &installedRead{done: make(chan struct{}), wantSHA: !c.shaOK, wantVer: !c.verOK}
+		c.run = run
+		hash, mark, path := hashInstalledImage, readInstalledVersion, st.Path // the seams are read here, not in the goroutine
+		go func() {
+			defer close(run.done)
+			if run.wantSHA {
+				run.sha, run.shaErr = hash(path)
+			}
+			if run.wantVer {
+				run.version, run.verErr = mark(path)
+			}
+		}()
+	}
+	c.mu.Unlock()
+
+	timedOut := false
+	if run != nil {
+		timer := time.NewTimer(installedReadWait)
+		select {
+		case <-run.done:
+		case <-timer.C:
+			timedOut = true
+		}
+		timer.Stop()
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.path != st.Path || c.size != fi.Size() || !c.mod.Equal(fi.ModTime()) {
+		// Another call saw the file move again while this one waited: what was read is of the file as it was.
+		return imageCheck{note: fmt.Sprintf("the installed image %s changed again while it was being read, so whether this process is stale is unknown", st.Path)}
 	}
 	var hashErr, markErr error
-	if !c.shaOK {
-		if sha, err := hashInstalledImage(st.Path); err != nil {
-			hashErr = err
-		} else {
-			c.sha, c.shaOK = sha, true
+	if run != nil && !timedOut {
+		// The whole read ended. The first call to get here records it; a failed part is not recorded (it was a moment, and the
+		// next call retries it), and a call that finds it recorded already reads the same errors off the read itself.
+		if !run.settled && c.run == run {
+			run.settled, c.run = true, nil
+			if run.wantSHA && run.shaErr == nil {
+				c.sha, c.shaOK = run.sha, true
+			}
+			if run.wantVer && run.verErr == nil {
+				c.version, c.verOK = run.version, true
+			}
+		}
+		if run.wantSHA {
+			hashErr = run.shaErr
+		}
+		if run.wantVer {
+			markErr = run.verErr
 		}
 	}
-	if !c.verOK {
-		if v, err := readInstalledVersion(st.Path); err != nil {
-			markErr = err
-		} else {
-			c.version, c.verOK = v, true
+	if timedOut {
+		pending := fmt.Errorf("the read did not finish within %s and goes on; the next call uses what it finds", installedReadWait)
+		if !c.shaOK {
+			hashErr = pending
+		}
+		if !c.verOK {
+			markErr = pending
 		}
 	}
 	out := imageCheck{}
