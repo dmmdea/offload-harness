@@ -83,7 +83,8 @@ type unseenReport struct {
 // unseenEntries classifies the entries of a file against a card table. ok is false when the file does not parse
 // (Audit owns that rule). The display card is the driver's reading by UUID (Card.Display), never a remembered
 // index, so a monitor moved to another card is followed on the next read; a box with no flagged display card
-// (a single card, a headless box) has none to look at. What another rule owns is left to it: an empty value
+// (a single card, a headless box) has none to look at, and a single-card box has nothing to tell apart even on a
+// reading that could not say which card the monitor is on. What another rule owns is left to it: an empty value
 // (cvd-empty), -1, a MIG slice, a token that is not a UUID or an index, and a UUID that names no card (A-87).
 func unseenEntries(text string, cards []gpuprobe.Card) (unseenReport, bool) {
 	var doc struct {
@@ -95,6 +96,9 @@ func unseenEntries(text string, cards []gpuprobe.Card) (unseenReport, bool) {
 	}
 	var r unseenReport
 	if len(doc.Models) == 0 {
+		return r, true
+	}
+	if len(cards) < 2 { // one card is its own work card: no display card to be on or off, even on a reading that could not tell
 		return r, true
 	}
 	for _, c := range cards {
@@ -164,8 +168,9 @@ func unseenEntries(text string, cards []gpuprobe.Card) (unseenReport, bool) {
 
 // AuditDisplayCapUnseen is the display-cap-unseen note over a file and this box's card table: at most one
 // Violation (Where names the display card of this reading), to be printed as a note and never counted. It is
-// silent when the file does not parse, has no entries, no card is flagged as the display card, or no entry is
-// one the audit cannot place off that card.
+// silent when the file does not parse, has no entries, the box has a single card, no card is flagged as the display
+// card, or no entry is one the audit cannot place off that card. On a box of two or more cards a reading that could
+// not say which card the monitor is on gets one line saying so, and names no entry.
 func AuditDisplayCapUnseen(text string, cards []gpuprobe.Card) []Violation {
 	r, ok := unseenEntries(text, cards)
 	if !ok {
