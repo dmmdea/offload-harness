@@ -52,6 +52,49 @@ computed, by 8 MiB. One planner serves all three placements (`resolveWanCards`),
   key case-sensitive, and the wrong power field. Docs: `docs/systems/media-generation.md` ("Which card computes", the image section),
   `render/README.md`, the usage comments of `render/comfy-video.mjs`; the stale "the larger card computes" comments of `internal/hostneed`.
 
+### Changed (behaviour) — the card-only Wan placement knows sage attention: 15.2 GiB of film-size activations, in the runner and in the lease sizing
+
+The film session of 2026-10-12 ran the film clip (720x1280x81) with `--use-sage-attention` in `COMFY_EXTRA_ARGS`: the compute card read 15,482 MiB in use
+at resident 0 (15.119 GiB), and 15,216 MiB at resident 2 on 720x1280x65 (14.859 GiB, 12.859 beyond the share), 3 GiB more than the default attention's
+12.2 GiB beyond the resident share. Neither the runner nor the lease sizing read the attention mode, so a sage call at the default share of 3
+(3 + 12.2 + 0.5 = 15.7 of 15.9 GiB) was admitted by both and ran out of memory on the compute card.
+
+- **Behaviour change: sage film calls must pass `--wan-resident-gb`.** Under sage the default share of 3 is refused at 57,000 tokens and up (at most 2.5 GiB at
+  720x1280x65, 0.2 GiB at 720x1280x81, so pass 0 at film size), by the planner before anything starts and by the lease sizing (which then declares the
+  ordinary set). A film driver that exports `COMFY_EXTRA_ARGS=--use-sage-attention` and relies on the default share changes from "runs, and runs out of memory"
+  to "refused before the lease slot". The refusal puts its sage clause before the ceiling and replaces the default mode's "(the measured film-size recipe
+  keeps 3)" tail with the way out; the default-mode message is byte for byte what it was.
+- **Runner.** `WAN_FILM_ACTIVATIONS_SAGE_GIB` (15.2, a one-line literal the Go mirror reads). `wanActivationsGib(tokens, attention)`: the default curve, and under
+  sage the straight line through the two measured sage points (12.9 GiB at 61,200 tokens, 15.2 at the film's 75,600), used from where it meets the default's cap
+  (about 56,800 tokens) up and held at 15.2 above the film's size; below that sage is sized as the default, which already covers the benchmark's 6.16 GiB reserved
+  with sage at 20,280 tokens (6.29). So sage departs from the default sizing only above about 57k tokens, and only 61,200 and 75,600 tokens were measured: the
+  line between them is chosen. (The line through the two points would otherwise rise above the default below about 20,700 tokens, where nothing was measured:
+  at 7,800 tokens it reads 4.4 GiB against the default's 2.4.) `wanAttentionMode` reads `COMFY_EXTRA_ARGS` token by token with ONE predicate,
+  `isSageAttentionToken` (`render/comfy-lifecycle.mjs`): the exact flag or an argparse prefix of 8+ characters (`--use-sa` is sage; `--use-s` also begins
+  `--use-split-cross-attention` and is not; a longer token is no prefix). Another attention flag (flash, split, quad, pytorch) is sized as the default: only sage was
+  measured. `checkResident` and `geometryNote` take the mode (`1280x1280x121` reads "film's 15.2 GiB" and about 39.9 GiB under sage); the plan carries `attention`, and
+  its one line gains `; sage attention (COMFY_EXTRA_ARGS): activations sized at X GiB`.
+- **Lease sizing.** `wanActivationsSageGiB` (a test pins it to the runner's constant, and another that the two sides admit the same share at film size),
+  `CardOnly.SageAttention`, read from the process environment by `sageAttention()` with the same token table (one table, checked in both languages). The sizing reads no geometry,
+  so under sage it holds 15.2 GiB for any clip: a partial-share sage call at a smaller clip (the measured 65 frames at 2 GiB) declares the ordinary set where it
+  declared 0 before sage was read, unless `--ram 0` states the real figure; the detail says so. **An `env COMFY_EXTRA_ARGS=...` prefix inside the wrapped command
+  is invisible to the lease sizing** while the runner sees it (the lease then declares as for the default attention); export the variable around `gpu reserve`, or pass
+  `--ram 0`. Both are documented next to the `--ram 0` advice.
+- **Reuse (its own commit).** A kept (`--keep-comfy`) multicard ComfyUI launched with `--use-sage-attention` is not reused by a call sized for the default attention: its
+  launch records which attention it was sized for, and `profileMismatch` reads the running argv with the same predicate (so an abbreviation counts), so the harness
+  replaces an instance it launched and refuses `COMFY-PROFILE-MISMATCH` for one it did not. Only that direction can run out of memory; the reverse wastes a cold start
+  and is reused, and a launch that does not say (the image placements) checks nothing.
+- **Tests hermetic.** The two existing multicard tests of `gpu_hostram_test.go` read the process environment through `Facts.Env`, so on a host that exports
+  `COMFY_EXTRA_ARGS=--use-sage-attention` their default-share assertions would fail: both now set it to "". The JS tests pass explicit env objects.
+- **Tests and mutations.** Eleven JS tests (three for the reuse), four in `internal/hostneed` and one in the root package, written first against a behaviour-free seam
+  and seen red on their assertions (the Go mirror test first, against the missing JS export; two JS tests are guards that were green before). Thirty-one one-line
+  mutations, each reverted byte for byte, fail a test they name: the sage branch, the attention mode, the token predicate (always false, by substring, from 7 and
+  from 9 characters), the attention dropped from `checkResident` and from `geometryNote`, a flat 15.2 below the film size, the line extended below the default's cap, the
+  sage figure and the two points moved, the refusal's way out and clause, the summary clause, the plan's `attention`, in Go the sage figure, the detection (never, 7
+  characters, substring, the wrong key) and the hint, and for the reuse the check deleted, by literal flag, inverted, applied to the old shape, the profile and the launch.
+  Docs: `docs/systems/media-generation.md` ("Sage attention", with the measured table; the launch-profile table), `docs/OPERATOR-GUIDE.md`, `render/README.md`,
+  the usage comment of `render/comfy-video.mjs`. Not changed: the image and edit recipes (measured with the default attention), the role rule, the geometry-blind lease sizing.
+
 ## [0.184.0] - 2026-10-12 - a busy fleet is a place in line in every row, a re-pack that empties its answer's lists is refused, every delegate result says where it ran, offload_status names the image a server runs, and the serving audit refuses a bare --cpu-moe and an index pin on identical cards
 
 ### Fixed — integration review round of 0.184.0

@@ -104,7 +104,9 @@ node render/comfy-video.mjs out.mp4 still.png "<prompt>" --wan-decode plain     
 node render/comfy-video.mjs out.mp4 still.png "<prompt>" --high-unet <fp8 high> --low-unet <fp8 low> \
      --wan-decode plain --wan-placement multicard    # wan on the TWO non-display cards of a lease, no host RAM
      # run it under `local-offload gpu reserve --devices <a>,<b> --class media --ram 0 -- ...`, flags spelled `--flag value` (not `--flag=value`);
-     # [--api http://127.0.0.1:<own port>] [--wan-resident-gb 3 (3.2 at most at film size; a clip bigger than the film's was not measured, and the planner says so: WAN-GEOMETRY-NOTE)] [--wan-cards <a>,<b>, outside a lease]
+     # [--api http://127.0.0.1:<own port>] [--wan-resident-gb 3 (3.2 at most at film size; a clip bigger than the film's was not measured, and the planner says so: WAN-GEOMETRY-NOTE; with --use-sage-attention in COMFY_EXTRA_ARGS the film-size ceiling is 0.2, so pass 0)] [--wan-cards <a>,<b>, outside a lease]
+     # [under COMFY_EXTRA_ARGS=--use-sage-attention the lease sizing holds 15.2 GiB of activations for any clip: --ram 0 states the real figure for a smaller one; export the variable around
+     #  `gpu reserve`: an `env COMFY_EXTRA_ARGS=...` prefix inside the wrapped command is not seen by the lease sizing, only by the runner]
      # [env WAN_COMPUTE_UUID=<index|uuid|uuid prefix of 8+>: which of the two cards computes; without it the larger card does, and of two cards within 1% of one size the higher board power (power.default_limit, at least 1.25x) does]
      # [--wait-sec N: 7200 by default under multicard, the 20-step film recipe measured 5136 s of runner wall]; the run watches ComfyUI's console
      # (WAN-OOM ends the wait when its prompt worker died of an out-of-memory error); a plain decode that ComfyUI retried tiled fails

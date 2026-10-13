@@ -36,6 +36,9 @@
 //   Which of the two computes: the larger card; of two cards within 1% of one size the higher board power (power.default_limit, 1.25x or more);
 //   of two equal cards the higher UUID. The environment variable WAN_COMPUTE_UUID (an index, a UUID or a UUID prefix of 8+ characters) names it
 //   instead; a value that names no card is refused, one outside the pair is ignored with a note.
+//   Sage attention: with --use-sage-attention (or an argparse prefix of 8+ characters) in COMFY_EXTRA_ARGS the sampler's activations are sized at 15.2 GiB at the
+//   film's size (12.2 without it), so the default --wan-resident-gb 3 is refused from about 57k tokens up and a sage film call passes --wan-resident-gb 0 (0.2 at
+//   most at 720x1280x81, 2.5 at 720x1280x65); the lease sizing holds 15.2 GiB for any clip, so --ram 0 states the real figure for a smaller one.
 //   --wan-decode plain under multicard frees both cards of the experts before the plain VAEDecode and saves the sampled latent
 //   (a LATENT line names it); a plain decode that ComfyUI retried tiled fails the run (WAN-DECODE-FALLBACK) and keeps the clip beside <out> as
 //   <name>.seamed<ext>; --wan-loader is not used. Needs --high-unet / --low-unet to name the fp8 safetensors experts. The wait is 7200 s unless
