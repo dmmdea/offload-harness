@@ -474,8 +474,13 @@ const DEFAULT_RESERVE_GIB = 1.0;
  * and the planner has no figure above it, so it holds 12.2 there. The activations are expected to grow with the tokens, which is why a bigger clip is
  * said to be unsized (geometryNote) and not read as one that needs no more.
  */
-export function wanActivationsGib(tokens) {
+export function wanActivationsGib(tokens, attention = "default") {
   return Math.min(WAN_FILM_ACTIVATIONS_GIB, Math.max(ACTIVATIONS_FLOOR_GIB, (tokens / 1000) * ACTIVATIONS_GIB_PER_1000_TOKENS));
+}
+
+/** wanAttentionMode: "sage" when COMFY_EXTRA_ARGS carries sage attention, else "default" (the seam: always "default"). */
+export function wanAttentionMode(env = process.env) {
+  return "default";
 }
 
 /**
@@ -486,12 +491,12 @@ export function wanActivationsGib(tokens) {
  * size less --reserve-vram, which is ComfyUI's model-load margin and not an activation ceiling, so the compute card's check does not use it. Both
  * with the figures internal/hostneed declares against, at this geometry (the smaller the clip, the less the activations need).
  */
-function checkResident(residentGb, pair, flags) {
+function checkResident(residentGb, pair, flags, attention = "default") {
   const reserveRaw = Number(flags["reserve-vram"]);
   const reserve = Number.isFinite(reserveRaw) && reserveRaw > 0 ? reserveRaw : DEFAULT_RESERVE_GIB;
   const computeGib = pair.compute.totalMiB / 1024, storageGib = pair.storage.totalMiB / 1024;
   const { w, h, f, tokens } = wanGeometry(flags);
-  const activations = wanActivationsGib(tokens);
+  const activations = wanActivationsGib(tokens, attention);
   const most = computeGib - activations - WAN_COMPUTE_CONTEXT_GIB;
   if (residentGb > most) {
     throw placementError(`--wan-resident-gb ${residentGb} leaves the compute card (idx ${pair.compute.index}, ${computeGib.toFixed(1)} GiB) about ${activations.toFixed(1)} GiB for the sampler's activations at ${w}x${h}x${f} (${tokens} tokens) and ${WAN_COMPUTE_CONTEXT_GIB} GiB for the CUDA context: at most ${most.toFixed(1)} GiB of an expert can stay resident there (the measured film-size recipe keeps ${WAN_RESIDENT_GB_DEFAULT})`);
@@ -515,7 +520,7 @@ function checkResident(residentGb, pair, flags) {
  * refuse what it cannot size (the documented intent is that a bigger clip may run); it says so before the check, with what a proportional extrapolation
  * gives, and leaves the share and the wait to the caller.
  */
-export function geometryNote(flags) {
+export function geometryNote(flags, attention = "default") {
   const { w, h, f, tokens } = wanGeometry(flags);
   if (tokens <= WAN_FILM_TOKENS) return "";
   const proportional = (WAN_FILM_ACTIVATIONS_GIB * tokens) / WAN_FILM_TOKENS;
@@ -561,11 +566,12 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   const { tokens, source } = wanCardTokens({ flags, env, leaseDevicesFn });
   const pair = resolveWanCards({ tokens, source, cards: cards(), compute: computeOverride(env) });
   if (source === "--wan-cards") confirmWithLease(pair, leaseDevicesFn(env));
-  const unsized = geometryNote(flags);
+  const attention = wanAttentionMode(env);
+  const unsized = geometryNote(flags, attention);
   if (unsized) say(unsized);
-  checkResident(residentGb, pair, flags);
+  checkResident(residentGb, pair, flags, attention);
   const launch = launchFn(pair, { comfyDir });
-  const plan = { pair, launch, residentGb, env: multicardEnv(env, launch) };
+  const plan = { pair, launch, residentGb, attention, env: multicardEnv(env, launch) };
   const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
   say(`wan-placement: multicard on ${source}: ${line("storage", WAN_STORAGE_DEVICE, pair.storage)}; ${line("compute", WAN_COMPUTE_DEVICE, pair.compute)}; ${residentGb} GiB of each expert resident on the compute card; ${computeChosen(pair)}`);
   return plan;

@@ -281,6 +281,11 @@ export function resolveLaunchProfile(env = process.env) {
 
 const profileRequested = (p) => !!(p && (p.cudaDevice || p.dynamicVram || p.cardUuid || p.multicard));
 
+/** isSageAttentionToken: is this one launch-argument token sage attention? (the seam: it never is yet) */
+export function isSageAttentionToken(tok) {
+  return false;
+}
+
 /** Remove every `flag value` pair (and a `flag=value` form) from an argv list. */
 function stripValued(args, flag) {
   const out = [];

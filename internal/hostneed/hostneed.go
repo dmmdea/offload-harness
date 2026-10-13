@@ -227,6 +227,12 @@ type slot struct {
 // a bigger one was not measured, and the runner holds it at this figure too and says so (WAN-GEOMETRY-NOTE), so no sizing here claims to know it.
 const wanActivationsGiB = 12.2
 
+// wanActivationsSageGiB is the same figure under sage attention (--use-sage-attention in COMFY_EXTRA_ARGS), which holds more activations on the
+// compute card: the film session of 2026-10-12 read 15,482 MiB (15.119 GiB) in use at the film's clip with no resident share, rounded up to 15.2, on the
+// same basis as the 12.2 above (the card's peak less its resident share, the context inside). render/wan-multicard.mjs WAN_FILM_ACTIVATIONS_SAGE_GIB (a
+// test pins the two together). Like the figure above it is the film's, held for any clip: this sizing reads no geometry.
+const wanActivationsSageGiB = 15.2
+
 // wanResidentDefaultGiB is the share of each Wan expert the card-only placement keeps on the compute card when the call names none:
 // render/wf-wan22-i2v.mjs WAN_RESIDENT_GB_DEFAULT (a test pins the two together).
 const wanResidentDefaultGiB = 3.0
@@ -246,6 +252,10 @@ const wanStorageOverheadGiB = 0.8
 type CardOnly struct {
 	// ResidentGiB is --wan-resident-gb: the share of each expert kept on the compute card.
 	ResidentGiB float64
+	// SageAttention is true when COMFY_EXTRA_ARGS carries --use-sage-attention (or an argparse prefix of it): the runner then sizes the compute card's
+	// activations at wanActivationsSageGiB. Read from the process environment only (Facts.Env): an `env COMFY_EXTRA_ARGS=...` prefix inside the wrapped
+	// command is not seen here, while the runner sees it.
+	SageAttention bool
 }
 
 // estimate is the rule: the files the family loads, sized, and counted in full when together they

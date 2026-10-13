@@ -130,11 +130,16 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 		// The card-only Wan placement (--wan-placement multicard) is read for the Wan graph alone: no other family has it.
 		var cardOnly *CardOnly
 		if model == "wan22" && strings.EqualFold(strings.TrimSpace(c.Flags["wan-placement"]), "multicard") {
-			cardOnly = &CardOnly{ResidentGiB: wanResidentGiB(c.Flags)}
+			cardOnly = &CardOnly{ResidentGiB: wanResidentGiB(c.Flags), SageAttention: sageAttention(f.env("COMFY_EXTRA_ARGS"))}
 		}
 		return estimateWith(model, mediacap.VideoModelFilesFor(model, fb), f, cardOnly)
 	}
 	return Need{}, false
+}
+
+// sageAttention reports whether a COMFY_EXTRA_ARGS value carries sage attention (the seam: it never does yet).
+func sageAttention(extra string) bool {
+	return false
 }
 
 // wanResidentGiB reads --wan-resident-gb (the share of each Wan expert the card-only placement keeps on the compute card). The runner
