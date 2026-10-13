@@ -135,7 +135,7 @@ test("parseCli: a value flag with no value refuses, naming the flag (it used to 
 });
 
 test("parseCli: an unknown or misspelled flag refuses, naming it", () => {
-  for (const bad of ["--bogus", "--cfg_weight", "--temprature", "--seed", "--cfgweight", "--repetition_penalty", "--topp", "--language"]) {
+  for (const bad of ["--bogus", "--cfg_weight", "--temprature", "--seed", "--cfgweight", "--repetition_penalty", "--topp", "--language", "--__proto__", "--constructor"]) {
     const r = parseCli([...BASE, bad, "0.3"]);
     assert.equal(r.ok, false, `${bad} was accepted`);
     assert.ok(r.error.includes(bad), `the refusal must name ${bad}: ${r.error}`);
@@ -147,6 +147,17 @@ test("parseCli: an unknown or misspelled flag refuses, naming it", () => {
   const eq = parseCli([...BASE, "--cfg-weight=0.3"]);
   assert.equal(eq.ok, false, "--flag=value is not a spelling this CLI reads");
   assert.ok(eq.error.includes("--cfg-weight=0.3"), eq.error);
+});
+
+test("parseCli: --model and --base-dir belong to --engine finetuned; the generalist would drop them, so they refuse", () => {
+  for (const k of ["model", "base-dir"]) {
+    for (const engine of [[], ["--engine", "generalist"]]) {
+      const r = parseCli([...BASE, ...engine, "--" + k, "/m/x"]);
+      assert.equal(r.ok, false, `--${k} with ${engine[1] || "the default engine"} was accepted and then ignored`);
+      assert.ok(r.error.includes("--" + k), r.error);
+    }
+    assert.equal(parseCli([...BASE, "--engine", "finetuned", "--" + k, "/m/x"]).ok, true, `--${k} with finetuned`);
+  }
 });
 
 test("parseCli: --engine takes generalist or finetuned only", () => {
@@ -203,8 +214,14 @@ test("the Go voice lane: every flag pipeline.go sends to tts.mjs is accepted, al
     assert.ok(sent.includes(must), `the scan of pipeline.go lost --${must}: ${sent.join(" ")}`);
   }
   for (const k of sent) {
-    const r = parseCli([...BASE, "--" + k, valueFor(k)]);
+    // --model / --base-dir only ever travel with --engine finetuned
+    const engine = k === "engine" ? [] : ["--engine", "finetuned"];
+    const r = parseCli([...BASE, ...engine, "--" + k, valueFor(k)]);
     assert.equal(r.ok, true, `pipeline.go sends --${k} and tts.mjs refuses it: ${r.error}`);
+    if (!["model", "base-dir"].includes(k)) {
+      const bare = parseCli([...BASE, "--" + k, valueFor(k)]);
+      assert.equal(bare.ok, true, `pipeline.go sends --${k} on the generalist lane and tts.mjs refuses it: ${bare.error}`);
+    }
   }
   const all = parseCli([...BASE, ...sent.flatMap((k) => ["--" + k, valueFor(k)])]);
   assert.equal(all.ok, true, all.error);
