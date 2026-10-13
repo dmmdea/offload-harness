@@ -145,7 +145,8 @@ func rescueSchemaMiss(ctx context.Context, rescue RescueFunc, contract core.Agen
 	// The rescued result is judged like any other: only a validated object that
 	// passes the contract's checks reads as a success (the prose alone never does).
 	pr.AcceptanceFailures = EvalAcceptance(contract, w)
-	if strike != nil && pr.ranBase != "" {
+	// Not a queue row's base either: it is the holder's, and the node that wrote the answer is not known to this side.
+	if strike != nil && pr.ranBase != "" && !pr.viaQueue {
 		strike(pr.ranBase, w, pr.AcceptanceFailures)
 	}
 	return pr
