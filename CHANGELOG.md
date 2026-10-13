@@ -59,7 +59,9 @@ Versioning: [SemVer](https://semver.org/).
   widened back, a name dropped from the usage line, the `--model` forwarding removed, the terminator, the flag shape widened to
   `/^--/`, the terminator honoured after it was seen, and both `--flag=value` hints. In `tts_chatterbox.py`: the `generate()` update removed,
   the presence test made a truthiness test (a given `0` lost) and removed (an unset flag passed as `None`), a name dropped from `SAMPLING`, a
-  `dest` misspelled, the finite test and the `nan` fallback removed, and `type=str`. - 2026-10-13 - the display card's cap is read live on its row and audit-yaml names the seats it cannot judge, the card-only placements compute on the faster of two same-size cards, the Wan sizing knows sage attention, and results[].node is the node id placement used
+  `dest` misspelled, the finite test and the `nan` fallback removed, and `type=str`.
+
+## [0.185.0] - 2026-10-13 - the display card's cap is read live on its row and audit-yaml names the seats it cannot judge, the card-only placements compute on the faster of two same-size cards, the Wan sizing knows sage attention, and results[].node is the node id placement used
 
 ### Changed — the card-only placements choose the compute card by board power when two cards are one size, and `WAN_COMPUTE_UUID` names it
 
