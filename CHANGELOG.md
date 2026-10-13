@@ -6,7 +6,60 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.185.0] - 2026-10-13 - the display card's cap is read live on its row and audit-yaml names the seats it cannot judge, the card-only placements compute on the faster of two same-size cards, the Wan sizing knows sage attention, and results[].node is the node id placement used
+### Fixed — the sampling flags of `render/tts.mjs` reach the generalist engine, and an unknown or malformed flag refuses instead of vanishing (0.185.1)
+
+- **The defect.** `render/tts.mjs` documents `--temperature --cfg-weight --exaggeration --repetition-penalty` in its usage header, but
+  `buildWorkerArgs` forwarded the sampling flags only when `--engine finetuned`. The generalist worker `tts_chatterbox.py` had no argparse
+  entry for them and never passed them to `ChatterboxMultilingualTTS.generate()`, so `node render/tts.mjs out.wav "text" --cfg-weight 0.3`
+  on the default engine ran, without a word, at the model's own default (a downstream user hit it narrating in production). And
+  `parseArgs` accepted any `--name`, so a misspelled or unknown flag was dropped the same way, a value flag with no value (last on the
+  line, or an unset shell variable) likewise, and a `--flag` that took the next flag as its value ate it.
+- **The fix, launcher.** `buildWorkerArgs` forwards the six sampling flags (`--temperature --cfg-weight --exaggeration
+  --repetition-penalty --min-p --top-p`) to BOTH workers under the same names, only the ones given; the fine-tuned argv is unchanged.
+  The new `parseCli` / `checkFlags` run before the interpreter is resolved, the lock is taken or a worker starts, and refuse with exit 2,
+  the reason and the usage line (which now lists all six): an unknown flag (named; `--flag=value` gets the spelling to use, and
+  `--no-lock=1` says that flag takes no value), a value flag with no value (last, empty, or followed by another flag), a sampling value that is
+  not a finite decimal number (`abc`, `nan`, `inf`, `1e999`, `0x10`, and the two negative spellings older Python argparse reads as a flag,
+  `-1e-2` and `-5.`), an `--engine` other than `generalist|finetuned`, `--model`/`--base-dir` without `--engine finetuned` (the generalist
+  would ignore them), and a third positional (an unquoted text used to be cut after its first word). The flags object has no prototype, so
+  `--__proto__` is a flag like any other. **Behaviour change:** a command line that carried a stray, misspelled or valueless flag, or an
+  unknown `--engine`, used to run and now exits 2.
+- **The fix, parsing.** A token is a flag only when it is shaped like one (`--` and a name of letters, digits, underscores and inner dashes), so a
+  text that opens with dashes, such as `"--- Intro ---"` (which `generate-audio out.wav -- "--- Intro ---"` keeps intact, CT-52, and the Go
+  lane puts second, before its flags), is the text; before, it was read as a flag that swallowed the next flag, and the narration was
+  whatever positional was left. A bare `--` ends the flags (`tts.mjs out.wav -- "--hola"`). A text that is itself flag-shaped and arrives
+  from the Go lane (which sends no `--`) is refused as an unknown flag, loudly, not narrated wrong.
+- **The fix, worker.** `tts_chatterbox.py` reads `--temperature --cfg-weight --exaggeration --repetition-penalty --min-p --top-p` (the same
+  flags and `dest` names as `tts_chatterbox_ft.py`, `type` a finite float so `nan`, `inf` and `1e999` fail in argument parsing before the
+  model loads, default `None`) and passes only the ones given to `generate()` under the model's keyword names (`temperature`, `cfg_weight`,
+  `exaggeration`, `repetition_penalty`, `min_p`, `top_p`): an unset flag keeps the model's default, a given `0` is passed, and the log line
+  says what was passed. The fine-tuned worker already read the six flags and is unchanged (a test runs the launcher's argv through it).
+- **Every flag the harness sends stays accepted.** `internal/pipeline/pipeline.go` builds this command line for the voice lane
+  (`--clone --lang`, and `--engine --model --base-dir --clone --lang` plus the `voicegen_ft_*` recipe); `render/tts.test.mjs` reads the Go source,
+  checks that the scan still finds those flags and that `parseCli` accepts each, alone and together, and pins the two argv shapes through to the
+  workers' argv. No Go file changed.
+- **Docs.** `render/README.md` (flag table, the strict command line) and `docs/systems/media-generation.md` (entry points, source map).
+- **Tests.** `render/tts.test.mjs`: the launcher cases above through `parseCli`; two process-level cases (exit 2, the flag named, the usage line
+  lists all six) that run with `--no-lock`, an isolated environment and an interpreter path that does not exist, so a command line that is
+  not refused cannot reach a model, a GPU or the machine's llama-swap; and the worker cases, which run the REAL `tts_chatterbox.py` and
+  `tts_chatterbox_ft.py` under `python -I` against stub `torch` / `torchaudio` / `chatterbox` modules (the stub `generate()` has the real
+  signature, so a keyword the model does not take is a `TypeError`, and prints the keywords it was given). Nothing loads a model.
+  **Red first**, each stage on its own commit before its fix: on a behaviour-free seam (`parseCli` returning today's decisions), 14
+  assertion failures, among them `buildWorkerArgs` (`actual [ --out out.wav --text hola --lang es --ref /r/ref.wav ]`, no sampling flag),
+  `--temperature "abc" (default engine) was accepted`, `--bogus was accepted`, `a misspelled engine silently ran the generalist worker`,
+  both process cases (the run went on to the worker lane instead of exiting 2) and four worker cases (`usage: tts_chatterbox.py [-h] --out OUT
+  --text TEXT [--lang LANG] [--ref REF]`, exit 2); then `--model with the default engine was accepted and then ignored`;
+  `--temperature "-1e-2" (default engine) was accepted`; and three parser cases (`unknown flag --- Intro ---`, `unknown flag --`, the
+  `--no-lock=1` hint). Mutation proofs: 30 single-line mutants through `scripts/mutation-check.sh` (each landed on exactly one line,
+  compiled, and was restored byte for byte; every verdict `MUTATION-VERDICT: RED`), run with the suite under the hidden window watcher. In
+  `tts.mjs`: the original bug (the forwarding guarded by `flags.engine === "finetuned"` again), a name dropped from `SAMPLING_FLAGS` and one
+  from `VALUE_FLAGS` (`base-dir`, which the Go lane sends), the unknown-flag test made always true, the finite-number test and, separately, the
+  decimal-shape test removed, the engine check, the `--model`/`--base-dir` check, the `startsWith("--")` arm and the empty-string arm of the
+  missing-value check, the third-positional check, `Object.create(null)` replaced by `{}`, exit code 2 changed to 1, the number regex
+  widened back, a name dropped from the usage line, the `--model` forwarding removed, the terminator, the flag shape widened to
+  `/^--/`, the terminator honoured after it was seen, and both `--flag=value` hints. In `tts_chatterbox.py`: the `generate()` update removed,
+  the presence test made a truthiness test (a given `0` lost) and removed (an unset flag passed as `None`), a name dropped from `SAMPLING`, a
+  `dest` misspelled, the finite test and the `nan` fallback removed, and `type=str`. - 2026-10-13 - the display card's cap is read live on its row and audit-yaml names the seats it cannot judge, the card-only placements compute on the faster of two same-size cards, the Wan sizing knows sage attention, and results[].node is the node id placement used
 
 ### Changed — the card-only placements choose the compute card by board power when two cards are one size, and `WAN_COMPUTE_UUID` names it
 

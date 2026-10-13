@@ -446,6 +446,16 @@ composition lane is also a fleet task (`compose-video`), restricted to vetted te
 A bare `--` ends the flags on every one of these verbs (CT-52): `generate-audio out.wav -- "--- Intro ---"` keeps a text that starts with
 a dash, and so do `generate-video`, `animate-character` and the verbs that take one file or text (a lone `-` is still stdin).
 
+The Chatterbox voice worker has a CLI of its own, `node render/tts.mjs <out.wav> "<text>" [flags]` (the script `voicegen_script` names;
+the Go voice lane builds this command line). The six sampling flags `--temperature --cfg-weight --exaggeration --repetition-penalty
+--min-p --top-p` reach `generate()` of either engine under the same names (0.185.1; before, only the fine-tuned worker read them, so on
+the default engine they changed nothing), and only the ones given: an unset flag keeps the model's own default. The command line is
+checked before the lock (`parseCli` / `checkFlags` in `render/tts.mjs`): an unknown flag, a flag with no value, a sampling value that
+is not a finite decimal number, an `--engine` other than `generalist|finetuned`, `--model` / `--base-dir` without `--engine finetuned`
+and a third positional (an unquoted text) exit 2 with the reason and the usage line. A token is a flag only when it is shaped like one
+(`--` and a name), so a text that opens with dashes (`"--- Intro ---"`, which the CT-52 verbs keep intact) is the text, and a bare `--`
+ends the flags. Every flag `internal/pipeline/pipeline.go` sends stays accepted (`render/tts.test.mjs` reads the Go source to check). Flag table: [`render/README.md`](../../render/README.md#voice--narration--tts-chatterbox-multilingual-voice-cloning).
+
 ## Dependencies
 
 A local ComfyUI installation (`comfy_dir`), the model files named by the bindings below, GIMP for the
@@ -2088,6 +2098,11 @@ recorded as known offenders with their reason rather than silently skipped — a
   and /32 normalization; [`render/sdcpp-video.mjs`](../../render/sdcpp-video.mjs),
   [`render/sdcpp-animate.mjs`](../../render/sdcpp-animate.mjs) and
   [`render/audiocpp-generate.mjs`](../../render/audiocpp-generate.mjs) are the three runners
+- [`render/tts.mjs`](../../render/tts.mjs), [`render/tts_chatterbox.py`](../../render/tts_chatterbox.py) and
+  [`render/tts_chatterbox_ft.py`](../../render/tts_chatterbox_ft.py) — the Chatterbox voice lane: `parseCli` / `checkFlags` (the
+  strict command line), `buildWorkerArgs` (the six sampling flags to either worker), and the workers' argparse;
+  [`render/tts.test.mjs`](../../render/tts.test.mjs) pins it, runs the real workers against stub `torch` / `chatterbox` modules
+  under `python -I` (no model, no GPU) and reads `internal/pipeline/pipeline.go` for the flags the voice lane sends
 - [`internal/pipeline/igpumedia.go`](../../internal/pipeline/igpumedia.go),
   [`internal/config/igpumedia.go`](../../internal/config/igpumedia.go) and
   [`internal/mediacap/igpumedia.go`](../../internal/mediacap/igpumedia.go) — the iGPU lanes' routing,
