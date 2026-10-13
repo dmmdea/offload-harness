@@ -1251,7 +1251,7 @@ its `node` is the id the claimant stamped on its answer: the id it claims under 
 resolves, so health, the claim and the envelope agree), its hostname before. In a mixed fleet the push path names the node by the
 placement id as soon as the delegator is deployed, whatever the nodes run, and the queue lane does so only when every node does. A run
 on this box's own seat is named by the placement too, which for an engine that is another box's (register C-58) is that box's name, not
-the runner's. `rig --node` selects the rows by either name (the `node` and `result.node_id` of the corpus row), so a node picked by the
+the runner's (the runner stamps its own box on its result, so such a row also carries that id in `node_reported`). `rig --node` selects the rows by either name (the `node` and `result.node_id` of the corpus row), so a node picked by the
 id its card shows finds the rows written before the change as well.
 
 **The retry never lands on a FENCED or RESERVED local seat (0.117.7, register D-94; reservations, register C-81).** Before choosing the local

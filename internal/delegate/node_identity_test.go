@@ -249,6 +249,9 @@ func TestALocalRunNamesTheNodeByThePlacementNotByTheRunnersEnvelope(t *testing.T
 		if pr.Node != "node-b" {
 			t.Errorf("node = %q, want the endpoint's host node-b: the runner's envelope name (envelope-local) does not know the engine is another box's", pr.Node)
 		}
+		if got := NodeReported(pr); got != "envelope-local" {
+			t.Errorf("node_reported = %q, want envelope-local: the runner's own stamp rides beside the endpoint's host", got)
+		}
 	})
 
 	t.Run("this box's own engine keeps the runner's envelope name", func(t *testing.T) {
@@ -258,6 +261,9 @@ func TestALocalRunNamesTheNodeByThePlacementNotByTheRunnersEnvelope(t *testing.T
 		}
 		if pr.Node != "envelope-local" {
 			t.Errorf("node = %q, want envelope-local: nothing in this placement names a box other than the runner's own", pr.Node)
+		}
+		if got := NodeReported(pr); got != "" {
+			t.Errorf("node_reported = %q on a run whose node IS the runner's stamp: nothing differs", got)
 		}
 	})
 }
