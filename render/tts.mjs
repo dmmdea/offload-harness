@@ -15,7 +15,8 @@
 // a sampling value that is not a finite number, an unknown --engine, --model/--base-dir without
 // --engine finetuned, or a third positional (an unquoted text) exits 2 with a usage line. The six sampling
 // flags go to BOTH workers under the same names; a flag that is not given is not forwarded, so the model
-// keeps its own default.
+// keeps its own default. A text that opens with dashes but is not shaped like a flag name ("--- Intro ---")
+// is the text; a bare "--" ends the flags (tts.mjs out.wav -- "--hola" gives the text --hola).
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { existsSync } from "node:fs";
@@ -40,14 +41,22 @@ export const BOOL_FLAGS = ["no-lock"];
 export const KNOWN_FLAGS = [...VALUE_FLAGS, ...BOOL_FLAGS];
 export const ENGINES = ["generalist", "finetuned"];
 
+// A token is a flag when it is shaped like one: "--", a name of letters, digits and underscores (not opening
+// with a digit) joined by single dashes, and an optional "=value" (which checkFlags refuses with the spelling to use). A text that opens
+// with dashes ("--- Intro ---", the CT-52 case the Go verbs keep intact) is therefore a positional, not a flag.
+const FLAG_SHAPE = /^--[A-Za-z_][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)*(?:=[\s\S]*)?$/;
+
 // parseArgs splits argv into positionals + flags. --no-lock is boolean; all other --flags
-// take the next token as their value. The flags object has no prototype, so a flag named like an
-// Object.prototype member (--__proto__) is a flag like any other and checkFlags sees it.
+// take the next token as their value. A bare "--" ends the flags: every later token is a positional. The
+// flags object has no prototype, so a flag named like an Object.prototype member (--__proto__) is a flag
+// like any other and checkFlags sees it.
 export function parseArgs(argv) {
   const pos = [];
   const flags = Object.create(null);
+  let ended = false;
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i].startsWith("--")) {
+    if (!ended && argv[i] === "--") ended = true;
+    else if (!ended && FLAG_SHAPE.test(argv[i])) {
       const k = argv[i].slice(2);
       if (BOOL_FLAGS.includes(k)) flags[k] = true;
       else {
@@ -100,8 +109,13 @@ const DECIMAL = /^(?:\+?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?|-(?:\d+|\d*\.\d+))$
 export function checkFlags(flags) {
   for (const k of Object.keys(flags)) {
     if (KNOWN_FLAGS.includes(k)) continue;
+    // --name=value: say how to write it, for a flag that exists
     const eq = k.indexOf("=");
-    return `unknown flag --${k}` + (eq > 0 ? ` (a flag takes its value as the next argument: --${k.slice(0, eq)} ${k.slice(eq + 1)})` : "");
+    const name = eq > 0 ? k.slice(0, eq) : "";
+    let hint = "";
+    if (BOOL_FLAGS.includes(name)) hint = ` (--${name} takes no value)`;
+    else if (KNOWN_FLAGS.includes(name)) hint = ` (a flag takes its value as the next argument: --${name} ${k.slice(eq + 1)})`;
+    return `unknown flag --${k}${hint}`;
   }
   for (const k of VALUE_FLAGS) {
     if (!(k in flags)) continue;
