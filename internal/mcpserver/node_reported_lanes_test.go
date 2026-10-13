@@ -162,22 +162,17 @@ func TestTheDocsNameNodeReportedOnEveryDoorThatPublishesIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	start := strings.Index(text, "## [Unreleased]")
-	if start < 0 {
-		t.Fatal("CHANGELOG.md has no [Unreleased] section: this check is blind")
-	}
-	section := text[start:]
-	if end := strings.Index(section[len("## [Unreleased]"):], "\n## ["); end >= 0 {
-		section = section[:len("## [Unreleased]")+end]
-	}
+	// The bullet is found wherever it sits (under [Unreleased] before the release bump, under the release's own heading
+	// after it), so the version bump cannot blind this check: the first "The rule." bullet that describes node_reported.
 	rule := ""
-	for _, line := range strings.Split(section, "\n") {
-		if strings.HasPrefix(line, "- **The rule.**") {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "- **The rule.**") && strings.Contains(line, "`results[].node_reported`") {
 			rule = line
+			break
 		}
 	}
-	if !strings.Contains(rule, "`results[].node_reported`") {
-		t.Fatal("the [Unreleased] \"The rule\" bullet no longer describes node_reported: this check is blind")
+	if rule == "" {
+		t.Fatal("no CHANGELOG \"The rule\" bullet describes node_reported: this check is blind")
 	}
 	for _, door := range []string{"offload_review_diff", "named-seat"} {
 		if !strings.Contains(rule, door) {
