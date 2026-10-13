@@ -279,3 +279,71 @@ func TestTableKeepsTheRunningLineAndTheCapLineOfTheDisplayCard(t *testing.T) {
 		t.Errorf("both lines must be printed:\n%s", text)
 	}
 }
+
+// An over card always says by how much. nvidia-smi reads whole MiB, so a card a few MiB past its budget is a real
+// reading, and a key rounded to hundredths of a GiB must not turn it into "over by nothing": over_cap true with the
+// amount missing from the JSON.
+func TestDisplayCapOverIsNeverOverByNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		excess float64 // GiB past the 9.6 GiB budget
+	}{
+		{"past the float tolerance", 5e-6},
+		{"half a MiB past", 0.0005},
+		{"four MiB past", 0.004},
+		{"forty MiB past", 0.04},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := RowsWithCap(capTable(6.4-tc.excess), nil, 60, 0)[1].DisplayCap
+			if d == nil || !d.OverCap {
+				t.Fatalf("control: %.6f GiB past the budget is over: %+v", tc.excess, d)
+			}
+			if d.OverByGiB <= 0 {
+				t.Errorf("an over card is over by something, got over_by_gb %v (%+v)", d.OverByGiB, *d)
+			}
+			if d.OverByGiB < tc.excess-1e-4 || d.OverByGiB > tc.excess+1e-4 {
+				t.Errorf("over_by_gb = %v, want %v to the key's resolution of 0.0001 GiB", d.OverByGiB, tc.excess)
+			}
+			b, err := json.Marshal(d)
+			if err != nil || !strings.Contains(string(b), `"over_by_gb"`) {
+				t.Errorf("a consumer that sees over_cap true must see the amount (%v): %s", err, b)
+			}
+		})
+	}
+	// The positive control: a card within its budget carries no amount.
+	within, _ := json.Marshal(RowsWithCap(capTable(10.0), nil, 60, 0)[1].DisplayCap)
+	if strings.Contains(string(within), `"over_by_gb"`) || !strings.Contains(string(within), `"over_cap":false`) {
+		t.Errorf("control: a card within its cap is not over and names no amount: %s", within)
+	}
+}
+
+// The text line never reads "OVER by 0.0 GiB": a breach under 0.05 GiB says so in words, and the figure past it keeps
+// its one decimal.
+func TestTableNeverSaysOverByZero(t *testing.T) {
+	capLineOf := func(excess float64) string {
+		for _, ln := range Table(RowsWithCap(capTable(6.4-excess), nil, 60, 0)) {
+			if strings.Contains(ln, "display cap:") {
+				return ln
+			}
+		}
+		t.Fatalf("no display cap line at %.4f GiB past the budget", excess)
+		return ""
+	}
+	for _, tc := range []struct {
+		excess float64
+		want   string
+	}{
+		{0.0005, "OVER by less than 0.1 GiB"},
+		{0.04, "OVER by less than 0.1 GiB"},
+		{0.06, "OVER by 0.1 GiB"}, // the controls: past 0.05 the figure keeps its one decimal
+		{3.4, "OVER by 3.4 GiB"},
+	} {
+		ln := capLineOf(tc.excess)
+		if !strings.Contains(ln, tc.want) {
+			t.Errorf("%.4f GiB past the budget: the line must contain %q: %s", tc.excess, tc.want, ln)
+		}
+		if strings.Contains(ln, "OVER by 0.0 GiB") {
+			t.Errorf("%.4f GiB past the budget: an over card is never over by 0.0 GiB: %s", tc.excess, ln)
+		}
+	}
+}

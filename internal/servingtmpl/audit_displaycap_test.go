@@ -302,3 +302,26 @@ func TestHasProxyEntry(t *testing.T) {
 		}
 	}
 }
+
+// A single-card box has no display card to be on or off (its only card is its work card), and the note is silent
+// there, as the docs say, even on a reading that could not say which card the monitor is on: gpuprobe marks every
+// device of such a reading unknown, a one-card box included, and with one card there is nothing to tell apart.
+func TestUnseenIsSilentOnASingleCardBoxEvenWhenTheReadingCouldNotTell(t *testing.T) {
+	cfg := pinCfg(proxyEntry("seat"), plainEntry("free"))
+	dev := func(i int, uuid string) gpuprobe.Device {
+		return gpuprobe.Device{Index: i, UUID: uuid, Name: "NVIDIA GeForce RTX 5060 Ti", TotalGiB: 15.9, FreeGiB: 15, AttachedUnknown: true}
+	}
+	one, _ := gpuprobe.BuildCards([]gpuprobe.Device{dev(0, pinCard5060A)}, "")
+	if len(one) != 1 || !one[0].DisplayUnknown || one[0].Display {
+		t.Fatalf("fixture: one card, unknown reading, never flagged: %+v", one)
+	}
+	if vs := AuditDisplayCapUnseen(cfg, one); len(vs) != 0 {
+		t.Errorf("a single-card box is silent even on a reading that could not say which card the monitor is on: %+v", vs)
+	}
+	// The positive control: the same kind of reading on two cards is not silent (the monitor could be on either).
+	two, _ := gpuprobe.BuildCards([]gpuprobe.Device{dev(0, pinCard5060A), dev(1, pinCard5070)}, "")
+	vs := AuditDisplayCapUnseen(cfg, two)
+	if len(vs) != 1 || vs[0].Where != "no display card known" {
+		t.Errorf("control: two cards of an unknown reading get the one note saying so: %+v", vs)
+	}
+}

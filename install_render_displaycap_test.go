@@ -197,3 +197,36 @@ func TestAuditYAMLSaysWhenTheReadingCouldNotSayWhichCardIsTheMonitors(t *testing
 		t.Errorf("no entry is named on a reading that cannot say which card is the monitor's:\n%s", out)
 	}
 }
+
+// The audit-yaml help says what the code does. The display-cap-unseen note needs the card table, and the table is read
+// for a file that pins a device or has a proxy: seat (TestAuditYAMLDoesNotReadTheCardTableWhenNothingPins keeps a file
+// with neither from running nvidia-smi), so an unpinned entry is named only in such a file. The help must not promise
+// the note to a file of unpinned entries alone, which is the commonest shape.
+func TestAuditYAMLHelpDoesNotPromiseTheNoteToAFileThatNeitherPinsNorProxies(t *testing.T) {
+	help := captureStderr(t, usage)
+	start, end := strings.Index(help, "local-offload audit-yaml"), strings.Index(help, "local-offload audit-config")
+	if start < 0 || end < start {
+		t.Fatalf("the help has no audit-yaml entry:\n%s", help)
+	}
+	section := help[start:end]
+	if !strings.Contains(section, "display-cap-unseen") {
+		t.Fatalf("control: the audit-yaml help describes the note:\n%s", section)
+	}
+	if strings.Contains(section, "an unpinned entry or a pin") {
+		t.Errorf("the help promises the note to a file with an unpinned entry, which the code does not print:\n%s", section)
+	}
+	if !strings.Contains(section, "a file with neither") {
+		t.Errorf("the help must say that a file with neither a pin nor a proxy: seat is not read:\n%s", section)
+	}
+	// The behaviour the help describes: a file of unpinned entries alone gets no note and never reads the card table;
+	// an unpinned entry in a file that also has a proxy: seat is named.
+	reads := countCardTableReads(t, displayDevs(), nil)
+	out, err := auditText(t, "models:\n"+unseenPlainEntry)
+	if err != nil || strings.Contains(out, "display-cap-unseen") || *reads != 0 {
+		t.Errorf("unpinned entries alone: no note, no table read (err=%v, reads=%d):\n%s", err, *reads, out)
+	}
+	out, err = auditText(t, "models:\n"+unseenProxyEntry+unseenPlainEntry)
+	if err != nil || !strings.Contains(out, "free-run") || *reads != 1 {
+		t.Errorf("control: with a proxy: seat in the file the unpinned entry is named after one table read (err=%v, reads=%d):\n%s", err, *reads, out)
+	}
+}
