@@ -127,3 +127,9 @@ a runner.
 The shared inputs and expected latent-token counts for the token cap. `render/igpu-engine.test.mjs`
 (`latentTokens`) and `internal/config` (`LatentTokens`) both read it, so the Go and Node
 formulas cannot drift apart.
+
+## sage-token-table.json
+
+The `COMFY_EXTRA_ARGS` values and whether each carries sage attention (`--use-sage-attention`, or an argparse prefix of it of 8+ characters), token by token. `render/wan-multicard.test.mjs`
+(`wanAttentionMode` over `isSageAttentionToken` of `render/comfy-lifecycle.mjs`) and `internal/hostneed` (`sageAttention`, through the lease sizing) both read it, so a value is
+sage to both or to neither. `--use-sa` is sage; `--use-s` also begins `--use-split-cross-attention` and is not.

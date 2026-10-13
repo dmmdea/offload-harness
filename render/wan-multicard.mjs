@@ -10,21 +10,26 @@
 // Measured on two RTX 5060 Ti 16 GB at the film's geometry (docs/systems/media-generation.md, "Card-only Wan"): the
 // 2026-10-11 benchmark, a 4-step run of the 20-step film recipe, peaked at 13.3 GiB on the compute card and 11.1 GiB on the
 // storage card; the full 20-step clip of that day peaked at 15.18 GiB and 10.86 GiB, with 2.3 GiB of host growth over
-// ComfyUI's idle.
+// ComfyUI's idle. With --use-sage-attention in COMFY_EXTRA_ARGS (2026-10-12) the activations are 3 GiB larger at the film's
+// size (15.2 GiB beyond the resident share, measured at resident 0): wanAttentionMode reads it and the sizing follows.
 //
 // WHAT THIS FILE DECIDES, all of it before ComfyUI starts, so a wrong card is a refusal and not a render:
 //   - which two cards (the lease's: GPU_LEASE_DEVICES, else the lease record; --wan-cards names them only when no lease
 //     does, and under a lease it can only confirm them), read from the driver's card table; neither may drive a display,
 //     and a card whose display state the driver does not report is refused too;
-//   - which of them is cuda:0 and which cuda:1 (the larger card computes; of two equal cards the lower UUID stores and the higher computes, the order a lease sorts its ids in);
+//   - which of them is cuda:0 and which cuda:1 (chooseRoles: the larger card computes, except that of two cards within 1 percent of one size the one with the higher
+//     board power computes when it is at least 1.25 times the other's; of two equal cards the lower UUID stores and the higher computes, the order a lease sorts its ids in;
+//     the environment variable WAN_COMPUTE_UUID names the compute card of the pair instead);
 //   - the ComfyUI launch that placement needs (flags, env, instance key), as plain data for ensureComfy;
 //   - the DisTorch2 allocation string.
-// Dependency-free; the card table and the pack scan are injectable for tests.
+// It reads the lease's cards from gpu-lock.mjs and the sage-attention token rule from comfy-lifecycle.mjs, and nothing else of the harness; the card table and the
+// pack scan are injectable for tests.
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { leaseDevices } from "./gpu-lock.mjs";
+import { isSageAttentionToken } from "./comfy-lifecycle.mjs";
 import { WAN_PLACEMENTS, WAN_PLACEMENT_DEFAULT, WAN_RESIDENT_GB_DEFAULT, WAN_STORAGE_DEVICE, WAN_COMPUTE_DEVICE } from "./wf-wan22-i2v.mjs";
 
 /** Where the harness-owned ComfyUI-side code lives (next to this file): the yaml ComfyUI is pointed at, and the node folder it names. */
@@ -97,7 +102,9 @@ const QUERY = "index,uuid,name,memory.total,memory.free,display_active,display_a
  * harness's own rule, internal/gpuprobe/display.go: a monitor on the card counts with the screen asleep too). A column the
  * driver does not give, or gives as something else than Enabled/Disabled and Yes/No, is "unknown": `display` stays false (an
  * unknown is never a yes) and `displayUnknown` is true, which resolveWanCards refuses for a chosen card. A row whose size is not
- * a number is no card (a size check on NaN would pass); a free column that is not a number reads as 0.
+ * a number is no card (a size check on NaN would pass); a free column that is not a number reads as 0. `powerLimitW` is 0 (not read)
+ * here: the board power is not a column of this query but a second one (queryCardsRanked), so that a driver which rejects it cannot cost the display
+ * state its ladder.
  */
 export function parseCardTable(text) {
   const cards = [];
@@ -113,6 +120,7 @@ export function parseCardTable(text) {
       display: active === "enabled" || attached === "yes",
       displayUnknown: !(["enabled", "disabled"].includes(active) && ["yes", "no"].includes(attached)),
       displayActive: cols[5] || "", displayAttached: cols[6] || "",
+      powerLimitW: 0, // the board's design power in watts; 0 = not read (queryCardsRanked fills it from a second query)
     });
   }
   return cards;
@@ -121,7 +129,7 @@ export function parseCardTable(text) {
 /**
  * queryCards asks the driver for the card table. A failed query is asked once more before a driver is taken to lack
  * display_attached (a transient failure is not a missing column); the fallback without it leaves every card's display state
- * unknown, which the selection refuses.
+ * unknown, which the selection refuses. The planners read the table through queryCardsRanked, which adds the board power.
  */
 export function queryCards(spawnSync = nodeSpawnSync) {
   const ask = (fields) => spawnSync("nvidia-smi", [`--query-gpu=${fields}`, "--format=csv,noheader,nounits"], { encoding: "utf8", timeout: 30000, windowsHide: true });
@@ -135,6 +143,43 @@ export function queryCards(spawnSync = nodeSpawnSync) {
   const cards = parseCardTable(r.stdout);
   if (cards.length === 0) throw placementError("nvidia-smi listed no card");
   return cards;
+}
+
+/** What the board-power query asks for: the UUID to join on, and the board's design power (not the operator-adjustable power.limit). */
+const POWER_QUERY = "uuid,power.default_limit";
+
+/**
+ * parsePowerTable reads `nvidia-smi --query-gpu=uuid,power.default_limit --format=csv,noheader,nounits` into a map from the lower-cased UUID to watts.
+ * A power the driver does not report ([N/A], [Not Supported], an empty cell) or reports as something else than a positive number is no reading and is left
+ * out, so a card without one stays at 0 (unknown); a row that is no card, or has no power column, is skipped.
+ */
+function parsePowerTable(text) {
+  const watts = new Map();
+  for (const raw of String(text || "").split(/\r?\n/)) {
+    const cols = raw.split(",").map((c) => c.trim());
+    const w = Number(cols[1]);
+    if (/^GPU-/i.test(cols[0]) && Number.isFinite(w) && w > 0) watts.set(cols[0].toLowerCase(), w);
+  }
+  return watts;
+}
+
+/**
+ * queryCardsRanked: the card table (queryCards, its display ladder untouched) with each board's design power joined on as powerLimitW. The power is a
+ * SECOND, best-effort query, asked once more when it fails (a transient failure must not drop the ranking and flip the roles of a pair, and with them the
+ * instance key): had it been one more column of the display query, a driver that rejects the column would have cost the display_attached ladder its
+ * rungs. A power that cannot be read at all leaves every card at 0, which ranks nothing: the roles are then the ones the planner always gave, and the
+ * placement is never refused for it. Every ask hides its console window on Windows (windowsHide).
+ */
+export function queryCardsRanked(spawnSync = nodeSpawnSync) {
+  // forwarded through a rest parameter, not handed over as a value: queryCards' own calls carry windowsHide, and the
+  // no-visible-windows scan can only judge a call it can see
+  const cards = queryCards((...a) => spawnSync(...a));
+  const askPower = () => { try { return spawnSync("nvidia-smi", [`--query-gpu=${POWER_QUERY}`, "--format=csv,noheader,nounits"], { encoding: "utf8", timeout: 30000, windowsHide: true }); } catch { return null; } };
+  let r = askPower();
+  if (!r || r.status !== 0 || !r.stdout) r = askPower();
+  if (!r || r.status !== 0 || !r.stdout) return cards;
+  const watts = parsePowerTable(r.stdout);
+  return cards.map((c) => ({ ...c, powerLimitW: watts.get(c.uuid.toLowerCase()) || 0 }));
 }
 
 // ---- which cards ----------------------------------------------------------------------------------
@@ -179,11 +224,70 @@ function matchCard(token, cards) {
 }
 
 /**
+ * Two cards whose sizes differ by no more than this fraction of the larger are one size. CHOSEN, not measured, the way WAN_COMPUTE_CONTEXT_GIB is: the exact
+ * byte count of a card's memory is a few MiB apart between boards of one generation (16311 MiB against 16303 MiB on a 5060 Ti beside a 5070 Ti) and says
+ * nothing about their speed, and 1 percent of 16 GiB is 163 MiB, far under any step between two memory sizes.
+ */
+export const VRAM_EQUAL_FRACTION = 0.01;
+/**
+ * Of two cards of one size, the faster board computes when its design power (power.default_limit) is at least this many times the other's. CHOSEN, not
+ * measured: the pair this was written for reads 300 W against 180 W (1.67 times; measured 2026-10-12 on a 16 GB Blackwell pair with --use-sage-attention: the
+ * higher-power card sampled about 2.5 times as fast), and a factory-overclocked variant of one chip sits near 1.1 times, which must stay a tie.
+ */
+export const POWER_RANK_RATIO = 1.25;
+
+/**
+ * computeOverride: the WAN_COMPUTE_UUID of an environment (an nvidia-smi index, a UUID or a UUID prefix of 8+ characters after the optional "GPU-"), the card
+ * the operator says computes; "" when absent or blank. Both planners read it, because the typed image and edit doors can carry no flag and their runner
+ * inherits the process environment.
+ */
+export function computeOverride(env = process.env) {
+  return String((env && env.WAN_COMPUTE_UUID) || "").trim();
+}
+
+/** Two cards are one size when they differ by no more than VRAM_EQUAL_FRACTION of the larger. */
+const sameSizeClass = (a, b) => Math.abs(a.totalMiB - b.totalMiB) <= VRAM_EQUAL_FRACTION * Math.max(a.totalMiB, b.totalMiB);
+/** A board power is known when the driver gave a positive number (0 means not read). */
+const powerKnown = (c) => Number.isFinite(c.powerLimitW) && c.powerLimitW > 0;
+
+/**
+ * chooseRoles gives the two cards their roles: { storage, compute, why }, why being the rule that chose the compute card.
+ * One size (within VRAM_EQUAL_FRACTION), both board powers known and at least POWER_RANK_RATIO apart: the higher-power card computes (cuda:1).
+ * Anything else is the rule the planner always had, so a power that could not be read reproduces it exactly: the larger card computes, and of two
+ * equal cards the one with the higher UUID does, the lower storing (cuda:0), which is the order a lease sorts its ids in (internal/gpulease
+ * NormalizeDevices): a pair named with --wan-cards gets the roles the same pair gets under a lease, whatever order the caller typed it in.
+ */
+export function chooseRoles(first, second) {
+  const oneSize = sameSizeClass(first, second);
+  const bothKnown = powerKnown(first) && powerKnown(second);
+  const [slow, fast] = first.powerLimitW <= second.powerLimitW ? [first, second] : [second, first];
+  if (oneSize && bothKnown && fast.powerLimitW >= POWER_RANK_RATIO * slow.powerLimitW) {
+    return { storage: slow, compute: fast, why: `the faster card: ${fast.powerLimitW} W board power against ${slow.powerLimitW} W` };
+  }
+  let storage, compute;
+  if (first.totalMiB !== second.totalMiB) [storage, compute] = second.totalMiB > first.totalMiB ? [first, second] : [second, first];
+  else [storage, compute] = first.uuid.toLowerCase() <= second.uuid.toLowerCase() ? [first, second] : [second, first];
+  const why = first.totalMiB !== second.totalMiB ? `the larger card (${compute.totalMiB} MiB against ${storage.totalMiB} MiB)` : "two cards of one size: the higher UUID computes";
+  const unread = [first, second].filter((c) => !powerKnown(c)).map((c) => `idx ${c.index}`).join(", ");
+  const remark = !oneSize ? "" : bothKnown ? `board power ${slow.powerLimitW} W and ${fast.powerLimitW} W differ by less than ${POWER_RANK_RATIO} times` : `board power not reported for ${unread}`;
+  return { storage, compute, why: remark ? `${why} (${remark})` : why };
+}
+
+/** computeChosen: the clause the planners' one-line summary ends with: the rule that chose the compute card, and the note of an override that was ignored. */
+export function computeChosen(pair) {
+  return `compute card chosen: ${pair.why}${pair.note ? ` (${pair.note})` : ""}`;
+}
+
+/**
  * resolveWanCards turns the tokens into the two cards and their roles. It refuses (with the reason) when there are not
  * exactly two distinct cards, when a token names no card of the driver's table, or when a card drives a display.
- * Roles: the larger card is the compute card (cuda:1); of two equal cards the one with the higher UUID computes.
+ * Roles (chooseRoles): the larger card computes (cuda:1), of two equal cards the one with the higher UUID, and of two cards of one size (within
+ * 1 percent) the one with the higher board power when the two differ by 1.25 times or more. `compute` is WAN_COMPUTE_UUID (computeOverride): a token that
+ * names exactly one card of the pair makes it the compute card, beating both rules (checkResident still judges it); one that names no card of the
+ * driver's table is refused (an explicit setting must not run quietly on a typo or a stale id); one that names a card outside the pair, or begins more than
+ * one card of the table, is ignored: the roles are ranked and `note` says so.
  */
-export function resolveWanCards({ tokens, source, cards, cardsFlag = "wan-cards" }) {
+export function resolveWanCards({ tokens, source, cards, cardsFlag = "wan-cards", compute: computeToken = "" }) {
   if (!tokens || tokens.length === 0) {
     throw placementError(`the multicard placement needs the two cards it runs on, and none was named: run it under \`local-offload gpu reserve --devices <card>,<card>\` (the lease names them), or pass --${cardsFlag} <card>,<card>`);
   }
@@ -209,13 +313,17 @@ export function resolveWanCards({ tokens, source, cards, cardsFlag = "wan-cards"
     throw placementError(`cannot tell whether idx ${unsure[0].index} (${unsure[0].name}) drives a display (the driver reported display_active ${unsure[0].displayActive || "nothing"}, display_attached ${unsure[0].displayAttached || "nothing"}), and the multicard placement never uses a display card, so it will not guess: lease two cards whose display state the driver reports`);
   }
   const [first, second] = found;
-  // The larger card computes. Cards of one size take their roles from their ids: the lower one stores (cuda:0), the higher one computes (cuda:1), which is
-  // the order the lease sorts its ids in (internal/gpulease NormalizeDevices), so a pair named with --wan-cards gets the roles the same pair gets under a
-  // lease, the split the benchmark measured, whatever order the caller typed it in.
-  let storage, compute;
-  if (first.totalMiB !== second.totalMiB) [storage, compute] = second.totalMiB > first.totalMiB ? [first, second] : [second, first];
-  else [storage, compute] = first.uuid.toLowerCase() <= second.uuid.toLowerCase() ? [first, second] : [second, first];
-  return { storage, compute, source };
+  const token = String(computeToken || "").trim();
+  let note = "";
+  if (token) {
+    const named = matchCards(token, cards);
+    const pairText = found.map((c) => `idx ${c.index}`).join(", ");
+    if (named.length === 0) throw placementError(`WAN_COMPUTE_UUID names ${JSON.stringify(token)}, which is no card in the driver's table (${cards.map((c) => `${c.index}:${c.uuid}`).join(", ")}), so it cannot say which of the two cards (${pairText}) computes: name one of them by its nvidia-smi index, its UUID or a UUID prefix of 8 or more characters after the optional "GPU-", or unset it${/^\d+$/.test(token) ? ` (a token of digits alone is read as an nvidia-smi index; a UUID prefix made of digits needs the "GPU-" spelling (GPU-${token}))` : ""}`);
+    if (named.length === 1 && found.includes(named[0])) return { storage: found.find((c) => c !== named[0]), compute: named[0], source, why: "named by WAN_COMPUTE_UUID", note: "" };
+    note = `WAN_COMPUTE_UUID names ${JSON.stringify(token)}, which does not name exactly one of the two cards (${pairText}); ranked instead`;
+  }
+  const { storage, compute, why } = chooseRoles(first, second);
+  return { storage, compute, source, why, note };
 }
 
 // ---- the ComfyUI launch ---------------------------------------------------------------------------
@@ -287,7 +395,8 @@ export function multicardEnv(env, launch) {
  * CUDA_VISIBLE_DEVICES; a count, a size or a model name that does not match means the pin did not take. Returns the problems found.
  * What it can prove is the count, the size (to 5 percent) and the model name ("cuda:N <torch name> : <allocator>" holds the nvidia-smi name) of each
  * device. It cannot tell two cards of one model apart, and /system_stats carries no UUID: the order of two such cards is the pin's
- * (CUDA_VISIBLE_DEVICES lists UUIDs, storage first) and the roles' (the lower UUID stores).
+ * (CUDA_VISIBLE_DEVICES lists UUIDs, storage first) and the roles' (chooseRoles: of two cards of one model the lower UUID stores, unless WAN_COMPUTE_UUID names the other).
+ * A pair of two models (a faster board beside a slower one of one size) is told apart by the model name, so its roles are verified card by card.
  */
 export function checkComfyDevices(devices, pair) {
   const problems = [];
@@ -360,6 +469,22 @@ export const WAN_EXPERT_GIB = 13.4;
 const ACTIVATIONS_GIB_PER_1000_TOKENS = 0.31;
 /** Scaled with the tokens, never under this: even a small clip holds a context's worth of buffers. */
 const ACTIVATIONS_FLOOR_GIB = 2.0;
+/**
+ * WAN_FILM_ACTIVATIONS_SAGE_GIB: the same figure as WAN_FILM_ACTIVATIONS_GIB under sage attention (--use-sage-attention in COMFY_EXTRA_ARGS), on the same basis (the
+ * compute card's nvidia-smi peak less its resident share, the CUDA context inside). Measured 2026-10-12 on a 16 GB Blackwell pair at the film clip with
+ * resident 0: 15,482 MiB in use = 15.119 GiB, rounded up to 15.2: 3.0 GiB more than the default attention's. internal/hostneed declares against the same
+ * figure (wanActivationsSageGiB; a Go test pins the two together, so this stays a one-line numeric literal).
+ */
+export const WAN_FILM_ACTIVATIONS_SAGE_GIB = 15.2;
+/**
+ * The sage curve is the straight line through the two sage points measured on 2026-10-12: 12.9 GiB at 61,200 tokens (720x1280x65 with 2 GiB resident: 15,216 MiB =
+ * 14.859 GiB in use, less the 2.0 GiB share = 12.859, rounded up) and WAN_FILM_ACTIVATIONS_SAGE_GIB at the film's 75,600. It is used from where it meets the default
+ * curve's cap (WAN_FILM_ACTIVATIONS_GIB), about 56,800 tokens, up; below that the default curve is above it and sage is sized as the default, which already covers the
+ * benchmark's 6.16 GiB reserved with sage at 20,280 tokens (the default gives 6.29 there). Chosen between the points and not measured there; only 61,200 and 75,600 were.
+ */
+const SAGE_POINT_TOKENS = 61200;
+const SAGE_POINT_GIB = 12.9;
+const SAGE_LINE_FROM_TOKENS = SAGE_POINT_TOKENS - ((SAGE_POINT_GIB - WAN_FILM_ACTIVATIONS_GIB) * (WAN_FILM_TOKENS - SAGE_POINT_TOKENS)) / (WAN_FILM_ACTIVATIONS_SAGE_GIB - SAGE_POINT_GIB);
 /** What the storage card keeps back: the runner's --reserve-vram, default 1.0 (internal/hostneed's default too). A model-load margin, so the compute card's check does not use it. */
 const DEFAULT_RESERVE_GIB = 1.0;
 
@@ -369,9 +494,24 @@ const DEFAULT_RESERVE_GIB = 1.0;
  * any of them. The film's own size is where the measurements end: the full model there was measured at 12.2 GiB beyond its resident share (the film-size run),
  * and the planner has no figure above it, so it holds 12.2 there. The activations are expected to grow with the tokens, which is why a bigger clip is
  * said to be unsized (geometryNote) and not read as one that needs no more.
+ * `attention` is "sage" under --use-sage-attention (wanAttentionMode), which holds more activations: the straight line through the two sage points (SAGE_POINT_*,
+ * WAN_FILM_ACTIVATIONS_SAGE_GIB) from where it meets the default's cap, held at the film's sage figure above the film's size; anything else is the default curve.
+ * From SAGE_LINE_FROM_TOKENS up the line is at or above the default's cap, so sage is never under the default (a test walks the whole range).
  */
-export function wanActivationsGib(tokens) {
-  return Math.min(WAN_FILM_ACTIVATIONS_GIB, Math.max(ACTIVATIONS_FLOOR_GIB, (tokens / 1000) * ACTIVATIONS_GIB_PER_1000_TOKENS));
+export function wanActivationsGib(tokens, attention = "default") {
+  const base = Math.min(WAN_FILM_ACTIVATIONS_GIB, Math.max(ACTIVATIONS_FLOOR_GIB, (tokens / 1000) * ACTIVATIONS_GIB_PER_1000_TOKENS));
+  if (attention !== "sage" || tokens < SAGE_LINE_FROM_TOKENS) return base;
+  return Math.min(WAN_FILM_ACTIVATIONS_SAGE_GIB, SAGE_POINT_GIB + ((tokens - SAGE_POINT_TOKENS) * (WAN_FILM_ACTIVATIONS_SAGE_GIB - SAGE_POINT_GIB)) / (WAN_FILM_TOKENS - SAGE_POINT_TOKENS));
+}
+
+/**
+ * wanAttentionMode: "sage" when COMFY_EXTRA_ARGS carries sage attention, else "default". The value is split on whitespace the way ensureComfy splits it for the launch
+ * (comfy-lifecycle.mjs launchFlags), and read token by token with isSageAttentionToken: the exact flag or an argparse prefix of it. Only sage was measured; another
+ * attention flag (flash, split, quad, pytorch) is sized as the default.
+ */
+export function wanAttentionMode(env = process.env) {
+  const extra = String((env && env.COMFY_EXTRA_ARGS) || "").split(/\s+/).filter(Boolean);
+  return extra.some(isSageAttentionToken) ? "sage" : "default";
 }
 
 /**
@@ -382,14 +522,18 @@ export function wanActivationsGib(tokens) {
  * size less --reserve-vram, which is ComfyUI's model-load margin and not an activation ceiling, so the compute card's check does not use it. Both
  * with the figures internal/hostneed declares against, at this geometry (the smaller the clip, the less the activations need).
  */
-function checkResident(residentGb, pair, flags) {
+function checkResident(residentGb, pair, flags, attention = "default") {
   const reserveRaw = Number(flags["reserve-vram"]);
   const reserve = Number.isFinite(reserveRaw) && reserveRaw > 0 ? reserveRaw : DEFAULT_RESERVE_GIB;
   const computeGib = pair.compute.totalMiB / 1024, storageGib = pair.storage.totalMiB / 1024;
   const { w, h, f, tokens } = wanGeometry(flags);
-  const activations = wanActivationsGib(tokens);
+  const activations = wanActivationsGib(tokens, attention);
   const most = computeGib - activations - WAN_COMPUTE_CONTEXT_GIB;
   if (residentGb > most) {
+    if (attention === "sage") {
+      // the sage clause comes BEFORE "at most", and the default mode's tail is replaced: the measured recipe that keeps 3 is the default attention's, the very share refused here
+      throw placementError(`--wan-resident-gb ${residentGb} leaves the compute card (idx ${pair.compute.index}, ${computeGib.toFixed(1)} GiB) about ${activations.toFixed(1)} GiB for the sampler's activations at ${w}x${h}x${f} (${tokens} tokens) and ${WAN_COMPUTE_CONTEXT_GIB} GiB for the CUDA context, with --use-sage-attention in COMFY_EXTRA_ARGS sizing the activations for sage attention (${WAN_FILM_ACTIVATIONS_SAGE_GIB} GiB at film size, ${WAN_FILM_ACTIVATIONS_GIB} without it): at most ${most.toFixed(1)} GiB of an expert can stay resident there (--wan-resident-gb 0 is the measured setting at film size; or drop the flag)`);
+    }
     throw placementError(`--wan-resident-gb ${residentGb} leaves the compute card (idx ${pair.compute.index}, ${computeGib.toFixed(1)} GiB) about ${activations.toFixed(1)} GiB for the sampler's activations at ${w}x${h}x${f} (${tokens} tokens) and ${WAN_COMPUTE_CONTEXT_GIB} GiB for the CUDA context: at most ${most.toFixed(1)} GiB of an expert can stay resident there (the measured film-size recipe keeps ${WAN_RESIDENT_GB_DEFAULT})`);
   }
   const donor = WAN_EXPERT_GIB - residentGb;
@@ -411,11 +555,13 @@ function checkResident(residentGb, pair, flags) {
  * refuse what it cannot size (the documented intent is that a bigger clip may run); it says so before the check, with what a proportional extrapolation
  * gives, and leaves the share and the wait to the caller.
  */
-export function geometryNote(flags) {
+export function geometryNote(flags, attention = "default") {
   const { w, h, f, tokens } = wanGeometry(flags);
   if (tokens <= WAN_FILM_TOKENS) return "";
-  const proportional = (WAN_FILM_ACTIVATIONS_GIB * tokens) / WAN_FILM_TOKENS;
-  return `WAN-GEOMETRY-NOTE: ${w}x${h}x${f} (${tokens} tokens) is bigger than the measured film clip (720x1280x81, ${WAN_FILM_TOKENS} tokens): nothing above it was measured, so the planner holds the sampler's activations at the film's ${WAN_FILM_ACTIVATIONS_GIB} GiB, and in proportion to its tokens they would be about ${proportional.toFixed(1)} GiB; the resident-share check is only as good as that figure. Lower --wan-resident-gb (or use a smaller clip) if the compute card runs short, and pass --wait-sec (the ${MULTICARD_WAIT_SEC} s default is the film's)`;
+  const film = attention === "sage" ? WAN_FILM_ACTIVATIONS_SAGE_GIB : WAN_FILM_ACTIVATIONS_GIB;
+  const proportional = (film * tokens) / WAN_FILM_TOKENS;
+  const sageWord = attention === "sage" ? " (sage attention, --use-sage-attention in COMFY_EXTRA_ARGS)" : "";
+  return `WAN-GEOMETRY-NOTE: ${w}x${h}x${f} (${tokens} tokens) is bigger than the measured film clip (720x1280x81, ${WAN_FILM_TOKENS} tokens): nothing above it was measured, so the planner holds the sampler's activations at the film's ${film} GiB${sageWord}, and in proportion to its tokens they would be about ${proportional.toFixed(1)} GiB; the resident-share check is only as good as that figure. Lower --wan-resident-gb (or use a smaller clip) if the compute card runs short, and pass --wait-sec (the ${MULTICARD_WAIT_SEC} s default is the film's)`;
 }
 
 /** confirmWithLease: --wan-cards (or the image runners' --cards) may name the two cards when no lease does; when a lease holds cards it can only confirm them. */
@@ -445,7 +591,7 @@ export function portNote(flags, env, api, label = "wan-placement") {
  * state is unknown, a resident share the compute card cannot hold, a missing pack. `cards` reads the driver's card table
  * (injectable); `isWanGraph` says whether this invocation builds the Wan 2.2 graph; `leaseDevicesFn` names the cards the lease holds.
  */
-export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, cards = queryCards, launchFn = multicardLaunch, leaseDevicesFn = leaseDevices, say = () => {} }) {
+export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, spawnSync: smiRun, cards = () => queryCardsRanked(smiRun), launchFn = multicardLaunch, leaseDevicesFn = leaseDevices, say = () => {} }) {
   refuseEqualsSpelling(flags);
   const mode = wanPlacementMode(flags);
   if (mode !== "multicard") return null;
@@ -455,15 +601,18 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   refuseUnmeasuredWan(flags);
   const residentGb = wanResidentGb(flags);
   const { tokens, source } = wanCardTokens({ flags, env, leaseDevicesFn });
-  const pair = resolveWanCards({ tokens, source, cards: cards() });
+  const pair = resolveWanCards({ tokens, source, cards: cards(), compute: computeOverride(env) });
   if (source === "--wan-cards") confirmWithLease(pair, leaseDevicesFn(env));
-  const unsized = geometryNote(flags);
+  const attention = wanAttentionMode(env);
+  const unsized = geometryNote(flags, attention);
   if (unsized) say(unsized);
-  checkResident(residentGb, pair, flags);
-  const launch = launchFn(pair, { comfyDir });
-  const plan = { pair, launch, residentGb, env: multicardEnv(env, launch) };
+  checkResident(residentGb, pair, flags, attention);
+  // `sage` rides the launch so ensureComfy records which attention this call was sized for, and a kept ComfyUI that runs sage under a call sized for the default is not reused
+  const launch = { ...launchFn(pair, { comfyDir }), sage: attention === "sage" };
+  const plan = { pair, launch, residentGb, attention, env: multicardEnv(env, launch) };
   const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
-  say(`wan-placement: multicard on ${source}: ${line("storage", WAN_STORAGE_DEVICE, pair.storage)}; ${line("compute", WAN_COMPUTE_DEVICE, pair.compute)}; ${residentGb} GiB of each expert resident on the compute card`);
+  const sageClause = attention === "sage" ? `; sage attention (COMFY_EXTRA_ARGS): activations sized at ${wanActivationsGib(wanGeometry(flags).tokens, attention).toFixed(1)} GiB` : "";
+  say(`wan-placement: multicard on ${source}: ${line("storage", WAN_STORAGE_DEVICE, pair.storage)}; ${line("compute", WAN_COMPUTE_DEVICE, pair.compute)}; ${residentGb} GiB of each expert resident on the compute card; ${computeChosen(pair)}${sageClause}`);
   return plan;
 }
 

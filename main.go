@@ -337,7 +337,8 @@ Usage:
   local-offload audit-yaml [--against-render] [--other-box] FILE...
                                          check live llama-swap config(s) against the operator rules (INV-1/INV-2: no -ngl 0, no empty CUDA_VISIBLE_DEVICES, ttl 300 everywhere, no persistent group, no preload).
                                          --against-render also re-derives each file from THIS binary's tier seeds and reports MATCH / STALE(keys) / UNSTAMPED / HAND-EDITED.
-                                         The CUDA_VISIBLE_DEVICES pin rules compare a file with THIS box's cards (nvidia-smi); --other-box says the files belong to another machine and skips them.
+                                         The CUDA_VISIBLE_DEVICES pin rules compare a file with THIS box's cards (nvidia-smi); --other-box says the files belong to another machine and skips them and the display-cap-unseen note.
+                                         A file with a proxy: seat or a CUDA_VISIBLE_DEVICES pin also gets ONE note (display-cap-unseen) naming the entries that may sit on the display card (a proxy: seat, an unpinned entry, an entry pinned onto it): their use of the display card is not judged against gpu_display_cap_pct (the yaml states no VRAM footprint); gpu status reads the card itself. The card table is read only for such a file, so a file with neither is not read and gets no note, its unpinned entries included. The note is silent on a box with one card or with no flagged display card. A note is never a violation and never changes the exit status.
   local-offload audit-config [--config PATH] [--tier NAME] [--json] [--all]
                                          compare this node's live config.json against the seed its tier would install; lists every seed-owned key that is DIFFERENT, LIVE-ONLY (hand-wired, never written back to profiles.json) or SEED-ONLY. Exit 1 on drift.
                                          --ram-tier defaults to THIS machine's detected RAM tier (the header names it, GB included); for another node's config (--config/--goos/--home) pass --ram-tier min|low|mid|high|none. A RAM probe that reads 0 GB is refused, never read as min.
@@ -2794,6 +2795,13 @@ func fleetServeParams(listenFlag, nodeIDFlag string, trusted bool, cfg config.Co
 	return listen, nodeID, nil
 }
 
+// fleetServeConfig returns cfg with the node id fleet-serve resolved (fleetServeParams) set as the id the pipeline stamps
+// on its result envelopes, so a node names itself one way in /fleet/health, in a queue claim and on every result.
+func fleetServeConfig(cfg config.Config, nodeID string) config.Config {
+	cfg.FleetNodeID = nodeID
+	return cfg
+}
+
 // reportPipelineJobsSweep writes the startup sweep's outcome to w: up to three
 // lines, each reported whether or not the others are, so a sweep that removed
 // 22 dirs and could not remove one says both. The removed line does not call
@@ -2826,7 +2834,7 @@ func runFleetServe(args []string) error {
 	fs.String("config", "", "config file path")
 	listenFlag := fs.String("listen", "", "listen address (default: config fleet_listen, 127.0.0.1:18811)")
 	trusted := fs.Bool("listen-trusted-network", false, "allow --listen to bind beyond loopback (the Tailscale address). The fleet endpoints are UNAUTHENTICATED; set this ONLY on a network you fully trust — and NEVER bind 0.0.0.0.")
-	nodeIDFlag := fs.String("node-id", "", "node id advertised in /fleet/health (default: config fleet_node_id, else the hostname)")
+	nodeIDFlag := fs.String("node-id", "", "node id advertised in /fleet/health, stamped on this node's results and used in its queue claims (default: config fleet_node_id, else the hostname)")
 	_ = fs.Parse(args)
 	cfg, src := loadCfgWithSource(fs)
 	// Before ANY state is touched: a node that cannot prove its own config must
@@ -2881,6 +2889,9 @@ func runFleetServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The pipeline stamps cfg.FleetNodeID on every result envelope, and /fleet/health and the queue claim take nodeID: one
+	// name for the node in all three, whichever way the id was given (the installers pass --node-id and write no fleet_node_id).
+	cfg = fleetServeConfig(cfg, nodeID)
 	if *trusted {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] WARNING: --listen-trusted-network set — the UNAUTHENTICATED fleet "+
 			"endpoints are exposed beyond loopback on %q. Anyone who can reach them can run renders on this GPU.\n", listen)

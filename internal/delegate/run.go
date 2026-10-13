@@ -6218,7 +6218,11 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 	release()
 	pr.ranBase = base
 	pr.PlacementReason = reason
-	if pr.Node == "" {
+	// results[].node is the id the placement used: the node_id the node publishes in /fleet/health, the name the placement
+	// text, the progress lines and the dispatch marker carry. runRemote copied the id the node stamped on its own result into
+	// pr.Node; that one stays in pr.Result.NodeID and is published as node_reported when it differs. The result's own id
+	// names the node only when health published none (laneID).
+	if chosen.NodeID != "" || pr.Node == "" {
 		pr.Node = chosen.NodeID
 	}
 	pr.Placed = remotePlaced
@@ -6271,7 +6275,9 @@ func (r *runner) runLocal(ctx context.Context, jobID string, contract core.Agent
 		return pr
 	}
 	pr.Result = wire
-	if wire.NodeID != "" {
+	// The runner's own id names the node, except where the placement attributed the run to another box (pairNode, set above
+	// from the endpoint's host): the runner stamps its own box, and that would undo the attribution.
+	if wire.NodeID != "" && pairNode == "" {
 		pr.Node = wire.NodeID
 	}
 	if wire.Seat != "" {

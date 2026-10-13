@@ -6,7 +6,9 @@
 //   - which recipe (route, family, DiT file, text encoder), or why there is none, by name (multicard-recipes.mjs findRecipe);
 //   - which two cards: the lease's (GPU_LEASE_DEVICES, else the lease record; --cards names them only when no lease does and can
 //     only confirm them under one), read from the driver's card table; neither may drive a display, and a card whose display
-//     state the driver does not report is refused too; the larger card computes (cuda:1), equal cards: the lower UUID stores and the higher computes (the order a lease sorts its ids in);
+//     state the driver does not report is refused too; the roles are the Wan planner's (wan-multicard.mjs chooseRoles): the larger card computes (cuda:1), except that of two cards within
+//     1 percent of one size the higher board power computes (at least 1.25 times the other's), equal cards: the lower UUID stores and the higher computes (the order a lease sorts its ids in);
+//     WAN_COMPUTE_UUID, an environment variable, names the compute card of the pair instead;
 //   - whether the recipe fits those two cards: its per-card peak against each card less --reserve-vram, and a resident share of
 //     the DiT that the compute card can hold beside the sampler's activations;
 //   - the ComfyUI launch the placement needs (flags, env, the instance key of the pair), as plain data for ensureComfy: the same
@@ -17,7 +19,7 @@ import { leaseDevices } from "./gpu-lock.mjs";
 import { fetchNodeInfo, missingNodeMessage } from "./comfy-nodes.mjs";
 import { comfyLogPath, comfyLogCursor } from "./comfy-lifecycle.mjs";
 import {
-  queryCards, wanCardTokens, resolveWanCards, confirmWithLease, refuseEqualsSpelling, multicardLaunch, multicardEnv, packDirs,
+  queryCardsRanked, computeOverride, computeChosen, wanCardTokens, resolveWanCards, confirmWithLease, refuseEqualsSpelling, multicardLaunch, multicardEnv, packDirs,
   checkComfyDevices, createOomWatch, PACK_MULTIGPU, PACK_GGUF,
 } from "./wan-multicard.mjs";
 import {
@@ -112,7 +114,7 @@ function checkPeaks(recipe, residentGb, pair, flags) {
  */
 export function planImageMulticard({
   route, family, unet, clip, flags, env = process.env, comfyDir, isGraph = false,
-  cards = queryCards, launchFn, listFn, leaseDevicesFn = leaseDevices, say = () => {},
+  spawnSync, cards = () => queryCardsRanked(spawnSync), launchFn, listFn, leaseDevicesFn = leaseDevices, say = () => {},
 }) {
   refuseEqualsSpelling(flags, IMAGE_FLAG_NAMES);
   if (imagePlacementMode(flags) !== "multicard") return null;
@@ -125,7 +127,7 @@ export function planImageMulticard({
     const { tokens, source } = wanCardTokens({ flags, env, leaseDevicesFn, cardsFlag: "cards" });
     // no card named: refused before the driver is asked anything
     const table = tokens.length ? cards() : [];
-    const found = resolveWanCards({ tokens, source, cards: table, cardsFlag: "cards" });
+    const found = resolveWanCards({ tokens, source, cards: table, cardsFlag: "cards", compute: computeOverride(env) });
     if (source === "--cards") confirmWithLease(found, leaseDevicesFn(env), "cards");
     return { ...found, source };
   });
@@ -135,7 +137,7 @@ export function planImageMulticard({
   const plan = { pair, launch, residentGb, recipe, comfyDir, env: multicardEnv(env, launch) };
   const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
   const share = residentGb === null ? "the whole DiT on the compute card" : `${residentGb} GiB of the DiT resident on the compute card`;
-  say(`placement: multicard on ${pair.source}: ${line("storage", MULTICARD_STORAGE, pair.storage)}; ${line("compute", MULTICARD_COMPUTE, pair.compute)}; recipe ${recipe.id}, ${share}; basis ${recipe.basis}`);
+  say(`placement: multicard on ${pair.source}: ${line("storage", MULTICARD_STORAGE, pair.storage)}; ${line("compute", MULTICARD_COMPUTE, pair.compute)}; recipe ${recipe.id}, ${share}; basis ${recipe.basis}; ${computeChosen(pair)}`);
   return plan;
 }
 

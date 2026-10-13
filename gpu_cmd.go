@@ -185,7 +185,9 @@ func runGPUStatus(args []string) error {
 	// The per-card table (plan P3): which card each lease holds, and what is free.
 	// Read-only, and never a reason for status to fail: no nvidia-smi prints the leases
 	// and says there is no table.
-	cards, cardsNote, cardsErr := cardTable(context.Background(), loadCfg(fs))
+	// cardCfg is the config the table is read with and the display cap is judged by (gpucards.RowsWithCap).
+	cardCfg := loadCfg(fs)
+	cards, cardsNote, cardsErr := cardTable(context.Background(), cardCfg)
 	if cardsErr != nil {
 		cards, cardsNote = nil, fmt.Sprintf("no card table (%v)", cardsErr)
 	}
@@ -258,7 +260,7 @@ func runGPUStatus(args []string) error {
 		}
 		// The per-card table, the per-lease list and the card-scoped switch (P3). Keys
 		// are only ever added: `queued` keeps its four keys and gains devices/scope.
-		for k, v := range statusLeaseSection(m, cards, cardsNote, waiters) {
+		for k, v := range statusLeaseSection(m, cardCfg, cards, cardsNote, waiters) {
 			out[k] = v
 		}
 		out["card_scoped_leases"] = m.CardScoped()
@@ -301,7 +303,7 @@ func runGPUStatus(args []string) error {
 		// take it, so an unreserved card is exactly when a bench is exposed — that
 		// should be visible, not inferred from silence.
 		fmt.Printf("GPU: free (unreserved)  state root: %s\n", m.Root())
-		printCardTable(cards, cardsNote, cardsErr, leases)
+		printCardTable(cardCfg, cards, cardsNote, cardsErr, leases) // a free host
 		fmt.Println(host.Line())
 		queueLines()
 		printActivity(act)
@@ -366,7 +368,7 @@ func runGPUStatus(args []string) error {
 			fmt.Printf("  lease epoch %d: %s pid %d, %s%s%s\n", l.Epoch, l.Class, l.PID, scope, group, declared)
 		}
 	}
-	printCardTable(cards, cardsNote, cardsErr, leases)
+	printCardTable(cardCfg, cards, cardsNote, cardsErr, leases) // a held host
 	fmt.Println(host.Line())
 	queueLines()
 	printActivity(act)

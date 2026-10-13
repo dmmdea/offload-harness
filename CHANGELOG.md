@@ -6,6 +6,190 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.185.0] - 2026-10-13 - the display card's cap is read live on its row and audit-yaml names the seats it cannot judge, the card-only placements compute on the faster of two same-size cards, the Wan sizing knows sage attention, and results[].node is the node id placement used
+
+### Changed — the card-only placements choose the compute card by board power when two cards are one size, and `WAN_COMPUTE_UUID` names it
+
+The Wan card-only placement (`--wan-placement multicard`) and the image and edit card-only placements (`--placement multicard`) picked the compute
+card (`cuda:1`) by exact memory size, then by the higher UUID. A 5070 Ti reads 16303 MiB beside a 5060 Ti at 16311 MiB, so the slower card
+computed, by 8 MiB. One planner serves all three placements (`resolveWanCards`), so all three change together.
+
+- **Behaviour change: which card computes.** Two cards whose sizes are within 1 percent of the larger (`VRAM_EQUAL_FRACTION`, 0.01, chosen:
+  163 MiB at 16 GiB) are one size, and then, when both boards report a design power (`power.default_limit`) and the higher is at least 1.25
+  times the lower (`POWER_RANK_RATIO`, chosen), the higher-power card computes. The pair this was written for reads 300 W against 180 W (1.67
+  times); measured 2026-10-12 on a 16 GB Blackwell pair with `--use-sage-attention`: about 2.5x. Every other pair, and every pair whose power
+  could not be read, takes exactly the roles it took before (the larger card computes, then the higher UUID), so a failed power read
+  reproduces the old behaviour and never refuses a run; for a pair within the 1 percent size band the reason says `board power not reported for idx N`. The plan's one line contains
+  `; compute card chosen: <the rule>`, followed by the sage clause under sage attention.
+- **The power is a second, best-effort query.** `queryCardsRanked` (the default card source of `planMulticard` and `planImageMulticard`, with a
+  `spawnSync` parameter for tests) runs the unchanged display ladder of `queryCards` first, then `nvidia-smi --query-gpu=uuid,power.default_limit`,
+  asked once more when it fails and joined by lower-cased UUID. Folding the power into the display query would have cost a driver that rejects the
+  column the `display_attached` rungs. Every ask hides its console window on Windows (`windowsHide`, pinned by a test on all of them).
+- **Added: `WAN_COMPUTE_UUID`.** An environment variable read by both planners (a flag could not reach the typed image and edit doors, whose
+  runner child inherits the process environment). It takes an nvidia-smi index, a UUID or a case-insensitive UUID prefix of 8+ characters after the
+  optional `GPU-`. A token that names exactly one card of the pair makes it compute, beating the size and the speed rule (the resident and peak
+  checks still judge it: a named card that cannot hold the share is refused with the numbers, the 12 GiB card of a 24 + 12 GiB pair at
+  `--wan-resident-gb 4` for one, while the 16 GiB card of a 24 + 16 GiB pair holds the default share of 3 at film size, 16.0 - 12.2 - 0.5 = 3.3, and is admitted). A token that names no card of the driver's
+  table is refused (`WAN_COMPUTE_UUID names "<token>", which is no card in the driver's table (...), so it cannot say which of the two cards
+  (idx a, idx b) computes`): an explicit setting must not run quietly on a typo or a stale id. A token that names a real card outside the pair, or
+  begins more than one card of the table, is ignored with a one-line note on the plan's line (`WAN_COMPUTE_UUID names "<token>", which does not
+  name exactly one of the two cards (idx a, idx b); ranked instead`), because the variable is box-level. It never adds a card: the lease or
+  `--wan-cards` still decide the pair.
+- **Upgrade note: stop a kept (`--keep-comfy`) multicard ComfyUI before the first run after upgrading.** The instance key follows the roles
+  (`mc-<storage>-<compute>`), so a pair whose roles change gets a new key, and a kept instance on the old key refuses with `COMFY-PROFILE-MISMATCH`.
+  Under a lease the holder stops the instance on release, so only a kept or orphaned instance bites.
+- **Known limits, written down.** The lease sizing (`internal/hostneed`, comments only here) still judges the compute stage against the larger
+  card; inside the 1 percent band the gap is at most 0.16 GiB at 16 GiB, so a share at the film-size ceiling (3.2 GiB) can be declared 0 and refused
+  by the runner on the smaller card that computes (a refusal before ComfyUI starts, never an out-of-memory run); the default share of 3 is
+  unaffected. Board power is a proxy for speed. `gpu_comfy_order` is the operator-declared fastest-first order, and the one place the harness holds
+  such a thing; follow-ons, not in this change: seeding the compute choice from it through the grant environment, and `compute_cap` as the primary
+  key for an fp8 pair that spans Ampere and Ada.
+- **Tests.** Nineteen, in `render/wan-multicard.test.mjs` and `render/multicard-image.test.mjs`, written first against a behaviour-free seam
+  (`queryCardsRanked`, `computeOverride` and `chooseRoles` stubs) and seen red on their assertions. The fast card is the lower-UUID card in the
+  ranking fixtures, so a mutation of any one rule turns an answer. Twenty-eight mutations, each one line and each reverted byte for byte
+  (`scripts/mutation-check.sh`), fail a test they name: the band as exact equality, the fraction at 0.05 and at 0.001, the ratio at 1.0, `>=` to `>`
+  at 1.25, an unreported power that ranks, the roles inverted, the ranking outside the band, the override matched against the pair instead of the
+  table, a no-card override ignored, a card outside the pair taken, an ambiguous token taken, a blank value untrimmed, the note reworded, the
+  unread remark, `compute: computeOverride(env)` dropped in each planner, the say suffix dropped in each, each default card source back to
+  `queryCards`, the power read from the wrong column, a window shown on the power ask and on the display ask, the retry dropped, the join and the
+  key case-sensitive, and the wrong power field. Docs: `docs/systems/media-generation.md` ("Which card computes", the image section),
+  `render/README.md`, the usage comments of `render/comfy-video.mjs`; the stale "the larger card computes" comments of `internal/hostneed`.
+- **Review round.** A refused `WAN_COMPUTE_UUID` now says how a UUID prefix is counted (8 or more characters after the optional `GPU-`, so `GPU-aaaa` names nothing) and, for a
+  token of digits alone, that it was read as an nvidia-smi index and that a UUID prefix made of digits needs the `GPU-` spelling (`GPU-11112222`); the token rule itself is unchanged,
+  because it also serves `--wan-cards` and the lease path. The image planner's override gets the test the Wan planner had: a named card that cannot hold the resident share or the
+  recipe's peak is refused on that card (two mutants that judged the larger card instead survived the suite before it, and are RED now). The 24 + 16 GiB example above was wrong
+  (the 16 GiB card holds the default share at film size and is admitted); a positive control joins its test. The comments of `internal/hostneed` now split the override out of the
+  1 percent bound, which belongs to the power rule alone (an override can name the smaller card of any pair).
+
+### Changed (behaviour) — the card-only Wan placement knows sage attention: 15.2 GiB of film-size activations, in the runner and in the lease sizing
+
+The film session of 2026-10-12 ran the film clip (720x1280x81) with `--use-sage-attention` in `COMFY_EXTRA_ARGS`: the compute card read 15,482 MiB in use
+at resident 0 (15.119 GiB), and 15,216 MiB at resident 2 on 720x1280x65 (14.859 GiB, 12.859 beyond the share), 3 GiB more than the default attention's
+12.2 GiB beyond the resident share. Neither the runner nor the lease sizing read the attention mode, so a sage call at the default share of 3
+(3 + 12.2 + 0.5 = 15.7 of 15.9 GiB) was admitted by both and ran out of memory on the compute card.
+
+- **Behaviour change: sage film calls must pass `--wan-resident-gb`.** Under sage the default share of 3 is refused from about 58,000 tokens up on a 15.9 GiB card
+  (720x1280x61, 57,600 tokens, still admits 3.1 GiB at most; 720x1280x65 admits 2.5 at most, 720x1280x81 0.2, so pass 0 at film size), by the planner before anything starts and by
+  the lease sizing (which then declares the ordinary set). A film driver that exports `COMFY_EXTRA_ARGS=--use-sage-attention` and relies on the default share changes from "runs, and runs out of memory"
+  to "refused before the lease slot". The refusal puts its sage clause before the ceiling and replaces the default mode's "(the measured film-size recipe
+  keeps 3)" tail with the way out; the default-mode message is byte for byte what it was.
+- **Runner.** `WAN_FILM_ACTIVATIONS_SAGE_GIB` (15.2, a one-line literal the Go mirror reads). `wanActivationsGib(tokens, attention)`: the default curve, and under
+  sage the straight line through the two measured sage points (12.9 GiB at 61,200 tokens, 15.2 at the film's 75,600), used from where it meets the default's cap
+  (about 56,800 tokens) up and held at 15.2 above the film's size; below that sage is sized as the default, which already covers the benchmark's 6.16 GiB reserved
+  with sage at 20,280 tokens (6.29). So sage departs from the default sizing only above about 57k tokens, and only 61,200 and 75,600 tokens were measured: the
+  line between them is chosen. (The line through the two points would otherwise rise above the default below about 20,700 tokens, where nothing was measured:
+  at 7,800 tokens it reads 4.4 GiB against the default's 2.4.) `wanAttentionMode` reads `COMFY_EXTRA_ARGS` token by token with ONE predicate,
+  `isSageAttentionToken` (`render/comfy-lifecycle.mjs`): the exact flag or an argparse prefix of 8+ characters (`--use-sa` is sage; `--use-s` also begins
+  `--use-split-cross-attention` and is not; a longer token is no prefix). Another attention flag (flash, split, quad, pytorch) is sized as the default: only sage was
+  measured. `checkResident` and `geometryNote` take the mode (`1280x1280x121` reads "film's 15.2 GiB" and about 39.9 GiB under sage); the plan carries `attention`, and
+  its one line gains `; sage attention (COMFY_EXTRA_ARGS): activations sized at X GiB`.
+- **Lease sizing.** `wanActivationsSageGiB` (a test pins it to the runner's constant, and another that the two sides admit the same share at film size),
+  `CardOnly.SageAttention`, read from the process environment by `sageAttention()` with the same token table (one table, `render/testdata/sage-token-table.json`, read by the tests of both languages). The sizing reads no geometry,
+  so under sage it holds 15.2 GiB for any clip: a partial-share sage call at a smaller clip (the measured 65 frames at 2 GiB) declares the ordinary set where it
+  declared 0 before sage was read, unless `--ram 0` states the real figure; the detail says so. **An `env COMFY_EXTRA_ARGS=...` prefix inside the wrapped command
+  is invisible to the lease sizing** while the runner sees it (the lease then declares as for the default attention); export the variable around `gpu reserve`, or pass
+  `--ram 0`. Both are documented next to the `--ram 0` advice.
+- **Reuse (its own commit).** A kept (`--keep-comfy`) multicard ComfyUI launched with `--use-sage-attention` is not reused by a call sized for the default attention: its
+  launch records which attention it was sized for, and `profileMismatch` reads the running argv with the same predicate (so an abbreviation counts), so the harness
+  replaces an instance it launched and refuses `COMFY-PROFILE-MISMATCH` for one it did not. Only that direction can run out of memory; the reverse wastes a cold start
+  and is reused, and a launch that does not say (the image placements) checks nothing.
+- **Tests hermetic.** The two existing multicard tests of `gpu_hostram_test.go` read the process environment through `Facts.Env`, so on a host that exports
+  `COMFY_EXTRA_ARGS=--use-sage-attention` their default-share assertions would fail: both now set it to "". The JS tests pass explicit env objects.
+- **Tests and mutations.** Eleven JS tests (three for the reuse), four in `internal/hostneed` and one in the root package, written first against a behaviour-free seam
+  and seen red on their assertions (the Go mirror test first, against the missing JS export; two JS tests are guards that were green before). Thirty-one one-line
+  mutations, each reverted byte for byte, fail a test they name: the sage branch, the attention mode, the token predicate (always false, by substring, from 7 and
+  from 9 characters), the attention dropped from `checkResident` and from `geometryNote`, a flat 15.2 below the film size, the line extended below the default's cap, the
+  sage figure and the two points moved, the refusal's way out and clause, the summary clause, the plan's `attention`, in Go the sage figure, the detection (never, 7
+  characters, substring, the wrong key) and the hint, and for the reuse the check deleted, by literal flag, inverted, applied to the old shape, the profile and the launch.
+  Docs: `docs/systems/media-generation.md` ("Sage attention", with the measured table; the launch-profile table), `docs/OPERATOR-GUIDE.md`, `render/README.md`,
+  the usage comment of `render/comfy-video.mjs`. Not changed: the image and edit recipes (measured with the default attention), the role rule, the geometry-blind lease sizing.
+- **Review round.** The hint on a sage call's ordinary detail (`--ram 0` states the real figure) is set only when the storage card fits its stage, that is when the compute stage
+  is the one the film figure pushed out; a storage-card miss no longer blames the geometry-blind sizing. The token rule's two literal copies became ONE file,
+  `render/testdata/sage-token-table.json`, read by `TestTheSageTokenRuleMatchesTheRunner` and by the `wanAttentionMode` test (a row changed there turns an answer in both
+  languages; the predicate mutants from 7 characters and by substring are RED in both). The refusal threshold above is stated in geometries and pinned at 57,600 tokens (720x1280x61
+  still admits the default share).
+
+### Changed — `results[].node` is the node id the placement used; the id the node stamped on its own result moves to the new `results[].node_reported`
+
+- **The defect.** A node named itself two ways. `/fleet/health` and the queue claim take the id `fleet-serve` resolves (`--node-id`, else `fleet_node_id`, else the OS hostname), and every placement text, progress line and dispatch marker names the node by it. The result envelope's `node_id` is stamped by the node's pipeline from `fleet_node_id`, else the OS hostname, and the `--node-id` flag never reached that config. Both installers pass the id by flag only and write no `fleet_node_id`, so a node launched the installers' way published `<node-id>` in health and stamped `<hostname>` on every result. The delegator copied the envelope into `results[].node` and filled the health id in only when the envelope gave none, so one result said `<hostname>` in `node` and `<node-id>` in `placement`.
+- **The rule.** `results[].node` is the id the placement used, the `node_id` the node's `/fleet/health` publishes, for a run on a fleet node this delegator dispatched to (a `route: "queue"` answer carries its claimant's stamp, and a run on this box's own seat a box's own name); the result's own id names the node only when health published none. `results[].node_reported` (additive, `omitempty`; `delegate.NodeReported`, stamped in `WireResponse` and in the response of every door that dispatches one contract through `contractOnFleetAt`: the routed `agent_run` / `offload_ask`, the named-seat door of `agent_run(model)` and `offload_review_diff`'s fence fallthrough) carries the id the node's own result named itself by, only when it differs (compared without regard to case), and never on a result no node took. It differs for a node on a build before 0.185.0 and for a local run attributed to another box's engine (register C-58); a node on this build stamps the id it advertises. The delegator-side change takes effect as soon as the delegator is deployed, against nodes of any version. Wire key names are unchanged.
+- **A value change, not a rename.** For a remote result from a node whose `--node-id` differs from its hostname (and that has no `fleet_node_id`), `results[].node`, the delegation-log `node`, the ledger row's `model_tier` prefix (`<node>:<seat>`; the dispatch marker already used the id, so one job's marker and finished row now agree), the routed `agent_run` `node`, fleet-smoke's node column and the fleet overview's delegation errors change from `<hostname>` to `<node-id>`. History splits at the deploy: rows written before say `<hostname>`. `rig --node` (and `agent_rig` `node`) matches a row by its `node` or by its `result.node_id`, and the two names select different rows: the card id selects the rows a 0.185.0 delegator wrote and, for a node launched with `--node-id` and no `fleet_node_id` (the installers' form), never a row written before (it carries only the hostname); the hostname selects the rows an older delegator wrote and those a 0.185.0 delegator wrote for a node not yet on 0.185.0, and stops selecting a node's rows once it runs 0.185.0 (it stamps the card id in both fields). For a window that spans the change, run `rig` once per name.
+- **Mixed fleet.** A 0.185.0 delegator names the node by the placement id whatever the node runs, with the older node's own stamp (its hostname) in `node_reported`. The queue lane (`route: "queue"`) cannot: the delegator has no health view of the claimant (the holder's poll returns the job's state and data, not who claimed it), so its `node` is the id the claimant stamped on its answer, which equals the id it claims under only once that node runs 0.185.0. The queue lane names the id only once every node runs 0.185.0; until then an answer from an older node still reads its hostname there.
+- **Fixed with it.** `fleet-serve` applies the id it resolves to the config its pipeline reads (`fleetServeConfig`), so health, the queue claim and the result envelope carry one id (a box whose hostname lookup fails now stamps the literal `fleet-node` where the envelope was empty, and the GPU activity origin, `(from X)`, shows the resolved id). A local run attributed to another box's engine (register C-58) keeps that box's name instead of taking the runner's envelope name, which the row then carries in `node_reported` (a run on this box's own engine still takes the runner's, as before). The schema-miss rescue is handed the placement id. The named-seat door's withheld-answer reason names the placement id. The `agent_delegate` description lists `node_reported` right after `node` and says what both mean.
+- **Tests, red first.** A seam commit adds only the `NodeReported` field and function (returning `""`) and `fleetServeConfig` (returning its config unchanged); the tests follow, and each failed on its assertion before the change, with a positive control beside it that passed. `internal/delegate/node_identity_test.go` (six): `results[].node = "host-bbbb", want "node-id-aaaa"` and `wire node_reported = <nil>` and `delegation-log node = [host-bbbb]` (the control: the placement text and the untouched envelope), `finished row model_tier node = "host-bbbb", want "node-id-aaaa"` (the marker already read the id), `origin node = "host-bbbb", want "fake-node"` (the rescue; its fixture is a budget-class schema miss, as an infrastructure-class one hands no origin at all), the same after a re-placement, and `node = "envelope-local", want the endpoint's host node-b` for a run on another box's engine (the control: this box's own engine keeps the runner's name; green before and after, as is the fallback test for a node whose health names no id). `internal/delegate/wire_node_test.go`: `node_reported is absent, want "h1"` (the table's other five rows, equal ids, case-only difference, no stamped id, no node took it and a queue-lane row, are the byte-identical contract and were green). `fleet_verbs_test.go`: `config handed to the pipeline has fleet_node_id "", want "flag-id"` (and for the hostname and the failed-hostname cases; the config-given case was green). `fleet_serve_nodeid_wiring_test.go` (an AST pin, because `runFleetServe` cannot run in a unit test): `found 0 assignment(s)` of `cfg = fleetServeConfig(cfg, nodeID)`, which must target `cfg`, take the id `fleetServeParams` resolved, and come after it and before `openPipeline(cfg)`. `internal/rig/rig_test.go`: `Build node "host-a" selected 1 row(s), want 2`. `internal/mcpserver`: the description does not carry `{node,node_reported,seat,placement,ran_on,job_id` or the sentences on what `node` and `node_reported` mean (and the existing `placement,ran_on,job_id` check still holds), `node_reported = <nil>` on a routed `agent_run`, and the withheld-answer reason named `host-bbbb`. Twenty-two mutations, each reverted in turn, fail a test they name: eight through `scripts/mutation-check.sh` on the delegator (the placement id replaced by the envelope's, the empty-health-id fallback dropped, the case-insensitive compare made exact or inert, the no-node guard dropped, the stamping dropped, `omitempty` dropped, the rescue back to the envelope id), two on the local arm's endpoint guard (dropped, inverted), three on `nodeMatches` (the stamped-id arm, the empty-node arm, the nil-result guard), five on the MCP door (the key list, its order, the sentence, the routed `node_reported`, the withheld-answer reason), and four on `fleet-serve` (the dropped value, the no-op function, the flag value in place of the resolved id, run on a second host because the root package is not built locally; and the assignment moved after `openPipeline`, which the one-line harness cannot express and was done by hand). One equivalence is left alone and said so: `NodeReported` has no separate empty-id guard, because it returns the id it compares, which is already `""`.
+- **Corrected in review.** Four statements were wider than the code, and the code was right. (1) `node_reported` was said to appear for "a node launched under another name"; a node on this build cannot differ (`fleet-serve` stamps the id it advertises, and the pipeline's reloader never rewrites the config), so the field's comment, the guide, the node doc and the `agent_delegate` description now name the two cases that exist: a node on a build before 0.185.0 and a local run attributed to another box's engine. (2) The description said `results[].node` is the health id unconditionally; it now says so for a run on a fleet node this delegator dispatched to and names the queue and local-run exceptions. (3) `rig --node` was said to find the rows written before the change by either name; for a node launched with `--node-id` and no `fleet_node_id` (the installers' form), the card id never selects a row written before (it carries only the hostname), and the hostname stops selecting a node's rows once the node is redeployed, so the guide, the node doc, the `nodeMatches` comment and the "value change" bullet above now say which name selects which rows (the rig test gains a redeployed-node row as a control). (4) The docs and this entry listed `agent_run` and `offload_ask` as the doors that publish `node_reported`; the named-seat door of `agent_run(model)` and `offload_review_diff`'s fence fallthrough publish it too, and the docs now say so (a behaviour test pins the review lane). Each is pinned red first by a test that fails on the retired wording: `internal/delegate/node_reported_docs_test.go`, `internal/rig/node_docs_test.go`, `internal/mcpserver/node_reported_lanes_test.go` and the description test in `internal/mcpserver/ran_on_description_test.go`.
+- **Docs.** `docs/FLEET-NODE.md` (the `fleet_node_id` row and the result's `node_id` row), `docs/systems/fleet-node.md` (the result table and a new "Which node" paragraph after "Where a result ran"), `docs/OPERATOR-GUIDE.md` (the delegate section), `docs/systems/delegation-client.md`, `docs/systems/mcp-server.md` and `docs/systems/fleet-overview.md`.
+
+### Added — the display card's cap is reported on its row of the card table, and audit-yaml names the llama-swap entries it cannot judge against it (`gpu_display_cap_pct`)
+
+**The gap.** `gpu_display_cap_pct` (default 60) bounded the card allocator only. A model llama-swap loads onto the display card is
+not placed by the allocator, so a 3-card vLLM seat pinned across the display card put 13,281 MiB (81 percent of a 16 GB card) there
+while `audit-yaml` printed OK: `servingtmpl.AuditPins` skips an entry that has no `CUDA_VISIBLE_DEVICES` (`pinOf` reports no pin, and the
+loop `continue`s), which is every `proxy:` seat and every unpinned entry, and the card table was read only for a file that pins a device.
+
+- **One arithmetic.** `gpulease.DisplayFloorGiB` and `gpulease.DisplayBudgetGiB` are the allocator's display-card floor as pure
+  functions (the rest of the card past the cap, or the display layer's declared floor, whichever is larger; the budget is the total less the
+  floor, never negative, with no answer without a total). The allocator's method calls the first, behaviour unchanged (its existing
+  display-cap tests are green); the surfaces below read the same functions, so none can disagree with the rule a job is admitted by.
+- **A live verdict on the display card's row.** `gpucards.Row.DisplayCap` (`cap_pct`, `budget_gb`, `used_gb`, `used_pct`, `over_cap`,
+  `over_by_gb`, `closed`, `unknown`) is on the display card's row, plus every row of a reading that could not say which card the monitor is on (there as `unknown`), in `gpu status` (text and `--json`), `gpu cards` and the
+  `offload_status` brief's `gpu_cards`: the VRAM in use now, the desktop and every process counted, against the budget. The text table keeps
+  its header and gains one `display cap:` line under the display card that says what is counted and that it cannot say whose memory it is.
+  `over_by_gb` is present exactly when the card is over, to four decimals of a GiB and never rounded to nothing (nvidia-smi reads whole MiB, so a
+  breach of a few MiB is a real reading), and the text line says `OVER by less than 0.1 GiB` under 0.05 GiB, never `OVER by 0.0 GiB`.
+  A cap of 0 is `closed` and never over; a card with no total, and every card of a reading that could not say which card the monitor is on
+  (the allocator closes such a card too), are `unknown` and not judged. The rows are built by one function, `gpucards.RowsWithCap`
+  (it replaces `Rows`, and `Section` takes the same two arguments), so no surface can print the table without the verdict. The cap is read from the
+  config file as it is when the call is made (`LiveGPUDisplayCap`), so a `0` written while the MCP server runs shows in the next brief.
+- **The brief can now say "unknown".** The brief's table is built from the nvidia-smi sample its verdict already took, which dropped
+  whether `display_attached` was read, so on a reading that could not tell the monitor's card it showed no display card and no cap row at all.
+  `gpuactivity.GPU.AttachedUnknown` (set by `SampleGPUs`, from `RunDisplayAwareReport`, on every card of such a reading) is passed into the table.
+- **`audit-yaml`'s `display-cap-unseen` note.** For a file that has a `proxy:` seat or pins a device (the card table is read for no other file), it prints
+  ONE `note:` naming the entries that may sit on the display card: the `proxy:` seats, the entries pinned onto it (by UUID, or by index under
+  `CUDA_DEVICE_ORDER=PCI_BUS_ID`) and the unpinned entries of that file (at most six names per group, the groups on the one line), the display card
+  (index and UUID tail of this reading), the default cap and its budget in GiB by the same arithmetic, saying that the yaml states no VRAM footprint
+  so nothing is judged and entries that can run together (`matrix:`) are not summed, and pointing to the `gpu status` row. A plain index with no
+  PCI order is named as unmappable, never guessed. It is never a violation and never an exit code, takes no `--config`, reads no config (the
+  cap it states is the default, and says so), and `--other-box` skips it with the existing skip line. The card table is read for a file that pins a device
+  or has a `proxy:` seat, once per file and shared with the pin rules; a file with neither still never runs `nvidia-smi`
+  (`TestAuditYAMLDoesNotReadTheCardTableWhenNothingPins` is unchanged), so an unpinned entry alone is not named.
+- **How the display card is identified.** By the driver's reading, by UUID (`display_active` or `display_attached`, `gpuprobe.Card.Display`), never an index,
+  so a monitor moved to another card is followed on the next read, and an entry that was off the display card and is now on it is named without a config edit.
+  A single-card or headless box flags none, as for the allocator, and the note is silent; a single-card box is silent even on a reading that could not say
+  which card the monitor is on (one card has nothing to tell apart), while a box of two or more cards gets one line saying so and naming no entry.
+- **What it cannot see, plainly.** The live row cannot say whose memory it is, and a model loading can flash it over for a moment. The yaml note judges
+  nothing: it has no footprint to judge, and it does not read the seat env inside an engine's launcher.
+- **Deferred, with the reason.** Footprint-based violations (a declared layer footprint, a vLLM `gpu_memory_utilization` times the card, a seat-env reader)
+  and a `doctor` row. There is no placement-neutral footprint source: declaring the opencode-only 3-card seat as a layer would expose it to placement,
+  `kv_cache_memory_bytes` voids the utilization figure, and a live yaml with no stamp would turn the session-start audit red. The layer placement
+  admission (`placement.displayFloor`) keeps its own arithmetic; this change does not fold the cap into it.
+- **Tests, written first and seen red.** A behaviour-free seam commit (types, fields and stubs), then the tests, each failing on its assertion:
+  `DisplayFloorGiB(15.9, 60, 0) = (0, false), want (6.36, true)`; `the display card's row must carry the cap verdict`; `card 0: a reading from the fallback after an unexplained
+  failure must say it cannot tell the monitor's card`; `the display card's row must carry display_cap` (brief); `pinned onto the display card = [], want [...]`;
+  `exactly one display-cap-unseen note line, got 0`; `the card table was read 0 times, want 1`. Some tests were NOT red first and are proven by a named mutation instead: the two declared-display-floor tests (`gpu cards` and the brief), the held-host `gpu status` text test and the cap-95 halves of the `gpu status` and `gpu cards` tests (each call site of the table), the two float-tolerance rows of `TestDisplayCapComparesUseToTheBudgetAndAnExactFitIsWithin` and the NaN-marshal assertion of `TestDisplayCapNeverGuessesAnUnreadableTotal` (the over comparison without its tolerance, and the no-total guard).
+  Mutations, each applied alone with `scripts/mutation-check.sh`, each RED: the floor
+  uses the cap instead of the rest of the card, the larger floor no longer wins, the budget is not clamped or has no total check; the over comparison inverted or
+  without the float tolerance, free compared instead of used, the cap applied to every row, a cap of 0 not closed, an unknown reading ignored or printed once
+  per card, a missing total unguarded, the section or the declared floor ignoring the cap; `SampleGPUs` never marking an unknown reading; the brief reading the cap at load
+  (killed by `TestBriefReadsTheLiveDisplayCapNotTheOneAtLoad`, which rewrites the config file after the server is built), ignoring the declared floor, or dropping the unknown reading;
+  in the note: an index with no PCI order mapped as an nvidia-smi index, a proxy seat not classified, every card judged a display card, an index or UUID pin ignoring the
+  display flag, no display-card guard, seven names per group, an unknown reading ignored, the budget at the wrong cap, and the audit's cmd-over-env order inverted; in the wiring (remote gate):
+  the proxy seat not reading the table, the table read for every file, `--other-box` ignored, the note dropped, the declared floor not passed, and each call site of the table ignoring the cap (`gpu status` json and both text branches, `gpu cards`). One mutation survives and is equivalent
+  by construction: reading the cap at load instead of live in the one-shot verbs, where the config is loaded in the same call; the live read matters in a long-lived process, which is the brief, and
+  that mutation is killed there.
+- **Review round: five distinct findings (the help-text one was raised twice), four fixed and one refuted.** Each fix has its test written first and seen red on its
+  assertion (no new symbol, so each compiled against the commit before), then the fix, then one-line mutations, each RED.
+  (1) The `audit-yaml` help and the `runAuditYAML` comment promised the note to a file with an unpinned entry; the code reads the card table only for a file that pins a
+  device or has a `proxy:` seat, so the words were wrong and the behaviour stands (`TestAuditYAMLHelpDoesNotPromiseTheNoteToAFileThatNeitherPinsNorProxies`).
+  (2) The list of tests written after the red commit, above, was incomplete; it now names them all. (3) A breach under about 5 MiB gave `over_cap` true with an amount of 0
+  (the key dropped from the JSON) and the text read `OVER by 0.0 GiB`, which it also printed from 0.01 to 0.049 GiB: `over_by_gb` is now four decimals and never below 0.0001
+  for an over card, and the verdict is unchanged (still the allocator's, on unrounded values). (4) A single-card box on a reading that could not say which card the monitor
+  is on printed the "no display card known" note, against the contract that a single-card box is silent; it is silent now. The card table's `display cap: not judged` line on
+  such a one-card reading is unchanged: it mirrors the allocator, which closes that card too. (5) Refuted: the cap of six names is per group, not per line. The design
+  listed at most six names per aggregated line, one line per group; the note became one line, and a total of six would have left the later groups (the plain indices that
+  cannot be mapped, which need an operator's eye) as a bare count behind a long list of unpinned entries. The worst case is 24 names on the line, and the docs say per group.
+- **No inference placement changes.** Everything here reads; nothing loads, unloads or moves a model, and the allocator's decisions are the same.
+
 ## [0.184.0] - 2026-10-12 - a busy fleet is a place in line in every row, a re-pack that empties its answer's lists is refused, every delegate result says where it ran, offload_status names the image a server runs, and the serving audit refuses a bare --cpu-moe and an index pin on identical cards
 
 ### Fixed — integration review round of 0.184.0

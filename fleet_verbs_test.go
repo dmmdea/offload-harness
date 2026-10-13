@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -134,6 +135,45 @@ func TestFleetServeParams(t *testing.T) {
 			t.Errorf("listen = %q, want the config value", listen)
 		}
 	})
+}
+
+// A node names itself in three places: /fleet/health and the queue claim take the id fleetServeParams resolves, and the
+// result envelope the pipeline stamps takes cfg.FleetNodeID. fleetServeConfig puts the first on the config the pipeline reads, so
+// the three agree whichever way the id was given (the installers pass --node-id and write no fleet_node_id).
+func TestFleetServeStampsItsResolvedNodeIDOnTheConfigThePipelineReads(t *testing.T) {
+	for _, tc := range []struct {
+		name, flag, cfgID string
+		hostname          func() (string, error)
+		want              string
+	}{
+		{"the flag", "flag-id", "", func() (string, error) { return "host-id", nil }, "flag-id"},
+		{"the flag beats the config", "flag-id", "cfg-id", func() (string, error) { return "host-id", nil }, "flag-id"},
+		{"the config", "", "cfg-id", func() (string, error) { return "host-id", nil }, "cfg-id"},
+		{"the hostname", "", "", func() (string, error) { return "host-id", nil }, "host-id"},
+		{"a hostname that cannot be read", "", "", func() (string, error) { return "", errors.New("no hostname") }, "fleet-node"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.FleetNodeID = tc.cfgID
+			_, nodeID, err := fleetServeParams("", tc.flag, false, cfg, tc.hostname)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if nodeID != tc.want {
+				t.Fatalf("fleetServeParams resolved %q, want %q (control: the id health and the claim take)", nodeID, tc.want)
+			}
+			got := fleetServeConfig(cfg, nodeID)
+			if got.FleetNodeID != nodeID {
+				t.Errorf("config handed to the pipeline has fleet_node_id %q, want %q: the result envelope would name the node differently from its health", got.FleetNodeID, nodeID)
+			}
+			// Nothing else on the config moves.
+			rest := got
+			rest.FleetNodeID = cfg.FleetNodeID
+			if !reflect.DeepEqual(rest, cfg) {
+				t.Errorf("fleetServeConfig changed a field other than fleet_node_id")
+			}
+		})
+	}
 }
 
 // TestFleetServeSweepReport: the startup sweep's outcome is reported as up to

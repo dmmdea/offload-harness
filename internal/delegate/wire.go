@@ -9,6 +9,7 @@ package delegate
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 )
@@ -101,6 +102,14 @@ const (
 // (which stays inside the node's result and the delegation log).
 type ResultWire struct {
 	Node string `json:"node"`
+	// NodeReported is the id the executing node stamped on its OWN result, present only when it differs (case-insensitively)
+	// from Node: Node is the id the placement used (the node_id /fleet/health publishes, the name the placement text carries),
+	// so the two differ in two cases: a node on a build before 0.185.0 (it stamps its hostname where it was launched with
+	// another --node-id) and a local run attributed to another box's engine (register C-58: the runner stamps its own box, the
+	// placement names the engine's). A node on this build stamps the id it advertises, so it never differs there. Absent when
+	// the two are the same and when no node took the subtask. Stamped in one place, WireResponse, from NodeReported().
+	NodeReported string `json:"node_reported,omitempty"`
+	// Seat is the agent seat that ran the subtask.
 	Seat string `json:"seat"`
 	// Placement is the placement REASON, a string — read as text (council R4) — so the composite decision is
 	// published beside it as Placed, never folded into it. Where the subtask RAN is RanOn, not a word in this text:
@@ -301,6 +310,17 @@ func lintFor(lints [][]string, i int) []string {
 	return nil
 }
 
+// NodeReported is the id the executing node stamped on its own result, when that
+// differs from the node the placement used (pr.Node); "" otherwise. See
+// ResultWire.NodeReported.
+func NodeReported(pr PlacedResult) string {
+	id := pr.Result.NodeID
+	if pr.Node == "" || strings.EqualFold(id, pr.Node) {
+		return ""
+	}
+	return id
+}
+
 // wireCallsMax bounds ResultWire.Calls (register D-99): the last eight
 // completions cover a 12-step run's tail — its tool steps, the final answer,
 // a structured re-pack — without republishing every planner turn.
@@ -437,6 +457,8 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 		case placedRemote:
 			rw.RanOn = RanOnNode
 		}
+		// The id the node's own result named it by, when that is not the one the placement used (Node above).
+		rw.NodeReported = NodeReported(pr)
 		if pr.Err != "" {
 			rw.Failed = true
 			rw.Reason = pr.Err

@@ -1238,6 +1238,29 @@ plugin reads `ran_on` first and the placement text only when a result has none (
 "Wire fields the plugin reads"). The field is additive and `omitempty`, so an older reader decodes the row unchanged, and it shows on a
 fleet only after the delegator is deployed.
 
+**Which node (`node`, `node_reported`, 0.185.0).** `results[].node` is the `node_id` the node publishes in `/fleet/health`, for a run on a fleet node this delegator dispatched to: the id
+placement used, and the name the `placement` text, the progress lines, the delegation-log `node`, the dispatch marker and the ledger
+`model_tier` prefix (`<node>:<seat>`) carry. It used to be the id the node stamped on its own result envelope, which for a node
+launched with `--node-id` (the installers' form, with no `fleet_node_id` in the config) was the OS hostname, so a result could say one
+node in `node` and another in `placement`. `results[].node_reported` (additive, `omitempty`) is the id the node's own result carried,
+published only when it differs from `node` (compared without regard to case): a node on a build before 0.185.0 (it stamped its
+hostname where it was launched with another `--node-id`), or a local run attributed to another box's engine (register C-58: the
+runner stamps its own box, the placement names the engine's). A node on 0.185.0 stamps the id it advertises, so it never differs
+there. It is absent when the ids agree and when no node took the subtask (a defer, a shed, a refusal chain, a call-deadline cut).
+`node` falls back to the result's own id only when a node's health published none. The
+`route: "queue"` lane has no health view of the claimant (the holder's poll returns the job's state and data, not who claimed it), so
+its `node` is the id the claimant stamped on its answer: the id it claims under once it runs 0.185.0 (`fleet-serve` stamps the id it
+resolves, so health, the claim and the envelope agree), its hostname before. In a mixed fleet the push path names the node by the
+placement id as soon as the delegator is deployed, whatever the nodes run, and the queue lane does so only when every node does. A run
+on this box's own seat carries this box's own name (the runner's stamp), or, for an engine that is another box's (register C-58),
+that box's name, not the runner's; such a row also carries the runner's stamp in `node_reported`.
+
+`rig --node` selects a row by its `node` or by its `result.node_id`, and the two names do not select the same rows. The node's card
+id selects the rows a 0.185.0 delegator wrote and, for a node launched with `--node-id` and no `fleet_node_id` (the installers' form), never a row written before (it carries only the hostname). The hostname selects
+the rows an older delegator wrote and the rows a 0.185.0 delegator wrote for a node not yet on 0.185.0, and it stops selecting a
+node's rows once that node runs 0.185.0 (it stamps its card id in both fields). For a window that spans the change, run `rig` once
+per name and read both reports.
+
 **The retry never lands on a FENCED or RESERVED local seat (0.117.7, register D-94; reservations, register C-81).** Before choosing the local
 seat for a retry the delegator reads the machine-wide lease and asks `delegate.Fenced` — the
 placement-side reading of `modelaffinity.BlocksNewRun`, which it calls rather than restates. Three
@@ -1491,7 +1514,7 @@ remote reasoning is quarantined from the caller's context by construction.
 | Field | Type | Meaning |
 |---|---|---|
 | `schema_version` | int | `1`. |
-| `node_id` | string | Executing node (`fleet_node_id`, else the OS hostname). |
+| `node_id` | string | Executing node, by the id `/fleet/health` publishes: `--node-id`, else `fleet_node_id`, else the OS hostname (0.185.0; an older node stamped its hostname whenever it was launched with `--node-id`). The delegator publishes it as `results[].node_reported` when it differs from `results[].node`. |
 | `seat` | string | The resolved planner model that ran the loop. |
 | `output` | string | The loop's final assistant text. Stays populated even when the structured re-pack failed, so the CALLER still receives the loop's answer. It is preserved for the caller, **not** for delegator-side acceptance — acceptance runs only when `deferred` is false, and every re-pack failure branch defers. |
 | `structured` | object | Present iff `output_schema` was given AND the result validated: a final answer that already IS the requested object (0.115.12: trimmed to its outermost `{…}`, scalar-coerced) is taken as is with no re-pack call; otherwise, after the loop, one grammar-constrained completion on the same seat re-packs `output` into the schema, with one retry before deferring. Its completion budget scales with the answer it re-packs (0.115.10: `len(output)/3 + 512` tokens, floor 1,024, cap 8,192 — a fixed 1,024 turned every long answer into a JSON prefix filed as "invalid json"); a completion cut at `max_tokens` is named `re-pack truncated at N tokens` and the retry gets the cap. The re-pack call sends `chat_template_kwargs: {"enable_thinking": false}` — it is a mechanical shape transformation, not a reasoning step, and on a THINKING seat the grammar-constrained output otherwise lands in `reasoning_content` while `content` comes back empty, failing both attempts and discarding a finished answer. Harmless on non-thinking templates (measured identical output with and without). |

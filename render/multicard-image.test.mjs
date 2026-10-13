@@ -358,3 +358,85 @@ test("the wiring: comfy-generate, comfy-render and comfy-edit hand the plan to w
   assert.equal((rnd.match(/generate\(out, API, built, flags, placement\)/g) || []).length, 2);
   assert.match(edt, /renderEdit\(\{ out, API, plan, placement, inputDir \}\)/);
 });
+
+// ---- the compute card ranked by capability (0.185.0): the Wan planner's role choice, on the image and edit placements ---------------------------------
+// Here U0 (idx 0) is the LOWER uuid, so the fast card is idx 0 and the slow one idx 2: the size rule (larger computes) and the uuid rule (higher computes)
+// both say idx 2, and only the board-power rule says idx 0.
+const RANKED = [
+  { ...CARDS[0], name: "Test GPU Fast", totalMiB: 16303, powerLimitW: 300 },
+  { ...CARDS[2], name: "Test GPU Slow", totalMiB: 16311, powerLimitW: 180 },
+];
+
+test("the image placement ranks the compute card by board power, and falls back to the old rule when the power is not reported", () => {
+  const p = plan({ cards: () => RANKED });
+  assert.equal(p.pair.compute.index, 0);
+  assert.equal(p.pair.storage.index, 2);
+  assert.equal(p.pair.why, "the faster card: 300 W board power against 180 W");
+  assert.equal(p.launch.key, "mc-cccc3333-aaaa1111", "the instance key follows the roles: storage first");
+  const unread = plan({ cards: () => RANKED.map((c) => ({ ...c, powerLimitW: 0 })) });
+  assert.equal(unread.pair.compute.index, 2, "the larger card computes, as before");
+  assert.match(unread.pair.why, /^the larger card \(16311 MiB against 16303 MiB\) \(board power not reported for idx 2, idx 0\)$/);
+});
+
+test("WAN_COMPUTE_UUID names the compute card of the image placement too, refuses a token that names no card, and ignores one outside the pair", () => {
+  // equal sizes and no power: the higher uuid (idx 2) computes unless the card is named
+  assert.equal(plan().pair.compute.index, 2);
+  const named = plan({ env: { ...LEASE, WAN_COMPUTE_UUID: "0" } });
+  assert.equal(named.pair.compute.index, 0);
+  assert.equal(named.pair.storage.index, 2);
+  assert.equal(named.pair.why, "named by WAN_COMPUTE_UUID");
+  assert.equal(plan({ env: { ...LEASE, WAN_COMPUTE_UUID: "aaaa1111" } }).pair.compute.index, 0, "a prefix");
+  // it beats the board power
+  assert.equal(plan({ cards: () => RANKED, env: { ...LEASE, WAN_COMPUTE_UUID: "2" } }).pair.compute.index, 2);
+  assert.equal(plan({ cards: () => RANKED }).pair.compute.index, 0, "(the control: unnamed, the fast card computes)");
+  // names no card of the table: refused in the image runners' words, with the two cards
+  assert.throws(() => plan({ env: { ...LEASE, WAN_COMPUTE_UUID: "deadbeef" } }), /^Error: IMAGE-PLACEMENT: WAN_COMPUTE_UUID names "deadbeef", which is no card in the driver's table.*\(idx 2, idx 0\)/);
+  // a real card that is not in the pair: ignored, with a note in the plan
+  const outside = plan({ env: { ...LEASE, WAN_COMPUTE_UUID: "1" } });
+  assert.equal(outside.pair.compute.index, 2);
+  assert.equal(outside.pair.note, 'WAN_COMPUTE_UUID names "1", which does not name exactly one of the two cards (idx 2, idx 0); ranked instead');
+  assert.equal(plan().pair.note, "", "(the control: nothing ignored, no note)");
+});
+
+test("the override is judged like any other choice: the recipe's resident and peak checks run on the card it names, not on the larger one", () => {
+  // 24 GiB beside 16 GiB: unnamed, the larger card (idx 0) computes. The GGUF recipe holds 4.9 GiB on the compute card at its 3 GiB share (+1 GiB per GiB of share)
+  // and 12.6 GiB on the storage card (which a larger share does not lower), against the 1 GiB --reserve-vram.
+  const unequal = W.parseCardTable([`0, ${U0}, Test GPU Big, 24576, 24000, Disabled, No`, `2, ${U2}, Test GPU Small, 16384, 16000, Disabled, No`].join("\n"));
+  const naming = { ...LEASE, WAN_COMPUTE_UUID: "2" };
+  const share = (gb) => ({ cards: () => unequal, flags: { placement: "multicard", "resident-gb": String(gb) } });
+  // the controls: the same two shares, unnamed, fit the 24 GiB card that computes
+  for (const gb of [14, 13.5]) assert.equal(plan(share(gb)).pair.compute.index, 0, `${gb} GiB resident, unnamed`);
+  // 14 GiB resident is over what the 16 GiB card holds beside the recipe's 1.6 GiB of activations and the 0.5 GiB context (13.9): the resident check refuses it ON IDX 2
+  assert.throws(() => plan({ ...share(14), env: naming }), /--resident-gb 14 leaves the compute card \(idx 2, 16\.0 GiB\).*1\.6 GiB for the sampler's activations.*at most 13\.9 GiB/s);
+  // 13.5 GiB passes that check but is a 15.4 GiB peak on the compute card against 15.0 usable: the peak check refuses it ON IDX 2
+  assert.throws(() => plan({ ...share(13.5), env: naming }), /needs the compute card \(idx 2, Test GPU Small\) to hold 15\.4 GiB, and it has 16\.0 GiB \(15\.0 GiB usable after --reserve-vram 1\)/);
+  // the positive control: a share the named card holds is planned, and the named card computes
+  const held = plan({ ...share(12), env: naming });
+  assert.deepEqual([held.pair.storage.index, held.pair.compute.index], [0, 2]);
+  assert.equal(held.pair.why, "named by WAN_COMPUTE_UUID");
+});
+
+test("the image placement's one line ends with the rule that chose the compute card, and the note of an ignored override", () => {
+  const lines = [];
+  plan({ cards: () => RANKED, say: (l) => lines.push(l) });
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^placement: multicard on the GPU lease: storage cuda:0 = idx 2 .*; compute cuda:1 = idx 0 .*; recipe qwen-image\/gguf-q5_1, 3 GiB of the DiT resident on the compute card; basis predicted; compute card chosen: the faster card: 300 W board power against 180 W$/);
+  lines.length = 0;
+  plan({ cards: () => [...RANKED, CARDS[1]], env: { ...LEASE, WAN_COMPUTE_UUID: "1" }, say: (l) => lines.push(l) });
+  assert.match(lines[0], /compute card chosen: the faster card: 300 W board power against 180 W \(WAN_COMPUTE_UUID names "1", which does not name exactly one of the two cards \(idx 2, idx 0\); ranked instead\)$/);
+});
+
+test("planImageMulticard reads the card table through queryCardsRanked unless it is handed one", () => {
+  const asked = [];
+  const smi = (cmd, args, opts) => {
+    asked.push({ fields: args[0], opts });
+    return /power/.test(args[0])
+      ? { status: 0, stdout: `${U0}, 300.00\n${U2}, 180.00` }
+      : { status: 0, stdout: `0, ${U0}, Test GPU Fast, 16303, 16000, Disabled, No\n2, ${U2}, Test GPU Slow, 16311, 16050, Disabled, No` };
+  };
+  const p = plan({ cards: undefined, spawnSync: smi });
+  assert.equal(p.pair.compute.index, 0);
+  assert.equal(asked.length, 2);
+  assert.equal(asked[1].fields, "--query-gpu=uuid,power.default_limit");
+  assert.ok(asked.every((a) => a.opts.windowsHide === true));
+});

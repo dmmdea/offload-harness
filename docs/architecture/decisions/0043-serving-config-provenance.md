@@ -179,6 +179,15 @@ more things, and the stamp turned out to be the evidence two of them need.
   that says why (the card table is not read) and leaves every other rule running. A box id in the
   stamp would let the audit tell for itself, but the stamp is a closed input set that `spec_sha256`
   hashes, so that is a change to its format, left for a decision.
+- **The display card's cap is reported, not judged (`display-cap-unseen`).** `gpu_display_cap_pct` bounds the card allocator's
+  jobs; a model llama-swap loads onto the display card is outside it, and the yaml states no VRAM footprint, so the audit cannot
+  say an entry is over the cap. The pin loop above skips an entry with no `CUDA_VISIBLE_DEVICES` (a `proxy:` seat, an unpinned
+  entry), so such an entry used to pass in silence. From the same single card-table read (taken now for a file that pins a device
+  or has a `proxy:` seat), `servingtmpl.AuditDisplayCapUnseen` prints ONE `note:` naming the entries that may sit on the card the
+  driver flags as the display card (by UUID, so a moved monitor is followed), the display card, the default cap and its budget
+  (`gpulease.DisplayBudgetGiB`, the allocator's arithmetic), and that nothing is judged. It is never a violation, never an exit code,
+  reads no config, and `--other-box` skips it. The live verdict is the display cap row of `gpu status`. Footprint-based violations
+  are deferred until a placement-neutral footprint source exists (`docs/systems/gpu-lease.md`).
 - **What stays open.** The installer still writes the bare form in three places (the selftest R4.2
   remediation, the `install.ps1` unknown-profile fallback and `fallbackProfile` for the CUDA
   family), so the off-matrix exemption is a concession, not a policy; a yaml that R4.2 remediated

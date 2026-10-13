@@ -227,6 +227,12 @@ type slot struct {
 // a bigger one was not measured, and the runner holds it at this figure too and says so (WAN-GEOMETRY-NOTE), so no sizing here claims to know it.
 const wanActivationsGiB = 12.2
 
+// wanActivationsSageGiB is the same figure under sage attention (--use-sage-attention in COMFY_EXTRA_ARGS), which holds more activations on the
+// compute card: the film session of 2026-10-12 read 15,482 MiB (15.119 GiB) in use at the film's clip with no resident share, rounded up to 15.2, on the
+// same basis as the 12.2 above (the card's peak less its resident share, the context inside). render/wan-multicard.mjs WAN_FILM_ACTIVATIONS_SAGE_GIB (a
+// test pins the two together). Like the figure above it is the film's, held for any clip: this sizing reads no geometry.
+const wanActivationsSageGiB = 15.2
+
 // wanResidentDefaultGiB is the share of each Wan expert the card-only placement keeps on the compute card when the call names none:
 // render/wf-wan22-i2v.mjs WAN_RESIDENT_GB_DEFAULT (a test pins the two together).
 const wanResidentDefaultGiB = 3.0
@@ -246,6 +252,10 @@ const wanStorageOverheadGiB = 0.8
 type CardOnly struct {
 	// ResidentGiB is --wan-resident-gb: the share of each expert kept on the compute card.
 	ResidentGiB float64
+	// SageAttention is true when COMFY_EXTRA_ARGS carries --use-sage-attention (or an argparse prefix of it): the runner then sizes the compute card's
+	// activations at wanActivationsSageGiB. Read from the process environment only (Facts.Env): an `env COMFY_EXTRA_ARGS=...` prefix inside the wrapped
+	// command is not seen here, while the runner sees it.
+	SageAttention bool
 }
 
 // estimate is the rule: the files the family loads, sized, and counted in full when together they
@@ -258,7 +268,8 @@ func estimate(family string, files []mediacap.ModelFile, f Facts) (Need, bool) {
 // estimateWith is estimate for a call that may ask for the card-only Wan placement (co: --wan-placement multicard on the Wan 2.2
 // graph). That placement does not stream weights from RAM: the two experts load one after the other (the first is gone before the
 // second lands) and the text encoder is gone before the first expert, so what has to fit is the largest STAGE, on each of the TWO
-// cards the lease holds: the larger card computes (its resident share of the expert + the sampler's activations + the CUDA context) and the
+// cards the lease holds: the compute card (the larger one here; see "which card computes" below) holds its resident share of the expert + the
+// sampler's activations + the CUDA context and the
 // other holds the donor blocks (the rest of the expert + the VAE and the CUDA context). When both fit, the call declares 0 (measured on two
 // equal cards at film size: 15.18 and 10.86 GiB at the peak, 2.3 GiB of host growth over ComfyUI's idle). Anything that is not exactly that (one
 // card, three, no table, a card too small for its stage) is the ordinary estimate, which counts the whole set.
@@ -312,6 +323,7 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 		src = SourceFamilyDefault
 	}
 	set := strings.Join(parts, " + ")
+	sageNote := "" // what a sage call that missed the card-only stages adds to the ordinary detail
 	if co != nil && len(f.CardsGiB) == 2 {
 		var expert float64
 		for _, s := range slots {
@@ -323,14 +335,33 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 		if small > large {
 			small, large = large, small
 		}
+		// Which card computes: this sizing judges the compute stage against the LARGER card. The runner (render/wan-multicard.mjs chooseRoles) gives the role to
+		// the larger card too, with two exceptions, and judges the stage against the card that computes. (1) Within 1 percent of one size the smaller card computes
+		// when its board is faster (power.default_limit at least 1.25 times the other's): the gap is then at most 1 percent of the card (0.16 GiB at 16 GiB), so a
+		// share at the film-size ceiling (3.2 GiB on a 15.9 GiB card) can be declared 0 here and refused by the runner's resident check on the smaller card: a
+		// refusal before ComfyUI starts, never an out-of-memory run. The default share of 3 is unaffected. (2) WAN_COMPUTE_UUID can name the smaller card of ANY
+		// pair (24 + 12 GiB too): the gap is then not bounded, and the runner's resident check refuses what that card cannot hold, again before ComfyUI starts. A card
+		// list that says which card is which would close both; the lease's card list carries neither the board power nor the override.
 		// The compute card is held to what was measured, its peak plus the context: --reserve-vram is ComfyUI's model-load margin, not an activation
 		// ceiling, and with the film-size run's 12.2 GiB it would refuse the call that run measured (3.0 + 12.2 = 15.2 > 14.9). It stays the storage
 		// card's margin.
 		reserve := f.reserve()
-		compute := co.ResidentGiB + wanActivationsGiB + wanComputeContextGiB
+		activations, activationsWord := wanActivationsGiB, "film-size activations"
+		if co.SageAttention {
+			activations, activationsWord = wanActivationsSageGiB, "film-size activations (sage attention)"
+		}
+		compute := co.ResidentGiB + activations + wanComputeContextGiB
 		storage := expert - co.ResidentGiB + wanStorageOverheadGiB
-		if expert > 0 && small > 0 && compute <= large && storage <= small-reserve {
-			return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB expert + %.1f GiB of film-size activations + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card) and the storage card %.1f GiB of donor blocks + %.1f GiB for the VAE and the context = %.1f GiB (of %.1f usable), so each card fits its stage, and the weights are mapped read-only: no weights stream from RAM (the set is %s)", family, small, large, co.ResidentGiB, expert, wanActivationsGiB, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
+		fitsStorage := expert > 0 && small > 0 && storage <= small-reserve
+		if fitsStorage && compute <= large {
+			return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB expert + %.1f GiB of %s + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card) and the storage card %.1f GiB of donor blocks + %.1f GiB for the VAE and the context = %.1f GiB (of %.1f usable), so each card fits its stage, and the weights are mapped read-only: no weights stream from RAM (the set is %s)", family, small, large, co.ResidentGiB, expert, activations, activationsWord, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
+		}
+		if co.SageAttention && fitsStorage {
+			// Only the COMPUTE stage missed at the sage figure (the storage card fits its stage, so compute > large here). This sizing reads no geometry, so it holds the film's
+			// 15.2 GiB for any clip: a smaller clip's partial share (the measured 65 frames at 2 GiB) lands here as the ordinary set, where it declared 0 before sage was read.
+			// Say so, and how to state the real figure. When the storage card is the one that cannot hold its stage (or no expert file was found) the hint would blame the
+			// geometry for a miss it did not cause, so it is withheld.
+			sageNote = fmt.Sprintf("; --use-sage-attention in COMFY_EXTRA_ARGS sizes the activations at the film's %.1f GiB for any clip, so a smaller clip's partial share is declared the ordinary set here: --ram 0 states the real figure (it is not seen when COMFY_EXTRA_ARGS is set by an `env` prefix inside the wrapped command)", wanActivationsSageGiB)
 		}
 	}
 	usable := f.VRAMGiB - f.reserve()
@@ -341,7 +372,7 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 	if f.VRAMGiB > 0 {
 		card = fmt.Sprintf("the %.1f GiB card (%.1f GiB usable)", f.VRAMGiB, usable)
 	}
-	return Need{GiB: total, Source: src, Detail: fmt.Sprintf("%s: %s = %.1f GiB does not fit %s, so the weights stream from RAM", family, set, total, card)}, true
+	return Need{GiB: total, Source: src, Detail: fmt.Sprintf("%s: %s = %.1f GiB does not fit %s, so the weights stream from RAM%s", family, set, total, card, sageNote)}, true
 }
 
 func roleWord(r mediacap.ModelRole) string {

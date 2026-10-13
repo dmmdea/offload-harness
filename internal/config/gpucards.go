@@ -69,10 +69,11 @@ func (c Config) WithSource(path string) Config {
 	return c
 }
 
-// LiveGPUDisplayCap is gpu_display_cap_pct as the file this Config was read from says NOW, for the one reader
+// LiveGPUDisplayCap is gpu_display_cap_pct as the file this Config was read from says NOW, for the readers
 // that must see the operator's "I need the card" switch (0) while the process runs: the card allocator's input
-// (gpualloc.BuildInput). A process never reloads its config, so GPUDisplayCap, the value at load, would leave
-// the switch dead for a `gpu reserve --wait 8h` already in line, for a detached holder, and for the long-lived
+// (gpualloc.BuildInput), `gpu status` and `gpu cards` (displayCapNow in gpu_cards.go) and the offload_status
+// brief (internal/mcpserver/status_section.go). A process never reloads its config, so GPUDisplayCap, the value at
+// load, would leave the switch dead for a `gpu reserve --wait 8h` already in line, for a detached holder, and for the long-lived
 // MCP server that places media calls. The read is one small file and one key: a plain read on every call, no
 // memo, because a memo keyed on the file's timestamp can miss a rewrite that keeps both timestamp and size.
 //

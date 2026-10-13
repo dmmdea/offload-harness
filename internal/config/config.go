@@ -1379,16 +1379,18 @@ type Config struct {
 	// he says he needs it, so no presence reading opens or closes it any more; 0 is the "I need it" switch and keeps
 	// the card closed to the allocator. A pointer because unset (60) and 0 (closed) must differ; 1..100 are shares, and
 	// a value outside 0..100 refuses the load by name (and reads as closed where a caller goes on with it anyway). The
-	// switch is read from this file as it is when the allocator builds its input (LiveGPUDisplayCap), not as it was
-	// at start, so a 0 written while a request is in line or a server is running takes effect. It bounds ADMISSION only: nothing limits a job after it is placed, and a job that declares no footprint (`--vram`)
+	// switch is read from this file as it is when the allocator builds its input or a status surface prints the card
+	// table (LiveGPUDisplayCap), not as it was at start, so a 0 written while a request is in line or a server is running takes effect. It bounds ADMISSION only: nothing limits a job after it is placed, and a job that declares no footprint (`--vram`)
 	// is not given the card, except at 100 with no display_floor_gib declared: that is the whole card, nothing is held
 	// back to hold a footprint to, and a job that declares none (every media call) is given it with no VRAM check on
 	// that card, as on any other. The llama-swap twin guards
-	// (display_floor, presence on the display layer) are separate and unchanged.
+	// (display_floor, presence on the display layer) are separate and unchanged. The display card's row of the card table
+	// (`gpu status`, `gpu cards`, the offload_status brief) reports the VRAM in use against this share live, whoever's memory it is, and
+	// audit-yaml's display-cap-unseen note names the llama-swap entries it cannot judge against it.
 	GPUDisplayCapPct *int `json:"gpu_display_cap_pct,omitempty"`
 	// sourcePath is the file this Config was read from ("" = none: the defaults, or a Config built by hand). It is
 	// not a setting. A running process never reloads its config, so the one key the operator's "I need the card"
-	// switch lives in (gpu_display_cap_pct) is re-read from this file when the allocator asks (LiveGPUDisplayCap).
+	// switch lives in (gpu_display_cap_pct) is re-read from this file when the allocator or a status surface asks (LiveGPUDisplayCap).
 	sourcePath string
 	// AgentSeatHostRAMGiB is the host RAM the agent seat holds once it is loaded (resident set plus any staged
 	// KV cache, GiB): what the warm-back of a seat a lease unloaded must find room for before it loads the seat
@@ -1776,6 +1778,9 @@ type Config struct {
 	FleetListen string `json:"fleet_listen,omitempty"`
 	// FleetNodeID names this node in /fleet/health. Empty = the OS hostname,
 	// resolved at serve time (so a shared config never bakes one box's name).
+	// fleet-serve's --node-id flag overrides it, and the id fleet-serve resolves
+	// is applied to the config its pipeline reads, so the result envelope, health
+	// and the queue claim carry one id.
 	FleetNodeID string `json:"fleet_node_id,omitempty"`
 	// FleetMaxQueueDepth caps how many jobs this node will hold in
 	// accepted/running at once — i.e. it is the ceiling on health's

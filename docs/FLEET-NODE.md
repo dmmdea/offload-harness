@@ -364,7 +364,7 @@ source, which has no `gpu_devices[]` to match against. Implementation:
 | Key | Default | Purpose |
 |---|---|---|
 | `fleet_listen` | `127.0.0.1:18811` | Bind address (`--listen` overrides). Port **18811** — the dispatcher owns 18810. |
-| `fleet_node_id` | `""` | Node id in `/fleet/health`. Empty = the OS hostname at serve time (`--node-id` overrides). |
+| `fleet_node_id` | `""` | Node id in `/fleet/health`. Empty = the OS hostname at serve time (`--node-id` overrides). The id `fleet-serve` resolves is also the one its result envelopes (`node_id`) and its queue claims carry (0.185.0; before, a node launched with `--node-id` stamped its hostname on its results). |
 | `fleet_sampler` | `auto` | Per-render VRAM footprint source: `auto` \| `pdh` \| `pdh-shared` \| `global` (see [Sampler modes](#sampler-modes)). |
 | `primary_gpu_uuid` | `""` | Pins the headline `vram_total_gb`/`vram_free_gb` to one card by nvidia-smi UUID, overriding the largest-total rule (see [`primary_gpu_uuid`](#primary_gpu_uuid--pin-the-headline-device-deterministically) above). Empty = unchanged largest-total behavior. |
 | `uma_reserve_gib` | `0` | RAM (GiB) a unified-memory SoC node (the `rockchip-rk3588` tier, whose GPU and NPU share system RAM) holds back from inference for the box's own workload. Health advertises `MemTotal − uma_reserve_gib` as `vram_total_gb` and `MemAvailable − uma_reserve_gib` as `vram_free_gb` (the linux-meminfo source). `0` = advertise all of RAM; the tier seeds `3`. Inert on every other tier, which reads a real VRAM counter. A reserve that leaves no capacity makes `fleet-serve` refuse to start, and a negative one is refused by name. |
@@ -735,7 +735,7 @@ one contract. Unknown payload fields are **ignored** (staggered node deploys mus
 | Field | Type | Meaning |
 |---|---|---|
 | `schema_version` | int | `1` |
-| `node_id` | string | this node (`fleet_node_id`, else hostname) |
+| `node_id` | string | this node, by the id `/fleet/health` publishes: `--node-id`, else `fleet_node_id`, else the OS hostname (0.185.0; a node on an older build stamped its hostname here whenever it was launched with `--node-id`, and the delegator then publishes that id as `results[].node_reported`) |
 | `seat` | string | the planner model that ran |
 | `output` | string | final assistant text (kept even when the structured re-pack failed) |
 | `structured` | object | present iff `output_schema` given AND the post-loop grammar re-pack validated (one retry). With no `output_schema` the re-pack is **skipped entirely** — not attempted and failed — so a schemaless local run is a plain success with `structured` absent |

@@ -381,7 +381,7 @@ local-offload gpu reserve --class media -- <your command>
 ```
 
 On a host with card-scoped leases enabled, hold only the cards the job uses so the others keep working:
-`gpu reserve --class media --devices 2 -- <cmd>` (named cards), `--cards 2` (the allocator picks two free cards; the display card only up to `gpu_display_cap_pct`, default 60 percent of its VRAM with the desktop's use counted, and only when you state `--vram`; set the key to `0` when you need the screen's card to yourself),
+`gpu reserve --class media --devices 2 -- <cmd>` (named cards), `--cards 2` (the allocator picks two free cards; the display card only up to `gpu_display_cap_pct`, default 60 percent of its VRAM with the desktop's use counted, and only when you state `--vram`; set the key to `0` when you need the screen's card to yourself; `gpu status` / `gpu cards` print a `display cap:` line under the display card with the VRAM in use against that share, whoever's memory it is),
 or no flag at all when `<cmd>` pins itself with `CUDA_VISIBLE_DEVICES`, `--cuda-device` or `COMFY_CUDA_DEVICE`. A command that carries a
 `COMFY_CUDA_DEVICE` or `COMFY_CARD_UUID` pointing at a card the lease does not hold is never refused: the wrapper rewrites that
 variable to the held card, prints one `re-pinned` line and starts the command (a `--cuda-device` on its command line is the
@@ -557,6 +557,9 @@ set. Keep `on` out of a binding that pools — every config load (so every CLI v
 with other flags, a render that needs a different profile relaunches it when the harness
 started it and nobody holds it, and otherwise defers with `COMFY-PROFILE-MISMATCH: …` naming
 the difference — stop that instance (or start it with the binding's flags) and retry.
+`--use-sage-attention` in `COMFY_EXTRA_ARGS` also changes the card-only Wan sizing (its activations are 15.2 GiB at film size, so a sage film call
+passes `--wan-resident-gb 0`; see "Sage attention" in `docs/systems/media-generation.md`), and a kept ComfyUI that runs sage is not reused by a call
+sized for the default attention.
 
 ### Deterministic post-production (edit-image op pack) ✅
 
@@ -1127,7 +1130,7 @@ through the fleet carries its wall to the node, where it is an expectation (ADR 
 however many nodes ran it. A name the local roster lacks is now looked up on the fleet: the door reads the roster's health once
 and sends ONE contract, at `route=remote` and narrowed to the nodes that match, to a node whose `agent_seat` is that name
 (without regard to case; a composite node's agent seat in a named layer counts). The result names `node`, `placement`, `seat`,
-`model` and `executed_on`, and is withheld if it came from another seat (a node that changed its agent seat after it was read; so is
+`model` and `executed_on`, plus `node_reported` only when the node's own result named itself by another id, and is withheld if it came from another seat (a node that changed its agent seat after it was read; so is
 the finished prose a deferral carries). The contract is a reasoned remote pin (`pin_reason: operator`), so when the delegator retries an
 attempt (a seat that abstained or went down) the retry goes to another node that runs the name or is not run, and never to this box's own agent seat.
 A name nobody runs keeps the old refusal and adds where the fleet looked, `config` when every node answered and `infrastructure`
@@ -1952,6 +1955,24 @@ makes it a `config` verdict on that node instead, because an unadvertised ceilin
 small. Those stay exit 0 by design. If the summary carries
 `corpus_rows_lost` / `ledger_rows_lost`, the results are still complete — the harness could not
 write that many telemetry rows (usually a full or read-only disk).
+
+**Which node ran it (`results[].node`, `results[].node_reported`, 0.185.0).** `results[].node` is the node id the node publishes in
+`/fleet/health` (the name on its card in `fleet-ui`), the same name `results[].placement` uses, for a run on a fleet node this
+delegator dispatched to; it is also the `node` of the delegation-log row and the node part of the ledger's `model_tier`
+(`<node>:<seat>`). Before 0.185.0 it was the id the node stamped on its own result, which for a node launched with `--node-id` (the
+installers' form) was the OS hostname, so a result could name one node in `node` and another in `placement`.
+`results[].node_reported` is that stamped id and appears only when it differs from `node`: a node on a build before 0.185.0 (it
+stamps its hostname where it was launched with another `--node-id`), or a local run attributed to another box's engine (register
+C-58), where it is the runner's own stamp. A node on 0.185.0 stamps the id it advertises, so it never differs there. It is absent
+when the two agree and when no node took the subtask. Match a node by `node`. A `route: "queue"` answer carries the id its
+claimant stamped, which is the id it claims under once that node runs 0.185.0 (the delegator has no health view of a claimant). A
+run on this box's own seat (`ran_on: "local"`) carries this box's own name, or the box whose engine ran it.
+
+`rig --node <name>` matches a row by its `node` or by the id the node stamped on its own result, and the two names do not select
+the same rows. The node's card id selects the rows a 0.185.0 delegator wrote, and, for a node launched with `--node-id` and no `fleet_node_id` (the installers' form), never a row written before (that row carries
+only the hostname). The OS hostname selects the rows an older delegator wrote and the rows a 0.185.0 delegator wrote for a node not
+yet on 0.185.0, but not the rows of a node that runs 0.185.0, which stamps its card id in both fields. For a window that spans the
+change, run `rig` once per name and read both reports.
 
 CLI equivalent:
 

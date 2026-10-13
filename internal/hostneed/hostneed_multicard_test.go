@@ -134,7 +134,8 @@ func TestACardOnlyImageCallThatDoesNotHoldTwoCardsKeepsTheOrdinaryEstimate(t *te
 	}
 }
 
-// What must fit is each card's own peak, less the runner's reserve: the larger card computes (13.0 GiB for the fp8mixed row), the other stores (11.0 GiB).
+// What must fit is each card's own peak, less the runner's reserve: the compute card (the larger one in this sizing; the runner may give the role to the faster of two
+// cards within 1 percent of one size) holds 13.0 GiB for the fp8mixed row, the other stores (11.0 GiB).
 func TestACardOnlyImageCallThatDoesNotFitTheLeasedPairIsSizedAsBefore(t *testing.T) {
 	ordinary := func(name string, n Need) {
 		t.Helper()

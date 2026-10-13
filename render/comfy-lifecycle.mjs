@@ -281,6 +281,19 @@ export function resolveLaunchProfile(env = process.env) {
 
 const profileRequested = (p) => !!(p && (p.cudaDevice || p.dynamicVram || p.cardUuid || p.multicard));
 
+/**
+ * isSageAttentionToken: is this one launch-argument token sage attention? The exact flag, or an argparse prefix of it: ComfyUI's parser (argparse, abbreviations
+ * allowed, `--use-sage-attention` one of a mutually exclusive attention group) accepts `--use-sa` as the flag, and /system_stats reports the argv as it was
+ * typed. A prefix shorter than 8 characters begins other attention flags too (`--use-s` is also --use-split-cross-attention) and is not this one; a longer
+ * token (`--use-sage-attention-extra`) is no prefix at all. The one predicate for the Wan sizing (wan-multicard.mjs wanAttentionMode), the reuse check of a
+ * running ComfyUI (profileMismatch) and, by the same rows (render/testdata/sage-token-table.json, which both languages' tests read), internal/hostneed's sageAttention;
+ * ComfyUI's parser is case-sensitive, so is this.
+ */
+export function isSageAttentionToken(tok) {
+  const t = String(tok);
+  return t.length >= 8 && "--use-sage-attention".startsWith(t);
+}
+
 /** Remove every `flag value` pair (and a `flag=value` form) from an argv list. */
 function stripValued(args, flag) {
   const out = [];
@@ -408,6 +421,13 @@ export function profileMismatch(argv, profile) {
     const got = argvFlagValue(argv, "--cuda-device");
     if (got !== null) why.push(`it runs with --cuda-device ${got}, which overrides the multicard pin by uuid`);
     if (argvDynamicVram(argv)) why.push("it runs with dynamic VRAM on, which the multicard placement needs off (--gpu-only keeps everything on the cards; --enable-dynamic-vram turns the streaming back on)");
+    // A call sized for the DEFAULT attention (sage === false) budgets 12.2 GiB of activations at film size; a kept instance that runs sage attention holds 15.2, so the share
+    // the call was admitted with can run out of memory on it. That direction is refused (or the harness's own instance replaced); the reverse, a kept default instance and a call
+    // sized for sage, only wastes a cold start and is reused. `sage` absent is the old shape (a launch that does not say) and checks nothing. The live argv is read with the same
+    // predicate the sizing reads COMFY_EXTRA_ARGS with: /system_stats carries the flag as it was typed, an abbreviation included.
+    if (profile.multicard.sage === false && argv.map(String).some(isSageAttentionToken)) {
+      why.push("it runs with --use-sage-attention, which holds about 3 GiB more activations at film size than this launch was sized for (the default attention)");
+    }
   }
   return why.join("; ");
 }
@@ -777,7 +797,8 @@ export async function ensureComfy(opts = {}) {
   const instance = resolveInstance({ api: apiOpt || process.env.COMFY_API, env });
   const { api, key } = instance;
   const profile = resolveLaunchProfile(env);
-  if (launch) profile.multicard = { cards: [...launch.cards] };
+  // `sage` says which attention the call was sized for (wan-multicard.mjs planMulticard sets it); a launch that does not say keeps the old shape, { cards } alone
+  if (launch) profile.multicard = { cards: [...launch.cards], ...(typeof launch.sage === "boolean" ? { sage: launch.sage } : {}) };
   // Can this call launch an instance on `api` at all? A keyed instance owns its --port; the
   // default endpoint is what an unlaunched ComfyUI listens on; an UNKEYED instance on any other
   // endpoint has no --port of its own, so only the operator's own extra args can put it there.

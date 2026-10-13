@@ -84,7 +84,8 @@ then the shorter queue, and names every node it skipped when none can take the j
 - `local-offload doctor --config ...`: the endpoint health line reads SKIP, and the fleet-versions
   section lists each delegate remote's harness version.
 - One contract: `local-offload delegate --config ... --contract c.json` lands on a fleet node; the result
-  names it in `node` and `placement`, never the local seat.
+  names it in `node` (the node id as `/fleet/health` publishes it, the same name `placement` uses) and `placement`, never the
+  local seat. `node_reported` appears beside `node` only when the node's own result named itself by another id.
 - One render: `local-offload compose-video --config ... --template title-card --snapshots 2.5 --json`
   returns `video_path` in this box's media dir and `meta.node` naming the node that rendered it.
 - One media job: `local-offload generate-image --config ... --route remote --json "a red door"` returns `image_path` in

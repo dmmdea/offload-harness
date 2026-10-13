@@ -21,7 +21,7 @@ other on a single shared card.
 |---|---|
 | `internal/gpulease/gpulease.go` | **the only implementation**: `LeaseDir` (the one resolver), acquire/release, epoch fencing, the reclaim conjunction, `InspectDir` (the one read path) |
 | `internal/gpulease/devices.go` | **card-scoped leases (record v2)**: device-id normalisation, the conflict rule, the grant (one critical section under the epoch lock), the per-epoch fence, per-lease release and restamp, the debris sweep, and the one reader (`reader`) every inspector shares |
-| `internal/gpulease/allocator.go` | the **card allocator** behind `gpu reserve --cards`: a pure function over an input the CLI assembles (cards, claims, quarantine, foreign busy, resident seats, the display cap, host RAM), plus the quarantine sidecar reader |
+| `internal/gpulease/allocator.go` | the **card allocator** behind `gpu reserve --cards`: a pure function over an input the CLI assembles (cards, claims, quarantine, foreign busy, resident seats, the display cap, host RAM), plus the quarantine sidecar reader; `DisplayFloorGiB` / `DisplayBudgetGiB` are its display-card arithmetic as pure functions, which the card table's `display_cap` row and `audit-yaml`'s note read too |
 | `internal/gpulease/cmddevices.go` | the default card set of a wrapped command: `CUDA_VISIBLE_DEVICES`, `--cuda-device`, `COMFY_CUDA_DEVICE` turned into cards, refusing instead of guessing |
 | `internal/gpulease/effective.go`, `infer.go`, `proctree*.go` | **what a lease holds, as a seat reads it (plan P4)**: `Info.EffectiveDevices/Touches/For`, `ResolvePins`, the legacy-lease evidence rule (`Scoper`, applied only to a record an older binary wrote: `Info.Legacy`; the `seen.<epoch>` sidecar, the scope ledger) and the process-tree reader it runs on |
 | `internal/gpulease/term.go` | **terms (plan P9)**: `PlanTerm` (what a requested window comes to), the installed limits (`SetDefaultTerms`), and `AdvanceTerm`, the one place a term ends in a renewal or the expired label (see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)) |
@@ -32,7 +32,8 @@ other on a single shared card.
 | `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMHeld`), and what a detached holder keeps when that wait fails (`detachedHostRAMError`) |
 | `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card, else the media class default (see "Host RAM") |
 | `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
-| `internal/gpucards` | the per-card view (`Rows`, `LeaseRows`, `QueueRows`, `Table`, `Section`) that `gpu status`, `gpu cards` and `offload_status` brief all render |
+| `internal/gpucards` | the per-card view (`RowsWithCap`, `LeaseRows`, `QueueRows`, `Table`, `Section`) that `gpu status`, `gpu cards` and `offload_status` brief all render; the display card's `DisplayCap` verdict is computed in `RowsWithCap` and nowhere else |
+| `internal/servingtmpl/audit_displaycap.go` | the **display-cap-unseen note** of `audit-yaml` (`AuditDisplayCapUnseen`, `HasProxyEntry`): names the llama-swap entries that may sit on the display card, judges none (see "The display card is allocatable up to a cap") |
 | `internal/gpulease/proc*.go` | per-platform liveness and process-start identity, exported so no consumer keeps a second copy |
 | `internal/gpulease/tree.go` | **a dead wrapper with a live tree keeps its claim (plan P10, ADR 0084)**: the recorded tree (`Meta.Tree`, `Lease.RecordTree`), `judge` (the one place a reader decides what a record's tree is), the launch-marker and process-table evidence, and the armed ComfyUI directory (`SetComfyDir`, called from `modelaffinity.SetComfyDir`) |
 | `internal/proctree` | **process-tree containment and the stop primitives (plan P10)**: `Start` runs a command in a job object (Windows) or its own session and process group (Unix), `PIDs`, `Terminate`, `TerminateExcept`; `Job` is the job object the agent shell's cage (`internal/sandbox`) is built on too; `PlanStop` and `Stop` stop only a recorded tree or a launch marker's process and report anything else on a card as not ours |
@@ -523,6 +524,23 @@ position, and two same-model cards cannot be ordered by anything it does report,
 `CUDA_VISIBLE_DEVICES=<uuid>` probe. A box with one card needs no declaration. With no nvidia-smi the verbs still print the
 leases and say there is no table.
 
+**The display card's row says where it stands against its cap** (`display_cap`; the display card's row, plus every row of a reading that could not say which card the monitor is on (there as `unknown`); otherwise absent on every
+other card and on a box that flags no display card). It reads the VRAM in use now, **the desktop and every process counted**,
+against the budget `gpulease.DisplayBudgetGiB` gives from `gpu_display_cap_pct` and the display layer's declared floor, which is
+the arithmetic the allocator admits by, so the two cannot disagree. The cap is read from the config file as it is when the call
+is made (`LiveGPUDisplayCap`), so a `0` written while the MCP server runs shows in the next brief. Keys: `cap_pct`, `budget_gb`,
+`used_gb`, `used_pct`, `over_cap`, `over_by_gb` (present exactly when the card is over: four decimals of a GiB, never rounded to nothing,
+and the text line says `OVER by less than 0.1 GiB` under 0.05 GiB), plus `closed` at a cap of `0` (the operator's "I need the card": nothing is
+judged) and `unknown` with its reason when the card has no total or the reading could not say which card the monitor is on
+(`display_unknown` on every row of that reading: the allocator closes such a card too, and the text table says it once). The text
+table keeps its header and gains one `display cap:` line under the display card. It is one reading of the card and nothing more:
+it cannot say **whose** memory it is, so a llama-swap seat the allocator never placed counts exactly as the desktop does, which is
+the point (it covers a seat pinned onto the display card by any means), and a model loading can flash the card over for a moment.
+The brief reads the nvidia-smi sample its verdict already took; that sample now carries `gpuactivity.GPU.AttachedUnknown`, so the
+brief too says "not judged" on a reading that could not tell the monitor's card, and no longer shows no display card at all
+(`TestBriefGPUCardsCarryTheDisplayCap`, `TestBriefReadsTheLiveDisplayCapNotTheOneAtLoad`,
+`TestBriefSaysWhenTheReadingCouldNotSayWhichCardTheMonitorIsOn`, `TestDisplayCapAtZeroIsClosedNotOver`).
+
 **Reading the table under load (F24, 0.178.0).** The table is one nvidia-smi exec of `gpuprobe`'s per-device query
 (`--query-gpu`: index, uuid, name, memory, utilisation, the two display columns) and nothing else: the allocation never
 lists processes, the slow phase of nvidia-smi under load, which is the separate, best-effort foreign-busy reader's call. Two
@@ -676,6 +694,29 @@ the footprint, as it always was.
   number per request cannot describe a donor slice beside a compute share. A display card with no resident seat sorts first (nothing
   to evict), so with the pair seat loaded `gpu reserve --cards 1 --vram 6` now prefers the screen's card to an eviction;
   `gpu_display_cap_pct: 0` restores the old order.
+- **A seat llama-swap pins onto the display card is not admitted by the cap at all.** The allocator places jobs; a llama-swap model
+  that loads onto the card is outside it (a vLLM seat pinned onto the display card once put 13,281 MiB, 81 percent of a 16 GB card,
+  there while the audit printed OK). What reports on the card afterwards is the display cap row of `gpu status` / `gpu cards` / the
+  brief (a live reading, above), which needs no knowledge of how the seat is pinned, and, for the yaml that pins seats there,
+  audit-yaml's `display-cap-unseen` note (next bullet).
+- **`audit-yaml` names the entries it cannot judge against the cap (`display-cap-unseen`).** A llama-swap yaml states no VRAM
+  footprint (a llama.cpp seat's weights, KV and compute buffers are nowhere in it, and a `proxy:` seat's cards are set in the
+  engine's own launcher), so the audit cannot say an entry exceeds the cap, and it does not pretend to. On a box whose driver flags
+  a display card it prints ONE `note:` for the file naming the entries that may sit on that card: `proxy:` seats, entries with no
+  `CUDA_VISIBLE_DEVICES` pin, entries pinned onto it by UUID or by index under `CUDA_DEVICE_ORDER=PCI_BUS_ID`, and plain indices
+  with no PCI order, named as unmappable and never guessed (at most six names per group). It names the display card (index and UUID
+  tail of that reading), the default cap and its budget by the same arithmetic, says that nothing is judged and that entries which
+  can run together (`matrix:`) are not summed, and points to the live row. It is never a violation and never an exit code; no
+  config is read, so the cap it states is the default and says so; `--other-box` skips it. The display card is the driver's reading
+  by UUID, never a remembered index, so a monitor moved to another card is followed on the next read. A single-card or headless
+  box has no flagged display card and the note is silent, even on a reading that could not say which card the monitor is on (one
+  card has nothing to tell apart); on two or more cards such a reading gets one line saying so and naming no entry. The table is
+  read for a file that pins a device **or** has a `proxy:`
+  seat (once per file, shared with the pin rules); a file with neither never runs nvidia-smi, so an unpinned entry alone is not
+  named. **Deferred on purpose:** footprint-based violations (a declared layer footprint, a vLLM `gpu_memory_utilization` times the
+  card, a seat-env reader) and a `doctor` row. There is no placement-neutral footprint source yet: declaring the opencode-only
+  3-card seat as a layer would expose it to placement, `kv_cache_memory_bytes` voids the utilization figure, and a live yaml with
+  no stamp would turn the session-start audit red. The live row is what catches such a seat today.
 - A display twin that is loaded counts as a resident seat of the display card, each loaded twin costed at the layer's
   `display_footprint_gib` (both twins loaded cost twice that), so the card is not ranked as an empty one while it holds a twin:
   taking it would evict the twins, and the order prices that. When llama-swap's `/running` cannot be read the display layer's

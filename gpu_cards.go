@@ -67,18 +67,28 @@ func cardTablePatient(ctx context.Context, cfg config.Config) ([]gpuprobe.Card, 
 // statusLeaseSection is what `gpu status --json` adds for cards: the table (empty, with a
 // note, when there is no card table), the per-lease list and the queue. Only keys are
 // added; nothing existing changes type.
-func statusLeaseSection(m *gpulease.Manager, cards []gpuprobe.Card, note string, waiters []gpulease.Waiter) map[string]any {
-	return gpucards.Section(cards, note, modelaffinity.ScopeLeases(m.Dir(), m.Leases()), waiters)
+func statusLeaseSection(m *gpulease.Manager, cfg config.Config, cards []gpuprobe.Card, note string, waiters []gpulease.Waiter) map[string]any {
+	capPct, floorGiB := displayCapNow(cfg) // gpu status --json
+	return gpucards.Section(cards, note, modelaffinity.ScopeLeases(m.Dir(), m.Leases()), waiters, capPct, floorGiB)
+}
+
+// displayCapNow is the display card's cap and declared floor as the allocator reads them: the cap from the
+// config file as it is NOW (LiveGPUDisplayCap, so the operator's "I need the card" switch is seen by a
+// process that started before he wrote it) and the display layer's declared floor. Every surface of this
+// package that prints the card table asks this one function, so none shows the table without the verdict.
+func displayCapNow(cfg config.Config) (capPct int, floorGiB float64) {
+	return cfg.LiveGPUDisplayCap(), cfg.DisplayFloorGiB()
 }
 
 // printCardTable prints the card table under a "card table:" heading, or says why there is none.
-func printCardTable(cards []gpuprobe.Card, note string, cerr error, leases []gpulease.Info) {
+func printCardTable(cfg config.Config, cards []gpuprobe.Card, note string, cerr error, leases []gpulease.Info) {
 	if cerr != nil {
 		fmt.Printf("  card table: none (%v)\n", cerr)
 		return
 	}
 	fmt.Println("  card table:")
-	for _, ln := range gpucards.Table(gpucards.Rows(cards, leases)) {
+	capPct, floorGiB := displayCapNow(cfg) // the table under gpu status
+	for _, ln := range gpucards.Table(gpucards.RowsWithCap(cards, leases, capPct, floorGiB)) {
 		fmt.Println("    " + ln)
 	}
 	if note != "" {
@@ -108,15 +118,16 @@ func runGPUCards(args []string) error {
 		return fmt.Errorf("no card table: %w", cerr)
 	}
 	leases := m.Leases()
+	capPct, floorGiB := displayCapNow(cfg) // gpu cards
 	if *asJSON {
 		b, _ := json.MarshalIndent(map[string]any{
-			"cards": gpucards.Rows(cards, leases), "leases": gpucards.LeaseRows(leases), "cards_note": note,
+			"cards": gpucards.RowsWithCap(cards, leases, capPct, floorGiB), "leases": gpucards.LeaseRows(leases), "cards_note": note,
 			"card_scoped_leases": m.CardScoped(), "state_root": m.Root(),
 		}, "", "  ")
 		fmt.Println(string(b))
 		return nil
 	}
-	for _, ln := range gpucards.Table(gpucards.Rows(cards, leases)) {
+	for _, ln := range gpucards.Table(gpucards.RowsWithCap(cards, leases, capPct, floorGiB)) {
 		fmt.Println(ln)
 	}
 	if note != "" {
