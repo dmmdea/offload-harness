@@ -22,6 +22,10 @@ const __dir = dirname(fileURLToPath(import.meta.url));
 export const GENERALIST_WORKER = "tts_chatterbox.py";
 export const FT_WORKER = "tts_chatterbox_ft.py";
 
+// The sampling flags both workers take under these same names (the worker binds them as generate()
+// kwargs, never positionally).
+export const SAMPLING_FLAGS = ["temperature", "cfg-weight", "exaggeration", "repetition-penalty", "min-p", "top-p"];
+
 // parseArgs splits argv into positionals + flags. --no-lock is boolean; all other --flags
 // take the next token as their value.
 export function parseArgs(argv) {
@@ -57,21 +61,40 @@ export function buildWorkerArgs(out, text, flags, env = process.env) {
   if (flags.engine === "finetuned") {
     if (flags.model) args.push("--model", flags.model);
     if (flags["base-dir"]) args.push("--base-dir", flags["base-dir"]);
-    for (const k of ["temperature", "cfg-weight", "exaggeration", "repetition-penalty", "min-p", "top-p"]) {
+    for (const k of SAMPLING_FLAGS) {
       if (flags[k] != null) args.push("--" + k, flags[k]);
     }
   }
   return args;
 }
 
-async function main() {
-  const { pos, flags } = parseArgs(process.argv.slice(2));
+export const USAGE = 'usage: node tts.mjs <out.wav> "<text>" [--engine generalist|finetuned] [--clone <ref.wav>] [--lang es] [--model <f>] [--base-dir <d>] [recipe flags] [--no-lock]';
+
+// checkFlags judges the parsed flags and returns the reason to refuse them, or null to accept.
+export function checkFlags(flags) {
+  return null;
+}
+
+// parseCli turns argv into a run plan, or says why the command line is refused. It never starts a
+// worker, takes a lock or reads the environment beyond TTS_REF, so it is the part tests exercise.
+export function parseCli(argv, env = process.env) {
+  const { pos, flags } = parseArgs(argv);
+  const bad = checkFlags(flags);
+  if (bad) return { ok: false, error: bad };
   const out = pos[0];
   const text = pos[1];
-  if (!out || !text) {
-    console.error('usage: node tts.mjs <out.wav> "<text>" [--engine generalist|finetuned] [--clone <ref.wav>] [--lang es] [--model <f>] [--base-dir <d>] [recipe flags] [--no-lock]');
+  if (!out || !text) return { ok: false, error: 'missing <out.wav> or "<text>"' };
+  return { ok: true, out, text, flags, worker: selectWorker(flags), args: buildWorkerArgs(out, text, flags, env) };
+}
+
+async function main() {
+  const plan = parseCli(process.argv.slice(2));
+  if (!plan.ok) {
+    console.error("tts.mjs: " + plan.error);
+    console.error(USAGE);
     process.exit(2);
   }
+  const { out, text, flags } = plan;
   // python auto-detect, mirroring comfy-video.mjs's COMFY_PY (the repo-root .tts-venv; see render/README.md Setup)
   const TTS_PY = process.env.TTS_PY
     || [join(__dir, "../.tts-venv/Scripts/python.exe"), join(__dir, "../.tts-venv/bin/python")].find((p) => existsSync(p))
