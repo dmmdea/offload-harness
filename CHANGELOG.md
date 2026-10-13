@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.185.1] - 2026-10-13 - the TTS sampling flags reach the generalist engine and an unknown tts.mjs flag refuses
+
 ### Fixed — the sampling flags of `render/tts.mjs` reach the generalist engine, and an unknown or malformed flag refuses instead of vanishing (0.185.1)
 
 - **The defect.** `render/tts.mjs` documents `--temperature --cfg-weight --exaggeration --repetition-penalty` in its usage header, but
