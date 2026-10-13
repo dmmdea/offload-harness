@@ -979,6 +979,15 @@ test("the override is judged like any other choice: a named card that cannot hol
   assert.equal(planWith(film, { cards: () => table }).pair.compute.index, 0, "the 24 GiB card computes, and 4 GiB resident fits it");
   // 12 GiB - 12.2 GiB of film-size activations - 0.5 GiB of context: nothing fits there
   assert.throws(() => planWith(film, { cards: () => table, env: { ...LEASE, WAN_COMPUTE_UUID: "2" } }), /--wan-resident-gb 4 .*compute card \(idx 2, 12\.0 GiB\).*720x1280x81.*at most -0\.7/);
+  // The 16 GiB card of a 24 + 16 GiB pair is the measured compute card, so naming it is NOT refused at the default share: 16.0 - 12.2 - 0.5 = 3.3 GiB holds the share of 3
+  // (the lease sizing judges the larger card, so nothing refuses either). It is refused only for a share over what it holds.
+  const mixed = cardsOf(24, 16);
+  const filmDefault = { width: "720", height: "1280", frames: "81" };
+  const namesSmaller = { ...LEASE, WAN_COMPUTE_UUID: "2" };
+  const admitted = planWith(filmDefault, { cards: () => mixed, env: namesSmaller });
+  assert.deepEqual([admitted.pair.storage.index, admitted.pair.compute.index, admitted.residentGb], [0, 2, 3], "24 + 16 naming the 16 GiB card, default share: admitted");
+  assert.throws(() => planWith({ ...filmDefault, "wan-resident-gb": "3.4" }, { cards: () => mixed, env: namesSmaller }), /--wan-resident-gb 3\.4 .*compute card \(idx 2, 16\.0 GiB\).*720x1280x81.*at most 3\.3/);
+  assert.equal(planWith({ ...filmDefault, "wan-resident-gb": "3.4" }, { cards: () => mixed }).pair.compute.index, 0, "(the control: unnamed, the 24 GiB card computes and holds 3.4)");
 });
 
 test("an override that does not name exactly one of the two cards is ignored with a note, and one that names no card at all is refused", () => {
@@ -1192,12 +1201,19 @@ test("sage attention in COMFY_EXTRA_ARGS: the film clip keeps at most 0.2 GiB of
 });
 
 test("sage attention: the measured 65-frame clip admits a 2 GiB share and refuses 3", () => {
-  const sage = (gb) => planWith({ ...CLIP65, "wan-resident-gb": String(gb) }, { env: SAGE_ENV });
+  const sage = (gb, clip = CLIP65) => planWith({ ...clip, "wan-resident-gb": String(gb) }, { env: SAGE_ENV });
   assert.equal(M.wanGeometry(CLIP65).tokens, 61200);
   assert.equal(sage(2).residentGb, 2, "the share the film session measured at this clip: a flat 15.2 GiB below the film size would refuse it");
   assert.throws(() => sage(3), /--wan-resident-gb 3 .*720x1280x65 \(61200 tokens\).*sage.*at most 2\.5/);
   // the control: the default sizing admits 3 at the same clip (15.93 - 12.2 - 0.5 = 3.2)
   assert.equal(planWith({ ...CLIP65, "wan-resident-gb": "3" }).residentGb, 3);
+  // Where the default share of 3 stops being admitted is geometry, not a round token count: 720x1280x61 (57,600 tokens) is past the point where sage leaves the default curve
+  // (about 56,800) and still admits 3 (12.325 GiB of activations, at most 3.1), while 720x1280x65 (61,200 tokens, above) refuses it. The share of 3 is first refused at about 58,250 tokens.
+  const CLIP61 = { width: "720", height: "1280", frames: "61" };
+  assert.equal(M.wanGeometry(CLIP61).tokens, 57600);
+  assert.ok(M.wanActivationsGib(57600, "sage") > M.wanActivationsGib(57600), "sage has left the default curve by 57,600 tokens");
+  assert.equal(sage(3, CLIP61).residentGb, 3, "720x1280x61 under sage still admits the default share");
+  assert.throws(() => sage(3.2, CLIP61), /--wan-resident-gb 3\.2 .*720x1280x61 \(57600 tokens\).*sage.*at most 3\.1/);
 });
 
 test("wanActivationsGib(tokens, 'sage') meets the film session's inequalities, and departs from the default only above the default's cap", () => {

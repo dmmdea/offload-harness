@@ -637,10 +637,12 @@ fall-back is visible. The one line the plan says ends with `compute card chosen:
 power and speed disagree (a hard power-capped card reads low), and `WAN_COMPUTE_UUID` (below) overrides it.
 
 `WAN_COMPUTE_UUID`, an environment variable and not a flag, names which card of the pair computes: an nvidia-smi index, a UUID, or a case-insensitive UUID prefix of 8
-or more characters after the optional `GPU-` (`GPU-aaaa1111` names a card, a bare `GPU-` names nothing). It chooses between the two cards already found and never adds
+or more characters after the optional `GPU-` (`GPU-aaaa1111` names a card; the characters are counted after the prefix, so `GPU-aaaa` and a bare `GPU-` name nothing; a token of digits alone is read
+as an index, so a UUID prefix made of digits needs the `GPU-` spelling, `GPU-11112222`, and the refusal says so). It chooses between the two cards already found and never adds
 one: the lease or `--wan-cards` still decide the pair. A token that names exactly one card of the pair makes it the compute card, beating the size and the speed rule;
-the resident-share and storage checks still judge it, so naming the smaller card of a 24 + 16 GiB pair is refused with the numbers (the lease sizing assumes the larger card
-computes, so that refusal comes after the lease is taken and before ComfyUI starts, never as an out-of-memory run). A token that names no card of the driver's table (a typo, a
+the resident-share and storage checks still judge it, so a named card that cannot hold the share beside the activations is refused with the numbers (the 12 GiB card of a 24 + 12 GiB pair at
+`--wan-resident-gb 4`: at most -0.7 GiB; the 16 GiB card of a 24 + 16 GiB pair holds the default share of 3 at film size, 16.0 - 12.2 - 0.5 = 3.3, so naming it is admitted there and refused only
+for a share over 3.3). The lease sizing assumes the larger card computes, so such a refusal comes after the lease is taken and before ComfyUI starts, never as an out-of-memory run. A token that names no card of the driver's table (a typo, a
 stale id) is refused with `WAN-PLACEMENT: WAN_COMPUTE_UUID names "<token>", ...`, naming the two cards: an explicit setting must not run quietly. A token that names a real card
 that is not one of the two, or begins more than one card of the table, is ignored with a one-line note (`WAN_COMPUTE_UUID names "<token>", which does not name exactly one of the two
 cards (idx a, idx b); ranked instead`, appended to the plan's line), because the variable is box-level and a lease may hold a pair that does not include that card. An empty or blank value is
@@ -789,8 +791,9 @@ holds on a 15.9 GiB card (the activations beyond the share, and the share it adm
 - Sage holds about 3 GiB more activations than the default attention at film size, so `--wan-resident-gb 0` is the only setting that fits 81 frames on a 16 GB compute
   card. The activations are on the file's own basis (the card's nvidia-smi peak less the resident share, the context inside): 15,482 MiB is 15.119 GiB, rounded up to 15.2;
   14.859 GiB less the 2 GiB share is 12.859, rounded up to 12.9. The 0.5 GiB context margin is added on top, as for the default.
-- **Behaviour change: sage film calls must pass `--wan-resident-gb`.** The default share of 3 is refused under sage from about 57k tokens up (at most 2.5 GiB at 720x1280x65, 0.2 at
-  720x1280x81), where before it was admitted by the planner and the lease sizing and ran out of memory. The refusal puts its sage clause before the ceiling and says `--wan-resident-gb 0` is the
+- **Behaviour change: sage film calls must pass `--wan-resident-gb`.** The default share of 3 is refused under sage from about 58k tokens up on a 15.9 GiB card, where the compute card's
+  ceiling (15.9 - the sage activations - 0.5) falls under 3: 720x1280x61 (57,600 tokens) still admits it (at most 3.1 GiB), 720x1280x65 (61,200 tokens) refuses it (at most 2.5 GiB) and
+  720x1280x81 admits 0.2 at most. Before, it was admitted by the planner and the lease sizing and ran out of memory. The refusal puts its sage clause before the ceiling and says `--wan-resident-gb 0` is the
   measured setting at film size.
 - The sampler's activations under sage are the default curve up to about 57k tokens, and from there the straight line through 12.9 GiB at 61,200 tokens and 15.2 GiB at 75,600, held at 15.2
   above the film's size (nothing larger was measured; the `WAN-GEOMETRY-NOTE` extrapolates from 15.2 under sage). So sage departs from the default sizing only above about 57k tokens, and only 61,200

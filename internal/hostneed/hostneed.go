@@ -335,12 +335,13 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 		if small > large {
 			small, large = large, small
 		}
-		// Which card computes: this sizing judges the compute stage against the LARGER card. The runner (render/wan-multicard.mjs chooseRoles) gives the
-		// role to the larger card too, except when the two are within 1 percent of one size and the smaller one has the faster board (power.default_limit at
-		// least 1.25 times the other's, or WAN_COMPUTE_UUID names it): then it computes, and the runner judges the stage against that card. The gap is at
-		// most 1 percent of the card (0.16 GiB at 16 GiB), so a share at the film-size ceiling (3.2 GiB on a 15.9 GiB card) can be declared 0 here and
-		// refused by the runner's resident check on the smaller card: a refusal before ComfyUI starts, never an out-of-memory run. The default share of 3
-		// is unaffected. A card list that says which card is which would close it; the lease's table does not carry the board power.
+		// Which card computes: this sizing judges the compute stage against the LARGER card. The runner (render/wan-multicard.mjs chooseRoles) gives the role to
+		// the larger card too, with two exceptions, and judges the stage against the card that computes. (1) Within 1 percent of one size the smaller card computes
+		// when its board is faster (power.default_limit at least 1.25 times the other's): the gap is then at most 1 percent of the card (0.16 GiB at 16 GiB), so a
+		// share at the film-size ceiling (3.2 GiB on a 15.9 GiB card) can be declared 0 here and refused by the runner's resident check on the smaller card: a
+		// refusal before ComfyUI starts, never an out-of-memory run. The default share of 3 is unaffected. (2) WAN_COMPUTE_UUID can name the smaller card of ANY
+		// pair (24 + 12 GiB too): the gap is then not bounded, and the runner's resident check refuses what that card cannot hold, again before ComfyUI starts. A card
+		// list that says which card is which would close both; the lease's card list carries neither the board power nor the override.
 		// The compute card is held to what was measured, its peak plus the context: --reserve-vram is ComfyUI's model-load margin, not an activation
 		// ceiling, and with the film-size run's 12.2 GiB it would refuse the call that run measured (3.0 + 12.2 = 15.2 > 14.9). It stays the storage
 		// card's margin.

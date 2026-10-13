@@ -21,7 +21,8 @@ import (
 //  2. the row's per-card peaks fitting the TWO cards the lease holds, each less the runner's --reserve-vram: the larger card computes, the other stores
 //     (within 1 percent of one size the runner gives the role to the faster board instead, render/wan-multicard.mjs chooseRoles, so the card that
 //     computes may be the one up to 1 percent smaller; the compute stage is judged here against the larger card, so a row that fits by less than
-//     that 1 percent can be declared 0 here and refused by the runner's peak check, before ComfyUI starts).
+//     that 1 percent can be declared 0 here and refused by the runner's peak check, before ComfyUI starts; WAN_COMPUTE_UUID can name the smaller card of any pair, and
+//     then that gap is not bounded: the runner's resident and peak checks refuse what the named card cannot hold, again before ComfyUI starts).
 //
 // The figures are render/multicard-recipes.json's, copied into internal/mediacap/multicard.go (which also finds the recipe of a call);
 // mediacap's TestTheMulticardRowsAreTheRunnersRecipes fails when either side moves.

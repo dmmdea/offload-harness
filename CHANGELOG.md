@@ -26,7 +26,8 @@ computed, by 8 MiB. One planner serves all three placements (`resolveWanCards`),
 - **Added: `WAN_COMPUTE_UUID`.** An environment variable read by both planners (a flag could not reach the typed image and edit doors, whose
   runner child inherits the process environment). It takes an nvidia-smi index, a UUID or a case-insensitive UUID prefix of 8+ characters after the
   optional `GPU-`. A token that names exactly one card of the pair makes it compute, beating the size and the speed rule (the resident and peak
-  checks still judge it: naming the smaller card of a 24 + 16 GiB pair is refused with the numbers). A token that names no card of the driver's
+  checks still judge it: a named card that cannot hold the share is refused with the numbers, the 12 GiB card of a 24 + 12 GiB pair at
+  `--wan-resident-gb 4` for one, while the 16 GiB card of a 24 + 16 GiB pair holds the default share of 3 at film size, 16.0 - 12.2 - 0.5 = 3.3, and is admitted). A token that names no card of the driver's
   table is refused (`WAN_COMPUTE_UUID names "<token>", which is no card in the driver's table (...), so it cannot say which of the two cards
   (idx a, idx b) computes`): an explicit setting must not run quietly on a typo or a stale id. A token that names a real card outside the pair, or
   begins more than one card of the table, is ignored with a one-line note on the plan's line (`WAN_COMPUTE_UUID names "<token>", which does not
@@ -51,6 +52,12 @@ computed, by 8 MiB. One planner serves all three placements (`resolveWanCards`),
   `queryCards`, the power read from the wrong column, a window shown on the power ask and on the display ask, the retry dropped, the join and the
   key case-sensitive, and the wrong power field. Docs: `docs/systems/media-generation.md` ("Which card computes", the image section),
   `render/README.md`, the usage comments of `render/comfy-video.mjs`; the stale "the larger card computes" comments of `internal/hostneed`.
+- **Review round.** A refused `WAN_COMPUTE_UUID` now says how a UUID prefix is counted (8 or more characters after the optional `GPU-`, so `GPU-aaaa` names nothing) and, for a
+  token of digits alone, that it was read as an nvidia-smi index and that a UUID prefix made of digits needs the `GPU-` spelling (`GPU-11112222`); the token rule itself is unchanged,
+  because it also serves `--wan-cards` and the lease path. The image planner's override gets the test the Wan planner had: a named card that cannot hold the resident share or the
+  recipe's peak is refused on that card (two mutants that judged the larger card instead survived the suite before it, and are RED now). The 24 + 16 GiB example above was wrong
+  (the 16 GiB card holds the default share at film size and is admitted); a positive control joins its test. The comments of `internal/hostneed` now split the override out of the
+  1 percent bound, which belongs to the power rule alone (an override can name the smaller card of any pair).
 
 ### Changed (behaviour) — the card-only Wan placement knows sage attention: 15.2 GiB of film-size activations, in the runner and in the lease sizing
 
@@ -59,9 +66,9 @@ at resident 0 (15.119 GiB), and 15,216 MiB at resident 2 on 720x1280x65 (14.859 
 12.2 GiB beyond the resident share. Neither the runner nor the lease sizing read the attention mode, so a sage call at the default share of 3
 (3 + 12.2 + 0.5 = 15.7 of 15.9 GiB) was admitted by both and ran out of memory on the compute card.
 
-- **Behaviour change: sage film calls must pass `--wan-resident-gb`.** Under sage the default share of 3 is refused at 57,000 tokens and up (at most 2.5 GiB at
-  720x1280x65, 0.2 GiB at 720x1280x81, so pass 0 at film size), by the planner before anything starts and by the lease sizing (which then declares the
-  ordinary set). A film driver that exports `COMFY_EXTRA_ARGS=--use-sage-attention` and relies on the default share changes from "runs, and runs out of memory"
+- **Behaviour change: sage film calls must pass `--wan-resident-gb`.** Under sage the default share of 3 is refused from about 58,000 tokens up on a 15.9 GiB card
+  (720x1280x61, 57,600 tokens, still admits 3.1 GiB at most; 720x1280x65 admits 2.5 at most, 720x1280x81 0.2, so pass 0 at film size), by the planner before anything starts and by
+  the lease sizing (which then declares the ordinary set). A film driver that exports `COMFY_EXTRA_ARGS=--use-sage-attention` and relies on the default share changes from "runs, and runs out of memory"
   to "refused before the lease slot". The refusal puts its sage clause before the ceiling and replaces the default mode's "(the measured film-size recipe
   keeps 3)" tail with the way out; the default-mode message is byte for byte what it was.
 - **Runner.** `WAN_FILM_ACTIVATIONS_SAGE_GIB` (15.2, a one-line literal the Go mirror reads). `wanActivationsGib(tokens, attention)`: the default curve, and under
@@ -75,7 +82,7 @@ at resident 0 (15.119 GiB), and 15,216 MiB at resident 2 on 720x1280x65 (14.859 
   measured. `checkResident` and `geometryNote` take the mode (`1280x1280x121` reads "film's 15.2 GiB" and about 39.9 GiB under sage); the plan carries `attention`, and
   its one line gains `; sage attention (COMFY_EXTRA_ARGS): activations sized at X GiB`.
 - **Lease sizing.** `wanActivationsSageGiB` (a test pins it to the runner's constant, and another that the two sides admit the same share at film size),
-  `CardOnly.SageAttention`, read from the process environment by `sageAttention()` with the same token table (one table, checked in both languages). The sizing reads no geometry,
+  `CardOnly.SageAttention`, read from the process environment by `sageAttention()` with the same token table (one table, `render/testdata/sage-token-table.json`, read by the tests of both languages). The sizing reads no geometry,
   so under sage it holds 15.2 GiB for any clip: a partial-share sage call at a smaller clip (the measured 65 frames at 2 GiB) declares the ordinary set where it
   declared 0 before sage was read, unless `--ram 0` states the real figure; the detail says so. **An `env COMFY_EXTRA_ARGS=...` prefix inside the wrapped command
   is invisible to the lease sizing** while the runner sees it (the lease then declares as for the default attention); export the variable around `gpu reserve`, or pass
@@ -94,6 +101,11 @@ at resident 0 (15.119 GiB), and 15,216 MiB at resident 2 on 720x1280x65 (14.859 
   characters, substring, the wrong key) and the hint, and for the reuse the check deleted, by literal flag, inverted, applied to the old shape, the profile and the launch.
   Docs: `docs/systems/media-generation.md` ("Sage attention", with the measured table; the launch-profile table), `docs/OPERATOR-GUIDE.md`, `render/README.md`,
   the usage comment of `render/comfy-video.mjs`. Not changed: the image and edit recipes (measured with the default attention), the role rule, the geometry-blind lease sizing.
+- **Review round.** The hint on a sage call's ordinary detail (`--ram 0` states the real figure) is set only when the storage card fits its stage, that is when the compute stage
+  is the one the film figure pushed out; a storage-card miss no longer blames the geometry-blind sizing. The token rule's two literal copies became ONE file,
+  `render/testdata/sage-token-table.json`, read by `TestTheSageTokenRuleMatchesTheRunner` and by the `wanAttentionMode` test (a row changed there turns an answer in both
+  languages; the predicate mutants from 7 characters and by substring are RED in both). The refusal threshold above is stated in geometries and pinned at 57,600 tokens (720x1280x61
+  still admits the default share).
 
 ## [0.184.0] - 2026-10-12 - a busy fleet is a place in line in every row, a re-pack that empties its answer's lists is refused, every delegate result says where it ran, offload_status names the image a server runs, and the serving audit refuses a bare --cpu-moe and an index pin on identical cards
 
