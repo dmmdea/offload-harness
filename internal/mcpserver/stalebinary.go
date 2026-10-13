@@ -86,16 +86,22 @@ func newExeWatch(read func() (exeStamp, error)) *exeWatch {
 
 // newServerExeWatch is the guard New builds. When the process captured its startup identity (runMCP does, as the first
 // thing it does: buildinfo.CaptureStartup), the guard starts from THAT image: the stamp the capture read through the
-// handle it hashed, compared with the file at the path the capture recorded. New runs after the config is loaded and the
-// pipeline opened, and a deploy that lands in between must not be taken for the image the process runs: reading the
-// stamp here, as the guard used to, re-opened the window the capture closed (D-36). A process that captured nothing (a
-// test, a short CLI call) starts from its own file as of now.
+// handle it hashed (or, when the open failed, from the path), compared with the file at the path the capture recorded. New
+// runs after the config is loaded and the pipeline opened, and a deploy that lands in between must not be taken for the image
+// the process runs: reading the stamp here, as the guard used to, re-opened the window the capture closed (D-36). A capture
+// that holds no stamp (no path, or neither the open nor the stat worked, each logged by buildinfo) leaves the guard nothing to
+// compare with, and it says so rather than stamping the file as of now: inactive, in the log once and on the doors that carry
+// stale_binary_guard. A process that captured nothing (a test, a short CLI call) starts from its own file as of now.
 func newServerExeWatch() *exeWatch {
-	if st, ok := startupIdentity(); ok && st.Path != "" && st.Size > 0 {
-		path := st.Path
-		return newExeWatchFrom(exeStamp{Size: st.Size, ModTime: st.ModTime}, nil, func() (exeStamp, error) { return stampOf(path) })
+	st, ok := startupIdentity()
+	if !ok {
+		return newExeWatch(readOwnExecutable)
 	}
-	return newExeWatch(readOwnExecutable)
+	if st.Path == "" || st.Size <= 0 {
+		return newExeWatchFrom(exeStamp{}, fmt.Errorf("the start-up capture holds no stamp of it (path %q, size %d), so there is nothing to compare the file with", st.Path, st.Size), nil)
+	}
+	path := st.Path
+	return newExeWatchFrom(exeStamp{Size: st.Size, ModTime: st.ModTime}, nil, func() (exeStamp, error) { return stampOf(path) })
 }
 
 // newExeWatchFrom builds the guard on a start stamp already read (st, err as a read returned them).
