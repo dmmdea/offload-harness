@@ -56,3 +56,44 @@ func TestAgentDelegateDescriptionSaysWhatNodeAndNodeReportedMean(t *testing.T) {
 	}
 	t.Fatal("agent_delegate is not advertised with agent_delegation_enabled on")
 }
+
+// results[].node_reported has two sources on a node of this release's build, and only two: a node on a build before 0.185.0
+// (it stamps its hostname where it was launched with another --node-id) and a local run attributed to another box's engine
+// (register C-58: the runner stamps its own box, the placement names the engine's). A node on this build that was launched
+// under another name stamps the id it advertises, so "a node launched under another name" describes a case that cannot
+// differ. And results[].node is the id /fleet/health publishes only for a run on a fleet node the delegator dispatched to: a
+// queue answer carries its claimant's stamp, and a local run carries a box's own name.
+func TestAgentDelegateDescriptionNamesTheCasesNodeAndNodeReportedActuallyHave(t *testing.T) {
+	cfg := config.Default()
+	cfg.AgentDelegationEnabled = true
+	for _, tool := range listTools(t, cfg) {
+		if tool.Name != "agent_delegate" {
+			continue
+		}
+		// control: the sentences this one qualifies are still there, so the absences below mean something
+		for _, keep := range []string{
+			`results[].node is the fleet node_id the node publishes in /fleet/health`,
+			`results[].node_reported appears only when the node's own result named itself by another id`,
+		} {
+			if !strings.Contains(tool.Description, keep) {
+				t.Fatalf("the description lost %q: this test's other assertions would pass for the wrong reason", keep)
+			}
+		}
+		for _, want := range []string{
+			`for a run on a fleet node this delegator dispatched`,
+			`a route:"queue" answer carries the id its claimant stamped`,
+			`a run on this box's own seat (ran_on "local") carries this box's own name, or the box whose engine ran it`,
+			`a node on a build before 0.185.0`,
+			`a local run attributed to another box's engine`,
+		} {
+			if !strings.Contains(tool.Description, want) {
+				t.Errorf("the description does not say %q", want)
+			}
+		}
+		if strings.Contains(tool.Description, `a node launched under another name`) {
+			t.Error("the description still names \"a node launched under another name\" as a source of node_reported: a node on this build stamps the id it advertises, so that case cannot differ")
+		}
+		return
+	}
+	t.Fatal("agent_delegate is not advertised with agent_delegation_enabled on")
+}

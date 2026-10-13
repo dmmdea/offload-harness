@@ -259,8 +259,10 @@ func TestBuildUnknownSeatNamesTheSeatsSeenAndCleanCorpusHasNothingToPropose(t *t
 
 // A delegation-log row's `node` is the id the placement used. A row written before that was the id the node stamped on its own
 // result, which for a node launched with --node-id was the OS hostname; that stamp is still on every row, in result.node_id.
-// `rig --node` selects by either name, so a node picked by the id its card shows finds the new rows, and one picked by the old
-// name still finds the rows written before.
+// `rig --node` selects by either name. The card id selects the rows a 0.185.0 delegator wrote ("new" and "upgraded") and never
+// a row written before ("old": the hostname is all it carries). The old name selects the rows written before and the rows a
+// 0.185.0 delegator wrote for a node not yet on 0.185.0 ("new"), and stops selecting a node once it runs 0.185.0 ("upgraded":
+// its own stamp is the card id too).
 func TestNodeFilterMatchesThePlacementIdAndTheIdTheNodeStamped(t *testing.T) {
 	since, until := time.Unix(1788600000, 0), time.Unix(1788800000, 0)
 	rows := []Row{
@@ -268,6 +270,8 @@ func TestNodeFilterMatchesThePlacementIdAndTheIdTheNodeStamped(t *testing.T) {
 		row("new", func(r *Row) { r.Node = "id-a"; r.Result.NodeID = "host-a" }),
 		// written before it: node is the stamp
 		row("old", func(r *Row) { r.Node = "host-a"; r.Result.NodeID = "host-a" }),
+		// written after the node was redeployed: it stamps the id it advertises, so both fields carry the card id
+		row("upgraded", func(r *Row) { r.Node = "id-a"; r.Result.NodeID = "id-a" }),
 		// another node, to prove the filter still filters
 		row("other", func(r *Row) { r.Node = "id-b"; r.Result.NodeID = "host-b" }),
 		// a row whose dispatch failed before any node answered: it carries no result at all
@@ -278,11 +282,11 @@ func TestNodeFilterMatchesThePlacementIdAndTheIdTheNodeStamped(t *testing.T) {
 		wantRows int
 		wantJobs []string
 	}{
-		{"", 4, []string{"new", "old", "other", "noresult"}}, // control: no filter selects every row
-		{"id-b", 1, []string{"other"}},                       // control: a node's own id selects only its rows
-		{"id-c", 1, []string{"noresult"}},                    // control: a row with no result is selected by its node alone
-		{"id-a", 1, []string{"new"}},                         // the placement id finds the new row
-		{"host-a", 2, []string{"new", "old"}},                // the old name finds both the old row and the new row's stamp
+		{"", 5, []string{"new", "old", "upgraded", "other", "noresult"}}, // control: no filter selects every row
+		{"id-b", 1, []string{"other"}},                                   // control: a node's own id selects only its rows
+		{"id-c", 1, []string{"noresult"}},                                // control: a row with no result is selected by its node alone
+		{"id-a", 2, []string{"new", "upgraded"}},                         // the card id finds what a 0.185.0 delegator wrote, never the row written before
+		{"host-a", 2, []string{"new", "old"}},                            // the old name finds the row written before and the not-yet-upgraded node's stamp, never the upgraded node's rows
 	} {
 		rep, err := Build(rows, "seat-a", tc.node, since, until)
 		if err != nil {
