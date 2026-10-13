@@ -302,6 +302,8 @@ Usage:
   local-offload extract-image <image-path> --schema schema.json [--json]
   local-offload assess-image <image-path> [--brief "..."] [--json]
   local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned|endpoint] [--tts-voice NAME] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
+                                         a bare -- ends the flags, so text that starts with a dash is kept: generate-audio out.wav -- "--- Intro ---"
+                                         (the same for generate-video, animate-character and the verbs that take one file, text or prompt)
   local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false] [--family NAME] [--transparent]
   local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N]
                                          N prompts: ONE warm ComfyUI session when this machine's lane is free, else each job a ticket on the
@@ -332,9 +334,10 @@ Usage:
   local-offload rig --seat <alias> [--since 7d] [--node ID] [--out report.json] [--json]   the seat rigger (ADR 0036 P3a): classify this box's delegation-log failures for a seat onto ONE axis each (published precedence), weights over eligible rows, evidence job ids, the pre-authored remedy per axis — proposes and applies nothing
   local-offload ledger [--since DAYS]    token-savings report
   local-offload doctor                   check endpoint health + config
-  local-offload audit-yaml [--against-render] FILE...
+  local-offload audit-yaml [--against-render] [--other-box] FILE...
                                          check live llama-swap config(s) against the operator rules (INV-1/INV-2: no -ngl 0, no empty CUDA_VISIBLE_DEVICES, ttl 300 everywhere, no persistent group, no preload).
                                          --against-render also re-derives each file from THIS binary's tier seeds and reports MATCH / STALE(keys) / UNSTAMPED / HAND-EDITED.
+                                         The CUDA_VISIBLE_DEVICES pin rules compare a file with THIS box's cards (nvidia-smi); --other-box says the files belong to another machine and skips them.
   local-offload audit-config [--config PATH] [--tier NAME] [--json] [--all]
                                          compare this node's live config.json against the seed its tier would install; lists every seed-owned key that is DIFFERENT, LIVE-ONLY (hand-wired, never written back to profiles.json) or SEED-ONLY. Exit 1 on drift.
                                          --ram-tier defaults to THIS machine's detected RAM tier (the header names it, GB included); for another node's config (--config/--goos/--home) pass --ram-tier min|low|mid|high|none. A RAM probe that reads 0 GB is refused, never read as min.
@@ -1656,7 +1659,44 @@ func buildAudioParams(f audioFlags) map[string]any {
 // `node render/tts.mjs out.wav "text"` CLI. It synthesizes on the LOCAL GPU for
 // free via the same runGenerateAudio pipeline branch the MCP tool uses.
 func runGenerateAudio(args []string) error {
-	fs := flag.NewFlagSet("generate-audio", flag.ExitOnError)
+	c, err := parseGenerateAudio(args, flag.ExitOnError)
+	if err != nil {
+		return err
+	}
+
+	cfg := loadCfg(c.fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	params := buildAudioParams(c.audio)
+	res := mediaremote.Run(context.Background(), cfg, p, core.Request{
+		Task:   core.TaskGenerateAudio,
+		Door:   "cli:generate-audio",
+		Input:  c.text,
+		Params: params,
+	}, c.route, c.remotes)
+	emitResult(res, c.asJSON, "", c.compact)
+	return nil
+}
+
+// generateAudioCLI is one parsed `generate-audio` command line.
+type generateAudioCLI struct {
+	fs      *flag.FlagSet
+	audio   audioFlags
+	text    string
+	asJSON  bool
+	compact bool
+	route   string
+	remotes []string
+}
+
+// parseGenerateAudio parses the generate-audio command line (factored out of runGenerateAudio, like
+// parseGenerateVideo, so the positionals can be tested without a render).
+func parseGenerateAudio(args []string, errorHandling flag.ErrorHandling) (generateAudioCLI, error) {
+	fs := flag.NewFlagSet("generate-audio", errorHandling)
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	kind := fs.String("kind", "voice", "voice (Chatterbox TTS) | music (ACE-Step)")
@@ -1669,8 +1709,8 @@ func runGenerateAudio(args []string) error {
 	reserveVRAM := fs.Float64("reserve-vram", 0, "music: VRAM held back for the display")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0077)")
-	var remotes repeatedFlag
-	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
+	remotes := new(repeatedFlag)
+	fs.Var(remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 
 	// generate-audio takes TWO positionals (out path, text); the rest are flags.
 	out, text, flagArgs := splitTwoArgs(args, map[string]bool{
@@ -1678,31 +1718,22 @@ func runGenerateAudio(args []string) error {
 		"seconds": true, "seed": true, "reserve-vram": true, "tts-voice": true,
 		"route": true, "remote": true,
 	})
-	_ = fs.Parse(flagArgs)
+	if err := fs.Parse(flagArgs); err != nil {
+		return generateAudioCLI{}, err
+	}
 
 	if out == "" || text == "" {
-		return fmt.Errorf("generate-audio requires an output path and text: local-offload generate-audio <out.wav> \"<text>\" [--kind voice|music] [--lang es]")
+		return generateAudioCLI{}, fmt.Errorf("generate-audio requires an output path and text: local-offload generate-audio <out.wav> \"<text>\" [--kind voice|music] [--lang es]")
 	}
-
-	cfg := loadCfg(fs)
-	p, cleanup, err := openPipeline(cfg)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
-	params := buildAudioParams(audioFlags{
-		kind: *kind, voice: *voice, ttsVoice: *ttsVoice, clone: *clone, lang: *lang, out: out,
-		seconds: *seconds, seed: *seed, reserveVRAM: *reserveVRAM,
-	})
-	res := mediaremote.Run(context.Background(), cfg, p, core.Request{
-		Task:   core.TaskGenerateAudio,
-		Door:   "cli:generate-audio",
-		Input:  text,
-		Params: params,
-	}, *route, remotes)
-	emitResult(res, *asJSON, "", *compactFlag)
-	return nil
+	return generateAudioCLI{
+		fs: fs,
+		audio: audioFlags{
+			kind: *kind, voice: *voice, ttsVoice: *ttsVoice, clone: *clone, lang: *lang, out: out,
+			seconds: *seconds, seed: *seed, reserveVRAM: *reserveVRAM,
+		},
+		text: text, asJSON: *asJSON, compact: *compactFlag,
+		route: *route, remotes: *remotes,
+	}, nil
 }
 
 // videoFlags is the parsed CLI input for `generate-video`. Factored out so the
@@ -1965,11 +1996,17 @@ func runAnimateCharacter(args []string) error {
 // splitFourArgs separates the FIRST FOUR positionals (out path + ref image +
 // driver video + prompt) from flags, mirroring splitThreeArgs. Used by
 // animate-character, whose CLI shape is `<out> <ref> <driver> "<prompt>" [flags]`.
+// A bare "--" ends the flags (see overflowArg for what happens to an extra positional).
 func splitFourArgs(args []string, valueFlags map[string]bool) (first, second, third, fourth string, flags []string) {
 	var pos []string
+	ended, fenced := false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if strings.HasPrefix(a, "-") && a != "-" {
+		if endsFlags(a, ended) {
+			ended = true
+			continue
+		}
+		if isFlagArg(a, ended) {
 			flags = append(flags, a)
 			name := strings.TrimLeft(a, "-")
 			if strings.ContainsRune(name, '=') {
@@ -1984,7 +2021,7 @@ func splitFourArgs(args []string, valueFlags map[string]bool) (first, second, th
 		if len(pos) < 4 {
 			pos = append(pos, a)
 		} else {
-			flags = append(flags, a)
+			flags = overflowArg(flags, a, ended, &fenced)
 		}
 	}
 	pos = append(pos, "", "", "", "")
@@ -1995,11 +2032,16 @@ func splitFourArgs(args []string, valueFlags map[string]bool) (first, second, th
 // prompt) from flags, treating the named value-flags as consuming the following
 // token. Used by generate-video, whose CLI shape is `<out> <still> "<prompt>"
 // [flags]`. A fourth+ positional is dropped onto flags (harmless; FlagSet ignores
-// trailing positionals).
+// trailing positionals). A bare "--" ends the flags (see overflowArg).
 func splitThreeArgs(args []string, valueFlags map[string]bool) (first, second, third string, flags []string) {
+	ended, fenced := false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if strings.HasPrefix(a, "-") && a != "-" {
+		if endsFlags(a, ended) {
+			ended = true
+			continue
+		}
+		if isFlagArg(a, ended) {
 			flags = append(flags, a)
 			name := strings.TrimLeft(a, "-")
 			if strings.ContainsRune(name, '=') {
@@ -2019,7 +2061,7 @@ func splitThreeArgs(args []string, valueFlags map[string]bool) (first, second, t
 		case third == "":
 			third = a
 		default:
-			flags = append(flags, a)
+			flags = overflowArg(flags, a, ended, &fenced)
 		}
 	}
 	return first, second, third, flags
@@ -2028,11 +2070,17 @@ func splitThreeArgs(args []string, valueFlags map[string]bool) (first, second, t
 // splitTwoArgs separates the FIRST TWO positionals (e.g. out path + text) from
 // flags, treating the named value-flags as consuming the following token. Used by
 // generate-audio, whose CLI shape is `<out> "<text>" [flags]`. A third+ positional
-// is dropped onto flags (harmless; FlagSet ignores trailing positionals).
+// is dropped onto flags (harmless; FlagSet ignores trailing positionals). A bare
+// "--" ends the flags (see overflowArg).
 func splitTwoArgs(args []string, valueFlags map[string]bool) (first, second string, flags []string) {
+	ended, fenced := false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if strings.HasPrefix(a, "-") && a != "-" {
+		if endsFlags(a, ended) {
+			ended = true
+			continue
+		}
+		if isFlagArg(a, ended) {
 			flags = append(flags, a)
 			name := strings.TrimLeft(a, "-")
 			if strings.ContainsRune(name, '=') {
@@ -2050,10 +2098,33 @@ func splitTwoArgs(args []string, valueFlags map[string]bool) (first, second stri
 		case second == "":
 			second = a
 		default:
-			flags = append(flags, a)
+			flags = overflowArg(flags, a, ended, &fenced)
 		}
 	}
 	return first, second, flags
+}
+
+// endsFlags reports whether tok is the bare "--" that ends flag handling. Only the first one does: after it, "--" is a positional.
+func endsFlags(tok string, ended bool) bool { return !ended && tok == "--" }
+
+// isFlagArg reports whether tok is read as a flag by the positional splitters: it starts with "-", it is not the lone "-" (the
+// stdin positional) and no bare "--" has ended the flags.
+func isFlagArg(tok string, ended bool) bool {
+	return !ended && strings.HasPrefix(tok, "-") && tok != "-"
+}
+
+// overflowArg hands a positional the splitter has no slot for on to the flags the caller gives fs.Parse
+// (as the splitters always did: Parse stops at the first non-flag, so the extra is harmless). Once a bare
+// "--" has ended the flags, the extra token may start with a dash, and Parse would read it as a flag, so
+// ONE "--" of the splitter's own goes in front of the first such token: Parse stops there and nothing
+// after the user's terminator is ever a flag. The user's own "--" is never passed on. fenced is the
+// splitter's "my -- is already in" state.
+func overflowArg(flags []string, tok string, ended bool, fenced *bool) []string {
+	if ended && !*fenced {
+		flags = append(flags, "--")
+		*fenced = true
+	}
+	return append(flags, tok)
 }
 
 // runOCR handles `local-offload ocr <image-path> [--json]`. Like vqa the
@@ -2241,6 +2312,11 @@ func emitResult(res core.Result, asJSON bool, selectCSV string, compact bool) {
 }
 
 func runMCP(args []string) error {
+	// D-36: take the identity of the image this process started from BEFORE anything else runs. The capture hashes the
+	// executable at the path os.Executable names, and on Windows that path keeps its name after a rename-swap, so a
+	// deploy landing during openPipeline would otherwise be hashed as the image this process runs. (A short CLI call
+	// never captures and keeps the lazy hash.)
+	buildinfo.CaptureStartup()
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	_ = fs.Parse(args)
@@ -2742,6 +2818,10 @@ func reportPipelineJobsSweep(w io.Writer, swept, kept int, serr error) {
 // node is a contract violation the dispatcher treats as broken. SIGINT drains
 // in-flight jobs for up to 30s before exiting.
 func runFleetServe(args []string) error {
+	// D-36, as runMCP: take the identity of the image this process started from BEFORE anything else runs. A node is as
+	// long-lived as an MCP server and stamps harness_build_sha256 on its agent answers, so a deploy that lands after it
+	// started must not be hashed, at the first answer, as the image it runs.
+	buildinfo.CaptureStartup()
 	fs := flag.NewFlagSet("fleet-serve", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	listenFlag := fs.String("listen", "", "listen address (default: config fleet_listen, 127.0.0.1:18811)")
@@ -4736,18 +4816,18 @@ func applyBatchRefineDefault(jobs []pipeline.ImageBatchJob, refine bool) {
 	}
 }
 
+// splitArgs separates the FIRST positional from flags, treating the named value-flags as consuming the
+// following token. A lone "-" is the stdin positional. A bare "--" ends the flags: every later token is a
+// positional, even one that starts with "-" (see overflowArg for what happens to an extra one).
 func splitArgs(args []string, valueFlags map[string]bool) (positional string, flags []string) {
+	ended, fenced := false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if a == "-" { // stdin indicator is a positional, not a flag
-			if positional == "" {
-				positional = a
-			} else {
-				flags = append(flags, a)
-			}
+		if endsFlags(a, ended) {
+			ended = true
 			continue
 		}
-		if strings.HasPrefix(a, "-") {
+		if isFlagArg(a, ended) { // a lone "-" (the stdin indicator) is not a flag: it falls through to the positional rule
 			flags = append(flags, a)
 			name := strings.TrimLeft(a, "-")
 			if strings.ContainsRune(name, '=') {
@@ -4762,7 +4842,7 @@ func splitArgs(args []string, valueFlags map[string]bool) (positional string, fl
 		if positional == "" {
 			positional = a
 		} else {
-			flags = append(flags, a)
+			flags = overflowArg(flags, a, ended, &fenced)
 		}
 	}
 	return positional, flags

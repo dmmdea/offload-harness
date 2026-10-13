@@ -63,6 +63,17 @@ type Device struct {
 	// the reading cannot say which card the monitor is on. A driver that refuses the field has
 	// no such mark (the rule rests on display_active alone, as it always did).
 	AttachedUnknown bool `json:"attached_unknown,omitempty"`
+	// TemperatureC is nvidia-smi temperature.gpu in degrees C and ThrottleReasons the clock event reasons
+	// active when it was read (the NVML bits, named: ThrottleReasonNames). Neither rides the per-device query
+	// above: ReadThermal asks for them in a second, optional query, so an old driver that refuses a thermal
+	// column can never take the memory reading down with it. Absent is never "cool" and never "not throttled":
+	// the query failed, was not due, or the driver answered [N/A] or [Not Supported] for the card (or has no
+	// throttle field at all). A card read with nothing limiting its clocks (no reason beyond idle) publishes an
+	// EMPTY array, so "read, none active" is told from "not read": ThrottleReasons is nil for the second and a
+	// non-nil empty slice for the first, which is why the tag is omitzero (omitempty would drop both). A pointer
+	// for the temperature, so a reading is told from none.
+	TemperatureC    *int     `json:"temperature_c,omitempty"`
+	ThrottleReasons []string `json:"throttle_reasons,omitzero"`
 }
 
 // DrivesDisplay is the placement answer to "is this the operator's screen": display_active
@@ -139,10 +150,16 @@ const (
 )
 
 // refusesAttached reports whether a failed full query is the driver saying it does not know
-// display_attached, as opposed to nvidia-smi failing for some other reason. nvidia-smi names the
-// field (`Field "display_attached" is not a valid field to query.`, on STDOUT, status 2), so the
-// output, the error text and an ExitError's stderr are all read.
+// display_attached, as opposed to nvidia-smi failing for some other reason.
 func refusesAttached(out string, err error) bool {
+	return refusesField(out, err, "display_attached")
+}
+
+// refusesField reports whether a failed query is the driver saying it does not know the query field
+// `field`, as opposed to nvidia-smi failing for some other reason. nvidia-smi names the field
+// (`Field "display_attached" is not a valid field to query.`, on STDOUT, status 2), so the output, the
+// error text and an ExitError's stderr are all read, and the exit status is not.
+func refusesField(out string, err error, field string) bool {
 	text := strings.ToLower(out)
 	if err != nil {
 		text += " " + strings.ToLower(err.Error())
@@ -151,7 +168,7 @@ func refusesAttached(out string, err error) bool {
 			text += " " + strings.ToLower(string(ee.Stderr))
 		}
 	}
-	if !strings.Contains(text, "display_attached") {
+	if !strings.Contains(text, strings.ToLower(field)) {
 		return false
 	}
 	for _, w := range []string{"not a valid", "invalid", "unknown field", "unrecognized", "unrecognised", "unsupported"} {

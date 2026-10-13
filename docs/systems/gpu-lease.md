@@ -47,7 +47,7 @@ other on a single shared card.
 | `internal/gpulease/explain.go` | the sentence a waiter reads when the lease it is queued behind is stalled, orphaned or overdue, and the installed orphan grace. READ-ONLY: it reads the orphan marker a status surface recorded and never writes it or takes the epoch lock |
 | `gpu_ownership.go` | the ownership flags (`--owner-*`, `--unattended`, `--progress-file`, `--stall`, `--yield-grace`, `--on-yield`), the `gpu owner-flags` verb, and the ownership lines of `gpu status` |
 | `gpu_drain.go` | `--drain`: waits until the seat's gauge AND the run registry are empty, inside the queue budget; restamps `draining` → `exclusive`; unload / warm-back |
-| `internal/gpuactivity` | the RUN REGISTRY (`<state root>/gpu/activity/`, one record per agent loop in flight) and the activity reading behind `gpu status` / `offload_status.gpu_lease` (`verdict`, `activity`) — ADR 0041; `holders.go` derives each live lease's standing, `facts.go` the activity facts of a legacy lease, `snapshot.go` (`View.Map`, `splitProcesses`) the one JSON shape both surfaces read, with a display card's unsized processes folded into one count per card |
+| `internal/gpuactivity` | the RUN REGISTRY (`<state root>/gpu/activity/`, one record per agent loop in flight) and the activity reading behind `gpu status` / `offload_status.gpu_lease` (`verdict`, `activity`) — ADR 0041; `holders.go` derives each live lease's standing, `facts.go` the activity facts of a legacy lease, `snapshot.go` (`View.Map`, `splitProcesses`) the one JSON shape both surfaces read, with a display card's unsized processes folded into one count per card; `driverevents.go` the **driver's fault events** for the leased cards (C-83-B, [below](#the-drivers-own-fault-events-for-the-leased-cards-c-83-b)) |
 | `internal/seatload` | the seat's in-flight reading: llama-swap's `/running` (and the roster, for an alias), then the loaded seat's own `/metrics` or `/slots` at the `proxy` `/running` reports — never through `/upstream`, which resets the idle unload timer; a `starting` seat is reported without touching the seat |
 | `gpu_hide_windows.go`, `gpu_hide_other.go` | hidden spawn for the detached holder (a visible console gets closed, killing the hold): it always gets a hidden console of its own, whatever terminal launched it (`winexec.HideWindowDetached`); the flags live in `internal/winexec`, the one place every hidden child is built |
 | `render/gpu-lock.mjs` | READ-ONLY participant: honours + fences an inherited lease, elects one unloader, drains, ComfyUI lifecycle. **Does not acquire.** |
@@ -810,6 +810,21 @@ binary that has it. **Nothing found is executed.** **Fail closed:** finding no b
 read or examined, or a process table that cannot be listed is a finding, not a pass. The exit status is non-zero when the
 audit is not green. `--write-audit` records the verdict as `gpu/reader-audit.json`, **red as well as green**, so a stale green
 cannot outlive a newer old binary.
+
+**Running processes older than the installed build (D-36).** A rename-swap deploy replaces the installed binary while every
+process already running keeps the image it started from. For each running binary the audit reached, `gpu doctor` compares
+the version its build marker states with the installed build's, read from the **installed file** (the doctor's own
+executable path, through the audit's own marker reader `gpulease.ReadBuildMarkerVersion`, so one file cannot read two
+versions). The doctor's own file is the reference only when it is the harness binary PATH resolves (or PATH names none): run
+from a worktree or dev build beside a deployed copy on PATH, it compares nothing and a note says why, since a build that is
+not installed would send the operator to restart deployed processes for nothing; an unresolved executable path is named as
+the cause when that is what stopped the comparison. The older ones carry `older_than_installed` in `--json` and an "older than the installed build" line in the text,
+followed by a summary with their pids. It is information and not a finding: the exit status and the reader-audit marker do
+not move. The installed file is read, not the doctor's compiled-in version, because the doctor may itself be a pre-swap
+process. A binary with no build marker, or a version that is not `major.minor.patch`, is never called older (unknown stays
+unknown), and when the installed version cannot be read a note says no comparison was made. The comparison is by version:
+two builds of one version are not told apart here (the MCP server's `process` block compares bytes,
+[mcp-server.md](mcp-server.md)).
 
 **What green does and does not mean.** Green means every reader the audit *reached* is aware. The output lists what it
 scanned **and what it did not enter** (directories past the depth cap, 3 levels below a scan root unless `--depth` says
@@ -1853,6 +1868,55 @@ The brief verdict line of `offload_status` leads with `HOST RAM OVER (committed 
 physical RAM)` in capitals, ahead of the lease verdict word, because `free` at the head of that line reads as "the box has room";
 NEAR trails it. The lease rows show what each lease declared, and the queue rows what a waiter waits for
 (`TestGPUStatusJSONCarriesTheHostBlockAndAnOverVerdict`, `TestStatusNamesOverLoudlyOnTheBriefLine`).
+
+### The driver's own fault events for the leased cards (C-83-B)
+
+A card that faults under a lease leaves one line in the driver's log, and until 0.184.0 nothing showed it (the register counted
+181 `nvlddmkm` id 153 events since 2026-09-22 on the reference box, found by hand): on Windows an event in the **System** log from
+provider `nvlddmkm` (id 153 reads `Error occurred on GPUID: b500`, or `UCodeReset TDR occurred on GPUID:100`), on Linux an
+`NVRM: Xid (PCI:0000:b5:00): 79, ...` line in the kernel log. `gpu status` (text, and `--json` under `activity`) and `offload_status.gpu_lease.activity` now carry the last 24 h of
+them for **the cards the lease holds** (every card for a whole-node lease; the union of the leases' cards when several are live):
+
+| key (`activity.`) | meaning |
+|---|---|
+| `driver_events` | newest first, at most 20: `{at, source (nvlddmkm \| Xid), id, bus, card, uuid, text}`; present only when there is one |
+| `driver_events_total` | how many the leased cards had before the list was capped (only when capped) |
+| `driver_events_unattributed` | events in the window that name no card this box can place, so no card's list holds them: said, so an empty list is not read as "no faults". On the reference box the Windows id 13 `Graphics Exception` records are the bulk of these (420 in 96 h against 14 id-153 ones): they carry no GPUID |
+| `driver_events_note` | why the events could not be read (`driver events unavailable: ...`) or why the list may be short or unplaced (`driver events incomplete: ...`: a log read that stopped part way, a journalctl that could not be read so only this boot's `dmesg` was, a card table that could not be read so the events are listed nowhere): a reader failure is a note, never an error |
+
+**Facts, never a verdict.** A driver fault and a kill look alike in the log (A-128's kill test is what tells them apart, and it
+is queued, not built), so an event never moves the lease's verdict, the brief line or any gate. A box with no source (an OS with
+no log reader, or the reader not wired) prints byte-identically to before: no key, no line.
+
+**How it is read.** `gpuactivity.ReadDriverEvents` is the production reader, handed in as `Options.DriverEvents` (nil = off;
+`activityOptions` wires it for `gpu status`, `offload_status` for the lease block): it is called only while a lease is held and
+the GPU sample is on. Windows: **one** `powershell.exe` from System32 (`-NoProfile -NonInteractive`), a read-only `Get-WinEvent`
+over `LogName System`, `ProviderName nvlddmkm`, the last 24 h, the newest 1000, each record as XML; a log with no matching event is
+an empty answer. Linux: `journalctl --no-pager -o short-unix --since "24 hours ago" _TRANSPORT=kernel` (the kernel transport as a
+match, not `-k`: `-k` implies `-b`, the current boot only, and a fault such as Xid 79 often ends in a reboot; on a gate host with
+four boots in its journal, seven days read 2528 lines with `-k` and 4226 across every boot), then `dmesg --time-format iso` when
+journalctl cannot be read, which holds this boot's ring buffer only and says so in the note. **Every child starts through
+`internal/winexec`** (no console window on Windows). The log read is bounded at 8 s and the card-table query has its own 4 s,
+so a slow log cannot leave `nvidia-smi` nothing. The answer is cached for 60 s in the process, failures included, so a poll of a
+**long-lived process (the MCP server)** starts no child per call; **`gpu status` is a fresh process on every call, so each one
+pays a read** (about 0.6 s on Windows, once per call, only while a lease is held). An answer whose events could not be
+placed because the card table was unreadable is held 10 s, not 60. The record's host name, user and device object path are not
+carried. The card behind an event is found by **PCI bus and device**: the record's GPUID is that pair as one hex number,
+`(bus << 8 | device)`, **printed without leading zeros** (`b500` = bus `b5`, device `00`; a card on bus `01` logs `100`, so a
+one-card box's events are placed by reading one to four digits as a number and splitting it), the kernel line says
+`PCI:0000:b5:00`, and `nvidia-smi --query-gpu=index,uuid,pci.bus_id` (a second small query made inside `gpuactivity`, so the
+card sample is unchanged) ends `B5:00.0`; the PCI domain is ignored. A table that cannot be read leaves the events unplaced
+(not lost) and the note says the table was the cause, with `nvidia-smi`'s reason; those events are then not counted as
+`driver_events_unattributed`. `offload_status` computes the events only for the `gpu_lease` section and the full answer: the
+`brief` returns none of them and starts no read.
+
+**Limits, said plainly.** The Linux `Xid` shape is the documented one and was not captured from a live Linux driver (neither
+Linux gate host has an NVIDIA card); the Windows shape was read from two boxes' logs (the fixtures in
+`internal/gpuactivity/testdata/nvlddmkm-153.xml`, a multi-card box on buses `17`, `65` and `b5`, and
+`nvlddmkm-153-lowbus.xml`, a one-card laptop on bus `01` whose records read `GPUID: 100`, hand-reduced, host name replaced).
+`ReadDriverEvents` caps the Windows read at the newest 1000 records: a storm of id-13 records older than that pushes older
+id-153 ones out of the window. A read costs one PowerShell start (0.56 to 0.65 s over three runs on an empty 24 h window): paid
+once a minute by the MCP server and on every `gpu status` call.
 
 ### A kept instance is freed when its family changes
 

@@ -1,6 +1,7 @@
 // node --test render/batch-jobs.test.mjs
 import { test } from "node:test";
 import assert from "node:assert";
+import { EventEmitter } from "node:events";
 import {
   parseJobs, jobArgs, resultLine, runBatchJobs, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS,
   isDiskFullError, batchExitCode, batchEndLine, renderExitError, BATCH_EXIT_JOBS_FAILED, RENDER_EXIT_SERVER_UNUSABLE,
@@ -266,4 +267,65 @@ test("renderExitError: exit 3 is serverUnusable and carries the child's RENDER F
   assert.ok(!o.serverUnusable);
   assert.equal(o.message, "comfy-render exited 1");
   assert.equal(batchMod.RENDER_EXIT_SERVER_UNUSABLE, 3, "the exit code is a cross-process contract");
+});
+
+// ---- D-38 (#72): the class line crosses the child -> parent boundary --------------------------------------------
+//
+// comfy-render.mjs ends a serverUnusable failure with "RENDER FAILED: <why>" and, on the next line, "IGPU_CLASS=comfy_unusable",
+// then exits 3. comfy-generate.mjs spawns it and is what the Go side runs, so the parent must put the child's stderr on its
+// own stderr UNCHANGED (the Go side reads the class line from that output) while it keeps the tail for the failure reason.
+
+function fakeRenderChild() {
+  const child = new EventEmitter();
+  child.stderr = new EventEmitter();
+  return child;
+}
+
+test("relayRenderChild: the child's stderr reaches the parent verbatim, class line included, and exit 3 is serverUnusable", async () => {
+  assert.equal(typeof batchMod.relayRenderChild, "function", "batch-jobs.mjs must export relayRenderChild");
+  const child = fakeRenderChild();
+  const written = [];
+  const done = batchMod.relayRenderChild(child, { write: (d) => written.push(String(d)) });
+  child.stderr.emit("data", "queued x seed 1\n");
+  child.stderr.emit("data", "RENDER FAILED: ComfyUI stopped answering mid-render (unreachable 90s)\nIGPU_CLASS=comfy_unusable\n");
+  child.emit("close", 3);
+  const err = await done.then(() => null, (e) => e);
+  assert.equal(written.join(""), "queued x seed 1\nRENDER FAILED: ComfyUI stopped answering mid-render (unreachable 90s)\nIGPU_CLASS=comfy_unusable\n");
+  assert.ok(err, "a child that exited 3 must reject");
+  assert.equal(err.serverUnusable, true);
+  assert.equal(err.message, "comfy-render exited 3: ComfyUI stopped answering mid-render (unreachable 90s)");
+});
+
+test("relayRenderChild: a clean exit resolves, another failing exit is not serverUnusable, a spawn error rejects", async () => {
+  assert.equal(typeof batchMod.relayRenderChild, "function");
+  const ok = fakeRenderChild();
+  const p0 = batchMod.relayRenderChild(ok, { write: () => {} });
+  ok.emit("close", 0);
+  await p0;
+  const bad = fakeRenderChild();
+  const p1 = batchMod.relayRenderChild(bad, { write: () => {} });
+  bad.stderr.emit("data", "RENDER FAILED: view fetch 404\n");
+  bad.emit("close", 1);
+  const e1 = await p1.then(() => null, (e) => e);
+  assert.ok(e1 && !e1.serverUnusable);
+  assert.equal(e1.message, "comfy-render exited 1: view fetch 404");
+  const gone = fakeRenderChild();
+  const p2 = batchMod.relayRenderChild(gone, { write: () => {} });
+  gone.emit("error", new Error("spawn node ENOENT"));
+  const e2 = await p2.then(() => null, (e) => e);
+  assert.match(e2.message, /ENOENT/);
+});
+
+test("relayRenderChild: the tail kept for the reason is bounded, the relay is not", async () => {
+  assert.equal(typeof batchMod.relayRenderChild, "function");
+  const child = fakeRenderChild();
+  const written = [];
+  const done = batchMod.relayRenderChild(child, { write: (d) => written.push(String(d)), tailBytes: 64 });
+  const noise = "x".repeat(500) + "\n";
+  child.stderr.emit("data", noise);
+  child.stderr.emit("data", "RENDER FAILED: the last word\n");
+  child.emit("close", 1);
+  const err = await done.then(() => null, (e) => e);
+  assert.equal(written.join(""), noise + "RENDER FAILED: the last word\n", "everything the child printed is relayed");
+  assert.equal(err.message, "comfy-render exited 1: the last word");
 });

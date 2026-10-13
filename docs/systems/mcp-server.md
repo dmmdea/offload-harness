@@ -129,6 +129,9 @@ local. `local` pins the call to this box (a held card then defers `gpu_busy` wit
 with none eligible, returns `deferred: true` with `defer_class: capacity` (or `config` with no remotes) without touching
 the local GPU. The audio is read on this box and sent as 16 kHz mono Opus; `srt_path`, `text_path` and `json_path` are
 always files this box wrote under its own `media_dir`, and `meta.node` / `meta.placement` say where the call ran.
+When the transcript carries word times the result also has `words_reliable` and `words_drift_sec`: `false` means the
+first word of some segment starts 0.5 s or more away from its segment (issue #169, see
+[offload-pipeline.md](offload-pipeline.md)), so audio should not be cut at word boundaries from those times.
 `select` still projects the result here, whichever box ran it. `engine: "npu"` is this box's own Hailo sidecar and never
 travels: a route named there other than `local` is refused (an omitted route is not a request to travel). The CLI
 `local-offload transcribe --route` carries the same vocabulary and defaults to `local`. See
@@ -428,6 +431,14 @@ limit that does not depend on it.
 
 ### The research lane (`offload_research`)
 
+*A page is handed to the seat in lines it can read (0.184.0).* The agent's `read_file` cuts every line at 2,000 characters and
+pages by line, so the rest of a longer line is out of the seat's reach: a page that arrives as one 98,304-character line gave it
+its first 2,020 characters, and research runs on such pages reached the forced final step in 38 of 117 cases against 36 of 1,283
+for pages with ordinary lines. `research.Build` therefore wraps each context document at `research.MaxLineChars` (1,800, pinned
+under `agent.ReadFileLineCap`): at the last space in the final quarter of the window, in the middle of a run with no space, never
+inside a rune, with the space becoming the newline and nothing else added or removed. A page whose lines all fit is handed over
+byte for byte; the fetched text that anchors, fingerprints and verifies quotes is the page as fetched.
+
 `offload_research` is the one-call answer to "this leg needs the web, so it goes to a cloud
 subagent". It takes a goal and up to 12 public URLs, fetches every page DELEGATOR-side under
 a public-web guard in TWO halves, strips it to text (dependency-free
@@ -458,6 +469,23 @@ regex (tagged `docanchor`) over the page's top prose content words — taken fro
 and the headings that introduce them, never from identifier-shaped tokens, UI or markup
 vocabulary, and never from the goal (0.141.1, register C-65), so an echoed goal cannot pass as
 verified while a faithful digest passes by restating any one of about two dozen words.
+Two faithful shapes used to fail it and now pass (0.184.0): an **inflection** (each anchor is matched in its singular, so
+"programmer" restates a page that says "programmers"; the goal's own words are excluded in the singular too), and an **honest
+absence**. The anchors are chosen off the whole goal the seat is handed (the fixed sentences `Build` adds, the file's name and
+title, the caller's questions), not only the caller's, and the regex holds the page's words and nothing else, so no sentence the
+goal contains satisfies it: the goal echoed back fails, and the delegator's lint does not call the contract parrot-passable.
+An honest absence restates no page word (the goal tells the seat to say so in the goal's own vocabulary, which the anchors
+exclude by construction), so it is excused by the delegator from the STRUCTURE of the digest and not from a phrase in the
+regex: `delegate.EvalAcceptance` drops the fingerprint failure of a result whose structured digest is
+`delegate.HonestAbsence`: an object in which every string at any depth (a list entry as much as a field) is empty or a short
+statement (60 words at most) that the page does not carry what was asked ("not on page", "does not contain/address/mention/…",
+"not documented/stated/…"), at least one such statement, no number or boolean, no second sentence that says what the page does
+hold, no contrast word ("but", "however", …), and no report of a failure to read the file ("could not read", "not found", "the
+file is missing": an error, not a finding). A stock phrase beside a claim, the goal echoed back, and "I could not read the file,
+so the page does not address it" still fail it. The excuse counts for the node as neither a strike nor a pass
+(`Quarantine.Pass`): an absence is no evidence that the node reads the right document. What no lexical rule can tell is a seat
+that did not read the page and reports "the page does not address it" without saying that it failed; that is delivered as an
+absence, as an honest one is, and only a second seat would tell them apart.
 
 What a digest owes beyond that is one design (register C-74): **presence is declared,
 non-emptiness is asked for only where the caller marked it, and the default digest owes that it
@@ -814,6 +842,31 @@ read-only unless deliberately widened. See
 
 ## Observability and debugging
 
+- **A server that started before the binary it runs was replaced says so (`stale_binary`).** An MCP server is spawned once
+  per client and keeps the executable image it started from, so a release swapped in on disk afterwards is not in that
+  process: two servers that had started on 0.180.0 were still stamping their rows with it eight hours after a 0.181.0 and then
+  a 0.182.0 binary had been swapped in, so the capacity-wait fix those releases carry could not run for them. The server takes the size and modification time of the image it started from
+  out of the identity the process captured first thing (`buildinfo.CaptureStartup`, see `process` below;
+  `internal/mcpserver/stalebinary.go`) and compares them with the file at the path the capture recorded when `agent_delegate`,
+  `offload_research` or `offload_status` answers. A stamp that has moved is settled by the bytes, with the check the `process`
+  block makes: equal bytes are not stale (a redeploy of the same build rewrites the file), different bytes are, and bytes that
+  cannot be compared leave the moved stamp standing, with a note that it rests on the stamp alone and the reason the comparison
+  gave (a lock on the freshly renamed file, a read that did not finish within 2 s). That read runs in the background, once per
+  moved file, and an answer waits for it at most 2 s: a stalled read (an antivirus scan, a slow mount) never holds the results
+  of a finished call, and the next call uses what the read found. A path that is gone (an OS
+  that unlinks the old file) is stale without a comparison. A stale answer carries a top-level `stale_binary` string naming the
+  running version, the two stamps and, when the installed file's build marker reads, the installed version, and saying to
+  restart the MCP client; the log says it once. It never exits, re-executes or cuts a call (that would drop the jobs the server
+  holds), a stat that fails for any other reason accuses nothing, and a server that could not read its own file at start has
+  nothing to compare with. The running version is the compiled-in one; the installed version is read from the installed file's
+  build marker (`gpulease.ReadBuildMarkerVersion`), never by running it.
+  The guard says when it is not watching, because a guard against a silent failure must not be one: a server that could not
+  stamp its own executable at start (or whose path was already gone, or whose start-up capture holds no path or no stamp, which
+  buildinfo logs) logs one `the stale-binary guard is inactive` line with the reason, and a stat that fails later is logged
+  once. `agent_delegate`, `offload_research` and `offload_status` all carry a top-level `stale_binary_guard` string
+  (`inactive: ...` for the first, `unreadable: ...` for as long as the second lasts), beside and independent of `stale_binary`,
+  and no such key while the guard is watching. The start-up capture takes the stamp from the path when the hash could not open
+  the file, so a refused open does not leave the guard to stamp the file as of `mcpserver.New`.
 - `offload_status` reports harness state to the calling agent: the configured model roster (the one
   table in `config.ModelRoutes`, shared with `doctor`/`acceptance`/`report`), a live `/v1/models`
   probe through [`internal/swapclient`](../../internal/swapclient/swapclient.go), and
@@ -829,7 +882,7 @@ read-only unless deliberately widened. See
 - **One block, or the brief form (0.137.0).** `offload_status` takes one optional argument,
   `section`. No argument (or `all`) is the whole payload, byte-identical to the answer before the
   argument existed. A block name (`local`, `media`, `remote`, `accelerators`, `reuse`, `fleet`,
-  `kv_cache_server`, `gpu_lease`, `pair`) returns `{<block>: …}` and computes nothing else: the fleet block
+  `kv_cache_server`, `gpu_lease`, `pair`, `media_queue`, `process`) returns `{<block>: …}` and computes nothing else: the fleet block
   runs no nvidia-smi, the lease block probes no node. `accelerators` asked for by name on a box that
   lists none is `{}`, never `null`. `pair` is reported only with `pair_workloads_enabled` on: `{mode, relay?, reason?}`, which way
   this box's PAIR emitter reports (`local ingress`, `node-info fallback`, `relay` with the member's route URL, or `off` with
@@ -838,12 +891,55 @@ read-only unless deliberately widened. See
   meets a string there. `gpu_lease_verdict` leads with the verdict word, then what the cards are
   doing, the holder and its reason, the queue length and the queue command. `local_verdict` gives
   the local endpoint's state and served count, the local agent seat's verdict, and the roster
-  entries that are empty and so defer here. An unknown section, an unknown argument or a wrong type
+  entries that are empty and so defer here. When the server holds a startup identity the brief also carries the full
+  answer's `process` block (below), so a stale server is visible on the call a caller makes first. An unknown section, an unknown argument or a wrong type
   is a defer that lists the valid values, never a fall-back to the full dump. `config_error`, when
   set, stays the first key of every answer. The block table in `status_section.go` feeds both the
   dispatch and the schema's enum. Measured on the reference box (2026-09-22, three fleet nodes, a
   media lease held): full 18,768 bytes, `brief` 4,426 (23.6%), `fleet` 3,786 (20.2%), `gpu_lease`
   8,028 (42.8% of the full answer).
+- **`process`: which image this server runs, and whether the installed build has moved on (D-36).** A rename-swap
+  deploy replaces the installed binary while every MCP server already running keeps the image it started from, so a
+  session could write rows with old behaviour for days and nothing said so (the register counted 13 of 18 MCP processes
+  older than the deployed build). The block is `{version, build_sha256, installed_version?, stale_image?, note?}`:
+  the version and the build hash this process stamps on its rows, and the comparison with the file now at the path it
+  started from. `stale_image` is `true` when the installed bytes differ, `false` when they are equal, and **absent with
+  a `note` when the installed file cannot be read** (never "fresh" on a failure); `installed_version` is the build
+  marker the installed file carries. `mcpserver.Run` takes the identity from `buildinfo.CaptureStartup()` and holds it on
+  the `Server`, so the block is built from what the server holds and not from the process global; a server that holds
+  none (the test seam) has no `process` block, and asked for by name it is
+  `{}`, as `pair`'s is. The hash is the one every row carries: `buildinfo.BuildSHA256` used to hash the executable
+  lazily at its first call, so a process whose first delegation came after a swap stamped its rows with the NEW
+  build's hash; `CaptureStartup` takes that one latch at start. A short CLI call never captures and keeps the lazy path
+  (no 60 MB hash per hook invocation). The fleet node (`runFleetServe`) captures as its first statement too, so the
+  `harness_build_sha256` on its agent answers is the image it started from (it runs no MCP server, so it serves no `process`
+  block). A status call does not hash the installed file either: its stat is compared with
+  the one the process saw at start, and only a moved stat is hashed (once per stat, then cached). A process that
+  started before this build shows no block at all: it predates the field, so the first proof is the next restart.
+  **`section:"brief"` carries the same block** under the same key (absent for a server that holds no identity), because the
+  brief is the call the tool's description makes first and a stale server must be visible there. Only a read that
+  succeeded is cached: a hash or marker read that failed once (an antivirus or indexer lock on the freshly renamed file) is
+  retried on the next call, and a missing `installed_version` or a missing `build_sha256` (the process's own start-up
+  hash failed) comes with a `note` saying why. The read of a moved file is bounded to 2 s per call and shared by the calls that
+  arrive while it runs: past the bound `stale_image` is absent with a `note` that the read did not finish. `gpu doctor` marks the running processes older than the installed build
+  ([gpu-lease.md](gpu-lease.md)). Ledger rows do not get a `stale_image` column: a
+  reader compares a row's hash with the deployed one. **One definition, two doors.** `process.stale_image` (`offload_status`: the whole answer, `brief` or
+  `section:"process"`) and the `stale_binary` note (`agent_delegate`, `offload_research`, `offload_status`) answer one question
+  about one capture. `runMCP` takes the identity before it loads the config or opens the pipeline, so a swap landing during
+  start-up is not hashed as the image the process runs; `mcpserver.New` starts the stale-binary guard from that identity (the
+  stamp the capture read through the handle it hashed, or from the path when the open failed, not a stat taken after the
+  pipeline opened; a capture with no stamp makes the guard inactive and says so) and `Run` holds it for the
+  block. Stale means the file at the start path holds other bytes than the image the process started from. The guard looks at
+  the cheap stamp first and asks the block's check (the hash, cached per stat, and the build marker) only once the stamp has
+  moved, so a rewrite with equal bytes reads fresh on both, different bytes read stale on both, and the installed version is the
+  one `installed_version` carries. When the bytes cannot be compared, `stale_image` is absent with a `note` and `stale_binary`
+  keeps the moved stamp and says it could not compare; a path that is gone has no installed file to read, so the block gives
+  no verdict and the guard says the file is no longer at its path.
+- **Driver events on the leased cards (C-83-B).** While a lease is held and the GPU sample is on, `gpu_lease.activity` carries
+  `driver_events` (the NVIDIA driver's recent fault events for the leased cards: Windows `nvlddmkm` System-log records, Linux
+  `NVRM: Xid` kernel-log lines), `driver_events_unattributed` and `driver_events_note` as facts that never move the verdict;
+  the reader is `statusDriverEvents` (wired only with the GPU sample, nil in the test fixture so no test starts PowerShell).
+  Only the `gpu_lease` section and the full answer read them: the `brief` returns none, so it starts no read. See [gpu-lease.md](gpu-lease.md#the-drivers-own-fault-events-for-the-leased-cards-c-83-b).
 - `local-offload doctor` checks the serving layer the tools depend on, and prints the same derived
   media routes — a route bound to a file that is absent exits non-zero.
 - **The most common operational surprise:** an MCP client holds its server process for the session,
@@ -859,7 +955,14 @@ manifest is a repo-root file.
 `status_section_test.go` covers `offload_status`'s `section` argument over the in-memory MCP
 transport: the default against the golden in `testdata/`, each block alone, the brief form, the
 refusals, `config_error` ordering, the schema's enum, and that the fleet section never samples the
-GPUs.
+GPUs. The fixture holds a fixed startup identity (a fixture version over a fixture installed image), so the
+`process` block is in the pinned answer with constant values and the test binary's own build hash never reaches the
+golden. `stale_image_test.go` covers the block itself: stale after a swap to another version, fresh for the same
+bytes, unknown (no key, a note) for an unreadable installed file, and no hash while the installed file's stat is
+unchanged. `stalebinary_test.go` covers the guard on stamps alone, and `stale_agreement_test.go` pins that the two signals
+agree: equal bytes under a newer stamp are fresh on both, different bytes are stale on both, bytes that cannot be compared
+keep the stamp and say so, a path that is gone is stale without a comparison, and the guard starts from the captured identity
+(a swap between the capture and `New` is stale).
 
 ## Common pitfalls
 
@@ -875,6 +978,10 @@ GPUs.
   handlers
 - [`internal/mcpserver/status_section.go`](../../internal/mcpserver/status_section.go) —
   `offload_status`'s block table, `section` parsing and the brief lines
+- [`internal/mcpserver/stale_image.go`](../../internal/mcpserver/stale_image.go) — the `process` block: the
+  startup identity the server holds and the stale-image comparison
+- [`internal/mcpserver/stalebinary.go`](../../internal/mcpserver/stalebinary.go) — the stale-binary guard: the stamp of
+  the image the process started from, compared with the file on disk and settled by the `process` block's byte comparison
 - [`internal/askjob`](../../internal/askjob/ask.go) — `offload_ask`’s contract builder (goal,
   output schema, and the grounded acceptance anchor)
 - [`internal/askcache`](../../internal/askcache/askcache.go) — `offload_ask`’s content-addressed,

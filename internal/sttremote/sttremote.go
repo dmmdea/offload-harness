@@ -537,6 +537,11 @@ type nodeResult struct {
 	SRTPath           string              `json:"srt_path"`
 	TextPath          string              `json:"text_path"`
 	JSONPath          string              `json:"json_path"`
+	// WordsReliable and WordsDriftSec are the node's word-time verdict (issue #169), carried as the
+	// node judged it over its full segment list. A node built before the check sends neither, and
+	// then neither is published: absent means not checked.
+	WordsReliable *bool   `json:"words_reliable,omitempty"`
+	WordsDriftSec float64 `json:"words_drift_sec,omitempty"`
 }
 
 func answerDefer(node, format string, a ...any) core.Result {
@@ -602,6 +607,7 @@ func materialize(ctx context.Context, cfg config.Config, base, node string, req 
 	out := nodeResult{
 		Language: nr.Language, DurationSec: nr.DurationSec, NumSegments: len(segs), Gist: gist,
 		Segments: inline, SegmentsTruncated: truncated, SRTPath: srtPath, TextPath: txtPath, JSONPath: jsonPath,
+		WordsReliable: nr.WordsReliable, WordsDriftSec: nr.WordsDriftSec,
 	}
 	data, err := json.Marshal(out)
 	if err != nil {

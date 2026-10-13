@@ -663,6 +663,23 @@ func (s Spec) validate(tier string, lane bool) error {
 			problems = append(problems, "storeless_reason is set beside a cache_server — a seat is bound to a store or it is storeless, never both")
 		}
 	}
+	// H-33: the engine's per-step token budget must cover at least one KV block. The
+	// block is a model-and-dtype property known only as measured pairs (784 fp16, 1568
+	// fp8 for the Qwen3.8-27B hybrid), not a Spec field, but ChunkSize is declared to
+	// EQUAL it and LMCache refuses a mismatch at registration, so for a seat bound to a
+	// store "batch >= chunk" is the checkable form. A storeless seat has no chunk and a
+	// batch of 0 is undeclared, so neither is judged here: a storeless fp8 seat with a
+	// small batch stays unguarded (a named limit, docs/systems/cache-server.md).
+	chunk := 0
+	if s.CacheServer != nil {
+		chunk = s.CacheServer.ChunkSize
+	}
+	if chunk > 0 && s.MaxBatchedTokens > 0 && s.MaxBatchedTokens < chunk {
+		problems = append(problems, fmt.Sprintf(
+			"max_num_batched_tokens %d is below the cache server's chunk_size %d — the chunk equals the engine's unified KV block, "+
+				"and the per-step token budget must cover at least one block (raise max_num_batched_tokens to %d or more, or correct chunk_size)",
+			s.MaxBatchedTokens, chunk, chunk))
+	}
 	// Bound-lane settings: the same rules the harness config applies, applied at
 	// declaration time so a tier cannot seed a lane the box would refuse or
 	// silently misrun.

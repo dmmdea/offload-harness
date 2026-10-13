@@ -40,7 +40,9 @@ type Axis string
 const (
 	AxisSeatInfra        Axis = "seat-infra"        // defer_class infrastructure: the seat/engine, not the loop
 	AxisCallDeadline     Axis = "call-deadline"     // the whole call ran out of time before this subtask finished (ADR 0065): not evidence about the seat
+	AxisCapacity         Axis = "capacity"          // defer_class capacity: every node that could run it was busy for as long as the wait ran (ADR 0073): a full fleet, neither a seat nor a wall
 	AxisTimeout          Axis = "timeout"           // the contract's wall ran out
+	AxisFinalToolCall    Axis = "final-tool-call"   // the forced final step was answered with a tool call, even after one re-ask: the seat's template habit, not a task too large (core.ForcedFinalToolCallReason)
 	AxisBudget           Axis = "budget"            // the step budget ran out
 	AxisReasoningStarved Axis = "reasoning-starved" // stop_reason reasoning_starved / empty: the completion budget went to the think block, or the seat closed with nothing (0.115.8)
 	AxisAbstention       Axis = "abstention"        // defer_class abstention: the seat declined
@@ -53,7 +55,7 @@ const (
 )
 
 // Precedence is the evaluation order, published so the report can print it.
-var Precedence = []Axis{AxisSeatInfra, AxisCallDeadline, AxisTimeout, AxisReasoningStarved, AxisBudget, AxisAbstention, AxisSchemaMiss, AxisAnchorMiss, AxisLoop, AxisLongObservation, AxisToolMisuse, AxisUnclassified}
+var Precedence = []Axis{AxisSeatInfra, AxisCallDeadline, AxisCapacity, AxisTimeout, AxisReasoningStarved, AxisFinalToolCall, AxisBudget, AxisAbstention, AxisSchemaMiss, AxisAnchorMiss, AxisLoop, AxisLongObservation, AxisToolMisuse, AxisUnclassified}
 
 // SubTwoStepGrounded is the sub-axis (of schema-miss and anchor-miss) the P2
 // corpus read found: the contract carried context docs and the run stopped
@@ -92,10 +94,24 @@ type Row struct {
 	Result             *core.AgentWireResult `json:"result"`
 	AcceptanceFailures []string              `json:"acceptance_failures"`
 	Arm                string                `json:"arm"`
+	// Refusal is set by a delegator on the row of an attempt a node answered with a capacity refusal (a 503 or
+	// 429 at dispatch): the attempt is outwaited and the subtask re-placed, so the row records a place in line,
+	// not an outcome, and the subtask's outcome is another row. Absent on rows written before the marker.
+	Refusal *Refusal `json:"refusal,omitempty"`
 }
 
-// Bad reports whether the row is a failure the rigger classifies.
-func (r Row) Bad() bool { return r.Deferred || !r.AcceptancePass }
+// Refusal is the delegator's marker on the row of a refused attempt.
+type Refusal struct {
+	Status        int `json:"status"`
+	RetryAfterSec int `json:"retry_after_sec,omitempty"`
+}
+
+// Refused reports whether the row is a node's capacity refusal inside a wait (see Row.Refusal).
+func (r Row) Refused() bool { return r.Refusal != nil }
+
+// Bad reports whether the row is a failure the rigger classifies. A refused attempt is not one: the subtask it
+// belonged to was re-placed, and the row of where it ended is judged on its own.
+func (r Row) Bad() bool { return !r.Refused() && (r.Deferred || !r.AcceptancePass) }
 
 // Verdict is one row's classification.
 type Verdict struct {
@@ -114,8 +130,13 @@ var (
 	// dispatchErrRe: the delegator could not even place the job (a node's
 	// 503 shed, a refused dispatch, a dial failure) — rows with an error but
 	// no defer_class, because no node ever produced a result.
-	dispatchErrRe  = regexp.MustCompile(`(?i)\b(HTTP|status) 5\d\d\b|\bshed\b|no idle execution slot|dispatch|connection refused|dial tcp|unreachable`)
-	nonAlnumDigits = regexp.MustCompile(`\d+`)
+	dispatchErrRe = regexp.MustCompile(`(?i)\b(HTTP|status) 5\d\d\b|\bshed\b|no idle execution slot|dispatch|connection refused|dial tcp|unreachable`)
+	// capacityRefusalErrRe: the error of a dispatch a node answered with 503 or 429 because it had no room (its queue
+	// is full, it sheds sheddable work, it has no idle execution slot). That is the node saying "not now", the
+	// delegator's capacity wait outlasts it, and it is not a fault of any seat. A 503 for another reason (a route the
+	// node does not serve) and a dial that never reached it do not match.
+	capacityRefusalErrRe = regexp.MustCompile(`(?i)\b(HTTP|status) (503|429)\b.*(queue full|\bshed\b|no idle execution slot)`)
+	nonAlnumDigits       = regexp.MustCompile(`\d+`)
 )
 
 // Classify puts one bad row on exactly one axis, in Precedence order. A row
@@ -132,11 +153,19 @@ var (
 //     class budget (the run's own verdict rides in the reason, never in the class), so a
 //     cut reaches this axis whatever the run reported, and only a row that carries an
 //     infrastructure, config or contract class of its own stays the seat's.
+//     1c. capacity: defer_class == "capacity" (the capacity wait ended, the shed, a lease's place in line), or no
+//     defer_class and the delegator's error is a node's 503/429 "queue full" answer to a dispatch (a row written
+//     before delegators marked refusals). Ahead of timeout because every capacity wait bounded by the call words
+//     itself with the bare word "deadline", which the wall-timeout pattern matches: 24 of 24 capacity defers of one
+//     day were filed as timeouts with the remedy "raise timeout_sec", a key that never bounds that wait (ADR 0073).
+//     A row a delegator marked as a refused attempt (Row.Refusal) is no failure at all: the subtask was re-placed.
 //  2. timeout: the reason/error says wall timeout / deadline, or
 //     defer_class == "budget" with stop_reason "error" and no step-budget text.
 //     2b. reasoning-starved: stop_reason "reasoning_starved" or "empty", or the
 //     reason opens with "empty final answer" (0.115.8) — the run produced no
 //     visible final on two attempts; the calls[] records carry the arithmetic.
+//     2c. final-tool-call: the reason carries core.ForcedFinalToolCallReason (the forced final step was answered with
+//     a tool call, again after one re-ask), ahead of budget, which shares its stop_reason and its prefix.
 //  3. budget: "step budget exhausted" in the reason, or stop_reason "budget".
 //  4. abstention: defer_class == "abstention" — except when the reason says
 //     the OUTPUT FAILED SCHEMA, which is schema-miss / invalid (the seat
@@ -173,6 +202,12 @@ func Classify(r Row) Verdict {
 		return v
 	case "":
 		// no node produced a result: the delegator's own error is the fact
+		if r.Error != "" && capacityRefusalErrRe.MatchString(r.Error) {
+			// Written before delegators marked a refused attempt (Row.Refusal): the row cannot say whether the chain
+			// ended on it, so it stays bad, but on the axis that is true. No seat was asked.
+			v.Axis, v.Evidence = AxisCapacity, "a node refused the dispatch for capacity: "+clip(r.Error, 100)
+			return v
+		}
 		if r.Error != "" && dispatchErrRe.MatchString(r.Error) {
 			v.Axis, v.Evidence = AxisSeatInfra, "dispatch: "+clip(r.Error, 120)
 			return v
@@ -182,12 +217,26 @@ func Classify(r Row) Verdict {
 		v.Axis, v.Evidence = AxisCallDeadline, clip(reason, 120)
 		return v
 	}
-	if wallTimeoutRe.MatchString(reason) || (r.DeferClass == core.DeferClassCapacity && wallTimeoutRe.MatchString(reason)) {
+	if r.DeferClass == core.DeferClassCapacity {
+		// Ahead of timeout, whose pattern matches the bare word "deadline" that every capacity wait bounded by the
+		// call words itself with. A full fleet is not a wall: raising timeout_sec cannot help it (ADR 0073).
+		v.Axis, v.Evidence = AxisCapacity, clip(reason, 120)
+		return v
+	}
+	if wallTimeoutRe.MatchString(reason) {
 		v.Axis, v.Evidence = AxisTimeout, clip(reason, 120)
 		return v
 	}
 	if stop == "reasoning_starved" || stop == "empty" || strings.HasPrefix(reason, "empty final answer") {
 		v.Axis, v.Evidence = AxisReasoningStarved, clip(firstNonEmpty(reason, "stop_reason "+stop), 120)
+		return v
+	}
+	if strings.Contains(reason, core.ForcedFinalToolCallReason) {
+		// Ahead of budget, whose stop_reason and "step budget exhausted" prefix this shape shares: the run reached its
+		// last step with the evidence it needed, the loop asked the seat for the answer, and the seat wrote a tool call
+		// instead (twice, since the loop re-asks once). The budget remedy, "split it", would send the reader to cut up
+		// a contract that was fine.
+		v.Axis, v.Evidence = AxisFinalToolCall, clip(reason, 120)
 		return v
 	}
 	if stepBudgetRe.MatchString(reason) || stop == "budget" {
@@ -297,7 +346,9 @@ type Remedy struct {
 var Remedies = map[Axis]Remedy{
 	AxisSeatInfra:       {Applies: "none", Rationale: "the seat or the box answered wrong (HTTP errors, engine crashes, contention): fix the serving stack; no rule shapes this"},
 	AxisCallDeadline:    {Applies: "none", Rationale: "the whole call ran out of time before this subtask finished (agent_call_deadline_sec, ADR 0065): not evidence about the seat, and no rule shapes it — split the call into smaller ones or raise the deadline"},
+	AxisCapacity:        {Applies: "delegator config", Key: "agent_call_deadline_sec / agent_placement_wait_sec", Value: "a full fleet is a place in line: shorten the fan-out, add a lane, or lengthen the wait that bounds it (agent_call_deadline_sec for the MCP doors, agent_placement_wait_sec for the doors without a call deadline); NOT timeout_sec, which never bounds this wait", Rationale: "every node that could run the subtask was busy for as long as the wait ran (ADR 0073)"},
 	AxisTimeout:         {Applies: "contract", Key: "timeout_sec", Value: "raise toward the cap only when the row's steps show progress; otherwise the run was stuck, not slow", Rationale: "the wall ran out — a contract-side budget, not a rule"},
+	AxisFinalToolCall:   {Applies: "none", Rationale: "the last step offered no tools and asked for the answer, and the seat wrote a tool call instead, again after the loop re-asked once with it quoted: the seat's template keeps continuing the tool-call turns above it, not a task too large for one contract (cutting the contract up cannot help: the run had read what it needed and most of its wall was unspent). The delegator gives the contract to another seat once; a seat that does this routinely wants a different agent seat for this lane"},
 	AxisBudget:          {Applies: "contract", Key: "max_steps", Value: "the cap is 12; a run at the cap with no loop axis is a task too large for one contract — split it", Rationale: "the step budget ran out"},
 	AxisAbstention:      {Applies: "contract", Key: "goal", Value: "name the context file and tell the seat to read it first; anchor acceptance on page-only tokens", Rationale: "the seat declined — usually a goal that reads as unanswerable"},
 	AxisSchemaMiss:      {Applies: "node config", Key: "agent_seed_context_reads", Value: "true on the node (one read_file per context doc replayed before turn 1) when the sub-axis is two-step-grounded; otherwise anchor acceptance on the document", Rationale: "a schema-valid answer with empty or short fields — on grounded contracts stopping at two steps the seat answered before reading the document (the 2026-09-07 corpus finding, measured by the setup_ab A/B)"},
@@ -323,12 +374,15 @@ type AxisReport struct {
 
 // Report is the rigger's output for one seat and window.
 type Report struct {
-	Seat         string         `json:"seat"`
-	Node         string         `json:"node,omitempty"`
-	Since        string         `json:"since"`
-	Until        string         `json:"until"`
-	Rows         int            `json:"rows"`
-	Bad          int            `json:"bad"`
+	Seat  string `json:"seat"`
+	Node  string `json:"node,omitempty"`
+	Since string `json:"since"`
+	Until string `json:"until"`
+	Rows  int    `json:"rows"`
+	Bad   int    `json:"bad"`
+	// Refusals counts the rows that were a node's capacity refusal inside a wait (Row.Refusal): attempts the
+	// delegator outwaited and re-placed. They are not subtasks, so they are in neither Rows nor Bad.
+	Refusals     int            `json:"refusals,omitempty"`
 	WithTrace    int            `json:"with_trace"`
 	BadWithTrace int            `json:"bad_with_trace"`
 	Precedence   []Axis         `json:"precedence"`
@@ -401,7 +455,12 @@ func Build(rows []Row, seat, node string, since, until time.Time) (Report, error
 	if len(mine) == 0 {
 		return rep, fmt.Errorf("%w %q (seats seen: %s)", ErrNoRows, seat, strings.Join(rep.SeatsSeen, ", "))
 	}
-	rep.Rows = len(mine)
+	for _, r := range mine {
+		if r.Refused() {
+			rep.Refusals++
+		}
+	}
+	rep.Rows = len(mine) - rep.Refusals
 	type bucket struct {
 		hits     int
 		examples []string
@@ -416,6 +475,9 @@ func Build(rows []Row, seat, node string, since, until time.Time) (Report, error
 		return string(a) + "/" + sub
 	}
 	for _, r := range mine {
+		if r.Refused() {
+			continue
+		}
 		hasTrace := r.Result != nil && len(r.Result.Trace) > 0
 		if hasTrace {
 			rep.WithTrace++
@@ -474,7 +536,7 @@ func Build(rows []Row, seat, node string, since, until time.Time) (Report, error
 			if elig > 0 {
 				ar.Weight = float64(b.hits) / float64(elig)
 			}
-			if a == AxisSeatInfra || a == AxisTimeout || a == AxisUnclassified {
+			if a == AxisSeatInfra || a == AxisCapacity || a == AxisTimeout || a == AxisUnclassified {
 				ar.TopReason = topKey(b.reasons)
 			}
 			rep.Axes = append(rep.Axes, ar)
@@ -509,7 +571,11 @@ func Markdown(rep Report) string {
 	if rep.Node != "" {
 		fmt.Fprintf(&b, " on %s", rep.Node)
 	}
-	fmt.Fprintf(&b, "\n\nwindow %s → %s · rows %d · bad %d · with trace %d (bad %d)\n\n", rep.Since, rep.Until, rep.Rows, rep.Bad, rep.WithTrace, rep.BadWithTrace)
+	fmt.Fprintf(&b, "\n\nwindow %s → %s · rows %d · bad %d · with trace %d (bad %d)", rep.Since, rep.Until, rep.Rows, rep.Bad, rep.WithTrace, rep.BadWithTrace)
+	if rep.Refusals > 0 {
+		fmt.Fprintf(&b, " · refused attempts %d (a node said queue full and the subtask was re-placed: not failures, not in rows)", rep.Refusals)
+	}
+	b.WriteString("\n\n")
 	fmt.Fprintf(&b, "precedence: %s\n\n", joinAxes(rep.Precedence))
 	fmt.Fprintf(&b, "| axis | hits / eligible | weight | remedy | examples |\n|---|---|---|---|---|\n")
 	for _, a := range rep.Axes {

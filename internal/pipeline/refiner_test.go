@@ -612,6 +612,7 @@ func TestRunGenerateImageSdcpp_RefinedPromptReachesRender(t *testing.T) {
 	cfg.SdcppScript = stub
 	cfg.MediaDir = dir
 	cfg.ImageGenRefinerModel = "refiner-x"
+	presentWeights(t, dir, &cfg) // CT-54: the sdcpp lane refuses a route whose binary or weight is missing before it refines or leases
 	p := refinerTestPipeline(t, cfg)
 	raw := "a lighthouse at dusk"
 	refined := "a lighthouse at dusk under a violet sky, long exposure, sea mist catching the beam, 24mm"

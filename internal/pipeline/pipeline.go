@@ -1442,6 +1442,12 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		p.recordDefer(req.Task, meta, len(req.Audio), "empty transcript")
 		return core.Deferf("empty transcript", "", meta)
 	}
+	// The word times of a drifted transcript (issue #169) are named where an operator reads: the
+	// verdict is also published in the payload below, but a run that nobody reads the payload of
+	// would otherwise cut audio at the wrong words without a trace.
+	if tr.WordsReliable != nil && !*tr.WordsReliable {
+		log.Printf("transcribe: word times of %q drift up to %.1f s from their segments (issue #169): words_reliable=false", filepath.Base(req.Audio), tr.WordsDriftSec)
+	}
 
 	// Write the full payload to disk (the pointer pattern) — best-effort: a write
 	// failure does not fail the result (the inline data still carries the answer).
@@ -1496,6 +1502,8 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		SRTPath:           srtPath,
 		TextPath:          txtPath,
 		JSONPath:          jsonPath,
+		WordsReliable:     tr.WordsReliable,
+		WordsDriftSec:     tr.WordsDriftSec,
 	}
 	data, _ := json.Marshal(out)
 	// Storing under a non-content key is what turns a transient read failure into
@@ -1542,6 +1550,13 @@ type transcribeResult struct {
 	SRTPath           string              `json:"srt_path"`
 	TextPath          string              `json:"text_path"`
 	JSONPath          string              `json:"json_path"`
+	// WordsReliable and WordsDriftSec are sttclient's word-time verdict (issue #169): false when the
+	// first word of some segment starts 0.5 s or more away from that segment's start, with the largest
+	// such gap in seconds (later words are not checked); absent when the transcript carries no word times, or when an entry cached by a build
+	// older than the check is served (no verdict is not a verdict of true). The segment file stays a
+	// bare array, so a reader of json_path alone does not see them.
+	WordsReliable *bool   `json:"words_reliable,omitempty"`
+	WordsDriftSec float64 `json:"words_drift_sec,omitempty"`
 }
 
 // mediaBase returns <MediaDir>/<sanitized-basename>-<8hex of ident> as the
@@ -1758,13 +1773,20 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 	if scriptCfg == "" {
 		scriptCfg = "render/sdcpp-generate.mjs"
 	}
+	// Ledger/health tier: the sdcpp engine is its own tier keyed by the bound model
+	// file — never the ComfyUI labels (health.groupByTier must not merge engines).
+	meta.Model = "sdcpp:" + filepath.Base(cfg.SdcppModel)
+	// CT-54: a file the binding names (a weight, the engine binary, the runner script) and the disk lacks is a typed defer before
+	// anything is created, refined or leased, and before the script is resolved below (that resolution defers untyped). cfg is the
+	// resolved binding (a named family's overlay renders under its own copy), and a derivation of it names its route
+	// "generate_image".
+	if res, notReady := p.routeReadyOrDefer(req, meta, start, cfg, "generate_image", "image generation"); notReady {
+		return res
+	}
 	script, serr := gpugen.ResolveScript(scriptCfg)
 	if serr != nil {
 		return deferf(serr.Error())
 	}
-	// Ledger/health tier: the sdcpp engine is its own tier keyed by the bound model
-	// file — never the ComfyUI labels (health.groupByTier must not merge engines).
-	meta.Model = "sdcpp:" + filepath.Base(cfg.SdcppModel)
 	// Same seed-pinning contract as the ComfyUI path: the reported seed must be the
 	// seed actually rendered, so mint one before the run when the caller sent none.
 	seed := paramIntOr(req.Params, "seed", 0)
@@ -2384,13 +2406,43 @@ func parseBatchResults(raw []byte, norm []ImageBatchJob) []ImageBatchItem {
 	return items
 }
 
+// The rows a batch that stopped itself leaves (render/batch-jobs.mjs, the cross-process contract of runBatchJobs):
+//   - a job the batch never started is recorded "not run: <why>" for the stop (a ComfyUI that can run no more work, a full disk);
+//   - the job that hit an unusable ComfyUI is recorded with its child's reason, "comfy-render exited 3: ..."
+//     (renderExitError, RENDER_EXIT_SERVER_UNUSABLE).
+//
+// TestBatchErrClassFilesTheAbortRowsWithTheBatchsTypedClass and the end-to-end batch test run the real runBatchJobs, so a change to
+// either text turns them red.
+const (
+	batchNotRunPrefix         = "not run: "
+	batchServerUnusablePrefix = "comfy-render exited 3"
+)
+
 // batchErrClass classifies a failed batch item for the ledger's ErrClass, mirroring
 // the single path's classifyErr. A job with no recorded result line died with the
-// batch itself, so the batch-level error (gerr) is its true cause; a job with its own
-// error line is classified from that. Pure.
+// batch itself, so the batch-level error (gerr) is its true cause; so is a job the
+// batch stopped on or never ran, when gerr carries a class gpugen decided structurally
+// (a *gpugen.RunError: the IGPU_CLASS= line the batch's output ends with, or a deadline):
+// without that, a ComfyUI that died mid-batch filed every row "other", the words of
+// "not run: ComfyUI became unusable at job 3/6 (...)" naming no class (D-38, issue #72).
+// A job with its own error line is classified from that: one that failed on its own before
+// the stop keeps the class its own words give. Pure.
 func batchErrClass(itemErr string, gerr error) string {
-	if gerr != nil && strings.Contains(itemErr, "no result recorded") {
-		return classifyErr(gerr)
+	if gerr != nil {
+		if strings.Contains(itemErr, "no result recorded") {
+			return classifyErr(gerr)
+		}
+		var re *gpugen.RunError
+		if errors.As(gerr, &re) && re.Class != "" {
+			switch {
+			case strings.HasPrefix(itemErr, batchNotRunPrefix):
+				return re.Class
+			// the row of the job the batch stopped on describes only the ComfyUI class: another typed class (a deadline, a reset)
+			// is not what that child's exit 3 said.
+			case re.Class == "comfy_unusable" && strings.HasPrefix(itemErr, batchServerUnusablePrefix):
+				return re.Class
+			}
+		}
 	}
 	return classifyErr(fmt.Errorf("%s", itemErr))
 }
@@ -5341,6 +5393,13 @@ func (p *Pipeline) waitForColdVisionSeat(ctx context.Context, model string) stri
 func classifyErr(err error) string {
 	if errors.Is(err, llamaclient.ErrLaneUnavailable) {
 		return errClassLaneGone
+	}
+	// A class gpugen decided structurally (the IGPU_CLASS= line the runner reported, or the "timeout" of a deadline gpugen
+	// itself observed) is exact and wins over any wording in the message, which embeds the child's last output: a
+	// "comfy_unusable" failure whose text says "the zoom lens timeout" is not an oom. gpugen.ClassifyErr reads it first too.
+	var re *gpugen.RunError
+	if errors.As(err, &re) && re.Class != "" {
+		return re.Class
 	}
 	// A full volume (0.178.0), by the typed errno or the errno token in the text, never by prose: the
 	// image lanes classify with this function, and a batch item that failed on a full drive was

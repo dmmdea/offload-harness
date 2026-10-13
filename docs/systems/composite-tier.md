@@ -230,8 +230,12 @@ missing, a card the probe cannot see, a presence the OS cannot report all REFUSE
   console session LOCKED ⇒ away; else last input idle ≥ `operator_idle_sec` (default 900)
   AND the shell not in a busy/fullscreen/presentation state ⇒ away. An unreadable reading is not away.
 
-**`operator_presence` defaults to `present`.** The display card is closed until the operator
+**`operator_presence` defaults to `present`.** The display layer is closed until the operator
 has read the probe's own readings in `offload_status` (`local.operator_presence`) and set `auto`.
+This key decides the display layer's twins only. The card allocator behind `gpu reserve --cards` and the
+media admission path reads no presence since 0.183.0: it may put a job that declares its footprint on the
+display card up to `gpu_display_cap_pct` of its VRAM (default 60), and never while that key is 0
+([ADR 0039](../architecture/decisions/0039-a-held-card-is-a-place-in-line.md), amendment 2026-10-12).
 
 **`away` is an unconditional override, and `auto` is the supported mode.** `away` never reads the
 session: it admits at the keyboard exactly as it does in an empty room, with no lock, idle or fullscreen
@@ -405,8 +409,9 @@ unloaded within `display_watch_sec` like one the harness placed. It cannot stop 
 - **The dormant display layer.** Opening it is the sequence above, and it is the operator's, after reading
   the G1b measurement (does the desktop hold its floor, and does the small call get faster than
   time-sharing the pair's cards?).
-- **`operator_presence`.** Until it is set to `auto` (or the override `away`), no placement touches the
-  display card. `auto` is the supported mode.
+- **`operator_presence`.** Until it is set to `auto` (or the override `away`), no layer placement touches the
+  display card. `auto` is the supported mode. (The card allocator's share of that card is
+  `gpu_display_cap_pct`, at any presence; see above.)
 - **No installer path downloads three-card weights.** Any three-card seat is opt-in and
   operator-installed.
 

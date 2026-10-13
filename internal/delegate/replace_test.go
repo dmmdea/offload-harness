@@ -374,8 +374,8 @@ func TestRunRetryNeverLandsOnASeatTheSubtaskAlreadyUsed(t *testing.T) {
 		t.Fatalf("local runner called %d times, want exactly 1 — a retry on the seat that already answered is not a second opinion",
 			localCalls.Load())
 	}
-	if sum.Retried != 0 || results[0].RetriedOn != "" || results[0].RetryNote != "" {
-		t.Fatalf("summary = %+v, retried_on = %q, note = %q — no retry was possible here",
+	if sum.Retried != 0 || results[0].RetriedOn != "" || !strings.HasPrefix(results[0].RetryNote, "retry skipped: no other node could take the contract after the first attempt on local") {
+		t.Fatalf("summary = %+v, retried_on = %q, note = %q — no retry was possible here, and the note says so",
 			sum, results[0].RetriedOn, results[0].RetryNote)
 	}
 	if sum.FailedVerification != 1 || sum.Replaced != 1 || sum.ReplacementRecovered != 1 {

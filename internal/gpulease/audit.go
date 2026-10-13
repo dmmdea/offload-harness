@@ -36,6 +36,7 @@ package gpulease
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -113,7 +114,10 @@ type AuditItem struct {
 	// Version is the compiled-in build version a binary's marker states ("" = the
 	// binary predates the marker).
 	Version string `json:"version,omitempty"`
-	Err     string `json:"error,omitempty"`
+	// Older is set by `gpu doctor` on a RUNNING binary whose build marker states an older version than the installed
+	// build's: a process a rename-swap left on its pre-swap image (D-36). It is information, not a finding.
+	Older bool   `json:"older_than_installed,omitempty"`
+	Err   string `json:"error,omitempty"`
 	// linksLease is set when the file carries a harness identity marker: it is a build of
 	// this module that can read the lease directory (see harnessIdentityMarkers).
 	linksLease bool
@@ -350,6 +354,19 @@ func sniffable(name string, info fs.FileInfo) bool {
 var openAudited = func(path string) (*os.File, error) { return os.Open(path) }
 
 var buildMarkerRE = regexp.MustCompile(regexp.QuoteMeta(BuildMarkerPrefix) + `(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)`)
+
+// ReadBuildMarkerVersion returns the build version the file at path states in its build marker ("" with no error when
+// the file carries none: a binary that predates the marker). It is the audit's own reader (scanInto), so a doctor row
+// and a stale-image check can never read two different versions out of one file. A file that cannot be opened or
+// read is an error, never "no marker": the caller must not take a failure for a fresh image.
+func ReadBuildMarkerVersion(path string) (string, error) {
+	var it AuditItem
+	scanInto(&it, path)
+	if it.Err != "" {
+		return "", errors.New(it.Err)
+	}
+	return it.Version, nil
+}
 
 // scanInto reads the file in chunks, looking for the signature, a harness identity marker
 // and the build marker.

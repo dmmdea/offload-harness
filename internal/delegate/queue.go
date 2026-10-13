@@ -66,6 +66,23 @@ func runQueued(ctx context.Context, cfg config.Config, subtasks []core.AgentCont
 	return results, queueSummary(results), nil
 }
 
+// takeQueueAnswer puts the answer a claimant filed for a queued job on pr: its result, the node and seat that gave it, and
+// the mark placedWhere reads, so the row says ran_on "node" (D-32). The queue lane records no dispatch of its own (the holder
+// places a job and a claim loop takes it), so the only evidence of where it ran is a finished answer, and the dial base of
+// this attempt is the holder's: the one URL this side asked. Only a finished answer sets it; a job still queued, a poll that
+// ran out and a call deadline's cut leave the row unplaced, so they publish no ran_on. Both arms that read a finished answer
+// (queuePoll and the deadline's last look, lookAnswer) come through here.
+//
+// The base is the holder's, which is not where the job ran: viaQueue says so, and the rescue of a schema miss reads it
+// (rescueSchemaMiss), so it dials no origin at the holder with the claimant's seat name.
+func (pr *PlacedResult) takeQueueAnswer(wire core.AgentWireResult, holder string) {
+	pr.Result = wire
+	pr.Node = wire.NodeID
+	pr.Seat = wire.Seat
+	pr.ranBase = holder
+	pr.viaQueue = true
+}
+
 // queueSummary counts the queue lane's outcomes into the four buckets. runQueued builds
 // it once the polls end; the call deadline (calldeadline.go) builds it again after its
 // final look at the holder has moved some outcomes.
@@ -163,9 +180,7 @@ func queuePoll(ctx context.Context, cfg config.Config, holder string, contract c
 				pr.Err = "job done but data is not an AgentWireResult: " + uerr.Error()
 				return
 			}
-			pr.Result = wire
-			pr.Node = wire.NodeID
-			pr.Seat = wire.Seat
+			pr.takeQueueAnswer(wire, holder)
 			// A finished answer whose structured re-pack failed is re-packed here, as on
 			// every other route (rescue.go); a rescue that cannot leaves the defer.
 			*pr = rescueSchemaMiss(ctx, rescue, contract, *pr, start, nil)

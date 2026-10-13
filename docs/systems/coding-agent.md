@@ -77,6 +77,23 @@ Three limits keep a weak model from burning the budget on nothing:
   hunting through tools. A `max_calls_per_tool` env rule on `read_file` is a separate, explicit cap
   and still counts every call.
 
+**The forced final step is re-asked once when the seat answers it with a tool call (0.184.0).** The last step of a multi-step
+run (D-89) offers no tools and opens with the answer-now turn. One seat family answers it with a tool call written as text
+(`<tool_call><function=...>`, since no parser runs on a request without tools) or parsed into a call: 35 of the 106 runs of that
+family that reached a forced final, against none of 241 on every other seat, with 30 of the 35 holding more than half their wall
+and the evidence they needed already in the transcript. The run used to end there on `budget` with the text thrown away. The
+loop now asks again, once (`finalReasked`), when the wall holds one more turn (`wallHoldsAnotherFinal`: the seat's list-cap floor
+where one is known and always the wall of the final call just made plus a quarter, so a contract without an output_schema, or a
+seat with no known rate, is gated too; the list-cap re-issue's own gate fails open there), with a request that differs from the first because the decode of this step is greedy and an identical request
+repeats itself: the offending text (or the tool name and arguments) is quoted back in a new user turn, the seat is told that
+nothing it writes as a call will run and to begin with the answer in the requested shape, and the offending turn stays out of the
+transcript. The re-ask spends no step, runs at the same budget with thinking off, and both completions are in `calls[]` as forced
+finals. A seat that answers it with a tool call again ends the run on `budget` as before, with both replies quoted in `stop_note`;
+an answer is `done` with `stop_note` saying the seat first wrote a tool call and was re-asked once. The rigger files the
+failed shape as `final-tool-call`, not `budget` ("split it"), and the delegator gives the contract to another seat once,
+placed like a seat-down retry (`delegate.producedNothingDefer`): it is not held in line for a busy retry seat and not refused
+for the failed seat's `min_turn_sec`, because the run produced nothing and a skipped retry is a lost job.
+
 The ordering here is load-bearing and documented in the code: the name cap must be checked before the
 exact-repeat check, or a model stuck on an identical call matches the repeat branch forever and never
 reaches the branch that disables the tool.
@@ -221,7 +238,13 @@ deterministic classifier over the delegation-log corpus: every failed or deferre
 failure axis, evaluated in a published precedence order and stopping at the first hit — `seat-infra` (a defer class of
 infrastructure/config/contract, or a placement failure with no defer class) → `call-deadline` (a reason that opens
 `call deadline reached`: the whole-call deadline of ADR 0065 cut the subtask, so it says nothing about the seat's speed) →
-`timeout` → `budget` → `abstention` (an
+`capacity` (a defer class of capacity, or a dispatch a node answered with 503/429 "queue full" in a row written before
+delegators marked refusals: the fleet was busy, which is neither a wall nor a seat, and its remedy names
+`agent_call_deadline_sec` / `agent_placement_wait_sec`, never `timeout_sec`, which does not bound that wait; it sits
+ahead of `timeout` because every wait bounded by the call words itself with the bare word "deadline") →
+`timeout` → `reasoning-starved` → `final-tool-call` (the forced final step was answered with a tool call, again after one
+re-ask: the reason carries `core.ForcedFinalToolCallReason`; ahead of `budget`, whose stop_reason and prefix it shares, so its
+remedy does not tell the reader to split a contract that had read everything it needed) → `budget` → `abstention` (an
 "output failed schema" reason is `schema-miss / invalid`) → `schema-miss` (min_items/nonempty; sub-axes
 `two-step-grounded` = context docs and ≤ 2 steps, `invalid`) → `anchor-miss` (contains/not_contains/regex; same sub-axis) →
 `loop` → `long-observation` → `tool-misuse` (the last three on trace-bearing rows only) → `unclassified`. The report gives
@@ -229,6 +252,9 @@ per axis the hits over the rows ELIGIBLE for it (trace axes count only rows with
 the deciding fact, the most repeated reason for seat-infra/timeout/unclassified, and the pre-authored remedy where the
 closed vocabulary has a lever (`agent_seed_context_reads`, `agent_env_rules.max_observation_tokens` /
 `max_calls_per_tool` / `rewrite_error`, with the value derivation in words) or "not a rule matter" where it has none.
+A row a delegator marked `refusal` (a node's capacity refusal at dispatch, which the capacity wait outlasts and the
+subtask is re-placed from) is no failure: it is not a bad row, it is on no axis, and the report counts it on its own
+`refusals` line outside `rows`, so a fan-out that met a full node reads as the place in line it was.
 `--verdicts` writes every row's verdict for an agreement check. It proposes nothing on its own and applies nothing. Why a
 classifier first: the design council read the day's corpus (1,187 rows, 649 bad) — ~70 % were wall timeouts and seat
 errors no rule shapes, only 16 rows carried a trace, and a digest-8 gate cannot fail for axes it never exercises. P3b (a
@@ -568,9 +594,26 @@ difference: `structured re-pack unreachable` fires after the agent loop has alre
 that result publishes `output` populated, `structured` absent, `defer_class: "infrastructure"`.
 That is lost work only when the DELEGATOR's rescue also fails (register C-66, PR-4): the node flags
 such a defer `schema_miss`, and the delegator — which holds the finished answer — re-packs it
-itself before acceptance (the lossless reading first, then ONE completion on its own agent seat, not
-a registered run; a seat that is not resident is warmed first, outside the allowance), validates the
-object, and lets the ordinary delegator-side acceptance decide. A node too old to publish the flag is
+itself before acceptance, down a ladder (`pipeline.RescueRepack`): the lossless reading first; then
+ONE completion on its own agent seat when that seat is resident (not a registered run); when it is not,
+ONE chat completion on the node that wrote the answer, on the seat that wrote it, through that node's
+chat door with the fleet bearer (the delegator hands the rescue that node in its context,
+`delegate.WithRescueOrigin`; the node has just decoded the answer and holds the seat hot, waits for no
+load here, and never queues behind this box's GPU lease, because the call carries `WithLocalBusy` and
+leaves the box or does not run); and last this box's seat, warmed first outside the allowance, with the
+budget the node left. The node is not handed over when its own re-pack failed for its seat's health (defer
+class `infrastructure`: a stall, an unreachable or busy seat, a seat lost under the run): the seat that just
+wedged is the last place to send the rescue first, and a call there that hangs would spend the whole budget
+(its allowance is at least the 120 s flat bound, the rescue's budget floors at 120 s) and leave this box's own
+seat no try. A budget defer, an abstention and a node that names no class keep the node. A `route: "queue"` answer hands none: the base the
+delegator holds for it is the queue holder's, which is not the node that ran the job and has no chat door for the claimant's seat,
+so the queue lane's rescue goes to this box's own seat (the row still reads `ran_on: "node"`). The seat that wrote
+the answer is the wire's, else the one the run was placed on. An unreadable `/running` leaves the rescue on
+its own seat, as before, and now says so in the log. The rescue
+validates the object, reads it against its answer (see "A re-pack is read against its answer" below),
+and lets the ordinary delegator-side acceptance decide; a failed rescue names every rung it tried, the
+node and the warm-up included. (A rescue on this box's cold seat under another session's lease used to
+queue behind the lease and be cut at its 120 s allowance.) A node too old to publish the flag is
 recognized from `stop_reason: done` and the reason prefix, and a defer whose reason says the CALLER's
 context ended is never rescued. The delivered result carries `repack_note: "rescued on <seat> …"` and
 is counted as a success; prose nothing validated is still never one, so a rescue that cannot produce a
@@ -584,6 +627,40 @@ that very lease (the lane instead reads a skipped or cut re-pack's raw lines its
 filters and without a second completion: `reviewlane.Salvage`, see [mcp-server.md](mcp-server.md)); and `offload_ask` at a named remote route keeps its own handling of a finished answer
 (its prose still reaches the caller: a deferred `offload_ask` carries it as `output`, flagged `schema_miss`), which the security review records as deliberate, so wiring it is
 outside this change. The seam is one field, `RunOptions.Rescue`, if any of them should be wired later.
+
+**A re-pack is read against its answer.** The schema validator says an object has the right shape,
+not that it kept the content, and the acceptance checks read fields (`contains:` the answer's text,
+`nonempty:` one scalar). A seat whose final answer was itself a JSON object with keys of its own
+(a list of eleven `{quote, release_note_says}` under `outdated_sentences`, where the schema asks for
+`stale: [string]`) was re-packed into `{"stale": [], "up_to_date": true, ...}` and delivered as a success,
+because the re-pack prompt said "use empty values when a field is absent" beside a text none of whose keys
+had the requested names. `core.ListsEmptied` is the check: a list the schema asks for that the answer
+holds under the same path is compared with that list alone (an answer that says `"stale": []` has nothing
+to lose); only when the answer shares no list path with the schema do the lists it holds under other paths
+count (a list nested under an object counts, at its path, `report.outdated`; an answer that is itself a JSON
+array, bare or fenced, is one list; a property declared `type: ["array","null"]` is a list), and then the
+object must hold some item in the lists the schema asks for. An object that carries the list itself lost
+nothing, and a prose answer is not judged (nothing can be counted, so a prose answer whose list was lost is
+published). The node refuses such an object on every lane
+(the next attempt carries the finding ahead of the text; all refused is an abstention with the answer in
+`output`), `EvalAcceptance` reads every result the same way (a failed verification, which the delegator
+retries on another node), and `RescueRepack` refuses a hollow rescue. The prompts changed with it: a text
+that is a JSON object (or array) is told so, with its keys or items described (shapes and counts, never
+content), and the bound a schema puts on a list (`maxItems`) is stated on every lane. A result that kept
+fewer list items than its answer held says so in `repack_note` (`kept 10 of 11 list items from
+"outdated_sentences" (maxItems 10)`); a partial loss is a note and not a refusal, because the object is
+faithful as far as it goes, the answer rides beside it, and a threshold would also refuse an object whose
+list is legitimately shorter than an unrelated list of the answer's (the two cannot be told apart by key).
+The cost of the check is a false refusal in one shape: an answer that lists what it checked under another
+key, beside a schema list that is legitimately empty, is refused, because nothing deterministic tells the
+two lists apart. What that costs is an abstention defer with the answer attached, then the delegator's
+rescue (which refuses the same object), then a re-placement: the delegator re-places an abstention once on
+another node, which is a SECOND FULL AGENT RUN, and a truthful answer reproduces the refusal there. It is
+not a wrong success: the attempt after a refusal names only the lists that were lost, sends a list into the
+field of the same name, and for any other list says to copy it only if it is the content of a requested
+list field, and that a field the text says is empty stays empty (a prompt that told the seat to write the
+text's lists into the list fields made an obedient seat publish the files an answer had checked as stale
+ones).
 
 The two surfaces report that verdict differently, on purpose, and they agree on the case that
 matters. **The CLI exits non-zero on `summary.infrastructure > 0`** — an exit code sits beside the

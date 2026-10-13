@@ -26,6 +26,23 @@ plus one lever Claude Code cannot offer: the three-lane dispatch protocol is inj
 | Instrument | `~/.claude/state/dispatch-log.jsonl` | Rows tagged `harness:"opencode"` — one adherence read across both harnesses; the Claude Code hooks own the file's rotation, the plugin is append-only |
 | Context instrument | [`cmd/opencode-context`](../../cmd/opencode-context/) over [`internal/occontext`](../../internal/occontext/) | Read-only per-call token, cache, growth, compaction and TTFT report from a copy of opencode's session db — see [Measuring context](#measuring-context) |
 
+## Wire fields the plugin reads
+
+After every `agent_delegate` result the plugin's placement digest (`delegateDigest`) parses the result JSON and counts where the
+subtasks ran. It reads these fields and no others; a field that is not here is ignored, so adding one to the wire changes nothing
+on this side.
+
+| Field | What it says | What the plugin does with it |
+|---|---|---|
+| `results[].ran_on` | `local` (the delegator's own seat ran it) or `node` (a fleet node did); absent when no seat ran the subtask and on a result from a delegator that predates it ([fleet-node.md](fleet-node.md), "Where a result ran") | Read first: `local` and `node` decide the local and remote counts. Any other value falls back to the placement text |
+| `results[].placement` | the placement reason in words; for a call whose route was a hint (ADR 0078) it opens with a clause naming the route the caller hinted and where the result was placed | The fallback when `ran_on` is absent: the clause is read first (the word `local` inside it names the hint, not the place), then the word `local` in the text as before |
+| `results[].deferred` | the subtask was deferred | Counted into the "contract(s) deferred" line. A deferred result with no `ran_on` is also left out of the local and the remote count (no seat ran it, so it cannot make "pair landed"), unless its placement text names the local seat, which a delegator that predates `ran_on` still writes for a defer on its own seat |
+| `summary.infrastructure` | defers that blame the stack or the config | A line when above 0 |
+| `results` (its length) | one row per subtask | The total, and whether a pair of two or more landed (at least one remote) |
+
+The digest's text points the model at `results[].reason`, but the plugin does not parse `reason`, `retried_on`, `failed` or the
+composite `placed` block.
+
 ## Which seat opencode runs on (the three-card reference box)
 
 opencode's primary, `small_model` and the `offload` agent name the three-card vLLM seat

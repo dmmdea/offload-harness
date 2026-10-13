@@ -6,6 +6,769 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.184.0] - 2026-10-12 - a busy fleet is a place in line in every row, a re-pack that empties its answer's lists is refused, every delegate result says where it ran, offload_status names the image a server runs, and the serving audit refuses a bare --cpu-moe and an index pin on identical cards
+
+### Fixed — integration review round of 0.184.0
+
+Six findings from an integration review of the merged release branch, each read against the code and fixed, with its test
+written first and seen red. A second look at the same fixes follows the six (the last bullets of this block).
+
+- **The queue lane's rescue dialled the queue holder with the claimant's seat name.** `takeQueueAnswer` sets the row's dial base
+  to the holder so that `ran_on` reads `node` (D-32). The rescue of a schema miss is handed an origin (the node that wrote the
+  answer, to re-pack on its hot seat) whenever the row has a base, and the queue lane calls the rescue for every schema miss, so
+  the rescue's first rung was a chat call to the holder's address for the claimant's seat, and its note named a node that had
+  not written the answer. The row now carries `viaQueue` (a `PlacedResult` field set in `takeQueueAnswer`, which both arms that
+  read a finished answer come through), and the origin is handed over only for a row that did not come through the queue.
+  `ran_on` is unchanged (`node`); the queue lane's rescue goes to the delegator's own seat, as it did before the origin existed.
+  Tests `internal/delegate/queue_rescue_origin_test.go`, written first: before the change the rescue was handed
+  `{Base: <holder>, Seat: sim-seat, Node: sim-node}` for a budget, an abstention and a class-less defer, and again for a rescue
+  that went on to fail (an `infrastructure` defer hands no origin on any route, which is why the existing queue rescue test,
+  whose claimant filed one, could not see it). Three mutations, each reverted in turn, fail a test they name (the gate dropped,
+  the mark dropped, the base not set, which also fails `TestRunQueueRouteEndToEnd`). Docs: `docs/systems/coding-agent.md`
+  (the rescue ladder) and ADR 0055 item 11.
+- **The two staleness signals disagreed on the same bytes, and the guard's start was taken after the capture.**
+  `offload_status`'s `process.stale_image` compares bytes (equal bytes read fresh, pinned by
+  `TestStaleImageIsFalseForTheSameBytes`); the `stale_binary` guard compared the size and modification time only. A redeploy of
+  the same build rewrites the file with a later time and the same bytes, so the same answer carried `stale_image: false` and a
+  note saying the image had changed on disk. The docs told two stories to match: the guard's said the version on disk is not
+  read, the block's said `installed_version` is read from the installed file's build marker. There is one definition now: the
+  image is stale when the file at the path the process started from holds other bytes than the image it started from. The guard
+  starts from the identity the process captured first thing (`buildinfo.StartupIdentity`: the stamp read through the handle the
+  capture hashed, and the path it recorded), and when that stamp has moved it asks the check the `process` block makes (the same
+  hash, the same per-stat cache, the same build marker). Equal bytes are not stale. Different bytes are, and the note names
+  the installed build when its marker reads. Bytes that cannot be compared (a lock on the freshly renamed file, a process
+  whose own hash failed at start) leave the moved stamp standing and the note says it rests on the stamp alone, so a guard
+  against a silent failure does not go quiet when it cannot look; the next call retries. A path that is gone is stale without a
+  comparison. A server that holds no identity (the test seam) decides on the stamp as before, and a process that captured
+  nothing starts the guard from its own file as of now. The start stamp was also read in `mcpserver.New`, after
+  `loadCfgWithSource` and `openPipeline`, which re-opened the start-up window the capture closed (D-36): a deploy landing in
+  between was read as the image the process runs and the guard accused nothing for the life of the process. `runMCP`'s
+  source-order pin now also requires the capture to come before `mcpserver.New`. Tests `internal/mcpserver/stale_agreement_test.go`
+  (eleven), written first: six of the first nine failed before the change, for example `stale_binary says "this MCP server is
+  running 0.183.0 from an executable image that has changed on disk ..." while process.stale_image is false for the same bytes:
+  the two signals disagree` and `stale_binary = "" for a swap between the capture and New, want the changed-on-disk note`; the
+  other three guard the halves that did not change (different bytes are stale on both signals, a swap of equal bytes between the
+  capture and `New`, a process with no captured identity). The commit that wrote them adds one behaviour-free seam,
+  `startupIdentity`, so that they compile before the fix. Six mutations, each reverted in turn, fail a test they name (equal
+  bytes no longer clear the note, an unreadable comparison silenced, the captured identity ignored, the installed version not
+  named, the Server passing no comparison, and a gone path compared as well). The last survived at first, because a comparison
+  of a path that is gone gives the same words; two tests with a spy on the comparison kill it. Docs:
+  `docs/systems/mcp-server.md` says which signal rides which door, that they share one capture and one definition, and that the
+  installed version is read from the build marker and never by running the file; the D-36 and stale-binary entries below say
+  the same, and no longer say the version on disk is not read.
+- **`docs/systems/mcp-server.md`'s Source map lacked `stalebinary.go`, and the page said "`mcpserver.Run` takes the identity"
+  twice.** The file is listed and the second sentence is gone (the first stays).
+- **`docs/FLEET-NODE.md` still stated the old quarantine rule.** It said a node is quarantined "after two results inside that
+  window fail the document fingerprint"; since 0.184.0 the failures must also outnumber the node's passes of the same check,
+  and an honest absence counts as neither (`docs/OPERATOR-GUIDE.md` and `docs/systems/mcp-server.md` already said so). The page
+  states the rule the code has (`delegate.Quarantine.Strike` and `Pass`).
+- **The `agent_delegate` tool description lists `results[].ran_on` and says what it means** (the follow-up the D-32 entry named
+  for after its branch merged). `internal/mcpserver/ran_on_description_test.go`, written first: the keys were listed without
+  `ran_on` and nothing told a reader to prefer it to the word "local" in `placement`.
+- **The fleet node takes its startup identity as the first statement of `runFleetServe`, as `runMCP` does** (the follow-up the
+  D-36 entries named). A node stamps `harness_build_sha256` on its agent answers and lives as long as an MCP server, so a deploy
+  landing after it started must not be hashed, at its first answer, as the image it runs. The source-order pin of
+  `mcp_startup_capture_test.go` now covers both functions; before the change
+  `TestRunFleetServeCapturesTheStartupImageBeforeOpeningAnything` failed with `runFleetServe must call buildinfo.CaptureStartup()
+  itself, before it opens anything`.
+- **Not changed.** The queue lane's rescue still passes no strike (a rescued object that fails the document fingerprint does
+  not count against the claimant), as the queue route is not covered by quarantine. It also hands the rescue no origin when the
+  claimant is the queue holder itself (a node that holds the queue and claims from it): the answer names the claimant by node id
+  only, and resolving that id to a dial base would mean probing the fleet from a lane that has no runner and no health view
+  (ADR 0030), so the rescue goes to the delegator's own seat, which is what it did before the origin existed. A wrong origin is a
+  call that fails or answers for another seat, so the lane withholds it whenever it cannot tell.
+- **A second look at the six, five applied and two answered.** A silent-failure review of the fixes above found these; each has
+  its test written first and seen red.
+  - *The `stale_binary` note dropped why the bytes could not be compared.* It said "could not be compared" and kept the read
+    error (a lock on the freshly renamed file) for `offload_status` alone; the note, and so the one log line, now ends the
+    sentence with the comparison's own reason. `internal/mcpserver/stale_reason_test.go`.
+  - *A guard that was not watching said so only on `offload_status`.* `agent_delegate` and `offload_research`, the doors the guard
+    exists for, answered with no note, which reads as a fresh server. Both now carry the top-level `stale_binary_guard` string
+    (`inactive: ...`, or `unreadable: ...` while the stamp cannot be read), read after the note's own read of the stamp, and no
+    key while the guard watches. `internal/mcpserver/stale_guard_doors_test.go` (three tests, each run on both doors: two failed
+    first on both doors, and the third is the control that a watching guard adds nothing).
+  - *A start-up capture without a stamp re-opened the window the capture closes, silently.* The self-hash set the capture's path
+    before it opened the file and took the stamp only through the open handle, so a refused open (the antivirus lock its own log
+    line cites) left a path and no size, and the guard fell back to reading its file as of `mcpserver.New`: a deploy landing in
+    between was taken for the running image with no line saying the fallback happened. The capture now takes the stamp from the
+    path when the open fails (and logs a failed stat, which was discarded), and a guard whose capture holds no path or no stamp
+    is inactive, logs one line naming the capture, and shows the reason on the doors above. Tests
+    `internal/buildinfo/stale_test.go` (the locked image keeps its stamp) and `internal/mcpserver/stale_capture_test.go` (two);
+    the commit that wrote them adds one behaviour-free seam, `openImage`.
+  - *Settling a moved stamp by the bytes put an unbounded read on the answer path.* Two passes over the installed executable (the
+    hash, then the build-marker scan) ran after every result existed, so a read that stalled held the finished results past the
+    call's deadline, and a failed read was retried by every later answer. The read now runs in the background, once per moved
+    file (calls that arrive while it runs wait on it and start none), and a call waits at most 2 s (`installedReadWait`): past
+    that `process.stale_image` is absent, the note keeps the moved stamp and says the read did not finish and goes on, and the
+    next call records what it found; a read that failed is still not cached, and a file that moved again while it was read gives
+    no verdict from the older read. `offload_status` shares the bound. `internal/mcpserver/stale_bounded_test.go` (three; the
+    stalled read is held 1.5 s in the test, and before the change the answers waited out all of it).
+  - *The quarantine strike was the second reader of a queue row's base that is wrong for it.* The queue lane passes no strike
+    today, so nothing fired; a strike wired for it later would have quarantined the holder for a claimant's fingerprint misses.
+    The strike is now skipped for a row the queue lane took (`viaQueue`). `internal/delegate/queue_rescue_strike_test.go`; the
+    push row's strike is the control and still passes.
+  - *Answered, not changed: the PAIR card.* The note that a queue row's PAIR card (`pairevents.go`) might name the holder is
+    withdrawn. `pairTerminal` runs only from the push path's `attempt`, and its guard is the model name only `pairInflight` sets,
+    which the queue lane never reaches (`runQueued` is called before the runner is built), so a queue row emits no card.
+  - *Answered, not changed: the holder-as-claimant origin.* The blunt `viaQueue` gate is the first bullet of "Not changed" above.
+
+### Fixed
+
+- **The rigger filed a busy fleet as a wall timeout and a node's "queue full" as a broken serving stack.** In one day's report
+  24 of the 26 bad rows of the local agent pool were capacity defers ("capacity wait: no node had room ... the call's
+  deadline"), and every one of them landed on the `timeout` axis, whose remedy is "raise `timeout_sec`": the wall-timeout
+  pattern matches the bare word "deadline", and `timeout_sec` never bounds that wait (ADR 0073). Thirteen more rows were
+  dispatches a node had answered 503 "queue full" and the delegator outwaited and re-placed, and `seat-infra` ("fix the
+  serving stack") took them although no seat was asked. There is now a `capacity` axis, behind `call-deadline` and ahead of
+  `timeout`: a row of defer class capacity lands on it whatever its words, and so does a row with no class whose error is a
+  node's 503/429 "queue full" / "shed" / "no idle execution slot" answer (a row from a delegator that predates the
+  marker below). Its remedy names `agent_call_deadline_sec` and `agent_placement_wait_sec`, the keys that bound the wait.
+  A dial that never reached the node and a 503 about something other than room stay `seat-infra`. A row carrying the new
+  `refusal` marker (`{"status":503,"retry_after_sec":N}`; delegators write it on a capacity-refused attempt) is not a bad
+  row at all: it is counted on the report's own `refusals` line, outside `rows`, so a fan-out that met a full node reads as
+  the place in line it was. The call-deadline and the wall-timeout verdicts are unchanged (`rig/calldeadline_test.go`). Tests
+  `internal/rig/capacity_test.go`, written first: red before with, for example, `held slot, the 0.180.0 wording: classified
+  "timeout"`, `no deadline word at all: classified "unclassified"` and `an unmarked 503 queue full row classified "seat-infra"`;
+  five mutations (the capacity-class check off, 429 dropped from the pattern, a refused row counted bad, refusals counted in
+  `rows`, the precedence swapped) each turn them red. The `agent_rig` tool description, which is what the delegating model reads,
+  publishes the same order (it still listed the old one, so a caller would have filed a full fleet under `timeout` and a
+  forced-final tool call under `budget`), names the wait keys as the capacity lever and the `refusals` line; a test reads
+  `rig.Precedence` and holds the description to it in order (`internal/mcpserver/agent_rig_description_test.go`, red before with
+  `axis "capacity" is missing from the description's precedence order`, and three mutations). Docs:
+  `docs/systems/coding-agent.md` (the rigger paragraph).
+- **A node's capacity refusal is a place in line in the delegation log, on the fleet page and in the rigger, and a subtask
+  lost to a full fleet now has a row that says so.** The capacity wait outlasts a node's 503 or 429 at dispatch, but the
+  refused attempt's corpus row was an ordinary error row (`deferred` false, `acceptance_pass` false), so thirteen of them in one
+  day were filed as serving-stack failures and listed as `delegation` errors on the fleet page, while nine of the twelve
+  subtasks behind them landed on another node seconds later. The other half: a wait that ended as a capacity defer after a
+  refusal wrote no row of its own (`settle` returned when `attempts > 0`) and carried the refused attempt's job id, so for the
+  subtasks that really were lost the refusal row was the only record, and it read as a dispatch error. Now the row of a
+  capacity-refused attempt carries `refusal: {status, retry_after_sec}` (additive; the ledger row is unchanged, still deferred
+  with `reason_code` `queue_full`), and a marked row is never the end of a subtask: a wait that ends as a capacity defer and a
+  chain that ends as the "placement refused" failure each write a terminal row under a job id of their own (the way a cut chain
+  already did, ADR 0065), and the caller is handed that id. The fleet page and `top` no longer raise a `delegation` error for
+  a marked row and show it as `refused (re-placed)`. The cooldown, the re-placement and the wait are unchanged, and so are the
+  rows of a refusal that is not about capacity and of a job the node acked and then took back (a queue deadline it confirmed,
+  a record that says it never ran): that job was held under an id the node's record and the intent ledger know, so its row is
+  not a refusal mark and the failure of a subtask nobody else took keeps that id (found by a Linux gate host:
+  `TestWithdrawAgainstTheRealNodeHandler` read the node's record under the published id, and a first version of the mark had
+  replaced it). The ledger now holds two rows where a lone refused dispatch with the wait off ended the subtask (the attempt
+  and the "placement refused" failure; `TestOnlyAJobANodeAckedCarriesAFleetJobID` pinned one). A test that pinned the old "the attempt's row alone" ending
+  (`TestASettledOutcomeThatIsNotACutKeepsItsAttemptsRow`) is rewritten to pin the new one. Tests
+  `internal/delegate/refusal_row_test.go` and `internal/fleetview/refusal_test.go`, written first: red before with, for
+  example, `a 503 refusal inside the wait is a bare error row, want a refusal marker`, `the terminal row = ... deferred:false
+  ..., want deferred, class capacity` and `the errors feed carries the refused attempt as an error`; the delegate tests read the
+  rows back through the rigger, so the writer and the reader cannot drift. Eight mutations (the marker never set, the closing row
+  skipped for a refusal, the failure's terminal row skipped, the marker left off the line, the flag kept on the published
+  outcome, the mark kept after a landing, the fleet page folding a marked row, its field dropped from the decode) each turn
+  them red. The chain's own ending reads the placements ledger (the row of the latest attempt that wrote one, as `settle` does)
+  and not only the seed it is handed: a replacement the process gate turned away returns before it writes a row, so a wait that
+  began at the gate after a refusal and ended on the budget had left the refusal-marked row as the only record of the lost
+  subtask (`TestAChainEndedAfterAGatedTurnAwayFilesATerminalRowWhenTheLastRowWasARefusal`, red before with `the failure carries
+  no job id: the refused attempt's row is a refusal, so no row says how the subtask ended`; four more mutations, one on each
+  reading of the ledger and the seed). Docs: ADR 0073 (amendment 2026-10-12), `docs/systems/fleet-overview.md`,
+  `docs/OPERATOR-GUIDE.md`.
+- **An MCP server whose binary was replaced after it started now says so on the doors a release changes.** A server is spawned
+  once per client and keeps the executable image it started from. Two servers that had started on 0.180.0 were still stamping
+  their corpus rows with it eight hours after a 0.181.0 and then a 0.182.0 binary had been swapped in on disk, so the
+  capacity-wait fix those releases carry (a wait that holds a run slot gives it up and keeps waiting) could not run for any
+  call they served, and nothing in the server noticed its binary had changed. (The 24 subtasks that a day's report shows lost
+  to the old ending were served before that fix existed; the next saturated fan-out through a server that outlives a release is
+  what this guards.) The server now takes the size and modification time of its own executable at start (the image the start-up
+  capture hashed, see the integration review round at the top of this section) and compares them with the file on disk when
+  `agent_delegate`, `offload_research` or `offload_status` answers: a stamp that moved, and bytes that differ from the image it
+  started from (or cannot be compared), or a path that is gone, put a top-level `stale_binary` string on the answer (running
+  version, the two stamps, the installed version when the installed file's build marker reads, "restart the MCP client to load
+  it") and one line in the log. The work still runs and nothing is interrupted or re-executed, a stat that fails for another
+  reason accuses nothing, and the installed version is read from the installed file's build marker, never by running it. The guard says
+  when it is not watching, because a guard against a silent failure must not be one: a server that could not stamp its own
+  executable at start (or whose path was already gone) logs one `the stale-binary guard is inactive` line with the reason, a stat
+  that fails later is logged once, and `offload_status` carries a top-level `stale_binary_guard` string (`inactive: ...` for the
+  first, `unreadable: ...` for as long as the second lasts), absent while the guard is watching (`agent_delegate` and
+  `offload_research` carry it too since the integration review round at the top of this section). Tests
+  `internal/mcpserver/stalebinary_test.go`, written first: red before with `agent_delegate: no stale_binary note in [summary
+  results]` on a server whose executable stamp had moved, on all three doors, and, for the inactive guard, `log "": want one
+  line saying the guard is inactive and why`; thirteen mutations (size or modification time dropped from the comparison, the
+  start-stamp guard, the vanished-path branch, each door's wiring, and on the inactive guard: the log line, the once-only log, the
+  remembered failure, the reported state, the gone-at-start reason, the status key) each turn them red.
+  Docs: `docs/systems/mcp-server.md`.
+- **A forced final step the seat answers with a tool call is re-asked once, with the offence quoted, instead of ending the run.**
+  The last step of a multi-step run offers no tools and asks for the answer (D-89). One seat family wrote a tool call there,
+  as text (`<tool_call><function=...>`) or parsed, in 35 of the 106 runs that reached a forced final (none of 241 on every other
+  seat), 30 of the 35 with more than half their wall unspent and the evidence they needed already read: the run returned
+  `budget` the moment it happened, with the seat's text thrown away and only the marker kept. A bare retry would have been a
+  no-op, because the decode of that step is greedy (`temperature=0` in the logged call records), so the re-ask changes the
+  prompt: a user turn that quotes the offending text (or the tool and its arguments), says nothing written as a call will run,
+  forbids the tool syntax and says to begin with the answer in the requested shape; the poisoned turn is kept out of the
+  transcript, the answer-now turn is not repeated, the step is not spent, and the budget and thinking-off are those of the first
+  final. It is gated on the wall and bounded at one. The gate is the seat's list-cap floor where one is known and, in every case,
+  the wall of the final call just made plus a quarter (`wallHoldsAnotherFinal`), because the list-cap re-issue's own gate fails
+  open for a contract without an output_schema and for a seat with no known rate, and a re-ask spent there let the deadline fall
+  INSIDE the call: the run ended as an error with the offence lost, and the delegator, which re-places only the forced-final
+  budget defer, never gave the contract another seat. A second tool
+  call ends the run on `budget` as before, now with both replies quoted in `stop_note` (`core.ForcedFinalToolCallReason` opens
+  it, and sits inside the defer reason). An answer is `done` and `stop_note` says the seat first wrote a tool call and was
+  re-asked once. **Not measured on a live seat** (no model was started for this change): whether a quoted-back, stricter
+  instruction stops this family writing the call is an inference from the history-continuation reading and from the tail
+  correlation in the corpus (44% failures when two of the last three trace entries were refused repeats, 9% otherwise); the
+  fallback, if a replay of the logged contracts shows it still fails, is to render the tool turns as plain observations for the
+  re-ask (a full re-prefill, about 30 s). Tests `internal/agent/forced_final_reask_test.go`, written first: red before with
+  `stop="budget" output="" steps=2, want the re-asked answer as a finished run in 2 steps` and `the seat was called 2 times,
+  want 3: one re-ask and no more`; the two tests that pinned the one-shot give-up (`TestForcedFinalToolCallIsNotExecuted`,
+  `TestForcedFinalToolCallWrittenAsTextIsABudgetStop`) now script two offences in a row; the wall tests (a contract with no
+  rate, a margin over the last turn, no deadline at all) were red before with `the run ended in an error (fakeClient: script
+  exhausted) with stop "error": the re-ask was spent with 200 ms of wall left and the deadline fell inside it`. Thirteen mutations
+  (the wall gate, the bound of one, the quoted text, the poisoned turn kept, each note, and on the gate: the measured turn not
+  read, no margin, the seat's floor ignored, a comparison too strict, a missing deadline read as a limit, the last turn not
+  passed, the original gate back) each turn them red. Docs: `docs/systems/coding-agent.md`,
+  `docs/OPERATOR-GUIDE.md`.
+- **A forced-final tool call is its own shape in the rigger and gets a second seat, instead of "a task too large: split it".**
+  The shape (the forced final step answered with a tool call, again after the re-ask above) ended on `stop_reason` `budget`,
+  and the rigger filed it on the `budget` axis, whose remedy reads "a run at the cap with no loop axis is a task too large for
+  one contract: split it". It was not: in the three rows of the day the seat had read the whole document (or all that read_file
+  could give it) and used 43 s of 600 s, 16 s of 299 s and 86 s of 485 s; and because `budget` outranks `loop` and
+  `tool-misuse` in the precedence, the refused repeats in their traces never surfaced. The rigger now has a `final-tool-call`
+  axis, ahead of `budget` and keyed on `core.ForcedFinalToolCallReason`, whose remedy says cutting the contract up cannot help.
+  And the delegator treats the shape as the fifth defer worth a second placement (`delegate.FinalToolCallDefer`, beside the
+  seat-down and lost-root defers): it is a property of that seat (none of 241 forced finals on every other seat did it), the
+  contract is sound and the wall mostly unspent, and a plain step-budget defer, which a second seat does not fix, stays as it
+  was. With nowhere to place it the caller gets `retry skipped: the seat on <node> wrote a tool call as its final answer and no
+  other node could take the contract (...)` instead of an empty note. Its second placement is placed the way a seat-down
+  retry is, and so is the lost-root defer's (one predicate, `delegate.producedNothingDefer`): a run that produced nothing has no
+  answer to hold, so the retry is not made to stand in line for a busy retry seat for the placement wait and then skipped
+  (every remote publishes one job at a time, so on a saturated fleet that was the normal outcome: "retry skipped: the retry seat
+  on <node> is already running another job after waiting 5s in line"), the failed seat's `min_turn_sec` is not the retry seat's
+  floor when the retry node publishes no rate (`retry skipped: 299s of the 300s timeout_sec budget left after choosing a retry
+  node (floor 1112s, min_turn_sec of the seat on <node> (the retry seat published no rate))`), and a local seat whose run-cap line
+  has no free slot is left for an untried remote. Tests `internal/rig/final_tool_call_test.go`,
+  `internal/delegate/final_tool_call_test.go` and `internal/delegate/final_tool_call_retry_test.go`, written first: red before
+  with `classified "budget" ... want final-tool-call`, `retried=0 deferred=true note=""` and the three skipped-retry notes above
+  (the lost-root defer failed the busy and local-line ones the same way); mutations turn them red. Docs:
+  `docs/systems/coding-agent.md`, `docs/systems/fleet-node.md`, ADR 0066 (amendment 2026-10-12).
+- **A research page that is one very long line is handed to the seat in lines it can read.** The agent's `read_file` cuts every
+  line at 2,000 characters (`(line truncated)`) and its `offset`/`limit` count lines, so the rest of a longer line cannot be
+  reached at all. Two of the three forced-final rows of the day were such pages: one was a single 98,304-character line (the seat
+  could read its first 2,020 characters), the other had two lines holding 97,544 of its 98,299 characters (4,806 were
+  reachable), and no final ask can ground an answer in text the seat never saw. Across the corpus, research runs on a page with
+  an unreadable line reached the forced final step in 38 of 117 cases against 36 of 1,283 for pages of ordinary lines (the
+  failure rate once there is about the same, 30% against 41%, so this is what makes the cap get reached, not what the seat does
+  at it). `research.Build` now wraps each context document at `research.MaxLineChars` (1,800, pinned under the new exported
+  `agent.ReadFileLineCap` by a test in the MCP server package): at the last space in the final quarter of the window, in the
+  middle of a run with no space (a base64 blob), never inside a rune; the space becomes the newline and nothing else is added or
+  removed, and a page whose lines all fit is handed over byte for byte. The text that anchors, fingerprints and verifies quotes
+  is the page as fetched, so those checks are unchanged. Not changed: a context document supplied by a caller of
+  `agent_delegate` (its lines are the caller's; `read_file` still truncates them and says so). Tests
+  `internal/research/build_wrap_test.go` and `internal/mcpserver/readable_context_test.go`, written first: red before with
+  `line 1 is 125999 runes: the seat's read_file would cut it at 2000 and the rest would be out of reach`; five mutations (the
+  wrap not applied, the early return, the break window, the hard-cut width, the cap constant) turn them red. Docs:
+  `docs/systems/mcp-server.md`.
+- **The document fingerprint no longer fails an honest absence or a plural/singular restatement, and no longer passes the goal
+  echoed back.** The research acceptance check is a wrong-document tripwire: one any-of alternation of the page's own prose
+  words, kept off the goal's vocabulary. Nine of 254 research answers in two days failed it, and every one was a faithful or
+  honest-absence digest, none off-document (a digest that names the document correctly and quotes it verbatim failed for
+  writing "specification" where the page's anchor was "specifications"; another was five "not on page" and a verdict). The goal
+  tells the seat to write exactly that, in the goal's own words, which the anchors exclude by construction, so an honest absence
+  could never pass. Each anchor is now matched in its singular (and the goal's words are excluded in the singular too), and an
+  honest absence is excused by the delegator from the STRUCTURE of the digest, not from a phrase in the regex:
+  `delegate.EvalAcceptance` drops the fingerprint failure of a result whose structured digest is `delegate.HonestAbsence`, an
+  object in which every string at any depth (a list entry as much as a field) is empty or a short statement (60 words at most)
+  that the page does not carry what was asked, with at least one such statement, no number or boolean, no second sentence that
+  says what the page does hold, no contrast word ("but", "however") and no report of a failure to read the file ("could not
+  read", "not found", "the file is missing"). Such a result is counted for the node as neither a strike nor a pass. An earlier
+  draft of this change appended the absence phrases to the regex as a last alternative, and that was withdrawn before release:
+  the goal itself contains them (the built goal says "does not contain" and "does not address it"), so every anchored research
+  contract read PARROT-PASSABLE in the lint that is published on the result, the goal echoed back passed the check, and a stock
+  phrase ("not specified") anywhere in a digest of the wrong document passed it. The anchors are also chosen off the whole goal
+  the seat is handed (the fixed sentences, the file's name and title, the questions) and not only the caller's: the template's
+  own "Always end with a one-sentence verdict" had made "always" an anchor on a page that uses the word. The cost is a smaller
+  pool: a page word that also appears in the goal's fixed sentences, or in the page's own title or file name, is no longer an
+  anchor (a page too thin to leave 4 usable words, `minAnchorWords`, has no fingerprint, as before). The check stays one regex
+  tagged `docanchor`, holding the page's words and nothing else. Not closed, and not closable by a lexical rule: a seat that did
+  not read the page and reports "the page does not address it" without saying it failed is delivered as an absence, as an honest
+  one is. Tests `internal/research/anchors_abstention_test.go` and `internal/delegate/absence_test.go`, written first: red before
+  with, for example, `a plain goal: the contract is flagged parrot-passable: acceptance is PARROT-PASSABLE`, `the goal echoed
+  back as the answer passed the fingerprint`, `facts about another subject, one of them hedged: passed the fingerprint` and
+  `could not read: "I could not read the file, so the page does not address the goal." passed the fingerprint`; twelve mutations
+  (the anchors chosen off the caller's goal alone, an absence alternative back in the regex, a number or boolean allowed, the
+  read-failure and contrast vetoes, the sentence rule, the vacuous-sentence guard, the word cap, the at-least-one-statement
+  guard, the excuse dropped, the excuse widened to any check, an excused absence counted as a pass) each turn them red. Docs:
+  `docs/systems/mcp-server.md`.
+- **A node that passed most of its research work is no longer quarantined by two misses of a lexical check.** A research answer
+  that fails the document fingerprint (`docanchor`) is a strike against the node that served it, and the second strike inside 30
+  minutes took the node out of the session's placement for 30 minutes ("quarantined until ..."), the whole point being to stop work
+  going to a node that answers about the wrong document. The check is lexical and misfired on honest answers (see the entry
+  above), so two misses of a node that had passed 48 of its 51 answers that day quarantined it while the rest of the fleet stood at
+  "queue full". A node that is truly off-document fails more often than it passes, so the
+  quarantine now needs at least two strikes that OUTNUMBER the node's passes of the same window: `Quarantine.Pass` records a result
+  that carried the fingerprint check and passed it (`runner.noteFingerprint`, at the remote result and at the delegator-side
+  rescue), a result with no such check says nothing, and passes age out with the strikes. A node with no passes is quarantined on
+  its second strike exactly as before. An honest absence (the entry above) is neither a pass nor a strike. A stated limit, on
+  purpose: a node that answers about the wrong document less often than about the right one (4 misses beside 6 passes in the
+  window) is not quarantined, because a failed fingerprint keeps its cross-seat retry, so such a node's miss is never delivered
+  as verified (one whose retry cannot be placed is published as a failed verification) and each miss costs one retry elsewhere, while idling a node on a lexical check costs the fleet a whole seat for the window. The
+  quarantine stays per server process and is never persisted. Tests
+  `internal/delegate/quarantine_pass_test.go`, written first: red before with `two failures after three passes quarantined a node
+  that answers about the right document`; six mutations (the outnumber rule, the two-strike floor, the pass record, the
+  carries-the-check guard, the call site, the window) turn them red. Docs: `docs/OPERATOR-GUIDE.md`.
+- **A verification retry is no longer refused for the first seat's `min_turn_sec` before a retry node is even chosen.** The retry
+  of a wrong answer (or an honest abstention, or the forced-final tool call above) goes to a DIFFERENT node, and the node it goes to
+  has its own floor, applied once it is chosen (`retryFloorOn`: its published `seat_rate`, the cold load and the final turn plus
+  the re-pack at its own rate). But the cheap check before that read the first attempt's own `min_turn_sec` for every retryable
+  shape except two (the seat-down and lost-root defers, exempted for exactly this reason), so a research digest that failed
+  acceptance on a seat whose cold load and two 8,192-token turns are measured at 1,112 s (3,379 s on a slow unified-memory
+  node, 889 to 951 s on the local pool) was refused its retry on a 300 s or 600 s contract before any node was asked, although
+  that seat had taken 20 to 325 s to give the answer: in one day 7 of the 14 verification retries skipped were refused that way
+  (the others fell to other rules: the chosen node's own floor, a busy retry seat, a fenced local seat, a rescue with no budget
+  left). The check before a node is chosen now reads the
+  configured floor (`agent_retry_min_sec`, else 10 s) alone; the chosen node's own floor, the budget left and the retry note
+  (`retry skipped: ... after choosing a retry node (floor ...s, min_turn_sec published by <node>)`) are unchanged, and a retry
+  node that publishes no rate still falls back to the first attempt's number, said in the note. Not changed, on purpose: a
+  VERIFICATION retry's wait for a busy retry seat keeps its placement-wait TTL (ADR 0073 decision 3: it is an optional second
+  opinion on an answer the subtask already holds); a retry of a run that produced nothing (seat-down, lost-root, forced-final tool
+  call) holds no answer, so it neither waits for that seat nor is refused for the failed seat's `min_turn_sec` (see the
+  forced-final entry above). Config, for the operator: with `agent_retry_min_sec` at 300 a default 300 s contract can never retry,
+  since what is left is always under it. Tests `internal/delegate/retry_first_seat_floor_test.go`, written first: red before with
+  `retry skipped: 299s of the 300s timeout_sec budget left after the first attempt (floor 1112s, min_turn_sec of the seat on
+  node-a)`; three mutations turn them red. Docs: `docs/OPERATOR-GUIDE.md`.
+- **A retry that found no node to go to is no longer published with an empty note.** When the engine considered the second
+  placement of a wrong answer or an honest abstention and no other node could take the contract, the result carried an empty
+  `retry_note` unless it was one of a few named shapes (a fence, a reservation, the call's deadline, a reasoned pin, or a defer that
+  promises a second placement: seat-down, lost-root, forced-final tool call). It read as a retry nobody considered, and a research
+  page skipped this way left nothing to log and nothing to fix. The note is now always there: `retry skipped: no other node could
+  take the contract after the first attempt on <node> (<outcome>); every eligible node was already tried or is not eligible`
+  (or `route local places nothing on another node`). Two tests that pinned the empty note of a bare route's skipped retry
+  (`TestRunRetryNeverLandsOnASeatTheSubtaskAlreadyUsed`, `TestTheBareRemoteRoutesRetryNoteNamesNoPinOnASeatlessBox`) now pin the
+  generic note, and the second still asserts that no pin wording appears where nothing was pinned. Tests
+  `internal/delegate/retry_nowhere_test.go`, written first: red before with `retry_note = "", want it to contain "retry
+  skipped"`; three mutations turn them red. Docs: `docs/systems/fleet-node.md`.
+
+### Fixed — a re-pack that emptied the lists its answer held is refused, a re-pack the schema bounds is no longer skipped for the answer's length, and the delegator's rescue re-packs on the node that wrote the answer
+
+Two defects of the structured re-pack, both seen in one delegation of three subtasks (2026-10-12): a wrong success and a lost answer. Each had a finished, correct answer in hand.
+
+- **A wrong success: eleven stale sentences delivered as none.** A seat's final answer was itself a JSON object with keys of its own (`outdated_sentences`: eleven `{quote, release_note_says}` objects), where the contract's schema asks for `{doc_title, stale: [string] (maxItems 10), up_to_date, notes}`. The seat never sees the schema, and the cut-final re-issue ("Return the same JSON object that was asked for") names no keys. The re-pack prompt then said "Use empty values when a field is absent", and a text none of whose keys is called `stale` made every field absent: the re-pack wrote `{"stale": [], "up_to_date": true, "notes": "No stale sentences were identified in the provided text."}`. It validated; `contains:` read the answer, `nonempty:doc_title` read one scalar, and the call counted it a success. The re-pack was not given a cut or trimmed answer: its `max_tokens` of 2,315 is exactly the budget of the whole 5,411-character answer. (That the extractor inverted for this reason is inferred from the prompt and the object; the model was not replayed. A control job on a different seat, whose answer was a prose numbered list with no foreign keys, kept all six items.) A faithful re-pack would have failed too: the answer has eleven items and the schema says `maxItems: 10`, which the validator enforces and no prompt mentioned.
+  - **The object is read against its answer** (`core.ListsEmptied`). A list the schema asks for that the answer also holds under the same path is compared with that list and nothing else (an answer that says `"stale": []` has nothing to lose, whatever else it lists). Only when the answer shares no list path with the schema do the lists it holds under keys the schema does not define count, and then the object must hold some item in the lists the schema asks for. A list the object carries itself is not lost. Prose answers are not judged: nothing can be counted in them, so a prose answer whose list was lost is published. The node refuses such an object on the grammar lane (before and after coercion) and on the chat lane; the attempt after a refusal carries the finding ahead of the text; every attempt refused is an abstention with the finished answer in `output`. A false refusal is not a wrong success but it is not free: an answer that lists what it checked under another key, beside a schema list that is legitimately empty, is refused too (pinned by a test), and the refusal is an abstention defer, which the delegator's rescue refuses again and the delegator then re-places once on another node: a second full agent run, which reproduces the refusal when the answer is truthful.
+  - **The prompt says what the text is.** A TEXT that is itself a JSON object gets the rule "take each requested field from the key whose content matches it ... use an empty value only for a field that no key of the TEXT holds content for" instead of the empty-values rule, and a listing of its keys (name, shape and count, never content). The bound a schema puts on a list (`maxItems`) rides in the prompt on every lane: the grammar's projection of the schema drops it, so the grammar lane never told the seat. A prose answer's prompt is byte-for-byte what it was when no list is bounded.
+  - **The delegator reads it too.** `EvalAcceptance` reads every result's object against its answer (a hollow object from a node that predates this is a failed verification, which the delegator retries on another node), and a rescued object is refused the same way. A result that kept fewer list items than its answer held says so: `repack_note` reads `kept 10 of 11 list items from "outdated_sentences" (maxItems 10)`.
+- **A lost answer: a correct answer deferred for a re-pack the schema bounds well under the time the call had left.** A slow seat's answer of 7,126 characters was skipped by the node (`re-pack skipped: 476 s left to the call's deadline + 30 s grace at 4.9 tok/s buys 2330 tokens < the answer's 2439`), because the skip test sized the re-pack's OUTPUT as the answer's length: a token per three characters. The schema (a title, at most ten strings, a flag, a note) bounds the object near 1,600 tokens by the estimate below; this answer's re-pack never ran, and the comparable one that did (the control subtask's, six items on a faster seat) wrote 228 tokens. The delegator's rescue then tried one place, its own agent seat, found it not resident with its cards held by another session's exclusive lease, warmed it, and was cut at its 120 s allowance (`attempt 1/1 cut by its 1m59.995201s share of the wall`); the error also dropped the warm-up note.
+  - **A re-pack is sized from the schema it writes to** (`repackSchemaTokens`, `repackLeast`). A free string is estimated at 128 tokens (about 400 characters; chosen, not measured), a declared `maxLength` or `enum` exactly, a list only with `maxItems`, an object only with named fields; a schema that bounds nothing keeps the answer-based figure, and the schema never raises it. A schema with one or two free-text fields is read as a restating one (the flat `{answer}` every remote `agent_run` carries is its one string, the whole answer restated) and keeps the answer-based figure too; three or more free slots, a list of ten strings counting as ten, are an extraction into parts. The skip floor, the chat lane's, the resend floor and the time the re-pack is owed (`repackOwedTokens`) use that one figure. A skip it sized says `< the object's N` instead of `< the answer's N`. The liveness allowance is left on the answer-based size on purpose: it is `max(flat bound, estimate)`, a stall bound, and shrinking it could only cut a seat that was producing. The cost: a bounded schema whose real output runs long is sent and cut at the tokens the time buys, a `budget` defer after seat time spent instead of before.
+  - **The rescue goes where the seat is hot.** The delegator hands its rescue the node that ran the loop and the seat that wrote the answer (`delegate.WithRescueOrigin`, in the context: the `RescueFunc` signature, and so every door that wires a rescue, is unchanged). `RescueRepack` reads the lossless object, then re-packs on this box's seat when it is resident (or its residency cannot be read), and when it is not, makes ONE chat completion on the origin node's own seat through the node's chat door with the fleet bearer, which waits for no load here and never queues behind this box's lease; the call carries `WithLocalBusy`, so it leaves the box or does not run. If the node cannot take it (an older build, a hollow or invalid object) this box's seat is warmed and used with the budget that is left, and the rescue stops without warming it when under 20 s remain. A failed rescue names every rung it tried, the node and the warm-up included. The node is not handed over when its own re-pack failed for its seat's health (defer class `infrastructure`: a stall, an unreachable or busy seat, a seat lost under the run): the seat that just wedged is the last place to send the rescue first.
+- **Tests, written first.** `internal/core/fidelity_test.go`, `internal/delegate/acceptance_fidelity_test.go`, `internal/delegate/rescue_origin_test.go`, `internal/pipeline/agenttask_repackfidelity_test.go`, `agenttask_repacksize_test.go` and `agentrescue_origin_test.go`. Red before, on `e14c5a88`: `published stale=[] as a success while the answer holds 11 list items`; `a hollow object over an answer holding 11 list items passed acceptance`; `structured re-pack skipped: 4 s left to the call's deadline + 0 s grace at 100.0 tok/s buys 403 tokens < the answer's 1064` for a three-thousand-character answer and a one-field schema; and, with this box's cards held by an exclusive lease and its seat cold, the rescue `cut by its 2m0s share of the wall` after 125 s where it now finishes in 10 ms. Each rule was mutation-checked with `scripts/mutation-check.sh` (one change reverted at a time, the mutant compiles, a named test fails).
+- **Second review round (on `0cfbe788`).** Two reviewers read the branch. Each finding was scored with Jev, reproduced against the code, and then fixed red first or declined with the reason below.
+  - **The retry prompt could turn a false refusal into a fabricated success.** Reproduced: `published stale=[a.md b.md c.md] as a success for an answer that lists them as checked files`, with an empty `repack_note`. A truthful answer (`{"doc_title": ..., "up_to_date": true, "checked_files": ["a.md", "b.md", "c.md"]}`) has no `stale` key, so the empty-list object is refused (the accepted cost above), and the attempt after the refusal said "write those items into the list fields" about every list the text held: a seat that obeyed it published the checked files as stale ones, contradicting `up_to_date: true`. The prompt after a refusal is built from the lists that were lost (`core.ListsLost`): a list the schema has a field of the same name for goes into that field; any other list is copied only if it is the content of a requested list field; a field the text says is empty stays empty. The refusal itself is unchanged: nothing deterministic tells a list of what was checked from stale sentences under another name.
+  - **Three shapes the check could not see, each published as a success.** A list nested under an object (`{"report": {"outdated": [...]}}`) is read by its path now; an answer that is itself a JSON array (bare or in one fenced block, items that are objects, texts or lists) is one list, and its prompt says so instead of "use empty values when a field is absent"; a list declared `type: ["array", "null"]` is a list site. The cost, stated: an auxiliary list nested in an answer that has no list under any schema name is now refused the way `checked_files` is.
+  - **The rescue no longer calls the seat that just wedged.** The node files a re-pack that stalled, could not reach its seat or found it busy as class `infrastructure` and flags every re-pack failure `schema_miss`, so the rescue used to call that seat first, with an allowance of at least the 120 s flat bound against a rescue budget that floors at 120 s. An `infrastructure` defer no longer hands the rescue the node; a budget defer, an abstention and a node that names no class still do. A result whose wire names no seat uses the one the run was placed on. An unreadable `/running` and an unparseable `output_schema` each say so in the log.
+  - **Declined.** Partial loss stays a note, not a refusal (`kept 1 of 11`): the object is faithful as far as it goes and the answer rides beside it, and an expected-count threshold cannot be computed on the orphan path (an answer with `files_changed` of 5 and `tests` of 3 beside a schema `blockers` of at most 5 would be refused for an object that is right), which would add the false refusals this round set out to count. A share cap on the origin rung: a hot seat's re-pack of a long answer takes tens of seconds (2,315 tokens at 30 tok/s is 77 s), and half of a 120 s budget would cut it to buy a try on a cold seat that needs 125 to 250 s to load. Sizing a `["array", "null"]` property in the re-pack prompt: it follows the grammar lane's projection, which compiles a type list to a string, so changing it reaches into the grammar; a nullable list there is a loud truncated attempt, not a silent result. Not changed, below the reviewers' bar: a shared key short-circuits the orphan reading of the other schema lists, the content test counts items and not words, an object that carries an orphan list verbatim is not judged.
+  - **Tests.** `internal/core/fidelity_lists_test.go`, `internal/pipeline/agenttask_repackcorrection_test.go`, and additions to `internal/delegate/rescue_origin_test.go` and `agentrescue_origin_test.go`. Red before, on `0cfbe788`: the reproduction above; `the re-pack stalled: class "infrastructure": origin handed = true, want false`; `a result with no seat of its own was handed no origin`; a hollow object over a nested list, a bare array and a nullable list published; a correction that still read "Write those items into the list fields". 26 rules mutation-checked with `scripts/mutation-check.sh`, each RED (one of the 27 mutants did not compile and was replaced by one that does).
+- **Not changed, for a follow-up.** The cut-final re-issue still says "Return the same JSON object that was asked for" to a seat that was asked for no JSON; rewording it changes every schema contract's cut final, so it needs an A/B first. No deterministic key mapping from a foreign key to a schema field: picking `quote` of `{quote, release_note_says}` would invent a mapping. A prose answer whose list was lost is not judged (nothing to count). The rescue tries the origin node only, not the fastest idle node of the fleet. Docs: `docs/systems/coding-agent.md`, `docs/systems/fleet-node.md`, `docs/architecture/decisions/0055-walls-are-ceilings-liveness-is-progress.md` (item 11).
+
+### Docs — the composite-tier guide no longer says the display card is closed to every placement until the operator sets presence
+
+- `docs/systems/composite-tier.md` said `operator_presence` keeps the display card closed and that no placement touches it until the key is `auto`. Since 0.183.0 that holds for the display layer's twins only: the card allocator behind `gpu reserve --cards` and the media admission path reads no presence and may use the display card up to `gpu_display_cap_pct` (ADR 0039, amendment 2026-10-12). Both sentences now say which placement they mean. Found by a fleet audit of the 0.183.0 docs.
+
+### Added — a transcript whose word times drift from their segment says `words_reliable: false` (D-38, issue #169: the flag; the cause stays open)
+
+- **What was wrong.** Issue #169: on a long file whisper-server's per-word times lagged the segment they belong to by minutes (up to -152 s on a 730 s file). `internal/sttclient` passed the `words[]` array through and nothing compared it with its segment, so a consumer that cuts audio at word boundaries had no way to tell the times were wrong.
+- **The fix.** `Transcribe` now sets `Result.WordsReliable` and `Result.WordsDriftSec` from the upstream's answer. The pure `checkWordDrift` takes the largest `|segment.start - words[0].start|` over the segments that carry words: `words_reliable` is `false` at or above 0.5 s (the issue's own threshold), `true` below it, and absent when no segment carries words (the OpenAI path never does); `words_drift_sec` is that largest gap. Both keys are `omitempty`, so a result without words marshals byte for byte as before. `true` means the FIRST word of every segment that carries words starts within the threshold of its segment's start; a later word far outside its segment still reads `true` (the field comment and the docs say so; a stricter bound on every word waits for a measurement of honest audio).
+- **Published, so a caller can see it (review round).** The first cut set the two fields on the client's `Result` and nothing read them: `pipeline`'s `transcribeResult` copies the `Result` field by field and `internal/sttremote`'s `nodeResult` rebuilt a node's answer the same way, so the verdict died before the `offload_transcribe` payload, the cache entry and any log. Both structs now carry `words_reliable` and `words_drift_sec` (omitempty); the pipeline sets them from the `Result` and logs one line when the verdict is `false`; `sttremote` re-publishes the node's verdict in the answer it builds on the asking box, including when the node cut its inline list; the MCP tool description and `docs/systems/mcp-server.md` name the two keys. The keys are additive: an older node or asker ignores them, and a node older than the check simply sends none, which stays absent (absent means no verdict, never `true`). An entry cached before this build carries no verdict until the audio is transcribed again.
+- **Tests.** `internal/pipeline/transcribe_words_test.go` (a real convert, a fake whisper answering a drifted, an aligned and a word-less transcript: the payload says `false` with 58.8, `true` with 0.2, and no key; the cache hit answers the same; the log names the symptom; `.segments.json` stays a bare array) and `internal/sttremote/words_reliable_test.go` (the node's verdict is re-published for a drifted, an aligned and a truncated answer, and an older node's answer gains no key), both red on the missing keys before the fix and ten mutants RED after it (`WordsReliable` or `WordsDriftSec` dropped from either out literal, the log removed or inverted, `omitempty` dropped from either key of either struct). `internal/sttclient/words_reliable_test.go` with the hand-written fixture `testdata/drifted_words.json`, written first: against a no-op `checkWordDrift` the drifted, aligned, exact-boundary, run-ahead, first-word and `Transcribe` tests failed on their assertions (not on a compile error). Eight mutants, each applied with `scripts/mutation-check.sh` and each RED: `<` to `<=` at the threshold, the first-word read replaced by the segment start, the absolute value dropped, the last segment's gap taken instead of the largest, the no-words skip removed (an index panic), the call in `Transcribe` removed, `omitempty` dropped from `words_reliable`, and the threshold constant changed to 5.
+- **Not changed, for follow-ups.** (1) The check flags the symptom and does not find where the per-chunk offsets are lost, so #169 stays open until a file longer than 30 s is run through a speech seat under its GPU lease. (2) The `.segments.json` file stays a bare segment array (`sttremote` fetches a truncated list from a node as one, and dataset readers parse it as one), so it carries no verdict: a reader that takes only the file path has to read `words_reliable` from the payload. (3) 0.5 s is the issue's number, not a measurement of honest audio: the same live run shows whether a clean file ever puts a segment's start and its first word's start further apart than that, and whether every word can be bounded by its segment's span without false alarms.
+
+### Added — a vLLM seat bound to a cache server is refused when its batch is smaller than the cache chunk (H-33)
+
+- **What was wrong.** A seat bound to an LMCache store declares `chunk_size`, which must equal the engine's unified KV block (784 for the
+  Qwen3.8-27B hybrid with fp16 KV, 1568 with fp8, which doubles it), and the engine's per-step token budget
+  (`--max-num-batched-tokens`) has to cover at least one block. `Spec.Validate` checked `chunk_size > 0` and nothing else, so a seat could
+  be authored, rebound through `install vllm-seat --config` (which replaces the chunk from the box's binding), and rendered with a batch
+  below the chunk it was registered with. The two shipped store-backed seats satisfy it (batch 3135, chunk 1568), so nothing in the tree
+  had ever shown the gap.
+- **The fix.** `Spec.validate` now refuses a seat with a cache server whose declared `max_num_batched_tokens` is below its `chunk_size`
+  and names both numbers and the cause (`max_num_batched_tokens 1024 is below the cache server's chunk_size 1568 ...`). One rule serves
+  the tier table (`Validate`), the extra seats (`ValidateExtra`) and the render (`Artifacts` re-validates after a binding replaced the
+  chunk). Equal is accepted. Docs: `docs/systems/cache-server.md` (invariants).
+- **Named limits.** `ChunkSize` is declared to equal the unified block and LMCache refuses a mismatch at registration, which is why
+  `batch >= chunk` is the checkable form of "batch >= block". The block itself is a model-and-dtype property known only as measured pairs,
+  not a `Spec` field, so a storeless fp8 seat with a small batch (the shipped storeless seats run 2048 and 4096) stays unguarded, and an
+  undeclared batch (0) is not compared. No upper bound is enforced (the measured seats run one token under two blocks).
+- **Tests.** Red before the rule: `TestASeatWhoseBatchIsSmallerThanTheCacheChunkIsRefused` failed in all four subtests (`lane_seat`,
+  `extra_seat`, `render`, `one_token_under`) with `a store-backed seat whose max_num_batched_tokens is below the cache chunk_size must be
+  refused; Validate returned nil`; the four guards (`TestASeatWhoseBatchEqualsTheChunkIsAccepted`, `TestAStorelessSeatIsNotJudgedByTheChunk`,
+  `TestASeatThatDeclaresNoBatchIsNotJudgedByTheChunk`, `TestTheMeasuredFP8SeatsKeepTheirChunk`) passed. Five single-line mutants each turn
+  one named test red (`scripts/mutation-check.sh`, verdict `RED`, file restored byte for byte): `<` to `<=` (the equal-batch guard), the chunk
+  read as 1568 for a storeless seat (the storeless guard), dropping `MaxBatchedTokens > 0` (the undeclared-batch guard), the chunk read as 0
+  beside a store (the refusal test) and the two numbers swapped in the message (the refusal test).
+
+### Added — `/fleet/health` `gpu_devices[]` carries each card's temperature and the clock event reasons active on it (F11)
+
+- **The gap.** No health payload carried a temperature or a throttle state: a card that was heat-soaking, or held at a power cap, looked the same on the wire as a cool one, and the only signal a delegator had for a hot node was a slow answer.
+- **What a card row gains.** `temperature_c` (integer degrees C, nvidia-smi `temperature.gpu`) and `throttle_reasons` (an array naming the active clock event reasons). An absent `temperature_c` means not read, never "cool": a node that predates the fields, a driver that answers `[N/A]`, a failed query and an answer older than 90 s all read the same way. `throttle_reasons` has three states, so an absent key is never "not throttled": the names of the reasons active; `[]` when the card was read and nothing limits its clocks (a mask of 0, or the idle bit alone); and no key when the throttle column was not read (a node that predates it, `[N/A]` or `[Not Supported]`, a driver with no throttle field, a failed query, an answer older than 90 s). The key is tagged `omitzero`, not `omitempty`, because `omitempty` drops an empty array and the two states would again look alike. A temperature outside 1 to 150 is a garbled counter and is left out. The delegator decodes the rows into the same `gpuprobe.Device`, so both fields reach `delegate.NodeView.Devices` with no change on its side. They show on a fleet only after a fleet-parity deploy.
+- **A second query, never a new column.** The values come from `gpuprobe.ReadThermal` (`index,uuid,temperature.gpu` plus the throttle field), merged into the devices in `fleetnode.SmiDeviceProbe`, so the per-device query the 2 s sampler and the placement guards share never gains a column an old driver refuses, and `main.go`, `vram.go` and `server.go` are untouched. Cards are matched by UUID, never by index.
+- **Cadence.** The sampler ticks every 2 s; the thermal query runs at most once per 30 s (one extra `nvidia-smi` process per 30 s per node), a failed query is not retried sooner than 60 s and is logged once per outage, an answer older than 90 s is dropped and not published, and the read is bounded at 10 s (the per-device query has no deadline of its own). The query runs on a goroutine of its own, one at a time, and the probe only reads what the last one stored: a hung second `nvidia-smi` delays neither the memory reading the placement guards use (the sampler stamps its snapshot after the probe returns, so an inline query had made the memory figures older than their timestamp) nor fleet-serve's synchronous first sample. The answer reaches the next tick, and is aged from when its query started.
+- **Both driver spellings.** The throttle field is `clocks_throttle_reasons.active` on older drivers and `clocks_event_reasons.active` on newer ones (a current driver lists both names for one field). The reader asks for the older name, asks for the renamed one when the driver refuses the first, and asks for the temperature alone when it knows neither; the variant that worked is remembered, so the refusal costs one spawn once. A refusal is recognised by the text naming the field, not by the exit status, and a failure that is not a refusal (a missing binary, a wedged driver) is returned at once and walks nothing. `refusesAttached` is now a call of the general `refusesField`.
+- **The bit table is NVML's, read from the header and not from memory** (`nvml.h`, CUDA 13.4, the `nvmlClocksEventReason*` / `nvmlClocksThrottleReason*` defines): `0x2` `applications_clocks_setting`, `0x4` `sw_power_cap`, `0x8` `hw_slowdown`, `0x10` `sync_boost`, `0x20` `sw_thermal_slowdown`, `0x40` `hw_thermal_slowdown`, `0x80` `hw_power_brake_slowdown`, `0x100` `display_clock_setting`, `0x200` `board_limit`, `0x400` `reliability`. `0x1` (idle) is never listed. `board_limit` and `reliability` are in the 13.4 header and not in 13.3's, so a bit above the table is published as `unknown:0x<bit>` instead of being dropped. The plan's seven named bits would have published an empty list for the three cards of the box read below, which all answer `0x400`.
+- **A live read.** Against the real driver of a three-card desk box, `SmiDeviceProbe` returned a temperature for each card (84, 52 and 37 C) and `["reliability"]` for each.
+- **Tests.** `internal/gpuprobe/thermal_test.go` (fifteen) and `internal/fleetnode/health_thermal_test.go`, `health_thermal_wire_test.go` (nine, one through the delegator's real health decoder), written first against compiling stubs: fourteen gpuprobe and seven fleetnode tests failed on assertions before the code, for example `15 probe calls at 2 s spacing made ... want 1` and `ThrottleReasonNames(0x20) = [], want [sw_thermal_slowdown]`; the guards (a card without a reading marshals byte-identically, a failing thermal query leaves `gpu_devices` byte-identical to a node without one) hold before and after. Sixteen mutations, each reverted in turn, fail a test they name (30 s window, 60 s back-off, 90 s age and its `<=` boundary, the 10 s bound, the once-per-outage log, a swapped bit name, the idle bit listed, the remembered variant forgotten, the ladder walked on any failure, any temperature accepted, the reasons slice aliased, match by position, a refusal matching any field, no renamed-field fallback, the display_attached refusal lost). `Device` now carries a slice, so four struct comparisons in `vram_test.go` and `gpuprobe_test.go` moved to `reflect.DeepEqual`. **Review round**, tests again written first and seen red: `internal/gpuprobe/thermal_clear_test.go` (three) and `internal/fleetnode/health_thermal_clear_test.go` (one) failed with `throttle_reasons = []string(nil), want an empty non-nil slice` and a clear read marshalling without the key; `internal/fleetnode/health_thermal_async_test.go` (five; four failed first with the probe `still running after 3s` behind a held thermal query, the fifth pins that an answer is aged from when its query started and is proved by mutation). The earlier fleetnode thermal tests now run through a settled probe (a tick, the wait for the query it started, a second tick at the same instant) so their assertions did not change. Thirteen more mutations, each reverted in turn, fail a test they name: a clear read parsed as not read, the merge keyed on length, the merge copy made nil, `omitempty` for `omitzero` (gpuprobe and fleetnode), the refresh run inline, the one-at-a-time guard removed, an answer aged from when its query returned, and the 30 s window, 60 s back-off, 90 s age (and its boundary), once-per-outage log and 10 s bound re-proved on the new structure.
+- **Not changed.** Placement does not read either field; whether a heat-soaked node is demoted is a separate decision (row F11 says "decide"). The sustained tok/s half of the row was already published (`seat_rate`).
+- **Docs.** `docs/FLEET-NODE.md` ("Multi-GPU: `gpu_devices[]`") and `docs/systems/fleet-node.md`.
+
+### Added — every `agent_delegate` result a seat ran says where it ran: `results[].ran_on` is `local` or `node`, and the opencode plugin reads it first (D-32)
+
+- **The defect.** `results[].placement` is the placement reason in words, and the opencode plugin counted the word `local` in it. A remote result whose reason said `local seat busy` read as local (10 of the 214 remote rows of one delegation log, for example `route=spread -> node-a (slot 1 of 1 ...); local seat busy: 1 in flight`), so the digest told the model the pair had not landed.
+- **The field.** `ResultWire.RanOn` (`ran_on`, `omitempty`): `local` when the delegator's own seat ran the subtask, `node` when a fleet node did, absent when no seat ran it. It is stamped in one place, `WireResponse`, from `placedWhere`: the decision that already writes the hint clause and the pin tallies, so the field cannot disagree with them. Every constructor of an unplaced outcome builds its result without `ranLocal` or `ranBase`, so `placedWhere` reads it as nowhere and the key stays off the row. It names where the subtask was placed and dispatched, so a local run that deferred on the seat still reads `local`. A job a node confirmed it took back before it started, or whose own record says it never ran, reads nothing even when the call deadline then cuts the row: the cut clears the refusal flag `placedWhere` used, so it now also reads the `withdrawn` and `nodeNeverRan` marks the node's word leaves (which keeps the hint clause and the pin tallies in step); a job the deadline cut while the node still held it, with no word that it will not run, reads `node`. A `route: "queue"` answer a claiming node filed reads `node`, set where the poll and the deadline's last look read a finished answer (`takeQueueAnswer`); a job still queued, a poll that ran out and a deadline cut stay unplaced. This adds no `PlacedResult` field and leaves `run.go` untouched.
+- **The plugin.** `ranLocally` takes a result as well as a placement string and reads `ran_on` first; any other value falls back to the placement text, read exactly as before, so an older node and a result nothing ran read as they always did. `delegateDigest` counts by it, and a deferred result with no `ran_on` (a defer no seat ran) is neither local nor remote any more, unless its placement text names the local seat, which a delegator that predates `ran_on` still writes for a defer on its own seat: it used to count remote, so one local run beside one defer printed "pair landed" for work nobody did. When nothing ran on a node the line says "nothing ran on a node" instead of "all local" if some rows ran nowhere.
+- **Known limits.** A node's answer that the delegator re-packed itself still reads `node`. The field shows on a fleet only after the delegator is deployed.
+- **Tests.** `internal/delegate/ran_on_test.go` (seven, plus a wire fixture, `testdata/ran_on_wire.json`) and five TypeScript tests in `integrations/opencode/test/plugin.test.ts`, written first: before the change `ran_on = "" (present false), want "local"` and `delegate placement: 1 local, 0 remote of 1.` where the misread placement now reads `0 local, 1 remote of 1`; the existing `ranLocally reads a placement that opens with no hint clause as it always was` stays green. Seven mutations (four Go, three TypeScript), each reverted in turn, fail a test they name. **Review round**, tests first and seen red: `internal/delegate/ran_on_cut_test.go` (three) showed `ran_on = "node"` for a job the node confirmed it took back, and for one its own record says it never ran, after the call deadline cut the row, and no `ran_on` on the queue lane (`TestRunQueueRouteEndToEnd` now asserts `node` where it pinned the gap); three more TypeScript tests, two of which failed first with `1 local, 1 remote of 2 — pair landed.` for one local run beside a defer no seat ran (the third guards the wording the fix touches). Nine more mutations (five Go, four TypeScript), each reverted in turn, fail a test they name: either half of the `placedWhere` marks dropped, the queue answer's mark dropped (and, separately, passed empty from the poll arm and from the deadline-look arm), the digest's defer rule off, its local-defer exception dropped, its node-defer exception dropped, and the "nothing ran on a node" wording replaced.
+- **Docs.** `docs/systems/fleet-node.md` ("Where a result ran") and `docs/systems/opencode-integration.md` ("Wire fields the plugin reads", the table of the fields the digest reads).
+
+### Added — `offload_status` names the image an MCP server runs and says when the installed build has moved on (D-36)
+
+- **What was wrong.** A rename-swap deploy replaces the installed binary while every MCP server already running keeps the
+  image it started from, so a session wrote rows with old behaviour for days and nothing said so: `offload_status` announced
+  only the version it started with, and `gpu doctor` listed 13 older-build harness processes beside 10 current ones
+  (2026-10-11) for the operator to compare by eye. Underneath, `buildinfo.BuildSHA256` hashed the executable lazily at its first
+  call, so a long-lived process whose first delegation came after a swap hashed the NEW file at the path it started from and
+  stamped its rows `harness_build_sha256` of a build it was not running.
+- **The fix.** `buildinfo.CaptureStartup()` takes that one latch at start (the version, the hash, the path and the stat of the
+  image, read through one handle); `runMCP` calls it before anything else and `mcpserver.Run` holds the identity on the `Server`. `offload_status` gains a
+  `process` block `{version, build_sha256, installed_version?, stale_image?, note?}`, built from the identity the server holds
+  (absent for a server that holds none, `{}` when asked for by name, as `pair` is): `stale_image` is `true` when the installed
+  bytes differ from the image the process started from, `false` when they are equal, and absent with a `note` when the installed
+  file cannot be read. A status call hashes the installed file only once its stat has moved from the one the process saw at
+  start, and caches the result per stat. `gpu doctor` marks each running binary older than the installed build
+  (`older_than_installed` in `--json`, a line and a summary with the pids in the text), reading the installed version from the
+  installed file through the audit's own marker reader (`gpulease.ReadBuildMarkerVersion`, exported from the audit's scan).
+  A short CLI call never captures and keeps the lazy hash, so a hook invocation does not hash the whole executable.
+- **The default answer moves.** The full `offload_status` answer gains the `process` block, so
+  `testdata/offload_status_default.golden.json` is re-pinned (`OFFLOAD_UPDATE_GOLDEN=1`) and `statusFixture` injects a fixed
+  startup identity: the pinned answer carries constant values and never the test binary's own hash.
+- **Tests.** `internal/buildinfo/stale_test.go` (the hash after a swap is the captured image's, once-only capture, the lazy path
+  for a process that never captures, an unreadable image is absent and not invented), `internal/gpulease/buildmarker_test.go`
+  (the exported reader, across a read-chunk edge, no marker, missing file), `internal/mcpserver/stale_image_test.go` (stale
+  after a swap in both directions, fresh for the same bytes, unknown for an unreadable file, no hash while the stat is
+  unchanged, the block in the full answer, the injected identity and never the test binary's, absent without an identity, `Run`'s
+  identity equals the pair a row carries) and `gpu_doctor_stale_test.go` (older marked, the installed version read from the file
+  and not the doctor's own constant, no marker is never older, an unreadable installed version is said and compares nothing),
+  written first and seen red.
+- **Not changed.** Processes started before this build show no block (they predate the field), so the real-world proof is the
+  next rename-swap. The fleet node (`runFleetServe`) captures too since the integration review round at the top of this section; it runs no MCP
+  server, so it serves no `process` block. A `stale_image` column on ledger rows is not added: a reader compares the
+  row's hash with the deployed one.
+
+### Added — `gpu status` and `offload_status` show the driver's fault events for the leased card (C-83-B, A-128 part 3)
+
+- **What was missing.** A card that faults under a lease leaves one line in the driver's log (Windows: the System log, provider
+  `nvlddmkm`, id 153 `Error occurred on GPUID: b500`; Linux: `NVRM: Xid (PCI:0000:b5:00): 79, ...` in the kernel log), and nothing
+  in the harness showed it: 181 id-153 events since 2026-09-22 on the reference box were found by hand, weeks after the fact.
+- **What it does now.** `gpuactivity.ReadDriverEvents` reads the last 24 h and places each event on its card by PCI bus and device
+  (the record's GPUID `b500` is bus `b5`, device `00`; `nvidia-smi --query-gpu=index,uuid,pci.bus_id` ends `B5:00.0`; a second
+  small query inside `gpuactivity`, so the card sample is unchanged). The activity snapshot keeps the events of the cards the lease
+  holds (every card for a whole-node lease), newest first and capped at 20, counts those that name no card this box can place
+  (`driver_events_unattributed`: the Windows id 13 Graphics Exception records, 420 in 96 h on the reference box, carry no GPUID),
+  and carries a reader failure as `driver_events_note`. They print in `gpu status` (text, and `--json` under `activity`) and ride
+  in `offload_status.gpu_lease.activity`. **Facts, never a verdict**: a fault and a kill look alike in the log (A-128's kill test
+  tells them apart and is queued), so an event never moves the verdict, the brief line or any gate; a box with no source prints
+  byte-identically to before.
+- **Read-only, hidden, bounded.** Windows: one `powershell.exe` from System32 (`-NoProfile -NonInteractive`), a read-only
+  `Get-WinEvent` over the System log's `nvlddmkm` provider (24 h, the newest 1000, each record as XML; a log with no match is an
+  empty answer). Linux: `journalctl -o short-unix --since "24 hours ago" _TRANSPORT=kernel` (every boot in the window), then
+  `dmesg --time-format iso` (this boot only, and said). Every child starts through `internal/winexec`
+  (`TestEveryChildProcessStartIsHidden` stays green), the log read is bounded at 8 s and the card-table query has its own 4 s, and the
+  answer is cached for 60 s in the process (failures too), so a poll of the long-lived MCP server starts no child per call (each
+  `gpu status` is a fresh process and pays one read). The record's host name, user and device object
+  path are not carried. The reader is called only while a lease is held and the GPU sample is on.
+- **Checked live, read-only.** The production reader on the reference workstation: a 24 h window with no match returned no events
+  and no error in 0.6 s; a 96 h window through the same child and pipe returned 434 records (420 id 13, 14 id 153), all parsed, the
+  14 id-153 ones placed on cards 1 and 2 by the bus table.
+- **Tests.** `internal/gpuactivity/driverevents_test.go` (the parsers over a fixture of two real records hand-reduced with the
+  host name replaced, the kernel-log lines in journalctl and dmesg forms, the bus table in either case, the readers behind their
+  seams: one System32 PowerShell that is read-only, journalctl then dmesg, the window, the card table failing, the 60 s cache and a
+  cached failure; the snapshot: only the leased cards' events, whole-node, newest first and capped, unplaced counted, nothing read
+  without a lease or the GPU sample, no key for a box with no source, a reader failure as a note, the verdict untouched),
+  `internal/mcpserver/driver_events_status_test.go` and `gpu_status_driverevents_test.go` (both surfaces), written first and seen
+  red.
+- **Not changed, for a follow-up.** A-128's kill test (does killing a healthy render mid-sampling log id 153?) is queued, not
+  built, so these events stay facts. The Linux `Xid` line shape is the documented one: neither Linux gate host has an NVIDIA card
+  to have logged one.
+
+### Fixed — review round on the stale-image block and the driver-event reader (D-36, C-83-B)
+
+Seventeen review findings (twelve distinct), each read against the code and fixed below, with its test written first and
+seen red.
+
+- **A card on a low PCI bus was never placed (C-83-B).** The driver prints the GPUID as the unpadded hex of `(bus << 8 | device)`:
+  a card on bus `01` logs `GPUID: 100` (read from a one-card laptop's System log, both `Error occurred on GPUID: 100` and
+  `UCodeReset TDR occurred on GPUID:100`, no space after the colon). The reader matched exactly four digits, so every one-card box
+  placed none of its events and called them "no card this box can place". `busOf` now reads one to four hex digits as a number and
+  splits it; `TestBusOfReadsEveryGPUIDSpelling`, `TestParseWinEventsPlacesACardOnALowBus` (a fixture hand-reduced from those records).
+- **A failed card table was silent (C-83-B).** When `nvidia-smi --query-gpu=index,uuid,pci.bus_id` failed, every event (the leased
+  card's own fault included) was left unplaced, counted as "name no card", cached for a minute, with no note. The events now come
+  back with an error that names the table and nvidia-smi's reason (`driver events incomplete: the card table could not be read
+  (...)`), are not counted as unplaced-by-nature, are held 10 s instead of 60, and the table query has its own 4 s budget
+  instead of what the 8 s log read left. `TestReadDriverEventsSaysWhenTheCardTableCannotBeRead`, `TestTheCardTableQueryHasItsOwnBudget`,
+  `TestACardTableFailureIsRetriedSoonNotHeldForAMinute`, `TestSnapshotSaysWhenEventsCouldNotBePlacedAndDoesNotBlameThem`.
+- **A short list read as the whole (C-83-B).** A record that is not XML after good ones used to end the read silently; the older
+  events it cut off are now said (`the event log read stopped after N record(s)`). `TestAPartialWindowsReadReturnsTheEventsAndSaysItStopped`,
+  `TestSnapshotNotesAnIncompleteReadAndStillShowsTheEvents`.
+- **Linux read only the current boot (C-83-B).** `journalctl -k` implies `-b`, so a fault that preceded a reboot (an Xid 79 usually
+  ends in one) was invisible under a "last 24 h" label: on a gate host with four boots in its journal, seven days read 2528 lines
+  with `-k` and 4226 across every boot. The kernel transport is now a match (`_TRANSPORT=kernel`); the `dmesg` fallback, which holds
+  this boot only, says so. `TestTheLinuxReaderReadsEveryBootInTheWindow`, `TestTheDmesgFallbackIsSaidToBeThisBootOnly`.
+- **`gpu status` pays the read every call; the docs said it did not (C-83-B).** The 60 s cache is process memory, so it serves the
+  long-lived MCP server and not the CLI, a fresh process per call (about 0.6 s on Windows, measured). The docs and the
+  header comments now say so; no state-dir cache was added.
+- **The brief read events it threw away (C-83-B).** `offload_status {section:"brief"}` made the lease view start the PowerShell
+  read under a held lease and returned none of it. The lease view takes whether the caller returns the events; the brief passes
+  no. `TestBriefMakesNoDriverEventReadButTheLeaseSectionDoes`.
+- **The stale-image signal was missing from the brief (D-36).** The call the tool's description tells a caller to make first
+  returned no `process` block, so a stale server stayed invisible there. The brief now carries the same block under the same key
+  (absent for a server with no identity). `TestStatusBriefCarriesTheStaleImage`, and the pinned brief key set moves with it.
+- **One failed read of the installed file hid the stale image for good (D-36).** The hash and marker errors were cached against
+  the file's unchanged stat, so a sharing violation during a deploy read "unknown" for the life of the process. Only a read that
+  succeeded is kept now, the hash and the marker apart (a retry repeats only what failed), and an unreadable marker is said in the
+  note. `TestStaleImageRetriesAfterATransientHashFailure`, `TestStaleImageRetriesAfterATransientMarkerFailureAndSaysSoMeanwhile`.
+- **A process whose own start-up hash failed explained nothing (D-36).** `build_sha256` was simply absent, on the stat-equal path
+  with no note; the note now says the self-hash failed and its rows carry no `harness_build_sha256`. `TestProcessBlockSaysWhenItsOwnStartupHashIsUnknown`.
+- **The image was captured after the pipeline opened (D-36).** `runMCP` took the capture in `mcpserver.Run`, after `openPipeline`; a
+  swap landing during start-up was hashed as the image the process runs. It is the first statement of `runMCP` now.
+  `TestRunMCPCapturesTheStartupImageBeforeOpeningAnything` (a source-order pin, the repo's style for a call order).
+- **`gpu doctor`'s two wrong sentences (D-36).** An unresolved executable path was reported as "the installed build carries no
+  build marker"; and a doctor run from a worktree or dev build compared the deployed processes with a build that is not
+  installed and told the operator to restart them. The path is named as the cause now, and a doctor that is not the harness binary
+  PATH resolves compares nothing and says why (a doctor that is the PATH copy, or PATH names none, behaves as before).
+  `TestGPUDoctorBlamesAnUnresolvedExecutablePathNotAMissingMarker`, `TestGPUDoctorComparesNothingWhenItIsNotThePathCopy`, and the guard
+  `TestGPUDoctorStillMarksWhenItIsThePathCopy`.
+- **Not changed.** The residual window between the process starting and `runMCP`'s first line (the Go runtime and package
+  init) is not closable from inside the process. (`runFleetServe` did not capture when this round was written; the integration
+  review round at the top of this section made it the first statement there too.)
+
+### Fixed — a bare `--` ends the flags on the media CLI verbs, so a positional that starts with `-` can be passed (CT-52)
+
+- **The defect.** `splitArgs`, `splitTwoArgs`, `splitThreeArgs` and `splitFourArgs` (`main.go`) sent every token that starts with `-`
+  to the flags, so `generate-audio out.wav "--- Intro ---"` came back with an empty text (the `--- Intro ---` was a flag) and the same
+  held for a prompt that opens with a dash on `generate-video`, `animate-character` and the fifteen call sites of `splitArgs`.
+  The engine side already did it right (`runnerArgs` puts `--` before the positionals); only the CLI door lost the text.
+- **The fix.** A bare `--` ends flag handling in all four helpers: every later token is a positional, in order, even when it starts
+  with `-`; a lone `-` is still the stdin positional. The user's `--` is consumed by the helper. A positional past the helper's arity
+  still goes to the flags the caller gives `fs.Parse` (as it always did), but once the terminator was seen the helper writes ONE `--`
+  of its own in front of the first such token, so `fs.Parse` stops there and can never read a leading dash as a flag. That is a
+  deliberate departure from the backlog wording ("do not leave the `--` token in the list handed to `fs.Parse`"): the user's token is
+  never passed on, the fence is the helper's own, and a test pins the returned flags exactly. With no `--` in the arguments every
+  helper returns what it returned before. `endsFlags` and `isFlagArg` hold the two rules once. The generate-audio command line is
+  factored into `parseGenerateAudio`, as generate-video already was, so the verb's own parse is testable. Usage text and
+  `docs/OPERATOR-GUIDE.md` say so.
+- **Tests.** `main_test.go`: one terminator test per helper plus a table over all four, the lone-dash guard, the flags-before-terminator
+  guard, the over-arity fence (for every helper, and through `fs.Parse`), a no-terminator guard, a value flag that takes a following `--`
+  as its value, and the two verbs' parse. Red before (targeted runs on a Linux gate host): the dash-led text
+  came back empty from `splitTwoArgs` (`= ("out.wav", "", [-- --- Intro ---])`) and the other three. Five mutants, each applied to one line of `main.go` and run on a Linux gate host through
+  `scripts/mutation-check.sh` (every verdict line: `MUTATION-VERDICT: RED (the mutant compiles and the tests fail: the tests catch this
+  mutation)`): `endsFlags` never true and `isFlagArg` ignoring the terminator turn the per-helper terminator tests and the table over all
+  four helpers red; `isFlagArg` without its lone-dash exemption turns `TestSplitArgsKeepsALoneDashAsThePositional` red; `overflowArg`
+  without its fence turns `TestSplitTwoArgsOverArityAfterTheTerminatorIsHandedToParseBehindOneDashDash`,
+  `TestSplitHelpersOverArityFenceTheirOverflow` and `TestParseGenerateAudioCarriesADashLedTextToTheRequest` red; a fence written before
+  every overflow token turns the first two red.
+
+### Fixed — a bound media route whose weight is missing defers typed `route_not_ready` before the lease on the local path (CT-54)
+
+- **The defect.** A fleet node refuses a media job for a route it binds but cannot run (a weight deleted, an engine binary moved) at its
+  door, with a 503 and the route's verdict. The local lanes never asked: with the fastwan `sdcpp_model` pointing at a missing file a
+  local `generate-video` took the media lease, spawned the runner, and deferred `err_class` `other` ("--model not found") 31 ms later
+  (the 0.173.0 live gates, 2026-10-08, as the backlog recorded them): fail-closed, but untyped, and after a lease other callers had waited behind.
+- **The fix.** The five engine lanes (sdcpp video, sdcpp animate, audio.cpp voice and music, the sdcpp image lane) read the same
+  `mediacap` derivation the node door, `doctor` and `offload_status` read (`internal/pipeline/igpumedia_routeready.go`), after their own
+  checks that every required key is set and before they resolve the runner script and the engine binary, create the output directory, mint
+  the seed, refine the prompt or take the lease. A route that derives BOUND-BUT-MISSING (a weight, the engine binary or the runner script
+  is not there) defers with the new `err_class` `route_not_ready`; the reason names the route, the config key and the missing path and says
+  another node may serve it. A required key left unset (nothing bound, or one key of several: mediacap reads the second BOUND-BUT-MISSING
+  on the video, animate and audio routes) keeps the lane's own sentence, which names the key, and no class; that is a configuration gap,
+  not a missing file, and the sdcpp image route reads it NOT CONFIGURED anyway. (Fix round: the hook first stood after the lanes' script and
+  binary resolutions, so a moved binary or a gone script still deferred untyped while the docs said they were typed; it moved above them.)
+  A video family that is not the default is judged on its own route (`generate_video:<family>`). The ledger files the class as
+  `config` (`internal/ledger/reasoncode.go`); no circuit breaker counts it (the breaker judges the llama tiers, no media lane reaches it).
+  The test fixtures that bound weights by name only (`/models/x.gguf`, `m.gguf`) now point at real files: a route with a missing weight
+  is exactly what the lanes now refuse. 34 tests of the pipeline package and one of the root package (`TestFleetMeasureProbesAnSdcppVideoAndAnAudiocppMusicBox`) ran a
+  lane against a stub runner with the weights named and absent: they failed on a full package run before the fixture change and pass after it.
+- **Tests.** `igpumedia_routeready_test.go` (five lanes by table: the weight is deleted and the lane defers `route_not_ready` naming the
+  key and the path, takes no lease, creates no output directory, never runs the runner, and the ledger row carries the class and
+  `config`; the reason sentence; a non-default family; the guards that a complete route still runs, an unbound route keeps its old
+  sentence, and the lane agrees with `mediacap.Routes`). Red before: every lane ran (`want a typed defer, got ok=true`) and the sdcpp
+  image lane's failure was classed `other`. Nine mutants (`scripts/mutation-check.sh`, all `RED`): the derivation read as NOT CONFIGURED instead of
+  BOUND-BUT-MISSING and the route name match dropped turn the lane table, the reason test, the family test and `TestAWeightThatIsThereStillRuns` red; a
+  wrong `err_class` string turns the lane table and the reason test red; every family judged on the default route turns
+  `TestAVideoFamilyThatIsNotTheDefaultIsJudgedOnItsOwnRoute` red; each lane's hook removed in turn (video, animate, audio, image) turns that
+  lane's row of `TestEngineLanesDeferTypedBeforeTheLeaseWhenTheirWeightIsMissing` and of `TestTheLaneAndTheNodeDoorReadTheSameVerdict` red and no other; the
+  ledger table without `route_not_ready` turns the lane table's ledger assertion red.
+  Fix round: `igpumedia_routeready_files_test.go` `TestEngineLanesDeferTypedBeforeTheLeaseWhenTheirBinaryOrScriptIsMissing` (the engine
+  binary and the runner script of the video lane, the engine binary, the depth binary and the script of the animate lane, binary and
+  script of voice and of music, binary and script of the image lane; each first asserts that mediacap reads the route CONFIGURED, then
+  BOUND-BUT-MISSING once the file is gone, then that the lane defers `route_not_ready` naming the key and the path, takes no lease,
+  creates no output directory and files one ledger row of class `config`). Red before, on the code with the hook after the resolutions
+  (run again on an extract of the red-tests commit): ten of the eleven cases came back with an empty `err_class` (the lane's "not found"
+  sentence); the eleventh, the image lane's engine binary, is a guard (that lane never resolves the binary itself and already deferred
+  typed). The image lane's script defer also carried the default model tier instead of its sdcpp model. `TestAnUnboundRouteKeepsItsOldDefer`
+  used to unset the VAE only, a route mediacap reads BOUND-BUT-MISSING, under the name of the nothing-bound case; it now clears every
+  required key of four lanes (premise: NOT CONFIGURED), and the half-bound case is `TestARouteWithAKeyLeftUnsetKeepsTheLanesOwnSentence`
+  (premise: what mediacap reads for each route). Five more mutants (`scripts/mutation-check.sh`, all `RED`): the video lane's required-key
+  checks removed turns the half-bound test's video row red; each lane's hook removed in turn (video, animate, audio, image) turns that
+  lane's row of `TestTheLaneAndTheNodeDoorReadTheSameVerdict` red.
+
+### Fixed — a dead ComfyUI is a typed class on the Go side, and `POST /prompt` and `GET /view` can time out (D-38, issue #72)
+
+- **The defect.** Two of the four follow-ups of issue #72 were still open. (2) `gpugen.ClassifyErr` and `pipeline.classifyErr` had no
+  class for a ComfyUI that stopped answering: `comfy-render.mjs` exits 3 on it (`RENDER_EXIT_SERVER_UNUSABLE`), and the Go side filed the
+  failure `other`. (3) `rawSubmit` (`POST /prompt`) and `fetchView` (`GET /view`) passed no `AbortSignal` (`/system_stats`, `/queue` and
+  `/history` always did), so a ComfyUI that accepts the connection and never answers held the exclusive GPU slot.
+- **The class.** `comfy_unusable` joins `gpugen`'s runner allow-list, so `Generate` returns a `RunError` of that class for any child
+  that prints `IGPU_CLASS=comfy_unusable` on a line of its own (it reads the retained output of any child, so no new parser).
+  `comfy-render.mjs` prints the line after its `RENDER FAILED:` line for a `serverUnusable` error (`reportRenderFailure`) and still exits
+  3; `comfy-generate.mjs` relays its child's stderr unchanged (`relayRenderChild`, moved into `batch-jobs.mjs` with the child injected so
+  the crossing is testable), so the line reaches the output the Go side reads. `pipeline.classifyErr` gets the `*gpugen.RunError` branch
+  `gpugen.ClassifyErr` already had, so the lanes that file a gen failure through it (the ComfyUI image, edit, inpaint and upscale lanes)
+  record the typed class instead of re-guessing it from the words of the message (a "zoom lens timeout" read as `oom`). The ledger files
+  `comfy_unusable` as `infrastructure`. The image `--batch` needed more (fix round): a batch that meets a dead ComfyUI stops and writes a
+  row for every job (the one it stopped on, `comfy-render exited 3: ...`, and `not run: ComfyUI became unusable at job i/N (...)` for each
+  later one), so `batchErrClass` never reached the batch error and read the words of each row, which name no class: a C-83 batch filed
+  every row `other`. `batchErrClass` now files the not-run rows, and the exit-3 row when the batch's class is `comfy_unusable`, with the
+  batch's typed class; a job that failed on its own before the stop keeps the class its words give. Only the image runner prints the line
+  today; the other ComfyUI runners (the inpaint `--batch` among them) raise the same error and are a follow-up.
+- **The bounds.** `rawSubmit` is bounded by `SUBMIT_TIMEOUT_MS` (120 s: the call validates and queues, it does not run) and `fetchView`
+  by `VIEW_TIMEOUT_MS` (600 s), which covers the whole request, the body read included. Both take a `timeoutMs` and reject with an error
+  that names the call and the bound (`ComfyUI POST /prompt timeout: no complete answer within N ms ...`); `submitGraph` takes
+  `submitTimeoutMs`. A timed-out `POST /prompt` is also marked *server unusable* (fix round: the flag a timed-out call carried, `timedOut`,
+  had no reader, so a `--batch` went on and paid 120 s on every later job against a ComfyUI that was wedged on that path): the render
+  exits 3 with the class line, a `--batch` stops, and the Go side files `comfy_unusable`. A timed-out `GET /view` is not marked: the render
+  has finished and its output is on disk, so it stays a plain failure and the Go side classes it `timeout`. The healthy paths are
+  unchanged.
+- **Tests.** Go: `TestGenerateReadsComfyUnusableFromAFakeRunner` (a fake runner prints the class and exits 3), `TestRunnerClassReadsComfyUnusable`,
+  `TestRunnerClassStillIgnoresAnInventedClass`, `TestClassifyErrHonoursATypedRunErrorClass`, `TestImageLaneRecordsAComfyUnusableFailureWithItsClass`
+  (the image lane, the result and the ledger row). JS: both calls reject at their bound against an injected `fetchImpl` and against a real
+  socket that accepts and never answers (each races a sentinel timer, so the failure was an assertion and not a hung runner), both pass an
+  `AbortSignal`, the body read is bounded, the relay is verbatim, and the real `comfy-render.mjs` against a server answering HTTP 500 exits 3
+  with the class line on a line of its own. Red before: `Generate` returned an untyped `*fmt.wrapError` (the runner allow-list dropped the line), `classifyErr` answered `oom` for a typed
+  `gpu_reset` whose message said "zoom lens timeout", the image lane's ledger class for a `comfy_unusable` failure was `oom`, 14 of 103 JS tests
+  failed (all new ones; the real script exited 3 as before but printed no class line), and the three timeout tests that would hang against a
+  server that never answers ended at their sentinel timer as assertions, not as a stuck runner. Nine mutants (`scripts/mutation-check.sh`, all `RED`): the runner
+  allow-list without `comfy_unusable` (`TestGenerateReadsComfyUnusableFromAFakeRunner`, `TestRunnerClassReadsComfyUnusable`); `classifyErr`
+  without its RunError branch (`TestClassifyErrHonoursATypedRunErrorClass`, the image-lane test); the abort signal that never fires, a POST without its signal, a GET without its signal, a changed submit
+  bound (the timeout and signal tests, the real-socket test, the constants test); `comfyUnusableClassLine` always empty and
+  `reportRenderFailure` without its class line (`reportRenderFailure`, the real-script test); the relay that drops the child's stderr
+  (the two relay tests).
+  Fix round, three findings. (1) The batch rows: `imagebatch_comfy_unusable_test.go` runs the REAL `runBatchJobs` of `render/batch-jobs.mjs`
+  in a stub batch parent (job 1 renders, job 2 fails on its own with an out-of-memory, job 3 exits 3 with the class line, jobs 4-5 are never
+  run) through `RunImageBatch`; red before: the four failed jobs were filed `[oom other other other]`, now `[oom comfy_unusable
+  comfy_unusable comfy_unusable]`. `TestBatchErrClassFilesTheAbortRowsWithTheBatchsTypedClass` (a word trap, "zoom lens timeout", does not
+  move an abort row; a job that failed on its own keeps its class) and `TestBatchErrClassKeepsReadingWordsWithoutATypedBatchError` (no
+  batch error, an untyped one, a deadline batch's own row, a full-disk not-run row, and an exit-3 row under a `gpu_reset` batch are all
+  unchanged). Five mutants, all `RED`: the not-run rows ignoring the typed class, the exit-3 row taking any typed class, the exit-3 row
+  never typed, every failed row taking the batch's class, and the typed branch removed. (2) A timed-out `POST /prompt` is marked server
+  unusable and a timed-out `GET /view` is not: `comfy-submit.test.mjs` pins both (and the class line), `comfy-render.test.mjs` pins the
+  exit code 3 and the two lines; red before: the render exited 1 and printed no class line. Two mutants, both `RED`: the mark removed
+  (the two POST tests), and every deadline marked (the GET guard). (3) The real-script test of `comfy-render.test.mjs` now bounds its child
+  (30 s kill timer, an error handler): against a mutant that holds the child open for 90 s the old test was still running at 45 s and
+  printed no result, the new one failed at 30.06 s with the bound in its message.
+
+### Added — `audit-yaml` and the write gate refuse the every-expert `--cpu-moe` (W4)
+
+- **The gap.** INV-1 (the cards do the inference, RAM is overflow only) sanctions one host-RAM use for experts: a measured partial
+  `--n-cpu-moe N`. The bare `--cpu-moe` parks every expert layer in RAM. Nothing read a live file for it: `AuditSpill` matches only the
+  partial form, and the seed gate `TestNoGPUTierParksTheMoEExpertsInRAM` reads `profiles.json`, so a hand-edited yaml could carry it
+  undetected.
+- **The rule.** `servingtmpl.AuditCPUMoE` (rule id `cpu-moe`) reads parsed entries (cmd, env, macros expanded) and refuses `--cpu-moe`,
+  `-cmoe`, the draft-model forms (`--cpu-moe-draft`, `--spec-draft-cpu-moe`, `-cmoed`) and the environment twins
+  (`LLAMA_ARG_CPU_MOE`, `LLAMA_ARG_SPEC_DRAFT_CPU_MOE`, any value but an explicit off). It never scans raw text: a stamped file records
+  `"moe_26b": "--cpu-moe -ngl 999"` in its own stamp comment. The partial `--n-cpu-moe N`, `-ncmoe N` and `LLAMA_ARG_CPU_MOE=0` are not
+  this rule's. It is pure and exemption-free.
+- **Two callers, two sources of evidence.** `install render` runs the gate before the stamp exists, so `renderGate` exempts from the
+  resolved profile: the cpu backend (no card to overflow from) and the off-matrix defaults' literal (`--cpu-moe -ngl 999`, which the
+  installer still writes for a box that is not on the tier matrix). It runs after the spill refusal, so a partial placement that names no
+  N keeps its more specific "no N" message. `audit-yaml` holds a file and reads its stamp, trusted only when it is a verbatim render (the
+  spec hash is the hash of the basis it carries and the body still hashes to `body_sha256`): a verbatim cpu render is clean, a verbatim
+  off-matrix render prints the finding as a `note:` line and does not fail the audit, and an unstamped file or one edited since its stamp
+  is judged as a box with a card and the finding says so. An edited stamp exempts nothing.
+- **Not changed (needs a decision).** The installer still writes the bare form in three places: the selftest R4.2 remediation
+  (`setup/selftest.ps1`), the `install.ps1` unknown-profile fallback and `fallbackProfile` for the CUDA family. They are untouched, and
+  the exemptions above keep each of them working; a yaml that R4.2 remediated reads as a `cpu-moe` finding on its next audit.
+  `--override-tensor` placements are not read either.
+- **Tests.** `internal/servingtmpl/audit_cpumoe_test.go` and the root `install_render_audit_test.go`, written first and seen red
+  (`AuditCPUMoE` a no-op: the spelling table found 0 of 12 offenders; `renderGate` passed a table GPU tier carrying the flag; `audit-yaml`
+  printed OK for it). Guards that were green before and after: the partial spill and the off switches, the stamp comment, the existing
+  "no N" refusal, and every shipped tier on both OSes (`TestRenderedTiersCarryNoBareCPUMoE`). Mutants, each turned red by a named test:
+  the `-cmoe` spelling, the environment twin, macro expansion of cmd and of env, each exemption in `renderGate`, an exemption read from a
+  stamp at render time, the cpu exemption in `audit-yaml`, and an unstamped file passing. Read-only, a built binary over a live yaml
+  with two `--n-cpu-moe 14` entries prints `OK`.
+- ADR 0043 gains an amendment that says which evidence each caller reads.
+
+### Added — `audit-yaml` flags an index pin on identical cards and a UUID that names no card (A-87; A-86 stays open)
+
+- **The gap.** `CheckComposite` compares a composite tier's pins at render, and an index and a UUID cannot be shown to be the same card
+  without the box's table. A live yaml that pins `CUDA_VISIBLE_DEVICES=0,2` on two identical cards records nothing about which card was
+  meant, and a reordering of the PCI enumeration (the shipped triple-card template records that its board does it on power loss) moves the seat silently. Nothing asserted
+  that every pin on such a box is by UUID.
+- **The rules.** `servingtmpl.AuditPins` reads each entry as llama-swap runs it (macros expanded; the last setting wins, an inline one
+  over the env list) against the box's card table. `pin-by-index`: a plain index that names a card whose model name another card also
+  carries (the index of a card no other resembles names exactly one card and is left alone; an entry without
+  `CUDA_DEVICE_ORDER=PCI_BUS_ID` is judged by the weaker form, any plain index while two cards share a name; cards with no model name are
+  never called identical). `pin-unresolved`: a `GPU-` UUID or prefix that matches no card, because CUDA hides every device from the first
+  pin it cannot resolve.
+- **Severity follows who maintains the file.** A seed cannot carry a UUID, so the seeded index pins of a verbatim render
+  (`win-triple-blackwell`) are the renderer's own output: a `note:` per entry, exit status unchanged, or the only way to satisfy the rule
+  would be a hand edit, which turns the file HAND-EDITED and red under `--against-render`. The same pin in an unstamped or edited file is
+  its maintainer's choice and a violation. A UUID that names no card is a violation in either. `audit-yaml` reads the table through the
+  existing `renderCardTable` seam and only for a file that pins a device; with no readable table it prints
+  `note: <file>: no card table: pin rules not applied (...)` and the exit status is unchanged, never a silent pass.
+- **Not in this item.** A-86 stays open: comparing each resident to the card its tier intended needs the tier's layer table, which
+  `CheckComposite` has at render and `audit-yaml` does not. The PCI bus id the register row also accepts is not in `gpuprobe.Card`, so
+  only a UUID is the stable form. Promoting the seeded-pin note to a failure waits for an installer step that substitutes UUIDs.
+- **Tests.** `internal/servingtmpl/audit_pins_test.go` and the root `install_render_audit_test.go`, written first and seen red with the
+  rule a no-op (the identical-cards, unresolved-UUID, macro and inline-pin tests failed; `audit-yaml` printed OK for `0,2`). Guards: a
+  unique card's index, UUID pins on identical cards, three distinct names, nameless cards, no card table, and that a file with no pin
+  never reads the table. Mutants, each turned red by a named test: the stamp-state split (both directions), the shared-name condition,
+  the unresolved-UUID rule and the weaker no-PCI-order form. On a three-card box a freshly rendered `blackwell-3x16` audits OK with 13
+  notes and exit 0, and the live yaml of that box (19 UUID pins) audits OK.
+
+### Changed — the hard-rule seed gates are shown to fail on synthetic fixtures (W0.1)
+
+- **The gap.** `TestNoGPUTierParksTheMoEExpertsInRAM` and `TestEveryAgentSeatIsChosenNotDerived` read the real `profiles.json` only, so a
+  gate that went blind (a skip that swallowed everything, a branch that never fires) passed for as long as the real seeds were clean. The
+  0.132.4 note says all three seed gates "were RED on the previous seeds"; no mutation proof was recorded.
+- **The change.** The two rule bodies are `checkNoGPUTierParksTheMoE` and `checkAgentSeatsAreChosen`, functions of a decoded document;
+  the real-document tests call them unchanged in effect. `seed_rules_fixture_test.go` hands them synthetic documents: a cuda tier that
+  seeds `cpu_moe` is refused and names the tier; the cpu tier, a tier that drops or fits the 26B, a `vllm_seat`, an explicit
+  `config_seed.agent_model` beside a differing `resident_tier`, the workhorse read from `config_seed.model` and the harness default are
+  guards; a tier that derives its agent seat from `resident_tier` is refused.
+- **Mutation proof.** Deleting the `Backend == "cpu"` skip, the `cpu_moe` clause, the `explicit` branch, the `VLLMSeat != nil` branch or
+  the workhorse read from `config_seed.model` each turns a named synthetic test red.
+
+### Fixed — review round on the cpu-moe and pin audit rules (A-87, W4)
+
+- **A pin that names no card is a finding, not a pass.** `AuditPins` judged only a `GPU-` UUID that matched no card, so
+  `CUDA_VISIBLE_DEVICES=7` on a three-card box, or a typo, a bare UUID without its prefix or a UUID with a non-ASCII hyphen, printed `OK`
+  while CUDA hid every device from that pin on, the same hazard `pin-unresolved` documents for a UUID (a seat on fewer cards than it was
+  sized for, or on none). `pin-unresolved` now also covers an index that no card has (under `CUDA_DEVICE_ORDER=PCI_BUS_ID` the nvidia-smi
+  index of a card on the table, otherwise a position past the last card) and any token that is neither a plain index nor a `GPU-` UUID.
+  `PinsCUDADevices` counts those tokens, so the card table is read for a file that holds only such a pin. `-1` (it hides every card, so it
+  is no pin on one) and a MIG instance id (a slice of a data-centre card, which a table of whole cards cannot resolve) are not judged. An
+  index that names no card no longer also counts toward the ambiguity rule, so it is one finding and not two. It is a violation in a
+  verbatim render too: a seed that pins index 2 on a two-card box is a render for a bigger box, and a note would excuse it into a dead seat.
+- **`audit-yaml --other-box`.** The pin rules compare a file's pins with the cards of the machine that runs the audit, and nothing in a
+  file or its stamp says which machine it belongs to. A file kept on another machine (the stamp records that machine's paths so the replay
+  does not call it stale) failed `pin-unresolved` on its own UUIDs and exited 1, where before this branch the same call printed `OK`. The
+  default is unchanged. `--other-box` says the files belong to another machine: the pin rules are skipped with a `note:` line that says why
+  and the card table is not read; every other rule still runs. Every pin violation now ends with what it was judged against and the flag (a `note:` for a verbatim render's seeded index pin does not).
+- **Four tests that passed without the rule they name.** A mutant of each survived the servingtmpl tests at the first review commit
+  (`5da1e386`): dropping `--spec-draft-cpu-moe` from the spelling table, matching the `GPU-` prefix case-sensitively (the lower-case UUID case
+  expected zero findings, so it passed either way), reading the env pin over the inline command pin, and treating `-1` as an index. Each now
+  has a case that turns red under it: a row for the spelling, a lower-case UUID that names no card, an entry that pins in both places (in
+  both directions), and `-1` on a box where two cards share a name.
+- **Tests.** The no-card cases were written first and seen red (each of the first nine table cases found 0 findings: the audit was
+  silent; the flag tests failed on the card table being read, the missing note and the missing hint). Mutants, each turned red by a named test: the card-count bound, the
+  PCI-order lookup, the unreadable-token branch, counting such a token as a pin, the MIG exemption, the `-1` exemption, the empty-token
+  exemption, an unresolved index counted as ambiguous, the flag ignored, the flag skipping the pin-less file check, the hint dropped, the
+  flag silencing every rule, and a verbatim render noting every pin finding. A guard walks every tier on both operating systems against a
+  box of eight distinct cards and finds no pin the rules cannot place (`TestRenderedTiersPinOnlyWhatThePinRulesCanRead`; it goes red when an
+  index stops being read as one).
+- **Not changed.** `CUDA_VISIBLE_DEVICES=-1` is still judged by no rule: it hides every card, which `cvd-empty` names only for the empty
+  value. That is a different rule from this one and a change to `Audit`, which runs over every shipped template.
+
 ## [0.183.0] - 2026-10-12 - the display card is open to jobs up to a cap at any presence, a wrapped command pinned outside its lease is moved onto it, a dead wrapper whose job still runs keeps its card, and one bad subtask no longer rejects a whole call
 
 ### Fixed — `TestTheAnchoredClockDropsTheAdmissionAllowance` no longer fails on a loaded box for a cost that is not the poll budget

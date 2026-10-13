@@ -62,7 +62,7 @@ import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
 import { buildKrea2 } from "./wf-krea2.mjs";
 import { buildQwenImage, QWEN_IMAGE_PRESETS } from "./wf-qwen-image.mjs";
 import { buildQwenImage21, snapDim, QWEN_IMAGE_21_DEFAULT_SIZE, QWEN_IMAGE_21_SCHEDULES } from "./wf-qwen-image-21.mjs";
-import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun, serverUnusableError } from "./comfy-submit.mjs";
+import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun, serverUnusableError, comfyUnusableClassLine } from "./comfy-submit.mjs";
 import { RENDER_EXIT_SERVER_UNUSABLE } from "./batch-jobs.mjs";
 
 /** A caller mistake: main() prints the message and exits 2 (never 1, never a render). */
@@ -379,6 +379,16 @@ export function renderExitCode(err) {
   return err && err.serverUnusable ? RENDER_EXIT_SERVER_UNUSABLE : 1;
 }
 
+// reportRenderFailure: what a failed render says before it exits. The "RENDER FAILED:" line is the reason (comfy-generate.mjs
+// keeps it as the job's error); a failure that says ComfyUI can run no more work adds the class line on a line of its own, which
+// the Go side reads (internal/gpugen runnerClass) so the ledger files it as comfy_unusable and not "other" (D-38, issue #72).
+// `say` is console.error, replaced by a collector in tests.
+export function reportRenderFailure(err, say = console.error) {
+  say("RENDER FAILED:", err.message);
+  const classLine = comfyUnusableClassLine(err);
+  if (classLine) say(classLine);
+}
+
 // firstImage: the first node output under `images` — this runner produces images, so a
 // graph whose only outputs are e.g. text previews keeps polling until the budget ends
 // (unchanged from the inline loop this replaces).
@@ -496,5 +506,5 @@ async function main() {
 // endsWith, not a URL comparison: the harness may reach render/ through a junction, and
 // Node reports the main module by its real path.
 if (process.argv[1] && /comfy-render\.mjs$/.test(process.argv[1])) {
-  main().catch(e => { console.error("RENDER FAILED:", e.message); process.exit(renderExitCode(e)); });
+  main().catch(e => { reportRenderFailure(e); process.exit(renderExitCode(e)); });
 }

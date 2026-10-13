@@ -83,6 +83,9 @@ var statusBlockTable = []statusBlock{
 		}
 		return nil
 	}},
+	// The image this process started from and whether the installed build has moved on since (D-36): reported
+	// whenever the Server holds a startup identity (Run takes one), absent for a server that holds none.
+	{"process", func(s *Server, _ context.Context, _ config.Config) any { return s.statusProcess() }},
 }
 
 // statusSectionValues is the section enum: the two composites, then every block.
@@ -96,7 +99,7 @@ func statusSectionValues() []string {
 
 // statusSectionDoc is the section argument's schema description. Kept short on
 // purpose: clients that inline tool schemas pay for these bytes on every call.
-const statusSectionDoc = "all (default): everything. brief: fleet + one-line gpu_lease and local verdicts + the per-card table (gpu_cards). Any other value: that block only."
+const statusSectionDoc = "all (default): everything. brief: fleet + one-line gpu_lease and local verdicts + the per-card table (gpu_cards) + process (is this server stale). Any other value: that block only."
 
 // statusInputSchema is offload_status's input schema, its enum built from the
 // same table the handler dispatches on.
@@ -174,11 +177,16 @@ func (s *Server) statusPayload(ctx context.Context, cfg config.Config, section s
 // each card, its holder, the per-lease device sets, the queue). The two lines get
 // their own keys rather than reusing gpu_lease/local, so a consumer that decodes
 // those blocks as objects never meets a string under the same name.
+//
+// process is the one exception to "a line": it is the full answer's own process block, same key and same shape (D-36),
+// because the brief is the call the tool's description tells a caller to make first and the stale-image signal has to
+// ride it; it is absent for a server that holds no startup identity, as in the full answer. The brief reads no driver
+// event (it returns none), so it asks the lease view for none.
 func (s *Server) statusBrief(ctx context.Context, cfg config.Config) map[string]any {
 	fleet := s.fleetView(ctx, cfg)
 	seat, _ := fleet["local_agent_seat"].(map[string]any)
-	leaseView, act := localLeaseViewWithActivity(ctx, cfg)
-	return map[string]any{
+	leaseView, act := localLeaseViewWithActivity(ctx, cfg, false)
+	brief := map[string]any{
 		"fleet":             fleet,
 		"gpu_lease_verdict": gpuLeaseVerdictLine(leaseView),
 		// The per-card table (plan P3): which card each lease holds, free VRAM, the
@@ -187,6 +195,10 @@ func (s *Server) statusBrief(ctx context.Context, cfg config.Config) map[string]
 		"gpu_cards":     gpuCardsSection(cfg, act),
 		"local_verdict": localVerdictLine(ctx, cfg, seat),
 	}
+	if p := s.statusProcess(); p != nil {
+		brief["process"] = p
+	}
+	return brief
 }
 
 // gpuCardsSection is the brief's per-card block. The card table comes from the same

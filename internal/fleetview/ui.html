@@ -75,7 +75,7 @@ function render(o){
   $('#cards').innerHTML=nodes.map(card).join('');
   const rows=[];
   for(const n of nodes)for(const j of (n.jobs||[]))rows.push({t:j.accepted_at,node:n.node_id||n.base,task:j.task,model:j.model,state:j.state,wall:j.wall_ms,msg:j.error});
-  for(const d of (o.delegations||[]))rows.push({t:d.ts,node:d.node,task:'delegate',model:d.seat,state:d.deferred?'deferred':(d.acceptance_pass?'passed':'failed'),wall:d.wall_ms,msg:d.error||d.defer_class||d.placement_reason});
+  for(const d of (o.delegations||[]))rows.push({t:d.ts,node:d.node,task:'delegate',model:d.seat,state:d.refusal?'refused (re-placed)':(d.deferred?'deferred':(d.acceptance_pass?'passed':'failed')),wall:d.wall_ms,msg:d.error||d.defer_class||d.placement_reason});
   rows.sort((a,b)=>b.t-a.t);
   $('#jobs').innerHTML=rows.slice(0,100).map(r=>`<tr><td>${ago(r.t)}</td><td>${esc(r.node)}</td><td>${esc(r.task)}</td><td>${esc(r.model)}</td><td>${esc(r.state)}</td><td>${typeof r.wall==='number'&&r.wall?(r.wall/1000).toFixed(1)+'s':''}</td><td>${esc(r.msg)}</td></tr>`).join('');
   $('#errors').innerHTML=(o.errors||[]).slice().reverse().map(e=>`<tr><td>${ago(e.at)}</td><td class="sev-${esc(e.severity)}">${esc(e.severity)}</td><td>${esc(e.node)}</td><td>${esc(e.source)}</td><td>${esc(e.message)}</td></tr>`).join('');

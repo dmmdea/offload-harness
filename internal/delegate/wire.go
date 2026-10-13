@@ -89,6 +89,12 @@ type SummaryWire struct {
 	Shed   int `json:"shed,omitempty"`
 }
 
+// The values of ResultWire.RanOn.
+const (
+	RanOnLocal = "local"
+	RanOnNode  = "node"
+)
+
 // ResultWire is one subtask's published outcome. Failed marks a
 // transport/config failure (distinct from a defer — the node never reported);
 // wall_ms is the DELEGATOR-observed round trip, not the node's own wall
@@ -96,10 +102,19 @@ type SummaryWire struct {
 type ResultWire struct {
 	Node string `json:"node"`
 	Seat string `json:"seat"`
-	// Placement is the placement REASON, a string — the opencode plugin and
-	// fleet_smoke read it as text (council R4), so the composite decision is
-	// published beside it as Placed, never folded into it.
+	// Placement is the placement REASON, a string — read as text (council R4) — so the composite decision is
+	// published beside it as Placed, never folded into it. Where the subtask RAN is RanOn, not a word in this text:
+	// the opencode plugin reads RanOn first and this text only when a result has none.
 	Placement string `json:"placement"`
+	// RanOn (D-32) says where the subtask RAN, as a closed value: RanOnLocal, the delegator's own seat, or RanOnNode, a
+	// fleet node (a route queue answer a claiming node filed reads node). Absent when no seat ran the work (a defer, a shed,
+	// a refusal chain, a subtask that never started, a job a node took back or whose record says it never ran, even when the
+	// call deadline cut the row afterwards) and on a result from a delegator that predates it. A job the deadline cut while a
+	// node still held it reads node: it was placed and dispatched there and may start. It is stamped in one place,
+	// WireResponse, from placedWhere: the decision that also writes the hint clause and the pin tallies, so it cannot
+	// disagree with them. Placement stays the reason, in words; a reader that wants the location reads this, never the word
+	// "local" in that text.
+	RanOn string `json:"ran_on,omitempty"`
 	// PinReason (ADR 0078) is the closed reason the caller pinned the call under (privacy, locality, measurement,
 	// operator). Present only on a call pinned with one; a route local or remote that gave none is a hint, and the
 	// placement above opens by saying whether it was honoured or overridden. omitempty — every other result
@@ -414,6 +429,14 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 		// Set beside, not inside, the literal above: a key longer than every other would
 		// re-align the whole block.
 		rw.RepackAttemptsDetail = firstRepackAttempts(pr.Result.RepackAttemptsDetail, wireRepackAttemptsMax)
+		// Where it ran (D-32): the one decision that already writes the hint clause and the pin tallies. A result no
+		// seat ran (placedNowhere) keeps the key off the row.
+		switch placedWhere(pr) {
+		case placedLocal:
+			rw.RanOn = RanOnLocal
+		case placedRemote:
+			rw.RanOn = RanOnNode
+		}
 		if pr.Err != "" {
 			rw.Failed = true
 			rw.Reason = pr.Err

@@ -19,6 +19,8 @@ package mcpserver
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +35,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -42,7 +45,21 @@ import (
 // statusBlocks is every top-level block of the full payload, written out here
 // rather than imported so a wrong implementation list cannot make these tests
 // pass by agreeing with itself.
-var statusBlocks = []string{"local", "media", "remote", "accelerators", "reuse", "fleet", "kv_cache_server", "gpu_lease", "pair", "media_queue"}
+var statusBlocks = []string{"local", "media", "remote", "accelerators", "reuse", "fleet", "kv_cache_server", "gpu_lease", "pair", "media_queue", "process"}
+
+// The startup identity statusFixture injects (D-36): a fixture version and the image it names, so the process block
+// is present in the pinned answer with constant values and the test binary's own build hash never reaches a golden.
+// The installed file is the image the "process" started from and has not moved, so the block reads fresh.
+const (
+	fixtureImageVersion = "9.9.9-fixture"
+	fixtureImageBody    = "local-offload fixture image\x00offload-build-version=" + fixtureImageVersion + "\x00"
+)
+
+// fixtureImageSHA is the SHA-256 of fixtureImageBody, the build_sha256 the golden pins.
+func fixtureImageSHA() string {
+	sum := sha256.Sum256([]byte(fixtureImageBody))
+	return hex.EncodeToString(sum[:])
+}
 
 const statusGoldenPath = "testdata/offload_status_default.golden.json"
 
@@ -97,6 +114,10 @@ func statusFixture(t *testing.T) (*Server, config.Config, func(string) string) {
 	t.Setenv("GPU_LOCK", "")
 	statusSamplesGPU = false
 	t.Cleanup(func() { statusSamplesGPU = true })
+	// No driver-event reader: a test that turns the GPU sample on with a fake sampler must not start PowerShell.
+	oldDriverEvents := statusDriverEvents
+	statusDriverEvents = nil
+	t.Cleanup(func() { statusDriverEvents = oldDriverEvents })
 
 	cfg := config.Default()
 	cfg.Endpoint = upstream.URL
@@ -132,6 +153,16 @@ func statusFixture(t *testing.T) (*Server, config.Config, func(string) string) {
 		}
 	}
 
+	// The process block (D-36): an installed image on disk and the startup identity of a process that began from it.
+	image := tmp + "/local-offload.exe"
+	if err := os.WriteFile(image, []byte(fixtureImageBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	imageStat, err := os.Stat(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	escaped, _ := json.Marshal(tmp)
 	tmpJSON := strings.Trim(string(escaped), `"`)
 	norm := func(s string) string {
@@ -141,7 +172,9 @@ func statusFixture(t *testing.T) (*Server, config.Config, func(string) string) {
 		s = pinsStartedAt.ReplaceAllString(s, `"started_at":"@PINS_START@"`)
 		return strings.ReplaceAll(s, tmpJSON, "@TMP@")
 	}
-	return New(pipeline.New(cfg, nil, nil, nil)), cfg, norm
+	s := New(pipeline.New(cfg, nil, nil, nil))
+	s.startup = &buildinfo.Startup{Version: fixtureImageVersion, SHA256: fixtureImageSHA(), Path: image, Size: imageStat.Size(), ModTime: imageStat.ModTime()}
+	return s, cfg, norm
 }
 
 // statusCall runs offload_status over an in-memory MCP transport — the path a
@@ -284,8 +317,12 @@ func TestStatusBriefIsTheFleetPlusTwoVerdictLinesAndTheCardTable(t *testing.T) {
 	briefRaw := norm(statusCall(t, s, json.RawMessage(`{"section":"brief"}`)))
 	brief := decodeObject(t, briefRaw)
 
-	if keys := sortedKeys(brief); !reflect.DeepEqual(keys, []string{"fleet", "gpu_cards", "gpu_lease_verdict", "local_verdict"}) {
-		t.Fatalf("brief keys = %v, want [fleet gpu_cards gpu_lease_verdict local_verdict]", keys)
+	// process: the stale-image signal (D-36) rides the call the tool's own description tells a caller to make first.
+	if keys := sortedKeys(brief); !reflect.DeepEqual(keys, []string{"fleet", "gpu_cards", "gpu_lease_verdict", "local_verdict", "process"}) {
+		t.Fatalf("brief keys = %v, want [fleet gpu_cards gpu_lease_verdict local_verdict process]", keys)
+	}
+	if !reflect.DeepEqual(brief["process"], full["process"]) {
+		t.Fatalf("brief.process must be the full answer's process block.\n got: %v\nwant: %v", brief["process"], full["process"])
 	}
 	if !reflect.DeepEqual(brief["fleet"], full["fleet"]) {
 		t.Fatalf("brief.fleet must be the full fleet block.\n got: %v\nwant: %v", brief["fleet"], full["fleet"])

@@ -112,6 +112,12 @@ func fixture() []Row {
 			r.Error = "dispatch: node http://n1:18811 answered HTTP 503: shed: no idle execution slot"
 			r.Result = nil
 		}),
+		row("dispatch-dial", func(r *Row) {
+			r.Deferred = false
+			r.DeferClass = ""
+			r.Error = "dispatch http://n1:18811/fleet/dispatch: dial tcp 192.0.2.10:18811: connect: connection refused"
+			r.Result = nil
+		}),
 		row("abstain-schema-invalid", func(r *Row) {
 			r.Deferred = true
 			r.DeferClass = "abstention"
@@ -146,7 +152,8 @@ func TestClassifyEveryAxisAndPrecedence(t *testing.T) {
 		"infra-with-timeout-text":    {Axis: AxisSeatInfra},
 		"timeout-with-trace-longobs": {Axis: AxisTimeout},
 		"schema-with-loop-trace":     {Axis: AxisSchemaMiss},
-		"dispatch-503":               {Axis: AxisSeatInfra},
+		"dispatch-503":               {Axis: AxisCapacity}, // a node's "shed: no idle execution slot": it had no room, no seat failed
+		"dispatch-dial":              {Axis: AxisSeatInfra},
 		"abstain-schema-invalid":     {Axis: AxisSchemaMiss, Sub: SubInvalid},
 		"anchor":                     {Axis: AxisAnchorMiss},
 		"anchor-2step":               {Axis: AxisAnchorMiss, Sub: SubTwoStepGrounded},
@@ -172,7 +179,7 @@ func TestBuildWeightsOverEligibleRowsAndIsDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Rows != 22 || rep.Bad != 21 { // +starved, +empty-stop (0.115.8)
+	if rep.Rows != 23 || rep.Bad != 22 { // +starved, +empty-stop (0.115.8), +dispatch-dial
 		t.Fatalf("rows=%d bad=%d", rep.Rows, rep.Bad)
 	}
 	// trace-bearing bad rows: loop-rules, loop-run, longobs, misuse, timeout-with-trace-longobs, schema-with-loop-trace = 6
@@ -191,7 +198,7 @@ func TestBuildWeightsOverEligibleRowsAndIsDeterministic(t *testing.T) {
 	if x := find(AxisLoop, ""); x.Hits != 2 || x.Eligible != 6 || x.Weight < 0.33 || x.Weight > 0.34 {
 		t.Fatalf("loop = %+v (weight must be over the TRACE-bearing bad rows, not all bad rows)", x)
 	}
-	if x := find(AxisSeatInfra, ""); x.Hits != 3 || x.Eligible != 21 || x.Remedy.Key != "" || !strings.Contains(x.TopReason, "x") {
+	if x := find(AxisSeatInfra, ""); x.Hits != 3 || x.Eligible != 22 || x.Remedy.Key != "" || !strings.Contains(x.TopReason, "x") {
 		t.Fatalf("seat-infra = %+v", x)
 	}
 	if x := find(AxisSchemaMiss, SubTwoStepGrounded); x.Hits != 1 || x.Remedy.Key != "agent_seed_context_reads" {
@@ -220,7 +227,7 @@ func TestBuildWeightsOverEligibleRowsAndIsDeterministic(t *testing.T) {
 		t.Fatal("two builds on the same rows differ")
 	}
 	md := Markdown(rep)
-	for _, s := range []string{"seat seat-a", "precedence: seat-infra → call-deadline → timeout", "| loop | 2 / 6 |", "not a rule matter", "agent_seed_context_reads", "proposes nothing"} {
+	for _, s := range []string{"seat seat-a", "precedence: seat-infra → call-deadline → capacity → timeout", "| loop | 2 / 6 |", "not a rule matter", "agent_seed_context_reads", "proposes nothing"} {
 		if !strings.Contains(md, s) {
 			t.Errorf("markdown lacks %q", s)
 		}

@@ -52,6 +52,11 @@ type Options struct {
 	// ComfyDir is the ComfyUI install, read for the activity facts of a lease that has no
 	// owner and no progress contract. "" = none.
 	ComfyDir string
+	// DriverEvents reads the driver's recent fault events (nvlddmkm on Windows, NVRM Xid on Linux), already
+	// attributed to cards (ReadDriverEvents is the production reader). nil = off: a box that wires none prints
+	// byte-identically to before. Read only while a lease is held and the GPU sample is on, and shown as facts, never
+	// as a verdict input.
+	DriverEvents func(ctx context.Context) ([]DriverEvent, error)
 }
 
 // Holder describes the lease holder beyond the lease record.
@@ -152,6 +157,17 @@ type View struct {
 	// OtherDevices are the cards every OTHER live lease sits on (lease ids): work on them is
 	// not the primary lease's holder's.
 	OtherDevices []string
+
+	// DriverEvents are the driver's recent fault events on the LEASED cards, newest first (C-83-B). Facts, never a
+	// verdict input: a fault and a kill look alike in the log, and telling them apart takes A-128's kill test.
+	DriverEvents []DriverEvent
+	// DriverEventsTotal is how many events the leased cards had before the list was capped (0 = not capped).
+	DriverEventsTotal int
+	// DriverEventsUnattributed counts the events in the window that name no card this box can place, so they are in
+	// no card's list: said, so an empty list is not read as "no faults".
+	DriverEventsUnattributed int
+	// DriverEventsNote says why the events could not be read (a reader failure is a note, never an error).
+	DriverEventsNote string
 }
 
 // trespassOf lists the cards that are busy under a bounded lease but outside its cards, with
@@ -316,6 +332,12 @@ func Snapshot(ctx context.Context, opts Options) View {
 				v.Processes = procs
 			}
 		}
+	}
+
+	// The driver's own fault events for the leased cards (C-83-B): facts under the lease, read only while one is held
+	// and the GPU sample is on, and never an input to the verdict below.
+	if opts.DriverEvents != nil && opts.SampleGPU && v.Held {
+		v.readDriverEvents(ctx, opts.DriverEvents)
 	}
 
 	v.Verdict, v.Note = Assess(v)
@@ -730,6 +752,19 @@ func (v View) Map() map[string]any {
 	if t := trespassOf(v); len(t) > 0 {
 		m["device_trespass"] = t
 	}
+	// The driver's fault events on the leased cards (C-83-B): absent unless there is something to say.
+	if len(v.DriverEvents) > 0 {
+		m["driver_events"] = v.DriverEvents
+	}
+	if v.DriverEventsTotal > len(v.DriverEvents) {
+		m["driver_events_total"] = v.DriverEventsTotal
+	}
+	if v.DriverEventsUnattributed > 0 {
+		m["driver_events_unattributed"] = v.DriverEventsUnattributed
+	}
+	if v.DriverEventsNote != "" {
+		m["driver_events_note"] = v.DriverEventsNote
+	}
 	return m
 }
 
@@ -764,6 +799,21 @@ func (v View) Lines() []string {
 		out = append(out, "cards: "+strings.Join(cards, " | "))
 	} else if v.GPUErr != "" {
 		out = append(out, "cards: "+v.GPUErr)
+	}
+	if len(v.DriverEvents) > 0 {
+		out = append(out, fmt.Sprintf("driver events on the leased card(s), last 24 h (facts, not a verdict): %d", max(v.DriverEventsTotal, len(v.DriverEvents))))
+		for _, e := range v.DriverEvents {
+			out = append(out, "  "+e.Line())
+		}
+		if v.DriverEventsTotal > len(v.DriverEvents) {
+			out = append(out, fmt.Sprintf("  ... and %d older (the newest %d are listed)", v.DriverEventsTotal-len(v.DriverEvents), len(v.DriverEvents)))
+		}
+	}
+	if v.DriverEventsUnattributed > 0 {
+		out = append(out, fmt.Sprintf("driver events: %d more in the last 24 h name no card this box can place (for instance a Windows id 13 Graphics Exception), so no card's list holds them", v.DriverEventsUnattributed))
+	}
+	if v.DriverEventsNote != "" {
+		out = append(out, v.DriverEventsNote)
 	}
 	return out
 }

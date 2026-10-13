@@ -350,6 +350,7 @@ func TestUnwindAllowanceIsATwentiethClampedToItsBounds(t *testing.T) {
 // forced through the progress callback (it fires once a result is on the board and
 // counted), not through sleeps.
 func TestUnfinishedCountIsFrozenAtTheFirstLook(t *testing.T) {
+	widenUnwind(t, 2*time.Second) // three chained handoffs must land inside the allowance: a starved one is abandoned, not cut
 	cfg := testCfg(t)
 	aDone, bDone := make(chan struct{}), make(chan struct{})
 	var onceA, onceB sync.Once
@@ -391,6 +392,7 @@ func TestUnfinishedCountIsFrozenAtTheFirstLook(t *testing.T) {
 // says what it was doing, rather than "had not been placed on a seat" (which is for work
 // no node ever took).
 func TestLocalRunCutMidRunStaysPlacedAndNamed(t *testing.T) {
+	widenUnwind(t, 2*time.Second) // the subject is the cut's wording; a run starved past 250 ms would be abandoned instead
 	cfg := testCfg(t)
 	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		<-ctx.Done()
@@ -571,6 +573,7 @@ func TestAttemptGuardCutNamesTheDeadlineInThePlacement(t *testing.T) {
 // deadline, well inside it: the abandoned subtask's reason is computed after that answer, and
 // must still say 2 — the number that was true when the call ran out of time.
 func TestTheUnfinishedCountIsTakenWhenTheDeadlinePasses(t *testing.T) {
+	widenUnwind(t, 2*time.Second) // the late answer must land inside the allowance on a loaded box; the deaf seat is abandoned at its end
 	cfg := testCfg(t)
 	release := make(chan struct{})
 	var once sync.Once
