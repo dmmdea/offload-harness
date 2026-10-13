@@ -19,7 +19,7 @@ Versioning: [SemVer](https://semver.org/).
   The new `parseCli` / `checkFlags` run before the interpreter is resolved, the lock is taken or a worker starts, and refuse with exit 2,
   the reason and the usage line (which now lists all six): an unknown flag (named; `--flag=value` gets the spelling to use, and
   `--no-lock=1` says that flag takes no value), a value flag with no value (last, empty, or followed by another flag), a sampling value that is
-  not a finite decimal number (`abc`, `nan`, `inf`, `1e999`, `0x10`, and the two negative spellings older Python argparse reads as a flag,
+  not a finite decimal number (`abc`, `nan`, `inf`, `1e999`, `0x10`, and the two negative spellings Python 3.11's argparse reads as a flag,
   `-1e-2` and `-5.`), an `--engine` other than `generalist|finetuned`, `--model`/`--base-dir` without `--engine finetuned` (the generalist
   would ignore them), and a third positional (an unquoted text used to be cut after its first word). The flags object has no prototype, so
   `--__proto__` is a flag like any other. **Behaviour change:** a command line that carried a stray, misspelled or valueless flag, or an

@@ -106,7 +106,7 @@ test("buildWorkerArgs: the finetuned argv is unchanged (model, base-dir, then th
 test("parseCli: a sampling value that is not a finite number refuses, naming the flag, for either engine", () => {
   for (const engine of [[], ["--engine", "finetuned"]]) {
     for (const k of SIX_NAMES) {
-      // "-1e-2" and "-5." are numbers, but before Python 3.14 argparse reads a dash-led token of that shape as a
+      // "-1e-2" and "-5." are numbers, but Python 3.11's argparse reads a dash-led token of that shape as a
       // flag ("expected one argument"), after the lock is taken; write them -0.01 and -5
       for (const bad of ["abc", "", " ", "NaN", "Infinity", "-Infinity", "1e999", "0x10", "1,5", "0.5x", "--lang", "-1e-2", "-5."]) {
         const r = parseCli([...BASE, ...engine, "--" + k, bad]);

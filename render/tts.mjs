@@ -98,8 +98,9 @@ export const USAGE = 'usage: node tts.mjs <out.wav> "<text>" [--engine generalis
   + "[--repetition-penalty F] [--min-p F] [--top-p F] [--no-lock]";
 
 // A decimal number the python workers read too: float() takes it (no hex, no whitespace, no nan/inf spelling) and, for a
-// negative one, argparse takes it as a VALUE on every python 3: before 3.14 a dash-led token is a value only when it is
-// -N or -N.N / -.N, anything else ("-1e-2", "-5.") is read as a flag and the worker exits 2 after the lock was taken.
+// negative one, argparse takes it as a VALUE. Measured on Python 3.11 (the README's venv): a dash-led token is a value
+// only when it is -N or -N.N / -.N; "-1e-2" and "-5." are read as flags and the worker exits 2 after the lock was taken
+// (3.14 reads them as values; the rule here is the narrower one, so it holds on both).
 const DECIMAL = /^(?:\+?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?|-(?:\d+|\d*\.\d+))$/;
 
 // checkFlags judges the parsed flags and returns the reason to refuse them, or null to accept. Nothing
