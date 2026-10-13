@@ -32,7 +32,7 @@ type GPU struct {
 	DisplayAttached bool `json:"display_attached,omitempty"`
 	// AttachedUnknown marks a sample whose full query failed for a reason that does not name display_attached
 	// (gpuprobe.AttachedUnknown): it cannot say which card the monitor is on. Carried so the per-card table of
-	// offload_status can say so instead of showing no display card (seam: not set yet).
+	// offload_status can say so instead of showing no display card.
 	AttachedUnknown bool `json:"attached_unknown,omitempty"`
 }
 
@@ -63,7 +63,7 @@ func SampleGPUs(ctx context.Context) ([]GPU, error) {
 	defer cancel()
 	// Through the shared fallback: a driver that does not know display_attached refuses the
 	// whole query, and the sample is then taken without it (display_active alone, as before).
-	out, err := gpuprobe.RunDisplayAware(func(withAttached bool) (string, error) {
+	out, state, err := gpuprobe.RunDisplayAwareReport(func(withAttached bool) (string, error) {
 		cols := "index,uuid,name,utilization.gpu,memory.used,memory.total,display_active"
 		if withAttached {
 			cols += ",display_attached"
@@ -73,7 +73,15 @@ func SampleGPUs(ctx context.Context) ([]GPU, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ParseGPUs(out), nil
+	gpus := ParseGPUs(out)
+	// A reading answered from the fallback after an unexplained failure cannot say which card the monitor is
+	// on: every card of it says so, as gpuprobe.Read marks every device of such a reading.
+	if state == gpuprobe.AttachedUnknown {
+		for i := range gpus {
+			gpus[i].AttachedUnknown = true
+		}
+	}
+	return gpus, nil
 }
 
 // SampleProcesses lists the processes holding GPU memory.
