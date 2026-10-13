@@ -1256,7 +1256,7 @@ on this box's own seat carries this box's own name (the runner's stamp), or, for
 that box's name, not the runner's; such a row also carries the runner's stamp in `node_reported`.
 
 `rig --node` selects a row by its `node` or by its `result.node_id`, and the two names do not select the same rows. The node's card
-id selects the rows a 0.185.0 delegator wrote and never a row written before (it carries only the hostname). The hostname selects
+id selects the rows a 0.185.0 delegator wrote and, for a node launched with `--node-id` and no `fleet_node_id` (the installers' form), never a row written before (it carries only the hostname). The hostname selects
 the rows an older delegator wrote and the rows a 0.185.0 delegator wrote for a node not yet on 0.185.0, and it stops selecting a
 node's rows once that node runs 0.185.0 (it stamps its card id in both fields). For a window that spans the change, run `rig` once
 per name and read both reports.

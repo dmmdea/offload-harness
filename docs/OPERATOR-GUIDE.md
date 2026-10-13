@@ -1969,7 +1969,7 @@ claimant stamped, which is the id it claims under once that node runs 0.185.0 (t
 run on this box's own seat (`ran_on: "local"`) carries this box's own name, or the box whose engine ran it.
 
 `rig --node <name>` matches a row by its `node` or by the id the node stamped on its own result, and the two names do not select
-the same rows. The node's card id selects the rows a 0.185.0 delegator wrote, and never a row written before (that row carries
+the same rows. The node's card id selects the rows a 0.185.0 delegator wrote, and, for a node launched with `--node-id` and no `fleet_node_id` (the installers' form), never a row written before (that row carries
 only the hostname). The OS hostname selects the rows an older delegator wrote and the rows a 0.185.0 delegator wrote for a node not
 yet on 0.185.0, but not the rows of a node that runs 0.185.0, which stamps its card id in both fields. For a window that spans the
 change, run `rig` once per name and read both reports.

@@ -22,6 +22,7 @@ import (
 )
 
 func TestTheProseSaysWhichNameSelectsWhichRows(t *testing.T) {
+	const qualifier = "for a node launched with --node-id and no fleet_node_id (the installers' form)"
 	for _, tc := range []struct {
 		path    string
 		retired []string // wording the code contradicts
@@ -48,6 +49,12 @@ func TestTheProseSaysWhichNameSelectsWhichRows(t *testing.T) {
 		}
 		if !strings.Contains(text, tc.want) {
 			t.Errorf("%s does not say %q", tc.path, tc.want)
+		}
+		// "never a row written before" holds only where the old row carries the hostname alone: a node launched with
+		// --node-id (which an older build stamped as the hostname) and no fleet_node_id, the form the installers write. A node
+		// whose id is its fleet_node_id, or its hostname, stamped the same id before, so the card id finds its older rows too.
+		if plain := strings.ReplaceAll(text, "`", ""); !strings.Contains(plain, qualifier) {
+			t.Errorf("%s says the card id never selects a row written before without %q: that holds for one form of node only", tc.path, qualifier)
 		}
 	}
 }

@@ -437,7 +437,8 @@ func ReadShards(dir string, since, until time.Time) ([]Row, int, error) {
 // node stamped node on its own result (result.node_id). A row's `node` is the id the placement used (the node_id the node's
 // health publishes); before that it was the id the node stamped on its result, which for a node launched with --node-id was the
 // OS hostname. The stamp is still on every row, so both names select something, but not the same rows. The card id selects the
-// rows a 0.185.0 delegator wrote and never a row written before (that row carries only the hostname). The hostname selects the
+// rows a 0.185.0 delegator wrote and, for a node launched with --node-id and no fleet_node_id (the installers' form), never a
+// row written before (that row carries only the hostname). The hostname selects the
 // rows an older delegator wrote and the rows a 0.185.0 delegator wrote for a node not yet on 0.185.0; a node that runs 0.185.0
 // stamps the id it advertises, so its rows carry the id in both fields and the hostname stops matching them. A window that spans
 // the change takes both names, one report each.
