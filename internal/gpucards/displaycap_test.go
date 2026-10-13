@@ -81,6 +81,10 @@ func TestDisplayCapComparesUseToTheBudgetAndAnExactFitIsWithin(t *testing.T) {
 		{"well under", 10, false, 0},             // 6.0 in use of a 9.6 budget
 		{"exactly on the budget", 6.4, false, 0}, // 9.6 in use
 		{"a hair over", 6.3, true, 0.1},          // 9.7 in use
+		// The float error of a share of a total is not a breach (15.9 x 40 / 100 is not exactly 6.36): 5e-7 GiB past
+		// the budget is within it, as the allocator's own comparison reads it; 5e-6 past it is over.
+		{"inside the float tolerance", 6.4 - 5e-7, false, 0},
+		{"just past the float tolerance", 6.4 - 5e-6, true, 0},
 		{"far over", 3.0, true, 3.4},
 		{"the whole card in use", 0, true, 6.4},
 	} {
