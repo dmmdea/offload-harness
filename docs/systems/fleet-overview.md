@@ -126,7 +126,8 @@ its own (`CardTiles`, `internal/fleetview/cards.go`).
 
 **The delegation-log fold** (`errors.go`) reads today's and yesterday's day-sharded corpus files
 (`BaseDir()/delegation-log/YYYY-MM-DD.jsonl`), keeps the last `maxDelegations` rows, and loosely
-decodes only `delegationRowFields` (`ts`, `job_id`, `node`, `seat`, `placement_reason`, `deferred`,
+decodes only `delegationRowFields` (`ts`, `job_id`, `node` (since 0.185.0 the id placement used, the same `node_id` the node's card
+shows; an older row carries the id the node stamped on its own result, which was its hostname for a node launched with `--node-id`), `seat`, `placement_reason`, `deferred`,
 `defer_class`, `acceptance_pass`, `wall_ms`, `error`, `refusal`) — a decode narrow enough that a future corpus
 column can never break it, and deliberately excludes `contract` (and any field pulled from it, such
 as `goal`): `/api/overview` is unauthenticated, and contract content has no business on the one route

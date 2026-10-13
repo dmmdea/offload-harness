@@ -22,7 +22,7 @@ func runRig(args []string) error {
 	fs.String("config", "", "config file path")
 	seat := fs.String("seat", "", "seat alias exactly as the corpus rows name it (e.g. qwen3.5-4b-vllm, agent-pool); required")
 	since := fs.String("since", "7d", "window: <N>d or <N>h back from now, or an RFC3339 instant")
-	node := fs.String("node", "", "only rows that ran on this node id (optional)")
+	node := fs.String("node", "", "only rows that ran on this node: its node id, or the id it stamped on its own result (optional)")
 	out := fs.String("out", "", "write the JSON report here (optional)")
 	verdicts := fs.String("verdicts", "", "write EVERY bad row's verdict ({job_id, axis, sub, evidence}) here — the per-row companion of the report, for an agreement check against independent labels (optional)")
 	asJSON := fs.Bool("json", false, "print the JSON report instead of the markdown")

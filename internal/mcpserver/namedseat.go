@@ -309,8 +309,13 @@ func (s *Server) runOnFleet(ctx context.Context, cfg config.Config, call agentRu
 	if model != "" && !ranSeat(wire.Seat, model) {
 		// The delegator placed the contract on a node whose agent seat WAS the name when it probed, and the node says it ran
 		// another (an operator edit in between): the answer is not from the model the caller named, so it is not published.
+		// The node is named as the placement named it (extra["node"], results[].node), not by the id on its own result.
+		node := wire.NodeID
+		if placed, _ := extra["node"].(string); placed != "" {
+			node = placed
+		}
 		return jsonResult(withReviewExtra(map[string]any{"deferred": true, "defer_class": core.DeferClassConfig, "route": route, "steps": wire.Steps,
-			"reason": fmt.Sprintf("node %s answered from seat %q, not the model named (%q): its agent seat changed after the fleet was read, so the answer is withheld", wire.NodeID, wire.Seat, model)}, extra))
+			"reason": fmt.Sprintf("node %s answered from seat %q, not the model named (%q): its agent seat changed after the fleet was read, so the answer is withheld", node, wire.Seat, model)}, extra))
 	}
 	out := map[string]any{"deferred": false, "output": wire.Output, "steps": wire.Steps, "seat": wire.Seat, "stop_reason": wire.StopReason, "route": route}
 	if model != "" {

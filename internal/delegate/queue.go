@@ -75,6 +75,11 @@ func runQueued(ctx context.Context, cfg config.Config, subtasks []core.AgentCont
 //
 // The base is the holder's, which is not where the job ran: viaQueue says so, and the rescue of a schema miss reads it
 // (rescueSchemaMiss), so it dials no origin at the holder with the claimant's seat name.
+//
+// Node here is the id the claimant stamped on its answer: the delegator has no health view of the claimant (the holder's
+// poll returns the job's state and data, not who claimed it), so it cannot name the node by the id health publishes. A
+// claimant on this release stamps the id it claims under, so the two agree; one on an older build stamps its OS hostname
+// where it was launched with another --node-id, and the row says that until the node is redeployed.
 func (pr *PlacedResult) takeQueueAnswer(wire core.AgentWireResult, holder string) {
 	pr.Result = wire
 	pr.Node = wire.NodeID

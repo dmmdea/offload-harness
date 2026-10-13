@@ -433,6 +433,18 @@ func ReadShards(dir string, since, until time.Time) ([]Row, int, error) {
 	return rows, skipped, nil
 }
 
+// nodeMatches reports whether a row belongs to node: every row when node is empty, else a row whose `node` is node or whose
+// node stamped node on its own result (result.node_id). A row's `node` is the id the placement used (the node_id the node's
+// health publishes); before that it was the id the node stamped on its result, which for a node launched with --node-id was the
+// OS hostname. The stamp is still on every row, so both names select something, but not the same rows. The card id selects the
+// rows a 0.185.0 delegator wrote and never a row written before (that row carries only the hostname). The hostname selects the
+// rows an older delegator wrote and the rows a 0.185.0 delegator wrote for a node not yet on 0.185.0; a node that runs 0.185.0
+// stamps the id it advertises, so its rows carry the id in both fields and the hostname stops matching them. A window that spans
+// the change takes both names, one report each.
+func nodeMatches(r Row, node string) bool {
+	return node == "" || r.Node == node || (r.Result != nil && r.Result.NodeID == node)
+}
+
 // Build classifies the rows for one seat (alias match on the row's seat,
 // optional node) and assembles the report. Deterministic for a fixed input:
 // rows are processed in order, examples are the first five hits.
@@ -443,7 +455,7 @@ func Build(rows []Row, seat, node string, since, until time.Time) (Report, error
 	var mine []Row
 	for _, r := range rows {
 		seen[r.Seat] = true
-		if r.Seat != seat || (node != "" && r.Node != node) {
+		if r.Seat != seat || !nodeMatches(r, node) {
 			continue
 		}
 		mine = append(mine, r)
@@ -621,7 +633,7 @@ func clip(s string, n int) string {
 func Verdicts(rows []Row, seat, node string) []Verdict {
 	var out []Verdict
 	for _, r := range rows {
-		if r.Seat != seat || (node != "" && r.Node != node) || !r.Bad() {
+		if r.Seat != seat || !nodeMatches(r, node) || !r.Bad() {
 			continue
 		}
 		out = append(out, Classify(r))

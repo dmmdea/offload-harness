@@ -1778,6 +1778,9 @@ type Config struct {
 	FleetListen string `json:"fleet_listen,omitempty"`
 	// FleetNodeID names this node in /fleet/health. Empty = the OS hostname,
 	// resolved at serve time (so a shared config never bakes one box's name).
+	// fleet-serve's --node-id flag overrides it, and the id fleet-serve resolves
+	// is applied to the config its pipeline reads, so the result envelope, health
+	// and the queue claim carry one id.
 	FleetNodeID string `json:"fleet_node_id,omitempty"`
 	// FleetMaxQueueDepth caps how many jobs this node will hold in
 	// accepted/running at once — i.e. it is the ceiling on health's

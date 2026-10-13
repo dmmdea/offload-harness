@@ -1953,6 +1953,24 @@ small. Those stay exit 0 by design. If the summary carries
 `corpus_rows_lost` / `ledger_rows_lost`, the results are still complete — the harness could not
 write that many telemetry rows (usually a full or read-only disk).
 
+**Which node ran it (`results[].node`, `results[].node_reported`, 0.185.0).** `results[].node` is the node id the node publishes in
+`/fleet/health` (the name on its card in `fleet-ui`), the same name `results[].placement` uses, for a run on a fleet node this
+delegator dispatched to; it is also the `node` of the delegation-log row and the node part of the ledger's `model_tier`
+(`<node>:<seat>`). Before 0.185.0 it was the id the node stamped on its own result, which for a node launched with `--node-id` (the
+installers' form) was the OS hostname, so a result could name one node in `node` and another in `placement`.
+`results[].node_reported` is that stamped id and appears only when it differs from `node`: a node on a build before 0.185.0 (it
+stamps its hostname where it was launched with another `--node-id`), or a local run attributed to another box's engine (register
+C-58), where it is the runner's own stamp. A node on 0.185.0 stamps the id it advertises, so it never differs there. It is absent
+when the two agree and when no node took the subtask. Match a node by `node`. A `route: "queue"` answer carries the id its
+claimant stamped, which is the id it claims under once that node runs 0.185.0 (the delegator has no health view of a claimant). A
+run on this box's own seat (`ran_on: "local"`) carries this box's own name, or the box whose engine ran it.
+
+`rig --node <name>` matches a row by its `node` or by the id the node stamped on its own result, and the two names do not select
+the same rows. The node's card id selects the rows a 0.185.0 delegator wrote, and never a row written before (that row carries
+only the hostname). The OS hostname selects the rows an older delegator wrote and the rows a 0.185.0 delegator wrote for a node not
+yet on 0.185.0, but not the rows of a node that runs 0.185.0, which stamps its card id in both fields. For a window that spans the
+change, run `rig` once per name and read both reports.
+
 CLI equivalent:
 
 ```powershell
