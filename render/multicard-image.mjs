@@ -18,7 +18,7 @@ import { leaseDevices } from "./gpu-lock.mjs";
 import { fetchNodeInfo, missingNodeMessage } from "./comfy-nodes.mjs";
 import { comfyLogPath, comfyLogCursor } from "./comfy-lifecycle.mjs";
 import {
-  queryCardsRanked, computeOverride, wanCardTokens, resolveWanCards, confirmWithLease, refuseEqualsSpelling, multicardLaunch, multicardEnv, packDirs,
+  queryCardsRanked, computeOverride, computeChosen, wanCardTokens, resolveWanCards, confirmWithLease, refuseEqualsSpelling, multicardLaunch, multicardEnv, packDirs,
   checkComfyDevices, createOomWatch, PACK_MULTIGPU, PACK_GGUF,
 } from "./wan-multicard.mjs";
 import {
@@ -136,7 +136,7 @@ export function planImageMulticard({
   const plan = { pair, launch, residentGb, recipe, comfyDir, env: multicardEnv(env, launch) };
   const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
   const share = residentGb === null ? "the whole DiT on the compute card" : `${residentGb} GiB of the DiT resident on the compute card`;
-  say(`placement: multicard on ${pair.source}: ${line("storage", MULTICARD_STORAGE, pair.storage)}; ${line("compute", MULTICARD_COMPUTE, pair.compute)}; recipe ${recipe.id}, ${share}; basis ${recipe.basis}`);
+  say(`placement: multicard on ${pair.source}: ${line("storage", MULTICARD_STORAGE, pair.storage)}; ${line("compute", MULTICARD_COMPUTE, pair.compute)}; recipe ${recipe.id}, ${share}; basis ${recipe.basis}; ${computeChosen(pair)}`);
   return plan;
 }
 

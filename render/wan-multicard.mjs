@@ -138,9 +138,39 @@ export function queryCards(spawnSync = nodeSpawnSync) {
   return cards;
 }
 
-/** queryCardsRanked: the card table with the board power joined on (the seam: no power is read yet, so it is queryCards). */
+/** What the board-power query asks for: the UUID to join on, and the board's design power (not the operator-adjustable power.limit). */
+const POWER_QUERY = "uuid,power.default_limit";
+
+/**
+ * parsePowerTable reads `nvidia-smi --query-gpu=uuid,power.default_limit --format=csv,noheader,nounits` into a map from the lower-cased UUID to watts.
+ * A power the driver does not report ([N/A], [Not Supported], an empty cell) or reports as something else than a positive number is no reading and is left
+ * out, so a card without one stays at 0 (unknown); a row that is no card, or has no power column, is skipped.
+ */
+function parsePowerTable(text) {
+  const watts = new Map();
+  for (const raw of String(text || "").split(/\r?\n/)) {
+    const cols = raw.split(",").map((c) => c.trim());
+    const w = Number(cols[1]);
+    if (/^GPU-/i.test(cols[0]) && Number.isFinite(w) && w > 0) watts.set(cols[0].toLowerCase(), w);
+  }
+  return watts;
+}
+
+/**
+ * queryCardsRanked: the card table (queryCards, its display ladder untouched) with each board's design power joined on as powerLimitW. The power is a
+ * SECOND, best-effort query, asked once more when it fails (a transient failure must not drop the ranking and flip the roles of a pair, and with them the
+ * instance key): had it been one more column of the display query, a driver that rejects the column would have cost the display_attached ladder its
+ * rungs. A power that cannot be read at all leaves every card at 0, which ranks nothing: the roles are then the ones the planner always gave, and the
+ * placement is never refused for it. Every ask hides its console window on Windows (windowsHide).
+ */
 export function queryCardsRanked(spawnSync = nodeSpawnSync) {
-  return queryCards(spawnSync);
+  const cards = queryCards(spawnSync);
+  const askPower = () => { try { return spawnSync("nvidia-smi", [`--query-gpu=${POWER_QUERY}`, "--format=csv,noheader,nounits"], { encoding: "utf8", timeout: 30000, windowsHide: true }); } catch { return null; } };
+  let r = askPower();
+  if (!r || r.status !== 0 || !r.stdout) r = askPower();
+  if (!r || r.status !== 0 || !r.stdout) return cards;
+  const watts = parsePowerTable(r.stdout);
+  return cards.map((c) => ({ ...c, powerLimitW: watts.get(c.uuid.toLowerCase()) || 0 }));
 }
 
 // ---- which cards ----------------------------------------------------------------------------------
@@ -184,31 +214,69 @@ function matchCard(token, cards) {
   return hits.length === 1 ? hits[0] : null;
 }
 
-/** Two cards whose sizes differ by no more than this fraction of the larger are one size (the seam: not used yet). */
+/**
+ * Two cards whose sizes differ by no more than this fraction of the larger are one size. CHOSEN, not measured, the way WAN_COMPUTE_CONTEXT_GIB is: the exact
+ * byte count of a card's memory is a few MiB apart between boards of one generation (16311 MiB against 16303 MiB on a 5060 Ti beside a 5070 Ti) and says
+ * nothing about their speed, and 1 percent of 16 GiB is 163 MiB, far under any step between two memory sizes.
+ */
 export const VRAM_EQUAL_FRACTION = 0.01;
-/** Of two cards of one size, the faster board computes when its design power is at least this many times the other's (the seam: not used yet). */
+/**
+ * Of two cards of one size, the faster board computes when its design power (power.default_limit) is at least this many times the other's. CHOSEN, not
+ * measured: the pair this was written for reads 300 W against 180 W (1.67 times; measured 2026-10-12 on a 16 GB Blackwell pair with --use-sage-attention: the
+ * higher-power card sampled about 2.5 times as fast), and a factory-overclocked variant of one chip sits near 1.1 times, which must stay a tie.
+ */
 export const POWER_RANK_RATIO = 1.25;
 
-/** computeOverride: the WAN_COMPUTE_UUID token of an environment, "" when absent (the seam: always absent). */
+/**
+ * computeOverride: the WAN_COMPUTE_UUID of an environment (an nvidia-smi index, a UUID or a UUID prefix of 8+ characters after the optional "GPU-"), the card
+ * the operator says computes; "" when absent or blank. Both planners read it, because the typed image and edit doors can carry no flag and their runner
+ * inherits the process environment.
+ */
 export function computeOverride(env = process.env) {
-  return "";
+  return String((env && env.WAN_COMPUTE_UUID) || "").trim();
 }
 
+/** Two cards are one size when they differ by no more than VRAM_EQUAL_FRACTION of the larger. */
+const sameSizeClass = (a, b) => Math.abs(a.totalMiB - b.totalMiB) <= VRAM_EQUAL_FRACTION * Math.max(a.totalMiB, b.totalMiB);
+/** A board power is known when the driver gave a positive number (0 means not read). */
+const powerKnown = (c) => Number.isFinite(c.powerLimitW) && c.powerLimitW > 0;
+
 /**
- * chooseRoles gives the two cards their roles: { storage, compute, why }. The seam is today's rule: the larger card computes, and of two
- * equal cards the one with the higher UUID does.
+ * chooseRoles gives the two cards their roles: { storage, compute, why }, why being the rule that chose the compute card.
+ * One size (within VRAM_EQUAL_FRACTION), both board powers known and at least POWER_RANK_RATIO apart: the higher-power card computes (cuda:1).
+ * Anything else is the rule the planner always had, so a power that could not be read reproduces it exactly: the larger card computes, and of two
+ * equal cards the one with the higher UUID does, the lower storing (cuda:0), which is the order a lease sorts its ids in (internal/gpulease
+ * NormalizeDevices): a pair named with --wan-cards gets the roles the same pair gets under a lease, whatever order the caller typed it in.
  */
 export function chooseRoles(first, second) {
+  const oneSize = sameSizeClass(first, second);
+  const bothKnown = powerKnown(first) && powerKnown(second);
+  const [slow, fast] = first.powerLimitW <= second.powerLimitW ? [first, second] : [second, first];
+  if (oneSize && bothKnown && fast.powerLimitW >= POWER_RANK_RATIO * slow.powerLimitW) {
+    return { storage: slow, compute: fast, why: `the faster card: ${fast.powerLimitW} W board power against ${slow.powerLimitW} W` };
+  }
   let storage, compute;
   if (first.totalMiB !== second.totalMiB) [storage, compute] = second.totalMiB > first.totalMiB ? [first, second] : [second, first];
   else [storage, compute] = first.uuid.toLowerCase() <= second.uuid.toLowerCase() ? [first, second] : [second, first];
-  return { storage, compute, why: "" };
+  const why = first.totalMiB !== second.totalMiB ? `the larger card (${compute.totalMiB} MiB against ${storage.totalMiB} MiB)` : "two cards of one size: the higher UUID computes";
+  const unread = [first, second].filter((c) => !powerKnown(c)).map((c) => `idx ${c.index}`).join(", ");
+  const remark = !oneSize ? "" : bothKnown ? `board power ${slow.powerLimitW} W and ${fast.powerLimitW} W differ by less than ${POWER_RANK_RATIO} times` : `board power not reported for ${unread}`;
+  return { storage, compute, why: remark ? `${why} (${remark})` : why };
+}
+
+/** computeChosen: the clause the planners' one-line summary ends with: the rule that chose the compute card, and the note of an override that was ignored. */
+export function computeChosen(pair) {
+  return `compute card chosen: ${pair.why}${pair.note ? ` (${pair.note})` : ""}`;
 }
 
 /**
  * resolveWanCards turns the tokens into the two cards and their roles. It refuses (with the reason) when there are not
  * exactly two distinct cards, when a token names no card of the driver's table, or when a card drives a display.
- * Roles: the larger card is the compute card (cuda:1); of two equal cards the one with the higher UUID computes.
+ * Roles (chooseRoles): the larger card computes (cuda:1), of two equal cards the one with the higher UUID, and of two cards of one size (within
+ * 1 percent) the one with the higher board power when the two differ by 1.25 times or more. `compute` is WAN_COMPUTE_UUID (computeOverride): a token that
+ * names exactly one card of the pair makes it the compute card, beating both rules (checkResident still judges it); one that names no card of the
+ * driver's table is refused (an explicit setting must not run quietly on a typo or a stale id); one that names a card outside the pair, or begins more than
+ * one card of the table, is ignored: the roles are ranked and `note` says so.
  */
 export function resolveWanCards({ tokens, source, cards, cardsFlag = "wan-cards", compute: computeToken = "" }) {
   if (!tokens || tokens.length === 0) {
@@ -236,11 +304,17 @@ export function resolveWanCards({ tokens, source, cards, cardsFlag = "wan-cards"
     throw placementError(`cannot tell whether idx ${unsure[0].index} (${unsure[0].name}) drives a display (the driver reported display_active ${unsure[0].displayActive || "nothing"}, display_attached ${unsure[0].displayAttached || "nothing"}), and the multicard placement never uses a display card, so it will not guess: lease two cards whose display state the driver reports`);
   }
   const [first, second] = found;
-  // The larger card computes. Cards of one size take their roles from their ids: the lower one stores (cuda:0), the higher one computes (cuda:1), which is
-  // the order the lease sorts its ids in (internal/gpulease NormalizeDevices), so a pair named with --wan-cards gets the roles the same pair gets under a
-  // lease, the split the benchmark measured, whatever order the caller typed it in.
+  const token = String(computeToken || "").trim();
+  let note = "";
+  if (token) {
+    const named = matchCards(token, cards);
+    const pairText = found.map((c) => `idx ${c.index}`).join(", ");
+    if (named.length === 0) throw placementError(`WAN_COMPUTE_UUID names ${JSON.stringify(token)}, which is no card in the driver's table (${cards.map((c) => `${c.index}:${c.uuid}`).join(", ")}), so it cannot say which of the two cards (${pairText}) computes: name one of them by its nvidia-smi index, its UUID or a UUID prefix of 8 or more characters, or unset it`);
+    if (named.length === 1 && found.includes(named[0])) return { storage: found.find((c) => c !== named[0]), compute: named[0], source, why: "named by WAN_COMPUTE_UUID", note: "" };
+    note = `WAN_COMPUTE_UUID names ${JSON.stringify(token)}, which does not name exactly one of the two cards (${pairText}); ranked instead`;
+  }
   const { storage, compute, why } = chooseRoles(first, second);
-  return { storage, compute, source, why, note: "" };
+  return { storage, compute, source, why, note };
 }
 
 // ---- the ComfyUI launch ---------------------------------------------------------------------------
@@ -488,7 +562,7 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   const launch = launchFn(pair, { comfyDir });
   const plan = { pair, launch, residentGb, env: multicardEnv(env, launch) };
   const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
-  say(`wan-placement: multicard on ${source}: ${line("storage", WAN_STORAGE_DEVICE, pair.storage)}; ${line("compute", WAN_COMPUTE_DEVICE, pair.compute)}; ${residentGb} GiB of each expert resident on the compute card`);
+  say(`wan-placement: multicard on ${source}: ${line("storage", WAN_STORAGE_DEVICE, pair.storage)}; ${line("compute", WAN_COMPUTE_DEVICE, pair.compute)}; ${residentGb} GiB of each expert resident on the compute card; ${computeChosen(pair)}`);
   return plan;
 }
 
