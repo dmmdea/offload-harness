@@ -623,12 +623,42 @@ is `cuda:0` whatever its nvidia-smi index. `cuda:0` is the STORAGE card: text en
 (about 10.3 GiB). `cuda:1` is the COMPUTE card: 3 GiB of the expert resident plus the sampler's activations. Each expert loads through the
 DisTorch2 loader with `compute_device cuda:1` and the allocation `cuda:1,3gb;cuda:0,*`; the donor blocks stream to the compute card one at a
 time over the card-to-card copy (about 6 GiB/s, no peer access: roughly 1.7 s of a 250 s step). The text encoder has to stay on `cuda:0`:
-on `cuda:1` the ComfyUI process aborts. The larger card computes; of two equal cards the one with the higher UUID computes (the lease sorts its ids, so a pair named with
-`--wan-cards` in either order gets the split the benchmark measured, storage on the lower id).
+on `cuda:1` the ComfyUI process aborts.
+
+**Which card computes.** Sizes within 1 percent of the larger card (`VRAM_EQUAL_FRACTION`, 0.01: 163 MiB at 16 GiB) count as one size, because the exact
+byte count of a card's memory differs by a few MiB between boards of one generation and says nothing about their speed: a 5070 Ti reads 16303 MiB beside a
+5060 Ti at 16311. Inside that band the card with the higher board power (`power.default_limit`, the board's design power, not the operator-adjustable
+`power.limit`) computes when the two differ by at least 1.25 times (`POWER_RANK_RATIO`, inclusive). Both numbers are chosen, not measured. The pair this was written
+for reads 300 W (5070 Ti) against 180 W (5060 Ti), 1.67 times, and the higher-power card sampled about 2.5 times as fast (measured 2026-10-12 on a 16 GB Blackwell
+pair with `--use-sage-attention`: about 2.5x). Every other pair takes the roles it always had: the larger card computes; of two equal cards the one with the higher
+UUID computes (the lease sorts its ids, so a pair named with `--wan-cards` in either order gets the split the benchmark measured, storage on the lower id). That
+includes a pair whose board power the driver did not report: it is ranked as before, never refused, and the plan says `board power not reported for idx N` so the
+fall-back is visible. The one line the plan says ends with `compute card chosen: <the rule>`. Board power is a proxy for speed: it can mislead for a pair whose
+power and speed disagree (a hard power-capped card reads low), and `WAN_COMPUTE_UUID` (below) overrides it.
+
+`WAN_COMPUTE_UUID`, an environment variable and not a flag, names which card of the pair computes: an nvidia-smi index, a UUID, or a case-insensitive UUID prefix of 8
+or more characters after the optional `GPU-` (`GPU-aaaa1111` names a card, a bare `GPU-` names nothing). It chooses between the two cards already found and never adds
+one: the lease or `--wan-cards` still decide the pair. A token that names exactly one card of the pair makes it the compute card, beating the size and the speed rule;
+the resident-share and storage checks still judge it, so naming the smaller card of a 24 + 16 GiB pair is refused with the numbers (the lease sizing assumes the larger card
+computes, so that refusal comes after the lease is taken and before ComfyUI starts, never as an out-of-memory run). A token that names no card of the driver's table (a typo, a
+stale id) is refused with `WAN-PLACEMENT: WAN_COMPUTE_UUID names "<token>", ...`, naming the two cards: an explicit setting must not run quietly. A token that names a real card
+that is not one of the two, or begins more than one card of the table, is ignored with a one-line note (`WAN_COMPUTE_UUID names "<token>", which does not name exactly one of the two
+cards (idx a, idx b); ranked instead`, appended to the plan's line), because the variable is box-level and a lease may hold a pair that does not include that card. An empty or blank value is
+absent. Set it in the shell for a `gpu reserve ... --` command or a hand-run helper, and in the daemon's environment for the typed image and edit doors (below), whose runner inherits it.
+
+`gpu_comfy_order` ([gpu-lease.md](gpu-lease.md), "every card once, fastest first") is the operator's own declaration of which card is fastest, and the harness refuses to guess
+that order from what nvidia-smi reports. The board-power rule is a proxy for it on the one question this placement asks, and it is not a substitute: a box that declares the order
+has said more than power does. Two follow-ons, not in this change: seeding the compute choice from `gpu_comfy_order` through the grant environment (the runner never sees the order today),
+and `compute_cap` as the primary key for an fp8 pair that spans Ampere and Ada (fp8 tensor cores need Ada or newer, so a 320 W Ampere card ranks above a 200 W Ada one by power
+alone; `compute_cap` is identical on the live pair, and reading it costs another column and another ladder rung on drivers that reject the field).
+
+The lease sizing (`internal/hostneed`) still judges the compute stage against the LARGER card. Inside the 1 percent band the gap is at most 0.16 GiB at 16 GiB, so a share at the
+film-size ceiling (3.2 GiB) can be declared 0 there and refused by the runner's resident check on the smaller card that computes; the default share of 3 is unaffected.
 
 **Which cards, and what is refused before anything starts.** `planMulticard` reads the driver's card table
 (`nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.free,display_active,display_attached`; a failed query is asked once more
-before a driver is taken to lack `display_attached`) and refuses, with the reason: no cards named, a dangling `--wan-cards`, anything but
+before a driver is taken to lack `display_attached`; then `--query-gpu=uuid,power.default_limit` in a second, best-effort query, asked once more when it fails, joined by UUID,
+and a board whose power the driver does not report stays at 0 = unknown and ranks nothing; every ask hides its console window on Windows) and refuses, with the reason: no cards named, a dangling `--wan-cards`, anything but
 exactly two, a token that names no card, a `--wan-cards` card the lease does not hold, a card that drives a display (`display_active`
 Enabled or `display_attached` Yes, the harness's own rule, so a monitor on a sleeping screen counts) and a card whose display state the
 driver does not report (never assumed screenless). It also refuses what was not measured or cannot run, in the same place, before the
@@ -762,7 +792,11 @@ through the ComfyUI-MultiGPU loaders, with every weight file mapped read-only (`
 placement), so nothing streams from host RAM. The runners take the placement as `--placement single|multicard` (`comfy-generate.mjs`,
 `comfy-render.mjs` and `comfy-edit.mjs`), `--resident-gb N` (the DiT's share kept on the compute card; only a split recipe has one) and `--cards <a>,<b>`
 (only outside a lease; under one it can only confirm the lease's cards): the Wan flags without the `wan-` prefix, with the same refusal of the `=`
-spelling (`--placement=multicard` is a refusal, not a silent single).
+spelling (`--placement=multicard` is a refusal, not a silent single). The roles are the Wan placement's rule, from the same planner: two cards within 1 percent of one size are
+ranked by board power, and `WAN_COMPUTE_UUID` (an index, a UUID or a UUID prefix of 8+ characters; see "Which card computes" above for what a token that names no card or a card outside the
+pair does) names the compute card for the image and edit placements too. The typed image and edit doors pass no card flag, so this variable is the one override that reaches them: set it in the
+daemon's environment (their runner child inherits the process environment) and, for a `gpu reserve ... --` command, in the shell. The recipe's peak and resident checks judge whichever card
+the variable names, and the plan's line ends with `compute card chosen: <the rule>`.
 
 | Route | Binding | DiT loader / text-encoder loader | Peak per card, compute / storage (GiB) | Basis |
 |---|---|---|---|---|
@@ -1991,7 +2025,7 @@ recorded as known offenders with their reason rather than silently skipped — a
   decode mode (`chooseWanDecode` is the one rule), the `/system_stats` card read (`readRenderCard`)
   and `buildGraphForRun`, the single path from flags to a graph
 - [`render/wan-multicard.mjs`](../../render/wan-multicard.mjs) — the card-only placement
-  (`--wan-placement multicard`): the card table, the choice and refusal of the two cards (`resolveWanCards`), the ComfyUI launch
+  (`--wan-placement multicard`): the card table with the board power (`queryCardsRanked`), the choice and refusal of the two cards and their roles (`resolveWanCards`, `chooseRoles`, `WAN_COMPUTE_UUID`), the ComfyUI launch
   it needs (`multicardLaunch`, `multicardEnv`), the device check (`checkComfyDevices`) and `planMulticard`, the one call the
   runner makes before anything starts; [`render/wan-multicard.test.mjs`](../../render/wan-multicard.test.mjs) pins it
 - [`render/comfyui-ext/extra_model_paths.yaml`](../../render/comfyui-ext/extra_model_paths.yaml) and

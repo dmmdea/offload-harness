@@ -545,8 +545,8 @@ func TestAnSdcppOnlyBoxDeclaresNothing(t *testing.T) {
 
 // THE CARD-ONLY WAN PLACEMENT (comfy-video.mjs --wan-placement multicard, measured 2026-10-11). The two experts never sit on the
 // cards together and the text encoder is gone before the first expert lands, so the set does not have to fit ONE card, and it does
-// not have to fit as a sum either: what must fit is each card's own stage (the larger card's resident share + the film-size activations + the
-// CUDA context, the other card's donor blocks + the VAE and the context) on the TWO
+// not have to fit as a sum either: what must fit is each card's own stage (the compute card's resident share + the film-size activations + the
+// CUDA context, judged here against the larger card; the other card's donor blocks + the VAE and the context) on the TWO
 // cards the lease holds. Measured (the film-size run): 15.18 + 10.86 GiB in use across the pair at the peak, 2.3 GiB of host growth, so the call declares 0.
 const wanMulticardCmd = "node render/comfy-video.mjs o.mp4 s.png p --model wan --high-unet hi.safetensors --low-unet lo.safetensors --text-encoder te.safetensors --wan-placement multicard"
 
@@ -609,8 +609,9 @@ func TestAMulticardWanCallThatDoesNotHoldTwoCardsKeepsTheOrdinaryEstimate(t *tes
 	}
 }
 
-// What must fit is each card's own stage: the LARGER card computes (its resident share of an expert + the film-size activations + the CUDA
-// context) and the other holds the donor blocks (the rest of the expert + the VAE and the CUDA context). Two 8 GiB cards cannot, two 24 GiB cards can, and
+// What must fit is each card's own stage: the compute card (judged here as the LARGER card; the runner may give the role to the faster of two cards
+// within 1 percent of one size) holds its resident share of an expert + the film-size activations + the CUDA
+// context and the other holds the donor blocks (the rest of the expert + the VAE and the CUDA context). Two 8 GiB cards cannot, two 24 GiB cards can, and
 // the SUM of two unequal cards proves nothing: 24 + 8 GiB adds up to plenty, but the 8 GiB card cannot hold a 10.4 GiB donor share.
 func TestAMulticardWanCallThatDoesNotFitTheLeasedPairIsSizedAsBefore(t *testing.T) {
 	ordinary := func(name string, n Need) {

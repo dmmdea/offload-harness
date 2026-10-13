@@ -33,6 +33,9 @@
 //   It reads the two cards from the lease (GPU_LEASE_DEVICES) or --wan-cards <card>,<card> (nvidia-smi indices or UUIDs), refuses
 //   a display card, launches its own ComfyUI on them (--gpu-only, a read-only safetensors reader, the harness's node folder) and
 //   builds the graph with the DisTorch2 loaders: --wan-resident-gb N (default 3) is the GiB of each expert kept on the compute card.
+//   Which of the two computes: the larger card; of two cards within 1% of one size the higher board power (power.default_limit, 1.25x or more);
+//   of two equal cards the higher UUID. The environment variable WAN_COMPUTE_UUID (an index, a UUID or a UUID prefix of 8+ characters) names it
+//   instead; a value that names no card is refused, one outside the pair is ignored with a note.
 //   --wan-decode plain under multicard frees both cards of the experts before the plain VAEDecode and saves the sampled latent
 //   (a LATENT line names it); a plain decode that ComfyUI retried tiled fails the run (WAN-DECODE-FALLBACK) and keeps the clip beside <out> as
 //   <name>.seamed<ext>; --wan-loader is not used. Needs --high-unet / --low-unet to name the fp8 safetensors experts. The wait is 7200 s unless

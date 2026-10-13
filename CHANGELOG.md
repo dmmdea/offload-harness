@@ -6,6 +6,52 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — the card-only placements choose the compute card by board power when two cards are one size, and `WAN_COMPUTE_UUID` names it
+
+The Wan card-only placement (`--wan-placement multicard`) and the image and edit card-only placements (`--placement multicard`) picked the compute
+card (`cuda:1`) by exact memory size, then by the higher UUID. A 5070 Ti reads 16303 MiB beside a 5060 Ti at 16311 MiB, so the slower card
+computed, by 8 MiB. One planner serves all three placements (`resolveWanCards`), so all three change together.
+
+- **Behaviour change: which card computes.** Two cards whose sizes are within 1 percent of the larger (`VRAM_EQUAL_FRACTION`, 0.01, chosen:
+  163 MiB at 16 GiB) are one size, and then, when both boards report a design power (`power.default_limit`) and the higher is at least 1.25
+  times the lower (`POWER_RANK_RATIO`, chosen), the higher-power card computes. The pair this was written for reads 300 W against 180 W (1.67
+  times); measured 2026-10-12 on a 16 GB Blackwell pair with `--use-sage-attention`: about 2.5x. Every other pair, and every pair whose power
+  could not be read, takes exactly the roles it took before (the larger card computes, then the higher UUID), so a failed power read
+  reproduces the old behaviour and never refuses a run; the reason says `board power not reported for idx N`. The plan's one line ends with
+  `; compute card chosen: <the rule>`.
+- **The power is a second, best-effort query.** `queryCardsRanked` (the default card source of `planMulticard` and `planImageMulticard`, with a
+  `spawnSync` parameter for tests) runs the unchanged display ladder of `queryCards` first, then `nvidia-smi --query-gpu=uuid,power.default_limit`,
+  asked once more when it fails and joined by lower-cased UUID. Folding the power into the display query would have cost a driver that rejects the
+  column the `display_attached` rungs. Every ask hides its console window on Windows (`windowsHide`, pinned by a test on all of them).
+- **Added: `WAN_COMPUTE_UUID`.** An environment variable read by both planners (a flag could not reach the typed image and edit doors, whose
+  runner child inherits the process environment). It takes an nvidia-smi index, a UUID or a case-insensitive UUID prefix of 8+ characters after the
+  optional `GPU-`. A token that names exactly one card of the pair makes it compute, beating the size and the speed rule (the resident and peak
+  checks still judge it: naming the smaller card of a 24 + 16 GiB pair is refused with the numbers). A token that names no card of the driver's
+  table is refused (`WAN_COMPUTE_UUID names "<token>", which is no card in the driver's table (...), so it cannot say which of the two cards
+  (idx a, idx b) computes`): an explicit setting must not run quietly on a typo or a stale id. A token that names a real card outside the pair, or
+  begins more than one card of the table, is ignored with a one-line note on the plan's line (`WAN_COMPUTE_UUID names "<token>", which does not
+  name exactly one of the two cards (idx a, idx b); ranked instead`), because the variable is box-level. It never adds a card: the lease or
+  `--wan-cards` still decide the pair.
+- **Upgrade note: stop a kept (`--keep-comfy`) multicard ComfyUI before the first run after upgrading.** The instance key follows the roles
+  (`mc-<storage>-<compute>`), so a pair whose roles change gets a new key, and a kept instance on the old key refuses with `COMFY-PROFILE-MISMATCH`.
+  Under a lease the holder stops the instance on release, so only a kept or orphaned instance bites.
+- **Known limits, written down.** The lease sizing (`internal/hostneed`, comments only here) still judges the compute stage against the larger
+  card; inside the 1 percent band the gap is at most 0.16 GiB at 16 GiB, so a share at the film-size ceiling (3.2 GiB) can be declared 0 and refused
+  by the runner on the smaller card that computes (a refusal before ComfyUI starts, never an out-of-memory run); the default share of 3 is
+  unaffected. Board power is a proxy for speed. `gpu_comfy_order` is the operator-declared fastest-first order, and the one place the harness holds
+  such a thing; follow-ons, not in this change: seeding the compute choice from it through the grant environment, and `compute_cap` as the primary
+  key for an fp8 pair that spans Ampere and Ada.
+- **Tests.** Nineteen, in `render/wan-multicard.test.mjs` and `render/multicard-image.test.mjs`, written first against a behaviour-free seam
+  (`queryCardsRanked`, `computeOverride` and `chooseRoles` stubs) and seen red on their assertions. The fast card is the lower-UUID card in the
+  ranking fixtures, so a mutation of any one rule turns an answer. Twenty-eight mutations, each one line and each reverted byte for byte
+  (`scripts/mutation-check.sh`), fail a test they name: the band as exact equality, the fraction at 0.05 and at 0.001, the ratio at 1.0, `>=` to `>`
+  at 1.25, an unreported power that ranks, the roles inverted, the ranking outside the band, the override matched against the pair instead of the
+  table, a no-card override ignored, a card outside the pair taken, an ambiguous token taken, a blank value untrimmed, the note reworded, the
+  unread remark, `compute: computeOverride(env)` dropped in each planner, the say suffix dropped in each, each default card source back to
+  `queryCards`, the power read from the wrong column, a window shown on the power ask and on the display ask, the retry dropped, the join and the
+  key case-sensitive, and the wrong power field. Docs: `docs/systems/media-generation.md` ("Which card computes", the image section),
+  `render/README.md`, the usage comments of `render/comfy-video.mjs`; the stale "the larger card computes" comments of `internal/hostneed`.
+
 ## [0.184.0] - 2026-10-12 - a busy fleet is a place in line in every row, a re-pack that empties its answer's lists is refused, every delegate result says where it ran, offload_status names the image a server runs, and the serving audit refuses a bare --cpu-moe and an index pin on identical cards
 
 ### Fixed — integration review round of 0.184.0

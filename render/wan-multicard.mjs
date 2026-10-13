@@ -16,7 +16,9 @@
 //   - which two cards (the lease's: GPU_LEASE_DEVICES, else the lease record; --wan-cards names them only when no lease
 //     does, and under a lease it can only confirm them), read from the driver's card table; neither may drive a display,
 //     and a card whose display state the driver does not report is refused too;
-//   - which of them is cuda:0 and which cuda:1 (the larger card computes; of two equal cards the lower UUID stores and the higher computes, the order a lease sorts its ids in);
+//   - which of them is cuda:0 and which cuda:1 (chooseRoles: the larger card computes, except that of two cards within 1 percent of one size the one with the higher
+//     board power computes when it is at least 1.25 times the other's; of two equal cards the lower UUID stores and the higher computes, the order a lease sorts its ids in;
+//     the environment variable WAN_COMPUTE_UUID names the compute card of the pair instead);
 //   - the ComfyUI launch that placement needs (flags, env, instance key), as plain data for ensureComfy;
 //   - the DisTorch2 allocation string.
 // Dependency-free; the card table and the pack scan are injectable for tests.
@@ -97,7 +99,9 @@ const QUERY = "index,uuid,name,memory.total,memory.free,display_active,display_a
  * harness's own rule, internal/gpuprobe/display.go: a monitor on the card counts with the screen asleep too). A column the
  * driver does not give, or gives as something else than Enabled/Disabled and Yes/No, is "unknown": `display` stays false (an
  * unknown is never a yes) and `displayUnknown` is true, which resolveWanCards refuses for a chosen card. A row whose size is not
- * a number is no card (a size check on NaN would pass); a free column that is not a number reads as 0.
+ * a number is no card (a size check on NaN would pass); a free column that is not a number reads as 0. `powerLimitW` is 0 (not read)
+ * here: the board power is not a column of this query but a second one (queryCardsRanked), so that a driver which rejects it cannot cost the display
+ * state its ladder.
  */
 export function parseCardTable(text) {
   const cards = [];
@@ -122,7 +126,7 @@ export function parseCardTable(text) {
 /**
  * queryCards asks the driver for the card table. A failed query is asked once more before a driver is taken to lack
  * display_attached (a transient failure is not a missing column); the fallback without it leaves every card's display state
- * unknown, which the selection refuses.
+ * unknown, which the selection refuses. The planners read the table through queryCardsRanked, which adds the board power.
  */
 export function queryCards(spawnSync = nodeSpawnSync) {
   const ask = (fields) => spawnSync("nvidia-smi", [`--query-gpu=${fields}`, "--format=csv,noheader,nounits"], { encoding: "utf8", timeout: 30000, windowsHide: true });
@@ -386,7 +390,8 @@ export function multicardEnv(env, launch) {
  * CUDA_VISIBLE_DEVICES; a count, a size or a model name that does not match means the pin did not take. Returns the problems found.
  * What it can prove is the count, the size (to 5 percent) and the model name ("cuda:N <torch name> : <allocator>" holds the nvidia-smi name) of each
  * device. It cannot tell two cards of one model apart, and /system_stats carries no UUID: the order of two such cards is the pin's
- * (CUDA_VISIBLE_DEVICES lists UUIDs, storage first) and the roles' (the lower UUID stores).
+ * (CUDA_VISIBLE_DEVICES lists UUIDs, storage first) and the roles' (chooseRoles: of two cards of one model the lower UUID stores, unless WAN_COMPUTE_UUID names the other).
+ * A pair of two models (a faster board beside a slower one of one size) is told apart by the model name, so its roles are verified card by card.
  */
 export function checkComfyDevices(devices, pair) {
   const problems = [];
