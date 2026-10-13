@@ -197,6 +197,15 @@ func nowWords(now exeStamp) string {
 	return now.String()
 }
 
+// staleBinaryFields is the pair a delegating door's answer carries: the stale_binary note ("" = none) and the guard's own
+// state ("" while it is watching: stale_binary_guard). The state is read after the note, because the note's read of the stamp
+// is what finds a stamp that cannot be read right now. A guard that is not watching says so on every door whose answer it
+// would have annotated, not only on offload_status: a blind guard is otherwise a server that reads as fresh.
+func (s *Server) staleBinaryFields(version string) (note, guard string) {
+	note = s.staleBinaryNote(version)
+	return note, s.exe.guardState()
+}
+
 // staleBinaryNote is the server's note for a door's answer ("" = none). The comparison of bytes is the process block's
 // own (s.installed.check against the identity the server holds), so the two signals share one capture, one cache and one
 // definition; a server that holds no identity (the test seam) has nothing to compare and the stamp decides.

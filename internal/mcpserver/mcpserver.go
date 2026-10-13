@@ -4381,7 +4381,8 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	results, sum = batch.Splice(results, sum, "subtask", nil)
 	// WireResponse is a struct, so "summary" marshals FIRST (roast delta 14) —
 	// jsonResult over a map would alphabetize results ahead of it.
-	res, jerr := jsonResult(delegateWire{ResponseWire: delegate.WireResponse(results, sum, lints), StaleBinary: s.staleBinaryNote(buildinfo.Version)})
+	staleNote, guardState := s.staleBinaryFields(buildinfo.Version)
+	res, jerr := jsonResult(delegateWire{ResponseWire: delegate.WireResponse(results, sum, lints), StaleBinary: staleNote, StaleBinaryGuard: guardState})
 	if jerr != nil || res == nil {
 		return res, jerr
 	}
@@ -4693,13 +4694,16 @@ type researchWire struct {
 	Sources       any    `json:"sources"` // []research.Source after untrusted.Value
 	// StaleBinary: the executable on disk is no longer the one this server started from (stalebinary.go).
 	StaleBinary string `json:"stale_binary,omitempty"`
+	// StaleBinaryGuard: why the guard that sets StaleBinary is not watching, absent while it is (as on offload_status).
+	StaleBinaryGuard string `json:"stale_binary_guard,omitempty"`
 }
 
 // delegateWire is agent_delegate's answer: the engine's response, summary first, and the stale-binary note when
 // the executable this server started from has changed on disk.
 type delegateWire struct {
 	delegate.ResponseWire
-	StaleBinary string `json:"stale_binary,omitempty"`
+	StaleBinary      string `json:"stale_binary,omitempty"`
+	StaleBinaryGuard string `json:"stale_binary_guard,omitempty"`
 }
 
 // handleResearch — offload_research. Fetch (guarded, delegator-side) → Build
@@ -4812,10 +4816,11 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 	if rerr != nil {
 		partialErr = rerr.Error()
 	}
+	staleNote, guardState := s.staleBinaryFields(buildinfo.Version)
 	res, jerr := jsonResult(researchWire{
 		Summary: wire.Summary, Untrusted: researchUntrustedNotice, Partial: rerr != nil, Error: partialErr,
 		Results: untrustedOrNote(wire.Results), ResultSources: resultSources[:len(results)], Sources: untrustedOrNote(sources),
-		StaleBinary: s.staleBinaryNote(buildinfo.Version),
+		StaleBinary: staleNote, StaleBinaryGuard: guardState,
 	})
 	if jerr != nil || res == nil {
 		return res, jerr
