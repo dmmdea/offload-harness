@@ -135,3 +135,28 @@ func TestCaptureStartupOfAnUnreadableImageIsAbsentNotInvented(t *testing.T) {
 		t.Fatalf("the capture lost where it looked or the version: %+v", st)
 	}
 }
+
+// A capture whose hash could not be taken still records the stamp of the file at the path (0.184.0 integration review,
+// silent failure hunt). The stamp used to be read only through the handle the hash was taken from, so an open that failed
+// (the antivirus lock the hash's own log line cites) left Path set and Size 0, and the stale-binary guard, which seeds from
+// the capture, fell back to reading the file in mcpserver.New: after the config was loaded and the pipeline opened, which is
+// the window the capture exists to close, and without a word about it.
+func TestCaptureStartupOfALockedImageStillRecordsItsStamp(t *testing.T) {
+	path := useImage(t, "image A, the build this process started from")
+	oldOpen := openImage
+	openImage = func(string) (*os.File, error) { return nil, os.ErrPermission }
+	t.Cleanup(func() { openImage = oldOpen })
+
+	st := CaptureStartup()
+	if st.SHA256 != "" {
+		t.Fatalf("setup: an image that could not be opened produced a hash: %q", st.SHA256)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Path != path || st.Size != fi.Size() || !st.ModTime.Equal(fi.ModTime()) {
+		t.Fatalf("the capture of a locked image holds path %q, size %d, modified %v; want the stamp of the file at the path (%q, %d, %v)",
+			st.Path, st.Size, st.ModTime, path, fi.Size(), fi.ModTime())
+	}
+}

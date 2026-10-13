@@ -42,6 +42,10 @@ var (
 	// test (what os.Executable answers for a process whose image was renamed differs by OS, so the test chooses it).
 	executable = os.Executable
 
+	// openImage is the seam the executable is opened through for the self-hash: os.Open in production, a refusal in a
+	// test (an antivirus lock on the file at start-up is the case that matters, and a test cannot make the OS lock one).
+	openImage = os.Open
+
 	startupMu sync.Mutex
 	startup   *Startup
 )
@@ -129,7 +133,7 @@ func hashSelf() image {
 		return img
 	}
 	img.path = exe
-	f, err := os.Open(exe)
+	f, err := openImage(exe)
 	if err != nil {
 		fail("open", err)
 		return img
