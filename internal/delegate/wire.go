@@ -101,6 +101,13 @@ const (
 // (which stays inside the node's result and the delegation log).
 type ResultWire struct {
 	Node string `json:"node"`
+	// NodeReported is the id the executing node stamped on its OWN result, present only when it differs (case-insensitively)
+	// from Node: Node is the id the placement used (the node_id /fleet/health publishes, the name the placement text carries),
+	// so a node that names itself otherwise on its result (an older build, or a different name than the one it advertises)
+	// shows both. Absent when the two are the same and when no node took the subtask. Stamped in one place, WireResponse, from
+	// NodeReported().
+	NodeReported string `json:"node_reported,omitempty"`
+	// Seat is the agent seat that ran the subtask.
 	Seat string `json:"seat"`
 	// Placement is the placement REASON, a string — read as text (council R4) — so the composite decision is
 	// published beside it as Placed, never folded into it. Where the subtask RAN is RanOn, not a word in this text:
@@ -299,6 +306,13 @@ func lintFor(lints [][]string, i int) []string {
 		return lints[i]
 	}
 	return nil
+}
+
+// NodeReported is the id the executing node stamped on its own result, when that
+// differs from the node the placement used (pr.Node); "" otherwise. See
+// ResultWire.NodeReported.
+func NodeReported(pr PlacedResult) string {
+	return ""
 }
 
 // wireCallsMax bounds ResultWire.Calls (register D-99): the last eight

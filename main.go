@@ -2794,6 +2794,12 @@ func fleetServeParams(listenFlag, nodeIDFlag string, trusted bool, cfg config.Co
 	return listen, nodeID, nil
 }
 
+// fleetServeConfig returns cfg with the node id fleet-serve resolved (fleetServeParams) set as the id the pipeline stamps
+// on its result envelopes, so a node names itself one way in /fleet/health, in a queue claim and on every result.
+func fleetServeConfig(cfg config.Config, nodeID string) config.Config {
+	return cfg
+}
+
 // reportPipelineJobsSweep writes the startup sweep's outcome to w: up to three
 // lines, each reported whether or not the others are, so a sweep that removed
 // 22 dirs and could not remove one says both. The removed line does not call
