@@ -42,6 +42,10 @@ var (
 	// test (what os.Executable answers for a process whose image was renamed differs by OS, so the test chooses it).
 	executable = os.Executable
 
+	// openImage is the seam the executable is opened through for the self-hash: os.Open in production, a refusal in a
+	// test (an antivirus lock on the file at start-up is the case that matters, and a test cannot make the OS lock one).
+	openImage = os.Open
+
 	startupMu sync.Mutex
 	startup   *Startup
 )
@@ -114,6 +118,17 @@ func StartupIdentity() (Startup, bool) {
 	return *startup, true
 }
 
+// statPath is the size and modification time of the file at path, or zero values when it cannot be stat'd: a capture
+// that holds no stamp says so to its reader (the stale-binary guard goes inactive and logs why).
+func statPath(path string) (int64, time.Time) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		log.Printf("buildinfo: stat of the executable at its path failed (%v); this process's start-up capture holds no stamp of it", err)
+		return 0, time.Time{}
+	}
+	return fi.Size(), fi.ModTime()
+}
+
 // hashSelf reads the running executable once. Failures are LOUD-once (the delegate corpus-loss posture): the caller
 // latches whatever happens here for the process lifetime, so a transient failure — an AV lock on the exe at startup,
 // a slow mount — silently disables build-hash pinning on EVERY row a long-lived process ever writes. Absent-with-a-
@@ -129,14 +144,21 @@ func hashSelf() image {
 		return img
 	}
 	img.path = exe
-	f, err := os.Open(exe)
+	f, err := openImage(exe)
 	if err != nil {
 		fail("open", err)
+		// The hash is lost, the stamp is not: the stale-binary guard seeds from this capture, and a capture with a path and no
+		// stamp would leave it to read the file later, after the start-up window this capture exists to close.
+		img.size, img.mod = statPath(exe)
 		return img
 	}
 	defer f.Close()
 	if fi, serr := f.Stat(); serr == nil {
 		img.size, img.mod = fi.Size(), fi.ModTime()
+	} else {
+		// Not fail(): its text says the hash will be absent, and the hash goes on. What is lost is the stamp.
+		log.Printf("buildinfo: stat of the executable through its open handle failed (%v); the stamp is read from the path instead", serr)
+		img.size, img.mod = statPath(exe)
 	}
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {

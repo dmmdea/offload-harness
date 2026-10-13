@@ -234,6 +234,10 @@ type PlacedResult struct {
 	// other such node under one empty key, and the dial target is the thing
 	// actually being re-tried.
 	ranBase string
+	// viaQueue marks an answer the queue lane took (takeQueueAnswer): ranBase is then the HOLDER, the one URL this side
+	// asked, which is not the node that ran the job and is no place to send a rescue. ran_on reads ranBase and stays
+	// "node"; the rescue origin does not (rescueSchemaMiss).
+	viaQueue bool
 	// PollNote (register D-116) names the bound the delegator polled a
 	// timeout_auto contract at and where the number came from — the node's
 	// advertised seat rate, the node's own published wall, or the cap when it

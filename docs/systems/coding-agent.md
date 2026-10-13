@@ -605,7 +605,9 @@ budget the node left. The node is not handed over when its own re-pack failed fo
 class `infrastructure`: a stall, an unreachable or busy seat, a seat lost under the run): the seat that just
 wedged is the last place to send the rescue first, and a call there that hangs would spend the whole budget
 (its allowance is at least the 120 s flat bound, the rescue's budget floors at 120 s) and leave this box's own
-seat no try. A budget defer, an abstention and a node that names no class keep the node. The seat that wrote
+seat no try. A budget defer, an abstention and a node that names no class keep the node. A `route: "queue"` answer hands none: the base the
+delegator holds for it is the queue holder's, which is not the node that ran the job and has no chat door for the claimant's seat,
+so the queue lane's rescue goes to this box's own seat (the row still reads `ran_on: "node"`). The seat that wrote
 the answer is the wire's, else the one the run was placed on. An unreadable `/running` leaves the rescue on
 its own seat, as before, and now says so in the log. The rescue
 validates the object, reads it against its answer (see "A re-pack is read against its answer" below),

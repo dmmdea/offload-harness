@@ -103,8 +103,9 @@ func rescueSchemaMiss(ctx context.Context, rescue RescueFunc, contract core.Agen
 	// The node that wrote the answer, for a rescue that can re-pack where the seat is hot. Not when
 	// that seat just failed the node's own re-pack (originSeatFailed): it is the last place to send
 	// the rescue first. The seat is the wire's, else the one the run was placed on (the fallback
-	// runRemote fills in before finish).
-	if pr.ranBase != "" && !originSeatFailed(pr.Result) {
+	// runRemote fills in before finish). Not an answer the queue lane took either (viaQueue): its base is the
+	// holder, a queue with no chat door for the claimant's seat, so the rescue goes to this box's own seat.
+	if pr.ranBase != "" && !pr.viaQueue && !originSeatFailed(pr.Result) {
 		seat := strings.TrimSpace(pr.Result.Seat)
 		if seat == "" {
 			seat = strings.TrimSpace(pr.Seat)
@@ -144,7 +145,8 @@ func rescueSchemaMiss(ctx context.Context, rescue RescueFunc, contract core.Agen
 	// The rescued result is judged like any other: only a validated object that
 	// passes the contract's checks reads as a success (the prose alone never does).
 	pr.AcceptanceFailures = EvalAcceptance(contract, w)
-	if strike != nil && pr.ranBase != "" {
+	// Not a queue row's base either: it is the holder's, and the node that wrote the answer is not known to this side.
+	if strike != nil && pr.ranBase != "" && !pr.viaQueue {
 		strike(pr.ranBase, w, pr.AcceptanceFailures)
 	}
 	return pr

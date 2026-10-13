@@ -6,6 +6,110 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — integration review round of 0.184.0
+
+Six findings from an integration review of the merged release branch, each read against the code and fixed, with its test
+written first and seen red. A second look at the same fixes follows the six (the last bullets of this block).
+
+- **The queue lane's rescue dialled the queue holder with the claimant's seat name.** `takeQueueAnswer` sets the row's dial base
+  to the holder so that `ran_on` reads `node` (D-32). The rescue of a schema miss is handed an origin (the node that wrote the
+  answer, to re-pack on its hot seat) whenever the row has a base, and the queue lane calls the rescue for every schema miss, so
+  the rescue's first rung was a chat call to the holder's address for the claimant's seat, and its note named a node that had
+  not written the answer. The row now carries `viaQueue` (a `PlacedResult` field set in `takeQueueAnswer`, which both arms that
+  read a finished answer come through), and the origin is handed over only for a row that did not come through the queue.
+  `ran_on` is unchanged (`node`); the queue lane's rescue goes to the delegator's own seat, as it did before the origin existed.
+  Tests `internal/delegate/queue_rescue_origin_test.go`, written first: before the change the rescue was handed
+  `{Base: <holder>, Seat: sim-seat, Node: sim-node}` for a budget, an abstention and a class-less defer, and again for a rescue
+  that went on to fail (an `infrastructure` defer hands no origin on any route, which is why the existing queue rescue test,
+  whose claimant filed one, could not see it). Three mutations, each reverted in turn, fail a test they name (the gate dropped,
+  the mark dropped, the base not set, which also fails `TestRunQueueRouteEndToEnd`). Docs: `docs/systems/coding-agent.md`
+  (the rescue ladder) and ADR 0055 item 11.
+- **The two staleness signals disagreed on the same bytes, and the guard's start was taken after the capture.**
+  `offload_status`'s `process.stale_image` compares bytes (equal bytes read fresh, pinned by
+  `TestStaleImageIsFalseForTheSameBytes`); the `stale_binary` guard compared the size and modification time only. A redeploy of
+  the same build rewrites the file with a later time and the same bytes, so the same answer carried `stale_image: false` and a
+  note saying the image had changed on disk. The docs told two stories to match: the guard's said the version on disk is not
+  read, the block's said `installed_version` is read from the installed file's build marker. There is one definition now: the
+  image is stale when the file at the path the process started from holds other bytes than the image it started from. The guard
+  starts from the identity the process captured first thing (`buildinfo.StartupIdentity`: the stamp read through the handle the
+  capture hashed, and the path it recorded), and when that stamp has moved it asks the check the `process` block makes (the same
+  hash, the same per-stat cache, the same build marker). Equal bytes are not stale. Different bytes are, and the note names
+  the installed build when its marker reads. Bytes that cannot be compared (a lock on the freshly renamed file, a process
+  whose own hash failed at start) leave the moved stamp standing and the note says it rests on the stamp alone, so a guard
+  against a silent failure does not go quiet when it cannot look; the next call retries. A path that is gone is stale without a
+  comparison. A server that holds no identity (the test seam) decides on the stamp as before, and a process that captured
+  nothing starts the guard from its own file as of now. The start stamp was also read in `mcpserver.New`, after
+  `loadCfgWithSource` and `openPipeline`, which re-opened the start-up window the capture closed (D-36): a deploy landing in
+  between was read as the image the process runs and the guard accused nothing for the life of the process. `runMCP`'s
+  source-order pin now also requires the capture to come before `mcpserver.New`. Tests `internal/mcpserver/stale_agreement_test.go`
+  (eleven), written first: six of the first nine failed before the change, for example `stale_binary says "this MCP server is
+  running 0.183.0 from an executable image that has changed on disk ..." while process.stale_image is false for the same bytes:
+  the two signals disagree` and `stale_binary = "" for a swap between the capture and New, want the changed-on-disk note`; the
+  other three guard the halves that did not change (different bytes are stale on both signals, a swap of equal bytes between the
+  capture and `New`, a process with no captured identity). The commit that wrote them adds one behaviour-free seam,
+  `startupIdentity`, so that they compile before the fix. Six mutations, each reverted in turn, fail a test they name (equal
+  bytes no longer clear the note, an unreadable comparison silenced, the captured identity ignored, the installed version not
+  named, the Server passing no comparison, and a gone path compared as well). The last survived at first, because a comparison
+  of a path that is gone gives the same words; two tests with a spy on the comparison kill it. Docs:
+  `docs/systems/mcp-server.md` says which signal rides which door, that they share one capture and one definition, and that the
+  installed version is read from the build marker and never by running the file; the D-36 and stale-binary entries below say
+  the same, and no longer say the version on disk is not read.
+- **`docs/systems/mcp-server.md`'s Source map lacked `stalebinary.go`, and the page said "`mcpserver.Run` takes the identity"
+  twice.** The file is listed and the second sentence is gone (the first stays).
+- **`docs/FLEET-NODE.md` still stated the old quarantine rule.** It said a node is quarantined "after two results inside that
+  window fail the document fingerprint"; since 0.184.0 the failures must also outnumber the node's passes of the same check,
+  and an honest absence counts as neither (`docs/OPERATOR-GUIDE.md` and `docs/systems/mcp-server.md` already said so). The page
+  states the rule the code has (`delegate.Quarantine.Strike` and `Pass`).
+- **The `agent_delegate` tool description lists `results[].ran_on` and says what it means** (the follow-up the D-32 entry named
+  for after its branch merged). `internal/mcpserver/ran_on_description_test.go`, written first: the keys were listed without
+  `ran_on` and nothing told a reader to prefer it to the word "local" in `placement`.
+- **The fleet node takes its startup identity as the first statement of `runFleetServe`, as `runMCP` does** (the follow-up the
+  D-36 entries named). A node stamps `harness_build_sha256` on its agent answers and lives as long as an MCP server, so a deploy
+  landing after it started must not be hashed, at its first answer, as the image it runs. The source-order pin of
+  `mcp_startup_capture_test.go` now covers both functions; before the change
+  `TestRunFleetServeCapturesTheStartupImageBeforeOpeningAnything` failed with `runFleetServe must call buildinfo.CaptureStartup()
+  itself, before it opens anything`.
+- **Not changed.** The queue lane's rescue still passes no strike (a rescued object that fails the document fingerprint does
+  not count against the claimant), as the queue route is not covered by quarantine. It also hands the rescue no origin when the
+  claimant is the queue holder itself (a node that holds the queue and claims from it): the answer names the claimant by node id
+  only, and resolving that id to a dial base would mean probing the fleet from a lane that has no runner and no health view
+  (ADR 0030), so the rescue goes to the delegator's own seat, which is what it did before the origin existed. A wrong origin is a
+  call that fails or answers for another seat, so the lane withholds it whenever it cannot tell.
+- **A second look at the six, five applied and two answered.** A silent-failure review of the fixes above found these; each has
+  its test written first and seen red.
+  - *The `stale_binary` note dropped why the bytes could not be compared.* It said "could not be compared" and kept the read
+    error (a lock on the freshly renamed file) for `offload_status` alone; the note, and so the one log line, now ends the
+    sentence with the comparison's own reason. `internal/mcpserver/stale_reason_test.go`.
+  - *A guard that was not watching said so only on `offload_status`.* `agent_delegate` and `offload_research`, the doors the guard
+    exists for, answered with no note, which reads as a fresh server. Both now carry the top-level `stale_binary_guard` string
+    (`inactive: ...`, or `unreadable: ...` while the stamp cannot be read), read after the note's own read of the stamp, and no
+    key while the guard watches. `internal/mcpserver/stale_guard_doors_test.go` (three tests, each run on both doors: two failed
+    first on both doors, and the third is the control that a watching guard adds nothing).
+  - *A start-up capture without a stamp re-opened the window the capture closes, silently.* The self-hash set the capture's path
+    before it opened the file and took the stamp only through the open handle, so a refused open (the antivirus lock its own log
+    line cites) left a path and no size, and the guard fell back to reading its file as of `mcpserver.New`: a deploy landing in
+    between was taken for the running image with no line saying the fallback happened. The capture now takes the stamp from the
+    path when the open fails (and logs a failed stat, which was discarded), and a guard whose capture holds no path or no stamp
+    is inactive, logs one line naming the capture, and shows the reason on the doors above. Tests
+    `internal/buildinfo/stale_test.go` (the locked image keeps its stamp) and `internal/mcpserver/stale_capture_test.go` (two);
+    the commit that wrote them adds one behaviour-free seam, `openImage`.
+  - *Settling a moved stamp by the bytes put an unbounded read on the answer path.* Two passes over the installed executable (the
+    hash, then the build-marker scan) ran after every result existed, so a read that stalled held the finished results past the
+    call's deadline, and a failed read was retried by every later answer. The read now runs in the background, once per moved
+    file (calls that arrive while it runs wait on it and start none), and a call waits at most 2 s (`installedReadWait`): past
+    that `process.stale_image` is absent, the note keeps the moved stamp and says the read did not finish and goes on, and the
+    next call records what it found; a read that failed is still not cached, and a file that moved again while it was read gives
+    no verdict from the older read. `offload_status` shares the bound. `internal/mcpserver/stale_bounded_test.go` (three; the
+    stalled read is held 1.5 s in the test, and before the change the answers waited out all of it).
+  - *The quarantine strike was the second reader of a queue row's base that is wrong for it.* The queue lane passes no strike
+    today, so nothing fired; a strike wired for it later would have quarantined the holder for a claimant's fingerprint misses.
+    The strike is now skipped for a row the queue lane took (`viaQueue`). `internal/delegate/queue_rescue_strike_test.go`; the
+    push row's strike is the control and still passes.
+  - *Answered, not changed: the PAIR card.* The note that a queue row's PAIR card (`pairevents.go`) might name the holder is
+    withdrawn. `pairTerminal` runs only from the push path's `attempt`, and its guard is the model name only `pairInflight` sets,
+    which the queue lane never reaches (`runQueued` is called before the runner is built), so a queue row emits no card.
+  - *Answered, not changed: the holder-as-claimant origin.* The blunt `viaQueue` gate is the first bullet of "Not changed" above.
+
 ### Fixed
 
 - **The rigger filed a busy fleet as a wall timeout and a node's "queue full" as a broken serving stack.** In one day's report
@@ -68,15 +172,18 @@ Versioning: [SemVer](https://semver.org/).
   capacity-wait fix those releases carry (a wait that holds a run slot gives it up and keeps waiting) could not run for any
   call they served, and nothing in the server noticed its binary had changed. (The 24 subtasks that a day's report shows lost
   to the old ending were served before that fix existed; the next saturated fan-out through a server that outlives a release is
-  what this guards.) The server now reads the size and modification time of its own executable at start and
-  compares them with the file on disk when `agent_delegate`, `offload_research` or `offload_status` answers: a difference, or a
-  path that is gone, puts a top-level `stale_binary` string on the answer (running version, the two stamps, "restart the MCP
-  client to load it") and one line in the log. The work still runs and nothing is interrupted or re-executed, a stat that fails
-  for another reason accuses nothing, and the version on disk is not read (it would mean running the new binary). The guard says
+  what this guards.) The server now takes the size and modification time of its own executable at start (the image the start-up
+  capture hashed, see the integration review round at the top of this section) and compares them with the file on disk when
+  `agent_delegate`, `offload_research` or `offload_status` answers: a stamp that moved, and bytes that differ from the image it
+  started from (or cannot be compared), or a path that is gone, put a top-level `stale_binary` string on the answer (running
+  version, the two stamps, the installed version when the installed file's build marker reads, "restart the MCP client to load
+  it") and one line in the log. The work still runs and nothing is interrupted or re-executed, a stat that fails for another
+  reason accuses nothing, and the installed version is read from the installed file's build marker, never by running it. The guard says
   when it is not watching, because a guard against a silent failure must not be one: a server that could not stamp its own
   executable at start (or whose path was already gone) logs one `the stale-binary guard is inactive` line with the reason, a stat
   that fails later is logged once, and `offload_status` carries a top-level `stale_binary_guard` string (`inactive: ...` for the
-  first, `unreadable: ...` for as long as the second lasts), absent while the guard is watching. Tests
+  first, `unreadable: ...` for as long as the second lasts), absent while the guard is watching (`agent_delegate` and
+  `offload_research` carry it too since the integration review round at the top of this section). Tests
   `internal/mcpserver/stalebinary_test.go`, written first: red before with `agent_delegate: no stale_binary note in [summary
   results]` on a server whose executable stamp had moved, on all three doors, and, for the inactive guard, `log "": want one
   line saying the guard is inactive and why`; thirteen mutations (size or modification time dropped from the comparison, the
@@ -307,7 +414,7 @@ Two defects of the structured re-pack, both seen in one delegation of three subt
 - **The defect.** `results[].placement` is the placement reason in words, and the opencode plugin counted the word `local` in it. A remote result whose reason said `local seat busy` read as local (10 of the 214 remote rows of one delegation log, for example `route=spread -> node-a (slot 1 of 1 ...); local seat busy: 1 in flight`), so the digest told the model the pair had not landed.
 - **The field.** `ResultWire.RanOn` (`ran_on`, `omitempty`): `local` when the delegator's own seat ran the subtask, `node` when a fleet node did, absent when no seat ran it. It is stamped in one place, `WireResponse`, from `placedWhere`: the decision that already writes the hint clause and the pin tallies, so the field cannot disagree with them. Every constructor of an unplaced outcome builds its result without `ranLocal` or `ranBase`, so `placedWhere` reads it as nowhere and the key stays off the row. It names where the subtask was placed and dispatched, so a local run that deferred on the seat still reads `local`. A job a node confirmed it took back before it started, or whose own record says it never ran, reads nothing even when the call deadline then cuts the row: the cut clears the refusal flag `placedWhere` used, so it now also reads the `withdrawn` and `nodeNeverRan` marks the node's word leaves (which keeps the hint clause and the pin tallies in step); a job the deadline cut while the node still held it, with no word that it will not run, reads `node`. A `route: "queue"` answer a claiming node filed reads `node`, set where the poll and the deadline's last look read a finished answer (`takeQueueAnswer`); a job still queued, a poll that ran out and a deadline cut stay unplaced. This adds no `PlacedResult` field and leaves `run.go` untouched.
 - **The plugin.** `ranLocally` takes a result as well as a placement string and reads `ran_on` first; any other value falls back to the placement text, read exactly as before, so an older node and a result nothing ran read as they always did. `delegateDigest` counts by it, and a deferred result with no `ran_on` (a defer no seat ran) is neither local nor remote any more, unless its placement text names the local seat, which a delegator that predates `ran_on` still writes for a defer on its own seat: it used to count remote, so one local run beside one defer printed "pair landed" for work nobody did. When nothing ran on a node the line says "nothing ran on a node" instead of "all local" if some rows ran nowhere.
-- **Known limits.** A node's answer that the delegator re-packed itself still reads `node`. The `agent_delegate` tool description in `internal/mcpserver/mcpserver.go` still lists the result keys without `ran_on`: that file is another branch's, so it is a one-line follow-up after it merges. The field shows on a fleet only after the delegator is deployed.
+- **Known limits.** A node's answer that the delegator re-packed itself still reads `node`. The field shows on a fleet only after the delegator is deployed.
 - **Tests.** `internal/delegate/ran_on_test.go` (seven, plus a wire fixture, `testdata/ran_on_wire.json`) and five TypeScript tests in `integrations/opencode/test/plugin.test.ts`, written first: before the change `ran_on = "" (present false), want "local"` and `delegate placement: 1 local, 0 remote of 1.` where the misread placement now reads `0 local, 1 remote of 1`; the existing `ranLocally reads a placement that opens with no hint clause as it always was` stays green. Seven mutations (four Go, three TypeScript), each reverted in turn, fail a test they name. **Review round**, tests first and seen red: `internal/delegate/ran_on_cut_test.go` (three) showed `ran_on = "node"` for a job the node confirmed it took back, and for one its own record says it never ran, after the call deadline cut the row, and no `ran_on` on the queue lane (`TestRunQueueRouteEndToEnd` now asserts `node` where it pinned the gap); three more TypeScript tests, two of which failed first with `1 local, 1 remote of 2 — pair landed.` for one local run beside a defer no seat ran (the third guards the wording the fix touches). Nine more mutations (five Go, four TypeScript), each reverted in turn, fail a test they name: either half of the `placedWhere` marks dropped, the queue answer's mark dropped (and, separately, passed empty from the poll arm and from the deadline-look arm), the digest's defer rule off, its local-defer exception dropped, its node-defer exception dropped, and the "nothing ran on a node" wording replaced.
 - **Docs.** `docs/systems/fleet-node.md` ("Where a result ran") and `docs/systems/opencode-integration.md` ("Wire fields the plugin reads", the table of the fields the digest reads).
 
@@ -341,8 +448,8 @@ Two defects of the structured re-pack, both seen in one delegation of three subt
   and not the doctor's own constant, no marker is never older, an unreadable installed version is said and compares nothing),
   written first and seen red.
 - **Not changed.** Processes started before this build show no block (they predate the field), so the real-world proof is the
-  next rename-swap. The fleet node (`runFleetServe`) does not capture yet: that is one call in `main.go`, left to a follow-up
-  after the media-door branch that owns that file. A `stale_image` column on ledger rows is not added: a reader compares the
+  next rename-swap. The fleet node (`runFleetServe`) captures too since the integration review round at the top of this section; it runs no MCP
+  server, so it serves no `process` block. A `stale_image` column on ledger rows is not added: a reader compares the
   row's hash with the deployed one.
 
 ### Added — `gpu status` and `offload_status` show the driver's fault events for the leased card (C-83-B, A-128 part 3)
@@ -428,8 +535,9 @@ seen red.
   PATH resolves compares nothing and says why (a doctor that is the PATH copy, or PATH names none, behaves as before).
   `TestGPUDoctorBlamesAnUnresolvedExecutablePathNotAMissingMarker`, `TestGPUDoctorComparesNothingWhenItIsNotThePathCopy`, and the guard
   `TestGPUDoctorStillMarksWhenItIsThePathCopy`.
-- **Not changed.** `runFleetServe` still does not capture (B2's file, a follow-up). The residual window between the process
-  starting and `runMCP`'s first line (the Go runtime and package init) is not closable from inside the process.
+- **Not changed.** The residual window between the process starting and `runMCP`'s first line (the Go runtime and package
+  init) is not closable from inside the process. (`runFleetServe` did not capture when this round was written; the integration
+  review round at the top of this section made it the first statement there too.)
 
 ### Fixed — a bare `--` ends the flags on the media CLI verbs, so a positional that starts with `-` can be passed (CT-52)
 

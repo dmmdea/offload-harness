@@ -72,11 +72,15 @@ func runQueued(ctx context.Context, cfg config.Config, subtasks []core.AgentCont
 // this attempt is the holder's: the one URL this side asked. Only a finished answer sets it; a job still queued, a poll that
 // ran out and a call deadline's cut leave the row unplaced, so they publish no ran_on. Both arms that read a finished answer
 // (queuePoll and the deadline's last look, lookAnswer) come through here.
+//
+// The base is the holder's, which is not where the job ran: viaQueue says so, and the rescue of a schema miss reads it
+// (rescueSchemaMiss), so it dials no origin at the holder with the claimant's seat name.
 func (pr *PlacedResult) takeQueueAnswer(wire core.AgentWireResult, holder string) {
 	pr.Result = wire
 	pr.Node = wire.NodeID
 	pr.Seat = wire.Seat
 	pr.ranBase = holder
+	pr.viaQueue = true
 }
 
 // queueSummary counts the queue lane's outcomes into the four buckets. runQueued builds

@@ -1449,9 +1449,13 @@ what an operator of the node needs:
 
 ## Quarantine (0.111.0)
 
-A delegator quarantines a node for **30 minutes** after two results inside that window fail the
+A delegator quarantines a node for **30 minutes** when two or more results inside that window fail the
 **document fingerprint** (the single any-of `(?P<docanchor>…)` regex acceptance `offload_research`
-attaches to every page, built from prose content words only since 0.141.1): the node answered about a different document. Quarantine is held in the delegator's
+attaches to every page, built from prose content words only since 0.141.1) **and those failures outnumber the node's passes of
+the same check inside the window** (0.184.0): the node answered about a different document. The fingerprint is lexical and
+misfires on an honest answer now and then, so a node that passed most of its work is not quarantined by two misses; an honest
+absence (a short statement that the page does not carry what was asked, `delegate.HonestAbsence`) counts as neither a strike nor
+a pass. Quarantine is held in the delegator's
 process (the MCP server), never persisted; a blocked node is skipped by placement and named in the
 run's `probe_errors` as `quarantined until <time>`. Contract-caused acceptance failures (a strict
 `contains:`, a thin page's `min_items`) never strike. `summary.quarantined` counts the flips.
