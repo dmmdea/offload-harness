@@ -104,9 +104,10 @@ type ResultWire struct {
 	Node string `json:"node"`
 	// NodeReported is the id the executing node stamped on its OWN result, present only when it differs (case-insensitively)
 	// from Node: Node is the id the placement used (the node_id /fleet/health publishes, the name the placement text carries),
-	// so a node that names itself otherwise on its result (an older build, or a different name than the one it advertises)
-	// shows both. Absent when the two are the same and when no node took the subtask. Stamped in one place, WireResponse, from
-	// NodeReported().
+	// so the two differ in two cases: a node on a build before 0.185.0 (it stamps its hostname where it was launched with
+	// another --node-id) and a local run attributed to another box's engine (register C-58: the runner stamps its own box, the
+	// placement names the engine's). A node on this build stamps the id it advertises, so it never differs there. Absent when
+	// the two are the same and when no node took the subtask. Stamped in one place, WireResponse, from NodeReported().
 	NodeReported string `json:"node_reported,omitempty"`
 	// Seat is the agent seat that ran the subtask.
 	Seat string `json:"seat"`

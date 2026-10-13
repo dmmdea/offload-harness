@@ -304,7 +304,9 @@ ONE contract goes through the delegator at `route=remote` with `remotes` narrowe
 configured roster, and is checked against it), so it runs on exactly one of them, placed by the usual gate: a node whose
 card is leased, or that cannot hold the wall, is passed over for another that serves the name, and with none left the call
 defers naming why. The response names `node`, `placement`, `seat`, `model` (the seat that ran it), `route` and
-`executed_on`, and carries no sizing of this box: the wall is the executing node's expectation (ADR 0055).
+`executed_on`, plus `node_reported` (0.185.0) only when the node's own result named itself by another id than `node`, the one
+placement used (see [fleet-node.md](fleet-node.md), "Which node"), and carries no sizing of this box: the wall is the executing
+node's expectation (ADR 0055).
 
 - **It honours a name only when it IS a node's agent seat.** The contract names no seat, so the node runs its own agent
   seat. A name a node merely serves (an alias, a non-agent seat) is refused naming the seat that node does run; nothing is
@@ -641,7 +643,8 @@ contract's estimated tokens plus the loop's reserve fit the node's `agent_ctx_to
 does not fit a remote window is not sent to it. Route `remote` rather than `auto` is the other half
 of that floor: `auto` would fall back to the fenced local seat when nothing qualified, so the remote
 route is what makes an accepted result provably off-box. The published result names where it ran
-(`executed_on`, `node`, `placement`, `seat`) and the fence that moved it, and the findings go
+(`executed_on`, `node`, `placement`, `seat`, plus `node_reported` (0.185.0) only when the node's own result named itself by another
+id than `node`) and the fence that moved it, and the findings go
 through the SAME filters as a local review (`publishReview` is shared, so the two cannot drift).
 An INHERITED lease is not a fence: `gpu reserve … -- <session>` sets `GPU_LEASE_EPOCH`, and the
 holder's own review stays on the cards its lease cleared. When the fleet takes nothing, today's path
