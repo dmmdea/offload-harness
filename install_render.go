@@ -1126,9 +1126,10 @@ func seatIDs(seats []*vllmseat.Spec) map[string]bool {
 // `note:` line and does not fail the audit. A device pin is read against this box's card table
 // (A-87, auditPinsFile): an index pin on identical cards and a pin that names no card. --other-box
 // says the files belong to another machine and skips those rules, which only make sense for this box.
-// The same table read gives the display-cap-unseen note for a file with a proxy: seat, an unpinned entry
-// or a pin onto the display card (servingtmpl.AuditDisplayCapUnseen): a note, never a violation, and no
-// config is read for it (the cap it states is the default, and says so).
+// The same table read gives the display-cap-unseen note for a file that pins a device or has a proxy: seat
+// (servingtmpl.AuditDisplayCapUnseen), naming in it the proxy: seats, the entries pinned onto the display card and
+// the unpinned entries: a note, never a violation, and no config is read for it (the cap it states is the default,
+// and says so). A file with neither a pin nor a proxy: seat is not read at all, so its unpinned entries are not named.
 //
 // FLAGS COME BEFORE FILES (`audit-yaml --against-render FILE...`): Go's flag
 // package stops parsing at the first non-flag argument.
