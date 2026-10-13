@@ -113,6 +113,7 @@ export function parseCardTable(text) {
       display: active === "enabled" || attached === "yes",
       displayUnknown: !(["enabled", "disabled"].includes(active) && ["yes", "no"].includes(attached)),
       displayActive: cols[5] || "", displayAttached: cols[6] || "",
+      powerLimitW: 0, // the board's design power in watts; 0 = not read (queryCardsRanked fills it from a second query)
     });
   }
   return cards;
@@ -135,6 +136,11 @@ export function queryCards(spawnSync = nodeSpawnSync) {
   const cards = parseCardTable(r.stdout);
   if (cards.length === 0) throw placementError("nvidia-smi listed no card");
   return cards;
+}
+
+/** queryCardsRanked: the card table with the board power joined on (the seam: no power is read yet, so it is queryCards). */
+export function queryCardsRanked(spawnSync = nodeSpawnSync) {
+  return queryCards(spawnSync);
 }
 
 // ---- which cards ----------------------------------------------------------------------------------
@@ -178,12 +184,33 @@ function matchCard(token, cards) {
   return hits.length === 1 ? hits[0] : null;
 }
 
+/** Two cards whose sizes differ by no more than this fraction of the larger are one size (the seam: not used yet). */
+export const VRAM_EQUAL_FRACTION = 0.01;
+/** Of two cards of one size, the faster board computes when its design power is at least this many times the other's (the seam: not used yet). */
+export const POWER_RANK_RATIO = 1.25;
+
+/** computeOverride: the WAN_COMPUTE_UUID token of an environment, "" when absent (the seam: always absent). */
+export function computeOverride(env = process.env) {
+  return "";
+}
+
+/**
+ * chooseRoles gives the two cards their roles: { storage, compute, why }. The seam is today's rule: the larger card computes, and of two
+ * equal cards the one with the higher UUID does.
+ */
+export function chooseRoles(first, second) {
+  let storage, compute;
+  if (first.totalMiB !== second.totalMiB) [storage, compute] = second.totalMiB > first.totalMiB ? [first, second] : [second, first];
+  else [storage, compute] = first.uuid.toLowerCase() <= second.uuid.toLowerCase() ? [first, second] : [second, first];
+  return { storage, compute, why: "" };
+}
+
 /**
  * resolveWanCards turns the tokens into the two cards and their roles. It refuses (with the reason) when there are not
  * exactly two distinct cards, when a token names no card of the driver's table, or when a card drives a display.
  * Roles: the larger card is the compute card (cuda:1); of two equal cards the one with the higher UUID computes.
  */
-export function resolveWanCards({ tokens, source, cards, cardsFlag = "wan-cards" }) {
+export function resolveWanCards({ tokens, source, cards, cardsFlag = "wan-cards", compute: computeToken = "" }) {
   if (!tokens || tokens.length === 0) {
     throw placementError(`the multicard placement needs the two cards it runs on, and none was named: run it under \`local-offload gpu reserve --devices <card>,<card>\` (the lease names them), or pass --${cardsFlag} <card>,<card>`);
   }
@@ -212,10 +239,8 @@ export function resolveWanCards({ tokens, source, cards, cardsFlag = "wan-cards"
   // The larger card computes. Cards of one size take their roles from their ids: the lower one stores (cuda:0), the higher one computes (cuda:1), which is
   // the order the lease sorts its ids in (internal/gpulease NormalizeDevices), so a pair named with --wan-cards gets the roles the same pair gets under a
   // lease, the split the benchmark measured, whatever order the caller typed it in.
-  let storage, compute;
-  if (first.totalMiB !== second.totalMiB) [storage, compute] = second.totalMiB > first.totalMiB ? [first, second] : [second, first];
-  else [storage, compute] = first.uuid.toLowerCase() <= second.uuid.toLowerCase() ? [first, second] : [second, first];
-  return { storage, compute, source };
+  const { storage, compute, why } = chooseRoles(first, second);
+  return { storage, compute, source, why, note: "" };
 }
 
 // ---- the ComfyUI launch ---------------------------------------------------------------------------
@@ -445,7 +470,7 @@ export function portNote(flags, env, api, label = "wan-placement") {
  * state is unknown, a resident share the compute card cannot hold, a missing pack. `cards` reads the driver's card table
  * (injectable); `isWanGraph` says whether this invocation builds the Wan 2.2 graph; `leaseDevicesFn` names the cards the lease holds.
  */
-export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, cards = queryCards, launchFn = multicardLaunch, leaseDevicesFn = leaseDevices, say = () => {} }) {
+export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, spawnSync = nodeSpawnSync, cards = () => queryCardsRanked(spawnSync), launchFn = multicardLaunch, leaseDevicesFn = leaseDevices, say = () => {} }) {
   refuseEqualsSpelling(flags);
   const mode = wanPlacementMode(flags);
   if (mode !== "multicard") return null;
@@ -455,7 +480,7 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   refuseUnmeasuredWan(flags);
   const residentGb = wanResidentGb(flags);
   const { tokens, source } = wanCardTokens({ flags, env, leaseDevicesFn });
-  const pair = resolveWanCards({ tokens, source, cards: cards() });
+  const pair = resolveWanCards({ tokens, source, cards: cards(), compute: computeOverride(env) });
   if (source === "--wan-cards") confirmWithLease(pair, leaseDevicesFn(env));
   const unsized = geometryNote(flags);
   if (unsized) say(unsized);
