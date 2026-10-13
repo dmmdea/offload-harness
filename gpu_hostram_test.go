@@ -621,6 +621,9 @@ func TestTheHostRAMEstimateReusesTheTableThePlanRead(t *testing.T) {
 // flag declares the whole set (33.1 GiB), which is what the host-RAM grant waited on. The estimate needs each leased card's
 // size, not only the largest one.
 func TestAMulticardWanCallDeclaresNothingOnTheTwoLeasedCards(t *testing.T) {
+	// the sizing reads COMFY_EXTRA_ARGS from the process environment (sage attention sizes the activations larger), and a box that exports
+	// --use-sage-attention would otherwise fail the default-share assertions below
+	t.Setenv("COMFY_EXTRA_ARGS", "")
 	useCardTable(t, "")
 	table, _ := gpuprobe.BuildCards([]gpuprobe.Device{
 		{Index: 0, UUID: "GPU-aaaa0000-x", Name: "T", TotalGiB: 15.9, FreeGiB: 15.9, UtilKnown: true},
@@ -656,6 +659,7 @@ func TestAMulticardWanCallDeclaresNothingOnTheTwoLeasedCards(t *testing.T) {
 // must hand the estimate each leased card's size too; without that a multicard call on two fitting cards silently declares the ordinary 33.1 GiB, which is
 // the lease wait the placement exists to remove (the review of 2026-10-11 deleted the assignment and every test still passed).
 func TestAMulticardWanCallDeclaresNothingWhenTheEstimateReadsTheCardTableItself(t *testing.T) {
+	t.Setenv("COMFY_EXTRA_ARGS", "") // see the test above: the sizing reads the process environment
 	useCardTable(t, "")
 	cfg := config.Config{ComfyDir: t.TempDir()}
 	cards, _, err := cardTableFn(context.Background(), cfg)
@@ -683,6 +687,39 @@ func TestAMulticardWanCallDeclaresNothingWhenTheEstimateReadsTheCardTableItself(
 	n = resolveReserveHostRAM(false, 0, gpulease.ClassMedia, call, pair, cfg, true, &out)
 	if math.Abs(n.GiB-33.1) > 0.01 {
 		t.Fatalf("the same call without the flag is sized as it always was, got %v", n)
+	}
+}
+
+// Sage attention (--use-sage-attention in COMFY_EXTRA_ARGS) holds 3 GiB more activations on the compute card at the film's clip, so the runner refuses the default
+// share there and the lease must not declare 0 for it either. The variable reaches the sizing through the process environment (Facts.Env = os.Getenv in
+// resolveReserveHostRAMWith); the wiring is this test's, the arithmetic is internal/hostneed's. `--ram 0` states the real figure for a call the geometry-blind
+// sizing over-declares.
+func TestAMulticardWanCallUnderSageAttentionDeclaresTheOrdinarySetAtTheDefaultShare(t *testing.T) {
+	t.Setenv("COMFY_EXTRA_ARGS", "--use-sage-attention")
+	useCardTable(t, "")
+	table, _ := gpuprobe.BuildCards([]gpuprobe.Device{
+		{Index: 0, UUID: "GPU-aaaa0000-x", Name: "T", TotalGiB: 15.9, FreeGiB: 15.9, UtilKnown: true},
+		{Index: 1, UUID: "GPU-bbbb0000-x", Name: "T", TotalGiB: 15.9, FreeGiB: 13.7, UtilKnown: true},
+		{Index: 2, UUID: "GPU-cccc0000-x", Name: "T", TotalGiB: 15.9, FreeGiB: 15.9, UtilKnown: true},
+	}, "")
+	pair := []string{table[0].LeaseID(), table[2].LeaseID()}
+	cfg := config.Config{ComfyDir: t.TempDir()}
+	call := strings.Fields("node render/comfy-video.mjs o.mp4 s.png p --model wan --high-unet hi.safetensors --low-unet lo.safetensors --wan-placement multicard")
+	var out bytes.Buffer
+
+	n := resolveReserveHostRAMWith(false, 0, gpulease.ClassMedia, call, pair, cfg, true, table, &out)
+	if math.Abs(n.GiB-33.1) > 0.01 || !strings.Contains(n.Detail, "COMFY_EXTRA_ARGS") {
+		t.Fatalf("a multicard Wan call under sage attention at the default share must declare the ordinary set and say why, got %v", n)
+	}
+	n = resolveReserveHostRAMWith(false, 0, gpulease.ClassMedia, append(append([]string{}, call...), "--wan-resident-gb", "0"), pair, cfg, true, table, &out)
+	if n.GiB != 0 || !strings.Contains(n.Detail, "2 leased cards") || !strings.Contains(n.Detail, "sage attention") {
+		t.Fatalf("a sage call with no resident share fits the two leased cards and declares 0, got %v", n)
+	}
+	// the control: the same call without the variable is the default sizing, where the default share declares 0
+	t.Setenv("COMFY_EXTRA_ARGS", "")
+	n = resolveReserveHostRAMWith(false, 0, gpulease.ClassMedia, call, pair, cfg, true, table, &out)
+	if n.GiB != 0 || !strings.Contains(n.Detail, "2 leased cards") {
+		t.Fatalf("without sage attention the default share declares 0, got %v", n)
 	}
 }
 

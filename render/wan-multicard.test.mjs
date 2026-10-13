@@ -885,3 +885,481 @@ test("createOomWatch: silent while the console is quiet, one message naming the 
   assert.equal(said.filter((m) => /^WAN-OOM-WATCH: .*no console file/.test(m)).length, 1);
   assert.equal(said.filter((m) => /^WAN-OOM-WATCH: .*capped/.test(m)).length, 1);
 });
+
+// ---- the compute card ranked by capability (0.185.0) ---------------------------------------------------------------------------------
+// The size rule picked the compute card by exact bytes, so a 16303 MiB card lost the role to a 16311 MiB card half its speed. A board's design power
+// (nvidia-smi power.default_limit, read by a second query) now ranks two cards of one size (within 1 percent), from a ratio of 1.25.
+// THE FIXTURES put the fast card on the LOWER uuid (U2 sorts before U0) and make it the SMALLER card by 8 MiB (16303 against 16311). Every rule that is
+// not the board-power rule then disagrees with it: the larger card computes -> idx 0, the higher uuid computes -> idx 0, an unreported power -> idx 0.
+// Only the power rule picks idx 2, so a mutation of any one rule turns an answer.
+const rankCards = ({ slowW, fastW, slowMiB = 16311, fastMiB = 16303 } = {}) => [
+  { index: 0, uuid: U0, name: "Test GPU Slow", totalMiB: slowMiB, freeMiB: 16000, display: false, displayUnknown: false, displayActive: "Disabled", displayAttached: "No", powerLimitW: slowW },
+  { index: 2, uuid: U2, name: "Test GPU Fast", totalMiB: fastMiB, freeMiB: 16050, display: false, displayUnknown: false, displayActive: "Disabled", displayAttached: "No", powerLimitW: fastW },
+];
+// [storage index, compute index]
+const rolesOf = (cards, tokens = ["0", "2"], extra = {}) => { const r = M.resolveWanCards({ tokens, source: "t", cards, ...extra }); return [r.storage.index, r.compute.index]; };
+const rankedWhy = (cards) => M.resolveWanCards({ tokens: ["0", "2"], source: "t", cards }).why;
+
+test("two cards within 1 percent of one size: the board with the higher design power computes, whatever the token order", () => {
+  const cards = rankCards({ slowW: 180, fastW: 300 });
+  for (const tokens of [["0", "2"], ["2", "0"], [U0, U2], [U2, U0]]) assert.deepEqual(rolesOf(cards, tokens), [0, 2], tokens.join());
+  assert.equal(rankedWhy(cards), "the faster card: 300 W board power against 180 W");
+  // the mirror: the fast card is idx 0 and carries the higher uuid, and the slow one is the larger: the size rule would have put the slow card on compute
+  const mirror = [{ ...cards[1], index: 0, uuid: U0 }, { ...cards[0], index: 2, uuid: U2 }];
+  assert.deepEqual(rolesOf(mirror), [2, 0]);
+  assert.equal(rankedWhy(mirror), "the faster card: 300 W board power against 180 W");
+});
+
+test("the equal-size band is 1 percent of the larger card, and outside it the larger card computes whatever the board power", () => {
+  assert.equal(M.VRAM_EQUAL_FRACTION, 0.01);
+  // 16311 - 16148 = 163 MiB, inside 1 percent of 16311 (163.11): one size, so the faster board computes
+  assert.deepEqual(rolesOf(rankCards({ slowW: 180, fastW: 300, fastMiB: 16148 })), [0, 2]);
+  // 164 MiB under: more than 1 percent, so the sizes are different and the larger card computes
+  assert.deepEqual(rolesOf(rankCards({ slowW: 180, fastW: 300, fastMiB: 16147 })), [2, 0]);
+  assert.match(rankedWhy(rankCards({ slowW: 180, fastW: 300, fastMiB: 16147 })), /^the larger card \(16311 MiB against 16147 MiB\)$/);
+  // far apart: a small fast card does not take the role from a big slow one
+  assert.deepEqual(rolesOf(rankCards({ slowW: 100, fastW: 300, slowMiB: 24576, fastMiB: 16384 })), [2, 0]);
+});
+
+test("a board power that is not reported on either card ranks nothing: today's rule applies, and the reason says so", () => {
+  for (const [slowW, fastW] of [[undefined, undefined], [0, 300], [undefined, 300], [NaN, 300], [180, 0], [300, undefined]]) {
+    const cards = rankCards({ slowW, fastW });
+    const r = M.resolveWanCards({ tokens: ["0", "2"], source: "t", cards });
+    // the larger card (16311 MiB, idx 0) computes: exactly what the planner did before the board power was read
+    assert.deepEqual([r.storage.index, r.compute.index], [2, 0], `${slowW} / ${fastW}`);
+    assert.match(r.why, /^the larger card \(16311 MiB against 16303 MiB\) \(board power not reported for idx \d/, `${slowW} / ${fastW}`);
+  }
+  // the positive control: the same two cards with both powers read are ranked
+  assert.deepEqual(rolesOf(rankCards({ slowW: 180, fastW: 300 })), [0, 2]);
+  // two cards of exactly one size and no power: the higher uuid computes, as it always did
+  const same = rankCards({ slowW: undefined, fastW: undefined, fastMiB: 16311 });
+  assert.deepEqual(rolesOf(same), [2, 0]);
+  assert.match(rankedWhy(same), /^two cards of one size: the higher UUID computes \(board power not reported for idx 0, idx 2\)$/);
+  assert.deepEqual(rolesOf(rankCards({ slowW: 180, fastW: 300, fastMiB: 16311 })), [0, 2], "and the same size with both powers read is ranked");
+});
+
+test("board power ranks from 1.25 times the other card, inclusive, and not under it", () => {
+  assert.equal(M.POWER_RANK_RATIO, 1.25);
+  const at = (slowW, fastW) => rolesOf(rankCards({ slowW, fastW }));
+  assert.deepEqual(at(100, 124), [2, 0], "1.24 times: a factory overclock of one chip, not another class of card: the old rule");
+  assert.match(rankedWhy(rankCards({ slowW: 100, fastW: 124 })), /^the larger card \(16311 MiB against 16303 MiB\) \(board power 100 W and 124 W differ by less than 1\.25 times\)$/);
+  assert.deepEqual(at(100, 125), [0, 2], "exactly 1.25 times ranks");
+  assert.deepEqual(at(100, 300), [0, 2]);
+});
+
+test("WAN_COMPUTE_UUID names the compute card of the pair: an index, a UUID or a prefix of 8+ characters, beating the size and the speed", () => {
+  // idx 0 and idx 2 are the same size here, so without a word idx 0 (the higher uuid) computes
+  for (const token of ["2", U2, U2.toLowerCase(), "aaaa1111", "GPU-AAAA1111", "gpu-aaaa1111", " 2 "]) {
+    const r = M.resolveWanCards({ tokens: ["0", "2"], source: "t", cards: CARDS, compute: token });
+    assert.deepEqual([r.storage.index, r.compute.index], [0, 2], JSON.stringify(token));
+    assert.equal(r.why, "named by WAN_COMPUTE_UUID");
+    assert.equal(r.note, "");
+  }
+  for (const token of ["", "   ", undefined]) assert.deepEqual(rolesOf(CARDS.filter((c) => c.index !== 1), ["0", "2"], { compute: token }), [2, 0], "no word: the old roles");
+  assert.deepEqual(rolesOf(CARDS, ["0", "2"], { compute: "0" }), [2, 0], "and naming the card that would compute anyway changes nothing");
+  // it beats the board power as well: the slow card is named, so it computes
+  assert.deepEqual(rolesOf(rankCards({ slowW: 180, fastW: 300 }), ["0", "2"], { compute: "0" }), [2, 0]);
+  assert.deepEqual(rolesOf(rankCards({ slowW: 180, fastW: 300 }), ["0", "2"]), [0, 2], "(the control: unnamed, the fast card computes)");
+  // through the plan, with the environment variable: idx 2 computes and the instance key follows the roles
+  const plan = planWith({}, { env: { ...LEASE, WAN_COMPUTE_UUID: "2" } });
+  assert.equal(plan.pair.compute.index, 2);
+  assert.equal(plan.pair.storage.index, 0);
+  assert.equal(plan.launch.cudaVisibleDevices, `${U0},${U2}`);
+  assert.equal(plan.launch.key, "mc-cccc3333-aaaa1111");
+  assert.equal(planWith().pair.compute.index, 0, "the control: the lease alone leaves the roles as they were");
+  assert.equal(M.computeOverride({ WAN_COMPUTE_UUID: "  2 " }), "2");
+  assert.equal(M.computeOverride({}), "");
+  assert.equal(M.computeOverride({ WAN_COMPUTE_UUID: "   " }), "");
+});
+
+test("the override is judged like any other choice: a named card that cannot hold the share is refused with the numbers", () => {
+  const cardsOf = (a, b) => M.parseCardTable([`0, ${U0}, Test GPU A, ${a * 1024}, 16000, Disabled, No`, `2, ${U2}, Test GPU A, ${b * 1024}, 16050, Disabled, No`].join("\n"));
+  const film = { width: "720", height: "1280", frames: "81", "wan-resident-gb": "4" };
+  const table = cardsOf(24, 12);
+  assert.equal(planWith(film, { cards: () => table }).pair.compute.index, 0, "the 24 GiB card computes, and 4 GiB resident fits it");
+  // 12 GiB - 12.2 GiB of film-size activations - 0.5 GiB of context: nothing fits there
+  assert.throws(() => planWith(film, { cards: () => table, env: { ...LEASE, WAN_COMPUTE_UUID: "2" } }), /--wan-resident-gb 4 .*compute card \(idx 2, 12\.0 GiB\).*720x1280x81.*at most -0\.7/);
+  // The 16 GiB card of a 24 + 16 GiB pair is the measured compute card, so naming it is NOT refused at the default share: 16.0 - 12.2 - 0.5 = 3.3 GiB holds the share of 3
+  // (the lease sizing judges the larger card, so nothing refuses either). It is refused only for a share over what it holds.
+  const mixed = cardsOf(24, 16);
+  const filmDefault = { width: "720", height: "1280", frames: "81" };
+  const namesSmaller = { ...LEASE, WAN_COMPUTE_UUID: "2" };
+  const admitted = planWith(filmDefault, { cards: () => mixed, env: namesSmaller });
+  assert.deepEqual([admitted.pair.storage.index, admitted.pair.compute.index, admitted.residentGb], [0, 2, 3], "24 + 16 naming the 16 GiB card, default share: admitted");
+  assert.throws(() => planWith({ ...filmDefault, "wan-resident-gb": "3.4" }, { cards: () => mixed, env: namesSmaller }), /--wan-resident-gb 3\.4 .*compute card \(idx 2, 16\.0 GiB\).*720x1280x81.*at most 3\.3/);
+  assert.equal(planWith({ ...filmDefault, "wan-resident-gb": "3.4" }, { cards: () => mixed }).pair.compute.index, 0, "(the control: unnamed, the 24 GiB card computes and holds 3.4)");
+});
+
+test("an override that does not name exactly one of the two cards is ignored with a note, and one that names no card at all is refused", () => {
+  // idx 3 begins like idx 2: a prefix names both on the table, though only one of them is in the pair
+  const twin = M.parseCardTable(`3, GPU-aaaa1111-9999-9999-9999-999999999999, Test GPU A, 16311, 16000, Disabled, No`);
+  const table = [...CARDS, ...twin];
+  const go = (cards, token) => { const r = M.resolveWanCards({ tokens: ["0", "2"], source: "t", cards, compute: token }); return { roles: [r.storage.index, r.compute.index], why: r.why, note: r.note }; };
+  const ignored = (token) => `WAN_COMPUTE_UUID names ${JSON.stringify(token)}, which does not name exactly one of the two cards (idx 0, idx 2); ranked instead`;
+  // a real card that is not in the pair
+  const outside = go(CARDS, "1");
+  assert.deepEqual(outside.roles, [2, 0]);
+  assert.equal(outside.note, ignored("1"));
+  assert.match(outside.why, /^two cards of one size: the higher UUID computes/);
+  // a prefix that begins two cards of the table: ambiguous, though only one of them is in the pair (the table-wide rule of the other tokens)
+  const ambiguous = go(table, "aaaa1111");
+  assert.deepEqual(ambiguous.roles, [2, 0]);
+  assert.equal(ambiguous.note, ignored("aaaa1111"));
+  assert.deepEqual(go(table, "aaaa1111-d").roles, [0, 2], "the control: a longer prefix names one card, and it computes");
+  // a token that names both cards of the pair is ambiguous too
+  const both = M.parseCardTable([`0, GPU-dddd4444-aaaa-bbbb-cccc-111111111111, Test GPU A, 16311, 16000, Disabled, No`, `2, GPU-dddd4444-aaaa-bbbb-cccc-222222222222, Test GPU A, 16311, 16050, Disabled, No`].join("\n"));
+  assert.equal(go(both, "dddd4444").note, ignored("dddd4444"));
+  assert.deepEqual(go(both, "dddd4444-aaaa-bbbb-cccc-1").roles, [2, 0], "(the control: a longer prefix names idx 0, which then computes, against the higher uuid's default)");
+  assert.deepEqual(go(both, "dddd4444-aaaa-bbbb-cccc-2").roles, [0, 2]);
+  // the ranking still decides when the override is ignored, and says so
+  const ranked = go([...rankCards({ slowW: 180, fastW: 300 }), CARDS[1]], "1");
+  assert.deepEqual(ranked.roles, [0, 2]);
+  assert.equal(ranked.why, "the faster card: 300 W board power against 180 W");
+  assert.equal(ranked.note, ignored("1"));
+  // names no card on the table (a typo, a stale uuid): refused, naming the token and the two cards, and the ranking is not run
+  for (const token of ["7", "deadbeef", "GPU-", "aaaa", "GPU-ffffffff", "GPU-aaaa"]) {
+    assert.throws(() => go(CARDS, token), new RegExp(`^Error: WAN-PLACEMENT: WAN_COMPUTE_UUID names ${JSON.stringify(token)}, which is no card in the driver's table.*\\(idx 0, idx 2\\)`), token);
+  }
+  assert.deepEqual(go(CARDS, "2").roles, [0, 2], "(the control: a card that exists is taken)");
+  // an empty or blank token is absent: no note, no refusal
+  for (const token of ["", "  "]) assert.deepEqual(go(CARDS, token), { roles: [2, 0], why: "two cards of one size: the higher UUID computes (board power not reported for idx 0, idx 2)", note: "" });
+});
+
+test("a refused override that is digits alone says it was read as an index, and how a UUID prefix made of digits is spelled", () => {
+  // about 2 percent of 8-hex prefixes are all digits: GPU-11112222-... is begun by "11112222", which the token rule reads as an index (nvidia-smi's index is a small number)
+  const digits = M.parseCardTable([`0, GPU-11112222-bbbb-cccc-dddd-eeeeeeeeeeee, Test GPU A, 16311, 16000, Disabled, No`, `2, ${U2}, Test GPU A, 16311, 16050, Disabled, No`].join("\n"));
+  const go = (token) => M.resolveWanCards({ tokens: ["0", "2"], source: "t", cards: digits, compute: token });
+  const refusal = (token) => { try { go(token); } catch (e) { return e.message; } return ""; };
+  assert.equal(go("GPU-11112222").compute.index, 0, "the control: the same prefix with its GPU- spelling names the card");
+  const digitsOnly = refusal("11112222");
+  assert.match(digitsOnly, /^WAN-PLACEMENT: WAN_COMPUTE_UUID names "11112222", which is no card in the driver's table/);
+  assert.match(digitsOnly, /a token of digits alone is read as an nvidia-smi index; a UUID prefix made of digits needs the "GPU-" spelling \(GPU-11112222\)/);
+  // a token with a letter in it is no index, so the clause would mislead there: the control
+  const letters = refusal("deadbeef");
+  assert.match(letters, /^WAN-PLACEMENT: WAN_COMPUTE_UUID names "deadbeef", which is no card/);
+  assert.doesNotMatch(letters, /digits alone/);
+  // and every refusal says how the 8 characters are counted: after the optional GPU- (the rule the docs state)
+  for (const msg of [digitsOnly, letters, refusal("GPU-aaaa")]) assert.match(msg, /a UUID prefix of 8 or more characters after the optional "GPU-", or unset it/);
+});
+
+test("the override cannot add a card: --wan-cards still has to be confirmed by the lease, whatever WAN_COMPUTE_UUID names", () => {
+  const held = ["gpu-cccc3333-bbbb-cccc-dddd-eeeeeeeeeeee", "gpu-bbbb2222-cccc-dddd-eeee-ffffffffffff"];
+  assert.throws(() => planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => held, env: { WAN_COMPUTE_UUID: "1" } }), /--wan-cards names idx 2, which the GPU lease does not hold/);
+  assert.throws(() => planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => held, env: { WAN_COMPUTE_UUID: "2" } }), /does not hold/);
+  // the control: a lease that holds the pair confirms it, and the override then names the compute card
+  const both = ["gpu-cccc3333-bbbb-cccc-dddd-eeeeeeeeeeee", "gpu-aaaa1111-dddd-eeee-ffff-000000000000"];
+  assert.equal(planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => both, env: { WAN_COMPUTE_UUID: "2" } }).pair.compute.index, 2);
+  assert.equal(planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => both, env: {} }).pair.compute.index, 0);
+});
+
+test("the plan says which rule chose the compute card at the end of the one line it says, with the note of an ignored override", () => {
+  const said = [];
+  const say = (l) => said.push(l);
+  const table = rankCards({ slowW: 180, fastW: 300 });
+  planWith({}, { cards: () => table, say });
+  assert.equal(said.length, 1);
+  assert.match(said[0], /^wan-placement: multicard on the GPU lease: storage cuda:0 = idx 0 .*; compute cuda:1 = idx 2 .*; 3 GiB of each expert resident on the compute card; compute card chosen: the faster card: 300 W board power against 180 W$/);
+  said.length = 0;
+  planWith({}, { cards: () => table, say, env: { ...LEASE, WAN_COMPUTE_UUID: "0" } });
+  assert.equal(said.length, 1);
+  assert.match(said[0], /; compute cuda:1 = idx 0 .*; compute card chosen: named by WAN_COMPUTE_UUID$/);
+  said.length = 0;
+  planWith({}, { cards: () => [...table, CARDS[1]], say, env: { ...LEASE, WAN_COMPUTE_UUID: "1" } });
+  assert.equal(said.length, 1);
+  assert.match(said[0], /; compute card chosen: the faster card: 300 W board power against 180 W \(WAN_COMPUTE_UUID names "1", which does not name exactly one of the two cards \(idx 2, idx 0\); ranked instead\)$/);
+});
+
+// ---- the card table with the board power: queryCardsRanked --------------------------------------------------------------------------
+const DISPLAY_CSV = [`0, ${U0}, Test GPU Slow, 16311, 16000, Disabled, No`, `2, ${U2}, Test GPU Fast, 16303, 16050, Disabled, No`].join("\n");
+// a fake nvidia-smi: the display ladder answers `display`, the power query answers `power` after `powerFails` failures
+const smiFake = ({ display = DISPLAY_CSV, power = "", powerFails = 0, displayFails = 0 } = {}) => {
+  const calls = [];
+  let pf = powerFails, df = displayFails;
+  const spawn = (cmd, args, opts) => {
+    calls.push({ cmd, fields: args[0], format: args[1], opts });
+    if (/power/.test(args[0])) { if (pf > 0) { pf--; return { status: 2, stdout: "" }; } return { status: 0, stdout: power }; }
+    if (df > 0) { df--; return { status: 2, stdout: "" }; }
+    return { status: 0, stdout: display };
+  };
+  spawn.calls = calls;
+  return spawn;
+};
+
+test("queryCardsRanked asks the display ladder first and unchanged, then the board power in a second hidden query, and joins it by UUID", () => {
+  const smi = smiFake({ power: `${U0}, 180.00\n${U2.toUpperCase()}, 300.00` });
+  const cards = M.queryCardsRanked(smi);
+  assert.equal(smi.calls.length, 2, "the display table once, the power once");
+  assert.match(smi.calls[0].fields, /^--query-gpu=index,uuid,name,memory\.total,memory\.free,display_active,display_attached$/);
+  assert.equal(smi.calls[1].fields, "--query-gpu=uuid,power.default_limit");
+  for (const c of smi.calls) {
+    assert.equal(c.cmd, "nvidia-smi");
+    assert.equal(c.format, "--format=csv,noheader,nounits");
+    assert.equal(c.opts.windowsHide, true, `${c.fields}: no console window on Windows`);
+  }
+  assert.deepEqual(cards.map((c) => [c.index, c.powerLimitW]), [[0, 180], [2, 300]], "joined by the lower-cased UUID, whatever case the driver spells it in");
+  assert.deepEqual(cards.map((c) => c.displayUnknown), [false, false], "the display table is what queryCards reads");
+  // the whole way through the roles
+  assert.deepEqual(rolesOf(cards), [0, 2]);
+});
+
+test("queryCardsRanked retries a failed power query once, and a power that cannot be read leaves every card at 0 and refuses nothing", () => {
+  const power = `${U0}, 180.00\n${U2}, 300.00`;
+  const once = smiFake({ power, powerFails: 1 });
+  assert.deepEqual(M.queryCardsRanked(once).map((c) => c.powerLimitW), [180, 300], "a transient failure is retried: the roles do not flip on one bad read");
+  assert.equal(once.calls.length, 3);
+  assert.ok(once.calls.every((c) => c.opts.windowsHide === true), "the retry is hidden too");
+  const never = smiFake({ power, powerFails: 9 });
+  const cards = M.queryCardsRanked(never);
+  assert.equal(never.calls.length, 3, "the table once, the power twice, then it gives up");
+  assert.deepEqual(cards.map((c) => c.powerLimitW), [0, 0]);
+  assert.deepEqual(cards.map((c) => c.displayUnknown), [false, false], "and the display detection is not touched by it");
+  assert.deepEqual(rolesOf(cards), [2, 0], "unranked: the larger card computes, as before the power was read");
+  const throws = (cmd, args, opts) => { if (/power/.test(args[0])) throw new Error("spawn failed"); return { status: 0, stdout: DISPLAY_CSV }; };
+  assert.deepEqual(M.queryCardsRanked(throws).map((c) => c.powerLimitW), [0, 0], "a throwing spawn is a failed read too");
+});
+
+test("queryCardsRanked reads only a power that is a positive number, and ignores a row that is no card of the table", () => {
+  const readOf = (cell) => M.queryCardsRanked(smiFake({ power: `${U0}, ${cell}\n${U2}, 250.50\nGPU-ffff0000-0000-0000-0000-000000000000, 400.00` })).map((c) => c.powerLimitW);
+  assert.deepEqual(readOf("180.00"), [180, 250.5]);
+  for (const cell of ["[N/A]", "[Not Supported]", "", "0.00", "-5", "abc", "Infinity"]) assert.deepEqual(readOf(cell), [0, 250.5], JSON.stringify(cell));
+  const short = M.queryCardsRanked(smiFake({ power: `${U0}\n${U2}, 250.50\nnoise` }));
+  assert.deepEqual(short.map((c) => c.powerLimitW), [0, 250.5], "a row without its column is no reading");
+});
+
+test("queryCardsRanked leaves the display ladder as queryCards has it: the full query twice, then without display_attached, then the power", () => {
+  const asked = [];
+  const smi = (cmd, args, opts) => {
+    asked.push({ fields: args[0], opts });
+    if (/power/.test(args[0])) return { status: 0, stdout: `${U0}, 180.00` };
+    return /display_attached/.test(args[0]) ? { status: 2, stdout: "" } : { status: 0, stdout: `0, ${U0}, X, 100, 50, Enabled` };
+  };
+  const cards = M.queryCardsRanked(smi);
+  assert.equal(asked.length, 4);
+  assert.deepEqual(asked.map((a) => /power/.test(a.fields) ? "power" : /display_attached/.test(a.fields) ? "full" : "six"), ["full", "full", "six", "power"]);
+  assert.ok(asked.every((a) => a.opts.windowsHide === true));
+  assert.equal(cards[0].display, true);
+  assert.equal(cards[0].displayUnknown, true, "the six-column fallback still leaves the display state unknown");
+  assert.equal(cards[0].powerLimitW, 180);
+  // no card table at all: the same refusals as queryCards, and no power is asked for
+  const none = smiFake({ displayFails: 9 });
+  assert.throws(() => M.queryCardsRanked(none), /nvidia-smi gave no card table/);
+  assert.ok(none.calls.every((c) => !/power/.test(c.fields)));
+  assert.throws(() => M.queryCardsRanked(() => ({ status: 0, stdout: "no cards here" })), /listed no card/);
+});
+
+test("planMulticard reads the card table through queryCardsRanked unless it is handed one: a faster board computes with no injected table", () => {
+  const smi = smiFake({ power: `${U0}, 180.00\n${U2}, 300.00` });
+  const plan = planWith({}, { cards: undefined, spawnSync: smi });
+  assert.equal(plan.pair.compute.index, 2);
+  assert.equal(plan.pair.why, "the faster card: 300 W board power against 180 W");
+  assert.deepEqual(smi.calls.map((c) => /power/.test(c.fields) ? "power" : "table"), ["table", "power"]);
+});
+
+// The mixed pair (two models of one size class) is checked role by role, so a pin that landed the cards the wrong way round is caught. The checker half of
+// this test holds before the ranking existed (the pair is built by hand); the last assertion is the roles the planner now gives such a pair.
+test("a mixed pair is verified role by role: the compute card's own model name is checked on cuda:1", () => {
+  const cards = rankCards({ slowW: 180, fastW: 300 });
+  const mixed = { storage: cards[0], compute: cards[1] };
+  const dev = (name, mib) => ({ type: "cuda", vram_total: mib * 1024 ** 2, name });
+  assert.deepEqual(M.checkComfyDevices([dev("cuda:0 Test GPU Slow : cudaMallocAsync", 16311), dev("cuda:1 Test GPU Fast : cudaMallocAsync", 16303)], mixed), []);
+  const swapped = M.checkComfyDevices([dev("cuda:0 Test GPU Fast : cudaMallocAsync", 16303), dev("cuda:1 Test GPU Slow : cudaMallocAsync", 16311)], mixed);
+  assert.equal(swapped.length, 2);
+  assert.match(swapped.join("\n"), /cuda:1 \(compute\) should be idx 2 \(Test GPU Fast\)/);
+  assert.match(swapped.join("\n"), /cuda:0 \(storage\) should be idx 0 \(Test GPU Slow\)/);
+  const r = M.resolveWanCards({ tokens: ["0", "2"], source: "t", cards });
+  assert.deepEqual([r.storage.index, r.compute.index], [mixed.storage.index, mixed.compute.index], "the planner's roles for this pair are the ones the checker verifies");
+});
+
+// ---- sage attention (0.185.0) ---------------------------------------------------------------------------------------------------------
+// The film session of 2026-10-12 ran the film clip with --use-sage-attention in COMFY_EXTRA_ARGS: the compute card read 15,482 MiB in use at resident 0 (15.119 GiB)
+// and 15,216 MiB at resident 2 on 720x1280x65 (14.859 GiB, 12.859 beyond the share), 3 GiB more than the default attention's 12.2. The planner knew neither, so a
+// sage call with the default share of 3 (3 + 12.2 + 0.5 = 15.7 of 15.93) was admitted and ran out of memory. Every env below is an EXPLICIT object, so no test
+// reads the host's COMFY_EXTRA_ARGS (a film host exports it).
+const SAGE_ENV = { ...LEASE, COMFY_EXTRA_ARGS: "--use-sage-attention" };
+const FILM = { width: "720", height: "1280", frames: "81" };
+const CLIP65 = { width: "720", height: "1280", frames: "65" };
+// ONE table, read by this file and by internal/hostneed's TestTheSageTokenRuleMatchesTheRunner (render/testdata/sage-token-table.json): a row changed there turns
+// an answer in both languages, and a row added is checked by both.
+const SAGE_TOKENS = JSON.parse(readFileSync(new URL("./testdata/sage-token-table.json", import.meta.url), "utf8")).rows.map((r) => [r.extra, r.sage]);
+
+test("sage attention in COMFY_EXTRA_ARGS: the film clip keeps at most 0.2 GiB of an expert resident, so the default share of 3 is refused and 0 is admitted", () => {
+  const sage = (flags) => planWith({ ...FILM, ...flags }, { env: SAGE_ENV });
+  assert.throws(() => sage({ "wan-resident-gb": "3" }), /--wan-resident-gb 3 .*720x1280x81 \(75600 tokens\).*sage.*at most 0\.2/);
+  assert.throws(() => sage({}), /--wan-resident-gb 3 .*sage.*at most 0\.2/, "the default share is the measured 3, and it is refused under sage");
+  assert.equal(sage({ "wan-resident-gb": "0" }).residentGb, 0);
+  assert.equal(sage({ "wan-resident-gb": "0.2" }).residentGb, 0.2);
+  assert.throws(() => sage({ "wan-resident-gb": "0.3" }), /--wan-resident-gb 0\.3 .*at most 0\.2/);
+  // the control: the same calls without the flag are the default sizing, where 3 and 3.2 are admitted
+  assert.equal(planWith({ ...FILM, "wan-resident-gb": "3" }).residentGb, 3);
+  assert.equal(planWith({ ...FILM, "wan-resident-gb": "3.2" }).residentGb, 3.2);
+  // the refusal names the mode and the way out, and drops the default-mode tail (the measured recipe that keeps 3 is the pytorch one, the very share refused here)
+  const msg = (() => { try { sage({ "wan-resident-gb": "3" }); } catch (e) { return e.message; } return ""; })();
+  assert.match(msg, /^WAN-PLACEMENT: /);
+  assert.match(msg, /--use-sage-attention in COMFY_EXTRA_ARGS/);
+  assert.match(msg, /--wan-resident-gb 0 is the measured setting at film size/);
+  assert.doesNotMatch(msg, /measured film-size recipe keeps/);
+});
+
+test("sage attention: the measured 65-frame clip admits a 2 GiB share and refuses 3", () => {
+  const sage = (gb, clip = CLIP65) => planWith({ ...clip, "wan-resident-gb": String(gb) }, { env: SAGE_ENV });
+  assert.equal(M.wanGeometry(CLIP65).tokens, 61200);
+  assert.equal(sage(2).residentGb, 2, "the share the film session measured at this clip: a flat 15.2 GiB below the film size would refuse it");
+  assert.throws(() => sage(3), /--wan-resident-gb 3 .*720x1280x65 \(61200 tokens\).*sage.*at most 2\.5/);
+  // the control: the default sizing admits 3 at the same clip (15.93 - 12.2 - 0.5 = 3.2)
+  assert.equal(planWith({ ...CLIP65, "wan-resident-gb": "3" }).residentGb, 3);
+  // Where the default share of 3 stops being admitted is geometry, not a round token count: 720x1280x61 (57,600 tokens) is past the point where sage leaves the default curve
+  // (about 56,800) and still admits 3 (12.325 GiB of activations, at most 3.1), while 720x1280x65 (61,200 tokens, above) refuses it. The share of 3 is first refused at about 58,250 tokens.
+  const CLIP61 = { width: "720", height: "1280", frames: "61" };
+  assert.equal(M.wanGeometry(CLIP61).tokens, 57600);
+  assert.ok(M.wanActivationsGib(57600, "sage") > M.wanActivationsGib(57600), "sage has left the default curve by 57,600 tokens");
+  assert.equal(sage(3, CLIP61).residentGb, 3, "720x1280x61 under sage still admits the default share");
+  assert.throws(() => sage(3.2, CLIP61), /--wan-resident-gb 3\.2 .*720x1280x61 \(57600 tokens\).*sage.*at most 3\.1/);
+});
+
+test("wanActivationsGib(tokens, 'sage') meets the film session's inequalities, and departs from the default only above the default's cap", () => {
+  const sage = (t) => M.wanActivationsGib(t, "sage");
+  const dflt = (t) => M.wanActivationsGib(t);
+  assert.equal(M.WAN_FILM_ACTIVATIONS_SAGE_GIB, 15.2);
+  // the two measured points: 12.859 GiB beyond the share at 61,200 tokens, 15.119 GiB at the film's 75,600, each rounded up
+  assert.ok(sage(61200) >= 12.86 && sage(61200) <= 13.4, `61200 tokens: ${sage(61200)}`);
+  assert.equal(sage(75600), M.WAN_FILM_ACTIVATIONS_SAGE_GIB);
+  assert.ok(sage(75600) > 12.4 && sage(75600) >= 15.12 && sage(75600) <= 15.4, `75600 tokens: ${sage(75600)}`);
+  assert.equal(sage(200000), sage(75600), "held at the film's figure above the film's size: nothing was measured there");
+  // between the points it rises with the tokens: a flat 15.2 below the film size would refuse the measured 65-frame clip
+  assert.ok(sage(68400) > sage(61200) && sage(68400) < sage(75600), `68400 tokens: ${sage(68400)}`);
+  // below the default's cap sage is the default curve: the benchmark's 6.16 GiB reserved at 20,280 tokens with sage is inside the default's 6.29
+  assert.equal(sage(20280), dflt(20280));
+  assert.ok(sage(20280) >= 6.16);
+  assert.equal(sage(7800), dflt(7800));
+  let previous = 0;
+  for (let t = 0; t <= 140000; t += 400) {
+    assert.ok(sage(t) >= dflt(t), `${t} tokens: sage ${sage(t)} under the default ${dflt(t)}`);
+    assert.ok(sage(t) >= previous, `${t} tokens: ${sage(t)} fell from ${previous}`);
+    if (t <= 56000) assert.equal(sage(t), dflt(t), `${t} tokens: the default's cap (12.2 GiB, from 39,400 tokens) is above the sage line until about 57,000`);
+    previous = sage(t);
+  }
+  assert.ok(sage(57600) > dflt(57600), "and from about 57,000 tokens it departs");
+  // the default call is what it was, and any mode but "sage" is the default
+  assert.equal(M.wanActivationsGib(75600), M.WAN_FILM_ACTIVATIONS_GIB);
+  for (const mode of ["default", "flash", undefined]) assert.equal(M.wanActivationsGib(75600, mode), M.WAN_FILM_ACTIVATIONS_GIB, String(mode));
+});
+
+test("wanAttentionMode reads COMFY_EXTRA_ARGS token by token, and isSageAttentionToken is the one predicate", () => {
+  assert.ok(SAGE_TOKENS.length >= 16 && SAGE_TOKENS.some(([, s]) => s) && SAGE_TOKENS.some(([, s]) => !s), "the shared table (render/testdata/sage-token-table.json) looks empty or one-sided");
+  for (const [extra, sage] of SAGE_TOKENS) assert.equal(M.wanAttentionMode({ COMFY_EXTRA_ARGS: extra }), sage ? "sage" : "default", JSON.stringify(extra));
+  assert.equal(M.wanAttentionMode({}), "default");
+  assert.equal(M.wanAttentionMode({ COMFY_EXTRA_ARGS: undefined }), "default");
+  // the predicate itself: one token (an exact flag or an argparse prefix of 8+ characters, ComfyUI's parser allows abbreviations)
+  for (const [extra, sage] of SAGE_TOKENS) {
+    const tokens = extra.split(/\s+/).filter(Boolean);
+    assert.equal(tokens.some(L.isSageAttentionToken), sage, JSON.stringify(extra));
+  }
+  assert.equal(L.isSageAttentionToken("--use-sage-attention"), true);
+  assert.equal(L.isSageAttentionToken("--use-sa"), true);
+  assert.equal(L.isSageAttentionToken("--use-s"), false, "begins --use-split-cross-attention too");
+});
+
+test("a plan with no sage flag, or another attention flag, is the plan it always was", () => {
+  for (const extra of [undefined, "", "--use-flash-attention", "--use-split-cross-attention", "--use-s", "--use-sage-attention-extra", "--x 1"]) {
+    const said = [];
+    const env = extra === undefined ? { ...LEASE } : { ...LEASE, COMFY_EXTRA_ARGS: extra };
+    const plan = planWith({ ...FILM, "wan-resident-gb": "3" }, { env, say: (l) => said.push(l) });
+    assert.equal(plan.attention, "default", String(extra));
+    assert.equal(plan.residentGb, 3);
+    assert.equal(said.length, 1, String(extra));
+    assert.doesNotMatch(said[0], /sage/i, String(extra));
+  }
+  // the default-mode refusal is byte for byte what it was
+  const expected = "WAN-PLACEMENT: --wan-resident-gb 10 leaves the compute card (idx 0, 15.9 GiB) about 6.3 GiB for the sampler's activations at 832x480x49 (20280 tokens) and 0.5 GiB for the CUDA context: at most 9.1 GiB of an expert can stay resident there (the measured film-size recipe keeps 3)";
+  assert.throws(() => planWith({ "wan-resident-gb": "10" }), (e) => e.message === expected);
+  assert.throws(() => planWith({ "wan-resident-gb": "10" }, { env: { ...LEASE, COMFY_EXTRA_ARGS: "--use-flash-attention" } }), (e) => e.message === expected);
+});
+
+test("geometryNote under sage extrapolates from the sage figure, and the default note is what it was", () => {
+  const big = { width: "1280", height: "1280", frames: "121" };
+  const note = M.geometryNote(big, "sage");
+  assert.match(note, /film's 15\.2 GiB/);
+  assert.match(note, /about 39\.9 GiB/);
+  assert.match(note, /sage/);
+  const plain = M.geometryNote(big);
+  assert.match(plain, /film's 12\.2 GiB/);
+  assert.match(plain, /about 32\.0 GiB/);
+  assert.doesNotMatch(plain, /sage/);
+  assert.equal(M.geometryNote(big, "default"), plain);
+  assert.equal(M.geometryNote(FILM, "sage"), "", "at the film's size there is nothing to say, under sage too");
+  // through the plan, the note comes first and the one summary line after it
+  const said = [];
+  planWith({ ...big, "wan-resident-gb": "0" }, { env: SAGE_ENV, say: (l) => said.push(l) });
+  assert.match(said[0], /^WAN-GEOMETRY-NOTE: .*film's 15\.2 GiB/);
+  assert.equal(said.length, 2);
+});
+
+test("a sage plan names the attention it sized for, once, and carries it", () => {
+  const said = [];
+  const plan = planWith({ ...FILM, "wan-resident-gb": "0" }, { env: SAGE_ENV, say: (l) => said.push(l) });
+  assert.equal(plan.attention, "sage");
+  assert.equal(said.length, 1);
+  assert.match(said[0], /^wan-placement: multicard on the GPU lease: storage cuda:0 = idx 2 .*; compute cuda:1 = idx 0 .*; 0 GiB of each expert resident on the compute card; compute card chosen: /);
+  assert.match(said[0], /; sage attention \(COMFY_EXTRA_ARGS\): activations sized at 15\.2 GiB$/);
+  // the control: without the flag the same call has no such clause
+  const plain = [];
+  planWith({ ...FILM, "wan-resident-gb": "0" }, { say: (l) => plain.push(l) });
+  assert.doesNotMatch(plain[0], /sage/);
+});
+
+// A guard, green before and after: under sage the film clip with no resident share fits the storage card the film session measured (14,182 MiB = 13.85 GiB
+// in use inside the 13.4 + 0.8 the placement assumes), so the storage constants stand.
+test("sage attention at film size with no resident share fits the storage card the film session measured", () => {
+  assert.equal(planWith({ ...FILM, "wan-resident-gb": "0" }, { env: SAGE_ENV }).residentGb, 0);
+  assert.ok(14182 / 1024 <= M.WAN_EXPERT_GIB + M.WAN_STORAGE_OVERHEAD_GIB, "13.85 GiB measured on the storage card, 14.2 assumed");
+});
+
+// ---- sage attention and the reuse of a running ComfyUI ---------------------------------------------------------------------------------
+// A kept (--keep-comfy) multicard ComfyUI keeps the flags it was launched with. A call sized for the DEFAULT attention budgets 12.2 GiB of activations at film size; an instance
+// that runs sage holds 15.2, so the share the call was admitted with can run out of memory on it. That direction is refused (an instance the harness launched is replaced). The
+// reverse, a kept default instance under a call sized for sage, only wastes a cold start and is reused.
+test("a running ComfyUI that runs sage attention is not the placement of a call sized for the default attention, and only in that direction", () => {
+  const profile = (sage) => ({ cudaDevice: "", dynamicVram: "", multicard: { cards: ["a", "b"], ...(sage === undefined ? {} : { sage }) } });
+  const base = ["main.py", "--gpu-only"];
+  // the hazard: the live argv carries the flag as it was typed, an argparse prefix of it included (the predicate of the sizing)
+  for (const flag of ["--use-sage-attention", "--use-sa", "--use-sage"]) {
+    assert.match(L.profileMismatch([...base, flag], profile(false)), /it runs with --use-sage-attention.*this launch was sized for \(the default attention\)/, flag);
+  }
+  // the controls: no flag, another attention flag, an ambiguous prefix and a longer token are not sage
+  assert.equal(L.profileMismatch([...base], profile(false)), "");
+  for (const flag of ["--use-flash-attention", "--use-s", "--use-sage-attention-extra"]) assert.equal(L.profileMismatch([...base, flag], profile(false)), "", flag);
+  // the harmless direction, and the old shape of a launch that does not say which attention it was sized for
+  assert.equal(L.profileMismatch([...base, "--use-sage-attention"], profile(true)), "");
+  assert.equal(L.profileMismatch([...base], profile(true)), "");
+  assert.equal(L.profileMismatch([...base, "--use-sage-attention"], profile(undefined)), "");
+});
+
+test("a plan records the attention it was sized for on its launch, and ensureComfy keeps it in the launch marker's profile", async (t) => {
+  assert.equal(planWith().launch.sage, false);
+  assert.equal(planWith({ ...FILM, "wan-resident-gb": "0" }, { env: SAGE_ENV }).launch.sage, true);
+  for (const sage of [true, false]) {
+    const h = lifecycleHarness(t);
+    await L.ensureComfy({ ...h.opts, launch: { ...h.launch, sage } });
+    assert.deepEqual(O.readLaunchOwner(h.dir, h.launch.key).profile.multicard, { cards: [U2, U0], sage });
+  }
+});
+
+test("reuseVerdict: a kept sage instance is replaced (ours) or refused (not ours) for a call sized for the default attention, and reused in the other cases", async (t) => {
+  const h = lifecycleHarness(t);
+  const plain = runningArgv(h);
+  const sageArgv = [...plain, "--use-sage-attention"];
+  const marker = (argv) => ({ pid: 5, args: argv, key: h.launch.key, port: 18852, profile: { multicard: { cards: h.launch.cards } } });
+  const verdictFor = (sage, mk, argv) => L.reuseVerdict({
+    api: "http://127.0.0.1:18852", comfyDir: h.dir, profile: { cudaDevice: "", dynamicVram: "", multicard: { cards: h.launch.cards, sage } }, key: h.launch.key, port: 18852,
+    systemArgv: async () => argv, readLaunch: () => mk, alive: () => true,
+  });
+  const hazard = await verdictFor(false, marker(sageArgv), sageArgv);
+  assert.equal(hazard.restart, true, "ours and not in use: replaced");
+  assert.match(hazard.reason, /it runs with --use-sage-attention.*the default attention/);
+  const foreign = await verdictFor(false, null, sageArgv);
+  assert.equal(foreign.reuse, false, "not proven ours: refused, never stopped");
+  assert.match(foreign.reason, /--use-sage-attention.*not started by this harness/);
+  assert.deepEqual(await verdictFor(true, marker(sageArgv), sageArgv), { reuse: true }, "a sage call on a sage instance");
+  assert.deepEqual(await verdictFor(false, marker(plain), plain), { reuse: true }, "a default call on a default instance");
+  assert.deepEqual(await verdictFor(true, marker(plain), plain), { reuse: true }, "a sage call on a kept default instance wastes a cold start at most, and is reused");
+});

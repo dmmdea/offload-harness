@@ -557,6 +557,9 @@ set. Keep `on` out of a binding that pools — every config load (so every CLI v
 with other flags, a render that needs a different profile relaunches it when the harness
 started it and nobody holds it, and otherwise defers with `COMFY-PROFILE-MISMATCH: …` naming
 the difference — stop that instance (or start it with the binding's flags) and retry.
+`--use-sage-attention` in `COMFY_EXTRA_ARGS` also changes the card-only Wan sizing (its activations are 15.2 GiB at film size, so a sage film call
+passes `--wan-resident-gb 0`; see "Sage attention" in `docs/systems/media-generation.md`), and a kept ComfyUI that runs sage is not reused by a call
+sized for the default attention.
 
 ### Deterministic post-production (edit-image op pack) ✅
 

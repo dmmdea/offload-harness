@@ -130,11 +130,27 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 		// The card-only Wan placement (--wan-placement multicard) is read for the Wan graph alone: no other family has it.
 		var cardOnly *CardOnly
 		if model == "wan22" && strings.EqualFold(strings.TrimSpace(c.Flags["wan-placement"]), "multicard") {
-			cardOnly = &CardOnly{ResidentGiB: wanResidentGiB(c.Flags)}
+			cardOnly = &CardOnly{ResidentGiB: wanResidentGiB(c.Flags), SageAttention: sageAttention(f.env("COMFY_EXTRA_ARGS"))}
 		}
 		return estimateWith(model, mediacap.VideoModelFilesFor(model, fb), f, cardOnly)
 	}
 	return Need{}, false
+}
+
+// sageAttentionFlag is the attention flag the film session of 2026-10-12 measured (ComfyUI's --use-sage-attention).
+const sageAttentionFlag = "--use-sage-attention"
+
+// sageAttention reports whether a COMFY_EXTRA_ARGS value carries sage attention, token by token, by the rule render/comfy-lifecycle.mjs isSageAttentionToken has (a
+// test reads ONE table with the runner's test, render/testdata/sage-token-table.json): the exact flag, or an argparse prefix of it of at least 8 characters (ComfyUI's parser accepts an unambiguous
+// abbreviation, `--use-sa`; `--use-s` also begins --use-split-cross-attention and is not this flag; a longer token is no prefix). Another attention flag is the
+// default attention: only sage was measured.
+func sageAttention(extra string) bool {
+	for _, tok := range strings.Fields(extra) {
+		if len(tok) >= 8 && strings.HasPrefix(sageAttentionFlag, tok) {
+			return true
+		}
+	}
+	return false
 }
 
 // wanResidentGiB reads --wan-resident-gb (the share of each Wan expert the card-only placement keeps on the compute card). The runner

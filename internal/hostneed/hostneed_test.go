@@ -1,6 +1,7 @@
 package hostneed
 
 import (
+	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
@@ -545,8 +546,8 @@ func TestAnSdcppOnlyBoxDeclaresNothing(t *testing.T) {
 
 // THE CARD-ONLY WAN PLACEMENT (comfy-video.mjs --wan-placement multicard, measured 2026-10-11). The two experts never sit on the
 // cards together and the text encoder is gone before the first expert lands, so the set does not have to fit ONE card, and it does
-// not have to fit as a sum either: what must fit is each card's own stage (the larger card's resident share + the film-size activations + the
-// CUDA context, the other card's donor blocks + the VAE and the context) on the TWO
+// not have to fit as a sum either: what must fit is each card's own stage (the compute card's resident share + the film-size activations + the
+// CUDA context, judged here against the larger card; the other card's donor blocks + the VAE and the context) on the TWO
 // cards the lease holds. Measured (the film-size run): 15.18 + 10.86 GiB in use across the pair at the peak, 2.3 GiB of host growth, so the call declares 0.
 const wanMulticardCmd = "node render/comfy-video.mjs o.mp4 s.png p --model wan --high-unet hi.safetensors --low-unet lo.safetensors --text-encoder te.safetensors --wan-placement multicard"
 
@@ -609,8 +610,9 @@ func TestAMulticardWanCallThatDoesNotHoldTwoCardsKeepsTheOrdinaryEstimate(t *tes
 	}
 }
 
-// What must fit is each card's own stage: the LARGER card computes (its resident share of an expert + the film-size activations + the CUDA
-// context) and the other holds the donor blocks (the rest of the expert + the VAE and the CUDA context). Two 8 GiB cards cannot, two 24 GiB cards can, and
+// What must fit is each card's own stage: the compute card (judged here as the LARGER card; the runner may give the role to the faster of two cards
+// within 1 percent of one size) holds its resident share of an expert + the film-size activations + the CUDA
+// context and the other holds the donor blocks (the rest of the expert + the VAE and the CUDA context). Two 8 GiB cards cannot, two 24 GiB cards can, and
 // the SUM of two unequal cards proves nothing: 24 + 8 GiB adds up to plenty, but the 8 GiB card cannot hold a 10.4 GiB donor share.
 func TestAMulticardWanCallThatDoesNotFitTheLeasedPairIsSizedAsBefore(t *testing.T) {
 	ordinary := func(name string, n Need) {
@@ -832,6 +834,161 @@ func wanRunnerConstFrom(t *testing.T, src []byte, name string) float64 {
 	}
 	v, _ := strconv.ParseFloat(string(m[1]), 64)
 	return v
+}
+
+// ---- sage attention (--use-sage-attention in COMFY_EXTRA_ARGS) --------------------------------------------------------------
+//
+// The film session of 2026-10-12 ran the film clip with sage attention on a 16 GB card: 15,482 MiB in use at resident 0, 3.0 GiB more than the default
+// attention's 12.2 GiB beyond the resident share. Neither the runner nor this sizing knew the attention mode, so a sage call with the default share of 3
+// (3 + 12.2 + 0.5 = 15.7 of 15.9) was admitted by both and ran out of memory. COMFY_EXTRA_ARGS is read from the environment on both sides.
+
+// extraArgsEnv is a Facts.Env that carries COMFY_EXTRA_ARGS and nothing else, so no test here reads the host's environment.
+func extraArgsEnv(extra string) func(string) string {
+	return func(k string) string {
+		if k == "COMFY_EXTRA_ARGS" {
+			return extra
+		}
+		return ""
+	}
+}
+
+func TestASageAttentionWanCallIsSizedForSageActivations(t *testing.T) {
+	sage := wanFacts(t, 15.9, 15.9)
+	sage.Env = extraArgsEnv("--use-sage-attention")
+	// the compute card holds the share + 15.2 GiB of sage activations + 0.5 GiB of context: 0.2 GiB of an expert at most on a 15.9 GiB card
+	for _, share := range []string{"0", "0.2"} {
+		n := wanNeed(t, wanMulticardCmd+" --wan-resident-gb "+share, sage)
+		if n.GiB != 0 || n.Source != SourceEstimate || !strings.Contains(n.Detail, "card-only") || !strings.Contains(n.Detail, "sage attention") {
+			t.Errorf("--wan-resident-gb %s under sage attention: %v, want the card-only 0 that says it was sized for sage attention", share, n)
+		}
+	}
+	// the default share, and every share above the ceiling, is the ordinary set, and the detail says why and how to state the real figure
+	for _, args := range []string{"", " --wan-resident-gb 3", " --wan-resident-gb 0.3", " --wan-resident-gb 2"} {
+		n := wanNeed(t, wanMulticardCmd+args, sage)
+		if !near(n.GiB, 13.3+13.4+6.3) || !strings.Contains(n.Detail, "does not fit") {
+			t.Errorf("%q under sage attention: %v, want the ordinary 33.0 that does not fit (3 + 15.2 + 0.5 = 18.7 > 15.9)", args, n)
+		}
+		for _, want := range []string{"--use-sage-attention", "COMFY_EXTRA_ARGS", "15.2 GiB", "--ram 0"} {
+			if !strings.Contains(n.Detail, want) {
+				t.Errorf("%q under sage attention: the detail must say how to state the real figure (%q missing): %q", args, want, n.Detail)
+			}
+		}
+	}
+	// the controls: the same calls with no extra args, another attention flag, or an unrelated one, are the default sizing, where the default share declares 0
+	for name, env := range map[string]func(string) string{
+		"no environment": nil, "empty": extraArgsEnv(""), "flash attention": extraArgsEnv("--use-flash-attention"),
+		"unrelated": extraArgsEnv("--x 1 --y"), "a longer flag": extraArgsEnv("--use-sage-attention-extra"),
+	} {
+		f := wanFacts(t, 15.9, 15.9)
+		f.Env = env
+		n := wanNeed(t, wanMulticardCmd, f)
+		if n.GiB != 0 || strings.Contains(n.Detail, "sage") {
+			t.Errorf("%s: %v, want the default sizing (the default share declares 0) with no word about sage", name, n)
+		}
+	}
+	// the sizing reads no geometry: a measured partial share at a smaller clip is the ordinary set here unless --ram 0 states the figure (documented)
+	if n := wanNeed(t, wanMulticardCmd+" --wan-resident-gb 2 --width 720 --height 1280 --frames 65", sage); !near(n.GiB, 13.3+13.4+6.3) {
+		t.Errorf("a sage call at a smaller clip is still sized for the film's 15.2 GiB: %v, want the ordinary 33.0", n)
+	}
+}
+
+// The hint on a sage call's ordinary detail ("--ram 0 states the real figure") answers one cause: the COMPUTE stage that the film's 15.2 GiB pushed out (a smaller
+// clip's partial share would fit it). When the storage card is the one that cannot hold its stage, the same hint would blame the geometry-blind sizing and send the
+// caller to an advice that changes nothing, so it is withheld; the ordinary set is declared in every case.
+func TestTheSageHintIsForAMissedComputeStageOnly(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cards []float64
+		hint  bool
+	}{
+		"the compute stage misses and the storage card fits (two 15.9 GiB cards)":              {[]float64{15.9, 15.9}, true},
+		"the compute stage fits a 24 GiB card, the storage card (8 GiB) cannot hold its stage": {[]float64{24, 8}, false},
+		"both stages miss: the 8 GiB storage card cannot hold its stage either":                {[]float64{15.9, 8}, false},
+	} {
+		f := wanFacts(t, tc.cards...)
+		f.Env = extraArgsEnv("--use-sage-attention")
+		n := wanNeed(t, wanMulticardCmd, f)
+		if !near(n.GiB, 13.3+13.4+6.3) || !strings.Contains(n.Detail, "does not fit") {
+			t.Errorf("%s: %v, want the ordinary 33.0 that does not fit", name, n)
+		}
+		if got := strings.Contains(n.Detail, "--ram 0"); got != tc.hint {
+			t.Errorf("%s: the --ram 0 hint present = %v, want %v: %q", name, got, tc.hint, n.Detail)
+		}
+	}
+}
+
+// The sage figure is the runner's: render/wan-multicard.mjs WAN_FILM_ACTIVATIONS_SAGE_GIB, and a different number on either side would make the lease
+// declare for a call the runner then refuses, or run one it sized against other figures.
+func TestTheSageActivationsMirrorTheRunner(t *testing.T) {
+	if got := wanRunnerConst(t, "WAN_FILM_ACTIVATIONS_SAGE_GIB"); got != wanActivationsSageGiB {
+		t.Fatalf("the runner sizes the film's activations under sage attention at %v GiB, this package at %v", got, wanActivationsSageGiB)
+	}
+}
+
+// The two sides agree where it matters: the ceiling the runner's planner draws from ITS sage constants is the one this sizing draws from its own.
+func TestTheSageComputeCardCeilingIsTheRunnersCeiling(t *testing.T) {
+	activations := wanRunnerConst(t, "WAN_FILM_ACTIVATIONS_SAGE_GIB")
+	contextGiB := wanRunnerConst(t, "WAN_COMPUTE_CONTEXT_GIB")
+	const card = 15.9
+	ceiling := math.Round((card-activations-contextGiB)*10) / 10
+	if ceiling < 0 {
+		t.Fatalf("the runner's constants leave no room for a resident share on a %v GiB card: %v + %v", card, activations, contextGiB)
+	}
+	f := wanFacts(t, card, card)
+	f.Env = extraArgsEnv("--use-sage-attention")
+	at := wanNeed(t, wanMulticardCmd+" --wan-resident-gb "+strconv.FormatFloat(ceiling, 'f', 1, 64), f)
+	above := wanNeed(t, wanMulticardCmd+" --wan-resident-gb "+strconv.FormatFloat(ceiling+0.1, 'f', 1, 64), f)
+	if at.GiB != 0 {
+		t.Errorf("the runner admits a %.1f GiB share at film size under sage on a %v GiB card (%v + %v), this sizing must declare 0 for it: %v", ceiling, card, activations, contextGiB, at)
+	}
+	if above.GiB == 0 {
+		t.Errorf("the runner refuses a %.1f GiB share at film size under sage on a %v GiB card, this sizing must not declare 0 for it: %v", ceiling+0.1, card, above)
+	}
+}
+
+// The token rule is the runner's (render/comfy-lifecycle.mjs isSageAttentionToken, and wanAttentionMode over a COMFY_EXTRA_ARGS value). ONE table, read by this test
+// and by render/wan-multicard.test.mjs (render/testdata/sage-token-table.json), so the two languages cannot read one value two ways: a row changed there turns an answer in
+// both, and a row added is checked by both. ComfyUI's parser accepts an unambiguous prefix of a flag (argparse allow_abbrev), so `--use-sa` IS sage attention and a missed
+// prefix would size the call for the default; `--use-s` begins --use-split-cross-attention too and is not.
+func TestTheSageTokenRuleMatchesTheRunner(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "render", "testdata", "sage-token-table.json"))
+	if err != nil {
+		if _, e := os.Stat(filepath.Join("..", "..", "render")); e != nil {
+			t.Skipf("the render folder is not beside this package: %v", e)
+		}
+		t.Fatalf("the shared sage token table is missing: %v", err)
+	}
+	var table struct {
+		Rows []struct {
+			Extra string `json:"extra"`
+			Sage  bool   `json:"sage"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(raw, &table); err != nil {
+		t.Fatalf("the shared sage token table does not parse: %v", err)
+	}
+	var yes, no int
+	for _, row := range table.Rows {
+		if row.Sage {
+			yes++
+		} else {
+			no++
+		}
+	}
+	if len(table.Rows) < 16 || yes == 0 || no == 0 {
+		t.Fatalf("the shared sage token table looks empty or one-sided: %d rows, %d sage, %d not", len(table.Rows), yes, no)
+	}
+	for _, row := range table.Rows {
+		if got := sageAttention(row.Extra); got != row.Sage {
+			t.Errorf("sageAttention(%q) = %v, the shared table (and the runner) read it as %v", row.Extra, got, row.Sage)
+		}
+		f := wanFacts(t, 15.9, 15.9)
+		f.Env = extraArgsEnv(row.Extra)
+		// the default share declares 0 under the default attention and the ordinary set under sage, so the outcome shows which mode the value read as
+		n := wanNeed(t, wanMulticardCmd, f)
+		if got := n.GiB != 0; got != row.Sage {
+			t.Errorf("COMFY_EXTRA_ARGS=%q: the sizing read it as sage = %v, want %v (%v)", row.Extra, got, row.Sage, n)
+		}
+	}
 }
 
 func TestLeasedCardsGiB(t *testing.T) {

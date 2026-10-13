@@ -614,7 +614,7 @@ VRAM, which streams the experts through host RAM: the host pays the whole file, 
 |---|---|
 | `--wan-placement single\|multicard` | `single` (default) changes nothing. `multicard` is the placement below; `--high-unet` / `--low-unet` must name the fp8 safetensors experts. |
 | `--wan-cards <a>,<b>` | The two cards, as nvidia-smi indices or UUIDs, for a call made outside a lease. Under a lease the lease's cards (`GPU_LEASE_DEVICES`, else the lease's own record) are the authority and this can only confirm them: a card the lease does not hold is refused. With neither, the UUIDs in `CUDA_VISIBLE_DEVICES`. |
-| `--wan-resident-gb N` | GiB of each expert kept on the compute card (default 3, the measured split; at most what the compute card holds beside the sampler's activations at the call's geometry, and at least what lets the storage card hold the rest of the expert beside the VAE: 3.2 GiB at most at film size on a 15.9 GiB card, from the film-size run's measured peak). The rest sits on the storage card. |
+| `--wan-resident-gb N` | GiB of each expert kept on the compute card (default 3, the measured split; at most what the compute card holds beside the sampler's activations at the call's geometry, and at least what lets the storage card hold the rest of the expert beside the VAE: 3.2 GiB at most at film size on a 15.9 GiB card, from the film-size run's measured peak; under `--use-sage-attention` in `COMFY_EXTRA_ARGS` the film-size ceiling is 0.2 GiB, so pass 0: "Sage attention" below). The rest sits on the storage card. |
 | `--wan-decode plain` | Under multicard: save the sampled latent, free both cards, then the plain `VAEDecode` (below). `tiled` and `auto` keep their meaning. |
 | `--wan-loader` | Not read under multicard (the placement is the loader). `native`, which a film driver may still pass, is ignored with one stderr line. |
 
@@ -623,12 +623,44 @@ is `cuda:0` whatever its nvidia-smi index. `cuda:0` is the STORAGE card: text en
 (about 10.3 GiB). `cuda:1` is the COMPUTE card: 3 GiB of the expert resident plus the sampler's activations. Each expert loads through the
 DisTorch2 loader with `compute_device cuda:1` and the allocation `cuda:1,3gb;cuda:0,*`; the donor blocks stream to the compute card one at a
 time over the card-to-card copy (about 6 GiB/s, no peer access: roughly 1.7 s of a 250 s step). The text encoder has to stay on `cuda:0`:
-on `cuda:1` the ComfyUI process aborts. The larger card computes; of two equal cards the one with the higher UUID computes (the lease sorts its ids, so a pair named with
-`--wan-cards` in either order gets the split the benchmark measured, storage on the lower id).
+on `cuda:1` the ComfyUI process aborts.
+
+**Which card computes.** Sizes within 1 percent of the larger card (`VRAM_EQUAL_FRACTION`, 0.01: 163 MiB at 16 GiB) count as one size, because the exact
+byte count of a card's memory differs by a few MiB between boards of one generation and says nothing about their speed: a 5070 Ti reads 16303 MiB beside a
+5060 Ti at 16311. Inside that band the card with the higher board power (`power.default_limit`, the board's design power, not the operator-adjustable
+`power.limit`) computes when the two differ by at least 1.25 times (`POWER_RANK_RATIO`, inclusive). Both numbers are chosen, not measured. The pair this was written
+for reads 300 W (5070 Ti) against 180 W (5060 Ti), 1.67 times, and the higher-power card sampled about 2.5 times as fast (measured 2026-10-12 on a 16 GB Blackwell
+pair with `--use-sage-attention`: about 2.5x). Every other pair takes the roles it always had: the larger card computes; of two equal cards the one with the higher
+UUID computes (the lease sorts its ids, so a pair named with `--wan-cards` in either order gets the split the benchmark measured, storage on the lower id). That
+includes a pair whose board power the driver did not report: it is ranked as before, never refused, and the plan says `board power not reported for idx N` so the
+fall-back is visible. The one line the plan says ends with `compute card chosen: <the rule>`. Board power is a proxy for speed: it can mislead for a pair whose
+power and speed disagree (a hard power-capped card reads low), and `WAN_COMPUTE_UUID` (below) overrides it.
+
+`WAN_COMPUTE_UUID`, an environment variable and not a flag, names which card of the pair computes: an nvidia-smi index, a UUID, or a case-insensitive UUID prefix of 8
+or more characters after the optional `GPU-` (`GPU-aaaa1111` names a card; the characters are counted after the prefix, so `GPU-aaaa` and a bare `GPU-` name nothing; a token of digits alone is read
+as an index, so a UUID prefix made of digits needs the `GPU-` spelling, `GPU-11112222`, and the refusal says so). It chooses between the two cards already found and never adds
+one: the lease or `--wan-cards` still decide the pair. A token that names exactly one card of the pair makes it the compute card, beating the size and the speed rule;
+the resident-share and storage checks still judge it, so a named card that cannot hold the share beside the activations is refused with the numbers (the 12 GiB card of a 24 + 12 GiB pair at
+`--wan-resident-gb 4`: at most -0.7 GiB; the 16 GiB card of a 24 + 16 GiB pair holds the default share of 3 at film size, 16.0 - 12.2 - 0.5 = 3.3, so naming it is admitted there and refused only
+for a share over 3.3). The lease sizing assumes the larger card computes, so such a refusal comes after the lease is taken and before ComfyUI starts, never as an out-of-memory run. A token that names no card of the driver's table (a typo, a
+stale id) is refused with `WAN-PLACEMENT: WAN_COMPUTE_UUID names "<token>", ...`, naming the two cards: an explicit setting must not run quietly. A token that names a real card
+that is not one of the two, or begins more than one card of the table, is ignored with a one-line note (`WAN_COMPUTE_UUID names "<token>", which does not name exactly one of the two
+cards (idx a, idx b); ranked instead`, appended to the plan's line), because the variable is box-level and a lease may hold a pair that does not include that card. An empty or blank value is
+absent. Set it in the shell for a `gpu reserve ... --` command or a hand-run helper, and in the daemon's environment for the typed image and edit doors (below), whose runner inherits it.
+
+`gpu_comfy_order` ([gpu-lease.md](gpu-lease.md), "every card once, fastest first") is the operator's own declaration of which card is fastest, and the harness refuses to guess
+that order from what nvidia-smi reports. The board-power rule is a proxy for it on the one question this placement asks, and it is not a substitute: a box that declares the order
+has said more than power does. Two follow-ons, not in this change: seeding the compute choice from `gpu_comfy_order` through the grant environment (the runner never sees the order today),
+and `compute_cap` as the primary key for an fp8 pair that spans Ampere and Ada (fp8 tensor cores need Ada or newer, so a 320 W Ampere card ranks above a 200 W Ada one by power
+alone; `compute_cap` is identical on the live pair, and reading it costs another column and another ladder rung on drivers that reject the field).
+
+The lease sizing (`internal/hostneed`) still judges the compute stage against the LARGER card. Inside the 1 percent band the gap is at most 0.16 GiB at 16 GiB, so a share at the
+film-size ceiling (3.2 GiB) can be declared 0 there and refused by the runner's resident check on the smaller card that computes; the default share of 3 is unaffected.
 
 **Which cards, and what is refused before anything starts.** `planMulticard` reads the driver's card table
 (`nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.free,display_active,display_attached`; a failed query is asked once more
-before a driver is taken to lack `display_attached`) and refuses, with the reason: no cards named, a dangling `--wan-cards`, anything but
+before a driver is taken to lack `display_attached`; then `--query-gpu=uuid,power.default_limit` in a second, best-effort query, asked once more when it fails, joined by UUID,
+and a board whose power the driver does not report stays at 0 = unknown and ranks nothing; every ask hides its console window on Windows) and refuses, with the reason: no cards named, a dangling `--wan-cards`, anything but
 exactly two, a token that names no card, a `--wan-cards` card the lease does not hold, a card that drives a display (`display_active`
 Enabled or `display_attached` Yes, the harness's own rule, so a monitor on a sleeping screen counts) and a card whose display state the
 driver does not report (never assumed screenless). It also refuses what was not measured or cannot run, in the same place, before the
@@ -636,7 +668,7 @@ lease slot is taken, llama-swap is unloaded or ComfyUI starts: `--fast`, a GGUF 
 `--low-unet` are required: the builder's defaults are GGUF), another family (`--model ltx25`, a `--graph` file), a `--wan-resident-gb`
 that one of the two cards cannot hold at the call's geometry (the compute card: its size less a chosen 0.5 GiB margin for the CUDA context, less the sampler's
 activations, the benchmark's reserved allocator peaks as an envelope of 0.31 GiB per 1,000 tokens (never under 2 GiB) capped at the film-size run's
-measured 12.2 GiB beyond the resident share (above the film's size nothing was measured: a bigger clip is held at 12.2 and a `WAN-GEOMETRY-NOTE` says so before the check, with what a proportional extrapolation gives, leaving the share and `--wait-sec` to the caller), so 3.2 GiB of an expert at most at film size and 9.1 at the default 832x480x49; the storage card: the
+measured 12.2 GiB beyond the resident share (above the film's size nothing was measured: a bigger clip is held at 12.2 and a `WAN-GEOMETRY-NOTE` says so before the check, with what a proportional extrapolation gives, leaving the share and `--wait-sec` to the caller; the activations read the attention mode from `COMFY_EXTRA_ARGS`: 15.2 GiB at film size under `--use-sage-attention`, the line between the two measured sage points below it, 12.2 without it), so 3.2 GiB of an expert at most at film size (0.2 under sage) and 9.1 at the default 832x480x49; the storage card: the
 rest of the 13.4 GiB expert plus 0.8 GiB for the VAE and the context inside its size less `--reserve-vram`, 1 GiB by default, so a 24 GiB card beside
 an 8 GiB one is refused with the share that would fit), a UUID prefix that names two cards, and
 the placement's own flags lost to an `=` (`--wan-placement=multicard`, or `--seed=7 --wan-placement multicard`: this runner's parser does
@@ -708,7 +740,7 @@ said once (`WAN-OOM-WATCH`) and the wait is then bounded by the budget alone. A 
 two leased cards fits its own stage, as the runner will place it (`hostneed.estimateWith`, `Facts.CardsGiB`, each card's size): the larger
 card computes, so it must hold the resident share of the expert (`--wan-resident-gb`, default 3) plus 12.2 GiB of film-size activations (the
 film-size run's compute-card peak, 15.18 GiB, less its 3 GiB resident share) plus a 0.5 GiB margin for the CUDA context (chosen, not measured: the 12.2 already holds a context, and the film-size run left 0.7 GiB free at its peak), which is 15.7 GiB with the default
-share and 3.2 GiB of share at most on a 15.9 GiB card; the other holds the rest of the expert plus 0.8 GiB for the VAE and the context inside its
+share and 3.2 GiB of share at most on a 15.9 GiB card (under `--use-sage-attention` in `COMFY_EXTRA_ARGS`, read from the process environment, the activations are 15.2 GiB: 15.7 GiB with no share, 0.2 GiB of share at most; `WAN_FILM_ACTIVATIONS_SAGE_GIB` is mirrored by a Go test like the others); the other holds the rest of the expert plus 0.8 GiB for the VAE and the context inside its
 size less `--reserve-vram` (the film-size run's storage card peaked at 10.86 GiB, the 4-step benchmark's at 11.1 GiB with 10.3 GiB of blocks). The
 runner checks the same two stages before it starts, with the same figures (a Go test fails when its `WAN_FILM_ACTIVATIONS_GIB`,
 `WAN_COMPUTE_CONTEXT_GIB`, `WAN_STORAGE_OVERHEAD_GIB` or `WAN_EXPERT_GIB` drift from these, and another that the two sides admit the same share
@@ -722,7 +754,10 @@ over ComfyUI's idle, inside the headroom the brake keeps anyway. The typed VIDEO
 is reached through the render helper under an explicit `gpu reserve --devices`; the typed image and edit doors have one ("Card-only image and edit", below).
 A driver script that wraps the helper is not itself a recognised render helper, so a lease around the script declares the media class
 default (the largest bound family's figure) whatever the helper inside it does; the verb says so on a second line (F71), and the way out
-is `--ram 0` on that `gpu reserve`, because the card-only placement keeps its weights on the two cards.
+is `--ram 0` on that `gpu reserve`, because the card-only placement keeps its weights on the two cards. The same `--ram 0` is the way out of the sage
+sizing's one over-declaration (the lease reads no geometry: "Sage attention" below). And the lease reads `COMFY_EXTRA_ARGS` from the process environment
+of the `gpu reserve` command only: an `env COMFY_EXTRA_ARGS=--use-sage-attention` prefix INSIDE the wrapped command is invisible to the lease sizing while the
+runner sees it, so the lease would declare as for the default attention; export the variable around the `gpu reserve`, or pass `--ram 0`.
 
 **Measured.** On two RTX 5060 Ti 16 GB, the two non-display cards of a three-card box, in one media lease with `--ram 0` (2026-10-11), on
 commit 090fbd95, the tip of this branch before its second review round; that round's fixes were not re-run on the cards.
@@ -741,6 +776,35 @@ z 6 to 18), the frame differences at the joins 24 and 48 are 0.69x and 0.82x the
 continuous through both joins when viewed. The Qwen-Image-Edit 2511 call at the film's full
 preset (fp8mixed, 40 steps, cfg 4, no LoRA, 1.47 MP) also runs on the same pair with 9 GiB of the DiT resident on the compute card: 15.98 s per step,
 12 min per image, 10.5 and 10.6 GiB per card; its output carries the known 1.47 MP bottom-edge strip, as the single-card runs do.
+
+**Sage attention** (`--use-sage-attention` in `COMFY_EXTRA_ARGS`; film session, 2026-10-12). The planner and the lease sizing read the attention mode from
+`COMFY_EXTRA_ARGS`, token by token: the exact flag, or an argparse prefix of it of 8 or more characters (ComfyUI's parser accepts an unambiguous abbreviation,
+so `--use-sa` is sage and `--use-s`, which also begins `--use-split-cross-attention`, is not). The compute card, nvidia-smi totals, "Planner" being what the sizing
+holds on a 15.9 GiB card (the activations beyond the share, and the share it admits at most):
+
+| Attention | Clip | Tokens | Resident per expert | Per step | Runner wall | Compute-card peak | Storage-card peak | Planner |
+|---|---|---|---|---|---|---|---|---|
+| default (PyTorch), 2026-10-11, two 16 GB cards | 720x1280x81 | 75,600 | 3 GiB | 250.5 s | 5,136 s | 15.18 GiB | 10.86 GiB | 12.2 GiB; 3.2 GiB at most |
+| sage | 720x1280x65 | 61,200 | 2 GiB | 66 s | 1,489 s | 15,216 MiB (14.86 GiB) | not recorded | 12.9 GiB; 2.5 GiB at most |
+| sage | 720x1280x81 | 75,600 | 0 | 94 s | 2,041 s | 15,482 MiB (15.12 GiB) | 14,182 MiB (13.85 GiB) | 15.2 GiB; 0.2 GiB at most, so in practice 0 |
+
+- Sage holds about 3 GiB more activations than the default attention at film size, so `--wan-resident-gb 0` is the only setting that fits 81 frames on a 16 GB compute
+  card. The activations are on the file's own basis (the card's nvidia-smi peak less the resident share, the context inside): 15,482 MiB is 15.119 GiB, rounded up to 15.2;
+  14.859 GiB less the 2 GiB share is 12.859, rounded up to 12.9. The 0.5 GiB context margin is added on top, as for the default.
+- **Behaviour change: sage film calls must pass `--wan-resident-gb`.** The default share of 3 is refused under sage from about 58k tokens up on a 15.9 GiB card, where the compute card's
+  ceiling (15.9 - the sage activations - 0.5) falls under 3: 720x1280x61 (57,600 tokens) still admits it (at most 3.1 GiB), 720x1280x65 (61,200 tokens) refuses it (at most 2.5 GiB) and
+  720x1280x81 admits 0.2 at most. Before, it was admitted by the planner and the lease sizing and ran out of memory. The refusal puts its sage clause before the ceiling and says `--wan-resident-gb 0` is the
+  measured setting at film size.
+- The sampler's activations under sage are the default curve up to about 57k tokens, and from there the straight line through 12.9 GiB at 61,200 tokens and 15.2 GiB at 75,600, held at 15.2
+  above the film's size (nothing larger was measured; the `WAN-GEOMETRY-NOTE` extrapolates from 15.2 under sage). So sage departs from the default sizing only above about 57k tokens, and only 61,200
+  and 75,600 tokens were measured: the points between are interpolated and chosen, not measured. Below 57k the default curve already covers the benchmark's 6.16 GiB reserved with sage at 20,280 tokens (it gives 6.29).
+- The storage card's 13.85 GiB at resident 0 sits inside the 13.4 + 0.8 the placement already assumes, so the storage figures stand.
+- Only sage was measured. Another attention flag (flash, split, quad, pytorch) is sized as the default, and is unmeasured.
+- The film session's sage run and the default run were not on the same compute card, so 94 s a step against 250.5 s is not an attention-only comparison.
+- The lease sizing reads no geometry: under sage it holds 15.2 GiB for any clip, so a partial-share sage call at a smaller clip (the measured 65 frames at 2 GiB) declares the ordinary set unless
+  `--ram 0` states the real figure, where it declared 0 before sage was read; its detail says so. An `env COMFY_EXTRA_ARGS=...` prefix inside the wrapped command is invisible to it (see "Host RAM").
+- A running ComfyUI is reused only when its argv agrees with the call's sizing in the direction that can run out of memory: a kept instance launched with `--use-sage-attention` is not reused by a
+  call that was sized for the default attention (the harness restarts an instance it launched, and refuses `COMFY-PROFILE-MISMATCH` when it did not). The reverse, a kept default instance and a sage call, only wastes a cold start and is reused.
 
 **What it says when it refuses.** `WAN-PLACEMENT: ...` (cards, display card, missing pack: nothing launched);
 `WAN-PLACEMENT-MISMATCH` (ComfyUI's devices are not the pinned pair: nothing submitted); `WAN-PLACEMENT-PACK` (the harness's pack failed
@@ -762,7 +826,11 @@ through the ComfyUI-MultiGPU loaders, with every weight file mapped read-only (`
 placement), so nothing streams from host RAM. The runners take the placement as `--placement single|multicard` (`comfy-generate.mjs`,
 `comfy-render.mjs` and `comfy-edit.mjs`), `--resident-gb N` (the DiT's share kept on the compute card; only a split recipe has one) and `--cards <a>,<b>`
 (only outside a lease; under one it can only confirm the lease's cards): the Wan flags without the `wan-` prefix, with the same refusal of the `=`
-spelling (`--placement=multicard` is a refusal, not a silent single).
+spelling (`--placement=multicard` is a refusal, not a silent single). The roles are the Wan placement's rule, from the same planner: two cards within 1 percent of one size are
+ranked by board power, and `WAN_COMPUTE_UUID` (an index, a UUID or a UUID prefix of 8+ characters; see "Which card computes" above for what a token that names no card or a card outside the
+pair does) names the compute card for the image and edit placements too. The typed image and edit doors pass no card flag, so this variable is the one override that reaches them: set it in the
+daemon's environment (their runner child inherits the process environment) and, for a `gpu reserve ... --` command, in the shell. The recipe's peak and resident checks judge whichever card
+the variable names, and the plan's line ends with `compute card chosen: <the rule>`.
 
 | Route | Binding | DiT loader / text-encoder loader | Peak per card, compute / storage (GiB) | Basis |
 |---|---|---|---|---|
@@ -1229,7 +1297,7 @@ handed to the runner as env:
 |---|---|---|
 | `comfy_cuda_device` | `COMFY_CUDA_DEVICE` | `--cuda-device <n>` (index or comma list, in **ComfyUI's device order** — the order the `*_pool_*` `cuda:N` keys use, fastest-first unless `CUDA_DEVICE_ORDER` says otherwise, NOT nvidia-smi's PCI order). It hides every other card. Never `--default-device`: that only reorders the visible list and silently re-maps what every pool key means. |
 | `comfy_dynamic_vram` | `COMFY_DYNAMIC_VRAM` | `on` strips `--disable-dynamic-vram` from the extra args (a bf16 DiT larger than one card streams instead of partial-offloading); `off` adds it (DisTorch2 pooled seats need it off, MultiGPU #191); `""` leaves the args alone |
-| `comfy_extra_args` | `COMFY_EXTRA_ARGS` | verbatim extra flags; `""` = inherit the process env, as before. A `--cuda-device`/`--default-device` here loses to `comfy_cuda_device` |
+| `comfy_extra_args` | `COMFY_EXTRA_ARGS` | verbatim extra flags; `""` = inherit the process env, as before. A `--cuda-device`/`--default-device` here loses to `comfy_cuda_device`. `--use-sage-attention` (or an argparse prefix of 8+ characters) here changes the card-only Wan sizing: its activations are 15.2 GiB at film size, so the default `--wan-resident-gb` is refused and a sage film call passes 0 ("Sage attention", above) |
 
 **Where the pin applies.** `comfy_cuda_device` is applied ONLY to the single-card routes — image
 generation when the binding does not pool, generative edit, upscale, inpaint, animate and music. It is
@@ -1991,7 +2059,7 @@ recorded as known offenders with their reason rather than silently skipped — a
   decode mode (`chooseWanDecode` is the one rule), the `/system_stats` card read (`readRenderCard`)
   and `buildGraphForRun`, the single path from flags to a graph
 - [`render/wan-multicard.mjs`](../../render/wan-multicard.mjs) — the card-only placement
-  (`--wan-placement multicard`): the card table, the choice and refusal of the two cards (`resolveWanCards`), the ComfyUI launch
+  (`--wan-placement multicard`): the card table with the board power (`queryCardsRanked`), the choice and refusal of the two cards and their roles (`resolveWanCards`, `chooseRoles`, `WAN_COMPUTE_UUID`), the ComfyUI launch
   it needs (`multicardLaunch`, `multicardEnv`), the device check (`checkComfyDevices`) and `planMulticard`, the one call the
   runner makes before anything starts; [`render/wan-multicard.test.mjs`](../../render/wan-multicard.test.mjs) pins it
 - [`render/comfyui-ext/extra_model_paths.yaml`](../../render/comfyui-ext/extra_model_paths.yaml) and
@@ -2000,7 +2068,7 @@ recorded as known offenders with their reason rather than silently skipped — a
   `OffloadFreeForDecode` ([tests](../../render/comfyui-ext/test_offload_multicard.py), run by
   [`render/comfyui-ext.test.mjs`](../../render/comfyui-ext.test.mjs))
 - [`internal/hostneed/hostneed.go`](../../internal/hostneed/hostneed.go) — `estimateWith`: a card-only Wan call declares 0 host RAM
-  when each leased card fits its own stage
+  when each leased card fits its own stage (`CardOnly.SageAttention`: the activations at 15.2 GiB under `--use-sage-attention`)
 - [`render/multicard-recipes.json`](../../render/multicard-recipes.json) /
   [`render/multicard-recipes.mjs`](../../render/multicard-recipes.mjs) /
   [`render/multicard-image.mjs`](../../render/multicard-image.mjs) — the card-only image and edit placement
