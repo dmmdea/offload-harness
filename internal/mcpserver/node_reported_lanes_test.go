@@ -7,9 +7,12 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -68,6 +71,71 @@ func docParagraph(t *testing.T, path, anchor string) (string, int) {
 		}
 	}
 	return found, n
+}
+
+// The tool descriptions a calling model reads list the response keys of the fleet door too. agent_run (its description and its
+// route text) and offload_ask (its route text) used to list "node, placement and seat" and stop, while contractOnFleetAt also
+// publishes node_reported when the node's own result named itself by another id. The key is listed with its condition, so a
+// reader neither misses it nor expects it on every row.
+func TestTheRouteDescriptionsOfAgentRunAndAskListNodeReportedWithItsCondition(t *testing.T) {
+	const want = "node_reported only when the node's own result named itself by another id"
+	routeText := func(tool *mcp.Tool) string {
+		raw, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var schema struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatalf("schema not JSON: %v", err)
+		}
+		return schema.Properties["route"].Description
+	}
+	seen := map[string]bool{}
+	for _, tool := range listTools(t, config.Default()) {
+		var texts map[string]string
+		switch tool.Name {
+		case "agent_run":
+			texts = map[string]string{"agent_run description": tool.Description, "agent_run route text": routeText(tool)}
+		case "offload_ask":
+			texts = map[string]string{"offload_ask route text": routeText(tool)}
+		default:
+			continue
+		}
+		for label, text := range texts {
+			seen[label] = true
+			if !strings.Contains(text, "placement") {
+				t.Errorf("%s no longer lists the fleet door's response keys: this check is blind", label)
+				continue
+			}
+			if !strings.Contains(text, want) {
+				t.Errorf("%s lists the fleet door's response keys without %q", label, want)
+			}
+		}
+	}
+	for _, label := range []string{"agent_run description", "agent_run route text", "offload_ask route text"} {
+		if !seen[label] {
+			t.Errorf("%s was not found on tools/list: this check is blind", label)
+		}
+	}
+}
+
+// The operator guide's account of the named-seat door lists the same keys and carries the same condition.
+func TestTheOperatorGuideListsNodeReportedOnTheNamedSeatDoor(t *testing.T) {
+	const guide = "../../docs/OPERATOR-GUIDE.md"
+	para, n := docParagraph(t, guide, "**A seat only the fleet runs (register D-125).**")
+	if n != 1 {
+		t.Fatalf("%d paragraph(s) of %s hold the named-seat door's account, want 1: this check is blind", n, guide)
+	}
+	if !strings.Contains(para, "`executed_on`") {
+		t.Fatal("the named-seat paragraph no longer lists its response keys: this check is blind")
+	}
+	if !strings.Contains(para, "`node_reported` only when the node's own result named itself by another id") {
+		t.Errorf("the operator guide lists the named-seat door's response keys without `node_reported` and its condition: %q", para)
+	}
 }
 
 // Every door that publishes node_reported is named where its response keys are listed. The anchors are the sentences that

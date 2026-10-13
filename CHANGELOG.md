@@ -130,7 +130,7 @@ loop `continue`s), which is every `proxy:` seat and every unpinned entry, and th
   floor, never negative, with no answer without a total). The allocator's method calls the first, behaviour unchanged (its existing
   display-cap tests are green); the surfaces below read the same functions, so none can disagree with the rule a job is admitted by.
 - **A live verdict on the display card's row.** `gpucards.Row.DisplayCap` (`cap_pct`, `budget_gb`, `used_gb`, `used_pct`, `over_cap`,
-  `over_by_gb`, `closed`, `unknown`) is on the display card's row only, in `gpu status` (text and `--json`), `gpu cards` and the
+  `over_by_gb`, `closed`, `unknown`) is on the display card's row, plus every row of a reading that could not say which card the monitor is on (there as `unknown`), in `gpu status` (text and `--json`), `gpu cards` and the
   `offload_status` brief's `gpu_cards`: the VRAM in use now, the desktop and every process counted, against the budget. The text table keeps
   its header and gains one `display cap:` line under the display card that says what is counted and that it cannot say whose memory it is.
   `over_by_gb` is present exactly when the card is over, to four decimals of a GiB and never rounded to nothing (nvidia-smi reads whole MiB, so a

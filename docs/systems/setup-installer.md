@@ -572,8 +572,8 @@ reading), the default cap and the budget in GiB the allocator's arithmetic gives
 itself. It is never a violation, never changes the exit status, and reads no config (the cap it
 states is the default, and says so). It uses the card table the pin rules already read, once per
 file; the table is now read for a file with a `proxy:` seat as well as for one that pins a device,
-and a file with neither still never runs `nvidia-smi` (so a file of unpinned entries alone gets no note: an unpinned entry is named only in a file that also pins a device or has a `proxy:` seat). `--other-box` skips it with the same note line
-that skips the pin rules, and a missing card table says so for it as for them.
+and a file with neither still never runs `nvidia-smi` (so a file of unpinned entries alone gets no note: an unpinned entry is named only in a file that also pins a device or has a `proxy:` seat). `--other-box` skips it with the same note line for a file that also pins (the line that skips the pin rules), its own line for a proxy-only file,
+and a missing card table says so for it the same way.
 *Deferred, with the reason:* a footprint-based verdict (a declared layer footprint, a vLLM
 `gpu_memory_utilization` times the card, a seat-env reader) and a `doctor` row. There is no
 placement-neutral footprint source: declaring the opencode-only 3-card seat as a layer would expose it

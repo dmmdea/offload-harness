@@ -524,7 +524,7 @@ position, and two same-model cards cannot be ordered by anything it does report,
 `CUDA_VISIBLE_DEVICES=<uuid>` probe. A box with one card needs no declaration. With no nvidia-smi the verbs still print the
 leases and say there is no table.
 
-**The display card's row says where it stands against its cap** (`display_cap`; the display card's row only, absent on every
+**The display card's row says where it stands against its cap** (`display_cap`; the display card's row, plus every row of a reading that could not say which card the monitor is on (there as `unknown`); otherwise absent on every
 other card and on a box that flags no display card). It reads the VRAM in use now, **the desktop and every process counted**,
 against the budget `gpulease.DisplayBudgetGiB` gives from `gpu_display_cap_pct` and the display layer's declared floor, which is
 the arithmetic the allocator admits by, so the two cannot disagree. The cap is read from the config file as it is when the call

@@ -1130,7 +1130,7 @@ through the fleet carries its wall to the node, where it is an expectation (ADR 
 however many nodes ran it. A name the local roster lacks is now looked up on the fleet: the door reads the roster's health once
 and sends ONE contract, at `route=remote` and narrowed to the nodes that match, to a node whose `agent_seat` is that name
 (without regard to case; a composite node's agent seat in a named layer counts). The result names `node`, `placement`, `seat`,
-`model` and `executed_on`, and is withheld if it came from another seat (a node that changed its agent seat after it was read; so is
+`model` and `executed_on`, plus `node_reported` only when the node's own result named itself by another id, and is withheld if it came from another seat (a node that changed its agent seat after it was read; so is
 the finished prose a deferral carries). The contract is a reasoned remote pin (`pin_reason: operator`), so when the delegator retries an
 attempt (a seat that abstained or went down) the retry goes to another node that runs the name or is not run, and never to this box's own agent seat.
 A name nobody runs keeps the old refusal and adds where the fleet looked, `config` when every node answered and `infrastructure`

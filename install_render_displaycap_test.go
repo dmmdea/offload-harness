@@ -218,6 +218,14 @@ func TestAuditYAMLHelpDoesNotPromiseTheNoteToAFileThatNeitherPinsNorProxies(t *t
 	if !strings.Contains(section, "a file with neither") {
 		t.Errorf("the help must say that a file with neither a pin nor a proxy: seat is not read:\n%s", section)
 	}
+	// --other-box skips the note as well as the pin rules (auditPinsFile returns before the table is read), and the note
+	// says nothing on a box with one card or with no flagged display card (servingtmpl.unseenEntries).
+	if !strings.Contains(section, "and skips them and the display-cap-unseen note") {
+		t.Errorf("the help must say that --other-box also skips the display-cap-unseen note:\n%s", section)
+	}
+	if !strings.Contains(section, "silent on a box with one card or with no flagged display card") {
+		t.Errorf("the help must say that the note is silent on a box with one card or no flagged display card:\n%s", section)
+	}
 	// The behaviour the help describes: a file of unpinned entries alone gets no note and never reads the card table;
 	// an unpinned entry in a file that also has a proxy: seat is named.
 	reads := countCardTableReads(t, displayDevs(), nil)
