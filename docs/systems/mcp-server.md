@@ -846,11 +846,14 @@ read-only unless deliberately widened. See
   per client and keeps the executable image it started from, so a release swapped in on disk afterwards is not in that
   process: two servers that had started on 0.180.0 were still stamping their rows with it eight hours after a 0.181.0 and then
   a 0.182.0 binary had been swapped in, so the capacity-wait fix those releases carry could not run for them. The server takes the size and modification time of the image it started from
-  from the identity the process captured first thing (`buildinfo.CaptureStartup`, see `process` below;
+  out of the identity the process captured first thing (`buildinfo.CaptureStartup`, see `process` below;
   `internal/mcpserver/stalebinary.go`) and compares them with the file at the path the capture recorded when `agent_delegate`,
   `offload_research` or `offload_status` answers. A stamp that has moved is settled by the bytes, with the check the `process`
   block makes: equal bytes are not stale (a redeploy of the same build rewrites the file), different bytes are, and bytes that
-  cannot be compared leave the moved stamp standing, with a note that it rests on the stamp alone. A path that is gone (an OS
+  cannot be compared leave the moved stamp standing, with a note that it rests on the stamp alone and the reason the comparison
+  gave (a lock on the freshly renamed file, a read that did not finish within 2 s). That read runs in the background, once per
+  moved file, and an answer waits for it at most 2 s: a stalled read (an antivirus scan, a slow mount) never holds the results
+  of a finished call, and the next call uses what the read found. A path that is gone (an OS
   that unlinks the old file) is stale without a comparison. A stale answer carries a top-level `stale_binary` string naming the
   running version, the two stamps and, when the installed file's build marker reads, the installed version, and saying to
   restart the MCP client; the log says it once. It never exits, re-executes or cuts a call (that would drop the jobs the server
@@ -858,9 +861,12 @@ read-only unless deliberately widened. See
   nothing to compare with. The running version is the compiled-in one; the installed version is read from the installed file's
   build marker (`gpulease.ReadBuildMarkerVersion`), never by running it.
   The guard says when it is not watching, because a guard against a silent failure must not be one: a server that could not
-  stamp its own executable at start (or whose path was already gone) logs one `the stale-binary guard is inactive` line with the
-  reason, and a stat that fails later is logged once; `offload_status` carries a top-level `stale_binary_guard` string
-  (`inactive: ...` for the first, `unreadable: ...` for as long as the second lasts) and no such key while the guard is watching.
+  stamp its own executable at start (or whose path was already gone, or whose start-up capture holds no path or no stamp, which
+  buildinfo logs) logs one `the stale-binary guard is inactive` line with the reason, and a stat that fails later is logged
+  once. `agent_delegate`, `offload_research` and `offload_status` all carry a top-level `stale_binary_guard` string
+  (`inactive: ...` for the first, `unreadable: ...` for as long as the second lasts), beside and independent of `stale_binary`,
+  and no such key while the guard is watching. The start-up capture takes the stamp from the path when the hash could not open
+  the file, so a refused open does not leave the guard to stamp the file as of `mcpserver.New`.
 - `offload_status` reports harness state to the calling agent: the configured model roster (the one
   table in `config.ModelRoutes`, shared with `doctor`/`acceptance`/`report`), a live `/v1/models`
   probe through [`internal/swapclient`](../../internal/swapclient/swapclient.go), and
@@ -914,13 +920,15 @@ read-only unless deliberately widened. See
   brief is the call the tool's description makes first and a stale server must be visible there. Only a read that
   succeeded is cached: a hash or marker read that failed once (an antivirus or indexer lock on the freshly renamed file) is
   retried on the next call, and a missing `installed_version` or a missing `build_sha256` (the process's own start-up
-  hash failed) comes with a `note` saying why. `gpu doctor` marks the running processes older than the installed build
+  hash failed) comes with a `note` saying why. The read of a moved file is bounded to 2 s per call and shared by the calls that
+  arrive while it runs: past the bound `stale_image` is absent with a `note` that the read did not finish. `gpu doctor` marks the running processes older than the installed build
   ([gpu-lease.md](gpu-lease.md)). Ledger rows do not get a `stale_image` column: a
   reader compares a row's hash with the deployed one. **One definition, two doors.** `process.stale_image` (`offload_status`: the whole answer, `brief` or
   `section:"process"`) and the `stale_binary` note (`agent_delegate`, `offload_research`, `offload_status`) answer one question
   about one capture. `runMCP` takes the identity before it loads the config or opens the pipeline, so a swap landing during
   start-up is not hashed as the image the process runs; `mcpserver.New` starts the stale-binary guard from that identity (the
-  stamp the capture read through the handle it hashed, not a stat taken after the pipeline opened) and `Run` holds it for the
+  stamp the capture read through the handle it hashed, or from the path when the open failed, not a stat taken after the
+  pipeline opened; a capture with no stamp makes the guard inactive and says so) and `Run` holds it for the
   block. Stale means the file at the start path holds other bytes than the image the process started from. The guard looks at
   the cheap stamp first and asks the block's check (the hash, cached per stat, and the build marker) only once the stamp has
   moved, so a rewrite with equal bytes reads fresh on both, different bytes read stale on both, and the installed version is the

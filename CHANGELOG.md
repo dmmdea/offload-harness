@@ -9,7 +9,7 @@ Versioning: [SemVer](https://semver.org/).
 ### Fixed — integration review round of 0.184.0
 
 Six findings from an integration review of the merged release branch, each read against the code and fixed, with its test
-written first and seen red.
+written first and seen red. A second look at the same fixes follows the six (the last bullets of this block).
 
 - **The queue lane's rescue dialled the queue holder with the claimant's seat name.** `takeQueueAnswer` sets the row's dial base
   to the holder so that `ran_on` reads `node` (D-32). The rescue of a schema miss is handed an origin (the node that wrote the
@@ -69,11 +69,46 @@ written first and seen red.
   `mcp_startup_capture_test.go` now covers both functions; before the change
   `TestRunFleetServeCapturesTheStartupImageBeforeOpeningAnything` failed with `runFleetServe must call buildinfo.CaptureStartup()
   itself, before it opens anything`.
-- **Not changed.** The PAIR card a queue-lane row emits on completion (`pairevents.go`) also reads the row's dial base, which
-  the queue lane sets to the holder, so it may name the holder's host as the node where the claimant ran it. That is the same
-  root on another surface; it was found here and not verified or changed. The queue lane's rescue still passes no strike
-  (a rescued object that fails the document fingerprint does not count against the claimant), as the queue route is not
-  covered by quarantine.
+- **Not changed.** The queue lane's rescue still passes no strike (a rescued object that fails the document fingerprint does
+  not count against the claimant), as the queue route is not covered by quarantine. It also hands the rescue no origin when the
+  claimant is the queue holder itself (a node that holds the queue and claims from it): the answer names the claimant by node id
+  only, and resolving that id to a dial base would mean probing the fleet from a lane that has no runner and no health view
+  (ADR 0030), so the rescue goes to the delegator's own seat, which is what it did before the origin existed. A wrong origin is a
+  call that fails or answers for another seat, so the lane withholds it whenever it cannot tell.
+- **A second look at the six, five applied and two answered.** A silent-failure review of the fixes above found these; each has
+  its test written first and seen red.
+  - *The `stale_binary` note dropped why the bytes could not be compared.* It said "could not be compared" and kept the read
+    error (a lock on the freshly renamed file) for `offload_status` alone; the note, and so the one log line, now ends the
+    sentence with the comparison's own reason. `internal/mcpserver/stale_reason_test.go`.
+  - *A guard that was not watching said so only on `offload_status`.* `agent_delegate` and `offload_research`, the doors the guard
+    exists for, answered with no note, which reads as a fresh server. Both now carry the top-level `stale_binary_guard` string
+    (`inactive: ...`, or `unreadable: ...` while the stamp cannot be read), read after the note's own read of the stamp, and no
+    key while the guard watches. `internal/mcpserver/stale_guard_doors_test.go` (four of five failed first; the fifth is the
+    control that a watching guard adds nothing).
+  - *A start-up capture without a stamp re-opened the window the capture closes, silently.* The self-hash set the capture's path
+    before it opened the file and took the stamp only through the open handle, so a refused open (the antivirus lock its own log
+    line cites) left a path and no size, and the guard fell back to reading its file as of `mcpserver.New`: a deploy landing in
+    between was taken for the running image with no line saying the fallback happened. The capture now takes the stamp from the
+    path when the open fails (and logs a failed stat, which was discarded), and a guard whose capture holds no path or no stamp
+    is inactive, logs one line naming the capture, and shows the reason on the doors above. Tests
+    `internal/buildinfo/stale_test.go` (the locked image keeps its stamp) and `internal/mcpserver/stale_capture_test.go` (two);
+    the commit that wrote them adds one behaviour-free seam, `openImage`.
+  - *Settling a moved stamp by the bytes put an unbounded read on the answer path.* Two passes over the installed executable (the
+    hash, then the build-marker scan) ran after every result existed, so a read that stalled held the finished results past the
+    call's deadline, and a failed read was retried by every later answer. The read now runs in the background, once per moved
+    file (calls that arrive while it runs wait on it and start none), and a call waits at most 2 s (`installedReadWait`): past
+    that `process.stale_image` is absent, the note keeps the moved stamp and says the read did not finish and goes on, and the
+    next call records what it found; a read that failed is still not cached, and a file that moved again while it was read gives
+    no verdict from the older read. `offload_status` shares the bound. `internal/mcpserver/stale_bounded_test.go` (three; the
+    stalled read is held 1.5 s in the test, and before the change the answers waited out all of it).
+  - *The quarantine strike was the second reader of a queue row's base that is wrong for it.* The queue lane passes no strike
+    today, so nothing fired; a strike wired for it later would have quarantined the holder for a claimant's fingerprint misses.
+    The strike is now skipped for a row the queue lane took (`viaQueue`). `internal/delegate/queue_rescue_strike_test.go`; the
+    push row's strike is the control and still passes.
+  - *Answered, not changed: the PAIR card.* The note that a queue row's PAIR card (`pairevents.go`) might name the holder is
+    withdrawn. `pairTerminal` runs only from the push path's `attempt`, and its guard is the model name only `pairInflight` sets,
+    which the queue lane never reaches (`runQueued` is called before the runner is built), so a queue row emits no card.
+  - *Answered, not changed: the holder-as-claimant origin.* The blunt `viaQueue` gate is the first bullet of "Not changed" above.
 
 ### Fixed
 
@@ -147,7 +182,8 @@ written first and seen red.
   when it is not watching, because a guard against a silent failure must not be one: a server that could not stamp its own
   executable at start (or whose path was already gone) logs one `the stale-binary guard is inactive` line with the reason, a stat
   that fails later is logged once, and `offload_status` carries a top-level `stale_binary_guard` string (`inactive: ...` for the
-  first, `unreadable: ...` for as long as the second lasts), absent while the guard is watching. Tests
+  first, `unreadable: ...` for as long as the second lasts), absent while the guard is watching (`agent_delegate` and
+  `offload_research` carry it too since the integration review round at the top of this section). Tests
   `internal/mcpserver/stalebinary_test.go`, written first: red before with `agent_delegate: no stale_binary note in [summary
   results]` on a server whose executable stamp had moved, on all three doors, and, for the inactive guard, `log "": want one
   line saying the guard is inactive and why`; thirteen mutations (size or modification time dropped from the comparison, the
