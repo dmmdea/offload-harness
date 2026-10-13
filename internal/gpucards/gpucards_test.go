@@ -20,7 +20,7 @@ func cards3() []gpuprobe.Card {
 }
 
 func TestRowsCardLeaseHoldsOnlyItsCards(t *testing.T) {
-	rows := Rows(cards3(), []gpulease.Info{{Held: true, Epoch: 7, Class: gpulease.ClassMedia, Devices: []string{"gpu-cccc0000-x"}, Group: "g"}})
+	rows := RowsWithCap(cards3(), []gpulease.Info{{Held: true, Epoch: 7, Class: gpulease.ClassMedia, Devices: []string{"gpu-cccc0000-x"}, Group: "g"}}, 60, 0)
 	if rows[2].State != "held" || rows[2].Holder.Epoch != 7 || rows[2].Holder.Scope != "card" || rows[2].Holder.Group != "g" {
 		t.Fatalf("card 2: %+v", rows[2])
 	}
@@ -30,7 +30,7 @@ func TestRowsCardLeaseHoldsOnlyItsCards(t *testing.T) {
 }
 
 func TestRowsWholeNodeLeaseHoldsEveryCardAndSaysSo(t *testing.T) {
-	rows := Rows(cards3(), []gpulease.Info{{Held: true, Epoch: 3, Class: gpulease.ClassText}})
+	rows := RowsWithCap(cards3(), []gpulease.Info{{Held: true, Epoch: 3, Class: gpulease.ClassText}}, 60, 0)
 	for _, r := range rows {
 		if r.State != "held" || r.Holder.Scope != "whole-node" || r.Holder.Epoch != 3 {
 			t.Fatalf("card %d: %+v", r.Index, r)
@@ -39,7 +39,7 @@ func TestRowsWholeNodeLeaseHoldsEveryCardAndSaysSo(t *testing.T) {
 }
 
 func TestSectionHasTheStableKeys(t *testing.T) {
-	sec := Section(cards3(), "a note", []gpulease.Info{{Held: true, Epoch: 1, Class: gpulease.ClassMedia, Age: time.Minute}}, nil)
+	sec := Section(cards3(), "a note", []gpulease.Info{{Held: true, Epoch: 1, Class: gpulease.ClassMedia, Age: time.Minute}}, nil, 60, 0)
 	for _, k := range []string{"cards", "leases", "queued", "cards_note"} {
 		if _, ok := sec[k]; !ok {
 			t.Errorf("missing key %q", k)
@@ -48,7 +48,7 @@ func TestSectionHasTheStableKeys(t *testing.T) {
 	if q, _ := sec["queued"].([]map[string]any); q == nil || len(q) != 0 {
 		t.Errorf("an empty queue is an empty list, never null: %#v", sec["queued"])
 	}
-	empty := Section(nil, "", nil, nil)
+	empty := Section(nil, "", nil, nil, 60, 0)
 	if c, _ := empty["cards"].([]Row); c == nil || len(c) != 0 {
 		t.Errorf("no card table is an empty list, never null: %#v", empty["cards"])
 	}
@@ -59,7 +59,7 @@ func TestSectionHasTheStableKeys(t *testing.T) {
 
 func TestTableClipsALongCommandAndKeepsTheUUIDWhole(t *testing.T) {
 	long := strings.Repeat("x", 300)
-	lines := Table(Rows(cards3(), []gpulease.Info{{Held: true, Epoch: 1, Class: gpulease.ClassMedia, Command: long, Devices: []string{"gpu-aaaa0000-x"}}}))
+	lines := Table(RowsWithCap(cards3(), []gpulease.Info{{Held: true, Epoch: 1, Class: gpulease.ClassMedia, Command: long, Devices: []string{"gpu-aaaa0000-x"}}}, 60, 0))
 	text := strings.Join(lines, "\n")
 	if strings.Contains(text, long) {
 		t.Error("a long command must be clipped")

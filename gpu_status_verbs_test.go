@@ -291,16 +291,16 @@ func TestPrintCardTableNotesAnUndeclaredComfyOrderAndTheDeclaredOne(t *testing.T
 		{Index: 0, UUID: "GPU-aaaa0000-x", Name: "A", TotalGiB: 16, FreeGiB: 16},
 		{Index: 1, UUID: "GPU-bbbb0000-x", Name: "A", TotalGiB: 16, FreeGiB: 16},
 	}, "")
-	text := captureStdout(t, func() { printCardTable(undeclared, "a note", nil, nil) })
+	text := captureStdout(t, func() { printCardTable(config.Config{}, undeclared, "a note", nil, nil) })
 	for _, want := range []string{"card table:", "GPU-aaaa0000-x", "note: a note", "gpu_comfy_order"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("an undeclared order must be explained (%q):\n%s", want, text)
 		}
 	}
-	if text := captureStdout(t, func() { printCardTable(statusCards(), "", nil, nil) }); strings.Contains(text, "gpu_comfy_order") {
+	if text := captureStdout(t, func() { printCardTable(config.Config{}, statusCards(), "", nil, nil) }); strings.Contains(text, "gpu_comfy_order") {
 		t.Errorf("a declared order needs no warning:\n%s", text)
 	}
-	if text := captureStdout(t, func() { printCardTable(nil, "", errors.New("boom"), nil) }); !strings.Contains(text, "card table: none") || !strings.Contains(text, "boom") {
+	if text := captureStdout(t, func() { printCardTable(config.Config{}, nil, "", errors.New("boom"), nil) }); !strings.Contains(text, "card table: none") || !strings.Contains(text, "boom") {
 		t.Errorf("an error is said, not hidden:\n%s", text)
 	}
 }

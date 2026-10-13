@@ -30,6 +30,10 @@ type GPU struct {
 	// (gpuprobe.ScreenCardUUIDs). The verdict's load attribution does NOT: an attached
 	// monitor is not a display in use.
 	DisplayAttached bool `json:"display_attached,omitempty"`
+	// AttachedUnknown marks a sample whose full query failed for a reason that does not name display_attached
+	// (gpuprobe.AttachedUnknown): it cannot say which card the monitor is on. Carried so the per-card table of
+	// offload_status can say so instead of showing no display card (seam: not set yet).
+	AttachedUnknown bool `json:"attached_unknown,omitempty"`
 }
 
 // GPUProcess is one process nvidia-smi lists on a card. On Windows (WDDM) the

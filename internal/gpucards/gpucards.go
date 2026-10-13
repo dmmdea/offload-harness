@@ -40,15 +40,32 @@ type Row struct {
 	ComfyOrder   int     `json:"comfy_order"` // -1 = not declared
 	State        string  `json:"state"`       // "free" or "held"
 	Holder       *Holder `json:"holder"`
+	// DisplayUnknown: the reading could not say which card the monitor is on (gpuprobe.Card.DisplayUnknown).
+	DisplayUnknown bool `json:"display_unknown,omitempty"`
+	// DisplayCap is the live verdict of gpu_display_cap_pct on this card; see DisplayCap.
+	DisplayCap *DisplayCap `json:"display_cap,omitempty"`
 }
 
-// Rows joins the card table with the live leases. A card-scoped lease holds the
-// cards it names; a whole-node lease holds every card, and says so.
-func Rows(cards []gpuprobe.Card, leases []gpulease.Info) []Row {
+// DisplayCap is the live reading of the display card against gpu_display_cap_pct (seam: nothing fills it yet).
+type DisplayCap struct {
+	CapPct    int     `json:"cap_pct"`
+	BudgetGiB float64 `json:"budget_gb"`
+	UsedGiB   float64 `json:"used_gb"`
+	UsedPct   float64 `json:"used_pct"`
+	OverCap   bool    `json:"over_cap"`
+	OverByGiB float64 `json:"over_by_gb,omitempty"`
+	Closed    bool    `json:"closed,omitempty"`
+	Unknown   string  `json:"unknown,omitempty"`
+}
+
+// RowsWithCap joins the card table with the live leases and the display card's cap. A card-scoped lease holds
+// the cards it names; a whole-node lease holds every card, and says so. The cap is a parameter of the only
+// constructor of rows, so no surface can print the table without it (seam: the cap is not read yet).
+func RowsWithCap(cards []gpuprobe.Card, leases []gpulease.Info, capPct int, floorGiB float64) []Row {
 	rows := make([]Row, 0, len(cards))
 	for _, c := range cards {
 		r := Row{
-			UUID: c.UUID, Index: c.NvidiaIndex, Name: c.Name, Display: c.Display,
+			UUID: c.UUID, Index: c.NvidiaIndex, Name: c.Name, Display: c.Display, DisplayUnknown: c.DisplayUnknown,
 			VRAMTotalGiB: c.VRAMTotalGiB, VRAMFreeGiB: c.VRAMFreeGiB,
 			UtilPct: c.UtilPct, UtilKnown: c.UtilKnown, ComfyOrder: c.ComfyOrder, State: "free",
 		}
@@ -170,9 +187,9 @@ func QueueRows(waiters []gpulease.Waiter) []map[string]any {
 // Section is what `gpu status --json` adds for cards: the table (empty, with a
 // note, when there is no card table), the per-lease list and the queue. Only keys are
 // added; nothing existing changes type.
-func Section(cards []gpuprobe.Card, note string, leases []gpulease.Info, waiters []gpulease.Waiter) map[string]any {
+func Section(cards []gpuprobe.Card, note string, leases []gpulease.Info, waiters []gpulease.Waiter, capPct int, floorGiB float64) map[string]any {
 	sec := map[string]any{
-		"cards":  Rows(cards, leases),
+		"cards":  RowsWithCap(cards, leases, capPct, floorGiB),
 		"leases": LeaseRows(leases),
 		"queued": QueueRows(waiters),
 	}

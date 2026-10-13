@@ -292,6 +292,16 @@ func (in AllocInput) displayFloorGiB(c gpuprobe.Card) (floor float64, ok bool) {
 	return floor, true
 }
 
+// DisplayFloorGiB is the display card's floor arithmetic as a pure function (seam: behaviour-free until implemented).
+func DisplayFloorGiB(totalGiB float64, capPct int, declaredFloorGiB float64) (floor float64, ok bool) {
+	return 0, false
+}
+
+// DisplayBudgetGiB is what a job may take of the display card: its total less the floor (seam).
+func DisplayBudgetGiB(totalGiB float64, capPct int, declaredFloorGiB float64) (budget float64, ok bool) {
+	return 0, false
+}
+
 // fitsCard is fits plus the display card's cap. The VRAM in use now (the desktop's included) plus the footprint
 // must stay at or under DisplayCapPct of the card, which is the display layer's own display_floor arithmetic
 // (free - footprint >= floor) with the floor set to the rest of the card (displayFloorGiB). A footprint left
