@@ -316,7 +316,7 @@ export function resolveWanCards({ tokens, source, cards, cardsFlag = "wan-cards"
   if (token) {
     const named = matchCards(token, cards);
     const pairText = found.map((c) => `idx ${c.index}`).join(", ");
-    if (named.length === 0) throw placementError(`WAN_COMPUTE_UUID names ${JSON.stringify(token)}, which is no card in the driver's table (${cards.map((c) => `${c.index}:${c.uuid}`).join(", ")}), so it cannot say which of the two cards (${pairText}) computes: name one of them by its nvidia-smi index, its UUID or a UUID prefix of 8 or more characters, or unset it`);
+    if (named.length === 0) throw placementError(`WAN_COMPUTE_UUID names ${JSON.stringify(token)}, which is no card in the driver's table (${cards.map((c) => `${c.index}:${c.uuid}`).join(", ")}), so it cannot say which of the two cards (${pairText}) computes: name one of them by its nvidia-smi index, its UUID or a UUID prefix of 8 or more characters after the optional "GPU-", or unset it${/^\d+$/.test(token) ? ` (a token of digits alone is read as an nvidia-smi index; a UUID prefix made of digits needs the "GPU-" spelling (GPU-${token}))` : ""}`);
     if (named.length === 1 && found.includes(named[0])) return { storage: found.find((c) => c !== named[0]), compute: named[0], source, why: "named by WAN_COMPUTE_UUID", note: "" };
     note = `WAN_COMPUTE_UUID names ${JSON.stringify(token)}, which does not name exactly one of the two cards (${pairText}); ranked instead`;
   }

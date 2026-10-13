@@ -1016,6 +1016,23 @@ test("an override that does not name exactly one of the two cards is ignored wit
   for (const token of ["", "  "]) assert.deepEqual(go(CARDS, token), { roles: [2, 0], why: "two cards of one size: the higher UUID computes (board power not reported for idx 0, idx 2)", note: "" });
 });
 
+test("a refused override that is digits alone says it was read as an index, and how a UUID prefix made of digits is spelled", () => {
+  // about 2 percent of 8-hex prefixes are all digits: GPU-11112222-... is begun by "11112222", which the token rule reads as an index (nvidia-smi's index is a small number)
+  const digits = M.parseCardTable([`0, GPU-11112222-bbbb-cccc-dddd-eeeeeeeeeeee, Test GPU A, 16311, 16000, Disabled, No`, `2, ${U2}, Test GPU A, 16311, 16050, Disabled, No`].join("\n"));
+  const go = (token) => M.resolveWanCards({ tokens: ["0", "2"], source: "t", cards: digits, compute: token });
+  const refusal = (token) => { try { go(token); } catch (e) { return e.message; } return ""; };
+  assert.equal(go("GPU-11112222").compute.index, 0, "the control: the same prefix with its GPU- spelling names the card");
+  const digitsOnly = refusal("11112222");
+  assert.match(digitsOnly, /^WAN-PLACEMENT: WAN_COMPUTE_UUID names "11112222", which is no card in the driver's table/);
+  assert.match(digitsOnly, /a token of digits alone is read as an nvidia-smi index; a UUID prefix made of digits needs the "GPU-" spelling \(GPU-11112222\)/);
+  // a token with a letter in it is no index, so the clause would mislead there: the control
+  const letters = refusal("deadbeef");
+  assert.match(letters, /^WAN-PLACEMENT: WAN_COMPUTE_UUID names "deadbeef", which is no card/);
+  assert.doesNotMatch(letters, /digits alone/);
+  // and every refusal says how the 8 characters are counted: after the optional GPU- (the rule the docs state)
+  for (const msg of [digitsOnly, letters, refusal("GPU-aaaa")]) assert.match(msg, /a UUID prefix of 8 or more characters after the optional "GPU-", or unset it/);
+});
+
 test("the override cannot add a card: --wan-cards still has to be confirmed by the lease, whatever WAN_COMPUTE_UUID names", () => {
   const held = ["gpu-cccc3333-bbbb-cccc-dddd-eeeeeeeeeeee", "gpu-bbbb2222-cccc-dddd-eeee-ffffffffffff"];
   assert.throws(() => planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => held, env: { WAN_COMPUTE_UUID: "1" } }), /--wan-cards names idx 2, which the GPU lease does not hold/);
