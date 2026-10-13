@@ -133,6 +133,10 @@ test("parseCli: a value flag with no value refuses, naming the flag (it used to 
     const swallowed = parseCli([...BASE, "--" + k, "--no-lock"]);
     assert.equal(swallowed.ok, false, `--${k} followed by a flag swallowed that flag as its value`);
     assert.ok(swallowed.error.includes("--" + k), swallowed.error);
+    // an empty value (an unset shell variable in `--clone "$REF"`) is no value
+    const empty = parseCli([...BASE, "--" + k, ""]);
+    assert.equal(empty.ok, false, `--${k} "" was accepted`);
+    assert.ok(empty.error.includes("--" + k), empty.error);
   }
 });
 
