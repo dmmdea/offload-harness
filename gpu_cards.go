@@ -68,7 +68,7 @@ func cardTablePatient(ctx context.Context, cfg config.Config) ([]gpuprobe.Card, 
 // note, when there is no card table), the per-lease list and the queue. Only keys are
 // added; nothing existing changes type.
 func statusLeaseSection(m *gpulease.Manager, cfg config.Config, cards []gpuprobe.Card, note string, waiters []gpulease.Waiter) map[string]any {
-	capPct, floorGiB := displayCapNow(cfg)
+	capPct, floorGiB := displayCapNow(cfg) // gpu status --json
 	return gpucards.Section(cards, note, modelaffinity.ScopeLeases(m.Dir(), m.Leases()), waiters, capPct, floorGiB)
 }
 
@@ -87,7 +87,7 @@ func printCardTable(cfg config.Config, cards []gpuprobe.Card, note string, cerr 
 		return
 	}
 	fmt.Println("  card table:")
-	capPct, floorGiB := displayCapNow(cfg)
+	capPct, floorGiB := displayCapNow(cfg) // the table under gpu status
 	for _, ln := range gpucards.Table(gpucards.RowsWithCap(cards, leases, capPct, floorGiB)) {
 		fmt.Println("    " + ln)
 	}
@@ -118,7 +118,7 @@ func runGPUCards(args []string) error {
 		return fmt.Errorf("no card table: %w", cerr)
 	}
 	leases := m.Leases()
-	capPct, floorGiB := displayCapNow(cfg)
+	capPct, floorGiB := displayCapNow(cfg) // gpu cards
 	if *asJSON {
 		b, _ := json.MarshalIndent(map[string]any{
 			"cards": gpucards.RowsWithCap(cards, leases, capPct, floorGiB), "leases": gpucards.LeaseRows(leases), "cards_note": note,

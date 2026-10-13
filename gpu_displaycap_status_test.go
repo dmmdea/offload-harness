@@ -7,9 +7,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpucards"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
@@ -144,6 +146,26 @@ func TestGPUStatusTextSaysWhenTheDisplayCardIsOverItsCap(t *testing.T) {
 	}
 }
 
+// The table is printed by two branches of `gpu status` (a free host and a held one); both carry the line.
+func TestGPUStatusTextOfAHeldHostCarriesTheDisplayCapLine(t *testing.T) {
+	cfg, m := scopedLeaseFixture(t)
+	writeCapConfig(t, cfg, 60)
+	useQuietStatus(t, capStatusCards(3.0, false), nil)
+	holder, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "batch", Devices: []string{"gpu-cccc0000-x"}, TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Release() }()
+	text := captureStdout(t, func() {
+		if err := runGPUStatus([]string{"--config", cfg}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(text, "GPU: held") || !strings.Contains(text, "display cap:") || !strings.Contains(text, "OVER by 3.4 GiB") {
+		t.Errorf("a held host's table carries the display cap line:\n%s", text)
+	}
+}
+
 func TestGPUCardsVerbCarriesTheDisplayCapInJSONAndText(t *testing.T) {
 	cfg, _ := scopedLeaseFixture(t)
 	writeCapConfig(t, cfg, 60)
@@ -169,6 +191,18 @@ func TestGPUCardsVerbCarriesTheDisplayCapInJSONAndText(t *testing.T) {
 	if !strings.Contains(text, "display cap:") || !strings.Contains(text, "OVER by 3.4 GiB") {
 		t.Errorf("`gpu cards` prints the display cap line:\n%s", text)
 	}
+	// The cap is the file's, not a constant: at 95 the same card is within it and the row says 95.
+	writeCapConfig(t, cfg, 95)
+	out = captureStdout(t, func() {
+		if err := runGPUCards([]string{"--config", cfg, "--json"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	rows, _ = statusRows(t, out)
+	if d := rows[1].DisplayCap; d == nil || d.OverCap || d.CapPct != 95 {
+		t.Errorf("`gpu cards --json` at a cap of 95: within, and the row says 95: %+v", d)
+	}
+	writeCapConfig(t, cfg, 60)
 	// A reading that could not say which card the monitor is on is not judged, on either surface.
 	useQuietStatus(t, capStatusCards(3.0, true), nil)
 	text = captureStdout(t, func() {
