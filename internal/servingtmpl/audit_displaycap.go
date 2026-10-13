@@ -42,7 +42,7 @@ func HasProxyEntry(text string) bool {
 		return false
 	}
 	for _, m := range doc.Models {
-		if isProxyEntry(m) {
+		if isProxyEntry(m) { // any proxy: seat
 			return true
 		}
 	}
@@ -121,7 +121,7 @@ func unseenEntries(text string, cards []gpuprobe.Card) (unseenReport, bool) {
 	sort.Strings(names)
 	for _, name := range names {
 		m := doc.Models[name]
-		if isProxyEntry(m) {
+		if isProxyEntry(m) { // a proxy: seat, whatever its own env says
 			r.Proxy = append(r.Proxy, name)
 			continue
 		}
