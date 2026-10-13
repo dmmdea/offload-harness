@@ -52,6 +52,9 @@ var hashInstalledImage = func(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// installedReadWait bounds how long a call waits for the read of a moved installed file (its hash and its build marker).
+var installedReadWait = 2 * time.Second
+
 // readInstalledVersion is the seam the installed file's build marker is read through (the audit's own reader), so a
 // test makes one read fail.
 var readInstalledVersion = gpulease.ReadBuildMarkerVersion
