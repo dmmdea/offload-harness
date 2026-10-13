@@ -1,6 +1,7 @@
 package hostneed
 
 import (
+	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
@@ -944,38 +945,48 @@ func TestTheSageComputeCardCeilingIsTheRunnersCeiling(t *testing.T) {
 	}
 }
 
-// The token rule is the runner's (render/comfy-lifecycle.mjs isSageAttentionToken, and wanAttentionMode over a COMFY_EXTRA_ARGS value): this table is the
-// one render/wan-multicard.test.mjs checks, token by token, so the two languages cannot read one value two ways. ComfyUI's parser accepts an unambiguous
-// prefix of a flag (argparse allow_abbrev), so `--use-sa` IS sage attention and a missed prefix would size the call for the default; `--use-s` begins
-// --use-split-cross-attention too and is not.
+// The token rule is the runner's (render/comfy-lifecycle.mjs isSageAttentionToken, and wanAttentionMode over a COMFY_EXTRA_ARGS value). ONE table, read by this test
+// and by render/wan-multicard.test.mjs (render/testdata/sage-token-table.json), so the two languages cannot read one value two ways: a row changed there turns an answer in
+// both, and a row added is checked by both. ComfyUI's parser accepts an unambiguous prefix of a flag (argparse allow_abbrev), so `--use-sa` IS sage attention and a missed
+// prefix would size the call for the default; `--use-s` begins --use-split-cross-attention too and is not.
 func TestTheSageTokenRuleMatchesTheRunner(t *testing.T) {
-	for _, tc := range []struct {
-		extra string
-		sage  bool
-	}{
-		{"--use-sage-attention", true},
-		{"--x 1 --use-sage-attention --y", true},
-		{"  --y   --use-sage-attention  ", true},
-		{"--use-sage", true},
-		{"--use-sa", true},
-		{"--use-sag", true},
-		{"--use-s", false},
-		{"--use-", false},
-		{"--use-split-cross-attention", false},
-		{"--use-flash-attention", false},
-		{"--use-pytorch-cross-attention", false},
-		{"--use-sage-attention-extra", false},
-		{"--USE-SAGE-ATTENTION", false},
-		{"use-sage-attention", false},
-		{"--sage-attention", false},
-		{"", false},
-	} {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "render", "testdata", "sage-token-table.json"))
+	if err != nil {
+		if _, e := os.Stat(filepath.Join("..", "..", "render")); e != nil {
+			t.Skipf("the render folder is not beside this package: %v", e)
+		}
+		t.Fatalf("the shared sage token table is missing: %v", err)
+	}
+	var table struct {
+		Rows []struct {
+			Extra string `json:"extra"`
+			Sage  bool   `json:"sage"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(raw, &table); err != nil {
+		t.Fatalf("the shared sage token table does not parse: %v", err)
+	}
+	var yes, no int
+	for _, row := range table.Rows {
+		if row.Sage {
+			yes++
+		} else {
+			no++
+		}
+	}
+	if len(table.Rows) < 16 || yes == 0 || no == 0 {
+		t.Fatalf("the shared sage token table looks empty or one-sided: %d rows, %d sage, %d not", len(table.Rows), yes, no)
+	}
+	for _, row := range table.Rows {
+		if got := sageAttention(row.Extra); got != row.Sage {
+			t.Errorf("sageAttention(%q) = %v, the shared table (and the runner) read it as %v", row.Extra, got, row.Sage)
+		}
 		f := wanFacts(t, 15.9, 15.9)
-		f.Env = extraArgsEnv(tc.extra)
+		f.Env = extraArgsEnv(row.Extra)
 		// the default share declares 0 under the default attention and the ordinary set under sage, so the outcome shows which mode the value read as
 		n := wanNeed(t, wanMulticardCmd, f)
-		if got := n.GiB != 0; got != tc.sage {
-			t.Errorf("COMFY_EXTRA_ARGS=%q: read as sage = %v, want %v (%v)", tc.extra, got, tc.sage, n)
+		if got := n.GiB != 0; got != row.Sage {
+			t.Errorf("COMFY_EXTRA_ARGS=%q: the sizing read it as sage = %v, want %v (%v)", row.Extra, got, row.Sage, n)
 		}
 	}
 }

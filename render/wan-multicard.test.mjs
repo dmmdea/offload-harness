@@ -1169,14 +1169,9 @@ test("a mixed pair is verified role by role: the compute card's own model name i
 const SAGE_ENV = { ...LEASE, COMFY_EXTRA_ARGS: "--use-sage-attention" };
 const FILM = { width: "720", height: "1280", frames: "81" };
 const CLIP65 = { width: "720", height: "1280", frames: "65" };
-// the same table render/comfy-lifecycle.mjs isSageAttentionToken and internal/hostneed's TestTheSageTokenRuleMatchesTheRunner read, row for row
-const SAGE_TOKENS = [
-  ["--use-sage-attention", true], ["--x 1 --use-sage-attention --y", true], ["  --y   --use-sage-attention  ", true],
-  ["--use-sage", true], ["--use-sa", true], ["--use-sag", true],
-  ["--use-s", false], ["--use-", false], ["--use-split-cross-attention", false], ["--use-flash-attention", false],
-  ["--use-pytorch-cross-attention", false], ["--use-sage-attention-extra", false], ["--USE-SAGE-ATTENTION", false],
-  ["use-sage-attention", false], ["--sage-attention", false], ["", false],
-];
+// ONE table, read by this file and by internal/hostneed's TestTheSageTokenRuleMatchesTheRunner (render/testdata/sage-token-table.json): a row changed there turns
+// an answer in both languages, and a row added is checked by both.
+const SAGE_TOKENS = JSON.parse(readFileSync(new URL("./testdata/sage-token-table.json", import.meta.url), "utf8")).rows.map((r) => [r.extra, r.sage]);
 
 test("sage attention in COMFY_EXTRA_ARGS: the film clip keeps at most 0.2 GiB of an expert resident, so the default share of 3 is refused and 0 is admitted", () => {
   const sage = (flags) => planWith({ ...FILM, ...flags }, { env: SAGE_ENV });
@@ -1234,6 +1229,7 @@ test("wanActivationsGib(tokens, 'sage') meets the film session's inequalities, a
 });
 
 test("wanAttentionMode reads COMFY_EXTRA_ARGS token by token, and isSageAttentionToken is the one predicate", () => {
+  assert.ok(SAGE_TOKENS.length >= 16 && SAGE_TOKENS.some(([, s]) => s) && SAGE_TOKENS.some(([, s]) => !s), "the shared table (render/testdata/sage-token-table.json) looks empty or one-sided");
   for (const [extra, sage] of SAGE_TOKENS) assert.equal(M.wanAttentionMode({ COMFY_EXTRA_ARGS: extra }), sage ? "sage" : "default", JSON.stringify(extra));
   assert.equal(M.wanAttentionMode({}), "default");
   assert.equal(M.wanAttentionMode({ COMFY_EXTRA_ARGS: undefined }), "default");

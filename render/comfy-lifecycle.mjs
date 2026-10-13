@@ -286,7 +286,8 @@ const profileRequested = (p) => !!(p && (p.cudaDevice || p.dynamicVram || p.card
  * allowed, `--use-sage-attention` one of a mutually exclusive attention group) accepts `--use-sa` as the flag, and /system_stats reports the argv as it was
  * typed. A prefix shorter than 8 characters begins other attention flags too (`--use-s` is also --use-split-cross-attention) and is not this one; a longer
  * token (`--use-sage-attention-extra`) is no prefix at all. The one predicate for the Wan sizing (wan-multicard.mjs wanAttentionMode), the reuse check of a
- * running ComfyUI (profileMismatch) and, as the same table, internal/hostneed's sageAttention; ComfyUI's parser is case-sensitive, so is this.
+ * running ComfyUI (profileMismatch) and, by the same rows (render/testdata/sage-token-table.json, which both languages' tests read), internal/hostneed's sageAttention;
+ * ComfyUI's parser is case-sensitive, so is this.
  */
 export function isSageAttentionToken(tok) {
   const t = String(tok);

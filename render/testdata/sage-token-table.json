@@ -1,0 +1,21 @@
+{
+  "what": "COMFY_EXTRA_ARGS values and whether each carries sage attention (--use-sage-attention, or an argparse prefix of it of 8+ characters), token by token. render/comfy-lifecycle.mjs isSageAttentionToken (through wanAttentionMode) and internal/hostneed sageAttention must read every row the same way; both test files read this file.",
+  "rows": [
+    { "extra": "--use-sage-attention", "sage": true },
+    { "extra": "--x 1 --use-sage-attention --y", "sage": true },
+    { "extra": "  --y   --use-sage-attention  ", "sage": true },
+    { "extra": "--use-sage", "sage": true },
+    { "extra": "--use-sa", "sage": true },
+    { "extra": "--use-sag", "sage": true },
+    { "extra": "--use-s", "sage": false },
+    { "extra": "--use-", "sage": false },
+    { "extra": "--use-split-cross-attention", "sage": false },
+    { "extra": "--use-flash-attention", "sage": false },
+    { "extra": "--use-pytorch-cross-attention", "sage": false },
+    { "extra": "--use-sage-attention-extra", "sage": false },
+    { "extra": "--USE-SAGE-ATTENTION", "sage": false },
+    { "extra": "use-sage-attention", "sage": false },
+    { "extra": "--sage-attention", "sage": false },
+    { "extra": "", "sage": false }
+  ]
+}
