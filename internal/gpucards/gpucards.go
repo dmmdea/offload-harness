@@ -9,6 +9,7 @@ package gpucards
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -46,7 +47,12 @@ type Row struct {
 	DisplayCap *DisplayCap `json:"display_cap,omitempty"`
 }
 
-// DisplayCap is the live reading of the display card against gpu_display_cap_pct (seam: nothing fills it yet).
+// DisplayCap is the live reading of the display card against gpu_display_cap_pct: the VRAM in use now (the
+// desktop and every process counted, which is how the allocator counts it) against the share of the card the cap
+// allows. It is the verdict the allocator would reach on an empty request, taken from the card as it is, so it
+// covers memory the allocator never placed (a seat llama-swap loaded onto the card). It cannot say whose memory it
+// is. The two states that are not a verdict say why: Closed (the cap is 0, the operator's "I need the card"
+// switch) and Unknown (a reading that could not say which card the monitor is on, or a card with no total).
 type DisplayCap struct {
 	CapPct    int     `json:"cap_pct"`
 	BudgetGiB float64 `json:"budget_gb"`
@@ -59,8 +65,10 @@ type DisplayCap struct {
 }
 
 // RowsWithCap joins the card table with the live leases and the display card's cap. A card-scoped lease holds
-// the cards it names; a whole-node lease holds every card, and says so. The cap is a parameter of the only
-// constructor of rows, so no surface can print the table without it (seam: the cap is not read yet).
+// the cards it names; a whole-node lease holds every card, and says so. The display card's row carries its cap
+// verdict (DisplayCap), computed here and nowhere else: capPct and floorGiB are the allocator's own inputs
+// (gpu_display_cap_pct as the config file says now, and the display layer's declared floor), and this is the only
+// constructor of rows, so no surface can print the table without them.
 func RowsWithCap(cards []gpuprobe.Card, leases []gpulease.Info, capPct int, floorGiB float64) []Row {
 	rows := make([]Row, 0, len(cards))
 	for _, c := range cards {
@@ -74,10 +82,56 @@ func RowsWithCap(cards []gpuprobe.Card, leases []gpulease.Info, capPct int, floo
 			r.Holder = &Holder{Epoch: l.Epoch, Class: string(l.Class), PID: l.PID, Scope: scope,
 				Group: l.Group, Command: l.Command, WrapperVersion: l.WrapperVersion}
 		}
+		r.DisplayCap = displayCapOf(r, capPct, floorGiB)
 		rows = append(rows, r)
 	}
 	return rows
 }
+
+// The two reasons a display card is not judged, in the words every surface prints.
+const (
+	unknownTotal   = "total VRAM not given"
+	unknownDisplay = "the reading could not say which card the monitor is on"
+)
+
+// capEpsilonGiB absorbs the float error of a share of a total, as the allocator's own comparison does
+// (gpulease's capEpsilonGiB): a card that sits exactly on its budget is within it.
+const capEpsilonGiB = 1e-6
+
+// displayCapOf is the cap verdict of one row, or nil for a row it says nothing about. A row of a reading that
+// could not say which card the monitor is on gets the unknown, whatever display_active says: the allocator closes
+// such a card before it asks the cap, and so does this. A card that is not the display card has no cap.
+func displayCapOf(r Row, capPct int, floorGiB float64) *DisplayCap {
+	if r.DisplayUnknown {
+		return &DisplayCap{CapPct: capPct, Unknown: unknownDisplay}
+	}
+	if !r.Display {
+		return nil
+	}
+	d := &DisplayCap{CapPct: capPct}
+	if r.VRAMTotalGiB <= 0 {
+		d.Unknown = unknownTotal
+		return d
+	}
+	used := math.Max(r.VRAMTotalGiB-r.VRAMFreeGiB, 0)
+	d.UsedGiB, d.UsedPct = round2(used), round1(used/r.VRAMTotalGiB*100)
+	if capPct <= 0 {
+		d.Closed = true
+		return d
+	}
+	budget, ok := gpulease.DisplayBudgetGiB(r.VRAMTotalGiB, capPct, floorGiB)
+	if !ok {
+		d.Unknown = unknownTotal
+		return d
+	}
+	d.BudgetGiB = round2(budget)
+	if used > budget+capEpsilonGiB {
+		d.OverCap, d.OverByGiB = true, round2(used-budget)
+	}
+	return d
+}
+
+func round2(x float64) float64 { return math.Round(x*100) / 100 }
 
 // holderOf finds the lease holding a card: a card-scoped lease that names it wins; a
 // whole-node lease holds it otherwise.
@@ -203,6 +257,7 @@ func Section(cards []gpuprobe.Card, note string, leases []gpulease.Info, waiters
 // UUID last so it can be copied whole.
 func Table(rows []Row) []string {
 	lines := []string{fmt.Sprintf("%-4s %-14s %-8s %-6s %-5s %-34s %s", "idx", "vram free/tot", "display", "comfy", "util", "holder", "name / uuid")}
+	unknownLine := "" // a reading that could not say which card is the monitor's says so once, not once per card
 	for _, r := range rows {
 		display := "-"
 		if r.Display {
@@ -228,8 +283,41 @@ func Table(rows []Row) []string {
 		if r.Holder != nil && r.Holder.Command != "" {
 			lines = append(lines, "       running: "+clip(r.Holder.Command, 100))
 		}
+		switch {
+		case r.DisplayCap == nil:
+		case r.DisplayUnknown:
+			if unknownLine == "" {
+				unknownLine = capLine(r)
+			}
+		default:
+			lines = append(lines, capLine(r))
+		}
+	}
+	if unknownLine != "" {
+		lines = append(lines, unknownLine)
 	}
 	return lines
+}
+
+// capLine is the one line under the display card that says where it stands against its cap. It says what is
+// counted (the desktop and every process) and that it cannot say whose memory it is: nvidia-smi on a WDDM driver
+// sizes no process, so this is the card's use, not a seat's.
+func capLine(r Row) string {
+	const indent = "       display cap: "
+	d := r.DisplayCap
+	switch {
+	case d.Unknown != "":
+		return indent + "not judged (" + d.Unknown + ")"
+	case d.Closed:
+		return indent + fmt.Sprintf("gpu_display_cap_pct is 0, so the card is closed to jobs; %.1f of %.1f GiB in use (%.0f%%), not judged (the desktop's own use cannot be told from a job's)",
+			d.UsedGiB, r.VRAMTotalGiB, d.UsedPct)
+	}
+	verdict := "within"
+	if d.OverCap {
+		verdict = fmt.Sprintf("OVER by %.1f GiB", d.OverByGiB)
+	}
+	return indent + fmt.Sprintf("%.1f of %.1f GiB in use (%.0f%%); gpu_display_cap_pct %d (with any declared display floor) allows %.1f GiB: %s (the desktop and every process are counted; this line cannot say whose memory it is)",
+		d.UsedGiB, r.VRAMTotalGiB, d.UsedPct, d.CapPct, d.BudgetGiB, verdict)
 }
 
 func clip(s string, n int) string {
