@@ -171,7 +171,9 @@ function parsePowerTable(text) {
  * placement is never refused for it. Every ask hides its console window on Windows (windowsHide).
  */
 export function queryCardsRanked(spawnSync = nodeSpawnSync) {
-  const cards = queryCards(spawnSync);
+  // forwarded through a rest parameter, not handed over as a value: queryCards' own calls carry windowsHide, and the
+  // no-visible-windows scan can only judge a call it can see
+  const cards = queryCards((...a) => spawnSync(...a));
   const askPower = () => { try { return spawnSync("nvidia-smi", [`--query-gpu=${POWER_QUERY}`, "--format=csv,noheader,nounits"], { encoding: "utf8", timeout: 30000, windowsHide: true }); } catch { return null; } };
   let r = askPower();
   if (!r || r.status !== 0 || !r.stdout) r = askPower();
@@ -589,7 +591,7 @@ export function portNote(flags, env, api, label = "wan-placement") {
  * state is unknown, a resident share the compute card cannot hold, a missing pack. `cards` reads the driver's card table
  * (injectable); `isWanGraph` says whether this invocation builds the Wan 2.2 graph; `leaseDevicesFn` names the cards the lease holds.
  */
-export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, spawnSync = nodeSpawnSync, cards = () => queryCardsRanked(spawnSync), launchFn = multicardLaunch, leaseDevicesFn = leaseDevices, say = () => {} }) {
+export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, spawnSync: smiRun, cards = () => queryCardsRanked(smiRun), launchFn = multicardLaunch, leaseDevicesFn = leaseDevices, say = () => {} }) {
   refuseEqualsSpelling(flags);
   const mode = wanPlacementMode(flags);
   if (mode !== "multicard") return null;

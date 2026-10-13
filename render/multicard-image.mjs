@@ -14,7 +14,6 @@
 //   - the ComfyUI launch the placement needs (flags, env, the instance key of the pair), as plain data for ensureComfy: the same
 //     launch the Wan placement makes, so one pair has one instance whichever family asks, with the packs the recipe needs.
 // Dependency-free; the card table and the pack scan are injectable for tests.
-import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { leaseDevices } from "./gpu-lock.mjs";
 import { fetchNodeInfo, missingNodeMessage } from "./comfy-nodes.mjs";
@@ -115,7 +114,7 @@ function checkPeaks(recipe, residentGb, pair, flags) {
  */
 export function planImageMulticard({
   route, family, unet, clip, flags, env = process.env, comfyDir, isGraph = false,
-  spawnSync = nodeSpawnSync, cards = () => queryCardsRanked(spawnSync), launchFn, listFn, leaseDevicesFn = leaseDevices, say = () => {},
+  spawnSync, cards = () => queryCardsRanked(spawnSync), launchFn, listFn, leaseDevicesFn = leaseDevices, say = () => {},
 }) {
   refuseEqualsSpelling(flags, IMAGE_FLAG_NAMES);
   if (imagePlacementMode(flags) !== "multicard") return null;
