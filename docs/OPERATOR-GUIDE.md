@@ -1953,6 +1953,15 @@ small. Those stay exit 0 by design. If the summary carries
 `corpus_rows_lost` / `ledger_rows_lost`, the results are still complete — the harness could not
 write that many telemetry rows (usually a full or read-only disk).
 
+**Which node ran it (`results[].node`, `results[].node_reported`, 0.185.0).** `results[].node` is the node id the node publishes in
+`/fleet/health` (the name on its card in `fleet-ui`), the same name `results[].placement` uses; it is also the `node` of the
+delegation-log row and the node part of the ledger's `model_tier` (`<node>:<seat>`). Before 0.185.0 it was the id the node stamped on
+its own result, which for a node launched with `--node-id` (the installers' form) was the OS hostname, so a result could name one node
+in `node` and another in `placement`. `results[].node_reported` is that stamped id and appears only when it differs from `node` (an
+older node build, or a node that names itself by another id than the one it advertises); it is absent when the two agree. Match a
+node by `node`. `rig --node <name>` accepts either name, so a node picked by its card id still finds the rows written before the
+change. A `route: "queue"` answer carries the id its claimant stamped, which is the id it claims under once that node runs 0.185.0.
+
 CLI equivalent:
 
 ```powershell

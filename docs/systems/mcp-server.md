@@ -272,7 +272,8 @@ assuming the fleet was even consulted.
 Since 0.130.2 (register C-46) `route` is accepted on **`agent_run` and `offload_ask`** too. Both
 doors ran local unconditionally before, so a remote seat could not be named from this box at all.
 `remote` / `auto` / `spread` / `queue` sends the call as ONE contract through the delegator's
-single-contract path, and the response names `node`, `placement`, `seat` and `executed_on`. The two
+single-contract path, and the response names `node`, `placement`, `seat` and `executed_on`, plus `node_reported` (0.185.0) only when the
+node's own result named itself by another id than `node`, the one placement used (see [fleet-node.md](fleet-node.md), "Which node"). The two
 doors put different things on the wire: for `agent_run` `read_root` and `judge` do not travel — the
 executing node reads its own root, and the response carries `notes` naming each of the two the caller passed — so it is for
 self-contained goals and `setup_actions`, while for `offload_ask` the files ride inline, so any node can answer.
