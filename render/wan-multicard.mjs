@@ -10,7 +10,8 @@
 // Measured on two RTX 5060 Ti 16 GB at the film's geometry (docs/systems/media-generation.md, "Card-only Wan"): the
 // 2026-10-11 benchmark, a 4-step run of the 20-step film recipe, peaked at 13.3 GiB on the compute card and 11.1 GiB on the
 // storage card; the full 20-step clip of that day peaked at 15.18 GiB and 10.86 GiB, with 2.3 GiB of host growth over
-// ComfyUI's idle.
+// ComfyUI's idle. With --use-sage-attention in COMFY_EXTRA_ARGS (2026-10-12) the activations are 3 GiB larger at the film's
+// size (15.2 GiB beyond the resident share, measured at resident 0): wanAttentionMode reads it and the sizing follows.
 //
 // WHAT THIS FILE DECIDES, all of it before ComfyUI starts, so a wrong card is a refusal and not a render:
 //   - which two cards (the lease's: GPU_LEASE_DEVICES, else the lease record; --wan-cards names them only when no lease
@@ -21,12 +22,14 @@
 //     the environment variable WAN_COMPUTE_UUID names the compute card of the pair instead);
 //   - the ComfyUI launch that placement needs (flags, env, instance key), as plain data for ensureComfy;
 //   - the DisTorch2 allocation string.
-// Dependency-free; the card table and the pack scan are injectable for tests.
+// It reads the lease's cards from gpu-lock.mjs and the sage-attention token rule from comfy-lifecycle.mjs, and nothing else of the harness; the card table and the
+// pack scan are injectable for tests.
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { leaseDevices } from "./gpu-lock.mjs";
+import { isSageAttentionToken } from "./comfy-lifecycle.mjs";
 import { WAN_PLACEMENTS, WAN_PLACEMENT_DEFAULT, WAN_RESIDENT_GB_DEFAULT, WAN_STORAGE_DEVICE, WAN_COMPUTE_DEVICE } from "./wf-wan22-i2v.mjs";
 
 /** Where the harness-owned ComfyUI-side code lives (next to this file): the yaml ComfyUI is pointed at, and the node folder it names. */
@@ -464,6 +467,22 @@ export const WAN_EXPERT_GIB = 13.4;
 const ACTIVATIONS_GIB_PER_1000_TOKENS = 0.31;
 /** Scaled with the tokens, never under this: even a small clip holds a context's worth of buffers. */
 const ACTIVATIONS_FLOOR_GIB = 2.0;
+/**
+ * WAN_FILM_ACTIVATIONS_SAGE_GIB: the same figure as WAN_FILM_ACTIVATIONS_GIB under sage attention (--use-sage-attention in COMFY_EXTRA_ARGS), on the same basis (the
+ * compute card's nvidia-smi peak less its resident share, the CUDA context inside). Measured 2026-10-12 on a 16 GB Blackwell pair at the film clip with
+ * resident 0: 15,482 MiB in use = 15.119 GiB, rounded up to 15.2: 3.0 GiB more than the default attention's. internal/hostneed declares against the same
+ * figure (wanActivationsSageGiB; a Go test pins the two together, so this stays a one-line numeric literal).
+ */
+export const WAN_FILM_ACTIVATIONS_SAGE_GIB = 15.2;
+/**
+ * The sage curve is the straight line through the two sage points measured on 2026-10-12: 12.9 GiB at 61,200 tokens (720x1280x65 with 2 GiB resident: 15,216 MiB =
+ * 14.859 GiB in use, less the 2.0 GiB share = 12.859, rounded up) and WAN_FILM_ACTIVATIONS_SAGE_GIB at the film's 75,600. It is used from where it meets the default
+ * curve's cap (WAN_FILM_ACTIVATIONS_GIB), about 56,800 tokens, up; below that the default curve is above it and sage is sized as the default, which already covers the
+ * benchmark's 6.16 GiB reserved with sage at 20,280 tokens (the default gives 6.29 there). Chosen between the points and not measured there; only 61,200 and 75,600 were.
+ */
+const SAGE_POINT_TOKENS = 61200;
+const SAGE_POINT_GIB = 12.9;
+const SAGE_LINE_FROM_TOKENS = SAGE_POINT_TOKENS - ((SAGE_POINT_GIB - WAN_FILM_ACTIVATIONS_GIB) * (WAN_FILM_TOKENS - SAGE_POINT_TOKENS)) / (WAN_FILM_ACTIVATIONS_SAGE_GIB - SAGE_POINT_GIB);
 /** What the storage card keeps back: the runner's --reserve-vram, default 1.0 (internal/hostneed's default too). A model-load margin, so the compute card's check does not use it. */
 const DEFAULT_RESERVE_GIB = 1.0;
 
@@ -473,14 +492,24 @@ const DEFAULT_RESERVE_GIB = 1.0;
  * any of them. The film's own size is where the measurements end: the full model there was measured at 12.2 GiB beyond its resident share (the film-size run),
  * and the planner has no figure above it, so it holds 12.2 there. The activations are expected to grow with the tokens, which is why a bigger clip is
  * said to be unsized (geometryNote) and not read as one that needs no more.
+ * `attention` is "sage" under --use-sage-attention (wanAttentionMode), which holds more activations: the straight line through the two sage points (SAGE_POINT_*,
+ * WAN_FILM_ACTIVATIONS_SAGE_GIB) from where it meets the default's cap, held at the film's sage figure above the film's size; anything else is the default curve.
+ * From SAGE_LINE_FROM_TOKENS up the line is at or above the default's cap, so sage is never under the default (a test walks the whole range).
  */
 export function wanActivationsGib(tokens, attention = "default") {
-  return Math.min(WAN_FILM_ACTIVATIONS_GIB, Math.max(ACTIVATIONS_FLOOR_GIB, (tokens / 1000) * ACTIVATIONS_GIB_PER_1000_TOKENS));
+  const base = Math.min(WAN_FILM_ACTIVATIONS_GIB, Math.max(ACTIVATIONS_FLOOR_GIB, (tokens / 1000) * ACTIVATIONS_GIB_PER_1000_TOKENS));
+  if (attention !== "sage" || tokens < SAGE_LINE_FROM_TOKENS) return base;
+  return Math.min(WAN_FILM_ACTIVATIONS_SAGE_GIB, SAGE_POINT_GIB + ((tokens - SAGE_POINT_TOKENS) * (WAN_FILM_ACTIVATIONS_SAGE_GIB - SAGE_POINT_GIB)) / (WAN_FILM_TOKENS - SAGE_POINT_TOKENS));
 }
 
-/** wanAttentionMode: "sage" when COMFY_EXTRA_ARGS carries sage attention, else "default" (the seam: always "default"). */
+/**
+ * wanAttentionMode: "sage" when COMFY_EXTRA_ARGS carries sage attention, else "default". The value is split on whitespace the way ensureComfy splits it for the launch
+ * (comfy-lifecycle.mjs launchFlags), and read token by token with isSageAttentionToken: the exact flag or an argparse prefix of it. Only sage was measured; another
+ * attention flag (flash, split, quad, pytorch) is sized as the default.
+ */
 export function wanAttentionMode(env = process.env) {
-  return "default";
+  const extra = String((env && env.COMFY_EXTRA_ARGS) || "").split(/\s+/).filter(Boolean);
+  return extra.some(isSageAttentionToken) ? "sage" : "default";
 }
 
 /**
@@ -499,6 +528,10 @@ function checkResident(residentGb, pair, flags, attention = "default") {
   const activations = wanActivationsGib(tokens, attention);
   const most = computeGib - activations - WAN_COMPUTE_CONTEXT_GIB;
   if (residentGb > most) {
+    if (attention === "sage") {
+      // the sage clause comes BEFORE "at most", and the default mode's tail is replaced: the measured recipe that keeps 3 is the default attention's, the very share refused here
+      throw placementError(`--wan-resident-gb ${residentGb} leaves the compute card (idx ${pair.compute.index}, ${computeGib.toFixed(1)} GiB) about ${activations.toFixed(1)} GiB for the sampler's activations at ${w}x${h}x${f} (${tokens} tokens) and ${WAN_COMPUTE_CONTEXT_GIB} GiB for the CUDA context, with --use-sage-attention in COMFY_EXTRA_ARGS sizing the activations for sage attention (${WAN_FILM_ACTIVATIONS_SAGE_GIB} GiB at film size, ${WAN_FILM_ACTIVATIONS_GIB} without it): at most ${most.toFixed(1)} GiB of an expert can stay resident there (--wan-resident-gb 0 is the measured setting at film size; or drop the flag)`);
+    }
     throw placementError(`--wan-resident-gb ${residentGb} leaves the compute card (idx ${pair.compute.index}, ${computeGib.toFixed(1)} GiB) about ${activations.toFixed(1)} GiB for the sampler's activations at ${w}x${h}x${f} (${tokens} tokens) and ${WAN_COMPUTE_CONTEXT_GIB} GiB for the CUDA context: at most ${most.toFixed(1)} GiB of an expert can stay resident there (the measured film-size recipe keeps ${WAN_RESIDENT_GB_DEFAULT})`);
   }
   const donor = WAN_EXPERT_GIB - residentGb;
@@ -523,8 +556,10 @@ function checkResident(residentGb, pair, flags, attention = "default") {
 export function geometryNote(flags, attention = "default") {
   const { w, h, f, tokens } = wanGeometry(flags);
   if (tokens <= WAN_FILM_TOKENS) return "";
-  const proportional = (WAN_FILM_ACTIVATIONS_GIB * tokens) / WAN_FILM_TOKENS;
-  return `WAN-GEOMETRY-NOTE: ${w}x${h}x${f} (${tokens} tokens) is bigger than the measured film clip (720x1280x81, ${WAN_FILM_TOKENS} tokens): nothing above it was measured, so the planner holds the sampler's activations at the film's ${WAN_FILM_ACTIVATIONS_GIB} GiB, and in proportion to its tokens they would be about ${proportional.toFixed(1)} GiB; the resident-share check is only as good as that figure. Lower --wan-resident-gb (or use a smaller clip) if the compute card runs short, and pass --wait-sec (the ${MULTICARD_WAIT_SEC} s default is the film's)`;
+  const film = attention === "sage" ? WAN_FILM_ACTIVATIONS_SAGE_GIB : WAN_FILM_ACTIVATIONS_GIB;
+  const proportional = (film * tokens) / WAN_FILM_TOKENS;
+  const sageWord = attention === "sage" ? " (sage attention, --use-sage-attention in COMFY_EXTRA_ARGS)" : "";
+  return `WAN-GEOMETRY-NOTE: ${w}x${h}x${f} (${tokens} tokens) is bigger than the measured film clip (720x1280x81, ${WAN_FILM_TOKENS} tokens): nothing above it was measured, so the planner holds the sampler's activations at the film's ${film} GiB${sageWord}, and in proportion to its tokens they would be about ${proportional.toFixed(1)} GiB; the resident-share check is only as good as that figure. Lower --wan-resident-gb (or use a smaller clip) if the compute card runs short, and pass --wait-sec (the ${MULTICARD_WAIT_SEC} s default is the film's)`;
 }
 
 /** confirmWithLease: --wan-cards (or the image runners' --cards) may name the two cards when no lease does; when a lease holds cards it can only confirm them. */
@@ -573,7 +608,8 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   const launch = launchFn(pair, { comfyDir });
   const plan = { pair, launch, residentGb, attention, env: multicardEnv(env, launch) };
   const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
-  say(`wan-placement: multicard on ${source}: ${line("storage", WAN_STORAGE_DEVICE, pair.storage)}; ${line("compute", WAN_COMPUTE_DEVICE, pair.compute)}; ${residentGb} GiB of each expert resident on the compute card; ${computeChosen(pair)}`);
+  const sageClause = attention === "sage" ? `; sage attention (COMFY_EXTRA_ARGS): activations sized at ${wanActivationsGib(wanGeometry(flags).tokens, attention).toFixed(1)} GiB` : "";
+  say(`wan-placement: multicard on ${source}: ${line("storage", WAN_STORAGE_DEVICE, pair.storage)}; ${line("compute", WAN_COMPUTE_DEVICE, pair.compute)}; ${residentGb} GiB of each expert resident on the compute card; ${computeChosen(pair)}${sageClause}`);
   return plan;
 }
 

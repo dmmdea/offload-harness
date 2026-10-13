@@ -1143,3 +1143,144 @@ test("a mixed pair is verified role by role: the compute card's own model name i
   const r = M.resolveWanCards({ tokens: ["0", "2"], source: "t", cards });
   assert.deepEqual([r.storage.index, r.compute.index], [mixed.storage.index, mixed.compute.index], "the planner's roles for this pair are the ones the checker verifies");
 });
+
+// ---- sage attention (0.185.0) ---------------------------------------------------------------------------------------------------------
+// The film session of 2026-10-12 ran the film clip with --use-sage-attention in COMFY_EXTRA_ARGS: the compute card read 15,482 MiB in use at resident 0 (15.119 GiB)
+// and 15,216 MiB at resident 2 on 720x1280x65 (14.859 GiB, 12.859 beyond the share), 3 GiB more than the default attention's 12.2. The planner knew neither, so a
+// sage call with the default share of 3 (3 + 12.2 + 0.5 = 15.7 of 15.93) was admitted and ran out of memory. Every env below is an EXPLICIT object, so no test
+// reads the host's COMFY_EXTRA_ARGS (a film host exports it).
+const SAGE_ENV = { ...LEASE, COMFY_EXTRA_ARGS: "--use-sage-attention" };
+const FILM = { width: "720", height: "1280", frames: "81" };
+const CLIP65 = { width: "720", height: "1280", frames: "65" };
+// the same table render/comfy-lifecycle.mjs isSageAttentionToken and internal/hostneed's TestTheSageTokenRuleMatchesTheRunner read, row for row
+const SAGE_TOKENS = [
+  ["--use-sage-attention", true], ["--x 1 --use-sage-attention --y", true], ["  --y   --use-sage-attention  ", true],
+  ["--use-sage", true], ["--use-sa", true], ["--use-sag", true],
+  ["--use-s", false], ["--use-", false], ["--use-split-cross-attention", false], ["--use-flash-attention", false],
+  ["--use-pytorch-cross-attention", false], ["--use-sage-attention-extra", false], ["--USE-SAGE-ATTENTION", false],
+  ["use-sage-attention", false], ["--sage-attention", false], ["", false],
+];
+
+test("sage attention in COMFY_EXTRA_ARGS: the film clip keeps at most 0.2 GiB of an expert resident, so the default share of 3 is refused and 0 is admitted", () => {
+  const sage = (flags) => planWith({ ...FILM, ...flags }, { env: SAGE_ENV });
+  assert.throws(() => sage({ "wan-resident-gb": "3" }), /--wan-resident-gb 3 .*720x1280x81 \(75600 tokens\).*sage.*at most 0\.2/);
+  assert.throws(() => sage({}), /--wan-resident-gb 3 .*sage.*at most 0\.2/, "the default share is the measured 3, and it is refused under sage");
+  assert.equal(sage({ "wan-resident-gb": "0" }).residentGb, 0);
+  assert.equal(sage({ "wan-resident-gb": "0.2" }).residentGb, 0.2);
+  assert.throws(() => sage({ "wan-resident-gb": "0.3" }), /--wan-resident-gb 0\.3 .*at most 0\.2/);
+  // the control: the same calls without the flag are the default sizing, where 3 and 3.2 are admitted
+  assert.equal(planWith({ ...FILM, "wan-resident-gb": "3" }).residentGb, 3);
+  assert.equal(planWith({ ...FILM, "wan-resident-gb": "3.2" }).residentGb, 3.2);
+  // the refusal names the mode and the way out, and drops the default-mode tail (the measured recipe that keeps 3 is the pytorch one, the very share refused here)
+  const msg = (() => { try { sage({ "wan-resident-gb": "3" }); } catch (e) { return e.message; } return ""; })();
+  assert.match(msg, /^WAN-PLACEMENT: /);
+  assert.match(msg, /--use-sage-attention in COMFY_EXTRA_ARGS/);
+  assert.match(msg, /--wan-resident-gb 0 is the measured setting at film size/);
+  assert.doesNotMatch(msg, /measured film-size recipe keeps/);
+});
+
+test("sage attention: the measured 65-frame clip admits a 2 GiB share and refuses 3", () => {
+  const sage = (gb) => planWith({ ...CLIP65, "wan-resident-gb": String(gb) }, { env: SAGE_ENV });
+  assert.equal(M.wanGeometry(CLIP65).tokens, 61200);
+  assert.equal(sage(2).residentGb, 2, "the share the film session measured at this clip: a flat 15.2 GiB below the film size would refuse it");
+  assert.throws(() => sage(3), /--wan-resident-gb 3 .*720x1280x65 \(61200 tokens\).*sage.*at most 2\.5/);
+  // the control: the default sizing admits 3 at the same clip (15.93 - 12.2 - 0.5 = 3.2)
+  assert.equal(planWith({ ...CLIP65, "wan-resident-gb": "3" }).residentGb, 3);
+});
+
+test("wanActivationsGib(tokens, 'sage') meets the film session's inequalities, and departs from the default only above the default's cap", () => {
+  const sage = (t) => M.wanActivationsGib(t, "sage");
+  const dflt = (t) => M.wanActivationsGib(t);
+  assert.equal(M.WAN_FILM_ACTIVATIONS_SAGE_GIB, 15.2);
+  // the two measured points: 12.859 GiB beyond the share at 61,200 tokens, 15.119 GiB at the film's 75,600, each rounded up
+  assert.ok(sage(61200) >= 12.86 && sage(61200) <= 13.4, `61200 tokens: ${sage(61200)}`);
+  assert.equal(sage(75600), M.WAN_FILM_ACTIVATIONS_SAGE_GIB);
+  assert.ok(sage(75600) > 12.4 && sage(75600) >= 15.12 && sage(75600) <= 15.4, `75600 tokens: ${sage(75600)}`);
+  assert.equal(sage(200000), sage(75600), "held at the film's figure above the film's size: nothing was measured there");
+  // between the points it rises with the tokens: a flat 15.2 below the film size would refuse the measured 65-frame clip
+  assert.ok(sage(68400) > sage(61200) && sage(68400) < sage(75600), `68400 tokens: ${sage(68400)}`);
+  // below the default's cap sage is the default curve: the benchmark's 6.16 GiB reserved at 20,280 tokens with sage is inside the default's 6.29
+  assert.equal(sage(20280), dflt(20280));
+  assert.ok(sage(20280) >= 6.16);
+  assert.equal(sage(7800), dflt(7800));
+  let previous = 0;
+  for (let t = 0; t <= 140000; t += 400) {
+    assert.ok(sage(t) >= dflt(t), `${t} tokens: sage ${sage(t)} under the default ${dflt(t)}`);
+    assert.ok(sage(t) >= previous, `${t} tokens: ${sage(t)} fell from ${previous}`);
+    if (t <= 56000) assert.equal(sage(t), dflt(t), `${t} tokens: the default's cap (12.2 GiB, from 39,400 tokens) is above the sage line until about 57,000`);
+    previous = sage(t);
+  }
+  assert.ok(sage(57600) > dflt(57600), "and from about 57,000 tokens it departs");
+  // the default call is what it was, and any mode but "sage" is the default
+  assert.equal(M.wanActivationsGib(75600), M.WAN_FILM_ACTIVATIONS_GIB);
+  for (const mode of ["default", "flash", undefined]) assert.equal(M.wanActivationsGib(75600, mode), M.WAN_FILM_ACTIVATIONS_GIB, String(mode));
+});
+
+test("wanAttentionMode reads COMFY_EXTRA_ARGS token by token, and isSageAttentionToken is the one predicate", () => {
+  for (const [extra, sage] of SAGE_TOKENS) assert.equal(M.wanAttentionMode({ COMFY_EXTRA_ARGS: extra }), sage ? "sage" : "default", JSON.stringify(extra));
+  assert.equal(M.wanAttentionMode({}), "default");
+  assert.equal(M.wanAttentionMode({ COMFY_EXTRA_ARGS: undefined }), "default");
+  // the predicate itself: one token (an exact flag or an argparse prefix of 8+ characters, ComfyUI's parser allows abbreviations)
+  for (const [extra, sage] of SAGE_TOKENS) {
+    const tokens = extra.split(/\s+/).filter(Boolean);
+    assert.equal(tokens.some(L.isSageAttentionToken), sage, JSON.stringify(extra));
+  }
+  assert.equal(L.isSageAttentionToken("--use-sage-attention"), true);
+  assert.equal(L.isSageAttentionToken("--use-sa"), true);
+  assert.equal(L.isSageAttentionToken("--use-s"), false, "begins --use-split-cross-attention too");
+});
+
+test("a plan with no sage flag, or another attention flag, is the plan it always was", () => {
+  for (const extra of [undefined, "", "--use-flash-attention", "--use-split-cross-attention", "--use-s", "--use-sage-attention-extra", "--x 1"]) {
+    const said = [];
+    const env = extra === undefined ? { ...LEASE } : { ...LEASE, COMFY_EXTRA_ARGS: extra };
+    const plan = planWith({ ...FILM, "wan-resident-gb": "3" }, { env, say: (l) => said.push(l) });
+    assert.equal(plan.attention, "default", String(extra));
+    assert.equal(plan.residentGb, 3);
+    assert.equal(said.length, 1, String(extra));
+    assert.doesNotMatch(said[0], /sage/i, String(extra));
+  }
+  // the default-mode refusal is byte for byte what it was
+  const expected = "WAN-PLACEMENT: --wan-resident-gb 10 leaves the compute card (idx 0, 15.9 GiB) about 6.3 GiB for the sampler's activations at 832x480x49 (20280 tokens) and 0.5 GiB for the CUDA context: at most 9.1 GiB of an expert can stay resident there (the measured film-size recipe keeps 3)";
+  assert.throws(() => planWith({ "wan-resident-gb": "10" }), (e) => e.message === expected);
+  assert.throws(() => planWith({ "wan-resident-gb": "10" }, { env: { ...LEASE, COMFY_EXTRA_ARGS: "--use-flash-attention" } }), (e) => e.message === expected);
+});
+
+test("geometryNote under sage extrapolates from the sage figure, and the default note is what it was", () => {
+  const big = { width: "1280", height: "1280", frames: "121" };
+  const note = M.geometryNote(big, "sage");
+  assert.match(note, /film's 15\.2 GiB/);
+  assert.match(note, /about 39\.9 GiB/);
+  assert.match(note, /sage/);
+  const plain = M.geometryNote(big);
+  assert.match(plain, /film's 12\.2 GiB/);
+  assert.match(plain, /about 32\.0 GiB/);
+  assert.doesNotMatch(plain, /sage/);
+  assert.equal(M.geometryNote(big, "default"), plain);
+  assert.equal(M.geometryNote(FILM, "sage"), "", "at the film's size there is nothing to say, under sage too");
+  // through the plan, the note comes first and the one summary line after it
+  const said = [];
+  planWith({ ...big, "wan-resident-gb": "0" }, { env: SAGE_ENV, say: (l) => said.push(l) });
+  assert.match(said[0], /^WAN-GEOMETRY-NOTE: .*film's 15\.2 GiB/);
+  assert.equal(said.length, 2);
+});
+
+test("a sage plan names the attention it sized for, once, and carries it", () => {
+  const said = [];
+  const plan = planWith({ ...FILM, "wan-resident-gb": "0" }, { env: SAGE_ENV, say: (l) => said.push(l) });
+  assert.equal(plan.attention, "sage");
+  assert.equal(said.length, 1);
+  assert.match(said[0], /^wan-placement: multicard on the GPU lease: storage cuda:0 = idx 2 .*; compute cuda:1 = idx 0 .*; 0 GiB of each expert resident on the compute card; compute card chosen: /);
+  assert.match(said[0], /; sage attention \(COMFY_EXTRA_ARGS\): activations sized at 15\.2 GiB$/);
+  // the control: without the flag the same call has no such clause
+  const plain = [];
+  planWith({ ...FILM, "wan-resident-gb": "0" }, { say: (l) => plain.push(l) });
+  assert.doesNotMatch(plain[0], /sage/);
+});
+
+// A guard, green before and after: under sage the film clip with no resident share fits the storage card the film session measured (14,182 MiB = 13.85 GiB
+// in use inside the 13.4 + 0.8 the placement assumes), so the storage constants stand.
+test("sage attention at film size with no resident share fits the storage card the film session measured", () => {
+  assert.equal(planWith({ ...FILM, "wan-resident-gb": "0" }, { env: SAGE_ENV }).residentGb, 0);
+  assert.ok(14182 / 1024 <= M.WAN_EXPERT_GIB + M.WAN_STORAGE_OVERHEAD_GIB, "13.85 GiB measured on the storage card, 14.2 assumed");
+});

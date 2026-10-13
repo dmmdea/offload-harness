@@ -281,9 +281,16 @@ export function resolveLaunchProfile(env = process.env) {
 
 const profileRequested = (p) => !!(p && (p.cudaDevice || p.dynamicVram || p.cardUuid || p.multicard));
 
-/** isSageAttentionToken: is this one launch-argument token sage attention? (the seam: it never is yet) */
+/**
+ * isSageAttentionToken: is this one launch-argument token sage attention? The exact flag, or an argparse prefix of it: ComfyUI's parser (argparse, abbreviations
+ * allowed, `--use-sage-attention` one of a mutually exclusive attention group) accepts `--use-sa` as the flag, and /system_stats reports the argv as it was
+ * typed. A prefix shorter than 8 characters begins other attention flags too (`--use-s` is also --use-split-cross-attention) and is not this one; a longer
+ * token (`--use-sage-attention-extra`) is no prefix at all. The one predicate for the Wan sizing (wan-multicard.mjs wanAttentionMode), the reuse check of a
+ * running ComfyUI (profileMismatch) and, as the same table, internal/hostneed's sageAttention; ComfyUI's parser is case-sensitive, so is this.
+ */
 export function isSageAttentionToken(tok) {
-  return false;
+  const t = String(tok);
+  return t.length >= 8 && "--use-sage-attention".startsWith(t);
 }
 
 /** Remove every `flag value` pair (and a `flag=value` form) from an argv list. */

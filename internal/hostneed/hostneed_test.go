@@ -835,6 +835,127 @@ func wanRunnerConstFrom(t *testing.T, src []byte, name string) float64 {
 	return v
 }
 
+// ---- sage attention (--use-sage-attention in COMFY_EXTRA_ARGS) --------------------------------------------------------------
+//
+// The film session of 2026-10-12 ran the film clip with sage attention on a 16 GB card: 15,482 MiB in use at resident 0, 3.0 GiB more than the default
+// attention's 12.2 GiB beyond the resident share. Neither the runner nor this sizing knew the attention mode, so a sage call with the default share of 3
+// (3 + 12.2 + 0.5 = 15.7 of 15.9) was admitted by both and ran out of memory. COMFY_EXTRA_ARGS is read from the environment on both sides.
+
+// extraArgsEnv is a Facts.Env that carries COMFY_EXTRA_ARGS and nothing else, so no test here reads the host's environment.
+func extraArgsEnv(extra string) func(string) string {
+	return func(k string) string {
+		if k == "COMFY_EXTRA_ARGS" {
+			return extra
+		}
+		return ""
+	}
+}
+
+func TestASageAttentionWanCallIsSizedForSageActivations(t *testing.T) {
+	sage := wanFacts(t, 15.9, 15.9)
+	sage.Env = extraArgsEnv("--use-sage-attention")
+	// the compute card holds the share + 15.2 GiB of sage activations + 0.5 GiB of context: 0.2 GiB of an expert at most on a 15.9 GiB card
+	for _, share := range []string{"0", "0.2"} {
+		n := wanNeed(t, wanMulticardCmd+" --wan-resident-gb "+share, sage)
+		if n.GiB != 0 || n.Source != SourceEstimate || !strings.Contains(n.Detail, "card-only") || !strings.Contains(n.Detail, "sage attention") {
+			t.Errorf("--wan-resident-gb %s under sage attention: %v, want the card-only 0 that says it was sized for sage attention", share, n)
+		}
+	}
+	// the default share, and every share above the ceiling, is the ordinary set, and the detail says why and how to state the real figure
+	for _, args := range []string{"", " --wan-resident-gb 3", " --wan-resident-gb 0.3", " --wan-resident-gb 2"} {
+		n := wanNeed(t, wanMulticardCmd+args, sage)
+		if !near(n.GiB, 13.3+13.4+6.3) || !strings.Contains(n.Detail, "does not fit") {
+			t.Errorf("%q under sage attention: %v, want the ordinary 33.0 that does not fit (3 + 15.2 + 0.5 = 18.7 > 15.9)", args, n)
+		}
+		for _, want := range []string{"--use-sage-attention", "COMFY_EXTRA_ARGS", "15.2 GiB", "--ram 0"} {
+			if !strings.Contains(n.Detail, want) {
+				t.Errorf("%q under sage attention: the detail must say how to state the real figure (%q missing): %q", args, want, n.Detail)
+			}
+		}
+	}
+	// the controls: the same calls with no extra args, another attention flag, or an unrelated one, are the default sizing, where the default share declares 0
+	for name, env := range map[string]func(string) string{
+		"no environment": nil, "empty": extraArgsEnv(""), "flash attention": extraArgsEnv("--use-flash-attention"),
+		"unrelated": extraArgsEnv("--x 1 --y"), "a longer flag": extraArgsEnv("--use-sage-attention-extra"),
+	} {
+		f := wanFacts(t, 15.9, 15.9)
+		f.Env = env
+		n := wanNeed(t, wanMulticardCmd, f)
+		if n.GiB != 0 || strings.Contains(n.Detail, "sage") {
+			t.Errorf("%s: %v, want the default sizing (the default share declares 0) with no word about sage", name, n)
+		}
+	}
+	// the sizing reads no geometry: a measured partial share at a smaller clip is the ordinary set here unless --ram 0 states the figure (documented)
+	if n := wanNeed(t, wanMulticardCmd+" --wan-resident-gb 2 --width 720 --height 1280 --frames 65", sage); !near(n.GiB, 13.3+13.4+6.3) {
+		t.Errorf("a sage call at a smaller clip is still sized for the film's 15.2 GiB: %v, want the ordinary 33.0", n)
+	}
+}
+
+// The sage figure is the runner's: render/wan-multicard.mjs WAN_FILM_ACTIVATIONS_SAGE_GIB, and a different number on either side would make the lease
+// declare for a call the runner then refuses, or run one it sized against other figures.
+func TestTheSageActivationsMirrorTheRunner(t *testing.T) {
+	if got := wanRunnerConst(t, "WAN_FILM_ACTIVATIONS_SAGE_GIB"); got != wanActivationsSageGiB {
+		t.Fatalf("the runner sizes the film's activations under sage attention at %v GiB, this package at %v", got, wanActivationsSageGiB)
+	}
+}
+
+// The two sides agree where it matters: the ceiling the runner's planner draws from ITS sage constants is the one this sizing draws from its own.
+func TestTheSageComputeCardCeilingIsTheRunnersCeiling(t *testing.T) {
+	activations := wanRunnerConst(t, "WAN_FILM_ACTIVATIONS_SAGE_GIB")
+	contextGiB := wanRunnerConst(t, "WAN_COMPUTE_CONTEXT_GIB")
+	const card = 15.9
+	ceiling := math.Round((card-activations-contextGiB)*10) / 10
+	if ceiling < 0 {
+		t.Fatalf("the runner's constants leave no room for a resident share on a %v GiB card: %v + %v", card, activations, contextGiB)
+	}
+	f := wanFacts(t, card, card)
+	f.Env = extraArgsEnv("--use-sage-attention")
+	at := wanNeed(t, wanMulticardCmd+" --wan-resident-gb "+strconv.FormatFloat(ceiling, 'f', 1, 64), f)
+	above := wanNeed(t, wanMulticardCmd+" --wan-resident-gb "+strconv.FormatFloat(ceiling+0.1, 'f', 1, 64), f)
+	if at.GiB != 0 {
+		t.Errorf("the runner admits a %.1f GiB share at film size under sage on a %v GiB card (%v + %v), this sizing must declare 0 for it: %v", ceiling, card, activations, contextGiB, at)
+	}
+	if above.GiB == 0 {
+		t.Errorf("the runner refuses a %.1f GiB share at film size under sage on a %v GiB card, this sizing must not declare 0 for it: %v", ceiling+0.1, card, above)
+	}
+}
+
+// The token rule is the runner's (render/comfy-lifecycle.mjs isSageAttentionToken, and wanAttentionMode over a COMFY_EXTRA_ARGS value): this table is the
+// one render/wan-multicard.test.mjs checks, token by token, so the two languages cannot read one value two ways. ComfyUI's parser accepts an unambiguous
+// prefix of a flag (argparse allow_abbrev), so `--use-sa` IS sage attention and a missed prefix would size the call for the default; `--use-s` begins
+// --use-split-cross-attention too and is not.
+func TestTheSageTokenRuleMatchesTheRunner(t *testing.T) {
+	for _, tc := range []struct {
+		extra string
+		sage  bool
+	}{
+		{"--use-sage-attention", true},
+		{"--x 1 --use-sage-attention --y", true},
+		{"  --y   --use-sage-attention  ", true},
+		{"--use-sage", true},
+		{"--use-sa", true},
+		{"--use-sag", true},
+		{"--use-s", false},
+		{"--use-", false},
+		{"--use-split-cross-attention", false},
+		{"--use-flash-attention", false},
+		{"--use-pytorch-cross-attention", false},
+		{"--use-sage-attention-extra", false},
+		{"--USE-SAGE-ATTENTION", false},
+		{"use-sage-attention", false},
+		{"--sage-attention", false},
+		{"", false},
+	} {
+		f := wanFacts(t, 15.9, 15.9)
+		f.Env = extraArgsEnv(tc.extra)
+		// the default share declares 0 under the default attention and the ordinary set under sage, so the outcome shows which mode the value read as
+		n := wanNeed(t, wanMulticardCmd, f)
+		if got := n.GiB != 0; got != tc.sage {
+			t.Errorf("COMFY_EXTRA_ARGS=%q: read as sage = %v, want %v (%v)", tc.extra, got, tc.sage, n)
+		}
+	}
+}
+
 func TestLeasedCardsGiB(t *testing.T) {
 	cards := []gpuprobe.Card{
 		{UUID: "GPU-aaaa0000", VRAMTotalGiB: 16},

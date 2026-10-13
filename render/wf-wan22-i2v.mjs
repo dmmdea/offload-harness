@@ -67,7 +67,8 @@ export const WAN_PLACEMENTS = Object.freeze(["single", "multicard"]);
 export const WAN_PLACEMENT_DEFAULT = "single";
 // GiB of each expert that stays on the compute card in the multicard placement: the measured split on two 16 GB cards at the
 // film's geometry (compute card 15.18 GiB, storage card 10.86 GiB at the peak of the film-size run). More resident weight is faster and
-// leaves the activations less room (12.2 GiB beyond the resident share at 720x1280x81), so it is a per-card figure and a flag
+// leaves the activations less room (12.2 GiB beyond the resident share at 720x1280x81; 15.2 GiB with --use-sage-attention in COMFY_EXTRA_ARGS,
+// where the default share of 3 no longer fits a 15.9 GiB card and --wan-resident-gb 0 is the measured setting), so it is a per-card figure and a flag
 // (--wan-resident-gb), not a law.
 export const WAN_RESIDENT_GB_DEFAULT = 3;
 // ComfyUI numbers the two cards in the order of CUDA_VISIBLE_DEVICES, which the runner sets storage first.

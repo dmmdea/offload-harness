@@ -137,8 +137,19 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 	return Need{}, false
 }
 
-// sageAttention reports whether a COMFY_EXTRA_ARGS value carries sage attention (the seam: it never does yet).
+// sageAttentionFlag is the attention flag the film session of 2026-10-12 measured (ComfyUI's --use-sage-attention).
+const sageAttentionFlag = "--use-sage-attention"
+
+// sageAttention reports whether a COMFY_EXTRA_ARGS value carries sage attention, token by token, by the rule render/comfy-lifecycle.mjs isSageAttentionToken has (a
+// test reads the same table in both languages): the exact flag, or an argparse prefix of it of at least 8 characters (ComfyUI's parser accepts an unambiguous
+// abbreviation, `--use-sa`; `--use-s` also begins --use-split-cross-attention and is not this flag; a longer token is no prefix). Another attention flag is the
+// default attention: only sage was measured.
 func sageAttention(extra string) bool {
+	for _, tok := range strings.Fields(extra) {
+		if len(tok) >= 8 && strings.HasPrefix(sageAttentionFlag, tok) {
+			return true
+		}
+	}
 	return false
 }
 
