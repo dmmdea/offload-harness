@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.185.0] - 2026-10-13 - the display card's cap is read live on its row and audit-yaml names the seats it cannot judge, the card-only placements compute on the faster of two same-size cards, the Wan sizing knows sage attention, and results[].node is the node id placement used
+
 ### Changed — the card-only placements choose the compute card by board power when two cards are one size, and `WAN_COMPUTE_UUID` names it
 
 The Wan card-only placement (`--wan-placement multicard`) and the image and edit card-only placements (`--placement multicard`) picked the compute
