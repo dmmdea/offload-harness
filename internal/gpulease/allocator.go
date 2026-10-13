@@ -279,17 +279,41 @@ func (in AllocInput) floorApplies(c gpuprobe.Card) bool {
 // the card past the cap, (100 - cap) percent of its total, or the display layer's declared absolute floor,
 // whichever is larger. ok is false when the cap needs a total the reading did not give.
 func (in AllocInput) displayFloorGiB(c gpuprobe.Card) (floor float64, ok bool) {
-	floor = in.DisplayFloorGiB
-	if in.DisplayCapPct >= 100 {
+	return DisplayFloorGiB(c.VRAMTotalGiB, in.DisplayCapPct, in.DisplayFloorGiB)
+}
+
+// DisplayFloorGiB is the allocator's display-card floor as a pure function of the card's total, the cap and the
+// display layer's declared absolute floor: the rest of the card past the cap, (100 - cap) percent of the total,
+// or the declared floor, whichever is larger. A cap of 100 or more leaves only the declared floor, and needs no
+// total. ok is false when the cap needs a total the reading did not give. The surfaces that REPORT the cap (the
+// card table's display_cap row, audit-yaml's display-cap-unseen note) read this same arithmetic, so none can
+// disagree with the rule a job is admitted by.
+func DisplayFloorGiB(totalGiB float64, capPct int, declaredFloorGiB float64) (floor float64, ok bool) {
+	floor = declaredFloorGiB
+	if capPct >= 100 {
 		return floor, true
 	}
-	if c.VRAMTotalGiB <= 0 {
+	if totalGiB <= 0 {
 		return 0, false
 	}
-	if rest := c.VRAMTotalGiB * float64(100-in.DisplayCapPct) / 100; rest > floor {
+	if rest := totalGiB * float64(100-capPct) / 100; rest > floor {
 		floor = rest
 	}
 	return floor, true
+}
+
+// DisplayBudgetGiB is what the cap leaves a job of the display card, the desktop's own use included in what is
+// already taken: the total less DisplayFloorGiB, never below zero. ok is false when there is no total to take it
+// from, or when the floor has no answer.
+func DisplayBudgetGiB(totalGiB float64, capPct int, declaredFloorGiB float64) (budget float64, ok bool) {
+	floor, ok := DisplayFloorGiB(totalGiB, capPct, declaredFloorGiB)
+	if !ok || totalGiB <= 0 {
+		return 0, false
+	}
+	if budget = totalGiB - floor; budget < 0 {
+		budget = 0
+	}
+	return budget, true
 }
 
 // fitsCard is fits plus the display card's cap. The VRAM in use now (the desktop's included) plus the footprint

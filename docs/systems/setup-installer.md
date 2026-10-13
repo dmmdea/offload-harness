@@ -553,6 +553,33 @@ device. The stamp records the render's paths, not its cards, so a file that belo
 machine would fail on its own UUIDs: pass `--other-box` (before the files) to skip the pin rules
 for it. A note line says they were skipped, and every other rule still runs.
 
+**The display card's cap is not judged from a yaml: `display-cap-unseen`.** `gpu_display_cap_pct`
+bounds how much of the display card a job may take, and the card allocator enforces it for the jobs
+it places. A model llama-swap loads onto that card is not one of them, and the yaml states no VRAM
+footprint (a llama.cpp seat's weights, KV and compute buffers are not in it; a `proxy:` seat's
+cards are set in the engine's own launcher), so `audit-yaml` cannot say an entry is over the cap and
+does not guess. On a box whose driver flags a display card (`display_active` or `display_attached`,
+by UUID, so a monitor moved to another card is followed; a single-card or headless box flags none and
+the audit is silent, a single-card one even on a reading that could not say which card the monitor
+is on) it prints ONE `note:` per file: `display-cap-unseen (card N): ...`. The note
+names the entries the audit cannot place off that card (a `proxy:` seat, an entry with no
+`CUDA_VISIBLE_DEVICES` pin, an entry pinned onto it by UUID or by index under
+`CUDA_DEVICE_ORDER=PCI_BUS_ID`, and a plain index with no PCI order, which it names as unmappable and
+never guesses), at most six names per group. It names the display card (index and UUID tail of that
+reading), the default cap and the budget in GiB the allocator's arithmetic gives
+(`gpulease.DisplayBudgetGiB`), says that nothing is judged and that entries which can run together
+(`matrix:`) are not summed, and points to the display cap row of `gpu status`, which reads the card
+itself. It is never a violation, never changes the exit status, and reads no config (the cap it
+states is the default, and says so). It uses the card table the pin rules already read, once per
+file; the table is now read for a file with a `proxy:` seat as well as for one that pins a device,
+and a file with neither still never runs `nvidia-smi` (so a file of unpinned entries alone gets no note: an unpinned entry is named only in a file that also pins a device or has a `proxy:` seat). `--other-box` skips it with the same note line
+that skips the pin rules, and a missing card table says so for it as for them.
+*Deferred, with the reason:* a footprint-based verdict (a declared layer footprint, a vLLM
+`gpu_memory_utilization` times the card, a seat-env reader) and a `doctor` row. There is no
+placement-neutral footprint source: declaring the opencode-only 3-card seat as a layer would expose it
+to placement, `kv_cache_memory_bytes` voids the utilization figure, and a live yaml with no stamp would
+turn the session-start audit red.
+
 #### The config half: `audit-config`
 
 `audit-yaml` audits the serving YAML. It never looked at `config.json`, and that is where the

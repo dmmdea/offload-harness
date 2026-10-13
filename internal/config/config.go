@@ -1384,7 +1384,9 @@ type Config struct {
 	// is not given the card, except at 100 with no display_floor_gib declared: that is the whole card, nothing is held
 	// back to hold a footprint to, and a job that declares none (every media call) is given it with no VRAM check on
 	// that card, as on any other. The llama-swap twin guards
-	// (display_floor, presence on the display layer) are separate and unchanged.
+	// (display_floor, presence on the display layer) are separate and unchanged. The display card's row of the card table
+	// (`gpu status`, `gpu cards`, the offload_status brief) reports the VRAM in use against this share live, whoever's memory it is, and
+	// audit-yaml's display-cap-unseen note names the llama-swap entries it cannot judge against it.
 	GPUDisplayCapPct *int `json:"gpu_display_cap_pct,omitempty"`
 	// sourcePath is the file this Config was read from ("" = none: the defaults, or a Config built by hand). It is
 	// not a setting. A running process never reloads its config, so the one key the operator's "I need the card"

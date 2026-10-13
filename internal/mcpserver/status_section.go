@@ -212,6 +212,7 @@ func gpuCardsSection(cfg config.Config, act gpuactivity.View) map[string]any {
 			Index: g.Index, UUID: g.UUID, Name: g.Name,
 			TotalGiB: float64(g.MemTotalMiB) / 1024, FreeGiB: float64(g.MemTotalMiB-g.MemUsedMiB) / 1024,
 			UtilPct: g.UtilPct, UtilKnown: g.UtilKnown, DisplayActive: g.DisplayActive, DisplayAttached: g.DisplayAttached,
+			AttachedUnknown: g.AttachedUnknown,
 		})
 	}
 	cards, note := gpuprobe.BuildCards(devs, cfg.GPUComfyOrder)
@@ -229,7 +230,7 @@ func gpuCardsSection(cfg config.Config, act gpuactivity.View) map[string]any {
 		_ = m.ApplyCardScopedConfig(cfg.GPUCardScopedLeases)
 		leases, waiters, scoped = modelaffinity.ScopeLeases(m.Dir(), m.Leases()), m.Waiters(), m.CardScoped()
 	}
-	sec := gpucards.Section(cards, note, leases, waiters)
+	sec := gpucards.Section(cards, note, leases, waiters, cfg.LiveGPUDisplayCap(), cfg.DisplayFloorGiB())
 	sec["card_scoped_leases"] = scoped
 	return sec
 }

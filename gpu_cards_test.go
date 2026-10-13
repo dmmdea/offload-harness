@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpucards"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
@@ -44,7 +45,7 @@ func TestStatusJSONHasPerCardRows(t *testing.T) {
 	}
 	defer func() { _ = l.Release() }()
 
-	sec := statusLeaseSection(m, statusCards(), "", m.Waiters())
+	sec := statusLeaseSection(m, config.Config{}, statusCards(), "", m.Waiters())
 	b, err := json.Marshal(sec)
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +96,7 @@ func TestStatusWholeNodeLeaseShowsOnEveryCardRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = l.Release() }()
-	rows := gpucards.Rows(statusCards(), m.Leases())
+	rows := gpucards.RowsWithCap(statusCards(), m.Leases(), 60, 0)
 	if len(rows) != 3 {
 		t.Fatalf("rows: %d", len(rows))
 	}
@@ -135,7 +136,7 @@ func TestStatusQueueEntriesShowTheirDeviceSet(t *testing.T) {
 }
 
 func TestRenderCardTableContainsTheFacts(t *testing.T) {
-	rows := gpucards.Rows(statusCards(), nil)
+	rows := gpucards.RowsWithCap(statusCards(), nil, 60, 0)
 	text := strings.Join(gpucards.Table(rows), "\n")
 	for _, want := range []string{"GPU-aaaa0000-x", "GPU-bbbb0000-x", "display", "free", "15.0/16.0", "Test Card A"} {
 		if !strings.Contains(text, want) {
@@ -146,7 +147,7 @@ func TestRenderCardTableContainsTheFacts(t *testing.T) {
 	unknown, _ := gpuprobe.BuildCards([]gpuprobe.Device{
 		{Index: 0, UUID: "GPU-x1", Name: "A", TotalGiB: 16, FreeGiB: 16, UtilKnown: true}, {Index: 1, UUID: "GPU-x2", Name: "A", TotalGiB: 16, FreeGiB: 16, UtilKnown: true},
 	}, "")
-	if text := strings.Join(gpucards.Table(gpucards.Rows(unknown, nil)), "\n"); !strings.Contains(text, "?") {
+	if text := strings.Join(gpucards.Table(gpucards.RowsWithCap(unknown, nil, 60, 0)), "\n"); !strings.Contains(text, "?") {
 		t.Errorf("an unknown ComfyUI order must read ?:\n%s", text)
 	}
 }
