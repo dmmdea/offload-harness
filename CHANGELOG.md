@@ -83,8 +83,8 @@ written first and seen red. A second look at the same fixes follows the six (the
   - *A guard that was not watching said so only on `offload_status`.* `agent_delegate` and `offload_research`, the doors the guard
     exists for, answered with no note, which reads as a fresh server. Both now carry the top-level `stale_binary_guard` string
     (`inactive: ...`, or `unreadable: ...` while the stamp cannot be read), read after the note's own read of the stamp, and no
-    key while the guard watches. `internal/mcpserver/stale_guard_doors_test.go` (four of five failed first; the fifth is the
-    control that a watching guard adds nothing).
+    key while the guard watches. `internal/mcpserver/stale_guard_doors_test.go` (three tests, each run on both doors: two failed
+    first on both doors, and the third is the control that a watching guard adds nothing).
   - *A start-up capture without a stamp re-opened the window the capture closes, silently.* The self-hash set the capture's path
     before it opened the file and took the stamp only through the open handle, so a refused open (the antivirus lock its own log
     line cites) left a path and no size, and the guard fell back to reading its file as of `mcpserver.New`: a deploy landing in
