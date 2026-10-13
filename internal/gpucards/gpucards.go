@@ -53,6 +53,7 @@ type Row struct {
 // covers memory the allocator never placed (a seat llama-swap loaded onto the card). It cannot say whose memory it
 // is. The two states that are not a verdict say why: Closed (the cap is 0, the operator's "I need the card"
 // switch) and Unknown (a reading that could not say which card the monitor is on, or a card with no total).
+// OverByGiB is present exactly when the card is over, to four decimals of a GiB and never rounded to nothing.
 type DisplayCap struct {
 	CapPct    int     `json:"cap_pct"`
 	BudgetGiB float64 `json:"budget_gb"`
@@ -98,6 +99,14 @@ const (
 // (gpulease's capEpsilonGiB): a card that sits exactly on its budget is within it.
 const capEpsilonGiB = 1e-6
 
+// minOverByGiB is the resolution of over_by_gb (four decimals of a GiB). The verdict is made on the unrounded values,
+// as the allocator makes it, and nvidia-smi reads whole MiB, so a card a few MiB past its budget is a real reading;
+// the amount is never rounded down to nothing for a card that is over.
+const minOverByGiB = 1e-4
+
+// smallOverGiB is where the text line stops printing the excess in tenths of a GiB: "OVER by 0.0 GiB" is never printed.
+const smallOverGiB = 0.05
+
 // displayCapOf is the cap verdict of one row, or nil for a row it says nothing about. A row of a reading that
 // could not say which card the monitor is on gets the unknown, whatever display_active says: the allocator closes
 // such a card before it asks the cap, and so does this. A card that is not the display card has no cap.
@@ -126,12 +135,14 @@ func displayCapOf(r Row, capPct int, floorGiB float64) *DisplayCap {
 	}
 	d.BudgetGiB = round2(budget)
 	if used > budget+capEpsilonGiB {
-		d.OverCap, d.OverByGiB = true, round2(used-budget)
+		d.OverCap, d.OverByGiB = true, math.Max(round4(used-budget), minOverByGiB)
 	}
 	return d
 }
 
 func round2(x float64) float64 { return math.Round(x*100) / 100 }
+
+func round4(x float64) float64 { return math.Round(x*10000) / 10000 }
 
 // holderOf finds the lease holding a card: a card-scoped lease that names it wins; a
 // whole-node lease holds it otherwise.
@@ -315,6 +326,9 @@ func capLine(r Row) string {
 	verdict := "within"
 	if d.OverCap {
 		verdict = fmt.Sprintf("OVER by %.1f GiB", d.OverByGiB)
+		if d.OverByGiB < smallOverGiB {
+			verdict = "OVER by less than 0.1 GiB"
+		}
 	}
 	return indent + fmt.Sprintf("%.1f of %.1f GiB in use (%.0f%%); gpu_display_cap_pct %d (with any declared display floor) allows %.1f GiB: %s (the desktop and every process are counted; this line cannot say whose memory it is)",
 		d.UsedGiB, r.VRAMTotalGiB, d.UsedPct, d.CapPct, d.BudgetGiB, verdict)
