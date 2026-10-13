@@ -398,6 +398,24 @@ test("WAN_COMPUTE_UUID names the compute card of the image placement too, refuse
   assert.equal(plan().pair.note, "", "(the control: nothing ignored, no note)");
 });
 
+test("the override is judged like any other choice: the recipe's resident and peak checks run on the card it names, not on the larger one", () => {
+  // 24 GiB beside 16 GiB: unnamed, the larger card (idx 0) computes. The GGUF recipe holds 4.9 GiB on the compute card at its 3 GiB share (+1 GiB per GiB of share)
+  // and 12.6 GiB on the storage card (which a larger share does not lower), against the 1 GiB --reserve-vram.
+  const unequal = W.parseCardTable([`0, ${U0}, Test GPU Big, 24576, 24000, Disabled, No`, `2, ${U2}, Test GPU Small, 16384, 16000, Disabled, No`].join("\n"));
+  const naming = { ...LEASE, WAN_COMPUTE_UUID: "2" };
+  const share = (gb) => ({ cards: () => unequal, flags: { placement: "multicard", "resident-gb": String(gb) } });
+  // the controls: the same two shares, unnamed, fit the 24 GiB card that computes
+  for (const gb of [14, 13.5]) assert.equal(plan(share(gb)).pair.compute.index, 0, `${gb} GiB resident, unnamed`);
+  // 14 GiB resident is over what the 16 GiB card holds beside the recipe's 1.6 GiB of activations and the 0.5 GiB context (13.9): the resident check refuses it ON IDX 2
+  assert.throws(() => plan({ ...share(14), env: naming }), /--resident-gb 14 leaves the compute card \(idx 2, 16\.0 GiB\).*1\.6 GiB for the sampler's activations.*at most 13\.9 GiB/s);
+  // 13.5 GiB passes that check but is a 15.4 GiB peak on the compute card against 15.0 usable: the peak check refuses it ON IDX 2
+  assert.throws(() => plan({ ...share(13.5), env: naming }), /needs the compute card \(idx 2, Test GPU Small\) to hold 15\.4 GiB, and it has 16\.0 GiB \(15\.0 GiB usable after --reserve-vram 1\)/);
+  // the positive control: a share the named card holds is planned, and the named card computes
+  const held = plan({ ...share(12), env: naming });
+  assert.deepEqual([held.pair.storage.index, held.pair.compute.index], [0, 2]);
+  assert.equal(held.pair.why, "named by WAN_COMPUTE_UUID");
+});
+
 test("the image placement's one line ends with the rule that chose the compute card, and the note of an ignored override", () => {
   const lines = [];
   plan({ cards: () => RANKED, say: (l) => lines.push(l) });
