@@ -77,6 +77,23 @@ Three limits keep a weak model from burning the budget on nothing:
   hunting through tools. A `max_calls_per_tool` env rule on `read_file` is a separate, explicit cap
   and still counts every call.
 
+**The forced final step is re-asked once when the seat answers it with a tool call (0.184.0).** The last step of a multi-step
+run (D-89) offers no tools and opens with the answer-now turn. One seat family answers it with a tool call written as text
+(`<tool_call><function=...>`, since no parser runs on a request without tools) or parsed into a call: 35 of the 106 runs of that
+family that reached a forced final, against none of 241 on every other seat, with 30 of the 35 holding more than half their wall
+and the evidence they needed already in the transcript. The run used to end there on `budget` with the text thrown away. The
+loop now asks again, once (`finalReasked`), when the wall holds one more turn (`wallHoldsAnotherFinal`: the seat's list-cap floor
+where one is known and always the wall of the final call just made plus a quarter, so a contract without an output_schema, or a
+seat with no known rate, is gated too; the list-cap re-issue's own gate fails open there), with a request that differs from the first because the decode of this step is greedy and an identical request
+repeats itself: the offending text (or the tool name and arguments) is quoted back in a new user turn, the seat is told that
+nothing it writes as a call will run and to begin with the answer in the requested shape, and the offending turn stays out of the
+transcript. The re-ask spends no step, runs at the same budget with thinking off, and both completions are in `calls[]` as forced
+finals. A seat that answers it with a tool call again ends the run on `budget` as before, with both replies quoted in `stop_note`;
+an answer is `done` with `stop_note` saying the seat first wrote a tool call and was re-asked once. The rigger files the
+failed shape as `final-tool-call`, not `budget` ("split it"), and the delegator gives the contract to another seat once,
+placed like a seat-down retry (`delegate.producedNothingDefer`): it is not held in line for a busy retry seat and not refused
+for the failed seat's `min_turn_sec`, because the run produced nothing and a skipped retry is a lost job.
+
 The ordering here is load-bearing and documented in the code: the name cap must be checked before the
 exact-repeat check, or a model stuck on an identical call matches the repeat branch forever and never
 reaches the branch that disables the tool.
@@ -221,7 +238,13 @@ deterministic classifier over the delegation-log corpus: every failed or deferre
 failure axis, evaluated in a published precedence order and stopping at the first hit — `seat-infra` (a defer class of
 infrastructure/config/contract, or a placement failure with no defer class) → `call-deadline` (a reason that opens
 `call deadline reached`: the whole-call deadline of ADR 0065 cut the subtask, so it says nothing about the seat's speed) →
-`timeout` → `budget` → `abstention` (an
+`capacity` (a defer class of capacity, or a dispatch a node answered with 503/429 "queue full" in a row written before
+delegators marked refusals: the fleet was busy, which is neither a wall nor a seat, and its remedy names
+`agent_call_deadline_sec` / `agent_placement_wait_sec`, never `timeout_sec`, which does not bound that wait; it sits
+ahead of `timeout` because every wait bounded by the call words itself with the bare word "deadline") →
+`timeout` → `reasoning-starved` → `final-tool-call` (the forced final step was answered with a tool call, again after one
+re-ask: the reason carries `core.ForcedFinalToolCallReason`; ahead of `budget`, whose stop_reason and prefix it shares, so its
+remedy does not tell the reader to split a contract that had read everything it needed) → `budget` → `abstention` (an
 "output failed schema" reason is `schema-miss / invalid`) → `schema-miss` (min_items/nonempty; sub-axes
 `two-step-grounded` = context docs and ≤ 2 steps, `invalid`) → `anchor-miss` (contains/not_contains/regex; same sub-axis) →
 `loop` → `long-observation` → `tool-misuse` (the last three on trace-bearing rows only) → `unclassified`. The report gives
@@ -229,6 +252,9 @@ per axis the hits over the rows ELIGIBLE for it (trace axes count only rows with
 the deciding fact, the most repeated reason for seat-infra/timeout/unclassified, and the pre-authored remedy where the
 closed vocabulary has a lever (`agent_seed_context_reads`, `agent_env_rules.max_observation_tokens` /
 `max_calls_per_tool` / `rewrite_error`, with the value derivation in words) or "not a rule matter" where it has none.
+A row a delegator marked `refusal` (a node's capacity refusal at dispatch, which the capacity wait outlasts and the
+subtask is re-placed from) is no failure: it is not a bad row, it is on no axis, and the report counts it on its own
+`refusals` line outside `rows`, so a fan-out that met a full node reads as the place in line it was.
 `--verdicts` writes every row's verdict for an agreement check. It proposes nothing on its own and applies nothing. Why a
 classifier first: the design council read the day's corpus (1,187 rows, 649 bad) — ~70 % were wall timeouts and seat
 errors no rule shapes, only 16 rows carried a trace, and a digest-8 gate cannot fail for axes it never exercises. P3b (a

@@ -257,6 +257,12 @@ type PlacedResult struct {
 	// a delegator bug rather than any node's answer.
 	refused       bool
 	refusalStatus int
+	// refusalRow marks the result of an attempt whose corpus row was written as a REFUSAL (the node answered the
+	// dispatch with a capacity refusal, 503 or 429): the row records a place in line, not the subtask's outcome,
+	// and the delegation log says so (delegationLogLine.Refusal). Set by attempt's finish, on the attempt's own
+	// result only; every row the engine writes for an outcome (settle, exhaustedSettled) clears it, because those
+	// copy a refused attempt's result and are the terminal record that refusal is not.
+	refusalRow bool
 	// retryAfterSec is the node's own Retry-After (seconds) on a 503 dispatch
 	// refusal, 0 when it sent none. It is a HINT about when the node expects a
 	// worker to free, never a promise, and it is NEVER slept on inside
@@ -1527,10 +1533,15 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// floor is seat-aware through config (agent_retry_min_sec, D-46): a cold
 	// load plus one turn at max_tokens on the retry seat, never the bare 10 s
 	// that let a 296 s retry burn a thinking seat for nothing.
-	// First pass, BEFORE a retry node is chosen: the configured floor raised by
-	// the first attempt's own min_turn (the seat we know about). This is the
-	// cheap refusal; the retry SEAT's floor is applied below once it is known.
-	floor, floorSrc := r.retryFloorFor(first)
+	// First pass, BEFORE a retry node is chosen: the configured floor and nothing else. This is
+	// the cheap refusal; the retry SEAT's floor is applied below once it is known. It used to be
+	// raised by the first attempt's own min_turn, but the retry goes to a DIFFERENT node, so that
+	// number belongs to a seat the retry will never use (retryFloorFor already exempted the
+	// seat-down and lost-root defers for exactly this reason): a seat whose cold load plus two
+	// 8,192-token turns is measured at 1,112 s took 20 to 325 s to give the answer, and 7 of the
+	// 14 retries skipped in one day were refused for it before any node was asked. A retry seat that publishes
+	// no rate still falls back to the first attempt's number in retryFloorOn, said in the note.
+	floor, floorSrc := r.firstPassRetryFloor()
 	remaining := pl.remaining(start, budget)
 	if remaining < floor {
 		first.RetryNote = fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after the first attempt (floor %ds%s)", remaining, budget, floor, floorSrc)
@@ -1569,22 +1580,19 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 			}
 		case held != "":
 			first.RetryNote = "retry skipped: " + held + " and no other node is eligible; " + retryHeldWhy(held)
-		case SeatDownDefer(first.Result), RootGoneDefer(first.Result):
+		case SeatDownDefer(first.Result), RootGoneDefer(first.Result), FinalToolCallDefer(first.Result):
 			// The defer promises a second placement on another node: when there is no
 			// other node the caller must be told it was considered and why it did not
 			// happen, not left with a retryable defer and an empty note. The seat-down
-			// defer (ADR 0066) and the lost-root defer (register C-79) are the two whose
-			// promise is that sentence.
-			why := "every eligible node was already tried or is not eligible"
-			switch {
-			case r.route == "local":
-				why = "route local places nothing on another node"
-			case r.remotePinned():
-				why += "; " + r.remotePinWhy()
-			}
+			// defer (ADR 0066), the lost-root defer (register C-79) and the forced-final
+			// tool-call defer are the ones whose promise is that sentence.
+			why := r.noRetryNodeWhy()
 			what := "the seat on " + nodeLabel(first) + " went down"
 			if RootGoneDefer(first.Result) {
 				what = "the run on " + nodeLabel(first) + " lost its workspace root"
+			}
+			if FinalToolCallDefer(first.Result) {
+				what = "the seat on " + nodeLabel(first) + " wrote a tool call as its final answer"
 			}
 			first.RetryNote = fmt.Sprintf("retry skipped: %s and no other node could take the contract (%s)", what, why)
 		case r.remotePinned():
@@ -1593,6 +1601,12 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 			// and read as a retry nobody considered. The pin is the reason there is no local retry, so the note names it.
 			first.RetryNote = fmt.Sprintf("retry skipped: no other fleet node could take the contract after the first attempt on %s (%s); %s",
 				nodeLabel(first), attemptOutcome(first), r.remotePinWhy())
+		default:
+			// Every other skip says why too (the operator's rule: a job's trouble is logged, not silent). A wrong answer or an
+			// abstention with nowhere to go used to be published with an empty note, which reads as a retry nobody
+			// considered; a research page skipped this way left nothing to log and nothing to fix.
+			first.RetryNote = fmt.Sprintf("retry skipped: no other node could take the contract after the first attempt on %s (%s); %s",
+				nodeLabel(first), attemptOutcome(first), r.noRetryNodeWhy())
 		}
 		return first
 	}
@@ -1608,12 +1622,14 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// it. The retry is skipped only when the seat stayed busy for the whole wait (or
 	// the wait is switched off), and the note says how long it waited.
 	//
-	// Not for a seat-down defer (ADR 0066): this check neither waits nor skips. D-46's
-	// case is a verification retry: the first attempt PRODUCED an answer, the retry is an
-	// optional second opinion on the budget that was left, and joining a generating seat
-	// costs it the budget it needs. A seat-down defer produced nothing — declining to
-	// re-place it, or waiting out the placement wait and then declining, loses the job
-	// — and its retry carries the credited budget of the wait the dead seat cost. Busy
+	// Not for a defer that produced nothing (producedNothingDefer: the seat-down defer,
+	// ADR 0066, the lost-root defer, C-79, and the forced-final tool-call defer): this check
+	// neither waits nor skips. D-46's case is a verification retry: the first attempt
+	// PRODUCED an answer, the retry is an optional second opinion on the budget that was
+	// left, and joining a generating seat costs it the budget it needs. A defer that
+	// produced nothing — declining to re-place it, or waiting out the placement wait and
+	// then declining, loses the job — and a seat-down retry carries the credited budget of
+	// the wait the dead seat cost. Busy
 	// is a place in line, never a refusal (INV-4): the node's own queue is the line, and
 	// it answers 503 when it is full, which placeAndRun re-places at once (ADR 0063),
 	// into the bounded capacity wait when nothing has room. During the 2026-09-29 outage
@@ -1622,11 +1638,11 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	//
 	// That line is a REMOTE alternative's. The local seat answers no 503: a run forced
 	// onto it joins the run-cap line and waits there for the run's whole wall, a line the
-	// subtask cannot leave. alternativeNode therefore sends a seat-down retry to an
+	// subtask cannot leave. alternativeNode therefore sends such a retry to an
 	// untried remote while that line has no free slot ahead of a newcomer, so the
 	// exemption below never hands the retry to a full local line when there is another
 	// place to go.
-	if !SeatDownDefer(first.Result) {
+	if !producedNothingDefer(first.Result) {
 		if busy, why := r.retrySeatBusy(ctx, alt); busy {
 			w := r.awaitRetrySeat(ctx, alt, why)
 			pl.credit += w.waited
@@ -1758,6 +1774,26 @@ func (r *runner) retryFloorSec() int {
 	return minRetrySec
 }
 
+// noRetryNodeWhy is the words for a retry that found no node to go to.
+func (r *runner) noRetryNodeWhy() string {
+	why := "every eligible node was already tried or is not eligible"
+	switch {
+	case r.route == "local":
+		why = "route local places nothing on another node"
+	case r.remotePinned():
+		why += "; " + r.remotePinWhy()
+	}
+	return why
+}
+
+// firstPassRetryFloor is the floor a verification retry is judged against BEFORE a retry node is chosen: the configured one
+// (agent_retry_min_sec, else the 10 s minimum) and nothing about the first attempt's seat. retryFloorOn applies the chosen
+// node's own floor.
+func (r *runner) firstPassRetryFloor() (int, string) {
+	floor := r.retryFloorSec()
+	return floor, retryFloorSource(floor)
+}
+
 // retryFloorFor (0.115.21, register D-03) is the seat's OWN floor when the
 // first attempt published one — min_turn_sec: its cold load plus one turn at
 // the final budget at its measured rate — and the configured floor otherwise.
@@ -1776,9 +1812,15 @@ func (r *runner) retryFloorSec() int {
 // is that run's directory, and the retry goes to another node, so the number read here
 // would be a seat the retry never uses. The configured floor stands and the retry seat's
 // own floor applies once it is chosen.
+//
+// The forced-final tool-call defer is the third, for the same reason as the first: the
+// seat is the fault, and the retry goes to a node that is not it. A retry node that
+// publishes no rate falls back to this function (retryFloorOn), so without the exemption
+// the number of the seat that wrote the tool call refused a retry that exists because of
+// that seat.
 func (r *runner) retryFloorFor(first PlacedResult) (int, string) {
 	floor := r.retryFloorSec()
-	if m := first.Result.MinTurnSec; m > floor && !SeatDownDefer(first.Result) && !RootGoneDefer(first.Result) {
+	if m := first.Result.MinTurnSec; m > floor && !producedNothingDefer(first.Result) {
 		return m, fmt.Sprintf(", min_turn_sec of the seat on %s", nodeLabel(first))
 	}
 	return floor, retryFloorSource(floor)
@@ -1992,6 +2034,24 @@ type placements struct {
 	// recorded by settle(); one that made at least one is already in the
 	// corpus and the ledger through that attempt, the way exhausted() relies on.
 	attempts int
+	// lastRowRefusal: the row of the latest attempt was written as a refusal (PlacedResult.refusalRow). A subtask
+	// that ends without a node taking it has no row of its own then, and settle writes one.
+	lastRowRefusal bool
+}
+
+// isRefusalRow: the row of this attempt is a node's capacity refusal AT DISPATCH, a place in line. A job the node
+// acked and then took back (refuseAsWithdrawn, refuseAsNeverRan: a queue deadline it confirmed, a record that says
+// it never ran) is filed with the same 503 but is not that: the node held it under an id the delegator's intent
+// ledger and the node's own record know, and when nothing else takes the subtask that row, under that id, is the
+// subtask's record.
+func isRefusalRow(pr PlacedResult) bool {
+	return pr.refused && pr.Err != "" && capacityRefusal(pr.refusalStatus) && !pr.withdrawn && pr.nodeNeverRan == ""
+}
+
+// countAttempt files one attempt that went through attempt's finish and so wrote its row.
+func (pl *placements) countAttempt(pr PlacedResult) {
+	pl.attempts++
+	pl.lastRowRefusal = pr.refusalRow
 }
 
 // settle is the telemetry close-out for an outcome NO attempt produced —
@@ -2009,7 +2069,10 @@ func (r *runner) settle(contract core.AgentContract, pr PlacedResult, pl *placem
 	cutBefore := pr.deadlineCut
 	pr = r.cutOutcome(pr, false)
 	cutHere := pr.deadlineCut && !cutBefore
-	if pl.attempts > 0 && !cutHere {
+	// A refused attempt's row is a refusal, not an outcome (delegationLogLine.Refusal), so when the last attempt's
+	// row is one, no row says how the subtask ended: this one does, as a cut's does.
+	closing := cutHere || pl.lastRowRefusal
+	if pl.attempts > 0 && !closing {
 		return pr
 	}
 	// A wait the deadline ended after refused attempts (ADR 0065 decision 2) is recorded
@@ -2018,9 +2081,10 @@ func (r *runner) settle(contract core.AgentContract, pr PlacedResult, pl *placem
 	// REFUSED dispatch, whose row already says "dispatch ... 503" for a job no node held,
 	// and a second row under it would double-count one id — and the caller is given that
 	// id, so the result, the ledger row and the corpus row are one thing.
-	if pr.JobID == "" || (cutHere && pl.attempts > 0) {
+	if pr.JobID == "" || (closing && pl.attempts > 0) {
 		pr.JobID = mintJobID()
 	}
+	pr.refusalRow = false
 	pr.wallMs = time.Since(since).Milliseconds()
 	r.record(contract, pr)
 	return pr
@@ -2335,7 +2399,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 	// Recorded whatever the outcome — a SUCCESSFUL placement must exclude its
 	// own seat from the verification retry just as firmly as a refused one.
 	pl.tried[pr.ranBase] = true
-	pl.attempts++
+	pl.countAttempt(pr)
 	if !r.isReplaceable(pr) {
 		return pr
 	}
@@ -2347,7 +2411,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		iterStart := time.Now()
 		remaining := pl.remaining(start, budget)
 		if remaining < minRetrySec {
-			return r.exhaustedSettled(contract, pr, refusals, budgetSpent(remaining, budget, len(refusals)), iterStart)
+			return r.exhaustedSettled(contract, pr, pl, refusals, budgetSpent(remaining, budget, len(refusals)), iterStart)
 		}
 		// Selection BLOCKS (fetchViews). Bound it by what is actually left, so
 		// the probe cannot outlive the budget it is probing on behalf of.
@@ -2377,7 +2441,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 			if pl.capacityRefusal || reserved {
 				return r.awaitCapacity(ctx, i, contract, start, budget, pl, pr, refusals, why)
 			}
-			return r.exhaustedSettled(contract, pr, refusals, why, iterStart)
+			return r.exhaustedSettled(contract, pr, pl, refusals, why, iterStart)
 		}
 		// RE-MEASURE. `remaining` above was true when taken and the probe may
 		// have consumed most of it; committing the stale number to the wire is
@@ -2386,7 +2450,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		// abandoned here costs neither a slot in the bound nor an exclusion.
 		remaining = pl.remaining(start, budget)
 		if remaining < minRetrySec {
-			return r.exhaustedSettled(contract, pr, refusals, budgetSpent(remaining, budget, len(refusals)), iterStart)
+			return r.exhaustedSettled(contract, pr, pl, refusals, budgetSpent(remaining, budget, len(refusals)), iterStart)
 		}
 		pl.tried[next.base] = true
 		if next.base != "" {
@@ -2432,7 +2496,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 			}
 			return r.awaitCapacity(ctx, i, contract, start, budget, pl, pr, refusals, why)
 		}
-		pl.attempts++
+		pl.countAttempt(pr)
 		pr.Replacements = len(refusals)
 		if !r.isReplaceable(pr) {
 			// Some node TOOK it (or the call's deadline ended the chain before one was asked:
@@ -2680,7 +2744,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			}
 			return r.settle(contract, r.reservedDefer(localView, r.localLease(contract), 0, seed.pendingReason, nil), pl, waitStart)
 		}
-		return r.exhaustedSettled(contract, seed, refusals, why, waitStart)
+		return r.exhaustedSettled(contract, seed, pl, refusals, why, waitStart)
 	}
 	deadline := cw.deadline
 	spanStart := waitStart
@@ -2808,7 +2872,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// never a `placement refused` failure naming a refusal nobody made.
 	budgetGone := func(remaining int) PlacedResult {
 		if len(refusals) > 0 {
-			return r.exhaustedSettled(contract, seed, refusals, budgetSpent(remaining, budget, len(refusals)), waitStart)
+			return r.exhaustedSettled(contract, seed, pl, refusals, budgetSpent(remaining, budget, len(refusals)), waitStart)
 		}
 		return r.settle(contract, r.waitBudgetDefer(localView, seed, idle, budgetSpent(remaining, budget, pl.attempts), pl.waitNote), pl, waitStart)
 	}
@@ -2937,7 +3001,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				}
 				spanStart = time.Now() // the attempt is charged; the wait resumes here
 				pl.tried[""] = true
-				pl.attempts++
+				pl.countAttempt(pr)
 				if !r.isReplaceable(pr) {
 					return r.landedAfterWait(pr, idle, refusals)
 				}
@@ -3077,7 +3141,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 					// cooled - the wait goes on and reads the fleet again next tick.
 				} else {
 					pl.tried[bases[best]] = true
-					pl.attempts++
+					pl.countAttempt(pr)
 					if !r.isReplaceable(pr) {
 						return r.landedAfterWait(pr, idle, refusals)
 					}
@@ -3209,7 +3273,7 @@ func (r *runner) hintSeatWithoutAWait(ctx context.Context, i int, contract core.
 		return PlacedResult{}, false
 	}
 	pl.tried[""] = true
-	pl.attempts++
+	pl.countAttempt(pr)
 	if capacityDeferRefusal(pr) {
 		// The line filled between the read and the run: the seat declined the job and ran nothing, so it is the refusal
 		// the caller's shed or defer names, not the result it publishes.
@@ -3315,7 +3379,7 @@ func (r *runner) runDecided(ctx context.Context, i int, contract core.AgentContr
 	remaining := pl.remaining(start, budget)
 	if remaining < minRetrySec {
 		if len(refusals) > 0 {
-			return r.exhaustedSettled(contract, seed, refusals, budgetSpent(remaining, budget, len(refusals)), waitStart)
+			return r.exhaustedSettled(contract, seed, pl, refusals, budgetSpent(remaining, budget, len(refusals)), waitStart)
 		}
 		local := r.localView()
 		reason := fmt.Sprintf("%s: %s — the decided seat %s was not started", budgetSpent(remaining, budget, pl.attempts), note, dec.Seat)
@@ -3341,7 +3405,7 @@ func (r *runner) runDecided(ctx context.Context, i int, contract core.AgentContr
 	forced := placement{view: r.localView(), reason: note, decided: &dec}
 	pr := r.attempt(ctx, i, replaced, &forced)
 	pl.tried[""] = true
-	pl.attempts++
+	pl.countAttempt(pr)
 	if !waited {
 		return pr
 	}
@@ -4256,6 +4320,7 @@ func replacementNote(refusals []string, landed bool) string {
 // counting it either — read as a contradiction on the wire. Err already carries
 // the same refusal list, so nothing is lost by the omission.
 func exhausted(last PlacedResult, refusals []string, why string) PlacedResult {
+	last.refusalRow = false // what is published is the chain's outcome, not the refused attempt's row
 	if capacityDeferRefusal(last) {
 		// The last thing refused was the local seat's own capacity DEFER, and
 		// nothing else had room either. That is still a defer - the fleet is
@@ -4302,13 +4367,25 @@ func exhausted(last PlacedResult, refusals []string, why string) PlacedResult {
 // steer the cut's wording ("was still running on the local seat") or its node and seat; the
 // attempt's own intent was closed by its finish. since is when the span the closing row
 // measures began.
-func (r *runner) exhaustedSettled(contract core.AgentContract, last PlacedResult, refusals []string, why string, since time.Time) PlacedResult {
+func (r *runner) exhaustedSettled(contract core.AgentContract, last PlacedResult, pl *placements, refusals []string, why string, since time.Time) PlacedResult {
+	// The row of the latest attempt that wrote one, which is what settle() reads too: the seed is the last attempt only when
+	// it went through finish, and a pseudo-attempt (a replacement the process gate turned away, a deal's overflow) returns
+	// before it, with no row and no mark, in front of a refused attempt whose row is the only record there is.
+	refusedLast := last.refusalRow || (pl != nil && pl.lastRowRefusal)
 	pr := exhausted(last, refusals, why)
 	if !r.call.reached() {
+		if refusedLast {
+			// The row of the last refused attempt is a refusal (delegationLogLine.Refusal), so the failure the
+			// caller is handed has no row yet: it gets one under a job id of its own, like a cut chain's.
+			pr.JobID = mintJobID()
+			pr.wallMs = time.Since(since).Milliseconds()
+			r.record(contract, pr)
+		}
 		return pr
 	}
 	pr.ranLocal, pr.intentRecorded, pr.orphanable, pr.waitCapacity = false, false, false, false
 	pr.withdrawn, pr.nodeNeverRan, pr.nodeTerminal = false, "", false
+	pr.refusalRow = false
 	pr = r.cutOutcome(pr, true)
 	pr.JobID = mintJobID()
 	pr.wallMs = time.Since(since).Milliseconds()
@@ -4352,6 +4429,10 @@ const minRetrySec = 10
 // infrastructure the seat's "I could not read the file" was a failed
 // verification, which this function retries: the better class must not take the
 // recovery with it.
+//
+// The fifth is the forced-final tool-call defer (FinalToolCallDefer): the seat answered the tool-less final step with a
+// tool call, even after the loop re-asked it once. A property of THIS seat, a sound contract that had read what it
+// needed, and a class (`budget`) this function otherwise leaves alone.
 func retryable(pr PlacedResult) bool {
 	if pr.Err != "" {
 		return false
@@ -4362,10 +4443,35 @@ func retryable(pr PlacedResult) bool {
 	if admissionDefer(pr.Result) || SeatDownDefer(pr.Result) {
 		return true
 	}
-	if RootGoneDefer(pr.Result) {
+	if RootGoneDefer(pr.Result) || FinalToolCallDefer(pr.Result) {
 		return true
 	}
 	return pr.Result.Deferred && pr.Result.DeferClass == core.DeferClassAbstention
+}
+
+// FinalToolCallDefer reports whether a result is the forced-final tool-call defer: a `budget` defer whose reason
+// carries core.ForcedFinalToolCallReason, i.e. the run reached its last step, which offers no tools and asks for the
+// answer, and the seat wrote a tool call instead, again after the loop re-asked it once with the offence quoted.
+//
+// It is the fifth defer worth a second placement, and for the same reason as the seat-down one: the fault is a
+// property of THIS seat (one seat family did it in 35 of 106 forced finals; the seats of every other family in none of
+// 241) and the contract is sound, so the same contract on another node is the cure. Unlike a plain step-budget defer
+// (a task too large, which another seat does not fix), the run had read what it needed and its wall was mostly
+// unspent. It is a node-filed defer, an OBSERVED terminal, so nothing still runs the contract. It matches on the
+// CONSTANT the loop writes (the phrase sits behind the "step budget exhausted (N steps): " grep key, so Contains and
+// not HasPrefix), never on other prose.
+func FinalToolCallDefer(r core.AgentWireResult) bool {
+	return r.Deferred && r.DeferClass == core.DeferClassBudget && strings.Contains(r.Reason, core.ForcedFinalToolCallReason)
+}
+
+// producedNothingDefer reports whether a result is the defer of a run that delivered no answer at all, so that its second
+// placement is the job's only way to be delivered and not an optional second opinion on an answer the subtask already
+// holds: the seat-down defer (ADR 0066), the lost-root defer (register C-79) and the forced-final tool-call defer. Such a
+// retry is placed the way the seat-down one always was (ADR 0066 decision 3): the busy check of the retry seat neither waits
+// nor skips (a skipped retry is a lost job, and the node's own queue is the line), the failed seat's own min_turn_sec is not
+// the retry seat's floor, and a local line with no free slot is left for an untried remote.
+func producedNothingDefer(r core.AgentWireResult) bool {
+	return SeatDownDefer(r) || RootGoneDefer(r) || FinalToolCallDefer(r)
 }
 
 // SeatDownDefer reports whether a result is the seat-down defer (ADR 0066,
@@ -4411,7 +4517,7 @@ func skipsRetryAsResearchAcceptanceOnly(contract core.AgentContract, pr PlacedRe
 // `docanchor`).
 func failsDocumentFingerprint(failures []string) bool {
 	for _, f := range failures {
-		if strings.Contains(f, "(?P<docanchor>") {
+		if strings.Contains(f, docAnchorTag) {
 			return true
 		}
 	}
@@ -4638,8 +4744,8 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 			}
 			return placement{}, held, false
 		}
-		// A seat-down defer is not held for a busy retry seat (runOne, ADR 0066 decision
-		// 3): the node's own queue is the line, and its 503 is re-placed at once. That is
+		// A defer that produced nothing (producedNothingDefer) is not held for a busy retry seat
+		// (runOne, ADR 0066 decision 3): the node's own queue is the line, and its 503 is re-placed at once. That is
 		// true of a REMOTE alternative and false of the local seat, which answers no 503:
 		// a run forced onto it joins the run-cap line and waits there for the run's whole
 		// wall before it defers as capacity, a line the subtask could not leave (the
@@ -4647,7 +4753,7 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 		// that line has no free slot ahead of a newcomer, an untried remote is the better
 		// place for the retry. With none, the local seat is the only place there is, and
 		// joining its line beats losing the job.
-		if SeatDownDefer(first.Result) {
+		if producedNothingDefer(first.Result) {
 			if free, note := r.localSlotAhead(); !free {
 				if chosen, base, found := r.remoteAlternative(ctx, st, pl); found {
 					return placement{view: chosen, base: base,
@@ -5747,6 +5853,9 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 				r.intent.done(jobID, intentNoteTerminal)
 			}
 		}
+		// A dispatch a node refused for capacity is re-placed or waited out by the engine, so its row is a refusal,
+		// not an outcome. Whatever ends the subtask without a node taking it writes a terminal row of its own.
+		pr.refusalRow = isRefusalRow(pr)
 		r.record(contract, pr)
 		r.pairTerminal(jobID, &pr)
 		return pr
@@ -6586,7 +6695,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			pr.Seat = wire.Seat
 			if !wire.Deferred {
 				pr.AcceptanceFailures = EvalAcceptance(contract, wire)
-				r.strikeOnFingerprint(base, pr.AcceptanceFailures)
+				r.noteFingerprint(base, contract, wire, pr.AcceptanceFailures)
 			}
 			return pr
 		case status == http.StatusOK && state == "error":
@@ -7100,6 +7209,11 @@ func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 			continue
 		}
 		if pass, reason := chk.Eval(wire); !pass {
+			// A digest that claims nothing and says the page does not carry what was asked restates none of the page's
+			// words, and is not about another document either (HonestAbsence reads the structure, not a phrase).
+			if strings.Contains(a, docAnchorTag) && HonestAbsence(wire.Structured) {
+				continue
+			}
 			failures = append(failures, reason)
 		}
 	}
@@ -7130,7 +7244,27 @@ func (r *runner) strikeOnFingerprint(base string, failures []string) {
 	}
 	if r.quarantine.Strike(base) {
 		r.quarantined.Add(1)
-		log.Printf("delegate: node %s quarantined for %s after 2 off-document answers (document fingerprint failed twice)", base, DefaultQuarantineTTL)
+		log.Printf("delegate: node %s quarantined for %s after off-document answers (document fingerprint failed at least twice, and more often than it passed)", base, DefaultQuarantineTTL)
+	}
+}
+
+// noteFingerprint is the runner's reading of one result against the document fingerprint: a contract that carries the
+// check and failed it is a strike against the node, one that carries it and PASSED is a pass (Quarantine.Pass), and one that
+// carries none says nothing about the node. A result the check missed that is an honest absence (excusedAbsence) is neither:
+// it did not fail the contract, but it restated nothing of the page either, so it is no evidence that the node reads the
+// right document and must not stand among its passes. The local seat has no call here, as for strikeOnFingerprint.
+func (r *runner) noteFingerprint(base string, contract core.AgentContract, wire core.AgentWireResult, failures []string) {
+	if r.quarantine == nil {
+		return
+	}
+	switch {
+	case failsDocumentFingerprint(failures):
+		r.strikeOnFingerprint(base, failures)
+	case failsDocumentFingerprint(contract.Acceptance):
+		// the check is on the contract (failsDocumentFingerprint reads the tag in either form) and did not fail
+		if !excusedAbsence(contract, wire) {
+			r.quarantine.Pass(base)
+		}
 	}
 }
 
@@ -7778,6 +7912,19 @@ type delegationLogLine struct {
 	// (PlacedResult.Placed). Omitempty: a plain box's corpus row is unchanged,
 	// and a pre-0.116 row reads as "one implicit layer", never as unplaced.
 	Placed *core.Placed `json:"placed,omitempty"`
+	// Refusal marks a row that is a node's capacity refusal at dispatch (503 or 429), not an outcome: the engine
+	// outwaits it and re-places the subtask, whose outcome is another row (the one that landed, or the terminal
+	// row a lost subtask gets under a job id of its own). Absent on every other row, and on rows written before
+	// the marker, so a reader that sees none reads them as it always did. The rigger does not count a marked row
+	// as a failure.
+	Refusal *refusalMark `json:"refusal,omitempty"`
+}
+
+// refusalMark is the delegation log's record of one capacity refusal: the status the node sent and its own
+// Retry-After (0 = none).
+type refusalMark struct {
+	Status        int `json:"status"`
+	RetryAfterSec int `json:"retry_after_sec,omitempty"`
 }
 
 // record writes one subtask's telemetry: the delegation-log corpus line and a
@@ -7813,6 +7960,9 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 	if pr.Err == "" {
 		res := pr.Result
 		line.Result = &res
+	}
+	if pr.refusalRow {
+		line.Refusal = &refusalMark{Status: pr.refusalStatus, RetryAfterSec: pr.retryAfterSec}
 	}
 	r.corpusTried.Add(1)
 	if err := appendDelegationLog(r.cfg.BaseDir(), line); err != nil {

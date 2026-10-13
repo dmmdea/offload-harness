@@ -6,6 +6,233 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The rigger filed a busy fleet as a wall timeout and a node's "queue full" as a broken serving stack.** In one day's report
+  24 of the 26 bad rows of the local agent pool were capacity defers ("capacity wait: no node had room ... the call's
+  deadline"), and every one of them landed on the `timeout` axis, whose remedy is "raise `timeout_sec`": the wall-timeout
+  pattern matches the bare word "deadline", and `timeout_sec` never bounds that wait (ADR 0073). Thirteen more rows were
+  dispatches a node had answered 503 "queue full" and the delegator outwaited and re-placed, and `seat-infra` ("fix the
+  serving stack") took them although no seat was asked. There is now a `capacity` axis, behind `call-deadline` and ahead of
+  `timeout`: a row of defer class capacity lands on it whatever its words, and so does a row with no class whose error is a
+  node's 503/429 "queue full" / "shed" / "no idle execution slot" answer (a row from a delegator that predates the
+  marker below). Its remedy names `agent_call_deadline_sec` and `agent_placement_wait_sec`, the keys that bound the wait.
+  A dial that never reached the node and a 503 about something other than room stay `seat-infra`. A row carrying the new
+  `refusal` marker (`{"status":503,"retry_after_sec":N}`; delegators write it on a capacity-refused attempt) is not a bad
+  row at all: it is counted on the report's own `refusals` line, outside `rows`, so a fan-out that met a full node reads as
+  the place in line it was. The call-deadline and the wall-timeout verdicts are unchanged (`rig/calldeadline_test.go`). Tests
+  `internal/rig/capacity_test.go`, written first: red before with, for example, `held slot, the 0.180.0 wording: classified
+  "timeout"`, `no deadline word at all: classified "unclassified"` and `an unmarked 503 queue full row classified "seat-infra"`;
+  five mutations (the capacity-class check off, 429 dropped from the pattern, a refused row counted bad, refusals counted in
+  `rows`, the precedence swapped) each turn them red. The `agent_rig` tool description, which is what the delegating model reads,
+  publishes the same order (it still listed the old one, so a caller would have filed a full fleet under `timeout` and a
+  forced-final tool call under `budget`), names the wait keys as the capacity lever and the `refusals` line; a test reads
+  `rig.Precedence` and holds the description to it in order (`internal/mcpserver/agent_rig_description_test.go`, red before with
+  `axis "capacity" is missing from the description's precedence order`, and three mutations). Docs:
+  `docs/systems/coding-agent.md` (the rigger paragraph).
+- **A node's capacity refusal is a place in line in the delegation log, on the fleet page and in the rigger, and a subtask
+  lost to a full fleet now has a row that says so.** The capacity wait outlasts a node's 503 or 429 at dispatch, but the
+  refused attempt's corpus row was an ordinary error row (`deferred` false, `acceptance_pass` false), so thirteen of them in one
+  day were filed as serving-stack failures and listed as `delegation` errors on the fleet page, while nine of the twelve
+  subtasks behind them landed on another node seconds later. The other half: a wait that ended as a capacity defer after a
+  refusal wrote no row of its own (`settle` returned when `attempts > 0`) and carried the refused attempt's job id, so for the
+  subtasks that really were lost the refusal row was the only record, and it read as a dispatch error. Now the row of a
+  capacity-refused attempt carries `refusal: {status, retry_after_sec}` (additive; the ledger row is unchanged, still deferred
+  with `reason_code` `queue_full`), and a marked row is never the end of a subtask: a wait that ends as a capacity defer and a
+  chain that ends as the "placement refused" failure each write a terminal row under a job id of their own (the way a cut chain
+  already did, ADR 0065), and the caller is handed that id. The fleet page and `top` no longer raise a `delegation` error for
+  a marked row and show it as `refused (re-placed)`. The cooldown, the re-placement and the wait are unchanged, and so are the
+  rows of a refusal that is not about capacity and of a job the node acked and then took back (a queue deadline it confirmed,
+  a record that says it never ran): that job was held under an id the node's record and the intent ledger know, so its row is
+  not a refusal mark and the failure of a subtask nobody else took keeps that id (found by a Linux gate host:
+  `TestWithdrawAgainstTheRealNodeHandler` read the node's record under the published id, and a first version of the mark had
+  replaced it). The ledger now holds two rows where a lone refused dispatch with the wait off ended the subtask (the attempt
+  and the "placement refused" failure; `TestOnlyAJobANodeAckedCarriesAFleetJobID` pinned one). A test that pinned the old "the attempt's row alone" ending
+  (`TestASettledOutcomeThatIsNotACutKeepsItsAttemptsRow`) is rewritten to pin the new one. Tests
+  `internal/delegate/refusal_row_test.go` and `internal/fleetview/refusal_test.go`, written first: red before with, for
+  example, `a 503 refusal inside the wait is a bare error row, want a refusal marker`, `the terminal row = ... deferred:false
+  ..., want deferred, class capacity` and `the errors feed carries the refused attempt as an error`; the delegate tests read the
+  rows back through the rigger, so the writer and the reader cannot drift. Eight mutations (the marker never set, the closing row
+  skipped for a refusal, the failure's terminal row skipped, the marker left off the line, the flag kept on the published
+  outcome, the mark kept after a landing, the fleet page folding a marked row, its field dropped from the decode) each turn
+  them red. The chain's own ending reads the placements ledger (the row of the latest attempt that wrote one, as `settle` does)
+  and not only the seed it is handed: a replacement the process gate turned away returns before it writes a row, so a wait that
+  began at the gate after a refusal and ended on the budget had left the refusal-marked row as the only record of the lost
+  subtask (`TestAChainEndedAfterAGatedTurnAwayFilesATerminalRowWhenTheLastRowWasARefusal`, red before with `the failure carries
+  no job id: the refused attempt's row is a refusal, so no row says how the subtask ended`; four more mutations, one on each
+  reading of the ledger and the seed). Docs: ADR 0073 (amendment 2026-10-12), `docs/systems/fleet-overview.md`,
+  `docs/OPERATOR-GUIDE.md`.
+- **An MCP server whose binary was replaced after it started now says so on the doors a release changes.** A server is spawned
+  once per client and keeps the executable image it started from. Two servers that had started on 0.180.0 were still stamping
+  their corpus rows with it eight hours after a 0.181.0 and then a 0.182.0 binary had been swapped in on disk, so the
+  capacity-wait fix those releases carry (a wait that holds a run slot gives it up and keeps waiting) could not run for any
+  call they served, and nothing in the server noticed its binary had changed. (The 24 subtasks that a day's report shows lost
+  to the old ending were served before that fix existed; the next saturated fan-out through a server that outlives a release is
+  what this guards.) The server now reads the size and modification time of its own executable at start and
+  compares them with the file on disk when `agent_delegate`, `offload_research` or `offload_status` answers: a difference, or a
+  path that is gone, puts a top-level `stale_binary` string on the answer (running version, the two stamps, "restart the MCP
+  client to load it") and one line in the log. The work still runs and nothing is interrupted or re-executed, a stat that fails
+  for another reason accuses nothing, and the version on disk is not read (it would mean running the new binary). The guard says
+  when it is not watching, because a guard against a silent failure must not be one: a server that could not stamp its own
+  executable at start (or whose path was already gone) logs one `the stale-binary guard is inactive` line with the reason, a stat
+  that fails later is logged once, and `offload_status` carries a top-level `stale_binary_guard` string (`inactive: ...` for the
+  first, `unreadable: ...` for as long as the second lasts), absent while the guard is watching. Tests
+  `internal/mcpserver/stalebinary_test.go`, written first: red before with `agent_delegate: no stale_binary note in [summary
+  results]` on a server whose executable stamp had moved, on all three doors, and, for the inactive guard, `log "": want one
+  line saying the guard is inactive and why`; thirteen mutations (size or modification time dropped from the comparison, the
+  start-stamp guard, the vanished-path branch, each door's wiring, and on the inactive guard: the log line, the once-only log, the
+  remembered failure, the reported state, the gone-at-start reason, the status key) each turn them red.
+  Docs: `docs/systems/mcp-server.md`.
+- **A forced final step the seat answers with a tool call is re-asked once, with the offence quoted, instead of ending the run.**
+  The last step of a multi-step run offers no tools and asks for the answer (D-89). One seat family wrote a tool call there,
+  as text (`<tool_call><function=...>`) or parsed, in 35 of the 106 runs that reached a forced final (none of 241 on every other
+  seat), 30 of the 35 with more than half their wall unspent and the evidence they needed already read: the run returned
+  `budget` the moment it happened, with the seat's text thrown away and only the marker kept. A bare retry would have been a
+  no-op, because the decode of that step is greedy (`temperature=0` in the logged call records), so the re-ask changes the
+  prompt: a user turn that quotes the offending text (or the tool and its arguments), says nothing written as a call will run,
+  forbids the tool syntax and says to begin with the answer in the requested shape; the poisoned turn is kept out of the
+  transcript, the answer-now turn is not repeated, the step is not spent, and the budget and thinking-off are those of the first
+  final. It is gated on the wall and bounded at one. The gate is the seat's list-cap floor where one is known and, in every case,
+  the wall of the final call just made plus a quarter (`wallHoldsAnotherFinal`), because the list-cap re-issue's own gate fails
+  open for a contract without an output_schema and for a seat with no known rate, and a re-ask spent there let the deadline fall
+  INSIDE the call: the run ended as an error with the offence lost, and the delegator, which re-places only the forced-final
+  budget defer, never gave the contract another seat. A second tool
+  call ends the run on `budget` as before, now with both replies quoted in `stop_note` (`core.ForcedFinalToolCallReason` opens
+  it, and sits inside the defer reason). An answer is `done` and `stop_note` says the seat first wrote a tool call and was
+  re-asked once. **Not measured on a live seat** (no model was started for this change): whether a quoted-back, stricter
+  instruction stops this family writing the call is an inference from the history-continuation reading and from the tail
+  correlation in the corpus (44% failures when two of the last three trace entries were refused repeats, 9% otherwise); the
+  fallback, if a replay of the logged contracts shows it still fails, is to render the tool turns as plain observations for the
+  re-ask (a full re-prefill, about 30 s). Tests `internal/agent/forced_final_reask_test.go`, written first: red before with
+  `stop="budget" output="" steps=2, want the re-asked answer as a finished run in 2 steps` and `the seat was called 2 times,
+  want 3: one re-ask and no more`; the two tests that pinned the one-shot give-up (`TestForcedFinalToolCallIsNotExecuted`,
+  `TestForcedFinalToolCallWrittenAsTextIsABudgetStop`) now script two offences in a row; the wall tests (a contract with no
+  rate, a margin over the last turn, no deadline at all) were red before with `the run ended in an error (fakeClient: script
+  exhausted) with stop "error": the re-ask was spent with 200 ms of wall left and the deadline fell inside it`. Thirteen mutations
+  (the wall gate, the bound of one, the quoted text, the poisoned turn kept, each note, and on the gate: the measured turn not
+  read, no margin, the seat's floor ignored, a comparison too strict, a missing deadline read as a limit, the last turn not
+  passed, the original gate back) each turn them red. Docs: `docs/systems/coding-agent.md`,
+  `docs/OPERATOR-GUIDE.md`.
+- **A forced-final tool call is its own shape in the rigger and gets a second seat, instead of "a task too large: split it".**
+  The shape (the forced final step answered with a tool call, again after the re-ask above) ended on `stop_reason` `budget`,
+  and the rigger filed it on the `budget` axis, whose remedy reads "a run at the cap with no loop axis is a task too large for
+  one contract: split it". It was not: in the three rows of the day the seat had read the whole document (or all that read_file
+  could give it) and used 43 s of 600 s, 16 s of 299 s and 86 s of 485 s; and because `budget` outranks `loop` and
+  `tool-misuse` in the precedence, the refused repeats in their traces never surfaced. The rigger now has a `final-tool-call`
+  axis, ahead of `budget` and keyed on `core.ForcedFinalToolCallReason`, whose remedy says cutting the contract up cannot help.
+  And the delegator treats the shape as the fifth defer worth a second placement (`delegate.FinalToolCallDefer`, beside the
+  seat-down and lost-root defers): it is a property of that seat (none of 241 forced finals on every other seat did it), the
+  contract is sound and the wall mostly unspent, and a plain step-budget defer, which a second seat does not fix, stays as it
+  was. With nowhere to place it the caller gets `retry skipped: the seat on <node> wrote a tool call as its final answer and no
+  other node could take the contract (...)` instead of an empty note. Its second placement is placed the way a seat-down
+  retry is, and so is the lost-root defer's (one predicate, `delegate.producedNothingDefer`): a run that produced nothing has no
+  answer to hold, so the retry is not made to stand in line for a busy retry seat for the placement wait and then skipped
+  (every remote publishes one job at a time, so on a saturated fleet that was the normal outcome: "retry skipped: the retry seat
+  on <node> is already running another job after waiting 5s in line"), the failed seat's `min_turn_sec` is not the retry seat's
+  floor when the retry node publishes no rate (`retry skipped: 299s of the 300s timeout_sec budget left after choosing a retry
+  node (floor 1112s, min_turn_sec of the seat on <node> (the retry seat published no rate))`), and a local seat whose run-cap line
+  has no free slot is left for an untried remote. Tests `internal/rig/final_tool_call_test.go`,
+  `internal/delegate/final_tool_call_test.go` and `internal/delegate/final_tool_call_retry_test.go`, written first: red before
+  with `classified "budget" ... want final-tool-call`, `retried=0 deferred=true note=""` and the three skipped-retry notes above
+  (the lost-root defer failed the busy and local-line ones the same way); mutations turn them red. Docs:
+  `docs/systems/coding-agent.md`, `docs/systems/fleet-node.md`, ADR 0066 (amendment 2026-10-12).
+- **A research page that is one very long line is handed to the seat in lines it can read.** The agent's `read_file` cuts every
+  line at 2,000 characters (`(line truncated)`) and its `offset`/`limit` count lines, so the rest of a longer line cannot be
+  reached at all. Two of the three forced-final rows of the day were such pages: one was a single 98,304-character line (the seat
+  could read its first 2,020 characters), the other had two lines holding 97,544 of its 98,299 characters (4,806 were
+  reachable), and no final ask can ground an answer in text the seat never saw. Across the corpus, research runs on a page with
+  an unreadable line reached the forced final step in 38 of 117 cases against 36 of 1,283 for pages of ordinary lines (the
+  failure rate once there is about the same, 30% against 41%, so this is what makes the cap get reached, not what the seat does
+  at it). `research.Build` now wraps each context document at `research.MaxLineChars` (1,800, pinned under the new exported
+  `agent.ReadFileLineCap` by a test in the MCP server package): at the last space in the final quarter of the window, in the
+  middle of a run with no space (a base64 blob), never inside a rune; the space becomes the newline and nothing else is added or
+  removed, and a page whose lines all fit is handed over byte for byte. The text that anchors, fingerprints and verifies quotes
+  is the page as fetched, so those checks are unchanged. Not changed: a context document supplied by a caller of
+  `agent_delegate` (its lines are the caller's; `read_file` still truncates them and says so). Tests
+  `internal/research/build_wrap_test.go` and `internal/mcpserver/readable_context_test.go`, written first: red before with
+  `line 1 is 125999 runes: the seat's read_file would cut it at 2000 and the rest would be out of reach`; five mutations (the
+  wrap not applied, the early return, the break window, the hard-cut width, the cap constant) turn them red. Docs:
+  `docs/systems/mcp-server.md`.
+- **The document fingerprint no longer fails an honest absence or a plural/singular restatement, and no longer passes the goal
+  echoed back.** The research acceptance check is a wrong-document tripwire: one any-of alternation of the page's own prose
+  words, kept off the goal's vocabulary. Nine of 254 research answers in two days failed it, and every one was a faithful or
+  honest-absence digest, none off-document (a digest that names the document correctly and quotes it verbatim failed for
+  writing "specification" where the page's anchor was "specifications"; another was five "not on page" and a verdict). The goal
+  tells the seat to write exactly that, in the goal's own words, which the anchors exclude by construction, so an honest absence
+  could never pass. Each anchor is now matched in its singular (and the goal's words are excluded in the singular too), and an
+  honest absence is excused by the delegator from the STRUCTURE of the digest, not from a phrase in the regex:
+  `delegate.EvalAcceptance` drops the fingerprint failure of a result whose structured digest is `delegate.HonestAbsence`, an
+  object in which every string at any depth (a list entry as much as a field) is empty or a short statement (60 words at most)
+  that the page does not carry what was asked, with at least one such statement, no number or boolean, no second sentence that
+  says what the page does hold, no contrast word ("but", "however") and no report of a failure to read the file ("could not
+  read", "not found", "the file is missing"). Such a result is counted for the node as neither a strike nor a pass. An earlier
+  draft of this change appended the absence phrases to the regex as a last alternative, and that was withdrawn before release:
+  the goal itself contains them (the built goal says "does not contain" and "does not address it"), so every anchored research
+  contract read PARROT-PASSABLE in the lint that is published on the result, the goal echoed back passed the check, and a stock
+  phrase ("not specified") anywhere in a digest of the wrong document passed it. The anchors are also chosen off the whole goal
+  the seat is handed (the fixed sentences, the file's name and title, the questions) and not only the caller's: the template's
+  own "Always end with a one-sentence verdict" had made "always" an anchor on a page that uses the word. The cost is a smaller
+  pool: a page word that also appears in the goal's fixed sentences, or in the page's own title or file name, is no longer an
+  anchor (a page too thin to leave 4 usable words, `minAnchorWords`, has no fingerprint, as before). The check stays one regex
+  tagged `docanchor`, holding the page's words and nothing else. Not closed, and not closable by a lexical rule: a seat that did
+  not read the page and reports "the page does not address it" without saying it failed is delivered as an absence, as an honest
+  one is. Tests `internal/research/anchors_abstention_test.go` and `internal/delegate/absence_test.go`, written first: red before
+  with, for example, `a plain goal: the contract is flagged parrot-passable: acceptance is PARROT-PASSABLE`, `the goal echoed
+  back as the answer passed the fingerprint`, `facts about another subject, one of them hedged: passed the fingerprint` and
+  `could not read: "I could not read the file, so the page does not address the goal." passed the fingerprint`; twelve mutations
+  (the anchors chosen off the caller's goal alone, an absence alternative back in the regex, a number or boolean allowed, the
+  read-failure and contrast vetoes, the sentence rule, the vacuous-sentence guard, the word cap, the at-least-one-statement
+  guard, the excuse dropped, the excuse widened to any check, an excused absence counted as a pass) each turn them red. Docs:
+  `docs/systems/mcp-server.md`.
+- **A node that passed most of its research work is no longer quarantined by two misses of a lexical check.** A research answer
+  that fails the document fingerprint (`docanchor`) is a strike against the node that served it, and the second strike inside 30
+  minutes took the node out of the session's placement for 30 minutes ("quarantined until ..."), the whole point being to stop work
+  going to a node that answers about the wrong document. The check is lexical and misfired on honest answers (see the entry
+  above), so two misses of a node that had passed 48 of its 51 answers that day quarantined it while the rest of the fleet stood at
+  "queue full". A node that is truly off-document fails more often than it passes, so the
+  quarantine now needs at least two strikes that OUTNUMBER the node's passes of the same window: `Quarantine.Pass` records a result
+  that carried the fingerprint check and passed it (`runner.noteFingerprint`, at the remote result and at the delegator-side
+  rescue), a result with no such check says nothing, and passes age out with the strikes. A node with no passes is quarantined on
+  its second strike exactly as before. An honest absence (the entry above) is neither a pass nor a strike. A stated limit, on
+  purpose: a node that answers about the wrong document less often than about the right one (4 misses beside 6 passes in the
+  window) is not quarantined, because a failed fingerprint keeps its cross-seat retry, so such a node's miss is never delivered
+  as verified (one whose retry cannot be placed is published as a failed verification) and each miss costs one retry elsewhere, while idling a node on a lexical check costs the fleet a whole seat for the window. The
+  quarantine stays per server process and is never persisted. Tests
+  `internal/delegate/quarantine_pass_test.go`, written first: red before with `two failures after three passes quarantined a node
+  that answers about the right document`; six mutations (the outnumber rule, the two-strike floor, the pass record, the
+  carries-the-check guard, the call site, the window) turn them red. Docs: `docs/OPERATOR-GUIDE.md`.
+- **A verification retry is no longer refused for the first seat's `min_turn_sec` before a retry node is even chosen.** The retry
+  of a wrong answer (or an honest abstention, or the forced-final tool call above) goes to a DIFFERENT node, and the node it goes to
+  has its own floor, applied once it is chosen (`retryFloorOn`: its published `seat_rate`, the cold load and the final turn plus
+  the re-pack at its own rate). But the cheap check before that read the first attempt's own `min_turn_sec` for every retryable
+  shape except two (the seat-down and lost-root defers, exempted for exactly this reason), so a research digest that failed
+  acceptance on a seat whose cold load and two 8,192-token turns are measured at 1,112 s (3,379 s on a slow unified-memory
+  node, 889 to 951 s on the local pool) was refused its retry on a 300 s or 600 s contract before any node was asked, although
+  that seat had taken 20 to 325 s to give the answer: in one day 7 of the 14 verification retries skipped were refused that way
+  (the others fell to other rules: the chosen node's own floor, a busy retry seat, a fenced local seat, a rescue with no budget
+  left). The check before a node is chosen now reads the
+  configured floor (`agent_retry_min_sec`, else 10 s) alone; the chosen node's own floor, the budget left and the retry note
+  (`retry skipped: ... after choosing a retry node (floor ...s, min_turn_sec published by <node>)`) are unchanged, and a retry
+  node that publishes no rate still falls back to the first attempt's number, said in the note. Not changed, on purpose: a
+  VERIFICATION retry's wait for a busy retry seat keeps its placement-wait TTL (ADR 0073 decision 3: it is an optional second
+  opinion on an answer the subtask already holds); a retry of a run that produced nothing (seat-down, lost-root, forced-final tool
+  call) holds no answer, so it neither waits for that seat nor is refused for the failed seat's `min_turn_sec` (see the
+  forced-final entry above). Config, for the operator: with `agent_retry_min_sec` at 300 a default 300 s contract can never retry,
+  since what is left is always under it. Tests `internal/delegate/retry_first_seat_floor_test.go`, written first: red before with
+  `retry skipped: 299s of the 300s timeout_sec budget left after the first attempt (floor 1112s, min_turn_sec of the seat on
+  node-a)`; three mutations turn them red. Docs: `docs/OPERATOR-GUIDE.md`.
+- **A retry that found no node to go to is no longer published with an empty note.** When the engine considered the second
+  placement of a wrong answer or an honest abstention and no other node could take the contract, the result carried an empty
+  `retry_note` unless it was one of a few named shapes (a fence, a reservation, the call's deadline, a reasoned pin, or a defer that
+  promises a second placement: seat-down, lost-root, forced-final tool call). It read as a retry nobody considered, and a research
+  page skipped this way left nothing to log and nothing to fix. The note is now always there: `retry skipped: no other node could
+  take the contract after the first attempt on <node> (<outcome>); every eligible node was already tried or is not eligible`
+  (or `route local places nothing on another node`). Two tests that pinned the empty note of a bare route's skipped retry
+  (`TestRunRetryNeverLandsOnASeatTheSubtaskAlreadyUsed`, `TestTheBareRemoteRoutesRetryNoteNamesNoPinOnASeatlessBox`) now pin the
+  generic note, and the second still asserts that no pin wording appears where nothing was pinned. Tests
+  `internal/delegate/retry_nowhere_test.go`, written first: red before with `retry_note = "", want it to contain "retry
+  skipped"`; three mutations turn them red. Docs: `docs/systems/fleet-node.md`.
+
 ### Fixed — a re-pack that emptied the lists its answer held is refused, a re-pack the schema bounds is no longer skipped for the answer's length, and the delegator's rescue re-packs on the node that wrote the answer
 
 Two defects of the structured re-pack, both seen in one delegation of three subtasks (2026-10-12): a wrong success and a lost answer. Each had a finished, correct answer in hand.

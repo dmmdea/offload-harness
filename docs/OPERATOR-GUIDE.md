@@ -1081,7 +1081,9 @@ min_turn of the seat the retry lands on)` — a remote node's `/fleet/health` `s
 load) at its own `seat_budget`, the local seat's `seat-rates.json`, plus the re-pack term for a schema contract; the
 retry note names the publisher, and only a node that publishes no rate falls back to the first attempt's
 `min_turn_sec` (the 2026-09-10 shape: a 201 s floor from the 4B cleared, the retry landed on the 27B whose own floor
-was ≈ 484 s). `seat_budget` is also what a caller reads to MATCH budgets across seats — a delegator's config does not
+was ≈ 484 s). Since 0.184.0 the cheap check made BEFORE a retry node is chosen reads `agent_retry_min_sec` alone: it used to
+read the first attempt's `min_turn_sec` too, a number that belongs to a seat the retry never uses, and 7 of the 14 retries skipped in one day
+were refused for it ("floor 1112s, min_turn_sec of the seat on <node>") before any node was asked. `seat_budget` is also what a caller reads to MATCH budgets across seats — a delegator's config does not
 travel with the contract. Reference (2026-09-10, ledger-01 on both
 seats): the <node-b> 27B TP2 seat at ~30 tok/s needs ≈ 600 s thinking off / ≈ 730 s auto INCLUDING a 210 s cold load for a
 12-step, 8,192-token-final contract — a 600 s box default is at the edge and 900 s is the honest wall; the <node-c> 4B at
@@ -1397,7 +1399,9 @@ on every agent result; a defer whose reason starts with **`seat contended:`** wh
 to serve the seat: `concurrencyLimit` is not the knob), and **`seat down:`** when the seat's engine hung or died
 under the run and did not come back (ADR 0066); `summary.batches` on research
 calls that ran more than 8 pages; `summary.quarantined` when a fleet node was blocked for 30 min
-after two off-document answers (its reason appears among `probe_errors` as "quarantined until …").
+after two off-document answers that outnumber its passes of the same window (0.184.0: the fingerprint is lexical and
+misfires on an honest answer now and then, so a node that passed most of its work is not quarantined by two misses; its
+reason appears among `probe_errors` as "quarantined until …").
 
 **Capacity is your step — the wait only makes contention honest.** The 429 exists because ten
 reserved requests per model are shared by every session. Ready to paste into
@@ -1968,7 +1972,8 @@ Loop accounting on the wire (0.115.20): every `results[]` row carries the node's
 `stop_reason`, `stop_note` and `output_truncated` as the node reported them. Read them before
 trusting a `done`: `stop_note` beginning `forced final answer` means the step budget ran out
 and the last step extracted the answer without tools (0.115.19, register D-89) — a correct
-answer from an incomplete exploration; `output_truncated: true` means the final completion
+answer from an incomplete exploration (since 0.184.0 it may add that the seat first answered
+that step with a tool call and was re-asked once with it quoted: the answer is the second reply); `output_truncated: true` means the final completion
 ended on `length` and the text is a partial. Both used to be visible only in the delegation log.
 
 Acceptance lint (0.88.0, warn-only): every subtask's acceptance is linted at intake and the
@@ -1988,6 +1993,11 @@ llama-server actually served, hashed from live `/props`) — and the log line ad
 `delegator_version`/`delegator_build_sha256` for the acceptance/placement side. Paired
 cross-seat comparisons must refuse rows whose pins differ or are absent; absent means
 *unknown* (pre-0.81, or the seat was gone by probe time), never "same config".
+A node that answers a dispatch 503 or 429 for capacity ("queue full") is a place in line, not a
+failed subtask: the delegator outwaits it and re-places the subtask, and the attempt's corpus line
+carries `refusal: {status, retry_after_sec}`. `rig` and the fleet page read that line as a
+refusal, not a failure; the subtask's own outcome is the line that landed, or, when nothing took it,
+a terminal line under a job id of its own (a capacity defer, or the "placement refused" failure).
 
 | Failure | Fix |
 |---|---|

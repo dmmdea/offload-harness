@@ -29,14 +29,20 @@ const maxDelegations = 100
 var delegationRowFields = []string{
 	"ts", "job_id", "node", "seat", "placement_reason",
 	"deferred", "defer_class", "acceptance_pass", "wall_ms", "error",
+	// "refusal": {status, retry_after_sec} on the row of an attempt a node refused for capacity (503/429). That
+	// row is a place in line, not an outcome: the delegator outwaits it and the subtask lands elsewhere, so it is
+	// shown as what it is and is not an error (foldDelegationLog).
+	"refusal",
 }
 
 // foldDelegationLog reads today's and yesterday's delegation-log corpus
 // shards (day-sharded, BaseDir()/delegation-log/YYYY-MM-DD.jsonl — see
 // internal/delegate/run.go corpusPath), keeps the last maxDelegations rows,
 // and turns every deferred or acceptance-failed row into an Error (deduped
-// on "deleg|<job_id>"). A missing file is not an error — a fresh install or
-// a delegator that has never run has no corpus yet.
+// on "deleg|<job_id>"), except a row marked `refusal` (a node's capacity
+// refusal the delegator outwaited: a place in line, not a failure). A
+// missing file is not an error — a fresh install or a delegator that has
+// never run has no corpus yet.
 func (p *Poller) foldDelegationLog() {
 	dir := filepath.Join(p.cfg.BaseDir(), "delegation-log")
 	now := time.Now()
@@ -52,6 +58,9 @@ func (p *Poller) foldDelegationLog() {
 	defer p.mu.Unlock()
 	p.delegations = rows
 	for _, row := range rows {
+		if _, refused := row["refusal"]; refused {
+			continue
+		}
 		deferred := boolv(row, "deferred")
 		acceptancePass := boolv(row, "acceptance_pass")
 		if !deferred && acceptancePass {

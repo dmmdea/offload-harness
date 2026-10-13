@@ -464,15 +464,21 @@ func TestOnlyAJobANodeAckedCarriesAFleetJobID(t *testing.T) {
 			t.Fatalf("Run: %v", err)
 		}
 		finished, markers := finishedAndMarkers(t, cfg.LedgerPath)
-		if len(finished) != 1 || len(markers) != 0 {
-			t.Fatalf("ledger = %d finished row(s) and %d marker(s), want 1 and 0", len(finished), len(markers))
+		// Two rows: the refused attempt (a place in line, marked as a refusal in the corpus) and the failure the
+		// subtask ended as, under a job id of its own (refusal_row_test.go). Neither names a node job: none was held.
+		if len(finished) != 2 || len(markers) != 0 {
+			t.Fatalf("ledger = %d finished row(s) and %d marker(s), want 2 and 0", len(finished), len(markers))
 		}
-		row := finished[0]
-		if row.ReasonCode != ledger.ReasonQueueFull || row.JobID == "" {
-			t.Fatalf("row = reason_code %q job_id %q, want %q and a job id", row.ReasonCode, row.JobID, ledger.ReasonQueueFull)
+		if finished[0].JobID == finished[1].JobID {
+			t.Fatalf("both rows carry job id %q: the attempt and the failure it ended as are two things", finished[0].JobID)
 		}
-		if row.FleetJobID != "" {
-			t.Fatalf("fleet_job_id = %q on a dispatch the node refused: no node ever held that id", row.FleetJobID)
+		for _, row := range finished {
+			if row.ReasonCode != ledger.ReasonQueueFull || row.JobID == "" {
+				t.Fatalf("row = reason_code %q job_id %q, want %q and a job id", row.ReasonCode, row.JobID, ledger.ReasonQueueFull)
+			}
+			if row.FleetJobID != "" {
+				t.Fatalf("fleet_job_id = %q on a dispatch the node refused: no node ever held that id", row.FleetJobID)
+			}
 		}
 	})
 

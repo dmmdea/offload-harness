@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
@@ -157,9 +158,6 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 			continue
 		}
 		name := DocName(i, f.FinalURL, f.URL)
-		anchor := AnchorCheck(f.Text, goal)
-		src.DocName, src.Anchor = name, anchor
-		sources = append(sources, src)
 
 		head := fmt.Sprintf("The page at %s", f.URL)
 		if f.Title != "" {
@@ -178,18 +176,24 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 			fullGoal += defaultVerdictAsk
 		}
 
+		// The anchors are chosen off the goal THE SEAT IS HANDED, not only the caller's: the fixed sentences above
+		// ("Always end with a one-sentence verdict", the file's name and title, "most important first") are the goal's
+		// words too, and a page word that is one of them would let the goal echoed back restate the page.
+		anchor := AnchorCheck(f.Text, fullGoal)
+		src.DocName, src.Anchor = name, anchor
+		src.Fingerprinted = anchor != ""
+		sources = append(sources, src)
+
 		acc := []string{}
 		if anchor != "" {
 			acc = append(acc, anchor)
 		}
-		src.Fingerprinted = anchor != ""
-		sources[len(sources)-1] = src
 		acc = append(acc, derived...)
 		acc = append(acc, req.Acceptance...)
 
 		specs = append(specs, delegate.SubtaskSpec{AgentContract: core.AgentContract{
 			Goal:         fullGoal,
-			Context:      []core.ContextDoc{{Name: name, Text: f.Text}},
+			Context:      []core.ContextDoc{{Name: name, Text: WrapLongLines(f.Text, MaxLineChars)}},
 			OutputSchema: schema,
 			Acceptance:   acc,
 			Profile:      req.Profile,
@@ -198,6 +202,58 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 		}})
 	}
 	return specs, sources
+}
+
+// MaxLineChars is the longest line a context document is handed to a seat with. The agent's read_file cuts every line at
+// 2,000 characters and pages by line, so the rest of a longer line is out of the seat's reach; a page that arrives as
+// one 98,304-character line gave it 2,020 of them. 1,800 leaves the line number and the tool's own framing room under
+// that cap (a cross-package test pins the two).
+const MaxLineChars = 1800
+
+// WrapLongLines breaks every line of text that is longer than max runes into lines of at most max, at the last space in
+// the final quarter of the window (in the middle of the run when that quarter holds no space at all), never inside a
+// rune. The space it breaks at becomes the newline and nothing else is added or removed, so the words are the same words
+// in the same order; text whose lines all fit is returned as it came.
+func WrapLongLines(text string, max int) string {
+	if max <= 0 || len(text) <= max {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	changed := false
+	for i, line := range lines {
+		if utf8.RuneCountInString(line) <= max {
+			continue
+		}
+		changed = true
+		rs := []rune(line)
+		var b strings.Builder
+		for len(rs) > max {
+			cut := max
+			for j := max; j > max-max/4 && j > 0; j-- {
+				if rs[j-1] == ' ' || rs[j] == ' ' {
+					cut = j
+					break
+				}
+			}
+			head, tail := rs[:cut], rs[cut:]
+			// the space the line is broken at is the newline
+			for len(head) > 0 && head[len(head)-1] == ' ' {
+				head = head[:len(head)-1]
+			}
+			for len(tail) > 0 && tail[0] == ' ' {
+				tail = tail[1:]
+			}
+			b.WriteString(string(head))
+			b.WriteByte('\n')
+			rs = tail
+		}
+		b.WriteString(string(rs))
+		lines[i] = b.String()
+	}
+	if !changed {
+		return text
+	}
+	return strings.Join(lines, "\n")
 }
 
 // nonEmptyChecks asks for items only where the CALLER marked them: the first

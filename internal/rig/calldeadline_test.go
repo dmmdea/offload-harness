@@ -93,8 +93,14 @@ func TestTheCallDeadlineAxisIsPublishedWithARemedy(t *testing.T) {
 			seen = i
 		}
 	}
-	if seen < 1 || Precedence[seen-1] != AxisSeatInfra || Precedence[seen+1] != AxisTimeout {
-		t.Fatalf("precedence %v: the call-deadline axis belongs between seat-infra (a verdict the run reported) and timeout (the wall the pattern would otherwise match)", Precedence)
+	timeout := -1
+	for i, a := range Precedence {
+		if a == AxisTimeout {
+			timeout = i
+		}
+	}
+	if seen < 1 || Precedence[seen-1] != AxisSeatInfra || timeout < seen {
+		t.Fatalf("precedence %v: the call-deadline axis belongs right behind seat-infra (a verdict the run reported) and ahead of timeout (the wall the pattern would otherwise match)", Precedence)
 	}
 	rem, ok := Remedies[AxisCallDeadline]
 	if !ok || rem.Applies != "none" || rem.Key != "" {

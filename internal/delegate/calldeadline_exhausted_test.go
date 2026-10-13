@@ -38,7 +38,7 @@ func TestExhaustedSettledIsExhaustedUntilTheCallDeadlinePasses(t *testing.T) {
 	} {
 		cfg := testCfg(t)
 		r := &runner{cfg: cfg, call: call}
-		got := r.exhaustedSettled(core.AgentContract{Goal: "say done"}, last, refusals, why, time.Now())
+		got := r.exhaustedSettled(core.AgentContract{Goal: "say done"}, last, newPlacements(), refusals, why, time.Now())
 		if want := exhausted(last, refusals, why); !reflect.DeepEqual(got, want) {
 			t.Errorf("%s: outcome = %+v, want exactly what exhausted() builds (%+v)", name, got, want)
 		}
@@ -96,7 +96,7 @@ func TestExhaustedSettledCutsEveryShapeOfRefusedAttemptAsNeverPlaced(t *testing.
 	for _, tc := range cases {
 		cfg := testCfg(t)
 		r := &runner{cfg: cfg, call: pastDeadline(1)}
-		pr := r.exhaustedSettled(core.AgentContract{Goal: "say done"}, tc.last, tc.refusals, why, time.Now().Add(-250*time.Millisecond))
+		pr := r.exhaustedSettled(core.AgentContract{Goal: "say done"}, tc.last, newPlacements(), tc.refusals, why, time.Now().Add(-250*time.Millisecond))
 
 		res := pr.Result
 		if !pr.deadlineCut || pr.Err != "" || !res.Deferred || res.DeferClass != core.DeferClassBudget {

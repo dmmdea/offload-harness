@@ -178,11 +178,14 @@ type Server struct {
 	// installed caches what the last moved installed image hashed to, so a status call reads the whole executable
 	// only after its stat changed (stale_image.go).
 	installed installedImages
+	// exe is the stale-binary guard: the executable this server started from, compared with the file on disk when
+	// a door whose behaviour a release changes answers (stalebinary.go).
+	exe *exeWatch
 }
 
 func New(p *pipeline.Pipeline) *Server {
 	return &Server{p: p, askCache: askcache.New(), quarantine: delegate.NewQuarantine(0), pins: delegate.NewPinTally(), tenant: delegate.DefaultTenant(),
-		originSession: func() string { return ledger.ProcessOrigin().Session }}
+		originSession: func() string { return ledger.ProcessOrigin().Session }, exe: newExeWatch(readOwnExecutable)}
 }
 
 // WithConfigSource records the config file this server runs on, so a node added to its delegate_remotes joins the running
@@ -589,7 +592,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// unknown seat is a clean defer naming the seats seen.
 	srv.AddTool(&mcp.Tool{
 		Name:        "agent_rig",
-		Description: "The seat rigger, first slice (ADR 0036 P3a): classify THIS box's delegation-log failures for one seat onto exactly ONE failure axis each, in a published precedence order (seat-infra [incl. placement failures with no defer class] → call-deadline [a subtask the whole-call deadline cut: not evidence about the seat] → timeout → budget → abstention [an 'output failed schema' reason is schema-miss/invalid] → schema-miss[two-step-grounded|invalid] → anchor-miss[two-step-grounded] → loop → long-observation → tool-misuse → unclassified), and return the triage report: per axis the hits, the ELIGIBLE rows (trace-only axes count only rows that carry a trace), the weight, up to five evidence job ids with the deciding fact, and the pre-authored remedy where the harness's closed vocabulary has a lever (agent_seed_context_reads, max_observation_tokens, max_calls_per_tool, rewrite_error) or the honest 'not a rule matter' where it has none (seat errors, wall timeouts). It PROPOSES NOTHING on its own and applies nothing — adoption is a measured A/B on the seat (P3b). Reads the corpus files only; never calls a seat or the cloud. Use it after a batch of delegations to see what actually failed and why before tuning anything.",
+		Description: "The seat rigger, first slice (ADR 0036 P3a): classify THIS box's delegation-log failures for one seat onto exactly ONE failure axis each, in a published precedence order (seat-infra [incl. placement failures with no defer class] → call-deadline [a subtask the whole-call deadline cut: not evidence about the seat] → capacity [a full fleet: every node that could take it was busy for as long as the wait ran, or a node's 503/429 queue-full answer: not a seat's fault] → timeout → reasoning-starved [the completion went into the think block or came back empty] → final-tool-call [the last step offered no tools and the seat wrote a tool call, again after one re-ask: not a task too large] → budget → abstention [an 'output failed schema' reason is schema-miss/invalid] → schema-miss[two-step-grounded|invalid] → anchor-miss[two-step-grounded] → loop → long-observation → tool-misuse → unclassified), and return the triage report: per axis the hits, the ELIGIBLE rows (trace-only axes count only rows that carry a trace), the weight, up to five evidence job ids with the deciding fact, and the pre-authored remedy where the harness's closed vocabulary has a lever (agent_seed_context_reads, max_observation_tokens, max_calls_per_tool, rewrite_error; agent_call_deadline_sec / agent_placement_wait_sec for a full fleet) or the honest 'not a rule matter' where it has none (seat errors, wall timeouts, a seat that answers the last step with a tool call). A dispatch a node refused for capacity that the delegator outwaited and re-placed (the row's `refusal` marker) is no failure: it is counted on the report's own `refusals` line, outside the rows. It PROPOSES NOTHING on its own and applies nothing — adoption is a measured A/B on the seat (P3b). Reads the corpus files only; never calls a seat or the cloud. Use it after a batch of delegations to see what actually failed and why before tuning anything.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"seat":{"type":"string","description":"the seat alias exactly as corpus rows name it (e.g. qwen3.5-4b-vllm, agent-pool)"},"since":{"type":"string","description":"window back from now: <N>d or <N>h (default 7d), or an RFC3339 instant"},"node":{"type":"string","description":"only rows that ran on this node id (optional)"},"markdown":{"type":"boolean","description":"also return the markdown triage table (default false; the JSON report is always returned)"}},"required":["seat"]}`),
 	}, s.handleAgentRig)
 
@@ -682,6 +685,13 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 		return bad, nil
 	}
 	payload := s.statusPayload(ctx, s.p.Cfg(), section)
+	if note := s.staleBinaryNote(buildinfo.Version); note != "" {
+		payload["stale_binary"] = note
+	}
+	// The guard that reports a swapped binary says when it cannot: absent while it is watching.
+	if state := s.exe.guardState(); state != "" {
+		payload["stale_binary_guard"] = state
+	}
 	if s.configErr != nil {
 		// FIRST key, not just present: this is the one tool still answering while
 		// every other one defers, so the reason has to be the first thing read —
@@ -4371,7 +4381,7 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	results, sum = batch.Splice(results, sum, "subtask", nil)
 	// WireResponse is a struct, so "summary" marshals FIRST (roast delta 14) —
 	// jsonResult over a map would alphabetize results ahead of it.
-	res, jerr := jsonResult(delegate.WireResponse(results, sum, lints))
+	res, jerr := jsonResult(delegateWire{ResponseWire: delegate.WireResponse(results, sum, lints), StaleBinary: s.staleBinaryNote(buildinfo.Version)})
 	if jerr != nil || res == nil {
 		return res, jerr
 	}
@@ -4681,6 +4691,15 @@ type researchWire struct {
 	Results       any    `json:"results"`
 	ResultSources []int  `json:"result_sources"`
 	Sources       any    `json:"sources"` // []research.Source after untrusted.Value
+	// StaleBinary: the executable on disk is no longer the one this server started from (stalebinary.go).
+	StaleBinary string `json:"stale_binary,omitempty"`
+}
+
+// delegateWire is agent_delegate's answer: the engine's response, summary first, and the stale-binary note when
+// the executable this server started from has changed on disk.
+type delegateWire struct {
+	delegate.ResponseWire
+	StaleBinary string `json:"stale_binary,omitempty"`
 }
 
 // handleResearch — offload_research. Fetch (guarded, delegator-side) → Build
@@ -4796,6 +4815,7 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 	res, jerr := jsonResult(researchWire{
 		Summary: wire.Summary, Untrusted: researchUntrustedNotice, Partial: rerr != nil, Error: partialErr,
 		Results: untrustedOrNote(wire.Results), ResultSources: resultSources[:len(results)], Sources: untrustedOrNote(sources),
+		StaleBinary: s.staleBinaryNote(buildinfo.Version),
 	})
 	if jerr != nil || res == nil {
 		return res, jerr

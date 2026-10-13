@@ -77,12 +77,16 @@ func TestAWaitCutAfterARefusalIsRecordedLikeAnyOtherCut(t *testing.T) {
 	}
 }
 
-// TestASettledOutcomeThatIsNotACutKeepsItsAttemptsRow: the closing row is for a CUT only.
-// A capacity wait that ran out of its own bound after a refused attempt is still recorded
-// by the attempt's row alone, exactly as before. Two bounds end a wait short of the call
+// TestASettledOutcomeThatIsNotACutIsClosedByARowOfItsOwnToo: a capacity wait that ran out of
+// its own bound after a refused attempt is recorded by a closing row of its own, like a cut
+// is. It used to be recorded by the refused attempt's row alone ("the last attempt's row
+// stands"), which said "dispatch ... 503" for a subtask that was in fact lost to a full
+// fleet, and the rigger filed that row under the serving stack. The refused attempt's row is
+// now a refusal (refusal_row_test.go), so the defer has the row that says how the subtask
+// ended, under the job id the caller was given. Two bounds end a wait short of the call
 // deadline: its own TTL (a call with no deadline, agent_placement_wait_sec) and, since ADR
 // 0073, the call's deadline less the reserve (a call that has one).
-func TestASettledOutcomeThatIsNotACutKeepsItsAttemptsRow(t *testing.T) {
+func TestASettledOutcomeThatIsNotACutIsClosedByARowOfItsOwnToo(t *testing.T) {
 	cases := []struct {
 		name string
 		opts func() *RunOptions
@@ -106,10 +110,17 @@ func TestASettledOutcomeThatIsNotACutKeepsItsAttemptsRow(t *testing.T) {
 				t.Fatalf("result %+v (cut %v), want the capacity wait's own defer, not a call-deadline cut", r, results[0].deadlineCut)
 			}
 			rows, _ := ledger.ReadAll(cfg.LedgerPath)
+			var closing int
 			for _, row := range rows {
-				if row.JobID == results[0].JobID && strings.HasPrefix(row.Reason, "capacity wait") {
-					t.Fatalf("a wait that ended on its own bound was recorded by a closing row too: %+v", row)
+				if row.JobID == results[0].JobID {
+					closing++
+					if !strings.HasPrefix(row.Reason, "capacity wait") || !row.Deferred {
+						t.Fatalf("the row under the published id = %+v, want the capacity wait's closing row", row)
+					}
 				}
+			}
+			if closing != 1 {
+				t.Fatalf("%d ledger row(s) under the published id %q, want exactly 1 closing row", closing, results[0].JobID)
 			}
 		})
 	}

@@ -195,6 +195,14 @@ const SeatNotServingReason = "seat not serving: "
 // serves) without matching prose.
 const SeatWarmFailedReason = "seat warm-up failed: "
 
+// ForcedFinalToolCallReason opens the stop note, and so sits inside the defer reason ("step budget exhausted (N
+// steps): forced final step: ..."), of a run whose forced final step (the last step: no tools offered, the answer
+// asked for) was answered with a tool call, written as text or parsed, even after the seat was re-asked once with
+// that quoted. It is a constant and not a sentence typed in three places because the loop writes it, the rigger
+// reads it to put the shape on its own axis instead of "a task too large for one contract", and the delegator
+// reads it to give the contract another seat (delegate.FinalToolCallDefer).
+const ForcedFinalToolCallReason = "forced final step: no tools were offered and the answer was asked for"
+
 // RootGoneReason prefixes the defer a run files when its own file tools, or its write
 // door, could not open its workspace root (register C-79): the directory the seat reads
 // (the contract's context documents, or the write door's tree) was no longer there,

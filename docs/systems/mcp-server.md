@@ -431,6 +431,14 @@ limit that does not depend on it.
 
 ### The research lane (`offload_research`)
 
+*A page is handed to the seat in lines it can read (0.184.0).* The agent's `read_file` cuts every line at 2,000 characters and
+pages by line, so the rest of a longer line is out of the seat's reach: a page that arrives as one 98,304-character line gave it
+its first 2,020 characters, and research runs on such pages reached the forced final step in 38 of 117 cases against 36 of 1,283
+for pages with ordinary lines. `research.Build` therefore wraps each context document at `research.MaxLineChars` (1,800, pinned
+under `agent.ReadFileLineCap`): at the last space in the final quarter of the window, in the middle of a run with no space, never
+inside a rune, with the space becoming the newline and nothing else added or removed. A page whose lines all fit is handed over
+byte for byte; the fetched text that anchors, fingerprints and verifies quotes is the page as fetched.
+
 `offload_research` is the one-call answer to "this leg needs the web, so it goes to a cloud
 subagent". It takes a goal and up to 12 public URLs, fetches every page DELEGATOR-side under
 a public-web guard in TWO halves, strips it to text (dependency-free
@@ -461,6 +469,23 @@ regex (tagged `docanchor`) over the page's top prose content words — taken fro
 and the headings that introduce them, never from identifier-shaped tokens, UI or markup
 vocabulary, and never from the goal (0.141.1, register C-65), so an echoed goal cannot pass as
 verified while a faithful digest passes by restating any one of about two dozen words.
+Two faithful shapes used to fail it and now pass (0.184.0): an **inflection** (each anchor is matched in its singular, so
+"programmer" restates a page that says "programmers"; the goal's own words are excluded in the singular too), and an **honest
+absence**. The anchors are chosen off the whole goal the seat is handed (the fixed sentences `Build` adds, the file's name and
+title, the caller's questions), not only the caller's, and the regex holds the page's words and nothing else, so no sentence the
+goal contains satisfies it: the goal echoed back fails, and the delegator's lint does not call the contract parrot-passable.
+An honest absence restates no page word (the goal tells the seat to say so in the goal's own vocabulary, which the anchors
+exclude by construction), so it is excused by the delegator from the STRUCTURE of the digest and not from a phrase in the
+regex: `delegate.EvalAcceptance` drops the fingerprint failure of a result whose structured digest is
+`delegate.HonestAbsence`: an object in which every string at any depth (a list entry as much as a field) is empty or a short
+statement (60 words at most) that the page does not carry what was asked ("not on page", "does not contain/address/mention/…",
+"not documented/stated/…"), at least one such statement, no number or boolean, no second sentence that says what the page does
+hold, no contrast word ("but", "however", …), and no report of a failure to read the file ("could not read", "not found", "the
+file is missing": an error, not a finding). A stock phrase beside a claim, the goal echoed back, and "I could not read the file,
+so the page does not address it" still fail it. The excuse counts for the node as neither a strike nor a pass
+(`Quarantine.Pass`): an absence is no evidence that the node reads the right document. What no lexical rule can tell is a seat
+that did not read the page and reports "the page does not address it" without saying that it failed; that is delivered as an
+absence, as an honest one is, and only a second seat would tell them apart.
 
 What a digest owes beyond that is one design (register C-74): **presence is declared,
 non-emptiness is asked for only where the caller marked it, and the default digest owes that it
@@ -817,6 +842,20 @@ read-only unless deliberately widened. See
 
 ## Observability and debugging
 
+- **A server that started before the binary it runs was replaced says so (`stale_binary`).** An MCP server is spawned once
+  per client and keeps the executable image it started from, so a release swapped in on disk afterwards is not in that
+  process: two servers that had started on 0.180.0 were still stamping their rows with it eight hours after a 0.181.0 and then
+  a 0.182.0 binary had been swapped in, so the capacity-wait fix those releases carry could not run for them. The server reads the size and modification time of its own executable at start
+  (`internal/mcpserver/stalebinary.go`) and compares them with the file on disk when `agent_delegate`, `offload_research` or
+  `offload_status` answers. When they differ, or the path is gone (an OS that unlinks the old file), the answer carries a
+  top-level `stale_binary` string naming the running version and the two stamps and saying to restart the MCP client, and the
+  log says it once. It never exits, re-executes or cuts a call (that would drop the jobs the server holds), a stat that fails
+  for any other reason accuses nothing, and a server that could not read its own file at start has nothing to compare with.
+  The running version is the compiled-in one; the version on disk is not read (that would run the new binary).
+  The guard says when it is not watching, because a guard against a silent failure must not be one: a server that could not
+  stamp its own executable at start (or whose path was already gone) logs one `the stale-binary guard is inactive` line with the
+  reason, and a stat that fails later is logged once; `offload_status` carries a top-level `stale_binary_guard` string
+  (`inactive: ...` for the first, `unreadable: ...` for as long as the second lasts) and no such key while the guard is watching.
 - `offload_status` reports harness state to the calling agent: the configured model roster (the one
   table in `config.ModelRoutes`, shared with `doctor`/`acceptance`/`report`), a live `/v1/models`
   probe through [`internal/swapclient`](../../internal/swapclient/swapclient.go), and
