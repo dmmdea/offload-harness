@@ -200,7 +200,8 @@ test("parseCli: --engine finetuned needs --model and --base-dir, and says which 
   for (const [given, missing] of [[[], "--model"], [["--base-dir", "/m/b"], "--model"], [["--model", "/m/x"], "--base-dir"]]) {
     const r = parseCli([...BASE, "--engine", "finetuned", ...given]);
     assert.equal(r.ok, false, `finetuned with ${given.join(" ") || "neither --model nor --base-dir"} was accepted; the worker would exit 2 after the lock`);
-    assert.ok(r.error.includes(missing), `the refusal must name ${missing}: ${r.error}`);
+    // the message always names both flags in its explanation, so it is the "needs <flag>" part that must be the missing one
+    assert.ok(r.error.includes(`needs ${missing} `), `the refusal must say it needs ${missing}: ${r.error}`);
   }
 });
 
