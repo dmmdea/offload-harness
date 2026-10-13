@@ -106,7 +106,9 @@ test("buildWorkerArgs: the finetuned argv is unchanged (model, base-dir, then th
 test("parseCli: a sampling value that is not a finite number refuses, naming the flag, for either engine", () => {
   for (const engine of [[], ["--engine", "finetuned"]]) {
     for (const k of SIX_NAMES) {
-      for (const bad of ["abc", "", " ", "NaN", "Infinity", "-Infinity", "1e999", "0x10", "1,5", "0.5x", "--lang"]) {
+      // "-1e-2" and "-5." are numbers, but before Python 3.14 argparse reads a dash-led token of that shape as a
+      // flag ("expected one argument"), after the lock is taken; write them -0.01 and -5
+      for (const bad of ["abc", "", " ", "NaN", "Infinity", "-Infinity", "1e999", "0x10", "1,5", "0.5x", "--lang", "-1e-2", "-5."]) {
         const r = parseCli([...BASE, ...engine, "--" + k, bad]);
         assert.equal(r.ok, false, `--${k} ${JSON.stringify(bad)} (${engine.join(" ") || "default engine"}) was accepted`);
         assert.ok(r.error.includes("--" + k), `the refusal for --${k} ${JSON.stringify(bad)} must name the flag: ${r.error}`);
@@ -116,7 +118,7 @@ test("parseCli: a sampling value that is not a finite number refuses, naming the
 });
 
 test("parseCli: finite numbers in every spelling the worker's float() reads are accepted and forwarded verbatim", () => {
-  for (const good of ["0.3", "1", "0", "-0.5", ".5", "5.", "1e-2", "+2", "2E3"]) {
+  for (const good of ["0.3", "1", "0", "-1", "-0.5", "-.5", ".5", "5.", "1e-2", "+2", "2E3"]) {
     const r = parseCli([...BASE, "--cfg-weight", good]);
     assert.equal(r.ok, true, `${good}: ${r.error}`);
     assert.equal(r.args[r.args.indexOf("--cfg-weight") + 1], good);

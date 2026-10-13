@@ -88,8 +88,10 @@ export const USAGE = 'usage: node tts.mjs <out.wav> "<text>" [--engine generalis
   + "[--model <f> --base-dir <d> (finetuned only)] [--temperature F] [--cfg-weight F] [--exaggeration F] "
   + "[--repetition-penalty F] [--min-p F] [--top-p F] [--no-lock]";
 
-// a decimal number the python workers' float() reads too (no hex, no whitespace, no nan/inf spellings)
-const DECIMAL = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+// A decimal number the python workers read too: float() takes it (no hex, no whitespace, no nan/inf spelling) and, for a
+// negative one, argparse takes it as a VALUE on every python 3: before 3.14 a dash-led token is a value only when it is
+// -N or -N.N / -.N, anything else ("-1e-2", "-5.") is read as a flag and the worker exits 2 after the lock was taken.
+const DECIMAL = /^(?:\+?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?|-(?:\d+|\d*\.\d+))$/;
 
 // checkFlags judges the parsed flags and returns the reason to refuse them, or null to accept. Nothing
 // the operator typed is dropped silently: an unknown flag, a value flag with no value (last on the line,
