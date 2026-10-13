@@ -433,6 +433,14 @@ func ReadShards(dir string, since, until time.Time) ([]Row, int, error) {
 	return rows, skipped, nil
 }
 
+// nodeMatches reports whether a row belongs to node: every row when node is empty, else a row whose `node` is node or whose
+// node stamped node on its own result (result.node_id). A row's `node` is the id the placement used (the node_id the node's
+// health publishes); before that it was the id the node stamped on its result, which for a node launched with --node-id was the
+// OS hostname. The stamp is still on every row, so a node picked by either name selects the rows written before and after.
+func nodeMatches(r Row, node string) bool {
+	return node == "" || r.Node == node || (r.Result != nil && r.Result.NodeID == node)
+}
+
 // Build classifies the rows for one seat (alias match on the row's seat,
 // optional node) and assembles the report. Deterministic for a fixed input:
 // rows are processed in order, examples are the first five hits.
@@ -443,7 +451,7 @@ func Build(rows []Row, seat, node string, since, until time.Time) (Report, error
 	var mine []Row
 	for _, r := range rows {
 		seen[r.Seat] = true
-		if r.Seat != seat || (node != "" && r.Node != node) {
+		if r.Seat != seat || !nodeMatches(r, node) {
 			continue
 		}
 		mine = append(mine, r)
@@ -621,7 +629,7 @@ func clip(s string, n int) string {
 func Verdicts(rows []Row, seat, node string) []Verdict {
 	var out []Verdict
 	for _, r := range rows {
-		if r.Seat != seat || (node != "" && r.Node != node) || !r.Bad() {
+		if r.Seat != seat || !nodeMatches(r, node) || !r.Bad() {
 			continue
 		}
 		out = append(out, Classify(r))

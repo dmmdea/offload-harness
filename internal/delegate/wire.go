@@ -9,6 +9,7 @@ package delegate
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 )
@@ -312,7 +313,11 @@ func lintFor(lints [][]string, i int) []string {
 // differs from the node the placement used (pr.Node); "" otherwise. See
 // ResultWire.NodeReported.
 func NodeReported(pr PlacedResult) string {
-	return ""
+	id := pr.Result.NodeID
+	if pr.Node == "" || strings.EqualFold(id, pr.Node) {
+		return ""
+	}
+	return id
 }
 
 // wireCallsMax bounds ResultWire.Calls (register D-99): the last eight
@@ -451,6 +456,8 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 		case placedRemote:
 			rw.RanOn = RanOnNode
 		}
+		// The id the node's own result named it by, when that is not the one the placement used (Node above).
+		rw.NodeReported = NodeReported(pr)
 		if pr.Err != "" {
 			rw.Failed = true
 			rw.Reason = pr.Err

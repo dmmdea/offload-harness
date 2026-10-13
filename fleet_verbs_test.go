@@ -167,9 +167,9 @@ func TestFleetServeStampsItsResolvedNodeIDOnTheConfigThePipelineReads(t *testing
 				t.Errorf("config handed to the pipeline has fleet_node_id %q, want %q: the result envelope would name the node differently from its health", got.FleetNodeID, nodeID)
 			}
 			// Nothing else on the config moves.
-			want := cfg
-			want.FleetNodeID = nodeID
-			if !reflect.DeepEqual(got, want) {
+			rest := got
+			rest.FleetNodeID = cfg.FleetNodeID
+			if !reflect.DeepEqual(rest, cfg) {
 				t.Errorf("fleetServeConfig changed a field other than fleet_node_id")
 			}
 		})

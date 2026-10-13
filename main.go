@@ -2797,6 +2797,7 @@ func fleetServeParams(listenFlag, nodeIDFlag string, trusted bool, cfg config.Co
 // fleetServeConfig returns cfg with the node id fleet-serve resolved (fleetServeParams) set as the id the pipeline stamps
 // on its result envelopes, so a node names itself one way in /fleet/health, in a queue claim and on every result.
 func fleetServeConfig(cfg config.Config, nodeID string) config.Config {
+	cfg.FleetNodeID = nodeID
 	return cfg
 }
 
@@ -2832,7 +2833,7 @@ func runFleetServe(args []string) error {
 	fs.String("config", "", "config file path")
 	listenFlag := fs.String("listen", "", "listen address (default: config fleet_listen, 127.0.0.1:18811)")
 	trusted := fs.Bool("listen-trusted-network", false, "allow --listen to bind beyond loopback (the Tailscale address). The fleet endpoints are UNAUTHENTICATED; set this ONLY on a network you fully trust — and NEVER bind 0.0.0.0.")
-	nodeIDFlag := fs.String("node-id", "", "node id advertised in /fleet/health (default: config fleet_node_id, else the hostname)")
+	nodeIDFlag := fs.String("node-id", "", "node id advertised in /fleet/health, stamped on this node's results and used in its queue claims (default: config fleet_node_id, else the hostname)")
 	_ = fs.Parse(args)
 	cfg, src := loadCfgWithSource(fs)
 	// Before ANY state is touched: a node that cannot prove its own config must
@@ -2887,6 +2888,9 @@ func runFleetServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The pipeline stamps cfg.FleetNodeID on every result envelope, and /fleet/health and the queue claim take nodeID: one
+	// name for the node in all three, whichever way the id was given (the installers pass --node-id and write no fleet_node_id).
+	cfg = fleetServeConfig(cfg, nodeID)
 	if *trusted {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] WARNING: --listen-trusted-network set — the UNAUTHENTICATED fleet "+
 			"endpoints are exposed beyond loopback on %q. Anyone who can reach them can run renders on this GPU.\n", listen)

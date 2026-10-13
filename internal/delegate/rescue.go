@@ -110,7 +110,7 @@ func rescueSchemaMiss(ctx context.Context, rescue RescueFunc, contract core.Agen
 		if seat == "" {
 			seat = strings.TrimSpace(pr.Seat)
 		}
-		ctx = WithRescueOrigin(ctx, RescueOrigin{Base: pr.ranBase, Seat: seat, Node: pr.Result.NodeID})
+		ctx = WithRescueOrigin(ctx, RescueOrigin{Base: pr.ranBase, Seat: seat, Node: pr.Node})
 	}
 	got, err := rescue(ctx, contract, pr.Result.Output, budget)
 	if err == nil {
@@ -220,7 +220,7 @@ type RescueOrigin struct {
 	Base string
 	// Seat is the seat that wrote the answer on that node (the wire result's seat).
 	Seat string
-	// Node is the node's id, for a note.
+	// Node is the node's id as the placement used it (results[].node), for a note.
 	Node string
 }
 
