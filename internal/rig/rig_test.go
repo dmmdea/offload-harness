@@ -270,16 +270,19 @@ func TestNodeFilterMatchesThePlacementIdAndTheIdTheNodeStamped(t *testing.T) {
 		row("old", func(r *Row) { r.Node = "host-a"; r.Result.NodeID = "host-a" }),
 		// another node, to prove the filter still filters
 		row("other", func(r *Row) { r.Node = "id-b"; r.Result.NodeID = "host-b" }),
+		// a row whose dispatch failed before any node answered: it carries no result at all
+		row("noresult", func(r *Row) { r.Node = "id-c"; r.Result = nil; r.Error = "dispatch failed" }),
 	}
 	for _, tc := range []struct {
 		node     string
 		wantRows int
 		wantJobs []string
 	}{
-		{"", 3, []string{"new", "old", "other"}}, // control: no filter selects every row
-		{"id-b", 1, []string{"other"}},           // control: a node's own id selects only its rows
-		{"id-a", 1, []string{"new"}},             // the placement id finds the new row
-		{"host-a", 2, []string{"new", "old"}},    // the old name finds both the old row and the new row's stamp
+		{"", 4, []string{"new", "old", "other", "noresult"}}, // control: no filter selects every row
+		{"id-b", 1, []string{"other"}},                       // control: a node's own id selects only its rows
+		{"id-c", 1, []string{"noresult"}},                    // control: a row with no result is selected by its node alone
+		{"id-a", 1, []string{"new"}},                         // the placement id finds the new row
+		{"host-a", 2, []string{"new", "old"}},                // the old name finds both the old row and the new row's stamp
 	} {
 		rep, err := Build(rows, "seat-a", tc.node, since, until)
 		if err != nil {
