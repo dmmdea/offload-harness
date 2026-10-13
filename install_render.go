@@ -1023,12 +1023,27 @@ func auditCPUMoEFile(text string) (violations, notes []servingtmpl.Violation) {
 // its UUIDs. The caller who knows says so (otherBox, the --other-box flag): the rules are skipped with
 // a line that says why, and every other rule still runs. Every violation says what table it was judged
 // against and how to audit a foreign file.
+//
+// The same card-table read also serves the display-cap-unseen note (servingtmpl.AuditDisplayCapUnseen), once per
+// file: gpu_display_cap_pct bounds the display card, a model llama-swap loads there is not placed by the allocator,
+// and a yaml states no VRAM footprint, so nothing can be judged here; the note names the entries that may sit on the
+// card the driver flags as the display card (proxy: seats, entries with no pin, entries pinned onto it) and points
+// to `gpu status`, which reads the card itself. It is a note, never a violation and never an exit code, and it needs
+// the table for a file that has a proxy: entry even when nothing pins a device. A file with neither reads nothing.
 func auditPinsFile(text string, otherBox bool) (violations, notes []servingtmpl.Violation, skipped string) {
-	if !servingtmpl.PinsCUDADevices(text) {
+	pins := servingtmpl.PinsCUDADevices(text)
+	if !pins && !servingtmpl.HasProxyEntry(text) {
 		return nil, nil, ""
 	}
+	const (
+		withNote = "; the display-cap-unseen note is not applied either"
+		noteOnly = "display-cap-unseen note not applied"
+	)
 	if otherBox {
-		return nil, nil, "pin rules not applied (--other-box: the file belongs to another machine, and the rules compare its device pins with THIS box's cards)"
+		if pins {
+			return nil, nil, "pin rules not applied (--other-box: the file belongs to another machine, and the rules compare its device pins with THIS box's cards)" + withNote
+		}
+		return nil, nil, noteOnly + " (--other-box: the file belongs to another machine, and the note names which of its entries sit on THIS box's display card)"
 	}
 	devs, err := renderCardTable()
 	if err != nil || len(devs) == 0 {
@@ -1036,19 +1051,25 @@ func auditPinsFile(text string, otherBox bool) (violations, notes []servingtmpl.
 		if err != nil {
 			why = err.Error()
 		}
-		return nil, nil, "no card table: pin rules not applied (" + why + ")"
+		if pins {
+			return nil, nil, "no card table: pin rules not applied (" + why + ")" + withNote
+		}
+		return nil, nil, "no card table: " + noteOnly + " (" + why + ")"
 	}
 	cards, _ := gpuprobe.BuildCards(devs, "")
-	_, verbatim := verbatimStamp(text)
-	for _, v := range servingtmpl.AuditPins(text, cards) {
-		if v.Rule == "pin-by-index" && verbatim {
-			v.Text += " [verbatim render: the seeds pin by index because a seed cannot carry a UUID; reported, not failed]"
-			notes = append(notes, v)
-			continue
+	if pins {
+		_, verbatim := verbatimStamp(text)
+		for _, v := range servingtmpl.AuditPins(text, cards) {
+			if v.Rule == "pin-by-index" && verbatim {
+				v.Text += " [verbatim render: the seeds pin by index because a seed cannot carry a UUID; reported, not failed]"
+				notes = append(notes, v)
+				continue
+			}
+			v.Text += " [judged against THIS box's cards; for a file that belongs to another machine pass --other-box]"
+			violations = append(violations, v)
 		}
-		v.Text += " [judged against THIS box's cards; for a file that belongs to another machine pass --other-box]"
-		violations = append(violations, v)
 	}
+	notes = append(notes, servingtmpl.AuditDisplayCapUnseen(text, cards)...)
 	return violations, notes, ""
 }
 
@@ -1105,13 +1126,16 @@ func seatIDs(seats []*vllmseat.Spec) map[string]bool {
 // `note:` line and does not fail the audit. A device pin is read against this box's card table
 // (A-87, auditPinsFile): an index pin on identical cards and a pin that names no card. --other-box
 // says the files belong to another machine and skips those rules, which only make sense for this box.
+// The same table read gives the display-cap-unseen note for a file with a proxy: seat, an unpinned entry
+// or a pin onto the display card (servingtmpl.AuditDisplayCapUnseen): a note, never a violation, and no
+// config is read for it (the cap it states is the default, and says so).
 //
 // FLAGS COME BEFORE FILES (`audit-yaml --against-render FILE...`): Go's flag
 // package stops parsing at the first non-flag argument.
 func runAuditYAML(args []string) error {
 	fs := flag.NewFlagSet("audit-yaml", flag.ExitOnError)
 	against := fs.Bool("against-render", false, "also re-derive each file from THIS binary's tier seeds and report MATCH / STALE(keys) / UNSTAMPED / HAND-EDITED")
-	otherBox := fs.Bool("other-box", false, "the files belong to ANOTHER machine: skip the pin rules, which compare a file's device pins with THIS box's cards (every other rule still runs)")
+	otherBox := fs.Bool("other-box", false, "the files belong to ANOTHER machine: skip the pin rules and the display-cap-unseen note, which compare a file with THIS box's cards (every other rule still runs)")
 	_ = fs.Parse(args)
 	files := fs.Args()
 	if len(files) == 0 {
