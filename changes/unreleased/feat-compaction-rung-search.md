@@ -4,10 +4,10 @@
   that thins older search listings: the grouped `search_files` output and bare `path:line:text` lines (as `grep -rn` or ripgrep
   print), alone or inside the `exit=` / `--- stdout ---` / `--- stderr ---` framing of `run_shell` and `run`. Each line is scored
   with BM25 against the objective (the last user message of the protected preamble, taken as its first 48 distinct terms in order
-  of appearance; the line's own path counts as part of the line), error-looking lines get a fixed boost, and up to 30 lines, 5 per file and 15 files are kept, chosen round-robin across files
+  of appearance; the line's own path counts as part of the line), error-looking lines get a fixed boost, and up to 30 lines, 5 per file and 15 files are kept (chosen to match the values shown in the upstream configuration example), chosen round-robin across files
   and written back in listing order under a counted footer (a 100-match listing over 20 files ends `[... 70 of 100 lines elided, 5 of 20 files elided ...]`).
   The tool's own "more matches" or "truncated" note is kept. The rung is gated on the call that produced the body: the result's tool-call id is mapped to its call, and only `search_files`
-  (grouped form) and a `run_shell` or `run` call whose command starts with `grep`, `rg`, `ag`, `ack` or `git grep` (flat form) qualify, so
+  (grouped form) and a `run_shell` or `run` call whose command starts with `grep`, `rg`, `ag`, `ack` or `git grep` (flat form) qualify (a command that chains another one after the search with an unquoted `;`, `&&`, `||`, `&` or newline does not, since the body then holds that command's output too; a plain pipe still qualifies), so
   the `path:line:col:text` diagnostics of flake8, ruff, `shellcheck -f gcc` or rubocop, a body with no matching call and an id claimed
   by two different calls are left untouched. Anything that is not, line for line, one of those shapes (the `web_search` list,
   `mode:"files"` output, test output, an error result, binary or non-UTF-8 text) comes back untouched, and so does a result that is

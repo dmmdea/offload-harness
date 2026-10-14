@@ -490,7 +490,7 @@ for older tool bodies that are search listings: the grouped `search_files` outpu
 `exit=` / `--- stdout ---` / `--- stderr ---` framing of `run_shell` and `run`. The rung is gated on the
 call that produced the body: the result's tool-call id is mapped to its call, and only `search_files`
 (grouped form) and a `run_shell` or `run` call whose command starts with `grep`, `rg`, `ag`, `ack` or
-`git grep` (flat form) qualify. A linter such as flake8, ruff, `shellcheck -f gcc` or rubocop prints the
+`git grep` (flat form) qualify; a command that chains another one after the search (an unquoted `;`, `&&`, `||`, `&` or newline, found by a quote-aware scan) does not, because the body then holds that command's output too, while a plain pipe (`grep x f | head`) still does. A linter such as flake8, ruff, `shellcheck -f gcc` or rubocop prints the
 same `path:line:col:text` lines, and every one of its diagnostics is something the agent must fix, so
 its output, a body with no matching call and an id claimed by two different calls are left alone.
 Everything else (the `web_search` list, `mode:"files"` output, test output, an error result) is left
@@ -501,7 +501,7 @@ body. Each line is scored with BM25 against the objective (the last user message
 preamble, the one task text that is the same on every step; the line's own path counts as part of the
 line), lines that look like errors (`error`, `fail`, `panic`, `exception`, `fatal`) get a fixed boost, and
 the survivors are chosen round-robin across files, best score first, up to 30 lines, 5 per file and 15
-files (the defaults of the idea's documented configuration), then written back in listing order under a
+files (chosen to match the values shown in the upstream configuration example), then written back in listing order under a
 footer (a 100-match listing over 20 files ends `[... 70 of 100 lines elided, 5 of 20 files elided ...]`: 30 lines and 15 files are the most
 that survive, and a test pins this exact line); the tool's own "more matches" or "truncated" note is kept. The result opens with the skeleton disclosure line, so the rest of the ladder,
 the re-execute-on-repeat path (ADR 0016) and the corpus harvest treat it as the compaction artifact it
