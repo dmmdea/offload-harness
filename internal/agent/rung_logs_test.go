@@ -283,6 +283,23 @@ func TestLogCollapseNeverFoldsIdenticalSignalLines(t *testing.T) {
 	}
 }
 
+func TestLogCollapseKeepsTheTailWindowOfABodyThatEndsInARun(t *testing.T) {
+	// The last four lines are part of the run but belong to the tail window:
+	// they stay, and only the run before them folds.
+	run := "retrying the build cache lookup"
+	in := lcJoin(lcHead, lcRepeat(run, 40))
+	got, ok := logCollapse(in)
+	if !ok {
+		t.Fatal("must collapse")
+	}
+	if n := strings.Count(got, run+"\n"); n != 5 {
+		t.Errorf("want the representative plus the four tail lines (5), got %d:\n%s", n, got)
+	}
+	if !strings.Contains(got, "[... 35 similar lines folded ...]\n"+strings.Repeat(run+"\n", 4)+"[log-collapse: folded") {
+		t.Errorf("the four tail lines must follow the marker unchanged:\n%s", got)
+	}
+}
+
 func TestLogCollapseWindowsApplyToRawLineIndices(t *testing.T) {
 	// A run that starts inside the head window: only the part past the window
 	// folds, the window lines stay verbatim and in place.
@@ -311,8 +328,8 @@ func TestLogCollapseMinimumRunIsThree(t *testing.T) {
 	for k := 0; k < 12; k++ {
 		c := 'a' + k%2
 		pairs = append(pairs,
-			fmt.Sprintf("GET /%c 200 5ms handled by the worker pool", c),
-			fmt.Sprintf("GET /%c 200 6ms handled by the worker pool", c))
+			fmt.Sprintf("GET /%c 200 5ms handled by the worker pool, which echoes the whole query string and the full list of response headers back into the log line", c),
+			fmt.Sprintf("GET /%c 200 6ms handled by the worker pool, which echoes the whole query string and the full list of response headers back into the log line", c))
 	}
 	in := lcJoin(lcHead, pairs, lcTail)
 	if got, ok := logCollapse(in); ok || got != in {
@@ -483,7 +500,7 @@ func TestLogCollapseFailsClosedOnUnexpectedShapes(t *testing.T) {
 		"empty":                     "",
 		"single line":               strings.Repeat("x", 2000),
 		"two lines":                 strings.Repeat("x", 1000) + "\n" + strings.Repeat("y", 1000),
-		"below the size floor":      lcJoin(lcHead[:2], lcRepeat("tiny run line", 6), lcTail[:1]),
+		"below the size floor":      lcJoin([]string{"s a", "s b", "s c", "s d", "s e", "s f", "s g", "s h"}, lcRepeat("ab 7", 60), []string{"e a", "e b", "e c", "e d"}),
 		"invalid utf-8":             foldable + "\xff\xfe broken tail\n",
 		"nul byte":                  foldable + "binary\x00blob\n",
 		"valid json document":       string(pretty),
@@ -658,31 +675,48 @@ func TestLogCollapseRungFoldsOlderBodiesOnlyAndKeepsPairing(t *testing.T) {
 	if estimateTokens(out) > budget {
 		t.Errorf("the rung alone should have reached the budget: %d > %d", estimateTokens(out), budget)
 	}
+
+	// Under a budget no ladder can meet, the preamble and the recent window are
+	// still untouched (the ladder's window, not the rung, decides what is older).
+	tight := compact(context.Background(), msgs, 1, 2, 3, lcLogOptsOn)
+	for _, i := range []int{0, 1, 2} {
+		if tight[i].Content != msgs[i].Content {
+			t.Errorf("tight budget: preamble message %d changed", i)
+		}
+	}
+	for k := 1; k <= 2; k++ {
+		if tight[len(tight)-k].Content != msgs[len(msgs)-k].Content {
+			t.Errorf("tight budget: recent message %d from the end changed", k)
+		}
+	}
 }
 
 func TestLogCollapseRungLeavesTheProtectedPrefixAlone(t *testing.T) {
-	// A log-shaped tool message INSIDE the protected preamble must survive even
-	// under pressure; only the older tool body after it is a candidate. The
-	// budget is what folding that one body buys, so no later rung runs.
+	// A command-output tool message INSIDE the protected preamble must survive
+	// even under pressure; only the older tool body after it is a candidate.
+	// The budget is what folding that one body buys, so no later rung runs, and
+	// the rung works oldest-first, so a rung that reached into the prefix would
+	// fold the prefix message before it ever reached the candidate.
 	pre := lrServerLog(200)
 	msgs := []Msg{
 		{Role: "system", Content: "You are a coding agent."},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "pre-1", Name: "run", Args: `{}`}}},
 		{Role: "tool", ToolCallID: "pre-1", Content: pre},
 		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-1", Name: "run", Args: `{}`}}},
 		{Role: "tool", ToolCallID: "call-1", Content: lrServerLog(190)},
 		{Role: "assistant", Content: "reading it"},
 	}
-	folded, ok := logCollapse(msgs[3].Content)
+	folded, ok := logCollapse(msgs[4].Content)
 	if !ok {
 		t.Fatal("control: the older body must fold")
 	}
 	probe := append([]Msg(nil), msgs...)
-	probe[3].Content = folded
-	out := compact(context.Background(), msgs, estimateTokens(probe), 1, 2, lcLogOptsOn)
-	if out[1].Content != pre {
+	probe[4].Content = folded
+	out := compact(context.Background(), msgs, estimateTokens(probe), 1, 3, lcLogOptsOn)
+	if out[2].Content != pre {
 		t.Error("a tool message inside the protected prefix was rewritten")
 	}
-	if out[3].Content != folded {
+	if out[4].Content != folded {
 		t.Error("the older tool body should have been folded")
 	}
 }

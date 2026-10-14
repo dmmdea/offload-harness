@@ -255,9 +255,6 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 	// check as every rung here, so the preamble, the recent turns and pairing stay.
 	if opts.LogCollapse {
 		logsRung(out, protectedEnd, recentStart, budget, pinned)
-		if estimateTokens(out) <= budget {
-			return out, fitUnknown
-		}
 	}
 
 	// Step 2b (flag-gated): skeletonize OLDER tool bodies oldest-first — the
