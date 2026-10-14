@@ -749,7 +749,10 @@ write and shell tools could otherwise clobber the record of what it did.
 
 - One-shot: `local-agent --root . "task"`.
 - Queue mode and `--serve` (OpenAI-compatible endpoint, loopback-only — see
-  [ADR 0005](../architecture/decisions/0005-loopback-only-serve.md)).
+  [ADR 0005](../architecture/decisions/0005-loopback-only-serve.md)). `--serve` sits behind the SF-16 ingress guard
+  (`fleet_ingress_guard`, see [fleet-node](fleet-node.md)): under `enforce` a POST must be `Content-Type:
+  application/json`, a `Host` outside loopback, the tailnet and the configured zones is refused, and so is any `Origin`.
+  The banner prints the mode.
 - `agent_run` via the MCP surface.
 - [`internal/agent/unattended-rules.json`](../../internal/agent/unattended-rules.json) — the
   default table EMBEDDED in the binary and loaded automatically on unattended runs with no
@@ -779,6 +782,11 @@ MCP. Capability defaults are an interface, not an implementation detail.
 4. The audit trail lives outside the worktree, enforced at build time.
 5. An action that cannot be audited does not happen.
 6. `--serve` refuses a non-loopback bind without `--listen-trusted-network`.
+6b. `--serve` is behind the ingress guard (`fleet_ingress_guard`). The default, `warn`, logs a request that `enforce`
+   would refuse (a foreign `Host` 421, any `Origin` 403, a POST that is not `application/json` 415) and serves it, so
+   `enforce` is opt-in; a cross-site `text/plain` POST needs no CORS preflight, which is why a POST must be JSON before
+   it can reach the tool loop. `--serve` refuses to start on a config that failed to load, because the guard's mode
+   comes from that config. The guard is not authentication.
 6a. Environment rules can only NARROW (deny/allow never add a tool; caps only lower) and never
    touch an EFFECT decision; a table that does not validate fails the build by name; a nil table
    changes nothing. Per-run rule state never crosses runs of a shared `Loop`.

@@ -98,6 +98,7 @@ resolve.
 | Failure | Fix |
 |---|---|
 | `refusing to bind --listen` | Non-loopback address without `--listen-trusted-network`. Use loopback, or add the flag for the Tailscale bind only. |
+| HTTP `421` / `403` / `415` from the node, `fleet-ui` or `local-agent --serve` | `fleet_ingress_guard` set to `enforce` refused the request: 421 a `Host` that is not loopback, a tailnet address, a dotless name or a name under a zone in `tailnet_suffix` / `tailnet_suffixes`; 403 an `Origin` header (a browser); 415 a POST without `Content-Type: application/json`. The log line names which and from where. `warn` (the default) logs the same and serves it; `off` skips the checks. |
 | `GPU probe failed` at startup | `nvidia-smi` missing/broken. By design — a node that can't report VRAM would be treated as broken by the dispatcher. Fix the driver first. |
 | footprints look wrong vs Afterburner | Run the PDH-vs-Afterburner validation in `docs/FLEET-NODE.md`; >15% off → set `"fleet_sampler":"global"`. |
 
@@ -801,13 +802,23 @@ local-agent --root . --base http://127.0.0.1:11436 --max-steps 4 \
 
 ```bash
 local-agent --serve --listen 127.0.0.1:18808 --base http://127.0.0.1:11436
-# [local-agent] OpenAI server on http://127.0.0.1:18808  (model="offload-e4b")
+# [local-agent] OpenAI server on http://127.0.0.1:18808  (model="offload-e4b", fleet_ingress_guard=warn)
 curl -s http://127.0.0.1:18808/v1/models
 # {"data":[{"id":"offload-e4b","object":"model","owned_by":"local-offload"}],"object":"list"}
 ```
 
 Each `/v1/chat/completions` POST runs the **full agent loop** over the last user message and returns
 the final answer. The endpoint is **unauthenticated** — keep it loopback-only.
+
+**The ingress guard in front of it (`fleet_ingress_guard`, register SF-16).** The banner prints the mode in
+force. The default, `warn`, logs a request that `enforce` would refuse and serves it anyway, so a stock install is
+not guarded until you set `enforce`. Under `enforce` the endpoint refuses a `Host` outside loopback, the tailnet and
+every zone in `tailnet_suffix` / `tailnet_suffixes` (421), any `Origin` header (403), and a POST that is not
+`Content-Type: application/json` (415). So a hand-made `curl -X POST` needs `-H 'Content-Type: application/json'`, a
+GUI whose browser makes the request itself sends an `Origin` and is refused, and a GUI in a container that reaches
+this host as `host.docker.internal:18808` fails the Host rule. Run `warn` until the log shows no client you use
+tripping it. `--serve` refuses to start on a config that failed to load, because the guard's mode comes from it. The
+guard stops a web page and a DNS-rebinding name; it is not authentication.
 
 ### Capability flags (all OFF by default)
 
@@ -1443,6 +1454,7 @@ re-pack (ADR 0066); a 429 is contention by definition and is never second-guesse
 | `audit_chain` | `false` | HASH-CHAIN each agent run's rows on the broker audit trail (register SF-08): `run_id`, `seq`, `prev_sha256` on every row and a closing `run_end` row (a run with no decision writes nothing). `local-offload agent-audit verify [--file PATH] [--json] [--strict]` exits 1 naming the run and seq of an edited, removed or reordered row inside a run; an OPEN run (no `run_end`: a crash or a cut tail) is reported, and failed with `--strict`; LATE rows (chained, after the close) are reported. Unkeyed: it does not see a whole run removed or a re-chained edit; an off-node head witness (S-08) is not built |
 | `agent_read_floor` | `""` → `warn` | the READ FLOOR on every agent tool that reads file content (register SF-07): `read_file`, `summarize_file`, `search_files`, `edit_file`, `github_upload_file`. Secret material (`.env*` except `.env.example`/`.env.sample`, keys and certificates, `.npmrc`/`.netrc`/`.pypirc`, `.git-credentials`, `.claude.json`, anything under `.ssh`/`.aws`/`.gnupg`/`.kube`/`.env`) and a rule table's `read` rules, checked as given AND resolved (symlinks, Windows 8.3 short names). `warn` = the read goes through and a `warn` row is recorded (refused when an enforcing trail cannot record it); `enforce` = refused, and `search_files` never opens such a file and says nothing about it; `off` = nothing checked. `--rules off` also turns it off. Not covered: the run/shell cage, hard links, media tools reading absolute paths |
 | `audit_all_doors` | `""` → `off` | the broker decision AUDIT TRAIL on every agent door (register SF-02): `off` = a trail only when browse asks for one (unchanged); `warn` = `agent_run`, `agent_delegate` and fleet contracts all write `~/.local-offload/agent-audit.jsonl`, a failed write is logged once and never changes a decision; `enforce` = a failed write denies the action and a door with no resolvable trail defers `config`. An unknown value refuses the config load (and a verb that runs on past the load error refuses the door). Rows come only from brokered actions (write, delete, fetch, shell, run, browse), so a read-only run attaches the trail and writes no broker rows (read-floor rows aside, see `agent_read_floor`). Move to `enforce` only after a clean window under `warn` |
+| `fleet_ingress_guard` | `""` → `warn` | the INGRESS GUARD on the fleet node, `fleet-ui` and `local-agent --serve` (register SF-16): a `Host` outside loopback, the tailnet CGNAT range, a dotless MagicDNS name and every zone listed in `tailnet_suffix` / `tailnet_suffixes` (the rule a `seat_endpoints` URL takes; a node shared in from another tailnet is named under that tailnet's zone, so list it in `tailnet_suffixes` before you set `enforce`), any `Origin` header (`fleet-ui`: other than its own page's), and (fleet node, local-agent) a POST that is not `application/json`. `warn` logs what `enforce` would refuse and serves it (bounded: each offender once per 5 minute window, at most 64 per peer and 4096 in all, values clipped, a summary line a minute for the rest), `enforce` refuses (421 / 403 / 415; the body does not name your tailnet zones), `off` skips; `fleet-serve`, `fleet-ui` and `doctor` print `ingress guard: <mode>`, and `local-agent --serve` prints the mode in its banner; a mistyped mode fails the load, and `fleet-ui` and `local-agent --serve` refuse a config that failed to load |
 | `agent_coherence_probe` | `""` → `cold` | post-warm SEAT COHERENCE probe (register D-118): after a cold load, ask the seat one ≤ 96-token question BEFORE the wall starts and defer `infrastructure` if it answers with the NaN shape. `cold` = only when this run loaded the seat, `always` = every run warm or cold, `off` = never. `coherence_note` on the wire reports the verdict |
 
 What you will see on the wire and in the ledger: `contention_wait_sec` and `admission_wait_sec`

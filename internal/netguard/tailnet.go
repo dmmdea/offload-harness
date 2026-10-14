@@ -234,14 +234,7 @@ func TailnetURLIn(zones []string, raw string) error {
 	// root dot; normalize both before the suffix/dot checks.
 	name := strings.ToLower(strings.TrimSuffix(host, "."))
 	// zones is read once by the caller: the checks and the message judge one list.
-	for _, zone := range zones {
-		if zone != "" && strings.HasSuffix(name, "."+zone) {
-			return nil
-		}
-	}
-	if !strings.Contains(name, ".") {
-		// Dotless = a search-domain-resolved short name. Shape alone cannot
-		// prove where it resolves — SafeDialContext closes that at dial time.
+	if tailnetNameAllowedIn(zones, name) {
 		return nil
 	}
 	switch len(zones) {
@@ -253,6 +246,25 @@ func TailnetURLIn(zones []string, raw string) error {
 	}
 	return fmt.Errorf("hostname %q in %q not allowed (need loopback, a tailnet CGNAT-range address literal, a dotless MagicDNS name, or a host under one of %s)",
 		host, shown, strings.Join(zones, ", "))
+}
+
+// tailnetNameAllowedIn is the NAME test both guards over a host name run, so they can never
+// disagree about one: TailnetURLIn (an endpoint's URL, at config time) and HostAllowed (a
+// request's Host header, at the ingress). name must already be lowercased with at most ONE
+// trailing root dot removed, as TailnetURLIn normalizes it; this function trims nothing, so
+// "zone.." (a second dot) is no name under any zone. A name passes when it sits under a zone
+// (a suffix match on a label boundary, so the bare zone itself does not pass unless another
+// zone it sits under admits it, which is how nested zones read) or when it is dotless (a
+// MagicDNS short name; SafeDialContext closes where that resolves at dial time).
+func tailnetNameAllowedIn(zones []string, name string) bool {
+	for _, zone := range zones {
+		if zone != "" && strings.HasSuffix(name, "."+zone) {
+			return true
+		}
+	}
+	// Dotless = a search-domain-resolved short name. Shape alone cannot prove where it
+	// resolves.
+	return !strings.Contains(name, ".")
 }
 
 // tailnetAddrAllowed reports whether one literal/resolved address is inside
