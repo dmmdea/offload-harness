@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -73,5 +75,59 @@ func TestTheBuildMarkerStillReadsThroughTheSharedOpen(t *testing.T) {
 	v, err := ReadBuildMarkerVersion(p)
 	if err != nil || v != "9.9.9" {
 		t.Fatalf("ReadBuildMarkerVersion = %q, %v, want 9.9.9", v, err)
+	}
+}
+
+// longPathImage writes an image file whose path is longer than MAX_PATH (260): a deep tree under a scan root, or a long backup
+// path, is what the audit and the stale-image check can be pointed at. The file is made through os calls. A Windows host whose
+// policy does not allow a path that long (LongPathsEnabled off) cannot build one at all: the test is skipped there, since
+// os.Open would not open it either (Go 1.23+ marks the process long-path aware and adds no prefix of its own).
+func longPathImage(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for len(dir) < 330 {
+		dir = filepath.Join(dir, strings.Repeat("d", 60))
+	}
+	p := filepath.Join(dir, "local-offload.exe")
+	err := os.MkdirAll(dir, 0o755)
+	if err == nil {
+		err = os.WriteFile(p, []byte("fake build padding\x00"+BuildMarkerPrefix+"9.9.9\x00tail"), 0o755)
+	}
+	if err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("this host cannot create a %d-character path (long paths are not enabled): %v", len(p), err)
+		}
+		t.Fatalf("cannot build the %d-character path: %v", len(p), err)
+	}
+	return p
+}
+
+// TestOpenSharedOpensAPathLongerThanMaxPath: the sharing open takes the path as os.Open does, so a long path that os.Open read
+// is read here too, and through the audit's opener, and the share bit survives it (the file can be renamed while it is open).
+// A parity pin: on the toolchain this repository builds with, os.Open adds no extended-length prefix of its own (the runtime
+// marks the process long-path aware), so OpenShared has nothing to mirror; if that ever changes this test goes red first.
+func TestOpenSharedOpensAPathLongerThanMaxPath(t *testing.T) {
+	p := longPathImage(t)
+	if len(p) < 261 {
+		t.Fatalf("setup: the path is %d characters, want more than MAX_PATH", len(p))
+	}
+	for name, open := range map[string]func(string) (*os.File, error){"OpenShared": OpenShared, "openAudited": openAudited} {
+		f, err := open(p)
+		if err != nil {
+			t.Fatalf("%s(%d-character path): %v", name, len(p), err)
+		}
+		b, err := io.ReadAll(f)
+		f.Close()
+		if err != nil || len(b) == 0 {
+			t.Fatalf("%s read %d bytes, %v", name, len(b), err)
+		}
+	}
+	f, err := OpenShared(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := os.Rename(p, p+".bak-rollback"); err != nil {
+		t.Fatalf("the long-path image could not be renamed aside while a reader had it open: %v", err)
 	}
 }
