@@ -4825,7 +4825,7 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 	// The subtitle adapter is the operator's: ytdlp_path names the binary (empty = off), and the scratch root is where
 	// each call's temporary directory is made. The caller chooses only the languages.
 	rcfg := s.p.Cfg()
-	opt := research.Options{YtDlpPath: rcfg.YtDlpPath, SubLangs: in.SubLangs, ScratchRoot: rcfg.EffectiveResearchScratchDir()}
+	opt := research.Options{YtDlpPath: rcfg.YtDlpPath, YtDlpSHA256: rcfg.YtDlpSHA256, SubLangs: in.SubLangs, ScratchRoot: rcfg.EffectiveResearchScratchDir()}
 	if in.FetchTimeoutSec > 0 {
 		opt.Timeout = time.Duration(in.FetchTimeoutSec) * time.Second
 	}

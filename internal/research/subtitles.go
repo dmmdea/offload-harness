@@ -112,6 +112,8 @@ func ClassifyURL(u *url.URL) (SourceKind, string) {
 	return SourceKindYouTube, id
 }
 
+var reSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // hashFile is the sha256 (lower-case hex) of the file at path; a var so a test can see when it is called.
 var hashFile = func(path string) (string, error) {
 	f, err := os.Open(path)
@@ -185,6 +187,21 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) (res Fetch
 	}
 	if fi, err := os.Stat(bin); err != nil || fi.IsDir() {
 		return fail(ErrKindYtDlpPath, "ytdlp_path %q is not an executable file", bin)
+	}
+	// ytdlp_path is trusted as written unless the operator pinned a hash: then the file is hashed before every run
+	// and a different one is never started. (A file swapped between this check and the start is not caught: the
+	// pin is against a wrong or replaced binary, not against a writer who races each call.)
+	if want := strings.ToLower(strings.TrimSpace(opt.YtDlpSHA256)); want != "" {
+		if !reSHA256.MatchString(want) {
+			return fail(ErrKindYtDlpPath, "ytdlp_sha256 must be a sha256, 64 hexadecimal digits, got %q", cutRunes(opt.YtDlpSHA256, 80))
+		}
+		got, herr := hashFile(bin)
+		if herr != nil {
+			return fail(ErrKindYtDlpPath, "cannot hash ytdlp_path %q to check it against ytdlp_sha256: %v", bin, herr)
+		}
+		if got != want {
+			return fail(ErrKindYtDlpPath, "ytdlp_path %q does not match ytdlp_sha256 (the file hashes to %s), so it was not run", bin, got)
+		}
 	}
 	langs := strings.TrimSpace(opt.SubLangs)
 	if langs == "" {
