@@ -8,7 +8,8 @@
 // withGpuSlot). Dependency-free; deps are injectable purely for tests.
 import { existsSync, createWriteStream, renameSync, rmSync, readFileSync, mkdirSync, openSync, closeSync, readSync, fstatSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_process";
 import { readLaunchOwner, writeLaunchOwner, restampLaunchOwner, clearLaunchOwner, harnessLaunched, pidAlive as defaultPidAlive } from "./comfy-ownership.mjs";
 
@@ -305,6 +306,28 @@ function stripValued(args, flag) {
   return out;
 }
 
+// --- the engine-resident idle bound (seam; the behaviour lands in the next commit) -----------------
+//
+// The ComfyUI-side pack render/comfyui-ext/idle-nodes/offload_idle frees a kept or warm instance's models and caches
+// after IDLE_FREE_DEFAULT_SEC with an empty queue. The yaml below puts it on ComfyUI's custom-node search path.
+// They are defined here, not in wan-multicard.mjs, which imports this file (gpu-lock.mjs, which it also imports, imports it
+// too: a cycle); wan-multicard.mjs re-exports the names next to EXT_YAML / EXT_NODE_PACK.
+const IDLE_EXT_DIR = join(dirname(fileURLToPath(import.meta.url)), "comfyui-ext");
+export const EXT_IDLE_YAML = join(IDLE_EXT_DIR, "extra_model_paths_idle.yaml");
+export const EXT_IDLE_PACK = "offload_idle";
+export const EXT_IDLE_PACK_FILE = join(IDLE_EXT_DIR, "idle-nodes", EXT_IDLE_PACK, "__init__.py");
+export const IDLE_FREE_DEFAULT_SEC = 300;
+
+/** resolveIdleBound: the idle bound in seconds a kept or warm launch asks for (COMFY_IDLE_FREE_SEC); 0 = none. */
+export function resolveIdleBound(env = process.env, log = () => {}) {
+  return IDLE_FREE_DEFAULT_SEC;
+}
+
+/** fetchIdleProbe: what GET /offload/idle on a running instance answers, or null. */
+export async function fetchIdleProbe(api) {
+  return null;
+}
+
 /**
  * launchFlags is the exact argv tail ensureComfy spawns main.py with. Base flags
  * first, then the profile's --cuda-device, then the extra args LAST (the J4 seam's
@@ -312,7 +335,7 @@ function stripValued(args, flag) {
  * or --default-device the extra args carry — argparse takes the last occurrence, so
  * leaving them in would silently override the binding.
  */
-export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "", profile = { cudaDevice: "", dynamicVram: "" }, instance = null, comfyDir = "", warn = () => {}, launch = null } = {}) {
+export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "", profile = { cudaDevice: "", dynamicVram: "" }, instance = null, comfyDir = "", warn = () => {}, launch = null, idle = null } = {}) {
   const flags = ["--disable-smart-memory"];
   // warm: a BATCH session keeps ComfyUI's model cache ON so the checkpoint loads once
   // for N renders; the caller still tears the whole session down at the batch boundary
@@ -769,6 +792,8 @@ export async function ensureComfy(opts = {}) {
     // to pin by uuid (storage first) and the env the placement needs. Absent = every launch behaves exactly as before.
     launch = null,
     systemArgv = fetchSystemArgv,
+    // probeIdle: asks a freshly launched instance whether its idle bound is live (GET /offload/idle); null = no answer.
+    probeIdle = fetchIdleProbe,
     readLaunch = readLaunchOwner,
     writeLaunch = writeLaunchOwner,
     restampLaunch = restampLaunchOwner,
