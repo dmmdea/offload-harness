@@ -1,6 +1,7 @@
 package research
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,7 +50,14 @@ const (
 	idBreak    = "BREAKexit01"
 	idNoSubs   = "NOSUBSfile1"
 	idHang     = "SLEEPforevr"
+	idTTML     = "TTMLformat1"
+	idSRT      = "SRTformat01"
+	idHuge     = "HUGEsubs001"
+	idBlank    = "BLANKcues01"
+	idFlood    = "FLOODerr001"
 )
+
+const fakeSRT = "1\n00:00:01,000 --> 00:00:02,500\nHello from <b>SubRip</b>.\n\n2\n00:00:03,000 --> 00:00:04,000\nSecond line.\n"
 
 const fakePlainVTT = "WEBVTT\n\nNOTE this is a note\nspanning lines\n\n00:00:01.000 --> 00:00:03.000\n<v Host>Hello &amp; welcome.</v>\n\n2\n00:00:03.500 --> 00:00:05.000 line:90%\n<i>Second</i> cue here.\n"
 
@@ -93,6 +101,11 @@ func runFakeYtDlp(args []string) int {
 		_, _ = e.WriteString("dir=" + dir + "\n" + strings.Join(os.Environ(), "\n") + "\n")
 		_ = e.Close()
 	}
+	if c, err := os.OpenFile(filepath.Join(filepath.Dir(dir), "cwd.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+		wd, _ := os.Getwd()
+		_, _ = c.WriteString(wd + "\n")
+		_ = c.Close()
+	}
 	id := target[strings.LastIndex(target, "v=")+2:]
 	write := func(name, body string) { _ = os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600) }
 	switch id {
@@ -110,6 +123,25 @@ func runFakeYtDlp(args []string) int {
 		return 1
 	case idNoSubs:
 		// exit 0 and no subtitle file: the video has no captions in the asked languages
+	case idTTML:
+		write(id+".en.ttml", "<tt><body><div><p>not read</p></div></body></tt>")
+	case idSRT:
+		write(id+".en.srt", fakeSRT)
+	case idHuge:
+		// a well-formed track a little over the read bound
+		var b strings.Builder
+		b.WriteString("WEBVTT\n\n")
+		for i := 0; b.Len() < 2<<20+4096; i++ {
+			fmt.Fprintf(&b, "00:00:01.000 --> 00:00:02.000\ncue number %d speaks\n\n", i)
+		}
+		write(id+".en.vtt", b.String())
+	case idBlank:
+		write(id+".en.vtt", "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n \n\n00:00:03.000 --> 00:00:04.000\n<c></c>\n")
+	case idFlood:
+		for i := 0; i < 2000; i++ {
+			fmt.Fprintf(os.Stderr, "WARNING: noisy line %04d %s\n", i, strings.Repeat("x", 60))
+		}
+		return 1
 	case idHang:
 		time.Sleep(30 * time.Second)
 	}
@@ -145,7 +177,7 @@ func leftovers(t *testing.T, root string) []string {
 	}
 	var out []string
 	for _, e := range ents {
-		if e.Name() != "calls.log" && e.Name() != "envs.log" {
+		if e.Name() != "calls.log" && e.Name() != "envs.log" && e.Name() != "cwd.log" {
 			out = append(out, e.Name())
 		}
 	}
