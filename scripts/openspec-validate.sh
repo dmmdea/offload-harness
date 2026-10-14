@@ -16,9 +16,19 @@ set -euo pipefail
 
 export OPENSPEC_TELEMETRY=0 DO_NOT_TRACK=1 OPENSPEC_NO_UPDATE_CHECK=1
 
+# OPENSPEC_BIN is the caller's, so a relative path means relative to the caller's directory: make it absolute before the
+# cd below moves to the repository root. A bare name (no slash) is looked up on PATH as it is.
+bin="${OPENSPEC_BIN:-openspec}"
+case "$bin" in
+  /* | [A-Za-z]:*) ;;
+  */*)
+    bin_dir="$(dirname "$bin")"
+    if [ -d "$bin_dir" ]; then bin="$(cd "$bin_dir" && pwd)/$(basename "$bin")"; fi
+    ;;
+esac
+
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-bin="${OPENSPEC_BIN:-openspec}"
 if ! command -v "$bin" >/dev/null 2>&1 && [ ! -x "$bin" ]; then
   echo "openspec-validate: '$bin' not found; install the pinned CLI with scripts/openspec-install.sh and set OPENSPEC_BIN" >&2
   exit 2
