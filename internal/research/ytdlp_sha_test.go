@@ -83,16 +83,20 @@ func TestYtDlpSHA256MismatchRefusesWithoutRunningAnything(t *testing.T) {
 func TestYtDlpSHA256MalformedValueRefusesToo(t *testing.T) {
 	pinYouTube(t)
 	right := fileHashHex(t, fakeBinary(t))
+	hashed := countHashing(t)
 	for _, bad := range []string{"deadbeef", right[:63], right + "0", strings.Repeat("g", 64), "sha256:" + right} {
 		opt, root := ytOpts(t)
 		opt.YtDlpSHA256 = bad
 		got := Fetch(context.Background(), "https://www.youtube.com/watch?v="+idPlain, opt)
-		if got.ErrKind != ErrKindYtDlpPath || got.Text != "" || !strings.Contains(got.Err, "ytdlp_sha256") {
-			t.Errorf("value %q: got %+v, want a %s refusal naming ytdlp_sha256", bad, got, ErrKindYtDlpPath)
+		if got.ErrKind != ErrKindYtDlpPath || got.Text != "" || !strings.Contains(got.Err, "ytdlp_sha256") || !strings.Contains(got.Err, "64 hexadecimal digits") {
+			t.Errorf("value %q: got %+v, want a %s refusal that says the value is not a sha256 (64 hexadecimal digits)", bad, got, ErrKindYtDlpPath)
 		}
 		if n := len(readCalls(t, root)); n != 0 {
 			t.Errorf("value %q: binary invoked %d times", bad, n)
 		}
+	}
+	if *hashed != 0 {
+		t.Errorf("the file was hashed %d times for values that cannot be a hash", *hashed)
 	}
 }
 
