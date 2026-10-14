@@ -174,6 +174,7 @@ const MATCHTYPE = "COMFY_MATCHTYPE_V3";
 // carried on into a crash or a memory exhaustion. Real templates sit far below both (a handful of nodes per level, three levels).
 export const LIMITS = Object.freeze({
   maxNodes: 100000, // every node met in every scope that is entered, of any kind (live, muted, bypassed, Note, Reroute, primitive, instance)
+  maxWires: 1000000, // the links of every scope that is entered (the root's and each instance's), counted as a scope is entered
   maxSubgraphDepth: 64, // instances inside instances
 });
 const SG_INPUT_NODE = "-10";
@@ -347,7 +348,7 @@ function build(template, objectInfo, options) {
     stats: { nodes: 0, expandedSubgraphs: 0, mutedNodes: 0, bypassedNodes: 0, notes: 0, reroutes: 0, primitiveNodes: 0 },
   };
   const root = makeScope(template.nodes, template.links, "", null, null);
-  ctx.wires = root.links.size;
+  chargeWires(ctx, root.links.size, { where: "root" });
   collect(ctx, root, []);
 
   // every class the live nodes use must be in the listing: all unknown ones are named at once, never guessed
@@ -412,6 +413,16 @@ function charge(ctx, key) {
   }
 }
 
+// chargeWires: the links of a scope that is being entered count against LIMITS.maxWires, whether or not a wire is ever followed. The
+// node bound does not see them: a definition of one Note and thousands of links, instanced hundreds of times, stays far below the
+// node bound and still holds millions of link records. The same tally is the bound on the hops of one walk (see settle).
+function chargeWires(ctx, count, at) {
+  ctx.wires += count;
+  if (ctx.wires > LIMITS.maxWires) {
+    refuse(REFUSAL.GRAPH_TOO_LARGE, `the template expands to more than ${LIMITS.maxWires} links (the links of every scope entered count, the root's and each subgraph instance's; stopped at ${at.node ?? at.where})`, { limit: LIMITS.maxWires, what: "wires", ...at });
+  }
+}
+
 // collect: walk a scope in file order; real live nodes go to ctx.live under their final id, live subgraph instances are entered.
 // Every node met is charged first, of any kind: nothing below (the key record, the classification, an instance's scope) is paid for
 // a node the bound has not counted.
@@ -443,7 +454,7 @@ function collect(ctx, scope, stack) {
         }
         const def = ctx.defs.get(node.type);
         const inner = makeScope(def.nodes, def.links, `${key}:`, { scope, node }, def);
-        ctx.wires += inner.links.size;
+        chargeWires(ctx, inner.links.size, { node: key });
         enterInstance(ctx, scope, node, def, inner, key);
         ctx.instances.set(key, inner);
         ctx.stats.expandedSubgraphs++;
