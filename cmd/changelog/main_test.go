@@ -207,6 +207,14 @@ func TestAssembleRefusalsLeaveEverythingByteIdentical(t *testing.T) {
 		{"a stray file", func(t *testing.T, root string) {
 			writeFile(t, filepath.Join(root, "changes", "unreleased", "Notes.txt"), "stray")
 		}, nil, "Notes.txt"},
+		// A release date between separators is a heading's shape: written into the changelog by any other line, the next
+		// `check` would refuse the file, with the fragment already deleted.
+		{"a dated ### heading in a fragment", func(t *testing.T, root string) {
+			writeFile(t, filepath.Join(root, "changes", "unreleased", "c-dated.md"), "### Fixed - 2026-10-14 - the card text\n\n- x\n")
+		}, nil, "c-dated.md"},
+		{"a release date glued onto a line of a fragment", func(t *testing.T, root string) {
+			writeFile(t, filepath.Join(root, "changes", "unreleased", "c-glued.md"), fragFirst+"\n- logged as foo - 2026-10-13 - bar in the output.\n")
+		}, nil, "c-glued.md"},
 		{"a version that already has a heading", func(t *testing.T, root string) {
 			writeFile(t, filepath.Join(root, "VERSION"), "0.185.1\n")
 		}, nil, "0.185.1"},

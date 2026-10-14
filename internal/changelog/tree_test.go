@@ -158,6 +158,24 @@ func TestNoLineButAHeadingCarriesAReleaseDate(t *testing.T) {
 	}
 }
 
+func TestADatedLineInAFragmentIsNamedBeforeTheRelease(t *testing.T) {
+	// The assembler would write the line into CHANGELOG.md and the next check would refuse the file, with the fragment
+	// already deleted: the rule has to hold on the fragment, where the file name is still there to be named.
+	root := treeAt(t, baseLF(), map[string]string{
+		"a-first.md": fragFirst,
+		"h.md":       "### Fixed - 2026-10-14 - the card text\n\n- x\n",
+	})
+	for name, check := range map[string]func(string) []string{"CheckTree": CheckTree, "CheckForRelease": CheckForRelease} {
+		t.Run(name, func(t *testing.T) {
+			p := check(root)
+			wantProblem(t, p, "changes/unreleased/h.md", "release date")
+			if joined := strings.Join(p, "\n"); strings.Contains(joined, "a-first.md") {
+				t.Errorf("the good fragment is named:\n%s", joined)
+			}
+		})
+	}
+}
+
 func TestOnlyTheRootChangelogIsRead(t *testing.T) {
 	root := treeAt(t, baseLF(), nil)
 	// The vendored printed-CLI ledgers carry their own headings and are never ours to police or to edit.

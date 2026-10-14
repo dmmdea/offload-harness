@@ -266,6 +266,34 @@ func TestSpliceRefusesABadVersionDateOrTitle(t *testing.T) {
 	}
 }
 
+func TestSpliceRefusesAFragmentThatWouldLeaveTheTreeRed(t *testing.T) {
+	// Splice takes the fragments it is given (the reader validates them), so its own output check is the last line of
+	// defence: it must not write a file that CheckTree refuses ("carries a release date but is not a heading").
+	for _, tc := range []struct{ name, body string }{
+		{"a dated ### heading", "### Fixed - 2026-10-14 - the card text\n\n- x\n"},
+		{"a dated bullet", fragFirst + "\n- logged as foo - 2026-10-13 - bar in the output.\n"},
+		{"a dated line in a CRLF fragment", eolOf("\r\n", fragFirst+"\n- logged as foo - 2026-10-13 - bar.\n")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Splice(baseLF(), frags("a.md", tc.body), rel0186)
+			wantErr(t, err, "release date")
+			if got != "" {
+				t.Errorf("text returned beside the error: %q", got)
+			}
+		})
+	}
+}
+
+func TestSpliceDoesNotJudgeTheOldText(t *testing.T) {
+	// The old text from its top release heading on is kept byte for byte, whatever it says: the tree check polices it
+	// (and cmd/changelog runs that check before it splices), the output check only the section Splice wrote.
+	tail := tailLF + "\nA stray line - 2026-01-01 - glued long ago.\n"
+	got := mustSplice(t, topLF+"## [Unreleased]\n\n"+tail, twoFragments(), rel0186)
+	if !strings.HasSuffix(got, tail) {
+		t.Errorf("the old text is not kept byte for byte: %q", got)
+	}
+}
+
 func TestPreviewPutsFragmentsInsideTheUnreleasedBlock(t *testing.T) {
 	want := topLF + "## [Unreleased]\n\n" +
 		"### Added - first thing\n\n- First bullet.\n\n### Fixed - second thing\n\n- Second bullet.\n\n" + tailLF
@@ -374,6 +402,12 @@ func TestValidateFragment(t *testing.T) {
 		{"a DEL byte", "a.md", "### Added - a\x7fb\n", "control character"},
 		{"an escape", "a.md", "### Added - a\x1b[0m\n", "control character"},
 		{"invalid UTF-8", "a.md", "### Added - a\xffb\n", "UTF-8"},
+		// The tree rule "no line but a heading carries a release date" has to hold for a fragment too, or the assembler
+		// writes a file its own check refuses, after the fragment is gone.
+		{"a release date between separators in a ### heading", "a.md", "### Fixed - 2026-10-14 - the card text\n\n- x\n", "release date"},
+		{"a release date between separators in a bullet", "a.md", ok + "\n- logged as foo - 2026-10-13 - bar in the output.\n", "release date"},
+		{"a release date between em dashes", "a.md", ok + "\n- logged as foo — 2026-10-13 — bar.\n", "release date"},
+		{"a release date between separators in a CRLF body", "a.md", eolOf("\r\n", ok+"\n- logged as foo - 2026-10-13 - bar.\n"), "release date"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			problems := ValidateFragment(tc.file, tc.body)
@@ -394,6 +428,21 @@ func TestValidateFragment(t *testing.T) {
 		problems := ValidateFragment("a.md", "### Added - a\n\n- b\n\n## [9.9.9] - x\n")
 		if joined := strings.Join(problems, "\n"); !strings.Contains(joined, "line 5") {
 			t.Errorf("the forged heading is on line 5 and the problem says %q", joined)
+		}
+	})
+
+	t.Run("the line of a dated line is named", func(t *testing.T) {
+		problems := ValidateFragment("a.md", "### Added - a\n\n- b\n\n- c - 2026-10-14 - d\n")
+		if joined := strings.Join(problems, "\n"); !strings.Contains(joined, "line 5") {
+			t.Errorf("the dated line is line 5 and the problem says %q", joined)
+		}
+	})
+
+	t.Run("a date in prose is not a release date", func(t *testing.T) {
+		// One separator, a date after a word, or a date with no separator on its far side: none of these is a heading's shape.
+		fine := "### Added - a\n\n- Shipped on 2026-09-01 - and on 2026-09-02.\n- Open from 2026-10-14 - on.\n- Due 2026-10-14 only.\n- A range - 2026-10-14 onwards.\n"
+		if p := ValidateFragment("a.md", fine); len(p) != 0 {
+			t.Errorf("dates in prose are refused: %v", p)
 		}
 	})
 }
@@ -529,6 +578,11 @@ func TestVerifyRefusesAnOutputThatLostALineOfTheOldFile(t *testing.T) {
 		{"the release is gone entirely: the old text, nothing added", before},
 		{"the new heading is there twice", strings.Replace(good, "### Added", "## [0.186.0] - 2026-10-14 - again\n\n### Added", 1)},
 		{"[Unreleased] is not blank", strings.Replace(good, "## [Unreleased]\n\n", "## [Unreleased]\n\n- stray text\n\n", 1)},
+		// The tree check refuses a non-heading line with a release date; an output that holds one is refused before the write.
+		{"a release date glued onto a line of the new section",
+			strings.Replace(good, "- First bullet.", "- First bullet - 2026-10-14 - glued.", 1)},
+		{"a dated ### heading in the new section",
+			strings.Replace(good, "### Added - first thing", "### Added - 2026-10-14 - first thing", 1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := verify(before, tc.after, rel0186); err == nil {
