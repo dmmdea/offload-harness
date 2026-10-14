@@ -214,15 +214,95 @@ func partial2(oracle CBSeat) CBSeat {
 	}
 }
 
-func TestRunCBFirstOperationOverTheBudgetIsABudgetWall(t *testing.T) {
+// A budget that cannot hold even the first send measured nothing: the seat was never
+// called, so the task is infra_error (with the cause), never a graded task_fail.
+func TestRunCBFirstOperationOverTheBudgetIsInfraErrorNotAGrade(t *testing.T) {
 	in := cbSmallInstance(t, CBFamilyKV)
-	o := cbRunOpts()
-	o.Budget, o.Reserve = 300, 100
-	called := false
-	seat := func(ctx context.Context, msgs []agent.Msg, maxOut int) (string, error) { called = true; return "", nil }
-	r := RunCBTask(context.Background(), in, seat, o)
-	if called || r.TerminatedBy != CBTermBudgetWall || r.Outcome != CBOutcomeTaskFail {
-		t.Fatalf("called=%v %+v", called, r)
+	instr := []agent.Msg{
+		{Role: "system", Content: CBInstruction(in, CBDeliveryToolResult)},
+		{Role: "user", Content: "Begin. The first operation follows."},
+	}
+	withOp := append(append([]agent.Msg{}, instr...),
+		agent.Msg{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: "op-0", Name: "next_op", Args: "{}"}}},
+		agent.Msg{Role: "tool", Content: cbRenderOp(in.Ops[0], len(in.Ops)-1), ToolCallID: "op-0"})
+	instrOnly, full := agent.EstimateTokens(instr), agent.EstimateTokens(withOp)
+	if instrOnly >= full {
+		t.Fatalf("setup: instruction %d, with the first operation %d", instrOnly, full)
+	}
+	const reserve = 100
+	for name, usable := range map[string]int{
+		"the instruction alone does not fit":               instrOnly / 2,
+		"the instruction fits but not the first operation": full - 1,
+	} {
+		o := cbRunOpts()
+		o.Budget, o.Reserve = usable+reserve, reserve
+		called := false
+		seat := func(ctx context.Context, msgs []agent.Msg, maxOut int) (string, error) { called = true; return "", nil }
+		r := RunCBTask(context.Background(), in, seat, o)
+		if called || r.TerminatedBy != CBTermBudgetWall || r.Turns != 0 {
+			t.Fatalf("%s: called=%v %+v", name, called, r)
+		}
+		if r.Outcome != CBOutcomeInfraError || r.Reward != nil || !strings.Contains(r.Detail, "budget") {
+			t.Fatalf("%s: a run that never called the seat measured nothing, want infra_error with the cause: %+v", name, r)
+		}
+	}
+	rep := RunCB(context.Background(), []*CBInstance{in}, func(context.Context, []agent.Msg, int) (string, error) { return "", nil },
+		CBRunOpts{Budget: 300, Reserve: 100}, "seat-x")
+	if rep.Counts[CBOutcomeTaskFail] != 0 || rep.Counts[CBOutcomeInfraError] != 1 {
+		t.Fatalf("counts = %v", rep.Counts)
+	}
+}
+
+// At a budget wall the over-budget context was never sent, so the needle grader must
+// not read it as the context the agent still holds.
+func TestRunCBBudgetWallDoesNotCreditNeedlesTheSeatNeverReceived(t *testing.T) {
+	in, err := GenerateCB(CBFamilyNeedle, "K4-C8", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	lazy := func(ctx context.Context, msgs []agent.Msg, maxOut int) (string, error) { calls++; return CBAdvanceMarker, nil }
+	r := RunCBTask(context.Background(), in, lazy, CBRunOpts{Budget: 6000, Reserve: 500})
+	if r.TerminatedBy != CBTermBudgetWall || calls != 1 || r.OpsDelivered < 2 {
+		t.Fatalf("the scenario must be: one seat call, then a wall with the next op already delivered: calls=%d %+v", calls, r)
+	}
+	seen := 0
+	for _, l := range in.Gold.NeedleLines {
+		if strings.Contains(in.Ops[0].Body, l) {
+			seen++
+		}
+	}
+	if seen == 0 || r.Matched != seen {
+		t.Fatalf("only the needles of the operation the seat received count: matched %d, received %d: %+v", r.Matched, seen, r)
+	}
+}
+
+// A cancelled context landing inside a seat request is an interrupted task, not a seat fault.
+func TestRunCBCancelDuringASeatCallIsNotRunNotInfraError(t *testing.T) {
+	var instances []*CBInstance
+	for _, f := range CBFamilies[:2] {
+		instances = append(instances, cbSmallInstance(t, f))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	seat := func(c context.Context, msgs []agent.Msg, maxOut int) (string, error) {
+		cancel()
+		return "", c.Err()
+	}
+	rep := RunCB(ctx, instances, seat, cbRunOpts(), "seat-x")
+	for _, r := range rep.Results {
+		if r.Outcome != CBOutcomeNotRun || r.TerminatedBy != CBTermCancelled || r.Reward != nil {
+			t.Errorf("%s: %+v", r.ID, r)
+		}
+	}
+	if rep.Counts[CBOutcomeInfraError] != 0 || rep.Counts[CBOutcomeNotRun] != len(instances) {
+		t.Fatalf("counts = %v", rep.Counts)
+	}
+	// A seat that fails for its own reason while the run is live is still infra_error.
+	r := RunCBTask(context.Background(), instances[0], func(context.Context, []agent.Msg, int) (string, error) {
+		return "", errors.New("connection refused")
+	}, cbRunOpts())
+	if r.Outcome != CBOutcomeInfraError {
+		t.Fatalf("%+v", r)
 	}
 }
 

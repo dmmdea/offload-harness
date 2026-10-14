@@ -123,3 +123,25 @@ func TestContextBenchWithNoEndpointConfiguredIsInfraError(t *testing.T) {
 		t.Fatal("an empty endpoint must be an error, not a silent success")
 	}
 }
+
+// A budget too small for the instruction and the first operation measures nothing. The
+// verb says so up front, before any seat call, instead of reporting a graded failure.
+func TestContextBenchRefusesABudgetThatCannotHoldTheFirstOperation(t *testing.T) {
+	calls := 0
+	withFakeContextBenchSeat(t, func(context.Context, []agent.Msg, int) (string, error) {
+		calls++
+		return compeval.CBAdvanceMarker, nil
+	})
+	out := filepath.Join(t.TempDir(), "tiny.json")
+	err := runCompactionContextBench(contextBenchArgs(t, "--family", "kv_store", "--budget", "2000", "--reserve", "100",
+		"--endpoint", "http://fake.invalid", "--model", "seat-x", "--out", out))
+	if err == nil || !strings.Contains(err.Error(), "--budget") {
+		t.Fatalf("a budget below the instruction plus the first operation must be refused, err = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("the seat was called %d time(s) on a run that cannot hold its first send", calls)
+	}
+	if _, serr := os.Stat(out); serr == nil {
+		t.Fatal("a refused run writes no report")
+	}
+}
