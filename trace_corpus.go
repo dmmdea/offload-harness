@@ -202,8 +202,10 @@ type tcDelegationResult struct {
 // neverRan reports a logged subtask whose agent never executed: a deferral (capacity,
 // infrastructure, budget, config, contract) is written with zero steps and nothing else. Anything
 // recorded at all means an agent ran: a step trace, prefill or seat-token accounting, or a pager
-// object, which a run the loop returned from carries (zeros included) unless it is a write-class
-// deferral. A row with none of those and no step never got there.
+// object, which a run the loop returned from carries (zeros included) once the recording ships.
+// A row with none of those and no step is read as never having got there; for a row written
+// before the recording that is an inference, because a deferral raised before the loop ran and a
+// run the loop returned from in zero steps with nothing else wrote the same row.
 //
 // A row with zero steps but a step trace is KEPT, and that is deliberate. Its trace is built from
 // the loop's own effect ledger, which exists only inside the loop's run: the contract's setup
@@ -215,8 +217,9 @@ type tcDelegationResult struct {
 // first model call and again when that call is rejected for context overflow, so a first prompt
 // too large for the seat can end a run at zero steps with passes recorded.
 //
-// A write-class deferral (the write door did not close cleanly) is also kept, by its trace, and
-// reads unrecorded: it returns before the wire result is given a pager object.
+// A write-class deferral (the write door did not close cleanly) is kept the same way, by its
+// trace, and carries a pager object like any other run the loop returned from: the object is
+// attached ahead of the write door.
 func (r *tcDelegationResult) neverRan() bool {
 	return r.Steps == 0 && len(r.Trace) == 0 && r.PrefillSteps == 0 && r.SeatTokensIn == 0 && r.Pager == nil
 }

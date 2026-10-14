@@ -9,10 +9,12 @@ Release: unreleased
 
 ## Context
 
-Two questions stand in front of the context-language-model measurement. How often does the compaction ladder actually
-run in real agent runs, so that a measurement of it has something to measure? And is the pager re-fetch rate (distinct
-evicted payloads fetched back, over distinct payloads evicted) above the 10 % gate of R2-13, below which the pager
-family closes and above which an `edit_context` tool would be worth building?
+Two questions stand in front of a planned measurement: would a model that edits its own context (the idea of a
+published paper on context language models) beat the harness's fixed compaction ladder? How often does the ladder
+actually run in real agent runs, so that a measurement of it has something to measure? And is the pager re-fetch rate
+(distinct evicted payloads fetched back, over distinct payloads evicted) above the 10 % gate of R2-13, below which the
+pager family closes and above which an `edit_context` tool would be worth building? `edit_context` is the proposed tool
+that would let the agent seat drop or rewrite earlier turns of its own transcript; the measurement is its go or no-go.
 
 Neither could be read from anything on disk. The agent loop measured both (the pager report, and now the pass count of
 the ladder) and the two records that outlive a run dropped them: the standalone per-goal trace file carried no pager or
@@ -26,7 +28,12 @@ A readout over those records needs three rules, each learned from reading the re
 - **A logged row is not a run.** A deferred subtask (capacity, infrastructure, budget, config, contract) is written to
   the delegation log with zero steps and nothing else. The first harvest counted those as runs: 24 % of the runs it
   counted never ran an agent, which inflated every unrecorded count and would have kept the pager's unrecorded count
-  above zero after the recording shipped, because such a row never reaches the loop that writes the pager report.
+  above zero after the recording shipped, because a deferral raised before the loop ran never gets the loop's pager
+  report. That those rows never reached the loop is inferred, not observed: before the pager recording existed, a
+  deferral raised before the loop ran and a run the loop returned from in zero steps with no trace, no prefill or
+  seat-token accounting wrote the same row, so the log cannot tell them apart. The skipped count is an upper bound on
+  pre-loop deferrals. Once a log holds the recording, a run the loop returned from carries a pager object and is kept,
+  and the two separate.
 - **A seat alias is not a seat.** A pool placement logs the pool's alias as the seat, and neither the row nor its result
   holds the node's real seat, so a per-seat reading cannot reach those runs.
 
@@ -34,7 +41,9 @@ A readout over those records needs three rules, each learned from reading the re
 
 1. **`local-offload trace-corpus` is the standing readout** for these questions, shaped like `compaction-eval`
    (`harvest`, `readout`, `freeze`, `check`) and kept apart from it. It reads recorded agent runs, from the standalone
-   agent traces and from the delegation log, and never the ledger. `readout`, `freeze` and `check` are deterministic and
+   agent traces and from the delegation log, and never the ledger. A file in the traces directory is a run only if it is
+   shaped like an agent trace (a transcript, and either steps or a stop reason); any other JSON object there is skipped
+   under the named reason `trace record has no transcript, or neither steps nor a stop reason` and counted. `readout`, `freeze` and `check` are deterministic and
    model-free, the report has no timestamps, and `check` demands a frozen report back byte for byte.
 2. **Every rate is null when nothing was recorded**, with the count of unrecorded runs beside it. A pager object or a
    pass count that is absent or null is unrecorded, never a recorded zero; an object that contradicts itself is read as
@@ -42,13 +51,13 @@ A readout over those records needs three rules, each learned from reading the re
    timings) is counted apart and adds nothing to the token sums.
 3. **A delegation row is a run only if an agent executed.** A row with zero steps and no step trace, no prefill or
    seat-token accounting and no pager object is skipped under the named reason `delegation row never ran (zero steps,
-   nothing recorded)` and counted in the harvest stats. Any record at all keeps the row a run. That includes a deferred
+   nothing recorded)` and counted in the harvest stats. The reason names what the record shows; that such a row never
+   reached the loop is an inference (Context). Any record at all keeps the row a run. That includes a deferred
    row with zero steps whose only record is a setup-action trace (36 runs in the first readout, 0.5 %, all budget or
    infrastructure deferrals that stopped with `error`; counted from the corpus, not a readout field). Those rows count as
    runs because the setup actions execute inside the agent loop, before its first model turn and without spending a
-   step, so the row did reach the loop; a budget or infrastructure deferral takes the loop's pager report (a write-class
-   deferral is the one that does not, Decision 5), so once the recording ships such a row carries a pager object and is not
-   unrecorded; and the compaction ladder runs before the first model call and again when that call is rejected for
+   step, so the row did reach the loop; a budget or infrastructure deferral takes the loop's pager report, so once the
+   recording ships such a row carries a pager object and is not unrecorded; and the compaction ladder runs before the first model call and again when that call is rejected for
    context size, so a run can end at zero steps with passes counted.
 4. **Seats are named only when the record names one.** `by_seat` holds the runs a seat can be named for: each seat the
    record names, and under the key `(unrecorded)` the runs whose record names no seat (every agent trace; the real corpus
@@ -58,12 +67,15 @@ A readout over those records needs three rules, each learned from reading the re
    over all runs, so a reader sees how much of the corpus a per-seat reading cannot reach.
 5. **Future runs record what the readout needs.** `PagerReport` counts compaction passes; the standalone trace file
    carries the pager and prefill objects of that goal alone (the loop's instruments are reset between goals); the agent
-   wire result carries a pager object, zeros included, on every run the loop returned from except one kind: a write-class
-   deferral (defer class `write`: the write door did not close cleanly, because the run changed more files or a larger
-   diff than the caps allow, or the snapshot of the write root after the run failed) returns before the object is
-   attached, so that row keeps its step trace and has no pager object. A deferral raised before the loop ran has none
-   either, but it has no steps and no other record, and is skipped as never ran. Rows logged before the recording, and
-   rows from a node that predates it, have none.
+   wire result carries a pager object, zeros included, on every run the loop returned from, a write-class deferral
+   (defer class `write`: the write door did not close cleanly) included, because the object is attached right after the
+   loop returns, ahead of the write door. A deferral raised before the loop ran has none, but it has no steps and no
+   other record either, and is skipped as never ran. A delegation row holds the object only if both ends carry the
+   field: the node that served the run emits it, and the delegator that writes the row decodes the node's answer into
+   its own wire result and encodes it again, so a delegator build without the field drops it. Rows logged before the
+   recording, rows from a node that predates it and rows written by a delegator that predates it have none. The row's
+   `delegator_version` names the delegator build and the result's `harness_version` the node build (absent on a
+   deferral raised before the loop).
 6. **The corpus is machine-local and redacted at harvest.** The corpus keeps numbers and enums only, redacts its few
    strings with the same redactor and vet table as `compaction-eval`, and replaces a seat, node id or stop reason that is
    a local path with a stable placeholder. This ADR carries aggregates only.
@@ -77,8 +89,9 @@ that is still growing.
 | Reading | Value |
 |---|---|
 | Runs executed | 7,057 |
-| Rows skipped | 2,233 never ran an agent, 1,003 without a result (dispatch error), 22 capacity refusals, 222 on the harness's own test seat |
-| Trace-bearing rows (a step trace) | 5,618 (79.6 % of runs), 21,391 steps in all |
+| Rows skipped | 2,233 with nothing recorded (inferred to have never reached the loop, see Context), 1,003 without a result (dispatch error), 22 capacity refusals, 222 on the harness's own test seat |
+| Trace-bearing rows (a step trace) | 5,618 (79.6 % of runs) |
+| Steps, summed over all 7,057 runs | 21,391 |
 | Zero-step runs kept (a setup-action trace only) | 36 (0.5 % of runs), counted from the corpus |
 | Pager: runs that recorded a report | 0 of 7,057 (unrecorded 7,057) |
 | Pager re-fetch rate against the 10 % gate | null, verdict `NO_DATA` (0 measured runs) |
@@ -95,13 +108,13 @@ that is still growing.
 
 ## What the numbers decide
 
-A recommendation for the human decision on the context-language-model measurement, not a ruling.
+A recommendation for the human decision on the planned context-editing measurement (see Context), not a ruling.
 
 1. **The compaction-fire question is unanswered, not answered "rarely".** No run in the corpus recorded a pass count and
    no trace file exists to give the transcript lower bound. The measurement should not take a fire rate from this
    corpus. It should wait for instrumented runs, or build its own set of long runs.
-2. **The re-fetch question is unanswered, so an `edit_context` tool should be neither built nor shelved on this
-   readout.** The gate reads `NO_DATA`; no run recorded a pager report. The pager family stays open, not closed by a
+2. **The re-fetch question is unanswered, so the proposed `edit_context` tool (see Context) should be neither built nor
+   shelved on this readout.** The gate reads `NO_DATA`; no run recorded a pager report. The pager family stays open, not closed by a
    zero.
 3. **The one compaction-relevant reading available is a proxy and points at long runs.** The ladder runs only when a
    transcript passes the seat's input budget (its context window less the output cap and a margin). Across 5,411 runs the
@@ -126,12 +139,12 @@ A recommendation for the human decision on the context-language-model measuremen
   Until instrumented runs accumulate, the pager gate reads `NO_DATA` and the compaction fire rate is null, which is the
   honest value.
 - Runs executed is a smaller, truer denominator than rows logged. For runs from a build that carries the recording, the
-  pager and compaction unrecorded counts reach zero apart from write-class deferrals: every other run that reached the
-  loop gets a pager object, zero-step deferred runs included, but a write-class deferral returns before the object is
-  attached, so it is a run (its trace keeps it) that counts as unrecorded, one count per such row. The first readout's
-  log holds no write-class row. Rows logged before the recording, and rows from a node that predates it, stay
-  unrecorded, so a harvest over mixed logs reads zero only once the older rows are windowed out by day (`--since`),
-  every node that wrote the rest runs the recording, and no write-class deferral is among them.
+  pager and compaction unrecorded counts reach zero: every run that reached the loop gets a pager object, zero-step
+  deferred runs and write-class deferrals included. Rows logged before the recording, rows from a node that predates it
+  and rows written by a delegator that predates it stay unrecorded (both the delegator that writes the log and the
+  serving node must carry the field; `delegator_version` on the row and `harness_version` on the result name the
+  builds), so a harvest over mixed logs reads zero only once the older rows are windowed out by day (`--since`) and
+  every node and delegator that wrote the rest runs the recording.
 - The readout is per machine. Nothing pools delegation logs across machines, and a reader comparing machines compares
   separate readouts.
 - The readout carries node ids and seat names as the records write them, so it stays machine-local like the corpus; only
@@ -146,8 +159,8 @@ A recommendation for the human decision on the context-language-model measuremen
 - **Treat an unrecorded pager report as a zero re-fetch rate.** It would close the pager family on no evidence, the exact
   conclusion the gate exists to protect.
 - **Count every logged row as a run.** On the first readout's log it counts 9,290 runs where 7,057 ran: 2,233 of the
-  counted runs (24 %, about a quarter) never reached the loop, which makes the denominator 31.6 % (about a third) larger
-  than the true one, and it makes the unrecorded count impossible to bring to zero.
+  counted runs (24 %, about a quarter) had nothing recorded and are read as never having reached the loop (an inference,
+  see Context), which makes the denominator 31.6 % (about a third) larger than the true one, and it makes the unrecorded count impossible to bring to zero.
 - **Fold this into `compaction-eval`.** That verb replays harvested transcripts through the ladder, a different input and
   a different question; the two share a redactor and a vet table and nothing else.
 - **Guess the seat behind a pool alias from the current configuration.** A node's seat binding changes over time and the
