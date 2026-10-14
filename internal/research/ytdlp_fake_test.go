@@ -86,6 +86,8 @@ const (
 	idWarn429 = "WARNING429x"
 	// idHugeSRV3: a well-formed srv3 track a little over the read bound, so it is cut in the middle of a cue.
 	idHugeSRV3 = "HUGEsrv3001"
+	// idCutSRV3: a short srv3 track that ends inside its third cue, as a download that was interrupted does.
+	idCutSRV3 = "CUTsrv3file"
 	// idLinger: the binary writes its track and exits 0, but a child it started keeps its output pipe open for four seconds.
 	idLinger = "LINGERpipe1"
 )
@@ -170,6 +172,9 @@ func runFakeYtDlp(args []string) int {
 		write(id+".en.vtt", b.String())
 	case idWarn429:
 		os.Stderr.WriteString("WARNING: [youtube] " + id + ": Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests\n")
+	case idCutSRV3:
+		write(id+".en.srv3", `<?xml version="1.0" encoding="utf-8" ?><timedtext format="3"><body>`+
+			`<p t="0" d="900"><s>first cue here</s></p><p t="1000" d="900"><s>second cue here</s></p><p t="2000" d="900"><s>third cue is cut o`)
 	case idHugeSRV3:
 		var b strings.Builder
 		b.WriteString(`<?xml version="1.0" encoding="utf-8" ?><timedtext format="3"><body>`)

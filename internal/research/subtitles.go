@@ -86,29 +86,44 @@ const (
 
 var reVideoID = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
 
-// ClassifyURL is the explicit matcher: youtube.com/watch?v=, youtu.be/<id> and
-// youtube.com/shorts/<id> on exactly youtube.com, www.youtube.com, m.youtube.com
-// and youtu.be, over http or https, on the default port, with no userinfo and a
-// video id of the real shape. Anything else, a lookalike host included, is a
-// page. It returns the video id for a YouTube URL.
+// ClassifyURL is the explicit matcher for a video: youtube.com/watch?v=, and
+// /shorts/<id>, /live/<id> and /embed/<id>, on exactly youtube.com, www.youtube.com,
+// m.youtube.com and music.youtube.com; /embed/<id> on youtube-nocookie.com and
+// www.youtube-nocookie.com; and youtu.be/<id> (also www.youtu.be). Over http or
+// https, on the default port, with no userinfo and a video id of the real shape.
+// Anything else, a lookalike host or a trailing-dot name included, is a page. It
+// returns the video id for a YouTube URL. The binary is always given the canonical
+// www.youtube.com/watch?v=<id>, whichever of these the caller wrote.
 func ClassifyURL(u *url.URL) (SourceKind, string) {
 	if u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Port() != "" {
 		return SourceKindPage, ""
 	}
 	host := strings.ToLower(u.Hostname())
+	// idAfter is the path segment after prefix, with at most one trailing slash.
+	idAfter := func(prefix string) string {
+		if !strings.HasPrefix(u.Path, prefix) {
+			return ""
+		}
+		return strings.TrimSuffix(strings.TrimPrefix(u.Path, prefix), "/")
+	}
 	id := ""
 	switch host {
-	case "youtube.com", "www.youtube.com", "m.youtube.com":
-		switch {
-		case u.Path == "/watch":
+	case "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com":
+		if u.Path == "/watch" {
 			id = u.Query().Get("v")
-		case strings.HasPrefix(u.Path, "/shorts/"):
-			id = strings.TrimSuffix(strings.TrimPrefix(u.Path, "/shorts/"), "/")
 		}
+		for _, prefix := range []string{"/shorts/", "/live/", "/embed/"} {
+			if id == "" {
+				id = idAfter(prefix)
+			}
+		}
+	case "youtube-nocookie.com", "www.youtube-nocookie.com":
+		id = idAfter("/embed/")
 	case "youtu.be", "www.youtu.be":
-		id = strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), "/")
+		id = idAfter("/")
 	}
-	if !reVideoID.MatchString(id) {
+	// "videoseries" is eleven letters, so it has the shape of an id, and it is the embed path of a playlist
+	if id == "videoseries" || !reVideoID.MatchString(id) {
 		return SourceKindPage, ""
 	}
 	return SourceKindYouTube, id
@@ -215,9 +230,7 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) (res Fetch
 
 	canonical := "https://www.youtube.com/watch?v=" + id
 	if _, err := ValidateURL(ctx, canonical); err != nil {
-		out.Err = err.Error()
-		out.Elapsed = time.Since(start)
-		return out
+		return fail(ErrKindURLRefused, "%v", err)
 	}
 	out.FinalURL = canonical
 
@@ -260,7 +273,7 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) (res Fetch
 		"--ignore-config", "--no-playlist", "--skip-download",
 		"--write-subs", "--write-auto-subs", "--sub-langs=" + langs, "--sub-format=vtt/srv3/best",
 		"--no-cookies", "--no-cookies-from-browser", "--no-cache-dir", "--no-update",
-		"--no-progress", "--no-warnings", "--quiet", "--ignore-no-formats-error",
+		"--no-progress", "--quiet", "--ignore-no-formats-error", // no --no-warnings: a 429 on the subtitle download is only a WARNING
 		"--socket-timeout", ytDlpSocketTimeout,
 		"--retries", "0", "--extractor-retries", "0", "--fragment-retries", "0",
 		"-P", "home:" + dir, "-P", "temp:" + dir, "-o", "%(id)s.%(ext)s",
@@ -298,6 +311,11 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) (res Fetch
 
 	name, ext, ok := pickSubtitleFile(dir, id)
 	if name == "" {
+		// yt-dlp exits 0 when a subtitle download is refused (a rate limit is only a WARNING), so what it printed is
+		// the difference between a video without subtitles and one that could not be read right now
+		if strings.TrimSpace(diag.b.String()) != "" {
+			return fail(ErrKindNoSubtitles, "yt-dlp wrote no subtitle file for languages %q: %s", langs, diag.tail())
+		}
 		return fail(ErrKindNoSubtitles, "yt-dlp wrote no subtitle file for languages %q", langs)
 	}
 	if !ok {
@@ -318,10 +336,15 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) (res Fetch
 	var text string
 	switch ext {
 	case ".srv3":
-		text, err = SRV3ToText(data)
+		var srv3Cut bool
+		text, srv3Cut, err = srv3ToText(data)
 		out.ContentType = "application/xml"
 		if err != nil {
 			return fail(ErrKindUnsupportedSubs, "the srv3 subtitle file did not parse: %v", err)
+		}
+		// a track cut by the read bound ends inside a cue: the cues before it are the text, and the cut is said
+		if srv3Cut {
+			out.Truncated = true
 		}
 	default:
 		text = VTTToText(string(data))
@@ -521,20 +544,29 @@ func joinCaptionLines(lines []string) string {
 }
 
 // SRV3ToText converts YouTube's srv3 timed-text XML (<timedtext><body><p><s>word</s>...</p>) to plain text
-// with the same rolling-caption handling as VTTToText.
+// with the same rolling-caption handling as VTTToText. A file that ends inside an element (the read bound cut it)
+// yields the cues read before the cut; one with no complete cue, or no timedtext root, is an error.
 func SRV3ToText(data []byte) (string, error) {
+	text, _, err := srv3ToText(data)
+	return text, err
+}
+
+// srv3ToText is SRV3ToText that also says whether the file was cut off before its end.
+func srv3ToText(data []byte) (text string, cut bool, err error) {
 	d := xml.NewDecoder(bytes.NewReader(data))
 	d.Strict = false
 	d.Entity = xml.HTMLEntity
 	var lines []string
 	rootSeen := false
+read:
 	for {
-		tok, err := d.Token()
-		if err != nil {
-			if errors.Is(err, io.EOF) && rootSeen {
-				break
+		tok, terr := d.Token()
+		if terr != nil {
+			if !rootSeen {
+				return "", false, fmt.Errorf("not srv3 timed text: %w", terr)
 			}
-			return "", fmt.Errorf("not srv3 timed text: %w", err)
+			cut = !errors.Is(terr, io.EOF)
+			break
 		}
 		se, ok := tok.(xml.StartElement)
 		if !ok {
@@ -542,7 +574,7 @@ func SRV3ToText(data []byte) (string, error) {
 		}
 		if !rootSeen {
 			if se.Name.Local != "timedtext" {
-				return "", fmt.Errorf("not srv3 timed text: root element is %q", se.Name.Local)
+				return "", false, fmt.Errorf("not srv3 timed text: root element is %q", se.Name.Local)
 			}
 			rootSeen = true
 			continue
@@ -553,9 +585,11 @@ func SRV3ToText(data []byte) (string, error) {
 		var b strings.Builder
 		depth := 1
 		for depth > 0 {
-			t, err := d.Token()
-			if err != nil {
-				return "", fmt.Errorf("not srv3 timed text: %w", err)
+			t, terr := d.Token()
+			if terr != nil {
+				// the file ended inside this cue: it is not a cue, and nothing after it was read
+				cut = true
+				break read
 			}
 			switch v := t.(type) {
 			case xml.StartElement:
@@ -568,5 +602,8 @@ func SRV3ToText(data []byte) (string, error) {
 		}
 		lines = append(lines, strings.Join(strings.Fields(b.String()), " "))
 	}
-	return joinCaptionLines(lines), nil
+	if cut && len(lines) == 0 {
+		return "", false, errors.New("not srv3 timed text: the file ends before its first cue is complete")
+	}
+	return joinCaptionLines(lines), cut, nil
 }

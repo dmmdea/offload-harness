@@ -86,6 +86,19 @@ func TestSRV3ToTextOfATruncatedFileKeepsTheCuesRead(t *testing.T) {
 	}
 }
 
+// A track that ends inside a cue without the read bound having cut it (an interrupted download) is marked too.
+func TestSubtitleSRV3EndingInsideACueIsMarkedTruncated(t *testing.T) {
+	pinYouTube(t)
+	opt, _ := ytOpts(t)
+	got := Fetch(context.Background(), "https://www.youtube.com/watch?v="+idCutSRV3, opt)
+	if got.Err != "" || got.ErrKind != "" {
+		t.Fatalf("a track cut mid-cue was refused: %s (%s)", got.Err, got.ErrKind)
+	}
+	if !got.Truncated || got.Text != "first cue here\nsecond cue here" {
+		t.Errorf("Truncated=%v text=%q, want true and the two complete cues", got.Truncated, got.Text)
+	}
+}
+
 func TestSubtitleSRV3OverTheReadBoundIsCutNotLost(t *testing.T) {
 	pinYouTube(t)
 	opt, _ := ytOpts(t)
