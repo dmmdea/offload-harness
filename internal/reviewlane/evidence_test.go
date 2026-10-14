@@ -273,7 +273,7 @@ func TestOutcomeLadder(t *testing.T) {
 
 func TestSeatReceiptNamesTheSeatAndHashesTheAnswerWithoutTiming(t *testing.T) {
 	w := core.AgentWireResult{Seat: "qwen-27b", NodeID: "n1", Output: "NONE", Steps: 3, StopReason: "done", WallMs: 91234}
-	r := SeatReceiptOf(w, map[string]any{"executed_on": "fleet", "node": "192.0.2.5:8080"}, SalvagedWall)
+	r := SeatReceiptOf(w, map[string]any{"executed_on": "fleet", "node": "node-b"}, SalvagedWall)
 	sum := sha256.Sum256([]byte("NONE"))
 	if r.Seat != "qwen-27b" || r.NodeID != "n1" || r.Steps != 3 || r.StopReason != "done" || r.ExecutedOn != "fleet" || r.Salvaged != SalvagedWall {
 		t.Errorf("receipt fields: %+v", r)

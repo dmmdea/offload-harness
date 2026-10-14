@@ -641,8 +641,8 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// else (internal/reviewlane).
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_review_diff",
-		Description: "Review a code DIFF on a FREE local seat with CLEAN context — the reviewer sees only the diff and the task statement, never this conversation's history. That isolation is the mechanism: a reviewer without the author's accumulated context catches defects the author's own judgement has stopped seeing (long-window context degradation is the well-studied effect this exploits). Pass diff (inline) or diff_path (a file holding a unified diff) — exactly one — plus task, which is what the change was SUPPOSED to do: without stated intent a reviewer cannot tell a defect from a decision. Returns {findings:[{severity,file,line,claim,why,also?}] ranked severe|moderate|minor first, reviewed_bytes, seat, steps, stop_reason, note?, salvaged?, dropped_ungrounded?, dropped_echo?, dropped_hollow?, dropped_duplicate?, truncated_by_cap?}. note explains an EMPTY findings list in words — read it, the two cases mean different things — and a SALVAGED list (below). The five counts say what is not in the list: dropped_ungrounded named a file the diff never touched, dropped_echo handed the prompt's own template back, dropped_hollow had no severity, no file and no why (a bare claim, usually restating the diff), dropped_duplicate merges the same defect reported more than once, including findings that cite the same file and line in different words (the most severe is kept and the others' claims ride in its also[] so every claim stays readable; merging runs BEFORE the cap, so repeats never crowd out a unique finding), truncated_by_cap is what your max_findings hid. HOW TO USE THE RESULT: findings are TRIAGE INPUT, not verdicts. Read the flagged lines yourself and decide — never apply a finding unread, and treat a `severe` label from a small local model as a prompt to look, not as proof anything is wrong. Equally, an EMPTY findings list means this reviewer found nothing; it is not a verification that the change works. ADVISORY ONLY: this lane never gates a merge and never substitutes for the final does-it-actually-work check, which stays yours — as do security review, architecture judgement, and any call you are accountable for. dropped_ungrounded counts findings naming a file the diff never touched (an invented path is how a small seat fails here); they are removed and reported rather than silently kept. If NO finding survives filtering — the seat wrote nothing, or every line it wrote was hollow, echoed or ungrounded — and its raw answer does not read as an explicit clean NONE verdict, this DEFERS (defer_class abstention) rather than reporting an empty list, and the deferral carries the counts and a reason naming them: a broken or hollow run must never arrive looking like a clean diff, so review the diff yourself. Only the seat's own NONE earns an empty findings list. SALVAGE: when the seat DID write its review and only the clock ended the structuring step — its final answer was cut at the completion budget (salvaged:\"output_truncated\"), or the wall had no time left for the structured re-pack (salvaged:\"wall\") — the lane reads the complete lines of the raw answer itself (a final line cut mid-way is dropped), runs them through the same filters, and publishes what survives with the flag and a note: an output_truncated list may be INCOMPLETE (whatever the seat had not yet written is unreviewed), a wall list is the seat's whole answer. If nothing survives it defers as above. READING (salvaged:\"repack_flattened\"): the structured re-pack of a seat's answer can FLATTEN it — small seats were seen to split a severity | file:line | claim | why line into bare fields, or to answer in JSON objects after a cut-final re-issue whose re-pack kept only each claim — so the lane also reads the seat's own answer (its pipe lines, or such JSON objects) and publishes whichever reading keeps more findings through the filters; when they tie the re-pack stands. Every other deferral (gpu busy, a seat or stack failure, a re-pack that answered the wrong shape) is unchanged. Caps: at most 10 findings (max_findings only narrows it), a diff of <=256 KiB inline or <=128 KiB via diff_path — split a larger one by path (git diff -- <dir>), which also keeps each review inside the seat's context window. On any failure it returns deferred:true with a reason and you review the diff yourself.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"diff":{"type":"string","description":"the unified diff text, inline (mutually exclusive with diff_path; <=256 KiB)"},"diff_path":{"type":"string","description":"path to a file holding the unified diff, read by the HARNESS under read_root so your context never pays for it (<=128 KiB)"},"task":{"type":"string","description":"what this change was SUPPOSED to accomplish — the intent the reviewer judges the diff against"},"max_findings":{"type":"integer","description":"cap on returned findings (default 10, which is also the ceiling: the seat is never asked for more)"},"read_root":{"type":"string","description":"absolute directory diff_path is read from; nothing outside it can be read (default: the server working dir)"}},"required":["task"]}`),
+		Description: "Review a code DIFF on a FREE local seat with CLEAN context — the reviewer sees only the diff and the task statement, never this conversation's history. That isolation is the mechanism: a reviewer without the author's accumulated context catches defects the author's own judgement has stopped seeing (long-window context degradation is the well-studied effect this exploits). Pass diff (inline) or diff_path (a file holding a unified diff) — exactly one — plus task, which is what the change was SUPPOSED to do: without stated intent a reviewer cannot tell a defect from a decision. Returns {findings:[{severity,file,line,claim,why,also?}] ranked severe|moderate|minor first, reviewed_bytes, seat, steps, stop_reason, note?, salvaged?, dropped_ungrounded?, dropped_echo?, dropped_hollow?, dropped_duplicate?, truncated_by_cap?, outcome, outcome_reason?, evidence, trace_error?}. note explains an EMPTY findings list in words — read it, the two cases mean different things — and a SALVAGED list (below). The five counts say what is not in the list: dropped_ungrounded named a file the diff never touched, dropped_echo handed the prompt's own template back, dropped_hollow had no severity, no file and no why (a bare claim, usually restating the diff), dropped_duplicate merges the same defect reported more than once, including findings that cite the same file and line in different words (the most severe is kept and the others' claims ride in its also[] so every claim stays readable; merging runs BEFORE the cap, so repeats never crowd out a unique finding), truncated_by_cap is what your max_findings hid. HOW TO USE THE RESULT: findings are TRIAGE INPUT, not verdicts. Read the flagged lines yourself and decide — never apply a finding unread, and treat a `severe` label from a small local model as a prompt to look, not as proof anything is wrong. Equally, an EMPTY findings list means this reviewer found nothing; it is not a verification that the change works. ADVISORY ONLY: this lane never gates a merge and never substitutes for the final does-it-actually-work check, which stays yours — as do security review, architecture judgement, and any call you are accountable for. dropped_ungrounded counts findings naming a file the diff never touched (an invented path is how a small seat fails here); they are removed and reported rather than silently kept. If NO finding survives filtering — the seat wrote nothing, or every line it wrote was hollow, echoed or ungrounded — and its raw answer does not read as an explicit clean NONE verdict, this DEFERS (defer_class abstention) rather than reporting an empty list, and the deferral carries the counts and a reason naming them: a broken or hollow run must never arrive looking like a clean diff, so review the diff yourself. Only the seat's own NONE earns an empty findings list. SALVAGE: when the seat DID write its review and only the clock ended the structuring step — its final answer was cut at the completion budget (salvaged:\"output_truncated\"), or the wall had no time left for the structured re-pack (salvaged:\"wall\") — the lane reads the complete lines of the raw answer itself (a final line cut mid-way is dropped), runs them through the same filters, and publishes what survives with the flag and a note: an output_truncated list may be INCOMPLETE (whatever the seat had not yet written is unreviewed), a wall list is the seat's whole answer. If nothing survives it defers as above. READING (salvaged:\"repack_flattened\"): the structured re-pack of a seat's answer can FLATTEN it — small seats were seen to split a severity | file:line | claim | why line into bare fields, or to answer in JSON objects after a cut-final re-issue whose re-pack kept only each claim — so the lane also reads the seat's own answer (its pipe lines, or such JSON objects) and publishes whichever reading keeps more findings through the filters; when they tie the re-pack stands. Every other deferral (gpu busy, a seat or stack failure, a re-pack that answered the wrong shape) is unchanged. Caps: at most 10 findings (max_findings only narrows it), a diff of <=256 KiB inline or <=128 KiB via diff_path — split a larger one by path (git diff -- <dir>), which also keeps each review inside the seat's context window. OUTCOME AND EVIDENCE: every result carries outcome (PASS | FINDINGS | GATE_FAILED | NOT_RUN | STALE) and an evidence block binding it to the exact diff bytes it judged: {base_sha?, head_sha?, diff_sha256, diff_bytes, prompt_sha256?, gates:[{name,status,detail?,head_sha?,source,stale?}] (the deterministic gates, attached BEFORE the seat ran: the lane's own diff-size and conflict-markers, then your gate_receipts), seat:{seat,node_id?,node?,executed_on?,steps,stop_reason,salvaged?,answer_sha256?} (the receipt of the seat that ran), recheck_sha256? (the diff fingerprint checked again right before the result is returned), stale?, refusal?}. PASS is hard to earn: a seat with a receipt reviewed the whole diff and said NONE, the diff is inside the ceiling, every gate receipt is green and for the reviewed commit, and the diff did not change while the seat read it. NOT_RUN means no clean seat reviewed this diff (every deferral, an oversize diff, a refused binding, an answer that contradicted itself) and is never a PASS; STALE means the diff changed during the review, so any findings are about bytes that no longer exist and the review should be re-run; GATE_FAILED is a clean seat beside a red or wrong-commit gate receipt (the review still ran); FINDINGS is the advisory list. To bind a result to a commit pass base_sha and head_sha (hex commit ids, optional, echoed and never resolved: the lane has no git access) and gate_receipts ([{name, status pass|fail, detail?, head_sha?}], at most 16, the results of the lints and tests YOU ran; the lane runs nothing you name). A receipt whose head_sha is not the review's head_sha is stale and cannot support a PASS. A malformed commit id or receipt is refused as a NOT_RUN. Every review also leaves a durable trace beside the ledger (review-evidence.jsonl: one review row and one row per finding), whether or not you act on the findings; trace_error says when that write failed. Outcomes are labels on an advisory result and never gate a merge. On any failure it returns deferred:true with a reason and you review the diff yourself.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"diff":{"type":"string","description":"the unified diff text, inline (mutually exclusive with diff_path; <=256 KiB)"},"diff_path":{"type":"string","description":"path to a file holding the unified diff, read by the HARNESS under read_root so your context never pays for it (<=128 KiB)"},"task":{"type":"string","description":"what this change was SUPPOSED to accomplish — the intent the reviewer judges the diff against"},"max_findings":{"type":"integer","description":"cap on returned findings (default 10, which is also the ceiling: the seat is never asked for more)"},"read_root":{"type":"string","description":"absolute directory diff_path is read from; nothing outside it can be read (default: the server working dir)"},"base_sha":{"type":"string","description":"optional: the hex id (7-64 characters) of the commit the diff is against; echoed into the result's evidence, never resolved"},"head_sha":{"type":"string","description":"optional: the hex id (7-64 characters) of the commit the diff ends at; echoed into the evidence. A gate receipt for another head cannot support a PASS"},"gate_receipts":{"type":"array","maxItems":16,"items":{"type":"object","properties":{"name":{"type":"string"},"status":{"type":"string","enum":["pass","fail"]},"detail":{"type":"string"},"head_sha":{"type":"string","description":"the commit the gate ran on"}},"required":["name","status"]},"description":"optional: receipts of deterministic gates (lints, tests) YOU already ran on this change. Attached to the evidence before the seat reviews; the lane runs nothing you name"}},"required":["task"]}`),
 	}, s.handleReviewDiff)
 
 	// agent_delegate (multi-node delegation, Task 6): registration is GATED on
@@ -3709,6 +3709,10 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 		Task        string `json:"task"`
 		MaxFindings int    `json:"max_findings"`
 		ReadRoot    string `json:"read_root"`
+		// SHA-bound evidence (RSI-OH-4): optional, echoed and bound, never resolved.
+		BaseSHA      string                   `json:"base_sha"`
+		HeadSHA      string                   `json:"head_sha"`
+		GateReceipts []reviewlane.GateReceipt `json:"gate_receipts"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -3724,6 +3728,9 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 		return jsonResult(map[string]any{"deferred": true, "reason": "one of diff (inline text) or diff_path (a file holding a unified diff) is required"})
 	}
 	diff := in.Diff
+	// The second fingerprint check re-reads the diff right before the result is returned. Held
+	// inline it cannot have moved; a diff_path file can, and is re-read the way it was first.
+	recheck := func() (string, error) { return diff, nil }
 	if hasPath {
 		// read_root defaulting mirrors handleAsk and handleAgentRun: the server
 		// working dir. The diff file goes through delegate.InlineContextPaths —
@@ -3750,6 +3757,29 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 			return jsonResult(map[string]any{"deferred": true, "reason": "diff_path read returned no content"})
 		}
 		diff = docs[0].Text
+		recheck = func() (string, error) {
+			again, rerr := delegate.InlineContextPaths([]string{in.DiffPath}, absRoot)
+			if rerr != nil {
+				return "", rerr
+			}
+			if len(again) != 1 {
+				return "", fmt.Errorf("diff_path read returned no content")
+			}
+			return again[0].Text, nil
+		}
+	}
+	// SHA-bound evidence (RSI-OH-4), built BEFORE the builder and before any seat: the diff's
+	// fingerprint and the deterministic gate receipts exist first, so even a refusal below is
+	// bound to the bytes it refused. seal stamps outcome + evidence on every exit from here on
+	// and leaves the durable trace beside the ledger.
+	ev, evErr := reviewlane.NewEvidence(diff, in.BaseSHA, in.HeadSHA, in.GateReceipts)
+	tracePath := filepath.Join(s.p.Cfg().BaseDir(), reviewlane.TraceFile)
+	seal := func(out map[string]any, run reviewlane.Run) (*mcp.CallToolResult, error) {
+		run.Recheck = recheck
+		return jsonResult(reviewlane.Seal(out, ev, run, tracePath))
+	}
+	if evErr != nil {
+		return seal(map[string]any{"deferred": true, "reason": evErr.Error()}, reviewlane.Run{})
 	}
 	// Every caller-input refusal — no task, an empty diff, a diff over the byte
 	// ceiling — arrives as one typed error from the builder, so the reason the
@@ -3757,7 +3787,17 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	contract, berr := reviewlane.BuildContract(in.Task, diff)
 	contract.Door = "offload_review_diff"
 	if berr != nil {
-		return jsonResult(map[string]any{"deferred": true, "reason": berr.Error()})
+		return seal(map[string]any{"deferred": true, "reason": berr.Error()}, reviewlane.Run{})
+	}
+	ev = ev.WithPrompt(contract.Goal)
+	// publish turns ONE seat's wire result into the lane's published answer (reviewPayload) and
+	// seals it. It is shared by the local path and the fenced-seat fleet path on purpose: the
+	// filters are the whole reason this lane's output is worth reading, and a remote review is
+	// produced by a SMALLER seat than the local one more often than not, so a second copy of
+	// these rules for the fleet path would be the copy that drifted.
+	publish := func(wire core.AgentWireResult, extra map[string]any) (*mcp.CallToolResult, error) {
+		out, delivered := reviewPayload(wire, diff, in.MaxFindings, extra)
+		return seal(out, reviewlane.Run{Delivered: delivered, Wire: &wire, Extra: extra})
 	}
 	// The review's wall is the box's agent_timeout_sec when that is larger than
 	// the wire default (0.115.21, register D-03 — the wall half of D-09): the
@@ -3797,7 +3837,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	if fenced, why := delegate.ForeignFenceFor(delegate.LocalLease(cfg.GPULockPath, cfg.StateDir), reviewSeatPins); fenced {
 		wire, extra, note, ok := s.reviewOnFleet(ctx, contract, why)
 		if ok {
-			return s.publishReview(wire, diff, in.MaxFindings, extra)
+			return publish(wire, extra)
 		}
 		// A fleet seat that WROTE the review and was stopped by the clock on its
 		// structuring (F20: a cut final, a re-pack with no wall left) deferred it, and the
@@ -3808,7 +3848,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 		// as before.
 		if wire.Deferred {
 			if out, delivered := reviewPayload(wire, diff, in.MaxFindings, extra); delivered {
-				return jsonResult(out)
+				return seal(out, reviewlane.Run{Delivered: true, Wire: &wire, Extra: extra})
 			}
 		}
 		// Nothing out there took it. Today's path stands — the wait, then the
@@ -3827,9 +3867,9 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// run two budgets that could disagree.
 	wire, rerr := run(ctx, contract, delegate.LocalOptions{})
 	if rerr != nil {
-		return jsonResult(withReviewExtra(map[string]any{"deferred": true, "reason": rerr.Error()}, fleetNote))
+		return seal(withReviewExtra(map[string]any{"deferred": true, "reason": rerr.Error()}, fleetNote), reviewlane.Run{})
 	}
-	return s.publishReview(wire, diff, in.MaxFindings, fleetNote)
+	return publish(wire, fleetNote)
 }
 
 // reviewOnFleet offers ONE review to the fleet at route=remote (register D-110),
@@ -3995,21 +4035,7 @@ func withReviewExtra(out map[string]any, extra map[string]any) map[string]any {
 	return out
 }
 
-// publishReview turns ONE seat's wire result into the lane's published answer (see
-// reviewPayload for what that comprises).
-//
-// It is shared by the local path and the fenced-seat fleet path on purpose. The
-// filters are the whole reason this lane's output is worth reading — a finding
-// naming a file the diff never touched is the ordinary way a small seat fails —
-// and a remote review is produced by a SMALLER seat than the local one more often
-// than not. A second copy of these rules for the fleet path would have been the
-// copy that drifted.
-func (s *Server) publishReview(wire core.AgentWireResult, diff string, maxFindings int, extra map[string]any) (*mcp.CallToolResult, error) {
-	out, _ := reviewPayload(wire, diff, maxFindings, extra)
-	return jsonResult(out)
-}
-
-// reviewPayload is publishReview's decision, apart from the transport so the fenced-seat fleet
+// reviewPayload is the review lane's publish decision, apart from the transport so the fenced-seat fleet
 // path can put the same question to a deferred result. It reads the seat's findings — from the
 // structured object, or, for a deferral the CLOCK caused on an answer the seat had written,
 // straight from its raw lines (reviewlane.Salvage) — then drops hollow lines, grounds, dedupes,

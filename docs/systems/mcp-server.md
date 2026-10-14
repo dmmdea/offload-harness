@@ -645,7 +645,7 @@ of that floor: `auto` would fall back to the fenced local seat when nothing qual
 route is what makes an accepted result provably off-box. The published result names where it ran
 (`executed_on`, `node`, `placement`, `seat`, plus `node_reported` (0.185.0) only when the node's own result named itself by another
 id than `node`) and the fence that moved it, and the findings go
-through the SAME filters as a local review (`publishReview` is shared, so the two cannot drift).
+through the SAME filters as a local review (one `publish` step in the handler serves both, so the two cannot drift).
 An INHERITED lease is not a fence: `gpu reserve … -- <session>` sets `GPU_LEASE_EPOCH`, and the
 holder's own review stays on the cards its lease cleared. When the fleet takes nothing, today's path
 stands — the wait, then the capacity defer — and the result carries a `fleet` note saying the fleet
@@ -761,7 +761,7 @@ These design choices are load-bearing rather than incidental:
   them away. The answer format is line-oriented and `ParseFindings` already reads raw lines, so the
   re-pack is a convenience here, not a requirement: `reviewlane.Salvage` takes the raw answer's
   complete lines (a finished answer is read with `RawLines`, below, so JSON finding objects count;
-  a cut one is split on newlines and loses its last line) and `publishReview` runs them through the
+  a cut one is split on newlines and loses its last line) and `reviewPayload` runs them through the
   normal `Report` path (echo, hollow, grounding, dedupe, same-line fold, cap). It keys on structure, never on prose: the node's own
   `output_truncated` flag, or `schema_miss` with the `budget` class (a finished answer whose
   re-pack the clock skipped, clamped or cut; a canceled re-pack is excluded because nobody is
@@ -781,6 +781,45 @@ These design choices are load-bearing rather than incidental:
   runs the lane's real contract through the real runner so the node and the lane cannot drift
   apart. The pipeline's own ledger row still records the run as the defer it was; the salvage is
   the door's.
+
+**Every result is bound to the diff it judged (RSI-OH-4).** A review used to say what a seat thought and
+nothing about what it thought it about, and a finding the caller skipped left no record. Now every
+payload, deferrals included, carries an `outcome` and an `evidence` block, all additive (a reader written
+before them keeps working; the deferral shape and the findings are untouched):
+
+- **The binding is the diff's sha256**, plus `base_sha` and `head_sha` when the caller passes them (hex,
+  7 to 64 characters, echoed and never resolved: the lane has no git access, and a commit id the caller
+  typed can be wrong where the bytes cannot). `prompt_sha256` binds the exact prompt the seat was shown and
+  `seat.answer_sha256` its raw answer; the seat receipt (`seat`, `node_id`, `node`, `executed_on`, `steps`,
+  `stop_reason`, `salvaged`) names who answered and carries no timing.
+- **Gates run first.** `evidence.gates` is built before the seat is contacted, so a refusal is bound too:
+  the lane's own `diff-size` and `conflict-markers` (a merge-conflict marker on an added line) and then the
+  `gate_receipts` the caller handed over, the results of the lints and tests it ran itself (`name`,
+  `status` `pass`|`fail`, `detail?`, `head_sha?`; at most 16). The lane executes nothing a caller names, which
+  keeps the review door from becoming a command-execution surface. A receipt whose `head_sha` is not the
+  review's head is marked `stale` and cannot support a PASS. A red gate does not stop the seat: the lane is
+  advisory, and the findings of a diff that fails a lint are still worth reading.
+- **One outcome, decided in one place** (`reviewlane.Decide`). `NOT_RUN`: no clean seat reviewed the diff,
+  which covers every deferral, a runner error, a refused binding (malformed commit id or receipt), a diff over
+  `MaxDiffBytes` (refused even if a caller skipped the builder), a result with no seat receipt, and an answer
+  that read as NONE while every line it wrote was discarded. `STALE`: the diff was not the same bytes at the
+  second check. `FINDINGS`: an advisory list. `GATE_FAILED`: a clean seat beside a red or wrong-commit gate.
+  `PASS`: a seat with a receipt, an in-bound diff, every gate green and for the reviewed commit, an
+  unchanged diff, and the seat's own NONE. `outcome_reason` says why for everything but PASS and FINDINGS.
+- **A second fingerprint check right before returning** (`reviewlane.Seal`). A `diff_path` is re-read through
+  the same confined reader and compared with the fingerprint taken first; `recheck_sha256` shows the second
+  value, and a difference (or a file that cannot be re-read) makes the result `STALE`. An inline diff is held
+  in memory and cannot move. A review that never reached a seat has nothing to re-check.
+- **Every review leaves a durable trace**: `review-evidence.jsonl` in the harness home beside `ledger.jsonl`,
+  one `review` row (outcome, evidence, counts of what was shown and what the filters and the cap took out)
+  and one `finding` row per published finding (severity, file, line, the claim and why cut to 512 bytes, and a
+  digest of the whole finding), joined by `review_id`. It is written whether or not the caller reads or applies
+  the findings, and a write that fails is reported as `trace_error` on the result. It is a sidecar and not a
+  ledger row on purpose: every ledger reader counts a row as a call, the pipeline already writes the run's own
+  row (door `offload_review_diff`) before the outcome is known, and the ledger keeps hashes where this trace
+  keeps the short finding text. The ledger row is the run record, this file the verdict record.
+- **Stays advisory, and one source is skipped.** An outcome is a label on a result a lead reads; nothing here
+  blocks a merge or a commit. The import-graph atlas the source material also describes is skipped.
 
 Everything the lane returns is ADVISORY: it never gates a merge and never substitutes for the
 final does-it-actually-work verification, which stays with the caller — as do security review,
@@ -1032,7 +1071,8 @@ keep the stamp and say so, a path that is gone is stale without a comparison, an
 - [`internal/askcache`](../../internal/askcache/askcache.go) — `offload_ask`’s content-addressed,
   bounded, per-process result cache (the `cache_hit` field)
 - [`internal/reviewlane`](../../internal/reviewlane/review.go) — `offload_review_diff`’s contract
-  builder, finding parser, diff-grounding filter and severity ranking
+  builder, finding parser, diff-grounding filter and severity ranking; [`evidence.go`](../../internal/reviewlane/evidence.go)
+  binds a result to the diff it judged (outcome, gate and seat receipts, second fingerprint check, durable trace)
 - [`internal/swapclient`](../../internal/swapclient/swapclient.go) — the harness's single
   alias-aware llama-swap roster reader, over `tools/llamaswap`'s `pkg/llamaswap`
   ([systems/printed-clis.md](printed-clis.md#the-one-exception-the-harness-consumes-pkgllamaswap))
