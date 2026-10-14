@@ -479,7 +479,7 @@ func copyOpenSpecInstallScript(t *testing.T, dir, sha string) string {
 // runOpenSpecInstallWithStandInNpm runs a copy of the install script, whose pin matches the stand-in tarball, against a
 // stand-in npm. The stand-in records its subcommands, the arguments, the directory it ran in, the cache and temp
 // settings it saw and whether the lockfile project and the tarball it was handed are the committed ones; its `ci`
-// "installs" an openspec binary that prints fakeVersion. The caller's environment is hostile on purpose (npm's cache
+// "installs" an openspec binary that prints fakeVersion and records the config home it ran with. The caller's environment is hostile on purpose (npm's cache
 // and the temp folders point outside the prefix), so only the script itself can move them under the prefix.
 func runOpenSpecInstallWithStandInNpm(t *testing.T, fakeVersion string, prepare func(prefix string)) openspecInstallRun {
 	t.Helper()
@@ -510,7 +510,7 @@ case "$1" in
     cmp -s package-lock.json "$SRC/package-lock.json" && log "ci lockfile=same" || log "ci lockfile=different"
     [ "$(cat fission-ai-openspec-1.14.1.tgz)" = "$STANDIN_TARBALL" ] && log "ci tarball=same" || log "ci tarball=different"
     mkdir -p node_modules/.bin
-    printf '#!/usr/bin/env bash\necho %s\n' "$FAKE_VERSION" > node_modules/.bin/openspec
+    printf '#!/usr/bin/env bash\necho "bin xdg=${XDG_CONFIG_HOME-unset}" >> "%s"\necho %s\n' "$LOG" "$FAKE_VERSION" > node_modules/.bin/openspec
     chmod +x node_modules/.bin/openspec ;;
   *)
     exit 1 ;;
@@ -544,7 +544,8 @@ esac
 		"LOG="+filepath.ToSlash(logPath), "SRC="+filepath.ToSlash(repoProject),
 		"STANDIN_TARBALL="+openspecStandInTarball, "FAKE_VERSION="+fakeVersion,
 		"PATH="+bin+sep+os.Getenv("PATH"),
-		"npm_config_cache="+hostile("cache"), "TMPDIR="+hostile("tmpdir"), "TMP="+hostile("tmp"), "TEMP="+hostile("temp"))
+		"npm_config_cache="+hostile("cache"), "TMPDIR="+hostile("tmpdir"), "TMP="+hostile("tmp"), "TEMP="+hostile("temp"),
+		"XDG_CONFIG_HOME="+hostile("xdg"))
 	out, runErr := cmd.CombinedOutput()
 	r := openspecInstallRun{out: string(out), err: runErr, prefix: realPrefix, log: map[string]string{}}
 	raw, _ := os.ReadFile(logPath)
@@ -611,6 +612,9 @@ func TestOpenSpecInstallScriptInstallsFromTheLockfileUnderThePrefix(t *testing.T
 		if !strings.Contains(r.out, want) {
 			t.Errorf("the output does not print %q:\n%s", want, r.out)
 		}
+	}
+	if !openspecPathUnder(r.log["bin xdg"], r.prefix) {
+		t.Errorf("the CLI's version check ran with XDG_CONFIG_HOME=%q, want a folder under the prefix %q whatever the caller exported", r.log["bin xdg"], r.prefix)
 	}
 	xdg := regexp.MustCompile(`(?m)^export XDG_CONFIG_HOME='([^']+)'\r?$`).FindStringSubmatch(r.out)
 	if xdg == nil || !openspecPathUnder(xdg[1], r.prefix) {
