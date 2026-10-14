@@ -1026,6 +1026,11 @@ type Config struct {
 	EditPython      string `json:"edit_python,omitempty"`
 	GimpConsolePath string `json:"gimp_console_path,omitempty"`
 	EditTimeoutSec  int    `json:"edit_timeout_sec,omitempty"`
+	// YtDlpPath is the absolute path to a yt-dlp executable, the subtitle adapter of offload_research. Empty (the
+	// default) = the adapter is OFF and a YouTube URL is read as an ordinary page: the harness never searches PATH for
+	// the binary and never installs it. The binary is invoked subtitles-only (--skip-download, no cookies, no config
+	// file, no retry) after the URL has passed the public-web guard; see docs/systems/delegation-client.md.
+	YtDlpPath string `json:"ytdlp_path,omitempty"`
 	// --- composition (offload_compose_video / compose-video; ADR 0059) ---
 	// A CPU-class lane: HyperFrames renders an HTML/CSS composition to video with
 	// headless Chrome in SOFTWARE GL + ffmpeg, so it takes NO GPU lease and no
@@ -3175,6 +3180,16 @@ func validatePipelines(pipelines map[string]PipelineSpec) error {
 	return nil
 }
 
+// EffectiveResearchScratchDir is the root under which offload_research makes its per-call scratch directories (the
+// subtitle adapter's yt-dlp output): <state_dir>/research-scratch, else a subdirectory of the OS temp dir. Each call's
+// directory is created beneath it and removed when the call ends; nothing else lives here.
+func (c Config) EffectiveResearchScratchDir() string {
+	if c.StateDir != "" {
+		return filepath.Join(c.StateDir, "research-scratch")
+	}
+	return filepath.Join(os.TempDir(), "local-offload-research")
+}
+
 // EffectiveUpscaleModel is the ESRGAN filename the upscale_image route binds:
 // UpscaleModel, else VideoGenUpscaleModel (the video route's post-decode upscaler is
 // the same kind of file), else "" = no route. Pipeline gate and capability report
@@ -3200,7 +3215,7 @@ func pathFields(c *Config) []*string {
 		&c.AudiocppScript, &c.AudiocppBin, &c.AudiocppVoiceModel, &c.AudiocppMusicModel,
 		&c.VideoGenScript, &c.AnimateGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath, &c.StateDir,
 		&c.VoiceGenRef, &c.VoiceGenFTModel, &c.VoiceGenFTBaseDir, &c.VoiceGenFTRef,
-		&c.EditPython, &c.GimpConsolePath,
+		&c.EditPython, &c.GimpConsolePath, &c.YtDlpPath,
 		&c.ComposeScript, &c.HyperframesDir, &c.HyperframesBrowserPath, &c.ComposeCacheDir,
 		&c.BrowsePython, &c.BrowseScript, &c.BrowseCaptureDir,
 		&c.CachePath, &c.LedgerPath,

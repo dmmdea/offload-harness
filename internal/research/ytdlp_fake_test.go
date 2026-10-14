@@ -89,6 +89,10 @@ func runFakeYtDlp(args []string) int {
 		_, _ = f.WriteString(strings.Join(args, argSep) + "\n")
 		_ = f.Close()
 	}
+	if e, err := os.OpenFile(filepath.Join(filepath.Dir(dir), "envs.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+		_, _ = e.WriteString(strings.Join([]string{"probe=" + os.Getenv("RESEARCH_ENV_PROBE"), "home=" + os.Getenv("HOME"), "temp=" + os.Getenv("TEMP"), "dir=" + dir}, argSep) + "\n")
+		_ = e.Close()
+	}
 	id := target[strings.LastIndex(target, "v=")+2:]
 	write := func(name, body string) { _ = os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600) }
 	switch id {
@@ -141,7 +145,7 @@ func leftovers(t *testing.T, root string) []string {
 	}
 	var out []string
 	for _, e := range ents {
-		if e.Name() != "calls.log" {
+		if e.Name() != "calls.log" && e.Name() != "envs.log" {
 			out = append(out, e.Name())
 		}
 	}

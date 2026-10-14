@@ -30,7 +30,7 @@ func pinYouTube(t *testing.T) {
 		"www.youtube.com": {sentinelPublic},
 		"youtube.com":     {sentinelPublic},
 		"m.youtube.com":   {sentinelPublic},
-		"youtu.be":         {sentinelPublic},
+		"youtu.be":        {sentinelPublic},
 	})
 }
 
@@ -200,11 +200,27 @@ func TestSubtitleAdapterIsOffWhenThePathIsEmpty(t *testing.T) {
 
 func TestSubtitleAdapterNeverSearchesPath(t *testing.T) {
 	pinYouTube(t)
-	for _, p := range []string{"yt-dlp", "./yt-dlp", "bin/yt-dlp"} {
+	// a working executable at a relative path must not be run: the only thing refusing it is the absolute-path rule
+	cwd := t.TempDir()
+	ext := filepath.Ext(fakeBinary(t))
+	body, err := os.ReadFile(fakeBinary(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cwd, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"ytdlp-rel" + ext, filepath.Join("bin", "ytdlp-rel"+ext)} {
+		if err := os.WriteFile(filepath.Join(cwd, rel), body, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(cwd)
+	for _, p := range []string{"ytdlp-rel" + ext, "./ytdlp-rel" + ext, "bin/ytdlp-rel" + ext} {
 		opt, root := ytOpts(t)
 		opt.YtDlpPath = p
 		got := Fetch(context.Background(), "https://youtu.be/"+idPlain, opt)
-		if got.ErrKind != ErrKindYtDlpPath || got.Text != "" {
+		if got.ErrKind != ErrKindYtDlpPath || got.Text != "" || !strings.Contains(got.Err, "absolute path") {
 			t.Errorf("path %q: got %+v, want %s", p, got, ErrKindYtDlpPath)
 		}
 		if n := len(readCalls(t, root)); n != 0 {
@@ -655,5 +671,56 @@ func TestFeedRedirectToPrivateIsRefused(t *testing.T) {
 	got := Fetch(context.Background(), "http://feeds.example/feed.xml", Options{Client: d.client(), Timeout: 5 * time.Second})
 	if got.Err == "" || got.Text != "" {
 		t.Fatalf("not refused: %+v", got)
+	}
+}
+
+// The child gets a scrubbed environment: what the harness process holds (a token, a profile path) is not
+// handed to a third-party program, and home and temp point at the per-call directory.
+func TestSubtitleChildEnvironmentIsScrubbed(t *testing.T) {
+	pinYouTube(t)
+	t.Setenv("RESEARCH_ENV_PROBE", "must-not-leak")
+	opt, root := ytOpts(t)
+	if got := Fetch(context.Background(), "https://www.youtube.com/watch?v="+idPlain, opt); got.Err != "" {
+		t.Fatalf("fetch: %s", got.Err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "envs.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Split(strings.TrimSpace(string(raw)), "\x1f")
+	if len(fields) != 4 {
+		t.Fatalf("env log = %q", raw)
+	}
+	if fields[0] != "probe=" {
+		t.Errorf("the child saw the harness's environment: %s", fields[0])
+	}
+	dir := strings.TrimPrefix(fields[3], "dir=")
+	if strings.TrimPrefix(fields[1], "home=") != dir || strings.TrimPrefix(fields[2], "temp=") != dir {
+		t.Errorf("home and temp are not the per-call directory: %v (dir %s)", fields, dir)
+	}
+}
+
+func TestSniffFeedKnowsFeedsFromEverythingElse(t *testing.T) {
+	yes := []string{
+		rssFixture, atomFixture, "\ufeff  " + rssFixture,
+		`<?xml version="1.0"?><!DOCTYPE rss><!-- c --><rss version="0.91"><channel/></rss>`,
+		`<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/"><channel/></rdf:RDF>`,
+	}
+	for _, b := range yes {
+		if !SniffFeed([]byte(b)) {
+			t.Errorf("not sniffed as a feed: %.60q", b)
+		}
+	}
+	no := []string{
+		"", "plain prose with a <feed> element in it",
+		`<?xml version="1.0"?><urlset><url><loc>https://feeds.example/a</loc></url></urlset>`,
+		`<feed><entry/></feed>`, // a feed element outside the Atom namespace
+		`<html><body><rss>x</rss></body></html>`,
+		`<svg xmlns="http://www.w3.org/2000/svg"/>`,
+	}
+	for _, b := range no {
+		if SniffFeed([]byte(b)) {
+			t.Errorf("sniffed as a feed: %.60q", b)
+		}
 	}
 }

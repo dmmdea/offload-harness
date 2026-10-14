@@ -465,6 +465,49 @@ name through a bare `http.Client`, so a hostile record with a one-second TTL cou
 as public and then resolve to `127.0.0.1` at connect time; `internal/research/fetch_rebind_test.go`
 is that regression, and it asserts ZERO accepts on a loopback listener.
 
+**Two more text sources: RSS/Atom feeds and YouTube subtitles.** Both are fetched delegator-side with no login and no cookies,
+and both end where a fetched page ends: the text goes through the same digest path, the digest through the same
+`internal/untrusted` fencing, and the URL through the same public-web guard.
+
+- *Feeds.* A response whose content type is `application/rss+xml`, `application/atom+xml` or `application/rdf+xml`, or whose
+  body sniffs as a feed (a generic XML, plain-text or untyped response whose root element is `rss`, an RDF root or an Atom
+  `feed`), is parsed with `encoding/xml` (`research.FeedToText`; no new dependency). Each item's title, link, date and summary
+  become the text, at most `research.MaxFeedItems` (50) items and 1,000 bytes of summary each, inside the ordinary 2 MiB read
+  cap and 96 KiB text cap; a feed cut by either says so in its own text. Item links are text only and are never followed: a
+  caller who wants an item lists its URL. A document that does not parse as a feed is read exactly as it was before.
+- *YouTube subtitles.* `youtube.com/watch?v=`, `youtu.be/<id>` and `youtube.com/shorts/<id>` (hosts `youtube.com`, `www.`,
+  `m.` and `youtu.be` only; http or https; the default port; no userinfo; an 11-character id) are routed by
+  `research.ClassifyURL` to the yt-dlp executable named by the config key `ytdlp_path`. The key is **empty by default, which
+  means the adapter is off** and the URL is read as an ordinary page. The harness never searches `PATH` for the binary and
+  never installs it: the value must be an absolute path to an executable file (the admitted version is in
+  [security.md](security.md#admitted-third-party-software)). The binary runs once per URL with `--skip-download --write-subs
+  --write-auto-subs --sub-langs=<sub_langs> --sub-format=vtt/srv3/best --no-cookies --no-cookies-from-browser
+  --ignore-config --no-playlist --no-cache-dir --socket-timeout 15` and zero retries, given the canonical
+  `https://www.youtube.com/watch?v=<id>` after a literal `--`. `sub_langs` is an `offload_research` input (default `en.*`;
+  letters, digits and `. * _ - ,` only, else the source fails as `bad_sub_langs` before anything runs). It runs in a per-call
+  directory under `<state_dir>/research-scratch` (else a directory under the OS temp dir) that is removed after the call, with
+  a scrubbed environment (home and temp point at that directory), bounded by the call's deadline and the per-fetch timeout,
+  with no retry and no scheduling. Of the files it writes, a readable format wins (WebVTT, SRV3, SubRip), then the shortest
+  name, so the plain `en` track beats `en-orig`. The subtitle file is converted to plain text: header and NOTE/STYLE/REGION
+  blocks, cue ids, timestamps, cue settings and tags are removed, entities decoded, and the rolling duplication automatic
+  captions carry is removed (a line equal to the one before it is dropped, and a line that only extends it replaces it). Subtitle
+  text and the same words pasted as a page therefore reach the digest stage as the same bytes (pinned by
+  `TestSubtitleTextAndPastedPageGiveTheSameDigestInput`; no model is called). A site break degrades to a skipped source with a
+  typed `error_kind` and no retry: `subtitle_site_break` (the binary exited non-zero), `no_subtitles` (exit zero and no file),
+  `unsupported_subtitle_format`, `subtitle_timeout`, `ytdlp_path` (not absolute, missing or will not start) or
+  `bad_sub_langs`.
+- *Security.* Every URL passes `research.ValidateURL` before anything is fetched or run, the subtitle path included: a hostname
+  that resolves to a private, loopback, link-local or CGNAT address is refused before any process starts (the tests drive it
+  through the `netguard.LookupIP` resolution seam). The canonical URL handed to the binary is validated too, because its host
+  is the one the binary will actually contact, and it is a fixed YouTube host rather than anything the caller wrote. The
+  matcher is exact, so a lookalike host (`youtube.com.evil.example`, a userinfo trick, another port) is an ordinary page under
+  the ordinary guard and never reaches the binary. The adapters build no HTTP client (the bare-client allowlist in
+  `bare_http_client_allowlist_test.go` still lists one in this package; `TestAdaptersBuildNoHTTPClientOfTheirOwn` pins it). One
+  limit is stated plainly: yt-dlp opens its own connection, outside `netguard.PublicTransport`, so for this path the guard is
+  the resolve-and-check on the two hosts above plus the fixed canonical URL, which is why the adapter is off until an operator
+  names a binary. Audio transcription is not part of this change: a video with no subtitles is a `no_subtitles` source, and
+  nothing downloads audio or video.
+
 Two contract rules are baked in because they were measured on the seats (2026-08-28): the
 goal names the context document as *already provided* (a goal that says "read the document"
 sends a small seat hunting for a file and fails acceptance), and acceptance is ONE any-of
@@ -1078,6 +1121,9 @@ keep the stamp and say so, a path that is gone is stale without a comparison, an
 - [`internal/mcpserver/reviewdiffio.go`](../../internal/mcpserver/reviewdiffio.go) — the file seam of
   `offload_review_diff`'s `diff_path` branch (working directory, absolute path, confined read), so the refusals behind
   those calls are tested
+- [`internal/research`](../../internal/research/fetch.go) — `offload_research`'s fetch and guard; the text sources:
+  [`feed.go`](../../internal/research/feed.go) (RSS and Atom) and [`subtitles.go`](../../internal/research/subtitles.go)
+  (the URL matcher, the yt-dlp subtitle adapter and the caption-to-text conversion)
 - [`internal/mcpserver/status_section.go`](../../internal/mcpserver/status_section.go) —
   `offload_status`'s block table, `section` parsing and the brief lines
 - [`internal/mcpserver/stale_image.go`](../../internal/mcpserver/stale_image.go) — the `process` block: the

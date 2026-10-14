@@ -42,17 +42,19 @@ const (
 // Fetched is one URL's outcome. Err is set (and Text empty) when the page could
 // not be used; the caller reports it as a skipped source, never as a digest.
 type Fetched struct {
-	URL         string        `json:"url"`
-	FinalURL    string        `json:"final_url,omitempty"`
-	Title       string        `json:"title,omitempty"`
-	Status      int           `json:"status,omitempty"`
-	ContentType string        `json:"content_type,omitempty"`
-	Bytes       int           `json:"bytes"`
-	TextBytes   int           `json:"text_bytes"`
-	Truncated   bool          `json:"truncated,omitempty"`
-	Err         string        `json:"error,omitempty"`
-	Elapsed     time.Duration `json:"-"`
-	Text        string        `json:"-"`
+	URL         string `json:"url"`
+	FinalURL    string `json:"final_url,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Status      int    `json:"status,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+	Bytes       int    `json:"bytes"`
+	TextBytes   int    `json:"text_bytes"`
+	Truncated   bool   `json:"truncated,omitempty"`
+	Err         string `json:"error,omitempty"`
+	// ErrKind names the failure of a text-source adapter (the ErrKind constants); empty for a page.
+	ErrKind string        `json:"error_kind,omitempty"`
+	Elapsed time.Duration `json:"-"`
+	Text    string        `json:"-"`
 }
 
 // Options tunes one Fetch. Zero values take the package defaults.
@@ -63,6 +65,12 @@ type Options struct {
 	// Client overrides the HTTP client (tests). Its Transport is used as-is;
 	// the redirect policy is always ours.
 	Client *http.Client
+	// YtDlpPath is the absolute path of the yt-dlp executable the subtitle adapter runs; empty = the adapter is
+	// off and a YouTube URL is an ordinary page. SubLangs is the subtitle language selection (default en.*).
+	// ScratchRoot is where the adapter makes its per-call directory (default: a directory under the OS temp dir).
+	YtDlpPath   string
+	SubLangs    string
+	ScratchRoot string
 }
 
 // ValidateURL is the SSRF guard's NAME half: only http(s), only public hosts.
@@ -130,9 +138,15 @@ func Fetch(ctx context.Context, raw string, opt Options) Fetched {
 	start := time.Now()
 	defer func() { out.Elapsed = time.Since(start) }()
 
-	if _, err := ValidateURL(ctx, raw); err != nil {
+	u, err := ValidateURL(ctx, raw)
+	if err != nil {
 		out.Err = err.Error()
 		return out
+	}
+	// A YouTube URL goes to the subtitle adapter when the operator has configured one: the guard above has
+	// judged the URL's host, and the adapter judges the canonical host it will hand the binary.
+	if kind, id := ClassifyURL(u); kind == SourceKindYouTube && opt.YtDlpPath != "" {
+		return fetchSubtitles(ctx, raw, id, opt)
 	}
 	timeout := opt.Timeout
 	if timeout <= 0 {
@@ -207,6 +221,16 @@ func Fetch(ctx context.Context, raw string, opt Options) Fetched {
 	out.Bytes = len(body)
 	ct := strings.ToLower(out.ContentType)
 	var text string
+	// A feed is read as items, not as a page of markup. A feed media type is trusted to try the parser; a
+	// generic type is sniffed first; a document that then fails to parse falls through to the page path
+	// below, so nothing that was readable before this change stops being readable.
+	if (isFeedMediaType(ct) || (feedSniffable(ct) && SniffFeed(body))) && !strings.Contains(ct, "html") {
+		if title, ftext, ferr := FeedToText(body); ferr == nil {
+			out.Title = title
+			finishText(&out, ftext)
+			return out
+		}
+	}
 	switch {
 	case strings.Contains(ct, "html") || (ct == "" && looksLikeHTML(body)):
 		out.Title, text = HTMLToText(string(body))
@@ -216,17 +240,7 @@ func Fetch(ctx context.Context, raw string, opt Options) Fetched {
 		out.Err = fmt.Sprintf("unsupported content type %q (text/html, text/*, json only)", out.ContentType)
 		return out
 	}
-	if len(text) > TextCap {
-		text = text[:TextCap]
-		out.Truncated = true
-	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		out.Err = "page stripped to empty text"
-		return out
-	}
-	out.Text = text
-	out.TextBytes = len(text)
+	finishText(&out, text)
 	return out
 }
 
