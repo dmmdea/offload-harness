@@ -494,14 +494,18 @@ near-identical lines in an OLDER result of a build or test command into its firs
 the lines between (`[... N similar lines folded ...]`) and its last line. The gate reads the call
 that produced the result, not only the tool's name. A result is folded only when its call is a
 build or test invocation: `go test`, `go build` or `go vet`, `cargo build`, `cargo test` or
-`cargo check`, `npm test` or `npm run build`/`test`, `pytest` or `python -m pytest`, and (through
+`cargo check`, `npm test` (or `npm t`) or `npm run build`/`test`, `pytest`, `python -m pytest` or
+`python -m unittest` (also as `python3`), and (through
 `run_shell` only, since the `run` tool's allowlist has no `make`) `make`. Through `run_shell` the
 first word is found after any leading `NAME=value` words, and the command must be one pipeline: an
 unquoted `;`, `&&`, `||`, a lone `&`, a newline or a carriage return anywhere in it, such as
 `cd sub && go test ./...`, disqualifies it, and a pipe qualifies only into a grep-family program
 (`grep`, `egrep`, `fgrep`, `rg`, `ag`, `ack`) or a pass-through filter (`head`, `tail`, `sort`,
 `uniq`, `wc`, `cut`, `sed`, `awk`, `tee`, `cat`); `xargs` or any other program after a pipe
-disqualifies. Everything
+disqualifies. A later pipe stage is judged by its program name alone, so a filter that is handed a
+file operand and reads that file instead of the pipe (`go test ./... | cat data.csv`,
+`| head -n 5 data.csv`) still qualifies, and its output would be folded as if it were the build's;
+operands cannot simply be refused, because `| tee out.log` is a pass-through with one. Everything
 else is never touched: a search listing (`grep -rn`, `rg -n`, `git grep`; those are the search
 rung's, below, which does not touch build or test output either), a `cat` or `sed` of a data file, a
 linter's diagnostics, a file read, a fetch, a result whose

@@ -25,7 +25,7 @@ import (
 // Provenance. The idea of compressing build and test logs while keeping the
 // failures and errors and the boundary lines is the documented behavior of the
 // Headroom project (Apache-2.0, https://github.com/headroomlabs-ai/headroom).
-// Everything here — the masking of digit-bearing tokens, the consecutive-run
+// Everything here — the masking of digit runs, the consecutive-run
 // rule, the head/tail windows, the markers and the footer — is this harness's
 // own design, written without reading or copying any of that project's source
 // (see NOTICE).
@@ -78,6 +78,11 @@ import (
 //     "cd sub && go test ./..." chains, so its result is left alone: the body
 //     may hold another command's output, and the scan is a quote-aware first-
 //     word test, not a shell parser.
+//   - A later pipe stage is judged by its program name alone. A filter handed a
+//     file operand reads that file and not the pipe ("go test ./... | cat
+//     data.csv", "| head -n 5 data.csv"), and the command still qualifies, so
+//     the file's lines would be folded as if they were the build's. Operands
+//     cannot simply be refused: "| tee out.log" is a pass-through with one.
 //   - A line shaped like a file:line or file:line:col diagnostic is kept
 //     verbatim and never joins a run, even when forty of them are identical.
 //   - A body that begins with logsPrefix is taken for an already collapsed

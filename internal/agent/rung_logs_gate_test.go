@@ -42,12 +42,15 @@ func TestLogsGateQualifiesBuildAndTestShellCommands(t *testing.T) {
 		"cargo check --all-targets",
 		"cargo +nightly test",
 		"npm test",
+		"npm t",
 		"npm run build",
 		"npm run test",
 		"pytest",
 		"pytest -q tests/",
 		"python -m pytest -x",
 		"python3 -m pytest",
+		"python -m unittest",
+		"python3 -m unittest discover -s tests",
 		"make",
 		"make test",
 		"CGO_ENABLED=0 go test ./...",
@@ -67,6 +70,13 @@ func TestLogsGateQualifiesBuildAndTestShellCommands(t *testing.T) {
 		"go test ./... | sed -n 1,40p | cut -c1-120",
 		"go test ./... | awk '{print $1}'",
 		"go test ./... | rg FAIL",
+		// The stated limit (docs, rung_logs.go): a later stage is judged by its
+		// program name alone, so a filter handed a file operand, which reads that
+		// file and not the pipe, still qualifies. `tee out.log` is why operands
+		// cannot just be refused.
+		"go test ./... | cat data.csv",
+		"go test ./... | head -n 5 data.csv",
+		"go test ./... | tee out.log",
 	} {
 		if !logsCallIsBuild(lcShellCall(cmd)) {
 			t.Errorf("run_shell %q must qualify", cmd)
@@ -176,11 +186,14 @@ func TestLogsGateQualifiesBuildAndTestRunCalls(t *testing.T) {
 		lcRunCall("cargo", "test", "--release"),
 		lcRunCall("cargo", "check"),
 		lcRunCall("npm", "test"),
+		lcRunCall("npm", "t"),
 		lcRunCall("npm", "run", "build"),
 		lcRunCall("pytest"),
 		lcRunCall("pytest", "-q"),
 		lcRunCall("python", "-m", "pytest"),
 		lcRunCall("python3", "-m", "pytest", "-x"),
+		lcRunCall("python", "-m", "unittest"),
+		lcRunCall("python3", "-m", "unittest", "discover"),
 		lcRunCall(" go ", "test"),
 	} {
 		if !logsCallIsBuild(c) {
@@ -320,9 +333,14 @@ func TestLogCollapseRungStillFoldsBuildAndTestOutput(t *testing.T) {
 		lcShellCall("cargo test"),
 		lcShellCall("npm run build"),
 		lcShellCall("pytest -q"),
+		lcShellCall("npm t"),
+		lcShellCall("python -m unittest discover"),
+		lcShellCall("python3 -m unittest -v"),
 		lcRunCall("go", "test", "-v", "./widget/..."),
 		lcRunCall("cargo", "build"),
 		lcRunCall("npm", "test"),
+		lcRunCall("npm", "t"),
+		lcRunCall("python", "-m", "unittest"),
 		lcRunCall("pytest"),
 	} {
 		if !lcFolds(c, log) {
