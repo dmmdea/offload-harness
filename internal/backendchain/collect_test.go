@@ -1417,8 +1417,8 @@ func TestASeatPinnedToAnotherNodeReadsAsServedThere(t *testing.T) {
 	r := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client()})
 	for _, lane := range []string{"escalation", "reasoning"} {
 		e := laneOf(t, r, lane)
-		if e.ActiveBackend == EngineNone || !strings.Contains(e.BackendReason, "served by another node") {
-			t.Errorf("%s lane = %+v, want it reported as served by another node", lane, e)
+		if e.ActiveBackend != EngineUnknown || !strings.Contains(e.BackendReason, "served by another node") {
+			t.Errorf("%s lane = %+v, want unknown (its engine is read on the other node, not from this node's file) and served by another node", lane, e)
 		}
 		for _, leak := range []string{"example.invalid", "11436", "://"} {
 			if strings.Contains(e.BackendReason, leak) {
@@ -1426,8 +1426,8 @@ func TestASeatPinnedToAnotherNodeReadsAsServedThere(t *testing.T) {
 			}
 		}
 	}
-	if e := seatOf(t, r, "gemma4-26b-a4b"); e.ActiveBackend == EngineNone || !strings.Contains(e.BackendReason, "served by another node") {
-		t.Errorf("seat row = %+v, want it reported as served by another node", e)
+	if e := seatOf(t, r, "gemma4-26b-a4b"); e.ActiveBackend != EngineUnknown || !strings.Contains(e.BackendReason, "served by another node") {
+		t.Errorf("seat row = %+v, want unknown and served by another node, although this node's file names llama-server for the seat", e)
 	}
 	if e := laneOf(t, r, "workhorse"); strings.Contains(e.BackendReason, "served by another node") {
 		t.Errorf("workhorse lane = %+v: a seat that is not pinned is read locally", e)
