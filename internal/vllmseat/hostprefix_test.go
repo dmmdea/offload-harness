@@ -156,3 +156,20 @@ func putFile(t *testing.T, p string) {
 		t.Fatal(err)
 	}
 }
+
+// A prefix that is a file (a mistyped path that happens to exist) is not a distro either.
+func TestDetectNamesAHostPrefixThatIsNotADirectory(t *testing.T) {
+	s := flagship()
+	_, r := fakeDistro(t, s)
+	r.HostPrefix = filepath.Join(t.TempDir(), "not-a-dir")
+	putFile(t, r.HostPrefix)
+	ok, why := s.Detect(r)
+	if ok {
+		t.Fatal("detected a seat through a host prefix that is a file")
+	}
+	for _, want := range []string{"host prefix", filepath.ToSlash(r.HostPrefix), "not a directory"} {
+		if !strings.Contains(why, want) {
+			t.Errorf("the reason must contain %q, got %q", want, why)
+		}
+	}
+}
