@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/comfyinst"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
@@ -120,5 +121,63 @@ func TestTheDetachedReleaseProceedsOverARecordItCannotRead(t *testing.T) {
 	}
 	if !errors.Is(got, cause) || !strings.Contains(got.Error(), "STILL HELD") {
 		t.Errorf("the cause stays and the error ends by saying the lease is still held: %v", got)
+	}
+}
+
+// ITEM 1a. A card lease whose record removal succeeds but whose claim removal fails: Release returns the error, the record is gone,
+// and releaseHolderLease took "the record is absent" for released and dropped the error (the holder then exited 0 over a lease
+// half released; 3769f89f printed LEASE NOT RELEASED there). The error is kept unless the record is verifiably absent AND no claim of
+// the epoch remains.
+func TestTheHoldersReleaseKeepsTheErrorWhenTheRecordIsGoneButAClaimRemains(t *testing.T) {
+	_, m, _ := holderFixture(t, false)
+	m.SetCardScoped(true)
+	fastHolderRetries(t)
+	l, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "film", TTL: time.Hour, Devices: []string{"gpu-test-0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch := l.Epoch()
+	restore := gpulease.UseRemoveFault(func(path string) error {
+		if strings.HasSuffix(path, ".claim") {
+			return errors.New("access denied")
+		}
+		return nil
+	})
+	t.Cleanup(func() { restore(); releaseAll(t, m) })
+
+	rerr := releaseHolderLease(m, l)
+	if rerr == nil || !strings.Contains(rerr.Error(), "access denied") {
+		t.Fatalf("the record is gone but a claim of the epoch is not: the release did not complete, and the error says why: %v", rerr)
+	}
+	if st, _ := m.RecordState(epoch); st != gpulease.RecordAbsent {
+		t.Errorf("the scenario is a removed record: %v", st)
+	}
+	if claims := m.ClaimsOf(epoch); len(claims) != 1 {
+		t.Errorf("the claim that could not be removed is still there: %v", claims)
+	}
+
+	// A lease that moved on is the one error that clears it: the epoch is not this caller's any more.
+	if !gpulease.IsLeaseMovedOn((&gpulease.ErrLeaseMovedOn{Asked: 1, Current: 2})) || gpulease.IsLeaseMovedOn(errors.New("access denied")) {
+		t.Error("IsLeaseMovedOn tells the moved-on refusal from any other error")
+	}
+}
+
+// 1a, the other half: stopInstancesOfLease over a record it cannot read does not say the lease is no longer ours.
+func TestStopInstancesOverAnUnreadableRecordSaysSoAndNotThatTheLeaseIsNoLongerOurs(t *testing.T) {
+	cfgPath, _, m := scopedComfyFixture(t)
+	calls := recordStops(t, m, []comfyinst.Outcome{{Key: "gaaaa1111", PID: 4242, Port: 8189, Stopped: true}})
+	l := cardLease(t, m, "ours", "gpu-test-0")
+	restore := gpulease.UseCheckFault(func(uint64) error {
+		return &gpulease.RecordUnreadableError{Epoch: l.Epoch(), Err: errors.New("access denied")}
+	})
+	t.Cleanup(restore)
+	var sb strings.Builder
+	stopInstancesOfLease(cfgOf(t, cfgPath), l, &sb)
+	if got := calls(); len(got) != 0 {
+		t.Fatalf("a record that cannot be read does not show the lease is ours: nothing is stopped: %+v", got)
+	}
+	out := sb.String()
+	if strings.Contains(out, "no longer ours") || !strings.Contains(out, "its record cannot be read") || !strings.Contains(out, "access denied") {
+		t.Errorf("the line says the record cannot be read, not that the lease is no longer ours: %q", out)
 	}
 }

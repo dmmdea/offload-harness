@@ -648,7 +648,7 @@ func runGPUReserve(args []string) (retErr error) {
 			merr := detachMaintainReport(m, epoch, loadCfg(fs), *drain, drainDL, *unload, exclusiveAfter, &freed)
 			outer := outerB.Stop() // the last moment on the record, for the message if the wait's own stamp fails
 			if merr != nil {
-				return detachedMaintainError(m, epoch, merr)
+				return detachedMaintainErrorAfter(m, epoch, merr, outer)
 			}
 			// The seat is cleared and the cards are held: now the host is asked (F82). The hidden holder keeps the
 			// heartbeat meanwhile. A wait that ends without the host's admission, whether the hold bound or --wait ended it,
@@ -1431,7 +1431,12 @@ func runGPUHold(args []string) (retErr error) {
 		// timeout, Ctrl-C, a closed terminal) nothing else would, and this process would renew the lease for ever: the incident of
 		// 2026-10-14 with nobody left to end it. So the holder reads its own record: a lease that STILL ASKS for the host's RAM whose
 		// stamped end of the wait has passed (by a grace that lets a live reserve release first) is released here.
-		if asked, until, herr := lease.HostRAMHold(); herr == nil && asked > 0 && !until.IsZero() && holdClock().After(until.Add(holdBoundGrace)) {
+		//
+		// The clock is read BEFORE the record: a stamp read from it can then only be as fresh as the time it is compared with or
+		// fresher. Read after, a holder starved of CPU between the two reads combined a
+		// stale `until` with a much later `now` and released a lease whose reserve had just pushed the moment out.
+		now := holdClock()
+		if asked, until, herr := lease.HostRAMHold(); herr == nil && asked > 0 && !until.IsZero() && now.After(until.Add(holdBoundGrace)) {
 			releaseHolderAtWaitEnd(loadCfg(fs), m, lease, asked, until)
 			return nil // the deferred function stops the instances and releases the lease
 		}
@@ -1894,6 +1899,12 @@ func requeueWait(queuedAt time.Time, wait time.Duration) time.Duration {
 // nothing of this reservation is held, and telling the caller to `gpu release`
 // would release someone else's lease.
 func detachedMaintainError(m *gpulease.Manager, epoch uint64, err error) error {
+	return detachedMaintainErrorAfter(m, epoch, err, time.Time{})
+}
+
+// detachedMaintainErrorAfter is detachedMaintainError for a caller that knows the last outer hold bound it put on the record (the zero
+// time if none): a lease that is gone with that moment in the past was, most likely, released by its own hidden holder at it.
+func detachedMaintainErrorAfter(m *gpulease.Manager, epoch uint64, err error, outer time.Time) error {
 	if st, cause := m.RecordState(epoch); st == gpulease.RecordUnreadable {
 		return fmt.Errorf("%w (the lease's record cannot be read, so it is treated as still held: %v; `gpu release --epoch %d` frees it)", err, cause, epoch)
 	}

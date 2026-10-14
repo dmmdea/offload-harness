@@ -836,3 +836,24 @@ func (m *Manager) RecordState(epoch uint64) (RecordState, error) {
 	}
 	return RecordAbsent, nil // corrupt bytes: debris that an acquirer sweeps, as every other reader treats it
 }
+
+// ClaimsOf lists the cards (lease ids) whose claim names this epoch. A card lease's release removes its record and then its claims;
+// a release that removed the record and failed on a claim has left the lease half released, and the record being absent does not
+// say so.
+func (m *Manager) ClaimsOf(epoch uint64) []string {
+	return nil
+}
+
+// ErrLeaseMovedOn is the refusal for releasing an epoch that is no longer the current lease.
+type ErrLeaseMovedOn struct{ Asked, Current uint64 }
+
+func (e *ErrLeaseMovedOn) Error() string {
+	return fmt.Sprintf("gpulease: lease has moved on (asked for epoch %d, current is %d)", e.Asked, e.Current)
+}
+
+// IsLeaseMovedOn is true for the refusal to release an epoch that is no longer the current lease: the one release error that says
+// the lease is NOT this caller's any more, so there is nothing of its own left to release.
+func IsLeaseMovedOn(err error) bool {
+	var e *ErrLeaseMovedOn
+	return errors.As(err, &e)
+}

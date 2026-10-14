@@ -2285,7 +2285,7 @@ func (m *Manager) ReleaseTarget(epoch uint64) (uint64, error) {
 
 // errLeaseMovedOn is the refusal for releasing an epoch that is no longer the current lease.
 func errLeaseMovedOn(asked, current uint64) error {
-	return fmt.Errorf("gpulease: lease has moved on (asked for epoch %d, current is %d)", asked, current)
+	return &ErrLeaseMovedOn{Asked: asked, Current: current}
 }
 
 // Release drops the lease — but ONLY if we still hold it. Releasing unconditionally

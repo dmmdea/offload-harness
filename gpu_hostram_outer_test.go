@@ -294,3 +294,57 @@ func TestADetachedReserveWhoseParentDiesDuringALongWaitDrainIsReleasedWithinTheB
 		})
 	}
 }
+
+// Round 4, addendum 5a: the outer bound was also wrong in the TOO EARLY direction. The unload is not bounded by the drain's deadline
+// (the maintenance client allows 15 minutes per request), so a drain that ends near its deadline followed by an unload longer than
+// the bound and the grace made the holder release a LIVE reserve's lease in the middle of the unload: the warm-back was skipped, the
+// seat left owed and cold, and the reserve failed with "no longer this reservation's". The reviewer's probe, compressed: --wait 1s,
+// --ram-hold-max 300ms, a 1 s holder grace, an unload that takes 6 s. The live reserve's re-stamping under the drain AND the unload
+// keeps the holder out of it. (Red against e7bcf2b5, the tree before the re-stamp; see the report.)
+func TestAnUnloadLongerThanTheBoundDoesNotLoseALiveReservesLeaseToItsHolder(t *testing.T) {
+	f := &orderedSwap{drainSwap: &drainSwap{}}
+	f.loaded.Store(true)
+	f.onUnload = func() { time.Sleep(6 * time.Second) }
+	cfgPath, m := handoffFixture(t, f)
+	useSeatBackedHost(t, f.loaded.Load, 95, 70)
+	shortFloor(t, time.Second)
+	fastHolder(t) // 20 ms poll, 1 s grace
+	oldE, oldS := outerRefreshEvery, outerSlack
+	outerRefreshEvery, outerSlack = 100*time.Millisecond, 500*time.Millisecond
+	t.Cleanup(func() { outerRefreshEvery, outerSlack = oldE, oldS })
+	holderDone := detachWithRealHolder(t)
+
+	args := append([]string{"--config", cfgPath, "--ram-hold-max", "300ms"}, strings.Fields("--detach --for 1h --wait 1s --drain --unload-seat --ram 30 --reason film")...)
+	var err error
+	stderr := captureStderr(t, func() { err = runGPUReserve(args) })
+	if err == nil || !strings.Contains(err.Error(), "hold bound") {
+		t.Fatalf("the unload ran 6 s, the reserve was alive throughout, and the bound ended its wait: %v\n%s", err, stderr)
+	}
+	if strings.Contains(err.Error(), "no longer this reservation's") {
+		t.Errorf("the holder released a live reserve's lease in the middle of its unload: %v", err)
+	}
+	if n := f.warms.Load(); n != 1 || m.SeatWarmOwed() != "" {
+		t.Errorf("the reserve released its own lease and paid the warm-back (a skipped warm-back leaves the seat owed and cold): warms=%d owed=%q\n%s", n, m.SeatWarmOwed(), stderr)
+	}
+	holderEnds(t, holderDone, 15*time.Second)
+}
+
+// Round 4, addendum 5a: when the drain or the unload fails and the lease is gone, the error says when the outer bound passed, so the
+// operator is not left to guess who released it.
+func TestADrainErrorSaysWhenTheOuterBoundReleasedTheLease(t *testing.T) {
+	_, m, _ := holderFixture(t, false)
+	cause := errors.New("the unload failed")
+	outer := time.Now().Add(-time.Minute)
+	got := detachedMaintainErrorAfter(m, 7, cause, outer)
+	for _, want := range []string{"the unload failed", "outer hold bound", outer.Format(time.Kitchen), "hidden holder"} {
+		if !strings.Contains(got.Error(), want) {
+			t.Errorf("the error must say %q: %v", want, got)
+		}
+	}
+	if plain := detachedMaintainErrorAfter(m, 7, cause, time.Time{}); strings.Contains(plain.Error(), "outer hold bound") {
+		t.Errorf("no outer bound was set, so none is named: %v", plain)
+	}
+	if future := detachedMaintainErrorAfter(m, 7, cause, time.Now().Add(time.Hour)); strings.Contains(future.Error(), "outer hold bound") {
+		t.Errorf("a bound that has not passed did not release anything: %v", future)
+	}
+}
