@@ -649,8 +649,8 @@ type AgentWireResult struct {
 	// the wire dropped them, so the delegation log could not say how often the compaction
 	// ladder ran or whether the seat fetched back what it evicted. A POINTER with omitempty:
 	// the key is absent on a node that predates the field, on a run that never reached the
-	// loop, and on a write-class deferral (the write door refused the run's write set, and
-	// that return comes before the object is attached), and PRESENT (zeros included) on
+	// loop, and on a write-class deferral (the write door did not close cleanly, and that
+	// return comes before the object is attached), and PRESENT (zeros included) on
 	// every other run the loop returned from, so a reader separates "not recorded" from
 	// "recorded, nothing happened".
 	Pager *AgentPager `json:"pager,omitempty"`

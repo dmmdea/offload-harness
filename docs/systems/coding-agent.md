@@ -553,7 +553,8 @@ demands the frozen report back byte for byte. With no source flag, harvest reads
   context size, so a run can end at zero steps with passes counted.
 - **Which rows carry a pager object.** From a build that carries the recording: a run the loop returned from carries one,
   zeros included, whether it finished or was deferred after the loop returned (a budget, infrastructure or abstention
-  deferral, for example); a write-class deferral (defer class `write`, the write door refused the run's write set)
+  deferral, for example); a write-class deferral (defer class `write`: the write door did not close cleanly, because the
+  run changed more files or a larger diff than the caps allow, or the snapshot of the write root after the run failed)
   returns before the object is attached, so it keeps its step trace and has none, which makes it a run that counts as
   unrecorded; a deferral raised before the loop ran has none and no other record either, and is skipped as never ran. Rows
   logged before the recording, and rows from a node that predates it, have none. The pager and compaction unrecorded

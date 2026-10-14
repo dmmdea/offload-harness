@@ -59,10 +59,11 @@ A readout over those records needs three rules, each learned from reading the re
 5. **Future runs record what the readout needs.** `PagerReport` counts compaction passes; the standalone trace file
    carries the pager and prefill objects of that goal alone (the loop's instruments are reset between goals); the agent
    wire result carries a pager object, zeros included, on every run the loop returned from except one kind: a write-class
-   deferral (defer class `write`, the write door refusing the run's write set) returns before the object is attached, so
-   that row keeps its step trace and has no pager object. A deferral raised before the loop ran has none either, but it
-   has no steps and no other record, and is skipped as never ran. Rows logged before the recording, and rows from a node
-   that predates it, have none.
+   deferral (defer class `write`: the write door did not close cleanly, because the run changed more files or a larger
+   diff than the caps allow, or the snapshot of the write root after the run failed) returns before the object is
+   attached, so that row keeps its step trace and has no pager object. A deferral raised before the loop ran has none
+   either, but it has no steps and no other record, and is skipped as never ran. Rows logged before the recording, and
+   rows from a node that predates it, have none.
 6. **The corpus is machine-local and redacted at harvest.** The corpus keeps numbers and enums only, redacts its few
    strings with the same redactor and vet table as `compaction-eval`, and replaces a seat, node id or stop reason that is
    a local path with a stable placeholder. This ADR carries aggregates only.

@@ -61,8 +61,8 @@ func TestAgentWireResultCarriesThePagerReport(t *testing.T) {
 }
 
 // TestWriteClassDeferralKeepsItsTraceAndCarriesNoPagerObject pins the one run that reached the
-// loop and still has no pager object: the write door refusing the run's write set returns before
-// the wire result is given the loop's pager report. ADR 0091 and the agent wire table state this
+// loop and still has no pager object: the write door failing to close cleanly returns before the
+// wire result is given the loop's pager report. ADR 0091 and the agent wire table state this
 // per row class (a write-class deferral is a run with a step trace that reads unrecorded). A
 // change that attaches the object ahead of the write door must flip this assertion and those
 // statements together.

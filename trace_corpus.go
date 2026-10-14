@@ -211,8 +211,8 @@ type tcDelegationResult struct {
 // first model call and again when that call is rejected for context overflow, so a first prompt
 // too large for the seat can end a run at zero steps with passes recorded.
 //
-// A write-class deferral (the write door refused the run's write set) is also kept, by its trace,
-// and reads unrecorded: it returns before the wire result is given a pager object.
+// A write-class deferral (the write door did not close cleanly) is also kept, by its trace, and
+// reads unrecorded: it returns before the wire result is given a pager object.
 func (r *tcDelegationResult) neverRan() bool {
 	return r.Steps == 0 && len(r.Trace) == 0 && r.PrefillSteps == 0 && r.SeatTokensIn == 0 && r.Pager == nil
 }

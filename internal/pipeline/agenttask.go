@@ -1165,8 +1165,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// same point and for the same reason as the prefill block above (a budget-stopped run is
 	// the one that compacted most). Unlike prefill it is set whether or not anything was
 	// evicted: an object of real zeros is a measurement, an absent key is "not recorded".
-	// It sits after the write door closes, so a write-class deferral (closeWriteDoor refusing
-	// the write set) returns before this line: that run keeps its trace and has no pager object.
+	// It sits after the write door closes, so a write-class deferral (closeWriteDoor returning an
+	// error: a cap breach or a failed snapshot) returns before this line: that run keeps its
+	// trace and has no pager object.
 	wire.Pager = agentPagerWire(res.Pager)
 	// The run's workspace root is gone (register C-79): its own file tools could not open it
 	// and the loop ended the run on the report, instead of letting the seat answer from
