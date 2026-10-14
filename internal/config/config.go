@@ -393,6 +393,14 @@ type Config struct {
 	// "enforce" makes a failed write deny the action, as a browse run's trail
 	// always has; it is the operator's call (a new way for a door to fail).
 	AuditAllDoors string `json:"audit_all_doors,omitempty"`
+	// FleetIngressGuard (register SF-16) guards the harness's own HTTP listeners (the fleet
+	// node, fleet-ui and local-agent --serve) against cross-site and DNS-rebinding requests: a
+	// Host outside loopback, the tailnet and every zone in tailnet_suffix / tailnet_suffixes, any Origin header
+	// (fleet-ui: other than its own page's), and (fleet node, local-agent) a POST that is not
+	// application/json. "" / "warn" (the default) logs what enforce would refuse, once per kind
+	// of violation, peer and offending value, with a bounded log, and serves the request;
+	// "enforce" refuses (421 / 403 / 415, naming this key); "off" skips the checks.
+	FleetIngressGuard string `json:"fleet_ingress_guard,omitempty"`
 	// AgentReadFloor (register SF-07) is the read floor every agent read tool
 	// (read_file, summarize_file, search_files) consults: reads of secret material
 	// (.env* except .env.example/.env.sample, *.pem, *.key, id_rsa*, id_ed25519*,
@@ -2647,6 +2655,9 @@ func load(path string) (Config, error) {
 	if err := validateAuditAllDoors(c.AuditAllDoors); err != nil {
 		return c, err
 	}
+	if err := validateFleetIngressGuard(c.FleetIngressGuard); err != nil {
+		return c, err
+	}
 	if err := validateAgentReadFloor(c.AgentReadFloor); err != nil {
 		return c, err
 	}
@@ -2715,6 +2726,31 @@ func validateAgentReadFloor(v string) error {
 		return nil
 	}
 	return fmt.Errorf("agent_read_floor: unknown mode %q (valid: \"\" or \"warn\" (default: record reads of secret material), \"enforce\", \"off\")", v)
+}
+
+// validateFleetIngressGuard refuses a fleet_ingress_guard value by name (SF-16): an unknown
+// mode must fail the load, never fall back to off (no guard) or to enforce (refusals the
+// operator did not ask for). Trimmed and lower-cased, as FleetIngressGuardMode.
+func validateFleetIngressGuard(v string) error {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "off", "warn", "enforce":
+		return nil
+	}
+	return fmt.Errorf("fleet_ingress_guard: unknown mode %q (valid: \"\" or \"warn\" (default: log what enforce would refuse), \"enforce\", \"off\")", v)
+}
+
+// FleetIngressGuardMode is the effective SF-16 ingress mode: off, warn (the default) or enforce.
+// A value the load would refuse comes back as enforce: a one-shot verb keeps going after a
+// config load error, and an unknown mode must never fail open.
+func (c Config) FleetIngressGuardMode() string {
+	switch v := strings.ToLower(strings.TrimSpace(c.FleetIngressGuard)); v {
+	case "", "warn":
+		return "warn"
+	case "off":
+		return "off"
+	default:
+		return "enforce"
+	}
 }
 
 // AuditAllDoorsMode resolves audit_all_doors to "off", "warn" or "enforce"; an unset

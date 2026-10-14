@@ -3080,6 +3080,8 @@ func runFleetServe(args []string) error {
 	// The lease in force is not always the one written (default, raised to the
 	// floor, off): say which, once, so a substituted value is not silent.
 	fmt.Fprintf(os.Stderr, "[fleet-serve] %s\n", pollLeaseNote(cfg))
+	// The ingress guard defaults to warn, which serves what it would refuse: say which mode runs.
+	fmt.Fprintf(os.Stderr, "[fleet-serve] %s\n", ingressGuardNote(cfg))
 	// Reclaimable VRAM is sampled in the background (never from the health handler,
 	// which must not block on llama-swap) — see fleet_reclaim.go for why the idle
 	// baseline, not free or total, is the right denominator for a shared card.
@@ -3599,6 +3601,8 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// The tailnet zones the guard admits dotted hostnames under: pure config as well, and
 	// the first thing to read when a roster entry by name is refused.
 	writeTailnetZonesSection(w, cfg)
+	// The ingress guard mode: pure config, and the default (warn) serves what it would refuse.
+	writeIngressGuardSection(w, cfg)
 	// The workers this box publishes against the slots its agent seat serves, read from the live serving
 	// config: pure config plus one file, informational like the skew and token rows, and silent without an
 	// agent seat.

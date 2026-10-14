@@ -31,6 +31,7 @@
   "agent_allow_write": false,
   "agent_allow_browse": false,
   "audit_all_doors": "",
+  "fleet_ingress_guard": "",
   "agent_read_floor": "",
   "audit_chain": false,
   "pair_workloads_enabled": false,

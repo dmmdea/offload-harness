@@ -458,7 +458,7 @@ func main() {
 		}
 		// The served process is ONE chained run for its whole lifetime (SF-08): every
 		// request shares this Build's trail, and the run closes only when serving ends.
-		err := serveOpenAI(*listen, loop, plannerModel)
+		err := runServe(cfgSrc, func() error { return serveOpenAI(*listen, loop, plannerModel, cfg.FleetIngressGuardMode()) })
 		built.EndAudit()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
