@@ -429,6 +429,11 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	}
 	// After the gate, so it wraps outside it: every door's result, a config deferral included, carries the stale notice (stale_notice.go).
 	srv.AddReceivingMiddleware(s.staleNotice)
+	// tools_schema_profile=compact (ENH-13a, toolsprofile.go) rewrites the ADVERTISED list only. Installed only for compact, so the
+	// default configuration has no extra middleware and its tools/list is byte-identical to the list before the key existed.
+	if s.p != nil && s.p.Cfg().ToolsSchemaProfileMode() == config.ToolsProfileCompact {
+		srv.AddReceivingMiddleware(compactToolsMiddleware)
+	}
 
 	// Discovery FIRST (LO-18): before this tool existed, offload_nim was the only
 	// tool that named or listed any model, so an agent inspecting the harness

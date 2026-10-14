@@ -1,26 +1,59 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
 
-// listToolsWire connects a real MCP client to the built server over an in-memory transport and returns the
-// tools/list result re-marshalled to the JSON a client receives on the wire: {"tools":[...]}.
+// wireCapture records the result bytes of every JSON-RPC response the server writes, before any client decodes them: the
+// client side of the in-memory transport would re-marshal the tools (alphabetical keys, schema order lost), the server's own
+// bytes are what a stdio client receives.
+type wireCapture struct {
+	mcp.Transport
+	mu      sync.Mutex
+	results [][]byte
+}
+
+type wireCaptureConn struct {
+	mcp.Connection
+	c *wireCapture
+}
+
+func (w *wireCapture) Connect(ctx context.Context) (mcp.Connection, error) {
+	conn, err := w.Transport.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &wireCaptureConn{Connection: conn, c: w}, nil
+}
+
+func (w *wireCaptureConn) Write(ctx context.Context, msg jsonrpc.Message) error {
+	if resp, ok := msg.(*jsonrpc.Response); ok && len(resp.Result) > 0 {
+		w.c.mu.Lock()
+		w.c.results = append(w.c.results, append([]byte(nil), resp.Result...))
+		w.c.mu.Unlock()
+	}
+	return w.Connection.Write(ctx, msg)
+}
+
+// listToolsWire answers a tools/list over an in-memory transport and returns the result exactly as the server wrote it.
 func listToolsWire(t *testing.T, cfg config.Config) []byte {
 	t.Helper()
 	srv := New(pipeline.New(cfg, nil, nil, nil)).buildServer("test")
 	clientT, serverT := mcp.NewInMemoryTransports()
+	capture := &wireCapture{Transport: serverT}
 	ctx := context.Background()
-	ss, err := srv.Connect(ctx, serverT, nil)
+	ss, err := srv.Connect(ctx, capture, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
@@ -30,15 +63,18 @@ func listToolsWire(t *testing.T, cfg config.Config) []byte {
 		t.Fatalf("client connect: %v", err)
 	}
 	defer cs.Close()
-	res, err := cs.ListTools(ctx, nil)
-	if err != nil {
+	if _, err := cs.ListTools(ctx, nil); err != nil {
 		t.Fatalf("tools/list: %v", err)
 	}
-	raw, err := json.Marshal(res)
-	if err != nil {
-		t.Fatal(err)
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	for _, r := range capture.results {
+		if bytes.Contains(r, []byte(`"tools":[`)) {
+			return r
+		}
 	}
-	return raw
+	t.Fatal("no tools/list result seen on the server's side of the transport")
+	return nil
 }
 
 // TestToolsListDump is the measurement helper behind the token table in docs/systems/opencode-integration.md:
@@ -56,6 +92,9 @@ func TestToolsListDump(t *testing.T) {
 	// recon set, so the measured box has agent_delegation_enabled on.
 	cfg := config.Default()
 	cfg.AgentDelegationEnabled = true
+	if p := os.Getenv("OFFLOAD_TOOLS_DUMP_PROFILE"); p != "" {
+		cfg.ToolsSchemaProfile = p
+	}
 	label := os.Getenv("OFFLOAD_TOOLS_DUMP_LABEL")
 	if label == "" {
 		label = "tools-list"
