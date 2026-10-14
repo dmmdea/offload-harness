@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -258,6 +259,52 @@ func TestAReserveThatDiesInTheMiddleOfItsOwnReleaseIsStillCoveredByTheHolder(t *
 	}
 	if m.SeatWarmOwed() != "" {
 		t.Errorf("the holder paid the owed warm-back before it released: owed=%q", m.SeatWarmOwed())
+	}
+}
+
+// THE REVIEW-ROUND-3 WINDOW. The reserve's wait ends without admission and the reserve dies at that very instant: after the wait
+// stopped, before its own release pushed the stamp out. The wait used to clear the stamp as it ended, so for those milliseconds
+// the record said "asks for 30 GiB, no bound", which the holder cannot act on, and a reserve killed there (a tool timeout lands at
+// exactly the default bound) left the cards held for good, the incident itself. The stamp now stays until admission, so the holder
+// has a moment to act on whichever way the wait ended. The test runs the real holder against the real wait and then does what the
+// dead reserve does: nothing.
+func TestAReserveThatDiesTheInstantItsWaitEndsLeavesTheHolderAMomentToAct(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		bound       time.Duration
+		cancelAfter time.Duration // a signal ends the wait this long after it began (0 = the bound ends it)
+	}{
+		{"the bound ends the wait", 400 * time.Millisecond, 0},
+		{"a signal ends the wait before the bound", 2 * time.Second, 300 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgPath, m, f := holderFixture(t, false)
+			fastHolder(t)
+			holderDone := runHolder(cfgPath)
+			epoch := waitForLeases(t, m, 1)[0].Epoch
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelAfter > 0 {
+				time.AfterFunc(tc.cancelAfter, cancel)
+			}
+			start := time.Now()
+			err := awaitHostRAMBounded(ctx, func(o gpulease.AwaitHostRAMOptions) error { return m.AwaitHostRAM(epoch, o) },
+				start.Add(time.Minute), time.Minute, hostRAMHold{max: tc.bound, heldSince: start}, io.Discard)
+			if err == nil {
+				t.Fatal("the host never has the room: the wait ends without admission")
+			}
+			// The reserve is dead from here on: nothing releases the lease and nothing pushes the stamp out.
+			holderEnds(t, holderDone, 5*time.Second)
+			if time.Since(start) < tc.bound {
+				t.Errorf("the holder let go %s in, before the moment the wait was stamped to end (%s)", time.Since(start), tc.bound)
+			}
+			if m.Inspect().Held {
+				t.Errorf("the holder ended but the lease is still held: %+v", m.Inspect())
+			}
+			if n := f.warms.Load(); n != 0 {
+				t.Errorf("the seat was never unloaded for this lease, so nothing is warmed: warms=%d", n)
+			}
+		})
 	}
 }
 

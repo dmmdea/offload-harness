@@ -70,32 +70,64 @@ func TestTheAwaitStampsWhenTheHoldBoundReleasesTheLeaseWhileItWaitsAndClearsItOn
 	}
 }
 
-// A wait that ends without admission (its deadline, here) leaves the lease still asking and no bound running. The test waits for
-// the stamp to EXIST mid-wait before it asserts that the end of the wait cleared it, so a slow runner cannot make it pass because
-// the stamp was never written.
-func TestAWaitThatEndsRefusedClearsTheBoundItStamped(t *testing.T) {
-	m, _ := ramScoped(t, 70)
-	l, err := m.TryAcquire(ClassMedia, Options{Reason: "film", TTL: time.Hour, Devices: []string{card0}, HostRAMWaitGiB: 30})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = l.Release() }()
-	until := time.Now().Add(1500 * time.Millisecond)
-	done := make(chan error, 1)
-	go func() { done <- l.AwaitHostRAM(AwaitHostRAMOptions{Deadline: until, HoldUntil: until}) }()
-	waitForHoldStamp(t, m, l.Epoch()) // it existed while the wait ran
-	select {
-	case err := <-done:
-		asHostRAM(t, err)
-	case <-time.After(15 * time.Second):
-		t.Fatal("the wait never ended")
-	}
-	rec := recordOf(t, m, l.Epoch())
-	if !rec.HostRAMHoldUntil.IsZero() {
-		t.Errorf("the wait is over, so the bound it stamped is not running any more: %v", rec.HostRAMHoldUntil)
-	}
-	if rec.HostRAMWaitGiB != 30 {
-		t.Errorf("the lease still asks for its figure: wait %.1f", rec.HostRAMWaitGiB)
+// A wait that ends without admission leaves the lease still asking, and the moment it stamped stays on the record, whichever way
+// the wait ended: that moment is the one by which the lease's hidden holder lets go of it if the reserve that took it never
+// does. Clearing it was a window (review round 3): between the clear and the reserve's own push-out of the stamp, the record said
+// "asks for 30 GiB, no bound", which the holder cannot act on, and a reserve killed in that instant (a tool timeout lands at
+// exactly the default bound) left the cards held for good. Only admission, which ends the asking, takes the stamp off. The three
+// ways a wait ends short of admission are all here: its deadline, a cancel before its moment, a figure no state can admit.
+func TestAWaitThatEndsWithoutAdmissionLeavesTheMomentItStampedOnTheRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		commit, need float64
+		cancel       bool // a signal ends the wait once its stamp is on the record
+		impossible   bool
+	}{
+		{name: "its deadline passes", commit: 70, need: 30},
+		{name: "a signal cancels it before its moment", commit: 70, need: 30, cancel: true},
+		{name: "the figure is impossible", commit: 10, need: 99, impossible: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := ramScoped(t, tc.commit)
+			l, err := m.TryAcquire(ClassMedia, Options{Reason: "film", TTL: time.Hour, Devices: []string{card0}, HostRAMWaitGiB: tc.need})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = l.Release() }()
+			until := time.Now().Add(1500 * time.Millisecond).Truncate(time.Millisecond)
+			cancel := make(chan struct{})
+			done := make(chan error, 1)
+			go func() { done <- l.AwaitHostRAM(AwaitHostRAMOptions{Deadline: until, HoldUntil: until, Cancel: cancel}) }()
+			if tc.cancel {
+				waitForHoldStamp(t, m, l.Epoch()) // the wait is running: the cancel ends it before its moment
+				close(cancel)
+			}
+			var end error
+			select {
+			case end = <-done:
+			case <-time.After(15 * time.Second):
+				t.Fatal("the wait never ended")
+			}
+			switch {
+			case tc.cancel:
+				if !errors.Is(end, ErrCancelled) {
+					t.Errorf("a cancelled wait says so: %v", end)
+				}
+			case tc.impossible:
+				if short := asHostRAM(t, end); !short.Impossible {
+					t.Errorf("99 GiB on a 100 GiB box can never be admitted: %+v", short)
+				}
+			default:
+				asHostRAM(t, end)
+			}
+			rec := recordOf(t, m, l.Epoch())
+			if d := rec.HostRAMHoldUntil.Sub(until); rec.HostRAMHoldUntil.IsZero() || d < -time.Millisecond || d > time.Millisecond {
+				t.Errorf("the wait ended without admission and the lease still asks, so the moment it stamped stays for the holder to act on: want %s, got %v", until, rec.HostRAMHoldUntil)
+			}
+			if rec.HostRAMWaitGiB != tc.need {
+				t.Errorf("the lease still asks for its figure: wait %.1f", rec.HostRAMWaitGiB)
+			}
+		})
 	}
 }
 
