@@ -555,6 +555,18 @@ try {
   try { Resolve-ProfileParams -ProfileId 'blackwell-16' -RamTier 'high' -BigRam $true -ProfilesJsonPath $scratchProfiles -Backend 'cuda' | Out-Null }
   catch { $threwNoN = $true; $noNMsg = $_.Exception.Message }
   Assert ($threwNoN -and ($noNMsg -match 'n_cpu_moe') -and ($noNMsg -match 'INV-1')) 'moe_26b n_cpu_moe with no N throws a profile-defect error that names n_cpu_moe and INV-1'
+  # The every-expert placement on a backend with a card is the other defect (the cpu backend has no card to overflow from).
+  $pjCard = Get-Content -Raw -Encoding UTF8 $profilesPath | ConvertFrom-Json
+  $pjCard.profiles.'blackwell-16'.moe_26b = 'cpu_moe'
+  [System.IO.File]::WriteAllText($scratchProfiles, ($pjCard | ConvertTo-Json -Depth 30), (New-Object System.Text.UTF8Encoding($false)))
+  $threwCard = $false; $cardMsg = ''
+  try { Resolve-ProfileParams -ProfileId 'blackwell-16' -RamTier 'min' -BigRam $true -ProfilesJsonPath $scratchProfiles -Backend 'cuda' | Out-Null }
+  catch { $threwCard = $true; $cardMsg = $_.Exception.Message }
+  Assert ($threwCard -and ($cardMsg -match 'cpu_moe') -and ($cardMsg -match 'INV-1')) 'moe_26b cpu_moe on a cuda tier throws at any RAM tier (here min) and names cpu_moe and INV-1'
+  $pjCard.profiles.'blackwell-16'.include_26b = $false
+  [System.IO.File]::WriteAllText($scratchProfiles, ($pjCard | ConvertTo-Json -Depth 30), (New-Object System.Text.UTF8Encoding($false)))
+  $ppNo26 = Resolve-ProfileParams -ProfileId 'blackwell-16' -RamTier 'high' -BigRam $true -ProfilesJsonPath $scratchProfiles -Backend 'cuda'
+  Assert ((-not $ppNo26.include_26b) -and ("$($ppNo26.moe_26b)" -eq '')) 'a tier that does not include the 26B places nothing and is not refused'
   $pjDoc.profiles.'blackwell-16' | Add-Member -NotePropertyName n_cpu_moe -NotePropertyValue 14 -Force
   [System.IO.File]::WriteAllText($scratchProfiles, ($pjDoc | ConvertTo-Json -Depth 30), (New-Object System.Text.UTF8Encoding($false)))
   $ppSpill = Resolve-ProfileParams -ProfileId 'blackwell-16' -RamTier 'high' -BigRam $true -ProfilesJsonPath $scratchProfiles -Backend 'cuda'
