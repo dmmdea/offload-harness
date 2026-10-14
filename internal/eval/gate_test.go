@@ -496,10 +496,10 @@ func TestGateEfficiencyNeedsMinPairsResolved(t *testing.T) {
 	}
 }
 
-// Rules R3 and R2: a task's efficiency value is the mean of the RESOLVED values over its SCORED
-// attempts (pass, task_fail, cheat). A nil value neither counts as 0 nor enters the divisor; an
-// attempt that did not finish (infra_error here) contributes no cost, whatever it carries and
-// wherever it sits in the list, even though the candidate's primary score counts it at the worst.
+// Rules R3 and R2: a task's efficiency value on the CANDIDATE arm is the mean of the RESOLVED values
+// over every attempt that ran: pass, task_fail, cheat, and the unfinished classes timeout,
+// infra_error and judge_error, which spent what they recorded. A nil value neither counts as 0 nor
+// enters the divisor, and a not_run attempt never ran and carries nothing, whatever it records.
 // Every task on the candidate arm has the same attempt list and every task on the incumbent costs
 // 1500, so each bootstrap replicate is exactly want-1500 and delta, lo and hi pin the task value.
 func TestGatePerTaskEfficiencyAggregation(t *testing.T) {
@@ -507,19 +507,30 @@ func TestGatePerTaskEfficiencyAggregation(t *testing.T) {
 	pass := func(tokens *float64) Attempt {
 		return Attempt{Outcome: OutcomePass, Score: f64(8), Metrics: map[string]*float64{tokensName: tokens}}
 	}
+	unfinished := func(o AttemptOutcome, tokens *float64) Attempt {
+		return Attempt{Outcome: o, Metrics: map[string]*float64{tokensName: tokens}}
+	}
 	for _, tc := range []struct {
 		name     string
 		attempts []Attempt
 		want     float64
 	}{
-		{"a nil value is not 0 and not in the divisor; an infra_error's cost is ignored",
-			[]Attempt{pass(f64(1000)), pass(nil), {Outcome: OutcomeInfraError, Metrics: map[string]*float64{tokensName: f64(1)}}}, 1000},
+		{"a nil value is not 0 and not in the divisor; an infra_error's recorded cost counts as spent",
+			[]Attempt{pass(f64(1000)), pass(nil), unfinished(OutcomeInfraError, f64(3000))}, 2000},
 		{"two resolved values and a nil: the mean of the two",
 			[]Attempt{pass(f64(1000)), pass(f64(600)), pass(nil)}, 800},
-		{"an unusable attempt BEFORE the usable one is ignored too",
-			[]Attempt{{Outcome: OutcomeTimeout, Metrics: map[string]*float64{tokensName: f64(1)}}, pass(f64(1000))}, 1000},
+		{"an unfinished attempt BEFORE the finished one counts too",
+			[]Attempt{unfinished(OutcomeTimeout, f64(600)), pass(f64(1000))}, 800},
 		{"a cheat is a usable attempt and its resolved cost counts",
 			[]Attempt{{Outcome: OutcomeCheat, Score: f64(0), Metrics: map[string]*float64{tokensName: f64(400)}}, pass(f64(600))}, 500},
+		{"a judge_error's recorded cost counts as spent",
+			[]Attempt{unfinished(OutcomeJudgeError, f64(200)), pass(f64(600))}, 400},
+		{"a not_run attempt never ran: it carries nothing, whatever it records",
+			[]Attempt{pass(f64(1000)), unfinished(OutcomeNotRun, f64(99999))}, 1000},
+		{"an unfinished attempt with a null cost stays unresolved, it is not 0 and not in the divisor",
+			[]Attempt{pass(f64(1000)), unfinished(OutcomeTimeout, nil)}, 1000},
+		{"a task that is nothing but a timeout is a pair with the cost it burned",
+			[]Attempt{unfinished(OutcomeTimeout, f64(20000))}, 20000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, h := freeze(t, niPre(n), nil)
@@ -535,6 +546,29 @@ func TestGatePerTaskEfficiencyAggregation(t *testing.T) {
 				t.Fatalf("the per-task cost must be %v (delta %v): got %+v", tc.want, want, e)
 			}
 		})
+	}
+}
+
+// The incumbent arm is not imputed, cost included: a timeout, infra_error, judge_error or not_run
+// attempt of the incumbent is skipped entirely, so whatever it records never reaches the mean.
+func TestGateIncumbentUnusableAttemptsCarryNoCost(t *testing.T) {
+	const n = 16
+	b, h := freeze(t, niPre(n), nil)
+	inc := arm("i", repeatF(8, n), nil)
+	for i := range inc.Tasks {
+		inc.Tasks[i].Attempts = []Attempt{
+			{Outcome: OutcomePass, Score: f64(8), Metrics: tokenMetric(1500)},
+			{Outcome: OutcomeTimeout, Metrics: tokenMetric(9e6)},
+			{Outcome: OutcomeInfraError, Metrics: tokenMetric(9e6)},
+			{Outcome: OutcomeJudgeError, Metrics: tokenMetric(9e6)},
+			{Outcome: OutcomeNotRun, Metrics: tokenMetric(9e6)},
+		}
+	}
+	cand := arm("c", repeatF(8, n), repeatF(1000, n))
+	r := mustGate(t, b, h, inputFor(h, inc, cand))
+	e := r.Efficiency[0]
+	if e.N != n || val(e.Delta) != -500 || val(e.Lo) != -500 || val(e.Hi) != -500 {
+		t.Fatalf("the incumbent costs 1500 per task whatever its unfinished attempts recorded: %+v", e)
 	}
 }
 

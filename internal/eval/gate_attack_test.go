@@ -721,9 +721,9 @@ func TestUnresolvedMetricShareAboveTheCapBlocksAdoptInNonInferiority(t *testing.
 	}
 }
 
-// A candidate that times out on its expensive tasks has no cost for them: those pairs are unresolved,
-// and the same cap catches it.
-func TestTimedOutTasksLeaveTheirCostUnresolved(t *testing.T) {
+// A candidate that times out on its expensive tasks cannot leave their cost out: a timeout ran, and what it
+// recorded is spent. Its tasks are pairs with the cost the timeouts burned, not unresolved pairs.
+func TestTimedOutTasksCarryTheCostTheyRecorded(t *testing.T) {
 	const n = 20
 	b, h := freeze(t, niPre(n), nil)
 	inc := armFrom("i", n, func(int) []Attempt {
@@ -731,14 +731,79 @@ func TestTimedOutTasksLeaveTheirCostUnresolved(t *testing.T) {
 	})
 	cand := armFrom("c", n, func(i int) []Attempt {
 		if i < 5 {
-			return []Attempt{{Outcome: OutcomeTimeout, Metrics: tokenMetric(1)}}
+			return []Attempt{{Outcome: OutcomeTimeout, Metrics: tokenMetric(5000)}}
+		}
+		return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: tokenMetric(500)}}
+	})
+	r := mustGate(t, b, h, inputFor(h, inc, cand))
+	e := r.Efficiency[0]
+	// 5 tasks cost 5000 and 15 cost 500, against 1000 on every task: the mean difference is
+	// (5 x 4000 - 15 x 500) / 20 = +625.
+	if e.N != n || e.UnresolvedPairs != 0 || e.OverUnresolvedCap || e.Improves || val(e.Delta) != 625 {
+		t.Fatalf("the timeouts' recorded cost is part of the candidate's spend: %+v", e)
+	}
+	if r.Verdict == VerdictAdopt {
+		t.Fatalf("a candidate that times out on a quarter of the tasks was adopted: %s", marshal(t, r))
+	}
+}
+
+// A cost the adapter did not record is a null and stays unresolved, an unfinished attempt's included:
+// the gate cannot charge for what it was never told. The pairs are counted, and over the cap they stop
+// the ADOPT.
+func TestTimedOutTasksWithNullCostStayUnresolved(t *testing.T) {
+	const n = 20
+	b, h := freeze(t, niPre(n), nil)
+	inc := armFrom("i", n, func(int) []Attempt {
+		return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: tokenMetric(1000)}}
+	})
+	cand := armFrom("c", n, func(i int) []Attempt {
+		if i < 5 {
+			return []Attempt{{Outcome: OutcomeTimeout, Metrics: map[string]*float64{tokensName: nil}}}
 		}
 		return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: tokenMetric(500)}}
 	})
 	r := mustGate(t, b, h, inputFor(h, inc, cand))
 	e := r.Efficiency[0]
 	if e.N != 15 || e.UnresolvedPairs != 5 || !e.OverUnresolvedCap || r.Verdict == VerdictAdopt {
-		t.Fatalf("a timed-out attempt's cost is not a measured cost: %+v %s", e, r.Verdict)
+		t.Fatalf("a null cost on a timed-out task is unresolved, never 0: %+v %s", e, r.Verdict)
+	}
+}
+
+// Probe P3, the cost lever. 20 tasks of 25 attempts: the incumbent passes all 25 at 1000 tokens, the
+// candidate passes 24 at 900 and its 25th attempt times out after burning 20000. Its true spend per task is
+// (24 x 900 + 20000) / 25 = 1664 tokens, 1.66 times the incumbent's. The timeout scores the worst (0.96
+// against 1.0, inside the 0.05 margin), and it used to carry no cost, so the gate saw 900 tokens and
+// ADOPTed an efficiency win that was a loss.
+func TestAnUnfinishedAttemptsRecordedCostIsSpentNotHidden(t *testing.T) {
+	const n, k = 20, 25
+	b, h := freeze(t, niUnitPre(n), nil)
+	inc := armFrom("i", n, func(int) []Attempt {
+		as := make([]Attempt, k)
+		for j := range as {
+			as[j] = passTok(1, 1000)
+		}
+		return as
+	})
+	cand := armFrom("c", n, func(int) []Attempt {
+		as := make([]Attempt, 0, k)
+		for j := 0; j < k-1; j++ {
+			as = append(as, passTok(1, 900))
+		}
+		return append(as, Attempt{Outcome: OutcomeTimeout, Metrics: tokenMetric(20000)})
+	})
+	r := mustGate(t, b, h, inputFor(h, inc, cand))
+	if !(r.Lo > -0.05) || r.ImputedAttempts != n || math.Abs(r.ExcludedShare-20.0/500.0) > 1e-12 {
+		t.Fatalf("setup: the primary must be inside the margin with 20 imputed attempts of 500, so that only the cost decides: %s", marshal(t, r))
+	}
+	e := r.Efficiency[0]
+	if e.N != n || val(e.Delta) != 664 || val(e.Lo) != 664 || val(e.Hi) != 664 {
+		t.Fatalf("the candidate spends 1664 tokens a task against 1000: want a delta of +664, got %+v", e)
+	}
+	if e.Improves || !e.Regresses {
+		t.Fatalf("a candidate 1.66 times dearer regresses and does not improve: %+v", e)
+	}
+	if r.Verdict != VerdictInconclusive || r.Reason != "declared efficiency metric "+tokensName+" got significantly worse" {
+		t.Fatalf("the efficiency win was a loss and must not ADOPT: %s %s", r.Verdict, r.Reason)
 	}
 }
 
@@ -788,14 +853,17 @@ func TestSignificantlyWorseEfficiencyMetricVetoesAdopt(t *testing.T) {
 	}
 }
 
-func TestRegressionNeedsMinPairsAndAnIntervalWhollyOnTheWorseSide(t *testing.T) {
+// A regression is read on any metric that has an interval, that is on two or more resolved pairs: only an
+// IMPROVEMENT needs min_pairs resolved pairs. (A metric resolved on 2 to min_pairs-1 pairs used to be neither,
+// so a ten-times regression on it was neutral.)
+func TestRegressionNeedsTwoResolvedPairsAndAnIntervalWhollyOnTheWorseSide(t *testing.T) {
 	const n = 20
 	p := niPre(n)
 	p.Efficiency = []PreRegEfficiency{
 		{Name: tokensName, Class: EffTokens},
 		{Name: "tokens_saved", Class: EffTokens, LowerIsBetter: boolp(false)},
 	}
-	share := 0.5 // wide enough that only min_pairs, not the unresolved cap, decides below
+	share := 0.95 // wide enough that the unresolved cap does not decide below
 	p.MaxExcludedShare = &share
 	b, h := freeze(t, p, nil)
 	build := func(resolved int, dTok, dSaved func(i int) float64) GateResult {
@@ -811,20 +879,76 @@ func TestRegressionNeedsMinPairsAndAnIntervalWhollyOnTheWorseSide(t *testing.T) 
 		})
 		return mustGate(t, b, h, inputFor(h, inc, cand))
 	}
+	dearer := func(int) float64 { return 100 }
+	lower := func(int) float64 { return -50 }
 	// 16 resolved pairs, both dearer / lower: both regress.
-	r := build(16, func(int) float64 { return 100 }, func(int) float64 { return -50 })
+	r := build(16, dearer, lower)
 	if !r.Efficiency[0].Regresses || !r.Efficiency[1].Regresses {
 		t.Fatalf("both metrics are wholly on the worse side: %+v", r.Efficiency)
 	}
-	// 15 resolved pairs is below min_pairs: no regression is declared (and nothing improves).
-	r = build(15, func(int) float64 { return 100 }, func(int) float64 { return -50 })
-	if r.Efficiency[0].Regresses || r.Efficiency[1].Regresses || r.Efficiency[0].Improves {
-		t.Fatalf("fewer than min_pairs resolved pairs cannot regress or improve: %+v", r.Efficiency)
+	// 15 resolved pairs is below min_pairs: both still regress (a regression needs only an interval), and
+	// nothing improves.
+	r = build(15, dearer, lower)
+	if !r.Efficiency[0].Regresses || !r.Efficiency[1].Regresses || r.Efficiency[0].Improves || r.Efficiency[1].Improves {
+		t.Fatalf("15 resolved pairs have an interval: both regress, neither improves: %+v", r.Efficiency)
+	}
+	// Two resolved pairs are the least that has an interval.
+	r = build(2, dearer, lower)
+	if e := r.Efficiency[0]; e.N != 2 || e.Delta == nil || !e.Regresses || e.Improves {
+		t.Fatalf("two resolved pairs regress: %+v", e)
+	}
+	// One resolved pair has no interval: delta, lo and hi are null and nothing regresses.
+	r = build(1, dearer, lower)
+	if e := r.Efficiency[0]; e.N != 1 || e.Delta != nil || e.Lo != nil || e.Hi != nil || e.Regresses || e.Improves {
+		t.Fatalf("one resolved pair has no interval and cannot regress: %+v", e)
+	}
+	// An IMPROVEMENT still needs min_pairs resolved pairs: 15 cheaper pairs are not enough, 16 are.
+	cheaper := func(int) float64 { return -100 }
+	more := func(int) float64 { return 50 }
+	if e := build(15, cheaper, more).Efficiency; e[0].Improves || e[1].Improves || e[0].Regresses || e[1].Regresses {
+		t.Fatalf("15 resolved pairs are too few to improve and are not a regression: %+v", e)
+	}
+	if e := build(16, cheaper, more).Efficiency; !e[0].Improves || !e[1].Improves {
+		t.Fatalf("16 resolved pairs reach min_pairs: %+v", e)
 	}
 	// An interval that spans zero is no regression.
 	r = build(16, func(i int) float64 { return float64(300 * (1 - 2*(i%2))) }, func(i int) float64 { return float64(50 * (1 - 2*(i%2))) })
 	if r.Efficiency[0].Regresses || r.Efficiency[1].Regresses {
 		t.Fatalf("an interval spanning zero is not a regression: %+v", r.Efficiency)
+	}
+}
+
+// Probe P7. 18 tasks: tokens are better on every pair, memory is ten times worse on 15 pairs and null on 3.
+// 15 resolved pairs is below min_pairs (16) and the 3 unresolved are 0.167 of the 18, under the 0.20 cap, so
+// memory neither improved nor counted as unmeasured, a regression on it went unread, and the tokens
+// carried an ADOPT.
+func TestAMetricResolvedOnFewerThanMinPairsStillVetoesWhenItIsMuchWorse(t *testing.T) {
+	const n = 18
+	p := niPre(n)
+	p.Efficiency = []PreRegEfficiency{{Name: tokensName, Class: EffTokens}, {Name: "memory_gib", Class: EffMemoryGiB}}
+	b, h := freeze(t, p, nil)
+	mk := func(tag string, tok float64, mem func(i int) *float64) Arm {
+		return armFrom(tag, n, func(i int) []Attempt {
+			return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: map[string]*float64{tokensName: f64(tok), "memory_gib": mem(i)}}}
+		})
+	}
+	inc := mk("i", 1000, func(int) *float64 { return f64(2) })
+	cand := mk("c", 800, func(i int) *float64 {
+		if i < 15 {
+			return f64(20)
+		}
+		return nil
+	})
+	r := mustGate(t, b, h, inputFor(h, inc, cand))
+	tok, mem := r.Efficiency[0], r.Efficiency[1]
+	if !tok.Improves || tok.Regresses {
+		t.Fatalf("setup: tokens improve on all 18 pairs: %+v", tok)
+	}
+	if mem.N != 15 || mem.UnresolvedPairs != 3 || mem.OverUnresolvedCap || mem.Improves || !mem.Regresses {
+		t.Fatalf("memory is resolved on 15 pairs, under the cap, and ten times worse: %+v", mem)
+	}
+	if r.Verdict == VerdictAdopt || r.Reason != "declared efficiency metric memory_gib got significantly worse" {
+		t.Fatalf("a ten-times memory regression must veto the ADOPT whatever the tokens do: %s %s", r.Verdict, r.Reason)
 	}
 }
 
