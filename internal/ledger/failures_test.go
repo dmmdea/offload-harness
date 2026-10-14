@@ -82,7 +82,7 @@ func showTokens(p *int64) string {
 	return strconv.FormatInt(*p, 10)
 }
 
-// Rows from before the reason code was stamped (F22) are classed with the ledger's own total classifier at read
+// Rows from before the reason code was stamped are classed with the ledger's own total classifier at read
 // time and counted as derived; a stamped code outside the closed set, or one that says ok on a deferred row, is
 // not trusted; an acceptance failure that did not defer is still a failed verification.
 func TestFailureClassOfARowThatCarriesNoCode(t *testing.T) {
