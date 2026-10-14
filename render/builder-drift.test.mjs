@@ -858,6 +858,91 @@ test("check --strict fails on unreviewed entries and only on those", async () =>
   assert.equal(deliberate.length, 4);
 });
 
+test("a single-dash argument and an extra positional are refused with exit 2, never ignored", async (t) => {
+  const dir = scratchDir(t, "bd-dash-");
+  const tdir = writeSyntheticPackage(dir);
+  const manifestFile = join(dir, "m.json");
+  assert.equal((await cli(["record", "--templates-dir", tdir, "--manifest", manifestFile])).code, 0);
+  // `-templates-dir DIR` is a typo of the flag: it must not leave the template side skipped
+  for (const argv of [
+    ["check", "-templates-dir", tdir, "--manifest", manifestFile],
+    ["check", "-templates-dir=" + tdir, "--manifest", manifestFile],
+    ["check", "-x", "--manifest", manifestFile],
+    ["-x", "check", "--manifest", manifestFile],
+    ["check", "-", "--manifest", manifestFile],
+    ["check", "--manifest", manifestFile, "-s"],
+  ]) {
+    const r = await cli(argv, {});
+    assert.equal(r.code, 2, `${argv.join(" ")} -> ${r.out}${r.err}`);
+    assert.match(r.err, /unknown flag -/);
+    assert.doesNotMatch(r.out, /^ok:|template side skipped/m);
+  }
+  // a flag's value is never a dash-led word: `--manifest -x` has no value
+  const dashValue = await cli(["check", "--manifest", "-x"]);
+  assert.equal(dashValue.code, 2);
+  assert.match(dashValue.err, /--manifest needs a non-empty value/);
+  // a second positional after the verb is refused, whichever verb it follows
+  for (const argv of [["check", "extra"], ["check", "extra", "--manifest", manifestFile], ["check", "check"], ["explain", "extra", "--templates-dir", tdir], ["record", "extra", "--templates-dir", tdir, "--manifest", join(dir, "o.json")]]) {
+    const r = await cli(argv, {});
+    assert.equal(r.code, 2, `${argv.join(" ")} -> ${r.out}${r.err}`);
+    assert.match(r.err, /unexpected argument extra|unexpected argument check/);
+    assert.doesNotMatch(r.out, /^ok:|^wrote /m);
+  }
+  // the known forms still work: no verb is check, a verb alone is itself
+  assert.equal((await cli(["--manifest", manifestFile, "--templates-dir", tdir])).code, 0);
+  assert.equal((await cli(["check", "--manifest", manifestFile, "--templates-dir", tdir])).code, 0);
+});
+
+test("the `=` form of a value flag is refused when empty, and a switch refuses any value", async (t) => {
+  const dir = scratchDir(t, "bd-eq-");
+  const tdir = writeSyntheticPackage(dir);
+  const manifestFile = join(dir, "m.json");
+  assert.equal((await cli(["record", "--templates-dir", tdir, "--manifest", manifestFile])).code, 0);
+  // an unset variable in the `--flag="$UNSET"` shape arrives as `--flag=`
+  for (const flag of ["templates-dir", "comfy-dir", "manifest"]) {
+    for (const arg of [`--${flag}=`, `--${flag}=   `]) {
+      const r = await cli(["check", arg], {});
+      assert.equal(r.code, 2, `${JSON.stringify(arg)} -> ${r.out}${r.err}`);
+      assert.match(r.err, new RegExp(`--${flag} needs a non-empty value`));
+      assert.doesNotMatch(r.out, /^ok:|template side skipped/m);
+    }
+  }
+  assert.equal((await cli(["check", "--templates-dir=", "--manifest", manifestFile], { COMFY_TEMPLATES_DIR: tdir })).code, 2);
+  // a switch takes no value: `--strict=1` is not "on", and not "off" either
+  for (const arg of ["--strict=1", "--strict=", "--strict=0", "--require-templates=1", "--require-templates="]) {
+    const r = await cli(["check", "--manifest", manifestFile, "--templates-dir", tdir, arg], {});
+    assert.equal(r.code, 2, `${arg} -> ${r.out}${r.err}`);
+    assert.match(r.err, /takes no value/);
+    assert.doesNotMatch(r.out, /^ok:/m);
+  }
+});
+
+test("check --strict quotes the reason recorded for each unreviewed entry", async () => {
+  const strict = await cli(["check", "--strict"]);
+  assert.equal(strict.code, 1);
+  assert.match(strict.err, /^builder drift: wf-qwen-image-edit \[full\]: widget ksampler\.cfg is unreviewed: .*\(on record: the template's non-LoRA CFG primitive is 4; the builder preset is 3\.0, which is the value of the KSampler's own widget \(stale, because the input is linked to the switch\)\.\)$/m);
+  assert.match(strict.err, /^builder drift: wf-qwen-image-21 \[edit\]: widget encoder\.resolution is unreviewed: .*\(on record: the edit template promotes resolution 0 \(each reference keeps its own size\); the builder defaults to 1024, which its header calls the official edit default\.\)$/m);
+  // the reason shown is the spec's, entry by entry
+  const spec = BUILDER_SPECS.find((s) => s.builder === "wf-qwen-image-edit");
+  const reason = spec.views.find((v) => v.name === "full").items.find((i) => i.key === "ksampler.cfg").delta.reason;
+  assert.ok(strict.err.includes(`(on record: ${reason})`));
+});
+
+test("a wiring check keeps (node 1, slot 2) and (node 2, slot 1) apart, and its key reads node, then slot", async () => {
+  const { feedSource } = await import("./builder-drift.mjs");
+  // the two sources are distinct: the id and the slot are not interchangeable
+  assert.equal(readDistinct(sinkTemplate([[1, "Split"], [2, "Split"]], [1, 2], [2, 1])), true);
+  assert.equal(readDistinct(sinkTemplate([[1, "Split"], [2, "Split"]], [2, 1], [1, 2])), true);
+  // ... while the same pair twice is one source
+  assert.equal(readDistinct(sinkTemplate([[1, "Split"], [2, "Split"]], [2, 1], [2, 1])), false);
+  // the key itself: node id first, output slot second; an origin that exists in no node list keeps the same order in its label
+  const tpl = sinkTemplate([[1, "Split"]], [1, 2], [77, 5]);
+  const root = { nodes: tpl.nodes, links: tpl.links, inputs: [] };
+  const sink = tpl.nodes[0];
+  assert.deepEqual(feedSource(root, sink, "a"), { key: "node:1#2", label: "node:Split/1#2" });
+  assert.deepEqual(feedSource(root, sink, "b"), { key: "node:77#5", label: "node:77#5" });
+});
+
 // withTemplateFile: the synthetic package with one template file replaced by `text`.
 function packageWith(dir, template, text) {
   const tdir = writeSyntheticPackage(dir);
