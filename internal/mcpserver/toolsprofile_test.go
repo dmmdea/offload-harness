@@ -177,6 +177,15 @@ func TestCompactKeepsNamedSafetySentences(t *testing.T) {
 		{"offload_video_describe", "Returns {answer} (which notes what the relevant frames show); if it can't answer confidently it returns deferred:true and you should watch the video yourself."},
 		{"offload_status", "Every offload_* tool except offload_nim and offload_browse runs LOCAL — the GPU roster or a listed accelerator (free, on-box, no cloud); offload_nim is the only remote MODEL surface, and offload_browse (opt-in, present only when configured) drives the operator's own local browser with typed choices from a loopback decision endpoint the operator runs."},
 		{"offload_review_diff", "Equally, an EMPTY findings list means this reviewer found nothing; it is not a verification that the change works."},
+		{"offload_review_diff", "OUTCOME AND EVIDENCE: every result, early refusals included, carries outcome (PASS | FINDINGS | GATE_FAILED | NOT_RUN | STALE)"},
+		{"offload_review_diff", "for an inline diff the check compares the string with itself, so it can never detect movement"},
+		{"offload_review_diff", "THE LANE RUNS NO LINTS OR TESTS ITSELF: gate_receipts are results you ran and hand over, and the lane cannot verify them."},
+		{"offload_review_diff", "When you pass head_sha, a receipt for another commit, or one that names no commit, cannot support a PASS."},
+		{"offload_review_diff", "A review with no head_sha is tied to no commit: head_unbound is true"},
+		{"offload_review_diff", "Even with head_sha nothing ties the head to the diff bytes: the fingerprint binds the bytes, the head is your word."},
+		{"offload_review_diff", "PASS needs a seat that said NONE, a diff fingerprint with a second check that agrees"},
+		{"offload_review_diff", "NOT_RUN means no clean seat reviewed it"},
+		{"offload_review_diff", "STALE means the diff changed during the review, so re-run it; GATE_FAILED is a clean seat beside a red, wrong-commit or unbound gate."},
 	}
 	for _, p := range pins {
 		f, ok := full[p.tool]
