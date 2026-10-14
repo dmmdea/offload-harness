@@ -301,7 +301,7 @@ Usage:
   local-offload ocr       <image-path> [--json]
   local-offload extract-image <image-path> --schema schema.json [--json]
   local-offload assess-image <image-path> [--brief "..."] [--json]
-  local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned|endpoint] [--tts-voice NAME] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
+  local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned|endpoint] [--tts-voice NAME] [--clone ref.wav] [--lang es] [--seconds N] [--seed N] [--node ID|URL]
                                          a bare -- ends the flags, so text that starts with a dash is kept: generate-audio out.wav -- "--- Intro ---"
                                          (the same for generate-video, animate-character and the verbs that take one file, text or prompt)
   local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false] [--family NAME] [--transparent]
@@ -313,8 +313,11 @@ Usage:
                                          4 some job failed (the JSON and the results file name them), 1 it stopped, errored or was interrupted
   local-offload inpaint-image <image> --mask m.png --prompt "..."   re-render ONLY the masked region (white=repaint)
   local-offload upscale-image <image> [--scale F] [--width N --height N] [--method lanczos] [--model name] [--out path]   ESRGAN enlarge (this machine's upscale_model)
-  local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F] [--fast] [--upscale]
-  local-offload animate-character <out.mp4> <ref.png> <driver.mp4> "<prompt>" [--motion-prompt "..."] [--frames 81] [--seed N]
+  local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F] [--fast] [--upscale] [--node ID|URL] [--min-vram-gb N]
+  local-offload animate-character <out.mp4> <ref.png> <driver.mp4> "<prompt>" [--motion-prompt "..."] [--frames 81] [--seed N] [--node ID|URL] [--min-vram-gb N]
+                                         --node names the ONE fleet node that runs a video, animation or audio call (its node_id, or a delegate_remotes URL): no other node
+                                         and not this machine is tried, and a node that cannot take the call is refused by a word before anything is sent; --min-vram-gb N
+                                         asks for a node whose largest card is at least N GB
   local-offload run-graph --graph <g.json> [--manifest <m.json>] [--out-dir <d>] [--reserve-vram F] [--min-vram-gb N] [--model-family wan22] [--route local|auto|remote] [--remote URL]... [--json]
                                          with a fleet, a whole-node graph goes to an idle node with ONE card that holds the files it names; --min-vram-gb N asks for a node whose largest card is at least N GB
                                          (without it, --model-family wan22 and a height of 720 or more get a 16 GB floor chosen from the film owner's stated constraint, not measured; 0 lifts it)
@@ -1605,6 +1608,7 @@ func runGenerateSVG(args []string) error {
 // audioFlags is the parsed CLI input for `generate-audio`. Factored out so the
 // param-building (buildAudioParams) is unit-testable without a live render.
 type audioFlags struct {
+	node        string
 	kind        string
 	voice       string
 	ttsVoice    string // voice=endpoint: server-side voice name
@@ -1626,6 +1630,9 @@ func buildAudioParams(f audioFlags) map[string]any {
 		kind = "voice"
 	}
 	params := map[string]any{"kind": kind}
+	if n := strings.TrimSpace(f.node); n != "" {
+		params["node"] = n
+	}
 	if f.voice != "" {
 		params["voice"] = f.voice
 	}
@@ -1712,12 +1719,13 @@ func parseGenerateAudio(args []string, errorHandling flag.ErrorHandling) (genera
 	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0077)")
 	remotes := new(repeatedFlag)
 	fs.Var(remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
+	node := fs.String("node", "", nodeFlagUsage)
 
 	// generate-audio takes TWO positionals (out path, text); the rest are flags.
 	out, text, flagArgs := splitTwoArgs(args, map[string]bool{
 		"config": true, "kind": true, "voice": true, "clone": true, "lang": true,
 		"seconds": true, "seed": true, "reserve-vram": true, "tts-voice": true,
-		"route": true, "remote": true,
+		"route": true, "remote": true, "node": true,
 	})
 	if err := fs.Parse(flagArgs); err != nil {
 		return generateAudioCLI{}, err
@@ -1729,7 +1737,7 @@ func parseGenerateAudio(args []string, errorHandling flag.ErrorHandling) (genera
 	return generateAudioCLI{
 		fs: fs,
 		audio: audioFlags{
-			kind: *kind, voice: *voice, ttsVoice: *ttsVoice, clone: *clone, lang: *lang, out: out,
+			node: *node, kind: *kind, voice: *voice, ttsVoice: *ttsVoice, clone: *clone, lang: *lang, out: out,
 			seconds: *seconds, seed: *seed, reserveVRAM: *reserveVRAM,
 		},
 		text: text, asJSON: *asJSON, compact: *compactFlag,
@@ -1739,7 +1747,23 @@ func parseGenerateAudio(args []string, errorHandling flag.ErrorHandling) (genera
 
 // videoFlags is the parsed CLI input for `generate-video`. Factored out so the
 // param-building (buildVideoParams) is unit-testable without a live render.
+// parseMinVRAMFlag reads --min-vram-gb of a verb that takes it: nil when the flag was not given, else a number of GB, 0 or more
+// (run-graph reads its own spelling of the same flag in runGraphParams).
+func parseMinVRAMFlag(verb, s string) (*float64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return nil, fmt.Errorf("%s: --min-vram-gb must be a number of GB, 0 or more; got %q", verb, s)
+	}
+	return &v, nil
+}
+
 type videoFlags struct {
+	node        string
+	minVRAM     *float64
 	model       string
 	still       string
 	negative    string
@@ -1768,6 +1792,12 @@ type videoFlags struct {
 // runner's --reserve-vram). reserve_vram is stringified to match the MCP wire shape.
 func buildVideoParams(f videoFlags) map[string]any {
 	params := map[string]any{}
+	if n := strings.TrimSpace(f.node); n != "" {
+		params["node"] = n
+	}
+	if f.minVRAM != nil {
+		params["min_vram_gb"] = *f.minVRAM
+	}
 	if f.model != "" {
 		params["model"] = f.model
 	}
@@ -1824,13 +1854,18 @@ type generateVideoCLI struct {
 	remotes []string
 }
 
+const (
+	nodeFlagUsage    = "name the ONE fleet node that runs this call: a node_id its /fleet/health publishes (any case) or one of the delegate_remotes URLs. No other node and not this machine is tried; a node that cannot take the call is refused by a word before anything is sent; --route local with --node is refused"
+	minVRAMFlagUsage = "only a fleet node whose LARGEST card is at least this many GB may take the call (a number of GB, 0 or more; a 16 GB card reads 15.92 GiB); filters nodes only"
+)
+
 // generateVideoValueFlags are the flags that consume the next token. Bool flags
 // (--fast, --hero, --upscale, --json, --compact) must NOT be listed: splitThreeArgs
 // would take the following positional as their value.
 var generateVideoValueFlags = map[string]bool{
 	"config": true, "model": true, "negative": true, "frames": true,
 	"width": true, "height": true, "steps": true, "seed": true, "reserve-vram": true,
-	"transformer": true, "route": true, "remote": true,
+	"transformer": true, "route": true, "remote": true, "node": true, "min-vram-gb": true,
 }
 
 // parseGenerateVideo parses the generate-video command line. The CLI carries every
@@ -1858,11 +1893,17 @@ func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (genera
 	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0077)")
 	remotes := new(repeatedFlag)
 	fs.Var(remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
+	node := fs.String("node", "", nodeFlagUsage)
+	minVRAM := fs.String("min-vram-gb", "", minVRAMFlagUsage)
 
 	// generate-video takes THREE positionals (out path, still image, prompt); the
 	// rest are flags.
 	out, still, prompt, flagArgs := splitThreeArgs(args, generateVideoValueFlags)
 	if err := fs.Parse(flagArgs); err != nil {
+		return generateVideoCLI{}, err
+	}
+	floor, err := parseMinVRAMFlag("generate-video", *minVRAM)
+	if err != nil {
 		return generateVideoCLI{}, err
 	}
 	if out == "" || prompt == "" {
@@ -1871,6 +1912,7 @@ func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (genera
 	return generateVideoCLI{
 		fs: fs,
 		video: videoFlags{
+			node: *node, minVRAM: floor,
 			model: *model, still: still, negative: *negative, out: out, transformer: *transformer,
 			frames: *frames, width: *width, height: *height, steps: *steps,
 			seed: *seed, reserveVRAM: *reserveVRAM, fast: *fast, hero: *hero, upscale: *upscale,
@@ -1951,6 +1993,8 @@ func runAnimateCharacter(args []string) error {
 // animateFlags is the parsed CLI input for `animate-character`, factored out like videoFlags so the command line and the
 // param-building are testable without a render.
 type animateFlags struct {
+	node                     string
+	minVRAM                  *float64
 	out, ref, driver, prompt string
 	motionPrompt, negative   string
 	width, height, frames    int
@@ -1990,14 +2034,20 @@ func parseAnimateCharacter(args []string, errorHandling flag.ErrorHandling) (ani
 	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; the reference image and driver video travel in a hash-checked bundle and the clip is fetched back verified; ADR 0077)")
 	remotes := new(repeatedFlag)
 	fs.Var(remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
+	node := fs.String("node", "", nodeFlagUsage)
+	minVRAM := fs.String("min-vram-gb", "", minVRAMFlagUsage)
 
 	out, ref, driver, prompt, flagArgs := splitFourArgs(args, map[string]bool{
 		"config": true, "motion-prompt": true, "negative": true, "width": true,
 		"height": true, "frames": true, "steps": true, "seed": true,
 		"pose-strength": true, "ref-strength": true, "reserve-vram": true,
-		"route": true, "remote": true,
+		"route": true, "remote": true, "node": true, "min-vram-gb": true,
 	})
 	if err := fs.Parse(flagArgs); err != nil {
+		return animateCharacterCLI{}, err
+	}
+	floor, err := parseMinVRAMFlag("animate-character", *minVRAM)
+	if err != nil {
 		return animateCharacterCLI{}, err
 	}
 
@@ -2007,6 +2057,7 @@ func parseAnimateCharacter(args []string, errorHandling flag.ErrorHandling) (ani
 	return animateCharacterCLI{
 		fs: fs,
 		animate: animateFlags{
+			node: *node, minVRAM: floor,
 			out: out, ref: ref, driver: driver, prompt: prompt, motionPrompt: *motionPrompt, negative: *negative,
 			width: *width, height: *height, frames: *frames, steps: *steps, seed: *seed,
 			poseStrength: *poseStrength, refStrength: *refStrength, reserveVRAM: *reserveVRAM,
@@ -2018,6 +2069,12 @@ func parseAnimateCharacter(args []string, errorHandling flag.ErrorHandling) (ani
 // buildAnimateParams maps the parsed CLI flags to the pipeline params map for an animate_character request.
 func buildAnimateParams(f animateFlags) map[string]any {
 	params := map[string]any{"ref": f.ref, "driver": f.driver, "out": f.out}
+	if n := strings.TrimSpace(f.node); n != "" {
+		params["node"] = n
+	}
+	if f.minVRAM != nil {
+		params["min_vram_gb"] = *f.minVRAM
+	}
 	if f.motionPrompt != "" {
 		params["motion_prompt"] = f.motionPrompt
 	}
