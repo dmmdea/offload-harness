@@ -695,6 +695,44 @@ var compactKeep = []compactKeepEntry{
 		Sentence: "space names the embedding space — NOT the Hailo's tinyclip and NOT the Coral's efficientnet-edgetpu-s, so vectors from different devices are never comparable, even at the same dimension.",
 		Why:      "vectors from different devices' embedding spaces are never comparable, even at the same dimension (the sibling of the siglip2 pairing rule)",
 	},
+	// Found by the enum check once it read the tool-level description and the prose and list shapes of an explanation (TestCompactExplainsEveryEnumValueTheFullListExplains):
+	// the sentence that says what a value of an enum parameter is or does, which the compact list had dropped while keeping the value. Kept verbatim.
+	{
+		Tools:    []string{"agent_run"},
+		Sentence: "Prefer \"build\" for reading and reasoning over a codebase; \"general\" advertises everything.",
+		Why:      "which profile to choose: \"build\" for reading and reasoning over a codebase, \"general\" advertises everything (the only place the profile values are explained)",
+	},
+	{
+		Tools:    []string{"offload_classify_image"},
+		Sentence: "domain=imagenet (default; EfficientNet-EdgeTPU-S, 1000 ImageNet classes) or birds|insects|plants (MobileNet v2 iNat).",
+		Why:      "what each domain value is: imagenet (the default, 1000 ImageNet classes) or birds|insects|plants; the only place the domain values are explained",
+	},
+	{
+		Tools:    []string{"offload_compose_video"},
+		Sentence: "quality defaults to this machine's compose_quality (high = libx264 slow CRF 15).",
+		Why:      "that quality defaults to the machine's compose_quality and what high is (libx264 slow CRF 15); the only place the quality values are explained",
+	},
+	{
+		Tools:    []string{"offload_zero_shot"},
+		Sentence: "space=tinyclip (default) or siglip2 (stronger: 73.0 vs 67.8 top-1).",
+		Why:      "what the two embedding spaces are: tinyclip is the default, siglip2 is the stronger one (73.0 vs 67.8 top-1); the choice the space enum offers",
+	},
+	{
+		Tools:    []string{"offload_edit_image_generative"},
+		Sentence: "On the default (Qwen-Image-Edit 2511) binding the working canvas follows the source within 0.9-2.0 MP (a smaller source is scaled up to ~0.9 MP, a larger one down to 2 MP, unless the machine pins gen_edit_megapixels); preset trades speed for fidelity there: lightning8 (default, ~4x faster) or full.",
+		Why:      "which preset is the default and what it costs: lightning8 (default, ~4x faster) or full, on the 2511 binding, and the canvas the edit renders at; the preset parameter lists full | lightning8 | lightning4 with no enum, and this is the only sentence that says which one is the default",
+	},
+	{
+		Tools:    []string{"agent_delegate"},
+		Sentence: "results[].ran_on says where a subtask ran: \"local\" is this box's own seat, \"node\" a fleet node, and the key is absent when no seat ran it (a defer, a shed, a refusal); read it, not the word \"local\" in results[].placement, which is the reason in words and can mention a busy local seat on a result a node ran.",
+		Why:      "result reading that stops a misreading of where the data went: ran_on says where a subtask ran (\"local\" this box's own seat, \"node\" a fleet node, absent when no seat ran it), and the word local in results[].placement is the reason in words and can mention a busy local seat on a result a node ran; the enum check also found the route value local quoted here",
+	},
+	// The same check, once it also read a parameter whose description lists its values with no enum keyword (kind of offload_generate_svg, preset of offload_edit_image_generative): the per-kind spec examples. Kept verbatim.
+	{
+		Tools:    []string{"offload_generate_svg"},
+		Sentence: "Examples — gauge: {\"value\":72,\"max\":100,\"label\":\"Purity\",\"unit\":\"%\"}; comparison-bar: {\"items\":[{\"label\":\"A\",\"value\":10},{\"label\":\"B\",\"value\":20}],\"highlight\":1}; chromatogram: {\"peaks\":[{\"rt\":2.5,\"height\":80,\"label\":\"API\"}]}; icon: {\"name\":\"check\",\"color\":\"#22c55e\"}.",
+		Why:      "what spec each kind takes: the spec parameter is free-form JSON and these examples (gauge, comparison-bar, chromatogram, icon) are the only place that shows the fields of each kind",
+	},
 }
 
 // compactKeepByTool is the keep-list indexed by tool name: the set of sentences compact keeps beyond the opening ones.

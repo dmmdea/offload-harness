@@ -129,12 +129,27 @@ type droppedEnumValue struct {
 	Tool, Path, Value, Reason string
 }
 
-// droppedEnumValues are the values the check found that compact may leave unexplained. The two lines of the transcribe route's own
-// description are explained once in the kept tool-level route sentence, which names all three values: the default auto, local pins
-// it to this box and remote forces a fleet node (the remote line stays too, because it carries the deferred:true protocol).
+// droppedEnumValues are the values the check found that compact may leave unexplained. Two groups.
+//
+// The transcribe route's own two lines (auto, local) are explained once in the kept tool-level route sentence, which names all three
+// values: the default auto, local pins it to this box and remote forces a fleet node (the remote line stays too, because it carries the
+// deferred:true protocol).
+//
+// The offload_status sections that name a block of the status result (local, fleet, media, remote, accelerators, pair, gpu_lease): the
+// full description explains each one only as the first key of that block inside its "Returns {...}" result shape (`local:{endpoint,
+// roster{...}}`), the section value is the block's own name, and the contents of a block are a result shape that compact drops as one.
+// The kept sentences say what a caller needs from the blocks: trust the live roster over a written figure, read verdict before concluding
+// anything from held, and what idle_agent_nodes above zero means.
 var droppedEnumValues = []droppedEnumValue{
 	{Tool: "offload_transcribe", Path: "#/properties/route", Value: "auto", Reason: "the kept tool-level route sentence says route (default auto) places the work, on this box's whisper when it is free and on a fleet node's otherwise, and that the audio is sent as 16 kHz mono Opus"},
 	{Tool: "offload_transcribe", Path: "#/properties/route", Value: "local", Reason: "the kept tool-level route sentence says local pins the work to this box, which is all the parameter's own local line adds"},
+	{Tool: "offload_status", Path: "#/properties/section", Value: "local", Reason: "section local returns the local block, whose contents (the roster of seats and the model ids served now) are a result shape the dropped Returns sentence lists; the section value is the block's name"},
+	{Tool: "offload_status", Path: "#/properties/section", Value: "fleet", Reason: "section fleet returns the fleet block, whose contents (the live delegation roster) are a result shape; the kept sentences say to trust it over a written figure and what idle_agent_nodes above zero means"},
+	{Tool: "offload_status", Path: "#/properties/section", Value: "media", Reason: "section media returns the media block, this machine's configured generation engines, a result shape the dropped Returns sentence lists; the section value is the block's name"},
+	{Tool: "offload_status", Path: "#/properties/section", Value: "remote", Reason: "section remote returns the remote block (the hosted-endpoint settings and whether a key is present), a result shape; the kept sentence on offload_nim says it is the only remote tool"},
+	{Tool: "offload_status", Path: "#/properties/section", Value: "accelerators", Reason: "section accelerators returns the accelerators block, present only when this box lists an accelerator device, a result shape; the section value is the block's name"},
+	{Tool: "offload_status", Path: "#/properties/section", Value: "pair", Reason: "section pair returns the pair block, present only when pair workloads are enabled, a result shape; the section value is the block's name"},
+	{Tool: "offload_status", Path: "#/properties/section", Value: "gpu_lease", Reason: "section gpu_lease returns the gpu_lease block (held, verdict, activity, queue_with), a result shape; the kept sentence says to read verdict before concluding anything from held"},
 }
 
 func isDroppedEnumValue(tool, path, value string) bool {
