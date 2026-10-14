@@ -114,6 +114,11 @@ type NodeView struct {
 	// the node's image-gen task carries an explicit refine=false.
 	ImageRecipes   []ImageRecipeView
 	RefineHonoured bool
+	// MediaRecipes are the family rows of the node's video, animation and audio bindings (health `media_recipes`, ADR 0082
+	// Amendment 3): which family each binding names and how big each weight file is on the node (-1: not there). A row carries no
+	// digest in this release, so it is never an identity. nil on a node that predates it or binds none of the three lanes through
+	// ComfyUI or sd.cpp, which a reader takes as UNKNOWN, never as "has no weights".
+	MediaRecipes []MediaRecipeView
 	// MediaRoutes is the node's own verdict on each file-backed media route (health
 	// `media_routes`, ADR 0077): CONFIGURED, NOT CONFIGURED or BOUND-BUT-MISSING. It is only
 	// meaningful when MediaRoutesKnown: a node that predates the field publishes none, which is
@@ -439,6 +444,21 @@ type ImageRecipeFileView struct {
 	Fingerprint string `json:"fingerprint"`
 }
 
+// MediaRecipeView mirrors fleetnode.MediaRecipeHealth (mediacap.LaneRow): one family a node's video, animation or audio binding
+// names, and what it loads. Lane is the fleet task type (video-gen, animate, audio-gen). Name is what a caller reaches the family by
+// (a video row: the `model` value). Files reuse the image row's file shape; a file's Bytes is -1 when the node does not hold it.
+// Digest is empty in this release: a row is never an identity. Mirrored here, not imported, like the image row.
+type MediaRecipeView struct {
+	Lane          string                `json:"lane"`
+	Name          string                `json:"name"`
+	Default       bool                  `json:"default"`
+	Engine        string                `json:"engine"`
+	Digest        string                `json:"digest"`
+	Files         []ImageRecipeFileView `json:"files"`
+	License       string                `json:"license"`
+	CommercialUse *bool                 `json:"commercial_use"`
+}
+
 // MediaRouteConfigured is the state string of a route that can run right now.
 const MediaRouteConfigured = "CONFIGURED"
 
@@ -577,6 +597,8 @@ type healthWire struct {
 	// Additive (ADR 0082): what each image family on the node is, and whether its image-gen carries refine.
 	ImageRecipes   []ImageRecipeView `json:"image_recipes"`
 	RefineHonoured bool              `json:"refine_honoured"`
+	// Additive (ADR 0082 Amendment 3): the family rows of the node's video, animation and audio bindings.
+	MediaRecipes []MediaRecipeView `json:"media_recipes"`
 	// Additive (ADR 0072): the stt upload door's capability. Absent on an older node.
 	STTHQ          *bool `json:"stt_hq"`
 	STTUploadMaxMB int   `json:"stt_upload_max_mb"`
@@ -668,6 +690,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		Layers:       w.Layers,
 
 		ImageRecipes:   w.ImageRecipes,
+		MediaRecipes:   w.MediaRecipes,
 		RefineHonoured: w.RefineHonoured,
 
 		STTHQ:          w.STTHQ,

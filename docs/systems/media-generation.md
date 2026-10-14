@@ -2235,6 +2235,9 @@ recorded as known offenders with their reason rather than silently skipped — a
   place such a graph keeps in the line while it is a ticket;
   [`internal/mediaremote/graph.go`](../../internal/mediaremote/graph.go) — the one-card rule, `min_vram_gb` and its default table, and
   what keeps a graph that reads input files on this machine
+- [`internal/mediaremote/named.go`](../../internal/mediaremote/named.go) — a call that names a node: the one candidate, the typed
+  refusals and what a row is read for (ADR 0082 Amendment 3); [`internal/mediacap/lane_rows.go`](../../internal/mediacap/lane_rows.go) and
+  [`internal/fleetnode/media_recipes.go`](../../internal/fleetnode/media_recipes.go) — the video, animation and audio family rows a node publishes
 - [`render/compose-hyperframes.mjs`](../../render/compose-hyperframes.mjs) — the composition runner:
   env allowlist, subcommand allowlist, `--json` everywhere, lint → check → render → ffprobe gate,
   typed `COMPOSE-FAIL` classes
@@ -2480,6 +2483,8 @@ render on a fleet node and get the output back hash-verified. The other media to
   no fleet configured it runs here and returns the pipeline's own deferral, as before.
 - `remote` always goes to a node. `remotes` narrows the nodes for one call; each must already be in `delegate_remotes`,
   and the call is refused before any probe otherwise.
+- A video, animation or audio call that carries `node` goes to that one node, whatever its route is set to except `local`
+  ([Naming a node](#naming-a-node-a-video-animation-or-audio-call-runs-on-the-one-node-you-pick-adr-0082-amendment-3)).
 
 **Which node.** The candidates are read through `internal/rosterprobe` like every other single-shot lane (ADR 0074): each
 `delegate_remotes` entry is first judged by the tailnet shape check the agent lane applies (`netguard.TailnetURL`), and one it
@@ -2548,6 +2553,70 @@ card closed red. A call that reached no node has its row and no card, and a pani
 panic before it goes on. Both POSTs, the plain
 dispatch and the media-job, carry `X-Offload-Asker` and, only when this machine's emitter is off, `X-Offload-Pair-Card: node`.
 The local route, and an auto call that runs here, are not attributed (the pipeline writes that row).
+
+## Naming a node: a video, animation or audio call runs on the one node you pick (ADR 0082, Amendment 3)
+
+`offload_generate_video`, `offload_animate_character` and `offload_generate_audio` (CLI `generate-video`, `animate-character`,
+`generate-audio`) take **`node`** (`--node`): a node id, as the `node_id` of its `/fleet/health` spells it (any case), or one of the
+`delegate_remotes` URLs. The named node is the **only** candidate: a box that has the lane itself still sends the call there, no other
+node is tried and this machine's lane is not asked. `route local` with a node contradicts itself and is refused; a node on an image
+or a graph call is refused by name by the library and the CLI (this release carries it for the three lanes only: the image and graph
+verbs have no `--node` and the image and graph MCP tools list no `node`, so one sent to them is dropped like any unlisted argument). `meta.placement` reads
+`remote: named node <name>`. Nothing about a call with no `node` changed: it is placed as before and no row is read for it.
+
+**Refused before anything is sent.** A node that cannot take the call is refused by a word before the POST, so no job exists on it.
+The deferred answer's data is `{refusal, node, lane, family, missing[], roster[]}`:
+
+| `refusal` | Defer | Meaning |
+| --- | --- | --- |
+| `node_unknown` | `contract` | The name matches no node of the roster this call may use (`remotes` narrows it). `roster[]` lists the ids that answered. |
+| `node_is_self` | `contract` | The name is this machine's own node: the call it would run itself is the local route. |
+| `node_lacks_route` | `capacity`, err_class `no_node_configured` | The node does not serve the lane, or its route is not CONFIGURED (the answer names the state, and the files of its row when it published one). |
+| `node_lacks_media_job` | `capacity`, `no_node_configured` | The call carries input files (a still, a reference and driver, a clone sample) and the node has not opened the media-job door. |
+| `node_lacks_model` | `capacity`, `no_node_configured` | The node's `media_recipes` row for the family the call renders is absent or lists a file with `bytes` -1; `missing[]` names the files. |
+| `node_below_min_vram` | `capacity`, `no_node_configured` | `min_vram_gb` was given (video and animation) and the node's largest card is smaller. |
+
+A node that does not answer, or holds a text lease, is an ordinary `capacity` defer with no err class, because it may take the call
+later; a node id that no answering node has, while some roster entry that was dialled did not answer, is that same defer, not
+`node_unknown`, because the id may be one of them (a URL outside the roster is always `node_unknown`). A roster entry the tailnet
+guard refuses is never dialled and has no id, so it does not make an unknown id a defer: the id is `node_unknown` and the reason names
+the refused entries. A URL you name that is on the roster but that the guard refuses is filed `capacity` with err_class
+`no_node_configured` and no refusal word, as `pickNodeFor` files such an entry. A named call on a machine with no `delegate_remotes`
+never reaches a roster: it is the plain `config` defer (`no delegate_remotes configured`) with no refusal word, and this machine's own
+lane is not tried. The four `capacity` refusals are a fact about the node that waiting does not change: the remedy is to name
+another node (the pairing is the one `no_node_configured` already has). Nothing falls back: the named node refusing, another node
+or this machine could have run the call, and neither is tried.
+
+**What a node publishes.** `/fleet/health` gains `media_recipes[]`, additive: one row
+`{lane, name, default, engine, digest, files:[{role, name, bytes}], license, commercial_use}` per family a binding of the node names
+(`lane` is `video-gen`, `animate` or `audio-gen`). A video row is named by the `model` value that selects it: the ComfyUI families
+`wan22`, `ltx25`, `hunyuan`, `h3` (the default family always; another only when `videogen_families` binds it or every file its graph
+loads is on the node) and an sd.cpp family by its own name; the animation row is `wan-animate2`, the music row `acestep`.
+`bytes` is the size where the node finds the file and `-1` where it does not, so a row whose weight is gone is still listed and the
+refusal can name it. The ComfyUI rows exist only on a node that has a ComfyUI install (`comfy_dir` is a directory on it): the shipped
+default config binds the three scripts on every machine, so the binding alone makes no row, and a node without the install (or with
+only sd.cpp families) publishes none of them and omits the key when it has no sd.cpp video family either; a node with the install
+lists every lane its config binds, an image-only node with ComfyUI included, with -1 for each weight it lacks. A ComfyUI file keeps
+its loader-relative name; an absolute, drive-lettered or `..` name is published as its file name, and an sd.cpp file by its bare file
+name whatever its path looks like. **A row is a statement of sizes, not an identity:** no fingerprint, `digest` always empty, built from
+a stat per file and memoised for a minute. There is no row for voice, the audio.cpp engines or the sd.cpp animation lane.
+
+**When a row judges.** Only a node that published at least one row for the call's lane is judged, by the row of the family the call
+renders: with no `model`, the node's default row; a `model` is matched by row name exactly and otherwise folded the way the node folds it
+(`ltx25`, `h3`, `hunyuan` render themselves, every other spelling, `wan` included, renders Wan 2.2; `ace` has no row and is not judged).
+A lane the node publishes no row for is **unknown, not refused**: the call goes to the node's own door, which refuses a missing weight
+itself with a 503, as a forced call does. Music is judged by the `acestep` row; voice, `voice=endpoint` included, is never refused for it.
+A named call that ran on a node whose row judged it adds `rendered_family` and `rendered_files` to the result, beside the node's own
+answer: what the node's row says it loads for that family, not a check of the render.
+
+**`min_vram_gb` on video and animation** (`--min-vram-gb`) filters the remote candidates of any placement that leaves the machine, by
+the largest card of the node as a graph's does (a 16 GB card reads 15.92 GiB, which counts as 16); on a named node it is
+`node_below_min_vram`. The caller's number only: the Wan 720p default floor of a graph is not applied. A malformed value is refused by
+name on every route. It filters nodes only; this machine's lane is its own grant.
+
+**Not in this release.** No video, animation or audio call overflows: identity (a digest of the files' content and the settings
+that change pixels), the busy-lane probe and tickets with input files are the releases that follow (ADR 0082 Amendment 3 lists them).
+A node with the media-job door closed takes a named call that carries no input file and refuses one that does.
 
 ## Overflow: a busy lane places an image call on the fleet (ADR 0082)
 

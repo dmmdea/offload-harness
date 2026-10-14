@@ -211,6 +211,10 @@ func plan(req core.Request) (planned, error) {
 			setPos(p, k, out)
 		}
 		setReserve(p, out)
+		// min_vram_gb is the delegator's own filter on the nodes it considers; it never travels.
+		if _, _, err := minVRAMArg(p); err != nil {
+			return planned{}, err
+		}
 		still := str(p, "still")
 		if still == "" {
 			still = strings.TrimSpace(req.Image)
@@ -240,6 +244,9 @@ func plan(req core.Request) (planned, error) {
 			setPos(p, k, out)
 		}
 		setReserve(p, out)
+		if _, _, err := minVRAMArg(p); err != nil {
+			return planned{}, err
+		}
 		pl.inputs = append(pl.inputs, input{"ref", ref}, input{"driver", driver})
 	case core.TaskGenerateAudio:
 		if req.Input == "" {

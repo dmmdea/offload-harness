@@ -220,6 +220,11 @@ type Server struct {
 	// recipeGen is the fingerprinter's generation the rows were built at: a read that settled since turns a pending row
 	// into its digest without waiting for the memo's minute.
 	recipeGen uint64
+	// mediaRecipeMemo is the memoised media_recipes advertisement (media_recipes.go): re-read at most every mediaRoutesTTL.
+	mediaRecipeMu   sync.Mutex
+	mediaRecipeMemo []MediaRecipeHealth
+	mediaRecipeAt   time.Time
+	mediaRecipeRead bool
 	// agentSeat is the resolved agent planner seat (config.AgentPlannerModel:
 	// agent_model > workhorse Model), computed once here at construction —
 	// the config cannot change under a running server. Advertised (and probed
@@ -1249,6 +1254,11 @@ type healthPayload struct {
 	// (image_recipe.go, ADR 0082). Additive; omitted on a node with no ComfyUI binding that names a checkpoint, and
 	// on a node that predates it, which a reader takes as "cannot be matched", never as "matches anything".
 	ImageRecipes []ImageRecipeHealth `json:"image_recipes,omitempty"`
+	// MediaRecipes is what each video, animation and audio binding of this node names: the family, the weight files and how big each
+	// is here (-1: not there), with no digest and no fingerprint in this release (media_recipes.go, ADR 0082 Amendment 3). Additive;
+	// omitted on a node with no ComfyUI install (comfy_dir is no directory on it) and no sd.cpp video family, and on a node that
+	// predates it, which a reader takes as unknown, never as "no weights".
+	MediaRecipes []MediaRecipeHealth `json:"media_recipes,omitempty"`
 	// RefineHonoured says this node's image-gen task carries `refine`: an explicit false reaches the pipeline and
 	// skips the node's prompt refiner. A delegator that sends refine=false requires it, so a node that predates it
 	// is a named miss instead of one that silently refines. Additive; published by a node that serves image-gen.
@@ -1665,6 +1675,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	// The video, animation and audio family rows (ADR 0082 Amendment 3) come from a memo too. They are not gated on the tasks the node
+	// serves (a node whose weights are gone still lists them, with -1, so a refusal can name the files); a node with no ComfyUI
+	// install and no sd.cpp video family has none and the key is omitted (mediacap.LaneRows).
+	payload.MediaRecipes = s.mediaRecipeRows()
 	// GPU utilization: advertise the busiest device's utilization when known.
 	// Omitted when no device has published a known utilization — absent ≠ idle.
 	for _, d := range snap.Devices {

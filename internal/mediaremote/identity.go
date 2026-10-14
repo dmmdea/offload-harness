@@ -120,11 +120,13 @@ type need struct {
 	steps bool
 	// graph is what a run_graph asks of a node (graph.go); nil for every other task.
 	graph *graphNeed
+	// vram is the caller's min_vram_gb on a video or animation call (graph.go); nil when the call asked for none.
+	vram *vramNeed
 }
 
 func needOf(req core.Request) need {
 	_, steps := posInt(req.Params, "steps")
-	return need{refineOff: refineOff(req.Params), steps: steps, graph: graphNeedOf(req)}
+	return need{refineOff: refineOff(req.Params), steps: steps, graph: graphNeedOf(req), vram: vramNeedOf(req)}
 }
 
 // nodeMatch is the verdict of one node's published recipes against this machine's.
