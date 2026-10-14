@@ -7291,8 +7291,9 @@ func gradeCheck(a string, contract core.AgentContract, wire core.AgentWireResult
 
 // GradeAcceptance is EvalAcceptance's per-check reading: one outcome per acceptance string, in order, each pass, fail
 // or unknown, with the authority the check demanded. It is the same grading EvalAcceptance runs (gradeCheck), without
-// the document-fingerprint excuse and the list-fidelity read that EvalAcceptance adds, so a caller that wants to state
-// the authority a contract closed at passes the outcomes to core.ClosedAt.
+// the document-fingerprint excuse and the list-fidelity read that EvalAcceptance adds, so it is the raw verdicts. The
+// authority a contract closed at, as the delegator publishes it, is EvalAcceptanceGraded's: it applies the excuse and the
+// fidelity read before it states one, which core.ClosedAt over these raw outcomes does not.
 func GradeAcceptance(contract core.AgentContract, wire core.AgentWireResult) []core.AcceptanceOutcome {
 	out := make([]core.AcceptanceOutcome, 0, len(contract.Acceptance))
 	for _, a := range contract.Acceptance {
