@@ -310,6 +310,42 @@ var compactKeep = []compactKeepEntry{
 		Why:      "ADVISORY ONLY: the review lane never gates a merge and never replaces the final check",
 	},
 	{
+		Tools:    []string{"offload_review_diff"},
+		Sentence: "OUTCOME AND EVIDENCE: every result, early refusals included, carries outcome (PASS | FINDINGS | GATE_FAILED | NOT_RUN | STALE) and evidence binding it to the exact diff judged: diff_sha256, diff_bytes (a refusal before any diff was read carries diff_bytes 0 and no fingerprint), base_sha?/head_sha?",
+		With:     []string{"(pass them if you have them: echoed, never resolved), gates (the lane's own diff-size and conflict-markers, then your gate_receipts [{name, status pass|fail, detail?, head_sha?}], attached BEFORE the seat runs), seat (the seat's receipt), recheck_sha256 (the diff fingerprint checked again right before returning: a diff_path is re-read through the same confined reader, but for an inline diff the check compares the string with itself, so it can never detect movement), head_unbound?"},
+		Why:      "the outcome words a caller must read (PASS, FINDINGS, GATE_FAILED, NOT_RUN, STALE) and that the evidence binds the result to the exact diff judged; the second sentence is the rest of the evidence list, including that an inline diff's recheck compares the string with itself and can never detect movement",
+	},
+	{
+		Tools:    []string{"offload_review_diff"},
+		Sentence: "THE LANE RUNS NO LINTS OR TESTS ITSELF: gate_receipts are results you ran and hand over, and the lane cannot verify them.",
+		Why:      "the lane runs no lints or tests itself: gate_receipts are the caller's own results, and the lane cannot verify them",
+	},
+	{
+		Tools:    []string{"offload_review_diff"},
+		Sentence: "When you pass head_sha, a receipt for another commit, or one that names no commit, cannot support a PASS.",
+		Why:      "what binds a PASS: with head_sha, a receipt for another commit, or one that names no commit, cannot support it",
+	},
+	{
+		Tools:    []string{"offload_review_diff"},
+		Sentence: "A review with no head_sha is tied to no commit: head_unbound is true, a receipt that names a commit is unbound (so a clean seat gives GATE_FAILED), and a clean PASS carries outcome_reason no head_sha: gates not tied to a commit.",
+		Why:      "a review with no head_sha is tied to no commit: head_unbound, a commit-named receipt is unbound (GATE_FAILED), and a clean PASS says its gates are not tied to a commit",
+	},
+	{
+		Tools:    []string{"offload_review_diff"},
+		Sentence: "Even with head_sha nothing ties the head to the diff bytes: the fingerprint binds the bytes, the head is your word.",
+		Why:      "head_sha is the caller's word: the fingerprint binds the diff bytes, nothing binds the head to them",
+	},
+	{
+		Tools:    []string{"offload_review_diff"},
+		Sentence: "PASS needs a seat that said NONE, a diff fingerprint with a second check that agrees, a diff inside the ceiling, green gates for the reviewed commit and an unchanged diff.",
+		Why:      "the full list of what a PASS needs: a seat that said NONE, an agreeing second fingerprint check, a diff inside the ceiling, green gates for the reviewed commit, an unchanged diff",
+	},
+	{
+		Tools:    []string{"offload_review_diff"},
+		Sentence: "NOT_RUN means no clean seat reviewed it (every result with deferred:true, an early refusal, an oversize diff, a refused binding, evidence with no diff fingerprint, and a run the node filed as a deferral whose answer the lane read as a clean NONE) and is never a PASS; findings read from such a deferred run stay FINDINGS; STALE means the diff changed during the review, so re-run it; GATE_FAILED is a clean seat beside a red, wrong-commit or unbound gate.",
+		Why:      "defines NOT_RUN (never a PASS), STALE (re-run) and GATE_FAILED: the outcome words a caller acts on",
+	},
+	{
 		Tools:    []string{"offload_run_graph"},
 		Sentence: "On ANY failure it returns deferred:true with a typed reason (SATISFIER_UNAVAILABLE, VENV_INCOHERENT, SATISFIER_SPAWN_FAILED [a provisioning subprocess failed to START, retried once — transient/retryable, NOT a venv problem], NODE_CLASS_MISSING, PREFLIGHT_MISSING_INPUTS, MODEL_SHA_MISMATCH, GPU_BUSY, TIMEOUT, ...) — it NEVER falls back to cloud; then run the graph another way.",
 		Why:      "on any failure run_graph returns deferred:true and never falls back to cloud",
