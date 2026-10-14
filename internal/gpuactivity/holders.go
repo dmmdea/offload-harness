@@ -48,6 +48,20 @@ func holdersOf(leaseDir string, info gpulease.Info, opts Options, now time.Time)
 				h.TreePIDs = append(h.TreePIDs, mem.PID)
 			}
 		}
+		if !l.TreeOrphan {
+			// The request made of the holder (plan P11): read from the lease's own sidecar, never written
+			// here. A tree-orphan has no holder left to ask.
+			vw := obs.YieldViewOf(l)
+			h.YieldNote = vw.Sentence
+			// The path is named while a request can be made (the policy is request) or once one was made. Under
+			// the default policy nobody is asked, and the path of a file that will never exist is not advertised.
+			if vw.Asked || gpulease.InstalledOnOverdue() == gpulease.OnOverdueRequest {
+				h.YieldFile = vw.File
+			}
+			if vw.Asked {
+				h.Yield = yieldStateOf(vw)
+			}
+		}
 		h.Facts = legacyFacts(opts.ComfyDir, l, len(leases) == 1, now)
 		hs = append(hs, h)
 	}
@@ -138,7 +152,29 @@ func ownerWho(h *Holder) string {
 
 func orphanedNote(h *Holder) string {
 	return fmt.Sprintf("the lease's owner (%s) has been gone for %s, past the %s grace: nobody is expected back for it. Its holder is still alive and heartbeating, so nothing is reclaimed or killed",
-		ownerWho(h), secs(h.OrphanedForS), secs(h.OrphanGraceS))
+		ownerWho(h), secs(h.OrphanedForS), secs(h.OrphanGraceS)) + yieldTail(h)
+}
+
+// yieldTail is what became of the request made of the lease's holder (plan P11, ADR 0086), or "": the
+// sentence gpulease.YieldViewOf wrote, carried on the holder so every surface says the same thing.
+func yieldTail(h *Holder) string {
+	if h == nil || h.YieldNote == "" {
+		return ""
+	}
+	return "; " + h.YieldNote
+}
+
+// yieldStateOf is a yield request in the shape a status call reports.
+func yieldStateOf(v gpulease.YieldView) *YieldState {
+	r := v.Req
+	y := &YieldState{
+		AskedAt: time.UnixMilli(r.AskedMs).UTC().Format(time.RFC3339), Action: r.Action, Exit: r.Exit,
+		Waiters: r.QueuedCount(), GraceSec: int(r.GraceMs / 1000), Unanswered: v.Unanswered,
+	}
+	if r.ActedMs > 0 {
+		y.ActedAt = time.UnixMilli(r.ActedMs).UTC().Format(time.RFC3339)
+	}
+	return y
 }
 
 // treeOrphanNote says why a lease whose wrapper is gone is still held: the job it started lives.
@@ -166,16 +202,16 @@ func stalledNote(h *Holder) string {
 			n += "; its last line: " + p.Detail
 		}
 	}
-	return n + ". Its holder is still alive and heartbeating, so nothing is reclaimed or killed"
+	return n + ". Its holder is still alive and heartbeating, so nothing is reclaimed or killed" + yieldTail(h)
 }
 
 func overdueNote(h *Holder) string {
 	if h.Expired {
 		return fmt.Sprintf("the lease has expired: its term ended %s ago and its holder did not renew it because %s. The holder is still alive and heartbeating, so nothing is reclaimed or killed (an expired lease is a label, not a release: it is held until its holder lets go or it is taken over). Queue behind it, or ask who holds it",
-			secs(h.OverdueBySec), expiredWhy(h))
+			secs(h.OverdueBySec), expiredWhy(h)) + yieldTail(h)
 	}
 	return fmt.Sprintf("the lease is past its declared window by %s and its holder is still renewing: nothing is reclaimed or killed (a declared window is not a ceiling for a holder that is alive). Queue behind it, or ask who holds it",
-		secs(h.OverdueBySec))
+		secs(h.OverdueBySec)) + yieldTail(h)
 }
 
 // expiredWhy is the recorded reason a term was not renewed, or the plain fact when a tick

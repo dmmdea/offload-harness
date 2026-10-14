@@ -1,0 +1,9 @@
+# ComfyUI-side idle bound the harness ships for kept and warm ComfyUI instances.
+#
+# render/comfy-lifecycle.mjs passes this file to ComfyUI with --extra-model-paths-config on a kept (--keep-comfy) or warm
+# (--batch) launch, and nothing else touches the install: `custom_nodes` is an extra search path, read relative to THIS file,
+# so the shared ComfyUI install keeps its own custom_nodes, settings and models as they are. It names a folder of its own
+# (idle-nodes), apart from nodes/ (extra_model_paths.yaml), so an ordinary kept launch never imports the Wan multicard pack.
+# A hand-started ComfyUI opts in by adding this file to its own launch, see docs/OPERATOR-GUIDE.md.
+offload_harness_idle:
+    custom_nodes: idle-nodes

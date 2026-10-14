@@ -201,6 +201,9 @@ func (n need) releaseRefuses(v delegate.NodeView) string {
 // refuses says why node v cannot take this call by the two rules above, "" when it can. It reads only what health
 // publishes: gpu_devices[] (nil is unknown, and unknown is never enough).
 func (n need) refuses(v delegate.NodeView) string {
+	if n.vram != nil {
+		return largestCardRefuses(v, n.vram.gb, n.vram.why)
+	}
 	g := n.graph
 	if g == nil {
 		return ""
@@ -214,21 +217,54 @@ func (n need) refuses(v delegate.NodeView) string {
 			return fmt.Sprintf("has %d cards, and a whole-node graph runs in the default ComfyUI instance, which sees every card (the display card of a multi-GPU box included); it is placed only on a node with one card", len(v.Devices))
 		}
 	}
-	if g.minVRAM > 0 {
-		if len(v.Devices) == 0 {
-			return fmt.Sprintf("publishes no per-card list, so its VRAM cannot be checked against %s", g.minVRAMWhy)
+	return largestCardRefuses(v, g.minVRAM, g.minVRAMWhy)
+}
+
+// vramNeed is a video or animation call's min_vram_gb: the least size, in GB, of the largest card of a node that may take it.
+// Only the caller's own number counts here; the Wan 720p default floor of a graph is not a rule of these calls.
+type vramNeed struct {
+	gb  float64
+	why string
+}
+
+// vramTask reports whether a call of this task takes this min_vram_gb: a video or an animation. A graph's floor is the graph
+// need's own (need.graph), read by the same largestCardRefuses.
+func vramTask(t core.TaskType) bool {
+	return t == core.TaskGenerateVideo || t == core.TaskAnimateCharacter
+}
+
+// vramNeedOf is the min_vram_gb of a video or animation call; nil when it gave none (or 0, which asks for nothing) or gave one
+// that plan refuses by name.
+func vramNeedOf(req core.Request) *vramNeed {
+	if !vramTask(req.Task) {
+		return nil
+	}
+	gb, set, err := minVRAMArg(req.Params)
+	if err != nil || !set || gb <= 0 {
+		return nil
+	}
+	return &vramNeed{gb: gb, why: fmt.Sprintf("min_vram_gb %g, given by the caller", gb)}
+}
+
+// largestCardRefuses says why node v has no card of at least minGB GB, "" when it has one or minGB asks for none. It reads
+// gpu_devices[]: a node that publishes none cannot be shown to have the card.
+func largestCardRefuses(v delegate.NodeView, minGB float64, why string) string {
+	if minGB <= 0 {
+		return ""
+	}
+	if len(v.Devices) == 0 {
+		return fmt.Sprintf("publishes no per-card list, so its VRAM cannot be checked against %s", why)
+	}
+	largest := 0.0
+	for _, d := range v.Devices {
+		if d.TotalGiB > largest {
+			largest = d.TotalGiB
 		}
-		largest := 0.0
-		for _, d := range v.Devices {
-			if d.TotalGiB > largest {
-				largest = d.TotalGiB
-			}
-		}
-		// A card is the size it rounds to: nvidia-smi reports MiB/1024, and a 16 GB card reads 15.92 or 15.93 GiB in this
-		// fleet's own docs, so a literal comparison with 16 would shut out every 16 GB card.
-		if math.Round(largest) < g.minVRAM {
-			return fmt.Sprintf("its largest card is %.2f GiB (a %g GB card) and this call needs a card of at least %g GB (%s)", largest, math.Round(largest), g.minVRAM, g.minVRAMWhy)
-		}
+	}
+	// A card is the size it rounds to: nvidia-smi reports MiB/1024, and a 16 GB card reads 15.92 or 15.93 GiB in this
+	// fleet's own docs, so a literal comparison with 16 would shut out every 16 GB card.
+	if math.Round(largest) < minGB {
+		return fmt.Sprintf("its largest card is %.2f GiB (a %g GB card) and this call needs a card of at least %g GB (%s)", largest, math.Round(largest), minGB, why)
 	}
 	return ""
 }

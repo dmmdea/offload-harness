@@ -36,7 +36,7 @@ type Params struct {
 	Ctx       int
 	KVType    string // applied to both K and V; kept symmetric on purpose
 	FlashAttn string // "on"/"off"
-	MoE26B    string // the flag form the tier chose: -ngl 99 | --cpu-moe | --n-cpu-moe N
+	MoE26B    string // the flag form the tier chose: -ngl 99 | --n-cpu-moe N (INV-1; the cpu backend's `--cpu-moe` is inert)
 	Threads   int
 	// CacheRAMMiB is llama-server's host-RAM prompt cache (--cache-ram). 0 renders the
 	// server default (8192) so an older caller never turns the cache OFF by omission.

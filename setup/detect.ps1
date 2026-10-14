@@ -6,7 +6,7 @@
 #   gpu_arch  — blackwell|ampere|ada|volta|rdna3|gcn|other|none  (name-regex match)
 #   gpu_count — number of discrete NVIDIA+AMD GPUs (Intel iGPUs excluded)
 #   profile   — one of the arch-class ids the installer (H2) keys a template off
-#   ram_tier  — high|mid|low|min  (drives the 26B --cpu-moe decision)
+#   ram_tier  — high|mid|low|min  (drives the 26B RAM gate)
 # The full 12-config matrix lives in
 #   docs/superpowers/plans/2026-07-11-agent-capabilities-and-hardware-matrix.md
 #
@@ -127,7 +127,7 @@ function Get-AdrenalinWarning {
 }
 
 # Map RAM size to a tier. >=120 high (128GB config), >=56 mid (64GB configs
-# unlock 26B via --cpu-moe), >=28 low (32GB), else min (<32GB warns already).
+# pass the RAM gate for the cpu backend's 26B), >=28 low (32GB), else min (<32GB warns already).
 function Get-RamTier {
   param([int]$RamGb)
   if ($RamGb -ge 120) { return 'high' }

@@ -52,7 +52,7 @@ type LayerSeat struct {
 	// layer for every seat whose pin includes the display device — a 0 here
 	// degrades the guard back to that rejected free-VRAM check. Config refuses
 	// the omission at load when display_device is a plain CUDA index; a UUID pin
-	// is resolved at admission, where a 0 footprint refuses as undeclared.
+	// or "auto" is resolved at admission, where a 0 footprint refuses as undeclared.
 	DisplayFootprintGiB float64 `json:"display_footprint_gib,omitempty"`
 	// HostRAMGiB is the host RAM the seat holds while loaded (experts on CPU);
 	// the host_ram guard refuses when free host RAM is below it.
@@ -106,8 +106,11 @@ type LayerSpec struct {
 	// (the display layer ships dormant until its measurement is read; council R7).
 	Dormant bool `json:"dormant,omitempty"`
 	// DisplayDevice is the device (CUDA index or GPU-UUID prefix) the display
-	// guards read live. <node-b> pins it by UUID because the board reorders
-	// indices on power loss.
+	// guards read live, or DisplayDeviceAuto ("auto") to guard whichever card
+	// the driver reports as the monitor's. <node-b> pins it by UUID because the
+	// board reorders indices on power loss. A declared card is the operator's
+	// word, cross-checked against the driver; auto is the driver's word, and
+	// refuses when the driver cannot give one card.
 	DisplayDevice string `json:"display_device,omitempty"`
 	// DisplayFloorGiB is the VRAM the desktop keeps on DisplayDevice: the
 	// display_floor guard admits a seat only while
@@ -128,6 +131,19 @@ var layerGuards = map[string]bool{"display_floor": true, "presence": true, "host
 // placement table resolves seats by. A misspelt role would never be found by
 // `LayerSeat(layer, role)` and the seat would sit declared but unplaceable.
 var layerRoles = map[string]bool{"router": true, "agent": true, "long": true, "ocr": true, "vision": true, "stt": true}
+
+// DisplayDeviceAuto is the display_device that names no card: the display_floor guard asks the driver
+// which card drives the monitor (display_active / display_attached) and guards that one, on every
+// decision, so a monitor that moves needs no edit to display_device (the display seat's own pin is a
+// different key and still has to be on that card). It cannot be mistaken for the other two forms: a CUDA
+// index is all digits and a GPU UUID pin starts "GPU-".
+const DisplayDeviceAuto = "auto"
+
+// IsAutoDisplayDevice reports whether a display_device is the DisplayDeviceAuto sentinel (case and
+// surrounding whitespace do not matter; the guards trim a declaration before they read it).
+func IsAutoDisplayDevice(s string) bool {
+	return strings.EqualFold(strings.TrimSpace(s), DisplayDeviceAuto)
+}
 
 // presenceModes is the closed vocabulary of Config.OperatorPresence. "" means
 // present (fail closed); the operator opts the display card in with auto/away.
@@ -481,8 +497,9 @@ func (c Config) ValidateLayers() error {
 		// check the council rejected (R6: it admitted a 10.5 GB load onto a card
 		// with 9 GB free), so every seat whose pin includes the display device must
 		// declare the number. Config can resolve that match only when
-		// display_device is a plain CUDA index; a UUID pin is resolved at admission
-		// (placement refuses "display footprint undeclared" there, never free − 0).
+		// display_device is a plain CUDA index; a UUID pin, and "auto" (the card the
+		// driver reports for the monitor), are resolved at admission (placement
+		// refuses "display footprint undeclared" there, never free − 0).
 		floorGuarded := containsString(l.Guards, "display_floor")
 		hostRAMGuarded := containsString(l.Guards, "host_ram")
 		display := strings.TrimSpace(l.DisplayDevice)
@@ -657,8 +674,8 @@ func sortedKeysOf(m map[string]bool) []string {
 }
 
 // isCUDAIndex reports whether a display_device is a plain CUDA index ("1")
-// rather than a GPU-UUID pin — the only form config can match against a seat's
-// device pin without a live probe.
+// rather than a GPU-UUID pin or the "auto" sentinel — the only form config can
+// match against a seat's device pin without a live probe.
 func isCUDAIndex(s string) bool {
 	if s == "" {
 		return false

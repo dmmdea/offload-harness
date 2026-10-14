@@ -31,7 +31,7 @@ operator enables it; an opt-in layer is entered only on an explicit ask, under i
 |---|---|---|---|---|---|
 | `single` | `blackwell-16` | `0` / `2` | router (device 0) — the cascade's own rungs<br>agent → `gemma-4-26b-agent` (device 0, window 131072)<br>ocr → `qwen3-vl-8b` (device 2, window 16384)<br>stt → `whisper-stt` (device 2) | — | active |
 | `pair` | `blackwell-2x16` | `0,2` | agent → the tier's vLLM seat<br>long → `qwen3.8-27b-262k` (device 0,2, window 262144)<br>vision → `qwen3-vl-32b` (device 0,2, window 16384) | — | active |
-| `display` | `blackwell-16` | `1` | router (device 1): triage → `gemma-4-e2b-display`, workhorse → `gemma-4-e4b-display` | display_floor, presence (display device 1, floor 4 GiB) | **dormant** (operator enables) |
+| `display` | `blackwell-16` | `1` | router (device 1): triage → `gemma-4-e2b-display`, workhorse → `gemma-4-e4b-display` | display_floor, presence (display device auto, floor 4 GiB) | **dormant** (operator enables) |
 
 ## Agent seat
 

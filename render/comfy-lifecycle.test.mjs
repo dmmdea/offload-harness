@@ -71,6 +71,7 @@ test("warm:true omits --cache-none but keeps the other flags (batch session)", a
     comfyUp: async () => (ups++ > 0),
     spawn: (py, args) => { spawnedArgs = args; return { kill() {} }; },
     warm: true,
+    probeIdle: async () => ({ limit_sec: 300, error: null }), // a warm launch asks its instance for the idle bound; no real request to whatever listens on 8188
     comfyDir: BOUND_DIR,
     pollMs: 1,
   });

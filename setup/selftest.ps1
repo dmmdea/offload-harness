@@ -51,10 +51,12 @@ else { $profilesJsonPath = Join-Path $scriptDir 'templates\profiles.json' }
 $detectJsonPath = if ($env:OFFLOAD_DETECT_JSON) { $env:OFFLOAD_DETECT_JSON } else { $null }
 
 # The chat tiers, in the fixed order we exercise them. Each maps a llama-swap model alias to the
-# gguf filename the rendered template references. A tier is "installed" iff its gguf is on disk.
-# (We check file existence, not installed.json: the Vulkan sandbox has no manifest, and the yaml
-# always lists all three group members regardless of which were downloaded - file existence is
-# the only ground truth for what can actually load.)
+# gguf filename the rendered template references. A tier is "installed" iff its gguf is on disk AND
+# the active yaml still defines it (Select-ServedTiers; a tier that drops the 26B keeps no entry for
+# it, and a gguf an earlier render wanted outlives that render).
+# (We check file existence, not installed.json: the Vulkan sandbox has no manifest, and a rendered
+# yaml lists every group member its tier serves regardless of which were downloaded - file existence
+# is the ground truth for what can actually load.)
 $TIER_SPEC = @(
   @{ id = 'offload-e4b';    file = 'gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf' }
   @{ id = 'gemma4-e2b';     file = 'gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf' }
@@ -142,7 +144,7 @@ function Invoke-Chat {
 function Test-AllocFailure {
   param([string]$ErrText)
   if (-not $ErrText) { return $false }
-  return ($ErrText -match '(?i)(VK_ERROR_OUT_OF_DEVICE_MEMORY|out of device memory|CUDA (error )?out of memory|cudaErrorMemoryAllocation|device[- ]lost|VK_ERROR_DEVICE_LOST|failed to allocate|ggml_backend.*alloc|unable to allocate|connection.*(closed|refused|reset|aborted)|actively refused|forcibly closed|unexpectedly)')
+  return ($ErrText -match '(?i)(VK_ERROR_OUT_OF_DEVICE_MEMORY|out of device memory|CUDA (error:? )?out of memory|cudaErrorMemoryAllocation|device[- ]lost|VK_ERROR_DEVICE_LOST|failed to allocate|ggml_backend.*alloc|unable to allocate|connection.*(closed|refused|reset|aborted)|actively refused|forcibly closed|unexpectedly)')
 }
 
 # Start the transient llama-swap against $yamlPath on $SWAP_PORT. Returns the Process object.
@@ -169,53 +171,47 @@ function Wait-SwapReady {
   return $false
 }
 
-# R4.2: auto-remediation for a 26B allocation/device-lost failure. Reads $yamlPath, finds the
-# gemma4-26b-a4b model's cmd, inserts --cpu-moe if absent, rewrites the yaml, restarts the
-# transient swap, and retries the 26B request ONCE. Returns {outcome='pass|fail', retry=<chat
-# result or $null>}. Idempotent: if --cpu-moe is already present it still restarts + retries once.
-function Invoke-Remediate26B {
-  Log "  R4.2: auto-remediating 26B - inserting --cpu-moe and restarting the transient swap"
-  # -Encoding UTF8 is REQUIRED: PS 5.1 decodes a BOM-less file as ANSI, which would mojibake any
-  # non-ASCII byte (e.g. the em-dash in the rendered yaml's comments) and the rewrite below would
-  # then bake that corruption into the file. Explicit UTF8 reads correctly on both engines.
-  $lines = Get-Content -Path $yamlPath -Encoding UTF8
-  # Find the model key line, then the first 'cmd:' at greater indent, then the continuation line
-  # that carries the actual llama-server args (the '>-' block folds onto the next non-empty line).
-  $keyIdx = -1
-  for ($j = 0; $j -lt $lines.Count; $j++) {
-    if ($lines[$j] -match '^\s*gemma4-26b-a4b\s*:') { $keyIdx = $j; break }
-  }
-  if ($keyIdx -lt 0) { return @{ outcome = 'fail'; retry = $null } }
-  # Insert --cpu-moe on the args continuation line (the one mentioning llama-server.exe or the .gguf)
-  # if the block does not already contain it anywhere before the next top-level key.
-  $blockHasCpuMoe = $false
-  $argsLineIdx = -1
-  for ($j = $keyIdx + 1; $j -lt $lines.Count; $j++) {
-    if ($lines[$j] -match '^\s{0,4}\S' -and $lines[$j] -notmatch '^\s') { break }  # dedent to a top-level key
-    if ($lines[$j] -match '^\s{0,2}\w+\s*:' -and $j -gt $keyIdx + 1 -and $lines[$j] -notmatch '(cmd|env|ttl|aliases)\s*:') { break }
-    if ($lines[$j] -match '--cpu-moe') { $blockHasCpuMoe = $true }
-    if ($argsLineIdx -lt 0 -and $lines[$j] -match '(llama-server\.exe|\.gguf|-ngl)') { $argsLineIdx = $j }
-  }
-  if (-not $blockHasCpuMoe -and $argsLineIdx -ge 0) {
-    # Insert right after the .gguf model path (or after llama-server.exe) so it lands in the args.
-    $lines[$argsLineIdx] = $lines[$argsLineIdx] -replace '(\.gguf)', '$1 --cpu-moe'
-    if ($lines[$argsLineIdx] -notmatch '--cpu-moe') { $lines[$argsLineIdx] = $lines[$argsLineIdx] + ' --cpu-moe' }
-    # BOM-less write: PS 5.1's Set-Content -Encoding UTF8 would prepend a BOM the yaml parser rejects.
-    Write-Utf8NoBom -Path $yamlPath -Content (($lines -join [Environment]::NewLine) + [Environment]::NewLine)
-    Log "  R4.2: --cpu-moe inserted into gemma4-26b-a4b cmd"
-  } elseif ($blockHasCpuMoe) {
-    Log "  R4.2: --cpu-moe already present; restarting + retrying once anyway"
-  }
-  # Restart the transient swap so it re-reads the yaml.
-  if ($script:swapProc -and -not $script:swapProc.HasExited) {
-    try { Stop-Process -Id $script:swapProc.Id -Force -ErrorAction SilentlyContinue } catch { }
-  }
-  Start-Sleep -Seconds 2
-  $script:swapProc = Start-Swap -ConfigPath $yamlPath
-  if (-not (Wait-SwapReady -TimeoutSec 120)) { return @{ outcome = 'fail'; retry = $null } }
-  $retry = Invoke-Chat -Model 'gemma4-26b-a4b' -UserContent 'Reply with exactly the single word: ready' -MaxTokens 48 -TimeoutSec 300
-  if ($retry.ok) { return @{ outcome = 'pass'; retry = $retry } }
-  return @{ outcome = 'fail'; retry = $retry }
+# Get-MoEFailureAdvice: what the operator is told when the 26B tier does not load or answer on this box.
+# Pure (text in, text out) so a test can drive it. INV-1: the cards do the inference and host RAM is overflow
+# only, so selftest never moves experts to the CPU and never edits llama-swap.yaml (it used to: a remediator
+# inserted the every-expert flag into the LIVE yaml, which the next audit-yaml fails). It says what the
+# installer can do instead; changing the table is the operator's decision.
+function Get-MoEFailureAdvice {
+  param([string]$ErrorText)
+  $why = if ($ErrorText) { $ErrorText } else { 'no error text' }
+  return ("26B did not load on this card ($why). RAM is overflow only (the cards do the inference), so selftest does not move experts to the CPU and does not edit llama-swap.yaml. " +
+    "Set this tier's moe_26b to drop in profiles.json (a tier whose resident_tier or agent seat is the 26B needs that changed too, or use a tier whose resident model is not the 26B), " +
+    "or, after measuring a partial spill on this card, declare n_cpu_moe with n_cpu_moe_max; then re-run install. " +
+    "If the failure is a device-lost or driver crash, update the GPU driver first.")
+}
+
+# Test-YamlServesModel: does the llama-swap.yaml text define $Id as a model (a key under models:, or an alias)?
+# A pure text check on the layout every shipped template uses: model keys at two spaces of indent, aliases as an
+# inline list. A comment that names the model, a longer key that shares its prefix and a gguf file name inside a
+# command are not the model.
+function Test-YamlServesModel {
+  param([string]$YamlText, [string]$Id)
+  if (-not $YamlText -or -not $Id) { return $false }
+  $e = [regex]::Escape($Id)
+  if ([regex]::IsMatch($YamlText, "(?m)^ {2}[`"']?$e[`"']?[ \t]*:")) { return $true }
+  return [regex]::IsMatch($YamlText, "(?m)^[ \t]+aliases:[ \t]*\[[^\]\r\n]*(?<![\w.-])$e(?![\w.-])")
+}
+
+# Select-ServedTiers: of the chat tiers whose gguf is on disk ($Tiers), the ones the ACTIVE yaml still defines.
+# A gguf outlives the render that wanted it: the CUDA fallback served the 26B until 0186 w4, so a box that downloaded
+# it keeps the 14 GB file after a re-render that no longer defines the model. The file says what can load, the yaml
+# says what can be asked for; without this the selftest asks llama-swap for a model it does not know (and the failure
+# is blamed on the card), and the cold-swap probe loads the unserved gguf on the card. An unreadable yaml, or one that
+# defines none of the chat tiers, is not a verdict: every tier stays, as before.
+function Select-ServedTiers {
+  param($Tiers, [string]$ConfigPath)
+  $all = @($Tiers)
+  $text = $null
+  try { if ($ConfigPath -and (Test-Path -LiteralPath $ConfigPath)) { $text = [System.IO.File]::ReadAllText($ConfigPath) } } catch { $text = $null }
+  if (-not $text) { return $all }
+  $served = @($all | Where-Object { Test-YamlServesModel -YamlText $text -Id $_.id })
+  if ($served.Count -eq 0) { return $all }
+  return $served
 }
 
 # Read the served chat-tier --ctx-size from the ACTIVE rendered yaml (ground truth: what actually
@@ -491,13 +487,13 @@ function Get-ProjectedProfile {
 # Load+serve a given model gguf on a standalone probe server at a specific ctx + KV type,
 # probe /health for readiness (records cold-load wall time), then OPTIONALLY run one warm
 # generation through it to measure decode tok/s, then tear it down. This is the H3 workhorse
-# for: the profile ctx-ceiling check (step 2), the 26B --cpu-moe decode tok/s (step 3), and
-# per-tier cold-swap time (step 4). It NEVER touches the running swap/yaml (own port).
+# for: the profile ctx-ceiling check (step 2), per-tier cold-swap time (step 4) and the canaries.
+# It NEVER touches the running swap/yaml (own port), and it never places experts in host RAM
+# (INV-1: the cards do the inference and RAM is overflow only; it has no -CpuMoe switch).
 # Returns {ok=$bool; detail; cold_load_s; tps} (tps=$null unless -WarmDecode and it succeeds).
 #   -ModelFile   gguf filename under $modelDir
 #   -Ctx         --ctx-size to load at
 #   -KvType      q8_0|f16 (kept symmetric across K and V)
-#   -CpuMoe      add --cpu-moe (experts in RAM) - the 26B reduce path
 #   -FlashAttn   on|off (default on; the cpu backend template omits it, handled by caller)
 #   -WarmDecode  after /health, issue one chat and time the generation for tok/s
 #   -GenPrompt   the warm-decode prompt (J1: the FA+q8-KV canary needs a FIXED prompt
@@ -509,7 +505,6 @@ function Invoke-ProbeLoad {
     [string]$ModelFile,
     [int]$Ctx,
     [string]$KvType = 'q8_0',
-    [switch]$CpuMoe,
     [string]$FlashAttn = 'on',
     [switch]$WarmDecode,
     [string]$GenPrompt = 'Count from one to forty in words, comma-separated, then stop.',
@@ -528,7 +523,6 @@ function Invoke-ProbeLoad {
   $svArgs = New-Object System.Collections.Generic.List[string]
   $svArgs.AddRange([string[]]@('-m', $modelPath, '-c', "$Ctx"))
   if ($backend -ne 'cpu') { $svArgs.AddRange([string[]]@('-ngl', "$ngl")) }
-  if ($CpuMoe)            { $svArgs.Add('--cpu-moe') }
   if ($FlashAttn -eq 'on' -and $backend -ne 'cpu') { $svArgs.AddRange([string[]]@('--flash-attn', 'on')) }
   $svArgs.AddRange([string[]]@('--cache-type-k', $KvType, '--cache-type-v', $KvType,
                              '--jinja', '--no-webui', '--parallel', '1',
@@ -555,7 +549,7 @@ function Invoke-ProbeLoad {
         try {
           $whole = Get-Content -Raw -Path $logFile -ErrorAction SilentlyContinue
           if ($whole) {
-            $am = [regex]::Match($whole, '(?im)^.*(VK_ERROR_OUT_OF_DEVICE_MEMORY|out of device memory|CUDA (error )?out of memory|cudaErrorMemoryAllocation|device[- ]lost|VK_ERROR_DEVICE_LOST|failed to allocate|unable to allocate).*$')
+            $am = [regex]::Match($whole, '(?im)^.*(VK_ERROR_OUT_OF_DEVICE_MEMORY|out of device memory|CUDA (error:? )?out of memory|cudaErrorMemoryAllocation|device[- ]lost|VK_ERROR_DEVICE_LOST|failed to allocate|unable to allocate).*$')
             if ($am.Success) { $tail = ($am.Value.Trim() + ' | ' + $tail) }
           }
         } catch { }
@@ -580,7 +574,7 @@ function Invoke-ProbeLoad {
     } catch { $faState = $null }
     $tps = $null
     $genText = ''
-    $detail = "loaded+healthy at ctx=$Ctx kv=$KvType$(if ($CpuMoe){' --cpu-moe'}) on a standalone probe server"
+    $detail = "loaded+healthy at ctx=$Ctx kv=$KvType on a standalone probe server"
     if ($WarmDecode) {
       # One warm generation directly against the probe server's OpenAI endpoint; time the decode.
       $body = @{ model = 'probe'; messages = @(@{ role = 'user'; content = $GenPrompt });
@@ -651,7 +645,7 @@ $receipt = [ordered]@{
   profile_measure = [ordered]@{
     profile         = $null       # active profile id (from installed.json / detect / OFFLOAD_PROFILE)
     profile_src     = 'none'      # where the profile came from
-    ram_tier        = $null       # high|mid|low|min (drives the 26B cpu-moe RAM gate)
+    ram_tier        = $null       # high|mid|low|min (the RAM tier detect reported; it gates the 26B)
     projected       = [ordered]@{ # the profiles.json PROJECTED values for this profile (unmeasured)
       ctx_size      = $null
       kv_type       = $null
@@ -669,11 +663,11 @@ $receipt = [ordered]@{
       src           = 'not-attempted' # 'measured' | 'not-attempted'
       detail        = $null
     }
-    moe26b          = [ordered]@{ # step 3: 26B --cpu-moe decode tok/s ("reduce not enable" number)
-      applicable    = $false      # profile includes 26B via cpu_moe AND the ram gate passed
+    moe26b          = [ordered]@{ # step 3 (retired, 0186 w4): the installer places no experts in host RAM (INV-1), so there is no such decode number to take
+      applicable    = $false      # always $false: no profile places every expert in RAM on a backend with a card
       installed     = $false      # the 26B gguf is on disk
-      moe26b_tps    = $null       # measured decode tok/s; $null if skipped
-      src           = 'skipped'   # 'measured' | 'skipped'
+      moe26b_tps    = $null       # always $null (the key stays so the receipt's shape does not change)
+      src           = 'skipped'   # always 'skipped'
       detail        = $null
     }
     cold_swap       = @()         # step 4: per installed tier {tier, cold_swap_s} (load-from-cold latency)
@@ -704,7 +698,7 @@ $receipt = [ordered]@{
   # box forcing OFFLOAD_SELFTEST_CANARIES=1). Every entry starts 'skipped' and is only
   # upgraded by an actual measurement; the SETUP-AGENT.md amd-rdna3 chapter tells the
   # installing agent which config promotions each PASS authorizes (ctx 16K->32K,
-  # f16->q8_0 KV, 26B cpu-moe->full-offload). Nothing here is auto-applied.
+  # f16->q8_0 KV). Nothing here is auto-applied.
   canaries        = [ordered]@{
     ran              = $false
     gate             = $null      # why the suite ran / was skipped
@@ -742,7 +736,7 @@ $receipt = [ordered]@{
 # ---------------------------------------------------------------------------
 # Test seam: with OFFLOAD_SELFTEST_DOT_SOURCE=1 the script defines its functions, paths, and
 # receipt state, then returns BEFORE MAIN - so a test harness can dot-source it, stub the
-# transport helpers (Start-Swap / Wait-SwapReady / Invoke-Chat), and drive Invoke-Remediate26B
+# transport helpers (Start-Swap / Wait-SwapReady / Invoke-Chat), and drive Get-MoEFailureAdvice
 # etc. in isolation (see setup/tests/). Zero effect on a normal run (env var absent).
 # ---------------------------------------------------------------------------
 if ($env:OFFLOAD_SELFTEST_DOT_SOURCE -eq '1') { return }
@@ -819,9 +813,15 @@ try {
   LogOk "gpu = $gpuLabel | driver = $drvLabel (gpu from llama-server --list-devices device 0)"
 
   # --- Which chat tiers are actually installed (file existence) ------------------------------
-  $installedTiers = @($TIER_SPEC | Where-Object { Test-Path (Join-Path $modelDir $_.file) })
+  $tiersOnDisk = @($TIER_SPEC | Where-Object { Test-Path (Join-Path $modelDir $_.file) })
+  $installedTiers = @(Select-ServedTiers -Tiers $tiersOnDisk -ConfigPath $yamlPath)
   if ($installedTiers.Count -eq 0) { throw "no chat-tier gguf found in $modelDir - nothing to exercise" }
   LogOk ("installed chat tiers: {0}" -f (($installedTiers | ForEach-Object { $_.id }) -join ', '))
+  $servedIds = @($installedTiers | ForEach-Object { $_.id })
+  $unservedTiers = @($tiersOnDisk | Where-Object { $servedIds -notcontains $_.id })
+  if ($unservedTiers.Count -gt 0) {
+    Log ("  NOTE: gguf on disk but not defined by the active yaml, so not exercised: {0} (an earlier render served it; the file is unused)" -f (($unservedTiers | ForEach-Object { $_.id }) -join ', '))
+  }
 
   # --- Expectations table (info only) -------------------------------------------------------
   Log ""
@@ -851,12 +851,10 @@ try {
     Log "  -> tier $($tier.id): request 1 (COLD - triggers evict-prior + cold-load; time = load+first-gen)"
     $res = Invoke-Chat -Model $tier.id -UserContent $tierPrompt -MaxTokens 48 -TimeoutSec 300
 
-    # R4.2: auto-remediation on 26B allocation failure.
+    # No auto-remediation (0186 w4, INV-1): a 26B that fails to load is NOT moved to host RAM and the yaml
+    # is NOT edited. The tier records its failure below with the advice, and the operator decides.
     if (-not $res.ok -and $isMoE -and (Test-AllocFailure $res.error)) {
       LogWarn "26B allocation/device-lost class failure: $($res.error)"
-      $remOutcome = Invoke-Remediate26B
-      $receipt.remediations += ,([ordered]@{ tier = 'gemma4-26b-a4b'; action = 'added --cpu-moe'; outcome = $remOutcome.outcome })
-      if ($remOutcome.retry) { $res = $remOutcome.retry }
     }
 
     if ($res.ok) {
@@ -870,14 +868,16 @@ try {
       $status = 'pass'
       $tokLabel = if ($null -ne $tokS) { "$tokS" } else { 'n/a' }
       if ($null -ne $tokS -and $tokS -lt 8) { $status = 'warn' }  # CPU-class throughput
-      $receipt.tiers += ,([ordered]@{ id = $tier.id; cold_load_s = $coldS; tok_s = $tokS; status = $status })
+      $receipt.tiers += ,([ordered]@{ id = $tier.id; cold_load_s = $coldS; tok_s = $tokS; status = $status; detail = $null })
       if ($status -eq 'warn') { LogWarn "$($tier.id): cold_load=${coldS}s warm-tok/s=$tokLabel (CPU-class, WARN)" }
       else { LogOk "$($tier.id): cold_load=${coldS}s warm-tok/s=$tokLabel" }
     } else {
-      # 26B failing (even post-remediation) is a tier-local FAIL, not a whole-selftest FAIL.
+      # The 26B failing is a tier-local FAIL, not a whole-selftest FAIL. It carries the operator advice in
+      # tiers[].detail (no tier row but a failed 26B has one).
       $msg = $res.error
-      if ($isMoE) { $msg = 'auto-remediation (--cpu-moe) applied but still failed; try a lower -ngl or update the AMD Adrenalin driver' }
-      $receipt.tiers += ,([ordered]@{ id = $tier.id; cold_load_s = $res.latency_s; tok_s = $null; status = 'fail' })
+      $detail = $null
+      if ($isMoE) { $detail = Get-MoEFailureAdvice -ErrorText $res.error; $msg = $detail }
+      $receipt.tiers += ,([ordered]@{ id = $tier.id; cold_load_s = $res.latency_s; tok_s = $null; status = 'fail'; detail = $detail })
       LogFail "$($tier.id): $msg"
     }
   }
@@ -913,7 +913,7 @@ try {
     LogOk "canary generated $($can.tokens) tokens at depth ~7000 (machine-local: this GPU + driver + depth only)"
   } elseif ((Test-AllocFailure $can.error) -or $can.error) {
     $receipt.canary.status = 'fail'
-    $receipt.canary.detail = "depth-7000 generation FAILED on $canaryModel : $($can.error) - update the AMD Adrenalin driver; if it persists switch 26b/e4b to --cpu-moe / lower -ngl"
+    $receipt.canary.detail = "depth-7000 generation FAILED on $canaryModel : $($can.error) - update the AMD Adrenalin driver; if it persists lower -ngl or the window (the experts stay on the card: RAM is overflow only)"
     LogFail "canary crashed/failed at depth 7000: $($can.error)"
   } else {
     $receipt.canary.status = 'fail'
@@ -1161,9 +1161,12 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       $kv = $proj.kv_type
       $fa = $proj.flash_attn
       $tryCtx = $proj.ctx_size
-      $residentIsMoe = ($residentId -eq 'gemma4-26b-a4b')  # if a profile ever made 26B the resident tier
+      # The probe loads the resident model as the yaml serves it: no expert-placement flag for any model (INV-1).
+      # On a tier whose resident is the 26B that means the card-resident 26B at the projected ctx, which can OOM
+      # and take the downshift path below; before 0186 w4 this probe launched the 26B with its experts in RAM
+      # and recorded "ctx MEASURED ok" for a placement the yaml does not serve.
       LogStep ("  ctx probe: loading {0} at projected ctx={1} kv={2}" -f $residentId, $tryCtx, $kv)
-      $r1 = Invoke-ProbeLoad -ModelFile $residentSpec.file -Ctx $tryCtx -KvType $kv -FlashAttn $fa -CpuMoe:$residentIsMoe -TimeoutSec 180
+      $r1 = Invoke-ProbeLoad -ModelFile $residentSpec.file -Ctx $tryCtx -KvType $kv -FlashAttn $fa -TimeoutSec 180
       if ($r1.ok) {
         $pm.ctx.measured_ctx = $tryCtx
         $pm.ctx.measured_ctx_ok = $true
@@ -1172,10 +1175,10 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         $pm.ctx.detail = $r1.detail
         LogOk ("ctx MEASURED ok at projected {0} (kv={1}): {2}" -f $tryCtx, $kv, $r1.detail)
       } elseif (Test-AllocFailure $r1.detail) {
-        # DOWNSHIFT: halve ctx (floor 4096) and retry once, mirroring the Invoke-Remediate26B pattern.
+        # DOWNSHIFT: halve ctx (floor 4096) and retry once.
         $downCtx = [int][math]::Max(4096, [math]::Floor($tryCtx / 2))
         LogWarn ("projected ctx {0} OOM'd ({1}); DOWNSHIFTING to {2} and retrying once" -f $tryCtx, $r1.detail, $downCtx)
-        $r2 = Invoke-ProbeLoad -ModelFile $residentSpec.file -Ctx $downCtx -KvType $kv -FlashAttn $fa -CpuMoe:$residentIsMoe -TimeoutSec 180
+        $r2 = Invoke-ProbeLoad -ModelFile $residentSpec.file -Ctx $downCtx -KvType $kv -FlashAttn $fa -TimeoutSec 180
         $pm.ctx.downshifted = $true
         $pm.ctx.src = 'measured'
         $receipt.remediations += ,([ordered]@{ tier = $residentId; action = ("downshift ctx {0}->{1}" -f $tryCtx, $downCtx); outcome = (if ($r2.ok) { 'pass' } else { 'fail' }) })
@@ -1202,52 +1205,20 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       }
     }
 
-    # 3. 26B --cpu-moe decode tok/s (the "reduce not enable" number). Applicable iff the profile
-    # INCLUDES the 26B via cpu_moe AND the ram gate passed (ram_tier mid|high). Measured only if the
-    # 26B gguf is installed. This box (ampere-8/mid) IS in the cpu_moe-with-RAM-path case.
+    # 3. (retired, 0186 w4) The 26B --cpu-moe decode tok/s. The installer places no experts in host RAM
+    # (INV-1: the cards do the inference and RAM is overflow only), so there is no such placement to take a
+    # number from; the old probe launched a standalone 26B with its experts in RAM and recorded a figure for a
+    # placement the yaml does not serve. profile_measure.moe26b stays in the receipt (its shape is unchanged)
+    # as installed + applicable $false + src 'skipped'.
     $moe26bId   = 'gemma4-26b-a4b'
     $moe26bSpec = $TIER_SPEC | Where-Object { $_.id -eq $moe26bId } | Select-Object -First 1
     $moe26bInstalled = $false
     if ($moe26bSpec) { $moe26bInstalled = Test-Path (Join-Path $modelDir $moe26bSpec.file) }
     $pm.moe26b.installed = $moe26bInstalled
-    $ramOk = ($active.ram_tier -in @('mid','high'))
-    $moeApplicable = [bool]($proj -and $proj.include_26b -and ($proj.moe_26b -eq 'cpu_moe') -and $ramOk)
-    $pm.moe26b.applicable = $moeApplicable
-    if ($moeApplicable -and $moe26bInstalled -and $backend -ne 'cpu' -and -not $skipProbe) {
-      LogStep "  26B --cpu-moe decode probe (warm generation for tok/s)"
-      $rm = Invoke-ProbeLoad -ModelFile $moe26bSpec.file -Ctx ([int]$pm.projected.ctx_size) -KvType $proj.kv_type -CpuMoe -FlashAttn $proj.flash_attn -WarmDecode -TimeoutSec 300
-      if ($rm.ok -and $null -ne $rm.tps) {
-        $pm.moe26b.moe26b_tps = $rm.tps
-        $pm.moe26b.src = 'measured'
-        $pm.moe26b.detail = "26B --cpu-moe measured $($rm.tps) tok/s (RAM-speed-bound; this is why 26B is REDUCE not ENABLE on cpu-moe). $($rm.detail)"
-        LogOk ("26B --cpu-moe MEASURED {0} tok/s decode" -f $rm.tps)
-      } else {
-        $pm.moe26b.src = 'skipped'
-        $pm.moe26b.detail = "26B --cpu-moe load/decode did not complete: $($rm.detail)"
-        LogWarn $pm.moe26b.detail
-      }
-    } else {
-      $reason = if (-not $moeApplicable) {
-        if (-not $proj) { 'no projected profile' }
-        elseif (-not $proj.include_26b) { 'profile does not include 26B' }
-        elseif ($proj.moe_26b -ne 'cpu_moe') { "26B placement is '$($proj.moe_26b)', not cpu_moe (measure GPU-resident 26B on the target rig)" }
-        elseif (-not $ramOk) { "ram_tier=$($active.ram_tier) has no RAM path for cpu-moe (needs mid|high)" }
-        else { 'not applicable' }
-      } elseif (-not $moe26bInstalled) { '26B gguf not installed in this stack' }
-      elseif ($skipProbe) {
-        # Honest labeling: name the ACTUAL cause of the skip. The moe-tps probe is currently
-        # coupled to $skipProbe, so OFFLOAD_SELFTEST_SKIP_CTXPROBE=1 skips it as collateral even on
-        # a box that HAS the 26B installed - say so explicitly rather than blaming a generic 'ctx probe'.
-        if ($env:OFFLOAD_SELFTEST_SKIP_CTXPROBE -eq '1') { 'moe-tps probe skipped as collateral of OFFLOAD_SELFTEST_SKIP_CTXPROBE=1 (26B is installed; unset the flag to measure decode tok/s)' }
-        elseif ($backend -eq 'cpu') { 'cpu backend (no GPU cpu-moe measurement)' }
-        elseif (-not $residentPresent) { 'resident-tier gguf absent (ctx probe not attempted)' }
-        else { 'ctx probe not attempted' }
-      }
-      else { 'cpu backend' }
-      $pm.moe26b.src = 'skipped'
-      $pm.moe26b.detail = "26B cpu-moe tok/s SKIPPED: $reason"
-      LogWarn $pm.moe26b.detail
-    }
+    $pm.moe26b.applicable = $false
+    $pm.moe26b.src = 'skipped'
+    $pm.moe26b.detail = 'no decode number is taken for the 26B with its experts in host RAM: the installer places none there (INV-1)'
+    Log "  26B host-RAM expert placement: not applicable (the installer places none)"
 
     # 4. Cold-swap time per installed tier (load-from-cold latency) - feeds the two-tier one-swap cost.
     if ($skipProbe) {
@@ -1255,14 +1226,12 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
     } else {
       LogStep "  cold-swap timing per installed tier (cold load-from-disk latency)"
       foreach ($tier in $installedTiers) {
-        $isMoe = ($tier.id -eq 'gemma4-26b-a4b')
-        # 26B loads with the profile's cpu_moe path only if applicable; else plain (GPU) - it just
-        # needs to load to time the cold swap, we don't decode here.
-        $useCpuMoe = ($isMoe -and $moeApplicable)
+        # Every tier loads plain, as the yaml serves it (the 26B on the card: INV-1) - it just needs to
+        # load to time the cold swap, we don't decode here.
         $kvForTier = if ($proj) { $proj.kv_type } else { 'q8_0' }
         $faForTier = if ($proj) { $proj.flash_attn } else { 'on' }
         $ctxForTier = if ($proj) { [int]$proj.ctx_size } else { 8192 }
-        $rc = Invoke-ProbeLoad -ModelFile $tier.file -Ctx $ctxForTier -KvType $kvForTier -FlashAttn $faForTier -CpuMoe:$useCpuMoe -TimeoutSec 240
+        $rc = Invoke-ProbeLoad -ModelFile $tier.file -Ctx $ctxForTier -KvType $kvForTier -FlashAttn $faForTier -TimeoutSec 240
         $cs = if ($rc.ok) { $rc.cold_load_s } else { $null }
         $pm.cold_swap += ,([ordered]@{ tier = $tier.id; cold_swap_s = $cs; ok = [bool]$rc.ok })
         if ($rc.ok) { LogOk ("cold-swap {0}: {1}s (load-from-cold)" -f $tier.id, $cs) }
@@ -1324,7 +1293,6 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       $tunedNotes = New-Object System.Collections.Generic.List[string]
       if ($pm.ctx.downshifted -and $pm.ctx.measured_ctx_ok -eq $true) { $tunedNotes.Add("apply ctx_size=$($pm.ctx.measured_ctx) (projected $($proj.ctx_size) OOM'd)") }
       elseif ($pm.ctx.measured_ctx_ok -eq $true) { $tunedNotes.Add("projected ctx_size=$($proj.ctx_size) confirmed loadable") }
-      if ($null -ne $pm.moe26b.moe26b_tps) { $tunedNotes.Add("26B cpu-moe measured $($pm.moe26b.moe26b_tps) tok/s") }
       if ($tunedNotes.Count -eq 0) { $tunedNotes.Add('nothing measured this run; projected values stand') }
       $pm.tuned.notes = ($tunedNotes -join '; ')
       LogOk ("tuned (source={0}): ctx_size={1} kv_type={2} moe26b_tps={3} | {4}" -f `
@@ -1343,8 +1311,8 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
   # Independent section (own try/catch; never changes the verdict rule). These canaries turn
   # the amd-rdna3 profile's SAFE FLOOR into evidence-backed promotions: each PASS authorizes
   # the installing agent to apply ONE config change per SETUP-AGENT.md (amd-rdna3 chapter) -
-  # ctx 16K->32K (ctx_sweep), f16->q8_0 KV (fa_q8kv), 26B cpu-moe->full-offload
-  # (moe_full_offload). Nothing is auto-applied here. Default gate: vulkan backend;
+  # ctx 16K->32K (ctx_sweep), f16->q8_0 KV (fa_q8kv). (moe_full_offload is retired: no host-RAM
+  # floor exists to promote from.) Nothing is auto-applied here. Default gate: vulkan backend;
   # OFFLOAD_SELFTEST_CANARIES=1 forces on any box, =0 forces off.
   LogStep "H3 canaries: promotion gates (fa_q8kv / moe_full_offload / ctx_sweep / bench / swap_leak / embedder / whisper)"
   $cn = $receipt.canaries
@@ -1431,45 +1399,14 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         }
       }
 
-      # (2) moe_full_offload - the 26B -ngl 99 FULL-OFFLOAD trial: the upward mirror of the
-      # standing Invoke-Remediate26B downshift. On UMA boxes the weights live in GTT/shared
-      # memory; research (2026-07-23) measured ~20-25 tok/s tg on a 780M + dual-channel DDR5 -
-      # FASTER than cpu-moe. pass+promote -> the agent may flip the 26B to -ngl 99;
-      # fail -> the cpu-moe floor stands.
-      $moeSpec26 = $TIER_SPEC | Where-Object { $_.id -eq 'gemma4-26b-a4b' } | Select-Object -First 1
-      $moeInstalled26 = Test-Path (Join-Path $modelDir $moeSpec26.file)
-      if ($proj -and $proj.moe_26b -eq 'gpu') {
-        $cn.moe_full_offload.detail = 'profile already projects full-offload (moe_26b=gpu) - nothing to trial'; LogWarn "moe_full_offload SKIPPED: $($cn.moe_full_offload.detail)"
-      } elseif ($proj -and -not $proj.include_26b) {
-        $cn.moe_full_offload.detail = 'profile excludes the 26B'; LogWarn "moe_full_offload SKIPPED: $($cn.moe_full_offload.detail)"
-      } elseif (-not $moeInstalled26) {
-        $cn.moe_full_offload.detail = '26B gguf not installed in this stack'; LogWarn "moe_full_offload SKIPPED: $($cn.moe_full_offload.detail)"
-      } elseif ($backend -eq 'cpu') {
-        $cn.moe_full_offload.detail = 'cpu backend'; LogWarn "moe_full_offload SKIPPED: $($cn.moe_full_offload.detail)"
-      } else {
-        LogStep "  moe_full_offload: 26B -ngl 99 trial (weights via GTT on UMA; may take minutes)"
-        $rmf = Invoke-ProbeLoad -ModelFile $moeSpec26.file -Ctx $cnCtx -KvType $cnKv -FlashAttn $cnFa -WarmDecode -TimeoutSec 600
-        $cn.moe_full_offload.cpu_moe_tps = $pm.moe26b.moe26b_tps
-        if ($rmf.ok -and $null -ne $rmf.tps) {
-          $cn.moe_full_offload.full_tps = $rmf.tps
-          $promote = ($null -eq $pm.moe26b.moe26b_tps) -or ($rmf.tps -gt $pm.moe26b.moe26b_tps)
-          $cn.moe_full_offload.promote = [bool]$promote
-          $cn.moe_full_offload.status = 'pass'
-          $cmLabel = if ($null -ne $pm.moe26b.moe26b_tps) { "$($pm.moe26b.moe26b_tps)" } else { 'unmeasured' }
-          $cn.moe_full_offload.detail = "26B full-offload measured $($rmf.tps) tok/s decode vs cpu-moe $cmLabel - $(if ($promote) { 'PROMOTE to -ngl 99' } else { 'keep cpu-moe (full-offload is not faster here)' })"
-          LogOk "moe_full_offload: $($cn.moe_full_offload.detail)"
-        } elseif ($rmf.ok) {
-          $cn.moe_full_offload.status = 'warn'
-          $cn.moe_full_offload.promote = $false
-          $cn.moe_full_offload.detail = "26B full-offload LOADED but decode tok/s was unmeasured ($($rmf.detail)) - no promotion without a number"
-          LogWarn "moe_full_offload: $($cn.moe_full_offload.detail)"
-        } else {
-          $cn.moe_full_offload.status = 'fail'
-          $cn.moe_full_offload.promote = $false
-          $cn.moe_full_offload.detail = "26B full-offload did not load ($($rmf.detail)) - the cpu-moe floor stands (a partial --n-cpu-moe N split is the manual middle path)"
-          LogWarn "moe_full_offload: $($cn.moe_full_offload.detail)"
-        }
-      }
+      # (2) moe_full_offload - RETIRED (0186 w4). It was the upward mirror of the cpu-moe floor the selftest used
+      # to fall back to: trial the 26B at -ngl 99 and promote it over the host-RAM baseline. The installer places
+      # no experts in host RAM (INV-1: the cards do the inference and RAM is overflow only), so there is no floor
+      # to promote from, and the trial could not run on any shipped tier (the only tier with the 26B and a
+      # non-gpu placement is the cpu tier, whose backend skipped it). The key stays in the receipt as 'skipped'
+      # so its shape does not change.
+      $cn.moe_full_offload.detail = 'retired: the installer places no experts in host RAM (INV-1), so there is no host-RAM floor to promote from'
+      LogWarn "moe_full_offload SKIPPED: $($cn.moe_full_offload.detail)"
 
       # (3) ctx_sweep - long-context SWA sweep 8K/16K/32K on the resident tier. KV type:
       # q8_0 if fa_q8kv PASSED this run, else the profile's projected KV. Stops at the
@@ -1787,7 +1724,7 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
 
   # --- Verdict (R4.4 rule) ------------------------------------------------------------------
   # fail iff harness_smoke=fail OR agent_smoke=fail OR ALL tiers failed. A single non-26b tier
-  # failing, or 26b failing even after remediation, is WARN (partial capability). The canary
+  # failing, or the 26b failing to load (it is never remediated), is WARN (partial capability). The canary
   # failing degrades to WARN too (machine-local crash signal, not an install-integrity failure).
   $allTiersFailed = ($receipt.tiers.Count -gt 0) -and (-not ($receipt.tiers | Where-Object { $_.status -ne 'fail' }))
   $anyTierWarnOrFail = [bool]($receipt.tiers | Where-Object { $_.status -ne 'pass' })
@@ -1860,10 +1797,6 @@ if (-not $pmf.profile) {
 }
 if ($pmf.ctx.src -ne 'measured') {
   $d = "the profile's projected ctx ($($pmf.ctx.projected_ctx)) actually loads on this box: $($pmf.ctx.src) ($($pmf.ctx.detail))"
-  if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
-}
-if ($pmf.moe26b.src -ne 'measured') {
-  $d = "26B --cpu-moe decode tok/s on this box: skipped ($($pmf.moe26b.detail))"
   if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
 }
 # dual-GPU two-model residency + Optane always need hardware this single-GPU laptop lacks.

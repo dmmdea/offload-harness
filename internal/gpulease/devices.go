@@ -898,7 +898,7 @@ func (m *Manager) removeLeaseFilesLocked(epoch uint64) error {
 // sibling's heartbeat and make it reclaimable.
 func (m *Manager) clearEpochMarkers(epoch uint64) {
 	e := strconv.FormatUint(epoch, 10)
-	for _, name := range []string{"unloaded." + e, "hb." + e, "hb." + e + ".tmp", orphanMarkPrefix + e, orphanMarkPrefix + e + ".tmp"} {
+	for _, name := range []string{"unloaded." + e, "hb." + e, "hb." + e + ".tmp", orphanMarkPrefix + e, orphanMarkPrefix + e + ".tmp", yieldPrefix + e, yieldPrefix + e + ".tmp"} {
 		_ = m.remove(filepath.Join(m.leaseDir(), name))
 	}
 }

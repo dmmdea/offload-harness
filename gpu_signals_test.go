@@ -11,6 +11,7 @@ package main
 // A console close cannot be driven from a test, so these pin what the wrapper asks for and what it says.
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"syscall"
@@ -78,24 +79,35 @@ func TestTheCardSaysWhichSignalEndedTheCommand(t *testing.T) {
 // today's code: 0.180.0 shipped the first wording and its entry is never edited, so the retired wording is refused only above that
 // heading (the unreleased section and any release after it), and the CHANGELOG is still held to quote the new clause whole.
 func TestTheDocsQuoteTheSIGTERMCardTextTheCodeProduces(t *testing.T) {
+	for _, problem := range sigtermDocProblems(".") {
+		t.Error(problem)
+	}
+}
+
+// sigtermDocProblems is that check over the documents under root, as a list, so a test can run it on a root of its own
+// (TestTheSIGTERMQuoteCheckSeesAChangelogFragment).
+func sigtermDocProblems(root string) []string {
 	const marker = "ended on SIGTERM: "
+	var problems []string
 	for _, name := range []string{"CHANGELOG.md", "docs/systems/pair-workloads.md", "docs/systems/gpu-lease.md"} {
-		raw, err := os.ReadFile(name)
+		raw, err := docText(root, name)
 		if err != nil {
-			t.Fatal(err)
+			problems = append(problems, err.Error())
+			continue
 		}
-		text := strings.Join(strings.Fields(string(raw)), " ") // a quote wraps across lines
+		text := strings.Join(strings.Fields(raw), " ") // a quote wraps across lines
 		current := text
 		if name == "CHANGELOG.md" {
 			i := strings.Index(text, "## [0.180.0] ")
 			if i < 0 {
-				t.Fatalf("%s has no [0.180.0] heading: the check cannot tell released history from the current text", name)
+				problems = append(problems, fmt.Sprintf("%s has no [0.180.0] heading: the check cannot tell released history from the current text", name))
+				continue
 			}
 			current = text[:i]
 		}
 		for _, retired := range []string{"its console was closed, or the session is ending", "terminated: its console was closed"} {
 			if strings.Contains(current, retired) {
-				t.Errorf("%s still quotes the retired card text %q", name, retired)
+				problems = append(problems, fmt.Sprintf("%s still quotes the retired card text %q", name, retired))
 			}
 		}
 		quotes := 0
@@ -106,13 +118,14 @@ func TestTheDocsQuoteTheSIGTERMCardTextTheCodeProduces(t *testing.T) {
 			}
 			rest = rest[i+len(marker):]
 			if !strings.HasPrefix(rest, termCauseLikely) {
-				t.Errorf("%s quotes the SIGTERM clause as %.90q, the code says %q", name, rest, termCauseLikely)
+				problems = append(problems, fmt.Sprintf("%s quotes the SIGTERM clause as %.90q, the code says %q", name, rest, termCauseLikely))
 			}
 		}
 		if name == "CHANGELOG.md" && quotes == 0 {
-			t.Errorf("%s no longer quotes the SIGTERM clause at all: the check has nothing to compare", name)
+			problems = append(problems, fmt.Sprintf("%s no longer quotes the SIGTERM clause at all: the check has nothing to compare", name))
 		}
 	}
+	return problems
 }
 
 // The wrapper's loop is long and drives a real command, so the wiring is pinned where it is made: the

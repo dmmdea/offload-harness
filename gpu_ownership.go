@@ -51,8 +51,8 @@ func addOwnershipFlags(fs *flag.FlagSet) *ownershipFlags {
 		unattended:   fs.Bool("unattended", false, "nobody is expected at the desk: the lease is judged by its progress contract and its window, never by whether its owner is still around; requires an explicit --for, --progress-file and --stall"),
 		progressFile: fs.String("progress-file", "", "a file the job appends to as it works; the lease reads held-stalled when it stops moving for --stall. A relative path is resolved against this command's working directory and recorded absolute (every reader looks for the same file). `auto` (the wrapper form only) mints one and hands it to the command in GPU_LEASE_PROGRESS_FILE; --stall then defaults to 15m. A command that runs a render helper gets the same without asking"),
 		stall:        fs.Duration("stall", 0, "how long --progress-file may go without moving before the lease reads as stalled"),
-		yieldGrace:   fs.Duration("yield-grace", 0, "how long the job needs to stop cleanly when asked to (recorded for the takeover command; nothing is ever killed inside it)"),
-		onYield:      fs.String("on-yield", "", "the command that makes the job stop at a clean boundary (for example `touch work/STOP`); recorded verbatim, with this command's working directory, for the takeover command"),
+		yieldGrace:   fs.Duration("yield-grace", 0, "how long the job needs to stop cleanly when asked to (recorded on the lease; with gpu_on_overdue = request a status call words the holder's request against it; nothing is ever killed inside it)"),
+		onYield:      fs.String("on-yield", "", "the command that makes the job stop at a clean boundary (for example `touch work/STOP`); recorded verbatim, with this command's working directory. With gpu_on_overdue = request, the lease's holder runs it once when the lease is overdue and someone waits for its cards; nothing is killed or released. It runs through sh -c (cmd.exe /c on Windows), so name a script rather than relying on shell syntax"),
 	}
 }
 
@@ -111,8 +111,8 @@ func (o *ownershipFlags) validate(forGiven bool) error {
 	case stall && !file && !o.wantsMintedProgress():
 		return errors.New("--stall needs --progress-file: the file that must move inside the window")
 	}
-	// The command is recorded verbatim for the takeover to run, so one that cannot be
-	// recorded faithfully is refused here rather than cut short.
+	// The command is recorded verbatim for the holder to run when it is asked to yield, so one
+	// that cannot be recorded faithfully is refused here rather than cut short.
 	if n := len(strings.TrimSpace(*o.onYield)); n > gpulease.MaxOnYieldBytes {
 		return fmt.Errorf("--on-yield is %d bytes; the most a lease records verbatim is %d: put the logic in a script and name the script", n, gpulease.MaxOnYieldBytes)
 	}
