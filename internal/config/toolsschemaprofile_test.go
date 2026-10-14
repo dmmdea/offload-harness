@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestToolsSchemaProfileDefaultsToFull (ENH-13a): a config that does not mention the key, and Default() itself, advertise the full
+// TestToolsSchemaProfileDefaultsToFull: a config that does not mention the key, and Default() itself, advertise the full
 // tool list; the key is opt-in.
 func TestToolsSchemaProfileDefaultsToFull(t *testing.T) {
 	if got := Default().ToolsSchemaProfile; got != ToolsProfileFull {

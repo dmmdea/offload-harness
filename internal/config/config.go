@@ -2002,7 +2002,7 @@ type Config struct {
 	// Default false. Distinct from FleetAgentEnabled deliberately — a box can
 	// be a worker without being a delegator and vice versa.
 	AgentDelegationEnabled bool `json:"agent_delegation_enabled,omitempty"`
-	// ToolsSchemaProfile (ENH-13a) picks how much of each MCP tool's prose tools/list carries: "full" (the
+	// ToolsSchemaProfile picks how much of each MCP tool's prose tools/list carries: "full" (the
 	// default, and what an unset key means) advertises every description and parameter description as written;
 	// "compact" keeps every tool, every parameter name, type, enum and required entry (so every call that is
 	// valid under "full" is valid under "compact") but cuts each description to its first sentence plus any
@@ -2733,7 +2733,7 @@ func validateAuditAllDoors(v string) error {
 	return fmt.Errorf("audit_all_doors: unknown mode %q (valid: \"\" or \"off\" (default: no trail unless browse asks for one), \"warn\", \"enforce\")", v)
 }
 
-// The two tools_schema_profile values (ENH-13a).
+// The two tools_schema_profile values.
 const (
 	ToolsProfileFull    = "full"
 	ToolsProfileCompact = "compact"

@@ -1,6 +1,6 @@
 package mcpserver
 
-// toolsprofile.go: the compact tools/list profile (ENH-13a, config key tools_schema_profile).
+// toolsprofile.go: the compact tools/list profile (config key tools_schema_profile).
 //
 // A client that sends every MCP tool schema up front on every call (opencode has no deferred tool search) pays the whole
 // advertised list as prompt tokens on every turn. Most of that list is prose: a description of several hundred tokens per
