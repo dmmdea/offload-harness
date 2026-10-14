@@ -151,7 +151,8 @@ func TestNoLineButAHeadingCarriesAReleaseDate(t *testing.T) {
 	wantProblem(t, CheckTree(treeAt(t, emDash, nil)), "not a heading")
 
 	// Both separators are legal in a heading (the em dash is what the file used before 0.113.39), and a date in prose is fine.
-	fine := topLF + "## [Unreleased]\n\n" + tailLF + "\n## [0.113.38] \u2014 2026-09-01 \u2014 an older heading\n\n- Shipped on 2026-09-01 - and on 2026-09-02.\n"
+	fine := topLF + "## [Unreleased]\n\n" + tailLF + "\n## [0.113.38] \u2014 2026-09-01 \u2014 an older heading\n\n- Shipped on 2026-09-01 - and on 2026-09-02.\n" +
+		"\n## [0.44.x interim] - 2026-08-10 - a heading that is not semver and still has a title\n\n- x.\n"
 	if p := CheckTree(treeAt(t, fine, nil)); len(p) != 0 {
 		t.Errorf("headings with either separator, and dates in prose, are fine: %v", p)
 	}

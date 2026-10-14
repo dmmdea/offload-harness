@@ -526,6 +526,7 @@ func TestVerifyRefusesAnOutputThatLostALineOfTheOldFile(t *testing.T) {
 			strings.TrimSuffix(good, "- The older bullet, with no section of its own.\n")},
 		{"the head changed", strings.Replace(good, "All notable changes", "Some notable changes", 1)},
 		{"the new heading is missing", strings.Replace(good, "## [0.186.0] - 2026-10-14 - the title\n\n", "", 1)},
+		{"the release is gone entirely: the old text, nothing added", before},
 		{"the new heading is there twice", strings.Replace(good, "### Added", "## [0.186.0] - 2026-10-14 - again\n\n### Added", 1)},
 		{"[Unreleased] is not blank", strings.Replace(good, "## [Unreleased]\n\n", "## [Unreleased]\n\n- stray text\n\n", 1)},
 	} {
