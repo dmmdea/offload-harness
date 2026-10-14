@@ -326,6 +326,41 @@ func TestGateEfficiencyMetricsUseTheSameBootstrap(t *testing.T) {
 	}
 }
 
+// A metric improves only when the WHOLE interval is on the good side: an interval that spans zero
+// does not improve, in either direction.
+func TestGateEfficiencyIntervalSpanningZeroDoesNotImprove(t *testing.T) {
+	const n = 16
+	p := niPre(n)
+	p.Efficiency = []PreRegEfficiency{
+		{Name: tokensName, Class: EffTokens},
+		{Name: "tokens_saved", Class: EffTokens, LowerIsBetter: boolp(false)},
+	}
+	b, h := freeze(t, p, nil)
+	inc := arm("i", repeatF(8, n), nil)
+	cand := arm("c", repeatF(8, n), nil)
+	for i := range inc.Tasks {
+		// The candidate is 300 cheaper on half the tasks and 300 dearer on the other half.
+		delta := -300.0
+		if i%2 == 1 {
+			delta = 300
+		}
+		inc.Tasks[i].Attempts[0].Metrics = map[string]*float64{tokensName: f64(1000), "tokens_saved": f64(100)}
+		cand.Tasks[i].Attempts[0].Metrics = map[string]*float64{tokensName: f64(1000 + delta), "tokens_saved": f64(100 - delta)}
+	}
+	r := mustGate(t, b, h, inputFor(h, inc, cand))
+	for _, e := range r.Efficiency {
+		if e.Lo >= 0 || e.Hi <= 0 {
+			t.Fatalf("setup: %s must span zero, got lo %v hi %v", e.Name, e.Lo, e.Hi)
+		}
+		if e.Improves {
+			t.Errorf("%s: an interval spanning zero must not improve: %+v", e.Name, e)
+		}
+	}
+	if r.Verdict != VerdictInconclusive {
+		t.Fatalf("no metric improved, so non-inferiority cannot ADOPT: %s %s", r.Verdict, r.Reason)
+	}
+}
+
 // Unresolved cost: a pair with a nil value on either side is skipped for that metric, counted,
 // and never read as 0.
 func TestGateUnresolvedCostIsSkippedNeverZero(t *testing.T) {
