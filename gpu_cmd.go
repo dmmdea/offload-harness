@@ -559,6 +559,10 @@ func runGPUReserve(args []string) (retErr error) {
 	holdMax := reserveCfg.GPUHostRAMHoldMax()
 	if holdMaxGiven {
 		holdMax = *holdMaxFlag
+	} else if sec := reserveCfg.GPUHostRAMHoldMaxSec; sec != nil && *sec > config.MaxGPUHostRAMHoldMaxSec {
+		// Load refuses this by name, but it returns at the FIRST validator that fails, so with another key invalid ahead of this one
+		// the refusal never comes and the accessor's clamp would be silent. Said once, where the clamped figure is used.
+		fmt.Fprintf(os.Stderr, "gpu reserve: warning: config gpu_hostram_hold_max_sec is %d s, above the %d s (7 day) ceiling; using the ceiling\n", *sec, config.MaxGPUHostRAMHoldMaxSec)
 	}
 	cmdEnv := os.Getenv
 	if *detach {
