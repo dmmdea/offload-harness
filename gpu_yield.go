@@ -21,3 +21,6 @@ func runYieldShell(line string, env []string) (int, error) { return 0, nil }
 func newHolderYieldTicker(lease *gpulease.Lease, onYield, label string, out io.Writer) *gpulease.YieldTicker {
 	return lease.NewYieldTicker(gpulease.YieldTickerOptions{OnYield: onYield, Run: yieldShell, Out: out, Label: label})
 }
+
+// detachedReport is what `gpu reserve --detach` prints once its holder has taken the lease.
+func detachedReport(info gpulease.Info, leaseDir string, asJSON bool) string { return "" }

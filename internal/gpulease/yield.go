@@ -85,6 +85,10 @@ func ReadYield(leaseDir string, epoch uint64) (YieldRequest, bool) { return Yiel
 // YieldOf is ReadYield on a Manager.
 func (m *Manager) YieldOf(epoch uint64) (YieldRequest, bool) { return YieldRequest{}, false }
 
+// yieldBeforeLockHook is a test seam, called by an ask that has passed every check made outside the epoch
+// lock and is about to take it. nil in production.
+var yieldBeforeLockHook func()
+
 // YieldAsker decides, on a holder's tick, whether the holder of one lease is to be asked to yield.
 type YieldAsker struct{}
 
