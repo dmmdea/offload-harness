@@ -222,6 +222,37 @@ func TestOpenSpecConfigCarriesTheStandingInvariants(t *testing.T) {
 	}
 }
 
+// openspecTierIDAsMachineName matches the ways a sentence can say a machine is named by its tier id: "by tier id", the
+// paraphrases "by its/their/the tier id(s)", "as tier ids", and the pairings "tier id or node letter" either way round.
+var openspecTierIDAsMachineName = regexp.MustCompile(`(?i)(by tier ids?|as tier ids?|tier ids? or node letters?|node letters? or tier ids?)`)
+
+// The pattern must catch the forms a rewrite of the sentence would take, and must leave alone the sentence the tree
+// carries today, where a tier id appears only inside "the <tier> reference box".
+func TestOpenSpecTierIDPatternCatchesParaphrases(t *testing.T) {
+	for _, bad := range []string{
+		"name a machine by tier id",
+		"Machines are named by their tier id",
+		"Machines are named by its tier ids",
+		"a machine is identified by the tier id",
+		"name it as tier ids",
+		"a tier id or node letter",
+		"a node letter or tier ids",
+	} {
+		if !openspecTierIDAsMachineName.MatchString(bad) {
+			t.Errorf("the pattern misses %q", bad)
+		}
+	}
+	for _, ok := range []string{
+		"Machines appear as node letters or role phrases, never by name, and a tier id only as \"the `<tier>` reference box\"",
+		"a node letter (`<node-a>`..`<node-f>`) or a role phrase, and a tier id only as the <tier> reference box",
+		"the tier is chosen by the config",
+	} {
+		if m := openspecTierIDAsMachineName.FindString(ok); m != "" {
+			t.Errorf("the pattern flags %q in %q", m, ok)
+		}
+	}
+}
+
 // The tree's public text names a machine the way docs/STYLE.md V1 to V4 say: a node letter or a role phrase, and a tier
 // id only inside "the <tier> reference box". A tier id names a hardware class, never a machine, so "name a machine by
 // tier id" is the sentence the style guide forbids. The check reads the config, the schema, the templates and the docs
@@ -233,7 +264,7 @@ func TestOpenSpecTextNamesMachinesByNodeLetter(t *testing.T) {
 		"openspec/schemas/harness-change/templates/adr.md",
 		"docs/systems/openspec.md",
 	}
-	forbidden := regexp.MustCompile(`(?i)(by tier ids?|as tier ids?|tier ids? or node letters?|node letters? or tier ids?)`)
+	forbidden := openspecTierIDAsMachineName
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
 		if err != nil {
