@@ -3415,7 +3415,13 @@ otherwise, because the builder keeps building the old recipe.
   the same as the tests (the template side runs when a directory is given, so it can be pointed at a candidate
   package extract before an upgrade); `explain` prints the template and builder values side by side;
   `record` rewrites the manifest after a person has compared the builder with the template, and refuses a
-  builder/template difference the spec does not declare.
+  builder/template difference the spec does not declare. The CLI fails closed: a flag that takes a value and gets
+  none (an empty or unset shell variable, `--templates-dir "$UNSET"`) exits 2, as does a flag it does not know, so
+  neither a typo nor an unset variable can skip the template side. `check --require-templates` makes a missing
+  template side an error (exit 2) instead of a note, for an upgrade runbook. `check --strict` also fails (exit 1)
+  on every `unreviewed` manifest entry; a plain `check` leaves those green. Both flags belong to `check`. A template
+  or manifest file may start with a byte-order mark; one that is not JSON, or a template with no `nodes` array,
+  fails with a message that names the file (the template side names the builder too).
 - **Which directory is read.** The CLI and the tests use one function, and the first source that is set decides:
   `--templates-dir`, `--comfy-dir` (a ComfyUI tree), the `COMFY_TEMPLATES_DIR` environment variable (a `templates`
   directory), the `COMFYUI_DIR` environment variable (a ComfyUI tree). A tree named on the command line that has no
@@ -3423,6 +3429,17 @@ otherwise, because the builder keeps building the old recipe.
   is skipped.
 - **Not guarded.** Seeds, prompts, model file names, sizes the caller sets, and the builders with no copied
   widget (`wf-hunyuan15-i2v`, `wf-sdxl-inpaint`, `wf-upscale`, each with its reason in the spec).
+- **Known limits.** What a green run does not tell you:
+  - Node mode is never read. A bypassed or muted node, or a bypassed or muted subgraph instance, still reads as
+    live, so a template that bypasses a node the builder keeps (or the reverse) is not a difference to the guard.
+  - Wiring is mostly unguarded. One `D` item (the Wan Animate 2 pose start and end percent) keeps two inputs on
+    separate sources. The `wf-wan22-i2v` high and low pairs (steps, cfg) share one template locator each, so a
+    template that split them would not be seen. A `feeds` locator (the source of an input, by node id and slot)
+    would cover both; it is not built, and the code for it comes later.
+  - `W` and `I` do not consult `proxyWidgets`; only `P` does. A widget a template starts promoting through
+    `proxyWidgets` is seen by a `W` or `I` locator only through the linked-widget refusal.
+  - The two `unreviewed` entries stay green in a plain `check` for good: a difference nobody judged does not
+    fail. `check --strict` fails them.
 
 First run, on package `comfyui-workflow-templates-json` 0.1.96: eleven builders, eighteen views, and every
 guarded widget equal except six entries, which the manifest records. Two are `unreviewed` (nobody has judged
@@ -3438,3 +3455,10 @@ them, and the math expression that passes the frame rate through is pinned as a 
 `wf-wan-animate2` copies the `_distilled` template: its
 pose strength, start and end percent and reference strength equal the builder's, and the template feeds the
 start and the end percent from two separate subgraph inputs (a wiring check keeps it so).
+
+Open item: the `wf-qwen-image-edit` full preset runs CFG 3.0 where the template's effective non-LoRA CFG (the
+primitive that feeds the sampler) is 4. The 3.0 is the value of the sampler's own widget, which is stale because its
+input is linked to the switch, so this is probably a real builder defect and not a choice. It is recorded, not
+changed: the builder keeps its recipe in this change. Resolve it by setting the builder to the template's value
+(and re-recording) or by declaring the difference `deliberate` with a reason; the same goes for the
+`wf-qwen-image-21` edit encoder resolution. Until then `check --strict` is red on both.

@@ -17,6 +17,13 @@
   builder was last verified against; with every widget unchanged the recorded `templateSha256` must equal the
   recomputed hash, so a hand-edited manifest fails. A wiring item keeps the `_distilled` Wan Animate 2 template's
   start and end percent on separate subgraph inputs, the shape of the PR #1308 defect.
+- **Fails closed.** A flag that takes a value and gets none (`--templates-dir "$UNSET"`, `--comfy-dir`, `--manifest`)
+  exits 2, as does a flag the CLI does not know; neither can skip the template side. `check --require-templates`
+  makes a missing template side an error (exit 2) for upgrade runbooks. `check --strict` also fails (exit 1) on
+  every `unreviewed` manifest entry. A template or manifest file with a byte-order mark reads; a file that is not
+  JSON, a `null` file or a template with no `nodes` array fails with a message that names the file and, on the
+  template side, the builder. A wiring check tells two sources apart by node id and output slot, not by node type
+  (two separate nodes of one type are two sources; the message still names the type).
 - **Coverage.** A new `wf-*.mjs` file must be guarded or listed in `NOT_TEMPLATE_DERIVED` with a reason, or a test
   fails. Not guarded, with reasons in the spec: `wf-hunyuan15-i2v` (its recipe is not the one template of the
   package that shares its family), `wf-sdxl-inpaint`, `wf-upscale`.
@@ -29,7 +36,7 @@
   node (the LTX frame rate) is pinned as a template-only item.
 - **First run on package 0.1.96.** Eleven builders, eighteen views; every guarded widget equals its template
   except six entries, recorded and left for a person to judge. Unreviewed: the `wf-qwen-image-edit` full preset
-  (template CFG 4, builder 3.0) and the `wf-qwen-image-21` edit encoder resolution (template 0, builder 1024).
+  (template CFG 4, builder 3.0, probably a real builder defect, recorded as an open item) and the `wf-qwen-image-21` edit encoder resolution (template 0, builder 1024).
   Deliberate and stated in the builder headers: the `wf-qwen-image-21` step count (both views) and the
   `wf-wan-animate2` pose-cache device and dtype. The `wf-h3-av` turbo path equals its template (the instance
   promotes 8 steps, the builder runs 8). No builder recipe was changed.
@@ -40,8 +47,17 @@
   input entry with `link: null` (three serialized shapes) on the node of every locator, which must not read as a
   link; the legacy proxied form, its promoted value looked up at the widget's position in `proxyWidgets` and a link
   into the instance's input refused; a hand-edited `templateSha256`; the directory order; the coverage and manifest-shape
-  branches, each checked by removing the branch in a scratch copy. Red then green was shown with planted effective
+  branches, each checked by removing the branch in a scratch copy. The review round added tests for node identity in
+  the wiring check, flags without a value, `--require-templates`, `--strict`, byte-order marks and `null` files, the
+  builder graph's class check, the subgraph-name filter of the node lookup, and a literal list for the template-only
+  widget locators; each new test was shown red against its mutant (key by node type, key by node id only, empty value
+  accepted, missing value read as true, unknown flag accepted, each flag ignored, strict failing `deliberate` too,
+  byte-order mark not stripped, nodes array or manifest shape unchecked, class check removed, name filter removed,
+  template-only locator renamed) and the file restored byte-clean. Red then green was shown with planted effective
   values (root-instance steps, LoRA strength and frame rate) in a scratch copy of the package: the guard fails
   naming `wf-h3-av` and `wf-ltx25-i2v`, and a guard that read the stale widgets stays green on the same copy.
   `node --test "render/**/*.test.mjs"`.
+- **Known limits, stated in the docs.** Node mode is never read (a bypassed or muted node still reads as live); wiring
+  is mostly unguarded (one wiring item, the `wf-wan22-i2v` pairs share locators; a `feeds` locator would cover it);
+  `W` and `I` ignore `proxyWidgets`; the two `unreviewed` entries are green in a plain `check`.
 - **Docs.** `docs/systems/media-generation.md` (Builder drift guard) and `render/README.md`.

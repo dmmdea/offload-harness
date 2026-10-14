@@ -386,7 +386,13 @@ COMFYUI_DIR=<comfyui-tree> node --test render/builder-drift.test.mjs   # plus th
 node render/builder-drift.mjs check   --templates-dir <extract>/comfyui_workflow_templates_json/templates   # a candidate package
 node render/builder-drift.mjs explain --comfy-dir <comfyui-tree>   # template and builder values side by side
 node render/builder-drift.mjs record  --comfy-dir <comfyui-tree>   # re-pin, after comparing the builder with the template
+node render/builder-drift.mjs check --comfy-dir <comfyui-tree> --require-templates --strict   # upgrade runbook
 ```
+
+The CLI fails closed. A flag that takes a value and gets none (an empty or unset shell variable) and a flag it does not
+know both exit 2. `--require-templates` makes a missing template side an error (exit 2) instead of a skipped one.
+`--strict` also fails (exit 1) on every `unreviewed` manifest entry; a plain `check` leaves them green. Both belong to
+`check`.
 
 A moved widget fails `builder drift: <builder> [<view>]: ...` naming the builder. `builder-drift-specs.mjs` lists
 the widgets per builder; a new `wf-*.mjs` file must be guarded there or listed in `NOT_TEMPLATE_DERIVED` with a
@@ -394,3 +400,13 @@ reason. A locator never reads a widget whose input is linked (its serialized val
 points at the source that feeds it. The templates directory is resolved in one order, by the CLI and the tests alike:
 `--templates-dir`, `--comfy-dir`, `COMFY_TEMPLATES_DIR`, `COMFYUI_DIR`. Rules, statuses and the first run's findings:
 [`docs/systems/media-generation.md`](../docs/systems/media-generation.md#builder-drift-guard).
+
+What a green run does not tell you:
+
+- Node mode is never read: a bypassed or muted node or instance still reads as live.
+- Wiring is mostly unguarded: one `D` item (Wan Animate 2 pose percents); the `wf-wan22-i2v` high and low pairs share
+  one template locator each. A `feeds` locator would cover it; it is not built.
+- `W` and `I` do not consult `proxyWidgets`; only `P` does.
+- The two `unreviewed` entries stay green in a plain `check`; `check --strict` fails them. One is probably a real
+  builder defect (`wf-qwen-image-edit` full preset: CFG 3.0 against the template's effective 4), an open item recorded in
+  the system page.
