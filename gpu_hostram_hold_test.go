@@ -169,8 +169,8 @@ func TestAHoldBoundOfZeroKeepsTheWholeWait(t *testing.T) {
 }
 
 // THE DETACHED FORM. A hold that no command wraps is the one that can sit on the cards the longest, so the bound releases it
-// too, with the warm-back a release owes; the failure is non-zero. (A wait that --wait ends first keeps the lease held, as
-// TestADetachedUnloadSeatLeaseThatTheHostNeverAdmitsFailsAndSaysTheLeaseIsHeld pins.)
+// too, with the warm-back a release owes; the failure is non-zero. (A wait that --wait ends first releases the lease too, as
+// TestADetachedWaitThatWaitEndsAlsoReleasesTheLease pins: cards are never held idle behind a figure the host did not meet.)
 func TestTheHoldBoundReleasesADetachedHoldToo(t *testing.T) {
 	f := &orderedSwap{drainSwap: &drainSwap{}}
 	f.loaded.Store(true)
@@ -402,5 +402,36 @@ func TestAFailedStampIsSaidOnce(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("the lines must say %q:\n%s", want, text)
 		}
+	}
+}
+
+// Review round 3, item I: the accessor clamps a bound above the ceiling, and Load refuses it by name, but Load returns at the FIRST
+// validator that fails: with another key invalid ahead of it the refusal never comes and the clamp is silent. The reserve says it
+// once, at the moment it uses the clamped figure.
+func TestAClampedHoldBoundIsSaidEvenWhenAnotherConfigKeyFailedValidationFirst(t *testing.T) {
+	cfgPath, _, _, _, args := holdBoundReserve(t, true, false, "--wait", "1s") // a later --wait wins: a short reserve
+	setConfigKey(t, cfgPath, "gpu_display_cap_pct", 500)                       // refused by name, and ahead of the hold bound's own validator
+	setConfigKey(t, cfgPath, "gpu_hostram_hold_max_sec", 9000000)              // above the 7 day ceiling
+	stderr := captureStderr(t, func() { _ = runGPUReserve(args) })
+	var lines []string
+	for _, l := range strings.Split(stderr, "\n") {
+		if strings.Contains(l, "gpu_hostram_hold_max_sec") && strings.Contains(l, "ceiling") {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) != 1 {
+		t.Fatalf("one line says the configured hold bound is above the ceiling and was clamped, got %d:\n%s", len(lines), stderr)
+	}
+	for _, want := range []string{"9000000", "7 day", "using the ceiling"} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("the line must say %q: %s", want, lines[0])
+		}
+	}
+
+	// The flag overrides the key: a reserve that gives --ram-hold-max never used the configured figure, so it says nothing of it.
+	withFlag, _ := unloadSeatReserve(t, cfgPath, "--wait", "30s", "--drain", "--unload-seat", "--ram", "30", "--wait", "1s", "--ram-hold-max", "1s")
+	stderr = captureStderr(t, func() { _ = runGPUReserve(withFlag) })
+	if strings.Contains(stderr, "ceiling") {
+		t.Errorf("the flag replaces the configured bound; nothing was clamped:\n%s", stderr)
 	}
 }

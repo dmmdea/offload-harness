@@ -3,8 +3,9 @@ package gpulease
 // F82, the hold bound (the incident of 2026-10-14). A lease that cleared the seat and now asks the host for its RAM
 // holds its cards for the whole wait. The CLI bounds that hold; what the library owes it is the record: while the wait
 // runs the lease's record says when the bound releases it (Meta.HostRAMHoldUntilMs), so `gpu status`, a different process,
-// can tell the operator. The stamp is there only while the wait is: it goes when the figure is admitted and when the wait
-// ends without admission (a lease that stays held after a wait that --wait ended must not go on claiming a bound), and a
+// can tell the operator, and so the lease's hidden holder can release it if the reserve that took it is gone. The stamp goes
+// when the figure is ADMITTED and at no other time: a wait that ends without admission (its deadline, a cancel, a figure no state
+// can admit) leaves it, because a lease that still asks for the host and carries no moment is one nobody is bound to release. A
 // wait that has no bound stamps nothing.
 
 import (
