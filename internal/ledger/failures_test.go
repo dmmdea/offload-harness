@@ -87,6 +87,7 @@ func TestFailureClassOfARowThatCarriesNoCode(t *testing.T) {
 		`{"ts":7,"task":"agent_delegate","deferred":false,"acceptance_result":"fail","job_id":"w"}`,
 		`{"ts":8,"task":"agent_delegate","deferred":false,"acceptance_result":"pass","reason_code":"ok","job_id":"p"}`,
 		`{"ts":9,"task":"summarize","deferred":false,"cache_hit":true}`,
+		`{"ts":10,"task":"summarize","deferred":true,"cache_hit":true,"reason":"a hit is served, not failed"}`,
 	)
 	reg, err := FailureRegisterFile(path, 0, false)
 	if err != nil {
@@ -105,9 +106,9 @@ func TestFailureClassOfARowThatCarriesNoCode(t *testing.T) {
 			t.Errorf("class %s = %d, want %d (all: %v)", k, got[k], v, got)
 		}
 	}
-	// 9 rows, 8 jobs the register looks at: the cache hit is a job but not a failure, nothing is skipped.
-	if reg.JobRows != 9 || reg.FailureRows != 7 {
-		t.Errorf("job_rows = %d, failure_rows = %d, want 9 and 7", reg.JobRows, reg.FailureRows)
+	// 10 job rows: the two cache hits and the passing row are jobs but not failures.
+	if reg.JobRows != 10 || reg.FailureRows != 7 {
+		t.Errorf("job_rows = %d, failure_rows = %d, want 10 and 7", reg.JobRows, reg.FailureRows)
 	}
 	// stamped and accepted as is: only the failed_verification row with a stamped code; every other failure row was classed here.
 	if reg.ClassDerivedRows != 6 {

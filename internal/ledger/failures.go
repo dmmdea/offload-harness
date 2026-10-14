@@ -128,9 +128,10 @@ func (r failureRow) tokensOf() (n int64, measured bool) {
 }
 
 // failureClassOf is the failure class of a job row, whether it was classed here rather than read from a stamped
-// code, and whether the row is a failure at all. A cache hit and a dispatch marker never are.
+// code, and whether the row is a failure at all. A cache hit never is (as TopDeferReasons reads it). The caller
+// has already dropped the dispatch markers and the inner rows with a parent: they are not jobs.
 func failureClassOf(e Entry) (class string, derived, failed bool) {
-	if e.CacheHit || e.Phase == PhaseStarted {
+	if e.CacheHit {
 		return "", false, false
 	}
 	if IsReasonCode(e.ReasonCode) && e.ReasonCode != ReasonOK && e.ReasonCode != ReasonStarted {
