@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -561,5 +562,46 @@ func TestFailureRegisterSaysWhenTheLedgerIsMissing(t *testing.T) {
 	}
 	if reg, err := FailureRegisterFile(empty, 0, false); err != nil || !reg.LedgerFound {
 		t.Errorf("an empty ledger that exists: found = %v, err = %v, want found", reg.LedgerFound, err)
+	}
+}
+
+// model_tier is `<node>:<seat alias>` ONLY on a delegation row (task agent_delegate: its two writers join the node
+// and the seat with a colon). On every other row it is the model alias the call used, and a model alias can hold a
+// colon of its own (`family:size`, `engine:file`): cutting it at the last colon turned `gemma:4b` into model `4b`
+// and `comfyui:model-y.safetensors` into the file name, and merged different models under one entry.
+func TestFailureModelIsCutAtTheColonOnlyOnADelegationRow(t *testing.T) {
+	path := writeFailureLedger(t,
+		`{"ts":1,"task":"summarize","deferred":true,"reason_code":"budget","model_tier":"gemma:4b"}`,
+		`{"ts":2,"task":"summarize","deferred":true,"reason_code":"budget","model_tier":"qwen:4b"}`,
+		`{"ts":3,"task":"generate_image","deferred":true,"reason_code":"budget","model_tier":"comfyui:model-y.safetensors"}`,
+		`{"ts":4,"task":"agent","deferred":true,"reason_code":"budget","model_tier":"pool:fast"}`,
+		`{"ts":5,"task":"agent_delegate","deferred":true,"reason_code":"budget","model_tier":"node-a:agent-pool"}`,
+		`{"ts":6,"task":"agent_delegate","deferred":true,"reason_code":"budget","model_tier":"node-b:agent-pool"}`,
+		`{"ts":7,"task":"agent_delegate","deferred":true,"reason_code":"budget","model_tier":":no-node-seat"}`,
+		`{"ts":8,"task":"agent_delegate","deferred":true,"reason_code":"budget","model_tier":"node-c:"}`,
+	)
+	reg, err := FailureRegisterFile(path, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := classNamed(t, reg, "budget")
+	count := func(fc []FailureCount) map[string]int {
+		m := map[string]int{}
+		for _, x := range fc {
+			m[x.Name] = x.Count
+		}
+		return m
+	}
+	wantSeats := map[string]int{"gemma:4b": 1, "qwen:4b": 1, "comfyui:model-y.safetensors": 1, "pool:fast": 1,
+		"node-a:agent-pool": 1, "node-b:agent-pool": 1, "no-node-seat": 1, "node-c:": 1}
+	if got := count(c.Seats); !reflect.DeepEqual(got, wantSeats) {
+		t.Errorf("seats = %v, want %v", got, wantSeats)
+	}
+	// Non-delegation rows keep the whole alias as the model; delegation rows give the part after the last colon,
+	// and an empty one reads as unrecorded.
+	wantModels := map[string]int{"gemma:4b": 1, "qwen:4b": 1, "comfyui:model-y.safetensors": 1, "pool:fast": 1,
+		"agent-pool": 2, "no-node-seat": 1, unrecorded: 1}
+	if got := count(c.Models); !reflect.DeepEqual(got, wantModels) {
+		t.Errorf("models = %v, want %v", got, wantModels)
 	}
 }
