@@ -50,6 +50,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -968,7 +969,12 @@ func (m *Manager) restampV2Locked(epoch uint64, fn func(*Meta)) error {
 func (m *Manager) releaseByEpochV2(epoch uint64) (released, handled bool, err error) {
 	if epoch != 0 {
 		if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr != nil {
-			return false, false, nil
+			if errors.Is(serr, fs.ErrNotExist) {
+				return false, false, nil // no card-scoped record: not a device lease (the whole-node path decides)
+			}
+			// The record may well be there: it could not be examined (an access error while it is replaced, an I/O error). "Nothing was
+			// held" would be a claim about a lease nobody looked at.
+			return false, true, fmt.Errorf("gpulease: releasing lease: the record of epoch %d cannot be examined: %w", epoch, serr)
 		}
 		if err := m.releaseV2(epoch); err != nil {
 			return false, true, err

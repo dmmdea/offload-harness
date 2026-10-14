@@ -350,7 +350,7 @@ func TestGPUStatusSaysHowLongAHeldLeaseHasHeldAndWhenTheBoundReleasesIt(t *testi
 		t.Fatal(err)
 	}
 	out = statusText()
-	for _, want := range []string{"the wait ended at " + past.Format(time.Kitchen), "the holder releases the lease at its next poll", "gpu release --warm-seat --epoch 1"} {
+	for _, want := range []string{"the wait ended at " + past.Format(time.Kitchen), "the holder, if one is running, releases the lease at its next poll", "`gpu release --epoch 1` frees it now"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status of a lease whose stamped wait has ended must say %q:\n%s", want, out)
 		}

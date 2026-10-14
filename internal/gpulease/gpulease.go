@@ -43,6 +43,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1292,6 +1293,18 @@ func cloneProgress(p *Progress) *Progress {
 // Leases narrow it.
 func (m *Manager) Inspect() Info { return m.reader().primary() }
 
+// isIOFailure is true for an error from reading a record that is neither "absent" nor "the bytes are not a record": the file may
+// well be there and be perfectly good, and the read failed (an access error while it is being replaced, a sharing violation, an
+// I/O error). Callers that read a failure as "nothing there" are wrong about it.
+func isIOFailure(err error) bool {
+	if err == nil || errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	var syntax *json.SyntaxError
+	var kind *json.UnmarshalTypeError
+	return !errors.As(err, &syntax) && !errors.As(err, &kind)
+}
+
 func (m *Manager) readMeta() (*Meta, error) {
 	b, err := os.ReadFile(m.metaPath())
 	if err != nil {
@@ -2180,8 +2193,11 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 	var released bool
 	lerr := m.withEpochLock(func() error {
 		meta, err := m.readMeta()
+		if err != nil && isIOFailure(err) {
+			return fmt.Errorf("gpulease: releasing lease: the record cannot be read: %w", err) // it may well be there
+		}
 		if err != nil || meta == nil {
-			return nil // nothing held
+			return nil // nothing held (absent, or corrupt and treated as stale)
 		}
 		if epoch != 0 && meta.Epoch != epoch {
 			return errLeaseMovedOn(epoch, meta.Epoch)

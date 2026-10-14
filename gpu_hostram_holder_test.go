@@ -462,7 +462,12 @@ func TestAReleaseThatFailsAtTheBoundIsSaidAndNeverClaimedAsDone(t *testing.T) {
 			if len(lines) != 1 {
 				t.Fatalf("exactly one line says the lease was not released, got %d:\n%s", len(lines), stderr)
 			}
-			for _, want := range []string{"gpu reserve: LEASE NOT RELEASED (epoch 1)", "access denied", "gpu release --warm-seat --epoch 1"} {
+			// The way out names --warm-seat only while a warm-back is still owed (an owed seat is loaded by the manual release).
+			wantCmd := "gpu release --epoch 1"
+			if m.SeatWarmOwed() != "" {
+				wantCmd = "gpu release --warm-seat --epoch 1"
+			}
+			for _, want := range []string{"gpu reserve: LEASE NOT RELEASED (epoch 1)", "access denied", wantCmd} {
 				if !strings.Contains(lines[0], want) {
 					t.Errorf("the line must say %q: %s", want, lines[0])
 				}

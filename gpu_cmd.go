@@ -388,7 +388,7 @@ const queueHint = gpulease.QueueHint
 // before it as a rule.
 const defaultReserveWait = 8 * time.Hour
 
-func runGPUReserve(args []string) error {
+func runGPUReserve(args []string) (retErr error) {
 	fs := flag.NewFlagSet("gpu reserve", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	class := fs.String("class", "text", "lease class: text (a measurement/bench) or media (a generation job)")
@@ -689,6 +689,8 @@ func runGPUReserve(args []string) error {
 	// release --warm-seat` or the seat's next request pays it).
 	endedOnTerm := false
 	endedAt := "" // the stage a signal found the wrapper in when its command never ran ("" = the command ran), for the sentence below
+	// Why the final release failed, for the error this command returns (finish sets it).
+	var releaseErr error
 	// closeTree lets go of the command's containment once it has started (gpu_tree.go). With
 	// --die-with-wrapper that ends whatever of the tree is still running; without it, nothing.
 	closeTree := func() {}
@@ -715,10 +717,18 @@ func runGPUReserve(args []string) error {
 		}
 		// A release that fails is said, never dropped: the failure text of a bound or a wait was built before this ran and says
 		// only that the lease is being released.
-		if rerr := lease.Release(); rerr != nil {
+		if rerr := releaseLeaseConfirmed(m, lease); rerr != nil {
+			releaseErr = rerr
 			fmt.Fprintln(os.Stderr, leaseNotReleasedLine("gpu reserve", lease.Epoch(), rerr, m.SeatWarmOwed() != ""))
 		}
 	}
+	// Registered BEFORE finish, so it runs AFTER it: an error returned while the lease was being released ("the lease is being
+	// released") gets the release's outcome as its last word when that release failed.
+	defer func() {
+		if releaseErr != nil && retErr != nil {
+			retErr = releaseFailedError(retErr, lease.Epoch(), releaseErr)
+		}
+	}()
 	defer finish()
 	if *drain || *unload {
 		heldSince := time.Now() // when the lease took its cards, for the hold bound's failure ("held the cards for")
@@ -1486,6 +1496,13 @@ func runGPURelease(args []string) error {
 		warmBackGuarded(loadCfg(fs), releaseWarmGuard(m, *epoch), os.Stderr)
 	}
 	released, err := releaseByEpochFn(m, *epoch)
+	if err == nil && !released {
+		// "No lease was held" is believed only if nothing is held now: the answer is the same for a lease that is gone and for one
+		// whose record could not be examined, and the verb used to print it and exit 0 over a lease that was there.
+		if info := m.Inspect(); info.Held && (target != 0 && info.HoldsEpoch(target) || target == 0 && *epoch == 0) {
+			err = fmt.Errorf("the release reported that no lease was held, but epoch %d is still held; run it again, or look at `gpu status`", info.Epoch)
+		}
+	}
 	if err != nil {
 		if stopped {
 			// The stop cannot be taken back: say so, so the operator does not read the failure

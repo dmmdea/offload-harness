@@ -257,8 +257,61 @@ var releaseByEpochFn = func(m *gpulease.Manager, epoch uint64) (bool, error) { r
 // bound or a wait is built BEFORE the release runs and so says only that the lease is being released; this line is the report of
 // the outcome, and the way out.
 func leaseNotReleasedLine(prefix string, epoch uint64, err error, warmOwed bool) string {
-	_ = warmOwed
-	return fmt.Sprintf("%s: LEASE NOT RELEASED (epoch %d): %v; run gpu release --warm-seat --epoch %d", prefix, epoch, err, epoch)
+	return fmt.Sprintf("%s: LEASE NOT RELEASED (epoch %d): %v; run %s", prefix, epoch, err, releaseCommand(epoch, warmOwed))
+}
+
+// releaseCommand is the command that ends lease `epoch` by hand. --warm-seat is part of it only when a warm-back is owed (the
+// marker an unload leaves): releaseWarmGuard has no onlyIfOwed, so advising it for a lease that unloaded nothing could load a
+// seat that nothing asked for.
+func releaseCommand(epoch uint64, warmOwed bool) string {
+	if warmOwed {
+		return fmt.Sprintf("gpu release --warm-seat --epoch %d", epoch)
+	}
+	return fmt.Sprintf("gpu release --epoch %d", epoch)
+}
+
+// leaseStillHeld is true when the lease with this epoch is on the record now.
+func leaseStillHeld(m *gpulease.Manager, epoch uint64) bool {
+	info := m.Inspect()
+	return info.Held && info.HoldsEpoch(epoch)
+}
+
+// confirmReleased turns the answer of a release into an error when the answer cannot be believed. ReleaseByEpoch says (false,
+// nil), "no lease was held", for a lease that is gone and, when a record could not be examined, for one that is not: a caller
+// that took that for "released" printed nothing and left the cards held. So a release that did nothing is believed only if the
+// epoch is no longer on the record.
+func confirmReleased(m *gpulease.Manager, epoch uint64, released bool, err error) error {
+	if err != nil {
+		return err
+	}
+	if !released && leaseStillHeld(m, epoch) {
+		return fmt.Errorf("the release reported that no lease was held, but epoch %d is still held", epoch)
+	}
+	return nil
+}
+
+// releaseConfirmed ends lease `epoch` by its number and confirms it is gone.
+func releaseConfirmed(m *gpulease.Manager, epoch uint64) error {
+	released, err := releaseByEpochFn(m, epoch)
+	return confirmReleased(m, epoch, released, err)
+}
+
+// releaseLeaseConfirmed releases a lease object and confirms it is gone: Lease.Release answers nil for a record it could not
+// read ("already gone"), which is a claim about a lease nobody looked at.
+func releaseLeaseConfirmed(m *gpulease.Manager, lease *gpulease.Lease) error {
+	if err := lease.Release(); err != nil {
+		return err
+	}
+	if leaseStillHeld(m, lease.Epoch()) {
+		return fmt.Errorf("the release reported success, but epoch %d is still held", lease.Epoch())
+	}
+	return nil
+}
+
+// releaseFailedError is what a command returns when the release it began failed: the cause it was already returning, then the
+// truth. The cause was built BEFORE the release ran and says the lease is being released; this is the last word.
+func releaseFailedError(cause error, epoch uint64, rerr error) error {
+	return fmt.Errorf("%w; the release then failed and the lease is STILL HELD (epoch %d): %v", cause, epoch, rerr)
 }
 
 // autoReleaseWarmGuard is releaseWarmGuard for a release the harness makes on its own, not one an operator asked for with
@@ -298,8 +351,9 @@ func releaseAfterRAMWait(m *gpulease.Manager, epoch uint64, cfg config.Config, e
 	}
 	stopKeptInstances(cfg, epoch, os.Stderr)
 	warmBackGuarded(cfg, autoReleaseWarmGuard(m, epoch), os.Stderr)
-	if _, rerr := releaseByEpochFn(m, epoch); rerr != nil {
+	if rerr := releaseConfirmed(m, epoch); rerr != nil {
 		fmt.Fprintln(os.Stderr, leaseNotReleasedLine("gpu reserve", epoch, rerr, m.SeatWarmOwed() != ""))
+		return releaseFailedError(err, epoch, rerr)
 	}
 	var bound *errHostRAMHoldBound
 	if errors.As(err, &bound) {
@@ -313,10 +367,11 @@ func releaseAfterRAMWait(m *gpulease.Manager, epoch uint64, cfg config.Config, e
 // released if the host still lacks the room (the record carries that moment, until: the earlier of the hold bound and --wait).
 // Without a stamp the wait has not begun (the drain and the unload come first) or has no end the record knows: the sentence
 // says only what is known. Past the stamped moment the lease is still there, so whoever releases it has not yet: a wrapper
-// does it when it exits; the hidden holder of a --detach lease does it at its next poll (a reserve that died cannot), and `gpu
-// release --warm-seat --epoch N` does it now. long adds the explanation of the order, for the one-line summary of the holder.
+// does it when it exits; the hidden holder of a --detach lease does it at its next poll IF one is running (a reserve that died
+// cannot, and a holder whose own release failed has gone), and `gpu release --epoch N` does it now (with --warm-seat when a
+// warm-back is owed). long adds the explanation of the order, for the one-line summary of the holder.
 func hostRAMAskedStatus(giB float64, held time.Duration, until, now time.Time, long bool, epoch uint64, byWrapper, warmOwed bool) string {
-	_ = warmOwed
+	release := releaseCommand(epoch, warmOwed)
 	s := fmt.Sprintf("host RAM %.1f GiB asked, not yet admitted", giB)
 	heldFor := held.Round(time.Second)
 	switch {
@@ -328,8 +383,8 @@ func hostRAMAskedStatus(giB float64, held time.Duration, until, now time.Time, l
 	case until.After(now):
 		return s + fmt.Sprintf(": held the cards for %s; the lease is released at %s, in %s, if the host still lacks the room (the hold bound, or --wait if that ends first)", heldFor, until.Format(time.Kitchen), until.Sub(now).Round(time.Second))
 	case byWrapper:
-		return s + fmt.Sprintf(": held the cards for %s; the wait ended at %s and the wrapper that holds the lease releases it when it exits (`gpu release --warm-seat --epoch %d` frees it now if that process is gone)", heldFor, until.Format(time.Kitchen), epoch)
+		return s + fmt.Sprintf(": held the cards for %s; the wait ended at %s and the wrapper that holds the lease releases it when it exits (`%s` frees it now if that process is gone)", heldFor, until.Format(time.Kitchen), release)
 	default:
-		return s + fmt.Sprintf(": held the cards for %s; the wait ended at %s and the holder releases the lease at its next poll (`gpu release --warm-seat --epoch %d` frees it now)", heldFor, until.Format(time.Kitchen), epoch)
+		return s + fmt.Sprintf(": held the cards for %s; the wait ended at %s: the holder, if one is running, releases the lease at its next poll; `%s` frees it now", heldFor, until.Format(time.Kitchen), release)
 	}
 }
