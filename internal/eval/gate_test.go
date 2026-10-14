@@ -282,7 +282,10 @@ func TestGateUsesTheExistingBootstrapOnSortedPairs(t *testing.T) {
 }
 
 // Efficiency: the same B and seed, one bootstrap per declared metric over the pairs that
-// resolved it, direction read per metric.
+// resolved it, direction read per metric. The per-task differences are NOT constant (-300 on
+// even tasks, -100 on odd ones; +50 and +30 for the higher-is-better metric), so the bootstrap
+// replicates spread and a different seed or a different B moves delta, lo or hi: the equality
+// against a direct BootstrapDeltaMean call with the baseline's B and seed pins both.
 func TestGateEfficiencyMetricsUseTheSameBootstrap(t *testing.T) {
 	const n = 16
 	p := niPre(n)
@@ -295,10 +298,18 @@ func TestGateEfficiencyMetricsUseTheSameBootstrap(t *testing.T) {
 	inc := arm("i", repeatF(8, n), repeatF(1000, n))
 	cand := arm("c", repeatF(8, n), nil)
 	tokI := []float64{1000, 1100, 900, 1050, 950, 1000, 1200, 800, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000}
-	tokC := []float64{700, 800, 600, 750, 650, 700, 900, 500, 700, 700, 700, 700, 700, 700, 700, 700}
+	tokC := make([]float64, n)
+	savedI, savedC := repeatF(100, n), make([]float64, n)
+	for i := range tokC {
+		if i%2 == 0 {
+			tokC[i], savedC[i] = tokI[i]-300, savedI[i]+50
+		} else {
+			tokC[i], savedC[i] = tokI[i]-100, savedI[i]+30
+		}
+	}
 	for i := range inc.Tasks {
-		inc.Tasks[i].Attempts[0].Metrics = map[string]*float64{tokensName: f64(tokI[i]), "peak_gib": f64(10), "tokens_saved": f64(100)}
-		cand.Tasks[i].Attempts[0].Metrics = map[string]*float64{tokensName: f64(tokC[i]), "peak_gib": f64(10), "tokens_saved": f64(150)}
+		inc.Tasks[i].Attempts[0].Metrics = map[string]*float64{tokensName: f64(tokI[i]), "peak_gib": f64(10), "tokens_saved": f64(savedI[i])}
+		cand.Tasks[i].Attempts[0].Metrics = map[string]*float64{tokensName: f64(tokC[i]), "peak_gib": f64(10), "tokens_saved": f64(savedC[i])}
 	}
 	// peak_gib: equal on both arms, so it cannot improve. tokens_saved: higher is better, and higher.
 	r := mustGate(t, b, h, inputFor(h, inc, cand))
@@ -307,22 +318,51 @@ func TestGateEfficiencyMetricsUseTheSameBootstrap(t *testing.T) {
 	}
 	d, lo, hi := BootstrapDeltaMean(tokI, tokC, b.BootstrapB, b.Seed)
 	e0 := r.Efficiency[0]
+	if !(lo < hi) {
+		t.Fatalf("setup: the tokens interval must have width, got [%v, %v]: a point interval cannot tell one seed from another", lo, hi)
+	}
 	if e0.Name != tokensName || e0.Delta != d || e0.Lo != lo || e0.Hi != hi || e0.N != n || e0.UnresolvedPairs != 0 || !e0.Improves || !e0.LowerIsBetter || e0.Class != EffTokens {
 		t.Fatalf("tokens row wrong: %+v (want %v %v %v)", e0, d, lo, hi)
 	}
 	if e1 := r.Efficiency[1]; e1.Improves || e1.Delta != 0 || e1.N != n {
-		t.Fatalf("an unchanged metric must not improve: %+v", e1)
+		t.Fatalf("an unchanged metric must not improve (and its zero is a measured zero, not a missing one): %+v", e1)
 	}
-	if e2 := r.Efficiency[2]; !e2.Improves || e2.LowerIsBetter || e2.Lo <= 0 {
-		t.Fatalf("a higher-is-better metric improves when lo > 0: %+v", e2)
+	sd, slo, shi := BootstrapDeltaMean(savedI, savedC, b.BootstrapB, b.Seed)
+	e2 := r.Efficiency[2]
+	if !(slo < shi) {
+		t.Fatalf("setup: the tokens_saved interval must have width, got [%v, %v]", slo, shi)
 	}
-	// Reverse the direction of tokens_saved: now it is worse, not improved.
+	if !e2.Improves || e2.LowerIsBetter || e2.Lo <= 0 || e2.Delta != sd || e2.Lo != slo || e2.Hi != shi {
+		t.Fatalf("a higher-is-better metric improves when lo > 0, with the same B and seed: %+v (want %v %v %v)", e2, sd, slo, shi)
+	}
+	// GATE-R2: ONE improving metric is enough. tokens and tokens_saved improve, peak_gib does not,
+	// and the primary (8 against 8) is inside the margin: ADOPT. "All must improve" would not.
+	if r.Verdict != VerdictAdopt {
+		t.Fatalf("at least one improving metric adopts, whatever the others do: %s %s", r.Verdict, r.Reason)
+	}
+	// Reverse the direction of tokens_saved: it is now worse, not improved, and tokens alone adopts.
 	for i := range cand.Tasks {
 		cand.Tasks[i].Attempts[0].Metrics["tokens_saved"] = f64(50)
 	}
 	r2 := mustGate(t, b, h, inputFor(h, inc, cand))
 	if r2.Efficiency[2].Improves {
 		t.Fatalf("a higher-is-better metric that dropped must not improve: %+v", r2.Efficiency[2])
+	}
+	if r2.Verdict != VerdictAdopt {
+		t.Fatalf("one improving metric (tokens) of three still adopts: %s %s", r2.Verdict, r2.Reason)
+	}
+	// The converse: no declared metric improves (tokens dearer, tokens_saved down, peak_gib equal).
+	for i := range cand.Tasks {
+		cand.Tasks[i].Attempts[0].Metrics[tokensName] = f64(tokI[i] + 300)
+	}
+	r3 := mustGate(t, b, h, inputFor(h, inc, cand))
+	for _, e := range r3.Efficiency {
+		if e.Improves {
+			t.Fatalf("setup: no metric may improve in this row: %+v", e)
+		}
+	}
+	if r3.Verdict != VerdictInconclusive || r3.Reason != "non-inferior but no declared efficiency metric improved" {
+		t.Fatalf("no improving metric: want INCONCLUSIVE naming it, got %s %s", r3.Verdict, r3.Reason)
 	}
 }
 
@@ -409,6 +449,68 @@ func TestGateEfficiencyNeedsMinPairsResolved(t *testing.T) {
 	e2 := r2.Efficiency[0]
 	if e2.N != 0 || e2.UnresolvedPairs != n || e2.Improves || e2.Delta != 0 {
 		t.Fatalf("all-unresolved: %+v", e2)
+	}
+}
+
+// GATE-R3 / R2: a task's efficiency value is the mean of the RESOLVED values over its USABLE
+// attempts. A nil value neither counts as 0 nor enters the divisor; an attempt that is not usable
+// (infra_error here) contributes nothing, whatever it carries and wherever it sits in the list.
+// Every task on the candidate arm has the same attempt list and every task on the incumbent costs
+// 1500, so each bootstrap replicate is exactly want-1500 and delta, lo and hi pin the task value.
+func TestGatePerTaskEfficiencyAggregation(t *testing.T) {
+	const n = 16
+	pass := func(tokens *float64) Attempt {
+		return Attempt{Outcome: OutcomePass, Score: f64(8), Metrics: map[string]*float64{tokensName: tokens}}
+	}
+	for _, tc := range []struct {
+		name     string
+		attempts []Attempt
+		want     float64
+	}{
+		{"a nil value is not 0 and not in the divisor; an infra_error's cost is ignored",
+			[]Attempt{pass(f64(1000)), pass(nil), {Outcome: OutcomeInfraError, Metrics: map[string]*float64{tokensName: f64(1)}}}, 1000},
+		{"two resolved values and a nil: the mean of the two",
+			[]Attempt{pass(f64(1000)), pass(f64(600)), pass(nil)}, 800},
+		{"an unusable attempt BEFORE the usable one is ignored too",
+			[]Attempt{{Outcome: OutcomeTimeout, Metrics: map[string]*float64{tokensName: f64(1)}}, pass(f64(1000))}, 1000},
+		{"a cheat is a usable attempt and its resolved cost counts",
+			[]Attempt{{Outcome: OutcomeCheat, Score: f64(0), Metrics: map[string]*float64{tokensName: f64(400)}}, pass(f64(600))}, 500},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, h := freeze(t, niPre(n), nil)
+			inc := arm("i", repeatF(8, n), repeatF(1500, n))
+			cand := arm("c", repeatF(8, n), nil)
+			for i := range cand.Tasks {
+				cand.Tasks[i].Attempts = append([]Attempt(nil), tc.attempts...)
+			}
+			r := mustGate(t, b, h, inputFor(h, inc, cand))
+			e := r.Efficiency[0]
+			want := tc.want - 1500
+			if e.N != n || e.UnresolvedPairs != 0 || e.Delta != want || e.Lo != want || e.Hi != want {
+				t.Fatalf("the per-task cost must be %v (delta %v): got %+v", tc.want, want, e)
+			}
+		})
+	}
+}
+
+// GATE-R6 power note under non-inferiority: with fewer than two usable pairs there is no interval
+// to project from, so tasks_needed is "unbounded" (without the guard the margin yardstick would
+// turn a zero half-width into "0 tasks needed").
+func TestGatePowerNoteNonInferiorityBelowTwoPairs(t *testing.T) {
+	p := niPre(4)
+	p.MinPairs = 2
+	b, h := freeze(t, p, nil)
+	one := arm("c", repeatF(7.75, 4), repeatF(800, 4))
+	one.Tasks = one.Tasks[:1]
+	r := mustGate(t, b, h, inputFor(h, arm("i", repeatF(8, 4), repeatF(1000, 4)), one))
+	if r.NUsed != 1 {
+		t.Fatalf("setup: want one usable pair, got %d", r.NUsed)
+	}
+	if !r.Power.TasksNeeded.Unbounded || !r.Power.TasksToAdd.Unbounded || r.Power.HalfWidth != 0 {
+		t.Fatalf("one usable pair projects nothing, under non-inferiority too: %+v", r.Power)
+	}
+	if j := marshal(t, r); !strings.Contains(j, `"tasks_needed":"unbounded"`) {
+		t.Fatalf("unbounded must serialize as the word: %s", j)
 	}
 }
 
