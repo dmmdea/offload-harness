@@ -33,9 +33,13 @@
 // without a wheel.
 //
 // Usage:
-//   node render/builder-drift.mjs check   [--templates-dir DIR | --comfy-dir DIR] [--manifest FILE]
+//   node render/builder-drift.mjs check   [--templates-dir DIR | --comfy-dir DIR] [--manifest FILE] [--require-templates] [--strict]
 //   node render/builder-drift.mjs explain  --templates-dir DIR | --comfy-dir DIR     (values side by side)
 //   node render/builder-drift.mjs record   --templates-dir DIR | --comfy-dir DIR     (rewrite the manifest)
+// A flag that takes a value and has none (an empty or unset shell variable) is an error (exit 2), as is a flag the CLI
+// does not know: a typo must not silently skip a side. `--require-templates` turns "no templates directory" into an
+// error (exit 2) instead of a skipped template side; use it in an upgrade runbook. `--strict` also fails (exit 1) on every
+// `unreviewed` manifest entry; without it those entries stay green until a person judges them.
 // DIR is the `templates` directory of the wheel (or of a `pip download` extract); --comfy-dir finds it inside a
 // ComfyUI tree. The first source that is set decides, in this order: --templates-dir, --comfy-dir, the
 // `COMFY_TEMPLATES_DIR` environment variable (a templates directory), the `COMFYUI_DIR` environment variable (a ComfyUI
@@ -145,16 +149,26 @@ function linkOf(container, linkId) {
   return null;
 }
 
-// What feeds an input: a named subgraph input, or "<node type>#<slot>".
-function feedOf(container, node, inputName) {
+// What feeds an input: a named subgraph input, or one output slot of one node. `key` is what two sources are compared by,
+// the node's ID and the slot (two separate nodes of one type are two sources, and one node feeding both inputs is one);
+// `label` is for a message and adds the node's type.
+function feedSource(container, node, inputName) {
   const inp = (node.inputs ?? []).find((i) => i.name === inputName);
   if (!inp || inp.link == null) return undefined;
   const link = linkOf(container, inp.link);
   if (!link) return undefined;
-  if (link.origin_id === -10) return `input:${container.inputs?.[link.origin_slot]?.name ?? link.origin_slot}`;
+  if (link.origin_id === -10) {
+    const key = `input:${container.inputs?.[link.origin_slot]?.name ?? link.origin_slot}`;
+    return { key, label: key };
+  }
   const origin = (container.nodes ?? []).find((n) => n.id === link.origin_id);
-  return `node:${origin?.type ?? link.origin_id}#${link.origin_slot}`;
+  return {
+    key: `node:${link.origin_id}#${link.origin_slot}`,
+    label: origin ? `node:${origin.type}/${link.origin_id}#${link.origin_slot}` : `node:${link.origin_id}#${link.origin_slot}`,
+  };
 }
+const feedOf = (container, node, inputName) => feedSource(container, node, inputName)?.key;
+const feedLabel = (container, node, inputName) => feedSource(container, node, inputName)?.label;
 
 // The input of `node` that carries widget `name`, when that input is linked: the widget's serialized value is then
 // stale (the value that runs comes through the link). An unlinked widget may have no input entry at all.
@@ -192,7 +206,7 @@ function proxiedWidget(tpl, found, t, tag, view) {
     const wired = linkedInput(inst, sgInput);
     if (wired) {
       const root = { nodes: tpl.nodes, links: tpl.links, inputs: [] };
-      throw new Error(`${tag}: template ${view.template} instance ${inst.id} has its ${sgInput} input linked at the root (to ${feedOf(root, inst, wired.name) ?? "another node"}), so the interior value is not the one that runs; point the spec at the source that feeds it`);
+      throw new Error(`${tag}: template ${view.template} instance ${inst.id} has its ${sgInput} input linked at the root (to ${feedLabel(root, inst, wired.name) ?? "another node"}), so the interior value is not the one that runs; point the spec at the source that feeds it`);
     }
   }
   return wv[t.w];
@@ -212,7 +226,7 @@ export function templateValue(spec, view, tpl, item) {
   const refuseLinked = (name, what) => {
     const inp = linkedInput(found.node, name);
     if (!inp) return;
-    throw new Error(`${tag}: template ${view.template} ${what} ${name} is linked (to ${feedOf(found.container, found.node, inp.name) ?? "another node"}), so its serialized value is not the one that runs; point the spec at the effective source (I for a subgraph input the root instance promotes, W on the node that feeds it, P for a legacy proxied widget)`);
+    throw new Error(`${tag}: template ${view.template} ${what} ${name} is linked (to ${feedLabel(found.container, found.node, inp.name) ?? "another node"}), so its serialized value is not the one that runs; point the spec at the effective source (I for a subgraph input the root instance promotes, W on the node that feeds it, P for a legacy proxied widget)`);
   };
   if (t.kind === "w") {
     if (typeof t.name !== "string" || !t.name) throw new Error(`${tag}: the spec's widget locator names no widget (W and P take the widget's input name)`);
@@ -256,8 +270,20 @@ export function formatManifest(manifest) {
   return JSON.stringify(manifest, null, 2).replace(row, '{ "template": $1, "builder": $2, "status": $3 }') + "\n";
 }
 
+// parseJsonText: JSON.parse that strips a byte-order mark (an editor on Windows writes one) and names what it was reading.
+function parseJsonText(text, what) {
+  try { return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text); }
+  catch (e) { throw new Error(`${what} is not valid JSON (${e.message})`); }
+}
+
 export function loadManifest(path = MANIFEST_PATH) {
-  return JSON.parse(readFileSync(path, "utf8"));
+  let text;
+  try { text = readFileSync(path, "utf8"); } catch (e) { throw new Error(`manifest ${path} cannot be read: ${e.message}`); }
+  const m = parseJsonText(text, `manifest ${path}`);
+  if (!m || typeof m !== "object" || Array.isArray(m) || !m.builders || typeof m.builders !== "object") {
+    throw new Error(`manifest ${path} is not a drift manifest (no builders object)`);
+  }
+  return m;
 }
 
 function statusOf(spec, view, item, tVal, bVal) {
@@ -392,6 +418,23 @@ export function checkBuilderSide(manifest, { specs = BUILDER_SPECS } = {}) {
   return failures;
 }
 
+// checkUnreviewed (`check --strict`): every manifest entry whose status is `unreviewed`, a builder/template difference the
+// first run found that nobody has judged. A plain check leaves them green; the strict one fails until a person turns each
+// into a fix or a `deliberate` delta.
+export function checkUnreviewed(manifest, { specs = BUILDER_SPECS } = {}) {
+  const failures = [];
+  for (const [builder, entry] of Object.entries(manifest.builders ?? {})) {
+    for (const [view, rec] of Object.entries(entry.views ?? {})) {
+      for (const [key, it] of Object.entries(rec.items ?? {})) {
+        if (it.status !== "unreviewed") continue;
+        const reason = specs.find((s) => s.builder === builder)?.views.find((v) => v.name === view)?.items.find((i) => i.key === key)?.delta?.reason;
+        failures.push(fail(builder, view, `widget ${key} is unreviewed: the builder and the template differ and nobody has judged it; fix the builder or declare the difference deliberate with a reason${reason ? ` (on record: ${reason})` : ""}`));
+      }
+    }
+  }
+  return failures;
+}
+
 // checkTemplateSide: re-read every template and compare. Returns { failures, notes }; a note says a wheel
 // version moved while every guarded widget stayed put.
 export function checkTemplateSide(manifest, { loadTemplate, versions, specs = BUILDER_SPECS }) {
@@ -439,7 +482,9 @@ export function templateSource(templatesDir) {
     loadTemplate: (name) => {
       const p = `${dir}/${name}.json`;
       if (!existsSync(p)) throw new Error(`template ${name} is not in ${JSON_PKG} (no ${name}.json in the templates directory)`);
-      return JSON.parse(readFileSync(p, "utf8"));
+      const tpl = parseJsonText(readFileSync(p, "utf8"), `template ${name}`);
+      if (!tpl || !Array.isArray(tpl.nodes)) throw new Error(`template ${name} has no nodes array (it is not a workflow file)`);
+      return tpl;
     },
   };
 }
@@ -459,12 +504,27 @@ export function resolveTemplatesDir(flags, env) {
   return null;
 }
 
-function parseArgs(argv) {
+// A flag that takes a value must get a non-empty one, and a flag the CLI does not know is refused: an unset shell variable
+// (`--templates-dir "$UNSET"`) or a typo must fail, never skip the side it was meant to name.
+const VALUE_FLAGS = new Set(["templates-dir", "comfy-dir", "manifest"]);
+const SWITCH_FLAGS = new Set(["require-templates", "strict"]);
+export function parseArgs(argv) {
   const flags = {};
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i].startsWith("--")) { const k = argv[i].slice(2); flags[k] = argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : true; }
-    else rest.push(argv[i]);
+    const a = argv[i];
+    if (!a.startsWith("--")) { rest.push(a); continue; }
+    const eq = a.indexOf("=");
+    const name = eq < 0 ? a.slice(2) : a.slice(2, eq);
+    if (SWITCH_FLAGS.has(name)) {
+      if (eq >= 0) throw new Error(`--${name} takes no value`);
+      flags[name] = true;
+      continue;
+    }
+    if (!VALUE_FLAGS.has(name)) throw new Error(`unknown flag --${name} (known: ${[...VALUE_FLAGS, ...SWITCH_FLAGS].map((f) => `--${f}`).join(", ")})`);
+    const value = eq >= 0 ? a.slice(eq + 1) : i + 1 < argv.length && !argv[i + 1].startsWith("--") ? argv[++i] : undefined;
+    if (typeof value !== "string" || !value.trim()) throw new Error(`--${name} needs a non-empty value`);
+    flags[name] = value;
   }
   return { flags, verb: rest[0] ?? "check" };
 }
@@ -490,15 +550,26 @@ export function explain({ source, specs = BUILDER_SPECS }) {
 }
 
 export async function main(argv, { out = (s) => process.stdout.write(s), err = (s) => process.stderr.write(s), env = process.env } = {}) {
-  const { flags, verb } = parseArgs(argv);
+  let parsed;
+  try { parsed = parseArgs(argv); } catch (e) { err(`${e.message}\n`); return 2; }
+  const { flags, verb } = parsed;
+  for (const flag of ["strict", "require-templates"]) {
+    if (flags[flag] && verb !== "check") { err(`--${flag} belongs to check, not ${verb}
+`); return 2; }
+  }
   const manifestPath = typeof flags.manifest === "string" ? flags.manifest : MANIFEST_PATH;
   let templatesDir;
-  try { templatesDir = resolveTemplatesDir(flags, env); } catch (e) { err(`${e.message}
-`); return 2; }
+  try { templatesDir = resolveTemplatesDir(flags, env); } catch (e) { err(`${e.message}\n`); return 2; }
   const source = templatesDir ? templateSource(templatesDir) : null;
   if (verb === "check") {
-    const manifest = loadManifest(manifestPath);
+    if (flags["require-templates"] && !source) {
+      err("--require-templates: no templates directory (give --templates-dir DIR or --comfy-dir DIR, or set COMFY_TEMPLATES_DIR / COMFYUI_DIR to a directory that has the package)\n");
+      return 2;
+    }
+    let manifest;
+    try { manifest = loadManifest(manifestPath); } catch (e) { err(`${e.message}\n`); return 2; }
     const failures = [...checkCoverage(), ...checkManifestShape(manifest), ...checkBuilderSide(manifest)];
+    if (flags.strict) failures.push(...checkUnreviewed(manifest));
     let notes = [];
     if (source) {
       const r = checkTemplateSide(manifest, source);
