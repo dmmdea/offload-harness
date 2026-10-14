@@ -14,8 +14,10 @@
   `level` it was read at), the held-out read (`missing` when no pair is usable), a power note, both runs' stamps, the judge,
   an era marker, the baseline and corpus hashes and the verb's own build hash, with no timestamp (the same input twice is
   byte-identical). `schema` prints the gate-input JSON Schema, whose `outcome` enum is the Go list and whose receipt hashes
-  are 64 lower-case hex. The statistic is `eval.BootstrapDeltaMean`, called unchanged (its results are pinned by a test)
-  over the usable non-held-out task pairs in sorted id order.
+  are 64 lower-case hex. The primary is the mean of the paired task differences over the usable non-held-out pairs in
+  sorted id order, with a 95% interval in the score form of the Student-t interval (`delta -+ c * sn / sqrt(n - c^2)`,
+  `c = t(n-1, .975)` from a table, `sn` the divisor-n standard deviation; see Calibration). `eval.BootstrapDeltaMean` is
+  unchanged (its results are pinned by a test) and the paired bootstrap reads the efficiency metrics.
 - **Scoring.** Every candidate attempt enters its task's mean: a `pass` or `task_fail` with its score; a `cheat`, a
   `timeout`, an `infra_error`, a `judge_error` and a `not_run` at the worst score of the primary range (the bad end given
   the direction: 0 or 1, 0 or 10, or an end of the declared custom range); a declared task the candidate lacks, or holds
@@ -24,23 +26,45 @@
   incumbent attempt is an excluded pair. The excluded share is the largest of the excluded-pair, incumbent-attempt and
   candidate-attempt ratios; above 0.20 the verdict is INCONCLUSIVE, as is fewer than `min_pairs` usable pairs. Held-out
   pairs are scored the same way and can veto an ADOPT; with none usable an ADOPT becomes INCONCLUSIVE ("held-out evidence
-  missing"), not BLOCK. An unresolved cost is JSON `null` end to end and never 0, and an imputed attempt carries no cost.
+  missing"), not BLOCK. Cost follows whether the attempt ran: a candidate's `cheat`, `timeout`, `infra_error` or
+  `judge_error` that recorded a metric contributes that cost to its task's mean (it ran and spent it), a `not_run` carries
+  nothing, the incumbent's unfinished attempts are skipped cost included, and an unresolved cost is JSON `null` end to
+  end and never 0. A candidate that passed 24 of 25 attempts at 900 tokens and timed out on the 25th after burning 20000
+  (1664 tokens a task, 1.66 times the incumbent's) is no longer an efficiency win. The incumbent exclusion ("the candidate
+  does not run those") holds for a frozen or trusted incumbent; one supplied in the input can use it as a lever, up to the
+  cap.
 - **Verdicts.** Superiority adopts iff `lo > 0` and blocks iff `hi < 0`. Non-inferiority blocks iff `hi < -m` and adopts iff
   `lo > -m` with a declared efficiency metric (tokens, money or memory in GiB, finite and not negative) improving, none
   got significantly worse, and none was left unmeasured. With k declared metrics each is read on the `1 - 0.05/k`
-  interval (Bonferroni); a metric regresses when its plain 95% interval lies wholly on the worse side; a metric whose
-  unresolved pairs exceed `max_excluded_share` cannot improve and blocks the ADOPT. Superiority reports efficiency and
-  ignores it for the verdict. The gate has no effect-size floor: a caller's own bar stays that caller's rule. A model
+  interval (Bonferroni); a metric regresses when its plain 95% interval lies wholly on the worse side, read from two
+  resolved pairs (only an improvement needs `min_pairs`; memory ten times worse on 15 of 18 pairs and null on 3 vetoes
+  now); a metric whose unresolved pairs exceed `max_excluded_share` cannot improve and blocks the ADOPT. Superiority
+  reports efficiency and ignores it for the verdict. The efficiency reads stay on the percentile bootstrap; their false
+  improvement rate on cost nulls is 3.5% to 5.9% at 16 tasks (a nominal 2.5%), documented, and a false improvement
+  adopts nothing alone. The gate has no effect-size floor: a caller's own bar stays that caller's rule. A model
   judge needs a passed receipt for the same scorer.
+- **Calibration of the primary.** The percentile interval of the paired bootstrap, which the gate read first, was measured
+  anti-conservative: over 20000 simulated datasets per cell it adopted in 3.8% (uniform scores), 3.8% (scores in tenths)
+  and 4.1% (x^3-skewed scores) of superiority runs at 16 tasks and in 6.1% of non-inferiority runs at exactly -margin with
+  20 tasks and pass rates .90 and .85 (10.0% with 16 tasks), against a nominal 2.5%. Five candidate intervals (studentized
+  bootstrap, BCa, the percentile widened by t/z, the paired t, the lower of two) were run on the same datasets at
+  `B = 2000` and `B = 10000`: none stays at or under 4% in every one of 43 null cells (the best, the paired t, 4.6% at 20
+  tasks). The score form of the t interval does: 0 cells over 4%, worst 2.7%, and 1.3%, 1.5%, 1.4% and 2.6% in the four
+  cells above. Its price is power (at 24 tasks a true +0.1 gain on a pass/fail score is adopted in 8.6% of runs against
+  10.7% for the plain t). Not covered: comparisons where the arms hardly disagree (a candidate that only ever loses 5% of
+  tasks is adopted in 36% of runs at 20 tasks under every interval) and the efficiency reads. `TestCalibrationStudy`
+  prints the grid and is off unless `OFFLOAD_GATE_STUDY=1`; its output is identical at 24 and at 30 workers.
 - **Pre-registration floors and the frozen judge.** Freeze and check refuse `bootstrap_b` below 2000, `min_pairs` below 16
-  or above the non-held-out tasks (on null data the earlier settings adopted in 5.4% of runs at 8 pairs and 3.1% at 16
-  pairs with `B = 2000`, against a nominal 2.5%, and in 45% at `B = 1`), a non-inferiority margin at or above the width of
-  the primary range, and a `custom` primary without a valid range. The judge (kind and identity) is frozen in the baseline
-  and the input must match it; `corpus_hash` is an echo, and the adapter that turns runs into arms is the trust boundary
-  for corpus content. The gate version is 2, so a baseline written under version 1 is refused and re-frozen.
-- **Exit codes and the rest.** 0 a verdict was produced (and `-h`, as the other verbs do), 1 a non-ADOPT under
-  `--require-adopt`, 2 a refusal, a result that could not be written, or a usage error; a global `--config <path>` before
-  `gate` is accepted and ignored. Freeze refuses any efficiency class but `tokens`, `money` and `memory_gib`, and any
+  or above the non-held-out tasks (the calibration was measured from 16 tasks up; on cost nulls at 16 tasks a metric
+  falsely improved in 8% to 13% of runs at `B = 10` and 42% to 50% at `B = 1`, against 3.5% to 5.9% at 2000), a
+  non-inferiority margin at or above the width of the primary range, and a `custom` primary without a valid range. The
+  judge (kind and identity) is frozen in the baseline and the input must match it; `corpus_hash` is an echo, and the
+  adapter that turns runs into arms is the trust boundary for corpus content. The gate version is 2 and stays 2 (the gate
+  has never been released and no version 2 baseline exists outside tests): a baseline of another version is refused first,
+  for its version, with the advice to re-freeze it. A baseline frozen by the version 1 gate used to get "edited by hand?".
+- **Exit codes and the rest.** 0 a verdict was produced (and `-h`, as the other verbs do: read the verdict from stdout,
+  not the exit code alone), 1 a non-ADOPT under `--require-adopt`, 2 a refusal, a result that could not be written, or a
+  usage error; a global `--config <path>` before `gate` is accepted and ignored. Freeze refuses any efficiency class but `tokens`, `money` and `memory_gib`, and any
   metric or primary name that carries a wall-time word, citing INV-5. The attempt enum is `eval.AttemptOutcome` (the name
   `eval.Outcome` is already the cascade eval's per-case struct), with `AllOutcomes` and `OutcomeFromRecord`, which maps an
   external record's outcome word (`not_checked` is `not_run`). `main.go` gains one case pair and one help line; the rest
@@ -48,21 +72,35 @@
 - **Why.** The program's earlier proposals used three different pass rules, and this repository holds the pieces of two
   (`BootstrapDeltaMean` with a `B` and seed taken from each call site and its interval read by each caller, and ADR 0080's
   0.5 effect-size bar with no interval), so the same evidence could adopt under one and block under another, and a rule
-  chosen after the numbers are seen is not a rule. The statistic already existed; the rules around it (scoring,
-  margins, small n, binding the rules and the judge to the result) did not. `agent-trajectory-gate` and the compaction A/B
+  chosen after the numbers are seen is not a rule. The bootstrap already existed; the rules around it (scoring,
+  margins, small n, binding the rules and the judge to the result) did not, and its percentile interval turned out not to be
+  the right one for the primary. `agent-trajectory-gate` and the compaction A/B
   (`compeval.RunAB`) keep `B = 2000`, `seed = 42` and are listed as legacy, not migrated. Docs:
   `docs/systems/measurement-gate.md` (new, linked from `docs/README.md`) and ADR 0088 (Proposed).
-- **Tests.** Red first, twice: the gate's types and a stub were committed with the rule tests failing, then the gate; and
+- **Tests.** Red first, three times: the gate's types and a stub were committed with the rule tests failing, then the gate;
   after an adversarial review, a second red commit of attack tests (unfinished attempts, few resamples, a swapped judge, an
-  unmeasured or costlier metric, a wide margin) before the fixes. `internal/eval` tests: a verdict table, boundary rows
-  built from exactly representable numbers (16 pairs, scores 8.0, 7.5, 7.0), the refusal rows, imputation on every class
-  and both arms, the three-ratio excluded share, held-out veto and missing evidence, the floors, the frozen judge and
-  receipt shapes, the efficiency vetoes and the Bonferroni read, a byte-for-byte pin of `BootstrapDeltaMean`, a null
-  ADOPT-rate simulation (3000 trials at 16 pairs and `B = 2000`, at most 4%), determinism, the era marker, the power note,
-  freeze then check byte-identical, every byte of a frozen baseline edited, and the schema's enum and properties pinned to
-  the Go types. Root tests drive the verb in-process (freeze, check, verdict round trip, exit codes 0, 1 and 2, a failed
-  write of the result on each verb, `-h`, write-once freeze, the INV-5 refusals, `schema`). Mutation checks, each proved
-  applied (`git diff --quiet` exit 1 after the edit, exit 0 after the restore): the imputation switch, the cheat score, the
-  held-out zero-pair rule, both floors, the `min_pairs` bound, each judge mismatch and each receipt hash check, the
-  negative-metric refusal, the unresolved cap (flag, verdict and the forced no-improve), the regression veto in both
-  directions, the Bonferroni level, the margin bound and each of the four write-error wraps: all 26 turned a test red.
+  unmeasured or costlier metric, a wide margin) before the fixes; and after a third review, red tests for an unfinished
+  candidate attempt's cost, a regression on few resolved pairs, the false-ADOPT cells and the refusal a version 1 baseline
+  gets, each before its fix. `internal/eval` tests: a verdict table, boundary rows built from exactly representable
+  numbers (16 pairs, scores 8.0, 7.5, 7.0), the refusal rows, imputation on every class and both arms, the cost of each
+  attempt class on each arm, the three-ratio excluded share, held-out veto and missing evidence, the floors, the frozen
+  judge and receipt shapes, the efficiency vetoes and the Bonferroni read, a byte-for-byte pin of `BootstrapDeltaMean`,
+  determinism, the era marker, the power note, freeze then check byte-identical, every byte of a frozen baseline edited, the
+  schema's enum and properties pinned to the Go types, and a baseline as the version 1 gate wrote it (raw bytes, hash
+  pinned, through `CheckBaseline` and through the verb). Calibration: `Gate` run end to end at the floors on six null cells
+  (at most 4% over 4000 to 10000 trials, fixed seeds, skipped under `-short`; 0.6% to 2.4% measured), the interval itself
+  over 50000 datasets on nine cells (1.2% to 2.5% measured), the interval against numpy and scipy computations and against
+  its own definition (the statistic equals the critical value at both ends), the t table against scipy, and the study
+  harness pinned to `BootstrapDeltaMean` bit for bit, to scipy's quantiles and to the moments of its generators. The
+  `internal/eval` tests take about 3.5 s with the calibration cells (about 0.5 s under `-short`) on a 36-core machine; the
+  cells split their trials over `GOMAXPROCS`, so a 4-core runner takes a few times that. Root tests drive the verb
+  in-process (freeze, check, verdict round trip, exit codes 0, 1 and 2, a failed write of the result on each verb, `-h`,
+  write-once freeze, the INV-5 refusals, `schema`, the version 1 refusal). Mutation checks, each proved applied (`git diff
+  --quiet` exit 1 after the edit, exit 0 after the restore): the imputation switch, the cheat score, the held-out zero-pair
+  rule, both floors, the `min_pairs` bound, each judge mismatch and each receipt hash check, the negative-metric refusal,
+  the unresolved cap (flag, verdict and the forced no-improve), the regression veto in both directions, the Bonferroni
+  level, the margin bound and each of the four write-error wraps: all 26 turned a test red; and in the third round a
+  candidate's unfinished cost dropped, a `not_run`'s cost counted, the incumbent's unfinished cost counted, a regression
+  read only from `min_pairs`, the primary back on the percentile bootstrap, the zero-variance value read from a sum, the
+  plain t interval, a nudged critical value, the version probe disabled, the version probe blind to trailing bytes, and
+  three in the harness (percentile index, generator bias, quantile bisection): all 13 turned a test red.
