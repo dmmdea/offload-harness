@@ -364,7 +364,11 @@ const sameFile = (a, b) => String(a).replace(/\\/g, "/").toLowerCase() === Strin
 
 const WHITELIST_FLAG = "--whitelist-custom-nodes";
 const DISABLE_ALL_FLAG = "--disable-all-custom-nodes";
-/** isLongFlag: is this token `long`, or an argparse abbreviation of it (`--wh`, `--wh=x`)? `minLen` is the shortest prefix ComfyUI's parser keeps unambiguous. */
+/**
+ * isLongFlag: is this token `long`, or an argparse abbreviation of it (`--wh`, `--wh=x`)? `minLen` is the shortest prefix ComfyUI's parser
+ * keeps unambiguous, measured against ComfyUI 0.38.0's own parser: `--wh` (4; `--w` also fits --windows-standalone-build) and
+ * `--disable-al` (12; `--disable-a` also fits --disable-auto-launch, --disable-async-offload and --disable-api-nodes).
+ */
 const isLongFlag = (tok, long, minLen) => {
   const name = String(tok).split("=")[0];
   return name.length >= minLen && long.startsWith(name);
@@ -382,7 +386,7 @@ function withPackWhitelisted(flags, pack) {
   let at = -1;
   for (let i = 0; i < out.length; i++) if (isLongFlag(out[i], WHITELIST_FLAG, 4)) at = i;
   if (at < 0) {
-    if (out.some((f) => isLongFlag(f, DISABLE_ALL_FLAG, 13))) out.push(WHITELIST_FLAG, pack);
+    if (out.some((f) => isLongFlag(f, DISABLE_ALL_FLAG, 12))) out.push(WHITELIST_FLAG, pack);
     return out;
   }
   const tok = String(out[at]);
@@ -849,7 +853,7 @@ function leaseEpochOf(env) {
 }
 
 /**
- * warnWithoutIdleBound: a running instance a kept or warm runner reuses, said once when its argv lacks the idle yaml (a hand-started
+ * warnWithoutIdleBound: a running instance a kept or warm runner reuses, said once per runner start when its argv lacks the idle yaml (a hand-started
  * instance, or one an older build kept). It is reused all the same: it holds what it loads until its lease ends, as it always did.
  * An argv ComfyUI does not report is unknown, not missing, and says nothing.
  */
@@ -860,7 +864,11 @@ async function warnWithoutIdleBound({ api, key, systemArgv, log }) {
   log(`COMFY-IDLE-WARN: instance '${key || "default"}' on ${api} has no idle bound (launched without the idle pack); it holds what it loads until its lease ends. To bound a hand-started instance add --extra-model-paths-config ${EXT_IDLE_YAML} to its launch`);
 }
 
-/** verifyIdleBound: ask a freshly launched instance for its idle status (GET /offload/idle) and say what came back; never throws. */
+/**
+ * verifyIdleBound: ask a freshly launched instance for its idle status (GET /offload/idle) and say what came back; never throws.
+ * One COMFY-IDLE line when the pack is live at the bound that was asked for (a pack that reports no bound is taken at its word);
+ * a COMFY-IDLE-WARN when it did not answer, reports it cannot run, or reports another bound than `secs` (it never read the variable).
+ */
 async function verifyIdleBound({ api, key, secs, probeIdle, log }) {
   const who = `instance '${key || "default"}' on ${api}`;
   let answer = null;
@@ -869,8 +877,11 @@ async function verifyIdleBound({ api, key, secs, probeIdle, log }) {
     log(`COMFY-IDLE-WARN: ${who} did not answer GET /offload/idle, so the idle pack may not have loaded (its console log says); it holds what it loads until its lease ends`);
   } else if (answer.error) {
     log(`COMFY-IDLE-WARN: ${who} reports that its idle bound is not active: ${answer.error}; it holds what it loads until its lease ends`);
+  } else if (typeof answer.limit_sec === "number" && answer.limit_sec !== secs) {
+    // OFFLOAD_IDLE_FREE_SEC went to the child, so a pack that answers another bound did not read it: the operator asked for secs, not for this.
+    log(`COMFY-IDLE-WARN: ${who} reports an idle bound of ${answer.limit_sec} s, not the ${secs} s asked for (OFFLOAD_IDLE_FREE_SEC did not reach the pack); it frees after ${answer.limit_sec} s with an empty queue`);
   } else {
-    log(`COMFY-IDLE: ${who} frees its models and caches after ${answer.limit_sec ?? secs} s with an empty queue`);
+    log(`COMFY-IDLE: ${who} frees its models and caches after ${secs} s with an empty queue`);
   }
 }
 
@@ -948,8 +959,12 @@ export async function ensureComfy(opts = {}) {
     log(line);
     return new Error(line);
   };
+  // The reuse decision and the idle warning both read the running instance's argv (GET /system_stats, up to 8 s on a slow one): one
+  // request answers both. reuseVerdict's return shape is read by other callers, so the answer is shared here, not through it.
+  let argvAsked;
+  const askArgv = (a) => (argvAsked ??= systemArgv(a));
   if (await up(api)) {
-    const v = await reuseVerdict({ api, comfyDir, profile, key, port: instance.port, systemArgv, readLaunch, alive });
+    const v = await reuseVerdict({ api, comfyDir, profile, key, port: instance.port, systemArgv: askArgv, readLaunch, alive });
     if (v.reuse) {
       // A kept instance outlives a lease whose holder died or was fenced out, and the next lease on
       // its card finds it running. Reusing it makes it that lease's: re-stamp the marker, or the
@@ -966,9 +981,10 @@ export async function ensureComfy(opts = {}) {
         }
       }
       // A running instance is never restarted or refused for want of the idle pack (every kept instance in flight on an upgrade, and every
-      // hand-started one, lacks it): it is said, once. Its argv is asked here because reuseVerdict does not fetch it for the default
-      // instance; an argv ComfyUI does not report is unknown, not missing. COMFY_IDLE_FREE_SEC cannot change an instance already running.
-      if (idleSecs > 0) await warnWithoutIdleBound({ api, key, systemArgv, log });
+      // hand-started one, lacks it): it is said once per runner start (this call), not once per process tree, so a driver that starts one
+      // runner per shot says it once per shot. Its argv is asked here because reuseVerdict does not fetch it for the default instance, and
+      // never twice (askArgv); an argv ComfyUI does not report is unknown, not missing. COMFY_IDLE_FREE_SEC cannot change an instance already running.
+      if (idleSecs > 0) await warnWithoutIdleBound({ api, key, systemArgv: askArgv, log });
       return null; // already running and fit for this binding — don't manage it
     }
     if (!v.restart) {
