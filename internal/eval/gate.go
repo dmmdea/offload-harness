@@ -59,17 +59,19 @@ type ArmCount struct {
 }
 
 // EfficiencyResult is the paired-bootstrap read of one declared efficiency metric over the
-// usable pairs that resolved it on both arms.
+// usable pairs that resolved it on both arms. Delta, Lo and Hi are null when fewer than two pairs
+// resolved the metric (N < 2): there is no interval to read, and a 0 would say "no change" where
+// the truth is "no data". A measured zero is a number.
 type EfficiencyResult struct {
-	Name            string  `json:"name"`
-	Class           string  `json:"class"`
-	LowerIsBetter   bool    `json:"lower_is_better"`
-	Delta           float64 `json:"delta"`
-	Lo              float64 `json:"lo"`
-	Hi              float64 `json:"hi"`
-	N               int     `json:"n"`
-	UnresolvedPairs int     `json:"unresolved_pairs"`
-	Improves        bool    `json:"improves"`
+	Name            string   `json:"name"`
+	Class           string   `json:"class"`
+	LowerIsBetter   bool     `json:"lower_is_better"`
+	Delta           *float64 `json:"delta"`
+	Lo              *float64 `json:"lo"`
+	Hi              *float64 `json:"hi"`
+	N               int      `json:"n"`
+	UnresolvedPairs int      `json:"unresolved_pairs"`
+	Improves        bool     `json:"improves"`
 }
 
 // HeldOutResult is the point-estimate check on the held-out pairs (GATE-R5).
@@ -376,12 +378,15 @@ func Gate(b Baseline, baselineHash string, in GateInput) (GateResult, error) {
 			}
 		}
 		er := EfficiencyResult{Name: e.Name, Class: e.Class, LowerIsBetter: e.LowerIsBetter, N: len(incV), UnresolvedPairs: len(pairs) - len(incV)}
-		er.Delta, er.Lo, er.Hi = BootstrapDeltaMean(incV, candV, b.BootstrapB, b.Seed)
-		if er.N >= b.MinPairs {
-			if e.LowerIsBetter {
-				er.Improves = er.Hi < 0
-			} else {
-				er.Improves = er.Lo > 0
+		if er.N >= 2 { // fewer than two resolved pairs have no interval: delta, lo and hi stay null
+			d, lo, hi := BootstrapDeltaMean(incV, candV, b.BootstrapB, b.Seed)
+			er.Delta, er.Lo, er.Hi = &d, &lo, &hi
+			if er.N >= b.MinPairs {
+				if e.LowerIsBetter {
+					er.Improves = hi < 0
+				} else {
+					er.Improves = lo > 0
+				}
 			}
 		}
 		if er.Improves {

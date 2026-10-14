@@ -54,6 +54,8 @@ Exit codes:
   1  verdict --require-adopt and the verdict is not ADOPT (the result is still printed)
   2  a refusal (bad hash, bad receipt, malformed input, a baseline that is not the frozen bytes,
      a freeze the gate cannot honour) or a usage error
+
+A global --config <path> before the subcommand is accepted and ignored: the gate reads no config.
 `
 
 // gateFail is a gate failure: every one ends the process with code 2, so that exit 1 stays free
@@ -66,31 +68,39 @@ func runGate(args []string) error { return gateMain(args, os.Stdout, os.Stderr) 
 
 // gateMain is runGate with its streams passed in, so a test drives the whole verb in-process.
 func gateMain(args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 {
+	// main.go hoists a global `--config <v>` / `--config=<v>` to the front of the verb's args, so
+	// `local-offload --config x.json gate schema` arrives here as [--config x.json schema]. The gate
+	// reads no config, but the subcommand is what follows it: take the subcommand from behind any
+	// leading --config (the same hoist `gpu` uses), and let the subcommand's own flag set accept the
+	// flag it gets back.
+	sub, rest, ok := hoistGlobalConfig(args)
+	if !ok {
 		fmt.Fprint(stderr, gateUsage)
 		return gateFail("a subcommand is required (freeze, check, verdict or schema)")
 	}
-	switch args[0] {
+	switch sub {
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, gateUsage)
 		return nil
 	case "freeze":
-		return gateFreeze(args[1:], stdout, stderr)
+		return gateFreeze(rest, stdout, stderr)
 	case "check":
-		return gateCheck(args[1:], stdout, stderr)
+		return gateCheck(rest, stdout, stderr)
 	case "verdict":
-		return gateVerdict(args[1:], stdout, stderr)
+		return gateVerdict(rest, stdout, stderr)
 	case "schema":
-		return gateSchema(args[1:], stdout, stderr)
+		return gateSchema(rest, stdout, stderr)
 	}
 	fmt.Fprint(stderr, gateUsage)
-	return gateFail("unknown subcommand %q (freeze, check, verdict or schema)", args[0])
+	return gateFail("unknown subcommand %q (freeze, check, verdict or schema)", sub)
 }
 
 func gateFlags(name string, stderr io.Writer) *flag.FlagSet {
 	fs := flag.NewFlagSet("gate "+name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.String("config", "", "unused by gate; accepted so the global --config hoist never misroutes this subcommand")
+	// The gate reads no config. The flag is accepted (and ignored) because gateMain hands a leading
+	// global --config back to the subcommand, and so that `gate schema --config x.json` parses too.
+	fs.String("config", "", "unused by gate; accepted and ignored")
 	return fs
 }
 

@@ -21,6 +21,14 @@ const (
 	scorerID   = "acceptance-dsl"
 )
 
+// val reads a nullable interval end; a nil is NaN, which no comparison with a number satisfies.
+func val(p *float64) float64 {
+	if p == nil {
+		return math.NaN()
+	}
+	return *p
+}
+
 func repeatF(v float64, n int) []float64 {
 	s := make([]float64, n)
 	for i := range s {
@@ -154,7 +162,7 @@ func TestGateVerdictTable(t *testing.T) {
 		{name: "4 non-inferiority ADOPT (inside the margin, tokens drop)", pre: niPre(sixteen),
 			inc: arm("i", repeatF(8.0, sixteen), tokens), can: arm("c", repeatF(7.75, sixteen), repeatF(800, sixteen)),
 			verdict: VerdictAdopt, extra: func(t *testing.T, r GateResult) {
-				if r.Margin != 0.5 || len(r.Efficiency) != 1 || !r.Efficiency[0].Improves || r.Efficiency[0].Delta != -200 {
+				if r.Margin != 0.5 || len(r.Efficiency) != 1 || !r.Efficiency[0].Improves || val(r.Efficiency[0].Delta) != -200 {
 					t.Fatalf("want margin 0.5 and an improving tokens metric (delta -200): %+v", r)
 				}
 			}},
@@ -321,10 +329,10 @@ func TestGateEfficiencyMetricsUseTheSameBootstrap(t *testing.T) {
 	if !(lo < hi) {
 		t.Fatalf("setup: the tokens interval must have width, got [%v, %v]: a point interval cannot tell one seed from another", lo, hi)
 	}
-	if e0.Name != tokensName || e0.Delta != d || e0.Lo != lo || e0.Hi != hi || e0.N != n || e0.UnresolvedPairs != 0 || !e0.Improves || !e0.LowerIsBetter || e0.Class != EffTokens {
+	if e0.Name != tokensName || val(e0.Delta) != d || val(e0.Lo) != lo || val(e0.Hi) != hi || e0.N != n || e0.UnresolvedPairs != 0 || !e0.Improves || !e0.LowerIsBetter || e0.Class != EffTokens {
 		t.Fatalf("tokens row wrong: %+v (want %v %v %v)", e0, d, lo, hi)
 	}
-	if e1 := r.Efficiency[1]; e1.Improves || e1.Delta != 0 || e1.N != n {
+	if e1 := r.Efficiency[1]; e1.Improves || e1.Delta == nil || *e1.Delta != 0 || e1.N != n {
 		t.Fatalf("an unchanged metric must not improve (and its zero is a measured zero, not a missing one): %+v", e1)
 	}
 	sd, slo, shi := BootstrapDeltaMean(savedI, savedC, b.BootstrapB, b.Seed)
@@ -332,7 +340,7 @@ func TestGateEfficiencyMetricsUseTheSameBootstrap(t *testing.T) {
 	if !(slo < shi) {
 		t.Fatalf("setup: the tokens_saved interval must have width, got [%v, %v]", slo, shi)
 	}
-	if !e2.Improves || e2.LowerIsBetter || e2.Lo <= 0 || e2.Delta != sd || e2.Lo != slo || e2.Hi != shi {
+	if !e2.Improves || e2.LowerIsBetter || !(val(e2.Lo) > 0) || val(e2.Delta) != sd || val(e2.Lo) != slo || val(e2.Hi) != shi {
 		t.Fatalf("a higher-is-better metric improves when lo > 0, with the same B and seed: %+v (want %v %v %v)", e2, sd, slo, shi)
 	}
 	// GATE-R2: ONE improving metric is enough. tokens and tokens_saved improve, peak_gib does not,
@@ -389,8 +397,8 @@ func TestGateEfficiencyIntervalSpanningZeroDoesNotImprove(t *testing.T) {
 	}
 	r := mustGate(t, b, h, inputFor(h, inc, cand))
 	for _, e := range r.Efficiency {
-		if e.Lo >= 0 || e.Hi <= 0 {
-			t.Fatalf("setup: %s must span zero, got lo %v hi %v", e.Name, e.Lo, e.Hi)
+		if !(val(e.Lo) < 0 && val(e.Hi) > 0) {
+			t.Fatalf("setup: %s must span zero, got lo %v hi %v", e.Name, val(e.Lo), val(e.Hi))
 		}
 		if e.Improves {
 			t.Errorf("%s: an interval spanning zero must not improve: %+v", e.Name, e)
@@ -417,7 +425,7 @@ func TestGateUnresolvedCostIsSkippedNeverZero(t *testing.T) {
 	delete(inc.Tasks[1].Attempts[0].Metrics, tokensName)
 	r := mustGate(t, b, h, inputFor(h, inc, cand))
 	e := r.Efficiency[0]
-	if e.N != 16 || e.UnresolvedPairs != 4 || e.Delta != -500 || e.Lo != -500 || e.Hi != -500 || !e.Improves {
+	if e.N != 16 || e.UnresolvedPairs != 4 || val(e.Delta) != -500 || val(e.Lo) != -500 || val(e.Hi) != -500 || !e.Improves {
 		t.Fatalf("unresolved pairs must be skipped and counted: %+v", e)
 	}
 	if r.Verdict != VerdictAdopt {
@@ -441,13 +449,14 @@ func TestGateEfficiencyNeedsMinPairsResolved(t *testing.T) {
 	if r.Verdict != VerdictInconclusive || !strings.Contains(r.Reason, "no declared efficiency metric improved") {
 		t.Fatalf("non-inferiority cannot ADOPT on an insufficient metric: %s %s", r.Verdict, r.Reason)
 	}
-	// And an all-unresolved metric serializes without any zero.
+	// And an all-unresolved metric has no interval at all: delta, lo and hi are nil (null in the
+	// JSON), never the 0 BootstrapDeltaMean returns for "nothing to conclude".
 	for i := range cand.Tasks {
 		cand.Tasks[i].Attempts[0].Metrics[tokensName] = nil
 	}
 	r2 := mustGate(t, b, h, inputFor(h, inc, cand))
 	e2 := r2.Efficiency[0]
-	if e2.N != 0 || e2.UnresolvedPairs != n || e2.Improves || e2.Delta != 0 {
+	if e2.N != 0 || e2.UnresolvedPairs != n || e2.Improves || e2.Delta != nil || e2.Lo != nil || e2.Hi != nil {
 		t.Fatalf("all-unresolved: %+v", e2)
 	}
 }
@@ -486,7 +495,7 @@ func TestGatePerTaskEfficiencyAggregation(t *testing.T) {
 			r := mustGate(t, b, h, inputFor(h, inc, cand))
 			e := r.Efficiency[0]
 			want := tc.want - 1500
-			if e.N != n || e.UnresolvedPairs != 0 || e.Delta != want || e.Lo != want || e.Hi != want {
+			if e.N != n || e.UnresolvedPairs != 0 || val(e.Delta) != want || val(e.Lo) != want || val(e.Hi) != want {
 				t.Fatalf("the per-task cost must be %v (delta %v): got %+v", tc.want, want, e)
 			}
 		})
