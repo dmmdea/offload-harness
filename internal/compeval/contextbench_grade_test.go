@@ -103,8 +103,8 @@ func TestCBGradeNeedleReadsOnlyTheFinalFrame(t *testing.T) {
 	}
 }
 
-// cbPanel renders a sudoku panel for gold cells the way the agent is told to.
-func cbPanel(side int, cells map[string]string, version int) string {
+// cbTestPanelText renders a sudoku panel for gold cells the way the agent is told to.
+func cbTestPanelText(side int, cells map[string]string, version int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "<<<SKETCHPAD BEGIN>>>\nVERSION: %d\n", version)
 	for r := 1; r <= side; r++ {
@@ -152,7 +152,7 @@ func TestCBGradeSudokuScoresDisplayedVersions(t *testing.T) {
 
 	var all []CBFrame
 	for i := range versions {
-		all = append(all, cbFrame("turn", cbPanel(4, boards[i], versions[i])))
+		all = append(all, cbFrame("turn", cbTestPanelText(4, boards[i], versions[i])))
 	}
 	g := GradeCB(in, all)
 	if !g.Valid || g.Reward != 1 || g.Total != 10 || g.Sub["reward_versioned"] != 1 || g.Sub["reward_final_em"] != 1 {
@@ -162,7 +162,7 @@ func TestCBGradeSudokuScoresDisplayedVersions(t *testing.T) {
 	// Skip every second version: half the versions were never displayed.
 	var half []CBFrame
 	for i := 0; i < len(versions); i += 2 {
-		half = append(half, cbFrame("turn", cbPanel(4, boards[i], versions[i])))
+		half = append(half, cbFrame("turn", cbTestPanelText(4, boards[i], versions[i])))
 	}
 	g = GradeCB(in, half)
 	if g.Reward != 0.5 {
@@ -172,7 +172,7 @@ func TestCBGradeSudokuScoresDisplayedVersions(t *testing.T) {
 	// The right grid under the wrong version label counts for content, not for the versioned score.
 	mislabeled := []CBFrame{}
 	for i := 1; i < len(versions); i++ {
-		mislabeled = append(mislabeled, cbFrame("turn", cbPanel(4, boards[i], versions[i]+100)))
+		mislabeled = append(mislabeled, cbFrame("turn", cbTestPanelText(4, boards[i], versions[i]+100)))
 	}
 	g = GradeCB(in, mislabeled)
 	if g.Reward != 1 || g.Sub["reward_versioned"] != 0 {
