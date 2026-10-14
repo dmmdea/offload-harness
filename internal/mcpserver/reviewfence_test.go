@@ -312,7 +312,7 @@ func fleetSeam(w core.AgentWireResult, summary delegate.Summary) func(context.Co
 	}
 }
 
-// RSI-OH-4#1: a review the fleet delivered under a foreign fence is sealed like a local one: the
+// A review the fleet delivered under a foreign fence is sealed like a local one: the
 // outcome, the evidence bound to the diff, the seat receipt carrying where it ran, and the trace.
 func TestReviewUnderAForeignFenceSealsTheFleetsReview(t *testing.T) {
 	s, _ := fenceServer(t, neverSeat(t))
@@ -357,7 +357,7 @@ func TestReviewUnderAForeignFenceSealsTheFleetsReview(t *testing.T) {
 	}
 }
 
-// RSI-OH-4#1: the salvage call site. A fleet seat that wrote the review and was cut deferred it;
+// The salvage call site. A fleet seat that wrote the review and was cut deferred it;
 // the lane publishes the written lines, and that publication is sealed too, with the receipt
 // recording the attempt as the deferral it was.
 func TestReviewUnderAForeignFenceSealsASalvagedFleetAnswer(t *testing.T) {
@@ -394,7 +394,7 @@ func TestReviewUnderAForeignFenceSealsASalvagedFleetAnswer(t *testing.T) {
 	}
 }
 
-// RSI-OH-4#3 on the salvage call site: a fleet seat that the node filed as a deferral and whose
+// The salvage call site of the deferred-clean rule: a fleet seat that the node filed as a deferral and whose
 // answer reads as a clean NONE is published, and is never a PASS.
 func TestReviewUnderAForeignFenceNeverPassesASalvagedDeferral(t *testing.T) {
 	s, _ := fenceServer(t, neverSeat(t))

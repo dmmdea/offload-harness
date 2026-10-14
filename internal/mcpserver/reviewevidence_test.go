@@ -1,4 +1,4 @@
-// offload_review_diff's SHA-bound evidence (RSI-OH-4). The outcome rules and the trace live in
+// offload_review_diff's SHA-bound evidence. The outcome rules and the trace live in
 // internal/reviewlane and are tested there; what is pinned HERE is the front door's own jobs:
 // bind every result to the diff bytes it judged, attach gate receipts before the seat runs,
 // re-check the diff right before returning, mark every deferral NOT_RUN, and leave the trace
@@ -468,7 +468,7 @@ func TestReviewDiffASecondReadWithNoDocumentIsStale(t *testing.T) {
 	}
 }
 
-// RSI-OH-4#6: the trace is written beside the ledger, derived from the ledger's own path, so it
+// The trace is written beside the ledger, derived from the ledger's own path, so it
 // follows an operator who placed the ledger away from the harness home; with no ledger path it
 // is the harness home.
 func TestReviewDiffTraceSitsBesideTheConfiguredLedger(t *testing.T) {
@@ -498,7 +498,7 @@ func TestReviewDiffTraceSitsBesideTheConfiguredLedger(t *testing.T) {
 	}
 }
 
-// RSI-OH-4#5: once the review names its head, a receipt that names no commit cannot support PASS.
+// Once the review names its head, a receipt that names no commit cannot support PASS.
 func TestReviewDiffAnUnboundGateReceiptCannotSupportPass(t *testing.T) {
 	clean := func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 		return seatFindings(), nil
@@ -530,7 +530,7 @@ func deferredCleanWire() core.AgentWireResult {
 		Deferred: true, SchemaMiss: true, DeferClass: core.DeferClassBudget, Reason: "structured re-pack skipped: nothing left of the budget"}
 }
 
-// RSI-OH-4#3 (conductor decision): a node-deferred run the lane salvages as a clean NONE is
+// A node-deferred run the lane salvages as a clean NONE is
 // published as before, but its outcome is NOT_RUN and never PASS; the receipt records the attempt.
 func TestReviewDiffANodeDeferredCleanNoneIsNotRunNeverPass(t *testing.T) {
 	s := askTestServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {

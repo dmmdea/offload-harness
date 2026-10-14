@@ -1,6 +1,6 @@
 package reviewlane
 
-// SHA-bound review evidence (RSI-OH-4).
+// SHA-bound review evidence.
 //
 // A review result used to say "here is what a seat thought" and nothing about WHAT it
 // thought it about. A caller holding two results for two states of one branch could not tell
@@ -43,11 +43,12 @@ import (
 )
 
 // Outcomes of one review, a closed set. PASS is the only one that says anything good, and it
-// is hard to earn on purpose: a clean seat, a diff inside the ceiling, every gate green, and
-// a diff that did not move.
+// is hard to earn on purpose: a clean seat, a diff inside the ceiling, every gate green and
+// for the reviewed commit, and a diff that did not move.
 const (
-	// OutcomePass: a seat with a receipt reviewed the whole diff, said NONE, no gate receipt
-	// is red or stale, and the diff was unchanged when the result was sealed.
+	// OutcomePass: a seat with a receipt reviewed the whole diff, said NONE, every gate receipt
+	// supports a PASS (GateReceipt.Passed: none is red, stale or unbound), and the diff was
+	// unchanged when the result was sealed.
 	OutcomePass = "PASS"
 	// OutcomeFindings: a seat reviewed the unchanged diff and reported at least one defect.
 	OutcomeFindings = "FINDINGS"

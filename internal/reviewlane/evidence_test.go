@@ -487,7 +487,7 @@ func TestTraceTextIsBoundedAndRuneSafe(t *testing.T) {
 	}
 }
 
-// RSI-OH-4#0: a review refused before any diff was read is bound to nothing and says why. It is
+// A review refused before any diff was read is bound to nothing and says why. It is
 // a NOT_RUN with the refusal as its reason, zero bytes, and no fingerprint (a fingerprint would
 // bind the refusal to bytes nobody chose), and Seal gives it its trace row like any other.
 func TestARefusalBeforeAnyDiffIsADiffLessNotRun(t *testing.T) {
@@ -530,7 +530,7 @@ func TestARefusalBeforeAnyDiffIsADiffLessNotRun(t *testing.T) {
 	}
 }
 
-// RSI-OH-4#3 (conductor decision): a run the node filed as a deferral, which the lane read as a
+// A run the node filed as a deferral, which the lane read as a
 // clean NONE, is NOT_RUN and never PASS. Findings salvaged from the same kind of run stay
 // FINDINGS: that is what the salvage is for.
 func TestANodeDeferredRunReadAsACleanNoneIsNotRunNeverPass(t *testing.T) {
@@ -595,7 +595,7 @@ func TestSealPublishesTheSeatReceiptsProvenance(t *testing.T) {
 	}
 }
 
-// RSI-OH-4#2: the dropped_* counts of the payload become Delivery.Filtered inside Seal. A clean
+// The dropped_* counts of the payload become Delivery.Filtered inside Seal. A clean
 // NONE beside lines the filters discarded is a seat that contradicted itself, never a PASS,
 // whichever filter took them. The counts are Go ints, as the door publishes them.
 func TestSealTurnsDroppedCountsIntoNotRun(t *testing.T) {
@@ -632,7 +632,7 @@ func TestSealTurnsDroppedCountsIntoNotRun(t *testing.T) {
 	}
 }
 
-// RSI-OH-4#5 (conductor decision): once the review names a head commit, a handed gate receipt
+// Once the review names a head commit, a handed gate receipt
 // that names none is unbound, so it cannot support a PASS. The lane's own gates carry no commit
 // and are never caught by this.
 func TestAHandedReceiptWithNoCommitCannotSupportPassOnABoundReview(t *testing.T) {
@@ -667,7 +667,7 @@ func TestAHandedReceiptWithNoCommitCannotSupportPassOnABoundReview(t *testing.T)
 	}
 }
 
-// RSI-OH-4#6: the trace sits beside the ledger, derived from the ledger's own path.
+// The trace sits beside the ledger, derived from the ledger's own path.
 func TestTracePathSitsBesideTheLedger(t *testing.T) {
 	dir := t.TempDir()
 	if got, want := TracePathFor(filepath.Join(dir, "led", "ledger.jsonl"), filepath.Join(dir, "home")), filepath.Join(dir, "led", TraceFile); got != want {
@@ -679,7 +679,7 @@ func TestTracePathSitsBesideTheLedger(t *testing.T) {
 	}
 }
 
-// RSI-OH-4#4: boundaries that the first tests only approached from one side.
+// Boundaries that the first tests only approached from one side.
 func TestConflictMarkerBoundaries(t *testing.T) {
 	// The only marker is an added closing line: the opening marker is not what trips the gate.
 	closing := mustEvidence(t, evDiff+"+>>>>>>> branch\n")

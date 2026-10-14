@@ -782,7 +782,7 @@ These design choices are load-bearing rather than incidental:
   apart. The pipeline's own ledger row still records the run as the defer it was; the salvage is
   the door's.
 
-**Every result is bound to the diff it judged (RSI-OH-4).** A review used to say what a seat thought and
+**Every result is bound to the diff it judged.** A review used to say what a seat thought and
 nothing about what it thought it about, and a finding the caller skipped left no record. Now every
 payload, deferrals and early refusals included, carries an `outcome` and an `evidence` block, all additive
 (a reader written before them keeps working; the deferral shape and the findings are untouched):
@@ -793,7 +793,7 @@ payload, deferrals and early refusals included, carries an `outcome` and an `evi
   `seat.answer_sha256` its raw answer; the seat receipt (`seat`, `node_id`, `node`, `executed_on`, `steps`,
   `stop_reason`, `salvaged`, `deferred`) names who answered and carries no timing. A review refused before
   any diff was read (both sources, neither, a `diff_path` that cannot be read or is over its cap, a bad
-  `read_root`, arguments that do not decode) is sealed as a diff-less `NOT_RUN`: `diff_bytes` is 0, there is no
+  `read_root`, a working directory that cannot be read, arguments that do not decode) is sealed as a diff-less `NOT_RUN`: `diff_bytes` is 0, there is no
   `diff_sha256` (no bytes were chosen, so there is nothing to fingerprint), and the refusal is both
   `evidence.refusal` and `outcome_reason`. The deferral shape and reason are the ones the door always gave.
 - **Gates run first.** `evidence.gates` is built before the seat is contacted, so a refusal is bound too:
@@ -1068,6 +1068,9 @@ keep the stamp and say so, a path that is gone is stale without a comparison, an
 
 - [`internal/mcpserver/mcpserver.go`](../../internal/mcpserver/mcpserver.go) — registration and
   handlers
+- [`internal/mcpserver/reviewdiffio.go`](../../internal/mcpserver/reviewdiffio.go) — the file seam of
+  `offload_review_diff`'s `diff_path` branch (working directory, absolute path, confined read), so the refusals behind
+  those calls are tested
 - [`internal/mcpserver/status_section.go`](../../internal/mcpserver/status_section.go) —
   `offload_status`'s block table, `section` parsing and the brief lines
 - [`internal/mcpserver/stale_image.go`](../../internal/mcpserver/stale_image.go) — the `process` block: the

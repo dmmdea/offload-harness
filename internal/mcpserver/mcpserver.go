@@ -3712,13 +3712,13 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 		Task        string `json:"task"`
 		MaxFindings int    `json:"max_findings"`
 		ReadRoot    string `json:"read_root"`
-		// SHA-bound evidence (RSI-OH-4): optional, echoed and bound, never resolved.
+		// SHA-bound evidence: optional, echoed and bound, never resolved.
 		BaseSHA      string                   `json:"base_sha"`
 		HeadSHA      string                   `json:"head_sha"`
 		GateReceipts []reviewlane.GateReceipt `json:"gate_receipts"`
 	}
-	// The durable trace sits beside the ledger, wherever the operator put it (RSI-OH-4#6), and
-	// refuse seals every exit that comes before a diff was read (RSI-OH-4#0): a refusal is a
+	// The durable trace sits beside the ledger, wherever the operator put it, and
+	// refuse seals every exit that comes before a diff was read: a refusal is a
 	// diff-less NOT_RUN naming its reason, bound to no bytes, and it leaves its trace row like
 	// every other result of this door. The deferral shape and reason are the ones this door
 	// always gave; outcome, outcome_reason and evidence ride beside them.
@@ -3788,7 +3788,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 			return again[0].Text, nil
 		}
 	}
-	// SHA-bound evidence (RSI-OH-4), built BEFORE the builder and before any seat: the diff's
+	// SHA-bound evidence, built BEFORE the builder and before any seat: the diff's
 	// fingerprint and the deterministic gate receipts exist first, so even a refusal below is
 	// bound to the bytes it refused. seal stamps outcome + evidence on every exit from here on
 	// (the exits above it went through refuse) and leaves the durable trace beside the ledger.
