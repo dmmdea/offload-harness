@@ -4,9 +4,8 @@
 // The idea is the ordered backend chain with a real probe of Agent-Reach's `doctor` (a channel has an
 // ordered list of backends, each with a real probe, and the report says which one is active and why),
 // rebuilt here without any of its dependencies and kept engine-neutral: the report names an engine KIND
-// ("llama.cpp", "vllm", "rkllm", and "strata" for the seat that is reserved for it), never a product
-// path, so a new engine registers by adding one row to the classification table (classify.go) and
-// changes no schema.
+// ("llama.cpp", "vllm", "rkllm", "whisper.cpp"), never a product path, so a new engine registers by
+// adding one row to the classification table (classify.go) and changes no schema.
 //
 // Four fields describe a verdict, on every lane and every seat:
 //
@@ -34,15 +33,14 @@ const (
 	EngineLlamaCpp = "llama.cpp"
 	EngineVLLM     = "vllm"
 	EngineRKLLM    = "rkllm"
-	// EngineStrata is reserved for the Strata seat. Nothing classifies into it yet: the seat registers by
-	// adding a row to engineRules, with no change to any field or schema.
-	EngineStrata = "strata"
 	// EngineWhisperCpp is the speech-to-text server.
 	EngineWhisperCpp = "whisper.cpp"
 	// EngineNone is active_backend when no backend of the chain can serve.
 	EngineNone = "none"
 	// EngineUnknown is the kind of a seat that can serve but whose engine the config does not say (an
-	// entry whose command names no engine this table knows, or no serving config to read it from).
+	// entry whose command names no engine this table knows, or no serving config to read it from), and
+	// the active_backend of a row whose probe saw nothing because it timed out, or whose seat is served by
+	// another node.
 	EngineUnknown = "unknown"
 )
 
@@ -100,7 +98,8 @@ type Lane struct {
 // Verdict is one candidate's probe result.
 type Verdict struct {
 	OK bool
-	// Unknown: the probe saw nothing (it timed out), so the candidate is neither up nor down. OK is false.
+	// Unknown: the probe saw nothing (it timed out), so the candidate is neither up nor down, and a lane
+	// bound to it reads "unknown", not "none". OK is false.
 	Unknown bool
 	// Probe is the deepest level the evidence reached; empty reads as ProbeProcess.
 	Probe string

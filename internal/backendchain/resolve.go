@@ -55,8 +55,13 @@ func seatLabel(kind, seat string) string {
 // A preferred seat that fails while the lane is bound to a later one is named in front of the answer
 // ("vllm seat X unavailable: ...; fell to llama.cpp seat Y: ...").
 //
+// A candidate whose probe saw nothing (a timeout: Verdict.Unknown) is neither up nor down. Bound to it, the
+// lane reads "unknown"; a preferred one is named as not confirmed and does not answer for a lane bound
+// elsewhere.
+//
 // A lane with no binding (a chain whose seats the config does not name) takes the first candidate whose
-// probe passes. When none passes the answer is "none", at the deepest probe level any candidate reached.
+// probe passes or could not be confirmed. When none does the answer is "none", at the deepest probe level
+// any candidate reached.
 func Resolve(ctx context.Context, lane Lane, p Prober) Entry {
 	chain := make([]string, 0, len(lane.Chain))
 	for _, c := range lane.Chain {
@@ -91,7 +96,7 @@ func Resolve(ctx context.Context, lane Lane, p Prober) Entry {
 			deepest = level
 		}
 		label := seatLabel(chain[i], c.Seat)
-		if !v.OK {
+		if !v.OK && !v.Unknown {
 			failed = append(failed, fmt.Sprintf("%s unavailable: %s", label, v.Detail))
 			continue
 		}
@@ -100,10 +105,17 @@ func Resolve(ctx context.Context, lane Lane, p Prober) Entry {
 			if i < boundIdx {
 				prefix = "the preferred "
 			}
-			available = append(available, fmt.Sprintf("%s%s is available (%s) but does not answer for this lane, which is bound to %s", prefix, label, v.Detail, bound))
+			if v.Unknown {
+				available = append(available, fmt.Sprintf("%s%s could not be confirmed (%s) and does not answer for this lane, which is bound to %s", prefix, label, v.Detail, bound))
+			} else {
+				available = append(available, fmt.Sprintf("%s%s is available (%s) but does not answer for this lane, which is bound to %s", prefix, label, v.Detail, bound))
+			}
 			continue
 		}
 		e.ActiveBackend, e.Seat, e.BackendProbe = chain[i], c.Seat, level
+		if v.Unknown {
+			e.ActiveBackend = EngineUnknown
+		}
 		reason := fmt.Sprintf("%s: %s", label, v.Detail)
 		if len(failed) > 0 {
 			reason = strings.Join(failed, "; ") + "; fell to " + reason

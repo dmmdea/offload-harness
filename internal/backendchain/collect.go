@@ -53,17 +53,25 @@ type Options struct {
 // serving, and to run on every /fleet/health refresh.
 //
 // Every row's starting state (loaded, not loaded, loading) comes from that one opening reading of the
-// running list, the snapshot. Only the explicit completion probe reads the list again, around each
-// completion (see completionVerdict), and those later readings decide whether a completion may be sent;
-// they never rewrite what a row says about the state the report began with.
+// running list, the snapshot. Only the explicit completion probe reads the list again, before it decides a
+// completion to a seat that is not running (see completionVerdict), and that later reading decides whether
+// a completion may be sent; it never rewrites what a row says about the state the report began with.
+//
+// A seat has one engine kind wherever it is read. The kinds a lane's plan declares (the tier table's
+// preferred and fallback seats) are registered first, and every candidate of every lane and every seat row
+// is then classified by the same rule, engineOf.
 func Collect(ctx context.Context, cfg config.Config, opt Options) Report {
 	s := newState(ctx, cfg, opt)
 	var rep Report
-	for _, lane := range PlanLanes(cfg) {
+	lanes := PlanLanes(cfg)
+	for _, lane := range lanes {
+		for _, c := range lane.Chain {
+			s.declare(c.Seat, c.Engine)
+		}
+	}
+	for _, lane := range lanes {
 		for i := range lane.Chain {
-			if strings.TrimSpace(lane.Chain[i].Engine) == "" {
-				lane.Chain[i].Engine = s.engineOf(lane.Chain[i].Seat)
-			}
+			lane.Chain[i].Engine = s.engineOf(lane.Chain[i].Seat)
 		}
 		rep.Lanes = append(rep.Lanes, Resolve(ctx, lane, s))
 	}
@@ -91,6 +99,8 @@ type state struct {
 	// loadSent is the seat of the one completion this run sent to a seat that was not running ("" until
 	// then): at most one such completion is sent, however it ends.
 	loadSent string
+	// declared maps a seat name (lower case) to the kind a lane's plan declares for it (the tier table).
+	declared map[string]string
 
 	entries    []servingtmpl.SeatEntry
 	entriesWhy string // why entries is empty, "" when the serving config was read
@@ -99,7 +109,7 @@ type state struct {
 }
 
 func newState(ctx context.Context, cfg config.Config, opt Options) *state {
-	s := &state{cfg: cfg, opt: opt, memo: map[string]Verdict{}}
+	s := &state{cfg: cfg, opt: opt, memo: map[string]Verdict{}, declared: map[string]string{}}
 	timeout := opt.ProbeTimeout
 	if timeout <= 0 {
 		timeout = defaultProbeTimeout
@@ -124,13 +134,16 @@ func newState(ctx context.Context, cfg config.Config, opt Options) *state {
 	case path == "":
 		s.entriesWhy = "serving_config_path is unset"
 	default:
-		text, err := os.ReadFile(path)
-		if err != nil {
+		text, tooBig, err := readBounded(path, maxServingConfigBytes)
+		switch {
+		case err != nil:
 			s.entriesWhy = "the serving config cannot be read"
-			break
-		}
-		if s.entries, err = servingtmpl.SeatEntries(string(text)); err != nil {
-			s.entriesWhy = "the serving config is not parseable"
+		case tooBig:
+			s.entriesWhy = "the serving config is too large to read"
+		default:
+			if s.entries, err = servingtmpl.SeatEntries(string(text)); err != nil {
+				s.entriesWhy = "the serving config is not parseable"
+			}
 		}
 	}
 	return s
@@ -141,28 +154,109 @@ var (
 	errNoClient   = errors.New("no HTTP client was supplied")
 )
 
-// short turns a transport error into one clause with no address, path or command in it.
-func short(err error) string {
+// readBounded reads a file of at most max bytes. A longer file is not read past max+1 and is reported as
+// too big, so a file of any size at the configured path cannot be pulled whole into memory.
+func readBounded(path string, max int64) (text []byte, tooBig bool, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	text, err = io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(text)) > max {
+		return nil, true, nil
+	}
+	return text, false, nil
+}
+
+// statusOf finds the HTTP status in a failed read of llama-swap or of a seat, whichever client made it.
+func statusOf(err error) (int, bool) {
 	var se *llamaclient.StatusError
-	var ne net.Error
+	var re *seatload.StatusError
 	switch {
 	case errors.As(err, &se):
-		return fmt.Sprintf("HTTP %d", se.StatusCode)
-	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
+		return se.StatusCode, true
+	case errors.As(err, &re):
+		return re.Status, true
+	}
+	return swapclient.HTTPStatus(err)
+}
+
+// isTimeout reports whether a read failed because it ran out of time. The vendored llama-swap client
+// flattens a transport failure into text, so the typed checks are backed by the words Go uses for one.
+func isTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "client.timeout") || strings.Contains(msg, "i/o timeout")
+}
+
+// short turns a failed read into one clause with no address, path or command in it: the status that
+// answered, "timed out", "connection refused", or "no answer" when nothing answered and nothing more is known.
+func short(err error) string {
+	if status, ok := statusOf(err); ok {
+		return fmt.Sprintf("HTTP %d", status)
+	}
+	switch {
+	case isTimeout(err):
 		return "timed out"
 	case strings.Contains(strings.ToLower(err.Error()), "refused"):
 		return "connection refused"
 	}
-	return "unreachable"
+	return "no answer"
 }
 
-// downDetail says why the roster is unavailable, in words that carry no address.
+// downDetail says why the roster is unavailable, in words that carry no address and say each thing once.
 func (s *state) downDetail() string {
 	switch {
 	case errors.Is(s.rosterErr, errNoEndpoint), errors.Is(s.rosterErr, errNoClient):
 		return s.rosterErr.Error()
 	}
-	return "llama-swap is unreachable (" + short(s.rosterErr) + ")"
+	switch why := short(s.rosterErr); {
+	case why == "no answer":
+		return "llama-swap is unreachable"
+	case why == "timed out":
+		return "llama-swap's roster read timed out"
+	case strings.HasPrefix(why, "HTTP "):
+		return "llama-swap's roster could not be read (" + why + ")"
+	default:
+		return "llama-swap is unreachable (" + why + ")"
+	}
+}
+
+// pinned reports whether seat_endpoints sends every call that names the seat to a remote llama-swap. The
+// key is the exact name a call uses, as the client resolves it.
+func (s *state) pinned(seat string) bool {
+	_, ok := s.cfg.SeatEndpoints[strings.TrimSpace(seat)]
+	return ok
+}
+
+// declare records the kind a lane's plan declares for a seat.
+func (s *state) declare(seat, kind string) {
+	if kind = strings.TrimSpace(kind); kind == "" {
+		return
+	}
+	for _, n := range s.names(seat) {
+		s.declared[strings.ToLower(strings.TrimSpace(n))] = kind
+	}
+}
+
+// declaredKind is the kind a lane's plan declares for the seat, under any name it answers to.
+func (s *state) declaredKind(seat string) string {
+	for _, n := range s.names(seat) {
+		if k, ok := s.declared[strings.ToLower(strings.TrimSpace(n))]; ok {
+			return k
+		}
+	}
+	return ""
 }
 
 // entryFor finds the serving-config entry that answers to name (an id or an alias).
@@ -190,11 +284,19 @@ func (s *state) canonical(name string) (string, bool) {
 	return strings.TrimSpace(name), false
 }
 
-// engineOf classifies a seat: declared vLLM (vllm_seats, matched under every name the seat answers to),
-// else the command its serving-config entry runs.
+// engineOf classifies a seat, the one rule for a lane's candidate and for a seat's own row: a seat served
+// by another node (seat_endpoints) is read there and is unknown here; else declared vLLM (vllm_seats,
+// matched under every name the seat answers to); else the command llama-swap reports it spawned, when the
+// seat is loaded and that command names an engine (it is what is true, where the file on disk may have
+// changed since); else the command its serving-config entry runs; else the kind a lane's plan declares
+// (the tier table); else unknown.
 func (s *state) engineOf(seat string) string {
-	f := SeatFacts{DeclaredVLLM: s.cfg.DeclaresVLLMSeat(seat)}
-	if id, ok := s.canonical(seat); ok && s.cfg.DeclaresVLLMSeat(id) {
+	if s.pinned(seat) {
+		return EngineUnknown
+	}
+	f := SeatFacts{DeclaredVLLM: s.cfg.DeclaresVLLMSeat(seat), Declared: s.declaredKind(seat)}
+	canon, _ := s.canonical(seat)
+	if canon != "" && s.cfg.DeclaresVLLMSeat(canon) {
 		f.DeclaredVLLM = true
 	}
 	if e, ok := s.entryFor(seat); ok {
@@ -203,6 +305,11 @@ func (s *state) engineOf(seat string) string {
 			if s.cfg.DeclaresVLLMSeat(n) {
 				f.DeclaredVLLM = true
 			}
+		}
+	}
+	if occ, ok := s.occupant(canon); ok && strings.TrimSpace(occ.Cmd) != "" {
+		if k := ClassifyEngine(SeatFacts{DeclaredVLLM: f.DeclaredVLLM, Cmd: occ.Cmd}); k != EngineUnknown {
+			return k
 		}
 	}
 	return ClassifyEngine(f)
@@ -265,13 +372,20 @@ func (s *state) occupant(canon string) (seatload.Occupant, bool) { return occupa
 // seat several lanes point at is asked once.
 func (s *state) Probe(ctx context.Context, c Candidate) Verdict {
 	canon, inRoster := s.canonical(c.Seat)
-	key := strings.ToLower(canon)
+	key := strings.ToLower(canon) + "\x00" + kindOf(c)
 	if v, ok := s.memo[key]; ok {
 		return v
 	}
-	v := s.probe(ctx, c, canon, inRoster)
-	if v.OK && (strings.TrimSpace(c.Engine) == "" || c.Engine == EngineUnknown) {
-		v.Detail += " (engine kind unknown: " + s.unknownWhy(c.Seat) + ")"
+	var v Verdict
+	if s.pinned(c.Seat) {
+		// The call goes to another node's llama-swap, which this node's roster never lists: not a seat
+		// that is missing here, and not one this node can read.
+		v = Verdict{OK: true, Probe: ProbeProcess, Detail: "served by another node (seat_endpoints pins it there); its engine is read on that node, not here"}
+	} else {
+		v = s.probe(ctx, c, canon, inRoster)
+		if v.OK && kindOf(c) == EngineUnknown {
+			v.Detail += " (engine kind unknown: " + s.unknownWhy(c.Seat) + ")"
+		}
 	}
 	s.memo[key] = v
 	return v
@@ -279,7 +393,7 @@ func (s *state) Probe(ctx context.Context, c Candidate) Verdict {
 
 func (s *state) probe(ctx context.Context, c Candidate, canon string, inRoster bool) Verdict {
 	if s.rosterErr != nil {
-		return Verdict{Probe: ProbeProcess, Detail: s.downDetail()}
+		return Verdict{Probe: ProbeProcess, Unknown: isTimeout(s.rosterErr), Detail: s.downDetail()}
 	}
 	if !inRoster {
 		return Verdict{Probe: ProbeProcess, Detail: "not in the llama-swap roster"}
@@ -333,12 +447,12 @@ func (s *state) endpointVerdict(ctx context.Context, canon string, occ seatload.
 	}
 	resp, err := s.opt.HTTP.Do(req)
 	if err != nil {
-		return Verdict{Probe: ProbeEndpoint, Detail: "loaded, but its health endpoint did not answer (" + short(err) + ")"}
+		return Verdict{Probe: ProbeEndpoint, Unknown: isTimeout(err), Detail: "loaded, but its health endpoint did not answer (" + short(err) + ")"}
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 	resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return Verdict{Probe: ProbeEndpoint, Detail: fmt.Sprintf("loaded, but its health endpoint answered %d", resp.StatusCode)}
+		return Verdict{Probe: ProbeEndpoint, Detail: fmt.Sprintf("loaded, but its health endpoint answered HTTP %d", resp.StatusCode)}
 	}
 	return Verdict{OK: true, Probe: ProbeEndpoint, Detail: fmt.Sprintf("loaded and ready; its health endpoint answered %d", resp.StatusCode)}
 }
@@ -412,7 +526,7 @@ func (s *state) answersTo(seat, want string) bool {
 // text, embeddings or reranking has no chat route: llama-swap answers a chat request for it with a 404,
 // which says nothing about whether the seat is up. The roles come from what the box states, never from a
 // guessed name: the seat is the configured embedder or speech-to-text seat, or its own command carries
-// the flag that makes it one (the way the serving config's author wrote it).
+// the flag that makes it one (the way the serving config's author wrote it), or it is a whisper server.
 func (s *state) hasChatRoute(seat string) bool {
 	for _, role := range []string{s.cfg.EmbedModel(), s.cfg.STTModel, s.cfg.STTModelHQ} {
 		if s.answersTo(seat, role) {
@@ -422,7 +536,7 @@ func (s *state) hasChatRoute(seat string) bool {
 	if e, ok := s.entryFor(seat); ok && cmdHasNonChatFlag(e.Cmd) {
 		return false
 	}
-	return true
+	return s.engineOf(seat) != EngineWhisperCpp
 }
 
 // completionVerdict runs the explicit 1-token completion probe on a seat the cheap probe passed.
@@ -486,7 +600,7 @@ func (s *state) completionVerdict(ctx context.Context, c Candidate, canon string
 	client := llamaclient.New(s.cfg.Endpoint, s.cfg.CompletionPath, c.Seat, timeout)
 	_, err := client.Generate(cctx, c.Seat, "", "ping", "", 1, 0, 0)
 	if err != nil {
-		return Verdict{Probe: ProbeCompletion, Detail: "the 1-token completion failed (" + short(err) + ")"}
+		return Verdict{Probe: ProbeCompletion, Unknown: isTimeout(err), Detail: "the 1-token completion failed (" + short(err) + ")"}
 	}
 	if !resident {
 		// The cheap probe said "not asked"; now it was, so that clause goes.

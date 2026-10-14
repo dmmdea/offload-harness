@@ -1334,8 +1334,8 @@ func TestHTTPStatusFailuresReadAsHTTPN(t *testing.T) {
 		f.dropModels = true
 		r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client()})
 		for _, e := range append(append([]Entry{}, r.Lanes...), r.Seats...) {
-			if e.ActiveBackend != EngineNone || e.BackendReason != "llama-swap is unreachable" {
-				t.Errorf("%s %s = %+v, want exactly \"llama-swap is unreachable\", the word once", e.Lane, e.Seat, e)
+			if e.ActiveBackend != EngineNone || !strings.HasSuffix(e.BackendReason, "unavailable: llama-swap is unreachable") {
+				t.Errorf("%s %s = %+v, want the reason to end with \"llama-swap is unreachable\", the word once", e.Lane, e.Seat, e)
 			}
 		}
 	})
