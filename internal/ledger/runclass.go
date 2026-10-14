@@ -131,6 +131,11 @@ func ClassOf(e Entry) string {
 	return ClassOfDoor(e.Door)
 }
 
+// ClassOfSession is the class a session label names on its own: "bake" for "bake:run-7", "test" for the go-test
+// label, "" for an ordinary label. ClassOf reads the same off a row that names no class, so a label that carries a
+// class labels every row written under it.
+func ClassOfSession(session string) string { return ClassOf(Entry{OriginSession: session}) }
+
 // ClassOfDoor is the class a door makes on its own: fleet-smoke and fleet-measure exist to produce test and
 // measurement traffic, so everything admitted through them is. A caller that must decide before it has a row
 // (a card opened when a call begins) asks this instead of building one.

@@ -105,3 +105,23 @@ func TestSessionFromEnvMatchesTheOriginResolver(t *testing.T) {
 		}
 	}
 }
+
+// A session label can carry a class of its own, and the node refuses such a label from a caller it cannot
+// authenticate (ClassOfSession is the question it asks).
+func TestClassOfSessionReadsTheClassALabelCarries(t *testing.T) {
+	for in, want := range map[string]string{
+		"sess-abc":        "",
+		"bake:run-7":      "bake",
+		"measurement:x":   "measurement",
+		"test:unit":       "test",
+		"go-test":         "test",
+		"tenant:acme":     "",
+		"":                "",
+		"bake":            "",
+		"production:real": "",
+	} {
+		if got := ClassOfSession(in); got != want {
+			t.Errorf("ClassOfSession(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

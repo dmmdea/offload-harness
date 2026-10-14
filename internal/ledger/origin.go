@@ -107,14 +107,21 @@ func CleanOrigin(s string) string {
 
 // stampOrigin fills the provenance columns from ProcessOrigin when the caller
 // set none — every writer in the binary is attributed by this one rule, and a
-// caller that names an origin of its own (a node re-recording a delegator's
-// job) keeps it.
+// caller that names an origin of its own keeps it. Two cases of that: a caller
+// that names a process (a pid) is kept whole, and a caller that names only a
+// SESSION (a fleet node writing the row of a job for the asker's session,
+// ADR 0085) keeps the session and still gets the pids of the process that
+// recorded the row, which is what the columns mean: "process P recorded this
+// while serving session S".
 func stampOrigin(e *Entry) {
-	if e.OriginSession != "" || e.OriginPID != 0 {
+	if e.OriginPID != 0 {
 		return
 	}
 	o := ProcessOrigin()
-	e.OriginSession, e.OriginPID, e.OriginPPID = o.Session, o.PID, o.PPID
+	if e.OriginSession == "" {
+		e.OriginSession = o.Session
+	}
+	e.OriginPID, e.OriginPPID = o.PID, o.PPID
 }
 
 // cardsTokens is the row's tokens through the cards (see Entry.CardsTokens):
