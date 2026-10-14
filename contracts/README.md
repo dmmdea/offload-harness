@@ -49,7 +49,8 @@ structured field or the write set, so a time criterion cannot be written as a ch
 fast it arrived. Two things could still put a speed term into an acceptance string: a content check that quotes a speed
 word (`contains:faster`, `regex:within 90 s`, `regex:tok/s >= 20`) and a future verb that reads a clock.
 `TestContractAcceptanceCarriesNoSpeedTerm` refuses the first in every JSON file under this directory, nested ones
-included, and `TestAcceptanceVerbSetIsReviewed` makes the second a reviewed decision: the verbs the parser declares and
+included (the key `acceptance` is read in any case, as the contract reader matches it: `Acceptance` is a live list),
+and `TestAcceptanceVerbSetIsReviewed` makes the second a reviewed decision: the verbs the parser declares and
 accepts must equal a reviewed list that gives each verb the reason it reads no clock. The scan is a lint, not a proof.
 It reads a `regex:` argument with its escapes undone, but a figure spelled `\d+`, `[0-9]+` or `(?:a|b)` evades it, so the
 closed verb set is the defence that does not depend on how a check is spelled. A check that has to quote a doc fact which
