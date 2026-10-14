@@ -449,6 +449,55 @@ type AwaitHostRAMOptions struct {
 	// what `gpu status` and the hidden holder read, not what ends the wait, so a failed write costs the status line and the
 	// holder's own enforcement, and the CLI says so once.
 	OnStampError func(err error)
+	// RequireStamp makes a stamp that cannot be written a failure of the wait: the stamp is tried a few times, and if it still has
+	// not landed the wait ends with *ErrHoldStamp before the host is looked at. The caller that sets it is one whose hidden holder
+	// is the only thing that can release the lease if the caller dies, so a wait the holder cannot see the end of must not run.
+	RequireStamp bool
+}
+
+// ErrHoldStamp is the failure of a wait that RequireStamp bound to its stamp: the moment the wait ends could not be put on the
+// lease's record, after Tries attempts. The record is left as it was (an earlier, outer stamp stays).
+type ErrHoldStamp struct {
+	Epoch uint64
+	Tries int
+	Err   error
+}
+
+func (e *ErrHoldStamp) Error() string {
+	return fmt.Sprintf("gpulease: host RAM: the moment the wait ends could not be written on the record of epoch %d after %d tries: %v", e.Epoch, e.Tries, e.Err)
+}
+
+func (e *ErrHoldStamp) Unwrap() error { return e.Err }
+
+// StampHostRAMHold puts the moment a host-RAM wait ends on the record of lease epoch (Meta.HostRAMHoldUntilMs). It does it only
+// while the lease still asks for the host: on an admitted lease the stamp would be a bound nothing is running.
+func (m *Manager) StampHostRAMHold(epoch uint64, until time.Time) error {
+	if stampFaultHook != nil {
+		if err := stampFaultHook(epoch); err != nil {
+			return err
+		}
+	}
+	ms := until.UnixMilli()
+	return m.Restamp(epoch, func(mt *Meta) { mt.HostRAMHoldUntilMs = ms })
+}
+
+// stampTries and stampRetryPause are how often, and how far apart, a stamp that RequireStamp binds the wait to is tried before the
+// wait fails. Variables so a test need not stand in line for the pause.
+var (
+	stampTries      = 4
+	stampRetryPause = 250 * time.Millisecond
+)
+
+// stampFaultHook is a test seam: when set, StampHostRAMHold fails with what it returns for the epoch. nil in production.
+var stampFaultHook func(epoch uint64) error
+
+// UseStampFault makes every StampHostRAMHold in this process fail with what fn returns for the epoch (nil from fn lets it
+// through), until the returned function is called: the way a test in another package provokes a stamp that cannot be written
+// while the other restamps of the lease (the drain's, the exclusive one) still work. Nothing in production calls it.
+func UseStampFault(fn func(epoch uint64) error) (restore func()) {
+	old := stampFaultHook
+	stampFaultHook = fn
+	return func() { stampFaultHook = old }
 }
 
 // AwaitHostRAM admits the host RAM a lease asked for after it cleared the seat (Options.HostRAMWaitGiB) and
@@ -484,8 +533,7 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 			// lease's hidden holder (other processes) read it. A reserve that dies before its first look has then still left a bound
 			// the holder can enforce. A stamp that cannot be written costs the status line and the holder's own enforcement, not the
 			// wait (the bound itself is the caller's Deadline): it is reported, tried again at the next look, and the wait goes on.
-			until := o.HoldUntil.UnixMilli()
-			if err := m.Restamp(epoch, func(mt *Meta) { mt.HostRAMHoldUntilMs = until }); err == nil {
+			if err := m.StampHostRAMHold(epoch, o.HoldUntil); err == nil {
 				stamped = true
 			} else if o.OnStampError != nil {
 				o.OnStampError(err)

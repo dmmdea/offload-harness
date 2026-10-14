@@ -135,6 +135,10 @@ type hostRAMHold struct {
 	heldSince    time.Time
 	freed        unloadOutcome
 	classDefault bool
+	// failClosed: a stamp that cannot be written ends the wait with an error (the detached form, whose hidden holder is the only
+	// thing that releases the lease if this process dies). outer is the outer bound already on the record, zero if none.
+	failClosed bool
+	outer      time.Time
 }
 
 // errHostRAMHoldBound is the failure of a wait that the hold bound ended: the lease is released and its command never ran.
