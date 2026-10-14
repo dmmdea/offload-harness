@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // `ledger --failures` is a read-only failure-class register over the ledger. Rows are grouped by
@@ -528,7 +528,7 @@ func TestLedgerFailuresFalseIsTheSavingsSummary(t *testing.T) {
 		"after":     {"--config", cfg, "--since", "3650", "--failures=false"},
 		"also true": {"--failures=false", "--failures=true", "--config", cfg, "--table", filepath.FromSlash(failureFixtureTable)},
 	} {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestLedgerHelperProcess$")
+		cmd := winexec.Command(os.Args[0], "-test.run=^TestLedgerHelperProcess$")
 		cmd.Env = append(os.Environ(), "LO_LEDGER_HELPER=1", "LO_LEDGER_ARGS="+strings.Join(args, "\x1f"))
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
