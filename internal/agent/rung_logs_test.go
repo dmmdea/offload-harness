@@ -141,7 +141,7 @@ func TestLogsKeyMasksNumbersIdsAndTimestamps(t *testing.T) {
 		{"retry in 5s", "retry in a moment"},
 		{"  indented line 1", "indented line 1"},
 		{"GET /a 200", "GET /b 200"},
-		{"connected to 192.0.2.1", "connected to 10.0.0"},
+		{"connected to 192.0.2.1", "connected to 192.0.2"},
 		{"stage build finished", "stage test finished"},
 	}
 	for _, p := range differ {
