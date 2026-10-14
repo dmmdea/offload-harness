@@ -16,8 +16,11 @@
   readout had counted rows that never ran an agent as runs: 24 % of the runs it counted, a denominator about a third
   larger than the true one, which inflated every unrecorded count and would have kept pager.unrecorded_runs above zero
   after the recording shipped. A deferred row with zero steps and only a setup-action trace stays a run: the setup actions
-  execute inside the agent loop before its first model turn, every return from the loop carries the pager report, and the
-  compaction ladder can run before the first model call, so such a run is not unrecorded once the recording ships.
+  execute inside the agent loop before its first model turn, a budget or infrastructure deferral takes the loop's pager
+  report, and the compaction ladder can run before the first model call, so such a run is not unrecorded once the recording
+  ships. From a build with the recording, the one kind of run that has a trace and no pager object is a write-class
+  deferral (the write door refused the run's write set): it is a run and counts as unrecorded, and the first log holds
+  none.
 - **Seat attribution is explicit.** A pool placement logs the pool's alias as the seat, so those runs cannot be attributed to
   a seat. `by_seat` holds the runs a seat can be named for (each seat the record names, and under the key `(unrecorded)`
   the runs whose record names no seat, every agent trace) and not the alias runs; alias runs are the `pool_alias` bucket
@@ -39,9 +42,10 @@
 - **Recording (additive, `omitempty`).** `PagerReport` gains `compaction_passes` (the number of ladder passes in the run: a
   proactive pass, the harder pass after a context-overflow rejection and the emergency shrink each count one). The standalone
   per-goal trace gains `pager` and `prefill` objects, and `AgentWireResult` gains `pager` (`core.AgentPager`, same key names as
-  the loop report), which the delegation log stores. Absent means a record from before the field; present means measured,
-  zeros included. `internal/compeval` exports its redactor (`NewRedactor`, `PIIClasses`) in a new file so a second harvester
-  cannot redact a different set of classes.
+  the loop report), which the delegation log stores. Present means measured, zeros included. Absent means a record from
+  before the field or from a node that predates it, a run that never reached the loop, or a write-class deferral (the write
+  door refused the run's write set, and that return comes before the object is attached). `internal/compeval` exports its
+  redactor (`NewRedactor`, `PIIClasses`) in a new file so a second harvester cannot redact a different set of classes.
 - **Fixed on the way.** One loop drains a whole queue and its pager and prefill instruments accumulate for the loop's life, so
   the stderr line and the new trace fields of goal N were the running total of goals 1 to N, and a payload evicted in an
   earlier goal could count as re-fetched in a later one. `Loop.ResetRunInstruments` (serial reuse only; a loop shared by

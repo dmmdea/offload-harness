@@ -198,18 +198,21 @@ type tcDelegationResult struct {
 // neverRan reports a logged subtask whose agent never executed: a deferral (capacity,
 // infrastructure, budget, config, contract) is written with zero steps and nothing else. Anything
 // recorded at all means an agent ran: a step trace, prefill or seat-token accounting, or a pager
-// object, which a run that reached the loop always carries (zeros included). A row with none of
-// those and no step never got there.
+// object, which a run the loop returned from carries (zeros included) unless it is a write-class
+// deferral. A row with none of those and no step never got there.
 //
 // A row with zero steps but a step trace is KEPT, and that is deliberate. Its trace is built from
 // the loop's own effect ledger, which exists only inside the loop's run: the contract's setup
 // actions execute there, before the first model turn and without spending a step. Such a row is a
 // deferred run (budget or infrastructure) that stopped before any model turn finished, and it is a
-// run for the three questions this readout answers: every return from the loop's run carries the
-// pager report, so after the recording ships the row carries a pager object and its unrecorded
-// count reaches zero like any other run's; and the compaction ladder runs before the first model
-// call and again when that call is rejected for context overflow, so a first prompt too large for
-// the seat can end a run at zero steps with passes recorded.
+// run for the three questions this readout answers: a budget or infrastructure deferral takes the
+// loop's pager report, so after the recording ships the row carries a pager object and its
+// unrecorded count reaches zero like any other run's; and the compaction ladder runs before the
+// first model call and again when that call is rejected for context overflow, so a first prompt
+// too large for the seat can end a run at zero steps with passes recorded.
+//
+// A write-class deferral (the write door refused the run's write set) is also kept, by its trace,
+// and reads unrecorded: it returns before the wire result is given a pager object.
 func (r *tcDelegationResult) neverRan() bool {
 	return r.Steps == 0 && len(r.Trace) == 0 && r.PrefillSteps == 0 && r.SeatTokensIn == 0 && r.Pager == nil
 }

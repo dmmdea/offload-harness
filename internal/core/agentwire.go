@@ -648,9 +648,11 @@ type AgentWireResult struct {
 	// --- Context-pager gate and compaction passes. The loop measures both and
 	// the wire dropped them, so the delegation log could not say how often the compaction
 	// ladder ran or whether the seat fetched back what it evicted. A POINTER with omitempty:
-	// the key is absent on a node that predates the field and on a run that never reached
-	// the loop, and PRESENT (zeros included) on every run the loop finished, so a reader
-	// separates "not recorded" from "recorded, nothing happened".
+	// the key is absent on a node that predates the field, on a run that never reached the
+	// loop, and on a write-class deferral (the write door refused the run's write set, and
+	// that return comes before the object is attached), and PRESENT (zeros included) on
+	// every other run the loop returned from, so a reader separates "not recorded" from
+	// "recorded, nothing happened".
 	Pager *AgentPager `json:"pager,omitempty"`
 
 	// --- Step trace (ADR 0036, 0.113.22). One entry per tool call the loop

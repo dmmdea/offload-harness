@@ -46,9 +46,10 @@ A readout over those records needs three rules, each learned from reading the re
    row with zero steps whose only record is a setup-action trace (36 runs in the first readout, 0.5 %, all budget or
    infrastructure deferrals that stopped with `error`; counted from the corpus, not a readout field). Those rows count as
    runs because the setup actions execute inside the agent loop, before its first model turn and without spending a
-   step, so the row did reach the loop; every return from the loop carries the pager report, so once the recording ships
-   such a row carries a pager object and is not unrecorded; and the compaction ladder runs before the first model call
-   and again when that call is rejected for context size, so a run can end at zero steps with passes counted.
+   step, so the row did reach the loop; a budget or infrastructure deferral takes the loop's pager report (a write-class
+   deferral is the one that does not, Decision 5), so once the recording ships such a row carries a pager object and is not
+   unrecorded; and the compaction ladder runs before the first model call and again when that call is rejected for
+   context size, so a run can end at zero steps with passes counted.
 4. **Seats are named only when the record names one.** `by_seat` holds the runs a seat can be named for: each seat the
    record names, and under the key `(unrecorded)` the runs whose record names no seat (every agent trace; the real corpus
    has none). Runs on a pool alias are not in `by_seat`: they are their own bucket (`pool_alias`, and `pool_alias_by_node`
@@ -57,7 +58,11 @@ A readout over those records needs three rules, each learned from reading the re
    over all runs, so a reader sees how much of the corpus a per-seat reading cannot reach.
 5. **Future runs record what the readout needs.** `PagerReport` counts compaction passes; the standalone trace file
    carries the pager and prefill objects of that goal alone (the loop's instruments are reset between goals); the agent
-   wire result carries a pager object, present on every run that reached the loop (zeros included) and absent otherwise.
+   wire result carries a pager object, zeros included, on every run the loop returned from except one kind: a write-class
+   deferral (defer class `write`, the write door refusing the run's write set) returns before the object is attached, so
+   that row keeps its step trace and has no pager object. A deferral raised before the loop ran has none either, but it
+   has no steps and no other record, and is skipped as never ran. Rows logged before the recording, and rows from a node
+   that predates it, have none.
 6. **The corpus is machine-local and redacted at harvest.** The corpus keeps numbers and enums only, redacts its few
    strings with the same redactor and vet table as `compaction-eval`, and replaces a seat, node id or stop reason that is
    a local path with a stable placeholder. This ADR carries aggregates only.
@@ -119,10 +124,12 @@ A recommendation for the human decision on the context-language-model measuremen
 - The two questions now have a reproducible answer path: a hash-stamped corpus, a frozen readout and a byte-exact check.
   Until instrumented runs accumulate, both gates read `NO_DATA`, which is the honest value.
 - Runs executed is a smaller, truer denominator than rows logged. For runs from a build that carries the recording, the
-  pager and compaction unrecorded counts reach zero, because every run that reached the loop writes a pager object,
-  zero-step deferred runs included. Rows logged before the recording, and rows from a node that predates it, stay
-  unrecorded, so a harvest over mixed logs reads zero only once the older rows are windowed out by day (`--since`) and
-  every node that wrote the rest runs the recording.
+  pager and compaction unrecorded counts reach zero apart from write-class deferrals: every other run that reached the
+  loop gets a pager object, zero-step deferred runs included, but a write-class deferral returns before the object is
+  attached, so it is a run (its trace keeps it) that counts as unrecorded, one count per such row. The first readout's
+  log holds no write-class row. Rows logged before the recording, and rows from a node that predates it, stay
+  unrecorded, so a harvest over mixed logs reads zero only once the older rows are windowed out by day (`--since`),
+  every node that wrote the rest runs the recording, and no write-class deferral is among them.
 - The readout is per machine. Nothing pools delegation logs across machines, and a reader comparing machines compares
   separate readouts.
 - The readout carries node ids and seat names as the records write them, so it stays machine-local like the corpus; only

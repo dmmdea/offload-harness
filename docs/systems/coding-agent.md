@@ -547,13 +547,19 @@ demands the frozen report back byte for byte. With no source flag, harvest reads
   is counted in the harvest stats.
 - **Why a zero-step row with a trace is a run.** A deferred row (budget or infrastructure) can carry zero steps and a
   step trace made only of setup actions. The setup actions execute inside the agent loop, before its first model turn and
-  without spending a step, so such a row did reach the loop, and the trace is the loop's own effect ledger. Every return
-  from the loop carries the pager report, so once the recording ships the row carries a pager object and is not
-  unrecorded. The compaction ladder also runs before the first model call and again when that call is rejected for
-  context size, so a run can end at zero steps with passes counted. For runs from a build that carries the recording, the
-  pager and compaction unrecorded counts therefore reach zero; rows logged before it, and rows from a node that predates
-  it, stay unrecorded, so a mixed log reads zero only once the older rows are windowed out by day (`--since`) and every
-  node that wrote the rest runs the recording.
+  without spending a step, so such a row did reach the loop, and the trace is the loop's own effect ledger. A budget or
+  infrastructure deferral takes the loop's pager report, so once the recording ships the row carries a pager object and is
+  not unrecorded. The compaction ladder also runs before the first model call and again when that call is rejected for
+  context size, so a run can end at zero steps with passes counted.
+- **Which rows carry a pager object.** From a build that carries the recording: a run the loop returned from carries one,
+  zeros included, whether it finished or was deferred after the loop returned (a budget, infrastructure or abstention
+  deferral, for example); a write-class deferral (defer class `write`, the write door refused the run's write set)
+  returns before the object is attached, so it keeps its step trace and has none, which makes it a run that counts as
+  unrecorded; a deferral raised before the loop ran has none and no other record either, and is skipped as never ran. Rows
+  logged before the recording, and rows from a node that predates it, have none. The pager and compaction unrecorded
+  counts therefore reach zero for recording-build rows with no write-class deferral among them, and a mixed log reads
+  zero only once the older rows are windowed out by day (`--since`) and every node that wrote the rest runs the
+  recording. The first readout's log holds no write-class row.
 - **What it reports.** The trace-bearing run count (an agent trace with a transcript, or a delegation row with a step
   trace); the pager re-fetch rate pooled over the runs that evicted something (distinct payloads re-fetched over distinct
   payloads evicted) against the 10 % gate of R2-13 (`agent.PagerGate`); the compaction fire rate (runs that ran the ladder at
@@ -583,8 +589,9 @@ demands the frozen report back byte for byte. With no source flag, harvest reads
 - **What is recorded now.** A standalone trace file carries `pager` (the loop's `PagerReport`, now with `compaction_passes`)
   and `prefill`; the queue drainer resets the loop's instruments before each goal, because they accumulate for the loop's
   life and a goal's trace would otherwise be the running total of the queue. The agent wire result carries `pager` (the
-  delegation log stores it). Rows written before that have neither, and the transcript in an older trace gives only a lower
-  bound on the ladder (tool turns that are elision markers or skeletons).
+  delegation log stores it) on every run the loop returned from except a write-class deferral (see "Which rows
+  carry a pager object" above). Rows written before that have neither, and the transcript in an older trace gives
+  only a lower bound on the ladder (tool turns that are elision markers or skeletons).
 - **No token counts is not a measured zero.** An engine that reports no prefill timings still ticks the observed-step
   counter, so a run with steps observed and zero prefilled and zero cached tokens is counted apart (`no_token_counts_runs`)
   and adds nothing to the token sums; the seat's own input-token figure (`seat_tokens_in`) is reported beside it for the runs

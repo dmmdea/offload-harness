@@ -217,10 +217,10 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 // the recording ships such a row still has no pager object, so the unrecorded count could never
 // reach zero. A row that did real work stays a run even when it was deferred, and so does a row
 // that recorded anything at all (a step trace, prefill, seat tokens, or a pager object, which a
-// run that reached the loop always carries, zeros included). That includes the zero-step deferred
-// row whose only trace is a setup action: the setup runs inside the loop, before its first model
-// turn, so the row reached the loop, will carry a pager object once the recording ships, and may
-// have compacted before its first model call.
+// run the loop returned from carries, zeros included, unless it is a write-class deferral). That
+// includes the zero-step deferred row whose only trace is a setup action: the setup runs inside
+// the loop, before its first model turn, so the row reached the loop, will carry a pager object
+// once the recording ships, and may have compacted before its first model call.
 func TestTraceCorpusSkipsRowsThatNeverRan(t *testing.T) {
 	dir := t.TempDir()
 	rows := []string{
