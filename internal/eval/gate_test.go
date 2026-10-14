@@ -514,6 +514,78 @@ func TestGatePowerNoteNonInferiorityBelowTwoPairs(t *testing.T) {
 	}
 }
 
+// GATE-R3: a metric with fewer than two resolved pairs has no interval, so its delta, lo and hi
+// serialize as null, never as the 0 BootstrapDeltaMean returns for "nothing to conclude". A metric
+// with two or more resolved pairs always has numbers, and a measured 0 stays 0.
+func TestGateEfficiencyWithFewerThanTwoResolvedPairsIsNullNotZero(t *testing.T) {
+	const n = 16
+	decode := func(t *testing.T, r GateResult) map[string]map[string]any {
+		t.Helper()
+		var doc struct {
+			Efficiency []map[string]any `json:"efficiency"`
+		}
+		if err := json.Unmarshal([]byte(marshal(t, r)), &doc); err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]map[string]any{}
+		for _, e := range doc.Efficiency {
+			out[e["name"].(string)] = e
+		}
+		return out
+	}
+	isNull := func(e map[string]any, k string) bool { v, present := e[k]; return present && v == nil }
+	p := niPre(n)
+	p.Efficiency = []PreRegEfficiency{
+		{Name: tokensName, Class: EffTokens},
+		{Name: "peak_gib", Class: EffMemoryGiB},
+		{Name: "tokens_saved", Class: EffTokens, LowerIsBetter: boolp(false)},
+	}
+	b, h := freeze(t, p, nil)
+	inc := arm("i", repeatF(8, n), nil)
+	cand := arm("c", repeatF(8, n), nil)
+	for i := range inc.Tasks {
+		// tokens: resolved nowhere. peak_gib: resolved on exactly one pair. tokens_saved: resolved
+		// on two pairs, and equal there (a measured zero difference).
+		inc.Tasks[i].Attempts[0].Metrics = map[string]*float64{"tokens_saved": nil}
+		cand.Tasks[i].Attempts[0].Metrics = map[string]*float64{"tokens_saved": nil}
+	}
+	inc.Tasks[0].Attempts[0].Metrics["peak_gib"], cand.Tasks[0].Attempts[0].Metrics["peak_gib"] = f64(10), f64(7)
+	for _, i := range []int{3, 4} {
+		inc.Tasks[i].Attempts[0].Metrics["tokens_saved"], cand.Tasks[i].Attempts[0].Metrics["tokens_saved"] = f64(100), f64(100)
+	}
+	r := mustGate(t, b, h, inputFor(h, inc, cand))
+	rows := decode(t, r)
+	for _, name := range []string{tokensName, "peak_gib"} {
+		e := rows[name]
+		for _, k := range []string{"delta", "lo", "hi"} {
+			if !isNull(e, k) {
+				t.Errorf("%s: %s must be null with fewer than two resolved pairs, got %v (present %v)", name, k, e[k], e[k] != nil)
+			}
+		}
+	}
+	if rows[tokensName]["n"] != float64(0) || rows[tokensName]["unresolved_pairs"] != float64(n) {
+		t.Errorf("an unresolved metric still reports its counts: %v", rows[tokensName])
+	}
+	if rows["peak_gib"]["n"] != float64(1) || rows["peak_gib"]["unresolved_pairs"] != float64(n-1) || rows["peak_gib"]["improves"] != false {
+		t.Errorf("one resolved pair is not enough to improve, and is counted: %v", rows["peak_gib"])
+	}
+	// Two resolved pairs: the interval exists, and an exact 0 is a number, not null.
+	e := rows["tokens_saved"]
+	for _, k := range []string{"delta", "lo", "hi"} {
+		if v, ok := e[k].(float64); !ok || v != 0 {
+			t.Errorf("tokens_saved: %s with two resolved equal pairs is the number 0, got %v", k, e[k])
+		}
+	}
+	if e["n"] != float64(2) {
+		t.Errorf("tokens_saved n: %v", e["n"])
+	}
+	// The raw bytes carry no zero for the metrics that have no data.
+	j := marshal(t, r)
+	if strings.Count(j, `"delta":null`) != 2 || strings.Count(j, `"lo":null`) != 2 || strings.Count(j, `"hi":null`) != 2 {
+		t.Errorf("want exactly two efficiency rows with null delta, lo and hi: %s", j)
+	}
+}
+
 // Row 18: an unresolved cost survives the whole path as null and never appears as 0.
 func TestGateUnresolvedCostNeverSerializesAsZero(t *testing.T) {
 	doc := `{

@@ -405,3 +405,61 @@ func TestGateCmdSchemaMatchesTheEnum(t *testing.T) {
 		t.Fatalf("schema draft: %q", doc.Schema)
 	}
 }
+
+// The global --config hoist (main.go hoistGlobalConfig) re-attaches `--config <v>` at the FRONT of
+// the verb's args, so `local-offload --config x.json gate schema` reaches gateMain as
+// [--config x.json schema]. The verb needs no config; it must accept and drop a leading --config
+// instead of dispatching on it.
+func TestGateCmdAcceptsALeadingGlobalConfig(t *testing.T) {
+	f := freezeSuperiority(t, 16, nil)
+	want := string(eval.GateInputSchema)
+	lead := map[string][]string{
+		"--config v":   {"--config", "x.json"},
+		"--config=v":   {"--config=x.json"},
+		"-config v":    {"-config", "x.json"},
+		"-config=v":    {"-config=x.json"},
+		"twice, mixed": {"--config", "x.json", "--config=y.json"},
+	}
+	for name, prefix := range lead {
+		t.Run(name, func(t *testing.T) {
+			out, errs, code := runGateCmd(t, append(append([]string{}, prefix...), "schema")...)
+			if code != 0 || out != want {
+				t.Fatalf("gate %v schema: code %d err %q (schema printed: %v)", prefix, code, errs, out == want)
+			}
+			out, errs, code = runGateCmd(t, append(append([]string{}, prefix...), "check", "--baseline", f.baseline, "--expect-hash", f.hash)...)
+			if code != 0 || strings.TrimSpace(out) != f.hash {
+				t.Fatalf("gate %v check: code %d out %q err %q", prefix, code, out, errs)
+			}
+		})
+	}
+
+	// The whole path main takes: hoist first, then the verb gets what is left.
+	sub, rest, ok := hoistGlobalConfig([]string{"--config", "x.json", "gate", "schema"})
+	if !ok || sub != "gate" {
+		t.Fatalf("hoist: %q %v %v", sub, rest, ok)
+	}
+	if out, errs, code := runGateCmd(t, rest...); code != 0 || out != want {
+		t.Fatalf("local-offload --config x.json gate schema: code %d err %q", code, errs)
+	}
+
+	// A --config after the subcommand still parses (the per-verb flag), and the verdict verb takes it too.
+	if out, errs, code := runGateCmd(t, "schema", "--config", "x.json"); code != 0 || out != want {
+		t.Fatalf("schema --config x.json: code %d err %q", code, errs)
+	}
+
+	// A usage error names the real mistake, not the config flag.
+	_, errs, code := runGateCmd(t, "--config", "x.json", "nonsense")
+	if code != 2 || !strings.Contains(errs, `"nonsense"`) || strings.Contains(errs, `"--config"`) {
+		t.Fatalf("an unknown subcommand after --config: code %d err %q", code, errs)
+	}
+	// --config with no subcommand is a usage error, not a panic and not a verdict.
+	for _, args := range [][]string{{"--config", "x.json"}, {"--config=x.json"}, {"--config"}} {
+		if _, _, code := runGateCmd(t, args...); code != 2 {
+			t.Errorf("gate %v must exit 2, got %d", args, code)
+		}
+	}
+	// help still works behind it.
+	if out, _, code := runGateCmd(t, "--config", "x.json", "help"); code != 0 || !strings.Contains(out, "Exit codes") {
+		t.Errorf("--config x.json help: code %d", code)
+	}
+}
