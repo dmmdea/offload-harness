@@ -21,8 +21,10 @@
 // What it does, in the order a node meets it:
 //   - mode 2 (muted) nodes are dropped; a wire that came from one is left out (a typed warning), or, for a widget input, the
 //     widget's stored value stays;
-//   - mode 4 (bypassed) nodes are not emitted; each output takes the first connected input of the same type (a union type
-//     matches when the two share a member), chains resolve, no match drops the wire (a typed warning);
+//   - mode 4 (bypassed) nodes are not emitted; the i-th output of a type takes the i-th connected input of that type (a union
+//     type matches when the two share a member, so positive and negative conditioning pass straight through), chains resolve,
+//     no connected input of the type drops the wire (a typed warning), and a type with a different number of outputs and
+//     connected inputs is refused (ambiguous_bypass), because which input an output takes would be a guess;
 //   - subgraph instances are expanded: their nodes get the id `<instance>:<inner>` (nested: `<a>:<b>:<inner>`), a wire into the
 //     instance reaches the inner nodes through the definition's input node (id -10), an inner wire into its output node
 //     (id -20) is what leaves the instance, and the instance's widgets_values reach the inner widgets through the
@@ -33,11 +35,12 @@
 //     the dotted names a dynamic combo (`<combo>.<child>`, nested to any depth) and an autogrow (`<group>.<child>`, link-fed)
 //     give their children;
 //   - a link beats a widget value everywhere;
-//   - a seed option pins the seed inputs (see pinSeeds below).
+//   - a seed option pins the seed inputs (see pinSeeds below), and a seed-named input it left alone is listed in a warning.
 //
 // What it never does is guess. A class the listing does not know, a template that needs a newer ComfyUI than the one it was
-// told about, a widget layout that does not add up, an input type it has no rule for: each is a refusal with a code, the
-// details that locate it, and no graph.
+// told about, a widget layout that does not add up, an input type it has no rule for, a bypassed node whose outputs cannot be
+// paired with its inputs: each is a refusal with a code, the details that locate it, and no graph. What it cannot check it says
+// so: a ComfyUI version given with no minimum to compare it with is a warning (version_check_skipped), never a silent pass.
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -52,6 +55,7 @@ export const REFUSAL = Object.freeze({
   COMFY_VERSION_UNKNOWN: "comfy_version_unknown",
   COMFY_TOO_OLD: "comfyui_too_old",
   UNKNOWN_NODE_CLASS: "unknown_node_class",
+  AMBIGUOUS_BYPASS: "ambiguous_bypass",
   GROUP_NODE_UNSUPPORTED: "group_node_unsupported",
   SUBGRAPH_DEFINITION_MISSING: "subgraph_definition_missing",
   SUBGRAPH_CYCLE: "subgraph_cycle",
@@ -249,6 +253,13 @@ function makeScope(nodesArr, linksArr, prefix, parent, def) {
     }
     const k = String(n.id);
     if (nodes.has(k)) refuse(REFUSAL.BAD_TEMPLATE, `node id ${k} appears twice`, { where: prefix || "root", id: n.id });
+    // the slot lists are read as arrays further on (a bypass pairs them, an instance is wired through them): a list that is
+    // absent or null is an empty one, anything else that is not an array is the template's fault, caught here and nowhere later
+    for (const field of ["inputs", "outputs"]) {
+      if (n[field] !== undefined && n[field] !== null && !Array.isArray(n[field])) {
+        refuse(REFUSAL.BAD_TEMPLATE, `node ${prefix}${k}: ${field} is not an array`, { where: prefix || "root", node: `${prefix}${k}`, field });
+      }
+    }
     nodes.set(k, n);
   }
   if (linksArr !== undefined && linksArr !== null && !Array.isArray(linksArr)) refuse(REFUSAL.BAD_TEMPLATE, "links is not an array", { where: prefix || "root" });
@@ -267,11 +278,22 @@ function makeScope(nodesArr, linksArr, prefix, parent, def) {
 // The conversion
 // ---------------------------------------------------------------------------------------------------------------------
 
-function checkVersions(options) {
+// checkVersions: the first thing a call is held to, before the seed, the listing and the template are looked at, so a too-old
+// ComfyUI is never hidden behind another refusal. With no minimum there is nothing to compare: a version that was given is then
+// said to be unchecked in a warning (the call is not refused, and it is never silent).
+function checkVersions(options, warnings) {
   const min = options.minComfyUIVersion ?? null;
-  if (min === null) return;
-  if (parseVersion(min) === null) refuse(REFUSAL.BAD_VERSION, `the template's minimum ComfyUI version is not a version: ${JSON.stringify(min)}`, { minComfyUIVersion: min });
   const have = options.comfyVersion ?? null;
+  if (min === null) {
+    if (have !== null) {
+      warnings.push({
+        code: "version_check_skipped", comfyVersion: have,
+        reason: "no minimum ComfyUI version is known for this template, so the version was not checked against anything",
+      });
+    }
+    return;
+  }
+  if (parseVersion(min) === null) refuse(REFUSAL.BAD_VERSION, `the template's minimum ComfyUI version is not a version: ${JSON.stringify(min)}`, { minComfyUIVersion: min });
   if (have === null) {
     refuse(REFUSAL.COMFY_VERSION_UNKNOWN, `the template needs ComfyUI ${min} or newer and no ComfyUI version was given (it is never assumed)`, { required: min });
   }
@@ -282,6 +304,8 @@ function checkVersions(options) {
 }
 
 function build(template, objectInfo, options) {
+  const warnings = [];
+  checkVersions(options, warnings);
   const seed = options.seed ?? null;
   if (seed !== null && !(typeof seed === "number" && Number.isSafeInteger(seed) && seed >= 0)) {
     refuse(REFUSAL.BAD_SEED, "the seed must be a non-negative safe integer", { seed: typeof seed === "number" ? seed : String(seed) });
@@ -289,7 +313,6 @@ function build(template, objectInfo, options) {
   if (!isObj(objectInfo) || Object.keys(objectInfo).length === 0) {
     refuse(REFUSAL.BAD_OBJECT_INFO, "the object_info must be a non-empty object keyed by node class", {});
   }
-  checkVersions(options);
   if (!isObj(template) || !Array.isArray(template.nodes)) refuse(REFUSAL.BAD_TEMPLATE, "not a UI-format workflow: no nodes array", {});
 
   const defs = new Map();
@@ -297,12 +320,17 @@ function build(template, objectInfo, options) {
   if (subgraphs !== undefined && !Array.isArray(subgraphs)) refuse(REFUSAL.BAD_TEMPLATE, "definitions.subgraphs is not an array", {});
   for (const d of subgraphs ?? []) {
     if (!isObj(d) || typeof d.id !== "string" || d.id === "") refuse(REFUSAL.BAD_TEMPLATE, "a subgraph definition has no id", {});
+    for (const field of ["inputs", "outputs"]) {
+      if (d[field] !== undefined && d[field] !== null && !Array.isArray(d[field])) {
+        refuse(REFUSAL.BAD_TEMPLATE, `subgraph ${d.id}: ${field} is not an array`, { subgraph: d.id, field });
+      }
+    }
     defs.set(d.id, d);
   }
 
   const ctx = {
     oi: objectInfo, defs, seed,
-    warnings: [], pinnedSeeds: [], live: [], instances: new Map(), proxies: new Map(), entryCache: new Map(),
+    warnings, pinnedSeeds: [], live: [], instances: new Map(), proxies: new Map(), entryCache: new Map(),
     stats: { nodes: 0, expandedSubgraphs: 0, mutedNodes: 0, bypassedNodes: 0, notes: 0, reroutes: 0, primitiveNodes: 0 },
   };
   const root = makeScope(template.nodes, template.links, "", null, null);
@@ -495,13 +523,27 @@ function resolveOutput(ctx, scope, node, slot, trail) {
   }
 }
 
-// A bypassed node hands each output the first connected input of the same type.
+// A bypassed node hands its outputs to its inputs positionally by type: the i-th output of a type T takes the i-th connected input
+// of type T (a union type matches when the two share a member, "*" matches any type). A node with two outputs of one type, such as
+// the positive and negative conditioning of a ControlNet apply node, keeps them apart that way. With no connected input of the type
+// there is nothing to pass: the wire is dropped (a typed warning where it was read). When the type has a different number of outputs
+// and connected inputs, which input an output takes would be a guess, so the call is refused (ambiguous_bypass). Only an output that
+// something reads is resolved, so a bypassed node nobody reads is never refused.
 function passThrough(ctx, scope, node, slot, trail) {
-  const outType = node.outputs?.[slot]?.type;
-  const inputs = node.inputs ?? [];
-  const idx = inputs.findIndex((i) => i && i.link !== null && i.link !== undefined && typesMatch(i.type, outType));
-  if (idx < 0) return nothing("bypass_no_match");
-  return resolveInput(ctx, scope, node, idx, trail);
+  const outputs = node.outputs ?? [];
+  const outType = outputs[slot]?.type;
+  const wired = [];
+  (node.inputs ?? []).forEach((i, j) => { if (i && i.link !== null && i.link !== undefined && typesMatch(i.type, outType)) wired.push(j); });
+  if (wired.length === 0) return nothing("bypass_no_match");
+  const same = [];
+  outputs.forEach((o, j) => { if (o?.type === outType) same.push(j); });
+  if (same.length !== wired.length) {
+    const id = scope.prefix + node.id;
+    refuse(REFUSAL.AMBIGUOUS_BYPASS,
+      `bypassed node ${id} has ${same.length} output(s) of type ${outType} and ${wired.length} connected input(s) of it: which input an output takes is ambiguous, and is never guessed`,
+      { node: id, type: outType, output: slot, outputs: same.length, inputs: wired.length });
+  }
+  return resolveInput(ctx, scope, node, wired[same.indexOf(slot)], trail);
 }
 
 // An inner wire from the definition's input node j is the instance's input of that name (by position when the instance lists as
@@ -656,8 +698,7 @@ function buildNode(ctx, item, options) {
   const { values, seedNames } = mapWidgets(ctx, item, ctx.proxies.get(key));
   const inputs = { ...values };
   const wired = new Set();
-  const slots = node.inputs ?? [];
-  if (!Array.isArray(slots)) refuse(REFUSAL.BAD_TEMPLATE, `node ${key}: inputs is not an array`, { node: key });
+  const slots = node.inputs ?? []; // an array: makeScope refused any other shape
   slots.forEach((slot, i) => {
     if (!isObj(slot) || slot.link === null || slot.link === undefined) return;
     const name = slot.name;
@@ -675,12 +716,20 @@ function buildNode(ctx, item, options) {
   });
   // pinSeeds: with a seed option, every input that is a seed (named seed or noise_seed, and made one by the listing's
   // control_after_generate) and holds a stored or primitive value is set to it; a wired seed, an INT that merely shares the
-  // control (a PrimitiveInt) and a sampling seed with no control are left alone
+  // control (a PrimitiveInt) and a sampling seed with no control are left alone. A seed-named input left alone is not silent:
+  // it is a seed_not_pinned warning with the reason ("wired", or "no_control" for a seed the listing gives no control)
   if (ctx.seed !== null) {
+    const pinned = new Set();
     for (const name of seedNames) {
       if (hasOwn(inputs, name) && !wired.has(name)) {
         ctx.pinnedSeeds.push({ node: key, input: name, from: inputs[name], to: ctx.seed });
         inputs[name] = ctx.seed;
+        pinned.add(name);
+      }
+    }
+    for (const name of Object.keys(inputs)) {
+      if (SEED_NAME.test(lastSegment(name)) && !pinned.has(name)) {
+        ctx.warnings.push({ code: "seed_not_pinned", node: key, input: name, reason: wired.has(name) ? "wired" : "no_control" });
       }
     }
   }
