@@ -714,6 +714,53 @@ func TestTraceCorpusUnusablePagerObjectsReadAsUnrecordedAndAreNoted(t *testing.T
 	}
 }
 
+// TestTraceCorpusHarvestShapeChecksTraceRecords: a file in the traces directory is a run only if it
+// is shaped like an agent trace, a transcript plus either steps or a stop reason. A valid JSON object
+// of some other kind (a checkpoint, a queue file, a goal list) used to become a run with zero steps
+// and no trace, which would be counted in every denominator. The rest are counted under one named
+// reason, apart from the files that are not JSON objects at all.
+func TestTraceCorpusHarvestShapeChecksTraceRecords(t *testing.T) {
+	const wantSkip = "trace record has no transcript, or neither steps nor a stop reason"
+	dir := t.TempDir()
+	files := map[string]string{
+		// shaped like a trace: kept
+		"ok-both":       `{"stop_reason":"done","steps":3,"transcript":[{"Role":"user","Content":"hi"}]}`,
+		"ok-stop-only":  `{"stop_reason":"error","steps":0,"transcript":[{"Role":"user","Content":"hi"}]}`,
+		"ok-steps-only": `{"steps":2,"transcript":[{"Role":"user","Content":"hi"}]}`,
+		// valid JSON, not a trace: counted under the named reason
+		"no-transcript":    `{"stop_reason":"done","steps":3}`,
+		"empty-transcript": `{"stop_reason":"done","steps":3,"transcript":[]}`,
+		"no-steps-no-stop": `{"transcript":[{"Role":"user","Content":"hi"}]}`,
+		"zero-steps-blank": `{"stop_reason":"","steps":0,"transcript":[{"Role":"user","Content":"hi"}]}`,
+		"other-record":     `{"id":"q-1","goal":"a queued goal","status":"pending"}`,
+		// not a JSON object: the older reason
+		"array": `[1,2,3]`,
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runs, stats, err := tcHarvest(tcHarvestOpts{TracesDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.TraceFiles != len(files) || len(runs) != 3 || stats.Runs != 3 {
+		t.Fatalf("files/runs = %d/%d, want %d files and 3 runs: %v", stats.TraceFiles, len(runs), len(files), stats.Skipped)
+	}
+	for _, r := range runs {
+		if !strings.HasPrefix(r.ID, "tr-ok-") || !r.TraceBearing {
+			t.Errorf("run %s should be one of the three shaped like a trace, and trace-bearing", r.ID)
+		}
+	}
+	if stats.Skipped[wantSkip] != 5 {
+		t.Errorf("skipped[%q] = %d, want 5 (all: %v)", wantSkip, stats.Skipped[wantSkip], stats.Skipped)
+	}
+	if stats.Skipped["trace file not a trace record"] != 1 {
+		t.Errorf("a file that is not a JSON object keeps its own reason: %v", stats.Skipped)
+	}
+}
+
 // TestTraceCorpusLadderArtifactsCountOnlyToolTurns: the transcript evidence for the ladder is a tool
 // turn that is a product of it (an elision marker, a dedupe reference). The same text in any other
 // role is not evidence: the model can quote it, a user can paste it.
