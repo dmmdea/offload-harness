@@ -648,6 +648,37 @@ test("a legacy proxied widget is refused when the root graph wires something int
   );
 });
 
+test("a legacy proxied widget that is wired at the root is refused for the wiring even where the instance also carries a value", () => {
+  const read = (tpl) => templateValue(PROXY_SPEC, PROXY_VIEW, tpl, proxiedItem({ proxied: true }));
+  const message = (tpl) => { try { read(tpl); } catch (e) { return e.message; } return ""; };
+  const text = { name: "text", type: "STRING" };
+  const lora = { name: "lora_name", type: "COMBO" };
+  const entry = (name, link) => ({ name, type: name === "text" ? "STRING" : "COMBO", widget: { name }, link });
+  const wired = { instanceInputs: [entry("text", null), entry("lora_name", 7)], rootLinks: [[7, 41, 0, 238, 1, "COMBO"]] };
+  const wiring = /instance 238 has its lora_name input linked at the root \(to node:\S+#0\), so the interior value is not the one that runs/;
+  // the wiring wins in all three cases of the carried value: the positions agree (I would be named), they differ, and the input is not widget-typed
+  const cases = {
+    "positions agree": { proxy: [["227", "text"], ["221", "lora_name"]], sgInputs: [text, lora], instanceValues: ["t", "b.safetensors"] },
+    "positions differ": { proxy: [["221", "lora_name"], ["227", "text"]], sgInputs: [text, lora], instanceValues: ["b.safetensors"] },
+    "input not widget-typed": { proxy: [["227", "text"], ["221", "lora_name"]], sgInputs: [text, { name: "lora_name", type: "*" }], instanceValues: ["t", "b.safetensors"] },
+  };
+  for (const [name, args] of Object.entries(cases)) {
+    const msg = message(proxiedTemplate({ ...args, ...wired }));
+    assert.match(msg, wiring, name);
+    assert.doesNotMatch(msg, /carries a promoted value/, name);
+    assert.doesNotMatch(msg, /read it with I\b/, name);
+  }
+  // the advice the old order gave would have failed: an I locator on the same wired instance throws "is linked"
+  const tpl = proxiedTemplate({ ...cases["positions agree"], ...wired });
+  const sg = tpl.definitions.subgraphs[0];
+  assert.throws(
+    () => templateValue(PROXY_SPEC, PROXY_VIEW, tpl, { key: "k", b: null, t: { kind: "inst", sg: null, id: 238, type: `subgraph:${sg.name}`, input: "lora_name" } }),
+    /instance 238 widget lora_name is linked/,
+  );
+  // without the wiring the same instance still gets the carried-value message
+  assert.match(message(proxiedTemplate(cases["positions agree"])), /read it with I \(position 1 is also its place among the widget-typed inputs\)/);
+});
+
 test("an instance whose own promoted widget is linked in the root graph fails", () => {
   const spec = BUILDER_SPECS.find((s) => s.builder === "wf-qwen-image-21");
   const view = spec.views.find((v) => v.name === "t2i");
