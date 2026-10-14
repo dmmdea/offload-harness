@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -498,5 +499,54 @@ func TestLedgerFailuresSaysWhatItCouldNotRead(t *testing.T) {
 	}
 	if !strings.Contains(errText, "1 ledger line(s) could not be read") {
 		t.Errorf("the unreadable line left no note on stderr, got %q", errText)
+	}
+}
+
+// ledgerHelperProcess is the child of TestLedgerFailuresFalseIsTheSavingsSummary: the ledger verb run as main runs
+// it, in a process of its own, because a flag set that refuses an argument exits the process (flag.ExitOnError),
+// which an in-process test cannot survive.
+func TestLedgerHelperProcess(t *testing.T) {
+	if os.Getenv("LO_LEDGER_HELPER") != "1" {
+		return
+	}
+	if err := runLedgerMode(strings.Split(os.Getenv("LO_LEDGER_ARGS"), "\x1f")); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+// `ledger --failures=false` is the savings summary, as every boolean flag spelled false is: the mode is off. It
+// exited 2 with a usage dump, because the register's flag was parsed by nobody once the register was not asked for.
+// Run end to end in a child process, since the refusal is an os.Exit.
+func TestLedgerFailuresFalseIsTheSavingsSummary(t *testing.T) {
+	cfg := failureFixtureConfig(t)
+	for name, args := range map[string][]string{
+		"equals":    {"--failures=false", "--config", cfg},
+		"single":    {"-failures=false", "--config", cfg},
+		"zero":      {"--failures=0", "--config", cfg},
+		"after":     {"--config", cfg, "--since", "3650", "--failures=false"},
+		"also true": {"--failures=false", "--failures=true", "--config", cfg, "--table", filepath.FromSlash(failureFixtureTable)},
+	} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestLedgerHelperProcess$")
+		cmd.Env = append(os.Environ(), "LO_LEDGER_HELPER=1", "LO_LEDGER_ARGS="+strings.Join(args, "\x1f"))
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		out := stdout.String()
+		if name == "also true" {
+			// the last word wins, as the flag package has it: a register, not a summary
+			if err != nil || !strings.Contains(out, `"classes"`) {
+				t.Errorf("%s: err = %v, stdout %q: want the register", name, err, out)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: ledger %v failed: %v\nstderr: %s", name, args, err, stderr.String())
+			continue
+		}
+		if !strings.Contains(out, `"tokens_saved"`) || strings.Contains(out, `"classes"`) {
+			t.Errorf("%s: ledger %v printed the register, or no summary:\n%s", name, args, out)
+		}
 	}
 }
