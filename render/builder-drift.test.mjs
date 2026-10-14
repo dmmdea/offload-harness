@@ -15,7 +15,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   buildManifest, builderValues, canonical, checkBuilderSide, checkCoverage, checkManifestShape, checkTemplateSide, formatManifest,
   itemDigest, loadManifest, main, recipeSha256, resolveTemplatesDir, templateSource, templateValue, MANIFEST_PATH,
@@ -800,6 +800,76 @@ test("the templates directory is resolved in one order by the CLI and the tests:
   const err = [];
   assert.equal(await main(["check", "--comfy-dir", join(dir, "no-such-tree")], { out: () => {}, err: (s) => err.push(s), env }), 2);
   assert.match(err.join(""), /--comfy-dir .* has no comfyui-workflow-templates-json package/);
+});
+
+// The package root (the folder that holds templates/) given where the templates directory belongs used to read as twenty
+// "template X is not in the package" failures and "installed unknown", which points at the package, not at the argument.
+// It is refused instead, with the path to pass, rather than followed into templates/: the manifest records which package was read.
+test("a package root given as the templates directory is refused by check, explain and record; its templates folder is read", async (t) => {
+  const dir = scratchDir(t, "bd-root-");
+  const tdir = writeSyntheticPackage(dir);
+  const root = dirname(tdir);
+  writeFileSync(join(root, "__init__.py"), "");
+  const want = `${root.replace(/\\/g, "/")}/templates`;
+  const manifestFile = join(dir, "m.json");
+  const run = async (argv, env = {}) => {
+    const out = [];
+    const err = [];
+    const code = await main(argv, { out: (s) => out.push(s), err: (s) => err.push(s), env });
+    return { code, out: out.join(""), err: err.join("") };
+  };
+  // the templates folder itself is read, through the flag and through the environment
+  assert.equal((await run(["record", "--templates-dir", tdir, "--manifest", manifestFile])).code, 0);
+  const recorded = readFileSync(manifestFile, "utf8");
+  const checked = await run(["check", "--templates-dir", tdir, "--manifest", manifestFile]);
+  assert.equal(checked.code, 0, checked.err);
+  assert.match(checked.out, /template side checked against 9\.9\.1/);
+  assert.equal((await run(["check", "--manifest", manifestFile], { COMFY_TEMPLATES_DIR: tdir })).code, 0);
+  assert.equal((await run(["explain", "--templates-dir", tdir])).code, 0);
+  // the package root is refused, whichever way it is given, and nothing is read or written
+  for (const verb of ["check", "explain", "record"]) {
+    for (const [via, argv, env] of [
+      ["--templates-dir", ["--templates-dir", root], {}],
+      ["COMFY_TEMPLATES_DIR", [], { COMFY_TEMPLATES_DIR: root }],
+    ]) {
+      const r = await run([verb, ...argv, "--manifest", manifestFile], env);
+      assert.equal(r.code, 2, `${verb} via ${via}: ${r.err}`);
+      assert.match(r.err, new RegExp(`^${esc(via)} .* is the package root`), `${verb} via ${via}: ${r.err}`);
+      assert.ok(r.err.includes(`pass ${want}`), `${verb} via ${via} must name ${want}: ${r.err}`);
+      assert.doesNotMatch(r.err, /is not in comfyui-workflow-templates-json|installed unknown/, `${verb} via ${via}`);
+      assert.equal(r.out, "", `${verb} via ${via} printed nothing`);
+      assert.equal(readFileSync(manifestFile, "utf8"), recorded, `${verb} via ${via} left the manifest as it was`);
+    }
+  }
+});
+
+test("the package-root refusal is narrow: a templates folder, a missing, empty or mixed directory and --comfy-dir are unchanged", (t) => {
+  const dir = scratchDir(t, "bd-root-edge-");
+  const tdir = writeSyntheticPackage(dir);
+  const root = dirname(tdir);
+  assert.throws(() => resolveTemplatesDir({ "templates-dir": root }, {}), /^Error: --templates-dir .* is the package root/);
+  assert.throws(() => resolveTemplatesDir({}, { COMFY_TEMPLATES_DIR: `${root}/` }), /^Error: COMFY_TEMPLATES_DIR .* is the package root/);
+  assert.equal(resolveTemplatesDir({ "templates-dir": tdir }, {}), tdir);
+  // a directory that does not exist is read as before (the per-template failures name it)
+  const missing = join(dir, "no-such-dir");
+  assert.equal(resolveTemplatesDir({ "templates-dir": missing }, {}), missing);
+  const empty = join(dir, "empty");
+  mkdirSync(empty);
+  assert.equal(resolveTemplatesDir({ "templates-dir": empty }, {}), empty);
+  // top-level template files decide: a directory that holds some and also a folder called templates is a templates directory
+  const mixed = join(dir, "mixed");
+  mkdirSync(join(mixed, "templates"), { recursive: true });
+  writeFileSync(join(mixed, "index.json"), "[]");
+  assert.equal(resolveTemplatesDir({ "templates-dir": mixed }, {}), mixed);
+  // a file called templates is not a folder
+  const fileNamed = join(dir, "file-named-templates");
+  mkdirSync(fileNamed);
+  writeFileSync(join(fileNamed, "templates"), "");
+  assert.equal(resolveTemplatesDir({ "templates-dir": fileNamed }, {}), fileNamed);
+  // --comfy-dir and COMFYUI_DIR still return the templates directory their locator found
+  const a = fakeTree(dir, "tree-a");
+  assert.equal(resolveTemplatesDir({ "comfy-dir": a.tree }, {}), a.templatesDir);
+  assert.equal(resolveTemplatesDir({}, { COMFYUI_DIR: a.tree }), a.templatesDir);
 });
 
 // ---------------------------------------------------------------------------------------------
