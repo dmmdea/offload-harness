@@ -526,6 +526,27 @@ func TestCompletionProbeSeesWhatItsOwnCompletionEvicted(t *testing.T) {
 	}
 }
 
+// TestCompletionReasonForASeatLoadedSinceTheReportBegan: a seat that another client loads after the
+// opening read, before its own probe is decided, is completed without loading anything, and its row must
+// not carry the cheap probe's "not asked" clause from the reading it has outgrown.
+func TestCompletionReasonForASeatLoadedSinceTheReportBegan(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	f.allowCompletion = true
+	f.onRunningRead = func(read int) {
+		if read >= 2 {
+			f.running["offload-e4b"] = "ready"
+		}
+	}
+	r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+	e := seatOf(t, r, "offload-e4b")
+	if e.BackendProbe != ProbeCompletion {
+		t.Fatalf("offload-e4b was running when its completion was decided, so the completion runs: %+v", e)
+	}
+	if strings.Contains(e.BackendReason, "not asked") || strings.Contains(e.BackendReason, "asking would") || !strings.Contains(e.BackendReason, "loaded since the report began") {
+		t.Errorf("reason %q must say the seat was loaded since the report began, not that it was not asked", e.BackendReason)
+	}
+}
+
 // TestCompletionProbeNeverLoadsASecondVLLMSeat: loading one vLLM seat evicts another, so an idle vLLM
 // seat is refused too while a different vLLM seat is loaded (the target being vLLM is no exemption).
 func TestCompletionProbeNeverLoadsASecondVLLMSeat(t *testing.T) {
