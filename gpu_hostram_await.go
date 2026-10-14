@@ -155,6 +155,7 @@ type errHostRAMHoldBound struct {
 	waited       time.Duration // how long the wait after the unload ran
 	held         time.Duration // how long the lease held its cards in all
 	freedWhy     string        // non-empty when the unload freed nothing: why
+	failedText   string        // non-empty when unloads of other residents failed: what to say instead of claiming nothing was there
 	classDefault bool
 }
 
@@ -168,6 +169,9 @@ func (e *errHostRAMHoldBound) Error() string {
 		roundHold(e.bound), roundHold(e.held), roundHold(e.waited), e.short.Error())
 	if e.freedWhy != "" {
 		fmt.Fprintf(&b, " The unload freed nothing on these cards (%s), so the shortage is not the seat's.", e.freedWhy)
+	}
+	if e.failedText != "" {
+		fmt.Fprintf(&b, " Note: %s.", e.failedText)
 	}
 	need := e.short.NeedGiB
 	if e.classDefault {
@@ -208,8 +212,11 @@ func awaitHostRAMBounded(ctx context.Context, await func(gpulease.AwaitHostRAMOp
 		OnWait: func(e *gpulease.ErrHostRAM) {
 			told = true
 			freed := ""
-			if h.freed.freedNothing() {
+			switch {
+			case h.freed.freedNothing():
 				freed = fmt.Sprintf(" (the unload freed nothing on these cards: %s, so it did not shorten this wait)", h.freed.why)
+			case h.freed.failed > 0:
+				freed = " (" + h.freed.failedUnloadsText() + ")"
 			}
 			bound := ""
 			if !boundAt.IsZero() {
@@ -226,6 +233,7 @@ func awaitHostRAMBounded(ctx context.Context, await func(gpulease.AwaitHostRAMOp
 			if h.freed.freedNothing() {
 				e.freedWhy = h.freed.why
 			}
+			e.failedText = h.freed.failedUnloadsText()
 			return e
 		}
 		return heldHint(err, wait)

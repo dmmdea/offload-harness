@@ -793,12 +793,25 @@ type unloadOutcome struct {
 	ran    bool   // the unload step completed
 	seat   bool   // the agent seat was resident (or could not be told) and is unloaded: its warm-back is owed
 	others int    // other resident models taken down
-	failed int    // other resident models whose unload FAILED (SEAM: not counted yet)
+	failed int    // other resident models whose unload FAILED: something may still be resident, so nothing is claimed freed or not
 	why    string // when nothing was freed: why, in the words of the wait line
 }
 
 // freedNothing is the claim the wait line makes: the unload ran, took no model down, and said why.
-func (u unloadOutcome) freedNothing() bool { return u.ran && !u.seat && u.others == 0 }
+func (u unloadOutcome) freedNothing() bool { return u.ran && !u.seat && u.others == 0 && u.failed == 0 }
+
+// failedUnloadsText says that unloads failed, for the wait line and the bound's failure ("" when none did): a failed unload
+// leaves something resident that may hold the very memory the lease waits for, so the lease is not told that nothing was
+// there.
+func (u unloadOutcome) failedUnloadsText() string {
+	switch u.failed {
+	case 0:
+		return ""
+	case 1:
+		return "1 unload of another resident model failed (see above), so what the unload freed is not known"
+	}
+	return fmt.Sprintf("%d unloads of other resident models failed (see above), so what the unload freed is not known", u.failed)
+}
 
 // maintainSeatReport is maintainSeatScoped that also tells the caller what the unload took down (out, when non-nil).
 func maintainSeatReport(ctx context.Context, cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool, owed func(seat string), devices []string, out *unloadOutcome) error {
@@ -918,7 +931,7 @@ func maintainSeatReport(ctx context.Context, cfg config.Config, restamp restampe
 				return err
 			}
 		}
-		unloadedOthers := unloadOthers(ctx, endpoint, others, protect)
+		unloadedOthers, failedOthers := unloadOthers(ctx, endpoint, others, protect)
 		if len(unloadedOthers) > 0 {
 			fmt.Fprintf(os.Stderr, "gpu reserve: also unloaded %d other resident model(s) so the leased cards are actually clear: %s\n",
 				len(unloadedOthers), strings.Join(unloadedOthers, ", "))
@@ -928,7 +941,7 @@ func maintainSeatReport(ctx context.Context, cfg config.Config, restamp restampe
 			if !agentOn {
 				why = "the seat sits on cards this lease does not hold, and nothing else resident was on these"
 			}
-			*out = unloadOutcome{ran: true, seat: wasLoaded, others: len(unloadedOthers), why: why}
+			*out = unloadOutcome{ran: true, seat: wasLoaded, others: len(unloadedOthers), failed: failedOthers, why: why}
 		}
 		if !wasLoaded {
 			// A seat that sits on other cards was never this lease's to unload, so it is owed no
@@ -993,22 +1006,23 @@ func otherResidentModels(ctx context.Context, endpoint, agentSeat string, memory
 
 // unloadOthers unloads every model in others, skipping (and reporting, never
 // failing the lease over) one that will not go. It returns the ones it
-// actually unloaded — the record the reservation prints. These are FOREIGN
+// actually unloaded — the record the reservation prints — and how many it could not unload (the outcome says so, never "freed
+// nothing" over a failure). These are FOREIGN
 // residents: the PR #464 rule ("warm back only the seat that was loaded, and
 // only if it was loaded") stays exactly as it is for the configured agent
 // seat, and none of these is ever warmed back automatically — that would
 // mean the harness deciding another client's model belongs back on a card it
 // no longer controls.
-func unloadOthers(ctx context.Context, endpoint string, others, protect []string) []string {
-	var done []string
+func unloadOthers(ctx context.Context, endpoint string, others, protect []string) (done []string, failed int) {
 	for _, m := range others {
 		if err := unloadSeat(ctx, maintenanceClient, endpoint, m, protect); err != nil {
 			fmt.Fprintf(os.Stderr, "gpu reserve: could not unload foreign resident %s: %v\n", m, err)
+			failed++
 			continue
 		}
 		done = append(done, m)
 	}
-	return done
+	return done, failed
 }
 
 // seatWasResident reports whether the seat is loaded and staying: loaded or
