@@ -808,6 +808,19 @@ func runGPUReserve(args []string) (retErr error) {
 				return err
 			}
 			lost := lease.Check()
+			if lost != nil {
+				// Not a verdict until it is seen on every look: a record that cannot be read, or that was being replaced, does not
+				// show the lease lost, and a drain that released and queued again on it would give up a lease that is ours.
+				switch state, last := confirmFence(lease, lost, wrapperFenceWindow, wrapperFencePoll, nil); state {
+				case fenceLost:
+					lost = last
+				case fenceUnreadable:
+					fmt.Fprintf(os.Stderr, "gpu reserve: cannot read the lease record (%v); that is no verdict, so the lease is not released and the drain does not start over\n", last)
+					lost = nil
+				default:
+					lost = nil
+				}
+			}
 			if lost == nil {
 				card.finish(merr)
 				return merr // a seat fault with the lease still ours: the deferred finish releases it (and warms back if it got that far)
@@ -942,6 +955,7 @@ func runGPUReserve(args []string) (retErr error) {
 	terms := newTermTicker(lease)
 	wrapperYields := newHolderYieldTicker(lease, opts.OnYield, "gpu reserve", os.Stderr)
 	sigDone := sw.Done() // set to nil once handled: a closed channel would be ready for ever
+	fenceSaid := false   // a failed renewal is said once per episode, not at every tick
 	for {
 		select {
 		case err := <-done:
@@ -965,12 +979,30 @@ func runGPUReserve(args []string) (retErr error) {
 			// — the failure the wrapper exists to prevent, now invisible. Renew()
 			// checks the epoch first, so this fires on an operator `gpu release` or on
 			// being fenced out.
+			//
+			// But a record that cannot be READ is not a verdict: a heartbeat that races an atomic replace of the record (a restamp, the
+			// queue's or the yield's writes, another process's stamp) reads the lease as gone for a moment, and a wrapper that kills on
+			// that kills a long job. It looks again, waits out a short window, and kills only on a verdict seen on every look.
 			if err := lease.Renew(); err != nil {
-				fmt.Fprintf(os.Stderr,
-					"gpu reserve: LEASE LOST (%v) — the GPU is no longer reserved for this command; killing it\n", err)
-				why = " (lease lost)"
-				stopWrappedTree(tree, cmd, cfg, lease.Epoch(), os.Stderr)
+				switch state, last := confirmFence(lease, err, wrapperFenceWindow, wrapperFencePoll, nil); state {
+				case fenceLost:
+					fmt.Fprintf(os.Stderr,
+						"gpu reserve: LEASE LOST (%v) — the GPU is no longer reserved for this command; killing it\n", last)
+					why = " (lease lost)"
+					stopWrappedTree(tree, cmd, cfg, lease.Epoch(), os.Stderr)
+				case fenceUnreadable:
+					if !fenceSaid {
+						fenceSaid = true
+						fmt.Fprintf(os.Stderr, "gpu reserve: cannot read the lease record (%v); that is no verdict, so the command keeps running and the lease is treated as held; looking again at every tick\n", last)
+					}
+				default:
+					if !fenceSaid {
+						fenceSaid = true
+						fmt.Fprintf(os.Stderr, "gpu reserve: could not renew the lease heartbeat (%v); the lease is still ours, retrying at every tick\n", err)
+					}
+				}
 			} else {
+				fenceSaid = false
 				// The heartbeat is the proof the lease is still ours; only then is its term asked
 				// about. A term that ends is renewed or labelled, never a reason to stop the command.
 				terms.tick()
@@ -1601,34 +1633,73 @@ func releaseHolderLease(m *gpulease.Manager, lease *gpulease.Lease) error {
 // not a lost lease. Three further looks, holdConfirmPause apart, must all fail before the lease is taken for gone; a lease that
 // really is gone (an operator release, a reclaim) costs the holder a fraction of a second more to notice.
 func holderLeaseGone(lease *gpulease.Lease, first error) (bool, error) {
+	state, last := confirmFence(lease, first, holdIORetryFor, holdPollEvery, func(last error) {
+		fmt.Fprintf(os.Stderr, "gpu hold: cannot read the record of lease epoch %d (%v); retrying for up to %s before letting go\n", lease.Epoch(), last, holdIORetryFor.Round(time.Second))
+	})
+	return state != fenceOK, last
+}
+
+// fenceState is what confirmFence made of a fence that failed.
+type fenceState int
+
+const (
+	// fenceOK: the fence passes again (a read that failed for a moment, or a heartbeat that could not be written while the lease is
+	// still ours).
+	fenceOK fenceState = iota
+	// fenceLost: a VERDICT, seen on every look: the lease is gone, or fenced out by another holder.
+	fenceLost
+	// fenceUnreadable: the record could not be READ on any look in the window. No verdict: the lease may well be ours.
+	fenceUnreadable
+)
+
+// The window in which a wrapper (its tick, its drain heartbeat, its drain loop) retries a fence it cannot read, and how often it
+// looks. A wrapper never kills its command, releases its lease or queues again on a record it cannot read; after the window it says
+// so once and goes on, looking again at every tick. Variables so a test need not stand in line.
+var (
+	wrapperFenceWindow = 10 * time.Second
+	wrapperFencePoll   = 250 * time.Millisecond
+)
+
+// confirmFence is what EVERY holder does with a fence (Lease.Check, or a Renew that failed) before it acts on it: a record read that
+// lands while a restamp replaces the record fails for a moment on Windows and reads as "the lease is gone". It looks again three
+// times, holdConfirmPause apart; a verdict (gone, fenced out) on all of them is fenceLost. A record that could not be READ on all of
+// them is retried for retryFor, polling every poll, after calling onUnreadable once (nil = say nothing); one that still cannot be
+// read is fenceUnreadable, which is not a verdict, and a read that turns into a verdict inside the window is fenceLost. The last error
+// seen is returned with the state.
+func confirmFence(lease *gpulease.Lease, first error, retryFor, poll time.Duration, onUnreadable func(error)) (fenceState, error) {
+	if first == nil {
+		return fenceOK, nil
+	}
 	last := first
 	for i := 0; i < 3; i++ {
 		time.Sleep(holdConfirmPause)
 		err := lease.Check()
 		if err == nil {
-			return false, nil
+			return fenceOK, nil
 		}
 		last = err
 	}
 	if !gpulease.IsRecordUnreadable(last) {
-		return true, last // a verdict (gone, fenced out): retrying changes nothing
+		return fenceLost, last // a verdict (gone, fenced out): retrying changes nothing
 	}
 	// A READ that keeps failing (an access error, a sharing violation) passes more often than a verdict does: the lease may well be
-	// there, and the holder's exit releases it. Retry for a while, with one line, before letting go.
-	fmt.Fprintf(os.Stderr, "gpu hold: cannot read the record of lease epoch %d (%v); retrying for up to %s before letting go\n", lease.Epoch(), last, holdIORetryFor.Round(time.Second))
-	deadline := time.Now().Add(holdIORetryFor)
+	// there. Retry for a while, with one line, before going on without a verdict.
+	if onUnreadable != nil {
+		onUnreadable(last)
+	}
+	deadline := time.Now().Add(retryFor)
 	for time.Now().Before(deadline) {
-		time.Sleep(holdPollEvery)
+		time.Sleep(poll)
 		err := lease.Check()
 		if err == nil {
-			return false, nil
+			return fenceOK, nil
 		}
 		last = err
 		if !gpulease.IsRecordUnreadable(err) {
-			return true, err // it became a verdict
+			return fenceLost, err // it became a verdict
 		}
 	}
-	return true, last
+	return fenceUnreadable, last
 }
 
 // releaseHolderAtWaitEnd is the hidden holder's release of its own lease when the reserve that took it did not: the host-RAM
@@ -1861,7 +1932,9 @@ func renewWhile(l *gpulease.Lease, every time.Duration, onLost ...func(error)) (
 					warned = false
 					continue
 				}
-				if cerr := l.Check(); cerr != nil {
+				// A fence that cannot be READ is not a lost lease: confirm it, and cancel the drain only on a verdict.
+				state, cerr := confirmFence(l, err, wrapperFenceWindow, wrapperFencePoll, nil)
+				if state == fenceLost {
 					fmt.Fprintf(os.Stderr, "gpu reserve: LEASE LOST while draining (%v)\n", cerr)
 					for _, fn := range onLost {
 						if fn != nil {
@@ -1869,6 +1942,13 @@ func renewWhile(l *gpulease.Lease, every time.Duration, onLost ...func(error)) (
 						}
 					}
 					return
+				}
+				if state == fenceUnreadable {
+					if !warned {
+						warned = true
+						fmt.Fprintf(os.Stderr, "gpu reserve: cannot read the lease record (%v); that is no verdict, so the lease is treated as held and the drain goes on, looking again every %s\n", cerr, every)
+					}
+					continue
 				}
 				if !warned {
 					warned = true
