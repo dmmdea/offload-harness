@@ -275,8 +275,8 @@ func collapseLogs(content string) (string, bool) {
 // result, a fetched page or an API reply is content the model asked for
 // verbatim, and its near-identical lines (a table, a list of matches with
 // different line numbers) each carry information a fold would lose. A result
-// whose producing call cannot be found, or has any other name, is left alone:
-// an unknown shape fails closed.
+// whose producing call cannot be found, is declared by more than one call, or
+// has any other name, is left alone: an unknown or ambiguous shape fails closed.
 var logsCommandTools = map[string]bool{"run": true, "run_shell": true}
 
 // logsRung folds OLDER command-output bodies in out[from:to], oldest-first,
@@ -295,14 +295,21 @@ func logsRung(out []Msg, from, to, budget int, pinned map[string]bool) {
 	if from >= to {
 		return
 	}
+	// An id that more than one call declares (a backend that numbers its calls
+	// from 0 in every turn, a model that invents ids) does not say which call
+	// produced a result, so such a result is unknown and fails closed. The
+	// drop and cut rungs also assume unique ids; this is the same stance.
 	producer := map[string]string{} // tool_call_id -> tool name
+	declared := map[string]int{}    // tool_call_id -> how many calls declare it
 	for _, m := range out {
 		for _, c := range m.ToolCalls {
 			producer[c.ID] = c.Name
+			declared[c.ID]++
 		}
 	}
 	for i := from; i < to && estimateTokens(out) > budget; i++ {
-		if out[i].Role != "tool" || pinned[out[i].ToolCallID] || !logsCommandTools[producer[out[i].ToolCallID]] {
+		id := out[i].ToolCallID
+		if out[i].Role != "tool" || pinned[id] || declared[id] != 1 || !logsCommandTools[producer[id]] {
 			continue
 		}
 		if c, ok := logCollapse(out[i].Content); ok {
