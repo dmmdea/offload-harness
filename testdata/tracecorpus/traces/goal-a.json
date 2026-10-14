@@ -1,0 +1,71 @@
+{
+  "id": "goal-a",
+  "goal": "synthetic goal a",
+  "stop_reason": "done",
+  "steps": 6,
+  "output": "synthetic output",
+  "pager": {
+    "evictions": 5,
+    "evicted_bytes": 40960,
+    "distinct_evicted": 4,
+    "refetched_distinct": 1,
+    "refetch_rate": 0.25,
+    "basis": "measured",
+    "verdict": "ABOVE GATE (synthetic)",
+    "compaction_passes": 2
+  },
+  "prefill": {
+    "observed_steps": 6,
+    "cache_tokens": 3000,
+    "prefill_tokens": 1200,
+    "prefill_ms": 0,
+    "generated_tokens": 90,
+    "kv_reuse_pct": 71.428571,
+    "basis": "measured",
+    "avg_prefill_tokens_per_step": 200,
+    "avg_prefill_ms_per_step": 0
+  },
+  "transcript": [
+    {
+      "Role": "system",
+      "Content": "synthetic system prompt",
+      "ToolCalls": null,
+      "ToolCallID": "",
+      "IsError": false
+    },
+    {
+      "Role": "user",
+      "Content": "synthetic objective a",
+      "ToolCalls": null,
+      "ToolCallID": "",
+      "IsError": false
+    },
+    {
+      "Role": "assistant",
+      "Content": "",
+      "ToolCalls": [
+        {
+          "ID": "c1",
+          "Name": "read",
+          "Args": "{}"
+        }
+      ],
+      "ToolCallID": "",
+      "IsError": false
+    },
+    {
+      "Role": "tool",
+      "Content": "[earlier result elided to fit context \u2014 4096 chars]",
+      "ToolCalls": null,
+      "ToolCallID": "c1",
+      "IsError": false
+    },
+    {
+      "Role": "assistant",
+      "Content": "synthetic final answer",
+      "ToolCalls": null,
+      "ToolCallID": "",
+      "IsError": false
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{"ts":1767225600,"job_id":"job-synthetic","seat":"seat-a","result":{"steps":5,"stop_reason":"done","trace":[{"step":1,"tool":"read","status":"committed","obs_chars":100},{"step":2,"tool":"read","status":"committed","obs_chars":100},{"step":3,"tool":"read","status":"committed","obs_chars":100}],"prefill_steps":5,"prefill_tokens":2000,"cache_tokens":8000,"pager":{"basis":"measured","evictions":6,"evicted_bytes":65536,"distinct_evicted":5,"refetched_distinct":0,"compaction_passes":3}}}
+{"ts":1767225600,"job_id":"job-synthetic","seat":"seat-a","result":{"steps":2,"stop_reason":"done","trace":[{"step":1,"tool":"read","status":"committed","obs_chars":100}],"prefill_steps":2,"prefill_tokens":400,"pager":{"basis":"insufficient_data","evictions":0,"evicted_bytes":0,"distinct_evicted":0,"refetched_distinct":0,"compaction_passes":0}}}
+{"ts":1767225600,"job_id":"job-synthetic","seat":"seat-b","result":{"steps":7,"stop_reason":"done","trace":[{"step":1,"tool":"read","status":"committed","obs_chars":100},{"step":2,"tool":"read","status":"committed","obs_chars":100},{"step":3,"tool":"read","status":"committed","obs_chars":100},{"step":4,"tool":"read","status":"committed","obs_chars":100},{"step":5,"tool":"read","status":"committed","obs_chars":100}]}}
+{"ts":1767225600,"job_id":"job-synthetic","seat":"fake-seat","result":{"steps":1,"stop_reason":"done","trace":[{"step":1,"tool":"read","status":"committed","obs_chars":100}],"prefill_steps":1,"prefill_tokens":99999}}
+{"ts":1767225600,"seat":"seat-a","refusal":{"status":503,"retry_after_sec":5}}
+
+not json
+{"ts":1767225600,"seat":"seat-a","error":"synthetic dispatch failure"}

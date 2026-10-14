@@ -209,6 +209,8 @@ func main() {
 		err = runCompactionEval(args)
 	case "stats":
 		err = runStats(args)
+	case "trace-corpus":
+		err = runTraceCorpus(args)
 	case "version", "--version", "-v":
 		fmt.Println("local-offload", version)
 	default:
@@ -363,6 +365,7 @@ Usage:
   local-offload confhead-eval            out-of-fold adoption gate (AURC/AUGRC + paired-bootstrap CI)
   local-offload confhead-calibrate       per-task conformal p(correct) escalation thresholds (ADOPT tasks)
   local-offload stats                    observational per-task ledger telemetry
+  local-offload trace-corpus <harvest|readout|freeze|check>   recorded agent runs: trace-bearing count, pager re-fetch rate vs its gate, compaction fire rate, prefill tokens (UNRECORDED reads null, never 0)
   local-offload loupe [--since N] [--json]  call-identity ledger view: duplicate rate,
                                          prefix reuse, exemplar histogram, artifact A/B arms
   local-offload node-swap --staged NEW.exe --target LIVE.exe --sha256 HEX [--restart-task NAME | --restart-command "..."] [--health-url URL] [--render-tarball t.tar.gz --render-dir DIR] [--dry-run] [--result out.json] [--log out.log] [--json]
