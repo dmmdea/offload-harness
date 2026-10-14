@@ -414,6 +414,103 @@ func TestTraceCorpusRedactsPathSeats(t *testing.T) {
 	}
 }
 
+// TestTraceCorpusRedactsPathNodes: the node id a delegation row carries is the one other identifier
+// the readout keys by (pool_alias_by_node), and it is whatever the node calls itself. A node id that
+// is a local filesystem path is vetted exactly like a seat or a stop reason: the harvest replaces it
+// with a stable placeholder and the loader refuses a corpus that still carries one. A node id that
+// is not path-shaped (a hostname, an id with a dot or a dash) is left as the row wrote it. The paths
+// are built at run time so no tracked file carries one.
+func TestTraceCorpusRedactsPathNodes(t *testing.T) {
+	drive := "Z" + ":" + "/" + "nodes" + "/" + "n1"
+	winSlash := "Y" + ":" + "\\" + "nodes" + "\\" + "n2"
+	rooted := "/" + "srv" + "/" + "n3"
+	backslashed := "sub" + "\\" + "n4"
+	// Every row is a pool placement, so each node id becomes a key of pool_alias_by_node.
+	nodes := []string{drive, rooted, drive, backslashed, winSlash, "node-1", "host.example", ""}
+	dir := t.TempDir()
+	var rows []string
+	for _, node := range nodes {
+		b, err := json.Marshal(map[string]any{"seat": "agent-pool", "node": node, "result": map[string]any{"steps": 1, "stop_reason": "done"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, string(b))
+	}
+	if err := os.WriteFile(filepath.Join(dir, "2026-04-02.jsonl"), []byte(strings.Join(rows, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "corpus.jsonl")
+	stdout, _, err := tcRunVerb(t, "harvest", "--delegation-log", dir, "--out", out)
+	if err != nil {
+		t.Fatalf("harvest: %v", err)
+	}
+	b, _ := os.ReadFile(out)
+	raw := string(b)
+	for _, leak := range []string{"nodes" + "/" + "n1", "nodes", "srv", "n3", "n4", "n2"} {
+		if strings.Contains(raw, leak) {
+			t.Fatalf("the corpus still holds a fragment of a path node id (%q):\n%s", leak, raw)
+		}
+	}
+	runs, _, err := tcLoadCorpus(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range runs {
+		got = append(got, r.Node)
+	}
+	// Stable: the same path is the same placeholder, numbered by first appearance in the corpus order.
+	want := []string{"[redacted-path-1]", "[redacted-path-2]", "[redacted-path-1]", "[redacted-path-3]", "[redacted-path-4]",
+		"node-1", "host.example", ""}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("node ids after harvest = %q, want %q", got, want)
+	}
+	var harvested struct {
+		Stats tcHarvestStats `json:"stats"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &harvested); err != nil {
+		t.Fatal(err)
+	}
+	if harvested.Stats.Redactions["path"] != 5 {
+		t.Errorf("path redactions = %v, want 5 (one per path-shaped node id)", harvested.Stats.Redactions)
+	}
+	// The readout key is the placeholder, never the path.
+	readout, _, err := tcRunVerb(t, "readout", "--corpus", out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep struct {
+		PoolAliasByNode map[string]struct {
+			Runs int `json:"runs"`
+		} `json:"pool_alias_by_node"`
+	}
+	if err := json.Unmarshal([]byte(readout), &rep); err != nil {
+		t.Fatal(err)
+	}
+	wantKeys := map[string]int{"[redacted-path-1]": 2, "[redacted-path-2]": 1, "[redacted-path-3]": 1, "[redacted-path-4]": 1,
+		"node-1": 1, "host.example": 1, tcSeatUnrecorded: 1}
+	if len(rep.PoolAliasByNode) != len(wantKeys) {
+		t.Errorf("pool_alias_by_node = %v, want exactly %v", rep.PoolAliasByNode, wantKeys)
+	}
+	for k, n := range wantKeys {
+		if rep.PoolAliasByNode[k].Runs != n {
+			t.Errorf("pool_alias_by_node[%q] = %d runs, want %d", k, rep.PoolAliasByNode[k].Runs, n)
+		}
+	}
+	// Defense in depth: the strict loader refuses a corpus that carries a path as its node id.
+	for name, node := range map[string]string{"rooted": rooted, "drive": drive, "backslashed": backslashed} {
+		dirty := filepath.Join(dir, "dirty-node-"+name+".jsonl")
+		line := `{"id":"dl-x","source":"delegation-log","seat":"seat-a","node":` + strconvQuote(node) + `,"trace_bearing":false,"steps":1,"stop_reason":"done"` +
+			`,"pager":null,"prefill":null,"seat_tokens_in":null,"ladder_artifacts":null}` + "\n"
+		if err := os.WriteFile(dirty, []byte(line), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := tcRunVerb(t, "readout", "--corpus", dirty); err == nil || !strings.Contains(err.Error(), "local path") {
+			t.Fatalf("a corpus holding a %s path as its node id must be refused, got %v", name, err)
+		}
+	}
+}
+
 // TestTraceCorpusPoolAliasRunsAreABucketKeyedByNode: a pool placement logs the pool's ALIAS as the
 // seat (the node's real seat is in neither the row nor its result), so those runs cannot be
 // attributed to a seat. They are reported as their own bucket, keyed by the node the row names, and
