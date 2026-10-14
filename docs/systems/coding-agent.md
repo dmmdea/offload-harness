@@ -548,10 +548,16 @@ file names its upstream file and commit). It is unrelated to `kvbench`, which me
 
 Tasks are generated, not downloaded. Each generator reproduces the original's random stream (the Mersenne
 Twister, `choice`, `sample`, `shuffle` and `choices` of CPython), and a test pins the digest of every family's
-operation stream against the original generator's output, so `--seed 42` is the published seed-42 instance.
+operation stream against the original generator's output, so `--seed 42` is the published seed-42 instance;
+`scripts/contextbench_parity_regen.py` regenerates those digests from a checkout of the pinned upstream commit and
+reports any that the tests no longer pin.
 The published levels are the `--level` names (`R130` to `R16000`, `L160` to `L12800`, `K4-C4` to `K2-C224`,
-`t4` to `t150`); without one, each family runs its smallest level whose stream exceeds the 32768-token
-budget of record. `--tasks N` runs seeds `--seed` to `--seed + N - 1` for each chosen family.
+`t4` to `t150`); without one, each family runs its smallest level whose uncompacted transcript (the instruction,
+every operation and, for `sudoku_sketchpad`, the whole board panel the agent prints after each move) exceeds the
+usable budget of record, 32768 tokens minus the 2048 reserved. That is `R1000`, `L1600`, `K4-C24` and `t60`: the
+sudoku stream alone is small (about 12k estimated tokens even at `t150`), so it is the panels that overflow, from
+`t60` (about 41k) on, where `t30` is about 21k. A test pins each default as the smallest level over the line.
+`--tasks N` runs seeds `--seed` to `--seed + N - 1` for each chosen family.
 
 ```
 local-offload compaction-eval contextbench --family kv_store --tasks 8 --out results.json \
@@ -603,18 +609,40 @@ Per-task outcomes use the measurement gate's seven words, and only these:
 | `pass` | graded, reward at or above `--pass-at` (default 1.0: every item right) |
 | `task_fail` | graded, reward below it; the reward is kept (0.958 of the needles is a `task_fail` and the number the bench exists to produce) |
 | `infra_error` | the seat could not answer: connection refused, no endpoint, a reset mid-run; or the budget cannot hold the instruction plus the first operation, so the seat was never called (the detail says so). Never graded, never a `task_fail` |
-| `timeout` | `--max-turns` reached before the stream drained; a step cap, never graded |
+| `timeout` | the attempt hit its budget and was not graded: `--max-turns` reached before the stream drained, or (`kv_store`, `log_triage`) the context stopped fitting the token budget before the seat was handed any query, recorded as `term_reason` `budget_wall_before_query`; no reward |
 | `judge_error` | the grade could not be computed (no snapshots, empty gold, a sudoku gold without its board side) |
 | `not_run` | the run was interrupted before the task finished or began, including an interrupt that lands while a seat request is in flight |
 | `cheat` | reserved for the gate's vocabulary; this adapter has no check for gaming a grader and never emits it |
 
-A task whose context stops fitting the budget after the seat has answered at least once ends `budget_wall` and is
-graded on what it had. A budget too small for the instruction plus the first operation is refused by the verb
-before any seat call (and, driven as a library, ends `infra_error`): nothing would be measured. The
-results JSON holds, per task, the outcome word, the reward (null unless graded), how the run ended, turns,
-operations delivered, compaction count, the largest context sent (estimated tokens) and the pager report, plus
-the outcome counts and the mean reward per family; it has no timestamps. With no seat reachable every task is
-`infra_error` and the verb exits non-zero saying nothing was measured.
+A task whose context stops fitting the budget (`terminated_by` `budget_wall`) ends one of three ways. Before the
+seat has answered once, nothing was measured: `infra_error`; the verb refuses a budget too small for the instruction
+plus the first operation before any seat call, and driven as a library such a task ends `infra_error`. After that,
+and before the seat was handed a single query (the operations from `query_start` on, in `kv_store` and
+`log_triage`), no frame can hold an answer, so grading it would score the agent zero for questions it was never
+asked: the task is `timeout` with `term_reason` `budget_wall_before_query` and no reward. Once a query has been
+handed over, and in the two families that ask nothing (`needle_retention`, `sudoku_sketchpad`), the wall is graded
+on the frames the task has. The results JSON holds, per task, the outcome word, the reward (null unless graded),
+how the run ended and the term reason if any, turns, operations delivered (appended to the transcript, the one
+that did not fit at a wall included) and operations sent (those the seat was handed), compaction count, the largest
+context sent (estimated tokens) and the pager report, plus the outcome counts and the mean reward per family; it
+has no timestamps. With no seat reachable every task is `infra_error` and the verb exits non-zero saying nothing
+was measured.
+
+One published cell ends as a `timeout` for a perfect agent, on purpose. Under the default `tool_result` delivery the
+production ladder cannot hold `log_triage` at `L12800`: its preserve guard keeps every tool result that still
+matches a signal word (error, fail, warn, timeout, refused and the like), the synthetic log lines carry `[WARN]`,
+`timeout` and `refused`, and tool messages are almost the whole transcript, so collapsing old pairs makes no room.
+An oracle that answers every query from the gold stops at the wall after 221 or 222 of the 262 operations were
+sent (all eight published seeds), and the task ends `timeout` / `budget_wall_before_query`. The level is left as
+published rather than regenerated to dodge the guard: the cell is a signal about the ladder, not a score, and a test
+pins it. Every other family's largest level passes the oracle under the same delivery. `--delivery user` reaches
+only the drop rung and passes that cell, which is why the choice of delivery is reported beside every result.
+
+Four of the graders' rules are stricter or more forgiving than a literal reading of the answer block, and each has a
+test. A `kv_store` answer is matched on its key without surrounding quotes or case, and its value must stand as a
+whole (the characters around it are not letters or digits), so the same words with a longer tag do not count. A
+`log_triage` count answer is read after a repeated `Query N` or `qid=N` label is removed and digit groups such as
+`12,800` are joined, and it still must state exactly one number.
 
 What it does not do. It is not a measurement: no run is recorded in this repository and no decision follows from
 the bench alone; the context-editing decision record comes after a leased measurement run. Instance bytes
