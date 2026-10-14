@@ -1379,7 +1379,7 @@ func runGPUHold(args []string) error {
 			return nil // the old ending: the deferred Release lets the card go
 		}
 		time.Sleep(holdPollEvery)
-		if err := lease.Check(); err != nil {
+		if err := lease.Check(); err != nil && holderLeaseGone(lease) {
 			return nil // released or fenced out — exit quietly, the lease is not ours
 		}
 		// The reserve that took this lease enforces the host-RAM hold bound while it lives. If it died during its wait (a tool
@@ -1419,8 +1419,22 @@ var (
 var holdBoundGrace = 5 * time.Second
 
 // holdConfirmPause is the pause between the looks with which the hidden holder confirms that its lease is really gone before it
-// lets go of it. SEAM: not read yet.
+// lets go of it. A variable so a test can shorten it.
 var holdConfirmPause = 50 * time.Millisecond
+
+// holderLeaseGone confirms a failed fence before the hidden holder lets go. The holder's exit releases its lease, and its fence
+// reads the record: a read that lands while a restamp replaces the record fails for a moment on Windows, and one failed read is
+// not a lost lease. Three further looks, holdConfirmPause apart, must all fail before the lease is taken for gone; a lease that
+// really is gone (an operator release, a reclaim) costs the holder a fraction of a second more to notice.
+func holderLeaseGone(lease *gpulease.Lease) bool {
+	for i := 0; i < 3; i++ {
+		time.Sleep(holdConfirmPause)
+		if lease.Check() == nil {
+			return false
+		}
+	}
+	return true
+}
 
 // releaseHolderAtWaitEnd is the hidden holder's release of its own lease when the reserve that took it did not: the host-RAM
 // wait it began has passed its stamped end and the lease still asks for the host. It says why on the holder's stderr, warms the
