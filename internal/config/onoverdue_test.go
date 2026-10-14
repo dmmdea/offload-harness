@@ -104,14 +104,14 @@ func TestGPUOnOverdueRefusesUnknownValueAndInstallsHold(t *testing.T) {
 // that, or a config with two faults would run the permissive default.
 func TestGPUOnOverdueIsInstalledEvenWhenAnotherKeyIsRefused(t *testing.T) {
 	resetOnOverdue(t)
-	_, err := Load(writeOnOverdueConfig(t, `, "gpu_on_overdue": "hold", "fleet_queue_holder": "http://203.0.113.9:8080"`))
+	_, err := Load(writeOnOverdueConfig(t, `, "gpu_on_overdue": "hold", "fleet_queue_holder": "http://192.0.2.9:8080"`))
 	if err == nil || !strings.Contains(err.Error(), "fleet_queue_holder") {
 		t.Fatalf("setup: the fleet_queue_holder must be refused: %v", err)
 	}
 	if got := gpulease.InstalledOnOverdue(); got != gpulease.OnOverdueHold {
 		t.Fatalf("installed %q, want hold: the install must not sit behind another key's refusal", got)
 	}
-	_, err = Load(writeOnOverdueConfig(t, `, "gpu_on_overdue": "request", "fleet_queue_holder": "http://203.0.113.9:8080"`))
+	_, err = Load(writeOnOverdueConfig(t, `, "gpu_on_overdue": "request", "fleet_queue_holder": "http://192.0.2.9:8080"`))
 	if err == nil {
 		t.Fatal("setup: the fleet_queue_holder must be refused")
 	}
