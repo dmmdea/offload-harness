@@ -28,14 +28,28 @@ LIMIT = 300
 class FakeQueue:
     def __init__(self):
         self.mutex = threading.RLock()
-        self.task_counter = 0
+        self._counter = 0
         self.queue = []
         self.currently_running = {}
         self.flags = {}
         self.set_calls = []
         self.owned_during_set = []
+        self.watching = False   # True while the pack's tick runs: only its reads are recorded
+        self.reads = []
+
+    @property
+    def task_counter(self):
+        if self.watching:
+            self.reads.append(("counter", self.mutex._is_owned()))
+        return self._counter
+
+    @task_counter.setter
+    def task_counter(self, value):
+        self._counter = value
 
     def get_tasks_remaining(self):
+        if self.watching:
+            self.reads.append(("remaining", self.mutex._is_owned()))  # asked before this method takes the mutex itself
         with self.mutex:
             return len(self.queue) + len(self.currently_running)
 
@@ -99,7 +113,11 @@ class Rig:
 
     def tick_at(self, now):
         self.clock.now = now
-        return self.bound.tick()
+        self.q.watching = True
+        try:
+            return self.bound.tick()
+        finally:
+            self.q.watching = False
 
 
 def load_pack(name="offload_idle_under_test", environ=None):
@@ -148,6 +166,16 @@ class WhenItFrees(PackTest):
         # prompt_worker drains the flags together; two separate holds could be drained one at a time
         self.assertEqual(t.q.owned_during_set, [True, True], "the caller must hold q.mutex across both set_flag calls")
         self.assertEqual(len([m for m in t.logs if "idle bound reached" in m]), 1, t.logs)
+
+    def test_the_queue_is_read_under_its_mutex_both_for_the_snapshot_and_for_the_recheck(self):
+        t = self.rig()
+        t.q.prompt_ran()
+        t.tick_at(0)
+        self.assertTrue(t.tick_at(LIMIT))    # the second tick reads a snapshot, then re-checks before it writes
+        kinds = [kind for kind, _ in t.q.reads]
+        self.assertEqual(kinds.count("remaining"), 3, t.q.reads)   # tick 0: one; tick 300: snapshot and recheck
+        self.assertEqual(kinds.count("counter"), 3, t.q.reads)
+        self.assertEqual([owned for _, owned in t.q.reads], [True] * 6, "every read of the queue is inside a hold of q.mutex")
 
     def test_it_frees_once_per_busy_period(self):
         t = self.rig()
