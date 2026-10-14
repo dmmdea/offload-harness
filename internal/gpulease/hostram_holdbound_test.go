@@ -224,3 +224,76 @@ func TestNoClearIsReportedWhenTheLeaseIsGone(t *testing.T) {
 		t.Errorf("a lease that is gone has no stamp to clear: %d report(s)", n)
 	}
 }
+
+// Review finding (both reviewers, HIGH): the bound was enforced only by the foreground reserve. A reserve that died during the
+// wait (a tool timeout, Ctrl-C, a closed terminal) left the hidden holder holding the cards for good. The holder now enforces the
+// bound itself from the record, so the record must carry it from the moment the wait BEGINS (a reserve that dies before its first
+// look still leaves a bound), and the lease must be able to say what its own record says about the wait.
+
+func TestTheBoundIsStampedBeforeTheFirstLookAtTheHost(t *testing.T) {
+	m, f := ramScoped(t, 70)
+	l, err := m.TryAcquire(ClassMedia, Options{Reason: "film", TTL: time.Hour, Devices: []string{card0}, HostRAMWaitGiB: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Release() }()
+	before := f.reads.Load()
+	readsAtFirstStamp := int32(-1)
+	restampFaultHook = func(uint64) error {
+		if readsAtFirstStamp < 0 {
+			readsAtFirstStamp = f.reads.Load()
+		}
+		return nil
+	}
+	t.Cleanup(func() { restampFaultHook = nil })
+	until := time.Now().Add(300 * time.Millisecond)
+	asHostRAM(t, l.AwaitHostRAM(AwaitHostRAMOptions{Deadline: until, HoldUntil: until}))
+	if readsAtFirstStamp != before {
+		t.Errorf("the bound is stamped when the wait begins, before the host is looked at: %d host reading(s) had been taken when the stamp was first written (%d before the wait)", readsAtFirstStamp, before)
+	}
+}
+
+func TestALeaseReportsWhatItsOwnRecordSaysAboutItsWaitForTheHost(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts Options
+	}{
+		{"card-scoped", Options{Devices: []string{card0}}},
+		{"whole node", Options{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, f := ramScoped(t, 70)
+			opts := tc.opts
+			opts.Reason, opts.TTL, opts.HostRAMWaitGiB = "film", time.Hour, 30
+			l, err := m.TryAcquire(ClassMedia, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = l.Release() }()
+			asked, until, err := l.HostRAMHold()
+			if err != nil || asked != 30 || !until.IsZero() {
+				t.Fatalf("a lease that asks for 30 GiB and has begun no wait: asked %.1f, until %v, err %v", asked, until, err)
+			}
+			stamp := time.UnixMilli(time.Now().Add(time.Minute).UnixMilli())
+			if err := m.Restamp(l.Epoch(), func(mt *Meta) { mt.HostRAMHoldUntilMs = stamp.UnixMilli() }); err != nil {
+				t.Fatal(err)
+			}
+			asked, until, err = l.HostRAMHold()
+			if err != nil || asked != 30 || !until.Equal(stamp) {
+				t.Errorf("the stamped end of the wait is read back: asked %.1f, until %v (want %v), err %v", asked, until, stamp, err)
+			}
+			f.setCommit(40) // the room appears
+			if err := l.AwaitHostRAM(AwaitHostRAMOptions{}); err != nil {
+				t.Fatalf("the host has the room now: %v", err)
+			}
+			asked, until, err = l.HostRAMHold()
+			if err != nil || asked != 0 || !until.IsZero() {
+				t.Errorf("an admitted lease asks for nothing and has no wait running: asked %.1f, until %v, err %v", asked, until, err)
+			}
+			_ = l.Release()
+			if _, _, err := l.HostRAMHold(); err == nil {
+				t.Error("a lease that is gone cannot be read: HostRAMHold must say so")
+			}
+		})
+	}
+}

@@ -1402,6 +1402,11 @@ var (
 	holdRenewEvery   = 15 * time.Second
 )
 
+// holdBoundGrace is how long past the stamped end of a host-RAM wait the hidden holder waits before it releases its own
+// lease: the reserve that took the lease releases it at that moment itself, and the holder acts only when it has not.
+// SEAM: not read yet.
+var holdBoundGrace = 5 * time.Second
+
 func runGPURelease(args []string) error {
 	fs := flag.NewFlagSet("gpu release", flag.ExitOnError)
 	fs.String("config", "", "config file path")

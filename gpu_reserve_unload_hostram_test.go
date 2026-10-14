@@ -242,60 +242,6 @@ func TestADetachedUnloadSeatLeaseIsNotHeldByTheHostRAMItsOwnUnloadFrees(t *testi
 	}
 }
 
-// And when the host never gives the room the detached form fails the way a failed drain does: non-zero, the lease still
-// held (the cards stay reserved, work keeps routing elsewhere), the way out in the message.
-func TestADetachedUnloadSeatLeaseThatTheHostNeverAdmitsFailsAndSaysTheLeaseIsHeld(t *testing.T) {
-	f := &orderedSwap{drainSwap: &drainSwap{}}
-	f.loaded.Store(true)
-	cfgPath, m := handoffFixture(t, f)
-	useSeatBackedHost(t, f.loaded.Load, 95, 90)
-	shortFloor(t, 400*time.Millisecond)
-	var held *gpulease.Lease
-	oldFn := detachHolderFn
-	detachHolderFn = func(_ *flag.FlagSet, class string, _, _ time.Duration, opts gpulease.Options, _ *reserveDeviceFlags, _ bool, m *gpulease.Manager) (uint64, error) {
-		l, err := m.TryAcquire(gpulease.Class(class), opts)
-		if err != nil {
-			return 0, err
-		}
-		held = l
-		return l.Epoch(), nil
-	}
-	t.Cleanup(func() {
-		detachHolderFn = oldFn
-		if held != nil {
-			_ = held.Release()
-		}
-	})
-	args := []string{"--config", cfgPath, "--detach", "--for", "1h", "--wait", "3s", "--drain", "--unload-seat", "--ram", "30", "--reason", "film"}
-	var err error
-	stderr := captureStderr(t, func() { err = runGPUReserve(args) })
-	if n := f.unloads.Load(); n != 1 {
-		t.Fatalf("the parent drains and unloads before it asks the host: unloads=%d err=%v\n%s", n, err, stderr)
-	}
-	if err == nil {
-		t.Fatalf("the host never admitted the lease: the detached reserve must fail\n%s", stderr)
-	}
-	// The seat is unloaded, so the way out names the release that warms it back too.
-	for _, want := range []string{"waiting for host RAM: needs 30.0 GiB, committed 90.0 of 100.0 GiB physical", "the lease is still held", "gpu release", "--warm-seat"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the failure must say %q: %v", want, err)
-		}
-	}
-	if info := m.Inspect(); !info.Held {
-		t.Error("a failed detached maintain leaves the lease held")
-	} else {
-		if info.HostRAMGiB != 0 {
-			t.Errorf("the host did not admit the lease: it must not declare any RAM, got %.1f GiB", info.HostRAMGiB)
-		}
-		// A failed step must not cordon the box for the rest of the window (register C-50, S-31: a failed drain clears the
-		// DRAINING stamp for the same reason). The exclusive stamp is put on once the drain succeeded; the host's refusal comes
-		// after it, and the lease it leaves is held and not exclusive.
-		if info.Exclusive {
-			t.Error("a detached lease whose host RAM wait failed keeps the exclusive stamp: the text lane on its cards stays cordoned for the rest of --for")
-		}
-	}
-}
-
 // The card-scoped and the allocated paths. The seat is the multi-seat stand-in, and the host reads the agent seat's
 // commit while it is resident.
 func cardSeatHost(t *testing.T, f *multiSeatSwap, seat string, withSeat, withoutSeat float64) {

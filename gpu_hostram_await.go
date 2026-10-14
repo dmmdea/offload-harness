@@ -316,3 +316,15 @@ func hostRAMAskedStatus(giB float64, held time.Duration, until, now time.Time, l
 		return s + fmt.Sprintf(": held the cards for %s; the hold bound passed at %s, and the reserve that holds the lease releases it at its next look (`gpu release --warm-seat` frees it now)", heldFor, until.Format(time.Kitchen))
 	}
 }
+
+// detachedReleaseGrace is how far past now the parent of a detached hold pushes the stamped end of the wait when it starts to
+// release the lease itself (warming the seat back takes minutes): until the release is done the hidden holder sees a moment
+// still ahead and leaves the lease to its parent, and a parent that dies mid-release leaves a moment the holder acts on.
+// SEAM: not read yet.
+var detachedReleaseGrace = 15 * time.Minute
+
+// releaseAfterRAMWait is the release of a detached hold whose host-RAM wait ended without admission, whatever ended it.
+// SEAM: until the fix it is releaseAfterHoldBound.
+func releaseAfterRAMWait(m *gpulease.Manager, epoch uint64, cfg config.Config, err error) error {
+	return releaseAfterHoldBound(m, epoch, cfg, err)
+}

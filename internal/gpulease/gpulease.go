@@ -1935,6 +1935,11 @@ func createClaim(path string) (*os.File, error) {
 // reclaim rule fire, blocking the card behind nobody. Measured under six concurrent
 // acquire/release cycles. The overlap is microseconds wide, so retrying clears it.
 func removeClaim(path string) error {
+	if removeClaimFault != nil {
+		if err := removeClaimFault(path); err != nil {
+			return err
+		}
+	}
 	for attempt := 0; ; attempt++ {
 		err := os.Remove(path)
 		if err == nil || os.IsNotExist(err) {

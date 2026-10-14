@@ -585,3 +585,26 @@ func (l *Lease) AwaitHostRAM(o AwaitHostRAMOptions) error {
 	}
 	return l.mgr.AwaitHostRAM(l.epoch, o)
 }
+
+// removeClaimFault is a test seam: when set, removeClaim (every lease and claim removal goes through it) fails with what it
+// returns. nil in production. UseRemoveFault is the way a test in another package reaches it.
+var removeClaimFault func(path string) error
+
+// UseRemoveFault makes every lease-file removal in this process fail with what fn returns for the path (nil from fn lets it
+// through), until the returned function is called. A test seam, for a release that must fail where a portable test cannot
+// provoke a real filesystem error: nothing in production calls it.
+func UseRemoveFault(fn func(path string) error) (restore func()) {
+	old := removeClaimFault
+	removeClaimFault = fn
+	return func() { removeClaimFault = old }
+}
+
+// HostRAMHold is what this lease's OWN record says about its wait for the host: the figure it still asks for (0 = admitted, or
+// nothing was deferred) and the moment its wait is stamped to end (the zero time = no wait is running). The hidden holder of a
+// detached lease reads it on every poll, so that a reserve that died during the wait does not leave the cards held for good. An
+// error means the record cannot be read (the lease is gone).
+//
+// SEAM: not read from the record yet.
+func (l *Lease) HostRAMHold() (askedGiB float64, until time.Time, err error) {
+	return 0, time.Time{}, nil
+}

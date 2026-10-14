@@ -322,7 +322,7 @@ func TestGPUStatusSaysHowLongAHeldLeaseHasHeldAndWhenTheBoundReleasesIt(t *testi
 			t.Errorf("status of a lease that has not begun to wait must say %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "hold bound") {
+	if strings.Contains(out, "hold bound") || strings.Contains(out, "is released at") {
 		t.Errorf("no bound is running yet, so none is named:\n%s", out)
 	}
 
@@ -331,7 +331,7 @@ func TestGPUStatusSaysHowLongAHeldLeaseHasHeldAndWhenTheBoundReleasesIt(t *testi
 		t.Fatal(err)
 	}
 	out = statusText()
-	for _, want := range []string{"host RAM 30.0 GiB asked, not yet admitted", "held the cards for", "the hold bound releases the lease at " + until.Format(time.Kitchen)} {
+	for _, want := range []string{"host RAM 30.0 GiB asked, not yet admitted", "held the cards for", "the lease is released at " + until.Format(time.Kitchen), "if the host still lacks the room"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status of a lease waiting under a bound must say %q:\n%s", want, out)
 		}
@@ -341,6 +341,22 @@ func TestGPUStatusSaysHowLongAHeldLeaseHasHeldAndWhenTheBoundReleasesIt(t *testi
 	parsed, perr := time.Parse(time.RFC3339, got)
 	if perr != nil || parsed.Sub(until).Abs() > 2*time.Second {
 		t.Errorf("the lease row carries the bound as host_ram_hold_until (RFC 3339): %v (parse error %v)", row["host_ram_hold_until"], perr)
+	}
+
+	// Once the stamped moment has passed and the lease is still there, the one who will release it is the HOLDER, not the reserve
+	// that may be gone: say what is then true, and the way to free it now.
+	past := time.Now().Add(-90 * time.Second)
+	if err := m.Restamp(l.Epoch(), func(mt *gpulease.Meta) { mt.HostRAMHoldUntilMs = past.UnixMilli() }); err != nil {
+		t.Fatal(err)
+	}
+	out = statusText()
+	for _, want := range []string{"the wait ended at " + past.Format(time.Kitchen), "the holder releases the lease at its next poll", "gpu release --warm-seat --epoch 1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status of a lease whose stamped wait has ended must say %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "the reserve that holds the lease releases it") {
+		t.Errorf("the reserve may be gone: status must not promise its release:\n%s", out)
 	}
 }
 
