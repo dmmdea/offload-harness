@@ -13,13 +13,24 @@
   original-size reporting described below. No flag, `Loop` setter, config key or replay option enables it yet, so nothing on a
   production path changes.
 - **The gate reads the call.** A result is folded only when the call that produced it is a build or test invocation: `go test`,
-  `go build`, `go vet`, `cargo build`/`test`/`check`, `npm test` or `npm run build`/`test`, `pytest` or `python -m pytest`, and `make`
+  `go build`, `go vet`, `cargo build`/`test`/`check`, `npm test` (or `npm t`) or `npm run build`/`test`, `pytest`, `python -m pytest` or
+  `python -m unittest`, and `make`
   through `run_shell` (the `run` tool's allowlist has no `make`). The first word is read after any `NAME=value` words and the command
   must be one pipeline: an unquoted `;`, `&&`, `||`, a lone `&`, a newline or a carriage return disqualifies it, and a pipe
   qualifies only into a grep-family program or a pass-through filter (`head`, `tail`, `sort`, `uniq`, `wc`, `cut`, `sed`, `awk`,
   `tee`, `cat`), so `xargs` or a linter after a pipe disqualifies it. A search listing, a `cat` or `sed` of a data file, a
   linter's output, a file read and a result whose call has an empty or reused id are left alone, so the docs' statement that search
-  and file reads are never touched is now true of the code.
+  and file reads are never touched is now true of the code. A later pipe stage is judged by its program name alone, so a filter
+  handed a file operand (`go test ./... | cat data.csv`) still qualifies and would fold that file's lines; operands cannot be refused
+  outright because `| tee out.log` is a pass-through with one, and the docs state the limit.
+- **Beside the search rung.** The search-results rung (`compactOpts.SearchResults`) and this one never claim the same body, because
+  each reads the call that produced it (a build or test invocation here, a search there). With both on, this rung runs first and the
+  search rung only when the transcript is still over budget: this rung keeps every distinct line and the search rung drops most of a
+  listing, so the gentler edit gets the first chance to fit. The two gates share one quote-aware command scanner and one set of
+  pass-through filters (`searchCommandScan`, `searchPassThroughFilters`, `searchGrepPrograms` in `rung_search.go`), so they cannot drift
+  apart; this rung adds its own positive build or test test of the first word, and refuses a quote left open and an empty stage. The
+  search rung writes its disclosure line through `skeletonHeader`, which this rung's size parser checks against, so a later elision
+  marker names the original size of a thinned listing as well as of a folded log.
 - **A rung that is off changes nothing.** `IsCompactionArtifact` keeps its three clauses; the always-on dedupe rung and the live
   loop's re-execute decision both ask it, so recognising the new header there would change the default ladder for any tool body that
   quotes it (a saved collapsed log read back with `read_file`). A separate `IsLogCollapseArtifact` recognises the header, and the
@@ -45,8 +56,8 @@
   strictly shorter, checked per run, per body and again in the wrapper); fails closed (too small or too large, invalid UTF-8, a NUL
   byte, a JSON document, another rung's marker or a GCF block, an unknown or ambiguous producer, a panic); confined to the ladder's
   own window, so the protected preamble, the recent turns, pinned results (also through a dedupe reference) and tool-call pairing
-  are untouched; placed after the GCF rung and before the skeleton rung (a budget the fold alone meets leaves no skeleton, a budget
-  GCF alone meets leaves the logs raw); the header, markers and footer stay out of the `signalLine` vocabulary so the drop rung treats
+  are untouched; placed after the GCF rung and before the search and skeleton rungs (a budget the fold alone meets leaves no
+  search thinning and no skeleton, a budget GCF alone meets leaves the logs raw); the header, markers and footer stay out of the `signalLine` vocabulary so the drop rung treats
   a folded body like any other.
 - **Tests.** Red first: the default ladder's output over the shipped mini corpus, four synthetic log transcripts and two transcripts
   of bodies that only quote the header is pinned by sha256 digests captured on the unmodified ladder
@@ -63,8 +74,13 @@
   verbatim and never joins a run; a folded run keeps its last line as well (first line, a count of the N-2 between, last line,
   with the marker in the singular for one line); a call and a result that both carry an empty id are not paired. Tests use the real
   `run_shell` framing (`formatShellResult`, including the cap's `...(truncated)` marker and a killed-by-signal exit line) and the
-  context trim's elision marker, and a transcript with a grep listing and a build log checks that the log rung leaves the listing
-  to a search rung. A mutation run of 49 edits to the gate, the scan, the mask, the diagnostic shape and the fold killed 47; the
+  context trim's elision marker, and a transcript with a grep listing and a build log runs with both rungs on and checks that each
+  edits only its own body, in the order above, and that the last resort names the original size of both. (That test's first version
+  passed without the search rung ever running: its listing had a match on line 0, which the search rung rejects, and its budget
+  was met by the fold alone. The listing now counts from 1, is checked to be one the search rung thins, and the test runs at a
+  budget the fold meets and at one that needs both rungs; moving the search rung ahead of the log rung fails it.) After the
+  merge with the search rung, four more edits to the gate (the open-quote refusal, `npm t`, `python -m unittest` and the
+  pass-through filter set) were each killed by a test. A mutation run of 49 edits to the gate, the scan, the mask, the diagnostic shape and the fold killed 47; the
   two survivors each remove one of two guards that both reject an empty call id, and removing both is killed. The golden-fixture
   discrimination test now needs 5 changed fixtures instead of 6: the shipped tool-text fixture's single body folds to one line
   (its last) more than before, which no longer fits its 60% budget.
