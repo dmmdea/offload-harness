@@ -98,6 +98,10 @@ func estimateTokens(msgs []Msg) int {
 type compactOpts struct {
 	GCF      bool // lossless: re-encode eligible JSON-array tool bodies (internal/gcf)
 	Skeleton bool // lossy-structural: reduce older tool bodies to signal skeletons
+	// LogCollapse (default off) folds runs of near-identical lines in OLDER tool
+	// bodies into one line plus a count, keeping every error/warning/summary line
+	// (rung_logs.go). It runs after the lossless GCF rung and before skeleton.
+	LogCollapse bool
 	// Pinned marks tool_call_ids whose results the model DEMONSTRABLY re-requested
 	// (the circuit breaker refused an exact-repeat call for them) — the H8 ramp:
 	// content the model re-reads stops being lossily compacted. A pinned body is
@@ -240,6 +244,17 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 				}
 			}
 		}
+		if estimateTokens(out) <= budget {
+			return out, fitUnknown
+		}
+	}
+
+	// Step 2a' (flag-gated, lossy but gentler than skeleton): fold runs of
+	// near-identical lines in OLDER tool bodies, oldest-first, stopping at the
+	// first fit (rung_logs.go). Same [protectedEnd, recentStart) window and pin
+	// check as every rung here, so the preamble, the recent turns and pairing stay.
+	if opts.LogCollapse {
+		logsRung(out, protectedEnd, recentStart, budget, pinned)
 		if estimateTokens(out) <= budget {
 			return out, fitUnknown
 		}
@@ -585,5 +600,5 @@ const DefaultKeepRecent = defaultKeepRecent
 // refuse already-compacted transcripts: replaying compaction-of-compacted text
 // would measure the ladder against its own output and bias every ratio toward 1.
 func IsCompactionArtifact(content string) bool {
-	return isElided(content) || strings.HasPrefix(content, skeletonPrefix) || isDeduped(content)
+	return isElided(content) || strings.HasPrefix(content, skeletonPrefix) || isDeduped(content) || isLogCollapsed(content)
 }
