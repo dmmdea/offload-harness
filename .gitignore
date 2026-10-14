@@ -100,4 +100,6 @@ seat-contention-probe.json
 # Pinned by TestOpenSpecGeneratedToolFilesStayUntracked.
 /.claude/skills/openspec-*/
 /.claude/commands/opsx/
-/.opencode/
+/.opencode/skills/openspec-*/
+/.opencode/commands/opsx-*
+/.opencode/command/opsx-*
