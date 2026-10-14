@@ -489,7 +489,7 @@ func MergeSameLine(in []Finding) ([]Finding, int) {
 // of an echo — text shaped like a finding that reviews nothing.
 //
 // Dropping is safe only because it is COUNTED and because an emptied list now defers instead of
-// publishing (publishReview: a list emptied by filtering is not a review). That pair is what
+// publishing (reviewPayload: a list emptied by filtering is not a review). That pair is what
 // ParseFindings' old "nothing is dropped for being badly formatted" rule was protecting — a
 // clean bill of health nobody issued — and it holds for every line that carries ANY structure:
 // a known severity, a file or a why still survives however badly the rest is formatted. An
