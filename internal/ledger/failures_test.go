@@ -499,6 +499,7 @@ func TestFailureRegisterCountsTheLinesItCouldNotRead(t *testing.T) {
 		`this is not json`,
 		`{"ts":2,"task":"agent_delegate","deferred":true,"reason_code":"budget","job_id":"b"`, // cut off mid-file
 		``,
+		"  	 ", // whitespace only: blank as well
 		`[1,2,3]`,
 		`{"ts":3,"task":"agent_delegate","deferred":true,"reason_code":"abstention","job_id":"c"}`,
 	)
