@@ -62,8 +62,12 @@ func TestSubtitleArgvPinsEveryFlagValue(t *testing.T) {
 			temp = strings.TrimPrefix(args[i+1], "temp:")
 		}
 	}
-	if home == "" || home != temp || filepath.Dir(home) != root {
+	if home == "" || filepath.Clean(home) != filepath.Clean(temp) || filepath.Clean(filepath.Dir(home)) != filepath.Clean(root) {
 		t.Errorf("-P home:%q temp:%q, want the same directory directly under %q", home, temp, root)
+	}
+	// warnings stay on: yt-dlp reports a rate limit on the subtitle download (HTTP 429) as a WARNING and exits 0
+	if hasArg(args, "--no-warnings") || !hasArg(args, "--quiet") {
+		t.Errorf("want --quiet without --no-warnings in %q", args)
 	}
 }
 

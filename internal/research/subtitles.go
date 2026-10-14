@@ -47,6 +47,8 @@ const (
 	ErrKindEmptySubtitles = "empty_subtitles"
 	// ErrKindTimeout: the caller's deadline (or the per-fetch timeout) ended the run.
 	ErrKindTimeout = "subtitle_timeout"
+	// ErrKindURLRefused: the canonical URL the binary would be given did not pass the public-web guard.
+	ErrKindURLRefused = "url_refused"
 )
 
 // DefaultSubLangs is the subtitle language selection when the caller gives none.

@@ -82,6 +82,10 @@ const (
 	idHuge     = "HUGEsubs001"
 	idBlank    = "BLANKcues01"
 	idFlood    = "FLOODerr001"
+	// idWarn429: the binary prints a rate-limit WARNING for the subtitle download and exits 0 with no file.
+	idWarn429 = "WARNING429x"
+	// idHugeSRV3: a well-formed srv3 track a little over the read bound, so it is cut in the middle of a cue.
+	idHugeSRV3 = "HUGEsrv3001"
 	// idLinger: the binary writes its track and exits 0, but a child it started keeps its output pipe open for four seconds.
 	idLinger = "LINGERpipe1"
 )
@@ -164,6 +168,16 @@ func runFakeYtDlp(args []string) int {
 			fmt.Fprintf(&b, "00:00:01.000 --> 00:00:02.000\ncue number %d speaks\n\n", i)
 		}
 		write(id+".en.vtt", b.String())
+	case idWarn429:
+		os.Stderr.WriteString("WARNING: [youtube] " + id + ": Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests\n")
+	case idHugeSRV3:
+		var b strings.Builder
+		b.WriteString(`<?xml version="1.0" encoding="utf-8" ?><timedtext format="3"><body>`)
+		for i := 0; b.Len() < 2<<20+4096; i++ {
+			fmt.Fprintf(&b, `<p t="%d" d="900"><s>cue number %d speaks</s></p>`, i*1000, i)
+		}
+		b.WriteString(`</body></timedtext>`)
+		write(id+".en.srv3", b.String())
 	case idBlank:
 		write(id+".en.vtt", "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n \n\n00:00:03.000 --> 00:00:04.000\n<c></c>\n")
 	case idFlood:
@@ -186,12 +200,21 @@ func runFakeYtDlp(args []string) int {
 // readCalls returns the recorded argument vectors, one per invocation.
 func readCalls(t *testing.T, root string) [][]string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(root, "calls.log"))
-	if os.IsNotExist(err) {
-		return nil
-	}
+	out, err := readCallsOf(root)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return out
+}
+
+// readCallsOf is readCalls without a *testing.T: a log that is not there yet is no calls.
+func readCallsOf(root string) ([][]string, error) {
+	raw, err := os.ReadFile(filepath.Join(root, "calls.log"))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 	var out [][]string
 	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
@@ -199,7 +222,7 @@ func readCalls(t *testing.T, root string) [][]string {
 			out = append(out, strings.Split(line, argSep))
 		}
 	}
-	return out
+	return out, nil
 }
 
 // leftovers lists what is in the scratch root besides the call log: a per-call

@@ -29,10 +29,13 @@ func ytOpts(t *testing.T) (Options, string) {
 func pinYouTube(t *testing.T) {
 	t.Helper()
 	pinDNS(t, map[string][]string{
-		"www.youtube.com": {sentinelPublic},
-		"youtube.com":     {sentinelPublic},
-		"m.youtube.com":   {sentinelPublic},
-		"youtu.be":        {sentinelPublic},
+		"www.youtube.com":          {sentinelPublic},
+		"youtube.com":              {sentinelPublic},
+		"m.youtube.com":            {sentinelPublic},
+		"music.youtube.com":        {sentinelPublic},
+		"youtu.be":                 {sentinelPublic},
+		"www.youtube-nocookie.com": {sentinelPublic},
+		"youtube-nocookie.com":     {sentinelPublic},
 	})
 }
 
@@ -55,6 +58,16 @@ func TestClassifyURLRoutesOnlyTheNamedYouTubeShapes(t *testing.T) {
 		"https://youtu.be/dQw4w9WgXcQ?t=5":                         "dQw4w9WgXcQ",
 		"https://www.youtube.com/shorts/dQw4w9WgXcQ":               "dQw4w9WgXcQ",
 		"https://WWW.YouTube.com/shorts/dQw4w9WgXcQ/":              "dQw4w9WgXcQ",
+		// live streams, embeds and the music host reach the same video id; youtube-nocookie.com serves embeds only
+		"https://www.youtube.com/live/dQw4w9WgXcQ":                  "dQw4w9WgXcQ",
+		"https://youtube.com/live/dQw4w9WgXcQ?feature=share":        "dQw4w9WgXcQ",
+		"https://m.youtube.com/live/dQw4w9WgXcQ/":                   "dQw4w9WgXcQ",
+		"https://www.youtube.com/embed/dQw4w9WgXcQ":                 "dQw4w9WgXcQ",
+		"http://youtube.com/embed/dQw4w9WgXcQ?start=5&autoplay=1":   "dQw4w9WgXcQ",
+		"https://music.youtube.com/watch?v=dQw4w9WgXcQ&list=RDAMVM": "dQw4w9WgXcQ",
+		"https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ":        "dQw4w9WgXcQ",
+		"https://youtube-nocookie.com/embed/dQw4w9WgXcQ/":           "dQw4w9WgXcQ",
+		"https://WWW.YOUTUBE-NOCOOKIE.COM/embed/dQw4w9WgXcQ":        "dQw4w9WgXcQ",
 	}
 	for raw, id := range yes {
 		u, err := url.Parse(raw)
@@ -84,9 +97,49 @@ func TestClassifyURLRoutesOnlyTheNamedYouTubeShapes(t *testing.T) {
 		"https://www.youtube.com/watch?v=dQw4w9WgXcQ%2Fx",
 		"https://www.youtube.com/shorts/",
 		"https://youtu.be/",
-		"https://music.youtube.com/watch?v=dQw4w9WgXcQ",
 		"ftp://youtu.be/dQw4w9WgXcQ",
 		"https://example.com/watch?v=dQw4w9WgXcQ",
+		// the new hosts and paths keep every refusal of the old ones: lookalikes, userinfo, ports, trailing dots,
+		// look-alike letters, an encoded backslash, ids of the wrong shape, and the one embed path that is not a video
+		"https://music.youtube.com.evil.example/watch?v=dQw4w9WgXcQ",
+		"https://evilmusic.youtube.com/watch?v=dQw4w9WgXcQ",
+		"https://music.youtube.com@evil.example/watch?v=dQw4w9WgXcQ",
+		"https://user:pw@music.youtube.com/watch?v=dQw4w9WgXcQ",
+		"https://music.youtube.com:8443/watch?v=dQw4w9WgXcQ",
+		"https://music.youtube.com./watch?v=dQw4w9WgXcQ",
+		"https://youtube-nocookie.com.evil.example/embed/dQw4w9WgXcQ",
+		"https://www.youtube-nocookie.com.evil.example/embed/dQw4w9WgXcQ",
+		"https://notyoutube-nocookie.com/embed/dQw4w9WgXcQ",
+		"https://www.youtube-nocookie.com@evil.example/embed/dQw4w9WgXcQ",
+		"https://user:pw@www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+		"https://www.youtube-nocookie.com:8443/embed/dQw4w9WgXcQ",
+		"https://www.youtube-nocookie.com./embed/dQw4w9WgXcQ",
+		"https://www.youtube-nocookie.com/watch?v=dQw4w9WgXcQ",
+		"https://www.youtube-nocookie.com/live/dQw4w9WgXcQ",
+		"https://www.youtube-nocookie.com/shorts/dQw4w9WgXcQ",
+		"https://www.youtube.com./watch?v=dQw4w9WgXcQ",
+		"https://www.youtube.com./embed/dQw4w9WgXcQ",
+		"https://www.youtube.com:8443/live/dQw4w9WgXcQ",
+		"https://www.youtube.com:8443/embed/dQw4w9WgXcQ",
+		"https://user:pw@www.youtube.com/embed/dQw4w9WgXcQ",
+		"https://www.youtube.com@evil.example/embed/dQw4w9WgXcQ",
+		"https://www.youtube.com.evil.example/live/dQw4w9WgXcQ",
+		"https://xn--youtube-3k5d.com/embed/dQw4w9WgXcQ",
+		"https://www.y\u043eutube.com/watch?v=dQw4w9WgXcQ",
+		"https://www.y\u043eutube.com/live/dQw4w9WgXcQ",
+		"https://www.youtube-nocookie.c\u043em/embed/dQw4w9WgXcQ",
+		"https://www.youtube.com%5c@evil.example/embed/dQw4w9WgXcQ",
+		"https://www.youtube.com/embed%5cdQw4w9WgXcQ",
+		"https://www.youtube.com/live%5cdQw4w9WgXcQ",
+		"https://www.youtube.com/embed/%5cdQw4w9WgXcQ",
+		"https://www.youtube.com/embed/videoseries?list=PLabc",
+		"https://www.youtube-nocookie.com/embed/videoseries?list=PLabc",
+		"https://www.youtube.com/embed/",
+		"https://www.youtube.com/live/",
+		"https://www.youtube.com/embed/dQw4w9WgXcQ/extra",
+		"https://www.youtube.com/live/dQw4w9WgXc%3B",
+		"https://www.youtube.com/embed/dQw4w9WgXcQ%2Fx",
+		"https://www.youtube.com/embed/short",
 	}
 	for _, raw := range no {
 		u, err := url.Parse(raw)
@@ -275,18 +328,21 @@ func TestSubtitleNoFileIsATypedError(t *testing.T) {
 func TestSubtitleRunIsBoundedByTheCallersDeadline(t *testing.T) {
 	pinYouTube(t)
 	opt, root := ytOpts(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	// The deadline is long enough for a slow machine to start the binary, and short beside the 30 s the fake sleeps.
+	// Whether the binary got as far as logging its start before the deadline is the machine's business, so the
+	// invocation count is bounded rather than pinned (the strict count is the cancel test below).
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	start := time.Now()
 	got := Fetch(ctx, "https://www.youtube.com/watch?v="+idHang, opt)
-	if took := time.Since(start); took > 10*time.Second {
+	if took := time.Since(start); took > 12*time.Second {
 		t.Fatalf("fetch outlived the caller's deadline: %v", took)
 	}
 	if got.ErrKind != ErrKindTimeout || got.Text != "" {
 		t.Fatalf("got %+v, want %s", got, ErrKindTimeout)
 	}
-	if n := len(readCalls(t, root)); n != 1 {
-		t.Errorf("binary invoked %d times, want 1", n)
+	if n := len(readCalls(t, root)); n > 1 {
+		t.Errorf("binary invoked %d times, want at most 1", n)
 	}
 	if left := leftovers(t, root); len(left) != 0 {
 		t.Errorf("per-call directory left behind after a timeout: %v", left)
@@ -347,6 +403,9 @@ func TestSubtitleAdapterChecksTheCanonicalHostToo(t *testing.T) {
 	got := Fetch(context.Background(), "https://youtu.be/"+idPlain, opt)
 	if got.Err == "" || got.Text != "" {
 		t.Fatalf("not refused: %+v", got)
+	}
+	if got.ErrKind != ErrKindURLRefused {
+		t.Errorf("ErrKind = %q, want %q: a refused canonical URL is a typed failure like every other adapter error", got.ErrKind, ErrKindURLRefused)
 	}
 	if n := len(readCalls(t, root)); n != 0 {
 		t.Errorf("binary invoked %d times", n)
