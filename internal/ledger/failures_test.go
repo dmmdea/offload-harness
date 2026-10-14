@@ -286,7 +286,7 @@ func TestFailureEveryNeverRanClassKeepsAStoredZeroOnARowThatNamesANode(t *testin
 	never := []string{
 		ReasonNodeBusy, ReasonCapacityWait, ReasonQueueFull, ReasonNoEligibleNode,
 		ReasonQueueWithdrawn, ReasonShed, ReasonDispatchRefused,
-		ReasonConfig, ReasonContract, ReasonWrite, ReasonBadInput,
+		ReasonConfig, ReasonContract, ReasonBadInput,
 	}
 	row := func(ts int, class string) string {
 		return `{"ts":` + strconv.Itoa(ts) + `,"task":"agent_delegate","deferred":true,"reason_code":"` + class +
@@ -309,18 +309,26 @@ func TestFailureEveryNeverRanClassKeepsAStoredZeroOnARowThatNamesANode(t *testin
 	}
 
 	// The same row under a class that says a run happened is not a measurement: the shape alone proves nothing.
-	const control = ReasonPollDeadline
-	lines := []string{row(1, control)}
+	// write is one of them on purpose: a node refuses the write door before a run (agent_allow_write is false) or
+	// after one (the finished write set broke a door cap), and the class does not say which, so its stored 0 is the
+	// delegator's gap and not a reading that nothing ran.
+	controls := []string{ReasonPollDeadline, ReasonWrite}
+	var lines []string
+	for i, c := range controls {
+		lines = append(lines, row(i+1, c))
+	}
 	for i, c := range never {
-		lines = append(lines, row(i+2, c))
+		lines = append(lines, row(i+1+len(controls), c))
 	}
 	reg, err := FailureRegisterFile(writeFailureLedger(t, lines...), 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := classNamed(t, reg, control); got.CardsTokens != nil || got.RowsWithTokens != 0 {
-		t.Errorf("%s: cards_tokens = %s over %d row(s), want nil: the row shape is meant to be vouched for by the class alone",
-			control, showTokens(got.CardsTokens), got.RowsWithTokens)
+	for _, control := range controls {
+		if got := classNamed(t, reg, control); got.CardsTokens != nil || got.RowsWithTokens != 0 {
+			t.Errorf("%s: cards_tokens = %s over %d row(s), want nil: the row shape is meant to be vouched for by the class alone",
+				control, showTokens(got.CardsTokens), got.RowsWithTokens)
+		}
 	}
 	for _, c := range never {
 		got := classNamed(t, reg, c)
