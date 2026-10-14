@@ -580,11 +580,13 @@ re-fetch rate or a gate verdict.
 
 Which snapshot the grade uses. A snapshot is the `[]agent.Msg` transcript at one moment. The run records two per
 step: `sent` (what the seat was handed, after compaction) and `turn` (the transcript right after the seat's
-reply, before the next compaction). A grader reads one field of a snapshot, `Msg.Content` of every message,
+reply, before the next compaction). A context that stays over the budget is never handed to the seat and is never
+recorded, so every snapshot is something the seat saw. A grader reads one field of a snapshot, `Msg.Content` of every message,
 joined by newlines; roles and tool-call arguments are not scanned. `kv_store`, `log_triage` and
 `sudoku_sketchpad` scan every snapshot, so a reply is credited once it appeared, even if the ladder
 removed it afterwards. `needle_retention` scans only the last snapshot, the context the agent still holds at the
-end. The instruction text sits in the scanned context, so it carries placeholders only, never an example
+end (when the budget wall stops a run, that is the last snapshot before the wall, so operations the seat never
+received earn no credit). The instruction text sits in the scanned context, so it carries placeholders only, never an example
 that could pass for an answer (a test pins that the bare instruction scores nothing).
 
 Per-task outcomes use the measurement gate's seven words, and only these:
@@ -593,13 +595,15 @@ Per-task outcomes use the measurement gate's seven words, and only these:
 |---|---|
 | `pass` | graded, reward at or above `--pass-at` (default 1.0: every item right) |
 | `task_fail` | graded, reward below it; the reward is kept (0.958 of the needles is a `task_fail` and the number the bench exists to produce) |
-| `infra_error` | the seat could not answer: connection refused, no endpoint, a reset mid-run. Never graded, never a `task_fail` |
+| `infra_error` | the seat could not answer: connection refused, no endpoint, a reset mid-run; or the budget cannot hold the instruction plus the first operation, so the seat was never called (the detail says so). Never graded, never a `task_fail` |
 | `timeout` | `--max-turns` reached before the stream drained; a step cap, never graded |
 | `judge_error` | the grade could not be computed (no snapshots, empty gold, a sudoku gold without its board side) |
-| `not_run` | the run was interrupted before the task finished or began |
+| `not_run` | the run was interrupted before the task finished or began, including an interrupt that lands while a seat request is in flight |
 | `cheat` | reserved for the gate's vocabulary; this adapter has no check for gaming a grader and never emits it |
 
-A task whose context cannot be made to fit the budget ends `budget_wall` and is graded on what it had. The
+A task whose context stops fitting the budget after the seat has answered at least once ends `budget_wall` and is
+graded on what it had. A budget too small for the instruction plus the first operation is refused by the verb
+before any seat call (and, driven as a library, ends `infra_error`): nothing would be measured. The
 results JSON holds, per task, the outcome word, the reward (null unless graded), how the run ended, turns,
 operations delivered, compaction count, the largest context sent (estimated tokens) and the pager report, plus
 the outcome counts and the mean reward per family; it has no timestamps. With no seat reachable every task is

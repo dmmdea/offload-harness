@@ -22,14 +22,19 @@
   the task `infra_error` and it is never graded; a task that reaches `--max-turns` is `timeout`; a grade that cannot be
   computed is `judge_error`. A graded task below `--pass-at` (default: every item right) is `task_fail` and keeps its
   reward. The report has no timestamps and a reward is null unless the task was graded. With nothing graded the verb
-  exits non-zero and says nothing was measured.
+  exits non-zero and says nothing was measured. A budget too small for the instruction plus the first operation is
+  refused before any seat call (as a library call it ends `infra_error`, never a graded `task_fail`), an interrupt
+  that lands while a seat request is in flight is `not_run`, and a context over the budget is never recorded as a
+  snapshot, so the needle grader cannot credit operations the seat never received at a budget wall.
 - **Tests.** Written before the code they cover, committed failing (build failure on the missing symbols), then green:
   the CPython random stream; generator parity digests and per-seed determinism; each grader on a known-good and a
   known-bad snapshot set (needle reads only the last snapshot, the others every one); the driver against fake seats
   (an oracle that passes every family under both deliveries, a seat that is down, one that dies mid-run, a turn cap,
   an invalid gold, a budget wall, an honest seat whose lost values fail the task once the ladder engages); the seven
   words and no clock field in the JSON; and that the bare instruction scores nothing. The verb is covered by root tests
-  with an injected seat and by one run against an unreachable endpoint.
+  with an injected seat and by one run against an unreachable endpoint, and by flag tests that fail if `--delivery`,
+  `--budget` or `--reserve` stop reaching the run. Every published level at seed 42 is pinned by operation and gold
+  digest, so a knob change in the level table fails a test.
 - **Docs.** `docs/systems/coding-agent.md` describes what each family measures, how to run it, the snapshot field the
   grade uses and the outcome table.
 
