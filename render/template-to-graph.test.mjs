@@ -612,6 +612,25 @@ test("mode 4 (bypassed): a union input matches an output on any of its members, 
   assert.deepEqual(warned(none, "input_dropped"), [{ code: "input_dropped", node: "3", input: "image", reason: "bypass_no_match" }]);
 });
 
+test("mode 4 (bypassed): a union output matches an input on any of its members, not only the first", () => {
+  const loader = { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] };
+  const reader = { id: 3, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] };
+  const edges = [[1, 1, 2, "in"], [2, 0, 3, "image"]];
+  const via = (inType, outType) => convert(ui([loader, { id: 2, type: "AnyBoth", mode: 4, ins: [["in", inType]], outs: [["out", outType]] }, reader], edges));
+  // MASK is the second member of the output's union
+  const second = via("MASK", "IMAGE,MASK");
+  assert.deepEqual(graphOf(second)["3"].inputs, { image: ["1", 1] }, "MASK and IMAGE,MASK share MASK");
+  assert.deepEqual(warned(second, "input_dropped"), []);
+  // the third member of a longer union
+  assert.deepEqual(graphOf(via("MASK", "IMAGE,LATENT,MASK"))["3"].inputs, { image: ["1", 1] });
+  // both sides a union, the shared member second on each
+  assert.deepEqual(graphOf(via("LATENT,MASK", "IMAGE,MASK"))["3"].inputs, { image: ["1", 1] });
+  // the control: a union output with no member of the input's type matches nothing and the wire is dropped
+  const none = via("MASK", "IMAGE,LATENT");
+  assert.deepEqual(graphOf(none)["3"].inputs, {});
+  assert.deepEqual(warned(none, "input_dropped"), [{ code: "input_dropped", node: "3", input: "image", reason: "bypass_no_match" }]);
+});
+
 test("mode 4 (bypassed): outputs are grouped by their exact type, so a union or * output beside a concrete one does not join its group", () => {
   const invert = (id) => ({ id, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] });
   const loaders = [
