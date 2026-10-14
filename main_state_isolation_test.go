@@ -102,20 +102,37 @@ const relaunchRootFolder = "relaunch"
 // ends by os.Exit from inside a test, or is killed by its parent, never reaches the removal in runIsolated, and a root in the OS temp dir
 // was left behind by every such launch (13 empty ones from the gpu tests alone, one run); a root inside the suite's own is removed with
 // it when the suite ends. The suite's variable must name a throwaway root of this package that is still on disk, as inheritedSuiteRoot
-// requires, or the answer is "" and the root goes to the OS temp dir as it always did: the net fails closed.
+// requires, or the answer is "" and the root goes to the OS temp dir as it always did: the net fails closed. A variable that names a
+// throwaway root that cannot be used (gone, not a folder, no room for the relaunch folder) says why on isolationStderr (relaunchFallback);
+// an unset one, or one that names something that is not a throwaway root, is not a suite's copy and stays quiet.
 func relaunchRootParent(getenv func(string) string) string {
 	owner := getenv(suiteStateRootEnv)
 	if owner == "" || !strings.HasPrefix(filepath.Base(owner), stateIsolationPrefix) {
 		return ""
 	}
-	if fi, err := os.Stat(owner); err != nil || !fi.IsDir() {
-		return ""
+	fi, err := os.Stat(owner)
+	if err != nil {
+		return relaunchFallback(owner+" (named by "+suiteStateRootEnv+") cannot be read", err)
+	}
+	if !fi.IsDir() {
+		return relaunchFallback(owner+" (named by "+suiteStateRootEnv+") is not a folder", nil)
 	}
 	parent := filepath.Join(filepath.Clean(owner), relaunchRootFolder)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return ""
+		return relaunchFallback("could not make "+parent, err)
 	}
 	return parent
+}
+
+// relaunchFallback says why a root that could have gone inside the suite's goes to the OS temp dir instead, and answers "" for it. The
+// fallback keeps the isolation (the root is still the process's own) but brings back the leak the nesting closes, and it would otherwise
+// show only as folders in the temp dir.
+func relaunchFallback(why string, err error) string {
+	if err != nil {
+		why += ": " + err.Error()
+	}
+	fmt.Fprintf(isolationStderr, "root tests: %s; this process keeps its state root in the OS temp dir, where a kill or an os.Exit leaves it behind\n", why)
+	return ""
 }
 
 // suiteRunner is what TestMain runs: *testing.M, or a stub in the fail-closed test.
@@ -126,14 +143,21 @@ type suiteRunner interface{ Run() int }
 // variable cannot be set up it returns 1 without running a single test, because
 // a suite that fell back to the machine-wide state root would be exposed to the
 // live data this net exists to protect. The three effects are parameters so
-// TestRunIsolatedFailsClosed can make each one fail.
-func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, error), setenv func(key, value string) error, removeAll func(string) error) int {
+// TestRunIsolatedFailsClosed can make each one fail. A root it cannot remove
+// (removeStateRoot) turns a passing suite's code 0 into 1.
+func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, error), setenv func(key, value string) error, removeAll func(string) error) (code int) {
 	dir, err := mkdirTemp(relaunchRootParent(os.Getenv), stateIsolationPrefix)
 	if err != nil {
 		os.Stderr.WriteString("root tests: could not isolate the state root: " + err.Error() + "\n")
 		return 1
 	}
-	defer removeStateRoot(dir, removeAll)
+	// A root that stays behind fails a passing suite (exit 1) and leaves a failing suite's own code alone: the tests ran, but the isolation net did
+	// not clean up after them, and the line removeStateRoot writes is hidden by `go test ./...` for a package that passed.
+	defer func() {
+		if removeStateRoot(dir, removeAll) != nil && code == 0 {
+			code = 1
+		}
+	}()
 	if err := setenv("LOCAL_OFFLOAD_STATE_DIR", filepath.Clean(dir)); err != nil {
 		os.Stderr.WriteString("root tests: could not set LOCAL_OFFLOAD_STATE_DIR: " + err.Error() + "\n")
 		return 1
@@ -173,16 +197,18 @@ const removeRetryDelay = 250 * time.Millisecond
 
 // removeStateRoot removes the suite's throwaway state root. A removal that fails is tried once more after removeRetryDelay, and a root
 // that is still there after that is named on isolationStderr with the error, so that a leak is seen where it is made and not found later as
-// a folder in the OS temp dir. It does not change the suite's result: the tests ran, and a leftover folder is not a failed test.
-func removeStateRoot(dir string, removeAll func(string) error) {
+// a folder in the OS temp dir, and the error is answered so that runIsolated can fail the package: `go test ./...` shows the stderr of a
+// package that passed only with -v, so the line alone reaches no one.
+func removeStateRoot(dir string, removeAll func(string) error) error {
 	err := removeAll(dir)
 	if err == nil {
-		return
+		return nil
 	}
 	time.Sleep(removeRetryDelay)
 	if err = removeAll(dir); err != nil {
-		fmt.Fprintf(isolationStderr, "root tests: could not remove the throwaway state root %s: %v (a process may still hold it open; remove it by hand)\n", filepath.Clean(dir), err)
+		fmt.Fprintf(isolationStderr, "root tests: could not remove the throwaway state root %s: %v (a process may still hold it open; remove it by hand); the package fails so that this is not missed\n", filepath.Clean(dir), err)
 	}
+	return err
 }
 
 // stubRunner records whether the suite was run, and answers code as the suite's own result.

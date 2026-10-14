@@ -3,11 +3,13 @@ package mediaremote
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stateIsolationPrefix names this package's throwaway state root, so TestMainIsolatesTheStateRoot can tell the TestMain's
@@ -65,14 +67,21 @@ type suiteRunner interface{ Run() int }
 // runIsolated points LOCAL_OFFLOAD_STATE_DIR at a throwaway directory, runs the suite, and removes the directory. It FAILS
 // CLOSED: when the directory or the variable cannot be set up it returns 1 without running a single test, because a suite
 // that fell back to the machine-wide state root would be exposed to the live data this net exists to protect. The three
-// effects are parameters so TestRunIsolatedFailsClosed can make each one fail.
-func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, error), setenv func(key, value string) error, removeAll func(string) error) int {
+// effects are parameters so TestRunIsolatedFailsClosed can make each one fail. A root it cannot remove (removeStateRoot) turns a passing
+// suite's code 0 into 1.
+func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, error), setenv func(key, value string) error, removeAll func(string) error) (code int) {
 	dir, err := mkdirTemp("", stateIsolationPrefix)
 	if err != nil {
 		os.Stderr.WriteString("mediaremote tests: could not isolate the state root: " + err.Error() + "\n")
 		return 1
 	}
-	defer func() { _ = removeAll(dir) }()
+	// A root that stays behind fails a passing suite (exit 1) and leaves a failing suite's own code alone: the tests ran, but the isolation net did
+	// not clean up after them, and the line removeStateRoot writes is hidden by `go test ./...` for a package that passed.
+	defer func() {
+		if removeStateRoot(dir, removeAll) != nil && code == 0 {
+			code = 1
+		}
+	}()
 	if err := setenv("LOCAL_OFFLOAD_STATE_DIR", filepath.Clean(dir)); err != nil {
 		os.Stderr.WriteString("mediaremote tests: could not set LOCAL_OFFLOAD_STATE_DIR: " + err.Error() + "\n")
 		return 1
@@ -87,6 +96,26 @@ func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, err
 
 // isolationStderr is where runIsolated reports a throwaway root it could not remove; os.Stderr, except in the test of that report.
 var isolationStderr io.Writer = os.Stderr
+
+// removeRetryDelay is how long runIsolated waits before it tries a removal that failed once more. On Windows a process that has just
+// ended (or a scanner) can still hold a file of the folder, or the folder itself as its working directory, for a moment.
+const removeRetryDelay = 250 * time.Millisecond
+
+// removeStateRoot removes the suite's throwaway state root. A removal that fails is tried once more after removeRetryDelay, and a root
+// that is still there after that is named on isolationStderr with the error, so that a leak is seen where it is made and not found later as
+// a folder in the OS temp dir, and the error is answered so that runIsolated can fail the package: `go test ./...` shows the stderr of a
+// package that passed only with -v, so the line alone reaches no one.
+func removeStateRoot(dir string, removeAll func(string) error) error {
+	err := removeAll(dir)
+	if err == nil {
+		return nil
+	}
+	time.Sleep(removeRetryDelay)
+	if err = removeAll(dir); err != nil {
+		fmt.Fprintf(isolationStderr, "mediaremote tests: could not remove the throwaway state root %s: %v (a process may still hold it open; remove it by hand); the package fails so that this is not missed\n", filepath.Clean(dir), err)
+	}
+	return err
+}
 
 // stubRunner records whether the suite was run, and answers code as the suite's own result.
 type stubRunner struct {

@@ -46,13 +46,19 @@ type suiteRunner interface{ Run() int }
 // a suite that fell back to the machine-wide state root would be exposed to the
 // live data this net exists to protect. The three effects are parameters so
 // TestRunIsolatedFailsClosed can make each one fail.
-func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, error), setenv func(key, value string) error, removeAll func(string) error) int {
+func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, error), setenv func(key, value string) error, removeAll func(string) error) (code int) {
 	dir, err := mkdirTemp("", stateIsolationPrefix)
 	if err != nil {
 		os.Stderr.WriteString("delegate tests: could not isolate the state root: " + err.Error() + "\n")
 		return 1
 	}
-	defer removeStateRoot(dir, removeAll)
+	// A root that stays behind fails a passing suite (exit 1) and leaves a failing suite's own code alone: the tests ran, but the isolation net did
+	// not clean up after them, and the line removeStateRoot writes is hidden by `go test ./...` for a package that passed.
+	defer func() {
+		if removeStateRoot(dir, removeAll) != nil && code == 0 {
+			code = 1
+		}
+	}()
 	if err := setenv("LOCAL_OFFLOAD_STATE_DIR", filepath.Clean(dir)); err != nil {
 		os.Stderr.WriteString("delegate tests: could not set LOCAL_OFFLOAD_STATE_DIR: " + err.Error() + "\n")
 		return 1
@@ -79,16 +85,18 @@ const removeRetryDelay = 250 * time.Millisecond
 
 // removeStateRoot removes the suite's throwaway state root. A removal that fails is tried once more after removeRetryDelay, and a root
 // that is still there after that is named on isolationStderr with the error, so that a leak is seen where it is made and not found later as
-// a folder in the OS temp dir. It does not change the suite's result: the tests ran, and a leftover folder is not a failed test.
-func removeStateRoot(dir string, removeAll func(string) error) {
+// a folder in the OS temp dir, and the error is answered so that runIsolated can fail the package: `go test ./...` shows the stderr of a
+// package that passed only with -v, so the line alone reaches no one.
+func removeStateRoot(dir string, removeAll func(string) error) error {
 	err := removeAll(dir)
 	if err == nil {
-		return
+		return nil
 	}
 	time.Sleep(removeRetryDelay)
 	if err = removeAll(dir); err != nil {
-		fmt.Fprintf(isolationStderr, "delegate tests: could not remove the throwaway state root %s: %v (a process may still hold it open; remove it by hand)\n", filepath.Clean(dir), err)
+		fmt.Fprintf(isolationStderr, "delegate tests: could not remove the throwaway state root %s: %v (a process may still hold it open; remove it by hand); the package fails so that this is not missed\n", filepath.Clean(dir), err)
 	}
+	return err
 }
 
 // stubRunner records whether the suite was run, and answers code as the suite's own result.

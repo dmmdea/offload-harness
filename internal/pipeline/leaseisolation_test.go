@@ -1,11 +1,13 @@
 package pipeline
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
@@ -57,19 +59,38 @@ func TestMain(m *testing.M) {
 	restoreHost := gpuprobe.UseHostMemoryReader(func() (gpuprobe.HostMemory, bool) { return roomyHostMem, true })
 	code := m.Run()
 	restoreHost()
-	_ = os.RemoveAll(dir)
-	os.Exit(code)
+	os.Exit(finishIsolation(code, dir, os.RemoveAll))
 }
 
 // isolationStderr is where finishIsolation reports a throwaway root it could not remove; os.Stderr, except in the test of that report.
 var isolationStderr io.Writer = os.Stderr
 
-// removeStateRoot removes the suite's throwaway state root.
-func removeStateRoot(dir string, removeAll func(string) error) error { return removeAll(dir) }
+// removeRetryDelay is how long finishIsolation waits before it tries a removal that failed once more. On Windows a process that has just
+// ended (or a scanner) can still hold a file of the folder, or the folder itself as its working directory, for a moment.
+const removeRetryDelay = 250 * time.Millisecond
 
-// finishIsolation ends the run: it removes the throwaway state root and answers the exit code.
+// removeStateRoot removes the suite's throwaway state root. A removal that fails is tried once more after removeRetryDelay, and a root
+// that is still there after that is named on isolationStderr with the error, so that a leak is seen where it is made and not found later as
+// a folder in the OS temp dir, and the error is answered so that finishIsolation can fail the package: `go test ./...` shows the stderr of a
+// package that passed only with -v, so the line alone reaches no one.
+func removeStateRoot(dir string, removeAll func(string) error) error {
+	err := removeAll(dir)
+	if err == nil {
+		return nil
+	}
+	time.Sleep(removeRetryDelay)
+	if err = removeAll(dir); err != nil {
+		fmt.Fprintf(isolationStderr, "pipeline tests: could not remove the throwaway state root %s: %v (a process may still hold it open; remove it by hand); the package fails so that this is not missed\n", filepath.Clean(dir), err)
+	}
+	return err
+}
+
+// finishIsolation ends the run: it removes the throwaway state root and answers the exit code. A root that stays behind fails a passing
+// suite (exit 1) and leaves a failing suite's own code alone: the tests ran, but the isolation net did not clean up after them.
 func finishIsolation(code int, dir string, removeAll func(string) error) int {
-	_ = removeStateRoot(dir, removeAll)
+	if removeStateRoot(dir, removeAll) != nil && code == 0 {
+		return 1
+	}
 	return code
 }
 
