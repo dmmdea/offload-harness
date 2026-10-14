@@ -1,11 +1,20 @@
 """Harness-owned ComfyUI idle bound: free the models and the executor cache after a quiet period.
 
 The house rule is that no idle model stays loaded: every engine unloads after 5 minutes. llama-swap does it with its own ttl;
-ComfyUI has no such timer (cli_args.py has no idle or timeout argument), so a ComfyUI that nothing frees holds what it loaded.
+ComfyUI has no such timer (cli_args.py has no idle or timeout argument), so a ComfyUI that nothing frees holds what it keeps.
 The harness frees it at the end of every job (render/gpu-lock.mjs POSTs /free), and the holder of the GPU lease stops a kept
-instance when the lease ends, but a runner killed before its cleanup, a warm session that stalls, or a hand-started instance
-leaves models resident. This pack is the engine-side timer for that gap, the llama-swap ttl analogue: ComfyUI owns the clock
-over its own models and the harness runs no watcher.
+instance when the lease ends. This pack is the engine-side timer for what is left, the llama-swap ttl analogue: ComfyUI owns
+the clock over its own models and caches and the harness runs no watcher.
+
+WHAT IS LEFT, AND WHAT IS NOT. The harness launches ComfyUI with --disable-smart-memory, and with that flag ComfyUI itself unloads
+every model when a prompt ends, whether it succeeded or failed (execution.py, after the node loop: `if DISABLE_SMART_MEMORY:
+unload_all_models()`; read in ComfyUI 0.38.0). A kept single-prompt instance (--cache-none) is therefore already bare between
+jobs, with or without the runner's /free, and for it this pack finds nothing to release: it does not fire and says nothing.
+What it bounds is what survives that: (a) a warm (--batch) session's executor cache, which keeps the loader outputs, the weights
+the unload moved to host RAM, until a free resets the executor; (b) a hand-started instance launched without
+--disable-smart-memory, which keeps its models loaded in VRAM after a prompt. Those are the two things the gate below tests (a
+loaded model, or a cache that is on). This is read from ComfyUI's code, not yet measured on a card (docs/systems/media-generation.md
+has the live check).
 
 ComfyUI loads this folder through render/comfyui-ext/extra_model_paths_idle.yaml (its `custom_nodes` key). render/comfy-lifecycle.mjs
 passes that file, and the pack name in the custom-node whitelist, on every kept (--keep-comfy) and warm (--batch) launch; a

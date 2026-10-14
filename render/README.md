@@ -158,10 +158,13 @@ node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyU
   the pack in `render/comfyui-ext/idle-nodes` (through `--extra-model-paths-config render/comfyui-ext/extra_model_paths_idle.yaml` and the
   custom-node whitelist): after `COMFY_IDLE_FREE_SEC` seconds (default 300; `0` or `off` disables it; a whole number from 5 up) with nothing
   queued or running, the instance asks its own worker to unload its models and reset its executor cache, once per busy period. A running
-  prompt is never idle. The harness runs no watcher; the Python process and its CUDA context are not freed by it and live until the lease
-  holder stops the instance. A running instance without the pack is reused with one `COMFY-IDLE-WARN`; to bound a hand-started ComfyUI add
-  the yaml to its own `--extra-model-paths-config` (`docs/OPERATOR-GUIDE.md`). The default single render is launched exactly as before.
-  Detail and the live check: `docs/systems/media-generation.md`.
+  prompt is never idle. ComfyUI already unloads every model when a prompt ends under the harness's `--disable-smart-memory`, so a kept
+  `--cache-none` instance is bare between jobs and the pack finds nothing to do there; it bounds a warm session's executor cache (host
+  RAM) and a hand-started instance that keeps its models. The harness runs no watcher; the Python process and its CUDA context are not
+  freed by it and live until the lease holder stops the instance. A running instance without the pack is reused with one
+  `COMFY-IDLE-WARN` per runner start; to bound a hand-started ComfyUI add the yaml to its own `--extra-model-paths-config`
+  (`docs/OPERATOR-GUIDE.md`). The default single render is launched exactly as before. Not yet run in a live ComfyUI; detail and the live
+  check: `docs/systems/media-generation.md`.
 - **`--reserve-vram 2.0`** keeps headroom for the Windows display/WDDM (too low → a decode spike
   kills the whole process with no traceback).
 - **Qwen2.5-VL fp8 text encoder CPU-offloads automatically** (~free with 64 GB RAM, saves 4–6 GB).

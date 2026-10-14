@@ -813,10 +813,12 @@ epoch) is not claimed by a lease that happens to reuse it. An instance nobody re
 it: the harness runs no timer or watcher over it (plan I5), and whether the next acquirer or `gpu doctor` should sweep
 markers whose epoch is dead is an operator decision (I5 forbids a watcher, not an explicit sweep). What the harness does
 carry is the engine's own idle clock, the llama-swap `ttl` analogue: a kept or warm instance is launched with the idle pack
-(`render/comfyui-ext/idle-nodes`), which frees its models and executor cache after 300 s with an empty queue, so the "no idle
-model stays loaded" rule holds for the weights even when no holder is left, and it acts on its own ComfyUI only. It bounds
-models and caches, not the process: the Python process and its CUDA context live until a holder or an operator stops them.
-See [media generation](media-generation.md). A kept launch
+(`render/comfyui-ext/idle-nodes`), which frees its models and executor cache after 300 s with an empty queue. The harness's own
+launch already has ComfyUI unload every model when a prompt ends (`--disable-smart-memory`), so what the clock bounds is what
+survives that: a warm session's executor cache in host RAM, and a hand-started instance's models when it runs with smart memory. It
+acts on its own ComfyUI only. It bounds models and caches, not the process: the Python process and its CUDA context live until a
+holder or an operator stops them. Built and tested against a fake queue, not yet run in a live ComfyUI. See
+[media generation](media-generation.md). A kept launch
 whose marker cannot be written logs `COMFY-KEEP-WARN`, because nothing can then stop it by its lease.
 
 **Allocate and claim are one loop.** The allocator reads live state over a window of seconds, so another reserve can take

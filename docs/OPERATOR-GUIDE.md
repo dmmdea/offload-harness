@@ -398,7 +398,9 @@ kill-filter misses it).
 
 **A hand-started ComfyUI is not bounded by the harness's idle free unless you opt in.** The ComfyUI the harness keeps
 (`--keep-comfy`) or runs warm (`--batch`) is launched with an idle pack that frees its models and caches after 300 s with
-nothing queued or running (`COMFY_IDLE_FREE_SEC` on the runner changes it, `0` or `off` disables it). The harness injects
+nothing queued or running (`COMFY_IDLE_FREE_SEC` on the runner changes it, `0` or `off` disables it). The harness's own launch
+passes `--disable-smart-memory`, so ComfyUI already unloads its models after each prompt; the pack matters for a warm session's
+cache and for an instance that runs with smart memory (ComfyUI's default), which keeps its models loaded between prompts. The harness injects
 nothing into an instance it did not start: a runner that finds one without the pack prints one `COMFY-IDLE-WARN` and uses it as
 it is. To give your own instance the same bound, add this to its launch (the path is your checkout's):
 
@@ -409,7 +411,8 @@ python main.py ... --extra-model-paths-config <repo>/render/comfyui-ext/extra_mo
 and, if you start it with `--disable-all-custom-nodes`, add `offload_idle` to its one `--whitelist-custom-nodes` list (that flag
 takes a single list and the last occurrence wins). `OFFLOAD_IDLE_FREE_SEC=<seconds>` in its environment changes the bound
 (default 300, `0` off). Confirm it with `curl http://127.0.0.1:8188/offload/idle`. It frees models and caches only: the process stays
-until you stop it. Detail: [media generation](systems/media-generation.md).
+until you stop it. It has been tested against a fake queue and not yet run in a live ComfyUI; the live check is in
+[media generation](systems/media-generation.md).
 
 ### Run an arbitrary ComfyUI graph (run-graph) ✅
 

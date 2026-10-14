@@ -1502,13 +1502,21 @@ runner. A kept instance that never answers is still killed, since a half-started
   (`internal/comfyinst`: the marker is matched to the epoch, the instance is shown to be the harness's by pid
   and exact argv on its own endpoint, freed with `POST /free`, then stopped). A kept **default** instance
   (no key) records no lease epoch and is stopped by whoever kept it, as it always was. That bounds the
-  process. Its models and caches are bounded sooner, by the instance itself (next bullet).
+  process. What it keeps in models and caches is bounded sooner, by the instance itself (next bullet).
 - **A kept or warm instance frees its own models and caches after 300 s idle (0.186, `render/comfyui-ext/idle-nodes/offload_idle`).**
   The rule is that no idle model stays loaded. llama-swap keeps it with its own `ttl`; ComfyUI has no idle timer (its parser takes no
-  idle or timeout argument), so an instance that nothing frees holds what it loaded. The runner's end-of-job `POST /free` and the
-  holder's stop at release cover the ordinary path. What they miss is a runner killed before its cleanup (a tree-kill skips it), a warm
-  session that stalls, and a hand-started instance. For that gap the bound lives inside the engine, the way llama-swap's `ttl` does:
-  the harness runs no timer or watcher and acts on no other process (plan I5), and the pack only ever acts on its own ComfyUI.
+  idle or timeout argument). The runner's end-of-job `POST /free` and the holder's stop at release cover the ordinary path. The harness
+  also launches every ComfyUI with `--disable-smart-memory`, and with that flag ComfyUI itself calls `unload_all_models()` when a prompt
+  ends, on success and on a handled error (`execution.py`, after the node loop; read in ComfyUI 0.38.0, not re-read on other nodes'
+  versions). So a kept single-prompt instance (`--cache-none`) is already bare between jobs, with or without the runner's `/free`, and the
+  pack finds nothing to release there: it does not fire and logs nothing. What survives that unload, and what the pack is for, is (a) a
+  warm (`--batch`) session's executor cache, which keeps the loader outputs (the weights the unload moved to host RAM) until a free
+  resets the executor, so a runner killed before its cleanup or a warm session that stalls holds host RAM (the 2026-10-09 incident above,
+  `render/comfy-family.mjs`, was an instance with the cache on: "Using RAM pressure cache" in its log, 57 GiB private); and (b) a hand-started
+  instance launched without `--disable-smart-memory`, which keeps its models loaded in VRAM after a prompt. That is the gap, and the
+  bound for it lives inside the engine, the way llama-swap's `ttl` does: the harness runs no timer or watcher and acts on no other
+  process (plan I5), and the pack only ever acts on its own ComfyUI. This is read from ComfyUI's code and checked against a fake queue;
+  **it has not been run inside a live ComfyUI** (the live check below is the way to do it).
   - *Where it is loaded.* A launch with `keep` or `warm` (`--keep-comfy`, `--batch`) adds
     `--extra-model-paths-config render/comfyui-ext/extra_model_paths_idle.yaml` once, before the operator's own args, and puts the pack
     `offload_idle` INTO the custom-node whitelist ComfyUI will read (`--whitelist-custom-nodes` is `nargs='+'` with no append, so a
@@ -1526,19 +1534,22 @@ runner. A kept instance that never answers is still killed, since a half-started
     touches a model. A prompt that lands in the microsecond after the check runs first and the flags drain after it: one avoidable
     reload, never a corrupted run. A running prompt, even a 550 s one, is never idle, and the gaps inside a batch are seconds, so
     back-to-back work is not affected; a driver that pauses more than 5 minutes between items pays one reload, which is the rule and
-    not a regression. Under `--cache-none` an instance that holds no model (the runner's own `/free` ran) does not fire at all; with the
-    cache on (a warm session) the free that follows it has little left to release and still logs `idle bound reached`.
+    not a regression. Under `--cache-none` an instance that holds no model (ComfyUI's own end-of-prompt unload ran, as did the runner's
+    `/free`) does not fire at all; with the cache on (a warm session) it fires once after the last prompt, whatever the models are
+    doing, and logs `idle bound reached` even when the runner's `/free` already reset the cache and the free has little left to release.
   - *Settings.* `COMFY_IDLE_FREE_SEC` on the runner: unset is 300, `0` or `off` is none (one `COMFY-IDLE-OFF` line), a whole number of
     seconds from 5 up is that; anything else is 300 with a `COMFY-IDLE-WARN`. It reaches the pack as `OFFLOAD_IDLE_FREE_SEC` and is
     fixed when an instance is launched: a runner that reuses a running instance cannot change it. `OFFLOAD_IDLE_POLL_SEC` (1 to 30,
     default 5) is the test seam.
   - *Knowing it is live.* The pack serves `GET /offload/idle` (`limit_sec`, `idle_sec`, `armed`, `freed`, `last_free_unix`, `error`),
-    read-only. After a launch with the pack the runner asks once: an answer is one `COMFY-IDLE` line; no answer, or an `error` (the
-    pack could not find ComfyUI's queue after an upstream change), is one `COMFY-IDLE-WARN` and the render goes on. The bound itself
+    read-only. After a launch with the pack the runner asks once: an answer that reports the bound that was asked for is one
+    `COMFY-IDLE` line; no answer, an `error` (the pack could not find ComfyUI's queue after an upstream change), or a `limit_sec`
+    other than the one asked for (the pack never read `OFFLOAD_IDLE_FREE_SEC`) is one `COMFY-IDLE-WARN` and the render goes on. The bound itself
     does not depend on the route, and a failure inside the pack is logged once as `[offload_idle] NOT ACTIVE` and never fails a job.
   - *Reuse and hand-started instances.* A running instance reused under `keep` or `warm` whose argv lacks the idle yaml (hand-started,
-    or kept by an older build) is reused, never restarted or refused, with one `COMFY-IDLE-WARN`; an argv ComfyUI does not report is
-    unknown and says nothing. The harness does not inject into an instance it does not own (ADR 0009): to bound one, add
+    or kept by an older build) is reused, never restarted or refused, with one `COMFY-IDLE-WARN` per runner start (a driver that starts
+    one runner per shot says it once per shot); it costs one `GET /system_stats` (up to 8 s on a slow instance, shared with the ownership
+    proof of a keyed instance, never asked twice); an argv ComfyUI does not report is unknown and says nothing. The harness does not inject into an instance it does not own (ADR 0009): to bound one, add
     `--extra-model-paths-config <repo>/render/comfyui-ext/extra_model_paths_idle.yaml` to its launch, and the pack name to its
     `--whitelist-custom-nodes` if it disables custom nodes ([operator guide](../OPERATOR-GUIDE.md)).
   - *What it does not bound.* The models and the executor cache only. The Python process and its CUDA context (it idles at 2.9 GiB
@@ -1550,20 +1561,38 @@ runner. A kept instance that never answers is still killed, since a half-started
     A sweep of markers whose epoch is dead, if one is wanted, is a separate slice (an explicit `gpu doctor` action, which plan I5
     allows where it forbids a watcher). So the register rows that say a kept instance lives to the end of its lease stay `partly`:
     models and caches are bounded, the process is lease-bounded.
-  - *Live check, not yet run on a card (the tests use a fake queue).* On a node with ComfyUI installed, as the operator, inside one
-    lease so the wrapped command does not end between steps: `local-offload gpu reserve --class media -- sh -c '<the sequence>'`.
-    (1) `node render/comfy-generate.mjs o1.png "a red cube" --keep-comfy`: `GET /system_stats` carries the idle yaml in `system.argv`,
-    the instance's log has `[offload_idle] idle bound 300 s`, `GET /offload/idle` answers. (2) `node render/comfy-render.mjs o2.png
-    "a red cube" --no-lifecycle` against that instance (it skips the runner's end-of-job `/free`, so the models stay resident): read
-    per-card memory (`nvidia-smi --query-gpu=memory.used`, and `torch_vram_free` in `/system_stats`) at t+0, at t+240 s (unchanged, no
-    fire line) and at t+330 s (down to the bare context, `idle bound reached` in the log). (3) Render again in the same lease: it
-    reloads and renders. (4) A 3-job `generate-image --batch` is unchanged and does not fire inside a gap under 300 s (re-run the
-    S3 acceptance, because a warm launch now carries the pack). (5) `COMFY_IDLE_FREE_SEC=60` shortens the bound; `0` gives no flag and
-    no line. (6) A hand-started instance without the yaml gives exactly one `COMFY-IDLE-WARN` and no restart. (7) On a Wan pair, a
-    kept multicard instance idle for 330 s with both cards read before and after: that settles whether `/free` returns VRAM under
-    `--gpu-only`, where ComfyUI's own unload frees nothing and a weight leaves the cards when its patcher loses its last reference
-    (the executor reset in `free_memory` should drop the cached ones; unverified). (8) Release the lease: the holder still stops the
-    instance (marker cleared, no ComfyUI process left). Record the node, the times and the readings on the register row.
+  - *Live check, not yet run on a card (the tests use a fake queue).* On a node with ComfyUI installed, as the operator, one lease per
+    case so the wrapped command does not end between steps (`local-offload gpu reserve --class media -- sh -c '<the sequence>'`),
+    with `COMFY_INSTANCE=idlecheck` in the environment so the instance is keyed and its holder stops it at release (a kept default
+    instance is stopped by hand). Two instruments, because the cases show in different places: per-card memory
+    (`nvidia-smi --query-gpu=memory.used`, `torch_vram_free` in `/system_stats`) for VRAM, and the private bytes of the process that
+    listens on the instance's port (`(Get-Process -Id (Get-NetTCPConnection -LocalPort <port> -State Listen).OwningProcess).PrivateMemorySize64`)
+    for host RAM. Per-card memory alone cannot show the warm case: the cache lives in host RAM.
+    - *A. The premise, and the no-op.* `node render/comfy-generate.mjs o1.png "a red cube" --keep-comfy`. Read per-card memory at once:
+      it is already the bare context, because ComfyUI unloaded the model itself when the prompt ended. A model still resident means
+      the premise does not hold on this ComfyUI version, and the pack's first case is back. `GET /system_stats` carries the idle yaml in
+      `system.argv`, the instance's log has `[offload_idle] idle bound 300 s`, `GET /offload/idle` answers. Wait 330 s: no `idle bound
+      reached` line and `freed` stays 0, because the gate found nothing to free (the expected no-op).
+    - *B. The warm case, the one the pack is for.* `node render/comfy-generate.mjs --batch jobs.jsonl --keep-comfy` with two small jobs:
+      a warm launch (no `--cache-none`) that carries the pack and stays up; the batch's own `/free` empties the cache at its end. Then
+      `node render/comfy-render.mjs o2.png "a red cube" --no-lifecycle` against that instance (it skips the runner's `/free`, so the
+      executor cache holds the loader outputs again). Read the process's private bytes at t+0 (the checkpoint's weights are in host
+      RAM), at t+240 s (unchanged, no fire line) and at t+330 s (down by about the checkpoint's size, `idle bound reached` in the log,
+      `freed` 1 in `GET /offload/idle`). If the line and `freed` are there and the private bytes did not fall, the free was asked for
+      and the allocator kept the pages: record that as a finding about the reading, not about the pack. Render again in the same
+      lease: it reloads and renders.
+    - *C. The smart-memory case (a hand-started instance).* Start ComfyUI by hand without `--disable-smart-memory`, with `--cache-none
+      --extra-model-paths-config <repo>/render/comfyui-ext/extra_model_paths_idle.yaml`, in a lease of its own. Render once with
+      `comfy-render.mjs ... --no-lifecycle` and read per-card memory at t+0 (the model resident), t+240 s (unchanged) and t+330 s
+      (down to the bare context, `idle bound reached`). The control is the same instance started without the yaml: it stays resident,
+      and a kept or warm runner that reuses it prints exactly one `COMFY-IDLE-WARN` and does not restart it.
+    - *D. The rest.* A 3-job `generate-image --batch` is unchanged and does not fire inside a gap under 300 s (re-run the S3 acceptance,
+      because a warm launch now carries the pack). `COMFY_IDLE_FREE_SEC=60` shortens the bound; `0` gives no flag and no line. On a Wan
+      pair, a kept multicard instance idle for 330 s with both cards read before and after settles whether `/free` returns VRAM under
+      `--gpu-only`, where ComfyUI's own unload frees nothing and a weight leaves the cards when its patcher loses its last reference
+      (the executor reset in `free_memory` should drop the cached ones; unverified). Release each lease: the holder still stops the
+      instance (marker cleared, no ComfyUI process left). Record the node, the ComfyUI version, the times and the readings on the
+      register row.
 
 **Verifying a pin on Windows.** The driver reports no per-process rows for graphics-mode (WDDM)
 cards, so confirm that an instance is on its card by per-card memory deltas, not process ids.
@@ -2145,8 +2174,8 @@ recorded as known offenders with their reason rather than silently skipped — a
   [`render/comfyui-ext.test.mjs`](../../render/comfyui-ext.test.mjs))
 - [`render/comfyui-ext/extra_model_paths_idle.yaml`](../../render/comfyui-ext/extra_model_paths_idle.yaml) and
   [`render/comfyui-ext/idle-nodes/offload_idle/__init__.py`](../../render/comfyui-ext/idle-nodes/offload_idle/__init__.py) — the idle bound a
-  kept or warm ComfyUI is launched with: it frees the instance's models and executor cache after 300 s with an empty queue
-  ([tests](../../render/comfyui-ext/test_offload_idle.py), run by [`render/comfyui-ext.test.mjs`](../../render/comfyui-ext.test.mjs));
+  kept or warm ComfyUI is launched with: it frees what the instance keeps (a loaded model, the executor cache) after 300 s with an empty
+  queue, not yet run in a live ComfyUI ([tests](../../render/comfyui-ext/test_offload_idle.py), run by [`render/comfyui-ext.test.mjs`](../../render/comfyui-ext.test.mjs));
   the launcher side (`resolveIdleBound`, the yaml and whitelist splice in `launchFlags`, the child env, the probe) is in
   [`render/comfy-lifecycle.mjs`](../../render/comfy-lifecycle.mjs), pinned by [`render/comfy-idle.test.mjs`](../../render/comfy-idle.test.mjs)
 - [`internal/hostneed/hostneed.go`](../../internal/hostneed/hostneed.go) — `estimateWith`: a card-only Wan call declares 0 host RAM

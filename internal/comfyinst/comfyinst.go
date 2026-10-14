@@ -6,9 +6,12 @@
 // lease it was launched under: the launch marker (.offload-launch-<key>.json) records the lease
 // epoch, and the HOLDER of that lease stops the instance when it releases it (`gpu reserve` when
 // its wrapped command ends, the pipeline when a media lease is released). That bounds the
-// process; the "no idle model stays loaded" rule for its models and caches is kept sooner by the
-// instance itself, without a watcher here: a kept or warm launch carries the idle pack
-// (render/comfyui-ext/idle-nodes), which frees them after 300 s with an empty queue.
+// process. What the instance keeps in models and caches (ComfyUI unloads its models itself when a
+// prompt ends under --disable-smart-memory, so that is a warm session's executor cache, or the
+// models of a hand-started instance run with smart memory) is bounded sooner by the instance
+// itself, without a watcher here: a kept or warm launch carries the idle pack
+// (render/comfyui-ext/idle-nodes), which frees it after 300 s with an empty queue; not yet run in
+// a live ComfyUI.
 //
 // WHAT IT WILL AND WILL NOT STOP. Only a keyed instance whose marker names exactly this lease
 // epoch. A marker with no epoch (the default instance, an instance launched outside a lease) is

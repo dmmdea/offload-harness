@@ -308,12 +308,16 @@ function stripValued(args, flag) {
 
 // --- the engine-resident idle bound -----------------------------------------------------------------
 //
-// The house rule is that no idle model stays loaded. llama-swap keeps it with its own ttl; ComfyUI has no idle timer, so a kept
-// (--keep-comfy) or warm (--batch) instance holds what it loaded until something frees it. The harness frees it at the end of every
-// job (gpu-lock.mjs POSTs /free) and the holder of the GPU lease stops a kept instance at release (internal/comfyinst); what is left
-// is a runner killed before its cleanup, a warm session that stalls, and an instance nobody's runner reaches. For those the bound
-// lives INSIDE the engine, the llama-swap ttl analogue: the pack render/comfyui-ext/idle-nodes/offload_idle asks ComfyUI's own worker
-// to unload the models and reset the executor cache after COMFY_IDLE_FREE_SEC (default 300) with an empty queue. The harness runs no
+// The house rule is that no idle model stays loaded. llama-swap keeps it with its own ttl; ComfyUI has no idle timer. The harness
+// frees an instance at the end of every job (gpu-lock.mjs POSTs /free) and the holder of the GPU lease stops a kept instance at
+// release (internal/comfyinst). Under the harness's own launch (--disable-smart-memory, always the first flag) ComfyUI also unloads
+// every model itself when a prompt ends, success or failure (execution.py, `if DISABLE_SMART_MEMORY: unload_all_models()`, ComfyUI
+// 0.38.0), so a kept single-prompt instance (--cache-none) is already bare between jobs and the pack below finds nothing to free.
+// What survives is the warm (--batch) session's executor cache, which keeps the loader outputs (the unloaded weights, in host RAM)
+// until a free resets the executor, and a hand-started instance run without --disable-smart-memory, which keeps its models in VRAM.
+// For those the bound lives INSIDE the engine, the llama-swap ttl analogue: the pack render/comfyui-ext/idle-nodes/offload_idle asks
+// ComfyUI's own worker to unload the models and reset the executor cache after COMFY_IDLE_FREE_SEC (default 300) with an empty queue.
+// Read from ComfyUI's code, not yet measured on a card (docs/systems/media-generation.md has the live check). The harness runs no
 // watcher and never acts on another process. It bounds models and caches, not the process: the Python process and its CUDA context
 // stay until the lease holder stops the instance (and an instance whose holder died stays until an operator does).
 //
@@ -337,7 +341,7 @@ export function resolveIdleBound(env = process.env, log = () => {}) {
   if (raw === "") return IDLE_FREE_DEFAULT_SEC;
   const whole = /^\d+$/.test(raw) ? Number(raw) : null;
   if (/^off$/i.test(raw) || whole === 0) {
-    log(`COMFY-IDLE-OFF: COMFY_IDLE_FREE_SEC=${raw} switches the idle bound off for the instances this run launches: they hold what they load until their lease ends`);
+    log(`COMFY-IDLE-OFF: COMFY_IDLE_FREE_SEC=${raw} switches the idle bound off for the instances this run launches: they keep whatever they hold until their lease ends`);
     return 0;
   }
   if (whole !== null && Number.isSafeInteger(whole) && whole >= IDLE_FREE_MIN_SEC) return whole;
@@ -466,7 +470,7 @@ export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "",
   if (idle && idle.yaml) {
     const missing = !existsSync(idle.yaml) ? idle.yaml : !existsSync(idle.packFile) ? idle.packFile : "";
     if (missing) {
-      warn(`COMFY-IDLE-WARN: the idle bound is not launched: ${missing} is missing (ComfyUI cannot start with an extra-model-paths file or a custom_nodes folder that does not exist); this instance holds what it loads until its lease ends`);
+      warn(`COMFY-IDLE-WARN: the idle bound is not launched: ${missing} is missing (ComfyUI cannot start with an extra-model-paths file or a custom_nodes folder that does not exist); this instance keeps whatever it holds until its lease ends`);
     } else {
       idleOn = true;
       if (![...flags, ...extra].some((f) => sameFile(f, idle.yaml) || sameFile(f, "--extra-model-paths-config=" + idle.yaml))) flags.push("--extra-model-paths-config", idle.yaml);
@@ -854,14 +858,14 @@ function leaseEpochOf(env) {
 
 /**
  * warnWithoutIdleBound: a running instance a kept or warm runner reuses, said once per runner start when its argv lacks the idle yaml (a hand-started
- * instance, or one an older build kept). It is reused all the same: it holds what it loads until its lease ends, as it always did.
+ * instance, or one an older build kept). It is reused all the same: it keeps whatever it holds until its lease ends, as it always did.
  * An argv ComfyUI does not report is unknown, not missing, and says nothing.
  */
 async function warnWithoutIdleBound({ api, key, systemArgv, log }) {
   let argv = null;
   try { argv = await systemArgv(api); } catch {}
   if (!Array.isArray(argv) || argv.some(idleYamlToken)) return;
-  log(`COMFY-IDLE-WARN: instance '${key || "default"}' on ${api} has no idle bound (launched without the idle pack); it holds what it loads until its lease ends. To bound a hand-started instance add --extra-model-paths-config ${EXT_IDLE_YAML} to its launch`);
+  log(`COMFY-IDLE-WARN: instance '${key || "default"}' on ${api} has no idle bound (launched without the idle pack); it keeps whatever it holds until its lease ends. To bound a hand-started instance add --extra-model-paths-config ${EXT_IDLE_YAML} to its launch`);
 }
 
 /**
@@ -874,9 +878,9 @@ async function verifyIdleBound({ api, key, secs, probeIdle, log }) {
   let answer = null;
   try { answer = await probeIdle(api); } catch {}
   if (!answer || typeof answer !== "object") {
-    log(`COMFY-IDLE-WARN: ${who} did not answer GET /offload/idle, so the idle pack may not have loaded (its console log says); it holds what it loads until its lease ends`);
+    log(`COMFY-IDLE-WARN: ${who} did not answer GET /offload/idle, so the idle pack may not have loaded (its console log says); it keeps whatever it holds until its lease ends`);
   } else if (answer.error) {
-    log(`COMFY-IDLE-WARN: ${who} reports that its idle bound is not active: ${answer.error}; it holds what it loads until its lease ends`);
+    log(`COMFY-IDLE-WARN: ${who} reports that its idle bound is not active: ${answer.error}; it keeps whatever it holds until its lease ends`);
   } else if (typeof answer.limit_sec === "number" && answer.limit_sec !== secs) {
     // OFFLOAD_IDLE_FREE_SEC went to the child, so a pack that answers another bound did not read it: the operator asked for secs, not for this.
     log(`COMFY-IDLE-WARN: ${who} reports an idle bound of ${answer.limit_sec} s, not the ${secs} s asked for (OFFLOAD_IDLE_FREE_SEC did not reach the pack); it frees after ${answer.limit_sec} s with an empty queue`);
