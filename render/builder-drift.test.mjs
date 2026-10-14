@@ -14,7 +14,7 @@
 //      otherwise: the package is not in this repository and none of it is copied here.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   buildManifest, builderValues, canonical, checkBuilderSide, checkCoverage, checkManifestShape, checkTemplateSide, formatManifest,
@@ -322,14 +322,20 @@ test("the CLI check passes on the committed manifest and fails on a planted one,
   assert.equal(await main(["nonsense"], io), 2);
 });
 
-test("the CLI reads a synthetic templates directory: explain lists the widgets, record writes only the manifest", async (t) => {
-  const dir = scratchDir(t, "bd-pkg-");
-  const syn = synthTemplates();
+// writeSyntheticPackage: the synthetic templates as a package directory (`site-packages/<json pkg>/templates` plus the
+// dist-info markers the version reader looks for). Returns the templates directory.
+function writeSyntheticPackage(dir, syn = synthTemplates()) {
   const tdir = join(dir, "site-packages", "comfyui_workflow_templates_json", "templates");
   mkdirSync(tdir, { recursive: true });
   mkdirSync(join(dir, "site-packages", "comfyui_workflow_templates_json-9.9.1.dist-info"));
   writeFileSync(join(dir, "site-packages", "comfyui_workflow_templates-9.0.0.dist-info"), "");
   for (const name of syn.templates.keys()) writeFileSync(join(tdir, `${name}.json`), JSON.stringify(syn.loadTemplate(name)));
+  return tdir;
+}
+
+test("the CLI reads a synthetic templates directory: explain lists the widgets, record writes only the manifest", async (t) => {
+  const dir = scratchDir(t, "bd-pkg-");
+  const tdir = writeSyntheticPackage(dir);
   const src = templateSource(tdir);
   assert.equal(src.versions["comfyui-workflow-templates-json"], "9.9.1");
   const out = [];
@@ -343,6 +349,173 @@ test("the CLI reads a synthetic templates directory: explain lists the widgets, 
   assert.equal(await main(["explain", "--templates-dir", tdir], io), 0);
   assert.match(out.join(""), /wf-krea2 \[default\]  template image_krea2_turbo_t2i\n\s+ksampler\.steps\s+template 8\s+builder 8\s+same/);
   assert.match(out.join(""), /DIFFERS \(unreviewed\)/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 2b. Effective values: a locator may not read a widget whose input is linked
+// ---------------------------------------------------------------------------------------------
+
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// plantLink: link the input `name` of the node a locator points at, the way an upstream edit that wires the
+// widget to a subgraph input or to another node would. The node keeps its (now stale) serialized value.
+function plantLink(tpl, t, name) {
+  const c = t.sg == null ? tpl : tpl.definitions.subgraphs.find((s) => s.name === t.sg);
+  const node = c.nodes.find((n) => n.id === t.id);
+  node.inputs = [...(node.inputs ?? []), { name, type: "INT", widget: { name }, link: 90001 }];
+  c.links = [...(c.links ?? []), { id: 90001, origin_id: 5000, origin_slot: 0, target_id: t.id, target_slot: 0 }];
+}
+
+test("a link planted on the widget a locator names fails with the builder, the key and the fix (every widget locator of every builder)", () => {
+  const { syn } = synthManifest();
+  let planted = 0;
+  for (const spec of BUILDER_SPECS) {
+    for (const view of spec.views) {
+      for (const item of view.items) {
+        const t = item.t;
+        if (t.kind === "distinct" || t.proxied) continue;
+        const name = t.kind === "inst" ? t.input : t.name;
+        assert.equal(typeof name, "string", `${spec.builder} [${view.name}] ${item.key}: the locator names no widget`);
+        const tpl = structuredClone(syn.loadTemplate(view.template));
+        plantLink(tpl, t, name);
+        assert.throws(
+          () => templateValue(spec, view, tpl, item),
+          new RegExp(`^${esc(spec.builder)} \\[${esc(view.name)}\\] ${esc(item.key)}: .* ${esc(name)} is linked \\(to node:\\S+#0\\), so its serialized value is not the one that runs`),
+          `${spec.builder} [${view.name}] ${item.key}`,
+        );
+        planted++;
+      }
+    }
+  }
+  assert.ok(planted > 100, `only ${planted} locators were planted`);
+});
+
+test("every widget locator names its widget the way the builder's input is named (a primitive node's widget is `value`)", () => {
+  for (const spec of BUILDER_SPECS) {
+    for (const view of spec.views) {
+      for (const item of view.items) {
+        const t = item.t;
+        if (t.kind !== "w") continue;
+        const want = /^Primitive/.test(t.type) ? "value" : item.b ? item.b.input : t.name;
+        assert.equal(typeof want, "string", `${spec.builder} [${view.name}] ${item.key}: the locator names no widget`);
+        assert.equal(t.name, want, `${spec.builder} [${view.name}] ${item.key}`);
+      }
+    }
+  }
+});
+
+test("a widget locator that names no widget is refused", () => {
+  const spec = BUILDER_SPECS.find((s) => s.builder === "wf-krea2");
+  const view = spec.views[0];
+  const { syn } = synthManifest();
+  const item = { key: "ksampler.steps", t: { kind: "w", sg: "Text to Image (Krea-2 Turbo)", id: 3, type: "KSampler", w: 2 }, b: null };
+  assert.throws(() => templateValue(spec, view, syn.loadTemplate(view.template), item), /wf-krea2 \[default\] ksampler\.steps: .*names no widget/);
+});
+
+// A template in the legacy form: the subgraph's widget is promoted by name in the instance's `proxyWidgets`, the
+// instance has no values of its own, and the interior node's widget is linked to the subgraph input.
+function proxiedTemplate({ proxy = [["227", "text"], ["221", "lora_name"]], instanceValues = [], linked = true } = {}) {
+  return {
+    nodes: [{ id: 238, type: "sg-1", mode: 0, inputs: [], widgets_values: instanceValues, properties: { proxyWidgets: proxy } }],
+    links: [],
+    definitions: {
+      subgraphs: [{
+        id: "sg-1",
+        name: "Proxied",
+        inputs: [{ name: "text", type: "STRING" }, { name: "lora_name", type: "COMBO" }],
+        nodes: [{
+          id: 221, type: "LoraLoaderModelOnly", mode: 0, widgets_values: ["a.safetensors", 1],
+          inputs: [{ name: "model", type: "MODEL", link: 1 }, { name: "lora_name", type: "COMBO", widget: { name: "lora_name" }, link: linked ? 2 : null }],
+        }],
+        links: [
+          { id: 1, origin_id: 7, origin_slot: 0, target_id: 221, target_slot: 0, type: "MODEL" },
+          { id: 2, origin_id: -10, origin_slot: 1, target_id: 221, target_slot: 1, type: "COMBO" },
+        ],
+      }],
+    },
+  };
+}
+const PROXY_SPEC = { builder: "wf-x" };
+const PROXY_VIEW = { name: "v", template: "tpl" };
+const proxiedItem = (extra = {}) => ({ key: "lora.name", b: null, t: { kind: "w", sg: "Proxied", id: 221, type: "LoraLoaderModelOnly", w: 0, name: "lora_name", ...extra } });
+
+test("a legacy proxied widget reads the interior value, once the instance is shown to list it and to carry no value of its own", () => {
+  const read = (tpl, extra = { proxied: true }) => templateValue(PROXY_SPEC, PROXY_VIEW, tpl, proxiedItem(extra));
+  assert.equal(read(proxiedTemplate()), "a.safetensors");
+  // the plain locator still refuses it: the widget is linked
+  assert.throws(() => read(proxiedTemplate(), {}), /wf-x \[v\] lora\.name: .* lora_name is linked \(to input:lora_name\)/);
+  assert.throws(() => read(proxiedTemplate({ proxy: [["227", "text"]] })), /does not list \[221, lora_name\] as a proxied widget/);
+  assert.throws(() => read(proxiedTemplate({ instanceValues: ["t", "b.safetensors"] })), /instance 238 carries a promoted value for lora_name; read it with I/);
+  assert.throws(() => read(proxiedTemplate({ linked: false })), /widget lora_name is not linked to a subgraph input; read it with W/);
+});
+
+test("an instance whose own promoted widget is linked in the root graph fails", () => {
+  const spec = BUILDER_SPECS.find((s) => s.builder === "wf-qwen-image-21");
+  const view = spec.views.find((v) => v.name === "t2i");
+  const item = view.items.find((i) => i.key === "ksampler.cfg");
+  const { syn } = synthManifest();
+  const tpl = structuredClone(syn.loadTemplate(view.template));
+  plantLink(tpl, item.t, "cfg");
+  assert.throws(() => templateValue(spec, view, tpl, item), /wf-qwen-image-21 \[t2i\] ksampler\.cfg: .* cfg is linked \(to node:\S+#0\)/);
+});
+
+test("a hand-edited templateSha256 fails the template side, naming the builder, once every widget is unchanged", () => {
+  const { syn, manifest: m } = synthManifest();
+  const copy = structuredClone(m);
+  copy.builders["wf-krea2"].views.default.templateSha256 = "0".repeat(64);
+  const r = checkTemplateSide(copy, { loadTemplate: syn.loadTemplate, versions: SYN_VERSIONS });
+  assert.equal(r.failures.length, 1);
+  assert.match(r.failures[0].message, /^builder drift: wf-krea2 \[default\]: templateSha256 does not match the recomputed hash \(manifest edited by hand\?\)/);
+  // a moved widget is reported as that, not as a hash mismatch
+  const moved = structuredClone(m);
+  moved.builders["wf-krea2"].views.default.items["ksampler.steps"].template = "0000000000000000";
+  moved.builders["wf-krea2"].views.default.templateSha256 = "0".repeat(64);
+  const r2 = checkTemplateSide(moved, { loadTemplate: syn.loadTemplate, versions: SYN_VERSIONS });
+  assert.equal(r2.failures.length, 1);
+  assert.match(r2.failures[0].message, /changed under the builder: widget ksampler\.steps /);
+});
+
+test("the CLI check fails on a hand-edited templateSha256 in the manifest file", async (t) => {
+  const dir = scratchDir(t, "bd-sha-");
+  const tdir = writeSyntheticPackage(dir);
+  const manifestFile = join(dir, "m.json");
+  const out = [];
+  const err = [];
+  const io = { out: (s) => out.push(s), err: (s) => err.push(s), env: {} };
+  assert.equal(await main(["record", "--templates-dir", tdir, "--manifest", manifestFile], io), 0, err.join(""));
+  const edited = JSON.parse(readFileSync(manifestFile, "utf8"));
+  edited.builders["wf-krea2"].views.default.templateSha256 = "f".repeat(64);
+  writeFileSync(manifestFile, JSON.stringify(edited));
+  assert.equal(await main(["check", "--templates-dir", tdir, "--manifest", manifestFile], io), 1);
+  assert.match(err.join(""), /builder drift: wf-krea2 \[default\]: templateSha256 does not match/);
+});
+
+// fakeTree: a ComfyUI tree that has the package installed (an empty index.json is all the locator looks for).
+function fakeTree(dir, name) {
+  const tree = join(dir, name);
+  const templatesDir = join(tree, ".venv", "Lib", "site-packages", "comfyui_workflow_templates_json", "templates");
+  mkdirSync(templatesDir, { recursive: true });
+  writeFileSync(join(templatesDir, "index.json"), "[]");
+  return { tree, templatesDir: templatesDir.replace(/\\/g, "/") };
+}
+
+test("the templates directory is resolved in one order by the CLI and the tests: --templates-dir, --comfy-dir, COMFY_TEMPLATES_DIR, COMFYUI_DIR", async (t) => {
+  const { resolveTemplatesDir } = await import("./builder-drift.mjs");
+  const dir = scratchDir(t, "bd-resolve-");
+  const a = fakeTree(dir, "tree-a");
+  const b = fakeTree(dir, "tree-b");
+  const env = { COMFY_TEMPLATES_DIR: "direct-dir", COMFYUI_DIR: a.tree };
+  assert.equal(resolveTemplatesDir({ "templates-dir": "flag-dir", "comfy-dir": b.tree }, env), "flag-dir");
+  assert.equal(resolveTemplatesDir({ "comfy-dir": b.tree }, env), b.templatesDir);
+  assert.equal(resolveTemplatesDir({}, env), "direct-dir");
+  assert.equal(resolveTemplatesDir({}, { COMFYUI_DIR: a.tree }), a.templatesDir);
+  assert.equal(resolveTemplatesDir({}, {}), null);
+  // a tree named by the environment that has no package is "not available"; a tree named on the command line is an error
+  assert.equal(resolveTemplatesDir({}, { COMFYUI_DIR: join(dir, "no-such-tree") }), null);
+  assert.throws(() => resolveTemplatesDir({ "comfy-dir": join(dir, "no-such-tree") }, env), /--comfy-dir .* has no comfyui_workflow_templates_json package/);
+  const err = [];
+  assert.equal(await main(["check", "--comfy-dir", join(dir, "no-such-tree")], { out: () => {}, err: (s) => err.push(s), env }), 2);
+  assert.match(err.join(""), /--comfy-dir .* has no comfyui_workflow_templates_json package/);
 });
 
 // ---------------------------------------------------------------------------------------------
