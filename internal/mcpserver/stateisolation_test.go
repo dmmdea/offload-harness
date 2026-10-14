@@ -3,11 +3,13 @@ package mcpserver
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -51,7 +53,7 @@ func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, err
 		os.Stderr.WriteString("mcpserver tests: could not isolate the state root: " + err.Error() + "\n")
 		return 1
 	}
-	defer func() { _ = removeAll(dir) }()
+	defer removeStateRoot(dir, removeAll)
 	if err := setenv("LOCAL_OFFLOAD_STATE_DIR", filepath.Clean(dir)); err != nil {
 		os.Stderr.WriteString("mcpserver tests: could not set LOCAL_OFFLOAD_STATE_DIR: " + err.Error() + "\n")
 		return 1
@@ -77,6 +79,24 @@ var knownTestHost = gpuprobe.HostMemory{PhysicalGiB: 128, AvailableGiB: 64, Comm
 
 // isolationStderr is where runIsolated reports a throwaway root it could not remove; os.Stderr, except in the test of that report.
 var isolationStderr io.Writer = os.Stderr
+
+// removeRetryDelay is how long runIsolated waits before it tries a removal that failed once more. On Windows a process that has just
+// ended (or a scanner) can still hold a file of the folder, or the folder itself as its working directory, for a moment.
+const removeRetryDelay = 250 * time.Millisecond
+
+// removeStateRoot removes the suite's throwaway state root. A removal that fails is tried once more after removeRetryDelay, and a root
+// that is still there after that is named on isolationStderr with the error, so that a leak is seen where it is made and not found later as
+// a folder in the OS temp dir. It does not change the suite's result: the tests ran, and a leftover folder is not a failed test.
+func removeStateRoot(dir string, removeAll func(string) error) {
+	err := removeAll(dir)
+	if err == nil {
+		return
+	}
+	time.Sleep(removeRetryDelay)
+	if err = removeAll(dir); err != nil {
+		fmt.Fprintf(isolationStderr, "mcpserver tests: could not remove the throwaway state root %s: %v (a process may still hold it open; remove it by hand)\n", filepath.Clean(dir), err)
+	}
+}
 
 // stubRunner records whether the suite was run.
 type stubRunner struct{ ran bool }

@@ -266,3 +266,48 @@ func TestACopyWithNoLiveSuiteRootKeepsARootOfItsOwnInTheTempDir(t *testing.T) {
 		})
 	}
 }
+
+// A copy that cannot share the suite's root keeps its own inside the suite's (relaunchRootParent) only when the suite's variable names a
+// live throwaway root of this package; any other value gets the OS temp dir (""), where the first process puts its own.
+func TestRelaunchRootParentFollowsOnlyALiveThrowawayRoot(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, stateIsolationPrefix+"1234")
+	elsewhere := filepath.Join(base, "somewhere")
+	for _, d := range []string{root, elsewhere} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file := filepath.Join(base, stateIsolationPrefix+"afile")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := func(owner string) func(string) string {
+		return func(key string) string {
+			if key == suiteStateRootEnv {
+				return owner
+			}
+			return ""
+		}
+	}
+	got := relaunchRootParent(env(root))
+	if want := filepath.Join(root, relaunchRootFolder); got != want {
+		t.Fatalf("relaunchRootParent(a live throwaway root) = %q, want %q", got, want)
+	}
+	if fi, err := os.Stat(got); err != nil || !fi.IsDir() {
+		t.Fatalf("the folder %q must exist for the copy's root to be made in it: %v", got, err)
+	}
+	for _, c := range []struct{ name, owner string }{
+		{"the variable is not set", ""},
+		{"it names a folder that is not a throwaway root", elsewhere},
+		{"it names a throwaway root that is gone", filepath.Join(base, stateIsolationPrefix+"gone")},
+		{"it names a file", file},
+	} {
+		if got := relaunchRootParent(env(c.owner)); got != "" {
+			t.Errorf("%s: relaunchRootParent = %q, want \"\" (the OS temp dir)", c.name, got)
+		}
+	}
+	if inner, err := os.ReadDir(elsewhere); err != nil || len(inner) != 0 {
+		t.Errorf("a folder that is not a throwaway root was written into: %v %v", inner, err)
+	}
+}
