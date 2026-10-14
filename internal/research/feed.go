@@ -214,18 +214,18 @@ func declaredEncoding(body []byte) string {
 // U+FFFE and U+FFFF) becomes a space. Either one would otherwise stop encoding/xml at that item, silently, and
 // every later item would be lost.
 func cleanXMLText(b []byte) []byte {
+	// ToValidUTF8 returns a copy, so the scrub below never touches the caller's bytes (Fetch still needs them
+	// when the document turns out not to be a feed)
 	b = bytes.ToValidUTF8(b, []byte(string(utf8.RuneError)))
-	return bytes.Map(func(r rune) rune {
-		switch {
-		case r == '\t' || r == '\n' || r == '\r':
-			return r
-		case r < 0x20:
-			return ' '
-		case r == 0xFFFE || r == 0xFFFF:
-			return ' '
+	for i, c := range b {
+		if c < 0x20 && c != '\t' && c != '\n' && c != '\r' {
+			b[i] = ' '
 		}
-		return r
-	}, b)
+	}
+	for _, r := range []rune{0xFFFE, 0xFFFF} {
+		b = bytes.ReplaceAll(b, []byte(string(r)), []byte(" "))
+	}
+	return b
 }
 
 // prepareFeedBody turns a feed response body into UTF-8 text the parser can read to the end. The encoding is the

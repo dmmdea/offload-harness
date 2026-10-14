@@ -1,6 +1,7 @@
 package research
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -110,6 +111,12 @@ func TestFeedWithAnInvalidByteKeepsEveryItem(t *testing.T) {
 			}
 			return s
 		},
+		"the noncharacters U+FFFE and U+FFFF": func(i int, s string) string {
+			if i == 2 {
+				return s + " " + string(rune(0xFFFE)) + string(rune(0xFFFF)) + " marks"
+			}
+			return s
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, text, err := FeedToText([]byte(rssWithTitles(4, edit)))
@@ -125,6 +132,27 @@ func TestFeedWithAnInvalidByteKeepsEveryItem(t *testing.T) {
 				t.Errorf("the header must count all four items and not claim a cut:\n%s", text)
 			}
 		})
+	}
+}
+
+// The parser works on a repaired copy: when the document turns out not to be a feed, Fetch reads the same bytes as a page.
+func TestParsingAFeedLeavesTheCallersBytesAlone(t *testing.T) {
+	body := []byte(rssWithTitles(3, func(i int, s string) string {
+		if i == 2 {
+			return s + " \xff \x0c"
+		}
+		return s
+	}))
+	before := append([]byte(nil), body...)
+	if _, _, err := FeedToText(body); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, before) {
+		t.Errorf("FeedToText changed the bytes it was given")
+	}
+	SniffFeed(body)
+	if !bytes.Equal(body, before) {
+		t.Errorf("SniffFeed changed the bytes it was given")
 	}
 }
 
