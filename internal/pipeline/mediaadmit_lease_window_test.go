@@ -8,7 +8,10 @@ package pipeline
 // These are guards, green on the code as it stands: they fail the day a media route is moved onto the fallback window, or
 // clamps its TTL below the render's timeout (a 5,400 s video render under a 3,600 s lease), or hard-codes one. Each runs on
 // both lease paths, the card-scoped writer (mediaadmit.go) and the whole-node one (pipeline.go), because each stamps the
-// TTL in its own place. The operator guide's description of this is pinned in operator_guide_lease_row_test.go.
+// TTL in its own place. These two pin the lease half for a ComfyUI image and video call on both paths. The other half, that the
+// render is killed at the same value, and the same pin over every other route that takes the lease (and a batch's per-image
+// timeout times its jobs), are in mediaadmit_lease_routes_test.go. The operator guide's description of all this is pinned in
+// operator_guide_lease_row_test.go.
 
 import (
 	"os"
@@ -52,7 +55,8 @@ func wantWindow(t *testing.T, what string, got, want time.Duration) {
 }
 
 // A video call under a 5,400 s timeout holds a 5,400 s lease: longer than the 3,600 s fallback, so neither the fallback nor
-// a clamp to it can pass, and equal to the render's kill, so the render never outlives its lease.
+// a clamp to it can pass. (That the render is killed at that same value is pinned in mediaadmit_lease_routes_test.go, which
+// has to use a short timeout to wait for a kill.)
 func TestAVideoCallsLeaseWindowIsItsOwnTimeout(t *testing.T) {
 	const timeout = 5400 * time.Second
 	if timeout <= gpulease.DefaultTTL {

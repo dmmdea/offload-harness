@@ -8,9 +8,13 @@ package pipeline
 // them going red.
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 )
@@ -110,4 +114,116 @@ func TestTheLeaseRouteTableNamesRealConfigKeys(t *testing.T) {
 			t.Errorf("%s: its setter does not write config key %q (the config carries %v)", r.name, r.key, got)
 		}
 	}
+}
+
+const (
+	// ownLeaseSec is the value a pin gives the route's own timeout key; otherLeaseSec is the value of every other timeout key,
+	// far from it, so a route that read the wrong key (or fell back to a default) shows as a different window.
+	ownLeaseSec   = 2
+	otherLeaseSec = 90
+	// windowTolerance bounds the read of a lease window: the window is stamped in milliseconds from the timeout and read from
+	// the record a moment later.
+	windowTolerance = 400 * time.Millisecond
+)
+
+// timeoutSetters is the setter of each distinct timeout key in the table.
+func timeoutSetters() map[string]func(*config.Config, int) {
+	m := map[string]func(*config.Config, int){}
+	for _, r := range leaseRoutes {
+		m[r.key] = r.set
+	}
+	return m
+}
+
+// setTimeouts gives key ownSec and every other timeout key otherSec.
+func setTimeouts(c *config.Config, key string, ownSec, otherSec int) {
+	for k, set := range timeoutSetters() {
+		if k == key {
+			set(c, ownSec)
+		} else {
+			set(c, otherSec)
+		}
+	}
+}
+
+// windowAndKill runs a media call in the background against the fixture's stub runner (which holds the render until the test
+// lets it go), reads the declared window of the one live lease while the render runs, then lets the render run into its
+// timeout and checks what killed it. Two facts, one value: the lease is stamped for `own`, and the render was killed at `own`
+// (gpugen's timeout error names the Timeout the render ran under: "timeout after 2s"). A render killed later than its lease
+// ends, a lease longer than the render may run, and a window read from the wrong key each fail here.
+func windowAndKill(t *testing.T, f *admitFixture, what string, own time.Duration, run func() string) {
+	t.Helper()
+	done := make(chan string, 1)
+	go func() { done <- run() }()
+
+	deadline := time.Now().Add(20 * time.Second)
+	for len(f.m.Leases()) != 1 {
+		select {
+		case answer := <-done:
+			t.Fatalf("%s: the call ended without ever holding a lease: %q", what, answer)
+		default:
+		}
+		if time.Now().After(deadline) {
+			f.letRunnersGo()
+			t.Fatalf("%s: no lease was held within 20 s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	window := theOneLeaseWindow(t, f)
+	if d := window - own; d < -windowTolerance || d > windowTolerance {
+		t.Errorf("%s: the lease window is %s; the call's own timeout is %s", what, window.Round(time.Millisecond), own)
+		f.letRunnersGo() // the pin has failed; end the call now instead of waiting out the runner
+	}
+
+	var answer string
+	select {
+	case answer = <-done:
+	case <-time.After(60 * time.Second):
+		f.letRunnersGo()
+		t.Fatalf("%s: the call never returned", what)
+	}
+	if want := fmt.Sprintf("timeout after %s", own); !strings.Contains(answer, want) {
+		t.Errorf("%s: the render was not killed at the call's own timeout (%s): want %q in what the call answered, got %q", what, own, want, answer)
+	}
+}
+
+// Every route that takes the media lease leases for ITS OWN timeout key and has its render killed at that same value. The table
+// is gpuLeaseCases (every GPU task), the key of each route is leaseRoutes, and each runs on the card-scoped host with the stub
+// runner holding the render. The two ComfyUI routes the lease-window pins run on both lease paths, and the whole-node plan is
+// what the iGPU, sdcpp and run-graph lanes take on this host, so the table covers both writers.
+func TestEveryMediaRouteLeasesForItsOwnTimeoutAndIsKilledThere(t *testing.T) {
+	cases := map[string]gpuLeaseCase{}
+	for _, c := range gpuLeaseCases() {
+		cases[c.name] = c
+	}
+	for _, r := range leaseRoutes {
+		tc, ok := cases[r.name]
+		if !ok {
+			t.Fatalf("%q is not a gpuLeaseCases route (TestTheLeaseRouteTableCoversEveryGPUTask names it)", r.name)
+		}
+		t.Run(r.name, func(t *testing.T) {
+			f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: func(c *config.Config) {
+				tc.setup(t, c, c.ImageGenScript, c.MediaDir) // the fixture's stub runner stands in for the route's script
+				presentWeights(t, c.MediaDir, c)
+				setTimeouts(c, r.key, ownLeaseSec, otherLeaseSec)
+			}})
+			windowAndKill(t, f, r.name+" ("+r.key+")", ownLeaseSec*time.Second, func() string { return tc.invoke(t, f.p, f.dir) })
+		})
+	}
+}
+
+// A batch takes the per-image timeout times its jobs, for the lease and for the kill: three one-second jobs hold the card for
+// three seconds, not one.
+func TestAnImageBatchLeasesAndIsKilledAtThePerImageTimeoutTimesItsJobs(t *testing.T) {
+	const perImageSec, jobs = 1, 3
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: func(c *config.Config) {
+		setTimeouts(c, "imagegen_timeout_sec", perImageSec, otherLeaseSec)
+	}})
+	windowAndKill(t, f, "image batch of three", perImageSec*jobs*time.Second, func() string {
+		_, err := f.p.RunImageBatch(context.Background(), []ImageBatchJob{{Prompt: "a red bike"}, {Prompt: "a blue bike"}, {Prompt: "a green bike"}})
+		if err != nil {
+			return err.Error()
+		}
+		return ""
+	})
 }
