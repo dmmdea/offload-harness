@@ -444,7 +444,7 @@ type AwaitHostRAMOptions struct {
 	// OnStampError, when set, is told when the bound's stamp could not be written (op StampOpSet) or taken off the record again
 	// (op StampOpClear). The wait does not fail on either: the stamp is what `gpu status` and the hidden holder read, not what
 	// ends the wait, so a failed write costs the status line and the holder's own enforcement, and the CLI says so once per
-	// kind. SEAM: nothing calls it yet.
+	// kind.
 	OnStampError func(op string, err error)
 }
 
@@ -471,12 +471,22 @@ const (
 func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) (result error) {
 	told := false
 	stamped := false
+	report := func(op string, err error) {
+		if o.OnStampError != nil {
+			o.OnStampError(op, err)
+		}
+	}
 	defer func() {
 		// The bound this wait stamped runs only while the wait does. A wait that ends without admission (its deadline, a
 		// cancel, a lease that is gone) leaves the lease still asking and no bound running; admission clears the stamp in
-		// the same critical section that declares the figure.
+		// the same critical section that declares the figure. A clear that fails is reported (the record would go on naming a
+		// bound that is not running), unless the lease is gone: then there is no record left to be wrong.
 		if stamped && result != nil {
-			_ = m.Restamp(epoch, func(mt *Meta) { mt.HostRAMHoldUntilMs = 0 })
+			if err := m.Restamp(epoch, func(mt *Meta) { mt.HostRAMHoldUntilMs = 0 }); err != nil {
+				if _, live := awaitedFigure(m.Leases(), epoch); live {
+					report(StampOpClear, err)
+				}
+			}
 		}
 	}()
 	for {
@@ -529,10 +539,13 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) (result erro
 		}
 		if !stamped && !o.HoldUntil.IsZero() {
 			// The wait will go on under a bound: put the moment it ends on the record, where `gpu status` (another process)
-			// reads it. A stamp that cannot be written costs the status line only; the bound itself is the caller's Deadline.
+			// reads it. A stamp that cannot be written costs the status line and the hidden holder's own enforcement, not the
+			// wait (the bound itself is the caller's Deadline): it is reported, tried again at the next look, and the wait goes on.
 			until := o.HoldUntil.UnixMilli()
-			if m.Restamp(epoch, func(mt *Meta) { mt.HostRAMHoldUntilMs = until }) == nil {
+			if err := m.Restamp(epoch, func(mt *Meta) { mt.HostRAMHoldUntilMs = until }); err == nil {
 				stamped = true
+			} else {
+				report(StampOpSet, err)
 			}
 		}
 		if !told && o.OnWait != nil {

@@ -205,10 +205,27 @@ func awaitHostRAMBounded(ctx context.Context, await func(gpulease.AwaitHostRAMOp
 		}
 	}
 	told := false
+	var saidStamp, saidClear bool
 	err := await(gpulease.AwaitHostRAMOptions{
 		Deadline:  effective,
 		HoldUntil: boundAt,
 		Cancel:    ctx.Done(),
+		// A stamp that cannot be written, or taken off again, is said once per kind however often the library reports it: it
+		// costs the status line and the hidden holder's own enforcement of the bound, never the wait.
+		OnStampError: func(op string, serr error) {
+			switch op {
+			case gpulease.StampOpSet:
+				if !saidStamp {
+					saidStamp = true
+					fmt.Fprintf(out, "gpu reserve: warning: could not stamp the hold bound on the lease record (%v); the bound still ends this wait, but `gpu status` cannot show when the lease is released and the hidden holder of a --detach lease cannot enforce the bound if this process dies\n", serr)
+				}
+			case gpulease.StampOpClear:
+				if !saidClear {
+					saidClear = true
+					fmt.Fprintf(out, "gpu reserve: warning: could not clear the hold bound from the lease record (%v); `gpu status` and the hidden holder may go on reading a bound that is no longer running\n", serr)
+				}
+			}
+		},
 		OnWait: func(e *gpulease.ErrHostRAM) {
 			told = true
 			freed := ""
