@@ -129,6 +129,10 @@ func TestLogsGateRefusesEveryOtherShellCommand(t *testing.T) {
 		"go test ./... | python filter.py",
 		"go test ./... |",
 		"go test ./... | | cat",
+		// a quote left open is not a command the scan can read
+		"go test -run 'a ./...",
+		`go test -run "a ./...`,
+		"go test ./... | grep 'FAIL",
 	} {
 		if logsCallIsBuild(lcShellCall(cmd)) {
 			t.Errorf("run_shell %q must NOT qualify", cmd)
@@ -142,6 +146,9 @@ func TestLogsGateRefusesEveryOtherShellCommand(t *testing.T) {
 func TestLogsGateScansQuotesTheWayAShellDoes(t *testing.T) {
 	if logsCallIsBuild(lcShellCall(`go test 'a\' ; flake8 .`)) {
 		t.Error(`a ";" after a single-quoted backslash chains: the command must NOT qualify`)
+	}
+	if logsCallIsBuild(lcShellCall(`go test 'a\' ; flake8 .' x`)) {
+		t.Error(`the quote after a single-quoted backslash is real: a later quote must not swallow the ";"`)
 	}
 	if logsCallIsBuild(lcShellCall(`go test -run a\; ./... ; flake8 .`)) {
 		t.Error("an escaped ';' hides only itself: the second ';' chains")
@@ -511,6 +518,9 @@ func TestLogsKeepRecognisesFileLineDiagnostics(t *testing.T) {
 		`C:\work\widget\a.go:3:4: declared and not used: v`,
 		"./a.go:3:4: declared and not used: v",
 		"a.c:10:3: note: previous declaration is here",
+		"src/lib.rs:3",
+		"pkg/a.go:12:5",
+		"\x1b[1m main.go:12:5: declared and not used: v",
 	}
 	for _, l := range keep {
 		if !logsKeep(l) {
@@ -519,6 +529,8 @@ func TestLogsKeepRecognisesFileLineDiagnostics(t *testing.T) {
 	}
 	fold := []string{
 		"12:30:45 up 3 days",
+		"127.0.0.1:18080: accepted a connection",
+		"0.0.0.0:8080: bind",
 		"listening on 127.0.0.1:18080",
 		"GET http://localhost:8080/health 200",
 		"build:12: ok then",
@@ -562,6 +574,27 @@ func TestLogCollapseNeverFoldsDistinctDiagnostics(t *testing.T) {
 }
 
 // --- the last line of a run --------------------------------------------------------
+
+// TestLogCollapseDoesNotFoldARunWhoseFirstAndLastLineCostAsMuchAsTheRun: keeping
+// the last line as well changes what a fold saves, so the per-run check counts
+// both lines kept. Three 25-byte lines cost 78 bytes; first line, marker and last
+// line cost 84.
+func TestLogCollapseDoesNotFoldARunWhoseFirstAndLastLineCostAsMuchAsTheRun(t *testing.T) {
+	mid := []string{"step output line number 1", "step output line number 2", "step output line number 3"}
+	for i := 0; i < 10; i++ {
+		mid = append(mid, fmt.Sprintf("distinct middle line number %c of the transcript body", 'a'+i))
+	}
+	if got, ok := logCollapse(lcJoin(lcHead, mid, lcTail)); ok {
+		t.Errorf("a run that would not shrink once its last line is kept was folded:\n%s", got)
+	}
+	got, ok := logCollapse(lcJoin(lcHead, mid, lcRepeat("retrying the build cache lookup", 40), lcTail))
+	if !ok {
+		t.Fatal("control: the long run should fold")
+	}
+	if !strings.Contains(got, strings.Join(mid[:3], "\n")+"\n") {
+		t.Errorf("the three short lines were folded:\n%s", got)
+	}
+}
 
 func TestLogCollapseKeepsTheFirstAndLastLineOfARun(t *testing.T) {
 	var prog []string

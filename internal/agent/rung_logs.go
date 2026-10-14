@@ -147,11 +147,12 @@ func logsKey(line string) string {
 }
 
 // logsDiagnostic is the opening of a compiler, linter or test-failure line that
-// points at a source position: "path:line:", "path:line:col" (with or without a
-// trailing colon), and rustc's "--> path:line:col". Whether the path part is a
+// points at a source position: "path:line:" (so also "path:line:col:"), a
+// "path:line" or "path:line:col" that ends the line, and rustc's
+// "--> path:line:col". Whether the path part is a
 // path is decided in code (logsIsDiagnostic): it must contain a separator or a
 // dot and a letter, so a clock time or an address never qualifies.
-var logsDiagnostic = regexp.MustCompile(`^\s*(?:-->\s+)?(\S+?):[1-9][0-9]*(?::[1-9][0-9]*)?(?::|\s*$)`)
+var logsDiagnostic = regexp.MustCompile(`^\s*(?:-->\s+)?(\S+?):[1-9][0-9]*(?::|\s*$)`)
 
 // logsIsDiagnostic reports whether a line is a file:line diagnostic. Two such
 // lines that differ only in their position or in a number are two different
@@ -478,7 +479,7 @@ func logsCallIsBuild(c ToolCall) bool {
 			Command string   `json:"command"`
 			Args    []string `json:"args"`
 		}
-		return json.Unmarshal([]byte(c.Args), &in) == nil && logsProgramIsBuild(strings.TrimSpace(in.Command), in.Args, false)
+		return json.Unmarshal([]byte(c.Args), &in) == nil && logsProgramIsBuild(in.Command, in.Args, false)
 	}
 	return false
 }
@@ -508,9 +509,6 @@ func logsShellCommandIsBuild(command string) bool {
 // logsProgramIsBuild is the test on an already split program and arguments.
 // shell is true for a shell command line, where make is also a build.
 func logsProgramIsBuild(prog string, args []string, shell bool) bool {
-	if prog == "" || strings.ContainsAny(prog, " \t") {
-		return false
-	}
 	switch runBaseName(prog) {
 	case "go":
 		return len(args) > 0 && (args[0] == "test" || args[0] == "build" || args[0] == "vet")
