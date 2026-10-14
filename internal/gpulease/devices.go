@@ -989,6 +989,11 @@ func (m *Manager) releaseByEpochV2(epoch uint64) (released, handled bool, err er
 	if meta, _ := m.readMeta(); meta != nil {
 		return false, false, nil
 	}
+	// A card record that exists and cannot be read is not a lease that is not there: the reader skips it, so "whatever is held" would
+	// be answered over it. It is an error that names it.
+	if bad := m.unreadableCardRecords(); len(bad) > 0 {
+		return false, true, errUnreadableCardRecord(bad[0])
+	}
 	switch live := m.liveCardLeaseEpochs(); len(live) {
 	case 0:
 		return false, false, nil
@@ -1000,6 +1005,35 @@ func (m *Manager) releaseByEpochV2(epoch uint64) (released, handled bool, err er
 	default:
 		return false, true, errSeveralCardLeases(live)
 	}
+}
+
+// unreadableCardRecords lists, lowest epoch first, the card-lease records (e/<epoch>.json) that exist and cannot be READ: an I/O
+// failure, a directory where the file was. The reader skips them ("the sweep deals with it once it is old"), which is right for a
+// judgement of who holds the cards and wrong for a question of whether anything is held.
+func (m *Manager) unreadableCardRecords() []uint64 {
+	entries, err := os.ReadDir(filepath.Join(m.leaseDir(), v2DirName))
+	if err != nil {
+		return nil
+	}
+	var bad []uint64
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		epoch, perr := strconv.ParseUint(strings.TrimSuffix(e.Name(), ".json"), 10, 64)
+		if perr != nil {
+			continue
+		}
+		if _, rerr := readEpochRecord(m.leaseDir(), epoch); rerr != nil && isIOFailure(rerr) {
+			bad = append(bad, epoch)
+		}
+	}
+	sort.Slice(bad, func(i, j int) bool { return bad[i] < bad[j] })
+	return bad
+}
+
+func errUnreadableCardRecord(epoch uint64) error {
+	return fmt.Errorf("gpulease: epoch %d: its record cannot be read; run again or pass --epoch %d", epoch, epoch)
 }
 
 // liveCardLeaseEpochs lists the epochs of the live card-scoped leases, lowest first.

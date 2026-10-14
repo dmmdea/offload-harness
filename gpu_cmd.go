@@ -1502,12 +1502,14 @@ func releaseHolderLease(m *gpulease.Manager, lease *gpulease.Lease) error {
 		} else {
 			_, err = releaseByEpochFn(m, epoch)
 		}
+		// The record itself decides, not Inspect() (which reads a record it cannot read as absent): off the record is released
+		// whatever the answers were; on it, or unreadable, is not.
 		if !leaseStillHeld(m, epoch) {
 			return nil
 		}
 		last = err
 		if last == nil {
-			last = fmt.Errorf("the release reported success, but epoch %d is still held", epoch)
+			last = stillHeldError(m, epoch, "the release reported success")
 		}
 	}
 	return last
@@ -1600,8 +1602,13 @@ func runGPURelease(args []string) error {
 	released, err := releaseByEpochFn(m, *epoch)
 	if err == nil && !released {
 		// "No lease was held" is believed only if nothing is held now: the answer is the same for a lease that is gone and for one
-		// whose record could not be examined, and the verb used to print it and exit 0 over a lease that was there.
-		if info := m.Inspect(); info.Held && (target != 0 && info.HoldsEpoch(target) || target == 0 && *epoch == 0) {
+		// whose record could not be examined, and the verb used to print it and exit 0 over a lease that was there. The record
+		// itself decides (a record that cannot be read is held), and for no named target the live view still must be empty.
+		if target != 0 {
+			if herr := stillHeldError(m, target, "the release reported that no lease was held"); herr != nil {
+				err = fmt.Errorf("%w; run it again, or look at `gpu status`", herr)
+			}
+		} else if info := m.Inspect(); info.Held && *epoch == 0 {
 			err = fmt.Errorf("the release reported that no lease was held, but epoch %d is still held; run it again, or look at `gpu status`", info.Epoch)
 		}
 	}

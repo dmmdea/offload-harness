@@ -45,6 +45,7 @@ package gpulease
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"sort"
@@ -773,5 +774,28 @@ func (s RecordState) String() string {
 // RecordState looks at the record of lease epoch directly (not through the reader, which treats a record it cannot read as
 // absent): absent, held, or unreadable, with the cause for the last.
 func (m *Manager) RecordState(epoch uint64) (RecordState, error) {
-	return RecordAbsent, nil
+	if epoch == 0 {
+		return RecordAbsent, nil
+	}
+	// A card lease keeps its record in e/<epoch>.json: look at that file itself.
+	if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
+		if _, rerr := readEpochRecord(m.leaseDir(), epoch); rerr != nil {
+			return RecordUnreadable, &RecordUnreadableError{Epoch: epoch, Err: rerr}
+		}
+		return RecordHeld, nil
+	} else if !errors.Is(serr, fs.ErrNotExist) {
+		return RecordUnreadable, &RecordUnreadableError{Epoch: epoch, Err: serr}
+	}
+	// Else a whole-node lease: meta.json names the epoch. The epoch counter is shared, so an epoch that is not meta.json's is not a
+	// whole-node lease; a meta.json that cannot be read cannot say, and so counts as holding this epoch.
+	meta, err := m.readMeta()
+	switch {
+	case err == nil && meta.Epoch == epoch:
+		return RecordHeld, nil
+	case err == nil, errors.Is(err, fs.ErrNotExist):
+		return RecordAbsent, nil
+	case isIOFailure(err):
+		return RecordUnreadable, &RecordUnreadableError{Epoch: epoch, Err: err}
+	}
+	return RecordAbsent, nil // corrupt bytes: debris that an acquirer sweeps, as every other reader treats it
 }

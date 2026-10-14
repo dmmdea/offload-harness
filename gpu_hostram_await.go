@@ -301,10 +301,24 @@ func releaseCommand(epoch uint64, warmOwed bool) string {
 	return fmt.Sprintf("gpu release --epoch %d", epoch)
 }
 
-// leaseStillHeld is true when the lease with this epoch is on the record now.
+// leaseStillHeld is true when the lease with this epoch is on the record now, and also when its record exists and cannot be read:
+// that lease is held for every decision here. It looks at the record itself (Manager.RecordState) and not through Inspect(), which
+// reads a record it cannot read as absent.
 func leaseStillHeld(m *gpulease.Manager, epoch uint64) bool {
-	info := m.Inspect()
-	return info.Held && info.HoldsEpoch(epoch)
+	st, _ := m.RecordState(epoch)
+	return st != gpulease.RecordAbsent
+}
+
+// stillHeldError says why the lease with this epoch is still on the record after a release that claimed otherwise, or nil when it
+// is not.
+func stillHeldError(m *gpulease.Manager, epoch uint64, claim string) error {
+	switch st, cause := m.RecordState(epoch); st {
+	case gpulease.RecordHeld:
+		return fmt.Errorf("%s, but epoch %d is still held", claim, epoch)
+	case gpulease.RecordUnreadable:
+		return fmt.Errorf("%s, but the record of epoch %d cannot be read, so the lease is treated as still held: %w", claim, epoch, cause)
+	}
+	return nil
 }
 
 // confirmReleased turns the answer of a release into an error when the answer cannot be believed. ReleaseByEpoch says (false,
@@ -315,8 +329,8 @@ func confirmReleased(m *gpulease.Manager, epoch uint64, released bool, err error
 	if err != nil {
 		return err
 	}
-	if !released && leaseStillHeld(m, epoch) {
-		return fmt.Errorf("the release reported that no lease was held, but epoch %d is still held", epoch)
+	if !released {
+		return stillHeldError(m, epoch, "the release reported that no lease was held")
 	}
 	return nil
 }
@@ -333,10 +347,7 @@ func releaseLeaseConfirmed(m *gpulease.Manager, lease *gpulease.Lease) error {
 	if err := lease.Release(); err != nil {
 		return err
 	}
-	if leaseStillHeld(m, lease.Epoch()) {
-		return fmt.Errorf("the release reported success, but epoch %d is still held", lease.Epoch())
-	}
-	return nil
+	return stillHeldError(m, lease.Epoch(), "the release reported success")
 }
 
 // releaseFailedError is what a command returns when the release it began failed: the cause it was already returning, then the

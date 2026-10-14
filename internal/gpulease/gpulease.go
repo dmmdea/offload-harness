@@ -2242,10 +2242,13 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 // held (or the named epoch is not): there is nothing to end. It reads and never writes.
 func (m *Manager) ReleaseTarget(epoch uint64) (uint64, error) {
 	if epoch != 0 {
-		if _, serr := os.Stat(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
-			return epoch, nil
+		if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr == nil || !errors.Is(serr, fs.ErrNotExist) {
+			return epoch, nil // there, or there and not examinable: the release reports which
 		}
 		meta, err := m.readMeta()
+		if isIOFailure(err) {
+			return epoch, nil // may be this lease: the release reports it
+		}
 		if err != nil || meta == nil {
 			return 0, nil
 		}
@@ -2254,11 +2257,15 @@ func (m *Manager) ReleaseTarget(epoch uint64) (uint64, error) {
 		}
 		return epoch, nil
 	}
-	if meta, err := m.readMeta(); meta != nil {
-		if err != nil {
-			return 0, nil
-		}
+	meta, err := m.readMeta()
+	if isIOFailure(err) {
+		return 0, fmt.Errorf("gpulease: the whole-node lease record cannot be read: %w; run again", &RecordUnreadableError{Err: err})
+	}
+	if meta != nil {
 		return meta.Epoch, nil
+	}
+	if bad := m.unreadableCardRecords(); len(bad) > 0 {
+		return 0, errUnreadableCardRecord(bad[0])
 	}
 	switch live := m.liveCardLeaseEpochs(); len(live) {
 	case 0:
@@ -2292,6 +2299,12 @@ func (l *Lease) Release() error {
 		return nil
 	}
 	meta, err := l.mgr.readMeta()
+	if isIOFailure(err) {
+		// The record may well be there and be ours: it could not be read. "Already gone" would be a claim about a lease nobody
+		// looked at, and a holder that believed it would exit over a held lease. Leave it releasable: the caller was told.
+		l.done.Store(false)
+		return fmt.Errorf("gpulease: releasing lease: %w", &RecordUnreadableError{Epoch: l.epoch, Err: err})
+	}
 	if err != nil || meta == nil {
 		return nil // already gone
 	}
