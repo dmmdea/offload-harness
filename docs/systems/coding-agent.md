@@ -484,6 +484,30 @@ preamble is never touched and no turn is dropped. The retry's shrink target is r
 just-rejected transcript's own estimate, not only the budget, so a dense-content estimate error
 can never make the retry re-send the bytes the server just refused.
 
+**Search-results rung (optional, default off: `compactOpts.SearchResults`).** One more lossy rung,
+for older tool bodies that are search listings: the grouped `search_files` output (`path:` then
+`  L<n>: text`) and bare `path:line:text` lines such as `grep -rn` or ripgrep print, alone or inside the
+`exit=` / `--- stdout ---` / `--- stderr ---` framing of `run_shell` and `run`. Everything else (the
+`web_search` list, `mode:"files"` output, test output, an error result) is left alone. It runs after
+dedupe and GCF and before the generic skeleton, over the same older span as that rung (never the
+protected preamble or the kept-recent tail), skips pinned bodies, and rewrites only a tool message's
+body. Each line is scored with BM25 against the objective (the last user message of the protected
+preamble, the one task text that is the same on every step; the line's own path counts as part of the
+line), lines that look like errors (`error`, `fail`, `panic`, `exception`, `fatal`) get a fixed boost, and
+the survivors are chosen round-robin across files, best score first, up to 30 lines, 5 per file and 15
+files (the documented defaults of the idea), then written back in listing order under a footer
+(`[... 74 of 100 lines elided, 12 of 30 files elided ...]`); the tool's own "more matches" or
+"truncated" note is kept. The result opens with the skeleton disclosure line, so the rest of the ladder,
+the re-execute-on-repeat path (ADR 0016) and the corpus harvest treat it as the compaction artifact it
+is, and a later elision marker still names the original size. It is deterministic, idempotent,
+monotonic (a result that is not strictly shorter is discarded) and fails closed: a body that is not,
+line for line, one of the accepted shapes comes back untouched. It has no CLI flag or loop setter yet:
+the option is reachable from the ladder's own options and from tests, the default ladder is pinned
+byte for byte by `internal/agent/testdata/ladder_default_golden.json`, and whether the rung ever
+becomes a default is decided by the measurement gate on a harvested corpus, not by this page. Source:
+`internal/agent/rung_search.go`. The idea is documented by the Headroom project (Apache-2.0); this is a
+clean-room implementation of that documented behaviour (see `NOTICE`).
+
 **Compaction eval harness (`compaction-eval`, `internal/compeval`).** Default flips for the ladder
 rungs are gated by MEASUREMENT, never estimates: the verb replays a pinned corpus (JSONL of
 transcript slices, sha256-hashed; a PII finding refuses the whole corpus) through the PRODUCTION
@@ -968,7 +992,7 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - [`internal/agent/runtool.go`](../../internal/agent/runtool.go) — allowlist, direct exec
 - [`internal/agent/writetools.go`](../../internal/agent/writetools.go) — `os.Root` scoping
 - [`internal/agent/builder.go`](../../internal/agent/builder.go) — capability grants, audit-path check
-- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`internal/compeval/`](../../internal/compeval/)
+- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`rung_search.go`](../../internal/agent/rung_search.go), [`internal/compeval/`](../../internal/compeval/)
 - [`internal/delegate/`](../../internal/delegate/) — delegator-side placement, intake, execution
   engine, acceptance evaluation
 - [`internal/pipeline/agenttask.go`](../../internal/pipeline/agenttask.go) — contract execution

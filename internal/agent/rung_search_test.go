@@ -1071,3 +1071,47 @@ func TestSearchRungKeepsTheShellToolsTruncationNote(t *testing.T) {
 	}
 	checkSearchRungProperties(t, body, rungQuery())
 }
+
+// TestSearchRungBodySavingsReport compares, body by body, what the rung and the
+// generic skeleton leave of every search listing in the frozen fixtures, in the
+// ladder's own token estimate. Report only: the adoption verdict belongs to the
+// measurement gate, on a harvested corpus.
+func TestSearchRungBodySavingsReport(t *testing.T) {
+	cases := append(ladderGoldenSynthetic(), ladderGoldenCase{name: "ladder-transcript", msgs: rungTranscript(), keep: rungKeep, protected: rungProtected})
+	tok := func(s string) int { return estimateTokens([]Msg{{Role: "tool", Content: s}}) }
+	query := searchQueryTerms(fixtureObjective)
+	var bodies, before, rung, skel int
+	for _, c := range cases {
+		cb, cr, cs := 0, 0, 0
+		for _, m := range c.msgs {
+			if m.Role != "tool" {
+				continue
+			}
+			thin, ok := searchRungBody(m.Content, query)
+			if !ok {
+				continue
+			}
+			sk, skOK := skeletonize(m.Content)
+			if !skOK {
+				sk = m.Content
+			}
+			cb += tok(m.Content)
+			cr += tok(thin)
+			cs += tok(sk)
+			bodies++
+		}
+		t.Logf("%-18s listing tokens before %6d  rung %6d (%3d%% left)  generic skeleton %6d (%3d%% left)", c.name, cb, cr, pct(cr, cb), cs, pct(cs, cb))
+		before, rung, skel = before+cb, rung+cr, skel+cs
+	}
+	t.Logf("%-18s %d listings: before %d tokens, rung %d (%d%% left), generic skeleton %d (%d%% left)", "total", bodies, before, rung, pct(rung, before), skel, pct(skel, before))
+	if bodies == 0 || rung >= before {
+		t.Errorf("the report found %d listings and the rung kept %d of %d tokens", bodies, rung, before)
+	}
+}
+
+func pct(a, b int) int {
+	if b == 0 {
+		return 0
+	}
+	return a * 100 / b
+}
