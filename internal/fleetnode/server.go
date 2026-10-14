@@ -2578,6 +2578,9 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	// Who asked, and whether the asker wants THIS node to card the job (it signals that only when it
 	// will not card the job itself). The asker's name is recorded on this node's row either way.
 	asker, nodeCards := askerOf(r)
+	// The session and run class of the box that asked (ADR 0085), read here and not in the run closure below:
+	// the closure outlives this request. They go on this node's row, so it names the session it worked for.
+	originSession, runClass := originOf(r, s.trustsWire(r, env.TaskType))
 	// An stt upload's transcript files, learned when the job finishes and released with its record.
 	var sttOut sttOutputs
 	card := s.newNodeCard(string(req.Task), specModel, env.JobID, asker, nodeCards)
@@ -2619,6 +2622,7 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		// D11: who the job was for, on this node's row; D7: the card, when the asker signalled that
 		// it will not card the job itself. A run that panics closes the card failed on its way out.
 		req.Requester = asker
+		req.OriginSession, req.RunClass = originSession, runClass
 		card.running()
 		finished := false
 		defer func() {

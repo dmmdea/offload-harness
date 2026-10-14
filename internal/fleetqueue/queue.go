@@ -168,6 +168,7 @@ func (q *Queue) SubmitAttributed(id, taskType string, payload json.RawMessage, t
 			ID: id, TaskType: taskType, Payload: payload, TimeoutSec: timeoutSec,
 			State: StateQueued, Submitted: q.clock().Unix(),
 			Asker: a.Asker, PairCard: a.PairCard,
+			Origin: a.Origin, RunClass: a.RunClass,
 		})
 	})
 	return state, err
