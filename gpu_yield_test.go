@@ -353,6 +353,30 @@ func TestNoYieldPathStopsTheCommand(t *testing.T) {
 	}
 }
 
+// A one-shot verb goes on after a config load error, and the policy it runs under is the one that asks
+// nobody: a mistyped gpu_on_overdue is a warning and a hold, never a request.
+func TestGPUReserveUnderAnInvalidPolicyStillRunsAndAsksNobody(t *testing.T) {
+	cfg, m := yieldRootRig(t, "kill")
+	stub := stubYieldShell(t)
+	afterCommandStarts(t, func() { plantRootWaiter(t, m) })
+	t.Setenv("LO_HELPER_SLEEP_MS", "3500")
+	var err error
+	stderr := captureStderr(t, func() {
+		err = runGPUReserve(yieldReserveArgs(cfg, []string{"--on-yield", "touch work/STOP"}, "TestHelperSleepMs"))
+	})
+	if err != nil {
+		t.Fatalf("a refused gpu_on_overdue is a warning to a one-shot verb, not a refusal to run: %v\n%s", err, stderr)
+	}
+	for _, want := range []string{"gpu_on_overdue", "request", "hold", "no request is made"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "asked to yield") || stub.count() != 0 {
+		t.Errorf("an unrecognised policy asked (%d runs):\n%s", stub.count(), stderr)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // The detached holder
 // ---------------------------------------------------------------------------
