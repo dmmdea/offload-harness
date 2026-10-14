@@ -19,6 +19,9 @@ import (
 const (
 	tcFixtureTraces     = "testdata/tracecorpus/traces"
 	tcFixtureDelegation = "testdata/tracecorpus/delegation-log"
+
+	// tcWantNeverRan is the skip reason of a delegation row whose agent never ran.
+	tcWantNeverRan = "delegation row never ran (zero steps, nothing recorded)"
 )
 
 func tcFixtureOpts() tcHarvestOpts {
@@ -109,16 +112,19 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Traces: goal-a, goal-b, goal-c-old, goal-e-badpager (goal-d-broken is not JSON).
-	// Delegation: 6 runs; the fake seat, the refusal, the dispatch error, the blank and the junk
-	// line are not runs, and notes.jsonl is not a dated shard.
-	if len(runs) != 10 || stats.Runs != 10 || stats.BySource[tcSourceAgentTrace] != 4 || stats.BySource[tcSourceDelegation] != 6 {
-		t.Fatalf("runs = %d, by source %v; want 10 = 4 traces + 6 delegation rows", len(runs), stats.BySource)
+	// Delegation runs, in file order: d1, d2 and d3 (seat-a, seat-a, seat-b) from the first shard
+	// and d4 and d5 (both seat-b) from the second: 5 runs; the fake seat, the refusal, the dispatch error, the deferral that never
+	// ran an agent (zero steps, nothing recorded), the blank and the junk line are not runs, and
+	// notes.jsonl is not a dated shard.
+	if len(runs) != 9 || stats.Runs != 9 || stats.BySource[tcSourceAgentTrace] != 4 || stats.BySource[tcSourceDelegation] != 5 {
+		t.Fatalf("runs = %d, by source %v; want 9 = 4 traces + 5 delegation rows", len(runs), stats.BySource)
 	}
 	wantSkipped := map[string]int{
 		"trace file not a trace record":                   1,
 		"seat excluded":                                   1,
 		"delegation row is a capacity refusal, not a run": 1,
 		"delegation row has no result (dispatch error)":   1,
+		tcWantNeverRan:                                    1,
 		"delegation row not JSON":                         1,
 		"delegation shard name is not a date":             1,
 	}
@@ -133,19 +139,20 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 
 	rep := tcBuildReport(runs, "hash")
 	a := rep.All
-	// trace-bearing: 4 traces with a transcript + delegation rows 1, 2, 3 with a step trace = 7.
-	if a.Runs != 10 || a.TraceBearingRuns != 7 {
-		t.Errorf("runs/trace-bearing = %d/%d, want 10/7", a.Runs, a.TraceBearingRuns)
+	// trace-bearing: 4 traces with a transcript + d1, d2, d3 with a step trace = 7.
+	if a.Runs != 9 || a.TraceBearingRuns != 7 {
+		t.Errorf("runs/trace-bearing = %d/%d, want 9/7", a.Runs, a.TraceBearingRuns)
 	}
-	// steps: 6+3+4+2 (traces) + 5+2+7+4+0+2 (delegation) = 35.
+	// steps: 6+3+4+2 (traces) + d1..d5 5+2+7+4+2 = 35.
 	if a.Steps != 35 {
 		t.Errorf("steps = %d, want 35", a.Steps)
 	}
-	// pager recorded by goal-a, goal-b and delegation rows 1, 2, 4 = 5; measured: goal-a, row 1,
-	// row 4 = 3 (rows counted in file order: 1, 2, 3, 8, 9, 10); distinct evicted 4+5+2 = 11, re-fetched 1+0+1 = 2, so 2/11 = 0.181818.
+	// pager recorded by goal-a, goal-b and d1, d2, d4 = 5; measured: goal-a, d1, d4 = 3; distinct
+	// evicted 4+5+2 = 11, re-fetched 1+0+1 = 2, so 2/11 = 0.181818. Unrecorded: goal-c-old,
+	// goal-e-badpager (its pager object contradicts itself), d3 and d5 = 4.
 	p := a.Pager
-	if p.RecordedRuns != 5 || p.MeasuredRuns != 3 || p.UnexercisedRuns != 2 || p.UnrecordedRuns != 5 {
-		t.Errorf("pager runs recorded/measured/unexercised/unrecorded = %d/%d/%d/%d, want 5/3/2/5", p.RecordedRuns, p.MeasuredRuns, p.UnexercisedRuns, p.UnrecordedRuns)
+	if p.RecordedRuns != 5 || p.MeasuredRuns != 3 || p.UnexercisedRuns != 2 || p.UnrecordedRuns != 4 {
+		t.Errorf("pager runs recorded/measured/unexercised/unrecorded = %d/%d/%d/%d, want 5/3/2/4", p.RecordedRuns, p.MeasuredRuns, p.UnexercisedRuns, p.UnrecordedRuns)
 	}
 	if p.DistinctEvicted != 11 || p.RefetchedDistinct != 2 || p.Evictions != 14 {
 		t.Errorf("pager distinct/refetched/evictions = %d/%d/%d, want 11/2/14", p.DistinctEvicted, p.RefetchedDistinct, p.Evictions)
@@ -153,10 +160,10 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 	if p.RefetchRate == nil || *p.RefetchRate != 0.181818 || p.Verdict != tcVerdictAbove || p.Basis != tcBasisMeasured || p.Gate != agent.PagerGate {
 		t.Errorf("pager rate/verdict/basis/gate = %v/%s/%s/%v, want 0.181818/%s/measured/%v", p.RefetchRate, p.Verdict, p.Basis, p.Gate, tcVerdictAbove, agent.PagerGate)
 	}
-	// compaction: 5 runs recorded a pass count; passes 2+0+3+0+1 = 6 over 3 runs with a pass:
+	// compaction: 5 runs recorded a pass count (goal-a, goal-b, d1, d2, d4); passes 2+0+3+0+1 = 6 over 3 runs with a pass:
 	// fire rate 3/5 = 0.6, passes per run 1.2, steps in those runs 6+3+5+2+4 = 20, so 0.3 a step.
 	c := a.Compaction
-	if c.RecordedRuns != 5 || c.UnrecordedRuns != 5 || c.RunsWithPass != 3 || c.Passes != 6 || c.StepsInRecordedRuns != 20 {
+	if c.RecordedRuns != 5 || c.UnrecordedRuns != 4 || c.RunsWithPass != 3 || c.Passes != 6 || c.StepsInRecordedRuns != 20 {
 		t.Errorf("compaction counts = %+v", c)
 	}
 	if c.FireRate == nil || *c.FireRate != 0.6 || c.PassesPerRun == nil || *c.PassesPerRun != 1.2 || c.PassesPerStep == nil || *c.PassesPerStep != 0.3 {
@@ -167,28 +174,28 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 	if c.TranscriptRuns != 4 || c.RunsWithArtifacts != 2 || c.LowerBoundFireRate == nil || *c.LowerBoundFireRate != 0.5 {
 		t.Errorf("transcript evidence = %d/%d/%v, want 4/2/0.5", c.TranscriptRuns, c.RunsWithArtifacts, c.LowerBoundFireRate)
 	}
-	// prefill: measured by goal-a, goal-b and rows 1, 2, 4 = 5 runs over 6+3+5+2+4 = 20 steps;
+	// prefill: measured by goal-a, goal-b and d1, d2, d4 = 5 runs over 6+3+5+2+4 = 20 steps;
 	// prefilled 1200+300+2000+400+800 = 4700, cached 3000+100+8000+0+200 = 11300, so reuse is
 	// 11300/16000 = 70.625 %, 235 prefilled tokens a step and 940 a run.
 	f := a.Prefill
-	if f.MeasuredRuns != 5 || f.NoTokenCountsRuns != 1 || f.UnmeasuredRuns != 4 || f.ObservedSteps != 20 || f.PrefillTokens != 4700 || f.CacheTokens != 11300 {
+	if f.MeasuredRuns != 5 || f.NoTokenCountsRuns != 1 || f.UnmeasuredRuns != 3 || f.ObservedSteps != 20 || f.PrefillTokens != 4700 || f.CacheTokens != 11300 {
 		t.Errorf("prefill counts = %+v", f)
 	}
 	if f.KVReusePct == nil || *f.KVReusePct != 70.625 || f.AvgPrefillTokensPerStep == nil || *f.AvgPrefillTokensPerStep != 235 || f.AvgPrefillTokensPerRun == nil || *f.AvgPrefillTokensPerRun != 940 {
 		t.Errorf("prefill rates = %v/%v/%v, want 70.625/235/940", f.KVReusePct, f.AvgPrefillTokensPerStep, f.AvgPrefillTokensPerRun)
 	}
 
-	// The tenth run observed 2 steps and reported no token counts (an engine that gives no
-	// timings): it is counted apart, adds nothing to the token sums, and is not a measured 0.
-	// Seat input tokens come from the three runs that reported them: 10000+400+1500 = 11900
-	// over 5+2+2 = 9 steps = 1322.222222 a step.
+	// d5 observed 2 steps and reported no token counts (an engine that gives no timings): it is
+	// counted apart, adds nothing to the token sums, and is not a measured 0.
+	// Seat input tokens come from the three runs that reported them (d1, d2, d5): 10000+400+1500
+	// = 11900 over 5+2+2 = 9 steps = 1322.222222 a step.
 	if f.SeatInputRuns != 3 || f.SeatInputTokens != 11900 || f.SeatInputSteps != 9 || f.AvgSeatInputTokensPerStep == nil || *f.AvgSeatInputTokensPerStep != 1322.222222 {
 		t.Errorf("seat input = %d runs, %d tokens, %d steps, %v a step; want 3/11900/9/1322.222222", f.SeatInputRuns, f.SeatInputTokens, f.SeatInputSteps, f.AvgSeatInputTokensPerStep)
 	}
 
-	// Per seat: seat-a has rows 1, 2 and the budget row; seat-b has rows 3, 8 and 10; the four
-	// traces name no seat. A seat's slice is a slice of the same arithmetic.
-	if got := rep.BySeat["seat-a"]; got.Runs != 3 || got.TraceBearingRuns != 2 || got.Pager.MeasuredRuns != 1 || got.Pager.RefetchRate == nil || *got.Pager.RefetchRate != 0 {
+	// Per seat: seat-a has d1 and d2 (its third row never ran an agent); seat-b has d3, d4 and d5;
+	// the four traces name no seat. A seat's slice is a slice of the same arithmetic.
+	if got := rep.BySeat["seat-a"]; got.Runs != 2 || got.TraceBearingRuns != 2 || got.Pager.MeasuredRuns != 1 || got.Pager.RefetchRate == nil || *got.Pager.RefetchRate != 0 {
 		t.Errorf("seat-a = %+v; its one measured run evicted 5 payloads and re-fetched none, a real 0", got.Pager)
 	}
 	if got := rep.BySeat["seat-b"]; got.Runs != 3 || got.Pager.RefetchRate == nil || *got.Pager.RefetchRate != 0.5 || got.Pager.Verdict != tcVerdictAbove {
@@ -199,6 +206,56 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 	}
 	if got := rep.BySource[tcSourceAgentTrace]; got.Runs != 4 {
 		t.Errorf("by source = %+v", got)
+	}
+}
+
+// TestTraceCorpusSkipsRowsThatNeverRan: a delegation row is a run only if an agent executed. A
+// deferred subtask (capacity, infrastructure, budget, config, contract) is logged with zero steps
+// and nothing else, and counting it would inflate the denominator of every unrecorded count: after
+// the recording ships such a row still has no pager object, so the unrecorded count could never
+// reach zero. A row that did real work stays a run even when it was deferred, and so does a row
+// that recorded anything at all (a step trace, prefill, seat tokens, or a pager object, which a
+// run that reached the loop always carries, zeros included).
+func TestTraceCorpusSkipsRowsThatNeverRan(t *testing.T) {
+	dir := t.TempDir()
+	rows := []string{
+		// never ran: skipped
+		`{"seat":"seat-a","deferred":true,"defer_class":"capacity","result":{"steps":0,"stop_reason":""}}`,
+		`{"seat":"seat-a","deferred":true,"defer_class":"infrastructure","result":{"steps":0,"stop_reason":"error"}}`,
+		`{"seat":"seat-a","result":{"steps":0}}`,
+		// ran: kept
+		`{"seat":"seat-a","deferred":true,"defer_class":"budget","result":{"steps":3,"stop_reason":"budget","trace":[{}],"prefill_steps":3,"prefill_tokens":10,"cache_tokens":5}}`,
+		`{"seat":"seat-a","result":{"steps":4,"stop_reason":"done"}}`,
+		`{"seat":"seat-a","result":{"steps":0,"stop_reason":"error","pager":{"basis":"insufficient_data","evictions":0,"evicted_bytes":0,"distinct_evicted":0,"refetched_distinct":0,"compaction_passes":0}}}`,
+		`{"seat":"seat-a","result":{"steps":0,"stop_reason":"error","trace":[{}]}}`,
+		`{"seat":"seat-a","result":{"steps":0,"stop_reason":"error","seat_tokens_in":50}}`,
+		`{"seat":"seat-a","result":{"steps":0,"stop_reason":"error","prefill_steps":2,"prefill_tokens":7,"cache_tokens":1}}`,
+	}
+	if err := os.WriteFile(filepath.Join(dir, "2026-03-01.jsonl"), []byte(strings.Join(rows, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runs, stats, err := tcHarvest(tcHarvestOpts{DelegationDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.DelegationRows != 9 || len(runs) != 6 || stats.Runs != 6 {
+		t.Fatalf("rows/runs = %d/%d, want 9 rows and 6 runs: %v", stats.DelegationRows, len(runs), stats.Skipped)
+	}
+	if stats.Skipped[tcWantNeverRan] != 3 {
+		t.Errorf("skipped[%q] = %d, want 3 (all: %v)", tcWantNeverRan, stats.Skipped[tcWantNeverRan], stats.Skipped)
+	}
+	// None of the six runs recorded a pager object but one: the unrecorded count is now a count
+	// of RUNS, 5, not of rows.
+	if got := tcStatsFor(runs).Pager.UnrecordedRuns; got != 5 {
+		t.Errorf("pager unrecorded runs = %d, want 5 of the 6 runs", got)
+	}
+	// A seat filter that rejects the row speaks first: the reason is the filter's, not never-ran.
+	_, stats, err = tcHarvest(tcHarvestOpts{DelegationDir: dir, Seats: map[string]bool{"seat-b": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Skipped[tcWantNeverRan] != 0 || stats.Skipped["seat filter: seat not selected"] != 9 {
+		t.Errorf("under a seat filter every row is skipped by the filter: %v", stats.Skipped)
 	}
 }
 
@@ -222,8 +279,8 @@ func TestTraceCorpusSeatAndWindowFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runs) != 3 {
-		t.Fatalf("--since 2026-01-02 kept %d runs, want the second shard's 3", len(runs))
+	if len(runs) != 2 {
+		t.Fatalf("--since 2026-01-02 kept %d runs, want the second shard's 2 (its other row never ran an agent)", len(runs))
 	}
 	o.Since, o.Until = "", "2026-01-01"
 	if runs, _, _ = tcHarvest(o); len(runs) != 3 {

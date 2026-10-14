@@ -1,3 +1,3 @@
 {"ts":1767225600,"job_id":"job-synthetic","seat":"seat-b","result":{"steps":4,"stop_reason":"done","prefill_steps":4,"prefill_tokens":800,"cache_tokens":200,"pager":{"basis":"measured","evictions":3,"evicted_bytes":12000,"distinct_evicted":2,"refetched_distinct":1,"compaction_passes":1}}}
-{"ts":1767225600,"job_id":"job-synthetic","seat":"seat-a","result":{"steps":0,"stop_reason":"budget"}}
+{"ts":1767225600,"job_id":"job-synthetic","seat":"seat-a","deferred":true,"defer_class":"capacity","result":{"steps":0,"stop_reason":"error"}}
 {"ts":1767225600,"job_id":"job-synthetic","seat":"seat-b","result":{"steps":2,"stop_reason":"done","prefill_steps":2,"seat_tokens_in":1500}}
