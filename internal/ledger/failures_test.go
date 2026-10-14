@@ -228,8 +228,9 @@ func TestFailureZeroOnADelegatorRowIsNotAMeasurement(t *testing.T) {
 		{"stall_decode", `{"ts":14,"task":"agent","deferred":true,"reason_code":"stall_decode","requester":"node-a","fleet_job_id":"f14","cards_tokens":0}`, zero},
 		// work in the older columns is work, whatever the stored figure says
 		{"stall_tool", `{"ts":15,"task":"agent_delegate","deferred":true,"reason_code":"stall_tool","fleet_job_id":"f15","tokens_out":10,"cards_tokens":0}`, ten},
-		// a stored figure above 0 is the ledger's own number
+		// a stored figure above 0 is the ledger's own number, even above the row's own columns (it carries inner rows' work)
 		{"seat_down", `{"ts":16,"task":"agent_delegate","deferred":true,"reason_code":"seat_down","fleet_job_id":"f16","cards_tokens":10}`, ten},
+		{"abstention", `{"ts":17,"task":"agent_delegate","deferred":true,"reason_code":"abstention","fleet_job_id":"f17","tokens_out":40,"cards_tokens":940}`, ptr64(940)},
 	}
 	var lines []string
 	for _, c := range cases {

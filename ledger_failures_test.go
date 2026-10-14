@@ -122,9 +122,10 @@ func TestFailureRegisterIsDeterministicOnTheFixtureLedger(t *testing.T) {
 }
 
 // A token total nobody measured is null, never 0: the column of a class whose rows recorded no card work is
-// a gap, and a 0 there would read as "this failure cost nothing". A measured zero (the row carries the
-// cards_tokens key, with 0) is a real zero and stays 0; a mixed class sums what was measured and says how many
-// rows that was.
+// a gap, and a 0 there would read as "this failure cost nothing". That includes a delegator's stored 0 for a job a
+// node owned (poll_deadline, node_unreachable): the row has no figure for the node's work. A 0 the row owns (the
+// class says no node ran the job, or the row names no node) is a real zero and stays 0; a mixed class sums what
+// was measured and says how many rows that was.
 func TestFailureRegisterUnresolvedTokensAreNullNeverZero(t *testing.T) {
 	out := runFailures(t)
 	var raw struct {
@@ -170,7 +171,7 @@ func TestFailureRegisterUnresolvedTokensAreNullNeverZero(t *testing.T) {
 		}
 	}
 	if got := byName["node_busy"]["cards_tokens"]; got != float64(0) {
-		t.Errorf("node_busy rows all carry the key with 0: cards_tokens = %v, want a measured 0", got)
+		t.Errorf("node_busy rows store 0 and no node ran the job: cards_tokens = %v, want a measured 0", got)
 	}
 	if got := byName["abstention"]["cards_tokens"]; got != float64(360) {
 		t.Errorf("abstention: cards_tokens = %v, want 360 (300 stored + 60 from the older columns; the third row has none)", got)

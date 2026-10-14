@@ -52,24 +52,30 @@ the same table give the same bytes. `--since DAYS` keeps only rows from that man
 | `undocumented_classes` | the classes present in the ledger that have no row in the table |
 | `classes[].class`, `count`, `share` | the class, its rows, and its part of `failure_rows` |
 | `classes[].example_reason` | the most frequent short reason among its rows (the smaller text on a tie) |
-| `classes[].doors`, `seats`, `models` | the same rows counted per door, per seat and per model |
+| `classes[].doors`, `seats`, `models` | the same rows counted per door, per seat and per model (on a delegation row the "model" is the seat alias, see below) |
 | `classes[].groups` | the rows counted per (door, seat, model) together |
 | `classes[].cards_tokens`, `rows_with_tokens` | the card work the class spent, and how many rows measured it |
 | `classes[].documented`, `meaning`, `root_cause`, `structural_fix` | the joined table row |
 
 **Door, seat and model.** The ledger has no seat or model column. `model_tier` is its one identity column: on a
-delegation row it is `<node>:<seat>`, on a cascade row the model alias. The report reads the **door** as recorded
-(`(unknown)` when a row has none), the **seat** as `model_tier` as recorded, and the **model** as the part of the
-seat after its last `:`, so the same alias on two nodes is one model. A row with no `model_tier` reads
-`(unrecorded)` for both.
+delegation row it is `<node>:<seat alias>`, on a cascade row the model alias. The report reads the **door** as
+recorded (`(unknown)` when a row has none), the **seat** as `model_tier` as recorded, and the **model** as the part
+of the seat after its last `:`, so the same alias on two nodes is one entry. That part is a model alias only on a
+cascade row. On a delegation row it is the seat alias (a pool name such as `agent-pool`): a seat, not a model, because
+the ledger records no model name for a delegation. For those rows `models` is the `seats` breakdown with the node
+stripped, and reads as such. A row with no `model_tier` reads `(unrecorded)` for both.
 
 **Tokens are null, not 0, when nobody measured them.** `cards_tokens` is the sum over the rows that measured their
-card work, and `null` when none did. A row measured it when it carries the `cards_tokens` key (the ledger's own figure for
-that row, which can be a real 0 for a job that failed before any model ran), or, on a row that predates the key,
-when its older token columns hold work. A
-class whose `rows_with_tokens` is below its `count` has a floor, not a total, and an unmeasured row is never added as
-zero. A delegator's row for a job that never came back does not see the work a node may have done, so read a
-delegator-side zero as "none recorded here".
+card work, and `null` when none did. A row measured it when the ledger holds a figure above 0 for it, or its older
+token columns hold work, or its stored 0 is the row's own. A stored 0 is the row's own when its reason code says no
+node ran the job (`node_busy`, `capacity_wait`, `queue_full`, `no_eligible_node`, `queue_withdrawn`, `shed`,
+`dispatch_refused`, `config`, `contract`, `write`, `bad_input`), when the row names no node, or when it is the
+node's own row for a job another box asked for. A delegator's row for a job a node owned (a `poll_deadline`, a
+`node_unreachable`, a `failed_verification` that came back from a node) stores 0 because the node's work is not on
+that row: the report carries it as unmeasured, never as a zero. Two codes are left off the no-node-ran list on
+purpose: `queue_deadline` (the node may still run a job it never confirmed taking back) and `canceled` (the caller
+left after a node held the job). A row written before the `cards_tokens` key reads its older columns only. A class
+whose `rows_with_tokens` is below its `count` has a floor, not a total, and an unmeasured row is never added as zero.
 
 ## Maintaining the table
 

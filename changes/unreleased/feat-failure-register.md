@@ -11,7 +11,7 @@
   that predates the stamped code is classed at read time by the ledger's own `DeferCode`, and counted in `class_derived_rows`. Each
   class carries its count and share, the most frequent short reason, and its rows counted per door, per seat, per model and per
   (door, seat, model). The ledger has no seat or model column, so the seat is `model_tier` as recorded and the model its part after
-  the last colon; a missing door reads `(unknown)` and a missing `model_tier` reads `(unrecorded)`.
+  the last colon (on a delegation row that part is the seat alias, a seat and not a model); a missing door reads `(unknown)` and a missing `model_tier` reads `(unrecorded)`.
 - **The human half.** `docs/systems/failure-register.md` holds the table (class, meaning, root cause, structural fix). It starts
   from the code: one row for every failure member of the closed reason-code set, the meaning and root cause restating the
   constants' own comments, and the fix column `open` wherever none is recorded. The page is embedded in the binary; `--table`
@@ -21,13 +21,17 @@
   different code than the ledger files it under.
 - **Honest numbers.** Classes come out by count descending, then class name, and the output holds no clock reading: the same ledger
   and table give the same bytes. A class that has no rows in the window is not listed. A token total no row measured is `null`,
-  never `0`: a row measured its card work when it carries the `cards_tokens` key (a stored 0 is the ledger's own figure) or, on a
-  row that predates the key, when its older token columns hold work; `rows_with_tokens` says how many rows the sum covers, so a
-  total over fewer rows than `count` reads as a floor. Test, bake and measurement traffic is left out and counted, as in every
+  never `0`: a row measured its card work when the ledger stores a figure above 0 for it, when its older token columns hold work,
+  or when its stored 0 is the row's own (its reason code says no node ran the job, it names no node, or it is the node's own row).
+  A delegator's stored 0 for a job a node owned (`poll_deadline`, `node_unreachable`, a failed verification that came back from a
+  node) is not a measurement, because the node's work is not on that row: it counts as unmeasured and reads `null`.
+  `rows_with_tokens` says how many rows the sum covers, so a total over fewer rows than `count` reads as a floor. Test, bake and measurement traffic is left out and counted, as in every
   production view of the ledger.
 - **Surface.** `main.go` changes by one line: the `ledger` case calls `runLedgerMode`, which sends `--failures` to the register and
-  everything else to the verb as it was. The reader lives in `internal/ledger/failures.go` (a bare `ReadAll` inside the package, so
-  it reads production rows by the same rule as `SessionSharesFile`); `ledger_readers_lint_test.go` passes unchanged.
+  everything else to the verb as it was. The reader lives in `internal/ledger/failures.go`. It scans the file itself (a 16 MiB line
+  buffer, where `ReadAll` takes 1 MiB) because it has to see whether a row carried the `cards_tokens` key, which `Entry` cannot
+  hold. `ledger_readers_lint_test.go` only inspects `ledger.ReadAll` calls from outside the package, so it does not see this reader:
+  the test-traffic rule here is held by this feature's own tests.
 - **Tests, red first.** The acceptance tests and a synthetic fixture ledger and table were committed before the reader existed
   and failed to build. They pin: deterministic bytes on the fixture (a committed golden file, flag order irrelevant), the class
   order including count ties, an unresolved total serialized as `null` and never `0` (the fixture lines are hand-written, because

@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// The failure-class register (RSI-OH-1): the ledger's failed jobs grouped into failure CLASSES, each with how
+// The failure-class register: the ledger's failed jobs grouped into failure CLASSES, each with how
 // many rows it holds, the door, seat and model they came through, and the card work they spent. It is a reader
 // and nothing else: it never writes the ledger and invents no cause. The root cause and the structural fix of a
 // class are a human's, kept in docs/systems/failure-register.md and joined by class name outside this package.
@@ -21,7 +21,10 @@ import (
 //
 //   - door  is the row's door as recorded,
 //   - seat  is model_tier as recorded (a leading ":" cut: a delegation row written with no node),
-//   - model is the part of the seat after its last ":" (the same alias on two nodes is one model).
+//   - model is the part of the seat after its last ":" (the same alias on two nodes is one entry). On a cascade
+//     row that is the model alias model_tier holds. On a delegation row model_tier is `<node>:<seat alias>`, so
+//     it is the SEAT ALIAS (a pool name, say), not a model: the ledger records no model name for a delegation,
+//     and the register does not pretend otherwise.
 //
 // Nothing is guessed: a row with no door reads "(unknown)", and one with no model_tier reads "(unrecorded)".
 
@@ -58,10 +61,11 @@ type FailureClass struct {
 	// "(unrecorded)" when no row of the class stored one.
 	ExampleReason string `json:"example_reason"`
 	// CardsTokens is the card work the class's rows spent: the sum over the rows that MEASURED it, nil (null in
-	// JSON) when none did. It is never 0 for "nobody measured": a row measured it when it carries the
-	// cards_tokens key (a measured 0 is a real 0: the row deferred before any model ran), or, on a row that
-	// predates the key, when its older token columns hold work. RowsWithTokens says how many rows that was, so a
-	// total over fewer rows than Count is a floor.
+	// JSON) when none did. It is never 0 for "nobody measured". A row measured it when a stored figure above 0
+	// says so, or its older token columns hold work, or its stored 0 is the row's own (see failureRow.tokensOf:
+	// the row names no node, the reason code says no node ran the job, or the node wrote the row itself). A
+	// delegator's 0 for a job a node owned is not a measurement: the node's work is not on that row. RowsWithTokens
+	// says how many rows measured it, so a total over fewer rows than Count is a floor.
 	CardsTokens    *int64         `json:"cards_tokens"`
 	RowsWithTokens int            `json:"rows_with_tokens"`
 	Doors          []FailureCount `json:"doors"`
@@ -91,8 +95,10 @@ type FailureRegister struct {
 
 // failureRow is a ledger row and the one fact Entry cannot carry: whether the line had the cards_tokens key.
 // CardsTokens is a plain int, so an absent key and a stored 0 are the same after Unmarshal, and they mean
-// different things (Entry.CardsTokens): the key's presence marks a row written under the schema that measures
-// card work, a missing key a row that never did.
+// different things (Entry.CardsTokens): a missing key is a row from before the schema that measures card work,
+// which has only its older token columns to read. A present key says less than it looks like: Record fills it
+// from the row's own columns, so a stored 0 is "this row recorded no work", and whether that is a measurement
+// depends on whose row it is (tokensOf).
 type failureRow struct {
 	Entry
 	// Declared shadows Entry.CardsTokens's JSON name one level up, so encoding/json fills this pointer and leaves
@@ -111,20 +117,51 @@ func decodeFailureRow(line []byte) (failureRow, bool) {
 	return r, true
 }
 
-// tokensOf is the card work of a failed row and whether the row measured it (see FailureClass.CardsTokens).
-func (r failureRow) tokensOf() (n int64, measured bool) {
+// tokensOf is the card work of a failed row of the given class and whether the row measured it (see
+// FailureClass.CardsTokens). A stored figure above 0 is the ledger's own number (it can be larger than the row's
+// own columns, because a call's row carries its earlier inner rows' work). A row that predates the key, or is an
+// orphan inner row (its parent never landed, and Record stored 0 on it because the parent row holds the work), has
+// no stored figure that says anything: its older columns are all there is. A stored 0 on any other row counts
+// only when older columns hold work after all, or when it is a 0 the row owns (zeroIsOwn).
+func (r failureRow) tokensOf(class string) (n int64, measured bool) {
 	e := r.Entry
-	if e.ParentJobID != "" {
-		// An orphan inner row (its parent never landed): Record stored 0 on it on purpose, because the parent
-		// row holds the work, so the stored figure says nothing; the older columns are all there is.
-		w := CardsTokensOf(e)
-		return int64(w), w > 0
-	}
-	if r.Declared != nil {
+	w := int64(CardsTokensOf(e))
+	switch {
+	case e.ParentJobID != "" || r.Declared == nil:
+		return w, w > 0
+	case *r.Declared > 0:
 		return int64(*r.Declared), true
+	case w > 0:
+		return w, true
 	}
-	w := CardsTokensOf(e)
-	return int64(w), w > 0
+	return 0, zeroIsOwn(class, e)
+}
+
+// neverRanClasses are the classes whose reason code says no node ran the job: it was refused, never placed,
+// withdrawn before it started, or stopped by a check made before any model ran. A row of one of them that stores
+// 0 spent nothing, even when it names the node that refused it. Left out on purpose: queue_deadline (the node may
+// still run a job it never confirmed taking back) and canceled (the caller left after a node held the job, which
+// may already have worked), and every class that says a run happened (poll_deadline, remote_error, stalls, a failed
+// verification, budget, abstention, infrastructure): the work of those is on the node.
+var neverRanClasses = map[string]bool{
+	ReasonNodeBusy: true, ReasonCapacityWait: true, ReasonQueueFull: true, ReasonNoEligibleNode: true,
+	ReasonQueueWithdrawn: true, ReasonShed: true, ReasonDispatchRefused: true,
+	ReasonConfig: true, ReasonContract: true, ReasonWrite: true, ReasonBadInput: true,
+}
+
+// zeroIsOwn reports whether a stored 0 on a failed row is that row's own measurement rather than a gap. Record
+// writes the 0 from the row's own columns, so on a delegator's row for a job a node owned it only means the node's
+// work is not here. It is a measurement when the class says no node ran the job (neverRanClasses), when the row
+// names no node at all (nothing else ran), or when it is the node's own row for the job (served door or a
+// requester): then the figure is that node's reading of its own work.
+func zeroIsOwn(class string, e Entry) bool {
+	if neverRanClasses[class] {
+		return true
+	}
+	if e.Door == servedDoor || e.Requester != "" {
+		return true
+	}
+	return e.FleetJobID == "" && e.Node == "" && e.NodeID == ""
 }
 
 // failureClassOf is the failure class of a job row, whether it was classed here rather than read from a stamped
@@ -265,7 +302,7 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 		if derived {
 			reg.ClassDerivedRows++
 		}
-		n, measured := r.tokensOf()
+		n, measured := r.tokensOf(class)
 		total.add(n, measured)
 
 		a := accs[class]
