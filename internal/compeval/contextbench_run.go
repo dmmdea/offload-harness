@@ -25,7 +25,12 @@
 //     to fit (budget_wall), or the turn cap is reached (max_turns). A budget_wall
 //     before the seat has answered once measured nothing (the budget cannot hold the
 //     instruction and the first operation) and is infra_error, not a graded failure.
-//     A cancelled context ends the task as not_run, also when it lands mid-request.
+//     A budget_wall before the seat has been handed a single query (kv_store and
+//     log_triage) leaves nothing to grade either: it is a timeout, the attempt hit its
+//     budget, with the term reason budget_wall_before_query. A wall once a query has
+//     been handed over, and a wall in a family that asks nothing, is graded on the
+//     frames it has. A cancelled context ends the task as not_run, also when it lands
+//     mid-request.
 //
 // The outcome word of a task is decided here and nowhere else; see classify.
 package compeval
@@ -54,6 +59,10 @@ const (
 	CBTermSeatError       = "seat_error"
 	CBTermCancelled       = "cancelled"
 )
+
+// CBReasonBudgetWallBeforeQuery is the term reason of a task whose context stopped fitting
+// the budget before the seat was handed any query operation (see RunCBTask).
+const CBReasonBudgetWallBeforeQuery = "budget_wall_before_query"
 
 // The seven outcome words of the measurement gate, in the gate's fixed order.
 const (
@@ -88,7 +97,8 @@ type CBRunOpts struct {
 	MaxOut int
 	// MaxTurns caps seat replies per task, nudges included. Default 3*ops+10. A task
 	// that reaches it ends as timeout: it hit its step budget, which says nothing about
-	// the agent's score, so it is not graded.
+	// the agent's score, so it is not graded. (The other timeout is a budget wall before
+	// any query; see RunCBTask.)
 	MaxTurns int
 	// KeepRecent is the ladder's keep-recent window in messages. Default
 	// agent.DefaultKeepRecent, the production value.
@@ -129,6 +139,11 @@ func (o CBRunOpts) withDefaults(nOps int) CBRunOpts {
 
 // CBTaskResult is one task's record. Reward is nil unless the task was graded: a
 // task that never reached a verdict has no score, and a zero would read as one.
+//
+// TermReason refines TerminatedBy when the outcome word turns on a case of it; today only
+// CBReasonBudgetWallBeforeQuery, and empty otherwise. OpsDelivered counts the operations
+// appended to the transcript, the one that did not fit at a budget wall included; OpsSent
+// counts those the seat was actually handed.
 type CBTaskResult struct {
 	ID             string             `json:"id"`
 	Family         string             `json:"family"`
@@ -140,8 +155,10 @@ type CBTaskResult struct {
 	Total          int                `json:"total"`
 	Rewards        map[string]float64 `json:"rewards,omitempty"`
 	TerminatedBy   string             `json:"terminated_by"`
+	TermReason     string             `json:"term_reason,omitempty"`
 	Turns          int                `json:"turns"`
 	OpsDelivered   int                `json:"ops_delivered"`
+	OpsSent        int                `json:"ops_sent"`
 	OpsTotal       int                `json:"ops_total"`
 	Compactions    int                `json:"compactions"`
 	PeakSentTokens int                `json:"peak_sent_tokens"`
@@ -298,14 +315,26 @@ loop:
 		}
 		if est := agent.EstimateTokens(msgs); est > usable {
 			end(CBTermBudgetWall)
-			if res.Turns == 0 {
+			switch {
+			case res.Turns == 0:
 				res.Outcome = CBOutcomeInfraError
 				res.Detail = fmt.Sprintf("the budget cannot hold the instruction and the first operation (%d tokens against %d usable): the seat was never called, so nothing was measured; raise --budget", est, usable)
+			case res.OpsSent <= in.QueryStart:
+				// The seat has been handed no query, so no frame can hold an answer and the
+				// partial grade would be a zero the agent never had the chance to avoid. The
+				// attempt hit its budget; whether the production ladder can hold this much
+				// content is what the timeout reports, not how well the agent remembers. A
+				// family that asks nothing has QueryStart 0, which a run past its first reply
+				// (OpsSent of at least 1) never reaches, so those walls stay graded.
+				res.Outcome = CBOutcomeTimeout
+				res.TermReason = CBReasonBudgetWallBeforeQuery
+				res.Detail = fmt.Sprintf("the context stopped fitting the budget (%d tokens against %d usable) after %d of the %d content operations, before the seat was handed any query: nothing was asked, so nothing is graded", est, usable, res.OpsSent, in.QueryStart)
 			}
 			break loop
 		} else if est > res.PeakSentTokens {
 			res.PeakSentTokens = est
 		}
+		res.OpsSent = res.OpsDelivered
 		record("sent")
 		reply, err := seat(ctx, msgs, o.MaxOut)
 		if err != nil {
@@ -381,7 +410,10 @@ loop:
 //
 //	infra_error  the seat could not answer, or the budget could not hold the first send
 //	             so the seat was never called (set by the loop; never graded)
-//	timeout      the turn cap was reached before the stream drained (never graded)
+//	timeout      the attempt hit its budget, never graded: the turn cap was reached before
+//	             the stream drained, or the context stopped fitting the token budget before
+//	             the seat was handed any query (term reason budget_wall_before_query; set
+//	             by the loop). A wall once a query has been handed over is graded.
 //	not_run      the run was cancelled before the task finished or began, also while a
 //	             seat request was in flight
 //	judge_error  the grade could not be computed (grader_valid 0)

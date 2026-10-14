@@ -113,6 +113,36 @@ func TestContextBenchLevelLookup(t *testing.T) {
 	}
 }
 
+// QueryStart marks the first operation that asks something: the driver's rule for a budget
+// wall before any query rests on it.
+func TestContextBenchQueryStartMarksTheFirstQueryOperation(t *testing.T) {
+	for _, family := range CBFamilies {
+		for _, name := range []string{cbSmallLevel(family), ""} {
+			in, err := GenerateCB(family, name, 42)
+			if err != nil {
+				t.Fatal(err)
+			}
+			label := family + "/" + in.Level
+			switch family {
+			case CBFamilyKV, CBFamilyLog:
+				if want := len(in.Ops) - len(in.Gold.KV) - len(in.Gold.Log); in.QueryStart != want || want == 0 {
+					t.Fatalf("%s: QueryStart = %d, the queries start at op %d", label, in.QueryStart, want)
+				}
+				if !strings.HasPrefix(in.Ops[in.QueryStart].Header, map[string]string{CBFamilyKV: "get ", CBFamilyLog: "query "}[family]) {
+					t.Errorf("%s: op %d is %q, not the first query", label, in.QueryStart, in.Ops[in.QueryStart].Header)
+				}
+				if h := in.Ops[in.QueryStart-1].Header; strings.HasPrefix(h, "get ") || strings.HasPrefix(h, "query ") {
+					t.Errorf("%s: op %d is a query (%q) but sits before QueryStart", label, in.QueryStart-1, h)
+				}
+			default:
+				if in.QueryStart != 0 {
+					t.Errorf("%s asks nothing, so it has no query block: QueryStart = %d", label, in.QueryStart)
+				}
+			}
+		}
+	}
+}
+
 // The gold must agree with the stream it was generated with.
 func TestContextBenchGoldAgreesWithTheStream(t *testing.T) {
 	kv := GenerateKV(42, CBKnobs{Records: 30, ValueWords: 6, Queries: 5, RecordsPerChunk: 10})

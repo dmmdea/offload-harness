@@ -79,6 +79,10 @@ type CBInstance struct {
 	Ops    []CBOp         `json:"ops"`
 	Gold   CBGold         `json:"gold"`
 	Meta   map[string]any `json:"meta"`
+	// QueryStart is the index of the first query operation: the operations before it only
+	// stream content, and from it on every operation asks something. It is 0 for a family
+	// that asks nothing (needle_retention, sudoku_sketchpad), which has no query block.
+	QueryStart int `json:"query_start,omitempty"`
 }
 
 // CBKnobs are the generator parameters. A family reads only its own.

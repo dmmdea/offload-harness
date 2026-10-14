@@ -111,6 +111,7 @@ func GenerateLog(seed int64, k CBKnobs) *CBInstance {
 		ops = append(ops, CBOp{Index: idx, Header: fmt.Sprintf("log batch (lines %d-%d)", start, end-1), Body: body})
 		idx++
 	}
+	queryStart := idx
 	for _, q := range gold {
 		body := fmt.Sprintf("QUERY %d: %s\n(Answer with an ANSWER block for qid=%d.)", q.QID, q.Prompt, q.QID)
 		ops = append(ops, CBOp{Index: idx, Header: fmt.Sprintf("query %d", q.QID), Body: body})
@@ -121,10 +122,11 @@ func GenerateLog(seed int64, k CBKnobs) *CBInstance {
 		texts[i] = ln.text
 	}
 	return &CBInstance{
-		Family: CBFamilyLog,
-		Seed:   seed,
-		Ops:    ops,
-		Gold:   CBGold{Log: gold},
+		Family:     CBFamilyLog,
+		Seed:       seed,
+		Ops:        ops,
+		QueryStart: queryStart,
+		Gold:       CBGold{Log: gold},
 		Meta: map[string]any{
 			"task_family": CBFamilyLog, "seed": seed, "lines": lines, "lines_per_batch": perBatch,
 			"queries": len(gold), "n_lookup": nLookup, "n_count": nCount,

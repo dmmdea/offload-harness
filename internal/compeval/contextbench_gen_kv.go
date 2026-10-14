@@ -96,10 +96,11 @@ func GenerateKV(seed int64, k CBKnobs) *CBInstance {
 		perValue = valueTok / records
 	}
 	return &CBInstance{
-		Family: CBFamilyKV,
-		Seed:   seed,
-		Ops:    ops,
-		Gold:   CBGold{KV: gold},
+		Family:     CBFamilyKV,
+		Seed:       seed,
+		Ops:        ops,
+		QueryStart: nBatches,
+		Gold:       CBGold{KV: gold},
 		Meta: map[string]any{
 			"task_family": CBFamilyKV, "seed": seed, "records": records, "value_words": k.ValueWords,
 			"records_per_chunk": perChunk, "queries": len(gold), "n_set": records, "n_get": len(gold),
