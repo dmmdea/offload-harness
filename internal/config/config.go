@@ -1029,7 +1029,8 @@ type Config struct {
 	// YtDlpPath is the absolute path to a yt-dlp executable, the subtitle adapter of offload_research. Empty (the
 	// default) = the adapter is OFF and a YouTube URL is read as an ordinary page: the harness never searches PATH for
 	// the binary and never installs it. The binary is invoked subtitles-only (--skip-download, no cookies, no config
-	// file, no retry) after the URL has passed the public-web guard; see docs/systems/delegation-client.md.
+	// file, no retry) after the URL has passed the public-web guard; see docs/systems/delegation-client.md. On Windows
+	// it must name an .exe or a wrapper .cmd: the zipapp is a shebang script, launchable directly only on POSIX.
 	YtDlpPath string `json:"ytdlp_path,omitempty"`
 	// --- composition (offload_compose_video / compose-video; ADR 0059) ---
 	// A CPU-class lane: HyperFrames renders an HTML/CSS composition to video with

@@ -470,17 +470,21 @@ and both end where a fetched page ends: the text goes through the same digest pa
 `internal/untrusted` fencing, and the URL through the same public-web guard.
 
 - *Feeds.* A response whose content type is `application/rss+xml`, `application/atom+xml` or `application/rdf+xml`, or whose
-  body sniffs as a feed (a generic XML, plain-text or untyped response whose root element is `rss`, an RDF root or an Atom
-  `feed`), is parsed with `encoding/xml` (`research.FeedToText`; no new dependency). Each item's title, link, date and summary
+  body sniffs as a feed (a generic XML, plain-text or untyped response whose root element is `rss`, an RDF root that declares
+  the RSS 1.0 namespace, or an Atom `feed`), is parsed with `encoding/xml` (`research.FeedToText`; no new dependency). Each item's title, link, date and summary
   become the text, at most `research.MaxFeedItems` (50) items and 1,000 bytes of summary each, inside the ordinary 2 MiB read
   cap and 96 KiB text cap; a feed cut by either says so in its own text. Item links are text only and are never followed: a
-  caller who wants an item lists its URL. A document that does not parse as a feed is read exactly as it was before.
+  caller who wants an item lists its URL. A document that does not parse as a feed, or that parses with no item or entry
+  (an empty channel, or an RDF/XML, OWL or SKOS file served as `application/rdf+xml`), is read exactly as it was before.
 - *YouTube subtitles.* `youtube.com/watch?v=`, `youtu.be/<id>` and `youtube.com/shorts/<id>` (hosts `youtube.com`, `www.`,
   `m.` and `youtu.be` only; http or https; the default port; no userinfo; an 11-character id) are routed by
   `research.ClassifyURL` to the yt-dlp executable named by the config key `ytdlp_path`. The key is **empty by default, which
   means the adapter is off** and the URL is read as an ordinary page. The harness never searches `PATH` for the binary and
   never installs it: the value must be an absolute path to an executable file (the admitted version is in
-  [security.md](security.md#admitted-third-party-software)). The binary runs once per URL with `--skip-download --write-subs
+  [security.md](security.md#admitted-third-party-software)). On Windows the file must be launchable by the system itself, an
+  `.exe` or a wrapper `.cmd` that starts the interpreter: the admitted zipapp is a `#!/usr/bin/env python3` script, which runs
+  directly only on a POSIX host with `python3` on `PATH`, and a Windows host that names it gets a `ytdlp_path` error at call
+  time. The binary runs once per URL with `--skip-download --write-subs
   --write-auto-subs --sub-langs=<sub_langs> --sub-format=vtt/srv3/best --no-cookies --no-cookies-from-browser
   --ignore-config --no-playlist --no-cache-dir --socket-timeout 15` and zero retries, given the canonical
   `https://www.youtube.com/watch?v=<id>` after a literal `--`. `sub_langs` is an `offload_research` input (default `en.*`;
@@ -494,8 +498,9 @@ and both end where a fetched page ends: the text goes through the same digest pa
   text and the same words pasted as a page therefore reach the digest stage as the same bytes (pinned by
   `TestSubtitleTextAndPastedPageGiveTheSameDigestInput`; no model is called). A site break degrades to a skipped source with a
   typed `error_kind` and no retry: `subtitle_site_break` (the binary exited non-zero), `no_subtitles` (exit zero and no file),
-  `unsupported_subtitle_format`, `subtitle_timeout`, `ytdlp_path` (not absolute, missing or will not start) or
-  `bad_sub_langs`.
+  `unsupported_subtitle_format`, `empty_subtitles` (a subtitle file was read and held only blank cues), `subtitle_timeout`,
+  `ytdlp_path` (not absolute, missing or will not start) or `bad_sub_langs`. A relative `state_dir` is made absolute before
+  the scratch directory is built.
 - *Security.* Every URL passes `research.ValidateURL` before anything is fetched or run, the subtitle path included: a hostname
   that resolves to a private, loopback, link-local or CGNAT address is refused before any process starts (the tests drive it
   through the `netguard.LookupIP` resolution seam). The canonical URL handed to the binary is validated too, because its host

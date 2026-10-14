@@ -12,9 +12,12 @@
   with timestamps, cue settings, tags and the rolling duplicate lines of automatic captions removed.
 - **Off by default.** `ytdlp_path` is empty by default, which leaves the adapter off and a YouTube URL an ordinary page. The
   harness never searches `PATH` for the binary and never installs it; a relative path is refused. `offload_research` gains an
-  optional `sub_langs` input; its sources rows gain `error_kind`.
+  optional `sub_langs` input; its sources rows gain `error_kind`. On Windows `ytdlp_path` must name an `.exe` or a wrapper `.cmd`
+  (the admitted zipapp is a shebang script that runs directly only on POSIX). A feed with no item or entry, and an RDF document
+  that does not declare the RSS 1.0 namespace, are read as the ordinary document they were before.
 - **A site break is a typed error, never a retry.** A non-zero exit is `subtitle_site_break`, an exit with no file is
-  `no_subtitles`, and `ytdlp_path`, `bad_sub_langs`, `unsupported_subtitle_format` and `subtitle_timeout` name the rest; the
+  `no_subtitles`, a subtitle file of blank cues is `empty_subtitles`, and `ytdlp_path`, `bad_sub_langs`,
+  `unsupported_subtitle_format` and `subtitle_timeout` name the rest; the
   batch keeps its shape and the other URLs are untouched.
 - **Security.** Every URL still passes `research.ValidateURL` before anything is fetched or run, and the canonical
   `https://www.youtube.com/watch?v=<id>` handed to the binary is validated as well: a hostname that resolves to a private,
