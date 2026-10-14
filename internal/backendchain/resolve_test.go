@@ -17,11 +17,15 @@ func stub(m map[string]Verdict) Prober {
 	})
 }
 
-// TestResolveChain is the ACCEPT table of EXP-1: a failing first backend makes the chain fall to the
-// second, and the report names the first one's failure.
+// TestResolveChain is the acceptance table for the active-backend report. The engine that answers for a
+// lane is the engine of the seat the lane is BOUND to; a preferred seat that is up while the lane is
+// bound elsewhere is named in the reason and does not answer. A lane with no binding takes the first
+// backend whose probe passes.
 func TestResolveChain(t *testing.T) {
-	vllm := Candidate{Seat: "big-vllm", Engine: EngineVLLM, Bound: true}
-	cpp := Candidate{Seat: "small-cpp", Engine: EngineLlamaCpp}
+	vllmBound := Candidate{Seat: "big-vllm", Engine: EngineVLLM, Bound: true}
+	vllmPreferred := Candidate{Seat: "big-vllm", Engine: EngineVLLM}
+	cppBound := Candidate{Seat: "small-cpp", Engine: EngineLlamaCpp, Bound: true}
+	cppUnbound := Candidate{Seat: "small-cpp", Engine: EngineLlamaCpp}
 	cases := []struct {
 		name       string
 		chain      []Candidate
@@ -34,27 +38,27 @@ func TestResolveChain(t *testing.T) {
 		notReason  []string
 	}{
 		{
-			name:       "the first backend answers and the chain stops there",
-			chain:      []Candidate{vllm, cpp},
+			name:       "the bound first backend answers and the chain stops there",
+			chain:      []Candidate{vllmBound, cppUnbound},
 			verdicts:   map[string]Verdict{"big-vllm": {OK: true, Probe: ProbeEndpoint, Detail: "loaded and ready"}, "small-cpp": {OK: true, Probe: ProbeProcess, Detail: "idle"}},
 			wantActive: EngineVLLM, wantSeat: "big-vllm", wantProbe: ProbeEndpoint,
 			wantChain: []string{"vllm", "llama.cpp"},
 			inReason:  []string{"loaded and ready"},
-			notReason: []string{"unavailable", "fell to"},
+			notReason: []string{"unavailable", "fell to", "idle"},
 		},
 		{
-			name:       "a failing first backend falls to the second and the reason names the failure",
-			chain:      []Candidate{vllm, cpp},
+			name:       "a failing preferred backend falls to the bound one and the reason names the failure",
+			chain:      []Candidate{vllmPreferred, cppBound},
 			verdicts:   map[string]Verdict{"big-vllm": {Probe: ProbeEndpoint, Detail: "its health endpoint answered 503"}, "small-cpp": {OK: true, Probe: ProbeProcess, Detail: "not loaded; loads on first request"}},
 			wantActive: EngineLlamaCpp, wantSeat: "small-cpp", wantProbe: ProbeProcess,
 			wantChain: []string{"vllm", "llama.cpp"},
 			inReason:  []string{"vllm seat big-vllm unavailable: its health endpoint answered 503", "fell to llama.cpp seat small-cpp", "not loaded; loads on first request"},
 		},
 		{
-			name:       "every backend failing is none, at the deepest probe reached, naming each failure",
-			chain:      []Candidate{vllm, cpp},
+			name:       "every backend failing is none, at the deepest probe reached, on the bound seat, naming each failure",
+			chain:      []Candidate{vllmPreferred, cppBound},
 			verdicts:   map[string]Verdict{"big-vllm": {Probe: ProbeEndpoint, Detail: "health 503"}, "small-cpp": {Probe: ProbeProcess, Detail: "not in the roster"}},
-			wantActive: EngineNone, wantSeat: "big-vllm", wantProbe: ProbeEndpoint,
+			wantActive: EngineNone, wantSeat: "small-cpp", wantProbe: ProbeEndpoint,
 			wantChain: []string{"vllm", "llama.cpp"},
 			inReason:  []string{"vllm seat big-vllm unavailable: health 503", "llama.cpp seat small-cpp unavailable: not in the roster"},
 		},
@@ -65,12 +69,31 @@ func TestResolveChain(t *testing.T) {
 			inReason: []string{"no backend"},
 		},
 		{
-			name:       "a candidate that answers while the lane is bound to another seat says so",
-			chain:      []Candidate{vllm, {Seat: "small-cpp", Engine: EngineLlamaCpp}},
+			name:       "a preferred backend that is up while the lane is bound to another does not answer for it",
+			chain:      []Candidate{vllmPreferred, cppBound},
+			verdicts:   map[string]Verdict{"big-vllm": {OK: true, Probe: ProbeEndpoint, Detail: "loaded and ready"}, "small-cpp": {OK: true, Probe: ProbeProcess, Detail: "idle"}},
+			wantActive: EngineLlamaCpp, wantSeat: "small-cpp", wantProbe: ProbeProcess,
+			wantChain: []string{"vllm", "llama.cpp"},
+			inReason:  []string{"llama.cpp seat small-cpp: idle", "the preferred vllm seat big-vllm is available (loaded and ready)", "does not answer for this lane", "bound to small-cpp"},
+			notReason: []string{"fell to"},
+		},
+		{
+			name:       "a bound backend that fails is none even when another seat of the chain is up",
+			chain:      []Candidate{vllmBound, cppUnbound},
+			verdicts:   map[string]Verdict{"big-vllm": {Probe: ProbeEndpoint, Detail: "its health endpoint answered 503"}, "small-cpp": {OK: true, Probe: ProbeProcess, Detail: "idle"}},
+			wantActive: EngineNone, wantSeat: "big-vllm", wantProbe: ProbeEndpoint,
+			wantChain: []string{"vllm", "llama.cpp"},
+			inReason:  []string{"vllm seat big-vllm unavailable: its health endpoint answered 503", "llama.cpp seat small-cpp is available (idle)", "bound to big-vllm"},
+			notReason: []string{"fell to"},
+		},
+		{
+			name:       "a lane with no binding takes the first backend that answers",
+			chain:      []Candidate{vllmPreferred, cppUnbound},
 			verdicts:   map[string]Verdict{"big-vllm": {Detail: "not in the roster"}, "small-cpp": {OK: true, Detail: "idle"}},
 			wantActive: EngineLlamaCpp, wantSeat: "small-cpp", wantProbe: ProbeProcess,
 			wantChain: []string{"vllm", "llama.cpp"},
-			inReason:  []string{"the lane is bound to big-vllm"},
+			inReason:  []string{"vllm seat big-vllm unavailable: not in the roster", "fell to llama.cpp seat small-cpp: idle"},
+			notReason: []string{"bound to"},
 		},
 		{
 			name:       "an engine the config does not say reads as unknown, never as a guess",

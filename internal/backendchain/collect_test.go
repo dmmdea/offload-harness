@@ -1,15 +1,20 @@
 package backendchain
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 )
@@ -31,8 +36,18 @@ type fakeSwap struct {
 	// allowCompletion admits POST /v1/chat/completions (and records the body): only the test of the
 	// explicit completion option sets it.
 	allowCompletion bool
-	requests        []string
-	completions     []map[string]any
+	// loadOnCompletion makes a completion LOAD its seat, the way llama-swap does: the model is listed as
+	// ready by every later /running read. Without it the fake's running list never changes.
+	loadOnCompletion bool
+	// completionStatus, when set, is what a completion answers instead of a result (a seat that fails).
+	completionStatus int
+	// seatPath is the path a seat answers as its health endpoint (default /health); any other path under
+	// the seat is a plain 404, so a probe that asks the wrong path reads a failing seat.
+	seatPath map[string]string
+	// proxyOf overrides the address /running reports for a seat (default: this fake's own /seat/<id>).
+	proxyOf     map[string]string
+	requests    []string
+	completions []map[string]any
 }
 
 func newFakeSwap(t *testing.T, roster map[string][]string) *fakeSwap {
@@ -60,11 +75,23 @@ func (f *fakeSwap) handle(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/running":
 		var rows []string
 		for id, state := range f.running {
-			rows = append(rows, fmt.Sprintf(`{"model":%q,"state":%q,"proxy":%q,"cmd":"x","ttl":0}`, id, state, f.srv.URL+"/seat/"+id))
+			proxy := f.srv.URL + "/seat/" + id
+			if p, ok := f.proxyOf[id]; ok {
+				proxy = p
+			}
+			rows = append(rows, fmt.Sprintf(`{"model":%q,"state":%q,"proxy":%q,"cmd":"x","ttl":0}`, id, state, proxy))
 		}
 		fmt.Fprintf(w, `{"running":[%s]}`, strings.Join(rows, ","))
-	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/seat/") && strings.HasSuffix(r.URL.Path, "/health"):
-		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/seat/"), "/health")
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/seat/"):
+		id, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/seat/"), "/")
+		want := "/health"
+		if p, ok := f.seatPath[id]; ok {
+			want = p
+		}
+		if "/"+rest != want {
+			w.WriteHeader(http.StatusNotFound)
+			break
+		}
 		st := f.seatStatus[id]
 		if st == 0 {
 			st = http.StatusOK
@@ -74,11 +101,46 @@ func (f *fakeSwap) handle(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.completions = append(f.completions, body)
+		if f.completionStatus != 0 {
+			w.WriteHeader(f.completionStatus)
+			break
+		}
+		if m, _ := body["model"].(string); m != "" && f.loadOnCompletion {
+			f.running[f.canonicalLocked(m)] = "ready"
+		}
 		fmt.Fprint(w, `{"choices":[{"message":{"content":"ok"},"finish_reason":"length"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
 	default:
 		f.t.Errorf("forbidden request to llama-swap: %s %s - the default probe must load nothing and must never send a completion", r.Method, r.URL.Path)
 		w.WriteHeader(http.StatusInternalServerError)
 	}
+}
+
+// canonicalLocked maps a model name (an id or an alias) to the id llama-swap lists it under. The caller
+// holds f.mu.
+func (f *fakeSwap) canonicalLocked(name string) string {
+	for id, aliases := range f.roster {
+		if id == name {
+			return id
+		}
+		for _, a := range aliases {
+			if a == name {
+				return id
+			}
+		}
+	}
+	return name
+}
+
+// completionModels is the model of every completion the fake served, in order.
+func (f *fakeSwap) completionModels() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, c := range f.completions {
+		m, _ := c["model"].(string)
+		out = append(out, m)
+	}
+	return out
 }
 
 func (f *fakeSwap) completionCount() int {
@@ -178,15 +240,23 @@ func TestCollectDefaultModeLoadsNothing(t *testing.T) {
 	cfg := testCfg(t, f)
 	r := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client()})
 
+	// The agent lane is BOUND to the llama.cpp seat small-cpp, so that engine is what answers for it, even
+	// though the preferred vLLM seat is loaded and healthy: the lane routes to its bound seat.
 	agent := laneOf(t, r, "agent")
-	if agent.ActiveBackend != EngineVLLM || agent.Seat != "big-vllm" || agent.BackendProbe != ProbeEndpoint {
-		t.Errorf("agent lane = %+v, want the loaded vLLM seat probed at its endpoint", agent)
+	if agent.ActiveBackend != EngineLlamaCpp || agent.Seat != "small-cpp" || agent.BackendProbe != ProbeProcess {
+		t.Errorf("agent lane = %+v, want the bound llama.cpp seat, not the loaded vLLM seat it is not bound to", agent)
 	}
 	if strings.Join(agent.BackendChain, ">") != "vllm>llama.cpp" {
 		t.Errorf("agent chain = %v", agent.BackendChain)
 	}
-	if !strings.Contains(agent.BackendReason, "the lane is bound to small-cpp") {
-		t.Errorf("the lane is bound to the fallback seat and the reason must say so: %q", agent.BackendReason)
+	for _, want := range []string{"the preferred vllm seat big-vllm is available", "does not answer for this lane", "bound to small-cpp"} {
+		if !strings.Contains(agent.BackendReason, want) {
+			t.Errorf("the lane is bound to the fallback seat and the reason must say so (%q): %q", want, agent.BackendReason)
+		}
+	}
+	// The vLLM seat is still reported on its own row, probed at its endpoint.
+	if v := seatOf(t, r, "big-vllm"); v.ActiveBackend != EngineVLLM || v.BackendProbe != ProbeEndpoint {
+		t.Errorf("big-vllm seat = %+v, want the loaded vLLM seat probed at its endpoint", v)
 	}
 	work := laneOf(t, r, "workhorse")
 	if work.ActiveBackend != EngineLlamaCpp || work.BackendProbe != ProbeProcess || !strings.Contains(work.BackendReason, "not loaded") {
@@ -354,10 +424,279 @@ func TestCompletionProbeNeverEvictsAVLLMSeat(t *testing.T) {
 	}
 }
 
+// TestCompletionProbeStopsOnceItLoadedAVLLMSeat: on an idle box the probe's own first completions load
+// seats, and a completion that loads a vLLM seat makes every later completion to a seat that is not
+// running a load that could evict it. The fake loads a seat on its completion, as llama-swap does, and
+// /running is re-read after every completion, so the vLLM seat this run loaded is seen before the next
+// completion is decided.
+func TestCompletionProbeStopsOnceItLoadedAVLLMSeat(t *testing.T) {
+	withTier(t)
+	f := newFakeSwap(t, fullRoster())
+	f.allowCompletion = true
+	f.loadOnCompletion = true
+	r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+
+	order := f.completionModels()
+	first := -1
+	for i, m := range order {
+		if m == "big-vllm" {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		t.Fatalf("the vLLM seat was never completed (order %v): the test would prove nothing", order)
+	}
+	if first != len(order)-1 {
+		t.Errorf("completions %v followed the one that loaded the vLLM seat: each would load a seat while it holds the cards", order[first+1:])
+	}
+	// /running is re-read right after every completion, before the next one is decided.
+	f.mu.Lock()
+	for i, req := range f.requests {
+		if req == "POST /v1/chat/completions" && (i+1 >= len(f.requests) || f.requests[i+1] != "GET /running") {
+			t.Errorf("request %d is a completion not followed by a /running read: %v", i, f.requests[i:])
+		}
+	}
+	f.mu.Unlock()
+	e := seatOf(t, r, "small-cpp")
+	if e.BackendProbe == ProbeCompletion || !strings.Contains(e.BackendReason, "big-vllm") || !strings.Contains(e.BackendReason, "would load") {
+		t.Errorf("small-cpp = %+v, want a skipped completion that names the vLLM seat the run loaded", e)
+	}
+}
+
+// TestCompletionProbeNeverLoadsASecondVLLMSeat: loading one vLLM seat evicts another, so an idle vLLM
+// seat is refused too while a different vLLM seat is loaded (the target being vLLM is no exemption).
+func TestCompletionProbeNeverLoadsASecondVLLMSeat(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	f.roster["other-vllm"] = nil
+	f.running["big-vllm"] = "ready"
+	f.allowCompletion = true
+	cfg := testCfg(t, f)
+	cfg.VLLMSeats = []string{"big-vllm", "other-vllm"}
+	yaml := servingYAML + "  other-vllm:\n    cmd: /seats/other-vllm-cmd.sh\n    proxy: http://127.0.0.1:18798\n"
+	if err := os.WriteFile(cfg.ServingConfigPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+	for _, m := range f.completionModels() {
+		if m != "big-vllm" {
+			t.Errorf("a completion was sent to %s while the vLLM seat big-vllm held the cards", m)
+		}
+	}
+	e := seatOf(t, r, "other-vllm")
+	if e.BackendProbe == ProbeCompletion || !strings.Contains(e.BackendReason, "big-vllm") || !strings.Contains(e.BackendReason, "would load") {
+		t.Errorf("other-vllm = %+v, want a skipped completion that names the loaded vLLM seat", e)
+	}
+	if v := seatOf(t, r, "big-vllm"); v.BackendProbe != ProbeCompletion {
+		t.Errorf("big-vllm is already loaded, so completing it loads nothing and must run: %+v", v)
+	}
+}
+
+// TestCompletionReasonDoesNotContradictItself: a row that ran a completion must not also say it was not
+// asked. An idle seat the completion loaded says so; a loaded seat keeps its endpoint clause.
+func TestCompletionReasonDoesNotContradictItself(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	f.allowCompletion = true
+	f.running["small-cpp"] = "ready"
+	r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+	for _, e := range append(append([]Entry{}, r.Lanes...), r.Seats...) {
+		if e.BackendProbe == ProbeCompletion && (strings.Contains(e.BackendReason, "not asked") || strings.Contains(e.BackendReason, "asking would")) {
+			t.Errorf("%s %s ran a completion and says it was not asked: %q", e.Lane, e.Seat, e.BackendReason)
+		}
+	}
+	idle := seatOf(t, r, "offload-e4b")
+	if idle.BackendProbe != ProbeCompletion || !strings.Contains(idle.BackendReason, "a 1-token completion loaded it and answered") {
+		t.Errorf("idle seat = %+v, want the completion that loaded it named", idle)
+	}
+	loaded := seatOf(t, r, "small-cpp")
+	if loaded.BackendProbe != ProbeCompletion || !strings.Contains(loaded.BackendReason, "its health endpoint answered 200") ||
+		!strings.Contains(loaded.BackendReason, "a 1-token completion answered") || strings.Contains(loaded.BackendReason, "loaded it") {
+		t.Errorf("loaded seat = %+v, want its endpoint clause and the completion", loaded)
+	}
+}
+
+// TestCollectAsksTheEntrysOwnHealthPath: a serving-config entry names its health path with checkEndpoint
+// (with or without the leading slash); the loaded seat is asked THAT path. The fake answers only that
+// path and 404s /health, so a probe that asks /health reads a failing seat.
+func TestCollectAsksTheEntrysOwnHealthPath(t *testing.T) {
+	for _, declared := range []string{"/v1/models", "v1/models"} {
+		t.Run(declared, func(t *testing.T) {
+			f := newFakeSwap(t, fullRoster())
+			f.running["small-cpp"] = "ready"
+			f.seatPath = map[string]string{"small-cpp": "/v1/models"}
+			cfg := testCfg(t, f)
+			yaml := strings.Replace(servingYAML, "  small-cpp:\n", "  small-cpp:\n    checkEndpoint: "+declared+"\n", 1)
+			if err := os.WriteFile(cfg.ServingConfigPath, []byte(yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client()})
+			e := seatOf(t, r, "small-cpp")
+			if e.ActiveBackend != EngineLlamaCpp || e.BackendProbe != ProbeEndpoint || !strings.Contains(e.BackendReason, "answered 200") {
+				t.Errorf("small-cpp = %+v, want ok at its own health path", e)
+			}
+			var asked []string
+			for _, req := range f.requests {
+				if strings.HasPrefix(req, "GET /seat/small-cpp") {
+					asked = append(asked, req)
+				}
+			}
+			if len(asked) != 1 || asked[0] != "GET /seat/small-cpp/v1/models" {
+				t.Errorf("the seat was asked %v, want only its checkEndpoint path", asked)
+			}
+		})
+	}
+}
+
+// TestCollectLaneActiveBackendIsTheBoundSeatsEngine: active_backend is the engine of the seat the lane is
+// bound to, whatever else of the chain is up. A preferred vLLM seat that is healthy while the lane is
+// bound to the llama.cpp fallback is NOT what answers; a bound seat that fails is none, and the report
+// says the other seat is available but not bound.
+func TestCollectLaneActiveBackendIsTheBoundSeatsEngine(t *testing.T) {
+	withTier(t)
+	cases := []struct {
+		name       string
+		bound      string
+		vllmStatus int
+		wantActive string
+		wantSeat   string
+		inReason   []string
+	}{
+		{"bound to the fallback while vLLM is healthy", "small-cpp", 200, EngineLlamaCpp, "small-cpp",
+			[]string{"the preferred vllm seat big-vllm is available", "bound to small-cpp"}},
+		{"bound to the vLLM seat and it is healthy", "big-vllm", 200, EngineVLLM, "big-vllm", nil},
+		{"bound to the vLLM seat and it fails: none, the fallback is not what the lane calls", "big-vllm", 503, EngineNone, "big-vllm",
+			[]string{"vllm seat big-vllm unavailable", "503", "llama.cpp seat small-cpp is available", "bound to big-vllm"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeSwap(t, fullRoster())
+			f.running["big-vllm"] = "ready"
+			f.seatStatus["big-vllm"] = tc.vllmStatus
+			cfg := testCfg(t, f)
+			cfg.AgentModel = tc.bound
+			agent := laneOf(t, Collect(t.Context(), cfg, Options{HTTP: f.srv.Client()}), "agent")
+			if agent.ActiveBackend != tc.wantActive || agent.Seat != tc.wantSeat {
+				t.Errorf("agent lane = %+v, want %s on seat %s", agent, tc.wantActive, tc.wantSeat)
+			}
+			for _, want := range tc.inReason {
+				if !strings.Contains(agent.BackendReason, want) {
+					t.Errorf("reason %q lacks %q", agent.BackendReason, want)
+				}
+			}
+		})
+	}
+}
+
+// TestBackendReasonsCarryNoPathOrURL: a reason is published to every node that reads /fleet/health, so
+// it names seats and states and carries no address, path, URL, command or config location, whatever
+// failed. The scenarios exercise every failure clause of the collector (the llama-swap that is down, a
+// running list that cannot be read, a seat whose health endpoint answers 503 or does not answer, a
+// completion that fails, a serving config that is missing or unparseable, no endpoint, no client).
+func TestBackendReasonsCarryNoPathOrURL(t *testing.T) {
+	ipv4 := regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
+	driveOrUNC := regexp.MustCompile(`[A-Za-z]:[\\/]|\\\\`)
+	check := func(t *testing.T, rep Report, extra ...string) {
+		t.Helper()
+		all := append(append([]Entry{}, rep.Lanes...), rep.Seats...)
+		if len(all) == 0 {
+			t.Fatal("no rows: the scenario proves nothing")
+		}
+		forbidden := append([]string{"://", "127.0.0.1", "localhost", "18797", "18798", "/bin/", "/seats/", ".sh", "llama-server", "\\", "--port"}, extra...)
+		for _, e := range all {
+			for _, bad := range forbidden {
+				if bad != "" && strings.Contains(e.BackendReason, bad) {
+					t.Errorf("%s %s: reason %q carries %q", e.Lane, e.Seat, e.BackendReason, bad)
+				}
+			}
+			if ipv4.MatchString(e.BackendReason) || driveOrUNC.MatchString(e.BackendReason) {
+				t.Errorf("%s %s: reason %q carries an address or a drive path", e.Lane, e.Seat, e.BackendReason)
+			}
+		}
+	}
+	hostOf := func(f *fakeSwap) string { return strings.TrimPrefix(f.srv.URL, "http://") }
+
+	t.Run("llama-swap is down", func(t *testing.T) {
+		withTier(t)
+		f := newFakeSwap(t, fullRoster())
+		cfg := testCfg(t, f)
+		f.srv.Close()
+		check(t, Collect(t.Context(), cfg, Options{HTTP: f.srv.Client()}), hostOf(f), cfg.ServingConfigPath, filepath.Dir(cfg.ServingConfigPath))
+	})
+	t.Run("the running list cannot be read, completion probe on", func(t *testing.T) {
+		f := newFakeSwap(t, fullRoster())
+		f.runningStatus = http.StatusInternalServerError
+		f.allowCompletion = true
+		cfg := testCfg(t, f)
+		check(t, Collect(t.Context(), cfg, Options{HTTP: f.srv.Client(), ProbeCompletion: true}), hostOf(f), cfg.ServingConfigPath)
+	})
+	t.Run("a loaded seat answers 503 and another does not answer at all", func(t *testing.T) {
+		withTier(t)
+		f := newFakeSwap(t, fullRoster())
+		f.running["big-vllm"] = "ready"
+		f.running["small-cpp"] = "ready"
+		f.seatStatus["big-vllm"] = http.StatusServiceUnavailable
+		f.proxyOf = map[string]string{"small-cpp": "http://127.0.0.1:1"} // a refused connection, whose error text carries the address
+		cfg := testCfg(t, f)
+		rep := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client(), ProbeTimeout: 2 * time.Second})
+		check(t, rep, hostOf(f), "127.0.0.1:1", cfg.ServingConfigPath)
+		if e := seatOf(t, rep, "small-cpp"); !strings.Contains(e.BackendReason, "did not answer") {
+			t.Errorf("the refused connection must still be reported: %+v", e)
+		}
+	})
+	t.Run("a completion fails", func(t *testing.T) {
+		f := newFakeSwap(t, fullRoster())
+		f.allowCompletion = true
+		f.completionStatus = http.StatusInternalServerError
+		cfg := testCfg(t, f)
+		rep := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+		check(t, rep, hostOf(f), cfg.ServingConfigPath)
+		if e := seatOf(t, rep, "small-cpp"); !strings.Contains(e.BackendReason, "the 1-token completion failed") {
+			t.Errorf("small-cpp = %+v", e)
+		}
+	})
+	t.Run("the serving config is missing, unparseable or unset", func(t *testing.T) {
+		for name, mutate := range map[string]func(cfg *config.Config){
+			"missing":     func(cfg *config.Config) { cfg.ServingConfigPath = filepath.Join(filepath.Dir(cfg.ServingConfigPath), "absent.yaml") },
+			"unparseable": func(cfg *config.Config) { _ = os.WriteFile(cfg.ServingConfigPath, []byte("models: [unclosed"), 0o600) },
+			"unset":       func(cfg *config.Config) { cfg.ServingConfigPath = "" },
+		} {
+			t.Run(name, func(t *testing.T) {
+				f := newFakeSwap(t, fullRoster())
+				cfg := testCfg(t, f)
+				dir := filepath.Dir(cfg.ServingConfigPath)
+				mutate(&cfg)
+				rep := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client()})
+				check(t, rep, hostOf(f), dir, cfg.ServingConfigPath)
+			})
+		}
+	})
+	t.Run("no endpoint and no client", func(t *testing.T) {
+		cfg := config.Default()
+		cfg.Endpoint = ""
+		check(t, Collect(t.Context(), cfg, Options{}))
+		cfg.Endpoint = "http://llama-swap.example.invalid:9"
+		check(t, Collect(t.Context(), cfg, Options{}), "example.invalid")
+	})
+	t.Run("the transport error text never reaches a reason", func(t *testing.T) {
+		for _, err := range []error{
+			context.DeadlineExceeded,
+			&url.Error{Op: "Get", URL: "http://192.0.2.3:8080/upstream/x/health", Err: errors.New("dial tcp 192.0.2.3:8080: connect: connection refused")},
+			&url.Error{Op: "Get", URL: "http://192.0.2.3:8080/running", Err: errors.New("EOF")},
+		} {
+			if got := short(err); strings.ContainsAny(got, "/\\") || strings.Contains(got, "192.0.2.3") || strings.Contains(got, "http") {
+				t.Errorf("short(%v) = %q carries the address", err, got)
+			}
+		}
+	})
+}
+
 // TestPlanLanes: one lane per configured model route; the agent lane carries the tier's chain.
 func TestPlanLanes(t *testing.T) {
 	cfg := config.Default()
 	cfg.AgentModel = "small-cpp"
+	if cfg.EmbedModel() == "" {
+		t.Fatal("the default config must name an embedder, or the embed assertion below proves nothing")
+	}
 	lanes := PlanLanes(cfg)
 	names := map[string]Lane{}
 	for _, l := range lanes {
@@ -370,6 +709,9 @@ func TestPlanLanes(t *testing.T) {
 	}
 	if _, ok := names["vision"]; ok {
 		t.Errorf("an unbound vision lane must not be reported: %+v", names["vision"])
+	}
+	if l, ok := names["embed"]; ok {
+		t.Errorf("embed is a route doctor does not diff, never a lane (the default config names an embedder, %q, and it must still not appear): %+v", cfg.EmbedModel(), l)
 	}
 	if got := names["agent"].Chain; len(got) != 1 || got[0].Seat != "small-cpp" || !got[0].Bound {
 		t.Errorf("without a tier the agent lane is its one bound seat: %+v", got)
@@ -385,6 +727,36 @@ func TestPlanLanes(t *testing.T) {
 	if len(agent.Chain) != 2 || agent.Chain[0].Seat != "big-vllm" || agent.Chain[0].Engine != EngineVLLM || agent.Chain[0].Bound ||
 		agent.Chain[1].Seat != "small-cpp" || !agent.Chain[1].Bound {
 		t.Errorf("tier chain = %+v, want the preferred vLLM seat then the bound fallback", agent.Chain)
+	}
+}
+
+// TestPlanLanesFollowTheEffectiveSeat: a lane exists for every diffed route that has an EFFECTIVE seat, so
+// an unset agent_model (it rides the workhorse seat) and an unset ocr_model (it rides the vision seat)
+// are still lanes and report the seat they fall back to, and stt_hq is a lane of its own.
+func TestPlanLanesFollowTheEffectiveSeat(t *testing.T) {
+	cfg := config.Default()
+	cfg.AgentModel = ""
+	cfg.VisionModel = "vis-seat"
+	cfg.OCRModel = ""
+	cfg.STTModelHQ = "hq-ears"
+	seats := map[string]string{}
+	for _, l := range PlanLanes(cfg) {
+		if len(l.Chain) != 1 {
+			t.Fatalf("lane %s chain = %+v, want its one bound seat", l.Name, l.Chain)
+		}
+		seats[l.Name] = l.Chain[0].Seat
+	}
+	if seats["agent"] != cfg.Model {
+		t.Errorf("an unset agent_model falls back to the workhorse seat %q, got %q", cfg.Model, seats["agent"])
+	}
+	if seats["ocr"] != "vis-seat" {
+		t.Errorf("an unset ocr_model falls back to the vision seat, got %q", seats["ocr"])
+	}
+	if seats["stt_hq"] != "hq-ears" {
+		t.Errorf("stt_hq is a lane when its seat is set, got %q", seats["stt_hq"])
+	}
+	if _, ok := seats["embed"]; ok {
+		t.Error("embed is not a lane")
 	}
 }
 
