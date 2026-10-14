@@ -130,10 +130,10 @@ func TestInstallVLLMSeatPointsAtTheHostPrefixWhenTheProbeWentThroughIt(t *testin
 // agree: a prefix for another distro vouches for a venv and weights the seat will not find.
 func TestInstallVLLMSeatRefusesAHostPrefixForAnotherDistro(t *testing.T) {
 	b := newWSLBox(t, "blackwell-3x16")
-	for _, prefix := range []string{`//wsl.localhost/other`, `\\wsl.localhost\other`, `\\wsl$\other`, `//wsl.localhost/other/`} {
+	for _, prefix := range []string{`//wsl.localhost/debian`, `\\wsl.localhost\debian`, `\\wsl$\debian`, `//wsl.localhost/debian/`} {
 		t.Run(prefix, func(t *testing.T) {
 			r := b.run(t, map[string]string{"-distro": "distro", "-host-prefix": prefix})
-			mustRefuse(t, r, "a --host-prefix naming another distro", "--host-prefix", "--distro", "other", "reads the filesystem of the distro")
+			mustRefuse(t, r, "a --host-prefix naming another distro", "--host-prefix", "--distro", "debian", "reads the filesystem of the distro")
 			// This box has no such share, so a render that skipped the comparison would still be
 			// refused, for the prefix being unreadable. That is a different refusal and not the one
 			// under test.
