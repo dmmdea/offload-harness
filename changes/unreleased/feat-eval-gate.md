@@ -92,15 +92,15 @@
   over 50000 datasets on nine cells (1.2% to 2.5% measured), the interval against numpy and scipy computations and against
   its own definition (the statistic equals the critical value at both ends), the t table against scipy, and the study
   harness pinned to `BootstrapDeltaMean` bit for bit, to scipy's quantiles and to the moments of its generators. The
-  `internal/eval` tests take about 3.5 s with the calibration cells (about 0.5 s under `-short`) on a 36-core machine; the
-  cells split their trials over `GOMAXPROCS`, so a 4-core runner takes a few times that. Root tests drive the verb
+  `internal/eval` tests take about 4 s with the calibration cells (about 1 s with `-short`) on a 36-core machine; the cells
+  split their trials over `GOMAXPROCS`, so a 4-core runner takes a few times that. Root tests drive the verb
   in-process (freeze, check, verdict round trip, exit codes 0, 1 and 2, a failed write of the result on each verb, `-h`,
   write-once freeze, the INV-5 refusals, `schema`, the version 1 refusal). Mutation checks, each proved applied (`git diff
   --quiet` exit 1 after the edit, exit 0 after the restore): the imputation switch, the cheat score, the held-out zero-pair
   rule, both floors, the `min_pairs` bound, each judge mismatch and each receipt hash check, the negative-metric refusal,
   the unresolved cap (flag, verdict and the forced no-improve), the regression veto in both directions, the Bonferroni
   level, the margin bound and each of the four write-error wraps: all 26 turned a test red; and in the third round a
-  candidate's unfinished cost dropped, a `not_run`'s cost counted, the incumbent's unfinished cost counted, a regression
-  read only from `min_pairs`, the primary back on the percentile bootstrap, the zero-variance value read from a sum, the
+  candidate's unfinished cost dropped, a `not_run`'s cost counted, the incumbent's unfinished cost counted, a null cost
+  counted as a zero in the divisor, a regression read only from `min_pairs`, the primary back on the percentile bootstrap, the zero-variance value read from a sum, the
   plain t interval, a nudged critical value, the version probe disabled, the version probe blind to trailing bytes, and
-  three in the harness (percentile index, generator bias, quantile bisection): all 13 turned a test red.
+  three in the harness (percentile index, generator bias, quantile bisection): all 14 turned a test red.
