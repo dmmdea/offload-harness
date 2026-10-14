@@ -54,6 +54,8 @@ type failureClassOut struct {
 
 // failureReport is what `ledger --failures` prints: one JSON object, no trailing text.
 type failureReport struct {
+	// SinceDays is the window asked for (--since), 0 for the whole ledger: always present.
+	SinceDays             int                       `json:"since_days"`
 	LedgerFound           bool                      `json:"ledger_found"`
 	UnparsedLines         int                       `json:"unparsed_lines"`
 	JobRows               int                       `json:"job_rows"`
@@ -163,7 +165,11 @@ func runLedgerFailures(args []string) error {
 	}
 	noteExcluded(reg.ExcludedNonProduction)
 	noteLedgerReading(cfg.LedgerPath, reg)
-	b, err := json.MarshalIndent(joinFailureDocs(reg, docs), "", "  ")
+	report := joinFailureDocs(reg, docs)
+	if *since > 0 {
+		report.SinceDays = *since
+	}
+	b, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return err
 	}
