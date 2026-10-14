@@ -169,6 +169,13 @@ function Wait-SwapReady {
   return $false
 }
 
+# Get-MoEFailureAdvice: the operator text for a 26B tier that failed to load. SEAM ONLY in this commit
+# (it returns nothing); the next commits give it the text and call it from the tier loop.
+function Get-MoEFailureAdvice {
+  param([string]$ErrorText)
+  return ''
+}
+
 # R4.2: auto-remediation for a 26B allocation/device-lost failure. Reads $yamlPath, finds the
 # gemma4-26b-a4b model's cmd, inserts --cpu-moe if absent, rewrites the yaml, restarts the
 # transient swap, and retries the 26B request ONCE. Returns {outcome='pass|fail', retry=<chat
