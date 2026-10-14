@@ -21,6 +21,17 @@ type reviewDiffIO struct {
 
 // reviewIO resolves the seam: this server's overrides over the real calls.
 func (s *Server) reviewIO() reviewDiffIO {
-	// STUB: the overrides are not honoured yet.
-	return reviewDiffIO{Getwd: os.Getwd, Abs: filepath.Abs, Read: delegate.InlineContextPaths}
+	io := reviewDiffIO{Getwd: os.Getwd, Abs: filepath.Abs, Read: delegate.InlineContextPaths}
+	if o := s.reviewDiffFS; o != nil {
+		if o.Getwd != nil {
+			io.Getwd = o.Getwd
+		}
+		if o.Abs != nil {
+			io.Abs = o.Abs
+		}
+		if o.Read != nil {
+			io.Read = o.Read
+		}
+	}
+	return io
 }

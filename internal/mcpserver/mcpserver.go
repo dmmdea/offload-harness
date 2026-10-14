@@ -3753,19 +3753,23 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 		// the ONE delegator-side confined reader (os.Root containment, 128 KiB
 		// cap, an error naming the offending path) — rather than a bare ReadFile,
 		// so this lane cannot become the one door that reads outside read_root.
+		//
+		// The three calls go through the reviewDiffIO seam (the real ones in production), so
+		// the refusals behind them are exercised rather than assumed.
+		fsio := s.reviewIO()
 		readRoot := in.ReadRoot
 		if readRoot == "" {
-			wd, werr := os.Getwd()
+			wd, werr := fsio.Getwd()
 			if werr != nil {
 				return refuse("cannot determine working dir for read_root: " + werr.Error())
 			}
 			readRoot = wd
 		}
-		absRoot, aerr := filepath.Abs(readRoot)
+		absRoot, aerr := fsio.Abs(readRoot)
 		if aerr != nil {
 			return refuse("bad read_root: " + aerr.Error())
 		}
-		docs, ierr := delegate.InlineContextPaths([]string{in.DiffPath}, absRoot)
+		docs, ierr := fsio.Read([]string{in.DiffPath}, absRoot)
 		if ierr != nil {
 			return refuse(ierr.Error())
 		}
@@ -3774,7 +3778,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 		}
 		diff = docs[0].Text
 		recheck = func() (string, error) {
-			again, rerr := delegate.InlineContextPaths([]string{in.DiffPath}, absRoot)
+			again, rerr := fsio.Read([]string{in.DiffPath}, absRoot)
 			if rerr != nil {
 				return "", rerr
 			}
