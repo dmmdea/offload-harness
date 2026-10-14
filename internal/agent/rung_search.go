@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"regexp"
@@ -27,11 +28,16 @@ import (
 //
 // Concept: the search-result compressor documented by the Headroom project
 // (Apache-2.0): relevance ranking, a per-file cap, file diversity and an error
-// boost, with the documented defaults for the caps. This file is an independent
+// boost, with the caps its documented configuration lists. This file is an independent
 // implementation written from that documented behaviour; no upstream source was
 // read or copied (see NOTICE).
 //
-// Properties, each pinned by rung_search_test.go:
+// Gate: the rung reads a body's shape AND the call that produced it (searchRung): only
+// search_files (grouped form) and a run_shell / run call whose command is grep, rg, ag,
+// ack or git grep (flat form) qualify. A linter prints the same "path:line:col:text"
+// lines and none of its diagnostics may be dropped.
+//
+// Properties, each pinned by rung_search_test.go and rung_search_gate_test.go:
 //   - deterministic: no map iteration reaches the output, ties break on position,
 //     and scores are quantized to integers before they are compared;
 //   - idempotent: the output opens with skeletonPrefix, which the rung (and the
@@ -45,8 +51,10 @@ import (
 //     a tool message's Content, never a Role, a ToolCallID or a message count.
 
 const (
-	// searchRungMaxLines / PerFileCap / MaxFiles are the documented defaults of the
-	// idea: 30 lines in total, at most 5 per file, from at most 15 files.
+	// searchRungMaxLines / PerFileCap / MaxFiles are the defaults of the idea's
+	// documented configuration (see NOTICE): 30 lines in total, at most 5 per file,
+	// from at most 15 files. At most 15 files survive, so a listing of F files always
+	// elides at least F-15 of them.
 	searchRungMaxLines   = 30
 	searchRungPerFileCap = 5
 	searchRungMaxFiles   = 15
@@ -471,10 +479,26 @@ func splitShellFraming(content string) (head, stdout, tail string, ok bool) {
 	return content[:headEnd], rest[:i], rest[i:], true
 }
 
-// searchRungBody thins one tool body. It returns (thinned, true) only for a body
-// that parses as a search listing of more than searchRungMaxLines lines and whose
-// thinned form is strictly shorter; every other input is returned as it came.
+// searchForm is the listing form a body must have to be thinned.
+type searchForm int
+
+const (
+	searchFormAny     searchForm = iota // either form: the shape check on its own
+	searchFormGrouped                   // the harness's "path:" then "  L<n>: text" form
+	searchFormFlat                      // bare "path:line:text" lines
+)
+
+// searchRungBody thins one tool body on its shape alone. It returns (thinned, true)
+// only for a body that parses as a search listing of more than searchRungMaxLines
+// lines and whose thinned form is strictly shorter; every other input is returned
+// as it came. searchRung does not call it directly: it first asks which call
+// produced the body and passes the one form that call can print.
 func searchRungBody(content string, query []string) (string, bool) {
+	return searchRungBodyForm(content, query, searchFormAny)
+}
+
+// searchRungBodyForm is searchRungBody restricted to one listing form.
+func searchRungBodyForm(content string, query []string, want searchForm) (string, bool) {
 	if len(content) < skeletonMinChars || len(content) > searchRungMaxBytes ||
 		IsCompactionArtifact(content) || !utf8.ValidString(content) || strings.IndexByte(content, 0) >= 0 {
 		return content, false
@@ -486,7 +510,8 @@ func searchRungBody(content string, query []string) (string, bool) {
 	hadNL := strings.HasSuffix(stdout, "\n")
 	section := strings.TrimSuffix(stdout, "\n")
 	l, ok := parseSearchListing(section)
-	if !ok || len(l.hits) <= searchRungMaxLines {
+	if !ok || len(l.hits) <= searchRungMaxLines ||
+		(want == searchFormGrouped && !l.grouped) || (want == searchFormFlat && l.grouped) {
 		return content, false
 	}
 	scoreSearchListing(l, query)
@@ -506,23 +531,114 @@ func searchRungBody(content string, query []string) (string, bool) {
 	return out, true
 }
 
+// searchGrepPrograms are the programs whose output is a flat match listing. A
+// linter (flake8, ruff, shellcheck -f gcc, rubocop, golangci-lint) prints the same
+// "path:line:col:text" lines, but every one of its diagnostics is something the
+// agent must fix, so the command is the gate and the shape alone is not.
+var searchGrepPrograms = map[string]bool{"grep": true, "rg": true, "ag": true, "ack": true}
+
+// searchCommandIsGrep reports whether a shell command line starts with a search
+// program: grep, rg, ag, ack or git grep, optionally by path. Only the first word is
+// read, so "cd x && grep ..." or "echo grep" do not qualify; a pipeline after the
+// search ("grep -rn x . | head") does, since its output is still the search's.
+func searchCommandIsGrep(command string) bool {
+	w := strings.Fields(command)
+	if len(w) == 0 {
+		return false
+	}
+	return searchProgramIsGrep(w[0], w[1:])
+}
+
+// searchProgramIsGrep is the same test on an already split program and arguments.
+func searchProgramIsGrep(prog string, args []string) bool {
+	if i := strings.LastIndexAny(prog, `/\`); i >= 0 {
+		prog = prog[i+1:]
+	}
+	if searchGrepPrograms[prog] {
+		return true
+	}
+	return prog == "git" && len(args) > 0 && args[0] == "grep"
+}
+
+// searchFormFor says which listing form the call that produced a body can print, or
+// searchFormAny with ok=false when the call is not a search at all.
+func searchFormFor(c ToolCall) (searchForm, bool) {
+	switch c.Name {
+	case "search_files":
+		return searchFormGrouped, true
+	case "run_shell":
+		var in struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal([]byte(c.Args), &in) == nil && searchCommandIsGrep(in.Command) {
+			return searchFormFlat, true
+		}
+	case "run":
+		var in struct {
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+		}
+		if json.Unmarshal([]byte(c.Args), &in) == nil && searchProgramIsGrep(strings.TrimSpace(in.Command), in.Args) {
+			return searchFormFlat, true
+		}
+	}
+	return searchFormAny, false
+}
+
+// searchCallsByID maps every tool-call id in msgs to its call. An id claimed by two
+// different calls is ambiguous and is left out, so a result under it is not thinned.
+func searchCallsByID(msgs []Msg) map[string]ToolCall {
+	calls := map[string]ToolCall{}
+	ambiguous := map[string]bool{}
+	for _, m := range msgs {
+		for _, c := range m.ToolCalls {
+			if c.ID == "" {
+				continue
+			}
+			if prev, dup := calls[c.ID]; dup && (prev.Name != c.Name || prev.Args != c.Args) {
+				ambiguous[c.ID] = true
+			}
+			calls[c.ID] = c
+		}
+	}
+	for id := range ambiguous {
+		delete(calls, id)
+	}
+	return calls
+}
+
 // searchRung runs the rung over the older tool bodies in [from, to), oldest
 // first, until the transcript fits budget: the same span, order and pin rule as
 // the skeleton rung, so a pinned body (one the model re-requested) is never
 // touched. It rewrites only a tool message's Content, in place in out (the
 // ladder's own copy). With no task text there is nothing to rank against and
 // the rung does nothing.
+//
+// A body is thinned only if the call that produced it is a search: the harness's
+// search_files (grouped form) or a run_shell / run call whose command is a
+// grep-family program (flat form). The tool message's ToolCallID is mapped to its
+// call; a body with no matching call, or from any other tool, is left untouched,
+// because the same line shape is what a linter prints.
 func searchRung(out []Msg, from, to, budget int, pinned map[string]bool) {
 	task := searchRungTask(out, from)
 	if strings.TrimSpace(task) == "" {
 		return
 	}
 	query := searchQueryTerms(task)
+	calls := searchCallsByID(out)
 	for i := from; i < to && estimateTokens(out) > budget; i++ {
 		if out[i].Role != "tool" || out[i].IsError || pinned[out[i].ToolCallID] {
 			continue
 		}
-		if r, ok := searchRungBody(out[i].Content, query); ok {
+		call, ok := calls[out[i].ToolCallID]
+		if !ok {
+			continue
+		}
+		form, ok := searchFormFor(call)
+		if !ok {
+			continue
+		}
+		if r, ok := searchRungBodyForm(out[i].Content, query, form); ok {
 			out[i].Content = r
 		}
 	}
