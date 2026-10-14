@@ -128,8 +128,8 @@ the CLI version that wrote it. `TestOpenSpecGeneratedToolFilesStayUntracked` pin
 
 ## Invariants and pitfalls
 
-- The `context` and `rules` in `config.yaml` are public text. Machines appear as node letters or role phrases, never by name, and a tier id only as "the `<tier>` reference box"; the
-  leak gate fails the build on a hit and has no allow list.
+- The `context` and `rules` in `config.yaml` are public text. Machines appear as node letters or role phrases, never by
+  name, and a tier id only as "the `<tier>` reference box"; the leak gate fails the build on a hit and has no allow list.
 - A rule in `config.yaml` that is a plain YAML scalar containing `: ` parses as a mapping, and OpenSpec then drops that
   artifact's whole rule list with a warning. Quote every rule.
 - `rules` keys are artifact ids. An unknown key is dropped with a warning, so `TestOpenSpecConfigRulesNameRealArtifacts` checks
