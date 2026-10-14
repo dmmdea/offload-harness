@@ -587,8 +587,11 @@ func adoptRate(t *testing.T, mode string, n, trials int, gen pairGen) float64 {
 // to read measured 6.1% on the first non-inferiority cell, 10.0% on the second and 6.2% on the heavy-tailed
 // superiority cell, over 20000 datasets each; TestCalibrationStudy prints the whole grid.
 //
-// All-tied datasets count: a sample whose paired differences are all equal has no spread to measure, and
-// its interval is its one value (the share of such datasets is part of each figure).
+// The strong-incumbent and nested-loss cells are where most samples have no pair that differs, and a sample
+// with no spread used to be read as its one value: pass rates .95 and .90 measured 9% at 16 tasks, .99 and .94
+// 32%, and a candidate that only loses 5% of the incumbent's passes 37% at 20 tasks. They are tested at 16 to
+// 24 tasks. They are not claimed at 60 tasks and more, where the score form is still above 4% in a few of them
+// (the ADR has the figures).
 func TestNullAdoptRateAtTheFloorsIsCalibrated(t *testing.T) {
 	if testing.Short() {
 		t.Skip("simulated gate runs; the cells below take a few seconds")

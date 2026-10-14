@@ -425,7 +425,7 @@ func newSimBuf(B int) *simBuf {
 
 // simLowers returns the lower end of every method (bases, then composites) on one dataset, with B
 // resamples drawn from seed in the order bootstrapReps draws them. degenerate reports a dataset
-// whose paired differences are all equal: its lower end is the same for every method.
+// whose paired differences are all equal: its interval is the point for every method but (vi).
 func simLowers(inc, cand []float64, B int, seed int64, buf *simBuf, span float64) (lows []float64, degenerate bool) {
 	n := len(inc)
 	fn := float64(n)
@@ -445,11 +445,16 @@ func simLowers(inc, cand []float64, B int, seed int64, buf *simBuf, span float64
 		}
 	}
 	if degenerate {
-		// Every method reads a sample with no spread the way the gate does: the lower end the sample
-		// cannot rule out (zeroSpreadInterval), so the methods stay on one footing.
-		zlo, _ := zeroSpreadInterval(d[0], n, span)
-		for k := range lows {
-			lows[k] = zlo
+		// A sample with no spread: every candidate interval is the point, as it was when the methods
+		// were compared, so their columns stay what they were; the gate's own method (vi) reads the
+		// lower end the sample cannot rule out (zeroSpreadInterval), and a composite takes the lower
+		// of its two parts.
+		for k := 0; k < nBase; k++ {
+			lows[k] = dbar
+		}
+		lows[mScore], _ = zeroSpreadInterval(d[0], n, span)
+		for i, c := range composites {
+			lows[nBase+i] = math.Min(lows[c.a], lows[c.b])
 		}
 		return lows, true
 	}

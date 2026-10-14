@@ -19,7 +19,13 @@ import "math"
 // was 13.5%. The score form is the t interval with its critical value multiplied by
 // sqrt((n-1) / (n-c^2)), 1.14 at 16 tasks, 1.10 at 20, 1.08 at 24, 1.04 at 40 and 1.02 at 80. The
 // measured false-ADOPT rates of this and of the four other candidate intervals, on the same
-// datasets, are in the ADR and reproduce with TestCalibrationStudy (gate_sim_test.go).
+// datasets, are in the ADR and reproduce with TestCalibrationStudy (gate_sim_test.go). The form
+// has nothing to read when every difference is equal, and zeroSpreadInterval takes that case.
+//
+// Where it is not calibrated: a strong incumbent and a candidate at exactly the margin whose
+// disagreements are a handful of tasks in 60 or more (pass rates .99 and .94 at 80 tasks measure
+// 4.8%, a candidate that only loses 5% of the incumbent's passes 8.2% at 80). The ADR has the
+// figures and the interval that does clear them.
 //
 // BootstrapDeltaMean (the percentile bootstrap, B and seed from the call site) is unchanged for
 // its legacy callers; the gate reads the efficiency metrics with it, not the primary.

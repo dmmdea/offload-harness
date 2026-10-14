@@ -351,12 +351,14 @@ const overflowMsg = "the scores or costs are too large to average: a sum overflo
 // The rules (docs/systems/measurement-gate.md has them in plain words, numbered the same):
 //
 //	R1  the statistic is the mean paired difference over TASKS, read on the score form of its
-//	    95% t interval (interval.go); the paired bootstrap reads the efficiency metrics
+//	    95% t interval (interval.go), its lower end held back when every difference is equal;
+//	    the paired bootstrap reads the efficiency metrics
 //	R2  superiority: ADOPT iff lo > 0, BLOCK iff hi < 0; non-inferiority with margin m: BLOCK iff
 //	    hi < -m, ADOPT iff lo > -m and a declared efficiency metric improves and none got
 //	    significantly worse or went unmeasured; else INCONCLUSIVE
 //	R3  a candidate attempt that did not finish scores the worst score and still spends the cost
-//	    it recorded, an incumbent's is skipped (cost included), a cheat scores the worst score;
+//	    it recorded (one that recorded none leaves its task's cost unresolved), an incumbent's is
+//	    skipped (cost included), a cheat scores the worst score;
 //	    excluded pairs and unusable attempts are counted
 //	R4  the incumbent wins every tie and every INCONCLUSIVE; fewer than min_pairs usable pairs, or
 //	    too large an excluded share, is INCONCLUSIVE (the remedy is more tasks, not more attempts)
