@@ -1393,7 +1393,7 @@ func TestLogsOriginalSizeParsesTheHeaderOnly(t *testing.T) {
 	}
 }
 
-// --- round three: a quoted header must not feed an arbitrary size into a marker ---
+// --- a quoted log-collapse header must not feed an arbitrary size into a marker ---
 
 // lcCollapseHeader spells a collapse header exactly as the rung writes it,
 // including the newline that ends it.
