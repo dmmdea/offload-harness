@@ -54,8 +54,8 @@ type fakeSwap struct {
 	// two reads, the way another client of llama-swap does.
 	onRunningRead func(read int)
 	runningReads  int
-	requests    []string
-	completions []map[string]any
+	requests      []string
+	completions   []map[string]any
 }
 
 func newFakeSwap(t *testing.T, roster map[string][]string) *fakeSwap {
@@ -718,7 +718,9 @@ func TestBackendReasonsCarryNoPathOrURL(t *testing.T) {
 	})
 	t.Run("the serving config is missing, unparseable or unset", func(t *testing.T) {
 		for name, mutate := range map[string]func(cfg *config.Config){
-			"missing":     func(cfg *config.Config) { cfg.ServingConfigPath = filepath.Join(filepath.Dir(cfg.ServingConfigPath), "absent.yaml") },
+			"missing": func(cfg *config.Config) {
+				cfg.ServingConfigPath = filepath.Join(filepath.Dir(cfg.ServingConfigPath), "absent.yaml")
+			},
 			"unparseable": func(cfg *config.Config) { _ = os.WriteFile(cfg.ServingConfigPath, []byte("models: [unclosed"), 0o600) },
 			"unset":       func(cfg *config.Config) { cfg.ServingConfigPath = "" },
 		} {
