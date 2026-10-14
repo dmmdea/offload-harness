@@ -130,6 +130,43 @@ func TestDoctorHelpListsEveryFlag(t *testing.T) {
 	}
 }
 
+// declaresFlag reports whether usage text declares a flag by name the way flag.PrintDefaults prints one: a
+// line of its own ("  -name" for a bool, "  -name string" for the rest). The usage line, which names
+// "--config FILE", is not a declaration and does not match.
+func declaresFlag(usage, name string) bool {
+	return regexp.MustCompile(`(?m)^\s+-` + regexp.QuoteMeta(name) + `(\s+\w+)?\s*$`).MatchString(usage)
+}
+
+// TestDoctorMistypedFlagShowsEveryFlag: a flag the verb does not know, a bool flag with a value that is not
+// a bool, and a flag missing its value are all refused with the verb's own usage, which lists
+// --probe-completion next to --config, and with exit status 2 like the flag package's own refusal. The
+// checks never run: nothing reaches the endpoint or prints a doctor row.
+func TestDoctorMistypedFlagShowsEveryFlag(t *testing.T) {
+	for _, args := range [][]string{{"--bogus"}, {"--probe-completion=maybe"}, {"--config"}} {
+		var err error
+		out := captureStdout(t, func() { err = runDoctorBackends(args) })
+		if err == nil {
+			t.Errorf("%v must be refused", args)
+			continue
+		}
+		code, text := exitStatus(err)
+		if code != 2 {
+			t.Errorf("%v exits %d, want 2 like any refused flag", args, code)
+		}
+		if !strings.Contains(text, "usage: local-offload doctor") {
+			t.Errorf("%v: the refusal carries no usage:\n%s", args, text)
+		}
+		for _, name := range []string{"config", "probe-completion"} {
+			if !declaresFlag(text, name) {
+				t.Errorf("%v: the refusal's usage declares no -%s flag line:\n%s", args, name, text)
+			}
+		}
+		if out != "" {
+			t.Errorf("%v: a refused flag must not run the checks, stdout was:\n%s", args, out)
+		}
+	}
+}
+
 func TestSplitProbeCompletion(t *testing.T) {
 	cases := []struct {
 		name      string
