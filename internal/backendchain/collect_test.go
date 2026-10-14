@@ -1190,6 +1190,10 @@ func TestCompletionProbeNeverLoadsThePreferredSeatOverTheBoundOne(t *testing.T) 
 // row's starting state comes from the one reading taken before any completion; the later readings decide
 // only whether a completion may be sent. small-cpp was loaded when the report began, so its row says so,
 // although it is no longer loaded when its turn comes, and its completion is refused over the seat that is.
+// The swap is already on the stored list when small-cpp's turn comes, because the workhorse seat, decided
+// first, read /running after it. So this test pins what a row says once the decision sees the swap; it does
+// not show that a decision for a seat the stored list still calls running reads /running again first.
+// TestCompletionProbeReadsRunningAgainBeforeASeatThatWasRunning does.
 func TestRowsKeepTheStateTheReportBeganWith(t *testing.T) {
 	f := newFakeSwap(t, fullRoster())
 	f.running["small-cpp"] = "ready"
@@ -1213,6 +1217,61 @@ func TestRowsKeepTheStateTheReportBeganWith(t *testing.T) {
 			t.Errorf("a completion was sent to %s while offload-e4b was running", m)
 		}
 	}
+}
+
+// TestCompletionProbeReadsRunningAgainBeforeASeatThatWasRunning: the stored list still calls small-cpp
+// running (it was, when the report began), but it stopped and another seat was loaded in its place before
+// its completion is due. A completion is sent only if the seat is running on a reading of /running taken
+// just before it, so none is sent here: it would load small-cpp over the seat that is running now. The
+// decision for a seat the stored list calls running used to skip that reading, because only a seat the
+// list called absent was read again.
+func TestCompletionProbeReadsRunningAgainBeforeASeatThatWasRunning(t *testing.T) {
+	// swapped stands up the report as it began (small-cpp running), then swaps the loaded seat the way
+	// another client of llama-swap does, so the stored list is behind by the time a decision is made.
+	swapped := func(t *testing.T) (*fakeSwap, *state) {
+		t.Helper()
+		f := newFakeSwap(t, fullRoster())
+		f.running["small-cpp"] = "ready"
+		f.allowCompletion = true
+		f.loadOnCompletion = true
+		f.evictOnLoad = true
+		s := newState(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+		if !s.resident("small-cpp") {
+			t.Fatal("the opening read must show small-cpp running: the test would prove nothing")
+		}
+		f.mu.Lock()
+		delete(f.running, "small-cpp")
+		f.running["offload-e4b"] = "ready"
+		f.mu.Unlock()
+		return f, s
+	}
+	small := Candidate{Seat: "small-cpp", Engine: EngineLlamaCpp}
+
+	t.Run("another seat is running now", func(t *testing.T) {
+		f, s := swapped(t)
+		v := s.Probe(t.Context(), small)
+		if got := f.completionModels(); len(got) != 0 {
+			t.Errorf("completions = %v, want none: small-cpp is not running, and offload-e4b is", got)
+		}
+		if v.Probe == ProbeCompletion || !strings.Contains(v.Detail, "loaded and ready; its health endpoint answered 200") ||
+			!strings.Contains(v.Detail, "not probed: would load over llama.cpp seat offload-e4b") {
+			t.Errorf("small-cpp = %+v, want the state it began with and a completion refused over the seat that is running now", v)
+		}
+	})
+
+	t.Run("the reading before the completion cannot be taken", func(t *testing.T) {
+		f, s := swapped(t)
+		f.mu.Lock()
+		f.runningStatus = http.StatusInternalServerError
+		f.mu.Unlock()
+		v := s.Probe(t.Context(), small)
+		if got := f.completionModels(); len(got) != 0 {
+			t.Errorf("completions = %v, want none: the stored list is not a reading of what is running now", got)
+		}
+		if v.Probe == ProbeCompletion || !strings.Contains(v.Detail, "cannot be ruled out") {
+			t.Errorf("small-cpp = %+v, want the completion skipped because the running list could not be read", v)
+		}
+	})
 }
 
 // TestCompletionProbeSkipsSeatsWithNoChatRoute: a speech-to-text seat and an embedding seat have no chat
