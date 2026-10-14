@@ -53,25 +53,28 @@ const (
 
 // LaneRows lists the rows of this machine's video, animation and audio bindings: video first (the default family, then the other
 // ComfyUI families, then the sd.cpp ones), then animation, then music. A lane is listed when its binding NAMES a renderer this
-// release can describe (a ComfyUI script, or an sd.cpp video family); whether the node can serve it right now is the route state's
-// business (media_routes), and a row of a binding whose weights are gone is still listed, with bytes -1, so that a refusal can
-// name them. The audio.cpp engines, the sd.cpp animation lane and voice have no row: a reader takes that as unknown.
+// release can describe: a ComfyUI script on a machine that HAS a ComfyUI install (comfy_dir is a directory here), or an sd.cpp
+// video family. The shipped default config binds the three ComfyUI scripts on every machine, so a script alone says nothing about
+// this one, and a machine with no install publishes no ComfyUI row. Whether the node can serve a lane right now is the route
+// state's business (media_routes), and a row of a binding whose weights are gone is still listed, with bytes -1, so that a
+// refusal can name them. The audio.cpp engines, the sd.cpp animation lane and voice have no row: a reader takes that as unknown.
 func LaneRows(cfg config.Config) []LaneRow {
 	roots := ModelRoots(cfg.ComfyDir)
+	comfy := isDir(cfg.ComfyDir)
 	var rows []LaneRow
-	rows = append(rows, videoLaneRows(cfg, roots)...)
-	if strings.TrimSpace(cfg.AnimateGenScript) != "" && cfg.AnimateGenEngine != config.EngineSdcpp {
+	rows = append(rows, videoLaneRows(cfg, roots, comfy)...)
+	if comfy && strings.TrimSpace(cfg.AnimateGenScript) != "" && cfg.AnimateGenEngine != config.EngineSdcpp {
 		rows = append(rows, LaneRow{Lane: LaneAnimate, Name: AnimateRowName, Default: true, Engine: EngineComfyUI, Files: laneFiles(roots, AnimateModelFiles(cfg))})
 	}
-	if strings.TrimSpace(cfg.MusicGenScript) != "" && cfg.MusicGenEngine != config.EngineAudiocpp {
+	if comfy && strings.TrimSpace(cfg.MusicGenScript) != "" && cfg.MusicGenEngine != config.EngineAudiocpp {
 		rows = append(rows, LaneRow{Lane: LaneAudio, Name: MusicRowName, Default: true, Engine: EngineComfyUI, Files: laneFiles(roots, MusicModelFiles())})
 	}
 	return rows
 }
 
-func videoLaneRows(cfg config.Config, roots []ModelRoot) []LaneRow {
+func videoLaneRows(cfg config.Config, roots []ModelRoot, comfy bool) []LaneRow {
 	var rows []LaneRow
-	if strings.TrimSpace(cfg.VideoGenScript) != "" {
+	if comfy && strings.TrimSpace(cfg.VideoGenScript) != "" {
 		// The default ComfyUI family: none when the box's default video family is an sd.cpp one.
 		comfyDefault := ""
 		if _, sdcpp := cfg.DefaultVideoSdcppFamily(); !sdcpp {
@@ -112,7 +115,7 @@ func videoLaneRows(cfg config.Config, roots []ModelRoot) []LaneRow {
 			if n, ok := osStatSize(f.path); ok {
 				size = n
 			}
-			files = append(files, RecipeFile{Role: f.role, Name: publishedName(f.path), Bytes: size})
+			files = append(files, RecipeFile{Role: f.role, Name: path.Base(publishedName(f.path)), Bytes: size})
 		}
 		row := LaneRow{Lane: LaneVideo, Name: name, Default: name == defaultSdcpp, Engine: config.EngineSdcpp, Files: files, License: fb.License, CommercialUse: fb.CommercialUse}
 		if row.Default {
