@@ -178,3 +178,71 @@ func TestAContractCausedUnknownFingerprintKeepsNoCrossSeatRetry(t *testing.T) {
 		t.Fatalf("a missed fingerprint lost its cross-seat retry (failures=%v)", pr.AcceptanceFailures)
 	}
 }
+
+// An honest absence is neither a pass nor a strike (Quarantine). A qualified field fingerprint whose field is empty grades
+// unknown, and the absence sentence sits in ANOTHER field, so the digest is an honest absence: the unknown is no fact about
+// the node, and excusesFingerprint (a fail only) does not drop it. Two such results must not block the node. The control
+// beside it: the same unknown over a digest that makes a claim is still the node's, and still strikes.
+func TestAnUnknownFingerprintOverAnHonestAbsenceStrikesNoNode(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"},"note":{"type":"string"}}}`)
+	contract := core.AgentContract{Goal: "g", Acceptance: []string{"regex:@field=summary:(?P<docanchor>pelican)"},
+		OutputSchema: schema, Context: []core.ContextDoc{{Name: "page.md", Text: "the pelican lives here"}}}
+	tests := []struct {
+		name       string
+		structured string
+		absent     bool
+	}{
+		{"empty field, absence sentence in another field", `{"summary":"","note":"the page does not mention it"}`, true},
+		{"empty field, a claim in another field", `{"summary":"","note":"the heron lives here"}`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wire := core.AgentWireResult{Structured: json.RawMessage(tt.structured)}
+			if HonestAbsence(wire.Structured) != tt.absent {
+				t.Fatalf("HonestAbsence(%s) = %v, want %v", tt.structured, !tt.absent, tt.absent)
+			}
+			f := EvalAcceptance(contract, wire)
+			if len(f) != 1 || !strings.Contains(f[0], "unknown at") || !failsDocumentFingerprint(f) {
+				t.Fatalf("EvalAcceptance = %v, want the one unknown fingerprint reported", f)
+			}
+			if got := fingerprintFailedByNode(contract, wire, f); got == tt.absent {
+				t.Errorf("fingerprintFailedByNode = %v, want %v", got, !tt.absent)
+			}
+			blocked, strikes, passes := fingerprintNoteOutcome(t, contract, wire, 2)
+			if tt.absent && (blocked || strikes != 0 || passes != 0) {
+				t.Fatalf("honest absence: blocked=%v strikes=%d passes=%d, want an untouched node", blocked, strikes, passes)
+			}
+			if !tt.absent && !blocked {
+				t.Fatalf("a non-absent unknown must still strike: blocked=%v strikes=%d", blocked, strikes)
+			}
+		})
+	}
+}
+
+// A node that PASSED the real fingerprint earned a pass even when a sibling qualified check is a contract-caused unknown
+// (that check is reported as a failure, which used to end noteFingerprint at its first case without recording the pass).
+func TestAPassedFingerprintBesideAContractCausedUnknownIsStillAPass(t *testing.T) {
+	c := core.AgentContract{
+		Goal:    "g",
+		Context: []core.ContextDoc{{Name: "page.md", Text: "the pelican lives here"}},
+		Acceptance: []string{
+			"regex:(?P<docanchor>pelican)",                // the real fingerprint: the answer carries it
+			"regex:@field=summary:(?P<docanchor>pelican)", // no output_schema: unreachable, always unknown
+		},
+	}
+	wire := core.AgentWireResult{Output: "the pelican"}
+	f := EvalAcceptance(c, wire)
+	if len(f) != 1 || fingerprintFailedByNode(c, wire, f) {
+		t.Fatalf("setup: failures=%v, want only the contract-caused unknown", f)
+	}
+	blocked, strikes, passes := fingerprintNoteOutcome(t, c, wire, 1)
+	if blocked || strikes != 0 || passes != 1 {
+		t.Fatalf("blocked=%v strikes=%d passes=%d, want the one pass recorded", blocked, strikes, passes)
+	}
+
+	// and the unknown alone, with nothing passed, is still neither
+	only := core.AgentContract{Goal: "g", Context: c.Context, Acceptance: c.Acceptance[1:]}
+	if blocked, strikes, passes := fingerprintNoteOutcome(t, only, wire, 1); blocked || strikes != 0 || passes != 0 {
+		t.Fatalf("unknown only: blocked=%v strikes=%d passes=%d, want an untouched node", blocked, strikes, passes)
+	}
+}
