@@ -191,6 +191,7 @@ func TestHealthRefreshNeverLoadsAModel(t *testing.T) {
 	cfg := config.Default()
 	cfg.Endpoint = srv.URL
 	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
+	s.collectBackends = swapCollectBackends // the production collector: this test is about what it sends
 	m := waitForHealthKey(t, s, "lane_backends")
 	var workhorse map[string]any
 	for _, l := range m["lane_backends"].([]any) {

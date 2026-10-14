@@ -73,7 +73,11 @@ func newTestServer(t *testing.T, cfg config.Config, r Runner, opts *Options) (*S
 		o = *opts
 		o.Cfg = cfg
 	}
-	return New(r, jobs, o), jobs
+	s := New(r, jobs, o)
+	// The active-backend report would read the llama-swap of the test's config, and a default config names a
+	// real local port: a test that wants the report installs its own collector (see activebackend_test.go).
+	s.collectBackends = nil
+	return s, jobs
 }
 
 // do runs one request through the routed handler.
@@ -1033,9 +1037,6 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 	var probes atomic.Int64
 	roster := fakeRoster(t, &probes, "gemma-4-e4b", "offload-e4b")
 	s, _ := newTestServer(t, agentHealthCfg(roster.URL), &fakeRunner{}, authOpts(true))
-	// The roster hit count below is the residency refresh's. The active-backend report has its own cached
-	// refresh and its own reads of the same fake (pinned in activebackend_test.go), so it is stood down.
-	s.collectBackends = nil
 
 	rec := do(t, s, http.MethodGet, "/fleet/health", "", nil)
 	if rec.Code != http.StatusOK {

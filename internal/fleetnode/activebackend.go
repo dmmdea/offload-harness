@@ -19,7 +19,8 @@ import (
 // it follows the rule every other health read of llama-swap follows: the handler serves a cached answer
 // and never waits. The first request after start-up answers without the keys (unknown, never "none"),
 // kicks ONE background read, and the keys appear once it lands. A cached answer older than
-// activeBackendTTL kicks the next read behind itself.
+// activeBackendTTL kicks the next read behind itself, and one older than activeBackendMaxStale is no
+// longer published.
 //
 // The refresh is the cheap probe only. It sends no completion and never touches /upstream, because a
 // completion loads an idle seat and can evict a vLLM seat; the 1-token completion probe exists only
@@ -28,7 +29,9 @@ import (
 // activeBackendTTL is how long one collection backs health: the same window as the residency answer.
 const activeBackendTTL = agentResidencyTTL
 
-// activeBackendMaxStale is how old a cached report may be and still be published.
+// activeBackendMaxStale is how old a cached report may be and still be published. Between the TTL and this
+// age the report is served while the next read runs; past it the keys are absent (unknown), so a refresh
+// that is slow or stuck cannot leave a stale answer published for as long as the process lives.
 const activeBackendMaxStale = 4 * activeBackendTTL
 
 // activeBackendBudget bounds one whole collection: the roster read, the running list, and each loaded
@@ -58,8 +61,11 @@ func (s *Server) activeBackends() (lanes, seats []backendchain.Entry) {
 	}
 	c := &s.backends
 	c.mu.Lock()
-	lanes, seats = c.lanes, c.seats
-	kick := (c.at.IsZero() || time.Since(c.at) > activeBackendTTL) && !c.inflight
+	age := time.Since(c.at)
+	if !c.at.IsZero() && age <= activeBackendMaxStale {
+		lanes, seats = c.lanes, c.seats
+	}
+	kick := (c.at.IsZero() || age > activeBackendTTL) && !c.inflight
 	if kick {
 		c.inflight = true
 	}
