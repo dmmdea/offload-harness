@@ -461,6 +461,78 @@ func TestOpenSpecValidateScriptExitsTwoWhenTheBinaryIsMissing(t *testing.T) {
 	}
 }
 
+// bash's cd consults CDPATH for a relative directory and then prints the directory it chose, so an exported CDPATH
+// that names a folder holding a same-named subfolder would send the validate script's `cd "$bin_dir"` somewhere else
+// and put a second line into its command substitution. The script clears CDPATH for the whole run. The folder `other`
+// beside the caller's directory holds a decoy `tools`, and CDPATH names `other` (relative, so the test is the same on
+// every host, where a Windows path would break on its drive colon).
+func TestOpenSpecValidateScriptIgnoresAnInheritedCDPATH(t *testing.T) {
+	bash := guardBash(t)
+	script, err := filepath.Abs(filepath.Join("scripts", "openspec-validate.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for _, d := range []string{"tools", filepath.Join("other", "tools")} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := filepath.ToSlash(filepath.Join(dir, "calls.txt"))
+	writeOpenSpecStandIn(t, filepath.Join(dir, "tools"), "openspec", `echo "args=$*" >> "$OUT"
+`)
+	cmd := winexec.Command(bash, filepath.ToSlash(script))
+	cmd.Dir = dir
+	cmd.Env = openspecScriptEnv(t, bash, "OPENSPEC_BIN=tools/openspec", "OUT="+out, "CDPATH=other")
+	combined, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("an inherited CDPATH broke the relative OPENSPEC_BIN: %v\n%s", err, combined)
+	}
+	calls, _ := os.ReadFile(filepath.FromSlash(out))
+	if !strings.Contains(string(calls), "args=validate --all --strict --no-interactive") {
+		t.Errorf("the stand-in in the caller's tools folder did not run the validation, calls were:\n%s", calls)
+	}
+}
+
+// The install script's `cd "$prefix"` has the same exposure: a relative prefix is resolved through CDPATH unless the
+// script clears it. The decoy `other/prefix` exists, the real prefix is the caller's own `prefix`, and the run must
+// reach the hash check with its scratch folder under the real one.
+func TestOpenSpecInstallScriptIgnoresAnInheritedCDPATH(t *testing.T) {
+	bash := guardBash(t)
+	script, err := filepath.Abs(filepath.Join("scripts", "openspec-install.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	for _, d := range []string{bin, filepath.Join(dir, "prefix"), filepath.Join(dir, "other", "prefix")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mark := filepath.ToSlash(filepath.Join(dir, "pack-cwd.txt"))
+	writeOpenSpecStandIn(t, bin, "npm", `case "$1" in
+  pack)
+    pwd > "$MARK"
+    printf 'not the admitted tarball' > fission-ai-openspec-1.14.1.tgz ;;
+esac
+`)
+	cmd := winexec.Command(bash, filepath.ToSlash(script), "prefix")
+	cmd.Dir = dir
+	cmd.Env = withStandInsFirst(openspecScriptEnv(t, bash, "MARK="+mark, "CDPATH=other"), bin)
+	combined, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(combined), "REFUSED: sha256 mismatch") {
+		t.Fatalf("an inherited CDPATH kept the install script from resolving its relative prefix:\n%s", combined)
+	}
+	packed, err := os.ReadFile(filepath.FromSlash(mark))
+	if err != nil {
+		t.Fatalf("npm pack never ran: %v\n%s", err, combined)
+	}
+	if got := strings.ReplaceAll(strings.TrimSpace(string(packed)), `\`, "/"); strings.Contains(got, "/other/") || !strings.Contains(got, "/prefix/") {
+		t.Errorf("npm pack ran in %q, want a scratch folder under the caller's prefix, not the CDPATH decoy", got)
+	}
+}
+
 var (
 	openspecAdmittedRowVersion = regexp.MustCompile("\\| (\\d+\\.\\d+\\.\\d+), tarball sha256 `([0-9a-f]{64})`")
 	openspecScriptVersion      = regexp.MustCompile(`(?m)^readonly OPENSPEC_VERSION="([^"]+)"$`)
