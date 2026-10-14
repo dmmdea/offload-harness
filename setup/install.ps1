@@ -1298,6 +1298,13 @@ function Get-DerivedAgentModel {
   return $null
 }
 
+# Get-OffMatrixRungSeed: the escalation and reasoning rungs of a fresh config for a box off the tier matrix.
+# Seam only (0186 w4 fix round): the body arrives with the fix.
+function Get-OffMatrixRungSeed {
+  param($ProfileRow, $Include26B)
+  return $null
+}
+
 # ---------------------------------------------------------------------------
 # run-graph (Task 12): ensure the manifest-satisfier tooling in the ComfyUI venv.
 # offload_run_graph provisions an arbitrary workflow's node manifest by shelling to
@@ -2020,6 +2027,13 @@ Step 'harness config -> ~/.local-offload/config.json' `
     if ($seedCond) {
       $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $seedCond -OffloadHome $HOME_DIR
       Write-Host "      config_seed_ram_mid_high ($profileId, ram_tier=$ramTier): $(@($seedCond.PSObject.Properties.Name) -join ', ')" -ForegroundColor DarkGray
+    }
+    # A box off the tier matrix has no profile row, so no seed reseeds its escalation and reasoning rungs; the
+    # template binds both to the 26B, which the CUDA fallback render no longer serves (0186 w4).
+    $rungSeed = Get-OffMatrixRungSeed -ProfileRow $profRow -Include26B ([bool]$pp.include_26b)
+    if ($rungSeed) {
+      $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $rungSeed
+      Write-Host "      off-matrix rungs ($(if ($profileId) { $profileId } else { '(defaults)' })): $(@($rungSeed.PSObject.Properties.Name) -join ', ') blank (the fallback render serves no 26B)" -ForegroundColor DarkGray
     }
     # Agent planner seat: deliberate parity copy of internal/tierseed.Resolve
     # (authoritative) — this raw-merge path bypasses tierseed, so the derivation
