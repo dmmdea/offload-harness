@@ -11,7 +11,11 @@
 //	0  the command ran; for verdict, a verdict was produced (any of ADOPT, BLOCK, INCONCLUSIVE)
 //	1  verdict --require-adopt and the verdict is not ADOPT (the result is still printed)
 //	2  a refusal: a bad hash, a bad receipt, a malformed or unreadable input, a baseline that is
-//	   not the frozen bytes, a freeze the gate cannot honour, or a usage error
+//	   not the frozen bytes, a freeze the gate cannot honour, a result that could not be
+//	   written, or a usage error
+//
+// -h and --help print the usage and exit 0, as the other verbs do whose flags are parsed with
+// flag.ExitOnError.
 //
 // The verb reads the files it is named and writes one file, freeze's --out, which is created
 // exclusively (a pre-registration is written once; a changed one is a new file with a new
@@ -46,7 +50,7 @@ const gateUsage = `usage: local-offload gate <freeze|check|verdict|schema> [flag
       sha256. --expect-hash also refuses a baseline whose hash is another one. A one-byte edit of a
       frozen baseline either fails check or changes its hash; an edit that leaves a valid file is
       another baseline, so bind a verdict to the hash freeze printed, never to a later check.
-  gate verdict --baseline BASELINE.json --input GATE-INPUT.json [--require-adopt]
+  gate verdict --baseline BASELINE.json --input INPUT.json [--require-adopt]
       judge the candidate against the incumbent under the baseline and print the result as JSON.
   gate schema
       print the JSON Schema (draft 2020-12) of the gate input document.
@@ -55,7 +59,7 @@ Exit codes:
   0  the command ran; for verdict, a verdict was produced (ADOPT, BLOCK or INCONCLUSIVE)
   1  verdict --require-adopt and the verdict is not ADOPT (the result is still printed)
   2  a refusal (bad hash, bad receipt, malformed input, a baseline that is not the frozen bytes,
-     a freeze the gate cannot honour) or a usage error
+     a freeze the gate cannot honour), a result that could not be written, or a usage error
 
 A global --config <path> before the subcommand is accepted and ignored: the gate reads no config.
 `
@@ -196,10 +200,13 @@ func gateFreeze(args []string, stdout, stderr io.Writer) error {
 	if err := writeBaselineOnce(*out, raw); err != nil {
 		return err
 	}
-	return printJSONLine(stdout, struct {
+	if err := printJSONLine(stdout, struct {
 		Baseline     string `json:"baseline"`
 		BaselineHash string `json:"baseline_hash"`
-	}{*out, hash})
+	}{*out, hash}); err != nil {
+		return gateFail("write result: %v", err)
+	}
+	return nil
 }
 
 // writeBaselineOnce creates path with raw. A pre-registration is written once: an existing file
@@ -251,8 +258,10 @@ func gateCheck(args []string, stdout, stderr io.Writer) error {
 	if *expect != "" && *expect != hash {
 		return gateFail("check refused: the baseline hashes to %s, not the expected %s: this is not the file that was frozen", hash, *expect)
 	}
-	_, err = fmt.Fprintln(stdout, hash)
-	return err
+	if _, err := fmt.Fprintln(stdout, hash); err != nil {
+		return gateFail("write result: %v", err)
+	}
+	return nil
 }
 
 func gateVerdict(args []string, stdout, stderr io.Writer) error {
@@ -288,7 +297,7 @@ func gateVerdict(args []string, stdout, stderr io.Writer) error {
 		return gateFail("%v", err)
 	}
 	if _, err := stdout.Write(append(j, '\n')); err != nil {
-		return err
+		return gateFail("write result: %v", err)
 	}
 	if *requireAdopt && res.Verdict != eval.VerdictAdopt {
 		return &exitCodeError{code: 1, msg: fmt.Sprintf("gate: verdict %s (--require-adopt): %s", res.Verdict, res.Reason)}
@@ -301,6 +310,8 @@ func gateSchema(args []string, stdout, stderr io.Writer) error {
 	if help, err := gateParse(fs, args); help || err != nil {
 		return err
 	}
-	_, err := stdout.Write(eval.GateInputSchema)
-	return err
+	if _, err := stdout.Write(eval.GateInputSchema); err != nil {
+		return gateFail("write result: %v", err)
+	}
+	return nil
 }
