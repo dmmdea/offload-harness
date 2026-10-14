@@ -33,9 +33,12 @@ import (
 // read or copied (see NOTICE).
 //
 // Gate: the rung reads a body's shape AND the call that produced it (searchRung): only
-// search_files (grouped form) and a run_shell / run call whose command is grep, rg, ag,
-// ack or git grep (flat form) qualify. A linter prints the same "path:line:col:text"
-// lines and none of its diagnostics may be dropped.
+// search_files (grouped form) and a run_shell or run call whose command is a search
+// (flat form) qualify. A search is grep, rg, ag, ack or git grep, optionally piped
+// through pass-through filters only (see searchCommandIsGrep). The run tool's
+// allowlist holds git and none of the others, so through run only "git grep" is
+// reachable; grep, rg, ag and ack come through run_shell. A linter prints the same
+// "path:line:col:text" lines and none of its diagnostics may be dropped.
 //
 // Properties, each pinned by rung_search_test.go and rung_search_gate_test.go:
 //   - deterministic: no map iteration reaches the output, ties break on position,
@@ -537,29 +540,64 @@ func searchRungBodyForm(content string, query []string, want searchForm) (string
 // agent must fix, so the command is the gate and the shape alone is not.
 var searchGrepPrograms = map[string]bool{"grep": true, "rg": true, "ag": true, "ack": true}
 
-// searchCommandIsGrep reports whether a shell command line starts with a search
-// program: grep, rg, ag, ack or git grep, optionally by path. Only the first word is
-// read, so "cd x && grep ..." or "echo grep" do not qualify; a pipeline after the
-// search ("grep -rn x . | head") does, since its output is still the search's. A
-// command that chains another one after the search (";", "&&", "||", "&" or a
-// newline, outside quotes) does not, because the body then holds that command's
-// output as well, and it may be a linter's.
-func searchCommandIsGrep(command string) bool {
-	w := strings.Fields(command)
-	if len(w) == 0 || searchCommandChains(command) {
-		return false
-	}
-	return searchProgramIsGrep(w[0], w[1:])
+// searchPassThroughFilters are the programs a search's output may be piped through
+// without changing what kind of output it is: they select, reorder, count or copy
+// lines of the search, and add none of their own.
+var searchPassThroughFilters = map[string]bool{
+	"head": true, "tail": true, "sort": true, "uniq": true, "wc": true,
+	"cut": true, "sed": true, "awk": true, "tee": true, "cat": true,
 }
 
-// searchCommandChains reports whether a shell command line runs a second command
-// after the first: an unquoted ";", "&&", "||", a lone "&" or a newline. A plain pipe
-// ("|", "|&") does not chain, since the pipeline's output is its last stage's, which
-// the first-word test already accepts, and the redirections "2>&1", ">&2" and "&>f"
-// do not either. It is a quote-aware scan, not a shell parser: single quotes,
-// double quotes and a backslash hide a separator, and nothing else does.
-func searchCommandChains(command string) bool {
+// searchCommandIsGrep reports whether a shell command line is a search: grep, rg, ag,
+// ack or git grep (optionally by path) as its first word, so "cd x && grep ..." or
+// "echo grep" do not qualify. A pipeline qualifies only when every later stage is a
+// pass-through filter (head, tail, sort, uniq, wc, cut, sed, awk, tee, cat) or
+// another search, so "grep -rn x . | head" does and "rg -l x | xargs flake8" does not:
+// the last stage's output is the body, and a linter's diagnostics are not the
+// search's. A command that chains another one after the search (";", "&&", "||", "&"
+// or a newline, outside quotes) does not qualify either, because the body then holds
+// that command's output as well.
+func searchCommandIsGrep(command string) bool {
+	stages, chained := searchCommandStages(command)
+	if chained || len(stages) == 0 {
+		return false
+	}
+	for i, st := range stages {
+		w := strings.Fields(st)
+		if len(w) == 0 {
+			return false // an empty stage: nothing to vouch for
+		}
+		if i == 0 {
+			if !searchProgramIsGrep(w[0], w[1:]) {
+				return false
+			}
+			continue
+		}
+		if !searchProgramIsFilter(w[0]) && !searchProgramIsGrep(w[0], w[1:]) {
+			return false
+		}
+	}
+	return true
+}
+
+// searchProgramIsFilter reports whether prog (optionally by path) is a pass-through filter.
+func searchProgramIsFilter(prog string) bool {
+	if i := strings.LastIndexAny(prog, `/\`); i >= 0 {
+		prog = prog[i+1:]
+	}
+	return searchPassThroughFilters[prog]
+}
+
+// searchCommandStages splits a shell command line at its pipes ("|" and "|&") into
+// the text of each stage, and reports chained=true when it runs a second command
+// after the first: an unquoted ";", "&&", "||", a lone "&", a newline or a carriage
+// return. The redirections "2>&1", ">&2", "<&3" and "&>f" are not separators. It is a
+// quote-aware scan, not a shell parser: single quotes take no escape at all, double
+// quotes honour a backslash, and outside quotes a backslash hides the next byte;
+// nothing else hides a separator.
+func searchCommandStages(command string) (stages []string, chained bool) {
 	var quote byte // 0, '\'' or '"'
+	start := 0
 	for i := 0; i < len(command); i++ {
 		c := command[i]
 		switch {
@@ -578,23 +616,25 @@ func searchCommandChains(command string) bool {
 		case c == '\'' || c == '"':
 			quote = c
 		case c == ';' || c == '\n' || c == '\r':
-			return true
+			return nil, true
 		case c == '|':
 			if i+1 < len(command) && command[i+1] == '|' {
-				return true
+				return nil, true
 			}
+			stages = append(stages, command[start:i])
 			if i+1 < len(command) && command[i+1] == '&' {
 				i++ // "|&" is a pipe
 			}
+			start = i + 1
 		case c == '&':
 			redirect := (i > 0 && (command[i-1] == '>' || command[i-1] == '<')) ||
 				(i+1 < len(command) && command[i+1] == '>')
 			if !redirect {
-				return true
+				return nil, true
 			}
 		}
 	}
-	return false
+	return append(stages, command[start:]), false
 }
 
 // searchProgramIsGrep is the same test on an already split program and arguments.
@@ -665,8 +705,9 @@ func searchCallsByID(msgs []Msg) map[string]ToolCall {
 // the rung does nothing.
 //
 // A body is thinned only if the call that produced it is a search: the harness's
-// search_files (grouped form) or a run_shell / run call whose command is a
-// grep-family program (flat form). The tool message's ToolCallID is mapped to its
+// search_files (grouped form) or a run_shell / run call whose command is a search
+// (flat form; see searchCommandIsGrep for what counts, pipes included). The tool
+// message's ToolCallID is mapped to its
 // call; a body with no matching call, or from any other tool, is left untouched,
 // because the same line shape is what a linter prints.
 func searchRung(out []Msg, from, to, budget int, pinned map[string]bool) {
