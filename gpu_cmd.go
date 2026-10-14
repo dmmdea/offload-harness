@@ -30,6 +30,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -637,20 +638,17 @@ func runGPUReserve(args []string) (retErr error) {
 			var freed unloadOutcome
 			heldSince := time.Now() // the hidden holder took the cards just now
 			drainDL := drainDeadline(*drainTimeout, queuedAt, *wait)
-			// The outer bound (F82, review round 3): until the wait begins nothing says when the lease asking for the host should
-			// end, and a reserve killed during the drain or the unload would leave the holder with no stamp to act on. The drain
-			// ends by its deadline and the wait after it by the hold bound, so that moment is stamped now, not invented; the wait
-			// replaces it with its real end when it begins.
-			var outer time.Time
-			if awaitRAM > 0 && holdMax > 0 {
-				outer = drainDL.Add(holdMax)
-				if serr := m.StampHostRAMHold(epoch, outer); serr != nil {
-					fmt.Fprintf(os.Stderr, "gpu reserve: warning: could not stamp the outer hold bound on the lease record (%v); if this process dies during the drain the hidden holder has no moment at which to release the lease\n", serr)
-					outer = time.Time{}
-				}
-			}
-			if err := detachMaintainReport(m, epoch, loadCfg(fs), *drain, drainDL, *unload, exclusiveAfter, &freed); err != nil {
-				return detachedMaintainError(m, epoch, err)
+			// The outer bound (F82, review rounds 3 and 4): until the wait begins nothing says when the lease asking for the host
+			// should end, and a reserve killed during the drain or the unload would leave the holder with no stamp to act on. The
+			// drain's own deadline is --wait away (8 h by default), which is no bound at all, so the LIVE reserve keeps a moment
+			// of now + the hold bound + a slack on the record, re-stamped every few seconds while the drain and the unload run (the
+			// unload is covered by the same ticker). A reserve that dies stops re-stamping and the holder releases the lease within
+			// about the bound plus the slack; the wait replaces it with its real end when it begins.
+			outerB := startOuterBound(m, epoch, awaitRAM > 0 && holdMax > 0, holdMax, os.Stderr)
+			merr := detachMaintainReport(m, epoch, loadCfg(fs), *drain, drainDL, *unload, exclusiveAfter, &freed)
+			outer := outerB.Stop() // the last moment on the record, for the message if the wait's own stamp fails
+			if merr != nil {
+				return detachedMaintainError(m, epoch, merr)
 			}
 			// The seat is cleared and the cards are held: now the host is asked (F82). The hidden holder keeps the
 			// heartbeat meanwhile. A wait that ends without the host's admission, whether the hold bound or --wait ended it,
@@ -1466,6 +1464,65 @@ var (
 	outerRefreshEvery = 30 * time.Second
 	outerSlack        = 60 * time.Second
 )
+
+// outerBound keeps the moment a detached reserve's lease is released at, by its hidden holder, if the reserve dies during the drain or
+// the unload: now + the hold bound + outerSlack, re-stamped every outerRefreshEvery until Stop.
+type outerBound struct {
+	stop chan struct{}
+	done chan struct{}
+	mu   sync.Mutex
+	last time.Time
+}
+
+// startOuterBound stamps the outer bound at once and starts refreshing it. With on false it does nothing and returns nil (Stop of a
+// nil outerBound answers the zero time). A stamp that cannot be written is said once; the refresh goes on trying.
+func startOuterBound(m *gpulease.Manager, epoch uint64, on bool, holdMax time.Duration, warn io.Writer) *outerBound {
+	if !on {
+		return nil
+	}
+	o := &outerBound{stop: make(chan struct{}), done: make(chan struct{})}
+	said := false
+	stamp := func() {
+		at := time.Now().Add(holdMax + outerSlack)
+		if err := m.StampHostRAMHold(epoch, at); err != nil {
+			if !said {
+				said = true
+				fmt.Fprintf(warn, "gpu reserve: warning: could not stamp the outer hold bound on the lease record (%v); if this process dies during the drain the hidden holder has no moment at which to release the lease\n", err)
+			}
+			return
+		}
+		o.mu.Lock()
+		o.last = at
+		o.mu.Unlock()
+	}
+	stamp()
+	go func() {
+		defer close(o.done)
+		t := time.NewTicker(outerRefreshEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-o.stop:
+				return
+			case <-t.C:
+				stamp()
+			}
+		}
+	}()
+	return o
+}
+
+// Stop ends the refreshing and returns the last moment this reserve put on the record (the zero time if none landed).
+func (o *outerBound) Stop() time.Time {
+	if o == nil {
+		return time.Time{}
+	}
+	close(o.stop)
+	<-o.done
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.last
+}
 
 // holdClock is the clock the hidden holder compares a stamped end of the wait against. A variable so a test can hold the holder
 // back until the reserve's push-out is on the record, and decide itself when the holder may act: a grace measured in real time

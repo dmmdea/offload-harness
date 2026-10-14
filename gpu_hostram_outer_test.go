@@ -63,9 +63,9 @@ func TestADetachedReserveStampsAnOuterBoundBeforeTheDrainSoAParentThatDiesThereI
 	})
 
 	l := firstStamp(t, m)
-	want := started.Add(20*time.Second + 5*time.Minute) // the drain's deadline (queued + --wait) plus the hold bound
+	want := started.Add(5*time.Minute + outerSlack) // now plus the hold bound plus the slack (the drain's own deadline is --wait away)
 	if d := l.HostRAMHoldUntil.Sub(want); d < -time.Second || d > 30*time.Second {
-		t.Errorf("the outer bound is the drain's deadline plus the hold bound (%s), got %s", want, l.HostRAMHoldUntil)
+		t.Errorf("the outer bound is now plus the hold bound plus the slack (%s), got %s", want, l.HostRAMHoldUntil)
 	}
 	if l.HostRAMWaitGiB != 30 {
 		t.Errorf("the lease still asks for its figure: %.1f", l.HostRAMWaitGiB)
