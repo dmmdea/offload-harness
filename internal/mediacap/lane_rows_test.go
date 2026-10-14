@@ -275,6 +275,25 @@ func TestLaneRowsAnSdcppFamilyNamedLikeAComfyOneReplacesIt(t *testing.T) {
 	}
 }
 
+// When the node's default video family is an sd.cpp one, a ComfyUI family that is also listed (its files are on the node and the
+// script is bound) is not the default: exactly one row is.
+func TestLaneRowsExactlyOneDefaultWhenTheDefaultIsSdcpp(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Config{
+		VideoGenScript: "render/comfy-video.mjs", ComfyDir: comfyWith(t, wanFiles()), VideoGenFamily: "fastwan",
+		VideoGenFamilies: map[string]config.VideoFamilyBinding{"fastwan": {Engine: config.EngineSdcpp, SdcppModel: filepath.Join(dir, "m.gguf")}},
+	}
+	var defaults []string
+	for _, r := range rowsOf(LaneRows(cfg), LaneVideo) {
+		if r.Default {
+			defaults = append(defaults, r.Name)
+		}
+	}
+	if len(defaults) != 1 || defaults[0] != "fastwan" {
+		t.Errorf("default rows = %v, want only the sd.cpp family", defaults)
+	}
+}
+
 // ---- animation and audio ---------------------------------------------------------------------------
 
 func TestLaneRowsAnimateIsTheFourWanAnimateFiles(t *testing.T) {
