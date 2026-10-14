@@ -60,17 +60,16 @@ func TestAgentWireResultCarriesThePagerReport(t *testing.T) {
 	}
 }
 
-// TestWriteClassDeferralKeepsItsTraceAndCarriesNoPagerObject pins the one run that reached the
-// loop and still has no pager object: the write door failing to close cleanly returns before the
-// wire result is given the loop's pager report. ADR 0091 and the agent wire table state this
-// per row class (a write-class deferral is a run with a step trace that reads unrecorded). A
-// change that attaches the object ahead of the write door must flip this assertion and those
-// statements together.
+// TestWriteClassDeferralKeepsItsTraceAndItsPagerObject pins that a run the write door refuses
+// still carries the loop's pager report: the loop ran, so the report is a measurement, and the
+// door failing to close cleanly (a cap breach or a failed snapshot) is no reason to lose it. The
+// object is attached with the other fields set before every defer branch, ahead of the door, so
+// the refusal returns with it and the run reads as recorded, not unrecorded.
 //
 // The write tools stop a seat at the file cap, so the refusal is reached the way the door's own
 // tests reach it: the tree snapshot sees files nobody asked for. The scripted seat makes one real
 // write_file call (so the run has a step trace) while eight other files appear in the write root.
-func TestWriteClassDeferralKeepsItsTraceAndCarriesNoPagerObject(t *testing.T) {
+func TestWriteClassDeferralKeepsItsTraceAndItsPagerObject(t *testing.T) {
 	c := writeContract(".")
 	req := agentTestRequest(t, c)
 	root, _ := req.Params["context_dir"].(string)
@@ -100,7 +99,10 @@ func TestWriteClassDeferralKeepsItsTraceAndCarriesNoPagerObject(t *testing.T) {
 	if len(wire.Trace) == 0 || wire.Steps == 0 {
 		t.Errorf("a write-class deferral ran the loop: want a step trace and steps, got %d trace entries and %d steps", len(wire.Trace), wire.Steps)
 	}
-	if wire.Pager != nil {
-		t.Errorf("a write-class deferral returns before the pager object is attached, got %+v", wire.Pager)
+	if wire.Pager == nil {
+		t.Fatalf("a write-class deferral ran the loop and must carry its pager object, got none")
+	}
+	if wire.Pager.Basis != "insufficient_data" || wire.Pager.Evictions != 0 || wire.Pager.CompactionPasses != 0 {
+		t.Errorf("a run that evicted nothing and never compacted must carry real zeros, got %+v", wire.Pager)
 	}
 }
