@@ -34,6 +34,17 @@ func fastHolder(t *testing.T) {
 	t.Cleanup(func() { holdPollEvery, holdBoundGrace = oldPoll, oldGrace })
 }
 
+// Review round 3 (G): under CPU starvation (two cores, six busy loops) the two holder tests that pit the holder against a live
+// parent failed 4 runs in 16 with warms=2: the 50 ms test grace raced the parent's push-out. The production grace has the same
+// shape on a real box, only slower: a parent stalled under paging or a suspended laptop must not get a parallel warm-back from the
+// holder, and the grace costs nothing but the delay of a BACKSTOP (the holder acts only when the parent is gone). So the production
+// grace is generous, and a test that pins the push-out uses a grace the starved parent cannot miss.
+func TestTheProductionGraceBeforeTheHolderStepsInIsGenerous(t *testing.T) {
+	if holdBoundGrace < 30*time.Second {
+		t.Errorf("a parent stalled for seconds must not get a parallel warm-back from the holder: the grace is %s, want at least 30s", holdBoundGrace)
+	}
+}
+
 // holderFixture is the seat-backed host (70 committed once the seat is unloaded: a 30 GiB need never fits, the 21 GiB warm-back
 // always does) with the seat loaded or not.
 func holderFixture(t *testing.T, seatLoaded bool) (cfgPath string, m *gpulease.Manager, f *orderedSwap) {
