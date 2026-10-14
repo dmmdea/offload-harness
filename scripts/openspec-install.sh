@@ -58,7 +58,9 @@ sha256_of() {
 }
 
 mkdir -p "$prefix"
-abs="$(cd "$prefix" && { pwd -W 2>/dev/null || pwd; })"
+# The absolute prefix is spelled one way everywhere: a Windows path from `pwd -W`, else the physical path from `pwd -P`
+# (a symlinked temp folder such as macOS /var is resolved, so the paths this script logs and prints are the real ones).
+abs="$(cd "$prefix" && { pwd -W 2>/dev/null || pwd -P; })"
 
 # The install replaces <prefix>/node_modules wholesale (as npm ci does), so refuse a node_modules that is not an
 # earlier install of this CLI, before anything runs.
