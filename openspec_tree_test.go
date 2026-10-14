@@ -326,6 +326,38 @@ func withStandInsFirst(env []string, dir string) []string {
 		"npm_config_offline=true")
 }
 
+// An inherited npm_config_* key is replaced whatever its case: Windows spells environment names in any case, and npm
+// reads npm_config_* case-insensitively, so an inherited NPM_CONFIG_REGISTRY left beside the stand-in's lower-case one
+// could win. Each key leaves exactly one entry, the stand-in's.
+func TestOpenSpecStandInEnvironmentReplacesInheritedNpmKeysInAnyCase(t *testing.T) {
+	env := withStandInsFirst([]string{
+		"KEEP=1",
+		"NPM_CONFIG_REGISTRY=https://registry.example.invalid/",
+		"Npm_Config_Fetch_Retries=5",
+		"NPM_CONFIG_OFFLINE=false",
+		"npm_config_cache=/kept/cache",
+	}, "standins")
+	count := map[string]int{}
+	val := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		count[strings.ToLower(k)]++
+		val[strings.ToLower(k)] = v
+	}
+	for key, want := range map[string]string{
+		"npm_config_registry":      "http://127.0.0.1:9/",
+		"npm_config_fetch_retries": "0",
+		"npm_config_offline":       "true",
+	} {
+		if count[key] != 1 || val[key] != want {
+			t.Errorf("%s: %d entries, value %q; want exactly one, %q (an inherited upper-case spelling must be dropped)", key, count[key], val[key], want)
+		}
+	}
+	if val["keep"] != "1" || val["npm_config_cache"] != "/kept/cache" {
+		t.Errorf("unrelated entries were not kept: %v", val)
+	}
+}
+
 // On Linux bash lives in /usr/bin beside the real npm. If bash's directory came ahead of the stand-ins, the install
 // script would run the real npm against the registry instead of the stand-in. This test builds that layout on any
 // host: a decoy "bash directory" ahead of everything else, holding an npm that records it ran and fails.
