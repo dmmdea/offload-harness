@@ -645,6 +645,14 @@ type AgentWireResult struct {
 	CacheTokens   int64   `json:"cache_tokens,omitempty"`
 	PrefillMS     float64 `json:"prefill_ms,omitempty"`
 
+	// --- Context-pager gate and compaction passes (RSI-OH-2). The loop measures both and
+	// the wire dropped them, so the delegation log could not say how often the compaction
+	// ladder ran or whether the seat fetched back what it evicted. A POINTER with omitempty:
+	// the key is absent on a node that predates the field and on a run that never reached
+	// the loop, and PRESENT (zeros included) on every run the loop finished, so a reader
+	// separates "not recorded" from "recorded, nothing happened".
+	Pager *AgentPager `json:"pager,omitempty"`
+
 	// --- Step trace (ADR 0036, 0.113.22). One entry per tool call the loop
 	// handled: tool, fate, how much the model read, which environment rule
 	// decided. Bounded by max_steps × calls-per-step, no transcript bytes.

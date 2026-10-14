@@ -1161,6 +1161,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		wire.CacheTokens = pf.CacheTokens
 		wire.PrefillMS = pf.PrefillMS
 	}
+	// RSI-OH-2: the pager gate and the compaction pass count ride the wire too, set at the
+	// same point and for the same reason as the prefill block above (a budget-stopped run is
+	// the one that compacted most). Unlike prefill it is set whether or not anything was
+	// evicted: an object of real zeros is a measurement, an absent key is "not recorded".
+	wire.Pager = agentPagerWire(res.Pager)
 	// The run's workspace root is gone (register C-79): its own file tools could not open it
 	// and the loop ended the run on the report, instead of letting the seat answer from
 	// nothing as it used to (the delegator then scored the answer as the model's failure),
