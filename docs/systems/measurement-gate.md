@@ -26,7 +26,7 @@ needs no model, no GPU and no network.
 |---|---|
 | **R1 superiority** | A claim of "better": ADOPT iff the interval's lower end `lo` is above 0; BLOCK iff the upper end `hi` is below 0; otherwise INCONCLUSIVE. |
 | **R2 non-inferiority** | A cut or an efficiency change ("not worse by more than the margin `m`, and cheaper"): BLOCK iff `hi < -m`; ADOPT iff `lo > -m` **and** at least one declared efficiency metric improves **and** none got significantly worse or went unmeasured; otherwise INCONCLUSIVE. See [the efficiency metrics](#the-efficiency-metrics). In superiority mode the efficiency metrics are reported and ignored for the verdict. |
-| **R3 scoring and the usable denominator** | Every candidate attempt enters its task's mean. A `pass` or `task_fail` enters with its score. A `cheat`, a `timeout`, an `infra_error`, a `judge_error` and a `not_run` enter at the **worst score** of the primary range (the bad end of it, given the direction). A declared task the candidate lacks, or holds with no attempt, counts as one `not_run` attempt. So every declared task is a usable pair, and a candidate cannot raise its mean by not finishing what it would fail. **Cost follows whether the attempt ran.** A candidate's `cheat`, `timeout`, `infra_error` or `judge_error` that recorded a metric contributes that cost to its task's mean, because the attempt ran and spent it (the worst score bounds how many of them a non-inferior candidate can carry, and the `cheats` count is reported apart). A metric the adapter did not record is `null` and stays unresolved, never 0, so an adapter must record the cost of every attempt that ran. A `not_run`, explicit or the placeholder for a missing task, never ran and carries nothing. The **incumbent is not imputed**: its cheat enters at the worst score, but its `timeout`, `infra_error`, `judge_error` and `not_run` attempts are skipped, cost included, and a task with no usable incumbent attempt is an excluded pair. The asymmetry is the point: the incumbent keeps every tie, so only the candidate pays for the attempts it did not finish. The unit is the task: a task's score is the mean of its attempts as above, and the interval is over tasks. The excluded share is the largest of three ratios: excluded pairs over declared main tasks, the incumbent's unusable attempts over its attempts, and the candidate's unusable attempts over its attempts (attempt totals count the `not_run` placeholders). Above `max_excluded_share` (0.20) the verdict is INCONCLUSIVE. That cap may sit above the margin because the candidate's unusable attempts already count at the worst score: the cap no longer bounds a free exclusion, and the only exclusions left are incumbent attempts, which the candidate does not run. That holds for a frozen or trusted incumbent. An incumbent supplied in the input can use the exclusion as a lever: marking some of its own best attempts unfinished (or whole tasks it wins) lowers its mean and removes tasks from the comparison, up to the cap. Freeze the incumbent (`freeze --incumbent`) when the comparison must not be steerable from the input. |
+| **R3 scoring and the usable denominator** | Every candidate attempt enters its task's mean. A `pass` or `task_fail` enters with its score. A `cheat`, a `timeout`, an `infra_error`, a `judge_error` and a `not_run` enter at the **worst score** of the primary range (the bad end of it, given the direction). A declared task the candidate lacks, or holds with no attempt, counts as one `not_run` attempt. So every declared task is a usable pair, and a candidate cannot raise its mean by not finishing what it would fail. **Cost follows whether the attempt ran.** A candidate's `cheat`, `timeout`, `infra_error` or `judge_error` that recorded a metric contributes that cost to its task's mean, because the attempt ran and spent it (the worst score bounds how many of them a non-inferior candidate can carry, and the `cheats` count is reported apart). A metric the adapter did not record is `null` and stays unresolved, never 0: a `pass`, `task_fail` or `cheat` without it is left out of its task's mean cost, and a candidate's `timeout`, `infra_error` or `judge_error` without it leaves its task's cost unresolved altogether, because the attempt that did not finish is the one likely to have spent the most and the attempts around it must not stand for the task (over the unresolved cap that blocks a non-inferiority ADOPT). So an adapter must record the cost of every attempt that ran. A `not_run`, explicit or the placeholder for a missing task, never ran and carries nothing. The **incumbent is not imputed**: its cheat enters at the worst score, but its `timeout`, `infra_error`, `judge_error` and `not_run` attempts are skipped, cost included, and a task with no usable incumbent attempt is an excluded pair. The asymmetry is the point: the incumbent keeps every tie, so only the candidate pays for the attempts it did not finish. The unit is the task: a task's score is the mean of its attempts as above, and the interval is over tasks. The excluded share is the largest of three ratios: excluded pairs over declared main tasks, the incumbent's unusable attempts over its attempts, and the candidate's unusable attempts over its attempts (attempt totals count the `not_run` placeholders). Above `max_excluded_share` (0.20) the verdict is INCONCLUSIVE. That cap may sit above the margin because the candidate's unusable attempts already count at the worst score: the cap no longer bounds a free exclusion, and the only exclusions left are incumbent attempts, which the candidate does not run. That holds for a frozen or trusted incumbent. An incumbent supplied in the input can use the exclusion as a lever: marking some of its own best attempts unfinished (or whole tasks it wins) lowers its mean and removes tasks from the comparison, up to the cap. Freeze the incumbent (`freeze --incumbent`) when the comparison must not be steerable from the input. |
 | **R4 the incumbent wins** | The incumbent keeps every tie and every INCONCLUSIVE (`keep_incumbent` is true unless ADOPT). Fewer than `min_pairs` usable pairs is INCONCLUSIVE, and `min_pairs` cannot be frozen below 16. The remedy for an INCONCLUSIVE at the corpus size is **more tasks, not more attempts**, because attempts of one task are not independent; the power note says how many. |
 | **R5 held-out** | A held-out slice is declared at freeze and scored once, with the same scoring as the main slice. It cannot rescue a verdict. It can veto one: an ADOPT whose held-out point estimate fails becomes BLOCK, "reject without re-tuning". With no usable held-out pair (every held-out incumbent task unusable) an ADOPT becomes INCONCLUSIVE with the reason "held-out evidence missing", never BLOCK: no evidence is not a failed check. |
 | **R6 pre-registration** | The mode, the primary metric, its margin and (for `custom`) its range, the judge, the efficiency metrics, `min_pairs`, the bootstrap size and seed, the held-out ids and the declared tasks are written into a baseline file and hashed before the first candidate run. A verdict names that hash and the gate refuses an input that names another one. |
@@ -63,9 +63,23 @@ Read against the plain t interval it is the same interval with the critical valu
 (exact to float64 up to 200 degrees of freedom, then the normal-quantile expansion), so the gate needs no special function
 and its output does not move with the platform's math library.
 
-When every difference is equal (zero variance, so no spread to measure) the interval is that one value, taken from the
-data, and the strict comparisons decide: a tie is exactly 0, and a difference exactly on the margin is neither ADOPT nor
-BLOCK. With fewer than two pairs there is no interval and `delta`, `lo` and `hi` read 0; the verdict is INCONCLUSIVE
+When every difference is equal (to within a rounding error of the scores: zero variance, so no spread to measure) there is
+no standard error to read, and a point interval would certify anything: sixteen ties in a row are what a candidate that loses
+5% of the incumbent's passes produces 44% of the time. `delta` and `hi` are then the one value, taken from the data and not
+from a sum, and `lo` is the true mean below which the sample would be 2.5% likely, for scores in the primary's range
+(width `w`, `q = 0.025^(1/n)`):
+
+```
+lo = q * (w + c) - w          (c is the one value; a tie has c = 0, so lo = -w * (1 - q))
+```
+
+A distribution with mean `t` puts at most `(w + t) / (w + c)` of its mass on the value `c` (the rest, at best, at `-w`), so
+`n` equal values have probability at most that to the power `n`, and setting it to 0.025 gives the formula. It is the exact
+bound, not a rule of thumb. A tie sits `0.206 w` below 0 at 16 tasks, `0.142 w` at 24, `0.088 w` at 40 and `0.045 w` at 80,
+so a margin of 0.05 of the range is certified by 80 ties and not by 40, and a superiority tie is INCONCLUSIVE because `lo`
+is below 0. Only `lo` is widened: the incumbent wins every tie, so a sample with no spread is never read as proof against
+it, and a candidate that loses every task by the same amount is still blocked (`hi` is that amount). A difference exactly on
+the margin is neither ADOPT nor BLOCK. With fewer than two pairs there is no interval and `delta`, `lo` and `hi` read 0; the verdict is INCONCLUSIVE
 through `min_pairs`. Scores or costs so large that a sum overflows to a number that is not finite are refused
 ("overflow"), never reported as a verdict about infinity.
 
@@ -83,48 +97,66 @@ pass rates .90 and .85 (10.0% with 16 tasks). Five candidate intervals were run 
 bootstrap, BCa, the percentile widened about the estimate by `t/z`, the paired t, and the lower of two of them, at
 `B = 2000` and `B = 10000`). None of them stays at or under 4% in every null cell: the best, the paired t, measures 4.6%
 in the cell with 20 tasks, because "two wins and no loss in 20 tasks" gives a lower end above `-0.05` although the true
-loss rate was 13.5%, and a variance taken at the estimate cannot see that. The score form does, with 0 of 43 cells over 4%
-and a worst cell of 2.7%. The ADR has the whole grid, the power at a moderate effect and the reasons.
+loss rate was 13.5%, and a variance taken at the estimate cannot see that. The score form is the best single interval: 61
+of the 63 null cells of the study are at most 3.6%. The two others, both at 80 tasks, are a strong incumbent (pass rates
+.99 and .94, 4.8%) and a candidate that only loses 5% of the incumbent's passes (8.2%): see "What this covers" below. The
+ADR has the whole grid, the power at a moderate effect and the reasons.
 
-False-ADOPT rate, per cent (a nominal 2.5%), the cells the review named and the extremes:
+A sample whose pairs are all equal has its own rule (above), and it matters most where the incumbent is strong, because
+most samples then have few pairs that differ. Read as a single point, as the gate first did, 16 ties ADOPTed a
+non-inferiority claim that carried an efficiency win.
 
-| null | tasks | percentile interval (before) | score form (after) |
-|---|---|---|---|
-| superiority, uniform scores | 16 | 3.77 | 1.31 |
-| superiority, scores in tenths | 16 | 3.81 | 1.53 |
-| superiority, x^3-skewed scores | 16 | 4.12 | 1.39 |
-| superiority, pass/fail p=.50 | 16 | 2.48 | 1.07 |
-| superiority, pass/fail p=.85 | 16 | 2.44 | 0.81 |
-| superiority, 0/10 judge, p=.50 | 16 | 2.56 | 1.10 |
-| non-inferiority at exactly -margin, pass rates .90 and .85 | 16 | 9.96 | 2.48 |
-| non-inferiority at exactly -margin, pass rates .90 and .85 | 20 | 6.12 | 2.55 |
-| non-inferiority at exactly -margin, pass rates .90 and .85 | 24 | 5.50 | 2.71 |
-| non-inferiority at exactly -margin, uniform scores | 24 | 3.24 | 1.79 |
-| worst of 43 cells (16 to 80 tasks) | | 9.96 | 2.71 |
-| cells over 4% of 43 | | 8 | 0 |
+False-ADOPT rate, per cent (a nominal 2.5%), the cells the reviews named and the extremes. "Score form, ties as a
+point" is the gate before the fourth review; the last column is the gate:
 
-An all-tied dataset has no spread to measure and is decided by its one value, so it counts in these figures (1.8% of the
-datasets with 16 tasks and pass rates .90 and .85, 0.7% with 20).
+| null | tasks | percentile interval | score form, ties as a point | score form (the gate) |
+|---|---|---|---|---|
+| superiority, uniform scores | 16 | 3.77 | 1.31 | 1.31 |
+| superiority, scores in tenths | 16 | 3.81 | 1.53 | 1.53 |
+| superiority, x^3-skewed scores | 16 | 4.12 | 1.39 | 1.39 |
+| superiority, pass/fail p=.50 | 16 | 2.48 | 1.07 | 1.07 |
+| non-inferiority at exactly -margin, pass rates .90 and .85 | 16 | 9.96 | 2.48 | 0.68 |
+| non-inferiority at exactly -margin, pass rates .90 and .85 | 20 | 6.12 | 2.55 | 1.84 |
+| non-inferiority at exactly -margin, pass rates .90 and .85 | 24 | 5.50 | 2.71 | 2.41 |
+| non-inferiority at exactly -margin, uniform scores | 24 | 3.24 | 1.78 | 1.79 |
+| non-inferiority at exactly -margin, pass rates .95 and .90 | 16 | 20.33 | 9.05 | 0.18 |
+| non-inferiority at exactly -margin, pass rates .95 and .90 | 24 | 9.99 | 5.92 | 3.23 |
+| non-inferiority at exactly -margin, pass rates .99 and .94 | 16 | 37.43 | 31.90 | 0.00 |
+| non-inferiority at exactly -margin, pass rates .99 and .94 | 40 | 8.77 | 8.76 | 2.87 |
+| non-inferiority at exactly -margin, pass rates .99 and .94 | 80 | 4.78 | 4.83 | 4.83 |
+| non-inferiority at exactly -margin, a candidate that only loses 5% of the incumbent's passes | 20 | 35.77 | 35.77 | 0.00 |
+| non-inferiority at exactly -margin, a candidate that only loses 5% of the incumbent's passes | 40 | 12.61 | 12.61 | 0.00 |
+| non-inferiority at exactly -margin, a candidate that only loses 5% of the incumbent's passes | 80 | 8.13 | 8.23 | 8.23 |
+| worst of 63 cells (16 to 80 tasks) | | 44.09 | 44.09 | 8.23 |
+| cells over 4% of 63 | | 25 | 17 | 2 |
 
-`TestNullAdoptRateAtTheFloorsIsCalibrated` runs `Gate` end to end on six of these cells at the floors, with fixed seeds,
-and requires at most 4% over its stated trials (it measures 0.6% to 2.4%; skipped under `-short`).
-`TestPrimaryIntervalFalseAdoptRateOnTheStatedNulls` does the same on the interval alone, which needs no bootstrap, over
-50000 datasets in each of nine cells (1.2% to 2.5%), and fails the plain t interval, which measures 4.6% on the cell with
-20 tasks. The grid, its power cells and its stress cells are `TestCalibrationStudy` in
-`internal/eval/gate_sim_test.go`, off unless `OFFLOAD_GATE_STUDY=1`:
+The percentile column reads an all-tied dataset as a point too. Those datasets are 1.8% of the draws with 16 tasks and pass
+rates .90 and .85, 8.9% at .95 and .90, 17% at .97 and .92, 32% at .99 and .94 and 44% for the nested-loss candidate.
+
+`TestNullAdoptRateAtTheFloorsIsCalibrated` runs `Gate` end to end on eleven of these cells at the floors, with fixed seeds,
+and requires at most 4% over its stated trials (it measures 0.0% to 3.0%; skipped under `-short`): the cells at 16 to 24
+tasks, among them pass rates .95 and .90, .99 and .94 and the nested-loss candidate, which fail it on the point rule (9%,
+32% and 37%). `TestPrimaryIntervalFalseAdoptRateOnTheStatedNulls` does the same on the interval alone, which needs no
+bootstrap, over 50000 datasets in each of fifteen cells (0.0% to 3.1%), and fails the plain t interval, which measures
+4.6% on the cell with 20 tasks. The package's tests take about 6 s (2 s with `-short`) on a 36-core machine; the
+simulated cells split their trials over `GOMAXPROCS`, so a 4-core runner takes a few times that. The grid, its power cells
+and its stress cells are `TestCalibrationStudy` in `internal/eval/gate_sim_test.go`, off unless `OFFLOAD_GATE_STUDY=1`
+(about 20 minutes on 30 workers):
 
 ```
 OFFLOAD_GATE_STUDY=1 go test ./internal/eval/ -run TestCalibrationStudy -v -timeout 1h
 ```
 
-**What this covers, and what it does not.** The cells above: both arms win and lose tasks, 16 to 80 tasks, scores that are
-pass/fail, in tenths, uniform or right-skewed. It does not cover a comparison where the arms disagree on very few tasks.
-A candidate that only ever loses tasks (it never wins one the incumbent loses) and loses 5% of them is adopted in 36% of
-simulated runs at 20 tasks and 13% at 40 under every interval measured, the score form included, and in 8.9% at 80 under
-it: those are samples with no loss, or one, in them, and an interval that rests on the sample's spread has no spread to
-widen. A zero-inflated score that is non-inferior at exactly `-margin` is adopted in 4.4% of runs at 16 tasks and 3.5% at
-24 with the score form. These are the stress cells of the same study. The remedy is more tasks (the power note counts
-them) and a pre-registered margin that the corpus size can certify.
+**What this covers, and what it does not.** The cells above: both arms win and lose tasks, or most pairs tie, 16 to 80
+tasks, scores that are pass/fail, in tenths, uniform or right-skewed. It does not cover a strong incumbent at exactly the
+margin whose disagreements with the candidate are a handful of tasks in 60 or more. There the score form is still
+anti-conservative, because a sample with one loss in it has little spread to read: the nested-loss candidate is adopted in
+8.2% of runs at 80 tasks (it accepts one loss in 80), 5.8% at 120 and 6.3% at 200, and pass rates .97 and .92 or .99 and
+.94 in up to 5.5% at 60 to 200 tasks (stress cells of the same study, which run the score form to 200 tasks). A
+zero-inflated score that is non-inferior at exactly `-margin` is adopted in 3.7% of runs at 16 tasks and 3.4% at 24. The
+remedy is more tasks (the power note counts them) and a pre-registered margin that the corpus size can certify. The lower
+of the score form and BCa clears all 63 cells and all 18 stress cells (the worst is 3.4%) at the same power to within 0.7
+points; it is not the gate because it would bring the bootstrap back into the primary (ADR 0088, decision 12).
 
 **Floors.** `bootstrap_b` cannot be frozen below 2000 and `min_pairs` below 16 (the default), and `min_pairs` cannot exceed
 the number of non-held-out tasks. The calibration above was measured from 16 tasks up, so 16 is the smallest sample the
@@ -136,7 +168,7 @@ gate makes a claim about. The bootstrap reads the efficiency metrics, and 2000 i
 Boundaries are strict: `lo > 0`, `hi < 0`, `lo > -m`, `hi < -m`. An interval that touches the line is INCONCLUSIVE. The
 tests build their boundary rows from exactly representable numbers (16 pairs, scores 8.0, 7.5, 7.0) so a mutation of a
 comparison flips a row on every platform; a constant difference is read from the data, not from a sum, so a difference of
-exactly `-0.1` against a margin of 0.1 is on the margin as well.
+exactly `-0.1` against a margin of 0.1 is on the margin as well (and its lower end, held back as above, is below it).
 
 ## The efficiency metrics
 
@@ -197,7 +229,7 @@ Each attempt carries one of seven classes (`eval.AttemptOutcome`, in `internal/e
 | `judge_error` | candidate: at the worst score. Incumbent: skipped | candidate: counts. Incumbent: skipped | the judge could not score it |
 | `not_run` | candidate: at the worst score. Incumbent: skipped | nothing, on either arm | never ran. A declared task missing from an arm, or present with no attempt, counts as one `not_run` |
 
-A recorded cost that is `null` is unresolved on every row, never 0.
+A cost that was not recorded is `null`, never 0: it is left out of the task's mean on a `pass`, `task_fail` or `cheat`, and on a candidate's `timeout`, `infra_error` or `judge_error` it leaves the task's cost unresolved.
 
 The **worst score** is the bad end of the primary's range, given `higher_is_better`: 0 for `unit_interval` and
 `judge_0_10` (1 and 10 for a lower-is-better primary), and the matching end of the declared `primary.range` for
@@ -272,7 +304,9 @@ for a model judge (the two hashes are 64 lower-case hex characters). An arm is
 `{stamps {harness_build_sha256, seat_config_sha256, engine_build}, tasks [{id, attempts [{outcome, score, metrics}]}]}`.
 Stamps come from the runs that produced the scores, never from the gate binary. A metric value is finite and not
 negative. A metric value of `null` (or an absent key) is **unresolved**: it stays unresolved end to end, the pair is
-skipped for that metric and counted in `unresolved_pairs`, and it is never written or read as 0.
+skipped for that metric and counted in `unresolved_pairs`, and it is never written or read as 0. On a candidate's
+`timeout`, `infra_error` or `judge_error` it leaves the whole task unresolved for that metric, not just that attempt, so
+record the cost of what timed out.
 
 **Result** (`eval.GateResult`, snake_case, struct order, no timestamp): `verdict`, `reason`, `keep_incumbent`, `mode`,
 `margin`, `delta`, `lo`, `hi` (the observed mean paired difference and its 95% interval), `n_used`, `n_declared`, `excluded_pairs`, `excluded_share`, `attempt_counts` (all seven
