@@ -237,6 +237,12 @@ func TestOpenSpecTierIDPatternCatchesParaphrases(t *testing.T) {
 		"name it as tier ids",
 		"a tier id or node letter",
 		"a node letter or tier ids",
+		"name a machine by tier-id",
+		"machines are named using tier ids",
+		"machines are named through their tier id",
+		"refer to a box with its tier id",
+		"address it via the tier id",
+		"a tier-id or node letter",
 	} {
 		if !openspecTierIDAsMachineName.MatchString(bad) {
 			t.Errorf("the pattern misses %q", bad)
