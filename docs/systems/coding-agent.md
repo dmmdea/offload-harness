@@ -492,12 +492,15 @@ call that produced the body: the result's tool-call id is mapped to its call, an
 (grouped form) and a `run_shell` or `run` call whose command is a search (flat form) qualify. A search
 starts with `grep`, `rg`, `ag`, `ack` or `git grep`. The `run` tool's allowlist (`go`, `gofmt`, `python`,
 `python3`, `pytest`, `npm`, `node`, `cargo`, `git`) holds only `git` of those, so through `run` only
-`git grep` is reachable; `grep`, `rg`, `ag` and `ack` come through `run_shell`. A search piped through
+`git grep` is reachable; `grep`, `rg`, `ag` and `ack` come through `run_shell`, which is Linux-only, so on
+another host only `git grep` qualifies at all. A search piped through
 pass-through filters only (`head`, `tail`, `sort`, `uniq`, `wc`, `cut`, `sed`, `awk`, `tee`, `cat`, or
 another search) still qualifies (`grep x f | head`); a pipe into anything else does not (`rg -l x | xargs flake8`,
 `rg x | flake8 -`), because the last stage's output is the body and it may be a linter's. A command that
 chains another one after the search (an unquoted `;`, `&&`, `||`, `&` or newline, found by a quote-aware
-scan) does not either, because the body then holds that command's output too. A linter such as flake8, ruff, `shellcheck -f gcc` or rubocop prints the
+scan) does not either, because the body then holds that command's output too. The check reads first words
+only and is not a shell parser: a filter that runs a command itself (`tee >(...)`, awk's `system()`, sed's `e`) or
+ANSI-C `$'...'` quoting is not seen. A linter such as flake8, ruff, `shellcheck -f gcc` or rubocop prints the
 same `path:line:col:text` lines, and every one of its diagnostics is something the agent must fix, so
 its output, a body with no matching call and an id claimed by two different calls are left alone.
 Everything else (the `web_search` list, `mode:"files"` output, test output, an error result) is left
