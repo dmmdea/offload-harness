@@ -434,3 +434,7 @@ func logsRung(out []Msg, from, to, budget int, pinned map[string]bool) {
 		}
 	}
 }
+
+// logsCallIsBuild reports whether a call is a build or test invocation.
+// Stub: the gate is still the tool name alone.
+func logsCallIsBuild(c ToolCall) bool { return logsCommandTools[c.Name] }

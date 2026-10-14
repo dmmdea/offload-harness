@@ -86,8 +86,43 @@ func lcSubtestLog(n int) string {
 // lcLogOptsOn is the rung enabled on its own.
 var lcLogOptsOn = compactOpts{LogCollapse: true}
 
+// lcRunArgs and lcShellArgs are the arguments of a build-and-test call as the
+// two command tools receive them: `run` takes a bare program and an argument
+// array, `run_shell` one command line. The rung folds a command tool's result
+// only when the call is a build or test invocation, so every transcript a test
+// folds names one.
+const (
+	lcRunArgs   = `{"command":"go","args":["test","./..."]}`
+	lcShellArgs = `{"command":"go test ./..."}`
+)
+
+// lcArgsFor is the build-and-test arguments for a command tool, and the
+// arguments unchanged for any other tool.
+func lcArgsFor(name, args string) string {
+	switch name {
+	case "run":
+		return lcRunArgs
+	case "run_shell":
+		return lcShellArgs
+	}
+	return args
+}
+
+// lcTranscript is lrTranscript with every command call made a `go test` call.
+func lcTranscript(bodies ...string) []Msg {
+	msgs := lrTranscript(bodies...)
+	for i := range msgs {
+		for j := range msgs[i].ToolCalls {
+			c := &msgs[i].ToolCalls[j]
+			c.Args = lcArgsFor(c.Name, c.Args)
+		}
+	}
+	return msgs
+}
+
 // lcNamed returns a copy of a fixture whose assistant tool calls are all named
-// name (the shipped mini corpus carries call ids only).
+// name (the shipped mini corpus carries call ids only) and, for a command tool,
+// whose arguments are a build-and-test call.
 func lcNamed(fx lrFixture, name string) lrFixture {
 	msgs := make([]Msg, len(fx.msgs))
 	for i, m := range fx.msgs {
@@ -96,6 +131,7 @@ func lcNamed(fx lrFixture, name string) lrFixture {
 			calls := make([]ToolCall, len(m.ToolCalls))
 			for j, c := range m.ToolCalls {
 				c.Name = name
+				c.Args = lcArgsFor(name, c.Args)
 				calls[j] = c
 			}
 			msgs[i].ToolCalls = calls
@@ -131,6 +167,9 @@ func TestLogsKeyMasksNumbersIdsAndTimestamps(t *testing.T) {
 		{"\x1b[32mok\x1b[0m step 3", "ok step 4"},
 		{"retrying build cache lookup   ", "retrying build cache lookup"},
 		{"retrying build cache lookup\r", "retrying build cache lookup"},
+		{"undefined: x1", "undefined: x2"},
+		{"=== RUN   TestWidget/case_001", "=== RUN   TestWidget/case_017"},
+		{"fault at 0xc000012345 in worker", "fault at 0xc0000ab9ef in worker"},
 	}
 	for _, p := range same {
 		if a, b := logsKey(p[0]), logsKey(p[1]); a != b {
@@ -143,6 +182,12 @@ func TestLogsKeyMasksNumbersIdsAndTimestamps(t *testing.T) {
 		{"GET /a 200", "GET /b 200"},
 		{"connected to 192.0.2.1", "connected to 192.0.2"},
 		{"stage build finished", "stage test finished"},
+		// Only digit runs are masked: the letters around them still count, so two
+		// different identifiers or algorithm names never share a key.
+		{"undefined: x1", "undefined: y2"},
+		{"md5", "sha256"},
+		{"want sha1 got md5", "want sha256 got md5"},
+		{"call f1(a2)", "call g1(a2)"},
 	}
 	for _, p := range differ {
 		if a, b := logsKey(p[0]), logsKey(p[1]); a == b {
@@ -208,9 +253,10 @@ func TestLogCollapseExactOutput(t *testing.T) {
 	want := fmt.Sprintf("[log-collapse: original %d chars, 60 lines]\n", len(in)) +
 		strings.Join(lcHead, "\n") + "\n" +
 		run + "\n" +
-		"[... 47 similar lines folded ...]\n" +
+		"[... 46 similar lines folded ...]\n" +
+		run + "\n" +
 		strings.Join(lcTail, "\n") + "\n" +
-		"[log-collapse: folded 1 run(s) of near-identical lines (47 lines hidden; digits are ignored when comparing lines); kept verbatim: the first 8 and last 4 lines and every line flagged as a problem or a test summary]"
+		"[log-collapse: folded 1 run(s) of near-identical lines (46 lines hidden; digit runs are ignored when comparing lines); kept verbatim: the first 8 and last 4 lines and every line flagged as a problem or a test summary]"
 	if got != want {
 		t.Errorf("collapsed bytes differ.\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
@@ -225,10 +271,10 @@ func TestLogCollapseFoldsNearIdenticalRunsAndKeepsWindows(t *testing.T) {
 	if len(got) >= len(in) {
 		t.Fatalf("collapsed body is not shorter: %d >= %d", len(got), len(in))
 	}
-	if n := strings.Count(got, "GET /health"); n != 1 {
-		t.Errorf("want one representative access line, got %d", n)
+	if n := strings.Count(got, "GET /health"); n != 2 {
+		t.Errorf("want the first and the last access line of the run, got %d", n)
 	}
-	if !strings.Contains(got, "[... 99 similar lines folded ...]") {
+	if !strings.Contains(got, "[... 98 similar lines folded ...]") {
 		t.Errorf("count marker missing or wrong:\n%s", got)
 	}
 	for _, l := range append(append([]string{}, lcHead...), lcTail...) {
@@ -236,9 +282,12 @@ func TestLogCollapseFoldsNearIdenticalRunsAndKeepsWindows(t *testing.T) {
 			t.Errorf("window line lost: %q", l)
 		}
 	}
-	// The first line of the run is the representative, verbatim.
+	// The first and the last line of the run stay, verbatim.
 	if !strings.Contains(got, lcAccess(0)+"\n") {
 		t.Errorf("first line of the run must survive verbatim:\n%s", got)
+	}
+	if !strings.Contains(got, lcAccess(99)+"\n") {
+		t.Errorf("last line of the run must survive verbatim:\n%s", got)
 	}
 }
 
@@ -292,10 +341,10 @@ func TestLogCollapseKeepsTheTailWindowOfABodyThatEndsInARun(t *testing.T) {
 	if !ok {
 		t.Fatal("must collapse")
 	}
-	if n := strings.Count(got, run+"\n"); n != 5 {
-		t.Errorf("want the representative plus the four tail lines (5), got %d:\n%s", n, got)
+	if n := strings.Count(got, run+"\n"); n != 6 {
+		t.Errorf("want the first and last line of the run plus the four tail lines (6), got %d:\n%s", n, got)
 	}
-	if !strings.Contains(got, "[... 35 similar lines folded ...]\n"+strings.Repeat(run+"\n", 4)+"[log-collapse: folded") {
+	if !strings.Contains(got, "[... 34 similar lines folded ...]\n"+strings.Repeat(run+"\n", 5)+"[log-collapse: folded") {
 		t.Errorf("the four tail lines must follow the marker unchanged:\n%s", got)
 	}
 }
@@ -340,8 +389,8 @@ func TestLogCollapseMinimumRunIsThree(t *testing.T) {
 	three := []string{fmt.Sprintf(long, 5), fmt.Sprintf(long, 6), fmt.Sprintf(long, 7)}
 	in3 := lcJoin(lcHead, three, []string{"between", "the", "windows", "we", "check"}, lcTail)
 	got, ok := logCollapse(in3)
-	if !ok || !strings.Contains(got, "[... 2 similar lines folded ...]") {
-		t.Errorf("a run of three long lines must fold to one line plus a count of two:\n%s", got)
+	if !ok || !strings.Contains(got, three[0]+"\n[... 1 similar line folded ...]\n"+three[2]+"\n") {
+		t.Errorf("a run of three long lines must fold to its first line, a count of one and its last line:\n%s", got)
 	}
 }
 
@@ -417,7 +466,7 @@ func TestLogCollapseKeepsCRLFLinesVerbatim(t *testing.T) {
 	if !strings.Contains(got, lcHead[0]+"\r\n") {
 		t.Errorf("a kept line lost its carriage return:\n%q", got)
 	}
-	if !strings.Contains(got, "[... 39 similar lines folded ...]") {
+	if !strings.Contains(got, "[... 38 similar lines folded ...]") {
 		t.Errorf("a CRLF run was not folded with the right count:\n%q", got)
 	}
 }
@@ -646,7 +695,7 @@ func TestLogCollapseProperties(t *testing.T) {
 func lcIsRaw(m Msg, original Msg) bool { return m.Content == original.Content }
 
 func TestLogCollapseRungFoldsOlderBodiesOnlyAndKeepsPairing(t *testing.T) {
-	msgs := lrTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170))
+	msgs := lcTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170))
 	budget := estimateTokens(msgs) * 6 / 10
 	out := compact(context.Background(), msgs, budget, 2, 3, lcLogOptsOn)
 	if len(out) != len(msgs) {
@@ -703,9 +752,9 @@ func TestLogCollapseRungLeavesTheProtectedPrefixAlone(t *testing.T) {
 	pre := lrServerLog(200)
 	msgs := []Msg{
 		{Role: "system", Content: "You are a coding agent."},
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "pre-1", Name: "run", Args: `{}`}}},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "pre-1", Name: "run", Args: lcRunArgs}}},
 		{Role: "tool", ToolCallID: "pre-1", Content: pre},
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-1", Name: "run", Args: `{}`}}},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-1", Name: "run", Args: lcRunArgs}}},
 		{Role: "tool", ToolCallID: "call-1", Content: lrServerLog(190)},
 		{Role: "assistant", Content: "reading it"},
 	}
@@ -725,7 +774,7 @@ func TestLogCollapseRungLeavesTheProtectedPrefixAlone(t *testing.T) {
 }
 
 func TestLogCollapseRungRespectsPins(t *testing.T) {
-	msgs := lrTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170))
+	msgs := lcTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170))
 	folded, ok := logCollapse(msgs[6].Content)
 	if !ok {
 		t.Fatal("control: the second body must fold")
@@ -753,9 +802,9 @@ func TestLogCollapseRungRespectsPinsThroughADedupeReference(t *testing.T) {
 		{Role: "system", Content: "You are a coding agent."},
 		{Role: "user", Content: "exemplar: run the tests and report the result"},
 		{Role: "user", Content: "objective: find out why the widget build is red"},
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-1", Name: "run", Args: `{"cmd":"make"}`}}},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-1", Name: "run", Args: lcRunArgs}}},
 		{Role: "tool", ToolCallID: "call-1", Content: dedupeMarker("call-2", len(raw))},
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-2", Name: "run", Args: `{"cmd":"make"}`}}},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-2", Name: "run", Args: lcRunArgs}}},
 		{Role: "tool", ToolCallID: "call-2", Content: raw},
 		{Role: "assistant", Content: "looking at the output now"},
 	}
@@ -780,7 +829,7 @@ func TestLogCollapseRungRespectsPinsThroughADedupeReference(t *testing.T) {
 }
 
 func TestLogsRungClampsItsWindow(t *testing.T) {
-	msgs := lrTranscript(lrServerLog(150), lrServerLog(160))
+	msgs := lcTranscript(lrServerLog(150), lrServerLog(160))
 	out := append([]Msg(nil), msgs...)
 	logsRung(out, -7, len(out)+50, 1, nil) // out-of-range window must clamp, not panic
 	if !isLogCollapsed(out[4].Content) || !isLogCollapsed(out[6].Content) {
@@ -800,7 +849,7 @@ func TestLogCollapseRungStopsAtTheFirstFit(t *testing.T) {
 	// oldest buys. The rung runs oldest-first and stops at the first fit, so
 	// the newer bodies must stay byte-identical (KV-prefix friendly: the edit
 	// point moves forward, never scatters).
-	msgs := lrTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170), lrServerLog(180), lrServerLog(190))
+	msgs := lcTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170), lrServerLog(180), lrServerLog(190))
 	probe := make([]Msg, len(msgs))
 	copy(probe, msgs)
 	folded, ok := logCollapse(probe[4].Content)
@@ -826,7 +875,7 @@ func TestLogCollapseRungStopsAtTheFirstFit(t *testing.T) {
 // lossless GCF rung (a budget GCF alone meets leaves the logs raw).
 func TestLogCollapseRungSitsBetweenGCFAndSkeleton(t *testing.T) {
 	t.Run("before skeleton", func(t *testing.T) {
-		msgs := lrTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170))
+		msgs := lcTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170))
 		folded, ok := logCollapse(msgs[4].Content)
 		if !ok {
 			t.Fatal("control: the oldest body must fold")
@@ -855,7 +904,7 @@ func TestLogCollapseRungSitsBetweenGCFAndSkeleton(t *testing.T) {
 
 	t.Run("after gcf", func(t *testing.T) {
 		raw, js := lrServerLog(150), jsonToolBody(60)
-		msgs := lrTranscript(raw, js)
+		msgs := lcTranscript(raw, js)
 		packed, ok := gcf.Compact(js)
 		if !ok {
 			t.Fatal("control: the JSON body must be GCF-eligible")
@@ -978,7 +1027,7 @@ func TestLogCollapseRungOnlyFoldsCommandOutput(t *testing.T) {
 		}
 	}
 	// A result with no matching call in the transcript is also left alone.
-	msgs := lrTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170))
+	msgs := lcTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170))
 	for i := range msgs {
 		msgs[i].ToolCalls = nil
 	}
@@ -1070,7 +1119,7 @@ func TestDefaultLadderTreatsALogCollapseLookalikeAsRawContent(t *testing.T) {
 	}
 
 	// Two identical copies: the older one is deduped, whatever it says on line 1.
-	msgs := lrTranscript(body, body, lrServerLog(170))
+	msgs := lcTranscript(body, body, lrServerLog(170))
 	budget := estimateTokens(msgs) * 6 / 10
 	out := compact(context.Background(), msgs, budget, 2, 3, compactOpts{})
 	if want := dedupeMarker("call-2", len(body)); out[4].Content != want {
@@ -1079,7 +1128,7 @@ func TestDefaultLadderTreatsALogCollapseLookalikeAsRawContent(t *testing.T) {
 
 	// Distinct copies under a budget nothing meets: every older body is elided
 	// and the marker reports the real length, not the 4096 the header claims.
-	distinct := lrTranscript(lrLookalikeHeader+lrServerLog(150), lrLookalikeHeader+lrTestLog(80), lrServerLog(170))
+	distinct := lcTranscript(lrLookalikeHeader+lrServerLog(150), lrLookalikeHeader+lrTestLog(80), lrServerLog(170))
 	tight := compact(context.Background(), distinct, 1, 2, 3, compactOpts{})
 	for _, i := range []int{4, 6} {
 		if want := elisionMarker(len(distinct[i].Content)); !strings.HasPrefix(tight[i].Content, want) {
@@ -1178,7 +1227,7 @@ func TestLogsKeepRecognisesLanguageErrorNamesAndFailureShapes(t *testing.T) {
 // a later rung elides is announced at the size it had BEFORE the fold: the
 // marker discloses what was lost, and what was lost is the whole original.
 func TestLogCollapseElideMarkerReportsTheOriginalSize(t *testing.T) {
-	msgs := lrTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170))
+	msgs := lcTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170))
 	for name, opts := range map[string]compactOpts{
 		"logs":          {LogCollapse: true},
 		"logs+skeleton": {Skeleton: true, LogCollapse: true},
@@ -1204,7 +1253,7 @@ func TestLogCollapseRungIgnoresAResultWhoseCallIdIsReused(t *testing.T) {
 		{Role: "user", Content: "exemplar"},
 		{Role: "assistant", ToolCalls: []ToolCall{{ID: "0", Name: "read_file", Args: `{"path":"server.log"}`}}},
 		{Role: "tool", ToolCallID: "0", Content: lrServerLog(150)},
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "0", Name: "run", Args: `{"cmd":"make"}`}}},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "0", Name: "run", Args: lcRunArgs}}},
 		{Role: "tool", ToolCallID: "0", Content: lrServerLog(160)},
 		{Role: "assistant", Content: "reading both"},
 	}
@@ -1218,7 +1267,7 @@ func TestLogCollapseRungIgnoresAResultWhoseCallIdIsReused(t *testing.T) {
 	// Control: the same two bodies under distinct ids, the second a command,
 	// fold the command's body only.
 	fixed := append([]Msg(nil), msgs...)
-	fixed[5] = Msg{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "run", Args: `{"cmd":"make"}`}}}
+	fixed[5] = Msg{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "run", Args: lcRunArgs}}}
 	fixed[6] = Msg{Role: "tool", ToolCallID: "1", Content: msgs[6].Content}
 	out = append([]Msg(nil), fixed...)
 	logsRung(out, 3, len(out)-1, 1, nil)
@@ -1247,7 +1296,7 @@ func lcSkeletonableLog() string {
 // left behind.
 func TestLogCollapseThenSkeletonThenElideNamesTheOriginalSize(t *testing.T) {
 	body := lcSkeletonableLog()
-	msgs := lrTranscript(body)
+	msgs := lcTranscript(body)
 	folded, ok := logCollapse(body)
 	if !ok {
 		t.Fatal("control: the body must fold")
@@ -1308,7 +1357,7 @@ func TestLogCollapseEmergencyShrinkNamesTheOriginalSize(t *testing.T) {
 	if _, can := skeletonizeAs(foldedSmall, len(small)); can {
 		t.Fatal("control: the short folded body must be beyond the skeleton rung")
 	}
-	msgs := lrTranscript(foldedOlder, foldedSmall, foldedNewest)
+	msgs := lcTranscript(foldedOlder, foldedSmall, foldedNewest)
 	on := compactOpts{LogCollapse: true}
 
 	out := emergencyShrinkWith(msgs, 1, 3, on)
@@ -1327,14 +1376,14 @@ func TestLogCollapseEmergencyShrinkNamesTheOriginalSize(t *testing.T) {
 	// rung's header is such a body.
 	lookalike := lrLookalikeHeader + lrServerLog(150)
 	lookalikeNewest := lrLookalikeHeader + lrServerLog(160)
-	plain := emergencyShrink(lrTranscript(lookalike, lookalikeNewest), 1, 3)
+	plain := emergencyShrink(lcTranscript(lookalike, lookalikeNewest), 1, 3)
 	if want := elisionMarker(len(lookalike)); !strings.HasPrefix(plain[4].Content, want) {
 		t.Errorf("rung off, older lookalike: want marker %q, got %.100q", want, plain[4].Content)
 	}
 	if want := elisionMarker(len(lookalikeNewest)); plain[6].Content != want {
 		t.Errorf("rung off, newest lookalike: want %q, got %.100q", want, plain[6].Content)
 	}
-	if viaWith := emergencyShrinkWith(lrTranscript(lookalike, lookalikeNewest), 1, 3, compactOpts{}); lrDigest(viaWith) != lrDigest(plain) {
+	if viaWith := emergencyShrinkWith(lcTranscript(lookalike, lookalikeNewest), 1, 3, compactOpts{}); lrDigest(viaWith) != lrDigest(plain) {
 		t.Error("emergencyShrink must equal emergencyShrinkWith with no optional rung")
 	}
 }
@@ -1351,7 +1400,7 @@ func TestLogCollapseDedupeMarkerNamesTheOriginalSize(t *testing.T) {
 	if !ok || orig <= len(folded) {
 		t.Fatalf("control: header should record a size larger than the fold: (%d, %v)", orig, ok)
 	}
-	msgs := lrTranscript(folded, folded, lrServerLog(170))
+	msgs := lcTranscript(folded, folded, lrServerLog(170))
 	for _, c := range []struct {
 		name string
 		opts compactOpts
@@ -1506,7 +1555,7 @@ func TestLogCollapseMarkersIgnoreAQuotedHeaderThatCannotBeTrue(t *testing.T) {
 			}
 
 			// Dedupe: the older of two identical copies becomes a reference.
-			msgs := lrTranscript(older, older, lrServerLog(170))
+			msgs := lcTranscript(older, older, lrServerLog(170))
 			want := dedupeMarker("call-2", len(older))
 			probe := append([]Msg(nil), msgs...)
 			probe[4].Content = want
@@ -1521,7 +1570,7 @@ func TestLogCollapseMarkersIgnoreAQuotedHeaderThatCannotBeTrue(t *testing.T) {
 			if !ok {
 				t.Fatal("control: the quoted body must prune to a skeleton")
 			}
-			msgs = lrTranscript(quoted)
+			msgs = lcTranscript(quoted)
 			probe = append([]Msg(nil), msgs...)
 			probe[4].Content = skel
 			out = compact(context.Background(), msgs, estimateTokens(probe), 1, 3, compactOpts{Skeleton: true, LogCollapse: true})
@@ -1530,7 +1579,7 @@ func TestLogCollapseMarkersIgnoreAQuotedHeaderThatCannotBeTrue(t *testing.T) {
 			}
 
 			// Elide: a budget nothing meets turns every older body into a marker.
-			distinct := lrTranscript(older, h.header+lrTestLog(80), lrServerLog(170))
+			distinct := lcTranscript(older, h.header+lrTestLog(80), lrServerLog(170))
 			tight := compact(context.Background(), distinct, 1, 2, 3, compactOpts{LogCollapse: true})
 			for _, i := range []int{4, 6} {
 				if want := elisionMarker(len(distinct[i].Content)); !strings.HasPrefix(tight[i].Content, want) {
@@ -1539,7 +1588,7 @@ func TestLogCollapseMarkersIgnoreAQuotedHeaderThatCannotBeTrue(t *testing.T) {
 			}
 
 			// Reactive last resort: an older body (pass 2) and the newest (pass 3).
-			shrunk := emergencyShrinkWith(lrTranscript(older, newest), 1, 3, compactOpts{LogCollapse: true})
+			shrunk := emergencyShrinkWith(lcTranscript(older, newest), 1, 3, compactOpts{LogCollapse: true})
 			if want := elisionMarker(len(older)); !strings.HasPrefix(shrunk[4].Content, want) {
 				t.Errorf("last resort, older body: want prefix %q, got %.120q", want, shrunk[4].Content)
 			}
@@ -1599,7 +1648,7 @@ func TestLogsMarkerSizeNamesTheSizeASkeletonRecorded(t *testing.T) {
 		t.Fatal("control: the folded body must prune to a skeleton")
 	}
 	older := lrServerLog(150)
-	msgs := lrTranscript(older, skel)
+	msgs := lcTranscript(older, skel)
 	on := emergencyShrinkWith(msgs, 1, 3, compactOpts{LogCollapse: true})
 	if want := elisionMarker(len(body)); on[6].Content != want {
 		t.Errorf("rung on, newest body is a skeleton: want %q, got %.120q", want, on[6].Content)
@@ -1675,24 +1724,24 @@ func TestLogsMarkerSizeIgnoresAQuotedSkeletonHeaderTheHarnessCannotVouchFor(t *t
 			older, newest := header+lrServerLog(150), header+lrServerLog(160)
 
 			// The reactive last resort over the newest body.
-			shrunk := emergencyShrinkWith(lrTranscript(lrServerLog(150), newest), 1, 3, compactOpts{LogCollapse: true})
+			shrunk := emergencyShrinkWith(lcTranscript(lrServerLog(150), newest), 1, 3, compactOpts{LogCollapse: true})
 			if want := elisionMarker(len(newest)); shrunk[6].Content != want {
 				t.Errorf("last resort, newest body: want %q, got %.120q", want, shrunk[6].Content)
 			}
 			// The rung off already names the body's own length.
-			off := emergencyShrinkWith(lrTranscript(lrServerLog(150), newest), 1, 3, compactOpts{})
+			off := emergencyShrinkWith(lcTranscript(lrServerLog(150), newest), 1, 3, compactOpts{})
 			if want := elisionMarker(len(newest)); off[6].Content != want {
 				t.Errorf("last resort, newest body, rung off: want %q, got %.120q", want, off[6].Content)
 			}
 
 			// The reactive last resort over an older body.
-			shrunk = emergencyShrinkWith(lrTranscript(older, lrServerLog(160)), 1, 3, compactOpts{LogCollapse: true})
+			shrunk = emergencyShrinkWith(lcTranscript(older, lrServerLog(160)), 1, 3, compactOpts{LogCollapse: true})
 			if want := elisionMarker(len(older)); !strings.HasPrefix(shrunk[4].Content, want) {
 				t.Errorf("last resort, older body: want prefix %q, got %.120q", want, shrunk[4].Content)
 			}
 
 			// The elide rung of the ladder proper.
-			distinct := lrTranscript(older, lrTestLog(80), lrServerLog(170))
+			distinct := lcTranscript(older, lrTestLog(80), lrServerLog(170))
 			tight := compact(context.Background(), distinct, 1, 2, 3, compactOpts{LogCollapse: true})
 			if want := elisionMarker(len(older)); !strings.HasPrefix(tight[4].Content, want) {
 				t.Errorf("elide marker: want prefix %q, got %.120q", want, tight[4].Content)
