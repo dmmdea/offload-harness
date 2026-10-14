@@ -52,6 +52,55 @@ func TestCBGradeKVCreditsAnAnswerSeenInAnyFrame(t *testing.T) {
 	}
 }
 
+// A model quotes a key or changes its case; the key it names is still the key.
+func TestCBGradeKVKeyIgnoresQuotesAndCase(t *testing.T) {
+	in := cbKVGold()
+	for _, header := range []string{`key="K00001"`, `key='K00001'`, "key=`K00001`", `key=k00001`, `key = "k00001"`} {
+		g := GradeCB(in, []CBFrame{cbFrame("turn", "<<<ANSWER "+header+">>>\nlantern ember #aaaa1111\n<<<ANSWER END>>>")})
+		if g.Matched != 1 {
+			t.Errorf("%s: the answer must be credited to K00001: %+v", header, g)
+		}
+	}
+	// A different key stays different.
+	g := GradeCB(in, []CBFrame{cbFrame("turn", "<<<ANSWER key=K00002>>>\nlantern ember #aaaa1111\n<<<ANSWER END>>>")})
+	if g.Matched != 0 {
+		t.Errorf("a value given for another key must not be credited: %+v", g)
+	}
+}
+
+// The value is credited only when it stands as a whole: its uniqueness tag is the last
+// thing of it, so a longer tag or a longer first word is a different value.
+func TestCBGradeKVValueMustEndAtItsTagBoundary(t *testing.T) {
+	in := cbKVGold()
+	credited := func(answer string) bool {
+		g := GradeCB(in, []CBFrame{cbFrame("turn", "<<<ANSWER key=K00001>>>\n"+answer+"\n<<<ANSWER END>>>")})
+		return g.Matched == 1
+	}
+	for _, ok := range []string{
+		"lantern ember #aaaa1111",
+		"the value is lantern ember #aaaa1111.",
+		"(lantern ember #aaaa1111)",
+		"lantern ember #aaaa1111, as stored",
+		// The first occurrence is a different value; the second is the right one.
+		"lantern ember #aaaa11110 and then lantern ember #aaaa1111",
+	} {
+		if !credited(ok) {
+			t.Errorf("%q must be credited", ok)
+		}
+	}
+	for _, bad := range []string{
+		"lantern ember #aaaa11110",
+		"lantern ember #aaaa1111f",
+		"lantern ember #aaaa1111g",
+		"slantern ember #aaaa1111",
+		"lantern ember #aaaa11",
+	} {
+		if credited(bad) {
+			t.Errorf("%q is not the stored value and must not be credited", bad)
+		}
+	}
+}
+
 func cbLogGold() *CBInstance {
 	return &CBInstance{Family: CBFamilyLog, Gold: CBGold{Log: []CBLogQuery{
 		{QID: 0, Type: "lookup", Answer: "timeout retry shard #deadbeef"},
@@ -77,6 +126,47 @@ func TestCBGradeLogLookupDropsTheTagAndCountNeedsExactlyOneNumber(t *testing.T) 
 	bad := []CBFrame{cbFrame("turn", "<<<ANSWER qid=0>>>\ntimeout retry\n<<<ANSWER END>>>")}
 	if got := GradeCB(in, bad); got.Sub["reward_lookup"] != 0 {
 		t.Errorf("a partial message must not be credited: %+v", got)
+	}
+}
+
+// A count answer may carry its own question label or group its digits; neither makes a
+// second number.
+func TestCBGradeLogCountStripsTheQuestionLabelAndThousandsSeparators(t *testing.T) {
+	credited := func(want, answer string) bool {
+		in := &CBInstance{Family: CBFamilyLog, Gold: CBGold{Log: []CBLogQuery{{QID: 3, Type: "count", Answer: want}}}}
+		g := GradeCB(in, []CBFrame{cbFrame("turn", "<<<ANSWER qid=3>>>\n"+answer+"\n<<<ANSWER END>>>")})
+		return g.Matched == 1
+	}
+	for answer, want := range map[string]string{
+		"Query 3: 7":                     "7",
+		"query #3 - 7":                   "7",
+		"qid=3: 7":                       "7",
+		"QID 3 -> 7":                     "7",
+		"7 (qid 3)":                      "7",
+		"Query 3: -7":                    "-7",
+		"1,234":                          "1234",
+		"Query 3: 12,800 lines":          "12800",
+		"1,234,567":                      "1234567",
+		"1_234":                          "1234",
+		"qid 3: 1,234":                   "1234",
+		"the answer to query 3 is 1,234": "1234",
+	} {
+		if !credited(want, answer) {
+			t.Errorf("answer %q must be credited as %s", answer, want)
+		}
+	}
+	for answer, want := range map[string]string{
+		"Query 3: 7 or 8": "7", // two numbers once the label is gone
+		"7, 8":            "7",
+		"5,6":             "5",
+		"Query 3":         "3", // the label is not an answer
+		"1,234":           "234",
+		"5,600":           "5",
+		"1234,567":        "1234",
+	} {
+		if credited(want, answer) {
+			t.Errorf("answer %q must not be credited as %s", answer, want)
+		}
 	}
 }
 
