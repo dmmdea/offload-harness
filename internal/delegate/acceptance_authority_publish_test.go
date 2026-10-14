@@ -3,10 +3,12 @@ package delegate
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 )
@@ -151,6 +153,64 @@ func TestTheClosedAtAuthorityIsPublishedOnTheResult(t *testing.T) {
 			t.Fatal("the corpus row of a failed contract carries acceptance_authority")
 		}
 	})
+}
+
+// The same reading on the remote placement path: a node's finished answer is graded by the delegator with the contract's own
+// checks, and the authority rides the published result.
+func TestTheClosedAtAuthorityIsPublishedForARemoteResult(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+		pollState: func(int64) (map[string]any, int) {
+			return doneWire(t, remoteWire("the zorblax answer", `{"answer":"42"}`)), http.StatusOK
+		},
+	}
+	srv := node.server()
+	c := remoteContract()
+	c.Acceptance = []string{"contains:@answer:zorblax", "contains:@field=answer:42"}
+	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{c}, "remote", []string{srv.URL})
+	if err != nil || len(results) != 1 {
+		t.Fatalf("Run: %v (%d results)", err, len(results))
+	}
+	if sum.Succeeded != 1 || len(results[0].AcceptanceFailures) != 0 {
+		t.Fatalf("summary %+v failures %v, want one accepted result", sum, results[0].AcceptanceFailures)
+	}
+	// answer and field are both reached; the weakest is answer
+	if got := wireRowOf(t, results, sum)["acceptance_authority"]; got != "answer" {
+		t.Fatalf("published acceptance_authority = %v, want \"answer\"", got)
+	}
+}
+
+// Every site that grades a result goes through PlacedResult.gradeAcceptance, so the failures and the authority are set
+// together. A site that assigned the failures alone would publish a result whose authority is stale or missing; this reads the
+// package's own source so a new such site fails here and not in production.
+func TestEverySiteThatGradesAResultRecordsTheAuthorityToo(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("glob: %v (%d files)", err, len(files))
+	}
+	callers := map[string]bool{}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := string(raw)
+		if strings.Contains(src, "AcceptanceFailures = EvalAcceptance(") {
+			t.Errorf("%s assigns AcceptanceFailures from EvalAcceptance: use pr.gradeAcceptance so the authority is recorded with them", f)
+		}
+		if strings.Contains(src, ".gradeAcceptance(") {
+			callers[f] = true
+		}
+	}
+	for _, f := range []string{"run.go", "queue.go", "rescue.go", "calldeadline.go"} {
+		if !callers[f] {
+			t.Errorf("%s no longer grades through gradeAcceptance", f)
+		}
+	}
 }
 
 // A result the call deadline rewrote has no answer to have been accepted: the authority goes with the failures.
