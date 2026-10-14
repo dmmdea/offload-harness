@@ -37,6 +37,14 @@ func kindOf(c Candidate) string {
 	return c.Engine
 }
 
+// seatLabel is "llama.cpp seat X", or just "seat X" when the engine kind is not known.
+func seatLabel(kind, seat string) string {
+	if kind == EngineUnknown {
+		return "seat " + seat
+	}
+	return kind + " seat " + seat
+}
+
 // Resolve walks a lane's chain in order and reports the first candidate whose probe passes. The failures
 // that came before it are named in the reason ("vllm seat X unavailable: ...; fell to llama.cpp seat Y:
 // ..."), so a lane served by its second backend says why it is not served by its first. When none passes
@@ -72,7 +80,7 @@ func Resolve(ctx context.Context, lane Lane, p Prober) Entry {
 		}
 		if v.OK {
 			e.ActiveBackend, e.Seat, e.BackendProbe = chain[i], c.Seat, level
-			reason := fmt.Sprintf("%s seat %s: %s", chain[i], c.Seat, v.Detail)
+			reason := fmt.Sprintf("%s: %s", seatLabel(chain[i], c.Seat), v.Detail)
 			if len(failed) > 0 {
 				reason = strings.Join(failed, "; ") + "; fell to " + reason
 			}
@@ -82,7 +90,7 @@ func Resolve(ctx context.Context, lane Lane, p Prober) Entry {
 			e.BackendReason = reason
 			return e
 		}
-		failed = append(failed, fmt.Sprintf("%s seat %s unavailable: %s", chain[i], c.Seat, v.Detail))
+		failed = append(failed, fmt.Sprintf("%s unavailable: %s", seatLabel(chain[i], c.Seat), v.Detail))
 	}
 	e.ActiveBackend, e.Seat, e.BackendProbe = EngineNone, lane.Chain[0].Seat, deepest
 	e.BackendReason = strings.Join(failed, "; ")

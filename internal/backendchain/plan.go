@@ -64,8 +64,10 @@ func (t TierSeat) answers(name string) bool {
 	return false
 }
 
-// PlanLanes derives the lanes to report from a config: one per model route that is bound (the config's
-// own table, config.ModelRoutes, so doctor, offload_status and this report read one list). Every lane is
+// PlanLanes derives the lanes to report from a config: one per model route that is bound and that
+// doctor checks against the roster (the config's own table, config.ModelRoutes, so doctor,
+// offload_status and this report read one list; a route doctor does not diff, embed_model, has no seat
+// whose absence means a route cannot run, so it is not a lane here either). Every lane is
 // its one bound seat, except the agent lane of a box whose tier declares a vLLM agent seat: the tier
 // prefers that seat and serves a llama.cpp seat when the vLLM prerequisites are missing, so the lane's
 // chain is [the vLLM seat, the llama.cpp fallback], with the bound one marked.
@@ -73,7 +75,7 @@ func PlanLanes(cfg config.Config) []Lane {
 	var out []Lane
 	for _, r := range cfg.ModelRoutes() {
 		seat := strings.TrimSpace(r.Effective)
-		if seat == "" {
+		if seat == "" || !r.Diffed {
 			continue
 		}
 		chain := []Candidate{{Seat: seat, Bound: true}}

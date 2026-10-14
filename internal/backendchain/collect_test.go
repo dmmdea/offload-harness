@@ -25,6 +25,9 @@ type fakeSwap struct {
 	roster     map[string][]string // canonical id -> aliases
 	running    map[string]string   // canonical id -> llama-swap state
 	seatStatus map[string]int      // seat id -> status its own /health answers (default 200)
+	// runningStatus, when set, is what /running answers instead of the list (a llama-swap whose running
+	// list cannot be read).
+	runningStatus int
 	// allowCompletion admits POST /v1/chat/completions (and records the body): only the test of the
 	// explicit completion option sets it.
 	allowCompletion bool
@@ -52,6 +55,8 @@ func (f *fakeSwap) handle(w http.ResponseWriter, r *http.Request) {
 			rows = append(rows, fmt.Sprintf(`{"id":%q,"object":"model","meta":{"llamaswap":{"aliases":%s}}}`, id, a))
 		}
 		fmt.Fprintf(w, `{"object":"list","data":[%s]}`, strings.Join(rows, ","))
+	case r.Method == http.MethodGet && r.URL.Path == "/running" && f.runningStatus != 0:
+		w.WriteHeader(f.runningStatus)
 	case r.Method == http.MethodGet && r.URL.Path == "/running":
 		var rows []string
 		for id, state := range f.running {
@@ -380,5 +385,92 @@ func TestPlanLanes(t *testing.T) {
 	if len(agent.Chain) != 2 || agent.Chain[0].Seat != "big-vllm" || agent.Chain[0].Engine != EngineVLLM || agent.Chain[0].Bound ||
 		agent.Chain[1].Seat != "small-cpp" || !agent.Chain[1].Bound {
 		t.Errorf("tier chain = %+v, want the preferred vLLM seat then the bound fallback", agent.Chain)
+	}
+}
+
+// TestCollectReadsAnAliasBoundSeatAsLoaded: lanes bind seats by ALIAS and /running lists the canonical
+// id, so a reader that matches the bound name reads a loaded seat as idle (the 0.113.16 drain defect).
+func TestCollectReadsAnAliasBoundSeatAsLoaded(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	f.running["small-cpp"] = "ready"
+	cfg := testCfg(t, f)
+	cfg.AgentModel = "cpp-alias"
+	r := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client()})
+	agent := laneOf(t, r, "agent")
+	if agent.ActiveBackend != EngineLlamaCpp || agent.BackendProbe != ProbeEndpoint || agent.Seat != "cpp-alias" {
+		t.Errorf("agent lane bound by alias = %+v, want the loaded canonical seat probed at its endpoint", agent)
+	}
+}
+
+// TestCollectLoadStates: a seat llama-swap lists as starting or stopping is not asked anything (a
+// request would hold until the load ends, or reset the unload) and says what it is doing.
+func TestCollectLoadStates(t *testing.T) {
+	for state, want := range map[string]string{"starting": "loading", "stopping": "unloading"} {
+		f := newFakeSwap(t, fullRoster())
+		f.running["small-cpp"] = state
+		r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client()})
+		e := seatOf(t, r, "small-cpp")
+		if e.ActiveBackend != EngineLlamaCpp || e.BackendProbe != ProbeProcess || !strings.Contains(e.BackendReason, want) {
+			t.Errorf("%s: %+v", state, e)
+		}
+		for _, req := range f.requests {
+			if strings.HasPrefix(req, "GET /seat/") {
+				t.Errorf("%s: a seat in transition was asked directly: %s", state, req)
+			}
+		}
+	}
+}
+
+// TestCollectHonoursASwitchedOffHealthEndpoint: `checkEndpoint: none` in the serving config means the
+// seat has no health path to ask, and the report says so instead of inventing /health.
+func TestCollectHonoursASwitchedOffHealthEndpoint(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	f.running["small-cpp"] = "ready"
+	cfg := testCfg(t, f)
+	yaml := strings.Replace(servingYAML, "  small-cpp:\n", "  small-cpp:\n    checkEndpoint: none\n", 1)
+	if err := os.WriteFile(cfg.ServingConfigPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client()})
+	e := seatOf(t, r, "small-cpp")
+	if e.BackendProbe != ProbeProcess || !strings.Contains(e.BackendReason, "switched off") {
+		t.Errorf("small-cpp = %+v", e)
+	}
+	for _, req := range f.requests {
+		if strings.HasPrefix(req, "GET /seat/") {
+			t.Errorf("a switched-off health endpoint was asked anyway: %s", req)
+		}
+	}
+}
+
+// TestCompletionProbeSkippedWhenRunningListIsUnreadable: with llama-swap's running list unreadable a vLLM
+// seat holding the cards cannot be ruled out, so a completion that would load an idle seat is not sent.
+func TestCompletionProbeSkippedWhenRunningListIsUnreadable(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	f.runningStatus = http.StatusInternalServerError
+	f.allowCompletion = true
+	r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+	if n := f.completionCount(); n != 0 {
+		t.Errorf("%d completions were sent with the running list unreadable", n)
+	}
+	e := seatOf(t, r, "small-cpp")
+	if e.ActiveBackend != EngineLlamaCpp || !strings.Contains(e.BackendReason, "cannot be ruled out") {
+		t.Errorf("small-cpp = %+v", e)
+	}
+}
+
+// TestCollectCountsAnUnconfiguredEndpointAsNone: no llama-swap endpoint is configured, so nothing is
+// read and nothing is claimed.
+func TestCollectCountsAnUnconfiguredEndpointAsNone(t *testing.T) {
+	cfg := config.Default()
+	cfg.Endpoint = ""
+	r := Collect(t.Context(), cfg, Options{})
+	if len(r.Lanes) == 0 {
+		t.Fatal("the lanes are still planned")
+	}
+	for _, e := range r.Lanes {
+		if e.ActiveBackend != EngineNone || !strings.Contains(e.BackendReason, "no llama-swap endpoint is configured") {
+			t.Errorf("%+v", e)
+		}
 	}
 }
