@@ -685,6 +685,7 @@ func TestTraceCorpusPrefillDistribution(t *testing.T) {
 
 	// No measured run: the count is 0 and every figure is null, never a 0.
 	b, _ = json.Marshal(tcStatsFor([]tcRun{{ID: "u", Source: tcSourceDelegation, Steps: 1}}).Prefill)
+	got.PerRun, got.PerStep = nil, nil
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}

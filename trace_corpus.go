@@ -720,6 +720,37 @@ type tcPrefillStats struct {
 	SeatInputTokens           int64    `json:"seat_input_tokens"`
 	SeatInputSteps            int64    `json:"seat_input_steps"`
 	AvgSeatInputTokensPerStep *float64 `json:"avg_seat_input_tokens_per_step"`
+	// The per-run spread (an average hides the long runs): prefilled tokens over the measured
+	// runs, and the mean prompt size per step (seat input tokens over steps) over the runs that
+	// reported seat input tokens and ran at least one step.
+	PrefillTokensPerRun          tcDist `json:"prefill_tokens_per_run"`
+	SeatInputTokensPerStepPerRun tcDist `json:"seat_input_tokens_per_step_per_run"`
+}
+
+// tcDist is a nearest-rank summary of one value per run: every figure is a value some run had,
+// and an empty set has runs 0 and null figures, never zeros.
+type tcDist struct {
+	Runs int    `json:"runs"`
+	P50  *int64 `json:"p50"`
+	P90  *int64 `json:"p90"`
+	Max  *int64 `json:"max"`
+}
+
+// tcSummarize sorts vals in place and returns its nearest-rank summary.
+func tcSummarize(vals []int64) tcDist {
+	d := tcDist{Runs: len(vals)}
+	if len(vals) == 0 {
+		return d
+	}
+	sort.Slice(vals, func(i, j int) bool { return vals[i] < vals[j] })
+	at := func(q float64) *int64 {
+		v := vals[int(math.Ceil(q*float64(len(vals))))-1]
+		return &v
+	}
+	d.P50, d.P90 = at(0.5), at(0.9)
+	top := vals[len(vals)-1]
+	d.Max = &top
+	return d
 }
 
 // tcRound keeps six decimals: a rate in a baseline file reads, and the rounding is the same
@@ -738,6 +769,7 @@ func tcRate(num, den float64) *float64 {
 func tcStatsFor(runs []tcRun) tcStats {
 	var s tcStats
 	s.Pager.Gate = agent.PagerGate
+	var prefillPerRun, promptPerStep []int64
 	for _, r := range runs {
 		s.Runs++
 		if r.TraceBearing {
@@ -775,6 +807,9 @@ func tcStatsFor(runs []tcRun) tcStats {
 			s.Prefill.SeatInputRuns++
 			s.Prefill.SeatInputTokens += *r.SeatTokensIn
 			s.Prefill.SeatInputSteps += int64(r.Steps)
+			if r.Steps > 0 {
+				promptPerStep = append(promptPerStep, *r.SeatTokensIn/int64(r.Steps))
+			}
 		}
 		switch {
 		case r.Prefill == nil:
@@ -786,6 +821,7 @@ func tcStatsFor(runs []tcRun) tcStats {
 			s.Prefill.ObservedSteps += int64(r.Prefill.ObservedSteps)
 			s.Prefill.PrefillTokens += r.Prefill.PrefillTokens
 			s.Prefill.CacheTokens += r.Prefill.CacheTokens
+			prefillPerRun = append(prefillPerRun, r.Prefill.PrefillTokens)
 		}
 	}
 
@@ -815,6 +851,8 @@ func tcStatsFor(runs []tcRun) tcStats {
 	f.AvgPrefillTokensPerStep = tcRate(float64(f.PrefillTokens), float64(f.ObservedSteps))
 	f.AvgPrefillTokensPerRun = tcRate(float64(f.PrefillTokens), float64(f.MeasuredRuns))
 	f.AvgSeatInputTokensPerStep = tcRate(float64(f.SeatInputTokens), float64(f.SeatInputSteps))
+	f.PrefillTokensPerRun = tcSummarize(prefillPerRun)
+	f.SeatInputTokensPerStepPerRun = tcSummarize(promptPerStep)
 	return s
 }
 
