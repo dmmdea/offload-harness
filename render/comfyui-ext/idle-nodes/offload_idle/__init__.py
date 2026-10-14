@@ -31,6 +31,14 @@ def resolve_poll(raw, say=None):
     return DEFAULT_POLL_SEC
 
 
+def models_loaded():
+    return False
+
+
+def cache_on():
+    return False
+
+
 class IdleBound:
     def __init__(self, get_queue, loaded_fn, cache_on_fn, limit, poll=DEFAULT_POLL_SEC, clock=time.monotonic,
                  wait=None, say=None):
@@ -54,7 +62,9 @@ class IdleBound:
         return None
 
     def start(self):
-        return threading.Thread(target=self.run)
+        self.thread = threading.Thread(target=self.run)
+        self.thread.start()
+        return self.thread
 
     def stop(self):
         self._stop.set()
