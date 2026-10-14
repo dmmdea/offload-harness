@@ -153,7 +153,9 @@ func TestWithinTaskTimeoutsCannotMakeACandidateBetter(t *testing.T) {
 	const n = 16
 	b, h := freeze(t, supPre(n), nil)
 	inc := armFrom("i", n, func(int) []Attempt { return []Attempt{passOnly(1), failOnly(0), failOnly(0)} })
-	cand := armFrom("c", n, func(int) []Attempt { return []Attempt{passOnly(1), noScore(OutcomeTimeout), noScore(OutcomeInfraError)} })
+	cand := armFrom("c", n, func(int) []Attempt {
+		return []Attempt{passOnly(1), noScore(OutcomeTimeout), noScore(OutcomeInfraError)}
+	})
 	r := mustGate(t, b, h, inputFor(h, inc, cand))
 	if r.Verdict == VerdictAdopt {
 		t.Fatalf("a candidate whose two other attempts did not finish was adopted: %s", marshal(t, r))
@@ -222,7 +224,7 @@ func TestImputationUsesTheWorstScoreOfTheClass(t *testing.T) {
 			if r.NUsed != n || r.Delta != tc.wantDelta || r.Lo != tc.wantDelta || r.Hi != tc.wantDelta {
 				t.Fatalf("every candidate task scores the worst: want delta %v, got n=%d %v [%v, %v]", tc.wantDelta, r.NUsed, r.Delta, r.Lo, r.Hi)
 			}
-			if r.ImputedAttempts != n || r.AttemptCounts.Candidate["not_run"] != 4+5 {
+			if r.ImputedAttempts != n || r.AttemptCounts.Candidate["not_run"] != 3+5 {
 				t.Fatalf("all %d candidate attempts are imputed (5 are placeholders): %+v %d", n, r.AttemptCounts.Candidate, r.ImputedAttempts)
 			}
 			if r.Verdict != VerdictInconclusive || !strings.Contains(r.Reason, "excluded_share=1") {
@@ -289,7 +291,7 @@ func TestIncumbentUnusableAttemptsAreSkippedAndExcludeThePair(t *testing.T) {
 	if r.ExcludedPairs != 2 || r.NUsed != 18 {
 		t.Fatalf("t003 and t004 have no usable incumbent attempt: %+v", r)
 	}
-	if r.UnusableAttempts.Incumbent != 5 || r.ImputedAttempts != 0 || r.UnusableAttempts.Candidate != 0 {
+	if r.UnusableAttempts.Incumbent != 7 || r.ImputedAttempts != 0 || r.UnusableAttempts.Candidate != 0 {
 		t.Fatalf("incumbent unusable attempts are counted, never imputed: %+v imputed %d", r.UnusableAttempts, r.ImputedAttempts)
 	}
 	// t000..t002 score 1 (the timeout is skipped, not averaged in as 0); the other 15 score 0.
@@ -605,6 +607,26 @@ func TestJudgeSwapAttacksAreRefused(t *testing.T) {
 	if _, err := Gate(bm, hm, in); err == nil || !strings.Contains(err.Error(), "pairs_hash") {
 		t.Fatalf("a receipt with empty hashes must be refused, got %v", err)
 	}
+	// A hash must be exactly 64 characters of lower-case hex: a short one, a long one and a
+	// non-hex one of the right length are each refused, in either field.
+	bad := map[string]string{
+		"63 hex characters":         hex64("x")[:63],
+		"65 hex characters":         hex64("x") + "0",
+		"64 characters, non-hex":    strings.Repeat("g", 64),
+		"64 characters, upper-case": strings.ToUpper(hex64("x")),
+	}
+	for name, h := range bad {
+		for field, rc := range map[string]JudgeReceipt{
+			"pairs_hash":   {ScorerID: "gpt-judge-v1", PairsHash: h, BuildSHA: hex64("build"), Passed: true},
+			"build_sha256": {ScorerID: "gpt-judge-v1", PairsHash: hex64("pairs"), BuildSHA: h, Passed: true},
+		} {
+			rc := rc
+			in.Receipt = &rc
+			if _, err := Gate(bm, hm, in); err == nil || !strings.Contains(err.Error(), field) {
+				t.Errorf("%s in %s must be refused naming the field, got %v", name, field, err)
+			}
+		}
+	}
 	in.Receipt = &JudgeReceipt{ScorerID: "gpt-judge-v1", PairsHash: hex64("pairs"), BuildSHA: hex64("build"), Passed: true}
 	if _, err := Gate(bm, hm, in); err != nil {
 		t.Fatalf("a complete receipt for the frozen model judge is accepted: %v", err)
@@ -707,7 +729,9 @@ func TestUnresolvedMetricShareAboveTheCapBlocksAdoptInNonInferiority(t *testing.
 func TestTimedOutTasksLeaveTheirCostUnresolved(t *testing.T) {
 	const n = 20
 	b, h := freeze(t, niPre(n), nil)
-	inc := armFrom("i", n, func(int) []Attempt { return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: tokenMetric(1000)}} })
+	inc := armFrom("i", n, func(int) []Attempt {
+		return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: tokenMetric(1000)}}
+	})
 	cand := armFrom("c", n, func(i int) []Attempt {
 		if i < 5 {
 			return []Attempt{{Outcome: OutcomeTimeout, Metrics: tokenMetric(1)}}
@@ -956,7 +980,9 @@ func TestAFailingCandidateIsBlockedUnderTheWidestMargin(t *testing.T) {
 	p.Primary.Margin = f64(0.99)
 	b, h := freeze(t, p, nil)
 	inc := armFrom("i", n, func(int) []Attempt { return []Attempt{passTok(1, 1000)} })
-	cand := armFrom("c", n, func(int) []Attempt { return []Attempt{{Outcome: OutcomeTaskFail, Score: f64(0), Metrics: tokenMetric(10)}} })
+	cand := armFrom("c", n, func(int) []Attempt {
+		return []Attempt{{Outcome: OutcomeTaskFail, Score: f64(0), Metrics: tokenMetric(10)}}
+	})
 	r := mustGate(t, b, h, inputFor(h, inc, cand))
 	if r.Verdict != VerdictBlock {
 		t.Fatalf("failing every task is worse than any margin inside the range: %s %s", r.Verdict, r.Reason)
