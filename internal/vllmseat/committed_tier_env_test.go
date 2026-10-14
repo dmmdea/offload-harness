@@ -287,6 +287,15 @@ func TestVLLMSeatReferenceEntryDeclaresWhatEntryRenders(t *testing.T) {
 			t.Errorf("reference %s = %v, but Spec.Entry renders %v", k, got, w)
 		}
 	}
+	// cmd and cmdStop differ by path placeholder, so the comparison is the program and the stub
+	// they run: a hand entry that runs bash through wsl.exe cannot start the distro from SYSTEM.
+	for k, stub := range map[string]string{"cmd": "seat-cmd.ps1", "cmdStop": "seat-cmdstop.ps1"} {
+		for name, m := range map[string]map[string]any{"the reference": ref, "Spec.Entry": want} {
+			if got, _ := m[k].(string); !strings.Contains(got, "powershell.exe") || !strings.Contains(got, stub) {
+				t.Errorf("%s %s = %q, want the PowerShell stub %s", name, k, got, stub)
+			}
+		}
+	}
 	refID, _ := parse("the reference", string(raw))
 	if got := ref["useModelName"]; got != refID {
 		t.Errorf("reference useModelName = %v, want its own model id %q (vLLM 404s every name it does not serve)", got, refID)
