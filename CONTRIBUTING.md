@@ -72,7 +72,9 @@ binary once left 22,434 folders and about 70 GB in under two hours. Two things g
   any `os.TempDir`, `TMP`, `TEMP` or `TMPDIR` read from the environment, and `os.MkdirTemp` passed as a value. It also
   requires every package whose tests start a copy of their own test binary to hold
   `TestARelaunchedTestBinaryLeavesNothingInTheTempDir` (see `internal/mediaremote/relaunch_leak_test.go`) or to be listed in
-  `relaunchExempt` with the reason a started copy leaves nothing. Prefer `t.TempDir()` to a new entry. To regenerate the
+  `relaunchExempt` with the reason a started copy leaves nothing (the root package's copy that a test starts with
+  `LOCAL_OFFLOAD_STATE_DIR` taken out of its environment keeps its state root inside the suite's own, which the suite removes;
+  every suite `TestMain` retries a failed removal once and names a root it could not remove on stderr). Prefer `t.TempDir()` to a new entry. To regenerate the
   keys, run `TEMPDIR_LINT_PRINT=1 go test . -run 'TestTestsReachForTheOSTempDirOnlyWhereItsRemovalIsOnEveryPath|TestEveryRelaunchingPackageProvesItLeavesNothing' -v`
   and write the reasons after reading the code.
 - **The tripwire, `scripts/test-temp-tripwire.sh`** (PowerShell twin `scripts/test-temp-tripwire.ps1`). A lint cannot see a

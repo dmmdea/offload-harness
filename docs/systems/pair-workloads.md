@@ -762,6 +762,16 @@ side can know the producer died, so the harness retires its own orphans:
   also needs `LOCAL_OFFLOAD_HOME` to be that root's `home` folder and `LOCAL_OFFLOAD_ORIGIN` to be
   `go-test`, the two values its `runIsolated` pins for the ledger guard, because a copy skips
   `runIsolated` and would otherwise take both from whatever the launching test left in the environment.
+  The tests that start a real `gpu reserve` wrapper take `LOCAL_OFFLOAD_STATE_DIR` out of the copy's
+  environment on purpose, so those copies cannot share the suite's root: the root package's
+  `runIsolated` makes such a copy's own root inside the suite's (`relaunchRootParent`, a `relaunch`
+  folder in the root `LO_ROOT_SUITE_STATE_ROOT` names) instead of in the OS temp dir, and the suite's
+  removal takes it with it, because a copy that dies by `os.Exit` or a kill never removes its own
+  (`TestARelaunchedCopyThatLostTheStateDirLeavesNothingInTheTempDir`). When the variable names no live
+  throwaway root, the root goes to the OS temp dir as before. In the root, `internal/delegate` and
+  `internal/mcpserver`, a removal that fails is tried once more after 250 ms and a root still there is
+  named on stderr with the error (`TestRunIsolatedRetriesARemovalOnceAndReportsWhatStaysBehind`); only a
+  run killed from outside (a timeout, a kill) can still leave a root, which no test code can clean.
 
 ## The PAIR side (what has to be true on the box)
 
