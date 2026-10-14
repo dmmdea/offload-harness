@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -228,9 +229,19 @@ func Fetch(ctx context.Context, raw string, opt Options) Fetched {
 	// generic type is sniffed first; a document that then fails to parse falls through to the page path
 	// below, so nothing that was readable before this change stops being readable.
 	if (isFeedMediaType(ct) || (feedSniffable(ct) && SniffFeed(body))) && !strings.Contains(ct, "html") {
-		if title, ftext, ferr := FeedToText(body); ferr == nil {
-			out.Title = title
-			finishText(&out, ftext)
+		// the charset the server names for the bytes and the address they came from (after redirects) go to the
+		// parser: the first decides how the text is read, the second what a relative item link is relative to
+		var charset string
+		if _, params, merr := mime.ParseMediaType(out.ContentType); merr == nil {
+			charset = params["charset"]
+		}
+		base, _ := url.Parse(out.FinalURL)
+		if fp, ferr := parseFeed(body, charset, base); ferr == nil {
+			out.Title = fp.Title
+			if fp.Cut {
+				out.Truncated = true
+			}
+			finishText(&out, fp.Text)
 			return out
 		}
 	}

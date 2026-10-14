@@ -153,6 +153,14 @@ func TestFeedBodyCutMidItemSaysSoAndCountsHonestly(t *testing.T) {
 	}
 }
 
+// Junk after the root element closed is not a cut: the document was complete.
+func TestFeedFollowedByTrailingJunkIsNotCut(t *testing.T) {
+	got := fetchFeed(t, "application/rss+xml", rssWithTitles(2, nil)+"\n<!-- served from cache -->\n<script", "/feed.xml")
+	if got.Err != "" || got.Truncated || strings.Contains(got.Text, "cut off") || !strings.Contains(got.Text, "Items: 2\n") {
+		t.Fatalf("a complete feed followed by junk was reported as cut: err %q truncated %v\n%s", got.Err, got.Truncated, got.Text)
+	}
+}
+
 // A feed longer than the read bound is cut at 2 MiB, in the middle of an item, and says so first.
 func TestFeedLongerThanTheReadBoundIsReportedAsCut(t *testing.T) {
 	var b strings.Builder
@@ -189,7 +197,7 @@ func TestFeedRelativeLinksResolveAgainstTheFeedAddressAndXMLBase(t *testing.T) {
 		"Link: http://feeds.example/posts/1", "Link: http://feeds.example/blog/posts/2",
 		"Link: https://other.example/x", "Link: http://cdn.example/y",
 	} {
-		if !strings.Contains(got.Text, want+"\n") {
+		if !strings.Contains(got.Text+"\n", want+"\n") { // the last line of the text has no newline after it
 			t.Errorf("missing %q:\n%s", want, got.Text)
 		}
 	}
@@ -208,14 +216,14 @@ func TestFeedRelativeLinksResolveAgainstTheFeedAddressAndXMLBase(t *testing.T) {
 		"Link: https://static.example/root/a/1", "Link: https://entry.example/e/a/2",
 		"Link: https://link.example/l/a/3", "Link: https://abs.example/a/4",
 	} {
-		if !strings.Contains(got.Text, want+"\n") {
+		if !strings.Contains(got.Text+"\n", want+"\n") { // the last line of the text has no newline after it
 			t.Errorf("missing %q:\n%s", want, got.Text)
 		}
 	}
 
 	// a document with no base of its own is relative to where it was fetched from, after redirects
 	got = fetchFeed(t, "application/atom+xml", `<feed xmlns="http://www.w3.org/2005/Atom"><title>B</title><entry><title>E</title><link href="../p/9"/></entry></feed>`, "/a/b/feed.atom")
-	if !strings.Contains(got.Text, "Link: http://feeds.example/a/p/9\n") {
+	if !strings.Contains(got.Text+"\n", "Link: http://feeds.example/a/p/9\n") {
 		t.Errorf("relative to the feed address:\n%s", got.Text)
 	}
 }
