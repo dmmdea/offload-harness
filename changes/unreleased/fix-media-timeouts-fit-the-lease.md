@@ -1,47 +1,42 @@
 
-### Fixed - the media timeouts the repository ships are held to the lease window they run under, and the node page and the guide say where that window comes from
+### Fixed - the guide and the node page say where a media call's lease window comes from and what holds it
 
-- **What the row claimed, and what the tree does.** The open question was a 5,400 s video timeout against a 3,600 s lease.
-  The tree has no such pair: every generation route takes the media lease for its own timeout and the render is killed at
-  that value (pinned in `internal/pipeline` by the lease-window fragment already in this release), and the 3,600 s
-  `DefaultTTL` is only the fallback for a lease taken with no window. The code defaults (`imagegen_timeout_sec` 720,
-  `videogen_timeout_sec` 1,500, `audiogen_timeout_sec` 720, `gpu_wait_ms` 90,000) are what `config.example.json` and
-  `setup/templates/config.json` carry, and `profiles.json` raises them per tier on purpose: the 5,400 s video seed is sized
-  from a measured 5,136 s film render, so cutting it to the lease library's fallback would kill a render that works. No
-  seed value and no code default changed.
-- **How a window can outgrow its term.** A window longer than one lease term (`gpu_max_term_min`, six hours by default) is
-  accepted whole but reaches its end only by renewal, and a term that is not renewed is labelled expired while the render
-  runs. Nothing held the seeds to that: a tier seed of `videogen_timeout_sec` 30,000, or a seed that lowers
-  `gpu_max_term_min` under its own video timeout, loaded without a word. That is the single-job case, and it is what the
-  test below holds. The other case is an image batch: its window is the per-image timeout times its jobs and nothing caps
-  the job count, so a batch of more than `gpu_max_term_min` divided by the per-image timeout images (more than six at the
-  seeded 3,600 s image timeout) asks for a window above the term whatever any seed says. This change states that limit in
-  the guide; it does not cap the job count, which is a pipeline change.
-- **What changed.** `docs/FLEET-NODE.md` now says a fleet media job's lease window is its route's own timeout key on the
-  node that runs it (the payload carries none), that `gpu_wait_ms` (90 s by default) is the queue wait and not a lease
-  length, and that the window is one term, as a single job's timeout (a node renders one job per ticket and there is no
-  batch task on the fleet, so the batch product never reaches a node). The guide's engine + lease row names
-  `gpu_max_term_min` as the bound on a single job's timeout, names the image batch and its uncapped job count as the case
-  that bound does not cover, and tells a `gpu reserve` wrapper to size `--for` from the key of the route it wraps (a seeded
-  5,400 s video wants `--for 90m`). The node page points at the guide's timeout chain section in prose, not through an
-  anchor.
-- **Tests (root package).** `TestSeededMediaTimeoutsFitTheLeaseWindowTheyRunUnder` holds every single-job media timeout the
-  repository ships to one lease term: the code defaults, `config.example.json`, the setup template and every tier seed layer in
-  `profiles.json` (base and `config_seed_*` overlays, `imagegen_families` and `gen_edit_families` keys included), plus any
-  seeded `gpu_wait_ms` to the doctor's 3x vision-wait rule. `TestTheSetupTemplateRestatesTheCodeDefaultsOrNothing` pins the
-  template's clocks to `config.Default()`. `TestTheMediaTimeoutKeyListMatchesTheConfig` reflects over `config.Config` and
-  fails when a `*_timeout_sec` key is in neither the media list nor the list of clocks that are not lease windows, or when a
-  listed key is gone from the config, so a new generation route cannot slip past the seed test (the control that used to
-  claim this could not fail, because the code-default entries marked every key as seen; it is gone).
-  `TestTheDocsStateWhereAMediaCallsLeaseWindowComesFrom` pins the doc statements above, quoting the 90 s from
-  `config.Default()`.
-- **Red-first, honestly.** The doc test was red before the docs changed (the guide row did not name `gpu_max_term_min` or the
-  batch case; the node page had no such paragraph), and the key-list test was red against a stub (its two controls, a new
-  `*_timeout_sec` key and a dropped listed key, found nothing). The seed test and the template test are guards, green on the tree
-  as it stands, like the pipeline tests of the lease-window fragment; their negative controls (a 5,400 s video under a 60 min
-  term, a 7 h image seed, a 600,000 ms `gpu_wait_ms`) are inside the test, and a hand mutation of `profiles.json` turned the
-  seed test red.
-- **Not changed, and why.** No `internal/config` default needed a change. Resizing a tier seed (an image seed of 3,600 s
-  against a render that finishes in minutes on some cards) stays a measurement decision per tier. A job-count ceiling for the
-  image batch (clamp or split it at `gpu_max_term_min` divided by the per-image timeout) is not added here: it belongs in
-  `internal/pipeline`, and until then the limit is stated, not enforced.
+- **The open question.** A 5,400 s video timeout against a 3,600 s lease. The tree has no such pair: every generation
+  route takes the media lease for its own timeout and the render is killed at that value (pinned in `internal/pipeline` by
+  the lease-window fragment already in this release), and the 3,600 s `DefaultTTL` is only the fallback for a lease taken
+  with no window. The code defaults (`imagegen_timeout_sec` 720, `videogen_timeout_sec` 1,500, `audiogen_timeout_sec` 720,
+  `gpu_wait_ms` 90,000) are what `config.example.json` and `setup/templates/config.json` carry, and `profiles.json` raises
+  them per tier on purpose. No seed value and no code default changed.
+- **What holds a media lease, read in the code.** The acquirer stamps the lease's end as now plus its whole window: for a
+  generation call that is the route's own timeout, or the per-image timeout times the jobs of a batch
+  (`record` in `internal/gpulease`, `RunImageBatchWaiting` in `internal/pipeline`). The window is granted whole, whatever its length.
+  `gpu_max_term_min` is not a bound on it. Taking a lease only records the term (`stampTerm` writes `TermMs`,
+  `RequestedMs` and `MaxTotalMs`), and the term is read only as renewal arithmetic (`nextEnd`) by the term check
+  (`AdvanceTerm`), whose one caller is the tick of a `gpu reserve` or `gpu hold` holder. A pipeline media lease never runs
+  that check, so nothing labels it expired, and the yield asker, which also lives only in those holders and needs an
+  expired or due term, never asks it to yield. What keeps it is its heartbeat, renewed every 15 s while the render runs:
+  a lease whose holder is alive is reclaimable only when its heartbeat is stale and its window has ended. Past the window the same timeout is the
+  render's own deadline, so the render is killed and the lease released. Only an explicit takeover, or the death of the
+  process that holds the lease, frees the card sooner.
+- **The cost of a long timeout.** How long a wedged render holds the machine-wide media lease: the seeded figure, up to
+  3,600 s for an image and 7,200 s for a video. That is the only cost, and the guide already says to size a resize from
+  the seeded figure. An image batch is no different: its window is the per-image timeout times its jobs, granted whole,
+  kept by the same heartbeat. Whether to resize a tier seed stays a measurement decision per tier.
+- **What changed.** `docs/FLEET-NODE.md` says a fleet media job's lease window is its route's own timeout key on the node
+  that runs it (the payload carries none), that the window is granted whole and kept by the job's heartbeat, that
+  `gpu_wait_ms` (90 s by default) is the queue wait and not a lease length, and that `gpu_max_term_min` does not bound it.
+  The guide's engine + lease row says the same, names `gpu_max_term_min` only as the renewal term of a `gpu reserve` hold
+  (renewed by that hold's own holder), and tells a `gpu reserve` wrapper to size `--for` from the key of the route it wraps
+  (a seeded 5,400 s video wants `--for 90m`). The node page points at the guide's timeout chain section in prose, not
+  through an anchor.
+- **Tests (root package).** `TestTheDocsStateWhereAMediaCallsLeaseWindowComesFromAndWhatHoldsIt` requires the statements
+  above in the guide row and in the node page paragraph (quoting the 90 s from `config.Default()` and all seven route
+  keys) and refuses, by name, the retired claim that a media timeout must fit one lease term.
+  `TestTheMediaTimeoutKeyListMatchesTheConfig` reflects over `config.Config` and fails when a `*_timeout_sec` key is in
+  neither the media list nor the list of clocks that are not lease windows, or when a listed key is gone from the config, so
+  a new generation route cannot slip past the docs and template checks. `TestTheSetupTemplateRestatesTheCodeDefaultsOrNothing`
+  pins the template's clocks to `config.Default()`. `TestSeededGPUWaitsPassTheDoctorsVisionWaitRule` holds every shipped
+  `gpu_wait_ms` to the doctor's 3x vision-wait rule, with a blind-gate count and its negative controls.
+- **Red-first.** The docs test was committed red against the docs as they stood before this fix (the guide row and the
+  node page lacked "granted whole" and the heartbeat, and still carried the term-bound and batch-cap wording), with the other
+  three tests of the file green in that commit; the docs commit that follows turns it green.
