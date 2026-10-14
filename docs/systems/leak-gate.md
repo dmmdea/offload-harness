@@ -39,6 +39,13 @@ blind scanner fails loudly even where the tree gate skips.
 The full behaviour matrix of the matcher (about a hundred cases: camel and digit glue, escapes, accents,
 zero-width characters, percent forms, phrases, drive letters) is in `internal/leakgate`, with synthetic names.
 
+The tree scan has no path or extension filter: every tracked path is scanned. Two tests pin that for the
+`openspec/` tree (spec and change prose a session writes about this repository, the likeliest place for a
+machine name to arrive): `TestScanTreeCoversTheOpenSpecTree` in `internal/leakgate` (bodies and names, YAML and
+Markdown, red under a path filter) and the root `TestOpenSpecGeneratedToolFilesStayUntracked` (OpenSpec's
+generated per-tool skills and commands stay gitignored; the `openspec/` tree stays tracked). See
+[security.md](security.md#admitted-third-party-software).
+
 ## Entry modes
 
 The list holds five kinds of entry. Each is hashed with its own code, so the same word in two modes has two
