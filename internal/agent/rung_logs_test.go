@@ -1609,3 +1609,94 @@ func TestLogsMarkerSizeNamesTheSizeASkeletonRecorded(t *testing.T) {
 		t.Errorf("rung off, newest body is a skeleton: want %q, got %.120q", want, off[6].Content)
 	}
 }
+
+// lcSkeletonHeader spells a skeleton's disclosure line as the skeleton rung
+// writes it, newline included.
+func lcSkeletonHeader(n int) string {
+	return fmt.Sprintf("%s%d chars]\n", skeletonPrefix, n)
+}
+
+// TestLogsMarkerSizeIgnoresAQuotedSkeletonHeaderTheHarnessCannotVouchFor: the
+// skeleton branch of logsMarkerSize reads the size out of a header, and a tool
+// body that merely quotes one (a saved skeleton read back, a search hit) must
+// not set it. With the rung on, a header the skeleton rung could not have
+// written falls back to the body's own length at every site that names a size:
+// the helper, the elide rung, and both passes of the reactive last resort.
+func TestLogsMarkerSizeIgnoresAQuotedSkeletonHeaderTheHarnessCannotVouchFor(t *testing.T) {
+	accept := []struct {
+		name   string
+		header string
+		total  int
+		want   int
+	}{
+		{"a plausible claim", lcSkeletonHeader(5000), 700, 5000},
+		{"one byte above the body", lcSkeletonHeader(701), 700, 701},
+		{"the smallest body the skeleton rung prunes", lcSkeletonHeader(skeletonMinChars), 60, skeletonMinChars},
+		{"the largest size the harness vouches for", lcSkeletonHeader(logsMaxChars), 700, logsMaxChars},
+	}
+	for _, c := range accept {
+		body := lcQuoted(c.header, c.total)
+		if got := logsMarkerSize(body, true); got != c.want {
+			t.Errorf("%s: the marker should name %d, got %d for %.80q", c.name, c.want, got, body)
+		}
+	}
+
+	refuse := []struct {
+		name   string
+		header string
+		total  int
+	}{
+		{"a negative size", lcSkeletonHeader(-5), 700},
+		{"a zero size", lcSkeletonHeader(0), 700},
+		{"an eleven-digit size", lcSkeletonHeader(99999999999), 700},
+		{"a size beyond what the harness vouches for", lcSkeletonHeader(logsMaxChars + 1), 700},
+		{"a size equal to the body", lcSkeletonHeader(700), 700},
+		{"a size below the body", lcSkeletonHeader(650), 7000},
+		{"a size below what the skeleton rung prunes", lcSkeletonHeader(skeletonMinChars - 1), 60},
+		{"an explicit plus sign", skeletonPrefix + "+5000 chars]\n", 700},
+		{"leading zeros", skeletonPrefix + "05000 chars]\n", 700},
+		{"a doubled space", skeletonPrefix + "5000  chars]\n", 700},
+		{"a carriage return before the newline", skeletonPrefix + "5000 chars]\r\n", 700},
+		{"no newline after the bracket", skeletonPrefix + "5000 chars]x", 700},
+		{"text after the bracket", skeletonPrefix + "5000 chars] extra\n", 700},
+	}
+	for _, c := range refuse {
+		body := lcQuoted(c.header, c.total)
+		if got := logsMarkerSize(body, true); got != len(body) {
+			t.Errorf("%s: the marker should name the body's own %d, got %d for %.80q", c.name, len(body), got, body)
+		}
+	}
+
+	// The same through the ladder, for the three sizes a quoted header can
+	// carry that no skeleton could have recorded.
+	for _, claim := range []int{-5, 0, 99999999999} {
+		t.Run(fmt.Sprintf("claim %d", claim), func(t *testing.T) {
+			header := lcSkeletonHeader(claim)
+			older, newest := header+lrServerLog(150), header+lrServerLog(160)
+
+			// The reactive last resort over the newest body.
+			shrunk := emergencyShrinkWith(lrTranscript(lrServerLog(150), newest), 1, 3, compactOpts{LogCollapse: true})
+			if want := elisionMarker(len(newest)); shrunk[6].Content != want {
+				t.Errorf("last resort, newest body: want %q, got %.120q", want, shrunk[6].Content)
+			}
+			// The rung off already names the body's own length.
+			off := emergencyShrinkWith(lrTranscript(lrServerLog(150), newest), 1, 3, compactOpts{})
+			if want := elisionMarker(len(newest)); off[6].Content != want {
+				t.Errorf("last resort, newest body, rung off: want %q, got %.120q", want, off[6].Content)
+			}
+
+			// The reactive last resort over an older body.
+			shrunk = emergencyShrinkWith(lrTranscript(older, lrServerLog(160)), 1, 3, compactOpts{LogCollapse: true})
+			if want := elisionMarker(len(older)); !strings.HasPrefix(shrunk[4].Content, want) {
+				t.Errorf("last resort, older body: want prefix %q, got %.120q", want, shrunk[4].Content)
+			}
+
+			// The elide rung of the ladder proper.
+			distinct := lrTranscript(older, lrTestLog(80), lrServerLog(170))
+			tight := compact(context.Background(), distinct, 1, 2, 3, compactOpts{LogCollapse: true})
+			if want := elisionMarker(len(older)); !strings.HasPrefix(tight[4].Content, want) {
+				t.Errorf("elide marker: want prefix %q, got %.120q", want, tight[4].Content)
+			}
+		})
+	}
+}
