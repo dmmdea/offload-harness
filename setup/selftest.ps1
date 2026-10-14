@@ -144,7 +144,7 @@ function Invoke-Chat {
 function Test-AllocFailure {
   param([string]$ErrText)
   if (-not $ErrText) { return $false }
-  return ($ErrText -match '(?i)(VK_ERROR_OUT_OF_DEVICE_MEMORY|out of device memory|CUDA (error )?out of memory|cudaErrorMemoryAllocation|device[- ]lost|VK_ERROR_DEVICE_LOST|failed to allocate|ggml_backend.*alloc|unable to allocate|connection.*(closed|refused|reset|aborted)|actively refused|forcibly closed|unexpectedly)')
+  return ($ErrText -match '(?i)(VK_ERROR_OUT_OF_DEVICE_MEMORY|out of device memory|CUDA (error:? )?out of memory|cudaErrorMemoryAllocation|device[- ]lost|VK_ERROR_DEVICE_LOST|failed to allocate|ggml_backend.*alloc|unable to allocate|connection.*(closed|refused|reset|aborted)|actively refused|forcibly closed|unexpectedly)')
 }
 
 # Start the transient llama-swap against $yamlPath on $SWAP_PORT. Returns the Process object.
@@ -549,7 +549,7 @@ function Invoke-ProbeLoad {
         try {
           $whole = Get-Content -Raw -Path $logFile -ErrorAction SilentlyContinue
           if ($whole) {
-            $am = [regex]::Match($whole, '(?im)^.*(VK_ERROR_OUT_OF_DEVICE_MEMORY|out of device memory|CUDA (error )?out of memory|cudaErrorMemoryAllocation|device[- ]lost|VK_ERROR_DEVICE_LOST|failed to allocate|unable to allocate).*$')
+            $am = [regex]::Match($whole, '(?im)^.*(VK_ERROR_OUT_OF_DEVICE_MEMORY|out of device memory|CUDA (error:? )?out of memory|cudaErrorMemoryAllocation|device[- ]lost|VK_ERROR_DEVICE_LOST|failed to allocate|unable to allocate).*$')
             if ($am.Success) { $tail = ($am.Value.Trim() + ' | ' + $tail) }
           }
         } catch { }
