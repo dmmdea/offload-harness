@@ -7335,6 +7335,7 @@ func (r *runner) strikeOnFingerprint(base string, failures []string) {
 // right document and must not stand among its passes. Nor is a fingerprint the contract can never close (an unknown the
 // intake lint warns about, as a grounded check on a contract with no context documents): it is a defect of the contract,
 // still reported as a failure, and no node could have passed it, so it neither strikes nor passes (fingerprintFailedByNode).
+// An unknown over an honest absence is the same: neither. A fingerprint the node PASSED beside such a failure is still a pass.
 // The local seat has no call here, as for strikeOnFingerprint.
 func (r *runner) noteFingerprint(base string, contract core.AgentContract, wire core.AgentWireResult, failures []string) {
 	if r.quarantine == nil {
@@ -7344,6 +7345,10 @@ func (r *runner) noteFingerprint(base string, contract core.AgentContract, wire 
 	case failsDocumentFingerprint(failures):
 		if fingerprintFailedByNode(contract, wire, failures) {
 			r.strikeOnFingerprint(base, failures)
+		} else if passedFingerprint(contract, wire) && !excusedAbsence(contract, wire) {
+			// every reported fingerprint failure is the contract's or an honest absence (neither strikes), but a sibling
+			// fingerprint the node PASSED is still the pass it earned
+			r.quarantine.Pass(base)
 		}
 	case failsDocumentFingerprint(contract.Acceptance):
 		// the check is on the contract (failsDocumentFingerprint reads the tag in either form) and did not fail
@@ -7351,6 +7356,19 @@ func (r *runner) noteFingerprint(base string, contract core.AgentContract, wire 
 			r.quarantine.Pass(base)
 		}
 	}
+}
+
+// passedFingerprint reports whether the contract carries a document-fingerprint check that the result graded PASS.
+func passedFingerprint(contract core.AgentContract, wire core.AgentWireResult) bool {
+	for _, a := range contract.Acceptance {
+		if !strings.Contains(a, docAnchorTag) {
+			continue
+		}
+		if o, parsed := gradeCheck(a, contract, wire); parsed && o.Verdict == core.VerdictPass {
+			return true
+		}
+	}
+	return false
 }
 
 // probeSnapshot is ONE fleet probe, memoised on the runner (= on the Run) so

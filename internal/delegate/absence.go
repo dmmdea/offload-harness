@@ -177,25 +177,30 @@ func contractDefectUnknown(a string, o core.AcceptanceOutcome, contract core.Age
 // answered. The fingerprint tag is in the text of a failure and of an unknown alike (a reason opens with the check), so the
 // tag alone cannot tell a node that wrote about another document from a contract that no node could satisfy; this regrades
 // the tagged checks the way EvalAcceptance did (gradeCheck, with the contract's context documents) and drops the ones whose
-// unknown is the contract's (contractDefectUnknown). A failure it cannot match to a regraded check (the caller holds
+// unknown is the contract's (contractDefectUnknown), and an unknown over a digest that is an honest absence (HonestAbsence):
+// a qualified field check whose field is empty, with the absence sentence in another field, grades unknown, and an honest
+// absence is neither a pass nor a strike (excusesFingerprint excuses a FAIL only, so that unknown stays reported but is no
+// fact about the node). A failure it cannot match to a regraded check (the caller holds
 // failures from somewhere else) is read as the node's, which is the reading failsDocumentFingerprint always gave it.
 //
 // The quarantine (noteFingerprint) and the cross-seat retry (skipsRetryAsResearchAcceptanceOnly) both ask this, because both
 // are cures for a node: a contract-caused unknown is still a reported failure, but striking a node for it, or running the
 // contract again on another node that grades the same unknown, cures nothing.
 func fingerprintFailedByNode(contract core.AgentContract, wire core.AgentWireResult, failures []string) bool {
-	var defects map[string]bool // the reasons of the contract-caused unknowns, built on the first tagged failure
+	var defects map[string]bool // the reasons of the unknowns that are no fact about the node, built on the first tagged failure
 	for _, f := range failures {
 		if !strings.Contains(f, docAnchorTag) {
 			continue
 		}
 		if defects == nil {
 			defects = map[string]bool{}
+			honest := HonestAbsence(wire.Structured)
 			for _, a := range contract.Acceptance {
 				if !strings.Contains(a, docAnchorTag) {
 					continue
 				}
-				if o, parsed := gradeCheck(a, contract, wire); parsed && contractDefectUnknown(a, o, contract) {
+				o, parsed := gradeCheck(a, contract, wire)
+				if parsed && (contractDefectUnknown(a, o, contract) || (o.Verdict == core.VerdictUnknown && honest)) {
 					defects[o.Reason] = true
 				}
 			}
