@@ -311,6 +311,17 @@ func TestAHandlerErrorAndATypedNilResultPassThroughUntouched(t *testing.T) {
 	}
 }
 
+// TestAResultWithNoContentPassesThroughUntouched: with no first block there is no answer to leave alone and put a notice
+// behind, so the result is returned as it is (the SDK itself turns a nil Content into an empty one before it gets here).
+func TestAResultWithNoContentPassesThroughUntouched(t *testing.T) {
+	s := movableStaleServer(t)
+	empty := &mcp.CallToolResult{Content: []mcp.Content{}}
+	got, err := throughNotice(s, "offload_summarize", func(context.Context, string, mcp.Request) (mcp.Result, error) { return empty, nil })
+	if err != nil || got != mcp.Result(empty) || len(empty.Content) != 0 {
+		t.Fatalf("a result with no content was changed: %+v, %v", got, err)
+	}
+}
+
 // TestTheNoticeNeverMutatesTheResultTheHandlerReturned: a handler may return a result it keeps (a cached answer); appending to
 // its Content in place would grow it on every call.
 func TestTheNoticeNeverMutatesTheResultTheHandlerReturned(t *testing.T) {
