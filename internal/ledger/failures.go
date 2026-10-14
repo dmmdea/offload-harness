@@ -54,6 +54,9 @@ type FailureGroup struct {
 // FailureClass is one failure class: every failed job row of one reason code.
 type FailureClass struct {
 	Class string `json:"class"`
+	// Kind is who owns this class of failure (failurekinds.go): stack_fault, capacity, caller, ceiling, work or
+	// unclassified. A fact about the class, not the rows.
+	Kind string `json:"kind"`
 	Count int    `json:"count"`
 	// Share is Count over the register's FailureRows, rounded to four places.
 	Share float64 `json:"share"`
@@ -74,6 +77,13 @@ type FailureClass struct {
 	Groups         []FailureGroup `json:"groups"`
 }
 
+// FailureKindCount is the failure rows of one kind and their part of FailureRows (four places).
+type FailureKindCount struct {
+	Kind  string  `json:"kind"`
+	Count int     `json:"count"`
+	Share float64 `json:"share"`
+}
+
 // FailureRegister is the whole report.
 type FailureRegister struct {
 	// JobRows is the job rows the register looked at, after the window and the run-class rule: a dispatch marker,
@@ -86,6 +96,13 @@ type FailureRegister struct {
 	// without a refused-then-landed subtask reading as two failures. A ledger written before the column existed has
 	// none marked, and its refusals count as the failures they were then recorded as.
 	RefusedAttempts int `json:"refused_attempts"`
+	// Kinds counts the failure rows per kind (failurekinds.go), count descending then kind, a kind with no row absent.
+	Kinds []FailureKindCount `json:"kinds"`
+	// StackFaultRows is the failure rows whose class says the stack itself failed, and StackFaultShare their part of
+	// FailureRows (four places), nil (null) when there is no failure row: a share of nothing is not 0. Capacity, caller,
+	// ceiling, work and unclassified failures are not in it, and an unclassified one is never counted as the stack's.
+	StackFaultRows  int      `json:"stack_fault_rows"`
+	StackFaultShare *float64 `json:"stack_fault_share"`
 	// ClassDerivedRows is how many failed rows carried no usable reason code (rows from before it was stamped,
 	// a code outside the closed set) and were classed here by DeferCode, the classifier Record itself uses.
 	ClassDerivedRows int `json:"class_derived_rows"`
@@ -249,7 +266,7 @@ type classAcc struct {
 // test, bake and measurement traffic is left out and counted per class (the run-class rule every production view
 // of the ledger follows). A missing ledger is an empty register. Lock-free, like the other file readers: a partial last line is skipped.
 func FailureRegisterFile(path string, since int64, includeTraffic bool) (FailureRegister, error) {
-	reg := FailureRegister{Classes: []FailureClass{}}
+	reg := FailureRegister{Classes: []FailureClass{}, Kinds: []FailureKindCount{}}
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -345,10 +362,11 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 	}
 
 	reg.CardsTokens, reg.RowsWithTokens = total.ptr(), total.measured
+	kinds := map[string]int{}
 	for class, a := range accs {
 		c := FailureClass{
-			Class: class, Count: a.count,
-			Share:          math.Round(float64(a.count)/float64(reg.FailureRows)*1e4) / 1e4,
+			Class: class, Kind: FailureKindOf(class), Count: a.count,
+			Share:          share(a.count, reg.FailureRows),
 			ExampleReason:  topReason(a.reasons),
 			CardsTokens:    a.tokens.ptr(),
 			RowsWithTokens: a.tokens.measured,
@@ -371,6 +389,21 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 			return x.Model < y.Model
 		})
 		reg.Classes = append(reg.Classes, c)
+		kinds[c.Kind] += c.Count
+	}
+	for kind, n := range kinds {
+		reg.Kinds = append(reg.Kinds, FailureKindCount{Kind: kind, Count: n, Share: share(n, reg.FailureRows)})
+	}
+	sort.Slice(reg.Kinds, func(i, j int) bool {
+		if reg.Kinds[i].Count != reg.Kinds[j].Count {
+			return reg.Kinds[i].Count > reg.Kinds[j].Count
+		}
+		return reg.Kinds[i].Kind < reg.Kinds[j].Kind
+	})
+	if reg.FailureRows > 0 {
+		reg.StackFaultRows = kinds[KindStackFault]
+		s := share(reg.StackFaultRows, reg.FailureRows)
+		reg.StackFaultShare = &s
 	}
 	sort.Slice(reg.Classes, func(i, j int) bool {
 		if reg.Classes[i].Count != reg.Classes[j].Count {
@@ -380,6 +413,9 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 	})
 	return reg, nil
 }
+
+// share is n over total rounded to four places.
+func share(n, total int) float64 { return math.Round(float64(n)/float64(total)*1e4) / 1e4 }
 
 // topReason is the most frequent reason, the smaller text on a tie, "(unrecorded)" when there is none.
 func topReason(counts map[string]int) string {

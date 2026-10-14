@@ -54,15 +54,18 @@ type failureClassOut struct {
 
 // failureReport is what `ledger --failures` prints: one JSON object, no trailing text.
 type failureReport struct {
-	JobRows               int               `json:"job_rows"`
-	FailureRows           int               `json:"failure_rows"`
-	RefusedAttempts       int               `json:"refused_attempts"`
-	ClassDerivedRows      int               `json:"class_derived_rows"`
-	CardsTokens           *int64            `json:"cards_tokens"`
-	RowsWithTokens        int               `json:"rows_with_tokens"`
-	ExcludedNonProduction map[string]int    `json:"excluded_non_production,omitempty"`
-	UndocumentedClasses   []string          `json:"undocumented_classes"`
-	Classes               []failureClassOut `json:"classes"`
+	JobRows               int                       `json:"job_rows"`
+	FailureRows           int                       `json:"failure_rows"`
+	RefusedAttempts       int                       `json:"refused_attempts"`
+	StackFaultRows        int                       `json:"stack_fault_rows"`
+	StackFaultShare       *float64                  `json:"stack_fault_share"`
+	Kinds                 []ledger.FailureKindCount `json:"kinds"`
+	ClassDerivedRows      int                       `json:"class_derived_rows"`
+	CardsTokens           *int64                    `json:"cards_tokens"`
+	RowsWithTokens        int                       `json:"rows_with_tokens"`
+	ExcludedNonProduction map[string]int            `json:"excluded_non_production,omitempty"`
+	UndocumentedClasses   []string                  `json:"undocumented_classes"`
+	Classes               []failureClassOut         `json:"classes"`
 }
 
 // runLedgerMode is the ledger verb's entry (the one line main.go changed): the failure register when --failures is
@@ -143,7 +146,7 @@ func runLedgerFailures(args []string) error {
 // "undocumented" in every human column; a table row for a class the register does not hold adds nothing.
 func joinFailureDocs(reg ledger.FailureRegister, docs map[string]failureDoc) failureReport {
 	out := failureReport{
-		JobRows: reg.JobRows, FailureRows: reg.FailureRows, RefusedAttempts: reg.RefusedAttempts, ClassDerivedRows: reg.ClassDerivedRows,
+		JobRows: reg.JobRows, FailureRows: reg.FailureRows, RefusedAttempts: reg.RefusedAttempts, StackFaultRows: reg.StackFaultRows, StackFaultShare: reg.StackFaultShare, Kinds: reg.Kinds, ClassDerivedRows: reg.ClassDerivedRows,
 		CardsTokens: reg.CardsTokens, RowsWithTokens: reg.RowsWithTokens, ExcludedNonProduction: reg.ExcludedNonProduction,
 		UndocumentedClasses: []string{}, Classes: make([]failureClassOut, 0, len(reg.Classes)),
 	}

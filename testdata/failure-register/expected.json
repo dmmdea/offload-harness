@@ -2,6 +2,35 @@
   "job_rows": 20,
   "failure_rows": 18,
   "refused_attempts": 2,
+  "stack_fault_rows": 3,
+  "stack_fault_share": 0.1667,
+  "kinds": [
+    {
+      "kind": "capacity",
+      "count": 6,
+      "share": 0.3333
+    },
+    {
+      "kind": "work",
+      "count": 6,
+      "share": 0.3333
+    },
+    {
+      "kind": "stack_fault",
+      "count": 3,
+      "share": 0.1667
+    },
+    {
+      "kind": "ceiling",
+      "count": 2,
+      "share": 0.1111
+    },
+    {
+      "kind": "unclassified",
+      "count": 1,
+      "share": 0.0556
+    }
+  ],
   "class_derived_rows": 4,
   "cards_tokens": 2710,
   "rows_with_tokens": 11,
@@ -17,6 +46,7 @@
   "classes": [
     {
       "class": "node_busy",
+      "kind": "capacity",
       "count": 4,
       "share": 0.2222,
       "example_reason": "seat busy: seat is at its run cap",
@@ -75,6 +105,7 @@
     },
     {
       "class": "abstention",
+      "kind": "work",
       "count": 3,
       "share": 0.1667,
       "example_reason": "empty transcript",
@@ -140,6 +171,7 @@
     },
     {
       "class": "failed_verification",
+      "kind": "work",
       "count": 3,
       "share": 0.1667,
       "example_reason": "acceptance failed: contains \"done\"",
@@ -190,6 +222,7 @@
     },
     {
       "class": "capacity_wait",
+      "kind": "capacity",
       "count": 2,
       "share": 0.1111,
       "example_reason": "capacity wait: no node had room",
@@ -229,6 +262,7 @@
     },
     {
       "class": "budget",
+      "kind": "ceiling",
       "count": 1,
       "share": 0.0556,
       "example_reason": "step budget exhausted",
@@ -268,6 +302,7 @@
     },
     {
       "class": "config",
+      "kind": "stack_fault",
       "count": 1,
       "share": 0.0556,
       "example_reason": "no image model configured",
@@ -307,6 +342,7 @@
     },
     {
       "class": "node_unreachable",
+      "kind": "stack_fault",
       "count": 1,
       "share": 0.0556,
       "example_reason": "no node answered the poll",
@@ -346,6 +382,7 @@
     },
     {
       "class": "other",
+      "kind": "unclassified",
       "count": 1,
       "share": 0.0556,
       "example_reason": "something nobody classified",
@@ -385,6 +422,7 @@
     },
     {
       "class": "poll_deadline",
+      "kind": "ceiling",
       "count": 1,
       "share": 0.0556,
       "example_reason": "poll budget spent: the node still owned the job",
@@ -424,6 +462,7 @@
     },
     {
       "class": "stall_prefill",
+      "kind": "stack_fault",
       "count": 1,
       "share": 0.0556,
       "example_reason": "stall in prefill",
