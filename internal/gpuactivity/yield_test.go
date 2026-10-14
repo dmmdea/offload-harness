@@ -238,13 +238,32 @@ func TestStatusNeverWritesTheYieldSidecar(t *testing.T) {
 	if err := os.MkdirAll(waiters, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := json.Marshal(map[string]any{"pid": os.Getpid() + 1, "class": "text", "since_ms": time.Now().UnixMilli()})
-	_ = os.WriteFile(filepath.Join(waiters, "w.json"), b, 0o666)
+	// A live waiter on the whole node: a process of its own (the parent of the test binary), because a pid no
+	// process has is pruned as dead and the test would then prove nothing, and the holder's own pid is never demand.
+	b, _ := json.Marshal(map[string]any{"pid": os.Getppid(), "class": "text", "since_ms": time.Now().UnixMilli()})
+	waiter := filepath.Join(waiters, "w.json")
+	if err := os.WriteFile(waiter, b, 0o666); err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < 3; i++ {
 		snap(root, 5, nil)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "yield.41")); !os.IsNotExist(err) {
 		t.Fatalf("a status snapshot wrote the yield request (%v): only the holder's own tick may", err)
+	}
+	// The control: the demand was there. The holder's own asker, ticking twice on the same lease and the same
+	// waiter, asks.
+	if _, err := os.Stat(waiter); err != nil {
+		t.Fatalf("setup: the waiter record is gone, so the snapshots above saw no demand (%v)", err)
+	}
+	asker := gpulease.ObserverAt(dir).NewYieldAsker(41)
+	for i := 0; i < 2; i++ {
+		if _, _, err := asker.Tick(); err != nil {
+			t.Fatalf("setup: the holder's tick: %v", err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "yield.41")); err != nil {
+		t.Fatalf("setup: the same lease and waiter must be asked by the holder's tick, or the snapshots proved nothing (%v)", err)
 	}
 }
 

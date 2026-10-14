@@ -545,6 +545,55 @@ func TestYieldShellRunsTheLineWithTheEnvironmentInTheHoldersDirectory(t *testing
 	}
 }
 
+// A wrapper's stdout is the job's: whatever the helper prints must not land in it (or in the stderr the
+// session reads as notifications). The line is run for real, with the process's own streams pointed at files,
+// and a marker the line writes proves it ran.
+func TestYieldShellDiscardsTheLinesOutput(t *testing.T) {
+	dir := t.TempDir()
+	ran := filepath.Join(dir, "ran.txt")
+	t.Setenv("LO_YIELD_RAN", ran)
+	line := `echo helper-chatter-out; echo helper-chatter-err 1>&2; echo ran > "$LO_YIELD_RAN"`
+	if runtime.GOOS == "windows" {
+		line = `echo helper-chatter-out& echo helper-chatter-err 1>&2& echo ran > "%LO_YIELD_RAN%"`
+	}
+	out, err := os.Create(filepath.Join(dir, "stdout.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	errf, err := os.Create(filepath.Join(dir, "stderr.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = out, errf
+	exit, runErr := runYieldShell(line, nil)
+	os.Stdout, os.Stderr = oldOut, oldErr
+	_ = out.Close()
+	_ = errf.Close()
+	if runErr != nil || exit != 0 {
+		t.Fatalf("exit %d, err %v", exit, runErr)
+	}
+	if _, serr := os.Stat(ran); serr != nil {
+		t.Fatalf("the line did not run, so the test proves nothing: %v", serr)
+	}
+	for _, f := range []string{"stdout.txt", "stderr.txt"} {
+		b, _ := os.ReadFile(filepath.Join(dir, f))
+		if strings.Contains(string(b), "helper-chatter") {
+			t.Errorf("the line's output reached the holder's %s: %q", f, b)
+		}
+	}
+}
+
+// A shell that cannot be started is a failure to start, not an exit status of the line: the holder records it
+// with its reason. The shell is made unreachable by pointing PATH at an empty directory.
+func TestYieldShellThatCannotBeStartedIsAnErrorNotAStatus(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	exit, err := runYieldShell("true", nil)
+	if err == nil || exit != -1 {
+		t.Fatalf("exit %d, err %v: a shell that cannot start is exit -1 and an error", exit, err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Words
 // ---------------------------------------------------------------------------

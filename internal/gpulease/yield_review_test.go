@@ -8,7 +8,9 @@ package gpulease
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -288,5 +290,192 @@ func TestAWaitersFreeTextReasonCannotSplitTheHoldersLine(t *testing.T) {
 	}
 	if !strings.Contains(line, "kv bench") {
 		t.Errorf("the line still names who waits: %q", line)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Coverage of rules the ADR states: what the sidecar says while the command runs, what a reader says of a
+// command that failed or never started, that the waiters are read last, and that the ask re-checks the lease
+// under the lock
+// ---------------------------------------------------------------------------
+
+// While the command runs the sidecar says so, and a reader says the command was started and has not ended.
+func TestTheSidecarSaysItsOnYieldIsRunningWhileItRuns(t *testing.T) {
+	yieldPolicy(t, "request")
+	r := newYieldRig(t, nil)
+	r.overdueBy(time.Minute)
+	r.waiter(yieldWaiterA)
+	y, out := &yieldRun{block: make(chan struct{})}, &syncBuf{}
+	tk := r.ticker("stop.sh", y, out)
+	r.tickUntilAsked(tk)
+	got, _ := ReadYield(r.m.leaseDir(), r.l.Epoch())
+	if got.Action != YieldActionRunning || got.ActedMs == 0 {
+		t.Fatalf("while the command runs the sidecar says %q at %d, want %q", got.Action, got.ActedMs, YieldActionRunning)
+	}
+	at := time.UnixMilli(got.ActedMs).Local().Format("15:04")
+	s := r.m.YieldViewOf(r.m.Inspect()).Sentence
+	for _, want := range []string{"started its on_yield at " + at, "which has not ended"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("a reader says %q while the command runs: %q", want, s)
+		}
+	}
+	close(y.block)
+	tk.Wait()
+	if got, _ := ReadYield(r.m.leaseDir(), r.l.Epoch()); got.Action != YieldActionRan {
+		t.Errorf("when the command ends the sidecar says %q, want %q", got.Action, YieldActionRan)
+	}
+}
+
+func TestAFailedOnYieldIsWordedWithItsExitStatusForAReader(t *testing.T) {
+	yieldPolicy(t, "request")
+	r := newYieldRig(t, nil)
+	r.overdueBy(time.Minute)
+	r.waiter(yieldWaiterA)
+	r.askedAndActed(YieldActionFailed, 3)
+	at := r.now.Local().Format("15:04")
+	s := r.m.YieldViewOf(r.m.Inspect()).Sentence
+	for _, want := range []string{"was asked to yield at " + at, "its on_yield failed at " + at, "exit 3"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("a reader says %q of a command that failed: %q", want, s)
+		}
+	}
+	if strings.Contains(s, "ran its on_yield") {
+		t.Errorf("a command that failed did not run to its end: %q", s)
+	}
+}
+
+// A command that cannot be started at all (no shell) is a failure with no exit status of its own: it is
+// recorded as one, with the reason, and nothing else happens.
+func TestAnOnYieldThatCannotBeStartedIsRecordedAsAFailure(t *testing.T) {
+	yieldPolicy(t, "request")
+	r := newYieldRig(t, nil)
+	r.overdueBy(time.Minute)
+	r.waiter(yieldWaiterA)
+	y, out := &yieldRun{err: errors.New("exec: sh: executable file not found in $PATH")}, &syncBuf{}
+	tk := r.ticker("stop.sh", y, out)
+	r.tickUntilAsked(tk)
+	tk.Wait()
+	got, _ := ReadYield(r.m.leaseDir(), r.l.Epoch())
+	if got.Action != YieldActionFailed || got.Exit != -1 {
+		t.Errorf("a command that could not start is a failure with exit -1, got %+v", got)
+	}
+	for _, want := range []string{"failed", "exit -1", "executable file not found"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the holder says %q:\n%s", want, out.String())
+		}
+	}
+	if err := r.l.Check(); err != nil || !r.m.Inspect().Held {
+		t.Errorf("a command that could not start leaves the lease held: %v", err)
+	}
+}
+
+// Reading the waiters prunes the records of the dead ones, so it is the last thing a tick does: a tick that
+// stops earlier (the policy asks nobody, the window runs, the holder was asked, the holder cannot be asked,
+// the label is too young) reads none and leaves another process's waiter records as they were.
+func TestTheWaitersAreReadLastBecauseReadingPrunesTheDead(t *testing.T) {
+	const dead = 5599 // not in the table of live processes
+	deadRecord := func(r *yieldRig) string {
+		w := plantYieldWaiter(r.t, r.m, Waiter{PID: dead, Class: ClassText, Reason: "gone"})
+		return filepath.Join(r.m.waitersDir(), fmt.Sprintf("%d.%d.json", w.PID, w.SinceMs))
+	}
+	survives := func(t *testing.T, path, why string) {
+		t.Helper()
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s: the tick read the waiters and pruned a record it had no reason to read (%v)", why, err)
+		}
+	}
+	t.Run("the policy asks nobody", func(t *testing.T) {
+		yieldPolicy(t, "")
+		r := newYieldRig(t, nil)
+		r.overdueBy(time.Hour)
+		rec := deadRecord(r)
+		a := r.m.NewYieldAsker(r.l.Epoch())
+		r.tickNone(a, 3, "unset policy")
+		survives(t, rec, "unset policy")
+	})
+	t.Run("the window runs", func(t *testing.T) {
+		yieldPolicy(t, "request")
+		r := newYieldRig(t, nil)
+		rec := deadRecord(r)
+		a := r.m.NewYieldAsker(r.l.Epoch())
+		*r.now = r.base.Add(yieldWindow - time.Minute)
+		_ = r.l.Renew()
+		r.tickNone(a, 3, "inside the window")
+		survives(t, rec, "inside the window")
+	})
+	t.Run("the holder cannot be asked", func(t *testing.T) {
+		yieldPolicy(t, "request")
+		r := newYieldRig(t, func(o *Options) { o.Yields = "" })
+		r.overdueBy(time.Hour)
+		rec := deadRecord(r)
+		a := r.m.NewYieldAsker(r.l.Epoch())
+		r.tickNone(a, 3, "no stamp")
+		survives(t, rec, "a holder with no stamp")
+	})
+	t.Run("the holder was asked", func(t *testing.T) {
+		yieldPolicy(t, "request")
+		r := newYieldRig(t, nil)
+		r.overdueBy(time.Hour)
+		r.waiter(yieldWaiterA)
+		a := r.m.NewYieldAsker(r.l.Epoch())
+		r.mustAsk(a)
+		rec := deadRecord(r)
+		for i := 0; i < 3; i++ {
+			a.Tick()
+		}
+		survives(t, rec, "an epoch already asked")
+	})
+	t.Run("the label is too young", func(t *testing.T) {
+		yieldPolicy(t, "request")
+		r, _ := newLabelledYieldRig(t)
+		rec := deadRecord(r)
+		tk := r.l.NewYieldTicker(YieldTickerOptions{OnYield: "stop.sh", Run: (&yieldRun{}).run, Out: &syncBuf{}, Label: "gpu reserve", Settle: time.Minute})
+		for i := 0; i < 3; i++ {
+			r.holderTick(tk, 10*time.Second)
+		}
+		survives(t, rec, "a label inside its settle interval")
+	})
+	// The control: a tick that does read the waiters (overdue, capable, asking) prunes the dead record.
+	t.Run("the control prunes it", func(t *testing.T) {
+		yieldPolicy(t, "request")
+		r := newYieldRig(t, nil)
+		r.overdueBy(time.Hour)
+		rec := deadRecord(r)
+		a := r.m.NewYieldAsker(r.l.Epoch())
+		a.Tick()
+		if _, err := os.Stat(rec); !os.IsNotExist(err) {
+			t.Errorf("setup: a tick that reads the waiters prunes a dead record, and this one did not (%v)", err)
+		}
+	})
+}
+
+// The ask re-checks, under the epoch lock, that the lease is still live: a lease released between the checks
+// made outside the lock and the lock itself must not get a request file after the sweep that ended it.
+func TestAnAskDoesNotWriteForALeaseReleasedBeforeTheLock(t *testing.T) {
+	yieldPolicy(t, "request")
+	r := newYieldRig(t, nil)
+	r.overdueBy(time.Minute)
+	r.waiter(yieldWaiterA)
+	a := r.m.NewYieldAsker(r.l.Epoch())
+	if _, asked, _ := a.Tick(); asked { // the first sighting of the waiter
+		t.Fatal("asked on first sighting")
+	}
+	released := false
+	yieldBeforeLockHook = func() {
+		if err := r.l.Release(); err != nil {
+			t.Errorf("release: %v", err)
+		}
+		released = true
+	}
+	t.Cleanup(func() { yieldBeforeLockHook = nil })
+	req, asked, err := a.Tick()
+	if !released {
+		t.Fatal("setup: the ask never reached the lock")
+	}
+	if err != nil || asked || req.AskedMs != 0 {
+		t.Errorf("a lease released before the lock is not asked: %+v, %v, %v", req, asked, err)
+	}
+	if r.asked() {
+		t.Error("the ask wrote a request file for a lease that was already gone")
 	}
 }
