@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,7 +16,7 @@ import (
 // kept the final transcript and nothing the run's own instruments had measured. The pager gate
 // and the prefill report were printed to stderr and lost, so the trace corpus could not answer
 // "how often did the agent come back for what compaction took out" from anything on disk.
-// These tests run the real drainer over a scripted seat and read the file it writes.
+// These tests run the real drainer over a scripted seat and read the files it writes.
 
 // doneClient answers every call with a final answer, reporting the server's prefill accounting
 // so the run's Prefill report is MEASURED.
@@ -32,9 +33,20 @@ func (doneClient) Chat(context.Context, []agent.Msg, []agent.ToolSpec, int) (age
 // drainOneGoal runs a one-goal queue through runStandalone and returns the decoded trace file.
 func drainOneGoal(t *testing.T) map[string]json.RawMessage {
 	t.Helper()
+	return drainGoals(t, 1)["g1"]
+}
+
+// drainGoals runs n goals (g1..gn) through ONE loop, the way the queue drainer does, and returns
+// every decoded trace file by goal id.
+func drainGoals(t *testing.T, n int) map[string]map[string]json.RawMessage {
+	t.Helper()
 	dir := t.TempDir()
 	queue := filepath.Join(dir, "queue.jsonl")
-	if err := os.WriteFile(queue, []byte("{\"id\":\"g1\",\"goal\":\"say done\"}\n"), 0o644); err != nil {
+	var q []byte
+	for i := 1; i <= n; i++ {
+		q = append(q, []byte(fmt.Sprintf("{\"id\":\"g%d\",\"goal\":\"say done\"}\n", i))...)
+	}
+	if err := os.WriteFile(queue, q, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	traces := filepath.Join(dir, "traces")
@@ -46,15 +58,20 @@ func drainOneGoal(t *testing.T) map[string]json.RawMessage {
 	if err != nil {
 		t.Fatalf("runStandalone: %v", err)
 	}
-	raw, err := os.ReadFile(filepath.Join(traces, "g1.json"))
-	if err != nil {
-		t.Fatalf("trace file not written: %v", err)
+	out := map[string]map[string]json.RawMessage{}
+	for i := 1; i <= n; i++ {
+		id := fmt.Sprintf("g%d", i)
+		raw, err := os.ReadFile(filepath.Join(traces, id+".json"))
+		if err != nil {
+			t.Fatalf("trace file %s not written: %v", id, err)
+		}
+		var rec map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			t.Fatalf("trace file %s is not JSON: %v", id, err)
+		}
+		out[id] = rec
 	}
-	var rec map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		t.Fatalf("trace file is not JSON: %v", err)
-	}
-	return rec
+	return out
 }
 
 // TestTraceFileCarriesThePagerReport: a run that never compacted is a measured zero passes with
@@ -99,6 +116,27 @@ func TestTraceFileCarriesThePrefillReport(t *testing.T) {
 	}
 	if pf.Basis != "measured" || pf.ObservedSteps != 1 || pf.PrefillTokens != 70 || pf.CacheTokens != 30 {
 		t.Fatalf("prefill = %+v, want measured over 1 step with 70 prefilled and 30 cached tokens", pf)
+	}
+}
+
+// TestEachGoalsTraceCoversThatGoalAlone: one loop drains the whole queue, and its instruments
+// accumulate for the loop's life. A trace that carried the running total would make the second
+// goal's prefill the sum of both goals', and a corpus that pools traces would count the first
+// goal twice. Every goal's file must report its own run.
+func TestEachGoalsTraceCoversThatGoalAlone(t *testing.T) {
+	traces := drainGoals(t, 3)
+	for _, id := range []string{"g1", "g2", "g3"} {
+		var pf struct {
+			ObservedSteps int   `json:"observed_steps"`
+			PrefillTokens int64 `json:"prefill_tokens"`
+			CacheTokens   int64 `json:"cache_tokens"`
+		}
+		if err := json.Unmarshal(traces[id]["prefill"], &pf); err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		if pf.ObservedSteps != 1 || pf.PrefillTokens != 70 || pf.CacheTokens != 30 {
+			t.Errorf("%s: prefill = %+v, want this goal's one step (70 prefilled, 30 cached), not a running total", id, pf)
+		}
 	}
 }
 
