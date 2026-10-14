@@ -27,13 +27,16 @@
   existence check removed (root), and in each of the three packages no retry, a second retry, no report, and a report when the retry
   worked.
 - **The top-level `Test<Name><n>` folders.** Those are `t.TempDir()`'s own parent folders, left when a test's process dies before its
-  cleanup runs. No test was found that makes one without cleaning it: one complete run of every other package of the module (115 of
-  them, `internal/pipeline` and `internal/delegate` included), one of the root package's gpu tests before the fix and one after, and a
-  second run of the five tests of `gpu_signals_harden_test.go` all left no such folder. The one inspected on the machine that found the
-  leak (`TestARefusedUnloadOfAResidentSeatWritesNoDebt<n>`) still held a live lease file, so its test was killed mid-run; a complete run
-  of that test leaves nothing. The rest of the root package's tests were not run (the whole suite is too heavy to run locally), so
-  they are unmeasured, not cleared.
-- **What this does not cover.** A suite killed from outside (a `go test` timeout, a kill by the RAM guard, Ctrl-C) never reaches any
+  cleanup runs. No test was found that makes one without cleaning it, and no source makes one by name (no `os.MkdirTemp` call takes
+  `t.Name()`). Measured with the temp dir and `GOTMPDIR` (where `go test` puts the `t.TempDir()` parents) both pointed at empty folders
+  and both listed at the end, which a probe test that exits after `t.TempDir()` shows the census does see: a whole run of every other
+  package of the module with both folders listed (115 packages with tests, `internal/pipeline` included; in it one timing test of
+  `internal/delegate` failed under load on the unfixed tree, and that failed run left nothing either), and the root package's gpu tests (before and after the fix, plus the five tests of
+  `gpu_signals_harden_test.go`) left no `Test<Name><n>` folder. The one inspected on the machine that found the leak
+  (`TestARefusedUnloadOfAResidentSeatWritesNoDebt<n>`) still held a live lease file, so its test was killed mid-run; a complete run of that
+  test leaves nothing. The rest of the root package's tests were not run (the whole suite is too heavy to run locally), so they are
+  unmeasured, not cleared.
+- **What this does not cover.** A suite killed from outside (a `go test` timeout, a kill, Ctrl-C) never reaches any
   deferred removal and still leaves its root and the `t.TempDir()` folders of the tests it was running; no test code can clean that, and
   the tripwire (`scripts/test-temp-tripwire.sh`) is what reports it. Stderr of a passing package is hidden by `go test` in package-list
   mode, so the new removal report shows in a single-package run or with `-v`.
