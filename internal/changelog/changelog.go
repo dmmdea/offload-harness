@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -400,7 +401,8 @@ func verify(before, after string, rel *Release) error {
 // ---- the tree
 
 // CheckTree is the one rule set for the tree at root, and the root test and `cmd/changelog check` both call it: every
-// file of changes/unreleased/ is a well-formed fragment; CHANGELOG.md holds one [Unreleased] heading and its block is
+// file of changes/unreleased/ is a well-formed fragment and changes/ holds nothing else but README.md (strayEntries);
+// CHANGELOG.md holds one [Unreleased] heading and its block is
 // blank ("entries go in changes/unreleased/"); no fragment's text is already in CHANGELOG.md (the duplicate a failed
 // delete leaves behind); every semver release heading appears once; and no line but a heading carries a release date
 // (a heading glued onto another line). A missing changes/unreleased/ is not a problem: it holds no fragments. It
@@ -411,8 +413,31 @@ func CheckTree(root string) []string { return checkTree(root, false) }
 // the new heading by the release, never dropped, so the release must not refuse it.
 func CheckForRelease(root string) []string { return checkTree(root, true) }
 
+// strayEntries names every entry of changes/ that is neither README.md nor the fragment directory spelled exactly so.
+// Nothing reads such an entry (a fragment saved one level up, or a directory in another case, which a case-insensitive
+// checkout still finds and Linux does not), so its text would never reach CHANGELOG.md: a skipped fragment is a lost entry.
+func strayEntries(root string) []string {
+	dir, fragDir := path.Dir(FragmentDir), path.Base(FragmentDir)
+	entries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(dir)))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return []string{dir + ": " + err.Error()}
+	}
+	var problems []string
+	for _, e := range entries {
+		if n := e.Name(); n != "README.md" && n != fragDir {
+			problems = append(problems, fmt.Sprintf("%s/%s: nothing reads this entry, so its text would never reach %s: fragments go in %s/ (spelled so) as <slug>.md, and %s/ holds only README.md and that directory", dir, n, ChangelogFile, FragmentDir, dir))
+		}
+	}
+	return problems
+}
+
 func checkTree(root string, allowLegacy bool) []string {
-	frags, problems := readFragmentsFS(os.DirFS(filepath.Join(root, filepath.FromSlash(FragmentDir))), FragmentDir+"/")
+	problems := strayEntries(root)
+	frags, fragProblems := readFragmentsFS(os.DirFS(filepath.Join(root, filepath.FromSlash(FragmentDir))), FragmentDir+"/")
+	problems = append(problems, fragProblems...)
 	raw, err := os.ReadFile(filepath.Join(root, ChangelogFile))
 	if err != nil {
 		return append(problems, ChangelogFile+": "+err.Error())
