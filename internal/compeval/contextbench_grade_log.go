@@ -6,6 +6,12 @@
 // lookup rule (the message without its trailing uniqueness tag appears in an answer)
 // and the count rule (the answer states exactly one number and it is the gold
 // integer). The code and comments are written for this repository.
+//
+// The count rule reads the answer after two clean-ups the original does not make: a
+// question label the model repeats ("Query 3:", "qid=3") is removed, and digit groups
+// joined by thousands separators ("12,800") are read as one number. Otherwise the label's
+// own number, or the groups, would be counted as a second number and a right answer
+// would be refused.
 package compeval
 
 import (
@@ -22,11 +28,26 @@ var (
 	cbLogTagRE = regexp.MustCompile(`\s*#[0-9a-f]+\s*$`)
 	// cbLogNumberRE is a complete number: optional sign, digits, optional decimals.
 	cbLogNumberRE = regexp.MustCompile(`[-+]?\d+(?:\.\d+)?`)
+	// cbLogLabelRE is the label a model puts before its answer: "Query 3:", "qid=3", "QID #3 ->".
+	cbLogLabelRE = regexp.MustCompile(`(?i)\b(?:qid|query)\s*[=#:]?\s*\d+\s*[:.)>=]*`)
+	// cbLogGroupedRE is a number written with thousands separators: groups of exactly three
+	// digits after the first group of one to three ("1,234", "12,800", "1_234").
+	cbLogGroupedRE = regexp.MustCompile(`\b\d{1,3}(?:[,_]\d{3})+\b`)
 )
+
+// cbLogNumbers lists the numbers an answer states once its question label is removed and
+// grouped digits are joined.
+func cbLogNumbers(answer string) []string {
+	answer = cbLogLabelRE.ReplaceAllString(answer, " ")
+	answer = cbLogGroupedRE.ReplaceAllStringFunc(answer, func(g string) string {
+		return strings.NewReplacer(",", "", "_", "").Replace(g)
+	})
+	return cbLogNumberRE.FindAllString(answer, -1)
+}
 
 func logCountCorrect(want string, answers map[string]bool) bool {
 	for a := range answers {
-		nums := cbLogNumberRE.FindAllString(a, -1)
+		nums := cbLogNumbers(a)
 		if len(nums) == 1 && nums[0] == want {
 			return true
 		}
