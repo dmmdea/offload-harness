@@ -46,9 +46,13 @@ import (
 // is hard to earn on purpose: a clean seat, a diff inside the ceiling, every gate green and
 // for the reviewed commit, and a diff that did not move.
 const (
-	// OutcomePass: a seat with a receipt reviewed the whole diff, said NONE, every gate receipt
-	// supports a PASS (GateReceipt.Passed: none is red, stale or unbound), and the diff was
-	// unchanged when the result was sealed.
+	// OutcomePass: a seat with a receipt reviewed the whole diff, said NONE, the result carries
+	// the diff's fingerprint and a second check that equals it, every gate receipt supports a
+	// PASS (GateReceipt.Passed: none is red, stale or unbound), and the diff was unchanged when
+	// the result was sealed. A PASS is tied to a commit only when the review named a head_sha
+	// (Evidence.HeadUnbound says when it did not), and even then the lane cannot show that the
+	// head is the commit the diff bytes came from: the fingerprint binds the bytes, the head
+	// is the caller's word.
 	OutcomePass = "PASS"
 	// OutcomeFindings: a seat reviewed the unchanged diff and reported at least one defect.
 	OutcomeFindings = "FINDINGS"
@@ -56,9 +60,12 @@ const (
 	// receipt belongs to another commit or names none, so PASS is not available. The review
 	// still ran.
 	OutcomeGateFailed = "GATE_FAILED"
-	// OutcomeNotRun: no clean seat reviewed this diff. A node deferral (including one the lane
-	// salvaged as a clean NONE), a refusal before any diff was read, a refused binding, an
-	// oversize diff, a seat that named nothing, an answer that contradicted itself.
+	// OutcomeNotRun: no clean seat reviewed this diff, or the result is bound to nothing. A node
+	// deferral (including one the lane salvaged as a clean NONE), a refusal before any diff was
+	// read, a refused binding, an oversize diff, a seat that named nothing, an answer that
+	// contradicted itself, evidence with no diff fingerprint, a second check that never ran.
+	// Missing evidence is NOT_RUN and not GATE_FAILED: GATE_FAILED is a gate that ran and was
+	// red, stale or unbound.
 	OutcomeNotRun = "NOT_RUN"
 	// OutcomeStale: a seat ran, but the diff was not the same bytes when the result was
 	// sealed, so whatever it said is about a diff that no longer exists.
@@ -69,7 +76,7 @@ const (
 // TracePathFor). It is THE durable trace of a review: no ledger row is written for the verdict.
 //
 // It is a sidecar and not a ledger row on purpose. Every ledger reader counts rows as calls
-// and jobs (jobrows.go: the C-62 double-count was exactly a second row for one job), the
+// and jobs (jobrows.go: the double-count of one job was exactly a second row for it), the
 // pipeline already writes the run's own row with this door's name before the outcome is
 // known, and the ledger keeps hashes where this trace has to keep the short finding text.
 // The same split the confidence head's label file and the base-policy audit already use. The
@@ -117,8 +124,9 @@ type GateReceipt struct {
 	HeadSHA string `json:"head_sha,omitempty"`
 	Source  string `json:"source,omitempty"` // lane | caller
 	Stale   bool   `json:"stale,omitempty"`
-	// Unbound marks a caller's receipt that names no commit while the review names one: there
-	// is nothing to show it belongs to the commit under review, so it cannot support a PASS.
+	// Unbound marks a caller's receipt that cannot be shown to belong to the commit under
+	// review: it names no commit while the review names one, or it names a commit while the
+	// review names none. Either way it cannot support a PASS.
 	Unbound bool `json:"unbound,omitempty"`
 }
 
@@ -165,15 +173,17 @@ type Evidence struct {
 	Stale         bool   `json:"stale,omitempty"`
 	StaleReason   string `json:"stale_reason,omitempty"`
 	// HeadUnbound is true when the review named no head_sha, so nothing ties its gate receipts
-	// to a commit.
+	// to a commit and a PASS on it is not tied to one either. Even with a head_sha nothing ties
+	// the head to the diff bytes: the head is the caller's word.
 	HeadUnbound bool `json:"head_unbound,omitempty"`
 	// Refusal is why the binding itself was refused (see ErrBadBinding), when it was.
 	Refusal string `json:"refusal,omitempty"`
 }
 
-// Fingerprint is the sha256 (lower-case hex) of the diff bytes, exactly as the seat is shown
-// them. It is the binding that holds: a commit id the caller typed can be wrong, the bytes
-// cannot.
+// Fingerprint is the sha256 (lower-case hex) of the diff bytes as the lane holds them. Invalid
+// UTF-8 is hashed as it is, although the text may not reach the seat byte for byte (it is
+// sanitized for JSON in transit). It is the binding that holds: a commit id the caller typed
+// can be wrong, the bytes cannot.
 func Fingerprint(diff string) string {
 	sum := sha256.Sum256([]byte(diff))
 	return hex.EncodeToString(sum[:])
@@ -222,6 +232,7 @@ func NewEvidence(diff, base, head string, handed []GateReceipt) (Evidence, error
 	if len(handed) > MaxGateReceipts {
 		return refuse(fmt.Errorf("%w: %d gate receipts handed, at most %d are accepted", ErrBadBinding, len(handed), MaxGateReceipts))
 	}
+	ev.HeadUnbound = ev.HeadSHA == ""
 	ev.Gates = append(ev.Gates, laneGates(diff)...)
 	for i, h := range handed {
 		r, rerr := normReceipt(h)
@@ -234,10 +245,15 @@ func NewEvidence(diff, base, head string, handed []GateReceipt) (Evidence, error
 			r.Stale = true
 			r.Detail = strings.TrimSpace(r.Detail + " [receipt is for commit " + capBytes(r.HeadSHA, 12) + ", the review is of " + capBytes(ev.HeadSHA, 12) + "]")
 		case r.HeadSHA == "" && ev.HeadSHA != "":
-			// Nothing shows this receipt belongs to the commit under review. A review that
-			// names no head has nothing to compare, and its receipts stand as given.
+			// Nothing shows this receipt belongs to the commit under review.
 			r.Unbound = true
 			r.Detail = strings.TrimSpace(r.Detail + " [receipt names no commit, the review is of " + capBytes(ev.HeadSHA, 12) + ": an unbound receipt cannot support a PASS]")
+		case r.HeadSHA != "" && ev.HeadSHA == "":
+			// The receipt names a commit and the review names none, so nothing shows the diff
+			// is that commit's. A receipt that names none either stands as given (the PASS says
+			// the review is tied to no commit).
+			r.Unbound = true
+			r.Detail = strings.TrimSpace(r.Detail + " [receipt is for commit " + capBytes(r.HeadSHA, 12) + ", the review names no head_sha: an unbound receipt cannot support a PASS]")
 		}
 		ev.Gates = append(ev.Gates, r)
 	}
@@ -346,8 +362,10 @@ func (e Evidence) failedGates() string {
 		switch {
 		case g.Stale:
 			names = append(names, g.Name+" (receipt is for another commit)")
-		case g.Unbound && g.Status == gatePass:
+		case g.Unbound && g.Status == gatePass && g.HeadSHA == "":
 			names = append(names, g.Name+" (receipt names no commit)")
+		case g.Unbound && g.Status == gatePass:
+			names = append(names, g.Name+" (receipt names a commit, the review names no head_sha)")
 		case !g.Passed():
 			names = append(names, g.Name)
 		}
@@ -407,22 +425,28 @@ type Delivery struct {
 	Reason string
 }
 
-// Verdict is the outcome of one review and, for every outcome but PASS and FINDINGS, why.
+// Verdict is the outcome of one review and, for every outcome but FINDINGS, why. A PASS carries
+// a reason only when it is not tied to a commit (NoHeadReason).
 type Verdict struct {
 	Outcome string
 	Reason  string
 }
 
+// NoHeadReason is the reason a PASS carries when the review named no head_sha.
+const NoHeadReason = "no head_sha: gates not tied to a commit"
+
 // Decide is the one place an outcome is chosen, in a fixed order so no result can reach a
 // better label than its worst fact allows:
 //
 //  1. a refused binding or a refusal before any diff was read, an oversize diff, a run that
-//     was not delivered, a seat that named nothing, an answer that contradicted itself, or a
-//     run the node filed as a deferral that the lane read as a clean NONE: NOT_RUN;
+//     was not delivered, a seat that named nothing, an answer that contradicted itself, a run
+//     the node filed as a deferral that the lane read as a clean NONE, or evidence with no
+//     diff fingerprint: NOT_RUN;
 //  2. a diff that moved: STALE;
 //  3. a defect reported: FINDINGS;
 //  4. a red, stale or unbound gate: GATE_FAILED;
-//  5. otherwise PASS.
+//  5. a second fingerprint check that is missing or differs from the first: NOT_RUN;
+//  6. otherwise PASS.
 //
 // The oversize rule is repeated here although BuildContract refuses the same diff before any
 // seat runs: this function is the contract, and a caller that built its own flow must not be
@@ -448,12 +472,18 @@ func Decide(ev Evidence, d Delivery) Verdict {
 		// it are still findings. A clean NONE read from a run the node itself filed as a
 		// deferral is not a review that ran to its end, so it is never an all-clear.
 		return Verdict{OutcomeNotRun, "no clean seat ran the review: the node filed the run as a deferral and the lane read a clean NONE from what the seat had written, which is never a PASS"}
+	case ev.DiffSHA256 == "":
+		return Verdict{OutcomeNotRun, "the result carries no diff fingerprint (diff_sha256), so it is bound to no bytes and cannot be a PASS"}
 	case ev.Stale:
 		return Verdict{OutcomeStale, ev.StaleReason + "; whatever the seat said is about bytes that no longer exist, so re-run the review on the current diff"}
 	case d.Findings > 0:
 		return Verdict{OutcomeFindings, ""}
 	case !ev.GatesPassed():
 		return Verdict{OutcomeGateFailed, "the seat found nothing, but a deterministic gate is not green: " + ev.failedGates()}
+	case ev.RecheckSHA256 != ev.DiffSHA256:
+		return Verdict{OutcomeNotRun, "the second fingerprint check did not confirm the diff (recheck_sha256 is missing or differs from diff_sha256), so nothing shows it did not move during the review"}
+	case ev.HeadUnbound:
+		return Verdict{OutcomePass, NoHeadReason}
 	}
 	return Verdict{OutcomePass, ""}
 }
@@ -473,7 +503,8 @@ type Run struct {
 }
 
 // Seal stamps the evidence onto a published payload and leaves the durable trace. It adds
-// `outcome`, `outcome_reason` (when the outcome is not a plain PASS or FINDINGS), `evidence`
+// `outcome`, `outcome_reason` (when the outcome is not a plain FINDINGS or a PASS tied to a
+// commit), `evidence`
 // and, if the trace could not be written, `trace_error`. It changes nothing else in out, so
 // a deferral keeps its deferral shape and a review keeps its findings.
 //
@@ -493,6 +524,10 @@ func Seal(out map[string]any, ev Evidence, r Run, tracePath string) map[string]a
 		if r.Recheck != nil {
 			now, err := r.Recheck()
 			ev = ev.Recheck(now, err)
+		} else {
+			// A diff held in memory cannot have moved: the second check is the fingerprint
+			// itself (as it is for an inline diff, whose recheck compares the string with itself).
+			ev.RecheckSHA256 = ev.DiffSHA256
 		}
 	}
 	findings, _ := out["findings"].([]Finding)
@@ -625,14 +660,19 @@ func AppendTrace(path string, rows ...TraceRow) error {
 	return werr
 }
 
-// capBytes cuts s to at most n bytes on a rune boundary.
+// capBytes cuts s to at most n bytes without splitting a rune: only a trailing partial rune is
+// dropped (at most utf8.UTFMax-1 bytes), so an invalid byte earlier in the string costs nothing
+// after it.
 func capBytes(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	cut := s[:n]
-	for len(cut) > 0 && !utf8.ValidString(cut) {
-		cut = cut[:len(cut)-1]
+	if n <= 0 {
+		return ""
 	}
-	return cut
+	cut := n
+	for back := 0; back < utf8.UTFMax-1 && cut > 0 && !utf8.RuneStart(s[cut]); back++ {
+		cut--
+	}
+	return s[:cut]
 }

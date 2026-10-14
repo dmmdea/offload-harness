@@ -22,9 +22,11 @@ const (
 	evHead = "89abcdef0123456789abcdef0123456789abcdef"
 )
 
-// cleanSeat is the receipt of a seat that ran, was not deferred and named itself.
+// cleanSeat is the receipt of a seat that ran, was not deferred and named itself, with the
+// second fingerprint check made and in agreement.
 func cleanSeat(ev Evidence) Evidence {
 	ev.Seat = &SeatReceipt{Seat: "fake-seat", Steps: 2, StopReason: "done"}
+	ev.RecheckSHA256 = ev.DiffSHA256
 	return ev
 }
 
@@ -188,10 +190,11 @@ func TestAHandedReceiptForAnotherCommitCannotSupportPass(t *testing.T) {
 	if !short.GatesPassed() {
 		t.Errorf("a prefix of the head is the same commit: %+v", short.Gates)
 	}
-	// With no head on the review there is nothing to compare, and the receipt stands.
+	// With no head on the review the receipt cannot be shown to belong to the diff: it is
+	// unbound, and says so.
 	ev2, err := NewEvidence(evDiff, "", "", []GateReceipt{{Name: "go-test", Status: "pass", HeadSHA: evHead}})
-	if err != nil || !ev2.GatesPassed() {
-		t.Errorf("unbound review, handed receipt: %v %+v", err, ev2.Gates)
+	if err != nil || ev2.GatesPassed() || !ev2.Gates[len(ev2.Gates)-1].Unbound {
+		t.Errorf("review with no head, receipt naming a commit: %v %+v", err, ev2.Gates)
 	}
 }
 
@@ -572,6 +575,7 @@ func TestANodeDeferredRunReadAsACleanNoneIsNotRunNeverPass(t *testing.T) {
 		t.Errorf("Decide: %+v, want NOT_RUN", v)
 	}
 	ev.Seat.Deferred = false
+	ev.RecheckSHA256 = ev.DiffSHA256
 	if v := Decide(ev, Delivery{Delivered: true}); v.Outcome != OutcomePass {
 		t.Errorf("the same receipt without the deferral is a PASS: %+v", v)
 	}
@@ -655,7 +659,8 @@ func TestAHandedReceiptWithNoCommitCannotSupportPassOnABoundReview(t *testing.T)
 	if !bound.GatesPassed() {
 		t.Errorf("a receipt for the head is bound: %+v", bound.Gates)
 	}
-	// A review with no head has nothing to bind to: a receipt with none stands, as before.
+	// A review with no head has nothing to bind to: a receipt with none stands, and the PASS
+	// says the review is tied to no commit.
 	unbound, err := NewEvidence(evDiff, evBase, "", []GateReceipt{{Name: "go-test", Status: "pass"}})
 	if err != nil || !unbound.GatesPassed() {
 		t.Errorf("no head on the review, no commit on the receipt: %v %+v", err, unbound.Gates)

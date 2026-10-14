@@ -803,23 +803,30 @@ payload, deferrals and early refusals included, carries an `outcome` and an `evi
   receipts are results the caller ran and hands over, and the lane cannot verify them. It executes nothing a
   caller names, which keeps the review door from becoming a command-execution surface. A receipt whose
   `head_sha` is not the review's head is marked `stale` and cannot support a PASS; when the review names a head,
-  a receipt that names no commit is marked `unbound` and cannot either (a review with no head has nothing to
-  compare, and its receipts stand as given). A red gate does not stop the seat: the lane is advisory, and the
+  a receipt that names no commit is marked `unbound` and cannot either. A review with no `head_sha` is tied to no
+  commit: `evidence.head_unbound` is true, a receipt that names a commit is marked `unbound` (nothing shows the diff
+  is that commit's), and a receipt that names none stands as given. **Even with a `head_sha`, nothing ties the head
+  to the diff bytes**: the lane has no git access, the fingerprint binds the bytes, and the head is the caller's
+  word, echoed. A red gate does not stop the seat: the lane is advisory, and the
   findings of a diff that fails a lint are still worth reading.
 - **One outcome, decided in one place** (`reviewlane.Decide`). `NOT_RUN`: no clean seat reviewed the diff,
   which covers every result with `deferred: true`, a runner error, an early refusal, a refused binding
   (malformed commit id or receipt), a diff over `MaxDiffBytes` (refused even if a caller skipped the builder), a
-  result with no seat receipt, an answer that read as NONE while every line it wrote was discarded, and a run the
+  result with no seat receipt, a result with no diff fingerprint, an answer that read as NONE while every line it wrote was discarded, and a run the
   node filed as a deferral whose answer the lane read as a clean NONE (the salvage still publishes what it read,
   and findings read from such a run are `FINDINGS`, but a clean NONE from it is never a PASS: `seat.deferred`
   records the attempt). `STALE`: the diff was not the same bytes at the second check. `FINDINGS`: an advisory
   list. `GATE_FAILED`: a clean seat beside a red, wrong-commit or unbound gate.
-  `PASS`: a seat with a receipt, an in-bound diff, every gate green and for the reviewed commit, an
-  unchanged diff, and the seat's own NONE. `outcome_reason` says why for everything but PASS and FINDINGS.
+  `PASS`: a seat with a receipt, a diff fingerprint and a second check equal to it, an in-bound diff, every gate
+  green and for the reviewed commit, an unchanged diff, and the seat's own NONE. A PASS on a review that named no
+  `head_sha` carries `outcome_reason` "no head_sha: gates not tied to a commit" beside `evidence.head_unbound`, so it
+  does not read as a PASS bound to a commit. `outcome_reason` says why for everything but FINDINGS and a PASS tied
+  to a commit.
 - **A second fingerprint check right before returning** (`reviewlane.Seal`). A `diff_path` is re-read through
   the same confined reader and compared with the fingerprint taken first; `recheck_sha256` shows the second
-  value, and a difference (or a file that cannot be re-read) makes the result `STALE`. An inline diff is held
-  in memory and cannot move. A review that never reached a seat has nothing to re-check.
+  value, and a difference (or a file that cannot be re-read) makes the result `STALE`. For an inline diff the
+  check compares the string with itself: it is held in memory and cannot move, so `recheck_sha256` equals
+  `diff_sha256` by construction there. A review that never reached a seat has nothing to re-check.
 - **Every review leaves a durable trace**: `review-evidence.jsonl` in the same directory as the configured
   ledger file (derived from `ledger_path`, so it sits beside the ledger wherever the operator put it; the harness
   home when no ledger path is set), one `review` row (outcome, evidence, counts of what was shown and what the filters and the cap took out)
@@ -830,8 +837,8 @@ payload, deferrals and early refusals included, carries an `outcome` and an `evi
   a row as a call, the pipeline already writes the run's own row (door `offload_review_diff`) before the outcome
   is known, and the ledger keeps hashes where this trace keeps the short finding text. The ledger row is the
   run record, this file the verdict record.
-- **Stays advisory, and one source is skipped.** An outcome is a label on a result a lead reads; nothing here
-  blocks a merge or a commit. The import-graph atlas the source material also describes is skipped.
+- **Stays advisory.** An outcome is a label on a result a lead reads; nothing here
+  blocks a merge or a commit.
 
 Everything the lane returns is ADVISORY: it never gates a merge and never substitutes for the
 final does-it-actually-work verification, which stays with the caller — as do security review,

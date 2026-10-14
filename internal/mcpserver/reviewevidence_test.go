@@ -145,10 +145,13 @@ func TestReviewDiffACleanBoundReviewIsAPass(t *testing.T) {
 		return seatFindings(), nil
 	})
 	m := reviewCall(t, s, map[string]any{"diff": reviewDiff, "task": "iterate over every element exactly once"})
-	if m["outcome"] != reviewlane.OutcomePass || m["outcome_reason"] != nil {
-		t.Fatalf("a clean seat, an in-bound diff and green gates is a PASS: %v", m)
+	if m["outcome"] != reviewlane.OutcomePass || m["outcome_reason"] != reviewlane.NoHeadReason {
+		t.Fatalf("a clean seat, an in-bound diff and green gates is a PASS that says it names no head: %v", m)
 	}
 	ev := evidenceOf(t, m)
+	if ev["head_unbound"] != true {
+		t.Errorf("a review with no head_sha is published as head_unbound: %v", ev)
+	}
 	if ev["base_sha"] != nil || ev["head_sha"] != nil {
 		t.Errorf("unbound commits are omitted, not published empty: %v", ev)
 	}
@@ -535,8 +538,24 @@ func TestReviewDiffAnUnboundGateReceiptCannotSupportPass(t *testing.T) {
 	s2 := askTestServer(t, clean)
 	m2 := reviewCall(t, s2, map[string]any{"diff": reviewDiff, "task": "t", "head_sha": evHead,
 		"gate_receipts": []map[string]any{{"name": "go-test", "status": "pass", "head_sha": evHead}}})
-	if m2["outcome"] != reviewlane.OutcomePass {
-		t.Errorf("a receipt for the head: %v", m2["outcome"])
+	if m2["outcome"] != reviewlane.OutcomePass || m2["outcome_reason"] != nil || evidenceOf(t, m2)["head_unbound"] != nil {
+		t.Errorf("a receipt for the head is a PASS tied to a commit, with no reason and no flag: %v", m2)
+	}
+}
+
+// A receipt naming a commit on a review that names none is tied to nothing.
+func TestReviewDiffAReceiptNamingACommitOnAReviewWithNoHeadCannotSupportPass(t *testing.T) {
+	s := askTestServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
+		return seatFindings(), nil
+	})
+	m := reviewCall(t, s, map[string]any{"diff": reviewDiff, "task": "t",
+		"gate_receipts": []map[string]any{{"name": "go-test", "status": "pass", "head_sha": "deadbee"}}})
+	reason, _ := m["outcome_reason"].(string)
+	if m["outcome"] != reviewlane.OutcomeGateFailed || !strings.Contains(reason, "go-test") || !strings.Contains(reason, "no head_sha") {
+		t.Fatalf("a clean seat, a receipt naming deadbee, a review with no head: %v", m)
+	}
+	if evidenceOf(t, m)["head_unbound"] != true {
+		t.Errorf("the evidence says the review names no head: %v", evidenceOf(t, m))
 	}
 }
 
