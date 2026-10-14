@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -34,6 +35,9 @@ import (
 // beside the verb and not inside doctorRunChecked so that main.go carries one changed line, and so the
 // new flag is parsed here and never reaches runDoctor's own flag set.
 func runDoctorBackends(args []string) error {
+	if doctorHelp(args, os.Stderr) {
+		return nil
+	}
 	rest, probe := splitProbeCompletion(args)
 	err := runDoctor(rest)
 	// runDoctor has already accepted `rest` (its flag set exits on a bad flag), so this parse only
@@ -47,6 +51,25 @@ func runDoctorBackends(args []string) error {
 	cfg, _ := config.LoadWithSource(*cfgPath)
 	writeBackendsSection(os.Stdout, cfg, probe)
 	return err
+}
+
+// doctorHelp prints the flags of the doctor verb, both of them, and reports true when args ask for help
+// (-h, -help or --help, read the way the flag package reads them). runDoctor's own flag set knows only
+// --config and exits the process on help, so help is answered here, before it runs: `doctor -h` is where
+// an operator learns that --probe-completion exists and that it can load idle seats.
+func doctorHelp(args []string, w io.Writer) bool {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.String("config", "", "config file path")
+	fs.Bool("probe-completion", false, "also send a 1-token completion to each seat: this CAN LOAD idle seats (a cold load takes minutes), so it is for a person to run, and it is refused where it would evict a vLLM seat")
+	if err := fs.Parse(args); !errors.Is(err, flag.ErrHelp) {
+		return false
+	}
+	fs.SetOutput(w)
+	fmt.Fprintln(w, "usage: local-offload doctor [--config FILE] [--probe-completion]")
+	fmt.Fprintln(w, "  checks endpoint health and config, then prints which engine answers for each lane and seat")
+	fs.PrintDefaults()
+	return true
 }
 
 // splitProbeCompletion takes --probe-completion (also -probe-completion, and =true / =false) out of

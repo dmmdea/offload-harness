@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -90,6 +91,43 @@ func doctorBackendsConfig(t *testing.T, endpoint string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// TestDoctorHelpListsEveryFlag: `doctor -h` names --probe-completion (the only door to a completion,
+// which can load a seat) next to --config, in every spelling of help, and does not run doctor.
+func TestDoctorHelpListsEveryFlag(t *testing.T) {
+	for _, h := range []string{"-h", "-help", "--help"} {
+		var b strings.Builder
+		if !doctorHelp([]string{h}, &b) {
+			t.Fatalf("%s must be answered as help", h)
+		}
+		// the flag is declared by exactly that name (a flag line of its own, not a prefix of another name)
+		if !regexp.MustCompile(`(?m)^\s+-probe-completion\s*$`).MatchString(b.String()) {
+			t.Errorf("%s output declares no -probe-completion flag line:\n%s", h, b.String())
+		}
+		for _, want := range []string{"usage: local-offload doctor", "-config", "CAN LOAD idle seats", "evict a vLLM seat"} {
+			if !strings.Contains(b.String(), want) {
+				t.Errorf("%s output lacks %q:\n%s", h, want, b.String())
+			}
+		}
+	}
+	var b strings.Builder
+	for _, args := range [][]string{nil, {"--config", "c.json"}, {"--probe-completion"}, {"--config", "-h"}, {"--no-such-flag"}} {
+		if doctorHelp(args, &b) {
+			t.Errorf("%v is not a request for help", args)
+		}
+	}
+	if b.Len() != 0 {
+		t.Errorf("nothing is printed when help was not asked: %q", b.String())
+	}
+	out := captureStdout(t, func() {
+		if err := runDoctorBackends([]string{"-h"}); err != nil {
+			t.Errorf("help is not a failure: %v", err)
+		}
+	})
+	if out != "" {
+		t.Errorf("help must not run the checks or the backends section, stdout was:\n%s", out)
+	}
 }
 
 func TestSplitProbeCompletion(t *testing.T) {
