@@ -886,8 +886,8 @@ read-only unless deliberately widened. See
   the block is appended (a handler may keep what it returned), a call that failed, a result with no content and a nil result pass
   through as they are, and the check runs after the handler finished, bounded as above (at most 2 s on the first call after a swap).
   A server that started before this release has no middleware: only a reconnect or a restart of the client puts it on the new
-  image. How each client renders a second block is for the release's live check to record; the notice does not depend on it for
-  the three doors that carry the key in their own JSON.
+  image. How each client renders a second block is for the release's live check to record; the three doors above keep the key in
+  their own JSON, which does not depend on it.
   **The read does not block a rollback.** The installed file is opened through `gpulease.OpenShared`, which on Windows grants
   `FILE_SHARE_DELETE` (Go's `os.Open` grants only read and write sharing), for the hash and for the build marker
   (`openAudited`, the audit's opener, which `gpu doctor` reads every backup through too). With the notice on every door the first
