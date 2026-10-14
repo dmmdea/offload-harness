@@ -13,10 +13,19 @@ package mcpserver
 // notice with the answer (how each client renders a second block is for the release's live check to record). The text is the
 // stale_binary note itself, the same string offload_status carries under that key, behind its name: one signal, one definition,
 // one cache (staleBinaryNote), and the two cannot disagree.
+//
+// Three doors (agent_delegate, offload_research, offload_status) already put stale_binary / stale_binary_guard in their own
+// answer, but only on the path that ran the work: every refusal before it, and the config gate's deferral, answers with no key.
+// So the middleware does not know those doors by name. It looks at the RESULT: a first block that is a JSON object holding one of
+// the two keys at its top level is the door's own signal and is left alone, and every other result of every door, those doors'
+// early returns included, gets the block. A name list would have left exactly the failures the guard exists for (a stale server
+// that defers everything because its config is invalid) with no signal on the two doors that matter most.
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
+	"strings"
 	"sync/atomic"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -30,22 +39,34 @@ import (
 // the process, and the same line on every call of every door would be noise nobody reads.
 const staleGuardEvery = 20
 
-// staleBinaryDoors are the doors whose own answer already carries stale_binary and stale_binary_guard (they call
-// staleBinaryFields / staleBinaryNote themselves), so the middleware leaves their results alone. A test pins the set against the
-// call sites in mcpserver.go: a fourth door that gains the keys without being listed here would carry the signal twice.
-var staleBinaryDoors = map[string]bool{
-	"offload_status":   true,
-	"agent_delegate":   true,
-	"offload_research": true,
+// carriesStaleSignal reports whether a result's first block is the door's own signal: a JSON object that holds stale_binary or
+// stale_binary_guard at its TOP level (the shape staleBinaryFields gives a delegating door's answer). The cheap test comes
+// first, so the parse is paid only by an answer that has the text of a key in it at all; the parse then settles whether that
+// text is a key of the object or only a mention (nested in a value, quoted in a string, a longer key, text that is not JSON), so
+// a summary that quotes this very documentation is still told. Either key alone counts: a door's answer on a fresh server whose
+// guard is blind carries only stale_binary_guard, and the guard state must not be added a second time beside it.
+func carriesStaleSignal(first mcp.Content) bool {
+	tc, ok := first.(*mcp.TextContent)
+	if !ok || !strings.Contains(tc.Text, `"stale_binary`) {
+		return false
+	}
+	var top map[string]json.RawMessage
+	if json.Unmarshal([]byte(tc.Text), &top) != nil {
+		return false
+	}
+	_, hasNote := top["stale_binary"]
+	_, hasGuard := top["stale_binary_guard"]
+	return hasNote || hasGuard
 }
 
-// staleNotice is the receiving middleware that appends the stale-binary notice to the result of every tools/call of a door
-// that does not carry the signal itself. It is registered after the config gate, so it wraps outside it: the deferral a server
-// with an invalid config answers with is a result of a stale server too.
+// staleNotice is the receiving middleware that appends the stale-binary notice to the result of every tools/call whose first
+// block does not already carry the signal (carriesStaleSignal). It is registered after the config gate, so it wraps outside it:
+// the deferral a server with an invalid config answers with is a result of a stale server too, on every door.
 //
-// The doors in staleBinaryDoors are passed through BEFORE any check: they already stat the installed file (and may hash it, up to
-// installedReadWait) for their own answer, and a check here would do the work twice on exactly those doors. For the others the
-// check runs after the handler finished, as it does on the three doors, so a long call is never delayed by it before it runs.
+// A result that carries the key is passed through before any check: its door already stat the installed file (and may have
+// hashed it, up to installedReadWait) for its own answer, and a check here would do the work twice. For every other result the
+// check runs after the handler finished, so a long call is never delayed by it before it runs; on a server that was not swapped
+// it is one stat, and on one that was the hash of the installed file is cached per stat (stale_image.go).
 //
 // Nothing is added to a call that failed (an error is the client's to see as it is), to a result that holds no content (there
 // is no first block to leave alone), or to a result whose pointer is nil: the SDK hands the middleware the handler's
@@ -58,16 +79,12 @@ func (s *Server) staleNotice(next mcp.MethodHandler) mcp.MethodHandler {
 		if method != "tools/call" {
 			return next(ctx, method, req)
 		}
-		params, ok := req.GetParams().(*mcp.CallToolParamsRaw)
-		if !ok || staleBinaryDoors[params.Name] {
-			return next(ctx, method, req)
-		}
 		res, err := next(ctx, method, req)
 		if err != nil {
 			return res, err
 		}
 		out, ok := res.(*mcp.CallToolResult)
-		if !ok || out == nil || len(out.Content) == 0 {
+		if !ok || out == nil || len(out.Content) == 0 || carriesStaleSignal(out.Content[0]) {
 			return res, err
 		}
 		// The note first: its read of the stamp is what finds a stamp that cannot be read right now, which the state reads after.
