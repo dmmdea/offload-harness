@@ -265,6 +265,14 @@ local, and a `route: "queue"` delegation writes no row on the asker's ledger at 
 row, as `served_*`), so it is in neither number. It reads this box's ledger only; run it on each box for the fleet
 view.
 
+**Why jobs failed.** `local-offload ledger --failures` (with `--since DAYS`, `--include-test-traffic` and
+`--table FILE`) prints the failure-class register in place of the savings summary: one JSON object that groups the
+ledger's failed jobs by reason code, with each class's count and share, the doors, seats and model aliases they
+came through (on a delegation row the "model" is the seat alias), the card work they spent (`null` where no row
+measured it, never `0`), and the meaning, root cause and structural fix that the table in
+[systems/failure-register.md](systems/failure-register.md) holds for the class (`undocumented` for a class with no
+row). It only reads the ledger; the root cause and the fix are written by a person, not derived.
+
 The harness-share gate and any other reader that sums the ledger itself should skip rows whose `run_class` is
 set (and, for rows written before the label, whose `origin_session` is `go-test`).
 
