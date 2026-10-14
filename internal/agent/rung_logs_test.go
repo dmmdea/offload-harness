@@ -1392,3 +1392,160 @@ func TestLogsOriginalSizeParsesTheHeaderOnly(t *testing.T) {
 		t.Errorf("rung off: a folded-looking body is named by its own length, got %d", got)
 	}
 }
+
+// --- round three: a quoted header must not feed an arbitrary size into a marker ---
+
+// lcCollapseHeader spells a collapse header exactly as the rung writes it,
+// including the newline that ends it.
+func lcCollapseHeader(n, lines int) string {
+	return fmt.Sprintf("%s%d chars, %d lines]\n", logsPrefix, n, lines)
+}
+
+// lcQuoted is header followed by filler up to total bytes (just the header when
+// it is already that long).
+func lcQuoted(header string, total int) string {
+	if total <= len(header) {
+		return header
+	}
+	return header + strings.Repeat("x", total-len(header))
+}
+
+// TestLogsOriginalSizeAcceptsOnlyAHeaderTheRungCouldHaveWritten: the header is
+// the only record of the original size, so a body that merely quotes one must
+// not be believed when the numbers cannot be true. A fold strictly shortens its
+// body, only folds a body of logsMinChars to logsMaxChars bytes, needs at least
+// the head, the tail and one run of lines, and ends the header with one newline.
+func TestLogsOriginalSizeAcceptsOnlyAHeaderTheRungCouldHaveWritten(t *testing.T) {
+	minLines := logsHeadLines + logsTailLines + logsMinRun
+	accept := []struct {
+		name   string
+		header string
+		total  int
+		want   int
+	}{
+		{"a plausible claim", lcCollapseHeader(5000, 120), 600, 5000},
+		{"one byte above the body", lcCollapseHeader(601, 120), 600, 601},
+		{"the largest body the rung folds", lcCollapseHeader(logsMaxChars, 120), 600, logsMaxChars},
+		{"the smallest body the rung folds", lcCollapseHeader(logsMinChars, minLines), 60, logsMinChars},
+		{"as many lines as bytes", lcCollapseHeader(500, 500), 100, 500},
+	}
+	for _, c := range accept {
+		body := lcQuoted(c.header, c.total)
+		n, ok := logsOriginalSize(body)
+		if !ok || n != c.want {
+			t.Errorf("%s: want (%d, true), got (%d, %v) for %.80q", c.name, c.want, n, ok, body)
+		}
+		if got := logsMarkerSize(body, true); got != c.want {
+			t.Errorf("%s: the marker should name %d, got %d", c.name, c.want, got)
+		}
+	}
+
+	refuse := []struct {
+		name   string
+		header string
+		total  int
+	}{
+		{"a negative size", lcCollapseHeader(-5, 120), 600},
+		{"a zero size", lcCollapseHeader(0, 120), 600},
+		{"an eleven-digit size", lcCollapseHeader(99999999999, 120), 600},
+		{"a size beyond what the rung folds", lcCollapseHeader(logsMaxChars+1, 120), 600},
+		{"a size equal to the body", lcCollapseHeader(600, 120), 600},
+		{"a size below the body", lcCollapseHeader(4096, 120), 6000},
+		{"a size below what the rung folds", lcCollapseHeader(logsMinChars-1, minLines), 60},
+		{"too few lines for a fold", lcCollapseHeader(5000, minLines-1), 600},
+		{"zero lines", lcCollapseHeader(5000, 0), 600},
+		{"a negative line count", lcCollapseHeader(5000, -3), 600},
+		{"more lines than bytes", lcCollapseHeader(500, 501), 100},
+		{"an explicit plus sign", logsPrefix + "+5000 chars, 120 lines]\n", 600},
+		{"leading zeros", logsPrefix + "05000 chars, 120 lines]\n", 600},
+		{"a doubled space", logsPrefix + "5000  chars, 120 lines]\n", 600},
+		{"a carriage return before the newline", logsPrefix + "5000 chars, 120 lines]\r\n", 600},
+		{"text after the bracket", logsPrefix + "5000 chars, 120 lines] extra\n", 600},
+		{"no newline after the bracket", logsPrefix + "5000 chars, 120 lines]x", 600},
+		{"nothing after the bracket", logsPrefix + "5000 chars, 120 lines]", 600},
+	}
+	for _, c := range refuse {
+		body := lcQuoted(c.header, c.total)
+		if n, ok := logsOriginalSize(body); ok {
+			t.Errorf("%s: must not parse, got %d for %.80q", c.name, n, body)
+		}
+		if got := logsMarkerSize(body, true); got != len(body) {
+			t.Errorf("%s: with the rung on the marker should name the body's own %d, got %d", c.name, len(body), got)
+		}
+	}
+
+	// A real fold still parses at every size the rung can produce.
+	for _, n := range []int{150, 400} {
+		folded, ok := logCollapse(lrServerLog(n))
+		if !ok {
+			t.Fatalf("control: lrServerLog(%d) must fold", n)
+		}
+		if got, ok := logsOriginalSize(folded); !ok || got != len(lrServerLog(n)) {
+			t.Errorf("a real fold of %d chars: want (%d, true), got (%d, %v)", len(lrServerLog(n)), len(lrServerLog(n)), got, ok)
+		}
+	}
+}
+
+// TestLogCollapseMarkersIgnoreAQuotedHeaderThatCannotBeTrue: with the rung ON,
+// a result that merely quotes a malformed or impossible header is named by its
+// own length at every site that names a size: the dedupe reference, the
+// skeleton prefix, the elide marker and both passes of the reactive last
+// resort. The expected values come from len(body), not from the rung.
+func TestLogCollapseMarkersIgnoreAQuotedHeaderThatCannotBeTrue(t *testing.T) {
+	headers := []struct{ name, header string }{
+		{"enormous", lcCollapseHeader(99999999999, 120)},
+		{"negative", lcCollapseHeader(-5, 120)},
+		{"zero", lcCollapseHeader(0, 3)},
+		{"smaller than the body", lrLookalikeHeader},
+	}
+	for _, h := range headers {
+		t.Run(h.name, func(t *testing.T) {
+			older, newest := h.header+lrServerLog(150), h.header+lrServerLog(160)
+			if len(older) <= 4096 || len(newest) <= 4096 {
+				t.Fatal("control: the bodies must be longer than the smallest claim")
+			}
+
+			// Dedupe: the older of two identical copies becomes a reference.
+			msgs := lrTranscript(older, older, lrServerLog(170))
+			want := dedupeMarker("call-2", len(older))
+			probe := append([]Msg(nil), msgs...)
+			probe[4].Content = want
+			out := compact(context.Background(), msgs, estimateTokens(probe), 2, 3, compactOpts{LogCollapse: true})
+			if out[4].Content != want {
+				t.Errorf("dedupe reference:\n got %.120q\nwant %.120q", out[4].Content, want)
+			}
+
+			// Skeleton: the prefix names the body it pruned.
+			quoted := h.header + lcSkeletonableLog()
+			skel, ok := skeletonizeAs(quoted, len(quoted))
+			if !ok {
+				t.Fatal("control: the quoted body must prune to a skeleton")
+			}
+			msgs = lrTranscript(quoted)
+			probe = append([]Msg(nil), msgs...)
+			probe[4].Content = skel
+			out = compact(context.Background(), msgs, estimateTokens(probe), 1, 3, compactOpts{Skeleton: true, LogCollapse: true})
+			if out[4].Content != skel {
+				t.Errorf("skeleton prefix:\n got %.120q\nwant %.120q", out[4].Content, skel)
+			}
+
+			// Elide: a budget nothing meets turns every older body into a marker.
+			distinct := lrTranscript(older, h.header+lrTestLog(80), lrServerLog(170))
+			tight := compact(context.Background(), distinct, 1, 2, 3, compactOpts{LogCollapse: true})
+			for _, i := range []int{4, 6} {
+				if want := elisionMarker(len(distinct[i].Content)); !strings.HasPrefix(tight[i].Content, want) {
+					t.Errorf("elide marker, message %d:\n got %.120q\nwant prefix %q", i, tight[i].Content, want)
+				}
+			}
+
+			// Reactive last resort: an older body (pass 2) and the newest (pass 3).
+			shrunk := emergencyShrinkWith(lrTranscript(older, newest), 1, 3, compactOpts{LogCollapse: true})
+			if want := elisionMarker(len(older)); !strings.HasPrefix(shrunk[4].Content, want) {
+				t.Errorf("last resort, older body: want prefix %q, got %.120q", want, shrunk[4].Content)
+			}
+			if want := elisionMarker(len(newest)); shrunk[6].Content != want {
+				t.Errorf("last resort, newest body: want %q, got %.120q", want, shrunk[6].Content)
+			}
+		})
+	}
+}
