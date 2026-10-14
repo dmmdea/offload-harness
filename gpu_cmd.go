@@ -1571,14 +1571,26 @@ func releaseHolderLease(m *gpulease.Manager, lease *gpulease.Lease) error {
 		} else {
 			_, err = releaseByEpochFn(m, epoch)
 		}
-		// The record itself decides, not Inspect() (which reads a record it cannot read as absent): off the record is released
-		// whatever the answers were; on it, or unreadable, is not.
-		if !leaseStillHeld(m, epoch) {
+		// The record itself decides, not Inspect() (which reads a record it cannot read as absent): off the record AND no claim of
+		// the epoch left is released whatever the answers were (a card lease removes its record first and its claims after, so a
+		// failure on a claim leaves the record absent and the lease half released); on the record, unreadable, or with a claim
+		// left, is not. A lease that moved on is not this caller's to release: that refusal is the one error that clears it.
+		if gpulease.IsLeaseMovedOn(err) {
 			return nil
 		}
-		last = err
-		if last == nil {
+		if !leaseStillHeld(m, epoch) && len(m.ClaimsOf(epoch)) == 0 {
+			return nil
+		}
+		// The first real failure is the one worth reporting: a retry by epoch of a lease whose record is already gone answers (false,
+		// nil) and must not replace what the lease's own release said.
+		switch {
+		case err != nil:
+			last = err
+		case last == nil:
 			last = stillHeldError(m, epoch, "the release reported success")
+			if last == nil {
+				last = fmt.Errorf("the release reported success, but the claim of epoch %d on %s is still there", epoch, strings.Join(m.ClaimsOf(epoch), ", "))
+			}
 		}
 	}
 	return last
@@ -1905,6 +1917,12 @@ func detachedMaintainError(m *gpulease.Manager, epoch uint64, err error) error {
 // detachedMaintainErrorAfter is detachedMaintainError for a caller that knows the last outer hold bound it put on the record (the zero
 // time if none): a lease that is gone with that moment in the past was, most likely, released by its own hidden holder at it.
 func detachedMaintainErrorAfter(m *gpulease.Manager, epoch uint64, err error, outer time.Time) error {
+	if st, _ := m.RecordState(epoch); st == gpulease.RecordAbsent && !outer.IsZero() && time.Now().After(outer) {
+		// Gone, with the outer bound this reserve last put on the record already past: the hidden holder releases a lease whose
+		// bound has passed and which still asks for the host, so that is the likely hand. It happens when this reserve could not keep
+		// the bound ahead (its drain or unload stalled it, or the box suspended); the operator is told so instead of left to guess.
+		return fmt.Errorf("%w (the lease is no longer this reservation's: the outer hold bound this reserve last set, %s, had passed and the hidden holder releases a lease whose bound has passed, so it most likely released it; reserve again to queue for it)", err, outer.Format(time.Kitchen))
+	}
 	if st, cause := m.RecordState(epoch); st == gpulease.RecordUnreadable {
 		return fmt.Errorf("%w (the lease's record cannot be read, so it is treated as still held: %v; `gpu release --epoch %d` frees it)", err, cause, epoch)
 	}

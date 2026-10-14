@@ -49,6 +49,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -841,7 +842,21 @@ func (m *Manager) RecordState(epoch uint64) (RecordState, error) {
 // a release that removed the record and failed on a claim has left the lease half released, and the record being absent does not
 // say so.
 func (m *Manager) ClaimsOf(epoch uint64) []string {
-	return nil
+	entries, err := os.ReadDir(m.cardsDir())
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".claim") {
+			continue
+		}
+		device := strings.TrimSuffix(e.Name(), ".claim")
+		if c, ok := readCardClaim(m.leaseDir(), device); ok && c.Epoch == epoch {
+			out = append(out, device)
+		}
+	}
+	return out
 }
 
 // ErrLeaseMovedOn is the refusal for releasing an epoch that is no longer the current lease.
