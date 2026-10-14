@@ -261,7 +261,10 @@ func TestRunCBBudgetWallDoesNotCreditNeedlesTheSeatNeverReceived(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
-	lazy := func(ctx context.Context, msgs []agent.Msg, maxOut int) (string, error) { calls++; return CBAdvanceMarker, nil }
+	lazy := func(ctx context.Context, msgs []agent.Msg, maxOut int) (string, error) {
+		calls++
+		return CBAdvanceMarker, nil
+	}
 	r := RunCBTask(context.Background(), in, lazy, CBRunOpts{Budget: 6000, Reserve: 500})
 	if r.TerminatedBy != CBTermBudgetWall || calls != 1 || r.OpsDelivered < 2 {
 		t.Fatalf("the scenario must be: one seat call, then a wall with the next op already delivered: calls=%d %+v", calls, r)
@@ -550,8 +553,8 @@ func TestRunCBNudgesAreSentAndThePeakContextIsTracked(t *testing.T) {
 		reply string
 		nudge string
 	}{
-		"no marker":            {"thinking about it", cbNoMarkerText},
-		"marker inside text":   {"I will say " + CBAdvanceMarker + " later", cbNonStandaloneText},
+		"no marker":             {"thinking about it", cbNoMarkerText},
+		"marker inside text":    {"I will say " + CBAdvanceMarker + " later", cbNonStandaloneText},
 		"submit before the end": {CBSubmitMarker, cbRefuseSubmitText},
 	} {
 		var sent [][]agent.Msg
