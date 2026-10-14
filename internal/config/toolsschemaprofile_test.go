@@ -55,6 +55,14 @@ func TestToolsSchemaProfileRefusesAnUnknownProfile(t *testing.T) {
 			t.Fatalf("error = %q, want it to contain %q", err, want)
 		}
 	}
+	// The message describes what compact keeps as the profile does: the opening sentence plus the sentences a reviewed keep list names.
+	// It once said "safety sentences", which is the keyword rule the profile replaced.
+	if !strings.Contains(err.Error(), "reviewed keep list") {
+		t.Fatalf("error = %q, want it to say compact keeps the sentences a reviewed keep list names", err)
+	}
+	if strings.Contains(err.Error(), "safety sentences") {
+		t.Fatalf("error = %q still describes compact by the safety-word rule it replaced", err)
+	}
 	// A Config built by hand with the same value resolves to full: the resolver never shrinks on a value it does not know.
 	if got := (Config{ToolsSchemaProfile: "tiny"}).ToolsSchemaProfileMode(); got != ToolsProfileFull {
 		t.Fatalf("a hand-built unknown profile resolves to %q, want %q", got, ToolsProfileFull)
