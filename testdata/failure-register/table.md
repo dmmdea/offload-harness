@@ -10,6 +10,8 @@ Rows for classes the fixture ledger holds, one row for a class it does not hold 
 | `failed_verification` | A result failed the contract's own checks. | | Tighten the contract (synthetic row). |
 | `budget` | A ceiling stopped the run. | A step budget. | open |
 | `stall_prefill` | The run went silent while the prompt was being processed. | Not recorded. | open |
+| `poll_deadline` | A node owned the job and it did not finish inside the poll budget. | A job larger than the budget. | open |
+| `node_unreachable` | No node answered. | The network path. | open |
 | `write` | The write door was refused. | The node does not opt in. | open |
 
 A second table must not be mistaken for the first.

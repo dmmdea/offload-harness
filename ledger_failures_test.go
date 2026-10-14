@@ -100,7 +100,7 @@ func TestFailureRegisterIsDeterministicOnTheFixtureLedger(t *testing.T) {
 		t.Fatalf("stdout is not a single JSON value (a text line follows it?):\n%s", a)
 	}
 	r := decodeFailureReport(t, a)
-	want := []string{"node_busy", "abstention", "failed_verification", "capacity_wait", "budget", "config", "other", "stall_prefill"}
+	want := []string{"node_busy", "abstention", "failed_verification", "capacity_wait", "budget", "config", "node_unreachable", "other", "poll_deadline", "stall_prefill"}
 	if got := classNames(r); !reflect.DeepEqual(got, want) {
 		t.Fatalf("class order = %v, want %v (count descending, then class name)", got, want)
 	}
@@ -137,7 +137,7 @@ func TestFailureRegisterUnresolvedTokensAreNullNeverZero(t *testing.T) {
 	for _, c := range raw.Classes {
 		byName[c["class"].(string)] = c
 	}
-	for _, name := range []string{"capacity_wait", "config", "other"} {
+	for _, name := range []string{"capacity_wait", "config", "other", "poll_deadline", "node_unreachable"} {
 		c := byName[name]
 		v, present := c["cards_tokens"]
 		if !present {
@@ -156,7 +156,7 @@ func TestFailureRegisterUnresolvedTokensAreNullNeverZero(t *testing.T) {
 		}
 	}
 	// Text-level guard: no unresolved class may carry a literal 0 in its token column.
-	for _, name := range []string{"capacity_wait", "config", "other"} {
+	for _, name := range []string{"capacity_wait", "config", "other", "poll_deadline", "node_unreachable"} {
 		i := strings.Index(out, `"class": "`+name+`"`)
 		if i < 0 {
 			t.Fatalf("class %s not found in output", name)
@@ -200,8 +200,8 @@ func TestFailureRegisterListsOnlyClassesWithRows(t *testing.T) {
 			}
 		}
 	}
-	if r.FailureRows != 16 {
-		t.Errorf("failure_rows = %d, want 16 (the inner row of j-bud, the marker, the cache hit, the ok row and the bake and test rows are not failures)", r.FailureRows)
+	if r.FailureRows != 18 {
+		t.Errorf("failure_rows = %d, want 18 (the inner row of j-bud, the marker, the cache hit, the ok row and the bake and test rows are not failures)", r.FailureRows)
 	}
 	if r.ExcludedNonProduction["bake"] != 1 || r.ExcludedNonProduction["test"] != 1 || len(r.ExcludedNonProduction) != 2 {
 		t.Errorf("excluded_non_production = %v, want bake 1 and test 1", r.ExcludedNonProduction)
@@ -211,8 +211,8 @@ func TestFailureRegisterListsOnlyClassesWithRows(t *testing.T) {
 	}
 
 	all := decodeFailureReport(t, runFailures(t, "--include-test-traffic"))
-	if all.FailureRows != 18 || len(all.ExcludedNonProduction) != 0 {
-		t.Errorf("with test traffic: failure_rows = %d (want 18), excluded = %v (want none)", all.FailureRows, all.ExcludedNonProduction)
+	if all.FailureRows != 20 || len(all.ExcludedNonProduction) != 0 {
+		t.Errorf("with test traffic: failure_rows = %d (want 20), excluded = %v (want none)", all.FailureRows, all.ExcludedNonProduction)
 	}
 	classByName(t, all, "write")
 	classByName(t, all, "contract")

@@ -73,6 +73,14 @@ func TestFailureTokensAreNilUntilARowMeasuredThem(t *testing.T) {
 
 func ptr64(n int64) *int64 { return &n }
 
+// showTokens prints a token total for a failure message: the number, or "nil" for an unresolved one.
+func showTokens(p *int64) string {
+	if p == nil {
+		return "nil"
+	}
+	return strconv.FormatInt(*p, 10)
+}
+
 // Rows from before the reason code was stamped (F22) are classed with the ledger's own total classifier at read
 // time and counted as derived; a stamped code outside the closed set, or one that says ok on a deferred row, is
 // not trusted; an acceptance failure that did not defer is still a failed verification.
@@ -182,5 +190,85 @@ func TestFailureRegisterOfAMissingLedgerIsEmptyNotAnError(t *testing.T) {
 	}
 	if reg.Classes == nil || len(reg.Classes) != 0 || reg.FailureRows != 0 || reg.CardsTokens != nil {
 		t.Errorf("register of no ledger = %+v, want an empty class list and null tokens", reg)
+	}
+}
+
+// A stored 0 is a measurement only when the row itself did the work or provably never reached a node. Record fills
+// cards_tokens from the row's own columns, and a delegator's row for a job a node owned carries none of the node's
+// work, so its stored 0 says "nothing recorded here" and the register must carry it as unresolved (nil), not as a
+// measured 0. A reason code that says no node ran the job (it was refused, never placed, or taken back) keeps the 0
+// even when the row names a node, and so does a row the node wrote for itself. Rows are hand-written because Record
+// cannot produce a delegator row with the key at 0 and a node on it without also owning the figure.
+func TestFailureZeroOnADelegatorRowIsNotAMeasurement(t *testing.T) {
+	zero, ten := ptr64(0), ptr64(10)
+	cases := []struct {
+		name string
+		line string
+		want *int64
+	}{
+		// the work ran on a node and the delegator's row has no figure for it
+		{"poll_deadline", `{"ts":1,"task":"agent_delegate","deferred":true,"reason_code":"poll_deadline","fleet_job_id":"f1","cards_tokens":0}`, nil},
+		{"node_unreachable", `{"ts":2,"task":"agent_delegate","deferred":true,"reason_code":"node_unreachable","node":"node-a","cards_tokens":0}`, nil},
+		{"remote_error", `{"ts":3,"task":"agent_delegate","deferred":true,"reason_code":"remote_error","node_id":"node-b","cards_tokens":0}`, nil},
+		{"failed_verification", `{"ts":4,"task":"agent_delegate","deferred":false,"acceptance_result":"fail","fleet_job_id":"f4","cards_tokens":0}`, nil},
+		// a node that accepted the job and never confirmed taking it back may still run it: not provably unrun
+		{"queue_deadline", `{"ts":5,"task":"agent_delegate","deferred":true,"reason_code":"queue_deadline","fleet_job_id":"f5","cards_tokens":0}`, nil},
+		// the caller went away after the node held the job: the node may have worked
+		{"canceled", `{"ts":6,"task":"agent_delegate","deferred":true,"reason_code":"canceled","fleet_job_id":"f6","cards_tokens":0}`, nil},
+		// a code that says no node ran the job keeps the measured zero, node on the row or not
+		{"capacity_wait", `{"ts":7,"task":"agent_delegate","deferred":true,"reason_code":"capacity_wait","fleet_job_id":"f7","cards_tokens":0}`, zero},
+		{"node_busy", `{"ts":8,"task":"agent_delegate","deferred":true,"reason_code":"node_busy","node":"node-a","cards_tokens":0}`, zero},
+		{"queue_withdrawn", `{"ts":9,"task":"agent_delegate","deferred":true,"reason_code":"queue_withdrawn","fleet_job_id":"f9","node":"node-b","cards_tokens":0}`, zero},
+		{"dispatch_refused", `{"ts":10,"task":"agent_delegate","deferred":true,"reason_code":"dispatch_refused","node":"node-b","cards_tokens":0}`, zero},
+		// no node on the row: nothing else ran, so the stored 0 is the row's own
+		{"no_eligible_node", `{"ts":11,"task":"agent_delegate","deferred":true,"reason_code":"no_eligible_node","cards_tokens":0}`, zero},
+		{"infrastructure", `{"ts":12,"task":"generate_image","deferred":true,"reason_code":"infrastructure","cards_tokens":0}`, zero},
+		// a node's own row for a job another box asked for: its stored figure is the node's own measurement
+		{"budget", `{"ts":13,"task":"agent","deferred":true,"reason_code":"budget","door":"fleet","fleet_job_id":"f13","cards_tokens":0}`, zero},
+		{"stall_decode", `{"ts":14,"task":"agent","deferred":true,"reason_code":"stall_decode","requester":"node-a","fleet_job_id":"f14","cards_tokens":0}`, zero},
+		// work in the older columns is work, whatever the stored figure says
+		{"stall_tool", `{"ts":15,"task":"agent_delegate","deferred":true,"reason_code":"stall_tool","fleet_job_id":"f15","tokens_out":10,"cards_tokens":0}`, ten},
+		// a stored figure above 0 is the ledger's own number
+		{"seat_down", `{"ts":16,"task":"agent_delegate","deferred":true,"reason_code":"seat_down","fleet_job_id":"f16","cards_tokens":10}`, ten},
+	}
+	var lines []string
+	for _, c := range cases {
+		lines = append(lines, c.line)
+	}
+	reg, err := FailureRegisterFile(writeFailureLedger(t, lines...), 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		got := classNamed(t, reg, c.name)
+		switch {
+		case c.want == nil && got.CardsTokens != nil:
+			t.Errorf("%s: cards_tokens = %d over %d row(s), want nil (the stored 0 is not a measurement)", c.name, *got.CardsTokens, got.RowsWithTokens)
+		case c.want != nil && (got.CardsTokens == nil || *got.CardsTokens != *c.want):
+			t.Errorf("%s: cards_tokens = %s, want %d", c.name, showTokens(got.CardsTokens), *c.want)
+		}
+		if wantRows := map[bool]int{true: 1, false: 0}[c.want != nil]; got.RowsWithTokens != wantRows {
+			t.Errorf("%s: rows_with_tokens = %d, want %d", c.name, got.RowsWithTokens, wantRows)
+		}
+		for _, g := range got.Groups {
+			if (g.CardsTokens == nil) != (c.want == nil) {
+				t.Errorf("%s: group cards_tokens = %s, want nil=%v", c.name, showTokens(g.CardsTokens), c.want == nil)
+			}
+		}
+	}
+
+	// A class that mixes the two sums what was measured and says how many rows that was.
+	reg, err = FailureRegisterFile(writeFailureLedger(t,
+		`{"ts":1,"task":"agent_delegate","deferred":true,"reason_code":"job_lost","fleet_job_id":"a","cards_tokens":0}`,
+		`{"ts":2,"task":"agent_delegate","deferred":true,"reason_code":"job_lost","fleet_job_id":"b","cards_tokens":300}`,
+	), 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := classNamed(t, reg, "job_lost"); c.Count != 2 || c.CardsTokens == nil || *c.CardsTokens != 300 || c.RowsWithTokens != 1 {
+		t.Errorf("job_lost = %d rows, %s tokens over %d, want 2 rows, 300 over 1 (a floor)", c.Count, showTokens(c.CardsTokens), c.RowsWithTokens)
+	}
+	if reg.CardsTokens == nil || *reg.CardsTokens != 300 || reg.RowsWithTokens != 1 {
+		t.Errorf("register totals = %s over %d rows, want 300 over 1", showTokens(reg.CardsTokens), reg.RowsWithTokens)
 	}
 }

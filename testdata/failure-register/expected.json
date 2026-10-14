@@ -1,6 +1,6 @@
 {
-  "job_rows": 18,
-  "failure_rows": 16,
+  "job_rows": 20,
+  "failure_rows": 18,
   "class_derived_rows": 4,
   "cards_tokens": 2710,
   "rows_with_tokens": 11,
@@ -17,7 +17,7 @@
     {
       "class": "node_busy",
       "count": 4,
-      "share": 0.25,
+      "share": 0.2222,
       "example_reason": "seat busy: seat is at its run cap",
       "cards_tokens": 0,
       "rows_with_tokens": 4,
@@ -75,7 +75,7 @@
     {
       "class": "abstention",
       "count": 3,
-      "share": 0.1875,
+      "share": 0.1667,
       "example_reason": "empty transcript",
       "cards_tokens": 360,
       "rows_with_tokens": 2,
@@ -140,7 +140,7 @@
     {
       "class": "failed_verification",
       "count": 3,
-      "share": 0.1875,
+      "share": 0.1667,
       "example_reason": "acceptance failed: contains \"done\"",
       "cards_tokens": 1400,
       "rows_with_tokens": 3,
@@ -190,7 +190,7 @@
     {
       "class": "capacity_wait",
       "count": 2,
-      "share": 0.125,
+      "share": 0.1111,
       "example_reason": "capacity wait: no node had room",
       "cards_tokens": null,
       "rows_with_tokens": 0,
@@ -229,7 +229,7 @@
     {
       "class": "budget",
       "count": 1,
-      "share": 0.0625,
+      "share": 0.0556,
       "example_reason": "step budget exhausted",
       "cards_tokens": 900,
       "rows_with_tokens": 1,
@@ -268,7 +268,7 @@
     {
       "class": "config",
       "count": 1,
-      "share": 0.0625,
+      "share": 0.0556,
       "example_reason": "no image model configured",
       "cards_tokens": null,
       "rows_with_tokens": 0,
@@ -305,9 +305,48 @@
       "structural_fix": "undocumented"
     },
     {
+      "class": "node_unreachable",
+      "count": 1,
+      "share": 0.0556,
+      "example_reason": "no node answered the poll",
+      "cards_tokens": null,
+      "rows_with_tokens": 0,
+      "doors": [
+        {
+          "name": "agent_run",
+          "count": 1
+        }
+      ],
+      "seats": [
+        {
+          "name": "node-a:agent-pool",
+          "count": 1
+        }
+      ],
+      "models": [
+        {
+          "name": "agent-pool",
+          "count": 1
+        }
+      ],
+      "groups": [
+        {
+          "door": "agent_run",
+          "seat": "node-a:agent-pool",
+          "model": "agent-pool",
+          "count": 1,
+          "cards_tokens": null
+        }
+      ],
+      "documented": true,
+      "meaning": "No node answered.",
+      "root_cause": "The network path.",
+      "structural_fix": "open"
+    },
+    {
       "class": "other",
       "count": 1,
-      "share": 0.0625,
+      "share": 0.0556,
       "example_reason": "something nobody classified",
       "cards_tokens": null,
       "rows_with_tokens": 0,
@@ -344,9 +383,48 @@
       "structural_fix": "undocumented"
     },
     {
+      "class": "poll_deadline",
+      "count": 1,
+      "share": 0.0556,
+      "example_reason": "poll budget spent: the node still owned the job",
+      "cards_tokens": null,
+      "rows_with_tokens": 0,
+      "doors": [
+        {
+          "name": "agent_run",
+          "count": 1
+        }
+      ],
+      "seats": [
+        {
+          "name": "node-b:fast-digest-seat",
+          "count": 1
+        }
+      ],
+      "models": [
+        {
+          "name": "fast-digest-seat",
+          "count": 1
+        }
+      ],
+      "groups": [
+        {
+          "door": "agent_run",
+          "seat": "node-b:fast-digest-seat",
+          "model": "fast-digest-seat",
+          "count": 1,
+          "cards_tokens": null
+        }
+      ],
+      "documented": true,
+      "meaning": "A node owned the job and it did not finish inside the poll budget.",
+      "root_cause": "A job larger than the budget.",
+      "structural_fix": "open"
+    },
+    {
       "class": "stall_prefill",
       "count": 1,
-      "share": 0.0625,
+      "share": 0.0556,
       "example_reason": "stall in prefill",
       "cards_tokens": 50,
       "rows_with_tokens": 1,
