@@ -1177,15 +1177,18 @@ running loads it, and llama-swap unloads whatever else holds the cards to make r
 is bound to (`cascade_seat_guard`, `internal/seatguard`). So it is a thing a person asks for, and `doctor -h` says so, as does
 the usage a mistyped flag prints (exit status 2, no check run). A completion goes only to a seat that is already running,
 which loads nothing and so evicts nothing, or, on a box where nothing is running, to at most ONE seat in the run, however
-that completion ends (the first seat the report reaches: the workhorse lane's). Any other seat is not probed, and its row says
-over which running seat the load would have been (`not probed: would load over llama.cpp seat X`, naming the seat the way
-the rest of the report does, by engine kind and id), or that the run's one load was already spent. Nothing that is not
-running is sent a completion either whenever llama-swap's running list cannot be read: a seat holding the cards cannot then
-be ruled out. A seat with no chat route is never sent a chat completion, because llama-swap answers one with a 404, which
+that completion ends (the first seat the report reaches: the workhorse lane's). Whether a seat is running is read from
+llama-swap's running list immediately before each completion, never taken from an earlier reading: a seat can stop between
+two readings (another client unloads it, or its idle timer runs out), and a completion to it would then load it over
+whatever runs now, so a seat that is not running on that reading is judged like any other seat that is not. Any other seat is
+not probed, and its row says over which running seat the load would have been (`not probed: would load over llama.cpp seat
+X`, naming the seat the way the rest of the report does, by engine kind and id), or that the run's one load was already
+spent. No seat is sent a completion whenever llama-swap's running list cannot be read just before it: whether the seat is
+running, or what holds the cards, cannot then be ruled out. A seat with no chat route is never sent a chat completion, because llama-swap answers one with a 404, which
 says nothing about whether the seat is up: the configured embedder and speech-to-text seats, a seat whose own command carries
 `--embedding`, `--embeddings`, `--rerank` or `--reranking`, and a whisper server. Its row keeps the reading the default probe
 gives it and says `not probed: not a chat seat`. Every row's starting state (loaded, not loaded, loading) comes from the one
-reading of the running list taken before any completion; a later reading, taken just before a seat that is not running is
+reading of the running list taken before any completion; a later reading, taken immediately before each completion is
 decided, only decides whether a completion may be sent, and the one thing it adds to a row is that another client loaded the
 seat since the report began. A row that ran a completion on an idle box says the completion loaded it. Seats it loads unload
 on their own idle timer like any other load. `/fleet/health` never runs it.
