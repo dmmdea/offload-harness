@@ -1114,9 +1114,9 @@ func TestLogCollapseIsDiscriminatedByTheGoldenFixtures(t *testing.T) {
 		}
 	}
 	// Six fixtures changed before the last line of a run was kept; the shipped
-	// tool-text fixture's one body now folds to 83 bytes more than it did, which
-	// no longer fits its 60% budget, so rung on and rung off both elide it. The
-	// five that remain are each pinned by a digest above.
+	// tool-text fixture's one body now folds to one line (its last) more than it
+	// did, which no longer fits its 60% budget, so rung on and rung off both elide
+	// it. The five that remain are each pinned by a digest above.
 	if changed < 5 {
 		t.Errorf("the rung changes only %d of %d golden fixtures; the pinned digests would not notice it leaking in", changed, len(fixtures))
 	}

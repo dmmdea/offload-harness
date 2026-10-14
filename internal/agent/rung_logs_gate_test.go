@@ -635,28 +635,37 @@ func lcBothRungsOpts() compactOpts { return compactOpts{LogCollapse: true} }
 // lines differ only in a number is the search rung's, not this one's. With both
 // rungs on, the listing is left raw by the log rung (and thinned by the search
 // rung once that exists), and the build output beside it is folded.
+//
+// Two listings are older than the build log: a `grep -rl` one (paths only, which
+// no search rung parses either: neither rung claims it) and a `grep -rn` one of
+// path:line:text hits (the shape a search rung thins; the log rung must leave it
+// raw whether or not that rung is on).
 func TestLogCollapseAndSearchRungsDoNotClaimTheSameOutput(t *testing.T) {
-	listing := lcListing("internal/pkg/file%d_%d.go", 90) // grep -rl: no file:line shape to protect it
-	msgs := lcTranscript(listing, lcSubtestLog(100), lrServerLog(170))
+	paths := lcListing("internal/pkg/file%d_%d.go", 90)
+	hits := lcListing("internal/pkg/file%d.go:%d:    return handle(req)", 90)
+	msgs := lcTranscript(paths, hits, lcSubtestLog(100), lrServerLog(170))
 	msgs[3].ToolCalls = []ToolCall{{ID: "call-1", Name: "run_shell", Args: `{"command":"grep -rl handle ."}`}}
-	if _, ok := logCollapse(listing); !ok {
-		t.Fatal("control: the listing is one the fold would shorten")
+	msgs[5].ToolCalls = []ToolCall{{ID: "call-2", Name: "run_shell", Args: `{"command":"grep -rn handle ."}`}}
+	if _, ok := logCollapse(paths); !ok {
+		t.Fatal("control: the paths listing is one the fold would shorten")
 	}
-	folded, ok := logCollapse(msgs[6].Content)
+	folded, ok := logCollapse(msgs[8].Content)
 	if !ok {
 		t.Fatal("control: the build log must fold")
 	}
 	probe := append([]Msg(nil), msgs...)
-	probe[6].Content = folded
+	probe[8].Content = folded
 	out := compact(context.Background(), msgs, estimateTokens(probe), 2, 3, lcBothRungsOpts())
-	if isLogCollapsed(out[4].Content) {
-		t.Error("the log rung folded a grep listing")
+	for _, i := range []int{4, 6} {
+		if isLogCollapsed(out[i].Content) {
+			t.Errorf("message %d: the log rung folded a grep listing", i)
+		}
+		if out[i].Content != msgs[i].Content && !isSkeletonized(out[i].Content) {
+			t.Errorf("message %d: the listing may only stay raw or be thinned by the search rung:\n%.200s", i, out[i].Content)
+		}
 	}
-	if out[4].Content != msgs[4].Content && !isSkeletonized(out[4].Content) {
-		t.Errorf("the listing may only stay raw or be thinned by the search rung:\n%.200s", out[4].Content)
-	}
-	if !isLogCollapsed(out[6].Content) {
-		t.Errorf("the build output was not folded:\n%.200s", out[6].Content)
+	if !isLogCollapsed(out[8].Content) {
+		t.Errorf("the build output was not folded:\n%.200s", out[8].Content)
 	}
 	pairing(t, out)
 }

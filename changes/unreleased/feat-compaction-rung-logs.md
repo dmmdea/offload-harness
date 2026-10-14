@@ -66,8 +66,8 @@
   context trim's elision marker, and a transcript with a grep listing and a build log checks that the log rung leaves the listing
   to a search rung. A mutation run of 49 edits to the gate, the scan, the mask, the diagnostic shape and the fold killed 47; the
   two survivors each remove one of two guards that both reject an empty call id, and removing both is killed. The golden-fixture
-  discrimination test now needs 5 changed fixtures instead of 6: the shipped tool-text fixture's single body folds to 83 bytes
-  more than before (its last line stays), which no longer fits its 60% budget.
+  discrimination test now needs 5 changed fixtures instead of 6: the shipped tool-text fixture's single body folds to one line
+  (its last) more than before, which no longer fits its 60% budget.
 - **What the evidence does and does not cover.** The savings figures printed by `TestLogCollapseMeasuredSavings` come from fixtures
   whose tool calls are renamed to `run`; the shipped mini replay corpus records call ids only, so the producer gate leaves it
   untouched and the rung is a no-op there. `ReplayOpts` does not expose the option, so the compaction eval cannot measure the rung

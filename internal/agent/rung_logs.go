@@ -70,6 +70,9 @@ import (
 //     fold to the first and the last plus a count and the middle value is not
 //     recoverable from the transcript. The footer says what was folded, and the
 //     original size is in the header.
+//   - Identifiers that differ only in a digit run (x1 and x2, sha1 and sha256)
+//     still share a key: only the digits are masked, so the letters around them
+//     tell apart "x1" from "y2" and "md5" from "sha256", and nothing more.
 //   - Only a command that is, from its first word to its end, one build or test
 //     invocation (optionally piped into a pass-through filter) is folded.
 //     "cd sub && go test ./..." chains, so its result is left alone: the body
