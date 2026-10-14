@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import {
   launchFlags, ensureComfy, resolveIdleBound, fetchIdleProbe, IDLE_FREE_DEFAULT_SEC,
   EXT_IDLE_YAML, EXT_IDLE_PACK, EXT_IDLE_PACK_FILE,
@@ -99,9 +99,14 @@ test("an idle launch adds the idle yaml once, after the base flags and before th
   assert.deepEqual(launchFlags({ idle: IDLE, extraArgs: "--lowvram" }), [...BASE, ...YAML_FLAG, "--lowvram"]);
 });
 
-test("the idle yaml is not added again when the operator's extra args already carry it, in either slash spelling", () => {
-  for (const spelled of [EXT_IDLE_YAML, EXT_IDLE_YAML.replaceAll("\\", "/")]) {
-    const f = launchFlags({ idle: IDLE, extraArgs: `--extra-model-paths-config ${spelled}` });
+test("the idle yaml is not added again when the operator's extra args already carry it, in either slash spelling", (t) => {
+  // launchFlags splits COMFY_EXTRA_ARGS on whitespace, so a yaml path with a space cannot be carried in it (nor spelled by an operator): this
+  // case needs a path without one. The checkout's own path is used when it has none; a checkout under a folder with a space is run from its
+  // root, where the path relative to the current directory has none either; otherwise the case cannot be built here and says so.
+  const yaml = [EXT_IDLE_YAML, relative(process.cwd(), EXT_IDLE_YAML)].find((p) => p && !/\s/.test(p) && existsSync(p));
+  if (!yaml) return t.skip("no whitespace-free path to the idle yaml from here (run it from the repository root)");
+  for (const spelled of [yaml, yaml.replaceAll("\\", "/")]) {
+    const f = launchFlags({ idle: { ...IDLE, yaml }, extraArgs: `--extra-model-paths-config ${spelled}` });
     assert.deepEqual(f, [...BASE, "--extra-model-paths-config", spelled]);
   }
 });
