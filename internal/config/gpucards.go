@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
@@ -23,6 +24,17 @@ func (c Config) GPUHostRAMHeadroom() float64 {
 		return c.GPUHostRAMHeadroomGiB
 	}
 	return DefaultGPUHostRAMHeadroomGiB
+}
+
+// DefaultGPUHostRAMHoldMaxSec is how long a lease that unloaded the seat may hold its cards waiting for the host to have the
+// room for its declared RAM, when gpu_hostram_hold_max_sec is unset. A chosen figure, not a measurement: ten minutes is
+// several times the minutes a seat's memory takes to come back after its unload, and short enough that a lease whose figure
+// the host can never meet frees the cards for the queue behind it.
+const DefaultGPUHostRAMHoldMaxSec = 600
+
+// GPUHostRAMHoldMax is gpu_hostram_hold_max_sec as a duration. SEAM: the accessor is not written yet.
+func (c Config) GPUHostRAMHoldMax() time.Duration {
+	return 0
 }
 
 // DefaultGPUDisplayCapPct is the share of the display card's VRAM the card allocator may fill when

@@ -436,6 +436,11 @@ type AwaitHostRAMOptions struct {
 	// there that the lease holds its cards and is waiting for the host. Once, because a line per poll is a
 	// notification per second in the session that wraps the reserve.
 	OnWait func(*ErrHostRAM)
+	// HoldUntil, when set, is the moment the caller's hold bound ends this wait (the CLI also passes it as Deadline, or
+	// Deadline is earlier): it is stamped on the lease's record (Meta.HostRAMHoldUntilMs) when the wait begins, so
+	// `gpu status` can say when the lease will be released, and cleared when the figure is admitted. It bounds nothing by
+	// itself; Deadline does.
+	HoldUntil time.Time
 }
 
 // AwaitHostRAM admits the host RAM a lease asked for after it cleared the seat (Options.HostRAMWaitGiB) and

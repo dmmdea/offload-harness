@@ -247,6 +247,7 @@
   "gpu_legacy_scope_inference": false,
   "gpu_comfy_order": "",
   "gpu_host_ram_headroom_gib": 0,
+  "gpu_hostram_hold_max_sec": null,
   "gpu_display_cap_pct": null,
   "agent_seat_host_ram_gib": 0,
   "gpu_orphan_grace_min": 0,
