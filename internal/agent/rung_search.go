@@ -239,14 +239,15 @@ func looksLikePath(p string) bool {
 // is an unexpected shape and the whole body is left alone.
 func parseSearchListing(section string) (*searchListing, bool) {
 	lines := strings.Split(section, "\n")
-	var trailer []string
-	for len(lines) > 0 && isSearchTrailer(lines[len(lines)-1]) {
-		trailer = append([]string{lines[len(lines)-1]}, trailer...)
-		lines = lines[:len(lines)-1]
+	end := len(lines)
+	for end > 0 && isSearchTrailer(lines[end-1]) {
+		end--
 	}
-	if len(lines) == 0 {
+	if end == 0 {
 		return nil, false
 	}
+	trailer := append([]string(nil), lines[end:]...)
+	lines = lines[:end]
 	l := &searchListing{trailer: trailer}
 	if m := searchFlatLine.FindStringSubmatch(lines[0]); m != nil && looksLikePath(m[1]) {
 		fileIdx := map[string]int{} // lookup only; order comes from l.files

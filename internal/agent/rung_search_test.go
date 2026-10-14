@@ -1154,3 +1154,14 @@ func TestSearchRungKeepsPlantedLinesReport(t *testing.T) {
 		t.Errorf("the rung must keep every planted task-relevant line: %d of %d", byRung, total)
 	}
 }
+
+func TestParseSearchListingKeepsEveryTrailerLineInOrder(t *testing.T) {
+	l, ok := parseSearchListing("pkg/a.go:1:x" + "\n" + grepMoreMarker + "\n" + searchTruncatedTrailer + "\n" + grepMoreMarker)
+	if !ok || len(l.hits) != 1 || strings.Join(l.trailer, "|") != grepMoreMarker+"|"+searchTruncatedTrailer+"|"+grepMoreMarker {
+		t.Fatalf("trailer lines must all be kept, in order: ok=%v %+v", ok, l)
+	}
+	// A body that is nothing but trailer lines is not a listing, however many there are.
+	if _, ok := parseSearchListing(strings.Repeat(grepMoreMarker+"\n", 50000) + grepMoreMarker); ok {
+		t.Error("trailer lines alone are not a listing")
+	}
+}
