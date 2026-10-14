@@ -219,10 +219,12 @@ func fallbackProfile(backend string) (servingProfile, error) {
 }
 
 // moePlacement resolves BOTH the 26B flag form and whether the tier serves it at all.
-// Ported rule-for-rule from install.ps1's Resolve-ProfileParams, and asserted against
-// it: rendering the two side by side is what caught this function returning a bare
-// "--cpu-moe" where the installer emits "--cpu-moe -ngl 999" (the -ngl is what keeps
-// the NON-expert layers on the GPU while every expert sits in RAM).
+// The include and defect rules mirror install.ps1's Resolve-ProfileParams (include_26b
+// after the RAM gate, and the refusals moeDefect names); install.ps1 reads include_26b
+// for the 14 GB download. The placement STRING is Go's alone: the cpu backend's inert
+// "--cpu-moe -ngl 999" below has no PowerShell twin (Resolve-ProfileParams returns an
+// empty string for cpu_moe, since the cpu templates carry the token in no command),
+// and nothing compares the two strings.
 //
 // INV-1 (0186 w4): the cards do the inference and host RAM is overflow only, so the ONLY
 // expert placement in RAM this function returns is a partial `n_cpu_moe` with a named N
