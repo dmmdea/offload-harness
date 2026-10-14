@@ -606,6 +606,21 @@ test("a proxied widget that carries a value points at I only where I would read 
   assert.match(other, /I would read position 0, which holds another widget/);
 });
 
+test("a proxied widget whose subgraph input is not widget-typed says that no locator reads it, not that I would read position -1", () => {
+  const read = (tpl) => templateValue(PROXY_SPEC, PROXY_VIEW, tpl, proxiedItem({ proxied: true }));
+  const message = (tpl) => { try { read(tpl); } catch (e) { return e.message; } return ""; };
+  const text = { name: "text", type: "STRING" };
+  // the wildcard type and a combined type are not in the set of widget-typed inputs, so I does not count the input at all
+  for (const type of ["*", "COMBO,STRING"]) {
+    const msg = message(proxiedTemplate({ proxy: [["227", "text"], ["221", "lora_name"]], sgInputs: [text, { name: "lora_name", type }], instanceValues: ["t", "b.safetensors"] }));
+    assert.match(msg, /carries a promoted value for lora_name at position 1 of its proxyWidgets/, type);
+    assert.match(msg, /no locator reads position 1: input lora_name is not a widget-typed input, so I does not count it/, type);
+    assert.doesNotMatch(msg, /position -1/, type);
+    assert.doesNotMatch(msg, /holds another widget/, type);
+    assert.doesNotMatch(msg, /read it with I\b/, type);
+  }
+});
+
 test("an I locator reads an instance by the order of the widget-typed inputs even where the instance also lists proxyWidgets", () => {
   // the claim the message above rests on, stated as a fact about the locator
   const tpl = proxiedTemplate({ proxy: [["221", "lora_name"], ["227", "text"]], sgInputs: [{ name: "text", type: "STRING" }, { name: "lora_name", type: "COMBO" }], instanceValues: ["first", "second"], linked: false });
