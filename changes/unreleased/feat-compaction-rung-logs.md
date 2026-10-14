@@ -21,7 +21,9 @@
   so a marker never says that less was lost than was. `emergencyShrinkWith` carries the ladder options to the last resort;
   `emergencyShrink` keeps its signature and means "no optional rung". The header is believed only when the rung could have
   written it: its exact spelling, a size above the body's own length and within the sizes the rung folds, and a line count a fold
-  needs. A result that merely quotes a header with a negative, zero, oversized or too-small number is named by its own length. A
+  needs. A result that merely quotes a header with a negative, zero, oversized or too-small number is named by its own length;
+  a quoted skeleton header gets the same test (exact spelling, a size above the body's own length and between the smallest body a
+  skeleton prunes and the largest the rung folds), so it cannot set a marker's size either. A
   quoted header with merely plausible numbers is indistinguishable from the real one in the text and is still believed.
 - **Why.** Build, test and server output is mostly runs of lines that differ only in a timestamp, an id or a counter, and the line a
   later step needs is rarely inside one. This rung keeps every line the skeleton rung would keep and every distinct line besides, so

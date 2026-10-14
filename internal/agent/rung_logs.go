@@ -209,19 +209,53 @@ func logsOriginalSize(content string) (int, bool) {
 	return n, true
 }
 
+// logsSkeletonSize is skeletonOriginalSize for the log rung's markers: the size
+// a skeleton's disclosure line records, believed only when the skeleton rung
+// could have written it. A body that merely quotes a skeleton header (a saved
+// skeleton read back, a search hit) would otherwise hand any integer to the
+// elide and last-resort markers. The line is believed when
+//
+//   - it is spelled exactly as skeletonHeader spells it (no sign, no leading
+//     zeros, no extra spaces, one newline);
+//   - the size is above len(content): a skeleton is kept only when strictly
+//     shorter than the body it pruned, and the size it reports is that body's
+//     length or the length before an earlier rung shortened it;
+//   - the size is within [skeletonMinChars, logsMaxChars]: the skeleton rung
+//     leaves a body under skeletonMinChars alone, and logsMaxChars is the
+//     largest size this rung vouches for. A skeleton of a larger body is
+//     named by its own length, which understates what was lost.
+//
+// Anything else returns (0, false) and the caller falls back to the body's own
+// length. A well-formed header whose number is merely plausible is still
+// believed: nothing in the text can tell it from the real one.
+func logsSkeletonSize(content string) (int, bool) {
+	n, ok := skeletonOriginalSize(content)
+	if !ok {
+		return 0, false
+	}
+	if n <= len(content) || n < skeletonMinChars || n > logsMaxChars {
+		return 0, false
+	}
+	if !strings.HasPrefix(content, skeletonHeader(n)) {
+		return 0, false
+	}
+	return n, true
+}
+
 // logsMarkerSize is the size an elide, dedupe or skeleton marker names for a
 // body. It is len(content) when the rung is off, which keeps every marker the
 // default ladder writes byte-identical to what it always wrote: a body that
 // merely quotes the rung's header is ordinary content there. With the rung on
 // it is what the body measured before any rung shrank it: the size in a
 // collapse header that logsOriginalSize believes, or the size a skeleton
-// recorded. A header it does not believe leaves the body's own length.
+// recorded that logsSkeletonSize believes. A header it does not believe leaves
+// the body's own length.
 func logsMarkerSize(content string, on bool) int {
 	if on {
 		if n, ok := logsOriginalSize(content); ok {
 			return n
 		}
-		if n, ok := skeletonOriginalSize(content); ok {
+		if n, ok := logsSkeletonSize(content); ok {
 			return n
 		}
 	}

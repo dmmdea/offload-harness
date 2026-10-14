@@ -51,6 +51,13 @@ var signalLine = regexp.MustCompile(`(?i)\b(error|fail(ed|ure)?|panic|fatal|warn
 // pruned, and how much) and the idempotence marker for isSkeletonized.
 const skeletonPrefix = "[skeleton — pruned from "
 
+// skeletonHeader is the disclosure line that opens a skeleton, newline
+// included. skeletonizeAs writes it and logsSkeletonSize compares against it, so
+// the writer and the parser cannot drift apart.
+func skeletonHeader(reported int) string {
+	return fmt.Sprintf("%s%d chars]\n", skeletonPrefix, reported)
+}
+
 // skeletonize reduces a verbose tool-result body to its skeleton. Returns
 // (skeleton, true) when pruning is worthwhile, or (content, false) unchanged
 // when the body is too small, already a skeleton or a bare marker, or the
@@ -89,7 +96,7 @@ func skeletonizeAs(content string, reported int) (string, bool) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s%d chars]\n", skeletonPrefix, reported)
+	b.WriteString(skeletonHeader(reported))
 	run := 0
 	flush := func() {
 		if run > 0 {

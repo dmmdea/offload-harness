@@ -276,7 +276,9 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 	// Step 3: elide OLDER tool-result bodies to markers, oldest-first. A
 	// skeleton falls through to a bare marker here under harder pressure; its
 	// marker reports the ORIGINAL body size (parsed from the skeleton's own
-	// prefix), not the skeleton's — the marker discloses what was lost.
+	// prefix), not the skeleton's — the marker discloses what was lost. With the
+	// log rung on, that prefix is believed only when the skeleton rung could have
+	// written it (logsSkeletonSize, reached through logsMarkerSize).
 	// FORCE_PRESERVE guard: a body whose remaining content still carries signal
 	// lines (errors/failures/warnings — the class every OmniRoute intensity
 	// preserves) keeps up to a bounded residue of those lines under the marker
@@ -285,8 +287,8 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 	for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
 		if out[i].Role == "tool" && !isElided(out[i].Content) && !isDeduped(out[i].Content) && !pinned[out[i].ToolCallID] {
 			n := logsMarkerSize(out[i].Content, opts.LogCollapse)
-			if orig, ok := skeletonOriginalSize(out[i].Content); ok {
-				n = orig
+			if orig, ok := skeletonOriginalSize(out[i].Content); ok && !opts.LogCollapse {
+				n = orig // rung on: logsMarkerSize already weighed the skeleton's header
 			}
 			out[i].Content = elideWithSignal(out[i].Content, n)
 		}
@@ -538,7 +540,7 @@ func emergencyShrinkWith(msgs []Msg, budget, protectedPrefix int, opts compactOp
 			}
 			continue
 		}
-		if orig, ok := skeletonOriginalSize(out[i].Content); ok {
+		if orig, ok := skeletonOriginalSize(out[i].Content); ok && !opts.LogCollapse {
 			out[i].Content = elisionMarker(orig)
 		} else {
 			out[i].Content = elisionMarker(logsMarkerSize(out[i].Content, opts.LogCollapse))
