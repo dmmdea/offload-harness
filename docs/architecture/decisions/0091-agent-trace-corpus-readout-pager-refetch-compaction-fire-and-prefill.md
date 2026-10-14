@@ -123,7 +123,8 @@ A recommendation for the human decision on the context-language-model measuremen
 ## Consequences
 
 - The two questions now have a reproducible answer path: a hash-stamped corpus, a frozen readout and a byte-exact check.
-  Until instrumented runs accumulate, both gates read `NO_DATA`, which is the honest value.
+  Until instrumented runs accumulate, the pager gate reads `NO_DATA` and the compaction fire rate is null, which is the
+  honest value.
 - Runs executed is a smaller, truer denominator than rows logged. For runs from a build that carries the recording, the
   pager and compaction unrecorded counts reach zero apart from write-class deferrals: every other run that reached the
   loop gets a pager object, zero-step deferred runs included, but a write-class deferral returns before the object is
