@@ -39,7 +39,7 @@ stops accepting work while remaining readable.
 
 | Route | Purpose |
 |---|---|
-| `GET /fleet/health` | Node identity, GPU vendor and architecture, live total and free VRAM, supported task types, loadable model families, measured footprints, queue depth, the node's job capacity (running / queued / both limits), GPU utilization, host CPU/RAM, and the agent lane's served-models roster (0.113.0) |
+| `GET /fleet/health` | Node identity, GPU vendor and architecture, live total and free VRAM, supported task types, loadable model families, measured footprints, queue depth, the node's job capacity (running / queued / both limits), GPU utilization, host CPU/RAM, the agent lane's served-models roster (0.113.0), and which engine answers for each lane and seat (`lane_backends`, `seat_backends`; below) |
 | `POST /fleet/dispatch` | Submit a job; returns `202` with an ack |
 | `GET /fleet/jobs/{id}` | Poll one job's state and result; `?wait=<seconds>` (≤ 12) long-polls until the job is terminal |
 | `GET /fleet/jobs` | Cluster jobs feed: recent jobs across this node, newest first, payload-free (0.113.0) |
@@ -1120,6 +1120,59 @@ copy-back slack, the long poll to its wait + 2 s. A `ResponseWriter` that cannot
 (a recorder, a wrapper that does not unwrap) is not a failure — the handler just runs under the
 blanket, as before.
 
+## Which engine answers for each lane and seat (`active_backend`)
+
+A lane (workhorse, agent, triage, ...) is bound to a seat, and a seat is run by an engine (llama.cpp, vLLM, an NPU
+runtime). Nothing said which engine was answering, or why a box whose tier prefers a vLLM agent seat was serving the
+tier's llama.cpp fallback. The report below says it, per lane and per seat, with the evidence. The idea is the ordered
+backend chain with a real probe and an `active_backend` field that a source-adapter `doctor` reports; it is rebuilt here
+with none of that tool's dependencies and stays engine-neutral: a field names an engine KIND, never a product path.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `active_backend` | string | The engine kind answering: `llama.cpp`, `vllm`, `rkllm`, `strata` (reserved for the Strata seat; nothing classifies into it yet), `unknown` (the seat can serve but the config does not name its engine), or `none`. |
+| `backend_chain` | string list | The engine kinds the lane or seat may use, in preference order. |
+| `backend_probe` | string | How deep the evidence goes: `process` (llama-swap's own state: the roster and the running list), `endpoint` (the seat was loaded and its own health endpoint answered), `completion` (a 1-token completion ran; only with the flag below). When nothing answers, the deepest level any candidate reached. |
+| `backend_reason` | string | Why that backend was chosen, or why none was. A lane served by its second backend names the first one's failure (`vllm seat X unavailable: not in the llama-swap roster; fell to llama.cpp seat Y: ...`), and a seat that answers while the lane is bound to another says so. It carries no address, path or command line: it is published to every node that reads health. |
+
+Each row also names the lane (`lane`, the config's status key) or the seat (`seat`, the seat answering, or the first of
+the chain when none is). The chain of a lane is its one bound seat, except the agent lane of a box installed as a tier that
+declares a vLLM agent seat: the tier prefers that seat and serves its llama.cpp fallback when the vLLM prerequisites are
+missing, so the chain is `[vllm seat, llama.cpp fallback]` and the first one that answers is active. This reports which
+backend of the chain can serve now, in preference order. It does not route anything: a lane is still routed by the seat
+its config binds. Lanes are the routes `doctor` already diffs against the roster (`config.ModelRoutes`, so an unset route
+and `embed_model` are not lanes); seat rows are one per entry of the serving config plus any roster id it does not carry.
+An engine is classified from the box's own statements, never guessed: `vllm_seats` (or the tier table) for a vLLM entry,
+whose command is a wrapper script, then `llama-server` or `rkllm` in the command the serving config runs for the seat. A
+new engine registers by adding one row to `engineRules` in `internal/backendchain/classify.go`, and changes no field.
+
+**The default probe loads nothing.** It reads llama-swap's roster (`/v1/models`) and its running list (`/running`), and a
+seat that is already loaded and ready is asked for its own health endpoint (the entry's `checkEndpoint`, `/health` when it
+states none, `none` skipping it) at the seat's own address, never through `/upstream/<seat>/...`, which loads a model on
+demand and resets the idle unload timer (`internal/seatload`). A seat that is in the roster and not loaded is available on
+demand and is not asked anything: asking would load it. A seat llama-swap lists as starting or stopping is not asked either.
+No code path of the default probe sends a completion. The tests run it against a llama-swap that fails the test on any
+completion, any `/upstream` path or any POST (`internal/backendchain`, `internal/fleetnode`, `doctor_backends_test.go`).
+
+**The 1-token completion probe exists only behind `doctor --probe-completion`.** A completion against an idle seat loads
+it, and a load can evict a vLLM seat that holds the cards (`cascade_seat_guard`, `internal/seatguard`), so it is a thing a
+person asks for. It is skipped, and says why, whenever it would load a seat while a vLLM seat is resident, and whenever
+llama-swap's running list cannot be read (a vLLM seat holding the cards cannot then be ruled out). It runs once per seat
+per run. Idle seats it loads unload on their own idle timer like any other load. `/fleet/health` never runs it.
+
+**Where it appears.**
+
+- `local-offload doctor` prints a `backends:` section after its own checks, whatever they returned (an unreachable
+  llama-swap still gets rows, `none`, with the reason): one row per lane and per seat. It is informational and never changes
+  doctor's exit code, and it prints nothing on a box with no local model (a delegation client). `doctor` has no JSON mode;
+  the JSON of the same four fields is the health payload below.
+- `GET /fleet/health` gains `lane_backends` and `seat_backends`, lists of `{lane|seat, active_backend, backend_chain,
+  backend_probe, backend_reason}`. Additive and `omitempty`: a reader that predates them ignores the keys, and the existing
+  `backends` key (the hardware tags of the install, ADR 0054: `vulkan`, `cpu`) is a different thing and is unchanged. The
+  read is cached like the residency answer: the handler never waits on llama-swap, the first request after start-up answers
+  without the keys (absent means unknown, never `none`) and kicks one background read, and a cached answer older than 30 s
+  is refreshed behind the next request. A node with no llama-swap endpoint publishes nothing.
+
 ## The acceptance gate (`local-offload acceptance`)
 
 A node must pass this before it is handed work. It is deliberately NOT `doctor`: doctor
@@ -2171,6 +2224,14 @@ died is still on the node under its job id; the next identical call from that ma
   alias it)
 - [`fleet_reclaim.go`](../../fleet_reclaim.go) — `oursLoaded` / `anyReclaimable`: the keep-set
   and memory-stack classification above, over `pkg/llamaswap`'s `Running()` + `IsProtected()`
+- [`internal/backendchain/`](../../internal/backendchain/) — the active-backend report: the chain resolver, the engine
+  classification table, the lane plan and the cheap probe (roster, running list, a loaded seat's own health endpoint)
+- [`internal/fleetnode/activebackend.go`](../../internal/fleetnode/activebackend.go) — the cached read behind
+  `lane_backends` / `seat_backends`
+- [`internal/servingtmpl/seatentries.go`](../../internal/servingtmpl/seatentries.go) — what a serving config states for
+  each seat (command, proxy, `checkEndpoint`)
+- [`doctor_backends.go`](../../doctor_backends.go) — the `backends:` section and `--probe-completion` of `doctor`, and
+  the tier-table reader the lane plan uses
 - [`main.go`](../../main.go) — `fleet-serve` / `fleet-measure` verbs
 
 ## Related docs

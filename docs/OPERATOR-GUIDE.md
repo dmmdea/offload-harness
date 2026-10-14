@@ -1772,6 +1772,15 @@ does not strand the box at 1 after the venv is installed. The tier is the instal
 `tier_profile`; with neither, or with an agent seat that is not the tier's, the row names no tier. It never changes doctor's
 exit code.
 
+`doctor` also prints a `backends:` section after its checks, whatever they returned: one row per lane and per seat saying which
+serving engine answers (`active_backend`: `llama.cpp`, `vllm`, `rkllm`, `unknown`, or `none`), the chain it was picked from, how
+deep the evidence goes (`process`: llama-swap's roster and running list; `endpoint`: a loaded seat's own health endpoint), and why.
+A box whose tier prefers a vLLM agent seat but serves its llama.cpp fallback says so in the agent lane's row. The default
+probe loads nothing and sends no completion. `doctor --probe-completion` adds a 1-token completion per seat, and THAT can load an
+idle seat (a cold vLLM load takes minutes), so it is skipped where it would evict a vLLM seat and never runs unless you pass the
+flag; run it deliberately, not from a script that runs every few minutes. The section is informational and never changes the exit
+code. The same four fields, as JSON, are `lane_backends` and `seat_backends` on `/fleet/health` (docs/systems/fleet-node.md).
+
 **A pin needs a reason (ADR 0078).** `route: local` and `route: remote` pin a call to this box's seat or to a fleet node, and a
 call that does that must say why: `pin_reason` (`--pin-reason` on the `delegate` and `research` verbs) is `privacy` (the material
 may not leave this box) or `locality` (the work needs something only this box has), both with `local`; or `measurement` (the call
