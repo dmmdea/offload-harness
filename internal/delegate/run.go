@@ -118,7 +118,11 @@ type PlacedResult struct {
 	Seat               string
 	Result             core.AgentWireResult
 	AcceptanceFailures []string
-	JobID              string
+	// AcceptanceAuthority is the authority the contract closed at (core.ClosedAt, set by gradeAcceptance): the weakest
+	// authority among its checks, stated only when every check passed and nothing else failed the result. AuthNone says
+	// nothing (a contract with an unqualified check, a failure, an unknown, an excused fingerprint, or no answer).
+	AcceptanceAuthority core.Authority
+	JobID               string
 	// intentRecorded / orphanable steer the intent ledger (intent.go): the
 	// first says a "d" line exists for JobID; the second marks the exits
 	// (cancel, owned-job poll deadline, queued give-up) where the node may
@@ -6293,7 +6297,7 @@ func (r *runner) runLocal(ctx context.Context, jobID string, contract core.Agent
 		// acceptance over it manufactures "failures" about content that was
 		// never claimed — turning an honest defer into a verification failure
 		// in the ledger and the corpus.
-		pr.AcceptanceFailures = EvalAcceptance(contract, wire)
+		pr.gradeAcceptance(contract, wire)
 		// No strikeOnFingerprint here ON PURPOSE: the local seat is the one
 		// placement always able to take a contract (replacementNode reserves it
 		// as the last resort), so quarantining it would strand every subtask.
@@ -6704,7 +6708,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			pr.Node = wire.NodeID
 			pr.Seat = wire.Seat
 			if !wire.Deferred {
-				pr.AcceptanceFailures = EvalAcceptance(contract, wire)
+				pr.gradeAcceptance(contract, wire)
 				r.noteFingerprint(base, contract, wire, pr.AcceptanceFailures)
 			}
 			return pr
@@ -7216,9 +7220,21 @@ func (r *runner) pollOnce(ctx context.Context, base, jobID string) (jobPoll, err
 // delegate.Run, evaluates acceptance by the SAME rules rather than a second
 // copy of them. An acceptance check nothing evaluates is decoration.
 func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []string {
-	var failures []string
+	failures, _ := EvalAcceptanceGraded(contract, wire)
+	return failures
+}
+
+// EvalAcceptanceGraded is EvalAcceptance plus the authority the contract closed at, from the same grading (so the two
+// cannot disagree about what passed). closedAt is core.ClosedAt over the graded checks: the weakest authority among them,
+// and only when every check passed. It is stated only for a result that was accepted whole: any failure (an unknown, a
+// list-fidelity failure included), a check that was excused instead of passed, and a single unqualified check all leave it
+// core.AuthNone, which says nothing. A weaker authority never closes a stronger claim, so a contract mixing a grounded
+// check with an answer check closes at answer, and one that also carries a plain check closes at none.
+func EvalAcceptanceGraded(contract core.AgentContract, wire core.AgentWireResult) (failures []string, closedAt core.Authority) {
+	outcomes := make([]core.AcceptanceOutcome, 0, len(contract.Acceptance))
 	for _, a := range contract.Acceptance {
 		o, parsed := gradeCheck(a, contract, wire)
+		outcomes = append(outcomes, o)
 		if o.Verdict == core.VerdictPass {
 			continue
 		}
@@ -7238,7 +7254,29 @@ func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 	if why := listFidelityFailure(contract, wire.Structured, wire.Output); why != "" {
 		failures = append(failures, why)
 	}
-	return failures
+	if len(failures) == 0 {
+		// An excused check is a fail outcome, so ClosedAt leaves such a contract open.
+		if at, ok := core.ClosedAt(outcomes); ok {
+			closedAt = at
+		}
+	}
+	return failures, closedAt
+}
+
+// gradeAcceptance records on the placed result what the delegator found when it graded the contract against wire: the
+// failures and the authority the contract closed at. It is the one call every site that grades a result makes, so the two
+// fields are always set together and a result that was not graded carries neither.
+func (pr *PlacedResult) gradeAcceptance(contract core.AgentContract, wire core.AgentWireResult) {
+	pr.AcceptanceFailures, pr.AcceptanceAuthority = EvalAcceptanceGraded(contract, wire)
+}
+
+// publishedAuthority is the wire spelling of the authority a result closed at: the level's name, and "" for none, so the
+// key is omitted and a result no qualified contract produced publishes byte-identically to before.
+func publishedAuthority(a core.Authority) string {
+	if a == core.AuthNone {
+		return ""
+	}
+	return a.String()
 }
 
 // gradeCheck grades one acceptance string against the result and the contract's context documents. parsed is false
@@ -7921,6 +7959,9 @@ type delegationLogLine struct {
 	Contract           core.AgentContract    `json:"contract"`
 	Result             *core.AgentWireResult `json:"result,omitempty"`
 	AcceptanceFailures []string              `json:"acceptance_failures,omitempty"`
+	// AcceptanceAuthority is the authority the contract closed at (PlacedResult.AcceptanceAuthority), by name. Omitempty:
+	// absent on a row that claims none, and on every row written before the field.
+	AcceptanceAuthority string `json:"acceptance_authority,omitempty"`
 	// Arm labels which experimental arm produced this row.
 	//
 	// This is an ENABLER, not a convenience. The delegation log is append-only and is
@@ -7976,21 +8017,22 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 	placement := r.stampPin(pr).PlacementReason
 	pinReason, routeAsked := r.pinLedgerFields()
 	line := delegationLogLine{
-		TS:                 time.Now().Unix(),
-		JobID:              pr.JobID,
-		Node:               pr.Node,
-		Seat:               pr.Seat,
-		PlacementReason:    placement,
-		Deferred:           pr.Result.Deferred,
-		DeferClass:         pr.Result.DeferClass,
-		AcceptancePass:     pr.Err == "" && !pr.Result.Deferred && len(pr.AcceptanceFailures) == 0,
-		WallMs:             pr.wallMs,
-		EstTokens:          EstimateTokens(contract),
-		Error:              pr.Err,
-		Contract:           contract,
-		AcceptanceFailures: pr.AcceptanceFailures,
-		Arm:                strings.TrimSpace(os.Getenv("OFFLOAD_DELEGATE_ARM")),
-		DelegatorVersion:   buildinfo.Version,
+		TS:                  time.Now().Unix(),
+		JobID:               pr.JobID,
+		Node:                pr.Node,
+		Seat:                pr.Seat,
+		PlacementReason:     placement,
+		Deferred:            pr.Result.Deferred,
+		DeferClass:          pr.Result.DeferClass,
+		AcceptancePass:      pr.Err == "" && !pr.Result.Deferred && len(pr.AcceptanceFailures) == 0,
+		WallMs:              pr.wallMs,
+		EstTokens:           EstimateTokens(contract),
+		Error:               pr.Err,
+		Contract:            contract,
+		AcceptanceFailures:  pr.AcceptanceFailures,
+		AcceptanceAuthority: publishedAuthority(pr.AcceptanceAuthority),
+		Arm:                 strings.TrimSpace(os.Getenv("OFFLOAD_DELEGATE_ARM")),
+		DelegatorVersion:    buildinfo.Version,
 		// Computed once per process (sync.Once) — the per-row cost is a read.
 		DelegatorBuildSHA256: buildinfo.BuildSHA256(),
 		Placed:               pr.Placed,
