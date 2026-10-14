@@ -2449,7 +2449,9 @@ that another job holds its card (`gpu_busy`, `gpu_queued`) closes the card quiet
 ([pair-workloads.md](pair-workloads.md), *A held card is not a failure*); a node that does not publish the class leaves the
 card closed red. A call that reached no node has its row and no card, and a panic in the lane closes the card failed with the
 panic before it goes on. Both POSTs, the plain
-dispatch and the media-job, carry `X-Offload-Asker` and, only when this machine's emitter is off, `X-Offload-Pair-Card: node`.
+dispatch and the media-job, carry `X-Offload-Asker` and, only when this machine's emitter is off, `X-Offload-Pair-Card: node`, and,
+only when non-empty, the asker's session and run class (`X-Offload-Origin`, `X-Offload-Run-Class`; the node believes the class only from a request
+it can authenticate, [ADR 0085](../architecture/decisions/0085-the-askers-origin-and-run-class-ride-the-fleet-wire.md)).
 The local route, and an auto call that runs here, are not attributed (the pipeline writes that row).
 
 ## Overflow: a busy lane places an image call on the fleet (ADR 0082)
