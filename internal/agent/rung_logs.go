@@ -445,14 +445,16 @@ func collapseLogs(content string) (string, bool) {
 // only when that call is a build or test invocation (logsCallIsBuild). Anything
 // else, and anything the scan cannot read, is left alone.
 
-// logsPipeFilters are the programs a build's output may be piped into without
-// the body ceasing to be that build's output: the grep family and the
-// pass-through filters. A pipe into anything else (xargs, a linter, a script)
-// makes the body that program's output.
-var logsPipeFilters = map[string]bool{
-	"grep": true, "egrep": true, "fgrep": true, "rg": true, "ag": true, "ack": true,
-	"head": true, "tail": true, "sort": true, "uniq": true, "wc": true, "cut": true,
-	"sed": true, "awk": true, "tee": true, "cat": true,
+// logsPipeFilter reports whether prog (optionally by path) may follow a pipe
+// without the body ceasing to be the build's output: the search rung's
+// pass-through filters (searchPassThroughFilters) and the grep family
+// (searchGrepPrograms). A pipe into anything else (xargs, a linter, a script)
+// makes the body that program's output. The names are the search rung's sets,
+// so the two gates cannot drift apart; only the program-name normalization is
+// this rung's own (runBaseName: case and a ".exe" suffix are ignored).
+func logsPipeFilter(prog string) bool {
+	name := runBaseName(prog)
+	return searchPassThroughFilters[name] || searchGrepPrograms[name]
 }
 
 // logsEnvAssign is a leading NAME=value word of a shell command.
@@ -461,10 +463,10 @@ var logsEnvAssign = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 // logsCallIsBuild reports whether a tool call is a build or test invocation:
 //
 //   - run_shell: a command line whose first word (after any NAME=value words)
-//     is go test/build/vet, cargo build/test/check, npm test or run build/test,
-//     pytest, python -m pytest/unittest, or make, with no second command after
-//     it (";", "&&", "||", "&", a newline or a carriage return outside quotes)
-//     and, if it is piped, only into logsPipeFilters programs;
+//     is go test/build/vet, cargo build/test/check, npm test (or t) or run
+//     build/test, pytest, python -m pytest/unittest, or make, with no second
+//     command after it (";", "&&", "||", "&", a newline or a carriage return
+//     outside quotes) and, if it is piped, only into logsPipeFilter programs;
 //   - run: the same programs but go, cargo, npm, pytest and python, the ones the
 //     run tool's allowlist holds (make is reachable through run_shell only).
 //
@@ -487,10 +489,14 @@ func logsCallIsBuild(c ToolCall) bool {
 	return false
 }
 
-// logsShellCommandIsBuild is logsCallIsBuild for a shell command line.
+// logsShellCommandIsBuild is logsCallIsBuild for a shell command line. The
+// pipeline is split by the search rung's quote-aware scanner (searchCommandScan),
+// which also finds a second command after the first; this rung adds two refusals
+// of its own, a quote left open and an empty stage (a dangling pipe), and its own
+// positive test of the first word.
 func logsShellCommandIsBuild(command string) bool {
-	stages, ok := logsSplitPipeline(command)
-	if !ok {
+	stages, chained, quoteOpen := searchCommandScan(command)
+	if chained || quoteOpen {
 		return false
 	}
 	words := strings.Fields(stages[0])
@@ -502,7 +508,7 @@ func logsShellCommandIsBuild(command string) bool {
 	}
 	for _, st := range stages[1:] {
 		w := strings.Fields(st)
-		if len(w) == 0 || !logsPipeFilters[runBaseName(w[0])] { // an empty stage is a "||" or a dangling pipe
+		if len(w) == 0 || !logsPipeFilter(w[0]) { // an empty stage is a dangling pipe
 			return false
 		}
 	}
@@ -533,57 +539,6 @@ func logsProgramIsBuild(prog string, args []string, shell bool) bool {
 		return shell
 	}
 	return false
-}
-
-// logsSplitPipeline splits a shell command line into its pipeline stages, or
-// reports false when the line is not one pipeline: it runs a second command
-// after the first (an unquoted ";", "&&", a lone "&", a newline or a carriage
-// return) or leaves a quote open. The redirections "2>&1", ">&2" and "&>f" are
-// not a "&". A "||" yields an empty stage between its two bars, and so does a
-// pipe with nothing on one side: the caller rejects an empty stage. It is a
-// quote-aware scan, not a shell parser: single quotes take no escape, double
-// quotes take a backslash, and a backslash outside quotes hides the next byte.
-func logsSplitPipeline(command string) ([]string, bool) {
-	var stages []string
-	var quote byte // 0, '\'' or '"'
-	start := 0
-	for i := 0; i < len(command); i++ {
-		c := command[i]
-		switch {
-		case quote == '\'':
-			if c == '\'' {
-				quote = 0
-			}
-		case quote == '"':
-			if c == '\\' {
-				i++ // the escaped byte cannot close the quote
-			} else if c == '"' {
-				quote = 0
-			}
-		case c == '\\':
-			i++
-		case c == '\'' || c == '"':
-			quote = c
-		case c == ';' || c == '\n' || c == '\r':
-			return nil, false
-		case c == '|':
-			stages = append(stages, command[start:i])
-			if i+1 < len(command) && command[i+1] == '&' {
-				i++ // "|&" is a pipe
-			}
-			start = i + 1
-		case c == '&':
-			redirect := (i > 0 && (command[i-1] == '>' || command[i-1] == '<')) ||
-				(i+1 < len(command) && command[i+1] == '>')
-			if !redirect {
-				return nil, false
-			}
-		}
-	}
-	if quote != 0 {
-		return nil, false
-	}
-	return append(stages, command[start:]), true
 }
 
 // logsCallsByID maps every non-empty tool-call id in msgs to its call. An id
