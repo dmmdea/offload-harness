@@ -35,7 +35,9 @@ package vllmseat
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path"
@@ -755,19 +757,68 @@ func (s Spec) Resolve(r Runtime) (Spec, error) {
 // point and exactly one resolvable model snapshot. A missing prerequisite is NOT an
 // error — it is the documented fallback path, and the reason is returned so the
 // installer can say WHY it fell back instead of silently shipping a lesser seat.
+//
+// The reason says WHY a probe failed, not only that it did: the operating system's own words
+// ride along, and a host prefix that cannot be read is named as the prefix. All of them used
+// to read "no vllm entry point", which sends an operator to build a venv that is already there.
 func (s Spec) Detect(r Runtime) (bool, string) {
 	vllm := r.hostPath(filepath.Join(r.VenvDir, "bin", "vllm"))
 	if fi, err := os.Stat(vllm); err != nil || fi.IsDir() {
-		return false, "no vllm entry point at " + filepath.ToSlash(vllm)
+		return false, r.probeFailure("vllm entry point", vllm, err, fi)
 	}
 	got, err := s.Resolve(r)
 	if err != nil {
 		return false, err.Error()
 	}
-	if fi, err := os.Stat(r.hostPath(got.ModelPath)); err != nil || !fi.IsDir() {
-		return false, "no model snapshot at " + filepath.ToSlash(r.hostPath(got.ModelPath))
+	model := r.hostPath(got.ModelPath)
+	if fi, err := os.Stat(model); err != nil || !fi.IsDir() {
+		return false, r.probeFailure("model snapshot", model, err, fi)
 	}
 	return true, ""
+}
+
+// probeFailure is the reason a Detect probe of path p failed. err is the stat error (nil when
+// the path exists but is the wrong kind of thing, fi then says what it is).
+func (r Runtime) probeFailure(what, p string, err error, fi os.FileInfo) string {
+	if why := r.HostPrefixProblem(); why != "" {
+		return why
+	}
+	cause := "it is not a directory"
+	switch {
+	case err != nil:
+		cause = statCause(err)
+	case fi != nil && fi.IsDir():
+		cause = "it is a directory, not a file"
+	}
+	return fmt.Sprintf("no %s at %s (%s)", what, filepath.ToSlash(p), cause)
+}
+
+// statCause is the operating system's reason for a failed stat, without the path a
+// *fs.PathError repeats.
+func statCause(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err.Error()
+	}
+	return err.Error()
+}
+
+// HostPrefixProblem says why HostPrefix cannot be used to look into the distro, or "" when no
+// prefix is set or it reads as a directory. A mistyped prefix, a distro this process cannot
+// reach and a share it may not read all make every probe through it fail, and all of them are
+// the prefix's fault, not the venv's.
+func (r Runtime) HostPrefixProblem() string {
+	if r.HostPrefix == "" {
+		return ""
+	}
+	fi, err := os.Stat(r.HostPrefix)
+	if err != nil {
+		return fmt.Sprintf("host prefix %s cannot be read (%s)", filepath.ToSlash(r.HostPrefix), statCause(err))
+	}
+	if !fi.IsDir() {
+		return fmt.Sprintf("host prefix %s is not a directory", filepath.ToSlash(r.HostPrefix))
+	}
+	return ""
 }
 
 // hostPath maps a path the ENGINE will see to one this process can stat.
@@ -1305,6 +1356,15 @@ func (s Spec) Artifacts(templatesDir string, r Runtime) (map[string]string, erro
 			return nil, fmt.Errorf("vllm seat template %s: %w", src, err)
 		}
 		body := string(raw)
+		if strings.HasSuffix(dst, ".env") {
+			// The seat env is SOURCED by bash inside the distro (seat_fg.sh: `. "$CFG"`), where a
+			// CR before the newline is part of every value: SEAT_PP= becomes a non-empty string
+			// and a tensor-parallel seat starts as a pipeline seat. A Windows checkout with
+			// autocrlf hands this file over as CRLF, so the render ends its lines itself rather
+			// than trusting the checkout. (.gitattributes pins the template to LF as well.) The
+			// Windows scripts keep their endings: PowerShell and WSH read either.
+			body = strings.ReplaceAll(body, "\r\n", "\n")
+		}
 		for k, v := range tok {
 			body = strings.ReplaceAll(body, k, v)
 		}
