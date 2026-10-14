@@ -1249,6 +1249,11 @@ type healthPayload struct {
 	// (image_recipe.go, ADR 0082). Additive; omitted on a node with no ComfyUI binding that names a checkpoint, and
 	// on a node that predates it, which a reader takes as "cannot be matched", never as "matches anything".
 	ImageRecipes []ImageRecipeHealth `json:"image_recipes,omitempty"`
+	// MediaRecipes is what each video, animation and audio binding of this node names: the family, the weight files and how big each
+	// is here (-1: not there), with no digest and no fingerprint in this release (media_recipes.go, ADR 0082 Amendment 3). Additive;
+	// omitted on a node that binds none of the three lanes through ComfyUI or sd.cpp, and on a node that predates it, which a reader
+	// takes as unknown, never as "no weights".
+	MediaRecipes []MediaRecipeHealth `json:"media_recipes,omitempty"`
 	// RefineHonoured says this node's image-gen task carries `refine`: an explicit false reaches the pipeline and
 	// skips the node's prompt refiner. A delegator that sends refine=false requires it, so a node that predates it
 	// is a named miss instead of one that silently refines. Additive; published by a node that serves image-gen.
