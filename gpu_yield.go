@@ -57,6 +57,15 @@ func runYieldShell(line string, env []string) (int, error) {
 	return 0, nil
 }
 
+// detachedYieldsForm is the form the hidden holder stamps on its record: it asks, so it says so, unless it
+// releases at its deadline (the pre-terms ending), in which case it never ticks the request and stamps nothing.
+func detachedYieldsForm(releaseAtExpiry bool) string {
+	if releaseAtExpiry {
+		return ""
+	}
+	return gpulease.YieldsDetached
+}
+
 // newHolderYieldTicker is the ticker a holder runs beside its term check. onYield is the holder's
 // own in-memory --on-yield value, never read back from the record.
 func newHolderYieldTicker(lease *gpulease.Lease, onYield, label string, out io.Writer) *gpulease.YieldTicker {

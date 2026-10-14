@@ -495,11 +495,10 @@ func runGPUReserve(args []string) error {
 	if err := owner.apply(&opts, os.Getenv); err != nil {
 		return err
 	}
-	if !*detach {
-		// This wrapper ticks the yield request below (gpu_yield.go); the record says so, so that no
-		// surface reads a holder of an older build as one that would answer.
-		opts.Yields = gpulease.YieldsWrapper
-	}
+	// This wrapper ticks the yield request below (gpu_yield.go); the record says so, so that no
+	// surface reads a holder of an older build as one that would answer. A --detach parent never acquires
+	// (its hidden holder stamps its own form), so the value is unused there.
+	opts.Yields = gpulease.YieldsWrapper
 	if w := progressFileWarning(opts.ProgressFile); w != "" {
 		fmt.Fprintln(os.Stderr, w)
 	}
@@ -871,7 +870,7 @@ func runGPUReserve(args []string) error {
 	tick := time.NewTicker(wrapperTickEvery)
 	defer tick.Stop()
 	terms := newTermTicker(lease)
-	yields := newHolderYieldTicker(lease, opts.OnYield, "gpu reserve", os.Stderr)
+	wrapperYields := newHolderYieldTicker(lease, opts.OnYield, "gpu reserve", os.Stderr)
 	sigDone := sw.Done() // set to nil once handled: a closed channel would be ready for ever
 	for {
 		select {
@@ -907,7 +906,7 @@ func runGPUReserve(args []string) error {
 				terms.tick()
 				// An overdue lease with somebody waiting for its cards is asked to yield: the job's own on_yield runs,
 				// and nothing is stopped (internal/gpulease/yield.go).
-				yields.Tick()
+				wrapperYields.Tick()
 				// And the tree is recorded for a reader that finds this wrapper gone (only when the
 				// set of processes changed: the record rewrite takes the epoch lock).
 				recorder.record()
@@ -1288,10 +1287,8 @@ func runGPUHold(args []string) error {
 	if err := owner.apply(&holdOpts, os.Getenv); err != nil {
 		return err
 	}
-	if !*releaseAtExpiry {
-		// This holder ticks the yield request in its loop below; one that releases at its deadline does not.
-		holdOpts.Yields = gpulease.YieldsDetached
-	}
+	// This holder ticks the yield request in its loop below; one that releases at its deadline does not.
+	holdOpts.Yields = detachedYieldsForm(*releaseAtExpiry)
 	var lease *gpulease.Lease
 	if strings.TrimSpace(*cardsFlag) != "" {
 		min, max, perr := parseCardCount(*cardsFlag)
@@ -1335,7 +1332,7 @@ func runGPUHold(args []string) error {
 	deadline := time.Now().Add(*dur)
 	lastRenew := time.Now()
 	terms := newTermTicker(lease)
-	yields := newHolderYieldTicker(lease, holdOpts.OnYield, "gpu hold", os.Stderr)
+	holdYields := newHolderYieldTicker(lease, holdOpts.OnYield, "gpu hold", os.Stderr)
 	for {
 		if *releaseAtExpiry && !time.Now().Before(deadline) {
 			return nil // the old ending: the deferred Release lets the card go
@@ -1352,7 +1349,7 @@ func runGPUHold(args []string) error {
 				// Asked to yield, this holder runs the job's on_yield and goes on holding: the job is a separate
 				// process, and returning here would free the card under it (the 2026-09-07 incident above). Its
 				// driver ends the lease once the job has stopped.
-				yields.Tick()
+				holdYields.Tick()
 			}
 		}
 	}
