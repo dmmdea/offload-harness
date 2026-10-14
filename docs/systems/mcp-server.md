@@ -860,7 +860,7 @@ read-only unless deliberately widened. See
   of a finished call, and the next call uses what the read found. A path that is gone (an OS
   that unlinks the old file) is stale without a comparison. A stale answer carries a top-level `stale_binary` string naming the
   running version, the two stamps and, when the installed file's build marker reads, the installed version, and saying to
-  restart the MCP client; the log says it once. It never exits, re-executes or cuts a call (that would drop the jobs the server
+  reconnect this server with `/mcp` (select `local-offload`, Reconnect) or restart the MCP client; the log says it once. It never exits, re-executes or cuts a call (that would drop the jobs the server
   holds), a stat that fails for any other reason accuses nothing, and a server that could not read its own file at start has
   nothing to compare with. The running version is the compiled-in one; the installed version is read from the installed file's
   build marker (`gpulease.ReadBuildMarkerVersion`), never by running it.
@@ -871,6 +871,35 @@ read-only unless deliberately widened. See
   (`inactive: ...` for the first, `unreadable: ...` for as long as the second lasts), beside and independent of `stale_binary`,
   and no such key while the guard is watching. The start-up capture takes the stamp from the path when the hash could not open
   the file, so a refused open does not leave the guard to stamp the file as of `mcpserver.New`.
+  **Every other door says it too (the in-band notice).** The three doors above carry `stale_binary` in their own answer, and a
+  session that called any other door (`offload_summarize`, `offload_ask`, a media door, `agent_run`) was never told that its
+  server runs an old image. `staleNotice` (`internal/mcpserver/stale_notice.go`, a receiving middleware registered after the
+  config gate, so that a config deferral carries it too) appends the same note as a **second text block** to the result of every
+  other `tools/call`, as `stale_binary: <the note>`. `Content[0]` is never touched, so a client that reads only the first block
+  still gets the door's JSON, and the block is the very string `offload_status` carries under `stale_binary` (one definition, one
+  cache, no way for the two to disagree). It rides on every call of a stale server, with no cap and no config key: a stale server
+  stays stale until it is reconnected, and a cap would bring the silent failure back. The three doors are passed through
+  before any check (they already stat the file, and may hash it, for their own answer), and a test pins that set against the
+  call sites in `mcpserver.go`, so a fourth door that gains the keys without being listed fails the build instead of carrying the
+  signal twice. A guard that is not watching rides the same way as `stale_binary_guard: ...`, on the first call that finds it so
+  and then on every 20th such call, because that is a standing condition of the process and not news. The result is copied before
+  the block is appended (a handler may keep what it returned), a call that failed, a result with no content and a nil result pass
+  through as they are, and the check runs after the handler finished, bounded as above (at most 2 s on the first call after a swap).
+  A server that started before this release has no middleware: only a reconnect or a restart of the client puts it on the new
+  image. How each client renders a second block is for the release's live check to record; the notice does not depend on it for
+  the three doors that carry the key in their own JSON.
+  **The read does not block a rollback.** The installed file is opened through `gpulease.OpenShared`, which on Windows grants
+  `FILE_SHARE_DELETE` (Go's `os.Open` grants only read and write sharing), for the hash and for the build marker
+  (`openAudited`, the audit's opener, which `gpu doctor` reads every backup through too). With the notice on every door the first
+  call of any door on a stale server reads the freshly installed file, and a read that did not share delete made a rollback or a
+  second swap landing in that window fail on a sharing violation, with node-swap's holder diagnosis unable to see the stale server
+  (its image path was renamed away).
+  **Counting a rollout (runbook).** A rollout's effect (a gate that reads ledger rows after a deploy) counts only the rows whose
+  `harness_build_sha256` equals the deployed build's hash: a session on an old image keeps writing the old hash until it is
+  reconnected, so the rows themselves say which sessions are not on the build. The operator's deploy script reports the MCP servers
+  it finds still on an older image at the end of each Windows leg and in its deploy record, under "Sessions still on an old
+  image" (process id and start time, and the session when the owners registry names it). It is information only: it never changes a
+  node's verdict and never stops anyone's server.
 - `offload_status` reports harness state to the calling agent: the configured model roster (the one
   table in `config.ModelRoutes`, shared with `doctor`/`acceptance`/`report`), a live `/v1/models`
   probe through [`internal/swapclient`](../../internal/swapclient/swapclient.go), and
@@ -928,7 +957,7 @@ read-only unless deliberately widened. See
   arrive while it runs: past the bound `stale_image` is absent with a `note` that the read did not finish. `gpu doctor` marks the running processes older than the installed build
   ([gpu-lease.md](gpu-lease.md)). Ledger rows do not get a `stale_image` column: a
   reader compares a row's hash with the deployed one. **One definition, two doors.** `process.stale_image` (`offload_status`: the whole answer, `brief` or
-  `section:"process"`) and the `stale_binary` note (`agent_delegate`, `offload_research`, `offload_status`) answer one question
+  `section:"process"`) and the `stale_binary` note (`agent_delegate`, `offload_research`, `offload_status`, and the second block every other door carries) answer one question
   about one capture. `runMCP` takes the identity before it loads the config or opens the pipeline, so a swap landing during
   start-up is not hashed as the image the process runs; `mcpserver.New` starts the stale-binary guard from that identity (the
   stamp the capture read through the handle it hashed, or from the path when the open failed, not a stat taken after the
@@ -986,6 +1015,10 @@ keep the stamp and say so, a path that is gone is stale without a comparison, an
   startup identity the server holds and the stale-image comparison
 - [`internal/mcpserver/stalebinary.go`](../../internal/mcpserver/stalebinary.go) — the stale-binary guard: the stamp of
   the image the process started from, compared with the file on disk and settled by the `process` block's byte comparison
+- [`internal/mcpserver/stale_notice.go`](../../internal/mcpserver/stale_notice.go) — the middleware that appends the stale
+  notice as a second text block to the result of every door that does not carry it itself
+- [`internal/gpulease/openshared_windows.go`](../../internal/gpulease/openshared_windows.go) — the read open that shares delete,
+  so a stale server's read of the installed image cannot block a rename of it
 - [`internal/askjob`](../../internal/askjob/ask.go) — `offload_ask`’s contract builder (goal,
   output schema, and the grounded acceptance anchor)
 - [`internal/askcache`](../../internal/askcache/askcache.go) — `offload_ask`’s content-addressed,

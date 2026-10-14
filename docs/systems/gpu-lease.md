@@ -865,7 +865,9 @@ not move. The installed file is read, not the doctor's compiled-in version, beca
 process. A binary with no build marker, or a version that is not `major.minor.patch`, is never called older (unknown stays
 unknown), and when the installed version cannot be read a note says no comparison was made. The comparison is by version:
 two builds of one version are not told apart here (the MCP server's `process` block compares bytes,
-[mcp-server.md](mcp-server.md)).
+[mcp-server.md](mcp-server.md)). The audit opens every image it reads through `gpulease.OpenShared`, which on Windows grants
+`FILE_SHARE_DELETE`, so reading a backup or the installed file never makes a rollback or a second swap that renames it fail on a
+sharing violation.
 
 **What green does and does not mean.** Green means every reader the audit *reached* is aware. The output lists what it
 scanned **and what it did not enter** (directories past the depth cap, 3 levels below a scan root unless `--depth` says

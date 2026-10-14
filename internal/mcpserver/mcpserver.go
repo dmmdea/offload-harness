@@ -412,6 +412,8 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	if s.configErr != nil {
 		srv.AddReceivingMiddleware(s.configGate)
 	}
+	// After the gate, so it wraps outside it: every door's result, a config deferral included, carries the stale notice (stale_notice.go).
+	srv.AddReceivingMiddleware(s.staleNotice)
 
 	// Discovery FIRST (LO-18): before this tool existed, offload_nim was the only
 	// tool that named or listed any model, so an agent inspecting the harness

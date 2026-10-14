@@ -190,7 +190,7 @@ func (w *exeWatch) staleNoteWith(version string, compare func() imageCheck) stri
 	}
 	note := fmt.Sprintf("this MCP server is running %s from an executable image that has changed on disk since it started "+
 		"(it started from %s; now %s%s). A long-lived server keeps the image it started from, so a fix shipped since is not in "+
-		"this process: restart the MCP client to load it. Nothing has been interrupted and this call ran as it always does.",
+		"this process: reconnect this server with /mcp (select local-offload, Reconnect) or restart the MCP client to load it. Nothing has been interrupted and this call ran as it always does.",
 		version, w.started, nowWords(now), evidence)
 	w.logged.Do(func() { log.Printf("mcpserver: %s", note) })
 	return note
