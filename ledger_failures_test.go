@@ -16,7 +16,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
-// RSI-OH-1: `ledger --failures` is a read-only failure-class register over the ledger. Rows are grouped by
+// `ledger --failures` is a read-only failure-class register over the ledger. Rows are grouped by
 // failure class (the closed reason code), with the door, seat and model of each row as breakdowns, and each
 // class is joined by name to the human-maintained table in docs/systems/failure-register.md for its meaning,
 // root cause and structural fix. These tests run it on a synthetic ledger (testdata/failure-register) and a

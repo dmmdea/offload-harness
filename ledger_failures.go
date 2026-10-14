@@ -15,8 +15,9 @@ import (
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
-// `ledger --failures` (RSI-OH-1): the failure-class register. A mode of the existing ledger verb: main.go's verb
-// switch calls runLedgerMode (its only change), and `ledger` without the flag is byte-for-byte what it was.
+// `ledger --failures`: the failure-class register. A mode of the existing ledger verb: main.go's verb
+// switch calls runLedgerMode (its only code change; the usage line also names the flag), and `ledger` without the
+// flag is byte-for-byte what it was.
 //
 // The ledger reader groups the failed job rows into classes (internal/ledger/failures.go). This file adds the
 // human half: the table in docs/systems/failure-register.md gives each class its meaning, root cause and

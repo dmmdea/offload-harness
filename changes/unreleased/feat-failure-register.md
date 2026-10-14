@@ -27,20 +27,24 @@
   node) is not a measurement, because the node's work is not on that row: it counts as unmeasured and reads `null`.
   `rows_with_tokens` says how many rows the sum covers, so a total over fewer rows than `count` reads as a floor. Test, bake and measurement traffic is left out and counted, as in every
   production view of the ledger.
-- **Surface.** `main.go` changes by one line: the `ledger` case calls `runLedgerMode`, which sends `--failures` to the register and
-  everything else to the verb as it was. The reader lives in `internal/ledger/failures.go`. It scans the file itself (a 16 MiB line
+- **Surface.** `main.go` changes by two lines: the `ledger` case calls `runLedgerMode`, which sends `--failures` to the register and
+  everything else to the verb as it was, and the `ledger` usage line names the flag. The operator guide and the README list the mode. The reader lives in `internal/ledger/failures.go`. It scans the file itself (a 16 MiB line
   buffer, where `ReadAll` takes 1 MiB) because it has to see whether a row carried the `cards_tokens` key, which `Entry` cannot
   hold. `ledger_readers_lint_test.go` only inspects `ledger.ReadAll` calls from outside the package, so it does not see this reader:
   the test-traffic rule here is held by this feature's own tests.
 - **Tests, red first.** The acceptance tests and a synthetic fixture ledger and table were committed before the reader existed
   and failed to build. They pin: deterministic bytes on the fixture (a committed golden file, flag order irrelevant), the class
   order including count ties, an unresolved total serialized as `null` and never `0` (the fixture lines are hand-written, because
-  `Record` always writes the key), a measured zero kept as `0`, classes with no rows absent (test, bake, marker, inner, cache-hit
+  `Record` always writes the key), a zero the row owns kept as `0` and a delegator's zero for a job a node owned read as `null`, classes with no rows absent (test, bake, marker, inner, cache-hit
   and passing rows make none), the join by class name with `undocumented` for a class without a row and `not recorded` / `open`
   for empty cells, the table parser (CRLF, an escaped pipe, a second table ignored, malformed tables refused), the embedded page
-  against the closed set, and that `ledger` without the flag is unchanged.
+  against the closed set, the verb's `--since` window (rows stamped relative to the clock), the default path with no `--table`
+  (joined to the page the binary embeds), the cut of `model_tier` at its last colon, and that `ledger` without the flag is unchanged.
+  The delegator-zero tests were written first and failed on an assertion, against a golden file written by hand from the rule.
 - **Mutations.** Eighteen one-line mutants (the token pointer rule, the measured-zero rule, both sort keys, the run-class filter,
   the job rule, the acceptance rule, the example-reason tie-break, the orphan inner row, the window, the group order, the cache-hit
   rule, the three join defaults, the flag parser, the duplicate-row check and the dispatch itself), each restored byte for byte
   with `git diff --quiet` exit 0 afterwards. One mutant survived: a marker guard that the job rule makes unreachable, which was
-  removed rather than tested. The cache-hit rule got its own test row and its mutant is red.
+  removed rather than tested. The cache-hit rule got its own test row and its mutant is red. Eighteen more cover the rules added
+  after review (the window's sign and unit, the default table, the last-colon cut, and each term of the zero-ownership rule),
+  each caught by a red test and restored the same way.

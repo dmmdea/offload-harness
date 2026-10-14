@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// RSI-OH-1: the failure-class register reader. Rows are hand-written JSONL (not built through Record), because
+// The failure-class register reader. Rows are hand-written JSONL (not built through Record), because
 // Record always writes the cards_tokens key and so cannot produce the one case that matters here: a row that
 // predates it.
 
