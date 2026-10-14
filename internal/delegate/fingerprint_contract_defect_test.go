@@ -246,3 +246,37 @@ func TestAPassedFingerprintBesideAContractCausedUnknownIsStillAPass(t *testing.T
 		t.Fatalf("unknown only: blocked=%v strikes=%d passes=%d, want an untouched node", blocked, strikes, passes)
 	}
 }
+
+// The pass branch of noteFingerprint (every reported fingerprint failure is the contract's or an honest absence, but a
+// sibling fingerprint PASSED) must not record a pass when the result is an excused absence: the guard is
+// !excusedAbsence. The digest is an honest absence; one sibling fingerprint passed on the absence sentence, one is an
+// empty-field unknown (reported, no fact about the node) and one is a plain failure the absence excuses. An absence is
+// neither a pass nor a strike, so the node ends untouched: not blocked, no strikes, no passes.
+func TestAPassedFingerprintBesideAnExcusedAbsenceIsNotAPass(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"},"note":{"type":"string"}}}`)
+	c := core.AgentContract{
+		Goal:         "g",
+		OutputSchema: schema,
+		Context:      []core.ContextDoc{{Name: "page.md", Text: "the pelican lives here"}},
+		Acceptance: []string{
+			"regex:@field=note:(?P<docanchor>mention)",    // PASSES on the absence sentence
+			"regex:@field=summary:(?P<docanchor>pelican)", // the field is empty: unknown
+			"regex:@field=note:(?P<docanchor>walrus)",     // FAILS, and the honest absence excuses it
+		},
+	}
+	wire := core.AgentWireResult{Structured: json.RawMessage(`{"summary":"","note":"the page does not mention it"}`)}
+	if !HonestAbsence(wire.Structured) {
+		t.Fatal("setup: the digest is not an honest absence")
+	}
+	f := EvalAcceptance(c, wire)
+	if len(f) != 1 || !strings.Contains(f[0], "unknown at") || fingerprintFailedByNode(c, wire, f) {
+		t.Fatalf("setup: failures=%v, want only the empty-field unknown, and not the node's", f)
+	}
+	if !passedFingerprint(c, wire) || !excusedAbsence(c, wire) {
+		t.Fatalf("setup: passedFingerprint=%v excusedAbsence=%v, want both true", passedFingerprint(c, wire), excusedAbsence(c, wire))
+	}
+	blocked, strikes, passes := fingerprintNoteOutcome(t, c, wire, 3)
+	if blocked || strikes != 0 || passes != 0 {
+		t.Fatalf("blocked=%v strikes=%d passes=%d, want an untouched node: an excused absence is neither a pass nor a strike", blocked, strikes, passes)
+	}
+}
