@@ -2054,11 +2054,19 @@ func (l *Lease) Renew() error {
 // stops existing (a concurrent TryAcquire still meets an existing file). The
 // epoch itself is never moved by this path.
 func (m *Manager) Restamp(epoch uint64, fn func(*Meta)) error {
+	if restampFaultHook != nil {
+		if err := restampFaultHook(epoch); err != nil {
+			return err
+		}
+	}
 	if _, serr := os.Stat(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
 		return m.restampV2(epoch, fn)
 	}
 	return m.withEpochLock(func() error { return m.restampWholeLocked(epoch, fn) })
 }
+
+// restampFaultHook is a test seam: when set, Restamp calls it first and fails with what it returns. nil in production.
+var restampFaultHook func(epoch uint64) error
 
 // restampLocked is Restamp for a caller that already holds the epoch lock: the check-and-stamp of AwaitHostRAM
 // reads the leases, decides and writes the record in ONE critical section, so the stamp that turns a waiting

@@ -441,7 +441,18 @@ type AwaitHostRAMOptions struct {
 	// `gpu status` can say when the lease will be released, and cleared when the figure is admitted. It bounds nothing by
 	// itself; Deadline does.
 	HoldUntil time.Time
+	// OnStampError, when set, is told when the bound's stamp could not be written (op StampOpSet) or taken off the record again
+	// (op StampOpClear). The wait does not fail on either: the stamp is what `gpu status` and the hidden holder read, not what
+	// ends the wait, so a failed write costs the status line and the holder's own enforcement, and the CLI says so once per
+	// kind. SEAM: nothing calls it yet.
+	OnStampError func(op string, err error)
 }
+
+// The two operations OnStampError names.
+const (
+	StampOpSet   = "stamp"
+	StampOpClear = "clear"
+)
 
 // AwaitHostRAM admits the host RAM a lease asked for after it cleared the seat (Options.HostRAMWaitGiB) and
 // returns nil when the host admitted it, which is also what a lease that waits for nothing answers. It
