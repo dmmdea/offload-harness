@@ -134,6 +134,8 @@ func TestClassifyURLRoutesOnlyTheNamedYouTubeShapes(t *testing.T) {
 		"https://www.youtube.com/embed/%5cdQw4w9WgXcQ",
 		"https://www.youtube.com/embed/videoseries?list=PLabc",
 		"https://www.youtube-nocookie.com/embed/videoseries?list=PLabc",
+		"https://www.youtube.com/embed/live_stream?channel=UCabcdefghijklmnopqrstuv",
+		"https://www.youtube-nocookie.com/embed/live_stream?channel=UCabcdefghijklmnopqrstuv",
 		"https://www.youtube.com/embed/",
 		"https://www.youtube.com/live/",
 		"https://www.youtube.com/embed/dQw4w9WgXcQ/extra",

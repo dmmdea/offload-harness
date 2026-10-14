@@ -84,7 +84,8 @@ type SourceKind int
 const (
 	// SourceKindPage is everything else: the ordinary fetch (and the feed parser when the response is a feed).
 	SourceKindPage SourceKind = iota
-	// SourceKindYouTube is a watch, youtu.be or shorts URL.
+	// SourceKindYouTube is a watch, youtu.be, shorts, live or embed URL on youtube.com (www, m or music) or an
+	// embed URL on youtube-nocookie.com.
 	SourceKindYouTube
 )
 
@@ -126,8 +127,9 @@ func ClassifyURL(u *url.URL) (SourceKind, string) {
 	case "youtu.be", "www.youtu.be":
 		id = idAfter("/")
 	}
-	// "videoseries" is eleven letters, so it has the shape of an id, and it is the embed path of a playlist
-	if id == "videoseries" || !reVideoID.MatchString(id) {
+	// "videoseries" and "live_stream" are eleven letters, so they have the shape of an id: they are the embed paths of a
+	// playlist and of a channel's live stream, not videos
+	if id == "videoseries" || id == "live_stream" || !reVideoID.MatchString(id) {
 		return SourceKindPage, ""
 	}
 	return SourceKindYouTube, id
