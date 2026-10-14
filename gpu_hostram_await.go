@@ -372,6 +372,11 @@ func autoReleaseWarmGuard(m *gpulease.Manager, epoch uint64) warmGuard {
 // default bound) leaves a moment the holder acts on. A variable so a test can watch it pass.
 var detachedReleaseGrace = 15 * time.Minute
 
+// pushedOutHook, when set, is called by releaseAfterRAMWait the moment the stamped end of the wait is pushed out, before the slow part
+// of the release begins. A test seam: a test that pits the hidden holder against a live reserve holds the reserve here until it has
+// decided what the holder may see, instead of polling for a window that a starved test goroutine can miss. Nil in production.
+var pushedOutHook func(epoch uint64, until time.Time)
+
 // releaseAfterRAMWait ends a detached hold whose host-RAM wait ended without admission, WHATEVER ended it (the hold bound,
 // --wait, an impossible figure): the cards are never held idle behind a RAM figure the host cannot meet. It does what `gpu
 // release --warm-seat --epoch N` does, except that the seat is warmed back only if the lease owes it (autoReleaseWarmGuard): the
@@ -389,7 +394,12 @@ func releaseAfterRAMWait(m *gpulease.Manager, epoch uint64, cfg config.Config, e
 	}
 	// Else it is on the record, or its record exists and cannot be read, which is a lease that is held: proceed to stop the
 	// instances, warm the seat back and release, and report the release if it fails.
-	if serr := m.StampHostRAMHold(epoch, time.Now().Add(detachedReleaseGrace)); serr != nil {
+	pushedTo := time.Now().Add(detachedReleaseGrace)
+	if serr := m.StampHostRAMHold(epoch, pushedTo); serr == nil {
+		if pushedOutHook != nil {
+			pushedOutHook(epoch, pushedTo)
+		}
+	} else {
 		fmt.Fprintf(os.Stderr, "gpu reserve: warning: could not push the lease's stamped end out before releasing it (%v); if this process dies during the warm-back the hidden holder may release the lease sooner than the warm-back finishes\n", serr)
 	}
 	stopKeptInstances(cfg, epoch, os.Stderr)

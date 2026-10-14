@@ -46,21 +46,34 @@ func heldHolderClock(t *testing.T) (advanceTo func(time.Time)) {
 	return func(to time.Time) { at.Store(to.UnixNano()) }
 }
 
-// waitForPushOut returns the stamped end of the wait once the reserve has pushed it out before its own release: a moment far in
-// the future, where the wait's own end was at most seconds away.
-func waitForPushOut(t *testing.T, m *gpulease.Manager) time.Time {
+// holdAtPushOut makes the reserve stop at the push-out of the stamped end (pushedOutHook) until resume is called, and delivers the
+// pushed moment on reached. It replaces polling the record for the push-out, which a starved test goroutine could miss entirely: the
+// reserve pushed the moment out, warmed the seat and released the lease before the poll came round (3 failures in 54 starved runs).
+func holdAtPushOut(t *testing.T) (reached <-chan time.Time, resume func()) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		for _, l := range m.Leases() {
-			if l.HostRAMHoldUntil.After(time.Now().Add(time.Minute)) {
-				return l.HostRAMHoldUntil
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
+	ch := make(chan time.Time, 1)
+	gate := make(chan struct{})
+	var once sync.Once
+	resume = func() { once.Do(func() { close(gate) }) }
+	old := pushedOutHook
+	pushedOutHook = func(_ uint64, until time.Time) {
+		ch <- until
+		<-gate
 	}
-	t.Fatal("the reserve never pushed the stamped end of the wait out before it began its own release")
-	return time.Time{}
+	t.Cleanup(func() { resume(); pushedOutHook = old })
+	return ch, resume
+}
+
+// pushedMoment waits for the reserve to reach the push-out.
+func pushedMoment(t *testing.T, reached <-chan time.Time) time.Time {
+	t.Helper()
+	select {
+	case until := <-reached:
+		return until
+	case <-time.After(60 * time.Second):
+		t.Fatal("the reserve never pushed the stamped end of the wait out before it began its own release")
+		return time.Time{}
+	}
 }
 
 // fastHolder shortens the hidden holder's poll and its grace past the stamped end, for one test.
@@ -238,6 +251,7 @@ func TestAReserveThatIsAliveReleasesFirstAndTheHolderNeitherDoublesTheWarmNorSte
 	shortFloor(t, time.Second)
 	fastHolder(t)
 	advance := heldHolderClock(t)
+	reached, resume := holdAtPushOut(t)
 	holderDone := detachWithRealHolder(t)
 
 	args := append([]string{"--config", cfgPath, "--ram-hold-max", "300ms"}, strings.Fields(detachedFilm)...)
@@ -245,11 +259,13 @@ func TestAReserveThatIsAliveReleasesFirstAndTheHolderNeitherDoublesTheWarmNorSte
 	stderr := captureStderr(t, func() {
 		reserveDone := make(chan error, 1)
 		go func() { reserveDone <- runGPUReserve(args) }()
-		// The holder sees nothing ended until the push-out is on the record; then it sees a time far past the wait's own end (where
-		// it would act, had the push-out not happened) and still short of the pushed moment. Only the push-out keeps it out of the
-		// parent's warm-back, and this order does not depend on how fast the parent runs.
-		pushed := waitForPushOut(t, m)
+		// The holder sees nothing ended until the reserve is AT the push-out, held there; then it sees a time far past the wait's
+		// own end (where it would act, had the push-out not happened) and still short of the pushed moment, and only then is the
+		// reserve let go on to its warm-back. Only the push-out keeps the holder out of it, and this order does not depend on how
+		// fast either side runs.
+		pushed := pushedMoment(t, reached)
 		advance(pushed.Add(-time.Minute))
+		resume()
 		err = <-reserveDone
 	})
 	if err == nil || !strings.Contains(err.Error(), "hold bound") {
@@ -290,6 +306,7 @@ func TestAReserveThatDiesInTheMiddleOfItsOwnReleaseIsStillCoveredByTheHolder(t *
 	shortFloor(t, time.Second)
 	fastHolder(t)
 	advance := heldHolderClock(t)
+	reached, resume := holdAtPushOut(t)
 	holderDone := detachWithRealHolder(t)
 
 	args := append([]string{"--config", cfgPath, "--ram-hold-max", "300ms"}, strings.Fields(detachedFilm)...)
@@ -305,7 +322,8 @@ func TestAReserveThatDiesInTheMiddleOfItsOwnReleaseIsStillCoveredByTheHolder(t *
 
 	// The reserve is stuck in its warm-back; the holder must end the lease on its own once the pushed-out moment (and the grace)
 	// has passed, which the test lets the holder see when the push-out is on the record.
-	pushed := waitForPushOut(t, m)
+	pushed := pushedMoment(t, reached)
+	resume() // on to the warm-back, which never finishes
 	// Checked BEFORE the holder may act: once it releases the lease the stuck warm-back notices the lease is gone and the reserve
 	// ends, which is not a failure of the test and would make this check depend on how fast the holder is.
 	select {
