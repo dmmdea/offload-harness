@@ -391,3 +391,100 @@ func TestFailureRegisterCountsARefusedAttemptApartFromFailures(t *testing.T) {
 		t.Errorf("the register JSON has no refused_attempts: %s", b)
 	}
 }
+
+// Every failure class has a kind, from a closed set: the question "how much of this is the stack failing" is not
+// answerable from a count that puts a full queue, a caller's mistake and a dead seat on one footing
+// (reasoncode.go files congestion as "a place in line, not a failure"; core's defer classes keep the caller's
+// contract and a node's capacity apart from a broken stack). A reason code added to the closed set with no kind
+// fails here, and so does a kind written for a code the set does not hold.
+func TestEveryFailureClassHasAKindFromTheClosedSet(t *testing.T) {
+	closed := map[string]bool{}
+	for _, k := range FailureKinds() {
+		closed[k] = true
+	}
+	if len(closed) != 6 {
+		t.Fatalf("the closed kind set = %v, want stack_fault, capacity, caller, ceiling, work and unclassified", FailureKinds())
+	}
+	isFailure := map[string]bool{}
+	for _, code := range ReasonCodes() {
+		kind := FailureKindOf(code)
+		if code == ReasonOK || code == ReasonStarted {
+			if kind != "" {
+				t.Errorf("%q is not a failure and must have no kind, got %q", code, kind)
+			}
+			continue
+		}
+		isFailure[code] = true
+		if !closed[kind] {
+			t.Errorf("failure class %q has kind %q, want one of %v", code, kind, FailureKinds())
+		}
+	}
+	if got := FailureKindOf("not_a_member"); got != "" {
+		t.Errorf("a code outside the closed set has kind %q, want none", got)
+	}
+	for code := range failureKinds {
+		if !isFailure[code] {
+			t.Errorf("failureKinds names %q, which is not a failure member of the closed reason-code set", code)
+		}
+	}
+	// The anchors the kinds are read against: the wire defer classes (agentwire.go) and BrokenStackDefer's pair.
+	for code, want := range map[string]string{
+		ReasonInfrastructure: KindStackFault, ReasonConfig: KindStackFault, ReasonNodeUnreachable: KindStackFault, ReasonStallDecode: KindStackFault,
+		ReasonNodeBusy: KindCapacity, ReasonQueueFull: KindCapacity, ReasonCapacityWait: KindCapacity, ReasonShed: KindCapacity,
+		ReasonContract: KindCaller, ReasonCanceled: KindCaller, ReasonBadInput: KindCaller,
+		ReasonBudget: KindCeiling, ReasonPollDeadline: KindCeiling,
+		ReasonAbstention: KindWork, ReasonFailedVerification: KindWork,
+	} {
+		if got := FailureKindOf(code); got != want {
+			t.Errorf("kind of %q = %q, want %q", code, got, want)
+		}
+	}
+}
+
+// The register carries the kind on each class, counts the failures by kind, and reports the stack-fault share on
+// its own line: the failures that say the stack itself failed, over all failure rows. With no failure row the
+// share is absent (null), not 0.
+func TestFailureRegisterReportsKindsAndTheStackFaultShare(t *testing.T) {
+	path := writeFailureLedger(t,
+		`{"ts":1,"task":"agent_delegate","deferred":true,"reason_code":"node_busy","job_id":"a","cards_tokens":0}`,
+		`{"ts":2,"task":"agent_delegate","deferred":true,"reason_code":"node_busy","job_id":"b","cards_tokens":0}`,
+		`{"ts":3,"task":"agent_delegate","deferred":true,"reason_code":"stall_decode","job_id":"c","cards_tokens":0}`,
+		`{"ts":4,"task":"agent_delegate","deferred":true,"reason_code":"infrastructure","job_id":"d","cards_tokens":0}`,
+		`{"ts":5,"task":"agent_delegate","deferred":true,"reason_code":"abstention","job_id":"e","cards_tokens":0}`,
+		`{"ts":6,"task":"agent_delegate","deferred":true,"reason_code":"contract","job_id":"f","cards_tokens":0}`,
+		`{"ts":7,"task":"agent_delegate","deferred":true,"reason_code":"budget","job_id":"g","cards_tokens":0}`,
+		`{"ts":8,"task":"agent_delegate","deferred":false,"reason_code":"ok","acceptance_result":"pass","job_id":"h","cards_tokens":0}`,
+	)
+	reg, err := FailureRegisterFile(path, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for class, want := range map[string]string{"node_busy": KindCapacity, "stall_decode": KindStackFault, "infrastructure": KindStackFault,
+		"abstention": KindWork, "contract": KindCaller, "budget": KindCeiling} {
+		if got := classNamed(t, reg, class).Kind; got != want {
+			t.Errorf("class %s kind = %q, want %q", class, got, want)
+		}
+	}
+	if reg.StackFaultRows != 2 || reg.StackFaultShare == nil || *reg.StackFaultShare != 0.2857 {
+		t.Errorf("stack_fault_rows = %d, share = %v, want 2 and 0.2857 (2 of 7 failure rows)", reg.StackFaultRows, reg.StackFaultShare)
+	}
+	want := []FailureKindCount{{Kind: KindCapacity, Count: 2, Share: 0.2857}, {Kind: KindStackFault, Count: 2, Share: 0.2857},
+		{Kind: KindCaller, Count: 1, Share: 0.1429}, {Kind: KindCeiling, Count: 1, Share: 0.1429}, {Kind: KindWork, Count: 1, Share: 0.1429}}
+	if len(reg.Kinds) != len(want) {
+		t.Fatalf("kinds = %+v, want %+v (count descending, then kind; kinds with no row absent)", reg.Kinds, want)
+	}
+	for i := range want {
+		if reg.Kinds[i] != want[i] {
+			t.Errorf("kinds[%d] = %+v, want %+v", i, reg.Kinds[i], want[i])
+		}
+	}
+
+	empty, err := FailureRegisterFile(writeFailureLedger(t, `{"ts":1,"task":"agent_delegate","reason_code":"ok","job_id":"x","cards_tokens":0}`), 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(empty)
+	if empty.StackFaultShare != nil || !strings.Contains(string(b), `"stack_fault_share":null`) || !strings.Contains(string(b), `"kinds":[]`) {
+		t.Errorf("a register with no failure row: stack_fault_share = %v in %s, want null and an empty kinds list", empty.StackFaultShare, b)
+	}
+}
