@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // The fake yt-dlp. The configured binary path in these tests is the test
@@ -20,6 +23,9 @@ import (
 // count invocations and read the flags back.
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 4 && os.Args[1] == sleeperFlag {
+		os.Exit(runSleeper(os.Args[2], os.Args[3]))
+	}
 	if isFakeYtDlpInvocation(os.Args) {
 		os.Exit(runFakeYtDlp(os.Args[1:]))
 	}
@@ -41,6 +47,27 @@ func isFakeYtDlpInvocation(args []string) bool {
 
 const argSep = "\x1f"
 
+// sleeperFlag makes a copy of the test binary a plain sleeper: `<binary> -research-sleeper <seconds> <pid file>`
+// writes its pid to the file ("-" = nowhere), sleeps, and exits 0. It plays the grandchild a wrapper script leaves
+// running: the program a `.cmd` wrapper starts, or what a shell script backgrounds.
+const sleeperFlag = "-research-sleeper"
+
+func runSleeper(seconds, pidFile string) int {
+	n, err := strconv.Atoi(seconds)
+	if err != nil {
+		return 64
+	}
+	if pidFile != "-" {
+		// written under another name and renamed, so a reader never sees half a number
+		tmp := pidFile + ".tmp"
+		if err := os.WriteFile(tmp, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil || os.Rename(tmp, pidFile) != nil {
+			return 65
+		}
+	}
+	time.Sleep(time.Duration(n) * time.Second)
+	return 0
+}
+
 // Video ids the fake understands (all 11 characters, the shape of a real id).
 const (
 	idPlain    = "PLAINcaps01"
@@ -55,6 +82,8 @@ const (
 	idHuge     = "HUGEsubs001"
 	idBlank    = "BLANKcues01"
 	idFlood    = "FLOODerr001"
+	// idLinger: the binary writes its track and exits 0, but a child it started keeps its output pipe open for four seconds.
+	idLinger = "LINGERpipe1"
 )
 
 const fakeSRT = "1\n00:00:01,000 --> 00:00:02,500\nHello from <b>SubRip</b>.\n\n2\n00:00:03,000 --> 00:00:04,000\nSecond line.\n"
@@ -144,6 +173,12 @@ func runFakeYtDlp(args []string) int {
 		return 1
 	case idHang:
 		time.Sleep(30 * time.Second)
+	case idLinger:
+		write(id+".en.vtt", fakePlainVTT)
+		c := winexec.Command(os.Args[0], sleeperFlag, "4", filepath.Join(filepath.Dir(dir), "linger.pid"))
+		c.Dir = filepath.Dir(dir) // not the per-call directory: nothing may hold that one
+		c.Stdout, c.Stderr = os.Stdout, os.Stderr
+		_ = c.Start()
 	}
 	return 0
 }

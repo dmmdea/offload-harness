@@ -52,9 +52,12 @@ type Fetched struct {
 	Truncated   bool   `json:"truncated,omitempty"`
 	Err         string `json:"error,omitempty"`
 	// ErrKind names the failure of a text-source adapter (the ErrKind constants); empty for a page.
-	ErrKind string        `json:"error_kind,omitempty"`
-	Elapsed time.Duration `json:"-"`
-	Text    string        `json:"-"`
+	ErrKind string `json:"error_kind,omitempty"`
+	// CleanupErr is set when the adapter could not remove its per-call scratch directory; it is a note beside a
+	// result that may itself have succeeded, never a reason to drop the text.
+	CleanupErr string        `json:"cleanup_error,omitempty"`
+	Elapsed    time.Duration `json:"-"`
+	Text       string        `json:"-"`
 }
 
 // Options tunes one Fetch. Zero values take the package defaults.

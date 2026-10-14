@@ -96,6 +96,9 @@ func ClassifyURL(u *url.URL) (SourceKind, string) {
 	return SourceKindYouTube, id
 }
 
+// removeAll removes the per-call scratch directory (a var so a test can make removal fail).
+var removeAll = os.RemoveAll
+
 var reSubLangs = regexp.MustCompile(`^[A-Za-z0-9_.*,-]{1,64}$`)
 
 // fetchSubtitles runs the configured yt-dlp for one validated YouTube URL.
@@ -160,7 +163,7 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) Fetched {
 	if err != nil {
 		return fail(ErrKindYtDlpPath, "scratch directory: %v", err)
 	}
-	defer os.RemoveAll(dir)
+	defer removeAll(dir)
 
 	args := []string{
 		"--ignore-config", "--no-playlist", "--skip-download",
