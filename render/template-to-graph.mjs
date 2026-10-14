@@ -177,6 +177,7 @@ export const LIMITS = Object.freeze({
   maxWires: 1000000, // the links of every scope that is entered (the root's and each instance's), counted as a scope is entered
   maxSubgraphDepth: 64, // instances inside instances
   maxWarnings: 1000, // warnings kept in the result; the ones past it are counted in warnings_dropped, not kept
+  maxIdLength: 256, // characters of a node id (its own id, not the <instance>:<inner> path built from it)
 });
 const SG_INPUT_NODE = "-10";
 const SG_OUTPUT_NODE = "-20";
@@ -265,6 +266,10 @@ function makeScope(nodesArr, linksArr, prefix, parent, def) {
       refuse(REFUSAL.BAD_TEMPLATE, "a node has no id or no type", { where: prefix || "root" });
     }
     const k = String(n.id);
+    // checked before the id becomes a key of anything (this scope's map, the final id, the visited set), and never echoed
+    if (k.length > LIMITS.maxIdLength) {
+      refuse(REFUSAL.BAD_TEMPLATE, `a node id is ${k.length} characters long, more than the ${LIMITS.maxIdLength} allowed`, { where: prefix || "root", what: "node id length", limit: LIMITS.maxIdLength, length: k.length });
+    }
     if (nodes.has(k)) refuse(REFUSAL.BAD_TEMPLATE, `node id ${k} appears twice`, { where: prefix || "root", id: n.id });
     // the slot lists are read as arrays further on (a bypass pairs them, an instance is wired through them): a list that is
     // absent or null is an empty one, anything else that is not an array is the template's fault, caught here and nowhere later
