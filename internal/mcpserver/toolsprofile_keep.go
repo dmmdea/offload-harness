@@ -44,6 +44,12 @@ var compactKeep = []compactKeepEntry{
 	},
 	{
 		Tools:    []string{"agent_delegate"},
+		Sentence: "results[].acceptance_lint (warn-only, the run still happened) flags acceptance that verifies less than it looks: PARROT-PASSABLE (every content check also matches the goal text, so an echoed question passes as verified and the retry never fires), UNGROUNDED (a contains:/regex: matching nothing in the contract's own context docs — fails right answers), or SHAPE-ONLY (nonempty:/min_items: alone — passes garbage).",
+		With:     []string{"When present, fix the acceptance (anchor >=1 contains:/regex: to content that appears only in the docs) before reusing the contract."},
+		Why:      "acceptance rule, keep-only: what acceptance_lint flags (PARROT-PASSABLE, UNGROUNDED, SHAPE-ONLY: a lone nonempty: passes garbage), so acceptance is written to test content that is not in the goal",
+	},
+	{
+		Tools:    []string{"agent_delegate"},
 		Sentence: "Non-zero means a node is broken or misconfigured, so do NOT read those subtasks as work the local stack honestly could not do — and when NOTHING succeeded the call comes back flagged as an error, with this same JSON body intact (a PARTIAL result, where some subtasks delivered, is a successful call: read summary.failed / lost_to_stack and each result's failed / defer_class / reason for what is missing).",
 		With:     []string{"summary.infrastructure counts the results whose story is a broken STACK rather than the work: defers whose defer_class is infrastructure|config, plus a local placement taken while every configured remote failed its health probe."},
 		Why:      "do not misread infrastructure defers as the stack's honest limit; the sentence names summary.infrastructure, so the sentence that defines it comes with it",

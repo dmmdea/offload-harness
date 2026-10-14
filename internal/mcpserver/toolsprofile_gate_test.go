@@ -46,7 +46,7 @@ type droppedSentence struct {
 const minExplicitReason = 30
 
 // checkDroppedRows returns one problem per defect of the dropped list: a row with no tool or sentence, a class that is not in
-// dropClasses, a sentence listed twice for one tool, and a sentence that carries a
+// dropClasses, a sentence listed twice for one tool, an acceptance-rule sentence (those are keep-only), and a sentence that carries a
 // rule word (gateTrigger) whose reason is missing, short or only a class description.
 func checkDroppedRows(rows []droppedSentence) []string {
 	var problems []string
@@ -58,6 +58,9 @@ func checkDroppedRows(rows []droppedSentence) []string {
 		}
 		if _, ok := dropClasses[d.Class]; !ok {
 			problems = append(problems, fmt.Sprintf("dropped row %d (%.60q) has the reason class %q, which is not one of the declared classes", i, d.Sentence, d.Class))
+		}
+		if acceptanceRule.MatchString(d.Sentence) {
+			problems = append(problems, fmt.Sprintf("dropped row %d is an acceptance-rule sentence, which is keep-only: %.80q", i, d.Sentence))
 		}
 		if gateTrigger.MatchString(d.Sentence) {
 			reason := strings.TrimSpace(d.Reason)
@@ -175,7 +178,8 @@ type gateResult struct {
 // gateTool classifies every sentence of one tool, comparing its full and compact forms: dropped is the tool's dropped list
 // (sentence -> row). An opening sentence is kept by rule (and, when the cut shortened it, the part it dropped may carry no rule word).
 // Every other sentence, whatever words it holds, must be in the COMPACT description of the same tool and parameter, verbatim, or on
-// the dropped list.
+// the dropped list; an acceptance-rule sentence (acceptanceRule) must be in the compact description and is never accepted from the dropped
+// list.
 func gateTool(ft, ct *mcp.Tool, dropped map[string]droppedSentence) gateResult {
 	var res gateResult
 	fd, cd := descriptionsByPath(ft), descriptionsByPath(ct)
@@ -209,6 +213,8 @@ func gateTool(ft, ct *mcp.Tool, dropped map[string]droppedSentence) gateResult {
 			switch {
 			case strings.Contains(cd[path], s):
 				res.kept++
+			case acceptanceRule.MatchString(s):
+				res.problems = append(res.problems, fmt.Sprintf("an acceptance-rule sentence is keep-only and compact dropped it: %s %s sentence %d: %s", ft.Name, path, i, s))
 			case isDropped:
 				res.dropped++
 			default:
