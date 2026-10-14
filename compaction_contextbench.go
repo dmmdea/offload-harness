@@ -47,7 +47,7 @@ func runCompactionContextBench(args []string) error {
 	fs := flag.NewFlagSet("compaction-eval contextbench", flag.ExitOnError)
 	fs.String("config", "", "config file path (supplies the default endpoint and model)")
 	family := fs.String("family", "all", "task family: all | kv_store | log_triage | needle_retention | sudoku_sketchpad")
-	level := fs.String("level", "", "a published level of the one chosen family (default: the smallest whose stream exceeds the budget)")
+	level := fs.String("level", "", "a published level of the one chosen family (default: the smallest whose uncompacted transcript exceeds the usable budget)")
 	tasks := fs.Int("tasks", 1, "tasks per family; task i uses seed --seed+i")
 	seed := fs.Int64("seed", 42, "first task seed (the published seeds are 42 to 49)")
 	endpoint := fs.String("endpoint", "", "serving endpoint (default: the configured endpoint)")

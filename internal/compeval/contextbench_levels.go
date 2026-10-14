@@ -62,11 +62,14 @@ var cbLevels = map[string][]CBLevel{
 	},
 }
 
-// cbDefaultLevel is the smallest published level of each family whose streamed
-// volume exceeds the context budget of record, i.e. where the context has to be
-// managed at all.
+// cbDefaultLevel is the smallest published level of each family whose uncompacted
+// transcript exceeds the usable budget of record (budget minus reserve), i.e. where the
+// context has to be managed at all. The transcript is the instruction, every operation and,
+// for sudoku_sketchpad, the whole board panel the task makes the agent print after each
+// move: the sudoku stream alone is small (12k estimated tokens at t150) and never overflows,
+// the panels do, from t60 (about 40k) on; t30 is about 21k.
 var cbDefaultLevel = map[string]string{
-	CBFamilyKV: "R1000", CBFamilyLog: "L1600", CBFamilyNeedle: "K4-C24", CBFamilySudoku: "t30",
+	CBFamilyKV: "R1000", CBFamilyLog: "L1600", CBFamilyNeedle: "K4-C24", CBFamilySudoku: "t60",
 }
 
 // CBLevelNames lists a family's level names in table order.
