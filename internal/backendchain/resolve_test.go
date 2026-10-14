@@ -165,7 +165,7 @@ func TestClassifyEngine(t *testing.T) {
 		want string
 	}{
 		{"declared vLLM wins over a wrapper command that names nothing", SeatFacts{DeclaredVLLM: true, Cmd: "/seats/x-cmd.sh"}, EngineVLLM},
-		{"llama-server in the command", SeatFacts{Cmd: `C:\llama\llama-server.exe -m a.gguf --port 1`}, EngineLlamaCpp},
+		{"llama-server in the command", SeatFacts{Cmd: "/opt/llama/llama-server -m a.gguf --port 1"}, EngineLlamaCpp},
 		{"an rkllm launcher", SeatFacts{Cmd: "/opt/rknpu/rkllm-serve.sh --port 1"}, EngineRKLLM},
 		{"a speech-to-text server is its own kind, not a llama.cpp seat", SeatFacts{Cmd: "/bin/whisper-server -m w.bin --port 1"}, EngineWhisperCpp},
 		{"a command that names no known engine", SeatFacts{Cmd: "/seats/launch.sh --port 1"}, EngineUnknown},
