@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -24,4 +26,11 @@ func TestTheChangelogTreeRulesHoldOnTheRealTree(t *testing.T) {
 		t.Errorf("the changelog tree breaks %d rule(s):\n  %s\nA change adds a fragment under changes/unreleased/ (format and rules: changes/README.md) "+
 			"and leaves CHANGELOG.md alone.", len(problems), strings.Join(problems, "\n  "))
 	}
+}
+
+// docText reads a document of the tree at root for the prose gates (TestTheDocsQuoteTheSIGTERMCardTextTheCodeProduces and
+// TestTheDocsDoNotClaimAnIdleBoxNeverTouchesTheServingConfig).
+func docText(root, name string) (string, error) {
+	raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
+	return string(raw), err
 }
