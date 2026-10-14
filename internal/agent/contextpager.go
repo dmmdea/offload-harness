@@ -67,6 +67,14 @@ func payloadKey(s string) string {
 	return hex.EncodeToString(h[:8])
 }
 
+// reset starts the instrument over: the next report covers only what is noted after it.
+func (p *PagerStats) reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.evicted, p.refetched = nil, nil
+	p.evictions, p.bytes, p.passes = 0, 0, 0
+}
+
 // NoteEvicted records that a payload left the transcript.
 func (p *PagerStats) NoteEvicted(content string) {
 	if p == nil || len(content) < minPayloadBytes {

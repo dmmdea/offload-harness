@@ -260,6 +260,10 @@ func runStandalone(ctx context.Context, loop *agent.Loop, o standaloneOpts) erro
 			continue
 		}
 		gctx, cancel := context.WithTimeout(ctx, o.goalTimeout)
+		// One loop drains the whole queue and its instruments accumulate for its life: start
+		// them over so this goal's pager, compaction and prefill report (the stderr lines and
+		// the trace file) describe this goal and not the running total.
+		loop.ResetRunInstruments()
 		res, rerr := loop.Run(gctx, g.Goal)
 		cancel()
 
