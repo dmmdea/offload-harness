@@ -120,6 +120,10 @@ func TestAHolderRetriesAFenceItCannotReadAndLetsGoOnlyAfterSayingWhy(t *testing.
 		cfgPath, m, _ := holderFixture(t, false)
 		fastHolder(t)
 		fastHolderRetries(t)
+		// The retry window is by the clock and the faults are by the count of reads: under CPU starvation a short window ran out
+		// before the holder reached the read that works (1 run in 8 on two cores with six busy loops). This case costs nothing for a
+		// long one, it ends at the working read; the case that never recovers is the one that needs a short window.
+		holdIORetryFor = 60 * time.Second
 		// The first read fails, the three confirming looks fail, and four more fail inside the retry window: the ninth works. Counted
 		// by reads and not by the clock, so no scheduler delay decides whether the holder reached the retry.
 		var reads atomic.Int32
