@@ -5,7 +5,7 @@
 //   node render/template-to-graph.mjs --template FILE --object-info FILE [--comfy-version X.Y.Z] [--seed N]
 //        [--min-comfyui-version X.Y.Z | --index FILE [--name NAME]] [--meta]
 //
-// prints {"ok":true,"graph":{...},"warnings":[...],"pinnedSeeds":[...],"stats":{...}} and exits 0, or
+// prints {"ok":true,"graph":{...},"warnings":[...],"warnings_dropped":0,"pinnedSeeds":[...],"stats":{...}} and exits 0, or
 // {"ok":false,"refusal":{"code","message","details"}} and exits 1 (a typed refusal of a call that was well formed), or the
 // same shape with code "usage" or "unreadable_input" and exit 2 (a call that could not be read).
 //
@@ -176,6 +176,7 @@ export const LIMITS = Object.freeze({
   maxNodes: 100000, // every node met in every scope that is entered, of any kind (live, muted, bypassed, Note, Reroute, primitive, instance)
   maxWires: 1000000, // the links of every scope that is entered (the root's and each instance's), counted as a scope is entered
   maxSubgraphDepth: 64, // instances inside instances
+  maxWarnings: 1000, // warnings kept in the result; the ones past it are counted in warnings_dropped, not kept
 });
 const SG_INPUT_NODE = "-10";
 const SG_OUTPUT_NODE = "-20";
@@ -343,7 +344,7 @@ function build(template, objectInfo, options) {
 
   const ctx = {
     oi: objectInfo, defs, seed,
-    warnings, pinnedSeeds: [], live: [], instances: new Map(), proxies: new Map(), entryCache: new Map(), keys: new Set(), budget: 0,
+    warnings, warningsDropped: 0, pinnedSeeds: [], live: [], instances: new Map(), proxies: new Map(), entryCache: new Map(), keys: new Set(), budget: 0,
     wires: 0, // the links of every scope entered, the most hops one walk can take (see settle)
     stats: { nodes: 0, expandedSubgraphs: 0, mutedNodes: 0, bypassedNodes: 0, notes: 0, reroutes: 0, primitiveNodes: 0 },
   };
@@ -371,10 +372,17 @@ function build(template, objectInfo, options) {
   // a proxy widget nobody used names a widget the converter could not find: say so
   for (const [innerKey, byName] of ctx.proxies) {
     for (const [name, p] of byName) {
-      if (!p.used) ctx.warnings.push({ code: "proxy_widget_unmatched", node: p.instance, input: name, target: innerKey.slice(p.instance.length + 1) });
+      if (!p.used) addWarning(ctx, { code: "proxy_widget_unmatched", node: p.instance, input: name, target: innerKey.slice(p.instance.length + 1) });
     }
   }
-  return { ok: true, graph, warnings: ctx.warnings, pinnedSeeds: ctx.pinnedSeeds, stats: ctx.stats };
+  return { ok: true, graph, warnings: ctx.warnings, warnings_dropped: ctx.warningsDropped, pinnedSeeds: ctx.pinnedSeeds, stats: ctx.stats };
+}
+
+// addWarning: keep a warning while fewer than LIMITS.maxWarnings are kept, else count it. One unknown key of a widgets_values object, or
+// one proxy entry, is one warning per expansion, so a template can ask for more of them than it has bytes.
+function addWarning(ctx, warning) {
+  if (ctx.warnings.length < LIMITS.maxWarnings) ctx.warnings.push(warning);
+  else ctx.warningsDropped++;
 }
 
 export function convertTemplate(template, objectInfo, options = {}) {
@@ -659,7 +667,7 @@ function mapWidgets(ctx, item, overrides) {
   const seenKeys = new Set();
   let idx = 0;
   const here = { node: key, class_type: cls };
-  const warn = (code, input) => ctx.warnings.push({ code, node: key, input });
+  const warn = (code, input) => addWarning(ctx, { code, node: key, input });
 
   const take = (full) => {
     if (keyed) { seenKeys.add(full); return hasOwn(raw, full) ? { has: true, value: raw[full] } : { has: false }; }
@@ -761,7 +769,7 @@ function mapWidgets(ctx, item, overrides) {
     if (extra > (DISPLAY_VALUES.get(cls) ?? 0)) {
       refuse(REFUSAL.WIDGET_MISMATCH, `node ${key} (${cls}): ${vals.length} widgets_values for ${idx} widgets`, { ...here, expected: idx, got: vals.length });
     }
-    ctx.warnings.push({ code: "display_values_ignored", node: key, count: extra });
+    addWarning(ctx, { code: "display_values_ignored", node: key, count: extra });
   }
   return { values, seedNames };
 }
@@ -785,9 +793,9 @@ function buildNode(ctx, item, options) {
     // "unconnected": the wire ends at nothing (an instance input nobody wired), so nothing was lost and nothing is said; a widget
     // keeps its stored value and a socket stays empty (the preflight reports a missing required input)
     const lost = reason !== "unconnected";
-    if (hasOwn(values, name)) { if (lost) ctx.warnings.push({ code: "widget_link_dropped", node: key, input: name, reason }); return; }
+    if (hasOwn(values, name)) { if (lost) addWarning(ctx, { code: "widget_link_dropped", node: key, input: name, reason }); return; }
     delete inputs[name];
-    if (lost) ctx.warnings.push({ code: "input_dropped", node: key, input: name, reason });
+    if (lost) addWarning(ctx, { code: "input_dropped", node: key, input: name, reason });
   });
   // pinSeeds: with a seed option, every input that is a seed (named seed or noise_seed, and made one by the listing's
   // control_after_generate) and holds a stored or primitive value is set to it; a wired seed, an INT that merely shares the
@@ -804,7 +812,7 @@ function buildNode(ctx, item, options) {
     }
     for (const name of Object.keys(inputs)) {
       if (SEED_NAME.test(lastSegment(name)) && !pinned.has(name)) {
-        ctx.warnings.push({ code: "seed_not_pinned", node: key, input: name, reason: wired.has(name) ? "wired" : "no_control" });
+        addWarning(ctx, { code: "seed_not_pinned", node: key, input: name, reason: wired.has(name) ? "wired" : "no_control" });
       }
     }
   }
