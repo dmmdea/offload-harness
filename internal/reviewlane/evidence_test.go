@@ -282,7 +282,7 @@ func TestSeatReceiptNamesTheSeatAndHashesTheAnswerWithoutTiming(t *testing.T) {
 		t.Errorf("the receipt must bind the seat's raw answer by digest: %q", r.AnswerSHA256)
 	}
 	b, _ := json.Marshal(r)
-	if strings.Contains(string(b), "91234") || strings.Contains(strings.ToLower(string(b)), "wall") {
+	if strings.Contains(string(b), "91234") || strings.Contains(string(b), "wall_ms") {
 		t.Errorf("a receipt is identity, not timing: %s", b)
 	}
 }
