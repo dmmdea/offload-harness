@@ -20,22 +20,22 @@ import (
 // holds a file and a stamp, so it reads the stamp. A gate that read the stamp at render time would
 // exempt nothing, and one that read the profile at audit time would have no profile.
 
-// offMatrixCUDARender is the render the installer reaches through `install render --fallback-backend
-// cuda` (install.ps1 passes it for a box that is not on the tier matrix). It carries the literal
-// `--cpu-moe -ngl 999` in its 26B entries.
-func offMatrixCUDARender(t *testing.T) renderResult {
+// offMatrixRender is the render the installer reaches through `install render --fallback-backend <b>`
+// (install.ps1 passes it for a box that is not on the tier matrix). Before 0186 w4 the cuda one carried the
+// literal `--cpu-moe -ngl 999` in its 26B entries; the installer no longer writes it, and the tests below
+// that need the legacy shape inject it (withBareCPUMoe) instead of reading it from a render.
+func offMatrixRender(t *testing.T, fallback string) renderResult {
 	t.Helper()
 	req := renderReq("", "linux", &pinnedVLLM{})
-	req.Fallback = "cuda"
+	req.Fallback = fallback
 	res, err := deriveRender(embeddedProfiles, req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(res.Config, "--cpu-moe -ngl 999") {
-		t.Fatalf("the off-matrix cuda render carries no `--cpu-moe -ngl 999`, so the exemption would be tested against nothing:\n%s", res.Config)
-	}
 	return res
 }
+
+func offMatrixCUDARender(t *testing.T) renderResult { return offMatrixRender(t, "cuda") }
 
 func tierRender(t *testing.T, tier string) renderResult {
 	t.Helper()
@@ -57,15 +57,15 @@ func withBareCPUMoe(t *testing.T, cfg, anchor string) string {
 	return out
 }
 
-func TestRenderGateExemptsOnlyTheCPUBackendAndTheOffMatrixLiteral(t *testing.T) {
+func TestRenderGateExemptsOnlyTheCPUBackend(t *testing.T) {
 	off := offMatrixCUDARender(t)
 	if err := renderGate(off); err != nil {
-		t.Fatalf("the installer's own off-matrix render must pass the write gate until the installer stops writing it: %v", err)
+		t.Fatalf("the installer's own off-matrix render must pass the write gate with no exemption: %v", err)
 	}
 
-	// The same text on a table GPU tier is the defect: no moeLiteral, a backend with a card.
+	// The flag in a table GPU tier's render is the defect: a backend with a card.
 	gpu := tierRender(t, "blackwell-16")
-	gpu.Config = off.Config
+	gpu.Config = withBareCPUMoe(t, gpu.Config, "-ngl 99 --parallel 1")
 	err := renderGate(gpu)
 	if err == nil {
 		t.Fatal("a table GPU tier whose render carries the bare --cpu-moe passed the write gate")
@@ -82,11 +82,20 @@ func TestRenderGateExemptsOnlyTheCPUBackendAndTheOffMatrixLiteral(t *testing.T) 
 	if err := renderGate(cpu); err != nil {
 		t.Fatalf("the cpu backend has no card to overflow from and must not be refused: %v", err)
 	}
-	// And a literal alone (no cpu backend) is the other half of the exemption.
+	// An off-matrix literal (vulkan still carries `-ngl 999` in moeLiteral) exempts nothing any more: it was
+	// a concession to the installer writing `--cpu-moe -ngl 999`, and the installer stopped.
+	vk := offMatrixRender(t, "vulkan")
+	if vk.Profile.moeLiteral == "" || vk.Profile.Backend != "vulkan" {
+		t.Fatalf("control: the vulkan off-matrix profile must carry a literal on a backend with a card, got %+v", vk.Profile)
+	}
 	lit := gpu
-	lit.Profile = off.Profile // backend cuda, moeLiteral set: only the literal can be what exempts it
-	if err := renderGate(lit); err != nil {
-		t.Fatalf("the off-matrix literal must stay exempt: %v", err)
+	lit.Profile = vk.Profile // moeLiteral set, backend vulkan: only the literal could be what exempts it
+	if err := renderGate(lit); err == nil || !strings.Contains(err.Error(), "cpu-moe (") {
+		t.Fatalf("an off-matrix literal on a backend with a card must not exempt the bare --cpu-moe, got %v", err)
+	}
+	vk.Config = withBareCPUMoe(t, vk.Config, "-ngl 999 --parallel 1")
+	if err := renderGate(vk); err == nil || !strings.Contains(err.Error(), "cpu-moe (") {
+		t.Fatalf("an off-matrix vulkan render that carries the bare --cpu-moe passed the write gate: %v", err)
 	}
 
 	// The shipped cpu tier renders no flag, so it passes by the rule and not by the exemption.
@@ -95,23 +104,21 @@ func TestRenderGateExemptsOnlyTheCPUBackendAndTheOffMatrixLiteral(t *testing.T) 
 	}
 }
 
-// A partial placement that names no N renders the every-expert form; the existing, more specific
-// refusal ("no N") must still be the one the operator reads.
-func TestRenderGateKeepsTheMoreSpecificNoNRefusalFirst(t *testing.T) {
+// A partial placement that names no N used to render the every-expert form and be refused by the gate AFTER
+// the flag was computed. It is refused at derive now, before any flag exists, and the specific refusal
+// ("no N") is still the one the operator reads: the gate never sees a render with the flag in it.
+func TestDeriveRenderKeepsTheSpecificNoNRefusal(t *testing.T) {
 	doc := tableDoc(t)
 	e := tierEntry(doc, "blackwell-16")
 	e["moe_26b"] = "n_cpu_moe"
 	e["n_cpu_moe_max"] = 14
 	delete(e, "n_cpu_moe")
 	res, err := deriveRender(marshalTable(t, doc), renderReq("blackwell-16", "linux", &pinnedVLLM{}))
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "no N") {
+		t.Fatalf("moe_26b n_cpu_moe with no N must be refused by deriveRender with its own message, got err=%v", err)
 	}
-	if !strings.Contains(res.Config, "--cpu-moe -ngl 999") {
-		t.Fatalf("the control render carries no bare --cpu-moe:\n%s", res.Config)
-	}
-	if err := renderGate(res); err == nil || !strings.Contains(err.Error(), "no N") {
-		t.Fatalf("moe_26b n_cpu_moe with no N must keep its own refusal, got %v", err)
+	if strings.Contains(res.Config, "--cpu-moe") {
+		t.Fatalf("the refused tier still produced a config carrying the every-expert flag:\n%s", res.Config)
 	}
 }
 
@@ -146,6 +153,30 @@ func TestRenderedTiersCarryNoBareCPUMoE(t *testing.T) {
 	}
 	if walked < 20 {
 		t.Fatalf("walked %d tier renders — the guard went blind", walked)
+	}
+	// The renders of a box OFF the matrix are renders too: the installer reaches them with
+	// --fallback-backend, and 0186 w4 made them clean (the full walk is install_nocpumoe_test.go).
+	fallbacks := 0
+	for _, fb := range []string{"cuda", "cuda-resident", "dual-cuda", "vulkan"} {
+		for _, goos := range []string{"linux", "windows"} {
+			req := renderReq("", goos, &pinnedVLLM{})
+			req.Fallback = fb
+			res, err := deriveRender(embeddedProfiles, req)
+			if err != nil {
+				if strings.Contains(err.Error(), "no serving template") {
+					continue
+				}
+				t.Errorf("off-matrix %s (%s) does not render: %v", fb, goos, err)
+				continue
+			}
+			fallbacks++
+			if vs := servingtmpl.AuditCPUMoE(res.Config); len(vs) != 0 {
+				t.Errorf("off-matrix %s (%s) renders the every-expert placement:\n%s", fb, goos, servingtmpl.Violations(vs))
+			}
+		}
+	}
+	if fallbacks < 6 {
+		t.Fatalf("walked %d off-matrix renders — the guard went blind", fallbacks)
 	}
 }
 
@@ -209,29 +240,52 @@ func TestAuditYAMLReadsTheExemptionFromTheStamp(t *testing.T) {
 		}
 	})
 
-	t.Run("a stamped off-matrix render is a note and does not fail the audit", func(t *testing.T) {
+	t.Run("a stamped CLEAN off-matrix render prints OK, with no cpu-moe finding and no note", func(t *testing.T) {
 		res := offMatrixCUDARender(t)
 		if res.Basis.Render.FallbackBackend != "cuda" {
 			t.Fatalf("control: the stamp records fallback %q", res.Basis.Render.FallbackBackend)
 		}
 		out, err := auditYAMLOn(t, stamp(t, res))
-		if err != nil {
-			t.Fatalf("an off-matrix render must not fail the audit: %v\n%s", err, out)
+		if err != nil || !strings.Contains(out, ": OK") {
+			t.Fatalf("a clean off-matrix render must print OK; err=%v:\n%s", err, out)
 		}
-		if !strings.Contains(out, ": OK") {
-			t.Errorf("the rule audit is clean and says so:\n%s", out)
+		if strings.Contains(out, "cpu-moe") || strings.Contains(out, "note: ") {
+			t.Errorf("a clean off-matrix render has no cpu-moe finding and nothing to note:\n%s", out)
 		}
-		var note string
+	})
+
+	// What a binary <= 0.185.1 wrote for a box off the tier matrix: the 26B entries with the every-expert
+	// literal, under a verbatim stamp that records the fallback. The installer stopped writing it, so the
+	// stamp no longer excuses it: it is a finding that fails the audit and says how to fix it.
+	t.Run("a legacy stamped off-matrix render that carries the flag is a violation that says to re-render", func(t *testing.T) {
+		res := offMatrixCUDARender(t)
+		res.Config = withBareCPUMoe(t, res.Config, "--n-gpu-layers 99 --parallel 1")
+		out, err := auditYAMLOn(t, stamp(t, res))
+		if err == nil {
+			t.Fatalf("a legacy off-matrix render that parks every expert in RAM must fail the audit:\n%s", out)
+		}
+		if strings.Contains(out, ": OK") {
+			t.Errorf("a refused file must not also print OK:\n%s", out)
+		}
+		var violation string
 		for _, l := range strings.Split(out, "\n") {
-			if strings.HasPrefix(l, "note: ") && strings.Contains(l, "cpu-moe (") {
-				note = l
+			if strings.HasPrefix(l, "note: ") && strings.Contains(l, "cpu-moe") {
+				t.Errorf("the finding must not print as a note: %s", l)
+			}
+			if strings.Contains(l, "cpu-moe (") && !strings.HasPrefix(l, "note: ") {
+				violation = l
 			}
 		}
-		if note == "" {
-			t.Fatalf("the off-matrix finding must print as a `note:` line:\n%s", out)
+		if violation == "" {
+			t.Fatalf("the legacy off-matrix finding must be a `cpu-moe (` violation:\n%s", out)
 		}
-		if !strings.Contains(note, "off-matrix") {
-			t.Errorf("the note says why it is not a failure: %s", note)
+		for _, want := range []string{"re-render", "older binary"} {
+			if !strings.Contains(violation, want) {
+				t.Errorf("the violation must carry %q: %s", want, violation)
+			}
+		}
+		if strings.Contains(violation, "unstamped file") || strings.Contains(violation, "no longer matches") {
+			t.Errorf("a verbatim stamp is neither unstamped nor edited, and the text must not say so: %s", violation)
 		}
 	})
 

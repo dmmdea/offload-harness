@@ -348,13 +348,10 @@ func TestInstallRenderRefusesNCPUMoEAboveTheTiersMeasuredSpill(t *testing.T) {
 	if err := renderGate(res); err == nil || !strings.Contains(err.Error(), "no measured spill") {
 		t.Fatalf("a tier with no n_cpu_moe_max must refuse any --n-cpu-moe, got %v", err)
 	}
-	// the partial placement that names no N silently renders --cpu-moe (every expert in RAM)
-	res, err = render("n_cpu_moe", 0, 14)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := renderGate(res); err == nil || !strings.Contains(err.Error(), "no N") {
-		t.Fatalf("moe_26b n_cpu_moe with no n_cpu_moe renders the every-expert form and must be refused, got %v", err)
+	// the partial placement that names no N would be the every-expert --cpu-moe (every expert in RAM): it
+	// is refused at derive, before any flag is computed (0186 w4), with the specific "no N" message
+	if _, err = render("n_cpu_moe", 0, 14); err == nil || !strings.Contains(err.Error(), "no N") {
+		t.Fatalf("moe_26b n_cpu_moe with no n_cpu_moe would put every expert in RAM and must be refused, got %v", err)
 	}
 	// and the text-level rule does not depend on the profile: a template that regressed to a
 	// literal `--n-cpu-moe` is refused even though the tier's own fields are innocent.

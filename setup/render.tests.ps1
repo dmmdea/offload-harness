@@ -590,6 +590,12 @@ if ($r.yaml -notmatch '__[A-Z0-9_]+__')                        { Ok 'unknown pro
 $macro = Get-CommonMacro $r.yaml
 if ($macro -match '--ctx-size 16384' -and $macro -match '--cache-type-k q8_0') { Ok 'unknown profile: CUDA fallback = 16384/q8_0' } else { Bad "unknown profile CUDA defaults (got: $macro)" }
 if ($r.verdict -and $r.verdict.profile -eq 'does-not-exist')   { Ok 'unknown profile: verdict echoes the unknown id' } else { Bad 'unknown profile verdict' }
+# 0186 w4 (INV-1): an unknown box has no tier, no measurement and no declared fit, so the CUDA fallback serves no
+# 26B and writes no every-expert flag. Comment lines are ignored: the template headers DOCUMENT the placements.
+$unkFunctional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
+if ($unkFunctional -notmatch '--cpu-moe')                      { Ok 'unknown profile: no every-expert --cpu-moe anywhere' } else { Bad 'unknown profile still renders --cpu-moe' }
+if ($unkFunctional -notmatch '(?m)^\s*gemma4-26b-a4b\s*:')     { Ok 'unknown profile: CUDA fallback defines no 26B entry' } else { Bad 'unknown profile still defines the 26B' }
+if ($r.verdict -and $r.verdict.include_26b -eq $false)         { Ok 'unknown profile: verdict says include_26b false' } else { Bad "unknown profile verdict include_26b (got: $($r.verdict.include_26b))" }
 
 Write-Host "== agent seat (B2): fresh seed-merge derives agent_model in PARITY with internal/tierseed =="
 # Dot-source install.ps1's pure helpers (OFFLOAD_INSTALL_DOT_SOURCE seam - no
