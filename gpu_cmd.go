@@ -1396,7 +1396,7 @@ func runGPUHold(args []string) error {
 		// timeout, Ctrl-C, a closed terminal) nothing else would, and this process would renew the lease for ever: the incident of
 		// 2026-10-14 with nobody left to end it. So the holder reads its own record: a lease that STILL ASKS for the host's RAM whose
 		// stamped end of the wait has passed (by a grace that lets a live reserve release first) is released here.
-		if asked, until, herr := lease.HostRAMHold(); herr == nil && asked > 0 && !until.IsZero() && time.Now().After(until.Add(holdBoundGrace)) {
+		if asked, until, herr := lease.HostRAMHold(); herr == nil && asked > 0 && !until.IsZero() && holdClock().After(until.Add(holdBoundGrace)) {
 			releaseHolderAtWaitEnd(loadCfg(fs), m, lease, asked, until)
 			return nil // the deferred function stops the instances and releases the lease
 		}
@@ -1423,10 +1423,17 @@ var (
 	holdRenewEvery   = 15 * time.Second
 )
 
+// holdClock is the clock the hidden holder compares a stamped end of the wait against. A variable so a test can hold the holder
+// back until the reserve's push-out is on the record, and decide itself when the holder may act: a grace measured in real time
+// raced the push-out under CPU starvation.
+var holdClock = time.Now
+
 // holdBoundGrace is how long past the stamped end of a host-RAM wait the hidden holder waits before it releases its own
-// lease: the reserve that took the lease releases it at that moment itself, and the holder acts only when it has not. A
-// variable so a test can shorten it.
-var holdBoundGrace = 5 * time.Second
+// lease: the reserve that took the lease releases it at that moment itself, and the holder acts only when it has not. It is
+// generous on purpose: it delays only a BACKSTOP (the holder acts when the reserve is gone), and a reserve stalled under paging,
+// or resumed after a suspend, must not get a parallel warm-back from the holder at the instant it is late with its push-out
+// (under CPU starvation the 5 s this used to be raced it). A variable so a test can shorten it.
+var holdBoundGrace = 30 * time.Second
 
 // holdConfirmPause is the pause between the looks with which the hidden holder confirms that its lease is really gone before it
 // lets go of it. A variable so a test can shorten it.

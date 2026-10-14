@@ -2045,7 +2045,7 @@ what it costs (`gpu status` cannot show when the lease is released; the hidden h
 
 **The hidden holder enforces it.** A detached hold's bound used to be enforced only by the foreground reserve: if that died during the
 wait (a tool timeout, Ctrl-C, a closed terminal) the hidden `gpu hold` renewed its term for ever. It now reads its own record on every
-poll (`Lease.HostRAMHold`) and, once the stamped end has passed by `holdBoundGrace` (5 s, so a live reserve releases first) while the
+poll (`Lease.HostRAMHold`) and, once the stamped end has passed by `holdBoundGrace` (30 s, so a live reserve releases first) while the
 lease STILL ASKS for the host's RAM (`host_ram_wait_gib` not yet admitted), releases the lease itself (`releaseHolderAtWaitEnd`): the
 instances stopped, the seat warmed back only if the lease owes it, the lease released (`TestTheHiddenHolderReleasesItsOwnLeaseOnceTheStampedWaitHasEndedAndNoReserveDid`).
 An admitted lease and a wait that has not ended are left alone (`TestTheHolderLeavesAnAdmittedLeaseAndAWaitThatHasNotEndedAlone`).

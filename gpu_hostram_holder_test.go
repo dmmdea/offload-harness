@@ -26,11 +26,48 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
+// testHolderGrace is the grace past the stamped end that the holder tests give the hidden holder. It was 50 ms, which a parent
+// starved of CPU for 50 ms misses (the holder then stepped in while the parent was alive: warms=2, 4 runs in 16 on two cores
+// with six busy loops). A second is out of reach of that for the tests that wait for the holder to act by the real clock; the two
+// tests that pit the holder against a live parent do not use the real clock at all (heldHolderClock).
+const testHolderGrace = time.Second
+
+// heldHolderClock freezes the clock the hidden holder reads at a moment an hour before now, so that the holder cannot see any wait
+// as ended until the test says so, and returns the function that moves it. A test that pits the holder against a live parent
+// then waits for the parent's push-out to be ON THE RECORD (waitForPushOut) before it lets the holder see a later time, and
+// no scheduler delay, however long, can make the holder act before the push-out.
+func heldHolderClock(t *testing.T) (advanceTo func(time.Time)) {
+	t.Helper()
+	var at atomic.Int64
+	at.Store(time.Now().Add(-time.Hour).UnixNano())
+	old := holdClock
+	holdClock = func() time.Time { return time.Unix(0, at.Load()) }
+	t.Cleanup(func() { holdClock = old })
+	return func(to time.Time) { at.Store(to.UnixNano()) }
+}
+
+// waitForPushOut returns the stamped end of the wait once the reserve has pushed it out before its own release: a moment far in
+// the future, where the wait's own end was at most seconds away.
+func waitForPushOut(t *testing.T, m *gpulease.Manager) time.Time {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, l := range m.Leases() {
+			if l.HostRAMHoldUntil.After(time.Now().Add(time.Minute)) {
+				return l.HostRAMHoldUntil
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the reserve never pushed the stamped end of the wait out before it began its own release")
+	return time.Time{}
+}
+
 // fastHolder shortens the hidden holder's poll and its grace past the stamped end, for one test.
 func fastHolder(t *testing.T) {
 	t.Helper()
 	oldPoll, oldGrace := holdPollEvery, holdBoundGrace
-	holdPollEvery, holdBoundGrace = 20*time.Millisecond, 50*time.Millisecond
+	holdPollEvery, holdBoundGrace = 20*time.Millisecond, testHolderGrace
 	t.Cleanup(func() { holdPollEvery, holdBoundGrace = oldPoll, oldGrace })
 }
 
@@ -200,11 +237,21 @@ func TestAReserveThatIsAliveReleasesFirstAndTheHolderNeitherDoublesTheWarmNorSte
 	useSeatBackedHost(t, f.loaded.Load, 95, 70)
 	shortFloor(t, time.Second)
 	fastHolder(t)
+	advance := heldHolderClock(t)
 	holderDone := detachWithRealHolder(t)
 
 	args := append([]string{"--config", cfgPath, "--ram-hold-max", "300ms"}, strings.Fields(detachedFilm)...)
 	var err error
-	stderr := captureStderr(t, func() { err = runGPUReserve(args) })
+	stderr := captureStderr(t, func() {
+		reserveDone := make(chan error, 1)
+		go func() { reserveDone <- runGPUReserve(args) }()
+		// The holder sees nothing ended until the push-out is on the record; then it sees a time far past the wait's own end (where
+		// it would act, had the push-out not happened) and still short of the pushed moment. Only the push-out keeps it out of the
+		// parent's warm-back, and this order does not depend on how fast the parent runs.
+		pushed := waitForPushOut(t, m)
+		advance(pushed.Add(-time.Minute))
+		err = <-reserveDone
+	})
 	if err == nil || !strings.Contains(err.Error(), "hold bound") {
 		t.Fatalf("the bound ended the wait: %v\n%s", err, stderr)
 	}
@@ -242,9 +289,7 @@ func TestAReserveThatDiesInTheMiddleOfItsOwnReleaseIsStillCoveredByTheHolder(t *
 	useSeatBackedHost(t, f.loaded.Load, 95, 70)
 	shortFloor(t, time.Second)
 	fastHolder(t)
-	oldGrace := detachedReleaseGrace
-	detachedReleaseGrace = 400 * time.Millisecond
-	t.Cleanup(func() { detachedReleaseGrace = oldGrace })
+	advance := heldHolderClock(t)
 	holderDone := detachWithRealHolder(t)
 
 	args := append([]string{"--config", cfgPath, "--ram-hold-max", "300ms"}, strings.Fields(detachedFilm)...)
@@ -258,15 +303,20 @@ func TestAReserveThatDiesInTheMiddleOfItsOwnReleaseIsStillCoveredByTheHolder(t *
 		}
 	})
 
-	// The reserve is stuck in its warm-back; the holder must end the lease on its own once the pushed-out moment passes.
-	holderEnds(t, holderDone, 20*time.Second)
-	if m.Inspect().Held {
-		t.Errorf("the holder ended but the lease is still held: %+v", m.Inspect())
-	}
+	// The reserve is stuck in its warm-back; the holder must end the lease on its own once the pushed-out moment (and the grace)
+	// has passed, which the test lets the holder see when the push-out is on the record.
+	pushed := waitForPushOut(t, m)
+	// Checked BEFORE the holder may act: once it releases the lease the stuck warm-back notices the lease is gone and the reserve
+	// ends, which is not a failure of the test and would make this check depend on how fast the holder is.
 	select {
 	case err := <-reserveDone:
 		t.Fatalf("the reserve was supposed to be stuck in its warm-back: %v", err)
 	default:
+	}
+	advance(pushed.Add(holdBoundGrace + time.Second))
+	holderEnds(t, holderDone, 20*time.Second)
+	if m.Inspect().Held {
+		t.Errorf("the holder ended but the lease is still held: %+v", m.Inspect())
 	}
 	if m.SeatWarmOwed() != "" {
 		t.Errorf("the holder paid the owed warm-back before it released: owed=%q", m.SeatWarmOwed())
@@ -305,7 +355,7 @@ func TestAReserveThatDiesTheInstantItsWaitEndsLeavesTheHolderAMomentToAct(t *tes
 				t.Fatal("the host never has the room: the wait ends without admission")
 			}
 			// The reserve is dead from here on: nothing releases the lease and nothing pushes the stamp out.
-			holderEnds(t, holderDone, 5*time.Second)
+			holderEnds(t, holderDone, 15*time.Second)
 			if time.Since(start) < tc.bound {
 				t.Errorf("the holder let go %s in, before the moment the wait was stamped to end (%s)", time.Since(start), tc.bound)
 			}
