@@ -27,11 +27,12 @@ test("the ComfyUI-side pack: the read-only reader and the free node pass their P
 // The idle bound's pack (idle-nodes/offload_idle) is standard library only, so ANY Python 3 runs its tests: the ComfyUI interpreter when it
 // exists, else python, else python3. Each is probed first with `-I -c`, because a Windows machine's python3 is often the Store stub that
 // exits non-zero. The test is skipped only when none answers, and CI (no ComfyUI install, no torch) runs it through python3.
-const probeOk = (cmd) => {
-  const r = spawnSync(cmd, ["-I", "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"], { encoding: "utf8", timeout: 60000, windowsHide: true });
-  return !r.error && r.status === 0;
-};
-const idlePython = [existsSync(COMFY_PY) ? COMFY_PY : null, "python", "python3"].filter(Boolean).find(probeOk);
+let idlePython = null;
+for (const candidate of [existsSync(COMFY_PY) ? COMFY_PY : null, "python", "python3"]) {
+  if (!candidate) continue;
+  const probed = spawnSync(candidate, ["-I", "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"], { encoding: "utf8", timeout: 60000, windowsHide: true });
+  if (!probed.error && probed.status === 0) { idlePython = candidate; break; }
+}
 
 test("the idle bound's pack: its Python tests pass under any Python 3", { skip: idlePython ? false : "no Python 3 interpreter on this machine" }, () => {
   const r = spawnSync(idlePython, ["-I", "-B", join(here, "comfyui-ext", "test_offload_idle.py")], { encoding: "utf8", env, timeout: 120000, windowsHide: true });

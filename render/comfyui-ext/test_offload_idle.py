@@ -480,6 +480,8 @@ class AsAComfyUIPack(unittest.TestCase):
         sys.meta_path.insert(0, Recorder)
         try:
             load_pack("offload_idle_imports")
+        except ImportError:
+            pass   # a pack that imports torch fails here where torch is absent; what it ASKED for is the point
         finally:
             sys.meta_path.remove(Recorder)
         heavy = [n for n in asked if n.split(".")[0] in ("torch", "comfy", "server", "aiohttp", "numpy")]
