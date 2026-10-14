@@ -49,7 +49,7 @@ import (
 // sentence that holds a rule is kept whole. It is the same family of words the review gate classifies sentences by (gateTrigger
 // in toolsprofile_gate_test.go, written out separately there), and a test pins that every word of the gate is a word of this
 // guard.
-var leadGuard = regexp.MustCompile(`(?i)\b(never|refus\w*|only|must|not|\w+n't|cannot|required|denied|trusted|untrusted|unattended|sandbox\w*|safety|advisory|read-only|forbidden|irreversible|destructive|opt-in|without|no (?:delete|shell|run|network|cloud|write)|forward\w*|travel\w*|fleet nodes?|tailnet|sent|cloud)\b`)
+var leadGuard = regexp.MustCompile(`(?i)\b(never|refus\w*|only|must|not|\w+n't|cannot|required|denied|trusted|untrusted|unattended|sandbox\w*|safety|advisory|read-only|forbidden|irreversible|destructive|opt-in|without|no (?:delete|shell|run|network|cloud|write)|forward\w*|travel\w*|fleet nodes?|tailnet|sent|cloud|defer\w*)\b`)
 
 // compactLeadMin is the shortest first "sentence" the cut accepts: a description that opens "OPTIONAL." or "Required." has
 // said nothing yet, so the next sentence is kept with it.

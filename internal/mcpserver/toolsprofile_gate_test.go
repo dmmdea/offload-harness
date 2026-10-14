@@ -23,7 +23,7 @@ import (
 // service (cloud). Those carry no prohibition word and say what happens to the caller's bytes, which is a privacy rule
 // all the same. It is written out here on purpose and is NOT the production lead-cut guard (leadGuard in toolsprofile.go):
 // narrowing production's regexp cannot narrow this gate.
-var gateTrigger = regexp.MustCompile(`(?i)\b(never|refus\w*|only|must|not|\w+n't|cannot|required|denied|trusted|untrusted|unattended|sandbox\w*|safety|advisory|read-only|forbidden|irreversible|destructive|opt-in|without|no (?:delete|shell|run|network|cloud|write)|forward\w*|travel\w*|fleet nodes?|tailnet|sent|cloud)\b`)
+var gateTrigger = regexp.MustCompile(`(?i)\b(never|refus\w*|only|must|not|\w+n't|cannot|required|denied|trusted|untrusted|unattended|sandbox\w*|safety|advisory|read-only|forbidden|irreversible|destructive|opt-in|without|no (?:delete|shell|run|network|cloud|write)|forward\w*|travel\w*|fleet nodes?|tailnet|sent|cloud|defer\w*)\b`)
 
 // droppedSentence records a constraint-word sentence the compact profile deliberately drops, in the tools named, and why that is
 // safe.

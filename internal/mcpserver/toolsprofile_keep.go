@@ -405,6 +405,108 @@ var compactKeep = []compactKeepEntry{
 		Sentence: "Returns {answer}; if it can't answer confidently it returns deferred:true and you should look at the image yourself.",
 		Why:      "the lane defers (deferred:true) when it cannot answer confidently, and the caller does the work itself",
 	},
+	// The deferral protocol, one entry per phrasing: a lane that cannot do the work returns deferred:true (or defers) and the caller does it
+	// another way. TestCompactKeepsTheDeferralProtocolOfEveryTool compares every description's count of deferred:true between the lists.
+	{
+		Tools:    []string{"agent_run"},
+		Sentence: "Returns {output, steps, stop_reason, tools, model}; on any failure it returns deferred:true with a reason and you do the task yourself.",
+		Why:      "the deferral protocol: on any failure the lane returns deferred:true and the caller does the task itself",
+	},
+	{
+		Tools:    []string{"agent_run"},
+		Sentence: "THE WALL IS A HARD DEADLINE on this door: a run still working when timeout_sec ends is cut and deferred (the reason says so), and a slow seat (the 27B) needs far more than the default for a many-step run.",
+		Why:      "a run still working when timeout_sec ends is cut and deferred: the caller sizes the wall (a slow seat needs far more than the default)",
+	},
+	{
+		Tools:    []string{"agent_run"},
+		Sentence: "Slow seats (the 27B) defer on short walls: size it from wall_estimate_sec",
+		Why:      "slow seats defer on short walls: size timeout_sec from wall_estimate_sec",
+	},
+	{
+		Tools:    []string{"offload_animate_character", "offload_generate_video"},
+		Sentence: "On any failure it returns deferred:true — then make the clip another way.",
+		Why:      "the deferral protocol: the lane hands the work back as deferred:true and the caller does it another way",
+	},
+	{
+		Tools:    []string{"offload_ask"},
+		Sentence: "On any failure it returns deferred:true with a reason and you read the files yourself.",
+		Why:      "the deferral protocol: on any failure the lane returns deferred:true and the caller reads the files itself",
+	},
+	{
+		Tools:    []string{"offload_assess_image"},
+		Sentence: "Returns the object or deferred:true.",
+		Why:      "the deferral protocol: the lane hands the work back as deferred:true and the caller does it another way",
+	},
+	{
+		Tools:    []string{"offload_browse"},
+		Sentence: "On any failure it returns deferred:true with a typed reason (NOT_CONFIGURED, BUSY, BAD_INPUT, CLI_MISSING, BROWSER_UNAVAILABLE, DECISION_UNAVAILABLE, TEXT_UNAVAILABLE, HOST_NOT_ALLOWED, DENIED, blocked, budget, TIMEOUT, RUNNER_FAILED) and, where the run started, the run so far as partial.",
+		Why:      "the deferral protocol: on any failure the run returns deferred:true with a typed reason (and the run so far as partial)",
+	},
+	{
+		Tools:    []string{"offload_classify"},
+		Sentence: "Returns {label, confidence}; low-confidence results are deferred back to you.",
+		Why:      "the deferral protocol: a low-confidence classification is deferred back to the caller",
+	},
+	{
+		Tools:    []string{"offload_compose_video"},
+		Sentence: "On any failure it returns deferred:true with a typed reason (BAD_INPUT, LINT_ERRORS, CHECK_FAILED, RENDER_FAILED, BROWSER_MISSING, FFMPEG_MISSING, CLI_MISSING, SPAWN_EBUSY, DISK_HEADROOM, TIMEOUT, or no composition route on this machine).",
+		Why:      "the deferral protocol: on any failure the render returns deferred:true with a typed reason",
+	},
+	{
+		Tools:    []string{"offload_edit_image"},
+		Sentence: "On any failure (engine absent, bad op, tool error) it returns deferred:true — then edit the image another way.",
+		Why:      "the deferral protocol: the lane hands the work back as deferred:true and the caller does it another way",
+	},
+	{
+		Tools:    []string{"offload_edit_image_generative"},
+		Sentence: "On any failure (no edit binding on this machine, unknown family, images on a single-image family, more than 10 images, missing file, preset on a 2.1 family, render error) it returns deferred:true.",
+		Why:      "the deferral protocol: the lane hands the work back as deferred:true and the caller does it another way",
+	},
+	{
+		Tools:    []string{"offload_extract", "offload_extract_image"},
+		Sentence: "Returns the extracted object or defers.",
+		Why:      "the deferral protocol: the lane returns the object or defers",
+	},
+	{
+		Tools:    []string{"offload_generate_audio"},
+		Sentence: "On any failure (GPU busy, no route, worker error, timeout) it returns deferred:true — then synthesize it another way.",
+		Why:      "the deferral protocol: the lane hands the work back as deferred:true and the caller does it another way",
+	},
+	{
+		Tools:    []string{"offload_inpaint_image"},
+		Sentence: "On any failure (no SDXL-class inpaint binding on this machine, missing files, render error) it returns deferred:true.",
+		Why:      "the deferral protocol: the lane hands the work back as deferred:true and the caller does it another way",
+	},
+	{
+		Tools:    []string{"offload_media"},
+		Sentence: "On any failure (ffmpeg absent, bad args) it returns deferred:true — then do it another way.",
+		Why:      "the deferral protocol: the lane hands the work back as deferred:true and the caller does it another way",
+	},
+	{
+		Tools:    []string{"offload_nim"},
+		Sentence: "Returns {model, content, reasoning_content, tokens_in, tokens_out, truncated}; on any failure (no key, endpoint down, bad model) it returns deferred:true with a reason and you handle the prompt yourself.",
+		Why:      "the deferral protocol: on any failure the tool returns deferred:true and the caller handles the prompt itself",
+	},
+	{
+		Tools:    []string{"offload_review_diff"},
+		Sentence: "On any failure it returns deferred:true with a reason and you review the diff yourself.",
+		Why:      "the deferral protocol: on any failure the lane returns deferred:true and the caller reviews the diff itself",
+	},
+	{
+		Tools:    []string{"offload_transcribe"},
+		Sentence: "remote: force a fleet node; with none eligible it returns deferred:true with defer_class capacity (config when no delegate_remotes are configured) and never touches the local GPU.",
+		Why:      "route value remote: with no eligible node the lane returns deferred:true and never touches the local GPU",
+	},
+	{
+		Tools:    []string{"offload_triage"},
+		Sentence: "Returns {decision, reason} or defers.",
+		Why:      "the deferral protocol: the lane returns the decision or defers",
+	},
+	{
+		Tools:    []string{"offload_upscale_image"},
+		Sentence: "On any failure (no upscale binding on this machine, missing file, half-given or out-of-range size, bad scale/method, render error, size mismatch) it returns deferred:true.",
+		Why:      "the deferral protocol: the lane hands the work back as deferred:true and the caller does it another way",
+	},
 	// The accelerator tables (acceltools.go). A box that lists a device as a FLEET accelerator advertises its tools as forwarders, and
 	// registerAccelTools appends the forwarding note to each description, after an opening sentence that says "LOCAL ... on-box": the
 	// note is the sentence that says the call goes to another node and the image bytes travel with it. The note names the device, so
