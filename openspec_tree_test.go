@@ -293,14 +293,25 @@ esac
 	if !strings.Contains(string(out), "REFUSED: sha256 mismatch") {
 		t.Fatalf("the stand-in npm did not reach the hash check:\n%s", out)
 	}
-	registry := ""
-	for _, kv := range cmd.Env {
-		if k, v, ok := strings.Cut(kv, "="); ok && strings.EqualFold(k, "npm_config_registry") {
-			registry = v
+	envOf := func(key string) string {
+		v := ""
+		for _, kv := range cmd.Env {
+			if k, val, ok := strings.Cut(kv, "="); ok && strings.EqualFold(k, key) {
+				v = val
+			}
 		}
+		return v
 	}
-	if !strings.HasPrefix(registry, "http://127.0.0.1:") {
+	if registry := envOf("npm_config_registry"); !strings.HasPrefix(registry, "http://127.0.0.1:") {
 		t.Errorf("npm_config_registry = %q: a stand-in run must point npm at a closed loopback port, so a shadowed stand-in fails without the network", registry)
+	}
+	// npm retries a refused connection (fetch-retries defaults to 2, with a backoff of 10 to 60 s): measured, each
+	// shadowed install test stalled about 78 s before it failed. No retries, and offline, make it fail in a moment.
+	if got := envOf("npm_config_fetch_retries"); got != "0" {
+		t.Errorf("npm_config_fetch_retries = %q, want 0: npm would retry the closed registry port with a long backoff", got)
+	}
+	if got := envOf("npm_config_offline"); got != "true" {
+		t.Errorf("npm_config_offline = %q, want true: a stand-in run never needs the network", got)
 	}
 }
 
