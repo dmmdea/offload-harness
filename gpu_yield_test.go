@@ -88,8 +88,8 @@ func yieldEnvValue(env []string, name string) string {
 }
 
 // yieldRootRig sets the process up for a holder that asks: the policy installed, a fast tick, a
-// session-less owner, and one live waiter on the whole node (a process of its own: the parent of
-// the test binary, because the holder's own pid never counts as demand).
+// session-less owner. The waiter is planted separately (plantRootWaiter), once the lease is held:
+// a waiter registered before the wrapper asks for the card stands in front of it in the line.
 func yieldRootRig(t *testing.T, policy string) (cfg string, m *gpulease.Manager) {
 	t.Helper()
 	termFixedUtil(t, false)
@@ -101,10 +101,19 @@ func yieldRootRig(t *testing.T, policy string) (cfg string, m *gpulease.Manager)
 	gpulease.SetDefaultOnOverdue(policy)
 	t.Cleanup(func() { gpulease.SetDefaultOnOverdue("") })
 	cfg, m = leaseFixture(t)
-	plantRootWaiter(t, m)
 	return cfg, m
 }
 
+// afterCommandStarts runs fn once the wrapped command has started, when the lease is held.
+func afterCommandStarts(t *testing.T, fn func()) {
+	t.Helper()
+	old := wrapperCommandStarted
+	wrapperCommandStarted = fn
+	t.Cleanup(func() { wrapperCommandStarted = old })
+}
+
+// plantRootWaiter queues one live waiter on the whole node: a process of its own (the parent of the
+// test binary), because the holder's own pid never counts as demand.
 func plantRootWaiter(t *testing.T, m *gpulease.Manager) {
 	t.Helper()
 	dir := filepath.Join(m.Root(), "gpu", "waiters")
@@ -160,6 +169,7 @@ func yieldReserveArgs(cfg string, extra []string, helper string) []string {
 func TestWrapperRunsItsOwnOnYieldOnceAndTheJobSeesTheYieldFile(t *testing.T) {
 	cfg, m := yieldRootRig(t, "request")
 	stub := stubYieldShell(t)
+	afterCommandStarts(t, func() { plantRootWaiter(t, m) })
 	probe := filepath.Join(t.TempDir(), "probe.txt")
 	t.Setenv("LO_HELPER_YIELD_OUT", probe)
 	t.Setenv("LO_HELPER_SLEEP_MS", "20000")
@@ -218,14 +228,13 @@ func TestWrapperNeverRunsTheRecordsOnYield(t *testing.T) {
 	probe := filepath.Join(t.TempDir(), "probe.txt")
 	t.Setenv("LO_HELPER_YIELD_OUT", probe)
 	t.Setenv("LO_HELPER_SLEEP_MS", "20000")
-	oldHook := wrapperCommandStarted
-	wrapperCommandStarted = func() {
+	afterCommandStarts(t, func() {
+		plantRootWaiter(t, m)
 		info := m.Inspect()
 		if err := m.Restamp(info.Epoch, func(meta *gpulease.Meta) { meta.OnYield = "echo tampered" }); err != nil {
 			t.Errorf("restamp: %v", err)
 		}
-	}
-	t.Cleanup(func() { wrapperCommandStarted = oldHook })
+	})
 	var err error
 	stderr := captureStderr(t, func() {
 		err = runGPUReserve(yieldReserveArgs(cfg, []string{"--on-yield", "touch work/STOP"}, "TestHelperYieldAware"))
@@ -241,6 +250,7 @@ func TestWrapperNeverRunsTheRecordsOnYield(t *testing.T) {
 func TestWrapperWithoutOnYieldSaysSoAndKeepsHolding(t *testing.T) {
 	cfg, m := yieldRootRig(t, "request")
 	stub := stubYieldShell(t)
+	afterCommandStarts(t, func() { plantRootWaiter(t, m) })
 	t.Setenv("LO_HELPER_SLEEP_MS", "4000")
 	done := make(chan error, 1)
 	var stderr string
@@ -290,6 +300,7 @@ func TestNoYieldPathStopsTheCommand(t *testing.T) {
 	cfg, m := yieldRootRig(t, "request")
 	stub := stubYieldShell(t)
 	stub.exit = 3
+	afterCommandStarts(t, func() { plantRootWaiter(t, m) })
 	t.Setenv("LO_HELPER_SLEEP_MS", "4500")
 	var err error
 	start := time.Now()
@@ -330,6 +341,7 @@ func TestDetachHolderAsksButNeverReleasesOnYield(t *testing.T) {
 	stub := stubYieldShell(t)
 	done := termHoldFor(t, cfg, "1s", "--on-yield", "stop-the-job", "--yield-grace", "1m")
 	l := waitForLeases(t, m, 1)[0]
+	plantRootWaiter(t, m)
 	if l.Yields != gpulease.YieldsDetached {
 		t.Fatalf("a detached holder stamps its form: %q", l.Yields)
 	}
@@ -364,6 +376,7 @@ func TestDetachHolderThatReleasesAtExpiryRunsNoRequest(t *testing.T) {
 	stub := stubYieldShell(t)
 	done := termHoldFor(t, cfg, "1s", "--release-at-expiry", "--on-yield", "stop-the-job")
 	l := waitForLeases(t, m, 1)[0]
+	plantRootWaiter(t, m)
 	if l.Yields != "" {
 		t.Errorf("a holder that releases at its deadline never asks, so it stamps no form: %q", l.Yields)
 	}
