@@ -65,16 +65,33 @@
   assertions for the stated reason before any fix: `IsAutoDisplayDevice("auto") = false, want true`; every guard case refused with `display
   device auto cannot be resolved to a CUDA index (not in the probe, or ambiguous)` where it should have admitted or named the monitor's card;
   the watcher unloaded a twin whose monitor card held its floor, and for a low one gave the unresolvable-card refusal instead of naming
-  the card; the shipped table named `display_device
-  "1"`; the docs lacked the paragraph. Cases that pass before and after by design are the characterization tests above, no shape check at load
-  (a dashed full UUID, a short UUID prefix and a typo all validate and a UUID or `auto` config round-trips through `Load` with its layers),
-  the delegator's carried verdict standing in where it holds no reader, and the floor read by the allocator not depending on the device
-  string. New: `internal/config/layers_auto_test.go`, `internal/placement/guards_auto_test.go`, `resident_auto_test.go`, `auto_docs_test.go`,
-  `internal/displaywatch/displaywatch_auto_test.go`, `internal/tierseed/tierseed_displayauto_test.go`.
+  the card; the shipped table named `display_device "1"`; the docs lacked the paragraph. Cases that pass before and after by design are
+  the characterization tests above, no shape check at load (a dashed full UUID, a short UUID prefix and a typo all validate and a UUID or
+  `auto` config round-trips through `Load` with its layers), the delegator's carried verdict standing in where it holds no reader, and the
+  floor read by the allocator not depending on the device string. New: `internal/config/layers_auto_test.go`,
+  `internal/placement/guards_auto_test.go`, `resident_auto_test.go`, `auto_docs_test.go`, `internal/displaywatch/displaywatch_auto_test.go`,
+  `internal/tierseed/tierseed_displayauto_test.go`, and `audit_config_displayauto_test.go` in the root package.
+- **Tests added by review.** (a) The promise that the sentinel's case and surrounding whitespace do not matter was proved at the helper and at
+  the label only, so two mutants survived the placement and watcher suites: `resolveDisplay` and the seat-pin rule each comparing with
+  `== "auto"` (a layer written `Auto` then refused as an unresolvable UUID, or kept deriving the card while the stale-pin protection silently
+  dropped away). `TestAutoDisplayDeviceIsRecognisedInAnySpellingAtEveryDecision` runs `Auto`, `AUTO`, ` AUTO ` and `\tAuto\n` through the
+  derived card, the seat-pin rule, the no-card refusal and the resident verdict. Production was already right, so it is green; the proof
+  that it can fail is the two mutants, SURVIVED before it and RED with it (`"Auto" must read the monitor's card (index 0) and admit, got
+  ... display device Auto cannot be resolved to a CUDA index`; `"Auto" must keep the seat-pin rule ..., got an admit with footprint 0.0`).
+  (b) `TestTheWatcherReadsASilentDriverAsAViolationOnlyForAnAutoLayer` pins the watcher's unload under `auto` for a reading that names no
+  single card (nothing flagged, a sample that cannot tell, monitors on two cards), dormant layer or not, against a declared card that keeps
+  its twin through the same readings. (c) `TestAuditConfigReportsLayersMergedFromTheTableThatNamedTheDisplayCard` pins the `audit-config`
+  drift (exactly the `layers` key, exit non-zero) and a node carrying today's seed auditing clean. (d) The docs gate gained the retired
+  `remote-desktop` and eight required phrases (the probe's causes, the watcher's unload, the `audit-config` drift), red on their
+  assertions before the page was fixed. (e) Two test names that said the layer follows the monitor were renamed to say what is true, that
+  the guard reads the card the driver reports for the monitor.
 - **Mutation proofs** (`scripts/mutation-check.sh`, one changed line each, every one RED, file restored byte for byte): `IsAutoDisplayDevice`
   without `TrimSpace`, case-sensitive, a different constant; `resolveAutoDisplay` returning card `1` for both the key and the index, or the
   index of the derived card with card `1` as the key (placement tests and the watcher tests both), the multi-card threshold moved from more
   than one to more than two, the empty-reading and no-reader checks removed; the seat-pin rule deleted, applied to declared cards too, or
-  keyed on a footprint of zero or more; the label helper returning the raw string, matching only the lower-case spelling, or the raw string
-  in either no-reader message; the auto branch in `resolveDisplay` disabled; the seat label losing its model; the multi-monitor wording; the
-  shipped table's `display_device` put back to `"1"`; and each sentence the docs test requires removed.
+  keyed on a footprint of zero or more; the sentinel compared with `== "auto"` in `resolveDisplay` and in the seat-pin rule, and the seat-pin
+  rule comparing with a whitespace-sensitive `EqualFold`; the label helper returning the raw string, matching only the lower-case spelling,
+  or the raw string in either no-reader message; the auto branch in `resolveDisplay` disabled; the seat label losing its model; the
+  multi-monitor wording; the watcher skipping dormant layers; `ScreenCardIndexes` ignoring an unknown `display_attached` reading; the
+  shipped table's `display_device` put back to `"1"` (the tier-seed test, and in the root package the `audit-config` test and the generated
+  tier page's currency test); and each sentence the docs test requires removed, `remote-desktop` put back included.
