@@ -290,7 +290,8 @@ func TestGateCmdCheckRefusals(t *testing.T) {
 		}
 	}
 	// An edit that leaves a valid, canonical baseline is a different pre-registration: its hash is
-	// different, and --expect-hash (the hash freeze printed) refuses it.
+	// different, and --expect-hash (the hash freeze printed) refuses it (see also
+	// TestGateCmdOneByteEditFailsCheckOrChangesTheHash).
 	other := bytes.Replace(raw, []byte("goal_reached"), []byte("goal_reachee"), 1)
 	p := gateWrite(t, f.dir, "other.json", other)
 	out, _, code := runGateCmd(t, "check", "--baseline", p)
@@ -461,5 +462,64 @@ func TestGateCmdAcceptsALeadingGlobalConfig(t *testing.T) {
 	// help still works behind it.
 	if out, _, code := runGateCmd(t, "--config", "x.json", "help"); code != 0 || !strings.Contains(out, "Exit codes") {
 		t.Errorf("--config x.json help: code %d", code)
+	}
+}
+
+// The ACCEPT line, worded exactly: a one-byte edit of a frozen baseline either fails `check` or
+// changes its hash, and `gate check --expect-hash` and the input's baseline_hash refuse it.
+func TestGateCmdOneByteEditFailsCheckOrChangesTheHash(t *testing.T) {
+	f := freezeSuperiority(t, 16, nil)
+	raw, _ := os.ReadFile(f.baseline)
+	judge := eval.Judge{Kind: "deterministic", Identity: "acceptance-dsl"}
+	bound := gateWrite(t, f.dir, "bound.json", eval.GateInput{BaselineHash: f.hash, Candidate: gateArm("cand", 16, 1), Incumbent: ptr(gateArm("inc", 16, 0)), Judge: judge})
+	differing := func(a, b []byte) (n int) {
+		if len(a) != len(b) {
+			t.Fatalf("a one-byte edit keeps the length: %d vs %d", len(a), len(b))
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				n++
+			}
+		}
+		return n
+	}
+
+	// 1. One byte that leaves a valid canonical document: min_pairs 16 -> 17. check accepts it and
+	// prints ANOTHER hash; --expect-hash and the bound input refuse it.
+	valid := bytes.Replace(raw, []byte(`"min_pairs": 16`), []byte(`"min_pairs": 17`), 1)
+	if differing(raw, valid) != 1 {
+		t.Fatal("setup: the edit must change exactly one byte")
+	}
+	p := gateWrite(t, f.dir, "min-pairs-17.json", valid)
+	out, errs, code := runGateCmd(t, "check", "--baseline", p)
+	if code != 0 || len(strings.TrimSpace(out)) != 64 || strings.TrimSpace(out) == f.hash {
+		t.Fatalf("a valid one-byte edit changes the hash: code %d hash %q (frozen %s) err %q", code, out, f.hash, errs)
+	}
+	if _, errs, code = runGateCmd(t, "check", "--baseline", p, "--expect-hash", f.hash); code != 2 || !strings.Contains(errs, f.hash) {
+		t.Fatalf("--expect-hash must refuse the edited baseline and name the expected hash: %d %s", code, errs)
+	}
+	if _, errs, code = runGateCmd(t, "verdict", "--baseline", p, "--input", bound); code != 2 || !strings.Contains(errs, "baseline_hash") {
+		t.Fatalf("an input bound to the frozen hash must be refused under the edited baseline: %d %s", code, errs)
+	}
+
+	// 2. One byte that breaks the document: the first brace. check itself fails.
+	broken := append([]byte("z"), raw[1:]...)
+	if differing(raw, broken) != 1 {
+		t.Fatal("setup: the edit must change exactly one byte")
+	}
+	pb := gateWrite(t, f.dir, "broken.json", broken)
+	if _, _, code = runGateCmd(t, "check", "--baseline", pb); code != 2 {
+		t.Fatalf("a one-byte edit that breaks the document must fail check, got %d", code)
+	}
+	if _, _, code = runGateCmd(t, "check", "--baseline", pb, "--expect-hash", f.hash); code != 2 {
+		t.Fatalf("and fail it with --expect-hash too, got %d", code)
+	}
+
+	// 3. Control: the unedited baseline passes check, --expect-hash and the bound input.
+	if out, _, code := runGateCmd(t, "check", "--baseline", f.baseline, "--expect-hash", f.hash); code != 0 || strings.TrimSpace(out) != f.hash {
+		t.Fatalf("control: the frozen baseline must pass --expect-hash: %d %q", code, out)
+	}
+	if _, errs, code := runGateCmd(t, "verdict", "--baseline", f.baseline, "--input", bound); code != 0 {
+		t.Fatalf("control: the bound input must be judged under the frozen baseline: %d %s", code, errs)
 	}
 }

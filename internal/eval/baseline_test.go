@@ -49,14 +49,20 @@ func refusalOf(t *testing.T, err error) *Refusal {
 	return r
 }
 
-// ACCEPT: freeze twice from the same inputs is byte-identical; check reproduces; a one-byte
-// edit fails check.
-func TestFreezeThenCheckReproducesByteIdentically(t *testing.T) {
-	inc := Arm{Stamps: testStamps("inc"), Tasks: []Task{
+// testIncumbentArm is a fresh incumbent arm with its tasks out of id order and one unresolved metric.
+func testIncumbentArm() Arm {
+	return Arm{Stamps: testStamps("inc"), Tasks: []Task{
 		{ID: "t002", Attempts: []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: map[string]*float64{"forwarded_tokens": f64(100)}}}},
 		{ID: "t000", Attempts: []Attempt{{Outcome: OutcomeInfraError}}},
 		{ID: "t001", Attempts: []Attempt{{Outcome: OutcomePass, Score: f64(7.5), Metrics: map[string]*float64{"forwarded_tokens": nil}}}},
 	}}
+}
+
+// ACCEPT (first half): freezing twice from the same inputs is byte-identical, and check of the
+// frozen bytes passes and reproduces them. The edit half is
+// TestOneByteEditOfAFrozenBaselineFailsCheckOrChangesItsHash.
+func TestFreezeThenCheckReproducesByteIdentically(t *testing.T) {
+	inc := testIncumbentArm()
 	b1, raw1, h1, err := FreezeBaseline(testPreReg(ModeNonInferiority), testCorpus, &inc)
 	if err != nil {
 		t.Fatal(err)
@@ -101,39 +107,6 @@ func TestFreezeThenCheckReproducesByteIdentically(t *testing.T) {
 		t.Fatal("the baseline check returns does not re-marshal to the frozen bytes")
 	}
 
-	// A one-byte edit never reproduces the frozen hash, wherever it lands: an edit that breaks
-	// the canonical form or a rule fails check outright, and one that happens to leave a valid
-	// document (a letter inside a name) is a different pre-registration with a different hash,
-	// which the verdict's baseline_hash binding and `gate check --expect-hash` refuse.
-	var outright, rehashed int
-	for i := 0; i < len(raw1); i++ {
-		edited := append([]byte{}, raw1...)
-		edited[i] ^= 0x01
-		_, h, err := CheckBaseline(edited)
-		switch {
-		case err != nil:
-			outright++
-		case h == h1:
-			t.Fatalf("a one-byte edit at offset %d reproduced the frozen hash", i)
-		default:
-			rehashed++
-		}
-	}
-	if outright == 0 || rehashed == 0 {
-		t.Fatalf("expected both kinds of edit (refused outright %d, valid but rehashed %d)", outright, rehashed)
-	}
-	// Whitespace edits too: this is a hash, not a parse.
-	for _, edited := range [][]byte{
-		bytes.Replace(raw1, []byte("\n"), []byte("\r\n"), -1),
-		append(append([]byte{}, raw1...), '\n'),
-		bytes.TrimSuffix(raw1, []byte("\n")),
-		bytes.Replace(raw1, []byte("0.5"), []byte("0.50"), 1),
-	} {
-		_, _, err := CheckBaseline(edited)
-		if err == nil || !strings.Contains(err.Error(), "canonical form") {
-			t.Fatalf("a whitespace edit must be refused as non-canonical, got %v", err)
-		}
-	}
 	// A different pre-registration is a different hash.
 	p := testPreReg(ModeNonInferiority)
 	seed := int64(2)
@@ -145,6 +118,65 @@ func TestFreezeThenCheckReproducesByteIdentically(t *testing.T) {
 	_, _, h5, _ := FreezeBaseline(testPreReg(ModeNonInferiority), []byte("another corpus"), &inc)
 	if h5 == h1 {
 		t.Fatal("a different corpus must change the hash")
+	}
+}
+
+// ACCEPT (second half), worded exactly: a one-byte edit of a frozen baseline either fails `check`
+// or changes its hash, and `gate check --expect-hash` and the input's baseline_hash refuse it.
+//
+// check alone cannot refuse an edit that leaves a valid canonical document (a letter inside a
+// name, the value of min_pairs): that is another pre-registration, and it hashes to another hash.
+// So the test does not assert that every edit fails check. For every one-byte edit it asserts the
+// other half of the sentence: the edit fails check, or it is a valid baseline whose hash is not
+// the frozen one AND a gate input that names the frozen hash is refused under it. The root test
+// TestGateCmdOneByteEditFailsCheckOrChangesTheHash drives `--expect-hash` through the verb.
+func TestOneByteEditOfAFrozenBaselineFailsCheckOrChangesItsHash(t *testing.T) {
+	inc := testIncumbentArm()
+	_, raw1, h1, err := FreezeBaseline(testPreReg(ModeNonInferiority), testCorpus, &inc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An input bound to the frozen hash, as a verdict adapter holds it.
+	bound := GateInput{BaselineHash: h1, Candidate: Arm{Stamps: testStamps("cand")}, Judge: detJudge()}
+	var outright, rehashed int
+	for i := 0; i < len(raw1); i++ {
+		edited := append([]byte{}, raw1...)
+		edited[i] ^= 0x01
+		b, h, err := CheckBaseline(edited)
+		if err != nil {
+			outright++ // fails check
+			continue
+		}
+		rehashed++ // a valid, canonical document: another pre-registration
+		if h == h1 {
+			t.Fatalf("a one-byte edit at offset %d left a valid baseline with the frozen hash", i)
+		}
+		// The input that names the frozen hash is refused under the edited baseline, with the
+		// hash binding as the reason (not some later check).
+		if _, gerr := Gate(b, h, bound); gerr == nil || !strings.Contains(gerr.Error(), "input baseline_hash") {
+			t.Fatalf("the edit at offset %d must be refused by the input's baseline_hash binding, got %v", i, gerr)
+		}
+	}
+	if outright == 0 || rehashed == 0 {
+		t.Fatalf("expected both kinds of edit (fails check %d, valid but another hash %d)", outright, rehashed)
+	}
+	// The frozen bytes themselves are accepted by the same input's binding (the control).
+	if b, h, err := CheckBaseline(raw1); err != nil || h != h1 {
+		t.Fatalf("control: %v", err)
+	} else if _, gerr := Gate(b, h, bound); gerr != nil && strings.Contains(gerr.Error(), "input baseline_hash") {
+		t.Fatalf("control: the frozen baseline must pass the hash binding, got %v", gerr)
+	}
+	// Whitespace edits fail check too: this is a hash of bytes, not a parse.
+	for _, edited := range [][]byte{
+		bytes.Replace(raw1, []byte("\n"), []byte("\r\n"), -1),
+		append(append([]byte{}, raw1...), '\n'),
+		bytes.TrimSuffix(raw1, []byte("\n")),
+		bytes.Replace(raw1, []byte("0.5"), []byte("0.50"), 1),
+	} {
+		_, _, err := CheckBaseline(edited)
+		if err == nil || !strings.Contains(err.Error(), "canonical form") {
+			t.Fatalf("a whitespace edit must be refused as non-canonical, got %v", err)
+		}
 	}
 }
 
