@@ -475,3 +475,41 @@ func TestTraceCorpusFixturesAreSynthetic(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestTraceCorpusHarvestIsLineEndingBlind: the same records checked out with CRLF line endings
+// (a Windows checkout of the fixtures, or a log copied through an editor) harvest to the same
+// corpus bytes.
+func TestTraceCorpusHarvestIsLineEndingBlind(t *testing.T) {
+	root := t.TempDir()
+	for _, sub := range []string{"traces", "delegation-log"} {
+		src := filepath.Join("testdata", "tracecorpus", sub)
+		dst := filepath.Join(root, sub)
+		if err := os.MkdirAll(dst, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			b, err := os.ReadFile(filepath.Join(src, e.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			b = bytes.ReplaceAll(bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n")), []byte("\n"), []byte("\r\n"))
+			if err := os.WriteFile(filepath.Join(dst, e.Name()), b, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	crlf := filepath.Join(t.TempDir(), "crlf.jsonl")
+	if _, _, err := tcRunVerb(t, "harvest", "--traces", filepath.Join(root, "traces"), "--delegation-log", filepath.Join(root, "delegation-log"), "--out", crlf); err != nil {
+		t.Fatalf("harvest over CRLF records: %v", err)
+	}
+	lf := tcHarvestFixture(t, "lf.jsonl")
+	a, _ := os.ReadFile(crlf)
+	b, _ := os.ReadFile(lf)
+	if !bytes.Equal(a, b) {
+		t.Fatalf("CRLF records harvested to a different corpus:\n%s\n---\n%s", a, b)
+	}
+}

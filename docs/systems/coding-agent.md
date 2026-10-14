@@ -531,6 +531,34 @@ re-runs on the result — residual PII refuses the harvest — and the corpus is
 destination. Methodology harvested from the OmniRoute compression service's
 eval approach (MIT); metrics and signals are this harness's own.
 
+`trace-corpus` (RSI-OH-2) is the read-only readout over RECORDED agent runs, shaped like `compaction-eval`
+(harvest, freeze, check) and kept apart from it. `trace-corpus harvest --traces DIR --delegation-log DIR --out corpus.jsonl`
+reduces every run to numbers and enums (no goal, output, transcript or tool text), redacts the few strings that remain with
+the same redactor and vet table `compaction-eval harvest` uses, and stamps the corpus with its sha256; the corpus is
+machine-local and never committed. `readout`, `freeze` and `check` are deterministic and carry no timestamps, and `check`
+demands the frozen report back byte for byte. With no source flag, harvest reads the install root's `agent-traces` and
+`delegation-log` directories. It reads those two records and never the ledger.
+
+- **What it reports.** The trace-bearing run count (an agent trace with a transcript, or a delegation row with a step
+  trace); the pager re-fetch rate pooled over the runs that evicted something (distinct payloads re-fetched over distinct
+  payloads evicted) against the 10 % gate of R2-13 (`agent.PagerGate`); the compaction fire rate (runs that ran the ladder at
+  least once over runs that recorded a pass count) and passes per run and per step; prefill tokens, cached tokens and KV
+  reuse. Each is given for the whole corpus, by source and by seat.
+- **Unrecorded is not zero.** Before RSI-OH-2 neither record kept the pager report or the pass count: the loop measured both
+  and the trace and the wire dropped them. Every rate is a pointer that serializes as `null` when nothing was recorded, and a
+  count of unrecorded runs sits beside it, so a corpus of older rows reads `NO_DATA` on the gate and cannot close the pager
+  family by reading as 0 %. A run that DID record a pass count of 0 is a real 0. A pager object that contradicts itself is
+  read as unrecorded and noted in the harvest stats.
+- **What is recorded now.** A standalone trace file carries `pager` (the loop's `PagerReport`, now with `compaction_passes`)
+  and `prefill`; the queue drainer resets the loop's instruments before each goal, because they accumulate for the loop's
+  life and a goal's trace would otherwise be the running total of the queue. The agent wire result carries `pager` (the
+  delegation log stores it). Rows written before that have neither, and the transcript in an older trace gives only a lower
+  bound on the ladder (tool turns that are elision markers or skeletons).
+- **No token counts is not a measured zero.** An engine that reports no prefill timings still ticks the observed-step
+  counter, so a run with steps observed and zero prefilled and zero cached tokens is counted apart (`no_token_counts_runs`)
+  and adds nothing to the token sums; the seat's own input-token figure (`seat_tokens_in`) is reported beside it for the runs
+  that carry one.
+
 ### The `browse` tool (opt-in, 0.141.0, ADR 0060)
 
 `browse` (`url`, `goal`, `max_actions`, `security_risk`) drives the operator's own running,
@@ -949,6 +977,9 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 ## Source map
 
 - [`internal/agent/loop.go`](../../internal/agent/loop.go) — loop, budget, `dispatchOrThrottle`
+- [`trace_corpus.go`](../../trace_corpus.go) — the `trace-corpus` verb (harvest, readout, freeze, check)
+  over recorded agent runs; [`internal/agent/contextpager.go`](../../internal/agent/contextpager.go) — the pager
+  instrument and the compaction pass count it records
 - [`internal/agent/policy.go`](../../internal/agent/policy.go) — broker, `.git` denial, audit append
 - [`internal/agent/rules.go`](../../internal/agent/rules.go) — the tighten-only risk-rule table and
   the built-in `defaultRules()` secret-material floor
