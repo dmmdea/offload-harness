@@ -28,7 +28,7 @@ func TestResetRunInstrumentsStartsTheNextRunAtZero(t *testing.T) {
 		t.Errorf("pager after reset = %+v, want nothing evicted", pg)
 	}
 	if pg.CompactionPasses == nil || *pg.CompactionPasses != 0 {
-		t.Errorf("compaction_passes after reset = %v, want a present 0", pg.CompactionPasses)
+		t.Errorf("compaction_passes after reset = %s, want a present 0", intPtrText(pg.CompactionPasses))
 	}
 }
 

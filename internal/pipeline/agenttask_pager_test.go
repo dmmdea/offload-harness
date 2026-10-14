@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -17,6 +18,15 @@ import (
 // on a fleet node left no trace of how often the ladder ran or whether evicted content came
 // back. This pins that the loop's pager report reaches the wire, as an object even for a run
 // that never compacted: an absent object means "a node that predates the field".
+
+// intPtrText is a *int for a failure message: the value, or "absent" for nil. A bare pointer
+// printed with %v is an address.
+func intPtrText(p *int) string {
+	if p == nil {
+		return "absent"
+	}
+	return strconv.Itoa(*p)
+}
 
 // TestAgentWireResultCarriesThePagerReport runs the real agent door over a scripted seat and
 // reads the wire result as raw JSON, the form the delegation log stores.
@@ -53,10 +63,10 @@ func TestAgentWireResultCarriesThePagerReport(t *testing.T) {
 		t.Fatalf("pager basis = %q for a run that evicted nothing, want insufficient_data", pg.Basis)
 	}
 	if pg.CompactionPasses == nil || *pg.CompactionPasses != 0 {
-		t.Fatalf("compaction_passes = %v, want a present 0 for a run that never compacted: %s", pg.CompactionPasses, raw)
+		t.Fatalf("compaction_passes = %s, want a present 0 for a run that never compacted: %s", intPtrText(pg.CompactionPasses), raw)
 	}
 	if pg.Evictions == nil || *pg.Evictions != 0 {
-		t.Fatalf("evictions = %v, want a present 0: %s", pg.Evictions, raw)
+		t.Fatalf("evictions = %s, want a present 0: %s", intPtrText(pg.Evictions), raw)
 	}
 }
 

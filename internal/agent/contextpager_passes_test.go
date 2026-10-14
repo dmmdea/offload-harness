@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"strconv"
 	"testing"
 )
 
@@ -11,6 +12,16 @@ import (
 // ladder pass, so one counter there reads the same pass sites without a second hook in the loop.
 //
 // These tests read the report through its JSON, the form the trace files and the wire carry.
+
+// intPtrText is a *int for a failure message: the value, or "absent" for nil. A bare pointer
+// printed with %v is an address, and dereferencing it in the message would panic on the nil
+// that is the very failure being reported.
+func intPtrText(p *int) string {
+	if p == nil {
+		return "absent"
+	}
+	return strconv.Itoa(*p)
+}
 
 type pagerPassesJSON struct {
 	CompactionPasses *int   `json:"compaction_passes"`
@@ -73,6 +84,6 @@ func TestEveryNoteCompactionCallIsOnePass(t *testing.T) {
 	nilStats.NoteCompaction(small, small) // must not panic
 	got := decodePagerPasses(t, ps.Report())
 	if got.CompactionPasses == nil || *got.CompactionPasses != 2 {
-		t.Fatalf("compaction_passes = %v, want 2", got.CompactionPasses)
+		t.Fatalf("compaction_passes = %s, want 2", intPtrText(got.CompactionPasses))
 	}
 }

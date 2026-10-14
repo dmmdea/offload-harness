@@ -96,8 +96,10 @@ func (p *PagerStats) NoteEvicted(content string) {
 // Byte-identical is the right test and not a strict one: the rungs that collapse a body
 // to a dedupe marker, prune it to a skeleton, or drop it outright all leave the agent
 // without the content it had, which is precisely the state a pager would exist to undo.
-// A no-op compaction (the transcript was already under budget) evicts nothing and
-// records nothing, so the happy path stays invisible to the instrument.
+// The loop calls this only for a pass it ran, a transcript over the input budget, so a run
+// that stays under budget never calls it and the happy path stays invisible to the
+// instrument. A call over a non-empty transcript counts as one pass even when the pass left
+// every tracked body in place and evicted nothing.
 //
 // This is the caller the instrument shipped without. Between R2-13 landing and 0.117.7
 // nothing called NoteEvicted in production, so the gate read insufficient_data on every

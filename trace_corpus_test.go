@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -28,6 +29,15 @@ const (
 
 func tcFixtureOpts() tcHarvestOpts {
 	return tcHarvestOpts{TracesDir: tcFixtureTraces, DelegationDir: tcFixtureDelegation, ExcludeSeats: map[string]bool{"fake-seat": true}}
+}
+
+// tcShow is a *float64 for a failure message: the value, or "null" for nil, which is how the
+// report serializes an unrecorded rate. A bare pointer printed with %v is an address.
+func tcShow(p *float64) string {
+	if p == nil {
+		return "null"
+	}
+	return strconv.FormatFloat(*p, 'g', -1, 64)
 }
 
 // tcRunVerb runs the verb in-process and returns stdout, stderr and the error.
@@ -160,7 +170,7 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 		t.Errorf("pager distinct/refetched/evictions = %d/%d/%d, want 11/2/14", p.DistinctEvicted, p.RefetchedDistinct, p.Evictions)
 	}
 	if p.RefetchRate == nil || *p.RefetchRate != 0.181818 || p.Verdict != tcVerdictAbove || p.Basis != tcBasisMeasured || p.Gate != agent.PagerGate {
-		t.Errorf("pager rate/verdict/basis/gate = %v/%s/%s/%v, want 0.181818/%s/measured/%v", p.RefetchRate, p.Verdict, p.Basis, p.Gate, tcVerdictAbove, agent.PagerGate)
+		t.Errorf("pager rate/verdict/basis/gate = %s/%s/%s/%v, want 0.181818/%s/measured/%v", tcShow(p.RefetchRate), p.Verdict, p.Basis, p.Gate, tcVerdictAbove, agent.PagerGate)
 	}
 	// compaction: 5 runs recorded a pass count (goal-a, goal-b, d1, d2, d4); passes 2+0+3+0+1 = 6 over 3 runs with a pass:
 	// fire rate 3/5 = 0.6, passes per run 1.2, steps in those runs 6+3+5+2+4 = 20, so 0.3 a step.
@@ -169,12 +179,12 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 		t.Errorf("compaction counts = %+v", c)
 	}
 	if c.FireRate == nil || *c.FireRate != 0.6 || c.PassesPerRun == nil || *c.PassesPerRun != 1.2 || c.PassesPerStep == nil || *c.PassesPerStep != 0.3 {
-		t.Errorf("compaction rates = %v/%v/%v, want 0.6/1.2/0.3", c.FireRate, c.PassesPerRun, c.PassesPerStep)
+		t.Errorf("compaction rates = %s/%s/%s, want 0.6/1.2/0.3", tcShow(c.FireRate), tcShow(c.PassesPerRun), tcShow(c.PassesPerStep))
 	}
 	// transcript evidence: 4 traces keep a transcript, 2 of them (goal-a, goal-c-old) carry a ladder
 	// artifact, so the fire rate is at least 2/4 = 0.5, whatever the pass counts say.
 	if c.TranscriptRuns != 4 || c.RunsWithArtifacts != 2 || c.LowerBoundFireRate == nil || *c.LowerBoundFireRate != 0.5 {
-		t.Errorf("transcript evidence = %d/%d/%v, want 4/2/0.5", c.TranscriptRuns, c.RunsWithArtifacts, c.LowerBoundFireRate)
+		t.Errorf("transcript evidence = %d/%d/%s, want 4/2/0.5", c.TranscriptRuns, c.RunsWithArtifacts, tcShow(c.LowerBoundFireRate))
 	}
 	// prefill: measured by goal-a, goal-b and d1, d2, d4 = 5 runs over 6+3+5+2+4 = 20 steps;
 	// prefilled 1200+300+2000+400+800 = 4700, cached 3000+100+8000+0+200 = 11300, so reuse is
@@ -184,7 +194,7 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 		t.Errorf("prefill counts = %+v", f)
 	}
 	if f.KVReusePct == nil || *f.KVReusePct != 70.625 || f.AvgPrefillTokensPerStep == nil || *f.AvgPrefillTokensPerStep != 235 || f.AvgPrefillTokensPerRun == nil || *f.AvgPrefillTokensPerRun != 940 {
-		t.Errorf("prefill rates = %v/%v/%v, want 70.625/235/940", f.KVReusePct, f.AvgPrefillTokensPerStep, f.AvgPrefillTokensPerRun)
+		t.Errorf("prefill rates = %s/%s/%s, want 70.625/235/940", tcShow(f.KVReusePct), tcShow(f.AvgPrefillTokensPerStep), tcShow(f.AvgPrefillTokensPerRun))
 	}
 
 	// d5 observed 2 steps and reported no token counts (an engine that gives no timings): it is
@@ -192,7 +202,7 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 	// Seat input tokens come from the three runs that reported them (d1, d2, d5): 10000+400+1500
 	// = 11900 over 5+2+2 = 9 steps = 1322.222222 a step.
 	if f.SeatInputRuns != 3 || f.SeatInputTokens != 11900 || f.SeatInputSteps != 9 || f.AvgSeatInputTokensPerStep == nil || *f.AvgSeatInputTokensPerStep != 1322.222222 {
-		t.Errorf("seat input = %d runs, %d tokens, %d steps, %v a step; want 3/11900/9/1322.222222", f.SeatInputRuns, f.SeatInputTokens, f.SeatInputSteps, f.AvgSeatInputTokensPerStep)
+		t.Errorf("seat input = %d runs, %d tokens, %d steps, %s a step; want 3/11900/9/1322.222222", f.SeatInputRuns, f.SeatInputTokens, f.SeatInputSteps, tcShow(f.AvgSeatInputTokensPerStep))
 	}
 
 	// Per seat: seat-a has d1 and d2 (its third row never ran an agent); seat-b has d3, d4 and d5;
@@ -913,7 +923,7 @@ func TestTraceCorpusUnrecordedNeverSerializesAsZero(t *testing.T) {
 		Pager: &tcPager{Basis: tcBasisInsufficient}}}
 	st := tcStatsFor(quiet)
 	if st.Compaction.FireRate == nil || *st.Compaction.FireRate != 0 {
-		t.Errorf("a recorded run with 0 passes must have fire_rate 0, got %v", st.Compaction.FireRate)
+		t.Errorf("a recorded run with 0 passes must have fire_rate 0, got %s", tcShow(st.Compaction.FireRate))
 	}
 	if st.Pager.RefetchRate != nil || st.Pager.Verdict != tcVerdictNoData || st.Pager.UnexercisedRuns != 1 {
 		t.Errorf("an unexercised pager must not produce a rate or a verdict: %+v", st.Pager)
@@ -927,7 +937,7 @@ func TestTraceCorpusUnrecordedNeverSerializesAsZero(t *testing.T) {
 	// A measured prefill of zero cached tokens is a real 0 % reuse, not null.
 	pf := tcStatsFor([]tcRun{{ID: "p", Source: tcSourceDelegation, Steps: 1, Prefill: &tcPrefill{ObservedSteps: 1, PrefillTokens: 100}}})
 	if pf.Prefill.KVReusePct == nil || *pf.Prefill.KVReusePct != 0 {
-		t.Errorf("measured prefill with nothing cached must read 0 %% reuse, got %v", pf.Prefill.KVReusePct)
+		t.Errorf("measured prefill with nothing cached must read 0 %% reuse, got %s", tcShow(pf.Prefill.KVReusePct))
 	}
 }
 
