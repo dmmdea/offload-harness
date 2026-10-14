@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,6 +135,9 @@ func runOnTestHost(m suiteRunner) int {
 	return m.Run()
 }
 
+// isolationStderr is where runIsolated reports a throwaway root it could not remove; os.Stderr, except in the test of that report.
+var isolationStderr io.Writer = os.Stderr
+
 // stubRunner records whether the suite was run.
 type stubRunner struct{ ran bool }
 
@@ -164,6 +169,63 @@ func TestRunIsolatedFailsClosed(t *testing.T) {
 			}
 			if c.wantRan && removed == "" {
 				t.Fatal("the throwaway directory must be removed after the run")
+			}
+		})
+	}
+}
+
+// TestRunIsolatedRetriesARemovalOnceAndReportsWhatStaysBehind pins the removal of the throwaway root: a removal that fails (on
+// Windows a process that has not yet let go of a file or of the folder as its working directory) is tried once more, and a root that
+// is still there after the second attempt is named on stderr with the error, so that a leak is seen, never dropped. The exit code is the
+// suite's own, and a root that went on the retry reports nothing.
+func TestRunIsolatedRetriesARemovalOnceAndReportsWhatStaysBehind(t *testing.T) {
+	boom := errors.New("sharing violation")
+	for _, c := range []struct {
+		name       string
+		failures   int
+		wantCalls  int
+		wantReport bool
+	}{
+		{"it works at once", 0, 1, false},
+		{"the retry works", 1, 2, false},
+		{"it fails both times", 99, 2, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var report bytes.Buffer
+			was := isolationStderr
+			isolationStderr = &report
+			t.Cleanup(func() { isolationStderr = was })
+			var tried []string
+			removeAll := func(p string) error {
+				tried = append(tried, p)
+				if len(tried) <= c.failures {
+					return boom
+				}
+				return nil
+			}
+			var stub stubRunner
+			code := runIsolated(&stub, func(string, string) (string, error) { return dir, nil }, func(string, string) error { return nil }, removeAll)
+			if code != 0 || !stub.ran {
+				t.Fatalf("code = %d, ran = %v; a removal that fails must not change the suite's own result", code, stub.ran)
+			}
+			if len(tried) != c.wantCalls {
+				t.Fatalf("the removal was tried %d times, want %d (once, and once more only when it failed)", len(tried), c.wantCalls)
+			}
+			for _, p := range tried {
+				if p != dir {
+					t.Fatalf("the removal was asked for %q, want the throwaway root %q", p, dir)
+				}
+			}
+			got := report.String()
+			if c.wantReport {
+				for _, want := range []string{"root tests:", filepath.Clean(dir), boom.Error()} {
+					if !strings.Contains(got, want) {
+						t.Fatalf("the report %q should contain %q", got, want)
+					}
+				}
+			} else if got != "" {
+				t.Fatalf("nothing is left behind, so nothing is reported, got %q", got)
 			}
 		})
 	}
