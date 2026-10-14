@@ -13,7 +13,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/agent"
 )
 
-// Tests for the trace-corpus verb (RSI-OH-2). The fixtures under testdata/tracecorpus are
+// Tests for the trace-corpus verb. The fixtures under testdata/tracecorpus are
 // SYNTHETIC: invented ids, invented seats, invented numbers. They hold a quiet run, a compacted
 // run, a run that re-fetched, a record written before the instruments existed, and the shapes a
 // real log carries (a refusal row, a dispatch error, a blank line, junk).
@@ -217,7 +217,10 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 // the recording ships such a row still has no pager object, so the unrecorded count could never
 // reach zero. A row that did real work stays a run even when it was deferred, and so does a row
 // that recorded anything at all (a step trace, prefill, seat tokens, or a pager object, which a
-// run that reached the loop always carries, zeros included).
+// run that reached the loop always carries, zeros included). That includes the zero-step deferred
+// row whose only trace is a setup action: the setup runs inside the loop, before its first model
+// turn, so the row reached the loop, will carry a pager object once the recording ships, and may
+// have compacted before its first model call.
 func TestTraceCorpusSkipsRowsThatNeverRan(t *testing.T) {
 	dir := t.TempDir()
 	rows := []string{
@@ -230,6 +233,7 @@ func TestTraceCorpusSkipsRowsThatNeverRan(t *testing.T) {
 		`{"seat":"seat-a","result":{"steps":4,"stop_reason":"done"}}`,
 		`{"seat":"seat-a","result":{"steps":0,"stop_reason":"error","pager":{"basis":"insufficient_data","evictions":0,"evicted_bytes":0,"distinct_evicted":0,"refetched_distinct":0,"compaction_passes":0}}}`,
 		`{"seat":"seat-a","result":{"steps":0,"stop_reason":"error","trace":[{}]}}`,
+		`{"seat":"seat-a","deferred":true,"defer_class":"budget","setup_ran":1,"result":{"steps":0,"stop_reason":"error","trace":[{"step":0,"tool":"read_file","status":"committed","setup":true}]}}`,
 		`{"seat":"seat-a","result":{"steps":0,"stop_reason":"error","seat_tokens_in":50}}`,
 		`{"seat":"seat-a","result":{"steps":0,"stop_reason":"error","prefill_steps":2,"prefill_tokens":7,"cache_tokens":1}}`,
 	}
@@ -240,23 +244,32 @@ func TestTraceCorpusSkipsRowsThatNeverRan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.DelegationRows != 9 || len(runs) != 6 || stats.Runs != 6 {
-		t.Fatalf("rows/runs = %d/%d, want 9 rows and 6 runs: %v", stats.DelegationRows, len(runs), stats.Skipped)
+	if stats.DelegationRows != 10 || len(runs) != 7 || stats.Runs != 7 {
+		t.Fatalf("rows/runs = %d/%d, want 10 rows and 7 runs: %v", stats.DelegationRows, len(runs), stats.Skipped)
 	}
 	if stats.Skipped[tcWantNeverRan] != 3 {
 		t.Errorf("skipped[%q] = %d, want 3 (all: %v)", tcWantNeverRan, stats.Skipped[tcWantNeverRan], stats.Skipped)
 	}
-	// None of the six runs recorded a pager object but one: the unrecorded count is now a count
-	// of RUNS, 5, not of rows.
-	if got := tcStatsFor(runs).Pager.UnrecordedRuns; got != 5 {
-		t.Errorf("pager unrecorded runs = %d, want 5 of the 6 runs", got)
+	// None of the seven runs recorded a pager object but one: the unrecorded count is now a count
+	// of RUNS, 6, not of rows. The setup-only zero-step deferred row is one of the seven.
+	if got := tcStatsFor(runs).Pager.UnrecordedRuns; got != 6 {
+		t.Errorf("pager unrecorded runs = %d, want 6 of the 7 runs", got)
+	}
+	zeroStepKept := 0
+	for _, r := range runs {
+		if r.Steps == 0 && r.TraceBearing {
+			zeroStepKept++
+		}
+	}
+	if zeroStepKept != 2 {
+		t.Errorf("zero-step runs with a step trace kept = %d, want 2 (a setup-only deferred row and a plain one)", zeroStepKept)
 	}
 	// A seat filter that rejects the row speaks first: the reason is the filter's, not never-ran.
 	_, stats, err = tcHarvest(tcHarvestOpts{DelegationDir: dir, Seats: map[string]bool{"seat-b": true}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Skipped[tcWantNeverRan] != 0 || stats.Skipped["seat filter: seat not selected"] != 9 {
+	if stats.Skipped[tcWantNeverRan] != 0 || stats.Skipped["seat filter: seat not selected"] != 10 {
 		t.Errorf("under a seat filter every row is skipped by the filter: %v", stats.Skipped)
 	}
 }

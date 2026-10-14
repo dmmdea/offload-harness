@@ -1,4 +1,4 @@
-// trace_corpus.go — the `trace-corpus` verb (RSI-OH-2): a read-only readout over RECORDED agent
+// trace_corpus.go — the `trace-corpus` verb: a read-only readout over RECORDED agent
 // runs, shaped like compaction-eval (harvest, freeze, check) and kept apart from it.
 //
 //	trace-corpus harvest  [--traces DIR] [--delegation-log DIR] --out corpus.jsonl [filters]
@@ -9,11 +9,11 @@
 // Two kinds of record hold agent runs, and harvest reads both without touching the ledger:
 //
 //   - agent traces: the per-goal JSON files the standalone queue drainer writes (the files
-//     compaction-eval harvest reads). They hold the final transcript and, since RSI-OH-2, the
-//     run's pager and prefill reports.
+//     compaction-eval harvest reads). They hold the final transcript and, from the release that
+//     added this verb, the run's pager and prefill reports.
 //   - the delegation log: one JSONL row per agent subtask, written by the delegator. It holds the
-//     wire result (step trace, prefill accounting and, since RSI-OH-2, the pager report), not the
-//     transcript.
+//     wire result (step trace, prefill accounting and, from the same release, the pager report),
+//     not the transcript.
 //
 // The readout answers four questions: how many runs are trace-bearing, how often evicted content
 // was fetched back (the pager re-fetch rate against the gate agent.PagerGate), how often the
@@ -51,7 +51,8 @@ const (
 	tcSchema           = "trace-corpus/1"
 	tcSourceAgentTrace = "agent-trace"
 	tcSourceDelegation = "delegation-log"
-	// tcSeatUnrecorded keys the runs whose record names no seat (agent traces do not).
+	// tcSeatUnrecorded is the by_seat key of the runs whose record names no seat (agent traces
+	// do not), and the pool_alias_by_node key of the alias runs whose row names no node.
 	tcSeatUnrecorded = "(unrecorded)"
 
 	// tcSkipNeverRan is the harvest's reason for a delegation row whose agent never executed.
@@ -196,9 +197,19 @@ type tcDelegationResult struct {
 
 // neverRan reports a logged subtask whose agent never executed: a deferral (capacity,
 // infrastructure, budget, config, contract) is written with zero steps and nothing else. Anything
-// recorded at all means an agent ran: a step trace (setup actions count), prefill or seat-token
-// accounting, or a pager object, which a run that reached the loop always carries (zeros
-// included). A row with none of those and no step never got there.
+// recorded at all means an agent ran: a step trace, prefill or seat-token accounting, or a pager
+// object, which a run that reached the loop always carries (zeros included). A row with none of
+// those and no step never got there.
+//
+// A row with zero steps but a step trace is KEPT, and that is deliberate. Its trace is built from
+// the loop's own effect ledger, which exists only inside the loop's run: the contract's setup
+// actions execute there, before the first model turn and without spending a step. Such a row is a
+// deferred run (budget or infrastructure) that stopped before any model turn finished, and it is a
+// run for the three questions this readout answers: every return from the loop's run carries the
+// pager report, so after the recording ships the row carries a pager object and its unrecorded
+// count reaches zero like any other run's; and the compaction ladder runs before the first model
+// call and again when that call is rejected for context overflow, so a first prompt too large for
+// the seat can end a run at zero steps with passes recorded.
 func (r *tcDelegationResult) neverRan() bool {
 	return r.Steps == 0 && len(r.Trace) == 0 && r.PrefillSteps == 0 && r.SeatTokensIn == 0 && r.Pager == nil
 }
@@ -269,9 +280,9 @@ func tcHarvest(o tcHarvestOpts) ([]tcRun, tcHarvestStats, error) {
 		r := &runs[i]
 		// A path-shaped value is replaced whole before the vet classes are applied: the vet table
 		// has no path class, and a seat or stop reason that names a file would otherwise become a
-		// by_seat key in every readout.
+		// by_seat key in every readout, and a node id that names one a pool_alias_by_node key.
 		r.ID, r.Seat, r.StopReason = red.Redact(r.ID), red.Redact(paths.redact(r.Seat)), red.Redact(paths.redact(r.StopReason))
-		r.Node = red.Redact(r.Node)
+		r.Node = red.Redact(paths.redact(r.Node))
 	}
 	for _, r := range runs {
 		for _, s := range []string{r.ID, r.Source, r.Seat, r.Node, r.Day, r.StopReason} {
@@ -308,6 +319,8 @@ func tcHarvest(o tcHarvestOpts) ([]tcRun, tcHarvestStats, error) {
 
 // tcPathRe matches a value that is a local filesystem path: a drive path, a rooted path, or
 // anything holding a backslash. A bare name or an org/model id with no leading slash is not one.
+// It vets the three strings a readout can key or print as the record wrote them: the seat, the
+// node id and the stop reason.
 var tcPathRe = regexp.MustCompile(`^[A-Za-z]:[\\/]|^/|\\`)
 
 // tcPathRedactor replaces path-shaped values with stable placeholders, numbered by first
@@ -613,8 +626,8 @@ func tcValidateRun(r tcRun) error {
 			return fmt.Errorf("corpus refused: %s (a corpus must be vetted, never scrubbed in place)", strings.Join(classes, ", "))
 		}
 	}
-	if tcPathRe.MatchString(r.Seat) || tcPathRe.MatchString(r.StopReason) {
-		return fmt.Errorf("corpus refused: a seat or stop reason is a local path (harvest replaces those with a placeholder)")
+	if tcPathRe.MatchString(r.Seat) || tcPathRe.MatchString(r.Node) || tcPathRe.MatchString(r.StopReason) {
+		return fmt.Errorf("corpus refused: a seat, node id or stop reason is a local path (harvest replaces those with a placeholder)")
 	}
 	return nil
 }
@@ -624,11 +637,13 @@ func tcValidateRun(r tcRun) error {
 // tcReport is the readout. It has no timestamps and no paths, so the same corpus always yields
 // the same bytes. Every rate is a pointer: null means the data to compute it was not recorded.
 //
-// By seat: by_seat holds only the runs whose record names a seat. A pool placement logs the pool's
-// ALIAS as the seat (the node's real seat is in neither the row nor its result), so a run on one
-// cannot be attributed to a seat, and it is reported apart: pool_alias (the whole bucket) and
-// pool_alias_by_node (the same runs keyed by the node the row names, "(unrecorded)" when it names
-// none). attribution says how much of the corpus a per-seat reading cannot reach.
+// By seat: by_seat holds the runs a seat can be named for, keyed by the seat the record names, and
+// the runs whose record names no seat (every agent trace) under the key "(unrecorded)". A pool
+// placement logs the pool's ALIAS as the seat (the node's real seat is in neither the row nor its
+// result), so a run on one cannot be attributed to a seat, and it is not in by_seat: it is reported
+// apart as pool_alias (the whole bucket) and pool_alias_by_node (the same runs keyed by the node the
+// row names, "(unrecorded)" when it names none). attribution counts the three classes and says how
+// much of the corpus a per-seat reading cannot reach.
 type tcReport struct {
 	Schema          string             `json:"schema"`
 	CorpusHash      string             `json:"corpus_hash"`
