@@ -2095,6 +2095,28 @@ I/O failure that is neither absence nor corrupt bytes): a verdict is let go of a
 go, and whatever it lets go on it says (`gpu hold: letting go of lease epoch N: <error>`), since the holder's stderr is a log nobody
 tails (`TestAHolderRetriesAFenceItCannotReadAndLetsGoOnlyAfterSayingWhy`, `TestAHolderThatLetsGoOfALeaseThatIsGoneSaysWhatItSaw`).
 
+**Every holder confirms a failed fence the same way, and a wrapper never kills on a record it cannot read (`confirmFence`).** On
+Windows under load a heartbeat `Renew`/`Check` that races an atomic replace of the lease record reads the lease as gone; the wrapper's
+tick printed `LEASE LOST` and killed the wrapped command, `renewWhile` cancelled the drain, and the drain loop released the lease and
+queued again, so a long GPU job could die to a record write. The helper is the holder's: three more looks, `holdConfirmPause` apart; a
+verdict (gone, fenced out) on all of them is lost; a record that could not be READ is retried for a window and then is neither lost nor
+fine. The hidden holder uses it with its 30 s window and lets go as before; the wrapper's tick, `renewWhile` and the drain loop use a
+10 s window (`wrapperFenceWindow`, looking every 250 ms) and, if the record still cannot be read, say so once, keep the command running,
+keep the drain going and release and requeue nothing, looking again at every tick. A heartbeat that cannot be written while the fence
+passes no longer kills the command either (it says so once). One out-of-process test replaces a running wrapper's record with a
+directory for several ticks and checks that the command, what it started and the wrapper are alive afterwards and no `LEASE LOST` was
+said (`TestAWrapperWhoseRecordReadFailsForAMomentDoesNotKillItsCommand`). Left as it was, and stated: the warm-back's guard
+(`leaseWarmGuard`) still abandons a warm on a plain `Check` failure (it kills and releases nothing; the seat stays owed).
+
+Which writers atomically replace a held lease's record (`meta.json`, or `e/<epoch>.json`), read from the callers of `renameReplacing`
+and `writeEpochRecord`: every `Manager.Restamp` (the temp file renamed over the record) and so (a) the holder's own restamps (the
+draining and exclusive stamps of the drain, the tree recorder, the term ticker's renewals and expiry labels in `AdvanceTerm`), (b) the
+detached parent's drain stamps, a different process from the holder that polls the same record, (c) `AwaitHostRAM`'s admission and
+`StampHostRAMHold` (the wait's stamp, the outer bound's 30 s re-stamp, the push-out before a release), (d) `MarkHolderGaveUp`, and (e)
+once, the grant that turns a granting card record active. The queue's waiter files, the yield request file (`gpu_on_overdue=request`),
+the heartbeat file `hb.<epoch>`, the orphan marks, the owner registry and the epoch counter are other files: they replace nothing the
+fence reads, and only add to the directory's I/O at the moment a fence is read.
+
 **The holder's own release is retried and its failure is not silent.** It is tried four times, a second apart (a lease off the record
 counts as released whatever the answers were, and one that reports success while still on the record is a failure); when it gives up
 the holder prints `LEASE NOT RELEASED`, marks the record (`holder_gave_up_ms` and `holder_gave_up_why`, additive, best effort), and

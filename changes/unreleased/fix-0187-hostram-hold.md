@@ -38,6 +38,12 @@
   (`holder_gave_up_ms`, additive), and exits non-zero instead of exiting 0 into a log in the temp directory, and `gpu status` says that
   nothing polls the lease any more, also once the holder has exited and the record reads as a stale holder (`gpu status` printed "free"
   and the stale-holder line with no word of the marker).
+- **A wrapper no longer kills its command over a record it cannot read.** On Windows under load a heartbeat that raced an atomic replace
+  of the lease record read the lease as gone: the wrapper's tick printed `LEASE LOST` and killed the wrapped command, the drain's
+  heartbeat cancelled the drain, and the drain loop released the lease and queued again. One shared helper (`confirmFence`, the hidden
+  holder's, now used by the wrapper's tick, the drain heartbeat and the drain loop) looks again, tells a verdict from a failed read, and
+  waits out a window; on a record it still cannot read the wrapper says so once, keeps the command running and the drain going, and
+  releases and requeues nothing. A heartbeat write that fails while the lease is still ours no longer kills the command either.
 - **A record that exists but cannot be read is a held lease.** `Inspect()` and `Leases()` judge who holds the cards and skip a record they
   cannot read, and the release paths believed them (reproduced on Windows by replacing the record with a directory). `Manager.RecordState`
   looks at the record itself (absent, held, unreadable; unreadable is held) and now decides every "the lease is gone": the release
@@ -65,7 +71,8 @@
   stamp; with the hold bound at 0 there is no outer bound (only `--wait` ends the wait); a holder cannot write its give-up marker onto a
   record it cannot read, so over such a record the exit status and its log are the only word; the reserve measures its wait on a monotonic
   clock and the holder compares wall-clock milliseconds, so after a suspend the holder can release sooner (never later) than the stamp
-  says; the hidden-holder process itself is exercised in-process, not as a spawned child.
+  says; the warm-back's guard still abandons a warm on a failed `Check` (it kills and releases nothing; the seat stays owed); the
+  hidden-holder process itself is exercised in-process, not as a spawned child.
 - **Docs.** `docs/systems/gpu-lease.md` (the F82 section: the order, the hold bound, the outer bound, "Releasing on its own", each form, the
   third consequence) and the OPERATOR-GUIDE config row (in the guide's one key table; it has no GPU-key table) and host-RAM paragraph. F82 is
   recorded in no ADR (ADR 0009 and ADR 0080 were checked: their host-RAM and unload passages are about other mechanisms), so there is no
