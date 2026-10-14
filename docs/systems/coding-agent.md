@@ -539,11 +539,31 @@ machine-local and never committed. `readout`, `freeze` and `check` are determini
 demands the frozen report back byte for byte. With no source flag, harvest reads the install root's `agent-traces` and
 `delegation-log` directories. It reads those two records and never the ledger.
 
+- **What counts as a run.** A delegation row is a run only if an agent executed: a deferral (capacity, infrastructure,
+  budget, config, contract) is logged with zero steps and nothing else, and harvest skips it under the named reason
+  `delegation row never ran (zero steps, nothing recorded)` instead of counting it. Any record at all (a step, a step
+  trace, prefill or seat-token accounting, or a pager object) keeps the row a run, so the unrecorded counts are counts of
+  runs and can reach zero once the recording is in place. A row without a result, a capacity refusal and the harness's own
+  test seat are skipped as before, and every skip is counted in the harvest stats.
 - **What it reports.** The trace-bearing run count (an agent trace with a transcript, or a delegation row with a step
   trace); the pager re-fetch rate pooled over the runs that evicted something (distinct payloads re-fetched over distinct
   payloads evicted) against the 10 % gate of R2-13 (`agent.PagerGate`); the compaction fire rate (runs that ran the ladder at
   least once over runs that recorded a pass count) and passes per run and per step; prefill tokens, cached tokens and KV
-  reuse. Each is given for the whole corpus, by source and by seat.
+  reuse, with the per-run spread (nearest-rank p50, p90 and max) of prefilled tokens over the measured runs and of the mean
+  prompt size per step over the runs that reported seat input tokens. Each is given for the whole corpus, by source and by
+  seat.
+- **Which runs a seat can be named for.** A pool placement logs the pool's ALIAS as the seat (a seat name in which `pool` is
+  a whole hyphen-delimited token); the node's real seat is in neither the row nor its result. Those runs cannot be
+  attributed to a seat, so `by_seat` holds only the runs whose record names a seat, and the alias runs are their own
+  bucket: `pool_alias` (the bucket's statistics) and `pool_alias_by_node` (the same runs keyed by the node id the row
+  carries, `(unrecorded)` when it names none). The `attribution` block counts the three classes (`seat_named_runs`,
+  `pool_alias_runs`, `seat_unrecorded_runs`) and gives `unattributed_share`, the last two over all runs, so a reader sees
+  how much of the corpus a per-seat reading cannot reach. Test seats other than the default-excluded one stay in `by_seat`
+  until named with `--exclude-seat`. The corpus and the readout carry node ids and seat names as the records write them,
+  so both are machine-local like the corpus; only a path-shaped seat or stop reason is replaced (below).
+- **Paths are redacted.** The shared vet table has no path class, so harvest replaces a seat or stop reason that is a local
+  path (a drive path, a rooted path, anything with a backslash) with a stable `[redacted-path-N]` placeholder, counted under
+  `redactions.path`, and the strict loader refuses a corpus that still carries one.
 - **Unrecorded is not zero.** Before RSI-OH-2 neither record kept the pager report or the pass count: the loop measured both
   and the trace and the wire dropped them. Every rate is a pointer that serializes as `null` when nothing was recorded, and a
   count of unrecorded runs sits beside it, so a corpus of older rows reads `NO_DATA` on the gate and cannot close the pager

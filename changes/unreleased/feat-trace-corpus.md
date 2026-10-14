@@ -8,7 +8,21 @@
   report back byte for byte and refuses a baseline from another corpus. The readout gives the trace-bearing run count, the
   pager re-fetch rate pooled over the runs that evicted something against the 10 % gate of R2-13 (`agent.PagerGate`, now
   exported so the readout and the instrument judge by one number), the compaction fire rate and passes per run and per step,
-  and prefill tokens with KV reuse, for the whole corpus, by source and by seat.
+  and prefill tokens with KV reuse (with the per-run spread, nearest-rank p50, p90 and max, of prefilled tokens over the
+  measured runs and of the mean prompt size per step), for the whole corpus, by source and by seat.
+- **Only runs that executed.** A deferred subtask (capacity, infrastructure, budget, config, contract) is logged with zero
+  steps and nothing else. Harvest skips such a row under the named reason `delegation row never ran (zero steps, nothing
+  recorded)`; any step, step trace, prefill or seat-token accounting, or pager object keeps a row a run. The first real
+  readout had counted rows that never ran an agent as runs, 24 % of its runs, which inflated every unrecorded count and
+  would have kept pager.unrecorded_runs above zero after the recording shipped.
+- **Seat attribution is explicit.** A pool placement logs the pool's alias as the seat, so those runs cannot be attributed to
+  a seat. `by_seat` holds only runs whose record names a seat; alias runs are the `pool_alias` bucket and
+  `pool_alias_by_node` (keyed by the node id the row carries, `(unrecorded)` when none), and the new `attribution` block
+  gives `seat_named_runs`, `pool_alias_runs`, `seat_unrecorded_runs` and `unattributed_share`. The corpus gains an optional
+  `node` field (an older corpus without it still loads).
+- **Paths are redacted.** The shared vet table has no path class, so a seat or stop reason that is a local path (a drive
+  path, a rooted path, anything with a backslash) is replaced at harvest with a stable `[redacted-path-N]` placeholder
+  (counted under `redactions.path`), and the strict loader refuses a corpus that still carries one.
 - **Why.** The gate that closes or opens the whole pager family, and the rate at which the ladder fires, could not be read from
   anything on disk. The loop measured both and the trace file and the wire result dropped them, so the family sat at
   `insufficient_data` and the compaction items had no baseline. The fields below make future runs record them; the verb reads
@@ -28,11 +42,24 @@
   the stderr line and the new trace fields of goal N were the running total of goals 1 to N, and a payload evicted in an
   earlier goal could count as re-fetched in a later one. `Loop.ResetRunInstruments` (serial reuse only; a loop shared by
   concurrent runs keeps one set of accumulators by design) starts them over before each goal.
-- **Tests.** Red first for the counter, the trace fields, the wire field and the per-goal reset (each committed failing, then
-  fixed). `trace_corpus_test.go` runs harvest, freeze and check over synthetic fixtures in `testdata/tracecorpus` and requires
-  byte-identical corpus and report across two harvests and across CRLF endings, pins every derived number against hand-worked
-  values, and covers redaction (literals built at run time), the unrecorded-never-zero rule, the gate boundary (the instrument's
-  `rate < gate` rule), the strict loader, the seat and day filters and the `main.go` registration. Mutations run and killed: an
-  unrecorded rate returned as 0, the gate comparison widened to `<=`, redaction removed (twice: with and without the exit
-  gate), the check made to always pass, a self-contradicting pager object trusted, a zero pass count read as a fire, and a
-  token-less prefill read as measured.
+- **Tests.** Red first for the counter, the trace fields, the wire field, the per-goal reset, the never-ran skip, the path
+  redaction, the pool-alias bucket and the per-run spread (each committed failing, then fixed). `trace_corpus_test.go` runs
+  harvest, freeze and check over synthetic fixtures in `testdata/tracecorpus` and requires byte-identical corpus and report
+  across two harvests and across CRLF endings, pins every derived number against hand-worked values, and covers redaction
+  (literals built at run time, and the fixture check builds its banned words at run time too), the unrecorded-never-zero rule,
+  the gate boundary (the instrument's `rate < gate` rule), the strict loader, the seat and day filters and the `main.go`
+  registration. The pager-object validator is pinned at every guard (null and absent pass count, unknown and empty basis,
+  each negative count, insufficient data with evictions or distinct payloads, refetched above evicted), an unusable object is
+  one note and one unrecorded run from a delegation row and from a trace, only tool turns count as ladder artifacts, and
+  `agentPagerWire` keeps an unrecorded pass count absent on the wire and maps every field when it is recorded.
+- **Mutations run and killed.** An unrecorded rate returned as 0, the gate comparison widened to `<=`, redaction removed
+  (twice: with and without the exit gate), the check made to always pass, a self-contradicting pager object trusted, a zero
+  pass count read as a fire, a token-less prefill read as measured; each term of the never-ran predicate removed in turn;
+  each alternative of the path pattern removed, the path redaction removed for the seat and for the stop reason, the loader's
+  path refusal weakened to one field; the pool-alias pattern loosened three ways, the node-less bucket key changed, the
+  unattributed share dropped to aliases only, the node field dropped or left unredacted; a nil pass count read as a recorded
+  zero, the negative-count terms and each of the other guards removed, the tool-role filter dropped; the wire mapping
+  returning an object of zeros for an absent count, and each field of it swapped; the quantile rank rounded the wrong way, the
+  p90 taken as the p50, the maximum taken one short, the sort removed, a zero-step run divided into the prompt size, the empty
+  set not reported as such. One mutant is equivalent and survives by construction: removing only the `distinct_evicted < 0`
+  term, because a negative distinct count is always also caught by the refetched checks beside it.
