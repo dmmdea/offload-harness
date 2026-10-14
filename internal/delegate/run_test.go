@@ -191,6 +191,10 @@ type fakeNode struct {
 	// core.PairCardHeader) the LAST dispatch carried ("" = absent).
 	lastAsker    atomic.Value // string
 	lastPairCard atomic.Value // string
+	// lastOrigin / lastRunClass record the origin headers (core.OriginHeader, core.RunClassHeader) the
+	// LAST dispatch carried ("" = absent).
+	lastOrigin   atomic.Value // string
+	lastRunClass atomic.Value // string
 	// saturation, when non-nil, is published as health's `saturation` block.
 	saturation *struct {
 		Score    float64 `json:"score"`
@@ -302,6 +306,8 @@ func (f *fakeNode) server() *httptest.Server {
 		f.lastTenant.Store(r.Header.Get(core.TenantHeader))
 		f.lastAsker.Store(r.Header.Get(core.AskerHeader))
 		f.lastPairCard.Store(r.Header.Get(core.PairCardHeader))
+		f.lastOrigin.Store(r.Header.Get(core.OriginHeader))
+		f.lastRunClass.Store(r.Header.Get(core.RunClassHeader))
 		if f.killOnDispatch {
 			// No status line, no body: the delegator sees a transport error and
 			// never an HTTP answer, on both dispatch attempts.
