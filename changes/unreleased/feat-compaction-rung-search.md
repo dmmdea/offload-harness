@@ -5,8 +5,11 @@
   print), alone or inside the `exit=` / `--- stdout ---` / `--- stderr ---` framing of `run_shell` and `run`. Each line is scored
   with BM25 against the objective (the last user message of the protected preamble, taken as its first 48 distinct terms in order
   of appearance; the line's own path counts as part of the line), error-looking lines get a fixed boost, and up to 30 lines, 5 per file and 15 files are kept, chosen round-robin across files
-  and written back in listing order under a counted footer (`[... 74 of 100 lines elided, 12 of 30 files elided ...]`). The tool's
-  own "more matches" or "truncated" note is kept. Anything that is not, line for line, one of those shapes (the `web_search` list,
+  and written back in listing order under a counted footer (a 100-match listing over 20 files ends `[... 70 of 100 lines elided, 5 of 20 files elided ...]`).
+  The tool's own "more matches" or "truncated" note is kept. The rung is gated on the call that produced the body: the result's tool-call id is mapped to its call, and only `search_files`
+  (grouped form) and a `run_shell` or `run` call whose command starts with `grep`, `rg`, `ag`, `ack` or `git grep` (flat form) qualify, so
+  the `path:line:col:text` diagnostics of flake8, ruff, `shellcheck -f gcc` or rubocop, a body with no matching call and an id claimed
+  by two different calls are left untouched. Anything that is not, line for line, one of those shapes (the `web_search` list,
   `mode:"files"` output, test output, an error result, binary or non-UTF-8 text) comes back untouched, and so does a result that is
   not strictly shorter.
 - **How it sits in the ladder.** One struct field and one call site, after dedupe and GCF and before the generic skeleton, over the
@@ -14,7 +17,8 @@
   message's body changes, and pairing is intact. The result opens with the skeleton disclosure line, so the existing idempotence
   check, the re-execute-on-repeat path (ADR 0016), the corpus harvest refusal and the elision marker's original size all treat it as
   the compaction artifact it is, with no change to any of them. There is no CLI flag or loop setter yet, and `compaction-eval` cannot
-  replay the rung yet; whether it ever becomes a default is for the measurement gate to decide on a harvested corpus.
+  replay the rung yet; whether it ever becomes a default is for the measurement gate to decide on a harvested corpus, and an adaptive cap, a production
+  entry point and the measurement of its interaction with the generic skeleton must land first, in a separate change.
 - **Why.** A long listing is the commonest bulk tool result on a small window, and the generic skeleton keeps its first and last
   lines whatever the task asks. Ranking by the task keeps the lines the task is about. The idea is documented by the Headroom
   project (Apache-2.0); this is a clean-room implementation of that documented behaviour, credited in `NOTICE`.

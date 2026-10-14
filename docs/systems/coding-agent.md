@@ -487,17 +487,23 @@ can never make the retry re-send the bytes the server just refused.
 **Search-results rung (optional, default off: `compactOpts.SearchResults`).** One more lossy rung,
 for older tool bodies that are search listings: the grouped `search_files` output (`path:` then
 `  L<n>: text`) and bare `path:line:text` lines such as `grep -rn` or ripgrep print, alone or inside the
-`exit=` / `--- stdout ---` / `--- stderr ---` framing of `run_shell` and `run`. Everything else (the
-`web_search` list, `mode:"files"` output, test output, an error result) is left alone. It runs after
+`exit=` / `--- stdout ---` / `--- stderr ---` framing of `run_shell` and `run`. The rung is gated on the
+call that produced the body: the result's tool-call id is mapped to its call, and only `search_files`
+(grouped form) and a `run_shell` or `run` call whose command starts with `grep`, `rg`, `ag`, `ack` or
+`git grep` (flat form) qualify. A linter such as flake8, ruff, `shellcheck -f gcc` or rubocop prints the
+same `path:line:col:text` lines, and every one of its diagnostics is something the agent must fix, so
+its output, a body with no matching call and an id claimed by two different calls are left alone.
+Everything else (the `web_search` list, `mode:"files"` output, test output, an error result) is left
+alone too. It runs after
 dedupe and GCF and before the generic skeleton, over the same older span as that rung (never the
 protected preamble or the kept-recent tail), skips pinned bodies, and rewrites only a tool message's
 body. Each line is scored with BM25 against the objective (the last user message of the protected
 preamble, the one task text that is the same on every step; the line's own path counts as part of the
 line), lines that look like errors (`error`, `fail`, `panic`, `exception`, `fatal`) get a fixed boost, and
 the survivors are chosen round-robin across files, best score first, up to 30 lines, 5 per file and 15
-files (the documented defaults of the idea), then written back in listing order under a footer
-(`[... 74 of 100 lines elided, 12 of 30 files elided ...]`); the tool's own "more matches" or
-"truncated" note is kept. The result opens with the skeleton disclosure line, so the rest of the ladder,
+files (the defaults of the idea's documented configuration), then written back in listing order under a
+footer (a 100-match listing over 20 files ends `[... 70 of 100 lines elided, 5 of 20 files elided ...]`: 30 lines and 15 files are the most
+that survive, and a test pins this exact line); the tool's own "more matches" or "truncated" note is kept. The result opens with the skeleton disclosure line, so the rest of the ladder,
 the re-execute-on-repeat path (ADR 0016) and the corpus harvest treat it as the compaction artifact it
 is, and a later elision marker still names the original size. It is deterministic, idempotent,
 monotonic (a result that is not strictly shorter is discarded) and fails closed: a body that is not,
@@ -506,7 +512,10 @@ and `compaction-eval` does not replay it yet (the measurement that decides it fi
 `agent.ReplayOpts`, `compeval.LadderOpts` and the verb's flag extended): the option is reachable from
 the ladder's own options and from tests, the default ladder is pinned
 byte for byte by `internal/agent/testdata/ladder_default_golden.json`, and whether the rung ever
-becomes a default is decided by the measurement gate on a harvested corpus, not by this page. Source:
+becomes a default is decided by the measurement gate on a harvested corpus, not by this page. Three
+pieces of work must land, in a separate change, before any default flips: an adaptive cap (the fixed
+30/5/15 do not scale with the window), a production entry point (a CLI flag or loop setter), and the
+measurement of how the rung interacts with the generic skeleton rung. Source:
 `internal/agent/rung_search.go`. The idea is documented by the Headroom project (Apache-2.0); this is a
 clean-room implementation of that documented behaviour (see `NOTICE`).
 

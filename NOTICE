@@ -38,8 +38,11 @@ LICENSE-comfy-workflow-templates.txt. They are test inputs only and are not ship
 
 Search-results compaction rung (internal/agent/rung_search.go):
 The idea of thinning search results by relevance to the task (BM25 ranking, a cap per
-file, diversity across files, a boost for error lines, with the documented default caps)
-is documented by the Headroom project (https://github.com/headroomlabs-ai/headroom),
-licensed under the Apache License, Version 2.0. internal/agent/rung_search.go is an
-independent, clean-room Go implementation written from that documented behaviour; no
-upstream source code was read or copied. The rung is off by default.
+file, diversity across files, a boost for error lines) is documented by the Headroom
+project, Copyright 2025 Headroom Contributors (https://github.com/headroomlabs-ai/headroom),
+licensed under the Apache License, Version 2.0. The caps used here (30 lines in total, 5 per
+file, 15 files) are the defaults of the SearchCompressor configuration listed on its
+documentation page docs/content/docs/text-and-logs.mdx
+(https://github.com/headroomlabs-ai/headroom/blob/main/docs/content/docs/text-and-logs.mdx).
+internal/agent/rung_search.go is an independent, clean-room Go implementation written from
+that documented behaviour; no upstream source code was read or copied. The rung is off by default.
