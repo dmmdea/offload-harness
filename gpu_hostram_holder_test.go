@@ -75,7 +75,7 @@ func holderEnds(t *testing.T, done <-chan error, within time.Duration) {
 // THE ROOT FIX. The reserve that took the lease is gone (nothing here releases it), the seat was unloaded for it (its warm-back
 // is owed), and the stamp it left says when its wait ended. The holder holds until that moment and then releases its own lease:
 // instances stopped, the owed seat warmed back, the lease gone.
-func TestTheHiddenHolderReleasesItsOwnLeaseOncetheStampedWaitHasEndedAndNoReserveDid(t *testing.T) {
+func TestTheHiddenHolderReleasesItsOwnLeaseOnceTheStampedWaitHasEndedAndNoReserveDid(t *testing.T) {
 	cfgPath, m, f := holderFixture(t, false) // the seat was unloaded for this lease
 	fastHolder(t)
 	if err := m.MarkSeatWarmOwed("seat"); err != nil {
