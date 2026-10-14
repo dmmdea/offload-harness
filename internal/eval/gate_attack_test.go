@@ -586,6 +586,13 @@ func TestNullAdoptRateAtTheFloorsIsCalibrated(t *testing.T) {
 		{"non-inferiority at exactly -margin, pass rates .90 and .85", ModeNonInferiority, 20, 4000, genBinary(.90, .85, 1)},
 		{"non-inferiority at exactly -margin, pass rates .90 and .85, the smallest sample", ModeNonInferiority, 16, 4000, genBinary(.90, .85, 1)},
 		{"non-inferiority at exactly -margin, uniform scores", ModeNonInferiority, 24, 4000, genUniform(0, 1, 0, .9)},
+		// A strong incumbent: most pairs tie, and a sample whose pairs all tie has no spread to
+		// measure. The share of such samples is 0.86^16 = 8.9% here, 0.93^16 = 31% at .99/.94.
+		{"non-inferiority at exactly -margin, pass rates .95 and .90, the smallest sample", ModeNonInferiority, 16, 4000, genBinary(.95, .90, 1)},
+		{"non-inferiority at exactly -margin, pass rates .95 and .90", ModeNonInferiority, 24, 4000, genBinary(.95, .90, 1)},
+		{"non-inferiority at exactly -margin, pass rates .99 and .94, the smallest sample", ModeNonInferiority, 16, 4000, genBinary(.99, .94, 1)},
+		{"non-inferiority at exactly -margin, a candidate that only loses 5% of the incumbent's passes", ModeNonInferiority, 20, 4000, genNested(.9, .05/.9)},
+		{"non-inferiority at exactly -margin, a candidate that only loses 5% of the incumbent's passes, 24 tasks", ModeNonInferiority, 24, 4000, genNested(.9, .05/.9)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rate := adoptRate(t, tc.mode, tc.n, tc.trials, tc.gen)
@@ -606,6 +613,101 @@ func TestNullAdoptRateAtTheFloorsIsCalibrated(t *testing.T) {
 		if _, _, _, err := FreezeBaseline(q, testCorpus, nil); err == nil {
 			t.Errorf("%+v must be refused", q)
 		}
+	}
+}
+
+// ---- a sample with no spread cannot certify anything -----------------------------------------
+
+// all-tied builds a non-inferiority comparison on n tasks in which every pair is equal (score v on both
+// arms) and the candidate spends half the tokens.
+func allTied(t *testing.T, n int, pre PreReg, inc, cand float64) GateResult {
+	t.Helper()
+	b, h := freeze(t, pre, nil)
+	return mustGate(t, b, h, inputFor(h,
+		arm("i", repeatF(inc, n), repeatF(1000, n)),
+		arm("c", repeatF(cand, n), repeatF(500, n))))
+}
+
+// Sixteen ties say little about a margin of 0.05: a candidate that lost 5% of the incumbent's passes
+// would tie all sixteen pairs 44% of the time. A sample with no spread has no standard error to read, so
+// the interval widens to what the sample cannot rule out: the lower end is the one for which a candidate
+// exactly at it ties every pair 2.5% of the time, 1 - 0.025^(1/n) of the score range below the tie.
+// That clears a margin of 0.05 from 80 tasks (4.5%) and not from 40 (8.8%).
+func TestAllTiedNonInferiorityDoesNotCertifyTheMarginOnASmallSample(t *testing.T) {
+	for _, tc := range []struct {
+		n    int
+		want string
+	}{{16, VerdictInconclusive}, {24, VerdictInconclusive}, {40, VerdictInconclusive}, {80, VerdictAdopt}} {
+		r := allTied(t, tc.n, niUnitPre(tc.n), 0.5, 0.5)
+		if r.Delta != 0 || r.Verdict != tc.want {
+			t.Errorf("n=%d, every pair tied, tokens halved: want %s, got %s %s (delta %v lo %v hi %v)", tc.n, tc.want, r.Verdict, r.Reason, r.Delta, r.Lo, r.Hi)
+		}
+		wantLo := -(1 - math.Pow(0.025, 1/float64(tc.n)))
+		if math.Abs(r.Lo-wantLo) > 1e-12 || math.Abs(r.Hi+wantLo) > 1e-12 {
+			t.Errorf("n=%d: the interval of a tie is +-%v, got [%v, %v]", tc.n, -wantLo, r.Lo, r.Hi)
+		}
+	}
+}
+
+// A superiority tie is INCONCLUSIVE because its interval spans 0, not because it is one value.
+func TestAllTiedSuperiorityIntervalSpansZero(t *testing.T) {
+	const n = 16
+	b, h := freeze(t, supPre(n), nil)
+	r := mustGate(t, b, h, inputFor(h, arm("i", repeatF(0.5, n), nil), arm("c", repeatF(0.5, n), nil)))
+	if r.Verdict != VerdictInconclusive || r.Delta != 0 || !(r.Lo < 0 && r.Hi > 0) {
+		t.Fatalf("a tie keeps the incumbent with an interval around 0: %+v", r)
+	}
+}
+
+// A constant difference that is exactly the margin on paper is -0.04999999999999993 (0.90 - 0.95) or
+// -0.05000000000000004 in floats; the single value used to decide it by the last bit.
+func TestConstantDifferenceAtTheMarginByFloatArithmeticIsNotAdopted(t *testing.T) {
+	for _, tc := range []struct{ inc, cand float64 }{{0.95, 0.90}, {0.70, 0.65}, {0.50, 0.45}, {0.60, 0.55}} {
+		r := allTied(t, 16, niUnitPre(16), tc.inc, tc.cand)
+		if r.Verdict != VerdictInconclusive {
+			t.Errorf("every pair %v -> %v is a loss of the margin: want INCONCLUSIVE, got %s %s (lo %v)", tc.inc, tc.cand, r.Verdict, r.Reason, r.Lo)
+		}
+	}
+}
+
+// The reviewer's P3 variant: the unfinished attempt records no tokens. A candidate that leaves the cost of
+// its timeouts out would keep the efficiency win of its other 24 attempts, so a task with an unfinished
+// attempt of unknown cost is unresolved on that metric (it cannot be measured), and over the cap it stops
+// the ADOPT.
+func TestAnUnfinishedAttemptWithNoRecordedCostLeavesTheTaskUnresolved(t *testing.T) {
+	const n, k = 20, 25
+	b, h := freeze(t, niUnitPre(n), nil)
+	inc := armFrom("i", n, func(int) []Attempt {
+		as := make([]Attempt, k)
+		for j := range as {
+			as[j] = passTok(1, 1000)
+		}
+		return as
+	})
+	for _, o := range []AttemptOutcome{OutcomeTimeout, OutcomeInfraError, OutcomeJudgeError} {
+		cand := armFrom("c", n, func(int) []Attempt {
+			as := make([]Attempt, 0, k)
+			for j := 0; j < k-1; j++ {
+				as = append(as, passTok(1, 900))
+			}
+			return append(as, Attempt{Outcome: o, Metrics: map[string]*float64{tokensName: nil}})
+		})
+		r := mustGate(t, b, h, inputFor(h, inc, cand))
+		e := r.Efficiency[0]
+		if e.N != 0 || e.UnresolvedPairs != n || !e.OverUnresolvedCap || e.Improves || r.Verdict == VerdictAdopt {
+			t.Errorf("%s with no recorded cost: the candidate's spend on every task is unknown: %+v %s", o, e, r.Verdict)
+		}
+	}
+	// The same attempt with its cost recorded is a measured task, as before.
+	cand := armFrom("c", n, func(int) []Attempt {
+		as := make([]Attempt, 0, k)
+		for j := 0; j < k-1; j++ {
+			as = append(as, passTok(1, 900))
+		}
+		return append(as, Attempt{Outcome: OutcomeTimeout, Metrics: tokenMetric(30000)})
+	})
+	if e := mustGate(t, b, h, inputFor(h, inc, cand)).Efficiency[0]; e.N != n || e.UnresolvedPairs != 0 {
+		t.Errorf("a recorded cost resolves the task: %+v", e)
 	}
 }
 
