@@ -99,7 +99,7 @@ const DefaultOrphanGrace = 15 * time.Minute
 // terms it is judged by; "its owner is gone" is not an escape.
 var ErrUnattendedContract = errors.New("gpulease: an unattended lease needs a declared window (--for) and a progress contract (--progress-file and --stall)")
 
-// MaxOnYieldBytes bounds a recorded --on-yield command. The takeover runs the command
+// MaxOnYieldBytes bounds a recorded --on-yield command. The holder runs the command
 // verbatim, so it is stored verbatim or not at all; a command that does not fit is
 // refused (put the logic in a script and name the script) rather than cut short.
 const MaxOnYieldBytes = 4096
@@ -147,9 +147,10 @@ func (m *Manager) stampOwnership(meta *Meta, opts Options) {
 	if opts.YieldGrace > 0 {
 		meta.YieldGraceMs = opts.YieldGrace.Milliseconds()
 	}
-	// Verbatim: the takeover runs this command, and one cut short for display is a corrupted
-	// command. validateOwnership has already refused one too long to record. The directory
-	// goes with it, so a relative command still names the same file when it runs elsewhere.
+	// Verbatim: the holder runs this command when it is asked to yield, and one cut short for
+	// display is a corrupted command. validateOwnership has already refused one too long to
+	// record. The directory goes with it, so a relative command still names the same file when
+	// a reader of the record looks at it elsewhere.
 	if oy := strings.TrimSpace(opts.OnYield); oy != "" {
 		meta.OnYield = oy
 		if wd, err := os.Getwd(); err == nil {

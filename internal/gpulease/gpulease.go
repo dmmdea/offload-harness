@@ -336,18 +336,20 @@ type Meta struct {
 	// which it must move.
 	Progress *Progress `json:"progress,omitempty"`
 	// YieldGraceMs and OnYield are the job's own terms for being asked to stop (how long
-	// it needs, and the command that makes it stop at a clean boundary). Recorded here;
-	// the takeover that reads them is a later change.
+	// it needs, and the command that makes it stop at a clean boundary). The HOLDER reads
+	// them: when it is asked to yield (yield.go) it runs its own copy of OnYield, once. No
+	// takeover command exists that reads them.
 	YieldGraceMs int64  `json:"yield_grace_ms,omitempty"`
+	OnYield      string `json:"on_yield,omitempty"`
+	// OnYieldDir is the working directory of the process that took the lease, recorded
+	// with OnYield: a reader that looks at the record later does not share it, and a
+	// relative command ("touch work/STOP") means a different file from another directory.
+	// The holder that runs the command is the process that recorded it, so it runs it in its own.
+	OnYieldDir string `json:"on_yield_dir,omitempty"`
 	// Yields is stamped by a holder that runs the yield request (yield.go): "wrapper" for the
 	// `gpu reserve -- <command>` form and "detached" for the hidden holder of --detach. A record
 	// without it was written by a build that never asks, so no request can be made of its holder.
 	Yields string `json:"yields,omitempty"`
-	OnYield      string `json:"on_yield,omitempty"`
-	// OnYieldDir is the working directory of the process that took the lease, recorded
-	// with OnYield: the takeover that runs the command later does not share it, and a
-	// relative command ("touch work/STOP") means a different file from another directory.
-	OnYieldDir string `json:"on_yield_dir,omitempty"`
 	// Format is the record format of the binary that WROTE the record (RecordFormat). A
 	// record without it was written by a binary that predates card-scoped leases: it cannot
 	// declare cards, so a reader may INFER what it holds (infer.go). A record that carries it
@@ -574,8 +576,9 @@ type Options struct {
 	Devices []string
 	// Group names a set of leases taken for one job (a fan-out batch); informational.
 	Group string
-	// WrapperVersion is the build that holds the lease. P11's takeover reads its
-	// absence as "a legacy wrapper that cannot honour a yield request".
+	// WrapperVersion is the build that holds the lease. Whether the holder honours a yield
+	// request is Yields, not this: every 0.18x build stamps a version and none of the older
+	// ones ticks the request.
 	WrapperVersion string
 
 	// Owner is who asked for the lease; the zero Owner records none (unknown).
@@ -588,8 +591,8 @@ type Options struct {
 	// how long it may go without that file moving. Both or neither.
 	ProgressFile string
 	Stall        time.Duration
-	// YieldGrace and OnYield are the job's terms for being asked to stop; recorded for
-	// the takeover that reads them.
+	// YieldGrace and OnYield are the job's terms for being asked to stop; recorded on the
+	// lease, and run by the holder when it is asked to yield (yield.go).
 	YieldGrace time.Duration
 	OnYield    string
 	// Yields says this holder runs the yield request (YieldsWrapper or YieldsDetached); it is
@@ -978,7 +981,7 @@ func (m *Manager) clearUnloadMarkers() {
 	for _, e := range entries {
 		// seen.<epoch> is the inferred-scope sidecar of a legacy lease (infer.go); a legacy
 		// release is the only writer of a whole-node record, so sweeping all of them is safe.
-		if strings.HasPrefix(e.Name(), "unloaded.") || strings.HasPrefix(e.Name(), "hb.") || strings.HasPrefix(e.Name(), seenPrefix) || strings.HasPrefix(e.Name(), orphanMarkPrefix) {
+		if strings.HasPrefix(e.Name(), "unloaded.") || strings.HasPrefix(e.Name(), "hb.") || strings.HasPrefix(e.Name(), seenPrefix) || strings.HasPrefix(e.Name(), orphanMarkPrefix) || strings.HasPrefix(e.Name(), yieldPrefix) {
 			_ = removeClaim(filepath.Join(m.leaseDir(), e.Name()))
 		}
 	}
@@ -1242,6 +1245,7 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		YieldGraceMs:   meta.YieldGraceMs,
 		OnYield:        meta.OnYield,
 		OnYieldDir:     meta.OnYieldDir,
+		Yields:         meta.Yields,
 		Owner:          cloneOwner(meta.Owner),
 		Progress:       cloneProgress(meta.Progress),
 		Legacy:         len(meta.Devices) == 0 && meta.Format < RecordFormat && strings.TrimSpace(meta.WrapperVersion) == "",
@@ -1800,6 +1804,7 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 		HostRAMWaitGiB: awaiting,
 		Group:          strings.TrimSpace(opts.Group),
 		WrapperVersion: strings.TrimSpace(opts.WrapperVersion),
+		Yields:         strings.TrimSpace(opts.Yields),
 	}
 	m.stampOwnership(&meta, opts)
 	m.stampTerm(&meta, opts, ttl)

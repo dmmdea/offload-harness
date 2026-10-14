@@ -531,7 +531,7 @@ func TestStaleYieldFromEarlierEpochNotInherited(t *testing.T) {
 	if v := r.m.YieldViewOf(r.m.Inspect()); v.Asked {
 		t.Errorf("the view of the new lease says it was asked: %+v", v)
 	}
-	*r.now = r.base.Add(2*yieldWindow + time.Minute)
+	*r.now = r.base.Add(2*yieldWindow + 2*time.Minute) // the new lease took its window at +1h1m, so it ends at +2h1m
 	if err := next.Renew(); err != nil {
 		t.Fatal(err)
 	}
