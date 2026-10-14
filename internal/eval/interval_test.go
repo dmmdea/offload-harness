@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 	"testing"
@@ -217,5 +218,46 @@ func TestSimHarnessScoreFormIsThePrimaryInterval(t *testing.T) {
 		if math.Abs(lows[mScore]-lo) > 1e-9 {
 			t.Fatalf("dataset %d (n=%d, degenerate %v): harness %v, production %v", s, n, deg, lows[mScore], lo)
 		}
+	}
+}
+
+// The interval itself, with many more trials than the end-to-end cells can afford (it needs no
+// bootstrap, so 50000 datasets take well under a second): the share of simulated comparisons whose lower
+// end clears the boundary when the truth is the boundary (0 for superiority, -0.05 for non-inferiority).
+// Each cell must stay at or under 4%, the nominal being 2.5%. The plain t interval measures 4.6% on the
+// third cell, so this test, unlike the end-to-end ones, also refuses a simplification back to it.
+func TestPrimaryIntervalFalseAdoptRateOnTheStatedNulls(t *testing.T) {
+	const trials = 50000
+	for _, tc := range []struct {
+		name string
+		n    int
+		mu0  float64
+		gen  pairGen
+	}{
+		{"superiority, pass/fail p=.5", 16, 0, genBinary(.5, .5, 1)},
+		{"superiority, x^3-skewed scores", 16, 0, genCubed(1)},
+		{"non-inferiority at exactly -margin, pass rates .90 and .85", 20, -0.05, genBinary(.90, .85, 1)},
+		{"non-inferiority at exactly -margin, pass rates .90 and .85", 16, -0.05, genBinary(.90, .85, 1)},
+		{"non-inferiority at exactly -margin, pass rates .90 and .85", 24, -0.05, genBinary(.90, .85, 1)},
+		{"non-inferiority at exactly -margin, pass rates .70 and .65", 24, -0.05, genBinary(.70, .65, 1)},
+		{"non-inferiority at exactly -margin, uniform scores", 24, -0.05, genUniform(0, 1, 0, .9)},
+		{"non-inferiority at exactly -margin, x^3-skewed scores", 16, -0.05, genCubed(.8)},
+		{"non-inferiority at exactly -margin, pass rates .90 and .85", 80, -0.05, genBinary(.90, .85, 1)},
+	} {
+		t.Run(fmt.Sprintf("%s, n=%d", tc.name, tc.n), func(t *testing.T) {
+			rng := rand.New(rand.NewSource(cellSeed(tc.name, tc.n)))
+			adopt := 0
+			for s := 0; s < trials; s++ {
+				inc, cand := tc.gen(rng, tc.n)
+				if _, lo, _ := primaryInterval(inc, cand); lo > tc.mu0 {
+					adopt++
+				}
+			}
+			rate := float64(adopt) / trials
+			t.Logf("false ADOPT rate over %d datasets: %.4f", trials, rate)
+			if rate > 0.04 {
+				t.Fatalf("false ADOPT rate %.4f is above 0.04", rate)
+			}
+		})
 	}
 }
