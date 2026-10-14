@@ -1014,6 +1014,13 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// (0.115.8) — same rule: set before every branch, so a deferred run's
 	// arithmetic reaches the corpus.
 	wire.Calls = CallsFromLoop(res.Calls)
+	// The pager gate and the compaction pass count ride the wire too, set HERE for the same
+	// reason: before every defer branch AND before the write door below, which can return a
+	// write-class deferral. A run the loop returned from has a pager report whatever ended
+	// it (a budget-stopped run is the one that compacted most), so the object is set whether
+	// or not anything was evicted: an object of real zeros is a measurement, an absent key
+	// is "not recorded". Set later it would be lost on the door's early return.
+	wire.Pager = agentPagerWire(res.Pager)
 	// The seat's measured numbers from THIS run feed the next estimate: the
 	// effective decode rate over the ≥ 1,024-token completions and the cold
 	// load the warm-up waited for. Recorded on every branch — a timed-out run
@@ -1161,14 +1168,6 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		wire.CacheTokens = pf.CacheTokens
 		wire.PrefillMS = pf.PrefillMS
 	}
-	// The pager gate and the compaction pass count ride the wire too, set at the
-	// same point and for the same reason as the prefill block above (a budget-stopped run is
-	// the one that compacted most). Unlike prefill it is set whether or not anything was
-	// evicted: an object of real zeros is a measurement, an absent key is "not recorded".
-	// It sits after the write door closes, so a write-class deferral (closeWriteDoor returning an
-	// error: a cap breach or a failed snapshot) returns before this line: that run keeps its
-	// trace and has no pager object.
-	wire.Pager = agentPagerWire(res.Pager)
 	// The run's workspace root is gone (register C-79): its own file tools could not open it
 	// and the loop ended the run on the report, instead of letting the seat answer from
 	// nothing as it used to (the delegator then scored the answer as the model's failure),
