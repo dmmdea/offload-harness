@@ -1214,3 +1214,231 @@ func TestParseSearchListingKeepsEveryTrailerLineInOrder(t *testing.T) {
 		t.Error("trailer lines alone are not a listing")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Contracts the review round pinned: preamble, transitive pins, roles, the
+// documented error words, and the production (Tokenizer) path.
+// ---------------------------------------------------------------------------
+
+// exemplarPreamble is shaped like a production preamble that carries profile
+// exemplars: [system, user, assistant(call), tool(listing), user(objective)]. The
+// tool body inside it is a 90-hit listing, far over the rung's size floor, so a rung
+// that wandered into the preamble would thin it.
+func exemplarPreamble(listing string) []Msg {
+	return []Msg{
+		{Role: "system", Content: "You are a coding agent."},
+		{Role: "user", Content: "Show how you would search for a symbol."},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "ex_search_1", Name: "search_files", Args: `{"pattern":"timeout"}`}}},
+		{Role: "tool", ToolCallID: "ex_search_1", Content: listing},
+		{Role: "user", Content: rungTask},
+	}
+}
+
+func TestLadderSearchRungNeverTouchesAToolBodyInsideThePreamble(t *testing.T) {
+	exemplar := prodGrouped(benignHits(41, 20, 90), true)
+	older := prodGrouped(benignHits(42, 18, 85), false)
+	newer := prodGrouped(benignHits(43, 16, 70), false)
+	msgs := append(exemplarPreamble(exemplar),
+		Msg{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "search_files", Args: `{"pattern":"deadline"}`}}},
+		Msg{Role: "tool", ToolCallID: "c1", Content: older},
+		Msg{Role: "assistant", ToolCalls: []ToolCall{{ID: "c2", Name: "search_files", Args: `{"pattern":"Timeout"}`}}},
+		Msg{Role: "tool", ToolCallID: "c2", Content: newer},
+		Msg{Role: "assistant", ToolCalls: []ToolCall{{ID: "c3", Name: "read_file", Args: `{"path":"README.md"}`}}},
+		Msg{Role: "tool", ToolCallID: "c3", Content: "short file"},
+	)
+	const protected = 5
+	if _, ok := searchRungBody(exemplar, searchQueryTerms(rungTask)); !ok {
+		t.Fatal("fixture: the exemplar listing must be one the rung would thin, or this test proves nothing")
+	}
+
+	checkPreamble := func(label string, got []Msg) {
+		t.Helper()
+		for i := 0; i < protected; i++ {
+			if got[i].Role != msgs[i].Role || got[i].Content != msgs[i].Content || got[i].ToolCallID != msgs[i].ToolCallID || got[i].IsError != msgs[i].IsError {
+				t.Fatalf("%s: preamble message %d changed (role %q, tool call id %q)", label, i, got[i].Role, got[i].ToolCallID)
+			}
+		}
+	}
+	footers := func(ms []Msg) (n int) {
+		for _, m := range ms {
+			for _, ln := range strings.Split(m.Content, "\n") {
+				if isRungFooter(ln) {
+					n++
+				}
+			}
+		}
+		return n
+	}
+
+	// The rung on its own, with a budget nothing can meet: it works through the whole span.
+	direct := append([]Msg(nil), msgs...)
+	searchRung(direct, protected, len(direct)-rungKeep, 1, nil)
+	checkPreamble("searchRung", direct)
+	if got := footers(direct[protected:]); got != 2 {
+		t.Errorf("both older listings after the preamble must be thinned, got %d thinned", got)
+	}
+	if footers(direct[:protected]) != 0 {
+		t.Error("a thinned listing appeared inside the protected preamble")
+	}
+
+	// And through the ladder, at several budgets, with every rung switched on.
+	est := estimateTokens(msgs)
+	for _, pct := range []int{90, 60, 30, 5} {
+		got := compact(context.Background(), append([]Msg(nil), msgs...), est*pct/100, rungKeep, protected, compactOpts{GCF: true, Skeleton: true, SearchResults: true})
+		checkPreamble(fmt.Sprintf("compact at %d%%", pct), got)
+	}
+}
+
+func TestLadderSearchRungSparesAListingAPinnedDedupeReferenceStandsFor(t *testing.T) {
+	// c1's body is a dedupe reference to c2: the model re-requested c1, so what it
+	// wants are the bytes that live at c2, and the ladder pins c2 through the
+	// reference (ADR 0016). The rung must be handed that resolved set, not the raw one.
+	listing := prodGrouped(benignHits(44, 20, 90), false)
+	other := prodGrouped(benignHits(45, 18, 80), false)
+	msgs := fixtureTranscript([]fixtureTurn{
+		{"search_files", `{"pattern":"timeout"}`, dedupeMarker("c2", len(listing))},
+		{"search_files", `{"pattern":"timeout"}`, listing},
+		{"search_files", `{"pattern":"deadline"}`, other},
+		{"read_file", `{"path":"README.md"}`, "short file"},
+	})
+	// A budget that thinning the unpinned listing alone satisfies, so the ladder stops
+	// right after the rung and nothing else can explain a change to the pinned one.
+	thin := mustThin(t, other, searchQueryTerms(fixtureObjective))
+	fits := append([]Msg(nil), msgs...)
+	fits[7].Content = thin
+	got := rungCompact(msgs, estimateTokens(fits), compactOpts{SearchResults: true, Pinned: map[string]bool{"c1": true}})
+
+	byID := map[string]string{}
+	for _, m := range got {
+		if m.Role == "tool" {
+			byID[m.ToolCallID] = m.Content
+		}
+	}
+	if byID["c2"] != listing {
+		t.Errorf("the listing a pinned dedupe reference points at was thinned or lost (%d bytes, was %d)", len(byID["c2"]), len(listing))
+	}
+	if byID["c1"] != msgs[3].Content {
+		t.Error("the pinned reference itself must stay as it was")
+	}
+	// The rung did run: the unpinned listing is the one that gave way.
+	if byID["c3"] != thin {
+		t.Errorf("control: the unpinned listing should have been thinned to meet the budget, got %d bytes", len(byID["c3"]))
+	}
+}
+
+func TestLadderSearchRungChangesOnlyToolMessages(t *testing.T) {
+	// Listing-shaped content in an older assistant message and in an older user
+	// message is not a tool result and is never rewritten; the tool body between
+	// them is the control that the rung does run on this transcript.
+	assistantBody := prodGrouped(benignHits(46, 20, 90), true)
+	toolBody := prodGrouped(benignHits(47, 18, 85), false)
+	userBody := prodGrouped(benignHits(48, 16, 80), false)
+	for name, body := range map[string]string{"assistant": assistantBody, "user": userBody} {
+		if _, ok := searchRungBody(body, searchQueryTerms(fixtureObjective)); !ok {
+			t.Fatalf("fixture: the %s message's content must be one the rung would thin", name)
+		}
+	}
+	msgs := []Msg{
+		{Role: "system", Content: "You are a coding agent."},
+		{Role: "user", Content: fixtureObjective},
+		{Role: "assistant", Content: assistantBody, ToolCalls: []ToolCall{{ID: "c1", Name: "search_files", Args: `{"pattern":"timeout"}`}}},
+		{Role: "tool", ToolCallID: "c1", Content: toolBody},
+		{Role: "user", Content: userBody},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "c2", Name: "read_file", Args: `{"path":"a.go"}`}}},
+		{Role: "tool", ToolCallID: "c2", Content: "short file"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "c3", Name: "read_file", Args: `{"path":"b.go"}`}}},
+		{Role: "tool", ToolCallID: "c3", Content: "short file too"},
+	}
+	out := append([]Msg(nil), msgs...)
+	searchRung(out, 2, len(out)-rungKeep, 1, nil)
+
+	if out[2].Content != assistantBody {
+		t.Error("an older assistant message must never be rewritten, whatever its content looks like")
+	}
+	if out[4].Content != userBody {
+		t.Error("an older user message must never be rewritten, whatever its content looks like")
+	}
+	if out[3].Content == toolBody || !strings.Contains(out[3].Content, "lines elided") {
+		t.Error("control: the older tool body is a listing and must have been thinned")
+	}
+	for i := range msgs {
+		if out[i].Role != msgs[i].Role || out[i].ToolCallID != msgs[i].ToolCallID || len(out[i].ToolCalls) != len(msgs[i].ToolCalls) {
+			t.Errorf("message %d: only a tool message's Content may change", i)
+		}
+	}
+}
+
+// TestSearchRungBoostsEveryDocumentedErrorWord pins the regexp word by word: the
+// docs and the changelog fragment list error, fail, panic, exception and fatal, and
+// each of them (with the inflections the pattern accepts) must lift a line by exactly
+// the boost, while the same line without it, or with a word that only contains it,
+// stays at zero.
+func TestSearchRungBoostsEveryDocumentedErrorWord(t *testing.T) {
+	l, ok := parseSearchListing(prodGrouped(benignHits(49, 6, 40), false))
+	if !ok {
+		t.Fatal("fixture must parse")
+	}
+	score := func(text string) int64 {
+		l.hits[0].payload = text
+		scoreSearchListing(l, nil) // no query: a line can only score through the boost
+		return l.hits[0].score
+	}
+	words := []string{
+		"error", "errors",
+		"fail", "fails", "failed", "failure", "failures", "failing",
+		"panic", "panics", "panicked",
+		"exception", "exceptions",
+		"fatal", "FATAL", "Panic",
+	}
+	for _, w := range words {
+		if got := score("the step reported " + w + " again"); got != searchErrorBoostMicros {
+			t.Errorf("%q must be boosted by exactly %d, scored %d", w, searchErrorBoostMicros, got)
+		}
+		if got := score("the step reported ok again"); got != 0 {
+			t.Errorf("control for %q: the same line without it must score 0, scored %d", w, got)
+		}
+	}
+	for _, near := range []string{"errorless mode", "terror alert", "errorcode table", "exceptional case", "fatalism", "failover plan", "panicky"} {
+		if got := score("the step reported " + near + " again"); got != 0 {
+			t.Errorf("%q only contains an error word and must not be boosted, scored %d", near, got)
+		}
+	}
+}
+
+// The ladder reaches the rung with a Tokenizer set in production. When the rung
+// alone brings the transcript within the estimate budget the ladder returns
+// right there: the verdict stays fitUnknown, the token-exact cut is never asked,
+// and nothing but the thinned listing differs from the input.
+func TestLadderSearchRungStopsTheLadderWhenItAloneFits(t *testing.T) {
+	msgs := rungTranscript()
+	thin := mustThin(t, msgs[3].Content, searchQueryTerms(fixtureObjective))
+	want := append([]Msg(nil), msgs...)
+	want[3].Content = thin
+	budget := estimateTokens(want)
+
+	tok := &runeTok{}
+	got, verdict := compactWithVerdict(context.Background(), append([]Msg(nil), msgs...), budget, rungKeep, rungProtected,
+		compactOpts{SearchResults: true, Tok: tok, RealBudget: 1 << 20})
+	if verdict != fitUnknown {
+		t.Errorf("verdict = %v, want fitUnknown: the estimate ladder fit the transcript and nothing measured it", verdict)
+	}
+	if tok.calls != 0 {
+		t.Errorf("the tokenizer was asked %d times; the token-exact cut must not run once the rung fits", tok.calls)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len %d, want %d: no message may be dropped", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Content != want[i].Content || got[i].Role != want[i].Role || got[i].ToolCallID != want[i].ToolCallID {
+			t.Fatalf("message %d differs: only the oldest listing should have been thinned", i)
+		}
+	}
+
+	// Control, same options: a budget the rung cannot meet does reach the tokenizer.
+	ctl := &runeTok{}
+	_, v := compactWithVerdict(context.Background(), append([]Msg(nil), msgs...), 1, rungKeep, rungProtected,
+		compactOpts{SearchResults: true, Tok: ctl, RealBudget: 1 << 20})
+	if ctl.calls == 0 || v != fitReal {
+		t.Errorf("control: with a budget the rung cannot meet the token-exact cut must run and measure (calls=%d, verdict=%v)", ctl.calls, v)
+	}
+}
