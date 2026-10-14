@@ -2136,7 +2136,9 @@ operator's explicit request), so advising it for a lease that unloaded nothing c
 read through the reader, which judges who holds the cards and, for that, skips a record it cannot read (`legacy` returns nil on any
 read error, `v2` continues past it). Every decision that a lease is GONE therefore comes from `Manager.RecordState(epoch)`, which
 looks at the record itself (a card lease's `e/<epoch>.json`, a whole-node `meta.json` naming the epoch) and answers absent, held or
-unreadable, with the cause for the last; unreadable counts as held. It decides `leaseStillHeld`, `confirmReleased`,
+unreadable, with the cause for the last; unreadable counts as held. (A card record that exists with bytes that are not a record counts
+as unreadable too, since its claims may still stand; a whole-node `meta.json` with such bytes counts as absent, the debris an acquirer
+sweeps, as every other reader treats it.) It decides `leaseStillHeld`, `confirmReleased`,
 `releaseLeaseConfirmed`, the holder's `releaseHolderLease` (which used to believe `Inspect` and return nil, so the holder exited 0 over
 a lease it could not touch; it now retries, prints `LEASE NOT RELEASED`, tries to mark the record, and exits non-zero) and `gpu
 release`'s post-check; the whole-node `Lease.Release` returns a wrapped `*RecordUnreadableError` instead of nil "already gone"
