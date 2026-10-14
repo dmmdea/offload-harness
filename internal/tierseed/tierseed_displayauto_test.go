@@ -11,7 +11,7 @@ import (
 // literal index ships a layer that is only right until the monitor moves, and then refuses forever (the
 // guard cross-checks a declaration against the driver, never follows it). The shipped table says "auto" so
 // the guard reads the driver's own answer; a tier that names a card again is a decision to make on purpose.
-func TestShippedDisplayFloorLayersFollowTheMonitor(t *testing.T) {
+func TestShippedDisplayFloorLayersReadTheDriversMonitorCard(t *testing.T) {
 	profiles, err := Load(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)

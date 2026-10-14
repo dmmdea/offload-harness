@@ -1,6 +1,7 @@
 package placement
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -175,6 +176,58 @@ func TestAutoDisplayStillRefusesAnUndeclaredFootprintOnTheDerivedCard(t *testing
 	}
 }
 
+// The sentinel is recognised in any case and with surrounding whitespace, and it has to be at the three
+// places that carry the behaviour, not only at the helper that names it: resolveDisplay (which card),
+// the seat-pin rule in displayFloor (a stale twin pin is loud) and the resident verdict (the watcher).
+// Every spelling here changes the case: resolveDisplay trims before it asks, so a padded lower-case
+// "auto" alone could not tell a case-sensitive comparison there from IsAutoDisplayDevice.
+func TestAutoDisplayDeviceIsRecognisedInAnySpellingAtEveryDecision(t *testing.T) {
+	for _, spelling := range []string{"Auto", "AUTO", " AUTO ", "\tAuto\n"} {
+		t.Run(fmt.Sprintf("%q", spelling), func(t *testing.T) {
+			f := admitting()
+			f.free["0"], f.free["1"] = 15, 15
+			live := f.live()
+			live.ScreenCards = screenAt("0")
+
+			// Which card: the driver's, printed as the sentinel.
+			l, s := autoLayerAndSeat(t, "0")
+			l.DisplayDevice = spelling
+			ok, reason, guard := LayerAdmissible(l, s, live, nil)
+			if !ok || !strings.Contains(reason, "on display device auto (index 0)") {
+				t.Fatalf("%q must read the monitor's card (index 0) and admit, got ok=%v guard=%q %q", spelling, ok, guard, reason)
+			}
+
+			// The seat-pin rule: a twin that declares a footprint but is pinned off the monitor's card.
+			l, s = autoLayerAndSeat(t, "1")
+			l.DisplayDevice = spelling
+			ok, reason, guard = LayerAdmissible(l, s, live, nil)
+			if ok || guard != "display_floor" || !strings.Contains(reason, "seat router declares display_footprint_gib 6.2") ||
+				!strings.Contains(reason, "pin 1") || !strings.Contains(reason, "index 0") {
+				t.Fatalf("%q must keep the seat-pin rule (a twin pinned to 1, the monitor on 0), got ok=%v guard=%q %q", spelling, ok, guard, reason)
+			}
+
+			// The refusal when the driver names no card is the sentinel's, not a UUID prefix nothing matches.
+			l, s = autoLayerAndSeat(t, "0")
+			l.DisplayDevice = spelling
+			silent := f.live()
+			silent.ScreenCards = screenAt()
+			ok, reason, _ = LayerAdmissible(l, s, silent, nil)
+			if ok || !strings.Contains(reason, "display_device auto: the driver does not say which card drives the monitor") {
+				t.Fatalf("%q with no card flagged must refuse as the sentinel does, got ok=%v %q", spelling, ok, reason)
+			}
+
+			// The resident verdict reads the derived card too: 3.0 GiB free on the monitor's card is under the floor.
+			f.free["0"] = 3
+			low := f.live()
+			low.ScreenCards = screenAt("0")
+			ok, reasons := ResidentVerdict(l, low)
+			if joined := strings.Join(reasons, " | "); ok || !strings.Contains(joined, "free 3.0 GiB < floor 4.0 GiB on display device auto (index 0)") {
+				t.Fatalf("%q resident, 3.0 GiB free on the monitor's card: want a violation naming index 0, got ok=%v %q", spelling, ok, joined)
+			}
+		})
+	}
+}
+
 // The literal-index and UUID paths are the operator's declaration and keep their exact words: this runs
 // them in one config next to an auto layer and pins the strings, so the new branch cannot swallow them.
 func TestAutoDisplayLeavesLiteralIndexAndUUIDBehaviourAlone(t *testing.T) {
@@ -192,8 +245,8 @@ func TestAutoDisplayLeavesLiteralIndexAndUUIDBehaviourAlone(t *testing.T) {
 	if !ok || !strings.Contains(reason, "display_floor: free 15.0 GiB − footprint 6.2 = 8.8 ≥ floor 4.0 on display device 1 (index 1)") {
 		t.Fatalf("literal index, monitor on 1: got ok=%v %q", ok, reason)
 	}
-	// The same config, the monitor on 0: the literal layer refuses with its old sentence; the auto layer
-	// follows the monitor and admits.
+	// The same config, the monitor on 0: the literal layer refuses with its old sentence; the auto layer's
+	// guard reads the monitor's card, 0, and admits.
 	live.ScreenCards = screenAt("0")
 	ok, reason, guard := LayerAdmissible(lit, litSeat, live, nil)
 	const old = "display_floor: display_device 1 is CUDA index 1, but the driver reports the monitor on index 0 (display_active / display_attached) — refused: the floor would guard a card that is not the desktop's until display_device names the one that drives the screen"
@@ -201,7 +254,7 @@ func TestAutoDisplayLeavesLiteralIndexAndUUIDBehaviourAlone(t *testing.T) {
 		t.Fatalf("literal index, monitor on 0 must keep its sentence:\n got %q\nwant %q", reason, old)
 	}
 	if ok, reason, _ := LayerAdmissible(auto, autoSeat, live, nil); !ok {
-		t.Fatalf("the auto layer next to it follows the monitor to 0, got %q", reason)
+		t.Fatalf("the auto layer next to it reads the monitor's card, 0, and admits, got %q", reason)
 	}
 
 	// The seat-pin rule is the sentinel's alone. On a declared card a seat that declares a footprint but
@@ -303,7 +356,7 @@ func TestAutoDisplayLayerIsAnsweredByTheNodesVerdictWhereTheDelegatorHasNoReader
 // The node publishes the verdict its own driver reading gives, so a delegator is told the truth: an auto
 // layer whose twin sits on the monitor's card is admissible, and the same layer with the twin on the
 // other card is not, and says which pin is stale.
-func TestANodePublishesAnAutoDisplayLayerFollowingTheMonitor(t *testing.T) {
+func TestANodePublishesTheAutoDisplayGuardsReadingOfTheMonitorsCard(t *testing.T) {
 	devs := []gpuprobe.Device{
 		{Index: 0, UUID: "GPU-aaaa1111", FreeGiB: 14, DisplayAttached: true}, // the monitor is on 0
 		{Index: 1, UUID: "GPU-bbbb2222", FreeGiB: 15},

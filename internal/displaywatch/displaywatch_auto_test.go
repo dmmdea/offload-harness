@@ -2,6 +2,7 @@ package displaywatch
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -90,5 +91,79 @@ func TestTheWatcherUnloadsATwinWhenTheDriverNamesNoSingleCard(t *testing.T) {
 	out := watcherWithMonitor(t, b, -1, 15, 15).Check(context.Background()) // plenty free everywhere, no card flagged
 	if len(b.unloaded) != 1 || !strings.Contains(strings.Join(out.Reasons, " "), "display_device auto") {
 		t.Fatalf("an auto layer with no monitor card to read must unload and say so: unloaded=%v reasons=%v", b.unloaded, out.Reasons)
+	}
+}
+
+// watcherOver builds a watcher for cfg over a device sample the test supplies.
+func watcherOver(t *testing.T, b *box, cfg config.Config, devs []gpuprobe.Device) *Watcher {
+	t.Helper()
+	d := b.deps("")
+	d.Devices = func() ([]gpuprobe.Device, bool) { return devs, true }
+	w := New(cfg, d)
+	if w == nil {
+		t.Fatal("a display layer with desktop guards wants a watcher")
+	}
+	return w
+}
+
+// With "auto" the driver's reading is the whole declaration, so a reading that does not name exactly one
+// card is a violation, and the watcher answers it as it answers every violation: the loaded twin comes
+// down on that check, with no drain. A layer declared with a card trusts that declaration through a
+// reading that cannot say, and tolerates a second monitor beside it, and keeps its twin. A dormant layer
+// is no different, because the watcher guards a rendered twin whoever loaded it (displaywatch.go watched).
+func TestTheWatcherReadsASilentDriverAsAViolationOnlyForAnAutoLayer(t *testing.T) {
+	cards := func(mark func(i int, d *gpuprobe.Device)) []gpuprobe.Device {
+		devs := []gpuprobe.Device{
+			{Index: 0, UUID: "GPU-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee", FreeGiB: 15},
+			{Index: 1, UUID: "GPU-bbbb2222-cccc-dddd-eeee-ffffffffffff", FreeGiB: 15},
+			{Index: 2, UUID: "GPU-cccc3333-dddd-eeee-ffff-000000000000", FreeGiB: 15},
+		}
+		for i := range devs {
+			mark(i, &devs[i])
+		}
+		return devs
+	}
+	readings := []struct {
+		name string
+		devs []gpuprobe.Device
+	}{
+		{"no card is flagged (headless, or the screen is on an iGPU)", cards(func(int, *gpuprobe.Device) {})},
+		{"display_attached is unknown for the sample", cards(func(i int, d *gpuprobe.Device) {
+			d.AttachedUnknown = true
+			d.DisplayActive = i == 1 // an Enabled display_active is no evidence when the sample cannot tell
+		})},
+		{"monitors on two cards", cards(func(i int, d *gpuprobe.Device) { d.DisplayAttached = i != 2 })},
+	}
+	for _, dormant := range []bool{false, true} {
+		for _, rd := range readings {
+			t.Run(fmt.Sprintf("dormant=%v/%s", dormant, rd.name), func(t *testing.T) {
+				auto := autoWatchedCfg()
+				declared := watchedCfg()
+				for _, cfg := range []config.Config{auto, declared} {
+					for i := range cfg.Layers {
+						if cfg.Layers[i].Name == "display" {
+							cfg.Layers[i].Dormant = dormant
+						}
+					}
+				}
+
+				b := newBox()
+				b.running = ready(twinE4B)
+				out := watcherOver(t, b, auto, rd.devs).Check(context.Background())
+				if len(b.unloaded) != 1 || b.unloaded[0] != twinE4B || !strings.Contains(strings.Join(out.Reasons, " "), "display_device auto") {
+					t.Fatalf("auto, %s, 15 GiB free everywhere: the twin comes down naming the sentinel, got unloaded=%v reasons=%v", rd.name, b.unloaded, out.Reasons)
+				}
+
+				b = newBox()
+				b.running = ready(twinE4B)
+				kept := watcherOver(t, b, declared, rd.devs).Check(context.Background())
+				if len(kept.Loaded) != 1 {
+					t.Fatalf("the declared layer's twin is loaded and watched, got %+v", kept)
+				}
+				if len(b.unloaded) != 0 {
+					t.Fatalf("a declared card (1, 15 GiB free) is not contradicted by %s, so its twin stays, got unloaded=%v", rd.name, b.unloaded)
+				}
+			})
+		}
 	}
 }
