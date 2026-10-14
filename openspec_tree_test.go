@@ -220,6 +220,37 @@ func TestOpenSpecConfigCarriesTheStandingInvariants(t *testing.T) {
 	}
 }
 
+// The tree's public text names a machine the way docs/STYLE.md V1 to V4 say: a node letter or a role phrase, and a tier
+// id only inside "the <tier> reference box". A tier id names a hardware class, never a machine, so "name a machine by
+// tier id" is the sentence the style guide forbids. The check reads the config, the schema, the templates and the docs
+// page, with line wraps folded away.
+func TestOpenSpecTextNamesMachinesByNodeLetter(t *testing.T) {
+	files := []string{
+		"openspec/config.yaml",
+		"openspec/schemas/harness-change/schema.yaml",
+		"openspec/schemas/harness-change/templates/adr.md",
+		"docs/systems/openspec.md",
+	}
+	forbidden := regexp.MustCompile(`(?i)(by tier ids?|as tier ids?|tier ids? or node letters?|node letters? or tier ids?)`)
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := strings.Join(strings.Fields(string(raw)), " ")
+		if m := forbidden.FindString(text); m != "" {
+			t.Errorf("%s says %q: a machine is a node letter or a role phrase (docs/STYLE.md V1), and a tier id is only ever \"the <tier> reference box\" (V2, V4)", f, m)
+		}
+	}
+	raw, err := os.ReadFile("openspec/config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := strings.Join(strings.Fields(string(raw)), " "); !strings.Contains(text, "reference box") {
+		t.Error("openspec/config.yaml must say how a tier id may appear: only as \"the <tier> reference box\"")
+	}
+}
+
 // The scripts run under Git's bash (not the WSL launcher), with the tools beside it on PATH.
 func openspecScriptEnv(t *testing.T, bash string, extra ...string) []string {
 	t.Helper()
