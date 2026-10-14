@@ -185,8 +185,8 @@ TIER="$(printf '%s' "$DETECT_JSON" | jq -r .verdict.profile)"
 [ -n "$TIER" ] && [ "$TIER" != "null" ] || die "could not classify this machine"
 say "tier:      $TIER  ($(printf '%s' "$DETECT_JSON" | jq -r .verdict.reason))"
 
-# ram_tier gates BOTH the 26B placement (--cpu-moe puts every expert in RAM, so it is
-# dropped without a real RAM path) and the RAM-gated media seed. This script passed
+# ram_tier gates BOTH the 26B placement (a partial --n-cpu-moe needs a real RAM path, and the
+# every-expert form is written for no tier with a card) and the RAM-gated media seed. This script passed
 # neither, so both gates were inert on Linux: a tier served the 26B on a box that
 # cannot host it, and the mid/high-only image seed never applied. An EMPTY value means
 # "do not gate", so it is a hard failure here rather than a silent downgrade.

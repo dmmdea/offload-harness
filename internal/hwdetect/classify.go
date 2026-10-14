@@ -89,7 +89,7 @@ type Verdict struct {
 // 16 min) so the two cannot drift.
 const (
 	ramHighGb = 120 // the 128 GB config
-	ramMidGb  = 56  // 64 GB configs — this is what unlocks the 26B via --cpu-moe
+	ramMidGb  = 56  // 64 GB configs — the RAM gate for the cpu backend's 26B
 	ramLowGb  = 28  // 32 GB
 )
 

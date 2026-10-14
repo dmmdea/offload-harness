@@ -1,5 +1,5 @@
 # setup/tests/selftest-profile-measure.test.ps1 - stub-integration test for the H3 profile_measure
-# helpers in setup/selftest.ps1. Like the R4.2 remediation test, it dot-sources the selftest through
+# helpers in setup/selftest.ps1. Like selftest-no-cpumoe.test.ps1, it dot-sources the selftest through
 # its OFFLOAD_SELFTEST_DOT_SOURCE=1 seam (functions + paths + the receipt scaffold, no MAIN), then
 # drives the PURE helpers - Read-ActiveProfile, Get-ProjectedProfile - and the downshift/tuned logic
 # WITHOUT a GPU or any llama-server load. The heavy measurement (Invoke-ProbeLoad) is a live-GPU path

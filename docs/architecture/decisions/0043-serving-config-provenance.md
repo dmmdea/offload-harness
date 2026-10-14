@@ -144,12 +144,16 @@ more things, and the stamp turned out to be the evidence two of them need.
   `"moe_26b": "--cpu-moe -ngl 999"` in its own comment. It is pure and exemption-free; **its two
   callers hold different evidence and each reads its own.** `install render` runs the gate BEFORE
   the stamp exists (the stamp is prepended after the rule audit), so `renderGate` exempts from the
-  resolved profile: the cpu backend (no card to overflow from) and the off-matrix defaults'
-  literal. `audit-yaml` holds a file, so it exempts from a *verbatim* stamp: one whose spec hash is
-  the hash of the basis it carries and whose body still hashes to `body_sha256`. A verbatim cpu
-  render is clean; a verbatim off-matrix render (`render.fallback_backend` set) prints the finding
-  as a `note:` line and does not fail the audit; an unstamped file, or one edited since its stamp,
-  is judged as a box with a card, and the finding says so. A stamp that cannot vouch for the body
+  resolved profile: the cpu backend (no card to overflow from). `audit-yaml` holds a file, so it
+  exempts from a *verbatim* stamp: one whose spec hash is the hash of the basis it carries and
+  whose body still hashes to `body_sha256`. A verbatim cpu render is clean; an unstamped file, or
+  one edited since its stamp, is judged as a box with a card, and the finding says so.
+  *Amended by 0186 w4:* there is no second exemption. The off-matrix defaults used to write the
+  literal `--cpu-moe -ngl 999` for the CUDA family, `renderGate` exempted that literal, and
+  `audit-yaml` printed a verbatim off-matrix render's finding as a `note:` line. The installer no
+  longer writes it (an off-matrix CUDA box renders no 26B), so the literal's exemption is gone and a
+  verbatim off-matrix render that still carries the flag was written by a binary at or before 0.185.1:
+  it is a violation whose text says to re-render. A stamp that cannot vouch for the body
   exempts nothing.
 - **A device pin on identical cards (A-87, rules `pin-by-index` and `pin-unresolved`).** An index is
   the card's place on the PCI bus; on a box with two cards of one model nothing in the config says
@@ -188,14 +192,14 @@ more things, and the stamp turned out to be the evidence two of them need.
   (`gpulease.DisplayBudgetGiB`, the allocator's arithmetic), and that nothing is judged. It is never a violation, never an exit code,
   reads no config, and `--other-box` skips it. The live verdict is the display cap row of `gpu status`. Footprint-based violations
   are deferred until a placement-neutral footprint source exists (`docs/systems/gpu-lease.md`).
-- **What stays open.** The installer still writes the bare form in three places (the selftest R4.2
+- **What stays open.** *(The installer's three writers of the bare form, the selftest R4.2
   remediation, the `install.ps1` unknown-profile fallback and `fallbackProfile` for the CUDA
-  family), so the off-matrix exemption is a concession, not a policy; a yaml that R4.2 remediated
-  reads as a `cpu-moe` finding on its next audit, which is the gate working on a hand edit. A-86
+  family, were removed by 0186 w4; a yaml an older binary wrote reads as a `cpu-moe` finding on its
+  next audit and re-renders on the next install, which is the gate working.)* A-86
   (each resident sits on the card its tier intended) needs the tier's layer table, which
   `CheckComposite` has at render and `audit-yaml` does not, and the promotion of the seeded-pin
   note to a failure waits for an installer step that substitutes UUIDs.
-- Tests: `TestAuditCPUMoERefusesTheBareFlagInEverySpelling`, `TestRenderGateExemptsOnlyTheCPUBackendAndTheOffMatrixLiteral`,
+- Tests: `TestAuditCPUMoERefusesTheBareFlagInEverySpelling`, `TestRenderGateExemptsOnlyTheCPUBackend`,
   `TestAuditYAMLReadsTheExemptionFromTheStamp`, `TestAuditPinsRefusesAnIndexPinOnIdenticalCards`,
   `TestAuditPinsRefusesAPinThatNamesNoCard`, `TestAuditYAMLOtherBoxSkipsThePinRules`,
   `TestAuditYAMLNotesASeededIndexPinOnAVerbatimRender`.

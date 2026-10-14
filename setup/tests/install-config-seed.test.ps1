@@ -513,6 +513,156 @@ Assert (([regex]::Matches($installText, "'model-26b'")).Count -eq 3) "'model-26b
 $ppAt = $installText.IndexOf('$pp = Resolve-ProfileParams')
 $step5At = $installText.IndexOf('$modelKeys = @(')
 Assert (($ppAt -gt 0) -and ($ppAt -lt $step5At)) '$pp is resolved before the Step 5 download set'
+
+# --- 0186 w4: the installer writes no every-expert --cpu-moe (INV-1) ------------------------------------
+# The cards do the inference and host RAM is overflow only, so the only expert placement in RAM the installer may
+# produce is a MEASURED partial --n-cpu-moe N within the tier's n_cpu_moe_max. The cpu backend has no card to
+# overflow from and keeps its tier. The Go renderer is the one that writes the yaml (install render); this
+# resolver is what install.ps1 reads include_26b from for the 14 GB download and the log label, and it used to
+# carry its own copy of the old unknown-profile defaults.
+Write-Host ""
+Write-Host "== Resolve-ProfileParams: no profile resolves to the every-expert --cpu-moe =="
+foreach ($rt in @('min', 'mid', 'high')) {
+  $ppU = Resolve-ProfileParams -ProfileId 'does-not-exist' -RamTier $rt -BigRam $false -ProfilesJsonPath $profilesPath -Backend 'cuda'
+  Assert (-not $ppU.include_26b) "unknown profile, cuda, ram_tier=${rt}: the 26B is dropped (no measurement says this card fits it)"
+  Assert ("$($ppU.moe_26b)" -notmatch 'cpu-moe') "unknown profile, cuda, ram_tier=${rt}: moe_26b carries no every-expert flag"
+}
+$ppNoId = Resolve-ProfileParams -ProfileId '' -RamTier 'high' -BigRam $false -ProfilesJsonPath $profilesPath -Backend 'cuda'
+Assert ((-not $ppNoId.include_26b) -and ("$($ppNoId.moe_26b)" -notmatch 'cpu-moe')) 'no profile id at all, cuda: the same fallback, 26B dropped'
+$ppVk = Resolve-ProfileParams -ProfileId 'does-not-exist' -RamTier 'mid' -BigRam $false -ProfilesJsonPath $profilesPath -Backend 'vulkan'
+Assert ($ppVk.include_26b -and ($ppVk.moe_26b -eq '-ngl 999')) 'unknown profile, vulkan: the 26B stays, full offload (-ngl 999), never an expert flag'
+$ppCpu = Resolve-ProfileParams -ProfileId 'does-not-exist' -RamTier 'mid' -BigRam $false -ProfilesJsonPath $profilesPath -Backend 'cpu'
+Assert ($ppCpu.include_26b -and ("$($ppCpu.moe_26b)" -eq '')) 'unknown profile, cpu: the 26B stays with no placement string'
+
+# A fresh config for a box off the tier matrix must not bind a rung to a model its own yaml does not serve. The
+# config template binds escalation_model and reasoning_model to the 26B; every shipped tier that drops the 26B
+# reseeds both in its config_seed, but an unknown profile has no row and so no seed, and its CUDA fallback render
+# serves no 26B since 0186 w4. "" disables a rung (internal/config: empty = no escalation / no reasoning tier).
+Write-Host ""
+Write-Host "== Get-OffMatrixRungSeed: the rungs of a fresh off-matrix config name only what the fallback render serves =="
+Assert ([bool](Get-Command Get-OffMatrixRungSeed -ErrorAction SilentlyContinue)) 'dot-source seam defines Get-OffMatrixRungSeed'
+foreach ($rt in @('min', 'mid', 'high')) {
+  $ppOff = Resolve-ProfileParams -ProfileId 'does-not-exist' -RamTier $rt -BigRam $false -ProfilesJsonPath $profilesPath -Backend 'cuda'
+  $cfgOff = (Merge-ConfigSeed -ConfigText $tplText -Seed (Get-OffMatrixRungSeed -ProfileRow $null -Include26B ([bool]$ppOff.include_26b))) | ConvertFrom-Json
+  Assert ($cfgOff.escalation_model -eq '') "unknown profile, cuda, ram_tier=${rt}: escalation_model is blank (the render serves no 26B for it to name)"
+  Assert ($cfgOff.reasoning_model -eq '')  "unknown profile, cuda, ram_tier=${rt}: reasoning_model is blank"
+  Assert (($cfgOff.model -eq 'offload-e4b') -and ($cfgOff.triage_model -eq 'gemma4-e2b')) "unknown profile, cuda, ram_tier=${rt}: the resident and triage seats are untouched"
+}
+$cfgNoId = (Merge-ConfigSeed -ConfigText $tplText -Seed (Get-OffMatrixRungSeed -ProfileRow $null -Include26B ([bool]$ppNoId.include_26b))) | ConvertFrom-Json
+Assert (($cfgNoId.escalation_model -eq '') -and ($cfgNoId.reasoning_model -eq '')) 'no profile id at all, cuda: the same blank rungs'
+Assert ($null -eq (Get-OffMatrixRungSeed -ProfileRow $null -Include26B ([bool]$ppVk.include_26b)))  'unknown profile, vulkan: the fallback keeps the 26B, so the template rungs stand'
+Assert ($null -eq (Get-OffMatrixRungSeed -ProfileRow $null -Include26B ([bool]$ppCpu.include_26b))) 'unknown profile, cpu: the fallback keeps the 26B, so the template rungs stand'
+$rungOwned = @()
+foreach ($t in @($profiles.PSObject.Properties.Name)) {
+  if ($null -ne (Get-OffMatrixRungSeed -ProfileRow $profiles.$t -Include26B $false)) { $rungOwned += $t }
+}
+Assert ($rungOwned.Count -eq 0) ("a tier that resolved keeps its own config_seed rungs: the off-matrix rule never touches a profile row" + $(if ($rungOwned.Count) { " (touched: $($rungOwned -join ', '))" } else { '' }))
+$cpuMoeOffenders = @()
+foreach ($t in @($profiles.PSObject.Properties.Name)) {
+  foreach ($rt in @('min', 'low', 'mid', 'high')) {
+    $ppE = Resolve-ProfileParams -ProfileId $t -RamTier $rt -BigRam $true -ProfilesJsonPath $profilesPath -Backend 'cuda'
+    if ("$($ppE.moe_26b)" -match 'cpu-moe' -and "$($ppE.moe_26b)" -notmatch 'n-cpu-moe') { $cpuMoeOffenders += "$t/$rt" }
+  }
+}
+Assert ($cpuMoeOffenders.Count -eq 0) ("no shipped tier resolves the every-expert flag at any ram_tier" + $(if ($cpuMoeOffenders.Count) { " (offenders: $($cpuMoeOffenders -join ', '))" } else { '' }))
+
+# A tier that names the partial placement without an N is a defect to fix, not something to paper over with a guess.
+$scratchDir = Join-Path ([System.IO.Path]::GetTempPath()) ("nocpumoe-seed-{0}" -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+[void][System.IO.Directory]::CreateDirectory($scratchDir)
+try {
+  $pjDoc = Get-Content -Raw -Encoding UTF8 $profilesPath | ConvertFrom-Json
+  $pjDoc.profiles.'blackwell-16'.moe_26b = 'n_cpu_moe'
+  [void]$pjDoc.profiles.'blackwell-16'.PSObject.Properties.Remove('n_cpu_moe')
+  $scratchProfiles = Join-Path $scratchDir 'profiles.json'
+  [System.IO.File]::WriteAllText($scratchProfiles, ($pjDoc | ConvertTo-Json -Depth 30), (New-Object System.Text.UTF8Encoding($false)))
+  $threwNoN = $false; $noNMsg = ''
+  try { Resolve-ProfileParams -ProfileId 'blackwell-16' -RamTier 'high' -BigRam $true -ProfilesJsonPath $scratchProfiles -Backend 'cuda' | Out-Null }
+  catch { $threwNoN = $true; $noNMsg = $_.Exception.Message }
+  Assert ($threwNoN -and ($noNMsg -match 'n_cpu_moe') -and ($noNMsg -match 'INV-1')) 'moe_26b n_cpu_moe with no N throws a profile-defect error that names n_cpu_moe and INV-1'
+  # The every-expert placement on a backend with a card is the other defect (the cpu backend has no card to overflow from).
+  $pjCard = Get-Content -Raw -Encoding UTF8 $profilesPath | ConvertFrom-Json
+  $pjCard.profiles.'blackwell-16'.moe_26b = 'cpu_moe'
+  [System.IO.File]::WriteAllText($scratchProfiles, ($pjCard | ConvertTo-Json -Depth 30), (New-Object System.Text.UTF8Encoding($false)))
+  $threwCard = $false; $cardMsg = ''
+  try { Resolve-ProfileParams -ProfileId 'blackwell-16' -RamTier 'min' -BigRam $true -ProfilesJsonPath $scratchProfiles -Backend 'cuda' | Out-Null }
+  catch { $threwCard = $true; $cardMsg = $_.Exception.Message }
+  Assert ($threwCard -and ($cardMsg -match 'cpu_moe') -and ($cardMsg -match 'INV-1')) 'moe_26b cpu_moe on a cuda tier throws at any RAM tier (here min) and names cpu_moe and INV-1'
+  $pjCard.profiles.'blackwell-16'.include_26b = $false
+  [System.IO.File]::WriteAllText($scratchProfiles, ($pjCard | ConvertTo-Json -Depth 30), (New-Object System.Text.UTF8Encoding($false)))
+  $ppNo26 = Resolve-ProfileParams -ProfileId 'blackwell-16' -RamTier 'high' -BigRam $true -ProfilesJsonPath $scratchProfiles -Backend 'cuda'
+  Assert ((-not $ppNo26.include_26b) -and ("$($ppNo26.moe_26b)" -eq '')) 'a tier that does not include the 26B places nothing and is not refused'
+  $pjDoc.profiles.'blackwell-16' | Add-Member -NotePropertyName n_cpu_moe -NotePropertyValue 14 -Force
+  [System.IO.File]::WriteAllText($scratchProfiles, ($pjDoc | ConvertTo-Json -Depth 30), (New-Object System.Text.UTF8Encoding($false)))
+  $ppSpill = Resolve-ProfileParams -ProfileId 'blackwell-16' -RamTier 'high' -BigRam $true -ProfilesJsonPath $scratchProfiles -Backend 'cuda'
+  Assert ($ppSpill.moe_26b -eq '--n-cpu-moe 14 -ngl 999') 'a measured partial spill (n_cpu_moe 14) still resolves to --n-cpu-moe 14 -ngl 999'
+
+  Write-Host ""
+  Write-Host "== Test-YamlHasEveryExpertFlag: the Step 6 SKIP probe sees a yaml an older installer wrote =="
+  Assert ([bool](Get-Command Test-YamlHasEveryExpertFlag -ErrorAction SilentlyContinue)) 'dot-source seam defines Test-YamlHasEveryExpertFlag'
+  $yamlOld   = Join-Path $scratchDir 'old.yaml'
+  $yamlClean = Join-Path $scratchDir 'clean.yaml'
+  $yamlSpill = Join-Path $scratchDir 'spill.yaml'
+  $everyExpert = '--cpu-moe'         # the flag the installer must never write, built into three yaml fixtures below
+  [System.IO.File]::WriteAllText($yamlOld,   "# stamp: moe_26b $everyExpert -ngl 999`nmodels:`n  m26:`n    cmd: >-`n      llama-server -m m.gguf $everyExpert -ngl 999 --parallel 1`n", (New-Object System.Text.UTF8Encoding($false)))
+  [System.IO.File]::WriteAllText($yamlClean, "# a comment may say $everyExpert and is not a placement`nmodels:`n  m26:`n    cmd: >-`n      llama-server -m m.gguf -ngl 99 --parallel 1`n", (New-Object System.Text.UTF8Encoding($false)))
+  [System.IO.File]::WriteAllText($yamlSpill, "models:`n  m26:`n    cmd: >-`n      llama-server -m m.gguf --n-cpu-moe 14 -ngl 999 --parallel 1`n", (New-Object System.Text.UTF8Encoding($false)))
+  Assert ((Test-YamlHasEveryExpertFlag -Path $yamlOld) -eq $true)   'a yaml with the every-expert flag on a command line is seen'
+  Assert ((Test-YamlHasEveryExpertFlag -Path $yamlClean) -eq $false) 'a flag named only in a comment line is not a placement'
+  Assert ((Test-YamlHasEveryExpertFlag -Path $yamlSpill) -eq $false) 'the sanctioned measured partial spill (--n-cpu-moe N) is not the every-expert form'
+  Assert ((Test-YamlHasEveryExpertFlag -Path (Join-Path $scratchDir 'absent.yaml')) -eq $false) 'a missing file is not a yaml carrying the flag'
+
+  # The REAL shape (0186 w4 fix round). Every serving template puts __MOE_26B__ FIRST on its own continuation line, so a
+  # yaml an older installer rendered carries the flag at the START of a line, not after `llama-server -m m.gguf` as the
+  # three fixtures above do. The detector used to need one non-blank, non-comment character before the flag, so it was
+  # blind to exactly the yamls it exists for and the Step 6 SKIP probe kept them.
+  $yamlLead  = Join-Path $scratchDir 'lead.yaml'
+  $yamlList  = Join-Path $scratchDir 'list.yaml'
+  $yamlLeadN = Join-Path $scratchDir 'leadn.yaml'
+  [System.IO.File]::WriteAllText($yamlLead,  "models:`n  m26:`n    cmd: >-`n      llama-server -m m.gguf`n      $everyExpert -ngl 999 --parallel 1 `${common}`n", (New-Object System.Text.UTF8Encoding($false)))
+  [System.IO.File]::WriteAllText($yamlList,  "models:`n  m26:`n    cmd:`n      - llama-server`n      - $everyExpert`n", (New-Object System.Text.UTF8Encoding($false)))
+  [System.IO.File]::WriteAllText($yamlLeadN, "models:`n  m26:`n    cmd: >-`n      llama-server -m m.gguf`n      --n-cpu-moe 14 -ngl 999 --parallel 1 `${common}`n", (New-Object System.Text.UTF8Encoding($false)))
+  Assert ((Test-YamlHasEveryExpertFlag -Path $yamlLead) -eq $true)   'the flag FIRST on its own continuation line (the shape every template renders) is seen'
+  Assert ((Test-YamlHasEveryExpertFlag -Path $yamlList) -eq $true)   'the flag as a list item is seen'
+  Assert ((Test-YamlHasEveryExpertFlag -Path $yamlLeadN) -eq $false) 'the sanctioned partial spill FIRST on its line is not the every-expert form'
+
+  # Built from the shipped templates, so the fixture is byte-for-byte what the old renderer wrote and not a shape this
+  # test imagines: substitute the placement token the way servingtmpl.Render does (plain replacement, everywhere).
+  $tplDir = Join-Path $setupDir 'templates'
+  $placed = 0
+  foreach ($tf in @(Get-ChildItem -LiteralPath $tplDir -Filter 'llama-swap.*.yaml' | Sort-Object Name)) {
+    $swapTpl = [System.IO.File]::ReadAllText($tf.FullName)   # NOT $tplText: that is the config.json template, used below
+    $usesToken = @($swapTpl -split "`r?`n" | Where-Object { $_ -notmatch '^\s*#' -and $_ -match '__MOE_26B__' }).Count -gt 0
+    if (-not $usesToken) { continue }
+    $placed++
+    $oldRender = Join-Path $scratchDir ("old-" + $tf.Name)
+    $newRender = Join-Path $scratchDir ("new-" + $tf.Name)
+    [System.IO.File]::WriteAllText($oldRender, $swapTpl.Replace('__MOE_26B__', "$everyExpert -ngl 999"), (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($newRender, $swapTpl.Replace('__MOE_26B__', '-ngl 99'), (New-Object System.Text.UTF8Encoding($false)))
+    Assert ((Test-YamlHasEveryExpertFlag -Path $oldRender) -eq $true)  "$($tf.Name) rendered with the every-expert placement (the 0.185.1 shape) is seen"
+    Assert ((Test-YamlHasEveryExpertFlag -Path $newRender) -eq $false) "$($tf.Name) rendered with the card-resident placement is not flagged"
+  }
+  Assert ($placed -ge 6) "the template walk found the 26B placement token in $placed templates (at least 6): a vacuous walk proves nothing"
+} finally {
+  if ([System.IO.Directory]::Exists($scratchDir)) { [System.IO.Directory]::Delete($scratchDir, $true) }
+}
+# MAIN (below the seam) is pinned by source. Step 6's SKIP probe re-renders a yaml that carries the every-expert flag
+# on a backend with a card: a yaml 0.185.1 or earlier rendered for an unknown profile passes every other probe, so
+# without this clause an upgrade would SKIP the render and keep the flag the audit refuses.
+Assert ($installText.Contains('(($tplBackend -eq ''cpu'') -or -not (Test-YamlHasEveryExpertFlag -Path $yamlDest)) -and')) 'the Step 6 SKIP probe re-renders a yaml carrying the every-expert flag unless the backend is cpu'
+# Step 8 (also below the seam) hands the resolved profile row and the resolved include_26b to the off-matrix rung rule and
+# merges its seed into the FRESH config after the tier seed layers and before the agent seat: without the call the rule is
+# a function nothing runs, and a fresh off-matrix config binds both rungs to a 26B its yaml no longer defines.
+$rungCall = 'Get-OffMatrixRungSeed -ProfileRow $profRow -Include26B ([bool]$pp.include_26b)'
+$rungAt   = $installText.IndexOf($rungCall, [System.StringComparison]::Ordinal)
+$tierAt   = $installText.IndexOf('config_seed_ram_mid_high ($profileId, ram_tier=$ramTier)', [System.StringComparison]::Ordinal)
+$seatAt   = $installText.IndexOf('$agentSeat = Get-DerivedAgentModel', [System.StringComparison]::Ordinal)
+Assert (($rungAt -gt 0) -and ($tierAt -gt 0) -and ($rungAt -gt $tierAt) -and ($seatAt -gt $rungAt)) 'Step 8 asks for the off-matrix rung seed after the tier seed layers and before the agent seat'
+Assert ($installText.Contains('$cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $rungSeed')) 'Step 8 merges the rung seed into the fresh config'
+# selftest.ps1 (MAIN is below its seam, so pinned by source here as well as in `go test`): no remediator, no -CpuMoe.
+$selftestText = Get-Content -Raw -Encoding UTF8 (Join-Path $setupDir 'selftest.ps1')
+Assert (-not $selftestText.Contains('Invoke-Remediate26B')) 'selftest.ps1 has no Invoke-Remediate26B (it edited the live llama-swap.yaml)'
+Assert (@($selftestText -split "`r?`n" | Where-Object { $_.TrimStart() -notmatch '^#' -and $_ -match '(?i)cpumoe' }).Count -eq 0) 'selftest.ps1 has no -CpuMoe switch or variable on a non-comment line'
+Assert ($selftestText -match 'Get-MoEFailureAdvice -ErrorText') 'selftest.ps1 tells the operator what to do through Get-MoEFailureAdvice'
 # The embeddinggemma2 projector flag, wired in the main flow (below the seam, so pinned by source): read from
 # the profile with the same strict-boolean check as its siblings, absent meaning true, and handed to
 # Get-GatedModelKeys, or a text-only tier would still download the projector (or a projector tier lose it).
