@@ -35,3 +35,12 @@ The workflow files there are trimmed excerpts of templates from Comfy-Org/workfl
 (https://github.com/Comfy-Org/workflow_templates), Copyright (c) 2023-present Comfy Org,
 licensed under the MIT License. The licence text is kept beside them in
 LICENSE-comfy-workflow-templates.txt. They are test inputs only and are not shipped.
+
+Log-collapse compaction rung (internal/agent/rung_logs.go):
+The idea of compressing build, test and server output while keeping the failures,
+errors and boundary lines is the documented behavior of the Headroom project
+(https://github.com/headroomlabs-ai/headroom, https://docs.headroomlabs.ai), licensed
+under the Apache License, Version 2.0. internal/agent/rung_logs.go is a clean-room
+implementation of that documented idea: the line-matching rule, the folding of runs,
+the kept windows, the markers and the footer are this repository's own design, and no
+Headroom source code was read or copied.

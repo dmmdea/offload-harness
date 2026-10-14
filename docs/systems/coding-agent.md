@@ -484,6 +484,33 @@ preamble is never touched and no turn is dropped. The retry's shrink target is r
 just-rejected transcript's own estimate, not only the budget, so a dense-content estimate error
 can never make the retry re-send the bytes the server just refused.
 
+**Optional log-collapse rung (`compactOpts.LogCollapse`, default off).** An extra rung between GCF
+and skeleton, in `internal/agent/rung_logs.go`: it folds each run of three or more consecutive
+near-identical lines in an OLDER result of a command tool (`run`, `run_shell`; a file read, a
+search, a fetch or a result whose call is not in the transcript is never touched) into its first
+line plus a count (`[... N similar lines folded ...]`). Two lines are near-identical when they match
+after every digit-bearing token (numbers, timestamp fields, counters, short hex ids), UUID, hex run
+of eight or more characters and terminal control sequence is masked and trailing whitespace is
+trimmed; indentation still counts. Every blank line, every line that looks like an error, warning,
+failure or test summary (the skeleton rung's `signalLine` plus stack-frame, traceback and
+test-runner summary shapes) and the first 8 and last 4 lines stay verbatim and never join a run, so
+a log made only of one repeated warning does not shrink. The body opens with
+`[log-collapse: original N chars, M lines]` (the idempotence marker, also recognised by
+`IsCompactionArtifact`) and ends with a footer that says how many runs and lines were folded. Like
+every rung it works only on the ladder's own window (never the protected preamble or the recent
+turns), skips pinned results, rewrites `Content` only (tool-call pairing is untouched), goes
+oldest-first and stops at the first fit. It is deterministic, idempotent, never makes a body longer
+(the original string comes back unless the result is strictly shorter) and fails closed to the
+original on a body that is too small or too large, is not valid UTF-8, holds a NUL byte, parses as
+a JSON document, already carries another rung's marker or a GCF block, or makes the rewrite
+panic. Because it stops at the first fit, enabling it keeps more of an older log than the rungs
+after it would at the same budget. No production surface enables it yet: the field is not wired to
+a flag, a `Loop` setter, the config or the replay seam, and whether to adopt it is the measurement
+gate's call, not this page's. The idea of compressing build and test output while keeping the
+failures and the boundary lines is the documented behavior of the Headroom project (Apache-2.0); the
+mechanism here is this repository's own, written without reading that project's source (see
+`NOTICE`).
+
 **Compaction eval harness (`compaction-eval`, `internal/compeval`).** Default flips for the ladder
 rungs are gated by MEASUREMENT, never estimates: the verb replays a pinned corpus (JSONL of
 transcript slices, sha256-hashed; a PII finding refuses the whole corpus) through the PRODUCTION
@@ -968,7 +995,7 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - [`internal/agent/runtool.go`](../../internal/agent/runtool.go) — allowlist, direct exec
 - [`internal/agent/writetools.go`](../../internal/agent/writetools.go) — `os.Root` scoping
 - [`internal/agent/builder.go`](../../internal/agent/builder.go) — capability grants, audit-path check
-- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`internal/compeval/`](../../internal/compeval/)
+- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`rung_logs.go`](../../internal/agent/rung_logs.go), [`internal/compeval/`](../../internal/compeval/)
 - [`internal/delegate/`](../../internal/delegate/) — delegator-side placement, intake, execution
   engine, acceptance evaluation
 - [`internal/pipeline/agenttask.go`](../../internal/pipeline/agenttask.go) — contract execution
