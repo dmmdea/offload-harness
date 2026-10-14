@@ -39,8 +39,9 @@
   and passing rows make none), the join by class name with `undocumented` for a class without a row and `not recorded` / `open`
   for empty cells, the table parser (CRLF, an escaped pipe, a second table ignored, malformed tables refused), the embedded page
   against the closed set, the verb's `--since` window (rows stamped relative to the clock), the default path with no `--table`
-  (joined to the page the binary embeds), the cut of `model_tier` at its last colon, each of the eleven never-ran classes keeping a stored 0 on a row that names a node, and that `ledger` without the flag is unchanged.
+  (joined to the page the binary embeds), the cut of `model_tier` at its last colon, and that `ledger` without the flag is unchanged.
   The delegator-zero tests were written first and failed on an assertion, against a golden file written by hand from the rule.
+- **Tests, green by design.** A table test that sends a stored-0 row naming a node and a fleet job through each of the eleven never-ran classes was added after the reader and passed when written; it was added because dropping a class from the set left the suite green, and the mutation runs below are what show it pins them.
 - **Mutations.** Eighteen one-line mutants (the token pointer rule, the measured-zero rule, both sort keys, the run-class filter,
   the job rule, the acceptance rule, the example-reason tie-break, the orphan inner row, the window, the group order, the cache-hit
   rule, the three join defaults, the flag parser, the duplicate-row check and the dispatch itself), each restored byte for byte
