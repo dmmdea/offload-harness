@@ -471,7 +471,7 @@ and both end where a fetched page ends: the text goes through the same digest pa
 
 - *Feeds.* A response whose content type is `application/rss+xml`, `application/atom+xml` or `application/rdf+xml`, or whose
   body sniffs as a feed (a generic XML, plain-text or untyped response whose root element is `rss`, an RDF root that declares
-  the RSS 1.0 namespace, or an Atom `feed`), is parsed with `encoding/xml` (`research.FeedToText`; no new dependency). Each item's title, link, date and summary
+  the RSS 1.0 namespace, or an Atom `feed`), is parsed with `encoding/xml` (`research.FeedToText`; the only added dependency is `golang.org/x/text`'s windows-1252 table, already in the module graph). Each item's title, link, date and summary
   become the text, at most `research.MaxFeedItems` (50) items and 1,000 bytes of summary each, inside the ordinary 2 MiB read
   cap and 96 KiB text cap; a feed cut by either, or one whose document stops before its end (a body that ends inside an
   item), says so first in its own header (`Items: 2 (the feed document was cut off here; later items are not included)`),

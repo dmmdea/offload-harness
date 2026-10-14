@@ -70,6 +70,9 @@ const (
 	scratchSweepAge = ytDlpMaxTimeout + 5*time.Minute
 )
 
+// ytDlpRunCap is the longest one run may be given (a var so a test can shorten it); it is ytDlpMaxTimeout.
+var ytDlpRunCap = ytDlpMaxTimeout
+
 // removeRetryWaits are the pauses between attempts to remove the scratch directory. On Windows a directory cannot
 // be removed while a process still has it as its working directory or a file in it open, and a process that has just
 // been ended takes a moment to let go; the total stays a few hundred milliseconds.
@@ -239,7 +242,7 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) (res Fetch
 	if timeout <= 0 {
 		timeout = ytDlpDefaultTimeout
 	}
-	timeout = min(timeout, ytDlpMaxTimeout)
+	timeout = min(timeout, ytDlpRunCap)
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

@@ -56,6 +56,31 @@ func TestSubtitleRunEndsWhenTheCallerCancelsAfterTheBinaryStarted(t *testing.T) 
 	}
 }
 
+// One run is capped at ytDlpMaxTimeout whatever fetch_timeout_sec asks for: the sweep treats a scratch directory older
+// than that as abandoned, which is only true while no run can outlive the cap.
+func TestOneRunIsCappedWhateverTheCallerAsksFor(t *testing.T) {
+	if ytDlpMaxTimeout != 15*time.Minute {
+		t.Fatalf("the documented cap is 15 minutes, the constant is %v", ytDlpMaxTimeout)
+	}
+	if ytDlpRunCap != ytDlpMaxTimeout || scratchSweepAge <= ytDlpRunCap {
+		t.Fatalf("cap %v, max %v, sweep age %v: the sweep must wait longer than the longest run", ytDlpRunCap, ytDlpMaxTimeout, scratchSweepAge)
+	}
+	pinYouTube(t)
+	real := ytDlpRunCap
+	ytDlpRunCap = 1500 * time.Millisecond
+	t.Cleanup(func() { ytDlpRunCap = real })
+	opt, _ := ytOpts(t)
+	opt.Timeout = time.Hour // far past the cap; the fake binary would sleep 30 s
+	start := time.Now()
+	got := Fetch(context.Background(), "https://www.youtube.com/watch?v="+idHang, opt)
+	if took := time.Since(start); took > 12*time.Second {
+		t.Fatalf("a run asked to last an hour was not capped: it took %v", took)
+	}
+	if got.ErrKind != ErrKindTimeout {
+		t.Fatalf("got %+v, want %s", got, ErrKindTimeout)
+	}
+}
+
 // readCallsQuiet is readCalls for a goroutine: no *testing.T, and a missing or half-written log is no calls yet.
 func readCallsQuiet(root string) [][]string {
 	out, _ := readCallsOf(root)
