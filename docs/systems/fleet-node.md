@@ -1166,7 +1166,7 @@ while a vLLM seat is loaded or loading (a vLLM seat is no exception: loading one
 running list cannot be read (a vLLM seat holding the cards cannot then be ruled out). The decision is made on a fresh read
 of the running list, and the list is read again after every completion, whether it succeeded or not, so a vLLM seat that
 the run itself loaded, or one that another client loaded meanwhile, stops the completions that would follow. A row that ran
-a completion on an idle seat says the completion loaded it. It runs once per seat per run. Seats it loads unload on their
+a completion on an idle seat says the completion loaded it, and one that another client loaded meanwhile says so. It runs once per seat per run. Seats it loads unload on their
 own idle timer like any other load. `/fleet/health` never runs it.
 
 **Where it appears.**

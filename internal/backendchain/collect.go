@@ -372,7 +372,11 @@ func (s *state) completionVerdict(ctx context.Context, c Candidate, canon string
 		hadRunErr := s.runErr != nil
 		s.refreshRunning(ctx)
 		resident = s.resident(canon)
-		if hadRunErr && s.runErr == nil {
+		switch {
+		case resident:
+			// Another client loaded it after the opening read: the cheap probe's "not loaded ... not asked" is stale.
+			prior.Detail = "in the roster, loaded since the report began"
+		case hadRunErr && s.runErr == nil:
 			prior.Detail = "in the roster" // the earlier "load state is unknown" no longer holds
 		}
 	}
