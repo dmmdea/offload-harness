@@ -17,10 +17,15 @@ func TestOpenSpecGeneratedToolFilesStayUntracked(t *testing.T) {
 	if err := winexec.Command("git", "rev-parse", "--is-inside-work-tree").Run(); err != nil {
 		t.Skip("not a git work tree (a source tarball): .gitignore is not consulted")
 	}
+	// The paths openspec 1.14.1 `init --tools claude,opencode --profile core` writes, as observed in a scratch
+	// project; the singular .opencode/command/ is the spelling older opencode releases read.
 	ignored := []string{
 		".claude/skills/openspec-propose/SKILL.md",
 		".claude/skills/openspec-apply-change/SKILL.md",
+		".claude/skills/openspec-sync-specs/SKILL.md",
 		".claude/commands/opsx/propose.md",
+		".claude/commands/opsx/archive.md",
+		".opencode/commands/opsx-propose.md",
 		".opencode/command/opsx-propose.md",
 		".opencode/skills/openspec-propose/SKILL.md",
 	}
