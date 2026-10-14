@@ -103,8 +103,8 @@ func TestSessionSharesReportsUnattributedRowsApartAndNeverMerges(t *testing.T) {
 }
 
 // The doc comment's floor, pinned: a cascade call routed to a node over the chat lane writes no node row and its
-// own row names neither the node nor a fleet job, so it reads as local; so does a delegation whose dispatch marker
-// failed to land. The reader says so in its help text; this keeps the behaviour from changing silently.
+// own row names neither the node nor a fleet job, so it reads as local. The reader says so in its help text; this
+// keeps the behaviour from changing silently.
 func TestSessionSharesReadsAChatLaneRowAsLocalTheDocumentedFloor(t *testing.T) {
 	rows := []Entry{
 		{Task: "classify", Door: "offload_classify", CardsTokens: 120, OriginSession: "sess-abc"},
@@ -192,6 +192,40 @@ func TestSessionSharesFileHonoursSince(t *testing.T) {
 	if excluded["bake"] != 1 {
 		t.Fatalf("excluded = %v, want the one bake job inside the window", excluded)
 	}
+}
+
+// A row inside the --since window is judged by the WHOLE ledger, because the job that explains it can be older than
+// the window. Two shapes, one per index SessionSharesFile builds before it filters; each fails if its index is
+// built from the windowed rows instead (mutants L14 and L15).
+func TestSessionSharesFileJudgesAWindowedRowByTheWholeLedger(t *testing.T) {
+	t.Run("an inner row whose parent job is older than the window is not a job", func(t *testing.T) {
+		p := writeShareLedger(t, []Entry{
+			{TS: 100, Task: "agent_delegate", JobID: "agd-old", FleetJobID: "agd-old", CardsTokens: 500, OriginSession: "sess-abc"},
+			{TS: 500, Task: "agent", ParentJobID: "agd-old", CardsTokens: 300, OriginSession: "sess-abc"},
+		})
+		shares, excluded, err := SessionSharesFile(p, 300, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(shares) != 0 || len(excluded) != 0 {
+			t.Fatalf("window = %+v, excluded %v: the only row inside it is the inner row of a job outside it, which is not a job", shares, excluded)
+		}
+	})
+	t.Run("an orphan inner row takes the class of a started marker older than the window", func(t *testing.T) {
+		// The finished row of the bake never landed, so its inner row is the job's only record (an orphan, which counts
+		// as a job) and the marker is the only row that says what class the job was.
+		p := writeShareLedger(t, []Entry{
+			{TS: 100, Task: "agent_delegate", Phase: PhaseStarted, JobID: "agd-bake", RunClass: "bake", OriginSession: "sess-abc"},
+			{TS: 500, Task: "agent", ParentJobID: "agd-bake", CardsTokens: 300, OriginSession: "sess-abc"},
+		})
+		shares, excluded, err := SessionSharesFile(p, 300, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(shares) != 0 || excluded["bake"] != 1 {
+			t.Fatalf("window = %+v, excluded %v: the inner row of a bake is bake traffic even when the marker that says so is older than the window", shares, excluded)
+		}
+	})
 }
 
 // A ledger that does not exist is an empty answer, not an error (nothing recorded yet).
