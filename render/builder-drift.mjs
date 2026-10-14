@@ -188,7 +188,9 @@ const proxyPosition = (inst, t) => (inst.properties?.proxyWidgets ?? []).findInd
 // A legacy-form widget: the interior widget is linked to a subgraph input, the root instance lists it in
 // `properties.proxyWidgets`, carries no value at that position and has nothing wired to its input for it, so the
 // interior widget is the only place the value lives. Anything else is refused: an instance that carries the value is
-// read with I, an input wired in the root graph by the source that feeds it, an unlinked widget with W.
+// read with I only where its position in proxyWidgets is also its place among the widget-typed inputs (the message says
+// which; I does not consult proxyWidgets), an input wired in the root graph by the source that feeds it, an unlinked widget
+// with W.
 function proxiedWidget(tpl, found, t, tag, view) {
   const wv = found.node.widgets_values;
   if (!Array.isArray(wv) || wv[t.w] === undefined) throw new Error(`${tag}: template ${view.template} node ${t.id} (${t.type}) has no widget ${t.w}`);
@@ -202,7 +204,13 @@ function proxiedWidget(tpl, found, t, tag, view) {
   for (const inst of listing) {
     const pos = proxyPosition(inst, t);
     if (Array.isArray(inst.widgets_values) && inst.widgets_values[pos] !== undefined) {
-      throw new Error(`${tag}: template ${view.template} instance ${inst.id} carries a promoted value for ${sgInput}; read it with I (its widgets_values follow proxyWidgets, position ${pos})`);
+      // I indexes the instance's widgets_values by the order of the subgraph's widget-typed inputs, not by proxyWidgets, so it
+      // reads this value only where the two positions agree.
+      const at = widgetInputNames(found.container).indexOf(sgInput);
+      const advice = at === pos
+        ? `read it with I (position ${pos} is also its place among the widget-typed inputs)`
+        : `no locator reads position ${pos}: I would read position ${at}, which holds another widget; point the spec at another source for this value`;
+      throw new Error(`${tag}: template ${view.template} instance ${inst.id} carries a promoted value for ${sgInput} at position ${pos} of its proxyWidgets; ${advice}`);
     }
     const wired = linkedInput(inst, sgInput);
     if (wired) {
