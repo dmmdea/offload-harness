@@ -1,6 +1,6 @@
 ### Added - `trace-corpus`: a read-only readout over recorded agent runs, with the pager report and compaction pass count now recorded
 
-- **What it does.** `local-offload trace-corpus <harvest|readout|freeze|check>` (RSI-OH-2, new root file `trace_corpus.go`,
+- **What it does.** `local-offload trace-corpus <harvest|readout|freeze|check>` (new root file `trace_corpus.go`,
   one `case` line in `main.go`) is shaped like `compaction-eval`. `harvest` reads the standalone agent trace files and the
   delegation log (never the ledger, so `ledger_readers_lint_test.go` does not apply), reduces each run to numbers and enums,
   redacts the strings that remain with the redactor and vet table the compaction harvest uses, and writes a hash-stamped,
@@ -13,16 +13,20 @@
 - **Only runs that executed.** A deferred subtask (capacity, infrastructure, budget, config, contract) is logged with zero
   steps and nothing else. Harvest skips such a row under the named reason `delegation row never ran (zero steps, nothing
   recorded)`; any step, step trace, prefill or seat-token accounting, or pager object keeps a row a run. The first real
-  readout had counted rows that never ran an agent as runs, 24 % of its runs, which inflated every unrecorded count and
-  would have kept pager.unrecorded_runs above zero after the recording shipped.
+  readout had counted rows that never ran an agent as runs: 24 % of the runs it counted, a denominator about a third
+  larger than the true one, which inflated every unrecorded count and would have kept pager.unrecorded_runs above zero
+  after the recording shipped. A deferred row with zero steps and only a setup-action trace stays a run: the setup actions
+  execute inside the agent loop before its first model turn, every return from the loop carries the pager report, and the
+  compaction ladder can run before the first model call, so such a run is not unrecorded once the recording ships.
 - **Seat attribution is explicit.** A pool placement logs the pool's alias as the seat, so those runs cannot be attributed to
-  a seat. `by_seat` holds only runs whose record names a seat; alias runs are the `pool_alias` bucket and
-  `pool_alias_by_node` (keyed by the node id the row carries, `(unrecorded)` when none), and the new `attribution` block
-  gives `seat_named_runs`, `pool_alias_runs`, `seat_unrecorded_runs` and `unattributed_share`. The corpus gains an optional
-  `node` field (an older corpus without it still loads).
-- **Paths are redacted.** The shared vet table has no path class, so a seat or stop reason that is a local path (a drive
-  path, a rooted path, anything with a backslash) is replaced at harvest with a stable `[redacted-path-N]` placeholder
-  (counted under `redactions.path`), and the strict loader refuses a corpus that still carries one.
+  a seat. `by_seat` holds the runs a seat can be named for (each seat the record names, and under the key `(unrecorded)`
+  the runs whose record names no seat, every agent trace) and not the alias runs; alias runs are the `pool_alias` bucket
+  and `pool_alias_by_node` (keyed by the node id the row carries, `(unrecorded)` when none), and the new `attribution`
+  block gives `seat_named_runs`, `pool_alias_runs`, `seat_unrecorded_runs` and `unattributed_share`. The corpus gains an
+  optional `node` field (an older corpus without it still loads).
+- **Paths are redacted.** The shared vet table has no path class, so a seat, node id or stop reason that is a local path (a
+  drive path, a rooted path, anything with a backslash) is replaced at harvest with a stable `[redacted-path-N]`
+  placeholder (counted under `redactions.path`), and the strict loader refuses a corpus that still carries one.
 - **Why.** The gate that closes or opens the whole pager family, and the rate at which the ladder fires, could not be read from
   anything on disk. The loop measured both and the trace file and the wire result dropped them, so the family sat at
   `insufficient_data` and the compaction items had no baseline. The fields below make future runs record them; the verb reads
@@ -43,7 +47,7 @@
   earlier goal could count as re-fetched in a later one. `Loop.ResetRunInstruments` (serial reuse only; a loop shared by
   concurrent runs keeps one set of accumulators by design) starts them over before each goal.
 - **Tests.** Red first for the counter, the trace fields, the wire field, the per-goal reset, the never-ran skip, the path
-  redaction, the pool-alias bucket and the per-run spread (each committed failing, then fixed). `trace_corpus_test.go` runs
+  redaction (seat, stop reason and node id), the pool-alias bucket and the per-run spread (each committed failing, then fixed). `trace_corpus_test.go` runs
   harvest, freeze and check over synthetic fixtures in `testdata/tracecorpus` and requires byte-identical corpus and report
   across two harvests and across CRLF endings, pins every derived number against hand-worked values, and covers redaction
   (literals built at run time, and the fixture check builds its banned words at run time too), the unrecorded-never-zero rule,
@@ -55,7 +59,7 @@
 - **Mutations run and killed.** An unrecorded rate returned as 0, the gate comparison widened to `<=`, redaction removed
   (twice: with and without the exit gate), the check made to always pass, a self-contradicting pager object trusted, a zero
   pass count read as a fire, a token-less prefill read as measured; each term of the never-ran predicate removed in turn;
-  each alternative of the path pattern removed, the path redaction removed for the seat and for the stop reason, the loader's
+  each alternative of the path pattern removed, the path redaction removed for the seat, for the stop reason and for the node id, the loader's
   path refusal weakened to one field; the pool-alias pattern loosened three ways, the node-less bucket key changed, the
   unattributed share dropped to aliases only, the node field dropped or left unredacted; a nil pass count read as a recorded
   zero, the negative-count terms and each of the other guards removed, the tool-role filter dropped; the wire mapping
