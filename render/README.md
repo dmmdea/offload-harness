@@ -154,6 +154,17 @@ node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyU
   2.0 MP cap is refused before anything starts. The runner checks the recipe's loader classes and their inputs against `/object_info` before it submits, watches the pair's
   ComfyUI console while it waits (`IMAGE-PLACEMENT-OOM` ends a wait on a worker that died of an out-of-memory error), and keeps an image whose VAE decode ComfyUI retried tiled
   beside the requested path as `<name>.tiled.<ext>` (`IMAGE-DECODE-FALLBACK`). `docs/systems/media-generation.md`, "Card-only image and edit".
+- **A kept (`--keep-comfy`) or warm (`--batch`) ComfyUI frees its own models and caches after 300 s idle.** The runner launches it with
+  the pack in `render/comfyui-ext/idle-nodes` (through `--extra-model-paths-config render/comfyui-ext/extra_model_paths_idle.yaml` and the
+  custom-node whitelist): after `COMFY_IDLE_FREE_SEC` seconds (default 300; `0` or `off` disables it; a whole number from 5 up) with nothing
+  queued or running, the instance asks its own worker to unload its models and reset its executor cache, once per busy period. A running
+  prompt is never idle. ComfyUI already unloads every model when a prompt ends under the harness's `--disable-smart-memory`, so a kept
+  `--cache-none` instance is bare between jobs and the pack finds nothing to do there; it bounds a warm session's executor cache (host
+  RAM) and a hand-started instance that keeps its models. The harness runs no watcher; the Python process and its CUDA context are not
+  freed by it and live until the lease holder stops the instance. A running instance without the pack is reused with one
+  `COMFY-IDLE-WARN` per runner start; to bound a hand-started ComfyUI add the yaml to its own `--extra-model-paths-config`
+  (`docs/OPERATOR-GUIDE.md`). The default single render is launched exactly as before. Not yet run in a live ComfyUI; detail and the live
+  check: `docs/systems/media-generation.md`.
 - **`--reserve-vram 2.0`** keeps headroom for the Windows display/WDDM (too low → a decode spike
   kills the whole process with no traceback).
 - **Qwen2.5-VL fp8 text encoder CPU-offloads automatically** (~free with 64 GB RAM, saves 4–6 GB).

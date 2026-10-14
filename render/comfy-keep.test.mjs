@@ -154,6 +154,7 @@ test("a kept launch spawns detached, console to a log file descriptor, unref'd, 
     portFree: async () => true,
     mkdirs: () => {},
     writeLaunch: () => {},
+    probeIdle: async () => ({ limit_sec: 300, error: null }), // a kept launch asks its instance for the idle bound; never a real socket here
     pollMs: 1,
   });
   assert.equal(seen.opts.detached, true);
