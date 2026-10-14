@@ -101,11 +101,14 @@ func TestDoctorHelpListsEveryFlag(t *testing.T) {
 		if !doctorHelp([]string{h}, &b) {
 			t.Fatalf("%s must be answered as help", h)
 		}
-		// the flag is declared by exactly that name (a flag line of its own, not a prefix of another name)
-		if !regexp.MustCompile(`(?m)^\s+-probe-completion\s*$`).MatchString(b.String()) {
-			t.Errorf("%s output declares no -probe-completion flag line:\n%s", h, b.String())
+		// each flag is declared by exactly its name, on a flag line of its own: the usage line names
+		// "--config FILE" and "--probe-completion" whether or not the flag set declares them
+		for _, name := range []string{"config", "probe-completion"} {
+			if !declaresFlag(b.String(), name) {
+				t.Errorf("%s output declares no -%s flag line:\n%s", h, name, b.String())
+			}
 		}
-		for _, want := range []string{"usage: local-offload doctor", "-config", "CAN LOAD idle seats", "evict a vLLM seat"} {
+		for _, want := range []string{"usage: local-offload doctor", "CAN LOAD idle seats", "evict a vLLM seat"} {
 			if !strings.Contains(b.String(), want) {
 				t.Errorf("%s output lacks %q:\n%s", h, want, b.String())
 			}
