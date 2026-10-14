@@ -41,13 +41,18 @@
   the contract can never close (the unknown the `AUTHORITY-UNREACHABLE` lint warns about, such as a grounded check on a
   contract with no context documents) is a defect of the contract: it is still reported as a failed check, but it is
   neither a strike nor a pass for the node (no quarantine) and is not retried on a second node. An unknown the
-  contract could have closed, such as an empty answer beside the documents, still counts against the node.
+  contract could have closed, such as an empty answer beside the documents, still counts against the node. An unknown
+  over an honest-absence digest (a qualified field fingerprint on an empty field, the absence sentence in another
+  field) strikes nothing either, since an honest absence is neither a pass nor a strike, and a fingerprint the node
+  passed beside a contract-caused unknown is still recorded as its pass.
 - **The rig.** The failure-class register keeps classifying a qualified check's failure by its verb prefix, so an
   unknown (empty or absent evidence) is counted as `anchor-miss`, not `schema-miss`; the empty-versus-wrong distinction
   lives in the evidence column (`unknown at <level> authority`), not in the axis (docs/systems/coding-agent.md).
 - **Skew.** A node one release behind admits a qualified contract (a literal substring to its parser). A delegator one
-  release behind, or a misspelt qualifier, reads the line as a literal: `contains:` and `regex:` fail closed, but
-  `not_contains:` passes vacuously, so a qualified `not_contains:` buys nothing on such a delegator.
+  release behind, or a misspelt qualifier, reads the line as a literal: `contains:` and `regex:` fail closed. On a
+  delegator one release behind, `not_contains:@answer:SECRET` is read as the literal string "@answer:SECRET", so the
+  check passes even when the answer contains SECRET and the forbidden-content check never fires. Qualified checks need
+  the whole fleet on 0.187 or later.
 - **Tests.** Red first (the tests commits do not compile, or fail, until the implementation lands): parse table
   including the literal-`@` and malformed cases, the verdict table (pass, fail and unknown for every level and
   verb), the ordering and the weaker-never-closes-stronger table, full-evidence pins (every match of a grounded
@@ -60,3 +65,9 @@
   `acceptance` row of `docs/systems/fleet-node.md`. The tool descriptions in `internal/mcpserver` still list the verbs
   without the qualifier and the result keys without `acceptance_authority`; they are left to the schema-profile work
   that owns that file.
+- **Known limits.**
+  - "Not retried" holds only for the research door: a deterministically unreachable authority (such as
+    `contains:@grounded:` with no context documents) is still retried on a second node. The better fix is an intake
+    refusal with a contract-class defer.
+  - A qualified `not_contains` on a legitimately empty field grades unknown, so pair it with a presence check.
+  - `Authority.AtLeast` and the exported `delegate.GradeAcceptance` have no production caller yet.

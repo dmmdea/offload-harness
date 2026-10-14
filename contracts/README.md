@@ -108,8 +108,9 @@ reserved prefix is now read as a qualified check, so anchor on something else or
 `contains:@fieldname:x` and `contains:@fieldx` are plain literal substrings, as is any other leading `@`, as before.
 A misspelt qualifier, and a qualified line read by
 a delegator one release behind, are a literal substring: for `contains:` and `regex:` no answer carries it, so the
-check fails closed; for `not_contains:` the literal is absent from every answer, so the check passes vacuously, and a
-qualified `not_contains:` buys nothing on such a delegator.
+check fails closed. For `not_contains:` that delegator reads `not_contains:@answer:SECRET` as the literal string
+"@answer:SECRET", so the check passes even when the answer contains SECRET and the forbidden-content check never fires.
+Qualified checks need the whole fleet on 0.187 or later.
 
 Acceptance carries no wall-time term (INV-5, [ADR 0050](../docs/architecture/decisions/0050-placement-ranks-adequate-seats-by-expected-completion.md):
 "Acceptance criteria and pass rules stay wall-time-free"). No verb above reads a clock: each reads the answer text, a
