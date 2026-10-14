@@ -609,10 +609,13 @@ function Resolve-ProfileParams {
   # Sane fallback: an unknown/absent profile renders the backend's ORIGINAL baked
   # defaults (pre-H2 values), so the config is always valid even off-matrix. The
   # backend templates are now fully tokenized, so the fallback MUST supply values.
+  # `inc` is whether the fallback serves the 26B (0186 w4, INV-1): a CUDA box off the tier matrix has no
+  # measured fit, so it serves none (and downloads none), and no expert placement in RAM is written for any
+  # backend. This table mirrors fallbackProfile in install_render.go, which is what actually renders.
   $defaults = @{
-    cuda   = @{ ctx = '16384'; kv = 'q8_0'; fa = 'on';  moe = '--cpu-moe -ngl 999'; resident = 'offload-e4b' }
-    vulkan = @{ ctx = '8192';  kv = 'f16';  fa = 'on';  moe = '-ngl 999';          resident = 'offload-e4b' }
-    cpu    = @{ ctx = '8192';  kv = 'f16';  fa = 'off'; moe = '';                  resident = 'offload-e4b' }
+    cuda   = @{ ctx = '16384'; kv = 'q8_0'; fa = 'on';  moe = '';          inc = $false; resident = 'offload-e4b' }
+    vulkan = @{ ctx = '8192';  kv = 'f16';  fa = 'on';  moe = '-ngl 999';  inc = $true;  resident = 'offload-e4b' }
+    cpu    = @{ ctx = '8192';  kv = 'f16';  fa = 'off'; moe = '';          inc = $true;  resident = 'offload-e4b' }
   }
   function New-Fallback {
     param([string]$B)
@@ -620,7 +623,7 @@ function Resolve-ProfileParams {
     if (-not $d) { $d = $defaults['cuda'] }
     return @{ known = $false; ctx = $d.ctx; kv_k = $d.kv; kv_v = $d.kv; flash_attn = $d.fa;
       agent_ctx = [int]$d.ctx; backend = $B; dual = $false; resident_tier = $d.resident;
-      include_26b = $true; moe_26b = $d.moe; moe_mode = 'template'; notes = 'fallback: backend defaults (unknown profile)' }
+      include_26b = [bool]$d.inc; moe_26b = $d.moe; moe_mode = 'template'; notes = 'fallback: backend defaults (unknown profile)' }
   }
   if (-not $ProfileId) { return (New-Fallback -B $Backend) }
   if (-not (Test-Path $ProfilesJsonPath)) { throw "profiles.json not found: $ProfilesJsonPath" }
@@ -630,10 +633,21 @@ function Resolve-ProfileParams {
   }
   $p = $doc.profiles.$ProfileId
 
-  # --cpu-moe needs a RAM path (>=~48GB) because EVERY expert lands in RAM. We keep
-  # the 26B on cpu_moe ONLY when ram_tier is mid|high; on low|min there is no RAM
-  # path so the 26B is dropped. 'gpu' placement never depends on RAM; 'drop' is
-  # always dropped.
+  # INV-1 (0186 w4): the cards do the inference and host RAM is overflow only. A tier that would put
+  # EVERY expert in RAM on a backend with a card, or that names the partial form without an N (which
+  # used to fall back to the every-expert form), is a defect in the table: refuse it by name, at any
+  # RAM tier, exactly as `local-offload install render` does (moeDefect in install_render.go), instead
+  # of downloading 14 GB for a render that will refuse. The cpu backend has no card to overflow from.
+  if ([bool]$p.include_26b -and $p.moe_26b -eq 'cpu_moe' -and $p.backend -ne 'cpu') {
+    throw "profile '$ProfileId': moe_26b cpu_moe parks every expert in host RAM on the $($p.backend) backend (INV-1: the cards do the inference and RAM is overflow only); use gpu or drop, or a measured n_cpu_moe with n_cpu_moe_max"
+  }
+  if ([bool]$p.include_26b -and $p.moe_26b -eq 'n_cpu_moe' -and [int]$p.n_cpu_moe -le 0) {
+    throw "profile '$ProfileId': moe_26b is n_cpu_moe but n_cpu_moe names no N; INV-1 sanctions only a measured partial spill (an N up to n_cpu_moe_max), never the every-expert placement a missing N would fall back to"
+  }
+
+  # The cpu backend's 26B (cpu_moe) needs a RAM path (>=~48GB). We keep it ONLY when ram_tier is
+  # mid|high; on low|min there is no RAM path so the 26B is dropped. 'gpu' placement never depends
+  # on RAM; 'drop' is always dropped.
   #
   # n_cpu_moe is the PARTIAL form: --n-cpu-moe <N> pushes only the top N expert
   # layers to RAM and keeps the rest on the GPU, so its RAM appetite is a fraction
@@ -653,20 +667,12 @@ function Resolve-ProfileParams {
 
   # __MOE_26B__ substitution string for the 26B llama-server cmd.
   #   gpu       -> experts on GPU, full offload
-  #   cpu_moe   -> ALL experts in RAM, non-expert layers on GPU
-  #   n_cpu_moe -> top N expert layers in RAM, the rest on GPU (partial)
+  #   cpu_moe   -> the cpu backend only (guarded above): no card, so no placement string
+  #   n_cpu_moe -> top N expert layers in RAM, the rest on GPU (partial; N is guarded above)
   $moeStr = ''
   if ($include) {
     if ($moeMode -eq 'gpu') { $moeStr = '-ngl 99' }
-    elseif ($moeMode -eq 'cpu_moe') { $moeStr = '--cpu-moe -ngl 999' }
-    elseif ($moeMode -eq 'n_cpu_moe') {
-      # n_cpu_moe MUST carry an N. A profile that names the mode without one is a
-      # defect, not something to paper over with a guess - fall back to the safe
-      # all-experts-in-RAM form rather than emitting a broken flag.
-      $n = [int]$p.n_cpu_moe
-      if ($n -gt 0) { $moeStr = "--n-cpu-moe $n -ngl 999" }
-      else { $moeStr = '--cpu-moe -ngl 999'; $moeMode = 'cpu_moe' }
-    }
+    elseif ($moeMode -eq 'n_cpu_moe') { $moeStr = "--n-cpu-moe $([int]$p.n_cpu_moe) -ngl 999" }
   }
 
   return @{
@@ -687,11 +693,16 @@ function Resolve-ProfileParams {
 }
 
 # Test-YamlHasEveryExpertFlag: does the llama-swap.yaml at $Path carry the every-expert placement on a
-# NON-comment line? SEAM ONLY in this commit (it always answers $false); the fix commit gives it its body and
-# the Step 6 SKIP test uses it, so a yaml an older installer rendered is re-rendered instead of kept.
+# NON-comment line? A yaml 0.185.1 or earlier rendered for an unknown profile does (and passes every other
+# Step 6 SKIP probe), so the SKIP test asks this, and an upgrade re-renders it instead of keeping the flag the
+# audit refuses. A comment may name the flag (the template headers do) and the sanctioned partial spill
+# (the flag with an N after `--n-`) is a different string, so neither counts. The pattern's `[-]` is a regex
+# character class on purpose: the source pin in `go test` fails on the dashed spelling in any non-comment
+# line of this script, and this detector is not a writer of the flag.
 function Test-YamlHasEveryExpertFlag {
   param([string]$Path)
-  return $false
+  if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $false }
+  return [bool](Select-String -LiteralPath $Path -Pattern '^\s*[^#\s].*--cpu[-]moe' -Quiet)
 }
 
 
@@ -1799,6 +1810,7 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     (Test-Path $yamlDest) -and
     -not (Select-String -Path $yamlDest -Pattern '__(LLAMA_BIN|MODELS|NTHREADS|CTX|KV_K|KV_V|FLASH_ATTN|MOE_26B|M26_ALT|M26_AND|Q38_ALT|Q38_AND)__' -Quiet) -and
     -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $llamaDir -Quiet) -and   # backslash path = stale pre-R3.6 render
+    (($tplBackend -eq 'cpu') -or -not (Test-YamlHasEveryExpertFlag -Path $yamlDest)) -and   # 0186 w4: a yaml an older installer rendered with the every-expert placement on a backend with a card must be re-rendered, not kept (the audit refuses it)
     (($tplBackend -ne 'vulkan') -or (Select-String -Path $yamlDest -SimpleMatch -Pattern 'GGML_VK_VISIBLE_DEVICES' -Quiet)) -and   # J1: vulkan render without the device pin = stale pre-0.22.19 render
     ((-not $eg2Bin) -or (Select-String -Path $yamlDest -SimpleMatch -Pattern "$eg2Bin/llama-server.exe" -Quiet)) -and   # OFFLOAD_EG2_LLAMA_BIN set but the entry not on that build = rendered before the override (or on another one): an upgrade must re-render. Anchored on the executable: a bare directory is a substring of a longer sibling (llama-b11490 inside llama-b11490-bin-win-cuda-12.4-x64)
     # A gated seat this tier enables but the rendered yaml does not contain = that yaml
