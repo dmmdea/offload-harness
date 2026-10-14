@@ -31,6 +31,11 @@
 # them for yours.
 set -euo pipefail
 
+# An exported CDPATH makes `cd <relative dir>` look in other folders first and print the one it chose, which would put a
+# second line into every `$(cd ... && pwd)` below. Clear it for the whole script, so no cd here or added later has to
+# remember to.
+unset CDPATH
+
 readonly OPENSPEC_VERSION="1.14.1"
 readonly OPENSPEC_SHA256="4a88e334938316db6916fd4f3aaf2213e6fc23b4fe327efd2afe7754c2d3b0bf"
 readonly OPENSPEC_PACKAGE="@fission-ai/openspec"

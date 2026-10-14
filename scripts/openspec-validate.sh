@@ -14,6 +14,11 @@
 # through `openspec schema validate <name>`. Exit code: 0 only when every call passes.
 set -euo pipefail
 
+# An exported CDPATH makes `cd <relative dir>` look in other folders first and print the one it chose, which would put a
+# second line into every `$(cd ... && pwd)` below. Clear it for the whole script, so no cd here or added later has to
+# remember to.
+unset CDPATH
+
 export OPENSPEC_TELEMETRY=0 DO_NOT_TRACK=1 OPENSPEC_NO_UPDATE_CHECK=1
 
 # OPENSPEC_BIN is the caller's, so a relative path means relative to the caller's directory: make it absolute before the
