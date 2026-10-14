@@ -439,21 +439,16 @@ type AwaitHostRAMOptions struct {
 	// HoldUntil, when set, is the moment the caller releases the lease if the host still lacks the room (the CLI passes the
 	// earlier of its hold bound and its --wait deadline, which is also the Deadline): it is stamped on the lease's record
 	// (Meta.HostRAMHoldUntilMs) when the wait BEGINS, so `gpu status` can say when the lease will be released and the lease's
-	// hidden holder can release it itself if the caller died, and cleared when the figure is admitted or the wait ends. It
-	// bounds nothing by itself; Deadline does.
+	// hidden holder can release it itself if the caller died. It is taken off the record only by admission, in the same
+	// critical section that declares the figure: a wait that ends any other way leaves it, because a lease that still asks for
+	// the host and carries no moment is one nobody is bound to release, and clearing it on the way out left a window of
+	// milliseconds in which a caller that died stranded the cards. It bounds nothing by itself; Deadline does.
 	HoldUntil time.Time
-	// OnStampError, when set, is told when the bound's stamp could not be written (op StampOpSet) or taken off the record again
-	// (op StampOpClear). The wait does not fail on either: the stamp is what `gpu status` and the hidden holder read, not what
-	// ends the wait, so a failed write costs the status line and the holder's own enforcement, and the CLI says so once per
-	// kind.
-	OnStampError func(op string, err error)
+	// OnStampError, when set, is told when the bound's stamp could not be written. The wait does not fail on it: the stamp is
+	// what `gpu status` and the hidden holder read, not what ends the wait, so a failed write costs the status line and the
+	// holder's own enforcement, and the CLI says so once.
+	OnStampError func(err error)
 }
-
-// The two operations OnStampError names.
-const (
-	StampOpSet   = "stamp"
-	StampOpClear = "clear"
-)
 
 // AwaitHostRAM admits the host RAM a lease asked for after it cleared the seat (Options.HostRAMWaitGiB) and
 // returns nil when the host admitted it, which is also what a lease that waits for nothing answers. It
@@ -469,27 +464,9 @@ const (
 // the figure on the record from the grant on would make each count the other's as still to load, and a host that
 // fits one of them would admit neither.) The cost, stated: while it waits a lease holds no claim on host RAM,
 // so a grant on other cards that fits is admitted ahead of it and the lease then waits for that grant's load.
-func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) (result error) {
+func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 	told := false
 	stamped := false
-	report := func(op string, err error) {
-		if o.OnStampError != nil {
-			o.OnStampError(op, err)
-		}
-	}
-	defer func() {
-		// The bound this wait stamped runs only while the wait does. A wait that ends without admission (its deadline, a
-		// cancel, a lease that is gone) leaves the lease still asking and no bound running; admission clears the stamp in
-		// the same critical section that declares the figure. A clear that fails is reported (the record would go on naming a
-		// bound that is not running), unless the lease is gone: then there is no record left to be wrong.
-		if stamped && result != nil {
-			if err := m.Restamp(epoch, func(mt *Meta) { mt.HostRAMHoldUntilMs = 0 }); err != nil {
-				if _, live := awaitedFigure(m.Leases(), epoch); live {
-					report(StampOpClear, err)
-				}
-			}
-		}
-	}()
 	for {
 		need, found := awaitedFigure(m.Leases(), epoch)
 		if !found {
@@ -509,8 +486,8 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) (result erro
 			until := o.HoldUntil.UnixMilli()
 			if err := m.Restamp(epoch, func(mt *Meta) { mt.HostRAMHoldUntilMs = until }); err == nil {
 				stamped = true
-			} else {
-				report(StampOpSet, err)
+			} else if o.OnStampError != nil {
+				o.OnStampError(err)
 			}
 		}
 		reading := m.readHost(need) // before the lock, compared inside it (F57)

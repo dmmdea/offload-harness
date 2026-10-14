@@ -284,10 +284,12 @@ type Meta struct {
 	// an older reader ignores it and reads a lease that declares nothing yet.
 	HostRAMWaitGiB float64 `json:"host_ram_wait_gib,omitempty"`
 	// HostRAMHoldUntilMs (F82 hold bound) is when the hold bound ends the wait of a lease that holds its cards while the
-	// host is asked for HostRAMWaitGiB: unix milliseconds, stamped when that wait begins and cleared with the wait. 0 = no
-	// bound is running (the wait has not begun, or the bound is off and --wait alone ends it). It is what `gpu status` reads
-	// to say when the lease will be released, since the bound can be a flag on one reserve and no other process sees that.
-	// Additive and omitempty: an older reader ignores it.
+	// host is asked for HostRAMWaitGiB: unix milliseconds, stamped when that wait begins and taken off only by admission (a
+	// wait that ends any other way leaves it: a lease that still asks for the host must carry a moment by which somebody
+	// releases it). 0 = no bound is known (the wait has not begun, or the bound is off and --wait alone ends it). It is what
+	// `gpu status` reads to say when the lease will be released, and what the lease's hidden holder acts on if the reserve that
+	// took it never releases it, since the bound can be a flag on one reserve and no other process sees that. Additive and
+	// omitempty: an older reader ignores it.
 	HostRAMHoldUntilMs int64 `json:"host_ram_hold_until_ms,omitempty"`
 
 	// --- record v2 (card-scoped leases). Every field is omitempty and unknown to a

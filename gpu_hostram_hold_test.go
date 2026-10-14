@@ -375,9 +375,10 @@ func TestARamHoldMaxAboveTheCeilingIsRefusedBeforeAnythingIsTaken(t *testing.T) 
 	_ = cfgPath
 }
 
-// Review finding: the CLI turns a failed stamp or clear into ONE stderr line per kind, however many times the library reports
-// it, and says what it costs (the status line, and the hidden holder's own enforcement of the bound).
-func TestAFailedStampOrClearIsSaidOncePerKind(t *testing.T) {
+// Review finding: the CLI turns a failed stamp into ONE stderr line, however many times the library reports it (it retries at every
+// look), and says what it costs (the status line, and the hidden holder's own enforcement of the bound). There is no clear to
+// fail: the stamp leaves the record only with admission.
+func TestAFailedStampIsSaidOnce(t *testing.T) {
 	short := &gpulease.ErrHostRAM{}
 	short.Why = "waiting for host RAM: needs 30.0 GiB, committed 70.0 of 100.0 GiB physical, 8.0 GiB headroom"
 	await := func(o gpulease.AwaitHostRAMOptions) error {
@@ -385,10 +386,7 @@ func TestAFailedStampOrClearIsSaidOncePerKind(t *testing.T) {
 			return nil // the CLI wired nothing: the failures below would be swallowed
 		}
 		for i := 0; i < 3; i++ {
-			o.OnStampError(gpulease.StampOpSet, errors.New("disk full"))
-		}
-		for i := 0; i < 2; i++ {
-			o.OnStampError(gpulease.StampOpClear, errors.New("access denied"))
+			o.OnStampError(errors.New("disk full"))
 		}
 		return nil
 	}
@@ -400,10 +398,7 @@ func TestAFailedStampOrClearIsSaidOncePerKind(t *testing.T) {
 	if n := strings.Count(text, "could not stamp"); n != 1 {
 		t.Errorf("one line for the stamp that could not be written, got %d:\n%s", n, text)
 	}
-	if n := strings.Count(text, "could not clear"); n != 1 {
-		t.Errorf("one line for the clear that could not be written, got %d:\n%s", n, text)
-	}
-	for _, want := range []string{"gpu reserve: warning:", "disk full", "access denied", "hidden holder", "gpu status"} {
+	for _, want := range []string{"gpu reserve: warning:", "disk full", "hidden holder", "gpu status"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the lines must say %q:\n%s", want, text)
 		}

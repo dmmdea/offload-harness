@@ -210,7 +210,7 @@ func TestAReserveThatIsAliveReleasesFirstAndTheHolderNeitherDoublesTheWarmNorSte
 }
 
 // THE PARENT DIES MID-RELEASE. The reserve reached the bound and began to warm the seat back, and was killed (a tool timeout
-// lands at exactly the default bound). Its wait is over and its stamp is cleared, but it pushed the stamped end out before the
+// lands at exactly the default bound). Its wait is over and its stamp had passed, but it pushed the stamped end out before the
 // slow part, so the holder, which sees a moment that then passes, releases the lease the reserve will never finish releasing.
 func TestAReserveThatDiesInTheMiddleOfItsOwnReleaseIsStillCoveredByTheHolder(t *testing.T) {
 	f := &orderedSwap{drainSwap: &drainSwap{}}
@@ -530,7 +530,7 @@ func TestTheStampedEndOfTheWaitIsWhicheverOfTheBoundAndWaitComesFirst(t *testing
 // A FENCE READ THAT FAILS FOR A MOMENT IS NOT A LOST LEASE. The holder's exit releases its lease, and its fence (Lease.Check)
 // reads the record: a read that lands while a restamp replaces the record fails for a moment on Windows ("access denied"), and the
 // holder took that for "the lease is gone" and let go of a live lease. The reserve now restamps the record more often during a
-// host-RAM wait (the stamp, its clear, the push-out before its own release), and the holder polls it, so the race had to be closed:
+// host-RAM wait (the stamp, the admission, the push-out before its own release), and the holder polls it, so the race had to be closed:
 // the holder confirms a failed fence with further looks before it lets go. Found as a 1-in-60 flake of the test above.
 func TestTheHolderDoesNotLetGoOfALiveLeaseBecauseOneFenceReadFailed(t *testing.T) {
 	cfgPath, m, _ := holderFixture(t, false)

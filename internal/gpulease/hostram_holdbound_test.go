@@ -161,9 +161,9 @@ func TestAWaitWithoutABoundStampsNothing(t *testing.T) {
 	asHostRAM(t, <-done)
 }
 
-// Review finding (silent failure): a failed stamp write and a failed clear were swallowed. The wait must not fail on either (the
-// stamp is what `gpu status` and the hidden holder read, not what ends the wait), but the caller must be told, so the CLI can say
-// once that the status line and the holder's own enforcement are not backed by a record.
+// Review finding (silent failure): a failed stamp write was swallowed. The wait must not fail on it (the stamp is what `gpu status`
+// and the hidden holder read, not what ends the wait), but the caller must be told, so the CLI can say once that the status line
+// and the holder's own enforcement are not backed by a record.
 
 // stampFaults installs a Restamp fault hook that fails the calls numbered in failOn (1-based) and counts every call.
 func stampFaults(t *testing.T, failOn ...int) *int32 {
@@ -191,21 +191,17 @@ func TestAFailedStampIsReportedAndDoesNotFailTheWait(t *testing.T) {
 	defer func() { _ = l.Release() }()
 	stampFaults(t, 1, 2) // the first two stamp attempts fail; the third works
 
-	type report struct {
-		op  string
-		err error
-	}
-	reports := make(chan report, 16)
+	reports := make(chan error, 16)
 	until := time.Now().Add(30 * time.Second)
 	done := make(chan error, 1)
 	go func() {
 		done <- l.AwaitHostRAM(AwaitHostRAMOptions{Deadline: until, HoldUntil: until,
-			OnStampError: func(op string, err error) { reports <- report{op, err} }})
+			OnStampError: func(err error) { reports <- err }})
 	}()
 	select {
 	case r := <-reports:
-		if r.op != StampOpSet || r.err == nil || !strings.Contains(r.err.Error(), "disk full") {
-			t.Errorf("a failed stamp is reported as the %q op with its error, got %+v", StampOpSet, r)
+		if r == nil || !strings.Contains(r.Error(), "disk full") {
+			t.Errorf("a failed stamp is reported with its error, got %v", r)
 		}
 	case err := <-done:
 		t.Fatalf("the wait ended instead of reporting the failed stamp: %v", err)
@@ -225,57 +221,6 @@ func TestAFailedStampIsReportedAndDoesNotFailTheWait(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the wait did not see the room")
-	}
-}
-
-func TestAFailedClearIsReportedAndTheWaitStillEndsWithTheHostsRefusal(t *testing.T) {
-	m, _ := ramScoped(t, 70)
-	l, err := m.TryAcquire(ClassMedia, Options{Reason: "film", TTL: time.Hour, Devices: []string{card0}, HostRAMWaitGiB: 30})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = l.Release() }()
-	stampFaults(t, 2) // call 1 stamps; call 2, the clear when the wait ends refused, fails
-
-	var ops []string
-	until := time.Now().Add(400 * time.Millisecond)
-	err = l.AwaitHostRAM(AwaitHostRAMOptions{Deadline: until, HoldUntil: until, OnStampError: func(op string, err error) { ops = append(ops, op) }})
-	asHostRAM(t, err)
-	if len(ops) != 1 || ops[0] != StampOpClear {
-		t.Errorf("exactly one report, of the clear that failed: %v", ops)
-	}
-	if rec := recordOf(t, m, l.Epoch()); rec.HostRAMHoldUntil.IsZero() {
-		t.Error("the clear failed, so the stamp is still on the record: that is what the report is about")
-	}
-}
-
-// A lease that is gone when the wait ends has no stamp left to clear: that is not a failure to report.
-func TestNoClearIsReportedWhenTheLeaseIsGone(t *testing.T) {
-	m, _ := ramScoped(t, 70)
-	l, err := m.TryAcquire(ClassMedia, Options{Reason: "film", TTL: time.Hour, Devices: []string{card0}, HostRAMWaitGiB: 30})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var reported atomic.Int32
-	until := time.Now().Add(20 * time.Second)
-	done := make(chan error, 1)
-	go func() {
-		done <- l.AwaitHostRAM(AwaitHostRAMOptions{Deadline: until, HoldUntil: until, OnStampError: func(string, error) { reported.Add(1) }})
-	}()
-	waitForHoldStamp(t, m, l.Epoch())
-	if err := m.releaseV2(l.Epoch()); err != nil { // the lease goes away under the wait
-		t.Fatal(err)
-	}
-	select {
-	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "gone") {
-			t.Errorf("a wait whose lease vanished says so: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the wait did not notice that its lease is gone")
-	}
-	if n := reported.Load(); n != 0 {
-		t.Errorf("a lease that is gone has no stamp to clear: %d report(s)", n)
 	}
 }
 
