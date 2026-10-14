@@ -13,8 +13,8 @@
   site that grades a result records both through one helper, and the result a caller reads carries
   `acceptance_authority` (`answer`, `field` or `grounded`), as does the corpus row. It is the weakest authority among
   the checks, stated only for a result accepted whole: one unqualified check, a failed or unknown check, a
-  list-fidelity failure or an excused document fingerprint leaves the key absent (omitempty), so a result no
-  qualified contract produced publishes byte-identically to before. A weaker authority cannot close a stronger
+  list-fidelity failure or an excused document fingerprint leaves the key absent (omitempty), so every result that
+  is not closed at an authority publishes byte-identically to before. A weaker authority cannot close a stronger
   claim: a contract of one grounded and one answer check closes at answer.
 - **Why a qualifier and not a verb.** The verb set is closed and pinned (`reviewedAcceptanceVerbs`), and every verb
   must be shown to read no clock. The qualifier lives in the argument tail, so no verb is added, a node one release
@@ -51,6 +51,7 @@
   its quarantine reading, the lint warnings (a blank document included), the published `acceptance_authority` on the
   local and remote paths and the corpus row, a source guard that every grading site records it, the rig reading real
   graded failures as anchor misses, and root tests that the verb set is unchanged and a speed term behind a
-  qualifier is still found. Docs: `contracts/README.md` (authority-graded checks) and the `acceptance` row of
-  `docs/systems/fleet-node.md`. The tool descriptions in `internal/mcpserver` still list the verbs without the
-  qualifier; they are left to the schema-profile work that owns that file.
+  qualifier is still found. Docs: `contracts/README.md` (authority-graded checks), the operator guide and the
+  `acceptance` row of `docs/systems/fleet-node.md`. The tool descriptions in `internal/mcpserver` still list the verbs
+  without the qualifier and the result keys without `acceptance_authority`; they are left to the schema-profile work
+  that owns that file.
