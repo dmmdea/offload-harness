@@ -2748,7 +2748,7 @@ func validateToolsSchemaProfile(v string) error {
 	case "", ToolsProfileFull, ToolsProfileCompact:
 		return nil
 	}
-	return fmt.Errorf("tools_schema_profile: unknown profile %q (valid: \"full\" (default: every description as written) or \"compact\" (first sentence plus safety sentences; every tool and parameter kept))", v)
+	return fmt.Errorf("tools_schema_profile: unknown profile %q (valid: \"full\" (default: every description as written) or \"compact\" (each description's opening sentence plus the sentences a reviewed keep list names; every tool, parameter, enum value and bound kept))", v)
 }
 
 // ToolsSchemaProfileMode resolves tools_schema_profile to "full" or "compact". An unset key is "full"; an unknown
