@@ -19,9 +19,9 @@
 // no file. Dependency-free (Node 18+, `node:` builtins only).
 //
 // What it does, in the order a node meets it:
-//   - a template that expands past LIMITS (100,000 nodes and instances, 64 levels of nesting) is refused (graph_too_large), and a
-//     node id that two scopes both give, or a subgraph definition id that appears twice, is a bad_template: neither is resolved
-//     to whichever came last;
+//   - a template that expands past LIMITS (100,000 nodes of any kind, subgraph instances included, counted over every scope that
+//     is entered; 64 levels of nesting) is refused (graph_too_large), and a node id that two scopes both give, or a subgraph
+//     definition id that appears twice, is a bad_template: neither is resolved to whichever came last;
 //   - mode 2 (muted) nodes are dropped; a wire that came from one is left out (a typed warning), or, for a widget input, the
 //     widget's stored value stays;
 //   - mode 4 (bypassed) nodes are not emitted; the i-th output of a type takes the i-th connected input of that type (a union
@@ -173,7 +173,7 @@ const MATCHTYPE = "COMFY_MATCHTYPE_V3";
 // of nodes, or so deep that a recursive walk runs out of stack: past either bound the call is refused (graph_too_large), never
 // carried on into a crash or a memory exhaustion. Real templates sit far below both (a handful of nodes per level, three levels).
 export const LIMITS = Object.freeze({
-  maxNodes: 100000, // real nodes plus subgraph instances entered
+  maxNodes: 100000, // every node met in every scope that is entered, of any kind (live, muted, bypassed, Note, Reroute, primitive, instance)
   maxSubgraphDepth: 64, // instances inside instances
 });
 const SG_INPUT_NODE = "-10";
@@ -400,19 +400,24 @@ function classify(ctx, node) {
   return "real";
 }
 
-// charge: one more real node or subgraph instance counts against LIMITS.maxNodes, at the moment it is met, so an expansion bomb is
-// refused after the first 100,000 and not after all of it
+// charge: one more node counts against LIMITS.maxNodes at the moment collect meets it, whatever its kind. A Note costs as much as a
+// live node: a definition stuffed with Notes, muted or bypassed nodes expands as far as one of live ones, and each instance of it
+// is walked, recorded in ctx.keys and given a scope map. So an expansion bomb is refused after the first 100,000 nodes it meets,
+// before any per-node work, and not after all of it.
 function charge(ctx, key) {
   if (++ctx.budget > LIMITS.maxNodes) {
-    refuse(REFUSAL.GRAPH_TOO_LARGE, `the template expands to more than ${LIMITS.maxNodes} nodes and subgraph instances (stopped at ${key})`, { limit: LIMITS.maxNodes, what: "nodes", node: key });
+    refuse(REFUSAL.GRAPH_TOO_LARGE, `the template expands to more than ${LIMITS.maxNodes} nodes (every node of every expanded subgraph counts, of any kind, and so does each subgraph instance; stopped at ${key})`, { limit: LIMITS.maxNodes, what: "nodes", node: key });
   }
 }
 
 // collect: walk a scope in file order; real live nodes go to ctx.live under their final id, live subgraph instances are entered.
+// Every node met is charged first, of any kind: nothing below (the key record, the classification, an instance's scope) is paid for
+// a node the bound has not counted.
 function collect(ctx, scope, stack) {
   for (const node of scope.nodes.values()) {
-    const kind = classify(ctx, node);
     const key = scope.prefix + node.id;
+    charge(ctx, key);
+    const kind = classify(ctx, node);
     // every node of every scope has one final id: two that read the same (a root node whose id is the path of an inner node) would
     // be one API node, or one trail key, with the last silently winning
     if (ctx.keys.has(key)) refuse(REFUSAL.BAD_TEMPLATE, `node id ${key} is given twice (a node of one scope has the id path of a node of another)`, { where: scope.prefix || "root", id: key });
@@ -434,7 +439,6 @@ function collect(ctx, scope, stack) {
         if (stack.length >= LIMITS.maxSubgraphDepth) {
           refuse(REFUSAL.GRAPH_TOO_LARGE, `subgraphs are nested more than ${LIMITS.maxSubgraphDepth} levels deep (stopped at ${key})`, { limit: LIMITS.maxSubgraphDepth, what: "subgraph depth", node: key });
         }
-        charge(ctx, key);
         const def = ctx.defs.get(node.type);
         const inner = makeScope(def.nodes, def.links, `${key}:`, { scope, node }, def);
         enterInstance(ctx, scope, node, def, inner, key);
@@ -444,7 +448,6 @@ function collect(ctx, scope, stack) {
         break;
       }
       default:
-        charge(ctx, key);
         ctx.live.push({ key, node, scope });
     }
   }

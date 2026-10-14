@@ -942,7 +942,7 @@ function rerouteChain(hops) {
 }
 
 test("Reroute chains of any length resolve without a stack overflow and in time that does not grow with the square of the length", () => {
-  const hops = 100000;
+  const hops = 99998; // the longest chain the bound admits: every Reroute counts, so this and its two ends are the 100,000 nodes
   const t0 = Date.now();
   const r = convert(rerouteChain(hops));
   const took = Date.now() - t0;
@@ -951,6 +951,7 @@ test("Reroute chains of any length resolve without a stack overflow and in time 
   assert.deepEqual(Object.keys(g).sort(), ["1", String(hops + 2)].sort());
   assert.equal(r.stats.reroutes, hops);
   assert.ok(took < 15000, `a 100k-hop chain took ${took} ms`); // loose on purpose: a copy of the visited set per hop is minutes, a walk is well under a second
+  assert.equal(refusalOf(convert(rerouteChain(hops + 1)), REFUSAL.GRAPH_TOO_LARGE).details.node, "100001", "one Reroute more is past the bound, which counts it like any node");
   // closed into a loop, a long chain is still a link_cycle and not a crash
   const loop = rerouteChain(hops);
   loop.links.push([hops + 2, hops + 1, 0, 2, 0, "IMAGE"]);
