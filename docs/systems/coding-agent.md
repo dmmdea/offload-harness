@@ -486,30 +486,51 @@ can never make the retry re-send the bytes the server just refused.
 
 **Optional log-collapse rung (`compactOpts.LogCollapse`, default off).** An extra rung between GCF
 and skeleton, in `internal/agent/rung_logs.go`: it folds each run of three or more consecutive
-near-identical lines in an OLDER result of a command tool (`run`, `run_shell`; a file read, a
-search, a fetch or a result whose call is not in the transcript is never touched) into its first
-line plus a count (`[... N similar lines folded ...]`). Two lines are near-identical when they match
-after every digit-bearing token (numbers, timestamp fields, counters, short hex ids), UUID, hex run
-of eight or more characters and terminal control sequence is masked and trailing whitespace is
-trimmed; indentation still counts. Every blank line, every line that looks like an error, warning,
-failure or test summary (the skeleton rung's `signalLine` plus stack-frame, traceback and
-test-runner summary shapes) and the first 8 and last 4 lines stay verbatim and never join a run, so
-a log made only of one repeated warning does not shrink. The body opens with
-`[log-collapse: original N chars, M lines]` (the idempotence marker, also recognised by
-`IsCompactionArtifact`) and ends with a footer that says how many runs and lines were folded. Like
-every rung it works only on the ladder's own window (never the protected preamble or the recent
-turns), skips pinned results, rewrites `Content` only (tool-call pairing is untouched), goes
+near-identical lines in an OLDER result of a command tool (`run`, `run_shell`) into its first
+line plus a count (`[... N similar lines folded ...]`). A file read, a search, a fetch, a result whose
+call is not in the transcript and a result whose tool-call id is declared by more than one call are
+never touched: an unknown or ambiguous producer fails closed. Two lines are near-identical when they
+match after every digit-bearing token (numbers, timestamp fields, counters, short hex ids), UUID, hex
+run of eight or more characters and terminal control sequence is masked and trailing whitespace is
+trimmed; indentation still counts. Because digits are masked, lines that differ only in a number (a
+status code, a port) fold into one, and the footer says so. Every blank line, every line that looks
+like an error, warning, failure or test summary and the first 8 and last 4 lines stay verbatim and
+never join a run, so a log made only of one repeated warning does not shrink. "Looks like" means the
+skeleton rung's `signalLine` plus stack-frame, traceback and test-runner summary shapes, the
+CamelCase exception names that `signalLine`'s word boundary cannot see (`TypeError`, `KeyError`,
+`AssertionError`, `NullPointerException`), a killed process, a segfault, a non-zero `exit status` and
+npm's `ERR!` prefix; each test is made on the line as written and with its terminal colour removed,
+so a coloured `ERROR` is kept and a line of nothing but colour codes counts as blank. The body opens
+with `[log-collapse: original N chars, M lines]` (the idempotence marker) and ends with a footer that
+says how many runs and lines were folded. Like every rung it works only on the ladder's own window
+(never the protected preamble or the recent turns), skips pinned results (including the body a
+pinned dedupe reference points at), rewrites `Content` only (tool-call pairing is untouched), goes
 oldest-first and stops at the first fit. It is deterministic, idempotent, never makes a body longer
 (the original string comes back unless the result is strictly shorter) and fails closed to the
 original on a body that is too small or too large, is not valid UTF-8, holds a NUL byte, parses as
 a JSON document, already carries another rung's marker or a GCF block, or makes the rewrite
 panic. Because it stops at the first fit, enabling it keeps more of an older log than the rungs
-after it would at the same budget. No production surface enables it yet: the field is not wired to
-a flag, a `Loop` setter, the config or the replay seam, and whether to adopt it is the measurement
-gate's call, not this page's. The idea of compressing build and test output while keeping the
-failures and the boundary lines is the documented behavior of the Headroom project (Apache-2.0); the
-mechanism here is this repository's own, written without reading that project's source (see
-`NOTICE`).
+after it would at the same budget.
+
+A rung that is off changes nothing, down to the byte. `IsCompactionArtifact` keeps its three
+clauses (elision marker, skeleton, dedupe reference), because the always-on dedupe rung and the live
+loop's re-execute decision both ask it; a separate `IsLogCollapseArtifact` recognises the rung's
+header, and the trace harvest asks both so it still refuses a transcript the rung has already
+compacted. A tool body that merely quotes the header, such as a saved collapsed log read back with
+`read_file`, is ordinary content to the default ladder, and a pinned set of digests over such
+transcripts holds that. With the rung on, the skeleton prefix, the elide marker (and the reactive
+last-resort marker) and the dedupe reference of a folded body name the size the body had before
+the fold, so a marker never says that less was lost than was.
+
+No production surface enables the rung yet: the field is not wired to a flag, a `Loop` setter, the
+config or the replay seam (`ReplayOpts` does not expose it, so `CompactReplay` cannot measure it).
+Wiring it into the live loop must also teach `resultDestroyed` the new predicate. Whether to adopt
+it is the measurement gate's call, not this page's, and that call needs a corpus whose tool calls
+carry tool names: the shipped mini corpus records call ids only, so the producer gate leaves it
+untouched, and the savings figures printed by the rung's tests come from fixtures whose calls are
+renamed to `run`. The idea of compressing build and test output while keeping the failures and the
+boundary lines is the documented behavior of the Headroom project (Apache-2.0); the mechanism here
+is this repository's own, written without reading that project's source (see `NOTICE`).
 
 **Compaction eval harness (`compaction-eval`, `internal/compeval`).** Default flips for the ladder
 rungs are gated by MEASUREMENT, never estimates: the verb replays a pinned corpus (JSONL of
