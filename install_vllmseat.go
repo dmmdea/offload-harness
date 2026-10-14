@@ -87,6 +87,9 @@ func (f vllmRuntimeFlags) check(tier string, s vllmseat.Spec) error {
 		for _, x := range []struct{ flag, val string }{
 			{"--distro", f.distro}, {"--wsl-seat-dir", f.wslSeatDir}, {"--host-prefix", f.hostPrefix},
 			{"--cache-mount-src", f.cacheMountSrc}, {"--cache-mount-opts", f.cacheMountOpts},
+			// The linux-systemd templates carry no LMCache wiring and no overlay token, so the
+			// flag would clear the fp8 refusal below and change no byte of the output.
+			{"--lmcache-overlay", f.lmcacheOverlay},
 		} {
 			if x.val != "" {
 				stray = append(stray, x.flag)
@@ -109,30 +112,88 @@ func (f vllmRuntimeFlags) check(tier string, s vllmseat.Spec) error {
 		// Everything the ENGINE reads is a path inside the distro. The defaults hang off --home (a
 		// Windows path here) and the HF cache falls back to $HF_HOME (also a Windows path), so a
 		// render that took either would write a Windows path into an env bash cannot open, and the
-		// seat would fail at its first start. Name them, as distro paths.
-		for _, x := range []struct{ flag, val string }{
-			{"--venv", f.venv}, {"--hf-home", f.hfHome}, {"--wsl-seat-dir", f.wslSeatDir}, {"--lmcache-overlay", f.lmcacheOverlay},
+		// seat would fail at its first start. Name them, as distro paths, each with an example of its
+		// own: one shared example sent an operator who left out --venv to pass the HF cache.
+		for _, x := range []struct {
+			flag, val, example string
+			optional           bool // empty is a default (or checked below), not a missing value
+		}{
+			{"--venv", f.venv, "/opt/seat/vllm-env", false},
+			{"--hf-home", f.hfHome, "/hf", false},
+			{"--wsl-seat-dir", f.wslSeatDir, "/opt/seat", true},
+			{"--lmcache-overlay", f.lmcacheOverlay, "/opt/seat/lmcache-overlay", true},
+			// Rendered into SEAT_MODEL, so it is what the engine opens: a directory that merely
+			// exists on the Windows side would pass the probe by accident.
+			{"--model-path", s.ModelPath, "/hf/hub/models--<org>--<name>/snapshots/<revision>", true},
 		} {
-			if x.val == "" && (x.flag == "--wsl-seat-dir" || x.flag == "--lmcache-overlay") {
-				continue // defaulted (/opt/seat), or checked below when the pair needs it
+			if x.val == "" && x.optional {
+				continue
 			}
 			if !strings.HasPrefix(x.val, "/") {
 				got := fmt.Sprintf("%q", x.val)
 				if x.val == "" {
 					got = "no value"
 				}
-				return fmt.Errorf("tier %s: launch %s needs %s as an absolute path INSIDE the distro %q (for example /hf), got %s — "+
+				return fmt.Errorf("tier %s: launch %s needs %s as an absolute path INSIDE the distro %q (for example %s), got %s — "+
 					"the engine and the seat env read it there, and a Windows path or a default under --home would not open",
-					tier, vllmseat.LaunchWindowsWSL, x.flag, f.distro, got)
+					tier, vllmseat.LaunchWindowsWSL, x.flag, f.distro, x.example, got)
+			}
+		}
+		// --host-prefix reads ONE distro's filesystem and --distro names the one the tasks run in. When
+		// the prefix is a share named after a distro, the two must agree, or the check vouches for a
+		// venv and weights the seat will not find. Share and distro names are case-insensitive, so the
+		// comparison is too; a prefix that is a plain directory names no distro and is not compared.
+		if name, ok := wslShareDistro(f.hostPrefix); ok && !strings.EqualFold(name, f.distro) {
+			return fmt.Errorf("tier %s: --host-prefix %q reads the filesystem of the distro %q, but --distro names %q — "+
+				"the prerequisite check would vouch for a venv and weights the seat will not find in %q",
+				tier, f.hostPrefix, name, f.distro, f.distro)
+		}
+		// The two cache-mount flags are read only for a seat that has a cache server. On a storeless
+		// seat their tokens render empty, and an operator who believes the share is mounted would get a
+		// same-box seat with no word that the flags were discarded.
+		if s.CacheServer == nil {
+			var stray []string
+			for _, x := range []struct{ flag, val string }{
+				{"--cache-mount-src", f.cacheMountSrc}, {"--cache-mount-opts", f.cacheMountOpts},
+			} {
+				if x.val != "" {
+					stray = append(stray, x.flag)
+				}
+			}
+			if len(stray) > 0 {
+				return fmt.Errorf("tier %s: %s given for a seat with no cache_server (the tier declares none, or --config binds it "+
+					"storeless): the wrapper mounts nothing, so nothing would read it", tier, strings.Join(stray, ", "))
 			}
 		}
 	}
 	if s.NeedsLMCacheOverlay() && f.lmcacheOverlay == "" {
+		if !wsl {
+			// Only a windows-wsl render wires an LMCache overlay into the files it writes. No flag could
+			// clear this for a seat that starts through systemd, so asking for one would send the
+			// operator to a second refusal.
+			return fmt.Errorf("tier %s: kv_cache_dtype %q with a cache_server cannot be rendered for a seat that starts through %s: "+
+				"only launch %s wires an LMCache overlay into the files it writes, and stock LMCache restores fp8 pages corrupt "+
+				"(upstream PR #4253) while reporting success", tier, s.KVCacheDtype, vllmseat.LaunchLinuxSystemd, vllmseat.LaunchWindowsWSL)
+		}
 		return fmt.Errorf("tier %s: kv_cache_dtype %q with a cache_server needs --lmcache-overlay, the patched LMCache "+
 			"directory (a path the engine sees) — stock LMCache restores fp8 pages corrupt (upstream PR #4253) and "+
 			"reports success while doing it, so this pair would serve wrong context silently", tier, s.KVCacheDtype)
 	}
 	return nil
+}
+
+// wslShareDistro is the distro a --host-prefix names when it is a WSL share (\\wsl.localhost\<name> or
+// \\wsl$\<name>), in either slash direction and any case; ok is false for any other prefix.
+func wslShareDistro(prefix string) (name string, ok bool) {
+	p := strings.ReplaceAll(prefix, `\`, "/")
+	lower := strings.ToLower(p)
+	for _, host := range []string{"//wsl.localhost/", "//wsl$/"} {
+		if strings.HasPrefix(lower, host) {
+			name, _, _ = strings.Cut(p[len(host):], "/")
+			return name, name != ""
+		}
+	}
+	return "", false
 }
 
 // vllmSeatFor decides whether THIS box renders the tier's vLLM agent seat.
@@ -272,17 +333,17 @@ func runInstallVLLMSeat(args []string) error {
 	outDir := fs.String("out", "", "directory to write the rendered artifacts into (default: <home>/seat)")
 	user := fs.String("user", "", "account llama-swap runs as; the polkit rule is scoped to it (launch windows-wsl: the interactive Windows account the seat tasks are registered for)")
 	proxy := fs.String("proxy-host", "", "LITERAL address the engine binds (an IP)")
-	venv := fs.String("venv", "", "hand-built vLLM virtualenv (default: <home>/vllm-env; launch windows-wsl: required, a path inside the distro)")
+	venv := fs.String("venv", "", "hand-built vLLM virtualenv (default: <home>/vllm-env; launch windows-wsl: required, a path inside the distro, written to SEAT_VENV)")
 	hfHome := fs.String("hf-home", "", "HF cache root (default: $HF_HOME, else <home>/hf; launch windows-wsl: required, a path inside the distro, e.g. /hf)")
-	modelPath := fs.String("model-path", "", "exact HF snapshot directory, overriding resolution from the tier's model_repo (the hash differs per download, so --force needs this)")
+	modelPath := fs.String("model-path", "", "exact HF snapshot directory, overriding resolution from the tier's model_repo (the hash differs per download, so --force needs this; launch windows-wsl: a path inside the distro, written to SEAT_MODEL)")
 	force := fs.Bool("force", false, "write the artifacts even when the venv or the weights are absent")
 	cfgPath := fs.String("config", "", "harness config.json whose kv_cache_server binding FOR THIS SEAT overrides the tier's cache_server (per-seat store dir and key_prefix)")
 	distro := fs.String("distro", "", "launch windows-wsl: the WSL distribution the engine runs in (required)")
 	wslSeatDir := fs.String("wsl-seat-dir", "", "launch windows-wsl: the directory INSIDE the distro holding the seat env and wrapper scripts (default /opt/seat)")
-	overlay := fs.String("lmcache-overlay", "", "patched LMCache directory prepended to PYTHONPATH, a path the engine sees (required for an fp8-KV seat with a cache server)")
-	mountSrc := fs.String("cache-mount-src", "", "launch windows-wsl: the cache export the seat wrapper mounts before the MP server starts, e.g. //store.example/kvcache (empty = already mounted)")
-	mountOpts := fs.String("cache-mount-opts", "", "launch windows-wsl: mount options for that export (carries the credentials path)")
-	hostPrefix := fs.String("host-prefix", "", "launch windows-wsl: where this process reads the distro's filesystem for the prerequisite check, e.g. \\\\wsl.localhost\\<distro> (never written to a file)")
+	overlay := fs.String("lmcache-overlay", "", "launch windows-wsl: patched LMCache directory prepended to PYTHONPATH, a path inside the distro (required for an fp8-KV seat with a cache server)")
+	mountSrc := fs.String("cache-mount-src", "", "launch windows-wsl: the cache export the seat wrapper mounts before the MP server starts, e.g. //store.example/kvcache (empty = already mounted; refused for a seat with no cache server)")
+	mountOpts := fs.String("cache-mount-opts", "", "launch windows-wsl: mount options for that export (carries the credentials path; refused for a seat with no cache server)")
+	hostPrefix := fs.String("host-prefix", "", "launch windows-wsl: where this process reads the distro's filesystem for the prerequisite check, e.g. \\\\wsl.localhost\\<distro>; a share must name --distro (never written to a file)")
 	_ = fs.Parse(args)
 
 	if *home == "" {
@@ -332,13 +393,25 @@ func runInstallVLLMSeat(args []string) error {
 	}
 	if ok, why := s.Detect(rt); !ok {
 		if !*force {
+			if s.Launch == vllmseat.LaunchWindowsWSL && rt.HostPrefixProblem() != "" {
+				// Every probe went through a prefix that cannot be read, so nothing was checked: this is
+				// not a missing venv, and "build it" would send the operator to the wrong place.
+				return fmt.Errorf("tier %s: %s — --host-prefix is how this process reads the distro's venv and HF cache, so "+
+					"nothing could be checked. Pass the distro's filesystem as this machine sees it (a share under wsl.localhost "+
+					"named after --distro %q), or pass --force to write the artifacts without the check", id, why, rt.Distro)
+			}
 			hint := ""
-			if s.Launch == vllmseat.LaunchWindowsWSL && rt.HostPrefix == "" {
-				// The venv and the HF cache of a windows-wsl seat are paths INSIDE the distro; this
-				// process can only look at them through the distro's share of the host filesystem.
-				hint = ". The venv and the HF cache of a windows-wsl seat are paths inside the distro: if they are " +
-					"there, pass --host-prefix (the distro's filesystem as this machine sees it, a share under wsl.localhost) " +
-					"so this check can read them"
+			if s.Launch == vllmseat.LaunchWindowsWSL {
+				if rt.HostPrefix == "" {
+					// The venv and the HF cache of a windows-wsl seat are paths INSIDE the distro; this
+					// process can only look at them through the distro's share of the host filesystem.
+					hint = ". The venv and the HF cache of a windows-wsl seat are paths inside the distro: if they are " +
+						"there, pass --host-prefix (the distro's filesystem as this machine sees it, a share under wsl.localhost) " +
+						"so this check can read them"
+				} else {
+					hint = fmt.Sprintf(". This check read the distro through --host-prefix %q: confirm it is the filesystem of "+
+						"the distro %q, and that the venv and the HF cache are at the paths the flags give", rt.HostPrefix, rt.Distro)
+				}
 			}
 			return fmt.Errorf("tier %s: %s — the box cannot run this seat, so the artifacts would describe a unit "+
 				"that fails at boot. Build the vLLM venv and fetch the weights first, or pass --force to write them anyway%s", id, why, hint)
