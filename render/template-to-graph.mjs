@@ -343,9 +343,11 @@ function build(template, objectInfo, options) {
   const ctx = {
     oi: objectInfo, defs, seed,
     warnings, pinnedSeeds: [], live: [], instances: new Map(), proxies: new Map(), entryCache: new Map(), keys: new Set(), budget: 0,
+    wires: 0, // the links of every scope entered, the most hops one walk can take (see settle)
     stats: { nodes: 0, expandedSubgraphs: 0, mutedNodes: 0, bypassedNodes: 0, notes: 0, reroutes: 0, primitiveNodes: 0 },
   };
   const root = makeScope(template.nodes, template.links, "", null, null);
+  ctx.wires = root.links.size;
   collect(ctx, root, []);
 
   // every class the live nodes use must be in the listing: all unknown ones are named at once, never guessed
@@ -441,6 +443,7 @@ function collect(ctx, scope, stack) {
         }
         const def = ctx.defs.get(node.type);
         const inner = makeScope(def.nodes, def.links, `${key}:`, { scope, node }, def);
+        ctx.wires += inner.links.size;
         enterInstance(ctx, scope, node, def, inner, key);
         ctx.instances.set(key, inner);
         ctx.stats.expandedSubgraphs++;
@@ -510,14 +513,27 @@ const MUTED = Object.freeze({ kind: "muted" });
 const nothing = (reason) => ({ kind: "none", reason });
 const follow = (scope, link) => ({ kind: "follow", scope, link });
 
-function settle(ctx, step, trail) {
-  while (step.kind === "follow") step = originStep(ctx, step.scope, step.link, trail);
+//
+// Two guards keep a loop in the wires from running for ever. The visited set (`trail`, a node and an output slot each) finds it where
+// it closes and names that node. Behind it is a bound on the hops of one walk, so that "never hangs" does not rest on the set alone:
+// the walk goes from one wire to the next by a rule that looks at nothing else, so a wire met twice is a loop, and a walk longer than
+// the wires of every scope entered (ctx.wires) has met one twice. Wires, not nodes: a definition that only passes its input through,
+// nested d deep, takes 2d + 3 hops over d + 3 nodes, and a node read through several of its outputs is passed once for each. A walk
+// that long is refused as link_cycle too, with details that say it was the bound (what: "hops") and name the node whose input was read.
+function settle(ctx, step, trail, consumer) {
+  let hops = 0;
+  while (step.kind === "follow") {
+    if (++hops > ctx.wires) {
+      refuse(REFUSAL.LINK_CYCLE, `the wires into ${consumer} take more hops than the template has wires (${ctx.wires}), so one wire is followed twice`, { what: "hops", limit: ctx.wires, consumer });
+    }
+    step = originStep(ctx, step.scope, step.link, trail);
+  }
   return step;
 }
 
 // resolveInput: the source of input `idx` of `node`, with `trail` the (node, slot) pairs this walk has passed through.
 function resolveInput(ctx, scope, node, idx, trail) {
-  return settle(ctx, inputStep(ctx, scope, node, idx), trail);
+  return settle(ctx, inputStep(ctx, scope, node, idx), trail, scope.prefix + node.id);
 }
 
 // inputStep: the wire into input `idx` of `node`. The link must exist and point back at this node and slot.
