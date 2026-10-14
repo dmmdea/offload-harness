@@ -6,18 +6,16 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/dmmdea/offload-harness/internal/config"
 )
 
-// liveSentences indexes every sentence of every description (a tool's own and each parameter's, at any depth) of the full
-// surfaces by tool: sentence -> true when it occurs somewhere OTHER than an opening position (the only place the keep-list and
+// liveSentences indexes every sentence of every description (a tool's own and each parameter's, at any depth) of every surface
+// in gateSurfaces by tool: sentence -> true when it occurs somewhere OTHER than an opening position (the only place the keep-list and
 // the dropped list act), false when it only ever opens a description.
 func liveSentences(t *testing.T) map[string]map[string]bool {
 	t.Helper()
 	out := map[string]map[string]bool{}
-	for _, cfg := range []func(string) config.Config{fullSurfaceCfg, fleetSurfaceCfg} {
-		for _, tool := range listTools(t, cfg("full")) {
+	for _, surface := range gateSurfaces() {
+		for _, tool := range listTools(t, surface.cfg("full")) {
 			if out[tool.Name] == nil {
 				out[tool.Name] = map[string]bool{}
 			}
@@ -109,28 +107,30 @@ func TestKeepAndDroppedListsAreDisjoint(t *testing.T) {
 // TestKeepListEntriesSurviveWhereverTheyAppear: a kept sentence (and its referents) is in the compact description at every place
 // of the tool where the full description has it, whether or not it carries a constraint word.
 func TestKeepListEntriesSurviveWhereverTheyAppear(t *testing.T) {
-	compact := map[string]*mcp.Tool{}
-	for _, tool := range listTools(t, fullSurfaceCfg("compact")) {
-		compact[tool.Name] = tool
-	}
 	checked := 0
-	for _, ft := range listTools(t, fullSurfaceCfg("full")) {
-		fd, cd := descriptionsByPath(ft), descriptionsByPath(compact[ft.Name])
-		paths := make([]string, 0, len(fd))
-		for p := range fd {
-			paths = append(paths, p)
+	for _, surface := range gateSurfaces() {
+		compact := map[string]*mcp.Tool{}
+		for _, tool := range listTools(t, surface.cfg("compact")) {
+			compact[tool.Name] = tool
 		}
-		sort.Strings(paths)
-		for _, path := range paths {
-			sents := splitSentences(fd[path])
-			lead := gateLeadCount(sents)
-			for i, s := range sents {
-				if i < lead || !compactKeepByTool[ft.Name][s] {
-					continue
-				}
-				checked++
-				if !strings.Contains(cd[path], s) {
-					t.Errorf("%s %s: compact dropped the kept sentence %.100q", ft.Name, path, s)
+		for _, ft := range listTools(t, surface.cfg("full")) {
+			fd, cd := descriptionsByPath(ft), descriptionsByPath(compact[ft.Name])
+			paths := make([]string, 0, len(fd))
+			for p := range fd {
+				paths = append(paths, p)
+			}
+			sort.Strings(paths)
+			for _, path := range paths {
+				sents := splitSentences(fd[path])
+				lead := gateLeadCount(sents)
+				for i, s := range sents {
+					if i < lead || !compactKeepByTool[ft.Name][s] {
+						continue
+					}
+					checked++
+					if !strings.Contains(cd[path], s) {
+						t.Errorf("%s: %s %s: compact dropped the kept sentence %.100q", surface.name, ft.Name, path, s)
+					}
 				}
 			}
 		}

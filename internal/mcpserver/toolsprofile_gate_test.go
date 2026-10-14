@@ -12,14 +12,17 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 )
 
-// gateTrigger marks a sentence as one that may carry a constraint: a prohibition, an obligation, an inability, a trust boundary, a
-// restriction or an opt-in. It is a deliberate superset of the words the compact profile was first reviewed against (never, refuse,
-// only, must, do not, cannot, required): it adds every contraction ("can't", "won't"), plain "not" (which also covers "do not",
-// "may not" and the upper-case "NOT"), "without", "opt-in" and the words the first lexical list kept (trusted, untrusted,
-// unattended, sandbox, safety, advisory, read-only, forbidden, irreversible, destructive, denied), so nothing that list kept and
-// nothing a review found it missing can go unclassified. It is written out here on purpose and is NOT the production lead-cut guard
-// (leadGuard in toolsprofile.go): narrowing production's regexp cannot narrow this gate.
-var gateTrigger = regexp.MustCompile(`(?i)\b(never|refus\w*|only|must|not|\w+n't|cannot|required|denied|trusted|untrusted|unattended|sandbox\w*|safety|advisory|read-only|forbidden|irreversible|destructive|opt-in|without|no (?:delete|shell|run|network|cloud|write))\b`)
+// gateTrigger marks a sentence as one that may carry a rule a caller must not be without. Two families. A constraint: a
+// prohibition, an obligation, an inability, a trust boundary, a restriction or an opt-in. It is a deliberate superset of the words
+// the compact profile was first reviewed against (never, refuse, only, must, do not, cannot, required): it adds every contraction
+// ("can't", "won't"), plain "not" (which also covers "do not", "may not" and the upper-case "NOT"), "without", "opt-in" and the
+// words the first lexical list kept (trusted, untrusted, unattended, sandbox, safety, advisory, read-only, forbidden, irreversible,
+// destructive, denied). And data leaving the box: a sentence that says the call is forwarded (forward*), that the input travels
+// with the job (travel*), that it goes over the tailnet or is sent on (tailnet, sent), or that a cloud model sits behind a
+// local service (cloud). Those carry no prohibition word and say what happens to the caller's bytes, which is a privacy rule
+// all the same. It is written out here on purpose and is NOT the production lead-cut guard (leadGuard in toolsprofile.go):
+// narrowing production's regexp cannot narrow this gate.
+var gateTrigger = regexp.MustCompile(`(?i)\b(never|refus\w*|only|must|not|\w+n't|cannot|required|denied|trusted|untrusted|unattended|sandbox\w*|safety|advisory|read-only|forbidden|irreversible|destructive|opt-in|without|no (?:delete|shell|run|network|cloud|write)|forward\w*|travel\w*|tailnet|sent|cloud)\b`)
 
 // droppedSentence records a constraint-word sentence the compact profile deliberately drops, in the tools named, and why that is
 // safe.
@@ -167,28 +170,32 @@ func gateTool(ft, ct *mcp.Tool, dropped map[string]string) gateResult {
 }
 
 // TestEveryConstraintSentenceIsKeptOrDroppedWithReason is the review gate of the compact profile. It reads the LIVE full
-// descriptions (every tool of the full surface, and each parameter at any depth), cuts them into sentences with the production
-// splitter, and for every sentence that carries a constraint word (gateTrigger) outside the opening sentence(s) it requires one of
-// two things: the sentence is in the COMPACT description of that same tool and parameter, verbatim, or it is on the dropped list
+// descriptions exactly as tools/list emits them (every tool of every surface in gateSurfaces: each optional lane on, the three
+// accelerators together as local and as fleet devices, and each device alone as a local and as a fleet accelerator, so the tool
+// names the shared-name rule hides on a combined box are read too, and a forwarder is read with the note appended to it), and each
+// parameter at any depth. It cuts them into sentences with the production splitter, and for every sentence that carries a
+// constraint word or says the data leaves the box (gateTrigger) outside the opening sentence(s) it requires one of two things:
+// the sentence is in the COMPACT description of that same tool and parameter, verbatim, or it is on the dropped list
 // (toolsprofile_dropped_test.go) with a reason. A description that gains a new rule therefore turns this test red until someone
 // has read the sentence and put it on one list or the other. The check reads the compact OUTPUT, so a keep-list entry that does
 // not match what the splitter produces is caught too.
 //
 // An opening sentence is kept by rule, and the cut may shorten it at a clause boundary only when the part it drops carries no
-// constraint word: that half is checked in gateTool with gateTrigger, independently of the production guard.
+// trigger word: that half is checked in gateTool with gateTrigger, independently of the production guard.
 func TestEveryConstraintSentenceIsKeptOrDroppedWithReason(t *testing.T) {
 	dropped := droppedIndex(t)
 	var total gateResult
-	for _, surface := range []struct {
-		name string
-		cfg  func(string) config.Config
-	}{{"full surface", fullSurfaceCfg}, {"fleet accelerators", fleetSurfaceCfg}} {
+	for _, surface := range gateSurfaces() {
 		compact := map[string]*mcp.Tool{}
 		for _, tool := range listTools(t, surface.cfg("compact")) {
 			compact[tool.Name] = tool
 		}
 		fullTools := listTools(t, surface.cfg("full"))
-		if surface.name == "fleet accelerators" {
+		switch {
+		case surface.device != "":
+			// A single-device surface must really register its device's table, or the pass over it is vacuous.
+			requireSurfaceRegistersItsDevice(t, surface, fullTools)
+		case surface.name == "fleet accelerators":
 			// The variant must really register the forwarders, or the pass over it is vacuous: every accelerator tool carries
 			// the "[FLEET: ...]" suffix there, and the surface is as large as the full one.
 			fleetTagged := 0
@@ -213,12 +220,12 @@ func TestEveryConstraintSentenceIsKeptOrDroppedWithReason(t *testing.T) {
 			total.leads += r.leads
 			total.leadsCut += r.leadsCut
 			for _, p := range r.problems {
-				t.Error(p)
+				t.Errorf("%s: %s", surface.name, p)
 			}
 		}
 	}
 	if total.kept < 40 || total.dropped < 40 || total.leads < 40 {
-		t.Fatalf("the gate saw %d kept, %d dropped and %d opening sentences with a constraint word: it is blind (leads cut: %d)", total.kept, total.dropped, total.leads, total.leadsCut)
+		t.Fatalf("the gate saw %d kept, %d dropped and %d opening sentences with a trigger word: it is blind (leads cut: %d)", total.kept, total.dropped, total.leads, total.leadsCut)
 	}
 }
 
@@ -264,7 +271,7 @@ func TestLeadCutNeverDropsAConstraintWord(t *testing.T) {
 // TestLeadGuardCoversTheGate: every word the gate classifies by is a word production's lead guard refuses to cut. Narrowing the
 // guard turns this red.
 func TestLeadGuardCoversTheGate(t *testing.T) {
-	for _, w := range []string{"never", "refuse", "refused", "refuses", "only", "must", "not", "do not", "may not", "don't", "can't", "won't", "cannot", "required", "denied", "trusted", "untrusted", "unattended", "sandbox", "sandboxed", "safety", "advisory", "read-only", "forbidden", "irreversible", "destructive", "opt-in", "without", "no delete", "no shell", "no run", "no network", "no cloud", "no write", "NOT", "ONLY"} {
+	for _, w := range []string{"never", "refuse", "refused", "refuses", "only", "must", "not", "do not", "may not", "don't", "can't", "won't", "cannot", "required", "denied", "trusted", "untrusted", "unattended", "sandbox", "sandboxed", "safety", "advisory", "read-only", "forbidden", "irreversible", "destructive", "opt-in", "without", "no delete", "no shell", "no run", "no network", "no cloud", "no write", "NOT", "ONLY", "forward", "forwarded", "forwards", "forwarding", "travel", "travels", "travelled", "tailnet", "sent", "cloud"} {
 		probe := "A sentence that says " + w + " here."
 		if !gateTrigger.MatchString(probe) {
 			t.Errorf("the gate does not classify by %q", w)
