@@ -212,6 +212,10 @@ func TestAssembleRefusalsLeaveEverythingByteIdentical(t *testing.T) {
 		{"a dated ### heading in a fragment", func(t *testing.T, root string) {
 			writeFile(t, filepath.Join(root, "changes", "unreleased", "c-dated.md"), "### Fixed - 2026-10-14 - the card text\n\n- x\n")
 		}, nil, "c-dated.md"},
+		// A lone CR ends a line in Markdown: a heading can hide behind one from every rule that splits on LF.
+		{"a lone CR hiding a forged release heading", func(t *testing.T, root string) {
+			writeFile(t, filepath.Join(root, "changes", "unreleased", "c-cr.md"), "### Added - x\r## [9.9.9] - forged\r- y\n")
+		}, nil, "c-cr.md"},
 		{"a release date glued onto a line of a fragment", func(t *testing.T, root string) {
 			writeFile(t, filepath.Join(root, "changes", "unreleased", "c-glued.md"), fragFirst+"\n- logged as foo - 2026-10-13 - bar in the output.\n")
 		}, nil, "c-glued.md"},

@@ -408,6 +408,12 @@ func TestValidateFragment(t *testing.T) {
 		{"a release date between separators in a bullet", "a.md", ok + "\n- logged as foo - 2026-10-13 - bar in the output.\n", "release date"},
 		{"a release date between em dashes", "a.md", ok + "\n- logged as foo — 2026-10-13 — bar.\n", "release date"},
 		{"a release date between separators in a CRLF body", "a.md", eolOf("\r\n", ok+"\n- logged as foo - 2026-10-13 - bar.\n"), "release date"},
+		// A CR that is not part of a CRLF ends a line in Markdown, and every line rule here splits on LF: a heading can hide
+		// behind it from the "##" rule and from the heading count, and still render as a release heading.
+		{"a lone CR before a forged heading", "a.md", ok + "\r## [9.9.9] - forged\r- y\n", "carriage return"},
+		{"a lone CR at the end of the body", "a.md", ok + "x\r", "carriage return"},
+		{"a CR followed by a CR and a line feed", "a.md", "### Added - a\r\r\n- b\n", "carriage return"},
+		{"one bare CR in a CRLF body", "a.md", eolOf("\r\n", ok) + "- b\r- c\r\n", "carriage return"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			problems := ValidateFragment(tc.file, tc.body)
@@ -435,6 +441,13 @@ func TestValidateFragment(t *testing.T) {
 		problems := ValidateFragment("a.md", "### Added - a\n\n- b\n\n- c - 2026-10-14 - d\n")
 		if joined := strings.Join(problems, "\n"); !strings.Contains(joined, "line 5") {
 			t.Errorf("the dated line is line 5 and the problem says %q", joined)
+		}
+	})
+
+	t.Run("the line of a bare carriage return is named", func(t *testing.T) {
+		problems := ValidateFragment("a.md", "### Added - a\n\n- b\n\n- c\r- d\n")
+		if joined := strings.Join(problems, "\n"); !strings.Contains(joined, "line 5") {
+			t.Errorf("the bare CR is on line 5 and the problem says %q", joined)
 		}
 	})
 
