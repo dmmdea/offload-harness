@@ -146,7 +146,7 @@ the CLI version that wrote it. `TestOpenSpecGeneratedToolFilesStayUntracked` pin
 
 `go test -run 'TestOpenSpec|TestDocsLint' .` covers the structure, the lockfile, both scripts (against stand-in `openspec` and
 `npm` programs, so the switches, the arguments, the exit code, the hash refusal and the install's success path, with npm's
-cache and temp folders under the prefix whatever the caller exported, need neither the network nor the CLI) and the ignore
+cache and temp folders under the prefix in the fetch and in the install whatever the caller exported, need neither the network nor the CLI) and the ignore
 lines. With `OPENSPEC_BIN` set it also runs the real CLI. With `OPENSPEC_INSTALL_TEST=1` it also runs the install script for
 real (npm and the network) into a scratch prefix, with home, application-data, XDG and temp folders pointed at empty folders
 beside it: the test fails if any of them gains a file, if the binary does not report the pinned version, or if the installed

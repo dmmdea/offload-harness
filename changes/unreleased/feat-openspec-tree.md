@@ -31,8 +31,8 @@
   against stand-in `openspec` and `npm` programs: the switches are forced whatever the caller exported, the strict arguments
   are exact, a failing validator fails the gate, a tarball with the wrong hash is refused before any install and leaves no
   scratch directory, the script's pins equal the admitted row, and a matching tarball installs through `npm pack` then
-  `npm ci` in a staged copy of the committed lockfile project with npm's cache and temp folders under the prefix even when the
-  caller exported others, a wrong installed version installs nothing, an earlier install is replaced and a foreign
+  `npm ci` in a staged copy of the committed lockfile project with npm's cache and temp folders under the prefix in both steps
+  even when the caller exported others, a wrong installed version installs nothing, an earlier install is replaced and a foreign
   `node_modules` is left alone. `TestOpenSpecInstallScriptInstallsTheRealPackage` runs the script for real (npm and the
   network) when `OPENSPEC_INSTALL_TEST=1`, with every home, data and temp folder pointed at an empty folder beside the prefix,
   and fails if any gains a file or if the installed packages differ from the lockfile; it skips with the reason elsewhere.

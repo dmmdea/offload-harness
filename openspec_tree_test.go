@@ -493,19 +493,24 @@ func runOpenSpecInstallWithStandInNpm(t *testing.T, fakeVersion string, prepare 
 	}
 	logPath := filepath.Join(dir, "npm-calls.log")
 	writeOpenSpecStandIn(t, bin, "npm", `log() { printf '%s\n' "$*" >> "$LOG"; }
+# What npm would use for its cache and its temp files in this step, as the script left the environment.
+log_env() {
+  log "$1 cache=${npm_config_cache-unset}"
+  log "$1 tmpdir=${TMPDIR-unset}"
+  log "$1 tmp=${TMP-unset}"
+  log "$1 temp=${TEMP-unset}"
+}
 log "call=$1"
 case "$1" in
   pack)
     log "pack argv=$*"
+    log_env pack
     printf '%s' "$STANDIN_TARBALL" > fission-ai-openspec-1.14.1.tgz
     echo fission-ai-openspec-1.14.1.tgz ;;
   ci)
     log "ci argv=$*"
     log "ci cwd=$(pwd -W 2>/dev/null || pwd)"
-    log "ci cache=${npm_config_cache-unset}"
-    log "ci tmpdir=${TMPDIR-unset}"
-    log "ci tmp=${TMP-unset}"
-    log "ci temp=${TEMP-unset}"
+    log_env ci
     cmp -s package.json "$SRC/package.json" && log "ci package.json=same" || log "ci package.json=different"
     cmp -s package-lock.json "$SRC/package-lock.json" && log "ci lockfile=same" || log "ci lockfile=different"
     [ "$(cat fission-ai-openspec-1.14.1.tgz)" = "$STANDIN_TARBALL" ] && log "ci tarball=same" || log "ci tarball=different"
@@ -600,12 +605,17 @@ func TestOpenSpecInstallScriptInstallsFromTheLockfileUnderThePrefix(t *testing.T
 			t.Errorf("%s = %q: npm ci must run in a copy that holds the committed package.json, the committed package-lock.json and the verified tarball", k, r.log[k])
 		}
 	}
-	if !openspecSamePath(r.log["ci cache"], filepath.Join(r.prefix, ".npm-cache")) {
-		t.Errorf("npm's cache was %q, want <prefix>/.npm-cache whatever the caller exported", r.log["ci cache"])
-	}
-	for _, k := range []string{"ci tmpdir", "ci tmp", "ci temp"} {
-		if !openspecPathUnder(r.log[k], r.prefix) {
-			t.Errorf("%s was %q, want a folder under the prefix %q whatever the caller exported", k, r.log[k], r.prefix)
+	// Both steps that touch npm's cache and temp files, the fetch and the install, run with them under the prefix:
+	// the caller exported folders elsewhere (the user profile, the system drive), and only the script can move them.
+	for _, step := range []string{"pack", "ci"} {
+		if !openspecSamePath(r.log[step+" cache"], filepath.Join(r.prefix, ".npm-cache")) {
+			t.Errorf("npm %s used the cache %q, want <prefix>/.npm-cache whatever the caller exported", step, r.log[step+" cache"])
+		}
+		for _, v := range []string{"tmpdir", "tmp", "temp"} {
+			k := step + " " + v
+			if !openspecPathUnder(r.log[k], r.prefix) {
+				t.Errorf("%s was %q, want a folder under the prefix %q whatever the caller exported", k, r.log[k], r.prefix)
+			}
 		}
 	}
 	for _, want := range []string{"export OPENSPEC_TELEMETRY=0", "export DO_NOT_TRACK=1", "export OPENSPEC_NO_UPDATE_CHECK=1"} {
