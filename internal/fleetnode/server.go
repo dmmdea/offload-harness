@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/backendchain"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/displaystate"
@@ -332,6 +333,11 @@ type Server struct {
 	admittingLoggedOpen bool
 	admittingLoggedList bool
 	agentRes            agentResidency
+	// backends / collectBackends: the cached per-lane and per-seat active_backend report
+	// (activebackend.go). collectBackends is a seam so tests drive the cache without a llama-swap;
+	// production always gets swapCollectBackends.
+	backends        backendCache
+	collectBackends func(ctx context.Context, cfg config.Config) backendchain.Report
 	// agentResultDecodeOnce keeps the "could not decode a finished contract's
 	// result" line to one per process: the only producer of that JSON is this
 	// process's own agenttask, so the failure is a wire-shape drift, not a
@@ -514,6 +520,7 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		rosterServes:       swapRosterServes,
 		rosterServedModels: swapRosterServedModels,
 		seatRunning:        swapSeatRunning,
+		collectBackends:    swapCollectBackends,
 		setWriteDeadline:   controllerWriteDeadline,
 		setReadDeadline:    controllerReadDeadline,
 	}
@@ -1210,6 +1217,13 @@ type healthPayload struct {
 	// (["vulkan","cpu"] on a dual-route node); a caller picks a route by seat id
 	// (`gemma4-e2b` vs `gemma4-e2b-cpu`). Additive + omitempty (ADR 0054).
 	Backends []string `json:"backends,omitempty"`
+	// LaneBackends and SeatBackends are the per-lane and per-seat active_backend report (EXP-1,
+	// internal/backendchain): which serving ENGINE (llama.cpp, vllm, rkllm, ...) is answering, the
+	// ordered chain it was picked from, how deep the probe went and why. They are NOT `backends` (the
+	// hardware tags above, unchanged). Additive + omitempty, and absent until the first background read
+	// lands: a reader takes an absent key as unknown, never as "none".
+	LaneBackends []backendchain.Entry `json:"lane_backends,omitempty"`
+	SeatBackends []backendchain.Entry `json:"seat_backends,omitempty"`
 	// KVSlot is true when this node renders a slot directory and answers the
 	// /fleet/kvslot/save|restore lane (ADR 0056 Layer 2).
 	KVSlot bool `json:"kvslot,omitempty"`
@@ -1677,6 +1691,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			payload.ServingConfigSpecSHA256, payload.ServingConfigState = sha, state
 		}
 	}
+	// Which engine answers for each lane and seat: a cached read, one background refresh per TTL.
+	payload.LaneBackends, payload.SeatBackends = s.activeBackends()
 	// The image recipe (ADR 0082) is published by a node that serves image-gen, from a memo; the node carries
 	// `refine` on that task exactly when it serves it.
 	for _, t := range tasks {

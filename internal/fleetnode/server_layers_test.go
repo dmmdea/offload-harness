@@ -71,6 +71,10 @@ func TestHealthPublishesTiersAndLayerRowsOnlyOnACompositeLane(t *testing.T) {
 		// does not answer for must publish served=false, not disappear.
 	})
 	s, _ := newTestServer(t, compositeNodeCfg(roster.URL), &fakeRunner{}, authOpts(true))
+	// This test counts the residency refresh's reads. The active-backend report (activebackend.go) has its
+	// own cached refresh with its own two reads of the same fake, so it is stood down here: its reads are
+	// pinned where it is tested (activebackend_test.go), and they are not the layer rows' probes.
+	s.collectBackends = nil
 
 	// First GET warms the cache the way production does (background refresh).
 	_ = do(t, s, http.MethodGet, "/fleet/health", "", nil)

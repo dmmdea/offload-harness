@@ -1033,6 +1033,9 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 	var probes atomic.Int64
 	roster := fakeRoster(t, &probes, "gemma-4-e4b", "offload-e4b")
 	s, _ := newTestServer(t, agentHealthCfg(roster.URL), &fakeRunner{}, authOpts(true))
+	// The roster hit count below is the residency refresh's. The active-backend report has its own cached
+	// refresh and its own reads of the same fake (pinned in activebackend_test.go), so it is stood down.
+	s.collectBackends = nil
 
 	rec := do(t, s, http.MethodGet, "/fleet/health", "", nil)
 	if rec.Code != http.StatusOK {
