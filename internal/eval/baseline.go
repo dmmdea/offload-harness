@@ -9,8 +9,8 @@ import (
 	"sort"
 )
 
-// The frozen baseline is the gate's pre-registration (GATE-R6): the mode, the primary metric
-// and its margin, the efficiency metrics a cut must improve, the sample floor, the bootstrap
+// The frozen baseline is the gate's pre-registration: the mode, the primary metric and its
+// margin, the judge, the efficiency metrics a cut must improve, the sample floor, the bootstrap
 // settings, the held-out ids and the declared task list, written ONCE before the first
 // candidate run and hashed. A verdict names the hash it was computed under, and the gate
 // refuses an input whose hash is not the baseline's, so the rules cannot be moved after the
@@ -18,8 +18,10 @@ import (
 // reproduces), with one more rule: the file is the canonical bytes, byte for byte.
 
 // GateVersion is the version of the rules this package implements. It rides in the baseline,
-// in every result and in the era marker.
-const GateVersion = "1"
+// in every result and in the era marker. Version 2: unusable candidate attempts enter at the
+// worst score, the judge is frozen, bootstrap_b and min_pairs have floors, a declared efficiency
+// metric that got worse vetoes, and the margin is bounded by the class width.
+const GateVersion = "2"
 
 // Modes.
 const (
@@ -48,12 +50,22 @@ const (
 	DefaultMinPairs         = 16
 	DefaultBootstrapB       = 10000
 	DefaultSeed       int64 = 1
-	// DefaultMaxExcludedShare is the share of declared tasks that may be unusable before the
-	// run is INCONCLUSIVE (GATE-R3).
+	// DefaultMaxExcludedShare is the share of attempts or declared tasks that may be unusable
+	// before the run is INCONCLUSIVE (the usable-denominator rule).
 	DefaultMaxExcludedShare = 0.20
-	// Default margins (DEFAULT TAKEN) for non-inferiority.
+	// Default margins for non-inferiority.
 	DefaultMarginUnitInterval = 0.05
 	DefaultMarginJudge010     = 0.5
+)
+
+// Floors that validate enforces. At n = 8 pairs a null comparison (no real difference) adopted in
+// 5.4% of simulated runs and at n = 16 with B = 2000 in 3.1%, against a nominal 2.5% for a
+// one-sided 95% interval; with B = 10 it was 9% and with B = 1 45%. The floors are the smallest
+// settings measured to stay calibrated: 2000 is the B the existing callers of BootstrapDeltaMean
+// use, and 16 is the default sample.
+const (
+	MinBootstrapB = 2000
+	MinMinPairs   = 16
 )
 
 // Primary is the metric the verdict is about.
@@ -63,12 +75,36 @@ type Primary struct {
 	// Margin is the non-inferiority margin m (> 0); 0 in superiority mode, where it is ignored.
 	Margin         float64 `json:"margin"`
 	HigherIsBetter bool    `json:"higher_is_better"`
-	// Range is [lo, hi], the closed score range of a custom primary class; absent for the others.
+	// Range is [lo, hi], the closed score range of a custom primary class; required for it and
+	// absent for the others, whose range the class fixes.
 	Range []float64 `json:"range,omitempty"`
 }
 
-// worst is the bad end of the primary's score range given its direction. Stub.
-func (p Primary) worst() float64 { return 0 }
+// scoreBounds is the closed range a pass or task_fail score of this primary must lie in. A class
+// without a valid range reports bounded false.
+func (p Primary) scoreBounds() (lo, hi float64, bounded bool) {
+	switch p.Class {
+	case ClassUnitInterval:
+		return 0, 1, true
+	case ClassJudge010:
+		return 0, 10, true
+	case ClassCustom:
+		if len(p.Range) == 2 {
+			return p.Range[0], p.Range[1], true
+		}
+	}
+	return 0, 0, false
+}
+
+// worst is the bad end of the primary's score range given its direction: the score an attempt
+// that did not produce one, or that cheated, enters a task's mean at.
+func (p Primary) worst() float64 {
+	lo, hi, _ := p.scoreBounds()
+	if p.HigherIsBetter {
+		return lo
+	}
+	return hi
+}
 
 // EfficiencyMetric is a cost a non-inferior candidate must improve to be adopted.
 type EfficiencyMetric struct {
@@ -175,6 +211,7 @@ func FreezeBaseline(p PreReg, corpus []byte, incumbent *Arm) (Baseline, []byte, 
 	b := Baseline{
 		GateVersion:      GateVersion,
 		Mode:             p.Mode,
+		Judge:            p.Judge,
 		MinPairs:         p.MinPairs,
 		BootstrapB:       p.BootstrapB,
 		Seed:             DefaultSeed,
@@ -199,6 +236,9 @@ func FreezeBaseline(p PreReg, corpus []byte, incumbent *Arm) (Baseline, []byte, 
 	sort.Strings(b.HeldOut)
 
 	b.Primary = Primary{Name: p.Primary.Name, Class: p.Primary.Class, HigherIsBetter: true}
+	if len(p.Primary.Range) > 0 {
+		b.Primary.Range = append([]float64{}, p.Primary.Range...)
+	}
 	if p.Primary.HigherIsBetter != nil {
 		b.Primary.HigherIsBetter = *p.Primary.HigherIsBetter
 	}
@@ -293,6 +333,22 @@ func (b *Baseline) validate() error {
 	if !b.Primary.HigherIsBetter {
 		return refusef("baseline refused: primary.higher_is_better must be true (lower-is-better primary scores are not supported yet)")
 	}
+	if b.Primary.Class == ClassCustom {
+		r := b.Primary.Range
+		if len(r) != 2 || !finite(r[0]) || !finite(r[1]) || !(r[1] > r[0]) || !finite(r[1]-r[0]) {
+			return refusef("baseline refused: primary class %q needs a range [lo, hi] of two finite numbers with hi above lo and a finite width (the worst score of an unfinished attempt is its bad end)", ClassCustom)
+		}
+	} else if len(b.Primary.Range) > 0 {
+		return refusef("baseline refused: primary.range is only for class %q; %q has a fixed range", ClassCustom, b.Primary.Class)
+	}
+	switch b.Judge.Kind {
+	case "deterministic", "model":
+	default:
+		return refusef("baseline refused: judge kind %q is not \"deterministic\" or \"model\" (the judge is part of the pre-registration)", b.Judge.Kind)
+	}
+	if b.Judge.Identity == "" {
+		return refusef("baseline refused: judge identity is empty (the pre-registration must name the scorer)")
+	}
 	switch b.Mode {
 	case ModeSuperiority:
 		if b.Primary.Margin != 0 {
@@ -301,6 +357,10 @@ func (b *Baseline) validate() error {
 	case ModeNonInferiority:
 		if !finite(b.Primary.Margin) || b.Primary.Margin <= 0 {
 			return refusef("baseline refused: non_inferiority needs a margin above 0, got %g", b.Primary.Margin)
+		}
+		lo, hi, _ := b.Primary.scoreBounds()
+		if width := hi - lo; b.Primary.Margin >= width {
+			return refusef("baseline refused: margin %g is not below the width %g of the %s score range: a margin that wide lets a candidate that fails every task through", b.Primary.Margin, width, b.Primary.Class)
 		}
 		if len(b.Efficiency) == 0 {
 			return refusef("freeze refused: non_inferiority with no efficiency metric (a non-inferiority cut must name what it saves)")
@@ -324,11 +384,11 @@ func (b *Baseline) validate() error {
 		}
 		seenEff[e.Name] = struct{}{}
 	}
-	if b.MinPairs < 2 {
-		return refusef("baseline refused: min_pairs %d is below 2 (a bootstrap over fewer than two pairs concludes nothing)", b.MinPairs)
+	if b.MinPairs < MinMinPairs {
+		return refusef("baseline refused: min_pairs %d is below the floor %d (a null comparison adopted in 5.4%% of runs at 8 pairs and 3.1%% at 16, against a nominal 2.5%%)", b.MinPairs, MinMinPairs)
 	}
-	if b.BootstrapB < 1 {
-		return refusef("baseline refused: bootstrap_b %d is below 1", b.BootstrapB)
+	if b.BootstrapB < MinBootstrapB {
+		return refusef("baseline refused: bootstrap_b %d is below the floor %d (a null comparison adopted in 9%% of runs at B = 10 and 45%% at B = 1)", b.BootstrapB, MinBootstrapB)
 	}
 	if !finite(b.MaxExcludedShare) || b.MaxExcludedShare < 0 || b.MaxExcludedShare > 1 {
 		return refusef("baseline refused: max_excluded_share %g is outside [0,1]", b.MaxExcludedShare)
@@ -360,6 +420,9 @@ func (b *Baseline) validate() error {
 	if len(b.HeldOut) >= len(b.Tasks) {
 		return refusef("baseline refused: every declared task is held out, none is left for the main comparison")
 	}
+	if left := len(b.Tasks) - len(b.HeldOut); b.MinPairs > left {
+		return refusef("baseline refused: min_pairs %d is above the %d tasks left once the held-out ones are set aside, so no run could reach it", b.MinPairs, left)
+	}
 	if b.Incumbent != nil {
 		if !stampsComplete(b.Incumbent.Stamps) {
 			return refusef("baseline refused: the frozen incumbent's stamps are incomplete (harness_build_sha256, seat_config_sha256 and engine_build are all required)")
@@ -369,7 +432,7 @@ func (b *Baseline) validate() error {
 				return refusef("baseline refused: the incumbent's tasks must be sorted by id and unique (%q after %q): not the form freeze writes", b.Incumbent.Tasks[i].ID, b.Incumbent.Tasks[i-1].ID)
 			}
 		}
-		if err := validateArm("incumbent", *b.Incumbent, declared, b.Primary.Class); err != nil {
+		if err := validateArm("incumbent", *b.Incumbent, declared, b.Primary); err != nil {
 			return err
 		}
 	}

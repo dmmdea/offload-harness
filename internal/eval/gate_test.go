@@ -427,8 +427,8 @@ func TestGateEfficiencyIntervalSpanningZeroDoesNotImprove(t *testing.T) {
 		if i%2 == 1 {
 			delta = 300
 		}
-		inc.Tasks[i].Attempts[0].Metrics = map[string]*float64{tokensName: f64(1000), "tokens_saved": f64(100)}
-		cand.Tasks[i].Attempts[0].Metrics = map[string]*float64{tokensName: f64(1000 + delta), "tokens_saved": f64(100 - delta)}
+		inc.Tasks[i].Attempts[0].Metrics = map[string]*float64{tokensName: f64(1000), "tokens_saved": f64(1000)}
+		cand.Tasks[i].Attempts[0].Metrics = map[string]*float64{tokensName: f64(1000 + delta), "tokens_saved": f64(1000 - delta)}
 	}
 	r := mustGate(t, b, h, inputFor(h, inc, cand))
 	for _, e := range r.Efficiency {

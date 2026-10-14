@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "local-offload gate input",
-  "description": "The document `local-offload gate verdict --input` reads: one comparison of a candidate arm against the incumbent arm under a frozen baseline. Stamps come from the runs that produced the scores. An unresolved efficiency value is JSON null (or an absent key) and is never read as 0. Scores of pass and task_fail attempts must lie in the baseline's primary class range (unit_interval: 0..1, judge_0_10: 0..10). The Go gate refuses what this schema cannot express (task ids outside the baseline's declared list, a repeated task id, an incumbent that differs from the baseline's frozen one).",
+  "description": "The document `local-offload gate verdict --input` reads: one comparison of a candidate arm against the incumbent arm under a frozen baseline. Stamps come from the runs that produced the scores. An unresolved efficiency value is JSON null (or an absent key) and is never read as 0. Scores of pass and task_fail attempts must lie in the baseline's primary class range (unit_interval: 0..1, judge_0_10: 0..10, custom: the range the baseline froze). Efficiency values are finite and not below 0. The judge must be the one the baseline froze. The Go gate refuses what this schema cannot express (task ids outside the baseline's declared list, a repeated task id, an incumbent that differs from the baseline's frozen one, a judge other than the frozen one).",
   "type": "object",
   "additionalProperties": false,
   "required": ["baseline_hash", "candidate", "judge"],
@@ -24,7 +24,7 @@
   },
   "$defs": {
     "outcome": {
-      "description": "What happened to one attempt. pass, task_fail and cheat are scored (a cheat is scored 0); every other class is counted and never scored.",
+      "description": "What happened to one attempt. pass, task_fail and cheat are scored (a cheat enters at the worst score of the primary range); every other class is counted and never scored: a candidate's enters its task's mean at the worst score, an incumbent's is skipped.",
       "type": "string",
       "enum": ["pass", "task_fail", "cheat", "infra_error", "timeout", "judge_error", "not_run"]
     },
@@ -35,11 +35,11 @@
       "properties": {
         "outcome": { "$ref": "#/$defs/outcome" },
         "score": {
-          "description": "Required for pass and task_fail. A cheat is scored 0 whatever it carries; ignored for every other class.",
+          "description": "Required for pass and task_fail. A cheat enters at the worst score of the primary range whatever it carries; ignored for every other class.",
           "type": "number"
         },
         "metrics": {
-          "description": "Efficiency values by declared metric name (tokens, money, memory in GiB). null or an absent key means unresolved.",
+          "description": "Efficiency values by declared metric name (tokens, money, memory in GiB): finite and not below 0. null or an absent key means unresolved.",
           "type": "object",
           "additionalProperties": { "type": ["number", "null"], "minimum": 0 }
         }
@@ -85,7 +85,7 @@
       "properties": {
         "kind": { "type": "string", "enum": ["deterministic", "model"] },
         "identity": {
-          "description": "The scorer id: a deterministic scorer's name, or the model id. A model judge's receipt must name the same scorer.",
+          "description": "The scorer id: a deterministic scorer's name, or the model id. It must be the judge the baseline froze (kind and identity); a model judge's receipt must name the same scorer.",
           "type": "string",
           "minLength": 1
         }
@@ -96,10 +96,10 @@
       "additionalProperties": false,
       "required": ["scorer_id", "pairs_hash", "passed", "build_sha256"],
       "properties": {
-        "scorer_id": { "type": "string" },
-        "pairs_hash": { "type": "string" },
-        "passed": { "type": "boolean" },
-        "build_sha256": { "type": "string" }
+        "scorer_id": { "description": "Must be the judge identity.", "type": "string", "minLength": 1 },
+        "pairs_hash": { "description": "Hex SHA-256 of the pairs the self-test ran on.", "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "passed": { "description": "Must be true.", "type": "boolean" },
+        "build_sha256": { "description": "Hex SHA-256 of the build that ran the self-test.", "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     }
   }

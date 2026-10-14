@@ -22,11 +22,11 @@ var GateInputSchema []byte
 // the same thing. A cost that was not measured is not a free run.
 type Attempt struct {
 	Outcome AttemptOutcome `json:"outcome"`
-	// Score is required for pass and task_fail; a cheat is scored 0 whatever it carries;
-	// ignored for every other class.
+	// Score is required for pass and task_fail; a cheat enters at the primary's worst score
+	// whatever it carries; ignored for every other class.
 	Score *float64 `json:"score,omitempty"`
-	// Metrics are efficiency values by declared metric name (tokens, money, memory in GiB).
-	// A nil value is unresolved.
+	// Metrics are efficiency values by declared metric name (tokens, money, memory in GiB):
+	// finite and not negative. A nil value is unresolved.
 	Metrics map[string]*float64 `json:"metrics,omitempty"`
 }
 
@@ -37,7 +37,7 @@ type Task struct {
 }
 
 // Stamps pin the run that produced an arm's scores: results from different stamps are
-// different eras and are never compared (GATE-R8). They come from the arms, not from the gate
+// different eras and are never compared. They come from the arms, not from the gate
 // binary.
 type Stamps struct {
 	HarnessBuildSHA256 string `json:"harness_build_sha256"`
@@ -146,24 +146,13 @@ func stampsComplete(s Stamps) bool {
 	return s.HarnessBuildSHA256 != "" && s.SeatConfigSHA256 != "" && s.EngineBuild != ""
 }
 
-// scoreRange is the closed range a primary class promises for a pass or task_fail score;
-// custom has none.
-func scoreRange(class string) (lo, hi float64, bounded bool) {
-	switch class {
-	case ClassUnitInterval:
-		return 0, 1, true
-	case ClassJudge010:
-		return 0, 10, true
-	}
-	return 0, 0, false
-}
-
 // validateArm refuses an arm the gate cannot honour: a task id the baseline never declared or a
 // repeated one, an unknown outcome word, a scored attempt with no score (or one outside its
-// class range), or a non-finite number. who names the arm in the message.
-func validateArm(who string, a Arm, declared map[string]struct{}, class string) error {
+// class range), a non-finite number or a negative efficiency value. who names the arm in the
+// message.
+func validateArm(who string, a Arm, declared map[string]struct{}, p Primary) error {
 	seen := make(map[string]struct{}, len(a.Tasks))
-	lo, hi, bounded := scoreRange(class)
+	lo, hi, bounded := p.scoreBounds()
 	for _, t := range a.Tasks {
 		if t.ID == "" {
 			return refusef("%s: a task has an empty id", who)
@@ -187,12 +176,15 @@ func validateArm(who string, a Arm, declared map[string]struct{}, class string) 
 					return refusef("%s: task %q attempt %d has a non-finite score", who, t.ID, i)
 				}
 				if bounded && (*at.Score < lo || *at.Score > hi) {
-					return refusef("%s: task %q attempt %d score %g is outside the %s range [%g, %g]", who, t.ID, i, *at.Score, class, lo, hi)
+					return refusef("%s: task %q attempt %d score %g is outside the %s range [%g, %g]", who, t.ID, i, *at.Score, p.Class, lo, hi)
 				}
 			}
-			for name, p := range at.Metrics {
-				if p != nil && !finite(*p) {
+			for name, m := range at.Metrics {
+				if m != nil && !finite(*m) {
 					return refusef("%s: task %q attempt %d metric %q is not finite", who, t.ID, i, name)
+				}
+				if m != nil && *m < 0 {
+					return refusef("%s: task %q attempt %d metric %q is negative (%g): an efficiency value is a cost, finite and not below 0", who, t.ID, i, name, *m)
 				}
 			}
 		}

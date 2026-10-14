@@ -9,7 +9,7 @@ import "fmt"
 //
 // Why not `Outcome`: this package already exports `Outcome`, the per-case result struct of the
 // cascade eval (Run, Aggregate, the confhead A/B). The gate's enum is the string type below;
-// the exported helpers keep the names the gate spec gave them (AllOutcomes, OutcomeFromCaliper).
+// the exported helpers are AllOutcomes and OutcomeFromRecord.
 type AttemptOutcome string
 
 const (
@@ -18,17 +18,20 @@ const (
 	OutcomePass AttemptOutcome = "pass"
 	// OutcomeTaskFail: the attempt finished and the scorer gave it a score (typically low).
 	OutcomeTaskFail AttemptOutcome = "task_fail"
-	// OutcomeCheat: the attempt tried to game the scorer. It is scored 0 whatever score it
-	// carries, and counted separately per arm.
+	// OutcomeCheat: the attempt tried to game the scorer. It enters a task's mean at the worst
+	// score of the primary whatever score it carries, and is counted separately per arm.
 	OutcomeCheat AttemptOutcome = "cheat"
-	// OutcomeInfraError: the run broke (engine crash, out of memory, transport). Not scored.
+	// OutcomeInfraError: the run broke (engine crash, out of memory, transport). Not scored: the
+	// candidate's enters at the worst score, the incumbent's is skipped.
 	OutcomeInfraError AttemptOutcome = "infra_error"
 	// OutcomeTimeout: the attempt hit its budget. Not scored: a timeout is a property of the
-	// run, and the gate carries no wall-time term (INV-5).
+	// run, and the gate carries no wall-time term (INV-5). A candidate's enters at the worst
+	// score, an incumbent's is skipped.
 	OutcomeTimeout AttemptOutcome = "timeout"
 	// OutcomeJudgeError: the judge could not score the attempt. Not scored.
 	OutcomeJudgeError AttemptOutcome = "judge_error"
-	// OutcomeNotRun: the attempt never ran (also: Caliper's `not_checked`). Not scored.
+	// OutcomeNotRun: the attempt never ran (an external record's `not_checked` is this class).
+	// Not scored.
 	OutcomeNotRun AttemptOutcome = "not_run"
 )
 
@@ -54,20 +57,22 @@ func (o AttemptOutcome) Valid() bool {
 	return false
 }
 
-// Scored reports whether an attempt of this class enters a task's score: pass, task_fail and
-// cheat. (A cheat enters as 0.)
+// Scored reports whether an attempt of this class enters a task's score on its own: pass,
+// task_fail and cheat. (A cheat enters at the primary's worst score, and an unfinished
+// candidate attempt is imputed at that score; see the scoring rule.)
 func (o AttemptOutcome) Scored() bool {
 	return o == OutcomePass || o == OutcomeTaskFail || o == OutcomeCheat
 }
 
-// OutcomeFromRecord is a stub.
-func OutcomeFromRecord(s string) (AttemptOutcome, bool) { return "", false }
-
-// OutcomeFromCaliper maps the outcome word of a Caliper record to this taxonomy. The six
-// classes it shares with the gate map to themselves; its `not_checked` (the check never ran)
-// is the gate's `not_run`. Any other word is unknown (false): a record the gate cannot place
-// must be refused by the caller, never guessed into a class.
-func OutcomeFromCaliper(s string) (AttemptOutcome, bool) {
+// OutcomeFromRecord maps the outcome word of an external evaluation record to this taxonomy.
+// The record shape it reads is one string: the outcome word the record's own check wrote. The
+// six words it shares with the gate (pass, task_fail, cheat, infra_error, timeout, judge_error)
+// map to themselves; the record's `not_checked` (the check never ran) is the gate's `not_run`.
+// Any other word is unknown (false): a record the gate cannot place must be refused by the
+// caller, never guessed into a class. Turning a record's runs into an arm is the adapter's job
+// and the adapter is the trust boundary: the gate checks task ids against the declared list,
+// not what a task contained.
+func OutcomeFromRecord(s string) (AttemptOutcome, bool) {
 	switch s {
 	case "pass", "task_fail", "cheat", "infra_error", "timeout", "judge_error":
 		return AttemptOutcome(s), true
