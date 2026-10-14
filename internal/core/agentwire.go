@@ -285,7 +285,7 @@ const (
 	AskerMaxLen = 64
 )
 
-// Origin headers (register D-101, ADR 0085). Like the attribution headers above they ride the request that
+// Origin headers (register D-101, ADR 0087). Like the attribution headers above they ride the request that
 // creates work on a fleet node, are sent only when non-empty, and are ignored by a node that predates them.
 //
 //	OriginHeader    the asker's session label (ledger.CleanOrigin: printable ASCII, at most 96 bytes, else none).

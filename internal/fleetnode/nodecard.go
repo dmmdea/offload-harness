@@ -30,7 +30,7 @@ func askerOf(r *http.Request) (asker string, nodeCards bool) {
 }
 
 // originOf reads the origin headers of a request that creates work: the asker's session label and run class
-// (ADR 0085), each cleaned by the ledger's own rule, so a label valid in the asker's own Record is never dropped
+// (ADR 0087), each cleaned by the ledger's own rule, so a label valid in the asker's own Record is never dropped
 // here and one the ledger would refuse never lands on a row. A value over the cap is refused whole, not cut like
 // the tenant is: a cut session id would name another session.
 //

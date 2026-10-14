@@ -11,7 +11,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
-// Register D-101 (ADR 0085): `ledger --by-session` adds a sessions array, each session's card tokens split by where
+// Register D-101 (ADR 0087): `ledger --by-session` adds a sessions array, each session's card tokens split by where
 // they ran (this box or a fleet node). It is additive: without the flag the output is what it always was.
 
 // sessionLedger writes a ledger of two sessions and one bake and returns the config path that reads it. Every row

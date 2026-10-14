@@ -2451,7 +2451,7 @@ card closed red. A call that reached no node has its row and no card, and a pani
 panic before it goes on. Both POSTs, the plain
 dispatch and the media-job, carry `X-Offload-Asker` and, only when this machine's emitter is off, `X-Offload-Pair-Card: node`, and,
 only when non-empty, the asker's session and run class (`X-Offload-Origin`, `X-Offload-Run-Class`; the node believes the class only from a request
-it can authenticate, [ADR 0085](../architecture/decisions/0085-the-askers-origin-and-run-class-ride-the-fleet-wire.md)).
+it can authenticate, [ADR 0087](../architecture/decisions/0087-the-askers-origin-and-run-class-ride-the-fleet-wire.md)).
 The local route, and an auto call that runs here, are not attributed (the pipeline writes that row).
 
 ## Overflow: a busy lane places an image call on the fleet (ADR 0082)

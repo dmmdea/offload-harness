@@ -5,7 +5,7 @@ import (
 	"sort"
 )
 
-// SessionShare is one session's card tokens split by WHERE they ran (register D-101, ADR 0085).
+// SessionShare is one session's card tokens split by WHERE they ran (register D-101, ADR 0087).
 //
 // It is the card-side placement split: of the tokens the session's own jobs put through the cards, how many ran
 // on a fleet node (RemoteTokens) and how many on this box (LocalTokens). It is NOT the share gate's figure,
@@ -21,7 +21,7 @@ import (
 //
 // It reads ONE box's ledger. The asker's own totals come from the rows its delegator process wrote; the
 // served_* part comes from the rows this box wrote as a fleet node, which carry the asker's session only since
-// the origin headers (ADR 0085). A view across the whole fleet is a reader of several ledgers; this is not it.
+// the origin headers (ADR 0087). A view across the whole fleet is a reader of several ledgers; this is not it.
 type SessionShare struct {
 	// Session is the origin_session of the rows; "" is every row that carries none (unattributed), never merged
 	// into a named session.

@@ -122,7 +122,7 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 	// row, and a job whose asker signalled that it will not card it gets its card from this node.
 	// The submitter's headers reached us on the queued job.
 	asker := core.SanitizeAsker(job.Asker)
-	// The submitter's session and run class (ADR 0085) came over the network on the queued job: cleaned again by
+	// The submitter's session and run class (ADR 0087) came over the network on the queued job: cleaned again by
 	// the ledger's rule, as the asker's name is. The holder is reached with this node's bearer, so the class it
 	// hands over is one this node can authenticate (the submit route sits behind the holder's own guard).
 	originSession, runClass := ledger.CleanOrigin(job.Origin), ledger.CleanClass(job.RunClass)

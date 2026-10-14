@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Register D-101 (ADR 0085): the session and run class a fleet node's row is stamped with come from the wire, so
+// Register D-101 (ADR 0087): the session and run class a fleet node's row is stamped with come from the wire, so
 // the cleaners that decide whether a label is valid are exported and used at both ends, and Record keeps a
 // session its caller named while still saying which process recorded the row.
 

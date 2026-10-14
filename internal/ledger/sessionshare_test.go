@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Register D-101 (ADR 0085): the card-side split of one session's tokens by where they ran. These tests pin the
+// Register D-101 (ADR 0087): the card-side split of one session's tokens by where they ran. These tests pin the
 // reader's rules one by one; each has a single-line mutant in the change that introduced it.
 
 func shareOf(t *testing.T, shares []SessionShare, session string) SessionShare {

@@ -200,7 +200,7 @@ tokens kept local (est.): 2920 (~$0.04 Opus-input value — an estimate, not bil
 
 Every row (0.124.0, ADR 0046) also says WHO asked and WHAT ran: `origin_session` (the Claude Code
 session id the MCP server inherited from its environment, or `LOCAL_OFFLOAD_ORIGIN` when a caller names
-itself; on a fleet node's row, the session of the box that asked, which it sends as `X-Offload-Origin` since ADR 0085 —
+itself; on a fleet node's row, the session of the box that asked, which it sends as `X-Offload-Origin` since ADR 0087 —
 absent when the asker is older or has none, and on a service's own row), `origin_pid` / `origin_ppid`, `cards_tokens`
 (the one figure for the tokens the cards processed for that row — prompt work plus generation, 0 on a
 cache hit), and on agent / delegate rows `job_id`, `route`, `placement`, `steps`, `stop_reason`,
@@ -251,7 +251,7 @@ local-offload ledger --since 2 --include-test-traffic
 ```
 
 A bake that dispatches to a fleet node labels the node's row too: the asker sends its class as `X-Offload-Run-Class`
-(and its session as `X-Offload-Origin`), and a node that can authenticate the request stamps both (ADR 0085), so
+(and its session as `X-Offload-Origin`), and a node that can authenticate the request stamps both (ADR 0087), so
 `local-offload ledger` on the node leaves the job out and counts it. A node built before this ignores the header; its
 row stays unlabelled.
 

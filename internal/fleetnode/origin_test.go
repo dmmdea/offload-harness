@@ -14,7 +14,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
-// Register D-101 (ADR 0085): a node stamps the asker's session and run class on its own ledger row, from two
+// Register D-101 (ADR 0087): a node stamps the asker's session and run class on its own ledger row, from two
 // headers, by the ledger's own cleaning rule, and honours the class only for a request it can authenticate.
 
 func originReq(session, class string) *http.Request {

@@ -73,7 +73,7 @@ func handleSubmit(q *Queue) http.HandlerFunc {
 		// job is attributed exactly like a pushed one. The asker name is untrusted; the card
 		// signal has one legal value.
 		attr := Attribution{Asker: core.SanitizeAsker(r.Header.Get(core.AskerHeader))}
-		// The session and run class the work is for (ADR 0085), cleaned by the ledger's rule. The class needs
+		// The session and run class the work is for (ADR 0087), cleaned by the ledger's rule. The class needs
 		// no further check here: this route is behind the Mount guard, so a request that reaches it carried the
 		// fleet bearer (or came over loopback on a node with no token), the same trust as the claim route.
 		attr.Origin = ledger.CleanOrigin(r.Header.Get(core.OriginHeader))

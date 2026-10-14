@@ -71,8 +71,8 @@ type Job struct {
 	Asker    string `json:"asker,omitempty"`
 	PairCard string `json:"pair_card,omitempty"`
 	// Origin and RunClass carry the submitter's origin headers (core.OriginHeader and core.RunClassHeader,
-	// cleaned) the same way (ADR 0085): the claiming node stamps them on its own ledger row, so a pulled job
-	// names the session it worked for exactly like a pushed one. Omitted on a job a pre-0085 submitter queued,
+	// cleaned) the same way (ADR 0087): the claiming node stamps them on its own ledger row, so a pulled job
+	// names the session it worked for exactly like a pushed one. Omitted on a job a pre-0087 submitter queued,
 	// which a claimant reads as "no session, no class named".
 	Origin   string `json:"origin_session,omitempty"`
 	RunClass string `json:"run_class,omitempty"`

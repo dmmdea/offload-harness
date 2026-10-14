@@ -110,7 +110,7 @@ func CleanOrigin(s string) string {
 // caller that names an origin of its own keeps it. Two cases of that: a caller
 // that names a process (a pid) is kept whole, and a caller that names only a
 // SESSION (a fleet node writing the row of a job for the asker's session,
-// ADR 0085) keeps the session and still gets the pids of the process that
+// ADR 0087) keeps the session and still gets the pids of the process that
 // recorded the row, which is what the columns mean: "process P recorded this
 // while serving session S".
 func stampOrigin(e *Entry) {

@@ -10,7 +10,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 )
 
-// Register D-101 (ADR 0085): the submitter's session label and run class ride the queued job to whichever node
+// Register D-101 (ADR 0087): the submitter's session label and run class ride the queued job to whichever node
 // claims it, so a pulled job names the session it worked for exactly like a pushed one.
 
 func submitWith(t *testing.T, h http.Handler, id string, headers map[string]string) {
@@ -98,7 +98,7 @@ func TestJobRoundTripsWithAndWithoutTheOriginFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	if old.Origin != "" || old.RunClass != "" || old.Asker != "node-a" {
-		t.Fatalf("pre-0085 job decoded as %+v", old)
+		t.Fatalf("pre-0087 job decoded as %+v", old)
 	}
 	b, err := json.Marshal(old)
 	if err != nil {

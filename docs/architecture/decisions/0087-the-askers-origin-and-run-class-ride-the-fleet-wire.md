@@ -3,7 +3,7 @@ status: Proposed
 date: "2026-10-13"
 ---
 
-# 0085 — The asker's origin and run class ride the fleet wire
+# 0087 — The asker's origin and run class ride the fleet wire
 
 Release: unreleased (register D-101, completing ADR 0046 and the run class of register F48)
 

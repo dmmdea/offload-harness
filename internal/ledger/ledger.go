@@ -147,7 +147,7 @@ type Entry struct {
 	// every row that carries none, so every writer in this binary — cascade,
 	// agent, delegate, media — is attributed by one rule. A fleet node's row
 	// carries the session of the asker that sent one (the X-Offload-Origin
-	// header, ADR 0085) and the node process's own pids; a row for an asker
+	// header, ADR 0087) and the node process's own pids; a row for an asker
 	// that sent none, or a service's own row, carries pids and no session;
 	// pre-0.124.0 rows carry neither, and a reader must treat that as
 	// UNATTRIBUTED, never as "some other session".

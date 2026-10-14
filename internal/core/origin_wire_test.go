@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Register D-101 (ADR 0085): the asker's session and run class ride in-process fields, never the wire body. A
+// Register D-101 (ADR 0087): the asker's session and run class ride in-process fields, never the wire body. A
 // request body must not be able to name its own session or class, and Meta (which a node marshals whole into its
 // poll results) must not echo the asker's session id back through them.
 

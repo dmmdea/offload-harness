@@ -679,7 +679,7 @@ running at start, terminal at finish; `fleetnode/nodecard.go`). Asking boxes sen
 on the job (`fleetqueue.Job.Asker`, `PairCard`), so the claim loop applies them to a pulled job exactly as
 `admit` does to a pushed one — and now also stamps a pulled job's door `fleet` (`dispatchDoor`), which it did
 not before. Two more headers carry the asker's session and run class (`X-Offload-Origin`, `X-Offload-Run-Class`,
-[ADR 0085](../architecture/decisions/0085-the-askers-origin-and-run-class-ride-the-fleet-wire.md)), sent only when non-empty:
+[ADR 0087](../architecture/decisions/0087-the-askers-origin-and-run-class-ride-the-fleet-wire.md)), sent only when non-empty:
 `admit` (and the claim loop, from `fleetqueue.Job.Origin` / `RunClass`) cleans them with the ledger's own rules
 (`ledger.CleanOrigin`, `CleanClass`; a session over 96 bytes is refused whole, where the tenant is truncated) and stamps them
 on the node's ledger row as `origin_session` and `run_class`, with the node process's own pids. The class is believed only

@@ -437,7 +437,7 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) 
 	meta.FleetJobID = req.FleetJobID
 	// The asker's name a fleet node was told (X-Offload-Asker), carried to the ledger row the same way.
 	meta.Requester = req.Requester
-	// The session and run class of the box that asked (ADR 0085), carried to the ledger row the same way: the row
+	// The session and run class of the box that asked (ADR 0087), carried to the ledger row the same way: the row
 	// names the session the node worked for, not the node process's own.
 	meta.AskerSession, meta.AskerClass = req.OriginSession, req.RunClass
 
@@ -5089,7 +5089,7 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		FleetJobID: meta.FleetJobID,
 		// Who a fleet node ran the job for (D11); empty on any other row.
 		Requester: meta.Requester,
-		// The session and run class the job was for (ADR 0085); empty on any row no asker named one for, which
+		// The session and run class the job was for (ADR 0087); empty on any row no asker named one for, which
 		// Record then stamps with this process's own.
 		OriginSession: meta.AskerSession,
 		RunClass:      meta.AskerClass,

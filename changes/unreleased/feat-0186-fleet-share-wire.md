@@ -50,7 +50,7 @@
   leaves the box, to every node the asker dispatches to, beside the asker's name, with no opt-out; and the share gate hook, which sums by session
   with no door filter, would count a job twice on a box that is both session host and node (it is paused; the fix is one line there, outside this
   repository).
-- **Docs.** ADR 0085 (Proposed; linked from the index and from ADR 0046's Consequences, which had named this change), the attribution header table and
+- **Docs.** ADR 0087 (Proposed; linked from the index and from ADR 0046's Consequences, which had named this change), the attribution header table and
   the node's recording rules in `docs/systems/pair-workloads.md` and `docs/systems/fleet-node.md`, the `run_class` row of the delegation ledger table in
   `docs/FLEET-NODE.md`, the ledger paragraph of `docs/systems/offload-pipeline.md`, and `docs/OPERATOR-GUIDE.md` (the `origin_session` column, a bake
   dispatched to a node, and `ledger --by-session`).

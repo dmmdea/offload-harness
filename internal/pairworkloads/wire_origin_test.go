@@ -10,7 +10,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
-// Register D-101 (ADR 0085): the asker's session label and run class ride the request that creates work on a
+// Register D-101 (ADR 0087): the asker's session label and run class ride the request that creates work on a
 // fleet node as two headers, sent only when non-empty and only when the ledger's own cleaners accept them, so a
 // label valid in the asker's own Record can never be dropped on the wire and an invalid one can never leave the box.
 

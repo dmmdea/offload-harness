@@ -69,7 +69,7 @@ func (e *Emitter) SetWireHeaders(h http.Header) {
 	if !e.Enabled() && !e.suppressed() {
 		h.Set(core.PairCardHeader, core.PairCardNode)
 	}
-	// The session this request is for and the run class of the process asking (ADR 0085), so the node's ledger
+	// The session this request is for and the run class of the process asking (ADR 0087), so the node's ledger
 	// row names them. Each goes only when non-empty and only when the ledger's own cleaner accepts it: the rule
 	// that decides what a row of this box may carry is the rule that decides what leaves the box, and a label
 	// over the cap is refused whole, never cut (a cut id would name another session). "production" is no class.

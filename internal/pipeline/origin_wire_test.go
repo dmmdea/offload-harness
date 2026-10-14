@@ -11,7 +11,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
-// Register D-101 (ADR 0085): a fleet node's ledger row names the session and run class of the box that asked,
+// Register D-101 (ADR 0087): a fleet node's ledger row names the session and run class of the box that asked,
 // not the node process's own. Run carries Request.OriginSession and RunClass into the result meta as
 // AskerSession and AskerClass and entryFrom maps them onto the row, exactly as the fleet job id and the asker's
 // name travel; Record keeps a session its caller set, so the wire value beats the node's own environment, and

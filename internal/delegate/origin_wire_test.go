@@ -12,7 +12,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
-// Register D-101 (ADR 0085): a delegation names the session and run class of the box that asked on the request that
+// Register D-101 (ADR 0087): a delegation names the session and run class of the box that asked on the request that
 // creates its work on a node, through the one chokepoint every work-creating POST already passes
 // (pairworkloads.Emitter.SetWireHeaders), and a call pinned for measurement is a measurement on the node's row
 // too, whatever the process is.
@@ -144,7 +144,7 @@ func TestQueueSubmitCarriesTheOriginToTheClaimedJob(t *testing.T) {
 // served row), so on the asker's box it is in neither the remote nor the local number. The control is the push path
 // on the same config, whose finished row carries the fleet job id the reader counts as remote; without it an empty
 // ledger could mean a ledger that was never writable. If the queue lane ever writes an asker row, this fails and the
-// reader's documented floor (ledger.SessionShare, ADR 0085) must change with it.
+// reader's documented floor (ledger.SessionShare, ADR 0087) must change with it.
 func TestQueueRouteWritesNoRowOnTheAskersLedger(t *testing.T) {
 	q, err := fleetqueue.Open(t.TempDir() + "/q.db")
 	if err != nil {
