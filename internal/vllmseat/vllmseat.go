@@ -511,6 +511,9 @@ func (r Runtime) wslSeatDir() string {
 	return "/opt/seat"
 }
 
+// DistroSeatDir is the seat directory inside the WSL distro, defaulted (/opt/seat).
+func (r Runtime) DistroSeatDir() string { return r.wslSeatDir() }
+
 // ModelDir is the absolute HF repo directory for this deployment.
 func (r Runtime) ModelDir(s Spec) string {
 	return path.Join(r.HFHome, s.ModelRepo)
@@ -712,6 +715,10 @@ func (s Spec) validate(tier string, lane bool) error {
 // than one means the box holds several revisions and the tier must pin which — both
 // are refusals, because picking one silently is how a seat comes up serving weights
 // nobody chose.
+//
+// The snapshots directory is READ through Runtime.HostPrefix (a windows-wsl seat's HF cache
+// is a distro path), but the ModelPath it returns is the engine's own path: it is what a
+// rendered file names, and bash inside the distro opens it.
 func (s Spec) Resolve(r Runtime) (Spec, error) {
 	if s.ModelPath != "" {
 		return s, nil
@@ -720,9 +727,9 @@ func (s Spec) Resolve(r Runtime) (Spec, error) {
 		return s, fmt.Errorf("vllm seat %s: neither model_repo nor model_path is set", s.ID)
 	}
 	snaps := filepath.Join(r.ModelDir(s), "snapshots")
-	entries, err := os.ReadDir(snaps)
+	entries, err := os.ReadDir(r.hostPath(snaps))
 	if err != nil {
-		return s, fmt.Errorf("vllm seat %s: cannot read %s: %w", s.ID, filepath.ToSlash(snaps), err)
+		return s, fmt.Errorf("vllm seat %s: cannot read %s: %w", s.ID, filepath.ToSlash(r.hostPath(snaps)), err)
 	}
 	var found []string
 	for _, e := range entries {
@@ -773,10 +780,12 @@ func (s Spec) Detect(r Runtime) (bool, string) {
 // what gets statted. The RENDERED artifacts always carry the distro path, because that
 // is what bash inside the distro must open.
 func (r Runtime) hostPath(p string) string {
-	if r.HostPrefix == "" || !strings.HasPrefix(p, "/") {
-		return p
+	// The leading slash is looked for in the SLASH form: filepath.Join has already turned an
+	// engine path into backslashes on Windows, where this mapping is needed most.
+	if slash := filepath.ToSlash(p); r.HostPrefix != "" && strings.HasPrefix(slash, "/") {
+		return r.HostPrefix + filepath.FromSlash(slash)
 	}
-	return r.HostPrefix + filepath.FromSlash(p)
+	return p
 }
 
 // Bindings are the harness config keys this seat derives. Kept beside the seat so a
@@ -1251,6 +1260,15 @@ func (s Spec) artifactFiles() map[string]string {
 	}
 }
 
+// NeedsLMCacheOverlay reports whether this seat may only be rendered against a patched
+// LMCache: fp8 KV pages restore CORRUPT through a stock cache server (upstream PR #4253), so
+// the pair (an fp8 KV dtype and a cache_server) is refused without Runtime.LMCacheOverlay.
+// Artifacts enforces it; a caller that collects the overlay from an operator asks the same
+// question so the two cannot disagree on when the overlay is required.
+func (s Spec) NeedsLMCacheOverlay() bool {
+	return s.CacheServer != nil && strings.HasPrefix(strings.ToLower(s.KVCacheDtype), "fp8")
+}
+
 // Artifacts renders the systemd unit, the two llama-swap wrappers, the run script and
 // the polkit rule from the reference templates in templatesDir. It returns
 // installed-name -> content, and refuses to return a file that still holds a token:
@@ -1266,7 +1284,7 @@ func (s Spec) Artifacts(templatesDir string, r Runtime) (map[string]string, erro
 	// PR #4253) and nothing reports it: the store logs hits, the engine answers, and
 	// the recovered context is wrong. Refuse the combination rather than render a seat
 	// whose failure mode is bad text that looks like good text.
-	if s.CacheServer != nil && strings.HasPrefix(strings.ToLower(s.KVCacheDtype), "fp8") && r.LMCacheOverlay == "" {
+	if s.NeedsLMCacheOverlay() && r.LMCacheOverlay == "" {
 		return nil, fmt.Errorf("vllm seat %s: kv_cache_dtype %q with a cache_server needs an LMCache overlay "+
 			"(Runtime.LMCacheOverlay) — stock LMCache restores fp8 pages corrupt (upstream PR #4253) and reports "+
 			"success while doing it, so this pair would serve wrong context silently", s.ID, s.KVCacheDtype)
