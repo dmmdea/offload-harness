@@ -1578,11 +1578,12 @@ second device exists:
   | flag | meaning |
   |---|---|
   | `--distro` | the WSL distribution the engine runs in (required) |
-  | `--venv`, `--hf-home` | the vLLM virtualenv and the HF cache, required, as paths INSIDE the distro (`/opt/seat/vllm-env`, `/hf`); the defaults hang off `--home` and `$HF_HOME`, which are Windows paths here, so they are refused |
+  | `--venv`, `--hf-home` | the vLLM virtualenv and the HF cache, required, as paths INSIDE the distro (`/opt/seat/vllm-env`, `/hf`); the defaults hang off `--home` and `$HF_HOME`, which are Windows paths here, so they are refused. `--venv` is written to `SEAT_VENV`, so the seat runs the venv the check looked in |
+  | `--model-path` | optional: pin the exact HF snapshot directory, a distro path (a Windows path is refused). Without it the one snapshot under the tier's `model_repo` is used, and two snapshots are an error. Either way the snapshot is written to `SEAT_MODEL`, so the seat serves the weights the check resolved and not whichever revision `seat_fg.sh`'s default repo id would pick |
   | `--wsl-seat-dir` | the seat directory inside the distro (default `/opt/seat`) |
-  | `--lmcache-overlay` | the patched LMCache directory, a distro path; required for an fp8 KV seat with a cache server, because stock LMCache restores fp8 pages corrupt (upstream PR #4253) |
-  | `--cache-mount-src`, `--cache-mount-opts` | the export the wrapper mounts before the MP server starts (`//store.example/kvcache`) and its mount options; empty = already mounted |
-  | `--host-prefix` | where this machine reads the distro's filesystem for the prerequisite check (`//wsl.localhost/<distro>`); never written to a file |
+  | `--lmcache-overlay` | the patched LMCache directory, a distro path; required for an fp8 KV seat with a cache server, because stock LMCache restores fp8 pages corrupt (upstream PR #4253). windows-wsl only: a seat that starts through systemd has no LMCache wiring, so the flag is refused there |
+  | `--cache-mount-src`, `--cache-mount-opts` | the export the wrapper mounts before the MP server starts (`//store.example/kvcache`) and its mount options; empty = already mounted. Refused for a seat with no cache server (the tier declares none, or `--config` binds it storeless), where nothing would mount it |
+  | `--host-prefix` | where this machine reads the distro's filesystem for the prerequisite check (`//wsl.localhost/<distro>`); never written to a file. When it is a `wsl.localhost` or `wsl$` share its name must be `--distro`; when it cannot be read the error says so instead of asking for a venv |
 
   ```sh
   local-offload install vllm-seat --profile blackwell-3x16 --root <repo> --home C:/llama-swap --user <account> \
@@ -1598,10 +1599,17 @@ second device exists:
   equal to what the renderer writes by `TestVLLMSeatReferenceEntryDeclaresWhatEntryRenders`: `ttl: 300`,
   `concurrencyLimit` equal to `max_num_seqs`, `useModelName`, and the two PowerShell stubs as `cmd` and `cmdStop`.
   Parity is a diff, not a belief: render the tier and compare the box's seat env with the result
-  (`TestCommittedTiersRenderTheirMeasuredSeatEnv` pins what each committed tier renders).
+  (`TestCommittedTiersRenderTheirMeasuredSeatEnv` pins what each committed tier renders, cache-server lines
+  included). The rendered env always ends its lines with LF, whatever the checkout holds (bash in the distro reads
+  a CR as part of every value), so a byte diff against the box's file is meaningful. It carries `SEAT_VENV` and
+  `SEAT_MODEL`, which a hand-kept env usually leaves to `seat_fg.sh`'s defaults (`<seat dir>/vllm-env` and the
+  hard-coded repo id): expect those two lines to show in the first diff. LMCache's fs_native page names embed the
+  resolved model path (the command prints a NOTE about long `--hf-home` values for that reason), so after the first start with a rendered env confirm that
+  the store still hits the pages written before (unverified here: the render has only been compared with the tier).
   `--user` and `--proxy-host` are still required (`--user` is the interactive Windows account the tasks are registered
-  for). The windows-wsl-only flags (`--distro`, `--wsl-seat-dir`, `--host-prefix`, `--cache-mount-*`) are an error, not a
-  silent no-op, on a seat that starts through systemd.
+  for). The windows-wsl-only flags (`--distro`, `--wsl-seat-dir`, `--host-prefix`, `--lmcache-overlay`,
+  `--cache-mount-*`) are an error, not a silent no-op, on a seat that starts through systemd. An fp8 KV seat bound to a
+  cache server cannot be rendered for systemd at all (its unit carries no LMCache wiring); the error says so.
 - **A seat that names a shipped chat template (`chat_template`, e.g. the blackwell-3x16 seat's
   `qwen3-fold-system.jinja`):** the render includes `templates/<name>` beside `<seat id>.env`, and
   `SEAT_EXTRA_ARGS` passes `--chat-template <WSL seat dir>/templates/<name>`. Copy the whole render —

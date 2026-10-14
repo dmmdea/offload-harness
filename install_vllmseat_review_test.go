@@ -132,8 +132,14 @@ func TestInstallVLLMSeatRefusesAHostPrefixForAnotherDistro(t *testing.T) {
 	b := newWSLBox(t, "blackwell-3x16")
 	for _, prefix := range []string{`//wsl.localhost/other`, `\\wsl.localhost\other`, `\\wsl$\other`, `//wsl.localhost/other/`} {
 		t.Run(prefix, func(t *testing.T) {
-			mustRefuse(t, b.run(t, map[string]string{"-distro": "distro", "-host-prefix": prefix}),
-				"a --host-prefix naming another distro", "--host-prefix", "--distro", "other")
+			r := b.run(t, map[string]string{"-distro": "distro", "-host-prefix": prefix})
+			mustRefuse(t, r, "a --host-prefix naming another distro", "--host-prefix", "--distro", "other", "reads the filesystem of the distro")
+			// This box has no such share, so a render that skipped the comparison would still be
+			// refused, for the prefix being unreadable. That is a different refusal and not the one
+			// under test.
+			if r.err != nil && strings.Contains(r.err.Error(), "cannot be read") {
+				t.Errorf("refused for an unreadable prefix, not for naming another distro: %v", r.err)
+			}
 		})
 	}
 

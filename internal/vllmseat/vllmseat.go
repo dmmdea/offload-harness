@@ -464,7 +464,9 @@ type Runtime struct {
 	// SeatDir holds the rendered unit + wrapper scripts.
 	SeatDir string
 	// VenvDir is the hand-built vLLM virtualenv (vLLM 0.28, torch 2.13+cu130). The
-	// installer does not create it; Detect only reports whether it is there.
+	// installer does not create it; Detect only reports whether it is there. A windows-wsl
+	// seat's env carries it (SEAT_VENV, a distro path), so the venv the check looked in is the
+	// one the seat runs; the resolved model snapshot rides along as SEAT_MODEL.
 	VenvDir string
 	// HFHome is the HF cache root. KEEP IT SHORT: LMCache's fs_native page names embed
 	// the resolved model path, and the reference box's long path produced 268-byte
