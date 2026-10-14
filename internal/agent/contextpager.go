@@ -50,6 +50,9 @@ type PagerStats struct {
 	refetched map[string]int
 	evictions int
 	bytes     int64
+	// passes counts compaction passes the loop ran: every NoteCompaction call over a
+	// non-empty transcript, whether or not it evicted a body the pager tracks (RSI-OH-2).
+	passes int
 }
 
 // minPayloadBytes ignores trivia. A 40-byte tool result reappearing is not evidence for a
@@ -95,6 +98,12 @@ func (p *PagerStats) NoteCompaction(before, after []Msg) {
 	if p == nil || len(before) == 0 {
 		return
 	}
+	// The ladder ran, so this is one fire, however little it took out. The counter is
+	// the only record of how often it ran: the final transcript keeps what the ladder
+	// left behind, not how many passes left it.
+	p.mu.Lock()
+	p.passes++
+	p.mu.Unlock()
 	kept := make(map[string]bool, len(after))
 	for _, m := range after {
 		if m.Role == "tool" && len(m.Content) >= minPayloadBytes {
@@ -148,10 +157,21 @@ type PagerReport struct {
 	RefetchRate *float64 `json:"refetch_rate"`
 	Basis       string   `json:"basis"` // "measured" | "insufficient_data"
 	Verdict     string   `json:"verdict"`
+	// CompactionPasses is how many times the compaction ladder ran in this run (a proactive
+	// pass, the harder pass after a context-overflow rejection, and the emergency shrink each
+	// count one). A POINTER for the same reason RefetchRate is: nil (JSON null) means no
+	// instrument recorded the run, and a measured zero is a real 0 — a run that never
+	// compacted. A trace written before this field existed has no key at all, and a reader
+	// treats that as unrecorded too.
+	CompactionPasses *int `json:"compaction_passes"`
 }
 
 // pagerGate is R2-13's stated threshold: below this, the pager family closes.
 const pagerGate = 0.10
+
+// PagerGate exports the threshold so a reader of recorded runs (the trace-corpus readout)
+// judges a pooled rate against the same number the instrument judges a single run against.
+const PagerGate = pagerGate
 
 func (p *PagerStats) Report() PagerReport {
 	if p == nil {
@@ -159,10 +179,11 @@ func (p *PagerStats) Report() PagerReport {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	passes := p.passes
 	r := PagerReport{
 		Evictions: p.evictions, EvictedBytes: p.bytes,
 		DistinctEvicted: len(p.evicted), Refetched: len(p.refetched),
-		Basis: "insufficient_data",
+		Basis: "insufficient_data", CompactionPasses: &passes,
 	}
 	if len(p.evicted) == 0 {
 		// Nothing was evicted, so the question was never posed. This is NOT "0% re-fetch".
