@@ -327,9 +327,9 @@ func checkRelease(text string, rel *Release) error {
 // before the [Unreleased] heading are unchanged, everything from the old top release heading to the end is byte for
 // byte the old text, the new release heading appears exactly once, and the [Unreleased] block is blank.
 func verify(before, after string, rel *Release) error {
-	head, _, end, count := locateUnreleased(before)
-	if count != 1 {
-		return fmt.Errorf("verify: the old text has %d %q headings, want 1", count, unreleasedHeading)
+	head, _, end, old := locateUnreleased(before)
+	if old != 1 {
+		return fmt.Errorf("verify: the old text has %d %q headings, want 1", old, unreleasedHeading)
 	}
 	prefix, suffix := before[:head], before[end:]
 	if len(after) < len(prefix)+len(suffix) || !strings.HasPrefix(after, prefix) {

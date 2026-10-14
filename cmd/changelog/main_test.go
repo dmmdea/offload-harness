@@ -416,6 +416,23 @@ func TestARemoveFailureIsReportedAndNamesTheFilesStillToDelete(t *testing.T) {
 	}
 }
 
+func TestAFragmentThatIsAlreadyGoneIsNotAFailure(t *testing.T) {
+	// The goal of the delete is that the file is gone; a file another process already removed has reached it.
+	root := newRoot(t, "0.186.0\n", baseLF())
+	ops := quietOps()
+	realRemove := os.Remove
+	ops.remove = func(path string) error {
+		if err := realRemove(path); err != nil {
+			return err
+		}
+		return &fs.PathError{Op: "remove", Path: path, Err: fs.ErrNotExist} // removed, and reported as already gone
+	}
+	code, stdout, stderr := runIt(t, ops, "assemble", "-root", root, "-title", "the title", "-date", "2026-10-14")
+	if code != 0 || !strings.Contains(stdout, deletes) {
+		t.Errorf("exit %d, stdout %q, stderr %q; want 0 and the Deletes line", code, stdout, stderr)
+	}
+}
+
 func TestARenameThatFailsOnceIsRetried(t *testing.T) {
 	root := newRoot(t, "0.186.0\n", baseLF())
 	var calls, sleeps atomic.Int32

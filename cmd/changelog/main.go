@@ -243,7 +243,7 @@ func writeChangelog(path, text string, ops fileOps) error {
 		return err
 	}
 	if err := retry(ops, func() error { return ops.rename(name, path) }); err != nil {
-		_ = ops.remove(name)
+		_ = ops.remove(name) // the rename failed: leave no temp file behind
 		return err
 	}
 	return nil

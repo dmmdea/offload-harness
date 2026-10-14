@@ -167,8 +167,8 @@ func TestSpliceRefusesAVersionThatAlreadyHasAHeading(t *testing.T) {
 
 	// The refusal is the heading, whole: a longer version that merely starts with the same digits is another release.
 	other := topLF + "## [Unreleased]\n\n## [0.186.10] - 2026-10-01 - x\n\n- x\n\n" + tailLF
-	if _, err := Splice(other, twoFragments(), rel0186); err != nil {
-		t.Errorf("0.186.10 exists and 0.186.0 is a different release, but Splice refused: %v", err)
+	if _, err := Splice(other, twoFragments(), &Release{Version: "0.186.1", Date: "2026-10-14", Title: "the title"}); err != nil {
+		t.Errorf("0.186.10 exists and 0.186.1 is a different release, but Splice refused: %v", err)
 	}
 	// The overwrite incident: the version being released is the one at the top.
 	top := topLF + "## [Unreleased]\n\n" + tailLF
@@ -491,6 +491,9 @@ func TestReadFragmentsNamesEveryProblem(t *testing.T) {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("the error does not name %s: %v", name, err)
 		}
+	}
+	if !strings.Contains(err.Error(), "sub: a directory is not a fragment") {
+		t.Errorf("a directory is refused for what it is, not for a read error: %v", err)
 	}
 	if strings.Contains(err.Error(), "good.md") {
 		t.Errorf("the error names the good fragment: %v", err)
