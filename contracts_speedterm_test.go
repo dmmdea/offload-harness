@@ -99,7 +99,7 @@ func speedTermIn(check string) (term string, ok bool) {
 // at any depth it records one finding per refusal reason: a value that is not an
 // array of strings, a string the closed DSL does not parse, a string with a speed
 // term. files lists the files that held at least one `acceptance` key (relative,
-// slash-separated, sorted) and strs counts the acceptance strings read.
+// slash-separated, in walk order) and strs counts the acceptance strings read.
 func scanAcceptanceDir(dir string) (findings []acceptanceFinding, files []string, strs int, err error) {
 	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, werr error) error {
 		if werr != nil {
@@ -131,7 +131,6 @@ func scanAcceptanceDir(dir string) (findings []acceptanceFinding, files []string
 		}
 		return nil
 	})
-	sort.Strings(files)
 	return findings, files, strs, err
 }
 
@@ -562,7 +561,7 @@ func filesWithAcceptanceKey(t *testing.T, dir string) []string {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
+		if d.IsDir() || strings.ToLower(filepath.Ext(d.Name())) != ".json" {
 			return nil
 		}
 		raw, rerr := os.ReadFile(p)
@@ -599,8 +598,10 @@ func TestContractAcceptanceCarriesNoSpeedTerm(t *testing.T) {
 	if len(want) == 0 {
 		t.Fatal("no JSON file under contracts/ holds an acceptance key: the byte search is broken")
 	}
-	if strings.Join(files, ",") != strings.Join(want, ",") {
-		t.Errorf("the scanner read %q, the byte search finds an acceptance key in %q", files, want)
+	read := append([]string(nil), files...)
+	sort.Strings(read)
+	if strings.Join(read, ",") != strings.Join(want, ",") {
+		t.Errorf("the scanner read %q, the byte search finds an acceptance key in %q", read, want)
 	}
 	if strs == 0 {
 		t.Error("the scanner read no acceptance string at all")
@@ -673,6 +674,12 @@ func TestAcceptanceVerbSourceScan(t *testing.T) {
 			src: head + "const AccA AcceptanceKind = \"alpha\"\n" +
 				"func ParseAcceptanceCheck(s string) (AcceptanceCheck, error) {\n\tvar c AcceptanceCheck\n" +
 				"\tswitch c.Kind {\n\tcase AccA, AccMystery:\n\t}\n\treturn c, nil\n}\n",
+			wantErr: true,
+		},
+		{
+			name: "a parser with no switch on the kind is an error",
+			src: head + "const AccA AcceptanceKind = \"alpha\"\n" +
+				"func ParseAcceptanceCheck(s string) (AcceptanceCheck, error) {\n\treturn AcceptanceCheck{}, nil\n}\n",
 			wantErr: true,
 		},
 		{
