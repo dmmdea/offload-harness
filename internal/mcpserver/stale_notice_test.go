@@ -63,6 +63,30 @@ var staleOtherDoorArgs = map[string]string{
 	"offload_review_diff":           `{"diff":5}`,
 }
 
+// staleKeyedDoors are the doors whose handler puts stale_binary / stale_binary_guard in its own answer on the path that runs
+// the work. The middleware does not know them by name (a result is left alone when it already carries the key, whatever door
+// it came from); the tests do, to give each of them the cases the other doors get. TestEveryDoorThatCarriesStaleBinaryItselfIsInTheKeyedList
+// pins the list against the call sites.
+var staleKeyedDoors = map[string]bool{
+	"offload_status":   true,
+	"agent_delegate":   true,
+	"offload_research": true,
+}
+
+// staleKeyedEarlyCases are calls of the keyed doors that END BEFORE their handler reaches the line that adds the key: a refusal
+// of the arguments or of the contract, a status call for a section that does not exist. Their results carry no key of their
+// own, so on a stale server the notice is theirs to carry like any other door's.
+var staleKeyedEarlyCases = []struct{ name, door, args string }{
+	{"delegate with no subtask", "agent_delegate", `{"subtasks":[]}`},
+	{"delegate with arguments of the wrong type", "agent_delegate", `{"subtasks":"all of them"}`},
+	{"delegate with a pin reason on a route that takes none", "agent_delegate", `{"subtasks":[{"goal":"x"}],"route":"auto","pin_reason":"because"}`},
+	{"research with no goal", "offload_research", `{"urls":["https://docs.example/a"]}`},
+	{"research with no url", "offload_research", `{"goal":"digest the page","urls":[]}`},
+	{"research with arguments of the wrong type", "offload_research", `{"goal":7}`},
+	{"status for a section that does not exist", "offload_status", `{"section":"no-such-section"}`},
+	{"status with an argument it does not take", "offload_status", `{"verbose":true}`},
+}
+
 // otherDoorNames is the sorted key set, for stable subtests.
 func otherDoorNames() []string {
 	names := make([]string, 0, len(staleOtherDoorArgs))
@@ -155,13 +179,14 @@ func TestAStaleServerAppendsTheNoticeToEveryOtherDoor(t *testing.T) {
 	s, _, path := serverOnInstalledImage(t, "0.183.0")
 	cs := doorSession(t, s)
 
-	// The drift guard: a door that is registered tomorrow has to be given a case here (or carry the signal itself).
+	// The drift guard: a door that is registered tomorrow has to be given a case here (or be one of the keyed doors, whose
+	// cases are staleKeyedEarlyCases and the success-path test).
 	listed, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, tool := range listed.Tools {
-		if staleBinaryDoors[tool.Name] {
+		if staleKeyedDoors[tool.Name] {
 			continue
 		}
 		if _, ok := staleOtherDoorArgs[tool.Name]; !ok {
@@ -222,7 +247,8 @@ func TestAFreshServerAddsNoBlock(t *testing.T) {
 }
 
 // TestTheThreeDoorsThatCarryTheSignalAreNotDoubled: agent_delegate, offload_research and offload_status put stale_binary in
-// their own answer; the middleware leaves those results alone, so the signal is there once.
+// their own answer when they ran the work; the middleware sees the key there and leaves those results alone, so the signal is
+// there once.
 func TestTheThreeDoorsThatCarryTheSignalAreNotDoubled(t *testing.T) {
 	s := staleResearchServer(t)
 	path := installOn(t, s, "0.183.0")
@@ -242,6 +268,94 @@ func TestTheThreeDoorsThatCarryTheSignalAreNotDoubled(t *testing.T) {
 				t.Fatalf("the answer carries stale_binary %d times, want once: %.300s", n, texts[0])
 			}
 		})
+	}
+}
+
+// TestTheEarlyReturnsOfTheKeyedDoorsCarryTheNotice: the three doors put the key in the answer only on the path that ran the
+// work. A refusal of the arguments, of the contract or of a section answers before that line, with no key, and a stale server
+// must still say so there: every tool result of every door.
+func TestTheEarlyReturnsOfTheKeyedDoorsCarryTheNotice(t *testing.T) {
+	s := staleResearchServer(t)
+	path := installOn(t, s, "0.183.0")
+	swapImage(t, path, imageBody("0.184.0"))
+	cs := doorSession(t, s)
+	for _, c := range staleKeyedEarlyCases {
+		t.Run(c.name, func(t *testing.T) {
+			texts := blockTexts(t, callTool(t, cs, c.door, c.args))
+			if len(texts) != 2 {
+				t.Fatalf("%d content blocks after the swap, want the door's own refusal and the notice: %q", len(texts), texts)
+			}
+			if !strings.Contains(texts[0], `"deferred":true`) || strings.Contains(texts[0], `"stale_binary`) {
+				t.Errorf("content[0] = %.300s, want the door's own deferral with no stale key in it", texts[0])
+			}
+			if !strings.HasPrefix(texts[1], "stale_binary: ") || !strings.Contains(texts[1], "/mcp") {
+				t.Errorf("content[1] = %.200s, want the stale_binary notice", texts[1])
+			}
+		})
+	}
+}
+
+// TestAFreshServerAddsNoBlockToTheKeyedDoorsEarlyReturns: the same calls on a server that was not swapped stay a single block,
+// so the cases above are early returns and the notice is not an artefact of them.
+func TestAFreshServerAddsNoBlockToTheKeyedDoorsEarlyReturns(t *testing.T) {
+	s := staleResearchServer(t)
+	path := installOn(t, s, "0.183.0")
+	cs := doorSession(t, s)
+	check := func(stage string) {
+		for _, c := range staleKeyedEarlyCases {
+			texts := blockTexts(t, callTool(t, cs, c.door, c.args))
+			if len(texts) != 1 || !strings.Contains(texts[0], `"deferred":true`) {
+				t.Errorf("%s: %s: %q, want the door's own deferral alone", stage, c.name, texts)
+			}
+		}
+	}
+	check("not swapped")
+	swapImage(t, path, imageBody("0.183.0")) // a redeploy of the same build: a later mtime, equal bytes
+	check("redeployed with equal bytes")
+}
+
+// TestTheKeyedDoorsUnderAnInvalidConfigCarryTheNotice: the config gate answers for agent_delegate and offload_research before
+// their handlers run, with a deferral that has no key. A stale server with a config the loader refused is the case the guard
+// exists for (a server that runs old behaviour and cannot work), and it must say so on those two doors as on any other.
+func TestTheKeyedDoorsUnderAnInvalidConfigCarryTheNotice(t *testing.T) {
+	statusSamplesGPU = false
+	t.Cleanup(func() { statusSamplesGPU = true })
+	s := New(pipeline.New(config.Default(), nil, nil, nil)).WithConfigError(badConfig)
+	path := installOn(t, s, "0.183.0")
+	cs := doorSession(t, s)
+	doors := map[string]string{"agent_delegate": staleDelegateArgs, "offload_research": staleResearchArgs}
+	for door, args := range doors {
+		if n := len(callTool(t, cs, door, args).Content); n != 1 {
+			t.Errorf("%s: %d content blocks on a server that was not swapped, want the config deferral alone", door, n)
+		}
+	}
+	swapImage(t, path, imageBody("0.184.0"))
+	for door, args := range doors {
+		t.Run(door, func(t *testing.T) {
+			texts := blockTexts(t, callTool(t, cs, door, args))
+			if len(texts) != 2 || !strings.Contains(texts[0], "config invalid") || !strings.HasPrefix(texts[1], "stale_binary: ") {
+				t.Fatalf("blocks %q, want the config deferral and the notice", texts)
+			}
+		})
+	}
+}
+
+// TestAKeyedDoorOnABlindGuardCarriesTheGuardOnceOnEveryAnswer: a door that ran the work puts stale_binary_guard in its answer
+// whenever the guard is not watching (not only on the middleware's every-Nth cadence), and the middleware recognises that key
+// alone as the door's own signal: the guard state is not added a second time beside it.
+func TestAKeyedDoorOnABlindGuardCarriesTheGuardOnceOnEveryAnswer(t *testing.T) {
+	captureStaleLog(t)
+	s := delegateTestServer(t, staleLocalRun())
+	s.exe = newExeWatchFrom(exeStamp{}, errors.New("no executable path"), nil)
+	cs := doorSession(t, s)
+	for i := 1; i <= 3; i++ {
+		texts := blockTexts(t, callTool(t, cs, "agent_delegate", staleDelegateArgs))
+		if len(texts) != 1 {
+			t.Fatalf("call %d: %d content blocks, want the door's own answer alone: %q", i, len(texts), texts)
+		}
+		if n := strings.Count(texts[0], `"stale_binary_guard":`); n != 1 {
+			t.Fatalf("call %d: the answer carries stale_binary_guard %d times, want once: %.300s", i, n, texts[0])
+		}
 	}
 }
 
@@ -367,10 +481,9 @@ func TestTheNoticeNeverMutatesTheResultTheHandlerReturned(t *testing.T) {
 	}
 }
 
-// TestOnlyToolCallsOfOtherDoorsAreTouched: tools/list and every other method pass through as they are, and the three doors that
-// carry the signal themselves are passed through BEFORE any check: they already stat the file (and may hash it) for their own
-// answer, so a check here would do the work twice on exactly those doors.
-func TestOnlyToolCallsOfOtherDoorsAreTouched(t *testing.T) {
+// staleMiddlewareFixture is a server whose guard sees a moved stamp and counts how often the stamp is read.
+func staleMiddlewareFixture(t *testing.T) (*Server, *atomic.Int64) {
+	t.Helper()
 	captureStaleLog(t)
 	var reads atomic.Int64
 	exe := &staleMovableExe{cur: staleExeThen}
@@ -378,27 +491,84 @@ func TestOnlyToolCallsOfOtherDoorsAreTouched(t *testing.T) {
 	s.exe = newExeWatch(func() (exeStamp, error) { reads.Add(1); return exe.read() })
 	exe.set(staleExeNow, nil)
 	reads.Store(0)
+	return s, &reads
+}
 
+// staleSampleDoors are door names the middleware is driven under: the three that put the key in their answer, and others.
+var staleSampleDoors = []string{"agent_delegate", "offload_research", "offload_status", "offload_summarize", "agent_run"}
+
+// TestOnlyToolCallsAreTouched: tools/list and every other method pass through as they are.
+func TestOnlyToolCallsAreTouched(t *testing.T) {
+	s, reads := staleMiddlewareFixture(t)
 	answer := oneBlockResult(`{"x":1}`)
 	next := func(context.Context, string, mcp.Request) (mcp.Result, error) { return answer, nil }
-	got, err := s.staleNotice(next)(context.Background(), "tools/list", &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "offload_summarize"}})
-	if err != nil || got != mcp.Result(answer) || len(answer.Content) != 1 {
-		t.Fatalf("a method that is not tools/call was changed: %v %v", got, err)
-	}
-	for door := range staleBinaryDoors {
-		got, err = throughNotice(s, door, next)
+	for _, method := range []string{"tools/list", "initialize", "ping", "prompts/list"} {
+		got, err := s.staleNotice(next)(context.Background(), method, &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "offload_summarize"}})
 		if err != nil || got != mcp.Result(answer) || len(answer.Content) != 1 {
-			t.Fatalf("%s: the result of a door that carries the signal itself was changed", door)
+			t.Fatalf("%s was changed: %v %v", method, got, err)
 		}
 	}
 	if n := reads.Load(); n != 0 {
-		t.Fatalf("the stamp was read %d times for calls that needed no check", n)
+		t.Fatalf("the stamp was read %d times for methods that are not tool calls", n)
 	}
-	if _, err = throughNotice(s, "offload_summarize", next); err != nil {
-		t.Fatal(err)
+}
+
+// TestAResultThatAlreadyCarriesTheSignalIsLeftAloneWhateverTheDoor: a result whose first block is a JSON object with
+// stale_binary or stale_binary_guard at its top level is a door's own signal, and it is left alone WITHOUT a check: that door
+// already stat the file (and may have hashed it, up to installedReadWait) for its answer, and the signal must be there once.
+// The decision is the result's, not the door's name: a fourth door that gains the key is covered the day it gains it.
+func TestAResultThatAlreadyCarriesTheSignalIsLeftAloneWhateverTheDoor(t *testing.T) {
+	s, reads := staleMiddlewareFixture(t)
+	for name, body := range map[string]string{
+		"the note":                   `{"summary":{},"stale_binary":"this MCP server is running 0.1.0 from an executable image that has changed"}`,
+		"the guard alone":            `{"summary":{},"stale_binary_guard":"inactive: no executable path"}`,
+		"both":                       `{"stale_binary":"n","stale_binary_guard":"g"}`,
+		"the key first":              `{"stale_binary":"n","results":[]}`,
+		"after a deep value":         `{"results":[{"a":{"b":[1,2,{"c":3}]}}],"stale_binary":"n"}`,
+		"after a string that quotes": `{"text":"the \"stale_binary\": key","stale_binary_guard":"g"}`,
+	} {
+		for _, door := range staleSampleDoors {
+			answer := oneBlockResult(body)
+			got, err := throughNotice(s, door, func(context.Context, string, mcp.Request) (mcp.Result, error) { return answer, nil })
+			if err != nil || got != mcp.Result(answer) || len(answer.Content) != 1 {
+				t.Errorf("%s under %s: a result that carries the signal itself was changed: %+v %v", name, door, got, err)
+			}
+		}
 	}
-	if reads.Load() == 0 {
-		t.Fatal("a call of another door never read the stamp")
+	if n := reads.Load(); n != 0 {
+		t.Fatalf("the stamp was read %d times for results that carry the signal and needed no check", n)
+	}
+}
+
+// TestAResultThatOnlyMentionsTheKeyIsNotTheSignal: the key nested in a value, quoted in a string, or in text that is not a JSON
+// object is not the door's signal, under any door name; the notice is appended and the stamp is read.
+func TestAResultThatOnlyMentionsTheKeyIsNotTheSignal(t *testing.T) {
+	for name, body := range map[string]string{
+		"nested in a value":   `{"results":[{"stale_binary":"x"}]}`,
+		"nested in an object": `{"process":{"stale_binary_guard":"x"}}`,
+		"quoted in a string":  `{"text":"look for \"stale_binary\": in the status"}`,
+		"in text, not JSON":   `a note about stale_binary and "stale_binary": values`,
+		"in an array":         `[{"stale_binary":"x"}]`,
+		"a prefix of the key": `{"stale_binary_x":"x"}`,
+		"no key at all":       `{"x":1}`,
+	} {
+		for _, door := range staleSampleDoors {
+			t.Run(name+"/"+door, func(t *testing.T) {
+				s, reads := staleMiddlewareFixture(t)
+				answer := oneBlockResult(body)
+				got, err := throughNotice(s, door, func(context.Context, string, mcp.Request) (mcp.Result, error) { return answer, nil })
+				res, _ := got.(*mcp.CallToolResult)
+				if err != nil || res == nil || len(res.Content) != 2 {
+					t.Fatalf("%+v %v, want the answer and the notice", got, err)
+				}
+				if res.Content[0].(*mcp.TextContent).Text != body || !strings.HasPrefix(res.Content[1].(*mcp.TextContent).Text, "stale_binary: ") {
+					t.Fatalf("blocks %q, want the door's own text first and the notice second", blockTexts(t, res))
+				}
+				if reads.Load() == 0 {
+					t.Fatal("the stamp was never read")
+				}
+			})
+		}
 	}
 }
 
@@ -546,11 +716,12 @@ func TestTheStaleBinaryNoteNamesMcpReconnect(t *testing.T) {
 	}
 }
 
-// TestEveryDoorThatCarriesStaleBinaryItselfIsInTheSkipSet pins staleBinaryDoors against the call sites: a handler that calls
-// staleBinaryNote or staleBinaryFields puts the signal in its own answer, and a middleware that did not skip its door would
-// carry it twice. The set is read from the source (every registered handler that makes the call, by the tool name it is
-// registered under), so a fourth door that gains the keys fails here until it is listed.
-func TestEveryDoorThatCarriesStaleBinaryItselfIsInTheSkipSet(t *testing.T) {
+// TestEveryDoorThatCarriesStaleBinaryItselfIsInTheKeyedList pins staleKeyedDoors against the call sites: a handler that calls
+// staleBinaryNote or staleBinaryFields puts the signal in its own answer. The middleware needs no list (it recognises the key
+// in the result), but the tests give each of those doors the early-return and invalid-config cases the other doors get, so a
+// fourth door that gains the keys fails here until it is listed and given them. The set is read from the source (every
+// registered handler that makes the call, by the tool name it is registered under).
+func TestEveryDoorThatCarriesStaleBinaryItselfIsInTheKeyedList(t *testing.T) {
 	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -637,13 +808,13 @@ func TestEveryDoorThatCarriesStaleBinaryItselfIsInTheSkipSet(t *testing.T) {
 		found[tool] = true
 	}
 	for tool := range found {
-		if !staleBinaryDoors[tool] {
-			t.Errorf("door %q carries stale_binary in its own answer and is not in staleBinaryDoors: its result would carry the signal twice", tool)
+		if !staleKeyedDoors[tool] {
+			t.Errorf("door %q carries stale_binary in its own answer and is not in staleKeyedDoors: add it, with its cases in staleKeyedEarlyCases and the success-path tests", tool)
 		}
 	}
-	for tool := range staleBinaryDoors {
+	for tool := range staleKeyedDoors {
 		if !found[tool] {
-			t.Errorf("door %q is in staleBinaryDoors but its handler no longer carries stale_binary itself: it would be left with no signal at all", tool)
+			t.Errorf("door %q is in staleKeyedDoors but its handler no longer carries stale_binary itself: drop it from the list and the cases that assume the key", tool)
 		}
 	}
 }
