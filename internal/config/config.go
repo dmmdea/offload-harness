@@ -1411,6 +1411,13 @@ type Config struct {
 	// renewed at all, in minutes. Past it a lease that is still held reads overdue however
 	// healthy its owner looks; it is still never freed by that. 0 or negative = 2880.
 	GPUMaxTotalMin int `json:"gpu_max_total_min,omitempty"`
+	// GPUOnOverdue (plan P11, ADR 0085) is what the harness does about a lease that outlived its
+	// declared window while someone waits for its cards: "" (unset) behaves as before the key existed
+	// and asks nobody; "request" asks the lease's HOLDER to yield, which runs the job's own recorded
+	// --on-yield, and nothing is ever killed, released or taken; "hold" says in words that nobody is
+	// asked. Matching trims and lower-cases. Anything else (yield, kill, takeover, a typo) is refused by
+	// name at load, and a one-shot verb that proceeds anyway is held, never asking. Load installs it.
+	GPUOnOverdue string `json:"gpu_on_overdue,omitempty"`
 	// ForeignGPUMinMiB overrides the per-process VRAM floor `gpu status`/`gpu
 	// reserve`'s foreign-GPU-memory warning (gpu_foreign.go) uses to decide a
 	// resident desktop process is worth a line — see foreignDefaultMinMiB for
@@ -2107,6 +2114,14 @@ func (c Config) GPUMaxTotal() time.Duration {
 	}
 	return time.Duration(c.GPUMaxTotalMin) * time.Minute
 }
+
+// OnOverduePolicy is gpu_on_overdue as the policy the lease holders read: unset is the behaviour
+// from before the key existed (nobody is asked), "request" asks the holder to yield, "hold" says so
+// in words. A value Load refused reads as hold: the permissive direction is never the fallback.
+func (c Config) OnOverduePolicy() gpulease.OnOverdue { return gpulease.OnOverdueUnset }
+
+// validateOnOverdue refuses a gpu_on_overdue value by name.
+func validateOnOverdue(v string) error { return nil }
 
 // AgentPlannerModel resolves the coding agent's planner seat. Precedence:
 // an explicit per-call/per-flag override > the configured AgentModel seat >

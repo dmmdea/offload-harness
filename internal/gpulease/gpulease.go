@@ -339,6 +339,10 @@ type Meta struct {
 	// it needs, and the command that makes it stop at a clean boundary). Recorded here;
 	// the takeover that reads them is a later change.
 	YieldGraceMs int64  `json:"yield_grace_ms,omitempty"`
+	// Yields is stamped by a holder that runs the yield request (yield.go): "wrapper" for the
+	// `gpu reserve -- <command>` form and "detached" for the hidden holder of --detach. A record
+	// without it was written by a build that never asks, so no request can be made of its holder.
+	Yields string `json:"yields,omitempty"`
 	OnYield      string `json:"on_yield,omitempty"`
 	// OnYieldDir is the working directory of the process that took the lease, recorded
 	// with OnYield: the takeover that runs the command later does not share it, and a
@@ -423,6 +427,9 @@ type Info struct {
 	YieldGraceMs int64
 	OnYield      string
 	OnYieldDir   string
+	// Yields mirrors Meta.Yields: which form of holder runs the yield request ("" = a holder
+	// that predates it).
+	Yields string
 	// Term, Requested and HardEnd mirror the record's terms (term.go): the renewal term, the
 	// window the caller asked for when that was above the cap on a term (zero otherwise), and
 	// the instant after which the lease is no longer renewed (AcquiredAt plus the maximum
@@ -585,6 +592,9 @@ type Options struct {
 	// the takeover that reads them.
 	YieldGrace time.Duration
 	OnYield    string
+	// Yields says this holder runs the yield request (YieldsWrapper or YieldsDetached); it is
+	// stamped on the record. Leave it empty for a holder that never ticks the request.
+	Yields string
 
 	// QueuedSince, when set, is the arrival time the waiter this call registers carries instead
 	// of now: a call that is handed a place in line keeps the position that place had.
