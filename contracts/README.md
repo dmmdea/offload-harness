@@ -43,6 +43,18 @@ Text verbs read the final `output`, falling back to the raw `structured` bytes w
 is empty; the field verbs require `structured` and fail closed without it. Unfalsifiable
 checks (`contains:`, `min_items:f:0`) are rejected at validation.
 
+Acceptance carries no wall-time term (INV-5, [ADR 0050](../docs/architecture/decisions/0050-placement-ranks-adequate-seats-by-expected-completion.md):
+"Acceptance criteria and pass rules stay wall-time-free"). No verb above reads a clock: each reads the answer text, a
+structured field or the write set, so a time criterion cannot be written as a check and a result is never judged by how
+fast it arrived. Two things could still put a speed term into an acceptance string: a content check that quotes a speed
+word (`contains:faster`, `regex:within 90 s`, `regex:tok/s >= 20`) and a future verb that reads a clock.
+`TestContractAcceptanceCarriesNoSpeedTerm` refuses the first in every JSON file under this directory, nested ones
+included, and `TestAcceptanceVerbSetIsReviewed` makes the second a reviewed decision: the verbs the parser declares and
+accepts must equal a reviewed list that gives each verb the reason it reads no clock. The scan is a lint, not a proof.
+It reads a `regex:` argument with its escapes undone, but a figure spelled `\d+`, `[0-9]+` or `(?:a|b)` evades it, so the
+closed verb set is the defence that does not depend on how a check is spelled. A check that has to quote a doc fact which
+contains such a phrase anchors on the figure instead (`regex:90`), as every content anchor below does.
+
 The any-of form of `nonempty:` uses the same emptiness rules as the one-field form, and a
 failure is one reason that names the check and says why each field is empty or absent. An empty
 alternative (`a||b`, `|a`, `a|`) and a repeated name (`a|a`) are rejected at validation, names
@@ -183,4 +195,7 @@ Each set is sha-pinned by the sha256 of its committed (LF) bytes. A change recor
 it touches in the CHANGELOG entry of the release that carries it, and the old version stays reachable by commit id.
 `TestContractFixturesAreWellFormed` (root package) fails when a set loses a subtask, names a context doc that is not an
 ADR file, carries an acceptance string that does not parse or is UNGROUNDED, or has a `regex:` alternative that is
-missing from its docs or present in its goal.
+missing from its docs or present in its goal. `TestContractAcceptanceCarriesNoSpeedTerm` reads every JSON file under this
+directory, the four templates, the four write-door contracts and the node list included, and fails on an acceptance
+value that is not a list of strings, a string the closed DSL does not parse, or a string with a speed term; it also
+checks that it read exactly the files that hold an `acceptance` key, so a walk that reads nothing cannot pass.
