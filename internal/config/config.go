@@ -2005,8 +2005,9 @@ type Config struct {
 	// ToolsSchemaProfile picks how much of each MCP tool's prose tools/list carries: "full" (the
 	// default, and what an unset key means) advertises every description and parameter description as written;
 	// "compact" keeps every tool, every parameter name, type, enum and required entry (so every call that is
-	// valid under "full" is valid under "compact") but cuts each description to its first sentence plus any
-	// sentence that carries a safety word (never, refuse, must, cannot, trusted, read-only, ...), and drops
+	// valid under "full" is valid under "compact") but cuts each description to its first sentence plus the
+	// sentences a reviewed per-tool keep-list names (prohibitions, trust and privacy boundaries, cost rules, the
+	// deferred-and-do-it-yourself protocol; internal/mcpserver/toolsprofile_keep.go), and drops
 	// examples. It exists for clients that send every tool schema up front on every call and have no deferred
 	// tool search (opencode): a smaller schema is prompt tokens back on a small context window. The registered
 	// schema, the handlers and the call-time validation are unchanged; only the advertised list is rewritten.
