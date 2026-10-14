@@ -473,7 +473,14 @@ func TestOpenSpecValidateScriptExitsTwoWhenTheBinaryIsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	for _, bin := range []string{filepath.ToSlash(filepath.Join(dir, "no-such-openspec")), "./no-such-openspec", "tools/no-such-openspec"} {
+	// named is what the message must carry: the path as the caller gave it, so a relative name whose folder does not exist
+	// is reported as given (the script keeps it unchanged when there is no folder to make it absolute against).
+	for _, c := range []struct{ bin, named string }{
+		{filepath.ToSlash(filepath.Join(dir, "no-such-openspec")), filepath.ToSlash(filepath.Join(dir, "no-such-openspec"))},
+		{"./no-such-openspec", "no-such-openspec"},
+		{"tools/no-such-openspec", "tools/no-such-openspec"},
+	} {
+		bin := c.bin
 		cmd := winexec.Command(bash, filepath.ToSlash(script))
 		cmd.Dir = dir
 		cmd.Env = openspecScriptEnv(t, bash, "OPENSPEC_BIN="+bin)
@@ -488,6 +495,9 @@ func TestOpenSpecValidateScriptExitsTwoWhenTheBinaryIsMissing(t *testing.T) {
 		}
 		if !strings.Contains(string(combined), "not found") {
 			t.Errorf("OPENSPEC_BIN=%s: the message does not say the binary was not found:\n%s", bin, combined)
+		}
+		if !strings.Contains(string(combined), c.named) {
+			t.Errorf("OPENSPEC_BIN=%s: the message does not name %q:\n%s", bin, c.named, combined)
 		}
 	}
 }
