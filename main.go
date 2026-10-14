@@ -3331,7 +3331,7 @@ func runLedger(args []string) error {
 	}
 	if wantSessions {
 		fmt.Println("sessions: remote_tokens ran on a fleet node and local_tokens on this box; remote_share is that card-side placement split, " +
-			"not the share gate's cards/(cards+cloud). A chat-lane call, and a delegation whose dispatch marker failed to write, read as local (a floor). " +
+			"not the share gate's cards/(cards+cloud). A chat-lane call reads as local, and a route \"queue\" delegation writes no row on this box's ledger, so it is in neither number (a floor). " +
 			"served_* are jobs this box ran for the session as a fleet node.")
 	}
 	return nil

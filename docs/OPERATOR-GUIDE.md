@@ -259,9 +259,10 @@ row stays unlabelled.
 array to the JSON: per session, `remote_tokens` (card tokens of jobs that ran on a fleet node), `local_tokens` (on this
 box), `remote_share`, and `served_rows` / `served_tokens` (jobs this box ran for the session as a fleet node, never
 added to its own totals). `remote_share` is the card-side placement split, not the harness-share gate's
-cards/(cards+cloud), which needs the session's transcript. It is a floor: a chat-lane call routed to a node and a
-delegation whose dispatch marker failed to write read as local. It reads this box's ledger only; run it on each box
-for the fleet view.
+cards/(cards+cloud), which needs the session's transcript. It is a floor: a chat-lane call routed to a node reads as
+local, and a `route: "queue"` delegation writes no row on the asker's ledger at all (the node that claims it holds the
+row, as `served_*`), so it is in neither number. It reads this box's ledger only; run it on each box for the fleet
+view.
 
 The harness-share gate and any other reader that sums the ledger itself should skip rows whose `run_class` is
 set (and, for rows written before the label, whose `origin_session` is `go-test`).

@@ -13,9 +13,11 @@ import (
 // the two numbers answer different questions and must not be compared.
 //
 // It is a FLOOR on the remote part. A row counts as remote only when it says so (a fleet job id or a node), and
-// two kinds of remote work say nothing: a cascade call routed to a node over the chat lane (the node writes no
-// row, and the asker's row names neither the node nor a fleet job), and a delegation whose dispatch ran but whose
-// started marker failed to write (the finished row carries no fleet job id). Both read as local.
+// two kinds of remote work are missing from it: a cascade call routed to a node over the chat lane (the node
+// writes no row, and the asker's row names neither the node nor a fleet job) reads as local, and a delegation sent
+// with route "queue" writes no row on the asker's ledger at all (the claiming node's own ledger holds it, as a
+// served row), so it is in neither number. A delegation pushed to a node is not a floor, whatever becomes of its
+// started marker: the finished row's fleet job id comes from the node's ack, which is recorded before the marker.
 //
 // It reads ONE box's ledger. The asker's own totals come from the rows its delegator process wrote; the
 // served_* part comes from the rows this box wrote as a fleet node, which carry the asker's session only since

@@ -138,3 +138,63 @@ func TestQueueSubmitCarriesTheOriginToTheClaimedJob(t *testing.T) {
 		t.Fatalf("queued job = origin %q class %q, want sess-abc and bake", job.Origin, job.RunClass)
 	}
 }
+
+// The floor the session-share reader documents for the queue lane, pinned from the writer's side: a route "queue"
+// delegation builds no runner and writes no row on the ASKER's ledger (the claiming node's own ledger holds it, as a
+// served row), so on the asker's box it is in neither the remote nor the local number. The control is the push path
+// on the same config, whose finished row carries the fleet job id the reader counts as remote; without it an empty
+// ledger could mean a ledger that was never writable. If the queue lane ever writes an asker row, this fails and the
+// reader's documented floor (ledger.SessionShare, ADR 0085) must change with it.
+func TestQueueRouteWritesNoRowOnTheAskersLedger(t *testing.T) {
+	q, err := fleetqueue.Open(t.TempDir() + "/q.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	mux := http.NewServeMux()
+	fleetqueue.Mount(mux, q, func(*http.Request) bool { return true })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	claimed := make(chan string, 1)
+	go func() {
+		for i := 0; i < 200; i++ {
+			job, ok, _ := q.Claim("sim-node", []string{"agent"})
+			if ok {
+				wire, _ := json.Marshal(core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "sim-node", Seat: "s",
+					Output: "RF-9082", Structured: json.RawMessage(`{"shipment_id":"RF-9082"}`)})
+				_ = q.Ack(job.ID, "sim-node", wire, "")
+				claimed <- job.ID
+				return
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		claimed <- ""
+	}()
+	cfg := testCfg(t)
+	cfg.FleetQueueHolder = srv.URL
+	contract := core.AgentContract{Goal: "which shipment?", OutputSchema: json.RawMessage(`{"properties":{"shipment_id":{"type":"string"}}}`), TimeoutSec: 30}
+	_, sum, err := Run(t.Context(), cfg, nil, []core.AgentContract{contract}, "queue", nil)
+	if err != nil || sum.Succeeded != 1 {
+		t.Fatalf("queue run: err=%v summary=%+v", err, sum)
+	}
+	if id := <-claimed; id == "" {
+		t.Fatal("no node claimed the job")
+	}
+	rows, err := ledger.ReadAll(cfg.LedgerPath)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("after a queue-routed delegation the asker's ledger holds %d rows (%v): %+v; want none", len(rows), err, rows)
+	}
+
+	// The control: the push path on the same config writes the finished row, with the fleet job id.
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	_, url := acceptingNode(t, "node-a", "zorblax", nil)
+	if _, sum, err := RunWith(t.Context(), cfg, neverLocal(t), []core.AgentContract{remoteContract()}, "remote", []string{url}, nil); err != nil || sum.Succeeded != 1 {
+		t.Fatalf("push run: err=%v summary=%+v", err, sum)
+	}
+	all, err := ledger.ReadAll(cfg.LedgerPath)
+	pushed := ledger.JobRows(all)
+	if err != nil || len(pushed) != 1 || pushed[0].FleetJobID == "" {
+		t.Fatalf("after a push-routed delegation the ledger holds %+v (%v); want one job row carrying a fleet job id", pushed, err)
+	}
+}

@@ -104,15 +104,17 @@ func TestSessionSharesReportsUnattributedRowsApartAndNeverMerges(t *testing.T) {
 
 // The doc comment's floor, pinned: a cascade call routed to a node over the chat lane writes no node row and its
 // own row names neither the node nor a fleet job, so it reads as local. The reader says so in its help text; this
-// keeps the behaviour from changing silently.
+// keeps the behaviour from changing silently. The only row shape here is one the writer emits. The other floor, a
+// route "queue" delegation, has no asker row to read at all (delegate.TestQueueRouteWritesNoRowOnTheAskersLedger pins
+// that from the writer's side). A pushed delegation whose started marker failed to write is not a floor: its finished
+// row carries the fleet job id, which is set from the node's ack and not from the marker.
 func TestSessionSharesReadsAChatLaneRowAsLocalTheDocumentedFloor(t *testing.T) {
 	rows := []Entry{
 		{Task: "classify", Door: "offload_classify", CardsTokens: 120, OriginSession: "sess-abc"},
-		{Task: "agent_delegate", JobID: "agd-5", Route: "remote", CardsTokens: 600, OriginSession: "sess-abc"}, // dispatched, marker lost: no fleet_job_id
 	}
 	s := shareOf(t, SessionShares(rows), "sess-abc")
-	if s.RemoteTokens != 0 || s.LocalTokens != 720 {
-		t.Fatalf("floor = %+v, want 720 local tokens and 0 remote", s)
+	if s.RemoteTokens != 0 || s.LocalTokens != 120 {
+		t.Fatalf("floor = %+v, want 120 local tokens and 0 remote", s)
 	}
 }
 

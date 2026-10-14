@@ -81,9 +81,13 @@ What this left open, measured against the delegator's own ledger:
   remote plus local card tokens. The gate's figure is cards over cards plus cloud and needs the session's transcript;
   it stays in the hook. The two answer different questions and are named apart on purpose.
 - **The remote part is a floor.** A cascade call routed to a node over the chat lane writes no node row, and the
-  asker's row names neither the node nor a fleet job; a delegation whose dispatch ran but whose started marker failed
-  to write has no fleet job id on its finished row. Both read as local. The reader's help text says so and a test
-  pins it.
+  asker's row names neither the node nor a fleet job, so it reads as local. A delegation sent with `route: "queue"`
+  builds no runner and writes no row on the asker's ledger at all (the claiming node's ledger holds it, as a served
+  row), so on the asker's box it is in neither number. A delegation pushed to a node is not a floor: its finished row
+  carries the fleet job id whenever the node acked the dispatch, because the id is set from the ack and the started
+  marker is written after it, so a marker that fails to write costs the marker and not the id. The reader's help text
+  says so and tests pin both shapes (`TestSessionSharesReadsAChatLaneRowAsLocalTheDocumentedFloor`, and
+  `TestQueueRouteWritesNoRowOnTheAskersLedger` from the writer's side).
 - **The reader reads one box's ledger.** The node-side stamp adds a node-local `served_*` view; a per-session view
   across the whole fleet is a reader of several ledgers, which this is not.
 - **A shared ledger is safe for this reader and not for others.** The reader separates served rows by door. The
