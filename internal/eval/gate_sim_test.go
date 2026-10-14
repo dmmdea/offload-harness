@@ -238,8 +238,10 @@ func stressCells() []simCell {
 		)
 	}
 	// Strong incumbents at the margin where the two arms disagree on only a handful of tasks: the
-	// regime where the score form is still anti-conservative, from 60 tasks up.
-	for _, n := range []int{60, 80, 120, 200} {
+	// regime where the score form is still anti-conservative, from 60 tasks up. 61 and 64 are the
+	// first sizes at which a sample of ties certifies a margin of 0.05 (3/61 < 0.05): a candidate that
+	// loses 5% of the incumbent's passes ties all 61 pairs 4.4% of the time.
+	for _, n := range []int{60, 61, 64, 80, 120, 200} {
 		out = append(out,
 			simCell{name: "stress ni binary .97/.92", n: n, mu0: -0.05, gen: genBinary(.97, .92, 1)},
 			simCell{name: "stress ni binary .99/.94", n: n, mu0: -0.05, gen: genBinary(.99, .94, 1)},
@@ -631,7 +633,8 @@ func runCell(c simCell, B, sims, workers int) simRun {
 					ldeg++
 				}
 				for k, lo := range lows {
-					if lo > c.mu0 {
+					// The gate's own comparison: to within 1e-9 of the score range.
+					if lo > c.mu0+equalTolerance*c.width() {
 						local[k]++
 					}
 				}
