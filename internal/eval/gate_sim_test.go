@@ -447,8 +447,8 @@ func simLowers(inc, cand []float64, B int, seed int64, buf *simBuf, span float64
 	if degenerate {
 		// A sample with no spread: every candidate interval is the point, as it was when the methods
 		// were compared, so their columns stay what they were; the gate's own method (vi) reads the
-		// lower end the sample cannot rule out (zeroSpreadInterval), and a composite takes the lower
-		// of its two parts.
+		// lower end of the rule of three about the value (zeroSpreadInterval), and a composite takes
+		// the lower of its two parts.
 		for k := 0; k < nBase; k++ {
 			lows[k] = dbar
 		}

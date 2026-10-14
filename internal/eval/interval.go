@@ -39,7 +39,7 @@ import "math"
 // When every difference is equal (to within a rounding error of the scores) there is no spread to
 // read a standard error from, and a point interval would certify anything: sixteen ties in a row
 // are what a candidate that loses 5% of the incumbent's passes produces 44% of the time. The
-// lower end then holds what the sample cannot rule out, see zeroSpreadInterval.
+// interval is then the rule of three, see zeroSpreadInterval.
 func primaryInterval(inc, cand []float64, span float64) (delta, lo, hi float64) {
 	n := len(inc)
 	if n != len(cand) || n < 2 {
@@ -84,26 +84,30 @@ func primaryInterval(inc, cand []float64, span float64) (delta, lo, hi float64) 
 // spread.
 const equalTolerance = 1e-9
 
+// ruleOfThree is the numerator of the rule of three: with no event in n trials, the one-sided 95%
+// upper bound on the rate of events is 1 - 0.05^(1/n), which is 3/n to within 1% from 60 trials.
+const ruleOfThree = 3.0
+
 // zeroSpreadInterval is the interval of n paired differences that all equal c, each lying in
-// [-span, span]: the single value c for the upper end, and for the lower end the true mean below
-// which the sample would be 2.5% likely or less. A distribution with mean t has mass at most
-// p = (span + t) / (span + c) on the value c (the rest of it at best at -span), so n equal values
-// have probability p^n, and p^n = 0.025 gives
+// [-span, span], where span is the width of the score range: [c - 3 span / n, c + 3 span / n],
+// clipped to [-span, span], the range the mean of such differences cannot leave.
 //
-//	lo = q (span + c) - span,   q = 0.025^(1/n).
-//
-// It is exact for that bound, not a rule of thumb. A tie (c = 0) at n = 16 sits 0.206 of the range
-// below 0, 0.088 at 40 and 0.045 at 80, so a margin of 0.05 on a unit range is certified by 80
-// ties and not by 40. Only the end a candidate has to clear is widened: the incumbent wins every
-// tie (R4), so a sample with no spread is never read as proof against it, and a candidate that
-// loses every task by the same amount is still blocked. A span that is not a positive number
-// leaves the single value.
+// It is the rule of three. For pass/fail scores with no discordant pair among n, 3/n is the
+// one-sided 95% upper bound on the rate of discordant pairs, so the mean difference can be as low
+// as -3/n (every discordant pair a loss) or as high as +3/n. For any other score the same width is
+// the usual allowance for a sample that cannot show its own spread, scaled by the range. A tie
+// (c = 0) at 16 pairs is therefore [-0.1875, 0.1875] on a unit range, [-0.075, 0.075] at 40 and
+// [-0.0375, 0.0375] at 80: a margin of 0.05 is certified from 61 ties and not from 60, whose end
+// sits exactly on it. Both ends move, so a superiority tie (c = 0) is INCONCLUSIVE at any size and
+// the incumbent keeps every tie, while a constant difference far from zero still decides: every
+// pair a win of the whole range (c = span) is [span - 3 span / n, span] and adopts, every pair a
+// loss of it blocks. A span that is not a positive number leaves the single value.
 func zeroSpreadInterval(c float64, n int, span float64) (lo, hi float64) {
-	if !(span > 0) || !finite(span) || !finite(c) {
+	if !(span > 0) || !finite(span) || !finite(c) || n < 1 {
 		return c, c
 	}
-	q := math.Pow(0.025, 1/float64(n))
-	return math.Min(c, q*(span+math.Max(-span, math.Min(span, c)))-span), c
+	half := ruleOfThree * span / float64(n)
+	return math.Min(c, math.Max(-span, c-half)), math.Max(c, math.Min(span, c+half))
 }
 
 // tCritical975 is t(df, .975), the two-sided 95% critical value of Student's t with df degrees of

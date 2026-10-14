@@ -178,7 +178,7 @@ func TestWithinTaskTimeoutsCannotMakeACandidateBetter(t *testing.T) {
 	if r.Verdict == VerdictAdopt {
 		t.Fatalf("a candidate whose two other attempts did not finish was adopted: %s", marshal(t, r))
 	}
-	if r.Delta != 0 || !(r.Lo < 0) || r.Hi != 0 {
+	if r.Delta != 0 || !(r.Lo < 0) || !(r.Hi > 0) {
 		t.Fatalf("the unfinished attempts score 0, so the candidate ties the incumbent: delta %v lo %v hi %v", r.Delta, r.Lo, r.Hi)
 	}
 	if r.ImputedAttempts != 2*n || r.UnusableAttempts.Candidate != 2*n || r.UnusableAttempts.Incumbent != 0 {
@@ -225,10 +225,11 @@ func TestImputationUsesTheWorstScoreOfTheClass(t *testing.T) {
 		pre       PreReg
 		incScore  float64
 		wantDelta float64
+		width     float64 // the width of the score range
 	}{
-		{"unit_interval", func() PreReg { p := supPre(n); return p }(), 1, -1},
-		{"judge_0_10", func() PreReg { p := supPre(n); p.Primary.Class = ClassJudge010; return p }(), 8, -8},
-		{"custom [-5, 20]", customPre(ModeSuperiority, n, -5, 20), 7, -12},
+		{"unit_interval", func() PreReg { p := supPre(n); return p }(), 1, -1, 1},
+		{"judge_0_10", func() PreReg { p := supPre(n); p.Primary.Class = ClassJudge010; return p }(), 8, -8, 10},
+		{"custom [-5, 20]", customPre(ModeSuperiority, n, -5, 20), 7, -12, 25},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, h := freeze(t, tc.pre, nil)
@@ -239,8 +240,11 @@ func TestImputationUsesTheWorstScoreOfTheClass(t *testing.T) {
 			cand := armFrom("c", n, func(i int) []Attempt { return []Attempt{noScore(outcomes[i%len(outcomes)])} })
 			cand.Tasks = cand.Tasks[:n-5] // the last five are never listed
 			r := mustGate(t, b, h, inputFor(h, inc, cand))
-			if r.NUsed != n || r.Delta != tc.wantDelta || r.Lo > tc.wantDelta || r.Hi != tc.wantDelta {
-				t.Fatalf("every candidate task scores the worst: want delta %v, got n=%d %v [%v, %v]", tc.wantDelta, r.NUsed, r.Delta, r.Lo, r.Hi)
+			// Every pair differs by the same amount, so the interval is the rule of three about it, clipped to the range.
+			half := 3 * tc.width / n
+			wantLo, wantHi := math.Max(-tc.width, tc.wantDelta-half), math.Min(tc.width, tc.wantDelta+half)
+			if r.NUsed != n || r.Delta != tc.wantDelta || math.Abs(r.Lo-wantLo) > 1e-12 || math.Abs(r.Hi-wantHi) > 1e-12 {
+				t.Fatalf("every candidate task scores the worst: want delta %v on [%v, %v], got n=%d %v [%v, %v]", tc.wantDelta, wantLo, wantHi, r.NUsed, r.Delta, r.Lo, r.Hi)
 			}
 			if r.ImputedAttempts != n || r.AttemptCounts.Candidate["not_run"] != 3+5 {
 				t.Fatalf("all %d candidate attempts are imputed (5 are placeholders): %+v %d", n, r.AttemptCounts.Candidate, r.ImputedAttempts)
@@ -371,18 +375,17 @@ func TestExcludedShareIsTheLargestOfTheThreeRatios(t *testing.T) {
 }
 
 // A constant difference exactly on a margin that is not a sum of floats is still exactly on it:
-// 0.1 - 0.2 is -0.1, the margin. The delta and the upper end are that single value, taken from the data, so
-// the upper end does not clear the margin, and the lower end is held back (no spread), so it does not either:
-// the verdict is INCONCLUSIVE. A mean computed as a sum reads -0.10000000000000002 (sixteen copies of -0.1
-// do not sum to -1.6) and would BLOCK.
+// 0.1 - 0.2 is -0.1, the margin. The delta is that single value, taken from the data, and the interval is the
+// rule of three about it, which spans the margin: the verdict is INCONCLUSIVE. A mean computed as a sum reads
+// -0.10000000000000002 (sixteen copies of -0.1 do not sum to -1.6).
 func TestGateConstantDifferenceExactlyOnTheMarginIsInconclusive(t *testing.T) {
 	const n = 16
 	p := niUnitPre(n)
 	p.Primary.Margin = f64(0.1)
 	b, h := freeze(t, p, nil)
 	r := mustGate(t, b, h, inputFor(h, arm("i", repeatF(0.2, n), repeatF(1000, n)), arm("c", repeatF(0.1, n), repeatF(800, n))))
-	if r.Delta != -0.1 || !(r.Lo < -0.1) || r.Hi != -0.1 {
-		t.Fatalf("every difference is exactly -0.1: want the one value and a lower end below it, got %v %v %v", r.Delta, r.Lo, r.Hi)
+	if r.Delta != -0.1 || !(r.Lo < -0.1) || !(r.Hi > -0.1) {
+		t.Fatalf("every difference is exactly -0.1: want the one value inside its interval, got %v %v %v", r.Delta, r.Lo, r.Hi)
 	}
 	if r.Verdict != VerdictInconclusive {
 		t.Fatalf("a difference exactly on the margin is neither ADOPT nor BLOCK: %s %s", r.Verdict, r.Reason)
@@ -1352,19 +1355,26 @@ func TestMarginAtOrAboveTheClassWidthIsRefused(t *testing.T) {
 }
 
 // A candidate that fails every task cannot ADOPT on cost: the widest margin that can be frozen is
-// still inside the range, and a delta of the whole range is below it.
-func TestAFailingCandidateIsBlockedUnderTheWidestMargin(t *testing.T) {
-	const n = 16
-	p := niUnitPre(n)
-	p.Primary.Margin = f64(0.99)
-	b, h := freeze(t, p, nil)
-	inc := armFrom("i", n, func(int) []Attempt { return []Attempt{passTok(1, 1000)} })
-	cand := armFrom("c", n, func(int) []Attempt {
-		return []Attempt{{Outcome: OutcomeTaskFail, Score: f64(0), Metrics: tokenMetric(10)}}
-	})
-	r := mustGate(t, b, h, inputFor(h, inc, cand))
-	if r.Verdict != VerdictBlock {
-		t.Fatalf("failing every task is worse than any margin inside the range: %s %s", r.Verdict, r.Reason)
+// still inside the range, and a delta of the whole range is below it. Every pair loses the whole range,
+// so there is no spread and the interval is the rule of three about -1: 16 tasks cannot put its upper end
+// (-0.8125) below a margin of 0.99, and 400 can (3/400 = 0.0075).
+func TestAFailingCandidateIsNeverAdoptedUnderTheWidestMargin(t *testing.T) {
+	for _, tc := range []struct {
+		n      int
+		margin float64
+		want   string
+	}{{16, 0.99, VerdictInconclusive}, {16, 0.5, VerdictBlock}, {400, 0.99, VerdictBlock}} {
+		p := niUnitPre(tc.n)
+		p.Primary.Margin = f64(tc.margin)
+		b, h := freeze(t, p, nil)
+		inc := armFrom("i", tc.n, func(int) []Attempt { return []Attempt{passTok(1, 1000)} })
+		cand := armFrom("c", tc.n, func(int) []Attempt {
+			return []Attempt{{Outcome: OutcomeTaskFail, Score: f64(0), Metrics: tokenMetric(10)}}
+		})
+		r := mustGate(t, b, h, inputFor(h, inc, cand))
+		if r.Verdict != tc.want || r.Lo != -1 || r.KeepIncumbent != true {
+			t.Errorf("n=%d, margin %v: failing every task: want %s on lo=-1, got %s %s (lo %v hi %v)", tc.n, tc.margin, tc.want, r.Verdict, r.Reason, r.Lo, r.Hi)
+		}
 	}
 }
 

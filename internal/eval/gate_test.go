@@ -152,7 +152,7 @@ func TestGateVerdictTable(t *testing.T) {
 	incSup := append(repeatF(0, 14), 1, 1)
 	tokens := repeatF(1000, sixteen)
 	// Incumbent scores with a little spread (8.0 and 8.1): a sample whose pairs all differ by the same
-	// amount has no spread to read, and its lower end is held back (TestAllTiedNonInferiority...).
+	// amount has no spread to read, and its interval is the rule of three (TestAllTiedNonInferiority...).
 	incWide := alternate(8.0, 8.1, sixteen)
 
 	rows := []row{
@@ -181,8 +181,10 @@ func TestGateVerdictTable(t *testing.T) {
 					t.Fatalf("want margin 0.5 and an improving tokens metric (delta -200): %+v", r)
 				}
 			}},
-		{name: "5 non-inferiority BLOCK (every difference -1.0, margin 0.5)", pre: niPre(sixteen),
-			inc: arm("i", repeatF(8.0, sixteen), tokens), can: arm("c", repeatF(7.0, sixteen), repeatF(800, sixteen)),
+		// Differences of -1.0 and -1.2 (a little spread: a sample whose pairs all differ by the same amount
+		// is the rule of three about it, TestAllTiedNonInferiority...).
+		{name: "5 non-inferiority BLOCK (every difference about -1.1, margin 0.5)", pre: niPre(sixteen),
+			inc: arm("i", repeatF(8.0, sixteen), tokens), can: arm("c", alternate(7.0, 6.8, sixteen), repeatF(800, sixteen)),
 			verdict: VerdictBlock, reason: "margin"},
 		{name: "6 non-inferiority INCONCLUSIVE (the interval straddles -m)", pre: niPre(sixteen),
 			inc: arm("i", repeatF(8.0, sixteen), tokens), can: arm("c", alternate(8.0, 7.0, sixteen), repeatF(800, sixteen)),
@@ -194,8 +196,8 @@ func TestGateVerdictTable(t *testing.T) {
 		{name: "6b boundary: every difference exactly -m with tokens down is INCONCLUSIVE, not ADOPT and not BLOCK", pre: niPre(sixteen),
 			inc: arm("i", repeatF(8.0, sixteen), tokens), can: arm("c", repeatF(7.5, sixteen), repeatF(800, sixteen)),
 			verdict: VerdictInconclusive, extra: func(t *testing.T, r GateResult) {
-				if !(r.Lo < -0.5) || r.Hi != -0.5 || r.Delta != -0.5 {
-					t.Fatalf("setup: the row must sit exactly on -m with no spread (its lower end held back), got %v %v %v", r.Delta, r.Lo, r.Hi)
+				if !(r.Lo < -0.5) || !(r.Hi > -0.5) || r.Delta != -0.5 {
+					t.Fatalf("setup: the row must sit exactly on -m with no spread (the rule of three about it), got %v %v %v", r.Delta, r.Lo, r.Hi)
 				}
 				if !r.Efficiency[0].Improves {
 					t.Fatal("setup: the efficiency metric must improve so only the primary boundary decides")
@@ -225,8 +227,8 @@ func TestGateVerdictTable(t *testing.T) {
 		{name: "11 incumbent tie (identical arrays): INCONCLUSIVE and keep_incumbent", pre: supPre(sixteen),
 			inc: arm("i", alternate(0.25, 1, sixteen), nil), can: arm("c", alternate(0.25, 1, sixteen), nil),
 			verdict: VerdictInconclusive, extra: func(t *testing.T, r GateResult) {
-				if !r.KeepIncumbent || !(r.Lo < 0) || r.Hi != 0 || r.Delta != 0 {
-					t.Fatalf("a tie is exactly zero, keeps the incumbent, and has a lower end below it: %+v", r)
+				if !r.KeepIncumbent || !(r.Lo < 0) || !(r.Hi > 0) || r.Delta != 0 {
+					t.Fatalf("a tie is exactly zero, keeps the incumbent, and has an interval about it: %+v", r)
 				}
 			}},
 		{name: "11b a tie on all zeros", pre: supPre(sixteen), inc: arm("i", zeros, nil), can: arm("c", zeros, nil),

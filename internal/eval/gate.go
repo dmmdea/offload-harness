@@ -351,7 +351,7 @@ const overflowMsg = "the scores or costs are too large to average: a sum overflo
 // The rules (docs/systems/measurement-gate.md has them in plain words, numbered the same):
 //
 //	R1  the statistic is the mean paired difference over TASKS, read on the score form of its
-//	    95% t interval (interval.go), its lower end held back when every difference is equal;
+//	    95% t interval (interval.go), the rule of three about the value when every difference is equal;
 //	    the paired bootstrap reads the efficiency metrics
 //	R2  superiority: ADOPT iff lo > 0, BLOCK iff hi < 0; non-inferiority with margin m: BLOCK iff
 //	    hi < -m, ADOPT iff lo > -m and a declared efficiency metric improves and none got
