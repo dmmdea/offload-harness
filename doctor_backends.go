@@ -22,10 +22,10 @@ import (
 //	  seat gemma4-e2b    llama.cpp  chain llama.cpp         probe process   llama.cpp seat gemma4-e2b: in the roster, not loaded; ...
 //
 // The default probe LOADS NOTHING (internal/backendchain): llama-swap's roster and running list, and a
-// loaded seat's own health endpoint. `doctor --probe-completion` adds a 1-token completion per seat, and
-// that one can load an idle seat (and is skipped where it would evict a vLLM seat), so it exists only
-// behind the flag. The section is informational and never changes doctor's exit code, like the
-// capacity and fleet-version rows.
+// loaded seat's own health endpoint. `doctor --probe-completion` adds a 1-token completion to each seat
+// that is already running and, on a box where nothing is running, to one idle seat, which it loads; it
+// never loads a seat over a running one, so it exists only behind the flag. The section is informational
+// and never changes doctor's exit code, like the capacity and fleet-version rows.
 //
 // It runs AFTER the checks of doctorRunChecked, whatever they returned: "why is nothing serving" is
 // exactly what an operator reads this section for when the endpoint is down, so a failed health probe
@@ -63,7 +63,7 @@ func doctorFlags() *flag.FlagSet {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.String("config", "", "config file path")
-	fs.Bool("probe-completion", false, "also send a 1-token completion to each seat: this CAN LOAD idle seats (a cold load takes minutes), so it is for a person to run, and it is refused where it would evict a vLLM seat")
+	fs.Bool("probe-completion", false, "also send a 1-token completion to each seat that is already running and, on a box where nothing is running, to one idle seat: this CAN LOAD one idle seat (a cold load takes minutes), so it is for a person to run; it never loads a seat over a running one")
 	return fs
 }
 
@@ -89,7 +89,7 @@ func doctorUsageError(parseErr error, fs *flag.FlagSet) error {
 // doctorHelp prints the usage of the doctor verb, both flags, and reports true when args ask for help
 // (-h, -help or --help, read the way the flag package reads them). runDoctor's own flag set knows only
 // --config and exits the process on help, so help is answered here, before it runs: `doctor -h` is where
-// an operator learns that --probe-completion exists and that it can load idle seats.
+// an operator learns that --probe-completion exists and that it can load an idle seat.
 func doctorHelp(args []string, w io.Writer) bool {
 	fs := doctorFlags()
 	if err := fs.Parse(args); !errors.Is(err, flag.ErrHelp) {
@@ -134,7 +134,7 @@ func writeBackendsSection(w io.Writer, cfg config.Config, probeCompletion bool) 
 		return
 	}
 	if probeCompletion {
-		fmt.Fprintln(w, "backends:   running a 1-token completion per seat (--probe-completion): this can load idle seats, and a cold load takes minutes ...")
+		fmt.Fprintln(w, "backends:   running a 1-token completion on the seats that are running (--probe-completion): on a box where nothing is running this loads one idle seat, and a cold load takes minutes ...")
 	}
 	rep := backendchain.Collect(context.Background(), cfg, backendchain.Options{HTTP: maintenanceClient, ProbeCompletion: probeCompletion})
 	writeBackendRows(w, rep, probeCompletion)
@@ -147,7 +147,7 @@ func writeBackendRows(w io.Writer, rep backendchain.Report, probeCompletion bool
 	}
 	how := "the default probe loads nothing; --probe-completion adds a 1-token completion that CAN load a model"
 	if probeCompletion {
-		how = "completion probe ON: idle seats may have been loaded by this run"
+		how = "completion probe ON: this run loaded at most one idle seat, and only where nothing was running"
 	}
 	fmt.Fprintf(w, "backends:   active_backend per lane and seat (%s)\n", how)
 	width := 0

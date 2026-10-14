@@ -108,7 +108,7 @@ func TestDoctorHelpListsEveryFlag(t *testing.T) {
 				t.Errorf("%s output declares no -%s flag line:\n%s", h, name, b.String())
 			}
 		}
-		for _, want := range []string{"usage: local-offload doctor", "CAN LOAD idle seats", "evict a vLLM seat"} {
+		for _, want := range []string{"usage: local-offload doctor", "CAN LOAD one idle seat", "never loads a seat over a running one"} {
 			if !strings.Contains(b.String(), want) {
 				t.Errorf("%s output lacks %q:\n%s", h, want, b.String())
 			}
@@ -221,14 +221,19 @@ func TestDoctorVerbAppendsTheBackendsSectionAndLoadsNothing(t *testing.T) {
 }
 
 // TestDoctorVerbProbeCompletionFlag: the flag is read by the verb, never reaches runDoctor's own flag
-// set (which would exit on it), and runs one 1-token completion per seat.
+// set (which would exit on it), and runs one 1-token completion on a box where nothing is running: the one
+// idle seat it may load. The strict swap does not load a seat on a completion, so every later seat is still
+// idle, and each says it was not probed.
 func TestDoctorVerbProbeCompletionFlag(t *testing.T) {
 	srv := newStrictSwap(t, defaultAliasIDs())
 	srv.allowCompletion = true
 	path := doctorBackendsConfig(t, srv.srv.URL)
 	out := captureStdout(t, func() { _ = runDoctorBackends([]string{"--config", path, "--probe-completion"}) })
-	if srv.completionCount() == 0 {
-		t.Fatalf("--probe-completion ran no completion:\n%s", out)
+	if n := srv.completionCount(); n != 1 {
+		t.Fatalf("--probe-completion sent %d completions on an idle box, want exactly the one it may load:\n%s", n, out)
+	}
+	if !strings.Contains(out, "not probed: this run already sent one completion that could load a seat") {
+		t.Errorf("a seat that was not probed must say so:\n%s", out)
 	}
 	srv.mu.Lock()
 	for _, c := range srv.completions {
@@ -237,7 +242,7 @@ func TestDoctorVerbProbeCompletionFlag(t *testing.T) {
 		}
 	}
 	srv.mu.Unlock()
-	for _, want := range []string{"running a 1-token completion per seat", "completion probe ON", "probe completion"} {
+	for _, want := range []string{"running a 1-token completion on the seats that are running", "completion probe ON", "probe completion"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}

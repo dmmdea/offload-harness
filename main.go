@@ -337,7 +337,7 @@ Usage:
   local-offload top [--ui http://127.0.0.1:18813] [--interval 5s]   terminal view of the fleet overview (for headless boxes; reads a running fleet-ui)
   local-offload rig --seat <alias> [--since 7d] [--node ID] [--out report.json] [--json]   the seat rigger (ADR 0036 P3a): classify this box's delegation-log failures for a seat onto ONE axis each (published precedence), weights over eligible rows, evidence job ids, the pre-authored remedy per axis — proposes and applies nothing
   local-offload ledger [--since DAYS]    token-savings report
-  local-offload doctor [--config FILE] [--probe-completion]   check endpoint health + config, then the engine answering each lane and seat (--probe-completion sends a 1-token completion and can load idle seats)
+  local-offload doctor [--config FILE] [--probe-completion]   check endpoint health + config, then the engine answering each lane and seat (--probe-completion sends a 1-token completion and can load one idle seat on an idle box)
   local-offload audit-yaml [--against-render] [--other-box] FILE...
                                          check live llama-swap config(s) against the operator rules (INV-1/INV-2: no -ngl 0, no empty CUDA_VISIBLE_DEVICES, ttl 300 everywhere, no persistent group, no preload).
                                          --against-render also re-derives each file from THIS binary's tier seeds and reports MATCH / STALE(keys) / UNSTAMPED / HAND-EDITED.
