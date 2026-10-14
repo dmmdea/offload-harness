@@ -1924,7 +1924,56 @@ func runGenerateVideo(args []string) error {
 // builder (cpu — the template's gpu/int8 cache hard-kills ComfyUI) and is
 // intentionally NOT exposed here so a caller can't regress it.
 func runAnimateCharacter(args []string) error {
-	fs := flag.NewFlagSet("animate-character", flag.ExitOnError)
+	c, err := parseAnimateCharacter(args, flag.ExitOnError)
+	if err != nil {
+		return err
+	}
+
+	cfg := loadCfg(c.fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	res := mediaremote.Run(context.Background(), cfg, p, core.Request{
+		Task:   core.TaskAnimateCharacter,
+		Door:   "cli:animate-character",
+		Input:  c.animate.prompt,
+		Image:  c.animate.ref,
+		Video:  c.animate.driver,
+		Params: buildAnimateParams(c.animate),
+	}, c.route, c.remotes)
+	emitResult(res, c.asJSON, "", c.compact)
+	return nil
+}
+
+// animateFlags is the parsed CLI input for `animate-character`, factored out like videoFlags so the command line and the
+// param-building are testable without a render.
+type animateFlags struct {
+	out, ref, driver, prompt string
+	motionPrompt, negative   string
+	width, height, frames    int
+	steps, seed              int
+	poseStrength             float64
+	refStrength              float64
+	reserveVRAM              float64
+}
+
+// animateCharacterCLI is one parsed `animate-character` command line.
+type animateCharacterCLI struct {
+	fs      *flag.FlagSet
+	animate animateFlags
+	asJSON  bool
+	compact bool
+	route   string
+	remotes []string
+}
+
+// parseAnimateCharacter parses the animate-character command line (factored out of runAnimateCharacter, like
+// parseGenerateVideo, so the flags can be tested without exiting the process or rendering).
+func parseAnimateCharacter(args []string, errorHandling flag.ErrorHandling) (animateCharacterCLI, error) {
+	fs := flag.NewFlagSet("animate-character", errorHandling)
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	motionPrompt := fs.String("motion-prompt", "", "one-line description of the driver video's motion")
@@ -1939,8 +1988,8 @@ func runAnimateCharacter(args []string) error {
 	reserveVRAM := fs.Float64("reserve-vram", 0, "VRAM held back for the display (per-workflow override)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; the reference image and driver video travel in a hash-checked bundle and the clip is fetched back verified; ADR 0077)")
-	var remotes repeatedFlag
-	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
+	remotes := new(repeatedFlag)
+	fs.Var(remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 
 	out, ref, driver, prompt, flagArgs := splitFourArgs(args, map[string]bool{
 		"config": true, "motion-prompt": true, "negative": true, "width": true,
@@ -1948,50 +1997,48 @@ func runAnimateCharacter(args []string) error {
 		"pose-strength": true, "ref-strength": true, "reserve-vram": true,
 		"route": true, "remote": true,
 	})
-	_ = fs.Parse(flagArgs)
+	if err := fs.Parse(flagArgs); err != nil {
+		return animateCharacterCLI{}, err
+	}
 
 	if out == "" || ref == "" || driver == "" || prompt == "" {
-		return fmt.Errorf("animate-character requires an output path, a reference image, a driver video, and a prompt: local-offload animate-character <out.mp4> <ref.png> <driver.mp4> \"<prompt>\" [--frames 81]")
+		return animateCharacterCLI{}, fmt.Errorf("animate-character requires an output path, a reference image, a driver video, and a prompt: local-offload animate-character <out.mp4> <ref.png> <driver.mp4> \"<prompt>\" [--frames 81]")
 	}
+	return animateCharacterCLI{
+		fs: fs,
+		animate: animateFlags{
+			out: out, ref: ref, driver: driver, prompt: prompt, motionPrompt: *motionPrompt, negative: *negative,
+			width: *width, height: *height, frames: *frames, steps: *steps, seed: *seed,
+			poseStrength: *poseStrength, refStrength: *refStrength, reserveVRAM: *reserveVRAM,
+		},
+		asJSON: *asJSON, compact: *compactFlag, route: *route, remotes: *remotes,
+	}, nil
+}
 
-	cfg := loadCfg(fs)
-	p, cleanup, err := openPipeline(cfg)
-	if err != nil {
-		return err
+// buildAnimateParams maps the parsed CLI flags to the pipeline params map for an animate_character request.
+func buildAnimateParams(f animateFlags) map[string]any {
+	params := map[string]any{"ref": f.ref, "driver": f.driver, "out": f.out}
+	if f.motionPrompt != "" {
+		params["motion_prompt"] = f.motionPrompt
 	}
-	defer cleanup()
-
-	params := map[string]any{"ref": ref, "driver": driver, "out": out}
-	if *motionPrompt != "" {
-		params["motion_prompt"] = *motionPrompt
+	if f.negative != "" {
+		params["negative"] = f.negative
 	}
-	if *negative != "" {
-		params["negative"] = *negative
-	}
-	for k, v := range map[string]int{"width": *width, "height": *height, "frames": *frames, "steps": *steps, "seed": *seed} {
+	for k, v := range map[string]int{"width": f.width, "height": f.height, "frames": f.frames, "steps": f.steps, "seed": f.seed} {
 		if v > 0 {
 			params[k] = v
 		}
 	}
-	if *poseStrength > 0 {
-		params["pose_strength"] = strconv.FormatFloat(*poseStrength, 'f', -1, 64)
+	if f.poseStrength > 0 {
+		params["pose_strength"] = strconv.FormatFloat(f.poseStrength, 'f', -1, 64)
 	}
-	if *refStrength > 0 {
-		params["ref_strength"] = strconv.FormatFloat(*refStrength, 'f', -1, 64)
+	if f.refStrength > 0 {
+		params["ref_strength"] = strconv.FormatFloat(f.refStrength, 'f', -1, 64)
 	}
-	if *reserveVRAM > 0 {
-		params["reserve_vram"] = strconv.FormatFloat(*reserveVRAM, 'f', -1, 64)
+	if f.reserveVRAM > 0 {
+		params["reserve_vram"] = strconv.FormatFloat(f.reserveVRAM, 'f', -1, 64)
 	}
-	res := mediaremote.Run(context.Background(), cfg, p, core.Request{
-		Task:   core.TaskAnimateCharacter,
-		Door:   "cli:animate-character",
-		Input:  prompt,
-		Image:  ref,
-		Video:  driver,
-		Params: params,
-	}, *route, remotes)
-	emitResult(res, *asJSON, "", *compactFlag)
-	return nil
+	return params
 }
 
 // splitFourArgs separates the FIRST FOUR positionals (out path + ref image +
