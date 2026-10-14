@@ -58,6 +58,10 @@ const (
 	// tcSkipNeverRan is the harvest's reason for a delegation row whose agent never executed.
 	tcSkipNeverRan = "delegation row never ran (zero steps, nothing recorded)"
 
+	// tcSkipNotATrace is the harvest's reason for a traces-directory file that is valid JSON but
+	// is not shaped like an agent trace: no transcript, or neither steps nor a stop reason.
+	tcSkipNotATrace = "trace record has no transcript, or neither steps nor a stop reason"
+
 	tcBasisMeasured     = "measured"
 	tcBasisInsufficient = "insufficient_data"
 
@@ -382,6 +386,14 @@ func tcHarvestTraces(o tcHarvestOpts, stats *tcHarvestStats) ([]tcRun, error) {
 		}
 		if in.Steps < 0 {
 			stats.Skipped["trace record has negative steps"]++
+			continue
+		}
+		// Any JSON object decodes into tcTraceIn, so the shape is checked: an agent trace holds
+		// the final transcript and either spent a step or says why it stopped. A file that has
+		// neither (a checkpoint, a queue file, a goal list) is not a run, and counting it would
+		// add a zero-step run with nothing recorded to every denominator.
+		if len(in.Transcript) == 0 || (in.Steps == 0 && in.StopReason == "") {
+			stats.Skipped[tcSkipNotATrace]++
 			continue
 		}
 		pg, ok := in.Pager.run()
