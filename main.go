@@ -152,7 +152,7 @@ func main() {
 	case "top":
 		err = runTop(args)
 	case "ledger":
-		err = runLedger(args)
+		err = runLedgerMode(args)
 	// `loupe` is the identity-aware ledger view (memory-frontier Phase 0.1b).
 	// Deliberately a SEPARATE command from `stats`: `stats` emits a stable
 	// report.Summarize JSON that callers may already script against, and
