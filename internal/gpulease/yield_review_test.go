@@ -526,3 +526,96 @@ func TestAnAskDoesNotWriteForALeaseReleasedBeforeTheLock(t *testing.T) {
 		t.Error("the ask wrote a request file for a lease that was already gone")
 	}
 }
+
+// The case the settle interval is for: an attended lease whose owner is alive, labelled because the look at its
+// cards failed (the sample timed out under a saturated GPU). A waiter stays on its cards; the holder does not
+// ask inside the minute, and when the second look finds the cards working the lease is renewed and never asked.
+func TestALabelThatCameFromAnUnreadableLookAndTheSecondLookRenewsIsNeverAsked(t *testing.T) {
+	yieldPolicy(t, "request")
+	f := newTermFixtureNP(t, false, Options{Yields: YieldsWrapper, OnYield: "touch STOP", YieldGrace: 5 * time.Minute})
+	f.at(t, time.Hour+time.Second, false)
+	res, err := f.l.AdvanceTerm(TermSignals{Cards: cardsAre(CardsUnreadable)})
+	if err != nil || res.Outcome != TermExpired || !strings.Contains(res.Why, "could not be read") {
+		t.Fatalf("setup: the term check must label the lease because the cards could not be read: %+v, %v", res, err)
+	}
+	plantYieldWaiter(t, f.m, Waiter{PID: termOwnerPID, Class: ClassText, Reason: "kv bench"})
+	y, out := &yieldRun{}, &syncBuf{}
+	tk := f.l.NewYieldTicker(YieldTickerOptions{OnYield: "touch STOP", Run: y.run, Out: out, Label: "gpu reserve", Settle: time.Minute})
+	asked := func() bool { _, err := os.Stat(YieldFilePath(f.m.leaseDir(), f.l.Epoch())); return err == nil }
+
+	tk.Tick() // the tick that found the label
+	for i := 0; i < 3; i++ {
+		*f.now = f.now.Add(15 * time.Second)
+		if err := f.l.Renew(); err != nil {
+			t.Fatal(err)
+		}
+		tk.Tick()
+		if asked() {
+			t.Fatalf("asked %d s after a label that came from a look at the cards that failed", (i+1)*15)
+		}
+	}
+	// A minute after the label the term check looks again, the cards are busy, and the lease is renewed.
+	*f.now = f.now.Add(15 * time.Second)
+	if err := f.l.Renew(); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := f.l.AdvanceTerm(TermSignals{Cards: cardsAre(CardsWorking)}); err != nil || res.Outcome != TermExtended {
+		t.Fatalf("setup: the second look must renew the lease: %+v, %v", res, err)
+	}
+	tk.Tick()
+	for i := 0; i < 16; i++ {
+		*f.now = f.now.Add(15 * time.Second)
+		if err := f.l.Renew(); err != nil {
+			t.Fatal(err)
+		}
+		tk.Tick()
+	}
+	tk.Wait()
+	if asked() || y.count() != 0 {
+		t.Fatalf("a lease the second look renewed was asked (asked=%v, on_yield ran %d times)", asked(), y.count())
+	}
+}
+
+// A lease the same tick renews is never asked, and that does not depend on which of the holder's two checks
+// runs first within a tick: the asker never asks on the first tick a lease reads overdue (that is where it first
+// sees the waiter), and a renewal moves the end before the next tick reads it. Both orders, a progressing job and
+// a waiter on its cards for the whole of it, with no settle interval to help.
+func TestARenewableLeaseIsNeverAskedWhicheverCheckRunsFirstInATick(t *testing.T) {
+	for _, order := range []string{"term check then yield tick", "yield tick then term check"} {
+		t.Run(order, func(t *testing.T) {
+			yieldPolicy(t, "request")
+			prog := progressFileAt(t, yieldBase)
+			r := newYieldRig(t, func(o *Options) { o.Unattended, o.ProgressFile, o.Stall = true, prog, 30*time.Minute })
+			r.waiter(yieldWaiterA)
+			y, out := &yieldRun{}, &syncBuf{}
+			tk := r.ticker("stop.sh", y, out)
+			renewals := 0
+			for i := 0; i < 16; i++ { // 15 s ticks, from a minute before the end of the first term to three minutes after
+				*r.now = r.base.Add(yieldWindow - time.Minute + time.Duration(i)*15*time.Second)
+				_ = r.l.Renew()
+				touchProgress(t, prog, *r.now) // the job is working
+				termCheck := func() {
+					if res, err := r.l.AdvanceTerm(TermSignals{}); err != nil {
+						t.Fatalf("term check: %v", err)
+					} else if res.Outcome == TermExtended {
+						renewals++
+					}
+				}
+				if order == "term check then yield tick" {
+					termCheck()
+					tk.Tick()
+				} else {
+					tk.Tick()
+					termCheck()
+				}
+				if r.asked() {
+					t.Fatalf("tick %d: a progressing job, renewed at its term end, was asked to yield", i+1)
+				}
+			}
+			tk.Wait()
+			if renewals != 1 || y.count() != 0 {
+				t.Fatalf("setup: the term must have been renewed once (%d) and nothing run (%d)", renewals, y.count())
+			}
+		})
+	}
+}
