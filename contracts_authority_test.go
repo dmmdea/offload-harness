@@ -7,7 +7,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 )
 
-// The authority qualifier (ENH-13b) must not become a way around the two things
+// The authority qualifier must not become a way around the two things
 // the closed acceptance DSL guarantees: the verb set is the reviewed one, and no
 // acceptance string carries a speed term. The qualifier sits in the argument
 // tail, so neither guarantee has anything new to review; these tests pin that.

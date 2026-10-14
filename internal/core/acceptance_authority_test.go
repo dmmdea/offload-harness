@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// The authority qualifier (ENH-13b). A qualified check names the evidence it
+// The authority qualifier. A qualified check names the evidence it
 // reads and the authority that evidence carries; an unqualified check is
 // byte-for-byte what it was. These tests pin both halves: the qualified form
 // (unknown on empty evidence, a weaker authority never closing a stronger
@@ -53,6 +53,15 @@ func TestAuthorityQualifierParses(t *testing.T) {
 		{in: "contains:@mention:x", kind: AccContains, auth: AuthNone, arg: "@mention:x"},
 		{in: "contains:@Answer:x", kind: AccContains, auth: AuthNone, arg: "@Answer:x"},
 		{in: "regex:@\\w+", kind: AccRegex, auth: AuthNone, arg: "@\\w+"},
+		// text that only begins with the letters @field is not a reserved prefix (the reserved ones are "@field=" and
+		// "@field:"): a literal on every verb that takes a qualifier
+		{in: "contains:@field", kind: AccContains, auth: AuthNone, arg: "@field"},
+		{in: "contains:@fieldname:x", kind: AccContains, auth: AuthNone, arg: "@fieldname:x"},
+		{in: "contains:@fieldx", kind: AccContains, auth: AuthNone, arg: "@fieldx"},
+		{in: "regex:@field", kind: AccRegex, auth: AuthNone, arg: "@field"},
+		{in: "regex:@fieldname:x", kind: AccRegex, auth: AuthNone, arg: "@fieldname:x"},
+		{in: "not_contains:@field", kind: AccNotContains, auth: AuthNone, arg: "@field"},
+		{in: "not_contains:@fieldname:x", kind: AccNotContains, auth: AuthNone, arg: "@fieldname:x"},
 		// verbs that take no qualifier read their argument literally, as before
 		{in: "nonempty:@answer:x", kind: AccNonempty, auth: AuthNone, arg: "@answer:x", fields: []string{"@answer:x"}},
 		{in: "diff_touches:@answer:x", kind: AccDiffTouches, auth: AuthNone, arg: "@answer:x"},
@@ -66,6 +75,9 @@ func TestAuthorityQualifierParses(t *testing.T) {
 		{in: "contains:@field:x", wantError: "@field=<name>"},
 		{in: "contains:@field=:x", wantError: "@field=<name>"},
 		{in: "contains:@field=summary", wantError: "@field=<name>"},
+		{in: "contains:@field=", wantError: "@field=<name>"},
+		{in: "regex:@field:x", wantError: "@field=<name>"},
+		{in: "not_contains:@field:x", wantError: "@field=<name>"},
 		{in: "regex:@answer:(", wantError: "error parsing regexp"},
 		// absence cannot be corroborated by sources
 		{in: "not_contains:@grounded:PLACEHOLDER", wantError: "grounded"},

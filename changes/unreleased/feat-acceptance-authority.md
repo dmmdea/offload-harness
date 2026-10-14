@@ -1,4 +1,4 @@
-### Added - authority-graded acceptance: an optional qualifier on contains:, regex: and not_contains: (ENH-13b)
+### Added - authority-graded acceptance: an optional qualifier on contains:, regex: and not_contains:
 
 - **What it does.** `contains:`, `regex:` and `not_contains:` take an optional authority qualifier at the head of the
   argument: `@answer:` (the answer text the model wrote), `@field=<name>:` (the values of one structured field) and
@@ -29,14 +29,19 @@
   (results also arrive from nodes, the queue and the rescue path) and external contracts cannot be seen, so the
   stricter reading applies to the qualified form only. `min_items:`, `nonempty:` and the diff verbs already fail
   closed on empty evidence and are unchanged. Some previously valid lines now fail to parse, by a rule and not
-  a list: after a reserved qualifier prefix (`@answer:`, `@grounded:`, `@field`) a missing field name, a missing colon
-  or an empty tail is a parse error, and so is `not_contains:@grounded:` (documents cannot corroborate an absence). A
-  substring that starts with a reserved spelling on one of the three verbs reads as qualified; any other leading `@`
-  is still a literal.
+  a list: the reserved prefixes are exactly `@answer:`, `@grounded:`, `@field=` and `@field:` (the last is refused,
+  since the field separator is `=`), and after one a missing field name, a missing colon or an empty tail is a parse
+  error, and so is `not_contains:@grounded:` (documents cannot corroborate an absence). A substring that starts with a
+  reserved prefix on one of the three verbs reads as qualified; any other leading `@` is still a literal, so
+  `contains:@field`, `contains:@fieldname:x` and `contains:@fieldx` are plain substrings.
 - **The document-fingerprint excuse.** The research lane excuses a FAILED document fingerprint when the digest is an
   honest absence. That excuse now drops only a failed check, never an unknown (an unknown stays a reported failure),
   and the quarantine reads the fingerprint through the same grading as the merge gate, with the contract's context
-  documents: a grounded fingerprint the documents carry is a pass for the node, not an excused absence.
+  documents: a grounded fingerprint the documents carry is a pass for the node, not an excused absence. A fingerprint
+  the contract can never close (the unknown the `AUTHORITY-UNREACHABLE` lint warns about, such as a grounded check on a
+  contract with no context documents) is a defect of the contract: it is still reported as a failed check, but it is
+  neither a strike nor a pass for the node (no quarantine) and is not retried on a second node. An unknown the
+  contract could have closed, such as an empty answer beside the documents, still counts against the node.
 - **The rig.** The failure-class register keeps classifying a qualified check's failure by its verb prefix, so an
   unknown (empty or absent evidence) is counted as `anchor-miss`, not `schema-miss`; the empty-versus-wrong distinction
   lives in the evidence column (`unknown at <level> authority`), not in the axis (docs/systems/coding-agent.md).

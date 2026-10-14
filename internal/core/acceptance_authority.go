@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Authority-graded acceptance (ENH-13b).
+// Authority-graded acceptance.
 //
 // A check says WHAT must hold; an authority says how much the evidence behind
 // it may be trusted. The idea is the one reverse-engineering tools use for a
@@ -140,10 +140,12 @@ const (
 )
 
 // splitAuthority strips an authority qualifier off the head of a check's
-// argument. It only reads the three reserved spellings, on the three verbs that
-// take a qualifier; anything else (an argument that merely starts with "@", a
-// verb that reads a field name or a path) comes back untouched, so every string
-// that parsed before parses to the same check.
+// argument. It reads four reserved prefixes, on the three verbs that take a
+// qualifier: "@answer:", "@grounded:", "@field=" and "@field:" (the last only to
+// refuse it, since the field separator is "="). Anything else (an argument that
+// merely starts with "@", or with the letters "@field" and no "=" or ":" after
+// them, or a verb that reads a field name or a path) comes back untouched, so
+// every string that parsed before parses to the same check.
 func splitAuthority(verb AcceptanceKind, rest string) (tail string, auth Authority, field string, err error) {
 	if !strings.HasPrefix(rest, "@") {
 		return rest, AuthNone, "", nil

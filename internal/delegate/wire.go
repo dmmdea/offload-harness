@@ -141,7 +141,7 @@ type ResultWire struct {
 	DeferClass         string          `json:"defer_class,omitempty"`
 	Failed             bool            `json:"failed,omitempty"`
 	AcceptanceFailures []string        `json:"acceptance_failures,omitempty"`
-	// AcceptanceAuthority (ENH-13b) is the authority the contract closed at: "answer", "field" or "grounded", the weakest
+	// AcceptanceAuthority is the authority the contract closed at: "answer", "field" or "grounded", the weakest
 	// authority among its checks, present only when every check passed, nothing else failed the result and every check
 	// was authority-qualified (contracts/README.md, "Authority-graded checks"). omitempty: a result with an unqualified
 	// check, a failure, or no graded answer publishes byte-identically to before.

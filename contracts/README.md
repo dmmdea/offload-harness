@@ -92,14 +92,21 @@ A field-level check names its field, so the field joins the schema's `required` 
 `min_items:` fields do. The intake lint adds **AUTHORITY-UNREACHABLE** (`results[].acceptance_lint`, warn-only): a
 `@grounded:` check on a contract with no context docs, and an `@field=` check whose field the `output_schema` does not
 declare (or that has no `output_schema`), can only ever grade unknown (a blank document counts as none, as it does
-when grading).
+when grading). Such an unknown is a defect of the contract, not of the node that answered. On the research lane's
+document fingerprint (the wrong-document tripwire a node is quarantined for) it is still reported as a failed check,
+but it is neither a strike nor a pass for the node, and the contract is not retried on a second node, because no
+node's answer could close it. An unknown the contract could have closed (an empty answer beside the documents, a
+declared field the result lacks) is the result's, and counts against the node as a failed fingerprint always has.
 
 Spelling: only `@answer:`, `@grounded:` and `@field=<name>:` (on `contains:`, `regex:` and `not_contains:`) are read as
-qualifiers. After a reserved qualifier prefix (`@answer:`, `@grounded:`, `@field`) a missing field name, a missing colon
-or an empty tail is a parse error, and so is `not_contains:@grounded:`; lines like these were plain substrings before. A
-substring that starts with those exact spellings is
-now read as a qualified check, so anchor on something else or write the first character as a class
-(`regex:[@]answer:`); any other leading `@` is a literal as before. A misspelt qualifier, and a qualified line read by
+qualifiers. The reserved prefixes are exactly `@answer:`, `@grounded:`, `@field=` and `@field:` (the last is no
+qualifier: it is refused, because the field qualifier's separator is `=`). After a reserved prefix a missing field name
+(`@field=:x`), a missing colon after the name (`@field=summary`), an empty tail, or `@field:` itself is a parse error,
+and so is `not_contains:@grounded:`; lines like these were plain substrings before. A substring that starts with a
+reserved prefix is now read as a qualified check, so anchor on something else or write the first character as a class
+(`regex:[@]answer:`). Text that only begins with the letters `@field` is not a reserved prefix, so `contains:@field`,
+`contains:@fieldname:x` and `contains:@fieldx` are plain literal substrings, as is any other leading `@`, as before.
+A misspelt qualifier, and a qualified line read by
 a delegator one release behind, are a literal substring: for `contains:` and `regex:` no answer carries it, so the
 check fails closed; for `not_contains:` the literal is absent from every answer, so the check passes vacuously, and a
 qualified `not_contains:` buys nothing on such a delegator.

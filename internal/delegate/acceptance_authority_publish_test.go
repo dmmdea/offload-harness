@@ -13,7 +13,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 )
 
-// The authority a contract closed at (ENH-13b). core.ClosedAt says it for a set of graded checks; the delegator states it on
+// The authority a contract closed at. core.ClosedAt says it for a set of graded checks; the delegator states it on
 // what it publishes: EvalAcceptanceGraded returns it beside the failures, PlacedResult carries it, and the result the caller
 // reads (acceptance_authority) and the corpus row repeat it. It is the weakest authority among the checks, and only when the
 // whole contract was accepted: a failure, an unknown, an excused fingerprint, a list-fidelity failure or a single
