@@ -1630,9 +1630,7 @@ func buildAudioParams(f audioFlags) map[string]any {
 		kind = "voice"
 	}
 	params := map[string]any{"kind": kind}
-	if n := strings.TrimSpace(f.node); n != "" {
-		params["node"] = n
-	}
+	laneTargetParams(params, f.node, nil)
 	if f.voice != "" {
 		params["voice"] = f.voice
 	}
@@ -1725,7 +1723,7 @@ func parseGenerateAudio(args []string, errorHandling flag.ErrorHandling) (genera
 	out, text, flagArgs := splitTwoArgs(args, map[string]bool{
 		"config": true, "kind": true, "voice": true, "clone": true, "lang": true,
 		"seconds": true, "seed": true, "reserve-vram": true, "tts-voice": true,
-		"route": true, "remote": true, "node": true,
+		"route": true, "remote": true, "node": true, // generate-audio
 	})
 	if err := fs.Parse(flagArgs); err != nil {
 		return generateAudioCLI{}, err
@@ -1747,6 +1745,17 @@ func parseGenerateAudio(args []string, errorHandling flag.ErrorHandling) (genera
 
 // videoFlags is the parsed CLI input for `generate-video`. Factored out so the
 // param-building (buildVideoParams) is unit-testable without a live render.
+// laneTargetParams puts the --node and --min-vram-gb of a lane verb into the request's params, only when they were given (an
+// explicit 0 is a number the caller gave). generate-audio has no VRAM floor and passes nil.
+func laneTargetParams(params map[string]any, node string, minVRAM *float64) {
+	if n := strings.TrimSpace(node); n != "" {
+		params["node"] = n
+	}
+	if minVRAM != nil {
+		params["min_vram_gb"] = *minVRAM
+	}
+}
+
 // parseMinVRAMFlag reads --min-vram-gb of a verb that takes it: nil when the flag was not given, else a number of GB, 0 or more
 // (run-graph reads its own spelling of the same flag in runGraphParams).
 func parseMinVRAMFlag(verb, s string) (*float64, error) {
@@ -1792,12 +1801,7 @@ type videoFlags struct {
 // runner's --reserve-vram). reserve_vram is stringified to match the MCP wire shape.
 func buildVideoParams(f videoFlags) map[string]any {
 	params := map[string]any{}
-	if n := strings.TrimSpace(f.node); n != "" {
-		params["node"] = n
-	}
-	if f.minVRAM != nil {
-		params["min_vram_gb"] = *f.minVRAM
-	}
+	laneTargetParams(params, f.node, f.minVRAM)
 	if f.model != "" {
 		params["model"] = f.model
 	}
@@ -1912,8 +1916,7 @@ func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (genera
 	return generateVideoCLI{
 		fs: fs,
 		video: videoFlags{
-			node: *node, minVRAM: floor,
-			model: *model, still: still, negative: *negative, out: out, transformer: *transformer,
+			model: *model, node: *node, minVRAM: floor, still: still, negative: *negative, out: out, transformer: *transformer,
 			frames: *frames, width: *width, height: *height, steps: *steps,
 			seed: *seed, reserveVRAM: *reserveVRAM, fast: *fast, hero: *hero, upscale: *upscale,
 		},
@@ -2041,7 +2044,7 @@ func parseAnimateCharacter(args []string, errorHandling flag.ErrorHandling) (ani
 		"config": true, "motion-prompt": true, "negative": true, "width": true,
 		"height": true, "frames": true, "steps": true, "seed": true,
 		"pose-strength": true, "ref-strength": true, "reserve-vram": true,
-		"route": true, "remote": true, "node": true, "min-vram-gb": true,
+		"route": true, "remote": true, "node": true, "min-vram-gb": true, // animate-character
 	})
 	if err := fs.Parse(flagArgs); err != nil {
 		return animateCharacterCLI{}, err
@@ -2057,8 +2060,7 @@ func parseAnimateCharacter(args []string, errorHandling flag.ErrorHandling) (ani
 	return animateCharacterCLI{
 		fs: fs,
 		animate: animateFlags{
-			node: *node, minVRAM: floor,
-			out: out, ref: ref, driver: driver, prompt: prompt, motionPrompt: *motionPrompt, negative: *negative,
+			out: out, node: *node, minVRAM: floor, ref: ref, driver: driver, prompt: prompt, motionPrompt: *motionPrompt, negative: *negative,
 			width: *width, height: *height, frames: *frames, steps: *steps, seed: *seed,
 			poseStrength: *poseStrength, refStrength: *refStrength, reserveVRAM: *reserveVRAM,
 		},
@@ -2069,12 +2071,7 @@ func parseAnimateCharacter(args []string, errorHandling flag.ErrorHandling) (ani
 // buildAnimateParams maps the parsed CLI flags to the pipeline params map for an animate_character request.
 func buildAnimateParams(f animateFlags) map[string]any {
 	params := map[string]any{"ref": f.ref, "driver": f.driver, "out": f.out}
-	if n := strings.TrimSpace(f.node); n != "" {
-		params["node"] = n
-	}
-	if f.minVRAM != nil {
-		params["min_vram_gb"] = *f.minVRAM
-	}
+	laneTargetParams(params, f.node, f.minVRAM)
 	if f.motionPrompt != "" {
 		params["motion_prompt"] = f.motionPrompt
 	}

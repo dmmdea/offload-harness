@@ -386,7 +386,8 @@ func TestWithNoModelTheNodesDefaultRowDecidesAndTheAnswerSaysWhichRendered(t *te
 		t.Fatalf("a default row with a missing file: %+v data %v", res, data)
 	}
 
-	whole := startNode(t, nodeOpts{id: "render-b", healthEdit: publishes(wanOK, mrow("video-gen", "ltx25", false, "x.safetensors", 1))})
+	// The default row is the one marked default, wherever it is listed.
+	whole := startNode(t, nodeOpts{id: "render-b", healthEdit: publishes(mrow("video-gen", "ltx25", false, "x.safetensors", 1), wanOK)})
 	res = Run(context.Background(), namedClient(t, whole), &recordingRunner{}, named("render-b", nil), "", nil)
 	if !res.OK || len(whole.posts()) != 1 {
 		t.Fatalf("%+v", res)
@@ -420,6 +421,27 @@ func TestTheModelFoldsTheWayTheNodeFoldsIt(t *testing.T) {
 	}
 }
 
+// An sd.cpp family is a row under its own name and a model is matched against it exactly, before any folding: "fastwan" is not
+// Wan 2.2 on a node that publishes it.
+func TestAnSdcppFamilyIsMatchedByItsOwnName(t *testing.T) {
+	sd := func(name string, files ...any) map[string]any {
+		r := mrow("video-gen", name, false, files...)
+		r["engine"] = "sdcpp"
+		return r
+	}
+	b := startNode(t, nodeOpts{id: "render-b", healthEdit: publishes(wanOK, sd("fastwan", "fastwan.gguf", 7))})
+	res := Run(context.Background(), namedClient(t, b), &recordingRunner{}, named("render-b", map[string]any{"model": "fastwan"}), "", nil)
+	if !res.OK || decode(t, res)["rendered_family"] != "fastwan" {
+		t.Fatalf("%+v", res)
+	}
+	broken := startNode(t, nodeOpts{id: "render-c", healthEdit: publishes(wanOK, sd("fastwan", "fastwan.gguf", -1, "vae.safetensors", 3))})
+	res = Run(context.Background(), namedClient(t, broken), &recordingRunner{}, named("render-c", map[string]any{"model": "fastwan"}), "", nil)
+	data := refusal(t, res)
+	if data["refusal"] != "node_lacks_model" || data["family"] != "fastwan" || strings.Join(strs(data["missing"]), ",") != "fastwan.gguf" {
+		t.Errorf("%+v data %v", res, data)
+	}
+}
+
 // A lane the node publishes no row for is unknown, not refused: an older node, a node whose animate lane is sd.cpp (rows only
 // for video), voice (no row in this release) and voice=endpoint all go on to the node's own door.
 func TestALaneWithoutARowIsUnknownAndProceeds(t *testing.T) {
@@ -429,6 +451,9 @@ func TestALaneWithoutARowIsUnknownAndProceeds(t *testing.T) {
 	}
 	if got := decode(t, Run(context.Background(), namedClient(t, older), &recordingRunner{}, named("render-a", nil), "", nil)); got["rendered_family"] != nil {
 		t.Errorf("no row, no claim about what rendered: %v", got)
+	}
+	if res := Run(context.Background(), namedClient(t, older), &recordingRunner{}, named("render-a", map[string]any{"model": "ltx25"}), "", nil); !res.OK {
+		t.Errorf("an older node is not judged for a model either: %+v", res)
 	}
 
 	videoOnly := startNode(t, nodeOpts{id: "render-b", mediaInputs: true, healthEdit: publishes(mrow("video-gen", "wan22", true, "high.gguf", -1))})

@@ -42,6 +42,9 @@ type LaneRow struct {
 	CommercialUse *bool        `json:"commercial_use,omitempty"`
 }
 
+// fileMissing is the bytes of a file the node does not hold.
+const fileMissing int64 = -1
+
 // The names of the animation and music rows: the families the node advertises for those lanes.
 const (
 	AnimateRowName = "wan-animate2"
@@ -105,7 +108,7 @@ func videoLaneRows(cfg config.Config, roots []ModelRoot) []LaneRow {
 			if strings.TrimSpace(f.path) == "" {
 				continue
 			}
-			size := int64(-1)
+			size := fileMissing
 			if n, ok := osStatSize(f.path); ok {
 				size = n
 			}
@@ -126,7 +129,7 @@ func videoLaneRows(cfg config.Config, roots []ModelRoot) []LaneRow {
 func laneFiles(roots []ModelRoot, files []ModelFile) []RecipeFile {
 	out := make([]RecipeFile, 0, len(files))
 	for _, f := range files {
-		size := int64(-1)
+		size := fileMissing
 		if _, n, ok := ResolveModelFilePath(roots, f, nil); ok {
 			size = n
 		}
@@ -137,7 +140,7 @@ func laneFiles(roots []ModelRoot, files []ModelFile) []RecipeFile {
 
 func allPresent(files []RecipeFile) bool {
 	for _, f := range files {
-		if f.Bytes < 0 {
+		if f.Bytes == fileMissing {
 			return false
 		}
 	}

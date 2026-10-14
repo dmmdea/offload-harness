@@ -351,6 +351,18 @@ func withMediaPlace(raw json.RawMessage, params map[string]any) map[string]any {
 	return params
 }
 
+// laneTargeting puts the lane-targeting parameters of the video, animation and audio doors (ADR 0082 Amendment 3) into a request's
+// params, only when the caller passed them: node (all three), min_vram_gb (video and animation; the audio door passes nil). A
+// min_vram_gb of 0 is a number the caller gave and travels.
+func laneTargeting(params map[string]any, node string, minVRAM any) {
+	if node != "" {
+		params["node"] = node
+	}
+	if minVRAM != nil {
+		params["min_vram_gb"] = minVRAM
+	}
+}
+
 func parseArgs(raw json.RawMessage, in any) *mcp.CallToolResult {
 	if len(raw) == 0 {
 		return nil
@@ -2238,12 +2250,7 @@ func (s *Server) handleGenerateVideo(ctx context.Context, req *mcp.CallToolReque
 		return bad, nil
 	}
 	params := map[string]any{}
-	if in.Node != "" {
-		params["node"] = in.Node
-	}
-	if in.MinVRAMGB != nil {
-		params["min_vram_gb"] = in.MinVRAMGB
-	}
+	laneTargeting(params, in.Node, in.MinVRAMGB)
 	// LO-19: hero/upscale were ADVERTISED in the schema but never mapped — MCP callers
 	// asking for the quality pass silently got the draft path. fast/hero/upscale now flow.
 	if in.Fast {
@@ -2313,12 +2320,7 @@ func (s *Server) handleAnimateCharacter(ctx context.Context, req *mcp.CallToolRe
 		return bad, nil
 	}
 	params := map[string]any{}
-	if in.Node != "" {
-		params["node"] = in.Node
-	}
-	if in.MinVRAMGB != nil {
-		params["min_vram_gb"] = in.MinVRAMGB
-	}
+	laneTargeting(params, in.Node, in.MinVRAMGB)
 	if in.Ref != "" {
 		params["ref"] = in.Ref
 	}
@@ -2381,9 +2383,7 @@ func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolReque
 		return bad, nil
 	}
 	params := map[string]any{}
-	if in.Node != "" {
-		params["node"] = in.Node
-	}
+	laneTargeting(params, in.Node, nil)
 	if in.Kind != "" {
 		params["kind"] = in.Kind
 	}
