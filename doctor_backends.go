@@ -14,7 +14,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 )
 
-// The active-backend section of `doctor` (EXP-1): for every lane and every seat, which serving engine
+// The active-backend section of `doctor`: for every lane and every seat, which serving engine
 // is answering, the ordered chain it was picked from, how deep the probe went and why.
 //
 //	backends:   active_backend per lane and seat ...

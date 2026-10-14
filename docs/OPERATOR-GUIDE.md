@@ -1773,13 +1773,15 @@ does not strand the box at 1 after the venv is installed. The tier is the instal
 exit code.
 
 `doctor` also prints a `backends:` section after its checks, whatever they returned: one row per lane and per seat saying which
-serving engine answers (`active_backend`: `llama.cpp`, `vllm`, `rkllm`, `unknown`, or `none`), the chain it was picked from, how
-deep the evidence goes (`process`: llama-swap's roster and running list; `endpoint`: a loaded seat's own health endpoint), and why.
-A box whose tier prefers a vLLM agent seat but serves its llama.cpp fallback says so in the agent lane's row. The default
-probe loads nothing and sends no completion. `doctor --probe-completion` adds a 1-token completion per seat, and THAT can load an
-idle seat (a cold vLLM load takes minutes), so it is skipped where it would evict a vLLM seat and never runs unless you pass the
-flag; run it deliberately, not from a script that runs every few minutes. The section is informational and never changes the exit
-code. The same four fields, as JSON, are `lane_backends` and `seat_backends` on `/fleet/health` (docs/systems/fleet-node.md).
+serving engine answers (`active_backend`: `llama.cpp`, `vllm`, `rkllm`, `unknown`, or `none`; on a lane, the engine of the seat the
+lane is bound to), the chain it was picked from, how deep the evidence goes (`process`: llama-swap's roster and running list;
+`endpoint`: a loaded seat's own health endpoint), and why. A box whose tier prefers a vLLM agent seat while `agent_model` is bound to
+the llama.cpp fallback reads `llama.cpp` on the agent lane and says in the row that the vLLM seat is available but not bound. The
+default probe loads nothing and sends no completion. `doctor --probe-completion` (listed by `doctor -h`) adds a 1-token completion
+per seat, and THAT can load an idle seat (a cold vLLM load takes minutes), so it is refused for any seat that is not running while a
+vLLM seat is loaded, and never runs unless you pass the flag; run it deliberately, not from a script that runs every few minutes.
+The section is informational and never changes the exit code. `doctor` has no JSON mode: it prints these rows as text, and the JSON
+of the same four fields is `lane_backends` and `seat_backends` on `/fleet/health` (docs/systems/fleet-node.md).
 
 **A pin needs a reason (ADR 0078).** `route: local` and `route: remote` pin a call to this box's seat or to a fleet node, and a
 call that does that must say why: `pin_reason` (`--pin-reason` on the `delegate` and `research` verbs) is `privacy` (the material

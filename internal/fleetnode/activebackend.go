@@ -10,7 +10,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 )
 
-// The per-lane and per-seat active_backend report (EXP-1) rides /fleet/health as two additive keys,
+// The per-lane and per-seat active_backend report rides /fleet/health as two additive keys,
 // lane_backends and seat_backends (internal/backendchain.Entry: active_backend, backend_chain,
 // backend_probe, backend_reason). They are NOT the existing `backends` key: that one is the hardware
 // tag list of the install (ADR 0054) and is untouched.

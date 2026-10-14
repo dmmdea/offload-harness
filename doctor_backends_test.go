@@ -154,7 +154,7 @@ func TestSplitProbeCompletion(t *testing.T) {
 	}
 }
 
-// TestDoctorVerbAppendsTheBackendsSectionAndLoadsNothing is the ACCEPT of EXP-1 at the verb: a
+// TestDoctorVerbAppendsTheBackendsSectionAndLoadsNothing is the acceptance test of the active-backend report at the verb: a
 // default-mode `doctor` prints the section and the llama-swap it ran against saw no completion, no
 // /upstream path and no POST (strictSwap fails the test on any).
 func TestDoctorVerbAppendsTheBackendsSectionAndLoadsNothing(t *testing.T) {

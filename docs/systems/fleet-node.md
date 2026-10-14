@@ -1130,21 +1130,26 @@ with none of that tool's dependencies and stays engine-neutral: a field names an
 
 | Field | Type | Meaning |
 |---|---|---|
-| `active_backend` | string | The engine kind answering: `llama.cpp`, `vllm`, `rkllm`, `strata` (reserved for the Strata seat; nothing classifies into it yet), `unknown` (the seat can serve but the config does not name its engine), or `none`. |
+| `active_backend` | string | The engine kind answering: `llama.cpp`, `vllm`, `rkllm`, `strata` (reserved for the Strata seat; nothing classifies into it yet), `unknown` (the seat can serve but the config does not name its engine), or `none`. On a lane it is the engine of the seat the lane is BOUND to, because the lane routes there: a preferred seat the lane is not bound to never becomes the active backend, however healthy it is. |
 | `backend_chain` | string list | The engine kinds the lane or seat may use, in preference order. |
 | `backend_probe` | string | How deep the evidence goes: `process` (llama-swap's own state: the roster and the running list), `endpoint` (the seat was loaded and its own health endpoint answered), `completion` (a 1-token completion ran; only with the flag below). When nothing answers, the deepest level any candidate reached. |
-| `backend_reason` | string | Why that backend was chosen, or why none was. A lane served by its second backend names the first one's failure (`vllm seat X unavailable: not in the llama-swap roster; fell to llama.cpp seat Y: ...`), and a seat that answers while the lane is bound to another says so. It carries no address, path or command line: it is published to every node that reads health. |
+| `backend_reason` | string | Why that backend was chosen, or why none was. A preferred seat that failed is named before the answer (`vllm seat X unavailable: not in the llama-swap roster; fell to llama.cpp seat Y: ...`); a preferred seat that is up while the lane is bound to another is named after it (`...; the preferred vllm seat X is available (...) but does not answer for this lane, which is bound to Y`); a bound seat that fails is `none`, and the reason says whether another seat of the chain is available. Seat names, llama-swap states, HTTP status numbers and fixed phrases only: no address, path, URL or command line, because it is published to every node that reads health. A test pins that for every failure clause of the collector. |
 
-Each row also names the lane (`lane`, the config's status key) or the seat (`seat`, the seat answering, or the first of
-the chain when none is). The chain of a lane is its one bound seat, except the agent lane of a box installed as a tier that
+Each row also names the lane (`lane`, the config's status key) or the seat (`seat`, the seat answering, or when none is,
+the lane's bound seat). The chain of a lane is its one bound seat, except the agent lane of a box installed as a tier that
 declares a vLLM agent seat: the tier prefers that seat and serves its llama.cpp fallback when the vLLM prerequisites are
-missing, so the chain is `[vllm seat, llama.cpp fallback]` and the first one that answers is active. This reports which
-backend of the chain can serve now, in preference order. It does not route anything: a lane is still routed by the seat
-its config binds. Lanes are the routes `doctor` already diffs against the roster (`config.ModelRoutes`, so an unset route
-and `embed_model` are not lanes); seat rows are one per entry of the serving config plus any roster id it does not carry.
-An engine is classified from the box's own statements, never guessed: `vllm_seats` (or the tier table) for a vLLM entry,
-whose command is a wrapper script, then `llama-server` or `rkllm` in the command the serving config runs for the seat. A
-new engine registers by adding one row to `engineRules` in `internal/backendchain/classify.go`, and changes no field.
+missing, so the chain is `[vllm seat, llama.cpp fallback]`, and the engine that answers is the one of whichever the lane's
+`agent_model` is bound to. A box whose vLLM venv is installed while `agent_model` still names the fallback therefore reads
+`llama.cpp` on the agent lane and says in the reason that the vLLM seat is available but not bound; a lane bound to a vLLM
+seat that fails reads `none`, not the fallback, because the lane would call the failing seat. This reports what answers
+for the lane as it is configured; it does not route anything. A lane exists for each route `doctor` diffs against the
+roster (`config.ModelRoutes`) that has an effective seat: a route with no effective seat is not a lane, `embed_model` is
+never one (doctor does not diff it), and `agent` and `ocr` report the seat they fall back to when their own model is unset
+(the workhorse seat and the vision seat). The lanes are workhorse, agent, triage, escalation, reasoning, vision, ocr, stt and
+stt_hq. Seat rows are one per entry of the serving config plus any roster id it does not carry. An engine is classified
+from the box's own statements, never guessed: `vllm_seats` (or the tier table) for a vLLM entry, whose command is a wrapper
+script, then `llama-server` or `rkllm` in the command the serving config runs for the seat. A new engine registers by adding
+one row to `engineRules` in `internal/backendchain/classify.go`, and changes no field.
 
 **The default probe loads nothing.** It reads llama-swap's roster (`/v1/models`) and its running list (`/running`), and a
 seat that is already loaded and ready is asked for its own health endpoint (the entry's `checkEndpoint`, `/health` when it
@@ -1154,24 +1159,33 @@ demand and is not asked anything: asking would load it. A seat llama-swap lists 
 No code path of the default probe sends a completion. The tests run it against a llama-swap that fails the test on any
 completion, any `/upstream` path or any POST (`internal/backendchain`, `internal/fleetnode`, `doctor_backends_test.go`).
 
-**The 1-token completion probe exists only behind `doctor --probe-completion`.** A completion against an idle seat loads
-it, and a load can evict a vLLM seat that holds the cards (`cascade_seat_guard`, `internal/seatguard`), so it is a thing a
-person asks for. It is skipped, and says why, whenever it would load a seat while a vLLM seat is resident, and whenever
-llama-swap's running list cannot be read (a vLLM seat holding the cards cannot then be ruled out). It runs once per seat
-per run. Idle seats it loads unload on their own idle timer like any other load. `/fleet/health` never runs it.
+**The 1-token completion probe exists only behind `doctor --probe-completion`.** A completion against a seat that is not
+running loads it, and a load can evict a vLLM seat that holds the cards (`cascade_seat_guard`, `internal/seatguard`), so it
+is a thing a person asks for, and `doctor -h` says so. It is refused, and the row says why, for any seat that is not running
+while a vLLM seat is loaded or loading (a vLLM seat is no exception: loading one evicts another), and whenever llama-swap's
+running list cannot be read (a vLLM seat holding the cards cannot then be ruled out). The decision is made on a fresh read
+of the running list, and the list is read again after every completion, whether it succeeded or not, so a vLLM seat that
+the run itself loaded, or one that another client loaded meanwhile, stops the completions that would follow. A row that ran
+a completion on an idle seat says the completion loaded it. It runs once per seat per run. Seats it loads unload on their
+own idle timer like any other load. `/fleet/health` never runs it.
 
 **Where it appears.**
 
 - `local-offload doctor` prints a `backends:` section after its own checks, whatever they returned (an unreachable
   llama-swap still gets rows, `none`, with the reason): one row per lane and per seat. It is informational and never changes
-  doctor's exit code, and it prints nothing on a box with no local model (a delegation client). `doctor` has no JSON mode;
-  the JSON of the same four fields is the health payload below.
+  doctor's exit code, and it prints nothing on a box with no local model (a delegation client). `doctor` has no JSON mode:
+  doctor prints these rows as text, and the JSON of the same four fields is the `lane_backends` and `seat_backends` of
+  `GET /fleet/health` below.
 - `GET /fleet/health` gains `lane_backends` and `seat_backends`, lists of `{lane|seat, active_backend, backend_chain,
   backend_probe, backend_reason}`. Additive and `omitempty`: a reader that predates them ignores the keys, and the existing
   `backends` key (the hardware tags of the install, ADR 0054: `vulkan`, `cpu`) is a different thing and is unchanged. The
   read is cached like the residency answer: the handler never waits on llama-swap, the first request after start-up answers
   without the keys (absent means unknown, never `none`) and kicks one background read, and a cached answer older than 30 s
   is refreshed behind the next request. A node with no llama-swap endpoint publishes nothing.
+- What the new keys expose, against what `backends` exposes: no host name, path, URL or IP. `backends` is hardware tags and
+  nothing else. The new rows add engine kinds and probe levels (a fixed vocabulary), the status key of each lane, and seat
+  names (model ids and aliases from llama-swap's roster and the serving config), which `served_models` already publishes on
+  a node with the agent or chat lane on. The seat's address and command line are read and never emitted.
 
 ## The acceptance gate (`local-offload acceptance`)
 

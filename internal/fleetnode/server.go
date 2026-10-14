@@ -1217,8 +1217,8 @@ type healthPayload struct {
 	// (["vulkan","cpu"] on a dual-route node); a caller picks a route by seat id
 	// (`gemma4-e2b` vs `gemma4-e2b-cpu`). Additive + omitempty (ADR 0054).
 	Backends []string `json:"backends,omitempty"`
-	// LaneBackends and SeatBackends are the per-lane and per-seat active_backend report (EXP-1,
-	// internal/backendchain): which serving ENGINE (llama.cpp, vllm, rkllm, ...) is answering, the
+	// LaneBackends and SeatBackends are the per-lane and per-seat active_backend report
+	// (internal/backendchain): which serving ENGINE (llama.cpp, vllm, rkllm, ...) is answering, the
 	// ordered chain it was picked from, how deep the probe went and why. They are NOT `backends` (the
 	// hardware tags above, unchanged). Additive + omitempty, and absent until the first background read
 	// lands: a reader takes an absent key as unknown, never as "none".
