@@ -261,6 +261,9 @@ func TestRunCBTheLadderActsOnToolResultsAndTheGradeShowsWhatItCost(t *testing.T)
 	if r.Compactions == 0 || r.Pager == nil || r.Pager.Evictions == 0 {
 		t.Fatalf("a tight budget must engage the ladder and the pager record: %+v", r)
 	}
+	if r.Pager.RefetchRate != nil || r.Pager.Basis != CBPagerNotExercised || strings.HasPrefix(r.Pager.Verdict, "BELOW") || strings.HasPrefix(r.Pager.Verdict, "ABOVE") {
+		t.Fatalf("a seat with no fetch tool must not report a measured re-fetch rate or a gate verdict: %+v", r.Pager)
+	}
 	if r.PeakSentTokens > tight.Budget-tight.Reserve {
 		t.Fatalf("a context sent to the seat was over the usable budget: %d > %d", r.PeakSentTokens, tight.Budget-tight.Reserve)
 	}

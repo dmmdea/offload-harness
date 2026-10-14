@@ -574,8 +574,9 @@ transcript goes through `agent.CompactReplay` at `budget - reserve`, estimated w
 chars-divided-by-four estimator (the report stamps `size_estimator`), and the compacted transcript is kept,
 as the production loop keeps it. The agent advances the stream with `READY_FOR_NEXT_OP` on a line of its own;
 the run ends when the last operation has been answered. Every compaction is passed to `agent.PagerStats`,
-whose report is stored per task. In this reply-only setting the agent has no tool to fetch evicted content, so
-`refetched_distinct` stays 0: the pager readout shows what was evicted, not a re-fetch rate.
+whose eviction counts are stored per task. In this reply-only setting the agent has no tool to fetch evicted content,
+so the stored pager report has basis `not_exercised` and a null `refetch_rate`: it shows what was evicted and never a
+re-fetch rate or a gate verdict.
 
 Which snapshot the grade uses. A snapshot is the `[]agent.Msg` transcript at one moment. The run records two per
 step: `sent` (what the seat was handed, after compaction) and `turn` (the transcript right after the seat's

@@ -163,6 +163,10 @@ type CBReport struct {
 	MeanReward map[string]float64 `json:"mean_reward_by_family,omitempty"`
 }
 
+// CBPagerNotExercised is the pager basis of every contextbench task: evictions are
+// recorded, a re-fetch rate is not (see RunCBTask).
+const CBPagerNotExercised = "not_exercised"
+
 // CBSchema stamps the report format.
 const CBSchema = "contextbench/1"
 
@@ -313,9 +317,14 @@ loop:
 		}
 	}
 
-	if rep := pager.Report(); rep.Basis != "" {
-		res.Pager = &rep
-	}
+	// The seat here has no tool to fetch evicted content, so the re-fetch question is never
+	// posed: the pager's own verdict ("below gate, no pager needed") was written for a loop
+	// that can re-fetch and would read as a measured zero. Keep what was evicted; null the rate.
+	rep := pager.Report()
+	rep.RefetchRate = nil
+	rep.Basis = CBPagerNotExercised
+	rep.Verdict = "re-fetch not exercised: the seat has no tool to fetch evicted content, so only evictions are measured"
+	res.Pager = &rep
 	if res.Outcome == "" {
 		classify(&res, GradeCB(in, frames), o.PassAt)
 	}
