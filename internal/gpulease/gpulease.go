@@ -2125,7 +2125,13 @@ var restampWholeHook func()
 // restampWholeLocked is the whole-node half of Restamp; the caller holds the epoch lock.
 func (m *Manager) restampWholeLocked(epoch uint64, fn func(*Meta)) error {
 	meta, err := m.readMeta()
-	if err != nil || meta == nil {
+	if isIOFailure(err) {
+		return fmt.Errorf("gpulease: restamp: %w", &RecordUnreadableError{Epoch: epoch, Err: err}) // not gone: it could not be read
+	}
+	if err != nil {
+		return fmt.Errorf("gpulease: restamp: the lease is gone (epoch %d): %w", epoch, err)
+	}
+	if meta == nil {
 		return fmt.Errorf("gpulease: restamp: the lease is gone (epoch %d)", epoch)
 	}
 	if meta.Epoch != epoch {

@@ -384,9 +384,11 @@ var detachedReleaseGrace = 15 * time.Minute
 // the holder for the minutes a warm-back takes, yet if it dies in the middle the lease must not stay held for good: the pushed
 // stamp is the moment the holder takes over. The lease being gone already (the holder got there first) is not a failure.
 func releaseAfterRAMWait(m *gpulease.Manager, epoch uint64, cfg config.Config, err error) error {
-	if info := m.Inspect(); !info.Held || !info.HoldsEpoch(epoch) {
+	if !leaseStillHeld(m, epoch) {
 		return detachedMaintainError(m, epoch, err) // the lease is not this reservation's any more: nothing to release
 	}
+	// Else it is on the record, or its record exists and cannot be read, which is a lease that is held: proceed to stop the
+	// instances, warm the seat back and release, and report the release if it fails.
 	if serr := m.StampHostRAMHold(epoch, time.Now().Add(detachedReleaseGrace)); serr != nil {
 		fmt.Fprintf(os.Stderr, "gpu reserve: warning: could not push the lease's stamped end out before releasing it (%v); if this process dies during the warm-back the hidden holder may release the lease sooner than the warm-back finishes\n", serr)
 	}

@@ -526,7 +526,10 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 	for {
 		need, found := awaitedFigure(m.Leases(), epoch)
 		if !found {
-			return fmt.Errorf("gpulease: host RAM: the lease is gone (epoch %d)", epoch)
+			if err := m.leaseMissing(epoch); err != nil {
+				return err
+			}
+			continue // it turned up again: a read that failed for a moment
 		}
 		if need <= 0 {
 			return nil // admitted already (or nothing was deferred)
@@ -559,7 +562,10 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 			}
 			if !stamped && o.RequireStamp {
 				if _, live := awaitedFigure(m.Leases(), epoch); !live {
-					return fmt.Errorf("gpulease: host RAM: the lease is gone (epoch %d)", epoch) // that, not the stamp, is what failed
+					if err := m.leaseMissing(epoch); err != nil {
+						return err // that, not the stamp, is what failed
+					}
+					continue
 				}
 				// The caller's hidden holder is the only thing that releases this lease if the caller dies, and it can enforce only
 				// what is on the record: a wait it cannot see the end of must not run. The host has not been looked at.
@@ -593,7 +599,10 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 		case err != nil:
 			return err
 		case gone:
-			return fmt.Errorf("gpulease: host RAM: the lease is gone (epoch %d)", epoch)
+			if err := m.leaseMissing(epoch); err != nil {
+				return err
+			}
+			continue
 		case refused == nil:
 			return nil
 		case refused.Impossible:
@@ -612,6 +621,34 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 			return ErrCancelled
 		}
 	}
+}
+
+// The wait looks for a lease that is not among the live ones this many more times, this far apart, before it believes the lease is
+// gone: a record read that fails for a moment (a rename that replaces it, a scanner holding it) shows the lease as absent.
+var (
+	missingRechecks     = 3
+	missingRecheckPause = 100 * time.Millisecond
+)
+
+// leaseMissing is what AwaitHostRAM answers when the lease it waits for is not among the live ones. It looks again, and returns nil
+// if the lease turned up. Otherwise it says why it is missing from the record itself: the lease is gone, or its record cannot be read
+// (which is not the same, and keeps its cause).
+func (m *Manager) leaseMissing(epoch uint64) error {
+	var st RecordState
+	var cause error
+	for i := 0; i <= missingRechecks; i++ {
+		if i > 0 {
+			m.pause(missingRecheckPause)
+		}
+		if _, found := awaitedFigure(m.Leases(), epoch); found {
+			return nil
+		}
+		st, cause = m.RecordState(epoch)
+	}
+	if st == RecordUnreadable {
+		return fmt.Errorf("gpulease: host RAM: the record of epoch %d cannot be read, so the lease is not known to be gone: %w", epoch, cause)
+	}
+	return fmt.Errorf("gpulease: host RAM: the lease is gone (epoch %d)", epoch)
 }
 
 // holdUntilOf is Meta.HostRAMHoldUntilMs as a time (the zero Time when no bound is running).

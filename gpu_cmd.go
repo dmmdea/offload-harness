@@ -1830,6 +1830,9 @@ func requeueWait(queuedAt time.Time, wait time.Duration) time.Duration {
 // nothing of this reservation is held, and telling the caller to `gpu release`
 // would release someone else's lease.
 func detachedMaintainError(m *gpulease.Manager, epoch uint64, err error) error {
+	if st, cause := m.RecordState(epoch); st == gpulease.RecordUnreadable {
+		return fmt.Errorf("%w (the lease's record cannot be read, so it is treated as still held: %v; `gpu release --epoch %d` frees it)", err, cause, epoch)
+	}
 	if info := m.Inspect(); info.Held && info.HoldsEpoch(epoch) {
 		// A lease that asks for the host's RAM carries an outer bound from the moment the holder has it: past it the holder releases
 		// the lease whatever became of this reserve, and the operator is told so instead of "held on purpose".

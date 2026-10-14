@@ -952,7 +952,10 @@ func (m *Manager) restampV2(epoch uint64, fn func(*Meta)) error {
 func (m *Manager) restampV2Locked(epoch uint64, fn func(*Meta)) error {
 	rec, err := readEpochRecord(m.leaseDir(), epoch)
 	if err != nil {
-		return fmt.Errorf("gpulease: restamp: the lease is gone (epoch %d)", epoch)
+		if isIOFailure(err) {
+			return fmt.Errorf("gpulease: restamp: %w", &RecordUnreadableError{Epoch: epoch, Err: err}) // not gone: it could not be read
+		}
+		return fmt.Errorf("gpulease: restamp: the lease is gone (epoch %d): %w", epoch, err)
 	}
 	if !claimsNameEpoch(m.leaseDir(), rec) {
 		return fmt.Errorf("gpulease: restamp: fenced out — a card of epoch %d is claimed by another holder", epoch)
