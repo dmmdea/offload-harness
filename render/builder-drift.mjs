@@ -165,9 +165,15 @@ function linkedInput(node, name) {
 const widgetInputNames = (sg) => (sg?.inputs ?? []).filter((i) => WIDGET_INPUT_TYPES.has(i.type)).map((i) => i.name);
 const subgraphOfInstance = (tpl, instance) => (tpl.definitions?.subgraphs ?? []).find((x) => x.id === instance.type);
 
+// The position of [node id, widget name] in an instance's `properties.proxyWidgets`, or -1. In the legacy form the
+// instance's `widgets_values` follow this list, not the order of the subgraph's inputs (the frontend's own migration
+// of a legacy proxy reads the host value at the entry's position in the list).
+const proxyPosition = (inst, t) => (inst.properties?.proxyWidgets ?? []).findIndex((p) => String(p[0]) === String(t.id) && p[1] === t.name);
+
 // A legacy-form widget: the interior widget is linked to a subgraph input, the root instance lists it in
-// `properties.proxyWidgets` and carries no value of its own, so the interior widget is the only place the value
-// lives. Anything else is refused: an instance that carries the value is read with I, an unlinked widget with W.
+// `properties.proxyWidgets`, carries no value at that position and has nothing wired to its input for it, so the
+// interior widget is the only place the value lives. Anything else is refused: an instance that carries the value is
+// read with I, an input wired in the root graph by the source that feeds it, an unlinked widget with W.
 function proxiedWidget(tpl, found, t, tag, view) {
   const wv = found.node.widgets_values;
   if (!Array.isArray(wv) || wv[t.w] === undefined) throw new Error(`${tag}: template ${view.template} node ${t.id} (${t.type}) has no widget ${t.w}`);
@@ -176,12 +182,17 @@ function proxiedWidget(tpl, found, t, tag, view) {
   if (!link || link.origin_id !== -10) throw new Error(`${tag}: template ${view.template} node ${t.id} (${t.type}) widget ${t.name} is not linked to a subgraph input; read it with W`);
   const sgInput = found.container.inputs?.[link.origin_slot]?.name;
   const instances = (tpl.nodes ?? []).filter((n) => n.type === found.container.id);
-  const listing = instances.filter((n) => (n.properties?.proxyWidgets ?? []).some((p) => String(p[0]) === String(t.id) && p[1] === t.name));
+  const listing = instances.filter((n) => proxyPosition(n, t) >= 0);
   if (!listing.length) throw new Error(`${tag}: template ${view.template} the root instance of subgraph "${found.container.name}" does not list [${t.id}, ${t.name}] as a proxied widget; the widget is promoted some other way, find where it runs from`);
-  const idx = widgetInputNames(found.container).indexOf(sgInput);
   for (const inst of listing) {
-    if (idx >= 0 && Array.isArray(inst.widgets_values) && inst.widgets_values[idx] !== undefined) {
-      throw new Error(`${tag}: template ${view.template} instance ${inst.id} carries a promoted value for ${sgInput}; read it with I`);
+    const pos = proxyPosition(inst, t);
+    if (Array.isArray(inst.widgets_values) && inst.widgets_values[pos] !== undefined) {
+      throw new Error(`${tag}: template ${view.template} instance ${inst.id} carries a promoted value for ${sgInput}; read it with I (its widgets_values follow proxyWidgets, position ${pos})`);
+    }
+    const wired = linkedInput(inst, sgInput);
+    if (wired) {
+      const root = { nodes: tpl.nodes, links: tpl.links, inputs: [] };
+      throw new Error(`${tag}: template ${view.template} instance ${inst.id} has its ${sgInput} input linked at the root (to ${feedOf(root, inst, wired.name) ?? "another node"}), so the interior value is not the one that runs; point the spec at the source that feeds it`);
     }
   }
   return wv[t.w];

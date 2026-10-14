@@ -3394,10 +3394,12 @@ otherwise, because the builder keeps building the old recipe.
   promotes) throw when the widget they point at is linked, naming the builder, the key and the fix, and the spec
   points at the source instead: `I` for a subgraph input the root instance promotes, `W` on the primitive that
   feeds it (a primitive behind a switch is read on the branch being checked), `P` for the legacy form in which the
-  interior widget is linked to a subgraph input, the root instance lists it in `proxyWidgets` and carries no
-  value, so the interior widget is the only place the value lives (the extractor checks all three facts). A
-  math node that only passes a value through (the LTX frame rate) is pinned as a template-only item, so a
-  changed expression cannot hide behind the locator that skips it.
+  interior widget is linked to a subgraph input, the root instance lists it in `proxyWidgets`, carries no value at
+  its position in that list (the instance's `widgets_values` follow the list, not the order of the subgraph's
+  inputs) and has nothing wired to its input for the widget, so the interior widget is the only place the value
+  lives (the extractor checks all four facts, and a value or a wiring sends the spec to `I` or to the source that
+  feeds it). A math node that only passes a value through (the LTX frame rate) is pinned as a template-only item,
+  so a changed expression cannot hide behind the locator that skips it.
 - **Builder side, offline.** `node --test render/builder-drift.test.mjs` has one test per builder
   (`builder drift: wf-krea2`): it rebuilds the graph with fixed arguments and compares every widget; a moved
   widget fails `builder drift: <builder> [<view>]: recipe widget changed in the builder's output graph: <key>`.
@@ -3429,7 +3431,10 @@ resolution (template 0, builder 1024). Four are `deliberate`, stated in the buil
 `wf-qwen-image-21` step count in both views (the model README's 40, template 25) and the `wf-wan-animate2`
 pose-cache device and dtype (pinned to cpu and default). The `wf-h3-av` turbo path equals its template: the
 steps, LoRA file and LoRA strength are read from the root instance that promotes them (the steps primitive's own
-widget is linked and is not the value that runs), and the LTX frame rate, video fps and the two i2v bypass
-switches are read from the primitives that feed them. `wf-wan-animate2` copies the `_distilled` template: its
+widget is linked and is not the value that runs). `wf-ltx25-i2v` reads its frame rate and video fps the same way,
+from the root instance that promotes the frame-rate value (the primitive that holds it is linked to that input, so
+its own widget is stale); only the two i2v bypass switches are read from a primitive, the boolean one that feeds
+them, and the math expression that passes the frame rate through is pinned as a template-only item.
+`wf-wan-animate2` copies the `_distilled` template: its
 pose strength, start and end percent and reference strength equal the builder's, and the template feeds the
 start and the end percent from two separate subgraph inputs (a wiring check keeps it so).

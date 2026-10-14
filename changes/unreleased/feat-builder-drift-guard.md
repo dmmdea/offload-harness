@@ -24,7 +24,8 @@
   comes through the link. A locator that points at a linked widget therefore throws, naming the builder and the
   key, and the spec points at the source instead: the widget the root subgraph instance promotes, the primitive
   that feeds it (read on the branch being checked), or, for the legacy form in which the instance lists the widget
-  in `proxyWidgets` and carries no value, the interior widget once those facts are checked. A pass-through math
+  in `proxyWidgets`, carries no value at that position of the list and has nothing wired to its input for the
+  widget, the interior widget once those facts are checked. A pass-through math
   node (the LTX frame rate) is pinned as a template-only item.
 - **First run on package 0.1.96.** Eleven builders, eighteen views; every guarded widget equals its template
   except six entries, recorded and left for a person to judge. Unreviewed: the `wf-qwen-image-edit` full preset
@@ -35,8 +36,10 @@
 - **Tests.** `render/builder-drift.test.mjs`: the committed manifest against the builders; a synthetic package
   written from the specs (no upstream data) in which every widget of every builder is moved once on each side and
   must turn the check red naming the builder; the PR #1308 wiring shape; a missing node, type or widget; a package
-  version that moved with every widget unchanged (a note); a link planted on the widget every locator names; the
-  legacy proxied form; a hand-edited `templateSha256`; the directory order; the coverage and manifest-shape
+  version that moved with every widget unchanged (a note); a link planted on the widget every locator names; an
+  input entry with `link: null` (three serialized shapes) on the node of every locator, which must not read as a
+  link; the legacy proxied form, its promoted value looked up at the widget's position in `proxyWidgets` and a link
+  into the instance's input refused; a hand-edited `templateSha256`; the directory order; the coverage and manifest-shape
   branches, each checked by removing the branch in a scratch copy. Red then green was shown with planted effective
   values (root-instance steps, LoRA strength and frame rate) in a scratch copy of the package: the guard fails
   naming `wf-h3-av` and `wf-ltx25-i2v`, and a guard that read the stale widgets stays green on the same copy.

@@ -11,9 +11,12 @@
 //                                 instance: the sampler's serialized value is then stale and the instance's is
 //                                 the one that runs.
 //   P(sg, id, type, w, name)      a widget of the legacy proxied form: the interior widget is linked to a subgraph
-//                                 input, the root instance lists [id, name] in `proxyWidgets` and carries no value of
-//                                 its own, so the interior widget is the only place the value lives. The extractor
-//                                 checks all three facts and refuses P when the instance carries the value (use I).
+//                                 input, the root instance lists [id, name] in `proxyWidgets`, carries no value at that
+//                                 position of the list (its widgets_values follow the list, not the order of the
+//                                 subgraph's inputs) and has nothing wired to its input for the widget, so the interior
+//                                 widget is the only place the value lives. The extractor checks all four facts and
+//                                 refuses P when the instance carries the value (use I) or the root graph wires the
+//                                 input (use the source that feeds it).
 //   D(sg, id, type, a, b)         template-only wiring check: the inputs `a` and `b` of the node are fed by
 //                                 DIFFERENT sources (the defect of upstream workflow_templates PR #1308 was one
 //                                 subgraph input feeding both the start and the end percent of a node)
