@@ -453,6 +453,23 @@ test("an unconnected Reroute feeds nothing: a widget keeps its stored value, a s
   assert.deepEqual(r.warnings, [], "nothing was lost, so nothing is said (a muted Reroute, which cut a wire, does say so)");
 });
 
+test("an unconnected Reroute whose input has no link key at all (undefined, not null) feeds nothing either, and does not name a link that is not there", () => {
+  const wf = ui([
+    { id: 1, type: "Reroute", ins: [["", "INT"]], outs: [["", "INT"]] },
+    { id: 2, type: "EmptyLatentImage", ins: [["width", "INT", true]], outs: [["LATENT", "LATENT"]], wv: [512, 384, 1] },
+    { id: 3, type: "Reroute", ins: [["", "IMAGE"]], outs: [["", "IMAGE"]] },
+    { id: 4, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  ], [[1, 0, 2, "width"], [3, 0, 4, "image"]]);
+  delete wf.nodes[0].inputs[0].link; // { name, type } and nothing else
+  delete wf.nodes[2].inputs[0].link;
+  assert.equal("link" in wf.nodes[0].inputs[0] || "link" in wf.nodes[2].inputs[0], false);
+  const r = convert(wf);
+  const g = graphOf(r);
+  assert.deepEqual(g["2"].inputs, { width: 512, height: 384, batch_size: 1 }, "the widget keeps its stored value");
+  assert.deepEqual(g["4"].inputs, {}, "the socket stays empty");
+  assert.deepEqual(r.warnings, [], "nothing was lost, so nothing is said");
+});
+
 test("stats count what the converter met: notes, reroutes, primitive nodes, muted and bypassed nodes, and the nodes of the graph", () => {
   const r = convert(ui([
     { id: 1, type: "Note", wv: ["x"] },
@@ -507,6 +524,21 @@ test("link beats widget: a widget input that is wired takes the wire, whatever i
 });
 
 // ---- mute and bypass -----------------------------------------------------------------------------------------------------
+
+test("a live node's input with no link key at all (undefined, not null) is an unconnected input: a widget keeps its stored value, a socket stays empty, nothing is said", () => {
+  const wf = ui([
+    { id: 2, type: "EmptyLatentImage", ins: [["width", "INT", true]], outs: [["LATENT", "LATENT"]], wv: [512, 384, 1] },
+    { id: 4, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  ]);
+  delete wf.nodes[0].inputs[0].link;
+  delete wf.nodes[1].inputs[0].link;
+  assert.equal("link" in wf.nodes[0].inputs[0] || "link" in wf.nodes[1].inputs[0], false);
+  const r = convert(wf);
+  const g = graphOf(r);
+  assert.deepEqual(g["2"].inputs, { width: 512, height: 384, batch_size: 1 });
+  assert.deepEqual(g["4"].inputs, {});
+  assert.deepEqual(r.warnings, []);
+});
 
 test("mode 2 (muted): the node is dropped and an input wired to it is left out with a typed warning", () => {
   const r = convert(ui([
@@ -807,6 +839,28 @@ test("subgraph: an input wired straight to an output is the outer wire itself", 
     { id: 3, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
   ], [[1, 0, 2, "img"], [2, 0, 3, "image"]]), pass);
   assert.deepEqual(graphOf(convert(wf))["3"].inputs, { image: ["1", 0] });
+});
+
+test("subgraph: an instance input with no link key at all (undefined, not null) is unwired: its widget value reaches the inner widget, a socket reaches nothing", () => {
+  const widget = subdef(SG(1), {
+    ins: [["a", "INT"]], outs: [],
+    nodes: [{ id: 10, type: "PrimitiveInt", ins: [["value", "INT", true]], outs: [["INT", "INT"]], wv: [0, "fixed"] }],
+    edges: [[-10, 0, 10, "value"]],
+  });
+  const wfWidget = withDefs(ui([{ id: 1, type: SG(1), ins: [["a", "INT", true]], wv: [11] }]), widget);
+  delete wfWidget.nodes[0].inputs[0].link;
+  assert.equal("link" in wfWidget.nodes[0].inputs[0], false);
+  assert.deepEqual(graphOf(convert(wfWidget))["1:10"].inputs, { value: 11 }, "the instance's widget value is the literal the inner widget gets");
+  const socket = subdef(SG(1), {
+    ins: [["img", "IMAGE"]], outs: [["out", "IMAGE"]],
+    nodes: [{ id: 7, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] }],
+    edges: [[-10, 0, 7, "image"], [7, 0, -20, "out"]],
+  });
+  const wfSocket = withDefs(ui([{ id: 2, type: SG(1), ins: [["img", "IMAGE"]], outs: [["out", "IMAGE"]], wv: [] }]), socket);
+  delete wfSocket.nodes[0].inputs[0].link;
+  const r = convert(wfSocket);
+  assert.deepEqual(graphOf(r)["2:7"].inputs, {}, "nothing reaches the inner socket");
+  assert.deepEqual(r.warnings, []);
 });
 
 test("subgraph: instance widgets_values align with the definition's widget inputs, not with the instance's own (shorter) inputs", () => {
