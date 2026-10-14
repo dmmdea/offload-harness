@@ -219,7 +219,8 @@ artifacts:
       the README table there.
 
       Keep the draft free of anything the public-repo privacy rules forbid: machines appear as
-      tier ids or node letters, never by name. Do not put a wall-time term in any rule the ADR
+      node letters (<node-a> to <node-f>) or role phrases, never by name, and a tier id only as
+      "the <tier> reference box". Do not put a wall-time term in any rule the ADR
       sets (quality outranks speed).
     requires:
       - design

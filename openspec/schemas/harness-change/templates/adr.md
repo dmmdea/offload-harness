@@ -7,7 +7,7 @@ date: "YYYY-MM-DD"
 
 <!-- OPTIONAL artifact. Delete this file if the change makes no decision that shapes the system beyond one
      implementation detail. Draft only a decision that is already made; a human accepts it. NNNN is assigned when the
-     draft moves to docs/architecture/decisions/ with its index row. Machines by tier id or node letter only. -->
+     draft moves to docs/architecture/decisions/ with its index row. Machines by node letter or role phrase only; a tier id only as "the <tier> reference box". -->
 
 ## Context
 

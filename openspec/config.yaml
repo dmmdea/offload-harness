@@ -11,8 +11,8 @@ context: |
   - Every idle model unloads after 300 s (INV-2), on every engine and tier.
   - No new daemon, scheduler, listener or watchdog without the operator's explicit yes. Fail loud; do not self-recover.
   - Never add a cloud fallback: a Defer is the answer (ADR 0001).
-  - Public-repo privacy. Name a machine by tier id (for example blackwell-3x16) or node letter (node-a to node-f),
-    never by host name; no personal names, local paths, addresses or account names. The leak gate fails the build
+  - Public-repo privacy. Name a machine by a node letter (<node-a> to <node-f>) or a role phrase,
+    never by host name; a tier id appears only as "the <tier> reference box"; no personal names, local paths, addresses or account names. The leak gate fails the build
     on a hit and has no allow list: rewrite the text.
   - One changelog fragment per change under changes/unreleased/ (named for the branch); never edit CHANGELOG.md.
   - A decision that shapes the system beyond one implementation detail needs an ADR in docs/architecture/decisions/.
@@ -30,7 +30,7 @@ rules:
     - "Every scenario is testable. No requirement or scenario uses a wall-time bound as a pass condition."
   design:
     - "Name each ADR the change needs by title; the optional adr artifact drafts it. No decision, no ADR."
-    - "Say how the leak gate, TestDocsLint and the changelog fragment apply. Machines by tier id or node letter only."
+    - "Say how the leak gate, TestDocsLint and the changelog fragment apply. Machines by node letter or role phrase only; a tier id only as 'the <tier> reference box'."
   tasks:
     - "In each group the first task writes the failing test; the task that makes it pass follows it."
     - "Every task names the command that verifies it, with a pass condition that has no wall-time term."
