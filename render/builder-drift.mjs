@@ -36,8 +36,9 @@
 //   node render/builder-drift.mjs check   [--templates-dir DIR | --comfy-dir DIR] [--manifest FILE] [--require-templates] [--strict]
 //   node render/builder-drift.mjs explain  --templates-dir DIR | --comfy-dir DIR     (values side by side)
 //   node render/builder-drift.mjs record   --templates-dir DIR | --comfy-dir DIR     (rewrite the manifest)
-// A flag that takes a value and has none (an empty or unset shell variable) is an error (exit 2), as is a flag the CLI
-// does not know: a typo must not silently skip a side. `--require-templates` turns "no templates directory" into an
+// A flag that takes a value and has none (an empty or unset shell variable) is an error (exit 2), as is an argument that
+// starts with `-` and is not a known flag (`-templates-dir`, `-x`) and a second positional after the verb: a typo must not
+// silently skip a side. `--require-templates` turns "no templates directory" into an
 // error (exit 2) instead of a skipped template side; use it in an upgrade runbook. `--strict` also fails (exit 1) on every
 // `unreviewed` manifest entry; without it those entries stay green until a person judges them.
 // DIR is the `templates` directory of the wheel (or of a `pip download` extract); --comfy-dir finds it inside a
@@ -152,7 +153,7 @@ function linkOf(container, linkId) {
 // What feeds an input: a named subgraph input, or one output slot of one node. `key` is what two sources are compared by,
 // the node's ID and the slot (two separate nodes of one type are two sources, and one node feeding both inputs is one);
 // `label` is for a message and adds the node's type.
-function feedSource(container, node, inputName) {
+export function feedSource(container, node, inputName) {
   const inp = (node.inputs ?? []).find((i) => i.name === inputName);
   if (!inp || inp.link == null) return undefined;
   const link = linkOf(container, inp.link);
@@ -504,8 +505,10 @@ export function resolveTemplatesDir(flags, env) {
   return null;
 }
 
-// A flag that takes a value must get a non-empty one, and a flag the CLI does not know is refused: an unset shell variable
-// (`--templates-dir "$UNSET"`) or a typo must fail, never skip the side it was meant to name.
+// A flag that takes a value must get a non-empty one, and an argument that starts with `-` and is not a known flag is
+// refused, in the single-dash form too (`-templates-dir`, `-x`), as is a second positional after the verb: an unset shell
+// variable (`--templates-dir "$UNSET"`) or a typo must fail, never skip the side it was meant to name. A value never starts
+// with `-`, so `--manifest -x` has no value.
 const VALUE_FLAGS = new Set(["templates-dir", "comfy-dir", "manifest"]);
 const SWITCH_FLAGS = new Set(["require-templates", "strict"]);
 export function parseArgs(argv) {
@@ -513,19 +516,22 @@ export function parseArgs(argv) {
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (!a.startsWith("--")) { rest.push(a); continue; }
+    if (!a.startsWith("-")) { rest.push(a); continue; }
     const eq = a.indexOf("=");
-    const name = eq < 0 ? a.slice(2) : a.slice(2, eq);
+    const dashes = a.startsWith("--") ? 2 : 1;
+    const name = eq < 0 ? a.slice(dashes) : a.slice(dashes, eq);
+    if (dashes === 1) throw new Error(`unknown flag ${eq < 0 ? a : a.slice(0, eq)} (flags start with two dashes; known: ${[...VALUE_FLAGS, ...SWITCH_FLAGS].map((f) => `--${f}`).join(", ")})`);
     if (SWITCH_FLAGS.has(name)) {
       if (eq >= 0) throw new Error(`--${name} takes no value`);
       flags[name] = true;
       continue;
     }
     if (!VALUE_FLAGS.has(name)) throw new Error(`unknown flag --${name} (known: ${[...VALUE_FLAGS, ...SWITCH_FLAGS].map((f) => `--${f}`).join(", ")})`);
-    const value = eq >= 0 ? a.slice(eq + 1) : i + 1 < argv.length && !argv[i + 1].startsWith("--") ? argv[++i] : undefined;
+    const value = eq >= 0 ? a.slice(eq + 1) : i + 1 < argv.length && !argv[i + 1].startsWith("-") ? argv[++i] : undefined;
     if (typeof value !== "string" || !value.trim()) throw new Error(`--${name} needs a non-empty value`);
     flags[name] = value;
   }
+  if (rest.length > 1) throw new Error(`unexpected argument ${rest[1]} after ${rest[0]} (one verb: check | explain | record)`);
   return { flags, verb: rest[0] ?? "check" };
 }
 
