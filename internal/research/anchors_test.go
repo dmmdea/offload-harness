@@ -77,6 +77,27 @@ func TestAnchorNeverChosenFromChrome(t *testing.T) {
 	}
 }
 
+// AnchorCheck is graded unqualified on purpose. A qualified fingerprint (regex:@grounded:..., regex:@field=...:...) is
+// graded against the delegator's context documents with a case-SENSITIVE match, while AnchorCheck's regex is (?i): the
+// page's words are lower-cased singulars, and a correct answer that capitalises one would be struck as off-document. Until
+// the grounded match folds case, qualifying the fingerprint would quarantine correct nodes.
+func TestAnchorCheckStaysUnqualified(t *testing.T) {
+	check := AnchorCheck(forumText(t), "Summarize the fix")
+	if check == "" {
+		t.Fatal("no anchor check for the forum page")
+	}
+	if strings.HasPrefix(check, "regex:@") {
+		t.Fatalf("AnchorCheck output is qualified: %.40s", check)
+	}
+	chk, err := core.ParseAcceptanceCheck(check)
+	if err != nil {
+		t.Fatalf("AnchorCheck output does not parse: %v", err)
+	}
+	if chk.Authority != core.AuthNone {
+		t.Fatalf("AnchorCheck output demands authority %v, want none (it is case-insensitive, grounding is case-sensitive)", chk.Authority)
+	}
+}
+
 func TestAnchorIsOneAnyOfCheck(t *testing.T) {
 	specs, _ := Build(Request{Goal: "Summarize the fix"}, []Fetched{{URL: "https://x/q", Text: forumText(t)}})
 	acc := specs[0].AgentContract.Acceptance
