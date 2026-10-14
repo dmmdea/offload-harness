@@ -61,6 +61,9 @@ func estimateTokens(msgs []Msg) int {
 //     2a. (opts.GCF only, LOSSLESS) re-encode OLDER tool bodies that are
 //     eligible JSON arrays into GCF columnar form (internal/gcf) — states the
 //     repeated keys once, loses nothing; always tried before any lossy rung.
+//     2a'. (opts.SearchResults only, default off) THIN older search listings to the
+//     lines that matter for the objective (BM25, a per-file cap, an error boost, a
+//     counted footer; see rung_search.go), before 2b so the skeleton never sees one.
 //     2b. (opts.Skeleton only) SKELETONIZE the bodies of OLDER tool-role messages
 //     oldest-first until under budget: head/tail windows + buried signal lines
 //     kept, the rest elided to counted run markers (see skeleton.go). Strictly
@@ -98,6 +101,9 @@ func estimateTokens(msgs []Msg) int {
 type compactOpts struct {
 	GCF      bool // lossless: re-encode eligible JSON-array tool bodies (internal/gcf)
 	Skeleton bool // lossy-structural: reduce older tool bodies to signal skeletons
+	// SearchResults (default OFF) thins older search listings (rung_search.go): BM25
+	// against the objective, a per-file cap, an error boost, a counted footer.
+	SearchResults bool
 	// Pinned marks tool_call_ids whose results the model DEMONSTRABLY re-requested
 	// (the circuit breaker refused an exact-repeat call for them) — the H8 ramp:
 	// content the model re-reads stops being lossily compacted. A pinned body is
@@ -240,6 +246,16 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 				}
 			}
 		}
+		if estimateTokens(out) <= budget {
+			return out, fitUnknown
+		}
+	}
+
+	// Step 2a' (flag-gated, default OFF): thin older search listings by relevance
+	// to the objective (rung_search.go). Before the generic skeleton on purpose: a
+	// skeletonized listing is no longer one, and this rung would never see it.
+	if opts.SearchResults {
+		searchRung(out, protectedEnd, recentStart, budget, pinned)
 		if estimateTokens(out) <= budget {
 			return out, fitUnknown
 		}
