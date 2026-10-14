@@ -2118,10 +2118,17 @@ func (c Config) GPUMaxTotal() time.Duration {
 // OnOverduePolicy is gpu_on_overdue as the policy the lease holders read: unset is the behaviour
 // from before the key existed (nobody is asked), "request" asks the holder to yield, "hold" says so
 // in words. A value Load refused reads as hold: the permissive direction is never the fallback.
-func (c Config) OnOverduePolicy() gpulease.OnOverdue { return gpulease.OnOverdueUnset }
+func (c Config) OnOverduePolicy() gpulease.OnOverdue {
+	mode, _ := gpulease.ParseOnOverdue(c.GPUOnOverdue)
+	return mode
+}
 
-// validateOnOverdue refuses a gpu_on_overdue value by name.
-func validateOnOverdue(v string) error { return nil }
+// validateOnOverdue refuses a gpu_on_overdue value by name. Matching trims and lower-cases, as the
+// other policy validators do, so a copy-pasted " Request " is accepted.
+func validateOnOverdue(v string) error {
+	_, err := gpulease.ParseOnOverdue(v)
+	return err
+}
 
 // AgentPlannerModel resolves the coding agent's planner seat. Precedence:
 // an explicit per-call/per-flag override > the configured AgentModel seat >
@@ -2428,6 +2435,11 @@ func Load(path string) (Config, error) {
 // value without a call before each return.
 func loadArmed(path string) (Config, error) {
 	c, err := load(path)
+	// The policy for an overdue lease is installed before anything below can return early, on every exit
+	// and the error ones included: a one-shot verb proceeds on a config that failed to load, and a value
+	// that never got installed would leave it on the default for a key the operator did set. An
+	// unrecognised value installs as hold, so it never asks.
+	gpulease.SetDefaultOnOverdue(c.GPUOnOverdue)
 	// Arm the model-affinity LOAD gate here and nowhere else, for the same reason
 	// netguard.SetTailnetSuffix below is installed from inside a load: the GPU lease
 	// location is a property of the MACHINE decided by two config fields
@@ -2636,6 +2648,12 @@ func load(path string) (Config, error) {
 		return c, err
 	}
 	if err := validateAgentReadFloor(c.AgentReadFloor); err != nil {
+		return c, err
+	}
+	// A policy for an overdue lease nobody implements is refused by name: there is no automatic mode,
+	// and a typo must not read as one. (A one-shot verb goes on after this error; loadArmed has already
+	// installed the value, and an unrecognised one installs as hold.)
+	if err := validateOnOverdue(c.GPUOnOverdue); err != nil {
 		return c, err
 	}
 	// The WARN half of S-38, printed LAST so it can never be mistaken for the
