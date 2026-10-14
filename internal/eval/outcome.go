@@ -3,7 +3,7 @@ package eval
 import "fmt"
 
 // AttemptOutcome is the closed taxonomy of what happened to ONE attempt at ONE task in a gate
-// run (GATE-2). The gate scores only the attempts that reached a verdict on the task itself
+// run. The gate scores only the attempts that reached a verdict on the task itself
 // (pass, task_fail, cheat); every other class is infrastructure or judge noise that is counted
 // and reported but never scored, so a flaky box cannot move a score in either direction.
 //

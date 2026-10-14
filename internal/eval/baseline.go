@@ -86,7 +86,7 @@ type Baseline struct {
 	CorpusHash       string             `json:"corpus_hash"`
 	// Tasks is the declared task list: the denominator of the excluded share.
 	Tasks []string `json:"tasks"`
-	// Incumbent is the frozen incumbent run (CAS-0 step 2 freezes it here); optional.
+	// Incumbent is the frozen incumbent run (a baseline measurement of the current cascade freezes it here); optional.
 	Incumbent *Arm `json:"incumbent,omitempty"`
 }
 
