@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -477,41 +479,111 @@ func TestCheckBaselineRefusesAFileBelowTheFloors(t *testing.T) {
 	}
 }
 
-// A measurement at n = 16 and B = 2000 measured a null ADOPT rate of 3.1% against a nominal 2.5%; at
-// n = 8 it was 5.4%, and at B = 1 it was 45%. At the floors the rate must stay at or below 4%.
+// adoptRate runs the gate end to end on trials simulated comparisons of the null that gen draws and
+// returns the share the gate ADOPTs. Trial s draws its scores from seed 1000+s, so the result does not
+// depend on the number of workers. A superiority null has no efficiency metric; a non-inferiority null has
+// one that clearly improves (1000 tokens against 100 on every task), so only the primary decides.
+func adoptRate(t *testing.T, mode string, n, trials int, gen pairGen) float64 {
+	t.Helper()
+	var p PreReg
+	if mode == ModeSuperiority {
+		p = supPre(n)
+	} else {
+		p = niUnitPre(n)
+	}
+	p.BootstrapB, p.MinPairs = MinBootstrapB, MinMinPairs
+	b, h := freeze(t, p, nil)
+	workers := runtime.GOMAXPROCS(0)
+	next := make(chan int, workers)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	adopt := 0
+	var firstErr error
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			local := 0
+			for s := range next {
+				incS, candS := gen(rand.New(rand.NewSource(int64(1000+s))), n)
+				inc, cand := Arm{Stamps: testStamps("i")}, Arm{Stamps: testStamps("c")}
+				for i, id := range taskIDs(n) {
+					ia, ca := Attempt{Outcome: OutcomePass, Score: f64(incS[i])}, Attempt{Outcome: OutcomePass, Score: f64(candS[i])}
+					if mode == ModeNonInferiority {
+						ia.Metrics, ca.Metrics = tokenMetric(1000), tokenMetric(100)
+					}
+					inc.Tasks = append(inc.Tasks, Task{ID: id, Attempts: []Attempt{ia}})
+					cand.Tasks = append(cand.Tasks, Task{ID: id, Attempts: []Attempt{ca}})
+				}
+				r, err := Gate(b, h, inputFor(h, inc, cand))
+				if err != nil {
+					mu.Lock()
+					firstErr = err
+					mu.Unlock()
+					continue
+				}
+				if r.Verdict == VerdictAdopt {
+					local++
+				}
+			}
+			mu.Lock()
+			adopt += local
+			mu.Unlock()
+		}()
+	}
+	for s := 0; s < trials; s++ {
+		next <- s
+	}
+	close(next)
+	wg.Wait()
+	if firstErr != nil {
+		t.Fatalf("Gate refused a simulated comparison: %v", firstErr)
+	}
+	return float64(adopt) / float64(trials)
+}
+
+// The false-ADOPT rate of the gate on null data, measured end to end through Gate at the floors (16 tasks or
+// more, B = 2000), in the cells below and no others: the true difference is 0 (superiority) or exactly
+// -margin (non-inferiority, the worst case the rule must still refuse). Each cell must measure at most 4%
+// (a nominal 2.5% one-sided) over its stated trials, with fixed seeds. The percentile interval the gate used
+// to read measured 6.1% on the first non-inferiority cell, 10.0% on the second and 6.2% on the heavy-tailed
+// superiority cell, over 20000 datasets each; TestCalibrationStudy prints the whole grid.
+//
+// All-tied datasets count: a sample whose paired differences are all equal has no spread to measure, and
+// its interval is its one value (the share of such datasets is part of each figure).
 func TestNullAdoptRateAtTheFloorsIsCalibrated(t *testing.T) {
 	if testing.Short() {
-		t.Skip("3000 gate runs at B = 2000")
+		t.Skip("simulated gate runs; the cells below take a few seconds")
 	}
-	const n, sims = 16, 3000
-	p := supPre(n)
-	p.BootstrapB, p.MinPairs = 2000, 16
-	b, h := freeze(t, p, nil)
-	adopt := 0
-	for s := 0; s < sims; s++ {
-		rng := rand.New(rand.NewSource(int64(1000 + s)))
-		inc, cand := Arm{Stamps: testStamps("i")}, Arm{Stamps: testStamps("c")}
-		for _, id := range taskIDs(n) {
-			si, sc := float64(rng.Intn(2)), float64(rng.Intn(2))
-			inc.Tasks = append(inc.Tasks, Task{ID: id, Attempts: []Attempt{passOnly(si)}})
-			cand.Tasks = append(cand.Tasks, Task{ID: id, Attempts: []Attempt{passOnly(sc)}})
-		}
-		if mustGate(t, b, h, inputFor(h, inc, cand)).Verdict == VerdictAdopt {
-			adopt++
-		}
+	for _, tc := range []struct {
+		name   string
+		mode   string
+		n      int
+		trials int
+		gen    pairGen
+	}{
+		{"superiority, pass/fail p=.5", ModeSuperiority, 16, 10000, genBinary(.5, .5, 1)},
+		{"superiority, x^3-skewed scores", ModeSuperiority, 16, 10000, genCubed(1)},
+		{"superiority, 90% of scores in [0, .1] and 10% in [.9, 1]", ModeSuperiority, 16, 10000, genRareLarge},
+		{"non-inferiority at exactly -margin, pass rates .90 and .85", ModeNonInferiority, 20, 4000, genBinary(.90, .85, 1)},
+		{"non-inferiority at exactly -margin, pass rates .90 and .85, the smallest sample", ModeNonInferiority, 16, 4000, genBinary(.90, .85, 1)},
+		{"non-inferiority at exactly -margin, uniform scores", ModeNonInferiority, 24, 4000, genUniform(0, 1, 0, .9)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rate := adoptRate(t, tc.mode, tc.n, tc.trials, tc.gen)
+			t.Logf("false ADOPT rate, n=%d, B=2000, %d trials: %.4f", tc.n, tc.trials, rate)
+			if rate > 0.04 {
+				t.Fatalf("false ADOPT rate %.4f over %d trials is above 0.04", rate, tc.trials)
+			}
+		})
 	}
-	rate := float64(adopt) / float64(sims)
-	t.Logf("null ADOPT rate at n=%d, B=2000 over %d trials: %.4f", n, sims, rate)
-	if rate > 0.04 {
-		t.Fatalf("null ADOPT rate %.4f is above 0.04", rate)
-	}
-	// And the settings that gave 45%, 9% and 5.4% cannot be frozen.
+	// And the settings that cannot be calibrated cannot be frozen.
 	for _, bad := range []func(p *PreReg){
 		func(p *PreReg) { p.BootstrapB = 1 },
 		func(p *PreReg) { p.BootstrapB = 10 },
 		func(p *PreReg) { p.MinPairs = 8 },
 	} {
-		q := supPre(n)
+		q := supPre(16)
 		bad(&q)
 		if _, _, _, err := FreezeBaseline(q, testCorpus, nil); err == nil {
 			t.Errorf("%+v must be refused", q)
