@@ -6,7 +6,7 @@
   `/free` at the end of its job, kept or not (`render/gpu-lock.mjs`), the Go side frees after every run, and the holder of the lease
   stops a kept instance at release. And the harness launches every ComfyUI with `--disable-smart-memory`, with which ComfyUI itself
   calls `unload_all_models()` when a prompt ends, on success and on a handled error (`execution.py` after the node loop; read in
-  ComfyUI 0.38.0), so a kept single-prompt instance (`--cache-none`) is already bare between jobs and the pack finds nothing to free
+  the ComfyUI checkout of the reference box, its version in `docs/systems/media-generation.md`), so a kept single-prompt instance (`--cache-none`) is already bare between jobs and the pack finds nothing to free
   there (it does not fire and logs nothing). What survives is (a) a warm (`--batch`) session's executor cache, which keeps the
   loader outputs (the weights the unload moved to host RAM) until a free resets the executor, so a runner killed before its cleanup
   (a tree-kill skips it) or a session that stalls holds host RAM until the lease ends, and (b) a hand-started instance run without
@@ -34,7 +34,7 @@
     launch never imports the fail-closed Wan pack) to `--extra-model-paths-config` once, before the operator's args, and puts the pack
     INTO the last `--whitelist-custom-nodes` value list. That flag is `nargs='+'` with no append action, so a second flag would replace
     the multicard packs, and `--whitelist-custom-nodes=a b` reads `b` as a stray argument, so that spelling is rewritten to the space
-    form; argparse abbreviations are read as the flags, down to the shortest ComfyUI 0.38.0's own parser accepts (`--wh`,
+    form; argparse abbreviations are read as the flags, down to the shortest ComfyUI's own parser accepts (measured on the reference box's checkout: `--wh`,
     `--disable-al`; `--w` and `--disable-a` are ambiguous there and stay unread); with `--disable-all-custom-nodes` and no whitelist
     one is added; with neither, every custom node loads and nothing is. Only when the yaml and the pack file exist: ComfyUI exits at
     boot on an `--extra-model-paths-config` file that does not, so a missing file is one `COMFY-IDLE-WARN` and a launch without it. With
@@ -97,7 +97,7 @@
   removed, and either of its two readers given the raw request function; the "yaml already carried" mutant was run again against the
   rewritten test.
 - **Not measured.** The tests use a fake queue; no ComfyUI was started and no card was used, so the whole mechanism is read from
-  ComfyUI 0.38.0's code (`main.py` `prompt_worker` drains the two flags, `execution.py` `PromptQueue` holds the mutex, the counter and
+  the reference box's ComfyUI code (`main.py` `prompt_worker` drains the two flags, `execution.py` `PromptQueue` holds the mutex, the counter and
   `get_tasks_remaining`, `server.py` `post_free` sets the same two flags) and not seen running. The live check is written out in
   `docs/systems/media-generation.md`: it first confirms that a harness-launched kept instance is already bare in VRAM when a prompt
   ends (so VRAM cannot show the bound there), then measures the warm case in the ComfyUI process's host RAM at t+0, t+240 s and
