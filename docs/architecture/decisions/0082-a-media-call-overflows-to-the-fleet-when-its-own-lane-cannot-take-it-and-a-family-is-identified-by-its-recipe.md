@@ -118,7 +118,8 @@ Three facts made the obvious change unsafe as stated.
    byte what it was, and asks the lane nothing), or for anything but an image job or a whole-node graph in this release (Amendment 1
    adds the graph, under its own file check and a single-card rule). (An image call that resumed a place did not overflow in the
    first cut; ADR 0083 brings its place into the ticket, and its Amendment 1 does the same for a graph.) Video, animation and audio
-   carry no per-family identity yet.
+   carry no per-family identity yet (Amendment 3 lets a caller name the node that runs one and has a node publish the family rows of
+   those lanes; their identity and their overflow are later releases).
 10. **ADR 0077 changes in three sentences.** Decision 6: `auto` runs here when the lane is free and, when it is not and a
     matching node is idle, there. The consequence that `refine=false` defers on a remote route no longer holds for image jobs:
     it travels, gated on `refine_honoured`. The consequence about `waiter_token` stands: a call that goes to a node leaves the
@@ -357,3 +358,97 @@ copied, whose size or time keeps moving, is read again on every health refresh (
 poll) and not once per 30 s. Nothing here was run against a
 live fleet: the acceptance is the three live matches of 0.179.0 read again after every node runs this release
 (docs/systems/media-generation.md, "Reading a node's recipes").
+
+## Amendment 3 (2026-10-13, N7): a video, animation or audio call can name the node that runs it, and a node publishes its family rows
+
+Decision 9 left video, animation and audio out of overflow because they carry no per-family identity, and the standing order for the
+fleet (the P0 plan) is that any machine that holds the model takes the call. **D2 is decided: video, animation and audio overflow
+like images, on by default, with `route local` as the escape.** That is three releases of work, and this amendment is the first and the
+smallest of them: it makes no call overflow. It lets a caller **name** the node, which needs no identity (naming a node is the
+caller's explicit act, as `route remote` is), and it has each node publish what its video, animation and audio bindings name, so that
+a call for a weight the node lacks is refused before anything is sent. Every other decision stands.
+
+1. **`node` names the one node that runs the call.** `offload_generate_video`, `offload_animate_character` and
+   `offload_generate_audio` (CLI `--node` on `generate-video`, `animate-character`, `generate-audio`) take `node`: a node id (the
+   `node_id` its `/fleet/health` publishes, in any case) or one of the `delegate_remotes` URLs. The named node is the only
+   candidate. A box that has the lane itself still sends the call there (`auto` with a node leaves this machine, as `remote` does),
+   no other node is tried, and this machine is not asked. `route local` with a node is a contradiction and is refused; a node on an
+   image or a graph call is refused by name (the image batch has no `--node`), because this release carries it for the three lanes
+   only and a refused word is better than a dropped one. `meta.placement` reads `remote: named node <name>`.
+2. **A node that cannot take the call is refused before any POST, by a word.** The deferred answer carries
+   `{refusal, node, lane, family, missing[], roster[]}` in its data. Two are the caller's mistake and are `contract` defers:
+   `node_unknown` (the name matches no node of the roster this call may use; `roster[]` lists the ids that answered) and
+   `node_is_self` (the name is this machine's own node, whose lane is the local route). Four are a fact about the reachable node,
+   which waiting does not change, and are filed as the misses `pickNodeFor` already files for a roster left out for configuration:
+   `capacity` with `err_class` `no_node_configured`, narrowed to the one node the caller chose. `node_lacks_route`: the node does not
+   serve the lane or its route is not CONFIGURED (the answer names the route state and, when the node published its row, the files
+   the row lacks). `node_lacks_media_job`: the call carries input files and the node has not opened the media-job door. `node_lacks_model`:
+   see 4. `node_below_min_vram`: see 6. **A node that does not answer, or holds a text lease, is not refused:** it is an ordinary
+   `capacity` defer with no err class, because it may take the call later; and a name that no node which answered has, while some entry
+   did not answer, is that same defer (the name may be one of them), not `node_unknown`. The choice of `capacity` for the four
+   configuration refusals is the pairing the code already has for `no_node_configured` (a test of the image batch pins it); the
+   caller's remedy is to name another node, not to wait.
+3. **A node publishes the family rows of its video, animation and audio bindings.** `/fleet/health` gains `media_recipes[]`, additive
+   (a node that binds none of the three through ComfyUI or sd.cpp omits it, and a reader that does not know it sees the shape it
+   always did): one row `{lane, name, default, engine, digest, files[{role, name, bytes}], license, commercial_use}` per family. A video
+   row is named by the value of the `model` parameter that selects it: the ComfyUI families `wan22`, `ltx25`, `hunyuan`, `h3`
+   (the default family always, any other only when the node bound it in `videogen_families` or holds every file its graph loads) and
+   an sd.cpp family by its own name; an animation row is `wan-animate2`; a music row is `acestep`. `bytes` is the size where the node
+   finds the file and **-1 where it does not**, so a row with a missing weight is still listed and a refusal can name the file. The
+   rows are built from the files the bindings name and a stat per file, memoised for a minute like the route verdicts. **A row is not
+   an identity in this release:** it has no content fingerprint, its `digest` is always empty, and nothing matches two rows against
+   each other. A ComfyUI file keeps its loader-relative name with its subfolders; an absolute, drive-lettered or climbing name is
+   published as its file name, and an sd.cpp file by its file name, so no row carries a path of the node's.
+   There is no row for voice, for the audio.cpp engines or for the sd.cpp animation lane: a reader takes the absence as unknown.
+4. **A row is read for one thing: the weight files it says the node lacks.** `node_lacks_model` is raised only when the node
+   published at least one row for the call's lane and the row of the family the call renders is absent or shows a file with `bytes`
+   -1. With no `model`, that is the node's default row. A `model` is matched by the row name exactly (an sd.cpp family) and otherwise
+   folded the way the node folds it, through `mediacap.VideoBinding`, the one resolver that exists: the runner's closed set
+   (`ltx25`, `h3`, `hunyuan`) renders itself and every other spelling, the documented `wan` included, renders Wan 2.2. `ace` has no
+   row and is not judged. A lane the node publishes no row for is **unknown, not refused**: the call goes on to the node's own door,
+   which refuses a missing weight itself with a 503, exactly as a forced call does today; voice, the sd.cpp animation lane and a node
+   that predates the rows are in that case. Music is judged by the `acestep` row; voice is never refused for a music row.
+5. **The answer says what rendered.** A named call that ran on a node whose row judged it carries `rendered_family` and
+   `rendered_files` in its data beside the node's own answer: the family and the loader names the node's row lists for it. That is
+   the row the node published, not a check of the render, which is a node-side fact the delegator does not repeat. A call that
+   names no node is not annotated and no row is read for it.
+6. **`min_vram_gb` on video and animation.** The caller's number (a number of GB, 0 or more; a card counts as the size it rounds to,
+   as for a graph) filters the remote candidates of a video or animation call, in every placement that leaves the machine, and on a
+   named node it is `node_below_min_vram`. It filters nodes only; this machine's lane is its own grant. A malformed value is refused
+   by name before the lane is asked, on every route, as a graph's is. The Wan 720p default floor of a graph is not applied to these
+   calls: it needs the resolved height, which belongs with the identity release.
+7. **What does not change.** A call with no `node` is placed exactly as it was: `auto`, `remote`, a thin client's `auto`, the image
+   overflow, the graph overflow, the image batch. No `node`-less call reads a row. The image recipe, `RecipeVersion` and every image digest
+   are untouched. A node whose media-job door is closed (an operator's choice) takes a named call with no input file and
+   refuses one with input files by `node_lacks_media_job`; this amendment does not design around the closed door.
+
+**The releases that follow (written down so the order is not lost; none of this is built).**
+
+- **Identity and one-shot overflow.** Rows gain a `digest` and content fingerprints: a lane recipe per engine (the ComfyUI video
+  families from `VideoModelFilesFor`; sd.cpp video from the model files and a hash of the extra arguments; the ComfyUI animation
+  and music files; audio.cpp; voice last, from the files of the hub snapshot `refs/main` reached by a followed stat, and the default
+  reference sample by content), the resolved settings that change pixels (runner family, Wan loader and decode, `fps`, the upscale
+  model and its size when `upscale` is asked, the license) and not the per-box size defaults, which travel as the caller's resolved
+  width, height and frames. The node checks the digest at its door with the 412 of decision 3; the delegator matches by equal
+  digest, same release, route CONFIGURED, the media-job door when files travel, the request's `fast` and `upscale` extras, and the
+  floor from the resolved height. The busy-lane probe in `internal/pipeline` is generalised from image to a per-task need by calling
+  the same functions the grants call (`videoNeed`, `singleCardNeed`, `wholeNeed`) with sd.cpp, audio.cpp and endpoint requests
+  answering "not judged" before any card read; the resolver copies (`pipeline.resolveVideoFamily`, `mediacap.videoRunnerFamily`,
+  `fleetnode.familyFor`) stay where they are, pinned by a test. This is where D2 becomes behaviour for a call with no input file.
+- **Tickets with input files.** A call that carries a still, a reference and driver or a clone sample becomes a ticket whose
+  inputs it copies (owner-only, swept with the ticket, bounded per ticket and machine-wide), keyed lazily by their content after the
+  lane reads busy, with the media-job bundle built once per scan and a fresh single-node health read before an upload; the MCP doors
+  move from `Run` to `RunWith` with `wait_s`. Until a node with an equal digest and an open door exists, an input-carrying call keeps
+  the local-only ticket a graph that reads input files has. Whether to open a ComfyUI node's media-job door is the operator's call
+  and not assumed.
+
+**Named limits of the amendment.** (a) A row is a size, not content: a weight replaced by a file of another content under the same
+name is present in a row, and a delegator that wants the call to render the same pixels as its own lane gets no such promise from
+this release (it is the identity release's). (b) A node that publishes no row for a lane is not judged, so a call to it with a missing
+weight reaches its door and is refused there (503), which is the behaviour of a forced call today; the typed refusal covers the
+nodes that publish rows. (c) `rendered_family` is the family the node's row names for the call, read from the row published a
+moment before, not a report from the render. (d) The `capacity` class of the four configuration refusals follows the existing pairing
+and is a choice: a caller that reads `defer_class` alone will treat them as retryable, and `err_class` `no_node_configured` with
+`data.refusal` is what tells it that waiting does not help. (e) Nothing here was run against a live fleet. The tests use fake nodes
+and the real node server with its health rewritten; the live acceptance (read `media_recipes` on every node, name a node that lacks a
+weight and see the refusal with no job on it, name a node by id for a music render and verify the file) is the release's.

@@ -2014,6 +2014,18 @@ lease block's class, reason and remaining seconds (`LeaseClass`, `LeaseReason`, 
 one lease, the first one's epoch (it names the holder in a ticket's answer). See
 [media-generation.md](media-generation.md#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082).
 
+**Video, animation and audio rows (ADR 0082 Amendment 3).** `/fleet/health` also carries `media_recipes[]`, additive: one row
+`{lane, name, default, engine, digest, files:[{role, name, bytes}], license, commercial_use}` per family a ComfyUI or sd.cpp binding of
+the node names for `video-gen` (the default family always, another only when `videogen_families` binds it or every file is on the node, an
+sd.cpp family by its own name), `animate` (`wan-animate2`, ComfyUI) and `audio-gen` (`acestep`, the ComfyUI music lane)
+(`internal/fleetnode/media_recipes.go`, from `mediacap.LaneRows`). `bytes` is the size where the node finds the file and `-1` where it
+does not, so a row whose weight is gone is still listed; a file keeps its loader-relative name and an absolute path is published as its
+file name. **A row is not an identity:** it carries no fingerprint and no digest (empty), costs a stat per file, and is memoised for
+`mediaRoutesTTL` (60 s). A node that binds none of the three lanes omits the key; voice, the audio.cpp engines and the sd.cpp animation
+lane have no row, which a reader takes as unknown. A delegator that names the node reads the rows to refuse a call for a weight the node
+lacks before it sends anything (`delegate.NodeView.MediaRecipes`; [media-generation.md](media-generation.md#naming-a-node-a-video-animation-or-audio-call-runs-on-the-one-node-you-pick-adr-0082-amendment-3)).
+The node itself checks nothing new at its door for them.
+
 **A delegator holds a busy call as a ticket (ADR 0083); a node publishes and checks nothing more for it.** What the node already
 publishes (`image_recipes[]`, `refine_honoured`, the lease block and `leases[]`, `queue_depth`) and does (the 412 recheck, the
 503 and 429 refusals, the `gpu_busy` / `gpu_queued` / `gpu_lease_unavailable` answers a bounce reads, its own grant as the authority)
@@ -2051,6 +2063,8 @@ died is still on the node under its job id; the next identical call from that ma
   the honest advertisement and `media_routes`
 - [`internal/fleetnode/image_recipe.go`](../../internal/fleetnode/image_recipe.go) — the `image_recipes` rows
   (memoised, fingerprints read without waiting), the `recipe_digest` check and the 412
+- [`internal/fleetnode/media_recipes.go`](../../internal/fleetnode/media_recipes.go) — the `media_recipes` rows of the video,
+  animation and audio bindings (sizes, no fingerprint; memoised)
 - [`internal/mediaremote/`](../../internal/mediaremote/) — the client that places a media job on a node, and (ADR 0082) the
   overflow of a busy image lane
 - [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, the admit-then-
