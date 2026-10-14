@@ -9,9 +9,17 @@ package mcpserver
 //   - every tool stays, in the same order, under the same name;
 //   - every parameter keeps its name, type, enum, items, required entry and numeric bounds, at every depth, so a call that
 //     is valid against the full list is valid against the compact one;
-//   - a description (a tool's, and each parameter's) is cut to its first sentence plus every later sentence that carries a
-//     safety word (safetyWords below): the rule that keeps "never pass third-party pages" and "ADVISORY ONLY" in the list;
+//   - a description (a tool's, and each parameter's) is cut to its first sentence plus the sentences a reviewed keep-list
+//     names for that tool (compactKeep, toolsprofile_keep.go): the sentences that hold a prohibition, a trust boundary, a
+//     privacy rule, a cost rule or a warning a result can mislead on ("never pass third-party pages", "ADVISORY ONLY", "the
+//     only cloud tool"), kept verbatim together with the sentence they cannot be read without;
 //   - examples, example, title and $comment keywords are dropped.
+//
+// No word list decides what is kept. A lexical rule was tried first and it lost sentences a caller relies on (an "ONLY" or a
+// "NOT" in capitals, "can't", the write door's caps) while keeping others by accident. Instead a test reads the live full
+// descriptions and fails for every sentence that carries a constraint word and is neither in the compact output nor on a
+// reviewed dropped-with-reason list (toolsprofile_gate_test.go, toolsprofile_dropped_test.go), so a rule added to a
+// description later turns it red until someone has read it and put it on one list or the other.
 //
 // Only the advertised list is rewritten, by a receiving middleware on tools/list that is installed ONLY when the profile is
 // compact, so the default configuration has no middleware and its list is byte-identical to the list before the key existed.
@@ -31,18 +39,12 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// safetyWords marks a sentence the compact profile must keep, whatever its position in the description: a prohibition (never,
-// do not, may not, forbidden, refuse, denied), an obligation (must), an inability a caller relies on (cannot, read-only), a trust
-// boundary (trusted, untrusted, unattended, sandbox), a risk (destructive, irreversible, safety) or the advisory status of a
-// result (advisory). A sentence is kept on one hit and kept whole.
-//
-// "only" is deliberately not on the list. It is plain description in a large share of the prose here ("the only candidate", "Only
-// a fleet node whose largest card is at least this many GB"), and keeping every sentence that holds it was measured to cost 1,801
-// tokens on the 31-tool list (19,674 become 21,475; see docs/systems/opencode-integration.md), enough to put the compact list back
-// above the 0.137.0 figures it exists to beat. A real "only" prohibition is caught by its companion word ("TRUSTED CODE ONLY ...
-// never pass", "ADVISORY ONLY"). TestCompactKeepsNamedSafetySentences pins named sentences and TestCompactNeverLosesASafetyWord
-// counts the safety words of every advertised description, so narrowing this list shows up as a red test.
-var safetyWords = regexp.MustCompile(`(?i)\b(never|do not|don't|must|may not|cannot|refus\w*|denied|trusted|untrusted|unattended|sandbox\w*|safety|advisory|read-only|forbidden|irreversible|destructive)\b`)
+// leadGuard marks text the lead cut must never drop. It is NOT what decides which sentences are kept (the reviewed keep-list does
+// that): it only stops shortenLead from cutting an opening sentence at a clause boundary when the part it would drop carries a
+// constraint word, so an opening sentence that holds a rule is kept whole. It is the same family of words the review gate
+// classifies sentences by (gateTrigger in toolsprofile_gate_test.go, written out separately there), and a test pins that every
+// word of the gate is a word of this guard.
+var leadGuard = regexp.MustCompile(`(?i)\b(never|refus\w*|only|must|not|\w+n't|cannot|required|denied|trusted|untrusted|unattended|sandbox\w*|safety|advisory|read-only|forbidden|irreversible|destructive|opt-in|without|no (?:delete|shell|run|network|cloud|write))\b`)
 
 // compactLeadMin is the shortest first "sentence" the cut accepts: a description that opens "OPTIONAL." or "Required." has
 // said nothing yet, so the next sentence is kept with it.
@@ -80,6 +82,10 @@ func splitSentences(s string) []string {
 			continue
 		}
 		if depth > 0 {
+			continue
+		}
+		// A run of dots is an ellipsis ("waiter_token=mq-... only to collect"), never a sentence end.
+		if rs[i] == '.' && ((i > 0 && rs[i-1] == '.') || (i+1 < len(rs) && rs[i+1] == '.')) {
 			continue
 		}
 		j := i + 1
@@ -123,32 +129,33 @@ func endsWithAbbreviation(prefix string) bool {
 }
 
 // compactDescription cuts prose to its first sentence (grown to compactLeadMin, shortened to maxLead at a clause boundary
-// when the part it drops carries no safety word) plus every later sentence that carries a safety word. Prose of one sentence,
-// or none, comes back as it was, unless that one sentence is over maxLead.
-func compactDescription(s string, maxLead int) string {
+// when the part it drops carries no constraint word, see leadGuard) plus every later sentence that is in keep, the reviewed
+// keep-set of the tool the prose belongs to. The kept sentences stay in the order the prose had them. Prose of one sentence, or
+// none, comes back as it was, unless that one sentence is over maxLead.
+func compactDescription(s string, maxLead int, keep map[string]bool) string {
 	sents := splitSentences(s)
 	if len(sents) == 0 {
 		return s
 	}
-	var keep []string
+	var out []string
 	lead := 0
-	for i, sent := range sents {
+	for _, sent := range sents {
 		switch {
 		case lead < compactLeadMin:
-			keep = append(keep, sent)
+			out = append(out, sent)
 			lead += len(sent)
-		case i > 0 && safetyWords.MatchString(sent):
-			keep = append(keep, sent)
+		case keep[sent]:
+			out = append(out, sent)
 		}
 	}
-	keep[0] = shortenLead(keep[0], maxLead)
-	return strings.Join(keep, " ")
+	out[0] = shortenLead(out[0], maxLead)
+	return strings.Join(out, " ")
 }
 
 // shortenLead cuts a long lead sentence at a top-level clause boundary: "; ", a spaced em dash, or the comma that follows a
 // closing bracket (the end of one "name (explanation), name (explanation)" item). It takes the last boundary inside maxLead,
-// else the first one inside twice that; the dropped tail must carry no safety word and a lead with no such boundary stays whole,
-// so the cut can shorten the prose but never remove a safety clause or break a bracket.
+// else the first one inside twice that; the dropped tail must carry no constraint word (leadGuard) and a lead with no such
+// boundary stays whole, so the cut can shorten the prose but never remove a rule or break a bracket.
 func shortenLead(lead string, maxLead int) string {
 	if maxLead <= 0 || len(lead) <= maxLead {
 		return lead
@@ -196,7 +203,7 @@ func shortenLead(lead string, maxLead int) string {
 	if cut <= 0 {
 		cut = beyond
 	}
-	if cut <= 0 || safetyWords.MatchString(string(rs[cut:])) {
+	if cut <= 0 || leadGuard.MatchString(string(rs[cut:])) {
 		return lead
 	}
 	return strings.TrimRight(string(rs[:cut]), " ,:") + "."
@@ -304,10 +311,10 @@ var (
 	schemaKeywords    = map[string]bool{"items": true, "additionalProperties": true, "not": true, "if": true, "then": true, "else": true, "oneOf": true, "anyOf": true, "allOf": true, "prefixItems": true, "contains": true, "propertyNames": true}
 )
 
-// compactSchemaNode rewrites one schema node: its description is cut, droppedKeywords go, and schema-bearing keywords are
-// walked. Every other keyword (type, enum, required, const, default, bounds, ...) is copied verbatim, and the VALUES of enum,
+// compactSchemaNode rewrites one schema node: its description is cut (keep is the tool's reviewed keep-set), droppedKeywords go,
+// and schema-bearing keywords are walked. Every other keyword (type, enum, required, const, default, bounds, ...) is copied verbatim, and the VALUES of enum,
 // const and default are never walked, so a property that is itself named "description" is never mistaken for the keyword.
-func compactSchemaNode(v any) any {
+func compactSchemaNode(v any, keep map[string]bool) any {
 	switch n := v.(type) {
 	case *ordObj:
 		out := &ordObj{vals: map[string]any{}}
@@ -318,7 +325,7 @@ func compactSchemaNode(v any) any {
 				continue
 			case k == "description":
 				if s, ok := val.(string); ok {
-					out.set(k, compactDescription(s, compactParamLead))
+					out.set(k, compactDescription(s, compactParamLead, keep))
 					continue
 				}
 				out.set(k, val)
@@ -326,14 +333,14 @@ func compactSchemaNode(v any) any {
 				if m, ok := val.(*ordObj); ok {
 					cm := &ordObj{vals: map[string]any{}}
 					for _, name := range m.keys {
-						cm.set(name, compactSchemaNode(m.vals[name]))
+						cm.set(name, compactSchemaNode(m.vals[name], keep))
 					}
 					out.set(k, cm)
 					continue
 				}
 				out.set(k, val)
 			case schemaKeywords[k]:
-				out.set(k, compactSchemaNode(val))
+				out.set(k, compactSchemaNode(val, keep))
 			default:
 				out.set(k, val)
 			}
@@ -342,7 +349,7 @@ func compactSchemaNode(v any) any {
 	case []any:
 		out := make([]any, len(n))
 		for i, e := range n {
-			out[i] = compactSchemaNode(e)
+			out[i] = compactSchemaNode(e, keep)
 		}
 		return out
 	}
@@ -350,7 +357,7 @@ func compactSchemaNode(v any) any {
 }
 
 // compactInputSchema returns the compact form of a tool's input schema, or the schema untouched when it cannot be parsed.
-func compactInputSchema(schema any) any {
+func compactInputSchema(schema any, keep map[string]bool) any {
 	var raw []byte
 	switch s := schema.(type) {
 	case nil:
@@ -372,7 +379,7 @@ func compactInputSchema(schema any) any {
 	if err != nil {
 		return schema
 	}
-	b, err := marshalNoEscape(compactSchemaNode(tree))
+	b, err := marshalNoEscape(compactSchemaNode(tree, keep))
 	if err != nil {
 		return schema
 	}
@@ -386,8 +393,9 @@ func compactTool(t *mcp.Tool) *mcp.Tool {
 		return nil
 	}
 	c := *t
-	c.Description = compactDescription(t.Description, compactToolLead)
-	c.InputSchema = compactInputSchema(t.InputSchema)
+	keep := compactKeepByTool[t.Name]
+	c.Description = compactDescription(t.Description, compactToolLead, keep)
+	c.InputSchema = compactInputSchema(t.InputSchema, keep)
 	return &c
 }
 

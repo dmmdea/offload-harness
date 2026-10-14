@@ -26,8 +26,10 @@ func fullSurfaceCfg(profile string) config.Config {
 
 // stripProse removes the keywords compact is allowed to drop, naively and independently of the production walker: a
 // "description" whose value is a string (a PROPERTY named description holds an object, so it survives), and the dropped
-// keywords. What is left is the structure a call depends on.
+// keywords. What is left is the structure a call depends on. The keys of a map of names (properties and its kin) are parameter
+// names, not keywords, so a parameter that is called title or example is kept and only its schema is stripped.
 func stripProse(v any) any {
+	nameMaps := map[string]bool{"properties": true, "patternProperties": true, "$defs": true, "definitions": true, "dependentSchemas": true}
 	switch n := v.(type) {
 	case map[string]any:
 		out := map[string]any{}
@@ -36,6 +38,14 @@ func stripProse(v any) any {
 				continue
 			}
 			if k == "examples" || k == "example" || k == "title" || k == "$comment" {
+				continue
+			}
+			if m, ok := x.(map[string]any); ok && nameMaps[k] {
+				names := map[string]any{}
+				for name, child := range m {
+					names[name] = stripProse(child)
+				}
+				out[k] = names
 				continue
 			}
 			out[k] = stripProse(x)
@@ -49,30 +59,6 @@ func stripProse(v any) any {
 		return out
 	}
 	return v
-}
-
-// collectDescriptions returns every description string of a tool: its own and each schema description at any depth.
-func collectDescriptions(tool *mcp.Tool) []string {
-	out := []string{tool.Description}
-	var walk func(v any)
-	walk = func(v any) {
-		switch n := v.(type) {
-		case map[string]any:
-			for k, x := range n {
-				if s, ok := x.(string); ok && k == "description" {
-					out = append(out, s)
-					continue
-				}
-				walk(x)
-			}
-		case []any:
-			for _, x := range n {
-				walk(x)
-			}
-		}
-	}
-	walk(tool.InputSchema)
-	return out
 }
 
 // TestCompactKeepsEveryToolAndParameter: the compact list names every tool the full list names, in the same order, and each
@@ -151,32 +137,6 @@ func TestCompactRequiredParametersSurvive(t *testing.T) {
 	}
 	if required < 30 {
 		t.Fatalf("only %d required parameters seen: the check is blind", required)
-	}
-}
-
-// TestCompactNeverLosesASafetyWord: the property the profile promises, checked over every description the server advertises:
-// a sentence that carries a safety word is kept whole and the cut only ever drops text that has none, so the number of safety
-// words in a tool's descriptions is the same under both profiles.
-func TestCompactNeverLosesASafetyWord(t *testing.T) {
-	full := listTools(t, fullSurfaceCfg("full"))
-	compact := listTools(t, fullSurfaceCfg("compact"))
-	seen := 0
-	for i := range full {
-		count := func(tool *mcp.Tool) int {
-			n := 0
-			for _, d := range collectDescriptions(tool) {
-				n += len(safetyWords.FindAllString(d, -1))
-			}
-			return n
-		}
-		f, c := count(full[i]), count(compact[i])
-		seen += f
-		if f != c {
-			t.Errorf("%s: %d safety words in the full descriptions, %d in the compact ones", full[i].Name, f, c)
-		}
-	}
-	if seen < 100 {
-		t.Fatalf("only %d safety words across the whole list: the check is blind", seen)
 	}
 }
 
@@ -463,21 +423,27 @@ func TestSplitSentences(t *testing.T) {
 }
 
 func TestCompactDescription(t *testing.T) {
+	never := map[string]bool{"Never pass secrets here.": true}
 	for _, tc := range []struct {
 		name, in string
 		lead     int
+		keep     map[string]bool
 		want     string
 	}{
-		{"first sentence only", "Summarize the given text right now. Triggers: summarize, digest. Returns the gist.", 320, "Summarize the given text right now."},
-		{"a safety sentence survives wherever it sits", "Summarize the given text right now. Triggers: summarize, digest. Never pass secrets here. Returns the gist.", 320, "Summarize the given text right now. Never pass secrets here."},
-		{"a one-word opener grows to the next sentence", "OPTIONAL. The ticket from a queued answer. Extra detail follows here.", 320, "OPTIONAL. The ticket from a queued answer."},
-		{"one sentence is untouched", "Just one sentence, with detail.", 320, "Just one sentence, with detail."},
-		{"a long lead is cut at a clause boundary", "Do the first useful thing for the caller right here; then explain at length why that is so and what else follows from it in a very long tail.", 60, "Do the first useful thing for the caller right here."},
-		{"a long lead whose tail has a safety word stays whole", "Do the first useful thing for the caller right here; then explain at length why you must never skip it, in a very long tail.", 60, "Do the first useful thing for the caller right here; then explain at length why you must never skip it, in a very long tail."},
-		{"a lead with no clean boundary stays whole", "Do the first useful thing for the caller right here and then keep on going with no break at all in this run", 40, "Do the first useful thing for the caller right here and then keep on going with no break at all in this run"},
-		{"a comma after a bracket is a boundary", "placement: auto (default; the local seat if idle), spread (deal across every node and keep the order), queue (durable).", 40, "placement: auto (default; the local seat if idle)."},
+		{"first sentence only", "Summarize the given text right now. Triggers: summarize, digest. Returns the gist.", 320, nil, "Summarize the given text right now."},
+		{"a listed sentence survives wherever it sits", "Summarize the given text right now. Triggers: summarize, digest. Never pass secrets here. Returns the gist.", 320, never, "Summarize the given text right now. Never pass secrets here."},
+		{"a sentence with a constraint word that is not listed is dropped", "Summarize the given text right now. Triggers: summarize, digest. Never pass secrets here. Returns the gist.", 320, nil, "Summarize the given text right now."},
+		{"kept sentences keep the order of the prose", "Summarize the given text right now. Alpha rule: only once. Beta note here. Gamma rule: never twice.", 320, map[string]bool{"Gamma rule: never twice.": true, "Alpha rule: only once.": true}, "Summarize the given text right now. Alpha rule: only once. Gamma rule: never twice."},
+		{"a listed sentence that is not in the prose keeps nothing", "Summarize the given text right now. Triggers: summarize, digest.", 320, never, "Summarize the given text right now."},
+		{"a one-word opener grows to the next sentence", "OPTIONAL. The ticket from a queued answer. Extra detail follows here.", 320, nil, "OPTIONAL. The ticket from a queued answer."},
+		{"one sentence is untouched", "Just one sentence, with detail.", 320, nil, "Just one sentence, with detail."},
+		{"a long lead is cut at a clause boundary", "Do the first useful thing for the caller right here; then explain at length why that is so and what else follows from it in a very long tail.", 60, nil, "Do the first useful thing for the caller right here."},
+		{"a long lead whose tail has a constraint word stays whole", "Do the first useful thing for the caller right here; then explain at length why you must never skip it, in a very long tail.", 60, nil, "Do the first useful thing for the caller right here; then explain at length why you must never skip it, in a very long tail."},
+		{"a long lead whose tail says only stays whole", "Do the first useful thing for the caller right here; then explain at length that this only applies to the first box in a very long tail.", 60, nil, "Do the first useful thing for the caller right here; then explain at length that this only applies to the first box in a very long tail."},
+		{"a lead with no clean boundary stays whole", "Do the first useful thing for the caller right here and then keep on going with no break at all in this run", 40, nil, "Do the first useful thing for the caller right here and then keep on going with no break at all in this run"},
+		{"a comma after a bracket is a boundary", "placement: auto (default; the local seat if idle), spread (deal across every node and keep the order), queue (durable).", 40, nil, "placement: auto (default; the local seat if idle)."},
 	} {
-		if got := compactDescription(tc.in, tc.lead); got != tc.want {
+		if got := compactDescription(tc.in, tc.lead, tc.keep); got != tc.want {
 			t.Errorf("%s:\n got  %q\n want %q", tc.name, got, tc.want)
 		}
 	}
@@ -487,9 +453,9 @@ func TestCompactDescription(t *testing.T) {
 // the prose keyword, and is neither cut nor dropped; enum and default values are never walked as schemas.
 func TestCompactSchemaKeepsPropertyNamedDescription(t *testing.T) {
 	in := json.RawMessage(`{"type":"object","title":"T","properties":{"description":{"type":"string","description":"What this field is for, in full. More words follow here."},"mode":{"type":"string","enum":["a. B","c"],"default":"a. B","examples":["c"]}},"required":["description"]}`)
-	got, ok := compactInputSchema(in).(json.RawMessage)
+	got, ok := compactInputSchema(in, nil).(json.RawMessage)
 	if !ok {
-		t.Fatalf("compactInputSchema returned %T", compactInputSchema(in))
+		t.Fatalf("compactInputSchema returned %T", compactInputSchema(in, nil))
 	}
 	want := `{"type":"object","properties":{"description":{"type":"string","description":"What this field is for, in full."},"mode":{"type":"string","enum":["a. B","c"],"default":"a. B"}},"required":["description"]}`
 	if string(got) != want {
@@ -500,10 +466,10 @@ func TestCompactSchemaKeepsPropertyNamedDescription(t *testing.T) {
 // TestCompactSchemaUnparseableStaysAsItWas: the failure mode is a full schema, never a broken one.
 func TestCompactSchemaUnparseableStaysAsItWas(t *testing.T) {
 	bad := json.RawMessage(`{"type":"object","properties":`)
-	if got := compactInputSchema(bad); !reflect.DeepEqual(got, any(bad)) {
+	if got := compactInputSchema(bad, nil); !reflect.DeepEqual(got, any(bad)) {
 		t.Fatalf("an unparseable schema came back changed: %v", got)
 	}
-	if got := compactInputSchema(nil); got != nil {
+	if got := compactInputSchema(nil, nil); got != nil {
 		t.Fatalf("nil schema came back as %v", got)
 	}
 }
@@ -537,9 +503,9 @@ func TestStripProseKeepsPropertiesNamedLikeProseKeywords(t *testing.T) {
 // TestCompactSchemaKeepsPropertiesNamedLikeProseKeywords: the production walker has the same obligation.
 func TestCompactSchemaKeepsPropertiesNamedLikeProseKeywords(t *testing.T) {
 	in := json.RawMessage(`{"type":"object","properties":{"title":{"type":"string","description":"What this field is for, in full. More words follow here."},"example":{"type":"string"},"examples":{"type":"array","items":{"type":"string"}}},"required":["title"]}`)
-	got, ok := compactInputSchema(in).(json.RawMessage)
+	got, ok := compactInputSchema(in, nil).(json.RawMessage)
 	if !ok {
-		t.Fatalf("compactInputSchema returned %T", compactInputSchema(in))
+		t.Fatalf("compactInputSchema returned %T", compactInputSchema(in, nil))
 	}
 	want := `{"type":"object","properties":{"title":{"type":"string","description":"What this field is for, in full."},"example":{"type":"string"},"examples":{"type":"array","items":{"type":"string"}}},"required":["title"]}`
 	if string(got) != want {
