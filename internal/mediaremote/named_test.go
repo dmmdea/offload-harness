@@ -340,6 +340,33 @@ func TestANamedNodeWithoutTheRouteIsRefusedBeforeAnyPOST(t *testing.T) {
 	}
 }
 
+// A node that does not list the lane's task is refused even when its route reads CONFIGURED, and an older node that publishes no routes
+// is refused for the task alone: the task list is the node's own statement of what it serves.
+func TestANamedNodeThatDoesNotListTheTaskIsRefused(t *testing.T) {
+	dropTask := func(m map[string]any) {
+		var kept []any
+		for _, x := range m["supported_task_types"].([]any) {
+			if x != "video-gen" {
+				kept = append(kept, x)
+			}
+		}
+		m["supported_task_types"] = kept
+	}
+	configured := startNode(t, nodeOpts{id: "render-a", healthEdit: dropTask})
+	older := startNode(t, nodeOpts{id: "render-b", healthEdit: func(m map[string]any) { dropTask(m); delete(m, "media_routes") }})
+	cfg := namedClient(t, configured, older)
+	for _, id := range []string{"render-a", "render-b"} {
+		res := Run(context.Background(), cfg, &recordingRunner{}, named(id, nil), "", nil)
+		data := refusal(t, res)
+		if data["refusal"] != "node_lacks_route" || !strings.Contains(res.Reason, "does not serve video-gen") {
+			t.Errorf("%s: %+v data %v", id, res, data)
+		}
+	}
+	if len(configured.posts())+len(older.posts()) != 0 {
+		t.Error("nothing is sent")
+	}
+}
+
 // Input files travel through the media-job door. A named node that has not opened it cannot take a still, and says so; the same
 // node takes a call with no input file, and a node with the door open takes the still.
 func TestANamedNodeWithoutTheMediaJobDoorRefusesAStill(t *testing.T) {
