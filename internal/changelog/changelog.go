@@ -416,13 +416,18 @@ func CheckForRelease(root string) []string { return checkTree(root, true) }
 // strayEntries names every entry of changes/ that is neither README.md nor the fragment directory spelled exactly so.
 // Nothing reads such an entry (a fragment saved one level up, or a directory in another case, which a case-insensitive
 // checkout still finds and Linux does not), so its text would never reach CHANGELOG.md: a skipped fragment is a lost entry.
-func strayEntries(root string) []string {
+func strayEntries(root string) []string { return strayEntriesFS(os.DirFS(root)) }
+
+// strayEntriesFS is strayEntries over any file system rooted at the repository root. Whether a file in a directory's
+// place reads as "does not exist" or as "not a directory" depends on the platform (Windows says the first), so the
+// directory is statted and a file there is named for what it is, not taken for an absent directory.
+func strayEntriesFS(fsys fs.FS) []string {
 	dir, fragDir := path.Dir(FragmentDir), path.Base(FragmentDir)
-	entries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(dir)))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
+	entries, err := fs.ReadDir(fsys, dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil // no changes/ at all holds no fragments
+	case err != nil:
 		return []string{dir + ": " + err.Error()}
 	}
 	var problems []string
