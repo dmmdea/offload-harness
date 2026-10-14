@@ -552,7 +552,8 @@ demands the frozen report back byte for byte. With no source flag, harvest reads
   unrecorded. The compaction ladder also runs before the first model call and again when that call is rejected for
   context size, so a run can end at zero steps with passes counted. For runs from a build that carries the recording, the
   pager and compaction unrecorded counts therefore reach zero; rows logged before it, and rows from a node that predates
-  it, stay unrecorded, so read a mixed log with `--since`.
+  it, stay unrecorded, so a mixed log reads zero only once the older rows are windowed out by day (`--since`) and every
+  node that wrote the rest runs the recording.
 - **What it reports.** The trace-bearing run count (an agent trace with a transcript, or a delegation row with a step
   trace); the pager re-fetch rate pooled over the runs that evicted something (distinct payloads re-fetched over distinct
   payloads evicted) against the 10 % gate of R2-13 (`agent.PagerGate`); the compaction fire rate (runs that ran the ladder at

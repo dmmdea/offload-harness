@@ -233,7 +233,7 @@ func TestTraceCorpusSkipsRowsThatNeverRan(t *testing.T) {
 		`{"seat":"seat-a","result":{"steps":4,"stop_reason":"done"}}`,
 		`{"seat":"seat-a","result":{"steps":0,"stop_reason":"error","pager":{"basis":"insufficient_data","evictions":0,"evicted_bytes":0,"distinct_evicted":0,"refetched_distinct":0,"compaction_passes":0}}}`,
 		`{"seat":"seat-a","result":{"steps":0,"stop_reason":"error","trace":[{}]}}`,
-		`{"seat":"seat-a","deferred":true,"defer_class":"budget","setup_ran":1,"result":{"steps":0,"stop_reason":"error","trace":[{"step":0,"tool":"read_file","status":"committed","setup":true}]}}`,
+		`{"seat":"seat-a","deferred":true,"defer_class":"budget","result":{"steps":0,"stop_reason":"error","setup_ran":1,"trace":[{"step":0,"tool":"read_file","status":"committed","setup":true}]}}`,
 		`{"seat":"seat-a","result":{"steps":0,"stop_reason":"error","seat_tokens_in":50}}`,
 		`{"seat":"seat-a","result":{"steps":0,"stop_reason":"error","prefill_steps":2,"prefill_tokens":7,"cache_tokens":1}}`,
 	}

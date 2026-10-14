@@ -121,7 +121,8 @@ A recommendation for the human decision on the context-language-model measuremen
 - Runs executed is a smaller, truer denominator than rows logged. For runs from a build that carries the recording, the
   pager and compaction unrecorded counts reach zero, because every run that reached the loop writes a pager object,
   zero-step deferred runs included. Rows logged before the recording, and rows from a node that predates it, stay
-  unrecorded, so a harvest over mixed logs reads zero only once those are windowed out (`--since`).
+  unrecorded, so a harvest over mixed logs reads zero only once the older rows are windowed out by day (`--since`) and
+  every node that wrote the rest runs the recording.
 - The readout is per machine. Nothing pools delegation logs across machines, and a reader comparing machines compares
   separate readouts.
 - The readout carries node ids and seat names as the records write them, so it stays machine-local like the corpus; only
