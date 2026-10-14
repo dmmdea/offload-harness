@@ -334,3 +334,60 @@ func TestFailureEveryNeverRanClassKeepsAStoredZeroOnARowThatNamesANode(t *testin
 		}
 	}
 }
+
+// A node's capacity refusal at dispatch is a place in line, not an outcome (the row carries refusal:true). The
+// subtask it belonged to landed elsewhere, or ended on a terminal row of its own, so counting the refusal as a failed
+// job read one subtask as two failures and inflated queue_full and job_rows. The register sets a marked row apart and
+// counts it as a refused attempt, inside the same window and with the same test-traffic rule as every other row.
+func TestFailureRegisterCountsARefusedAttemptApartFromFailures(t *testing.T) {
+	path := writeFailureLedger(t,
+		// one subtask: refused twice, then it landed
+		`{"ts":100,"task":"agent_delegate","deferred":true,"reason_code":"queue_full","reason":"dispatch: status 503","job_id":"r1","refusal":true,"cards_tokens":0}`,
+		`{"ts":101,"task":"agent_delegate","deferred":true,"reason_code":"queue_full","reason":"dispatch: status 503","job_id":"r2","refusal":true,"cards_tokens":0}`,
+		`{"ts":102,"task":"agent_delegate","deferred":false,"reason_code":"ok","acceptance_result":"pass","job_id":"landed","cards_tokens":40}`,
+		// a different subtask: refused, then the wait ended as a capacity defer on a row of its own
+		`{"ts":200,"task":"agent_delegate","deferred":true,"reason_code":"queue_full","reason":"dispatch: status 429","job_id":"r3","refusal":true,"cards_tokens":0}`,
+		`{"ts":201,"task":"agent_delegate","deferred":true,"reason_code":"capacity_wait","reason":"no node had room","job_id":"lost","cards_tokens":0}`,
+		// an explicit false is not a mark
+		`{"ts":202,"task":"agent_delegate","deferred":true,"reason_code":"queue_full","reason":"every node refused","job_id":"final","refusal":false,"cards_tokens":0}`,
+		// test traffic: a refusal that is not production is neither a refused attempt nor an excluded job
+		`{"ts":203,"task":"agent_delegate","deferred":true,"reason_code":"queue_full","job_id":"t1","refusal":true,"run_class":"test","cards_tokens":0}`,
+	)
+	reg, err := FailureRegisterFile(path, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reg.RefusedAttempts != 3 {
+		t.Errorf("refused_attempts = %d, want 3 (the production refusals)", reg.RefusedAttempts)
+	}
+	// 3 jobs: the landing, the lost subtask's terminal row and the final queue_full row; no refusal row is one.
+	if reg.JobRows != 3 || reg.FailureRows != 2 {
+		t.Errorf("job_rows = %d, failure_rows = %d, want 3 and 2 (refused attempts are neither)", reg.JobRows, reg.FailureRows)
+	}
+	if c := classNamed(t, reg, "queue_full"); c.Count != 1 {
+		t.Errorf("queue_full = %d, want 1: only the row that is an outcome, not the three place-in-line rows", c.Count)
+	}
+	if len(reg.ExcludedNonProduction) != 0 {
+		t.Errorf("excluded_non_production = %v: a refused attempt of test traffic is not an excluded job", reg.ExcludedNonProduction)
+	}
+	// The window applies to a refusal like to any row.
+	late, err := FailureRegisterFile(path, 150, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if late.RefusedAttempts != 1 {
+		t.Errorf("refused_attempts inside since=150 = %d, want 1", late.RefusedAttempts)
+	}
+	// With the test traffic counted, its refusal joins the refused attempts.
+	all, err := FailureRegisterFile(path, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if all.RefusedAttempts != 4 {
+		t.Errorf("refused_attempts with test traffic = %d, want 4", all.RefusedAttempts)
+	}
+	b, _ := json.Marshal(reg)
+	if !strings.Contains(string(b), `"refused_attempts":3`) {
+		t.Errorf("the register JSON has no refused_attempts: %s", b)
+	}
+}
