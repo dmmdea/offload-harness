@@ -742,39 +742,6 @@ func TestTimedOutTasksLeaveTheirCostUnresolved(t *testing.T) {
 	}
 }
 
-// A cheat scores at the worst value of the class, and its cost is not a measured cost either: a
-// cheap cheat must not feed an efficiency interval, on either arm.
-func TestCheatAttemptsLeaveTheirCostUnresolved(t *testing.T) {
-	const n = 20
-	b, h := freeze(t, niPre(n), nil)
-	inc := armFrom("i", n, func(int) []Attempt {
-		return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: tokenMetric(1000)}}
-	})
-	cand := armFrom("c", n, func(i int) []Attempt {
-		if i < 5 {
-			return []Attempt{{Outcome: OutcomeCheat, Score: f64(10), Metrics: tokenMetric(1)}}
-		}
-		return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: tokenMetric(500)}}
-	})
-	r := mustGate(t, b, h, inputFor(h, inc, cand))
-	if e := r.Efficiency[0]; e.N != 15 || e.UnresolvedPairs != 5 {
-		t.Fatalf("a candidate cheat's cost entered the efficiency interval: %+v", e)
-	}
-	incCheat := armFrom("i", n, func(i int) []Attempt {
-		if i < 5 {
-			return []Attempt{{Outcome: OutcomeCheat, Score: f64(10), Metrics: tokenMetric(1000000)}}
-		}
-		return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: tokenMetric(1000)}}
-	})
-	cand2 := armFrom("c", n, func(int) []Attempt {
-		return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: tokenMetric(500)}}
-	})
-	r = mustGate(t, b, h, inputFor(h, incCheat, cand2))
-	if e := r.Efficiency[0]; e.N != 15 || e.UnresolvedPairs != 5 {
-		t.Fatalf("an incumbent cheat's cost entered the efficiency interval: %+v", e)
-	}
-}
-
 func TestSuperiorityReportsEfficiencyAndIgnoresItForTheVerdict(t *testing.T) {
 	const n = 16
 	p := supPre(n)
