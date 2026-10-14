@@ -227,23 +227,32 @@ func TestContextBenchRefusesFlagValuesThatWouldBeSilentlyDefaulted(t *testing.T)
 	}
 }
 
-// Every flag the verb defines is named in the usage block of its docs page.
+// Every flag the verb defines is named in the contextbench section of its docs page.
 func TestContextBenchEveryFlagIsDocumented(t *testing.T) {
 	src, err := os.ReadFile("compaction_contextbench.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	docs, err := os.ReadFile(filepath.Join("docs", "systems", "coding-agent.md"))
+	page, err := os.ReadFile(filepath.Join("docs", "systems", "coding-agent.md"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	docs := string(page)
+	start := strings.Index(docs, "### The `contextbench` task bench")
+	if start < 0 {
+		t.Fatal("docs/systems/coding-agent.md has no contextbench section")
+	}
+	docs = docs[start:]
+	if end := strings.Index(docs[1:], "\n### "); end >= 0 {
+		docs = docs[:end+1]
 	}
 	flags := regexp.MustCompile(`fs\.(?:String|Int|Int64|Float64|Bool)\("([a-z-]+)"`).FindAllStringSubmatch(string(src), -1)
 	if len(flags) < 15 {
 		t.Fatalf("found only %d flag definitions in the verb: the pattern no longer matches how they are written", len(flags))
 	}
 	for _, m := range flags {
-		if !strings.Contains(string(docs), "--"+m[1]) {
-			t.Errorf("flag --%s is defined by the contextbench verb but not documented in docs/systems/coding-agent.md", m[1])
+		if !strings.Contains(docs, "--"+m[1]) {
+			t.Errorf("flag --%s is defined by the contextbench verb but not documented in the contextbench section of docs/systems/coding-agent.md", m[1])
 		}
 	}
 }
