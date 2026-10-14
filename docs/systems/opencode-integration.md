@@ -181,7 +181,7 @@ What `"compact"` does, per tool and per parameter at every depth:
 - Cuts each description to its first sentence (grown to the next sentence when the first is under 28 characters, and
   shortened at a clause boundary when it runs past 320 characters for a tool or 200 for a parameter and the dropped part
   carries no rule word and does not say the data leaves the box), plus the sentences a reviewed per-tool keep-list
-  names ([`toolsprofile_keep.go`](../../internal/mcpserver/toolsprofile_keep.go), 130 entries), verbatim and in the order
+  names ([`toolsprofile_keep.go`](../../internal/mcpserver/toolsprofile_keep.go), 143 entries), verbatim and in the order
   the description has them. An entry is a sentence a caller must not be without: a prohibition, a trust or privacy
   boundary, the statement that a call is forwarded to another node and its image or audio bytes travel with it, a cost
   rule, a limit the schema cannot express, the "if it cannot, it returns `deferred:true` and you do the work yourself"
@@ -192,7 +192,8 @@ What `"compact"` does, per tool and per parameter at every depth:
   the three values of `agent_run`'s `thinking` together, the acceptance lint with its remedy.
 - Drops `examples`, `example`, `title` and `$comment` keywords. Anything it cannot parse stays as it was: its failure
   mode is a full schema, never a broken one.
-- Loses, on purpose: the `Returns {...}` result-shape and result-reading sentences, trigger lists, placement and queue
+- Loses, on purpose: the `Returns {...}` result shapes and the result reading that stops no misreading (the seven
+  sentences that do are kept), trigger lists, placement and queue
   mechanics, the tool-selection menus among sibling tools and the explanation of the enum values that another kept
   sentence already covers. The caller still sees every value it may pass; it gets less guidance on what comes back and
   which door to take (for opencode the door choice is made in the plugin's injected dispatch protocol).
@@ -225,7 +226,7 @@ unread.
 The test cuts the descriptions into sentences with the production splitter and requires, for every sentence outside the
 opening one(s) and whatever words it holds, one of two things: the sentence is in the compact description of that tool and
 parameter, verbatim, or it is a row of the dropped list
-([`toolsprofile_dropped_test.go`](../../internal/mcpserver/toolsprofile_dropped_test.go): 253 rows covering 309 tool and
+([`toolsprofile_dropped_test.go`](../../internal/mcpserver/toolsprofile_dropped_test.go): 240 rows covering 296 tool and
 sentence pairs, each with one of eleven reason classes: `result`, `mech`, `valid`, `schema`, `restated`, `enum`,
 `rationale`, `descr`, `defer`, `choice`, `advice`). A rule reworded, added or split off later turns the test red until
 someone has read it and put it on one list or the other, and an entry is the exact sentence, so a reworded rule is read again.
@@ -239,7 +240,9 @@ how to resume a queued place with a `waiter_token`, that the browse lane runs in
 address the images of a multi-reference edit, the preset and denoise warnings, that a generative edit re-renders everything,
 that the enhancement is preview-grade, the first-door sentences of `offload_extract` and `offload_summarize`, `wait_s` under
 the client's timeout, the quote and inch caveat and the prompt-writing sentence of `offload_generate_image`, the research caps,
-how to size a contract with `section:"brief"`, and the cost of `offload_video_watch` on a long file.
+how to size a contract with `section:"brief"`, and the cost of `offload_video_watch` on a long file. Thirteen more were
+moved by the two later checks described below (the sentences that explain an enum value, and the result-reading sentences
+that stop a misreading), which is why the keep-list is longer and the dropped list shorter than the counts above say.
 
 The trigger words are the second check, not the first. They are the constraint words (`never`, `refuse*`, `only`, `must`, `not`
 (which covers `do not`, `may not` and `NOT`), any `n't` contraction, `cannot`, `required`, `without`, `opt-in`,
@@ -263,21 +266,45 @@ Four more checks name what the sentence-by-sentence gate cannot say on its own:
 - **Acceptance-authoring rules are keep-only.** The sentence that says what `acceptance_lint` flags (`PARROT-PASSABLE`,
   `UNGROUNDED`, `SHAPE-ONLY`: a lone `nonempty:` passes garbage) and the remedy that follows it are kept, the gate reports
   such a sentence as an error if compact drops it even with a reason, and a row for one on the dropped list is a defect.
-- **Enum values.** For every parameter with an enum, each value that the full description explains (`value = meaning`,
-  `value: meaning`, `value (meaning)`) is explained in the compact description too, unless it is on a short reviewed list of
-  dropped enum values. The check found the scheduling band `1 = urgent`, the `measurement` and `operator` pin reasons and the
-  transcribe route's `auto` and `local` lines. The first three are kept; the last two are the list's only entries, because the
-  kept tool-level route sentence names all three route values.
+- **Enum values.** For every parameter with an enum, and for a parameter whose description opens by listing its values with
+  no enum keyword (`full | lightning8 | lightning4`), each value that the full list explains is explained in the compact
+  list too, unless it is on a short reviewed list of dropped enum values. The check reads the parameter's own description
+  and the tool's description, and counts an explanation in these shapes: `value = meaning`, `value: meaning`,
+  `value (meaning)`, a member of an `a|b|c` list that a parenthesis explains (`birds|insects|plants (MobileNet v2 iNat)`),
+  and a quoted value that the prose then speaks of (`Prefer "build" for ...; "general" advertises everything`). A bare
+  mention in running prose ("route local or remote", "local pins it to this box") is not one of these shapes, so a value
+  that only such prose explains is not read, and the quoted shape is loose in the other direction: it read the route value
+  `local` in the sentence that says what the result field `ran_on` means (that sentence is kept, below). The first version
+  read only the parameter's own description and the first three shapes; it found the scheduling band `1 = urgent`, the
+  `measurement` and `operator` pin reasons and the transcribe route's `auto` and `local` lines. Widened, it found the
+  `build` and `general` profiles, the classify-image domains, the compose-video `high` quality, the zero-shot spaces, the
+  edit preset `lightning8` (which preset is the default and what the preset trades: the preset has no enum, its description lists the three names),
+  the per-kind spec examples of `offload_generate_svg`, and seven `offload_status` sections. Every sentence is kept except
+  the sections. The dropped-enum list has nine entries, each with its reason: the transcribe route's `auto` and `local`
+  (the kept tool-level route sentence names all three route values) and the status sections `local`, `fleet`, `media`,
+  `remote`, `accelerators`, `pair` and `gpu_lease` (a section names its block, and the block's contents are a result shape;
+  the clauses that say how to read the roster are kept).
+- **Result-reading sentences that stop a misreading.** Seven sentences the first classification dropped as result reading
+  are kept whole, because each one stops a caller from misreading a result it already holds: `offload_transcribe`'s
+  `words_reliable false` (do not cut audio at word boundaries from those times), `offload_research`'s "a PARTIAL result is a
+  successful call" (read `summary.failed`), `agent_delegate`'s `results[].ran_on` (where a subtask ran: read it, not the word
+  local in `results[].placement`), `defer_class "contract"` (your contract, not a box: rewrite it and retry) and the call
+  deadline (re-issue the unfinished subtasks in a smaller call), and `offload_ask`'s two (`verified:false` is a prompt to
+  look, not proof the answer is wrong; a repeat does not re-roll the seat). A test finds each in the full description by a
+  phrase and requires the whole sentence in the compact one. The `Returns {...}` result shapes are still dropped.
 - **The fused sentence.** `offload_status`'s description held three clauses that tell a caller how to read the live roster inside one
   2,000-character `Returns {...}` sentence that is dropped as a result shape, because the whole sentence sits in one open brace
   and the splitter does not cut inside it. The source text now closes the brace before them and the three clauses are
   sentences of their own (one brace moved, two semicolons became full stops, no word changed); a test pins that each is a
   sentence of the full description and is kept by compact.
 
-What the gate still cannot see: a rule that is in an opening sentence is kept by rule, so it is not reviewed row by row (the
-lead cut may shorten an opening sentence only where the dropped part carries none of the words above); and a rule fused into a
-sentence that the splitter does not cut is classified with that sentence, which is how `offload_status` lost its three clauses.
-The remedy is to split the source text, and the gate cannot find a fused sentence by itself.
+What the gate still cannot see: a rule that is in an opening sentence is kept by rule, so it is not reviewed row by row. The
+lead cut shortens an opening sentence only when it runs past 200 characters (a parameter) or 320 (a tool), only at a `; ` or a
+spaced em dash, and only where the dropped part carries none of the words above, so the one limit left there is that such a long
+opening sentence is guarded, for its tail after the `; ` or the dash, by that keyword list alone: a rule worded without any of
+the words is dropped with that tail, with no row to review. The second thing it cannot see is a rule fused into a sentence that
+the splitter does not cut, which is classified with that sentence and is how `offload_status` lost its three clauses. The remedy
+for both is to split the source text, and the gate cannot find either by itself.
 
 ### Measured
 
@@ -293,22 +320,32 @@ the surface the plugin's `recon` set is drawn from. Tokenizer: the llama.cpp b11
   `{"type": "function", "function": {"name", "description", "parameters"}}` per line, `</tools>`, with Python-style
   `, ` and `: ` separators. This is the rendering the 0.137.0 figures used, so it is the column to compare with them. The
   fixed template text around the block (the header and the call-format instructions) is identical under both profiles
-  and is not counted. With compact separators (`,` and `:`) the same lists count 29,456 (full) and 17,950 (compact), so the
+  and is not counted. With compact separators (`,` and `:`) the same lists count 29,456 (full) and 18,711 (compact), so the
   ratio, not the absolute figure, is what carries across renderers.
 
 | Tool set | Tools | JSON, full | JSON, compact | Template, full | Template, compact | Saved (template) |
 |---|---|---|---|---|---|---|
-| Every advertised tool | 31 | 29,272 | 17,766 | 31,381 | 19,873 | 11,508 (36.7%) |
-| The plugin's `recon` set | 12 | 11,157 | 6,953 | 11,867 | 7,662 | 4,205 (35.4%) |
-| The other tools (the `offload-media` set) | 19 | 18,155 | 10,853 | 19,521 | 12,218 | 7,303 (37.4%) |
+| Every advertised tool | 31 | 29,272 | 18,527 | 31,381 | 20,634 | 10,747 (34.2%) |
+| The plugin's `recon` set | 12 | 11,157 | 7,397 | 11,867 | 8,106 | 3,761 (31.7%) |
+| The other tools (the `offload-media` set) | 19 | 18,155 | 11,170 | 19,521 | 12,535 | 6,986 (35.8%) |
 | The four Tier-1 tools | 4 | 1,125 | 886 | 1,232 | 993 | 239 (19.4%) |
-| Largest surface: the 31 plus the browse lane and three accelerators | 45 | 31,799 | 19,797 | 34,376 | 22,372 | 12,004 (34.9%) |
+| Largest surface: the 31 plus the browse lane and three accelerators | 45 | 31,799 | 20,629 | 34,376 | 23,204 | 11,172 (32.5%) |
 
 The 45-tool row is measured the same way over the config the review gate uses (it is not an estimate), and the `recon` set
 and the four Tier-1 tools are the same tools in it. The full column is the unchanged default: the same bytes as before the
 profile existed (see below), so only the compact columns depend on the keep-list.
 
-Before the review of every sentence (the previous measurement of this change) the compact columns were 15,901 and 18,007 for
+This round (the enum check widened to the tool-level description and to parameters that list their values, and the seven
+result-reading sentences kept) took the compact columns (tools/list JSON, then template rendering) from 17,766 and 19,873 for the 31 tools to 18,527 and 20,634 (+761
+tokens in the template rendering, 3.8%), from 6,953 and 7,662 for `recon` to 7,397 and 8,106, from 10,853 and 12,218 for the other
+nineteen to 11,170 and 12,535, and from 19,797 and 22,372 for the 45 tools to 20,629 and 23,204; the Tier-1 tools did not move.
+The earlier figures were reproduced to the token with the same tokenizer before the new ones were measured. By change, on the 31
+tools: the enum-value explanations are +310 (`offload_generate_svg` +98, `offload_edit_image_generative` +87, `agent_delegate`
++82 for the `ran_on` sentence, `offload_compose_video` +23, `agent_run` +20; the classify-image domains and the zero-shot spaces
+add 71 more on the 45-tool surface), and the six other result-reading sentences are +451 (`agent_delegate` +121, `offload_ask`
++116, `offload_transcribe` +109, `offload_research` +105).
+
+Before the review of every sentence (an earlier measurement of this change) the compact columns were 15,901 and 18,007 for
 the 31 tools, 5,974 and 6,682 for `recon`, 9,967 and 11,332 for the other nineteen, 740 and 847 for the Tier-1 tools, and 17,797
 and 20,371 for the 45 tools; those figures were reproduced to the token with the same tokenizer before the new ones were
 measured. The 31-tool compact list grew by 1,866 tokens in the template rendering (10.4%, from 18,007 to 19,873), in three
@@ -319,21 +356,17 @@ By tool the compact growth is `agent_run` +381, `agent_delegate` +267, `offload_
 `offload_edit_image_generative` +146, `offload_inpaint_image` +92, `offload_status` +90 (44 for the `section:"brief"` sentence the review kept, 46 for the three clauses), `offload_research` +72,
 `offload_summarize` +69, and 2 to 67 for the other seventeen that moved; the Tier-1 tools grew by 146 because `offload_summarize`
 and `offload_extract` keep their first-door sentence. On the variant whose three accelerators are fleet accelerators (45 tools, 13
-of them forwarders carrying the note) the lists measure 35,081 full and 23,080 compact in the template rendering (21,079 before).
+of them forwarders carrying the note) the lists measure 35,081 full and 23,911 compact in the template rendering (23,080 before this round, 21,079 before the review of every sentence).
 
 Against the 0.137.0 figures, which this document recorded before this build (template rendering; 35 tools: 20,868; the
 `recon` twelve: 8,265; the four Tier-1 tools: 847): the full list has grown since, and the comparison is not like for like
 except where the tools are the same.
 
-- **The same twelve tools (the `recon` set), the comparison to lead with:** 8,265 at 0.137.0, 11,867 now in full, 7,662
-  compact, still below the old full figure.
+- **The same twelve tools (the `recon` set), the comparison to lead with:** 8,265 at 0.137.0, 11,867 now in full, 8,106 compact, still below the old full figure.
 - **All tools, not the same set:** 0.137.0 counted 35 (the set is per-box), this build's delegation-enabled box
-  advertises 31. Per tool, that is 596 tokens (20,868 / 35) then; now 1,012 in full (31,381 / 31) and 641 compact
-  (19,873 / 31). On the largest surface, 45 tools, compact is 22,372 (497 per tool), which is above the 20,868 of the
-  old 35-tool full list (the previous measurement of this change was below it, at 20,371). The all-tools statement is
+  advertises 31. Per tool, that is 596 tokens (20,868 / 35) then; now 1,012 in full (31,381 / 31) and 666 compact (20,634 / 31). On the largest surface, 45 tools, compact is 23,204 (516 per tool), which is above the 20,868 of the old 35-tool full list (an earlier measurement of this change was below it, at 20,371). The all-tools statement is
   therefore a statement about these two box shapes, and only the twelve-tool row is the same set.
-- **Per tool, where 0.137.0 recorded one** (then in full; now in full and compact): `agent_delegate` 2,903; 4,173 and
-  2,951. `offload_status` 660; 1,074 and 328. `offload_compose_video` 991; 1,153 and 863. The four Tier-1 tools 847; 1,232
+- **Per tool, where 0.137.0 recorded one** (then in full; now in full and compact): `agent_delegate` 2,903; 4,173 and 3,154. `offload_status` 660; 1,074 and 328. `offload_compose_video` 991; 1,153 and 886. The four Tier-1 tools 847; 1,232
   and 993. The other tools of the 0.137.0 list have no recorded per-tool figure, so they cannot be compared one by one.
 
 The 19,674 and 8,011 of the safety-word rule (31 tools and `recon`) are long superseded: the keep-list drops the
@@ -360,7 +393,7 @@ the JSON column, and render its tools through the template for the other.
 
 - opencode inlines every enabled MCP tool schema per call; the 35 harness tools of 0.137.0 are
   20,868 tokens. `primaryTools: "tier1"` and `offloadTools: "recon"` are the default mitigations
-  (the offload subagent's measured fixed prompt was 24,680 tokens before the recon split). On 0.186.0 the full list of a 31-tool box is 31,381 tokens; `tools_schema_profile: "compact"` on the harness config brings it to 19,873 (see [Tool schema size](#tool-schema-size)).
+  (the offload subagent's measured fixed prompt was 24,680 tokens before the recon split). On 0.186.0 the full list of a 31-tool box is 31,381 tokens; `tools_schema_profile: "compact"` on the harness config brings it to 20,634 (see [Tool schema size](#tool-schema-size)).
 - Prefix-cache reuse on a vLLM hybrid-attention seat is block-granular: cached prompt tokens come
   in whole blocks of the seat's block size (1,568 tokens on the Qwen3.8 fp8 seat; measured
   10,976 = 7 blocks, 12,544 = 8, 25,088 = 16), so every request recomputes its trailing partial
