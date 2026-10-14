@@ -183,6 +183,16 @@ function Get-MoEFailureAdvice {
     "If the failure is a device-lost or driver crash, update the GPU driver first.")
 }
 
+# Test-YamlServesModel / Select-ServedTiers: seam only (0186 w4 fix round), the bodies arrive with the fix.
+function Test-YamlServesModel {
+  param([string]$YamlText, [string]$Id)
+  return $true
+}
+function Select-ServedTiers {
+  param($Tiers, [string]$ConfigPath)
+  return $Tiers
+}
+
 # Read the served chat-tier --ctx-size from the ACTIVE rendered yaml (ground truth: what actually
 # launches). The chat tiers share the 'common' macro whose first '--ctx-size N' is the served window;
 # the embedding model has its own smaller '--ctx-size 2048' further down, so we take the FIRST match.
@@ -782,7 +792,8 @@ try {
   LogOk "gpu = $gpuLabel | driver = $drvLabel (gpu from llama-server --list-devices device 0)"
 
   # --- Which chat tiers are actually installed (file existence) ------------------------------
-  $installedTiers = @($TIER_SPEC | Where-Object { Test-Path (Join-Path $modelDir $_.file) })
+  $tiersOnDisk = @($TIER_SPEC | Where-Object { Test-Path (Join-Path $modelDir $_.file) })
+  $installedTiers = @(Select-ServedTiers -Tiers $tiersOnDisk -ConfigPath $yamlPath)
   if ($installedTiers.Count -eq 0) { throw "no chat-tier gguf found in $modelDir - nothing to exercise" }
   LogOk ("installed chat tiers: {0}" -f (($installedTiers | ForEach-Object { $_.id }) -join ', '))
 
