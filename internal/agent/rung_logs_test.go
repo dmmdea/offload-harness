@@ -1549,3 +1549,63 @@ func TestLogCollapseMarkersIgnoreAQuotedHeaderThatCannotBeTrue(t *testing.T) {
 		})
 	}
 }
+
+// TestLogsMarkerSizeNamesTheSizeASkeletonRecorded pins the skeleton branch of
+// logsMarkerSize. Five of the six call sites check skeletonOriginalSize before
+// or instead of it, so only the reactive last resort's pass over the NEWEST
+// body, when that body is already a skeleton, reaches it. Without the branch
+// that marker would name the skeleton's own length, not what was lost.
+func TestLogsMarkerSizeNamesTheSizeASkeletonRecorded(t *testing.T) {
+	body := lcSkeletonableLog()
+	folded, ok := logCollapse(body)
+	if !ok {
+		t.Fatal("control: the body must fold")
+	}
+	// A skeleton of a folded body records the size before the fold; a skeleton
+	// of a raw body records the raw size.
+	for name, c := range map[string]struct {
+		skeletonOf string
+		recorded   int
+	}{
+		"a folded body": {folded, len(body)},
+		"a raw body":    {body, len(body)},
+	} {
+		skel, ok := skeletonizeAs(c.skeletonOf, c.recorded)
+		if !ok {
+			t.Fatalf("%s: control: must prune to a skeleton", name)
+		}
+		if _, isHeader := logsOriginalSize(skel); isHeader {
+			t.Fatalf("%s: control: a skeleton is not a collapse header, so only the skeleton branch can answer", name)
+		}
+		if n, ok := skeletonOriginalSize(skel); !ok || n != c.recorded {
+			t.Fatalf("%s: control: the skeleton should record %d, got (%d, %v)", name, c.recorded, n, ok)
+		}
+		if len(skel) >= c.recorded {
+			t.Fatalf("%s: control: the skeleton (%d) must be shorter than the size it records (%d)", name, len(skel), c.recorded)
+		}
+		if got := logsMarkerSize(skel, true); got != c.recorded {
+			t.Errorf("%s, rung on: the marker should name the recorded %d, got %d", name, c.recorded, got)
+		}
+		if got := logsMarkerSize(skel, false); got != len(skel) {
+			t.Errorf("%s, rung off: the marker names the body in front of it (%d), got %d", name, len(skel), got)
+		}
+	}
+
+	// The one live site: the newest tool body is already a skeleton and the
+	// reactive last resort cannot trim it into the budget. Rung on, the marker
+	// names the size the skeleton recorded; rung off, the length of the skeleton.
+	skel, ok := skeletonizeAs(folded, len(body))
+	if !ok {
+		t.Fatal("control: the folded body must prune to a skeleton")
+	}
+	older := lrServerLog(150)
+	msgs := lrTranscript(older, skel)
+	on := emergencyShrinkWith(msgs, 1, 3, compactOpts{LogCollapse: true})
+	if want := elisionMarker(len(body)); on[6].Content != want {
+		t.Errorf("rung on, newest body is a skeleton: want %q, got %.120q", want, on[6].Content)
+	}
+	off := emergencyShrinkWith(msgs, 1, 3, compactOpts{})
+	if want := elisionMarker(len(skel)); off[6].Content != want {
+		t.Errorf("rung off, newest body is a skeleton: want %q, got %.120q", want, off[6].Content)
+	}
+}
