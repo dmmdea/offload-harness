@@ -565,21 +565,24 @@ func (m *Manager) YieldViewOf(info Info) YieldView {
 	}
 	now := m.now()
 	v.Req, v.Asked = m.YieldOf(info.Epoch)
+	overdue := info.Expired || (!info.ExpiresAt.IsZero() && now.After(info.ExpiresAt))
 	if v.Asked {
 		limit := yieldUnansweredDisplay
 		if v.Req.GraceMs > 0 {
 			limit = time.Duration(v.Req.GraceMs) * time.Millisecond
 		}
-		v.Unanswered = now.Sub(time.UnixMilli(v.Req.AskedMs)) > limit
+		// The ask is once per epoch and its sidecar stays until the lease ends, so a lease can be renewed after
+		// it (its owner came back, its progress resumed): that lease is no longer overdue, and an ask that was
+		// answered by the job going on is not one nobody answered.
+		v.Unanswered = overdue && now.Sub(time.UnixMilli(v.Req.AskedMs)) > limit
 	}
-	overdue := info.Expired || (!info.ExpiresAt.IsZero() && now.After(info.ExpiresAt))
 	v.Sentence = yieldSentence(v, info, overdue, now)
 	return v
 }
 
 func yieldSentence(v YieldView, info Info, overdue bool, now time.Time) string {
 	if v.Asked {
-		return askedSentence(v, info, now)
+		return askedSentence(v, info, overdue, now)
 	}
 	if !overdue {
 		return ""
@@ -593,13 +596,16 @@ func yieldSentence(v YieldView, info Info, overdue bool, now time.Time) string {
 		return s
 	case OnOverdueRequest:
 		if !v.Capable {
-			return "its holder build predates the yield request, so no request can be made of it: ask whoever owns it"
+			// Two kinds of holder carry no stamp and the words are true of both: a build from before the
+			// request, and a holder of this build that is not a gpu reserve / gpu hold process (the media
+			// pipeline acquires in process and never ticks the request).
+			return "its holder does not run the yield request (a build from before it, or an in-process holder such as the media pipeline's), so no request can be made of it: ask whoever owns it"
 		}
 	}
 	return ""
 }
 
-func askedSentence(v YieldView, info Info, now time.Time) string {
+func askedSentence(v YieldView, info Info, overdue bool, now time.Time) string {
 	req := v.Req
 	hhmm := func(ms int64) string { return time.UnixMilli(ms).Local().Format("15:04") }
 	s := fmt.Sprintf("its holder was asked to yield at %s (%d waiter(s) queued)", hhmm(req.AskedMs), req.QueuedCount())
@@ -618,6 +624,11 @@ func askedSentence(v YieldView, info Info, now time.Time) string {
 		s += " but recorded no --on-yield, so it has nothing to run; the job can watch " + file
 	}
 	age := roundDur(now.Sub(time.UnixMilli(req.AskedMs)))
+	if !overdue {
+		// Asked while it was overdue, and the holder's term check has renewed it since: the job went on, and
+		// there is nothing left to ask of anyone.
+		return s + "; the lease has since been renewed and is not overdue now"
+	}
 	if !v.Unanswered {
 		return s + fmt.Sprintf("; it still holds the card %s later", age)
 	}
