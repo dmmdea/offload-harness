@@ -207,8 +207,8 @@ func TestContextBenchRefusesFlagValuesThatWouldBeSilentlyDefaulted(t *testing.T)
 		out := filepath.Join(t.TempDir(), "r.json")
 		err := runCompactionContextBench(contextBenchArgs(t, "--family", "kv_store", "--level", "R130", c.flag, c.value,
 			"--endpoint", "http://fake.invalid", "--model", "seat-x", "--out", out))
-		if err == nil || !strings.Contains(err.Error(), c.flag) {
-			t.Errorf("%s %s: want a refusal naming the flag, got %v", c.flag, c.value, err)
+		if err == nil || !strings.Contains(err.Error(), c.flag+" must") {
+			t.Errorf("%s %s: want a refusal that says what the flag must be, got %v", c.flag, c.value, err)
 		}
 		if _, serr := os.Stat(out); serr == nil {
 			t.Errorf("%s %s: a refused run writes no report", c.flag, c.value)
