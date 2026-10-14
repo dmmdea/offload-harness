@@ -61,12 +61,19 @@ func estimateTokens(msgs []Msg) int {
 //     2a. (opts.GCF only, LOSSLESS) re-encode OLDER tool bodies that are
 //     eligible JSON arrays into GCF columnar form (internal/gcf) — states the
 //     repeated keys once, loses nothing; always tried before any lossy rung.
-//     2a'. (opts.LogCollapse only, lossy but gentler than 2b) fold each run of
+//     2a-i. (opts.LogCollapse only, lossy but gentler than 2b) fold each run of
 //     near-identical lines in the output of an OLDER build or test command
 //     into its first line, a count and its last line (see rung_logs.go),
 //     keeping every signal, diagnostic and summary line, oldest-first and
 //     stopping at the first fit. A search listing, a file read and a linter's
 //     output are not touched (the producer gate reads the call).
+//     2a-ii. (opts.SearchResults only, default off) THIN older search listings to the
+//     lines that matter for the objective (BM25, a per-file cap, an error boost, a
+//     counted footer; see rung_search.go), before 2b so the skeleton never sees one.
+//     The two rungs never claim the same body (each reads the call that produced it:
+//     a build or test invocation is 2a-i, a search is 2a-ii); 2a-i runs first because it
+//     keeps every distinct line and 2a-ii drops most of a listing, so with both on the
+//     gentler edit gets the first chance to fit the budget.
 //     2b. (opts.Skeleton only) SKELETONIZE the bodies of OLDER tool-role messages
 //     oldest-first until under budget: head/tail windows + buried signal lines
 //     kept, the rest elided to counted run markers (see skeleton.go). Strictly
@@ -107,8 +114,12 @@ type compactOpts struct {
 	// LogCollapse (default off) folds runs of near-identical lines in OLDER build
 	// and test output into the first line, a count and the last line, keeping
 	// every error/warning/diagnostic/summary line (rung_logs.go). It runs after
-	// the lossless GCF rung and before skeleton.
+	// the lossless GCF rung and before the search rung and skeleton.
 	LogCollapse bool
+	// SearchResults (default OFF) thins older search listings (rung_search.go): BM25
+	// against the objective, a per-file cap, an error boost, a counted footer. It
+	// runs after the log rung and before skeleton.
+	SearchResults bool
 	// Pinned marks tool_call_ids whose results the model DEMONSTRABLY re-requested
 	// (the circuit breaker refused an exact-repeat call for them) — the H8 ramp:
 	// content the model re-reads stops being lossily compacted. A pinned body is
@@ -256,12 +267,27 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 		}
 	}
 
-	// Step 2a' (flag-gated, lossy but gentler than skeleton): fold runs of
+	// Step 2a-i (flag-gated, lossy but gentler than skeleton): fold runs of
 	// near-identical lines in OLDER build and test output, oldest-first, stopping
 	// at the first fit (rung_logs.go; the producer gate reads the call). Same [protectedEnd, recentStart) window and pin
 	// check as every rung here, so the preamble, the recent turns and pairing stay.
+	// Before the search rung: it keeps every distinct line, the search rung drops most
+	// of a listing, so the gentler edit gets the first chance to fit the budget.
 	if opts.LogCollapse {
 		logsRung(out, protectedEnd, recentStart, budget, pinned)
+		if estimateTokens(out) <= budget {
+			return out, fitUnknown
+		}
+	}
+
+	// Step 2a-ii (flag-gated, default OFF): thin older search listings by relevance
+	// to the objective (rung_search.go). Before the generic skeleton on purpose: a
+	// skeletonized listing is no longer one, and this rung would never see it.
+	if opts.SearchResults {
+		searchRung(out, protectedEnd, recentStart, budget, pinned)
+		if estimateTokens(out) <= budget {
+			return out, fitUnknown
+		}
 	}
 
 	// Step 2b (flag-gated): skeletonize OLDER tool bodies oldest-first — the

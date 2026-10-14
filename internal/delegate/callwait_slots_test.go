@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -212,18 +213,90 @@ func TestAWaitHoldingARunSlotGivesItUpAtItsTTLAndKeepsWaiting(t *testing.T) {
 	heldSlotWait(t, contracts, nil)
 }
 
-// TestASubtaskIsNotStartedInsideTheReserve: five subtasks on a local seat that takes 1 s each, a 2 s call
-// and a 1.2 s reserve. The first four start at once (2 s left); the fifth gets a slot with about 1 s left,
-// no more than a placed job needs, and is not started: a capacity defer that says so, with the seat asked
-// four times.
+// reserveGateSlack is how far past the start of the reserve the start-order tests open their barrier: far enough that a slot
+// freed by it is looked at with the call inside the reserve, and so far short of the deadline (the reserve less this) that a
+// runner has to stall for nearly the whole reserve before the deadline, and not the reserve, answers.
+const reserveGateSlack = 50 * time.Millisecond
+
+// reserveCall is the options of a call of the given window with its deadline state built up front, the way RunBatched builds
+// it, so a test reads the reserve's own numbers (the span the reserve is taken out of, the instant it begins) instead of
+// assuming them from a clock of its own. The test is skipped when the state was built with no more time than the reserve (the
+// test goroutine itself stalled for the whole difference between the window and the reserve between two statements): the
+// reserve is not taken out of such a call (callDeadline.noRoom), so there is no rule to pin.
+func reserveCall(t *testing.T, window time.Duration, subtasks int) (*RunOptions, *callDeadline) {
+	t.Helper()
+	opts := deadlineIn(window)
+	dl := newCallDeadline(t.Context(), opts, subtasks)
+	if dl.span <= callWaitReserve {
+		t.Skipf("the call state was built with %s of a %s window left, no more than the %s reserve: the runner stalled before the call began, and the reserve is not taken out of a call that short", dl.span.Round(time.Millisecond), window, callWaitReserve)
+	}
+	opts.call = dl
+	return opts, dl
+}
+
+// openAtReserve returns a barrier that opens reserveGateSlack after the call's reserve begins, at the instant the call's own
+// state computes (callDeadline.waitHorizon). A seat held at it frees its run slot with the call inside the reserve, which
+// is the condition the rule is about, whatever the runner's speed was before: the seat's own running time is no part of it.
+func openAtReserve(t *testing.T, dl *callDeadline) <-chan struct{} {
+	t.Helper()
+	horizon, _ := dl.waitHorizon()
+	gate := make(chan struct{})
+	var once sync.Once
+	open := func() { once.Do(func() { close(gate) }) }
+	timer := time.AfterFunc(time.Until(horizon.Add(reserveGateSlack)), open)
+	t.Cleanup(func() { timer.Stop(); open() })
+	return gate
+}
+
+var leftInReason = regexp.MustCompile(`the call had (\S+) left`)
+
+// checkRefused reads the results of subtasks that were never started against the launch loop's own decision, which each
+// carries: the time it found the call had left (rounded to the second) when it refused. Every refusal must say the call had
+// no more than the reserve, so a loop that refused with the reserve not yet begun fails here on any runner. It reports whether
+// the call's deadline was what ended one of them instead: that, on a call whose slot was freed inside the reserve with the
+// rest of the reserve to spare, is a runner that stalled for nearly all of the reserve.
+func checkRefused(t *testing.T, refused []PlacedResult) (cut bool) {
+	t.Helper()
+	for i, pr := range refused {
+		if pr.deadlineCut {
+			cut = true
+			continue
+		}
+		m := leftInReason.FindStringSubmatch(pr.PlacementReason)
+		var left time.Duration
+		var err error
+		if m != nil {
+			left, err = time.ParseDuration(m[1])
+		}
+		if m == nil || err != nil || left > callWaitReserve+500*time.Millisecond {
+			t.Fatalf("refused result %d reason %q, want a refusal that says the call had no more than the %s reserve left: it was refused with the reserve not yet begun", i, pr.PlacementReason, callWaitReserve)
+		}
+	}
+	return cut
+}
+
+// TestASubtaskIsNotStartedInsideTheReserve: five subtasks on a local seat, a 4 s call and a 2 s reserve. The first four
+// start at once, well before the reserve begins 2 s in, and hold their run slots until the reserve has begun; the fifth gets a
+// slot with the call inside the reserve, no more than a placed job needs, and is not started: a capacity defer that says so,
+// with the seat asked four times.
+//
+// The seat holds at a barrier (openAtReserve) instead of running for a fixed second, so the instant its slot frees is set by
+// the call's own reserve and not by how fast the runner was: the slot always frees inside the reserve. The first wave's starts
+// are the one thing left that depends on the clock, and they have 2 s of margin (the call's first 2 s) where the version with
+// a 0.8 s window had to start them inside it. A runner that stalls past even that is told apart by the loop's own decision:
+// a refusal must say the call had no more than the reserve left (checkRefused), and a start count short of four with such a
+// refusal, or a fifth subtask cut by the call's deadline, skips the test as a stall and never fails it. A fifth subtask that
+// is started fails it on any runner, because it can only get its slot after the barrier, inside the reserve.
 func TestASubtaskIsNotStartedInsideTheReserve(t *testing.T) {
-	withCallReserve(t, 1200*time.Millisecond)
+	withCallReserve(t, 2*time.Second)
 	cfg := testCfg(t)
+	opts, dl := reserveCall(t, 4*time.Second, runConcurrency+1)
+	hold := openAtReserve(t, dl)
 	var started atomic.Int64
 	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		started.Add(1)
 		select {
-		case <-time.After(time.Second):
+		case <-hold:
 		case <-ctx.Done():
 		}
 		return localOK(), nil
@@ -232,10 +305,14 @@ func TestASubtaskIsNotStartedInsideTheReserve(t *testing.T) {
 	for i := range contracts {
 		contracts[i] = core.AgentContract{Goal: "answer the question"}
 	}
-	results, sum, _ := runWithin(t, 10*time.Second, cfg, local, contracts, "local", nil, deadlineIn(2*time.Second), nil)
+	results, sum, _ := runWithin(t, 30*time.Second, cfg, local, contracts, "local", nil, opts, nil)
 
-	if got := started.Load(); got != int64(runConcurrency) {
-		t.Fatalf("the seat was started %d times, want %d: the fifth subtask got its slot inside the reserve and must not begin", got, runConcurrency)
+	got := int(started.Load())
+	if got > runConcurrency {
+		t.Fatalf("the seat was started %d times, want at most %d: the fifth subtask got its slot inside the reserve and must not begin", got, runConcurrency)
+	}
+	if cut := checkRefused(t, results[got:]); cut || got < runConcurrency {
+		t.Skipf("the seat was started %d of %d times and the call's deadline cut a refused subtask = %v: the runner stalled across the start of the reserve, so there is no start order to judge", got, runConcurrency, cut)
 	}
 	last := results[runConcurrency]
 	if sum.Deferred != 1 || sum.Succeeded != runConcurrency {
@@ -244,7 +321,7 @@ func TestASubtaskIsNotStartedInsideTheReserve(t *testing.T) {
 	if !last.Result.Deferred || last.Result.DeferClass != core.DeferClassCapacity || !last.Unplaced || last.deadlineCut {
 		t.Fatalf("last result %+v (cut %v), want an unplaced capacity defer: the deadline had not passed, so it is not the call-deadline cut", last.Result, last.deadlineCut)
 	}
-	for _, want := range []string{"not started: the call's deadline left no room", "no more than the 1s a placed job needs to run in"} {
+	for _, want := range []string{"not started: the call's deadline left no room", "no more than the 2s a placed job needs to run in"} {
 		if !strings.Contains(last.PlacementReason, want) || !strings.Contains(last.Result.Reason, want) {
 			t.Errorf("placement reason %q / result reason %q, want both to contain %q", last.PlacementReason, last.Result.Reason, want)
 		}
@@ -255,40 +332,60 @@ func TestASubtaskIsNotStartedInsideTheReserve(t *testing.T) {
 }
 
 // TestALaterChunkIsNotStartedInsideTheReserve: the same rule across the chunks of a batched call (a list
-// longer than one batch of 16, ADR 0076). The first chunk runs in two waves of 2 s and uses the call's
-// time, and the subtasks of its third wave are not started; the second chunk finds about 2 s left of a
-// 3 s reserve and starts nothing, so its subtasks end at once as the same defer instead of beginning in
-// the last seconds. The scale is wide on purpose: the second wave must start with more than the reserve
-// left (it does, with a second to spare) and the call must not reach its deadline first (it has two), so
-// a loaded runner has to stall for a full second to move either.
+// longer than one batch of 16, ADR 0076), on a 6 s call with a 3 s reserve. The first chunk's first wave of four starts at
+// once and is let go as soon as the fourth has started; the second wave starts with the reserve not yet begun and holds its
+// slots until it has (openAtReserve). The subtasks of the third wave are not started, and the second chunk finds the call
+// inside the reserve and starts nothing, so its subtasks end at once as the same defer instead of beginning in the last
+// seconds.
+//
+// Neither wave runs for a fixed time: the first is released by the fourth start, an event, and the second by the call's own
+// reserve, so how long the runner took to run a seat moves neither the second wave's start (it has 3 s of margin, not the
+// 1 s the two 2 s waves left) nor the third wave's refusal. A start count short of eight with refusals that say the call had
+// no more than the reserve left, or a refused subtask cut by the call's deadline, is a runner that stalled across the start of
+// the reserve and skips the test (see TestASubtaskIsNotStartedInsideTheReserve).
 func TestALaterChunkIsNotStartedInsideTheReserve(t *testing.T) {
 	withCallReserve(t, 3*time.Second)
 	cfg := testCfg(t)
-	var started atomic.Int64
-	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
-		started.Add(1)
-		select {
-		case <-time.After(2 * time.Second):
-		case <-ctx.Done():
-		}
-		return localOK(), nil
-	}
 	contracts := make([]core.AgentContract, MaxBatchSubtasks+2)
 	for i := range contracts {
 		contracts[i] = core.AgentContract{Goal: "answer the question"}
 	}
-	results, sum, err := RunBatched(t.Context(), cfg, local, contracts, "local", nil, deadlineIn(6*time.Second))
+	opts, dl := reserveCall(t, 6*time.Second, len(contracts))
+	secondWave := openAtReserve(t, dl)
+	firstWave := make(chan struct{})
+	var started atomic.Int64
+	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
+		n := started.Add(1)
+		if n == runConcurrency {
+			close(firstWave)
+		}
+		hold := secondWave
+		if n <= runConcurrency {
+			hold = firstWave
+		}
+		select {
+		case <-hold:
+		case <-secondWave:
+		case <-ctx.Done():
+		}
+		return localOK(), nil
+	}
+	results, sum, err := RunBatched(t.Context(), cfg, local, contracts, "local", nil, opts)
 	if err != nil {
 		t.Fatalf("RunBatched: %v", err)
 	}
 	// Two waves of runConcurrency (4) started: route=local has no deal to size the call from.
-	if got := started.Load(); got != int64(2*runConcurrency) {
-		t.Fatalf("the seat was started %d times, want %d (two waves of the first chunk): the third wave, and the second chunk, began inside the reserve", got, 2*runConcurrency)
+	got, want := int(started.Load()), 2*runConcurrency
+	if got > want {
+		t.Fatalf("the seat was started %d times, want %d (two waves of the first chunk): the third wave, or the second chunk, began inside the reserve", got, want)
 	}
-	if sum.Batches != 2 || sum.Deferred != len(contracts)-2*runConcurrency {
-		t.Fatalf("summary %+v, want two chunks and the %d subtasks past the second wave deferred", sum, len(contracts)-2*runConcurrency)
+	if cut := checkRefused(t, results[got:]); cut || got < want {
+		t.Skipf("the seat was started %d of %d times and the call's deadline cut a refused subtask = %v: the runner stalled across the start of the reserve, so there is no start order to judge", got, want, cut)
 	}
-	for _, pr := range results[2*runConcurrency:] {
+	if sum.Batches != 2 || sum.Deferred != len(contracts)-want {
+		t.Fatalf("summary %+v, want two chunks and the %d subtasks past the second wave deferred", sum, len(contracts)-want)
+	}
+	for _, pr := range results[want:] {
 		if !pr.Result.Deferred || pr.Result.DeferClass != core.DeferClassCapacity || !strings.Contains(pr.Result.Reason, "the call's deadline left no room") {
 			t.Errorf("later result %+v, want the no-room capacity defer", pr.Result)
 		}
