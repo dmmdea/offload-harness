@@ -550,3 +550,20 @@ func TestLedgerFailuresFalseIsTheSavingsSummary(t *testing.T) {
 		}
 	}
 }
+
+// The report says the window it was asked for: since_days is the --since value (0 = the whole ledger), always
+// present, so a saved report cannot be mistaken for a different window than the one it covers.
+func TestFailureReportCarriesItsWindow(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		want float64
+	}{{nil, 0}, {[]string{"--since", "3650"}, 3650}, {[]string{"--since", "0"}, 0}} {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(runFailures(t, c.args...)), &raw); err != nil {
+			t.Fatal(err)
+		}
+		if got, present := raw["since_days"]; !present || got != c.want {
+			t.Errorf("ledger --failures %v: since_days = %v (present %v), want %v", c.args, got, present, c.want)
+		}
+	}
+}
