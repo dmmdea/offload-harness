@@ -25,5 +25,7 @@
   `TestAnImageCallsLeaseWindowIsItsOwnTimeout` are green guards on both lease paths (video 5,400 s gives a 5,400 s
   window, image 100 s gives a 100 s window, neither the 3,600 s fallback). Mutations, each restored byte for byte: image
   TTL to zero, video TTL to zero, a one-hour clamp in `acquireMediaLease`, the card-scoped TTL to zero and the whole-node
-  TTL to zero each turn exactly the matching subtests red; the row mutations (a code default replaced by the old figure,
-  the queue-wait sentence removed) turn the doc pins red.
+  TTL to zero each turn exactly the matching subtests red. On the row: each of the three code defaults replaced by a
+  deployed figure, the 3,600 s figure changed, each of the four retired claims put back, the sentences on the call's own
+  timeout, the queue wait, the fallback and `gpu reserve` removed, and the doctor sentence reverted to "the deployed"
+  each turn the matching doc pin red.
