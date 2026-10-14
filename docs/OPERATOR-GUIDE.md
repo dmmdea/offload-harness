@@ -1782,14 +1782,16 @@ prints one `lan ip:     WARN` row for each endpoint the harness dials whose host
 private-range literal (RFC 1918 or an IPv6 unique-local address), a link-local one, or a tailnet CGNAT one (the row then says to use
 the MagicDNS name). Loopback is fine, every name is fine, and a public literal is left to the tailnet guard. The fields read are
 `endpoint`, `seat_endpoints`, `cascade_remote_lanes`, `delegate_remotes`, `fleet_queue_holder`, the explicit entries of
-`pair_workloads_relay`, and the `host:port` of every enabled valkey `kv_cache_server` binding (a disabled or storeless binding and
-an `fs_native` path are not dialed; `nim_endpoint` and `nim_bases` are not read, because a self-hosted NIM on the LAN is what that
-allowlist is for). The row names the field, with its list index or map key, and never prints the address. It is configuration only,
+`pair_workloads_relay`. `nim_endpoint` and `nim_bases` are not read, because a self-hosted NIM on the LAN is what that allowlist is
+for, and neither is a `kv_cache_server` address: a literal on the direct LAN or the tailnet is a valid store address and the
+preferred one (bulk KV over MagicDNS measured several times slower, and the `offload_status` reachability readback of a store dials
+literals only, so a name switches it off), which a row asking for a name would undo. A store that moves is the operator's call to
+rename. The row names the field, with its list index or map key, and never prints the address. It is configuration only,
 so a serving layer that is down does not hide it, a config with nothing to warn about prints nothing, and it never changes
 doctor's exit code. A literal outside loopback and the tailnet range was already refused when the config loads in
 `seat_endpoints`, `cascade_remote_lanes` and `fleet_queue_holder`, and is a `config findings` FAIL in `delegate_remotes`; the
 row is what says why, and it is the only word on a tailnet literal and on the fields that load clean (`endpoint`,
-`pair_workloads_relay`, a cache-server address). Fix the warning by writing the node's dotless MagicDNS name (or a name under a
+`pair_workloads_relay`). Fix the warning by writing the node's dotless MagicDNS name (or a name under a
 zone listed in `tailnet_suffix` / `tailnet_suffixes`) in the field.
 
 **A pin needs a reason (ADR 0078).** `route: local` and `route: remote` pin a call to this box's seat or to a fleet node, and a

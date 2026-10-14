@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"net"
 	"net/netip"
 	"net/url"
 	"sort"
@@ -35,17 +34,20 @@ import (
 // config with nothing to warn about prints nothing. What it reads is the config alone, so a serving layer that
 // is down cannot hide it.
 //
-// Fields read: endpoint, seat_endpoints, cascade_remote_lanes, delegate_remotes, fleet_queue_holder, the
-// explicit entries of pair_workloads_relay, and the host:port of every ENABLED valkey cache-server binding.
-// nim_endpoint and nim_bases are left out on purpose: a self-hosted NIM on the LAN is what that allowlist is
-// for. Values that are not usable URLs are left to the config rows that already say so.
+// Fields read: endpoint, seat_endpoints, cascade_remote_lanes, delegate_remotes, fleet_queue_holder and the
+// explicit entries of pair_workloads_relay. Two kinds of value are left out on purpose. nim_endpoint and
+// nim_bases: a self-hosted NIM on the LAN is what that allowlist is for. A kv_cache_server address: the config
+// documents a literal on the direct LAN or the tailnet as a valid store address and prefers it to a name (bulk
+// KV over MagicDNS measured several times slower, and the status readback dials literals only, so a name
+// switches it off), which makes a row that asks for a name wrong for a store, with no way to silence it. Values
+// that are not usable URLs are left to the config rows that already say so.
 func writeLANIPEndpointsSection(w io.Writer, cfg config.Config) {
 	for _, e := range lanIPEndpoints(cfg) {
 		kind := classifyLANIP(e.host)
 		if kind == lanIPNone {
 			continue
 		}
-		fmt.Fprintf(w, "lan ip:     WARN  %s names its host by %s%s\n", e.field, kind.phrase(), kind.advice(e.store))
+		fmt.Fprintf(w, "lan ip:     WARN  %s names its host by %s%s\n", e.field, kind.phrase(), kind.advice())
 	}
 }
 
@@ -67,7 +69,8 @@ var (
 )
 
 // classifyLANIP judges one host. Anything that is not an IP literal is a name, and a name is the right shape.
-// An IPv4-mapped IPv6 literal is judged as the IPv4 address it carries, a zone suffix is ignored, and the
+// An IPv4-mapped IPv6 literal is judged as the IPv4 address it carries (the unmap is what lets the tailnet
+// prefix test see it: a prefix never matches an address in the 4-in-6 form), a zone suffix is ignored, and the
 // tailnet ranges are told apart from the private ranges before those are tested: the tailnet's IPv6 block sits
 // inside the unique-local block, and both get their own advice.
 func classifyLANIP(host string) lanIPKind {
@@ -105,28 +108,21 @@ func (k lanIPKind) phrase() string {
 	return ""
 }
 
-// advice is what to do about it, with the reason. A cache-server binding gets one more clause: the bulk KV path
-// is the one place a direct LAN address can be a deliberate throughput choice, and the row only warns.
-func (k lanIPKind) advice(store bool) string {
-	var s string
+// advice is what to do about it, with the reason.
+func (k lanIPKind) advice() string {
 	switch k {
 	case lanIPTailnet:
-		s = ": use the MagicDNS name, because a name follows the node and a literal does not"
+		return ": use the MagicDNS name, because a name follows the node and a literal does not"
 	default:
-		s = ": cross-machine reach uses a tailnet name, because a literal breaks when the box moves or when its firewall is scoped to the tailnet"
+		return ": cross-machine reach uses a tailnet name, because a literal breaks when the box moves or when its firewall is scoped to the tailnet"
 	}
-	if store {
-		s += "; where the direct LAN path is a deliberate throughput choice for the store, the binding can stay as it is"
-	}
-	return s
 }
 
-// lanIPEndpoint is one configured value that carries a host the harness dials: the field to name, the host
-// read out of it, and whether it is a cache-server store (whose advice differs).
+// lanIPEndpoint is one configured value that carries a host the harness dials: the field to name and the host
+// read out of it.
 type lanIPEndpoint struct {
 	field string
 	host  string
-	store bool
 }
 
 // lanIPEndpoints lists the dialed hosts in a fixed order, so doctor output can be diffed: the config's own
@@ -155,22 +151,6 @@ func lanIPEndpoints(cfg config.Config) []lanIPEndpoint {
 			continue // the relay's two words, not a base
 		}
 		base(fmt.Sprintf("pair_workloads_relay[%d]", i), raw)
-	}
-	for i, b := range cfg.KVCacheServers {
-		// Only a store that is dialed: an opt-out and a disabled binding are not, and an fs_native
-		// export is a mounted path with no host in it.
-		if b == nil || b.Storeless || !b.Enabled || b.StoreName() != "valkey" {
-			continue
-		}
-		host, _, err := net.SplitHostPort(strings.TrimSpace(b.Address))
-		if err != nil || host == "" {
-			continue // the config rows already refuse an address that is not host:port
-		}
-		seat := "box default"
-		if s := strings.TrimSpace(b.Seat); s != "" {
-			seat = fmt.Sprintf("seat %q", s)
-		}
-		out = append(out, lanIPEndpoint{field: fmt.Sprintf("kv_cache_server[%d].address (%s)", i, seat), host: host, store: true})
 	}
 	return out
 }

@@ -197,9 +197,10 @@ prefix whenever the engine layout, the KV dtype or the LMCache build changes.
   holds every field, `internal/config/kvcacheservers.go` the list rules) and `vllm_seats`.
 - `offload_status` → `kv_cache_server.bindings[]` + `unbound_seats`.
 - `local-offload doctor` → the "cache server" section, one line per vLLM seat.
-  An enabled valkey binding whose address is an IP literal in a private range also gets a `lan ip:` WARN row in the
-  configuration band (never a failure, and it never prints the address): a tailnet name is the rule for cross-machine
-  reach, and where the direct LAN path is a deliberate throughput choice for the store, the binding can stay as it is.
+  The `lan ip:` rows (an endpoint named by an IP literal instead of a name) do not read this block: a store address that
+  is a literal on the direct LAN or the tailnet is valid and the preferred form, and a name would put the bulk path on
+  MagicDNS and switch off the `offload_status` reachability readback, which dials literals only. Rename the address only
+  if the store box moves.
 - `local-offload install vllm-seat --config <config.json>` → renders a seat from its own binding. A `windows-wsl`
   seat (the blackwell-2x16 and blackwell-3x16 tiers) renders its `<seat id>.env` and four Windows scripts from
   `setup/templates/vllm-seat/windows-wsl/`, with `--distro`, `--lmcache-overlay` (required for an fp8 KV seat with a
