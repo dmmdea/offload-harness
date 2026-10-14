@@ -586,6 +586,38 @@ try {
   Assert ((Test-YamlHasEveryExpertFlag -Path $yamlClean) -eq $false) 'a flag named only in a comment line is not a placement'
   Assert ((Test-YamlHasEveryExpertFlag -Path $yamlSpill) -eq $false) 'the sanctioned measured partial spill (--n-cpu-moe N) is not the every-expert form'
   Assert ((Test-YamlHasEveryExpertFlag -Path (Join-Path $scratchDir 'absent.yaml')) -eq $false) 'a missing file is not a yaml carrying the flag'
+
+  # The REAL shape (0186 w4 fix round). Every serving template puts __MOE_26B__ FIRST on its own continuation line, so a
+  # yaml an older installer rendered carries the flag at the START of a line, not after `llama-server -m m.gguf` as the
+  # three fixtures above do. The detector used to need one non-blank, non-comment character before the flag, so it was
+  # blind to exactly the yamls it exists for and the Step 6 SKIP probe kept them.
+  $yamlLead  = Join-Path $scratchDir 'lead.yaml'
+  $yamlList  = Join-Path $scratchDir 'list.yaml'
+  $yamlLeadN = Join-Path $scratchDir 'leadn.yaml'
+  [System.IO.File]::WriteAllText($yamlLead,  "models:`n  m26:`n    cmd: >-`n      llama-server -m m.gguf`n      $everyExpert -ngl 999 --parallel 1 `${common}`n", (New-Object System.Text.UTF8Encoding($false)))
+  [System.IO.File]::WriteAllText($yamlList,  "models:`n  m26:`n    cmd:`n      - llama-server`n      - $everyExpert`n", (New-Object System.Text.UTF8Encoding($false)))
+  [System.IO.File]::WriteAllText($yamlLeadN, "models:`n  m26:`n    cmd: >-`n      llama-server -m m.gguf`n      --n-cpu-moe 14 -ngl 999 --parallel 1 `${common}`n", (New-Object System.Text.UTF8Encoding($false)))
+  Assert ((Test-YamlHasEveryExpertFlag -Path $yamlLead) -eq $true)   'the flag FIRST on its own continuation line (the shape every template renders) is seen'
+  Assert ((Test-YamlHasEveryExpertFlag -Path $yamlList) -eq $true)   'the flag as a list item is seen'
+  Assert ((Test-YamlHasEveryExpertFlag -Path $yamlLeadN) -eq $false) 'the sanctioned partial spill FIRST on its line is not the every-expert form'
+
+  # Built from the shipped templates, so the fixture is byte-for-byte what the old renderer wrote and not a shape this
+  # test imagines: substitute the placement token the way servingtmpl.Render does (plain replacement, everywhere).
+  $tplDir = Join-Path $setupDir 'templates'
+  $placed = 0
+  foreach ($tf in @(Get-ChildItem -LiteralPath $tplDir -Filter 'llama-swap.*.yaml' | Sort-Object Name)) {
+    $swapTpl = [System.IO.File]::ReadAllText($tf.FullName)   # NOT $tplText: that is the config.json template, used below
+    $usesToken = @($swapTpl -split "`r?`n" | Where-Object { $_ -notmatch '^\s*#' -and $_ -match '__MOE_26B__' }).Count -gt 0
+    if (-not $usesToken) { continue }
+    $placed++
+    $oldRender = Join-Path $scratchDir ("old-" + $tf.Name)
+    $newRender = Join-Path $scratchDir ("new-" + $tf.Name)
+    [System.IO.File]::WriteAllText($oldRender, $swapTpl.Replace('__MOE_26B__', "$everyExpert -ngl 999"), (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($newRender, $swapTpl.Replace('__MOE_26B__', '-ngl 99'), (New-Object System.Text.UTF8Encoding($false)))
+    Assert ((Test-YamlHasEveryExpertFlag -Path $oldRender) -eq $true)  "$($tf.Name) rendered with the every-expert placement (the 0.185.1 shape) is seen"
+    Assert ((Test-YamlHasEveryExpertFlag -Path $newRender) -eq $false) "$($tf.Name) rendered with the card-resident placement is not flagged"
+  }
+  Assert ($placed -ge 6) "the template walk found the 26B placement token in $placed templates (at least 6): a vacuous walk proves nothing"
 } finally {
   if ([System.IO.Directory]::Exists($scratchDir)) { [System.IO.Directory]::Delete($scratchDir, $true) }
 }
