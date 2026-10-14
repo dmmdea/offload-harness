@@ -81,8 +81,19 @@ func collectDescriptions(tool *mcp.Tool) []string {
 func TestCompactKeepsEveryToolAndParameter(t *testing.T) {
 	full := listTools(t, fullSurfaceCfg("full"))
 	compact := listTools(t, fullSurfaceCfg("compact"))
-	if len(full) < 30 {
-		t.Fatalf("only %d tools in the full list: the test config lost an optional surface", len(full))
+	// The surface must still hold the optional lanes the test claims to cover: the browse lane, the delegation pair and one tool
+	// of each accelerator. A bare count would pass at 31 tools with all of them gone.
+	have := map[string]bool{}
+	for _, tool := range full {
+		have[tool.Name] = true
+	}
+	for _, name := range []string{"offload_browse", "agent_delegate", "offload_research", "offload_face_detect", "offload_classify_image", "offload_semantic_segment"} {
+		if !have[name] {
+			t.Fatalf("%s is not in the full list: the test config lost an optional surface (%d tools)", name, len(full))
+		}
+	}
+	if len(full) < 45 {
+		t.Fatalf("only %d tools in the full list, want at least 45: the test config lost an optional surface", len(full))
 	}
 	if len(compact) != len(full) {
 		t.Fatalf("compact advertises %d tools, full %d", len(compact), len(full))
@@ -190,6 +201,20 @@ func TestCompactKeepsNamedSafetySentences(t *testing.T) {
 		{"offload_browse", "SAFETY: controls labelled publish / send / post / delete / pay / buy / checkout / subscribe / confirm / sign out"},
 		{"offload_browse", "Never pass pages whose text should not leave this machine"},
 		{"offload_generate_image", "do not lower steps/resolution to speed things up unless the caller explicitly asks for a draft"},
+		{"offload_nim", "This is the ONLY cloud/remote tool on this server — every other offload_* tool runs on the LOCAL models (see offload_status for that roster)."},
+		{"offload_nim", "It is OPT-IN (the hosted endpoint needs NVIDIA_API_KEY in the server env; a self-hosted NIM via base is keyless): use it deliberately for a stronger model than the local cascade, NOT for routine grunt work."},
+		{"offload_generate_video", "The graph family comes from THIS machine's videogen_family binding (the 2x16 reference box is bound to LTX-2.5, which generates joint AAC audio); pass model ONLY to override that deliberately — no cloud, runs on the local GPU."},
+		{"offload_generate_video", "QUALITY-FIRST DEFAULT: the native two-stage recipe (no distill LoRA, 20 steps, cfg 3.5, the model's official negative) — a render takes tens of minutes and that is intended; set fast=true ONLY when the caller explicitly wants a draft (8-step lightx2v distill — visibly weaker motion)."},
+		{"agent_delegate", "Caps: 8 files, 64 KiB written, 192 KiB of diff, and no delete/shell/run/network — past a cap nothing is published at all."},
+		{"agent_delegate", "Verify it with diff_touches:<path-prefix> and diff_max_files:<n>, which read the write set rather than the prose; neither says the change is CORRECT, so read the diff."},
+		{"agent_delegate", "On any refusal before placement it returns deferred:true with a reason and you do the work yourself."},
+		{"offload_ocr", "Returns {text} with the transcribed text in reading order; if it can't transcribe confidently it returns deferred:true and you should read the image yourself."},
+		{"offload_summarize", "Returns {summary, bullets}; if it can't do it confidently it returns deferred:true and you should summarize it yourself."},
+		{"offload_vqa", "Returns {answer}; if it can't answer confidently it returns deferred:true and you should look at the image yourself."},
+		{"offload_transcribe", "If it can't transcribe confidently it returns deferred:true and you should handle the audio yourself."},
+		{"offload_video_describe", "Returns {answer} (which notes what the relevant frames show); if it can't answer confidently it returns deferred:true and you should watch the video yourself."},
+		{"offload_status", "Every offload_* tool except offload_nim and offload_browse runs LOCAL — the GPU roster or a listed accelerator (free, on-box, no cloud); offload_nim is the only remote MODEL surface, and offload_browse (opt-in, present only when configured) drives the operator's own local browser with typed choices from a loopback decision endpoint the operator runs."},
+		{"offload_review_diff", "Equally, an EMPTY findings list means this reviewer found nothing; it is not a verification that the change works."},
 	}
 	for _, p := range pins {
 		f, ok := full[p.tool]
@@ -217,6 +242,77 @@ func TestCompactKeepsNamedSafetySentences(t *testing.T) {
 	}
 	if len(cp) >= len(fp) {
 		t.Errorf("compact did not shorten write_root: %d bytes against %d", len(cp), len(fp))
+	}
+}
+
+// TestCompactKeepsNamedParameterSentences pins constraint sentences that live in a PARAMETER description, and the enum-value lines a
+// kept one belongs with. Each pin is looked up in the full description first, so a rewording fails loudly.
+func TestCompactKeepsNamedParameterSentences(t *testing.T) {
+	full := map[string]*mcp.Tool{}
+	for _, tool := range listTools(t, fullSurfaceCfg("full")) {
+		full[tool.Name] = tool
+	}
+	compact := map[string]*mcp.Tool{}
+	for _, tool := range listTools(t, fullSurfaceCfg("compact")) {
+		compact[tool.Name] = tool
+	}
+	pins := []struct {
+		tool     string
+		path     []string
+		sentence string
+	}{
+		{"agent_delegate", []string{"subtasks", "items", "properties", "write_root"}, "Grants create+overwrite only: no delete, no shell, no run, no network."},
+		{"agent_delegate", []string{"subtasks", "items", "properties", "write_root"}, "Omit for read-only work, which is everything else"},
+		{"agent_delegate", []string{"pin_reason"}, "privacy: the material may not leave this box (credentials, unreleased or brand-isolated data); route local only."},
+		{"agent_delegate", []string{"pin_reason"}, "locality: the work needs something only this box has (a local service, files the contract cannot carry inline, this box's own seat as the thing under comparison); route local only."},
+		{"agent_delegate", []string{"remotes"}, "A call can only narrow the fleet, never add a node: a URL outside delegate_remotes is refused and never dialled, and a box with no delegate_remotes accepts none."},
+		{"agent_delegate", []string{"subtasks", "items", "properties", "output_schema"}, "REQUIRED for any remote placement"},
+		{"agent_delegate", []string{"subtasks", "items", "properties", "allow_browse"}, "Admitted only with route local, this node's agent_allow_browse, a configured lane and browse_hosts; judged unattended (publish/send-class controls always refused), audited."},
+		{"agent_run", []string{"thinking"}, "on: never send the kwarg"},
+		{"agent_run", []string{"thinking"}, "off: every planner call renders in non-thinking mode (chat_template_kwargs enable_thinking:false) — use for grounded extraction on a thinking seat that spends its budget in the think block."},
+		{"agent_run", []string{"judge"}, "Never gates anything."},
+		{"offload_generate_video", []string{"fast"}, "The default is the native quality recipe — only set when the caller explicitly accepts draft quality"},
+		{"offload_generate_image", []string{"waiter_token"}, "mq-...: the ticket the harness is holding for this request, which starts on the first matching lane that frees anywhere; do NOT call again to wait for it (a repeat of the identical request attaches to the same ticket), and send the SAME request with waiter_token=mq-... only to collect the result."},
+	}
+	for _, p := range pins {
+		f, ok := full[p.tool]
+		if !ok {
+			t.Errorf("%s is not in the full list", p.tool)
+			continue
+		}
+		fp := paramDescription(t, f, p.path...)
+		cp := paramDescription(t, compact[p.tool], p.path...)
+		if !strings.Contains(fp, p.sentence) {
+			t.Errorf("%s %v: the pinned sentence is not in the full description any more (reworded?): %q", p.tool, p.path, p.sentence)
+			continue
+		}
+		if !strings.Contains(cp, p.sentence) {
+			t.Errorf("%s %v: compact dropped %q\n compact description: %s", p.tool, p.path, p.sentence, cp)
+		}
+	}
+}
+
+// TestCompactKeepsTheReferentOfAKeptSentence: a kept sentence that cannot be read without its neighbour comes with it. "Non-zero
+// means a node is broken" is about summary.infrastructure, and "on: never send the kwarg" is one of three enum-value lines.
+func TestCompactKeepsTheReferentOfAKeptSentence(t *testing.T) {
+	compact := map[string]*mcp.Tool{}
+	for _, tool := range listTools(t, fullSurfaceCfg("compact")) {
+		compact[tool.Name] = tool
+	}
+	d := compact["agent_delegate"].Description
+	const anaphor = "Non-zero means a node is broken or misconfigured"
+	const referent = "summary.infrastructure counts the results whose story is a broken STACK"
+	if !strings.Contains(d, anaphor) {
+		t.Fatalf("agent_delegate compact no longer keeps %q", anaphor)
+	}
+	if !strings.Contains(d, referent) {
+		t.Errorf("agent_delegate compact keeps %q without the sentence it refers to (%q)", anaphor, referent)
+	}
+	th := paramDescription(t, compact["agent_run"], "thinking")
+	for _, line := range []string{"auto (default;", "off: every planner call", "on: never send the kwarg"} {
+		if !strings.Contains(th, line) {
+			t.Errorf("agent_run.thinking compact is missing the enum-value line %q: %s", line, th)
+		}
 	}
 }
 
@@ -355,6 +451,7 @@ func TestSplitSentences(t *testing.T) {
 		{"lower-case identifier opens a sentence", "Read summary FIRST. results[].ran_on says where it ran.", []string{"Read summary FIRST.", "results[].ran_on says where it ran."}},
 		{"a quoted argument does not split", "pass section:\"brief\" to size it. Then go.", []string{"pass section:\"brief\" to size it.", "Then go."}},
 		{"ellipsis in a token does not split", "send waiter_token=mq-...: the ticket. Done.", []string{"send waiter_token=mq-...: the ticket.", "Done."}},
+		{"an ellipsis followed by a lower-case word does not split", "send the SAME request with waiter_token=mq-... only to collect the result. Next.", []string{"send the SAME request with waiter_token=mq-... only to collect the result.", "Next."}},
 		{"no terminal period", "Only one clause here", []string{"Only one clause here"}},
 		{"empty", "", nil},
 	} {
@@ -408,5 +505,44 @@ func TestCompactSchemaUnparseableStaysAsItWas(t *testing.T) {
 	}
 	if got := compactInputSchema(nil); got != nil {
 		t.Fatalf("nil schema came back as %v", got)
+	}
+}
+
+// TestStripProseKeepsPropertiesNamedLikeProseKeywords: stripProse is the independent half of the structure comparison, so it must not
+// remove a PARAMETER that happens to be called title, example, examples or $comment: under a properties map those keys are names,
+// not keywords. A compact regression that dropped such a parameter would otherwise compare equal.
+func TestStripProseKeepsPropertiesNamedLikeProseKeywords(t *testing.T) {
+	in := map[string]any{
+		"type":  "object",
+		"title": "T",
+		"properties": map[string]any{
+			"title":    map[string]any{"type": "string", "description": "d", "examples": []any{"x"}},
+			"example":  map[string]any{"type": "string"},
+			"examples": map[string]any{"type": "array", "items": map[string]any{"type": "string", "title": "i"}},
+		},
+	}
+	want := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"title":    map[string]any{"type": "string"},
+			"example":  map[string]any{"type": "string"},
+			"examples": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		},
+	}
+	if got := stripProse(in); !reflect.DeepEqual(got, want) {
+		t.Fatalf("stripProse dropped a property name or kept prose\n got:  %v\n want: %v", got, want)
+	}
+}
+
+// TestCompactSchemaKeepsPropertiesNamedLikeProseKeywords: the production walker has the same obligation.
+func TestCompactSchemaKeepsPropertiesNamedLikeProseKeywords(t *testing.T) {
+	in := json.RawMessage(`{"type":"object","properties":{"title":{"type":"string","description":"What this field is for, in full. More words follow here."},"example":{"type":"string"},"examples":{"type":"array","items":{"type":"string"}}},"required":["title"]}`)
+	got, ok := compactInputSchema(in).(json.RawMessage)
+	if !ok {
+		t.Fatalf("compactInputSchema returned %T", compactInputSchema(in))
+	}
+	want := `{"type":"object","properties":{"title":{"type":"string","description":"What this field is for, in full."},"example":{"type":"string"},"examples":{"type":"array","items":{"type":"string"}}},"required":["title"]}`
+	if string(got) != want {
+		t.Fatalf("\n got  %s\n want %s", got, want)
 	}
 }
