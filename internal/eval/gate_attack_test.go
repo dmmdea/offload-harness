@@ -738,8 +738,8 @@ func TestTimedOutTasksCarryTheCostTheyRecorded(t *testing.T) {
 	r := mustGate(t, b, h, inputFor(h, inc, cand))
 	e := r.Efficiency[0]
 	// 5 tasks cost 5000 and 15 cost 500, against 1000 on every task: the mean difference is
-	// (5 x 4000 - 15 x 500) / 20 = +625.
-	if e.N != n || e.UnresolvedPairs != 0 || e.OverUnresolvedCap || e.Improves || val(e.Delta) != 625 {
+	// (5 x 4000 - 15 x 500) / 20 = +625 (the reported delta is the bootstrap's, within a few tens of it).
+	if e.N != n || e.UnresolvedPairs != 0 || e.OverUnresolvedCap || e.Improves || math.Abs(val(e.Delta)-625) > 50 {
 		t.Fatalf("the timeouts' recorded cost is part of the candidate's spend: %+v", e)
 	}
 	if r.Verdict == VerdictAdopt {

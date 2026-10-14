@@ -81,8 +81,8 @@ type EfficiencyResult struct {
 	// OverUnresolvedCap is true when UnresolvedPairs over the usable pairs is above
 	// max_excluded_share: the metric was not measured on enough pairs, so it cannot improve.
 	OverUnresolvedCap bool `json:"over_unresolved_cap"`
-	// Regresses is true when the plain 95% interval lies wholly on the worse side and at least
-	// min_pairs pairs resolved the metric.
+	// Regresses is true when the plain 95% interval lies wholly on the worse side. It is read
+	// wherever the metric has an interval (two or more resolved pairs), not only from min_pairs.
 	Regresses bool `json:"regresses"`
 	// Level is the two-sided level of Lo and Hi: 0.95, or 1 - 0.05/k for k declared metrics.
 	Level float64 `json:"level"`
@@ -202,8 +202,10 @@ type armTask struct {
 	usable bool
 	score  float64
 	// metric holds the mean of the resolved values of each declared efficiency metric over the
-	// task's attempts that ran to a score. A metric with no resolved value is absent:
-	// unresolved, never 0. An imputed attempt contributes a score and never a metric.
+	// task's attempts that ran: on the candidate arm every attempt but a not_run (a pass,
+	// task_fail, cheat, timeout, infra_error or judge_error spent what it recorded); on the
+	// incumbent arm the attempts that were scored (an unfinished one is skipped). A metric with no
+	// resolved value is absent: unresolved, never 0.
 	metric map[string]float64
 }
 
@@ -228,12 +230,15 @@ type armView struct {
 // enters with its score, a cheat at worst, and a timeout, infra_error, judge_error or not_run at
 // worst too, so a candidate cannot improve its mean by not finishing what it would fail. A
 // declared task the arm lacks, or holds with no attempt, is one not_run attempt, so every
-// declared task is usable.
+// declared task is usable. The cost of an attempt follows whether it ran: a pass, task_fail,
+// cheat, timeout, infra_error or judge_error spent what it recorded and contributes it (a null
+// stays unresolved, never 0), while a not_run, explicit or the placeholder for a missing task,
+// never ran and carries nothing. Otherwise a candidate could hide what its timeouts burned.
 //
 // Incumbent arm: a cheat enters at worst, and a timeout, infra_error, judge_error or not_run
-// attempt is skipped; a task with no remaining attempt is unusable on this arm and its pair is
-// excluded. The asymmetry is deliberate: the incumbent is not the one being adopted and keeps
-// every tie, so only the candidate pays for the attempts it did not finish.
+// attempt is skipped, its cost included; a task with no remaining attempt is unusable on this
+// arm and its pair is excluded. The asymmetry is deliberate: the incumbent is not the one being
+// adopted and keeps every tie, so only the candidate pays for the attempts it did not finish.
 func scoreArm(a Arm, declared []string, effs []EfficiencyMetric, worst float64, imputeUnusable bool) armView {
 	byID := make(map[string]Task, len(a.Tasks))
 	for _, t := range a.Tasks {
@@ -269,7 +274,18 @@ func scoreArm(a Arm, declared []string, effs []EfficiencyMetric, worst float64, 
 			case OutcomeCheat:
 				sum += worst
 				n++
-			default: // timeout, infra_error, judge_error, not_run
+			case OutcomeTimeout, OutcomeInfraError, OutcomeJudgeError:
+				v.unusable++
+				if !imputeUnusable {
+					continue // the incumbent's unfinished attempt is skipped, cost included
+				}
+				// The candidate's unfinished attempt ran: it enters the score at the worst and,
+				// like a cheat, the cost it recorded is spent, so it falls through to the metric
+				// loop below. A cost it did not record (null) stays unresolved there.
+				v.imputed++
+				sum += worst
+				n++
+			default: // not_run: it never ran, so it carries no cost on either arm
 				v.unusable++
 				if imputeUnusable {
 					v.imputed++
@@ -495,13 +511,19 @@ func Gate(b Baseline, baselineHash string, in GateInput) (GateResult, error) {
 				return GateResult{}, refusef("efficiency metric %q: %s", e.Name, overflowMsg)
 			}
 			er.Delta, er.Lo, er.Hi = &d, &lo, &hi
+			// A regression is read wherever there is an interval (two or more resolved pairs), so a
+			// metric resolved on 2 to min_pairs-1 pairs cannot hide a ten-times regression. Only an
+			// improvement needs min_pairs resolved pairs.
+			if e.LowerIsBetter {
+				er.Regresses = plainLo > 0
+			} else {
+				er.Regresses = plainHi < 0
+			}
 			if er.N >= b.MinPairs {
 				if e.LowerIsBetter {
 					er.Improves = hi < 0
-					er.Regresses = plainLo > 0
 				} else {
 					er.Improves = lo > 0
-					er.Regresses = plainHi < 0
 				}
 			}
 		}
