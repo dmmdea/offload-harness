@@ -259,6 +259,27 @@ func TestTheNoticeIsOnEveryCallNotTheFirstN(t *testing.T) {
 	}
 }
 
+// TestARebuildOfTheSameVersionReadsSensibly: builds embed their worktree path, so a redeploy of the same version can hold other
+// bytes. The notice is still the note (the server is stale), and it names the installed build as the very version the server
+// runs instead of claiming it is older.
+func TestARebuildOfTheSameVersionReadsSensibly(t *testing.T) {
+	s, _, path := serverOnInstalledImage(t, buildinfo.Version)
+	swapImage(t, path, append(imageBody(buildinfo.Version), []byte("rebuilt in another worktree")...))
+	cs := doorSession(t, s)
+	texts := blockTexts(t, callTool(t, cs, "offload_summarize", staleOtherDoorArgs["offload_summarize"]))
+	if len(texts) != 2 {
+		t.Fatalf("%d blocks for a rebuild of the same version with other bytes, want the answer and the notice", len(texts))
+	}
+	for _, want := range []string{"is running " + buildinfo.Version, "the installed build is " + buildinfo.Version, "changed on disk"} {
+		if !strings.Contains(texts[1], want) {
+			t.Errorf("the notice %q does not say %q", texts[1], want)
+		}
+	}
+	if strings.Contains(texts[1], "older") || strings.Contains(texts[1], "newer") {
+		t.Errorf("the notice %q ranks two builds of one version", texts[1])
+	}
+}
+
 // TestAnErrorResultStillCarriesTheNotice: a result flagged IsError is still a result of a stale server.
 func TestAnErrorResultStillCarriesTheNotice(t *testing.T) {
 	s := movableStaleServer(t)
