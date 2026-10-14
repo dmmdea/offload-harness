@@ -173,9 +173,10 @@ type servingProfile struct {
 	// (docs/systems/composite-tier.md), which is why they are also its prerequisite.
 	ExtraVLLMSeats []vllmseat.Spec `json:"extra_vllm_seats,omitempty"`
 	// moeLiteral is set ONLY by fallbackProfile and bypasses moeFlag: the off-matrix
-	// defaults are literal flag strings (`--cpu-moe -ngl 999`, with 999 — not the 99
-	// a declared "gpu" placement renders), and they must stay byte-identical to what
-	// install.ps1 emitted or the delegation silently changes an off-matrix install.
+	// defaults are literal flag strings (vulkan's `-ngl 999`, with 999 — not the 99 a
+	// declared "gpu" placement renders — and the cpu backend's inert `--cpu-moe`, which
+	// its templates carry in no command). The CUDA family carries none since 0186 w4: a
+	// box off the tier matrix has no measured fit, so it renders no 26B at all.
 	moeLiteral string
 }
 
@@ -194,8 +195,11 @@ func (p servingProfile) eg2TextOnly() bool {
 func fallbackProfile(backend string) (servingProfile, error) {
 	switch backend {
 	case "cuda", "cuda-resident", "dual-cuda":
-		return servingProfile{CtxSize: 16384, KVType: "q8_0", FlashAttn: "on", Backend: backend,
-			Include26B: true, moeLiteral: "--cpu-moe -ngl 999"}, nil
+		// No 26B (0186 w4, INV-1): a box off the tier matrix has no tier, no measurement and no declared
+		// fit, so it is not claimed to hold the 26B on its card, and the old `--cpu-moe -ngl 999` literal
+		// (every expert in host RAM) is gone. Same outcome as every tier that cannot fit it (ampere-6,
+		// ampere-8, blackwell-8: moe_26b "drop"). The window, KV and flash-attn are unchanged.
+		return servingProfile{CtxSize: 16384, KVType: "q8_0", FlashAttn: "on", Backend: backend, MoE26B: "drop"}, nil
 	case "vulkan":
 		return servingProfile{CtxSize: 8192, KVType: "f16", FlashAttn: "on", Backend: backend,
 			Include26B: true, moeLiteral: "-ngl 999"}, nil
@@ -219,6 +223,14 @@ func fallbackProfile(backend string) (servingProfile, error) {
 // it: rendering the two side by side is what caught this function returning a bare
 // "--cpu-moe" where the installer emits "--cpu-moe -ngl 999" (the -ngl is what keeps
 // the NON-expert layers on the GPU while every expert sits in RAM).
+//
+// INV-1 (0186 w4): the cards do the inference and host RAM is overflow only, so the ONLY
+// expert placement in RAM this function returns is a partial `n_cpu_moe` with a named N
+// (the measured spill, bounded by the tier's n_cpu_moe_max at the write gate). The
+// every-expert form is returned for the cpu backend alone, which has no card to overflow
+// from; a card backend that names it, or the partial form with no N, gets no flag and no
+// 26B (deriveRender refuses both earlier, moeDefect, so this is the last line, not the
+// message the operator reads).
 //
 // ramTier gates the RAM-hungry placements. "cpu_moe" puts EVERY expert in RAM, so it
 // needs a real RAM path and is dropped on low/min; "n_cpu_moe" pushes only the top N
@@ -244,16 +256,42 @@ func moePlacement(p servingProfile, ramTier string) (flag string, include bool) 
 	case "gpu":
 		return "-ngl 99", true
 	case "cpu_moe":
-		return "--cpu-moe -ngl 999", true
+		if p.Backend == "cpu" {
+			return "--cpu-moe -ngl 999", true
+		}
+		return "", false
 	case "n_cpu_moe":
-		// A tier naming the partial form without an N is a defect; fall back to the
-		// safe all-experts-in-RAM form rather than emitting a broken flag.
+		// A tier naming the partial form without an N is a defect (moeDefect refuses it at derive).
+		// The old fall-back to the every-expert form is gone: it put every expert in host RAM.
 		if p.NCPUMoE > 0 {
 			return fmt.Sprintf("--n-cpu-moe %d -ngl 999", p.NCPUMoE), true
 		}
-		return "--cpu-moe -ngl 999", true
+		return "", false
 	}
 	return "", false
+}
+
+// moeDefect refuses a tier whose 26B placement would put every expert in host RAM on a backend with a
+// card, BEFORE any flag is computed (INV-1: the cards do the inference, RAM is overflow only), and says
+// what to fix. Two shapes: the every-expert placement `cpu_moe` on a backend that is not cpu, and the
+// partial placement `n_cpu_moe` that names no N (which used to fall back to the every-expert form). It
+// does not depend on the RAM tier: a `min` box used to have the 26B dropped without a word instead of
+// the defect being named. A tier that does not include the 26B places nothing, so it is not refused. The
+// seed rule (seed_rules_test.go) already forbids the table entry; this stops the installer from
+// producing it from a table that regressed, and from a profile that lost its N.
+func moeDefect(id string, p servingProfile) error {
+	if !p.Include26B {
+		return nil
+	}
+	switch {
+	case p.MoE26B == "n_cpu_moe" && p.NCPUMoE <= 0:
+		return fmt.Errorf("tier %s: moe_26b is n_cpu_moe but n_cpu_moe names no N; INV-1 sanctions only a measured partial "+
+			"spill (an N up to n_cpu_moe_max), never the every-expert placement a missing N would fall back to", id)
+	case p.MoE26B == "cpu_moe" && p.Backend != "cpu":
+		return fmt.Errorf("tier %s: moe_26b cpu_moe parks every expert in host RAM on the %s backend (INV-1: the cards do the "+
+			"inference and RAM is overflow only); use gpu or drop, or a measured n_cpu_moe with n_cpu_moe_max", id, p.Backend)
+	}
+	return nil
 }
 
 // spillSeatIncluded decides whether the RAM-spill agent seat (Qwen3.6-35B-A3B) renders: the
@@ -597,6 +635,11 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		}
 	}
 	ramTier := strings.ToLower(strings.TrimSpace(req.RAMTier))
+	// A placement that would put every expert in host RAM is refused here, whatever the RAM tier, so the
+	// operator reads the defect instead of the gate (or a silently dropped 26B) after the fact.
+	if err := moeDefect(id, p); err != nil {
+		return renderResult{}, err
+	}
 	moe, include26B := moePlacement(p, ramTier)
 	if p.moeLiteral != "" {
 		moe, include26B = p.moeLiteral, true // off-matrix defaults are literal flags
@@ -753,10 +796,10 @@ func runInstallRender(args []string) error {
 //     the CPU, keeps one loaded past five idle minutes, or preloads is refused. The templates
 //     were fixed by hand twice (0.115.4, 0.115.7) and nothing stopped the next regression.
 //   - The spill ceiling (H-01, INV-1): `--n-cpu-moe` above the tier's measured spill
-//     (`n_cpu_moe_max`), and a partial placement that names no N (which renders the
-//     every-expert form), are refused.
+//     (`n_cpu_moe_max`) is refused. (A partial placement that names no N is refused earlier,
+//     at derive: moeDefect.)
 //   - The every-expert placement (W4, INV-1): a bare `--cpu-moe` in a render is refused unless the
-//     profile says why it is there (cpuMoeExempt).
+//     profile is the cpu backend, which has no card to overflow from (cpuMoeExempt).
 //   - D5 (ADR 0052): a tier that declares layers must render the CHECKED UNION of what it
 //     declares: every layer seat defined, every seat on the cards its layer declares, every
 //     composed capability present. The tier shipped a media block copied from the 2-card tier
@@ -771,8 +814,8 @@ func renderGate(res renderResult) error {
 	if vs := spillViolations(res); len(vs) != 0 {
 		return fmt.Errorf("tier %s: the rendered config spills experts to the CPU beyond the tier's measured spill (INV-1) — not written:\n%s", res.TierID, servingtmpl.Violations(vs))
 	}
-	// After spillViolations on purpose: a partial placement that names no N renders the every-expert
-	// form too, and its own refusal ("no N") is the one that tells the operator what to fix.
+	// The every-expert form is refused unless the profile is the cpu backend. (A partial placement that
+	// names no N never gets here: deriveRender refuses it first, with its own "no N" message.)
 	if !cpuMoeExempt(res.Profile) {
 		if vs := servingtmpl.AuditCPUMoE(res.Config); len(vs) != 0 {
 			return fmt.Errorf("tier %s: the rendered config parks every expert in host RAM (INV-1: the cards do the inference, RAM is overflow only) — not written:\n%s", res.TierID, servingtmpl.Violations(vs))
@@ -947,12 +990,11 @@ func localPinResolver() func(string) (string, bool) {
 }
 
 // cpuMoeExempt says whether a RESOLVED render may carry the every-expert `--cpu-moe`: the cpu backend
-// has no card to overflow from, and the off-matrix defaults (fallbackProfile's moeLiteral, the same
-// discriminator spillViolations uses) are literal flag strings that must stay byte-identical to what
-// the installer has always written for a box that is not on the tier matrix. The evidence is the
-// profile and not a stamp, because renderGate runs BEFORE the stamp exists. The second half is a
-// concession to the installer, not a policy: when the installer stops writing the literal, it goes.
-func cpuMoeExempt(p servingProfile) bool { return p.Backend == "cpu" || p.moeLiteral != "" }
+// has no card to overflow from, and nothing else does. The evidence is the profile and not a stamp,
+// because renderGate runs BEFORE the stamp exists. It used to also exempt the off-matrix defaults
+// (fallbackProfile's moeLiteral), a concession to the installer writing `--cpu-moe -ngl 999` for a box
+// off the tier matrix; the installer stopped (0186 w4), so the concession went with it.
+func cpuMoeExempt(p servingProfile) bool { return p.Backend == "cpu" }
 
 // verbatimStamp returns the basis a file's stamp records when the file is a VERBATIM render: it carries
 // a stamp, the stamp's spec hash is the hash of the basis it carries, and the body below it still hashes
@@ -978,28 +1020,30 @@ func verbatimStamp(text string) (servingtmpl.SpecBasis, bool) {
 }
 
 // auditCPUMoEFile is the W4 rule over a LIVE file, with the exemption read from the file's stamp: a
-// verbatim render whose backend is cpu has no card to overflow from (clean); a verbatim off-matrix
-// render (render.fallback_backend set) is what the installer writes for a box that is not on the tier
-// matrix, so it is reported as a note and does not fail the audit; anything else, including a file
-// with no stamp or one edited since, is judged as a box with a card, and the finding says so.
+// verbatim render whose backend is cpu has no card to overflow from (clean); anything else, including
+// a file with no stamp or one edited since, is judged as a box with a card, and the finding says so.
+// A verbatim off-matrix render (render.fallback_backend set) that carries the flag was a NOTE until
+// 0186 w4, because the installer wrote the every-expert form for a box off the tier matrix; it no
+// longer does, so such a file was written by a binary <= 0.185.1 and is a violation that says to
+// re-render. The second result stays for the audit's note plumbing and is always empty: no stamp
+// excuses the flag any more.
 func auditCPUMoEFile(text string) (violations, notes []servingtmpl.Violation) {
 	vs := servingtmpl.AuditCPUMoE(text)
 	if len(vs) == 0 {
 		return nil, nil
 	}
 	basis, verbatim := verbatimStamp(text)
+	var why string
 	switch {
 	case verbatim && basis.Params.Backend == "cpu":
 		return nil, nil
 	case verbatim && basis.Render.FallbackBackend != "":
-		for i := range vs {
-			vs[i].Text += " [off-matrix render: the installer writes this form for a box that is not on the tier matrix; reported, not failed]"
+		why = "rendered by an older binary that wrote the every-expert form for a box off the tier matrix; re-render it (re-run the installer, or `local-offload install render --fallback-backend <backend> ... --out`)"
+	default:
+		why = "unstamped file: judged as a box with a card; only a stamp recording the cpu backend exempts it"
+		if _, stamped := servingtmpl.ParseStamp(text); stamped {
+			why = "the stamp no longer matches the file (edited after the render), so the backend it records is not trusted: judged as a box with a card"
 		}
-		return nil, vs
-	}
-	why := "unstamped file: judged as a box with a card; only a stamp recording the cpu backend exempts it"
-	if _, stamped := servingtmpl.ParseStamp(text); stamped {
-		why = "the stamp no longer matches the file (edited after the render), so the backend it records is not trusted: judged as a box with a card"
 	}
 	for i := range vs {
 		vs[i].Text += " [" + why + "]"
@@ -1073,21 +1117,13 @@ func auditPinsFile(text string, otherBox bool) (violations, notes []servingtmpl.
 	return violations, notes, ""
 }
 
-// spillViolations is the INV-1 spill rule for one resolved render: the text-level ceiling
-// (any `--n-cpu-moe N` in the rendered config above the tier's `n_cpu_moe_max`) plus the one
-// thing text cannot show: a tier that names the partial placement with no N, which
-// moePlacement renders as the every-expert `--cpu-moe -ngl 999` "rather than emit a broken
-// flag". That is a full spill on a box with a card, and only the cpu backend (no card to
-// overflow from) may render it.
+// spillViolations is the INV-1 spill rule for one resolved render: the text-level ceiling (any
+// `--n-cpu-moe N` in the rendered config above the tier's `n_cpu_moe_max`). The thing text cannot
+// show, a tier that names the partial placement with no N, used to be checked here after
+// moePlacement had rendered it as the every-expert form; moeDefect refuses it at derive now (0186
+// w4), so no render reaches this gate with it.
 func spillViolations(res renderResult) []servingtmpl.Violation {
-	vs := servingtmpl.AuditSpill(res.Config, res.Profile.NCPUMoEMax)
-	p := res.Profile
-	if p.MoE26B == "n_cpu_moe" && res.Include26B && p.NCPUMoE <= 0 && p.Backend != "cpu" && p.moeLiteral == "" {
-		vs = append(vs, servingtmpl.Violation{Rule: "n-cpu-moe", Where: "tier " + res.TierID, Text: "moe_26b is n_cpu_moe but " +
-			"n_cpu_moe names no N, which renders the every-expert `--cpu-moe -ngl 999`; INV-1 sanctions only a partial spill up " +
-			"to the tier's measured spill (n_cpu_moe_max)"})
-	}
-	return vs
+	return servingtmpl.AuditSpill(res.Config, res.Profile.NCPUMoEMax)
 }
 
 // seatIDs is the set of seat ids in a list, for the layer resolution's "which seats does
@@ -1121,9 +1157,10 @@ func seatIDs(seats []*vllmseat.Spec) map[string]bool {
 // gate that gets ignored, and the point of this one is that STALE is rare and
 // means something. UNSTAMPED still prints, as a finding.
 //
-// The every-expert `--cpu-moe` (W4) is refused on a file judged to have a card; the exemptions are
-// read from the file's own stamp (auditCPUMoEFile). A finding the stamp explains prints as a
-// `note:` line and does not fail the audit. A device pin is read against this box's card table
+// The every-expert `--cpu-moe` (W4) is refused on a file judged to have a card; the one exemption (the
+// cpu backend) is read from the file's own stamp (auditCPUMoEFile). Since 0186 w4 no stamp excuses it,
+// not even an off-matrix one, which fails with its own re-render text. A finding a stamp does explain
+// prints as a `note:` line and does not fail the audit. A device pin is read against this box's card table
 // (A-87, auditPinsFile): an index pin on identical cards and a pin that names no card. --other-box
 // says the files belong to another machine and skips those rules, which only make sense for this box.
 // The same table read gives the display-cap-unseen note for a file that pins a device or has a proxy: seat
