@@ -236,6 +236,63 @@ func openspecScriptEnv(t *testing.T, bash string, extra ...string) []string {
 	return withBashOnPath(env, bash)
 }
 
+// withStandInsFirst puts dir, the folder of a test's stand-in tools, on PATH for a script environment built by
+// openspecScriptEnv.
+func withStandInsFirst(env []string, dir string) []string {
+	out := make([]string, 0, len(env)+1)
+	cur := ""
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && strings.EqualFold(k, "PATH") {
+			cur = v
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "PATH="+cur+string(os.PathListSeparator)+dir)
+}
+
+// On Linux bash lives in /usr/bin beside the real npm. If bash's directory came ahead of the stand-ins, the install
+// script would run the real npm against the registry instead of the stand-in. This test builds that layout on any
+// host: a decoy "bash directory" ahead of everything else, holding an npm that records it ran and fails.
+func TestOpenSpecStandInsAreNotShadowedByBashsDirectory(t *testing.T) {
+	bash := guardBash(t)
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	decoy := filepath.Join(dir, "decoy")
+	for _, d := range []string{bin, decoy} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shadow := filepath.ToSlash(filepath.Join(dir, "shadow-called.txt"))
+	writeOpenSpecStandIn(t, decoy, "npm", "echo shadowed >> \"$SHADOW\"\nexit 1\n")
+	writeOpenSpecStandIn(t, bin, "npm", `case "$1" in
+  pack)
+    printf 'not the admitted tarball' > fission-ai-openspec-1.14.1.tgz
+    echo fission-ai-openspec-1.14.1.tgz ;;
+esac
+`)
+	env := withBashOnPath(openspecScriptEnv(t, bash, "SHADOW="+shadow), filepath.Join(decoy, "bash"))
+	cmd := winexec.Command(bash, "scripts/openspec-install.sh", filepath.ToSlash(filepath.Join(dir, "prefix")))
+	cmd.Env = withStandInsFirst(env, bin)
+	out, _ := cmd.CombinedOutput()
+	if _, err := os.Stat(shadow); err == nil {
+		t.Fatalf("the npm in bash's directory ran instead of the stand-in:\n%s", out)
+	}
+	if !strings.Contains(string(out), "REFUSED: sha256 mismatch") {
+		t.Fatalf("the stand-in npm did not reach the hash check:\n%s", out)
+	}
+	registry := ""
+	for _, kv := range cmd.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok && strings.EqualFold(k, "npm_config_registry") {
+			registry = v
+		}
+	}
+	if !strings.HasPrefix(registry, "http://127.0.0.1:") {
+		t.Errorf("npm_config_registry = %q: a stand-in run must point npm at a closed loopback port, so a shadowed stand-in fails without the network", registry)
+	}
+}
+
 func writeOpenSpecStandIn(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	p := filepath.Join(dir, name)
@@ -395,8 +452,7 @@ esac
 `)
 	prefix := filepath.ToSlash(filepath.Join(dir, "prefix"))
 	cmd := winexec.Command(bash, "scripts/openspec-install.sh", prefix)
-	sep := string(os.PathListSeparator)
-	cmd.Env = openspecScriptEnv(t, bash, "MARK="+mark, "PATH="+bin+sep+os.Getenv("PATH"))
+	cmd.Env = withStandInsFirst(openspecScriptEnv(t, bash, "MARK="+mark), bin)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("the script accepted a tarball with the wrong hash:\n%s", out)
@@ -544,13 +600,12 @@ esac
 		t.Fatal(err)
 	}
 	cmd := winexec.Command(bash, script, filepath.ToSlash(prefix))
-	sep := string(os.PathListSeparator)
 	cmd.Env = openspecScriptEnv(t, bash,
 		"LOG="+filepath.ToSlash(logPath), "SRC="+filepath.ToSlash(repoProject),
 		"STANDIN_TARBALL="+openspecStandInTarball, "FAKE_VERSION="+fakeVersion,
-		"PATH="+bin+sep+os.Getenv("PATH"),
 		"npm_config_cache="+hostile("cache"), "TMPDIR="+hostile("tmpdir"), "TMP="+hostile("tmp"), "TEMP="+hostile("temp"),
 		"XDG_CONFIG_HOME="+hostile("xdg"))
+	cmd.Env = withStandInsFirst(cmd.Env, bin)
 	out, runErr := cmd.CombinedOutput()
 	r := openspecInstallRun{out: string(out), err: runErr, prefix: realPrefix, log: map[string]string{}}
 	raw, _ := os.ReadFile(logPath)
