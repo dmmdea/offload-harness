@@ -592,6 +592,14 @@ func copyOpenSpecInstallScript(t *testing.T, dir, sha string) string {
 // and the temp folders point outside the prefix), so only the script itself can move them under the prefix.
 func runOpenSpecInstallWithStandInNpm(t *testing.T, fakeVersion string, prepare func(prefix string)) openspecInstallRun {
 	t.Helper()
+	return runOpenSpecInstallAt(t, fakeVersion, false, prepare)
+}
+
+// runOpenSpecInstallAt is runOpenSpecInstallWithStandInNpm with a choice of how the prefix is spelled to the script:
+// when viaSymlink is set, the script is handed a symlink to the prefix, as a macOS temp folder is (/var is a link to
+// /private/var). The run's prefix is always the physical folder.
+func runOpenSpecInstallAt(t *testing.T, fakeVersion string, viaSymlink bool, prepare func(prefix string)) openspecInstallRun {
+	t.Helper()
 	bash := guardBash(t)
 	dir := t.TempDir()
 	sum := sha256.Sum256([]byte(openspecStandInTarball))
@@ -652,7 +660,14 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := winexec.Command(bash, script, filepath.ToSlash(prefix))
+	arg := prefix
+	if viaSymlink {
+		arg = filepath.Join(dir, "prefix-link")
+		if err := os.Symlink(prefix, arg); err != nil {
+			t.Skipf("this host cannot create a symlink: %v", err)
+		}
+	}
+	cmd := winexec.Command(bash, script, filepath.ToSlash(arg))
 	cmd.Env = openspecScriptEnv(t, bash,
 		"LOG="+filepath.ToSlash(logPath), "SRC="+filepath.ToSlash(repoProject),
 		"STANDIN_TARBALL="+openspecStandInTarball, "FAKE_VERSION="+fakeVersion,
@@ -778,6 +793,27 @@ func TestOpenSpecInstallScriptInstallsFromTheLockfileUnderThePrefix(t *testing.T
 		default:
 			t.Errorf("unexpected entry %q in the prefix after the install", e.Name())
 		}
+	}
+}
+
+// A prefix handed over as a symlink (a macOS temp folder: /var is a link to /private/var) is installed into, and every
+// path the script logs or prints is the physical one, which is how the other tests, and a caller who resolves the
+// prefix, spell it. The script settles on the physical path after the Windows attempt (`pwd -W`), which has no
+// symlinks to resolve.
+func TestOpenSpecInstallScriptSpellsAPrefixSymlinkPhysically(t *testing.T) {
+	r := runOpenSpecInstallAt(t, "1.14.1", true, nil)
+	if r.err != nil {
+		t.Fatalf("the script failed on a symlinked prefix: %v\n%s", r.err, r.out)
+	}
+	if !openspecPathUnder(r.log["ci cwd"], r.prefix) {
+		t.Errorf("npm ci ran in %q, want a folder under the physical prefix %q", r.log["ci cwd"], r.prefix)
+	}
+	if !openspecSamePath(r.log["ci cache"], filepath.Join(r.prefix, ".npm-cache")) {
+		t.Errorf("npm ci used the cache %q, want <physical prefix>/.npm-cache", r.log["ci cache"])
+	}
+	xdg := regexp.MustCompile(`(?m)^export XDG_CONFIG_HOME='([^']+)'\r?$`).FindStringSubmatch(r.out)
+	if xdg == nil || !openspecPathUnder(xdg[1], r.prefix) {
+		t.Errorf("the printed XDG_CONFIG_HOME must be under the physical prefix %q, got %v in:\n%s", r.prefix, xdg, r.out)
 	}
 }
 
