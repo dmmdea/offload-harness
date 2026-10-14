@@ -187,7 +187,8 @@ What `"compact"` does, per tool and per parameter at every depth:
   rule, a limit the schema cannot express, the "if it cannot, it returns `deferred:true` and you do the work yourself"
   protocol of every lane (one entry per phrasing), the acceptance-authoring rules of `agent_delegate`, how to read
   `offload_status` (trust the live roster over any written figure; read `verdict` before concluding anything from a held
-  card), a warning that a result is not a verdict. A sentence that cannot be read without its neighbour
+  card), a warning that a result is not a verdict, the result-reading sentences that stop a misreading (a partial result is a
+  successful call, where a subtask ran). A sentence that cannot be read without its neighbour
   comes with it: the sentence that defines `summary.infrastructure` with the one that says what a non-zero value means,
   the three values of `agent_run`'s `thinking` together, the acceptance lint with its remedy.
 - Drops `examples`, `example`, `title` and `$comment` keywords. Anything it cannot parse stays as it was: its failure
@@ -254,7 +255,7 @@ own on its row, at least 30 characters that are not a restatement of its class; 
 where the part it drops carries none; and the production lead guard has the same words, so the clause-boundary cut never
 drops one (a test pins that every word of the gate is a word of the guard).
 
-Four more checks name what the sentence-by-sentence gate cannot say on its own:
+Five more checks name what the sentence-by-sentence gate cannot say on its own:
 
 - **The deferral protocol.** For every description of every tool, the count of the literal `deferred:true` and of the
   sentences that hold it is the same in the compact list as in the full one. This found the sentence missing from fourteen
