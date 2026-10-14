@@ -324,7 +324,7 @@
       ],
       "models": [
         {
-          "name": "model-y.safetensors",
+          "name": "comfyui:model-y.safetensors",
           "count": 1
         }
       ],
@@ -332,7 +332,7 @@
         {
           "door": "offload_generate_image",
           "seat": "comfyui:model-y.safetensors",
-          "model": "model-y.safetensors",
+          "model": "comfyui:model-y.safetensors",
           "count": 1,
           "cards_tokens": null
         }
@@ -478,7 +478,7 @@
       ],
       "seats": [
         {
-          "name": "node-b:fast-digest-seat",
+          "name": "fast-digest-seat",
           "count": 1
         }
       ],
@@ -491,7 +491,7 @@
       "groups": [
         {
           "door": "fleet",
-          "seat": "node-b:fast-digest-seat",
+          "seat": "fast-digest-seat",
           "model": "fast-digest-seat",
           "count": 1,
           "cards_tokens": 50

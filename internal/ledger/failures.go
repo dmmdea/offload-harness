@@ -21,11 +21,11 @@ import (
 // identity column, `<node>:<seat>` on a delegation row and the model alias on a cascade row, so
 //
 //   - door  is the row's door as recorded,
-//   - seat  is model_tier as recorded (a leading ":" cut: a delegation row written with no node),
-//   - model is the part of the seat after its last ":" (the same alias on two nodes is one entry). On a cascade
-//     row that is the model alias model_tier holds. On a delegation row model_tier is `<node>:<seat alias>`, so
-//     it is the SEAT ALIAS (a pool name, say), not a model: the ledger records no model name for a delegation,
-//     and the register does not pretend otherwise.
+//   - seat  is model_tier as recorded (on a delegation row, a leading ":" cut: written with no node),
+//   - model is, on a delegation row, the part of the seat after its last ":" (the same alias on two nodes is one
+//     entry): model_tier there is `<node>:<seat alias>`, so it is the SEAT ALIAS (a pool name, say), not a model:
+//     the ledger records no model name for a delegation, and the register does not pretend otherwise. On every
+//     other row model_tier is the model alias itself and is kept whole, a colon of its own (`family:size`) included.
 //
 // Nothing is guessed: a row with no door reads "(unknown)", and one with no model_tier reads "(unrecorded)".
 
@@ -213,15 +213,26 @@ func failureClassOf(e Entry) (class string, derived, failed bool) {
 	return "", false, false
 }
 
-// seatAndModel splits an entry's model_tier into the register's seat and model (see the package comment).
-func seatAndModel(modelTier string) (seat, model string) {
-	seat = strings.TrimPrefix(strings.TrimSpace(modelTier), ":")
+// delegationTask is the task of the rows whose model_tier is `<node>:<seat alias>` (the delegator's finished row and
+// its dispatch marker: the two writers join the node and the seat with a colon).
+const delegationTask = "agent_delegate"
+
+// seatAndModel splits an entry's model_tier into the register's seat and model (see the package comment). The cut
+// at the last colon is a delegation row's alone: on every other row model_tier is a model alias, which can hold a
+// colon of its own (`family:size`, `engine:file`), and cutting it would name the wrong model.
+func seatAndModel(e Entry) (seat, model string) {
+	seat = strings.TrimSpace(e.ModelTier)
+	if e.Task == delegationTask {
+		seat = strings.TrimPrefix(seat, ":")
+	}
 	if seat == "" {
 		return unrecorded, unrecorded
 	}
 	model = seat
-	if i := strings.LastIndexByte(seat, ':'); i >= 0 {
-		model = seat[i+1:]
+	if e.Task == delegationTask {
+		if i := strings.LastIndexByte(seat, ':'); i >= 0 {
+			model = seat[i+1:]
+		}
 	}
 	if model == "" {
 		model = unrecorded
@@ -359,7 +370,7 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 		if door == "" {
 			door = unknownDoor
 		}
-		seat, model := seatAndModel(e.ModelTier)
+		seat, model := seatAndModel(e)
 		a.doors[door]++
 		a.seats[seat]++
 		a.models[model]++
