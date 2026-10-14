@@ -118,10 +118,16 @@ func TestAutoDisplayRefusesASeatPinnedOffTheDerivedCard(t *testing.T) {
 	if ok || guard != "display_floor" {
 		t.Fatalf("a twin pinned to 1 with the monitor on 0 must refuse by display_floor, got ok=%v guard=%q %q", ok, guard, reason)
 	}
-	for _, w := range []string{"display_footprint_gib 6.2", "pin 1", "index 0", "re-pin"} {
+	for _, w := range []string{"seat router declares display_footprint_gib 6.2", "pin 1", "index 0", "re-pin"} {
 		if !strings.Contains(reason, w) {
 			t.Errorf("the refusal must say %q, got %q", w, reason)
 		}
+	}
+	// A seat that carries a model is named by it.
+	named := config.LayerSeat{Role: "agent", Model: "gemma-4-e4b-display", Device: "1", DisplayFootprintGiB: 5}
+	live.ScreenCards = screenAt("0")
+	if ok, reason, _ := LayerAdmissible(l, named, live, nil); ok || !strings.Contains(reason, "seat gemma-4-e4b-display declares display_footprint_gib 5.0") {
+		t.Fatalf("a seat with a model is named by it, got ok=%v %q", ok, reason)
 	}
 
 	// The monitor on 1 is the seeded arrangement: admitted.
