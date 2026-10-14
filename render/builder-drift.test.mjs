@@ -520,23 +520,27 @@ test("a widget locator that names no widget is refused", () => {
 });
 
 // A template in the legacy form: the subgraph's widget is promoted by name in the instance's `proxyWidgets`, the
-// instance has no values of its own, and the interior node's widget is linked to the subgraph input.
-function proxiedTemplate({ proxy = [["227", "text"], ["221", "lora_name"]], instanceValues = [], linked = true } = {}) {
+// instance has no values of its own, and the interior node's widget is linked to the subgraph input. `sgInputs` sets the
+// order of the subgraph's inputs, `instanceInputs` and `rootLinks` what is wired to the instance in the root graph.
+function proxiedTemplate({
+  proxy = [["227", "text"], ["221", "lora_name"]], instanceValues = [], linked = true,
+  sgInputs = [{ name: "text", type: "STRING" }, { name: "lora_name", type: "COMBO" }], instanceInputs = [], rootLinks = [],
+} = {}) {
   return {
-    nodes: [{ id: 238, type: "sg-1", mode: 0, inputs: [], widgets_values: instanceValues, properties: { proxyWidgets: proxy } }],
-    links: [],
+    nodes: [{ id: 238, type: "sg-1", mode: 0, inputs: instanceInputs, widgets_values: instanceValues, properties: { proxyWidgets: proxy } }],
+    links: rootLinks,
     definitions: {
       subgraphs: [{
         id: "sg-1",
         name: "Proxied",
-        inputs: [{ name: "text", type: "STRING" }, { name: "lora_name", type: "COMBO" }],
+        inputs: sgInputs,
         nodes: [{
           id: 221, type: "LoraLoaderModelOnly", mode: 0, widgets_values: ["a.safetensors", 1],
           inputs: [{ name: "model", type: "MODEL", link: 1 }, { name: "lora_name", type: "COMBO", widget: { name: "lora_name" }, link: linked ? 2 : null }],
         }],
         links: [
           { id: 1, origin_id: 7, origin_slot: 0, target_id: 221, target_slot: 0, type: "MODEL" },
-          { id: 2, origin_id: -10, origin_slot: 1, target_id: 221, target_slot: 1, type: "COMBO" },
+          { id: 2, origin_id: -10, origin_slot: sgInputs.findIndex((i) => i.name === "lora_name"), target_id: 221, target_slot: 1, type: "COMBO" },
         ],
       }],
     },
@@ -556,6 +560,42 @@ test("a legacy proxied widget reads the interior value, once the instance is sho
   assert.throws(() => read(proxiedTemplate({ linked: false })), /widget lora_name is not linked to a subgraph input; read it with W/);
 });
 
+test("a legacy proxied widget's promoted value is found where the template format puts it: the position in proxyWidgets, not the subgraph's input order", () => {
+  const read = (tpl) => templateValue(PROXY_SPEC, PROXY_VIEW, tpl, proxiedItem({ proxied: true }));
+  const text = { name: "text", type: "STRING" };
+  const lora = { name: "lora_name", type: "COMBO" };
+  // lora_name is listed first but is the second widget-typed input: the one value is at its position, so it carries one
+  assert.throws(
+    () => read(proxiedTemplate({ proxy: [["221", "lora_name"], ["227", "text"]], sgInputs: [text, lora], instanceValues: ["b.safetensors"] })),
+    /instance 238 carries a promoted value for lora_name; read it with I/,
+  );
+  // lora_name is listed second but is the first widget-typed input: the one value belongs to the widget listed first
+  assert.equal(read(proxiedTemplate({ proxy: [["227", "text"], ["221", "lora_name"]], sgInputs: [lora, text], instanceValues: ["a prompt"] })), "a.safetensors");
+  // a value at its own position is found whatever the order of the subgraph's inputs
+  assert.throws(
+    () => read(proxiedTemplate({ proxy: [["227", "text"], ["221", "lora_name"]], sgInputs: [lora, text], instanceValues: ["a prompt", "b.safetensors"] })),
+    /instance 238 carries a promoted value for lora_name; read it with I/,
+  );
+});
+
+test("a legacy proxied widget is refused when the root graph wires something into the instance's input for it", () => {
+  const read = (tpl) => templateValue(PROXY_SPEC, PROXY_VIEW, tpl, proxiedItem({ proxied: true }));
+  const entry = (name, link) => ({ name, type: name === "text" ? "STRING" : "COMBO", widget: { name }, link });
+  // entries with no link are not a wiring, and an input wired for another widget is not this widget's
+  assert.equal(read(proxiedTemplate({ instanceInputs: [entry("text", null), entry("lora_name", null)] })), "a.safetensors");
+  assert.equal(read(proxiedTemplate({ instanceInputs: [entry("text", 7), entry("lora_name", null)], rootLinks: [[7, 41, 0, 238, 0, "STRING"]] })), "a.safetensors");
+  // a link into the widget's own input: the value that runs comes through it, so the interior value is stale
+  assert.throws(
+    () => read(proxiedTemplate({ instanceInputs: [entry("text", null), entry("lora_name", 7)], rootLinks: [[7, 41, 0, 238, 1, "COMBO"]] })),
+    /wf-x \[v\] lora\.name: .* instance 238 has its lora_name input linked at the root \(to node:\S+#0\)/,
+  );
+  // the object form of a link is read the same way
+  assert.throws(
+    () => read(proxiedTemplate({ instanceInputs: [entry("lora_name", 7)], rootLinks: [{ id: 7, origin_id: 41, origin_slot: 0, target_id: 238, target_slot: 0 }] })),
+    /instance 238 has its lora_name input linked at the root/,
+  );
+});
+
 test("an instance whose own promoted widget is linked in the root graph fails", () => {
   const spec = BUILDER_SPECS.find((s) => s.builder === "wf-qwen-image-21");
   const view = spec.views.find((v) => v.name === "t2i");
@@ -564,6 +604,61 @@ test("an instance whose own promoted widget is linked in the root graph fails", 
   const tpl = structuredClone(syn.loadTemplate(view.template));
   plantLink(tpl, item.t, "cfg");
   assert.throws(() => templateValue(spec, view, tpl, item), /wf-qwen-image-21 \[t2i\] ksampler\.cfg: .* cfg is linked \(to node:\S+#0\)/);
+});
+
+// How a template serializes the input of a widget that nothing is wired to. None of these shapes is a link.
+const UNLINKED_ENTRY_SHAPES = {
+  "widget form, link null": (name) => ({ name, type: "INT", widget: { name }, link: null }),
+  "name only, link null": (name) => ({ name, type: "INT", link: null }),
+  "widget form, link key left out": (name) => ({ name, type: "INT", widget: { name } }),
+};
+
+// withUnlinkedEntries: a clone of the synthetic package in which the node each W and I locator points at carries an input
+// entry for that widget with no link. Returns { loadTemplate, entries }, the number of entries added.
+function withUnlinkedEntries(syn, make) {
+  const tpls = new Map();
+  let entries = 0;
+  for (const spec of BUILDER_SPECS) {
+    for (const view of spec.views) {
+      if (!tpls.has(view.template)) tpls.set(view.template, structuredClone(syn.loadTemplate(view.template)));
+      const tpl = tpls.get(view.template);
+      for (const item of view.items) {
+        const t = item.t;
+        if (t.kind === "distinct" || t.proxied) continue;
+        const c = t.kind === "inst" || t.sg == null ? tpl : tpl.definitions.subgraphs.find((s) => s.name === t.sg);
+        const node = c.nodes.find((n) => n.id === t.id);
+        const name = t.kind === "inst" ? t.input : t.name;
+        if (node.inputs.some((i) => (i.widget?.name ?? i.name) === name)) continue;
+        node.inputs.push(make(name));
+        entries++;
+      }
+    }
+  }
+  return { loadTemplate: (name) => tpls.get(name), entries };
+}
+
+test("a widget input entry with link null is not a link: every locator of every builder still reads its value", () => {
+  const { syn, manifest: m } = synthManifest();
+  for (const [shape, make] of Object.entries(UNLINKED_ENTRY_SHAPES)) {
+    const pkg = withUnlinkedEntries(syn, make);
+    assert.ok(pkg.entries > 100, `${shape}: only ${pkg.entries} entries were added`);
+    const r = checkTemplateSide(m, { loadTemplate: pkg.loadTemplate, versions: SYN_VERSIONS });
+    assert.deepEqual(r.failures, [], shape);
+    assert.deepEqual(r.notes, [], shape);
+  }
+});
+
+test("an unlinked widget entry that gets a link is refused: the link decides, not the entry", () => {
+  const spec = BUILDER_SPECS.find((s) => s.builder === "wf-krea2");
+  const view = spec.views[0];
+  const item = view.items.find((i) => i.key === "ksampler.steps");
+  const { syn } = synthManifest();
+  const tpl = structuredClone(withUnlinkedEntries(syn, UNLINKED_ENTRY_SHAPES["widget form, link null"]).loadTemplate(view.template));
+  assert.equal(templateValue(spec, view, tpl, item), builderValues(spec, view).get(item.key)); // the entry with no link reads
+  const c = tpl.definitions.subgraphs.find((s) => s.name === item.t.sg);
+  c.nodes.find((n) => n.id === item.t.id).inputs.find((i) => i.name === item.t.name).link = 90001;
+  c.links.push({ id: 90001, origin_id: 5000, origin_slot: 0, target_id: item.t.id, target_slot: 0 });
+  assert.throws(() => templateValue(spec, view, tpl, item), /wf-krea2 \[default\] ksampler\.steps: .* steps is linked \(to node:\S+#0\)/);
 });
 
 test("a hand-edited templateSha256 fails the template side, naming the builder, once every widget is unchanged", () => {
