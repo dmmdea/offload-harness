@@ -1298,15 +1298,28 @@ func TestLogCollapseEmergencyShrinkNamesTheOriginalSize(t *testing.T) {
 	if !ok1 || !ok2 {
 		t.Fatal("control: both bodies must fold")
 	}
-	msgs := lrTranscript(foldedOlder, foldedNewest)
+	// A second older body too short for the skeleton rung to touch, so pass 2
+	// meets it as a folded body and not as a skeleton.
+	small := lcJoin([]string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"}, lcRepeat("pausing between polls", 50), []string{"india", "juliet", "kilo", "lima"})
+	foldedSmall, ok3 := logCollapse(small)
+	if !ok3 {
+		t.Fatal("control: the short body must fold")
+	}
+	if _, can := skeletonizeAs(foldedSmall, len(small)); can {
+		t.Fatal("control: the short folded body must be beyond the skeleton rung")
+	}
+	msgs := lrTranscript(foldedOlder, foldedSmall, foldedNewest)
 	on := compactOpts{LogCollapse: true}
 
 	out := emergencyShrinkWith(msgs, 1, 3, on)
 	if want := elisionMarker(len(older)); !strings.HasPrefix(out[4].Content, want) {
-		t.Errorf("older folded body: want marker %q, got %.100q", want, out[4].Content)
+		t.Errorf("older folded body (pruned to a skeleton first): want marker %q, got %.100q", want, out[4].Content)
 	}
-	if want := elisionMarker(len(newest)); out[6].Content != want {
-		t.Errorf("newest folded body, trim cannot fit: want %q, got %.100q", want, out[6].Content)
+	if want := elisionMarker(len(small)); !strings.HasPrefix(out[6].Content, want) {
+		t.Errorf("older folded body (beyond the skeleton rung): want marker %q, got %.100q", want, out[6].Content)
+	}
+	if want := elisionMarker(len(newest)); out[8].Content != want {
+		t.Errorf("newest folded body, trim cannot fit: want %q, got %.100q", want, out[8].Content)
 	}
 
 	// The three-argument form is the rung-off emergency pass: it names the
