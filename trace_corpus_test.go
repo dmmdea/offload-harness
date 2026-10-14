@@ -411,6 +411,92 @@ func TestTraceCorpusRedactsPathSeats(t *testing.T) {
 	}
 }
 
+// TestTraceCorpusPoolAliasRunsAreABucketKeyedByNode: a pool placement logs the pool's ALIAS as the
+// seat (the node's real seat is in neither the row nor its result), so those runs cannot be
+// attributed to a seat. They are reported as their own bucket, keyed by the node the row names, and
+// the readout says how much of the corpus cannot be attributed instead of letting an alias read as
+// a seat in by_seat. Nodes and seats are synthetic.
+func TestTraceCorpusPoolAliasRunsAreABucketKeyedByNode(t *testing.T) {
+	dir := t.TempDir()
+	row := func(seat, node, extra string) string {
+		return `{"seat":"` + seat + `","node":"` + node + `","result":{"steps":2,"stop_reason":"done","trace":[{}]` + extra + `}}`
+	}
+	rows := []string{
+		row("agent-pool", "node-1", `,"pager":{"basis":"measured","evictions":5,"evicted_bytes":100,"distinct_evicted":4,"refetched_distinct":1,"compaction_passes":1}`),
+		row("agent-pool", "node-1", ""),
+		row("agent-pool-3card", "node-2", ""),
+		row("arm-pool", "", ""),
+		row("seat-a", "node-1", ""),
+		row("", "node-1", ""),
+		// not aliases: the word pool must be a whole hyphen-delimited token
+		row("spool", "node-2", ""),
+		row("poolside", "node-2", ""),
+		row("carpool-a", "node-2", ""),
+	}
+	if err := os.WriteFile(filepath.Join(dir, "2026-05-01.jsonl"), []byte(strings.Join(rows, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	corpus := filepath.Join(dir, "corpus.jsonl")
+	if _, _, err := tcRunVerb(t, "harvest", "--delegation-log", dir, "--out", corpus); err != nil {
+		t.Fatalf("harvest: %v", err)
+	}
+	out, _, err := tcRunVerb(t, "readout", "--corpus", corpus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type runs struct {
+		Runs  int `json:"runs"`
+		Pager struct {
+			RefetchRate *float64 `json:"refetch_rate"`
+		} `json:"pager"`
+	}
+	var rep struct {
+		Attribution struct {
+			Runs               int      `json:"runs"`
+			SeatNamedRuns      int      `json:"seat_named_runs"`
+			PoolAliasRuns      int      `json:"pool_alias_runs"`
+			SeatUnrecordedRuns int      `json:"seat_unrecorded_runs"`
+			UnattributedShare  *float64 `json:"unattributed_share"`
+		} `json:"attribution"`
+		PoolAlias       runs            `json:"pool_alias"`
+		PoolAliasByNode map[string]runs `json:"pool_alias_by_node"`
+		BySeat          map[string]runs `json:"by_seat"`
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatal(err)
+	}
+	at := rep.Attribution
+	if at.Runs != 9 || at.SeatNamedRuns != 4 || at.PoolAliasRuns != 4 || at.SeatUnrecordedRuns != 1 {
+		t.Errorf("attribution = %+v, want 9 runs = 4 seat-named + 4 pool alias + 1 with no seat", at)
+	}
+	if at.UnattributedShare == nil || *at.UnattributedShare != 0.555556 {
+		t.Errorf("unattributed share = %v, want (4 aliases + 1 no seat) / 9 = 0.555556", at.UnattributedShare)
+	}
+	if rep.PoolAlias.Runs != 4 {
+		t.Errorf("pool_alias bucket holds %d runs, want 4", rep.PoolAlias.Runs)
+	}
+	if n1, n2, un := rep.PoolAliasByNode["node-1"], rep.PoolAliasByNode["node-2"], rep.PoolAliasByNode[tcSeatUnrecorded]; n1.Runs != 2 || n2.Runs != 1 || un.Runs != 1 || len(rep.PoolAliasByNode) != 3 {
+		t.Errorf("pool_alias_by_node = %v, want node-1:2 node-2:1 and 1 under %s (the row names no node)", rep.PoolAliasByNode, tcSeatUnrecorded)
+	}
+	if got := rep.PoolAliasByNode["node-1"].Pager.RefetchRate; got == nil || *got != 0.25 {
+		t.Errorf("node-1 pool-alias re-fetch rate = %v, want 1 of 4 = 0.25", got)
+	}
+	// by_seat names only runs a seat can be attributed to: no alias is a key.
+	want := map[string]int{"seat-a": 1, "spool": 1, "poolside": 1, "carpool-a": 1, tcSeatUnrecorded: 1}
+	if len(rep.BySeat) != len(want) {
+		t.Errorf("by_seat = %v, want exactly %v", rep.BySeat, want)
+	}
+	for k, n := range want {
+		if rep.BySeat[k].Runs != n {
+			t.Errorf("by_seat[%q] = %d runs, want %d", k, rep.BySeat[k].Runs, n)
+		}
+	}
+	// The sum rule: every run is in exactly one of the three attribution classes.
+	if at.SeatNamedRuns+at.PoolAliasRuns+at.SeatUnrecordedRuns != at.Runs {
+		t.Errorf("attribution classes do not add up: %+v", at)
+	}
+}
+
 // TestTraceCorpusUnrecordedNeverSerializesAsZero is the rule the whole verb exists to keep: a
 // value nobody recorded is null, and the counts say how many runs had none. Here every run
 // predates the instruments, so every rate must be null and no verdict may be reached.
