@@ -293,3 +293,172 @@ func TestSearchRungDoesNotPairTwoEmptyIDs(t *testing.T) {
 		t.Error("a result and a call that both have an empty id were paired and thinned")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// A command that chains another command after the search prints that command's
+// output too, so the body is no longer the search's alone.
+// ---------------------------------------------------------------------------
+
+func TestSearchRungLeavesAChainedCommandAlone(t *testing.T) {
+	body := prodShell(1, linterBody(80, 12), "")
+	for _, cmd := range []string{
+		"grep -n x f; flake8 .",
+		"grep -q x f || ruff check .",
+		"grep x f && flake8 .",
+		"grep x f;flake8 .",
+		"grep x f&&flake8 .",
+		"grep x f||flake8 .",
+		"grep x f & flake8 .",
+		"grep -rn timeout . | head && flake8 .",
+		"grep -rn 'a' . ; grep -rn \"b\" . ; flake8 .",
+		"grep -rn timeout .\nflake8 .",
+		"grep -rn \\\"x . ; flake8 .", // an escaped quote does not open a quoted span
+		"git grep -n x; ruff check .",
+		"rg -n x && flake8 .",
+	} {
+		if thinned, got := gateOutcome(t, shellCall(cmd), body, true); thinned {
+			t.Errorf("run_shell %q: a chained command's output was thinned:\n%.200s", cmd, got)
+		}
+	}
+}
+
+func TestSearchRungKeepsPipesAndQuotedSeparatorsAsSearches(t *testing.T) {
+	flat := fixtureFlat(benignHits(58, 16, 80))
+	body := prodShell(0, flat+"\n", "")
+	for _, cmd := range []string{
+		"grep x f | head",
+		"grep -rn timeout . | sort | uniq",
+		"grep -rn timeout . |& head",
+		`grep -rn "a;b" .`,
+		`grep -rn 'a;b' .`,
+		`grep -rn "a&&b" .`,
+		`grep -rn 'a||b' .`,
+		`grep -rn "say \"x\";y" .`,
+		`grep -rnE "a|b" .`,
+		`grep -rn a\;b .`,
+		"grep -rn timeout . 2>&1",
+		"grep -rn timeout . >/dev/null 2>&1 | head",
+	} {
+		thinned, got := gateOutcome(t, shellCall(cmd), body, true)
+		if !thinned || !strings.Contains(got, "lines elided") {
+			t.Errorf("run_shell %q: a plain search must still be thinned", cmd)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pins for the pairing and the form the run tool prints.
+// ---------------------------------------------------------------------------
+
+func TestSearchRungRunToolPrintsTheFlatFormOnly(t *testing.T) {
+	grouped := prodGrouped(benignHits(59, 20, 90), true)
+	for _, c := range []ToolCall{
+		runCall("grep", "-rn", "timeout", "."),
+		runCall("rg", "-n", "timeout"),
+		runCall("git", "grep", "-n", "timeout"),
+	} {
+		if thinned, _ := gateOutcome(t, c, grouped, true); thinned {
+			t.Errorf("run %s: a grouped listing from a grep command was thinned", c.Args)
+		}
+	}
+}
+
+func TestSearchRungTrimsTheRunCommand(t *testing.T) {
+	flat := prodShell(0, fixtureFlat(benignHits(60, 16, 80))+"\n", "")
+	for _, c := range []ToolCall{
+		runCall("  grep", "-rn", "timeout", "."),
+		runCall("\tgrep", "-rn", "timeout", "."),
+		runCall(" git ", "grep", "-n", "timeout"),
+	} {
+		thinned, got := gateOutcome(t, c, flat, true)
+		if !thinned || !strings.Contains(got, "lines elided") {
+			t.Errorf("run %s: a command with surrounding space must still qualify", c.Args)
+		}
+	}
+}
+
+func TestSearchRungAmbiguityNeedsTheNameAndTheArgsToAgree(t *testing.T) {
+	grouped := prodGrouped(benignHits(61, 20, 90), true)
+	flat := prodShell(0, fixtureFlat(benignHits(62, 16, 80))+"\n", "")
+	// two reuses an id of the call under test; the result sits under that id.
+	with := func(first, second ToolCall, body string) string {
+		msgs := []Msg{
+			{Role: "system", Content: "You are a coding agent."},
+			{Role: "user", Content: rungTask},
+			{Role: "assistant", ToolCalls: []ToolCall{first}},
+			{Role: "assistant", ToolCalls: []ToolCall{second}},
+			{Role: "tool", ToolCallID: "g1", Content: body},
+			{Role: "assistant", ToolCalls: []ToolCall{{ID: "g2", Name: "read_file", Args: `{"path":"a.go"}`}}},
+			{Role: "tool", ToolCallID: "g2", Content: "short file"},
+		}
+		searchRung(msgs, rungProtected, len(msgs)-rungKeep, 1, nil)
+		return msgs[4].Content
+	}
+	grep := ToolCall{ID: "g1", Name: "run_shell", Args: `{"command":"grep -rn timeout ."}`}
+	lint := ToolCall{ID: "g1", Name: "run_shell", Args: `{"command":"flake8 ."}`}
+	// Same name, different args: ambiguous, whichever comes last.
+	for _, pair := range [][2]ToolCall{{lint, grep}, {grep, lint}} {
+		if got := with(pair[0], pair[1], flat); got != flat {
+			t.Errorf("same name, different args (%s then %s): the id is ambiguous and the body must be left alone", pair[0].Args, pair[1].Args)
+		}
+	}
+	// Same args, different name: ambiguous, whichever comes last.
+	args := `{"command":"grep -rn timeout .","pattern":"timeout"}`
+	shell := ToolCall{ID: "g1", Name: "run_shell", Args: args}
+	search := ToolCall{ID: "g1", Name: "search_files", Args: args}
+	read := ToolCall{ID: "g1", Name: "read_file", Args: args}
+	for _, pair := range [][2]ToolCall{{shell, search}, {search, shell}, {read, search}, {search, read}} {
+		for _, body := range []string{grouped, flat} {
+			if got := with(pair[0], pair[1], body); got != body {
+				t.Errorf("same args, different name (%s then %s): the id is ambiguous and the body must be left alone", pair[0].Name, pair[1].Name)
+			}
+		}
+	}
+}
+
+func TestSearchRungCountsTwoIdenticalCallsWithOneIDAsOneCall(t *testing.T) {
+	grouped := prodGrouped(benignHits(63, 20, 90), true)
+	call := gateSearchCall()
+	msgs := []Msg{
+		{Role: "system", Content: "You are a coding agent."},
+		{Role: "user", Content: rungTask},
+		{Role: "assistant", ToolCalls: []ToolCall{call}},
+		{Role: "assistant", ToolCalls: []ToolCall{call}}, // a replayed duplicate, byte for byte
+		{Role: "tool", ToolCallID: "g1", Content: grouped},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "g2", Name: "read_file", Args: `{"path":"a.go"}`}}},
+		{Role: "tool", ToolCallID: "g2", Content: "short file"},
+	}
+	searchRung(msgs, rungProtected, len(msgs)-rungKeep, 1, nil)
+	if msgs[4].Content == grouped || !strings.Contains(msgs[4].Content, "lines elided") {
+		t.Error("two identical calls under one id are one call, and its listing must still be thinned")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The caps are chosen to match the values the upstream configuration example
+// shows. That page never calls them defaults, so nothing here may.
+// ---------------------------------------------------------------------------
+
+func TestSearchRungNeverCallsTheCapsDefaults(t *testing.T) {
+	bad := regexp.MustCompile(`(?is)\bdefaults?\s+of\s+(the\s+)?(idea|search\s*compressor)|\bthe\s+defaults\s+of\b|documented\s+defaults`)
+	for _, rel := range []string{
+		"NOTICE",
+		"internal/agent/rung_search.go",
+		"docs/systems/coding-agent.md",
+		"changes/unreleased/feat-compaction-rung-search.md",
+	} {
+		b, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(rel)))
+		if err != nil {
+			if os.IsNotExist(err) && strings.HasPrefix(rel, "changes/unreleased/") {
+				continue // the fragment is consumed at release
+			}
+			t.Fatal(err)
+		}
+		if m := bad.Find(b); m != nil {
+			t.Errorf("%s: %q calls the caps defaults; say \"the values shown in the upstream configuration example\" or \"chosen to match\"", rel, m)
+		}
+		if !strings.Contains(string(b), "configuration example") && !strings.Contains(string(b), "chosen to match") {
+			t.Errorf("%s: must say the caps are the values shown in the upstream configuration example (or chosen to match)", rel)
+		}
+	}
+}
