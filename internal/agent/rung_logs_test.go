@@ -742,6 +742,43 @@ func TestLogCollapseRungRespectsPins(t *testing.T) {
 	}
 }
 
+// TestLogCollapseRungRespectsPinsThroughADedupeReference: the model asked for a
+// result again, and that result is now a dedupe reference to a later call's
+// body. The pin set the ladder resolves (ADR 0016 section 2) protects the body
+// the reference points at, and the rung must be handed THAT set: folding the
+// referenced body would destroy exactly what the model asked to keep.
+func TestLogCollapseRungRespectsPinsThroughADedupeReference(t *testing.T) {
+	raw := lrServerLog(160)
+	msgs := []Msg{
+		{Role: "system", Content: "You are a coding agent."},
+		{Role: "user", Content: "exemplar: run the tests and report the result"},
+		{Role: "user", Content: "objective: find out why the widget build is red"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-1", Name: "run", Args: `{"cmd":"make"}`}}},
+		{Role: "tool", ToolCallID: "call-1", Content: dedupeMarker("call-2", len(raw))},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-2", Name: "run", Args: `{"cmd":"make"}`}}},
+		{Role: "tool", ToolCallID: "call-2", Content: raw},
+		{Role: "assistant", Content: "looking at the output now"},
+	}
+	folded, ok := logCollapse(raw)
+	if !ok {
+		t.Fatal("control: the referenced body must be foldable")
+	}
+	// The budget is what folding the referenced body alone buys.
+	probe := append([]Msg(nil), msgs...)
+	probe[6].Content = folded
+	budget := estimateTokens(probe)
+	opts := compactOpts{LogCollapse: true, Pinned: map[string]bool{"call-1": true}}
+	out := compact(context.Background(), msgs, budget, 1, 3, opts)
+	if out[6].Content != raw {
+		t.Errorf("the body a pinned dedupe reference points at was rewritten (collapsed=%v):\n%.120q", isLogCollapsed(out[6].Content), out[6].Content)
+	}
+	// Control: with no pin the same transcript and budget fold it.
+	free := compact(context.Background(), msgs, budget, 1, 3, lcLogOptsOn)
+	if free[6].Content != folded {
+		t.Error("control: without a pin the referenced body should have been folded")
+	}
+}
+
 func TestLogsRungClampsItsWindow(t *testing.T) {
 	msgs := lrTranscript(lrServerLog(150), lrServerLog(160))
 	out := append([]Msg(nil), msgs...)
@@ -781,6 +818,62 @@ func TestLogCollapseRungStopsAtTheFirstFit(t *testing.T) {
 			t.Errorf("message %d changed although the first fold already fit", i)
 		}
 	}
+}
+
+// TestLogCollapseRungSitsBetweenGCFAndSkeleton pins the rung's place in the
+// ladder, with the neighbours switched on: it runs BEFORE the skeleton rung
+// (a budget the fold alone meets leaves no skeleton behind) and AFTER the
+// lossless GCF rung (a budget GCF alone meets leaves the logs raw).
+func TestLogCollapseRungSitsBetweenGCFAndSkeleton(t *testing.T) {
+	t.Run("before skeleton", func(t *testing.T) {
+		msgs := lrTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170))
+		folded, ok := logCollapse(msgs[4].Content)
+		if !ok {
+			t.Fatal("control: the oldest body must fold")
+		}
+		if _, ok := skeletonize(msgs[4].Content); !ok {
+			t.Fatal("control: the oldest body must also be skeletonisable, or the order proves nothing")
+		}
+		probe := append([]Msg(nil), msgs...)
+		probe[4].Content = folded
+		budget := estimateTokens(probe) // what folding the oldest body alone buys
+		for name, opts := range map[string]compactOpts{
+			"skeleton+logs":     {Skeleton: true, LogCollapse: true},
+			"gcf+skeleton+logs": {GCF: true, Skeleton: true, LogCollapse: true},
+		} {
+			out := compact(context.Background(), msgs, budget, 2, 3, opts)
+			if out[4].Content != folded {
+				t.Errorf("%s: the oldest body should be log-collapsed exactly as logCollapse folds it:\n%.120q", name, out[4].Content)
+			}
+			for i, m := range out {
+				if m.Role == "tool" && isSkeletonized(m.Content) {
+					t.Errorf("%s: message %d was skeletonised although the fold already fit", name, i)
+				}
+			}
+		}
+	})
+
+	t.Run("after gcf", func(t *testing.T) {
+		raw, js := lrServerLog(150), jsonToolBody(60)
+		msgs := lrTranscript(raw, js)
+		packed, ok := gcf.Compact(js)
+		if !ok {
+			t.Fatal("control: the JSON body must be GCF-eligible")
+		}
+		if _, ok := logCollapse(raw); !ok {
+			t.Fatal("control: the log body must be foldable, or the order proves nothing")
+		}
+		probe := append([]Msg(nil), msgs...)
+		probe[6].Content = packed
+		budget := estimateTokens(probe) // what GCF alone buys
+		out := compact(context.Background(), msgs, budget, 1, 3, compactOpts{GCF: true, Skeleton: true, LogCollapse: true})
+		if !gcf.IsCompacted(out[6].Content) {
+			t.Fatalf("control: the JSON body should be GCF-encoded:\n%.120q", out[6].Content)
+		}
+		if out[4].Content != raw {
+			t.Errorf("the log body was rewritten although the lossless GCF rung already fit:\n%.120q", out[4].Content)
+		}
+	})
 }
 
 func TestLogCollapseOffIsTheDefaultLadder(t *testing.T) {
