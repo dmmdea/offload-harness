@@ -979,9 +979,13 @@ test("expansion is bounded: a nested subgraph bomb is refused as graph_too_large
   assert.equal(typeof nodes.details.node, "string", "the details name where the limit was passed");
   refusalOf(convert(bomb(18, false)), "graph_too_large"); // 2^18 instances and not one real node: instances count too
   assert.ok(Date.now() - t0 < 15000, "refused at the limit, not after expanding it");
-  const ok = convert(bomb(16, true)); // 2^16 = 65,536 real nodes
+  const ok = convert(bomb(15, true)); // 2^15 = 32,768 real nodes in 2^16 - 1 = 65,535 instances: 98,303 against the bound
   assert.equal(graphOf(ok) !== undefined, true);
-  assert.equal(ok.stats.nodes, 65536);
+  assert.equal(ok.stats.nodes, 32768);
+  // the bound itself: 100,000 real nodes convert, 100,001 do not
+  const flat = (n) => ({ version: 0.4, links: [], nodes: Array.from({ length: n }, (_v, i) => ({ id: i + 1, type: "ImageInvert", mode: 0, inputs: [], outputs: [] })) });
+  assert.equal(convert(flat(100000)).stats.nodes, 100000);
+  assert.equal(refusalOf(convert(flat(100001)), "graph_too_large").details.node, "100001");
 });
 
 test("expansion is bounded: subgraphs nested past 64 levels are refused as graph_too_large, tens of thousands deep included, not an internal_error from the stack", () => {

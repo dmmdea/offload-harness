@@ -19,6 +19,9 @@
 // no file. Dependency-free (Node 18+, `node:` builtins only).
 //
 // What it does, in the order a node meets it:
+//   - a template that expands past LIMITS (100,000 nodes and instances, 64 levels of nesting) is refused (graph_too_large), and a
+//     node id that two scopes both give, or a subgraph definition id that appears twice, is a bad_template: neither is resolved
+//     to whichever came last;
 //   - mode 2 (muted) nodes are dropped; a wire that came from one is left out (a typed warning), or, for a widget input, the
 //     widget's stored value stays;
 //   - mode 4 (bypassed) nodes are not emitted; the i-th output of a type takes the i-th connected input of that type (a union
@@ -63,6 +66,7 @@ export const REFUSAL = Object.freeze({
   DANGLING_LINK: "dangling_link",
   LINK_MISMATCH: "link_mismatch",
   LINK_CYCLE: "link_cycle",
+  GRAPH_TOO_LARGE: "graph_too_large",
   WIDGET_MISMATCH: "widget_mismatch",
   UNSUPPORTED_INPUT_TYPE: "unsupported_input_type",
   PRIMITIVE_WITHOUT_VALUE: "primitive_without_value",
@@ -165,6 +169,13 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DYNAMIC_COMBO = "COMFY_DYNAMICCOMBO_V3";
 const AUTOGROW = "COMFY_AUTOGROW_V3";
 const MATCHTYPE = "COMFY_MATCHTYPE_V3";
+// What one call may expand to. A template of a few kilobytes can nest subgraph definitions so that one instance stands for millions
+// of nodes, or so deep that a recursive walk runs out of stack: past either bound the call is refused (graph_too_large), never
+// carried on into a crash or a memory exhaustion. Real templates sit far below both (a handful of nodes per level, three levels).
+export const LIMITS = Object.freeze({
+  maxNodes: 100000, // real nodes plus subgraph instances entered
+  maxSubgraphDepth: 64, // instances inside instances
+});
 const SG_INPUT_NODE = "-10";
 const SG_OUTPUT_NODE = "-20";
 
@@ -325,12 +336,13 @@ function build(template, objectInfo, options) {
         refuse(REFUSAL.BAD_TEMPLATE, `subgraph ${d.id}: ${field} is not an array`, { subgraph: d.id, field });
       }
     }
+    if (defs.has(d.id)) refuse(REFUSAL.BAD_TEMPLATE, `subgraph definition ${d.id} appears twice`, { subgraph: d.id });
     defs.set(d.id, d);
   }
 
   const ctx = {
     oi: objectInfo, defs, seed,
-    warnings, pinnedSeeds: [], live: [], instances: new Map(), proxies: new Map(), entryCache: new Map(),
+    warnings, pinnedSeeds: [], live: [], instances: new Map(), proxies: new Map(), entryCache: new Map(), keys: new Set(), budget: 0,
     stats: { nodes: 0, expandedSubgraphs: 0, mutedNodes: 0, bypassedNodes: 0, notes: 0, reroutes: 0, primitiveNodes: 0 },
   };
   const root = makeScope(template.nodes, template.links, "", null, null);
@@ -388,11 +400,23 @@ function classify(ctx, node) {
   return "real";
 }
 
+// charge: one more real node or subgraph instance counts against LIMITS.maxNodes, at the moment it is met, so an expansion bomb is
+// refused after the first 100,000 and not after all of it
+function charge(ctx, key) {
+  if (++ctx.budget > LIMITS.maxNodes) {
+    refuse(REFUSAL.GRAPH_TOO_LARGE, `the template expands to more than ${LIMITS.maxNodes} nodes and subgraph instances (stopped at ${key})`, { limit: LIMITS.maxNodes, what: "nodes", node: key });
+  }
+}
+
 // collect: walk a scope in file order; real live nodes go to ctx.live under their final id, live subgraph instances are entered.
 function collect(ctx, scope, stack) {
   for (const node of scope.nodes.values()) {
     const kind = classify(ctx, node);
     const key = scope.prefix + node.id;
+    // every node of every scope has one final id: two that read the same (a root node whose id is the path of an inner node) would
+    // be one API node, or one trail key, with the last silently winning
+    if (ctx.keys.has(key)) refuse(REFUSAL.BAD_TEMPLATE, `node id ${key} is given twice (a node of one scope has the id path of a node of another)`, { where: scope.prefix || "root", id: key });
+    ctx.keys.add(key);
     switch (kind) {
       case "muted": ctx.stats.mutedNodes++; break;
       case "bypassed": ctx.stats.bypassedNodes++; break;
@@ -407,6 +431,10 @@ function collect(ctx, scope, stack) {
         break;
       case "instance": {
         if (stack.includes(node.type)) refuse(REFUSAL.SUBGRAPH_CYCLE, `subgraph ${node.type} contains itself (reached again at ${key})`, { node: key, type: node.type });
+        if (stack.length >= LIMITS.maxSubgraphDepth) {
+          refuse(REFUSAL.GRAPH_TOO_LARGE, `subgraphs are nested more than ${LIMITS.maxSubgraphDepth} levels deep (stopped at ${key})`, { limit: LIMITS.maxSubgraphDepth, what: "subgraph depth", node: key });
+        }
+        charge(ctx, key);
         const def = ctx.defs.get(node.type);
         const inner = makeScope(def.nodes, def.links, `${key}:`, { scope, node }, def);
         enterInstance(ctx, scope, node, def, inner, key);
@@ -416,6 +444,7 @@ function collect(ctx, scope, stack) {
         break;
       }
       default:
+        charge(ctx, key);
         ctx.live.push({ key, node, scope });
     }
   }
@@ -468,12 +497,28 @@ function enterInstance(ctx, parent, inst, def, inner, key) {
 // ---- resolving a wire to what produces it ----------------------------------------------------------------------------
 // A source is one of: { kind: "ref", key, slot } (a real node's output), { kind: "literal", value } (a PrimitiveNode or an
 // instance widget), { kind: "muted" } (it came from a muted node), { kind: "none", reason } (it came from nothing).
+//
+// Finding the source is a walk along ONE path: a Reroute hands on its one input, a bypassed node the one input its output takes, a
+// subgraph instance the one inner wire that leaves it. So each step either settles on a source or names the next wire to follow
+// ({ kind: "follow", scope, link }), and settle() loops over the steps with a single visited set. That is what keeps a chain of a
+// hundred thousand Reroute nodes off the call stack and costs one set insertion per hop, not a copy of the whole trail.
 
 const MUTED = Object.freeze({ kind: "muted" });
 const nothing = (reason) => ({ kind: "none", reason });
+const follow = (scope, link) => ({ kind: "follow", scope, link });
 
-// resolveInput: the source of input `idx` of `node`. The link must exist and point back at this node and slot.
+function settle(ctx, step, trail) {
+  while (step.kind === "follow") step = originStep(ctx, step.scope, step.link, trail);
+  return step;
+}
+
+// resolveInput: the source of input `idx` of `node`, with `trail` the (node, slot) pairs this walk has passed through.
 function resolveInput(ctx, scope, node, idx, trail) {
+  return settle(ctx, inputStep(ctx, scope, node, idx), trail);
+}
+
+// inputStep: the wire into input `idx` of `node`. The link must exist and point back at this node and slot.
+function inputStep(ctx, scope, node, idx) {
   const slot = node.inputs[idx];
   const key = scope.prefix + node.id;
   const link = scope.links.get(String(slot.link));
@@ -481,24 +526,24 @@ function resolveInput(ctx, scope, node, idx, trail) {
   if (link.target !== String(node.id) || link.targetSlot !== idx) {
     refuse(REFUSAL.LINK_MISMATCH, `link ${link.id} does not end at node ${key} input ${idx}`, { node: key, input: slot.name, link: link.id });
   }
-  return resolveOrigin(ctx, scope, link, trail);
+  return follow(scope, link);
 }
 
-function resolveOrigin(ctx, scope, link, trail) {
+function originStep(ctx, scope, link, trail) {
   if (link.origin === SG_INPUT_NODE) {
     if (!scope.parent) refuse(REFUSAL.DANGLING_LINK, `link ${link.id} starts at a subgraph input node outside any subgraph`, { link: link.id, origin: link.originRaw });
-    return resolveSubgraphInput(ctx, scope, link.originSlot, trail);
+    return subgraphInputStep(ctx, scope, link.originSlot);
   }
   const origin = scope.nodes.get(link.origin);
   if (!origin) refuse(REFUSAL.DANGLING_LINK, `link ${link.id} starts at node ${link.originRaw}, which is not in the template`, { link: link.id, origin: link.originRaw });
-  return resolveOutput(ctx, scope, origin, link.originSlot, trail);
+  return outputStep(ctx, scope, origin, link.originSlot, trail);
 }
 
-function resolveOutput(ctx, scope, node, slot, trail) {
+function outputStep(ctx, scope, node, slot, trail) {
   const id = scope.prefix + node.id;
   const tk = `${id}#${slot}`;
   if (trail.has(tk)) refuse(REFUSAL.LINK_CYCLE, `the wires through ${id} loop back on themselves`, { node: id });
-  const next = new Set(trail).add(tk);
+  trail.add(tk);
   switch (classify(ctx, node)) {
     case "muted": return MUTED;
     case "note": return nothing("unconnected");
@@ -510,14 +555,14 @@ function resolveOutput(ctx, scope, node, slot, trail) {
     case "reroute": {
       const first = node.inputs?.[0];
       if (!first || first.link === null || first.link === undefined) return nothing("unconnected");
-      return resolveInput(ctx, scope, node, 0, next);
+      return inputStep(ctx, scope, node, 0);
     }
-    case "bypassed": return passThrough(ctx, scope, node, slot, next);
+    case "bypassed": return passThroughStep(ctx, scope, node, slot);
     case "instance": {
       const inner = ctx.instances.get(id);
       const exit = [...inner.links.values()].find((l) => l.target === SG_OUTPUT_NODE && l.targetSlot === slot);
       if (!exit) return nothing("unconnected");
-      return resolveOrigin(ctx, inner, exit, next);
+      return follow(inner, exit);
     }
     default: return { kind: "ref", key: id, slot };
   }
@@ -529,7 +574,7 @@ function resolveOutput(ctx, scope, node, slot, trail) {
 // there is nothing to pass: the wire is dropped (a typed warning where it was read). When the type has a different number of outputs
 // and connected inputs, which input an output takes would be a guess, so the call is refused (ambiguous_bypass). Only an output that
 // something reads is resolved, so a bypassed node nobody reads is never refused.
-function passThrough(ctx, scope, node, slot, trail) {
+function passThroughStep(ctx, scope, node, slot) {
   const outputs = node.outputs ?? [];
   const outType = outputs[slot]?.type;
   const wired = [];
@@ -543,12 +588,12 @@ function passThrough(ctx, scope, node, slot, trail) {
       `bypassed node ${id} has ${same.length} output(s) of type ${outType} and ${wired.length} connected input(s) of it: which input an output takes is ambiguous, and is never guessed`,
       { node: id, type: outType, output: slot, outputs: same.length, inputs: wired.length });
   }
-  return resolveInput(ctx, scope, node, wired[same.indexOf(slot)], trail);
+  return inputStep(ctx, scope, node, wired[same.indexOf(slot)]);
 }
 
 // An inner wire from the definition's input node j is the instance's input of that name (by position when the instance lists as
 // many inputs as the definition and none carries the name): its wire if it has one, else the literal its widget carries.
-function resolveSubgraphInput(ctx, scope, j, trail) {
+function subgraphInputStep(ctx, scope, j) {
   const def = scope.def;
   const inst = scope.parent.node;
   const instScope = scope.parent.scope;
@@ -557,7 +602,7 @@ function resolveSubgraphInput(ctx, scope, j, trail) {
   const instInputs = inst.inputs ?? [];
   let idx = instInputs.findIndex((i) => i && i.name === sgIn.name);
   if (idx < 0 && instInputs.length === (def.inputs ?? []).length) idx = j;
-  if (idx >= 0 && instInputs[idx]?.link !== null && instInputs[idx]?.link !== undefined) return resolveInput(ctx, instScope, inst, idx, trail);
+  if (idx >= 0 && instInputs[idx]?.link !== null && instInputs[idx]?.link !== undefined) return inputStep(ctx, instScope, inst, idx);
   if (scope.literals.has(j)) return { kind: "literal", value: clone(scope.literals.get(j)) };
   return nothing("unconnected");
 }
