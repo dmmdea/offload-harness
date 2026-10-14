@@ -33,7 +33,8 @@ import (
 // Error kinds a source can fail with. They ride on Fetched.ErrKind so a caller
 // can tell a broken site from an absent track without parsing prose.
 const (
-	// ErrKindYtDlpPath: the configured binary is not an absolute path, is missing, or will not start.
+	// ErrKindYtDlpPath: the configured binary is not an absolute path, is missing, does not match the pinned
+	// ytdlp_sha256 (or that value is not a sha256), or will not start.
 	ErrKindYtDlpPath = "ytdlp_path"
 	// ErrKindBadLangs: the sub_langs value is not a plain language list.
 	ErrKindBadLangs = "bad_sub_langs"
