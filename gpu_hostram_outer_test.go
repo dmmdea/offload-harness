@@ -218,3 +218,79 @@ func TestADetachedReserveWhoseStampCannotBeWrittenFailsClosedAndReleases(t *test
 		})
 	}
 }
+
+// Round 4, item 5. The outer bound was drainDeadline + holdMax with drainDeadline = queuedAt + --wait (8 h by default): a default
+// detached reserve killed a minute into its drain left the holder holding the cards until about --wait + the bound, the incident's
+// own command shape. The LIVE parent now re-stamps now + holdMax + slack every few seconds while the drain and the unload run, so a
+// dead parent is covered within about the bound plus the slack, whatever --wait says.
+func TestADetachedReserveWhoseParentDiesDuringALongWaitDrainIsReleasedWithinTheBoundNotAtWait(t *testing.T) {
+	for _, dead := range []bool{false, true} {
+		name := "a live parent keeps the bound moving and the holder leaves the lease alone"
+		if dead {
+			name = "a dead parent leaves a moment within the bound and the holder releases at it"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := &orderedSwap{drainSwap: &drainSwap{}}
+			f.loaded.Store(true)
+			f.inflight.Store(1) // a request is in flight: the drain waits
+			cfgPath, m := handoffFixture(t, f)
+			useSeatBackedHost(t, f.loaded.Load, 95, 70)
+			shortFloor(t, time.Second)
+			fastHolder(t)
+			oldE, oldS := outerRefreshEvery, outerSlack
+			outerRefreshEvery, outerSlack = 50*time.Millisecond, 500*time.Millisecond
+			t.Cleanup(func() { outerRefreshEvery, outerSlack = oldE, oldS })
+			holderDone := detachWithRealHolder(t)
+
+			started := time.Now()
+			// --wait 8h, the default: the drain's own deadline is eight hours away.
+			args := append([]string{"--config", cfgPath, "--ram-hold-max", "1s"}, strings.Fields("--detach --for 1h --wait 8h --drain --unload-seat --ram 30 --reason film")...)
+			reserveDone := make(chan error, 1)
+			go func() { reserveDone <- runGPUReserve(args) }()
+			t.Cleanup(func() {
+				f.inflight.Store(0)
+				releaseAll(t, m)
+				select {
+				case <-reserveDone:
+				case <-time.After(40 * time.Second):
+				}
+			})
+
+			first := firstStamp(t, m)
+			if limit := started.Add(time.Second + 500*time.Millisecond + 5*time.Second); first.HostRAMHoldUntil.After(limit) {
+				t.Fatalf("the outer bound is now + the hold bound + the slack, not the drain's deadline eight hours away: stamped %s, started %s", first.HostRAMHoldUntil, started)
+			}
+			if !dead {
+				// A live parent: the stamp moves forward, and the holder never releases a lease its parent is still draining.
+				deadline := time.Now().Add(10 * time.Second)
+				moved := false
+				for time.Now().Before(deadline) && !moved {
+					for _, l := range m.Leases() {
+						if l.HostRAMHoldUntil.After(first.HostRAMHoldUntil.Add(300 * time.Millisecond)) {
+							moved = true
+						}
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+				if !moved {
+					t.Fatal("the live parent never moved the outer bound forward")
+				}
+				time.Sleep(3 * time.Second) // past bound + slack + grace from the start: a stamp that did not move would have fired
+				if !m.Inspect().Held {
+					t.Fatal("the holder released a lease whose parent is alive and still draining")
+				}
+				return
+			}
+			// A dead parent: from the first stamp on, nothing re-stamps (it is killed).
+			restore := gpulease.UseStampFault(func(uint64) error { return errors.New("the parent is dead") })
+			t.Cleanup(restore)
+			holderEnds(t, holderDone, 15*time.Second)
+			if m.Inspect().Held {
+				t.Errorf("the holder ended but the lease is still held: %+v", m.Inspect())
+			}
+			if took := time.Since(started); took > 30*time.Second {
+				t.Errorf("released after %s: within the bound, not at --wait", took)
+			}
+		})
+	}
+}

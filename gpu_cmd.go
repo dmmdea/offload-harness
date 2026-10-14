@@ -1460,6 +1460,13 @@ var (
 	holdRenewEvery   = 15 * time.Second
 )
 
+// The detached reserve keeps the outer bound it stamped on its lease moving while the drain and the unload run: every
+// outerRefreshEvery it re-stamps now + the hold bound + outerSlack. (Variables so a test need not stand in line.)
+var (
+	outerRefreshEvery = 30 * time.Second
+	outerSlack        = 60 * time.Second
+)
+
 // holdClock is the clock the hidden holder compares a stamped end of the wait against. A variable so a test can hold the holder
 // back until the reserve's push-out is on the record, and decide itself when the holder may act: a grace measured in real time
 // raced the push-out under CPU starvation.
