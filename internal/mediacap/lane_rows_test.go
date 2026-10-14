@@ -277,6 +277,40 @@ func TestLaneRowsAnSdcppFileIsPublishedByItsBareName(t *testing.T) {
 	}
 }
 
+// An sd.cpp row lists the four weight files its binding can name, in this order: the model, the Wan 2.2 high-noise expert, the VAE
+// and the T5. A file the binding leaves unset is not listed; one it names that is not on the node is listed with -1, so a node
+// missing its high-noise expert or its T5 does not read as complete.
+func TestLaneRowsAnSdcppFamilyListsItsFourWeightRolesInOrder(t *testing.T) {
+	dir := t.TempDir()
+	model, high, t5 := filepath.Join(dir, "m.gguf"), filepath.Join(dir, "high.gguf"), filepath.Join(dir, "t5.safetensors")
+	putSized(t, model, 7)
+	putSized(t, high, 8)
+	putSized(t, t5, 9)
+	bind := func(fb config.VideoFamilyBinding) config.Config {
+		fb.Engine = config.EngineSdcpp
+		return config.Config{VideoGenFamily: "fastwan", VideoGenFamilies: map[string]config.VideoFamilyBinding{"fastwan": fb}}
+	}
+	// The VAE is named and absent: the four roles, in order, with -1 for the one the node lacks.
+	r := rowNamed(t, LaneRows(bind(config.VideoFamilyBinding{
+		SdcppModel: model, SdcppHighNoiseModel: high, SdcppVAE: filepath.Join(dir, "vae.safetensors"), SdcppT5xxl: t5,
+	})), LaneVideo, "fastwan")
+	if got := fileRoles(r); got != "model,high_noise_model,vae,t5xxl" {
+		t.Errorf("roles = %q", got)
+	}
+	if !sizesEqual(fileSizes(r), 7, 8, -1, 9) {
+		t.Errorf("sizes = %v, want 7, 8, -1 (the VAE is not there), 9", fileSizes(r))
+	}
+	// A file the binding names that is missing is listed (-1) whichever role it has; one it leaves unset is not listed.
+	r = rowNamed(t, LaneRows(bind(config.VideoFamilyBinding{SdcppModel: model, SdcppHighNoiseModel: filepath.Join(dir, "gone.gguf")})), LaneVideo, "fastwan")
+	if got := fileRoles(r); got != "model,high_noise_model" || !sizesEqual(fileSizes(r), 7, -1) {
+		t.Errorf("a missing high-noise expert is listed with -1 and an unset VAE and T5 are not: roles %q sizes %v", got, fileSizes(r))
+	}
+	r = rowNamed(t, LaneRows(bind(config.VideoFamilyBinding{SdcppModel: model, SdcppT5xxl: filepath.Join(dir, "gone.safetensors")})), LaneVideo, "fastwan")
+	if got := fileRoles(r); got != "model,t5xxl" || !sizesEqual(fileSizes(r), 7, -1) {
+		t.Errorf("a missing T5 is listed with -1: roles %q sizes %v", got, fileSizes(r))
+	}
+}
+
 // An sd.cpp family may carry the name of a ComfyUI one. It is then the sd.cpp row, and the ComfyUI builder-default files of that
 // name (which its renders never load) are not listed beside it.
 func TestLaneRowsAnSdcppFamilyNamedLikeAComfyOneReplacesIt(t *testing.T) {

@@ -327,6 +327,29 @@ func TestANamedURLTheGuardRefusesIsFiledNoNodeConfigured(t *testing.T) {
 	}
 }
 
+// A machine with no fleet configured has no node to send a named call to, and the lane it has itself is not a place for it. The
+// answer is the plain configuration defer every remote call on such a machine gets ("no delegate_remotes configured"), not a
+// node_unknown (the caller did not mistype a name; the operator has configured no fleet) and not a run here. It carries no
+// data.refusal: the six words are for a call that reached a roster.
+func TestANamedCallOnAMachineWithNoFleetIsAConfigDeferAndRunsNothing(t *testing.T) {
+	withLocalVideoLane(t)
+	cfg := namedClient(t)
+	cfg.VideoGenScript = writeFile(t, t.TempDir(), "comfy-video.mjs", []byte("//"))
+	local := &recordingRunner{}
+	for _, route := range []string{"", "auto", "remote"} {
+		res := Run(context.Background(), cfg, local, named("render-a", nil), route, nil)
+		if res.OK || !res.Deferred || res.DeferClass != core.DeferClassConfig || !strings.Contains(res.Reason, "no delegate_remotes") {
+			t.Errorf("route %q: %+v", route, res)
+		}
+		if strings.Contains(string(res.Data), "refusal") {
+			t.Errorf("route %q: no roster was read, so there is no refusal word: %s", route, res.Data)
+		}
+	}
+	if local.count() != 0 {
+		t.Errorf("a named call never runs here: the local runner ran %d times", local.count())
+	}
+}
+
 // A call may narrow the fleet with remotes and never extend it: a node outside this call's remotes is not on its roster.
 func TestANodeOutsideTheCallsRemotesIsUnknown(t *testing.T) {
 	a := startNode(t, nodeOpts{id: "render-a"})
