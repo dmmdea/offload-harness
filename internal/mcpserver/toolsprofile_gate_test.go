@@ -27,6 +27,11 @@ import (
 // production lead-cut guard (leadGuard in toolsprofile.go): narrowing production's regexp cannot narrow this gate.
 var gateTrigger = regexp.MustCompile(`(?i)\b(never|refus\w*|only|must|not|\w+n't|cannot|required|denied|trusted|untrusted|unattended|sandbox\w*|safety|advisory|read-only|forbidden|irreversible|destructive|opt-in|without|no (?:delete|shell|run|network|cloud|write)|forward\w*|travel\w*|fleet nodes?|tailnet|sent|cloud|defer\w*|always|should|avoid\w*|make sure|prohibit\w*|ensure\w*)\b`)
 
+// acceptanceRule marks the sentences that teach how to write acceptance: the lint that flags acceptance which verifies less than it looks
+// (PARROT-PASSABLE, SHAPE-ONLY, "passes garbage") and the remedy that says where to anchor a check. They are never
+// dropped, in any tool: a caller that does not see them writes a lone nonempty: check that passes garbage.
+var acceptanceRule = regexp.MustCompile(`(?i)\bparrot-passable\b|\bshape-only\b|\bpasses garbage\b|\banchor >=1\b`)
+
 // droppedSentence records a sentence the compact profile deliberately drops, in the tools named, with the class of reason that makes
 // that safe (a key of dropClasses) and, for a sentence that carries a rule word, an explicit reason of its own.
 type droppedSentence struct {
