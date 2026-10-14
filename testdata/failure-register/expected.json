@@ -46,6 +46,12 @@
     "config",
     "other"
   ],
+  "uninvestigated_classes": [
+    "capacity_wait",
+    "config",
+    "other",
+    "stall_prefill"
+  ],
   "classes": [
     {
       "class": "node_busy",
@@ -102,6 +108,7 @@
         }
       ],
       "documented": true,
+      "investigated": true,
       "meaning": "A seat answered a capacity defer after admission.",
       "root_cause": "Another job held what the call needed.",
       "structural_fix": "open"
@@ -168,6 +175,7 @@
         }
       ],
       "documented": true,
+      "investigated": true,
       "meaning": "The model ran and gave no usable answer.",
       "root_cause": "The work, not the stack.",
       "structural_fix": "open"
@@ -219,6 +227,7 @@
         }
       ],
       "documented": true,
+      "investigated": true,
       "meaning": "A result failed the contract's own checks.",
       "root_cause": "not recorded",
       "structural_fix": "Tighten the contract (synthetic row)."
@@ -259,6 +268,7 @@
         }
       ],
       "documented": false,
+      "investigated": false,
       "meaning": "undocumented",
       "root_cause": "undocumented",
       "structural_fix": "undocumented"
@@ -299,6 +309,7 @@
         }
       ],
       "documented": true,
+      "investigated": true,
       "meaning": "A ceiling stopped the run.",
       "root_cause": "A step budget.",
       "structural_fix": "open"
@@ -339,6 +350,7 @@
         }
       ],
       "documented": false,
+      "investigated": false,
       "meaning": "undocumented",
       "root_cause": "undocumented",
       "structural_fix": "undocumented"
@@ -379,6 +391,7 @@
         }
       ],
       "documented": true,
+      "investigated": true,
       "meaning": "No node answered.",
       "root_cause": "The network path.",
       "structural_fix": "open"
@@ -419,6 +432,7 @@
         }
       ],
       "documented": false,
+      "investigated": false,
       "meaning": "undocumented",
       "root_cause": "undocumented",
       "structural_fix": "undocumented"
@@ -459,6 +473,7 @@
         }
       ],
       "documented": true,
+      "investigated": true,
       "meaning": "A node owned the job and it did not finish inside the poll budget.",
       "root_cause": "A job larger than the budget.",
       "structural_fix": "open"
@@ -499,6 +514,7 @@
         }
       ],
       "documented": true,
+      "investigated": false,
       "meaning": "The run went silent while the prompt was being processed.",
       "root_cause": "Not recorded.",
       "structural_fix": "open"

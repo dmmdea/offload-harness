@@ -23,6 +23,8 @@ import (
 // human half: the table in docs/systems/failure-register.md gives each class its meaning, root cause and
 // structural fix, and the two are joined here BY CLASS NAME. Nothing in code supplies a root cause or a fix: a
 // class with no row in the table says "undocumented", a row with an empty cell says "not recorded" / "open".
+// A class counts as investigated only when its row holds a root cause or a structural fix a person wrote:
+// having a row is not that, so the register can still say which classes nobody has looked into.
 
 // failureRegisterDoc is the page the table lives on, embedded so a built binary carries the table it was built
 // with and needs no checkout to run. --table reads another copy.
@@ -41,12 +43,16 @@ const (
 // failureDoc is one row of the human-maintained table.
 type failureDoc struct {
 	Meaning, RootCause, StructuralFix string
+	// Investigated is true when the root-cause or structural-fix cell holds something a person wrote: not empty, and
+	// not the default the report prints for an empty cell.
+	Investigated bool
 }
 
 // failureClassOut is a class of the ledger's register with the joined table row.
 type failureClassOut struct {
 	ledger.FailureClass
 	Documented    bool   `json:"documented"`
+	Investigated  bool   `json:"investigated"`
 	Meaning       string `json:"meaning"`
 	RootCause     string `json:"root_cause"`
 	StructuralFix string `json:"structural_fix"`
@@ -69,7 +75,10 @@ type failureReport struct {
 	RowsWithTokens        int                       `json:"rows_with_tokens"`
 	ExcludedNonProduction map[string]int            `json:"excluded_non_production,omitempty"`
 	UndocumentedClasses   []string                  `json:"undocumented_classes"`
-	Classes               []failureClassOut         `json:"classes"`
+	// UninvestigatedClasses are the classes in the ledger with no root cause and no structural fix written by a
+	// person: a class with no row (undocumented) is among them.
+	UninvestigatedClasses []string          `json:"uninvestigated_classes"`
+	Classes               []failureClassOut `json:"classes"`
 }
 
 // runLedgerMode is the ledger verb's entry (the one line main.go changed): the failure register when --failures is
@@ -195,19 +204,23 @@ func joinFailureDocs(reg ledger.FailureRegister, docs map[string]failureDoc) fai
 		LedgerFound: reg.LedgerFound, UnparsedLines: reg.UnparsedLines,
 		JobRows: reg.JobRows, FailureRows: reg.FailureRows, RefusedAttempts: reg.RefusedAttempts, StackFaultRows: reg.StackFaultRows, StackFaultShare: reg.StackFaultShare, Kinds: reg.Kinds, ClassDerivedRows: reg.ClassDerivedRows,
 		CardsTokens: reg.CardsTokens, RowsWithTokens: reg.RowsWithTokens, ExcludedNonProduction: reg.ExcludedNonProduction,
-		UndocumentedClasses: []string{}, Classes: make([]failureClassOut, 0, len(reg.Classes)),
+		UndocumentedClasses: []string{}, UninvestigatedClasses: []string{}, Classes: make([]failureClassOut, 0, len(reg.Classes)),
 	}
 	for _, c := range reg.Classes {
 		row := failureClassOut{FailureClass: c}
 		if d, ok := docs[c.Class]; ok {
-			row.Documented, row.Meaning, row.RootCause, row.StructuralFix = true, d.Meaning, d.RootCause, d.StructuralFix
+			row.Documented, row.Investigated, row.Meaning, row.RootCause, row.StructuralFix = true, d.Investigated, d.Meaning, d.RootCause, d.StructuralFix
 		} else {
 			row.Meaning, row.RootCause, row.StructuralFix = undocumentedClass, undocumentedClass, undocumentedClass
 			out.UndocumentedClasses = append(out.UndocumentedClasses, c.Class)
 		}
+		if !row.Investigated {
+			out.UninvestigatedClasses = append(out.UninvestigatedClasses, c.Class)
+		}
 		out.Classes = append(out.Classes, row)
 	}
 	sort.Strings(out.UndocumentedClasses)
+	sort.Strings(out.UninvestigatedClasses)
 	return out
 }
 
@@ -239,6 +252,7 @@ func parseFailureTable(text string) (map[string]failureDoc, error) {
 			return nil, fmt.Errorf("class %q has two rows", class)
 		}
 		d := failureDoc{Meaning: r[col["meaning"]], RootCause: r[col["root cause"]], StructuralFix: r[col["structural fix"]]}
+		d.Investigated = isWrittenFinding(d.RootCause, notRecordedCause) || isWrittenFinding(d.StructuralFix, openFix)
 		if d.RootCause == "" {
 			d.RootCause = notRecordedCause
 		}
@@ -248,6 +262,13 @@ func parseFailureTable(text string) (map[string]failureDoc, error) {
 		docs[class] = d
 	}
 	return docs, nil
+}
+
+// isWrittenFinding reports whether a root-cause or structural-fix cell holds something a person wrote: it is not
+// empty and not the default the report prints for an empty cell (def), however it is capitalised or punctuated.
+func isWrittenFinding(cell, def string) bool {
+	c := strings.ToLower(strings.Trim(strings.TrimSpace(cell), ". "))
+	return c != "" && c != def
 }
 
 var tableSeparatorCell = regexp.MustCompile(`^:?-{3,}:?$`)

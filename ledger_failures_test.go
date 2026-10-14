@@ -634,3 +634,46 @@ func TestEmbeddedFailureTableShipsOnlyInvestigatedCells(t *testing.T) {
 		}
 	}
 }
+
+// The kinds table on the page is the code's: each row lists exactly the classes the code files under that kind, and
+// every failure class is in one row. The table is prose a reader trusts, so it is held to the map it describes.
+func TestFailureRegisterDocKindTableMatchesTheCode(t *testing.T) {
+	header, rows, err := readMarkdownTable(failureRegisterDoc, "kind")
+	if err != nil {
+		t.Fatalf("kinds table: %v", err)
+	}
+	if len(header) != 3 {
+		t.Fatalf("kinds table header = %v, want kind | meaning | classes", header)
+	}
+	documented := map[string]string{} // class -> kind on the page
+	pageKinds := []string{}
+	for _, r := range rows {
+		kind := strings.Trim(r[0], "` ")
+		pageKinds = append(pageKinds, kind)
+		for _, class := range strings.Split(r[2], ",") {
+			class = strings.Trim(class, "` ")
+			if prev, dup := documented[class]; dup {
+				t.Errorf("class %q is in two rows of the kinds table (%s and %s)", class, prev, kind)
+			}
+			documented[class] = kind
+		}
+	}
+	sort.Strings(pageKinds)
+	wantKinds := ledger.FailureKinds()
+	sort.Strings(wantKinds)
+	if !reflect.DeepEqual(pageKinds, wantKinds) {
+		t.Errorf("the kinds table lists %v, the code has %v", pageKinds, wantKinds)
+	}
+	for _, class := range ledger.ReasonCodes() {
+		if class == ledger.ReasonOK || class == ledger.ReasonStarted {
+			continue
+		}
+		if got, want := documented[class], ledger.FailureKindOf(class); got != want {
+			t.Errorf("class %q: the page files it under %q, the code under %q", class, got, want)
+		}
+		delete(documented, class)
+	}
+	for class := range documented {
+		t.Errorf("the kinds table names %q, which is not a failure class", class)
+	}
+}
