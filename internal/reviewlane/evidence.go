@@ -285,6 +285,12 @@ func conflictMarkerLine(diff string) int {
 	return 0
 }
 
+// Refused is the evidence of a review refused before any diff was read (stub).
+func Refused(reason string) Evidence { return Evidence{} }
+
+// TracePathFor is where the durable trace lives (stub).
+func TracePathFor(ledgerPath, fallbackDir string) string { return "" }
+
 // WithPrompt records the digest of the prompt the seat is shown.
 func (e Evidence) WithPrompt(goal string) Evidence {
 	e.PromptSHA256 = Fingerprint(goal)

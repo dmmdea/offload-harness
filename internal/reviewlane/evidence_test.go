@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -483,5 +484,283 @@ func TestTraceTextIsBoundedAndRuneSafe(t *testing.T) {
 	}
 	if fnd["sha256"] == "" {
 		t.Error("the digest covers the full text, so a cut claim is still identifiable")
+	}
+}
+
+// RSI-OH-4#0: a review refused before any diff was read is bound to nothing and says why. It is
+// a NOT_RUN with the refusal as its reason, zero bytes, and no fingerprint (a fingerprint would
+// bind the refusal to bytes nobody chose), and Seal gives it its trace row like any other.
+func TestARefusalBeforeAnyDiffIsADiffLessNotRun(t *testing.T) {
+	const reason = "pass diff OR diff_path, not both"
+	ev := Refused(reason)
+	if ev.Refusal != reason || ev.DiffBytes != 0 || ev.DiffSHA256 != "" || len(ev.Gates) != 0 {
+		t.Fatalf("a diff-less refusal carries the reason and nothing about any diff: %+v", ev)
+	}
+	// Whatever else a caller hands Decide, a refusal wins: there is nothing to PASS.
+	seated := ev
+	seated.Seat = &SeatReceipt{Seat: "fake-seat", Steps: 1}
+	for name, d := range map[string]Delivery{"no run": {}, "a delivered clean run": {Delivered: true}} {
+		v := Decide(seated, d)
+		if v.Outcome != OutcomeNotRun || v.Reason != reason {
+			t.Errorf("%s: %+v, want NOT_RUN naming the refusal", name, v)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), TraceFile)
+	out := Seal(map[string]any{"deferred": true, "reason": reason}, ev, Run{}, path)
+	if out["deferred"] != true || out["reason"] != reason {
+		t.Errorf("the deferral shape must be kept: %v", out)
+	}
+	if out["outcome"] != OutcomeNotRun || out["outcome_reason"] != reason {
+		t.Errorf("outcome = %v / %v, want NOT_RUN with the refusal reason", out["outcome"], out["outcome_reason"])
+	}
+	if out["trace_error"] != nil {
+		t.Fatalf("trace_error = %v", out["trace_error"])
+	}
+	rows := readTrace(t, path)
+	if len(rows) != 1 || rows[0]["kind"] != "review" || rows[0]["outcome"] != OutcomeNotRun {
+		t.Fatalf("a refusal leaves its review row: %v", rows)
+	}
+	if e, _ := rows[0]["evidence"].(map[string]any); e["refusal"] != reason || e["diff_bytes"].(float64) != 0 || e["diff_sha256"] != nil {
+		t.Errorf("the trace row's evidence: %v", e)
+	}
+	b, _ := json.Marshal(ev)
+	if !strings.Contains(string(b), `"diff_bytes":0`) || strings.Contains(string(b), "diff_sha256") {
+		t.Errorf("a diff-less evidence publishes diff_bytes 0 and no fingerprint: %s", b)
+	}
+}
+
+// RSI-OH-4#3 (conductor decision): a run the node filed as a deferral, which the lane read as a
+// clean NONE, is NOT_RUN and never PASS. Findings salvaged from the same kind of run stay
+// FINDINGS: that is what the salvage is for.
+func TestANodeDeferredRunReadAsACleanNoneIsNotRunNeverPass(t *testing.T) {
+	deferred := core.AgentWireResult{Seat: "fake-seat", Output: "NONE", Steps: 2, StopReason: "done",
+		Deferred: true, SchemaMiss: true, DeferClass: core.DeferClassBudget, Reason: "structured re-pack skipped"}
+	path := filepath.Join(t.TempDir(), TraceFile)
+
+	out := sealedPayload()
+	out["salvaged"] = SalvagedWall
+	got := Seal(out, mustEvidence(t, evDiff), Run{Delivered: true, Wire: &deferred}, path)
+	if got["outcome"] != OutcomeNotRun {
+		t.Fatalf("outcome = %v, want NOT_RUN for a deferred run read as clean", got["outcome"])
+	}
+	reason, _ := got["outcome_reason"].(string)
+	if !strings.Contains(reason, "deferral") || !strings.Contains(reason, "never a PASS") {
+		t.Errorf("the reason must say the node filed a deferral: %q", reason)
+	}
+	for _, banned := range []string{"wall", "clock", "timed out", "second"} {
+		if strings.Contains(strings.ToLower(reason), banned) {
+			t.Errorf("a verdict reason carries no timing term, found %q in %q", banned, reason)
+		}
+	}
+	seat := got["evidence"].(Evidence).Seat
+	if seat == nil || !seat.Deferred || seat.Salvaged != SalvagedWall {
+		t.Errorf("the receipt records the attempt as it was: %+v", seat)
+	}
+
+	// The same deferred run with a surviving finding is a review with findings.
+	withFinding := sealedPayload(Finding{Severity: "severe", File: "run.go", Line: 5, Claim: "c", Why: "w"})
+	withFinding["salvaged"] = SalvagedWall
+	if got := Seal(withFinding, mustEvidence(t, evDiff), Run{Delivered: true, Wire: &deferred}, path); got["outcome"] != OutcomeFindings {
+		t.Errorf("a salvaged deferral with findings: outcome = %v, want FINDINGS", got["outcome"])
+	}
+
+	// Decide reads the receipt itself, so a caller that builds its own flow cannot reach PASS.
+	ev := mustEvidence(t, evDiff)
+	ev.Seat = &SeatReceipt{Seat: "fake-seat", Steps: 2, Deferred: true}
+	if v := Decide(ev, Delivery{Delivered: true}); v.Outcome != OutcomeNotRun {
+		t.Errorf("Decide: %+v, want NOT_RUN", v)
+	}
+	ev.Seat.Deferred = false
+	if v := Decide(ev, Delivery{Delivered: true}); v.Outcome != OutcomePass {
+		t.Errorf("the same receipt without the deferral is a PASS: %+v", v)
+	}
+}
+
+// The seat receipt is pinned through Seal, not only through SeatReceiptOf: node, executed_on,
+// the salvage flag and the deferral flag all have to arrive on the published evidence.
+func TestSealPublishesTheSeatReceiptsProvenance(t *testing.T) {
+	wire := core.AgentWireResult{Seat: "qwen-27b", NodeID: "id-1", Output: "NONE", Steps: 3, StopReason: "done", Deferred: true}
+	out := sealedPayload()
+	out["salvaged"] = SalvagedWall
+	got := Seal(out, mustEvidence(t, evDiff), Run{Delivered: true, Wire: &wire,
+		Extra: map[string]any{"executed_on": "fleet", "node": "node-b"}}, filepath.Join(t.TempDir(), TraceFile))
+	seat := got["evidence"].(Evidence).Seat
+	if seat == nil {
+		t.Fatal("no seat receipt")
+	}
+	if seat.Seat != "qwen-27b" || seat.NodeID != "id-1" || seat.Node != "node-b" || seat.ExecutedOn != "fleet" ||
+		seat.Salvaged != SalvagedWall || !seat.Deferred || seat.Steps != 3 || seat.StopReason != "done" || seat.AnswerSHA256 != Fingerprint("NONE") {
+		t.Errorf("seat receipt through Seal: %+v", seat)
+	}
+}
+
+// RSI-OH-4#2: the dropped_* counts of the payload become Delivery.Filtered inside Seal. A clean
+// NONE beside lines the filters discarded is a seat that contradicted itself, never a PASS,
+// whichever filter took them. The counts are Go ints, as the door publishes them.
+func TestSealTurnsDroppedCountsIntoNotRun(t *testing.T) {
+	wire := core.AgentWireResult{Seat: "fake-seat", Output: "NONE", Steps: 2, StopReason: "done"}
+	cases := map[string]struct {
+		counts map[string]any
+		sum    string
+	}{
+		"echo alone":          {map[string]any{"dropped_echo": 2}, "2 finding-shaped"},
+		"hollow alone":        {map[string]any{"dropped_hollow": 3}, "3 finding-shaped"},
+		"ungrounded alone":    {map[string]any{"dropped_ungrounded": 4}, "4 finding-shaped"},
+		"all three, distinct": {map[string]any{"dropped_echo": 1, "dropped_hollow": 2, "dropped_ungrounded": 4}, "7 finding-shaped"},
+	}
+	for name, c := range cases {
+		out := sealedPayload()
+		for k, v := range c.counts {
+			out[k] = v
+		}
+		got := Seal(out, mustEvidence(t, evDiff), Run{Delivered: true, Wire: &wire}, filepath.Join(t.TempDir(), TraceFile))
+		reason, _ := got["outcome_reason"].(string)
+		if got["outcome"] != OutcomeNotRun || !strings.Contains(reason, c.sum) || !strings.Contains(reason, "discarded every one") {
+			t.Errorf("%s: outcome %v, reason %q, want NOT_RUN naming %q", name, got["outcome"], reason, c.sum)
+		}
+	}
+	// No drops, no findings: the seat's NONE stands and the same payload is a PASS.
+	if got := Seal(sealedPayload(), mustEvidence(t, evDiff), Run{Delivered: true, Wire: &wire}, filepath.Join(t.TempDir(), TraceFile)); got["outcome"] != OutcomePass {
+		t.Errorf("a clean NONE with nothing dropped: outcome = %v", got["outcome"])
+	}
+	// A surviving finding means the filters did not empty the list.
+	f := sealedPayload(Finding{Severity: "minor", File: "run.go", Line: 1, Claim: "c", Why: "w"})
+	f["dropped_hollow"] = 2
+	if got := Seal(f, mustEvidence(t, evDiff), Run{Delivered: true, Wire: &wire}, filepath.Join(t.TempDir(), TraceFile)); got["outcome"] != OutcomeFindings {
+		t.Errorf("findings beside drops: outcome = %v", got["outcome"])
+	}
+}
+
+// RSI-OH-4#5 (conductor decision): once the review names a head commit, a handed gate receipt
+// that names none is unbound, so it cannot support a PASS. The lane's own gates carry no commit
+// and are never caught by this.
+func TestAHandedReceiptWithNoCommitCannotSupportPassOnABoundReview(t *testing.T) {
+	ev := mustEvidence(t, evDiff, GateReceipt{Name: "go-test", Status: "pass", Detail: "ok"})
+	if ev.GatesPassed() {
+		t.Fatalf("an unbound receipt cannot support a PASS on a review with a head: %+v", ev.Gates)
+	}
+	v := Decide(cleanSeat(ev), Delivery{Delivered: true})
+	if v.Outcome != OutcomeGateFailed || !strings.Contains(v.Reason, "go-test") || !strings.Contains(v.Reason, "names no commit") {
+		t.Errorf("clean seat + unbound receipt: %+v, want GATE_FAILED naming the receipt", v)
+	}
+	if v := Decide(cleanSeat(ev), Delivery{Delivered: true, Findings: 1}); v.Outcome != OutcomeFindings {
+		t.Errorf("findings beside an unbound receipt stay FINDINGS: %+v", v)
+	}
+	if !ev.Gates[0].Passed() || !ev.Gates[1].Passed() {
+		t.Errorf("the lane's own gates name no commit and must never be caught: %+v", ev.Gates[:2])
+	}
+	// A receipt that names the head (or an abbreviation of it) is bound.
+	bound := mustEvidence(t, evDiff, GateReceipt{Name: "go-test", Status: "pass", HeadSHA: evHead})
+	if !bound.GatesPassed() {
+		t.Errorf("a receipt for the head is bound: %+v", bound.Gates)
+	}
+	// A review with no head has nothing to bind to: a receipt with none stands, as before.
+	unbound, err := NewEvidence(evDiff, evBase, "", []GateReceipt{{Name: "go-test", Status: "pass"}})
+	if err != nil || !unbound.GatesPassed() {
+		t.Errorf("no head on the review, no commit on the receipt: %v %+v", err, unbound.Gates)
+	}
+	// A failing receipt with no commit still blocks PASS, and is named as red, not as unbound.
+	red := mustEvidence(t, evDiff, GateReceipt{Name: "lint", Status: "fail"})
+	if v := Decide(cleanSeat(red), Delivery{Delivered: true}); v.Outcome != OutcomeGateFailed || strings.Contains(v.Reason, "names no commit") {
+		t.Errorf("a red receipt is named as red: %+v", v)
+	}
+}
+
+// RSI-OH-4#6: the trace sits beside the ledger, derived from the ledger's own path.
+func TestTracePathSitsBesideTheLedger(t *testing.T) {
+	dir := t.TempDir()
+	if got, want := TracePathFor(filepath.Join(dir, "led", "ledger.jsonl"), filepath.Join(dir, "home")), filepath.Join(dir, "led", TraceFile); got != want {
+		t.Errorf("TracePathFor = %q, want the ledger's directory: %q", got, want)
+	}
+	// No ledger path configured: the harness home, never the working directory.
+	if got, want := TracePathFor("", filepath.Join(dir, "home")), filepath.Join(dir, "home", TraceFile); got != want {
+		t.Errorf("TracePathFor(no ledger) = %q, want %q", got, want)
+	}
+}
+
+// RSI-OH-4#4: boundaries that the first tests only approached from one side.
+func TestConflictMarkerBoundaries(t *testing.T) {
+	// The only marker is an added closing line: the opening marker is not what trips the gate.
+	closing := mustEvidence(t, evDiff+"+>>>>>>> branch\n")
+	if closing.GatesPassed() {
+		t.Error("an added closing conflict marker must fail the conflict-markers gate")
+	}
+	bare := mustEvidence(t, evDiff+"+>>>>>>>\n")
+	if bare.GatesPassed() {
+		t.Error("a closing marker with nothing after it is still a marker")
+	}
+	for _, g := range closing.Gates {
+		if g.Name == "conflict-markers" && !strings.Contains(g.Detail, "line 6") {
+			t.Errorf("the gate must point at the marker's diff line: %q", g.Detail)
+		}
+	}
+}
+
+func TestReceiptAndCommitIDBounds(t *testing.T) {
+	exactly := make([]GateReceipt, MaxGateReceipts)
+	for i := range exactly {
+		exactly[i] = GateReceipt{Name: "g", Status: "pass", HeadSHA: evHead}
+	}
+	if ev, err := NewEvidence(evDiff, evBase, evHead, exactly); err != nil || len(ev.Gates) != 2+MaxGateReceipts {
+		t.Fatalf("exactly %d receipts are accepted: %v, %d gates", MaxGateReceipts, err, len(ev.Gates))
+	}
+	hex := func(n int) string { return strings.Repeat("a", n) }
+	for _, n := range []int{7, 40, 64} {
+		if ev, err := NewEvidence(evDiff, "", hex(n), nil); err != nil || ev.HeadSHA != hex(n) {
+			t.Errorf("a %d-character commit id is valid: %v", n, err)
+		}
+	}
+	for _, n := range []int{6, 65, 80} {
+		if _, err := NewEvidence(evDiff, "", hex(n), nil); !errors.Is(err, ErrBadBinding) || !strings.Contains(err.Error(), "head_sha") {
+			t.Errorf("a %d-character commit id is refused naming head_sha: %v", n, err)
+		}
+	}
+}
+
+// Two sealed reviews of the same diff are two reviews: their rows must not share a join key.
+func TestReviewIDsAreDistinctForTheSameDiff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), TraceFile)
+	wire := core.AgentWireResult{Seat: "fake-seat", Output: "NONE", Steps: 1, StopReason: "done"}
+	for i := 0; i < 3; i++ {
+		Seal(sealedPayload(Finding{Severity: "minor", File: "run.go", Line: 1, Claim: "c", Why: "w"}), mustEvidence(t, evDiff), Run{Delivered: true, Wire: &wire}, path)
+	}
+	seen := map[string]bool{}
+	rows := readTrace(t, path)
+	for _, r := range rows {
+		if r["kind"] == "review" {
+			id, _ := r["review_id"].(string)
+			if id == "" || seen[id] {
+				t.Errorf("review_id %q is empty or reused", id)
+			}
+			seen[id] = true
+		}
+	}
+	if len(seen) != 3 || len(rows) != 6 {
+		t.Fatalf("want 3 distinct reviews over 6 rows, got %d ids over %d rows", len(seen), len(rows))
+	}
+	for i := 0; i < len(rows); i += 2 {
+		if rows[i]["review_id"] != rows[i+1]["review_id"] {
+			t.Errorf("a finding row joins its own review: %v / %v", rows[i], rows[i+1])
+		}
+	}
+}
+
+// The trace holds the seat's short statements about someone else's code: owner-only. POSIX file
+// modes cannot be asserted on Windows, so this test is skipped there rather than passing vacuously.
+func TestTraceFileIsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are not enforced on Windows")
+	}
+	path := filepath.Join(t.TempDir(), TraceFile)
+	if err := AppendTrace(path, TraceRow{Kind: "review", ReviewID: "x", Outcome: OutcomeNotRun}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("trace file mode = %o, want 600", mode)
 	}
 }
