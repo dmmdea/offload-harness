@@ -374,9 +374,14 @@ var compactKeep = []compactKeepEntry{
 	// note is the sentence that says the call goes to another node and the image bytes travel with it. The note names the device, so
 	// there is one entry per device, each listing the tools that device's table has.
 	{
-		Tools:    []string{"offload_face_detect", "offload_face_embed", "offload_object_detect", "offload_person_embed", "offload_depth", "offload_enhance_low_light", "offload_image_embed", "offload_pose", "offload_segment", "offload_text_embed", "offload_zero_shot"},
+		Tools:    []string{"offload_face_detect", "offload_face_embed", "offload_object_detect", "offload_person_embed", "offload_depth", "offload_enhance_low_light", "offload_image_embed", "offload_pose", "offload_segment", "offload_zero_shot"},
 		Sentence: "[FLEET: this box has no hailo-8l — the call is forwarded to the fleet node that does; image_path is read HERE and its bytes travel with the job (cap 8 MiB); the result carries placement{node,wall_ms}]",
 		Why:      "the forwarding note of a fleet accelerator: the call is forwarded to another node and the image bytes travel with it, which the opening sentence (on-box, free) does not say",
+	},
+	{
+		Tools:    []string{"offload_text_embed"},
+		Sentence: "[FLEET: this box has no hailo-8l — the call is forwarded to the fleet node that does; text travels with the job; the result carries placement{node,wall_ms}]",
+		Why:      "the forwarding note of a fleet accelerator, for the one tool that takes text and no image: the call is forwarded to another node and the text travels with it, which the opening sentence (on-box, free) does not say",
 	},
 	{
 		Tools:    []string{"offload_classify_image", "offload_object_detect", "offload_semantic_segment", "offload_image_embed"},

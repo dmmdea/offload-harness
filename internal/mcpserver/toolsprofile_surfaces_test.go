@@ -218,10 +218,14 @@ func TestCompactKeepsTheFleetForwardingSentence(t *testing.T) {
 			if !strings.Contains(cd[ft.Name], note) {
 				t.Errorf("%s: %s: compact dropped the forwarding note: %q\n compact description: %s", s.name, ft.Name, note, cd[ft.Name])
 			}
-			for _, word := range []string{"is forwarded to the fleet node", "bytes travel with the job"} {
+			// An image tool's bytes travel with the job; the one text tool's text does.
+			for _, word := range []string{"is forwarded to the fleet node", "with the job"} {
 				if !strings.Contains(note, word) {
 					t.Errorf("%s: %s: the forwarding note no longer says %q (reworded?): %s", s.name, ft.Name, word, note)
 				}
+			}
+			if !strings.Contains(note, "bytes travel with the job") && !strings.Contains(note, "text travels with the job") {
+				t.Errorf("%s: %s: the forwarding note does not say what travels with the job: %s", s.name, ft.Name, note)
 			}
 		}
 	}

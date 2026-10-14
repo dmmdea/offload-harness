@@ -180,7 +180,7 @@ What `"compact"` does, per tool and per parameter at every depth:
 - Cuts each description to its first sentence (grown to the next sentence when the first is under 28 characters, and
   shortened at a clause boundary when it runs past 320 characters for a tool or 200 for a parameter and the dropped part
   carries no constraint word and does not say the data leaves the box), plus the sentences a reviewed per-tool keep-list
-  names ([`toolsprofile_keep.go`](../../internal/mcpserver/toolsprofile_keep.go), 73 entries), verbatim and in the order
+  names ([`toolsprofile_keep.go`](../../internal/mcpserver/toolsprofile_keep.go), 74 entries), verbatim and in the order
   the description has them. An entry is a sentence a caller must not be without: a prohibition, a trust or privacy
   boundary, the statement that a call is forwarded to another node and its image or audio bytes travel with it, a cost
   rule, a limit the schema cannot express, the "if it cannot, it returns `deferred:true` and you do the work yourself"
@@ -300,14 +300,14 @@ sentences that rule lost.
 
 The keep-list's own figures before the data-leaves-the-box words joined the gate were 16,811 (31 tools), 6,626 (`recon`),
 10,192 (the other nineteen) and 19,116 (45 tools); they grew by 469, 56, 413 and 528 tokens. The growth is five things: the
-clause-boundary cut no longer drops the "input files you name travel to it" tail of the `route` parameter on five tools
-(the three generators, `offload_animate_character`, `offload_run_graph`), the vision tools' "the image ... travels with the
-job" sentence (`offload_assess_image`, `offload_ocr`, `offload_vqa`), transcribe's route sentence, the compose-video tool's route sentence (80 tokens: the render and the project bundle go to a
-fleet node), and on the 45-tool surface the browse typed-decision sentence. The four Tier-1 tools do not move, and of the
-per-tool figures above only the compose-video one does. On the variant whose
-three accelerators are fleet accelerators (45 tools, 13 of them forwarders carrying the note) the lists measure 34,250 full
-and 20,365 compact in the template rendering (the note is kept, so it is in both); the 13 forwarding notes together are 718 tokens
-of the full list.
+clause-boundary cut no longer drops the "input files you name travel to it" tail of the `route` parameter on five tools (the
+three generators, `offload_animate_character`, `offload_run_graph`), the vision tools' "the image ... travels with the job"
+sentence (`offload_assess_image`, `offload_ocr`, `offload_vqa`), transcribe's route sentence, the compose-video tool's route
+sentence (80 tokens: the render and the project bundle go to a fleet node), and on the 45-tool surface the browse
+typed-decision sentence. The four Tier-1 tools do not move, and of the per-tool figures above only the compose-video one
+does. On the variant whose three accelerators are fleet accelerators (45 tools, 13 of them forwarders carrying the note) the
+lists measure 34,237 full and 20,352 compact in the template rendering (the note is kept, so it is in both); the 13
+forwarding notes together are 705 tokens of the full list.
 
 The default is unchanged: with no key, with `"full"`, and with the shipped `Default()`, the `tools/list` result is
 byte-identical to the one the 0.186.0 base advertises (SHA-256 `e4840d2c3a9e879d...` for both, captured with the helper
