@@ -1569,6 +1569,39 @@ second device exists:
   namespace, L1 size and chunk into `seat.env`; the tier keeps the mount point, the write floor, the
   prune target, the writer count and the cap, which are properties of the share rather than the
   namespace.
+- **Rendering a Windows/WSL seat (`launch: windows-wsl`: the blackwell-2x16 and blackwell-3x16 tiers):** the command
+  takes its templates from the seat's launch, so these tiers render `<seat id>.env` (plus `templates/<name>` when the
+  tier names a shipped chat template) and the four Windows scripts (`seat-cmd.ps1`, `seat-cmdstop.ps1`, `hidden.vbs`,
+  `register-seat-tasks.ps1`), and never a systemd unit or a polkit rule. The tier states the operating point; the box
+  supplies its own half as flags, none of them hardened into the tier:
+
+  | flag | meaning |
+  |---|---|
+  | `--distro` | the WSL distribution the engine runs in (required) |
+  | `--venv`, `--hf-home` | the vLLM virtualenv and the HF cache, required, as paths INSIDE the distro (`/opt/seat/vllm-env`, `/hf`); the defaults hang off `--home` and `$HF_HOME`, which are Windows paths here, so they are refused |
+  | `--wsl-seat-dir` | the seat directory inside the distro (default `/opt/seat`) |
+  | `--lmcache-overlay` | the patched LMCache directory, a distro path; required for an fp8 KV seat with a cache server, because stock LMCache restores fp8 pages corrupt (upstream PR #4253) |
+  | `--cache-mount-src`, `--cache-mount-opts` | the export the wrapper mounts before the MP server starts (`//store.example/kvcache`) and its mount options; empty = already mounted |
+  | `--host-prefix` | where this machine reads the distro's filesystem for the prerequisite check (`//wsl.localhost/<distro>`); never written to a file |
+
+  ```sh
+  local-offload install vllm-seat --profile blackwell-3x16 --root <repo> --home C:/llama-swap --user <account> \
+    --proxy-host 127.0.0.1 --distro <distro> --venv /opt/seat/vllm-env --hf-home /hf \
+    --lmcache-overlay /opt/seat/lmcache-overlay --host-prefix //wsl.localhost/<distro> [--config <config.json>]
+  ```
+
+  The command only writes files: it copies nothing into the distro and registers no task, and it says so in its
+  output. Copy `<seat id>.env` (and `templates/`) with the shipped `seat_fg.sh` and `seat_stop.sh` into the distro's
+  seat directory, keep the four Windows scripts in the Windows seat directory the llama-swap entry runs them from, and
+  run `register-seat-tasks.ps1` once, elevated. The llama-swap entry is not written by this command (the Windows
+  installer binds the tier's fallback seat); `setup/templates/vllm-seat/llama-swap-entry.yaml` is its reference, kept
+  equal to what the renderer writes by `TestVLLMSeatReferenceEntryDeclaresWhatEntryRenders`: `ttl: 300`,
+  `concurrencyLimit` equal to `max_num_seqs`, `useModelName`, and the two PowerShell stubs as `cmd` and `cmdStop`.
+  Parity is a diff, not a belief: render the tier and compare the box's seat env with the result
+  (`TestCommittedTiersRenderTheirMeasuredSeatEnv` pins what each committed tier renders).
+  `--user` and `--proxy-host` are still required (`--user` is the interactive Windows account the tasks are registered
+  for). The windows-wsl-only flags (`--distro`, `--wsl-seat-dir`, `--host-prefix`, `--cache-mount-*`) are an error, not a
+  silent no-op, on a seat that starts through systemd.
 - **A seat that names a shipped chat template (`chat_template`, e.g. the blackwell-3x16 seat's
   `qwen3-fold-system.jinja`):** the render includes `templates/<name>` beside `<seat id>.env`, and
   `SEAT_EXTRA_ARGS` passes `--chat-template <WSL seat dir>/templates/<name>`. Copy the whole render —
