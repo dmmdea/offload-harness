@@ -739,6 +739,37 @@ func TestConstantDifferenceAtTheMarginByFloatArithmeticIsNotAdopted(t *testing.T
 	}
 }
 
+// An end of the interval that sits on the line by arithmetic and a bit off it by float rounding is on the line.
+// The verdict compares the ends to the boundary with a tolerance of 1e-9 of the score range, so an interval
+// that touches the margin (or 0) is neither an ADOPT nor a BLOCK whichever way the last bit of a sum fell:
+//   - 60 ties that are not exactly ties (0.1 + 0.2 against 0.3, 5.6e-17 apart): lo = -0.04999999999999995;
+//   - 30 pairs that each gain 0.05 as 0.55 - 0.5 = 0.05000000000000004: lo = -0.04999999999999996;
+//   - 60 pairs that each lose 0.1 as 0.7 - 0.8 = -0.10000000000000009: hi = -0.050000000000000086;
+//   - the same gain of 0.05 at 60 pairs against 0 in superiority: lo = 4.2e-17.
+func TestAnIntervalEndOnTheLineByFloatArithmeticIsNeitherAdoptNorBlock(t *testing.T) {
+	x, y := 0.1, 0.2 // not constants: a constant 0.1 + 0.2 is exactly 0.3
+	for _, tc := range []struct {
+		name      string
+		n         int
+		inc, cand float64
+	}{
+		{"60 ties that are not exact", 60, 0.3, x + y},
+		{"30 pairs that gain 0.05", 30, 0.5, 0.55},
+		{"60 pairs that lose 0.1", 60, 0.8, 0.7},
+	} {
+		r := allTied(t, tc.n, niUnitPre(tc.n), tc.inc, tc.cand)
+		if r.Verdict != VerdictInconclusive {
+			t.Errorf("%s: an interval end on -margin is INCONCLUSIVE, got %s %s (lo %v hi %v)", tc.name, r.Verdict, r.Reason, r.Lo, r.Hi)
+		}
+	}
+	const n = 60
+	b, h := freeze(t, supPre(n), nil)
+	r := mustGate(t, b, h, inputFor(h, arm("i", repeatF(0.5, n), nil), arm("c", repeatF(0.55, n), nil)))
+	if r.Verdict != VerdictInconclusive {
+		t.Errorf("superiority, 60 pairs that gain 0.05: lo is 0 by arithmetic, got %s %s (lo %v)", r.Verdict, r.Reason, r.Lo)
+	}
+}
+
 // The reviewer's P3 variant: the unfinished attempt records no tokens. A candidate that leaves the cost of
 // its timeouts out would keep the efficiency win of its other 24 attempts, so a task with an unfinished
 // attempt of unknown cost is unresolved on that metric (it cannot be measured), and over the cap it stops
