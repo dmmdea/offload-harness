@@ -129,6 +129,15 @@ var layerGuards = map[string]bool{"display_floor": true, "presence": true, "host
 // `LayerSeat(layer, role)` and the seat would sit declared but unplaceable.
 var layerRoles = map[string]bool{"router": true, "agent": true, "long": true, "ocr": true, "vision": true, "stt": true}
 
+// DisplayDeviceAuto is the display_device that names no card: the display_floor guard asks the driver
+// which card drives the monitor and guards that one (see IsAutoDisplayDevice).
+const DisplayDeviceAuto = "auto"
+
+// IsAutoDisplayDevice reports whether a display_device is the DisplayDeviceAuto sentinel.
+func IsAutoDisplayDevice(s string) bool {
+	return false
+}
+
 // presenceModes is the closed vocabulary of Config.OperatorPresence. "" means
 // present (fail closed); the operator opts the display card in with auto/away.
 var presenceModes = map[string]bool{"": true, "auto": true, "away": true, "present": true}
