@@ -1298,11 +1298,21 @@ function Get-DerivedAgentModel {
   return $null
 }
 
-# Get-OffMatrixRungSeed: the escalation and reasoning rungs of a fresh config for a box off the tier matrix.
-# Seam only (0186 w4 fix round): the body arrives with the fix.
+# Get-OffMatrixRungSeed: the escalation and reasoning rungs of a fresh config for a box off the tier matrix
+# (0186 w4). templates/config.json binds both rungs to the 26B. Every shipped tier that does not serve the 26B
+# reseeds them in its own config_seed (ampere-8 and blackwell-8 to a resident agent seat; ampere-6, ampere-16,
+# amd-gcn and rockchip-rk3588 to "", which disables the rung), but an unknown profile has no row and so no seed,
+# and its CUDA fallback render serves no 26B: without this the fresh config names a model its own yaml does not
+# define, and doctor FAILs on the dangling binding right after install. "" is the outcome those tiers reach:
+# internal/config reads an empty escalation_model as "no escalation tier" and an empty reasoning_model as "no
+# reasoning tier" (the cascade defers straight on). Returns $null when a profile row resolved (its own seeds
+# decide) or when the fallback serves the 26B (the vulkan and cpu fallbacks), so the template rungs stand.
+# Only the create path of Step 8 calls it: an existing config.json is never touched (see Step 8).
 function Get-OffMatrixRungSeed {
   param($ProfileRow, $Include26B)
-  return $null
+  if ($null -ne $ProfileRow) { return $null }
+  if ([bool]$Include26B) { return $null }
+  return [pscustomobject]@{ escalation_model = ''; reasoning_model = '' }
 }
 
 # ---------------------------------------------------------------------------
