@@ -123,10 +123,12 @@ func TestAHoldBoundOfZeroKeepsTheWholeWait(t *testing.T) {
 		name  string
 		flags []string
 		cfg   any // gpu_hostram_hold_max_sec, nil = leave the key out
+		wait  string
 	}{
-		{"flag 0", []string{"--ram-hold-max", "0"}, nil},
-		{"config 0", nil, 0},
-		{"flag 0 beats a configured bound", []string{"--ram-hold-max", "0"}, 1},
+		{"flag 0", []string{"--ram-hold-max", "0"}, nil, "2500ms"},
+		{"config 0", nil, 0, "2500ms"},
+		// A configured bound of 1 s would end this wait well before --wait (6 s); the flag's 0 is a value and beats it.
+		{"flag 0 beats a configured bound", []string{"--ram-hold-max", "0"}, 1, "6s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &orderedSwap{drainSwap: &drainSwap{}}
@@ -137,17 +139,18 @@ func TestAHoldBoundOfZeroKeepsTheWholeWait(t *testing.T) {
 			if tc.cfg != nil {
 				setConfigKey(t, cfgPath, "gpu_hostram_hold_max_sec", tc.cfg)
 			}
-			args, epochFile := unloadSeatReserve(t, cfgPath, append([]string{"--wait", "2500ms", "--drain", "--unload-seat", "--ram", "30"}, tc.flags...)...)
+			args, epochFile := unloadSeatReserve(t, cfgPath, append([]string{"--wait", tc.wait, "--drain", "--unload-seat", "--ram", "30"}, tc.flags...)...)
 			start := time.Now()
 			var err error
 			stderr := captureStderr(t, func() { err = runGPUReserve(args) })
 			if err == nil {
 				t.Fatalf("the host never had the room\n%s", stderr)
 			}
-			if took := time.Since(start); took < 2*time.Second {
-				t.Errorf("with no bound the cards are held for the whole --wait (2.5 s), the reserve ended after %s: %v", took, err)
+			waitFor, _ := time.ParseDuration(tc.wait)
+			if took := time.Since(start); took < waitFor-500*time.Millisecond {
+				t.Errorf("with no bound the cards are held for the whole --wait (%s), the reserve ended after %s: %v", waitFor, took, err)
 			}
-			for _, want := range []string{"waiting for host RAM: needs 30.0 GiB, committed 70.0 of 100.0 GiB physical", "--wait 2.5s", "pass a longer --wait"} {
+			for _, want := range []string{"waiting for host RAM: needs 30.0 GiB, committed 70.0 of 100.0 GiB physical", "--wait " + waitFor.String(), "pass a longer --wait"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("the old refusal says %q: %v", want, err)
 				}
