@@ -163,6 +163,7 @@ func TestCBGradeLogCountStripsTheQuestionLabelAndThousandsSeparators(t *testing.
 		"1,234":           "234",
 		"5,600":           "5",
 		"1234,567":        "1234",
+		"1234,567 lines":  "1234567", // not a group: four digits before the comma
 	} {
 		if credited(want, answer) {
 			t.Errorf("answer %q must not be credited as %s", answer, want)

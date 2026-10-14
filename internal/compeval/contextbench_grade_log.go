@@ -28,8 +28,8 @@ var (
 	cbLogTagRE = regexp.MustCompile(`\s*#[0-9a-f]+\s*$`)
 	// cbLogNumberRE is a complete number: optional sign, digits, optional decimals.
 	cbLogNumberRE = regexp.MustCompile(`[-+]?\d+(?:\.\d+)?`)
-	// cbLogLabelRE is the label a model puts before its answer: "Query 3:", "qid=3", "QID #3 ->".
-	cbLogLabelRE = regexp.MustCompile(`(?i)\b(?:qid|query)\s*[=#:]?\s*\d+\s*[:.)>=]*`)
+	// cbLogLabelRE is the label a model puts before its answer: "Query 3", "qid=3", "QID #3".
+	cbLogLabelRE = regexp.MustCompile(`(?i)\b(?:qid|query)\s*[=#:]?\s*\d+`)
 	// cbLogGroupedRE is a number written with thousands separators: groups of exactly three
 	// digits after the first group of one to three ("1,234", "12,800", "1_234").
 	cbLogGroupedRE = regexp.MustCompile(`\b\d{1,3}(?:[,_]\d{3})+\b`)
