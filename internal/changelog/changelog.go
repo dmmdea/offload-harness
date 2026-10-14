@@ -115,7 +115,8 @@ func readFragmentsFS(fsys fs.FS, prefix string) ([]Fragment, []string) {
 
 // ValidateFragment returns every rule the named fragment breaks, each starting with the file name; an empty slice
 // means it is well formed. The rules: the name is lower case and ends in .md; the body is valid UTF-8 with no control
-// byte but tab, CR and LF; it is not empty; its first non-blank line starts "### "; no line starts a "#" or "##"
+// byte but tab, CR and LF, and no CR that is not followed by an LF (Markdown ends a line at a lone CR, and the line rules
+// below split on LF only); it is not empty; its first non-blank line starts "### "; no line starts a "#" or "##"
 // heading, even inside a code fence; and no line carries a release date between two separators (gluedDate), because the
 // tree check refuses such a line in CHANGELOG.md and the release would write it there. The "### " opening is a tightening
 // the changelog itself never had (121 of its 387 release entries open with a bullet or a lead paragraph): a loose bullet
@@ -141,6 +142,9 @@ func ValidateFragment(name, body string) []string {
 			add("control character 0x%02x on line %d", c, line)
 			break
 		}
+	}
+	if i := bareCR(body); i >= 0 {
+		add("a carriage return on line %d is not part of a CR LF: Markdown ends a line there, so a heading could hide behind it from the line rules", 1+strings.Count(body[:i], "\n"))
 	}
 	if strings.TrimSpace(body) == "" {
 		add("is empty")
@@ -172,6 +176,16 @@ func ValidateFragment(name, body string) []string {
 // a line in CHANGELOG.md, so a fragment must not hold one and a release must not write one.
 func gluedDate(line string) bool {
 	return !strings.HasPrefix(line, "## [") && dateBetweenSeparators.MatchString(line)
+}
+
+// bareCR is the offset of the first carriage return of s that is not followed by a line feed, or -1.
+func bareCR(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\r' && !strings.HasPrefix(s[i:], "\r\n") {
+			return i
+		}
+	}
+	return -1
 }
 
 func clip(s string) string {
