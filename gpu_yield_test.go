@@ -261,21 +261,34 @@ func TestWrapperWithoutOnYieldSaysSoAndKeepsHolding(t *testing.T) {
 	stub := stubYieldShell(t)
 	afterCommandStarts(t, func() { plantRootWaiter(t, m) })
 	t.Setenv("LO_HELPER_SLEEP_MS", "4000")
-	done := make(chan error, 1)
+	// ended is closed once the wrapper has returned and its stderr is in hand.
+	ended := make(chan struct{})
+	var runErr error
 	var stderr string
 	go func() {
-		stderr = captureStderr(t, func() { done <- runGPUReserve(yieldReserveArgs(cfg, nil, "TestHelperSleepMs")) })
+		defer close(ended)
+		stderr = captureStderr(t, func() { runErr = runGPUReserve(yieldReserveArgs(cfg, nil, "TestHelperSleepMs")) })
 	}()
 	termWaitFor(t, "the holder to be asked", 20*time.Second, func() bool { return yieldSidecar(m) != "" })
 	if in := m.Inspect(); !in.Held || in.Yields != gpulease.YieldsWrapper {
 		t.Fatalf("the lease is held by a wrapper that stamped its form: %+v", in)
 	}
 	time.Sleep(600 * time.Millisecond) // the lease and the command go on past the ask
-	if _, gone := termExited(done); gone || !m.Inspect().Held {
-		t.Fatal("the ask ended the command or released the lease")
+	select {
+	case <-ended:
+		t.Fatal("the ask ended the command")
+	default:
 	}
-	if err := <-done; err != nil {
-		t.Fatalf("the command completes normally: %v", err)
+	if !m.Inspect().Held {
+		t.Fatal("the ask released the lease")
+	}
+	select {
+	case <-ended:
+	case <-time.After(40 * time.Second):
+		t.Fatal("the command never finished")
+	}
+	if runErr != nil {
+		t.Fatalf("the command completes normally: %v", runErr)
 	}
 	if stub.count() != 0 {
 		t.Errorf("something was run although no --on-yield was recorded")
