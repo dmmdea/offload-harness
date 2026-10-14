@@ -83,8 +83,20 @@ function refusalOf(r, code) {
 const warned = (r, code) => r.warnings.filter((w) => w.code === code);
 
 // graphProblems: what is wrong with an API graph as a graph, whatever the template said: a node of a class the listing lacks, a
-// wire to a node that is not in the graph, a wire to an output slot the class does not have.
+// wire to a node that is not in the graph, a wire to an output slot the class does not have, a wire whose output type (the
+// listing's `output` list) shares no member with the type the target input declares. The type check compares only what the
+// listing states as a plain type string: a combo list, a COMFY_*_V3 schema type (on either end), an input the listing does not
+// name (a dotted dynamic-combo or autogrow child) and a missing target class are skipped, and "*" takes any type.
 const isRef = (v) => Array.isArray(v) && v.length === 2 && typeof v[0] === "string" && Number.isInteger(v[1]);
+const plainType = (t) => (typeof t === "string" && !/^COMFY_.+_V3$/.test(t) ? t : null);
+const declaredType = (info, name) => {
+  for (const section of ["required", "optional"]) {
+    const spec = info.input?.[section]?.[name];
+    if (Array.isArray(spec)) return plainType(spec[0]);
+  }
+  return null;
+};
+const sameType = (a, b) => a === "*" || b === "*" || a.split(",").some((x) => b.split(",").includes(x));
 function graphProblems(graph, oi) {
   const out = [];
   for (const [id, n] of Object.entries(graph)) {
@@ -92,8 +104,15 @@ function graphProblems(graph, oi) {
     for (const [k, v] of Object.entries(n.inputs)) {
       if (!isRef(v)) continue;
       const t = graph[v[0]];
-      if (!t) out.push(`${id}.${k}: wire to missing node ${v[0]}`);
-      else if (oi[t.class_type] && v[1] >= oi[t.class_type].output.length) out.push(`${id}.${k}: wire to slot ${v[1]} of ${v[0]} (${t.class_type} has ${oi[t.class_type].output.length})`);
+      if (!t) { out.push(`${id}.${k}: wire to missing node ${v[0]}`); continue; }
+      const outputs = oi[t.class_type]?.output;
+      if (!outputs) continue;
+      if (v[1] >= outputs.length) { out.push(`${id}.${k}: wire to slot ${v[1]} of ${v[0]} (${t.class_type} has ${outputs.length})`); continue; }
+      const want = declaredType(oi[n.class_type], k);
+      const have = plainType(outputs[v[1]]);
+      if (want !== null && have !== null && !sameType(have, want)) {
+        out.push(`${id}.${k}: wire from slot ${v[1]} of ${v[0]} (${t.class_type}) carries ${have}, the input wants ${want}`);
+      }
     }
   }
   return out;
@@ -131,8 +150,11 @@ test("graphProblems: names a wire whose output type is not the type the target i
     9: { class_type: "PreviewAny", inputs: { source: ["1", 1] } }, // "*" takes any type
     10: { class_type: "ImageInvert", inputs: { image: ["8", 1] } }, // a MASK into an IMAGE input
     11: { class_type: "ImageInvert", inputs: { image: ["6", 0] } }, // IMAGE,MASK into IMAGE: a common member
+    12: { class_type: "ImageInvert", inputs: { image: ["13", 0] } }, // a COMFY_*_V3 output: not compared
+    13: { class_type: "MatchOut", inputs: {} },
   };
-  assert.deepEqual(graphProblems(g, OI), [
+  const oi = { ...OI, MatchOut: { input: { required: {} }, output: ["COMFY_MATCHTYPE_V3"] } };
+  assert.deepEqual(graphProblems(g, oi), [
     "2.vae: wire from slot 0 of 1 (CheckpointLoaderSimple) carries MODEL, the input wants VAE",
     "4.mesh: wire from slot 0 of 6 (ResizeSynth) carries IMAGE,MASK, the input wants MESH,FILE_3D_GLB,FILE_3D",
     "10.image: wire from slot 1 of 8 (LoadImage) carries MASK, the input wants IMAGE",
