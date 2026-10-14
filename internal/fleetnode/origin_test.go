@@ -136,6 +136,15 @@ func TestTokenlessMediaDispatchIgnoresAWireRunClass(t *testing.T) {
 	if r := requestFor(t, fr, "tokenless-1"); r.RunClass != "" || r.OriginSession != "sess-abc" {
 		t.Fatalf("tokenless node: class %q session %q, want no class and the session kept", r.RunClass, r.OriginSession)
 	}
+	// An EMPTY bearer is not the tokenless node's (empty) token. bearerOK hashes both sides, so "Bearer " with nothing
+	// after it hashes equal to an empty configured token: the only thing that keeps such a request from being believed
+	// is trustsWire asking for a configured token first (mutant N10). A real listener trims the trailing space off the
+	// header value, so this is set on the request directly, as do() does.
+	emptyBearer := map[string]string{"Authorization": "Bearer ", core.OriginHeader: "sess-abc", core.RunClassHeader: "bake"}
+	dispatchAndWait(t, s, "tokenless-empty-1", emptyBearer)
+	if r := requestFor(t, fr, "tokenless-empty-1"); r.RunClass != "" || r.OriginSession != "sess-abc" {
+		t.Fatalf("tokenless node, empty bearer: class %q session %q, want no class and the session kept", r.RunClass, r.OriginSession)
+	}
 
 	fr = &fakeRunner{}
 	s, _ = newTestServer(t, tokenCfg("s3cret"), fr, authOpts(false))
