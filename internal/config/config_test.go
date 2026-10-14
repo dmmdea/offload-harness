@@ -457,7 +457,7 @@ func pathFieldJSONNames(t *testing.T) []string {
 		"audiocpp_script", "audiocpp_bin", "audiocpp_voice_model", "audiocpp_music_model",
 		"videogen_script", "animategen_script", "run_graph_script", "voicegen_script", "musicgen_script", "gpu_lock_path", "state_dir",
 		"voicegen_ref", "voicegen_ft_model", "voicegen_ft_base_dir", "voicegen_ft_ref",
-		"edit_python", "gimp_console_path",
+		"edit_python", "gimp_console_path", "ytdlp_path",
 		"compose_script", "hyperframes_dir", "hyperframes_browser_path", "compose_cache_dir",
 		"browse_python", "browse_script", "browse_capture_dir",
 		"cache_path", "ledger_path",
@@ -981,5 +981,23 @@ func TestLoadInstallsTheHostRAMHeadroomForEveryGrant(t *testing.T) {
 	}
 	if got := gpulease.DefaultHostRAMHeadroom(); got != DefaultGPUHostRAMHeadroomGiB {
 		t.Fatalf("an unset key means the default %v, got %v", DefaultGPUHostRAMHeadroomGiB, got)
+	}
+}
+
+// TestYtDlpPathDefaultsOffAndScratchFollowsTheStateRoot: the subtitle adapter of offload_research is off until an
+// operator names a binary (empty by default, never a PATH search), and its per-call scratch lives under the state
+// root when one is set, else under the OS temp dir.
+func TestYtDlpPathDefaultsOffAndScratchFollowsTheStateRoot(t *testing.T) {
+	c := Default()
+	if c.YtDlpPath != "" {
+		t.Fatalf("YtDlpPath default = %q, want empty (adapter off)", c.YtDlpPath)
+	}
+	c.StateDir = filepath.Join("state", "root")
+	if got, want := c.EffectiveResearchScratchDir(), filepath.Join("state", "root", "research-scratch"); got != want {
+		t.Errorf("scratch with a state dir = %q, want %q", got, want)
+	}
+	c.StateDir = ""
+	if got := c.EffectiveResearchScratchDir(); !strings.HasPrefix(got, os.TempDir()) || got == os.TempDir() {
+		t.Errorf("scratch without a state dir = %q, want a subdirectory of %q", got, os.TempDir())
 	}
 }
