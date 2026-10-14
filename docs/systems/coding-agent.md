@@ -246,7 +246,11 @@ ahead of `timeout` because every wait bounded by the call words itself with the 
 re-ask: the reason carries `core.ForcedFinalToolCallReason`; ahead of `budget`, whose stop_reason and prefix it shares, so its
 remedy does not tell the reader to split a contract that had read everything it needed) → `budget` → `abstention` (an
 "output failed schema" reason is `schema-miss / invalid`) → `schema-miss` (min_items/nonempty; sub-axes
-`two-step-grounded` = context docs and ≤ 2 steps, `invalid`) → `anchor-miss` (contains/not_contains/regex; same sub-axis) →
+`two-step-grounded` = context docs and ≤ 2 steps, `invalid`) → `anchor-miss` (contains/not_contains/regex; same sub-axis;
+an authority-qualified check keeps its verb prefix, so its failure lands here too, an UNKNOWN verdict (empty or absent
+evidence: an empty answer, an absent field) included: the axis names which kind of check failed, and the empty-versus-wrong
+distinction is in the evidence column, `unknown at <level> authority`, which is why an empty answer under a qualified check
+reads as an anchor-miss while an absent field under an unqualified `nonempty:` reads as a schema-miss) →
 `loop` → `long-observation` → `tool-misuse` (the last three on trace-bearing rows only) → `unclassified`. The report gives
 per axis the hits over the rows ELIGIBLE for it (trace axes count only rows with a trace), up to five evidence job ids with
 the deciding fact, the most repeated reason for seat-infra/timeout/unclassified, and the pre-authored remedy where the
@@ -483,6 +487,51 @@ trimmed head/tail to the remaining room (a bare marker only if even the trim can
 preamble is never touched and no turn is dropped. The retry's shrink target is relative to the
 just-rejected transcript's own estimate, not only the budget, so a dense-content estimate error
 can never make the retry re-send the bytes the server just refused.
+
+**Search-results rung (optional, default off: `compactOpts.SearchResults`).** One more lossy rung,
+for older tool bodies that are search listings: the grouped `search_files` output (`path:` then
+`  L<n>: text`) and bare `path:line:text` lines such as `grep -rn` or ripgrep print, alone or inside the
+`exit=` / `--- stdout ---` / `--- stderr ---` framing of `run_shell` and `run`. The rung is gated on the
+call that produced the body: the result's tool-call id is mapped to its call, and only `search_files`
+(grouped form) and a `run_shell` or `run` call whose command is a search (flat form) qualify. A search
+starts with `grep`, `rg`, `ag`, `ack` or `git grep`. The `run` tool's allowlist (`go`, `gofmt`, `python`,
+`python3`, `pytest`, `npm`, `node`, `cargo`, `git`) holds only `git` of those, so through `run` only
+`git grep` is reachable; `grep`, `rg`, `ag` and `ack` come through `run_shell`, which is Linux-only, so on
+another host only `git grep` qualifies at all. A search piped through
+pass-through filters only (`head`, `tail`, `sort`, `uniq`, `wc`, `cut`, `sed`, `awk`, `tee`, `cat`, or
+another search) still qualifies (`grep x f | head`); a pipe into anything else does not (`rg -l x | xargs flake8`,
+`rg x | flake8 -`), because the last stage's output is the body and it may be a linter's. A command that
+chains another one after the search (an unquoted `;`, `&&`, `||`, `&` or newline, found by a quote-aware
+scan) does not either, because the body then holds that command's output too. The check reads first words
+only and is not a shell parser: a filter that runs a command itself (`tee >(...)`, awk's `system()`, sed's `e`) or
+ANSI-C `$'...'` quoting is not seen. A linter such as flake8, ruff, `shellcheck -f gcc` or rubocop prints the
+same `path:line:col:text` lines, and every one of its diagnostics is something the agent must fix, so
+its output, a body with no matching call and an id claimed by two different calls are left alone.
+Everything else (the `web_search` list, `mode:"files"` output, test output, an error result) is left
+alone too. It runs after
+dedupe and GCF and before the generic skeleton, over the same older span as that rung (never the
+protected preamble or the kept-recent tail), skips pinned bodies, and rewrites only a tool message's
+body. Each line is scored with BM25 against the objective (the last user message of the protected
+preamble, the one task text that is the same on every step; the line's own path counts as part of the
+line), lines that look like errors (`error`, `fail`, `panic`, `exception`, `fatal`) get a fixed boost, and
+the survivors are chosen round-robin across files, best score first, up to 30 lines, 5 per file and 15
+files (chosen to match the values shown in the upstream configuration example), then written back in listing order under a
+footer (a 100-match listing over 20 files ends `[... 70 of 100 lines elided, 5 of 20 files elided ...]`: 30 lines and 15 files are the most
+that survive, and a test pins this exact line); the tool's own "more matches" or "truncated" note is kept. The result opens with the skeleton disclosure line, so the rest of the ladder,
+the re-execute-on-repeat path (ADR 0016) and the corpus harvest treat it as the compaction artifact it
+is, and a later elision marker still names the original size. It is deterministic, idempotent,
+monotonic (a result that is not strictly shorter is discarded) and fails closed: a body that is not,
+line for line, one of the accepted shapes comes back untouched. It has no CLI flag or loop setter yet,
+and `compaction-eval` does not replay it yet (the measurement that decides it first needs
+`agent.ReplayOpts`, `compeval.LadderOpts` and the verb's flag extended): the option is reachable from
+the ladder's own options and from tests, the default ladder is pinned
+byte for byte by `internal/agent/testdata/ladder_default_golden.json`, and whether the rung ever
+becomes a default is decided by the measurement gate on a harvested corpus, not by this page. Three
+pieces of work must land, in a separate change, before the rung can be switched on by default: an adaptive cap (the fixed
+30/5/15 do not scale with the window), a production entry point (a CLI flag or loop setter), and the
+measurement of how the rung interacts with the generic skeleton rung. Source:
+`internal/agent/rung_search.go`. The idea is documented by the Headroom project (Apache-2.0); this is a
+clean-room implementation of that documented behaviour (see `NOTICE`).
 
 **Compaction eval harness (`compaction-eval`, `internal/compeval`).** Default flips for the ladder
 rungs are gated by MEASUREMENT, never estimates: the verb replays a pinned corpus (JSONL of
@@ -1086,7 +1135,7 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - [`internal/agent/runtool.go`](../../internal/agent/runtool.go) — allowlist, direct exec
 - [`internal/agent/writetools.go`](../../internal/agent/writetools.go) — `os.Root` scoping
 - [`internal/agent/builder.go`](../../internal/agent/builder.go) — capability grants, audit-path check
-- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`internal/compeval/`](../../internal/compeval/)
+- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`rung_search.go`](../../internal/agent/rung_search.go), [`internal/compeval/`](../../internal/compeval/)
 - [`compaction_contextbench.go`](../../compaction_contextbench.go) — the `compaction-eval contextbench` verb;
   [`internal/compeval/contextbench_run.go`](../../internal/compeval/contextbench_run.go) (driver, outcomes),
   `contextbench_gen_*.go` and `contextbench_grade_*.go` in [`internal/compeval/`](../../internal/compeval/) (ported generators and graders)

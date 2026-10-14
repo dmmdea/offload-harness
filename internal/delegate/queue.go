@@ -190,7 +190,7 @@ func queuePoll(ctx context.Context, cfg config.Config, holder string, contract c
 			// every other route (rescue.go); a rescue that cannot leaves the defer.
 			*pr = rescueSchemaMiss(ctx, rescue, contract, *pr, start, nil)
 			if !pr.Result.Deferred {
-				pr.AcceptanceFailures = EvalAcceptance(contract, pr.Result)
+				pr.gradeAcceptance(contract, pr.Result)
 			}
 			return
 		case status == http.StatusOK && state == "error":

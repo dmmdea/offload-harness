@@ -17,16 +17,15 @@
 // {kill(){}} child cannot prove anything about an event loop.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, statSync, mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { writeFileSync, readFileSync, existsSync, statSync, mkdirSync } from "node:fs";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { EventEmitter } from "node:events";
 import { ensureComfy, comfyLogPath, rotateComfyLog, tailComfyLog, trimRotatedLog } from "./comfy-lifecycle.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
-import { removeTree, scratchDir } from "./test-scratch.mjs";
+import { awaitTreeGone, killTree, scratchDir } from "./test-scratch.mjs";
 import { isolatedRunnerEnv } from "./test-isolation.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -58,10 +57,6 @@ function freePort() {
 }
 
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } };
-function killTree(pid) {
-  if (process.platform === "win32") spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], { windowsHide: true });
-  else { try { process.kill(pid, "SIGKILL"); } catch {} }
-}
 
 async function setup(comfyDir) {
   writeFileSync(join(comfyDir, "main.py"), STUB_MAIN);
@@ -81,13 +76,18 @@ console.log("RUNNER-RESULT " + out);
 }
 
 test("a runner given keep-comfy exits after its job while the instance it launched stays up", async (t) => {
-  // the folder, and the hook that kills what runs in it and then removes it, come before anything that can
-  // throw. scratchDir would not do here: node:test runs a test's hooks in the order they were registered,
-  // and the removal has to wait for the kill (a running stub holds its files open on Windows)
-  const comfyDir = mkdtempSync(join(tmpdir(), "comfy-keep-"));
+  // the folder, and the teardown that kills what runs in it, come before anything that can throw. The
+  // teardown runs ahead of the folder's removal (a running stub holds its files open on Windows), and
+  // waits until the killed processes are gone before the removal starts: taskkill returns while Windows is
+  // still tearing the tree down, and on a loaded box that takes seconds
   let stubPid = 0;
   let child;
-  t.after(() => { if (stubPid) killTree(stubPid); if (child && child.exitCode === null) killTree(child.pid); removeTree(comfyDir); });
+  const comfyDir = scratchDir(t, "comfy-keep-", {
+    teardown: async () => {
+      if (stubPid) await awaitTreeGone(killTree(stubPid));
+      if (child && child.exitCode === null) await awaitTreeGone(killTree(child.pid));
+    },
+  });
   const { port, api, runner } = await setup(comfyDir);
   const markerPath = join(comfyDir, ".offload-launch-keepcase.json");
 
