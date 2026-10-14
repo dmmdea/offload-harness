@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/seatload"
 )
 
 // fakeSwap is a llama-swap that FAILS THE TEST on any request a cheap probe must never make: a
@@ -33,11 +34,20 @@ type fakeSwap struct {
 	// runningStatus, when set, is what /running answers instead of the list (a llama-swap whose running
 	// list cannot be read).
 	runningStatus int
+	// failRunningReads makes the first N reads of /running answer 500 and every later one the list: a
+	// llama-swap whose running list could not be read at the opening of the report and can be read after.
+	failRunningReads   int
+	failedRunningReads int
+	// dropRunning aborts every /running request with no answer at all, so the client's error is a transport
+	// failure whose Go text carries the request URL (a status code's text does not).
+	dropRunning bool
 	// allowCompletion admits POST /v1/chat/completions (and records the body): only the test of the
 	// explicit completion option sets it.
 	allowCompletion bool
 	// loadOnCompletion makes a completion LOAD its seat, the way llama-swap does: the model is listed as
-	// ready by every later /running read. Without it the fake's running list never changes.
+	// ready by every later /running read. Without it the fake's running list never changes. The load
+	// happens before the completion is answered, so it also happens when completionStatus then fails it
+	// (llama-swap loads the model and the generation fails afterwards).
 	loadOnCompletion bool
 	// evictOnLoad makes a completion that loads a seat unload every other seat, as llama-swap's swap
 	// groups do.
@@ -78,8 +88,13 @@ func (f *fakeSwap) handle(w http.ResponseWriter, r *http.Request) {
 			rows = append(rows, fmt.Sprintf(`{"id":%q,"object":"model","meta":{"llamaswap":{"aliases":%s}}}`, id, a))
 		}
 		fmt.Fprintf(w, `{"object":"list","data":[%s]}`, strings.Join(rows, ","))
+	case r.Method == http.MethodGet && r.URL.Path == "/running" && f.dropRunning:
+		panic(http.ErrAbortHandler) // net/http closes the connection without an answer and logs nothing
 	case r.Method == http.MethodGet && r.URL.Path == "/running" && f.runningStatus != 0:
 		w.WriteHeader(f.runningStatus)
+	case r.Method == http.MethodGet && r.URL.Path == "/running" && f.failedRunningReads < f.failRunningReads:
+		f.failedRunningReads++
+		w.WriteHeader(http.StatusInternalServerError)
 	case r.Method == http.MethodGet && r.URL.Path == "/running":
 		f.runningReads++
 		if f.onRunningRead != nil {
@@ -113,16 +128,16 @@ func (f *fakeSwap) handle(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.completions = append(f.completions, body)
-		if f.completionStatus != 0 {
-			w.WriteHeader(f.completionStatus)
-			break
-		}
 		if m, _ := body["model"].(string); m != "" && f.loadOnCompletion {
 			id := f.canonicalLocked(m)
 			if _, already := f.running[id]; !already && f.evictOnLoad {
 				clear(f.running)
 			}
 			f.running[id] = "ready"
+		}
+		if f.completionStatus != 0 {
+			w.WriteHeader(f.completionStatus)
+			break
 		}
 		fmt.Fprint(w, `{"choices":[{"message":{"content":"ok"},"finish_reason":"length"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
 	default:
@@ -673,28 +688,53 @@ func TestCollectLaneActiveBackendIsTheBoundSeatsEngine(t *testing.T) {
 // TestBackendReasonsCarryNoPathOrURL: a reason is published to every node that reads /fleet/health, so
 // it names seats and states and carries no address, path, URL, command or config location, whatever
 // failed. The scenarios exercise every failure clause of the collector (the llama-swap that is down, a
-// running list that cannot be read, a seat whose health endpoint answers 503 or does not answer, a
-// completion that fails, a serving config that is missing or unparseable, no endpoint, no client).
+// running list that cannot be read, whether it answers a status or fails at the transport, a seat whose
+// health endpoint answers 503 or does not answer, a completion that fails, a completion skipped because
+// a vLLM seat holds the cards, a serving config that is missing or unparseable, no endpoint, no client).
+// Each scenario that depends on a clause also asserts the clause appeared, so a scenario that never
+// reaches it fails instead of passing for nothing.
 func TestBackendReasonsCarryNoPathOrURL(t *testing.T) {
 	ipv4 := regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
 	driveOrUNC := regexp.MustCompile(`[A-Za-z]:[\\/]|\\\\`)
+	// the routes of llama-swap and of the completion API: a reason that names one has copied a URL or an
+	// error's text, and the Go text of a failed request carries the path whether or not it carries a host.
+	routes := []string{"/running", "/v1/models", "/health", "/upstream", "/v1/chat/completions"}
+	checkText := func(t *testing.T, who, reason string, extra ...string) {
+		t.Helper()
+		forbidden := append(append([]string{"://", "127.0.0.1", "localhost", "18797", "18798", "/bin/", "/seats/", ".sh", "llama-server", "\\", "--port"}, routes...), extra...)
+		for _, bad := range forbidden {
+			if bad != "" && strings.Contains(reason, bad) {
+				t.Errorf("%s: reason %q carries %q", who, reason, bad)
+			}
+		}
+		if ipv4.MatchString(reason) || driveOrUNC.MatchString(reason) {
+			t.Errorf("%s: reason %q carries an address or a drive path", who, reason)
+		}
+	}
 	check := func(t *testing.T, rep Report, extra ...string) {
 		t.Helper()
 		all := append(append([]Entry{}, rep.Lanes...), rep.Seats...)
 		if len(all) == 0 {
 			t.Fatal("no rows: the scenario proves nothing")
 		}
-		forbidden := append([]string{"://", "127.0.0.1", "localhost", "18797", "18798", "/bin/", "/seats/", ".sh", "llama-server", "\\", "--port"}, extra...)
 		for _, e := range all {
-			for _, bad := range forbidden {
-				if bad != "" && strings.Contains(e.BackendReason, bad) {
-					t.Errorf("%s %s: reason %q carries %q", e.Lane, e.Seat, e.BackendReason, bad)
-				}
+			checkText(t, e.Lane+" "+e.Seat, e.BackendReason, extra...)
+		}
+	}
+	// anyRowSays fails the scenario unless some row carries every one of the clauses: the proof that the
+	// scenario reached the clause it is there to check.
+	anyRowSays := func(t *testing.T, rep Report, clauses ...string) {
+		t.Helper()
+		for _, e := range append(append([]Entry{}, rep.Lanes...), rep.Seats...) {
+			ok := true
+			for _, c := range clauses {
+				ok = ok && strings.Contains(e.BackendReason, c)
 			}
-			if ipv4.MatchString(e.BackendReason) || driveOrUNC.MatchString(e.BackendReason) {
-				t.Errorf("%s %s: reason %q carries an address or a drive path", e.Lane, e.Seat, e.BackendReason)
+			if ok {
+				return
 			}
 		}
+		t.Errorf("no row carries %q: the scenario never reached the clause it is for", clauses)
 	}
 	hostOf := func(f *fakeSwap) string { return strings.TrimPrefix(f.srv.URL, "http://") }
 
@@ -710,7 +750,52 @@ func TestBackendReasonsCarryNoPathOrURL(t *testing.T) {
 		f.runningStatus = http.StatusInternalServerError
 		f.allowCompletion = true
 		cfg := testCfg(t, f)
-		check(t, Collect(t.Context(), cfg, Options{HTTP: f.srv.Client(), ProbeCompletion: true}), hostOf(f), cfg.ServingConfigPath)
+		rep := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+		check(t, rep, hostOf(f), cfg.ServingConfigPath)
+		anyRowSays(t, rep, "running list could not be read (", "completion probe skipped", "cannot be ruled out")
+	})
+	t.Run("the running list fails at the transport, with or without the completion probe", func(t *testing.T) {
+		f := newFakeSwap(t, fullRoster())
+		f.dropRunning = true
+		f.allowCompletion = true
+		cfg := testCfg(t, f)
+		// The raw error of this failure carries the host and the route, so a reason that copied it would leak.
+		_, raw := seatload.Occupants(t.Context(), f.srv.Client(), f.srv.URL)
+		if raw == nil || !strings.Contains(raw.Error(), hostOf(f)) || !strings.Contains(raw.Error(), "/running") {
+			t.Fatalf("the scenario's raw error is %v: it must carry the host and the route, or it proves nothing", raw)
+		}
+		for _, probe := range []bool{false, true} {
+			rep := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client(), ProbeCompletion: probe})
+			check(t, rep, hostOf(f), cfg.ServingConfigPath)
+			anyRowSays(t, rep, "running list could not be read (")
+			if probe {
+				anyRowSays(t, rep, "completion probe skipped", "cannot be ruled out")
+			}
+		}
+		if n := f.completionCount(); n != 0 {
+			t.Errorf("%d completions were sent with the running list unreadable", n)
+		}
+	})
+	t.Run("a raw running-list error that carries a path and a URL", func(t *testing.T) {
+		f := newFakeSwap(t, fullRoster())
+		cfg := testCfg(t, f)
+		s := newState(t.Context(), cfg, Options{HTTP: f.srv.Client()})
+		s.running = nil
+		s.runErr = fmt.Errorf("llama-swap /running: %w", &url.Error{Op: "Get", URL: "http://llama-swap.example.invalid:9/running", Err: errors.New("open /srv/seats/serving.yaml: permission denied")})
+		v := s.Probe(t.Context(), Candidate{Seat: "small-cpp", Engine: EngineLlamaCpp})
+		if !strings.Contains(v.Detail, "running list could not be read (") {
+			t.Fatalf("the unreadable running list must be reported: %+v", v)
+		}
+		checkText(t, "small-cpp", v.Detail, "example.invalid", "serving.yaml", "/srv/", "permission denied")
+	})
+	t.Run("a completion is skipped because a vLLM seat holds the cards", func(t *testing.T) {
+		f := newFakeSwap(t, fullRoster())
+		f.running["big-vllm"] = "ready"
+		f.allowCompletion = true
+		cfg := testCfg(t, f)
+		rep := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+		check(t, rep, hostOf(f), cfg.ServingConfigPath)
+		anyRowSays(t, rep, "completion probe skipped: it would load", "while the vLLM seat big-vllm holds the cards")
 	})
 	t.Run("a loaded seat answers 503 and another does not answer at all", func(t *testing.T) {
 		withTier(t)
