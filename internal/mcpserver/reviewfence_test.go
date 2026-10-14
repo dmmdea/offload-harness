@@ -24,6 +24,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
+	"github.com/dmmdea/offload-harness/internal/reviewlane"
 )
 
 // fenceServer builds a review-lane server whose state dir (and therefore whose
@@ -297,5 +298,117 @@ func TestReviewUnderAForeignFenceFallsThroughWhenTheFleetsSalvageComesToNothing(
 	}
 	if note, _ := out["fleet"].(string); !strings.Contains(note, "cut at the completion budget") {
 		t.Errorf("the caller must still be told why the fleet's answer was not used: %v", out["fleet"])
+	}
+}
+
+// fleetSeam hands the fleet dispatch seam one placed result from a node.
+func fleetSeam(w core.AgentWireResult, summary delegate.Summary) func(context.Context, config.Config, delegate.LocalRunner, []core.AgentContract, string, []string, *delegate.RunOptions) ([]delegate.PlacedResult, delegate.Summary, error) {
+	return func(context.Context, config.Config, delegate.LocalRunner, []core.AgentContract, string, []string, *delegate.RunOptions) ([]delegate.PlacedResult, delegate.Summary, error) {
+		return []delegate.PlacedResult{{
+			Node: "node-b", Seat: w.Seat,
+			PlacementReason: "route=remote forced → node-b",
+			Result:          w,
+		}}, summary, nil
+	}
+}
+
+// RSI-OH-4#1: a review the fleet delivered under a foreign fence is sealed like a local one: the
+// outcome, the evidence bound to the diff, the seat receipt carrying where it ran, and the trace.
+func TestReviewUnderAForeignFenceSealsTheFleetsReview(t *testing.T) {
+	s, _ := fenceServer(t, neverSeat(t))
+	s.reviewFleet = fleetSeam(fleetWire(), delegate.Summary{Succeeded: 1})
+	m := reviewCall(t, s, map[string]any{"diff": reviewDiff, "task": "iterate over every element exactly once"})
+	if m["outcome"] != reviewlane.OutcomeFindings {
+		t.Fatalf("outcome = %v, want FINDINGS: %v", m["outcome"], m)
+	}
+	ev := evidenceOf(t, m)
+	if ev["diff_sha256"] != reviewlane.Fingerprint(reviewDiff) || ev["prompt_sha256"] == nil {
+		t.Errorf("the fleet review is bound to the diff and the prompt: %v", ev)
+	}
+	seat, _ := ev["seat"].(map[string]any)
+	if seat["seat"] != "qwen3.8-27b-vllm" || seat["executed_on"] != "fleet" || seat["node"] != "node-b" || seat["answer_sha256"] == nil {
+		t.Errorf("the seat receipt must say where the review ran: %v", seat)
+	}
+	if seat["deferred"] != nil || seat["salvaged"] != nil {
+		t.Errorf("a delivered review is no deferral and no salvage: %v", seat)
+	}
+	rows := traceRowsOf(t, s)
+	if len(rows) != 2 || rows[0]["kind"] != "review" || rows[0]["outcome"] != reviewlane.OutcomeFindings || rows[1]["kind"] != "finding" {
+		t.Fatalf("want the review row and the one grounded finding's row: %v", rows)
+	}
+	if counts, _ := rows[0]["counts"].(map[string]any); counts["dropped_ungrounded"] != float64(1) || counts["findings"] != float64(1) {
+		t.Errorf("the review row counts what the fleet path's filters took: %v", counts)
+	}
+
+	// A clean fleet review, nothing dropped, is a PASS that names the node.
+	clean := seatFindings()
+	clean.Seat = "qwen3.8-27b-vllm"
+	s2, _ := fenceServer(t, neverSeat(t))
+	s2.reviewFleet = fleetSeam(clean, delegate.Summary{Succeeded: 1})
+	m2 := reviewCall(t, s2, map[string]any{"diff": reviewDiff, "task": "t"})
+	if m2["outcome"] != reviewlane.OutcomePass {
+		t.Fatalf("a clean fleet review: %v", m2)
+	}
+	if seat2, _ := evidenceOf(t, m2)["seat"].(map[string]any); seat2["executed_on"] != "fleet" || seat2["node"] != "node-b" {
+		t.Errorf("the PASS carries the node it ran on: %v", seat2)
+	}
+	if rows := traceRowsOf(t, s2); len(rows) != 1 || rows[0]["outcome"] != reviewlane.OutcomePass {
+		t.Errorf("a clean fleet review leaves its review row: %v", rows)
+	}
+}
+
+// RSI-OH-4#1: the salvage call site. A fleet seat that wrote the review and was cut deferred it;
+// the lane publishes the written lines, and that publication is sealed too, with the receipt
+// recording the attempt as the deferral it was.
+func TestReviewUnderAForeignFenceSealsASalvagedFleetAnswer(t *testing.T) {
+	s, _ := fenceServer(t, neverSeat(t))
+	cut := cutWire(strings.Join([]string{
+		"severe | run.go:1 | the loop reads one past the end | index out of range at runtime",
+		"minor | nowhere.go:9 | invented file | must be dropped as ungrounded",
+		"moderate | run.go:3 | the comparison is not strict | a fence-post error",
+		"severe | run.go:4 | the second loop never terminat", // cut by the budget
+	}, "\n"))
+	cut.Seat = "qwen3.8-27b-vllm"
+	s.reviewFleet = fleetSeam(cut, delegate.Summary{Deferred: 1})
+	m := reviewCall(t, s, map[string]any{"diff": reviewDiff, "task": "iterate over every element exactly once"})
+	if m["deferred"] != nil || m["salvaged"] != "output_truncated" {
+		t.Fatalf("fixture: the written answer must be published as a salvaged review: %v", m)
+	}
+	if m["outcome"] != reviewlane.OutcomeFindings {
+		t.Fatalf("outcome = %v, want FINDINGS: %v", m["outcome"], m)
+	}
+	ev := evidenceOf(t, m)
+	seat, _ := ev["seat"].(map[string]any)
+	if seat["executed_on"] != "fleet" || seat["node"] != "node-b" || seat["salvaged"] != "output_truncated" || seat["deferred"] != true {
+		t.Errorf("the seat receipt records the fleet node and the salvage: %v", seat)
+	}
+	if ev["diff_sha256"] != reviewlane.Fingerprint(reviewDiff) {
+		t.Errorf("the salvaged review is bound to the diff: %v", ev)
+	}
+	rows := traceRowsOf(t, s)
+	if len(rows) != 3 || rows[0]["kind"] != "review" || rows[0]["outcome"] != reviewlane.OutcomeFindings {
+		t.Fatalf("want the review row and two finding rows: %v", rows)
+	}
+	if counts, _ := rows[0]["counts"].(map[string]any); counts["findings"] != float64(2) || counts["dropped_ungrounded"] != float64(1) {
+		t.Errorf("counts: %v", counts)
+	}
+}
+
+// RSI-OH-4#3 on the salvage call site: a fleet seat that the node filed as a deferral and whose
+// answer reads as a clean NONE is published, and is never a PASS.
+func TestReviewUnderAForeignFenceNeverPassesASalvagedDeferral(t *testing.T) {
+	s, _ := fenceServer(t, neverSeat(t))
+	w := deferredCleanWire()
+	w.Seat = "qwen3.8-27b-vllm"
+	s.reviewFleet = fleetSeam(w, delegate.Summary{Deferred: 1})
+	m := reviewCall(t, s, map[string]any{"diff": reviewDiff, "task": "t"})
+	if m["salvaged"] != "wall" || m["outcome"] != reviewlane.OutcomeNotRun {
+		t.Fatalf("a deferred fleet run read as clean: %v", m)
+	}
+	if seat, _ := evidenceOf(t, m)["seat"].(map[string]any); seat["executed_on"] != "fleet" || seat["deferred"] != true {
+		t.Errorf("seat receipt: %v", seat)
+	}
+	if rows := traceRowsOf(t, s); len(rows) != 1 || rows[0]["outcome"] != reviewlane.OutcomeNotRun {
+		t.Errorf("trace: %v", rows)
 	}
 }

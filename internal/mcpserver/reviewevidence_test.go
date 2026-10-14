@@ -19,6 +19,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
+	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/reviewlane"
 )
 
@@ -39,7 +40,13 @@ func reviewCall(t *testing.T, s *Server, args map[string]any) map[string]any {
 
 func traceRowsOf(t *testing.T, s *Server) []map[string]any {
 	t.Helper()
-	f, err := os.Open(filepath.Join(s.p.Cfg().BaseDir(), reviewlane.TraceFile))
+	cfg := s.p.Cfg()
+	return traceRowsAt(t, reviewlane.TracePathFor(cfg.LedgerPath, cfg.BaseDir()))
+}
+
+func traceRowsAt(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	f, err := os.Open(path)
 	if err != nil {
 		t.Fatalf("the review left no trace file: %v", err)
 	}
@@ -325,4 +332,149 @@ func TestReviewDiffAdvertisesTheEvidenceFields(t *testing.T) {
 		return
 	}
 	t.Fatal("offload_review_diff not advertised")
+}
+
+// evidenceServer is a review server whose ledger sits at ledgerPath, which may be nowhere near
+// the harness home, so a trace path derived from the wrong one shows.
+func evidenceServer(t *testing.T, home, ledgerPath string, local delegate.LocalRunner) *Server {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Home = home
+	cfg.LedgerPath = ledgerPath
+	s := New(pipeline.New(cfg, nil, nil, nil))
+	s.localAgent = local
+	return s
+}
+
+// RSI-OH-4#0: every early exit of the handler is sealed as a diff-less NOT_RUN. The refusal
+// reason is the outcome reason, the evidence binds to no bytes (zero diff_bytes, no fingerprint),
+// the seat is never contacted, and each refusal leaves its trace row.
+func TestReviewDiffEveryEarlyRefusalIsASealedNotRun(t *testing.T) {
+	root, elsewhere := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "big.diff"), []byte(strings.Repeat("+x\n", 50000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(elsewhere, "outside.diff")
+	if err := os.WriteFile(outside, []byte(reviewDiff), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ name, args, wantReason string }{
+		{"both diff and diff_path", reviewArgs(t, map[string]any{"diff": reviewDiff, "diff_path": "x.diff", "read_root": root, "task": "t"}), "not both"},
+		{"neither", reviewArgs(t, map[string]any{"task": "t"}), "is required"},
+		{"a whitespace-only diff", reviewArgs(t, map[string]any{"diff": " \n ", "task": "t"}), "is required"},
+		{"a diff_path that does not exist", reviewArgs(t, map[string]any{"diff_path": "nope.diff", "read_root": root, "task": "t"}), "nope.diff"},
+		{"a diff_path over the file cap", reviewArgs(t, map[string]any{"diff_path": "big.diff", "read_root": root, "task": "t"}), "cap"},
+		{"a diff_path outside read_root", reviewArgs(t, map[string]any{"diff_path": outside, "read_root": root, "task": "t"}), "outside read_root"},
+		{"arguments that do not decode", `{"diff":123,"task":"t"}`, "bad arguments: "},
+	}
+	for _, c := range cases {
+		s := askTestServer(t, neverSeat(t))
+		res, err := s.handleReviewDiff(context.Background(), callReq(c.args))
+		if err != nil {
+			t.Fatalf("%s: handleReviewDiff: %v", c.name, err)
+		}
+		m := decodeResult(t, res)
+		reason, _ := m["reason"].(string)
+		if m["deferred"] != true || !strings.Contains(reason, c.wantReason) {
+			t.Errorf("%s: the refusal keeps its deferral shape and reason (want %q): %v", c.name, c.wantReason, m)
+			continue
+		}
+		if m["outcome"] != reviewlane.OutcomeNotRun || m["outcome_reason"] != reason {
+			t.Errorf("%s: outcome = %v / %v, want NOT_RUN carrying the refusal reason", c.name, m["outcome"], m["outcome_reason"])
+		}
+		ev := evidenceOf(t, m)
+		if ev["refusal"] != reason || ev["diff_bytes"] != float64(0) || ev["diff_sha256"] != nil {
+			t.Errorf("%s: the evidence binds to no bytes and names the refusal: %v", c.name, ev)
+		}
+		if m["trace_error"] != nil {
+			t.Errorf("%s: trace_error = %v", c.name, m["trace_error"])
+		}
+		if rows := traceRowsOf(t, s); len(rows) != 1 || rows[0]["kind"] != "review" || rows[0]["outcome"] != reviewlane.OutcomeNotRun {
+			t.Errorf("%s: a refusal leaves its review row: %v", c.name, rows)
+		}
+	}
+}
+
+// RSI-OH-4#6: the trace is written beside the ledger, derived from the ledger's own path, so it
+// follows an operator who placed the ledger away from the harness home; with no ledger path it
+// is the harness home.
+func TestReviewDiffTraceSitsBesideTheConfiguredLedger(t *testing.T) {
+	clean := func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
+		return seatFindings(), nil
+	}
+	home := t.TempDir()
+	ledgerDir := filepath.Join(t.TempDir(), "ledgers")
+	s := evidenceServer(t, home, filepath.Join(ledgerDir, "ledger.jsonl"), clean)
+	if m := reviewCall(t, s, map[string]any{"diff": reviewDiff, "task": "t"}); m["trace_error"] != nil {
+		t.Fatalf("trace_error: %v", m["trace_error"])
+	}
+	if rows := traceRowsAt(t, filepath.Join(ledgerDir, reviewlane.TraceFile)); len(rows) != 1 {
+		t.Errorf("the trace must sit in the ledger's directory: %v", rows)
+	}
+	if _, err := os.Stat(filepath.Join(home, reviewlane.TraceFile)); err == nil {
+		t.Error("the trace must not be written to the harness home when the ledger is elsewhere")
+	}
+
+	home2 := t.TempDir()
+	s2 := evidenceServer(t, home2, "", clean)
+	if m := reviewCall(t, s2, map[string]any{"diff": reviewDiff, "task": "t"}); m["trace_error"] != nil {
+		t.Fatalf("trace_error: %v", m["trace_error"])
+	}
+	if rows := traceRowsAt(t, filepath.Join(home2, reviewlane.TraceFile)); len(rows) != 1 {
+		t.Errorf("with no ledger path the trace sits in the harness home: %v", rows)
+	}
+}
+
+// RSI-OH-4#5: once the review names its head, a receipt that names no commit cannot support PASS.
+func TestReviewDiffAnUnboundGateReceiptCannotSupportPass(t *testing.T) {
+	clean := func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
+		return seatFindings(), nil
+	}
+	s := askTestServer(t, clean)
+	m := reviewCall(t, s, map[string]any{"diff": reviewDiff, "task": "t", "head_sha": evHead,
+		"gate_receipts": []map[string]any{{"name": "go-test", "status": "pass"}}})
+	reason, _ := m["outcome_reason"].(string)
+	if m["outcome"] != reviewlane.OutcomeGateFailed || !strings.Contains(reason, "go-test") || !strings.Contains(reason, "names no commit") {
+		t.Fatalf("a clean seat beside an unbound receipt on a bound review is GATE_FAILED: %v", m)
+	}
+	gates := evidenceOf(t, m)["gates"].([]any)
+	if last := gates[len(gates)-1].(map[string]any); last["unbound"] != true {
+		t.Errorf("the receipt is published as unbound: %v", last)
+	}
+	// The same receipt naming the head is bound and supports the PASS.
+	s2 := askTestServer(t, clean)
+	m2 := reviewCall(t, s2, map[string]any{"diff": reviewDiff, "task": "t", "head_sha": evHead,
+		"gate_receipts": []map[string]any{{"name": "go-test", "status": "pass", "head_sha": evHead}}})
+	if m2["outcome"] != reviewlane.OutcomePass {
+		t.Errorf("a receipt for the head: %v", m2["outcome"])
+	}
+}
+
+// deferredCleanWire is a run the node filed as a deferral (the structured re-pack was skipped for
+// want of time) whose raw answer is a clean NONE: the lane salvages it as a review with no findings.
+func deferredCleanWire() core.AgentWireResult {
+	return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Seat: "fake-seat", Output: "NONE", Steps: 2, StopReason: "done",
+		Deferred: true, SchemaMiss: true, DeferClass: core.DeferClassBudget, Reason: "structured re-pack skipped: nothing left of the budget"}
+}
+
+// RSI-OH-4#3 (conductor decision): a node-deferred run the lane salvages as a clean NONE is
+// published as before, but its outcome is NOT_RUN and never PASS; the receipt records the attempt.
+func TestReviewDiffANodeDeferredCleanNoneIsNotRunNeverPass(t *testing.T) {
+	s := askTestServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
+		return deferredCleanWire(), nil
+	})
+	m := reviewCall(t, s, map[string]any{"diff": reviewDiff, "task": "t"})
+	if m["salvaged"] != "wall" {
+		t.Fatalf("fixture: the deferral must be salvaged as a published review: %v", m)
+	}
+	if m["outcome"] != reviewlane.OutcomeNotRun || m["outcome_reason"] == nil {
+		t.Fatalf("outcome = %v / %v, want NOT_RUN with a reason", m["outcome"], m["outcome_reason"])
+	}
+	seat, _ := evidenceOf(t, m)["seat"].(map[string]any)
+	if seat["deferred"] != true || seat["salvaged"] != "wall" || seat["seat"] != "fake-seat" {
+		t.Errorf("the seat receipt records the attempt: %v", seat)
+	}
+	if rows := traceRowsOf(t, s); len(rows) != 1 || rows[0]["outcome"] != reviewlane.OutcomeNotRun {
+		t.Errorf("trace: %v", rows)
+	}
 }
