@@ -17,10 +17,15 @@
   and the error the command returns ends with the failure (`the lease is STILL HELD`). `--warm-seat` is advised only when a warm-back is
   owed, because the manual release has no guard against loading a seat nothing unloaded.
 - **A detached hold cannot outlive its reserve.** The bound used to be enforced only by the foreground reserve: if it died the hidden holder
-  kept the cards for good. The record now carries a moment by which the lease is released: an OUTER bound (the drain's deadline plus the hold
-  bound, both known) stamped as soon as the holder has the lease, so a reserve killed during the drain or the unload is covered; replaced by
-  the wait's own end (the earlier of the bound and `--wait`) when the wait begins, and taken off only when the host admits the figure (a wait
-  that ends any other way leaves it, so a reserve that dies the instant its wait ends is covered too). The hidden `gpu hold` reads its record
+  kept the cards for good. The record now carries a moment by which the lease is released: an OUTER bound, now + the hold bound + 60 s,
+  stamped as soon as the holder has the lease and re-stamped every 30 s by the LIVE reserve while it drains and unloads (the drain's own
+  deadline is `--wait` away, 8 h by default, which is no bound), so a reserve killed during the drain or the unload, however long `--wait`
+  is, is covered within about the bound; replaced by the wait's own end (the earlier of the bound and `--wait`) when the wait begins, and
+  taken off only when the host admits the figure (a wait that ends any other way leaves it, so a reserve that dies the instant its wait ends
+  is covered too). The same re-stamp closes the too-EARLY direction: an unload is not bounded by the drain's deadline (the maintenance
+  client allows 15 minutes per request), and a long unload used to make the holder release a live reserve's lease mid-unload, leaving the
+  seat owed and cold; a live reserve now loses its lease to its holder only if it cannot re-stamp for more than the bound + 60 s + 30 s. A failed drain's lease, which the detach form keeps held, is released by the holder at the last stamped moment unless the
+  operator frees it sooner, and the error says when. The hidden `gpu hold` reads its record
   on every poll and releases its lease 30 s after that moment if the lease still asks for the host (instances stopped, the seat warmed back
   only if the lease owes it); a live reserve pushes the moment out before its own minutes-long release so the two never race or double the
   warm-back, and a reserve that dies in the middle of that release is still covered. The detached wait **fails closed** on its stamp: tried
@@ -31,7 +36,19 @@
   READ from a verdict (gone, fenced out), the holder confirms a failed fence with further looks, retries a failed read for 30 s with one
   line, and says what it let go on. Its own release is retried four times; when it gives up it prints `LEASE NOT RELEASED`, marks the record
   (`holder_gave_up_ms`, additive), and exits non-zero instead of exiting 0 into a log in the temp directory, and `gpu status` says that
-  nothing polls the lease any more. A release's answer "no lease was held" is believed only if the epoch is off the record: the detached
+  nothing polls the lease any more, also once the holder has exited and the record reads as a stale holder (`gpu status` printed "free"
+  and the stale-holder line with no word of the marker).
+- **A record that exists but cannot be read is a held lease.** `Inspect()` and `Leases()` judge who holds the cards and skip a record they
+  cannot read, and the release paths believed them (reproduced on Windows by replacing the record with a directory). `Manager.RecordState`
+  looks at the record itself (absent, held, unreadable; unreadable is held) and now decides every "the lease is gone": the release
+  confirmations, the holder's own release (it can no longer return nil and exit 0 over a lease it could not touch), `gpu release`'s
+  post-check, and the whole-node `Lease.Release`, which returns a wrapped `*RecordUnreadableError` instead of nil. Bare `gpu release`
+  with no `--epoch` on a card-scoped host names an unreadable card record (`epoch N: its record cannot be read; run again or pass --epoch
+  N`) instead of printing "no lease is held" and exiting 0. `Restamp` keeps the cause (`%w`) and says "cannot be read" rather than "the
+  lease is gone"; the host-RAM wait looks again three times, 100 ms apart, before it believes a missing lease is gone; the detached
+  reserve's release proceeds over an unreadable record (stop the instances, warm back, release, report). The holder's release keeps its
+  error while a claim of the epoch remains (a card lease removes its record before its claims, so "the record is absent" alone is not
+  "released"), and the stop line over a record it cannot read says so instead of "the lease is no longer ours". A release's answer "no lease was held" is believed only if the epoch is off the record: the detached
   reserve, the wrapper's final release, the holder and `gpu release` no longer report a held lease as released or as "no lease is held",
   and `ReleaseByEpoch` answers "nothing held" only for an absent record. The holder's grace before it steps in is 30 s, so a reserve stalled
   under paging is not given a parallel warm-back.
@@ -44,10 +61,11 @@
   the record, additive; `host_ram_hold_until` and `holder_gave_up` on the lease row). The ComfyUI instances kept under a lease are stopped
   only by a caller that fenced the epoch first, and a source test now pins each caller by the function that holds the call across the whole
   package.
-- **Open, stated.** A reserve that dies in the few milliseconds between the holder taking the lease and the outer stamp leaves no stamp; the
-  outer bound assumes the unload ends within the holder's grace of the drain's deadline; with the hold bound at 0 there is no outer bound; the
-  reserve measures its wait on a monotonic clock and the holder compares wall-clock milliseconds, so after a suspend the holder can release
-  sooner (never later) than the stamp says; the hidden-holder process itself is exercised in-process, not as a spawned child.
+- **Open, stated.** A reserve that dies in the few milliseconds between the holder taking the lease and the first outer stamp leaves no
+  stamp; with the hold bound at 0 there is no outer bound (only `--wait` ends the wait); a holder cannot write its give-up marker onto a
+  record it cannot read, so over such a record the exit status and its log are the only word; the reserve measures its wait on a monotonic
+  clock and the holder compares wall-clock milliseconds, so after a suspend the holder can release sooner (never later) than the stamp
+  says; the hidden-holder process itself is exercised in-process, not as a spawned child.
 - **Docs.** `docs/systems/gpu-lease.md` (the F82 section: the order, the hold bound, the outer bound, "Releasing on its own", each form, the
   third consequence) and the OPERATOR-GUIDE config row (in the guide's one key table; it has no GPU-key table) and host-RAM paragraph. F82 is
   recorded in no ADR (ADR 0009 and ADR 0080 were checked: their host-RAM and unload passages are about other mechanisms), so there is no
@@ -59,9 +77,10 @@
   detached round (the holder releasing its own lease after the stamp passes, the reserve that dies mid-release or the instant its wait ends,
   `--wait`-ended detached waits, a cold seat never warmed, a failed release reported, `gpu status` after the stamp passes, the fence
   confirmation), and the third round (the outer bound, the fail-closed stamp, the holder's failure paths, the confirmed release, the
-  production grace, the clamp line). The two tests that pit the holder against a live parent hold the holder's clock back until the
-  reserve's push-out is on the record, so no scheduler delay can decide them (8 runs of the whole holder set on two cores with six busy
-  loops: 64 of 64 pass; before, 4 of 16 of the two tests failed).
+  production grace, the clamp line), and the fourth (the unreadable-record round: `RecordState`, bare `gpu release`, the wait and restamp,
+  the stale-holder line, the live outer bound, and an instance-stop scan over whole declarations). The two tests that pit the holder
+  against a live parent hold the holder's clock back and hold the reserve AT its push-out (a hook, not a poll of the record), and the
+  holder reads its clock before its record, so no scheduler delay can decide them.
 - **Mutations** (each compiled, was proved applied by a changed sha256, turned a named test red, and was restored byte-for-byte): bound
   ignored; bound error swallowed so the command runs; lease not released (wrapper, detached); seat not warmed back (detached); warning
   dropped; config 0 read as the default; `--ram-hold-max 0` ignored; unload always counted as freeing something; bound never stamped; stamp
@@ -77,3 +96,6 @@
   with the failed release, `--warm-seat` always advised, a stamp landing on an admitted lease, the production grace back to 5 s, the clamp
   silent, and a stray direct stop of the ComfyUI instances in another function, in a file of its own, and through a lease object in an
   unlisted function.
+  The fourth round ran no mutation battery, by order: its proofs are the red-then-green pairs, the reviewer's slow-unload probe (red on the
+  tree before the live re-stamp), one stray `stopKeptInstances` in a package-level initializer turning the instance-stop scan red, and a
+  starvation tally for the push-out race.

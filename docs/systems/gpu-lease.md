@@ -2030,15 +2030,33 @@ behind a RAM figure the host cannot meet; the failure names what ended the wait 
 
 #### Releasing on its own: the hidden holder, the warm-back, and the outcome
 
-**An outer bound before the drain.** A detached reserve killed during the drain or the unload, before the wait begins, used to leave
-the lease asking for the host with no stamp, and the holder acts only on a stamp. As soon as the holder has the lease, a reserve
-whose lease defers its host RAM and whose hold bound is on stamps the moment the drain ends by its deadline plus the hold bound
-(`drainDeadline(...)` + the bound: both known then, nothing invented); the wait replaces it with its real end when it begins and
-admission clears it as before (`TestADetachedReserveStampsAnOuterBoundBeforeTheDrainSoAParentThatDiesThereIsStillCovered`). It is
-off when the bound is off (`0`: nothing says when the lease should end but `--wait`, which is the operator's choice) and when nothing
-was deferred (`TestNoOuterBoundIsStampedWhenThereIsNoBoundOrNothingWasDeferred`). A failed drain's error names the moment the bound
-releases the lease. Open, and stated: it is stamped after the holder has the lease, so a reserve that dies in the few milliseconds
-between the two leaves no stamp; and it assumes the unload ends within the holder's grace of the drain's deadline.
+**An outer bound before the drain, kept moving by the live reserve.** A detached reserve killed during the drain or the unload,
+before the wait begins, used to leave the lease asking for the host with no stamp, and the holder acts only on a stamp. The first
+version stamped the drain's deadline plus the hold bound, and the drain's deadline is `--wait` away (8 h by default): a default
+detached reserve killed a minute into its drain, the incident's own command shape, left the holder holding the cards for hours. Now,
+as soon as the holder has the lease, a reserve whose lease defers its host RAM and whose hold bound is on stamps **now + the hold
+bound + a slack (`outerSlack`, 60 s)** and **re-stamps it every `outerRefreshEvery` (30 s)** while the drain and the unload run (the
+unload is under the same ticker); the wait replaces it with its real end when it begins, and admission clears it as before. A reserve
+that dies stops re-stamping, so the holder releases the lease within about the bound plus the slack plus its own grace, whatever
+`--wait` says, and does not touch a lease whose reserve is alive and still draining
+(`TestADetachedReserveWhoseParentDiesDuringALongWaitDrainIsReleasedWithinTheBoundNotAtWait`,
+`TestADetachedReserveStampsAnOuterBoundBeforeTheDrainSoAParentThatDiesThereIsStillCovered`). It is off when the bound is off (`0`:
+nothing says when the lease should end but `--wait`, which is the operator's choice) and when nothing was deferred
+(`TestNoOuterBoundIsStampedWhenThereIsNoBoundOrNothingWasDeferred`). A failed drain leaves its lease held (the exit code tells the
+caller not to start), and that lease now ends by itself too: the holder releases it at the last moment the reserve stamped, and the
+error says when (`detachedMaintainError`); `gpu release --epoch N` frees it sooner. Open, and stated: a reserve that dies in the few
+milliseconds between the holder taking the lease and the first stamp leaves no stamp; and with the bound at 0 there is no backstop.
+
+The first outer bound was wrong in the other direction too: it was the drain's deadline plus the hold bound, and the UNLOAD is not
+bounded by the drain's deadline (the maintenance client allows 15 minutes per request), so a drain that ended near its deadline,
+followed by an unload longer than the bound plus the holder's grace, made the holder release a LIVE reserve's lease in the middle of
+the unload: the warm-back skipped, the seat left owed and cold, the reserve failing with "no longer this reservation's". The same
+re-stamp, which runs under the drain and under the unload, closes it. The margin is exact: a live reserve loses its lease to its
+holder only if it cannot re-stamp for more than the hold bound plus the 60 s slack plus the holder's 30 s grace
+(`TestAnUnloadLongerThanTheBoundDoesNotLoseALiveReservesLeaseToItsHolder`, the reviewer's probe compressed: `--wait 1s`,
+`--ram-hold-max 300ms`, a 1 s holder grace, a 6 s unload; on the tree before the re-stamp the holder released the lease at the
+bound and the reserve failed with "the lease is gone"). When a lease is gone after a failed drain or unload and the outer bound this
+reserve last set has passed, the error says so (`detachedMaintainErrorAfter`, `TestADrainErrorSaysWhenTheOuterBoundReleasedTheLease`).
 
 **The record carries the end of the wait.** `Manager.AwaitHostRAM` stamps the moment the wait ends (`host_ram_hold_until_ms`) on the
 lease's record when the wait BEGINS, before the first look at the host, so a reserve that dies before its first look still leaves it.
@@ -2083,15 +2101,20 @@ the holder prints `LEASE NOT RELEASED`, marks the record (`holder_gave_up_ms` an
 **exits non-zero** instead of exiting 0 after writing to a log in the temp directory. `gpu status` reads the marker: `the holder gave up
 releasing it at HH:MM (why) and nothing polls the lease now; gpu release --epoch N frees it`, for a waiting lease and an admitted one;
 the lease row carries `holder_gave_up` (`TestAHolderWhoseOwnReleaseKeepsFailingRetriesReportsExitsNonZeroAndMarksTheRecord`,
-`TestStatusSaysTheHolderGaveUpAndNeverPromisesItsNextPoll`).
+`TestStatusSaysTheHolderGaveUpAndNeverPromisesItsNextPoll`). Once the holder that wrote the marker has exited, the record is
+reclaimable and `gpu status` reads the lease as stale (`GPU: free (unreserved)` and the stale-holder verdict); that line carries the
+marker too: `the holder gave up releasing it at HH:MM (why), so the release failed: the next gpu reserve reclaims it, or gpu release
+--epoch N frees it now` (`TestAStaleHolderThatGaveUpReleasingItSaysSoAndWhy`).
 
 **The parent that is alive releases first and is not raced.** When a wait ends the parent pushes the stamped end out by
 `detachedReleaseGrace` (15 minutes) before the slow part of its own release (a seat warm-back takes minutes), so the holder neither
 steps in nor doubles the warm-back (`TestAReserveThatIsAliveReleasesFirstAndTheHolderNeitherDoublesTheWarmNorStepsIn`). If the parent
 dies in the middle of that release (a tool timeout lands at exactly the default bound), the pushed stamp is the moment the holder takes
 over (`TestAReserveThatDiesInTheMiddleOfItsOwnReleaseIsStillCoveredByTheHolder`). Both releasing is epoch-fenced and harmless: a lease
-already released by the other party is not a failure. These two tests wait for the push-out to be on the record, with the holder's
-clock held back (`holdClock`) until it is, and do not race it by the real clock. The reserve measures its own wait on a monotonic
+already released by the other party is not a failure. These two tests hold the reserve AT its push-out
+(`pushedOutHook`, a nil seam in production) with the holder's clock held back (`holdClock`) until they have decided what the holder may
+see, and do not poll the record for a window a starved test goroutine can miss (3 failures in 54 starved runs); the holder reads its
+clock BEFORE its record, so a stale stamp can only be compared with an older now. The reserve measures its own wait on a monotonic
 clock and the holder compares wall-clock milliseconds, so after a suspend the holder can release while the reserve still has time
 left: the safe direction, since the lease is then released sooner and never later than the stamp says.
 
@@ -2108,6 +2131,30 @@ release then failed and the lease is STILL HELD (epoch N): <why>` (`TestWhenTheR
 The command names `--warm-seat` only when a warm-back is owed: `gpu release --warm-seat` has no `onlyIfOwed` guard (it is the
 operator's explicit request), so advising it for a lease that unloaded nothing could load a seat nothing asked for
 (`TestTheNotReleasedLineAdvisesAWarmBackOnlyWhenOneIsOwed`).
+
+**A record that exists but cannot be read is a held lease, never a gone one (`Manager.RecordState`).** `Inspect()` and `Leases()`
+read through the reader, which judges who holds the cards and, for that, skips a record it cannot read (`legacy` returns nil on any
+read error, `v2` continues past it). Every decision that a lease is GONE therefore comes from `Manager.RecordState(epoch)`, which
+looks at the record itself (a card lease's `e/<epoch>.json`, a whole-node `meta.json` naming the epoch) and answers absent, held or
+unreadable, with the cause for the last; unreadable counts as held. It decides `leaseStillHeld`, `confirmReleased`,
+`releaseLeaseConfirmed`, the holder's `releaseHolderLease` (which used to believe `Inspect` and return nil, so the holder exited 0 over
+a lease it could not touch; it now retries, prints `LEASE NOT RELEASED`, tries to mark the record, and exits non-zero) and `gpu
+release`'s post-check; the whole-node `Lease.Release` returns a wrapped `*RecordUnreadableError` instead of nil "already gone"
+(`TestRecordStateSaysAbsentHeldOrUnreadableAndUnreadableIsNeverGone`, `TestTheHoldersReleaseOverARecordItCannotReadIsAFailureNeverSuccess`).
+Bare `gpu release` with no `--epoch` enumerates the card records directly: one that exists and cannot be read is an error, `epoch N: its
+record cannot be read; run again or pass --epoch N`, not "no lease is held" (`TestBareGPUReleaseNeverSaysNoLeaseIsHeldOverAnUnreadableCardRecord`).
+`Restamp` returns a wrapped `*RecordUnreadableError` for a record it cannot read and wraps the real cause (`%w`) when the lease is
+gone; `AwaitHostRAM` looks again three times, 100 ms apart, before it says a missing lease is gone, and says "the record cannot be read,
+so the lease is not known to be gone" when it is the record that failed; `releaseAfterRAMWait` treats an unreadable record as held and
+proceeds to stop the instances, warm the seat back and release
+(`TestAnUnreadableRecordIsNotTheLeaseIsGoneInRestampAndInTheWait`, `TestTheDetachedReleaseProceedsOverARecordItCannotRead`). The holder's
+release also keeps its error while the card lease is half released: a card lease removes its record first and its claims after, so a
+failure on a claim leaves the record absent, and "the record is absent" alone is not "released" (`releaseHolderLease` keeps the
+release error unless the record is absent AND `Manager.ClaimsOf(epoch)` is empty; the moved-on refusal, `IsLeaseMovedOn`, is the one
+error that clears it: `TestTheHoldersReleaseKeepsTheErrorWhenTheRecordIsGoneButAClaimRemains`). Over a record it cannot read,
+`stopInstancesOfLease` says "its record cannot be read" and stops nothing, instead of "the lease is no longer ours"
+(`TestStopInstancesOverAnUnreadableRecordSaysSoAndNotThatTheLeaseIsNoLongerOurs`). Stated: the holder cannot write its give-up marker
+onto a record it cannot read, so over such a record the exit status and the log are the only word.
 
 **A release's "nothing was held" is believed only if nothing is held.** `Manager.ReleaseByEpoch` answers `(false, nil)` for a lease
 that is gone, and used to answer it for a lease whose record it could not even examine (a stat that fails with an access error while
