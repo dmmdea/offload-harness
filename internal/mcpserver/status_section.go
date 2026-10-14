@@ -285,6 +285,10 @@ func gpuLeaseVerdictLine(view map[string]any) string {
 		clip := 240
 		if escalated {
 			clip = 480
+			if holder != nil && holder.YieldNote != "" {
+				// What became of the request to the holder is part of the standing, not a tail to clip.
+				clip += len([]rune(holder.YieldNote)) + 2
+			}
 		}
 		b.WriteString(" — " + oneLine(note, clip))
 	}
