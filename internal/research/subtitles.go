@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // YouTube subtitles as a text source. The operator names a yt-dlp executable
@@ -170,7 +172,9 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) Fetched {
 		"-P", "home:" + dir, "-P", "temp:" + dir, "-o", "%(id)s.%(ext)s",
 		"--", canonical,
 	}
-	cmd := exec.CommandContext(rctx, bin, args...)
+	// winexec.CommandContext starts the child hidden: a console program started by a process with no console of its
+	// own would otherwise open a window of its own on the operator's desktop (TestEveryChildProcessStartIsHidden).
+	cmd := winexec.CommandContext(rctx, bin, args...)
 	cmd.Dir = dir
 	cmd.Env = ytDlpEnv(dir)
 	cmd.WaitDelay = 2 * time.Second
