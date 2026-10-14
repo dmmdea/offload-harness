@@ -41,11 +41,22 @@ func failureFixtureConfig(t *testing.T) string {
 	return cfgPath
 }
 
+// runLedgerModeOut runs the ledger verb the way main does (runLedgerMode) and returns its stdout.
+func runLedgerModeOut(t *testing.T, args ...string) string {
+	t.Helper()
+	var runErr error
+	out := captureStdout(t, func() { runErr = runLedgerMode(args) })
+	if runErr != nil {
+		t.Fatalf("ledger %v: %v", args, runErr)
+	}
+	return out
+}
+
 // runFailures runs `ledger --failures` against the fixture ledger and the synthetic table.
 func runFailures(t *testing.T, extra ...string) string {
 	t.Helper()
 	args := append([]string{"--failures", "--config", failureFixtureConfig(t), "--table", filepath.FromSlash(failureFixtureTable)}, extra...)
-	return runLedgerOut(t, args...)
+	return runLedgerModeOut(t, args...)
 }
 
 func decodeFailureReport(t *testing.T, out string) failureReport {
@@ -81,7 +92,7 @@ func classByName(t *testing.T, r failureReport, name string) failureClassOut {
 // the verb's usual trailing text lines would break a script (and the evidence file) that reads it.
 func TestFailureRegisterIsDeterministicOnTheFixtureLedger(t *testing.T) {
 	a := runFailures(t)
-	b := runLedgerOut(t, "--table", filepath.FromSlash(failureFixtureTable), "--config", failureFixtureConfig(t), "--failures")
+	b := runLedgerModeOut(t, "--table", filepath.FromSlash(failureFixtureTable), "--config", failureFixtureConfig(t), "--failures")
 	if a != b {
 		t.Fatalf("flag order changed the output:\n--- a\n%s\n--- b\n%s", a, b)
 	}
@@ -352,7 +363,7 @@ func TestEmbeddedFailureTableCoversEveryReasonCode(t *testing.T) {
 // summary's fields leak in either: it is a different report, not the same one plus a flag.
 func TestLedgerFailuresModeIsAdditive(t *testing.T) {
 	cfgPath := failureFixtureConfig(t)
-	plain := runLedgerOut(t, "--config", cfgPath)
+	plain := runLedgerModeOut(t, "--config", cfgPath)
 	for _, key := range []string{`"classes"`, `"failure_rows"`} {
 		if strings.Contains(plain, key) {
 			t.Errorf("the default ledger output grew %s:\n%s", key, plain)
