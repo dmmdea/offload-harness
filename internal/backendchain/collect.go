@@ -269,7 +269,7 @@ func (s *state) probe(ctx context.Context, c Candidate, canon string, inRoster b
 	case s.runErr != nil:
 		v = Verdict{OK: true, Probe: ProbeProcess, Detail: "in the roster; llama-swap's running list could not be read (" + short(s.runErr) + "), so its load state is unknown"}
 	case !found || (state != "ready" && state != "starting" && state != "stopping"):
-		v = Verdict{OK: true, Probe: ProbeProcess, Detail: "in the roster, not loaded; llama-swap loads it on first use (not asked further: asking would load it)"}
+		v = Verdict{OK: true, Probe: ProbeProcess, Detail: "in the roster, not loaded; loads on first use, not asked (asking would load it)"}
 	case state == "starting":
 		v = Verdict{OK: true, Probe: ProbeProcess, Detail: "loading (llama-swap state starting)"}
 	case state == "stopping":
