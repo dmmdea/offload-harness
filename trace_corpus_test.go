@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -498,6 +499,149 @@ func TestTraceCorpusPoolAliasRunsAreABucketKeyedByNode(t *testing.T) {
 	}
 }
 
+// tcPagerEdgeCases are the pager objects the validator must tell apart. The bad ones each trip ONE
+// guard, so removing any single guard (or one term of it) lets exactly its case through.
+var tcPagerEdgeCases = []struct {
+	name string
+	json string
+	ok   bool
+}{
+	{"recorded zero passes, nothing evicted", `{"basis":"insufficient_data","compaction_passes":0}`, true},
+	{"measured and consistent", `{"basis":"measured","evictions":5,"evicted_bytes":10,"distinct_evicted":4,"refetched_distinct":4,"compaction_passes":2}`, true},
+	{"passes null", `{"basis":"insufficient_data","compaction_passes":null}`, false},
+	{"passes key absent", `{"basis":"insufficient_data"}`, false},
+	{"negative passes", `{"basis":"insufficient_data","compaction_passes":-1}`, false},
+	{"unknown basis", `{"basis":"guess","compaction_passes":0}`, false},
+	{"empty basis", `{"compaction_passes":0}`, false},
+	{"negative evictions", `{"basis":"measured","evictions":-1,"distinct_evicted":1,"compaction_passes":0}`, false},
+	{"negative evicted bytes", `{"basis":"measured","evictions":1,"evicted_bytes":-1,"distinct_evicted":1,"compaction_passes":0}`, false},
+	{"negative distinct", `{"basis":"measured","evictions":1,"distinct_evicted":-1,"refetched_distinct":-2,"compaction_passes":0}`, false},
+	{"negative refetched", `{"basis":"measured","evictions":1,"distinct_evicted":1,"refetched_distinct":-1,"compaction_passes":0}`, false},
+	{"refetched more than evicted", `{"basis":"measured","evictions":1,"distinct_evicted":1,"refetched_distinct":2,"compaction_passes":0}`, false},
+	{"measured with nothing evicted", `{"basis":"measured","compaction_passes":0}`, false},
+	{"insufficient with evictions", `{"basis":"insufficient_data","evictions":2,"compaction_passes":0}`, false},
+	{"insufficient with distinct evicted", `{"basis":"insufficient_data","distinct_evicted":1,"compaction_passes":0}`, false},
+}
+
+// TestTraceCorpusPagerObjectValidatorEdges: the rule the verb exists for is that unrecorded is never
+// 0, and its edge is the pager object. A report whose pass count is null or absent (a node from before
+// the field) must not read as a recorded zero-pass run, and an object that contradicts itself is
+// unrecorded, never trusted. Each shape is read through the real JSON decode, so the null-versus-absent
+// pointer semantics are what is under test.
+func TestTraceCorpusPagerObjectValidatorEdges(t *testing.T) {
+	if p, ok := (*tcPagerIn)(nil).run(); p != nil || !ok {
+		t.Errorf("no pager object is a plain absence (nil, true), got %v/%v", p, ok)
+	}
+	for _, c := range tcPagerEdgeCases {
+		var in tcPagerIn
+		if err := json.Unmarshal([]byte(c.json), &in); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		p, ok := in.run()
+		if ok != c.ok || (p != nil) != c.ok {
+			t.Errorf("%s: run() = %v/%v, want usable=%v", c.name, p, ok, c.ok)
+		}
+	}
+	// A usable object carries every field through, and a recorded zero stays a zero.
+	var in tcPagerIn
+	if err := json.Unmarshal([]byte(tcPagerEdgeCases[1].json), &in); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := in.run(); p == nil || *p != (tcPager{Basis: tcBasisMeasured, Evictions: 5, EvictedBytes: 10, DistinctEvicted: 4, Refetched: 4, CompactionPasses: 2}) {
+		t.Errorf("a usable pager object must map through unchanged, got %+v", p)
+	}
+	var zero tcPagerIn
+	if err := json.Unmarshal([]byte(tcPagerEdgeCases[0].json), &zero); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := zero.run(); p == nil || p.CompactionPasses != 0 {
+		t.Errorf("a recorded 0 passes is a usable zero, got %+v", p)
+	}
+}
+
+// TestTraceCorpusUnusablePagerObjectsReadAsUnrecordedAndAreNoted: at harvest, every shape the
+// validator refuses lands as an unrecorded run with one note, from a delegation row and from a
+// standalone trace alike, and the usable ones stay recorded.
+func TestTraceCorpusUnusablePagerObjectsReadAsUnrecordedAndAreNoted(t *testing.T) {
+	dir := t.TempDir()
+	logDir, tracesDir := filepath.Join(dir, "log"), filepath.Join(dir, "traces")
+	for _, d := range []string{logDir, tracesDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var rows []string
+	usable, unusable := 0, 0
+	for _, c := range tcPagerEdgeCases {
+		rows = append(rows, `{"seat":"seat-a","result":{"steps":1,"trace":[{}],"pager":`+c.json+`}}`)
+		if c.ok {
+			usable++
+		} else {
+			unusable++
+		}
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "2026-06-01.jsonl"), []byte(strings.Join(rows, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// One standalone trace with a null pass count: unusable too.
+	trace := `{"stop_reason":"done","steps":1,"pager":` + tcPagerEdgeCases[2].json + `,"transcript":[{"Role":"user","Content":"hi"}]}`
+	if err := os.WriteFile(filepath.Join(tracesDir, "goal-null-passes.json"), []byte(trace), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	unusable++
+	runs, stats, err := tcHarvest(tcHarvestOpts{TracesDir: tracesDir, DelegationDir: logDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stats.Notes["pager object unusable (read as unrecorded)"]; got != unusable {
+		t.Errorf("notes = %d, want %d (one per unusable object): %v", got, unusable, stats.Notes)
+	}
+	st := tcStatsFor(runs)
+	if st.Pager.RecordedRuns != usable || st.Pager.UnrecordedRuns != unusable || st.Compaction.RecordedRuns != usable || st.Compaction.UnrecordedRuns != unusable {
+		t.Errorf("recorded/unrecorded = pager %d/%d compaction %d/%d, want %d/%d", st.Pager.RecordedRuns, st.Pager.UnrecordedRuns,
+			st.Compaction.RecordedRuns, st.Compaction.UnrecordedRuns, usable, unusable)
+	}
+}
+
+// TestTraceCorpusLadderArtifactsCountOnlyToolTurns: the transcript evidence for the ladder is a tool
+// turn that is a product of it (an elision marker, a dedupe reference). The same text in any other
+// role is not evidence: the model can quote it, a user can paste it.
+func TestTraceCorpusLadderArtifactsCountOnlyToolTurns(t *testing.T) {
+	elided := "[earlier result elided to fit context — 4096 chars]"
+	deduped := "[identical to the later result for call c1 — 10 chars]"
+	msg := func(role, content string) map[string]string {
+		return map[string]string{"Role": role, "Content": content}
+	}
+	write := func(dir, name string, transcript ...map[string]string) {
+		b, err := json.Marshal(map[string]any{"stop_reason": "done", "steps": 2, "transcript": transcript})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name+".json"), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := t.TempDir()
+	// Artifact-looking text in every role but tool: no ladder evidence.
+	write(dir, "quoted", msg("system", elided), msg("user", elided), msg("assistant", deduped), msg("tool", "raw file content"))
+	// A tool turn that is an elision marker and one that is a dedupe reference: two.
+	write(dir, "compacted", msg("user", "hi"), msg("tool", elided), msg("tool", deduped), msg("tool", "raw file content"))
+	runs, _, err := tcHarvest(tcHarvestOpts{TracesDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, r := range runs {
+		if r.LadderArtifacts == nil {
+			t.Fatalf("%s: a trace with a transcript must carry a ladder_artifacts count", r.ID)
+		}
+		got[r.ID] = *r.LadderArtifacts
+	}
+	if got["tr-quoted"] != 0 || got["tr-compacted"] != 2 {
+		t.Errorf("ladder artifacts = %v, want quoted:0 compacted:2 (only tool turns count)", got)
+	}
+}
+
 // TestTraceCorpusUnrecordedNeverSerializesAsZero is the rule the whole verb exists to keep: a
 // value nobody recorded is null, and the counts say how many runs had none. Here every run
 // predates the instruments, so every rate must be null and no verdict may be reached.
@@ -672,9 +816,12 @@ func TestTraceCorpusIsRegisteredInMain(t *testing.T) {
 	}
 }
 
-// TestTraceCorpusFixturesAreSynthetic: the fixtures carry no host, path or identity text.
+// TestTraceCorpusFixturesAreSynthetic: the fixtures carry no host, path or identity text. The
+// banned words are assembled at run time (and a drive path is a pattern) so this file never holds
+// one itself: a literal here would be the one place the text reached a tracked file.
 func TestTraceCorpusFixturesAreSynthetic(t *testing.T) {
-	banned := []string{"C:\\", "D:\\", "G:\\", "C:/", "D:/", "G:/", "/home/", "/Users/", "@", "Bearer ", "dev-caches", "worktrees"}
+	drivePath := regexp.MustCompile(`(^|[^A-Za-z0-9])[A-Za-z]:[\\/]`)
+	banned := []string{"/" + "home/", "/" + "Users/", "@", "Bearer ", "dev" + "-caches", "work" + "trees", "My" + " Drive"}
 	err := filepath.Walk("testdata/tracecorpus", func(p string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return err
@@ -688,10 +835,22 @@ func TestTraceCorpusFixturesAreSynthetic(t *testing.T) {
 				t.Errorf("%s contains %q", p, bad)
 			}
 		}
+		if m := drivePath.Find(b); m != nil {
+			t.Errorf("%s contains a drive path (%q)", p, m)
+		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The patterns bite: a planted drive path is caught, and the legitimate shapes are not.
+	for in, want := range map[string]bool{
+		"Q" + ":" + "/x": true, "Q" + ":" + `\x`: true, "see " + "q" + ":" + "/x": true,
+		"https://example.invalid": false, `"Role":"user"`: false, "a:b": false,
+	} {
+		if got := drivePath.MatchString(in); got != want {
+			t.Errorf("drive pattern on %q = %v, want %v", in, got, want)
+		}
 	}
 }
 
