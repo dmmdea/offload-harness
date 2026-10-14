@@ -513,3 +513,47 @@ func TestTraceCorpusHarvestIsLineEndingBlind(t *testing.T) {
 		t.Fatalf("CRLF records harvested to a different corpus:\n%s\n---\n%s", a, b)
 	}
 }
+
+// TestTraceCorpusHarvestDefaultsToTheInstallRoot: with no source flag, harvest reads the
+// agent-traces and delegation-log directories under the configured install root (`home`), the
+// same two places the writers use. A root with neither is refused, naming what to pass.
+func TestTraceCorpusHarvestDefaultsToTheInstallRoot(t *testing.T) {
+	home := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	cfgJSON, _ := json.Marshal(map[string]string{"home": home})
+	if err := os.WriteFile(cfgPath, cfgJSON, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "corpus.jsonl")
+	if _, _, err := tcRunVerb(t, "harvest", "--config", cfgPath, "--out", out); err == nil || !strings.Contains(err.Error(), "pass --traces and/or --delegation-log") {
+		t.Fatalf("an install root with no records must be refused with the flags to pass, got %v", err)
+	}
+	copyDir := func(src, dst string) {
+		if err := os.MkdirAll(dst, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			b, err := os.ReadFile(filepath.Join(src, e.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dst, e.Name()), b, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	copyDir(tcFixtureTraces, filepath.Join(home, "agent-traces"))
+	copyDir(tcFixtureDelegation, filepath.Join(home, "delegation-log"))
+	if _, _, err := tcRunVerb(t, "harvest", "--config", cfgPath, "--out", out); err != nil {
+		t.Fatalf("harvest from the install root: %v", err)
+	}
+	got, _ := os.ReadFile(out)
+	want, _ := os.ReadFile(tcHarvestFixture(t, "explicit.jsonl"))
+	if !bytes.Equal(got, want) {
+		t.Fatalf("the install-root harvest differs from the explicit one:\n%s\n---\n%s", got, want)
+	}
+}
