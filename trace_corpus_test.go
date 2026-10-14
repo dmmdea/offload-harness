@@ -336,6 +336,78 @@ func TestTraceCorpusRedactsAtHarvest(t *testing.T) {
 	}
 }
 
+// TestTraceCorpusRedactsPathSeats: a seat name that is a local filesystem path (a drive path, a
+// rooted path, anything with a backslash: a seat bound by model file) is a by_seat key in every
+// readout and baseline, and the vet table has no path class, so the harvest replaces it with a
+// stable placeholder and the loader refuses a corpus that still carries one. The paths are built
+// at run time so no tracked file carries one.
+func TestTraceCorpusRedactsPathSeats(t *testing.T) {
+	drive := "Z" + ":" + "/" + "models" + "/" + "m1.gguf"
+	winSlash := "Y" + ":" + "\\" + "stuff" + "\\" + "m2.gguf"
+	rooted := "/" + "opt" + "/" + "m3.gguf"
+	backslashed := "sub" + "\\" + "m4.gguf"
+	// Each row is {seat, stop reason}; the last row names a path as its stop reason.
+	seats := [][2]string{{drive, "done"}, {winSlash, "done"}, {drive, "done"}, {rooted, "done"}, {backslashed, "done"},
+		{"seat-a", "done"}, {"models/org-model", "done"}, {"seat-a", rooted}}
+	dir := t.TempDir()
+	var rows []string
+	for _, row := range seats {
+		b, err := json.Marshal(map[string]any{"seat": row[0], "result": map[string]any{"steps": 1, "stop_reason": row[1]}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, string(b))
+	}
+	if err := os.WriteFile(filepath.Join(dir, "2026-04-01.jsonl"), []byte(strings.Join(rows, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "corpus.jsonl")
+	stdout, _, err := tcRunVerb(t, "harvest", "--delegation-log", dir, "--out", out)
+	if err != nil {
+		t.Fatalf("harvest: %v", err)
+	}
+	b, _ := os.ReadFile(out)
+	raw := string(b)
+	for _, leak := range []string{"models" + "/" + "m1", "stuff", "m2.gguf", "m3.gguf", "m4.gguf", "opt"} {
+		if strings.Contains(raw, leak) {
+			t.Fatalf("the corpus still holds a fragment of a path seat (%q):\n%s", leak, raw)
+		}
+	}
+	// Stable: the same path is the same placeholder, numbered by first appearance; a seat that is
+	// not path-shaped (a bare name, an org/model id with no leading slash) is left alone.
+	runs, _, err := tcLoadCorpus(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range runs {
+		got = append(got, r.Seat+"/"+r.StopReason)
+	}
+	want := []string{"[redacted-path-1]/done", "[redacted-path-2]/done", "[redacted-path-1]/done", "[redacted-path-3]/done",
+		"[redacted-path-4]/done", "seat-a/done", "models/org-model/done", "seat-a/[redacted-path-3]"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("seat/stop reason after harvest = %v, want %v", got, want)
+	}
+	var harvested struct {
+		Stats tcHarvestStats `json:"stats"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &harvested); err != nil {
+		t.Fatal(err)
+	}
+	if harvested.Stats.Redactions["path"] != 6 {
+		t.Errorf("path redactions = %v, want 6 (one per path-shaped value: five seats and one stop reason)", harvested.Stats.Redactions)
+	}
+	// Defense in depth: the strict loader refuses a corpus that carries a path seat.
+	dirty := filepath.Join(dir, "dirty.jsonl")
+	line := `{"id":"dl-x","source":"delegation-log","seat":` + strconvQuote(rooted) + `,"trace_bearing":false,"steps":1,"pager":null,"prefill":null,"seat_tokens_in":null,"ladder_artifacts":null}` + "\n"
+	if err := os.WriteFile(dirty, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := tcRunVerb(t, "readout", "--corpus", dirty); err == nil || !strings.Contains(err.Error(), "path") {
+		t.Fatalf("a corpus holding a path seat must be refused, got %v", err)
+	}
+}
+
 // TestTraceCorpusUnrecordedNeverSerializesAsZero is the rule the whole verb exists to keep: a
 // value nobody recorded is null, and the counts say how many runs had none. Here every run
 // predates the instruments, so every rate must be null and no verdict may be reached.
