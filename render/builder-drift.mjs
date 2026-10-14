@@ -1,4 +1,4 @@
-// render/builder-drift.mjs — the builder drift guard (ENH-4).
+// render/builder-drift.mjs — the builder drift guard.
 //
 // A `render/wf-*.mjs` builder that was copied from a ComfyUI workflow template (the
 // `comfyui-workflow-templates-json` wheel) carries the template's recipe widgets (steps, cfg, sampler,
@@ -20,6 +20,10 @@
 //     template JSON and compare. A template that changed under a builder fails NAMING THE BUILDER, the
 //     template and the wheel version the builder was last verified against.
 //
+// Every template value is read from the place it runs from. A widget whose input is linked (to a subgraph input, or to
+// another node) carries a stale serialized value, so a locator that points at one fails (see `templateValue`) and the
+// spec points at the effective source instead.
+//
 // What is stored is names and hashes only. No template JSON, no template text and no widget value is copied
 // into the repository. `explain` prints the values to the terminal for a human; nothing writes them down.
 //
@@ -33,8 +37,11 @@
 //   node render/builder-drift.mjs explain  --templates-dir DIR | --comfy-dir DIR     (values side by side)
 //   node render/builder-drift.mjs record   --templates-dir DIR | --comfy-dir DIR     (rewrite the manifest)
 // DIR is the `templates` directory of the wheel (or of a `pip download` extract); --comfy-dir finds it inside a
-// ComfyUI tree. `COMFY_TEMPLATES_DIR` / `COMFYUI_DIR` supply them when the flags are absent. Read-only on the
-// templates; `record` writes only the manifest.
+// ComfyUI tree. The first source that is set decides, in this order: --templates-dir, --comfy-dir, the
+// `COMFY_TEMPLATES_DIR` environment variable (a templates directory), the `COMFYUI_DIR` environment variable (a ComfyUI
+// tree). The tests use the same function (`resolveTemplatesDir`). A tree named on the command line that has no package
+// is an error; one named by the environment that has none counts as "no package here" and the template side is
+// skipped. Read-only on the templates; `record` writes only the manifest.
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -149,8 +156,40 @@ function feedOf(container, node, inputName) {
   return `node:${origin?.type ?? link.origin_id}#${link.origin_slot}`;
 }
 
+// The input of `node` that carries widget `name`, when that input is linked: the widget's serialized value is then
+// stale (the value that runs comes through the link). An unlinked widget may have no input entry at all.
+function linkedInput(node, name) {
+  return (node.inputs ?? []).find((i) => (i.widget?.name ?? i.name) === name && i.link != null) ?? null;
+}
+
+const widgetInputNames = (sg) => (sg?.inputs ?? []).filter((i) => WIDGET_INPUT_TYPES.has(i.type)).map((i) => i.name);
+const subgraphOfInstance = (tpl, instance) => (tpl.definitions?.subgraphs ?? []).find((x) => x.id === instance.type);
+
+// A legacy-form widget: the interior widget is linked to a subgraph input, the root instance lists it in
+// `properties.proxyWidgets` and carries no value of its own, so the interior widget is the only place the value
+// lives. Anything else is refused: an instance that carries the value is read with I, an unlinked widget with W.
+function proxiedWidget(tpl, found, t, tag, view) {
+  const wv = found.node.widgets_values;
+  if (!Array.isArray(wv) || wv[t.w] === undefined) throw new Error(`${tag}: template ${view.template} node ${t.id} (${t.type}) has no widget ${t.w}`);
+  const inp = linkedInput(found.node, t.name);
+  const link = inp ? linkOf(found.container, inp.link) : null;
+  if (!link || link.origin_id !== -10) throw new Error(`${tag}: template ${view.template} node ${t.id} (${t.type}) widget ${t.name} is not linked to a subgraph input; read it with W`);
+  const sgInput = found.container.inputs?.[link.origin_slot]?.name;
+  const instances = (tpl.nodes ?? []).filter((n) => n.type === found.container.id);
+  const listing = instances.filter((n) => (n.properties?.proxyWidgets ?? []).some((p) => String(p[0]) === String(t.id) && p[1] === t.name));
+  if (!listing.length) throw new Error(`${tag}: template ${view.template} the root instance of subgraph "${found.container.name}" does not list [${t.id}, ${t.name}] as a proxied widget; the widget is promoted some other way, find where it runs from`);
+  const idx = widgetInputNames(found.container).indexOf(sgInput);
+  for (const inst of listing) {
+    if (idx >= 0 && Array.isArray(inst.widgets_values) && inst.widgets_values[idx] !== undefined) {
+      throw new Error(`${tag}: template ${view.template} instance ${inst.id} carries a promoted value for ${sgInput}; read it with I`);
+    }
+  }
+  return wv[t.w];
+}
+
 // templateValue: the value one spec item reads out of a parsed template. Throws a message that names the
-// builder when the template no longer has the node, the type or the widget the spec points at.
+// builder when the template no longer has the node, the type or the widget the spec points at, and when the
+// widget the spec points at is linked (its serialized value is stale; the effective one lives at the link's source).
 export function templateValue(spec, view, tpl, item) {
   const t = item.t;
   const tag = where(spec, view, item);
@@ -159,19 +198,27 @@ export function templateValue(spec, view, tpl, item) {
   if (!typeMatches(tpl, found.node, t.type)) {
     throw new Error(`${tag}: template ${view.template} node ${t.id} is ${found.node.type}, the spec expects ${t.type}`);
   }
+  const refuseLinked = (name, what) => {
+    const inp = linkedInput(found.node, name);
+    if (!inp) return;
+    throw new Error(`${tag}: template ${view.template} ${what} ${name} is linked (to ${feedOf(found.container, found.node, inp.name) ?? "another node"}), so its serialized value is not the one that runs; point the spec at the effective source (I for a subgraph input the root instance promotes, W on the node that feeds it, P for a legacy proxied widget)`);
+  };
   if (t.kind === "w") {
+    if (typeof t.name !== "string" || !t.name) throw new Error(`${tag}: the spec's widget locator names no widget (W and P take the widget's input name)`);
+    if (t.proxied) return proxiedWidget(tpl, found, t, tag, view);
     const wv = found.node.widgets_values;
     if (!Array.isArray(wv) || wv[t.w] === undefined) throw new Error(`${tag}: template ${view.template} node ${t.id} (${t.type}) has no widget ${t.w}`);
+    refuseLinked(t.name, `node ${t.id} (${t.type}) widget`);
     return wv[t.w];
   }
   if (t.kind === "inst") {
-    const s = (tpl.definitions?.subgraphs ?? []).find((x) => x.id === found.node.type);
-    const widgetInputs = (s?.inputs ?? []).filter((i) => WIDGET_INPUT_TYPES.has(i.type)).map((i) => i.name);
-    const idx = widgetInputs.indexOf(t.input);
+    const s = subgraphOfInstance(tpl, found.node);
+    const idx = widgetInputNames(s).indexOf(t.input);
     const wv = found.node.widgets_values;
     if (idx < 0 || !Array.isArray(wv) || wv[idx] === undefined) {
       throw new Error(`${tag}: template ${view.template} instance ${t.id} has no promoted widget ${t.input}`);
     }
+    refuseLinked(t.input, `instance ${t.id} widget`);
     return wv[idx];
   }
   if (t.kind === "distinct") {
@@ -356,6 +403,10 @@ export function checkTemplateSide(manifest, { loadTemplate, versions, specs = BU
       }
       if (moved.length) {
         failures.push(fail(spec.builder, view.name, `template ${view.template} changed under the builder: widget${moved.length > 1 ? "s" : ""} ${moved.join(", ")} (builder last verified against ${JSON_PKG} ${rec.json_version}, installed ${versions[JSON_PKG] ?? "unknown"}). Compare the builder with the template, then \`node render/builder-drift.mjs record\`.`));
+        continue;
+      }
+      if (recipeSha256(vals) !== rec.templateSha256) {
+        failures.push(fail(spec.builder, view.name, "templateSha256 does not match the recomputed hash (manifest edited by hand?)"));
       } else if (versions[JSON_PKG] && versions[JSON_PKG] !== rec.json_version) {
         notes.push(`${spec.builder} [${view.name}]: verified against ${JSON_PKG} ${rec.json_version}, installed ${versions[JSON_PKG]}; every guarded widget of ${view.template} is unchanged`);
       }
@@ -382,11 +433,19 @@ export function templateSource(templatesDir) {
   };
 }
 
-function resolveTemplatesDir(flags, env) {
+// resolveTemplatesDir: the templates directory the checks read, or null when none is named. The first source that is
+// set decides: --templates-dir, --comfy-dir, COMFY_TEMPLATES_DIR, COMFYUI_DIR. A ComfyUI tree named by a flag that has
+// no package throws (it is a request); one named by the environment returns null (the package is not installed here).
+export function resolveTemplatesDir(flags, env) {
   if (typeof flags["templates-dir"] === "string") return flags["templates-dir"];
-  const comfy = typeof flags["comfy-dir"] === "string" ? flags["comfy-dir"] : env.COMFYUI_DIR;
-  if (comfy) { const found = locateTemplates(comfy, nodeIo); if (found) return found.templatesDir; }
-  return env.COMFY_TEMPLATES_DIR || null;
+  if (typeof flags["comfy-dir"] === "string") {
+    const found = locateTemplates(flags["comfy-dir"], nodeIo);
+    if (!found) throw new Error(`--comfy-dir ${flags["comfy-dir"]} has no ${JSON_PKG} package (looked in .venv and venv under it)`);
+    return found.templatesDir;
+  }
+  if (env.COMFY_TEMPLATES_DIR) return env.COMFY_TEMPLATES_DIR;
+  if (env.COMFYUI_DIR) return locateTemplates(env.COMFYUI_DIR, nodeIo)?.templatesDir ?? null;
+  return null;
 }
 
 function parseArgs(argv) {
@@ -422,7 +481,9 @@ export function explain({ source, specs = BUILDER_SPECS }) {
 export async function main(argv, { out = (s) => process.stdout.write(s), err = (s) => process.stderr.write(s), env = process.env } = {}) {
   const { flags, verb } = parseArgs(argv);
   const manifestPath = typeof flags.manifest === "string" ? flags.manifest : MANIFEST_PATH;
-  const templatesDir = resolveTemplatesDir(flags, env);
+  let templatesDir;
+  try { templatesDir = resolveTemplatesDir(flags, env); } catch (e) { err(`${e.message}
+`); return 2; }
   const source = templatesDir ? templateSource(templatesDir) : null;
   if (verb === "check") {
     const manifest = loadManifest(manifestPath);

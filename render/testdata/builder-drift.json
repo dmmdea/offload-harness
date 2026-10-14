@@ -36,13 +36,13 @@
           "template": "video_minimax_h3_t2v",
           "json_version": "0.1.96",
           "meta_version": "0.11.70",
-          "templateSha256": "b7b468ec7c0b3075c334c20b3cdb4c793bba0d37567fcb336de8a07177ea04ee",
+          "templateSha256": "9d9fc9e4d2c18faaa29a38fdd11086f558f04de63ab0afcbdf639e429f79c454",
           "builderSha256": "9d9fc9e4d2c18faaa29a38fdd11086f558f04de63ab0afcbdf639e429f79c454",
           "items": {
             "sampler.sampler_name": { "template": "dfc4ec22cd4ab1a3", "builder": "dfc4ec22cd4ab1a3", "status": "same" },
             "scheduler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
             "scheduler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
-            "scheduler.steps": { "template": "e7f6c011776e8db7", "builder": "2c624232cdd22177", "status": "unreviewed" },
+            "scheduler.steps": { "template": "2c624232cdd22177", "builder": "2c624232cdd22177", "status": "same" },
             "lora.name": { "template": "b4e7aeb69c889f04", "builder": "b4e7aeb69c889f04", "status": "same" },
             "lora.strength": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" }
           }
@@ -64,13 +64,13 @@
           "template": "video_minimax_h3_i2v",
           "json_version": "0.1.96",
           "meta_version": "0.11.70",
-          "templateSha256": "b7b468ec7c0b3075c334c20b3cdb4c793bba0d37567fcb336de8a07177ea04ee",
+          "templateSha256": "9d9fc9e4d2c18faaa29a38fdd11086f558f04de63ab0afcbdf639e429f79c454",
           "builderSha256": "9d9fc9e4d2c18faaa29a38fdd11086f558f04de63ab0afcbdf639e429f79c454",
           "items": {
             "sampler.sampler_name": { "template": "dfc4ec22cd4ab1a3", "builder": "dfc4ec22cd4ab1a3", "status": "same" },
             "scheduler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
             "scheduler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
-            "scheduler.steps": { "template": "e7f6c011776e8db7", "builder": "2c624232cdd22177", "status": "unreviewed" },
+            "scheduler.steps": { "template": "2c624232cdd22177", "builder": "2c624232cdd22177", "status": "same" },
             "lora.name": { "template": "b4e7aeb69c889f04", "builder": "b4e7aeb69c889f04", "status": "same" },
             "lora.strength": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" }
           }
@@ -162,7 +162,7 @@
           "template": "video_ltx2_5_i2v",
           "json_version": "0.1.96",
           "meta_version": "0.11.70",
-          "templateSha256": "67dfdd28a7422693f04c02fad015250ecb84ebd8f4ebe9e9d7008548514b5288",
+          "templateSha256": "b25f2b772eacf28d9c2a2a118a911529c8290afcdd969d12cf04c85cbdef1467",
           "builderSha256": "67dfdd28a7422693f04c02fad015250ecb84ebd8f4ebe9e9d7008548514b5288",
           "items": {
             "preprocess.img_compression": { "template": "4ec9599fc203d176", "builder": "4ec9599fc203d176", "status": "same" },
@@ -170,6 +170,7 @@
             "resize.scale_method": { "template": "c0d417b917f242dd", "builder": "c0d417b917f242dd", "status": "same" },
             "negative.text": { "template": "c9fbd8bab9bb6955", "builder": "c9fbd8bab9bb6955", "status": "same" },
             "conditioning.frame_rate": { "template": "c2356069e9d1e79c", "builder": "c2356069e9d1e79c", "status": "same" },
+            "conditioning.frame_rate_expression": { "template": "ac8d8342bbb2362d", "builder": null, "status": "template-only" },
             "base.i2v_strength": { "template": "973b372a514f91db", "builder": "973b372a514f91db", "status": "same" },
             "base.i2v_bypass": { "template": "fcbcf165908dd18a", "builder": "fcbcf165908dd18a", "status": "same" },
             "base.guider_video_cfg": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },

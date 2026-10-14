@@ -1,6 +1,6 @@
 // node --test render/builder-drift.test.mjs
 //
-// The builder drift guard (ENH-4, render/builder-drift.mjs). Three layers:
+// The builder drift guard (render/builder-drift.mjs). Three layers:
 //
 //   1. The committed manifest against the builders, offline: every guarded builder is rebuilt with the spec's fixed
 //      arguments and each recipe widget of its output graph is compared with render/testdata/builder-drift.json. One
@@ -10,18 +10,17 @@
 //      defect of upstream PR #1308 each fail naming the builder. Every recipe widget of every builder is mutated once
 //      on each side.
 //   3. The manifest against the real workflow-templates package, when one is at hand (COMFY_TEMPLATES_DIR is its
-//      `templates` directory, or COMFYUI_DIR a ComfyUI tree that has it installed). Skipped, with the reason,
-//      otherwise: the package is not in this repository and none of it is copied here.
+//      `templates` directory, or COMFYUI_DIR a ComfyUI tree that has it installed; the CLI's own resolver picks it).
+//      Skipped, with the reason, otherwise: the package is not in this repository and none of it is copied here.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   buildManifest, builderValues, canonical, checkBuilderSide, checkCoverage, checkManifestShape, checkTemplateSide, formatManifest,
-  itemDigest, loadManifest, main, recipeSha256, templateSource, templateValue, MANIFEST_PATH,
+  itemDigest, loadManifest, main, recipeSha256, resolveTemplatesDir, templateSource, templateValue, MANIFEST_PATH,
 } from "./builder-drift.mjs";
 import { BUILDER_SPECS, NOT_TEMPLATE_DERIVED } from "./builder-drift-specs.mjs";
-import { locateTemplates, nodeIo } from "./templates-catalog.mjs";
 import { scratchDir } from "./test-scratch.mjs";
 
 const manifest = loadManifest();
@@ -101,7 +100,9 @@ test("canonical form: float noise in a template does not move a hash, a real cha
 
 // synthTemplates: one synthetic template per template name, written from the specs so that every locator reads
 // the builder's own value (a differing value where the spec declares a delta, `true` for a wiring item).
-// `override` maps a template name + locator to the value to plant instead.
+// `override` maps a template name + locator to the value to plant instead. Every synthetic subgraph starts with an
+// IMAGE input, which is a link and not a widget, so an instance index that forgot to skip it reads the wrong value.
+const WIDGET_TYPES = new Set(["STRING", "BOOLEAN", "INT", "FLOAT", "COMBO"]);
 function synthTemplates({ override = new Map(), specs = BUILDER_SPECS } = {}) {
   const byName = new Map();
   const planted = new Map();
@@ -109,7 +110,7 @@ function synthTemplates({ override = new Map(), specs = BUILDER_SPECS } = {}) {
     if (sgName == null) return tpl;
     let s = state.sgs.get(sgName);
     if (!s) {
-      s = { id: `sg-${state.sgs.size}`, name: sgName, nodes: [], links: [], inputs: [] };
+      s = { id: `sg-${state.sgs.size}`, name: sgName, nodes: [], links: [], inputs: [{ name: "image", type: "IMAGE" }] };
       state.sgs.set(sgName, s);
       tpl.definitions.subgraphs.push(s);
     }
@@ -141,13 +142,28 @@ function synthTemplates({ override = new Map(), specs = BUILDER_SPECS } = {}) {
         if (override.has(lkey)) { v = override.get(lkey); planted.set(lkey, true); }
         const tag = `${view.template} ${item.key}`;
         if (t.kind === "w") {
-          put(nodeIn(container(tpl, t.sg, state), t.id, t.type).widgets_values, t.w, v, tag);
+          const c = container(tpl, t.sg, state);
+          const node = nodeIn(c, t.id, t.type);
+          put(node.widgets_values, t.w, v, tag);
+          if (t.proxied) {
+            // the legacy form: the interior widget is linked to a subgraph input; the root instance lists it and has no values
+            let slot = c.inputs.findIndex((i) => i.name === t.name);
+            if (slot < 0) { c.inputs.push({ name: t.name, type: "COMBO" }); slot = c.inputs.length - 1; }
+            if (!node.inputs.some((i) => i.name === t.name)) {
+              const id = 200 + c.links.length;
+              node.inputs.push({ name: t.name, type: "COMBO", widget: { name: t.name }, link: id });
+              c.links.push({ id, origin_id: -10, origin_slot: slot, target_id: t.id, target_slot: node.inputs.length - 1 });
+            }
+            let inst = tpl.nodes.find((n) => n.type === c.id);
+            if (!inst) { inst = { id: 90000 + state.sgs.size, type: c.id, mode: 0, widgets_values: [], inputs: [], properties: { proxyWidgets: [] } }; tpl.nodes.push(inst); }
+            inst.properties.proxyWidgets.push([String(t.id), t.name]);
+          }
         } else if (t.kind === "inst") {
           const sgName = t.type.slice("subgraph:".length);
           const s = container(tpl, sgName, state);
           const inst = nodeIn(tpl, t.id, s.id);
-          let idx = s.inputs.findIndex((i) => i.name === t.input);
-          if (idx < 0) { s.inputs.push({ name: t.input, type: "INT" }); idx = s.inputs.length - 1; }
+          if (!s.inputs.some((i) => i.name === t.input)) s.inputs.push({ name: t.input, type: "INT" });
+          const idx = s.inputs.filter((i) => WIDGET_TYPES.has(i.type)).findIndex((i) => i.name === t.input);
           put(inst.widgets_values, idx, v, tag);
         } else if (t.kind === "distinct") {
           const s = container(tpl, t.sg, state);
@@ -155,8 +171,9 @@ function synthTemplates({ override = new Map(), specs = BUILDER_SPECS } = {}) {
           t.inputs.forEach((name, k) => {
             if (n.inputs.some((i) => i.name === name)) return;
             n.inputs.push({ name, link: 100 + k });
-            s.inputs.push({ name: `in${k}`, type: "FLOAT" });
-            s.links.push({ id: 100 + k, origin_id: -10, origin_slot: v === false ? 0 : k, target_id: t.id, target_slot: k });
+            if (!s.inputs.some((i) => i.name === `in${k}`)) s.inputs.push({ name: `in${k}`, type: "FLOAT" });
+            const slotOf = (j) => s.inputs.findIndex((i) => i.name === `in${j}`);
+            s.links.push({ id: 100 + k, origin_id: -10, origin_slot: v === false ? slotOf(0) : slotOf(k), target_id: t.id, target_slot: k });
           });
         }
       }
@@ -241,7 +258,8 @@ test("the PR #1308 class: one subgraph input feeding both the start and the end 
   const { syn, manifest: m } = synthManifest();
   const tpl = structuredClone(syn.loadTemplate(view.template));
   const sg = tpl.definitions.subgraphs.find((s) => s.name === item.t.sg);
-  for (const l of sg.links) if (l.target_id === item.t.id) l.origin_slot = 0; // both inputs now come from one subgraph input
+  const into = sg.links.filter((l) => l.target_id === item.t.id);
+  for (const l of into) l.origin_slot = into[0].origin_slot; // both inputs now come from one subgraph input
   const r = checkTemplateSide(m, { loadTemplate: (n) => (n === view.template ? tpl : syn.loadTemplate(n)), versions: SYN_VERSIONS });
   assert.equal(r.failures.length, 1);
   assert.match(r.failures[0].message, /^builder drift: wf-wan-animate2 \[default\]: template video_wan_animate2_distilled changed under the builder: widget wiring\.pose_start_end_distinct /);
@@ -380,7 +398,7 @@ test("a link planted on the widget a locator names fails with the builder, the k
         plantLink(tpl, t, name);
         assert.throws(
           () => templateValue(spec, view, tpl, item),
-          new RegExp(`^${esc(spec.builder)} \\[${esc(view.name)}\\] ${esc(item.key)}: .* ${esc(name)} is linked \\(to node:\\S+#0\\), so its serialized value is not the one that runs`),
+          new RegExp(`${esc(spec.builder)} \\[${esc(view.name)}\\] ${esc(item.key)}: .* ${esc(name)} is linked \\(to node:\\S+#0\\), so its serialized value is not the one that runs`),
           `${spec.builder} [${view.name}] ${item.key}`,
         );
         planted++;
@@ -500,7 +518,6 @@ function fakeTree(dir, name) {
 }
 
 test("the templates directory is resolved in one order by the CLI and the tests: --templates-dir, --comfy-dir, COMFY_TEMPLATES_DIR, COMFYUI_DIR", async (t) => {
-  const { resolveTemplatesDir } = await import("./builder-drift.mjs");
   const dir = scratchDir(t, "bd-resolve-");
   const a = fakeTree(dir, "tree-a");
   const b = fakeTree(dir, "tree-b");
@@ -512,23 +529,18 @@ test("the templates directory is resolved in one order by the CLI and the tests:
   assert.equal(resolveTemplatesDir({}, {}), null);
   // a tree named by the environment that has no package is "not available"; a tree named on the command line is an error
   assert.equal(resolveTemplatesDir({}, { COMFYUI_DIR: join(dir, "no-such-tree") }), null);
-  assert.throws(() => resolveTemplatesDir({ "comfy-dir": join(dir, "no-such-tree") }, env), /--comfy-dir .* has no comfyui_workflow_templates_json package/);
+  assert.throws(() => resolveTemplatesDir({ "comfy-dir": join(dir, "no-such-tree") }, env), /--comfy-dir .* has no comfyui-workflow-templates-json package/);
   const err = [];
   assert.equal(await main(["check", "--comfy-dir", join(dir, "no-such-tree")], { out: () => {}, err: (s) => err.push(s), env }), 2);
-  assert.match(err.join(""), /--comfy-dir .* has no comfyui_workflow_templates_json package/);
+  assert.match(err.join(""), /--comfy-dir .* has no comfyui-workflow-templates-json package/);
 });
 
 // ---------------------------------------------------------------------------------------------
 // 3. The manifest against the real workflow-templates package
 // ---------------------------------------------------------------------------------------------
 
-function realTemplatesDir() {
-  const direct = process.env.COMFY_TEMPLATES_DIR;
-  if (direct) return direct;
-  const tree = process.env.COMFYUI_DIR;
-  return tree ? locateTemplates(tree, nodeIo)?.templatesDir ?? null : null;
-}
-const REAL = realTemplatesDir();
+// The same resolver the CLI uses: COMFY_TEMPLATES_DIR, else the package inside COMFYUI_DIR.
+const REAL = resolveTemplatesDir({}, process.env);
 
 if (!REAL) {
   test("template side against the real workflow-templates package", { skip: "set COMFY_TEMPLATES_DIR (the package's templates directory) or COMFYUI_DIR (a ComfyUI tree with it installed) to compare the manifest with the real templates" }, () => {});
