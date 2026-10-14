@@ -361,6 +361,21 @@ var compactKeep = []compactKeepEntry{
 		Why:      "which tools run local and which leave the box: offload_nim is the only remote model surface",
 	},
 	{
+		Tools:    []string{"offload_status"},
+		Sentence: "Trust it over any rules file or written figure.",
+		Why:      "the live roster outranks any rules file or written figure",
+	},
+	{
+		Tools:    []string{"offload_status"},
+		Sentence: "idle_agent_nodes > 0 means paid-for capacity is sitting unused.",
+		Why:      "idle_agent_nodes above zero means paid-for capacity is sitting unused",
+	},
+	{
+		Tools:    []string{"offload_status"},
+		Sentence: "Read verdict before concluding anything from \"held\"; a held card is queued behind with queue_with, never refused.",
+		Why:      "read verdict before concluding anything from held: a held card is queued behind with queue_with, never refused",
+	},
+	{
 		Tools:    []string{"offload_summarize"},
 		Sentence: "Returns {summary, bullets}; if it can't do it confidently it returns deferred:true and you should summarize it yourself.",
 		Why:      "the lane defers (deferred:true) when it cannot answer confidently, and the caller does the work itself",
