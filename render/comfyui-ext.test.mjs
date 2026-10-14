@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COMFY_PY } from "./comfy-lifecycle.mjs";
@@ -18,6 +19,22 @@ const skip = probe.error || probe.status !== 0 ? `no interpreter with torch and 
 
 test("the ComfyUI-side pack: the read-only reader and the free node pass their Python tests", { skip }, () => {
   const r = run([join(here, "comfyui-ext", "test_offload_multicard.py")], 300000);
+  assert.equal(r.status, 0, `python tests failed:\n${r.stdout}\n${r.stderr}`);
+  assert.match(r.stderr, /Ran \d+ tests/);
+  assert.match(r.stderr, /\nOK/);
+});
+
+// The idle bound's pack (idle-nodes/offload_idle) is standard library only, so ANY Python 3 runs its tests: the ComfyUI interpreter when it
+// exists, else python, else python3. Each is probed first with `-I -c`, because a Windows machine's python3 is often the Store stub that
+// exits non-zero. The test is skipped only when none answers, and CI (no ComfyUI install, no torch) runs it through python3.
+const probeOk = (cmd) => {
+  const r = spawnSync(cmd, ["-I", "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"], { encoding: "utf8", timeout: 60000, windowsHide: true });
+  return !r.error && r.status === 0;
+};
+const idlePython = [existsSync(COMFY_PY) ? COMFY_PY : null, "python", "python3"].filter(Boolean).find(probeOk);
+
+test("the idle bound's pack: its Python tests pass under any Python 3", { skip: idlePython ? false : "no Python 3 interpreter on this machine" }, () => {
+  const r = spawnSync(idlePython, ["-I", "-B", join(here, "comfyui-ext", "test_offload_idle.py")], { encoding: "utf8", env, timeout: 120000, windowsHide: true });
   assert.equal(r.status, 0, `python tests failed:\n${r.stdout}\n${r.stderr}`);
   assert.match(r.stderr, /Ran \d+ tests/);
   assert.match(r.stderr, /\nOK/);
