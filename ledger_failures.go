@@ -71,36 +71,62 @@ type failureReport struct {
 }
 
 // runLedgerMode is the ledger verb's entry (the one line main.go changed): the failure register when --failures is
-// asked for, the savings summary otherwise.
+// asked for, the savings summary otherwise. The summary's own flag set does not define --failures, so a
+// --failures=false that reaches it would exit 2 with a usage dump; the flag is a mode switch decided here, and
+// is taken out of the arguments the summary parses.
 func runLedgerMode(args []string) error {
 	if ledgerFailuresRequested(args) {
 		return runLedgerFailures(args)
 	}
-	return runLedger(args)
+	return runLedger(withoutFailuresFlag(args))
+}
+
+// failuresFlagArg reports whether arg is the --failures flag (one or two dashes, with or without a value) and
+// what it says: on is false only for a value strconv.ParseBool reads as false. A value that is not a boolean reads
+// as on, so the register's own flag set is the one that refuses it.
+func failuresFlagArg(arg string) (isFlag, on bool) {
+	if !strings.HasPrefix(arg, "-") {
+		return false, false
+	}
+	name, val, hasVal := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+	if name != "failures" {
+		return false, false
+	}
+	if !hasVal {
+		return true, true
+	}
+	b, err := strconv.ParseBool(val)
+	return true, err != nil || b
 }
 
 // ledgerFailuresRequested reports whether a ledger invocation asks for the register: a --failures (or -failures)
-// flag that is not --failures=false, before any "--". It is checked before the verb's own flag set parses, which
-// would refuse the unknown flag.
+// flag before any "--" whose last occurrence is not false (the way the flag package reads a repeated boolean).
+// It is checked before any flag set parses, and the summary's would refuse the unknown flag.
 func ledgerFailuresRequested(args []string) bool {
+	on := false
 	for _, a := range args {
 		if a == "--" {
-			return false
+			break
 		}
-		if !strings.HasPrefix(a, "-") {
-			continue
+		if isFlag, v := failuresFlagArg(a); isFlag {
+			on = v
 		}
-		name, val, hasVal := strings.Cut(strings.TrimLeft(a, "-"), "=")
-		if name != "failures" {
-			continue
-		}
-		if !hasVal {
-			return true
-		}
-		on, err := strconv.ParseBool(val)
-		return err != nil || on
 	}
-	return false
+	return on
+}
+
+// withoutFailuresFlag is args with every --failures flag before a "--" taken out.
+func withoutFailuresFlag(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i, a := range args {
+		if a == "--" {
+			return append(out, args[i:]...)
+		}
+		if isFlag, _ := failuresFlagArg(a); !isFlag {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // runLedgerFailures is `ledger --failures`: the register as JSON on stdout. Anything else it has to say (the
