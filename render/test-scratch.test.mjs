@@ -12,7 +12,7 @@
 //      fails here until it uses scratchDir.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -157,4 +157,29 @@ test("no render test or test-support module makes a temp folder of its own: it u
     "a raw mkdtemp in a render test is a folder nobody removes on a failed run (and on every run, if the rmSync is forgotten).\n" +
     "Use `const dir = scratchDir(t, \"prefix-\")` from ./test-scratch.mjs: it is removed when the test ends.\n" +
     "If the test must own its removal (a stub process has to be killed first, say), list the call in RAW_MKDTEMP with the reason.\n");
+});
+
+// A folder whose tree was just killed is not free at once: on Windows a process that is still being torn
+// down keeps its working directory and its open files, and on a loaded box that takes seconds, not
+// milliseconds. The child below keeps a folder busy for 4 s the same way (its working directory, one open
+// file), and removeTree has to ride it out. The old removeTree gave up after about 2.75 s, which left
+// comfy-keep-* folders behind. Windows only: a POSIX unlink does not care who has the folder open.
+test("removeTree: a folder a child keeps busy for 4 s is removed once the child lets go", { skip: process.platform !== "win32" && "only Windows refuses to remove a folder that is in use" }, async (t) => {
+  const dir = scratchDir(t, "scratch-busy-");
+  const sub = join(dir, "busy");
+  mkdirSync(sub);
+  const child = spawn(process.execPath, ["-e", "require('fs').openSync('held.txt', 'w'); process.stdout.write('ready'); setTimeout(() => {}, 4000);"], {
+    cwd: sub, stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+  });
+  const exited = new Promise((r) => child.once("exit", r));
+  try {
+    await new Promise((resolve, reject) => { child.stdout.once("data", resolve); child.once("error", reject); child.once("exit", () => reject(new Error("the holder exited before it held anything"))); });
+    const t0 = Date.now();
+    removeTree(sub); // throws while the folder cannot go
+    assert.equal(existsSync(sub), false, "the busy folder is gone");
+    assert.ok(Date.now() - t0 >= 2000, "it was busy: the removal waited for the child");
+  } finally {
+    child.kill();
+    await exited;
+  }
 });
