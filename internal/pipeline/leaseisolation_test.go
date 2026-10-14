@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,6 +59,18 @@ func TestMain(m *testing.M) {
 	restoreHost()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// isolationStderr is where finishIsolation reports a throwaway root it could not remove; os.Stderr, except in the test of that report.
+var isolationStderr io.Writer = os.Stderr
+
+// removeStateRoot removes the suite's throwaway state root.
+func removeStateRoot(dir string, removeAll func(string) error) error { return removeAll(dir) }
+
+// finishIsolation ends the run: it removes the throwaway state root and answers the exit code.
+func finishIsolation(code int, dir string, removeAll func(string) error) int {
+	_ = removeStateRoot(dir, removeAll)
+	return code
 }
 
 // isBrowseSidecarCopy reports whether this process is the test binary re-launched as the fake browse sidecar.

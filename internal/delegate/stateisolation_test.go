@@ -91,10 +91,13 @@ func removeStateRoot(dir string, removeAll func(string) error) {
 	}
 }
 
-// stubRunner records whether the suite was run.
-type stubRunner struct{ ran bool }
+// stubRunner records whether the suite was run, and answers code as the suite's own result.
+type stubRunner struct {
+	ran  bool
+	code int
+}
 
-func (s *stubRunner) Run() int { s.ran = true; return 0 }
+func (s *stubRunner) Run() int { s.ran = true; return s.code }
 
 // TestRunIsolatedFailsClosed pins the fail-closed rule: a directory or variable
 // that cannot be set up ends the suite with a non-zero code and no test run.
@@ -129,19 +132,23 @@ func TestRunIsolatedFailsClosed(t *testing.T) {
 
 // TestRunIsolatedRetriesARemovalOnceAndReportsWhatStaysBehind pins the removal of the throwaway root: a removal that fails (on
 // Windows a process that has not yet let go of a file or of the folder as its working directory) is tried once more, and a root that
-// is still there after the second attempt is named on stderr with the error, so that a leak is seen, never dropped. The exit code is the
-// suite's own, and a root that went on the retry reports nothing.
+// is still there after the second attempt is named on stderr with the error, so that a leak is seen, never dropped. A root that stays
+// behind also ends a passing suite with exit code 1, because `go test ./...` hides the stderr of a package that passed and the report alone
+// would not reach anyone; a suite that failed keeps its own code, and a root that went on the retry reports nothing.
 func TestRunIsolatedRetriesARemovalOnceAndReportsWhatStaysBehind(t *testing.T) {
 	boom := errors.New("sharing violation")
 	for _, c := range []struct {
 		name       string
 		failures   int
+		suiteCode  int
 		wantCalls  int
 		wantReport bool
+		wantCode   int
 	}{
-		{"it works at once", 0, 1, false},
-		{"the retry works", 1, 2, false},
-		{"it fails both times", 99, 2, true},
+		{"it works at once", 0, 0, 1, false, 0},
+		{"the retry works", 1, 0, 2, false, 0},
+		{"it fails both times, the suite passed", 99, 0, 2, true, 1},
+		{"it fails both times, the suite failed", 99, 3, 2, true, 3},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -157,10 +164,10 @@ func TestRunIsolatedRetriesARemovalOnceAndReportsWhatStaysBehind(t *testing.T) {
 				}
 				return nil
 			}
-			var stub stubRunner
+			stub := stubRunner{code: c.suiteCode}
 			code := runIsolated(&stub, func(string, string) (string, error) { return dir, nil }, func(string, string) error { return nil }, removeAll)
-			if code != 0 || !stub.ran {
-				t.Fatalf("code = %d, ran = %v; a removal that fails must not change the suite's own result", code, stub.ran)
+			if code != c.wantCode || !stub.ran {
+				t.Fatalf("code = %d, ran = %v; want %d, true (a root that stays behind fails a passing suite and leaves a failing one's code alone)", code, stub.ran, c.wantCode)
 			}
 			if len(tried) != c.wantCalls {
 				t.Fatalf("the removal was tried %d times, want %d (once, and once more only when it failed)", len(tried), c.wantCalls)

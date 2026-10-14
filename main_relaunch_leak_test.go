@@ -311,3 +311,75 @@ func TestRelaunchRootParentFollowsOnlyALiveThrowawayRoot(t *testing.T) {
 		t.Errorf("a folder that is not a throwaway root was written into: %v %v", inner, err)
 	}
 }
+
+// relaunchRootParent falls back to the OS temp dir when the suite's root cannot be used, and that is the leak the nesting exists to close
+// (a copy killed or ended by os.Exit leaves a root there), so the fallback must say why on isolationStderr: a regression of the nesting
+// (the suite's root gone, a file where the `relaunch` folder goes, a full disk) would otherwise only show as folders in the temp dir.
+// The two cases that are not a copy of a suite (the variable unset, a folder that is not a throwaway root) are the normal ones and stay quiet.
+func TestRelaunchRootParentSaysWhyItFellBackToTheTempDir(t *testing.T) {
+	base := t.TempDir()
+	gone := filepath.Join(base, stateIsolationPrefix+"gone")
+	_, goneErr := os.Stat(gone)
+	afile := filepath.Join(base, stateIsolationPrefix+"afile")
+	if err := os.WriteFile(afile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(base, stateIsolationPrefix+"blocked")
+	if err := os.Mkdir(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blocked, relaunchRootFolder), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mkErr := os.MkdirAll(filepath.Join(blocked, relaunchRootFolder), 0o755)
+	if mkErr == nil {
+		t.Fatal("test premise: a file named like the relaunch folder must make MkdirAll fail")
+	}
+	live := filepath.Join(base, stateIsolationPrefix+"live")
+	elsewhere := filepath.Join(base, "somewhere")
+	for _, d := range []string{live, elsewhere} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		name     string
+		owner    string
+		wantTemp bool     // the answer is "", the OS temp dir
+		want     []string // what the report must contain; none means it must be empty
+	}{
+		{"the suite's root is gone", gone, true, []string{"root tests:", gone, goneErr.Error(), "OS temp dir"}},
+		{"the suite's root is a file", afile, true, []string{"root tests:", afile, "OS temp dir"}},
+		{"the relaunch folder cannot be made", blocked, true, []string{"root tests:", filepath.Join(blocked, relaunchRootFolder), mkErr.Error(), "OS temp dir"}},
+		{"the variable is not set", "", true, nil},
+		{"it names a folder that is not a throwaway root", elsewhere, true, nil},
+		{"it names a live throwaway root", live, false, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var report bytes.Buffer
+			was := isolationStderr
+			isolationStderr = &report
+			t.Cleanup(func() { isolationStderr = was })
+			got := relaunchRootParent(func(key string) string {
+				if key == suiteStateRootEnv {
+					return c.owner
+				}
+				return ""
+			})
+			if (got == "") != c.wantTemp {
+				t.Fatalf("relaunchRootParent = %q; want the OS temp dir (\"\") = %v", got, c.wantTemp)
+			}
+			if c.want == nil {
+				if report.Len() != 0 {
+					t.Fatalf("nothing was lost, so nothing is reported, got %q", report.String())
+				}
+				return
+			}
+			for _, w := range c.want {
+				if !strings.Contains(report.String(), w) {
+					t.Errorf("the report %q should contain %q", report.String(), w)
+				}
+			}
+		})
+	}
+}
