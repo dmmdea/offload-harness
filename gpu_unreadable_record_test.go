@@ -95,3 +95,30 @@ func TestBareGPUReleaseNeverSaysNoLeaseIsHeldOverAnUnreadableCardRecord(t *testi
 	}
 	_ = epoch
 }
+
+// ITEM 3 (the CLI half). releaseAfterRAMWait returned early on !Inspect().Held, which an unreadable record satisfies: the detached
+// reserve then reported the lease as no longer its own and left it held. An unreadable record is a held lease: it proceeds to stop
+// the instances, warm the seat back and release, and reports the release that fails.
+func TestTheDetachedReleaseProceedsOverARecordItCannotRead(t *testing.T) {
+	_, m, _ := holderFixture(t, false)
+	l, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "film", TTL: time.Hour, HostRAMWaitGiB: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch := l.Epoch()
+	restore := unreadableRecord(t, filepath.Join(m.Dir(), "meta.json"))
+	t.Cleanup(func() { restore(); releaseAll(t, m) })
+
+	cause := errors.New("the bound's failure")
+	var got error
+	stderr := captureStderr(t, func() { got = releaseAfterRAMWait(m, epoch, loadCfgPath(t.TempDir()+"/none.json"), cause) })
+	if strings.Contains(got.Error(), "no longer this reservation's") {
+		t.Errorf("a record that cannot be read is not a lease that is no longer ours: %v", got)
+	}
+	if !strings.Contains(stderr, "LEASE NOT RELEASED (epoch 1)") {
+		t.Errorf("the release was attempted and its failure is reported:\n%s", stderr)
+	}
+	if !errors.Is(got, cause) || !strings.Contains(got.Error(), "STILL HELD") {
+		t.Errorf("the cause stays and the error ends by saying the lease is still held: %v", got)
+	}
+}
