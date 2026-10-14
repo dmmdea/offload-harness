@@ -44,6 +44,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 // YieldFileEnv names the variable the wrapper form hands its command: the path of the lease's
@@ -544,6 +545,18 @@ func (t *YieldTicker) flushLocked() {
 	t.pending, t.actionSaid = nil, false
 }
 
+// oneLine makes free text fit the holder's one-line stream: line breaks and other control characters become
+// spaces, and runs of white space collapse to one.
+func oneLine(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // Tick is called on every holder tick, after the term check.
 func (t *YieldTicker) Tick() {
 	t.flush()
@@ -570,8 +583,9 @@ func (t *YieldTicker) Tick() {
 	if len(req.Waiters) > 0 {
 		w := req.Waiters[0]
 		who = fmt.Sprintf(": pid %d", w.PID)
-		if w.Reason != "" {
-			who = ": " + w.Reason
+		// The reason is typed by any local process; this line goes to the session that wraps the holder.
+		if reason := oneLine(w.Reason); reason != "" {
+			who = ": " + reason
 		}
 	}
 	head := fmt.Sprintf("asked to yield (%s; %d waiter(s) queued%s)", req.Basis, req.QueuedCount(), who)
