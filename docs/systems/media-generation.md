@@ -3397,10 +3397,12 @@ otherwise, because the builder keeps building the old recipe.
   interior widget is linked to a subgraph input, the root instance lists it in `proxyWidgets`, carries no value at
   its position in that list (the instance's `widgets_values` follow the list, not the order of the subgraph's
   inputs) and has nothing wired to its input for the widget, so the interior widget is the only place the value
-  lives (the extractor checks all four facts). A wiring sends the spec to the source that feeds it. A value the
-  instance carries is read by `I` only where its position in `proxyWidgets` is also its place among the
-  subgraph's widget-typed inputs, because `I` indexes by input order, not by `proxyWidgets`; the message says
-  which case it is, and where the two positions differ it says that no locator reads that position.
+  lives (the extractor checks all four facts). A wiring is checked first and sends the spec to the source that
+  feeds it, whatever else the instance carries, because `I` throws on a wired input. A value the instance carries
+  is read by `I` only where its position in `proxyWidgets` is also its place among the subgraph's widget-typed
+  inputs, because `I` indexes by input order, not by `proxyWidgets`; the message says which case it is, and where
+  the two positions differ, or the input is not widget-typed (so `I` does not count it), it says that no locator
+  reads that position.
   A math node that only passes a value through (the LTX frame rate) is pinned as a template-only item,
   so a changed expression cannot hide behind the locator that skips it.
 - **Builder side, offline.** `node --test render/builder-drift.test.mjs` has one test per builder
