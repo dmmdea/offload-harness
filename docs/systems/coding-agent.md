@@ -609,7 +609,7 @@ Per-task outcomes use the measurement gate's seven words, and only these:
 | `pass` | graded, reward at or above `--pass-at` (default 1.0: every item right) |
 | `task_fail` | graded, reward below it; the reward is kept (0.958 of the needles is a `task_fail` and the number the bench exists to produce) |
 | `infra_error` | the seat could not answer: connection refused, no endpoint, a reset mid-run; or the budget cannot hold the instruction plus the first operation, so the seat was never called (the detail says so). Never graded, never a `task_fail` |
-| `timeout` | the attempt hit its budget and was not graded: `--max-turns` reached before the stream drained, or (`kv_store`, `log_triage`) the context stopped fitting the token budget before the seat was handed any query, recorded as `term_reason` `budget_wall_before_query`; no reward |
+| `timeout` | the attempt hit its budget and was not graded: `--max-turns` reached before the stream drained, or (`kv_store`, `log_triage`) the context stopped fitting the token budget before the seat was handed any query, recorded as `term_reason` `budget_wall_before_query`; no reward. Under the default delivery the production ladder cannot hold `log_triage` at `L12800` (its preserve guard keeps every signal-bearing tool result), so a perfect agent ends that published cell here: a deliberate signal about the ladder, explained below the table |
 | `judge_error` | the grade could not be computed (no snapshots, empty gold, a sudoku gold without its board side) |
 | `not_run` | the run was interrupted before the task finished or began, including an interrupt that lands while a seat request is in flight |
 | `cheat` | reserved for the gate's vocabulary; this adapter has no check for gaming a grader and never emits it |
