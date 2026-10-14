@@ -579,6 +579,7 @@ func TestFailureModelIsCutAtTheColonOnlyOnADelegationRow(t *testing.T) {
 		`{"ts":6,"task":"agent_delegate","deferred":true,"reason_code":"budget","model_tier":"node-b:agent-pool"}`,
 		`{"ts":7,"task":"agent_delegate","deferred":true,"reason_code":"budget","model_tier":":no-node-seat"}`,
 		`{"ts":8,"task":"agent_delegate","deferred":true,"reason_code":"budget","model_tier":"node-c:"}`,
+		`{"ts":9,"task":"summarize","deferred":true,"reason_code":"budget","model_tier":":kept-as-recorded"}`, // only a delegation row's missing node is trimmed
 	)
 	reg, err := FailureRegisterFile(path, 0, false)
 	if err != nil {
@@ -593,14 +594,14 @@ func TestFailureModelIsCutAtTheColonOnlyOnADelegationRow(t *testing.T) {
 		return m
 	}
 	wantSeats := map[string]int{"gemma:4b": 1, "qwen:4b": 1, "comfyui:model-y.safetensors": 1, "pool:fast": 1,
-		"node-a:agent-pool": 1, "node-b:agent-pool": 1, "no-node-seat": 1, "node-c:": 1}
+		"node-a:agent-pool": 1, "node-b:agent-pool": 1, "no-node-seat": 1, "node-c:": 1, ":kept-as-recorded": 1}
 	if got := count(c.Seats); !reflect.DeepEqual(got, wantSeats) {
 		t.Errorf("seats = %v, want %v", got, wantSeats)
 	}
 	// Non-delegation rows keep the whole alias as the model; delegation rows give the part after the last colon,
 	// and an empty one reads as unrecorded.
 	wantModels := map[string]int{"gemma:4b": 1, "qwen:4b": 1, "comfyui:model-y.safetensors": 1, "pool:fast": 1,
-		"agent-pool": 2, "no-node-seat": 1, unrecorded: 1}
+		"agent-pool": 2, "no-node-seat": 1, unrecorded: 1, ":kept-as-recorded": 1}
 	if got := count(c.Models); !reflect.DeepEqual(got, wantModels) {
 		t.Errorf("models = %v, want %v", got, wantModels)
 	}
