@@ -432,6 +432,11 @@ type YieldTickerOptions struct {
 	Out io.Writer
 	// Label leads the holder's lines ("gpu reserve", "gpu hold").
 	Label string
+	// Settle is how long a lease must have read overdue, on every tick of this holder, before the holder is
+	// asked. The holders pass the interval at which their term check looks again at a lease it has labelled
+	// expired, so a label is asked about only after it survived a look. Zero asks on the first overdue tick
+	// that has a waiter.
+	Settle time.Duration
 }
 
 // YieldTicker is the holder side of the request: ask when due, then run the job's own on_yield once.
