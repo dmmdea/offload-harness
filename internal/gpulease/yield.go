@@ -20,8 +20,10 @@ package gpulease
 // "request" (config gpu_on_overdue; unset behaves as before the key existed and asks nobody), the
 // lease's record is expired or past its declared end (decided from the record alone, so a lease whose
 // term the same tick renewed is not asked), the holder was not asked yet, its record says it runs the
-// request (Meta.Yields; an older build never ticks this), and only then the waiters are read, because
-// reading them prunes the dead ones. The same waiter (pid and start identity) must be seen on two
+// request (Meta.Yields; an older build, or an in-process holder, never ticks this), that the lease has read
+// overdue for the holder's settle interval (the holders pass the interval at which their term check looks again
+// at a label, so a label is asked about only after it survived a look), and only then the waiters are read,
+// because reading them prunes the dead ones. The same waiter (pid and start identity) must be seen on two
 // consecutive ticks: a short `gpu reserve --wait` probe, or a seat admission that leaves after seconds,
 // would otherwise stop a long job through its on_yield and be gone, and the ask cannot be taken back.
 //
@@ -211,6 +213,16 @@ type YieldAsker struct {
 	asked bool
 	// prev holds the conflicting waiters the previous tick saw, for the drive-by guard.
 	prev map[yieldWaiterKey]struct{}
+	// settle is how long the lease must have read overdue, tick after tick, before it is asked; overdueSince
+	// is when this asker first saw it so, zero while it does not read overdue.
+	settle       time.Duration
+	overdueSince time.Time
+}
+
+// forget drops what a run of ticks had gathered: the lease no longer reads overdue, or the policy no longer asks.
+func (a *YieldAsker) forget() {
+	a.prev = nil
+	a.overdueSince = time.Time{}
 }
 
 // NewYieldAsker binds the decision to one lease of this directory, held by this process.
@@ -223,7 +235,7 @@ func (m *Manager) NewYieldAsker(epoch uint64) *YieldAsker {
 func (a *YieldAsker) Tick() (YieldRequest, bool, error) {
 	// (a) the policy: anything but request asks nobody.
 	if InstalledOnOverdue() != OnOverdueRequest {
-		a.prev = nil
+		a.forget()
 		return YieldRequest{}, false, nil
 	}
 	// (b) once per epoch.
@@ -236,13 +248,16 @@ func (a *YieldAsker) Tick() (YieldRequest, bool, error) {
 	// not consulted.
 	rec, err := m.recordOf(a.epoch)
 	if err != nil {
-		a.prev = nil // the lease is gone; the holder's heartbeat is what notices
+		a.forget() // the lease is gone; the holder's heartbeat is what notices
 		return YieldRequest{}, false, nil
 	}
 	now := m.now()
 	if !rec.Expired && !termDue(rec, now) {
-		a.prev = nil
+		a.forget()
 		return YieldRequest{}, false, nil
+	}
+	if a.overdueSince.IsZero() {
+		a.overdueSince = now
 	}
 	// (d) already asked (by an earlier ask of this epoch from another asker).
 	if _, serr := os.Stat(YieldFilePath(m.leaseDir(), a.epoch)); serr == nil {
@@ -252,6 +267,14 @@ func (a *YieldAsker) Tick() (YieldRequest, bool, error) {
 	// (e) the holder runs the request: a record without the stamp was written by a build that never
 	// ticks this, and nothing would answer.
 	if rec.Yields == "" {
+		a.prev = nil
+		return YieldRequest{}, false, nil
+	}
+	// (e2) the label has to have survived the holder's own look. The term check looks again at a lease it
+	// labelled expired only every so often, and a look that failed (the cards could not be read) can label a
+	// lease that a second look renews; the ask cannot be taken back, so it is not made on a label that is
+	// younger than that interval. The waiter is counted from the first tick after it.
+	if now.Sub(a.overdueSince) < a.settle {
 		a.prev = nil
 		return YieldRequest{}, false, nil
 	}
@@ -457,7 +480,9 @@ func (l *Lease) NewYieldTicker(o YieldTickerOptions) *YieldTicker {
 	if o.Out == nil {
 		o.Out = io.Discard
 	}
-	return &YieldTicker{asker: l.mgr.NewYieldAsker(l.epoch), m: l.mgr, epoch: l.epoch, opts: o}
+	asker := l.mgr.NewYieldAsker(l.epoch)
+	asker.settle = o.Settle
+	return &YieldTicker{asker: asker, m: l.mgr, epoch: l.epoch, opts: o}
 }
 
 func (t *YieldTicker) say(format string, args ...any) {
