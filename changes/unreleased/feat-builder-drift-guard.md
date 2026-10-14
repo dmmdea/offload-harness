@@ -11,25 +11,34 @@
   template JSON, text or widget value is stored.
 - **Two checks.** Builder side, offline, always in `node --test`: one test per builder (`builder drift: wf-krea2`)
   rebuilds the graph with fixed arguments and compares each widget, and a moved widget fails naming the builder
-  and the widget. Template side, when `COMFY_TEMPLATES_DIR` or `COMFYUI_DIR` (or `--templates-dir`/`--comfy-dir`
-  on the CLI) points at the package or at a candidate extract: the same widgets are read from the template JSON,
-  and a change fails naming the builder, the template and the package version the builder was last verified
-  against. A wiring item keeps the `_distilled` Wan Animate 2 template's start and end percent on separate
-  subgraph inputs, the shape of the PR #1308 defect.
+  and the widget. Template side, when a templates directory is named (`--templates-dir`, `--comfy-dir`,
+  `COMFY_TEMPLATES_DIR` or `COMFYUI_DIR`, resolved in that order by the CLI and the tests alike): the same widgets
+  are read from the template JSON, and a change fails naming the builder, the template and the package version the
+  builder was last verified against; with every widget unchanged the recorded `templateSha256` must equal the
+  recomputed hash, so a hand-edited manifest fails. A wiring item keeps the `_distilled` Wan Animate 2 template's
+  start and end percent on separate subgraph inputs, the shape of the PR #1308 defect.
 - **Coverage.** A new `wf-*.mjs` file must be guarded or listed in `NOT_TEMPLATE_DERIVED` with a reason, or a test
   fails. Not guarded, with reasons in the spec: `wf-hunyuan15-i2v` (its recipe is not the one template of the
   package that shares its family), `wf-sdxl-inpaint`, `wf-upscale`.
-- **Where the value is read.** The sampler's own serialized widget is stale once its input is linked, so a locator
-  points at the primitive behind the template's switch, or at the widget the subgraph instance promotes.
+- **Where the value is read.** A widget whose input is linked keeps a stale serialized value; the value that runs
+  comes through the link. A locator that points at a linked widget therefore throws, naming the builder and the
+  key, and the spec points at the source instead: the widget the root subgraph instance promotes, the primitive
+  that feeds it (read on the branch being checked), or, for the legacy form in which the instance lists the widget
+  in `proxyWidgets` and carries no value, the interior widget once those facts are checked. A pass-through math
+  node (the LTX frame rate) is pinned as a template-only item.
 - **First run on package 0.1.96.** Eleven builders, eighteen views; every guarded widget equals its template
-  except eight entries, recorded and left for a person to judge. Unreviewed: the `wf-h3-av` turbo path (template 6
-  steps, builder 8), the `wf-qwen-image-edit` full preset (template CFG 4, builder 3.0) and the
-  `wf-qwen-image-21` edit encoder resolution (template 0, builder 1024). Deliberate and stated in the builder
-  headers: the `wf-qwen-image-21` step count and the `wf-wan-animate2` pose-cache device and dtype. No builder
-  recipe was changed.
+  except six entries, recorded and left for a person to judge. Unreviewed: the `wf-qwen-image-edit` full preset
+  (template CFG 4, builder 3.0) and the `wf-qwen-image-21` edit encoder resolution (template 0, builder 1024).
+  Deliberate and stated in the builder headers: the `wf-qwen-image-21` step count (both views) and the
+  `wf-wan-animate2` pose-cache device and dtype. The `wf-h3-av` turbo path equals its template (the instance
+  promotes 8 steps, the builder runs 8). No builder recipe was changed.
 - **Tests.** `render/builder-drift.test.mjs`: the committed manifest against the builders; a synthetic package
   written from the specs (no upstream data) in which every widget of every builder is moved once on each side and
   must turn the check red naming the builder; the PR #1308 wiring shape; a missing node, type or widget; a package
-  version that moved with every widget unchanged (a note); the CLI. Red then green was shown with a planted builder
-  widget and with planted template widgets in a scratch copy of the package. `node --test "render/**/*.test.mjs"`.
+  version that moved with every widget unchanged (a note); a link planted on the widget every locator names; the
+  legacy proxied form; a hand-edited `templateSha256`; the directory order; the coverage and manifest-shape
+  branches, each checked by removing the branch in a scratch copy. Red then green was shown with planted effective
+  values (root-instance steps, LoRA strength and frame rate) in a scratch copy of the package: the guard fails
+  naming `wf-h3-av` and `wf-ltx25-i2v`, and a guard that read the stale widgets stays green on the same copy.
+  `node --test "render/**/*.test.mjs"`.
 - **Docs.** `docs/systems/media-generation.md` (Builder drift guard) and `render/README.md`.

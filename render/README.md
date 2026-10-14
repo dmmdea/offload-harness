@@ -390,5 +390,7 @@ node render/builder-drift.mjs record  --comfy-dir <comfyui-tree>   # re-pin, aft
 
 A moved widget fails `builder drift: <builder> [<view>]: ...` naming the builder. `builder-drift-specs.mjs` lists
 the widgets per builder; a new `wf-*.mjs` file must be guarded there or listed in `NOT_TEMPLATE_DERIVED` with a
-reason. Rules, statuses and the first run's findings:
-[`docs/systems/media-generation.md`](../docs/systems/media-generation.md#builder-drift-guard-enh-4).
+reason. A locator never reads a widget whose input is linked (its serialized value is stale): it throws and the spec
+points at the source that feeds it. The templates directory is resolved in one order, by the CLI and the tests alike:
+`--templates-dir`, `--comfy-dir`, `COMFY_TEMPLATES_DIR`, `COMFYUI_DIR`. Rules, statuses and the first run's findings:
+[`docs/systems/media-generation.md`](../docs/systems/media-generation.md#builder-drift-guard).

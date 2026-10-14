@@ -495,7 +495,7 @@ export async function main(argv, { out = (s) => process.stdout.write(s), err = (
       notes = r.notes;
     }
     for (const n of notes) out(`note: ${n}\n`);
-    if (!source) out("note: template side skipped (no --templates-dir / --comfy-dir / COMFY_TEMPLATES_DIR)\n");
+    if (!source) out("note: template side skipped (no --templates-dir / --comfy-dir / COMFY_TEMPLATES_DIR / COMFYUI_DIR)\n");
     for (const f of failures) err(`${f.message}\n`);
     const n = BUILDER_SPECS.reduce((a, s) => a + s.views.length, 0);
     out(failures.length ? `${failures.length} failure(s)\n` : `ok: ${BUILDER_SPECS.length} builders, ${n} views${source ? ", template side checked against " + (source.versions[JSON_PKG] ?? "unknown version") : ""}\n`);
