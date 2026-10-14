@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -639,6 +640,58 @@ func TestTraceCorpusLadderArtifactsCountOnlyToolTurns(t *testing.T) {
 	}
 	if got["tr-quoted"] != 0 || got["tr-compacted"] != 2 {
 		t.Errorf("ladder artifacts = %v, want quoted:0 compacted:2 (only tool turns count)", got)
+	}
+}
+
+// TestTraceCorpusPrefillDistribution: an average hides the long runs, so the readout also gives the
+// per-run spread of the two input-volume figures: prefilled tokens over the MEASURED runs (a
+// no-token-counts run is not a measured zero and is left out), and the mean prompt size per step
+// over the runs that reported seat input tokens and ran at least one step. Nearest rank, so every
+// figure is a value some run had.
+func TestTraceCorpusPrefillDistribution(t *testing.T) {
+	var runs []tcRun
+	for i := 1; i <= 10; i++ {
+		runs = append(runs, tcRun{ID: fmt.Sprintf("m%d", i), Source: tcSourceDelegation, Steps: 2,
+			Prefill: &tcPrefill{ObservedSteps: 2, PrefillTokens: int64(i * 100)}})
+	}
+	// Not measured: observed steps with no token counts, and no prefill at all.
+	runs = append(runs, tcRun{ID: "n", Source: tcSourceDelegation, Steps: 2, Prefill: &tcPrefill{ObservedSteps: 2}},
+		tcRun{ID: "u", Source: tcSourceDelegation, Steps: 2})
+	// Seat input per step: 1000/4 = 250, 900/3 = 300, 100/1 = 100; a run with no step is left out.
+	for i, in := range [][2]int64{{1000, 4}, {900, 3}, {100, 1}, {50, 0}} {
+		n := in[0]
+		runs = append(runs, tcRun{ID: fmt.Sprintf("s%d", i), Source: tcSourceDelegation, Steps: int(in[1]), SeatTokensIn: &n})
+	}
+	b, err := json.Marshal(tcStatsFor(runs).Prefill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		PerRun  map[string]*float64 `json:"prefill_tokens_per_run"`
+		PerStep map[string]*float64 `json:"seat_input_tokens_per_step_per_run"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := func(name string, d map[string]*float64, runs, p50, p90, max float64) {
+		for k, v := range map[string]float64{"runs": runs, "p50": p50, "p90": p90, "max": max} {
+			if d[k] == nil || *d[k] != v {
+				t.Errorf("%s.%s = %v, want %v (all: %v)", name, k, d[k], v, d)
+			}
+		}
+	}
+	want("prefill_tokens_per_run", got.PerRun, 10, 500, 900, 1000)
+	want("seat_input_tokens_per_step_per_run", got.PerStep, 3, 250, 300, 300)
+
+	// No measured run: the count is 0 and every figure is null, never a 0.
+	b, _ = json.Marshal(tcStatsFor([]tcRun{{ID: "u", Source: tcSourceDelegation, Steps: 1}}).Prefill)
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []map[string]*float64{got.PerRun, got.PerStep} {
+		if d["runs"] == nil || *d["runs"] != 0 || d["p50"] != nil || d["p90"] != nil || d["max"] != nil {
+			t.Errorf("an empty distribution must have runs 0 and null figures, got %v", d)
+		}
 	}
 }
 
