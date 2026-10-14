@@ -5151,7 +5151,6 @@ func runResearch(args []string) error {
 	pinReason := fs.String("pin-reason", "", "why this call is pinned to --route local or remote: "+strings.Join(delegate.PinReasons(), " | ")+" (privacy and locality take --route local only; measurement and operator take either). Without it local and remote are hints. Refused with any other route")
 	timeout := fs.Int("timeout", 0, "per-page contract budget in seconds (default 300, cap 900)")
 	fetchTimeout := fs.Int("fetch-timeout", 0, "per-page fetch timeout in seconds (default 30)")
-	subLangs := fs.String("sub-langs", "", "YouTube subtitle languages, comma separated (default en.*); used only when the config sets ytdlp_path")
 	_ = fs.Parse(args)
 	if err := leftoverArgErr(fs, "research"); err != nil {
 		return err
@@ -5178,7 +5177,7 @@ func runResearch(args []string) error {
 		}
 		schema = json.RawMessage(b)
 	}
-	opt := research.Options{YtDlpPath: cfg.YtDlpPath, SubLangs: *subLangs, ScratchRoot: cfg.EffectiveResearchScratchDir()}
+	opt := research.Options{}
 	if *fetchTimeout > 0 {
 		opt.Timeout = time.Duration(*fetchTimeout) * time.Second
 	}
