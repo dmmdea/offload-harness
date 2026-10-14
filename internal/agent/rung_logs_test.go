@@ -338,6 +338,56 @@ func TestLogCollapseSkipsARunThatWouldNotShrink(t *testing.T) {
 	if got, ok := logCollapse(in); ok || got != in {
 		t.Errorf("a run whose replacement is not shorter must stay: ok=%v changed=%v", ok, got != in)
 	}
+	// Beside a run that does pay for itself, the tiny run still stays verbatim
+	// (the body as a whole shrinks, so only the per-run check can keep it).
+	big := lcRepeat("retrying the build cache lookup", 40)
+	got, ok := logCollapse(lcJoin(lcHead, mid, big, lcTail))
+	if !ok {
+		t.Fatal("the long run should fold")
+	}
+	if !strings.Contains(got, "a 1\na 2\na 3\n") {
+		t.Errorf("a run whose marker is longer than the run itself was folded:\n%s", got)
+	}
+}
+
+// TestLogCollapseDeclinesWhenHeaderAndFooterCostMoreThanTheFold: a run that
+// does fold profitably can still leave the whole body longer once the header
+// and footer are added; the rewrite itself must then decline, not rely on the
+// wrapper to notice.
+func TestLogCollapseDeclinesWhenHeaderAndFooterCostMoreThanTheFold(t *testing.T) {
+	long := "GET /export?format=csv&columns=all 200 %dms streamed through the worker pool without buffering"
+	three := []string{fmt.Sprintf(long, 5), fmt.Sprintf(long, 6), fmt.Sprintf(long, 7)}
+	in := lcJoin(lcHead, three, []string{"between", "the", "windows", "we", "check"}, lcTail)
+	if got, ok := collapseLogs(in); ok || got != in {
+		t.Errorf("collapseLogs must decline when the result would not be shorter (ok=%v, changed=%v)", ok, got != in)
+	}
+	if got, ok := logCollapse(in); ok || got != in {
+		t.Errorf("logCollapse must decline too (ok=%v, changed=%v)", ok, got != in)
+	}
+}
+
+// TestLogCollapseWrapperRejectsAnyRewriteThatBreaksTheContract: whatever the
+// rewrite returns, logCollapse hands back the original unless the result is
+// strictly shorter and carries the idempotence prefix.
+func TestLogCollapseWrapperRejectsAnyRewriteThatBreaksTheContract(t *testing.T) {
+	in := lcJoin(lcHead, lcRepeat("retrying the build cache lookup", 60), lcTail)
+	saved := logsCollapseImpl
+	defer func() { logsCollapseImpl = saved }()
+	for name, impl := range map[string]func(string) (string, bool){
+		"longer":           func(c string) (string, bool) { return logsPrefix + c, true },
+		"same length":      func(c string) (string, bool) { return logsPrefix + c[len(logsPrefix):], true },
+		"shorter unmarked": func(c string) (string, bool) { return c[:len(c)/2], true },
+		"declined":         func(c string) (string, bool) { return c, false },
+	} {
+		logsCollapseImpl = impl
+		if got, ok := logCollapse(in); ok || got != in {
+			t.Errorf("%s: the wrapper must return the original (ok=%v)", name, ok)
+		}
+	}
+	logsCollapseImpl = func(c string) (string, bool) { return logsPrefix + "ok]", true }
+	if got, ok := logCollapse(in); !ok || got != logsPrefix+"ok]" {
+		t.Errorf("a shorter, marked rewrite must pass through (ok=%v)", ok)
+	}
 }
 
 func TestLogCollapseKeepsCRLFLinesVerbatim(t *testing.T) {
