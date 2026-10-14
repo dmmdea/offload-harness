@@ -117,6 +117,28 @@ test("graphProblems: names a missing node, an out-of-range slot and an unknown c
   assert.deepEqual(graphProblems(g, OI), ["2.image: wire to slot 5 of 1 (LoadImage has 2)", "3.image: wire to missing node 9", "4: unknown class Nope"]);
 });
 
+test("graphProblems: names a wire whose output type is not the type the target input declares, and skips what it cannot compare", () => {
+  const ckpt = { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "a.safetensors" } };
+  const g = {
+    1: ckpt,
+    2: { class_type: "VAEDecode", inputs: { samples: ["5", 0], vae: ["1", 0] } }, // a MODEL into a VAE input
+    3: { class_type: "VAEDecode", inputs: { samples: ["5", 0], vae: ["1", 2] } }, // fine
+    4: { class_type: "SaveGLB", inputs: { mesh: ["6", 0] } }, // IMAGE,MASK output into a MESH,FILE_3D_GLB,FILE_3D input: no common member
+    5: { class_type: "EmptyLatentImage", inputs: { width: ["7", 0] } }, // INT into a widget input of the same type
+    6: { class_type: "ResizeSynth", inputs: { input: ["8", 1] } }, // a MATCHTYPE input: not compared
+    7: { class_type: "PrimitiveInt", inputs: {} },
+    8: { class_type: "LoadImage", inputs: { image: ["7", 0], nope: ["1", 0] } }, // a combo input and an input the listing does not name: not compared
+    9: { class_type: "PreviewAny", inputs: { source: ["1", 1] } }, // "*" takes any type
+    10: { class_type: "ImageInvert", inputs: { image: ["8", 1] } }, // a MASK into an IMAGE input
+    11: { class_type: "ImageInvert", inputs: { image: ["6", 0] } }, // IMAGE,MASK into IMAGE: a common member
+  };
+  assert.deepEqual(graphProblems(g, OI), [
+    "2.vae: wire from slot 0 of 1 (CheckpointLoaderSimple) carries MODEL, the input wants VAE",
+    "4.mesh: wire from slot 0 of 6 (ResizeSynth) carries IMAGE,MASK, the input wants MESH,FILE_3D_GLB,FILE_3D",
+    "10.image: wire from slot 1 of 8 (LoadImage) carries MASK, the input wants IMAGE",
+  ]);
+});
+
 test("golden: the subgraph template expands to ids <instance>:<inner>, with its inputs and output rewired", () => {
   const r = convert(readJson("subgraph-i2v.workflow.json"));
   assert.deepEqual(compareApiGraphs(graphOf(r), readJson("subgraph-i2v.api.json")), []);
