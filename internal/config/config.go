@@ -2007,11 +2007,13 @@ type Config struct {
 	// "compact" keeps every tool, every parameter name, type, enum and required entry (so every call that is
 	// valid under "full" is valid under "compact") but cuts each description to its first sentence plus the
 	// sentences a reviewed per-tool keep-list names (prohibitions, trust and privacy boundaries, cost rules, the
-	// deferred-and-do-it-yourself protocol; internal/mcpserver/toolsprofile_keep.go), and drops
-	// examples. It exists for clients that send every tool schema up front on every call and have no deferred
+	// deferred-and-do-it-yourself protocol of every lane, acceptance-authoring rules; internal/mcpserver/toolsprofile_keep.go),
+	// and drops examples. It exists for clients that send every tool schema up front on every call and have no deferred
 	// tool search (opencode): a smaller schema is prompt tokens back on a small context window. The registered
 	// schema, the handlers and the call-time validation are unchanged; only the advertised list is rewritten.
 	// An unknown value fails the load; a hand-built Config with one reads as "full", never as a silent shrink.
+	// The profile is read once, when the MCP server is built (the rewrite is a middleware installed at that moment), so
+	// changing it takes an MCP server restart or a client reconnect, which starts a new server process.
 	ToolsSchemaProfile string `json:"tools_schema_profile,omitempty"`
 	// DelegateRemotes are the fleet node base URLs (tailnet-only, e.g.
 	// "http://node-b:18811") the delegator considers when a call passes no

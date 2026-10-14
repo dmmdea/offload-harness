@@ -8,14 +8,18 @@ package mcpserver
 // cannot express, the deferred-and-do-it-yourself protocol, a warning that a result is not a verdict. An entry carries the
 // sentences it cannot be read without (With) and says why it is kept (Why).
 //
-// What is NOT here is dropped, and the sentences that carry a constraint word, or say the data leaves the box, are all accounted
-// for: the review gate (TestEveryConstraintSentenceIsKeptOrDroppedWithReason) reads the live full descriptions of every surface
-// (each accelerator alone too, local and fleet) and fails for a sentence with such a word that is neither kept by this list nor
-// on the dropped-with-reason list in toolsprofile_dropped_test.go. So adding a rule to a description means adding it to one of
-// the two lists, and rewording a listed sentence means updating its entry: the entry is the exact sentence, because a changed
-// rule has to be read again. A tool with no entry keeps only its opening sentences.
+// What is NOT here is dropped, and every dropped sentence is accounted for: the review gate
+// (TestEveryConstraintSentenceIsKeptOrDroppedWithReason) reads the live full descriptions of every surface (each accelerator alone
+// too, local and fleet) and fails for any sentence outside the opening ones, whatever words it holds, that is neither kept by this
+// list nor on the dropped list in toolsprofile_dropped_test.go (one row per sentence, with a reason class). So adding a sentence to a
+// description means adding it to one of the two lists, and rewording a listed sentence means updating its entry: the entry is the
+// exact sentence, because a changed rule has to be read again. A tool with no entry keeps only its opening sentences.
 //
-// An entry need not carry a constraint word: a sentence a reviewer wants in the compact list can be named whatever it says.
+// Two kinds of sentence cannot be dropped: an acceptance-authoring rule (acceptanceRule in the gate test), and an enum value's
+// explanation unless it is on the short dropped-enum list (toolsprofile_enum_test.go). The deferred:true protocol of every lane is
+// kept by an entry per phrasing, and a test compares the count of the literal between the full and the compact list.
+//
+// An entry need not carry a rule word: a sentence a reviewer wants in the compact list can be named whatever it says.
 
 // compactKeepEntry names a sentence compact keeps, in each of the tools listed. The sentence is what splitSentences produces for
 // it: a description of the tool itself, or of any parameter of it at any depth.
@@ -653,7 +657,7 @@ var compactKeep = []compactKeepEntry{
 	{
 		Tools:    []string{"offload_video_watch"},
 		Sentence: "Slower than video_describe (one vision call per window); scale window_sec/fps for very long files.",
-		Why:      "video_watch is slower than video_describe (one vision call per window): scale window_sec and fps for very long files",
+		Why:      "video_watch costs one vision call per window, so scale window_sec and fps for very long files",
 	},
 	// The accelerator tables (acceltools.go). A box that lists a device as a FLEET accelerator advertises its tools as forwarders, and
 	// registerAccelTools appends the forwarding note to each description, after an opening sentence that says "LOCAL ... on-box": the

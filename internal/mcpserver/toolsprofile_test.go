@@ -305,8 +305,8 @@ func paramDescription(t *testing.T, tool *mcp.Tool, path ...string) string {
 }
 
 // TestDefaultProfileIsFull: no key, "full" and the Default() value all advertise the same bytes, and compact does not. The
-// compact middleware is installed only for compact, so the default list is the list before the key existed; the release notes
-// record the one-off proof that the default bytes equal the previous release's.
+// compact middleware is installed only for compact, so the default list is the list before the key existed, except for the three
+// punctuation characters of offload_status's description that the release notes name (its guidance clauses are sentences of their own).
 func TestDefaultProfileIsFull(t *testing.T) {
 	if got := config.Default().ToolsSchemaProfile; got != "full" {
 		t.Fatalf("Default().ToolsSchemaProfile = %q, want \"full\"", got)

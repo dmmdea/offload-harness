@@ -17,10 +17,12 @@ package mcpserver
 //
 // No word list decides what is kept. A lexical rule was tried first and it lost sentences a caller relies on (an "ONLY" or a
 // "NOT" in capitals, "can't", the write door's caps) while keeping others by accident. Instead a test reads the live full
-// descriptions, exactly as tools/list emits them, and fails for every sentence that carries a constraint word or says the
-// caller's data leaves the box (it is forwarded, it travels with the job, it runs on a fleet node, it goes over the tailnet) and is neither in the compact
-// output nor on a reviewed dropped-with-reason list (toolsprofile_gate_test.go, toolsprofile_dropped_test.go), so a rule added to
-// a description later turns it red until someone has read it and put it on one list or the other. It reads every surface the
+// descriptions, exactly as tools/list emits them, and fails for EVERY sentence outside the opening ones, whatever words it holds,
+// that is neither in the compact output nor on the reviewed dropped list (toolsprofile_gate_test.go, toolsprofile_dropped_test.go:
+// one row per sentence with a reason class), so a rule added or reworded later ("Always ...", "You should ...", "Make sure ...")
+// turns it red until someone has read it and put it on one list or the other. The words a keyword list would have used (constraint
+// words, deferral words, words that say the caller's data leaves the box) are only the second check: a dropped sentence that carries
+// one needs a reason of its own, and the lead cut may not drop a tail that carries one. It reads every surface the
 // server can emit, including each accelerator alone, as a local and as a fleet device: the shared-name rule gives a tool name to
 // the first listed device, so the other devices' descriptions for that name are advertised only on a box that lists them alone,
 // and a fleet device's description carries a forwarding note appended after the table text.
