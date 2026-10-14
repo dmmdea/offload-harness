@@ -41,8 +41,10 @@
   rows with no session are one entry apart, never merged into a named one.
 - **What the share is.** It is the card-side placement split, not the share gate's cards/(cards+cloud), which needs the session's transcript and stays
   in the hook; the fields are named apart (`remote_*`, not `fleet_*`) so the two are not confused. It is a floor on the remote part: a cascade call
-  routed to a node over the chat lane writes no node row, and a delegation whose started marker failed to write has no fleet job id, so both read as
-  local (a test pins it). It reads one box's ledger; a view across the fleet is a reader of several.
+  routed to a node over the chat lane writes no node row and reads as local, and a delegation sent with `route: "queue"` writes no row on the asker's
+  ledger at all (the claiming node holds it, as a served row), so it is in neither number. A pushed delegation is not a floor: its finished row's
+  fleet job id comes from the node's ack, whatever becomes of its started marker. Tests pin both shapes. It reads one box's ledger; a view across the
+  fleet is a reader of several.
 - **Known limits, on purpose.** Accelerator rows served by a node stay unattributed (`RecordAccel` writes from no `Meta`); the `cli:fleet-measure`
   door sends no class from a box with no process class, because the media and vision lanes know the config, not the door; the session id now
   leaves the box, to every node the asker dispatches to, beside the asker's name, with no opt-out; and the share gate hook, which sums by session
@@ -56,16 +58,19 @@
   process on an unknown flag), then tests that failed on their assertions against it, for example: `X-Offload-Origin = "", want sess-abc`;
   `originOf = ("", ""), want ("sess-abc", "bake")`; `queued job = origin "", class "", want sess-abc and bake`; `session-only row = session "sess-abc"
   pid 0 ppid 0, want ... this process`; `written row = origin_session "" run_class "", want the asker's sess-abc and bake`; `no entry for session
-  "sess-abc" in []`; `--by-session printed no sessions key`. Then the behaviour.
-- **Mutation proofs.** Every rule has a single-line mutant that `scripts/mutation-check.sh` scored RED (the mutant compiled, the named test failed,
-  the file was restored byte for byte), 43 in all. Ledger: `stampOrigin` restored to return early on a named session; the reader reading a fleet job id
+  "sess-abc" in []`; `--by-session printed no sessions key`. Then the behaviour. Three additions made after review are green at birth, because the
+  code they pin was already right: they are scored by the mutants named below, which turn each of them red (the windowed-index test in the ledger, the
+  empty-bearer case on a node with no token, and the queue lane writing no asker row).
+- **Mutation proofs.** 48 single-line mutants, each scored RED by `scripts/mutation-check.sh` (the mutant compiled, the named test failed, the file
+  was restored byte for byte). Ledger: `stampOrigin` restored to return early on a named session; the reader reading a fleet job id
   or node as local, counting a served row as the asker's own, ignoring the run class filter, counting markers and inner rows as jobs, dividing by
   zero for an idle session, reading a row without `cards_tokens` as free, ignoring `--since`, reversing the order, merging unattributed rows into a
-  named session; `CleanOrigin` without its cap; `CleanClass` accepting `production`; `ClassOfSession` naming no class. Sender: the origin header
+  named session, the parent index or the class index built from the rows inside `--since` instead of the whole ledger; `CleanOrigin` without its cap; `CleanClass` accepting `production`; `ClassOfSession` naming no class. Sender: the origin header
   not sent, the class header not sent, either value not cleaned, the environment not read. Queue: the stored job dropping the origin or the class,
   the submit handler storing either uncleaned, the origin key written when empty. Core: `Request` or `Meta` carrying the session on the wire. Node
   (run on the remote gate runner): the stamp deleted on the push door and on the claim loop, the request always trusted, the bearer not checked, a
   session cut to length tenant-style, a class-carrying label kept for an untrusted caller, the class not cleaned, the queued session or class not
-  cleaned again. Pipeline: the copy into `Meta` deleted, `entryFrom` dropping the session or the class. Delegate: a measurement pin sending no class,
-  and overriding a process class. `ledger`: `--session` not narrowing, not implying `--by-session`, the array emitted unconditionally, the key
-  losing `omitempty`.
+  cleaned again, the configured-token guard of the trust check deleted (an empty bearer then matches a node with no token), the token-gated arm of
+  the trust check made unreachable. Pipeline: the copy into `Meta` deleted, `entryFrom` dropping the session or the class. Delegate: a measurement
+  pin sending no class, overriding a process class, and the queue lane writing a row on the asker's ledger. `ledger`: `--session` not narrowing, not
+  implying `--by-session`, the array emitted unconditionally, the key losing `omitempty`.
