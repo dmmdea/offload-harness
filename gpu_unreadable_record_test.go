@@ -181,3 +181,37 @@ func TestStopInstancesOverAnUnreadableRecordSaysSoAndNotThatTheLeaseIsNoLongerOu
 		t.Errorf("the line says the record cannot be read, not that the lease is no longer ours: %q", out)
 	}
 }
+
+// ITEM 8. On Windows under load, a heartbeat Renew/Check that races an atomic replace of the lease record reads the lease as gone. The
+// wrapper's tick then printed LEASE LOST and KILLED the wrapped command, renewWhile cancelled the drain, and the drain loop released
+// the lease and queued again: a queue or yield write racing a long holder's Renew could kill a long GPU job. A record that cannot be
+// read is not a verdict: the wrapper looks again, waits out a short window, and never kills, releases or requeues on it.
+//
+// An out-of-process wrapper (as the tree tests run it), its record replaced by a directory for a few ticks (150 ms each) and then put
+// back: the command must be alive afterwards, the wrapper still running, and no LEASE LOST said.
+func TestAWrapperWhoseRecordReadFailsForAMomentDoesNotKillItsCommand(t *testing.T) {
+	run := startTreeRun(t, "")
+	path := filepath.Join(run.m.Dir(), "meta.json")
+	restore := unreadableRecord(t, path)
+	time.Sleep(1200 * time.Millisecond) // several wrapper ticks fail to read the record
+	restore()
+	time.Sleep(900 * time.Millisecond) // and several succeed again
+
+	select {
+	case err := <-run.exited:
+		t.Fatalf("the wrapper ended over a record read that failed for a moment: %v\n%s", err, run.stderrText())
+	default:
+	}
+	if !gpulease.PIDAlive(run.cmdPID) {
+		t.Errorf("the wrapped command (pid %d) was killed over a record read that failed for a moment:\n%s", run.cmdPID, run.stderrText())
+	}
+	if !gpulease.PIDAlive(run.grand) {
+		t.Errorf("what the command started (pid %d) was killed with it:\n%s", run.grand, run.stderrText())
+	}
+	if strings.Contains(run.stderrText(), "LEASE LOST") {
+		t.Errorf("a record that could not be read for a moment is not a lost lease:\n%s", run.stderrText())
+	}
+	if !run.m.Inspect().Held {
+		t.Errorf("the lease is still held: %+v", run.m.Inspect())
+	}
+}
