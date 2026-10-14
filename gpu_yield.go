@@ -67,17 +67,21 @@ func detachedYieldsForm(releaseAtExpiry bool) string {
 }
 
 // newHolderYieldTicker is the ticker a holder runs beside its term check. onYield is the holder's
-// own in-memory --on-yield value, never read back from the record.
+// own in-memory --on-yield value, never read back from the record. The holder settles for the interval at
+// which its term check looks again at a lease it labelled expired: the ask cannot be taken back, so it is
+// not made on a label the check has not looked at twice.
 func newHolderYieldTicker(lease *gpulease.Lease, onYield, label string, out io.Writer) *gpulease.YieldTicker {
-	return lease.NewYieldTicker(gpulease.YieldTickerOptions{OnYield: onYield, Run: yieldShell, Out: out, Label: label})
+	return lease.NewYieldTicker(gpulease.YieldTickerOptions{OnYield: onYield, Run: yieldShell, Out: out, Label: label, Settle: termRecheckEvery})
 }
 
 // detachedReport is what `gpu reserve --detach` prints once its holder has taken the lease. A detached
 // job is not a child of the holder, so GPU_LEASE_YIELD_FILE is not in its environment: the report names
-// the file a job can watch instead.
+// the file a job can watch instead, but only under the request policy, the one under which the holder
+// asks. Under the default (nobody is asked), hold and an unrecognised value the report is what it was
+// before the request existed.
 func detachedReport(info gpulease.Info, leaseDir string, asJSON bool) string {
 	yieldFile := ""
-	if info.Yields != "" {
+	if info.Yields != "" && gpulease.InstalledOnOverdue() == gpulease.OnOverdueRequest {
 		yieldFile = gpulease.YieldFilePath(leaseDir, info.Epoch)
 	}
 	if asJSON {
@@ -101,7 +105,11 @@ func detachedReport(info gpulease.Info, leaseDir string, asJSON bool) string {
 	s := fmt.Sprintf("reserved: %s epoch %d (pid %d%s) until %s\n  release with: local-offload gpu release --epoch %d\n",
 		info.Class, info.Epoch, info.PID, cardsText, info.ExpiresAt.Format(time.Kitchen), info.Epoch)
 	if yieldFile != "" {
-		s += fmt.Sprintf("  yield request: when this lease is overdue and someone waits for its cards, the holder runs the --on-yield it was given; a job can watch %s, which exists only once the holder is asked\n", yieldFile)
+		what := "the holder runs the --on-yield it was given"
+		if strings.TrimSpace(info.OnYield) == "" {
+			what = "the holder is asked, but no --on-yield was recorded, so there is nothing for it to run"
+		}
+		s += fmt.Sprintf("  yield request: when this lease is overdue and someone waits for its cards, %s; a job can watch %s, which exists only once the holder is asked\n", what, yieldFile)
 	}
 	return s
 }
