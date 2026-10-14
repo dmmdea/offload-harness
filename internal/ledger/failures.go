@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"math"
 	"os"
@@ -86,6 +87,12 @@ type FailureKindCount struct {
 
 // FailureRegister is the whole report.
 type FailureRegister struct {
+	// LedgerFound is false when the ledger file does not exist: the zeros beside it then mean "nothing was read",
+	// not "nothing failed". UnparsedLines is the non-blank lines that did not decode as a ledger row (garbage, a
+	// line cut off mid-file, a non-object, a last line the writer had not finished) and so are in none of the
+	// counts below: a ledger that is partly unreadable must not look like a quiet one.
+	LedgerFound   bool `json:"ledger_found"`
+	UnparsedLines int  `json:"unparsed_lines"`
 	// JobRows is the job rows the register looked at, after the window and the run-class rule: a dispatch marker,
 	// an inner row whose parent is present and a refused attempt are not jobs. FailureRows of them failed.
 	JobRows     int `json:"job_rows"`
@@ -264,7 +271,9 @@ type classAcc struct {
 // all) keeps only rows from the window; the job and class indexes are the whole ledger's, so an inner row inside
 // the window is still judged by a parent that is older (the way SessionSharesFile does). Unless includeTraffic,
 // test, bake and measurement traffic is left out and counted per class (the run-class rule every production view
-// of the ledger follows). A missing ledger is an empty register. Lock-free, like the other file readers: a partial last line is skipped.
+// of the ledger follows). A missing ledger is an empty register with LedgerFound false. Lock-free, like the other
+// file readers: a last line still being written is not a row, and is counted in UnparsedLines with every other line
+// that does not decode.
 func FailureRegisterFile(path string, since int64, includeTraffic bool) (FailureRegister, error) {
 	reg := FailureRegister{Classes: []FailureClass{}, Kinds: []FailureKindCount{}}
 	f, err := os.Open(path)
@@ -275,13 +284,16 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 		return reg, err
 	}
 	defer f.Close()
+	reg.LedgerFound = true
 	var rows []failureRow
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 16<<20)
 	for sc.Scan() {
-		if line := sc.Bytes(); len(line) > 0 {
+		if line := bytes.TrimSpace(sc.Bytes()); len(line) > 0 {
 			if r, ok := decodeFailureRow(line); ok {
 				rows = append(rows, r)
+			} else {
+				reg.UnparsedLines++
 			}
 		}
 	}

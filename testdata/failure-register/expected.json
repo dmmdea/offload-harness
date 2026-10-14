@@ -1,4 +1,6 @@
 {
+  "ledger_found": true,
+  "unparsed_lines": 1,
   "job_rows": 20,
   "failure_rows": 18,
   "refused_attempts": 2,

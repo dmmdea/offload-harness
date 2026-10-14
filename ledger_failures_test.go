@@ -473,3 +473,30 @@ func TestLedgerFailuresDefaultsToTheEmbeddedPage(t *testing.T) {
 		t.Errorf("capacity_wait meaning = %q, want the embedded page's text", c.Meaning)
 	}
 }
+
+// The verb says what it could not read, on stdout where a script reads it and on stderr where a person does: a
+// ledger that is not there is "ledger_found": false (and exit 0), and lines it could not decode are counted.
+func TestLedgerFailuresSaysWhatItCouldNotRead(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone", "ledger.jsonl")
+	var out string
+	errText := captureStderr(t, func() {
+		out = runLedgerModeOut(t, "--failures", "--config", failureConfigFor(t, missing), "--table", filepath.FromSlash(failureFixtureTable))
+	})
+	r := decodeFailureReport(t, out)
+	if r.LedgerFound || r.FailureRows != 0 || len(r.Classes) != 0 {
+		t.Errorf("a missing ledger reported found=%v failure_rows=%d: %s", r.LedgerFound, r.FailureRows, out)
+	}
+	if !strings.Contains(errText, "no ledger at") || !strings.Contains(errText, "ledger_found") {
+		t.Errorf("a missing ledger left no note on stderr, got %q", errText)
+	}
+
+	var fixture string
+	errText = captureStderr(t, func() { fixture = runFailures(t) })
+	fr := decodeFailureReport(t, fixture)
+	if !fr.LedgerFound || fr.UnparsedLines != 1 {
+		t.Errorf("fixture ledger: found = %v, unparsed_lines = %d, want true and 1 (its cut-off last line)", fr.LedgerFound, fr.UnparsedLines)
+	}
+	if !strings.Contains(errText, "1 ledger line(s) could not be read") {
+		t.Errorf("the unreadable line left no note on stderr, got %q", errText)
+	}
+}

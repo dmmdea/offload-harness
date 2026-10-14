@@ -54,6 +54,8 @@ type failureClassOut struct {
 
 // failureReport is what `ledger --failures` prints: one JSON object, no trailing text.
 type failureReport struct {
+	LedgerFound           bool                      `json:"ledger_found"`
+	UnparsedLines         int                       `json:"unparsed_lines"`
 	JobRows               int                       `json:"job_rows"`
 	FailureRows           int                       `json:"failure_rows"`
 	RefusedAttempts       int                       `json:"refused_attempts"`
@@ -134,6 +136,7 @@ func runLedgerFailures(args []string) error {
 		return err
 	}
 	noteExcluded(reg.ExcludedNonProduction)
+	noteLedgerReading(cfg.LedgerPath, reg)
 	b, err := json.MarshalIndent(joinFailureDocs(reg, docs), "", "  ")
 	if err != nil {
 		return err
@@ -142,10 +145,22 @@ func runLedgerFailures(args []string) error {
 	return nil
 }
 
+// noteLedgerReading says on stderr what the JSON also says, so a person looking at the terminal sees it: the ledger
+// was not there (every count is then zero because nothing was read), or some of its lines could not be read.
+func noteLedgerReading(path string, reg ledger.FailureRegister) {
+	if !reg.LedgerFound {
+		fmt.Fprintf(os.Stderr, "note: no ledger at %s: nothing was read, so the zeros are not \"no failures\" (ledger_found is false)\n", path)
+	}
+	if reg.UnparsedLines > 0 {
+		fmt.Fprintf(os.Stderr, "note: %d ledger line(s) could not be read and are in no count (unparsed_lines)\n", reg.UnparsedLines)
+	}
+}
+
 // joinFailureDocs joins the table to the register by class name. A class the table has no row for reads
 // "undocumented" in every human column; a table row for a class the register does not hold adds nothing.
 func joinFailureDocs(reg ledger.FailureRegister, docs map[string]failureDoc) failureReport {
 	out := failureReport{
+		LedgerFound: reg.LedgerFound, UnparsedLines: reg.UnparsedLines,
 		JobRows: reg.JobRows, FailureRows: reg.FailureRows, RefusedAttempts: reg.RefusedAttempts, StackFaultRows: reg.StackFaultRows, StackFaultShare: reg.StackFaultShare, Kinds: reg.Kinds, ClassDerivedRows: reg.ClassDerivedRows,
 		CardsTokens: reg.CardsTokens, RowsWithTokens: reg.RowsWithTokens, ExcludedNonProduction: reg.ExcludedNonProduction,
 		UndocumentedClasses: []string{}, Classes: make([]failureClassOut, 0, len(reg.Classes)),
