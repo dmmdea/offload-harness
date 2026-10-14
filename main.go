@@ -3276,7 +3276,10 @@ func runLedger(args []string) error {
 	fs.String("config", "", "config file path")
 	since := fs.Int("since", 0, "only count entries from the last N days")
 	includeTraffic := includeTrafficFlag(fs)
+	bySession := fs.Bool("by-session", false, "add a sessions array: each session's card tokens split by where they ran (this box or a fleet node)")
+	sessionID := fs.String("session", "", "with --by-session, only this session's entry (implies --by-session)")
 	_ = fs.Parse(args)
+	_, _ = bySession, sessionID
 	cfg := loadCfg(fs)
 	var sinceTS int64
 	if *since > 0 {

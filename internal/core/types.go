@@ -192,6 +192,13 @@ type Request struct {
 	// node's row says who the work was for. Documentary only, like Door and FleetJobID: it never
 	// routes, gates or keys a cache.
 	Requester string `json:"requester,omitempty"`
+	// OriginSession and RunClass are the asker's session label and run class (OriginHeader and
+	// RunClassHeader, cleaned), stamped by a fleet node on the request it builds for a job another box
+	// asked for. They ride to the ledger row as Meta.AskerSession and Meta.AskerClass, so the node's row
+	// names the session it worked for (ADR 0085). Documentary only, like Requester: they never route, gate or
+	// key a cache. In-process only (`json:"-"`): a wire body must not be able to name its own session or class.
+	OriginSession string `json:"-"`
+	RunClass      string `json:"-"`
 	// ParentJobID is set by a COMPOSITE call (extract_image, inpaint's auto-text
 	// mask) on the sub-request it issues: the sub-call's ledger row is then an
 	// INNER row of the composite's own row (register C-62), never a second call
@@ -470,6 +477,13 @@ type Meta struct {
 	// Requester is the Request.Requester carried through to telemetry: who a fleet node's
 	// row was run for. Copied in Pipeline.Run and mapped onto ledger.Entry.Requester; omitempty.
 	Requester string `json:"requester,omitempty"`
+	// AskerSession and AskerClass are the Request.OriginSession and Request.RunClass carried through to
+	// telemetry: the session and run class a fleet node's row was run for (ADR 0085). Copied in Pipeline.Run
+	// and mapped onto ledger.Entry.OriginSession and ledger.Entry.RunClass. `json:"-"`: Meta is marshalled
+	// whole into a node's poll results, and the asker's session id must not be echoed back through them.
+	// Named apart from the node's own ProcessOrigin so the two are never confused.
+	AskerSession string `json:"-"`
+	AskerClass   string `json:"-"`
 	// License is the license of the media binding that produced this result (ADR
 	// 0058: a named family always declares one; a default binding may). Mapped onto
 	// ledger.Entry.License so the ledger can answer "which renders came out of a

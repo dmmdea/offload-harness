@@ -56,9 +56,14 @@ var throwawayRoots = func() []string {
 	return roots
 }
 
-// cleanClass trims and lower-cases s and refuses anything that is not a short [a-z0-9_-] token, so a malformed
-// environment value cannot bloat or break the one-line record. "production" is no class.
-func cleanClass(s string) string {
+// cleanClass is CleanClass under its original, unexported name (the process resolver and the tests call it).
+func cleanClass(s string) string { return CleanClass(s) }
+
+// CleanClass trims and lower-cases s and refuses anything that is not a short [a-z0-9_-] token, so a malformed
+// environment value cannot bloat or break the one-line record. "production" is no class. It is the one rule for
+// a run class wherever one is read: the process environment, and both ends of the fleet wire (the asker sends
+// only a class that passes it, the node keeps only a class that passes it).
+func CleanClass(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	if s == "" || len(s) > maxClassLen || s == "production" || s == "prod" {
 		return ""

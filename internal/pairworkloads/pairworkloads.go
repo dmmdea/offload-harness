@@ -237,6 +237,9 @@ type Emitter struct {
 	// sweepFrameFn builds a sweep's closing frame for a marker; sweepFrame unless a
 	// test swaps it (a build failure cannot otherwise be provoked from data).
 	sweepFrameFn func(m openMarker, now time.Time) ([]byte, error)
+	// originFn names the session and run class SetWireHeaders sends (ADR 0085); nil reads this process's
+	// environment. A seam so a test names them without depending on the environment it runs in.
+	originFn func() (session, class string)
 }
 
 type engineAnswer struct {

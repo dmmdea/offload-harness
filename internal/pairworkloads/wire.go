@@ -9,6 +9,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
 // The attribution a request carries to the fleet node that will run its work (PAIR routing fixes,
@@ -67,6 +68,16 @@ func (e *Emitter) SetWireHeaders(h http.Header) {
 	if !e.Enabled() && !e.suppressed() {
 		h.Set(core.PairCardHeader, core.PairCardNode)
 	}
+}
+
+// origin is the session and run class this box sends as core.OriginHeader and core.RunClassHeader: the
+// process's own, read from the environment by the resolvers the ledger stamps its rows with (no process-table
+// walk, which is slow on Windows and this runs on every request), unless a test swapped the seam. Nil-safe.
+func (e *Emitter) origin() (session, class string) {
+	if e != nil && e.originFn != nil {
+		return e.originFn()
+	}
+	return ledger.SessionFromEnv(os.Getenv), ledger.RunClassFromEnv(os.Getenv)
 }
 
 var (

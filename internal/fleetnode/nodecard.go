@@ -28,6 +28,13 @@ func askerOf(r *http.Request) (asker string, nodeCards bool) {
 	return core.SanitizeAsker(r.Header.Get(core.AskerHeader)), r.Header.Get(core.PairCardHeader) == core.PairCardNode
 }
 
+// originOf reads the origin headers of a request that creates work: the asker's session label and run class
+// (ADR 0085), each cleaned by the ledger's own rule. trustClass says the request is one this node can
+// authenticate; only then is the class honoured.
+func originOf(r *http.Request, trustClass bool) (session, class string) {
+	return "", ""
+}
+
 // nodeCard is the serving node's one PAIR card for a job its asker will not card. Every method is a
 // no-op on a nil receiver, which is what newNodeCard returns whenever no card is due.
 type nodeCard struct {

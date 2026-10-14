@@ -77,10 +77,22 @@ func sessionFrom(getenv func(string) string) string {
 	return ""
 }
 
-// cleanOrigin trims s and refuses anything that is not printable ASCII within
+// cleanOrigin is CleanOrigin under its original, unexported name (the resolver and the tests call it).
+func cleanOrigin(s string) string { return CleanOrigin(s) }
+
+// SessionFromEnv is the session label of an environment (Origin.Session) without the pid walk
+// OriginFromEnv does: LOCAL_OFFLOAD_ORIGIN, else CLAUDE_CODE_SESSION_ID, cleaned. The same resolver
+// ProcessOrigin applies, so the two cannot name different sessions.
+func SessionFromEnv(getenv func(string) string) string { return sessionFrom(getenv) }
+
+// CleanOrigin trims s and refuses anything that is not printable ASCII within
 // maxOriginLen, so a malformed or hostile environment value cannot bloat or
-// break the one-line record.
-func cleanOrigin(s string) string {
+// break the one-line record. It is the ONE rule for a session label wherever one
+// is read: the process environment, the fleet wire (the asker sends only a label
+// that passes it, the node keeps only a label that passes it), and the queue. A
+// value over the cap is refused whole, never truncated: a truncated session id
+// would attribute the row to a different session.
+func CleanOrigin(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" || len(s) > maxOriginLen {
 		return ""

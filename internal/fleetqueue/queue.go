@@ -70,12 +70,21 @@ type Job struct {
 	// "nothing asked, nothing signalled".
 	Asker    string `json:"asker,omitempty"`
 	PairCard string `json:"pair_card,omitempty"`
+	// Origin and RunClass carry the submitter's origin headers (core.OriginHeader and core.RunClassHeader,
+	// cleaned) the same way (ADR 0085): the claiming node stamps them on its own ledger row, so a pulled job
+	// names the session it worked for exactly like a pushed one. Omitted on a job a pre-0085 submitter queued,
+	// which a claimant reads as "no session, no class named".
+	Origin   string `json:"origin_session,omitempty"`
+	RunClass string `json:"run_class,omitempty"`
 }
 
-// Attribution is who submitted a job and whether the claiming node must card it (see Job).
+// Attribution is who submitted a job, whether the claiming node must card it, and the session and run class
+// the work is for (see Job).
 type Attribution struct {
 	Asker    string
 	PairCard string
+	Origin   string
+	RunClass string
 }
 
 // Queue is the durable store. All methods are safe for concurrent use; bbolt
