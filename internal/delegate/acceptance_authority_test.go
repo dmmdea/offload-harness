@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 )
@@ -95,8 +96,82 @@ func TestLintFlagsAnAuthorityTheContractCannotReach(t *testing.T) {
 	c.OutputSchema = json.RawMessage(`{"type":"object","properties":{"verdict":{"type":"string"}}}`)
 	wantWarn(t, LintAcceptance(c), "AUTHORITY-UNREACHABLE")
 
+	// grounded with only a blank document: Grade reads a blank document as no document, so the lint must too
+	c = authorityContract("contains:@grounded:pelican")
+	c.Context = []core.ContextDoc{{Name: "p.md", Text: "   \n\t"}}
+	wantWarn(t, LintAcceptance(c), "AUTHORITY-UNREACHABLE")
+
 	// reachable: silent about authority
 	c = authorityContract("contains:@field=summary:pelican", "contains:@grounded:pelican")
 	c.OutputSchema = json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}}}`)
 	wantNoWarn(t, LintAcceptance(c), "AUTHORITY-UNREACHABLE")
+}
+
+// A qualified document fingerprint (the docanchor tag behind an authority qualifier) is graded by the delegator on every
+// path that reads the fingerprint: the merge gate (EvalAcceptance) and the quarantine's reading of it (excusedAbsence). The
+// two disagreed once: excusedAbsence read the check through Eval, which has no context documents, so a grounded check the
+// merge gate PASSED was a failure there, and a passing result was counted as an excused absence (no quarantine pass).
+const qualifiedFingerprint = "regex:@grounded:(?P<docanchor>pelican)"
+
+func qualifiedFingerprintContract(docs ...core.ContextDoc) core.AgentContract {
+	return core.AgentContract{Goal: "what lives here?", Context: docs, Acceptance: []string{qualifiedFingerprint}}
+}
+
+// an honest-absence digest beside an answer that DOES restate the page's word
+func absentDigestWithAnswer(output string) core.AgentWireResult {
+	return core.AgentWireResult{Output: output, Structured: json.RawMessage(`{"digest":"the page does not mention it"}`)}
+}
+
+func TestExcusedAbsenceGradesAQualifiedFingerprintLikeTheMergeGate(t *testing.T) {
+	c := qualifiedFingerprintContract(core.ContextDoc{Name: "page.md", Text: "the pelican lives here"})
+	wire := absentDigestWithAnswer("pelican")
+	if f := EvalAcceptance(c, wire); len(f) != 0 {
+		t.Fatalf("the merge gate must pass a grounded fingerprint the documents carry, got %v", f)
+	}
+	if o := GradeAcceptance(c, wire); len(o) != 1 || o[0].Verdict != core.VerdictPass {
+		t.Fatalf("GradeAcceptance = %+v, want one pass", o)
+	}
+	if excusedAbsence(c, wire) {
+		t.Fatal("excusedAbsence is true for a result whose fingerprint PASSED: the quarantine would skip its pass")
+	}
+
+	// the same through the quarantine: the node that restated the page's word gets its pass
+	q := NewQuarantine(10 * time.Minute)
+	r := &runner{quarantine: q}
+	base := "http://node-a:18811"
+	r.noteFingerprint(base, c, wire, EvalAcceptance(c, wire))
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.passes[base]) != 1 {
+		t.Fatalf("a passing grounded fingerprint is %d quarantine pass(es), want 1", len(q.passes[base]))
+	}
+}
+
+func TestExcusedAbsenceStillExcusesAFailedQualifiedFingerprint(t *testing.T) {
+	// the answer does not carry the word and the digest is an honest absence: excused, as for an unqualified fingerprint
+	c := qualifiedFingerprintContract(core.ContextDoc{Name: "page.md", Text: "the pelican lives here"})
+	wire := absentDigestWithAnswer("nothing relevant")
+	if f := EvalAcceptance(c, wire); len(f) != 0 {
+		t.Fatalf("an honest absence must still be excused, got %v", f)
+	}
+	if !excusedAbsence(c, wire) {
+		t.Fatal("excusedAbsence is false for a failed fingerprint beside an honest absence")
+	}
+}
+
+func TestAnUnknownFingerprintIsAFailureNotAnExcusedAbsence(t *testing.T) {
+	// no context documents: the grounded fingerprint is UNKNOWN, and an unknown is never a pass, so the honest-absence
+	// excuse (which drops a failed check) must not drop it
+	c := qualifiedFingerprintContract()
+	wire := absentDigestWithAnswer("pelican")
+	if o := GradeAcceptance(c, wire); len(o) != 1 || o[0].Verdict != core.VerdictUnknown {
+		t.Fatalf("GradeAcceptance = %+v, want one unknown", o)
+	}
+	f := EvalAcceptance(c, wire)
+	if len(f) != 1 || !strings.Contains(f[0], "unknown") {
+		t.Fatalf("an unknown fingerprint must stay a reported failure that says unknown, got %v", f)
+	}
+	if excusedAbsence(c, wire) {
+		t.Fatal("excusedAbsence excuses an unknown: only a failed check is excused")
+	}
 }
