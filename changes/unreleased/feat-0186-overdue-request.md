@@ -16,29 +16,40 @@
 - **Who asks, and when.** The holder's own tick (the wrapper of `gpu reserve`, and the detached holder of `gpu reserve --detach`),
   not a blocked waiter. The preconditions are checked cheapest first, from the lease record alone: the policy is `request`; the
   record is labelled expired or is past its declared end (a lease the same tick renewed is not asked); the holder was not asked
-  yet (an in-memory flag, so a vanished file cannot make it ask twice); the record says this holder runs the request; and only then
-  are the waiters read. Demand is a live waiter that is not the holder's own process, not waiting only on host RAM, and wants a
+  yet (an in-memory flag, so a vanished file cannot make it ask twice); the record says this holder runs the request; the lease has
+  read overdue, on every tick, for the holder's settle interval (below); and only then are the waiters read. Demand is a live waiter that is not the holder's own process, not waiting only on host RAM, and wants a
   card the lease holds. **The same waiter (pid and start identity) must be seen on two consecutive ticks**, so a short probe
   that comes and goes cannot stop a long job through its `on_yield`; the persistence is an in-memory counter on the holder's own
-  cadence and adds no time constant.
+  cadence and adds no time constant. **A label has to have survived a look.** The term check looks again at a lease it labelled
+  expired once a minute, and a look at the cards that fails (most likely when they are busiest) labels a lease that a second look
+  would renew; the ask cannot be taken back, so both holders settle for that same interval (the term check's own
+  `termRecheckEvery`, handed to the ticker, not a new constant) before they ask, and the waiter is counted from the first tick
+  after it. A lease the look renews is never asked, and a renewed lease that is labelled again settles again.
 - **The request.** A sidecar beside the lease record, `yield.<epoch>`: when it was asked, by which waiter pid, why (the basis in
   words), up to three waiters and the queue length, the policy, the job's declared grace, and a second write of what the holder
   did about it (`on_yield running`, `ran on_yield`, `on_yield failed` with the exit status, or `no on_yield recorded`). It is
   written under the epoch lock after the writability probe and the liveness check the orphan marker uses, with tmp and rename; both
   the ask and the later action update check the lease is still live, so a late update cannot bring the file back after a release;
   both sweeps that end a lease remove it. A binary that predates the request ignores it (the preserved old-reader fixture pins that).
-  If the ask cannot be recorded nothing is run, and the holder says so once.
+  If the ask cannot be recorded nothing is run, and the holder says so once. What the holder did about it is written the same way;
+  a write that fails is said once (`could not record what its --on-yield did`) and tried again on the next heartbeat, with the
+  time of the event, and a request file that exists and cannot be read is an error, not "never asked".
 - **What the holder does.** It runs the `--on-yield` it was STARTED with, from memory, never the line the record holds (the record is
   shared and can be rewritten), once, in its own working directory, through `sh -c` (or `cmd.exe /d /s /c` hidden on Windows), with
   its output discarded (a wrapper's stdout is the job's), in a goroutine so the heartbeat goes on, and never waited out or cut short.
   The wrapper's command is told `GPU_LEASE_YIELD_FILE`, the path of the sidecar (which exists only once the holder is asked), so a
   job can poll it between items; the line itself gets `GPU_LEASE_EPOCH`, `GPU_LEASE_DIR` and `GPU_LEASE_YIELD_FILE`. A detached job is
-  not the holder's child, so `gpu reserve --detach` prints the path (and `yield_file` under `--json`), and `gpu status --json` carries
-  it. **A detached holder never returns on a yield:** its job is a separate process, and releasing would free the card under a live
+  not the holder's child, so under the request policy `gpu reserve --detach` prints the path (and `yield_file` under `--json`) and
+  says whether the holder runs an `--on-yield` or none was recorded, and `gpu status --json` carries it; under the default, `hold`
+  and an unrecognised value nobody is asked, and both are what they were before the key existed (a status call names the file once
+  a holder was asked, whatever the policy says by then). A waiter's reason is free text typed by any local process, so line breaks
+  and control characters in it become spaces before it reaches the holder's one-line stream. **A detached holder never returns on a yield:** its job is a separate process, and releasing would free the card under a live
   job (the 2026-09-07 incident). A holder started with `--release-at-expiry` stamps nothing and is never asked.
 - **A record gains an additive `yields` stamp** (`wrapper` or `detached`), set at acquire by a holder that runs the request. The
-  version cannot say whether a holder would answer (none of the older builds ticks this), so a record without the stamp reads, on
-  every surface, as "its holder build predates the yield request: ask whoever owns it", and is never asked.
+  version cannot say whether a holder would answer (none of the older builds ticks this), so a record without the stamp is never
+  asked and reads, on every surface, as "its holder does not run the yield request (a build from before it, or an in-process holder
+  such as the media pipeline's): ask whoever owns it". Two kinds of holder carry no stamp: every job started before the upgrade, and
+  the leases this build's own media pipeline takes in process, which never tick the request.
 - **What a waiter and a status call read.** Read-only everywhere (a test pins that no status surface writes the sidecar):
   `ExplainHeld` (the refusal text of a blocked request), `gpu status` and its `holder.yield` object (asked at, waiters, grace, the
   action, the exit status, whether the ask is unanswered), the one-line brief, and the overdue, stalled and orphaned notes all say
@@ -47,7 +58,8 @@
   the wrapper ends. Only a detached holder's sentence names the release command, with what it does: it frees the claim at once, and
   the job keeps running on the card until it ends. An ask is called unanswered once the lease still holds its cards past the job's
   declared grace, or past a display-only ten minutes when the job declared none; nothing keys off that figure, which is chosen and
-  not measured.
+  not measured. A lease that was asked and then renewed (the sidecar stays until the lease ends) is no longer overdue and is never
+  called unanswered: it reads "has since been renewed and is not overdue now".
 - **Not changed, on purpose.** Nothing is killed, signalled, released or taken over: a static test reads the source of the yield files
   and fails on a kill, a signal, a process-tree stop, `taskkill`, `os.FindProcess` or a second process start. A claim whose holder
   is alive is never freed by the harness. The term check still renews or labels and never frees. No `gpu yield` or `gpu takeover` verb
@@ -58,8 +70,11 @@
   node-local: the fleet node's lease standing wire does not carry it. (4) A seat waiter registered for the whole node (the card table
   was unreadable when it queued) conflicts with every lease and can ask an expired lease on a card it does not need; the two-tick
   rule bounds that. (5) A holder started before the upgrade carries no stamp and is never asked, so a host is covered only once
-  its holders are this build; restart the long-lived processes so their surfaces say the same thing. (6) A holder whose command ends
-  before its `on_yield` returns leaves the action at `on_yield running`; the file goes with the lease.
+  its `gpu reserve` and `gpu hold` holders are this build; restart the long-lived processes so their surfaces say the same thing. The
+  leases this build's own media pipeline takes in process never carry the stamp and are never asked, before or after a restart.
+  (6) A holder whose command ends before its `on_yield` returns leaves the action at `on_yield running`; the file goes with the
+  lease. (7) The earliest ask comes about a minute and a half after the term ended: a label is asked about only after it survived
+  the term check's second look, and the waiter must then stay two ticks.
 - **Record and docs.** ADR 0085 (status Proposed) amends plan invariant I5 and the plan's description of the takeover: here the holder's
   own tick runs the job's own pre-declared `on_yield`, instead of a takeover command running it. The file-only alternative (the holder
   writes the sidecar and the job polls it) is a one-line change in the ticker, and the choice between the two is the operator's to
@@ -114,3 +129,44 @@
   while the release sweep had already run, so the test was strengthened, see above), and three first attempts did not compile
   (BAD-MUTANT) and were replaced by mutants that build; none of those is in the sixty-six. One redundancy was left alone on purpose: the unlocked stat
   before the epoch lock in the asker is only a shortcut, and the in-lock re-check is what is pinned.
+- **Second pass, before it shipped.** A review of the first version found six defects in behaviour and wording, and tests that proved
+  less than they claimed. All are fixed, each with its test first. (1) An ask that a renewal had since answered was still called
+  unanswered, on every surface and on `holder.yield.unanswered`: it needs the lease to be overdue too, and reads "has since been
+  renewed". (2) A lease labelled on one tick could be asked about on the second, 15 seconds later, before the term check had
+  looked at the label again (a look at the cards that fails labels a lease that a second look renews): the holders now settle for
+  the term check's own recheck interval. (3) The three updates that record what the holder did discarded their errors, so a
+  sidecar could say "started its on_yield, which has not ended" for the life of a lease about a command that had finished: a
+  failed record is now said once and retried on the next heartbeat, with the time of the event. (4) A waiter's free-text reason
+  could split the holder's one-line stream or inject a terminal sequence into it: it is collapsed to one line. (5) A holder that
+  does not run the request was said to "predate" it, which is false of the media pipeline's in-process leases, and the rollout
+  sentence promised coverage that those leases can never have: the words now name the cause, and the rollout is narrowed to the
+  `gpu reserve` and `gpu hold` holders. (6) The default policy still printed, on `gpu reserve --detach` and on the status wire, that
+  a holder would run its `--on-yield`: the detach report and `yield_file` now appear only under `gpu_on_overdue = request` (or once
+  a holder was asked), and say there is nothing to run when no `--on-yield` was recorded. The status test that planted a waiter with
+  a pid nobody has (pruned as dead, so no demand ever existed) now plants a live one and shows the holder's own asker asks on that
+  same fixture.
+  **Red first, the second round.** Tests committed before the fixes and failing on their assertions: `a lease that is not overdue is
+  not an ask nobody answered`, `asked 15 s after the label, before the holder's term check looked at it again`, `a lease the recheck
+  renewed was asked`, `the holder says once that the result of its on_yield could not be recorded, got 0`, `an unreadable request
+  must be an error naming it, got <nil>`, `a clean ask is one line on the wrapping session's stream, got 2`, `the sentence must say
+  "does not run the yield request"` and `the default policy asks nobody and so advertises no yield file`; in the root package
+  `the holder was asked about a label that had not survived a recheck`, `a lease with no --on-yield: the holder runs nothing and the
+  report says so` and `gpu_on_overdue = "" asks nobody, and the report still talks of a yield request`. **Tests that were NOT red first,
+  proven by mutation instead:** the sidecar saying `on_yield running` while the command runs, the sentences for a failed command and
+  for one that cannot be started (exit -1), the waiters being read last (a dead waiter's record survives every tick that stops
+  earlier), the in-lock liveness check on the first write, the line's output never reaching the holder's streams, a shell that cannot
+  start being an error, the settle interval starting again for a renewed lease that is labelled again, the retried record carrying
+  the time of the event, the failed-look scenario of the settle rule, the live-waiter status test, and a test that a renewable
+  lease is never asked whichever of the holder's two checks runs first within a tick (the order is immaterial, because the asker never
+  asks on the first tick a lease reads overdue).
+  **Thirty more single-line mutations**, each run through `scripts/mutation-check.sh` and each `RED`: **in `internal/gpulease` (22)**
+  an unanswered ask by time alone, the sentence never learning the lease was renewed, the old "predates" wording, the settle interval
+  dropped (against the silent-progress label and against the failed-look label), the settle interval not starting again, a failed
+  record not said, a failed record not retried, the running action not written, an unreadable request file not an error, a retry
+  stamped with the time of the retry, the waiter's reason raw on the stream, control characters surviving, the waiters read before the
+  policy, the window, the once-flag, the form stamp and the settle interval (five), the ask not re-checking liveness under the lock,
+  a command that could not start not recorded as exit -1, and the running and failed sentences dropped; **in `internal/gpuactivity`
+  (3)** the default policy advertising the yield file, a request that was made not named once the policy changed, and a status
+  snapshot that ticks the real asker; **in the root package (5)** the holders passing no settle interval, the detach report
+  promising a request under every policy, the detach report claiming a command that was not recorded, the helper's output reaching
+  the holder's streams (on a Linux host and a Windows host), and a shell that cannot start reported as success (both hosts).
