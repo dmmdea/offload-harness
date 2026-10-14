@@ -115,10 +115,12 @@ func readFragmentsFS(fsys fs.FS, prefix string) ([]Fragment, []string) {
 
 // ValidateFragment returns every rule the named fragment breaks, each starting with the file name; an empty slice
 // means it is well formed. The rules: the name is lower case and ends in .md; the body is valid UTF-8 with no control
-// byte but tab, CR and LF; it is not empty; its first non-blank line starts "### "; and no line starts a "#" or "##"
-// heading, even inside a code fence. The "### " opening is a tightening the changelog itself never had (122 of its 387
-// release entries open with a bullet or a lead paragraph): a loose bullet would be glued under the previous fragment's
-// section. It is for fragments only, and the legacy text a release absorbs from [Unreleased] is exempt from it.
+// byte but tab, CR and LF; it is not empty; its first non-blank line starts "### "; no line starts a "#" or "##"
+// heading, even inside a code fence; and no line carries a release date between two separators (gluedDate), because the
+// tree check refuses such a line in CHANGELOG.md and the release would write it there. The "### " opening is a tightening
+// the changelog itself never had (121 of its 387 release entries open with a bullet or a lead paragraph): a loose bullet
+// would be glued under the previous fragment's section. The rules are for fragments only, and the legacy text a release
+// absorbs from [Unreleased] is exempt from them.
 func ValidateFragment(name, body string) []string {
 	var problems []string
 	add := func(format string, args ...any) {
@@ -158,8 +160,18 @@ func ValidateFragment(name, body string) []string {
 		if topLevelHeading.MatchString(l) {
 			add("line %d starts a \"#\" or \"##\" heading, and only \"###\" sections belong in a fragment: %q", i+1, clip(l))
 		}
+		if gluedDate(l) {
+			add("line %d carries a release date between separators, which only a release heading may: once assembled, the tree check would refuse CHANGELOG.md: %q", i+1, clip(l))
+		}
 	}
 	return problems
+}
+
+// gluedDate reports whether a line carries a release date between two separators without being a "## [" heading: the
+// shape of a heading's text glued onto another line, or copied into a "###" title or a bullet. The tree check refuses such
+// a line in CHANGELOG.md, so a fragment must not hold one and a release must not write one.
+func gluedDate(line string) bool {
+	return !strings.HasPrefix(line, "## [") && dateBetweenSeparators.MatchString(line)
 }
 
 func clip(s string) string {
@@ -253,7 +265,8 @@ func hasHeading(text, version string) bool {
 // are trimmed and joined by exactly one blank line. A release is refused for: a version that is not x.y.z, a date that
 // is not a real YYYY-MM-DD, a title that is empty, has two lines or is padded, a `## [V]` heading the file already has
 // (the overwrite and duplicate guard), nothing to release, and zero or two [Unreleased] headings. The result of a
-// release is checked against text by verify before it is returned.
+// release is checked against text by verify before it is returned (it refuses, among the rest, a fragment line that carries
+// a release date between separators, which the tree check would refuse in the written file).
 func Splice(text string, frags []Fragment, rel *Release) (string, error) {
 	head, start, end, count := locateUnreleased(text)
 	if count != 1 {
@@ -325,7 +338,9 @@ func checkRelease(text string, rel *Release) error {
 
 // verify checks a release against the text it was made from, so a bug in Splice cannot cost the file a line: the bytes
 // before the [Unreleased] heading are unchanged, everything from the old top release heading to the end is byte for
-// byte the old text, the new release heading appears exactly once, and the [Unreleased] block is blank.
+// byte the old text, the new release heading appears exactly once, the [Unreleased] block is blank, and the section
+// Splice wrote holds no line the tree check would refuse for carrying a release date (a fragment is validated by its
+// reader, but Splice takes the fragments it is given).
 func verify(before, after string, rel *Release) error {
 	head, _, end, old := locateUnreleased(before)
 	if old != 1 {
@@ -352,6 +367,18 @@ func verify(before, after string, rel *Release) error {
 	_, s, e, c := locateUnreleased(after)
 	if c != 1 || strings.TrimSpace(after[s:e]) != "" {
 		return fmt.Errorf("verify: the %q block is not empty after the release", unreleasedHeading)
+	}
+	// The section Splice wrote (between the two kept ends) must not hold what the tree check refuses, or the file is
+	// written, the fragments are deleted, and only then does the next check say no. The kept ends are not judged here.
+	glued := ""
+	eachLine(after[len(prefix):len(after)-len(suffix)], func(_, _ int, line string) bool {
+		if gluedDate(line) {
+			glued = line
+		}
+		return glued == ""
+	})
+	if glued != "" {
+		return fmt.Errorf("verify: the new section carries a release date between separators on a line that is not a heading: %q", clip(glued))
 	}
 	return nil
 }
@@ -397,7 +424,7 @@ func checkTree(root string, allowLegacy bool) []string {
 		n++
 		if m := semverHeading.FindStringSubmatch(line); m != nil {
 			counts[m[1]]++
-		} else if !strings.HasPrefix(line, "## [") && dateBetweenSeparators.MatchString(line) {
+		} else if gluedDate(line) {
 			problems = append(problems, fmt.Sprintf("%s line %d: carries a release date but is not a heading (a heading glued onto another line?)", ChangelogFile, n))
 		}
 		return true
