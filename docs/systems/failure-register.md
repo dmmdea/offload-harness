@@ -78,7 +78,8 @@ Some classes straddle two kinds, and the comment on each line of `failurekinds.g
 `no_eligible_node` is capacity (the delegator's own placement outcome), `poll_deadline` is a ceiling (the class does
 not separate a job larger than the budget from a node that stopped progressing), `write` is the caller's (a node's
 policy, or a write set past a door cap; neither a broken stack nor an unplaceable contract). The stack-fault share is
-a share of `failure_rows` and counts nothing it cannot name: an `unclassified` failure could add to it.
+a share of `failure_rows` and counts only the classes filed as stack faults: an `unclassified` failure is in
+`failure_rows` but never in `stack_fault_rows`, so while unclassified rows exist the share is a lower bound.
 
 ### The fields
 

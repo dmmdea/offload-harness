@@ -57,7 +57,7 @@ type FailureClass struct {
 	Class string `json:"class"`
 	// Kind is who owns this class of failure (failurekinds.go): stack_fault, capacity, caller, ceiling, work or
 	// unclassified. A fact about the class, not the rows.
-	Kind string `json:"kind"`
+	Kind  string `json:"kind"`
 	Count int    `json:"count"`
 	// Share is Count over the register's FailureRows, rounded to four places.
 	Share float64 `json:"share"`

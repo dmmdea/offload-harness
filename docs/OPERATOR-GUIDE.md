@@ -268,7 +268,7 @@ view.
 **Why jobs failed.** `local-offload ledger --failures` (with `--since DAYS`, `--include-test-traffic` and
 `--table FILE`) prints the failure-class register in place of the savings summary: one JSON object that groups the
 ledger's failed jobs by reason code, with each class's count, share and kind (stack fault, capacity, caller,
-ceiling or work), the doors, seats and model aliases they came through (on a delegation row the "model" is the seat
+ceiling, work, or unclassified for a class no kind names), the doors, seats and model aliases they came through (on a delegation row the "model" is the seat
 alias), the card work they spent (`null` where no row measured it, never `0`), and the meaning, root cause and
 structural fix that the table in [systems/failure-register.md](systems/failure-register.md) holds for the class
 (`undocumented` for a class with no row; a class whose root cause and fix nobody has written is listed in
