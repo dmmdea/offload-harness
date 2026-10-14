@@ -225,6 +225,25 @@ missing, a card the probe cannot see, a presence the OS cannot report all REFUSE
   cannot say (no card drives a display, or a transient failure left `display_attached` unknown) trusts
   the declaration, and a second monitor on another card does not contradict a declared card that also
   drives one. The node publishes the same verdict in its `layers` rows, so a delegator is told.
+  **`"display_device": "auto"` follows the driver instead of naming a card.** The guard then protects the
+  card the driver reports as the monitor's (the same `display_active` / `display_attached` reading the card
+  table and the allocator's display cap use), derived on every decision, so a monitor that moves needs no
+  edit to `display_device` (the twins' pin is another matter, below). There is no declaration to trust, so it
+  is stricter than a declared card: it refuses
+  when no reader is available, when the driver flags no card (a headless or remote-desktop session, an
+  older driver, a transient failure that left `display_attached` unknown), and when it reports the monitor
+  on more than one card. It does not choose between cards, so a box with a monitor on two cards names the
+  one the floor must guard in `display_device`. The reasons print `display device auto (index N)`, the card
+  it derived. The seat's `device` stays a literal pin (an index or a UUID); `auto` is valid only in
+  `display_device`. A seat that declares `display_footprint_gib` is meant to sit on the display card, so under
+  `auto` it is refused when its pin does not include that card: a floor judged on the monitor's card while the
+  twin loads on another would guard nothing, so the twin's pin (here and in the llama-swap yaml) moves with the
+  monitor. A seat that declares no footprint is judged as a seat off the card always was, free − 0. A literal
+  index or UUID keeps its rules, and their wording, unchanged.
+  The derivation reads the driver's screen reading, which does not carry the card table's own exclusions: on a
+  box whose only card drives the monitor, or whose screen card reports no UUID, the card table flags no
+  display card while `auto` still follows the reading. A delegator holds no reader for another node's card;
+  the node's own verdict in its `layers` rows stands for it, as for every guard.
 - **`host_ram`** — free host RAM ≥ the seat's declared `host_ram_gib`.
 - **`presence`** — `operator_presence` is `present` (never), `away` (always), or `auto`:
   console session LOCKED ⇒ away; else last input idle ≥ `operator_idle_sec` (default 900)
@@ -374,8 +393,14 @@ gates, both shut. Opening them is a sequence, in this order, and it is the opera
    the harness loaded first; edit that one, since a second copy elsewhere is not read.
 2. **Seed `tier_profile`, `tiers` and `layers` into the live config.** `local-offload install seed --profile
    blackwell-3x16 --home <install root>` prints the fragment; merge those three keys. A box with no `layers` has
-   no display layer to open. The layer arrives `dormant: true` with `display_device` as an index; on a board
-   whose cards re-enumerate after a power loss, name the display card by UUID there. `local-offload doctor`
+   no display layer to open. The layer arrives `dormant: true` with `display_device` set to `auto`, so the
+   guard follows the card the driver reports for the monitor; name a card there instead (an index, or a UUID on
+   a board whose cards re-enumerate after a power loss) when the box has no single monitor card to follow.
+   The seeded twins are pinned to index 1 (their seat `device`, and `CUDA_VISIBLE_DEVICES=1` in the template),
+   so on a box whose monitor is on another card the layer refuses, naming the pin and the monitor's card, until
+   the twins are re-pinned in `layers` and in the llama-swap yaml. A render stamped before this seed
+   reports `STALE` under `audit-yaml --against-render` until it is re-rendered, because the display layer's
+   declaration is part of the stamp (nothing served is wrong; the stamp is behind). `local-offload doctor`
    must stay clean, and `offload_status` `local.layers` must list `display` as not admissible (dormant).
 3. **Put the display twins in the llama-swap yaml, pinned by UUID.** `install render` emits `gemma-4-e4b-display`
    and `gemma-4-e2b-display`, their vars and the `display` set for a tier that declares the layer (the template

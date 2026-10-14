@@ -134,8 +134,9 @@ var layerRoles = map[string]bool{"router": true, "agent": true, "long": true, "o
 
 // DisplayDeviceAuto is the display_device that names no card: the display_floor guard asks the driver
 // which card drives the monitor (display_active / display_attached) and guards that one, on every
-// decision, so a monitor that moves needs no config edit on the layer. It cannot be mistaken for the
-// other two forms: a CUDA index is all digits and a GPU UUID pin starts "GPU-".
+// decision, so a monitor that moves needs no edit to display_device (the display seat's own pin is a
+// different key and still has to be on that card). It cannot be mistaken for the other two forms: a CUDA
+// index is all digits and a GPU UUID pin starts "GPU-".
 const DisplayDeviceAuto = "auto"
 
 // IsAutoDisplayDevice reports whether a display_device is the DisplayDeviceAuto sentinel (case and

@@ -24,12 +24,12 @@ func TestCompositeTierDocsNameTheAutoSentinel(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		`"display_device": "auto"`,           // how it is spelled
-		"display device auto (index N)",      // how the guard's reasons print it
-		"does not choose between cards",      // more than one screen card refuses
-		"reports the monitor",                // what it reads
-		"its pin does not include that card", // the seat-pin coherence rule
-		"audit-yaml --against-render",        // a stamped render goes STALE until re-rendered
+		`"display_device": "auto"`,                  // how it is spelled
+		"display device auto (index N)",             // how the guard's reasons print it
+		"does not choose between cards",             // more than one screen card refuses
+		"reports the monitor on more than one card", // what it refuses
+		"its pin does not include that card",        // the seat-pin coherence rule
+		"audit-yaml --against-render",               // a stamped render goes STALE until re-rendered
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("composite-tier.md must say %q", want)
