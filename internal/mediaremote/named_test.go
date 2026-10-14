@@ -16,6 +16,8 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe/rostertest"
 )
 
 // ---- fixtures --------------------------------------------------------------------------------------
@@ -257,6 +259,71 @@ func TestAnIdNoReachableNodeHasMayBeADownNodeAndIsACapacityDefer(t *testing.T) {
 	res = Run(context.Background(), namedClient(t, a), &recordingRunner{}, named("http://192.0.2.77:18811", nil), "", nil)
 	if res.OK || res.DeferClass != core.DeferClassContract || !strings.Contains(res.Reason, "delegate_remotes") {
 		t.Errorf("a URL outside delegate_remotes: %+v", res)
+	}
+}
+
+// A roster entry the tailnet guard refuses is never dialled and so has no node id: it cannot be the node a mistyped id was meant for,
+// and waiting does not change it. An id that no answering node has is then unknown (the caller's mistake) however many entries the
+// guard refuses, and the reason names the refused entries so that the operator who meant one of them sees why it is out. An entry
+// that was dialled and did not answer still keeps the id a capacity defer.
+func TestAnIdNoNodeHasWhileTheGuardRefusesAnEntryIsUnknownNotADownNode(t *testing.T) {
+	rostertest.Zones(t)
+	rosterprobe.Default.Reset()
+	t.Cleanup(rosterprobe.Default.Reset)
+	refused := "http://node-x.tailkkkkkk.ts.net:18811"
+	a := startNode(t, nodeOpts{id: "render-a"})
+	cfg := namedClient(t, a)
+	cfg.DelegateRemotes = append(cfg.DelegateRemotes, refused)
+	res := Run(context.Background(), cfg, &recordingRunner{}, named("render-z", nil), "", nil)
+	data := refusal(t, res)
+	if res.DeferClass != core.DeferClassContract || data["refusal"] != "node_unknown" || res.Meta.ErrClass != "" {
+		t.Fatalf("a refused entry cannot be the node the id was meant for: %+v data %v", res, data)
+	}
+	if got := strings.Join(strs(data["roster"]), ","); got != "render-a" {
+		t.Errorf("roster = %q, want the node that answered", got)
+	}
+	if !hasAll(res.Reason, refused, "not dialled") {
+		t.Errorf("the reason must name the entry the guard refused: %s", res.Reason)
+	}
+	if len(a.posts()) != 0 {
+		t.Error("nothing is sent for an unknown node")
+	}
+
+	// The refused entry does not hide a dialled one that did not answer: that one may be the node, so the id stays a capacity defer.
+	down := httptest.NewServer(http.NotFoundHandler())
+	downURL := down.URL
+	down.Close()
+	cfg.DelegateRemotes = append(cfg.DelegateRemotes, downURL)
+	res = Run(context.Background(), cfg, &recordingRunner{}, named("render-z", nil), "", nil)
+	if res.OK || res.DeferClass != core.DeferClassCapacity || !strings.Contains(res.Reason, downURL) {
+		t.Errorf("an entry that was dialled and did not answer may be the node: %+v", res)
+	}
+}
+
+// A URL the caller names that is on the roster but that the tailnet guard refuses is a configuration fact, as pickNodeFor files
+// it: capacity with err_class no_node_configured, which a caller that waits for a place stops waiting on. It is not a node that
+// did not answer (it was never dialled), and it is not the "broken stack" class. The entry is printed redacted.
+func TestANamedURLTheGuardRefusesIsFiledNoNodeConfigured(t *testing.T) {
+	rostertest.Zones(t)
+	rosterprobe.Default.Reset()
+	t.Cleanup(rosterprobe.Default.Reset)
+	refused := "http://operator:hunter2@node-x.tailkkkkkk.ts.net:18811"
+	a := startNode(t, nodeOpts{id: "render-a"})
+	cfg := namedClient(t, a)
+	cfg.DelegateRemotes = append(cfg.DelegateRemotes, refused)
+	local := &recordingRunner{}
+	res := Run(context.Background(), cfg, local, named(refused, nil), "", nil)
+	if res.OK || !res.Deferred || res.DeferClass != core.DeferClassCapacity || res.Meta.ErrClass != core.ErrClassNoNodeConfigured {
+		t.Fatalf("a refused entry is a configuration fact: %+v", res)
+	}
+	if !hasAll(res.Reason, "node-x.tailkkkkkk.ts.net", "not dialled") {
+		t.Errorf("the reason says the entry was not dialled: %s", res.Reason)
+	}
+	if strings.Contains(res.Reason+string(res.Data)+res.Meta.Placement, "hunter2") {
+		t.Errorf("the credential is echoed: %+v", res)
+	}
+	if len(a.posts()) != 0 || local.count() != 0 {
+		t.Errorf("nothing runs: render-a got %d posts, the local runner %d runs", len(a.posts()), local.count())
 	}
 }
 

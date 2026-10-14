@@ -256,6 +256,27 @@ func TestLaneRowsAnSdcppFamilyIsARowByBasename(t *testing.T) {
 	}
 }
 
+// An sd.cpp file is published by its bare file name whatever its path looks like: a relative path keeps no subfolder (where the
+// node keeps its weights is the node's own business, as for an absolute one), in either slash, and a drive-relative name loses its
+// drive.
+func TestLaneRowsAnSdcppFileIsPublishedByItsBareName(t *testing.T) {
+	cfg := config.Config{
+		VideoGenFamily: "fastwan",
+		VideoGenFamilies: map[string]config.VideoFamilyBinding{"fastwan": {
+			Engine: config.EngineSdcpp, SdcppModel: "models/sub/fastwan-q8.gguf", SdcppVAE: `models\sub\wan-vae.safetensors`,
+			SdcppHighNoiseModel: "../up/high.gguf", SdcppT5xxl: "D:t5.safetensors",
+		}},
+	}
+	r := rowNamed(t, LaneRows(cfg), LaneVideo, "fastwan")
+	var got []string
+	for _, f := range r.Files {
+		got = append(got, f.Name)
+	}
+	if want := "fastwan-q8.gguf,high.gguf,wan-vae.safetensors,t5.safetensors"; strings.Join(got, ",") != want {
+		t.Errorf("names = %v, want %s", got, want)
+	}
+}
+
 // An sd.cpp family may carry the name of a ComfyUI one. It is then the sd.cpp row, and the ComfyUI builder-default files of that
 // name (which its renders never load) are not listed beside it.
 func TestLaneRowsAnSdcppFamilyNamedLikeAComfyOneReplacesIt(t *testing.T) {
@@ -398,6 +419,33 @@ func TestLaneRowsAreNeverAnIdentity(t *testing.T) {
 		for _, f := range r.Files {
 			if f.Fingerprint != "" {
 				t.Errorf("%s/%s file %s has fingerprint %q", r.Lane, r.Name, f.Name, f.Fingerprint)
+			}
+		}
+	}
+}
+
+// The shipped default config binds the three ComfyUI scripts on every machine, so a binding alone says nothing about the node: a
+// machine with no ComfyUI install (comfy_dir unset, or not a directory) has nothing to describe and publishes no row. One that
+// has the install lists each lane its config binds, with -1 for every weight it lacks, so that a refusal can name them.
+func TestLaneRowsTheShippedDefaultWithoutAComfyInstallPublishesNothing(t *testing.T) {
+	for name, comfy := range map[string]string{
+		"comfy_dir unset":           "",
+		"comfy_dir is no directory": filepath.Join(t.TempDir(), "no-comfyui-here"),
+	} {
+		cfg := config.Default()
+		cfg.ComfyDir = comfy
+		if got := LaneRows(cfg); len(got) != 0 {
+			t.Errorf("%s: a node with no ComfyUI install published rows: %+v", name, got)
+		}
+	}
+	cfg := config.Default()
+	cfg.ComfyDir = t.TempDir()
+	rows := LaneRows(cfg)
+	for _, want := range [][2]string{{LaneVideo, "wan22"}, {LaneAnimate, "wan-animate2"}, {LaneAudio, "acestep"}} {
+		r := rowNamed(t, rows, want[0], want[1])
+		for _, f := range r.Files {
+			if f.Bytes != -1 {
+				t.Errorf("%s/%s: %s is %d bytes on a node that holds no weights, want -1", r.Lane, r.Name, f.Name, f.Bytes)
 			}
 		}
 	}

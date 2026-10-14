@@ -110,10 +110,18 @@ func TestHealthPublishesMediaRecipesForTheBoundLanes(t *testing.T) {
 // The twin of "a node without image-gen publishes neither key": a node that binds none of the three lanes publishes no
 // media_recipes, so an older reader and an image-only node see the shape they always did.
 func TestHealthOmitsMediaRecipesOnANodeWithoutTheLanes(t *testing.T) {
+	// The shipped default binds the three ComfyUI scripts on every machine; a machine with no ComfyUI install is a node without the
+	// lanes all the same.
+	noComfy := config.Default()
+	noComfy.ComfyDir = ""
+	missingComfy := config.Default()
+	missingComfy.ComfyDir = filepath.Join(t.TempDir(), "no-comfyui-here")
 	for name, cfg := range map[string]config.Config{
-		"image only": {ImageGenScript: "render/comfy-generate.mjs", ComfyDir: t.TempDir()},
-		"bare":       {},
-		"stt only":   {STTModel: "large-v3-turbo"},
+		"image only":                  {ImageGenScript: "render/comfy-generate.mjs", ComfyDir: t.TempDir()},
+		"bare":                        {},
+		"stt only":                    {STTModel: "large-v3-turbo"},
+		"shipped default, no ComfyUI": noComfy,
+		"shipped default, comfy_dir is no directory": missingComfy,
 	} {
 		s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
 		_, raw := readHealthMediaRecipes(t, s)
