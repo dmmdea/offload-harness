@@ -696,13 +696,16 @@ function Resolve-ProfileParams {
 # NON-comment line? A yaml 0.185.1 or earlier rendered for an unknown profile does (and passes every other
 # Step 6 SKIP probe), so the SKIP test asks this, and an upgrade re-renders it instead of keeping the flag the
 # audit refuses. A comment may name the flag (the template headers do) and the sanctioned partial spill
-# (the flag with an N after `--n-`) is a different string, so neither counts. The pattern's `[-]` is a regex
+# (the flag with an N after `--n-`) is a different string, so neither counts. The comment guard is a negative
+# lookahead and consumes nothing: every template puts the placement token FIRST on its own continuation line, so a
+# yaml an older installer rendered has the flag at the START of a line, and a guard that had to consume one
+# character before the flag never matched it. The pattern's `[-]` is a regex
 # character class on purpose: the source pin in `go test` fails on the dashed spelling in any non-comment
 # line of this script, and this detector is not a writer of the flag.
 function Test-YamlHasEveryExpertFlag {
   param([string]$Path)
   if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $false }
-  return [bool](Select-String -LiteralPath $Path -Pattern '^\s*[^#\s].*--cpu[-]moe' -Quiet)
+  return [bool](Select-String -LiteralPath $Path -Pattern '^(?!\s*#).*--cpu[-]moe' -Quiet)
 }
 
 
