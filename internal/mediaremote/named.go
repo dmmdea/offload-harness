@@ -141,7 +141,8 @@ func pickNamed(ctx context.Context, cfg config.Config, bases []string, name stri
 		readings = rosterprobe.Probe(ctx, bases, cfg.FleetAuthToken, healthTimeout)
 		match    = -1
 		roster   []string
-		silent   []string // the entries that gave no health: one of them may be the node the caller means
+		silent   []string // the entries that were dialled and gave no health: one of them may be the node the caller means
+		refused  []string // the entries the tailnet guard will not admit: never dialled, so none has an id to be meant by
 	)
 	for i, r := range readings {
 		id := r.Shown()
@@ -153,7 +154,11 @@ func pickNamed(ctx context.Context, cfg config.Config, bases []string, name stri
 			match = i
 		}
 		if r.Err != nil {
-			silent = append(silent, r.Miss())
+			if r.Refused != nil {
+				refused = append(refused, r.Miss())
+			} else {
+				silent = append(silent, r.Miss())
+			}
 			continue
 		}
 		roster = append(roster, id)
@@ -164,18 +169,22 @@ func pickNamed(ctx context.Context, cfg config.Config, bases []string, name stri
 			return "", "", nil, &placementError{core.DeferClassCapacity, fmt.Sprintf(
 				"no node that answered is called %q; these entries did not answer and one of them may be it: %s", name, strings.Join(silent, "; "))}
 		}
-		e := refuse(core.DeferClassContract, false, refusalNodeUnknown, fmt.Sprintf(
-			"node %q is not on this call's roster (%s): name a node_id its /fleet/health publishes or one of the delegate_remotes URLs", name, strings.Join(roster, ", ")), "", nil)
+		why := fmt.Sprintf("node %q is not on this call's roster (%s): name a node_id its /fleet/health publishes or one of the delegate_remotes URLs", name, strings.Join(roster, ", "))
+		if len(refused) > 0 {
+			why += "; these entries were not dialled and so have no node id to name: " + strings.Join(refused, "; ")
+		}
+		e := refuse(core.DeferClassContract, false, refusalNodeUnknown, why, "", nil)
 		e.Roster = roster
 		return "", "", nil, e
 	}
 	r := readings[match]
 	if r.Err != nil {
-		class := core.DeferClassCapacity
 		if r.Refused != nil {
-			class = core.DeferClassConfig // the tailnet guard will not admit the entry, whatever the node is doing
+			// The tailnet guard will not admit the entry, whatever the node is doing: a configuration fact that waiting does not
+			// change, filed the way pickNodeFor files such an entry.
+			return "", "", nil, &noNodeConfigured{&placementError{core.DeferClassCapacity, "the node you named is a roster entry this machine does not dial: " + r.Miss()}}
 		}
-		return "", "", nil, &placementError{class, "the node you named did not answer: " + r.Miss()}
+		return "", "", nil, &placementError{core.DeferClassCapacity, "the node you named did not answer: " + r.Miss()}
 	}
 	v := r.View
 	id := strings.TrimSpace(v.NodeID)
