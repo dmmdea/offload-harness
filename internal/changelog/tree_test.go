@@ -104,6 +104,33 @@ func TestCheckTreeNamesEveryBadFragmentAndStrayFile(t *testing.T) {
 	}
 }
 
+func TestAnEntryOfChangesBesideTheFragmentDirectoryIsRefused(t *testing.T) {
+	// changes/README.md sits next to changes/unreleased/, so a fragment saved one level up is an easy mistake, and one
+	// that nothing would ever read: a skipped fragment is a lost entry. The same goes for a directory spelled in another
+	// case (a case-insensitive checkout reads it, Linux does not).
+	for _, tc := range []struct{ name, path, want string }{
+		{"a fragment one level up", "stray.md", "changes/stray.md"},
+		{"a text file", "notes.txt", "changes/notes.txt"},
+		{"another directory", "other/a.md", "changes/other"},
+		{"the fragment directory in another case", "Unreleased/a.md", "changes/Unreleased"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := treeAt(t, baseLF(), nil)
+			writeFile(t, filepath.Join(root, "changes", filepath.FromSlash(tc.path)), fragFirst)
+			wantProblem(t, CheckTree(root), tc.want)
+			wantProblem(t, CheckForRelease(root), tc.want)
+		})
+	}
+}
+
+func TestTheReadmeAndTheFragmentDirectoryAreTheOnlyEntriesOfChanges(t *testing.T) {
+	root := treeAt(t, baseLF(), twoFragmentFiles())
+	writeFile(t, filepath.Join(root, "changes", "README.md"), "# About this directory\n")
+	if p := CheckTree(root); len(p) != 0 {
+		t.Errorf("changes/README.md and changes/unreleased/ are refused: %v", p)
+	}
+}
+
 func TestAFragmentAlreadyInTheChangelogIsRefused(t *testing.T) {
 	// The duplicate a failed delete leaves behind: the text was assembled, the file is still there.
 	released := topLF + "## [Unreleased]\n\n## [0.186.0] - 2026-10-14 - the title\n\n" + fragFirst + "\n" + tailLF

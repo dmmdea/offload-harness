@@ -207,6 +207,9 @@ func TestAssembleRefusalsLeaveEverythingByteIdentical(t *testing.T) {
 		{"a stray file", func(t *testing.T, root string) {
 			writeFile(t, filepath.Join(root, "changes", "unreleased", "Notes.txt"), "stray")
 		}, nil, "Notes.txt"},
+		{"a fragment saved one level up, where nothing reads it", func(t *testing.T, root string) {
+			writeFile(t, filepath.Join(root, "changes", "stray.md"), fragFirst)
+		}, nil, "changes/stray.md"},
 		// A release date between separators is a heading's shape: written into the changelog by any other line, the next
 		// `check` would refuse the file, with the fragment already deleted.
 		{"a dated ### heading in a fragment", func(t *testing.T, root string) {
@@ -377,6 +380,15 @@ func TestCheckExitCodes(t *testing.T) {
 	code, _, stderr = runIt(t, quietOps(), "check", "-root", root)
 	if code != 1 || !strings.Contains(stderr, "c-bad.md") {
 		t.Errorf("a bad fragment: exit %d, stderr %q; want 1 naming it", code, stderr)
+	}
+	// A fragment saved beside the fragment directory is not read by anything, so `check` is the only thing that can name it.
+	if err := os.Remove(filepath.Join(root, "changes", "unreleased", "c-bad.md")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "changes", "stray.md"), fragFirst)
+	code, _, stderr = runIt(t, quietOps(), "check", "-root", root)
+	if code != 1 || !strings.Contains(stderr, "changes/stray.md") {
+		t.Errorf("a fragment one level up: exit %d, stderr %q; want 1 naming it", code, stderr)
 	}
 }
 
