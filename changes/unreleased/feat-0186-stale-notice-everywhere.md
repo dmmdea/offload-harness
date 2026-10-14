@@ -65,8 +65,9 @@
   image path, by start time and by neither; the session joined from an owners registry; a bad swap time answers `ok=false`).
   The review round added tests that failed first (nine assertions: the swap time that rides, its classifier, the fallback
   caveat, and a deploy record whose stale-mcp file is not JSON) and ran `write_record` for real, which no test had executed.
-  Nineteen single-line mutations of the final script, each killed: the swap time reverted to the preflight clock on either leg;
+  Twenty single-line mutations of the final script, each killed: the swap time reverted to the preflight clock on either leg;
   the classifier reading node-swap's start, the wrong step, or leaving the fraction of a second in; the fallback caveat
   dropped or always off on either leg; no swap time passed on either leg; a dry run handed a swap time; either leg's report
   call dropped; either leg counting after a swap that did not complete; the record's merge raising on a bad file, writing
-  nothing, or keyed on the wrong name; the record's builder writing an empty object.
+  nothing, or keyed on the wrong name; the record's builder writing an empty object; the snippet's date parser narrowed to the
+  old offset-less format (killed by the `--selftest` lines that hand real PowerShell a stamp with an offset and one in UTC).
