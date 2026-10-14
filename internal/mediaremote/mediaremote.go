@@ -208,15 +208,23 @@ func RunWith(ctx context.Context, cfg config.Config, runner Runner, req core.Req
 	}
 	// A bad min_vram_gb is the caller's mistake whatever the route: refused here by name, before the lane is asked or a node
 	// is read, so a call that stays on this machine never drops the typo silently.
-	if req.Task == core.TaskRunGraph {
+	if req.Task == core.TaskRunGraph || vramTask(req.Task) {
 		if _, _, err := minVRAMArg(req.Params); err != nil {
 			return contractDefer(err.Error(), core.Meta{})
 		}
 	}
+	// A call that names a fleet node (ADR 0082 Amendment 3) leaves this machine whatever its lane: route local contradicts it.
+	named, nerr := namedNodeOf(req)
+	if nerr != nil {
+		return contractDefer(nerr.Error(), core.Meta{})
+	}
+	if named != "" && r == RouteLocal {
+		return contractDefer(fmt.Sprintf("node %q names a fleet node and route local runs this call on this machine: drop one of them", shownNode(named)), core.Meta{})
+	}
 	if r == RouteLocal {
 		return runner.Run(ctx, req)
 	}
-	if r == RouteAuto {
+	if r == RouteAuto && named == "" {
 		noFleet := len(cfg.DelegateRemotes) == 0 && len(remotes) == 0
 		if LocalConfigured(cfg, req) || noFleet {
 			// A lane here, or no fleet to hand it to: the call is exactly the one that existed before
@@ -234,6 +242,9 @@ func RunWith(ctx context.Context, cfg config.Config, runner Runner, req core.Req
 	placement := "remote: forced"
 	if r == RouteAuto {
 		placement = "remote: no " + laneName(req) + " lane on this machine"
+	}
+	if named != "" {
+		placement = "remote: named node " + shownNode(named)
 	}
 	// The call is the remote lane's own from here on: it writes its asker ledger row and, once a node is
 	// chosen, its one PAIR card, like composeremote and the other remote lanes (0.165.0, D5-D11). The
@@ -288,6 +299,15 @@ func (e *noNodeConfigured) Unwrap() error { return e.placementError }
 
 func placementDefer(err error, placement string) core.Result {
 	res := core.Deferf(err.Error(), "", core.Meta{Placement: placement})
+	var nr *namedRefusal
+	if errors.As(err, &nr) {
+		// A named node that was refused (named.go): the word and its facts are the answer's data.
+		res.DeferClass, res.Data = nr.class, nr.data()
+		if nr.noNode {
+			res.Meta.ErrClass = core.ErrClassNoNodeConfigured
+		}
+		return res
+	}
 	var nc *noNodeConfigured
 	if errors.As(err, &nc) {
 		res.Meta.ErrClass = core.ErrClassNoNodeConfigured
@@ -355,7 +375,18 @@ func callWith(ctx context.Context, cfg config.Config, req core.Request, remotes 
 	if len(pl.inputs) > 0 {
 		route, taskForNode = "/fleet/media-job", taskMediaJob
 	}
-	base, node, err := pickNodeFor(ctx, cfg, bases, pl.fleetTask, taskForNode, nodeRoutes(req), needOf(req))
+	var (
+		base, node string
+		pick       *namedPick
+	)
+	if named, nerr := namedNodeOf(req); nerr != nil {
+		return core.Result{}, nerr
+	} else if named != "" {
+		// The caller named the node: it is the only candidate (named.go).
+		base, node, pick, err = pickNamed(ctx, cfg, bases, named, req, pl, taskForNode)
+	} else {
+		base, node, err = pickNodeFor(ctx, cfg, bases, pl.fleetTask, taskForNode, nodeRoutes(req), needOf(req))
+	}
 	if err != nil {
 		return core.Result{}, err
 	}
@@ -387,7 +418,8 @@ func callWith(ctx context.Context, cfg config.Config, req core.Request, remotes 
 		return core.Result{}, &contractError{fmt.Sprintf("the %s request cannot be encoded for the wire: %v", pl.fleetTask, err)}
 	}
 
-	return sendAndFetch(ctx, cfg, req, pl, base, node, route, body, jobID, start, h, false)
+	res, err := sendAndFetch(ctx, cfg, req, pl, base, node, route, body, jobID, start, h, false)
+	return pick.annotate(res), err
 }
 
 // sendAndFetch posts body to route on base, waits for the node's job and fetches its outputs: everything a call does

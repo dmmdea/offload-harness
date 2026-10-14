@@ -36,6 +36,8 @@ import { WAN_PLACEMENTS, WAN_PLACEMENT_DEFAULT, WAN_RESIDENT_GB_DEFAULT, WAN_STO
 export const EXT_DIR = join(dirname(fileURLToPath(import.meta.url)), "comfyui-ext");
 export const EXT_YAML = join(EXT_DIR, "extra_model_paths.yaml");
 export const EXT_NODE_PACK = "offload_multicard";
+// The idle bound's yaml and pack name, defined in comfy-lifecycle.mjs (this file imports it; it cannot import this one back).
+export { EXT_IDLE_YAML, EXT_IDLE_PACK } from "./comfy-lifecycle.mjs";
 
 /** The packs ComfyUI loads on a multicard launch, besides the harness's own: matched by name, case-insensitively. */
 const REQUIRED_PACKS = Object.freeze([

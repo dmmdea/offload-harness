@@ -474,12 +474,12 @@ requirements** — they carry over to every backend.
 # --- NVIDIA (CUDA) ---
 # small entry tier:     --n-gpu-layers 99
 # workhorse tier:       --n-gpu-layers 99 --parallel 1
-# large MoE escalation: --cpu-moe --n-gpu-layers 999 --parallel 1   (env GGML_CUDA_DISABLE_GRAPHS=1)
+# large MoE escalation: -ngl 99 --parallel 1   (the experts stay on the card; env GGML_CUDA_DISABLE_GRAPHS=1)
 
 # --- AMD / any Vulkan GPU (native Windows) ---
 # small entry tier:     -ngl 999
 # workhorse tier:       -ngl 999 --parallel 1
-# large MoE escalation: -ngl 999 --parallel 1   (full offload first; add --cpu-moe if allocation fails)
+# large MoE escalation: -ngl 999 --parallel 1   (full offload; if allocation fails the tier drops the 26B, RAM is overflow only)
 ```
 
 The setup scripts render a ready-made [`setup/templates/llama-swap.win-vulkan.yaml`](setup/templates/llama-swap.win-vulkan.yaml)
@@ -502,8 +502,9 @@ does not make it faster):
 2. **The 2024 "garbled Vulkan output" bug is FIXED** (Dec 2024) — it is folklore now. Do not disable
    Vulkan or chase workarounds for it on a current build.
 3. **Windows shared-GPU-memory ceiling is machine-specific** — rather than assume it, `selftest.ps1`
-   **measures real allocation on-device** and the stack falls back gracefully (full offload →
-   `--cpu-moe` → CPU) when the MoE tier won't fit.
+   **measures real allocation on-device**; when the MoE tier won't fit it records a failed 26B tier
+   with advice (drop it, or pick a tier whose resident is not the 26B). It never moves the experts
+   to host RAM and never edits the yaml: the cards do the inference and RAM is overflow only.
 
 <details>
 <summary><b>Serving gotchas (load-bearing)</b></summary>

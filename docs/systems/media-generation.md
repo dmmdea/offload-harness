@@ -1471,7 +1471,7 @@ runner. A kept instance that never answers is still killed, since a half-started
   to pump the stream, and this harness does not add a long-lived helper for a log. Each launch rotates the
   log (`.1` to `.3`, as before) and cuts the archived copy to its last 5 MB (`trimRotatedLog`), so the disk
   holds at most three 5 MB archives plus the run in progress. The live file of a run is not truncated: the
-  instance lives no longer than its lease, which bounds it. `tailComfyLog` (the lines a failure message
+  instance lives no longer than its lease, which bounds it, and the idle pack below writes one line into it per free. `tailComfyLog` (the lines a failure message
   carries) reads only the last 256 KB of the file, so a long-lived instance's log is never read whole.
 - **It is freed when its family changes (2026-10-09, `render/comfy-family.mjs`).** ComfyUI keeps the models it loaded in
   host memory between prompts ("Using RAM pressure cache"; "Model Krea2 prepared for dynamic VRAM loading. 24449MB Staged" in
@@ -1501,7 +1501,98 @@ runner. A kept instance that never answers is still killed, since a half-started
   when its wrapped command ends, and the pipeline when its media lease is released
   (`internal/comfyinst`: the marker is matched to the epoch, the instance is shown to be the harness's by pid
   and exact argv on its own endpoint, freed with `POST /free`, then stopped). A kept **default** instance
-  (no key) records no lease epoch and is stopped by whoever kept it, as it always was.
+  (no key) records no lease epoch and is stopped by whoever kept it, as it always was. That bounds the
+  process. What it keeps in models and caches is bounded sooner, by the instance itself (next bullet).
+- **A kept or warm instance frees its own models and caches after 300 s idle (0.186, `render/comfyui-ext/idle-nodes/offload_idle`).**
+  The rule is that no idle model stays loaded. llama-swap keeps it with its own `ttl`; ComfyUI has no idle timer (its parser takes no
+  idle or timeout argument). The runner's end-of-job `POST /free` and the holder's stop at release cover the ordinary path. The harness
+  also launches every ComfyUI with `--disable-smart-memory`, and with that flag ComfyUI itself calls `unload_all_models()` when a prompt
+  ends, on success and on a handled error (`execution.py`, after the node loop; read in ComfyUI 0.38.0, not re-read on other nodes'
+  versions). So a kept single-prompt instance (`--cache-none`) is already bare between jobs, with or without the runner's `/free`, and the
+  pack finds nothing to release there: it does not fire and logs nothing. What survives that unload, and what the pack is for, is (a) a
+  warm (`--batch`) session's executor cache, which keeps the loader outputs (the weights the unload moved to host RAM) until a free
+  resets the executor, so a runner killed before its cleanup or a warm session that stalls holds host RAM (the 2026-10-09 incident above,
+  `render/comfy-family.mjs`, was an instance with the cache on: "Using RAM pressure cache" in its log, 57 GiB private); and (b) a hand-started
+  instance launched without `--disable-smart-memory`, which keeps its models loaded in VRAM after a prompt. That is the gap, and the
+  bound for it lives inside the engine, the way llama-swap's `ttl` does: the harness runs no timer or watcher and acts on no other
+  process (plan I5), and the pack only ever acts on its own ComfyUI. This is read from ComfyUI's code and checked against a fake queue;
+  **it has not been run inside a live ComfyUI** (the live check below is the way to do it).
+  - *Where it is loaded.* A launch with `keep` or `warm` (`--keep-comfy`, `--batch`) adds
+    `--extra-model-paths-config render/comfyui-ext/extra_model_paths_idle.yaml` once, before the operator's own args, and puts the pack
+    `offload_idle` INTO the custom-node whitelist ComfyUI will read (`--whitelist-custom-nodes` is `nargs='+'` with no append, so a
+    second flag would replace the multicard packs, and `--whitelist-custom-nodes=a b` reads `b` as a stray argument: that spelling is
+    rewritten to the space form). With `--disable-all-custom-nodes` and no whitelist one is added; with neither, every custom node
+    loads, the pack among them. It is added only when the yaml and the pack file exist (ComfyUI exits at boot on an
+    `--extra-model-paths-config` file that does not exist): otherwise one `COMFY-IDLE-WARN` and a launch without it. The default
+    single render, which its runner kills, is byte for byte what it was. The pack sits in its own folder, apart from
+    `nodes/`, so an ordinary kept launch never imports the fail-closed Wan pack.
+  - *What it does.* One daemon thread polls every 5 s. A poll is busy when a prompt is queued or running, or `task_counter` moved (a
+    prompt that began and ended between two polls); both are read under the queue's mutex. After 300 s of polls that were not busy,
+    and if the engine holds something (a loaded model, or the executor cache is on, which is the warm case), it sets the two flags
+    `POST /free` sets, `unload_models` and `free_memory`, in one hold of that mutex after re-checking that nothing is queued, once per
+    busy period. ComfyUI's own worker thread drains them (unload all models, reset the executor, collect garbage); the pack never
+    touches a model. A prompt that lands in the microsecond after the check runs first and the flags drain after it: one avoidable
+    reload, never a corrupted run. A running prompt, even a 550 s one, is never idle, and the gaps inside a batch are seconds, so
+    back-to-back work is not affected; a driver that pauses more than 5 minutes between items pays one reload, which is the rule and
+    not a regression. Under `--cache-none` an instance that holds no model (ComfyUI's own end-of-prompt unload ran, as did the runner's
+    `/free`) does not fire at all; with the cache on (a warm session) it fires once after the last prompt, whatever the models are
+    doing, and logs `idle bound reached` even when the runner's `/free` already reset the cache and the free has little left to release.
+  - *Settings.* `COMFY_IDLE_FREE_SEC` on the runner: unset is 300, `0` or `off` is none (one `COMFY-IDLE-OFF` line), a whole number of
+    seconds from 5 up is that; anything else is 300 with a `COMFY-IDLE-WARN`. It reaches the pack as `OFFLOAD_IDLE_FREE_SEC` and is
+    fixed when an instance is launched: a runner that reuses a running instance cannot change it. `OFFLOAD_IDLE_POLL_SEC` (1 to 30,
+    default 5) is the test seam.
+  - *Knowing it is live.* The pack serves `GET /offload/idle` (`limit_sec`, `idle_sec`, `armed`, `freed`, `last_free_unix`, `error`),
+    read-only. After a launch with the pack the runner asks once: an answer that reports the bound that was asked for is one
+    `COMFY-IDLE` line; no answer, an `error` (the pack could not find ComfyUI's queue after an upstream change), or a `limit_sec`
+    other than the one asked for (the pack never read `OFFLOAD_IDLE_FREE_SEC`) is one `COMFY-IDLE-WARN` and the render goes on. The bound itself
+    does not depend on the route, and a failure inside the pack is logged once as `[offload_idle] NOT ACTIVE` and never fails a job.
+  - *Reuse and hand-started instances.* A running instance reused under `keep` or `warm` whose argv lacks the idle yaml (hand-started,
+    or kept by an older build) is reused, never restarted or refused, with one `COMFY-IDLE-WARN` per runner start (a driver that starts
+    one runner per shot says it once per shot); it costs one `GET /system_stats` (up to 8 s on a slow instance, shared with the ownership
+    proof of a keyed instance, never asked twice); an argv ComfyUI does not report is unknown and says nothing. The harness does not inject into an instance it does not own (ADR 0009): to bound one, add
+    `--extra-model-paths-config <repo>/render/comfyui-ext/extra_model_paths_idle.yaml` to its launch, and the pack name to its
+    `--whitelist-custom-nodes` if it disables custom nodes ([operator guide](../OPERATOR-GUIDE.md)).
+  - *What it does not bound.* The models and the executor cache only. The Python process and its CUDA context (it idles at 2.9 GiB
+    private, above) live until the holder stops the instance at release, and an instance whose holder died lives until an operator
+    stops it. A self-exit from inside ComfyUI is deliberately not built: a runner in a long step that is not ComfyUI's (ffmpeg, a QA
+    pass, an LLM call) looks the same as an abandoned instance, and a stopped instance breaks that runner's next prompt with a refused
+    connection where a `/free` only costs a reload. A pack-side check of the lease epoch is unsafe as well: reusing an instance
+    re-stamps its marker to the new epoch (`restampLaunchOwner`) while the child's environment keeps the epoch it was launched under.
+    A sweep of markers whose epoch is dead, if one is wanted, is a separate slice (an explicit `gpu doctor` action, which plan I5
+    allows where it forbids a watcher). So the register rows that say a kept instance lives to the end of its lease stay `partly`:
+    models and caches are bounded, the process is lease-bounded.
+  - *Live check, not yet run on a card (the tests use a fake queue).* On a node with ComfyUI installed, as the operator, one lease per
+    case so the wrapped command does not end between steps (`local-offload gpu reserve --class media -- sh -c '<the sequence>'`),
+    with `COMFY_INSTANCE=idlecheck` in the environment so the instance is keyed and its holder stops it at release (a kept default
+    instance is stopped by hand). Two instruments, because the cases show in different places: per-card memory
+    (`nvidia-smi --query-gpu=memory.used`, `torch_vram_free` in `/system_stats`) for VRAM, and the private bytes of the process that
+    listens on the instance's port (`(Get-Process -Id (Get-NetTCPConnection -LocalPort <port> -State Listen).OwningProcess).PrivateMemorySize64`)
+    for host RAM. Per-card memory alone cannot show the warm case: the cache lives in host RAM.
+    - *A. The premise, and the no-op.* `node render/comfy-generate.mjs o1.png "a red cube" --keep-comfy`. Read per-card memory at once:
+      it is already the bare context, because ComfyUI unloaded the model itself when the prompt ended. A model still resident means
+      the premise does not hold on this ComfyUI version, and the pack's first case is back. `GET /system_stats` carries the idle yaml in
+      `system.argv`, the instance's log has `[offload_idle] idle bound 300 s`, `GET /offload/idle` answers. Wait 330 s: no `idle bound
+      reached` line and `freed` stays 0, because the gate found nothing to free (the expected no-op).
+    - *B. The warm case, the one the pack is for.* `node render/comfy-generate.mjs --batch jobs.jsonl --keep-comfy` with two small jobs:
+      a warm launch (no `--cache-none`) that carries the pack and stays up; the batch's own `/free` empties the cache at its end. Then
+      `node render/comfy-render.mjs o2.png "a red cube" --no-lifecycle` against that instance (it skips the runner's `/free`, so the
+      executor cache holds the loader outputs again). Read the process's private bytes at t+0 (the checkpoint's weights are in host
+      RAM), at t+240 s (unchanged, no fire line) and at t+330 s (down by about the checkpoint's size, `idle bound reached` in the log,
+      `freed` 1 in `GET /offload/idle`). If the line and `freed` are there and the private bytes did not fall, the free was asked for
+      and the allocator kept the pages: record that as a finding about the reading, not about the pack. Render again in the same
+      lease: it reloads and renders.
+    - *C. The smart-memory case (a hand-started instance).* Start ComfyUI by hand without `--disable-smart-memory`, with `--cache-none
+      --extra-model-paths-config <repo>/render/comfyui-ext/extra_model_paths_idle.yaml`, in a lease of its own. Render once with
+      `comfy-render.mjs ... --no-lifecycle` and read per-card memory at t+0 (the model resident), t+240 s (unchanged) and t+330 s
+      (down to the bare context, `idle bound reached`). The control is the same instance started without the yaml: it stays resident,
+      and a kept or warm runner that reuses it prints exactly one `COMFY-IDLE-WARN` and does not restart it.
+    - *D. The rest.* A 3-job `generate-image --batch` is unchanged and does not fire inside a gap under 300 s (re-run the S3 acceptance,
+      because a warm launch now carries the pack). `COMFY_IDLE_FREE_SEC=60` shortens the bound; `0` gives no flag and no line. On a Wan
+      pair, a kept multicard instance idle for 330 s with both cards read before and after settles whether `/free` returns VRAM under
+      `--gpu-only`, where ComfyUI's own unload frees nothing and a weight leaves the cards when its patcher loses its last reference
+      (the executor reset in `free_memory` should drop the cached ones; unverified). Release each lease: the holder still stops the
+      instance (marker cleared, no ComfyUI process left). Record the node, the ComfyUI version, the times and the readings on the
+      register row.
 
 **Verifying a pin on Windows.** The driver reports no per-process rows for graphics-mode (WDDM)
 cards, so confirm that an instance is on its card by per-card memory deltas, not process ids.
@@ -2081,6 +2172,12 @@ recorded as known offenders with their reason rather than silently skipped — a
   harness-owned ComfyUI code the placement loads through `--extra-model-paths-config`: the read-only safetensors reader and
   `OffloadFreeForDecode` ([tests](../../render/comfyui-ext/test_offload_multicard.py), run by
   [`render/comfyui-ext.test.mjs`](../../render/comfyui-ext.test.mjs))
+- [`render/comfyui-ext/extra_model_paths_idle.yaml`](../../render/comfyui-ext/extra_model_paths_idle.yaml) and
+  [`render/comfyui-ext/idle-nodes/offload_idle/__init__.py`](../../render/comfyui-ext/idle-nodes/offload_idle/__init__.py) — the idle bound a
+  kept or warm ComfyUI is launched with: it frees what the instance keeps (a loaded model, the executor cache) after 300 s with an empty
+  queue, not yet run in a live ComfyUI ([tests](../../render/comfyui-ext/test_offload_idle.py), run by [`render/comfyui-ext.test.mjs`](../../render/comfyui-ext.test.mjs));
+  the launcher side (`resolveIdleBound`, the yaml and whitelist splice in `launchFlags`, the child env, the probe) is in
+  [`render/comfy-lifecycle.mjs`](../../render/comfy-lifecycle.mjs), pinned by [`render/comfy-idle.test.mjs`](../../render/comfy-idle.test.mjs)
 - [`internal/hostneed/hostneed.go`](../../internal/hostneed/hostneed.go) — `estimateWith`: a card-only Wan call declares 0 host RAM
   when each leased card fits its own stage (`CardOnly.SageAttention`: the activations at 15.2 GiB under `--use-sage-attention`)
 - [`render/multicard-recipes.json`](../../render/multicard-recipes.json) /
@@ -2138,6 +2235,9 @@ recorded as known offenders with their reason rather than silently skipped — a
   place such a graph keeps in the line while it is a ticket;
   [`internal/mediaremote/graph.go`](../../internal/mediaremote/graph.go) — the one-card rule, `min_vram_gb` and its default table, and
   what keeps a graph that reads input files on this machine
+- [`internal/mediaremote/named.go`](../../internal/mediaremote/named.go) — a call that names a node: the one candidate, the typed
+  refusals and what a row is read for (ADR 0082 Amendment 3); [`internal/mediacap/lane_rows.go`](../../internal/mediacap/lane_rows.go) and
+  [`internal/fleetnode/media_recipes.go`](../../internal/fleetnode/media_recipes.go) — the video, animation and audio family rows a node publishes
 - [`render/compose-hyperframes.mjs`](../../render/compose-hyperframes.mjs) — the composition runner:
   env allowlist, subcommand allowlist, `--json` everywhere, lint → check → render → ffprobe gate,
   typed `COMPOSE-FAIL` classes
@@ -2383,6 +2483,8 @@ render on a fleet node and get the output back hash-verified. The other media to
   no fleet configured it runs here and returns the pipeline's own deferral, as before.
 - `remote` always goes to a node. `remotes` narrows the nodes for one call; each must already be in `delegate_remotes`,
   and the call is refused before any probe otherwise.
+- A video, animation or audio call that carries `node` goes to that one node, whatever its route is set to except `local`
+  ([Naming a node](#naming-a-node-a-video-animation-or-audio-call-runs-on-the-one-node-you-pick-adr-0082-amendment-3)).
 
 **Which node.** The candidates are read through `internal/rosterprobe` like every other single-shot lane (ADR 0074): each
 `delegate_remotes` entry is first judged by the tailnet shape check the agent lane applies (`netguard.TailnetURL`), and one it
@@ -2451,6 +2553,70 @@ card closed red. A call that reached no node has its row and no card, and a pani
 panic before it goes on. Both POSTs, the plain
 dispatch and the media-job, carry `X-Offload-Asker` and, only when this machine's emitter is off, `X-Offload-Pair-Card: node`.
 The local route, and an auto call that runs here, are not attributed (the pipeline writes that row).
+
+## Naming a node: a video, animation or audio call runs on the one node you pick (ADR 0082, Amendment 3)
+
+`offload_generate_video`, `offload_animate_character` and `offload_generate_audio` (CLI `generate-video`, `animate-character`,
+`generate-audio`) take **`node`** (`--node`): a node id, as the `node_id` of its `/fleet/health` spells it (any case), or one of the
+`delegate_remotes` URLs. The named node is the **only** candidate: a box that has the lane itself still sends the call there, no other
+node is tried and this machine's lane is not asked. `route local` with a node contradicts itself and is refused; a node on an image
+or a graph call is refused by name by the library and the CLI (this release carries it for the three lanes only: the image and graph
+verbs have no `--node` and the image and graph MCP tools list no `node`, so one sent to them is dropped like any unlisted argument). `meta.placement` reads
+`remote: named node <name>`. Nothing about a call with no `node` changed: it is placed as before and no row is read for it.
+
+**Refused before anything is sent.** A node that cannot take the call is refused by a word before the POST, so no job exists on it.
+The deferred answer's data is `{refusal, node, lane, family, missing[], roster[]}`:
+
+| `refusal` | Defer | Meaning |
+| --- | --- | --- |
+| `node_unknown` | `contract` | The name matches no node of the roster this call may use (`remotes` narrows it). `roster[]` lists the ids that answered. |
+| `node_is_self` | `contract` | The name is this machine's own node: the call it would run itself is the local route. |
+| `node_lacks_route` | `capacity`, err_class `no_node_configured` | The node does not serve the lane, or its route is not CONFIGURED (the answer names the state, and the files of its row when it published one). |
+| `node_lacks_media_job` | `capacity`, `no_node_configured` | The call carries input files (a still, a reference and driver, a clone sample) and the node has not opened the media-job door. |
+| `node_lacks_model` | `capacity`, `no_node_configured` | The node's `media_recipes` row for the family the call renders is absent or lists a file with `bytes` -1; `missing[]` names the files. |
+| `node_below_min_vram` | `capacity`, `no_node_configured` | `min_vram_gb` was given (video and animation) and the node's largest card is smaller. |
+
+A node that does not answer, or holds a text lease, is an ordinary `capacity` defer with no err class, because it may take the call
+later; a node id that no answering node has, while some roster entry that was dialled did not answer, is that same defer, not
+`node_unknown`, because the id may be one of them (a URL outside the roster is always `node_unknown`). A roster entry the tailnet
+guard refuses is never dialled and has no id, so it does not make an unknown id a defer: the id is `node_unknown` and the reason names
+the refused entries. A URL you name that is on the roster but that the guard refuses is filed `capacity` with err_class
+`no_node_configured` and no refusal word, as `pickNodeFor` files such an entry. A named call on a machine with no `delegate_remotes`
+never reaches a roster: it is the plain `config` defer (`no delegate_remotes configured`) with no refusal word, and this machine's own
+lane is not tried. The four `capacity` refusals are a fact about the node that waiting does not change: the remedy is to name
+another node (the pairing is the one `no_node_configured` already has). Nothing falls back: the named node refusing, another node
+or this machine could have run the call, and neither is tried.
+
+**What a node publishes.** `/fleet/health` gains `media_recipes[]`, additive: one row
+`{lane, name, default, engine, digest, files:[{role, name, bytes}], license, commercial_use}` per family a binding of the node names
+(`lane` is `video-gen`, `animate` or `audio-gen`). A video row is named by the `model` value that selects it: the ComfyUI families
+`wan22`, `ltx25`, `hunyuan`, `h3` (the default family always; another only when `videogen_families` binds it or every file its graph
+loads is on the node) and an sd.cpp family by its own name; the animation row is `wan-animate2`, the music row `acestep`.
+`bytes` is the size where the node finds the file and `-1` where it does not, so a row whose weight is gone is still listed and the
+refusal can name it. The ComfyUI rows exist only on a node that has a ComfyUI install (`comfy_dir` is a directory on it): the shipped
+default config binds the three scripts on every machine, so the binding alone makes no row, and a node without the install (or with
+only sd.cpp families) publishes none of them and omits the key when it has no sd.cpp video family either; a node with the install
+lists every lane its config binds, an image-only node with ComfyUI included, with -1 for each weight it lacks. A ComfyUI file keeps
+its loader-relative name; an absolute, drive-lettered or `..` name is published as its file name, and an sd.cpp file by its bare file
+name whatever its path looks like. **A row is a statement of sizes, not an identity:** no fingerprint, `digest` always empty, built from
+a stat per file and memoised for a minute. There is no row for voice, the audio.cpp engines or the sd.cpp animation lane.
+
+**When a row judges.** Only a node that published at least one row for the call's lane is judged, by the row of the family the call
+renders: with no `model`, the node's default row; a `model` is matched by row name exactly and otherwise folded the way the node folds it
+(`ltx25`, `h3`, `hunyuan` render themselves, every other spelling, `wan` included, renders Wan 2.2; `ace` has no row and is not judged).
+A lane the node publishes no row for is **unknown, not refused**: the call goes to the node's own door, which refuses a missing weight
+itself with a 503, as a forced call does. Music is judged by the `acestep` row; voice, `voice=endpoint` included, is never refused for it.
+A named call that ran on a node whose row judged it adds `rendered_family` and `rendered_files` to the result, beside the node's own
+answer: what the node's row says it loads for that family, not a check of the render.
+
+**`min_vram_gb` on video and animation** (`--min-vram-gb`) filters the remote candidates of any placement that leaves the machine, by
+the largest card of the node as a graph's does (a 16 GB card reads 15.92 GiB, which counts as 16); on a named node it is
+`node_below_min_vram`. The caller's number only: the Wan 720p default floor of a graph is not applied. A malformed value is refused by
+name on every route. It filters nodes only; this machine's lane is its own grant.
+
+**Not in this release.** No video, animation or audio call overflows: identity (a digest of the files' content and the settings
+that change pixels), the busy-lane probe and tickets with input files are the releases that follow (ADR 0082 Amendment 3 lists them).
+A node with the media-job door closed takes a named call that carries no input file and refuses one that does.
 
 ## Overflow: a busy lane places an image call on the fleet (ADR 0082)
 

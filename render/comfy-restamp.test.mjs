@@ -141,7 +141,7 @@ test("a kept instance whose launch marker cannot be written says so: nothing can
   await L.ensureComfy({
     keep: true, api: "http://127.0.0.1:8190", env: { COMFY_INSTANCE: "side", GPU_LEASE_EPOCH: "6" }, comfyDir: dir, py: "py", pollMs: 1, log: (l) => lines.push(l),
     comfyUp: async () => up, portFree: async () => true, mkdirs: () => {}, envFor: () => ({}),
-    openLogFd: () => 5, closeFd: () => {},
+    openLogFd: () => 5, closeFd: () => {}, probeIdle: async () => ({ limit_sec: 300, error: null }),
     spawn: () => { up = true; return { pid: 9, unref() {}, kill() {}, once() {} }; },
     writeLaunch: () => { throw new Error("ENOSPC: no space left on device"); },
   });

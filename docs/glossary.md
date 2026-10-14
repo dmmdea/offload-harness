@@ -211,6 +211,16 @@ engine, model files, launch keys) that must declare `license` and `commercial_us
 it produces carries its license. The only way a non-commercial model ships in this repository — see
 [ADR 0058](architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md).
 
+## Named node
+
+A video, animation or audio call that carries `node` (an id, as a node's `/fleet/health` `node_id` spells it, or a `delegate_remotes` URL; CLI
+`--node`) runs on that one node and nowhere else: no other node is tried and this machine's lane is not asked. A node that cannot take
+the call is refused by a word (`node_unknown`, `node_is_self`, `node_lacks_route`, `node_lacks_media_job`, `node_lacks_model`,
+`node_below_min_vram`) before anything is sent. It reads the node's `media_recipes[]` rows, which list the weight files of each family a binding
+names with their size on the node (-1: not there) and are not an identity. See
+[ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md)
+Amendment 3.
+
 ## Node Manifest
 
 The declaration accompanying a run-graph request: which ComfyUI custom node packs are required (at

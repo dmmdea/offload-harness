@@ -811,8 +811,15 @@ that card REUSES it, it does not launch over it: a live keyed instance whose mar
 reusing an instance that was a lease's takes it over (`restampLaunchOwner`: only the marker's `leaseEpoch` changes,
 to the reusing lease's), so that lease's release stops it. An instance that was never a lease's (a marker with no
 epoch) is not claimed by a lease that happens to reuse it. An instance nobody reuses stays up until an operator stops
-it: nothing here is a timer or a watcher (plan I5), and whether the next acquirer or `gpu doctor` should sweep
-markers whose epoch is dead is an operator decision (I5 forbids a watcher, not an explicit sweep). A kept launch
+it: the harness runs no timer or watcher over it (plan I5), and whether the next acquirer or `gpu doctor` should sweep
+markers whose epoch is dead is an operator decision (I5 forbids a watcher, not an explicit sweep). What the harness does
+carry is the engine's own idle clock, the llama-swap `ttl` analogue: a kept or warm instance is launched with the idle pack
+(`render/comfyui-ext/idle-nodes`), which frees its models and executor cache after 300 s with an empty queue. The harness's own
+launch already has ComfyUI unload every model when a prompt ends (`--disable-smart-memory`), so what the clock bounds is what
+survives that: a warm session's executor cache in host RAM, and a hand-started instance's models when it runs with smart memory. It
+acts on its own ComfyUI only. It bounds models and caches, not the process: the Python process and its CUDA context live until a
+holder or an operator stops them. Built and tested against a fake queue, not yet run in a live ComfyUI. See
+[media generation](media-generation.md). A kept launch
 whose marker cannot be written logs `COMFY-KEEP-WARN`, because nothing can then stop it by its lease.
 
 **Allocate and claim are one loop.** The allocator reads live state over a window of seconds, so another reserve can take
@@ -866,7 +873,9 @@ not move. The installed file is read, not the doctor's compiled-in version, beca
 process. A binary with no build marker, or a version that is not `major.minor.patch`, is never called older (unknown stays
 unknown), and when the installed version cannot be read a note says no comparison was made. The comparison is by version:
 two builds of one version are not told apart here (the MCP server's `process` block compares bytes,
-[mcp-server.md](mcp-server.md)).
+[mcp-server.md](mcp-server.md)). The audit opens every image it reads through `gpulease.OpenShared`, which on Windows grants
+`FILE_SHARE_DELETE`, so reading a backup or the installed file never makes a rollback or a second swap that renames it fail on a
+sharing violation.
 
 **What green does and does not mean.** Green means every reader the audit *reached* is aware. The output lists what it
 scanned **and what it did not enter** (directories past the depth cap, 3 levels below a scan root unless `--depth` says

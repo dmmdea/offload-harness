@@ -154,6 +154,8 @@ prompt/exemplars; can only narrow — UNSET resolves to config `agent_profile`, 
 | `internal/agent/` | Agent loop, tools, and the policy broker (`Build()` is the shared constructor). |
 | `internal/sandbox/` | OS cage for the runner: Landlock+seccomp+userns on Linux (`run` + `run_shell`); Job Object + low-integrity token on Windows (`run` only — writes confined, reads/network NOT). |
 | `cmd/local-agent/` | The coding-agent CLI (`main.go`) + OpenAI server (`serve.go`, loopback guard). |
+| `changes/unreleased/` | One changelog fragment per change (`<branch-slug>.md`): a change never edits `CHANGELOG.md`, whose `## [Unreleased]` block stays empty. Format, rules, release order and recovery: `changes/README.md`. |
+| `cmd/changelog/`, `internal/changelog/` | `go run ./cmd/changelog assemble -title "…"` moves the fragments under the new version heading at the release step (bump first, assemble last) and prints the `Deletes:` line; `check` runs the rule set the tests use. Stdlib only. |
 | `internal/mcpserver/` | MCP tool surface (incl. `agent_run`). |
 | `setup/` | Cross-vendor installer: `detect.ps1`, `install.ps1`, `selftest.ps1`, `templates/`, `SETUP-AGENT.md`. |
 | `skill/local-offload-setup/` | Thin setup-skill wrapper pointing at `setup/SETUP-AGENT.md`. |

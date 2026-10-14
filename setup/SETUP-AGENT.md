@@ -76,8 +76,8 @@ Radeon Software version read from the registry; `null` off-AMD or unreadable), `
 The **`profile`** is the load-bearing new field: `install.ps1` keys the serving template + params
 (context, KV type, 26B placement) off it, and `selftest.ps1` measures against it. It is chosen from
 vendor + arch + VRAM band + GPU count + RAM tier (a heterogeneous NVIDIA pair → `dual-gpu`; RAM ≥
-~56 GB unlocks the 26B via `--cpu-moe`). An unrecognized NVIDIA card falls back to an `ampere-*` band
-by VRAM and **warns** — verify the template fits before relying on it.
+~56 GB passes the RAM gate of the `cpu` tier's 26B; no tier with a card puts experts in host RAM, because RAM is overflow only). An unrecognized NVIDIA card falls back to an `ampere-*` band
+by VRAM and **warns** — verify the template fits before relying on it. A profile id that `profiles.json` does not list (or none at all) renders the backend's off-matrix defaults: on CUDA that serves no 26B (no measurement says the card fits it, and RAM is overflow only), and a *fresh* `config.json` gets `escalation_model` and `reasoning_model` set to `""` to match, the outcome of every tier that drops the 26B. An existing `config.json` is never rewritten, so after re-running the installer over a yaml that 0.185.1 or earlier rendered for such a box (the re-run re-renders it without the 26B and without `--cpu-moe`), set those two keys to `""` by hand; `doctor` names them if you do not.
 
 Expected shapes:
 
@@ -127,13 +127,13 @@ projected per-profile serving choices — `selftest.ps1` measures and refines th
 | `volta-16` | #2 (V100 16 GB) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU |
 | `ampere-16` | 3090-class ≥12 GB (defensive) | `offload-e4b` (agent `qwen38-27b-agent` = Qwen3.8-27B UD-IQ3_S + embedded MTP head, `--ctx-size 49152`, `research`; 26B dropped) | 49K | q8_0 | 26B dropped — MEASURED 2026-09-04 on an A2 16 GB @ 40 W: 26B-A4B 1/8, 4B 8/8. SEAT RE-AUDITED 2026-09-16 (ADR 0047): the 27B+MTP beats the 4B 24/24 blind; `--ctx-size 49152` is the measured fit (14,410 MiB of 15,356, including the resident embedder) and a larger window aborts at load |
 | `dual-gpu` | #3/#4 (5060 Ti + V100 32 GB) | 26B architect + E4B editor, both resident | 32K | q8_0 | resident, **zero-swap** two-tier |
-| `ampere-8` | #5/#6 (3070 8 GB; +64 GB) | `offload-e4b` | 16K | q8_0 | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
-| `blackwell-8` | #8/#9 (5060 8 GB; +64 GB) | `offload-e4b` | 16K | q8_0 | `--cpu-moe` if RAM ≥ ~56 GB; CUDA-13 serves, 12.8 peak |
-| `amd-rdna3` | #7 (780M + 64 GB, Vulkan) | `offload-e4b` | 16K (floor; canary → 32K) | f16 (floor; canary → q8_0) | `--cpu-moe` floor; canary → full-offload `-ngl 99` (~20–25 t/s measured elsewhere) — see the [AMD RDNA3 chapter](#amd-rdna3--the-780m-class-runbook-for-the-installing-agent) |
-| `amd-rdna3-dgpu` | discrete RDNA3 ≥12 GB (RX 7900-class, Vulkan) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU `-ngl 99` (on 12 GB the OOM remediation flips it to `--cpu-moe`) |
+| `ampere-8` | #5/#6 (3070 8 GB; +64 GB) | `offload-e4b` | 16K | q8_0 | dropped (RAM is overflow only: no every-expert `--cpu-moe`) |
+| `blackwell-8` | #8/#9 (5060 8 GB; +64 GB) | `offload-e4b` | 16K | q8_0 | dropped (as `ampere-8`); CUDA-13 serves, 12.8 peak |
+| `amd-rdna3` | #7 (780M + 64 GB, Vulkan) | `offload-e4b` | 16K (floor; canary → 32K) | f16 (floor; canary → q8_0) | full-offload `-ngl 99` on the unified-memory iGPU (~20–25 t/s measured elsewhere) — see the [AMD RDNA3 chapter](#amd-rdna3--the-780m-class-runbook-for-the-installing-agent) |
+| `amd-rdna3-dgpu` | discrete RDNA3 ≥12 GB (RX 7900-class, Vulkan) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU `-ngl 99`; a 12 GB card fails the 26B load and selftest says so (it never edits the yaml; see the `tiers[].status:"fail"` row of the per-field reads) |
 | `ampere-6` | #10/#11 (3050 6 GB) | `offload-e4b` | 32K | q8_0 (conservative default; f16 measured viable) | dropped |
 | `amd-gcn` | #12 (Vega 7 + 32 GB, Vulkan + CPU alt route) | `gemma4-e2b` (agent `qwen3.5-4b-agent`) | 32K | f16, FA on (measured 2026-09-20) | dropped |
-| `cpu` | no GPU | `offload-e4b` (CPU) | 8K | f16, FA off | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
+| `cpu` | no GPU | `offload-e4b` (CPU) | 8K | f16, FA off | kept if RAM ≥ ~56 GB, else dropped (no card to overflow from, so this is the one tier exempt from the every-expert rule) |
 | `rockchip-rk3588` | Rockchip RK3588 SoC board (the reference board, 7.7 GiB shared by CPU/GPU/NPU); Linux only, detected from the device tree | `qwen3.5-2b-npu` (NPU via RKLLM, chat + vision); no llama.cpp entry (Vulkan faults the Mali, measured); no CPU inference | the NPU seat 16K | n/a (RKLLM) | dropped |
 
 **Big-VRAM Blackwell tiers (#13–15, added 2026-07-16):** cards ≥24 GB render the
@@ -230,7 +230,7 @@ text_encoders/qwen3vl_8b_bf16.safetensors vae/qwen_image_2.1_vae_bf16.safetensor
 8GB tiers: **VERIFIED** — O1 bf16 @2048 runs on an 8GB 3070 with 64GB RAM (5.9 min/render,
 an 8GB 3070 + 64GB RAM box, 2026-07-16). **J4: this binding is now AUTOMATIC on fresh installs** —
 `ampere-8`/`blackwell-8` carry a `config_seed_ram_mid_high` layer that install.ps1 merges only when
-`ram_tier` is mid/high (same RAM gate as the 26B cpu-moe path). A second layer, `config_seed_ram_low_up`, applies from `low`
+`ram_tier` is mid/high (the RAM gate of the `cpu` tier's 26B). A second layer, `config_seed_ram_low_up`, applies from `low`
 (28 GB) up and merges before it (ampere-6 binds its RAM-spill agent seat there, ADR 0080). The two tiers DIVERGE by operator
 decision: **`ampere-8` = the O1 bf16 IMAGE seat, image only** (no video/music — decision
 2026-07-23, standing for that tier pending its own bake). **`blackwell-8` (2026-08-23 REVERSAL,
@@ -398,7 +398,7 @@ chapter's canaries).
    field. If the Adrenalin warning fires (driver ≤ 25.11.1 = the deep-context Vulkan crash class,
    llama.cpp #17432): **STOP and ask the human to update the driver. Never update it yourself.**
 2. `install.ps1` — renders the Vulkan template: 16K ctx / f16 KV / FA explicitly `on` / 26B
-   `--cpu-moe` / `GGML_VK_VISIBLE_DEVICES=0` on every model. If `llama-server --list-devices`
+   `-ngl 99` (full offload on the unified-memory iGPU) / `GGML_VK_VISIBLE_DEVICES=0` on every model. If `llama-server --list-devices`
    shows the wrong adapter as device 0 (multi-ICD boxes can enumerate a second GPU or a software
    rasterizer first), fix the index in the rendered `llama-swap.yaml` — that edit is yours to make.
 3. `selftest.ps1` — on a Vulkan backend the **H3 canary suite runs by default** (budget 15–30 min;
@@ -417,7 +417,7 @@ chapter's canaries).
 | Canary | Proves | Does NOT prove | On fail |
 |---|---|---|---|
 | `fa_q8kv` | FA is genuinely ON (server log at `-lv 10`) and q8_0-KV text matches f16 at temp 0 (word overlap ≥ 0.80) on THIS gpu+driver | long-session stability at depth; other models | Stay on f16. `fa_confirmed:"off"` despite `-fa on` = the silent-disable mode — report it, do not force q8. |
-| `moe_full_offload` | the 26B loads at `-ngl 99` through GTT with a measured decode t/s — `promote:true` when it beats the `--cpu-moe` baseline, or when no baseline was measured this run (the receipt's `cpu_moe_tps` says which case you are in) | that 32K ctx also fits alongside; thermals under sustained load | Keep the `--cpu-moe` floor. The manual middle path is `--n-cpu-moe N` (a few expert layers in RAM — preferred over `-ot` regex; try N≈4–8). |
+| `moe_full_offload` | RETIRED (0186 w4): always `status:"skipped"`. It trialled the 26B at `-ngl 99` against the `--cpu-moe` floor selftest used to fall back to; the installer places no experts in host RAM now (RAM is overflow only), so there is no floor to promote from and the trial could not run on any shipped tier. The key stays in the receipt so its shape does not change. | — | A 26B that does not fit the card is a tier failure with advice, not a canary. The only sanctioned expert placement in RAM is a MEASURED `--n-cpu-moe N` declared in the profile table (`n_cpu_moe` with `n_cpu_moe_max`). |
 | `ctx_sweep` | the resident tier loads AND generates at 8/16/32K with the canary-chosen KV | quality at depth (SWA-1024 keeps KV modest; depth-quality is the model's own behavior) | The standing ctx probe/downshift result governs; serve the largest PASSING size. |
 | `bench` | pp512/tg128 on this exact build+driver (your regression baseline) | anything cross-machine | `tg < 8` = CPU-class → offload is broken; check FA state, device pin, and the Adrenalin warning before anything else. |
 | `swap_leak` | llama-swap evicts cleanly across a tier cycle (≤1 llama-server process after) | multi-hour TTL behavior on :11436 | Report; do not ship a leaking stack. |
@@ -434,7 +434,6 @@ a dedicated vision canary exists and passes — this is a named non-binding, lik
 |---|---|---|
 | KV `f16 → q8_0` | `fa_q8kv.status:"pass"` (which requires `fa_confirmed:"on"`) | Set `--cache-type-k/v q8_0` in the rendered yaml (K and V stay symmetric). |
 | ctx `16384 → 32768` | `ctx_sweep.max_ok_ctx ≥ 32768` | Raise `--ctx-size` and `installed.json`→`agent_ctx_tokens` to 32768 together. |
-| 26B `--cpu-moe → -ngl 99` | `moe_full_offload.promote:true` | Replace `--cpu-moe -ngl 999` with `-ngl 99` on the 26B cmd. If a later request OOMs, the standing remediation returns it to `--cpu-moe` — that rollback is also yours to keep. |
 | Vulkan device index | `--list-devices` shows the wrong device 0 | Edit `GGML_VK_VISIBLE_DEVICES` to the correct index. |
 
 Apply promotions ONE at a time, re-running selftest after the set — a combined failure you cannot
@@ -463,7 +462,7 @@ else any file drop the human prefers):
 // 1. $OFFLOAD_HOME\installed.json  (versions actually installed)
 // 2. selftest receipt — the LAST stdout line of the FINAL selftest run (post-promotions),
 //    which carries: tiers[] (per-tier cold_load_s/tok_s), canaries.fa_q8kv{overlap,fa_confirmed},
-//    canaries.moe_full_offload{full_tps,cpu_moe_tps,promote}, canaries.ctx_sweep{results,max_ok_ctx},
+//    canaries.moe_full_offload{status:"skipped" (retired)}, canaries.ctx_sweep{results,max_ok_ctx},
 //    canaries.bench{pp512_tps,tg128_tps}, canaries.swap_leak, canaries.embedder,
 //    media.render{seconds,bytes,distinct_colors}, media.gpu_vae{seconds,promote},
 //    profile_measure.tuned{...}, verdict, and the honest does_not_prove[] list.
@@ -551,9 +550,10 @@ $env:FLEET_LIVE_SMOKE='1'; go test -run TestLiveWindowsProbes -v ./internal/flee
 ### `amd-rdna3-dgpu` deltas (discrete RX 7900-class)
 
 Renders 32K / q8_0 / 26B `-ngl 99` resident directly (dedicated VRAM, no GTT dependency). The same
-canaries run; `moe_full_offload` self-skips (`profile already projects full-offload`). On a 12 GB
-card the 26B OOMs and the standing remediation flips it to `--cpu-moe` — expected, keep it. All
-other rules of this chapter apply unchanged.
+canaries run; `moe_full_offload` is retired and always skips. On a 12 GB card the 26B load fails
+and selftest records a `tiers[]` failure whose `detail` says what to change (RAM is overflow only:
+selftest does not move experts to the CPU and does not edit the yaml); pick a tier whose resident
+is not the 26B, or drop the 26B in the profile table. All other rules of this chapter apply unchanged.
 
 ---
 
@@ -581,7 +581,7 @@ grammar-task **terminal tier** that runs after the chain is exhausted (see
 **Know what you are changing from:** the shipped default binds `gemma4-26b-a4b` to BOTH
 `escalation_model` and `reasoning_model` — exactly the both-26B shape this recommendation
 replaces. That default is correct for 8GB tiers (a 12B-class rung does not fit beside the
-residents there — the 8GB ladder stays e2b → e4b → 26b-`--cpu-moe`) and stays the built-in;
+residents there — the 8GB ladder stays e2b → e4b, with the 26B dropped on those tiers) and stays the built-in;
 this is a matrix recommendation for ≥16GB operators, not a default change.
 
 **Installer honesty:** the profile templates do NOT yet serve a 12B tier — no template renders an
@@ -630,9 +630,10 @@ normal link for the full family (~21 GB), less for `OFFLOAD_WITH_FAMILY=0`. Prog
 
 **Profile-driven serving (H2).** Install reads the detected `profile` + `ram_tier` and renders the
 llama-swap yaml from `setup/templates/profiles.json` — substituting the profile's `--ctx-size`, KV
-type, flash-attn, and 26B MoE placement (`gpu` / `--cpu-moe` / dropped) into the backend template
-(`dual-gpu` renders the `win-dual-cuda` two-model-resident template). It drops the 26B entirely when
-`ram_tier` is `low`/`min` (no RAM path for `--cpu-moe`). The install step prints the resolved
+type, flash-attn, and 26B MoE placement (`gpu` / a measured partial `--n-cpu-moe N` / dropped) into the backend template
+(`dual-gpu` renders the `win-dual-cuda` two-model-resident template). The installer never writes the
+every-expert `--cpu-moe` for a box with a card (RAM is overflow only). A partial `--n-cpu-moe N` drops the 26B when
+`ram_tier` is `min`, and a box off the tier matrix (no recognized profile) gets no 26B on the CUDA family. The install step prints the resolved
 `profile | ram_tier | ctx | kv | 26b` and writes `profile`, `ram_tier`, `big_ram`, and
 `agent_ctx_tokens` into `installed.json`. The install seed binds the agent's planner seat
 automatically: config `agent_model` derives from the profile's `resident_tier` when it differs from
@@ -776,22 +777,28 @@ Receipt schema (real fields):
 
 ```json
 {"schema":1,"backend":"cuda","gpu":"NVIDIA GeForce RTX 3070 ...","driver_version":"32.0.15.xxxx",
- "tiers":[{"id":"offload-e4b","cold_load_s":6.2,"tok_s":81.4,"status":"pass"}],
+ "tiers":[{"id":"offload-e4b","cold_load_s":6.2,"tok_s":81.4,"status":"pass","detail":null}],
  "canary":{"depth":7000,"status":"pass","detail":"generated N tokens at depth ~7000 ..."},
  "remediations":[],"harness_smoke":"ok","agent_smoke":"ok",
  "profile_measure":{"profile":"ampere-8","profile_src":"installed.json","ram_tier":"low",
-   "projected":{"ctx_size":16384,"kv_type":"q8_0","moe_26b":"cpu_moe","resident_tier":"offload-e4b"},
+   "projected":{"ctx_size":16384,"kv_type":"q8_0","moe_26b":"drop","resident_tier":"offload-e4b"},
    "ctx":{"projected_ctx":16384,"measured_ctx":16384,"measured_ctx_ok":true,"downshifted":false,"src":"measured"},
    "moe26b":{"applicable":false,"src":"skipped"},"cold_swap":[{"tier":"offload-e4b","cold_swap_s":6.2}],
    "tuned":{"ctx_size":16384,"kv_type":"q8_0","source":"measured"}},
  "verdict":"pass","proves":[...],"does_not_prove":[...]}
 ```
 
+`tiers[].detail` is `null` except on a failed `gemma4-26b-a4b` row, where it holds the operator advice
+(what to change in the profile table; selftest itself changes nothing).
+
 **`profile_measure` (H3 — measured-vs-projected).** selftest reads the active `profile` (from
 `installed.json`), pulls the PROJECTED serving params (`profiles.json`), then MEASURES on THIS box:
 does the projected ctx actually load without OOM (`ctx.measured_ctx_ok`, halving + retry if it
-OOMs → `downshifted:true`); the 26B `--cpu-moe` decode tok/s where applicable (`moe26b`); per-tier
-cold-swap latency (`cold_swap[]`); and whether q8_0 KV held. The **`tuned`** block is the payload:
+OOMs → `downshifted:true`; the probe loads the resident model as the yaml serves it, so on a tier
+whose resident is the 26B it loads the card-resident 26B, which can OOM and downshift); per-tier
+cold-swap latency (`cold_swap[]`); and whether q8_0 KV held. `moe26b` is retired and always
+`{applicable:false, src:"skipped"}`: the installer places no experts in host RAM, so there is no such
+decode number to take. The **`tuned`** block is the payload:
 `source:"measured"` means at least one value was measured on-device and should be applied OVER the
 projected profile; `source:"projected"` means nothing on this host could measure it (recorded
 honestly, never faked). Dual-GPU / Optane checks are marked `not-applicable-on-this-host` /
@@ -808,7 +815,7 @@ Read them against the tables in the [AMD RDNA3 chapter](#amd-rdna3--the-780m-cla
 | `verdict` | Meaning | Action |
 |---|---|---|
 | `pass` | Every tier live, canary clean, harness+agent smoke ok. | Done — proceed to Step 3. |
-| `warn` | Installed and usable, but a soft signal fired: a tier is CPU-class slow (`tok_s < 8`), the canary did not pass, the 26B tier failed even after remediation, or the harness `summarize` **deferred**. | Read the receipt. A `harness_smoke:"defer"` on a tiny sample is **designed behavior, not a failure** — proceed. A `canary.status:"fail"` → see the canary row below. |
+| `warn` | Installed and usable, but a soft signal fired: a tier is CPU-class slow (`tok_s < 8`), the canary did not pass, the 26B tier failed to load (selftest never remediates it), or the harness `summarize` **deferred**. | Read the receipt. A `harness_smoke:"defer"` on a tiny sample is **designed behavior, not a failure** — proceed. A `canary.status:"fail"` → see the canary row below. |
 | `fail` | `harness_smoke:"fail"` OR `agent_smoke:"fail"` OR **all** tiers failed. | Do not proceed. Diagnose per the table below. |
 
 **Per-field reads:**
@@ -817,9 +824,9 @@ Read them against the tables in the [AMD RDNA3 chapter](#amd-rdna3--the-780m-cla
 |---|---|
 | `tiers[].status:"pass"` | Tier cold-loads and generates. Good. |
 | `tiers[].status:"warn"` (`tok_s < 8`) | Throughput is CPU-class. Expected on `backend:"cpu"`; on a GPU backend it hints the model fell back to CPU — check the canary/remediations. |
-| `tiers[].status:"fail"` on `gemma4-26b-a4b` | The MoE tier OOM'd. selftest **auto-remediated** (added `--cpu-moe`, restarted, retried once) — see `remediations[]`. If still failed: the message says try a lower `-ngl` or update the AMD Adrenalin driver → **STOP and ask the human** re the driver. |
-| `remediations[]` non-empty | selftest edited your `llama-swap.yaml` (added `--cpu-moe` to the 26B cmd). This is persisted and correct — keep it. |
-| `canary.status:"fail"` (device-lost / connection drop) | The deep-context Vulkan crash class (llama.cpp #17432). The detail says: update the AMD Adrenalin driver; if it persists switch 26b/e4b to `--cpu-moe` / lower `-ngl`. **STOP and ask the human to update the driver.** |
+| `tiers[].status:"fail"` on `gemma4-26b-a4b` | The 26B did not load or answer on this card. selftest does **not** remediate it: RAM is overflow only, so it never moves experts to the CPU and never edits `llama-swap.yaml`. The row's `detail` says what to change: set the tier's `moe_26b` to `drop` in `profiles.json` (on a tier whose `resident_tier` or agent seat is the 26B, change those too, or pick a tier whose resident model is not the 26B), or declare a *measured* partial spill (`n_cpu_moe` with `n_cpu_moe_max`), then re-run the install. A device-lost or driver-crash message → update the driver first → **STOP and ask the human** re the driver. |
+| `remediations[]` non-empty | An entry named `downshift ctx a->b` is the standalone ctx probe halving the window after an OOM (the yaml is not edited; `profile_measure.tuned.ctx_size` is the value to apply). selftest writes no other remediation, and never one that changes `llama-swap.yaml`. |
+| `canary.status:"fail"` (device-lost / connection drop) | The deep-context Vulkan crash class (llama.cpp #17432). The detail says: update the AMD Adrenalin driver; if it persists lower `-ngl` or the window. **STOP and ask the human to update the driver.** |
 | `canary.status:"fail"` (empty completion) | Model returned nothing at depth. Re-run selftest once; if it recurs treat as a model/serving fault and surface. |
 | `harness_smoke:"fail"` | The grammar pipeline did not return parseable JSON. This is a **fail** verdict — the endpoint or a serving flag is wrong. Run `harness\local-offload.exe --config <tmp> doctor` (see Troubleshooting). |
 | `agent_smoke:"fail"` | The agent server did not answer `/v1/models` on 18802. Check the agent built (`harness\local-agent.exe` exists) and the port is free. |
@@ -945,7 +952,7 @@ difference between a good first impression and a confused user.
 | `install.ps1`: `winget unavailable` | no package manager | Human installs Git + Go 1.26+ manually; re-run. |
 | `install.ps1`: SHA/size mismatch | corrupt/wrong asset | Do not substitute. Delete the `.part` / component dir, re-run once; recurs → STOP. |
 | HF download 429 / timeout | rate-limited | Re-run (idempotent); persistent → STOP, ask human. |
-| `selftest` canary `fail`, device-lost | old AMD Adrenalin (deep-context crash #17432) | STOP → ask human to update the AMD driver; interim: `--cpu-moe` / lower `-ngl`. |
+| `selftest` canary `fail`, device-lost | old AMD Adrenalin (deep-context crash #17432) | STOP → ask human to update the AMD driver; interim: lower `-ngl` or the window. |
 | `selftest` port `18801`/`18802` in use | a prior run leaked a process | Kill stray `llama-server.exe` / `local-agent.exe`, or reboot after asking; re-run. |
 | `doctor`: `health: DOWN` | llama-swap not running / wrong port | Start llama-swap (Step 3); confirm `--listen 127.0.0.1:11436`. |
 | `doctor`: an alias `FAIL — not in the live roster` | model not served / wrong yaml | Check `llama-swap.yaml` lists that alias; some non-core aliases (vision/stt) are absent on a grunt-work-only install — expected. |

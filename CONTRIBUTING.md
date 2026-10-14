@@ -147,15 +147,48 @@ bumped together, in the same commit:**
 2. the `Version` const in `internal/buildinfo/buildinfo.go` (advertised in the MCP handshake — a
    stale value misreports the server to clients). `main.go` aliases it as `version`; the fleet and
    pipeline stampers read `buildinfo.Version` directly, so that file is the one to edit.
-3. the top `## [x.y.z]` entry in `CHANGELOG.md`
+3. the top `## [x.y.z]` entry in `CHANGELOG.md`, produced by `go run ./cmd/changelog assemble` from the
+   changelog fragments (below), never typed by hand
 4. the `version` field in `.printing-press.json` (the MCP manifest — it also declares the tool list,
    which a drift test checks against what the code actually registers)
 
 `TestVersionSourcesAgree` (in `main_test.go`) fails the build if any of these disagree, so
-`go test ./...` catches a partial bump. When you change published behavior, bump the version **and**
-add a CHANGELOG entry in the same PR. This repository is the canonical source of version authority.
+`go test ./...` catches a partial bump. When you change published behavior, add a changelog fragment in
+the same PR (below). The version is bumped where the change is released: a direct pull request to `main` is
+its own release, so it bumps and assembles the changelog as well; a feature branch that is merged into a
+release branch leaves the bump and the assembly to that branch. This repository is the canonical
+source of version authority.
 Never let the sources drift — a mismatch once made the version look lower than a separately-published
 copy and triggered a false "we lost work" fire drill.
+
+## The changelog is one file per change
+
+A change adds **one new file**, `changes/unreleased/<slug>.md` (the lower-case branch name with `/` written as
+`-`), and never edits `CHANGELOG.md`. The body is exactly the text that will appear in the changelog and opens
+with `### <Kind> - <title>`; no line may start with `# ` or `## `, and no line may carry a release date between
+separators. Two branches add two files, so they cannot
+conflict on the changelog, and the `## [Unreleased]` block of `CHANGELOG.md` stays empty (`go test` fails if
+anything is written there). The format, the rules and the recovery steps are in
+[`changes/README.md`](changes/README.md); `go run ./cmd/changelog check` runs the same rules the tests do.
+
+There are two ways a change reaches `main`, and the changelog takes part in the release step of both:
+
+* **A direct pull request to `main` that is also a release.** Add your fragment, bump the version in
+  `VERSION`, `internal/buildinfo/buildinfo.go` and `.printing-press.json`, and run
+  `go run ./cmd/changelog assemble -title "<one line>"` as the **last** commit of the pull request. Your own fragment
+  is added and consumed inside the same pull request, so it needs no `Deletes:` line. But `assemble` consumes every
+  file in `changes/unreleased/`: if a fragment-only pull request left a fragment on `main` earlier, paste the
+  `Deletes:` line that `assemble` prints into the commit message, as in the next item.
+* **A release branch (`release/X.Y.Z`).** Feature branches add fragments only. On the release branch, merge them,
+  then `git merge origin/main`, renumber the three version carriers, and run `assemble` **last**. Commit it with the
+  printed `Deletes:` line only if some fragment reached `main` earlier through a fragment-only pull request that did
+  not bump the version (the deletion guard below then sees `main`'s file go).
+
+`assemble` is last because it writes the top of `CHANGELOG.md`: a merge of `main` or a renumbered version after it
+conflicts in the hunk the tool wrote. If `main` moves after the assembly, revert the release commit (the fragments
+come back), merge `main`, renumber, and assemble again; `changes/README.md` has the commands. This removes the
+conflicts between feature branches and the overwritten release heading; two *releases* still conflict on the
+version carriers and the top of the changelog.
 
 ## Deleting a file is a decision you have to declare
 
@@ -199,8 +232,10 @@ finds the script. When the only bash on the machine is that launcher, the test s
 
 1. Fork the repo and create a branch off `main`.
 2. Make your change, with `go build ./...`, `go vet ./...`, and `go test ./...` all green.
-3. Open a PR describing what changed and why. Link any related issue.
-4. If it removes any tracked file, say so with a `Deletes:` line (see above) — CI refuses an
+3. If you changed published behavior, add a changelog fragment under `changes/unreleased/` (see "The
+   changelog is one file per change" above); do not edit `CHANGELOG.md`.
+4. Open a PR describing what changed and why. Link any related issue.
+5. If it removes any tracked file, say so with a `Deletes:` line (see above) — CI refuses an
    undeclared deletion.
 
 By contributing, you agree that your contributions are licensed under the

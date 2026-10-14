@@ -270,10 +270,10 @@ func cpuMoeEnvSet(v string) bool {
 // every spelling and its LLAMA_ARG_CPU_MOE environment twin, and the draft-model forms, on every entry,
 // reading each entry the way llama-swap runs it (a `${name}` macro is replaced by its text first).
 //
-// It is pure and exemption-free. The cpu backend has no card to overflow from, and an off-matrix render
-// writes the literal on purpose; whether either applies is the caller's evidence to read (`install
-// render` holds the resolved profile and runs before the stamp exists; `audit-yaml` holds the file and
-// its stamp). It reads parsed entries, never the raw text: a stamped file carries
+// It is pure and exemption-free. The cpu backend has no card to overflow from; whether it applies is the
+// caller's evidence to read (`install render` holds the resolved profile and runs before the stamp exists;
+// `audit-yaml` holds the file and its stamp). The installer used to write the literal for a box off the
+// tier matrix too (an exemption until 0186 w4); it no longer does, so nothing else is exempt. It reads parsed entries, never the raw text: a stamped file carries
 // `"moe_26b": "--cpu-moe -ngl 999"` in its stamp comment. One finding per offending entry, sorted by
 // entry; a document that does not parse is Audit's finding, not this rule's.
 func AuditCPUMoE(text string) []Violation {

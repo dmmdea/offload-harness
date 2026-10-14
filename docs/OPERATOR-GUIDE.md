@@ -396,6 +396,24 @@ it is before rendering: a flagless instance can keep the port while a correctly-
 fails to bind, and nothing reports it (its argv carries no `ComfyUI` substring, so a naive
 kill-filter misses it).
 
+**A hand-started ComfyUI is not bounded by the harness's idle free unless you opt in.** The ComfyUI the harness keeps
+(`--keep-comfy`) or runs warm (`--batch`) is launched with an idle pack that frees its models and caches after 300 s with
+nothing queued or running (`COMFY_IDLE_FREE_SEC` on the runner changes it, `0` or `off` disables it). The harness's own launch
+passes `--disable-smart-memory`, so ComfyUI already unloads its models after each prompt; the pack matters for a warm session's
+cache and for an instance that runs with smart memory (ComfyUI's default), which keeps its models loaded between prompts. The harness injects
+nothing into an instance it did not start: a runner that finds one without the pack prints one `COMFY-IDLE-WARN` and uses it as
+it is. To give your own instance the same bound, add this to its launch (the path is your checkout's):
+
+```
+python main.py ... --extra-model-paths-config <repo>/render/comfyui-ext/extra_model_paths_idle.yaml
+```
+
+and, if you start it with `--disable-all-custom-nodes`, add `offload_idle` to its one `--whitelist-custom-nodes` list (that flag
+takes a single list and the last occurrence wins). `OFFLOAD_IDLE_FREE_SEC=<seconds>` in its environment changes the bound
+(default 300, `0` off). Confirm it with `curl http://127.0.0.1:8188/offload/idle`. It frees models and caches only: the process stays
+until you stop it. It has been tested against a fake queue and not yet run in a live ComfyUI; the live check is in
+[media generation](systems/media-generation.md).
+
 ### Run an arbitrary ComfyUI graph (run-graph) ✅
 
 ```powershell
@@ -713,6 +731,20 @@ even when it starts with a dash; a lone `-` is still stdin. The same holds for `
 take one file, text or prompt.
 
 **A busy image lane overflows to the fleet ([ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md)).** An `auto` image call on a machine that has the lane and a fleet asks its own pipeline whether the lane is free; when it is not (a lease holds the card, callers are in line, or the host-RAM guard is holding the lane back), the call goes to an idle node that renders **the same recipe**: the same weight files at the same sizes and with the same content fingerprint, and the same sampling, compared as `digest` in `/fleet/health` `image_recipes`. A match is strict and never substitutes a quantization; it also needs the node on the same release, and the answer names the key that differs and the family of yours that would match (`send family=qwen-image-2.1-fast to use its qwen-image-2.1`). A node that holds any lease is not a candidate. When nothing admits, the call becomes a **ticket** ([ADR 0083](architecture/decisions/0083-a-busy-image-call-is-a-ticket-the-harness-holds-until-the-first-matching-lane-frees.md)): the harness holds the job and starts it on the first matching lane that frees anywhere (your own, or a node that renders the same recipe), in the order it arrived, and the answer says where it stands: its position, your own lane, and one row of `cluster[]` per node of `delegate_remotes` with the state (`busy` and by what, `in-use`, `not-capable` and the key that differs, `unreachable`, `bounced`, `refused`) and since when, and **do not call again** (a repeat of the identical request attaches to the same ticket; `waiter_token=mq-...` collects the result). A node that took the call and passed it back (another job held its card, or its own lease could not be taken) is left alone for a minute, then five, and its row says so in the node's own words (a host short of RAM reads as that, not as a held card); the MCP server remembers that across the calls of a session. A node that refused the recipe (412) because it had only not finished reading its weight files (`pending`) is left alone for a minute and never for five, and that is not counted as a bounce; one whose files or binding changed, or that cannot read a file, is bounced like the rest. `offload_generate_image` takes `wait_s` (how long the call waits before it answers "queued"; default `gpu_wait_ms`); the CLI `generate-image` blocks until the job is done, prints where the ticket stands on stderr, and the first Ctrl-C cancels a ticket that has sent nothing. `offload_status` lists the tickets as `media_queue[]`. A node added to `delegate_remotes` joins a running MCP session when the config file changes (no restart). A finished result nobody has collected is kept 6 hours (10 minutes for a failure), and for 2 minutes after a call took it, so a second call naming the ticket still gets it. A lane the pipeline could not read (its card table past 4 s and the one 10 s retry that follows a read that ran out of time, its lease directory not opening) is not taken for a free lane: the fleet is looked at first and the call runs here only if no node can take it. `route local` never leaves. A digest covers each weight file's name, byte size and a sampled content fingerprint (64 evenly spaced MiB of the file): a same-named file of the same size with other bytes no longer matches and the answer names it; a change confined to the stretch between two sampled blocks is not seen (that stretch is about a sixty-third of the file: roughly 0.3 GB of a 20 GB checkpoint and 0.65 GB of a 42 GB one, and a layer-wise merge or a baked-in VAE can sit inside it), so after a copy you doubt, or a merge you swap in, compare whole-file hashes. A node that has just started, or whose file just changed, publishes that file as `pending` for a few seconds on a warm disk (longer on a cold or network one), with no digest, and is a named miss until it has read it; a read that has not finished in a minute is given up on and the file reads `unreadable`. Every node must run the same release for digests to match. Before relying on a match, read `image_recipes` on both nodes and compare the digests.
+
+**Naming the node that runs a video, animation or audio call ([ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md) Amendment 3).**
+`local-offload generate-video out.mp4 still.png "a slow pan" --node node-b` (or `animate-character ... --node node-b`,
+`generate-audio out.wav "text" --kind music --node node-b`; MCP `node` on the same three tools) sends the call to the node whose
+`node_id` is `node-b`, or to a `delegate_remotes` URL you give instead, and to no other: not another node, and not this machine's own
+lane. If that node cannot take it nothing is sent and the CLI prints `DEFERRED (<reason>)` with the node ids and file names in the
+reason; the reason as a word is in `data.refusal` (with `missing[]` and `roster[]`), which the CLI prints only with `--json` and an MCP
+call returns as it is: `node_unknown` (the answer lists the node ids that answered), `node_is_self`, `node_lacks_route` (it does not serve the lane, or its weights are gone: the answer names
+the files), `node_lacks_media_job` (the call carries a still, a reference or a clone sample and the node has not opened that door),
+`node_lacks_model` (the node's row for the family you asked for lacks a file) or `node_below_min_vram` (`--min-vram-gb N`). A node that
+is down or busy with a text job is a retryable `capacity` defer instead. `--route local` with `--node` is refused. Without
+`--model` the node renders its own default family, and the answer's `rendered_family` and `rendered_files` say which. Read a node's rows with
+`curl http://node-b:18811/fleet/health` (`media_recipes`; `bytes` -1 is a missing weight). This is the named-node release only: a
+busy lane still does not send a video, animation or audio call to another node by itself.
 
 **Adding a template.** Follow the contract in
 [`render/compose-templates/README.md`](../render/compose-templates/README.md): offline, deterministic,
@@ -1351,18 +1383,20 @@ carries any measured override to apply.
 | `blackwell-3x16` | `gemma4-26b-a4b` (single layer) + the vLLM agent seat (pair layer) | 131072 (long twin 262144) | q8_0 | COMPOSITE (ADR 0052): a complete `blackwell-16` AND `blackwell-2x16` as well as itself. Placement decides per task which layer and seat run the work and records it as `placed`; the display card (device 1) is fenced by a ≥4 GiB floor, a host-RAM guard and an operator-presence guard, all failing closed, and its layer ships dormant. See [systems/composite-tier.md](systems/composite-tier.md) |
 | `ampere-16` | `offload-e4b` (agent `qwen38-27b-agent` = Qwen3.8-27B UD-IQ3_S + embedded MTP head, `--ctx-size 49152`, `research`; 26B dropped) | 49152 | q8_0 | **SEAT RE-AUDITED 2026-09-16 (ADR 0047): the 4B is out.** Blind, 24 Opus judgements, 3 lenses, on a card at its accepted 40 W profile and cooled before every arm: Qwen3.8-27B UD-IQ3_S+MTP 9.32 beats the previous seat `qwen3.5-4b-vllm` (5.39) **24/24**, gemma-4-12B+MTP (6.17) 24/24 and gpt-oss-20b+EAGLE-3 (6.21) 24/24; the 4B took zero firsts and fourteen lasts. The 2026-09-14 "measured tie" is withdrawn — it ran on a stock, thermally throttled card (A-103) at a 1,024-token step budget with the 12B capped at 32k. Costs that ship with it: it pads (102 degenerate findings flagged) and decodes at 6.3 tok/s, so the tier seeds `agent_max_tokens` 4096 and `agent_timeout_sec` 900. The llama.cpp 4B entry stays as the fallback. Was: measured 2026-09-04 on an NVIDIA A2 16 GB at 40 W: the projected 26B-A4B seat ran 1/8 digests, the 4B seat 8/8 (0.113.15); 2026-09-06 the reference box's agent lane moved to a vLLM seat behind llama-swap (131,072 ctx). RENDERED by the installer since 0.113.33 and NOT persistent since 0.113.36 (`ttl: 300`, no preload, no boot-enable). Seat choice re-grounded on QUALITY 2026-09-08 (blind 4-way, 24 judgements: 4B-vLLM 7.75 > 4B-llama.cpp 7.38 > 12B-vLLM 6.50 > 12B-llama.cpp 6.21), not on wall time: ADR 0035, `setup/templates/vllm-seat/linux-systemd/` |
 | `dual-gpu` | `gemma4-26b-a4b` (architect) + `offload-e4b` (editor), both resident | 32768 | q8_0 | resident (two-tier, **zero swap**) |
-| `ampere-8` / `blackwell-8` | `offload-e4b` | 16384 | q8_0 | via `--cpu-moe` only when RAM ≥ ~56 GB; else dropped |
-| `amd-rdna3` | `offload-e4b` (Vulkan) | 16384 (floor; canary → 32768) | f16 (floor; canary → q8_0) | `--cpu-moe` floor; canary → full-offload `-ngl 99` (~20–25 t/s on dual-channel DDR5) — see SETUP-AGENT.md, AMD RDNA3 chapter |
+| `ampere-8` / `blackwell-8` | `offload-e4b` | 16384 | q8_0 | dropped (RAM is overflow only: no every-expert `--cpu-moe`) |
+| `amd-rdna3` | `offload-e4b` (Vulkan) | 16384 (floor; canary → 32768) | f16 (floor; canary → q8_0) | full-offload `-ngl 99` on the unified-memory iGPU (~20–25 t/s on dual-channel DDR5) — see SETUP-AGENT.md, AMD RDNA3 chapter |
 | `amd-rdna3-dgpu` | `gemma4-26b-a4b` (Vulkan, discrete RX 7900-class ≥12 GB) | 32768 | q8_0 | full-GPU `-ngl 99` resident |
 | `ampere-6` | `offload-e4b` (agent seat `qwen3.5-4b-agent`; `qwen3.6-35b-a3b-agent`, a RAM-spill MoE, on a box with 28 GB or more of RAM, ADR 0080) | 32768 | q8_0 (conservative default; f16 measured viable) | dropped (architectural — see the tier page) |
 | `amd-gcn` | `gemma4-e2b` (Vulkan; the CPU alt route was withdrawn 2026-09-24 — no model runs on CPU, ADR 0054 amendment; agent seat `qwen3.5-4b-agent`) | 32768 (8192 → 32768 measured 2026-09-20: 24k-token prompt in 278 s, 3.9 GiB GTT) | f16, flash-attn on (measured 2026-09-20 on <node-f>: +4 % pp, neutral on Lucienne; the lane is DDR-bandwidth-bound, every RADV/ubatch/KV knob within ±4 %) | dropped |
-| `cpu` | `offload-e4b` (CPU) | 8192 | f16, flash-attn off | `--cpu-moe` when RAM ≥ ~56 GB; else dropped |
+| `cpu` | `offload-e4b` (CPU) | 8192 | f16, flash-attn off | kept when RAM ≥ ~56 GB, else dropped (no card to overflow from: the one tier exempt from the every-expert rule) |
 | `rockchip-rk3588` | `qwen3.5-2b-npu` (Qwen3.5-2B W8A8 on the NPU via RKLLM, chat and vision: `vqa` and `ocr`, never `assess_image`; its own pipeline runs `classify` and `extract` with no grammar, from a prompt plus strict validation, and the fleet text lane is not advertised until measured); no llama.cpp entry (llama.cpp Vulkan faults the Mali GPU on this kernel/Mesa, measured), no model runs on the CPU, and `uma_reserve_gib` 3 holds RAM back for the host | the NPU seat 16384 | n/a (RKLLM) | dropped |
 
 Notes: q8_0 KV keeps the KV cache ~half the size (V-quant needs flash-attn on, which the CUDA/Vulkan
-templates set); the 26B is placed full-GPU only on ≥12 GB single-card profiles, `--cpu-moe` (experts
-in RAM, much slower — "reduce, not enable") on 8 GB + big-RAM boxes, and dropped where there is no
-RAM path. On the dual-GPU profile the two models sit on separate cards so `--two-tier` costs no swap.
+templates set); the 26B is placed full-GPU only on ≥12 GB single-card profiles and dropped where it
+does not fit: RAM is overflow only, so the installer never writes the every-expert `--cpu-moe` for a box
+with a card (the only expert placement in RAM it may write is a measured partial `--n-cpu-moe N`
+within the tier's `n_cpu_moe_max`). A box that is not on the tier matrix gets no 26B on the CUDA family.
+On the dual-GPU profile the two models sit on separate cards so `--two-tier` costs no swap.
 Anything *italic/projected* is refined by the install-time measurement — trust the selftest receipt
 over the projected table when they differ.
 
@@ -2185,7 +2219,7 @@ local-offload --config "$HOME\.local-offload\config.json" doctor   # the new ali
 | Failure | Fix |
 |---|---|
 | alias `FAIL — not in roster` | Restart llama-swap so it re-reads the yaml; confirm the name matches a model id or one of its `aliases` (the check reads both). |
-| model won't load / device-lost | VRAM too small — add `--cpu-moe` (MoE) or lower `-ngl`. See §6. |
+| model won't load / device-lost | VRAM too small — lower `-ngl` or the window, or drop the model from the tier (the 26B: `moe_26b` `drop`); the experts stay on the card, because RAM is overflow only (no `--cpu-moe`). See §6. |
 
 ---
 
@@ -2195,8 +2229,8 @@ local-offload --config "$HOME\.local-offload\config.json" doctor   # the new ali
 |---|---|
 | **Everything defers** | Endpoint unreachable. Run `local-offload doctor`: `health: DOWN` → start llama-swap; an alias `FAIL` → fix the yaml. A defer on hard/over-long input is by design. |
 | **Port busy** (`18801`/`18802` in selftest, or `:11436`/`:18800`) | `Get-NetTCPConnection -LocalPort <p> -State Listen` to find the owner; kill a leaked `llama-server.exe`/`local-agent.exe`, or reboot after asking. |
-| **Model load fails** (OOM at load) | VRAM ceiling. For the 26B MoE add `--cpu-moe` (experts stay in RAM) to its `cmd`; for dense tiers lower `-ngl`. On AMD, selftest auto-remediates 26B with `--cpu-moe`. |
-| **Vulkan driver crash** (device-lost mid-generation, AMD) | The deep-context crash class (llama.cpp #17432). Re-run `selftest.ps1` — its depth-7000 **canary** reproduces it and the receipt names your GPU + driver. Remediation: **update the AMD Adrenalin driver** (ask the human first), keep it current; interim: `--cpu-moe` / lower `-ngl`. If it persists on a big MoE, add `nodes_per_submit: 1` to the model entry. |
+| **Model load fails** (OOM at load) | VRAM ceiling. For the 26B MoE: drop it (`moe_26b` `drop`, and change the `resident_tier` and agent seat if the tier's resident is the 26B) or declare a *measured* partial spill (`n_cpu_moe` with `n_cpu_moe_max`) in the profile table; never add the every-expert `--cpu-moe` to its `cmd` (INV-1: the cards do the inference, RAM is overflow only, and `audit-yaml` fails the file). For dense tiers lower `-ngl`. selftest does not remediate it: the receipt's failed `tiers[]` row carries the advice in `detail` and `llama-swap.yaml` is never edited. |
+| **Vulkan driver crash** (device-lost mid-generation, AMD) | The deep-context crash class (llama.cpp #17432). Re-run `selftest.ps1` — its depth-7000 **canary** reproduces it and the receipt names your GPU + driver. Remediation: **update the AMD Adrenalin driver** (ask the human first), keep it current; interim: lower `-ngl` or the window. If it persists on a big MoE, add `nodes_per_submit: 1` to the model entry. |
 | **Context overflow** (agent HTTP 400 / `context` error) | The transcript exceeded the ~32K window (see §4). Narrow the prompt to edit+upload shape, trim the toolset, or lower `--max-steps`. |
 | **GitHub tool refusals** | Token/scope. Ensure `$GITHUB_TOKEN` is set (least-privilege — only the scopes the task needs) and `$GITHUB_REPO=owner/name`. Put both in a **gitignored** `~/.local-agent-github.env`, never in the repo or a logged command line. |
 | **`doctor` exits non-zero with a `config findings` section** | One `FAIL` row per value that loads and then cannot do what it says: a `delegate_remotes` base not on the fleet node port `:18811`, one that is loopback (a delegate REMOTE is another box), one carrying a `/v1` suffix, or one the tailnet guard refuses (named by slot, `delegate_remotes[i] is refused by the tailnet guard`: the agent lane would fail every call on it and the single-shot lanes skip it); a `cascade_remote_lanes` base on neither shape a lane can be (a fleet node `:18811`, or a llama-swap on this box’s own `endpoint` port) or carrying `/v1`; `gpu_wait_ms` more than 3x `vision_gpu_wait_sec` (C-33); a `fleet_accelerators` entry naming a local-only device (`hailo-8l`, E-08: no node ever advertises it, so the call can only defer); one row per retired key still in the file. Nothing is refused for these — fix the file, or accept the row. |

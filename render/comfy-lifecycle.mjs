@@ -8,7 +8,8 @@
 // withGpuSlot). Dependency-free; deps are injectable purely for tests.
 import { existsSync, createWriteStream, renameSync, rmSync, readFileSync, mkdirSync, openSync, closeSync, readSync, fstatSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_process";
 import { readLaunchOwner, writeLaunchOwner, restampLaunchOwner, clearLaunchOwner, harnessLaunched, pidAlive as defaultPidAlive } from "./comfy-ownership.mjs";
 
@@ -305,14 +306,112 @@ function stripValued(args, flag) {
   return out;
 }
 
+// --- the engine-resident idle bound -----------------------------------------------------------------
+//
+// The house rule is that no idle model stays loaded. llama-swap keeps it with its own ttl; ComfyUI has no idle timer. The harness
+// frees an instance at the end of every job (gpu-lock.mjs POSTs /free) and the holder of the GPU lease stops a kept instance at
+// release (internal/comfyinst). Under the harness's own launch (--disable-smart-memory, always the first flag) ComfyUI also unloads
+// every model itself when a prompt ends, success or failure (execution.py, `if DISABLE_SMART_MEMORY: unload_all_models()`, ComfyUI
+// 0.38.0), so a kept single-prompt instance (--cache-none) is already bare between jobs and the pack below finds nothing to free.
+// What survives is the warm (--batch) session's executor cache, which keeps the loader outputs (the unloaded weights, in host RAM)
+// until a free resets the executor, and a hand-started instance run without --disable-smart-memory, which keeps its models in VRAM.
+// For those the bound lives INSIDE the engine, the llama-swap ttl analogue: the pack render/comfyui-ext/idle-nodes/offload_idle asks
+// ComfyUI's own worker to unload the models and reset the executor cache after COMFY_IDLE_FREE_SEC (default 300) with an empty queue.
+// Read from ComfyUI's code, not yet measured on a card (docs/systems/media-generation.md has the live check). The harness runs no
+// watcher and never acts on another process. It bounds models and caches, not the process: the Python process and its CUDA context
+// stay until the lease holder stops the instance (and an instance whose holder died stays until an operator does).
+//
+// The names are defined here, not in wan-multicard.mjs, which imports this file (through gpu-lock.mjs too: a cycle); wan-multicard.mjs
+// re-exports the yaml and the pack name next to EXT_YAML / EXT_NODE_PACK.
+const IDLE_EXT_DIR = join(dirname(fileURLToPath(import.meta.url)), "comfyui-ext");
+export const EXT_IDLE_YAML = join(IDLE_EXT_DIR, "extra_model_paths_idle.yaml");
+export const EXT_IDLE_PACK = "offload_idle";
+export const EXT_IDLE_PACK_FILE = join(IDLE_EXT_DIR, "idle-nodes", EXT_IDLE_PACK, "__init__.py");
+export const IDLE_FREE_DEFAULT_SEC = 300;
+/** The pack refuses less (a smaller bound would thrash reloads); the launcher judges COMFY_IDLE_FREE_SEC by the same rule. */
+const IDLE_FREE_MIN_SEC = 5;
+
+/**
+ * resolveIdleBound: the idle bound in seconds a kept or warm launch asks for, from COMFY_IDLE_FREE_SEC: unset = 300 (the house rule),
+ * `0` or `off` = none (said, once: COMFY-IDLE-OFF), a whole number of seconds of 5 or more = that, anything else = 300 and a
+ * COMFY-IDLE-WARN that names the value. It is fixed when an instance is LAUNCHED: a runner that reuses a running instance cannot change it.
+ */
+export function resolveIdleBound(env = process.env, log = () => {}) {
+  const raw = String(env.COMFY_IDLE_FREE_SEC ?? "").trim();
+  if (raw === "") return IDLE_FREE_DEFAULT_SEC;
+  const whole = /^\d+$/.test(raw) ? Number(raw) : null;
+  if (/^off$/i.test(raw) || whole === 0) {
+    log(`COMFY-IDLE-OFF: COMFY_IDLE_FREE_SEC=${raw} switches the idle bound off for the instances this run launches: they keep whatever they hold until their lease ends`);
+    return 0;
+  }
+  if (whole !== null && Number.isSafeInteger(whole) && whole >= IDLE_FREE_MIN_SEC) return whole;
+  log(`COMFY-IDLE-WARN: COMFY_IDLE_FREE_SEC=${raw} is not off, 0 or a whole number of seconds of ${IDLE_FREE_MIN_SEC} or more; using ${IDLE_FREE_DEFAULT_SEC}`);
+  return IDLE_FREE_DEFAULT_SEC;
+}
+
+/** fetchIdleProbe: what GET /offload/idle on a running instance answers (the pack's status object), or null. */
+export async function fetchIdleProbe(api) {
+  try {
+    const r = await fetch(api + "/offload/idle", { signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return null; // a 404 is an instance without the pack
+    const j = await r.json();
+    return j && typeof j === "object" && !Array.isArray(j) ? j : null;
+  } catch {
+    return null;
+  }
+}
+
+/** idleYamlToken: is this launch-argument token the idle yaml, by name, under any path spelling (`--flag=path` included)? */
+const idleYamlToken = (tok) => /(^|[\\/=])extra_model_paths_idle\.yaml$/i.test(String(tok));
+/** The same file, by exact path (slashes and case aside), for a yaml the operator's extra args already carry. */
+const sameFile = (a, b) => String(a).replace(/\\/g, "/").toLowerCase() === String(b).replace(/\\/g, "/").toLowerCase();
+
+const WHITELIST_FLAG = "--whitelist-custom-nodes";
+const DISABLE_ALL_FLAG = "--disable-all-custom-nodes";
+/**
+ * isLongFlag: is this token `long`, or an argparse abbreviation of it (`--wh`, `--wh=x`)? `minLen` is the shortest prefix ComfyUI's parser
+ * keeps unambiguous, measured against ComfyUI 0.38.0's own parser: `--wh` (4; `--w` also fits --windows-standalone-build) and
+ * `--disable-al` (12; `--disable-a` also fits --disable-auto-launch, --disable-async-offload and --disable-api-nodes).
+ */
+const isLongFlag = (tok, long, minLen) => {
+  const name = String(tok).split("=")[0];
+  return name.length >= minLen && long.startsWith(name);
+};
+
+/**
+ * withPackWhitelisted: `flags` with the idle pack in the custom-node whitelist ComfyUI will read. --whitelist-custom-nodes is
+ * nargs='+' with no append action, so a second occurrence REPLACES the first list: the pack goes INTO the last occurrence's value run
+ * (argparse keeps the last), never into a new flag. `--flag=a` takes one value only (`--flag=a b` leaves `b` a stray positional), so that
+ * spelling is rewritten to `--flag a` for the pack to follow. With --disable-all-custom-nodes and no whitelist a whitelist naming the pack
+ * is added at the end; with neither, every custom node loads (the pack among them, found through the yaml) and nothing is added.
+ */
+function withPackWhitelisted(flags, pack) {
+  const out = [...flags];
+  let at = -1;
+  for (let i = 0; i < out.length; i++) if (isLongFlag(out[i], WHITELIST_FLAG, 4)) at = i;
+  if (at < 0) {
+    if (out.some((f) => isLongFlag(f, DISABLE_ALL_FLAG, 12))) out.push(WHITELIST_FLAG, pack);
+    return out;
+  }
+  const tok = String(out[at]);
+  const eq = tok.indexOf("=");
+  if (eq >= 0) out.splice(at, 1, tok.slice(0, eq), ...(tok.slice(eq + 1) === "" ? [] : [tok.slice(eq + 1)]));
+  let end = at + 1;
+  while (end < out.length && !String(out[end]).startsWith("--")) end++;
+  if (!out.slice(at + 1, end).includes(pack)) out.splice(end, 0, pack);
+  return out;
+}
+
 /**
  * launchFlags is the exact argv tail ensureComfy spawns main.py with. Base flags
  * first, then the profile's --cuda-device, then the extra args LAST (the J4 seam's
  * contract: extra args are the tail). The profile's device wins over a --cuda-device
  * or --default-device the extra args carry — argparse takes the last occurrence, so
  * leaving them in would silently override the binding.
+ * `idle` ({ yaml, pack, packFile }, null = none: the argv is then byte for byte what it was) adds the idle bound: its yaml once,
+ * and the pack in the custom-node whitelist (see withPackWhitelisted).
  */
-export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "", profile = { cudaDevice: "", dynamicVram: "" }, instance = null, comfyDir = "", warn = () => {}, launch = null } = {}) {
+export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "", profile = { cudaDevice: "", dynamicVram: "" }, instance = null, comfyDir = "", warn = () => {}, launch = null, idle = null } = {}) {
   const flags = ["--disable-smart-memory"];
   // warm: a BATCH session keeps ComfyUI's model cache ON so the checkpoint loads once
   // for N renders; the caller still tears the whole session down at the batch boundary
@@ -364,8 +463,21 @@ export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "",
     const { outputDir, tempBase } = instancePaths(comfyDir, instance.key);
     flags.push("--port", String(instance.port), "--output-directory", outputDir, "--temp-directory", tempBase);
   }
+  // The idle bound (resolveIdleBound): only when the yaml AND the pack file exist, because ComfyUI exits at boot on an
+  // --extra-model-paths-config file that does not exist and on a custom_nodes folder that does not; a render never fails for want of it.
+  // The yaml goes after the base and placement flags and before the operator's args, once; the pack goes into the whitelist last of all.
+  let idleOn = false;
+  if (idle && idle.yaml) {
+    const missing = !existsSync(idle.yaml) ? idle.yaml : !existsSync(idle.packFile) ? idle.packFile : "";
+    if (missing) {
+      warn(`COMFY-IDLE-WARN: the idle bound is not launched: ${missing} is missing (ComfyUI cannot start with an extra-model-paths file or a custom_nodes folder that does not exist); this instance keeps whatever it holds until its lease ends`);
+    } else {
+      idleOn = true;
+      if (![...flags, ...extra].some((f) => sameFile(f, idle.yaml) || sameFile(f, "--extra-model-paths-config=" + idle.yaml))) flags.push("--extra-model-paths-config", idle.yaml);
+    }
+  }
   flags.push(...extra);
-  return flags;
+  return idleOn ? withPackWhitelisted(flags, idle.pack) : flags;
 }
 
 /** argvFlagValue: the value of the LAST `flag v` / `flag=v` in an argv (argparse semantics). */
@@ -744,6 +856,39 @@ function leaseEpochOf(env) {
   return raw !== "" && Number.isInteger(n) && n >= 0 ? n : null;
 }
 
+/**
+ * warnWithoutIdleBound: a running instance a kept or warm runner reuses, said once per runner start when its argv lacks the idle yaml (a hand-started
+ * instance, or one an older build kept). It is reused all the same: it keeps whatever it holds until its lease ends, as it always did.
+ * An argv ComfyUI does not report is unknown, not missing, and says nothing.
+ */
+async function warnWithoutIdleBound({ api, key, systemArgv, log }) {
+  let argv = null;
+  try { argv = await systemArgv(api); } catch {}
+  if (!Array.isArray(argv) || argv.some(idleYamlToken)) return;
+  log(`COMFY-IDLE-WARN: instance '${key || "default"}' on ${api} has no idle bound (launched without the idle pack); it keeps whatever it holds until its lease ends. To bound a hand-started instance add --extra-model-paths-config ${EXT_IDLE_YAML} to its launch`);
+}
+
+/**
+ * verifyIdleBound: ask a freshly launched instance for its idle status (GET /offload/idle) and say what came back; never throws.
+ * One COMFY-IDLE line when the pack is live at the bound that was asked for (a pack that reports no bound is taken at its word);
+ * a COMFY-IDLE-WARN when it did not answer, reports it cannot run, or reports another bound than `secs` (it never read the variable).
+ */
+async function verifyIdleBound({ api, key, secs, probeIdle, log }) {
+  const who = `instance '${key || "default"}' on ${api}`;
+  let answer = null;
+  try { answer = await probeIdle(api); } catch {}
+  if (!answer || typeof answer !== "object") {
+    log(`COMFY-IDLE-WARN: ${who} did not answer GET /offload/idle, so the idle pack may not have loaded (its console log says); it keeps whatever it holds until its lease ends`);
+  } else if (answer.error) {
+    log(`COMFY-IDLE-WARN: ${who} reports that its idle bound is not active: ${answer.error}; it keeps whatever it holds until its lease ends`);
+  } else if (typeof answer.limit_sec === "number" && answer.limit_sec !== secs) {
+    // OFFLOAD_IDLE_FREE_SEC went to the child, so a pack that answers another bound did not read it: the operator asked for secs, not for this.
+    log(`COMFY-IDLE-WARN: ${who} reports an idle bound of ${answer.limit_sec} s, not the ${secs} s asked for (OFFLOAD_IDLE_FREE_SEC did not reach the pack); it frees after ${answer.limit_sec} s with an empty queue`);
+  } else {
+    log(`COMFY-IDLE: ${who} frees its models and caches after ${secs} s with an empty queue`);
+  }
+}
+
 // ensureComfy: if ComfyUI is already up, reuse it — unless this binding carries a launch
 // profile the running instance contradicts (then: restart it when the harness launched
 // it and nobody holds it, otherwise refuse with a COMFY-PROFILE-MISMATCH line; never
@@ -769,6 +914,10 @@ export async function ensureComfy(opts = {}) {
     // to pin by uuid (storage first) and the env the placement needs. Absent = every launch behaves exactly as before.
     launch = null,
     systemArgv = fetchSystemArgv,
+    // probeIdle: asks a freshly launched instance whether its idle bound is live (GET /offload/idle); null = no answer.
+    probeIdle = fetchIdleProbe,
+    // idleExt: where the idle bound's yaml and pack are (a test points it elsewhere).
+    idleExt = { yaml: EXT_IDLE_YAML, pack: EXT_IDLE_PACK, packFile: EXT_IDLE_PACK_FILE },
     readLaunch = readLaunchOwner,
     writeLaunch = writeLaunchOwner,
     restampLaunch = restampLaunchOwner,
@@ -797,6 +946,9 @@ export async function ensureComfy(opts = {}) {
   const instance = resolveInstance({ api: apiOpt || process.env.COMFY_API, env });
   const { api, key } = instance;
   const profile = resolveLaunchProfile(env);
+  // The idle bound is for the instances that outlive their runner: a kept one, or a warm session that holds its cache. The default single
+  // render is killed by its own runner, so it asks for nothing and its launch stays byte for byte what it was.
+  const idleSecs = (keep || warm) ? resolveIdleBound(env, log) : 0;
   // `sage` says which attention the call was sized for (wan-multicard.mjs planMulticard sets it); a launch that does not say keeps the old shape, { cards } alone
   if (launch) profile.multicard = { cards: [...launch.cards], ...(typeof launch.sage === "boolean" ? { sage: launch.sage } : {}) };
   // Can this call launch an instance on `api` at all? A keyed instance owns its --port; the
@@ -811,8 +963,12 @@ export async function ensureComfy(opts = {}) {
     log(line);
     return new Error(line);
   };
+  // The reuse decision and the idle warning both read the running instance's argv (GET /system_stats, up to 8 s on a slow one): one
+  // request answers both. reuseVerdict's return shape is read by other callers, so the answer is shared here, not through it.
+  let argvAsked;
+  const askArgv = (a) => (argvAsked ??= systemArgv(a));
   if (await up(api)) {
-    const v = await reuseVerdict({ api, comfyDir, profile, key, port: instance.port, systemArgv, readLaunch, alive });
+    const v = await reuseVerdict({ api, comfyDir, profile, key, port: instance.port, systemArgv: askArgv, readLaunch, alive });
     if (v.reuse) {
       // A kept instance outlives a lease whose holder died or was fenced out, and the next lease on
       // its card finds it running. Reusing it makes it that lease's: re-stamp the marker, or the
@@ -828,6 +984,11 @@ export async function ensureComfy(opts = {}) {
           log(`COMFY-KEEP-WARN: could not hand instance '${key}' to lease epoch ${epoch} (${e && e.message}); its marker still names lease epoch ${(readLaunch(comfyDir, key) || {}).leaseEpoch ?? "?"}, so this lease's release will not stop it`);
         }
       }
+      // A running instance is never restarted or refused for want of the idle pack (every kept instance in flight on an upgrade, and every
+      // hand-started one, lacks it): it is said once per runner start (this call), not once per process tree, so a driver that starts one
+      // runner per shot says it once per shot. Its argv is asked here because reuseVerdict does not fetch it for the default instance, and
+      // never twice (askArgv); an argv ComfyUI does not report is unknown, not missing. COMFY_IDLE_FREE_SEC cannot change an instance already running.
+      if (idleSecs > 0) await warnWithoutIdleBound({ api, key, systemArgv: askArgv, log });
       return null; // already running and fit for this binding — don't manage it
     }
     if (!v.restart) {
@@ -871,7 +1032,9 @@ export async function ensureComfy(opts = {}) {
     const { outputDir, tempDir } = instancePaths(comfyDir, key);
     for (const d of [outputDir, tempDir]) { try { mkdirs(d); } catch {} }
   }
-  const flags = launchFlags({ reserveVram, warm, extraArgs: env.COMFY_EXTRA_ARGS, profile, instance: key ? instance : null, comfyDir, warn: log, launch });
+  const flags = launchFlags({ reserveVram, warm, extraArgs: env.COMFY_EXTRA_ARGS, profile, instance: key ? instance : null, comfyDir, warn: log, launch, idle: idleSecs > 0 ? idleExt : null });
+  // Applied only if launchFlags found the files: the child's env and the probe below follow what it really launched.
+  const idleApplied = idleSecs > 0 && flags.some(idleYamlToken);
   // A --cuda-device launch has already scoped the cards (main.py rewrites
   // CUDA_VISIBLE_DEVICES to it), so the multi-GPU visibility restore below does not
   // apply — and neither does its --disable-pinned-memory: one visible card is not the
@@ -898,6 +1061,9 @@ export async function ensureComfy(opts = {}) {
       && !flags.includes("--disable-pinned-memory")) {
     flags.push("--disable-pinned-memory");
   }
+  // The pack reads its bound from the child's env. A COPY, made after the identity check above (which asks whether the placement's env is
+  // process.env itself) so neither that decision nor the parent's env changes; a launch that asked for nothing passes spawnEnv as it was.
+  const childEnv = idleApplied ? { ...spawnEnv, OFFLOAD_IDLE_FREE_SEC: String(idleSecs) } : spawnEnv;
   let child;
   if (keep) {
     // A KEPT instance must not be a piped child of a runner that is about to exit. As one it held
@@ -913,7 +1079,9 @@ export async function ensureComfy(opts = {}) {
     // marker records that epoch). The holder of the lease stops it on release: `gpu reserve`
     // when its wrapped command ends, and the pipeline when its media lease is released
     // (internal/comfyinst). A kept default instance (no key) has no lease epoch in its marker and
-    // is stopped by its operator, as before.
+    // is stopped by its operator, as before. Within the lease, the idle pack this launch carries
+    // (resolveIdleBound) frees the instance's models and caches after COMFY_IDLE_FREE_SEC with an
+    // empty queue; the process and its CUDA context live until the holder stops it.
     rotateComfyLog(comfyDir, key);
     trimRotatedLog(comfyDir, key);
     let fd = null;
@@ -921,13 +1089,13 @@ export async function ensureComfy(opts = {}) {
       log(`COMFY-KEEP-WARN: cannot open ${comfyLogPath(comfyDir, key)} (${e && e.message}); this instance's console goes nowhere`);
     }
     try {
-      child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: ["ignore", fd ?? "ignore", fd ?? "ignore"], detached: true, windowsHide: true, env: spawnEnv });
+      child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: ["ignore", fd ?? "ignore", fd ?? "ignore"], detached: true, windowsHide: true, env: childEnv });
     } finally {
       if (fd !== null) { try { closeFd(fd); } catch {} } // the child holds its own copy
     }
     try { child?.unref?.(); } catch {}
   } else {
-    child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: ["ignore", "pipe", "pipe"], detached: false, env: spawnEnv, windowsHide: true });
+    child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: ["ignore", "pipe", "pipe"], detached: false, env: childEnv, windowsHide: true });
     captureComfyOutput(child, comfyDir, key);
   }
   // Record the launch so a later job can tell this instance from a foreign one (the
@@ -969,7 +1137,12 @@ export async function ensureComfy(opts = {}) {
   } catch {}
   for (let i = 0; i < maxPolls; i++) {
     await new Promise((r) => setTimeout(r, pollMs));
-    if (await up(api)) return child;
+    if (await up(api)) {
+      // Ask the instance it launched whether the pack is alive: a pack that did not load (an upstream rename, a folder ComfyUI skipped) frees
+      // nothing and would otherwise be silent. Said, never fatal: no render fails for want of the bound.
+      if (idleApplied) await verifyIdleBound({ api, key, secs: idleSecs, probeIdle, log });
+      return child;
+    }
     if (earlyExit) {
       const tail = tailComfyLog(comfyDir, undefined, key);
       const seeLog = tail

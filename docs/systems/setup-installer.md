@@ -36,9 +36,11 @@ Three scripts run in order, each ending with a machine-readable JSON line:
 2. **`install.ps1`** installs pinned binaries and models, substitutes the template placeholders, and
    builds the Go binaries.
 3. **`selftest.ps1`** emits a receipt with verdict `pass | warn | fail`. On a Vulkan backend it
-   also runs the **H3 canary suite** (`fa_q8kv`, `moe_full_offload`, `ctx_sweep`, `bench`,
-   `swap_leak`, `embedder`, `whisper`) — promotion gates recorded in `receipt.canaries`, never
-   verdict-changing; `OFFLOAD_SELFTEST_CANARIES=1|0` forces them on/off anywhere.
+   also runs the **H3 canary suite** (`fa_q8kv`, `ctx_sweep`, `bench`, `swap_leak`, `embedder`,
+   `whisper`; `moe_full_offload` stays in the receipt as a retired entry that is always `skipped`,
+   since the installer places no experts in host RAM) — promotion gates recorded in
+   `receipt.canaries`, never verdict-changing; `OFFLOAD_SELFTEST_CANARIES=1|0` forces them on/off
+   anywhere.
 
 `setup/SETUP-AGENT.md` is written for an agent to execute directly, with decision tables keyed to
 those receipts.
@@ -99,9 +101,10 @@ confusion:
   `--cache-ram` (llama-server's host-RAM prompt cache) is rendered per RAM tier from the top-level
   `cache_ram_mib_by_ram_tier` map since 0.131.3 (ADR 0056) — never 0.
   template because that backend has neither `-ngl` nor `--flash-attn`). On `amd-rdna3` the f16/16K
-  values are an explicit SAFE FLOOR: the selftest's H3 canary suite (`fa_q8kv`, `ctx_sweep`,
-  `moe_full_offload`) measures the q8_0/32K/26B-full-offload promotions on the real box, and the
-  installing agent applies them canary-gated per the runbook's AMD RDNA3 chapter.
+  values are an explicit SAFE FLOOR: the selftest's H3 canary suite (`fa_q8kv`, `ctx_sweep`)
+  measures the q8_0 KV and 32K promotions on the real box, and the installing agent applies them
+  canary-gated per the runbook's AMD RDNA3 chapter. The 26B on that tier is already card-resident
+  (`-ngl 99`), so there is no full-offload promotion left to measure (`moe_full_offload` is retired).
 - **Vulkan device pinning:** every model entry in the Vulkan template carries
   `GGML_VK_VISIBLE_DEVICES=0` so multi-ICD boxes serve from a deterministic adapter.
 - **One exemption:** the `embeddinggemma` entry bypasses the shared flag macro entirely, taking
@@ -465,8 +468,12 @@ every offender, and nothing is written:
    `local-offload audit-yaml` runs the same checker over a live file.
 2. **The spill ceiling (H-01, INV-1).** `--n-cpu-moe N` (every spelling, and the `LLAMA_ARG_N_CPU_MOE`
    twin) above the tier's `n_cpu_moe_max`, its MEASURED spill, is refused. A tier that recorded none
-   sanctions none, so any `N` above zero is refused. A tier that names `moe_26b: n_cpu_moe` with no `N`
-   is refused too, because that renders the every-expert `--cpu-moe` on a box with a card.
+   sanctions none, so any `N` above zero is refused. A tier that names `moe_26b: n_cpu_moe` with no `N`,
+   or `moe_26b: cpu_moe` on a backend with a card, is refused earlier still, at derive (`moeDefect`, at any
+   RAM tier), because it would put every expert in host RAM; the installer never writes the every-expert
+   `--cpu-moe` for a box with a card (0186 w4). A box off the tier matrix (`--fallback-backend cuda`,
+   `cuda-resident`, `dual-cuda`) renders no 26B at all: it has no measurement, so it is not claimed to fit.
+   The cpu backend, which has no card to overflow from, is the one exemption, in the gate and in the audit.
    `n_cpu_moe_max` is a separate number from `n_cpu_moe` on purpose: the placement a tier ships and the
    ceiling its measurement supports are two decisions, and one field cannot check itself. Only `ampere-6`
    declares one: `n_cpu_moe_max: 40`, the number its Qwen3.6-35B-A3B spill seat was measured at (the seat's
