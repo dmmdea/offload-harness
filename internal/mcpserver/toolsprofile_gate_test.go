@@ -271,7 +271,7 @@ func TestLeadCutNeverDropsAConstraintWord(t *testing.T) {
 // TestLeadGuardCoversTheGate: every word the gate classifies by is a word production's lead guard refuses to cut. Narrowing the
 // guard turns this red.
 func TestLeadGuardCoversTheGate(t *testing.T) {
-	for _, w := range []string{"never", "refuse", "refused", "refuses", "only", "must", "not", "do not", "may not", "don't", "can't", "won't", "cannot", "required", "denied", "trusted", "untrusted", "unattended", "sandbox", "sandboxed", "safety", "advisory", "read-only", "forbidden", "irreversible", "destructive", "opt-in", "without", "no delete", "no shell", "no run", "no network", "no cloud", "no write", "NOT", "ONLY", "forward", "forwarded", "forwards", "forwarding", "travel", "travels", "travelled", "tailnet", "sent", "cloud"} {
+	for _, w := range []string{"never", "refuse", "refused", "refuses", "only", "must", "not", "do not", "may not", "don't", "can't", "won't", "cannot", "required", "denied", "trusted", "untrusted", "unattended", "sandbox", "sandboxed", "safety", "advisory", "read-only", "forbidden", "irreversible", "destructive", "opt-in", "without", "no delete", "no shell", "no run", "no network", "no cloud", "no write", "NOT", "ONLY", "forward", "forwarded", "forwards", "forwarding", "travel", "travels", "travelled", "tailnet", "sent", "cloud", "fleet node", "fleet nodes"} {
 		probe := "A sentence that says " + w + " here."
 		if !gateTrigger.MatchString(probe) {
 			t.Errorf("the gate does not classify by %q", w)
