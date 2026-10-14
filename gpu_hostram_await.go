@@ -250,10 +250,14 @@ func awaitHostRAMBounded(ctx context.Context, await func(gpulease.AwaitHostRAMOp
 	return nil
 }
 
+// releaseByEpochFn is Manager.ReleaseByEpoch. A variable so a test can make it answer "nothing was held" for a lease that is.
+var releaseByEpochFn = func(m *gpulease.Manager, epoch uint64) (bool, error) { return m.ReleaseByEpoch(epoch) }
+
 // leaseNotReleasedLine is the one line printed when a release the harness just tried did not happen. The failure text of a
 // bound or a wait is built BEFORE the release runs and so says only that the lease is being released; this line is the report of
 // the outcome, and the way out.
-func leaseNotReleasedLine(prefix string, epoch uint64, err error) string {
+func leaseNotReleasedLine(prefix string, epoch uint64, err error, warmOwed bool) string {
+	_ = warmOwed
 	return fmt.Sprintf("%s: LEASE NOT RELEASED (epoch %d): %v; run gpu release --warm-seat --epoch %d", prefix, epoch, err, epoch)
 }
 
@@ -294,8 +298,8 @@ func releaseAfterRAMWait(m *gpulease.Manager, epoch uint64, cfg config.Config, e
 	}
 	stopKeptInstances(cfg, epoch, os.Stderr)
 	warmBackGuarded(cfg, autoReleaseWarmGuard(m, epoch), os.Stderr)
-	if _, rerr := m.ReleaseByEpoch(epoch); rerr != nil {
-		fmt.Fprintln(os.Stderr, leaseNotReleasedLine("gpu reserve", epoch, rerr))
+	if _, rerr := releaseByEpochFn(m, epoch); rerr != nil {
+		fmt.Fprintln(os.Stderr, leaseNotReleasedLine("gpu reserve", epoch, rerr, m.SeatWarmOwed() != ""))
 	}
 	var bound *errHostRAMHoldBound
 	if errors.As(err, &bound) {
@@ -311,7 +315,8 @@ func releaseAfterRAMWait(m *gpulease.Manager, epoch uint64, cfg config.Config, e
 // says only what is known. Past the stamped moment the lease is still there, so whoever releases it has not yet: a wrapper
 // does it when it exits; the hidden holder of a --detach lease does it at its next poll (a reserve that died cannot), and `gpu
 // release --warm-seat --epoch N` does it now. long adds the explanation of the order, for the one-line summary of the holder.
-func hostRAMAskedStatus(giB float64, held time.Duration, until, now time.Time, long bool, epoch uint64, byWrapper bool) string {
+func hostRAMAskedStatus(giB float64, held time.Duration, until, now time.Time, long bool, epoch uint64, byWrapper, warmOwed bool) string {
+	_ = warmOwed
 	s := fmt.Sprintf("host RAM %.1f GiB asked, not yet admitted", giB)
 	heldFor := held.Round(time.Second)
 	switch {

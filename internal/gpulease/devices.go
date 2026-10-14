@@ -967,7 +967,7 @@ func (m *Manager) restampV2Locked(epoch uint64, fn func(*Meta)) error {
 // epoch is not a device lease (the caller falls through to the whole-node path).
 func (m *Manager) releaseByEpochV2(epoch uint64) (released, handled bool, err error) {
 	if epoch != 0 {
-		if _, serr := os.Stat(epochRecordPath(m.leaseDir(), epoch)); serr != nil {
+		if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr != nil {
 			return false, false, nil
 		}
 		if err := m.releaseV2(epoch); err != nil {

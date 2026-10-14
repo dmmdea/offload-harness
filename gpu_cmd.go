@@ -318,7 +318,7 @@ func runGPUStatus(args []string) error {
 		excl += "  (draining: new runs wait, in-flight runs complete)"
 	}
 	if info.HostRAMWaitGiB > 0 {
-		excl += "  (" + hostRAMAskedStatus(info.HostRAMWaitGiB, info.Age, info.HostRAMHoldUntil, time.Now(), true, info.Epoch, info.Yields == gpulease.YieldsWrapper) + ")"
+		excl += "  (" + hostRAMAskedStatus(info.HostRAMWaitGiB, info.Age, info.HostRAMHoldUntil, time.Now(), true, info.Epoch, info.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "") + ")"
 	}
 	if info.Command != "" {
 		excl += "\n  running: " + info.Command
@@ -364,7 +364,7 @@ func runGPUStatus(args []string) error {
 				declared = fmt.Sprintf(", host RAM %.1f GiB", l.HostRAMGiB)
 			}
 			if l.HostRAMWaitGiB > 0 {
-				declared = ", " + hostRAMAskedStatus(l.HostRAMWaitGiB, l.Age, l.HostRAMHoldUntil, time.Now(), false, l.Epoch, l.Yields == gpulease.YieldsWrapper)
+				declared = ", " + hostRAMAskedStatus(l.HostRAMWaitGiB, l.Age, l.HostRAMHoldUntil, time.Now(), false, l.Epoch, l.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "")
 			}
 			fmt.Printf("  lease epoch %d: %s pid %d, %s%s%s\n", l.Epoch, l.Class, l.PID, scope, group, declared)
 		}
@@ -716,7 +716,7 @@ func runGPUReserve(args []string) error {
 		// A release that fails is said, never dropped: the failure text of a bound or a wait was built before this ran and says
 		// only that the lease is being released.
 		if rerr := lease.Release(); rerr != nil {
-			fmt.Fprintln(os.Stderr, leaseNotReleasedLine("gpu reserve", lease.Epoch(), rerr))
+			fmt.Fprintln(os.Stderr, leaseNotReleasedLine("gpu reserve", lease.Epoch(), rerr, m.SeatWarmOwed() != ""))
 		}
 	}
 	defer finish()
@@ -1354,7 +1354,7 @@ func runGPUHold(args []string) error {
 		// The instances kept under this lease go with it (gpu_instances.go).
 		stopInstancesOfLease(loadCfg(fs), lease, os.Stderr)
 		if rerr := lease.Release(); rerr != nil {
-			fmt.Fprintln(os.Stderr, leaseNotReleasedLine("gpu hold", lease.Epoch(), rerr))
+			fmt.Fprintln(os.Stderr, leaseNotReleasedLine("gpu hold", lease.Epoch(), rerr, m.SeatWarmOwed() != ""))
 		}
 	}()
 
@@ -1485,7 +1485,7 @@ func runGPURelease(args []string) error {
 	if *warm {
 		warmBackGuarded(loadCfg(fs), releaseWarmGuard(m, *epoch), os.Stderr)
 	}
-	released, err := m.ReleaseByEpoch(*epoch)
+	released, err := releaseByEpochFn(m, *epoch)
 	if err != nil {
 		if stopped {
 			// The stop cannot be taken back: say so, so the operator does not read the failure

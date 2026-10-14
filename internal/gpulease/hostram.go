@@ -46,6 +46,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -588,6 +589,29 @@ func UseRemoveFault(fn func(path string) error) (restore func()) {
 	old := removeClaimFault
 	removeClaimFault = fn
 	return func() { removeClaimFault = old }
+}
+
+// statFaultHook, when set, is consulted by statRecord before the real stat: a test seam (UseStatFault).
+var statFaultHook func(path string) error
+
+// statRecord is os.Stat of a lease record, with the test seam in front of it.
+func statRecord(path string) error {
+	if statFaultHook != nil {
+		if err := statFaultHook(path); err != nil {
+			return err
+		}
+	}
+	_, err := os.Stat(path)
+	return err
+}
+
+// UseStatFault makes the examination of a lease record before its release fail with what fn returns for the path (nil from fn
+// lets the real stat run), until the returned function is called: the way a test provokes a stat that fails for a reason
+// other than the record being absent, as one does on Windows while the record is being replaced. Nothing in production calls it.
+func UseStatFault(fn func(path string) error) (restore func()) {
+	old := statFaultHook
+	statFaultHook = fn
+	return func() { statFaultHook = old }
 }
 
 // HostRAMHold is what this lease's OWN record says about its wait for the host: the figure it still asks for (0 = admitted, or
