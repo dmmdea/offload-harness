@@ -318,7 +318,7 @@ the JSON column, and render its tools through the template for the other.
 
 - opencode inlines every enabled MCP tool schema per call; the 35 harness tools of 0.137.0 are
   20,868 tokens. `primaryTools: "tier1"` and `offloadTools: "recon"` are the default mitigations
-  (the offload subagent's measured fixed prompt was 24,680 tokens before the recon split). On 0.186.0 the full list of a 31-tool box is 30,537 tokens; `tools_schema_profile: "compact"` on the harness config brings it to 16,811 (see [Tool schema size](#tool-schema-size)).
+  (the offload subagent's measured fixed prompt was 24,680 tokens before the recon split). On 0.186.0 the full list of a 31-tool box is 30,537 tokens; `tools_schema_profile: "compact"` on the harness config brings it to 17,200 (see [Tool schema size](#tool-schema-size)).
 - Prefix-cache reuse on a vLLM hybrid-attention seat is block-granular: cached prompt tokens come
   in whole blocks of the seat's block size (1,568 tokens on the Qwen3.8 fp8 seat; measured
   10,976 = 7 blocks, 12,544 = 8, 25,088 = 16), so every request recomputes its trailing partial
