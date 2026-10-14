@@ -508,6 +508,37 @@ func TestScanAcceptanceDirFixtures(t *testing.T) {
 			name:  "only .json files are read",
 			files: map[string]string{"notes.md": `{"acceptance":["regex:within 90 s"]}`},
 		},
+		{
+			// encoding/json matches a key to the struct tag without regard to case, so
+			// this is a live acceptance list for every consumer of the contract.
+			name:      "a capitalised key is read like the production decoder reads it",
+			files:     map[string]string{"c.json": `{"goal":"g","Acceptance":["regex:within 90 s"]}`},
+			want:      []wantFinding{{"c.json", "Acceptance[0]", "speed term"}},
+			wantFiles: []string{"c.json"},
+			wantStrs:  1,
+		},
+		{
+			name:      "an upper-case key in a nested subtask",
+			files:     map[string]string{"c.json": `{"subtasks":[{"ACCEPTANCE":["contains:x"]},{"ACCEPTANCE":["not_contains:faster"]}]}`},
+			want:      []wantFinding{{"c.json", "subtasks[1].ACCEPTANCE[0]", "speed term"}},
+			wantFiles: []string{"c.json"},
+			wantStrs:  2,
+		},
+		{
+			// Both spellings are scanned; the decoder keeps only the last one it meets,
+			// and which one that is depends on the file, so neither may hide the other.
+			name:      "two spellings of the key in one object are both read",
+			files:     map[string]string{"c.json": `{"acceptance":["contains:x"],"Acceptance":["regex:within 90 s"]}`},
+			want:      []wantFinding{{"c.json", "Acceptance[0]", "speed term"}},
+			wantFiles: []string{"c.json"},
+			wantStrs:  2,
+		},
+		{
+			name:      "a capitalised key holding a bare string is refused too",
+			files:     map[string]string{"c.json": `{"Acceptance":"contains:x"}`},
+			want:      []wantFinding{{"c.json", "Acceptance", "not an array"}},
+			wantFiles: []string{"c.json"},
+		},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -579,6 +610,63 @@ func filesWithAcceptanceKey(t *testing.T, dir string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestFilesWithAcceptanceKeyByteSearch pins the second way of finding the files,
+// on its own: it must agree with the walk about which spellings of the key count,
+// or the non-vacuity cross-check below would flag a file the walk read correctly.
+func TestFilesWithAcceptanceKeyByteSearch(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		want  string
+	}{
+		{"the plain key", map[string]string{"c.json": `{"acceptance":["contains:x"]}`}, "c.json"},
+		{"a spaced key", map[string]string{"c.json": `{"acceptance" : []}`}, "c.json"},
+		{"a capitalised key", map[string]string{"c.json": `{"Acceptance":["contains:x"]}`}, "c.json"},
+		{"an upper-case key in a nested directory", map[string]string{"a/b/c.json": `{"x":[{"ACCEPTANCE":[]}]}`}, "a/b/c.json"},
+		{"a quoted key inside a text value is not a key", map[string]string{"c.json": `{"context":"the \"acceptance\": list"}`}, ""},
+		{"a file with no acceptance key", map[string]string{"c.json": `{"goal":"g"}`}, ""},
+		{"a non-json file", map[string]string{"c.md": `{"acceptance":[]}`}, ""},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for rel, body := range tc.files {
+				p := filepath.Join(dir, filepath.FromSlash(rel))
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := strings.Join(filesWithAcceptanceKey(t, dir), ","); got != tc.want {
+				t.Errorf("filesWithAcceptanceKey = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestProductionDecoderReadsAcceptanceKeyCaseInsensitively pins the premise of the
+// two case-insensitive matches above, using the real contract-file reader: if the
+// production decoder ever became case-sensitive, the scan could go back to the
+// exact key, and this test is where that would be noticed.
+func TestProductionDecoderReadsAcceptanceKeyCaseInsensitively(t *testing.T) {
+	for _, key := range []string{"acceptance", "Acceptance", "ACCEPTANCE"} {
+		p := filepath.Join(t.TempDir(), "c.json")
+		body := `{"goal":"g","` + key + `":["regex:within 90 s"]}`
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		specs, err := parseContractFile(p)
+		if err != nil {
+			t.Fatalf("parseContractFile(%s): %v", body, err)
+		}
+		if len(specs) != 1 || strings.Join(specs[0].Acceptance, "|") != "regex:within 90 s" {
+			t.Errorf("key %q: the production reader holds acceptance %q, want [regex:within 90 s]", key, specs[0].Acceptance)
+		}
+	}
 }
 
 // TestContractAcceptanceCarriesNoSpeedTerm is the live gate: every acceptance
