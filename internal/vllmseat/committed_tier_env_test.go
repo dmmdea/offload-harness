@@ -110,6 +110,26 @@ func TestCommittedTiersRenderTheirMeasuredSeatEnv(t *testing.T) {
 		"SEAT_LMCACHE_PYTHONPATH": "/opt/seat/lmcache-overlay",
 		"SEAT_HF_HOME":            "/hf",
 		"SEAT_L2_STATUS_FILE":     "/opt/seat/seat-l2-qwen3.8-27b-vllm.status",
+		"SEAT_MP_HTTP_PORT":       "18790",
+
+		// The cache server's half, which is what "parity" most depends on: the store the seat
+		// writes to, the share it mounts, the rate it must clear and the size it is pruned to.
+		// Literals on purpose, taken from the tiers' cache_server blocks in profiles.json: a
+		// value computed from the same function the renderer calls could not disagree with it.
+		"SEAT_L2":               `{"type":"fs_native","base_path":"/mnt/kvcache/lmcache-seat-tp2-fp8","num_workers":8,"use_odirect":false,"max_capacity_gb":45}`,
+		"SEAT_L2_MOUNT_SRC":     "//store.example/kvcache",
+		"SEAT_L2_MOUNT_DIR":     "/mnt/kvcache",
+		"SEAT_L2_MOUNT_OPTS":    "vers=3.1.1",
+		"SEAT_L2_MIN_MBPS":      "200",
+		"SEAT_L2_PRUNE_GB":      "45",
+		"SEAT_L2_MOUNT_SRCADDR": "auto",
+
+		// What the engine runs and serves: the venv the prerequisite check looked in, and the
+		// weights it resolved (the tier's model_repo under the HF cache). Without them
+		// seat_fg.sh falls back to <seat dir>/vllm-env and a hard-coded repo id, whatever the
+		// check vouched for.
+		"SEAT_VENV":  "/opt/seat/vllm-env",
+		"SEAT_MODEL": "/hf/hub/models--RedHatAI--Qwen3.8-27B-INT4/snapshots/synthetic",
 	}
 	const fourFlags = "--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3 --kv-cache-dtype fp8"
 	cases := map[string]struct {

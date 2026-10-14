@@ -312,6 +312,9 @@ func TestInstallVLLMSeatRefusesWSLOnlyFlagsOnALinuxTier(t *testing.T) {
 	for flag, val := range map[string]string{
 		"-distro": "distro", "-wsl-seat-dir": "/srv/seat", "-host-prefix": "/mnt/distro",
 		"-cache-mount-src": "//store.example/kvcache", "-cache-mount-opts": "vers=3.1.1",
+		// The linux-systemd templates carry no LMCache wiring and no overlay token: the flag
+		// would clear the fp8 refusal and change no byte of the output.
+		"-lmcache-overlay": "/opt/seat/lmcache-overlay",
 	} {
 		t.Run(flag, func(t *testing.T) {
 			mustRefuse(t, runSeatCommand(t, "blackwell-16", flag, val), "a windows-wsl-only flag on a systemd seat", "-"+flag, "windows-wsl")
