@@ -8,7 +8,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 )
 
-// The yield request (plan P11, ADR 0085) reaches the one-line brief a session reads first: an
+// The yield request (plan P11, ADR 0086) reaches the one-line brief a session reads first: an
 // overdue lease whose holder was asked to yield says so, and the sentence is not the part a fixed
 // width cuts off.
 func TestBriefVerdictOverdueNamesAskedYield(t *testing.T) {

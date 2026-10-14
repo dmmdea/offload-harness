@@ -155,7 +155,7 @@ func orphanedNote(h *Holder) string {
 		ownerWho(h), secs(h.OrphanedForS), secs(h.OrphanGraceS)) + yieldTail(h)
 }
 
-// yieldTail is what became of the request made of the lease's holder (plan P11, ADR 0085), or "": the
+// yieldTail is what became of the request made of the lease's holder (plan P11, ADR 0086), or "": the
 // sentence gpulease.YieldViewOf wrote, carried on the holder so every surface says the same thing.
 func yieldTail(h *Holder) string {
 	if h == nil || h.YieldNote == "" {

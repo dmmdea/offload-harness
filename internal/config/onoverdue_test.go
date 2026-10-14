@@ -9,7 +9,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
-// gpu_on_overdue (plan P11, ADR 0085) is what the harness does about a lease that outlived its
+// gpu_on_overdue (plan P11, ADR 0086) is what the harness does about a lease that outlived its
 // window while somebody waits for its cards. Unset keeps the behaviour from before the key existed
 // (nobody is asked); "request" asks the lease's holder to yield; "hold" says so in words. Load
 // installs it where every holder's tick reads it.

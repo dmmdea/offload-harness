@@ -1411,7 +1411,7 @@ type Config struct {
 	// renewed at all, in minutes. Past it a lease that is still held reads overdue however
 	// healthy its owner looks; it is still never freed by that. 0 or negative = 2880.
 	GPUMaxTotalMin int `json:"gpu_max_total_min,omitempty"`
-	// GPUOnOverdue (plan P11, ADR 0085) is what the harness does about a lease that outlived its
+	// GPUOnOverdue (plan P11, ADR 0086) is what the harness does about a lease that outlived its
 	// declared window while someone waits for its cards: "" (unset) behaves as before the key existed
 	// and asks nobody; "request" asks the lease's HOLDER to yield, which runs the job's own recorded
 	// --on-yield, and nothing is ever killed, released or taken; "hold" says in words that nobody is

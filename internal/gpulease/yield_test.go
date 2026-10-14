@@ -1,6 +1,6 @@
 package gpulease
 
-// The yield request (plan P11, ADR 0085): a lease that outlived its window while somebody waits
+// The yield request (plan P11, ADR 0086): a lease that outlived its window while somebody waits
 // for its cards has its HOLDER asked to yield. Every test holds a lease on a scratch state root
 // with an injected clock and process table; none touches a real lease directory, a GPU or a
 // process. The rule under test each time is named in the test; a negative test carries a

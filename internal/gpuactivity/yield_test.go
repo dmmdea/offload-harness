@@ -1,6 +1,6 @@
 package gpuactivity
 
-// What a status call says about the yield request (plan P11, ADR 0085): the holder of an overdue
+// What a status call says about the yield request (plan P11, ADR 0086): the holder of an overdue
 // lease was asked to yield, ran the job's own on_yield, and still holds the card. The words come
 // from gpulease.YieldViewOf, one source for every surface; these tests pin that a status snapshot
 // carries them, that a lease nobody asked adds nothing to the wire, and that nothing here writes.

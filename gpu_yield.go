@@ -1,6 +1,6 @@
 package main
 
-// The holders' side of the yield request (plan P11, ADR 0085): the shell that runs a job's own
+// The holders' side of the yield request (plan P11, ADR 0086): the shell that runs a job's own
 // --on-yield line, the one place a holder builds its yield ticker, and what `gpu reserve --detach`
 // prints about the request. The decision of WHEN to ask lives in internal/gpulease (yield.go); this
 // file only starts the line the job recorded.

@@ -1,6 +1,6 @@
 package gpulease
 
-// yield.go — an overdue lease's HOLDER is asked to yield; it is never taken from (plan P11, ADR 0085).
+// yield.go — an overdue lease's HOLDER is asked to yield; it is never taken from (plan P11, ADR 0086).
 //
 // WHAT IS BUILT. When a lease outlives its declared window while somebody waits for its cards, the
 // holder's own tick writes a small sidecar, yield.<epoch>, and runs the --on-yield command the job

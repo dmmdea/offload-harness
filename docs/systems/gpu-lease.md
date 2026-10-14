@@ -41,7 +41,7 @@ other on a single shared card.
 | `internal/comfyinst` | stops the ComfyUI instances a lease kept (`StopForLease`), and the primitives an explicit takeover will use (`StopMarker`: interrupt, free, kill after the launch fingerprint is verified; `PIDsOfOtherLeases`) |
 | `internal/pipeline/pipeline.go` | takes the `media` lease around **every** generation call site (image ComfyUI + sdcpp, inpaint, image batch, run-graph, video, audio) and threads `GPU_LEASE_*` to the runner; inherits an ambient lease instead of re-acquiring; owns the in-process slot (`mediaSlot`) that arbitrates jobs sharing one inherited lease |
 | `gpu_cmd.go` | the `gpu status\|reserve\|release\|hold` verbs, wrapper and `--detach` forms |
-| `internal/gpulease/yield.go`, `gpu_yield*.go` | **the yield request (plan P11, ADR 0085)**: the policy (`ParseOnOverdue`, `SetDefaultOnOverdue`), the asker, the `yield.<epoch>` sidecar, the holder's ticker, the read-only `YieldViewOf` every surface words from; the root files hold the shell runner (`sh -c`, `cmd.exe /d /s /c`, hidden) and the `--detach` report |
+| `internal/gpulease/yield.go`, `gpu_yield*.go` | **the yield request (plan P11, ADR 0086)**: the policy (`ParseOnOverdue`, `SetDefaultOnOverdue`), the asker, the `yield.<epoch>` sidecar, the holder's ticker, the read-only `YieldViewOf` every surface words from; the root files hold the shell runner (`sh -c`, `cmd.exe /d /s /c`, hidden) and the `--detach` report |
 | `gpu_terms.go` | the holders' side of terms: the tick the wrapper form and the detached holder run at the end of a term, the over-cap warning, and the argv of the hidden holder (`--release-at-expiry`) |
 | `gpu_progress.go`, `internal/gpulease/progressdir.go`, `render/lease-progress.mjs` | the progress contract of a wrapped render helper (F8): the helpers the wrapper declares one for, the minted file and its sweep, `GPU_LEASE_PROGRESS_FILE`, and the helper-side heartbeat |
 | `gpu_reserve_devices.go`, `gpu_cards.go`, `gpu_doctor.go` | which cards a reserve holds (`--devices`, `--cards`, derivation, the queue), `gpu cards` and the status table, `gpu doctor` |
@@ -1215,7 +1215,7 @@ evidence and a heartbeat the wrapper writes about itself proves only that the wr
 | `owner` | who asked: `session` (a session id), `pid` + `start_ms` (a process, judged like a holder: a recycled pid reads as gone), `remote` (asked for from another host), `tracked` (the session was in the registry when the lease was taken) |
 | `unattended` | nobody is expected at the desk; the lease is judged by its progress contract and its window, never by its owner. `remote` implies it |
 | `progress` | the progress contract: `file` the job appends to (always an ABSOLUTE path: `gpu reserve` resolves a relative `--progress-file` against its own working directory before recording it, and the library refuses a relative one, because every reader looks for the same file from its own directory), `stall_ms` it may stay still |
-| `yield_grace_ms`, `on_yield`, `on_yield_dir` | the job's own terms for being asked to stop. The lease's HOLDER reads them when it is asked to yield ([An overdue lease's holder is asked to yield](#an-overdue-leases-holder-is-asked-to-yield-it-is-never-taken-from-plan-p11-adr-0085)); no takeover command reads them. `on_yield` is stored verbatim (refused above 4096 bytes, never clipped: the holder runs it) with the directory the lease was taken in, because a reader of the record does not share it |
+| `yield_grace_ms`, `on_yield`, `on_yield_dir` | the job's own terms for being asked to stop. The lease's HOLDER reads them when it is asked to yield ([An overdue lease's holder is asked to yield](#an-overdue-leases-holder-is-asked-to-yield-it-is-never-taken-from-plan-p11-adr-0086)); no takeover command reads them. `on_yield` is stored verbatim (refused above 4096 bytes, never clipped: the holder runs it) with the directory the lease was taken in, because a reader of the record does not share it |
 | `yields` | `wrapper` or `detached`: the holder runs the yield request. A record without it was written by a build from before the request, or by a holder that is not a `gpu reserve` / `gpu hold` process (the media pipeline's in-process leases never carry it), and its holder is never asked |
 
 **Where the owner comes from.** `gpu reserve --owner-session ID --owner-pid N --owner-start-ms MS [--owner-remote]`,
@@ -1366,7 +1366,7 @@ told which lease, what is wrong, for how long, what is running and the command t
 later change), and the message says so: until it ships, ask whoever owns the lease or the operator.
 `gpu_orphan_grace_min` (default 15) is installed once at config load, so every surface reads the same grace.
 
-**Not in this change, on purpose:** the takeover command (the holder-side yield request is [its own section](#an-overdue-leases-holder-is-asked-to-yield-it-is-never-taken-from-plan-p11-adr-0085)), `gpu release` routing (the process-tree record behind
+**Not in this change, on purpose:** the takeover command (the holder-side yield request is [its own section](#an-overdue-leases-holder-is-asked-to-yield-it-is-never-taken-from-plan-p11-adr-0086)), `gpu release` routing (the process-tree record behind
 `tree-orphan` is [its own section](#a-dead-wrapper-with-a-live-tree-keeps-its-claim-plan-p10-adr-0084)). A lease past its window with a live holder is surfaced as `held-overdue` and nothing else happens
 to it; what its holder does at the end of a term is the next section.
 
@@ -1456,7 +1456,7 @@ holder) restores the old ending; it is refused for the wrapper form, which has n
 required with `--detach`: it is the term the lease is judged by. A hold that nothing ever releases stays held until it is
 released or taken over, which is the point.
 
-## An overdue lease's holder is asked to yield; it is never taken from (plan P11, ADR 0085)
+## An overdue lease's holder is asked to yield; it is never taken from (plan P11, ADR 0086)
 
 *Opt-in with `gpu_on_overdue = request`. Everything here is the action of the lease's own holder; the harness never frees a
 claim whose holder is alive, never stops a command and never signals a process. The takeover command stays unbuilt.*
@@ -2772,7 +2772,7 @@ request posted straight to llama-swap by anything outside the harness is outside
 - **A tree-orphan is held until its members are gone, and nothing yet stops one.** The tree record, the `tree-orphan` verdict and the
   stop primitives exist (see [A dead wrapper with a live tree](#a-dead-wrapper-with-a-live-tree-keeps-its-claim-plan-p10-adr-0084)),
   but the takeover that stops a tree and frees the claim is a later change (`gpu_on_overdue = request` asks the holder to yield and
-  stops nothing, see [An overdue lease's holder is asked to yield](#an-overdue-leases-holder-is-asked-to-yield-it-is-never-taken-from-plan-p11-adr-0085)), so a hung job whose wrapper died is freed by an operator stopping its processes or running
+  stops nothing, see [An overdue lease's holder is asked to yield](#an-overdue-leases-holder-is-asked-to-yield-it-is-never-taken-from-plan-p11-adr-0086)), so a hung job whose wrapper died is freed by an operator stopping its processes or running
   `gpu release --epoch N`, which ends the claim and leaves the job running. A reader built before the change still reclaims a dead
   wrapper's lease at once, and the recorded tree is at most one tick behind.
 - **The warm-back's reload retry rests on llama-swap's source, not on a captured incident.** The 500 body of the incident

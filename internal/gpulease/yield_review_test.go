@@ -1,6 +1,6 @@
 package gpulease
 
-// The review round of the yield request (plan P11, ADR 0085). Each test names the finding it closes:
+// The review round of the yield request (plan P11, ADR 0086). Each test names the finding it closes:
 // what a reader says about a lease that was asked and then renewed, the label that has to survive a
 // look before its holder is asked, an action update that fails to record, a waiter's free text on
 // the holder's one-line stream, and the wording for a holder that cannot be asked. Every test holds

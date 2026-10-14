@@ -11,7 +11,7 @@
   typo) is refused by name when the config loads, and, because a one-shot verb goes on after a load error and the load installs
   the policy on every exit, it is installed as `hold`, the direction that asks nobody; the holder's first tick says why no request
   is made. **There is no automatic mode:** no timer, no daemon and no waiter acts on a lease; only the holder's own tick can ask. The
-  plan names `request` as the default; the operator decided that asking is opt-in, so the default stays what it was (ADR 0085 records
+  plan names `request` as the default; the operator decided that asking is opt-in, so the default stays what it was (ADR 0086 records
   the deviation).
 - **Who asks, and when.** The holder's own tick (the wrapper of `gpu reserve`, and the detached holder of `gpu reserve --detach`),
   not a blocked waiter. The preconditions are checked cheapest first, from the lease record alone: the policy is `request`; the
@@ -75,7 +75,7 @@
   (6) A holder whose command ends before its `on_yield` returns leaves the action at `on_yield running`; the file goes with the
   lease. (7) The earliest ask comes about a minute and a half after the term ended: a label is asked about only after it survived
   the term check's second look, and the waiter must then stay two ticks.
-- **Record and docs.** ADR 0085 (status Proposed) amends plan invariant I5 and the plan's description of the takeover: here the holder's
+- **Record and docs.** ADR 0086 (status Proposed) amends plan invariant I5 and the plan's description of the takeover: here the holder's
   own tick runs the job's own pre-declared `on_yield`, instead of a takeover command running it. The file-only alternative (the holder
   writes the sidecar and the job polls it) is a one-line change in the ticker, and the choice between the two is the operator's to
   confirm. `docs/systems/gpu-lease.md` has the new section, the corrected `on_yield` / `yield_grace` rows (they were described as

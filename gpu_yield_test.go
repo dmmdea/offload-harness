@@ -1,6 +1,6 @@
 package main
 
-// The holders' side of the yield request (plan P11, ADR 0085): the wrapper form and the detached
+// The holders' side of the yield request (plan P11, ADR 0086): the wrapper form and the detached
 // holder ask an overdue lease's holder to yield when someone waits for its cards, run the job's own
 // recorded --on-yield once, and never stop the command, release the lease or kill anything. Every
 // test holds a lease on a scratch state root (leaseFixture); the on_yield runner is replaced by a

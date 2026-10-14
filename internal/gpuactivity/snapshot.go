@@ -112,7 +112,7 @@ type Holder struct {
 	RequestedSec int    `json:"requested_s,omitempty"`
 	HardEnd      string `json:"hard_end,omitempty"`
 
-	// The yield request (plan P11, ADR 0085), read from the lease record and its yield sidecar by
+	// The yield request (plan P11, ADR 0086), read from the lease record and its yield sidecar by
 	// gpulease.YieldViewOf and never stored as a verdict. YieldFile is the path of the sidecar of a
 	// lease whose holder runs the request (it exists only once the holder was asked; a detached job
 	// can watch it), named while the policy is request or once the holder was asked and absent under
