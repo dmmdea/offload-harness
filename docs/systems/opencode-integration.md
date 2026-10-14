@@ -313,10 +313,10 @@ the 31 tools, 5,974 and 6,682 for `recon`, 9,967 and 11,332 for the other ninete
 and 20,371 for the 45 tools; those figures were reproduced to the token with the same tokenizer before the new ones were
 measured. The 31-tool compact list grew by 1,866 tokens in the template rendering (10.4%, from 18,007 to 19,873), in three
 steps: 529 for the `deferred:true` sentence of every lane and `agent_run`'s hard-deadline sizing sentences, 856 for the twenty
-sentences the row-by-row review moved to the keep-list, and 481 for the rest (`offload_status`'s three clauses: 90;
+sentences the row-by-row review moved to the keep-list, and 481 for the rest (`offload_status`'s three clauses: 46;
 `agent_run`'s remote model placement, two sentences; the urgent band and two pin reasons; the acceptance-authoring sentences).
 By tool the compact growth is `agent_run` +381, `agent_delegate` +267, `offload_generate_image` +149,
-`offload_edit_image_generative` +146, `offload_inpaint_image` +92, `offload_status` +90, `offload_research` +72,
+`offload_edit_image_generative` +146, `offload_inpaint_image` +92, `offload_status` +90 (44 for the `section:"brief"` sentence the review kept, 46 for the three clauses), `offload_research` +72,
 `offload_summarize` +69, and 2 to 67 for the other seventeen that moved; the Tier-1 tools grew by 146 because `offload_summarize`
 and `offload_extract` keep their first-door sentence. On the variant whose three accelerators are fleet accelerators (45 tools, 13
 of them forwarders carrying the note) the lists measure 35,081 full and 23,080 compact in the template rendering (21,079 before).
