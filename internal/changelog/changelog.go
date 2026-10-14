@@ -7,6 +7,8 @@
 // that joined two entries with no blank line between them). Everything here is stdlib only.
 package changelog
 
+import "io/fs"
+
 // FragmentDir is where the fragments live, relative to the repository root, with forward slashes.
 const FragmentDir = "changes/unreleased"
 
@@ -27,8 +29,17 @@ type Release struct {
 	Title   string // one line, no padding
 }
 
-// ReadFragments reads every fragment of dir, sorted by file name in byte order.
+// ReadFragments reads every fragment of dir, sorted by file name in byte order. A directory that does
+// not exist holds no fragments. Any entry that is not a well-formed fragment is an error, because a
+// silently skipped fragment is a lost entry; the error names every problem, not the first.
 func ReadFragments(dir string) ([]Fragment, error) {
+	return nil, nil
+}
+
+// readFragmentsFS is ReadFragments over any file system, with the problems as a list and each one
+// prefixed with prefix (the directory the names belong to). The sort is its own, so a file system that
+// lists in another order gives the same result.
+func readFragmentsFS(fsys fs.FS, prefix string) ([]Fragment, []string) {
 	return nil, nil
 }
 
