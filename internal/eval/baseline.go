@@ -287,11 +287,29 @@ func FreezeBaseline(p PreReg, corpus []byte, incumbent *Arm) (Baseline, []byte, 
 	return b, raw, BaselineHash(raw), nil
 }
 
+// versionRefusal is the refusal for a baseline of another gate version. Its fields and its canonical
+// bytes are those of another gate, so the form of the file says nothing useful about it, and the
+// only remedy is to write the pre-registration again.
+func versionRefusal(got string) error {
+	return refusef("baseline refused: gate_version %q, this gate implements %q: a baseline frozen under another version (a version 1 file, for one) must be re-frozen under the current version, because its rules and its canonical bytes are those of another gate", got, GateVersion)
+}
+
 // CheckBaseline parses a baseline file, re-marshals it canonically and refuses when the bytes
 // differ from what it was given: the file is exactly what freeze wrote, or it is not a
 // baseline. It also re-validates every rule freeze applies, so a hand-built file that happens
 // to be canonical is still refused. It returns the baseline and the hash of the raw bytes.
+//
+// The version is read first, before the document is decoded strictly or compared with its
+// canonical form: a baseline of another version (one frozen by the version 1 gate has no judge key,
+// so its bytes are not this gate's canonical form) is refused for its version, which is the thing
+// the operator can act on.
 func CheckBaseline(raw []byte) (Baseline, string, error) {
+	var probe struct {
+		GateVersion *string `json:"gate_version"`
+	}
+	if json.NewDecoder(bytes.NewReader(raw)).Decode(&probe) == nil && probe.GateVersion != nil && *probe.GateVersion != GateVersion {
+		return Baseline{}, "", versionRefusal(*probe.GateVersion)
+	}
 	var b Baseline
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -319,7 +337,7 @@ func CheckBaseline(raw []byte) (Baseline, string, error) {
 // runs it after parsing, so there is one set of rules.
 func (b *Baseline) validate() error {
 	if b.GateVersion != GateVersion {
-		return refusef("baseline refused: gate_version %q, this gate implements %q", b.GateVersion, GateVersion)
+		return versionRefusal(b.GateVersion)
 	}
 	switch b.Mode {
 	case ModeSuperiority, ModeNonInferiority:
