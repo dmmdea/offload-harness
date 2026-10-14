@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -11,16 +12,34 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// enumNode is a parameter with an enum, at any depth of a tool's input schema.
+// enumNode is a parameter with an enum, at any depth of a tool's input schema, or one with no enum keyword whose description opens by
+// listing its values ("full | lightning8 | lightning4 — a matched triple").
 type enumNode struct {
 	path   string
 	values []string
 	desc   string
 }
 
-// enumNodes returns every schema node that has an enum, keyed by its path ("#/properties/route"). The values are written the way a
-// description writes them: a string as it is, a number in its shortest decimal form, and the empty string (a "not set" value no
-// sentence can explain) is left out.
+// valueListLead matches a description that opens with a list of identifiers joined by pipes, the way a parameter without an enum
+// keyword names its choices: "full | lightning8 | lightning4 — a MATCHED steps+cfg+LoRA triple".
+var valueListLead = regexp.MustCompile(`^\s*([A-Za-z0-9_.-]+(?:\s*\|\s*[A-Za-z0-9_.-]+)+)`)
+
+// listedValues returns the values a description opens by listing, or nil.
+func listedValues(desc string) []string {
+	m := valueListLead.FindStringSubmatch(desc)
+	if m == nil {
+		return nil
+	}
+	var out []string
+	for _, v := range strings.Split(m[1], "|") {
+		out = append(out, strings.TrimSpace(v))
+	}
+	return out
+}
+
+// enumNodes returns every schema node that has an enum, and every one that opens its description by listing its values, keyed by its path
+// ("#/properties/route"). The values are written the way a description writes them: a string as it is, a number in its shortest decimal
+// form, and the empty string (a "not set" value no sentence can explain) is left out.
 func enumNodes(schema any) map[string]enumNode {
 	out := map[string]enumNode{}
 	var walk func(path string, v any)
@@ -43,6 +62,10 @@ func enumNodes(schema any) map[string]enumNode {
 				}
 			}
 			out[path] = node
+		} else if desc, _ := n["description"].(string); desc != "" {
+			if vals := listedValues(desc); len(vals) > 0 {
+				out[path] = enumNode{path: path, values: vals, desc: desc}
+			}
 		}
 		if props, ok := n["properties"].(map[string]any); ok {
 			for name, child := range props {
@@ -243,6 +266,30 @@ func TestDroppedEnumValuesAreLiveAndReasoned(t *testing.T) {
 		if !live {
 			t.Errorf("dropped enum value %d (%s %s %q) is not a value the full description explains and the compact one does not", i, d.Tool, d.Path, d.Value)
 		}
+	}
+}
+
+// TestEnumNodesReadAValueListThatHasNoEnumKeyword: a parameter whose schema has no enum but whose description opens with "a | b | c"
+// is a choice among those values (offload_edit_image_generative's preset is one), so the enum check reads it.
+func TestEnumNodesReadAValueListThatHasNoEnumKeyword(t *testing.T) {
+	schema := map[string]any{"properties": map[string]any{
+		"preset": map[string]any{"type": "string", "description": "full | lightning8 | lightning4 — a MATCHED steps+cfg+LoRA triple (2511 binding only)"},
+		"route":  map[string]any{"type": "string", "enum": []any{"", "local", "remote"}, "description": "local | remote would not be read twice"},
+		"note":   map[string]any{"type": "string", "description": "the text to send | not a list of values because it opens with prose"},
+		"one":    map[string]any{"type": "string", "description": "single value only"},
+	}}
+	nodes := enumNodes(schema)
+	if got := nodes["#/properties/preset"].values; !slices.Equal(got, []string{"full", "lightning8", "lightning4"}) {
+		t.Errorf("a description that opens with a value list gave %q", got)
+	}
+	if got := nodes["#/properties/route"].values; !slices.Equal(got, []string{"local", "remote"}) {
+		t.Errorf("a parameter with an enum keyword gave %q, want its enum (the empty string left out)", got)
+	}
+	if _, ok := nodes["#/properties/note"]; ok {
+		t.Errorf("a description that merely contains a pipe was read as a value list")
+	}
+	if _, ok := nodes["#/properties/one"]; ok {
+		t.Errorf("a description with no list was read as a value list")
 	}
 }
 
