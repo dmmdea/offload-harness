@@ -3,7 +3,8 @@
 // The template-to-API converter (render/template-to-graph.mjs): a ComfyUI UI-format workflow in, the API-format prompt graph out.
 // One test per behaviour, on small hand-written UI-format graphs built here, the synthetic /object_info and the two hand-worked
 // goldens in render/testdata/template-goldens/ (see its README: none of them is a frontend export). The value-exact comparison
-// with the frontend's own export on real templates is a separate, privately run test that reads TEMPLATE_GOLDEN_DIR.
+// with API-format files beside real templates (said to be the frontend's own export; that is unverified) is a separate, privately
+// run test that reads TEMPLATE_GOLDEN_DIR.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
@@ -1393,7 +1394,7 @@ test("invariant: the converter does not touch the lifecycle module", () => {
 // ---- the frontend-golden comparison (private data, skipped without it) ---------------------------------------------------
 
 const GOLDEN_DIR = process.env.TEMPLATE_GOLDEN_DIR;
-test("frontend goldens: every <name>.workflow.json in TEMPLATE_GOLDEN_DIR converts to its frontend-exported <name>.api.json, value for value",
+test("API-format goldens: every <name>.workflow.json in TEMPLATE_GOLDEN_DIR converts to the <name>.api.json beside it, value for value (that the frontend wrote those files is unverified)",
   { skip: !GOLDEN_DIR && "TEMPLATE_GOLDEN_DIR is not set (the folder holds object_info.json and <name>.workflow.json / <name>.api.json pairs)" }, () => {
     const oi = JSON.parse(readFileSync(join(GOLDEN_DIR, "object_info.json"), "utf8"));
     const names = readdirSync(GOLDEN_DIR).filter((f) => f.endsWith(".workflow.json")).map((f) => f.slice(0, -".workflow.json".length)).sort();
@@ -1405,7 +1406,7 @@ test("frontend goldens: every <name>.workflow.json in TEMPLATE_GOLDEN_DIR conver
       const opts = existsSync(optsFile) ? JSON.parse(readFileSync(optsFile, "utf8")) : {};
       const r = convertTemplate(JSON.parse(readFileSync(join(GOLDEN_DIR, `${name}.workflow.json`), "utf8")), oi, opts);
       assert.equal(r.ok, true, `${name}: refused ${JSON.stringify(r.refusal)}`);
-      assert.deepEqual(compareApiGraphs(r.graph, JSON.parse(readFileSync(api, "utf8"))), [], `${name}: differs from the frontend export`);
+      assert.deepEqual(compareApiGraphs(r.graph, JSON.parse(readFileSync(api, "utf8"))), [], `${name}: differs from the API-format export beside it`);
     }
   });
 

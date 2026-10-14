@@ -20,6 +20,6 @@ an upstream template:
   `minComfyUIVersion` (a template file itself does not).
 
 What this folder cannot show: that the converter agrees with the frontend's own export on real templates. That comparison
-needs real templates, a real `/object_info` and a frontend-exported API graph for each, and it is run privately (see
+needs real templates, a real `/object_info` and an API-format export of each from the frontend (that a given file came from the frontend is unverified), and it is run privately (see
 `docs/systems/media-generation.md`, "Template-to-API converter"); the test reads such pairs from `TEMPLATE_GOLDEN_DIR` when
 the variable is set and skips otherwise.

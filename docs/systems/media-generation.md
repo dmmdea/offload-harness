@@ -3426,12 +3426,15 @@ key order and `_meta` are not differences unless asked).
 | display-only values | `PreviewAny`, `GetImageSize`, `SaveGLB` and `Preview3D` store trailing values of frontend-only display widgets; up to 3, 1, 1 and 1 of them are ignored (`display_values_ignored`), one more is a refusal |
 | seeds | with `seed`, an input is pinned when it is named `seed` or `noise_seed`, the listing's control makes it a seed, and it holds a stored or primitive value. A wired seed, a generic INT that shares the control (a `PrimitiveInt`) and a sampling seed with no control are left alone, each as a `seed_not_pinned` warning naming the node and input with its reason (`wired`, or `no_control`); the change is listed in `pinnedSeeds` |
 | fewer values than widgets | the listing's `default` fills the input and says so (`default_filled`); with no default the input is left out (`widget_value_missing`) |
+| long chains | `Reroute`, bypassed and nested-instance chains are followed in a loop with one visited set, so a chain of 100,000 hops resolves without a stack overflow and without a copy of the trail per hop; a loop in the wires through them is `link_cycle` |
+| limits | real nodes plus subgraph instances entered are counted as they are met: past 100,000 the call is refused (`graph_too_large`, `what: "nodes"`); subgraphs nested more than 64 levels deep are refused the same way (`what: "subgraph depth"`). Real templates use a handful of nodes per level and three levels |
+| id collisions | a node whose final id (`<instance>:<inner>` path included) is also another node's, in any scope and of any kind, and a subgraph definition id that appears twice, are `bad_template`, never resolved to whichever came last |
 
-**What it refuses, with a code and the details that locate it, and no graph.** `bad_template` (a file that is no workflow, and a node or a subgraph definition whose `inputs` or `outputs` is not a list), `bad_object_info`,
+**What it refuses, with a code and the details that locate it, and no graph.** `bad_template` (a file that is no workflow, a node or a subgraph definition whose `inputs` or `outputs` is not a list, a node id two scopes both give and a subgraph definition id that appears twice), `bad_object_info`,
 `bad_seed`, `bad_version` (a malformed version); `comfyui_too_old` (the template's minimum exceeds the given ComfyUI;
 both versions are in the details) and `comfy_version_unknown` (a minimum is known and no ComfyUI version was given: the
 version is passed in, never assumed); `unknown_node_class` (every class the listing lacks, with the node ids; muted and
-bypassed nodes do not count); `ambiguous_bypass` (a bypassed node with a different number of outputs and connected inputs of one type; the details give the node, the type and both counts); `group_node_unsupported`; `subgraph_definition_missing`, `subgraph_cycle`,
+bypassed nodes do not count); `graph_too_large` (more than 100,000 nodes and subgraph instances, or subgraphs nested more than 64 levels; the details give the limit, what it counts and where it was passed); `ambiguous_bypass` (a bypassed node with a different number of outputs and connected inputs of one type; the details give the node, the type and both counts); `group_node_unsupported`; `subgraph_definition_missing`, `subgraph_cycle`,
 `subgraph_widget_mismatch`; `dangling_link`, `link_mismatch`, `link_cycle`; `widget_mismatch` (more values than widgets, a
 flagged INT not followed by a control word, a dynamic combo's value that is no option of it); `unsupported_input_type` (a
 custom frontend widget such as an image comparer or a file-upload viewer, an autogrow of widgets, an input type with no
@@ -3458,16 +3461,21 @@ anything.
 - A survey over a templates package (`TEMPLATE_SURVEY_DIR`) shows what refuses and why. On `comfyui-workflow-templates-json`
   0.1.96 (593 files) with an `/object_info` listing saved on 2026-08-14, which is older than the package: 405 convert, and
   every converted graph passes the graph check (each wire reaches a node that is in the graph and an output slot its class
-  has; 5,055 nodes). The refusals: 86 `unknown_node_class` (classes newer than the listing), 45 `widget_mismatch`
+  has, and the output's type, from the listing's `output` list, shares a member with the type the target input declares;
+  5,055 nodes). The type check exists because the slot-matching rule for a subgraph's outputs was once pinned by no test:
+  dropping it left the suite green and put 37 wrong wires into 9 converted templates (a VAE into a MODEL input, a mesh into
+  an image input), which the type check flags and the new synthetic test, with three outputs of three types read in crossed order, turns red. The refusals: 86 `unknown_node_class` (classes newer than the listing), 45 `widget_mismatch`
   (mostly schema skew between package and listing, and display widgets of nodes such as `CustomCombo`), 40
   `unsupported_input_type` (mostly the image comparer), 2 `ambiguous_bypass` (a bypassed node with one output and two connected inputs of its type, which the earlier first-of-type reading converted), 15 `bad_template` (files that are not workflows). With `seed` set, 18 of the 405 leave at least one seed-named input alone and say so (`seed_not_pinned`: 6 wired seeds, 15 seeds with no control). The counts
   describe that pair of package and listing and nothing else.
 - A malformed-field fuzz over the 405 convertible templates (29,928 cases: `inputs`, `outputs`, `widgets_values` and `properties` of the first nodes and of every bypassed node and subgraph instance replaced by an object, a string or a number, and the slot lists, nodes and links of each definition) ends every case in a graph or a typed refusal, never in `internal_error`; the same fuzz on the converter as first written ended 921 of its cases in one.
 
 **Known gaps.** The acceptance run, at least 10 non-API templates compared node by node with frontend-exported goldens, is
-a follow-up. It needs a running ComfyUI to serve a current `/object_info` and a scripted frontend export of each template,
+a follow-up (the two private pairs are API-format files placed beside the workflows; that the frontend wrote them is unverified, so
+"frontend-exported" is a description of intent, not a checked fact). It needs a running ComfyUI to serve a current `/object_info` and a scripted frontend export of each template,
 which is GPU-lease work (ComfyUI is started only as a lease-wrapped command and stopped when it ends), so it was not run
-here; two matching pairs are not ten, and no template class is claimed beyond those. Untested against a frontend export:
+here; two matching pairs are not ten, and no template class is claimed beyond those. Every node in both private pairs is mode 0, so
+no comparison with a frontend export covers a bypassed or a muted node. Untested against a frontend export:
 the bypass pairing rule (positional by type; two templates of the survey above, which the earlier first-of-type reading converted, are now refused for it), the display-only counts, COLOR widgets and the upload slot counts (read
 from the template files). A class with a custom frontend widget is refused, not guessed; each such class is a candidate for
 the follow-up to decide.
