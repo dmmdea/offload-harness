@@ -764,3 +764,129 @@ func TestTraceFileIsOwnerOnly(t *testing.T) {
 		t.Errorf("trace file mode = %o, want 600", mode)
 	}
 }
+
+// PASS is bound to a fingerprint: a result with no diff_sha256 is bound to nothing, so it is
+// not a PASS however clean the seat was, and the second check has to agree with the first.
+func TestPassNeedsAFingerprintAndAMatchingRecheck(t *testing.T) {
+	wire := core.AgentWireResult{Seat: "s", Output: "NONE", Steps: 1, StopReason: "done"}
+	path := filepath.Join(t.TempDir(), TraceFile)
+
+	bare := Seal(map[string]any{"findings": []Finding{}}, Evidence{}, Run{Delivered: true, Wire: &wire}, path)
+	if bare["outcome"] != OutcomeNotRun {
+		t.Fatalf("no fingerprint, no gates, no recheck: outcome = %v, want NOT_RUN", bare["outcome"])
+	}
+	if why, _ := bare["outcome_reason"].(string); !strings.Contains(why, "fingerprint") {
+		t.Errorf("the reason names the missing fingerprint: %q", why)
+	}
+	if v := Decide(Evidence{Seat: &SeatReceipt{Seat: "s"}}, Delivery{Delivered: true}); v.Outcome != OutcomeNotRun {
+		t.Errorf("Decide on evidence with no fingerprint: %+v", v)
+	}
+
+	// A fingerprint but no second check: nothing shows the diff stayed put.
+	ev := mustEvidence(t, evDiff)
+	ev.Seat = &SeatReceipt{Seat: "s"}
+	if v := Decide(ev, Delivery{Delivered: true}); v.Outcome != OutcomeNotRun || !strings.Contains(v.Reason, "second") {
+		t.Errorf("a PASS candidate with no recheck fingerprint: %+v, want NOT_RUN naming the second check", v)
+	}
+	// A recheck that disagrees without the stale flag is no PASS either.
+	ev.RecheckSHA256 = Fingerprint("other bytes")
+	if v := Decide(ev, Delivery{Delivered: true}); v.Outcome == OutcomePass {
+		t.Errorf("a recheck fingerprint that differs: %+v", v)
+	}
+	ev.RecheckSHA256 = ev.DiffSHA256
+	if v := Decide(ev, Delivery{Delivered: true}); v.Outcome != OutcomePass {
+		t.Errorf("a fingerprint rechecked and equal is a PASS: %+v", v)
+	}
+
+	// A caller that holds the diff in memory passes no Recheck: the recheck is then the
+	// fingerprint itself, so the result is still a PASS and the evidence says what was compared.
+	held := Seal(map[string]any{"findings": []Finding{}}, mustEvidence(t, evDiff), Run{Delivered: true, Wire: &wire}, path)
+	if held["outcome"] != OutcomePass {
+		t.Fatalf("an in-memory diff with a clean seat: %v", held)
+	}
+	if got := held["evidence"].(Evidence); got.RecheckSHA256 != got.DiffSHA256 || got.RecheckSHA256 == "" {
+		t.Errorf("recheck_sha256 equals diff_sha256 for a diff held in memory: %+v", got)
+	}
+}
+
+// A review that names no head_sha ties its gates to no commit, and says so; a receipt that
+// names a commit on such a review is unbound and cannot support a PASS.
+func TestAReviewWithNoHeadIsMarkedAndItsReceiptsAreUnbound(t *testing.T) {
+	wire := core.AgentWireResult{Seat: "s", Output: "NONE", Steps: 1, StopReason: "done"}
+	path := filepath.Join(t.TempDir(), TraceFile)
+
+	ev, err := NewEvidence(evDiff, "", "", []GateReceipt{{Name: "go-test", Status: "pass", HeadSHA: "deadbee"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := ev.Gates[len(ev.Gates)-1]
+	if !last.Unbound || last.Passed() || ev.GatesPassed() {
+		t.Fatalf("a receipt naming a commit on a review that names none is unbound: %+v", ev.Gates)
+	}
+	for _, g := range ev.Gates[:2] {
+		if g.Unbound {
+			t.Errorf("the lane's own gates name no commit and are never unbound: %+v", g)
+		}
+	}
+	out := Seal(map[string]any{"findings": []Finding{}}, ev, Run{Delivered: true, Wire: &wire}, path)
+	if out["outcome"] != OutcomeGateFailed {
+		t.Fatalf("a receipt naming deadbee, a review with no head, a clean seat: outcome = %v, want GATE_FAILED", out["outcome"])
+	}
+	if why, _ := out["outcome_reason"].(string); !strings.Contains(why, "go-test") {
+		t.Errorf("the reason names the unbound receipt: %q", why)
+	}
+
+	// With no receipt at all the PASS stands but is marked, in the evidence and in the reason.
+	plain := Seal(map[string]any{"findings": []Finding{}}, mustEvidenceNoHead(t, evDiff), Run{Delivered: true, Wire: &wire}, path)
+	if plain["outcome"] != OutcomePass {
+		t.Fatalf("a clean seat and the lane's own gates: %v", plain["outcome"])
+	}
+	if got := plain["evidence"].(Evidence); !got.HeadUnbound {
+		t.Errorf("evidence must say the review names no head: %+v", got)
+	}
+	if why, _ := plain["outcome_reason"].(string); why != "no head_sha: gates not tied to a commit" {
+		t.Errorf("a PASS without a head says so: %q", why)
+	}
+	// A PASS on a review that names its head carries no such reason and no flag.
+	bound := Seal(map[string]any{"findings": []Finding{}}, mustEvidence(t, evDiff), Run{Delivered: true, Wire: &wire}, path)
+	if _, has := bound["outcome_reason"]; has || bound["evidence"].(Evidence).HeadUnbound {
+		t.Errorf("a bound PASS is unmarked: %v", bound)
+	}
+}
+
+func mustEvidenceNoHead(t *testing.T, diff string) Evidence {
+	t.Helper()
+	ev, err := NewEvidence(diff, "", "", nil)
+	if err != nil {
+		t.Fatalf("NewEvidence: %v", err)
+	}
+	return ev
+}
+
+// capBytes trims a trailing partial rune and nothing else: one invalid byte early in the
+// string must not cut everything after it.
+func TestCapBytesTrimsOnlyAPartialRuneAtTheEnd(t *testing.T) {
+	s := "abc\xffdef" + strings.Repeat("x", 600)
+	if got := capBytes(s, 256); len(got) != 256 || got != s[:256] {
+		t.Errorf("an invalid byte early in the string cut the rest: kept %d bytes, want 256", len(got))
+	}
+	// A multi-byte rune straddling the limit is dropped whole.
+	e := strings.Repeat("a", 255) + "é" + "tail"
+	if got := capBytes(e, 256); got != strings.Repeat("a", 255) {
+		t.Errorf("a rune cut by the limit is dropped whole: %q", got[len(got)-3:])
+	}
+	if got := capBytes(e, 257); got != strings.Repeat("a", 255)+"é" {
+		t.Errorf("a rune that fits is kept: len %d", len(got))
+	}
+	if got := capBytes("short", 256); got != "short" {
+		t.Errorf("a short string is returned as it is: %q", got)
+	}
+	if got := capBytes("héllo", 0); got != "" {
+		t.Errorf("n = 0 keeps nothing: %q", got)
+	}
+	// A run of continuation bytes with no start byte is not walked back to the beginning.
+	junk := "ab" + strings.Repeat("\x80", 20)
+	if got := capBytes(junk, 10); len(got) < 7 {
+		t.Errorf("a continuation run must not erase what precedes it: kept %d bytes", len(got))
+	}
+}

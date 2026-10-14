@@ -164,6 +164,9 @@ type Evidence struct {
 	RecheckSHA256 string `json:"recheck_sha256,omitempty"`
 	Stale         bool   `json:"stale,omitempty"`
 	StaleReason   string `json:"stale_reason,omitempty"`
+	// HeadUnbound is true when the review named no head_sha, so nothing ties its gate receipts
+	// to a commit.
+	HeadUnbound bool `json:"head_unbound,omitempty"`
 	// Refusal is why the binding itself was refused (see ErrBadBinding), when it was.
 	Refusal string `json:"refusal,omitempty"`
 }

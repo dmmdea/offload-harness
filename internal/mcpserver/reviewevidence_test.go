@@ -334,6 +334,23 @@ func TestReviewDiffAdvertisesTheEvidenceFields(t *testing.T) {
 	t.Fatal("offload_review_diff not advertised")
 }
 
+// The description must not promise more than the evidence holds: an inline diff's second check
+// compares the string with itself, and a PASS without a head names no commit.
+func TestReviewDiffDescriptionIsHonestAboutWhatBindsAPass(t *testing.T) {
+	for _, tool := range listTools(t, config.Default()) {
+		if tool.Name != "offload_review_diff" {
+			continue
+		}
+		for _, want := range []string{"compares the string with itself", "no head_sha: gates not tied to a commit", "head_unbound"} {
+			if !strings.Contains(tool.Description, want) {
+				t.Errorf("description must say %q", want)
+			}
+		}
+		return
+	}
+	t.Fatal("offload_review_diff not advertised")
+}
+
 // evidenceServer is a review server whose ledger sits at ledgerPath, which may be nowhere near
 // the harness home, so a trace path derived from the wrong one shows.
 func evidenceServer(t *testing.T, home, ledgerPath string, local delegate.LocalRunner) *Server {
