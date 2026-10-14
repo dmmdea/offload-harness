@@ -10,16 +10,16 @@ Release: unreleased (rules R1 to R8 of the measurement gate; `docs/systems/measu
 ## Context
 
 Every change that swaps a seat, cuts a rung of the cascade, changes a compaction ladder or adopts a proposed skill needs
-a pass rule, and the repository had three in use at once:
+a pass rule, and the program's earlier proposals used three different ones. This repository holds the pieces of two:
 
-- a paired-standard-error comparison;
-- `eval.BootstrapDeltaMean` (a paired bootstrap of the mean difference with a 95% interval) with each caller reading its
-  interval in its own way (`agent-trajectory-gate` and the compaction A/B, both at `B = 2000`, `seed = 42`);
-- "not worse", with no statistic at all, plus a 0.5 effect-size bar on a 0 to 10 judge scale from
+- `eval.BootstrapDeltaMean` (a paired bootstrap of the mean difference with a 95% interval), whose `B` and seed each call
+  site chooses and whose interval each caller reads its own way: `agent-trajectory-gate` turns it into a verdict and the
+  compaction A/B only reports it (both pass `B = 2000`, `seed = 42`);
+- a 0.5 effect-size bar on a 0 to 10 judge scale, with no interval, from
   [ADR 0080](0080-a-ram-spill-moe-is-the-agent-seat-when-it-earns-it.md).
 
-Three pass rules mean the same evidence can adopt under one and block under another, and a rule chosen after the numbers
-are seen is not a rule. Meanwhile the statistic that should have been the common ground already existed and was tested:
+Different pass rules mean the same evidence can adopt under one and block under another, and a rule chosen after the
+numbers are seen is not a rule. Meanwhile the statistic that should have been the common ground already existed and was tested:
 `BootstrapDeltaMean` resamples aligned per-item scores at the same index for both arms and returns the mean difference with
 its interval. What was missing was everything around it: what counts as a usable attempt, what a margin is, what happens
 at small n, and a way to bind the rules to the result so that they cannot move afterwards.
@@ -53,7 +53,8 @@ One gate, `eval.Gate`, a pure function over a frozen baseline and one comparison
 6. **R6, pre-registration.** The mode, the primary metric and margin, the efficiency metrics, `min_pairs`, the bootstrap
    size and seed, the held-out ids and the declared tasks are frozen into a baseline file in canonical bytes and hashed
    before the first candidate run; the corpus is hashed into it, never stored. The gate refuses an input that names another
-   hash, and `gate check` refuses a baseline that is not the frozen bytes.
+   hash, and `gate check` refuses a baseline that is not the frozen bytes. A one-byte edit of a frozen baseline either
+   fails `check` or changes its hash, and `gate check --expect-hash` and the input's `baseline_hash` refuse it.
 7. **R7, judge integrity.** A model judge needs a passed self-test receipt for the same scorer, or the gate refuses.
    Receipts are plain data in `internal/eval` (which must not import `internal/compeval`); the verb that produces them is a
    separate change.
@@ -81,8 +82,9 @@ One gate, `eval.Gate`, a pure function over a frozen baseline and one comparison
   `OutcomeFromCaliper`) are as specified.
 - **Stricter than the minimum in four places.** Both arms must carry all three stamps and the judge must name a scorer,
   because an empty stamp would make two unrelated runs share an era marker; a task id may appear once per arm; a `pass` or
-  `task_fail` score must lie in its primary class range; and a changed baseline is detected by hash even when an edit leaves
-  a valid document (`gate check --expect-hash`).
+  `task_fail` score must lie in its primary class range; and a changed baseline is detected by hash even when an edit
+  leaves a valid document (`gate check` alone prints that document's own hash, so a verdict adapter takes the baseline hash
+  from `freeze`'s output and passes `--expect-hash`; the docs page says so).
 - **No wall-time term enters through the gate.** Speed may be reported beside a verdict as a side column by a caller; the
   gate has no input for it and no rule that reads it.
 - **Reading the gate's inputs needs adapters.** A Caliper-shaped record becomes a gate input outside this repository

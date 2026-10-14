@@ -43,7 +43,9 @@ const gateUsage = `usage: local-offload gate <freeze|check|verdict|schema> [flag
       {"baseline": <path>, "baseline_hash": <sha256>}.
   gate check   --baseline BASELINE.json [--expect-hash SHA256]
       parse the baseline, refuse it unless it is byte for byte what freeze writes, and print its
-      sha256. --expect-hash also refuses a baseline whose hash is another one.
+      sha256. --expect-hash also refuses a baseline whose hash is another one. A one-byte edit of a
+      frozen baseline either fails check or changes its hash; an edit that leaves a valid file is
+      another baseline, so bind a verdict to the hash freeze printed, never to a later check.
   gate verdict --baseline BASELINE.json --input GATE-INPUT.json [--require-adopt]
       judge the candidate against the incumbent under the baseline and print the result as JSON.
   gate schema

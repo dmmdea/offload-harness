@@ -8,8 +8,11 @@ candidate is compared with the incumbent on the same declared tasks, with the st
 written down and hashed before the first candidate ran. The gate returns **ADOPT**, **BLOCK** or **INCONCLUSIVE**, and
 the incumbent keeps its place unless the verdict is ADOPT.
 
-It replaces three pass rules that were in use side by side: a paired-standard-error rule, `BootstrapDeltaMean` with an
-ad hoc reading of its interval, and "not worse" with no statistic. [ADR 0088](../architecture/decisions/0088-one-measurement-gate.md)
+It replaces the pass rules the program's earlier proposals each wrote for themselves: three different ones were in use.
+This repository holds two of the pieces. `BootstrapDeltaMean` takes its `B` and seed from each call site and each caller
+reads its interval its own way (`agent-trajectory-gate` turns it into a verdict, the compaction A/B only reports it; both
+pass `B = 2000` and `seed = 42`). [ADR 0080](../architecture/decisions/0080-a-ram-spill-moe-is-the-agent-seat-when-it-earns-it.md)
+sets a 0.5 effect-size bar on a 0 to 10 judge scale with no interval at all. [ADR 0088](../architecture/decisions/0088-one-measurement-gate.md)
 records the decision.
 
 The gate is a pure function plus a verb. It reads scores that someone else produced, so it measures nothing itself and
@@ -45,6 +48,12 @@ declared efficiency metric gets its own call over the pairs that resolved that m
 `bootstrap_b` and `seed`, and improves when `hi < 0` (lower is better) or `lo > 0` (higher is better). A metric needs at
 least `min_pairs` resolved pairs to improve. A metric that no task carries on both arms resolves nowhere and cannot
 improve, so **a non-inferiority cut cannot ADOPT on a missing metric**.
+
+A metric's `delta`, `lo` and `hi` are **`null`, never 0, when fewer than two pairs resolved it** (`n < 2`): with one pair
+or none there is no interval, and a 0 would read as "no change" where the truth is "no data". `n` and `unresolved_pairs`
+say how much data there was. A metric with two or more resolved pairs always has numbers, and a measured 0 is a 0. The
+primary `delta`, `lo` and `hi`, and the held-out `delta`, are plain numbers and read 0 when there is no data behind them
+(`n_used` below 2; `held_out.n` of 0); read `n_used` and `held_out.n` first, as the verdict's reason does.
 
 Boundaries are strict: `lo > 0`, `hi < 0`, `lo > -m`, `hi < -m`. An interval that touches the line is INCONCLUSIVE. The
 tests build their boundary rows from exactly representable numbers (16 pairs, scores 8.0, 7.5, 7.0) so a mutation of a
@@ -124,8 +133,8 @@ key) is **unresolved**: it stays unresolved end to end, the pair is skipped for 
 
 **Result** (`eval.GateResult`, snake_case, struct order, no timestamp): `verdict`, `reason`, `keep_incumbent`, `mode`,
 `margin`, `delta`, `lo`, `hi`, `n_used`, `n_declared`, `excluded_pairs`, `excluded_share`, `attempt_counts` (all seven
-classes per arm, zeros included), `cheats`, `efficiency` (per metric: `delta`, `lo`, `hi`, `n`, `unresolved_pairs`,
-`improves`), `held_out` (`{n, delta, failed}` or `null` when none is declared), `power`, `stamps`, `judge`, `era_marker`,
+classes per arm, zeros included), `cheats`, `efficiency` (per metric: `delta`, `lo` and `hi`, each `null` below two
+resolved pairs, then `n`, `unresolved_pairs`, `improves`), `held_out` (`{n, delta, failed}` or `null` when none is declared), `power`, `stamps`, `judge`, `era_marker`,
 `gate_version`, `corpus_hash`, `baseline_hash`, `bootstrap_b`, `seed`, and the verb's `gate_build_sha256`. `n_declared` is
 the number of declared tasks that are not held out. The same input twice gives byte-identical output.
 
@@ -153,11 +162,16 @@ local-offload gate schema
   The output file is created exclusively: freezing the same inputs again to the same path is a no-op, and a changed
   pre-registration goes to a new path (and has a new hash).
 - `check` parses the baseline, re-marshals it canonically and refuses unless the bytes are identical ("not in canonical
-  form: edited by hand?"), then prints the hash. An edit that leaves a valid, canonical document is another
-  pre-registration with another hash; `--expect-hash` (the hash `freeze` printed) refuses it, and so does any verdict
-  input that names the old hash.
+  form: edited by hand?"), then prints the hash. **A one-byte edit of a frozen baseline either fails `check` or changes
+  its hash, and `gate check --expect-hash` and the input's `baseline_hash` refuse it.** What `check` alone cannot do is
+  refuse an edit that leaves a valid, canonical document (a letter inside a name, the value of `min_pairs`): that is
+  another pre-registration, `check` prints its hash, and only the hash tells it from the frozen one. So a verdict
+  adapter takes `baseline_hash` from `freeze`'s output (or a hash it recorded then), never from a later `gate check` of
+  the file, and passes `--expect-hash` when it wants `check` itself to refuse.
 - `verdict` runs the gate and prints the result as indented JSON.
 - `schema` prints the embedded input schema.
+- A global `--config <path>` (or `--config=<path>`) before the subcommand, as in `local-offload --config x.json gate
+  schema`, is accepted and ignored: the gate reads no config.
 
 | exit | meaning |
 |---|---|
