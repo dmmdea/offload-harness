@@ -1,19 +1,31 @@
   # ===== <seat id> — a vLLM seat backed by LMCache MP (reference llama-swap entry) ======================
-  # `cmd` runs seat_fg.sh in the FOREGROUND of a client; ending the client reaps the engine (swap-out);
-  # `cmdStop` stops the engine by port and the LMCache MP server. The seat reads seat.env for its layout:
+  # Rendered form: `Spec.Entry` (internal/vllmseat) writes this same block for a windows-wsl seat, and
+  # TestVLLMSeatReferenceEntryDeclaresWhatEntryRenders keeps the two in step on every key and on the values below.
+  # `cmd` runs seat-cmd.ps1, the PowerShell stub `local-offload install vllm-seat` writes beside the seat's env: llama-swap
+  # runs as SYSTEM and a WSL distro belongs to the interactive user, so the stub triggers the scheduled task that runs
+  # seat_fg.sh in the distro and stays alive while the seat answers; ending it is the swap-out. `cmdStop` (seat-cmdstop.ps1)
+  # triggers the stop task: seat_stop.sh stops the engine by port and the LMCache MP server. (A llama-swap that runs AS the
+  # distro's own user can instead run `wsl.exe -d <distro> -u root -e bash <seat-dir>/seat_fg.sh <seat-dir>/<seat>.env` in the
+  # FOREGROUND of a client; that was this file's form, and it cannot start the distro from SYSTEM.) The seat reads its env for
+  # its layout:
   #   SEAT_TP=2 (two cards) — the only layout that can use a cache server (SEAT_L2 set);
   #   SEAT_PP=3 + SEAT_PARTITION — three cards with the same-box RAM tier (SEAT_L1_GB, SEAT_L2 empty).
   # Swappable like every other seat: cold load 75–190 s, covered by the house templates' top-level
   # `healthCheckTimeout: 300`. Exclusive with the other interactive seats in the matrix (it owns ~0.9 of
   # its cards while up); unloadTimeout must exceed seat_stop.sh's worst case (20 s engine + 20 s server).
+  # `ttl` is the house idle window (operator rule: no model stays loaded more than 5 minutes unused; 1800 here was a drift).
+  # `concurrencyLimit` must equal the env's SEAT_SEQS (--max-num-seqs): llama-swap's per-model default (10) answers 429 to the
+  # streams the seat was provisioned for. `useModelName`: vLLM 404s any name it does not serve, so every alias is rewritten to the id.
   # Prove the tier before binding the harness to it: vllm:external_prefix_cache_hits > 0 after an
   # eviction, and a planted needle retrieved verbatim after eviction and after a restart.
   "<seat id>":
-    cmd: "<path to wsl.exe or bash> -d <distro> -u root -e bash <seat-dir>/seat_fg.sh <seat-dir>/<seat>.env"
-    cmdStop: "<path to wsl.exe or bash> -d <distro> -u root -e bash <seat-dir>/seat_stop.sh <seat-dir>/<seat>.env"
+    cmd: "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -ExecutionPolicy Bypass -File <seat-dir>/seat-cmd.ps1 <seat id>"
+    cmdStop: "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -ExecutionPolicy Bypass -File <seat-dir>/seat-cmdstop.ps1 <seat id>"
     proxy: "http://127.0.0.1:18797"
     checkEndpoint: /health
+    useModelName: "<seat id>"
     aliases: ["agent-pool"]
-    ttl: 1800
+    ttl: 300
     unloadTimeout: 60
+    concurrencyLimit: 32
     name: "<model> on vLLM — agent-pool seat (fan-out, prefix reuse) [+ cache server on a second device]"

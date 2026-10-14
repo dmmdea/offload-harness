@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -109,7 +110,12 @@ func runFleetUI(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, _ := loadCfgWithSource(fs)
+	cfg, src := loadCfgWithSource(fs)
+	// SF-16 verify: the guard's mode comes from this config, so a file that failed to load stops
+	// the page, as it stops fleet-serve, instead of falling back to the default without a word.
+	if err := fleetServeConfigGate(src); err != nil {
+		return fmt.Errorf("fleet-ui: %w", err)
+	}
 	if err := refuseListen(*listen, *trusted); err != nil {
 		return err
 	}
@@ -135,10 +141,24 @@ func runFleetUI(args []string) error {
 		return fmt.Errorf("fleet-ui: listen %s: %w", *listen, err)
 	}
 	fmt.Fprintf(os.Stderr, "[fleet-ui] http://%s — polling %d node(s) every %s\n", *listen, len(bases), *interval)
-	srv := &http.Server{Handler: fleetview.NewHandler(p), ReadHeaderTimeout: 5 * time.Second}
+	fmt.Fprintf(os.Stderr, "[fleet-ui] %s\n", ingressGuardNote(cfg))
+	// SF-16: the page re-serves data the poller fetched with the fleet bearer, so it takes the
+	// ingress guard too: the Host rule against DNS rebinding, its own page's Origin allowed.
+	srv := newFleetUIServer(fleetview.NewHandler(p), cfg.FleetIngressGuardMode())
 	go func() { <-ctx.Done(); _ = srv.Close() }()
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
+}
+
+// newFleetUIServer is the server runFleetUI runs: the page behind the ingress guard.
+func newFleetUIServer(h http.Handler, mode string) *http.Server {
+	return &http.Server{Handler: fleetUIHandler(h, mode), ReadHeaderTimeout: 5 * time.Second}
+}
+
+// fleetUIHandler puts the SF-16 ingress guard in front of the fleet-ui page: a browser UI, so
+// a same-origin Origin is admitted; its routes are GETs, so no POST rule.
+func fleetUIHandler(h http.Handler, mode string) http.Handler {
+	return netguard.IngressGuard(netguard.IngressOptions{Mode: mode, AllowSameOrigin: true, Key: "fleet_ingress_guard", Logf: log.Printf}, h)
 }

@@ -6,10 +6,12 @@ package main
 // launch left a lo-root-state-* folder behind. A copy shares the root of the suite that launched it instead (main_state_isolation_test.go).
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/winexec"
 )
@@ -17,13 +19,26 @@ import (
 // relaunchLeakHelperEnv asks the helper below to act; without it the helper is an ordinary skipped test.
 const relaunchLeakHelperEnv = "LO_RELAUNCH_LEAK_HELPER"
 
-// TestRelaunchLeakHelperProcess is the child of TestARelaunchedTestBinaryLeavesNothingInTheTempDir. It ends the way the re-launched
-// copies of this suite end: by os.Exit from inside the test, so that nothing after m.Run is reached.
+// relaunchLeakReportEnv names a file the helper writes the state dir it sees to, as one "state=<dir>" line; relaunchLeakSleepEnv asks it to
+// wait there for its parent to kill it instead of ending by os.Exit.
+const (
+	relaunchLeakReportEnv = "LO_RELAUNCH_LEAK_REPORT"
+	relaunchLeakSleepEnv  = "LO_RELAUNCH_LEAK_SLEEP"
+)
+
+// TestRelaunchLeakHelperProcess is the child of the relaunch-leak tests below. It ends the way the re-launched copies of this suite end:
+// by os.Exit from inside the test, or killed by the parent while it waits, so that nothing after m.Run is reached.
 func TestRelaunchLeakHelperProcess(t *testing.T) {
 	if os.Getenv(relaunchLeakHelperEnv) != "1" {
-		t.Skip("the child of TestARelaunchedTestBinaryLeavesNothingInTheTempDir")
+		t.Skip("the child of the relaunch-leak tests")
+	}
+	if report := os.Getenv(relaunchLeakReportEnv); report != "" {
+		_ = os.WriteFile(report, []byte("state="+os.Getenv("LOCAL_OFFLOAD_STATE_DIR")+"\n"), 0o644)
 	}
 	os.Stdout.WriteString("relaunch-leak helper: ending from inside the test\n")
+	if os.Getenv(relaunchLeakSleepEnv) == "1" {
+		time.Sleep(60 * time.Second) // the parent kills this process long before
+	}
 	os.Exit(0)
 }
 
@@ -117,6 +132,253 @@ func TestACopyTrustsTheSuitesStateRootOnlyWhenTheEnvironmentAgreesWithIt(t *test
 			got, ok := inheritedSuiteRoot(env(c.e))
 			if ok != c.want || (ok && got != c.e.owner) {
 				t.Fatalf("inheritedSuiteRoot(%+v) = %q, %v; want trusted=%v", c.e, got, ok, c.want)
+			}
+		})
+	}
+}
+
+// relaunchedCopy starts a copy of this test binary the way the suite starts its own (os.Args[0], winexec, an environment built from the
+// suite's), with the OS temp dir pointed at tmp on the copy's environment only, and runs it to its end. The copy ends by os.Exit from
+// inside the test, or, with kill, waits until the parent has seen its report and kills it. It returns the state dir the copy reported.
+func relaunchedCopy(t *testing.T, env []string, tmp string, kill bool) string {
+	t.Helper()
+	report := filepath.Join(t.TempDir(), "report")
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestRelaunchLeakHelperProcess$", "-test.timeout=60s")
+	cmd.Env = append(env, relaunchLeakHelperEnv+"=1", relaunchLeakReportEnv+"="+report, "TMP="+tmp, "TEMP="+tmp, "TMPDIR="+tmp)
+	if kill {
+		cmd.Env = append(cmd.Env, relaunchLeakSleepEnv+"=1")
+	}
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start the copy: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	if kill {
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			if b, err := os.ReadFile(report); err == nil && strings.HasSuffix(string(b), "\n") {
+				break
+			}
+			if time.Now().After(deadline) {
+				_ = cmd.Process.Kill()
+				<-done
+				t.Fatalf("test premise: the copy never reported, so an empty folder proves nothing:\n%s", out.String())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		_ = cmd.Process.Kill()
+		<-done
+	} else if err := <-done; err != nil {
+		t.Fatalf("the copy: %v\n%s", err, out.String())
+	}
+	b, err := os.ReadFile(report)
+	if err != nil || !strings.HasPrefix(string(b), "state=") {
+		t.Fatalf("test premise: the copy never reported, so an empty folder proves nothing (%v):\n%s", err, out.String())
+	}
+	return strings.TrimSpace(strings.TrimPrefix(string(b), "state="))
+}
+
+// namesIn lists the entries of dir.
+func namesIn(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// THE LEAK THAT REMAINED (F77b left it): the tests that start a real `gpu reserve` wrapper take LOCAL_OFFLOAD_STATE_DIR out of the
+// copy's environment (treeEnv), or empty it in their own (isolateFromMachineState), so that the wrapper and its config agree on a
+// scratch lease root. A copy whose environment lost the state dir fails inheritedSuiteRoot, makes a root of its own, and ends by os.Exit
+// from inside a test or is killed by its parent, so the removal in runIsolated never runs: one empty lo-root-state-* folder per launch
+// (13 from the gpu tests alone in one run; a census of one machine's temp dir on 2026-10-14 found 58, 57 of them empty). It must keep a root of its own (that is the net: no fall back to the
+// machine-wide root) but keep it inside the suite's root, which the suite removes when it ends.
+func TestARelaunchedCopyThatLostTheStateDirLeavesNothingInTheTempDir(t *testing.T) {
+	suiteRoot := filepath.Clean(os.Getenv("LOCAL_OFFLOAD_STATE_DIR"))
+	if !strings.HasPrefix(filepath.Base(suiteRoot), stateIsolationPrefix) {
+		t.Fatalf("test premise: LOCAL_OFFLOAD_STATE_DIR = %q is not this suite's throwaway root", suiteRoot)
+	}
+	for _, env := range []struct {
+		name string
+		env  func() []string
+	}{
+		{"the state dir is taken out of the environment", func() []string { return treeEnv() }},
+		{"the state dir is emptied", func() []string { return append(os.Environ(), "LOCAL_OFFLOAD_STATE_DIR=") }},
+	} {
+		for _, end := range []struct {
+			name string
+			kill bool
+		}{{"it ends by os.Exit from inside a test", false}, {"its parent kills it", true}} {
+			t.Run(env.name+", "+end.name, func(t *testing.T) {
+				tmp := t.TempDir()
+				state := relaunchedCopy(t, env.env(), tmp, end.kill)
+				if names := namesIn(t, tmp); len(names) != 0 {
+					t.Errorf("a re-launched copy whose environment lost the state dir left %d entries in its temp dir, want none: %v", len(names), names)
+				}
+				if !strings.HasPrefix(filepath.Base(state), stateIsolationPrefix) {
+					t.Errorf("the copy's state dir is %q, want a throwaway root of its own (%s*), never the machine-wide one", state, stateIsolationPrefix)
+				}
+				if filepath.Clean(state) == suiteRoot {
+					t.Errorf("the copy's state dir is the suite's root %q; a copy that lost the state dir must not share it, its own pinned root is the isolation", state)
+				}
+				if !strings.HasPrefix(filepath.Clean(state), suiteRoot+string(filepath.Separator)) {
+					t.Errorf("the copy's state dir %q is not inside the suite's root %q, so the suite's removal does not take it with it", state, suiteRoot)
+				}
+			})
+		}
+	}
+}
+
+// When no live throwaway root of a suite is named, a copy has no suite to own its root and makes one of its own in the OS temp dir, as
+// the first process does: the net fails closed, so nothing is nested under a folder that is not a suite's throwaway root.
+func TestACopyWithNoLiveSuiteRootKeepsARootOfItsOwnInTheTempDir(t *testing.T) {
+	base := t.TempDir()
+	elsewhere := filepath.Join(base, "somewhere")
+	if err := os.Mkdir(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, owner := range []struct{ name, value string }{
+		{"the suite's variable is not set", ""},
+		{"it names a folder that is not a throwaway root", elsewhere},
+		{"it names a throwaway root that is gone", filepath.Join(base, stateIsolationPrefix+"gone")},
+	} {
+		t.Run(owner.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			env := append(treeEnv(), suiteStateRootEnv+"="+owner.value)
+			state := relaunchedCopy(t, env, tmp, false)
+			names := namesIn(t, tmp)
+			if len(names) != 1 || !strings.HasPrefix(names[0], stateIsolationPrefix) {
+				t.Fatalf("a copy with no live suite root should keep one %s* root of its own in its temp dir, found %v", stateIsolationPrefix, names)
+			}
+			if !strings.HasPrefix(filepath.Base(state), stateIsolationPrefix) {
+				t.Errorf("the copy's state dir is %q, want a throwaway root of its own", state)
+			}
+			if inner := namesIn(t, elsewhere); len(inner) != 0 {
+				t.Errorf("the copy put %v inside %s, which is not a suite's throwaway root", inner, elsewhere)
+			}
+		})
+	}
+}
+
+// A copy that cannot share the suite's root keeps its own inside the suite's (relaunchRootParent) only when the suite's variable names a
+// live throwaway root of this package; any other value gets the OS temp dir (""), where the first process puts its own.
+func TestRelaunchRootParentFollowsOnlyALiveThrowawayRoot(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, stateIsolationPrefix+"1234")
+	elsewhere := filepath.Join(base, "somewhere")
+	for _, d := range []string{root, elsewhere} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file := filepath.Join(base, stateIsolationPrefix+"afile")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := func(owner string) func(string) string {
+		return func(key string) string {
+			if key == suiteStateRootEnv {
+				return owner
+			}
+			return ""
+		}
+	}
+	got := relaunchRootParent(env(root))
+	if want := filepath.Join(root, relaunchRootFolder); got != want {
+		t.Fatalf("relaunchRootParent(a live throwaway root) = %q, want %q", got, want)
+	}
+	if fi, err := os.Stat(got); err != nil || !fi.IsDir() {
+		t.Fatalf("the folder %q must exist for the copy's root to be made in it: %v", got, err)
+	}
+	for _, c := range []struct{ name, owner string }{
+		{"the variable is not set", ""},
+		{"it names a folder that is not a throwaway root", elsewhere},
+		{"it names a throwaway root that is gone", filepath.Join(base, stateIsolationPrefix+"gone")},
+		{"it names a file", file},
+	} {
+		if got := relaunchRootParent(env(c.owner)); got != "" {
+			t.Errorf("%s: relaunchRootParent = %q, want \"\" (the OS temp dir)", c.name, got)
+		}
+	}
+	if inner, err := os.ReadDir(elsewhere); err != nil || len(inner) != 0 {
+		t.Errorf("a folder that is not a throwaway root was written into: %v %v", inner, err)
+	}
+}
+
+// relaunchRootParent falls back to the OS temp dir when the suite's root cannot be used, and that is the leak the nesting exists to close
+// (a copy killed or ended by os.Exit leaves a root there), so the fallback must say why on isolationStderr: a regression of the nesting
+// (the suite's root gone, a file where the `relaunch` folder goes, a full disk) would otherwise only show as folders in the temp dir.
+// The two cases that are not a copy of a suite (the variable unset, a folder that is not a throwaway root) are the normal ones and stay quiet.
+func TestRelaunchRootParentSaysWhyItFellBackToTheTempDir(t *testing.T) {
+	base := t.TempDir()
+	gone := filepath.Join(base, stateIsolationPrefix+"gone")
+	_, goneErr := os.Stat(gone)
+	afile := filepath.Join(base, stateIsolationPrefix+"afile")
+	if err := os.WriteFile(afile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(base, stateIsolationPrefix+"blocked")
+	if err := os.Mkdir(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blocked, relaunchRootFolder), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mkErr := os.MkdirAll(filepath.Join(blocked, relaunchRootFolder), 0o755)
+	if mkErr == nil {
+		t.Fatal("test premise: a file named like the relaunch folder must make MkdirAll fail")
+	}
+	live := filepath.Join(base, stateIsolationPrefix+"live")
+	elsewhere := filepath.Join(base, "somewhere")
+	for _, d := range []string{live, elsewhere} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		name     string
+		owner    string
+		wantTemp bool     // the answer is "", the OS temp dir
+		want     []string // what the report must contain; none means it must be empty
+	}{
+		{"the suite's root is gone", gone, true, []string{"root tests:", gone, goneErr.Error(), "OS temp dir"}},
+		{"the suite's root is a file", afile, true, []string{"root tests:", afile, "OS temp dir"}},
+		{"the relaunch folder cannot be made", blocked, true, []string{"root tests:", filepath.Join(blocked, relaunchRootFolder), mkErr.Error(), "OS temp dir"}},
+		{"the variable is not set", "", true, nil},
+		{"it names a folder that is not a throwaway root", elsewhere, true, nil},
+		{"it names a live throwaway root", live, false, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var report bytes.Buffer
+			was := isolationStderr
+			isolationStderr = &report
+			t.Cleanup(func() { isolationStderr = was })
+			got := relaunchRootParent(func(key string) string {
+				if key == suiteStateRootEnv {
+					return c.owner
+				}
+				return ""
+			})
+			if (got == "") != c.wantTemp {
+				t.Fatalf("relaunchRootParent = %q; want the OS temp dir (\"\") = %v", got, c.wantTemp)
+			}
+			if c.want == nil {
+				if report.Len() != 0 {
+					t.Fatalf("nothing was lost, so nothing is reported, got %q", report.String())
+				}
+				return
+			}
+			for _, w := range c.want {
+				if !strings.Contains(report.String(), w) {
+					t.Errorf("the report %q should contain %q", report.String(), w)
+				}
 			}
 		})
 	}

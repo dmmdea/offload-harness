@@ -1070,7 +1070,18 @@ func (s *Server) Handler() http.Handler {
 			return bearerOK(r, s.opts.Cfg.FleetAuthToken)
 		})
 	}
-	return mux
+	// SF-16: every route sits behind the ingress guard: a Host outside loopback, the tailnet
+	// and every zone in tailnet_suffix / tailnet_suffixes (unless it is the address the
+	// connection arrived on), any Origin
+	// header, and a POST that is not application/json (the lanes' own Content-Type checks
+	// are uneven: the queue lane has none). fleet_ingress_guard: warn (default) logs,
+	// enforce refuses.
+	return netguard.IngressGuard(netguard.IngressOptions{
+		Mode:            s.opts.Cfg.FleetIngressGuardMode(),
+		RequireJSONPost: true,
+		Key:             "fleet_ingress_guard",
+		Logf:            log.Printf,
+	}, mux)
 }
 
 // EnableQueueHost opens the durable queue store and arms the holder surface —

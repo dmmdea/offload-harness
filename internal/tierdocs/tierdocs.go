@@ -645,6 +645,15 @@ func agentSeatSection(p Profile) string {
 	fmt.Fprintf(&b, "| ttl_seconds | %d | idle window before the seat unloads and frees its cards |\n", s.TTLSeconds)
 	fmt.Fprintf(&b, "| launch | `%s` | which artifact set starts it |\n", dash(s.Launch))
 	fmt.Fprintf(&b, "| fallback | `%s` | the llama.cpp seat a box WITHOUT the vLLM venv serves instead |\n", dash(s.Fallback))
+	if s.Launch == vllmseat.LaunchWindowsWSL {
+		// The Windows installer binds the fallback seat (setup/install.ps1), so this launch's seat is
+		// produced by the one command that renders it, from inputs only the box knows.
+		b.WriteString("\nThis seat starts through **WSL** (`windows-wsl`). The Windows installer binds the fallback seat; " +
+			"`local-offload install vllm-seat --profile <this tier>` renders this seat's env file and the Windows scripts that start it, " +
+			"from the box's own `--distro`, `--venv` and `--hf-home` (paths inside the distro), `--lmcache-overlay` (required with fp8 KV " +
+			"and a cache server) and `--host-prefix`. See [the operator guide](../OPERATOR-GUIDE.md); parity with a running box is a diff " +
+			"of its seat env against that render.\n")
+	}
 	if c := s.CacheServer; c != nil {
 		b.WriteString("\n### Cache server\n\nThis seat is backed by a KV **cache server**: a context that leaves VRAM comes back from\n" +
 			"the store instead of being recomputed, and it survives a seat swap.\n\n| setting | value |\n|---|---|\n")

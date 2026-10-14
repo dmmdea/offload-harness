@@ -30,6 +30,11 @@ contracts/write-door/** text eol=lf
 # there: a CRLF checkout would make every context line of a diff miss and put a CR into the Python.
 setup/templates/vllm-seat/lmcache-patches/** text eol=lf
 
+# The seat env is SOURCED by bash inside the WSL distro (seat_fg.sh does `. "$CFG"`): a CR before each newline becomes part
+# of every value, so SEAT_PP= is a non-empty string and a tensor-parallel seat starts as a pipeline seat. The renderer ends
+# the lines of the file it writes itself (internal/vllmseat), and the template stays LF so a hand copy agrees with it.
+setup/templates/vllm-seat/windows-wsl/seat.env text eol=lf
+
 # Chat templates are the model's prompt format, copied verbatim into a seat directory on a Linux
 # engine: a CR inside a template string literal would reach every prompt.
 *.jinja         text eol=lf
