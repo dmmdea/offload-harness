@@ -386,7 +386,7 @@ node render/template-to-graph.mjs --template <template.json> --object-info <obje
     [--comfy-version X.Y.Z] [--seed N] [--min-comfyui-version X.Y.Z | --index <index.json> [--name NAME]] [--meta]
 ```
 
-It prints the graph (`{"ok":true,"graph":{...},"warnings":[...],"pinnedSeeds":[...],"stats":{...}}`, exit 0) or a typed
+It prints the graph (`{"ok":true,"graph":{...},"warnings":[...],"warnings_dropped":0,"pinnedSeeds":[...],"stats":{...}}`, exit 0) or a typed
 refusal (`{"ok":false,"refusal":{"code","message","details"}}`, exit 1; exit 2 for a call that cannot be read). It drops
 muted nodes, passes bypassed nodes through by type (positionally, and refused as `ambiguous_bypass` when the counts differ), expands subgraphs (ids `<instance>:<inner>`) with their input and output
 rewiring, resolves `Reroute` and `PrimitiveNode`, skips `Note` and `MarkdownNote`, maps `widgets_values` to named inputs in
@@ -394,7 +394,8 @@ the listing's input order (the hidden `control_after_generate` slot, upload slot
 and pins seeds with `--seed`. A template whose minimum ComfyUI version exceeds `--comfy-version` is refused
 (`comfyui_too_old`); a known minimum with no version given is a refusal too, because the version is never assumed, and a version given with no minimum to compare it with is a `version_check_skipped` warning. An
 unknown node class, a widget layout that does not add up and an input type with no rule are refusals as well, never a
-guess. Rules, refusal codes, evidence and the open frontend-golden comparison:
+guess. It is meant for trusted template packages: its caps bound nodes, wires, hops, nesting depth, warnings and id length, not
+the work proportional to the size of a value (see the Known gaps of the system page linked below). Rules, refusal codes, evidence and the open frontend-golden comparison:
 [`docs/systems/media-generation.md`](../docs/systems/media-generation.md#template-to-api-converter-rendertemplate-to-graphmjs).
 Tests: `node --test render/template-to-graph.test.mjs`; fixtures in
 [`testdata/template-goldens/`](testdata/template-goldens/README.md).

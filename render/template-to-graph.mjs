@@ -20,8 +20,9 @@
 //
 // What it does, in the order a node meets it:
 //   - a template that expands past LIMITS (100,000 nodes of any kind, subgraph instances included, counted over every scope that
-//     is entered; 64 levels of nesting) is refused (graph_too_large), and a node id that two scopes both give, or a subgraph
-//     definition id that appears twice, is a bad_template: neither is resolved to whichever came last;
+//     is entered; 1,000,000 links over every scope entered; 64 levels of nesting) is refused (graph_too_large), a node id longer
+//     than 256 characters is a bad_template, and so is a node id that two scopes both give, or a subgraph definition id that
+//     appears twice: neither is resolved to whichever came last. Warnings past 1,000 are counted (warnings_dropped), not kept;
 //   - mode 2 (muted) nodes are dropped; a wire that came from one is left out (a typed warning), or, for a widget input, the
 //     widget's stored value stays;
 //   - mode 4 (bypassed) nodes are not emitted; the i-th output of a type takes the i-th connected input of that type (a union
@@ -170,8 +171,13 @@ const DYNAMIC_COMBO = "COMFY_DYNAMICCOMBO_V3";
 const AUTOGROW = "COMFY_AUTOGROW_V3";
 const MATCHTYPE = "COMFY_MATCHTYPE_V3";
 // What one call may expand to. A template of a few kilobytes can nest subgraph definitions so that one instance stands for millions
-// of nodes, or so deep that a recursive walk runs out of stack: past either bound the call is refused (graph_too_large), never
-// carried on into a crash or a memory exhaustion. Real templates sit far below both (a handful of nodes per level, three levels).
+// of nodes, or so deep that a recursive walk runs out of stack. The caps bound the nodes of every kind, the wires, the hops of one
+// wire resolution, the nesting depth, the warnings kept and the length of a node id: past one of them the call is refused
+// (graph_too_large, or bad_template for an id) and the warnings past the cap are counted and dropped. They do not bound the
+// widgets_values copied per instance, nor the scans of a definition's inputs and links that each instance, and each read of one of
+// its outputs, makes, so a hostile template can still use time and memory in proportion to the size of its values and definitions
+// times the number of instances. The converter is meant for trusted template packages. Real templates sit far below every cap (a
+// handful of nodes per level, three levels).
 export const LIMITS = Object.freeze({
   maxNodes: 100000, // every node met in every scope that is entered, of any kind (live, muted, bypassed, Note, Reroute, primitive, instance)
   maxWires: 1000000, // the links of every scope that is entered (the root's and each instance's), counted as a scope is entered
@@ -530,8 +536,9 @@ function enterInstance(ctx, parent, inst, def, inner, key) {
 //
 // Finding the source is a walk along ONE path: a Reroute hands on its one input, a bypassed node the one input its output takes, a
 // subgraph instance the one inner wire that leaves it. So each step either settles on a source or names the next wire to follow
-// ({ kind: "follow", scope, link }), and settle() loops over the steps with a single visited set. That is what keeps a chain of a
-// hundred thousand Reroute nodes off the call stack and costs one set insertion per hop, not a copy of the whole trail.
+// ({ kind: "follow", scope, link }), and settle() loops over the steps with a single visited set. That is what keeps a chain of
+// 99,998 Reroute nodes (the longest the node cap admits between two live ones) off the call stack and costs one set insertion per
+// hop, not a copy of the whole trail.
 
 const MUTED = Object.freeze({ kind: "muted" });
 const nothing = (reason) => ({ kind: "none", reason });

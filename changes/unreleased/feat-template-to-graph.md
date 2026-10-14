@@ -14,13 +14,13 @@
   `render/comfy-lifecycle.mjs` is untouched. Wires are followed in a loop with one visited set, behind which a bound on the hops of one resolution (the wires of every
   scope entered; a longer walk has used a wire twice) refuses a loop as `link_cycle` even if the set failed, so a chain of 99,998 `Reroute`
   nodes resolves without a stack overflow; expansion is bounded (more than 100,000 nodes of any kind, subgraph instances
-  included and every expanded scope counted, or subgraphs nested more than 64 levels, is a typed `graph_too_large` refusal), and a node id two scopes both give or a subgraph definition id
+  included and every expanded scope counted, more than 1,000,000 links over every scope entered, or subgraphs nested more than 64 levels, is a typed `graph_too_large` refusal; at most 1,000 warnings are kept and the rest are counted in `warnings_dropped`), and a node id longer than 256 characters, a node id two scopes both give or a subgraph definition id
   that appears twice is a `bad_template`, never whichever came last. Nothing calls it yet. Clean room: the GPL-3.0 frontend and ComfyUI's server code
   were not read as source.
 - **Why.** `run-graph` and `POST /prompt` take API-format graphs only and the templates catalog could list and classify
   templates but not run one. This is the harness-side converter the catalog's docs said was missing, without a
   third-party custom node.
-- **Tests.** `node --test render/template-to-graph.test.mjs` (94 tests, plus two that read private data and skip
+- **Tests.** `node --test render/template-to-graph.test.mjs` (97 tests, plus two that read private data and skip
   unless `TEMPLATE_GOLDEN_DIR` or `TEMPLATE_SURVEY_DIR` is set): one per behaviour, on hand-built UI-format graphs, a synthetic
   listing and two hand-worked goldens; a mutated widget order turns a golden red, the version refusal and the unknown-class
   refusal are pinned. Written red first (the stub commit fails 51 of 55). A run of 24 one-line mutations of the converter,
@@ -30,12 +30,20 @@
   unpinned (dropping it left every test green and put 37 wrong wires into 9 converted templates of the survey below); a synthetic
   test with three outputs of three types read in crossed order now pins it, the graph check compares each wire's output type with
   the type the target input declares, and tests pin cycle detection through bypassed nodes, a bypassed input with no `link` key,
-  100,000-hop chains, an expansion bomb, the nesting bound and both id collisions; each of those tests was shown red against a
+  99,998-hop chains, an expansion bomb, the nesting bound and both id collisions; each of those tests was shown red against a
   one-line mutant of the converter. An independent check then found the expansion cap charged only live nodes and instances, so a
   template of a few hundred kilobytes (nested definitions stuffed with `Note` nodes, 65,535 instances) ended in an `internal_error`
   after gigabytes of memory; every node met is now charged first, and tests pin the Note-, muted-, bypassed-, Reroute- and
   primitive-heavy bombs and an exact boundary of mixed kinds, the three undefined-link guards, which guard found a loop (the hop
   bound must not hide a visited set that stopped working), and a 99,998-hop chain that runs on a worker under a test-runner timeout.
+  A last independent check found that a hostile template could still exhaust memory or time in ways the node cap does not see;
+  one test each, written red first, pins the wire cap (a definition of one `Note` and 2,000 links instanced 501 times is refused,
+  500 convert), the 1,000 kept warnings with the rest counted in `warnings_dropped`, and the 256-character node id.
+- **Limits.** The caps bound the nodes of every kind, the wires, the hops of one wire resolution, the nesting depth, the
+  warnings kept and the length of a node id. They do not bound the `widgets_values` copied per instance, nor the scans of a
+  definition's inputs and links that each instance, and each read of one of its outputs, makes, so a hostile template can still
+  use time and memory in proportion to the size of its values and definitions times the number of instances. The converter is
+  meant for trusted template packages.
 - **Checked against real data, privately.** On two saved workflows with an API-format file beside each, the converted graph
   matched value for value (50 of 50 and 20 of 20 nodes, one a subgraph template with dynamic combos). Over the 593 files of
   `comfyui-workflow-templates-json` 0.1.96 with an `/object_info` listing saved on 2026-08-14 (older than the package), 405

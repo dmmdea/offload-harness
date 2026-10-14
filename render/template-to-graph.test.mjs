@@ -1061,7 +1061,7 @@ function convertOnAWorker(t, templates) {
   });
 }
 
-test("Reroute chains of any length resolve without a stack overflow and in time that does not grow with the square of the length", { timeout: 20000 }, async (t) => {
+test("Reroute chains up to 99,998 hops, the longest the node bound admits, resolve without a stack overflow and in time that does not grow with the square of the length", { timeout: 20000 }, async (t) => {
   const hops = 99998; // the longest chain the bound admits: every Reroute counts, so this and its two ends are the 100,000 nodes
   // closed into a loop, a long chain is still a link_cycle and not a crash
   const loop = rerouteChain(hops);
@@ -1070,10 +1070,10 @@ test("Reroute chains of any length resolve without a stack overflow and in time 
   // both walks run on a worker: when one has gone quadratic the timeout above ends this test, by name, and the run goes on
   const [chain, looped] = await convertOnAWorker(t, [rerouteChain(hops), loop]);
   const g = graphOf(chain);
-  assert.deepEqual(g[String(hops + 2)].inputs, { image: ["1", 0] }, "100k reroutes are the wire they carry");
+  assert.deepEqual(g[String(hops + 2)].inputs, { image: ["1", 0] }, "99,998 reroutes are the wire they carry");
   assert.deepEqual(Object.keys(g).sort(), ["1", String(hops + 2)].sort());
   assert.equal(chain.stats.reroutes, hops);
-  assert.ok(chain.ms < 15000, `a 100k-hop chain took ${chain.ms} ms`); // loose on purpose: a copy of the visited set per hop is minutes, a walk is well under a second
+  assert.ok(chain.ms < 15000, `a 99,998-hop chain took ${chain.ms} ms`); // loose on purpose: a copy of the visited set per hop is minutes, a walk is well under a second
   trailCycleOf(looped);
   assert.equal(refusalOf(convert(rerouteChain(hops + 1)), REFUSAL.GRAPH_TOO_LARGE).details.node, "100001", "one Reroute more is past the bound, which counts it like any node");
 });
