@@ -238,28 +238,28 @@ func openspecScriptEnv(t *testing.T, bash string, extra ...string) []string {
 
 // withStandInsFirst puts dir, the folder of a test's stand-in tools, at the head of PATH in a script environment built
 // by openspecScriptEnv. withBashOnPath puts bash's own directory first, and on Linux that is /usr/bin, where the real
-// npm lives. A stand-in must come before it, or the script runs the tool it stands in for. npm's registry is also
-// pointed at a closed loopback port: a stand-in that is shadowed anyway then fails at once instead of reaching the
-// network.
+// npm lives. A stand-in must come before it, or the script runs the tool it stands in for.
+//
+// The same environment also keeps a shadowed stand-in from reaching the network. npm's registry is a closed loopback
+// port, so the real npm that runs by mistake is refused at once; but npm retries a refused connection (fetch-retries
+// defaults to 2, with a backoff of 10 to 60 s), which stalled each install test about 78 s before it failed. With
+// fetch-retries at 0 and npm offline the real npm gives up in a moment instead: offline answers from the cache or fails
+// without opening a socket. The stand-in npm is a script that reads none of these, so they cost a correct run nothing.
 func withStandInsFirst(env []string, dir string) []string {
-	out := make([]string, 0, len(env)+2)
-	cur := ""
+	kept := make([]string, 0, len(env))
 	for _, kv := range env {
-		k, v, ok := strings.Cut(kv, "=")
-		switch {
-		case ok && strings.EqualFold(k, "PATH"):
-			cur = v
-			continue
-		case ok && strings.EqualFold(k, "npm_config_registry"):
-			continue
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			switch strings.ToLower(k) {
+			case "npm_config_registry", "npm_config_fetch_retries", "npm_config_offline":
+				continue
+			}
 		}
-		out = append(out, kv)
+		kept = append(kept, kv)
 	}
-	path := dir
-	if cur != "" {
-		path += string(os.PathListSeparator) + cur
-	}
-	return append(out, "PATH="+path, "npm_config_registry=http://127.0.0.1:9/")
+	return append(prependPath(kept, dir),
+		"npm_config_registry=http://127.0.0.1:9/",
+		"npm_config_fetch_retries=0",
+		"npm_config_offline=true")
 }
 
 // On Linux bash lives in /usr/bin beside the real npm. If bash's directory came ahead of the stand-ins, the install
