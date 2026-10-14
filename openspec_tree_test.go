@@ -332,6 +332,16 @@ func TestOpenSpecInstallScriptPinsWhatSecurityMdAdmitted(t *testing.T) {
 			t.Errorf("scripts/openspec-install.sh no longer contains %q", want)
 		}
 	}
+	// The two npm calls that matter, spelled out: pack by the scoped, pinned name without running scripts; install from the
+	// verified file (never from the registry by name) without running scripts.
+	for _, re := range []string{
+		`(?m)^\( cd "\$work" && npm pack "\$\{OPENSPEC_PACKAGE\}@\$\{OPENSPEC_VERSION\}" --ignore-scripts`,
+		`(?m)^npm install --prefix "\$abs" "\$tarball" --ignore-scripts`,
+	} {
+		if !regexp.MustCompile(re).MatchString(text) {
+			t.Errorf("scripts/openspec-install.sh has no line matching %s", re)
+		}
+	}
 	// Install from the verified file, never from the registry by name, and never globally.
 	for _, bad := range []string{"npm install -g", "npm i -g", "--global", "curl ", "wget ", "npx "} {
 		if strings.Contains(text, bad) {
