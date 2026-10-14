@@ -229,6 +229,9 @@ func AnchorCheck(text, goal string) string {
 	for _, t := range toks {
 		q = append(q, regexp.QuoteMeta(singular(t)))
 	}
+	// Unqualified on purpose: a qualified regex (@grounded:, @field=) is matched case-SENSITIVELY against the context documents,
+	// and this one is (?i) over lower-cased singulars, so qualifying it would strike correct nodes that capitalise a word.
+	// TestAnchorCheckStaysUnqualified pins it.
 	return "regex:(?i)(?P<docanchor>" + strings.Join(q, "|") + ")"
 }
 

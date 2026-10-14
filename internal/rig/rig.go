@@ -174,6 +174,10 @@ var (
 //     sub two-step-grounded when the contract has context docs and steps <= 2.
 //     5b. anchor-miss: any acceptance failure that is contains:/not_contains:/
 //     regex: (a valid answer that missed a content anchor); same sub-axis.
+//     A qualified check (contains:@grounded:...) keeps its verb prefix, so its
+//     failure is counted here, an UNKNOWN verdict (empty or absent evidence) too:
+//     the axis says which kind of check failed, and the evidence column carries
+//     "unknown at <level> authority" to tell an empty answer from a wrong one.
 //  6. loop (trace only): rules_fired > 0, or the same tool on >= 3
 //     consecutive steps.
 //  7. long-observation (trace only): any step's obs_chars > 8,000.

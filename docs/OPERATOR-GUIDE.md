@@ -1465,7 +1465,11 @@ under the run and did not come back (ADR 0066); `summary.batches` on research
 calls that ran more than 8 pages; `summary.quarantined` when a fleet node was blocked for 30 min
 after two off-document answers that outnumber its passes of the same window (0.184.0: the fingerprint is lexical and
 misfires on an honest answer now and then, so a node that passed most of its work is not quarantined by two misses; its
-reason appears among `probe_errors` as "quarantined until …").
+reason appears among `probe_errors` as "quarantined until …"). Only a FAILED fingerprint can be excused (by an honest
+absence). An unknown fingerprint that the contract caused (a grounded check with no context documents, a field check the
+`output_schema` does not declare) or that sits over an honest-absence digest is reported as a failed check but strikes
+nothing, passes nothing and is not retried on the research door. Apart from those two cases, an unknown the result caused (an empty answer beside the
+documents, a declared field missing from the result) strikes like a failure.
 
 **Capacity is your step — the wait only makes contention honest.** The 429 exists because ten
 reserved requests per model are shared by every session. Ready to paste into
@@ -1771,6 +1775,24 @@ which vLLM seat the tier declares, its `max_num_seqs`, and that the cap goes up 
 does not strand the box at 1 after the venv is installed. The tier is the installer's (`installed.json`), else the config's
 `tier_profile`; with neither, or with an agent seat that is not the tier's, the row names no tier. It never changes doctor's
 exit code.
+
+**A name, not a LAN address (`lan ip:` row).** Cross-machine reach uses tailnet names, because an IP literal works until the box it
+names moves or its firewall is scoped to the tailnet, and then the endpoint is dead with nothing in the file that says why. `doctor`
+prints one `lan ip:     WARN` row for each endpoint the harness dials whose host is an IP literal instead of a name: a
+private-range literal (RFC 1918 or an IPv6 unique-local address), a link-local one, or a tailnet CGNAT one (the row then says to use
+the MagicDNS name). Loopback is fine, every name is fine, and a public literal is left to the tailnet guard. The fields read are
+`endpoint`, `seat_endpoints`, `cascade_remote_lanes`, `delegate_remotes`, `fleet_queue_holder`, the explicit entries of
+`pair_workloads_relay`. `nim_endpoint` and `nim_bases` are not read, because a self-hosted NIM on the LAN is what that allowlist is
+for, and neither is a `kv_cache_server` address: a literal on the direct LAN or the tailnet is a valid store address and the
+preferred one (bulk KV over MagicDNS measured several times slower, and the `offload_status` reachability readback of a store dials
+literals only, so a name switches it off), which a row asking for a name would undo. A store that moves is the operator's call to
+rename. The row names the field, with its list index or map key, and never prints the address. It is configuration only,
+so a serving layer that is down does not hide it, a config with nothing to warn about prints nothing, and it never changes
+doctor's exit code. A literal outside loopback and the tailnet range was already refused when the config loads in
+`seat_endpoints`, `cascade_remote_lanes` and `fleet_queue_holder`, and is a `config findings` FAIL in `delegate_remotes`; the
+row is what says why, and it is the only word on a tailnet literal and on the fields that load clean (`endpoint`,
+`pair_workloads_relay`). Fix the warning by writing the node's dotless MagicDNS name (or a name under a
+zone listed in `tailnet_suffix` / `tailnet_suffixes`) in the field.
 
 **A pin needs a reason (ADR 0078).** `route: local` and `route: remote` pin a call to this box's seat or to a fleet node, and a
 call that does that must say why: `pin_reason` (`--pin-reason` on the `delegate` and `research` verbs) is `privacy` (the material
@@ -2106,6 +2128,12 @@ fires), UNGROUNDED (`contains:`/`regex:` matching nothing in the contract's own 
 right answers), SHAPE-ONLY (`nonempty:`/`min_items:` alone — passes garbage). The run still
 happens; fix the acceptance before reusing the contract (authoring rule: anchor ≥1 check to
 content that appears in the docs but not in the goal; contracts/README.md).
+
+Closed-at authority: a contract whose checks all carry an authority qualifier (`@answer:`, `@field=<name>:`,
+`@grounded:`; contracts/README.md) and all passed publishes the weakest of them as
+`results[].acceptance_authority` (`answer`, `field` or `grounded`), and the delegation-log row carries the same
+key. It is absent for every other result (an unqualified check, a failure, an unknown), so a caller reads its
+presence as "every check of this contract was backed by at least this authority" and its absence as no claim.
 
 Experiment support (0.79.0–0.81.0): setting `OFFLOAD_DELEGATE_ARM=<label>` tags every
 delegation-log line **and every ledger row** the process records with `arm:<label>`, so an

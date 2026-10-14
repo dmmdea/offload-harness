@@ -563,7 +563,9 @@ statement (60 words at most) that the page does not carry what was asked ("not o
 "not documented/stated/…"), at least one such statement, no number or boolean, no second sentence that says what the page does
 hold, no contrast word ("but", "however", …), and no report of a failure to read the file ("could not read", "not found", "the
 file is missing": an error, not a finding). A stock phrase beside a claim, the goal echoed back, and "I could not read the file,
-so the page does not address it" still fail it. The excuse counts for the node as neither a strike nor a pass
+so the page does not address it" still fail it. Only a FAILED fingerprint can be excused: an unknown (as a qualified field
+fingerprint over an empty field grades) is never dropped and stays a reported failure, but over an honest absence it is no
+fact about the node, so it strikes nothing and passes nothing. The excuse counts for the node as neither a strike nor a pass
 (`Quarantine.Pass`): an absence is no evidence that the node reads the right document. What no lexical rule can tell is a seat
 that did not read the page and reports "the page does not address it" without saying that it failed; that is delivered as an
 absence, as an honest one is, and only a second seat would tell them apart.
@@ -620,7 +622,13 @@ A research page that fails only its own checks (a shape, an item count) is not r
 node: a second seat given the same page mostly repeats the verdict at the cost of a whole second
 run, and the result's `retry_note` says so. A failed document fingerprint (`docanchor`) is a
 different fact: the answer is about another document, which is a property of the node (two of
-them quarantine it), so that failure keeps its one retry on another node. The seats never gain
+them quarantine it), so that failure keeps its one retry on another node. A fingerprint that grades unknown for a reason
+of the contract (a grounded check on a contract with no context documents, a field check the `output_schema` does not
+declare: the `AUTHORITY-UNREACHABLE` lint warns about it) is still reported, but it neither strikes a node nor passes, and
+on the research door it is not retried, because another node would grade the same unknown; the same holds for an unknown
+over an honest absence. Only a FAILED fingerprint can be excused (by an honest absence): an unknown caused by the contract
+or by an honest absence strikes nothing and passes nothing, and otherwise an unknown the result caused (an empty answer beside the
+documents, a declared field missing from the result) strikes like a failure. The seats never gain
 network access; the agent loop's egress cage is untouched. Failed or refused fetches come
 back as `sources[].skipped` and produce no result — a broken page never reads as a digest.
 
