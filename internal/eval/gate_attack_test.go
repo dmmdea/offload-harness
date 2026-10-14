@@ -651,61 +651,87 @@ func allTied(t *testing.T, n int, pre PreReg, inc, cand float64) GateResult {
 		arm("c", repeatF(cand, n), repeatF(500, n))))
 }
 
-// Sixteen ties say little about a margin of 0.05: a candidate that lost 5% of the incumbent's passes
-// would tie all sixteen pairs 44% of the time. A sample with no spread has no standard error to read, so
-// the lower end drops to what the sample cannot rule out: the one for which a candidate exactly at it ties
-// every pair 2.5% of the time, 1 - 0.025^(1/n) of the score range below the tie.
-// That clears a margin of 0.05 from 80 tasks (4.5%) and not from 40 (8.8%).
+// Sixteen ties say little about a margin of 0.05: a candidate that lost 5% of the incumbent's passes would
+// tie all sixteen pairs 44% of the time. A sample with no spread has no standard error to read, so its
+// interval is the rule of three: the one value plus and minus 3 R / n, R the width of the score range (for pass/fail
+// scores with no discordant pair among n, 3 / n is the one-sided 95% upper bound on the rate of discordant pairs, so
+// the mean difference can be as low as -3 / n). A margin of 0.05 of the range is certified from 61 ties; 60 ties
+// put the end exactly on it, and a difference exactly on the margin is not an ADOPT.
 func TestAllTiedNonInferiorityDoesNotCertifyTheMarginOnASmallSample(t *testing.T) {
 	for _, tc := range []struct {
 		n    int
 		want string
-	}{{16, VerdictInconclusive}, {24, VerdictInconclusive}, {40, VerdictInconclusive}, {80, VerdictAdopt}} {
+	}{{16, VerdictInconclusive}, {24, VerdictInconclusive}, {40, VerdictInconclusive}, {60, VerdictInconclusive}, {61, VerdictAdopt}, {64, VerdictAdopt}, {80, VerdictAdopt}} {
 		r := allTied(t, tc.n, niUnitPre(tc.n), 0.5, 0.5)
 		if r.Delta != 0 || r.Verdict != tc.want {
 			t.Errorf("n=%d, every pair tied, tokens halved: want %s, got %s %s (delta %v lo %v hi %v)", tc.n, tc.want, r.Verdict, r.Reason, r.Delta, r.Lo, r.Hi)
 		}
-		wantLo := -(1 - math.Pow(0.025, 1/float64(tc.n)))
-		if math.Abs(r.Lo-wantLo) > 1e-12 || r.Hi != 0 {
-			t.Errorf("n=%d: the interval of a tie is [%v, 0], got [%v, %v]", tc.n, wantLo, r.Lo, r.Hi)
+		if half := 3 / float64(tc.n); math.Abs(r.Lo+half) > 1e-12 || math.Abs(r.Hi-half) > 1e-12 {
+			t.Errorf("n=%d: the interval of a tie is [%v, %v], got [%v, %v]", tc.n, -half, half, r.Lo, r.Hi)
 		}
 	}
 }
 
-// The same on a 0..10 judge scale, where the margin is 0.5 and the widening is ten times as wide: a mutant that
+// The same on a 0..10 judge scale, where the margin is 0.5 and the interval is ten times as wide: a mutant that
 // forgot the width of the range would certify the margin from 16 ties.
 func TestAllTiedNonInferiorityScalesWithTheScoreRange(t *testing.T) {
 	for _, tc := range []struct {
 		n    int
 		want string
-	}{{16, VerdictInconclusive}, {40, VerdictInconclusive}, {80, VerdictAdopt}} {
+	}{{16, VerdictInconclusive}, {40, VerdictInconclusive}, {60, VerdictInconclusive}, {61, VerdictAdopt}, {80, VerdictAdopt}} {
 		r := allTied(t, tc.n, niPre(tc.n), 8, 8)
 		if r.Margin != 0.5 || r.Verdict != tc.want {
 			t.Errorf("n=%d on 0..10 with margin %v: want %s, got %s %s (lo %v)", tc.n, r.Margin, tc.want, r.Verdict, r.Reason, r.Lo)
 		}
-		if wantLo := -10 * (1 - math.Pow(0.025, 1/float64(tc.n))); math.Abs(r.Lo-wantLo) > 1e-12 {
-			t.Errorf("n=%d: the lower end of a tie is %v, got %v", tc.n, wantLo, r.Lo)
+		if half := 30 / float64(tc.n); math.Abs(r.Lo+half) > 1e-12 || math.Abs(r.Hi-half) > 1e-12 {
+			t.Errorf("n=%d: the interval of a tie is [%v, %v], got [%v, %v]", tc.n, -half, half, r.Lo, r.Hi)
 		}
 	}
 }
 
-// A superiority tie is INCONCLUSIVE because its lower end is below 0, not because it is one value.
-func TestAllTiedSuperiorityIsInconclusive(t *testing.T) {
+// A superiority tie is INCONCLUSIVE because its interval spans 0, and it stays so at any size: the incumbent wins
+// ties. A constant difference far from zero still decides, in both directions and in both modes: every pair a win
+// of the whole range is an ADOPT, every pair a loss of it is a BLOCK, and the interval stops at the range.
+func TestAllTiedSuperiorityIsInconclusiveAndAConstantFarFromZeroStillDecides(t *testing.T) {
 	const n = 16
 	b, h := freeze(t, supPre(n), nil)
-	r := mustGate(t, b, h, inputFor(h, arm("i", repeatF(0.5, n), nil), arm("c", repeatF(0.5, n), nil)))
-	if r.Verdict != VerdictInconclusive || r.Delta != 0 || !(r.Lo < 0) || r.Hi != 0 {
-		t.Fatalf("a tie keeps the incumbent with a lower end below 0: %+v", r)
+	for _, size := range []int{16, 80, 200} {
+		bs, hs := freeze(t, supPre(size), nil)
+		r := mustGate(t, bs, hs, inputFor(hs, arm("i", repeatF(0.5, size), nil), arm("c", repeatF(0.5, size), nil)))
+		if half := 3 / float64(size); r.Verdict != VerdictInconclusive || r.Delta != 0 || math.Abs(r.Lo+half) > 1e-12 || math.Abs(r.Hi-half) > 1e-12 || !r.KeepIncumbent {
+			t.Errorf("n=%d: a tie keeps the incumbent with an interval about 0: %s delta %v [%v, %v] keep %v", size, r.Verdict, r.Delta, r.Lo, r.Hi, r.KeepIncumbent)
+		}
+	}
+	r := mustGate(t, b, h, inputFor(h, arm("i", repeatF(0, n), nil), arm("c", repeatF(1, n), nil)))
+	if r.Verdict != VerdictAdopt || r.Delta != 1 || math.Abs(r.Lo-(1-3.0/n)) > 1e-12 || r.Hi != 1 {
+		t.Errorf("every pair +1: want ADOPT on [0.8125, 1], got %s [%v, %v]", r.Verdict, r.Lo, r.Hi)
+	}
+	r = mustGate(t, b, h, inputFor(h, arm("i", repeatF(1, n), nil), arm("c", repeatF(0, n), nil)))
+	if r.Verdict != VerdictBlock || r.Delta != -1 || r.Lo != -1 || math.Abs(r.Hi-(-1+3.0/n)) > 1e-12 {
+		t.Errorf("every pair -1: want BLOCK on [-1, -0.8125], got %s [%v, %v]", r.Verdict, r.Lo, r.Hi)
+	}
+	// Non-inferiority: every pair a loss of the whole range is a BLOCK, and a win of it with tokens halved an ADOPT.
+	bn, hn := freeze(t, niUnitPre(n), nil)
+	r = mustGate(t, bn, hn, inputFor(hn, arm("i", repeatF(1, n), repeatF(1000, n)), arm("c", repeatF(0, n), repeatF(500, n))))
+	if r.Verdict != VerdictBlock {
+		t.Errorf("non-inferiority, every pair -1: want BLOCK, got %s %s", r.Verdict, r.Reason)
+	}
+	r = mustGate(t, bn, hn, inputFor(hn, arm("i", repeatF(0, n), repeatF(1000, n)), arm("c", repeatF(1, n), repeatF(500, n))))
+	if r.Verdict != VerdictAdopt {
+		t.Errorf("non-inferiority, every pair +1 and tokens halved: want ADOPT, got %s %s", r.Verdict, r.Reason)
 	}
 }
 
-// A constant difference that is exactly the margin on paper is -0.04999999999999993 (0.90 - 0.95) or
-// -0.05000000000000004 in floats; the single value used to decide it by the last bit.
+// A constant difference that is exactly the margin on paper is -0.04999999999999993 (0.95 - 0.90) or
+// -0.05000000000000004 in floats; the single value used to decide it by the last bit. It is a constant loss of
+// the margin, with no spread to read, and it never ADOPTs, at any size.
 func TestConstantDifferenceAtTheMarginByFloatArithmeticIsNotAdopted(t *testing.T) {
-	for _, tc := range []struct{ inc, cand float64 }{{0.95, 0.90}, {0.70, 0.65}, {0.50, 0.45}, {0.60, 0.55}} {
-		r := allTied(t, 16, niUnitPre(16), tc.inc, tc.cand)
-		if r.Verdict != VerdictInconclusive {
-			t.Errorf("every pair %v -> %v is a loss of the margin: want INCONCLUSIVE, got %s %s (lo %v)", tc.inc, tc.cand, r.Verdict, r.Reason, r.Lo)
+	for _, n := range []int{16, 80, 200} {
+		for _, tc := range []struct{ inc, cand float64 }{{0.95, 0.90}, {0.70, 0.65}, {0.50, 0.45}, {0.60, 0.55}} {
+			r := allTied(t, n, niUnitPre(n), tc.inc, tc.cand)
+			if r.Verdict != VerdictInconclusive {
+				t.Errorf("n=%d, every pair %v -> %v is a loss of the margin: want INCONCLUSIVE, got %s %s (lo %v hi %v)", n, tc.inc, tc.cand, r.Verdict, r.Reason, r.Lo, r.Hi)
+			}
 		}
 	}
 }

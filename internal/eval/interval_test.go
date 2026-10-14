@@ -97,41 +97,44 @@ func TestPrimaryIntervalInvariances(t *testing.T) {
 	}
 }
 
-// With no spread to measure the delta and the upper end are the one value, taken from the data and not from a
-// sum, and the lower end is what the sample cannot rule out (see zeroSpreadInterval). The reference lower
-// ends were computed outside the package from q (span + c) - span with q = 0.025^(1/n).
-// With nothing to conclude the result is zeros; a sum that overflows is not finite, for the caller to refuse.
+// With no spread to measure the delta is the one value, taken from the data and not from a sum, and the
+// interval is the value plus and minus 3 R / n (the rule of three, R the width of the score range), clipped to
+// [-R, R] (see zeroSpreadInterval). The reference ends were computed outside the package. With nothing to
+// conclude the result is zeros; a sum that overflows is not finite, for the caller to refuse.
 func TestPrimaryIntervalDegenerateInputs(t *testing.T) {
 	near := func(got, want float64) bool { return math.Abs(got-want) <= 1e-12*math.Max(1, math.Abs(want)) }
 	for _, tc := range []struct {
 		name      string
 		inc, cand []float64
 		span      float64
-		want      float64 // the delta, which is also the upper end
-		lo        float64
+		delta     float64 // the one value
+		lo, hi    float64
 	}{
-		{"every difference zero (a tie), 16 tasks", repeatF(0.5, 16), repeatF(0.5, 16), 1, 0, -0.20590721420782276},
-		{"a tie, 40 tasks", repeatF(0.5, 40), repeatF(0.5, 40), 1, 0, -0.08809730287880235},
-		{"a tie, 80 tasks", repeatF(0.5, 80), repeatF(0.5, 80), 1, 0, -0.0450640350676923},
-		{"a tie on a 0..10 range, 24 tasks", repeatF(5, 24), repeatF(5, 24), 10, 0, -1.4247359772252572},
-		{"every difference +0.25", repeatF(0.5, 16), repeatF(0.75, 16), 1, 0.25, -0.007384017759778483},
-		{"every difference -0.5 on a 0..10 range", repeatF(8, 16), repeatF(7.5, 16), 10, -0.5, -2.4561185349743164},
-		{"two tasks, the same difference", []float64{0.5, 0.25}, []float64{1, 0.75}, 1, 0.5, -0.7628291754873715},
+		{"every difference zero (a tie), 16 tasks", repeatF(0.5, 16), repeatF(0.5, 16), 1, 0, -0.1875, 0.1875},
+		{"a tie, 40 tasks", repeatF(0.5, 40), repeatF(0.5, 40), 1, 0, -0.075, 0.075},
+		{"a tie, 60 tasks: 3/60 is the margin 0.05", repeatF(0.5, 60), repeatF(0.5, 60), 1, 0, -0.05, 0.05},
+		{"a tie, 80 tasks", repeatF(0.5, 80), repeatF(0.5, 80), 1, 0, -0.0375, 0.0375},
+		{"a tie on a 0..10 range, 24 tasks", repeatF(5, 24), repeatF(5, 24), 10, 0, -1.25, 1.25},
+		{"every difference +0.25", repeatF(0.5, 16), repeatF(0.75, 16), 1, 0.25, 0.0625, 0.4375},
+		{"every difference -0.5 on a 0..10 range", repeatF(8, 16), repeatF(7.5, 16), 10, -0.5, -2.375, 1.375},
+		// The mean of a difference cannot leave [-R, R]: the interval stops at the end of the range.
+		{"two tasks, the same difference: clipped at both ends", []float64{0.5, 0.25}, []float64{1, 0.75}, 1, 0.5, -1, 1},
 		// Sixteen copies of -0.1 sum to -1.6000000000000003, whose sixteenth is not -0.1: the delta
 		// must come from the data, not from the sum.
-		{"every difference -0.1 (not a sum of floats)", repeatF(0.2, 16), repeatF(0.1, 16), 1, -0.1, -0.2853164927870405},
-		// The largest possible difference on every task is a win to the end of the range, and only the
-		// lower end moves.
-		{"every candidate score perfect, every incumbent score 0", repeatF(0, 16), repeatF(1, 16), 1, 1, 0.5881855715843545},
+		{"every difference -0.1 (not a sum of floats)", repeatF(0.2, 16), repeatF(0.1, 16), 1, -0.1, -0.2875, 0.0875},
+		// The largest possible difference on every task is a win to the end of the range, and it is
+		// clipped there.
+		{"every candidate score perfect, every incumbent score 0", repeatF(0, 16), repeatF(1, 16), 1, 1, 0.8125, 1},
+		{"every candidate score zero, every incumbent score perfect", repeatF(1, 16), repeatF(0, 16), 1, -1, -1, -0.8125},
 	} {
 		d, lo, hi := primaryInterval(tc.inc, tc.cand, tc.span)
-		if d != tc.want || !near(lo, tc.lo) || hi != tc.want {
-			t.Errorf("%s: got %v %v %v, want %v %v %v", tc.name, d, lo, hi, tc.want, tc.lo, tc.want)
+		if d != tc.delta || !near(lo, tc.lo) || !near(hi, tc.hi) {
+			t.Errorf("%s: got %v %v %v, want %v %v %v", tc.name, d, lo, hi, tc.delta, tc.lo, tc.hi)
 		}
 	}
 	// Differences that are equal on paper but not to the last bit (0.3-0.2 against 0.2-0.1) are not a
 	// spread: they get the interval of a sample with none.
-	if d, lo, hi := primaryInterval([]float64{0.2, 0.1, 0.2, 0.1}, []float64{0.3, 0.2, 0.3, 0.2}, 1); !finite(d) || math.Abs(d-0.1) > 1e-9 || math.Abs(lo+0.5626010991781221) > 1e-8 || hi != d {
+	if d, lo, hi := primaryInterval([]float64{0.2, 0.1, 0.2, 0.1}, []float64{0.3, 0.2, 0.3, 0.2}, 1); !finite(d) || math.Abs(d-0.1) > 1e-9 || math.Abs(lo+0.65) > 1e-8 || math.Abs(hi-0.85) > 1e-8 {
 		t.Errorf("near-equal differences: %v %v %v", d, lo, hi)
 	}
 	// A difference that is not rounding is a spread, however small a share of the range it is.
