@@ -215,7 +215,7 @@ func TestCommittedTierShipsTheChatTemplateItsTailNames(t *testing.T) {
 }
 
 // concurrencyLimit is not a template FILE in the windows-wsl set (git grep of the hand
-// templates finds it only under linux-systemd/), so the premise "the Qube entry has it" is
+// templates finds it only under linux-systemd/), so the premise "the reference box's entry has it" is
 // carried by Entry alone. llama-swap's per-model default (10) answers 429 to the streams a
 // 32-slot seat was provisioned for, so the entry's limit must equal the engine's --max-num-seqs
 // for every committed tier that launches through WSL.

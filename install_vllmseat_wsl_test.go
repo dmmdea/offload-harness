@@ -237,7 +237,7 @@ func TestInstallVLLMSeatNeedsDistroPathsNotWindowsDefaults(t *testing.T) {
 // the wrapper mounts. None of them may be hardened into the tier.
 func TestInstallVLLMSeatAcceptsOverlayAndSeatDirFlags(t *testing.T) {
 	r := newWSLBox(t, "blackwell-3x16").run(t, map[string]string{
-		"-wsl-seat-dir": "/srv/seat", "-lmcache-overlay": "/srv/lmcache",
+		"-distro": "distro-b", "-wsl-seat-dir": "/srv/seat", "-lmcache-overlay": "/srv/lmcache",
 		"-cache-mount-src": "//store.example/kvcache", "-cache-mount-opts": "vers=3.1.1",
 	})
 	if r.err != nil {
@@ -259,7 +259,7 @@ func TestInstallVLLMSeatAcceptsOverlayAndSeatDirFlags(t *testing.T) {
 		t.Errorf("the chat template must be named at the distro seat directory the flag gave: %q", env["SEAT_EXTRA_ARGS"])
 	}
 	tasks := readRendered(t, r.out, "register-seat-tasks.ps1")
-	for _, want := range []string{"-d distro", "/srv/seat/seat_fg.sh", "/srv/seat/qwen3.8-27b-vllm.env"} {
+	for _, want := range []string{"-d distro-b", "/srv/seat/seat_fg.sh", "/srv/seat/qwen3.8-27b-vllm.env"} {
 		if !strings.Contains(tasks, want) {
 			t.Errorf("register-seat-tasks.ps1 lacks %q", want)
 		}
