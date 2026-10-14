@@ -438,6 +438,21 @@ func TestJustRenewedLeaseIsNotAsked(t *testing.T) {
 	r.mustAsk(a)
 }
 
+// The once-flag lives in the asker, not only in the sidecar: a file removed after the ask (a cleanup, a sweep
+// of another lease's debris) must not let the next tick ask again and run the job's on_yield a second time.
+func TestAskedOnceEvenIfTheSidecarVanishes(t *testing.T) {
+	yieldPolicy(t, "request")
+	r := newYieldRig(t, nil)
+	r.overdueBy(time.Minute)
+	r.waiter(yieldWaiterA)
+	a := r.m.NewYieldAsker(r.l.Epoch())
+	r.mustAsk(a)
+	if err := os.Remove(r.yieldFile()); err != nil {
+		t.Fatal(err)
+	}
+	r.tickNone(a, 4, "the sidecar vanished after the ask")
+}
+
 func TestAskToYieldNeverTouchesTheClaim(t *testing.T) {
 	yieldPolicy(t, "request")
 	r := newYieldRig(t, nil)

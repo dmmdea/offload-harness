@@ -185,3 +185,20 @@ func TestStatusNeverWritesTheYieldSidecar(t *testing.T) {
 		t.Fatalf("a status snapshot wrote the yield request (%v): only the holder's own tick may", err)
 	}
 }
+
+// A tree-orphan has no holder left to ask: its record may still carry the stamp of the wrapper that died, and
+// a sidecar that wrapper wrote, and neither is reported as a request waiting for an answer.
+func TestATreeOrphanHasNoHolderToAsk(t *testing.T) {
+	yieldPolicy(t, "request")
+	dir := t.TempDir()
+	plantYield(t, dir, 41, 25*time.Minute, gpulease.YieldActionRan)
+	info := gpulease.Info{Held: true, Epoch: 41, PID: deadOwnerPID, Class: gpulease.ClassMedia, Epochs: []uint64{41}, Yields: gpulease.YieldsWrapper,
+		ExpiresAt: time.Now().Add(-time.Hour), TreeOrphan: true, TreeWhy: "a recorded member of the job's tree is alive"}
+	_, head := holdersOf(dir, info, Options{}, time.Now())
+	if head == nil || !head.TreeOrphan {
+		t.Fatalf("setup: %+v", head)
+	}
+	if head.YieldFile != "" || head.YieldNote != "" || head.Yield != nil {
+		t.Errorf("a tree-orphan reports a request nobody can answer: %+v", head)
+	}
+}

@@ -98,9 +98,14 @@ func yieldRootRig(t *testing.T, policy string) (cfg string, m *gpulease.Manager)
 	old := wrapperTickEvery
 	wrapperTickEvery = 150 * time.Millisecond
 	t.Cleanup(func() { wrapperTickEvery = old })
-	gpulease.SetDefaultOnOverdue(policy)
-	t.Cleanup(func() { gpulease.SetDefaultOnOverdue("") })
 	cfg, m = leaseFixture(t)
+	// The policy is the config's: every gpu verb loads the config and Load installs what it says, so a
+	// policy installed by hand would be replaced by the unset default the moment the verb ran.
+	body := `{"state_dir": ` + strconv.Quote(filepath.Dir(cfg)) + `, "gpu_on_overdue": ` + strconv.Quote(policy) + `}`
+	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gpulease.SetDefaultOnOverdue("") })
 	return cfg, m
 }
 
