@@ -2480,8 +2480,13 @@ The deferred answer's data is `{refusal, node, lane, family, missing[], roster[]
 | `node_below_min_vram` | `capacity`, `no_node_configured` | `min_vram_gb` was given (video and animation) and the node's largest card is smaller. |
 
 A node that does not answer, or holds a text lease, is an ordinary `capacity` defer with no err class, because it may take the call
-later; a node id that no answering node has, while some roster entry did not answer, is that same defer, not `node_unknown`, because
-the id may be one of them (a URL outside the roster is always `node_unknown`). The four `capacity` refusals are a fact about the node that waiting does not change: the remedy is to name
+later; a node id that no answering node has, while some roster entry that was dialled did not answer, is that same defer, not
+`node_unknown`, because the id may be one of them (a URL outside the roster is always `node_unknown`). A roster entry the tailnet
+guard refuses is never dialled and has no id, so it does not make an unknown id a defer: the id is `node_unknown` and the reason names
+the refused entries. A URL you name that is on the roster but that the guard refuses is filed `capacity` with err_class
+`no_node_configured` and no refusal word, as `pickNodeFor` files such an entry. A named call on a machine with no `delegate_remotes`
+never reaches a roster: it is the plain `config` defer (`no delegate_remotes configured`) with no refusal word, and this machine's own
+lane is not tried. The four `capacity` refusals are a fact about the node that waiting does not change: the remedy is to name
 another node (the pairing is the one `no_node_configured` already has). Nothing falls back: the named node refusing, another node
 or this machine could have run the call, and neither is tried.
 
@@ -2491,8 +2496,12 @@ or this machine could have run the call, and neither is tried.
 `wan22`, `ltx25`, `hunyuan`, `h3` (the default family always; another only when `videogen_families` binds it or every file its graph
 loads is on the node) and an sd.cpp family by its own name; the animation row is `wan-animate2`, the music row `acestep`.
 `bytes` is the size where the node finds the file and `-1` where it does not, so a row whose weight is gone is still listed and the
-refusal can name it. A ComfyUI file keeps its loader-relative name; an absolute, drive-lettered or `..` name is published as its file name,
-and an sd.cpp file by its file name. **A row is a statement of sizes, not an identity:** no fingerprint, `digest` always empty, built from
+refusal can name it. The ComfyUI rows exist only on a node that has a ComfyUI install (`comfy_dir` is a directory on it): the shipped
+default config binds the three scripts on every machine, so the binding alone makes no row, and a node without the install (or with
+only sd.cpp families) publishes none of them and omits the key when it has no sd.cpp video family either; a node with the install
+lists every lane its config binds, an image-only node with ComfyUI included, with -1 for each weight it lacks. A ComfyUI file keeps
+its loader-relative name; an absolute, drive-lettered or `..` name is published as its file name, and an sd.cpp file by its bare file
+name whatever its path looks like. **A row is a statement of sizes, not an identity:** no fingerprint, `digest` always empty, built from
 a stat per file and memoised for a minute. There is no row for voice, the audio.cpp engines or the sd.cpp animation lane.
 
 **When a row judges.** Only a node that published at least one row for the call's lane is judged, by the row of the family the call

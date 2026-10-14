@@ -386,12 +386,22 @@ a call for a weight the node lacks is refused before anything is sent. Every oth
    the row lacks). `node_lacks_media_job`: the call carries input files and the node has not opened the media-job door. `node_lacks_model`:
    see 4. `node_below_min_vram`: see 6. **A node that does not answer, or holds a text lease, is not refused:** it is an ordinary
    `capacity` defer with no err class, because it may take the call later; and a node id that no node which answered has, while some entry
-   did not answer, is that same defer (the id may be one of them), not `node_unknown`; a URL outside the roster is always `node_unknown`. The choice of `capacity` for the four
+   that was **dialled** did not answer, is that same defer (the id may be one of them), not `node_unknown`; a URL outside the roster is
+   always `node_unknown`. **A roster entry the tailnet guard refuses is not such an entry:** it is never dialled, has no node id, and
+   waiting does not change it, so an id no answering node has is `node_unknown` however many entries the guard refuses, and the reason
+   names them (`not dialled`) for the operator who meant one. A URL the caller names that is on the roster but that the guard refuses
+   is a configuration fact like the four, filed `capacity` with `err_class` `no_node_configured`, with no refusal word (not the `config`
+   class, which reads as a broken stack). Two answers of a named call therefore carry no refusal data: that one and a call on a
+   machine that has no `delegate_remotes` at all, which never reaches a roster and is the plain `config` defer every remote call on
+   such a machine gets (`no delegate_remotes configured`): the name is not the caller's mistake there, the fleet is the operator's to
+   configure, and the local lane is not tried. The choice of `capacity` for the four
    configuration refusals is the pairing the code already has for `no_node_configured` (a test of the image batch pins it); the
    caller's remedy is to name another node, not to wait.
 3. **A node publishes the family rows of its video, animation and audio bindings.** `/fleet/health` gains `media_recipes[]`, additive
-   (a node that binds none of the three through ComfyUI or sd.cpp omits it, and a reader that does not know it sees the shape it
-   always did): one row `{lane, name, default, engine, digest, files[{role, name, bytes}], license, commercial_use}` per family. A video
+   (a node that has no ComfyUI install, `comfy_dir` being a directory on it, and binds no sd.cpp video family omits it, and a reader
+   that does not know it sees the shape it always did; the shipped default config binds the three ComfyUI scripts on every machine, so a
+   binding alone makes no row, while a node that has the install lists every lane its config binds, an image-only node with ComfyUI
+   among them, with -1 for each weight it lacks): one row `{lane, name, default, engine, digest, files[{role, name, bytes}], license, commercial_use}` per family. A video
    row is named by the value of the `model` parameter that selects it: the ComfyUI families `wan22`, `ltx25`, `hunyuan`, `h3`
    (the default family always, any other only when the node bound it in `videogen_families` or holds every file its graph loads) and
    an sd.cpp family by its own name; an animation row is `wan-animate2`; a music row is `acestep`. `bytes` is the size where the node
@@ -399,12 +409,15 @@ a call for a weight the node lacks is refused before anything is sent. Every oth
    rows are built from the files the bindings name and a stat per file, memoised for a minute like the route verdicts. **A row is not
    an identity in this release:** it has no content fingerprint, its `digest` is always empty, and nothing matches two rows against
    each other. A ComfyUI file keeps its loader-relative name with its subfolders; an absolute, drive-lettered or climbing name is
-   published as its file name, and an sd.cpp file by its file name, so no row carries a path of the node's.
+   published as its file name, and an sd.cpp file by its bare file name whatever its path looks like (a relative path keeps no
+   subfolder), so no row carries a path of the node's.
    There is no row for voice, for the audio.cpp engines or for the sd.cpp animation lane: a reader takes the absence as unknown.
 4. **A row is read for one thing: the weight files it says the node lacks.** `node_lacks_model` is raised only when the node
    published at least one row for the call's lane and the row of the family the call renders is absent or shows a file with `bytes`
    -1. With no `model`, that is the node's default row. A `model` is matched by the row name exactly (an sd.cpp family) and otherwise
-   folded the way the node folds it, through `mediacap.VideoBinding`, the one resolver that exists: the runner's closed set
+   folded the way the node folds it, through `mediacap.VideoBinding`, which carries its own copy of the runner's closed set
+   (`mediacap.videoRunnerFamily`; `pipeline.canonicalVideoFamily` and `fleetnode.familyFor` carry the others, and nothing can import
+   all three), pinned to the pipeline's fold by `TestMediacapFoldsAVideoFamilyTheWayThePipelineRendersIt`: the runner's closed set
    (`ltx25`, `h3`, `hunyuan`) renders itself and every other spelling, the documented `wan` included, renders Wan 2.2. `ace` has no
    row and is not judged. A lane the node publishes no row for is **unknown, not refused**: the call goes on to the node's own door,
    which refuses a missing weight itself with a 503, exactly as a forced call does today; voice, the sd.cpp animation lane and a node

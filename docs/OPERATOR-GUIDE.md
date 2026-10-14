@@ -718,8 +718,9 @@ take one file, text or prompt.
 `local-offload generate-video out.mp4 still.png "a slow pan" --node node-b` (or `animate-character ... --node node-b`,
 `generate-audio out.wav "text" --kind music --node node-b`; MCP `node` on the same three tools) sends the call to the node whose
 `node_id` is `node-b`, or to a `delegate_remotes` URL you give instead, and to no other: not another node, and not this machine's own
-lane. If that node cannot take it you get the reason as a word in `data.refusal` and nothing is sent: `node_unknown` (the answer lists
-the node ids that answered), `node_is_self`, `node_lacks_route` (it does not serve the lane, or its weights are gone: the answer names
+lane. If that node cannot take it nothing is sent and the CLI prints `DEFERRED (<reason>)` with the node ids and file names in the
+reason; the reason as a word is in `data.refusal` (with `missing[]` and `roster[]`), which the CLI prints only with `--json` and an MCP
+call returns as it is: `node_unknown` (the answer lists the node ids that answered), `node_is_self`, `node_lacks_route` (it does not serve the lane, or its weights are gone: the answer names
 the files), `node_lacks_media_job` (the call carries a still, a reference or a clone sample and the node has not opened that door),
 `node_lacks_model` (the node's row for the family you asked for lacks a file) or `node_below_min_vram` (`--min-vram-gb N`). A node that
 is down or busy with a text job is a retryable `capacity` defer instead. `--route local` with `--node` is refused. Without

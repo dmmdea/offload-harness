@@ -540,8 +540,9 @@ version number. A graph that names no file is admitted as before, on a node with
 
 `/fleet/health` carries `media_recipes[]` for a node whose video, animation or music binding is ComfyUI (or whose video family is sd.cpp): one
 row `{lane, name, default, engine, digest, files:[{role, name, bytes}], license, commercial_use}` per family, with `bytes` -1 for a
-weight the node does not hold. It is additive (a node that binds none of the lanes omits the key) and **a row is not an identity**: no
-fingerprint, an empty `digest`. A caller that names a node (`node` on `offload_generate_video`, `offload_animate_character`,
+weight the node does not hold. It is additive (a node with no ComfyUI install, `comfy_dir` being no directory on it, and no sd.cpp video
+family omits the key, whatever scripts its config binds; one with the install lists every lane its config binds, with -1 for each weight
+it lacks) and **a row is not an identity**: no fingerprint, an empty `digest`. A caller that names a node (`node` on `offload_generate_video`, `offload_animate_character`,
 `offload_generate_audio`; `--node` on the verbs) is refused before any POST when the row of the family it asks for lacks a file. See
 [media-generation.md](systems/media-generation.md#naming-a-node-a-video-animation-or-audio-call-runs-on-the-one-node-you-pick-adr-0082-amendment-3).
 

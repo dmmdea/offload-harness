@@ -14,13 +14,20 @@
   with `bytes` -1, or no such row) and `node_below_min_vram` are `capacity` defers with `err_class` `no_node_configured`, the pairing that
   err class already has, narrowed to the node the caller chose. A node that does not answer, or holds a text lease, is an ordinary
   `capacity` defer with no err class (it may take the call later), and so is a node id that no answering node has while some roster entry
-  did not answer. Nothing falls back to another node or to a local run. A named call that ran on a node whose row judged it adds
+  that was dialled did not answer. A roster entry the tailnet guard refuses is never dialled and has no id, so it does not count as
+  one: an id nobody has is `node_unknown` however many entries the guard refuses, and the reason names them; a URL named that is on the
+  roster but that the guard refuses is `capacity` with `err_class` `no_node_configured`, with no refusal word. A named call on a machine with
+  no `delegate_remotes` never reaches a roster and is the plain `config` defer, also with no refusal word. Nothing falls back to another
+  node or to a local run. A named call that ran on a node whose row judged it adds
   `rendered_family` and `rendered_files` to the result.
 - **The rows.** `/fleet/health` gains `media_recipes[]`, additive: one row `{lane, name, default, engine, digest, files[{role, name,
   bytes}], license, commercial_use}` per family a ComfyUI or sd.cpp binding of the node names (video: the default family always, another
   only when `videogen_families` binds it or every file is on the node, an sd.cpp family by its own name; `wan-animate2`; `acestep`), with
-  `bytes` -1 for a file the node does not hold. A row is a statement of sizes, not an identity: no fingerprint, an empty `digest`, a stat per
-  file, memoised for a minute; ComfyUI names keep their subfolders and an absolute, drive-lettered or `..` name is published as its file name.
+  `bytes` -1 for a file the node does not hold. The ComfyUI rows exist only on a node that has a ComfyUI install (`comfy_dir` is a directory
+  on it), because the shipped default config binds the three scripts on every machine: a node without the install and without an sd.cpp
+  video family omits the key, and one with the install lists every lane its config binds, with -1 for what it lacks. A row is a statement of
+  sizes, not an identity: no fingerprint, an empty `digest`, a stat per file, memoised for a minute; ComfyUI names keep their subfolders,
+  an absolute, drive-lettered or `..` name is published as its file name, and an sd.cpp file is published by its bare file name.
   Voice, the audio.cpp engines and the sd.cpp animation lane publish no row, which a reader takes as unknown: a lane the node publishes no
   row for goes to the node's own door, as a forced call does. A `model` is matched by row name exactly and otherwise folded the way the node
   folds it (`mediacap.VideoBinding`), `ace` has no row. `delegate.NodeView.MediaRecipes` decodes it.
@@ -71,3 +78,34 @@
 - **Docs.** ADR 0082 Amendment 3 (the rules, the six refusals and their classes, what a row is and is not, the named limits, and the two
   releases that follow), `docs/systems/media-generation.md` ("Naming a node"), `docs/systems/fleet-node.md`, `docs/FLEET-NODE.md`, the
   glossary and the operator guide.
+- **Review fixes, before the merge.** A review of the first build found, and this entry's code now fixes, in order of weight:
+  (1) a roster entry the tailnet guard refuses was filed with the entries that did not answer, so a mistyped node id on a roster that
+  held one was a retryable `capacity` defer ("one of them may be it") on every attempt; it is `node_unknown` now, naming the refused
+  entries, and a dialled entry that did not answer still keeps the id a capacity defer; (2) every node that loaded the shipped default
+  config published a default `wan22`, `wan-animate2` and `acestep` row with every file at -1, nodes with no ComfyUI at all included (the
+  default binds the three scripts on every machine, and the docs and tests said a node without the lanes omits the key); the ComfyUI rows
+  are now built only when `comfy_dir` is a directory on the node, and the docs say what a node with the install publishes, an image-only
+  node included; (3) a named URL that is on the roster but that the guard refuses was filed under the `config` class, which no document
+  named; it is `capacity` with `err_class` `no_node_configured`, as `pickNodeFor` files such an entry; (4) an sd.cpp file was published
+  with the subfolders of a relative path though the contract is the bare file name; (5) the ADR called `mediacap.VideoBinding` the one
+  resolver of the video family, but three folds exist and nothing tied mediacap's copy of the runner's closed set to the pipeline's: a
+  pin test now does (`TestMediacapFoldsAVideoFamilyTheWayThePipelineRendersIt`, in `internal/pipeline`) and the ADR says so; (6) the CLI
+  prints a refusal's word only with `--json` (the DEFERRED line carries the reason), which the operator guide and the usage text now say;
+  (7) a named call on a machine with no `delegate_remotes` is the plain `config` defer with no refusal word, now stated and pinned;
+  (8) two comment fixes (the doc comment of `videoFlags` had been left above another function, and `vramTask` named a graph it does not
+  cover). Not changed: the image and graph MCP tools still list no `node` and drop one sent to them, a choice this entry documents and
+  the design left open; no door advertises a parameter it would drop.
+- **Review fixes: red first, and the mutants.** Four tests were committed first and failed on their assertions: `a refusal must carry
+  typed data, got "null"` (an id unknown on a roster with a refused entry came back as a capacity defer); `a refused entry is a
+  configuration fact: ... DeferClass:config ...` with an empty err class; `names = [models/sub/fastwan-q8.gguf high.gguf
+  models/sub/wan-vae.safetensors t5.safetensors], want fastwan-q8.gguf,high.gguf,wan-vae.safetensors,t5.safetensors`; and `a node with
+  no ComfyUI install published rows` (three rows with every file at -1), in `internal/mediacap` and in `internal/fleetnode`. **Not red
+  first, and the history says so:** three pins were added green because the code already had the behaviour and no test held it: the
+  four weight roles of an sd.cpp row (dropping the high-noise expert or the T5 survived every earlier test and all 74 mutants above),
+  a named call on a machine with no fleet, and the cross-package family fold; each was then proved by a mutant. 17 more single-line
+  mutants through `scripts/mutation-check.sh` on a `git archive` copy of the committed tree, each landed on one line, compiled, was
+  restored byte for byte and ended RED: mediacap (9), the four sd.cpp roles one by one, the bare-name `path.Base`, the ComfyUI gate
+  (its definition, and its use on the video, the animation and the music lane); mediaremote (6), refused entries filed with the
+  silent ones, the refused entries left out of the reason, the class and the err class of a named URL the guard refuses, the class of
+  the no-fleet defer, a named call with no fleet running here; pipeline (2), `h3` removed from mediacap's closed set and `hunyuan`
+  removed from the pipeline's.

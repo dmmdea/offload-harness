@@ -2020,8 +2020,11 @@ the node names for `video-gen` (the default family always, another only when `vi
 sd.cpp family by its own name), `animate` (`wan-animate2`, ComfyUI) and `audio-gen` (`acestep`, the ComfyUI music lane)
 (`internal/fleetnode/media_recipes.go`, from `mediacap.LaneRows`). `bytes` is the size where the node finds the file and `-1` where it
 does not, so a row whose weight is gone is still listed; a file keeps its loader-relative name and an absolute path is published as its
-file name. **A row is not an identity:** it carries no fingerprint and no digest (empty), costs a stat per file, and is memoised for
-`mediaRoutesTTL` (60 s). A node that binds none of the three lanes omits the key; voice, the audio.cpp engines and the sd.cpp animation
+file name (an sd.cpp file always by its bare file name). **A row is not an identity:** it carries no fingerprint and no digest (empty),
+costs a stat per file, and is memoised for `mediaRoutesTTL` (60 s). A node with no ComfyUI install (`comfy_dir` is a directory on it) and
+no sd.cpp video family omits the key, because the shipped default config binds the three ComfyUI scripts on every machine and a script
+alone says nothing about the node; one that has the install lists every lane its config binds, with -1 for each weight it lacks (an
+image-only node with ComfyUI included). Voice, the audio.cpp engines and the sd.cpp animation
 lane have no row, which a reader takes as unknown. A delegator that names the node reads the rows to refuse a call for a weight the node
 lacks before it sends anything (`delegate.NodeView.MediaRecipes`; [media-generation.md](media-generation.md#naming-a-node-a-video-animation-or-audio-call-runs-on-the-one-node-you-pick-adr-0082-amendment-3)).
 The node itself checks nothing new at its door for them.
