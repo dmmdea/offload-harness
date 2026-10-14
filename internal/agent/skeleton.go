@@ -56,6 +56,15 @@ const skeletonPrefix = "[skeleton — pruned from "
 // when the body is too small, already a skeleton or a bare marker, or the
 // skeleton would not actually be smaller.
 func skeletonize(content string) (string, bool) {
+	return skeletonizeAs(content, len(content))
+}
+
+// skeletonizeAs is skeletonize with the size the disclosure prefix reports
+// given by the caller. It is len(content) unless an earlier rung already
+// shrank the body, and then it is the size the body had before that rung, so
+// a marker parsed back out of the prefix (skeletonOriginalSize) still names
+// what was lost in total.
+func skeletonizeAs(content string, reported int) (string, bool) {
 	if len(content) < skeletonMinChars || isSkeletonized(content) || isElided(content) {
 		return content, false
 	}
@@ -80,7 +89,7 @@ func skeletonize(content string) (string, bool) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s%d chars]\n", skeletonPrefix, len(content))
+	fmt.Fprintf(&b, "%s%d chars]\n", skeletonPrefix, reported)
 	run := 0
 	flush := func() {
 		if run > 0 {

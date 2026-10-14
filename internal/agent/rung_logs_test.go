@@ -1136,3 +1136,153 @@ func TestLogCollapseRungIgnoresAResultWhoseCallIdIsReused(t *testing.T) {
 		t.Error("control: the command's body should fold under a unique id")
 	}
 }
+
+// lcSkeletonableLog is a body the rung folds and a skeleton can then prune
+// further: a long run of near-identical lines (the fold) and a long middle of
+// distinct, signal-free lines (what only the skeleton can drop).
+func lcSkeletonableLog() string {
+	var distinct []string
+	for i := 0; i < 90; i++ {
+		distinct = append(distinct, fmt.Sprintf("module %c%c exported its symbols to the registry", 'a'+i/26, 'a'+i%26))
+	}
+	return lcJoin(lcHead, lcAccessRun(60), distinct, lcTail)
+}
+
+// TestLogCollapseThenSkeletonThenElideNamesTheOriginalSize walks one body down
+// the ladder: folded, then pruned to a skeleton, then elided. Each prefix or
+// marker names the size the body had at the start, not what the previous rung
+// left behind.
+func TestLogCollapseThenSkeletonThenElideNamesTheOriginalSize(t *testing.T) {
+	body := lcSkeletonableLog()
+	msgs := lrTranscript(body)
+	folded, ok := logCollapse(body)
+	if !ok {
+		t.Fatal("control: the body must fold")
+	}
+	probe := append([]Msg(nil), msgs...)
+	probe[4].Content = folded
+	foldedTokens := estimateTokens(probe)
+	skel, ok := skeletonizeAs(folded, len(body))
+	if !ok {
+		t.Fatal("control: the folded body must still prune to a skeleton")
+	}
+	probe[4].Content = skel
+	skelTokens := estimateTokens(probe)
+	if skelTokens >= foldedTokens {
+		t.Fatalf("control: the skeleton must be smaller than the fold (%d >= %d)", skelTokens, foldedTokens)
+	}
+
+	opts := compactOpts{Skeleton: true, LogCollapse: true}
+	out := compact(context.Background(), msgs, skelTokens, 1, 3, opts)
+	if orig, ok := skeletonOriginalSize(out[4].Content); !ok || orig != len(body) {
+		t.Fatalf("the skeleton of a folded body should record the original %d chars, got (%d, %v):\n%.160q", len(body), orig, ok, out[4].Content)
+	}
+	if want := fmt.Sprintf("%s%d chars]", skeletonPrefix, len(body)); !strings.HasPrefix(out[4].Content, want) {
+		t.Errorf("skeleton prefix: want %q, got %.100q", want, out[4].Content)
+	}
+
+	probe[4].Content = elisionMarker(len(body))
+	gone := compact(context.Background(), out, estimateTokens(probe), 1, 3, opts)
+	if want := elisionMarker(len(body)); !strings.HasPrefix(gone[4].Content, want) {
+		t.Errorf("elide marker over a skeleton of a folded body: want prefix %q, got %.100q", want, gone[4].Content)
+	}
+
+	// With the rung off the same ladder reports what it always reported: the
+	// skeleton names the body it pruned, whatever that body was.
+	off := compact(context.Background(), msgs, skelTokens, 1, 3, compactOpts{Skeleton: true})
+	if orig, ok := skeletonOriginalSize(off[4].Content); ok && orig != len(body) {
+		t.Errorf("rung off: skeleton should name the raw body's size %d, got %d", len(body), orig)
+	}
+}
+
+// TestLogCollapseEmergencyShrinkNamesTheOriginalSize: the reactive last resort
+// also announces a folded body at its original size, whether the body is an
+// older one (pass 2) or the newest (pass 3, when even the trim cannot fit).
+func TestLogCollapseEmergencyShrinkNamesTheOriginalSize(t *testing.T) {
+	older, newest := lrServerLog(150), lrServerLog(160)
+	foldedOlder, ok1 := logCollapse(older)
+	foldedNewest, ok2 := logCollapse(newest)
+	if !ok1 || !ok2 {
+		t.Fatal("control: both bodies must fold")
+	}
+	msgs := lrTranscript(foldedOlder, foldedNewest)
+	on := compactOpts{LogCollapse: true}
+
+	out := emergencyShrinkWith(msgs, 1, 3, on)
+	if want := elisionMarker(len(older)); !strings.HasPrefix(out[4].Content, want) {
+		t.Errorf("older folded body: want marker %q, got %.100q", want, out[4].Content)
+	}
+	if want := elisionMarker(len(newest)); out[6].Content != want {
+		t.Errorf("newest folded body, trim cannot fit: want %q, got %.100q", want, out[6].Content)
+	}
+
+	// The three-argument form is the rung-off emergency pass: it names the
+	// size of the body in front of it, and a body that merely opens with the
+	// rung's header is such a body.
+	lookalike := lrLookalikeHeader + lrServerLog(150)
+	lookalikeNewest := lrLookalikeHeader + lrServerLog(160)
+	plain := emergencyShrink(lrTranscript(lookalike, lookalikeNewest), 1, 3)
+	if want := elisionMarker(len(lookalike)); !strings.HasPrefix(plain[4].Content, want) {
+		t.Errorf("rung off, older lookalike: want marker %q, got %.100q", want, plain[4].Content)
+	}
+	if want := elisionMarker(len(lookalikeNewest)); plain[6].Content != want {
+		t.Errorf("rung off, newest lookalike: want %q, got %.100q", want, plain[6].Content)
+	}
+	if viaWith := emergencyShrinkWith(lrTranscript(lookalike, lookalikeNewest), 1, 3, compactOpts{}); lrDigest(viaWith) != lrDigest(plain) {
+		t.Error("emergencyShrink must equal emergencyShrinkWith with no optional rung")
+	}
+}
+
+// TestLogCollapseDedupeMarkerNamesTheOriginalSize: two older bodies that fold
+// to the same bytes are one body to the dedupe rung; its reference names the
+// size before the fold when the rung is on, and the folded size when it is off.
+func TestLogCollapseDedupeMarkerNamesTheOriginalSize(t *testing.T) {
+	folded, ok := logCollapse(lrServerLog(150))
+	if !ok {
+		t.Fatal("control: the body must fold")
+	}
+	orig, ok := logsOriginalSize(folded)
+	if !ok || orig <= len(folded) {
+		t.Fatalf("control: header should record a size larger than the fold: (%d, %v)", orig, ok)
+	}
+	msgs := lrTranscript(folded, folded, lrServerLog(170))
+	for _, c := range []struct {
+		name string
+		opts compactOpts
+		want string
+	}{
+		{"rung on", compactOpts{LogCollapse: true}, dedupeMarker("call-2", orig)},
+		{"rung off", compactOpts{}, dedupeMarker("call-2", len(folded))},
+	} {
+		// The budget is what the dedupe alone buys, so no later rung runs.
+		probe := append([]Msg(nil), msgs...)
+		probe[4].Content = c.want
+		out := compact(context.Background(), msgs, estimateTokens(probe), 2, 3, c.opts)
+		if out[4].Content != c.want {
+			t.Errorf("%s: want %q, got %.100q", c.name, c.want, out[4].Content)
+		}
+	}
+}
+
+func TestLogsOriginalSizeParsesTheHeaderOnly(t *testing.T) {
+	folded, ok := logCollapse(lrServerLog(150))
+	if !ok {
+		t.Fatal("control: the body must fold")
+	}
+	if n, ok := logsOriginalSize(folded); !ok || n != len(lrServerLog(150)) {
+		t.Errorf("want (%d, true), got (%d, %v)", len(lrServerLog(150)), n, ok)
+	}
+	for _, c := range []string{"", "plain text", "[log-collapse: original ", "[log-collapse: original x chars, 3 lines]", "[log-collapse: original 12 chars]"} {
+		if n, ok := logsOriginalSize(c); ok {
+			t.Errorf("%q must not parse, got %d", c, n)
+		}
+	}
+	for _, on := range []bool{false, true} {
+		if got := logsMarkerSize("plain text", on); got != len("plain text") {
+			t.Errorf("an ordinary body is named by its own length (on=%v), got %d", on, got)
+		}
+	}
+	if got := logsMarkerSize(folded, false); got != len(folded) {
+		t.Errorf("rung off: a folded-looking body is named by its own length, got %d", got)
+	}
+}

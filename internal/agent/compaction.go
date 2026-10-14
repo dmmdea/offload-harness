@@ -223,7 +223,7 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 		if j, ok := latest[out[i].Content]; ok && j > i {
 			// Guard against GROWTH: a long call id can make the marker larger
 			// than a smallish body — collapsing must always shrink.
-			if m := dedupeMarker(out[j].ToolCallID, len(out[i].Content)); len(m) < len(out[i].Content) {
+			if m := dedupeMarker(out[j].ToolCallID, logsMarkerSize(out[i].Content, opts.LogCollapse)); len(m) < len(out[i].Content) {
 				out[i].Content = m
 			}
 		}
@@ -263,7 +263,7 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 	if opts.Skeleton {
 		for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
 			if out[i].Role == "tool" && !pinned[out[i].ToolCallID] {
-				if sk, ok := skeletonize(out[i].Content); ok {
+				if sk, ok := skeletonizeAs(out[i].Content, logsMarkerSize(out[i].Content, opts.LogCollapse)); ok {
 					out[i].Content = sk
 				}
 			}
@@ -284,7 +284,7 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 	// already tiny, and eliding one would sever the reference for no gain.
 	for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
 		if out[i].Role == "tool" && !isElided(out[i].Content) && !isDeduped(out[i].Content) && !pinned[out[i].ToolCallID] {
-			n := len(out[i].Content)
+			n := logsMarkerSize(out[i].Content, opts.LogCollapse)
 			if orig, ok := skeletonOriginalSize(out[i].Content); ok {
 				n = orig
 			}
@@ -484,6 +484,14 @@ func isElided(content string) bool {
 // server will reject again). Deterministic; returns msgs unchanged when
 // already within budget.
 func emergencyShrink(msgs []Msg, budget, protectedPrefix int) []Msg {
+	return emergencyShrinkWith(msgs, budget, protectedPrefix, compactOpts{})
+}
+
+// emergencyShrinkWith is emergencyShrink for a loop whose ladder has optional
+// rungs on. Only LogCollapse matters here: it makes the markers name the size a
+// folded body had before the fold (logsMarkerSize); everything else is
+// emergencyShrink as documented above.
+func emergencyShrinkWith(msgs []Msg, budget, protectedPrefix int, opts compactOpts) []Msg {
 	if estimateTokens(msgs) <= budget {
 		return msgs
 	}
@@ -508,7 +516,7 @@ func emergencyShrink(msgs []Msg, budget, protectedPrefix int) []Msg {
 		if out[i].Role != "tool" || i == lastTool || isElided(out[i].Content) {
 			continue
 		}
-		if sk, ok := skeletonize(out[i].Content); ok && len(sk) < len(out[i].Content) {
+		if sk, ok := skeletonizeAs(out[i].Content, logsMarkerSize(out[i].Content, opts.LogCollapse)); ok && len(sk) < len(out[i].Content) {
 			out[i].Content = sk
 		}
 	}
@@ -533,7 +541,7 @@ func emergencyShrink(msgs []Msg, budget, protectedPrefix int) []Msg {
 		if orig, ok := skeletonOriginalSize(out[i].Content); ok {
 			out[i].Content = elisionMarker(orig)
 		} else {
-			out[i].Content = elisionMarker(len(out[i].Content))
+			out[i].Content = elisionMarker(logsMarkerSize(out[i].Content, opts.LogCollapse))
 		}
 	}
 	// Pass 3: the newest tool body is what still keeps the estimate over
@@ -546,6 +554,7 @@ func emergencyShrink(msgs []Msg, budget, protectedPrefix int) []Msg {
 	// contract.
 	if lastTool >= 0 && estimateTokens(out) > budget {
 		size := len(out[lastTool].Content)
+		reported := logsMarkerSize(out[lastTool].Content, opts.LogCollapse)
 		rest := estimateTokens(out) - size/bytesPerToken
 		roomChars := (budget - rest) * bytesPerToken
 		if roomChars < 256 {
@@ -553,7 +562,7 @@ func emergencyShrink(msgs []Msg, budget, protectedPrefix int) []Msg {
 		}
 		out[lastTool].Content, _ = contextbudget.Trim(out[lastTool].Content, roomChars)
 		if estimateTokens(out) > budget {
-			out[lastTool].Content = elisionMarker(size)
+			out[lastTool].Content = elisionMarker(reported)
 		}
 	}
 	return out

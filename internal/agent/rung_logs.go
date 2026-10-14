@@ -44,12 +44,17 @@ import (
 //   - Scoped like every other rung: logsRung only touches tool-role bodies in
 //     the window the ladder passes it ([protectedEnd, recentStart)), skips
 //     pinned call ids, folds only the output of the command tools (run,
-//     run_shell; any other or unknown producer fails closed), rewrites Content
-//     only (never Role, ToolCallID or the assistant tool calls, so pairing is
-//     intact), works oldest-first and stops at the first fit. The protected preamble and the recent turns are
-//     therefore never edited, and the edit point only moves forward, which is
-//     what keeps the server's KV prefix as stable as the rest of the ladder
-//     (ADR 0017: any edit costs a re-prefill, so a rung must not scatter edits).
+//     run_shell; an unknown, ambiguous or any other producer fails closed),
+//     rewrites Content only (never Role, ToolCallID or the assistant tool
+//     calls, so pairing is intact), works oldest-first and stops at the first
+//     fit. The protected preamble and the recent turns are therefore never
+//     edited, and the edit point only moves forward, which is what keeps the
+//     server's KV prefix as stable as the rest of the ladder (ADR 0017: any
+//     edit costs a re-prefill, so a rung must not scatter edits).
+//   - Honest about size: when the rung is on, the skeleton prefix, the elide
+//     marker and the dedupe reference of a body this rung folded name the
+//     size the body had BEFORE the fold (logsMarkerSize), so a marker never
+//     tells the model that less was lost than was.
 //
 // Honest limits, stated here rather than papered over:
 //
@@ -62,10 +67,13 @@ import (
 //     such as "port 8080", "port 8081", "port 9090" fold to the first plus a
 //     count and the other two values are not recoverable from the transcript.
 //     The footer says what was folded, and the original size is in the header.
-//   - A collapsed body that a later rung skeletonises or elides reports the
-//     collapsed size, not the original, in that rung's own marker (the
-//     skeleton-size parser is skeleton-specific, and the ladder hunk is kept
-//     minimal). The original size stays in this rung's header while it exists.
+//   - A body that begins with logsPrefix is taken for an already collapsed
+//     body, because the prefix is the only idempotence marker there is: with
+//     the rung on, a raw body that merely quotes the header is skipped by this
+//     rung and a later rung's marker quotes the size its first line claims.
+//     With the rung off nothing here is consulted (logsMarkerSize,
+//     IsLogCollapseArtifact), so the default ladder treats that body as the
+//     ordinary content it is.
 //   - A hex id made only of the letters a-f and shorter than eight characters
 //     is not masked, so two lines that differ only in such an id do not match.
 
@@ -143,6 +151,38 @@ func logsKeep(line string) bool {
 // re-compaction never touches it again.
 func isLogCollapsed(content string) bool {
 	return len(content) >= len(logsPrefix) && content[:len(logsPrefix)] == logsPrefix
+}
+
+// logsOriginalSize parses the original body size out of a collapsed body's
+// header, so a later rung's marker can name what was lost in total and not the
+// size the fold left behind (the same job skeletonOriginalSize does).
+func logsOriginalSize(content string) (int, bool) {
+	if !isLogCollapsed(content) {
+		return 0, false
+	}
+	var n, lines int
+	if _, err := fmt.Sscanf(content[len(logsPrefix):], "%d chars, %d lines]", &n, &lines); err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// logsMarkerSize is the size an elide, dedupe or skeleton marker names for a
+// body. It is len(content) when the rung is off, which keeps every marker the
+// default ladder writes byte-identical to what it always wrote: a body that
+// merely quotes the rung's header is ordinary content there. With the rung on
+// it is what the body measured before any rung shrank it: the size in a
+// collapse header, or the size a skeleton recorded.
+func logsMarkerSize(content string, on bool) int {
+	if on {
+		if n, ok := logsOriginalSize(content); ok {
+			return n
+		}
+		if n, ok := skeletonOriginalSize(content); ok {
+			return n
+		}
+	}
+	return len(content)
 }
 
 // IsLogCollapseArtifact reports whether a tool body is a PRODUCT of the
