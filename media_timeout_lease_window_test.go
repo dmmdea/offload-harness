@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -21,11 +23,15 @@ import (
 //
 // What a value CAN still do is ask for a window longer than one lease TERM. A window above gpu_max_term_min (6 h unless the
 // config says otherwise) is accepted whole but reaches its declared end only by renewal, and a term that is not renewed is
-// labelled expired while the render is still running (gpulease.PlanTerm, ADR 0070). These tests hold every timeout the
-// repository ships (the code defaults, the setup template, the example config and every tier seed layer, per-family keys
+// labelled expired while the render is still running (gpulease.PlanTerm, ADR 0070). These tests hold every SINGLE-JOB timeout
+// the repository ships (the code defaults, the setup template, the example config and every tier seed layer, per-family keys
 // included) to that rule, and the seeds that restate a default to the code's value.
+//
+// What they cannot hold is an image BATCH: its window is the per-image timeout times its jobs (pipeline.RunImageBatch), and
+// no cap bounds the job count, so a batch longer than gpu_max_term_min / imagegen_timeout_sec images asks for a window above
+// the term whatever the seed says. That stays a stated limit in the operator guide, not a number this file can pin.
 
-// mediaTimeoutKeys are the seven generation routes' timeout keys and their code defaults.
+// mediaTimeoutKeys are the seven generation routes' timeout keys and their code defaults. Each is a single job's timeout.
 var mediaTimeoutKeys = map[string]func(config.Config) int{
 	"imagegen_timeout_sec":   func(c config.Config) int { return c.ImageGenTimeoutSec },
 	"videogen_timeout_sec":   func(c config.Config) int { return c.VideoGenTimeoutSec },
@@ -34,6 +40,43 @@ var mediaTimeoutKeys = map[string]func(config.Config) int{
 	"gen_edit_timeout_sec":   func(c config.Config) int { return c.GenEditTimeoutSec },
 	"animategen_timeout_sec": func(c config.Config) int { return c.AnimateGenTimeoutSec },
 	"audiogen_timeout_sec":   func(c config.Config) int { return c.AudioGenTimeoutSec },
+}
+
+// notMediaLeaseTimeouts are the other *_timeout_sec keys of config.Config, each a clock that never becomes a media lease
+// window. A new *_timeout_sec key must land in mediaTimeoutKeys or here, so adding a generation route cannot slip past the
+// seed test unnoticed.
+var notMediaLeaseTimeouts = map[string]string{
+	"agent_timeout_sec":            "the text agent loop's wall",
+	"stt_request_timeout_sec":      "one speech-to-text request",
+	"imagegen_refiner_timeout_sec": "the prompt refiner's text call",
+	"edit_timeout_sec":             "CPU edit ops: no GPU lease",
+	"compose_timeout_sec":          "composition renders in software: no GPU lease",
+	"browse_timeout_sec":           "one browser fetch",
+	"request_timeout_sec":          "one chat request",
+	"nim_timeout_sec":              "a remote hosted call",
+	"hailo_timeout_sec":            "an accelerator call",
+	"coral_timeout_sec":            "an accelerator call",
+	"rknpu_timeout_sec":            "an accelerator call",
+}
+
+// configTimeoutTags returns every top-level *_timeout_sec JSON key config.Config declares.
+func configTimeoutTags() []string {
+	var tags []string
+	rt := reflect.TypeOf(config.Config{})
+	for i := 0; i < rt.NumField(); i++ {
+		name := strings.Split(rt.Field(i).Tag.Get("json"), ",")[0]
+		if strings.HasSuffix(name, "_timeout_sec") {
+			tags = append(tags, name)
+		}
+	}
+	sort.Strings(tags)
+	return tags
+}
+
+// mediaTimeoutKeyDrift compares the config's *_timeout_sec keys with the key list: a media key the config no longer declares,
+// and a config key that is in neither list.
+func mediaTimeoutKeyDrift(tags []string) []string {
+	return nil // red: not written yet
 }
 
 func sortedMediaKeys() []string {
@@ -160,7 +203,32 @@ func tierSeedLayers(t *testing.T) map[string]map[string]any {
 	return out
 }
 
-// TestSeededMediaTimeoutsFitTheLeaseWindowTheyRunUnder holds every shipped media timeout to one lease term. It is a guard,
+// TestTheMediaTimeoutKeyListMatchesTheConfig: the key list the seed test walks is the config's own set of generation
+// timeouts. The two controls are what prove it can fail: a new route key nobody classified, and a listed key the config
+// dropped.
+func TestTheMediaTimeoutKeyListMatchesTheConfig(t *testing.T) {
+	tags := configTimeoutTags()
+	if len(tags) < len(mediaTimeoutKeys) {
+		t.Fatalf("only %d *_timeout_sec keys found on config.Config: the reflection went blind", len(tags))
+	}
+	if drift := mediaTimeoutKeyDrift(tags); len(drift) != 0 {
+		t.Errorf("the media timeout key list and config.Config drifted: %v", drift)
+	}
+	if d := mediaTimeoutKeyDrift(append(append([]string{}, tags...), "newroute_timeout_sec")); len(d) != 1 || !strings.Contains(d[0], "newroute_timeout_sec") {
+		t.Errorf("a *_timeout_sec key in neither list must be reported once, got %v", d)
+	}
+	var without []string
+	for _, tag := range tags {
+		if tag != "videogen_timeout_sec" {
+			without = append(without, tag)
+		}
+	}
+	if d := mediaTimeoutKeyDrift(without); len(d) != 1 || !strings.Contains(d[0], "videogen_timeout_sec") {
+		t.Errorf("a listed media key the config no longer declares must be reported once, got %v", d)
+	}
+}
+
+// TestSeededMediaTimeoutsFitTheLeaseWindowTheyRunUnder holds every shipped single-job media timeout to one lease term. It is a guard,
 // green on the tree as it stands (the longest seed is 7,200 s against a 21,600 s term): the two controls below are what
 // prove it can fail.
 func TestSeededMediaTimeoutsFitTheLeaseWindowTheyRunUnder(t *testing.T) {
@@ -251,6 +319,8 @@ func TestTheSetupTemplateRestatesTheCodeDefaultsOrNothing(t *testing.T) {
 // TestTheDocsStateWhereAMediaCallsLeaseWindowComesFrom: the operator guide's engine + lease row and the fleet-node page
 // both tell a reader what the lease window of a generation call is, and the node page says it for a fleet media job
 // (whose timeout keys are the node's own, never the delegator's).
+var registerAnchor = regexp.MustCompile(`#[a-z0-9-]*register-[a-z]-[0-9]+`)
+
 func TestTheDocsStateWhereAMediaCallsLeaseWindowComesFrom(t *testing.T) {
 	guide, err := os.ReadFile(filepath.FromSlash("docs/OPERATOR-GUIDE.md"))
 	if err != nil {
@@ -268,6 +338,13 @@ func TestTheDocsStateWhereAMediaCallsLeaseWindowComesFrom(t *testing.T) {
 	if !strings.Contains(row, "`gpu_max_term_min`") {
 		t.Errorf("the guide's engine + lease row does not name gpu_max_term_min: a reader cannot see that a seeded timeout must fit one lease term")
 	}
+	// The term bound is a single job's timeout. A batch's window is the per-image timeout times its jobs and no cap bounds the
+	// job count, so the row must name the batch as the case the bound does not hold for.
+	for _, w := range []string{"single job's timeout", "per-image timeout times its jobs", "job count"} {
+		if !strings.Contains(row, w) {
+			t.Errorf("the guide's engine + lease row does not say %q: it would let a reader take the term bound for a batch's whole window", w)
+		}
+	}
 
 	node, err := os.ReadFile(filepath.FromSlash("docs/FLEET-NODE.md"))
 	if err != nil {
@@ -275,7 +352,7 @@ func TestTheDocsStateWhereAMediaCallsLeaseWindowComesFrom(t *testing.T) {
 	}
 	def := config.Default()
 	wait := fmt.Sprintf("%d s", def.GPUWaitMs/1000)
-	want := append([]string{"lease", "`gpu_max_term_min`", "`gpu_wait_ms`", wait, "OPERATOR-GUIDE.md"}, func() []string {
+	want := append([]string{"lease", "`gpu_max_term_min`", "`gpu_wait_ms`", wait, "OPERATOR-GUIDE.md", "batch"}, func() []string {
 		keys := sortedMediaKeys()
 		for i, k := range keys {
 			keys[i] = "`" + k + "`"
@@ -293,6 +370,9 @@ func TestTheDocsStateWhereAMediaCallsLeaseWindowComesFrom(t *testing.T) {
 		if len(missing) < missingBest {
 			best, missingBest = para, len(missing)
 			if len(missing) == 0 {
+				if slug := registerAnchor.FindString(para); slug != "" {
+					t.Errorf("docs/FLEET-NODE.md links the guide through an anchor that carries a plan id (%s): name the section in prose", slug)
+				}
 				return
 			}
 		}
