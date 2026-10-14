@@ -29,7 +29,7 @@ other on a single shared card.
 | `internal/gpuprobe/cards.go` | the **card table** (UUID-keyed, index spaces side by side) |
 | `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmits` (the ONE admission rule), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
 | `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases (what the processes below the holder hold RESIDENT, the unit a declaration is in), `Manager.HostRAMPending`; and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
-| `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMBounded`), the hold bound that ends that wait and releases the lease (`errHostRAMHoldBound`, `releaseAfterRAMWait`, `autoReleaseWarmGuard`; [the hold bound](#the-hold-bound-gpu_hostram_hold_max_sec-the-incident-of-2026-10-14)), `gpu status`'s sentence for a lease that is waiting (`hostRAMAskedStatus`), and the line for a release that did not happen (`leaseNotReleasedLine`) |
+| `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMBounded`), the hold bound that ends that wait and releases the lease (`errHostRAMHoldBound`, `releaseAfterRAMWait`, `autoReleaseWarmGuard`; [the hold bound](#the-hold-bound-gpu_hostram_hold_max_sec-the-incident-of-2026-10-14)), `gpu status`'s sentence for a lease that is waiting (`hostRAMAskedStatus`, `holderGaveUpNote`), the line for a release that did not happen and the command that frees it (`leaseNotReleasedLine`, `releaseCommand`), the confirmation of a release's answer (`releaseConfirmed`, `releaseLeaseConfirmed`) and the failure of a wait whose stamp could not be written (`holdStampError`) |
 | `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card, else the media class default (see "Host RAM") |
 | `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
 | `internal/gpucards` | the per-card view (`RowsWithCap`, `LeaseRows`, `QueueRows`, `Table`, `Section`) that `gpu status`, `gpu cards` and `offload_status` brief all render; the display card's `DisplayCap` verdict is computed in `RowsWithCap` and nowhere else |
@@ -1974,7 +1974,7 @@ seat for a wait it cannot shorten would only cost the seat's callers (`TestALeas
 | form | where the order is made | why it cannot deadlock |
 |---|---|---|
 | wrapper (`gpu reserve ... -- <cmd>`) | `runGPUReserve`: `maintainSeatReport`, then `awaitHostRAMBounded` (the wait under the hold bound) under the same heartbeat and the same cancel as the drain | the grant compares nothing; the wait runs after the unload |
-| `--detach` | the parent: `detachMaintainReport`, then `awaitHostRAMBounded` against the held epoch (`Manager.AwaitHostRAM`). The hidden holder is started with `--ram 0 --ram-wait N` (`holdArgs`) | the holder compares nothing in its grant (`TestTheDetachedHolderOfAnUnloadSeatLeaseTakesItsCardsAndComparesNothing`); a wait that ends without the host's admission, **whatever ended it** (the hold bound, `--wait`, an impossible figure), **releases the lease** (`releaseAfterRAMWait`: what `gpu release --warm-seat --epoch N` does, except that the seat is warmed back only if the lease owes it, `autoReleaseWarmGuard`) and fails the parent non-zero with what ended the wait (`TestTheHoldBoundReleasesADetachedHoldToo`, `TestADetachedWaitThatWaitEndsAlsoReleasesTheLease`); and if the parent dies first, **the hidden holder releases the lease itself** from the end of the wait the record carries (`releaseHolderAtWaitEnd`; [below](#the-hold-bound-gpu_hostram_hold_max_sec-the-incident-of-2026-10-14)) |
+| `--detach` | the parent: `detachMaintainReport`, then `awaitHostRAMBounded` against the held epoch (`Manager.AwaitHostRAM`). The hidden holder is started with `--ram 0 --ram-wait N` (`holdArgs`) | the holder compares nothing in its grant (`TestTheDetachedHolderOfAnUnloadSeatLeaseTakesItsCardsAndComparesNothing`); a wait that ends without the host's admission, **whatever ended it** (the hold bound, `--wait`, an impossible figure), **releases the lease** (`releaseAfterRAMWait`: what `gpu release --warm-seat --epoch N` does, except that the seat is warmed back only if the lease owes it, `autoReleaseWarmGuard`) and fails the parent non-zero with what ended the wait (`TestTheHoldBoundReleasesADetachedHoldToo`, `TestADetachedWaitThatWaitEndsAlsoReleasesTheLease`); and if the parent dies first, **the hidden holder releases the lease itself** from the end of the wait the record carries (`releaseHolderAtWaitEnd`), or, if it died during the drain or the unload, from the outer bound the parent stamped as soon as the holder had the lease ([below](#the-hold-bound-gpu_hostram_hold_max_sec-the-incident-of-2026-10-14)) |
 | `gpu hold` (the hidden holder verb itself) | none: it has no drain and no unload of its own, only what the parent hands it | it declares exactly what it is given. `--ram N` is compared in its grant, as before; nothing frees host memory for it, so there is no unload to wait behind. The `--detach` parent passes the figure as `--ram-wait` instead |
 | `--devices` and `--cards` | the same two code paths; `--cards` allocates with a host term of 0 and the allocator's queue treats the request as one that declares nothing. `--devices` knows its cards before the grant and applies step 0 to them. `--cards` chooses its cards after the grant, so step 0 cannot be asked beforehand and it always defers: an allocation that lands on cards the unload does not reach holds them while the host is short, and the wait line (it says the drain and the unload are done, not that the seat was cleared) is true for it | `TestACardLeaseWithUnloadSeatIsNotHeldByTheHostRAMItsOwnUnloadFrees`, `TestACardsRequestWithUnloadSeatIsNotHeldByTheHostRAMItsOwnUnloadFrees` |
 
@@ -2030,8 +2030,20 @@ behind a RAM figure the host cannot meet; the failure names what ended the wait 
 
 #### Releasing on its own: the hidden holder, the warm-back, and the outcome
 
+**An outer bound before the drain.** A detached reserve killed during the drain or the unload, before the wait begins, used to leave
+the lease asking for the host with no stamp, and the holder acts only on a stamp. As soon as the holder has the lease, a reserve
+whose lease defers its host RAM and whose hold bound is on stamps the moment the drain ends by its deadline plus the hold bound
+(`drainDeadline(...)` + the bound: both known then, nothing invented); the wait replaces it with its real end when it begins and
+admission clears it as before (`TestADetachedReserveStampsAnOuterBoundBeforeTheDrainSoAParentThatDiesThereIsStillCovered`). It is
+off when the bound is off (`0`: nothing says when the lease should end but `--wait`, which is the operator's choice) and when nothing
+was deferred (`TestNoOuterBoundIsStampedWhenThereIsNoBoundOrNothingWasDeferred`). A failed drain's error names the moment the bound
+releases the lease. Open, and stated: it is stamped after the holder has the lease, so a reserve that dies in the few milliseconds
+between the two leaves no stamp; and it assumes the unload ends within the holder's grace of the drain's deadline.
+
 **The record carries the end of the wait.** `Manager.AwaitHostRAM` stamps the moment the wait ends (`host_ram_hold_until_ms`) on the
 lease's record when the wait BEGINS, before the first look at the host, so a reserve that dies before its first look still leaves it.
+The stamp is written by `Manager.StampHostRAMHold`, which does nothing on a lease that no longer asks for the host (an admitted lease
+names no bound that is running: `TestAStampOnAnAdmittedLeaseIsANoOp`).
 The moment is the earlier of the hold bound and the `--wait` deadline (`awaitHostRAMBounded` passes `HoldUntil: effective`), and it
 is taken off the record **only by admission**, in the same critical section that declares the figure. A wait that ends any other way
 (its deadline, a cancel, a figure no state can admit) leaves it there, because a lease that still asks for the host and carries no
@@ -2039,13 +2051,19 @@ moment is one nobody is bound to release. The first version cleared it as the wa
 reserve pushed it out before its own release the record said "asks for the host, no bound", which the holder cannot act on, and a
 reserve killed in that instant (a tool timeout lands at exactly the default bound) left the cards held for good
 (`TestAWaitThatEndsWithoutAdmissionLeavesTheMomentItStampedOnTheRecord`, and the real holder against a reserve that dies the instant
-its wait ends, `TestAReserveThatDiesTheInstantItsWaitEndsLeavesTheHolderAMomentToAct`). A stamp that cannot be written is retried at
-the next look and reported through `AwaitHostRAMOptions.OnStampError`; the wait does not fail on it, and the CLI says it once, naming
-what it costs (`gpu status` cannot show when the lease is released; the hidden holder cannot enforce the bound if the reserve dies).
+its wait ends, `TestAReserveThatDiesTheInstantItsWaitEndsLeavesTheHolderAMomentToAct`). A stamp that cannot be written is reported
+through `AwaitHostRAMOptions.OnStampError` and the CLI says it once, naming what it costs (`gpu status` cannot show when the lease is
+released; the hidden holder cannot enforce the bound if the reserve dies). **The wrapper's wait goes on** (the wrapper is its own
+holder) and tries again at the next look. **The detached wait fails closed** (`RequireStamp`): its hidden holder is the only thing that
+releases the lease if the reserve dies and it can enforce only what is on the record, so the stamp is tried four times, 250 ms
+apart, before the host is looked at, and if it never lands the wait ends with `*ErrHoldStamp` (`holdStampError`: the tries, the cause,
+and whether the outer bound stamped before the drain stays on the record, which it does: nothing clears a stamp but admission), and the
+reserve releases the lease (`TestADetachedReserveWhoseStampCannotBeWrittenFailsClosedAndReleases`). Failing closed is strict: it
+happens even if the first look would have admitted the figure, and the caller reserves again.
 
 **The hidden holder enforces it.** A detached hold's bound used to be enforced only by the foreground reserve: if that died during the
 wait (a tool timeout, Ctrl-C, a closed terminal) the hidden `gpu hold` renewed its term for ever. It now reads its own record on every
-poll (`Lease.HostRAMHold`) and, once the stamped end has passed by `holdBoundGrace` (30 s, so a live reserve releases first) while the
+poll (`Lease.HostRAMHold`) and, once the stamped end has passed by `holdBoundGrace` (30 s, so a live reserve releases first, and a reserve stalled under paging or resumed after a suspend is not given a parallel warm-back: the grace delays only a backstop; it was 5 s, and a 50 ms test grace failed 4 runs in 16 under CPU starvation) while the
 lease STILL ASKS for the host's RAM (`host_ram_wait_gib` not yet admitted), releases the lease itself (`releaseHolderAtWaitEnd`): the
 instances stopped, the seat warmed back only if the lease owes it, the lease released (`TestTheHiddenHolderReleasesItsOwnLeaseOnceTheStampedWaitHasEndedAndNoReserveDid`).
 An admitted lease and a wait that has not ended are left alone (`TestTheHolderLeavesAnAdmittedLeaseAndAWaitThatHasNotEndedAlone`).
@@ -2053,13 +2071,29 @@ The holder also confirms a failed fence before it lets go (`holderLeaseGone`: th
 lands while a restamp replaces the record fails for a moment on Windows, the holder's exit releases its lease, and the reserve now
 restamps the record more often during a wait (the stamp, the admission, the push-out), so one failed read must not release a live lease
 (`TestTheHolderDoesNotLetGoOfALiveLeaseBecauseOneFenceReadFailed`, found as a 1-in-60 flake of the admitted-lease test).
+`Lease.Check` now tells a verdict (`the lease is gone`, `fenced out`) from a record that could not be READ (`*RecordUnreadableError`: an
+I/O failure that is neither absence nor corrupt bytes): a verdict is let go of after the three looks, a failed read is retried for
+`holdIORetryFor` (30 s) with one line (`gpu hold: cannot read the record of lease epoch N (...); retrying ...`) before the holder lets
+go, and whatever it lets go on it says (`gpu hold: letting go of lease epoch N: <error>`), since the holder's stderr is a log nobody
+tails (`TestAHolderRetriesAFenceItCannotReadAndLetsGoOnlyAfterSayingWhy`, `TestAHolderThatLetsGoOfALeaseThatIsGoneSaysWhatItSaw`).
+
+**The holder's own release is retried and its failure is not silent.** It is tried four times, a second apart (a lease off the record
+counts as released whatever the answers were, and one that reports success while still on the record is a failure); when it gives up
+the holder prints `LEASE NOT RELEASED`, marks the record (`holder_gave_up_ms` and `holder_gave_up_why`, additive, best effort), and
+**exits non-zero** instead of exiting 0 after writing to a log in the temp directory. `gpu status` reads the marker: `the holder gave up
+releasing it at HH:MM (why) and nothing polls the lease now; gpu release --epoch N frees it`, for a waiting lease and an admitted one;
+the lease row carries `holder_gave_up` (`TestAHolderWhoseOwnReleaseKeepsFailingRetriesReportsExitsNonZeroAndMarksTheRecord`,
+`TestStatusSaysTheHolderGaveUpAndNeverPromisesItsNextPoll`).
 
 **The parent that is alive releases first and is not raced.** When a wait ends the parent pushes the stamped end out by
 `detachedReleaseGrace` (15 minutes) before the slow part of its own release (a seat warm-back takes minutes), so the holder neither
 steps in nor doubles the warm-back (`TestAReserveThatIsAliveReleasesFirstAndTheHolderNeitherDoublesTheWarmNorStepsIn`). If the parent
 dies in the middle of that release (a tool timeout lands at exactly the default bound), the pushed stamp is the moment the holder takes
 over (`TestAReserveThatDiesInTheMiddleOfItsOwnReleaseIsStillCoveredByTheHolder`). Both releasing is epoch-fenced and harmless: a lease
-already released by the other party is not a failure.
+already released by the other party is not a failure. These two tests wait for the push-out to be on the record, with the holder's
+clock held back (`holdClock`) until it is, and do not race it by the real clock. The reserve measures its own wait on a monotonic
+clock and the holder compares wall-clock milliseconds, so after a suspend the holder can release while the reserve still has time
+left: the safe direction, since the lease is then released sooner and never later than the stamp says.
 
 **An automatic release warms only what it owes.** `gpu release --warm-seat` is the operator's explicit request and warms
 regardless; the release the harness makes on its own (the detached parent's, the holder's) uses `autoReleaseWarmGuard` /
@@ -2067,9 +2101,30 @@ regardless; the release the harness makes on its own (the detached parent's, the
 not loaded by the release of a lease that never unloaded it, the 2026-09-23 defect class (`TestADetachedReleaseAtTheBoundNeverWarmsASeatThatWasNeverLoaded`).
 
 **The outcome of a release is reported after it happens.** A release that did not happen prints one line,
-`gpu reserve: LEASE NOT RELEASED (epoch N): <error>; run gpu release --warm-seat --epoch N` (the hidden holder's says `gpu hold:`), from
-the wrapper's deferred release, the detached parent and the holder; the failure text never claims a release that has not happened
-(`TestAReleaseThatFailsAtTheBoundIsSaidAndNeverClaimedAsDone`).
+`gpu reserve: LEASE NOT RELEASED (epoch N): <error>; run gpu release [--warm-seat] --epoch N` (the hidden holder's says `gpu hold:`),
+from the wrapper's deferred release, the detached parent and the holder; the failure text never claims a release that has not happened
+(`TestAReleaseThatFailsAtTheBoundIsSaidAndNeverClaimedAsDone`), and **the error the command returns ends with the failure**: `...; the
+release then failed and the lease is STILL HELD (epoch N): <why>` (`TestWhenTheReleaseFailsTheReturnedErrorEndsByNamingTheFailureAndTheLeaseStillHeld`).
+The command names `--warm-seat` only when a warm-back is owed: `gpu release --warm-seat` has no `onlyIfOwed` guard (it is the
+operator's explicit request), so advising it for a lease that unloaded nothing could load a seat nothing asked for
+(`TestTheNotReleasedLineAdvisesAWarmBackOnlyWhenOneIsOwed`).
+
+**A release's "nothing was held" is believed only if nothing is held.** `Manager.ReleaseByEpoch` answers `(false, nil)` for a lease
+that is gone, and used to answer it for a lease whose record it could not even examine (a stat that fails with an access error while
+the record is being replaced), and its callers ignored the bool: the detached reserve printed nothing and left the cards for the
+15 minute grace, and `gpu release` printed `no lease is held` and exited 0 over a lease that was held. Only an ABSENT record is "nothing
+held" now (any other failure to examine or read it is an error that names why), and the detached reserve, the wrapper's final release,
+the holder and `gpu release` take the answer from the record: a release that did nothing is believed only if the epoch is off it
+(`confirmReleased`; `TestAReleaseWhoseRecordCannotBeExaminedIsAnErrorNotNothingHeld`,
+`TestADetachedReleaseThatReportsNothingHeldWhileTheLeaseIsHeldIsAFailureAndIsSaid`, `TestGPUReleaseNeverSaysNoLeaseIsHeldWhileOneIs`).
+
+**Where instances may be stopped.** The ComfyUI instances kept under a lease are stopped only by a caller that fenced the epoch first,
+and `TestInstancesAreStoppedOnlyByCallersThatFencedTheirEpoch` pins each caller by the function that holds the call, across every
+non-test file of the package: through a `*Lease` (`stopInstancesOfLease`: the wrapper, the holder, the holder's release at the end of
+a wait; the holder stops twice, before the warm-back for the VRAM and in its deferred function, which finds no marker of an instance the
+first stop took, so it is redundant and harmless) or by an epoch the caller resolved or checked (`stopKeptInstances`: the release
+verb for the target `ReleaseTarget` named, the detached reserve's release for the epoch `HoldsEpoch` confirmed, which never holds the
+lease itself; an epoch is never reused and each marker names its lease, so a stop by epoch leaves an instance a later lease took over).
 
 **A failed unload is not "freed nothing".** `unloadOthers` logs an unload that failed and goes on; the outcome counts them, and the
 waiting line and the bound's failure then say `N unloads of other resident models failed (see above), so what the unload freed is not
@@ -2099,11 +2154,13 @@ and in the changelog fragment.
 cards yet). `gpu status` says `host RAM N GiB asked, not yet admitted` on the lease line, followed by how long the cards have been
 held (`held the cards for 12m3s`) and, once the wait for the host has begun, when the lease is released if the host still lacks the
 room (`the lease is released at 8:55AM, in 9m59s, if the host still lacks the room (the hold bound, or --wait if that ends first)`).
-Past that moment, while the lease is still there, it says who releases it: `the wait ended at 8:55AM and the holder releases the lease at
-its next poll (`gpu release --warm-seat --epoch N` frees it now)` for a `--detach` lease (the reserve that took it may be gone, so the
-text no longer promises its release), `the wrapper that holds the lease releases it when it exits` for a wrapper. The moment is on the
-record as `host_ram_hold_until_ms` (stamped by `Manager.AwaitHostRAM` when the wait begins, taken off when the figure is admitted;
-additive and omitted otherwise), because the bound can be a flag on one reserve and no other process could read it from anywhere
+Past that moment, while the lease is still there, it says who releases it: `the wait ended at 8:55AM: the holder, if one is running,
+releases the lease at its next poll; `gpu release --epoch N` frees it now` for a `--detach` lease (the reserve that took it may be gone,
+and so may the holder, so the text promises neither; `--warm-seat` appears only when a warm-back is owed), `the wrapper that holds the
+lease releases it when it exits` for a wrapper, and, when the holder gave up, `the holder gave up releasing it at ... and nothing polls
+the lease now`. The moment is on the
+record as `host_ram_hold_until_ms` (the outer bound stamped before the drain, then `Manager.AwaitHostRAM`'s stamp when the wait begins;
+taken off when the figure is admitted; additive and omitted otherwise), because the bound can be a flag on one reserve and no other process could read it from anywhere
 else. `offload_status` carries `host_ram_wait_gib` and, while the lease still asks, `host_ram_hold_until` (RFC 3339) on the lease row.
 Once admitted the row shows `host_ram_gib` alone.
 
