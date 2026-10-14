@@ -733,6 +733,37 @@ var compactKeep = []compactKeepEntry{
 		Sentence: "Examples — gauge: {\"value\":72,\"max\":100,\"label\":\"Purity\",\"unit\":\"%\"}; comparison-bar: {\"items\":[{\"label\":\"A\",\"value\":10},{\"label\":\"B\",\"value\":20}],\"highlight\":1}; chromatogram: {\"peaks\":[{\"rt\":2.5,\"height\":80,\"label\":\"API\"}]}; icon: {\"name\":\"check\",\"color\":\"#22c55e\"}.",
 		Why:      "what spec each kind takes: the spec parameter is free-form JSON and these examples (gauge, comparison-bar, chromatogram, icon) are the only place that shows the fields of each kind",
 	},
+	// Result-reading sentences that stop a caller from misreading a result it already holds (TestCompactKeepsTheResultReadingSentencesThatStopAMisreading). They were dropped as result shape; each is kept whole, in the source's own words.
+	{
+		Tools:    []string{"offload_transcribe"},
+		Sentence: "Returns {gist (preview), language, duration_sec, num_segments, segments[{id,start,end,text}] (timestamped spans — pull only the ones you need), srt_path, text_path, json_path} plus, when the transcript carries word times (segments[].words), words_reliable and words_drift_sec: words_reliable false means the first word of some segment starts 0.5 s or more away from its segment (up to words_drift_sec seconds), so do not cut audio at word boundaries from those times.",
+		Why:      "the transcribe result reading: words_reliable false means the first word of some segment starts 0.5 s or more away from its segment, so a caller must not cut audio at word boundaries from those times; the sentence is kept whole with the result shape it qualifies",
+	},
+	{
+		Tools:    []string{"offload_research"},
+		Sentence: "Read summary FIRST; a PARTIAL result (some pages digested, some failed) is a successful call — the error flag is set only when nothing succeeded — so read summary.failed and each result's reason for what is missing; the same whole-call deadline as agent_delegate applies (the page fetch included): at it the finished digests come back and the unfinished pages are `call deadline reached` budget defers; a source with `skipped` produced no result (fetch failed, non-public host, unsupported content type).",
+		Why:      "a PARTIAL research result (some pages digested, some failed) is a successful call, the error flag is set only when nothing succeeded, and summary.failed and each result's reason say what is missing; the whole-call deadline defers the unfinished pages",
+	},
+	{
+		Tools:    []string{"offload_ask"},
+		Sentence: "On verified:false read acceptance_failures (which names the check that did not match) and then the evidence — it is a prompt to look, not proof the answer is wrong, and a question whose subject is a short or question-named identifier can leave nothing anchorable at all.",
+		Why:      "on verified:false read acceptance_failures and the evidence: it is a prompt to look, not proof the answer is wrong",
+	},
+	{
+		Tools:    []string{"offload_ask"},
+		Sentence: "A REPEAT DOES NOT RE-ROLL THE SEAT: an identical call after a verified:false answer returns that same unverified answer again, cache_hit:true, with no new seat run — to get a second attempt, change the question, which is a different key and always a fresh run.",
+		Why:      "an identical call after a verified:false answer returns that same unverified answer (cache_hit:true) with no new seat run; a second attempt needs a changed question",
+	},
+	{
+		Tools:    []string{"agent_delegate"},
+		Sentence: "defer_class \"contract\" is YOUR contract, not a box: no output_schema for a remote placement, past the origin hop, or bigger than any node's advertised context — rewrite the contract and retry.",
+		Why:      "a defer_class contract defer blames the caller's contract and not a box: no output_schema for a remote placement, past the origin hop, or bigger than any node's context; rewrite the contract and retry",
+	},
+	{
+		Tools:    []string{"agent_delegate"},
+		Sentence: "The whole call has a deadline below the MCP client's abort (agent_call_deadline_sec, default 1,500 s, counted from arrival): at it the finished subtasks' results come back and every unfinished one is a budget defer whose reason opens `call deadline reached; N unfinished` — a result shape, not a failure; re-issue those subtasks in a smaller call.",
+		Why:      "the call deadline: the finished subtasks' results come back and every unfinished one is a budget defer whose reason opens call deadline reached, a result shape and not a failure; the caller re-issues those subtasks in a smaller call",
+	},
 }
 
 // compactKeepByTool is the keep-list indexed by tool name: the set of sentences compact keeps beyond the opening ones.
