@@ -36,11 +36,12 @@ import (
 // boundary (trusted, untrusted, unattended, sandbox), a risk (destructive, irreversible, safety) or the advisory status of a
 // result (advisory). A sentence is kept on one hit and kept whole.
 //
-// "only" is deliberately not on the list. It is plain description in a fifth of the prose here ("the only candidate", "Only a
-// fleet node whose largest card is at least this many GB"), and keeping every sentence that holds it was measured to cost about
-// 1,750 tokens on the 31-tool list (see docs/systems/opencode-integration.md), enough to put the compact list back above the
-// 0.137.0 figures it exists to beat. A real "only" prohibition is caught by its companion word ("TRUSTED CODE ONLY ... never pass",
-// "ADVISORY ONLY"), and TestCompactKeepsSafetySentences pins named sentences, so narrowing this list shows up as a red test.
+// "only" is deliberately not on the list. It is plain description in a large share of the prose here ("the only candidate", "Only
+// a fleet node whose largest card is at least this many GB"), and keeping every sentence that holds it was measured to cost 1,801
+// tokens on the 31-tool list (19,674 become 21,475; see docs/systems/opencode-integration.md), enough to put the compact list back
+// above the 0.137.0 figures it exists to beat. A real "only" prohibition is caught by its companion word ("TRUSTED CODE ONLY ...
+// never pass", "ADVISORY ONLY"). TestCompactKeepsNamedSafetySentences pins named sentences and TestCompactNeverLosesASafetyWord
+// counts the safety words of every advertised description, so narrowing this list shows up as a red test.
 var safetyWords = regexp.MustCompile(`(?i)\b(never|do not|don't|must|may not|cannot|refus\w*|denied|trusted|untrusted|unattended|sandbox\w*|safety|advisory|read-only|forbidden|irreversible|destructive)\b`)
 
 // compactLeadMin is the shortest first "sentence" the cut accepts: a description that opens "OPTIONAL." or "Required." has
