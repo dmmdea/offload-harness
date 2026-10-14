@@ -541,6 +541,63 @@ func TestCompletionProbeSeesWhatItsOwnCompletionEvicted(t *testing.T) {
 	}
 }
 
+// TestCompletionProbeSeesWhatAFailedCompletionEvicted: the list is read again after a completion whether
+// it succeeded or not. The completion here loads the vLLM seat, which evicts small-cpp, and then fails
+// its generation, so the reading taken before it, which still lists small-cpp as running, is stale: acting
+// on it completes small-cpp, reloads it and evicts the vLLM seat. A seat the failed completion LOADED is
+// caught by the next seat's own fresh read; only a seat the stale list counts as running skips that read,
+// so this is the case that needs the read after the failure.
+func TestCompletionProbeSeesWhatAFailedCompletionEvicted(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	f.running["small-cpp"] = "ready"
+	f.allowCompletion = true
+	f.loadOnCompletion = true
+	f.evictOnLoad = true
+	f.completionStatus = http.StatusInternalServerError
+	s := newState(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+	first := s.Probe(t.Context(), Candidate{Seat: "big-vllm", Engine: EngineVLLM})
+	second := s.Probe(t.Context(), Candidate{Seat: "small-cpp", Engine: EngineLlamaCpp})
+	if first.Probe != ProbeCompletion || first.OK || !strings.Contains(first.Detail, "the 1-token completion failed") {
+		t.Fatalf("the vLLM seat's completion must run and fail: %+v", first)
+	}
+	for _, m := range f.completionModels() {
+		if m != "big-vllm" {
+			t.Errorf("a completion was sent to %s after the failed one evicted it: it would reload it and evict the vLLM seat", m)
+		}
+	}
+	if second.Probe == ProbeCompletion || !strings.Contains(second.Detail, "big-vllm") {
+		t.Errorf("small-cpp = %+v, want a skipped completion that names the vLLM seat the failed completion loaded", second)
+	}
+}
+
+// TestCompletionReasonWhenTheRunningListBecameReadable: the opening read of /running failed, so the cheap
+// probe says the seat's load state is unknown; the decision to complete reads it again and it answers. The
+// row must not keep the "unknown" clause the second reading outgrew, here beside the skip that the readable
+// list produced (a vLLM seat holds the cards). Only the first seat decided after a failed opening read is
+// in this position: its successful read clears the error for every later seat.
+func TestCompletionReasonWhenTheRunningListBecameReadable(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	f.running["big-vllm"] = "ready"
+	f.failRunningReads = 1
+	f.allowCompletion = true
+	s := newState(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+	if s.runErr == nil {
+		t.Fatal("the opening read of /running was meant to fail: the test would prove nothing")
+	}
+	v := s.Probe(t.Context(), Candidate{Seat: "small-cpp", Engine: EngineLlamaCpp})
+	if v.Probe == ProbeCompletion || !strings.Contains(v.Detail, "would load small-cpp") || !strings.Contains(v.Detail, "big-vllm") {
+		t.Fatalf("small-cpp = %+v, want a skipped completion that names the vLLM seat the second reading found", v)
+	}
+	for _, stale := range []string{"could not be read", "unknown", "not asked"} {
+		if strings.Contains(v.Detail, stale) {
+			t.Errorf("reason %q carries %q although the running list was read when the completion was decided", v.Detail, stale)
+		}
+	}
+	if n := f.completionCount(); n != 0 {
+		t.Errorf("%d completions were sent while a vLLM seat held the cards", n)
+	}
+}
+
 // TestCompletionReasonForASeatLoadedSinceTheReportBegan: a seat that another client loads after the
 // opening read, before its own probe is decided, is completed without loading anything, and its row must
 // not carry the cheap probe's "not asked" clause from the reading it has outgrown.
