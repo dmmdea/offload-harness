@@ -95,8 +95,9 @@ declare (or that has no `output_schema`), can only ever grade unknown (a blank d
 when grading). Such an unknown is a defect of the contract, not of the node that answered. On the research lane's
 document fingerprint (the wrong-document tripwire a node is quarantined for) it is still reported as a failed check,
 but it is neither a strike nor a pass for the node, and the contract is not retried on a second node, because no
-node's answer could close it. An unknown the contract could have closed (an empty answer beside the documents, a
-declared field the result lacks) is the result's, and counts against the node as a failed fingerprint always has.
+node's answer could close it. The same holds for an unknown over an honest-absence digest. Only a FAILED fingerprint can
+be excused (by an honest absence). An unknown the contract could have closed (an empty answer beside the documents, a
+declared field the result lacks) is the result's, and strikes like a failure.
 
 Spelling: only `@answer:`, `@grounded:` and `@field=<name>:` (on `contains:`, `regex:` and `not_contains:`) are read as
 qualifiers. The reserved prefixes are exactly `@answer:`, `@grounded:`, `@field=` and `@field:` (the last is no

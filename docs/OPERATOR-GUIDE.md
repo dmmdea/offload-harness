@@ -1465,10 +1465,11 @@ under the run and did not come back (ADR 0066); `summary.batches` on research
 calls that ran more than 8 pages; `summary.quarantined` when a fleet node was blocked for 30 min
 after two off-document answers that outnumber its passes of the same window (0.184.0: the fingerprint is lexical and
 misfires on an honest answer now and then, so a node that passed most of its work is not quarantined by two misses; its
-reason appears among `probe_errors` as "quarantined until …"). Two kinds of fingerprint result never count against a node:
-an unknown that follows from the contract (a grounded check with no context documents, a field check the `output_schema`
-does not declare) is reported as a failed check but neither strikes nor passes and is not retried on the research door,
-and an unknown over an honest-absence digest strikes nothing either; only a FAILED fingerprint is excused or struck.
+reason appears among `probe_errors` as "quarantined until …"). Only a FAILED fingerprint can be excused (by an honest
+absence). An unknown fingerprint that the contract caused (a grounded check with no context documents, a field check the
+`output_schema` does not declare) or that sits over an honest-absence digest is reported as a failed check but strikes
+nothing, passes nothing and is not retried on the research door. An unknown the result caused (an empty answer beside the
+documents, a declared field missing from the result) strikes like a failure.
 
 **Capacity is your step — the wait only makes contention honest.** The 429 exists because ten
 reserved requests per model are shared by every session. Ready to paste into
