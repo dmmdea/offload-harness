@@ -7126,6 +7126,11 @@ func (r *runner) dispatchDetailed(ctx context.Context, base, jobID string, paylo
 			// A call pinned for measurement opens no card anywhere: this box opens none (pairInflight), so a box
 			// with no emitter of its own must not ask the serving node to open one for it either (register F48).
 			req.Header.Del(core.PairCardHeader)
+			// And the node's row for it is a measurement too (ADR 0085). A process class, when this process has
+			// one, is already on the request and wins, as it does in the ledger's own settleRunClass.
+			if req.Header.Get(core.RunClassHeader) == "" {
+				req.Header.Set(core.RunClassHeader, ledger.ClassMeasurement)
+			}
 		}
 		resp, derr := fleetClient.Do(req)
 		if derr != nil {
