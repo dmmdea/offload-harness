@@ -502,13 +502,21 @@ test("every widget locator names its widget the way the builder's input is named
     for (const view of spec.views) {
       for (const item of view.items) {
         const t = item.t;
-        if (t.kind !== "w") continue;
-        const want = /^Primitive/.test(t.type) ? "value" : item.b ? item.b.input : t.name;
-        assert.equal(typeof want, "string", `${spec.builder} [${view.name}] ${item.key}: the locator names no widget`);
+        if (t.kind !== "w" || !item.b) continue; // the ones with no builder side are pinned by the test below
+        const want = /^Primitive/.test(t.type) ? "value" : item.b.input;
         assert.equal(t.name, want, `${spec.builder} [${view.name}] ${item.key}`);
       }
     }
   }
+});
+
+test("the widget locators that have no builder side, and so nothing to compare their name with, are exactly this list", () => {
+  // A template-only widget locator is checked against a literal: comparing its name with itself proves nothing.
+  const templateOnly = [];
+  for (const spec of BUILDER_SPECS) for (const view of spec.views) for (const item of view.items) {
+    if (item.t.kind === "w" && !item.b) templateOnly.push(`${spec.builder} [${view.name}] ${item.key} ${item.t.type} ${item.t.name}`);
+  }
+  assert.deepEqual(templateOnly, ["wf-ltx25-i2v [default] conditioning.frame_rate_expression ComfyMathExpression expression"]);
 });
 
 test("a widget locator that names no widget is refused", () => {
@@ -717,6 +725,205 @@ test("the templates directory is resolved in one order by the CLI and the tests:
   const err = [];
   assert.equal(await main(["check", "--comfy-dir", join(dir, "no-such-tree")], { out: () => {}, err: (s) => err.push(s), env }), 2);
   assert.match(err.join(""), /--comfy-dir .* has no comfyui-workflow-templates-json package/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 2c. What feeds an input is a node, not a node type; the CLI refuses what it cannot read
+// ---------------------------------------------------------------------------------------------
+
+// A root-level template whose sink node (id 10) takes inputs a and b from the links given as [origin id, origin slot].
+// `origins` are the nodes that feed it (id, type).
+function sinkTemplate(origins, fromA, fromB) {
+  return {
+    nodes: [
+      { id: 10, type: "Sink", mode: 0, widgets_values: [], inputs: [{ name: "a", link: 1 }, { name: "b", link: 2 }] },
+      ...origins.map(([id, type]) => ({ id, type, mode: 0, widgets_values: [], inputs: [] })),
+    ],
+    links: [
+      { id: 1, origin_id: fromA[0], origin_slot: fromA[1], target_id: 10, target_slot: 0 },
+      { id: 2, origin_id: fromB[0], origin_slot: fromB[1], target_id: 10, target_slot: 1 },
+    ],
+  };
+}
+const SINK_ITEM = { key: "wiring.a_b_distinct", b: null, t: { kind: "distinct", sg: null, id: 10, type: "Sink", inputs: ["a", "b"] } };
+const readDistinct = (tpl) => templateValue({ builder: "wf-x" }, { name: "v", template: "tpl" }, tpl, SINK_ITEM);
+
+test("a wiring check tells nodes apart by id, not by type: two separate nodes of one type are distinct", () => {
+  // two PrimitiveFloat nodes, one per input: two sources
+  assert.equal(readDistinct(sinkTemplate([[1, "PrimitiveFloat"], [2, "PrimitiveFloat"]], [1, 0], [2, 0])), true);
+  // one node feeding both inputs through one slot: one source
+  assert.equal(readDistinct(sinkTemplate([[1, "PrimitiveFloat"]], [1, 0], [1, 0])), false);
+  // one node, two output slots: two sources
+  assert.equal(readDistinct(sinkTemplate([[1, "SplitNode"]], [1, 0], [1, 1])), true);
+  // two nodes of different types: two sources
+  assert.equal(readDistinct(sinkTemplate([[1, "PrimitiveFloat"], [2, "PrimitiveInt"]], [1, 0], [2, 0])), true);
+  // one origin id that exists in no node list is still one source when both links name it
+  assert.equal(readDistinct(sinkTemplate([], [77, 0], [77, 0])), false);
+  assert.equal(readDistinct(sinkTemplate([], [77, 0], [78, 0])), true);
+});
+
+test("a linked widget's message names the feeding node by type and id", () => {
+  const tpl = {
+    nodes: [
+      { id: 4, type: "KSampler", mode: 0, widgets_values: [0, "fixed", 20], inputs: [{ name: "steps", type: "INT", widget: { name: "steps" }, link: 9 }] },
+      { id: 7, type: "PrimitiveInt", mode: 0, widgets_values: [30], inputs: [] },
+    ],
+    links: [{ id: 9, origin_id: 7, origin_slot: 0, target_id: 4, target_slot: 0 }],
+  };
+  const item = { key: "ksampler.steps", b: null, t: { kind: "w", sg: null, id: 4, type: "KSampler", w: 2, name: "steps" } };
+  assert.throws(() => templateValue({ builder: "wf-x" }, { name: "v", template: "tpl" }, tpl, item), /steps is linked \(to node:PrimitiveInt\/7#0\)/);
+});
+
+// cli: run the CLI main with captured output.
+async function cli(argv, env = {}) {
+  const out = [];
+  const err = [];
+  const code = await main(argv, { out: (s) => out.push(s), err: (s) => err.push(s), env });
+  return { code, out: out.join(""), err: err.join("") };
+}
+
+test("a flag that needs a value and has none is refused with exit 2, never read as a flag that is on", async (t) => {
+  const dir = scratchDir(t, "bd-flags-");
+  const tdir = writeSyntheticPackage(dir);
+  const manifestFile = join(dir, "m.json");
+  assert.equal((await cli(["record", "--templates-dir", tdir, "--manifest", manifestFile])).code, 0);
+  // an unset shell variable arrives as an empty argument (or as no argument at all)
+  for (const flag of ["--templates-dir", "--comfy-dir", "--manifest"]) {
+    const noun = flag.slice(2);
+    for (const argv of [["check", flag, ""], ["check", flag, "   "], ["check", flag], ["check", flag, "--require-templates"]]) {
+      const r = await cli(argv, {});
+      assert.equal(r.code, 2, `${argv.map((a) => JSON.stringify(a)).join(" ")} -> ${r.out}${r.err}`);
+      assert.match(r.err, new RegExp(`--${noun} needs a non-empty value`));
+      assert.doesNotMatch(r.out, /^ok:|template side skipped/m);
+    }
+  }
+  // the same flags with a value still work
+  assert.equal((await cli(["check", "--templates-dir", tdir, "--manifest", manifestFile])).code, 0);
+  assert.equal((await cli(["check", `--templates-dir=${tdir}`, `--manifest=${manifestFile}`])).code, 0);
+  // a flag the CLI does not know is refused too: a typo must not skip a side
+  const typo = await cli(["check", "--template-dir", tdir]);
+  assert.equal(typo.code, 2);
+  assert.match(typo.err, /unknown flag --template-dir/);
+});
+
+test("--require-templates makes a missing template side an error; --strict and --require-templates belong to check", async (t) => {
+  const dir = scratchDir(t, "bd-require-");
+  const tdir = writeSyntheticPackage(dir);
+  const manifestFile = join(dir, "m.json");
+  assert.equal((await cli(["record", "--templates-dir", tdir, "--manifest", manifestFile])).code, 0);
+  // no source at all: the default run skips the side and passes, the required run is an error
+  const skipped = await cli(["check", "--manifest", manifestFile]);
+  assert.equal(skipped.code, 0);
+  assert.match(skipped.out, /template side skipped/);
+  const required = await cli(["check", "--manifest", manifestFile, "--require-templates"]);
+  assert.equal(required.code, 2);
+  assert.match(required.err, /--require-templates: no templates directory/);
+  assert.doesNotMatch(required.out, /^ok:/m);
+  // a ComfyUI tree named by the environment that has no package is "none" as well
+  const emptyTree = join(dir, "no-such-tree");
+  const envNone = await cli(["check", "--manifest", manifestFile, "--require-templates"], { COMFYUI_DIR: emptyTree });
+  assert.equal(envNone.code, 2);
+  // with a source the flag changes nothing
+  const withSource = await cli(["check", "--manifest", manifestFile, "--templates-dir", tdir, "--require-templates"]);
+  assert.equal(withSource.code, 0, withSource.err);
+  assert.match(withSource.out, /template side checked against 9\.9\.1/);
+  // the flags are for check only
+  for (const flag of ["--strict", "--require-templates"]) {
+    for (const verb of ["explain", "record"]) {
+      const r = await cli([verb, "--templates-dir", tdir, "--manifest", join(dir, "other.json"), flag]);
+      assert.equal(r.code, 2, `${verb} ${flag}`);
+      assert.match(r.err, new RegExp(`${flag} belongs to check`));
+    }
+  }
+});
+
+test("check --strict fails on unreviewed entries and only on those", async () => {
+  const plain = await cli(["check"]);
+  assert.equal(plain.code, 0, plain.err);
+  const strict = await cli(["check", "--strict"]);
+  assert.equal(strict.code, 1);
+  const lines = strict.err.trim().split("\n");
+  assert.equal(lines.length, 2, strict.err);
+  assert.match(strict.err, /^builder drift: wf-qwen-image-21 \[edit\]: widget encoder\.resolution is unreviewed/m);
+  assert.match(strict.err, /^builder drift: wf-qwen-image-edit \[full\]: widget ksampler\.cfg is unreviewed/m);
+  assert.match(strict.out, /^2 failure\(s\)$/m);
+  // the unreviewed entries of the committed manifest are exactly these two (a deliberate entry is a decision, not a debt)
+  const unreviewed = [];
+  const deliberate = [];
+  for (const [b, e] of Object.entries(manifest.builders)) for (const [v, r] of Object.entries(e.views)) for (const [k, it] of Object.entries(r.items)) {
+    if (it.status === "unreviewed") unreviewed.push(`${b} [${v}] ${k}`);
+    if (it.status === "deliberate") deliberate.push(`${b} [${v}] ${k}`);
+  }
+  assert.deepEqual(unreviewed.sort(), ["wf-qwen-image-21 [edit] encoder.resolution", "wf-qwen-image-edit [full] ksampler.cfg"]);
+  assert.equal(deliberate.length, 4);
+});
+
+// withTemplateFile: the synthetic package with one template file replaced by `text`.
+function packageWith(dir, template, text) {
+  const tdir = writeSyntheticPackage(dir);
+  writeFileSync(join(tdir, `${template}.json`), text);
+  return tdir;
+}
+
+test("a template file with a byte-order mark reads; a null file, a file without nodes and invalid JSON fail naming the builder", async (t) => {
+  const dir = scratchDir(t, "bd-bom-");
+  const good = writeSyntheticPackage(join(dir, "good"));
+  const manifestFile = join(dir, "m.json");
+  assert.equal((await cli(["record", "--templates-dir", good, "--manifest", manifestFile])).code, 0);
+  const text = readFileSync(join(good, "image_krea2_turbo_t2i.json"), "utf8");
+  const bom = await cli(["check", "--templates-dir", packageWith(join(dir, "bom"), "image_krea2_turbo_t2i", `﻿${text}`), "--manifest", manifestFile]);
+  assert.equal(bom.code, 0, bom.err);
+  const cases = { "null": /no nodes array/, "{}": /no nodes array/, "[]": /no nodes array/, "{ \"nodes\": [": /is not valid JSON/, "": /is not valid JSON/ };
+  let n = 0;
+  for (const [body, want] of Object.entries(cases)) {
+    const r = await cli(["check", "--templates-dir", packageWith(join(dir, `bad${n++}`), "image_krea2_turbo_t2i", body), "--manifest", manifestFile]);
+    assert.equal(r.code, 1, `${JSON.stringify(body)}: ${r.err}`);
+    assert.match(r.err, /^builder drift: wf-krea2 \[default\]: /m);
+    assert.match(r.err, /image_krea2_turbo_t2i/);
+    assert.match(r.err, want, JSON.stringify(body));
+    assert.doesNotMatch(r.err, /Cannot read propert|is not iterable/);
+  }
+});
+
+test("a manifest file with a byte-order mark reads; a null or unparsable manifest is refused with exit 2", async (t) => {
+  const dir = scratchDir(t, "bd-mbom-");
+  const withBom = join(dir, "bom.json");
+  writeFileSync(withBom, `﻿${formatManifest(manifest)}`);
+  assert.equal((await cli(["check", "--manifest", withBom])).code, 0);
+  for (const body of ["null", "[]", "{}", "{ nope", ""]) {
+    const file = join(dir, "bad.json");
+    writeFileSync(file, body);
+    const r = await cli(["check", "--manifest", file]);
+    assert.equal(r.code, 2, `${JSON.stringify(body)}: ${r.out}${r.err}`);
+    assert.match(r.err, /manifest/);
+  }
+  const missing = await cli(["check", "--manifest", join(dir, "absent.json")]);
+  assert.equal(missing.code, 2);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 2d. The branches the mutation runs found unproven
+// ---------------------------------------------------------------------------------------------
+
+test("a builder graph node of another class than the spec names fails the builder side, naming the builder", () => {
+  const { manifest: baseline } = synthManifest();
+  const spec = BUILDER_SPECS.find((s) => s.builder === "wf-krea2");
+  const item = spec.views[0].items.find((i) => i.key === "ksampler.steps");
+  const moved = { ...spec, build: (args) => { const g = spec.build(args); g[item.b.node].class_type = "KSamplerAdvanced"; return g; } };
+  const failures = checkBuilderSide(baseline, { specs: [moved] });
+  assert.equal(failures.length, 1, messages(failures));
+  assert.match(failures[0].message, /^builder drift: wf-krea2 \[default\]: ksampler\.steps: node 9 is KSamplerAdvanced, the spec expects KSampler$/);
+});
+
+test("a node id is looked up in the subgraph the spec names, not in any subgraph that has it", () => {
+  const sub = (name, steps) => ({ id: `id-${name}`, name, inputs: [], links: [], nodes: [{ id: 3, type: "KSampler", mode: 0, widgets_values: [0, "fixed", steps], inputs: [] }] });
+  const item = { key: "ksampler.steps", b: null, t: { kind: "w", sg: "Wanted", id: 3, type: "KSampler", w: 2, name: "steps" } };
+  const read = (tpl) => templateValue({ builder: "wf-x" }, { name: "v", template: "tpl" }, tpl, item);
+  // node 3 exists only in another subgraph: the named one has none
+  assert.throws(() => read({ nodes: [], links: [], definitions: { subgraphs: [sub("Other", 99)] } }), /wf-x \[v\] ksampler\.steps: template tpl has no node 3 in subgraph "Wanted"/);
+  // node 3 exists in both: the named subgraph's value is read, wherever it sits in the list
+  assert.equal(read({ nodes: [], links: [], definitions: { subgraphs: [sub("Other", 99), sub("Wanted", 20)] } }), 20);
+  assert.equal(read({ nodes: [], links: [], definitions: { subgraphs: [sub("Wanted", 20), sub("Other", 99)] } }), 20);
 });
 
 // ---------------------------------------------------------------------------------------------
