@@ -61,7 +61,9 @@ line as a plain substring (a node parses acceptance when it ACKs a contract and 
 
 The levels are ordered, weakest first: `answer` (what the model wrote; only the model vouches for it), `field` (a value
 in the structured result, a slot the contract's own schema asked for) and `grounded` (text the answer carries that the
-delegator's own documents also carry: a corroborated mention, not proof the claim is true). Three rules follow.
+delegator's own documents also carry: a corroborated mention, not proof the claim is true). Grounding compares the
+matched text verbatim and case-sensitively, so a case-insensitive pattern can match the answer and still fail the
+document check. Three rules follow.
 
 1. **Absent evidence is unknown, never a pass.** An empty answer, no structured result, an absent or empty field, no
    answer at all, or no context docs for a grounded check leaves the check with nothing to read. It grades `unknown`:
@@ -75,9 +77,12 @@ delegator's own documents also carry: a corroborated mention, not proof the clai
    outcomes) report the authority a contract closed at: the weakest among its checks, and only when all passed, so one
    unqualified check pulls it to none.
 3. **Unqualified checks are untouched.** In particular `not_contains:<s>` over a fully empty result still passes. That
-   is the vacuous pass the qualifier avoids, kept for the unqualified form because a write-door leg or a schema-only
-   result legitimately reaches acceptance with no output, and a contract that pairs `not_contains:` with
-   `diff_touches:` would stop passing. A contract that cannot afford it writes the qualified form, or pairs the
+   is the vacuous pass the qualifier avoids. It stays for the unqualified form because changing it would change the
+   verdict of contracts this repository cannot see, in a closed DSL every contract uses, and it is not shown
+   unreachable: an empty final answer is deferred before acceptance, so the case is rare, but results also arrive from
+   nodes, the queue and the rescue path. No file under `contracts/` (the write-door contracts included) uses
+   `not_contains:`, and the operator guide's example pairs it with `min_items:` and `nonempty:`, which already fail
+   closed on an empty result. A contract that cannot afford the vacuous pass writes the qualified form, or pairs the
    `not_contains:` with a qualified `contains:` on the same evidence.
 
 A field-level check names its field, so the field joins the schema's `required` list the way `nonempty:` and
@@ -88,9 +93,10 @@ declare (or that has no `output_schema`), can only ever grade unknown.
 Spelling: only `@answer:`, `@grounded:` and `@field=<name>:` (on `contains:`, `regex:` and `not_contains:`) are read as
 qualifiers, and `@field` without `=<name>:` is a parse error. A substring that starts with those exact spellings is
 now read as a qualified check, so anchor on something else or write the first character as a class
-(`regex:[@]answer:`); any other leading `@` is a literal as before. A misspelt qualifier is a literal that no answer
-carries, so it fails closed. A delegator one release behind reads a qualified line the same way: a literal, so
-failing closed.
+(`regex:[@]answer:`); any other leading `@` is a literal as before. A misspelt qualifier, and a qualified line read by
+a delegator one release behind, are a literal substring: for `contains:` and `regex:` no answer carries it, so the
+check fails closed; for `not_contains:` the literal is absent from every answer, so the check passes vacuously, and a
+qualified `not_contains:` buys nothing on such a delegator.
 
 Acceptance carries no wall-time term (INV-5, [ADR 0050](../docs/architecture/decisions/0050-placement-ranks-adequate-seats-by-expected-completion.md):
 "Acceptance criteria and pass rules stay wall-time-free"). No verb above reads a clock: each reads the answer text, a

@@ -30,9 +30,12 @@ import (
 //
 // The qualifier lives in the argument tail so the verb spelling is unchanged: a
 // node one release behind parses the line as a plain substring (a node only
-// PARSES acceptance when it ACKs a contract and never evaluates it), and an older
-// delegator reads the same line as a literal that no answer carries, so it fails
-// closed. An unqualified check is untouched by any of this.
+// PARSES acceptance when it ACKs a contract and never evaluates it). A delegator
+// one release behind, or a misspelt qualifier, reads the line as a literal
+// substring too: for contains: and regex: no answer carries it, so the check fails
+// closed; for not_contains: the literal is absent from every answer, so it passes
+// vacuously and the qualified form buys nothing there. An unqualified check is
+// untouched by any of this.
 //
 // The levels are ordered, weakest first:
 //
@@ -51,11 +54,13 @@ import (
 // the reason says unknown, so an empty answer is told apart from a wrong one.
 //
 // Unqualified not_contains over an empty answer still passes. That is the vacuous
-// pass this qualifier exists to avoid, and it is kept for unqualified checks
-// because a write-door leg and a schema-only result legitimately reach
-// acceptance with an empty output, and the documented contracts that pair
-// not_contains with a write-set verb would otherwise stop passing. A contract
-// that cannot afford the vacuous pass writes the qualified form.
+// pass this qualifier exists to avoid. It is kept for unqualified checks because
+// changing it would change the verdict of contracts this repository cannot see,
+// in a closed DSL every contract uses, and it is not shown unreachable (an empty
+// final answer is deferred before acceptance, but results also arrive from nodes,
+// the queue and the rescue path). No contract shipped under contracts/ uses
+// not_contains. A contract that cannot afford the vacuous pass writes the
+// qualified form.
 
 // Authority is the strength of the evidence a check reads, ordered weakest
 // first. The zero value is "no authority claimed".

@@ -284,8 +284,8 @@ func TestClosedAtIsTheWeakestCheck(t *testing.T) {
 // TestUnqualifiedChecksAreUnchanged pins what an unqualified check does, empty
 // evidence included, so the qualified form can never leak into it. In
 // particular not_contains over an empty answer still passes: it is the vacuous
-// pass the qualifier exists to avoid, kept here because write-door and
-// schema-only contracts reach EvalAcceptance with an empty Output.
+// pass the qualifier exists to avoid, kept here because changing it would change
+// the verdict of contracts this repository cannot see.
 func TestUnqualifiedChecksAreUnchanged(t *testing.T) {
 	structured := json.RawMessage(`{"digest":"three findings","findings":["a","b","c"]}`)
 	tests := []struct {

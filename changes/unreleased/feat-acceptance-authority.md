@@ -16,12 +16,17 @@
   with no context documents and for a field check the `output_schema` does not declare; a field-level check joins the
   schema's `required` list through `Fields()`.
 - **What did not change.** An unqualified check is byte for byte what it was, failure text included. That includes
-  `not_contains:` passing over a fully empty result: a write-door leg and a schema-only result reach acceptance with no
-  output, no shipped contract under `contracts/` uses `not_contains:`, but the documented write-door contracts pair it
-  with `diff_touches:` and external contracts cannot be seen, so the stricter reading applies to the qualified form
-  only. `min_items:`, `nonempty:` and the diff verbs already fail closed on empty evidence and are unchanged. The one
-  string that changes meaning is a substring that starts with a reserved spelling (`@answer:`, `@grounded:`,
-  `@field=`) on one of the three verbs; any other leading `@` is still a literal.
+  `not_contains:` passing over a fully empty result. No file under `contracts/` (the write-door contracts included)
+  uses `not_contains:`, and an empty final answer is deferred before acceptance, but the case is not shown unreachable
+  (results also arrive from nodes, the queue and the rescue path) and external contracts cannot be seen, so the
+  stricter reading applies to the qualified form only. `min_items:`, `nonempty:` and the diff verbs already fail
+  closed on empty evidence and are unchanged. Three previously valid spellings are now parse errors
+  (`contains:@field:x`, `contains:@field=:x`, `not_contains:@grounded:x`), and a substring that starts with a reserved
+  spelling (`@answer:`, `@grounded:`, `@field=`) on one of the three verbs reads as qualified; any other leading `@` is
+  still a literal.
+- **Skew.** A node one release behind admits a qualified contract (a literal substring to its parser). A delegator one
+  release behind, or a misspelt qualifier, reads the line as a literal: `contains:` and `regex:` fail closed, but
+  `not_contains:` passes vacuously, so a qualified `not_contains:` buys nothing on such a delegator.
 - **Tests.** Red first (the tests commit does not compile until the implementation lands): parse table including the
   literal-`@` and malformed cases, the verdict table (pass, fail and unknown for every level and verb), the ordering
   and the weaker-never-closes-stronger table, `ClosedAt`, a pin of every unqualified case including the vacuous
