@@ -16,7 +16,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -395,6 +397,67 @@ exit "${FAKE_EXIT:-0}"
 
 	if _, err := run("3"); err == nil {
 		t.Error("the script exited 0 although the validator failed: a red validation must fail the gate")
+	}
+}
+
+// The validate script moves to the repository root before it runs the CLI, so a relative OPENSPEC_BIN has to be made
+// absolute against the caller's directory first. The stand-in lives in a folder of its own, the script runs with that
+// folder as its working directory, and OPENSPEC_BIN names the stand-in relative to it.
+func TestOpenSpecValidateScriptResolvesARelativeBinaryFromTheCallersDirectory(t *testing.T) {
+	bash := guardBash(t)
+	script, err := filepath.Abs(filepath.Join("scripts", "openspec-validate.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"./openspec", "tools/openspec"} {
+		t.Run(rel, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, "tools"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			out := filepath.ToSlash(filepath.Join(dir, "calls.txt"))
+			writeOpenSpecStandIn(t, filepath.Join(dir, filepath.Dir(filepath.FromSlash(rel))), "openspec", `echo "args=$*" >> "$OUT"
+`)
+			cmd := winexec.Command(bash, filepath.ToSlash(script))
+			cmd.Dir = dir
+			cmd.Env = openspecScriptEnv(t, bash, "OPENSPEC_BIN="+rel, "OUT="+out)
+			combined, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("OPENSPEC_BIN=%s, relative to the caller's directory, was not found: %v\n%s", rel, err, combined)
+			}
+			calls, _ := os.ReadFile(filepath.FromSlash(out))
+			if !strings.Contains(string(calls), "args=validate --all --strict --no-interactive") {
+				t.Errorf("the stand-in at %s did not run the validation, calls were:\n%s", rel, calls)
+			}
+		})
+	}
+}
+
+// A binary that is not there exits 2, which is how a missing tool differs from a red validation (any other non-zero
+// code): a caller can tell "install the CLI" from "fix the spec". It holds for an absolute and a relative name.
+func TestOpenSpecValidateScriptExitsTwoWhenTheBinaryIsMissing(t *testing.T) {
+	bash := guardBash(t)
+	script, err := filepath.Abs(filepath.Join("scripts", "openspec-validate.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for _, bin := range []string{filepath.ToSlash(filepath.Join(dir, "no-such-openspec")), "./no-such-openspec", "tools/no-such-openspec"} {
+		cmd := winexec.Command(bash, filepath.ToSlash(script))
+		cmd.Dir = dir
+		cmd.Env = openspecScriptEnv(t, bash, "OPENSPEC_BIN="+bin)
+		combined, err := cmd.CombinedOutput()
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Errorf("OPENSPEC_BIN=%s: want an exit error, got %v:\n%s", bin, err, combined)
+			continue
+		}
+		if ee.ExitCode() != 2 {
+			t.Errorf("OPENSPEC_BIN=%s: exit code %d, want 2:\n%s", bin, ee.ExitCode(), combined)
+		}
+		if !strings.Contains(string(combined), "not found") {
+			t.Errorf("OPENSPEC_BIN=%s: the message does not say the binary was not found:\n%s", bin, combined)
+		}
 	}
 }
 
