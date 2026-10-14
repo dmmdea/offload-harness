@@ -179,11 +179,12 @@ What `"compact"` does, per tool and per parameter at every depth:
   installed only for `"compact"`.
 - Cuts each description to its first sentence (grown to the next sentence when the first is under 28 characters, and
   shortened at a clause boundary when it runs past 320 characters for a tool or 200 for a parameter and the dropped part
-  carries no constraint word), plus the sentences a reviewed per-tool keep-list names
-  ([`toolsprofile_keep.go`](../../internal/mcpserver/toolsprofile_keep.go), 64 entries), verbatim and in the order the
-  description has them. An entry is a sentence a caller must not be without: a prohibition, a trust or privacy boundary,
-  a cost rule, a limit the schema cannot express, the "if it cannot, it returns `deferred:true` and you do the work
-  yourself" protocol, a warning that a result is not a verdict. A sentence that cannot be read without its neighbour
+  carries no constraint word and does not say the data leaves the box), plus the sentences a reviewed per-tool keep-list
+  names ([`toolsprofile_keep.go`](../../internal/mcpserver/toolsprofile_keep.go), 72 entries), verbatim and in the order
+  the description has them. An entry is a sentence a caller must not be without: a prohibition, a trust or privacy
+  boundary, the statement that a call is forwarded to another node and its image or audio bytes travel with it, a cost
+  rule, a limit the schema cannot express, the "if it cannot, it returns `deferred:true` and you do the work yourself"
+  protocol, a warning that a result is not a verdict. A sentence that cannot be read without its neighbour
   comes with it: the sentence that defines `summary.infrastructure` with the one that says what a non-zero value means,
   and the three values of `agent_run`'s `thinking` together.
 - Drops `examples`, `example`, `title` and `$comment` keywords. Anything it cannot parse stays as it was: its failure
@@ -206,21 +207,44 @@ result description of `offload_status`, the SALVAGE and READING paragraphs of `o
 `offload_run_graph`), and it kept a "Non-zero means a node is broken" sentence cut loose from the
 `summary.infrastructure` sentence it is about.
 
-Now a test reads the live full descriptions of every tool and every parameter (the 45-tool surface with the delegation
-pair, the browse lane and all three accelerators on, and the variant whose accelerators are fleet accelerators), cuts them
-into sentences, and fails for every sentence that carries a constraint word and is neither in the compact description of
-that tool and parameter nor on a reviewed dropped-with-reason list
-([`toolsprofile_dropped_test.go`](../../internal/mcpserver/toolsprofile_dropped_test.go), 99 entries). The constraint words
-are `never`, `refuse*`, `only`, `must`, `not` (which covers `do not`, `may not` and `NOT`), any `n't` contraction,
-`cannot`, `required`, `without`, `opt-in`, `no delete|shell|run|network|cloud|write` and the words the first list used
-(`trusted`, `untrusted`, `unattended`, `sandbox`, `safety`, `advisory`, `read-only`, `forbidden`, `irreversible`,
-`destructive`, `denied`). A rule added to a description later turns the test red until someone has read it and put it on one
-list or the other, and an entry is the exact sentence, so a reworded rule is read again. The test reads the compact output,
-so a keep-list entry that does not match what the splitter produces is caught too. Companion tests prove that the gate
-fires on a new sentence, that every entry on either list still matches a live sentence, that the two lists are disjoint,
-that a kept sentence stays wherever it appears, and that the clause-boundary cut of an opening sentence never drops a
-constraint word. What the gate cannot see is a rule written without any of those words; the keep-list can name such a
-sentence (it does for the write door's "neither says the change is CORRECT, so read the diff"), but nothing forces it to.
+Now a test reads the live full descriptions of every tool and every parameter, exactly as `tools/list` emits them, on eight
+surfaces: the delegation pair and the browse lane on, with the three accelerators together as local devices (the 45-tool
+surface), the same three together as fleet accelerators, and each of the three alone, once as a local device and once as a
+fleet accelerator. The single-device surfaces are there because the shared-name rule gives a tool name to the first listed
+device: the other devices' descriptions for that name (the Coral's and the RKNPU's `offload_image_embed`; the Coral's
+`offload_object_detect` also has a `size` parameter the Hailo's lacks) are advertised only on a box that lists them alone and
+appear on neither combined surface, and a fleet device's description carries a forwarding note that `registerAccelTools`
+appends after the table text. One test checks
+that each single-device surface registers its device's whole table with the table's own text and parameters, and another that
+the gate's device list matches the `case` ids of the table switch, so a fourth device cannot be advertised unread.
+
+The test cuts the descriptions into sentences and fails for every sentence that carries a trigger word and is neither in the
+compact description of that tool and parameter nor on a reviewed dropped-with-reason list
+([`toolsprofile_dropped_test.go`](../../internal/mcpserver/toolsprofile_dropped_test.go), 104 entries). The trigger words are
+a constraint family and a data-leaves-the-box family. The constraint words are `never`, `refuse*`, `only`, `must`, `not`
+(which covers `do not`, `may not` and `NOT`), any `n't` contraction, `cannot`, `required`, `without`, `opt-in`,
+`no delete|shell|run|network|cloud|write` and the words the first list used (`trusted`, `untrusted`, `unattended`,
+`sandbox`, `safety`, `advisory`, `read-only`, `forbidden`, `irreversible`, `destructive`, `denied`). The data-leaves-the-box
+words are `forward*`, `travel*`, `tailnet`, `sent` and `cloud`. Those sentences hold no prohibition word and say what happens
+to the caller's bytes: a fleet accelerator's note says the call is forwarded to another node and the image bytes travel with
+it, the vision tools' `route` parameter says the image travels with the job, transcribe's route says the audio is sent as
+Opus, browse says the visible page text is sent to a decision endpoint that may front a cloud model. Before this family was
+added the gate could not see them: compact dropped the forwarding note from all 13 forwarders of the fleet surface (18 tool
+and device pairs across the three devices) while the kept opening sentence still said "on the LOCAL ... NPU (free,
+on-box ...)", and it dropped the Coral's "NOT a CLIP space" and the RKNPU's "vectors from different devices are never
+comparable" sentences, which no surface showed. The production lead guard has the same words, so the clause-boundary cut no
+longer drops "the input files you name travel to it" from the `route` parameter of the generators, `offload_animate_character`
+and `offload_run_graph`.
+
+A rule added to a description later turns the test red until someone has read it and put it on one list or the other, and an
+entry is the exact sentence, so a reworded rule is read again. The test reads the compact output, so a keep-list entry that
+does not match what the splitter produces is caught too. Companion tests prove that the gate fires on a new sentence and on a
+sentence appended after the table text, that every entry on either list still matches a live sentence on some surface, that
+the two lists are disjoint, that a kept sentence stays wherever it appears, that compact keeps the forwarding note in every
+forwarder of every fleet surface and both shared-name space warnings, that the structure of every surface survives, and that
+the clause-boundary cut of an opening sentence never drops a trigger word. What the gate cannot see is a rule written without
+any of those words; the keep-list can name such a sentence (it does for the write door's "neither says the change is CORRECT,
+so read the diff"), but nothing forces it to.
 
 ### Measured
 
@@ -236,16 +260,16 @@ the surface the plugin's `recon` set is drawn from. Tokenizer: the llama.cpp b11
   `{"type": "function", "function": {"name", "description", "parameters"}}` per line, `</tools>`, with Python-style
   `, ` and `: ` separators. This is the rendering the 0.137.0 figures used, so it is the column to compare with them. The
   fixed template text around the block (the header and the call-format instructions) is identical under both profiles
-  and is not counted. With compact separators (`,` and `:`) the same lists count 28,653 (full) and 14,929 (compact), so the
+  and is not counted. With compact separators (`,` and `:`) the same lists count 28,653 (full) and 15,318 (compact), so the
   ratio, not the absolute figure, is what carries across renderers.
 
 | Tool set | Tools | JSON, full | JSON, compact | Template, full | Template, compact | Saved (template) |
 |---|---|---|---|---|---|---|
-| Every advertised tool | 31 | 28,469 | 14,745 | 30,537 | 16,811 | 13,726 (44.9%) |
-| The plugin's `recon` set | 12 | 11,157 | 5,918 | 11,867 | 6,626 | 5,241 (44.2%) |
-| The other tools (the `offload-media` set) | 19 | 17,352 | 8,867 | 18,677 | 10,192 | 8,485 (45.4%) |
+| Every advertised tool | 31 | 28,469 | 15,134 | 30,537 | 17,200 | 13,337 (43.7%) |
+| The plugin's `recon` set | 12 | 11,157 | 5,974 | 11,867 | 6,682 | 5,185 (43.7%) |
+| The other tools (the `offload-media` set) | 19 | 17,352 | 9,200 | 18,677 | 10,525 | 8,152 (43.6%) |
 | The four Tier-1 tools | 4 | 1,125 | 740 | 1,232 | 847 | 385 (31.2%) |
-| Largest surface: the 31 plus the browse lane and three accelerators | 45 | 30,996 | 16,582 | 33,532 | 19,116 | 14,416 (43.0%) |
+| Largest surface: the 31 plus the browse lane and three accelerators | 45 | 30,996 | 17,030 | 33,532 | 19,564 | 13,968 (41.7%) |
 
 The 45-tool row is measured the same way over the config the review gate uses (it is not an estimate), and the `recon` set
 and the four Tier-1 tools are the same tools in it. The full column is the unchanged default: the same bytes as before the
@@ -255,11 +279,11 @@ Against the 0.137.0 figures, which this document recorded before this build (tem
 `recon` twelve: 8,265; the four Tier-1 tools: 847): the full list has grown since, and the comparison is not like for like
 except where the tools are the same.
 
-- **The same twelve tools (the `recon` set), the comparison to lead with:** 8,265 at 0.137.0, 11,867 now in full, 6,626
+- **The same twelve tools (the `recon` set), the comparison to lead with:** 8,265 at 0.137.0, 11,867 now in full, 6,682
   compact.
 - **All tools, not the same set:** 0.137.0 counted 35 (the set is per-box), this build's delegation-enabled box
-  advertises 31. Per tool, that is 596 tokens (20,868 / 35) then; now 985 in full (30,537 / 31) and 542 compact
-  (16,811 / 31). On the largest surface, 45 tools, compact is 19,116 (425 per tool), still below 20,868. The all-tools
+  advertises 31. Per tool, that is 596 tokens (20,868 / 35) then; now 985 in full (30,537 / 31) and 555 compact
+  (17,200 / 31). On the largest surface, 45 tools, compact is 19,564 (435 per tool), still below 20,868. The all-tools
   statement is therefore a statement about these two box shapes, and it holds on both of them, but only the twelve-tool
   row is the same set.
 - **Per tool, where 0.137.0 recorded one** (then in full; now in full and compact): `agent_delegate` 2,903; 4,173 and
@@ -271,9 +295,19 @@ superseded: the keep-list is smaller than what that rule kept, because it drops 
 sentences the rule kept by accident (`offload_status` alone goes from 849 tokens to 238), and larger only where it adds the
 sentences that rule lost.
 
+The keep-list's own figures before the data-leaves-the-box words joined the gate were 16,811 (31 tools), 6,626 (`recon`),
+10,192 (the other nineteen) and 19,116 (45 tools); they grew by 389, 56, 333 and 448 tokens. The growth is four things: the
+clause-boundary cut no longer drops the "input files you name travel to it" tail of the `route` parameter on five tools
+(the three generators, `offload_animate_character`, `offload_run_graph`), the vision tools' "the image ... travels with the
+job" sentence (`offload_assess_image`, `offload_ocr`, `offload_vqa`), transcribe's route sentence, and on the 45-tool surface
+the browse typed-decision sentence. The four Tier-1 tools and the per-tool figures above do not move. On the variant whose
+three accelerators are fleet accelerators (45 tools, 13 of them forwarders carrying the note) the lists measure 34,250 full
+and 20,285 compact in the template rendering (the note is kept, so it is in both); the forwarding note is 718 tokens of the
+full list.
+
 The default is unchanged: with no key, with `"full"`, and with the shipped `Default()`, the `tools/list` result is
 byte-identical to the one the 0.186.0 base advertises (SHA-256 `e4840d2c3a9e879d...` for both, captured with the helper
-below on each tree).
+below on each tree, and the same hash again after the data-leaves-the-box change).
 
 To re-measure: `OFFLOAD_TOOLS_DUMP_DIR=<dir> OFFLOAD_TOOLS_DUMP_PROFILE=<full|compact> go test ./internal/mcpserver -run TestToolsListDump`
 writes the wire bytes of one profile (the test is skipped without the variable and asserts nothing); tokenize that file for
