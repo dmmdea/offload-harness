@@ -151,8 +151,10 @@ func searchTokens(s string) []string {
 	return out
 }
 
-// searchQueryTerms is the task's term set: unique, stopwords removed, sorted (so
-// every sum over it runs in one fixed order), and bounded.
+// searchQueryTerms is the task's term set: unique, stopwords removed, bounded to
+// the first searchRungMaxQueryTerms terms in order of appearance (what the
+// objective names first is what it is about; the alphabet has no say), and then
+// sorted so every sum over it runs in one fixed order.
 func searchQueryTerms(task string) []string {
 	if len(task) > 4096 {
 		task = task[:4096]
@@ -168,11 +170,11 @@ func searchQueryTerms(task string) []string {
 		}
 		seen[t] = true
 		terms = append(terms, t)
+		if len(terms) == searchRungMaxQueryTerms {
+			break
+		}
 	}
 	sort.Strings(terms)
-	if len(terms) > searchRungMaxQueryTerms {
-		terms = terms[:searchRungMaxQueryTerms]
-	}
 	return terms
 }
 
