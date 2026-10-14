@@ -13,12 +13,20 @@ package main
 // wording was corrected before any release shipped it.
 
 import (
-	"os"
+	"fmt"
 	"strings"
 	"testing"
 )
 
 func TestTheDocsDoNotClaimAnIdleBoxNeverTouchesTheServingConfig(t *testing.T) {
+	for _, problem := range fenceDocProblems(".") {
+		t.Error(problem)
+	}
+}
+
+// fenceDocProblems is that check over the files under root, as a list, so a test can run it on a root of its own
+// (TestTheFenceCostCheckSeesAChangelogFragment).
+func fenceDocProblems(root string) []string {
 	retired := map[string][]string{
 		"CHANGELOG.md": {
 			"The idle path pays nothing new.",
@@ -31,17 +39,20 @@ func TestTheDocsDoNotClaimAnIdleBoxNeverTouchesTheServingConfig(t *testing.T) {
 			"A seat's pins are looked up on the same condition, and no sooner",
 		},
 	}
+	var problems []string
 	for name, phrases := range retired {
-		raw, err := os.ReadFile(name)
+		raw, err := docText(root, name)
 		if err != nil {
-			t.Fatal(err)
+			problems = append(problems, err.Error())
+			continue
 		}
 		// A quote wraps across lines, and a Go comment carries its // markers across the wrap.
-		text := strings.Join(strings.Fields(strings.ReplaceAll(string(raw), "//", " ")), " ")
+		text := strings.Join(strings.Fields(strings.ReplaceAll(raw, "//", " ")), " ")
 		for _, phrase := range phrases {
 			if strings.Contains(text, phrase) {
-				t.Errorf("%s still says %q: only the fence's own lookups wait for a lease that names cards; PinsFor and the other callers of Config.ModelPins Stat the serving config on every call", name, phrase)
+				problems = append(problems, fmt.Sprintf("%s still says %q: only the fence's own lookups wait for a lease that names cards; PinsFor and the other callers of Config.ModelPins Stat the serving config on every call", name, phrase))
 			}
 		}
 	}
+	return problems
 }
