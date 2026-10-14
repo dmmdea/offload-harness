@@ -34,6 +34,6 @@
   grade uses and the outcome table.
 
 **What this does not do.** It runs no measurement and downloads nothing; no result is recorded and no decision follows
-from the bench alone. In this reply-only setting the agent has no tool to fetch evicted content, so the pager's
-stored pager report has basis `not_exercised` and a null re-fetch rate: it shows evictions only. Scores are not comparable with published ContextBench
+from the bench alone. In this reply-only setting the agent has no tool to fetch evicted content, so the stored
+pager report has basis `not_exercised` and a null re-fetch rate: it shows evictions only. Scores are not comparable with published ContextBench
 numbers (different instruction wording and delivery); they compare harness configurations with each other.
