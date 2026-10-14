@@ -18,11 +18,12 @@ import (
 // ("can't", "won't"), plain "not" (which also covers "do not", "may not" and the upper-case "NOT"), "without", "opt-in" and the
 // words the first lexical list kept (trusted, untrusted, unattended, sandbox, safety, advisory, read-only, forbidden, irreversible,
 // destructive, denied). And data leaving the box: a sentence that says the call is forwarded (forward*), that the input travels
-// with the job (travel*), that it goes over the tailnet or is sent on (tailnet, sent), or that a cloud model sits behind a
-// local service (cloud). Those carry no prohibition word and say what happens to the caller's bytes, which is a privacy rule
+// with the job (travel*), that it runs on a fleet node (fleet node, fleet nodes), that it goes over the tailnet or is sent on
+// (tailnet, sent), or that a cloud model sits behind a local
+// service (cloud). Those carry no prohibition word and say what happens to the caller's bytes, which is a privacy rule
 // all the same. It is written out here on purpose and is NOT the production lead-cut guard (leadGuard in toolsprofile.go):
 // narrowing production's regexp cannot narrow this gate.
-var gateTrigger = regexp.MustCompile(`(?i)\b(never|refus\w*|only|must|not|\w+n't|cannot|required|denied|trusted|untrusted|unattended|sandbox\w*|safety|advisory|read-only|forbidden|irreversible|destructive|opt-in|without|no (?:delete|shell|run|network|cloud|write)|forward\w*|travel\w*|tailnet|sent|cloud)\b`)
+var gateTrigger = regexp.MustCompile(`(?i)\b(never|refus\w*|only|must|not|\w+n't|cannot|required|denied|trusted|untrusted|unattended|sandbox\w*|safety|advisory|read-only|forbidden|irreversible|destructive|opt-in|without|no (?:delete|shell|run|network|cloud|write)|forward\w*|travel\w*|fleet nodes?|tailnet|sent|cloud)\b`)
 
 // droppedSentence records a constraint-word sentence the compact profile deliberately drops, in the tools named, and why that is
 // safe.

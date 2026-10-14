@@ -9,7 +9,7 @@ import (
 
 // composeRouteSentence is the start of the tool-level sentence of offload_compose_video that says where a render goes when this
 // machine has no composition lane: to a fleet node, the html or project_dir bundle with it. It holds no prohibition word and none
-// of the older data-leaves-the-box words (forward*, travel*, tailnet, sent, cloud), so the review gate used to skip it and the
+// of the older data-leaves-the-box words (forward*, travel*, tailnet, sent, cloud), so the review gate skipped it and the
 // compact list dropped it with no entry on either list.
 const composeRouteSentence = "route places the render: auto (default) runs here when this machine has the composition lane and otherwise on a fleet node"
 

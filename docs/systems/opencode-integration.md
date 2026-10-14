@@ -180,7 +180,7 @@ What `"compact"` does, per tool and per parameter at every depth:
 - Cuts each description to its first sentence (grown to the next sentence when the first is under 28 characters, and
   shortened at a clause boundary when it runs past 320 characters for a tool or 200 for a parameter and the dropped part
   carries no constraint word and does not say the data leaves the box), plus the sentences a reviewed per-tool keep-list
-  names ([`toolsprofile_keep.go`](../../internal/mcpserver/toolsprofile_keep.go), 72 entries), verbatim and in the order
+  names ([`toolsprofile_keep.go`](../../internal/mcpserver/toolsprofile_keep.go), 73 entries), verbatim and in the order
   the description has them. An entry is a sentence a caller must not be without: a prohibition, a trust or privacy
   boundary, the statement that a call is forwarded to another node and its image or audio bytes travel with it, a cost
   rule, a limit the schema cannot express, the "if it cannot, it returns `deferred:true` and you do the work yourself"
@@ -220,15 +220,18 @@ the gate's device list matches the `case` ids of the table switch, so a fourth d
 
 The test cuts the descriptions into sentences and fails for every sentence that carries a trigger word and is neither in the
 compact description of that tool and parameter nor on a reviewed dropped-with-reason list
-([`toolsprofile_dropped_test.go`](../../internal/mcpserver/toolsprofile_dropped_test.go), 104 entries). The trigger words are
+([`toolsprofile_dropped_test.go`](../../internal/mcpserver/toolsprofile_dropped_test.go), 107 entries). The trigger words are
 a constraint family and a data-leaves-the-box family. The constraint words are `never`, `refuse*`, `only`, `must`, `not`
 (which covers `do not`, `may not` and `NOT`), any `n't` contraction, `cannot`, `required`, `without`, `opt-in`,
 `no delete|shell|run|network|cloud|write` and the words the first list used (`trusted`, `untrusted`, `unattended`,
 `sandbox`, `safety`, `advisory`, `read-only`, `forbidden`, `irreversible`, `destructive`, `denied`). The data-leaves-the-box
-words are `forward*`, `travel*`, `tailnet`, `sent` and `cloud`. Those sentences hold no prohibition word and say what happens
-to the caller's bytes: a fleet accelerator's note says the call is forwarded to another node and the image bytes travel with
+words are `forward*`, `travel*`, `fleet node` (and `fleet nodes`), `tailnet`, `sent` and `cloud`. Those sentences hold no
+prohibition word and say what happens to the caller's bytes: a fleet accelerator's note says the call is forwarded to another node and the image bytes travel with
 it, the vision tools' `route` parameter says the image travels with the job, transcribe's route says the audio is sent as
-Opus, browse says the visible page text is sent to a decision endpoint that may front a cloud model. Before this family was
+Opus, browse says the visible page text is sent to a decision endpoint that may front a cloud model, and the compose-video tool's
+route sentence says an inline composition or a project directory goes to a fleet node as a project bundle when this machine
+has no composition lane (that sentence holds none of the other words, so it was dropped unlisted until `fleet node` joined
+the family). Before this family was
 added the gate could not see them: compact dropped the forwarding note from all 13 forwarders of the fleet surface (18 tool
 and device pairs across the three devices) while the kept opening sentence still said "on the LOCAL ... NPU (free,
 on-box ...)", and it dropped the Coral's "NOT a CLIP space" and the RKNPU's "vectors from different devices are never
@@ -260,16 +263,16 @@ the surface the plugin's `recon` set is drawn from. Tokenizer: the llama.cpp b11
   `{"type": "function", "function": {"name", "description", "parameters"}}` per line, `</tools>`, with Python-style
   `, ` and `: ` separators. This is the rendering the 0.137.0 figures used, so it is the column to compare with them. The
   fixed template text around the block (the header and the call-format instructions) is identical under both profiles
-  and is not counted. With compact separators (`,` and `:`) the same lists count 28,653 (full) and 15,318 (compact), so the
+  and is not counted. With compact separators (`,` and `:`) the same lists count 28,653 (full) and 15,398 (compact), so the
   ratio, not the absolute figure, is what carries across renderers.
 
 | Tool set | Tools | JSON, full | JSON, compact | Template, full | Template, compact | Saved (template) |
 |---|---|---|---|---|---|---|
-| Every advertised tool | 31 | 28,469 | 15,134 | 30,537 | 17,200 | 13,337 (43.7%) |
+| Every advertised tool | 31 | 28,469 | 15,214 | 30,537 | 17,280 | 13,257 (43.4%) |
 | The plugin's `recon` set | 12 | 11,157 | 5,974 | 11,867 | 6,682 | 5,185 (43.7%) |
-| The other tools (the `offload-media` set) | 19 | 17,352 | 9,200 | 18,677 | 10,525 | 8,152 (43.6%) |
+| The other tools (the `offload-media` set) | 19 | 17,352 | 9,280 | 18,677 | 10,605 | 8,072 (43.2%) |
 | The four Tier-1 tools | 4 | 1,125 | 740 | 1,232 | 847 | 385 (31.2%) |
-| Largest surface: the 31 plus the browse lane and three accelerators | 45 | 30,996 | 17,030 | 33,532 | 19,564 | 13,968 (41.7%) |
+| Largest surface: the 31 plus the browse lane and three accelerators | 45 | 30,996 | 17,110 | 33,532 | 19,644 | 13,888 (41.4%) |
 
 The 45-tool row is measured the same way over the config the review gate uses (it is not an estimate), and the `recon` set
 and the four Tier-1 tools are the same tools in it. The full column is the unchanged default: the same bytes as before the
@@ -282,12 +285,12 @@ except where the tools are the same.
 - **The same twelve tools (the `recon` set), the comparison to lead with:** 8,265 at 0.137.0, 11,867 now in full, 6,682
   compact.
 - **All tools, not the same set:** 0.137.0 counted 35 (the set is per-box), this build's delegation-enabled box
-  advertises 31. Per tool, that is 596 tokens (20,868 / 35) then; now 985 in full (30,537 / 31) and 555 compact
-  (17,200 / 31). On the largest surface, 45 tools, compact is 19,564 (435 per tool), still below 20,868. The all-tools
+  advertises 31. Per tool, that is 596 tokens (20,868 / 35) then; now 985 in full (30,537 / 31) and 557 compact
+  (17,280 / 31). On the largest surface, 45 tools, compact is 19,644 (437 per tool), still below 20,868. The all-tools
   statement is therefore a statement about these two box shapes, and it holds on both of them, but only the twelve-tool
   row is the same set.
 - **Per tool, where 0.137.0 recorded one** (then in full; now in full and compact): `agent_delegate` 2,903; 4,173 and
-  2,684. `offload_status` 660; 1,074 and 238. `offload_compose_video` 991; 1,153 and 725. The four Tier-1 tools 847; 1,232
+  2,684. `offload_status` 660; 1,074 and 238. `offload_compose_video` 991; 1,153 and 805. The four Tier-1 tools 847; 1,232
   and 847. The other tools of the 0.137.0 list have no recorded per-tool figure, so they cannot be compared one by one.
 
 The previous compact figures (19,674 for the 31 tools, 8,011 for `recon`) were measured with the safety-word rule and are
@@ -296,13 +299,14 @@ sentences the rule kept by accident (`offload_status` alone goes from 849 tokens
 sentences that rule lost.
 
 The keep-list's own figures before the data-leaves-the-box words joined the gate were 16,811 (31 tools), 6,626 (`recon`),
-10,192 (the other nineteen) and 19,116 (45 tools); they grew by 389, 56, 333 and 448 tokens. The growth is four things: the
+10,192 (the other nineteen) and 19,116 (45 tools); they grew by 469, 56, 413 and 528 tokens. The growth is five things: the
 clause-boundary cut no longer drops the "input files you name travel to it" tail of the `route` parameter on five tools
 (the three generators, `offload_animate_character`, `offload_run_graph`), the vision tools' "the image ... travels with the
-job" sentence (`offload_assess_image`, `offload_ocr`, `offload_vqa`), transcribe's route sentence, and on the 45-tool surface
-the browse typed-decision sentence. The four Tier-1 tools and the per-tool figures above do not move. On the variant whose
+job" sentence (`offload_assess_image`, `offload_ocr`, `offload_vqa`), transcribe's route sentence, the compose-video tool's route sentence (80 tokens: the render and the project bundle go to a
+fleet node), and on the 45-tool surface the browse typed-decision sentence. The four Tier-1 tools do not move, and of the
+per-tool figures above only the compose-video one does. On the variant whose
 three accelerators are fleet accelerators (45 tools, 13 of them forwarders carrying the note) the lists measure 34,250 full
-and 20,285 compact in the template rendering (the note is kept, so it is in both); the 13 forwarding notes together are 718 tokens
+and 20,365 compact in the template rendering (the note is kept, so it is in both); the 13 forwarding notes together are 718 tokens
 of the full list.
 
 The default is unchanged: with no key, with `"full"`, and with the shipped `Default()`, the `tools/list` result is
@@ -318,7 +322,7 @@ the JSON column, and render its tools through the template for the other.
 
 - opencode inlines every enabled MCP tool schema per call; the 35 harness tools of 0.137.0 are
   20,868 tokens. `primaryTools: "tier1"` and `offloadTools: "recon"` are the default mitigations
-  (the offload subagent's measured fixed prompt was 24,680 tokens before the recon split). On 0.186.0 the full list of a 31-tool box is 30,537 tokens; `tools_schema_profile: "compact"` on the harness config brings it to 17,200 (see [Tool schema size](#tool-schema-size)).
+  (the offload subagent's measured fixed prompt was 24,680 tokens before the recon split). On 0.186.0 the full list of a 31-tool box is 30,537 tokens; `tools_schema_profile: "compact"` on the harness config brings it to 17,280 (see [Tool schema size](#tool-schema-size)).
 - Prefix-cache reuse on a vLLM hybrid-attention seat is block-granular: cached prompt tokens come
   in whole blocks of the seat's block size (1,568 tokens on the Qwen3.8 fp8 seat; measured
   10,976 = 7 blocks, 12,544 = 8, 25,088 = 16), so every request recomputes its trailing partial

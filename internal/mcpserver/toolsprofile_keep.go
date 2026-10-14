@@ -210,6 +210,11 @@ var compactKeep = []compactKeepEntry{
 		Why:      "html and project_dir are TRUSTED CODE ONLY; never pass third-party pages",
 	},
 	{
+		Tools:    []string{"offload_compose_video"},
+		Sentence: "route places the render: auto (default) runs here when this machine has the composition lane and otherwise on a fleet node; a fleet node renders a template through its template door and html or project_dir as a confined project bundle through its token-gated compose-project door (ADR 0071), and the video and snapshots are fetched back into this machine's media dir (or out).",
+		Why:      "the default route (auto) renders on a fleet node when this machine has no composition lane, and an html or project_dir composition then goes there as a project bundle: the one place the caller's files leave the box on this tool",
+	},
+	{
 		Tools:    []string{"offload_depth"},
 		Sentence: "Shot analysis / parallax previews, not a production depth pass.",
 		Why:      "depth output is a preview, not a production depth pass",
