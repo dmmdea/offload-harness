@@ -54,6 +54,9 @@ type fakeSwap struct {
 	evictOnLoad bool
 	// completionStatus, when set, is what a completion answers instead of a result (a seat that fails).
 	completionStatus int
+	// chatless lists the seats that have no chat route (a speech-to-text or an embedding seat): a
+	// completion for one answers 404 and loads nothing, as llama-swap's passthrough does for them.
+	chatless map[string]bool
 	// seatPath is the path a seat answers as its health endpoint (default /health); any other path under
 	// the seat is a plain 404, so a probe that asks the wrong path reads a failing seat.
 	seatPath map[string]string
@@ -128,6 +131,10 @@ func (f *fakeSwap) handle(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.completions = append(f.completions, body)
+		if m, _ := body["model"].(string); f.chatless[f.canonicalLocked(m)] {
+			w.WriteHeader(http.StatusNotFound)
+			break
+		}
 		if m, _ := body["model"].(string); m != "" && f.loadOnCompletion {
 			id := f.canonicalLocked(m)
 			if _, already := f.running[id]; !already && f.evictOnLoad {
@@ -200,6 +207,8 @@ models:
     cmd: /opt/rknpu/rkllm-serve.sh --port ${PORT}
   ears:
     cmd: /bin/whisper-server -m w.bin --port ${PORT}
+  embedder:
+    cmd: /bin/llama-server -m emb.gguf --embeddings --pooling mean ${common}
 `
 
 // testCfg is a config bound to the fake llama-swap, with the agent lane on the llama.cpp seat and the
@@ -221,7 +230,7 @@ func testCfg(t *testing.T, f *fakeSwap) config.Config {
 func fullRoster() map[string][]string {
 	return map[string][]string{
 		"offload-e4b": nil, "gemma4-e2b": nil, "gemma4-26b-a4b": nil,
-		"small-cpp": {"cpp-alias"}, "big-vllm": nil, "npu-seat": nil, "ears": nil,
+		"small-cpp": {"cpp-alias"}, "big-vllm": nil, "npu-seat": nil, "ears": nil, "embedder": nil,
 	}
 }
 
@@ -399,9 +408,12 @@ func TestCollectSeatMissingFromRoster(t *testing.T) {
 }
 
 // TestCompletionProbeOnlyWithTheFlag: with the explicit option the probe sends ONE 1-token completion
-// per answering seat and reports the completion level; the cheap probe of the same state sent none.
+// to the seat that is running and reports the completion level; the cheap probe of the same state sent
+// none. (A seat that is not running is only completed on an idle box, and then once: see
+// TestCompletionProbeOnAnIdleBoxLoadsAtMostOneSeat.)
 func TestCompletionProbeOnlyWithTheFlag(t *testing.T) {
 	f := newFakeSwap(t, fullRoster())
+	f.running["small-cpp"] = "ready"
 	cfg := testCfg(t, f)
 	Collect(t.Context(), cfg, Options{HTTP: f.srv.Client()})
 	if n := f.completionCount(); n != 0 {
@@ -455,33 +467,26 @@ func TestCompletionProbeNeverEvictsAVLLMSeat(t *testing.T) {
 	}
 }
 
-// TestCompletionProbeStopsOnceItLoadedAVLLMSeat: on an idle box the probe's own first completions load
-// seats, and a completion that loads a vLLM seat makes every later completion to a seat that is not
-// running a load that could evict it. The fake loads a seat on its completion, as llama-swap does, and
-// /running is re-read after every completion, so the vLLM seat this run loaded is seen before the next
-// completion is decided.
-func TestCompletionProbeStopsOnceItLoadedAVLLMSeat(t *testing.T) {
-	withTier(t)
+// TestCompletionProbeOnAnIdleBoxLoadsAtMostOneSeat: with nothing running, a completion to an idle seat
+// loads it, and every later seat is then a load over a running seat. So the report sends ONE completion
+// in all (to the first seat it reaches), the list is read again right after it, and every other row says
+// it was not probed and over which seat the load would have been. The fake loads a seat on its completion,
+// as llama-swap does.
+func TestCompletionProbeOnAnIdleBoxLoadsAtMostOneSeat(t *testing.T) {
 	f := newFakeSwap(t, fullRoster())
 	f.allowCompletion = true
 	f.loadOnCompletion = true
 	r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true})
 
 	order := f.completionModels()
-	first := -1
-	for i, m := range order {
-		if m == "big-vllm" {
-			first = i
-			break
-		}
+	if len(order) != 1 {
+		t.Fatalf("completions = %v, want exactly one: each further one would load a seat over a running one", order)
 	}
-	if first < 0 {
-		t.Fatalf("the vLLM seat was never completed (order %v): the test would prove nothing", order)
+	first := order[0]
+	if first != "offload-e4b" {
+		t.Errorf("the completion went to %s, want the first seat of the report (the workhorse lane's seat)", first)
 	}
-	if first != len(order)-1 {
-		t.Errorf("completions %v followed the one that loaded the vLLM seat: each would load a seat while it holds the cards", order[first+1:])
-	}
-	// /running is re-read right after every completion, before the next one is decided.
+	// /running is read again right after the completion, before the next seat is decided.
 	f.mu.Lock()
 	for i, req := range f.requests {
 		if req == "POST /v1/chat/completions" && (i+1 >= len(f.requests) || f.requests[i+1] != "GET /running") {
@@ -489,9 +494,44 @@ func TestCompletionProbeStopsOnceItLoadedAVLLMSeat(t *testing.T) {
 		}
 	}
 	f.mu.Unlock()
-	e := seatOf(t, r, "small-cpp")
-	if e.BackendProbe == ProbeCompletion || !strings.Contains(e.BackendReason, "big-vllm") || !strings.Contains(e.BackendReason, "would load") {
-		t.Errorf("small-cpp = %+v, want a skipped completion that names the vLLM seat the run loaded", e)
+	e := seatOf(t, r, first)
+	if e.BackendProbe != ProbeCompletion || !strings.Contains(e.BackendReason, "a 1-token completion loaded it and answered") {
+		t.Errorf("%s = %+v, want the completion that loaded it named", first, e)
+	}
+	checked := 0
+	for _, other := range r.Seats {
+		if other.Seat == first || other.ActiveBackend == EngineNone || other.BackendProbe == ProbeCompletion {
+			continue
+		}
+		checked++
+		if !strings.Contains(other.BackendReason, "not probed: would load over llama.cpp seat "+first) {
+			t.Errorf("%s = %+v, want the not-probed clause naming the seat the load would be over", other.Seat, other)
+		}
+	}
+	if checked == 0 {
+		t.Error("no other seat row was checked: the test proves nothing")
+	}
+}
+
+// TestCompletionProbeSendsNoSecondLoadAfterAFailedOne: the first completion on an idle box fails and
+// loads nothing, so nothing is running afterwards and the "something is running" test would let the next
+// seat through. The report still sends only one completion that can load a seat.
+func TestCompletionProbeSendsNoSecondLoadAfterAFailedOne(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	f.allowCompletion = true
+	f.completionStatus = http.StatusInternalServerError
+	r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+	if got := f.completionModels(); len(got) != 1 {
+		t.Fatalf("completions = %v, want one: a failed load is still the one this run was allowed", got)
+	}
+	skipped := 0
+	for _, e := range r.Seats {
+		if strings.Contains(e.BackendReason, "not probed: this run already sent one completion that could load a seat") {
+			skipped++
+		}
+	}
+	if skipped == 0 {
+		t.Errorf("no seat row says why it was not probed: %+v", r.Seats)
 	}
 }
 
@@ -517,56 +557,46 @@ func TestCompletionProbeDecidesOnAFreshRunningList(t *testing.T) {
 	}
 }
 
-// TestCompletionProbeSeesWhatItsOwnCompletionEvicted: the completion that loads the vLLM seat unloads the
-// llama.cpp seat that was running, so the next seat, which the reading taken just before that completion
-// lists as running, is no longer running: completing it would reload it and evict the vLLM seat. The list
-// is re-read after the completion and the second completion is refused.
-func TestCompletionProbeSeesWhatItsOwnCompletionEvicted(t *testing.T) {
+// TestCompletionProbeSeesWhatItsOwnCompletionLoaded: the completion that loads a seat is followed by a
+// fresh reading of the running list, so the next seat is refused because of the seat that is now running
+// (named in its row), not merely because one load was already spent.
+func TestCompletionProbeSeesWhatItsOwnCompletionLoaded(t *testing.T) {
 	f := newFakeSwap(t, fullRoster())
-	f.running["small-cpp"] = "ready"
 	f.allowCompletion = true
 	f.loadOnCompletion = true
-	f.evictOnLoad = true
 	s := newState(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true})
 	first := s.Probe(t.Context(), Candidate{Seat: "big-vllm", Engine: EngineVLLM})
 	second := s.Probe(t.Context(), Candidate{Seat: "small-cpp", Engine: EngineLlamaCpp})
 	if first.Probe != ProbeCompletion || !first.OK {
-		t.Fatalf("the vLLM seat's completion must run: %+v", first)
+		t.Fatalf("the first completion must run on an idle box: %+v", first)
 	}
 	if got := f.completionModels(); len(got) != 1 || got[0] != "big-vllm" {
-		t.Errorf("completions = %v, want only the vLLM seat: the second would reload small-cpp and evict it", got)
+		t.Errorf("completions = %v, want only the first seat", got)
 	}
-	if second.Probe == ProbeCompletion || !strings.Contains(second.Detail, "big-vllm") {
-		t.Errorf("small-cpp = %+v, want a skipped completion that names the vLLM seat", second)
+	if second.Probe == ProbeCompletion || !strings.Contains(second.Detail, "not probed: would load over vllm seat big-vllm") {
+		t.Errorf("small-cpp = %+v, want a refusal that names the vLLM seat the completion loaded", second)
 	}
 }
 
-// TestCompletionProbeSeesWhatAFailedCompletionEvicted: the list is read again after a completion whether
-// it succeeded or not. The completion here loads the vLLM seat, which evicts small-cpp, and then fails
-// its generation, so the reading taken before it, which still lists small-cpp as running, is stale: acting
-// on it completes small-cpp, reloads it and evicts the vLLM seat. A seat the failed completion LOADED is
-// caught by the next seat's own fresh read; only a seat the stale list counts as running skips that read,
-// so this is the case that needs the read after the failure.
-func TestCompletionProbeSeesWhatAFailedCompletionEvicted(t *testing.T) {
+// TestCompletionProbeSeesWhatAFailedCompletionLoaded: llama-swap loads the model and the generation fails
+// afterwards, so the list is read again after a failed completion too: the next seat is refused over the
+// seat the failed completion loaded.
+func TestCompletionProbeSeesWhatAFailedCompletionLoaded(t *testing.T) {
 	f := newFakeSwap(t, fullRoster())
-	f.running["small-cpp"] = "ready"
 	f.allowCompletion = true
 	f.loadOnCompletion = true
-	f.evictOnLoad = true
 	f.completionStatus = http.StatusInternalServerError
 	s := newState(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true})
 	first := s.Probe(t.Context(), Candidate{Seat: "big-vllm", Engine: EngineVLLM})
 	second := s.Probe(t.Context(), Candidate{Seat: "small-cpp", Engine: EngineLlamaCpp})
 	if first.Probe != ProbeCompletion || first.OK || !strings.Contains(first.Detail, "the 1-token completion failed") {
-		t.Fatalf("the vLLM seat's completion must run and fail: %+v", first)
+		t.Fatalf("the first completion must run and fail: %+v", first)
 	}
-	for _, m := range f.completionModels() {
-		if m != "big-vllm" {
-			t.Errorf("a completion was sent to %s after the failed one evicted it: it would reload it and evict the vLLM seat", m)
-		}
+	if got := f.completionModels(); len(got) != 1 {
+		t.Errorf("completions = %v, want only the failed one", got)
 	}
-	if second.Probe == ProbeCompletion || !strings.Contains(second.Detail, "big-vllm") {
-		t.Errorf("small-cpp = %+v, want a skipped completion that names the vLLM seat the failed completion loaded", second)
+	if second.Probe == ProbeCompletion || !strings.Contains(second.Detail, "not probed: would load over vllm seat big-vllm") {
+		t.Errorf("small-cpp = %+v, want a refusal that names the vLLM seat the failed completion loaded", second)
 	}
 }
 
@@ -585,7 +615,7 @@ func TestCompletionReasonWhenTheRunningListBecameReadable(t *testing.T) {
 		t.Fatal("the opening read of /running was meant to fail: the test would prove nothing")
 	}
 	v := s.Probe(t.Context(), Candidate{Seat: "small-cpp", Engine: EngineLlamaCpp})
-	if v.Probe == ProbeCompletion || !strings.Contains(v.Detail, "would load small-cpp") || !strings.Contains(v.Detail, "big-vllm") {
+	if v.Probe == ProbeCompletion || !strings.Contains(v.Detail, "not probed: would load over vllm seat big-vllm") {
 		t.Fatalf("small-cpp = %+v, want a skipped completion that names the vLLM seat the second reading found", v)
 	}
 	for _, stale := range []string{"could not be read", "unknown", "not asked"} {
@@ -648,7 +678,8 @@ func TestCompletionProbeNeverLoadsASecondVLLMSeat(t *testing.T) {
 }
 
 // TestCompletionReasonDoesNotContradictItself: a row that ran a completion must not also say it was not
-// asked. An idle seat the completion loaded says so; a loaded seat keeps its endpoint clause.
+// asked. A loaded seat keeps its endpoint clause; an idle one the completion loaded (on an idle box, the
+// only place one is) says so, and TestCompletionProbeOnAnIdleBoxLoadsAtMostOneSeat checks that row.
 func TestCompletionReasonDoesNotContradictItself(t *testing.T) {
 	f := newFakeSwap(t, fullRoster())
 	f.allowCompletion = true
@@ -658,10 +689,6 @@ func TestCompletionReasonDoesNotContradictItself(t *testing.T) {
 		if e.BackendProbe == ProbeCompletion && (strings.Contains(e.BackendReason, "not asked") || strings.Contains(e.BackendReason, "asking would")) {
 			t.Errorf("%s %s ran a completion and says it was not asked: %q", e.Lane, e.Seat, e.BackendReason)
 		}
-	}
-	idle := seatOf(t, r, "offload-e4b")
-	if idle.BackendProbe != ProbeCompletion || !strings.Contains(idle.BackendReason, "a 1-token completion loaded it and answered") {
-		t.Errorf("idle seat = %+v, want the completion that loaded it named", idle)
 	}
 	loaded := seatOf(t, r, "small-cpp")
 	if loaded.BackendProbe != ProbeCompletion || !strings.Contains(loaded.BackendReason, "its health endpoint answered 200") ||
@@ -855,7 +882,7 @@ func TestBackendReasonsCarryNoPathOrURL(t *testing.T) {
 		cfg := testCfg(t, f)
 		rep := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client(), ProbeCompletion: true})
 		check(t, rep, hostOf(f), cfg.ServingConfigPath)
-		anyRowSays(t, rep, "completion probe skipped: it would load", "while the vLLM seat big-vllm holds the cards")
+		anyRowSays(t, rep, "not probed: would load over vllm seat big-vllm")
 	})
 	t.Run("a loaded seat answers 503 and another does not answer at all", func(t *testing.T) {
 		withTier(t)
@@ -873,6 +900,7 @@ func TestBackendReasonsCarryNoPathOrURL(t *testing.T) {
 	})
 	t.Run("a completion fails", func(t *testing.T) {
 		f := newFakeSwap(t, fullRoster())
+		f.running["small-cpp"] = "ready" // a seat that is running is completed on any box
 		f.allowCompletion = true
 		f.completionStatus = http.StatusInternalServerError
 		cfg := testCfg(t, f)
@@ -1073,6 +1101,145 @@ func TestCollectCountsAnUnconfiguredEndpointAsNone(t *testing.T) {
 	for _, e := range r.Lanes {
 		if e.ActiveBackend != EngineNone || !strings.Contains(e.BackendReason, "no llama-swap endpoint is configured") {
 			t.Errorf("%+v", e)
+		}
+	}
+}
+
+// TestCompletionProbeNeverEvictsAResidentSeat (probe A): small-cpp is running, the workhorse seat is idle.
+// A completion to the workhorse seat loads it and llama-swap evicts small-cpp, and the row of small-cpp,
+// read after that, said "not loaded; loads on first use". Now no completion goes to a seat that is not
+// running while any seat is, the running seat is still completed, and every row keeps the state it had when
+// the report began.
+func TestCompletionProbeNeverEvictsAResidentSeat(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	f.running["small-cpp"] = "ready"
+	f.allowCompletion = true
+	f.loadOnCompletion = true
+	f.evictOnLoad = true
+	r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+
+	for _, m := range f.completionModels() {
+		if m != "small-cpp" {
+			t.Errorf("a completion was sent to %s, which is not running, while small-cpp was: llama-swap evicts small-cpp to load it", m)
+		}
+	}
+	f.mu.Lock()
+	if f.running["small-cpp"] != "ready" {
+		t.Errorf("small-cpp was evicted during the report: running = %v", f.running)
+	}
+	f.mu.Unlock()
+
+	kept := seatOf(t, r, "small-cpp")
+	if kept.ActiveBackend != EngineLlamaCpp || kept.BackendProbe != ProbeCompletion ||
+		!strings.Contains(kept.BackendReason, "its health endpoint answered 200") || !strings.Contains(kept.BackendReason, "a 1-token completion answered") ||
+		strings.Contains(kept.BackendReason, "not loaded") {
+		t.Errorf("small-cpp = %+v, want its starting state (loaded, endpoint 200) and the completion that ran on it", kept)
+	}
+	for _, e := range append([]Entry{laneOf(t, r, "workhorse")}, seatOf(t, r, "offload-e4b")) {
+		if e.BackendProbe == ProbeCompletion || e.ActiveBackend != EngineLlamaCpp ||
+			!strings.Contains(e.BackendReason, "not loaded") ||
+			!strings.Contains(e.BackendReason, "not probed: would load over llama.cpp seat small-cpp") {
+			t.Errorf("%s %s = %+v, want the idle seat's starting state and the reason it was not probed", e.Lane, e.Seat, e)
+		}
+	}
+}
+
+// TestCompletionProbeNeverLoadsThePreferredSeatOverTheBoundOne (probe C): the tier prefers a vLLM agent seat
+// while the agent lane is bound to the llama.cpp seat, which is running. The preferred seat is idle; loading
+// it evicts the bound seat. The old holder test looked for a running vLLM seat only, so a running llama.cpp
+// seat went unprotected and the completion cold-loaded the vLLM seat over it.
+func TestCompletionProbeNeverLoadsThePreferredSeatOverTheBoundOne(t *testing.T) {
+	withTier(t)
+	f := newFakeSwap(t, fullRoster())
+	f.running["small-cpp"] = "ready"
+	f.allowCompletion = true
+	f.loadOnCompletion = true
+	f.evictOnLoad = true
+	r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+
+	for _, m := range f.completionModels() {
+		if m == "big-vllm" {
+			t.Fatalf("the preferred vLLM seat was cold-loaded over the running bound seat (completions %v)", f.completionModels())
+		}
+	}
+	agent := laneOf(t, r, "agent")
+	if agent.ActiveBackend != EngineLlamaCpp || agent.Seat != "small-cpp" || agent.BackendProbe != ProbeCompletion {
+		t.Errorf("agent lane = %+v, want the bound llama.cpp seat, completed", agent)
+	}
+	if !strings.Contains(agent.BackendReason, "the preferred vllm seat big-vllm is available") ||
+		!strings.Contains(agent.BackendReason, "not probed: would load over llama.cpp seat small-cpp") {
+		t.Errorf("agent reason = %q, want the preferred seat named as available and not probed", agent.BackendReason)
+	}
+	if v := seatOf(t, r, "big-vllm"); v.BackendProbe == ProbeCompletion || !strings.Contains(v.BackendReason, "not probed: would load over llama.cpp seat small-cpp") {
+		t.Errorf("big-vllm seat = %+v, want a refusal over the running bound seat", v)
+	}
+}
+
+// TestRowsKeepTheStateTheReportBeganWith: another client swaps the loaded seat while the report runs. Every
+// row's starting state comes from the one reading taken before any completion; the later readings decide
+// only whether a completion may be sent. small-cpp was loaded when the report began, so its row says so,
+// although it is no longer loaded when its turn comes, and its completion is refused over the seat that is.
+func TestRowsKeepTheStateTheReportBeganWith(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	f.running["small-cpp"] = "ready"
+	f.allowCompletion = true
+	f.onRunningRead = func(read int) {
+		if read >= 2 {
+			delete(f.running, "small-cpp")
+			f.running["offload-e4b"] = "ready"
+		}
+	}
+	r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+	e := seatOf(t, r, "small-cpp")
+	if e.ActiveBackend != EngineLlamaCpp || !strings.Contains(e.BackendReason, "loaded and ready; its health endpoint answered 200") {
+		t.Errorf("small-cpp = %+v, want the state it had when the report began (loaded, endpoint 200)", e)
+	}
+	if e.BackendProbe == ProbeCompletion || !strings.Contains(e.BackendReason, "not probed: would load over llama.cpp seat offload-e4b") {
+		t.Errorf("small-cpp = %+v, want its completion refused over the seat that is running now", e)
+	}
+	for _, m := range f.completionModels() {
+		if m != "offload-e4b" {
+			t.Errorf("a completion was sent to %s while offload-e4b was running", m)
+		}
+	}
+}
+
+// TestCompletionProbeSkipsSeatsWithNoChatRoute: a speech-to-text seat and an embedding seat have no chat
+// route, so a chat completion for one answers 404 and the row read "none" while default mode read the same
+// seat correctly. They are not sent one, and keep the reading default mode gives them, with the reason.
+func TestCompletionProbeSkipsSeatsWithNoChatRoute(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	f.running["small-cpp"] = "ready"
+	f.running["ears"] = "ready"
+	f.chatless = map[string]bool{"ears": true, "embedder": true}
+	f.allowCompletion = true
+	cfg := testCfg(t, f)
+	cfg.STTModel = "ears"
+	def := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client()})
+	r := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+
+	for _, m := range f.completionModels() {
+		if m == "ears" || m == "embedder" {
+			t.Errorf("a chat completion was sent to %s, which has no chat route", m)
+		}
+	}
+	if got := f.completionModels(); len(got) != 1 || got[0] != "small-cpp" {
+		t.Errorf("completions = %v, want the one chat seat that is running", got)
+	}
+	for _, c := range []struct {
+		name string
+		got  Entry
+		want Entry
+	}{
+		{"stt lane", laneOf(t, r, "stt"), laneOf(t, def, "stt")},
+		{"ears seat", seatOf(t, r, "ears"), seatOf(t, def, "ears")},
+		{"embedder seat", seatOf(t, r, "embedder"), seatOf(t, def, "embedder")},
+	} {
+		if c.got.ActiveBackend == EngineNone || c.got.ActiveBackend != c.want.ActiveBackend || c.got.BackendProbe != c.want.BackendProbe {
+			t.Errorf("%s = %+v, want the default-mode reading %+v", c.name, c.got, c.want)
+		}
+		if !strings.Contains(c.got.BackendReason, c.want.BackendReason) || !strings.Contains(c.got.BackendReason, "not probed: not a chat seat") {
+			t.Errorf("%s reason = %q, want the default-mode reason %q and the clause that says why no completion ran", c.name, c.got.BackendReason, c.want.BackendReason)
 		}
 	}
 }
