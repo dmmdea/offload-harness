@@ -59,7 +59,9 @@
   registration. The pager-object validator is pinned at every guard (null and absent pass count, unknown and empty basis,
   each negative count, insufficient data with evictions or distinct payloads, refetched above evicted), an unusable object is
   one note and one unrecorded run from a delegation row and from a trace, only tool turns count as ladder artifacts, and
-  `agentPagerWire` keeps an unrecorded pass count absent on the wire and maps every field when it is recorded.
+  `agentPagerWire` keeps an unrecorded pass count absent on the wire and maps every field when it is recorded. A write-class
+  deferral is pinned end to end as a run with a step trace and no pager object (moving the assignment ahead of the write door
+  fails it).
 - **Mutations run and killed.** An unrecorded rate returned as 0, the gate comparison widened to `<=`, redaction removed
   (twice: with and without the exit gate), the check made to always pass, a self-contradicting pager object trusted, a zero
   pass count read as a fire, a token-less prefill read as measured; each term of the never-ran predicate removed in turn;

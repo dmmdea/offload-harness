@@ -3,7 +3,12 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 // The agent door's wire result is what the delegator's standing corpus (the
@@ -52,5 +57,50 @@ func TestAgentWireResultCarriesThePagerReport(t *testing.T) {
 	}
 	if pg.Evictions == nil || *pg.Evictions != 0 {
 		t.Fatalf("evictions = %v, want a present 0: %s", pg.Evictions, raw)
+	}
+}
+
+// TestWriteClassDeferralKeepsItsTraceAndCarriesNoPagerObject pins the one run that reached the
+// loop and still has no pager object: the write door refusing the run's write set returns before
+// the wire result is given the loop's pager report. ADR 0091 and the agent wire table state this
+// per row class (a write-class deferral is a run with a step trace that reads unrecorded). A
+// change that attaches the object ahead of the write door must flip this assertion and those
+// statements together.
+//
+// The write tools stop a seat at the file cap, so the refusal is reached the way the door's own
+// tests reach it: the tree snapshot sees files nobody asked for. The scripted seat makes one real
+// write_file call (so the run has a step trace) while eight other files appear in the write root.
+func TestWriteClassDeferralKeepsItsTraceAndCarriesNoPagerObject(t *testing.T) {
+	c := writeContract(".")
+	req := agentTestRequest(t, c)
+	root, _ := req.Params["context_dir"].(string)
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop: func(n int64) string {
+			if n != 1 {
+				return doneChat("wrote one file")
+			}
+			for i := 0; i < core.AgentWriteMaxFiles; i++ {
+				if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("unasked%d.txt", i)), []byte("x\n"), 0o644); err != nil {
+					t.Errorf("planting an unasked file: %v", err)
+				}
+			}
+			return writeCallChat("w1", "asked.txt", "x\n")
+		},
+		repack: func(int64) string { return `{"answer":"x"}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	wire := decodeWire(t, writeDoorPipeline(t, srv.URL, true).Run(context.Background(), req))
+	if !wire.Deferred || wire.DeferClass != core.DeferClassWrite {
+		t.Fatalf("deferred=%v class=%q reason=%q, want a write-class deferral for %d files over the %d-file cap",
+			wire.Deferred, wire.DeferClass, wire.Reason, core.AgentWriteMaxFiles+1, core.AgentWriteMaxFiles)
+	}
+	if len(wire.Trace) == 0 || wire.Steps == 0 {
+		t.Errorf("a write-class deferral ran the loop: want a step trace and steps, got %d trace entries and %d steps", len(wire.Trace), wire.Steps)
+	}
+	if wire.Pager != nil {
+		t.Errorf("a write-class deferral returns before the pager object is attached, got %+v", wire.Pager)
 	}
 }
