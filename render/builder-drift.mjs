@@ -205,11 +205,14 @@ function proxiedWidget(tpl, found, t, tag, view) {
     const pos = proxyPosition(inst, t);
     if (Array.isArray(inst.widgets_values) && inst.widgets_values[pos] !== undefined) {
       // I indexes the instance's widgets_values by the order of the subgraph's widget-typed inputs, not by proxyWidgets, so it
-      // reads this value only where the two positions agree.
+      // reads this value only where the two positions agree. An input that is not widget-typed (the wildcard type, a combined
+      // type) has no place in that order at all (-1), so there is no other position to name.
       const at = widgetInputNames(found.container).indexOf(sgInput);
-      const advice = at === pos
-        ? `read it with I (position ${pos} is also its place among the widget-typed inputs)`
-        : `no locator reads position ${pos}: I would read position ${at}, which holds another widget; point the spec at another source for this value`;
+      const advice = at < 0
+        ? `no locator reads position ${pos}: input ${sgInput} is not a widget-typed input, so I does not count it; point the spec at another source for this value`
+        : at === pos
+          ? `read it with I (position ${pos} is also its place among the widget-typed inputs)`
+          : `no locator reads position ${pos}: I would read position ${at}, which holds another widget; point the spec at another source for this value`;
       throw new Error(`${tag}: template ${view.template} instance ${inst.id} carries a promoted value for ${sgInput} at position ${pos} of its proxyWidgets; ${advice}`);
     }
     const wired = linkedInput(inst, sgInput);
