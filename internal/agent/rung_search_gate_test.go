@@ -338,6 +338,10 @@ func TestSearchRungKeepsPipesAndQuotedSeparatorsAsSearches(t *testing.T) {
 		`grep -rn a\;b .`,
 		"grep -rn timeout . 2>&1",
 		"grep -rn timeout . >/dev/null 2>&1 | head",
+		"grep -rn timeout . &>/dev/null",
+		"grep -rn timeout . &> f",
+		"grep -rn timeout . >&2",
+		"grep -rn timeout . <&3",
 	} {
 		thinned, got := gateOutcome(t, shellCall(cmd), body, true)
 		if !thinned || !strings.Contains(got, "lines elided") {
@@ -439,8 +443,13 @@ func TestSearchRungCountsTwoIdenticalCallsWithOneIDAsOneCall(t *testing.T) {
 // shows. That page never calls them defaults, so nothing here may.
 // ---------------------------------------------------------------------------
 
-func TestSearchRungNeverCallsTheCapsDefaults(t *testing.T) {
-	bad := regexp.MustCompile(`(?is)\bdefaults?\s+of\s+(the\s+)?(idea|search\s*compressor)|\bthe\s+defaults\s+of\b|documented\s+defaults`)
+// The upstream page shows 30/5/15 in a configuration example and never calls them defaults, so nothing here may either.
+// Every sentence that names the caps is read; "default" in it fails, except the rung's own default-off wording.
+func TestSearchRungCapsAreAttributedToTheConfigurationExample(t *testing.T) {
+	capWords := regexp.MustCompile(`(?i)max_total_matches|max_matches_per_file|max_files|search\s*compressor|\b30\s*/\s*5\s*/\s*15\b|\b30, 5 and 15\b`)
+	allowed := regexp.MustCompile(`(?i)\boff by default\b|\bby default\b|\bdefault[- ]off\b|\bdefaults? to off\b`)
+	defaultWord := regexp.MustCompile(`(?i)\bdefaults?\b`)
+	sentence := regexp.MustCompile(`[^.\n]+`)
 	for _, rel := range []string{
 		"NOTICE",
 		"internal/agent/rung_search.go",
@@ -454,8 +463,13 @@ func TestSearchRungNeverCallsTheCapsDefaults(t *testing.T) {
 			}
 			t.Fatal(err)
 		}
-		if m := bad.Find(b); m != nil {
-			t.Errorf("%s: %q calls the caps defaults; say \"the values shown in the upstream configuration example\" or \"chosen to match\"", rel, m)
+		for _, sn := range sentence.FindAllString(string(b), -1) {
+			if !capWords.MatchString(sn) {
+				continue
+			}
+			if defaultWord.MatchString(allowed.ReplaceAllString(sn, "")) {
+				t.Errorf("%s: %q calls the caps defaults; say \"the values shown in the upstream configuration example\" or \"chosen to match\"", rel, strings.TrimSpace(sn))
+			}
 		}
 		if !strings.Contains(string(b), "configuration example") && !strings.Contains(string(b), "chosen to match") {
 			t.Errorf("%s: must say the caps are the values shown in the upstream configuration example (or chosen to match)", rel)
