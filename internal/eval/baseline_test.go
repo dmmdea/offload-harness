@@ -420,7 +420,7 @@ func TestCheckBaselineRefusesARealVersionOneFileWithTheVersionReason(t *testing.
 	if got, want := BaselineHash(raw), "ed7876ddd9d294d239f896462b161c3d17f8758e58101a285151f4a285a637a6"; got != want {
 		t.Fatalf("testdata/baseline-v1-frozen.json hashes to %s, not %s: its bytes changed", got, want)
 	}
-	if !bytes.Contains(raw, []byte(`"gate_version": "1"`)) || bytes.Contains(raw, []byte("")) || bytes.Contains(raw, []byte(`"judge"`)) {
+	if !bytes.Contains(raw, []byte(`"gate_version": "1"`)) || bytes.Contains(raw, []byte("\r")) || bytes.Contains(raw, []byte(`"judge"`)) {
 		t.Fatal("the file must be a version 1 baseline, LF only, with no judge")
 	}
 	_, _, err = CheckBaseline(raw)
