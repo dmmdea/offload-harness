@@ -625,6 +625,8 @@ func TestCapsDefaultGuardReadsAcrossWrappedLines(t *testing.T) {
 		"wrapped":           "The rung keeps up to 30 / 5 / 15,\nwhich are the documented\ndefaults of the idea.",
 		"star list wrapped": "* keeps 30 / 5 / 15 and\n  the default.",
 		"list wrapped":      "- keeps 30 lines, 5 per file and\n  15 files, the default.",
+		"quote wrapped":     "> keeps 30 lines,\n> 5 per file as the default.",
+		"list cap wrapped":  "- keeps 30 lines,\n- 5 per file as the default.",
 		"cap phrase wrap":   "keeps 30 lines,\n5 per file as the default",
 		"cap phrase plain":  "It keeps 30 lines, 5 per file, which are the defaults of the idea.",
 		"default first":     "The defaults are 30 lines, 5 per file.",
@@ -668,20 +670,44 @@ func TestCapsDefaultGuardReadsGoComments(t *testing.T) {
 	}
 }
 
+// capsScannedFiles are the files whose sentences about the caps are read. The package's
+// own tests are on the list because a test name or a failure message calls the caps
+// something too; attribute marks the files that must also say where the values come from.
+var capsScannedFiles = []struct {
+	rel       string
+	attribute bool // the file must say the caps are the values shown in the upstream configuration example
+}{
+	{"NOTICE", true},
+	{"internal/agent/rung_search.go", true},
+	{"docs/systems/coding-agent.md", true},
+	{"changes/unreleased/feat-compaction-rung-search.md", true},
+	{"internal/agent/rung_search_test.go", false},
+}
+
+// The scan list is the guard's reach: dropping a file from it silently weakens the guard.
+func TestCapsGuardScansTheCodeTheDocsAndThePackageTests(t *testing.T) {
+	scanned := map[string]bool{}
+	for _, f := range capsScannedFiles {
+		scanned[f.rel] = true
+	}
+	for _, rel := range []string{
+		"NOTICE",
+		"internal/agent/rung_search.go",
+		"internal/agent/rung_search_test.go",
+		"docs/systems/coding-agent.md",
+		"changes/unreleased/feat-compaction-rung-search.md",
+	} {
+		if !scanned[rel] {
+			t.Errorf("%s is not scanned for a caps sentence that says default", rel)
+		}
+	}
+}
+
 // Every sentence that names the caps is read, in the code, the notice, the docs, the
 // fragment and this package's own tests; "default" in one fails, except the rung's
 // own default-off wording. Where a file describes the caps it must attribute them.
 func TestSearchRungCapsAreAttributedToTheConfigurationExample(t *testing.T) {
-	for _, f := range []struct {
-		rel       string
-		attribute bool // the file must say the caps are the values shown in the upstream configuration example
-	}{
-		{"NOTICE", true},
-		{"internal/agent/rung_search.go", true},
-		{"docs/systems/coding-agent.md", true},
-		{"changes/unreleased/feat-compaction-rung-search.md", true},
-		{"internal/agent/rung_search_test.go", false},
-	} {
+	for _, f := range capsScannedFiles {
 		b, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(f.rel)))
 		if err != nil {
 			if os.IsNotExist(err) && strings.HasPrefix(f.rel, "changes/unreleased/") {
