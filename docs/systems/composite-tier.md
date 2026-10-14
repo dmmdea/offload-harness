@@ -230,8 +230,9 @@ missing, a card the probe cannot see, a presence the OS cannot report all REFUSE
   table and the allocator's display cap use), derived on every decision, so a monitor that moves needs no
   edit to `display_device` (the twins' pin is another matter, below). There is no declaration to trust, so it
   is stricter than a declared card: it refuses
-  when no reader is available, when the driver flags no card (a headless or remote-desktop session, an
-  older driver, a transient failure that left `display_attached` unknown), and when it reports the monitor
+  when no reader is available, when the driver flags no card (no NVIDIA card has a monitor attached: a
+  headless box, or a screen on an iGPU; a screen asleep on a driver that does not report `display_attached`;
+  a transient failure that left `display_attached` unknown), and when it reports the monitor
   on more than one card. It does not choose between cards, so a box with a monitor on two cards names the
   one the floor must guard in `display_device`. The reasons print `display device auto (index N)`, the card
   it derived. The seat's `device` stays a literal pin (an index or a UUID); `auto` is valid only in
@@ -277,6 +278,11 @@ until llama-swap's 300 s idle ttl, however soon the operator is back or a game t
   Presence reading present or unknown refuses; so does free VRAM on the display card below the floor.
   The floor is `free ≥ display_floor_gib`, not the admission arithmetic `free − footprint`, because a
   resident twin's footprint is already out of the free number. `host_ram` bounds a load and is not asked.
+  With `display_device` `auto` the question includes which card to ask about: a reading that does not name
+  exactly one card (no card flagged, a sample that cannot tell, monitors on more than one; see the refusals
+  under `display_floor`) is a violation here as it is at admission, so the loaded twin is unloaded on that check,
+  with no drain, however much VRAM is free and whether the layer is dormant or not. A layer declared with a
+  card trusts its declaration through a reading that cannot say and is not unloaded for it.
 - **What it does.** Unloads the layer's loaded models (its seats' models and the router `model_map`
   twins, nothing else) through llama-swap's per-model unload route. There is no drain: the desktop needs
   the memory now, so a request in flight on the twin ends with llama-swap's 502, which a mechanical call
@@ -400,8 +406,11 @@ gates, both shut. Opening them is a sequence, in this order, and it is the opera
    so on a box whose monitor is on another card the layer refuses, naming the pin and the monitor's card, until
    the twins are re-pinned in `layers` and in the llama-swap yaml. A render stamped before this seed
    reports `STALE` under `audit-yaml --against-render` until it is re-rendered, because the display layer's
-   declaration is part of the stamp (nothing served is wrong; the stamp is behind). `local-offload doctor`
-   must stay clean, and `offload_status` `local.layers` must list `display` as not admissible (dormant).
+   declaration is part of the stamp (nothing served is wrong; the stamp is behind). A live config whose
+   `layers` were merged from the earlier table (`display_device` `1`) likewise reports `layers` as `DIFFERENT`
+   under `local-offload audit-config`, which exits non-zero while any seed-owned key differs, until its display
+   layer matches the seed's (a box whose twins are re-pinned off index 1 differs from the seed by those pins as
+   well). `local-offload doctor` must stay clean, and `offload_status` `local.layers` must list `display` as not admissible (dormant).
 3. **Put the display twins in the llama-swap yaml, pinned by UUID.** `install render` emits `gemma-4-e4b-display`
    and `gemma-4-e2b-display`, their vars and the `display` set for a tier that declares the layer (the template
    renders them with `CUDA_VISIBLE_DEVICES=1`). Replace that pin on each twin with `CUDA_VISIBLE_DEVICES=GPU-<uuid of

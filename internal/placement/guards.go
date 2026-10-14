@@ -114,7 +114,8 @@ func resolveDisplay(l config.LayerSpec, live Live) (display, index, refusal stri
 // (Live.ScreenCards, the reading the card table and the allocator's display cap are built on), and it
 // is returned as both the key the free-VRAM reader is asked and the CUDA index, so every number the
 // guard reads is the derived card's. It refuses, naming why, wherever the reading does not give
-// exactly one card: no reader, no card flagged (headless, a remote session, an older driver, a
+// exactly one card: no reader, no card flagged (no NVIDIA card has a monitor attached: headless, or
+// a screen on an iGPU; a screen asleep on a driver that does not report display_attached; a
 // transient failure that left display_attached unknown) or several. It does not choose between
 // several: the multi-monitor tolerance of a DECLARED card is trust in the operator's word, and there
 // is none here, so the operator names the card the floor must guard.
