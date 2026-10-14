@@ -45,13 +45,17 @@ const MaxGPUHostRAMHoldMaxSec = 7 * 24 * 60 * 60
 // verbs (gpu reserve among them) go on with it, so a typo must not turn the bound off.
 func (c Config) GPUHostRAMHoldMax() time.Duration {
 	if c.GPUHostRAMHoldMaxSec != nil && *c.GPUHostRAMHoldMaxSec >= 0 {
-		return time.Duration(*c.GPUHostRAMHoldMaxSec) * time.Second
+		// Clamped to the ceiling BEFORE the multiplication: time.Duration(sec)*time.Second wraps past about 9.2e9 seconds.
+		return time.Duration(min(*c.GPUHostRAMHoldMaxSec, MaxGPUHostRAMHoldMaxSec)) * time.Second
 	}
 	return DefaultGPUHostRAMHoldMaxSec * time.Second
 }
 
-// validateGPUHostRAMHold refuses a gpu_hostram_hold_max_sec below 0, by name.
+// validateGPUHostRAMHold refuses a gpu_hostram_hold_max_sec below 0 or above the ceiling (7 days), by name.
 func validateGPUHostRAMHold(c Config) error {
+	if c.GPUHostRAMHoldMaxSec != nil && *c.GPUHostRAMHoldMaxSec > MaxGPUHostRAMHoldMaxSec {
+		return fmt.Errorf("gpu_hostram_hold_max_sec: %d s is more than 7 days (%d s), longer than any lease or --wait in use, so it is a typo; 0 = no bound, the wait after the unload runs the whole --wait", *c.GPUHostRAMHoldMaxSec, MaxGPUHostRAMHoldMaxSec)
+	}
 	if c.GPUHostRAMHoldMaxSec != nil && *c.GPUHostRAMHoldMaxSec < 0 {
 		return fmt.Errorf("gpu_hostram_hold_max_sec: %d is not a number of seconds (0 = no bound, the wait after the unload runs the whole --wait; unset = %d)", *c.GPUHostRAMHoldMaxSec, DefaultGPUHostRAMHoldMaxSec)
 	}

@@ -442,6 +442,9 @@ func runGPUReserve(args []string) error {
 	if *holdMaxFlag < 0 {
 		return errors.New("--ram-hold-max must be 0 (no bound: the wait after the unload runs the whole --wait) or a duration such as 10m")
 	}
+	if *holdMaxFlag > time.Duration(config.MaxGPUHostRAMHoldMaxSec)*time.Second {
+		return fmt.Errorf("--ram-hold-max %s is more than 7 days, longer than any lease or --wait in use, so it is a typo; use 0 for no bound (the wait after the unload then runs the whole --wait)", *holdMaxFlag)
+	}
 	if *detach && !forGiven {
 		return errors.New("--detach requires an explicit --for: the window is the term the lease is judged by, and the 45-minute default would label a long job overdue from its 45th minute. Declare the real window (e.g. --for 8h), or use the wrapper form `gpu reserve ... -- <command>`, which holds the lease exactly as long as the command runs")
 	}
