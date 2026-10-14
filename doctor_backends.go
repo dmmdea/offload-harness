@@ -32,8 +32,8 @@ import (
 // must not hide it (the file's own rule for the pure-config rows, kept from the other side).
 
 // runDoctorBackends is the `doctor` verb: the unchanged doctor, then the backends section. It lives
-// beside the verb and not inside doctorRunChecked so that main.go carries one changed line, and so the
-// new flag is parsed here and never reaches runDoctor's own flag set.
+// beside the verb and not inside doctorRunChecked so that main.go carries one changed dispatch line (and
+// one usage line), and so the new flag is parsed here and never reaches runDoctor's own flag set.
 func runDoctorBackends(args []string) error {
 	if doctorHelp(args, os.Stderr) {
 		return nil

@@ -44,11 +44,11 @@ type Options struct {
 //
 // One observation backs the whole report: llama-swap's roster (GET /v1/models) and running list (GET
 // /running) are read once, the serving config is read once, and a loaded seat is asked for its own
-// health endpoint at most once however many lanes point at it. (Only the explicit completion probe reads
-// the running list again, around each completion: see completionVerdict.) None of that loads a model: the seat's
+// health endpoint at most once however many lanes point at it. None of that loads a model: the seat's
 // health endpoint is asked at the seat's own address (seatload.SeatURL), never through /upstream, which
 // loads on demand and resets the idle timer. The default is therefore safe to run against a node that is
-// serving, and to run on every /fleet/health refresh.
+// serving, and to run on every /fleet/health refresh. Only the explicit completion probe reads the
+// running list again, around each completion (see completionVerdict).
 func Collect(ctx context.Context, cfg config.Config, opt Options) Report {
 	s := newState(ctx, cfg, opt)
 	var rep Report
