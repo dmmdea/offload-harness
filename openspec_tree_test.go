@@ -657,6 +657,33 @@ func openspecSamePath(a, b string) bool {
 	return norm(a) == norm(b)
 }
 
+// The data-location cell of the admitted-software row says where the install lands. The script takes a prefix
+// directory from the caller and puts node_modules, the npm cache and the config home under it; an npm `--prefix` is
+// not how it works, and this row is what a reader trusts.
+func TestOpenSpecAdmittedRowDescribesTheInstallLayout(t *testing.T) {
+	doc, err := os.ReadFile("docs/systems/security.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row string
+	for _, l := range strings.Split(string(doc), "\n") {
+		if strings.HasPrefix(l, "| OpenSpec CLI") {
+			row = l
+		}
+	}
+	if row == "" {
+		t.Fatal("docs/systems/security.md has no OpenSpec CLI row in the admitted software table")
+	}
+	if strings.Contains(row, "--prefix") {
+		t.Error("the OpenSpec row still says `--prefix`: the install script takes a prefix directory and does not pass npm's --prefix")
+	}
+	for _, want := range []string{"prefix directory", "node_modules", ".npm-cache", "XDG_CONFIG_HOME"} {
+		if !strings.Contains(row, want) {
+			t.Errorf("the OpenSpec row's data-location cell does not mention %q", want)
+		}
+	}
+}
+
 // The success path, with a stand-in npm: pack by the scoped, pinned name; install with `npm ci --ignore-scripts` in a
 // staged copy of the committed lockfile project, next to the verified tarball; npm's cache and temp files under the
 // prefix whatever the caller exported; the binary in the prefix; no scratch directory left; the four exports printed.
