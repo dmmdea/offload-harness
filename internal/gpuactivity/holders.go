@@ -52,7 +52,12 @@ func holdersOf(leaseDir string, info gpulease.Info, opts Options, now time.Time)
 			// The request made of the holder (plan P11): read from the lease's own sidecar, never written
 			// here. A tree-orphan has no holder left to ask.
 			vw := obs.YieldViewOf(l)
-			h.YieldFile, h.YieldNote = vw.File, vw.Sentence
+			h.YieldNote = vw.Sentence
+			// The path is named while a request can be made (the policy is request) or once one was made. Under
+			// the default policy nobody is asked, and the path of a file that will never exist is not advertised.
+			if vw.Asked || gpulease.InstalledOnOverdue() == gpulease.OnOverdueRequest {
+				h.YieldFile = vw.File
+			}
 			if vw.Asked {
 				h.Yield = yieldStateOf(vw)
 			}

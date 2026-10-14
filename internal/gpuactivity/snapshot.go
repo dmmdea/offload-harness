@@ -115,9 +115,10 @@ type Holder struct {
 	// The yield request (plan P11, ADR 0085), read from the lease record and its yield sidecar by
 	// gpulease.YieldViewOf and never stored as a verdict. YieldFile is the path of the sidecar of a
 	// lease whose holder runs the request (it exists only once the holder was asked; a detached job
-	// can watch it); YieldNote is the sentence a waiter reads, empty when there is nothing to say;
-	// Yield is present only once the holder was asked. All three are absent from the wire of a lease
-	// with nothing to say, so a consumer of the holder reads the bytes it read before.
+	// can watch it), named while the policy is request or once the holder was asked and absent under
+	// the default policy; YieldNote is the sentence a waiter reads, empty when there is nothing to say;
+	// Yield is present only once the holder was asked. Under the default policy a lease nobody asked
+	// carries none of the three, so a consumer of the holder reads the bytes it read before.
 	YieldFile string      `json:"yield_file,omitempty"`
 	YieldNote string      `json:"yield_note,omitempty"`
 	Yield     *YieldState `json:"yield,omitempty"`
