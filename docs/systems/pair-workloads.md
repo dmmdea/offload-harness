@@ -768,10 +768,17 @@ side can know the producer died, so the harness retires its own orphans:
   folder in the root `LO_ROOT_SUITE_STATE_ROOT` names) instead of in the OS temp dir, and the suite's
   removal takes it with it, because a copy that dies by `os.Exit` or a kill never removes its own
   (`TestARelaunchedCopyThatLostTheStateDirLeavesNothingInTheTempDir`). When the variable names no live
-  throwaway root, the root goes to the OS temp dir as before. In the root, `internal/delegate` and
-  `internal/mcpserver`, a removal that fails is tried once more after 250 ms and a root still there is
-  named on stderr with the error (`TestRunIsolatedRetriesARemovalOnceAndReportsWhatStaysBehind`); only a
-  run killed from outside (a timeout, a kill) can still leave a root, which no test code can clean.
+  throwaway root, the root goes to the OS temp dir as before; when it names a throwaway root that cannot
+  be used (gone, not a folder, no room for the `relaunch` folder), `relaunchRootParent` says why on stderr
+  (`TestRelaunchRootParentSaysWhyItFellBackToTheTempDir`). In all six suites that make a throwaway root
+  (the root, `internal/delegate`, `internal/mcpserver`, `internal/mediaremote`, `internal/pairworkloads`
+  and `internal/pipeline`), a removal that fails is tried once more after 250 ms and a root still there
+  is named on stderr with the error (`TestRunIsolatedRetriesARemovalOnceAndReportsWhatStaysBehind`, and
+  `TestFinishIsolationRetriesARemovalOnceAndReportsWhatStaysBehind` in `internal/pipeline`). A suite that
+  passed then exits 1, because `go test ./...` shows the stderr of a package that passed only with `-v`;
+  a suite that failed keeps its own exit code. A root can still be left by a run killed from outside (a
+  timeout, a kill), which no test code can clean, and by a copy started with an environment that lacks
+  the suite's variable, whose root goes to the OS temp dir.
 
 ## The PAIR side (what has to be true on the box)
 

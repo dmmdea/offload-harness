@@ -198,7 +198,7 @@ func namesIn(t *testing.T, dir string) []string {
 // copy's environment (treeEnv), or empty it in their own (isolateFromMachineState), so that the wrapper and its config agree on a
 // scratch lease root. A copy whose environment lost the state dir fails inheritedSuiteRoot, makes a root of its own, and ends by os.Exit
 // from inside a test or is killed by its parent, so the removal in runIsolated never runs: one empty lo-root-state-* folder per launch
-// (13 from the gpu tests alone, 58 on the machine that found it). It must keep a root of its own (that is the net: no fall back to the
+// (13 from the gpu tests alone in one run; a census of one machine's temp dir on 2026-10-14 found 58, 57 of them empty). It must keep a root of its own (that is the net: no fall back to the
 // machine-wide root) but keep it inside the suite's root, which the suite removes when it ends.
 func TestARelaunchedCopyThatLostTheStateDirLeavesNothingInTheTempDir(t *testing.T) {
 	suiteRoot := filepath.Clean(os.Getenv("LOCAL_OFFLOAD_STATE_DIR"))
