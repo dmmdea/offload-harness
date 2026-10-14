@@ -1032,6 +1032,11 @@ type Config struct {
 	// file, no retry) after the URL has passed the public-web guard; see docs/systems/delegation-client.md. On Windows
 	// it must name an .exe or a wrapper .cmd: the zipapp is a shebang script, launchable directly only on POSIX.
 	YtDlpPath string `json:"ytdlp_path,omitempty"`
+	// YtDlpSHA256 is the optional sha256 (64 hexadecimal digits) of the file at YtDlpPath. Empty (the default) = the
+	// path is trusted as written and nothing is hashed. When set, the file is hashed before every run and a mismatch
+	// refuses to run it. On Windows with a wrapper .cmd the hash covers the wrapper, not the interpreter or the
+	// script it calls.
+	YtDlpSHA256 string `json:"ytdlp_sha256,omitempty"`
 	// --- composition (offload_compose_video / compose-video; ADR 0059) ---
 	// A CPU-class lane: HyperFrames renders an HTML/CSS composition to video with
 	// headless Chrome in SOFTWARE GL + ffmpeg, so it takes NO GPU lease and no

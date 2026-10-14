@@ -51,6 +51,33 @@ func TestResearchHandsTheFetchTheSubtitleAdapterSettings(t *testing.T) {
 	}
 }
 
+func TestResearchHandsTheFetchTheConfiguredBinaryHash(t *testing.T) {
+	home := t.TempDir()
+	cfg := config.Default()
+	cfg.Home = home
+	cfg.StateDir = home
+	cfg.LedgerPath = home + "/ledger.jsonl"
+	cfg.AgentDelegationEnabled = true
+	cfg.YtDlpPath = "/opt/tools/yt-dlp"
+	cfg.YtDlpSHA256 = strings.Repeat("ab", 32)
+	s := New(pipeline.New(cfg, nil, nil, nil))
+	var got research.Options
+	s.researchFetch = func(_ context.Context, urls []string, opt research.Options) []research.Fetched {
+		got = opt
+		out := make([]research.Fetched, len(urls))
+		for i, u := range urls {
+			out[i] = research.Fetched{URL: u, Err: "stub"}
+		}
+		return out
+	}
+	if _, err := s.handleResearch(context.Background(), callReq(`{"goal":"g","urls":["https://youtu.be/dQw4w9WgXcQ"],"route":"local"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got.YtDlpSHA256 != cfg.YtDlpSHA256 {
+		t.Fatalf("the fetch was handed hash %q, want the configured %q", got.YtDlpSHA256, cfg.YtDlpSHA256)
+	}
+}
+
 func TestResearchToolSchemaTakesSubLangsAndNamesTheSources(t *testing.T) {
 	cfg := config.Default()
 	cfg.AgentDelegationEnabled = true

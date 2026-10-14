@@ -3,6 +3,8 @@ package research
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -108,6 +110,20 @@ func ClassifyURL(u *url.URL) (SourceKind, string) {
 		return SourceKindPage, ""
 	}
 	return SourceKindYouTube, id
+}
+
+// hashFile is the sha256 (lower-case hex) of the file at path; a var so a test can see when it is called.
+var hashFile = func(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // removeAll removes the per-call scratch directory (a var so a test can make removal fail).

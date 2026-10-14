@@ -75,6 +75,9 @@ type Options struct {
 	YtDlpPath   string
 	SubLangs    string
 	ScratchRoot string
+	// YtDlpSHA256, when set, is the sha256 the file at YtDlpPath must have: it is hashed before every run and a
+	// mismatch refuses to run it. Empty = the path is trusted as written and nothing is hashed.
+	YtDlpSHA256 string
 }
 
 // ValidateURL is the SSRF guard's NAME half: only http(s), only public hosts.

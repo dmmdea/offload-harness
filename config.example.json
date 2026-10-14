@@ -172,6 +172,7 @@
   "gimp_console_path": "",
   "edit_timeout_sec": 300,
   "ytdlp_path": "",
+  "ytdlp_sha256": "",
   "compose_script": "",
   "hyperframes_dir": "",
   "hyperframes_browser_path": "",

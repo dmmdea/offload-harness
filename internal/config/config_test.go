@@ -179,6 +179,25 @@ func TestCardAllocatorKeysDefaultAndLoad(t *testing.T) {
 	}
 }
 
+// ytdlp_sha256 is optional: empty by default (the path is trusted as written, nothing is hashed), and read as written.
+func TestYtDlpSHA256DefaultsEmptyAndLoads(t *testing.T) {
+	if got := Default().YtDlpSHA256; got != "" {
+		t.Fatalf("ytdlp_sha256 default = %q, want empty", got)
+	}
+	const sum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	p := filepath.Join(t.TempDir(), "cfg.json")
+	if err := os.WriteFile(p, []byte(`{"ytdlp_path": "/opt/tools/yt-dlp", "ytdlp_sha256": "`+sum+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.YtDlpSHA256 != sum {
+		t.Fatalf("ytdlp_sha256 = %q, want %q", c.YtDlpSHA256, sum)
+	}
+}
+
 func TestInpaintFieldsRoundTrip(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "cfg.json")
 	js := `{"inpaint_script":"render/comfy-inpaint.mjs","inpaint_ckpt":"some-sdxl.safetensors",` +
