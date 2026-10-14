@@ -82,8 +82,8 @@ type state struct {
 	// never replaced. Every row's starting state comes from it.
 	start    []seatload.Occupant
 	startErr error
-	// running / runErr are the live reading: the snapshot at first, read again before a completion is
-	// decided and after each one. They gate completions and feed nothing else.
+	// running / runErr are the live reading: the snapshot at first, read again before a completion to a
+	// seat that is not running is decided. They gate completions and feed nothing else.
 	running []seatload.Occupant
 	runErr  error
 	// loadSent is the seat of the one completion this run sent to a seat that was not running ("" until
@@ -435,10 +435,10 @@ func (s *state) hasChatRoute(seat string) bool {
 //
 // Any other seat is not probed, and its row says over which running seat the load would have been. A
 // seat with no chat route (speech to text, an embedder) is never sent a chat completion: its row keeps
-// the reading default mode gives it. The decision is made on a fresh reading of /running, and the list is
-// read again after every completion, success or not, because the completion may have loaded a seat. When
-// the list cannot be read, whether a seat holds the cards cannot be ruled out, and no seat that is not
-// running is sent one.
+// the reading default mode gives it. A seat that is not running is decided on a fresh reading of /running
+// taken just before, so a seat the run itself loaded (the completion may load it and then fail) or one
+// another client loaded meanwhile is seen. When the list cannot be read, whether a seat holds the cards
+// cannot be ruled out, and no seat that is not running is sent one.
 //
 // A row says what the report found when it began (the snapshot); the readings taken here decide whether to
 // send, and the one clause they may add is that a seat was loaded since the report began.
@@ -483,7 +483,6 @@ func (s *state) completionVerdict(ctx context.Context, c Candidate, canon string
 	defer cancel()
 	client := llamaclient.New(s.cfg.Endpoint, s.cfg.CompletionPath, c.Seat, timeout)
 	_, err := client.Generate(cctx, c.Seat, "", "ping", "", 1, 0, 0)
-	s.refreshRunning(ctx)
 	if err != nil {
 		return Verdict{Probe: ProbeCompletion, Detail: "the 1-token completion failed (" + short(err) + ")"}
 	}

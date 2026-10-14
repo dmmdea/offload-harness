@@ -19,9 +19,11 @@
 // The default probe is cheap and LOADS NOTHING: it reads llama-swap's roster and its running list, and
 // asks a seat that is already loaded for its own health endpoint. It never sends a completion, and never
 // goes through llama-swap's /upstream path (that path loads a model on demand and resets the idle timer).
-// A 1-token completion exists only behind an explicit option, because it loads an idle seat and can
-// evict a vLLM seat (internal/seatguard exists for the same reason); it is refused for any seat that is
-// not running while a vLLM seat is loaded, and llama-swap's running list is re-read after each one.
+// A 1-token completion exists only behind an explicit option, because it loads an idle seat and the load
+// can evict a seat that is running (internal/seatguard exists for the same reason). It goes only to a seat
+// that is already running, or, on a box where nothing is running, to one seat; any other seat is reported
+// as not probed, over the running seat the load would have been, and a seat with no chat route is never
+// sent one.
 //
 // The existing `backends` field of /fleet/health (hardware tags such as "vulkan" and "cpu", ADR 0054) is
 // a different thing and is untouched.

@@ -469,9 +469,8 @@ func TestCompletionProbeNeverEvictsAVLLMSeat(t *testing.T) {
 
 // TestCompletionProbeOnAnIdleBoxLoadsAtMostOneSeat: with nothing running, a completion to an idle seat
 // loads it, and every later seat is then a load over a running seat. So the report sends ONE completion
-// in all (to the first seat it reaches), the list is read again right after it, and every other row says
-// it was not probed and over which seat the load would have been. The fake loads a seat on its completion,
-// as llama-swap does.
+// in all (to the first seat it reaches), and every other row says it was not probed and over which seat the
+// load would have been. The fake loads a seat on its completion, as llama-swap does.
 func TestCompletionProbeOnAnIdleBoxLoadsAtMostOneSeat(t *testing.T) {
 	f := newFakeSwap(t, fullRoster())
 	f.allowCompletion = true
@@ -486,14 +485,6 @@ func TestCompletionProbeOnAnIdleBoxLoadsAtMostOneSeat(t *testing.T) {
 	if first != "offload-e4b" {
 		t.Errorf("the completion went to %s, want the first seat of the report (the workhorse lane's seat)", first)
 	}
-	// /running is read again right after the completion, before the next seat is decided.
-	f.mu.Lock()
-	for i, req := range f.requests {
-		if req == "POST /v1/chat/completions" && (i+1 >= len(f.requests) || f.requests[i+1] != "GET /running") {
-			t.Errorf("request %d is a completion not followed by a /running read: %v", i, f.requests[i:])
-		}
-	}
-	f.mu.Unlock()
 	e := seatOf(t, r, first)
 	if e.BackendProbe != ProbeCompletion || !strings.Contains(e.BackendReason, "a 1-token completion loaded it and answered") {
 		t.Errorf("%s = %+v, want the completion that loaded it named", first, e)
@@ -557,9 +548,9 @@ func TestCompletionProbeDecidesOnAFreshRunningList(t *testing.T) {
 	}
 }
 
-// TestCompletionProbeSeesWhatItsOwnCompletionLoaded: the completion that loads a seat is followed by a
-// fresh reading of the running list, so the next seat is refused because of the seat that is now running
-// (named in its row), not merely because one load was already spent.
+// TestCompletionProbeSeesWhatItsOwnCompletionLoaded: the next seat is decided on a fresh reading of the
+// running list, so it is refused because of the seat the completion loaded (named in its row), not merely
+// because one load was already spent.
 func TestCompletionProbeSeesWhatItsOwnCompletionLoaded(t *testing.T) {
 	f := newFakeSwap(t, fullRoster())
 	f.allowCompletion = true
@@ -579,8 +570,8 @@ func TestCompletionProbeSeesWhatItsOwnCompletionLoaded(t *testing.T) {
 }
 
 // TestCompletionProbeSeesWhatAFailedCompletionLoaded: llama-swap loads the model and the generation fails
-// afterwards, so the list is read again after a failed completion too: the next seat is refused over the
-// seat the failed completion loaded.
+// afterwards, so a failed completion leaves a running seat too: the next seat is refused over the seat the
+// failed completion loaded.
 func TestCompletionProbeSeesWhatAFailedCompletionLoaded(t *testing.T) {
 	f := newFakeSwap(t, fullRoster())
 	f.allowCompletion = true
