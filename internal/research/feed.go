@@ -214,7 +214,7 @@ func declaredEncoding(body []byte) string {
 // U+FFFE and U+FFFF) becomes a space. Either one would otherwise stop encoding/xml at that item, silently, and
 // every later item would be lost.
 func cleanXMLText(b []byte) []byte {
-	b = bytes.ToValidUTF8(b, []byte("�"))
+	b = bytes.ToValidUTF8(b, []byte(string(utf8.RuneError)))
 	return bytes.Map(func(r rune) rune {
 		switch {
 		case r == '\t' || r == '\n' || r == '\r':
