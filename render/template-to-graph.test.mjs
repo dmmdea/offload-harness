@@ -1173,6 +1173,30 @@ test("expansion is bounded: exactly 100,000 nodes of any mix of kinds convert, a
   for (const kind of names) assert.equal(refusalOf(convert(mix(100000, kind)), REFUSAL.GRAPH_TOO_LARGE).details.node, "100001", `a ${kind} node as the 100,001st`);
 });
 
+test("expansion is bounded by wires too: instances of a definition with 2,000 links are refused as graph_too_large once the links of every scope entered pass 1,000,000, with the node count far below its bound", () => {
+  const BG = "5c1b0000-0000-4000-8000-0000000000b1";
+  // one Note and 2,000 links that nothing reads: a scope's links count whether or not a wire is ever followed
+  const def = subdef(BG, { ins: [], outs: [], nodes: [{ id: 1, type: "Note", wv: ["x"] }] });
+  def.links = Array.from({ length: 2000 }, (_v, i) => ({ id: i + 1, origin_id: -10, origin_slot: 0, target_id: -20, target_slot: 0 }));
+  const instances = (n) => withDefs(ui(Array.from({ length: n }, (_v, i) => ({ id: i + 1, type: BG }))), def);
+  // 500 instances are exactly 1,000,000 wires and convert; the 501st passes the bound with 1,002 nodes against 100,000
+  const under = convert(instances(500));
+  assert.equal(under.ok, true, JSON.stringify(under.refusal));
+  assert.equal(under.stats.expandedSubgraphs, 500);
+  const t0 = Date.now();
+  const over = refusalOf(convert(instances(501)), REFUSAL.GRAPH_TOO_LARGE);
+  assert.equal(over.details.what, "wires");
+  assert.equal(over.details.limit, 1000000);
+  assert.equal(over.details.node, "501", "the details name the instance that passed the bound");
+  assert.ok(Date.now() - t0 < 15000, "refused at the bound, not after converting it");
+  // the root scope's own links count too
+  const flat = ui([{ id: 1, type: "Note", wv: ["x"] }]);
+  flat.links = Array.from({ length: 1000001 }, (_v, i) => [i + 1, 1, 0, 1, 0]);
+  const root = refusalOf(convert(flat), REFUSAL.GRAPH_TOO_LARGE);
+  assert.equal(root.details.what, "wires");
+  assert.equal(root.details.where, "root");
+});
+
 test("expansion is bounded: subgraphs nested past 64 levels are refused as graph_too_large, tens of thousands deep included, not an internal_error from the stack", () => {
   const BG = (n) => `5c1b0000-0000-4000-8000-${String(n).padStart(12, "0")}`;
   const depth = (levels) => {
@@ -1208,6 +1232,43 @@ test("ids that collide are refused as bad_template, never resolved to whichever 
   // two subgraph definitions with one id
   const dup = refusalOf(convert(withDefs(ui([{ id: 2, type: SG(1) }]), def, subdef(SG(1), { ins: [], outs: [], nodes: [] }))), REFUSAL.BAD_TEMPLATE);
   assert.equal(dup.details.subgraph, SG(1));
+});
+
+test("warnings are bounded: at most 1,000 are kept, and the rest are counted in warnings_dropped", () => {
+  // one widget_key_ignored per unknown key of a keyed widgets_values
+  const keyed = (n) => ui([{ id: 1, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]], wv: Object.fromEntries(Array.from({ length: n }, (_v, i) => [`k${i}`, i])) }]);
+  const over = convert(keyed(1201));
+  assert.equal(over.ok, true, JSON.stringify(over.refusal));
+  assert.equal(over.warnings.length, 1000);
+  assert.equal(over.warnings_dropped, 201);
+  assert.equal(over.warnings[0].input, "k0", "the first warnings are the ones kept");
+  const exact = convert(keyed(1000));
+  assert.equal(exact.ok, true, JSON.stringify(exact.refusal));
+  assert.equal(exact.warnings.length, 1000);
+  assert.equal(exact.warnings_dropped, 0, "nothing was dropped at the bound itself");
+  assert.equal(convert(ui([{ id: 1, type: "Note", wv: ["x"] }])).warnings_dropped, 0, "the count is always there");
+  // one proxy_widget_unmatched per proxy entry nobody used, after the nodes are built
+  const proxied = (n) => {
+    const def = subdef(SG(1), { ins: [], outs: [], nodes: [{ id: 7, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] }] });
+    const wf = ui([{ id: 1, type: SG(1), wv: Array.from({ length: n }, (_v, i) => i), properties: { proxyWidgets: Array.from({ length: n }, (_v, i) => [7, `w${i}`]) } }]);
+    return withDefs(wf, def);
+  };
+  const unmatched = convert(proxied(1201));
+  assert.equal(unmatched.ok, true, JSON.stringify(unmatched.refusal));
+  assert.equal(unmatched.warnings.length, 1000);
+  assert.equal(unmatched.warnings_dropped, 201);
+  assert.ok(unmatched.warnings.every((w) => w.code === "proxy_widget_unmatched"));
+});
+
+test("a node id longer than 256 characters is refused as bad_template before any key is built, in the root and in a definition; 256 is allowed", () => {
+  const note = (id) => ({ id, type: "Note", wv: ["x"] });
+  const r = refusalOf(convert(ui([note("x".repeat(257))])), REFUSAL.BAD_TEMPLATE);
+  assert.equal(r.details.limit, 256);
+  assert.equal(r.details.length, 257);
+  assert.ok(r.message.length < 300, "the refusal names the length and does not echo the id");
+  assert.equal(convert(ui([note("x".repeat(256))])).ok, true, "256 characters is within the bound");
+  const def = subdef(SG(1), { ins: [], outs: [], nodes: [note("y".repeat(257))] });
+  refusalOf(convert(withDefs(ui([{ id: 1, type: SG(1) }]), def)), REFUSAL.BAD_TEMPLATE);
 });
 
 // ---- refusals ------------------------------------------------------------------------------------------------------------
