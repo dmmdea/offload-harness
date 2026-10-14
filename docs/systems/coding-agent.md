@@ -531,6 +531,84 @@ re-runs on the result — residual PII refuses the harvest — and the corpus is
 destination. Methodology harvested from the OmniRoute compression service's
 eval approach (MIT); metrics and signals are this harness's own.
 
+### The `contextbench` task bench (`compaction-eval contextbench`)
+
+`compaction-eval contextbench` is the instrument for the context-editing decision: it drives long-horizon
+tasks against one agent seat and grades what the harness kept, so the compaction ladder and the context pager
+can be measured on work whose input does not fit the window. It ports the task generators and graders of
+[ContextBench](https://github.com/RulinShao/ContextBench) (Apache-2.0; credited in `NOTICE`, and each ported
+file names its upstream file and commit). It is unrelated to `kvbench`, which measures KV-prefix reuse.
+
+| Family | What streams | What is asked | Reward |
+|---|---|---|---|
+| `kv_store` | batches of `SET key = value`, values random and unguessable | `GET key` for keys not announced in advance | share of GETs answered with the right value (memory: nothing can be summarised or guessed) |
+| `log_triage` | batches of service log lines | exact-message lookups and level-and-service counts | share of questions answered correctly (needs the exact log) |
+| `needle_retention` | chunks of a few needle lines plus a large filler block | nothing: the agent keeps the needles | share of needle lines still present, verbatim, in the final context (retention) |
+| `sudoku_sketchpad` | one fully specified move per turn | the agent re-prints the whole board after each move | share of gold board versions it displayed exactly (in-context state maintenance) |
+
+Tasks are generated, not downloaded. Each generator reproduces the original's random stream (the Mersenne
+Twister, `choice`, `sample`, `shuffle` and `choices` of CPython), and a test pins the digest of every family's
+operation stream against the original generator's output, so `--seed 42` is the published seed-42 instance.
+The published levels are the `--level` names (`R130` to `R16000`, `L160` to `L12800`, `K4-C4` to `K2-C224`,
+`t4` to `t150`); without one, each family runs its smallest level whose stream exceeds the 32768-token
+budget of record. `--tasks N` runs seeds `--seed` to `--seed + N - 1` for each chosen family.
+
+```
+local-offload compaction-eval contextbench --family kv_store --tasks 8 --out results.json \
+    [--endpoint URL] [--model ID] [--level R1000] [--budget 32768 --reserve 2048] \
+    [--delivery tool_result|user] [--gcf] [--skeleton] [--max-turns N] [--pass-at 1.0]
+```
+
+The endpoint and model default to the configured ones, as for `kvbench`. The other `compaction-eval`
+subcommands take no `--seat` or `--route`; here `--seat` is an alias of `--model`, and `--route` accepts only
+`local`, because the verb drives the one endpoint it is given and places nothing on the fleet. The verb runs
+a model and is never run by the test suite: the tests inject a fake seat through the same function-valued seam.
+
+How a run works. The transcript starts with a short instruction written for this adapter (the original's
+scaffolds are prose and are not copied, so scores compare harness configurations with each other, not with
+published numbers). Each operation is delivered as the result of a synthetic `next_op` tool call
+(`--delivery tool_result`, the default) because the ladder shrinks tool-result bodies (dedupe, skeleton,
+elision) before it drops whole turns; with `--delivery user` operations are user messages, as upstream
+delivers them, and only the last rung (dropping older bare messages) can act. Before every send the
+transcript goes through `agent.CompactReplay` at `budget - reserve`, estimated with the ladder's own
+chars-divided-by-four estimator (the report stamps `size_estimator`), and the compacted transcript is kept,
+as the production loop keeps it. The agent advances the stream with `READY_FOR_NEXT_OP` on a line of its own;
+the run ends when the last operation has been answered. Every compaction is passed to `agent.PagerStats`,
+whose report is stored per task. In this reply-only setting the agent has no tool to fetch evicted content, so
+`refetched_distinct` stays 0: the pager readout shows what was evicted, not a re-fetch rate.
+
+Which snapshot the grade uses. A snapshot is the `[]agent.Msg` transcript at one moment. The run records two per
+step: `sent` (what the seat was handed, after compaction) and `turn` (the transcript right after the seat's
+reply, before the next compaction). A grader reads one field of a snapshot, `Msg.Content` of every message,
+joined by newlines; roles and tool-call arguments are not scanned. `kv_store`, `log_triage` and
+`sudoku_sketchpad` scan every snapshot, so a reply is credited once it appeared, even if the ladder
+removed it afterwards. `needle_retention` scans only the last snapshot, the context the agent still holds at the
+end. The instruction text sits in the scanned context, so it carries placeholders only, never an example
+that could pass for an answer (a test pins that the bare instruction scores nothing).
+
+Per-task outcomes use the measurement gate's seven words, and only these:
+
+| Word | When |
+|---|---|
+| `pass` | graded, reward at or above `--pass-at` (default 1.0: every item right) |
+| `task_fail` | graded, reward below it; the reward is kept (0.958 of the needles is a `task_fail` and the number the bench exists to produce) |
+| `infra_error` | the seat could not answer: connection refused, no endpoint, a reset mid-run. Never graded, never a `task_fail` |
+| `timeout` | `--max-turns` reached before the stream drained; a step cap, never graded |
+| `judge_error` | the grade could not be computed (no snapshots, empty gold, a sudoku gold without its board side) |
+| `not_run` | the run was interrupted before the task finished or began |
+| `cheat` | reserved for the gate's vocabulary; this adapter has no check for gaming a grader and never emits it |
+
+A task whose context cannot be made to fit the budget ends `budget_wall` and is graded on what it had. The
+results JSON holds, per task, the outcome word, the reward (null unless graded), how the run ended, turns,
+operations delivered, compaction count, the largest context sent (estimated tokens) and the pager report, plus
+the outcome counts and the mean reward per family; it has no timestamps. With no seat reachable every task is
+`infra_error` and the verb exits non-zero saying nothing was measured.
+
+What it does not do. It is not a measurement: no run is recorded in this repository and no decision follows from
+the bench alone; the context-editing decision record comes after a leased measurement run. Instance bytes
+match the original; the instruction wording and the operation delivery (`tool_result`) do not, so a published
+score is not comparable with one from this bench.
+
 ### The `browse` tool (opt-in, 0.141.0, ADR 0060)
 
 `browse` (`url`, `goal`, `max_actions`, `security_risk`) drives the operator's own running,
@@ -969,6 +1047,9 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - [`internal/agent/writetools.go`](../../internal/agent/writetools.go) — `os.Root` scoping
 - [`internal/agent/builder.go`](../../internal/agent/builder.go) — capability grants, audit-path check
 - [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`internal/compeval/`](../../internal/compeval/)
+- [`compaction_contextbench.go`](../../compaction_contextbench.go) — the `compaction-eval contextbench` verb;
+  [`internal/compeval/contextbench_run.go`](../../internal/compeval/contextbench_run.go) (driver, outcomes),
+  `contextbench_gen_*.go` and `contextbench_grade_*.go` in [`internal/compeval/`](../../internal/compeval/) (ported generators and graders)
 - [`internal/delegate/`](../../internal/delegate/) — delegator-side placement, intake, execution
   engine, acceptance evaluation
 - [`internal/pipeline/agenttask.go`](../../internal/pipeline/agenttask.go) — contract execution

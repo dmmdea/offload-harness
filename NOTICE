@@ -35,3 +35,15 @@ The workflow files there are trimmed excerpts of templates from Comfy-Org/workfl
 (https://github.com/Comfy-Org/workflow_templates), Copyright (c) 2023-present Comfy Org,
 licensed under the MIT License. The licence text is kept beside them in
 LICENSE-comfy-workflow-templates.txt. They are test inputs only and are not shipped.
+
+ContextBench task generators and graders (internal/compeval/contextbench_*.go):
+The four task generators (kv_store, log_triage, needle_retention, sudoku_sketchpad),
+the four graders, the standalone-marker and operation-rendering rules, and the table of
+published levels are ported to Go from ContextBench
+(https://github.com/RulinShao/ContextBench), licensed under the Apache License,
+Version 2.0, pinned at commit fb533c18c78a82d3f1b2047a9c1700735cf829ae. The logic and
+the data tables (word lists, level knobs) are carried over so that a seed produces the
+same task stream; the code and comments are written for this repository. Each ported
+file names the upstream file it comes from. No upstream documentation, instruction
+scaffold or dataset text is copied, and no upstream data is committed. The upstream
+repository has no NOTICE file.
