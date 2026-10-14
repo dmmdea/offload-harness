@@ -560,7 +560,15 @@ func Gate(b Baseline, baselineHash string, in GateInput) (GateResult, error) {
 		}
 	}
 
-	// Verdict (R2, R4). Superiority reports the efficiency metrics and ignores them here.
+	// Verdict (R2, R4). Superiority reports the efficiency metrics and ignores them here. An end
+	// of the primary's interval is compared with its boundary (0, or -m) to within a tolerance of
+	// 1e-9 of the score range, so an interval that touches the boundary on paper is neither an
+	// ADOPT nor a BLOCK whichever way the last bit of a float fell (the interval of a sample with
+	// no spread lands on the margin at 60 pairs).
+	var tol float64
+	if w := scoreHi - scoreLo; w > 0 && finite(w) {
+		tol = equalTolerance * w
+	}
 	switch {
 	case res.NUsed < b.MinPairs:
 		res.Verdict, res.Reason = VerdictInconclusive, fmt.Sprintf("n=%d below min_pairs=%d", res.NUsed, b.MinPairs)
@@ -568,9 +576,9 @@ func Gate(b Baseline, baselineHash string, in GateInput) (GateResult, error) {
 		res.Verdict, res.Reason = VerdictInconclusive, fmt.Sprintf("excluded_share=%s above max_excluded_share=%s", fmtF(res.ExcludedShare), fmtF(b.MaxExcludedShare))
 	case b.Mode == ModeSuperiority:
 		switch {
-		case res.Lo > 0:
+		case res.Lo > tol:
 			res.Verdict, res.Reason = VerdictAdopt, "candidate better: the 95% interval lies above 0"
-		case res.Hi < 0:
+		case res.Hi < -tol:
 			res.Verdict, res.Reason = VerdictBlock, "candidate worse: the 95% interval lies below 0"
 		default:
 			res.Verdict, res.Reason = VerdictInconclusive, "the 95% interval spans 0"
@@ -578,9 +586,9 @@ func Gate(b Baseline, baselineHash string, in GateInput) (GateResult, error) {
 	default: // non-inferiority
 		m := b.Primary.Margin
 		switch {
-		case res.Hi < -m:
+		case res.Hi < -m-tol:
 			res.Verdict, res.Reason = VerdictBlock, fmt.Sprintf("candidate worse than the margin: hi=%s below -margin=%s", fmtF(res.Hi), fmtF(-m))
-		case res.Lo > -m:
+		case res.Lo > -m+tol:
 			switch {
 			case overCap != nil:
 				res.Verdict, res.Reason = VerdictInconclusive, fmt.Sprintf("declared efficiency metric %s has %d of %d pairs unresolved, above max_excluded_share=%s: a metric that was not measured cannot be traded away", overCap.Name, overCap.UnresolvedPairs, res.NUsed, fmtF(b.MaxExcludedShare))
