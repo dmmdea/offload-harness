@@ -483,7 +483,7 @@ and both end where a fetched page ends: the text goes through the same digest pa
   [security.md](security.md#admitted-third-party-software)). The binary runs once per URL with `--skip-download --write-subs
   --write-auto-subs --sub-langs=<sub_langs> --sub-format=vtt/srv3/best --no-cookies --no-cookies-from-browser
   --ignore-config --no-playlist --no-cache-dir --socket-timeout 15` and zero retries, given the canonical
-  `https://www.youtube.com/watch?v=<id>` after a literal `--`. `sub_langs` is an `offload_research` input (default `en.*`;
+  `https://www.youtube.com/watch?v=<id>` after a literal `--`. `sub_langs` is an `offload_research` input, and `--sub-langs` on `local-offload research` (default `en.*`;
   letters, digits and `. * _ - ,` only, else the source fails as `bad_sub_langs` before anything runs). It runs in a per-call
   directory under `<state_dir>/research-scratch` (else a directory under the OS temp dir) that is removed after the call, with
   a scrubbed environment (home and temp point at that directory), bounded by the call's deadline and the per-fetch timeout,
