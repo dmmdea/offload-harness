@@ -31,7 +31,8 @@ type Options struct {
 	// Required: without it nothing can be read and every entry is "none".
 	HTTP *http.Client
 	// ProbeCompletion adds a 1-token completion probe. It LOADS an idle seat, so it is off unless a
-	// person asked for it (doctor --probe-completion); /fleet/health never sets it.
+	// person asked for it (doctor --probe-completion); /fleet/health never sets it. It is refused for any
+	// seat that is not running while a vLLM seat is loaded.
 	ProbeCompletion bool
 	// ProbeTimeout bounds each cheap read; zero means 3 s.
 	ProbeTimeout time.Duration
@@ -43,7 +44,8 @@ type Options struct {
 //
 // One observation backs the whole report: llama-swap's roster (GET /v1/models) and running list (GET
 // /running) are read once, the serving config is read once, and a loaded seat is asked for its own
-// health endpoint at most once however many lanes point at it. None of that loads a model: the seat's
+// health endpoint at most once however many lanes point at it. (Only the explicit completion probe reads
+// the running list again, around each completion: see completionVerdict.) None of that loads a model: the seat's
 // health endpoint is asked at the seat's own address (seatload.SeatURL), never through /upstream, which
 // loads on demand and resets the idle timer. The default is therefore safe to run against a node that is
 // serving, and to run on every /fleet/health refresh.
@@ -321,24 +323,67 @@ func (s *state) endpointVerdict(ctx context.Context, canon string, occ seatload.
 	return Verdict{OK: true, Probe: ProbeEndpoint, Detail: fmt.Sprintf("loaded and ready; its health endpoint answered %d", resp.StatusCode)}
 }
 
-// completionVerdict runs the explicit 1-token completion probe on a seat the cheap probe passed. A
-// completion on an idle seat loads it, and while a vLLM seat holds the cards that can evict it
-// (internal/seatguard exists for the same reason), so the probe is skipped, and says why, whenever it
-// would load a seat while a vLLM seat is resident or while that cannot be ruled out.
+// resident reports whether llama-swap has the seat loaded or loading, so that a completion to it loads
+// nothing new. A seat that is stopping is going away and the next request reloads it, so it is not resident.
+func (s *state) resident(canon string) bool {
+	occ, ok := s.occupant(canon)
+	if !ok {
+		return false
+	}
+	st := strings.ToLower(strings.TrimSpace(occ.State))
+	return st == "ready" || st == "starting"
+}
+
+// vllmHolder finds a vLLM seat other than canon that is loaded or loading, the seat a load of canon can evict.
+func (s *state) vllmHolder(canon string) (string, bool) {
+	for _, o := range s.running {
+		st := strings.ToLower(strings.TrimSpace(o.State))
+		if (st == "ready" || st == "starting") && !strings.EqualFold(strings.TrimSpace(o.Model), canon) && s.engineOf(o.Model) == EngineVLLM {
+			return o.Model, true
+		}
+	}
+	return "", false
+}
+
+// refreshRunning re-reads llama-swap's running list. A failed read leaves no list and the error, so every
+// decision made on it afterwards fails closed (a vLLM seat holding the cards cannot be ruled out).
+func (s *state) refreshRunning(ctx context.Context) {
+	timeout := s.opt.ProbeTimeout
+	if timeout <= 0 {
+		timeout = defaultProbeTimeout
+	}
+	qctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	s.running, s.runErr = seatload.Occupants(qctx, s.opt.HTTP, swapclient.BaseURL(s.cfg.Endpoint))
+}
+
+// completionVerdict runs the explicit 1-token completion probe on a seat the cheap probe passed.
+//
+// A completion to a seat that is not running LOADS it, and while a vLLM seat holds the cards that load
+// can evict it (internal/seatguard exists for the same reason). So the probe is refused, and says why,
+// for any seat that is not running whenever a vLLM seat is loaded or loading (the target being a vLLM
+// seat itself is no exemption: one vLLM seat evicts another), and whenever the running list cannot be
+// read. The decision is made on a fresh reading of /running, and the list is read again after every
+// completion, success or not, because the completion may have loaded a seat (the vLLM seat of this very
+// run included): the report's own first completions must not evict what its later ones would.
 func (s *state) completionVerdict(ctx context.Context, c Candidate, canon string, prior Verdict) Verdict {
-	if occ, loaded := s.occupant(canon); !loaded || strings.EqualFold(occ.State, "stopping") {
+	resident := s.resident(canon)
+	if !resident {
+		hadRunErr := s.runErr != nil
+		s.refreshRunning(ctx)
+		resident = s.resident(canon)
+		if hadRunErr && s.runErr == nil {
+			prior.Detail = "in the roster" // the earlier "load state is unknown" no longer holds
+		}
+	}
+	if !resident {
 		if s.runErr != nil {
 			prior.Detail += "; completion probe skipped: llama-swap's running list could not be read, so a vLLM seat holding the cards cannot be ruled out"
 			return prior
 		}
-		if s.engineOf(canon) != EngineVLLM {
-			for _, o := range s.running {
-				st := strings.ToLower(o.State)
-				if (st == "ready" || st == "starting") && !strings.EqualFold(o.Model, canon) && s.engineOf(o.Model) == EngineVLLM {
-					prior.Detail += fmt.Sprintf("; completion probe skipped: it would load %s while the vLLM seat %s holds the cards", c.Seat, o.Model)
-					return prior
-				}
-			}
+		if holder, ok := s.vllmHolder(canon); ok {
+			prior.Detail += fmt.Sprintf("; completion probe skipped: it would load %s while the vLLM seat %s holds the cards", c.Seat, holder)
+			return prior
 		}
 	}
 	timeout := s.opt.CompletionTimeout
@@ -348,8 +393,14 @@ func (s *state) completionVerdict(ctx context.Context, c Candidate, canon string
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	client := llamaclient.New(s.cfg.Endpoint, s.cfg.CompletionPath, c.Seat, timeout)
-	if _, err := client.Generate(cctx, c.Seat, "", "ping", "", 1, 0, 0); err != nil {
+	_, err := client.Generate(cctx, c.Seat, "", "ping", "", 1, 0, 0)
+	s.refreshRunning(ctx)
+	if err != nil {
 		return Verdict{Probe: ProbeCompletion, Detail: "the 1-token completion failed (" + short(err) + ")"}
+	}
+	if !resident {
+		// The cheap probe said "not asked"; now it was, so that clause goes.
+		return Verdict{OK: true, Probe: ProbeCompletion, Detail: "in the roster, was not loaded; a 1-token completion loaded it and answered"}
 	}
 	return Verdict{OK: true, Probe: ProbeCompletion, Detail: prior.Detail + "; a 1-token completion answered"}
 }

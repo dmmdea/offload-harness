@@ -10,7 +10,8 @@
 //
 // Four fields describe a verdict, on every lane and every seat:
 //
-//	active_backend  the engine kind that is answering, or "none"
+//	active_backend  the engine kind that is answering, or "none". On a lane it is the engine of the seat
+//	                the lane is bound to: the lane routes there, whatever else of its chain is up
 //	backend_chain   the ordered engine kinds the lane or seat may use
 //	backend_probe   how deep the evidence goes: "process", "endpoint" or "completion"
 //	backend_reason  why that backend was chosen, or why none was (it names the failures that came first)
@@ -19,7 +20,8 @@
 // asks a seat that is already loaded for its own health endpoint. It never sends a completion, and never
 // goes through llama-swap's /upstream path (that path loads a model on demand and resets the idle timer).
 // A 1-token completion exists only behind an explicit option, because it loads an idle seat and can
-// evict a vLLM seat (internal/seatguard exists for the same reason).
+// evict a vLLM seat (internal/seatguard exists for the same reason); it is refused for any seat that is
+// not running while a vLLM seat is loaded, and llama-swap's running list is re-read after each one.
 //
 // The existing `backends` field of /fleet/health (hardware tags such as "vulkan" and "cpu", ADR 0054) is
 // a different thing and is untouched.
@@ -57,8 +59,8 @@ type Entry struct {
 	// Lane is the lane the verdict is about (the config's status key: "agent", "workhorse", ...);
 	// empty on a seat row.
 	Lane string `json:"lane,omitempty"`
-	// Seat is the seat the verdict names: the one that is answering, or the first seat of the chain when
-	// none is.
+	// Seat is the seat the verdict names: the one that is answering (a lane's bound seat), or, when none
+	// is, the lane's bound seat (the first seat of the chain on a lane with no binding).
 	Seat          string   `json:"seat,omitempty"`
 	ActiveBackend string   `json:"active_backend"`
 	BackendChain  []string `json:"backend_chain"`
@@ -78,9 +80,10 @@ type Candidate struct {
 	Seat string
 	// Engine is the kind; empty asks the collector to classify it from the serving config.
 	Engine string
-	// Bound is true for the seat the lane's config actually points at. A chain may list preferred seats
-	// the lane is not bound to (a tier's preferred vLLM seat while the lane serves its llama.cpp
-	// fallback); the reason says so when one of those is the one that answers.
+	// Bound is true for the seat the lane's config actually points at, and that seat's engine is what
+	// answers for the lane. A chain may list preferred seats the lane is not bound to (a tier's preferred
+	// vLLM seat while the lane serves its llama.cpp fallback): they are probed and named in the reason,
+	// and they do not answer for the lane.
 	Bound bool
 }
 

@@ -45,10 +45,18 @@ func seatLabel(kind, seat string) string {
 	return kind + " seat " + seat
 }
 
-// Resolve walks a lane's chain in order and reports the first candidate whose probe passes. The failures
-// that came before it are named in the reason ("vllm seat X unavailable: ...; fell to llama.cpp seat Y:
-// ..."), so a lane served by its second backend says why it is not served by its first. When none passes
-// the answer is "none", at the deepest probe level any candidate reached, with every failure named.
+// Resolve reports which backend answers for a lane, and why.
+//
+// A lane routes to the seat its config binds (the Bound candidate), so the engine that answers is that
+// seat's engine and nothing else's: a preferred seat of the chain that is up while the lane is bound to
+// another does not answer for it, and the reason says so ("the preferred vllm seat X is available (...)
+// but does not answer for this lane, which is bound to Y"). A bound seat that fails is "none", with every
+// failure named, even when another seat of the chain is up: the lane would call the bound seat and fail.
+// A preferred seat that fails while the lane is bound to a later one is named in front of the answer
+// ("vllm seat X unavailable: ...; fell to llama.cpp seat Y: ...").
+//
+// A lane with no binding (a chain whose seats the config does not name) takes the first candidate whose
+// probe passes. When none passes the answer is "none", at the deepest probe level any candidate reached.
 func Resolve(ctx context.Context, lane Lane, p Prober) Entry {
 	chain := make([]string, 0, len(lane.Chain))
 	for _, c := range lane.Chain {
@@ -60,14 +68,18 @@ func Resolve(ctx context.Context, lane Lane, p Prober) Entry {
 		e.BackendReason = "no backend is configured for this lane"
 		return e
 	}
-	bound := ""
-	for _, c := range lane.Chain {
+	boundIdx := -1
+	for i, c := range lane.Chain {
 		if c.Bound {
-			bound = c.Seat
+			boundIdx = i
 			break
 		}
 	}
-	var failed []string
+	bound := ""
+	if boundIdx >= 0 {
+		bound = lane.Chain[boundIdx].Seat
+	}
+	var failed, available []string
 	deepest := ProbeProcess
 	for i, c := range lane.Chain {
 		v := p.Probe(ctx, c)
@@ -78,21 +90,35 @@ func Resolve(ctx context.Context, lane Lane, p Prober) Entry {
 		if depth(level) > depth(deepest) {
 			deepest = level
 		}
-		if v.OK {
-			e.ActiveBackend, e.Seat, e.BackendProbe = chain[i], c.Seat, level
-			reason := fmt.Sprintf("%s: %s", seatLabel(chain[i], c.Seat), v.Detail)
-			if len(failed) > 0 {
-				reason = strings.Join(failed, "; ") + "; fell to " + reason
-			}
-			if bound != "" && !c.Bound {
-				reason += fmt.Sprintf(" (the lane is bound to %s, not to this seat)", bound)
-			}
-			e.BackendReason = reason
-			return e
+		label := seatLabel(chain[i], c.Seat)
+		if !v.OK {
+			failed = append(failed, fmt.Sprintf("%s unavailable: %s", label, v.Detail))
+			continue
 		}
-		failed = append(failed, fmt.Sprintf("%s unavailable: %s", seatLabel(chain[i], c.Seat), v.Detail))
+		if boundIdx >= 0 && i != boundIdx {
+			prefix := "the "
+			if i < boundIdx {
+				prefix = "the preferred "
+			}
+			available = append(available, fmt.Sprintf("%s%s is available (%s) but does not answer for this lane, which is bound to %s", prefix, label, v.Detail, bound))
+			continue
+		}
+		e.ActiveBackend, e.Seat, e.BackendProbe = chain[i], c.Seat, level
+		reason := fmt.Sprintf("%s: %s", label, v.Detail)
+		if len(failed) > 0 {
+			reason = strings.Join(failed, "; ") + "; fell to " + reason
+		}
+		if len(available) > 0 {
+			reason += "; " + strings.Join(available, "; ")
+		}
+		e.BackendReason = reason
+		return e
 	}
-	e.ActiveBackend, e.Seat, e.BackendProbe = EngineNone, lane.Chain[0].Seat, deepest
-	e.BackendReason = strings.Join(failed, "; ")
+	seat := lane.Chain[0].Seat
+	if boundIdx >= 0 {
+		seat = bound
+	}
+	e.ActiveBackend, e.Seat, e.BackendProbe = EngineNone, seat, deepest
+	e.BackendReason = strings.Join(append(failed, available...), "; ")
 	return e
 }
