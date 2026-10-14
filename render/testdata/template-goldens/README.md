@@ -8,7 +8,7 @@ an upstream template:
 - `object-info.synthetic.json` is a small `/object_info` listing in the shape a running ComfyUI serves (input spec tuples,
   `input_order`, `output`, `output_node`, `hidden`, the `COMFY_DYNAMICCOMBO_V3`, `COMFY_AUTOGROW_V3` and
   `COMFY_MATCHTYPE_V3` types, the `control_after_generate`, `image_upload`, `audio_upload`, `widgetType`, `forceInput` and
-  `socketless` options). It carries 27 invented-or-minimal node classes, enough for every behaviour the tests pin. It is not
+  `socketless` options). It carries 28 invented-or-minimal node classes, enough for every behaviour the tests pin. It is not
   evidence about any real node's schema.
 - `basic-t2i.workflow.json` / `basic-t2i.api.json` and `subgraph-i2v.workflow.json` / `subgraph-i2v.api.json` are UI-format
   graphs and the API-format graphs a person worked out from the two formats' public descriptions, by hand, node by node. The

@@ -2263,6 +2263,10 @@ recorded as known offenders with their reason rather than silently skipped — a
   licence map, keyed by Hugging Face repo id
 - [`render/testdata/templates-catalog/`](../../render/testdata/templates-catalog/README.md) — its
   fixtures: trimmed upstream templates (MIT) and hand-written edge cases
+- [`render/template-to-graph.mjs`](../../render/template-to-graph.mjs) — the template-to-API converter:
+  a UI-format workflow in, the API-format prompt graph out, typed refusals, a JSON CLI
+- [`render/testdata/template-goldens/`](../../render/testdata/template-goldens/README.md) — its
+  fixtures: a synthetic `/object_info` listing, hand-worked goldens and a stand-in index
 
 ## Related docs
 
@@ -3369,3 +3373,99 @@ rule files differ is scored with them anyway and `rules_check` says so, and `mai
 confined to it is not seen. An `extra_model_paths.yaml` entry that is rooted but has no drive letter
 (`/models/x`) under a drive-lettered `base_path` resolves onto that drive under Windows path join and is left as
 written here (measured against ComfyUI's own loader, not on a live file).
+
+## Template-to-API converter (`render/template-to-graph.mjs`)
+
+A workflow template is a UI-format graph (`nodes[]`, `links[]`, `definitions.subgraphs`, `widgets_values`).
+`POST /prompt`, the `run-graph` door and the render builders take API-format graphs only:
+`{"<id>": {"class_type", "inputs"}}`. `render/template-to-graph.mjs` converts the first into the second. It is the
+converter the templates catalog (phase A, above) did not contain. Nothing calls it yet: no MCP tool, config key, fleet
+task or route, and the ComfyUI lifecycle module is untouched.
+
+**Class: none.** No GPU slot, no lease, no ComfyUI process. It is a pure function of three inputs: the template, an
+`/object_info` listing and options. The listing is never fetched here: the caller passes the one a running ComfyUI served
+(or a saved copy of it), and a listing from an older or newer ComfyUI than the one that will run the graph is a mismatch
+for the caller to avoid. It imports only `node:` builtins, opens no network, starts no process and writes no file (a test
+fails if it does).
+
+**Clean room.** It was written from the public descriptions of the two formats, the MIT-licensed template files, the
+harness's own builders under `render/` and the shape of an `/object_info` listing. The GPL-3.0 frontend (which has its own
+graph-to-prompt code) and ComfyUI's server code were not opened or read as source. The frontend is a black box: its own
+export of a template is the golden the converter is compared with.
+
+```bash
+node render/template-to-graph.mjs --template <template.json> --object-info <object_info.json> \
+    [--comfy-version X.Y.Z] [--seed N] [--min-comfyui-version X.Y.Z | --index <index.json> [--name NAME]] [--meta]
+```
+
+It prints one JSON document. Exit 0: `{"ok":true,"graph":{...},"warnings":[...],"pinnedSeeds":[...],"stats":{...}}`. Exit 1:
+`{"ok":false,"refusal":{"code","message","details"}}`, a typed refusal of a call that was well formed. Exit 2: the same
+shape with code `usage` or `unreadable_input`, a call that could not be read. `--index` reads the template's minimum from
+the templates package's `index.json` (the file that carries `minComfyUIVersion`; a template file does not) by the template's
+file name, or by `--name`; a template the index does not list has no known minimum. From code:
+`convertTemplate(template, objectInfo, { comfyVersion, minComfyUIVersion, seed, meta })`, and
+`compareApiGraphs(actual, expected)`, which lists the differences between two API graphs node by node (class and inputs;
+key order and `_meta` are not differences unless asked).
+
+**What it does.**
+
+| rule | behaviour |
+|---|---|
+| muted (mode 2) | the node is dropped; an input wired to it is left out with an `input_dropped` warning, and a widget input keeps its stored value (`widget_link_dropped`) |
+| bypassed (mode 4) | the node is not emitted; each output takes the first connected input of the same type (a union such as `IMAGE,MASK` matches when the two share a member, `*` matches any), chains resolve, no match drops the wire (`bypass_no_match`) |
+| subgraph instances | expanded; inner nodes get the id `<instance>:<inner>` (nested: `<a>:<b>:<inner>`); a wire into the instance reaches the inner nodes through the definition's input node (id -10); an inner wire into its output node (id -20) is what leaves the instance; a bypassed or muted instance is handled as a node |
+| instance widget values | `properties.proxyWidgets` (`[innerNodeId, widgetName]` pairs) when the instance has them: its `widgets_values` belong to those inner widgets, in order. Otherwise they align with the definition's widget inputs, not with the instance's own `inputs` array, which can list fewer; an instance wire wins over its widget value |
+| `Reroute`, `PrimitiveNode` | resolved into the inputs they feed (a primitive's first value is a literal on every consumer); neither reaches the graph |
+| `Note`, `MarkdownNote` | skipped, also when muted |
+| link beats widget | a widget input that is wired takes the wire, whatever value it stored |
+| widget values | mapped to named inputs in the listing's `input_order` (the key order when a class has none), `required` then `optional`; `hidden` inputs are not inputs. An input is a widget when its type is INT, FLOAT, STRING, BOOLEAN, COMBO or COLOR, a list of options, or a union type with a `widgetType`, unless `forceInput` makes it a socket |
+| `control_after_generate` | a flagged INT owns one hidden slot after it (flag `true` or a string such as `fixed`), which must hold one of the four control words. A listing that has no flag at all is read by the data: a seed-named INT followed by a control word owns the slot, one followed by anything else does not |
+| upload slots | after a COMBO with `image_upload` or `video_upload` one extra value, after one with `audio_upload` two (counted from the template files) |
+| dotted dynamic-combo names | the selected option's widgets follow the combo as `<combo>.<child>`, nested to any depth, in the option's input order |
+| dotted autogrow names | the children (`values.a`, `values.b`) are wires named by the node's own input slots; an autogrow group of widgets is refused |
+| display-only values | `PreviewAny`, `GetImageSize`, `SaveGLB` and `Preview3D` store trailing values of frontend-only display widgets; up to 3, 1, 1 and 1 of them are ignored (`display_values_ignored`), one more is a refusal |
+| seeds | with `seed`, an input is pinned when it is named `seed` or `noise_seed`, the listing's control makes it a seed, and it holds a stored or primitive value. A wired seed, a generic INT that shares the control (a `PrimitiveInt`) and a sampling seed with no control are left alone; the change is listed in `pinnedSeeds` |
+| fewer values than widgets | the listing's `default` fills the input and says so (`default_filled`); with no default the input is left out (`widget_value_missing`) |
+
+**What it refuses, with a code and the details that locate it, and no graph.** `bad_template`, `bad_object_info`,
+`bad_seed`, `bad_version` (a malformed version); `comfyui_too_old` (the template's minimum exceeds the given ComfyUI;
+both versions are in the details) and `comfy_version_unknown` (a minimum is known and no ComfyUI version was given: the
+version is passed in, never assumed); `unknown_node_class` (every class the listing lacks, with the node ids; muted and
+bypassed nodes do not count); `group_node_unsupported`; `subgraph_definition_missing`, `subgraph_cycle`,
+`subgraph_widget_mismatch`; `dangling_link`, `link_mismatch`, `link_cycle`; `widget_mismatch` (more values than widgets, a
+flagged INT not followed by a control word, a dynamic combo's value that is no option of it); `unsupported_input_type` (a
+custom frontend widget such as an image comparer or a file-upload viewer, an autogrow of widgets, an input type with no
+rule); `primitive_without_value`; `internal_error` (a defect in the converter, never a template's fault). The version check
+runs first. A refusal is a typed answer, and the converter does not try the next best reading.
+
+**What it does not do.** It does not check that a required input is wired (`preflight-graph-file.mjs` does, against a live
+listing), that a model file exists (the manifest satisfier does), or that a node pack is installed. It does not submit
+anything.
+
+**Evidence and status.**
+
+- `node --test render/template-to-graph.test.mjs`: one test per behaviour on small hand-built UI-format graphs, a synthetic
+  listing and two hand-worked goldens in `render/testdata/template-goldens/` (see its README: none of it is a frontend
+  export). A mutated widget order turns the golden red (a swap of two inputs, a swap of two combos, a type-breaking move).
+  A mutation run of 24 one-line changes to the converter, each applied to a copy and proved applied, turned the suite red
+  every time.
+- The value-for-value comparison with the frontend's own export is `TEMPLATE_GOLDEN_DIR` (a folder with `object_info.json`
+  and `<name>.workflow.json` / `<name>.api.json` pairs); the test skips without it. It was run privately on two saved
+  workflows with an API-format file beside each (the shape of the frontend's Save (API Format) export, `_meta` titles
+  included; that the frontend wrote them is unverified): 50 of 50 and 20 of 20 nodes matched, inputs included, one of them a
+  subgraph template with dynamic combos. Neither file is in the repository.
+- A survey over a templates package (`TEMPLATE_SURVEY_DIR`) shows what refuses and why. On `comfyui-workflow-templates-json`
+  0.1.96 (593 files) with an `/object_info` listing saved on 2026-08-14, which is older than the package: 407 convert, and
+  every converted graph passes the graph check (each wire reaches a node that is in the graph and an output slot its class
+  has; 5,074 nodes). The refusals: 86 `unknown_node_class` (classes newer than the listing), 45 `widget_mismatch`
+  (mostly schema skew between package and listing, and display widgets of nodes such as `CustomCombo`), 40
+  `unsupported_input_type` (mostly the image comparer), 15 `bad_template` (files that are not workflows). The counts
+  describe that pair of package and listing and nothing else.
+
+**Known gaps.** The acceptance run, at least 10 non-API templates compared node by node with frontend-exported goldens, is
+a follow-up. It needs a running ComfyUI to serve a current `/object_info` and a scripted frontend export of each template,
+which is GPU-lease work (ComfyUI is started only as a lease-wrapped command and stopped when it ends), so it was not run
+here; two matching pairs are not ten, and no template class is claimed beyond those. Untested against a frontend export:
+the bypass pass-through rule beyond first-of-type, the display-only counts, COLOR widgets and the upload slot counts (read
+from the template files). A class with a custom frontend widget is refused, not guessed; each such class is a candidate for
+the follow-up to decide.

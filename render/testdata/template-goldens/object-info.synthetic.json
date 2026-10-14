@@ -209,6 +209,12 @@
     "output": ["IMAGE"], "output_name": ["IMAGE"],
     "name": "CustomWidgetNode", "display_name": "Custom Widget Node", "output_node": false
   },
+  "ImageMix": {
+    "input": { "required": { "image_a": ["IMAGE", {}], "image_b": ["IMAGE", {}], "factor": ["FLOAT", { "default": 0.5 }] } },
+    "input_order": { "required": ["image_a", "image_b", "factor"] },
+    "output": ["IMAGE"], "output_name": ["IMAGE"],
+    "name": "ImageMix", "display_name": "Image Mix", "output_node": false
+  },
   "PreviewAny": {
     "input": { "required": { "source": ["*", {}] } },
     "input_order": { "required": ["source"] },

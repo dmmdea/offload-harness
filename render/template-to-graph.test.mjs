@@ -445,6 +445,19 @@ test("mode 4 (bypassed): no input of the output's type drops the wire with a typ
   assert.deepEqual(warned(r, "input_dropped"), [{ code: "input_dropped", node: "3", input: "images", reason: "bypass_no_match" }]);
 });
 
+test("mode 4 (bypassed): of two connected inputs of the output's type the first one, in input order, is passed through", () => {
+  const spec = (mode) => [
+    { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+    { id: 2, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["b.png", "image"] },
+    { id: 3, type: "ImageMix", mode, ins: [["image_a", "IMAGE"], ["image_b", "IMAGE"]], outs: [["IMAGE", "IMAGE"]], wv: [0.5] },
+    { id: 4, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  ];
+  const both = convert(ui(spec(4), [[1, 0, 3, "image_a"], [2, 0, 3, "image_b"], [3, 0, 4, "image"]]));
+  assert.deepEqual(graphOf(both)["4"].inputs, { image: ["1", 0] }, "image_a is first");
+  const onlyB = convert(ui(spec(4), [[2, 0, 3, "image_b"], [3, 0, 4, "image"]]));
+  assert.deepEqual(graphOf(onlyB)["4"].inputs, { image: ["2", 0] }, "an unconnected first input is not a candidate");
+});
+
 // ---- subgraphs -----------------------------------------------------------------------------------------------------------
 
 test("subgraph: a nested instance gets the id path <outer>:<inner>:<node>, with the outer wire reaching the innermost node", () => {
