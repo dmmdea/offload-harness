@@ -439,40 +439,261 @@ func TestSearchRungCountsTwoIdenticalCallsWithOneIDAsOneCall(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// A pipeline qualifies only when every stage after the search is a pass-through
+// filter or another search: a linter at the end of a pipe prints its own
+// diagnostics, and none of them may be dropped.
+// ---------------------------------------------------------------------------
+
+func TestSearchRungLeavesAPipeIntoALinterAlone(t *testing.T) {
+	body := prodShell(1, linterBody(80, 12), "")
+	for _, cmd := range []string{
+		"rg -l foo | xargs flake8",
+		"grep -rn x . | xargs flake8",
+		"rg --files | xargs ruff check",
+		"rg foo | flake8 -",
+		"grep -rn x . | head -50 | xargs flake8",
+		"grep -rn x . |& xargs flake8",
+		"grep -rn x . | python -m flake8 -",
+		"grep -rn x . | xargs",
+		"grep -rn x . | ",
+		"grep -rn x . |",
+		`grep -rn x . | "head" | flake8 -`,
+		"grep -rn x . | FOO=1 head",
+		"grep -rn x . | tr a b",
+		"grep -rn x . | headx",
+		"grep -rn x . | sh -c 'flake8 .'",
+	} {
+		if thinned, got := gateOutcome(t, shellCall(cmd), body, true); thinned {
+			t.Errorf("run_shell %q: a pipe into another program was thinned:\n%.200s", cmd, got)
+		}
+	}
+}
+
+func TestSearchRungKeepsAPipeThroughFiltersAndSearches(t *testing.T) {
+	flat := fixtureFlat(benignHits(64, 16, 80))
+	body := prodShell(0, flat+"\n", "")
+	for _, cmd := range []string{
+		"grep x | head",
+		"grep -rn x . | tail -n 200",
+		"grep -rn x . | sort | uniq",
+		"grep -rn x . | wc -l",
+		"grep -rn x . | cut -d: -f1-3",
+		"grep -rn x . | sed 's/a/b/'",
+		"grep -rn x . | awk '{print}'",
+		"grep -rn x . | tee out.txt",
+		"grep -rn x . | cat",
+		"grep -rn x . | grep -v y",
+		"rg -n x | rg y",
+		"rg -n x | git grep -n y",
+		"grep -rn x . | /usr/bin/head -5",
+		"grep -rn x . |& tail",
+		"grep -rn x . | sort | uniq | head | tee o",
+	} {
+		thinned, got := gateOutcome(t, shellCall(cmd), body, true)
+		if !thinned || !strings.Contains(got, "lines elided") {
+			t.Errorf("run_shell %q: a search through pass-through filters must still be thinned", cmd)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scanner behaviours worth pinning: a single quote takes no backslash escape,
+// and a lone carriage return separates commands.
+// ---------------------------------------------------------------------------
+
+func TestSearchRungSingleQuotesTakeNoBackslashEscape(t *testing.T) {
+	body := prodShell(1, linterBody(80, 12), "")
+	// In a shell 'a\' is the word a\ : the quote closes at the second quote, so the
+	// ';' after it is a real separator and flake8 runs.
+	for _, cmd := range []string{
+		`grep 'a\' ; flake8 .`,
+		`grep -rn 'a\';flake8 .`,
+		`grep -rn 'x\' . && ruff check .`,
+	} {
+		if thinned, got := gateOutcome(t, shellCall(cmd), body, true); thinned {
+			t.Errorf("run_shell %q: the quote closes at the second quote, the separator chains, and the body must not qualify:\n%.200s", cmd, got)
+		}
+	}
+	// A backslash inside double quotes does escape the quote, so the separator
+	// stays quoted and the search is still just a search.
+	flat := prodShell(0, fixtureFlat(benignHits(65, 16, 80))+"\n", "")
+	if thinned, _ := gateOutcome(t, shellCall(`grep -rn "a\" ; b" .`), flat, true); !thinned {
+		t.Error(`a ';' inside a double-quoted span with an escaped quote is quoted: the search must still be thinned`)
+	}
+}
+
+func TestSearchRungALoneCarriageReturnSeparatesCommands(t *testing.T) {
+	body := prodShell(1, linterBody(80, 12), "")
+	for _, cmd := range []string{
+		"grep -rn timeout .\rflake8 .",
+		"grep -rn timeout . \r flake8 .",
+		"grep -rn timeout .\r\nflake8 .",
+	} {
+		if thinned, got := gateOutcome(t, shellCall(cmd), body, true); thinned {
+			t.Errorf("run_shell %q: a CR separates commands, the body must not qualify:\n%.200s", cmd, got)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// What the run tool can reach. Its allowlist is the real control: of the
+// grep-family programs only git is on it, so only "git grep" can come through run;
+// grep, rg, ag and ack come through run_shell. The docs say exactly this.
+// ---------------------------------------------------------------------------
+
+func TestSearchRungRunToolReachesOnlyGitGrep(t *testing.T) {
+	onList := map[string]bool{}
+	for _, p := range runAllowedExecutables {
+		onList[p] = true
+	}
+	for p := range searchGrepPrograms {
+		if onList[p] {
+			t.Errorf("%s is now on the run allowlist: the docs say only git grep is reachable through run; update them and this pin together", p)
+		}
+	}
+	if !onList["git"] {
+		t.Error("git left the run allowlist: the docs say git grep is the one search reachable through run; update them and this pin together")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // The caps are chosen to match the values the upstream configuration example
 // shows. That page never calls them defaults, so nothing here may.
 // ---------------------------------------------------------------------------
 
-// The upstream page shows 30/5/15 in a configuration example and never calls them defaults, so nothing here may either.
-// Every sentence that names the caps is read; "default" in it fails, except the rung's own default-off wording.
-func TestSearchRungCapsAreAttributedToTheConfigurationExample(t *testing.T) {
-	capWords := regexp.MustCompile(`(?i)max_total_matches|max_matches_per_file|max_files|search\s*compressor|\b30\s*/\s*5\s*/\s*15\b|\b30, 5 and 15\b`)
-	allowed := regexp.MustCompile(`(?i)\boff by default\b|\bby default\b|\bdefault[- ]off\b|\bdefaults? to off\b`)
-	defaultWord := regexp.MustCompile(`(?i)\bdefaults?\b`)
-	sentence := regexp.MustCompile(`[^.\n]+`)
-	for _, rel := range []string{
-		"NOTICE",
-		"internal/agent/rung_search.go",
-		"docs/systems/coding-agent.md",
-		"changes/unreleased/feat-compaction-rung-search.md",
+var (
+	capWordsPattern    = regexp.MustCompile(`(?i)max_total_matches|max_matches_per_file|max_files|search\s*compressor|\b30\s*/\s*5\s*/\s*15\b|\b30, 5 and 15\b|\b30\s+lines,\s*5\s+per\s+file\b`)
+	capsAllowedWording = regexp.MustCompile(`(?i)\boff by default\b|\bby default\b|\bdefault[- ]off\b|\bdefaults? to off\b`)
+	capsDefaultWord    = regexp.MustCompile(`(?i)\bdefaults?\b`)
+	paragraphBreak     = regexp.MustCompile(`\n[ \t]*\n`)
+	lineWrap           = regexp.MustCompile(`[ \t]*\r?\n[ \t]*(?:>|-|\*|#)?[ \t]*`)
+	sentenceEnd        = regexp.MustCompile(`[.!?]+(?:\s+|$)`)
+)
+
+// capsParagraphs cuts text into the runs of lines that read as one passage. In prose
+// a passage ends at a blank line. In Go source a run of // comment lines is one
+// passage (the comment marker dropped) and every other line is a passage of its own,
+// so a stretch of code is never read as one long sentence.
+func capsParagraphs(text string, goSource bool) []string {
+	if !goSource {
+		return paragraphBreak.Split(text, -1)
+	}
+	var out []string
+	var run []string
+	flush := func() {
+		if len(run) > 0 {
+			out = append(out, strings.Join(run, "\n"))
+			run = nil
+		}
+	}
+	for _, ln := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		if t := strings.TrimSpace(ln); strings.HasPrefix(t, "//") {
+			run = append(run, strings.TrimPrefix(t, "//"))
+			continue
+		}
+		flush()
+		out = append(out, ln)
+	}
+	flush()
+	return out
+}
+
+// capsDefaultSentences returns every sentence of text that names the caps and calls
+// them defaults. A sentence ends at ".", "!" or "?" followed by white space, or at the
+// end of its passage (see capsParagraphs); a line wrap inside a passage (with its
+// list marker) is a space, so a "default" wrapped onto the next line cannot escape the
+// check. The rung's own default-off wording is allowed.
+func capsDefaultSentences(text string, goSource bool) []string {
+	var bad []string
+	for _, para := range capsParagraphs(text, goSource) {
+		para = lineWrap.ReplaceAllString(para, " ")
+		for _, sn := range sentenceEnd.Split(para, -1) {
+			if !capWordsPattern.MatchString(sn) {
+				continue
+			}
+			if capsDefaultWord.MatchString(capsAllowedWording.ReplaceAllString(sn, "")) {
+				bad = append(bad, strings.TrimSpace(sn))
+			}
+		}
+	}
+	return bad
+}
+
+func TestCapsDefaultGuardReadsAcrossWrappedLines(t *testing.T) {
+	for name, text := range map[string]string{
+		"same line":         "The rung keeps 30 / 5 / 15 as its defaults.",
+		"wrapped":           "The rung keeps up to 30 / 5 / 15,\nwhich are the documented\ndefaults of the idea.",
+		"star list wrapped": "* keeps 30 / 5 / 15 and\n  the default.",
+		"list wrapped":      "- keeps 30 lines, 5 per file and\n  15 files, the default.",
+		"cap phrase wrap":   "keeps 30 lines,\n5 per file as the default",
+		"cap phrase plain":  "It keeps 30 lines, 5 per file, which are the defaults of the idea.",
+		"default first":     "The defaults are 30 lines, 5 per file.",
 	} {
-		b, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(rel)))
+		if len(capsDefaultSentences(text, false)) == 0 {
+			t.Errorf("%s: the guard missed a caps sentence that says default: %q", name, text)
+		}
+	}
+	for name, text := range map[string]string{
+		"off by default":         "The rung keeps 30 / 5 / 15 and is off by default.",
+		"default off":            "The search compressor caps are chosen to match an example; the rung is default-off.",
+		"other sentence":         "The caps are 30 / 5 / 15.\nThe default ladder is unchanged.",
+		"other sentence wrapped": "The caps are 30 lines,\n5 per file.\n\nThe golden pins the default ladder.",
+		"no caps":                "The default is off.",
+	} {
+		if got := capsDefaultSentences(text, false); len(got) != 0 {
+			t.Errorf("%s: the guard flagged a sentence it should not: %q", name, got)
+		}
+	}
+}
+
+func TestCapsDefaultGuardReadsGoComments(t *testing.T) {
+	for name, text := range map[string]string{
+		"comment wrapped":  "// the search compressor keeps\n// the default values for\n// every cap.\nx := 1",
+		"indented comment": "\t// keeps 30 / 5 / 15 as\n\t// the defaults of the idea.\n",
+		"string literal":   "\tt.Errorf(\"the caps are the documented defaults of the idea (30 lines, 5 per file, 15 files)\")\n",
+		"crlf comment":     "// keeps 30 / 5 / 15 as\r\n// the defaults.\r\n",
+	} {
+		if len(capsDefaultSentences(text, true)) == 0 {
+			t.Errorf("%s: the guard missed a caps sentence that says default: %q", name, text)
+		}
+	}
+	for name, text := range map[string]string{
+		"code stretch":   "hits := benignHits(18, 8, 40)\nswitch x {\ndefault:\n}\nconst a = 30 // 30 / 5 / 15\n",
+		"two passages":   "// keeps 30 / 5 / 15.\n\n// The default ladder is unchanged.\n",
+		"off by default": "// keeps 30 / 5 / 15; the rung is off by default.\n",
+	} {
+		if got := capsDefaultSentences(text, true); len(got) != 0 {
+			t.Errorf("%s: the guard flagged a sentence it should not: %q", name, got)
+		}
+	}
+}
+
+// Every sentence that names the caps is read, in the code, the notice, the docs, the
+// fragment and this package's own tests; "default" in one fails, except the rung's
+// own default-off wording. Where a file describes the caps it must attribute them.
+func TestSearchRungCapsAreAttributedToTheConfigurationExample(t *testing.T) {
+	for _, f := range []struct {
+		rel       string
+		attribute bool // the file must say the caps are the values shown in the upstream configuration example
+	}{
+		{"NOTICE", true},
+		{"internal/agent/rung_search.go", true},
+		{"docs/systems/coding-agent.md", true},
+		{"changes/unreleased/feat-compaction-rung-search.md", true},
+		{"internal/agent/rung_search_test.go", false},
+	} {
+		b, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(f.rel)))
 		if err != nil {
-			if os.IsNotExist(err) && strings.HasPrefix(rel, "changes/unreleased/") {
+			if os.IsNotExist(err) && strings.HasPrefix(f.rel, "changes/unreleased/") {
 				continue // the fragment is consumed at release
 			}
 			t.Fatal(err)
 		}
-		for _, sn := range sentence.FindAllString(string(b), -1) {
-			if !capWords.MatchString(sn) {
-				continue
-			}
-			if defaultWord.MatchString(allowed.ReplaceAllString(sn, "")) {
-				t.Errorf("%s: %q calls the caps defaults; say \"the values shown in the upstream configuration example\" or \"chosen to match\"", rel, strings.TrimSpace(sn))
-			}
+		for _, sn := range capsDefaultSentences(string(b), strings.HasSuffix(f.rel, ".go")) {
+			t.Errorf("%s: %q calls the caps defaults; say \"the values shown in the upstream configuration example\" or \"chosen to match\"", f.rel, sn)
 		}
-		if !strings.Contains(string(b), "configuration example") && !strings.Contains(string(b), "chosen to match") {
-			t.Errorf("%s: must say the caps are the values shown in the upstream configuration example (or chosen to match)", rel)
+		if f.attribute && !strings.Contains(string(b), "configuration example") && !strings.Contains(string(b), "chosen to match") {
+			t.Errorf("%s: must say the caps are the values shown in the upstream configuration example (or chosen to match)", f.rel)
 		}
 	}
 }
