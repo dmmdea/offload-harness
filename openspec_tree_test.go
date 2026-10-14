@@ -236,19 +236,30 @@ func openspecScriptEnv(t *testing.T, bash string, extra ...string) []string {
 	return withBashOnPath(env, bash)
 }
 
-// withStandInsFirst puts dir, the folder of a test's stand-in tools, on PATH for a script environment built by
-// openspecScriptEnv.
+// withStandInsFirst puts dir, the folder of a test's stand-in tools, at the head of PATH in a script environment built
+// by openspecScriptEnv. withBashOnPath puts bash's own directory first, and on Linux that is /usr/bin, where the real
+// npm lives. A stand-in must come before it, or the script runs the tool it stands in for. npm's registry is also
+// pointed at a closed loopback port: a stand-in that is shadowed anyway then fails at once instead of reaching the
+// network.
 func withStandInsFirst(env []string, dir string) []string {
-	out := make([]string, 0, len(env)+1)
+	out := make([]string, 0, len(env)+2)
 	cur := ""
 	for _, kv := range env {
-		if k, v, ok := strings.Cut(kv, "="); ok && strings.EqualFold(k, "PATH") {
+		k, v, ok := strings.Cut(kv, "=")
+		switch {
+		case ok && strings.EqualFold(k, "PATH"):
 			cur = v
+			continue
+		case ok && strings.EqualFold(k, "npm_config_registry"):
 			continue
 		}
 		out = append(out, kv)
 	}
-	return append(out, "PATH="+cur+string(os.PathListSeparator)+dir)
+	path := dir
+	if cur != "" {
+		path += string(os.PathListSeparator) + cur
+	}
+	return append(out, "PATH="+path, "npm_config_registry=http://127.0.0.1:9/")
 }
 
 // On Linux bash lives in /usr/bin beside the real npm. If bash's directory came ahead of the stand-ins, the install
