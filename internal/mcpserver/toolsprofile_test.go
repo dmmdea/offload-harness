@@ -68,7 +68,9 @@ func TestCompactKeepsEveryToolAndParameter(t *testing.T) {
 	full := listTools(t, fullSurfaceCfg("full"))
 	compact := listTools(t, fullSurfaceCfg("compact"))
 	// The surface must still hold the optional lanes the test claims to cover: the browse lane, the delegation pair and one tool
-	// of each accelerator. A bare count would pass at 31 tools with all of them gone.
+	// of each device that owns a name on this combined surface (the RKNPU owns none here, because the Hailo and the Coral are
+	// listed before it; its table, like each device's, is read on its own surface by TestEveryDeviceTableIsReadByTheGate and
+	// TestCompactKeepsEveryToolAndParameterOnEverySurface). A bare count would pass at 31 tools with all of them gone.
 	have := map[string]bool{}
 	for _, tool := range full {
 		have[tool.Name] = true

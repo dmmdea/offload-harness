@@ -302,15 +302,16 @@ clause-boundary cut no longer drops the "input files you name travel to it" tail
 job" sentence (`offload_assess_image`, `offload_ocr`, `offload_vqa`), transcribe's route sentence, and on the 45-tool surface
 the browse typed-decision sentence. The four Tier-1 tools and the per-tool figures above do not move. On the variant whose
 three accelerators are fleet accelerators (45 tools, 13 of them forwarders carrying the note) the lists measure 34,250 full
-and 20,285 compact in the template rendering (the note is kept, so it is in both); the forwarding note is 718 tokens of the
-full list.
+and 20,285 compact in the template rendering (the note is kept, so it is in both); the 13 forwarding notes together are 718 tokens
+of the full list.
 
 The default is unchanged: with no key, with `"full"`, and with the shipped `Default()`, the `tools/list` result is
 byte-identical to the one the 0.186.0 base advertises (SHA-256 `e4840d2c3a9e879d...` for both, captured with the helper
 below on each tree, and the same hash again after the data-leaves-the-box change).
 
 To re-measure: `OFFLOAD_TOOLS_DUMP_DIR=<dir> OFFLOAD_TOOLS_DUMP_PROFILE=<full|compact> go test ./internal/mcpserver -run TestToolsListDump`
-writes the wire bytes of one profile (the test is skipped without the variable and asserts nothing); tokenize that file for
+writes the wire bytes of one profile (the test is skipped without the variable and asserts nothing; add
+`OFFLOAD_TOOLS_DUMP_SURFACE=full-surface` or `fleet-surface` for the 45-tool row and the fleet-accelerator variant); tokenize that file for
 the JSON column, and render its tools through the template for the other.
 
 ## Caveats

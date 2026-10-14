@@ -95,6 +95,17 @@ func TestToolsListDump(t *testing.T) {
 	if p := os.Getenv("OFFLOAD_TOOLS_DUMP_PROFILE"); p != "" {
 		cfg.ToolsSchemaProfile = p
 	}
+	// OFFLOAD_TOOLS_DUMP_SURFACE picks a larger surface than the default box: "full-surface" is the 45-tool one the review gate
+	// reads (the browse lane and the three accelerators on), "fleet-surface" the same with the accelerators as fleet accelerators.
+	switch os.Getenv("OFFLOAD_TOOLS_DUMP_SURFACE") {
+	case "":
+	case "full-surface":
+		cfg = fullSurfaceCfg(cfg.ToolsSchemaProfile)
+	case "fleet-surface":
+		cfg = fleetSurfaceCfg(cfg.ToolsSchemaProfile)
+	default:
+		t.Fatalf("OFFLOAD_TOOLS_DUMP_SURFACE = %q: want full-surface or fleet-surface", os.Getenv("OFFLOAD_TOOLS_DUMP_SURFACE"))
+	}
 	label := os.Getenv("OFFLOAD_TOOLS_DUMP_LABEL")
 	if label == "" {
 		label = "tools-list"
