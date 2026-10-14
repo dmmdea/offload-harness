@@ -43,6 +43,25 @@ func passTok(score, tokens float64) Attempt {
 }
 
 // passOnly is a passing attempt with a score and no cost.
+// incScore is the incumbent's score on task i in the tests that are about something other than the primary: a
+// little spread (1 and 0.98), because a sample whose pairs all differ by the same amount has no spread to read
+// and its lower end is held back.
+func incScore(i int) float64 {
+	if i%2 == 1 {
+		return 0.98
+	}
+	return 1
+}
+
+// armScore is the 0..10 score of task i for the efficiency tests: the incumbent ("i") has a little spread
+// (8.0 and 8.1), the candidate scores 8.
+func armScore(tag string, i int) float64 {
+	if tag == "i" && i%2 == 1 {
+		return 8.1
+	}
+	return 8
+}
+
 func passOnly(score float64) Attempt { return Attempt{Outcome: OutcomePass, Score: f64(score)} }
 
 // failOnly is a task_fail attempt with a score and no cost.
@@ -159,7 +178,7 @@ func TestWithinTaskTimeoutsCannotMakeACandidateBetter(t *testing.T) {
 	if r.Verdict == VerdictAdopt {
 		t.Fatalf("a candidate whose two other attempts did not finish was adopted: %s", marshal(t, r))
 	}
-	if r.Delta != 0 || r.Lo != 0 || r.Hi != 0 {
+	if r.Delta != 0 || !(r.Lo < 0) || r.Hi != 0 {
 		t.Fatalf("the unfinished attempts score 0, so the candidate ties the incumbent: delta %v lo %v hi %v", r.Delta, r.Lo, r.Hi)
 	}
 	if r.ImputedAttempts != 2*n || r.UnusableAttempts.Candidate != 2*n || r.UnusableAttempts.Incumbent != 0 {
@@ -220,7 +239,7 @@ func TestImputationUsesTheWorstScoreOfTheClass(t *testing.T) {
 			cand := armFrom("c", n, func(i int) []Attempt { return []Attempt{noScore(outcomes[i%len(outcomes)])} })
 			cand.Tasks = cand.Tasks[:n-5] // the last five are never listed
 			r := mustGate(t, b, h, inputFor(h, inc, cand))
-			if r.NUsed != n || r.Delta != tc.wantDelta || r.Lo != tc.wantDelta || r.Hi != tc.wantDelta {
+			if r.NUsed != n || r.Delta != tc.wantDelta || r.Lo > tc.wantDelta || r.Hi != tc.wantDelta {
 				t.Fatalf("every candidate task scores the worst: want delta %v, got n=%d %v [%v, %v]", tc.wantDelta, r.NUsed, r.Delta, r.Lo, r.Hi)
 			}
 			if r.ImputedAttempts != n || r.AttemptCounts.Candidate["not_run"] != 3+5 {
@@ -295,7 +314,7 @@ func TestIncumbentUnusableAttemptsAreSkippedAndExcludeThePair(t *testing.T) {
 	}
 	// t000..t002 score 1 (the timeout is skipped, not averaged in as 0); the other 15 score 0.
 	incS := append(repeatF(1, 3), repeatF(0, 15)...)
-	d, lo, hi := primaryInterval(incS, repeatF(1, 18))
+	d, lo, hi := primaryInterval(incS, repeatF(1, 18), 1)
 	if r.Delta != d || r.Lo != lo || r.Hi != hi {
 		t.Fatalf("the incumbent's task scores are wrong: gate %v %v %v want %v %v %v", r.Delta, r.Lo, r.Hi, d, lo, hi)
 	}
@@ -352,17 +371,18 @@ func TestExcludedShareIsTheLargestOfTheThreeRatios(t *testing.T) {
 }
 
 // A constant difference exactly on a margin that is not a sum of floats is still exactly on it:
-// 0.1 - 0.2 is -0.1, the margin. The interval is that single value, taken from the data, so neither end
-// clears the margin and the verdict is INCONCLUSIVE. A mean computed as a sum reads -0.10000000000000002
-// (sixteen copies of -0.1 do not sum to -1.6) and would BLOCK.
+// 0.1 - 0.2 is -0.1, the margin. The delta and the upper end are that single value, taken from the data, so
+// the upper end does not clear the margin, and the lower end is held back (no spread), so it does not either:
+// the verdict is INCONCLUSIVE. A mean computed as a sum reads -0.10000000000000002 (sixteen copies of -0.1
+// do not sum to -1.6) and would BLOCK.
 func TestGateConstantDifferenceExactlyOnTheMarginIsInconclusive(t *testing.T) {
 	const n = 16
 	p := niUnitPre(n)
 	p.Primary.Margin = f64(0.1)
 	b, h := freeze(t, p, nil)
 	r := mustGate(t, b, h, inputFor(h, arm("i", repeatF(0.2, n), repeatF(1000, n)), arm("c", repeatF(0.1, n), repeatF(800, n))))
-	if r.Delta != -0.1 || r.Lo != -0.1 || r.Hi != -0.1 {
-		t.Fatalf("every difference is exactly -0.1: want the one value, got %v %v %v", r.Delta, r.Lo, r.Hi)
+	if r.Delta != -0.1 || !(r.Lo < -0.1) || r.Hi != -0.1 {
+		t.Fatalf("every difference is exactly -0.1: want the one value and a lower end below it, got %v %v %v", r.Delta, r.Lo, r.Hi)
 	}
 	if r.Verdict != VerdictInconclusive {
 		t.Fatalf("a difference exactly on the margin is neither ADOPT nor BLOCK: %s %s", r.Verdict, r.Reason)
@@ -630,8 +650,8 @@ func allTied(t *testing.T, n int, pre PreReg, inc, cand float64) GateResult {
 
 // Sixteen ties say little about a margin of 0.05: a candidate that lost 5% of the incumbent's passes
 // would tie all sixteen pairs 44% of the time. A sample with no spread has no standard error to read, so
-// the interval widens to what the sample cannot rule out: the lower end is the one for which a candidate
-// exactly at it ties every pair 2.5% of the time, 1 - 0.025^(1/n) of the score range below the tie.
+// the lower end drops to what the sample cannot rule out: the one for which a candidate exactly at it ties
+// every pair 2.5% of the time, 1 - 0.025^(1/n) of the score range below the tie.
 // That clears a margin of 0.05 from 80 tasks (4.5%) and not from 40 (8.8%).
 func TestAllTiedNonInferiorityDoesNotCertifyTheMarginOnASmallSample(t *testing.T) {
 	for _, tc := range []struct {
@@ -643,19 +663,36 @@ func TestAllTiedNonInferiorityDoesNotCertifyTheMarginOnASmallSample(t *testing.T
 			t.Errorf("n=%d, every pair tied, tokens halved: want %s, got %s %s (delta %v lo %v hi %v)", tc.n, tc.want, r.Verdict, r.Reason, r.Delta, r.Lo, r.Hi)
 		}
 		wantLo := -(1 - math.Pow(0.025, 1/float64(tc.n)))
-		if math.Abs(r.Lo-wantLo) > 1e-12 || math.Abs(r.Hi+wantLo) > 1e-12 {
-			t.Errorf("n=%d: the interval of a tie is +-%v, got [%v, %v]", tc.n, -wantLo, r.Lo, r.Hi)
+		if math.Abs(r.Lo-wantLo) > 1e-12 || r.Hi != 0 {
+			t.Errorf("n=%d: the interval of a tie is [%v, 0], got [%v, %v]", tc.n, wantLo, r.Lo, r.Hi)
 		}
 	}
 }
 
-// A superiority tie is INCONCLUSIVE because its interval spans 0, not because it is one value.
-func TestAllTiedSuperiorityIntervalSpansZero(t *testing.T) {
+// The same on a 0..10 judge scale, where the margin is 0.5 and the widening is ten times as wide: a mutant that
+// forgot the width of the range would certify the margin from 16 ties.
+func TestAllTiedNonInferiorityScalesWithTheScoreRange(t *testing.T) {
+	for _, tc := range []struct {
+		n    int
+		want string
+	}{{16, VerdictInconclusive}, {40, VerdictInconclusive}, {80, VerdictAdopt}} {
+		r := allTied(t, tc.n, niPre(tc.n), 8, 8)
+		if r.Margin != 0.5 || r.Verdict != tc.want {
+			t.Errorf("n=%d on 0..10 with margin %v: want %s, got %s %s (lo %v)", tc.n, r.Margin, tc.want, r.Verdict, r.Reason, r.Lo)
+		}
+		if wantLo := -10 * (1 - math.Pow(0.025, 1/float64(tc.n))); math.Abs(r.Lo-wantLo) > 1e-12 {
+			t.Errorf("n=%d: the lower end of a tie is %v, got %v", tc.n, wantLo, r.Lo)
+		}
+	}
+}
+
+// A superiority tie is INCONCLUSIVE because its lower end is below 0, not because it is one value.
+func TestAllTiedSuperiorityIsInconclusive(t *testing.T) {
 	const n = 16
 	b, h := freeze(t, supPre(n), nil)
 	r := mustGate(t, b, h, inputFor(h, arm("i", repeatF(0.5, n), nil), arm("c", repeatF(0.5, n), nil)))
-	if r.Verdict != VerdictInconclusive || r.Delta != 0 || !(r.Lo < 0 && r.Hi > 0) {
-		t.Fatalf("a tie keeps the incumbent with an interval around 0: %+v", r)
+	if r.Verdict != VerdictInconclusive || r.Delta != 0 || !(r.Lo < 0) || r.Hi != 0 {
+		t.Fatalf("a tie keeps the incumbent with a lower end below 0: %+v", r)
 	}
 }
 
@@ -885,7 +922,7 @@ func TestEfficiencyValuesMustBeFiniteAndNotNegative(t *testing.T) {
 func TestUnresolvedMetricShareAboveTheCapBlocksAdoptInNonInferiority(t *testing.T) {
 	const n = 40
 	b, h := freeze(t, niUnitPre(n), nil)
-	inc := armFrom("i", n, func(int) []Attempt { return []Attempt{passTok(1, 1000)} })
+	inc := armFrom("i", n, func(i int) []Attempt { return []Attempt{passTok(incScore(i), 1000)} })
 	cand := armFrom("c", n, func(i int) []Attempt {
 		if i < 24 {
 			return []Attempt{{Outcome: OutcomePass, Score: f64(1), Metrics: map[string]*float64{tokensName: nil}}}
@@ -969,10 +1006,10 @@ func TestTimedOutTasksWithNullCostStayUnresolved(t *testing.T) {
 func TestAnUnfinishedAttemptsRecordedCostIsSpentNotHidden(t *testing.T) {
 	const n, k = 20, 25
 	b, h := freeze(t, niUnitPre(n), nil)
-	inc := armFrom("i", n, func(int) []Attempt {
+	inc := armFrom("i", n, func(i int) []Attempt {
 		as := make([]Attempt, k)
 		for j := range as {
-			as[j] = passTok(1, 1000)
+			as[j] = passTok(incScore(i), 1000)
 		}
 		return as
 	})
@@ -1024,7 +1061,7 @@ func TestSignificantlyWorseEfficiencyMetricVetoesAdopt(t *testing.T) {
 	b, h := freeze(t, p, nil)
 	mk := func(tag string, tok func(i int) float64, mem func(i int) float64) Arm {
 		return armFrom(tag, n, func(i int) []Attempt {
-			return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: map[string]*float64{tokensName: f64(tok(i)), "memory_gib": f64(mem(i))}}}
+			return []Attempt{{Outcome: OutcomePass, Score: f64(armScore(tag, i)), Metrics: map[string]*float64{tokensName: f64(tok(i)), "memory_gib": f64(mem(i))}}}
 		})
 	}
 	inc := mk("i", func(int) float64 { return 1000 }, func(int) float64 { return 2 })
@@ -1121,7 +1158,7 @@ func TestAMetricResolvedOnFewerThanMinPairsStillVetoesWhenItIsMuchWorse(t *testi
 	b, h := freeze(t, p, nil)
 	mk := func(tag string, tok float64, mem func(i int) *float64) Arm {
 		return armFrom(tag, n, func(i int) []Attempt {
-			return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: map[string]*float64{tokensName: f64(tok), "memory_gib": mem(i)}}}
+			return []Attempt{{Outcome: OutcomePass, Score: f64(armScore(tag, i)), Metrics: map[string]*float64{tokensName: f64(tok), "memory_gib": mem(i)}}}
 		})
 	}
 	inc := mk("i", 1000, func(int) *float64 { return f64(2) })
@@ -1181,7 +1218,7 @@ func TestSeveralMetricsAreReadOnABonferroniInterval(t *testing.T) {
 				for _, nm := range names {
 					m[nm] = f64(vals[i])
 				}
-				return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: m}}
+				return []Attempt{{Outcome: OutcomePass, Score: f64(armScore(tag, i)), Metrics: m}}
 			})
 		}
 		return mk("i", incV), mk("c", candV)

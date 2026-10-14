@@ -25,26 +25,32 @@ import "math"
 // its legacy callers; the gate reads the efficiency metrics with it, not the primary.
 
 // primaryInterval returns the mean paired difference and the lower and upper ends of its 95%
-// interval over aligned per-task scores. With fewer than two tasks, or unaligned input, there is
-// nothing to conclude and it returns zeros, as BootstrapDeltaMean does. When every difference is
-// equal (zero variance, so no spread to measure) the interval is that one value, taken exactly
-// from the data and not from a sum (ten copies of 0.1 do not sum to 1): the strict comparisons of
-// the verdict then decide, a difference exactly on the margin is neither ADOPT nor BLOCK, and a
-// tie is exactly 0. A sum that overflows gives a number that is not finite, which the caller
-// refuses.
-func primaryInterval(inc, cand []float64) (delta, lo, hi float64) {
+// interval over aligned per-task scores, which lie in a range of width span (the primary's score
+// range). With fewer than two tasks, or unaligned input, there is nothing to conclude and it
+// returns zeros, as BootstrapDeltaMean does. A sum that overflows gives a number that is not
+// finite, which the caller refuses.
+//
+// When every difference is equal (to within a rounding error of the scores) there is no spread to
+// read a standard error from, and a point interval would certify anything: sixteen ties in a row
+// are what a candidate that loses 5% of the incumbent's passes produces 44% of the time. The
+// lower end then holds what the sample cannot rule out, see zeroSpreadInterval.
+func primaryInterval(inc, cand []float64, span float64) (delta, lo, hi float64) {
 	n := len(inc)
 	if n != len(cand) || n < 2 {
 		return 0, 0, 0
 	}
 	fn := float64(n)
+	var tol float64
+	if span > 0 && finite(span) {
+		tol = equalTolerance * span
+	}
 	var sum float64
 	first := cand[0] - inc[0]
 	same := true
 	for i := range inc {
 		d := cand[i] - inc[i]
 		sum += d
-		if d != first {
+		if math.Abs(d-first) > tol {
 			same = false
 		}
 	}
@@ -53,7 +59,8 @@ func primaryInterval(inc, cand []float64) (delta, lo, hi float64) {
 		return delta, delta, delta
 	}
 	if same {
-		return first, first, first
+		lo, hi = zeroSpreadInterval(first, n, span)
+		return first, lo, hi
 	}
 	var ss float64
 	for i := range inc {
@@ -64,6 +71,33 @@ func primaryInterval(inc, cand []float64) (delta, lo, hi float64) {
 	// For n <= c^2 + 1 (six tasks or fewer) the form has no room: the denominator is held at 1.
 	half := c * math.Sqrt(ss/fn) / math.Sqrt(math.Max(fn-c*c, 1))
 	return delta, delta - half, delta + half
+}
+
+// equalTolerance is how far apart, as a share of the score range, two paired differences can be and
+// still count as the same one: the rounding of float scores (0.3 - 0.2 against 0.2 - 0.1) is not a
+// spread.
+const equalTolerance = 1e-9
+
+// zeroSpreadInterval is the interval of n paired differences that all equal c, each lying in
+// [-span, span]: the single value c for the upper end, and for the lower end the true mean below
+// which the sample would be 2.5% likely or less. A distribution with mean t has mass at most
+// p = (span + t) / (span + c) on the value c (the rest of it at best at -span), so n equal values
+// have probability p^n, and p^n = 0.025 gives
+//
+//	lo = q (span + c) - span,   q = 0.025^(1/n).
+//
+// It is exact for that bound, not a rule of thumb. A tie (c = 0) at n = 16 sits 0.206 of the range
+// below 0, 0.088 at 40 and 0.045 at 80, so a margin of 0.05 on a unit range is certified by 80
+// ties and not by 40. Only the end a candidate has to clear is widened: the incumbent wins every
+// tie (R4), so a sample with no spread is never read as proof against it, and a candidate that
+// loses every task by the same amount is still blocked. A span that is not a positive number
+// leaves the single value.
+func zeroSpreadInterval(c float64, n int, span float64) (lo, hi float64) {
+	if !(span > 0) || !finite(span) || !finite(c) {
+		return c, c
+	}
+	q := math.Pow(0.025, 1/float64(n))
+	return math.Min(c, q*(span+math.Max(-span, math.Min(span, c)))-span), c
 }
 
 // tCritical975 is t(df, .975), the two-sided 95% critical value of Student's t with df degrees of

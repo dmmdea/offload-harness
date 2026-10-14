@@ -205,7 +205,8 @@ type armTask struct {
 	// task's attempts that ran: on the candidate arm every attempt but a not_run (a pass,
 	// task_fail, cheat, timeout, infra_error or judge_error spent what it recorded); on the
 	// incumbent arm the attempts that were scored (an unfinished one is skipped). A metric with no
-	// resolved value is absent: unresolved, never 0.
+	// resolved value is absent: unresolved, never 0. So is a metric an unfinished candidate
+	// attempt of the task did not record.
 	metric map[string]float64
 }
 
@@ -231,9 +232,14 @@ type armView struct {
 // worst too, so a candidate cannot improve its mean by not finishing what it would fail. A
 // declared task the arm lacks, or holds with no attempt, is one not_run attempt, so every
 // declared task is usable. The cost of an attempt follows whether it ran: a pass, task_fail,
-// cheat, timeout, infra_error or judge_error spent what it recorded and contributes it (a null
-// stays unresolved, never 0), while a not_run, explicit or the placeholder for a missing task,
-// never ran and carries nothing. Otherwise a candidate could hide what its timeouts burned.
+// cheat, timeout, infra_error or judge_error spent what it recorded and contributes it, while a
+// not_run, explicit or the placeholder for a missing task, never ran and carries nothing.
+// Otherwise a candidate could hide what its timeouts burned. A cost that was not recorded is a
+// null and stays unresolved, never 0: on a pass, task_fail or cheat the task's cost is the mean
+// of the attempts that recorded one, and on a timeout, infra_error or judge_error the task's cost
+// is unresolved altogether, because the attempt that did not finish is the one likely to have
+// spent the most and a candidate must not keep the savings of the attempts around it by leaving
+// its cost out.
 //
 // Incumbent arm: a cheat enters at worst, and a timeout, infra_error, judge_error or not_run
 // attempt is skipped, its cost included; a task with no remaining attempt is unusable on this
@@ -264,7 +270,9 @@ func scoreArm(a Arm, declared []string, effs []EfficiencyMetric, worst float64, 
 		var n int
 		msum := make(map[string]float64, len(effs))
 		mn := make(map[string]int, len(effs))
+		blind := make(map[string]bool, len(effs)) // a metric an unfinished candidate attempt did not record
 		for _, at := range t.Attempts {
+			unfinished := false
 			v.counts[string(at.Outcome)]++
 			v.attempts++
 			switch at.Outcome {
@@ -281,10 +289,11 @@ func scoreArm(a Arm, declared []string, effs []EfficiencyMetric, worst float64, 
 				}
 				// The candidate's unfinished attempt ran: it enters the score at the worst and,
 				// like a cheat, the cost it recorded is spent, so it falls through to the metric
-				// loop below. A cost it did not record (null) stays unresolved there.
+				// loop below. A cost it did not record (null) leaves the task's cost unresolved.
 				v.imputed++
 				sum += worst
 				n++
+				unfinished = true
 			default: // not_run: it never ran, so it carries no cost on either arm
 				v.unusable++
 				if imputeUnusable {
@@ -298,6 +307,8 @@ func scoreArm(a Arm, declared []string, effs []EfficiencyMetric, worst float64, 
 				if p := at.Metrics[e.Name]; p != nil {
 					msum[e.Name] += *p
 					mn[e.Name]++
+				} else if unfinished {
+					blind[e.Name] = true
 				}
 			}
 		}
@@ -306,7 +317,7 @@ func scoreArm(a Arm, declared []string, effs []EfficiencyMetric, worst float64, 
 		}
 		task := armTask{usable: true, score: sum / float64(n), metric: map[string]float64{}}
 		for _, e := range effs {
-			if mn[e.Name] > 0 {
+			if mn[e.Name] > 0 && !blind[e.Name] {
 				task.metric[e.Name] = msum[e.Name] / float64(mn[e.Name])
 			}
 		}
@@ -477,7 +488,8 @@ func Gate(b Baseline, baselineHash string, in GateInput) (GateResult, error) {
 	for k, p := range pairs {
 		incScores[k], candScores[k] = p.inc.score, p.cand.score
 	}
-	res.Delta, res.Lo, res.Hi = primaryInterval(incScores, candScores)
+	scoreLo, scoreHi, _ := b.Primary.scoreBounds()
+	res.Delta, res.Lo, res.Hi = primaryInterval(incScores, candScores, scoreHi-scoreLo)
 	if !finite(res.Delta) || !finite(res.Lo) || !finite(res.Hi) {
 		return GateResult{}, refusef("%s", overflowMsg)
 	}

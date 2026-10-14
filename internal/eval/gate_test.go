@@ -151,6 +151,9 @@ func TestGateVerdictTable(t *testing.T) {
 	// 14 of 16 tasks flip from 0 to 1: a clear gain with a little spread.
 	incSup := append(repeatF(0, 14), 1, 1)
 	tokens := repeatF(1000, sixteen)
+	// Incumbent scores with a little spread (8.0 and 8.1): a sample whose pairs all differ by the same
+	// amount has no spread to read, and its lower end is held back (TestAllTiedNonInferiority...).
+	incWide := alternate(8.0, 8.1, sixteen)
 
 	rows := []row{
 		{name: "1 superiority ADOPT", pre: supPre(sixteen), inc: arm("i", incSup, nil), can: arm("c", ones, nil),
@@ -172,7 +175,7 @@ func TestGateVerdictTable(t *testing.T) {
 				}
 			}},
 		{name: "4 non-inferiority ADOPT (inside the margin, tokens drop)", pre: niPre(sixteen),
-			inc: arm("i", repeatF(8.0, sixteen), tokens), can: arm("c", repeatF(7.75, sixteen), repeatF(800, sixteen)),
+			inc: arm("i", incWide, tokens), can: arm("c", repeatF(7.75, sixteen), repeatF(800, sixteen)),
 			verdict: VerdictAdopt, extra: func(t *testing.T, r GateResult) {
 				if r.Margin != 0.5 || len(r.Efficiency) != 1 || !r.Efficiency[0].Improves || val(r.Efficiency[0].Delta) != -200 {
 					t.Fatalf("want margin 0.5 and an improving tokens metric (delta -200): %+v", r)
@@ -191,28 +194,28 @@ func TestGateVerdictTable(t *testing.T) {
 		{name: "6b boundary: every difference exactly -m with tokens down is INCONCLUSIVE, not ADOPT and not BLOCK", pre: niPre(sixteen),
 			inc: arm("i", repeatF(8.0, sixteen), tokens), can: arm("c", repeatF(7.5, sixteen), repeatF(800, sixteen)),
 			verdict: VerdictInconclusive, extra: func(t *testing.T, r GateResult) {
-				if r.Lo != -0.5 || r.Hi != -0.5 || r.Delta != -0.5 {
-					t.Fatalf("setup: the row must sit exactly on -m, got %v %v %v", r.Delta, r.Lo, r.Hi)
+				if !(r.Lo < -0.5) || r.Hi != -0.5 || r.Delta != -0.5 {
+					t.Fatalf("setup: the row must sit exactly on -m with no spread (its lower end held back), got %v %v %v", r.Delta, r.Lo, r.Hi)
 				}
 				if !r.Efficiency[0].Improves {
 					t.Fatal("setup: the efficiency metric must improve so only the primary boundary decides")
 				}
 			}},
 		{name: "6c non-inferior with the metric present but equal: INCONCLUSIVE", pre: niPre(sixteen),
-			inc: arm("i", repeatF(8.0, sixteen), tokens), can: arm("c", repeatF(7.75, sixteen), tokens),
+			inc: arm("i", incWide, tokens), can: arm("c", repeatF(7.75, sixteen), tokens),
 			verdict: VerdictInconclusive, reason: "non-inferior but no declared efficiency metric improved", extra: func(t *testing.T, r GateResult) {
 				if r.Lo <= -0.5 || r.Efficiency[0].Improves {
 					t.Fatalf("setup: want lo > -m and a metric that does not improve: %+v", r)
 				}
 			}},
 		{name: "6d non-inferior with the metric worse: INCONCLUSIVE", pre: niPre(sixteen),
-			inc: arm("i", repeatF(8.0, sixteen), tokens), can: arm("c", repeatF(7.75, sixteen), repeatF(1200, sixteen)),
+			inc: arm("i", incWide, tokens), can: arm("c", repeatF(7.75, sixteen), repeatF(1200, sixteen)),
 			verdict: VerdictInconclusive, reason: "declared efficiency metric " + tokensName + " got significantly worse"},
 		{name: "7 n below min_pairs is INCONCLUSIVE (the incumbent lost 6 of 20 tasks)", pre: supPre(20),
 			inc: withInfraErrors(arm("i", repeatF(0, 20), nil), 0, 1, 2, 3, 4, 5), can: arm("c", repeatF(1, 20), nil),
 			verdict: VerdictInconclusive, reason: "n=14 below min_pairs=16"},
 		{name: "9 a missing efficiency metric: non-inferiority cannot ADOPT", pre: niPre(sixteen),
-			inc: arm("i", repeatF(8.0, sixteen), nil), can: arm("c", repeatF(8.0, sixteen), nil),
+			inc: arm("i", incWide, nil), can: arm("c", repeatF(8.0, sixteen), nil),
 			verdict: VerdictInconclusive, reason: "declared efficiency metric " + tokensName + " has 16 of 16 pairs unresolved", extra: func(t *testing.T, r GateResult) {
 				e := r.Efficiency[0]
 				if e.N != 0 || e.Improves || e.UnresolvedPairs != 16 || !e.OverUnresolvedCap {
@@ -222,8 +225,8 @@ func TestGateVerdictTable(t *testing.T) {
 		{name: "11 incumbent tie (identical arrays): INCONCLUSIVE and keep_incumbent", pre: supPre(sixteen),
 			inc: arm("i", alternate(0.25, 1, sixteen), nil), can: arm("c", alternate(0.25, 1, sixteen), nil),
 			verdict: VerdictInconclusive, extra: func(t *testing.T, r GateResult) {
-				if !r.KeepIncumbent || r.Lo != 0 || r.Hi != 0 || r.Delta != 0 {
-					t.Fatalf("a tie must be exactly zero and keep the incumbent: %+v", r)
+				if !r.KeepIncumbent || !(r.Lo < 0) || r.Hi != 0 || r.Delta != 0 {
+					t.Fatalf("a tie is exactly zero, keeps the incumbent, and has a lower end below it: %+v", r)
 				}
 			}},
 		{name: "11b a tie on all zeros", pre: supPre(sixteen), inc: arm("i", zeros, nil), can: arm("c", zeros, nil),
@@ -296,7 +299,7 @@ func TestGateReadsThePrimaryOnSortedPairs(t *testing.T) {
 		ca.Tasks[i], ca.Tasks[j] = ca.Tasks[j], ca.Tasks[i]
 	}
 	r := mustGate(t, b, h, inputFor(h, ia, ca))
-	d, lo, hi := primaryInterval(inc, cand)
+	d, lo, hi := primaryInterval(inc, cand, 1)
 	if r.Delta != d || r.Lo != lo || r.Hi != hi {
 		t.Fatalf("gate (%v %v %v) != primaryInterval (%v %v %v)", r.Delta, r.Lo, r.Hi, d, lo, hi)
 	}
@@ -332,7 +335,7 @@ func TestGateEfficiencyMetricsUseTheSameBootstrap(t *testing.T) {
 		{Name: "tokens_saved", Class: EffTokens, LowerIsBetter: boolp(false)},
 	}
 	b, h := freeze(t, p, nil)
-	inc := arm("i", repeatF(8, n), repeatF(1000, n))
+	inc := arm("i", alternate(8, 8.1, n), repeatF(1000, n))
 	cand := arm("c", repeatF(8, n), nil)
 	tokI := []float64{1000, 1100, 900, 1050, 950, 1000, 1200, 800, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000}
 	tokC := make([]float64, n)
@@ -382,7 +385,7 @@ func TestGateEfficiencyMetricsUseTheSameBootstrap(t *testing.T) {
 		t.Fatalf("a higher-is-better metric improves when lo > 0, with the same B and seed: %+v (want %v %v %v)", e2, sd, slo, shi)
 	}
 	// Rule R2: ONE improving metric is enough. tokens and tokens_saved improve, peak_gib does not
-	// (and does not regress), and the primary (8 against 8) is inside the margin: ADOPT. "All must
+	// (and does not regress), and the primary (8 against 8 and 8.1) is inside the margin: ADOPT. "All must
 	// improve" would not.
 	if r.Verdict != VerdictAdopt {
 		t.Fatalf("at least one improving metric adopts, whatever the others do: %s %s", r.Verdict, r.Reason)
@@ -463,7 +466,7 @@ func TestGateEfficiencyIntervalSpanningZeroDoesNotImprove(t *testing.T) {
 func TestGateUnresolvedCostIsSkippedNeverZero(t *testing.T) {
 	const n = 20
 	b, h := freeze(t, niPre(n), nil)
-	inc := arm("i", repeatF(8, n), repeatF(1000, n))
+	inc := arm("i", alternate(8, 8.1, n), repeatF(1000, n))
 	cand := arm("c", repeatF(8, n), repeatF(500, n))
 	// Three pairs: the candidate's cost is unresolved (null). If nil were read as 0 these would
 	// look like free runs and drag the delta; skipped, the delta stays exactly -500.
@@ -485,7 +488,7 @@ func TestGateUnresolvedCostIsSkippedNeverZero(t *testing.T) {
 func TestGateEfficiencyNeedsMinPairsResolved(t *testing.T) {
 	const n = 20
 	b, h := freeze(t, niPre(n), nil)
-	inc := arm("i", repeatF(8, n), repeatF(1000, n))
+	inc := arm("i", alternate(8, 8.1, n), repeatF(1000, n))
 	cand := arm("c", repeatF(8, n), repeatF(500, n))
 	for i := 0; i < 5; i++ { // 5 unresolved leaves 15 < 16 resolved pairs
 		cand.Tasks[i].Attempts[0].Metrics[tokensName] = nil
@@ -527,7 +530,7 @@ func TestGatePerTaskEfficiencyAggregation(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		attempts []Attempt
-		want     float64
+		want     float64 // the task's cost; -1 when it is unknown, so that every pair is unresolved on the metric
 	}{
 		{"a nil value is not 0 and not in the divisor; an infra_error's recorded cost counts as spent",
 			[]Attempt{pass(f64(1000)), pass(nil), unfinished(OutcomeInfraError, f64(3000))}, 2000},
@@ -541,8 +544,8 @@ func TestGatePerTaskEfficiencyAggregation(t *testing.T) {
 			[]Attempt{unfinished(OutcomeJudgeError, f64(200)), pass(f64(600))}, 400},
 		{"a not_run attempt never ran: it carries nothing, whatever it records",
 			[]Attempt{pass(f64(1000)), unfinished(OutcomeNotRun, f64(99999))}, 1000},
-		{"an unfinished attempt with a null cost stays unresolved, it is not 0 and not in the divisor",
-			[]Attempt{pass(f64(1000)), unfinished(OutcomeTimeout, nil)}, 1000},
+		{"an unfinished attempt with a null cost leaves the task unresolved: it is not 0, and the attempts around it do not stand for it",
+			[]Attempt{pass(f64(1000)), unfinished(OutcomeTimeout, nil)}, -1},
 		{"a task that is nothing but a timeout is a pair with the cost it burned",
 			[]Attempt{unfinished(OutcomeTimeout, f64(20000))}, 20000},
 	} {
@@ -555,6 +558,12 @@ func TestGatePerTaskEfficiencyAggregation(t *testing.T) {
 			}
 			r := mustGate(t, b, h, inputFor(h, inc, cand))
 			e := r.Efficiency[0]
+			if tc.want < 0 {
+				if e.N != 0 || e.UnresolvedPairs != n || e.Improves || e.Delta != nil {
+					t.Fatalf("every task holds an unfinished attempt of unknown cost: want all %d pairs unresolved, got %+v", n, e)
+				}
+				return
+			}
 			want := tc.want - 1500
 			if e.N != n || e.UnresolvedPairs != 0 || val(e.Delta) != want || val(e.Lo) != want || val(e.Hi) != want {
 				t.Fatalf("the per-task cost must be %v (delta %v): got %+v", tc.want, want, e)
@@ -729,7 +738,7 @@ func TestGateCheatCountedSeparatelyAndScoredZero(t *testing.T) {
 	}
 	r := mustGate(t, b, h, inputFor(h, inc, cand))
 	candScores := append(repeatF(1, 8), repeatF(0, 8)...)
-	d, lo, hi := primaryInterval(incScores, candScores)
+	d, lo, hi := primaryInterval(incScores, candScores, 1)
 	if r.Delta != d || r.Lo != lo || r.Hi != hi {
 		t.Fatalf("a cheat must enter as 0: gate %v %v %v want %v %v %v", r.Delta, r.Lo, r.Hi, d, lo, hi)
 	}
@@ -809,7 +818,7 @@ func TestGateUnusableAttemptsAreImputedOnTheCandidateAndSkippedOnTheIncumbent(t 
 			candS = append(candS, 1)
 		}
 	}
-	d, lo, hi := primaryInterval(incS, candS)
+	d, lo, hi := primaryInterval(incS, candS, 1)
 	if r.Delta != d || r.Lo != lo || r.Hi != hi {
 		t.Fatalf("per-task scores wrong: gate %v %v %v want %v %v %v", r.Delta, r.Lo, r.Hi, d, lo, hi)
 	}
@@ -873,7 +882,7 @@ func TestGateHeldOutNonInferiorityThreshold(t *testing.T) {
 	p.HeldOut = []string{"t016", "t017"}
 	b, h := freeze(t, p, nil)
 	tokI, tokC := repeatF(1000, declared), repeatF(800, declared)
-	inc := arm("i", repeatF(8, declared), tokI)
+	inc := arm("i", append(alternate(8, 8.1, 16), 8, 8), tokI)
 	// Held-out candidate scores exactly 7.5: delta -0.5 = -m, which is not below -m.
 	c := arm("c", append(repeatF(7.75, 16), 7.5, 7.5), tokC)
 	r := mustGate(t, b, h, inputFor(h, inc, c))

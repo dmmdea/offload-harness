@@ -18,7 +18,7 @@ func TestPrimaryIntervalMatchesAnIndependentComputation(t *testing.T) {
 	for i := range d {
 		cand[i] = 0.25 + d[i]
 	}
-	delta, lo, hi := primaryInterval(inc, cand)
+	delta, lo, hi := primaryInterval(inc, cand, 1)
 	if !near(delta, 0.025) || !near(lo, -0.13109591433944429) || !near(hi, 0.18109591433944427) {
 		t.Fatalf("n=20: got %v %v %v", delta, lo, hi)
 	}
@@ -26,7 +26,7 @@ func TestPrimaryIntervalMatchesAnIndependentComputation(t *testing.T) {
 	// 16 tasks of continuous scores.
 	inc16 := []float64{0.805, 0.808, 0.515, 0.286, 0.054, 0.383, 0.408, 0.045, 0.049, 0.999, 0.652, 0.235, 0.435, 0.974, 0.898, 0.844}
 	cand16 := []float64{0.838, 0.625, 0.439, 0.238, 0.0, 0.544, 0.445, 0.0, 0.181, 1.0, 0.373, 0.234, 0.289, 0.989, 0.69, 0.898}
-	delta, lo, hi = primaryInterval(inc16, cand16)
+	delta, lo, hi = primaryInterval(inc16, cand16, 1)
 	if !near(delta, -0.037937500000000006) || !near(lo, -0.1109080595568126) || !near(hi, 0.03503305955681258) {
 		t.Fatalf("n=16: got %v %v %v", delta, lo, hi)
 	}
@@ -42,7 +42,7 @@ func TestPrimaryIntervalIsTheScoreFormOfTheTInterval(t *testing.T) {
 		for i := range inc {
 			inc[i], cand[i] = rng.Float64(), rng.Float64()*0.9
 		}
-		delta, lo, hi := primaryInterval(inc, cand)
+		delta, lo, hi := primaryInterval(inc, cand, 1)
 		c := tCritical975(n - 1)
 		stat := func(mu float64) float64 {
 			var m2 float64
@@ -73,10 +73,10 @@ func TestPrimaryIntervalInvariances(t *testing.T) {
 		inc[i], cand[i] = float64(rng.Intn(11))/10, float64(rng.Intn(11))/10
 	}
 	near := func(a, b float64) bool { return math.Abs(a-b) <= 1e-12*math.Max(1, math.Abs(b)) }
-	d0, lo0, hi0 := primaryInterval(inc, cand)
+	d0, lo0, hi0 := primaryInterval(inc, cand, 1)
 
 	shifted, shiftedC := plus(inc, 3.5), plus(cand, 3.5)
-	d, lo, hi := primaryInterval(shifted, shiftedC)
+	d, lo, hi := primaryInterval(shifted, shiftedC, 1)
 	if !near(d, d0) || !near(lo, lo0) || !near(hi, hi0) {
 		t.Errorf("shifting both arms moved the interval: %v %v %v vs %v %v %v", d, lo, hi, d0, lo0, hi0)
 	}
@@ -87,41 +87,62 @@ func TestPrimaryIntervalInvariances(t *testing.T) {
 		}
 		return out
 	}
-	d, lo, hi = primaryInterval(scale(inc, 10), scale(cand, 10))
+	d, lo, hi = primaryInterval(scale(inc, 10), scale(cand, 10), 10)
 	if !near(d, 10*d0) || !near(lo, 10*lo0) || !near(hi, 10*hi0) {
 		t.Errorf("a 0..10 scale must give ten times the 0..1 interval: %v %v %v vs %v %v %v", d, lo, hi, 10*d0, 10*lo0, 10*hi0)
 	}
-	d, lo, hi = primaryInterval(cand, inc)
+	d, lo, hi = primaryInterval(cand, inc, 1)
 	if !near(d, -d0) || !near(lo, -hi0) || !near(hi, -lo0) {
 		t.Errorf("swapping the arms must negate the interval: %v %v %v vs %v %v %v", d, lo, hi, -d0, -hi0, -lo0)
 	}
 }
 
-// With no spread to measure the interval is its one value; with nothing to conclude it is zeros; a sum
-// that overflows is not finite, for the caller to refuse.
+// With no spread to measure the delta and the upper end are the one value, taken from the data and not from a
+// sum, and the lower end is what the sample cannot rule out (see zeroSpreadInterval). The reference lower
+// ends were computed outside the package from q (span + c) - span with q = 0.025^(1/n).
+// With nothing to conclude the result is zeros; a sum that overflows is not finite, for the caller to refuse.
 func TestPrimaryIntervalDegenerateInputs(t *testing.T) {
+	near := func(got, want float64) bool { return math.Abs(got-want) <= 1e-12*math.Max(1, math.Abs(want)) }
 	for _, tc := range []struct {
 		name      string
 		inc, cand []float64
-		want      float64
+		span      float64
+		want      float64 // the delta, which is also the upper end
+		lo        float64
 	}{
-		{"every difference zero (a tie)", repeatF(0.5, 16), repeatF(0.5, 16), 0},
-		{"every difference +0.25", repeatF(0.5, 16), repeatF(0.75, 16), 0.25},
-		{"every difference -0.5", repeatF(8, 16), repeatF(7.5, 16), -0.5},
-		{"two tasks, the same difference", []float64{1, 2}, []float64{1.5, 2.5}, 0.5},
-		// Sixteen copies of -0.1 sum to -1.6000000000000003, whose sixteenth is not -0.1: the single
-		// value must come from the data, not from the sum.
-		{"every difference -0.1 (not a sum of floats)", repeatF(0.2, 16), repeatF(0.1, 16), -0.1},
+		{"every difference zero (a tie), 16 tasks", repeatF(0.5, 16), repeatF(0.5, 16), 1, 0, -0.20590721420782276},
+		{"a tie, 40 tasks", repeatF(0.5, 40), repeatF(0.5, 40), 1, 0, -0.08809730287880235},
+		{"a tie, 80 tasks", repeatF(0.5, 80), repeatF(0.5, 80), 1, 0, -0.0450640350676923},
+		{"a tie on a 0..10 range, 24 tasks", repeatF(5, 24), repeatF(5, 24), 10, 0, -1.4247359772252572},
+		{"every difference +0.25", repeatF(0.5, 16), repeatF(0.75, 16), 1, 0.25, -0.007384017759778483},
+		{"every difference -0.5 on a 0..10 range", repeatF(8, 16), repeatF(7.5, 16), 10, -0.5, -2.4561185349743164},
+		{"two tasks, the same difference", []float64{0.5, 0.25}, []float64{1, 0.75}, 1, 0.5, -0.7628291754873715},
+		// Sixteen copies of -0.1 sum to -1.6000000000000003, whose sixteenth is not -0.1: the delta
+		// must come from the data, not from the sum.
+		{"every difference -0.1 (not a sum of floats)", repeatF(0.2, 16), repeatF(0.1, 16), 1, -0.1, -0.2853164927870405},
+		// The largest possible difference on every task is a win to the end of the range, and only the
+		// lower end moves.
+		{"every candidate score perfect, every incumbent score 0", repeatF(0, 16), repeatF(1, 16), 1, 1, 0.5881855715843545},
 	} {
-		d, lo, hi := primaryInterval(tc.inc, tc.cand)
-		if d != tc.want || lo != tc.want || hi != tc.want {
-			t.Errorf("%s: got %v %v %v, want the single value %v", tc.name, d, lo, hi, tc.want)
+		d, lo, hi := primaryInterval(tc.inc, tc.cand, tc.span)
+		if d != tc.want || !near(lo, tc.lo) || hi != tc.want {
+			t.Errorf("%s: got %v %v %v, want %v %v %v", tc.name, d, lo, hi, tc.want, tc.lo, tc.want)
 		}
 	}
-	// Differences that are equal on paper but not to the last bit (0.3-0.2 against 0.2-0.1) have a spread
-	// of about 1e-17: the interval is finite and about as wide as that.
-	if d, lo, hi := primaryInterval([]float64{0.2, 0.1, 0.2, 0.1}, []float64{0.3, 0.2, 0.3, 0.2}); !finite(d) || !finite(lo) || !finite(hi) || hi-lo > 1e-9 {
+	// Differences that are equal on paper but not to the last bit (0.3-0.2 against 0.2-0.1) are not a
+	// spread: they get the interval of a sample with none.
+	if d, lo, hi := primaryInterval([]float64{0.2, 0.1, 0.2, 0.1}, []float64{0.3, 0.2, 0.3, 0.2}, 1); !finite(d) || math.Abs(d-0.1) > 1e-9 || math.Abs(lo+0.5626010991781221) > 1e-8 || hi != d {
 		t.Errorf("near-equal differences: %v %v %v", d, lo, hi)
+	}
+	// A difference that is not rounding is a spread, however small a share of the range it is.
+	if _, lo, hi := primaryInterval(repeatF(0.5, 16), append(repeatF(0.5, 15), 0.51), 1); hi-lo > 0.01 || hi <= 0 {
+		t.Errorf("a difference of 0.01 on one task is a spread, and a small one: %v %v", lo, hi)
+	}
+	// A range that is not a positive number leaves the single value.
+	for _, span := range []float64{0, -1, math.NaN(), math.Inf(1)} {
+		if d, lo, hi := primaryInterval(repeatF(0.5, 16), repeatF(0.25, 16), span); d != -0.25 || lo != d || hi != d {
+			t.Errorf("span %v: got %v %v %v, want the single value", span, d, lo, hi)
+		}
 	}
 	for _, tc := range []struct {
 		name      string
@@ -131,17 +152,17 @@ func TestPrimaryIntervalDegenerateInputs(t *testing.T) {
 		{"one pair", []float64{1}, []float64{0}},
 		{"unaligned", []float64{1, 2, 3}, []float64{1, 2}},
 	} {
-		if d, lo, hi := primaryInterval(tc.inc, tc.cand); d != 0 || lo != 0 || hi != 0 {
+		if d, lo, hi := primaryInterval(tc.inc, tc.cand, 1); d != 0 || lo != 0 || hi != 0 {
 			t.Errorf("%s: nothing to conclude is zeros, got %v %v %v", tc.name, d, lo, hi)
 		}
 	}
 	big := repeatF(1.7e308, 16)
-	if d, lo, hi := primaryInterval(repeatF(0, 16), big); finite(d) && finite(lo) && finite(hi) {
+	if d, lo, hi := primaryInterval(repeatF(0, 16), big, 1); finite(d) && finite(lo) && finite(hi) {
 		t.Errorf("a sum that overflows must not come back finite: %v %v %v", d, lo, hi)
 	}
 	spread := repeatF(0, 16)
 	spread[3] = 1e200
-	if _, lo, hi := primaryInterval(repeatF(0, 16), spread); finite(lo) && finite(hi) {
+	if _, lo, hi := primaryInterval(repeatF(0, 16), spread, 1); finite(lo) && finite(hi) {
 		t.Errorf("a sum of squares that overflows must not come back finite: %v %v", lo, hi)
 	}
 	// The smallest sizes have no room for the form (n <= c^2 + 1): they still get a finite, wider interval.
@@ -150,7 +171,7 @@ func TestPrimaryIntervalDegenerateInputs(t *testing.T) {
 		for i := range cand {
 			cand[i] = float64(i % 2)
 		}
-		if d, lo, hi := primaryInterval(inc, cand); !finite(lo) || !finite(hi) || !(lo < d && d < hi) {
+		if d, lo, hi := primaryInterval(inc, cand, 1); !finite(lo) || !finite(hi) || !(lo < d && d < hi) {
 			t.Errorf("n=%d: %v %v %v", n, d, lo, hi)
 		}
 	}
@@ -213,8 +234,8 @@ func TestSimHarnessScoreFormIsThePrimaryInterval(t *testing.T) {
 		if s%3 == 1 {
 			inc, cand = genUniform(0, 1, 0, .9)(rng, n)
 		}
-		lows, deg := simLowers(inc, cand, 50, 1, buf)
-		_, lo, _ := primaryInterval(inc, cand)
+		lows, deg := simLowers(inc, cand, 50, 1, buf, 1)
+		_, lo, _ := primaryInterval(inc, cand, 1)
 		if math.Abs(lows[mScore]-lo) > 1e-9 {
 			t.Fatalf("dataset %d (n=%d, degenerate %v): harness %v, production %v", s, n, deg, lows[mScore], lo)
 		}
@@ -243,13 +264,20 @@ func TestPrimaryIntervalFalseAdoptRateOnTheStatedNulls(t *testing.T) {
 		{"non-inferiority at exactly -margin, uniform scores", 24, -0.05, genUniform(0, 1, 0, .9)},
 		{"non-inferiority at exactly -margin, x^3-skewed scores", 16, -0.05, genCubed(.8)},
 		{"non-inferiority at exactly -margin, pass rates .90 and .85", 80, -0.05, genBinary(.90, .85, 1)},
+		// A strong incumbent, where most samples have few or no pairs that differ.
+		{"non-inferiority at exactly -margin, pass rates .95 and .90", 16, -0.05, genBinary(.95, .90, 1)},
+		{"non-inferiority at exactly -margin, pass rates .95 and .90", 24, -0.05, genBinary(.95, .90, 1)},
+		{"non-inferiority at exactly -margin, pass rates .99 and .94", 16, -0.05, genBinary(.99, .94, 1)},
+		{"non-inferiority at exactly -margin, pass rates .99 and .94", 24, -0.05, genBinary(.99, .94, 1)},
+		{"non-inferiority at exactly -margin, a candidate that only loses 5% of the incumbent's passes", 20, -0.05, genNested(.9, .05/.9)},
+		{"non-inferiority at exactly -margin, a candidate that only loses 5% of the incumbent's passes", 40, -0.05, genNested(.9, .05/.9)},
 	} {
 		t.Run(fmt.Sprintf("%s, n=%d", tc.name, tc.n), func(t *testing.T) {
 			rng := rand.New(rand.NewSource(cellSeed(tc.name, tc.n)))
 			adopt := 0
 			for s := 0; s < trials; s++ {
 				inc, cand := tc.gen(rng, tc.n)
-				if _, lo, _ := primaryInterval(inc, cand); lo > tc.mu0 {
+				if _, lo, _ := primaryInterval(inc, cand, 1); lo > tc.mu0 {
 					adopt++
 				}
 			}

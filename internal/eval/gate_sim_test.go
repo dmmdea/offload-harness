@@ -116,6 +116,15 @@ type simCell struct {
 	n    int
 	mu0  float64
 	gen  pairGen
+	// span is the width of the score range (0 reads as 1, a unit interval).
+	span float64
+}
+
+func (c simCell) width() float64 {
+	if c.span > 0 {
+		return c.span
+	}
+	return 1
 }
 
 // supNullCells are the superiority nulls: both arms score alike, so the true difference is 0.
@@ -133,7 +142,11 @@ func supNullCells(sizes ...int) []simCell {
 			{"sup x^3 skewed", genCubed(1)},
 			{"sup two-point 0/10", genBinary(.5, .5, 10)},
 		} {
-			out = append(out, simCell{name: c.name, n: n, mu0: 0, gen: c.gen})
+			cell := simCell{name: c.name, n: n, mu0: 0, gen: c.gen}
+			if c.name == "sup two-point 0/10" {
+				cell.span = 10
+			}
+			out = append(out, cell)
 		}
 	}
 	return out
@@ -153,6 +166,12 @@ func niNullCells(sizes ...int) []simCell {
 			{"ni binary .55/.50", genBinary(.55, .50, 1)},
 			{"ni continuous uniform", genUniform(0, 1, 0, .9)},
 			{"ni continuous x^3 skewed", genCubed(.8)},
+			// A strong incumbent: most pairs tie, and a sample whose pairs all tie has no spread.
+			{"ni binary .95/.90", genBinary(.95, .90, 1)},
+			{"ni binary .97/.92", genBinary(.97, .92, 1)},
+			{"ni binary .99/.94", genBinary(.99, .94, 1)},
+			// A candidate that never wins a task the incumbent loses and loses 5% of the rest.
+			{"ni nested loss 5%", genNested(.9, .05/.9)},
 		} {
 			out = append(out, simCell{name: c.name, n: n, mu0: -0.05, gen: c.gen})
 		}
@@ -218,8 +237,14 @@ func stressCells() []simCell {
 			simCell{name: "stress ni zero-inflated", n: n, mu0: -0.05, gen: genZeroInflated(.8, .9)},
 		)
 	}
-	for _, n := range []int{20, 40, 80} {
-		out = append(out, simCell{name: "stress ni nested loss 5%", n: n, mu0: -0.05, gen: genNested(.9, .05/.9)})
+	// Strong incumbents at the margin where the two arms disagree on only a handful of tasks: the
+	// regime where the score form is still anti-conservative, from 60 tasks up.
+	for _, n := range []int{60, 80, 120, 200} {
+		out = append(out,
+			simCell{name: "stress ni binary .97/.92", n: n, mu0: -0.05, gen: genBinary(.97, .92, 1)},
+			simCell{name: "stress ni binary .99/.94", n: n, mu0: -0.05, gen: genBinary(.99, .94, 1)},
+			simCell{name: "stress ni nested loss 5%", n: n, mu0: -0.05, gen: genNested(.9, .05/.9)},
+		)
 	}
 	return out
 }
@@ -400,8 +425,8 @@ func newSimBuf(B int) *simBuf {
 
 // simLowers returns the lower end of every method (bases, then composites) on one dataset, with B
 // resamples drawn from seed in the order bootstrapReps draws them. degenerate reports a dataset
-// whose paired differences are all equal: its interval is the point, for every method.
-func simLowers(inc, cand []float64, B int, seed int64, buf *simBuf) (lows []float64, degenerate bool) {
+// whose paired differences are all equal: its lower end is the same for every method.
+func simLowers(inc, cand []float64, B int, seed int64, buf *simBuf, span float64) (lows []float64, degenerate bool) {
 	n := len(inc)
 	fn := float64(n)
 	d := make([]float64, n)
@@ -414,14 +439,17 @@ func simLowers(inc, cand []float64, B int, seed int64, buf *simBuf) (lows []floa
 	lows = make([]float64, nBase+len(composites))
 	degenerate = true
 	for i := 1; i < n; i++ {
-		if d[i] != d[0] {
+		if math.Abs(d[i]-d[0]) > equalTolerance*span {
 			degenerate = false
 			break
 		}
 	}
 	if degenerate {
+		// Every method reads a sample with no spread the way the gate does: the lower end the sample
+		// cannot rule out (zeroSpreadInterval), so the methods stay on one footing.
+		zlo, _ := zeroSpreadInterval(d[0], n, span)
 		for k := range lows {
-			lows[k] = dbar
+			lows[k] = zlo
 		}
 		return lows, true
 	}
@@ -593,7 +621,7 @@ func runCell(c simCell, B, sims, workers int) simRun {
 			for s := range next {
 				rng := rand.New(rand.NewSource(base + int64(s)))
 				inc, cand := c.gen(rng, c.n)
-				lows, deg := simLowers(inc, cand, B, 5000000+int64(s), buf)
+				lows, deg := simLowers(inc, cand, B, 5000000+int64(s), buf, c.width())
 				if deg {
 					ldeg++
 				}
@@ -757,7 +785,7 @@ func TestSimHarnessPercentileMethodIsBootstrapDeltaMean(t *testing.T) {
 		for s := 0; s < 20; s++ {
 			rng := rand.New(rand.NewSource(int64(100 + s)))
 			inc, cand := tc.cell.gen(rng, tc.cell.n)
-			lows, deg := simLowers(inc, cand, tc.B, tc.seed, buf)
+			lows, deg := simLowers(inc, cand, tc.B, tc.seed, buf, 1)
 			_, lo, _ := BootstrapDeltaMean(inc, cand, tc.B, tc.seed)
 			if deg {
 				continue
