@@ -794,22 +794,35 @@ func TestViewSaysWhenNoOnYieldWasRecorded(t *testing.T) {
 	}
 }
 
-func TestViewSaysAHolderThatPredatesTheRequestCannotBeAsked(t *testing.T) {
+// A holder that does not run the request is one of two kinds, and the sentence is true of both: a build from
+// before the request, and an in-process holder of this build that never ticks it (the media pipeline's
+// leases acquire with no form stamp). Neither is helped by an upgrade or a restart of the other.
+func TestViewSaysAHolderThatDoesNotRunTheRequestCannotBeAsked(t *testing.T) {
 	yieldPolicy(t, "request")
-	r := newYieldRig(t, func(o *Options) { o.Yields, o.WrapperVersion = "", "0.185.1" })
-	r.overdueBy(time.Hour)
-	r.waiter(yieldWaiterA)
-	v := r.m.YieldViewOf(r.m.Inspect())
-	if v.Capable || v.File != "" || v.Asked {
-		t.Fatalf("view = %+v", v)
-	}
-	for _, want := range []string{"predates the yield request", "ask whoever owns it"} {
-		if !strings.Contains(v.Sentence, want) {
-			t.Errorf("the sentence must say %q: %q", want, v.Sentence)
-		}
-	}
-	if strings.Contains(v.Sentence, "release") {
-		t.Errorf("a wrapper of this age ends its job when its claim is released: %q", v.Sentence)
+	for name, over := range map[string]func(*Options){
+		"a build from before the request":    func(o *Options) { o.Yields, o.WrapperVersion = "", "0.185.1" },
+		"an in-process holder of this build": func(o *Options) { o.Yields, o.WrapperVersion = "", "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newYieldRig(t, over)
+			r.overdueBy(time.Hour)
+			r.waiter(yieldWaiterA)
+			v := r.m.YieldViewOf(r.m.Inspect())
+			if v.Capable || v.File != "" || v.Asked {
+				t.Fatalf("view = %+v", v)
+			}
+			for _, want := range []string{"does not run the yield request", "media pipeline", "ask whoever owns it"} {
+				if !strings.Contains(v.Sentence, want) {
+					t.Errorf("the sentence must say %q: %q", want, v.Sentence)
+				}
+			}
+			if strings.Contains(v.Sentence, "predates") {
+				t.Errorf("an in-process holder of this build does not predate anything: %q", v.Sentence)
+			}
+			if strings.Contains(v.Sentence, "release") {
+				t.Errorf("a wrapper of this age ends its job when its claim is released: %q", v.Sentence)
+			}
+		})
 	}
 }
 

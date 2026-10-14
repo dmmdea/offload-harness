@@ -75,15 +75,74 @@ func TestHolderYieldFieldsOmittedWhenThereIsNothingToSay(t *testing.T) {
 	if strings.Contains(v.Note, "yield") {
 		t.Errorf("the default policy keeps the note of before the key existed: %s", v.Note)
 	}
-	// The control: the same lease under a stamp the holder wrote carries the path.
+	// A holder that runs the request, under the default policy, adds nothing either: nobody is asked, so the
+	// path of a file that will never exist is not advertised.
 	root2, _ := overdueLease(t, gpulease.YieldsWrapper)
 	h := snap(root2, 5, nil).Holder
-	if h == nil || h.YieldFile == "" {
-		t.Fatalf("a lease whose holder runs the request carries the path of its yield file: %+v", h)
+	if h == nil || h.YieldFile != "" {
+		t.Fatalf("the default policy asks nobody and so advertises no yield file: %+v", h)
+	}
+	// The control: the same lease under the request policy carries the path.
+	yieldPolicy(t, "request")
+	if h := snap(root2, 5, nil).Holder; h == nil || h.YieldFile == "" {
+		t.Fatalf("a lease whose holder runs the request carries the path of its yield file under the request policy: %+v", h)
+	}
+}
+
+// The path is a statement that a request may appear there: it is made only while a request can be made
+// (the policy is request), or once one was made, whatever the policy says by then.
+func TestYieldFileIsOnTheWireOnlyWhenARequestCanBeMadeOrWas(t *testing.T) {
+	root, dir := overdueLease(t, gpulease.YieldsWrapper)
+	for _, tc := range []struct {
+		policy string
+		want   bool
+	}{{"", false}, {"hold", false}, {"kill", false}, {"request", true}} {
+		yieldPolicy(t, tc.policy)
+		h := snap(root, 5, nil).Holder
+		if h == nil {
+			t.Fatal("no holder")
+		}
+		b, _ := json.Marshal(h)
+		if got := h.YieldFile != "" && strings.Contains(string(b), `"yield_file"`); got != tc.want {
+			t.Errorf("policy %q: yield_file on the wire = %v, want %v: %s", tc.policy, got, tc.want, b)
+		}
+	}
+	yieldPolicy(t, "")
+	plantYield(t, dir, 41, time.Minute, gpulease.YieldActionRan)
+	if h := snap(root, 5, nil).Holder; h == nil || h.YieldFile == "" {
+		t.Errorf("once a request was made its file is named whatever the policy says now: %+v", h)
+	}
+}
+
+// An ask is once per epoch and its sidecar stays until the lease ends, so a lease can be asked and then
+// renewed. The status of a healthy lease must not call its ask unanswered.
+func TestAnAskedLeaseThatWasRenewedIsNotUnanswered(t *testing.T) {
+	yieldPolicy(t, "request")
+	root, dir := leaseFixture(t, func(rec map[string]any) { // a window that has not ended
+		rec["wrapper_version"] = "0.186.0"
+		rec["yields"] = gpulease.YieldsWrapper
+	})
+	plantYield(t, dir, 41, 25*time.Minute, gpulease.YieldActionRan)
+	v := snap(root, 5, nil)
+	y := v.Holder.Yield
+	if y == nil || y.Action != gpulease.YieldActionRan {
+		t.Fatalf("the sidecar of the epoch stands: %+v", y)
+	}
+	if y.Unanswered {
+		t.Errorf("a lease that is not overdue is not an unanswered ask: %+v", y)
+	}
+	for _, bad := range []string{"has not ended", "ask whoever owns it", "stop its job by hand"} {
+		if strings.Contains(v.Holder.YieldNote, bad) {
+			t.Errorf("the sentence about a renewed lease must not say %q: %q", bad, v.Holder.YieldNote)
+		}
+	}
+	if !strings.Contains(v.Holder.YieldNote, "renewed") {
+		t.Errorf("the sentence says the lease has since been renewed: %q", v.Holder.YieldNote)
 	}
 }
 
 func TestHolderCarriesTheYieldFileOfACapableLease(t *testing.T) {
+	yieldPolicy(t, "request")
 	root, dir := overdueLease(t, gpulease.YieldsDetached)
 	h := snap(root, 5, nil).Holder
 	if h == nil {
@@ -157,12 +216,15 @@ func TestADetachedHoldersUnansweredAskNamesReleaseWithWhatItDoes(t *testing.T) {
 	}
 }
 
-func TestAHolderThatPredatesTheRequestIsSaidToBeUnaskable(t *testing.T) {
+func TestAHolderThatDoesNotRunTheRequestIsSaidToBeUnaskable(t *testing.T) {
 	yieldPolicy(t, "request")
-	root, _ := overdueLease(t, "") // a wrapper with a version and no yields stamp
+	root, _ := overdueLease(t, "") // a record with no yields stamp: an older build, or an in-process holder
 	v := snap(root, 5, nil)
-	if !strings.Contains(v.Note, "predates the yield request") || !strings.Contains(v.Note, "ask whoever owns it") {
+	if !strings.Contains(v.Note, "does not run the yield request") || !strings.Contains(v.Note, "media pipeline") || !strings.Contains(v.Note, "ask whoever owns it") {
 		t.Fatalf("note: %s", v.Note)
+	}
+	if strings.Contains(v.Note, "predates") {
+		t.Errorf("an in-process holder of this build predates nothing: %s", v.Note)
 	}
 	if v.Holder.YieldFile != "" || v.Holder.Yield != nil {
 		t.Errorf("a holder that cannot be asked has no yield file: %+v", v.Holder)
