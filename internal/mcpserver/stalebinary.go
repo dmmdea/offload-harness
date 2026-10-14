@@ -5,9 +5,11 @@ package mcpserver
 // day 24 subtasks were lost to a capacity wait the next release had already fixed, because the delegators that
 // served them predated it, and nothing in the server said so. The server cannot replace itself, and must not exit
 // or re-exec while a call is running (that would cut the jobs it holds), so it does the one thing it can: it
-// compares the stamp of the file it started from with the file on disk and, when they differ, says so on the doors
-// whose behaviour a release changes (agent_delegate, offload_research, offload_status), once in the log and on
-// every answer. Nothing is interrupted, and the work still runs.
+// compares the stamp of the file it started from with the file on disk and, when they differ, says so once in the log
+// and on every tool result. The three doors whose behaviour a release changes (agent_delegate, offload_research,
+// offload_status) carry it in their own answer when they ran the work; stale_notice.go carries it as a second text block
+// on every other result: every other door, and those three doors' refusals and deferrals. Nothing is interrupted, and the
+// work still runs.
 
 import (
 	"errors"
@@ -190,7 +192,7 @@ func (w *exeWatch) staleNoteWith(version string, compare func() imageCheck) stri
 	}
 	note := fmt.Sprintf("this MCP server is running %s from an executable image that has changed on disk since it started "+
 		"(it started from %s; now %s%s). A long-lived server keeps the image it started from, so a fix shipped since is not in "+
-		"this process: restart the MCP client to load it. Nothing has been interrupted and this call ran as it always does.",
+		"this process: reconnect this server with /mcp (select local-offload, Reconnect) or restart the MCP client to load it. Nothing has been interrupted and this call ran as it always does.",
 		version, w.started, nowWords(now), evidence)
 	w.logged.Do(func() { log.Printf("mcpserver: %s", note) })
 	return note

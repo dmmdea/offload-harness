@@ -350,8 +350,9 @@ func sniffable(name string, info fs.FileInfo) bool {
 }
 
 // openAudited opens a file for the audit. A variable so a test can make one unreadable on
-// any platform.
-var openAudited = func(path string) (*os.File, error) { return os.Open(path) }
+// any platform. It opens through OpenShared: the audit reads every image beside the installed one and the installed one itself
+// (the stale-image check's build marker), and a read must not block a rollback or a swap that renames them (openshared_windows.go).
+var openAudited = OpenShared
 
 var buildMarkerRE = regexp.MustCompile(regexp.QuoteMeta(BuildMarkerPrefix) + `(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)`)
 

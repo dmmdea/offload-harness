@@ -37,10 +37,14 @@ func (s *Server) holdStartup() {
 	s.startup = &st
 }
 
+// installedOpen is the seam the installed file is opened through for the hash: gpulease.OpenShared, which does not stand in
+// the way of a rename of the file (a rollback or a second swap) while a stale server reads it.
+var installedOpen = gpulease.OpenShared
+
 // hashInstalledImage is the seam the installed file is hashed through: a test counts how often a status call reads
 // the whole executable.
 var hashInstalledImage = func(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := installedOpen(path)
 	if err != nil {
 		return "", err
 	}
