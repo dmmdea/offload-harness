@@ -12,12 +12,12 @@
 //      fails here until it uses scratchDir.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { removeTree, scratchDir } from "./test-scratch.mjs";
+import { awaitTreeGone, killTree, removeTree, scratchDir } from "./test-scratch.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SELF = basename(fileURLToPath(import.meta.url));
@@ -118,7 +118,6 @@ test("igpu-stub: a process that builds a stub executable leaves nothing in its O
 // reason: the default is `scratchDir(t, prefix)`, which cannot be forgotten.
 const RAW_MKDTEMP = {
   "audiocpp-generate.test.mjs": [1, "work(): every test that calls it removes the folder in a finally"],
-  "comfy-keep.test.mjs": [1, "the one test that launches a detached stub registers, right after making the folder, the after-hook that kills the stub and then removes the folder (hooks run in registration order, and a running stub holds its files open on Windows)"],
   "comfy-submit.test.mjs": [3, "each test removes its folder in a finally"],
   "igpu-delivery.test.mjs": [1, "scratch(): every caller removes the folder in a finally"],
   "igpu-engine.test.mjs": [1, "scratch(): every caller removes the folder in a finally"],
@@ -157,4 +156,117 @@ test("no render test or test-support module makes a temp folder of its own: it u
     "a raw mkdtemp in a render test is a folder nobody removes on a failed run (and on every run, if the rmSync is forgotten).\n" +
     "Use `const dir = scratchDir(t, \"prefix-\")` from ./test-scratch.mjs: it is removed when the test ends.\n" +
     "If the test must own its removal (a stub process has to be killed first, say), list the call in RAW_MKDTEMP with the reason.\n");
+});
+
+// A folder whose tree was just killed is not free at once: on Windows a process that is still being torn
+// down keeps its working directory and its open files, and on a loaded box that takes seconds, not
+// milliseconds. The child below keeps a folder busy for 4 s the same way (its working directory, one open
+// file), and removeTree has to ride it out. The old removeTree gave up after about 2.75 s, which left
+// comfy-keep-* folders behind. Windows only: a POSIX unlink does not care who has the folder open.
+test("removeTree: a folder a child keeps busy for 4 s is removed once the child lets go", { skip: process.platform !== "win32" && "only Windows refuses to remove a folder that is in use" }, async (t) => {
+  const dir = scratchDir(t, "scratch-busy-");
+  const sub = join(dir, "busy");
+  mkdirSync(sub);
+  const child = spawn(process.execPath, ["-e", "require('fs').openSync('held.txt', 'w'); process.stdout.write('ready'); setTimeout(() => {}, 4000);"], {
+    cwd: sub, stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+  });
+  const exited = new Promise((r) => child.once("exit", r));
+  try {
+    await new Promise((resolve, reject) => { child.stdout.once("data", resolve); child.once("error", reject); child.once("exit", () => reject(new Error("the holder exited before it held anything"))); });
+    const t0 = Date.now();
+    removeTree(sub); // throws while the folder cannot go
+    assert.equal(existsSync(sub), false, "the busy folder is gone");
+    assert.ok(Date.now() - t0 >= 2000, "it was busy: the removal waited for the child");
+  } finally {
+    child.kill();
+    await exited;
+  }
+});
+
+// ---- removeTree's back-off and awaitTreeGone, with the clock and the file system faked -----------------------
+
+// a fake clock: sleeping advances `now`, and the sleeps are recorded
+function fakeClock() {
+  const c = { t: 0, naps: [], now: () => c.t, nap: (ms) => { c.naps.push(ms); c.t += ms; } };
+  return c;
+}
+const errCode = (code) => Object.assign(new Error(`${code}: fake`), { code });
+
+test("removeTree: a transient failure is retried with a doubling back-off from 50 ms to 1 s, and the folder is removed once it clears", () => {
+  const c = fakeClock();
+  let calls = 0;
+  removeTree("x", { rm: () => { if (++calls <= 8) throw errCode("EPERM"); }, sleep: c.nap, now: c.now });
+  assert.equal(calls, 9);
+  assert.deepEqual(c.naps, [50, 100, 200, 400, 800, 1000, 1000, 1000]);
+});
+
+test("removeTree: EPERM, EBUSY and ENOTEMPTY are all transient", () => {
+  for (const code of ["EPERM", "EBUSY", "ENOTEMPTY"]) {
+    const c = fakeClock();
+    let calls = 0;
+    removeTree("x", { rm: () => { if (++calls === 1) throw errCode(code); }, sleep: c.nap, now: c.now });
+    assert.equal(calls, 2, code);
+  }
+});
+
+test("removeTree: a folder that cannot go within about 15 s throws the last error (a defect to see, not to hide)", () => {
+  const c = fakeClock();
+  let calls = 0;
+  assert.throws(() => removeTree("x", { rm: () => { calls++; throw errCode("EBUSY"); }, sleep: c.nap, now: c.now }), { code: "EBUSY" });
+  const total = c.naps.reduce((a, b) => a + b, 0);
+  assert.ok(total >= 14000 && total <= 15000, `waited ${total} ms in all`);
+  assert.ok(Math.max(...c.naps) <= 1000, "no single step over 1 s");
+  assert.ok(calls < 40, `bounded: ${calls} attempts`);
+});
+
+test("removeTree: any other error is thrown at once, without a retry", () => {
+  const c = fakeClock();
+  let calls = 0;
+  assert.throws(() => removeTree("x", { rm: () => { calls++; throw errCode("EACCES"); }, sleep: c.nap, now: c.now }), { code: "EACCES" });
+  assert.equal(calls, 1);
+  assert.deepEqual(c.naps, []);
+});
+
+test("awaitTreeGone: waits for a pid that goes late, never sleeps for one that is already gone, takes one pid or a list", async () => {
+  const c = fakeClock();
+  const base = { now: c.now, nap: async (ms) => c.nap(ms), pollMs: 100, log: () => assert.fail("no bound was passed") };
+  const late = await awaitTreeGone([1, 2], { ...base, isGone: (p) => p === 1 || c.t >= 700 });
+  assert.equal(late.gone, true);
+  assert.equal(late.waitedMs, 700);
+  const c2 = fakeClock();
+  const none = await awaitTreeGone(5, { now: c2.now, nap: async (ms) => c2.nap(ms), isGone: () => true, log: () => assert.fail("no bound was passed") });
+  assert.deepEqual([none.gone, none.waitedMs, c2.naps], [true, 0, []]);
+});
+
+test("awaitTreeGone: at the bound it prints ONE line naming what is still alive and returns gone:false (the removal after it is what fails)", async () => {
+  const c = fakeClock();
+  const lines = [];
+  const r = await awaitTreeGone([7, 8], { now: c.now, nap: async (ms) => c.nap(ms), pollMs: 50, timeoutMs: 1000, isGone: (p) => p === 8, log: (s) => lines.push(s) });
+  assert.equal(r.gone, false);
+  assert.deepEqual(r.alive, [7]);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /\b7\b/);
+  assert.ok(r.waitedMs >= 1000 && r.waitedMs < 1200);
+});
+
+test("killTree + awaitTreeGone: a process and the child it started are both reported, killed and gone", async () => {
+  // the parent starts a child of its own and tells us its pid; both would sleep for a minute
+  const sleeper = "setTimeout(() => {}, 60000)";
+  const parent = spawn(process.execPath, ["-e", `const c = require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(sleeper)}], { stdio: 'ignore', windowsHide: true }); process.stdout.write(String(c.pid)); ${sleeper};`], {
+    stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+  });
+  const exited = new Promise((r) => parent.once("exit", r));
+  let grandchild = 0;
+  try {
+    grandchild = Number(await new Promise((resolve, reject) => { parent.stdout.once("data", (d) => resolve(String(d))); parent.once("error", reject); }));
+    assert.ok(grandchild > 0);
+    const pids = killTree(parent.pid);
+    assert.ok(pids.includes(parent.pid), "the parent is in the list");
+    assert.ok(pids.includes(grandchild), `the child it started is in the list (${pids})`);
+    const r = await awaitTreeGone(pids, { timeoutMs: 20000 });
+    assert.equal(r.gone, true, `still alive: ${r.alive}`);
+  } finally {
+    parent.kill();
+    await exited;
+  }
 });
