@@ -76,10 +76,16 @@ type FailureClass struct {
 
 // FailureRegister is the whole report.
 type FailureRegister struct {
-	// JobRows is the job rows the register looked at, after the window and the run-class rule: a dispatch marker
-	// and an inner row whose parent is present are not jobs. FailureRows of them failed.
+	// JobRows is the job rows the register looked at, after the window and the run-class rule: a dispatch marker,
+	// an inner row whose parent is present and a refused attempt are not jobs. FailureRows of them failed.
 	JobRows     int `json:"job_rows"`
 	FailureRows int `json:"failure_rows"`
+	// RefusedAttempts is the rows that are a node's capacity refusal at dispatch (Entry.Refusal): a place in line,
+	// not an outcome. The subtask they belonged to landed elsewhere or ended on a row of its own, which is the one
+	// that counts; counted here instead, with the same window and run-class rule, so queue pressure stays visible
+	// without a refused-then-landed subtask reading as two failures. A ledger written before the column existed has
+	// none marked, and its refusals count as the failures they were then recorded as.
+	RefusedAttempts int `json:"refused_attempts"`
 	// ClassDerivedRows is how many failed rows carried no usable reason code (rows from before it was stamped,
 	// a code outside the closed set) and were classed here by DeferCode, the classifier Record itself uses.
 	ClassDerivedRows int `json:"class_derived_rows"`
@@ -240,8 +246,8 @@ type classAcc struct {
 // FailureRegisterFile reads the ledger at path and builds the failure-class register. since (unix seconds, 0 =
 // all) keeps only rows from the window; the job and class indexes are the whole ledger's, so an inner row inside
 // the window is still judged by a parent that is older (the way SessionSharesFile does). Unless includeTraffic,
-// test, bake and measurement traffic is left out and counted per class (register F48). A missing ledger is an
-// empty register. Lock-free, like the other file readers: a partial last line is skipped.
+// test, bake and measurement traffic is left out and counted per class (the run-class rule every production view
+// of the ledger follows). A missing ledger is an empty register. Lock-free, like the other file readers: a partial last line is skipped.
 func FailureRegisterFile(path string, since int64, includeTraffic bool) (FailureRegister, error) {
 	reg := FailureRegister{Classes: []FailureClass{}}
 	f, err := os.Open(path)
@@ -281,7 +287,7 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 		}
 		if !includeTraffic {
 			if c := classIn(e, jobs); c != "" {
-				if CountsAsJob(e, parents) {
+				if CountsAsJob(e, parents) && !e.Refusal {
 					if reg.ExcludedNonProduction == nil {
 						reg.ExcludedNonProduction = map[string]int{}
 					}
@@ -291,6 +297,10 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 			}
 		}
 		if !CountsAsJob(e, parents) {
+			continue
+		}
+		if e.Refusal {
+			reg.RefusedAttempts++
 			continue
 		}
 		reg.JobRows++

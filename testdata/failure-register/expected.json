@@ -1,6 +1,7 @@
 {
   "job_rows": 20,
   "failure_rows": 18,
+  "refused_attempts": 2,
   "class_derived_rows": 4,
   "cards_tokens": 2710,
   "rows_with_tokens": 11,

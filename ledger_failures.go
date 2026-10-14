@@ -56,6 +56,7 @@ type failureClassOut struct {
 type failureReport struct {
 	JobRows               int               `json:"job_rows"`
 	FailureRows           int               `json:"failure_rows"`
+	RefusedAttempts       int               `json:"refused_attempts"`
 	ClassDerivedRows      int               `json:"class_derived_rows"`
 	CardsTokens           *int64            `json:"cards_tokens"`
 	RowsWithTokens        int               `json:"rows_with_tokens"`
@@ -142,7 +143,7 @@ func runLedgerFailures(args []string) error {
 // "undocumented" in every human column; a table row for a class the register does not hold adds nothing.
 func joinFailureDocs(reg ledger.FailureRegister, docs map[string]failureDoc) failureReport {
 	out := failureReport{
-		JobRows: reg.JobRows, FailureRows: reg.FailureRows, ClassDerivedRows: reg.ClassDerivedRows,
+		JobRows: reg.JobRows, FailureRows: reg.FailureRows, RefusedAttempts: reg.RefusedAttempts, ClassDerivedRows: reg.ClassDerivedRows,
 		CardsTokens: reg.CardsTokens, RowsWithTokens: reg.RowsWithTokens, ExcludedNonProduction: reg.ExcludedNonProduction,
 		UndocumentedClasses: []string{}, Classes: make([]failureClassOut, 0, len(reg.Classes)),
 	}

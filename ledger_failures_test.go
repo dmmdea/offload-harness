@@ -210,6 +210,9 @@ func TestFailureRegisterListsOnlyClassesWithRows(t *testing.T) {
 			}
 		}
 	}
+	if r.RefusedAttempts != 2 {
+		t.Errorf("refused_attempts = %d, want 2 (the two refused dispatches of the fixture are neither jobs nor failures)", r.RefusedAttempts)
+	}
 	if r.FailureRows != 18 {
 		t.Errorf("failure_rows = %d, want 18 (the inner row of j-bud, the marker, the cache hit, the ok row and the bake and test rows are not failures)", r.FailureRows)
 	}
