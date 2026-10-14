@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/changelog"
 )
 
 func TestTheProseSaysWhichNameSelectsWhichRows(t *testing.T) {
@@ -30,9 +32,14 @@ func TestTheProseSaysWhichNameSelectsWhichRows(t *testing.T) {
 }
 
 // readProse reads a file of the check, named relative to dir (this package's directory: the docs and the CHANGELOG are
-// two levels up).
+// two levels up). The CHANGELOG is read with its changelog fragments spliced in, because a fragment is changelog text from
+// the day it is written and a gate that read only the file would see it first on the release branch, after the assembly.
 func readProse(dir, path string) (string, error) {
-	raw, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(path)))
+	full := filepath.Join(dir, filepath.FromSlash(path))
+	if filepath.Base(full) == changelog.ChangelogFile {
+		return changelog.Combined(filepath.Dir(full))
+	}
+	raw, err := os.ReadFile(full)
 	return string(raw), err
 }
 

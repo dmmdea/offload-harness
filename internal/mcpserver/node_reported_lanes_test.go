@@ -10,12 +10,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/dmmdea/offload-harness/internal/changelog"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
@@ -172,8 +172,9 @@ func changelogRuleProblems(root string) []string {
 		return []string{err.Error()}
 	}
 	text = strings.ReplaceAll(text, "\r\n", "\n")
-	// The bullet is found wherever it sits (under [Unreleased] before the release bump, under the release's own heading
-	// after it), so the version bump cannot blind this check: the first "The rule." bullet that describes node_reported.
+	// The bullet is found wherever it sits (in a fragment of changes/unreleased/ before the release is assembled, under the
+	// release's own heading after it), so the version bump cannot blind this check: the first "The rule." bullet that
+	// describes node_reported.
 	rule := ""
 	for _, line := range strings.Split(text, "\n") {
 		if strings.HasPrefix(line, "- **The rule.**") && strings.Contains(line, "`results[].node_reported`") {
@@ -193,8 +194,9 @@ func changelogRuleProblems(root string) []string {
 	return problems
 }
 
-// changelogText is the CHANGELOG under root as the prose checks read it.
+// changelogText is the CHANGELOG under root as the prose checks read it: with its changelog fragments spliced in, because a
+// fragment is changelog text from the day it is written and a gate that read only the file would see it first on the release
+// branch, after the assembly.
 func changelogText(root string) (string, error) {
-	raw, err := os.ReadFile(filepath.Join(root, "CHANGELOG.md"))
-	return string(raw), err
+	return changelog.Combined(root)
 }

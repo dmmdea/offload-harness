@@ -29,8 +29,13 @@ func TestTheChangelogTreeRulesHoldOnTheRealTree(t *testing.T) {
 }
 
 // docText reads a document of the tree at root for the prose gates (TestTheDocsQuoteTheSIGTERMCardTextTheCodeProduces and
-// TestTheDocsDoNotClaimAnIdleBoxNeverTouchesTheServingConfig).
+// TestTheDocsDoNotClaimAnIdleBoxNeverTouchesTheServingConfig). A fragment is changelog text from the day it is written, so
+// CHANGELOG.md is read with its fragments spliced in: a retired phrase that rides in on a fragment fails here, on the branch
+// that wrote it, and not first on the release branch after the assembly.
 func docText(root, name string) (string, error) {
+	if name == changelog.ChangelogFile {
+		return changelog.Combined(root)
+	}
 	raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
 	return string(raw), err
 }
