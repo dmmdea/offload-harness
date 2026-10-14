@@ -82,6 +82,16 @@ function refusalOf(r, code) {
   return r.refusal;
 }
 const warned = (r, code) => r.warnings.filter((w) => w.code === code);
+// a loop in the wires: refused as link_cycle by the visited set, which names the node the walk came back to. The bound on the hops
+// of one walk is only the backstop behind that set and says something else, so a test that wants the loop found where it closes
+// asserts the message and the node and not the code alone: with the code alone, a visited set that stopped working would still
+// pass (the backstop would answer link_cycle too) and nothing would show that the first line of defence was gone.
+function trailCycleOf(r) {
+  const refusal = refusalOf(r, REFUSAL.LINK_CYCLE);
+  assert.match(refusal.message, /loop back on themselves/, "the visited set found it, not the hop bound");
+  assert.equal(typeof refusal.details.node, "string", "and it names the node the loop closes at");
+  return refusal;
+}
 
 // graphProblems: what is wrong with an API graph as a graph, whatever the template said: a node of a class the listing lacks, a
 // wire to a node that is not in the graph, a wire to an output slot the class does not have, a wire whose output type (the
@@ -437,7 +447,7 @@ test("Reroute nodes are resolved: a chain of them is the wire it carries, and a 
     { id: 3, type: "Reroute", ins: [["", "IMAGE"]], outs: [["", "IMAGE"]] },
     { id: 4, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
   ], [[2, 0, 3, ""], [3, 0, 2, ""], [3, 0, 4, "image"]]));
-  refusalOf(loop, REFUSAL.LINK_CYCLE);
+  trailCycleOf(loop);
 });
 
 test("an unconnected Reroute feeds nothing: a widget keeps its stored value, a socket stays empty, and nothing is warned", () => {
@@ -604,10 +614,24 @@ test("mode 4 (bypassed): two bypassed nodes wired to each other and read by a co
     pass(2), pass(3),
     { id: 4, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
   ], [[2, 0, 3, "image"], [3, 0, 2, "image"], [3, 0, 4, "image"]]));
-  const refusal = refusalOf(r, REFUSAL.LINK_CYCLE);
+  const refusal = trailCycleOf(r);
   assert.match(refusal.details.node, /^[23]$/);
   // one bypassed node wired to itself is the same loop
-  refusalOf(convert(ui([pass(2), { id: 4, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] }], [[2, 0, 2, "image"], [2, 0, 4, "image"]])), REFUSAL.LINK_CYCLE);
+  trailCycleOf(convert(ui([pass(2), { id: 4, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] }], [[2, 0, 2, "image"], [2, 0, 4, "image"]])));
+});
+
+test("link_cycle: a loop through a ring of bypassed nodes and Reroutes, and one that runs through a subgraph instance, is found by the visited set where it closes", () => {
+  const pass = (id) => ({ id, type: "ImageInvert", mode: 4, ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] });
+  const reroute = (id) => ({ id, type: "Reroute", ins: [["", "IMAGE"]], outs: [["", "IMAGE"]] });
+  const consumer = (id) => ({ id, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] });
+  const ring = trailCycleOf(convert(ui([pass(2), reroute(3), pass(4), consumer(5)], [[2, 0, 3, ""], [3, 0, 4, "image"], [4, 0, 2, "image"], [4, 0, 5, "image"]])));
+  assert.match(ring.details.node, /^[234]$/);
+  // consumer 4 reads bypassed node 2, which takes its input from the instance 3, whose only input is node 2's output again
+  const through = subdef(SG(1), { ins: [["img", "IMAGE"]], outs: [["out", "IMAGE"]], nodes: [], edges: [[-10, 0, -20, "out"]] });
+  const viaInstance = trailCycleOf(convert(withDefs(ui([
+    pass(2), { id: 3, type: SG(1), ins: [["img", "IMAGE"]], outs: [["out", "IMAGE"]], wv: [] }, consumer(4),
+  ], [[3, 0, 2, "image"], [2, 0, 3, "img"], [2, 0, 4, "image"]]), through)));
+  assert.equal(viaInstance.details.node, "2");
 });
 
 test("mode 4 (bypassed): an unconnected input that has no link key at all (undefined, not null) is not a candidate either", () => {
@@ -982,6 +1006,24 @@ test("subgraph: a bypassed or muted node inside a definition is handled like a t
   assert.deepEqual(graphOf(convert(wf))["3"].inputs, { text: "x", clip: ["1", 1] });
 });
 
+test("subgraph: definitions that only pass an input through, nested many levels deep, resolve to the outer wire", () => {
+  // depth + 1 instances inside one another, the innermost wiring its input node to its output node: reading the outer instance's
+  // output takes a hop into each level and a hop out of each, so more hops than the 2 + depth nodes the graph is made of
+  const depth = 8;
+  const id = (n) => `5c1b0000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const slots = { ins: [["img", "IMAGE"]], outs: [["out", "IMAGE"]] };
+  const defs = [subdef(id(0), { ...slots, nodes: [], edges: [[-10, 0, -20, "out"]] })];
+  for (let k = 1; k <= depth; k++) defs.push(subdef(id(k), { ...slots, nodes: [{ id: 5, type: id(k - 1), ...slots }], edges: [[-10, 0, 5, "img"], [5, 0, -20, "out"]] }));
+  const wf = withDefs(ui([
+    { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+    { id: 2, type: id(depth), ...slots, wv: [] },
+    { id: 3, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  ], [[1, 0, 2, "img"], [2, 0, 3, "image"]]), ...defs);
+  const r = convert(wf);
+  assert.deepEqual(graphOf(r)["3"].inputs, { image: ["1", 0] });
+  assert.equal(r.stats.expandedSubgraphs, depth + 1);
+});
+
 // ---- limits and collisions -----------------------------------------------------------------------------------------------
 
 // a chain of `hops` Reroute nodes between a LoadImage (id 1) and an ImageInvert (id hops + 2), built as plain data: link i runs from
@@ -1010,7 +1052,7 @@ test("Reroute chains of any length resolve without a stack overflow and in time 
   const loop = rerouteChain(hops);
   loop.links.push([hops + 2, hops + 1, 0, 2, 0, "IMAGE"]);
   loop.nodes[1].inputs[0].link = hops + 2;
-  refusalOf(convert(loop), REFUSAL.LINK_CYCLE);
+  trailCycleOf(convert(loop));
 });
 
 test("a long chain of bypassed nodes resolves to the wire it carries too", () => {
