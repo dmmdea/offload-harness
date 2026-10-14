@@ -373,8 +373,9 @@ a call for a weight the node lacks is refused before anything is sent. Every oth
    `node_id` its `/fleet/health` publishes, in any case) or one of the `delegate_remotes` URLs. The named node is the only
    candidate. A box that has the lane itself still sends the call there (`auto` with a node leaves this machine, as `remote` does),
    no other node is tried, and this machine is not asked. `route local` with a node is a contradiction and is refused; a node on an
-   image or a graph call is refused by name (the image batch has no `--node`), because this release carries it for the three lanes
-   only and a refused word is better than a dropped one. `meta.placement` reads `remote: named node <name>`.
+   image or a graph call is refused by name by the library and the CLI (the image and graph verbs have no `--node`, and the image batch
+   none), because this release carries it for the three lanes only. The image and graph MCP tools list no `node`, so a `node` sent to them
+   is dropped as any argument a tool does not list is; no door advertises a parameter it would drop. `meta.placement` reads `remote: named node <name>`.
 2. **A node that cannot take the call is refused before any POST, by a word.** The deferred answer carries
    `{refusal, node, lane, family, missing[], roster[]}` in its data. Two are the caller's mistake and are `contract` defers:
    `node_unknown` (the name matches no node of the roster this call may use; `roster[]` lists the ids that answered) and

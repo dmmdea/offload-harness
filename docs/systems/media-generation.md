@@ -2463,7 +2463,8 @@ The local route, and an auto call that runs here, are not attributed (the pipeli
 `generate-audio`) take **`node`** (`--node`): a node id, as the `node_id` of its `/fleet/health` spells it (any case), or one of the
 `delegate_remotes` URLs. The named node is the **only** candidate: a box that has the lane itself still sends the call there, no other
 node is tried and this machine's lane is not asked. `route local` with a node contradicts itself and is refused; a node on an image
-or a graph call is refused by name (this release carries it for the three lanes only). `meta.placement` reads
+or a graph call is refused by name by the library and the CLI (this release carries it for the three lanes only: the image and graph
+verbs have no `--node` and the image and graph MCP tools list no `node`, so one sent to them is dropped like any unlisted argument). `meta.placement` reads
 `remote: named node <name>`. Nothing about a call with no `node` changed: it is placed as before and no row is read for it.
 
 **Refused before anything is sent.** A node that cannot take the call is refused by a word before the POST, so no job exists on it.

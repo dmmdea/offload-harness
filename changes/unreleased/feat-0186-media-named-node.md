@@ -3,8 +3,9 @@
 - **What changed.** `offload_generate_video`, `offload_animate_character` and `offload_generate_audio` (CLI `--node` on `generate-video`,
   `animate-character`, `generate-audio`) take `node`: a node id (the `node_id` its `/fleet/health` publishes, in any case) or one of the
   `delegate_remotes` URLs. The named node is the only candidate. A box that has the lane itself still sends the call there, no other
-  node is tried and this machine's lane is not asked; `route local` with a node is refused, and so is a node on an image or a graph call
-  (the image and graph tools and verbs do not offer it, so no door advertises a parameter it would drop). A call with no `node` is placed
+  node is tried and this machine's lane is not asked; `route local` with a node is refused, and so is a node on an image or a graph call made
+  through the library or the CLI (the image and graph verbs have no `--node`; the image and graph MCP tools list no `node` and drop one sent to
+  them like any unlisted argument, so no door advertises a parameter it would drop). A call with no `node` is placed
   exactly as before and reads no row. `meta.placement` reads `remote: named node <name>`.
 - **Refused before anything is sent.** A node that cannot take the call is refused by a word in `data.refusal`, beside `node`, `lane`,
   `family`, `missing[]` and `roster[]`, before the POST, so no job exists on it. `node_unknown` (it lists the ids that answered) and
