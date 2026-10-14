@@ -52,7 +52,8 @@ const (
 	// OutcomeFindings: a seat reviewed the unchanged diff and reported at least one defect.
 	OutcomeFindings = "FINDINGS"
 	// OutcomeGateFailed: the seat found nothing, but a deterministic gate is red or its
-	// receipt belongs to another commit, so PASS is not available. The review still ran.
+	// receipt belongs to another commit or names none, so PASS is not available. The review
+	// still ran.
 	OutcomeGateFailed = "GATE_FAILED"
 	// OutcomeNotRun: no clean seat reviewed this diff. A node deferral (including one the lane
 	// salvaged as a clean NONE), a refusal before any diff was read, a refused binding, an
@@ -416,7 +417,7 @@ type Verdict struct {
 //     run the node filed as a deferral that the lane read as a clean NONE: NOT_RUN;
 //  2. a diff that moved: STALE;
 //  3. a defect reported: FINDINGS;
-//  4. a red or stale gate: GATE_FAILED;
+//  4. a red, stale or unbound gate: GATE_FAILED;
 //  5. otherwise PASS.
 //
 // The oversize rule is repeated here although BuildContract refuses the same diff before any
