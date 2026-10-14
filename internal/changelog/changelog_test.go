@@ -412,6 +412,7 @@ func TestValidateFragment(t *testing.T) {
 		// behind it from the "##" rule and from the heading count, and still render as a release heading.
 		{"a lone CR before a forged heading", "a.md", ok + "\r## [9.9.9] - forged\r- y\n", "carriage return"},
 		{"a lone CR at the end of the body", "a.md", ok + "x\r", "carriage return"},
+		{"a lone CR as the first byte", "a.md", "\r" + ok, "carriage return"},
 		{"a CR followed by a CR and a line feed", "a.md", "### Added - a\r\r\n- b\n", "carriage return"},
 		{"one bare CR in a CRLF body", "a.md", eolOf("\r\n", ok) + "- b\r- c\r\n", "carriage return"},
 	} {
