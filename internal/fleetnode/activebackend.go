@@ -67,24 +67,18 @@ func (s *Server) activeBackends() (lanes, seats []backendchain.Entry) {
 	return lanes, seats
 }
 
-// refreshActiveBackends runs one collection and publishes it. The caller holds the latch, and the
-// publish is deferred so a panic in the collector still clears it (otherwise the report would never
-// refresh again for the life of the process).
+// refreshActiveBackends runs one collection and publishes it, releasing the latch the caller took. The
+// collector reports its own failures as rows (an unreachable llama-swap is a "none" row with the reason),
+// and a panic in it is not recovered: it is a bug, and it ends the process loudly like any other
+// goroutine's would, instead of leaving a node that serves a stale report.
 func (s *Server) refreshActiveBackends() {
-	var rep backendchain.Report
-	done := false
-	defer func() {
-		c := &s.backends
-		c.mu.Lock()
-		if done {
-			c.lanes, c.seats = rep.Lanes, rep.Seats
-		}
-		c.at = time.Now()
-		c.inflight = false
-		c.mu.Unlock()
-	}()
 	ctx, cancel := context.WithTimeout(context.Background(), activeBackendBudget)
 	defer cancel()
-	rep = s.collectBackends(ctx, s.opts.Cfg)
-	done = true
+	rep := s.collectBackends(ctx, s.opts.Cfg)
+	c := &s.backends
+	c.mu.Lock()
+	c.lanes, c.seats = rep.Lanes, rep.Seats
+	c.at = time.Now()
+	c.inflight = false
+	c.mu.Unlock()
 }

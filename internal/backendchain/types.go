@@ -2,7 +2,7 @@
 // engine is answering for it right now, and how do we know.
 //
 // The idea is the ordered backend chain with a real probe of Agent-Reach's `doctor` (a channel has an
-// ordered list of backends, the first one whose probe passes is the active one, and the report says so),
+// ordered list of backends, each with a real probe, and the report says which one is active and why),
 // rebuilt here without any of its dependencies and kept engine-neutral: the report names an engine KIND
 // ("llama.cpp", "vllm", "rkllm", and "strata" for the seat that is reserved for it), never a product
 // path, so a new engine registers by adding one row to the classification table (classify.go) and

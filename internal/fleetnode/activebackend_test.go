@@ -104,6 +104,53 @@ func TestHealthPublishesActiveBackendsFromACachedRead(t *testing.T) {
 	}
 }
 
+// TestHealthRefreshesAStaleActiveBackendReportBehindTheNextRequest: a read older than the TTL is served
+// as it is (the handler never waits) and kicks the next read behind itself, so a node that refreshed only
+// once would not publish stale engine state forever. The cache is aged by moving its timestamp.
+func TestHealthRefreshesAStaleActiveBackendReportBehindTheNextRequest(t *testing.T) {
+	s, _ := newTestServer(t, config.Config{Endpoint: "http://llama-swap.invalid"}, &fakeRunner{}, nil)
+	var calls atomic.Int32
+	s.collectBackends = func(context.Context, config.Config) backendchain.Report {
+		n := calls.Add(1)
+		return backendchain.Report{Lanes: []backendchain.Entry{{Lane: "agent", ActiveBackend: "llama.cpp", BackendChain: []string{"llama.cpp"}, BackendProbe: "process", BackendReason: fmt.Sprintf("read %d", n)}}}
+	}
+	reasonOf := func(m map[string]any) string {
+		lanes, _ := m["lane_backends"].([]any)
+		if len(lanes) == 0 {
+			return ""
+		}
+		r, _ := lanes[0].(map[string]any)["backend_reason"].(string)
+		return r
+	}
+	if r := reasonOf(waitForHealthKey(t, s, "lane_backends")); r != "read 1" {
+		t.Fatalf("first published read = %q", r)
+	}
+	for i := 0; i < 3; i++ {
+		backendHealth(t, s)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("%d collections inside the TTL window, want 1", n)
+	}
+
+	s.backends.mu.Lock()
+	s.backends.at = time.Now().Add(-2 * activeBackendTTL)
+	s.backends.mu.Unlock()
+	if r := reasonOf(backendHealth(t, s)); r != "read 1" {
+		t.Errorf("the request that finds a stale read must serve it, not wait for the next: got %q", r)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for reasonOf(backendHealth(t, s)) != "read 2" {
+		if time.Now().After(deadline) {
+			t.Fatalf("a read older than %s was never refreshed (%d collections)", activeBackendTTL, calls.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("%d collections after one stale read, want 2", n)
+	}
+}
+
 // TestHealthPublishesNothingWithoutAnEndpoint: no llama-swap endpoint, no collection.
 func TestHealthPublishesNothingWithoutAnEndpoint(t *testing.T) {
 	s, _ := newTestServer(t, config.Config{}, &fakeRunner{}, nil)
