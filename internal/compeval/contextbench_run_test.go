@@ -582,3 +582,155 @@ func TestRunCBNudgesAreSentAndThePeakContextIsTracked(t *testing.T) {
 		}
 	}
 }
+
+// cbTaskJSON is a task record the way the report serialises it, so a test can read a
+// field by its wire name.
+func cbTaskJSON(t *testing.T, r CBTaskResult) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// cbFirstQueryOp is the index of the first query operation, read from the gold (the
+// number of queries counted back from the end of the stream); len(Ops) when the family
+// asks nothing.
+func cbFirstQueryOp(in *CBInstance) int {
+	return len(in.Ops) - len(in.Gold.KV) - len(in.Gold.Log)
+}
+
+// cbBloat makes operation i larger than any budget these tests use. Its text carries no
+// signal word, so no rung of the ladder can keep a residue of it or cut it down: the newest
+// operation sits inside the keep-recent window.
+func cbBloat(in *CBInstance, i int) {
+	in.Ops[i].Body += "\n" + strings.Repeat("lorem ipsum dolor sit amet\n", 6000)
+}
+
+func cbWallOpts() CBRunOpts { return CBRunOpts{Budget: 8000, Reserve: 500, MaxOut: 512} }
+
+// A wall before the seat has been handed a single query leaves nothing to grade: the
+// partial frames hold no answer, so their zero would say the agent forgot what it was never
+// asked. The task is a timeout (it hit its budget), carries no reward and names the case.
+func TestRunCBBudgetWallBeforeAnyQueryIsTimeoutNotAGrade(t *testing.T) {
+	for _, family := range []string{CBFamilyKV, CBFamilyLog} {
+		first := cbFirstQueryOp(cbSmallInstance(t, family))
+		for name, at := range map[string]int{"in the stream": 2, "the last stream op": first - 1, "the first query op": first} {
+			in := cbSmallInstance(t, family)
+			cbBloat(in, at)
+			r := RunCBTask(context.Background(), in, cbOracleSeat(in), cbWallOpts())
+			label := family + "/" + name
+			if r.Outcome != CBOutcomeTimeout || r.TerminatedBy != CBTermBudgetWall || r.Reward != nil {
+				t.Errorf("%s: want an ungraded timeout ending at the budget wall: %+v", label, r)
+				continue
+			}
+			j := cbTaskJSON(t, r)
+			if j["term_reason"] != "budget_wall_before_query" {
+				t.Errorf("%s: term_reason = %v, want budget_wall_before_query", label, j["term_reason"])
+			}
+			if r.Detail == "" || r.Turns != at || r.OpsDelivered != at+1 || j["ops_sent"] != float64(at) {
+				t.Errorf("%s: detail %q turns %d delivered %d ops_sent %v, want turns %d delivered %d ops_sent %d", label, r.Detail, r.Turns, r.OpsDelivered, j["ops_sent"], at, at+1, at)
+			}
+		}
+	}
+}
+
+// A wall once the seat has been handed a query is graded on what it had, as before.
+func TestRunCBBudgetWallInsideTheQueryBlockIsStillGraded(t *testing.T) {
+	for _, family := range []string{CBFamilyKV, CBFamilyLog} {
+		first := cbFirstQueryOp(cbSmallInstance(t, family))
+		last := len(cbSmallInstance(t, family).Ops) - 1
+		for name, c := range map[string]struct {
+			at      int
+			matched int
+		}{"the second query op": {first + 1, 1}, "the last query op": {last, last - first}} {
+			in := cbSmallInstance(t, family)
+			cbBloat(in, c.at)
+			r := RunCBTask(context.Background(), in, cbOracleSeat(in), cbWallOpts())
+			label := family + "/" + name
+			if r.Outcome != CBOutcomeTaskFail || r.TerminatedBy != CBTermBudgetWall || r.Reward == nil || r.Matched != c.matched {
+				t.Errorf("%s: want a graded task_fail with %d answers credited: %+v", label, c.matched, r)
+				continue
+			}
+			if _, has := cbTaskJSON(t, r)["term_reason"]; has {
+				t.Errorf("%s: a graded wall carries no term_reason", label)
+			}
+		}
+	}
+}
+
+// needle_retention and sudoku_sketchpad ask nothing, so they have no query block to stop
+// short of: a wall after the first reply is graded on the frames, as before.
+func TestRunCBBudgetWallInAFamilyWithNoQueriesIsStillGraded(t *testing.T) {
+	for _, family := range []string{CBFamilyNeedle, CBFamilySudoku} {
+		in := cbSmallInstance(t, family)
+		cbBloat(in, 2)
+		r := RunCBTask(context.Background(), in, cbOracleSeat(in), cbWallOpts())
+		if r.TerminatedBy != CBTermBudgetWall || r.Reward == nil || (r.Outcome != CBOutcomeTaskFail && r.Outcome != CBOutcomePass) {
+			t.Errorf("%s: want a graded wall: %+v", family, r)
+		}
+		if _, has := cbTaskJSON(t, r)["term_reason"]; has {
+			t.Errorf("%s: a graded wall carries no term_reason", family)
+		}
+	}
+}
+
+// ops_delivered counts the operation that was appended to the transcript, the over-budget
+// one included; ops_sent counts only the operations the seat was actually handed.
+func TestRunCBReportCountsOperationsSentBesideOperationsDelivered(t *testing.T) {
+	in := cbSmallInstance(t, CBFamilyKV)
+	clean := cbTaskJSON(t, RunCBTask(context.Background(), in, cbOracleSeat(in), cbRunOpts()))
+	n := float64(len(in.Ops))
+	if clean["ops_sent"] != n || clean["ops_delivered"] != n || clean["ops_total"] != n {
+		t.Fatalf("a finished run sent every operation: %v", clean)
+	}
+	cbBloat(in, 3)
+	wall := cbTaskJSON(t, RunCBTask(context.Background(), in, cbOracleSeat(in), cbWallOpts()))
+	if wall["ops_delivered"] != 4.0 || wall["ops_sent"] != 3.0 {
+		t.Fatalf("the over-budget operation is delivered but never sent: %v", wall)
+	}
+}
+
+// Under the default delivery and the budget of record, a perfect agent passes the largest
+// published level of every family except log_triage/L12800. There the production ladder
+// cannot hold the log: its preserve guard keeps every tool result that still matches a
+// signal word, and the synthetic log lines carry [WARN], timeout and refused, so the
+// transcript stops fitting before the first query. That cell ends as a timeout whatever the
+// agent does: the ungraded signal the bench reports about the ladder, not a score.
+func TestRunCBOracleOnEveryFamilysTopLevelUnderTheDefaultDelivery(t *testing.T) {
+	const documented = CBFamilyLog + "/L12800"
+	for _, family := range CBFamilies {
+		names := CBLevelNames(family)
+		top := names[len(names)-1]
+		in, err := GenerateCB(family, top, 42)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := RunCBTask(context.Background(), in, cbOracleSeat(in), CBRunOpts{})
+		cell := family + "/" + top
+		if cell != documented {
+			if r.Outcome != CBOutcomePass || r.Reward == nil || *r.Reward != 1 {
+				t.Errorf("%s: a perfect agent must pass the top level: %+v", cell, r)
+			}
+			continue
+		}
+		if r.Outcome != CBOutcomeTimeout || r.TerminatedBy != CBTermBudgetWall || r.Reward != nil {
+			t.Fatalf("%s: want the documented ungraded timeout at the budget wall: %+v", cell, r)
+		}
+		if got := cbTaskJSON(t, r)["term_reason"]; got != "budget_wall_before_query" {
+			t.Errorf("%s: term_reason = %v", cell, got)
+		}
+		// No optional rung changes that: the guard, not the rung set, is what holds the log.
+		for _, lad := range []LadderOpts{{GCF: true}, {Skeleton: true}} {
+			rr := RunCBTask(context.Background(), in, cbOracleSeat(in), CBRunOpts{Ladder: lad})
+			if rr.Outcome != CBOutcomeTimeout || cbTaskJSON(t, rr)["term_reason"] != "budget_wall_before_query" {
+				t.Errorf("%s with ladder %s: %+v", cell, lad.Label(), rr)
+			}
+		}
+	}
+}
