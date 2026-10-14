@@ -275,3 +275,62 @@ func TestFailureZeroOnADelegatorRowIsNotAMeasurement(t *testing.T) {
 		t.Errorf("register totals = %s over %d rows, want 300 over 1", showTokens(reg.CardsTokens), reg.RowsWithTokens)
 	}
 }
+
+// Every class in neverRanClasses keeps a stored 0 as the row's own measurement, on a row built so that nothing else in
+// zeroIsOwn can vouch for it: the row names the node and a fleet job and is not a node's own row, so neither the
+// no-node term nor the served-door and requester term applies. The classes are written out here and not read from the
+// map: a loop over the map would lose a class together with the entry that dropped it. The map is held to the list in
+// both directions, so a class cannot join the set without this test saying so.
+func TestFailureEveryNeverRanClassKeepsAStoredZeroOnARowThatNamesANode(t *testing.T) {
+	never := []string{
+		ReasonNodeBusy, ReasonCapacityWait, ReasonQueueFull, ReasonNoEligibleNode,
+		ReasonQueueWithdrawn, ReasonShed, ReasonDispatchRefused,
+		ReasonConfig, ReasonContract, ReasonWrite, ReasonBadInput,
+	}
+	row := func(ts int, class string) string {
+		return `{"ts":` + strconv.Itoa(ts) + `,"task":"agent_delegate","deferred":true,"reason_code":"` + class +
+			`","door":"agent_run","fleet_job_id":"f` + strconv.Itoa(ts) + `","node":"node-a","cards_tokens":0}`
+	}
+	listed := map[string]bool{}
+	for _, c := range never {
+		listed[c] = true
+	}
+	if len(listed) != len(never) {
+		t.Fatalf("the list of never-ran classes repeats a class: %v", never)
+	}
+	if len(neverRanClasses) != len(listed) {
+		t.Errorf("neverRanClasses holds %d classes, this test lists %d", len(neverRanClasses), len(listed))
+	}
+	for c := range neverRanClasses {
+		if !listed[c] {
+			t.Errorf("neverRanClasses holds %q, which this test does not list", c)
+		}
+	}
+
+	// The same row under a class that says a run happened is not a measurement: the shape alone proves nothing.
+	const control = ReasonPollDeadline
+	lines := []string{row(1, control)}
+	for i, c := range never {
+		lines = append(lines, row(i+2, c))
+	}
+	reg, err := FailureRegisterFile(writeFailureLedger(t, lines...), 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := classNamed(t, reg, control); got.CardsTokens != nil || got.RowsWithTokens != 0 {
+		t.Errorf("%s: cards_tokens = %s over %d row(s), want nil: the row shape is meant to be vouched for by the class alone",
+			control, showTokens(got.CardsTokens), got.RowsWithTokens)
+	}
+	for _, c := range never {
+		got := classNamed(t, reg, c)
+		if got.Count != 1 || got.CardsTokens == nil || *got.CardsTokens != 0 || got.RowsWithTokens != 1 {
+			t.Errorf("%s: %d row(s), cards_tokens = %s over %d, want 1 row measured at 0 (no node ran the job)",
+				c, got.Count, showTokens(got.CardsTokens), got.RowsWithTokens)
+		}
+		for _, g := range got.Groups {
+			if g.CardsTokens == nil || *g.CardsTokens != 0 {
+				t.Errorf("%s: group cards_tokens = %s, want 0", c, showTokens(g.CardsTokens))
+			}
+		}
+	}
+}
