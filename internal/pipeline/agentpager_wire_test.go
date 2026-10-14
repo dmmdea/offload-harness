@@ -7,7 +7,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 )
 
-// RSI-OH-2: agentPagerWire is the unrecorded-versus-zero boundary on the delegation-log wire.
+// agentPagerWire is the unrecorded-versus-zero boundary on the delegation-log wire.
 // The loop's CompactionPasses is a pointer, nil meaning no instrument recorded the run, and the
 // wire object must stay ABSENT for that case: an object of zeros would read as a measured run
 // that never compacted and never evicted, and the readout would count it as a real zero.

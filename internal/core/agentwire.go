@@ -645,7 +645,7 @@ type AgentWireResult struct {
 	CacheTokens   int64   `json:"cache_tokens,omitempty"`
 	PrefillMS     float64 `json:"prefill_ms,omitempty"`
 
-	// --- Context-pager gate and compaction passes (RSI-OH-2). The loop measures both and
+	// --- Context-pager gate and compaction passes. The loop measures both and
 	// the wire dropped them, so the delegation log could not say how often the compaction
 	// ladder ran or whether the seat fetched back what it evicted. A POINTER with omitempty:
 	// the key is absent on a node that predates the field and on a run that never reached

@@ -51,7 +51,7 @@ type PagerStats struct {
 	evictions int
 	bytes     int64
 	// passes counts compaction passes the loop ran: every NoteCompaction call over a
-	// non-empty transcript, whether or not it evicted a body the pager tracks (RSI-OH-2).
+	// non-empty transcript, whether or not it evicted a body the pager tracks.
 	passes int
 }
 

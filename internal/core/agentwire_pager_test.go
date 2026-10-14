@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// RSI-OH-2: the pager object is additive on the agent wire result. These pin the two shapes a
+// The pager object is additive on the agent wire result. These pin the two shapes a
 // reader of the delegation log has to tell apart: the object present (a run whose node recorded
 // the pager gate, zeros included) and the key absent (a node that predates the field).
 

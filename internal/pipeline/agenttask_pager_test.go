@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// RSI-OH-2: the agent door's wire result is what the delegator's standing corpus (the
+// The agent door's wire result is what the delegator's standing corpus (the
 // delegation log) stores, and it already carried the prefill accounting. It carried nothing of
 // the pager gate or the compaction ladder, so the one workload that produces recorded agent runs
 // on a fleet node left no trace of how often the ladder ran or whether evicted content came

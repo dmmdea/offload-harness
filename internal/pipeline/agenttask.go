@@ -1161,7 +1161,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		wire.CacheTokens = pf.CacheTokens
 		wire.PrefillMS = pf.PrefillMS
 	}
-	// RSI-OH-2: the pager gate and the compaction pass count ride the wire too, set at the
+	// The pager gate and the compaction pass count ride the wire too, set at the
 	// same point and for the same reason as the prefill block above (a budget-stopped run is
 	// the one that compacted most). Unlike prefill it is set whether or not anything was
 	// evicted: an object of real zeros is a measurement, an absent key is "not recorded".

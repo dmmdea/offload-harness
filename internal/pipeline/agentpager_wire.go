@@ -5,7 +5,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 )
 
-// agentPagerWire maps the loop's pager report onto the wire object (RSI-OH-2). It returns nil
+// agentPagerWire maps the loop's pager report onto the wire object. It returns nil
 // when no instrument recorded the run (CompactionPasses nil), so that case stays an absent key
 // on the wire instead of becoming an object of zeros.
 func agentPagerWire(r agent.PagerReport) *core.AgentPager {

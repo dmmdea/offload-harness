@@ -12,7 +12,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/agent"
 )
 
-// RSI-OH-2: the per-goal trace is the ONLY durable record of a standalone run, and until now it
+// The per-goal trace is the ONLY durable record of a standalone run, and until now it
 // kept the final transcript and nothing the run's own instruments had measured. The pager gate
 // and the prefill report were printed to stderr and lost, so the trace corpus could not answer
 // "how often did the agent come back for what compaction took out" from anything on disk.

@@ -2,7 +2,7 @@ package agent
 
 import "testing"
 
-// RSI-OH-2: the pager and prefill instruments live on the Loop and accumulate for its life. The
+// The pager and prefill instruments live on the Loop and accumulate for its life. The
 // standalone queue drainer reuses one Loop for every goal, so a per-goal trace needs a way to
 // start the instruments over between goals. ResetRunInstruments is that, for SERIAL reuse only.
 

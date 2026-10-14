@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// RSI-OH-2: the compaction ladder's fire count has to be RECORDED with the run, because
+// The compaction ladder's fire count has to be RECORDED with the run, because
 // nothing else on disk says how often the ladder ran (the final transcript keeps only the
 // bodies it left behind). The count rides the pager report: the pager is already fed at every
 // ladder pass, so one counter there reads the same pass sites without a second hook in the loop.

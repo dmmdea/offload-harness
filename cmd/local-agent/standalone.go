@@ -76,7 +76,7 @@ type traceRecord struct {
 	// this field the traces could not show WHICH goal degraded the process
 	// (review finding 2026-08-14).
 	TokenizerPath string `json:"tokenizer_path,omitempty"`
-	// Pager and Prefill (RSI-OH-2) are the run's own instrument reports, written beside the
+	// Pager and Prefill are the run's own instrument reports, written beside the
 	// transcript because the transcript alone cannot reproduce them: the final transcript
 	// keeps what the ladder left behind, not what it took out or how many times it ran.
 	// Pointers with omitempty: a trace written before these existed has neither key, and a
