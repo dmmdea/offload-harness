@@ -15,8 +15,11 @@
 //                                 position of the list (its widgets_values follow the list, not the order of the
 //                                 subgraph's inputs) and has nothing wired to its input for the widget, so the interior
 //                                 widget is the only place the value lives. The extractor checks all four facts and
-//                                 refuses P when the instance carries the value (use I) or the root graph wires the
-//                                 input (use the source that feeds it).
+//                                 refuses P when the instance carries the value or the root graph wires the input.
+//                                 For a carried value the message says whether I reads it: I indexes the instance's
+//                                 widgets_values by the order of the subgraph's widget-typed inputs, not by proxyWidgets,
+//                                 so it is the right locator only where both positions agree. For a wired input the fix
+//                                 is the source that feeds it.
 //   D(sg, id, type, a, b)         template-only wiring check: the inputs `a` and `b` of the node are fed by
 //                                 DIFFERENT sources (the defect of upstream workflow_templates PR #1308 was one
 //                                 subgraph input feeding both the start and the end percent of a node)

@@ -564,7 +564,7 @@ test("a legacy proxied widget reads the interior value, once the instance is sho
   // the plain locator still refuses it: the widget is linked
   assert.throws(() => read(proxiedTemplate(), {}), /wf-x \[v\] lora\.name: .* lora_name is linked \(to input:lora_name\)/);
   assert.throws(() => read(proxiedTemplate({ proxy: [["227", "text"]] })), /does not list \[221, lora_name\] as a proxied widget/);
-  assert.throws(() => read(proxiedTemplate({ instanceValues: ["t", "b.safetensors"] })), /instance 238 carries a promoted value for lora_name; read it with I/);
+  assert.throws(() => read(proxiedTemplate({ instanceValues: ["t", "b.safetensors"] })), /instance 238 carries a promoted value for lora_name at position 1 of its proxyWidgets; read it with I \(position 1 is also/);
   assert.throws(() => read(proxiedTemplate({ linked: false })), /widget lora_name is not linked to a subgraph input; read it with W/);
 });
 
@@ -575,15 +575,59 @@ test("a legacy proxied widget's promoted value is found where the template forma
   // lora_name is listed first but is the second widget-typed input: the one value is at its position, so it carries one
   assert.throws(
     () => read(proxiedTemplate({ proxy: [["221", "lora_name"], ["227", "text"]], sgInputs: [text, lora], instanceValues: ["b.safetensors"] })),
-    /instance 238 carries a promoted value for lora_name; read it with I/,
+    /instance 238 carries a promoted value for lora_name at position 0 of its proxyWidgets/,
   );
   // lora_name is listed second but is the first widget-typed input: the one value belongs to the widget listed first
   assert.equal(read(proxiedTemplate({ proxy: [["227", "text"], ["221", "lora_name"]], sgInputs: [lora, text], instanceValues: ["a prompt"] })), "a.safetensors");
   // a value at its own position is found whatever the order of the subgraph's inputs
   assert.throws(
     () => read(proxiedTemplate({ proxy: [["227", "text"], ["221", "lora_name"]], sgInputs: [lora, text], instanceValues: ["a prompt", "b.safetensors"] })),
-    /instance 238 carries a promoted value for lora_name; read it with I/,
+    /instance 238 carries a promoted value for lora_name at position 1 of its proxyWidgets/,
   );
+});
+
+test("a proxied widget that carries a value points at I only where I would read the same position, and says so where it would not", () => {
+  const read = (tpl) => templateValue(PROXY_SPEC, PROXY_VIEW, tpl, proxiedItem({ proxied: true }));
+  const text = { name: "text", type: "STRING" };
+  const lora = { name: "lora_name", type: "COMBO" };
+  const message = (tpl) => { try { read(tpl); } catch (e) { return e.message; } return ""; };
+  // proxyWidgets position 1 is also the second widget-typed input: an I locator reads the value that runs
+  const agree = message(proxiedTemplate({ proxy: [["227", "text"], ["221", "lora_name"]], sgInputs: [text, lora], instanceValues: ["t", "b.safetensors"] }));
+  assert.match(agree, /carries a promoted value for lora_name at position 1 of its proxyWidgets; read it with I \(position 1 is also its place among the widget-typed inputs\)/);
+  // position 0 in proxyWidgets, the second among the widget-typed inputs: I would read the other widget
+  const differ = message(proxiedTemplate({ proxy: [["221", "lora_name"], ["227", "text"]], sgInputs: [text, lora], instanceValues: ["b.safetensors"] }));
+  assert.match(differ, /carries a promoted value for lora_name at position 0 of its proxyWidgets/);
+  assert.match(differ, /I would read position 1, which holds another widget/);
+  assert.match(differ, /no locator reads position 0/);
+  assert.doesNotMatch(differ, /read it with I\b/);
+  // the same facts the other way round
+  const other = message(proxiedTemplate({ proxy: [["227", "text"], ["221", "lora_name"]], sgInputs: [lora, text], instanceValues: ["a prompt", "b.safetensors"] }));
+  assert.match(other, /at position 1 of its proxyWidgets/);
+  assert.match(other, /I would read position 0, which holds another widget/);
+});
+
+test("a proxied widget whose subgraph input is not widget-typed says that no locator reads it, not that I would read position -1", () => {
+  const read = (tpl) => templateValue(PROXY_SPEC, PROXY_VIEW, tpl, proxiedItem({ proxied: true }));
+  const message = (tpl) => { try { read(tpl); } catch (e) { return e.message; } return ""; };
+  const text = { name: "text", type: "STRING" };
+  // the wildcard type and a combined type are not in the set of widget-typed inputs, so I does not count the input at all
+  for (const type of ["*", "COMBO,STRING"]) {
+    const msg = message(proxiedTemplate({ proxy: [["227", "text"], ["221", "lora_name"]], sgInputs: [text, { name: "lora_name", type }], instanceValues: ["t", "b.safetensors"] }));
+    assert.match(msg, /carries a promoted value for lora_name at position 1 of its proxyWidgets/, type);
+    assert.match(msg, /no locator reads position 1: input lora_name is not a widget-typed input, so I does not count it/, type);
+    assert.doesNotMatch(msg, /position -1/, type);
+    assert.doesNotMatch(msg, /holds another widget/, type);
+    assert.doesNotMatch(msg, /read it with I\b/, type);
+  }
+});
+
+test("an I locator reads an instance by the order of the widget-typed inputs even where the instance also lists proxyWidgets", () => {
+  // the claim the message above rests on, stated as a fact about the locator
+  const tpl = proxiedTemplate({ proxy: [["221", "lora_name"], ["227", "text"]], sgInputs: [{ name: "text", type: "STRING" }, { name: "lora_name", type: "COMBO" }], instanceValues: ["first", "second"], linked: false });
+  const sg = tpl.definitions.subgraphs[0];
+  const read = (input) => templateValue(PROXY_SPEC, PROXY_VIEW, tpl, { key: "k", b: null, t: { kind: "inst", sg: null, id: 238, type: `subgraph:${sg.name}`, input } });
+  assert.equal(read("text"), "first");
+  assert.equal(read("lora_name"), "second");
 });
 
 test("a legacy proxied widget is refused when the root graph wires something into the instance's input for it", () => {
@@ -602,6 +646,37 @@ test("a legacy proxied widget is refused when the root graph wires something int
     () => read(proxiedTemplate({ instanceInputs: [entry("lora_name", 7)], rootLinks: [{ id: 7, origin_id: 41, origin_slot: 0, target_id: 238, target_slot: 0 }] })),
     /instance 238 has its lora_name input linked at the root/,
   );
+});
+
+test("a legacy proxied widget that is wired at the root is refused for the wiring even where the instance also carries a value", () => {
+  const read = (tpl) => templateValue(PROXY_SPEC, PROXY_VIEW, tpl, proxiedItem({ proxied: true }));
+  const message = (tpl) => { try { read(tpl); } catch (e) { return e.message; } return ""; };
+  const text = { name: "text", type: "STRING" };
+  const lora = { name: "lora_name", type: "COMBO" };
+  const entry = (name, link) => ({ name, type: name === "text" ? "STRING" : "COMBO", widget: { name }, link });
+  const wired = { instanceInputs: [entry("text", null), entry("lora_name", 7)], rootLinks: [[7, 41, 0, 238, 1, "COMBO"]] };
+  const wiring = /instance 238 has its lora_name input linked at the root \(to node:\S+#0\), so the interior value is not the one that runs/;
+  // the wiring wins in all three cases of the carried value: the positions agree (I would be named), they differ, and the input is not widget-typed
+  const cases = {
+    "positions agree": { proxy: [["227", "text"], ["221", "lora_name"]], sgInputs: [text, lora], instanceValues: ["t", "b.safetensors"] },
+    "positions differ": { proxy: [["221", "lora_name"], ["227", "text"]], sgInputs: [text, lora], instanceValues: ["b.safetensors"] },
+    "input not widget-typed": { proxy: [["227", "text"], ["221", "lora_name"]], sgInputs: [text, { name: "lora_name", type: "*" }], instanceValues: ["t", "b.safetensors"] },
+  };
+  for (const [name, args] of Object.entries(cases)) {
+    const msg = message(proxiedTemplate({ ...args, ...wired }));
+    assert.match(msg, wiring, name);
+    assert.doesNotMatch(msg, /carries a promoted value/, name);
+    assert.doesNotMatch(msg, /read it with I\b/, name);
+  }
+  // the advice the old order gave would have failed: an I locator on the same wired instance throws "is linked"
+  const tpl = proxiedTemplate({ ...cases["positions agree"], ...wired });
+  const sg = tpl.definitions.subgraphs[0];
+  assert.throws(
+    () => templateValue(PROXY_SPEC, PROXY_VIEW, tpl, { key: "k", b: null, t: { kind: "inst", sg: null, id: 238, type: `subgraph:${sg.name}`, input: "lora_name" } }),
+    /instance 238 widget lora_name is linked/,
+  );
+  // without the wiring the same instance still gets the carried-value message
+  assert.match(message(proxiedTemplate(cases["positions agree"])), /read it with I \(position 1 is also its place among the widget-typed inputs\)/);
 });
 
 test("an instance whose own promoted widget is linked in the root graph fails", () => {
@@ -762,6 +837,25 @@ test("a wiring check tells nodes apart by id, not by type: two separate nodes of
   assert.equal(readDistinct(sinkTemplate([], [77, 0], [78, 0])), true);
 });
 
+test("a wiring check over an input with no link throws, naming the node and the inputs (either input may be the unlinked one)", () => {
+  const unlinkedA = sinkTemplate([[1, "PrimitiveFloat"]], [1, 0], [1, 0]);
+  const msg = /wf-x \[v\] wiring\.a_b_distinct: template tpl node 10 has an unlinked input in \[a, b\]/;
+  // drop the link from one input at a time: a === undefined, then b === undefined
+  for (const name of ["a", "b"]) {
+    const tpl = structuredClone(unlinkedA);
+    const node = tpl.nodes.find((n) => n.id === 10) ?? tpl.definitions.subgraphs.flatMap((s) => s.nodes).find((n) => n.id === 10);
+    node.inputs.find((i) => i.name === name).link = null;
+    assert.throws(() => readDistinct(tpl), msg, `input ${name} unlinked`);
+  }
+  // an input the node does not list at all is unlinked too
+  const missing = structuredClone(unlinkedA);
+  const sink = missing.nodes.find((n) => n.id === 10) ?? missing.definitions.subgraphs.flatMap((s) => s.nodes).find((n) => n.id === 10);
+  sink.inputs = sink.inputs.filter((i) => i.name !== "b");
+  assert.throws(() => readDistinct(missing), msg);
+  // control: as built, it reads
+  assert.equal(readDistinct(unlinkedA), false);
+});
+
 test("a linked widget's message names the feeding node by type and id", () => {
   const tpl = {
     nodes: [
@@ -914,6 +1008,25 @@ test("the `=` form of a value flag is refused when empty, and a switch refuses a
     assert.equal(r.code, 2, `${arg} -> ${r.out}${r.err}`);
     assert.match(r.err, /takes no value/);
     assert.doesNotMatch(r.out, /^ok:/m);
+  }
+});
+
+test("the runbook names the expected failures of check --strict: the docs and the README list exactly the unreviewed entries of the manifest", async () => {
+  const strict = await cli(["check", "--strict"]);
+  assert.equal(strict.code, 1);
+  const count = (strict.out.match(/^(\d+) failure\(s\)$/m) ?? [])[1];
+  assert.equal(count, "2");
+  const entries = strict.err.trim().split("\n").map((line) => {
+    const m = line.match(/^builder drift: (\S+) \[(\w+)\]: widget (\S+) is unreviewed/);
+    assert.ok(m, line);
+    return { builder: m[1], key: m[3] };
+  });
+  const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
+  const page = readFileSync(new URL("../docs/systems/media-generation.md", import.meta.url), "utf8");
+  for (const [name, raw] of [["render/README.md", readme], ["the system page", page]]) {
+    const text = raw.replace(/\s+/g, " ");
+    assert.ok(text.includes(`exactly \`${count} failure(s)\``), `${name} states the failure count ${count}`);
+    for (const e of entries) assert.ok(text.includes(e.builder) && text.includes(e.key), `${name} names ${e.builder} ${e.key}`);
   }
 });
 
