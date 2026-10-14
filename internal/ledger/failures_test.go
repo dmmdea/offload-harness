@@ -454,6 +454,7 @@ func TestFailureRegisterReportsKindsAndTheStackFaultShare(t *testing.T) {
 		`{"ts":6,"task":"agent_delegate","deferred":true,"reason_code":"contract","job_id":"f","cards_tokens":0}`,
 		`{"ts":7,"task":"agent_delegate","deferred":true,"reason_code":"budget","job_id":"g","cards_tokens":0}`,
 		`{"ts":8,"task":"agent_delegate","deferred":false,"reason_code":"ok","acceptance_result":"pass","job_id":"h","cards_tokens":0}`,
+		`{"ts":9,"task":"agent_delegate","deferred":true,"reason_code":"node_busy","job_id":"i","cards_tokens":0}`,
 	)
 	reg, err := FailureRegisterFile(path, 0, false)
 	if err != nil {
@@ -465,11 +466,11 @@ func TestFailureRegisterReportsKindsAndTheStackFaultShare(t *testing.T) {
 			t.Errorf("class %s kind = %q, want %q", class, got, want)
 		}
 	}
-	if reg.StackFaultRows != 2 || reg.StackFaultShare == nil || *reg.StackFaultShare != 0.2857 {
-		t.Errorf("stack_fault_rows = %d, share = %v, want 2 and 0.2857 (2 of 7 failure rows)", reg.StackFaultRows, reg.StackFaultShare)
+	if reg.StackFaultRows != 2 || reg.StackFaultShare == nil || *reg.StackFaultShare != 0.25 {
+		t.Errorf("stack_fault_rows = %d, share = %v, want 2 and 0.25 (2 of 8 failure rows; capacity holds 3, so the two are told apart)", reg.StackFaultRows, reg.StackFaultShare)
 	}
-	want := []FailureKindCount{{Kind: KindCapacity, Count: 2, Share: 0.2857}, {Kind: KindStackFault, Count: 2, Share: 0.2857},
-		{Kind: KindCaller, Count: 1, Share: 0.1429}, {Kind: KindCeiling, Count: 1, Share: 0.1429}, {Kind: KindWork, Count: 1, Share: 0.1429}}
+	want := []FailureKindCount{{Kind: KindCapacity, Count: 3, Share: 0.375}, {Kind: KindStackFault, Count: 2, Share: 0.25},
+		{Kind: KindCaller, Count: 1, Share: 0.125}, {Kind: KindCeiling, Count: 1, Share: 0.125}, {Kind: KindWork, Count: 1, Share: 0.125}}
 	if len(reg.Kinds) != len(want) {
 		t.Fatalf("kinds = %+v, want %+v (count descending, then kind; kinds with no row absent)", reg.Kinds, want)
 	}
