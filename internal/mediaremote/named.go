@@ -12,7 +12,10 @@ package mediaremote
 // node_lacks_model, node_below_min_vram) is a configuration fact that waiting does not change: it is filed like the misses
 // pickNodeFor reports for a roster left out for configuration, as a capacity defer with err_class no_node_configured, narrowed to
 // the one node the caller chose. A node that does not answer, or holds a text lease, is an ordinary capacity defer with no err
-// class: it may take the call later.
+// class: it may take the call later. A roster entry the tailnet guard refuses is never dialled and has no id: an id nobody has is
+// node_unknown however many such entries the roster holds (the reason names them), and a URL named that the guard refuses is filed
+// like the configuration refusals (capacity, no_node_configured) without a refusal word. A machine with no delegate_remotes never
+// reaches a roster: callWith answers the plain config defer of every remote call there.
 //
 // What a node publishes in media_recipes (the family rows of its video, animation and audio bindings) is read for one thing: the
 // weight files a row says it lacks. A lane the node publishes no row for is UNKNOWN, never refused (an older node, an sd.cpp
