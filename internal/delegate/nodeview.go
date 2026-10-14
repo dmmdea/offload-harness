@@ -597,6 +597,8 @@ type healthWire struct {
 	// Additive (ADR 0082): what each image family on the node is, and whether its image-gen carries refine.
 	ImageRecipes   []ImageRecipeView `json:"image_recipes"`
 	RefineHonoured bool              `json:"refine_honoured"`
+	// Additive (ADR 0082 Amendment 3): the family rows of the node's video, animation and audio bindings.
+	MediaRecipes []MediaRecipeView `json:"media_recipes"`
 	// Additive (ADR 0072): the stt upload door's capability. Absent on an older node.
 	STTHQ          *bool `json:"stt_hq"`
 	STTUploadMaxMB int   `json:"stt_upload_max_mb"`
@@ -688,6 +690,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		Layers:       w.Layers,
 
 		ImageRecipes:   w.ImageRecipes,
+		MediaRecipes:   w.MediaRecipes,
 		RefineHonoured: w.RefineHonoured,
 
 		STTHQ:          w.STTHQ,

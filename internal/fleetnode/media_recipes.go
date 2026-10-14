@@ -12,8 +12,21 @@ import (
 // MediaRecipeHealth is one row of /fleet/health media_recipes (mediacap.LaneRow).
 type MediaRecipeHealth = mediacap.LaneRow
 
-// MediaRecipes lists the rows of this node's video, animation and audio bindings. Seam: the build lands with its tests.
-func MediaRecipes(cfg config.Config) []MediaRecipeHealth { return nil }
+// MediaRecipes lists the rows of this node's video, animation and audio bindings (mediacap.LaneRows): the family each binding
+// names, its weight files and their sizes here, -1 for a file the node does not hold. No file is read: a row carries no content
+// fingerprint and no digest in this release, so it is a statement of what the binding names and what is on disk, never an
+// identity, and building it costs a stat per file.
+func MediaRecipes(cfg config.Config) []MediaRecipeHealth { return mediacap.LaneRows(cfg) }
 
-// mediaRecipeRows is the media_recipes advertisement of this server's config.
-func (s *Server) mediaRecipeRows() []MediaRecipeHealth { return MediaRecipes(s.opts.Cfg) }
+// mediaRecipeRows is the memoised MediaRecipes of this server's config: re-read at most every mediaRoutesTTL, the freshness a
+// route verdict has, so polling health does not stat the weight files each time and a file that appears or goes shows within a
+// minute. The config cannot change under a running server, so the memo is keyed on time alone.
+func (s *Server) mediaRecipeRows() []MediaRecipeHealth {
+	s.mediaRecipeMu.Lock()
+	defer s.mediaRecipeMu.Unlock()
+	now := mediaClock()
+	if !s.mediaRecipeRead || now.Sub(s.mediaRecipeAt) >= mediaRoutesTTL {
+		s.mediaRecipeMemo, s.mediaRecipeAt, s.mediaRecipeRead = MediaRecipes(s.opts.Cfg), now, true
+	}
+	return s.mediaRecipeMemo
+}

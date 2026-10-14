@@ -9,6 +9,9 @@ package mediacap
 // is untouched.
 
 import (
+	"path"
+	"strings"
+
 	"github.com/dmmdea/offload-harness/internal/config"
 )
 
@@ -39,5 +42,135 @@ type LaneRow struct {
 	CommercialUse *bool        `json:"commercial_use,omitempty"`
 }
 
-// LaneRows lists the rows of this machine's video, animation and audio bindings. Seam: the builder lands with its tests.
-func LaneRows(cfg config.Config) []LaneRow { return nil }
+// The names of the animation and music rows: the families the node advertises for those lanes.
+const (
+	AnimateRowName = "wan-animate2"
+	MusicRowName   = "acestep"
+)
+
+// LaneRows lists the rows of this machine's video, animation and audio bindings: video first (the default family, then the other
+// ComfyUI families, then the sd.cpp ones), then animation, then music. A lane is listed when its binding NAMES a renderer this
+// release can describe (a ComfyUI script, or an sd.cpp video family); whether the node can serve it right now is the route state's
+// business (media_routes), and a row of a binding whose weights are gone is still listed, with bytes -1, so that a refusal can
+// name them. The audio.cpp engines, the sd.cpp animation lane and voice have no row: a reader takes that as unknown.
+func LaneRows(cfg config.Config) []LaneRow {
+	roots := ModelRoots(cfg.ComfyDir)
+	var rows []LaneRow
+	rows = append(rows, videoLaneRows(cfg, roots)...)
+	if strings.TrimSpace(cfg.AnimateGenScript) != "" && cfg.AnimateGenEngine != config.EngineSdcpp {
+		rows = append(rows, LaneRow{Lane: LaneAnimate, Name: AnimateRowName, Default: true, Engine: EngineComfyUI, Files: laneFiles(roots, AnimateModelFiles(cfg))})
+	}
+	if strings.TrimSpace(cfg.MusicGenScript) != "" && cfg.MusicGenEngine != config.EngineAudiocpp {
+		rows = append(rows, LaneRow{Lane: LaneAudio, Name: MusicRowName, Default: true, Engine: EngineComfyUI, Files: laneFiles(roots, MusicModelFiles())})
+	}
+	return rows
+}
+
+func videoLaneRows(cfg config.Config, roots []ModelRoot) []LaneRow {
+	var rows []LaneRow
+	if strings.TrimSpace(cfg.VideoGenScript) != "" {
+		// The default ComfyUI family: none when the box's default video family is an sd.cpp one.
+		comfyDefault := ""
+		if _, sdcpp := cfg.DefaultVideoSdcppFamily(); !sdcpp {
+			comfyDefault = videoRunnerFamily(strings.TrimSpace(cfg.VideoGenFamily))
+		}
+		for _, name := range videoFamilyNames {
+			// An sd.cpp family named like a ComfyUI one is the sd.cpp row below, not a listing of files its renders never load.
+			if cfg.SdcppVideoFamily(name) {
+				continue
+			}
+			_, bound := cfg.VideoGenFamilies[name]
+			fam, fb := VideoBinding(cfg, name)
+			files := laneFiles(roots, VideoModelFilesFor(fam, fb))
+			// The default family is always listed. Another one only when the node has bound it or holds every file its graph loads:
+			// otherwise it is not a family this node renders.
+			if name != comfyDefault && !bound && !allPresent(files) {
+				continue
+			}
+			row := LaneRow{Lane: LaneVideo, Name: name, Default: name == comfyDefault, Engine: EngineComfyUI, Files: files, License: fb.License, CommercialUse: fb.CommercialUse}
+			if row.Default {
+				rows = append([]LaneRow{row}, rows...)
+			} else {
+				rows = append(rows, row)
+			}
+		}
+	}
+	defaultSdcpp, _ := cfg.DefaultVideoSdcppFamily()
+	for _, name := range sdcppVideoFamilyNames(cfg) {
+		fb := cfg.VideoGenFamilies[name]
+		files := make([]RecipeFile, 0, 4)
+		for _, f := range []struct{ role, path string }{
+			{"model", fb.SdcppModel}, {"high_noise_model", fb.SdcppHighNoiseModel}, {"vae", fb.SdcppVAE}, {"t5xxl", fb.SdcppT5xxl},
+		} {
+			if strings.TrimSpace(f.path) == "" {
+				continue
+			}
+			size := int64(-1)
+			if n, ok := osStatSize(f.path); ok {
+				size = n
+			}
+			files = append(files, RecipeFile{Role: f.role, Name: publishedName(f.path), Bytes: size})
+		}
+		row := LaneRow{Lane: LaneVideo, Name: name, Default: name == defaultSdcpp, Engine: config.EngineSdcpp, Files: files, License: fb.License, CommercialUse: fb.CommercialUse}
+		if row.Default {
+			rows = append([]LaneRow{row}, rows...)
+		} else {
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
+// laneFiles describes the weight files of a family on this node: the name the loader opens, and the size where it finds the file
+// (-1 when it does not). No content is read.
+func laneFiles(roots []ModelRoot, files []ModelFile) []RecipeFile {
+	out := make([]RecipeFile, 0, len(files))
+	for _, f := range files {
+		size := int64(-1)
+		if _, n, ok := ResolveModelFilePath(roots, f, nil); ok {
+			size = n
+		}
+		out = append(out, RecipeFile{Role: laneRole(f.Label), Name: publishedName(f.Name), Bytes: size})
+	}
+	return out
+}
+
+func allPresent(files []RecipeFile) bool {
+	for _, f := range files {
+		if f.Bytes < 0 {
+			return false
+		}
+	}
+	return len(files) > 0
+}
+
+// laneRole is a file's role in its row: its label without the "(<builder> builder default)" note and without the config key
+// prefix the doctor labels carry.
+func laneRole(label string) string {
+	if i := strings.Index(label, " ("); i >= 0 {
+		label = label[:i]
+	}
+	label = strings.TrimPrefix(label, "videogen_")
+	return strings.TrimPrefix(label, "animategen_")
+}
+
+// publishedName is the name a row carries for a file. A relative name keeps its subfolders, as the loader opens it (forward
+// slashes whatever the config spelled). An absolute path, a drive-lettered one or one that climbs out with `..` is cut to its file
+// name: rows leave the machine on /fleet/health, and a path is the machine's own business.
+func publishedName(name string) string {
+	n := strings.ReplaceAll(strings.TrimSpace(name), `\`, "/")
+	abs := strings.HasPrefix(n, "/")
+	if len(n) >= 2 && n[1] == ':' {
+		n, abs = n[2:], true
+	}
+	parent := false
+	for _, el := range strings.Split(n, "/") {
+		if el == ".." {
+			parent = true
+		}
+	}
+	if abs || parent {
+		return path.Base(n)
+	}
+	return n
+}

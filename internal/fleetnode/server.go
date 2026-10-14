@@ -220,6 +220,11 @@ type Server struct {
 	// recipeGen is the fingerprinter's generation the rows were built at: a read that settled since turns a pending row
 	// into its digest without waiting for the memo's minute.
 	recipeGen uint64
+	// mediaRecipeMemo is the memoised media_recipes advertisement (media_recipes.go): re-read at most every mediaRoutesTTL.
+	mediaRecipeMu   sync.Mutex
+	mediaRecipeMemo []MediaRecipeHealth
+	mediaRecipeAt   time.Time
+	mediaRecipeRead bool
 	// agentSeat is the resolved agent planner seat (config.AgentPlannerModel:
 	// agent_model > workhorse Model), computed once here at construction —
 	// the config cannot change under a running server. Advertised (and probed
@@ -1670,6 +1675,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	// The video, animation and audio family rows (ADR 0082 Amendment 3) come from a memo too; a node that binds none of the three
+	// through ComfyUI or sd.cpp has no rows and the key is omitted.
+	payload.MediaRecipes = s.mediaRecipeRows()
 	// GPU utilization: advertise the busiest device's utilization when known.
 	// Omitted when no device has published a known utilization — absent ≠ idle.
 	for _, d := range snap.Devices {
