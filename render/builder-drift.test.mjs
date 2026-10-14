@@ -965,6 +965,25 @@ test("the `=` form of a value flag is refused when empty, and a switch refuses a
   }
 });
 
+test("the runbook names the expected failures of check --strict: the docs and the README list exactly the unreviewed entries of the manifest", async () => {
+  const strict = await cli(["check", "--strict"]);
+  assert.equal(strict.code, 1);
+  const count = (strict.out.match(/^(\d+) failure\(s\)$/m) ?? [])[1];
+  assert.equal(count, "2");
+  const entries = strict.err.trim().split("\n").map((line) => {
+    const m = line.match(/^builder drift: (\S+) \[(\w+)\]: widget (\S+) is unreviewed/);
+    assert.ok(m, line);
+    return { builder: m[1], key: m[3] };
+  });
+  const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
+  const page = readFileSync(new URL("../docs/systems/media-generation.md", import.meta.url), "utf8");
+  for (const [name, raw] of [["render/README.md", readme], ["the system page", page]]) {
+    const text = raw.replace(/\s+/g, " ");
+    assert.ok(text.includes(`exactly \`${count} failure(s)\``), `${name} states the failure count ${count}`);
+    for (const e of entries) assert.ok(text.includes(e.builder) && text.includes(e.key), `${name} names ${e.builder} ${e.key}`);
+  }
+});
+
 test("check --strict quotes the reason recorded for each unreviewed entry", async () => {
   const strict = await cli(["check", "--strict"]);
   assert.equal(strict.code, 1);

@@ -395,7 +395,10 @@ to a switch (`--strict=1`) and a second positional after the verb all exit 2. A 
 `COMFY_TEMPLATES_DIR` / `COMFYUI_DIR` that is unset still leaves the template side skipped; `--require-templates` makes
 that an error (exit 2) instead of a skipped side.
 `--strict` also fails (exit 1) on every `unreviewed` manifest entry; a plain `check` leaves them green. Both belong to
-`check`.
+`check`. **The runbook command above (`--require-templates --strict`) exits 1 on the committed manifest by design:**
+exactly `2 failure(s)`, for `wf-qwen-image-edit [full] ksampler.cfg` and `wf-qwen-image-21 [edit] encoder.resolution`,
+the two `unreviewed` entries. Those are the expected failures; any other line is a new finding. Drop `--strict` for a
+green gate.
 
 A moved widget fails `builder drift: <builder> [<view>]: ...` naming the builder. `builder-drift-specs.mjs` lists
 the widgets per builder; a new `wf-*.mjs` file must be guarded there or listed in `NOT_TEMPLATE_DERIVED` with a

@@ -3397,8 +3397,10 @@ otherwise, because the builder keeps building the old recipe.
   interior widget is linked to a subgraph input, the root instance lists it in `proxyWidgets`, carries no value at
   its position in that list (the instance's `widgets_values` follow the list, not the order of the subgraph's
   inputs) and has nothing wired to its input for the widget, so the interior widget is the only place the value
-  lives (the extractor checks all four facts, and a value or a wiring sends the spec to `I` or to the source that
-  feeds it). A math node that only passes a value through (the LTX frame rate) is pinned as a template-only item,
+  lives (the extractor checks all four facts. A wiring sends the spec to the source that feeds it. A value the
+  instance carries is read by `I` only where its position in `proxyWidgets` is also its place among the
+  subgraph's widget-typed inputs, because `I` indexes by input order, not by `proxyWidgets`; the message says
+  which case it is, and where the two positions differ it says that no locator reads that position) A math node that only passes a value through (the LTX frame rate) is pinned as a template-only item,
   so a changed expression cannot hide behind the locator that skips it.
 - **Builder side, offline.** `node --test render/builder-drift.test.mjs` has one test per builder
   (`builder drift: wf-krea2`): it rebuilds the graph with fixed arguments and compares every widget; a moved
@@ -3423,7 +3425,12 @@ otherwise, because the builder keeps building the old recipe.
   environment (`COMFY_TEMPLATES_DIR`, `COMFYUI_DIR`) that is unset, or names a tree without the package, still
   leaves the template side skipped with a note: that is the case `check --require-templates` is for. It makes a
   missing template side an error (exit 2) instead of a note, for an upgrade runbook. `check --strict` also fails (exit 1)
-  on every `unreviewed` manifest entry; a plain `check` leaves those green. Both flags belong to `check`. A template
+  on every `unreviewed` manifest entry; a plain `check` leaves those green. Both flags belong to `check`.
+  **The runbook command `check --require-templates --strict` exits 1 on the committed manifest, by design,
+  until the two `unreviewed` entries are decided:** it prints exactly `2 failure(s)`, one for
+  `wf-qwen-image-edit` `[full]` `ksampler.cfg` and one for `wf-qwen-image-21` `[edit]` `encoder.resolution`.
+  Those two are the expected failures, with the template side unchanged. Any further line, or a template-side failure, is new and is the finding.
+  Use the command without `--strict` where a green gate is needed; it reports the same template side. A template
   or manifest file may start with a byte-order mark; one that is not JSON, or a template with no `nodes` array,
   fails with a message that names the file (the template side names the builder too).
 - **Which directory is read.** The CLI and the tests use one function, and the first source that is set decides:
