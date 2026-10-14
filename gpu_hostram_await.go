@@ -125,14 +125,6 @@ func hostRAMDeadline(queuedAt time.Time, wait time.Duration) time.Time {
 	return drainDeadline(0, queuedAt, wait)
 }
 
-// awaitHostRAMHeld puts the host-RAM check of a lease that cleared the seat. await is the lease's
-// AwaitHostRAM (a Lease or a Manager by epoch); ctx ends the wait early (a signal, a lost lease). It says once
-// that the cards are held while the host is short, and when the wait ended. A timeout comes back as the refusal the grant
-// would have given, with the hint that names the flag that waits longer.
-func awaitHostRAMHeld(ctx context.Context, await func(gpulease.AwaitHostRAMOptions) error, deadline time.Time, wait time.Duration, out io.Writer) error {
-	return awaitHostRAMBounded(ctx, await, deadline, wait, hostRAMHold{}, out)
-}
-
 // hostRAMHold is what bounds the wait after the unload and what the operator is told about it (the hold bound, the
 // 2026-10-14 incident). max is the most the lease may hold its cards waiting for the host, counted from the unload; 0 = no
 // bound, --wait alone ends the wait. heldSince is when the lease took its cards, for the failure's "held the cards for".
@@ -191,7 +183,10 @@ func roundHold(d time.Duration) string {
 	return d.Round(100 * time.Millisecond).String()
 }
 
-// awaitHostRAMBounded is awaitHostRAMHeld with the hold bound: the wait ends at the earlier of the --wait deadline and the
+// awaitHostRAMBounded puts the host-RAM check of a lease that cleared the seat, still holding the cards. await is the
+// lease's AwaitHostRAM (a Lease or a Manager by epoch); ctx ends the wait early (a signal, a lost lease). It says once that the
+// cards are held while the host is short, and when the wait ended. With a zero hostRAMHold it is the plain wait inside --wait;
+// with a bound the wait ends at the earlier of the --wait deadline and the
 // bound (counted from now, the moment the unload is done, and not under the drain floor: the floor exists for the memory the
 // unload frees to come back, and a bound the operator set is an answer to that). When the bound is the earlier one and it
 // passes without the host's admission, the failure is errHostRAMHoldBound; when --wait ends first, or there is no bound, it

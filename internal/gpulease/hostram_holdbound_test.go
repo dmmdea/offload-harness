@@ -10,6 +10,7 @@ package gpulease
 import (
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -69,7 +70,9 @@ func TestTheAwaitStampsWhenTheHoldBoundReleasesTheLeaseWhileItWaitsAndClearsItOn
 	}
 }
 
-// A wait that ends without admission (its deadline, here) leaves the lease still asking and no bound running.
+// A wait that ends without admission (its deadline, here) leaves the lease still asking and no bound running. The test waits for
+// the stamp to EXIST mid-wait before it asserts that the end of the wait cleared it, so a slow runner cannot make it pass because
+// the stamp was never written.
 func TestAWaitThatEndsRefusedClearsTheBoundItStamped(t *testing.T) {
 	m, _ := ramScoped(t, 70)
 	l, err := m.TryAcquire(ClassMedia, Options{Reason: "film", TTL: time.Hour, Devices: []string{card0}, HostRAMWaitGiB: 30})
@@ -77,8 +80,16 @@ func TestAWaitThatEndsRefusedClearsTheBoundItStamped(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = l.Release() }()
-	until := time.Now().Add(300 * time.Millisecond)
-	asHostRAM(t, l.AwaitHostRAM(AwaitHostRAMOptions{Deadline: until, HoldUntil: until}))
+	until := time.Now().Add(1500 * time.Millisecond)
+	done := make(chan error, 1)
+	go func() { done <- l.AwaitHostRAM(AwaitHostRAMOptions{Deadline: until, HoldUntil: until}) }()
+	waitForHoldStamp(t, m, l.Epoch()) // it existed while the wait ran
+	select {
+	case err := <-done:
+		asHostRAM(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("the wait never ended")
+	}
 	rec := recordOf(t, m, l.Epoch())
 	if !rec.HostRAMHoldUntil.IsZero() {
 		t.Errorf("the wait is over, so the bound it stamped is not running any more: %v", rec.HostRAMHoldUntil)
@@ -88,7 +99,9 @@ func TestAWaitThatEndsRefusedClearsTheBoundItStamped(t *testing.T) {
 	}
 }
 
-// A wait with no bound (the caller passes no HoldUntil: --ram-hold-max 0) stamps nothing, at any moment of the wait.
+// A wait with no bound (the caller passes no HoldUntil) stamps nothing, at any moment of the wait. The test samples the record
+// only after the wait has reported its first refusal (OnWait), the moment by which a bounded wait has long since stamped, so the
+// assertion cannot pass merely because the wait had not started.
 func TestAWaitWithoutABoundStampsNothing(t *testing.T) {
 	m, _ := ramScoped(t, 70)
 	l, err := m.TryAcquire(ClassMedia, Options{Reason: "film", TTL: time.Hour, Devices: []string{card0}, HostRAMWaitGiB: 30})
@@ -96,9 +109,18 @@ func TestAWaitWithoutABoundStampsNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = l.Release() }()
+	waiting := make(chan struct{})
+	var once sync.Once
 	done := make(chan error, 1)
-	go func() { done <- l.AwaitHostRAM(AwaitHostRAMOptions{Deadline: time.Now().Add(400 * time.Millisecond)}) }()
-	for i := 0; i < 20; i++ {
+	go func() {
+		done <- l.AwaitHostRAM(AwaitHostRAMOptions{Deadline: time.Now().Add(800 * time.Millisecond), OnWait: func(*ErrHostRAM) { once.Do(func() { close(waiting) }) }})
+	}()
+	select {
+	case <-waiting:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the wait never reported its first refusal")
+	}
+	for i := 0; i < 10; i++ {
 		if rec := recordOf(t, m, l.Epoch()); !rec.HostRAMHoldUntil.IsZero() {
 			t.Fatalf("a wait with no bound stamps no bound: %v", rec.HostRAMHoldUntil)
 		}
