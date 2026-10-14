@@ -51,9 +51,9 @@ import (
 //     a tool message's Content, never a Role, a ToolCallID or a message count.
 
 const (
-	// searchRungMaxLines / PerFileCap / MaxFiles are the defaults of the idea's
-	// documented configuration (see NOTICE): 30 lines in total, at most 5 per file,
-	// from at most 15 files. At most 15 files survive, so a listing of F files always
+	// searchRungMaxLines / PerFileCap / MaxFiles are chosen to match the values the
+	// upstream configuration example shows (see NOTICE): 30 lines in total, at most
+	// 5 per file, from at most 15 files. At most 15 files survive, so a listing of F files always
 	// elides at least F-15 of them.
 	searchRungMaxLines   = 30
 	searchRungPerFileCap = 5
@@ -540,13 +540,61 @@ var searchGrepPrograms = map[string]bool{"grep": true, "rg": true, "ag": true, "
 // searchCommandIsGrep reports whether a shell command line starts with a search
 // program: grep, rg, ag, ack or git grep, optionally by path. Only the first word is
 // read, so "cd x && grep ..." or "echo grep" do not qualify; a pipeline after the
-// search ("grep -rn x . | head") does, since its output is still the search's.
+// search ("grep -rn x . | head") does, since its output is still the search's. A
+// command that chains another one after the search (";", "&&", "||", "&" or a
+// newline, outside quotes) does not, because the body then holds that command's
+// output as well, and it may be a linter's.
 func searchCommandIsGrep(command string) bool {
 	w := strings.Fields(command)
-	if len(w) == 0 {
+	if len(w) == 0 || searchCommandChains(command) {
 		return false
 	}
 	return searchProgramIsGrep(w[0], w[1:])
+}
+
+// searchCommandChains reports whether a shell command line runs a second command
+// after the first: an unquoted ";", "&&", "||", a lone "&" or a newline. A plain pipe
+// ("|", "|&") does not chain, since the pipeline's output is its last stage's, which
+// the first-word test already accepts, and the redirections "2>&1", ">&2" and "&>f"
+// do not either. It is a quote-aware scan, not a shell parser: single quotes,
+// double quotes and a backslash hide a separator, and nothing else does.
+func searchCommandChains(command string) bool {
+	var quote byte // 0, '\'' or '"'
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		switch {
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			}
+		case quote == '"':
+			if c == '\\' {
+				i++ // the escaped byte cannot close the quote
+			} else if c == '"' {
+				quote = 0
+			}
+		case c == '\\':
+			i++
+		case c == '\'' || c == '"':
+			quote = c
+		case c == ';' || c == '\n' || c == '\r':
+			return true
+		case c == '|':
+			if i+1 < len(command) && command[i+1] == '|' {
+				return true
+			}
+			if i+1 < len(command) && command[i+1] == '&' {
+				i++ // "|&" is a pipe
+			}
+		case c == '&':
+			redirect := (i > 0 && (command[i-1] == '>' || command[i-1] == '<')) ||
+				(i+1 < len(command) && command[i+1] == '>')
+			if !redirect {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // searchProgramIsGrep is the same test on an already split program and arguments.
@@ -586,7 +634,9 @@ func searchFormFor(c ToolCall) (searchForm, bool) {
 }
 
 // searchCallsByID maps every tool-call id in msgs to its call. An id claimed by two
-// different calls is ambiguous and is left out, so a result under it is not thinned.
+// different calls is ambiguous and is left out, so a result under it is not thinned;
+// the same call repeated under one id is one call. The pairing ignores order (a call
+// anywhere in msgs claims its id) because real transcripts put the call first.
 func searchCallsByID(msgs []Msg) map[string]ToolCall {
 	calls := map[string]ToolCall{}
 	ambiguous := map[string]bool{}
