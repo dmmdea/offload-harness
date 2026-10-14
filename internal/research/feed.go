@@ -63,7 +63,10 @@ func feedSniffable(ct string) bool {
 	return ct == "" || strings.Contains(ct, "xml") || strings.HasPrefix(ct, "text/plain") || strings.HasPrefix(ct, "application/octet-stream")
 }
 
-const atomNS = "http://www.w3.org/2005/Atom"
+const (
+	atomNS = "http://www.w3.org/2005/Atom"
+	rss1NS = "http://purl.org/rss/1.0/"
+)
 
 // SniffFeed reports whether the body is a feed document: after an optional BOM,
 // whitespace, XML declaration, comments and a doctype, the root element is rss,
@@ -81,33 +84,54 @@ func SniffFeed(body []byte) bool {
 	return ok && feedRoot(root)
 }
 
-func feedRoot(n xml.Name) bool {
-	switch n.Local {
+// feedRoot reports whether a document's root element is a feed's: an rss element, an Atom feed
+// (the Atom namespace is the element's own or the default one it declares), or an RDF root that
+// declares the RSS 1.0 namespace. A bare rdf:RDF is not enough: RDF/XML, OWL and SKOS files are
+// rooted there too and are not feeds.
+func feedRoot(se xml.StartElement) bool {
+	switch se.Name.Local {
 	case "rss":
 		return true
 	case "RDF":
-		return true
+		return declaresNS(se, rss1NS)
 	case "feed":
-		return n.Space == atomNS
+		return se.Name.Space == atomNS || declaresDefaultNS(se, atomNS)
 	}
 	return false
 }
 
-func firstStartElement(d *xml.Decoder) (xml.Name, bool) {
+// declaresDefaultNS reports whether the element carries xmlns="<ns>". RawToken does not translate
+// namespaces, so the declaration is read off the element itself.
+func declaresDefaultNS(se xml.StartElement, ns string) bool {
+	for _, a := range se.Attr {
+		if a.Name.Space == "" && a.Name.Local == "xmlns" && a.Value == ns {
+			return true
+		}
+	}
+	return false
+}
+
+// declaresNS is declaresDefaultNS or a prefixed declaration (xmlns:p="<ns>").
+func declaresNS(se xml.StartElement, ns string) bool {
+	if declaresDefaultNS(se, ns) {
+		return true
+	}
+	for _, a := range se.Attr {
+		if a.Name.Space == "xmlns" && a.Value == ns {
+			return true
+		}
+	}
+	return false
+}
+
+func firstStartElement(d *xml.Decoder) (xml.StartElement, bool) {
 	for {
 		tok, err := d.RawToken()
 		if err != nil {
-			return xml.Name{}, false
+			return xml.StartElement{}, false
 		}
 		if se, ok := tok.(xml.StartElement); ok {
-			// RawToken does not translate namespaces: read the default one off the element itself
-			name := se.Name
-			for _, a := range se.Attr {
-				if a.Name.Local == "xmlns" && a.Name.Space == "" {
-					name.Space = a.Value
-				}
-			}
-			return name, true
+			return se, true
 		}
 	}
 }
@@ -143,7 +167,8 @@ func feedCharsetReader(label string, in io.Reader) (io.Reader, error) {
 // FeedToText turns an RSS 2.0, RSS 1.0 or Atom document into the text a seat is
 // handed, and returns the feed's own title. It is a pure function of the bytes:
 // no link in the document is fetched. A document cut off mid-way (the fetch
-// bound) yields the items read so far.
+// bound) yields the items read so far. A document with no item or entry is an
+// error, so an empty feed or an RDF file that is not RSS stays an ordinary document.
 func FeedToText(body []byte) (title, text string, err error) {
 	body = trimXMLPrefix(body)
 	d := xmlDecoder(body)
@@ -168,7 +193,7 @@ func FeedToText(body []byte) (title, text string, err error) {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			if !rootSeen {
-				if !feedRoot(t.Name) {
+				if !feedRoot(t) {
 					return "", "", fmt.Errorf("not a feed: root element is %q", t.Name.Local)
 				}
 				rootSeen = true
@@ -212,6 +237,10 @@ func FeedToText(body []byte) (title, text string, err error) {
 done:
 	if !rootSeen {
 		return "", "", errors.New("not a feed: no root element")
+	}
+	if len(items) == 0 {
+		// A root that holds no item is not a source: Fetch reads the document as it always did
+		return "", "", errors.New("not a feed: no item or entry found")
 	}
 	var b strings.Builder
 	if title != "" {

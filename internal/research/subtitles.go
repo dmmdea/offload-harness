@@ -39,6 +39,8 @@ const (
 	ErrKindNoSubtitles = "no_subtitles"
 	// ErrKindUnsupportedSubs: a subtitle file came back in a format this adapter does not read.
 	ErrKindUnsupportedSubs = "unsupported_subtitle_format"
+	// ErrKindEmptySubtitles: a subtitle file was read and held no speech text (blank cues only).
+	ErrKindEmptySubtitles = "empty_subtitles"
 	// ErrKindTimeout: the caller's deadline (or the per-fetch timeout) ended the run.
 	ErrKindTimeout = "subtitle_timeout"
 )
@@ -142,6 +144,13 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) Fetched {
 	if root == "" {
 		root = filepath.Join(os.TempDir(), "local-offload-research")
 	}
+	// The binary runs with the per-call directory as its working directory and is given the same
+	// directory as -P home:, which it resolves against that working directory: a relative root
+	// would send its output to <dir>/<dir>. The path is made absolute before any of it is used.
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return fail(ErrKindYtDlpPath, "scratch root: %v", err)
+	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return fail(ErrKindYtDlpPath, "scratch root: %v", err)
 	}
@@ -191,15 +200,12 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) Fetched {
 	if err != nil {
 		return fail(ErrKindNoSubtitles, "reading the subtitle file: %v", err)
 	}
-	data, err := io.ReadAll(io.LimitReader(f, MaxFetchBytes+1))
+	data, cut, err := readCapped(f, MaxFetchBytes)
 	f.Close()
 	if err != nil {
 		return fail(ErrKindNoSubtitles, "reading the subtitle file: %v", err)
 	}
-	if len(data) > MaxFetchBytes {
-		data = data[:MaxFetchBytes]
-		out.Truncated = true
-	}
+	out.Truncated = cut
 	out.Bytes = len(data)
 
 	var text string
@@ -216,8 +222,26 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) Fetched {
 	}
 	out.Title = fmt.Sprintf("YouTube video %s subtitles", id)
 	finishText(&out, text)
+	if out.Text == "" {
+		// the shared empty-text message speaks of a page: a subtitle file that held no speech says so
+		out.ErrKind = ErrKindEmptySubtitles
+		out.Err = ErrKindEmptySubtitles + ": the subtitle file held no speech text (blank cues only)"
+	}
 	out.Elapsed = time.Since(start)
 	return out
+}
+
+// readCapped reads at most max bytes of r, reading one byte past the bound to know whether the
+// source was longer, and says so in cut. It never holds more than max+1 bytes.
+func readCapped(r io.Reader, max int) (data []byte, cut bool, err error) {
+	data, err = io.ReadAll(io.LimitReader(r, int64(max)+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(data) > max {
+		return data[:max], true, nil
+	}
+	return data, false, nil
 }
 
 // finishText applies the bounds every text source shares with a fetched page:
