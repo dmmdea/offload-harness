@@ -90,7 +90,7 @@ func runFakeYtDlp(args []string) int {
 		_ = f.Close()
 	}
 	if e, err := os.OpenFile(filepath.Join(filepath.Dir(dir), "envs.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
-		_, _ = e.WriteString(strings.Join([]string{"probe=" + os.Getenv("RESEARCH_ENV_PROBE"), "home=" + os.Getenv("HOME"), "temp=" + os.Getenv("TEMP"), "dir=" + dir}, argSep) + "\n")
+		_, _ = e.WriteString("dir=" + dir + "\n" + strings.Join(os.Environ(), "\n") + "\n")
 		_ = e.Close()
 	}
 	id := target[strings.LastIndex(target, "v=")+2:]

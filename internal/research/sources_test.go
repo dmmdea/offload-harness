@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // ytOpts is an Options that turns the subtitle adapter on with the fake binary
@@ -687,16 +689,61 @@ func TestSubtitleChildEnvironmentIsScrubbed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fields := strings.Split(strings.TrimSpace(string(raw)), "\x1f")
-	if len(fields) != 4 {
-		t.Fatalf("env log = %q", raw)
+	lines := strings.Split(strings.TrimSpace(strings.ReplaceAll(string(raw), "\r", "")), "\n")
+	dir := strings.TrimPrefix(lines[0], "dir=")
+	if dir == "" || dir == lines[0] {
+		t.Fatalf("env log has no dir line: %q", raw)
 	}
-	if fields[0] != "probe=" {
-		t.Errorf("the child saw the harness's environment: %s", fields[0])
+	has := map[string]bool{}
+	for _, l := range lines[1:] {
+		k, v, _ := strings.Cut(l, "=")
+		k = strings.ToUpper(k)
+		has[k] = true
+		switch k {
+		case "RESEARCH_ENV_PROBE":
+			t.Errorf("the child saw the harness's environment: %s", l)
+		case "HOME", "TEMP", "TMP", "TMPDIR":
+			if v != dir {
+				t.Errorf("%s = %q, want the per-call directory %q", k, v, dir)
+			}
+		}
 	}
-	dir := strings.TrimPrefix(fields[3], "dir=")
-	if strings.TrimPrefix(fields[1], "home=") != dir || strings.TrimPrefix(fields[2], "temp=") != dir {
-		t.Errorf("home and temp are not the per-call directory: %v (dir %s)", fields, dir)
+	for _, k := range []string{"HOME", "TEMP", "TMP", "TMPDIR"} {
+		if !has[k] {
+			t.Errorf("%s is not set for the child", k)
+		}
+	}
+}
+
+// A copy of this package's test binary, started the way the fake yt-dlp is, with the OS temp dir pointed at a
+// fresh folder, must leave nothing in it (the repository's relaunch rule, tempdir_lint_test.go).
+const relaunchLeakHelperEnv = "RESEARCH_RELAUNCH_LEAK_HELPER"
+
+func TestRelaunchLeakHelperProcess(t *testing.T) {
+	if os.Getenv(relaunchLeakHelperEnv) != "1" {
+		t.Skip("the child of TestARelaunchedTestBinaryLeavesNothingInTheTempDir")
+	}
+	os.Stdout.WriteString("relaunch-leak helper: ending from inside the test\n")
+	os.Exit(0)
+}
+
+func TestARelaunchedTestBinaryLeavesNothingInTheTempDir(t *testing.T) {
+	tmp := t.TempDir()
+	cmd := winexec.Command(os.Args[0], "-test.run=^TestRelaunchLeakHelperProcess$", "-test.timeout=60s")
+	cmd.Env = append(os.Environ(), relaunchLeakHelperEnv+"=1", "TMP="+tmp, "TEMP="+tmp, "TMPDIR="+tmp)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper process: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "ending from inside the test") {
+		t.Fatalf("test premise: the helper never ran, so an empty folder proves nothing:\n%s", out)
+	}
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("a re-launched copy of the test binary left %d entries in its temp dir, want none", len(entries))
 	}
 }
 

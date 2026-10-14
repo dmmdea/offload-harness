@@ -997,7 +997,11 @@ func TestYtDlpPathDefaultsOffAndScratchFollowsTheStateRoot(t *testing.T) {
 		t.Errorf("scratch with a state dir = %q, want %q", got, want)
 	}
 	c.StateDir = ""
-	if got := c.EffectiveResearchScratchDir(); !strings.HasPrefix(got, os.TempDir()) || got == os.TempDir() {
-		t.Errorf("scratch without a state dir = %q, want a subdirectory of %q", got, os.TempDir())
+	tmp := t.TempDir()
+	t.Setenv("TMP", tmp)
+	t.Setenv("TEMP", tmp)
+	t.Setenv("TMPDIR", tmp)
+	if got, want := c.EffectiveResearchScratchDir(), filepath.Join(tmp, "local-offload-research"); got != want {
+		t.Errorf("scratch without a state dir = %q, want %q", got, want)
 	}
 }
