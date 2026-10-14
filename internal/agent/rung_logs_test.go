@@ -210,7 +210,7 @@ func TestLogCollapseExactOutput(t *testing.T) {
 		run + "\n" +
 		"[... 47 similar lines folded ...]\n" +
 		strings.Join(lcTail, "\n") + "\n" +
-		"[log-collapse: folded 1 run(s) of near-identical lines (47 lines hidden); kept verbatim: the first 8 and last 4 lines and every line flagged as a problem or a test summary]"
+		"[log-collapse: folded 1 run(s) of near-identical lines (47 lines hidden; digits are ignored when comparing lines); kept verbatim: the first 8 and last 4 lines and every line flagged as a problem or a test summary]"
 	if got != want {
 		t.Errorf("collapsed bytes differ.\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}

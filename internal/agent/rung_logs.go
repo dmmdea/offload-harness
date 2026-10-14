@@ -100,9 +100,14 @@ var logsVolatile = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 var logsANSI = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 
 // logsExtraKeep adds, to signalLine, the shapes of a stack frame, a traceback,
-// a goroutine dump and the summary lines of common test runners that
-// signalLine's vocabulary does not catch.
-var logsExtraKeep = regexp.MustCompile(`^\s+at\s+\S|^\s+File ".+", line \d+|^Traceback \(most recent call last\)|^goroutine \d+ \[|^(PASS|FAIL|SKIP)\b|^Ran \d+ tests?\b|^(Tests?|Test Suites?|Test Files?):|^test result:|\bpanicked at\b`)
+// a goroutine dump, the summary lines of common test runners, the exception
+// names of the common languages (TypeError, KeyError, AssertionError,
+// NullPointerException: signalLine's word boundary cannot see "error" inside a
+// CamelCase name) and the failure shapes a shell or a package manager prints
+// (a killed process, a segfault, a non-zero exit status, npm's "ERR!" prefix)
+// that signalLine's vocabulary does not catch. signalLine itself is left
+// alone: the skeleton and elide rungs use it on the default path.
+var logsExtraKeep = regexp.MustCompile(`^\s+at\s+\S|^\s+File ".+", line \d+|^Traceback \(most recent call last\)|^goroutine \d+ \[|^(PASS|FAIL|SKIP)\b|^Ran \d+ tests?\b|^(Tests?|Test Suites?|Test Files?):|^test result:|\bpanicked at\b|\b\w*(Error|Exception)\b|(?i:\bsegmentation fault\b|\bkilled\b)|^exit status [1-9]|\bERR!`)
 
 // logsKey is the equality key of a line for run detection: terminal control
 // sequences removed, every volatile token replaced by NUL (which cannot occur
@@ -116,12 +121,22 @@ func logsKey(line string) string {
 
 // logsKeep reports whether a line must survive verbatim and never join a run:
 // a blank line, a line that looks like an error, warning, failure or test
-// summary (signalLine, tested on the RAW line), or one of the extra shapes.
+// summary (signalLine), or one of the extra shapes. Each test is made on the
+// line as written AND with its terminal control sequences removed, as logsKey
+// does: an ESC [ 31 m colour code leaves no word boundary before the word it
+// colours, and a line of nothing but colour codes is blank to a reader.
 func logsKeep(line string) bool {
-	if strings.TrimSpace(line) == "" {
+	plain := line
+	if strings.IndexByte(line, '\x1b') >= 0 {
+		plain = logsANSI.ReplaceAllString(line, "")
+	}
+	if strings.TrimSpace(plain) == "" {
 		return true
 	}
-	return signalLine.MatchString(line) || logsExtraKeep.MatchString(line)
+	if signalLine.MatchString(line) || logsExtraKeep.MatchString(line) {
+		return true
+	}
+	return plain != line && (signalLine.MatchString(plain) || logsExtraKeep.MatchString(plain))
 }
 
 // isLogCollapsed reports whether a body is already a collapsed log, so a
@@ -246,7 +261,7 @@ func collapseLogs(content string) (string, bool) {
 		return content, false
 	}
 
-	footer := fmt.Sprintf("[log-collapse: folded %d run(s) of near-identical lines (%d lines hidden); kept verbatim: the first %d and last %d lines and every line flagged as a problem or a test summary]",
+	footer := fmt.Sprintf("[log-collapse: folded %d run(s) of near-identical lines (%d lines hidden; digits are ignored when comparing lines); kept verbatim: the first %d and last %d lines and every line flagged as a problem or a test summary]",
 		runs, hidden, logsHeadLines, logsTailLines)
 	out := fmt.Sprintf("%s%d chars, %d lines]\n", logsPrefix, len(content), n) + body.String() + footer
 	if len(out) >= len(content) {
