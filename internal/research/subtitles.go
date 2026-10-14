@@ -52,9 +52,23 @@ const DefaultSubLangs = "en.*"
 
 const (
 	ytDlpDefaultTimeout = 60 * time.Second
-	ytDlpSocketTimeout  = "15"
-	ytDlpOutputCap      = 8 << 10
+	// ytDlpMaxTimeout caps one run whatever fetch_timeout_sec asks for. The sweep below treats a scratch directory
+	// older than this (plus slack) as abandoned, which is only true while no run can outlive it.
+	ytDlpMaxTimeout    = 15 * time.Minute
+	ytDlpSocketTimeout = "15"
+	ytDlpOutputCap     = 8 << 10
+
+	// scratchPrefix names the per-call directories this adapter makes; the sweep touches only directories that
+	// carry it, directly under the scratch root it was given.
+	scratchPrefix = "ytdlp-"
+	// scratchSweepAge: a directory last touched longer ago than the longest run, with room for the run's cleanup.
+	scratchSweepAge = ytDlpMaxTimeout + 5*time.Minute
 )
+
+// removeRetryWaits are the pauses between attempts to remove the scratch directory. On Windows a directory cannot
+// be removed while a process still has it as its working directory or a file in it open, and a process that has just
+// been ended takes a moment to let go; the total stays a few hundred milliseconds.
+var removeRetryWaits = []time.Duration{25 * time.Millisecond, 50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond}
 
 // SourceKind is the class a URL is routed to.
 type SourceKind int
@@ -99,13 +113,47 @@ func ClassifyURL(u *url.URL) (SourceKind, string) {
 // removeAll removes the per-call scratch directory (a var so a test can make removal fail).
 var removeAll = os.RemoveAll
 
+// removeScratch removes dir, retrying briefly: the child may still be letting go of it.
+func removeScratch(dir string) error {
+	err := removeAll(dir)
+	for _, wait := range removeRetryWaits {
+		if err == nil {
+			break
+		}
+		time.Sleep(wait)
+		err = removeAll(dir)
+	}
+	return err
+}
+
+// sweepStaleScratch removes the ytdlp-* directories under root that nothing can still be using: the ones a killed
+// harness, or a child that outlived its run, left behind. Only directories (not links or files) whose name carries
+// scratchPrefix and whose last change is older than scratchSweepAge go; it is best effort, and a directory that is
+// still held is tried again at the next call.
+func sweepStaleScratch(root string) {
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-scratchSweepAge)
+	for _, e := range ents {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), scratchPrefix) {
+			continue
+		}
+		if fi, err := e.Info(); err != nil || fi.ModTime().After(cutoff) {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(root, e.Name()))
+	}
+}
+
 var reSubLangs = regexp.MustCompile(`^[A-Za-z0-9_.*,-]{1,64}$`)
 
 // fetchSubtitles runs the configured yt-dlp for one validated YouTube URL.
 // Fetch has already passed the URL the caller wrote through ValidateURL; the
 // canonical URL the binary is given is validated here as well, because its host
 // (www.youtube.com) is the one the binary will actually contact.
-func fetchSubtitles(ctx context.Context, raw, id string, opt Options) Fetched {
+func fetchSubtitles(ctx context.Context, raw, id string, opt Options) (res Fetched) {
 	out := Fetched{URL: raw}
 	start := time.Now()
 	fail := func(kind, format string, a ...any) Fetched {
@@ -142,6 +190,7 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) Fetched {
 	if timeout <= 0 {
 		timeout = ytDlpDefaultTimeout
 	}
+	timeout = min(timeout, ytDlpMaxTimeout)
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -159,11 +208,18 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) Fetched {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return fail(ErrKindYtDlpPath, "scratch root: %v", err)
 	}
-	dir, err := os.MkdirTemp(root, "ytdlp-")
+	sweepStaleScratch(root)
+	dir, err := os.MkdirTemp(root, scratchPrefix)
 	if err != nil {
 		return fail(ErrKindYtDlpPath, "scratch directory: %v", err)
 	}
-	defer removeAll(dir)
+	// The directory goes whatever the outcome. A removal that still fails after the brief retries is not dropped: it is
+	// recorded on the result (beside the text, when there is one), and the sweep above takes the directory at a later call.
+	defer func() {
+		if rerr := removeScratch(dir); rerr != nil {
+			res.CleanupErr = "scratch directory not removed: " + cutRunes(rerr.Error(), 300)
+		}
+	}()
 
 	args := []string{
 		"--ignore-config", "--no-playlist", "--skip-download",
@@ -178,6 +234,10 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) Fetched {
 	// winexec.CommandContext starts the child hidden: a console program started by a process with no console of its
 	// own would otherwise open a window of its own on the operator's desktop (TestEveryChildProcessStartIsHidden).
 	cmd := winexec.CommandContext(rctx, bin, args...)
+	// A deadline ends the whole tree the binary started, not only the program launched: the documented Windows shape
+	// is a wrapper .cmd, whose interpreter is a grandchild that would otherwise keep running with the per-call
+	// directory as its working directory.
+	winexec.KillTreeOnCancel(cmd)
 	cmd.Dir = dir
 	cmd.Env = ytDlpEnv(dir)
 	cmd.WaitDelay = 2 * time.Second
@@ -187,6 +247,11 @@ func fetchSubtitles(ctx context.Context, raw, id string, opt Options) Fetched {
 
 	if rerr := rctx.Err(); rerr != nil {
 		return fail(ErrKindTimeout, "yt-dlp did not finish before the deadline (%v)", rerr)
+	}
+	// exec reports ErrWaitDelay when the program exited 0 but a child of it still held the output pipe once
+	// WaitDelay ran out. The program succeeded: what is on disk is read like any other exit 0.
+	if errors.Is(runErr, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == 0 {
+		runErr = nil
 	}
 	if runErr != nil {
 		var ee *exec.ExitError
