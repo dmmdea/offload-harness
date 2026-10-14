@@ -98,6 +98,9 @@ func estimateTokens(msgs []Msg) int {
 type compactOpts struct {
 	GCF      bool // lossless: re-encode eligible JSON-array tool bodies (internal/gcf)
 	Skeleton bool // lossy-structural: reduce older tool bodies to signal skeletons
+	// SearchResults (default OFF) thins older search listings (rung_search.go): BM25
+	// against the objective, a per-file cap, an error boost, a counted footer.
+	SearchResults bool
 	// Pinned marks tool_call_ids whose results the model DEMONSTRABLY re-requested
 	// (the circuit breaker refused an exact-repeat call for them) — the H8 ramp:
 	// content the model re-reads stops being lossily compacted. A pinned body is
@@ -240,6 +243,16 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 				}
 			}
 		}
+		if estimateTokens(out) <= budget {
+			return out, fitUnknown
+		}
+	}
+
+	// Step 2a' (flag-gated, default OFF): thin older search listings by relevance
+	// to the objective (rung_search.go). Before the generic skeleton on purpose: a
+	// skeletonized listing is no longer one, and this rung would never see it.
+	if opts.SearchResults {
+		searchRung(out, protectedEnd, recentStart, budget, pinned)
 		if estimateTokens(out) <= budget {
 			return out, fitUnknown
 		}

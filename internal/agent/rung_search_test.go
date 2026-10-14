@@ -1055,3 +1055,19 @@ func TestLadderSearchRungNeverTouchesTheRecentTail(t *testing.T) {
 		}
 	}
 }
+
+func TestSearchRungKeepsTheShellToolsTruncationNote(t *testing.T) {
+	// A shell result clipped at its output cap ends in a note the real formatter
+	// writes; the rung must keep it, last in the stdout section, and still thin.
+	line := "pkg/x.go:1234:" + strings.Repeat("a", 46) + "\n"
+	stdout := strings.Repeat(line, 1200)
+	body := prodShell(0, stdout, "")
+	if !strings.Contains(body, "\n"+searchTruncatedTrailer+"\n--- stderr ---\n") {
+		t.Fatalf("the fixture must go through the real clip (cap %d, stdout %d)", shellOutputCap, len(stdout))
+	}
+	out := mustThin(t, body, rungQuery())
+	if !strings.Contains(out, "files elided ...]\n"+searchTruncatedTrailer+"\n--- stderr ---\n") {
+		t.Errorf("the truncation note must stay after the footer and before the stderr framing:\n%s", out[max(0, len(out)-200):])
+	}
+	checkSearchRungProperties(t, body, rungQuery())
+}
