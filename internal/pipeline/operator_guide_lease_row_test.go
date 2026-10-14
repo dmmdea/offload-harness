@@ -11,11 +11,21 @@ package pipeline
 //   - the one place a window can be shorter than the job is a `gpu reserve` wrapper, whose --for term a call running
 //     inside it inherits.
 //
-// These tests read the guide's row and refuse the retired claims, ask for the corrected sentences, and tie every figure the
-// row quotes to the code (config.Default and gpulease.DefaultTTL), so the row cannot drift back to one machine's config.
-// The lease windows themselves are pinned in mediaadmit_lease_window_test.go.
+// The first reading of the code was too wide, and review caught it: the claim is about the routes that TAKE the media lease.
+// The tts_endpoint voice lane (the server owns its card) and a pipeline-job (it holds the in-process media slot only; its stages
+// lease for themselves) take none, and each route reads its own timeout key, not only the two the row first named. And the
+// code default is not what a fresh install runs: the tier seeds in setup/templates/profiles.json raise the image and video
+// timeouts (and so the lease window) to as much as an hour and more, so a row that quotes only the default sizes a wedged
+// render's hold at 12 minutes where a seeded install gives 60.
+//
+// These tests read the guide's row and refuse the retired claims, ask for the corrected sentences, tie every default the
+// row quotes to the code (config.Default and gpulease.DefaultTTL) and every seeded figure to the profile file, and hold the
+// row to naming each route's timeout key (the table in mediaadmit_lease_routes_test.go), so the row cannot drift back to one
+// machine's config or to two routes. The lease windows and the kill are pinned in mediaadmit_lease_window_test.go and
+// mediaadmit_lease_routes_test.go.
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -74,6 +84,8 @@ func TestOperatorGuideLeaseRowStatesTheMediaLeaseIsTheTimeout(t *testing.T) {
 		"size the lease `--for` window to the job", // the pipeline sizes its own lease; only a gpu reserve wrapper has a --for to size
 		"lease TTL (3,600 s default)",              // 3,600 s is the fallback for a lease with no window, not the lease a media call takes
 		"`gpu_wait_ms` 600,000",                    // one box's deployed value, and the key is a queue wait, not a lease length
+		"A media call takes its lease",             // too wide: the tts_endpoint lane and a pipeline-job take no media lease
+		"which no media call is",                   // the same width: a call that takes no lease is not one acquired with no window
 	} {
 		if strings.Contains(row, retired) {
 			t.Errorf("the engine + lease row still says %q", retired)
@@ -128,9 +140,91 @@ func TestOperatorGuideQuotesCodeDefaultsForMediaTimeouts(t *testing.T) {
 		}
 	}
 
-	// The lease library's own fallback window.
-	fallback := fmt.Sprintf("%s s", commas(int(gpulease.DefaultTTL/time.Second)))
+	// The lease library's own fallback window, in its own sentence (a seeded 3,600 s elsewhere in the row must not satisfy it).
+	fallback := fmt.Sprintf("%s s window (`DefaultTTL`)", commas(int(gpulease.DefaultTTL/time.Second)))
 	if !strings.Contains(row, fallback) {
-		t.Errorf("the engine + lease row does not quote the lease library's fallback window (gpulease.DefaultTTL, %s)", fallback)
+		t.Errorf("the engine + lease row does not quote the lease library's fallback window (gpulease.DefaultTTL) as %q", fallback)
+	}
+}
+
+// Every route's timeout key is named in the row: the claim "a call leases for its own timeout" is about each route's key, and
+// a reader sizing a lease for inpaint, upscale, edit, animate or audio must find the key to size.
+func TestOperatorGuideLeaseRowNamesEveryRoutesTimeoutKey(t *testing.T) {
+	row, _ := leaseRowOf(t)
+	for _, key := range leaseRouteKeys() {
+		if !strings.Contains(row, "`"+key+"`") {
+			t.Errorf("the engine + lease row does not name `%s`, the timeout key a media route leases for", key)
+		}
+	}
+}
+
+// The two lanes that take no media lease are named as the exceptions: the row's claim is about the routes that take it.
+func TestOperatorGuideLeaseRowNamesTheLanesThatTakeNoLease(t *testing.T) {
+	row, _ := leaseRowOf(t)
+	for _, want := range []struct{ phrase, why string }{
+		{"`tts_endpoint`", "the voice lane that calls a speech server takes no media lease (ttsendpoint.go: the server owns its card)"},
+		{"`pipeline-job`", "a fleet pipeline job holds only the in-process media slot (pipeline.go runPipelineJob)"},
+	} {
+		if !strings.Contains(row, want.phrase) {
+			t.Errorf("the engine + lease row does not name %s as a lane that takes no media lease (%s)", want.phrase, want.why)
+		}
+	}
+}
+
+// seededMax is the largest value any tier seed in the profile file gives key, in any profile, any seed block and any family
+// overlay. A zero result is the blind-gate control: a renamed key or a moved file fails here instead of passing the check.
+func seededMax(t *testing.T, key string) int {
+	t.Helper()
+	raw, err := os.ReadFile(profilesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("%s: %v", profilesPath, err)
+	}
+	most := 0
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, e := range x {
+				if n, ok := e.(float64); ok && k == key {
+					most = max(most, int(n))
+					continue
+				}
+				walk(e)
+			}
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		}
+	}
+	walk(doc)
+	if most == 0 {
+		t.Fatalf("%s gives no value for %s: this check is blind", profilesPath, key)
+	}
+	return most
+}
+
+const profilesPath = "../../setup/templates/profiles.json"
+
+// The row says what a seeded install runs, not only the code default: the tier seeds raise the image and video timeouts, and
+// the lease window is the timeout, so the figures are quoted from the profile file and cannot rot away from it.
+func TestOperatorGuideLeaseRowQuotesTheSeededTimeouts(t *testing.T) {
+	row, _ := leaseRowOf(t)
+	image, video := seededMax(t, "imagegen_timeout_sec"), seededMax(t, "videogen_timeout_sec")
+	d := config.Default()
+	if image <= d.ImageGenTimeoutSec || video <= d.VideoGenTimeoutSec {
+		t.Fatalf("the tier seeds (image %d s, video %d s) no longer exceed the code defaults (%d s, %d s): the seeded sentence has no reason to exist",
+			image, video, d.ImageGenTimeoutSec, d.VideoGenTimeoutSec)
+	}
+	want := fmt.Sprintf("as much as %s s for an image and %s s for a video", commas(image), commas(video))
+	if !strings.Contains(row, want) {
+		t.Errorf("the engine + lease row does not say what the tier seeds raise the timeouts to (%q, from %s)", want, "`setup/templates/profiles.json`")
+	}
+	if !strings.Contains(row, "`setup/templates/profiles.json`") {
+		t.Error("the engine + lease row does not name the file the seeded figures come from (`setup/templates/profiles.json`)")
 	}
 }
