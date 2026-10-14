@@ -220,6 +220,11 @@ func LeaseRows(leases []gpulease.Info) []map[string]any {
 		if l.HostRAMWaitGiB > 0 {
 			row["host_ram_wait_gib"] = round1(l.HostRAMWaitGiB)
 		}
+		// When the hold bound releases a lease that waits for the host with its cards held (F82); present only while the wait runs
+		// under a bound.
+		if !l.HostRAMHoldUntil.IsZero() {
+			row["host_ram_hold_until"] = l.HostRAMHoldUntil.Format(time.RFC3339)
+		}
 		out = append(out, row)
 	}
 	return out

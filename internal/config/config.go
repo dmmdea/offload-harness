@@ -2588,6 +2588,10 @@ func load(path string) (Config, error) {
 	if err := validateGPUDisplayCap(c); err != nil {
 		return c, err
 	}
+	// The hold bound on a lease that waits for the host's RAM with its cards held (F82): a negative value is refused by name.
+	if err := validateGPUHostRAMHold(c); err != nil {
+		return c, err
+	}
 	// Install the operator's tailnet zones BEFORE any endpoint is vetted — the
 	// endpoint checks below consult them, so setting them afterwards would judge this
 	// load's endpoints against the PREVIOUS value (empty on a first load, i.e.

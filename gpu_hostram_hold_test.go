@@ -56,6 +56,7 @@ func TestTheHoldBoundReleasesTheCardsAndRunsNothingWhenTheHostNeverHasTheRoom(t 
 		t.Errorf("the bound did not end the wait: the reserve ran %s", took)
 	}
 	msg := err.Error()
+	t.Logf("the failure the operator reads:\n%s", msg)
 	if strings.ContainsAny(msg, "\r\n") {
 		t.Errorf("the failure is one line:\n%s", msg)
 	}

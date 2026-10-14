@@ -43,6 +43,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpucards"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
+	"github.com/dmmdea/offload-harness/internal/hostneed"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 	"github.com/dmmdea/offload-harness/internal/proctree"
@@ -317,7 +318,7 @@ func runGPUStatus(args []string) error {
 		excl += "  (draining: new runs wait, in-flight runs complete)"
 	}
 	if info.HostRAMWaitGiB > 0 {
-		excl += fmt.Sprintf("  (host RAM %.1f GiB asked, not yet admitted: the seat is cleared first, then the host is asked)", info.HostRAMWaitGiB)
+		excl += "  (" + hostRAMAskedStatus(info.HostRAMWaitGiB, info.Age, info.HostRAMHoldUntil, time.Now(), true) + ")"
 	}
 	if info.Command != "" {
 		excl += "\n  running: " + info.Command
@@ -363,7 +364,7 @@ func runGPUStatus(args []string) error {
 				declared = fmt.Sprintf(", host RAM %.1f GiB", l.HostRAMGiB)
 			}
 			if l.HostRAMWaitGiB > 0 {
-				declared = fmt.Sprintf(", host RAM %.1f GiB asked, not yet admitted", l.HostRAMWaitGiB)
+				declared = ", " + hostRAMAskedStatus(l.HostRAMWaitGiB, l.Age, l.HostRAMHoldUntil, time.Now(), false)
 			}
 			fmt.Printf("  lease epoch %d: %s pid %d, %s%s%s\n", l.Epoch, l.Class, l.PID, scope, group, declared)
 		}
@@ -408,7 +409,6 @@ func runGPUReserve(args []string) error {
 	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card (0 = not declared)")
 	ramFlag := fs.Float64("ram", 0, "GiB of host RAM the job will load, declared on the lease and admitted against committed memory (0 = needs no host RAM). Unset, it is estimated: from the model files of a render helper call whose weights do not fit the card (render/comfy-generate.mjs, comfy-edit, comfy-video, comfy-inpaint, comfy-render), else for a media lease the largest ComfyUI render family this box binds (an sd.cpp binding is not counted: a node that binds only sd.cpp declares 0), and 0 for a text lease. A grant waits, in the same queue, while committed memory + this + what running leases have yet to load would exceed physical RAM less gpu_host_ram_headroom_gib, or while the available RAM less this and the unloaded part would fall under that headroom. With --unload-seat the host is asked AFTER the seat is unloaded, while the cards are held, because the memory it needs may be the seat's own (F82)")
 	holdMaxFlag := fs.Duration("ram-hold-max", 0, "with --unload-seat: the most the lease may hold its cards waiting for the host to have the RAM it declared, counted from the unload; past it the lease is released (the seat warmed back), the command never runs and the reserve exits non-zero. Unset = config gpu_hostram_hold_max_sec (default 600 s); 0 = no bound, --wait alone ends the wait")
-	_ = holdMaxFlag // SEAM: read nowhere yet
 	owner := addOwnershipFlags(fs)
 	releaseAtExpiry := fs.Bool("release-at-expiry", false, "with --detach: the hidden holder releases the card at --for, as it did before leases had terms (default: it renews its term while the owner vouches for the job, else labels the lease expired and keeps holding; nothing is ever released by a deadline)")
 	dieWithWrapper := fs.Bool("die-with-wrapper", false, "wrapper form: end the command's whole process tree when this wrapper exits or dies (Windows: the job object is created kill-on-close). Off by default, because it makes the wrapper a single point of failure for a long render; without it a dead wrapper's job keeps running and its lease keeps the cards as a tree-orphan until the job ends. Refused where the platform has no handle whose closing ends a tree, and when the command cannot be put in the job. A ComfyUI instance another lease took over is spared and the guarantee stops at it (the job stops killing on close once something is spared)")
@@ -425,17 +425,22 @@ func runGPUReserve(args []string) error {
 	// but its window is still the term the lease is judged by, so the requirement stays: the
 	// default would read a long job as overdue from the 45th minute. The wrapper form ties the
 	// hold to a process and needs no window, so the requirement lands only on --detach.
-	forGiven, ramGiven := false, false
+	forGiven, ramGiven, holdMaxGiven := false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "for":
 			forGiven = true
 		case "ram":
 			ramGiven = true
+		case "ram-hold-max":
+			holdMaxGiven = true
 		}
 	})
 	if *ramFlag < 0 {
 		return errors.New("--ram must be 0 (needs no host RAM) or a number of GiB")
+	}
+	if *holdMaxFlag < 0 {
+		return errors.New("--ram-hold-max must be 0 (no bound: the wait after the unload runs the whole --wait) or a duration such as 10m")
 	}
 	if *detach && !forGiven {
 		return errors.New("--detach requires an explicit --for: the window is the term the lease is judged by, and the 45-minute default would label a long job overdue from its 45th minute. Declare the real window (e.g. --for 8h), or use the wrapper form `gpu reserve ... -- <command>`, which holds the lease exactly as long as the command runs")
@@ -540,6 +545,12 @@ func runGPUReserve(args []string) error {
 	// no card table is read and the lease is whole-node, as before.
 	devFlags := reserveDeviceFlags{devices: *devicesFlag, cards: *cardsFlag, wholeNode: *wholeNode, vramGiB: *vramFlag, ramGiB: *ramFlag}
 	reserveCfg := loadCfg(fs)
+	// The most the lease may hold its cards waiting for the host's RAM after the unload (F82 hold bound): the flag when given
+	// (0 is a value: no bound), else the config key (unset = 600 s).
+	holdMax := reserveCfg.GPUHostRAMHoldMax()
+	if holdMaxGiven {
+		holdMax = *holdMaxFlag
+	}
 	cmdEnv := os.Getenv
 	if *detach {
 		cmdEnv = func(string) string { return "" } // a detached holder runs no command to read cards from
@@ -610,14 +621,23 @@ func runGPUReserve(args []string) error {
 		// --release-at-expiry the child letting go at --for), nothing is held and
 		// the error says so.
 		if *drain || *unload {
-			if err := detachMaintain(m, epoch, loadCfg(fs), *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter); err != nil {
+			var freed unloadOutcome
+			heldSince := time.Now() // the hidden holder took the cards just now
+			if err := detachMaintainReport(m, epoch, loadCfg(fs), *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, &freed); err != nil {
 				return detachedMaintainError(m, epoch, err)
 			}
 			// The seat is cleared and the cards are held: now the host is asked (F82). The hidden holder keeps the
-			// heartbeat meanwhile; a host that never has the room fails like a failed drain, the lease still held.
+			// heartbeat meanwhile; a host that never has the room within --wait fails like a failed drain, the lease still
+			// held. A wait the hold bound ended releases the lease instead (releaseAfterHoldBound): cards held idle behind
+			// a figure the host cannot meet are what the bound exists to end.
 			if awaitRAM > 0 {
 				await := func(o gpulease.AwaitHostRAMOptions) error { return m.AwaitHostRAM(epoch, o) }
-				if err := awaitHostRAMHeld(context.Background(), await, hostRAMDeadline(queuedAt, *wait), *wait, os.Stderr); err != nil {
+				hold := hostRAMHold{max: holdMax, heldSince: heldSince, freed: freed, classDefault: need.Source == hostneed.SourceClassDefault}
+				if err := awaitHostRAMBounded(context.Background(), await, hostRAMDeadline(queuedAt, *wait), *wait, hold, os.Stderr); err != nil {
+					var bound *errHostRAMHoldBound
+					if errors.As(err, &bound) {
+						return releaseAfterHoldBound(m, epoch, loadCfg(fs), err)
+					}
 					return detachedHostRAMError(m, epoch, err)
 				}
 			}
@@ -697,6 +717,7 @@ func runGPUReserve(args []string) error {
 	}
 	defer finish()
 	if *drain || *unload {
+		heldSince := time.Now() // when the lease took its cards, for the hold bound's failure ("held the cards for")
 		for requeues := 0; ; requeues++ {
 			// The drain now runs for the queue budget (hours) and the renewal loop
 			// below starts only once the wrapped command does; the reclaim rule needs
@@ -718,19 +739,30 @@ func runGPUReserve(args []string) error {
 				case <-mctx.Done():
 				}
 			}()
-			merr := maintainSeatScoped(mctx, cfg, lease.Restamp, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, markWarmOwed(m), lease.Devices())
+			var freed unloadOutcome
+			merr := maintainSeatReport(mctx, cfg, lease.Restamp, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, markWarmOwed(m), lease.Devices(), &freed)
 			// F82: the seat is cleared; the host is asked now, still holding the cards, under the same heartbeat and
 			// the same cancel as the drain. A lease lost or a signal received during this wait is handled below like
-			// one during the drain.
+			// one during the drain. The wait is bounded (hold bound): at the bound the lease is released by the deferred
+			// finish, with the seat warmed back as for any release, and the command never starts.
 			stage, phase := stageDraining, "the drain"
 			if merr == nil && awaitRAM > 0 {
 				stage, phase = stageHostRAM, "the wait for host RAM"
-				merr = awaitHostRAMHeld(mctx, lease.AwaitHostRAM, hostRAMDeadline(queuedAt, *wait), *wait, os.Stderr)
+				hold := hostRAMHold{max: holdMax, heldSince: heldSince, freed: freed, classDefault: need.Source == hostneed.SourceClassDefault}
+				merr = awaitHostRAMBounded(mctx, lease.AwaitHostRAM, hostRAMDeadline(queuedAt, *wait), *wait, hold, os.Stderr)
 			}
 			stopRenew()
 			cancelMaintain()
 			if merr == nil {
 				break
+			}
+			var bound *errHostRAMHoldBound
+			if errors.As(merr, &bound) && sw.Signal() == nil {
+				// The hold bound passed: never a lease to take again. The lease is still ours (the wait only ends on
+				// its own bound), the deferred finish stops the kept instances, warms the seat back and releases it,
+				// and the reserve ends here with the bound's failure: nothing runs and nothing re-queues.
+				card.finish(merr)
+				return merr
 			}
 			if sig := sw.Signal(); sig != nil {
 				// Decided before the deferred finish runs: it chooses between the warm-back and its skip by this.
@@ -774,6 +806,7 @@ func runGPUReserve(args []string) error {
 				return err
 			}
 			lease = next
+			heldSince = time.Now()
 		}
 	}
 	if wrapperBeforeStart != nil {

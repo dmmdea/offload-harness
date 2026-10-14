@@ -1264,6 +1264,8 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		HardEnd:        hardEndOf(meta),
 		Expired:        meta.Expired,
 		ExpiredWhy:     meta.ExpiredWhy,
+
+		HostRAMHoldUntil: holdUntilOf(meta.HostRAMHoldUntilMs),
 	}
 }
 

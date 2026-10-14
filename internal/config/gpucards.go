@@ -32,9 +32,23 @@ func (c Config) GPUHostRAMHeadroom() float64 {
 // the host can never meet frees the cards for the queue behind it.
 const DefaultGPUHostRAMHoldMaxSec = 600
 
-// GPUHostRAMHoldMax is gpu_hostram_hold_max_sec as a duration. SEAM: the accessor is not written yet.
+// GPUHostRAMHoldMax is gpu_hostram_hold_max_sec as a duration, with the default applied: 600 seconds when unset, and 0 (no
+// bound: the wait after the unload runs the whole --wait) only when the operator wrote 0. A negative value reads as the
+// default and never as no bound: Load refuses it by name, but it returns the Config beside that error and the one-shot
+// verbs (gpu reserve among them) go on with it, so a typo must not turn the bound off.
 func (c Config) GPUHostRAMHoldMax() time.Duration {
-	return 0
+	if c.GPUHostRAMHoldMaxSec != nil && *c.GPUHostRAMHoldMaxSec >= 0 {
+		return time.Duration(*c.GPUHostRAMHoldMaxSec) * time.Second
+	}
+	return DefaultGPUHostRAMHoldMaxSec * time.Second
+}
+
+// validateGPUHostRAMHold refuses a gpu_hostram_hold_max_sec below 0, by name.
+func validateGPUHostRAMHold(c Config) error {
+	if c.GPUHostRAMHoldMaxSec != nil && *c.GPUHostRAMHoldMaxSec < 0 {
+		return fmt.Errorf("gpu_hostram_hold_max_sec: %d is not a number of seconds (0 = no bound, the wait after the unload runs the whole --wait; unset = %d)", *c.GPUHostRAMHoldMaxSec, DefaultGPUHostRAMHoldMaxSec)
+	}
+	return nil
 }
 
 // DefaultGPUDisplayCapPct is the share of the display card's VRAM the card allocator may fill when

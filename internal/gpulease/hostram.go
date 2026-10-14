@@ -457,8 +457,17 @@ type AwaitHostRAMOptions struct {
 // the figure on the record from the grant on would make each count the other's as still to load, and a host that
 // fits one of them would admit neither.) The cost, stated: while it waits a lease holds no claim on host RAM,
 // so a grant on other cards that fits is admitted ahead of it and the lease then waits for that grant's load.
-func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
+func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) (result error) {
 	told := false
+	stamped := false
+	defer func() {
+		// The bound this wait stamped runs only while the wait does. A wait that ends without admission (its deadline, a
+		// cancel, a lease that is gone) leaves the lease still asking and no bound running; admission clears the stamp in
+		// the same critical section that declares the figure.
+		if stamped && result != nil {
+			_ = m.Restamp(epoch, func(mt *Meta) { mt.HostRAMHoldUntilMs = 0 })
+		}
+	}()
 	for {
 		need, found := awaitedFigure(m.Leases(), epoch)
 		if !found {
@@ -490,6 +499,7 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 			return m.restampLocked(epoch, func(mt *Meta) {
 				mt.HostRAMGiB = cur
 				mt.HostRAMWaitGiB = 0
+				mt.HostRAMHoldUntilMs = 0
 			})
 		})
 		switch {
@@ -506,6 +516,14 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 		if remaining <= 0 {
 			return refused
 		}
+		if !stamped && !o.HoldUntil.IsZero() {
+			// The wait will go on under a bound: put the moment it ends on the record, where `gpu status` (another process)
+			// reads it. A stamp that cannot be written costs the status line only; the bound itself is the caller's Deadline.
+			until := o.HoldUntil.UnixMilli()
+			if m.Restamp(epoch, func(mt *Meta) { mt.HostRAMHoldUntilMs = until }) == nil {
+				stamped = true
+			}
+		}
 		if !told && o.OnWait != nil {
 			told = true
 			o.OnWait(refused)
@@ -515,6 +533,14 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 			return ErrCancelled
 		}
 	}
+}
+
+// holdUntilOf is Meta.HostRAMHoldUntilMs as a time (the zero Time when no bound is running).
+func holdUntilOf(ms int64) time.Time {
+	if ms <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms)
 }
 
 // awaitedFigure is the host RAM the live lease with this epoch is waiting to have admitted (0 = none), and whether the

@@ -18,8 +18,10 @@ package main
 //     onto them;
 //  3. the drain and the unload run, as they always did, under the lease;
 //  4. only then Manager.AwaitHostRAM puts the one admission rule to the figure, still holding the cards, with the
-//     same words, inside the same --wait, and the figure becomes the lease's declared need in the same critical
-//     section that admitted it;
+//     same words, inside the same --wait AND the hold bound (gpu_hostram_hold_max_sec, default 600 s, --ram-hold-max,
+//     0 = none), and the figure becomes the lease's declared need in the same critical section that admitted it;
+//     when the bound passes first the lease is released (the seat warmed back as for any release), nothing runs, and
+//     the reserve fails with one line (errHostRAMHoldBound);
 //  5. the command starts.
 //
 // Every other lease is untouched and compares in the grant: a lease without --unload-seat (--drain alone frees no host
@@ -30,13 +32,19 @@ package main
 // config can state (agent_seat_host_ram_gib) is a floor and its default is a chosen one, and a prediction taken when the
 // reserve starts is stale when the grant comes, hours later; a screen that sent the lease back to the grant on it would
 // bring the deadlock back whenever the cause changed in between. So the comparison after the unload is the decision, and
-// a shortage the unload does not cure costs the cards held (exclusive) and the seat cold until --wait ends it.
+// a shortage the unload does not cure costs the cards held (exclusive) and the seat cold, but only for the hold bound.
+// Before the bound (2026-10-14) it cost them until --wait ended it: a media lease around a command that is not a render
+// helper declared the class default (46.8 GiB), the seat was not even loaded, the unload freed nothing, and the lease held
+// all three cards idle for about 50 minutes while a production lease queued behind it. The drain-and-unload-first order is
+// unchanged (it breaks a real deadlock); only the time the cards may be held after it is bounded.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -122,18 +130,104 @@ func hostRAMDeadline(queuedAt time.Time, wait time.Duration) time.Time {
 // that the cards are held while the host is short, and when the wait ended. A timeout comes back as the refusal the grant
 // would have given, with the hint that names the flag that waits longer.
 func awaitHostRAMHeld(ctx context.Context, await func(gpulease.AwaitHostRAMOptions) error, deadline time.Time, wait time.Duration, out io.Writer) error {
+	return awaitHostRAMBounded(ctx, await, deadline, wait, hostRAMHold{}, out)
+}
+
+// hostRAMHold is what bounds the wait after the unload and what the operator is told about it (the hold bound, the
+// 2026-10-14 incident). max is the most the lease may hold its cards waiting for the host, counted from the unload; 0 = no
+// bound, --wait alone ends the wait. heldSince is when the lease took its cards, for the failure's "held the cards for".
+// freed, when it says the unload freed nothing, is printed in the waiting line: the wait cannot have been shortened by it.
+// classDefault is whether the declared figure is the media class default, which decides what the failure advises.
+type hostRAMHold struct {
+	max          time.Duration
+	heldSince    time.Time
+	freed        unloadOutcome
+	classDefault bool
+}
+
+// errHostRAMHoldBound is the failure of a wait that the hold bound ended: the lease is released and its command never ran.
+// It wraps the host's last refusal (errors.As still finds the *gpulease.ErrHostRAM, whose text carries the need and the
+// committed, physical and headroom figures), and it is deliberately not given heldHint's advice to pass a longer --wait:
+// --wait did not end this wait.
+type errHostRAMHoldBound struct {
+	short        *gpulease.ErrHostRAM
+	bound        time.Duration // the bound that was in force
+	waited       time.Duration // how long the wait after the unload ran
+	held         time.Duration // how long the lease held its cards in all
+	freedWhy     string        // non-empty when the unload freed nothing: why
+	classDefault bool
+}
+
+func (e *errHostRAMHoldBound) Unwrap() error { return e.short }
+
+// Error is one line: what ended the wait, the need and the host's figures (the refusal's own words), how long the cards were
+// held, what happened to the lease, and what to do about it.
+func (e *errHostRAMHoldBound) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "the host RAM hold bound passed (%s): the lease held the cards for %s (%s of it waiting for the host after the unload) and the host never had the room: %s; the lease is released and nothing ran under it.",
+		roundHold(e.bound), roundHold(e.held), roundHold(e.waited), e.short.Error())
+	if e.freedWhy != "" {
+		fmt.Fprintf(&b, " The unload freed nothing on these cards (%s), so the shortage is not the seat's.", e.freedWhy)
+	}
+	need := e.short.NeedGiB
+	if e.classDefault {
+		fmt.Fprintf(&b, " The declared %.1f GiB is the media class default, not a measure of this command: pass --ram <GiB> with the real figure (--ram 0 when the weights sit on the cards).", need)
+	} else {
+		fmt.Fprintf(&b, " If %.1f GiB is more than the command loads, pass a smaller --ram <GiB>; otherwise wait for the host to free memory and reserve again.", need)
+	}
+	b.WriteString(" To hold longer: --ram-hold-max <duration>, or config gpu_hostram_hold_max_sec (0 = no bound, --wait alone ends the wait).")
+	return b.String()
+}
+
+// roundHold prints a hold or a bound the way an operator reads it: whole seconds from ten seconds up, tenths below.
+func roundHold(d time.Duration) string {
+	if d >= 10*time.Second {
+		return d.Round(time.Second).String()
+	}
+	return d.Round(100 * time.Millisecond).String()
+}
+
+// awaitHostRAMBounded is awaitHostRAMHeld with the hold bound: the wait ends at the earlier of the --wait deadline and the
+// bound (counted from now, the moment the unload is done, and not under the drain floor: the floor exists for the memory the
+// unload frees to come back, and a bound the operator set is an answer to that). When the bound is the earlier one and it
+// passes without the host's admission, the failure is errHostRAMHoldBound; when --wait ends first, or there is no bound, it
+// is the refusal the grant would have given (heldHint), exactly as before the bound.
+func awaitHostRAMBounded(ctx context.Context, await func(gpulease.AwaitHostRAMOptions) error, deadline time.Time, wait time.Duration, h hostRAMHold, out io.Writer) error {
 	start := time.Now()
+	effective, boundAt := deadline, time.Time{}
+	if h.max > 0 {
+		if b := start.Add(h.max); b.Before(deadline) {
+			effective, boundAt = b, b
+		}
+	}
 	told := false
 	err := await(gpulease.AwaitHostRAMOptions{
-		Deadline: deadline,
-		Cancel:   ctx.Done(),
+		Deadline:  effective,
+		HoldUntil: boundAt,
+		Cancel:    ctx.Done(),
 		OnWait: func(e *gpulease.ErrHostRAM) {
 			told = true
-			fmt.Fprintf(out, "gpu reserve: %s — the drain and the unload are done and the cards are held; waiting up to %s for the host to have the room\n",
-				e.Error(), time.Until(deadline).Round(time.Second))
+			freed := ""
+			if h.freed.freedNothing() {
+				freed = fmt.Sprintf(" (the unload freed nothing on these cards: %s, so it did not shorten this wait)", h.freed.why)
+			}
+			bound := ""
+			if !boundAt.IsZero() {
+				bound = fmt.Sprintf("; if the host still lacks the room then, the lease is released and nothing runs under it (hold bound %s: --ram-hold-max, config gpu_hostram_hold_max_sec)", roundHold(h.max))
+			}
+			fmt.Fprintf(out, "gpu reserve: %s — the drain and the unload are done and the cards are held%s; waiting up to %s for the host to have the room%s\n",
+				e.Error(), freed, time.Until(effective).Round(time.Second), bound)
 		},
 	})
 	if err != nil {
+		var short *gpulease.ErrHostRAM
+		if !boundAt.IsZero() && errors.As(err, &short) && !short.Impossible {
+			e := &errHostRAMHoldBound{short: short, bound: h.max, waited: time.Since(start), held: time.Since(h.heldSince), classDefault: h.classDefault}
+			if h.freed.freedNothing() {
+				e.freedWhy = h.freed.why
+			}
+			return e
+		}
 		return heldHint(err, wait)
 	}
 	if told {
@@ -157,4 +251,43 @@ func detachedHostRAMError(m *gpulease.Manager, epoch uint64, err error) error {
 		return fmt.Errorf("%w (the lease is still held and no longer exclusive; the seat is unloaded: `gpu release --warm-seat` frees the lease and warms the seat back, `gpu release` frees it and leaves the warm owed)", err)
 	}
 	return detachedMaintainError(m, epoch, err)
+}
+
+// releaseAfterHoldBound ends a detached hold whose host-RAM wait the hold bound ended: it does what `gpu release --warm-seat
+// --epoch N` does (the instances kept under the lease are stopped, the seat the unload took down is warmed back under the
+// release guards, the lease is released) and returns the bound's failure so the reserve exits non-zero. A detached hold is the
+// form that can sit on the cards longest (a hidden holder renews its term while its owner vouches for it), and the incident this
+// bound answers was cards held idle behind a wait that could not end; keeping the lease "so the operator can look" is what
+// failed there. A wait that --wait ended first keeps the lease (detachedHostRAMError), as it always did.
+func releaseAfterHoldBound(m *gpulease.Manager, epoch uint64, cfg config.Config, err error) error {
+	if info := m.Inspect(); !info.Held || !info.HoldsEpoch(epoch) {
+		return detachedMaintainError(m, epoch, err) // the lease is not this reservation's any more: nothing to release
+	}
+	stopKeptInstances(cfg, epoch, os.Stderr)
+	warmBackGuarded(cfg, releaseWarmGuard(m, epoch), os.Stderr)
+	if _, rerr := m.ReleaseByEpoch(epoch); rerr != nil {
+		return fmt.Errorf("%w (and the lease could not be released: %v; `gpu release --warm-seat` frees it)", err, rerr)
+	}
+	return err
+}
+
+// hostRAMAskedStatus is what `gpu status` says about a lease that holds its cards while the host has not admitted the RAM it
+// asked for (F82): the figure, how long the cards have been held, and, when the wait for the host runs under the hold bound
+// (the record carries the moment it ends, until), when the bound releases the lease. Without a stamp the wait has not begun
+// (the drain and the unload come first) or runs with no bound (--ram-hold-max 0): the sentence says only what is known.
+// long adds the explanation of the order, for the one-line summary of the holder.
+func hostRAMAskedStatus(giB float64, held time.Duration, until, now time.Time, long bool) string {
+	s := fmt.Sprintf("host RAM %.1f GiB asked, not yet admitted", giB)
+	heldFor := held.Round(time.Second)
+	switch {
+	case until.IsZero():
+		if long {
+			s += ": the seat is cleared first, then the host is asked"
+		}
+		return s + fmt.Sprintf("; held the cards for %s", heldFor)
+	case until.After(now):
+		return s + fmt.Sprintf(": held the cards for %s; the hold bound releases the lease at %s, in %s", heldFor, until.Format(time.Kitchen), until.Sub(now).Round(time.Second))
+	default:
+		return s + fmt.Sprintf(": held the cards for %s; the hold bound passed at %s, and the reserve that holds the lease releases it at its next look (`gpu release --warm-seat` frees it now)", heldFor, until.Format(time.Kitchen))
+	}
 }

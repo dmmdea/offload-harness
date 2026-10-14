@@ -718,8 +718,13 @@ func leaseDevicesOf(m *gpulease.Manager, epoch uint64) []string {
 // --unload-seat`): the drain and unload of the lease the hidden child holds, scoped to that
 // lease's cards by epoch.
 func detachMaintain(m *gpulease.Manager, epoch uint64, cfg config.Config, drain bool, deadline time.Time, unload, exclusive bool) error {
-	return maintainSeatScoped(context.Background(), cfg, func(fn func(*gpulease.Meta)) error { return m.Restamp(epoch, fn) },
-		drain, deadline, unload, exclusive, markWarmOwed(m), leaseDevicesOf(m, epoch))
+	return detachMaintainReport(m, epoch, cfg, drain, deadline, unload, exclusive, nil)
+}
+
+// detachMaintainReport is detachMaintain that also tells the caller what the unload took down (out, when non-nil).
+func detachMaintainReport(m *gpulease.Manager, epoch uint64, cfg config.Config, drain bool, deadline time.Time, unload, exclusive bool, out *unloadOutcome) error {
+	return maintainSeatReport(context.Background(), cfg, func(fn func(*gpulease.Meta)) error { return m.Restamp(epoch, fn) },
+		drain, deadline, unload, exclusive, markWarmOwed(m), leaseDevicesOf(m, epoch), out)
 }
 
 // rosterIDsFn reads the llama-swap roster ids; a variable so a test needs no llama-swap.
@@ -777,6 +782,25 @@ func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, 
 // the drain waits only for runs on those cards, and the unload takes only the seats that sit on
 // them (plan P5). nil devices is the whole node, exactly as before.
 func maintainSeatScoped(ctx context.Context, cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool, owed func(seat string), devices []string) error {
+	return maintainSeatReport(ctx, cfg, restamp, drain, deadline, unload, exclusive, owed, devices, nil)
+}
+
+// unloadOutcome says what the unload step of a maintain took down on the lease's cards, for the caller that waits for the
+// host afterwards (gpu_hostram_await.go): an unload that freed nothing cannot have shortened that wait, and the operator
+// is told so (the 2026-10-14 incident: the seat was not even loaded). The zero value is "the unload did not run, or did not
+// get that far": nothing is claimed.
+type unloadOutcome struct {
+	ran    bool   // the unload step completed
+	seat   bool   // the agent seat was resident (or could not be told) and is unloaded: its warm-back is owed
+	others int    // other resident models taken down
+	why    string // when nothing was freed: why, in the words of the wait line
+}
+
+// freedNothing is the claim the wait line makes: the unload ran, took no model down, and said why.
+func (u unloadOutcome) freedNothing() bool { return u.ran && !u.seat && u.others == 0 }
+
+// maintainSeatReport is maintainSeatScoped that also tells the caller what the unload took down (out, when non-nil).
+func maintainSeatReport(ctx context.Context, cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool, owed func(seat string), devices []string, out *unloadOutcome) error {
 	endpoint, model, err := seatTarget(cfg)
 	if err != nil {
 		return err
@@ -897,6 +921,13 @@ func maintainSeatScoped(ctx context.Context, cfg config.Config, restamp restampe
 		if len(unloadedOthers) > 0 {
 			fmt.Fprintf(os.Stderr, "gpu reserve: also unloaded %d other resident model(s) so the leased cards are actually clear: %s\n",
 				len(unloadedOthers), strings.Join(unloadedOthers, ", "))
+		}
+		if out != nil {
+			why := "the seat was not loaded"
+			if !agentOn {
+				why = "the seat sits on cards this lease does not hold, and nothing else resident was on these"
+			}
+			*out = unloadOutcome{ran: true, seat: wasLoaded, others: len(unloadedOthers), why: why}
 		}
 		if !wasLoaded {
 			// A seat that sits on other cards was never this lease's to unload, so it is owed no
