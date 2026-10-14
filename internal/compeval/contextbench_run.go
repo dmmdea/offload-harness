@@ -147,16 +147,16 @@ type CBTaskResult struct {
 // CBReport is the artifact of a contextbench run. It carries no timestamps: two runs
 // of the same configuration against a deterministic seat are byte-identical.
 type CBReport struct {
-	Schema      string         `json:"schema"`
-	Seat        string         `json:"seat"`
-	Budget      int            `json:"budget_tokens"`
-	Reserve     int            `json:"reserve_tokens"`
-	TokenMethod string         `json:"token_method"`
-	Delivery    string         `json:"delivery"`
-	Ladder      string         `json:"ladder"`
-	PassAt      float64        `json:"pass_at"`
-	Results     []CBTaskResult `json:"results"`
-	Counts      map[string]int `json:"outcome_counts"`
+	Schema    string         `json:"schema"`
+	Seat      string         `json:"seat"`
+	Budget    int            `json:"budget_tokens"`
+	Reserve   int            `json:"reserve_tokens"`
+	Estimator string         `json:"size_estimator"`
+	Delivery  string         `json:"delivery"`
+	Ladder    string         `json:"ladder"`
+	PassAt    float64        `json:"pass_at"`
+	Results   []CBTaskResult `json:"results"`
+	Counts    map[string]int `json:"outcome_counts"`
 	// MeanReward is the mean reward over graded tasks, per family; absent for a family
 	// with none. Read it beside the counts: it says nothing about tasks that did not
 	// reach a verdict.
