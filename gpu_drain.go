@@ -793,6 +793,7 @@ type unloadOutcome struct {
 	ran    bool   // the unload step completed
 	seat   bool   // the agent seat was resident (or could not be told) and is unloaded: its warm-back is owed
 	others int    // other resident models taken down
+	failed int    // other resident models whose unload FAILED (SEAM: not counted yet)
 	why    string // when nothing was freed: why, in the words of the wait line
 }
 
