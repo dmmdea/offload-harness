@@ -39,3 +39,19 @@ func ClassifyEngine(f SeatFacts) string {
 	}
 	return EngineUnknown
 }
+
+// nonChatFlags are the llama-server flags that make a seat serve embeddings or reranking, which have no
+// chat route. They are read from the seat's own command, the way the serving config's author wrote them.
+var nonChatFlags = []string{"--embedding", "--embeddings", "--rerank", "--reranking"}
+
+// cmdHasNonChatFlag reports whether a command line carries one of nonChatFlags as a whole argument.
+func cmdHasNonChatFlag(cmd string) bool {
+	for _, arg := range strings.Fields(cmd) {
+		for _, f := range nonChatFlags {
+			if arg == f {
+				return true
+			}
+		}
+	}
+	return false
+}

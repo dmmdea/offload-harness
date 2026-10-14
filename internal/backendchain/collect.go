@@ -31,8 +31,9 @@ type Options struct {
 	// Required: without it nothing can be read and every entry is "none".
 	HTTP *http.Client
 	// ProbeCompletion adds a 1-token completion probe. It LOADS an idle seat, so it is off unless a
-	// person asked for it (doctor --probe-completion); /fleet/health never sets it. It is refused for any
-	// seat that is not running while a vLLM seat is loaded.
+	// person asked for it (doctor --probe-completion); /fleet/health never sets it. A completion goes only
+	// to a seat that is already running (it loads nothing), or, on a box where nothing is running, to the
+	// one seat the run is allowed to load; a seat with no chat route is never sent one.
 	ProbeCompletion bool
 	// ProbeTimeout bounds each cheap read; zero means 3 s.
 	ProbeTimeout time.Duration
@@ -47,8 +48,12 @@ type Options struct {
 // health endpoint at most once however many lanes point at it. None of that loads a model: the seat's
 // health endpoint is asked at the seat's own address (seatload.SeatURL), never through /upstream, which
 // loads on demand and resets the idle timer. The default is therefore safe to run against a node that is
-// serving, and to run on every /fleet/health refresh. Only the explicit completion probe reads the
-// running list again, around each completion (see completionVerdict).
+// serving, and to run on every /fleet/health refresh.
+//
+// Every row's starting state (loaded, not loaded, loading) comes from that one opening reading of the
+// running list, the snapshot. Only the explicit completion probe reads the list again, around each
+// completion (see completionVerdict), and those later readings decide whether a completion may be sent;
+// they never rewrite what a row says about the state the report began with.
 func Collect(ctx context.Context, cfg config.Config, opt Options) Report {
 	s := newState(ctx, cfg, opt)
 	var rep Report
@@ -73,8 +78,17 @@ type state struct {
 
 	roster    swapclient.Roster
 	rosterErr error
-	running   []seatload.Occupant
-	runErr    error
+	// start / startErr are the snapshot: llama-swap's running list as the report found it, read once and
+	// never replaced. Every row's starting state comes from it.
+	start    []seatload.Occupant
+	startErr error
+	// running / runErr are the live reading: the snapshot at first, read again before a completion is
+	// decided and after each one. They gate completions and feed nothing else.
+	running []seatload.Occupant
+	runErr  error
+	// loadSent is the seat of the one completion this run sent to a seat that was not running ("" until
+	// then): at most one such completion is sent, however it ends.
+	loadSent string
 
 	entries    []servingtmpl.SeatEntry
 	entriesWhy string // why entries is empty, "" when the serving config was read
@@ -101,6 +115,7 @@ func newState(ctx context.Context, cfg config.Config, opt Options) *state {
 			qctx, qcancel := context.WithTimeout(ctx, timeout)
 			s.running, s.runErr = seatload.Occupants(qctx, opt.HTTP, swapclient.BaseURL(cfg.Endpoint))
 			qcancel()
+			s.start, s.startErr = s.running, s.runErr
 		}
 	}
 	switch path := strings.TrimSpace(cfg.ServingConfigPath); {
@@ -231,15 +246,18 @@ func (s *state) seatIDs() []string {
 	return ids
 }
 
-// occupant finds a running row by canonical id.
-func (s *state) occupant(canon string) (seatload.Occupant, bool) {
-	for _, o := range s.running {
+// occupantIn finds a row of a running list by canonical id.
+func occupantIn(list []seatload.Occupant, canon string) (seatload.Occupant, bool) {
+	for _, o := range list {
 		if strings.EqualFold(strings.TrimSpace(o.Model), canon) {
 			return o, true
 		}
 	}
 	return seatload.Occupant{}, false
 }
+
+// occupant finds a seat's row in the opening snapshot: the state the report began with.
+func (s *state) occupant(canon string) (seatload.Occupant, bool) { return occupantIn(s.start, canon) }
 
 // Probe is the default cheap prober; it implements Prober. Results are kept per canonical seat, so a
 // seat several lanes point at is asked once.
@@ -268,8 +286,8 @@ func (s *state) probe(ctx context.Context, c Candidate, canon string, inRoster b
 	occ, found := s.occupant(canon)
 	state := strings.ToLower(strings.TrimSpace(occ.State))
 	switch {
-	case s.runErr != nil:
-		v = Verdict{OK: true, Probe: ProbeProcess, Detail: "in the roster; llama-swap's running list could not be read (" + short(s.runErr) + "), so its load state is unknown"}
+	case s.startErr != nil:
+		v = Verdict{OK: true, Probe: ProbeProcess, Detail: "in the roster; llama-swap's running list could not be read (" + short(s.startErr) + "), so its load state is unknown"}
 	case !found || (state != "ready" && state != "starting" && state != "stopping"):
 		v = Verdict{OK: true, Probe: ProbeProcess, Detail: "in the roster, not loaded; loads on first use, not asked (asking would load it)"}
 	case state == "starting":
@@ -323,30 +341,34 @@ func (s *state) endpointVerdict(ctx context.Context, canon string, occ seatload.
 	return Verdict{OK: true, Probe: ProbeEndpoint, Detail: fmt.Sprintf("loaded and ready; its health endpoint answered %d", resp.StatusCode)}
 }
 
-// resident reports whether llama-swap has the seat loaded or loading, so that a completion to it loads
-// nothing new. A seat that is stopping is going away and the next request reloads it, so it is not resident.
-func (s *state) resident(canon string) bool {
-	occ, ok := s.occupant(canon)
-	if !ok {
-		return false
-	}
-	st := strings.ToLower(strings.TrimSpace(occ.State))
+// isRunning reports whether a row of a running list is loaded or loading: a seat that is stopping is
+// going away and the next request reloads it, so it is not running.
+func isRunning(o seatload.Occupant) bool {
+	st := strings.ToLower(strings.TrimSpace(o.State))
 	return st == "ready" || st == "starting"
 }
 
-// vllmHolder finds a vLLM seat other than canon that is loaded or loading, the seat a load of canon can evict.
-func (s *state) vllmHolder(canon string) (string, bool) {
-	for _, o := range s.running {
-		st := strings.ToLower(strings.TrimSpace(o.State))
-		if (st == "ready" || st == "starting") && !strings.EqualFold(strings.TrimSpace(o.Model), canon) && s.engineOf(o.Model) == EngineVLLM {
-			return o.Model, true
-		}
-	}
-	return "", false
+// resident reports whether llama-swap, on the live reading, has the seat loaded or loading, so that a
+// completion to it loads nothing new.
+func (s *state) resident(canon string) bool {
+	o, ok := occupantIn(s.running, canon)
+	return ok && isRunning(o)
 }
 
-// refreshRunning re-reads llama-swap's running list. A failed read leaves no list and the error, so every
-// decision made on it afterwards fails closed (a vLLM seat holding the cards cannot be ruled out).
+// otherResident finds a seat other than canon that the live reading has loaded or loading, whatever its
+// engine: the seat a load of canon can evict.
+func (s *state) otherResident(canon string) (seatload.Occupant, bool) {
+	for _, o := range s.running {
+		if isRunning(o) && !strings.EqualFold(strings.TrimSpace(o.Model), canon) {
+			return o, true
+		}
+	}
+	return seatload.Occupant{}, false
+}
+
+// refreshRunning re-reads llama-swap's running list into the live reading (never the snapshot). A failed
+// read leaves no list and the error, so every decision made on it afterwards fails closed (a seat holding
+// the cards cannot be ruled out).
 func (s *state) refreshRunning(ctx context.Context) {
 	timeout := s.opt.ProbeTimeout
 	if timeout <= 0 {
@@ -357,16 +379,74 @@ func (s *state) refreshRunning(ctx context.Context) {
 	s.running, s.runErr = seatload.Occupants(qctx, s.opt.HTTP, swapclient.BaseURL(s.cfg.Endpoint))
 }
 
+// names lists every name a seat answers to: the name asked, the id llama-swap lists it under, and the
+// serving-config entry's id and aliases.
+func (s *state) names(seat string) []string {
+	out := []string{strings.TrimSpace(seat)}
+	if id, _ := s.canonical(seat); id != "" {
+		out = append(out, id)
+	}
+	if e, ok := s.entryFor(seat); ok {
+		out = append(out, e.Names()...)
+	}
+	return out
+}
+
+// answersTo reports whether any name the seat answers to is want.
+func (s *state) answersTo(seat, want string) bool {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return false
+	}
+	for _, n := range s.names(seat) {
+		if strings.EqualFold(strings.TrimSpace(n), want) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasChatRoute reports whether a chat completion can be asked of the seat. A seat that serves speech to
+// text, embeddings or reranking has no chat route: llama-swap answers a chat request for it with a 404,
+// which says nothing about whether the seat is up. The roles come from what the box states, never from a
+// guessed name: the seat is the configured embedder or speech-to-text seat, or its own command carries
+// the flag that makes it one (the way the serving config's author wrote it).
+func (s *state) hasChatRoute(seat string) bool {
+	for _, role := range []string{s.cfg.EmbedModel(), s.cfg.STTModel, s.cfg.STTModelHQ} {
+		if s.answersTo(seat, role) {
+			return false
+		}
+	}
+	if e, ok := s.entryFor(seat); ok && cmdHasNonChatFlag(e.Cmd) {
+		return false
+	}
+	return true
+}
+
 // completionVerdict runs the explicit 1-token completion probe on a seat the cheap probe passed.
 //
-// A completion to a seat that is not running LOADS it, and while a vLLM seat holds the cards that load
-// can evict it (internal/seatguard exists for the same reason). So the probe is refused, and says why,
-// for any seat that is not running whenever a vLLM seat is loaded or loading (the target being a vLLM
-// seat itself is no exemption: one vLLM seat evicts another), and whenever the running list cannot be
-// read. The decision is made on a fresh reading of /running, and the list is read again after every
-// completion, success or not, because the completion may have loaded a seat (the vLLM seat of this very
-// run included): the report's own first completions must not evict what its later ones would.
+// A completion to a seat that is not running LOADS it, and llama-swap unloads whatever else holds the
+// cards to make room (a vLLM seat, or a llama.cpp seat the lane is bound to: internal/seatguard exists for
+// the same reason). So a completion goes only
+//
+//   - to a seat that is already running: it loads nothing, so it can evict nothing; or
+//   - to a seat that is not, when nothing else is running, and then to at most ONE such seat in the run,
+//     however that completion ends.
+//
+// Any other seat is not probed, and its row says over which running seat the load would have been. A
+// seat with no chat route (speech to text, an embedder) is never sent a chat completion: its row keeps
+// the reading default mode gives it. The decision is made on a fresh reading of /running, and the list is
+// read again after every completion, success or not, because the completion may have loaded a seat. When
+// the list cannot be read, whether a seat holds the cards cannot be ruled out, and no seat that is not
+// running is sent one.
+//
+// A row says what the report found when it began (the snapshot); the readings taken here decide whether to
+// send, and the one clause they may add is that a seat was loaded since the report began.
 func (s *state) completionVerdict(ctx context.Context, c Candidate, canon string, prior Verdict) Verdict {
+	if !s.hasChatRoute(c.Seat) {
+		prior.Detail += "; not probed: not a chat seat"
+		return prior
+	}
 	resident := s.resident(canon)
 	if !resident {
 		hadRunErr := s.runErr != nil
@@ -382,13 +462,18 @@ func (s *state) completionVerdict(ctx context.Context, c Candidate, canon string
 	}
 	if !resident {
 		if s.runErr != nil {
-			prior.Detail += "; completion probe skipped: llama-swap's running list could not be read, so a vLLM seat holding the cards cannot be ruled out"
+			prior.Detail += "; completion probe skipped: llama-swap's running list could not be read, so a seat holding the cards cannot be ruled out"
 			return prior
 		}
-		if holder, ok := s.vllmHolder(canon); ok {
-			prior.Detail += fmt.Sprintf("; completion probe skipped: it would load %s while the vLLM seat %s holds the cards", c.Seat, holder)
+		if occ, ok := s.otherResident(canon); ok {
+			prior.Detail += "; not probed: would load over " + seatLabel(s.engineOf(occ.Model), occ.Model)
 			return prior
 		}
+		if s.loadSent != "" {
+			prior.Detail += "; not probed: this run already sent one completion that could load a seat"
+			return prior
+		}
+		s.loadSent = c.Seat
 	}
 	timeout := s.opt.CompletionTimeout
 	if timeout <= 0 {

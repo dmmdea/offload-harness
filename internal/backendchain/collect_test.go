@@ -500,7 +500,7 @@ func TestCompletionProbeOnAnIdleBoxLoadsAtMostOneSeat(t *testing.T) {
 	}
 	checked := 0
 	for _, other := range r.Seats {
-		if other.Seat == first || other.ActiveBackend == EngineNone || other.BackendProbe == ProbeCompletion {
+		if other.Seat == first || other.ActiveBackend == EngineNone || other.BackendProbe == ProbeCompletion || strings.Contains(other.BackendReason, "not a chat seat") {
 			continue
 		}
 		checked++
@@ -867,8 +867,8 @@ func TestBackendReasonsCarryNoPathOrURL(t *testing.T) {
 		f := newFakeSwap(t, fullRoster())
 		cfg := testCfg(t, f)
 		s := newState(t.Context(), cfg, Options{HTTP: f.srv.Client()})
-		s.running = nil
-		s.runErr = fmt.Errorf("llama-swap /running: %w", &url.Error{Op: "Get", URL: "http://llama-swap.example.invalid:9/running", Err: errors.New("open /srv/seats/serving.yaml: permission denied")})
+		s.start, s.running = nil, nil
+		s.startErr = fmt.Errorf("llama-swap /running: %w", &url.Error{Op: "Get", URL: "http://llama-swap.example.invalid:9/running", Err: errors.New("open /srv/seats/serving.yaml: permission denied")})
 		v := s.Probe(t.Context(), Candidate{Seat: "small-cpp", Engine: EngineLlamaCpp})
 		if !strings.Contains(v.Detail, "running list could not be read (") {
 			t.Fatalf("the unreadable running list must be reported: %+v", v)
@@ -1238,8 +1238,9 @@ func TestCompletionProbeSkipsSeatsWithNoChatRoute(t *testing.T) {
 		if c.got.ActiveBackend == EngineNone || c.got.ActiveBackend != c.want.ActiveBackend || c.got.BackendProbe != c.want.BackendProbe {
 			t.Errorf("%s = %+v, want the default-mode reading %+v", c.name, c.got, c.want)
 		}
-		if !strings.Contains(c.got.BackendReason, c.want.BackendReason) || !strings.Contains(c.got.BackendReason, "not probed: not a chat seat") {
-			t.Errorf("%s reason = %q, want the default-mode reason %q and the clause that says why no completion ran", c.name, c.got.BackendReason, c.want.BackendReason)
+		const why = "; not probed: not a chat seat"
+		if !strings.Contains(c.got.BackendReason, why) || strings.Replace(c.got.BackendReason, why, "", 1) != c.want.BackendReason {
+			t.Errorf("%s reason = %q, want the default-mode reason %q plus %q", c.name, c.got.BackendReason, c.want.BackendReason, why)
 		}
 	}
 }
