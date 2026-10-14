@@ -25,6 +25,9 @@ func TestFleetNodeAdmitsAHostUnderEveryConfiguredTailnetZone(t *testing.T) {
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// config.Load arms the process-wide GPU-lease fence at the machine's real lease directory. Left armed,
+	// it fences every later chat-lane forward in this test binary behind whatever lease the host holds.
+	restoreGPUFence(t)
 	cfg, err := config.Load(p)
 	if err != nil {
 		t.Fatal(err)

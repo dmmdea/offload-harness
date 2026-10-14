@@ -545,7 +545,10 @@ than compiled in.
 5. The reasoning Tier never fabricates a pass: garbage from it still defers.
 6. **One llama-swap serving slot holds one model at a time.** Every generation request passes
    through the Model Affinity Gate (`internal/modelaffinity`) before it is sent. Same model on the
-   same base is concurrent; a different model parks until the in-flight batch drains. See
+   same base is concurrent; a different model parks until the in-flight batch drains. The gate is
+   per process, an accepted limit: two harness processes on one box do not see each other's
+   in-flight model, while the run cap and the media-lease fence are machine-wide (the amendment of
+   2026-10-14 names the trigger that would reopen it). See
    [ADR 0025](../architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md).
 7. **A cascade rung never evicts a loaded vLLM seat** while `cascade_seat_guard` is on. The rung
    rides its lane or is served by the seat, and an unknown reading fails toward the seat. With no
