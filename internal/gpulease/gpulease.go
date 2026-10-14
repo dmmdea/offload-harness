@@ -348,7 +348,8 @@ type Meta struct {
 	OnYieldDir string `json:"on_yield_dir,omitempty"`
 	// Yields is stamped by a holder that runs the yield request (yield.go): "wrapper" for the
 	// `gpu reserve -- <command>` form and "detached" for the hidden holder of --detach. A record
-	// without it was written by a build that never asks, so no request can be made of its holder.
+	// without it was written by a build from before the request, or by a holder that never ticks it
+	// (the media pipeline acquires in process), so no request can be made of its holder.
 	Yields string `json:"yields,omitempty"`
 	// Format is the record format of the binary that WROTE the record (RecordFormat). A
 	// record without it was written by a binary that predates card-scoped leases: it cannot
@@ -429,8 +430,8 @@ type Info struct {
 	YieldGraceMs int64
 	OnYield      string
 	OnYieldDir   string
-	// Yields mirrors Meta.Yields: which form of holder runs the yield request ("" = a holder
-	// that predates it).
+	// Yields mirrors Meta.Yields: which form of holder runs the yield request ("" = a holder that
+	// does not: a build from before it, or an in-process holder of this build).
 	Yields string
 	// Term, Requested and HardEnd mirror the record's terms (term.go): the renewal term, the
 	// window the caller asked for when that was above the cap on a term (zero otherwise), and

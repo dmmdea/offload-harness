@@ -1216,7 +1216,7 @@ evidence and a heartbeat the wrapper writes about itself proves only that the wr
 | `unattended` | nobody is expected at the desk; the lease is judged by its progress contract and its window, never by its owner. `remote` implies it |
 | `progress` | the progress contract: `file` the job appends to (always an ABSOLUTE path: `gpu reserve` resolves a relative `--progress-file` against its own working directory before recording it, and the library refuses a relative one, because every reader looks for the same file from its own directory), `stall_ms` it may stay still |
 | `yield_grace_ms`, `on_yield`, `on_yield_dir` | the job's own terms for being asked to stop. The lease's HOLDER reads them when it is asked to yield ([An overdue lease's holder is asked to yield](#an-overdue-leases-holder-is-asked-to-yield-it-is-never-taken-from-plan-p11-adr-0085)); no takeover command reads them. `on_yield` is stored verbatim (refused above 4096 bytes, never clipped: the holder runs it) with the directory the lease was taken in, because a reader of the record does not share it |
-| `yields` | `wrapper` or `detached`: the holder runs the yield request. A record without it was written by a build that never asks, and its holder is never asked |
+| `yields` | `wrapper` or `detached`: the holder runs the yield request. A record without it was written by a build from before the request, or by a holder that is not a `gpu reserve` / `gpu hold` process (the media pipeline's in-process leases never carry it), and its holder is never asked |
 
 **Where the owner comes from.** `gpu reserve --owner-session ID --owner-pid N --owner-start-ms MS [--owner-remote]`,
 else the session label the ledger already resolves (`LOCAL_OFFLOAD_ORIGIN`, then `CLAUDE_CODE_SESSION_ID`) with NO pid:
@@ -1483,10 +1483,15 @@ automatic mode.
 **When the holder is asked** (its own tick, every 15 s, right after the term check; decided from the record alone, cheapest
 first). All of: the policy is `request`; the record is labelled expired or its declared end has passed (a lease the same tick
 renewed has a later end and is not asked); the holder was not asked yet in this epoch; the record carries `yields`
-(below); and a live waiter, not the holder's own process and not one waiting only on host RAM, wants a card the lease holds
+(below); the lease has read overdue, on every tick of this holder, for its settle interval (below); and a live waiter, not the holder's own process and not one waiting only on host RAM, wants a card the lease holds
 (`DevicesConflict`; a whole-node lease conflicts with every waiter). The same waiter, by pid and start identity, must be seen on
 two consecutive ticks: the ask is once per epoch and cannot be taken back, so a short `gpu reserve --wait` probe or a seat
-admission that leaves after seconds is not demand. A progressing job is renewed by its owner's term check
+admission that leaves after seconds is not demand; the count starts on the first tick after the settle interval ends.
+**A label has to have survived a look.** The term check looks again at a lease it labelled expired once a minute
+(`termRecheckEvery`), and a look at the cards that fails (most likely when they are busiest) labels a lease that a second look
+would renew. The ask cannot be taken back, so the holder settles for that same interval: the lease must have read overdue on
+every tick of the holder for a minute before it is asked, which puts the earliest ask about a minute and a half after the term
+ended. A progressing job is renewed by its owner's term check
 ([Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)), so it is not overdue and is not asked;
 only a lease labelled expired, or one that reached `gpu_max_total_min`, is. A seat waiter registered for the whole node (the
 card table was unreadable when it queued) conflicts with every lease and can ask an expired lease on a card it does not need;
@@ -1513,19 +1518,28 @@ is the job's), with `GPU_LEASE_EPOCH`, `GPU_LEASE_DIR` and `GPU_LEASE_YIELD_FILE
 goroutine, so the heartbeat goes on, and is never waited out or cut short. One stderr line says it was asked
 (`gpu reserve: asked to yield (overdue by ...; 1 waiter(s) queued: ...); running its --on-yield "...". The job keeps running
 until it stops; nothing is released or killed`), and a failed `on_yield` is said once more. With no `--on-yield` recorded it
-says so and points at the file. The source of this path is pinned to contain no stop, signal or release call.
+says so and points at the file. A waiter's reason is free text typed by any local process, so line breaks and control
+characters in it become spaces before it reaches that line. What the holder did (it started its command, how it ended, that it
+had none to run) is written to the sidecar; a write that fails is said once (`could not record what its --on-yield did`) and
+tried again on the next heartbeat, with the time of the event, and a request file that exists and cannot be read is an error,
+not "never asked". The source of this path is pinned to contain no stop, signal or release call.
 
 **What the job sees.** A wrapped command gets `GPU_LEASE_YIELD_FILE`, the path of the sidecar; the file exists only once the
-holder was asked, so a job can poll it between its items. A detached job is not the holder's child, so `gpu reserve --detach`
-prints `yield request: ... a job can watch <path>` (and `yield_file` with `--json`), and `gpu status --json` carries
-`activity.holder.yield_file`. The detached holder's own stderr is a temporary log, not a notification stream: for it the
+holder was asked, so a job can poll it between its items (the variable is set under every policy and names a file that never
+appears unless the policy is `request`). A detached job is not the holder's child, so under `gpu_on_overdue = request`
+`gpu reserve --detach` prints `yield request: ... a job can watch <path>` (and `yield_file` with `--json`), saying whether the
+holder runs an `--on-yield` or none was recorded, and `gpu status --json` carries `activity.holder.yield_file`. Under the default,
+`hold` or an unrecognised value nobody is asked, so the detach report and the status wire are what they were before the key
+existed; a status call names the file once a holder was asked, whatever the policy says by then. The detached holder's own stderr is a temporary log, not a notification stream: for it the
 sidecar and the status surfaces are the record.
 
 **Which holders can be asked.** The record carries `yields` (`wrapper` or `detached`), stamped at acquire by a holder that runs
 this. A wrapper version cannot say it (every 0.18x build stamps one and none of the older ones ticks the request), so a record
-without `yields`, including every job started before the upgrade, is never asked and every surface says
-`its holder build predates the yield request ... ask whoever owns it`. A detached holder started with `--release-at-expiry`
-releases at its deadline and stamps nothing.
+without `yields` is never asked and every surface says `its holder does not run the yield request (a build from before it, or
+an in-process holder such as the media pipeline's) ... ask whoever owns it`. Two kinds of holder carry no stamp: every job
+started before the upgrade, and the leases this build's own media pipeline takes in process, which never tick the request. A
+restart helps the first kind and nothing helps the second. A detached holder started with `--release-at-expiry` releases at its
+deadline and stamps nothing.
 
 **What a waiter and a status call read** (read-only; nothing here writes):
 
@@ -1533,18 +1547,21 @@ releases at its deadline and stamps nothing.
 |---|---|
 | unset policy | nothing; the sentences are those of before the key existed |
 | `hold` (or an unrecognised value) | `gpu_on_overdue=hold: its holder is not asked to yield; it holds until it ends` |
-| `request`, holder cannot be asked | `its holder build predates the yield request, so no request can be made of it: ask whoever owns it` |
+| `request`, holder cannot be asked | `its holder does not run the yield request (a build from before it, or an in-process holder such as the media pipeline's), so no request can be made of it: ask whoever owns it` |
 | `request`, not asked yet | nothing |
 | asked | `its holder was asked to yield at 14:02 (2 waiter(s) queued) and ran its on_yield at 14:02 (exit 0); it still holds the card 3m0s later` |
-| asked, past the job's grace (10 minutes when it declared none, a display-only figure) | `asked 14m0s ago and it has not ended: nothing is killed; ask whoever owns it, or stop its job by hand (wrapper pid 77); the claim frees when the wrapper ends` |
+| asked, past the job's grace (10 minutes when it declared none, a display-only figure), and the lease is still overdue | `asked 14m0s ago and it has not ended: nothing is killed; ask whoever owns it, or stop its job by hand (wrapper pid 77); the claim frees when the wrapper ends` |
+| asked, and the lease was renewed afterwards (the sidecar stays until the lease ends) | `its holder was asked to yield at 14:02 (2 waiter(s) queued) and ran its on_yield at 14:02 (exit 0); the lease has since been renewed and is not overdue now`; `unanswered` is false |
 
 For a **detached** holder the unanswered sentence names the release command with what it does: `have its driver stop the job and
 run local-offload gpu release --epoch N (the job is a separate process: that command frees the claim at once, and the job
 keeps running on the card until it ends)`. **No sentence about a live wrapper names `gpu release`**: releasing the claim of a
 live wrapper makes it end its own job within one tick. The sentences ride `ExplainHeld` (the waiter's refusal), the standing
 notes of `gpu status` and `offload_status`, and the brief line; `activity.holder` carries `yield_file`, `yield_note` and, once
-asked, `yield` (`asked_at`, `acted_at`, `action`, `exit`, `waiters`, `grace_s`, `unanswered`). A holder that runs no request carries none
-of the three, and `yield_note` and `yield` are absent until there is something to say.
+asked, `yield` (`asked_at`, `acted_at`, `action`, `exit`, `waiters`, `grace_s`, `unanswered`). `yield_file` is named while the policy
+is `request` and, whatever the policy says by then, once the holder was asked; under the default policy a lease nobody asked
+carries none of the three. A holder that cannot be asked carries `yield_note` under `request` and no `yield_file`, and
+`yield_note` and `yield` are absent until there is something to say.
 
 **When the holder does not yield.** Nothing automatic. The lease stays held-overdue, its heartbeat and fence intact, its
 waiters keep their place in line (FIFO unchanged), and the surfaces move from asked to unanswered wording. It frees when the

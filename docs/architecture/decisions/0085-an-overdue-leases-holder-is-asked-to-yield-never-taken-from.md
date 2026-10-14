@@ -41,12 +41,19 @@ ordinary way: a wrapper when its command ends, a detached job when its driver st
   Waiter presence is the demand signal: a live waiter (not the holder's own process, not one waiting only on host RAM) that
   wants a card the lease holds. The preconditions are checked cheapest first, from the lease's record alone: the policy is
   `request`; the record is labelled expired or past its declared end (a lease the same tick renewed is not asked); the holder
-  was not asked yet; the record says the holder runs the request; and then the waiters are read, because reading them prunes
-  the dead ones.
+  was not asked yet; the record says the holder runs the request; the lease has read overdue for the settle interval (below);
+  and then the waiters are read, because reading them prunes the dead ones.
 - **The same waiter, by pid and start identity, must be seen on two consecutive ticks.** The ask is once per epoch and cannot
   be taken back, so a short `gpu reserve --wait` probe, or a seat admission that leaves after seconds, must not stop a long job
   through its `on_yield` and be gone. The persistence is an in-memory counter on the holder's own 15 second cadence; it adds
   no time constant.
+- **A label has to have survived a look.** The holder's term check looks again at a lease it labelled expired once a minute,
+  and a look at the cards that fails (most likely when they are busiest) labels a lease that a second look would renew. The
+  waiter rule counts the waiter and not the label, so on its own the second tick, 15 seconds after the label, could ask a lease
+  the term check was about to renew. The holder therefore settles: the lease must have read overdue on every tick for the
+  interval the term check already uses to look again (`termRecheckEvery`, passed to the ticker by both holders, not a new
+  constant), and the waiter is counted from the first tick after that. The earliest ask is about a minute and a half after the
+  term ended. A lease the look renews is never asked.
 - **The request is a sidecar, `yield.<epoch>`**, beside the lease record, written under the epoch lock after the same
   writability probe and liveness check the orphan marker uses, with tmp and rename: the ask (when, why, who waited, the
   job's declared grace) and a second write of what the holder did about it. Both writes take the lock and check the lease is
@@ -56,13 +63,20 @@ ordinary way: a wrapper when its command ends, a detached job when its driver st
   command the holder runs is the one it was started with, once, in its own working directory (which is the directory the
   record names, by construction), through `sh -c` or `cmd.exe /d /s /c`, hidden, with its output discarded (a wrapper's stdout is
   the job's), in a goroutine so the heartbeat goes on, and never waited out or cut short. If the ask cannot be recorded
-  nothing is run. The wrapper's command is told `GPU_LEASE_YIELD_FILE`, the path of the sidecar, which exists only once the
-  holder is asked, so a job can poll it between its items; a detached job is not the holder's child, so `gpu reserve --detach`
-  prints the path and `gpu status --json` carries it.
+  nothing is run. What the holder did (it started its command, how it ended, that it had none to run) is written to the sidecar;
+  a write that fails is said once and tried again on the next heartbeat, so a sidecar is not left saying "started its
+  on_yield" about a command that ended. A waiter's reason is free text typed by any local process, so it is collapsed to one
+  line before it reaches the holder's stderr, the notification stream of the wrapping session. The wrapper's command is told
+  `GPU_LEASE_YIELD_FILE`, the path of the sidecar, which exists only once the holder is asked, so a job can poll it between its
+  items. A detached job is not the holder's child, so under the request policy `gpu reserve --detach` prints the path and
+  `gpu status --json` carries it; under the default, `hold` and an unrecognised value nobody is asked, and both are what they
+  were before the key existed.
 - **A record gains an additive `yields` stamp** (`wrapper` or `detached`), set at acquire by a holder that runs the request.
   Every 0.18x build already stamps a wrapper version, and none of the older ones ticks this, so the version cannot say whether
-  a holder would answer. A record without the stamp reads, on every surface, as "its holder build predates the yield request:
-  ask whoever owns it", and is never asked.
+  a holder would answer. A record without the stamp is never asked, and reads on every surface as "its holder does not run the
+  yield request (a build from before it, or an in-process holder such as the media pipeline's): ask whoever owns it". Two
+  kinds of holder carry no stamp, and the words are true of both: every job started before the upgrade, and the leases this
+  build's own media pipeline takes in process (it acquires with no form stamp and never ticks the request).
 - **A detached holder never returns on a yield.** Its job is a separate process; releasing would free the card under a live
   job, the 2026-09-07 incident (ADR 0070).
 - **No waiter-facing sentence names `gpu release --epoch N` for a lease whose wrapper is alive.** For a wrapper it says: nothing
@@ -70,7 +84,8 @@ ordinary way: a wrapper when its command ends, a detached job when its driver st
   detached holder's sentence names the release command, with what it does: it frees the claim at once, and the job keeps running
   on the card until it ends. An ask is described as unanswered once the lease still holds its cards past the job's declared
   grace, or past a display-only ten minutes when the job declared none; nothing keys off that figure, which is chosen and not
-  measured.
+  measured. A lease that was asked and then renewed (the sidecar stays until the lease ends) is no longer overdue and is never
+  called unanswered: it reads "has since been renewed and is not overdue now".
 
 **This amends plan invariant I5 and the plan's description of the takeover.** The plan puts running `on_yield` in the process
 of a takeover command and has a blocked waiter write the request. Here the holder's own tick runs the job's own pre-declared
@@ -97,11 +112,13 @@ the two is the operator's to confirm.
   ticks.
 - **A holder that exits before its `on_yield` returns** (the wrapper's command ended meanwhile) leaves the sidecar's action at
   "running"; the sidecar goes with the lease.
-- **Rollout.** A host is covered once every holder on it is this build; a 20 hour job started before the upgrade carries no
-  stamp and is told so. Restart the long-lived processes (MCP servers, fleet daemon) so their surfaces say the same thing.
+- **Rollout.** A host is covered once every `gpu reserve` and `gpu hold` holder on it is this build; a 20 hour job started before
+  the upgrade carries no stamp and is told so. The leases this build's own media pipeline takes in process never carry the
+  stamp and are never asked, before or after a restart; they are told so in the same words. Restart the long-lived processes
+  (MCP servers, fleet daemon) so their surfaces say the same thing.
 - **The term check still renews or labels and never frees.** The ask reads the record after the holder's term check ran and
-  ignores its result; a tick whose term check errored may ask a lease that the next tick would have renewed, which is why the
-  waiter must also have stayed for two ticks.
+  ignores its result; a tick whose term check errored may leave a lease overdue that the next tick would have renewed, which
+  is why the lease must also have read overdue for the settle interval and the waiter have stayed for two ticks.
 
 ## Alternatives considered
 
