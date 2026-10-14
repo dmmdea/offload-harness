@@ -109,10 +109,10 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Traces: goal-a, goal-b, goal-c-old, goal-e-badpager (goal-d-broken is not JSON).
-	// Delegation: 5 runs; the fake seat, the refusal, the dispatch error, the blank and the junk
+	// Delegation: 6 runs; the fake seat, the refusal, the dispatch error, the blank and the junk
 	// line are not runs, and notes.jsonl is not a dated shard.
-	if len(runs) != 9 || stats.Runs != 9 || stats.BySource[tcSourceAgentTrace] != 4 || stats.BySource[tcSourceDelegation] != 5 {
-		t.Fatalf("runs = %d, by source %v; want 9 = 4 traces + 5 delegation rows", len(runs), stats.BySource)
+	if len(runs) != 10 || stats.Runs != 10 || stats.BySource[tcSourceAgentTrace] != 4 || stats.BySource[tcSourceDelegation] != 6 {
+		t.Fatalf("runs = %d, by source %v; want 10 = 4 traces + 6 delegation rows", len(runs), stats.BySource)
 	}
 	wantSkipped := map[string]int{
 		"trace file not a trace record":                   1,
@@ -134,18 +134,18 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 	rep := tcBuildReport(runs, "hash")
 	a := rep.All
 	// trace-bearing: 4 traces with a transcript + delegation rows 1, 2, 3 with a step trace = 7.
-	if a.Runs != 9 || a.TraceBearingRuns != 7 {
-		t.Errorf("runs/trace-bearing = %d/%d, want 9/7", a.Runs, a.TraceBearingRuns)
+	if a.Runs != 10 || a.TraceBearingRuns != 7 {
+		t.Errorf("runs/trace-bearing = %d/%d, want 10/7", a.Runs, a.TraceBearingRuns)
 	}
-	// steps: 6+3+4+2 (traces) + 5+2+7+4+0 (delegation) = 33.
-	if a.Steps != 33 {
-		t.Errorf("steps = %d, want 33", a.Steps)
+	// steps: 6+3+4+2 (traces) + 5+2+7+4+0+2 (delegation) = 35.
+	if a.Steps != 35 {
+		t.Errorf("steps = %d, want 35", a.Steps)
 	}
 	// pager recorded by goal-a, goal-b and delegation rows 1, 2, 4 = 5; measured: goal-a, row 1,
-	// row 4 = 3; distinct evicted 4+5+2 = 11, re-fetched 1+0+1 = 2, so 2/11 = 0.181818.
+	// row 4 = 3 (rows counted in file order: 1, 2, 3, 8, 9, 10); distinct evicted 4+5+2 = 11, re-fetched 1+0+1 = 2, so 2/11 = 0.181818.
 	p := a.Pager
-	if p.RecordedRuns != 5 || p.MeasuredRuns != 3 || p.UnexercisedRuns != 2 || p.UnrecordedRuns != 4 {
-		t.Errorf("pager runs recorded/measured/unexercised/unrecorded = %d/%d/%d/%d, want 5/3/2/4", p.RecordedRuns, p.MeasuredRuns, p.UnexercisedRuns, p.UnrecordedRuns)
+	if p.RecordedRuns != 5 || p.MeasuredRuns != 3 || p.UnexercisedRuns != 2 || p.UnrecordedRuns != 5 {
+		t.Errorf("pager runs recorded/measured/unexercised/unrecorded = %d/%d/%d/%d, want 5/3/2/5", p.RecordedRuns, p.MeasuredRuns, p.UnexercisedRuns, p.UnrecordedRuns)
 	}
 	if p.DistinctEvicted != 11 || p.RefetchedDistinct != 2 || p.Evictions != 14 {
 		t.Errorf("pager distinct/refetched/evictions = %d/%d/%d, want 11/2/14", p.DistinctEvicted, p.RefetchedDistinct, p.Evictions)
@@ -156,7 +156,7 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 	// compaction: 5 runs recorded a pass count; passes 2+0+3+0+1 = 6 over 3 runs with a pass:
 	// fire rate 3/5 = 0.6, passes per run 1.2, steps in those runs 6+3+5+2+4 = 20, so 0.3 a step.
 	c := a.Compaction
-	if c.RecordedRuns != 5 || c.UnrecordedRuns != 4 || c.RunsWithPass != 3 || c.Passes != 6 || c.StepsInRecordedRuns != 20 {
+	if c.RecordedRuns != 5 || c.UnrecordedRuns != 5 || c.RunsWithPass != 3 || c.Passes != 6 || c.StepsInRecordedRuns != 20 {
 		t.Errorf("compaction counts = %+v", c)
 	}
 	if c.FireRate == nil || *c.FireRate != 0.6 || c.PassesPerRun == nil || *c.PassesPerRun != 1.2 || c.PassesPerStep == nil || *c.PassesPerStep != 0.3 {
@@ -171,19 +171,27 @@ func TestTraceCorpusReadoutNumbers(t *testing.T) {
 	// prefilled 1200+300+2000+400+800 = 4700, cached 3000+100+8000+0+200 = 11300, so reuse is
 	// 11300/16000 = 70.625 %, 235 prefilled tokens a step and 940 a run.
 	f := a.Prefill
-	if f.MeasuredRuns != 5 || f.UnmeasuredRuns != 4 || f.ObservedSteps != 20 || f.PrefillTokens != 4700 || f.CacheTokens != 11300 {
+	if f.MeasuredRuns != 5 || f.NoTokenCountsRuns != 1 || f.UnmeasuredRuns != 4 || f.ObservedSteps != 20 || f.PrefillTokens != 4700 || f.CacheTokens != 11300 {
 		t.Errorf("prefill counts = %+v", f)
 	}
 	if f.KVReusePct == nil || *f.KVReusePct != 70.625 || f.AvgPrefillTokensPerStep == nil || *f.AvgPrefillTokensPerStep != 235 || f.AvgPrefillTokensPerRun == nil || *f.AvgPrefillTokensPerRun != 940 {
 		t.Errorf("prefill rates = %v/%v/%v, want 70.625/235/940", f.KVReusePct, f.AvgPrefillTokensPerStep, f.AvgPrefillTokensPerRun)
 	}
 
-	// Per seat: seat-a has rows 1, 2 and the budget row; seat-b has rows 3 and 4; the four
+	// The tenth run observed 2 steps and reported no token counts (an engine that gives no
+	// timings): it is counted apart, adds nothing to the token sums, and is not a measured 0.
+	// Seat input tokens come from the three runs that reported them: 10000+400+1500 = 11900
+	// over 5+2+2 = 9 steps = 1322.222222 a step.
+	if f.SeatInputRuns != 3 || f.SeatInputTokens != 11900 || f.SeatInputSteps != 9 || f.AvgSeatInputTokensPerStep == nil || *f.AvgSeatInputTokensPerStep != 1322.222222 {
+		t.Errorf("seat input = %d runs, %d tokens, %d steps, %v a step; want 3/11900/9/1322.222222", f.SeatInputRuns, f.SeatInputTokens, f.SeatInputSteps, f.AvgSeatInputTokensPerStep)
+	}
+
+	// Per seat: seat-a has rows 1, 2 and the budget row; seat-b has rows 3, 8 and 10; the four
 	// traces name no seat. A seat's slice is a slice of the same arithmetic.
 	if got := rep.BySeat["seat-a"]; got.Runs != 3 || got.TraceBearingRuns != 2 || got.Pager.MeasuredRuns != 1 || got.Pager.RefetchRate == nil || *got.Pager.RefetchRate != 0 {
 		t.Errorf("seat-a = %+v; its one measured run evicted 5 payloads and re-fetched none, a real 0", got.Pager)
 	}
-	if got := rep.BySeat["seat-b"]; got.Runs != 2 || got.Pager.RefetchRate == nil || *got.Pager.RefetchRate != 0.5 || got.Pager.Verdict != tcVerdictAbove {
+	if got := rep.BySeat["seat-b"]; got.Runs != 3 || got.Pager.RefetchRate == nil || *got.Pager.RefetchRate != 0.5 || got.Pager.Verdict != tcVerdictAbove {
 		t.Errorf("seat-b = %+v, want 1 of 2 evicted payloads re-fetched", got.Pager)
 	}
 	if got := rep.BySeat[tcSeatUnrecorded]; got.Runs != 4 || got.Compaction.TranscriptRuns != 4 {
@@ -202,8 +210,8 @@ func TestTraceCorpusSeatAndWindowFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runs) != 2 {
-		t.Fatalf("--seat seat-b kept %d runs, want its 2 delegation rows (agent traces name no seat)", len(runs))
+	if len(runs) != 3 {
+		t.Fatalf("--seat seat-b kept %d runs, want its 3 delegation rows (agent traces name no seat)", len(runs))
 	}
 	if stats.Skipped["seat filter: record names no seat"] != 5 {
 		t.Errorf("the 5 trace files in the directory must be counted as skipped by the seat filter (4 records + 1 broken): %v", stats.Skipped)
@@ -214,8 +222,8 @@ func TestTraceCorpusSeatAndWindowFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runs) != 2 {
-		t.Fatalf("--since 2026-01-02 kept %d runs, want the second shard's 2", len(runs))
+	if len(runs) != 3 {
+		t.Fatalf("--since 2026-01-02 kept %d runs, want the second shard's 3", len(runs))
 	}
 	o.Since, o.Until = "", "2026-01-01"
 	if runs, _, _ = tcHarvest(o); len(runs) != 3 {
@@ -335,6 +343,12 @@ func TestTraceCorpusUnrecordedNeverSerializesAsZero(t *testing.T) {
 	}
 	if st.Pager.RefetchRate != nil || st.Pager.Verdict != tcVerdictNoData || st.Pager.UnexercisedRuns != 1 {
 		t.Errorf("an unexercised pager must not produce a rate or a verdict: %+v", st.Pager)
+	}
+	// Steps observed with no token counts at all (an engine that reports no timings) are not a
+	// measured zero: the run is counted apart and the token sums and the reuse rate stay unset.
+	nt := tcStatsFor([]tcRun{{ID: "n", Source: tcSourceDelegation, Steps: 3, Prefill: &tcPrefill{ObservedSteps: 3}}})
+	if nt.Prefill.MeasuredRuns != 0 || nt.Prefill.NoTokenCountsRuns != 1 || nt.Prefill.KVReusePct != nil || nt.Prefill.AvgPrefillTokensPerStep != nil {
+		t.Errorf("a run with observed steps and no token counts must not read as measured: %+v", nt.Prefill)
 	}
 	// A measured prefill of zero cached tokens is a real 0 % reuse, not null.
 	pf := tcStatsFor([]tcRun{{ID: "p", Source: tcSourceDelegation, Steps: 1, Prefill: &tcPrefill{ObservedSteps: 1, PrefillTokens: 100}}})

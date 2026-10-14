@@ -101,6 +101,10 @@ type tcRun struct {
 	StopReason   string     `json:"stop_reason,omitempty"`
 	Pager        *tcPager   `json:"pager"`
 	Prefill      *tcPrefill `json:"prefill"`
+	// SeatTokensIn is the prompt-token count the seat processed over the whole run, cache hits
+	// included (the wire's seat_tokens_in). It is the one input-volume figure an engine that
+	// reports no prefill timings still gives. nil = not reported.
+	SeatTokensIn *int64 `json:"seat_tokens_in"`
 	// LadderArtifacts counts tool turns in the final transcript that are products of the
 	// compaction ladder (elision markers, skeletons). It exists only for agent traces, which keep
 	// a transcript; nil on a delegation row. It is a LOWER BOUND on whether the ladder fired.
@@ -174,6 +178,7 @@ type tcDelegationIn struct {
 		PrefillSteps  int        `json:"prefill_steps"`
 		PrefillTokens int64      `json:"prefill_tokens"`
 		CacheTokens   int64      `json:"cache_tokens"`
+		SeatTokensIn  int64      `json:"seat_tokens_in"`
 		Pager         *tcPagerIn `json:"pager"`
 	} `json:"result"`
 }
@@ -400,6 +405,10 @@ func tcHarvestDelegation(o tcHarvestOpts, stats *tcHarvestStats) ([]tcRun, error
 			if res.PrefillSteps > 0 && res.PrefillTokens >= 0 && res.CacheTokens >= 0 {
 				run.Prefill = &tcPrefill{ObservedSteps: res.PrefillSteps, PrefillTokens: res.PrefillTokens, CacheTokens: res.CacheTokens}
 			}
+			if res.SeatTokensIn > 0 {
+				n := res.SeatTokensIn
+				run.SeatTokensIn = &n
+			}
 			runs = append(runs, run)
 		}
 		scanErr := sc.Err()
@@ -532,6 +541,9 @@ func tcValidateRun(r tcRun) error {
 	if r.Prefill != nil && (r.Prefill.ObservedSteps <= 0 || r.Prefill.PrefillTokens < 0 || r.Prefill.CacheTokens < 0) {
 		return fmt.Errorf("prefill object is inconsistent (observed_steps must be > 0: an unmeasured run has no prefill object)")
 	}
+	if r.SeatTokensIn != nil && *r.SeatTokensIn <= 0 {
+		return fmt.Errorf("seat_tokens_in must be positive when present (an unreported figure is null)")
+	}
 	if r.LadderArtifacts != nil && *r.LadderArtifacts < 0 {
 		return fmt.Errorf("negative ladder_artifacts")
 	}
@@ -597,8 +609,14 @@ type tcCompaction struct {
 	LowerBoundFireRate  *float64 `json:"transcript_lower_bound_fire_rate"`
 }
 
+// tcPrefillStats: a run is MEASURED when the backend reported token counts for its steps. A
+// prompt has at least one token, so a run that observed steps and reported zero prefilled AND
+// zero cached tokens came from an engine that gives no token timings (the step counter ticks
+// because a stats block arrived, not because tokens were counted): it is counted apart as
+// no_token_counts and contributes nothing to the token sums, never a measured zero.
 type tcPrefillStats struct {
 	MeasuredRuns            int      `json:"measured_runs"`
+	NoTokenCountsRuns       int      `json:"no_token_counts_runs"`
 	UnmeasuredRuns          int      `json:"unmeasured_runs"`
 	ObservedSteps           int64    `json:"observed_steps"`
 	PrefillTokens           int64    `json:"prefill_tokens"`
@@ -606,6 +624,12 @@ type tcPrefillStats struct {
 	KVReusePct              *float64 `json:"kv_reuse_pct"`
 	AvgPrefillTokensPerStep *float64 `json:"avg_prefill_tokens_per_step"`
 	AvgPrefillTokensPerRun  *float64 `json:"avg_prefill_tokens_per_run"`
+	// Seat input tokens: the prompt tokens the seat processed per run, cache hits included,
+	// over the runs that reported it. Reported by engines whose prefill timings are absent.
+	SeatInputRuns             int      `json:"seat_input_runs"`
+	SeatInputTokens           int64    `json:"seat_input_tokens"`
+	SeatInputSteps            int64    `json:"seat_input_steps"`
+	AvgSeatInputTokensPerStep *float64 `json:"avg_seat_input_tokens_per_step"`
 }
 
 // tcRound keeps six decimals: a rate in a baseline file reads, and the rounding is the same
@@ -657,9 +681,17 @@ func tcStatsFor(runs []tcRun) tcStats {
 				s.Compaction.RunsWithArtifacts++
 			}
 		}
-		if r.Prefill == nil {
+		if r.SeatTokensIn != nil {
+			s.Prefill.SeatInputRuns++
+			s.Prefill.SeatInputTokens += *r.SeatTokensIn
+			s.Prefill.SeatInputSteps += int64(r.Steps)
+		}
+		switch {
+		case r.Prefill == nil:
 			s.Prefill.UnmeasuredRuns++
-		} else {
+		case r.Prefill.PrefillTokens+r.Prefill.CacheTokens == 0:
+			s.Prefill.NoTokenCountsRuns++
+		default:
 			s.Prefill.MeasuredRuns++
 			s.Prefill.ObservedSteps += int64(r.Prefill.ObservedSteps)
 			s.Prefill.PrefillTokens += r.Prefill.PrefillTokens
@@ -692,6 +724,7 @@ func tcStatsFor(runs []tcRun) tcStats {
 	f.KVReusePct = tcRate(float64(f.CacheTokens)*100, float64(f.CacheTokens+f.PrefillTokens))
 	f.AvgPrefillTokensPerStep = tcRate(float64(f.PrefillTokens), float64(f.ObservedSteps))
 	f.AvgPrefillTokensPerRun = tcRate(float64(f.PrefillTokens), float64(f.MeasuredRuns))
+	f.AvgSeatInputTokensPerStep = tcRate(float64(f.SeatInputTokens), float64(f.SeatInputSteps))
 	return s
 }
 
