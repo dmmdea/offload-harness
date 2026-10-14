@@ -1441,8 +1441,8 @@ func holderLeaseGone(lease *gpulease.Lease) bool {
 // seat back ONLY if the lease owes it (the wrapper form's guard: a seat nothing unloaded is never loaded by a release), and
 // leaves the release itself to the holder's deferred function. The kept instances are stopped HERE as well as there: they hold
 // VRAM the seat's warm-back wants, so they go first, and the deferred stop that follows the warm-back finds no marker of a
-// stopped instance (StopForLease reads the markers; a stopped instance's is gone), so the second call is a no-op for every instance the first one stopped (one it had to leave
-// running is named a second time: noise, not harm).
+// stopped instance (StopForLease reads the markers; a stopped instance's is gone), so the second call is a no-op for every
+// instance the first one stopped (one it had to leave running is named a second time: noise, not harm).
 func releaseHolderAtWaitEnd(cfg config.Config, m *gpulease.Manager, lease *gpulease.Lease, asked float64, until time.Time) {
 	fmt.Fprintf(os.Stderr, "gpu hold: the host-RAM wait of this lease (%.1f GiB asked) ended at %s and the lease was not released: the reserve that took it is gone, or it died before it could. Releasing the lease here (the seat is warmed back only if this lease owes it)\n", asked, until.Format(time.Kitchen))
 	stopInstancesOfLease(cfg, lease, os.Stderr)
