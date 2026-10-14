@@ -10,28 +10,26 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
-	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
 // The lease window a generation call runs under IS its own timeout: the pipeline hands acquireMediaLease the route's
-// timeout as the lease's declared window and kills the render at the same value (pinned per route in internal/pipeline,
-// TestEveryMediaRouteLeasesForItsOwnTimeoutAndIsKilledThere). So a timeout can never outlive the window it holds, and the
-// 3,600 s DefaultTTL of the lease library is only the fallback for a lease taken with no window at all.
+// timeout as the lease's declared window (a batch: the per-image timeout times its jobs) and kills the render at the same
+// value (pinned per route in internal/pipeline, TestEveryMediaRouteLeasesForItsOwnTimeoutAndIsKilledThere). So a timeout can
+// never outlive the window it holds, and the 3,600 s DefaultTTL of the lease library is only the fallback for a lease taken
+// with no window at all.
 //
-// What a value CAN still do is ask for a window longer than one lease TERM. A window above gpu_max_term_min (6 h unless the
-// config says otherwise) is accepted whole but reaches its declared end only by renewal, and a term that is not renewed is
-// labelled expired while the render is still running (gpulease.PlanTerm, ADR 0070). These tests hold every SINGLE-JOB timeout
-// the repository ships (the code defaults, the setup template, the example config and every tier seed layer, per-family keys
-// included) to that rule, and the seeds that restate a default to the code's value.
-//
-// What they cannot hold is an image BATCH: its window is the per-image timeout times its jobs (pipeline.RunImageBatch), and
-// no cap bounds the job count, so a batch longer than gpu_max_term_min / imagegen_timeout_sec images asks for a window above
-// the term whatever the seed says. That stays a stated limit in the operator guide, not a number this file can pin.
+// The window is granted whole, whatever its length. gpu_max_term_min is not a bound on it: that cap is the renewal term of a
+// `gpu reserve` (or `gpu hold`) lease, and only that holder's own term check reads it. A pipeline media lease runs no term
+// check, so nothing labels it expired or asks it to yield while the render is inside its window; its 15 s heartbeat keeps
+// it, and past the window the same timeout is the render's own deadline. What a long timeout costs is how long a WEDGED
+// render holds the machine-wide lease. So nothing here bounds a seeded timeout by a term; these tests hold what is true and
+// checkable: the key list tracks the config, the template restates the code's own clocks, a seeded gpu_wait_ms passes the
+// doctor's vision-wait rule, and the two docs say where a media call's window comes from and what holds it.
 
-// mediaTimeoutKeys are the seven generation routes' timeout keys and their code defaults. Each is a single job's timeout.
+// mediaTimeoutKeys are the seven generation routes' timeout keys and their code defaults. Each is the timeout a route
+// leases for and is killed at.
 var mediaTimeoutKeys = map[string]func(config.Config) int{
 	"imagegen_timeout_sec":   func(c config.Config) int { return c.ImageGenTimeoutSec },
 	"videogen_timeout_sec":   func(c config.Config) int { return c.VideoGenTimeoutSec },
@@ -44,7 +42,7 @@ var mediaTimeoutKeys = map[string]func(config.Config) int{
 
 // notMediaLeaseTimeouts are the other *_timeout_sec keys of config.Config, each a clock that never becomes a media lease
 // window. A new *_timeout_sec key must land in mediaTimeoutKeys or here, so adding a generation route cannot slip past the
-// seed test unnoticed.
+// docs and template checks unnoticed.
 var notMediaLeaseTimeouts = map[string]string{
 	"agent_timeout_sec":            "the text agent loop's wall",
 	"stt_request_timeout_sec":      "one speech-to-text request",
@@ -83,7 +81,7 @@ func mediaTimeoutKeyDrift(tags []string) []string {
 		_, media := mediaTimeoutKeys[tag]
 		_, other := notMediaLeaseTimeouts[tag]
 		if !media && !other {
-			out = append(out, tag+" is a config.Config *_timeout_sec key in neither mediaTimeoutKeys nor notMediaLeaseTimeouts: if it is a generation route's clock, add it to mediaTimeoutKeys so the seed test holds it to the lease term")
+			out = append(out, tag+" is a config.Config *_timeout_sec key in neither mediaTimeoutKeys nor notMediaLeaseTimeouts: if it is a generation route's clock, add it to mediaTimeoutKeys so the docs and template checks cover it")
 		}
 	}
 	for _, key := range sortedMediaKeys() {
@@ -113,72 +111,25 @@ func sortedMediaKeys() []string {
 	return keys
 }
 
-// seededTimeouts walks a seed layer for media timeout keys at any depth (a family block carries its own) and returns
-// path -> seconds. A layer that leaves a top-level route unset runs the code default, so that default is reported too.
-func seededTimeouts(layer map[string]any) map[string]float64 {
-	out := map[string]float64{}
-	var walk func(prefix string, m map[string]any)
-	walk = func(prefix string, m map[string]any) {
-		for k, v := range m {
-			path := prefix + k
-			switch x := v.(type) {
-			case map[string]any:
-				walk(path+".", x)
-			case float64:
-				if _, ok := mediaTimeoutKeys[k]; ok && x > 0 {
-					out[path] = x
-				}
-			}
+// gpuWaitProblems judges one layer's gpu_wait_ms against the doctor's rule (more than 3x vision_gpu_wait_sec). gpu_wait_ms is
+// the queue wait, not a window, so this is the one clock of a seed layer that has a rule of its own. seen is false when the
+// layer seeds no gpu_wait_ms.
+func gpuWaitProblems(where string, layer map[string]any) (seen bool, problems []string) {
+	ms, ok := layer["gpu_wait_ms"].(float64)
+	if !ok {
+		return false, nil
+	}
+	cfg := config.Default()
+	cfg.GPUWaitMs = int(ms)
+	if v, ok := layer["vision_gpu_wait_sec"].(float64); ok {
+		cfg.VisionGPUWaitSec = int(v)
+	}
+	for _, f := range cfg.Findings() {
+		if strings.Contains(f, "gpu_wait_ms") {
+			problems = append(problems, where+": "+f)
 		}
 	}
-	walk("", layer)
-	def := config.Default()
-	for key, get := range mediaTimeoutKeys {
-		if v, ok := layer[key].(float64); !ok || v <= 0 {
-			out[key+" (code default)"] = float64(get(def))
-		}
-	}
-	return out
-}
-
-// leaseWindowProblems judges one layer. The window a call takes is its timeout; the lease plan for that window must be
-// one whole first term under the layer's own gpu_max_term_min (else the 6 h default).
-func leaseWindowProblems(where string, layer map[string]any) (explicit int, problems []string) {
-	termCap := config.Default().GPUMaxTerm()
-	if m, ok := layer["gpu_max_term_min"].(float64); ok && m > 0 {
-		termCap = time.Duration(m) * time.Minute
-	}
-	timeouts := seededTimeouts(layer)
-	paths := make([]string, 0, len(timeouts))
-	for p := range timeouts {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
-	for _, p := range paths {
-		sec := timeouts[p]
-		if !strings.HasSuffix(p, "(code default)") {
-			explicit++
-		}
-		window := time.Duration(sec * float64(time.Second))
-		plan := gpulease.PlanTerm(window, false, termCap, 0)
-		if plan.Requested != 0 || plan.Term < window {
-			problems = append(problems, fmt.Sprintf("%s: %s = %.0f s is a lease window above the %s term cap (gpu_max_term_min): it would reach its end only by renewal, and a term that is not renewed is labelled expired mid-render", where, p, sec, termCap))
-		}
-	}
-	// gpu_wait_ms is the queue wait, not a window; a seeded one must not trip the doctor's 3x vision-wait finding.
-	if ms, ok := layer["gpu_wait_ms"].(float64); ok {
-		cfg := config.Default()
-		cfg.GPUWaitMs = int(ms)
-		if v, ok := layer["vision_gpu_wait_sec"].(float64); ok {
-			cfg.VisionGPUWaitSec = int(v)
-		}
-		for _, f := range cfg.Findings() {
-			if strings.Contains(f, "gpu_wait_ms") {
-				problems = append(problems, where+": "+f)
-			}
-		}
-	}
-	return explicit, problems
+	return true, problems
 }
 
 func readJSONMap(t *testing.T, rel string) map[string]any {
@@ -228,9 +179,9 @@ func tierSeedLayers(t *testing.T) map[string]map[string]any {
 	return out
 }
 
-// TestTheMediaTimeoutKeyListMatchesTheConfig: the key list the seed test walks is the config's own set of generation
-// timeouts. The two controls are what prove it can fail: a new route key nobody classified, and a listed key the config
-// dropped.
+// TestTheMediaTimeoutKeyListMatchesTheConfig: the key list the docs and template checks walk is the config's own set of
+// generation timeouts. The two controls are what prove it can fail: a new route key nobody classified, and a listed key the
+// config dropped.
 func TestTheMediaTimeoutKeyListMatchesTheConfig(t *testing.T) {
 	tags := configTimeoutTags()
 	if len(tags) < len(mediaTimeoutKeys) {
@@ -253,12 +204,11 @@ func TestTheMediaTimeoutKeyListMatchesTheConfig(t *testing.T) {
 	}
 }
 
-// TestSeededMediaTimeoutsFitTheLeaseWindowTheyRunUnder holds every shipped single-job media timeout to one lease term. It is a guard,
-// green on the tree as it stands (the longest seed is 7,200 s against a 21,600 s term): the two controls below are what
-// prove it can fail.
-func TestSeededMediaTimeoutsFitTheLeaseWindowTheyRunUnder(t *testing.T) {
+// TestSeededGPUWaitsPassTheDoctorsVisionWaitRule holds every shipped gpu_wait_ms (the example config, the setup template and,
+// should a tier seed ever carry one, every tier seed layer) to the doctor's rule that a media queue wait is not more than 3x
+// the vision wait. It is a guard, green on the tree as it stands: the controls below are what prove it can fail.
+func TestSeededGPUWaitsPassTheDoctorsVisionWaitRule(t *testing.T) {
 	layers := map[string]map[string]any{
-		"code defaults":               {},
 		"config.example.json":         readJSONMap(t, "config.example.json"),
 		"setup/templates/config.json": readJSONMap(t, "setup/templates/config.json"),
 	}
@@ -266,40 +216,36 @@ func TestSeededMediaTimeoutsFitTheLeaseWindowTheyRunUnder(t *testing.T) {
 		layers["profiles.json "+tier] = layer
 	}
 
-	explicit := 0
 	names := make([]string, 0, len(layers))
 	for n := range layers {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	seen := 0
 	for _, name := range names {
-		n, problems := leaseWindowProblems(name, layers[name])
-		explicit += n
+		ok, problems := gpuWaitProblems(name, layers[name])
+		if ok {
+			seen++
+		}
 		for _, p := range problems {
 			t.Error(p)
 		}
 	}
-
-	// Blind-gate control: the walk found the seeds it is meant to judge. (That the key list is the config's own is
-	// TestTheMediaTimeoutKeyListMatchesTheConfig's job.)
-	if explicit < 20 {
-		t.Fatalf("only %d explicit media timeouts found across the seed files: the walk went blind", explicit)
+	// Blind-gate control: the example config and the template both seed one, so a walk that finds fewer went blind.
+	if seen < 2 {
+		t.Fatalf("only %d seeded gpu_wait_ms found across the seed files, want at least the example config and the template: the walk went blind", seen)
 	}
 
-	// Negative controls: the predicate fails for a video seed that outlives a one-hour term, and for a window above the
-	// default term; and it stays quiet for the same seed under the default term.
-	_, problems := leaseWindowProblems("control", map[string]any{"videogen_timeout_sec": float64(5400), "gpu_max_term_min": float64(60)})
-	if len(problems) != 1 || !strings.Contains(problems[0], "videogen_timeout_sec") {
-		t.Errorf("a 5,400 s video seed under a 60 min term must be refused once, got %v", problems)
-	}
-	if _, problems := leaseWindowProblems("control", map[string]any{"imagegen_timeout_sec": float64(7 * 3600)}); len(problems) != 1 {
-		t.Errorf("a 7 h image seed must be refused under the 6 h default term, got %v", problems)
-	}
-	if _, problems := leaseWindowProblems("control", map[string]any{"videogen_timeout_sec": float64(5400)}); len(problems) != 0 {
-		t.Errorf("a 5,400 s video seed fits the default term, got %v", problems)
-	}
-	if _, problems := leaseWindowProblems("control", map[string]any{"gpu_wait_ms": float64(600000)}); len(problems) != 1 {
+	// Negative controls: the predicate fails for a 600,000 ms wait against the 90 s vision wait, and stays quiet for the code
+	// default and for the same wait once the vision wait is raised to match.
+	if _, problems := gpuWaitProblems("control", map[string]any{"gpu_wait_ms": float64(600000)}); len(problems) != 1 {
 		t.Errorf("a 600,000 ms gpu_wait_ms against the 90 s vision wait must be refused once, got %v", problems)
+	}
+	if _, problems := gpuWaitProblems("control", map[string]any{"gpu_wait_ms": float64(config.Default().GPUWaitMs)}); len(problems) != 0 {
+		t.Errorf("the code default gpu_wait_ms must pass, got %v", problems)
+	}
+	if _, problems := gpuWaitProblems("control", map[string]any{"gpu_wait_ms": float64(600000), "vision_gpu_wait_sec": float64(300)}); len(problems) != 0 {
+		t.Errorf("a 600,000 ms gpu_wait_ms is within 3x a 300 s vision wait, got %v", problems)
 	}
 }
 
@@ -333,12 +279,38 @@ func TestTheSetupTemplateRestatesTheCodeDefaultsOrNothing(t *testing.T) {
 	}
 }
 
-// TestTheDocsStateWhereAMediaCallsLeaseWindowComesFrom: the operator guide's engine + lease row and the fleet-node page
-// both tell a reader what the lease window of a generation call is, and the node page says it for a fleet media job
-// (whose timeout keys are the node's own, never the delegator's).
+// Where a media call's lease window comes from and what holds it, as the operator guide's engine + lease row and the fleet-node
+// page state it. The node page says it for a fleet media job (whose timeout keys are the node's own, never the delegator's).
+// The statements are the ones the code backs:
+//
+//   - the window is the route's own timeout (a batch: the per-image timeout times its jobs) and is granted whole;
+//   - it is kept by the call's heartbeat, and no term check runs on it (gpu_max_term_min is the renewal term of a
+//     `gpu reserve` hold, renewed by that hold's own holder, not a bound on a media call);
+//   - gpu_wait_ms is a queue wait, not a lease length;
+//   - a `gpu reserve --for` wrapper is sized from the key of the route it wraps.
+//
+// The claims of the retired rule (a media timeout must fit one lease term, because a window above a term "reaches its end only
+// by renewal" and is "labelled expired while the render runs"; an image batch is "the case the bound does not cover") are
+// refused by name, so they cannot come back.
 var registerAnchor = regexp.MustCompile(`#[a-z0-9-]*register-[a-z]-[0-9]+`)
 
-func TestTheDocsStateWhereAMediaCallsLeaseWindowComesFrom(t *testing.T) {
+// retiredTermClaims are phrases of the retired rule that a seeded media timeout must fit one lease term.
+var retiredTermClaims = []string{
+	"single job's timeout",
+	"must stay under it",
+	"A window is also one lease term",
+	"The window is one lease term",
+	"asks for a window above the term",
+	"the case that bound does not cover",
+	"job count",
+}
+
+// flat collapses whitespace so a phrase that the source wraps across lines still matches.
+func flat(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func TestTheDocsStateWhereAMediaCallsLeaseWindowComesFromAndWhatHoldsIt(t *testing.T) {
 	guide, err := os.ReadFile(filepath.FromSlash("docs/OPERATOR-GUIDE.md"))
 	if err != nil {
 		t.Fatal(err)
@@ -352,14 +324,26 @@ func TestTheDocsStateWhereAMediaCallsLeaseWindowComesFrom(t *testing.T) {
 	if row == "" {
 		t.Fatal("docs/OPERATOR-GUIDE.md has no engine + lease row: the gate went blind")
 	}
-	if !strings.Contains(row, "`gpu_max_term_min`") {
-		t.Errorf("the guide's engine + lease row does not name gpu_max_term_min: a reader cannot see that a seeded timeout must fit one lease term")
+	row = flat(row)
+	for _, w := range []struct{ phrase, why string }{
+		{"the call's own timeout", "a media call's lease window is its own timeout"},
+		{"per-image timeout times its jobs", "a batch's window is the per-image timeout times its jobs"},
+		{"granted whole", "the window is granted whole, whatever its length"},
+		{"kept by its heartbeat", "the lease is kept by the call's heartbeat, not renewed by a term check"},
+		{"`gpu_max_term_min`", "the term cap is named, so a reader sees what it governs"},
+		{"renewal term of a `gpu reserve` hold", "gpu_max_term_min governs a gpu reserve hold, not a media call"},
+		{"queue wait", "gpu_wait_ms is the queue wait, not a lease length"},
+		{"not a lease length", "gpu_wait_ms is the queue wait, not a lease length"},
+		{"`--for`", "a gpu reserve wrapper is sized with --for"},
+		{"same key as the route it wraps", "--for is sized from the key of the route the wrapper wraps"},
+	} {
+		if !strings.Contains(row, w.phrase) {
+			t.Errorf("the guide's engine + lease row does not say %q (%s)", w.phrase, w.why)
+		}
 	}
-	// The term bound is a single job's timeout. A batch's window is the per-image timeout times its jobs and no cap bounds the
-	// job count, so the row must name the batch as the case the bound does not hold for.
-	for _, w := range []string{"single job's timeout", "per-image timeout times its jobs", "job count"} {
-		if !strings.Contains(row, w) {
-			t.Errorf("the guide's engine + lease row does not say %q: it would let a reader take the term bound for a batch's whole window", w)
+	for _, retired := range retiredTermClaims {
+		if strings.Contains(row, retired) {
+			t.Errorf("the guide's engine + lease row still says %q, a claim of the retired rule that a media timeout must fit one lease term", retired)
 		}
 	}
 
@@ -369,15 +353,17 @@ func TestTheDocsStateWhereAMediaCallsLeaseWindowComesFrom(t *testing.T) {
 	}
 	def := config.Default()
 	wait := fmt.Sprintf("%d s", def.GPUWaitMs/1000)
-	want := append([]string{"lease", "`gpu_max_term_min`", "`gpu_wait_ms`", wait, "OPERATOR-GUIDE.md", "batch"}, func() []string {
+	want := append([]string{"lease", "`gpu_wait_ms`", wait, "queue wait", "OPERATOR-GUIDE.md", "granted whole", "heartbeat", "--for"}, func() []string {
 		keys := sortedMediaKeys()
 		for i, k := range keys {
 			keys[i] = "`" + k + "`"
 		}
 		return keys
 	}()...)
-	best, missingBest := "", len(want)+1
+	missingBest := len(want) + 1
+	var best string
 	for _, para := range strings.Split(strings.ReplaceAll(string(node), "\r\n", "\n"), "\n\n") {
+		para = flat(para)
 		var missing []string
 		for _, w := range want {
 			if !strings.Contains(para, w) {
@@ -386,14 +372,23 @@ func TestTheDocsStateWhereAMediaCallsLeaseWindowComesFrom(t *testing.T) {
 		}
 		if len(missing) < missingBest {
 			best, missingBest = para, len(missing)
-			if len(missing) == 0 {
-				if slug := registerAnchor.FindString(para); slug != "" {
-					t.Errorf("docs/FLEET-NODE.md links the guide through an anchor that carries a plan id (%s): name the section in prose", slug)
-				}
-				return
+		}
+		if len(missing) == 0 {
+			if slug := registerAnchor.FindString(para); slug != "" {
+				t.Errorf("docs/FLEET-NODE.md links the guide through an anchor that carries a plan id (%s): name the section in prose", slug)
 			}
+			for _, retired := range retiredTermClaims {
+				if strings.Contains(para, retired) {
+					t.Errorf("docs/FLEET-NODE.md's media-lease paragraph still says %q, a claim of the retired rule that a media timeout must fit one lease term", retired)
+				}
+			}
+			return
 		}
 	}
-	_ = best
-	t.Errorf("docs/FLEET-NODE.md has no paragraph that states a fleet media job's lease window is its route's own timeout key: the closest paragraph is missing %d of %v", missingBest, want)
+	t.Errorf("docs/FLEET-NODE.md has no paragraph that states a fleet media job's lease window is its route's own timeout key, granted whole and kept by its heartbeat: the closest paragraph is missing %d of %v", missingBest, want)
+	for _, retired := range retiredTermClaims {
+		if strings.Contains(best, retired) {
+			t.Errorf("the closest paragraph of docs/FLEET-NODE.md still says %q, a claim of the retired rule", retired)
+		}
+	}
 }
