@@ -634,6 +634,27 @@ if ($seat8) { $merged8 = Merge-ConfigSeed -ConfigText $merged8 -Seed ([pscustomo
 $merged8Obj = $merged8 | ConvertFrom-Json
 if ($merged8Obj.agent_model -eq 'mimo-9b-agent') { Ok 'ampere-8 fresh seed-merge binds explicit agent_model=mimo-9b-agent' } else { Bad "ampere-8 agent_model (got: '$($merged8Obj.agent_model)')" }
 
+# 0186 w4 fix round: a fresh config for a box off the tier matrix binds no chat model its own rendered yaml does not
+# serve. The config template binds escalation_model and reasoning_model to the 26B; every shipped tier that drops
+# the 26B reseeds both, an unknown profile has no row to do it, and its CUDA fallback render serves no 26B. The
+# property is checked on the rendered yaml of each fallback backend (comments ignored: the headers name models).
+$profilesPath = Join-Path (Join-Path $here 'templates') 'profiles.json'
+foreach ($fb in @('cuda', 'vulkan', 'cpu')) {
+  $rFb  = Invoke-Render -Backend $fb -ProfileId 'does-not-exist' -RamTier 'mid' -BigRam $false
+  $fbYaml = (($rFb.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
+  $ppFb = Resolve-ProfileParams -ProfileId 'does-not-exist' -RamTier 'mid' -BigRam $false -ProfilesJsonPath $profilesPath -Backend $fb
+  $cfgFb = (Merge-ConfigSeed -ConfigText $seedTpl -Seed (Get-OffMatrixRungSeed -ProfileRow $null -Include26B ([bool]$ppFb.include_26b))) | ConvertFrom-Json
+  $dangling = @()
+  foreach ($k in @('model', 'triage_model', 'escalation_model', 'reasoning_model')) {
+    $v = [string]$cfgFb.$k
+    if (-not $v) { continue }
+    $e = [regex]::Escape($v)
+    $served = ($fbYaml -match "(?m)^ {2}[`"']?$e[`"']?\s*:") -or ($fbYaml -match "(?m)^\s+aliases:\s*\[[^\]]*\b$e\b")
+    if (-not $served) { $dangling += "$k=$v" }
+  }
+  if ($dangling.Count -eq 0) { Ok "unknown profile, $fb fallback: every chat model the fresh config names is served by the rendered yaml" } else { Bad "unknown profile, $fb fallback: the fresh config names models its yaml does not serve ($($dangling -join ', '))" }
+}
+
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 
 Write-Host ""

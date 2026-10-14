@@ -533,6 +533,30 @@ $ppVk = Resolve-ProfileParams -ProfileId 'does-not-exist' -RamTier 'mid' -BigRam
 Assert ($ppVk.include_26b -and ($ppVk.moe_26b -eq '-ngl 999')) 'unknown profile, vulkan: the 26B stays, full offload (-ngl 999), never an expert flag'
 $ppCpu = Resolve-ProfileParams -ProfileId 'does-not-exist' -RamTier 'mid' -BigRam $false -ProfilesJsonPath $profilesPath -Backend 'cpu'
 Assert ($ppCpu.include_26b -and ("$($ppCpu.moe_26b)" -eq '')) 'unknown profile, cpu: the 26B stays with no placement string'
+
+# A fresh config for a box off the tier matrix must not bind a rung to a model its own yaml does not serve. The
+# config template binds escalation_model and reasoning_model to the 26B; every shipped tier that drops the 26B
+# reseeds both in its config_seed, but an unknown profile has no row and so no seed, and its CUDA fallback render
+# serves no 26B since 0186 w4. "" disables a rung (internal/config: empty = no escalation / no reasoning tier).
+Write-Host ""
+Write-Host "== Get-OffMatrixRungSeed: the rungs of a fresh off-matrix config name only what the fallback render serves =="
+Assert ([bool](Get-Command Get-OffMatrixRungSeed -ErrorAction SilentlyContinue)) 'dot-source seam defines Get-OffMatrixRungSeed'
+foreach ($rt in @('min', 'mid', 'high')) {
+  $ppOff = Resolve-ProfileParams -ProfileId 'does-not-exist' -RamTier $rt -BigRam $false -ProfilesJsonPath $profilesPath -Backend 'cuda'
+  $cfgOff = (Merge-ConfigSeed -ConfigText $tplText -Seed (Get-OffMatrixRungSeed -ProfileRow $null -Include26B ([bool]$ppOff.include_26b))) | ConvertFrom-Json
+  Assert ($cfgOff.escalation_model -eq '') "unknown profile, cuda, ram_tier=${rt}: escalation_model is blank (the render serves no 26B for it to name)"
+  Assert ($cfgOff.reasoning_model -eq '')  "unknown profile, cuda, ram_tier=${rt}: reasoning_model is blank"
+  Assert (($cfgOff.model -eq 'offload-e4b') -and ($cfgOff.triage_model -eq 'gemma4-e2b')) "unknown profile, cuda, ram_tier=${rt}: the resident and triage seats are untouched"
+}
+$cfgNoId = (Merge-ConfigSeed -ConfigText $tplText -Seed (Get-OffMatrixRungSeed -ProfileRow $null -Include26B ([bool]$ppNoId.include_26b))) | ConvertFrom-Json
+Assert (($cfgNoId.escalation_model -eq '') -and ($cfgNoId.reasoning_model -eq '')) 'no profile id at all, cuda: the same blank rungs'
+Assert ($null -eq (Get-OffMatrixRungSeed -ProfileRow $null -Include26B ([bool]$ppVk.include_26b)))  'unknown profile, vulkan: the fallback keeps the 26B, so the template rungs stand'
+Assert ($null -eq (Get-OffMatrixRungSeed -ProfileRow $null -Include26B ([bool]$ppCpu.include_26b))) 'unknown profile, cpu: the fallback keeps the 26B, so the template rungs stand'
+$rungOwned = @()
+foreach ($t in @($profiles.PSObject.Properties.Name)) {
+  if ($null -ne (Get-OffMatrixRungSeed -ProfileRow $profiles.$t -Include26B $false)) { $rungOwned += $t }
+}
+Assert ($rungOwned.Count -eq 0) ("a tier that resolved keeps its own config_seed rungs: the off-matrix rule never touches a profile row" + $(if ($rungOwned.Count) { " (touched: $($rungOwned -join ', '))" } else { '' }))
 $cpuMoeOffenders = @()
 foreach ($t in @($profiles.PSObject.Properties.Name)) {
   foreach ($rt in @('min', 'low', 'mid', 'high')) {
@@ -625,6 +649,15 @@ try {
 # on a backend with a card: a yaml 0.185.1 or earlier rendered for an unknown profile passes every other probe, so
 # without this clause an upgrade would SKIP the render and keep the flag the audit refuses.
 Assert ($installText.Contains('(($tplBackend -eq ''cpu'') -or -not (Test-YamlHasEveryExpertFlag -Path $yamlDest)) -and')) 'the Step 6 SKIP probe re-renders a yaml carrying the every-expert flag unless the backend is cpu'
+# Step 8 (also below the seam) hands the resolved profile row and the resolved include_26b to the off-matrix rung rule and
+# merges its seed into the FRESH config after the tier seed layers and before the agent seat: without the call the rule is
+# a function nothing runs, and a fresh off-matrix config binds both rungs to a 26B its yaml no longer defines.
+$rungCall = 'Get-OffMatrixRungSeed -ProfileRow $profRow -Include26B ([bool]$pp.include_26b)'
+$rungAt   = $installText.IndexOf($rungCall, [System.StringComparison]::Ordinal)
+$tierAt   = $installText.IndexOf('config_seed_ram_mid_high ($profileId, ram_tier=$ramTier)', [System.StringComparison]::Ordinal)
+$seatAt   = $installText.IndexOf('$agentSeat = Get-DerivedAgentModel', [System.StringComparison]::Ordinal)
+Assert (($rungAt -gt 0) -and ($tierAt -gt 0) -and ($rungAt -gt $tierAt) -and ($seatAt -gt $rungAt)) 'Step 8 asks for the off-matrix rung seed after the tier seed layers and before the agent seat'
+Assert ($installText.Contains('$cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $rungSeed')) 'Step 8 merges the rung seed into the fresh config'
 # selftest.ps1 (MAIN is below its seam, so pinned by source here as well as in `go test`): no remediator, no -CpuMoe.
 $selftestText = Get-Content -Raw -Encoding UTF8 (Join-Path $setupDir 'selftest.ps1')
 Assert (-not $selftestText.Contains('Invoke-Remediate26B')) 'selftest.ps1 has no Invoke-Remediate26B (it edited the live llama-swap.yaml)'
