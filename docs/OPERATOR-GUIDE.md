@@ -200,7 +200,8 @@ tokens kept local (est.): 2920 (~$0.04 Opus-input value — an estimate, not bil
 
 Every row (0.124.0, ADR 0046) also says WHO asked and WHAT ran: `origin_session` (the Claude Code
 session id the MCP server inherited from its environment, or `LOCAL_OFFLOAD_ORIGIN` when a caller names
-itself; absent on rows a service or a fleet node wrote), `origin_pid` / `origin_ppid`, `cards_tokens`
+itself; on a fleet node's row, the session of the box that asked, which it sends as `X-Offload-Origin` since ADR 0085 —
+absent when the asker is older or has none, and on a service's own row), `origin_pid` / `origin_ppid`, `cards_tokens`
 (the one figure for the tokens the cards processed for that row — prompt work plus generation, 0 on a
 cache hit), and on agent / delegate rows `job_id`, `route`, `placement`, `steps`, `stop_reason`,
 `repack_ms`, `acceptance_result`. Since ADR 0064 every delegate row also carries `door`, `fleet_job_id`
@@ -248,6 +249,19 @@ $env:LOCAL_OFFLOAD_RUN_CLASS = "bake"        # everything this shell runs is a b
 local-offload ledger --since 2                # production only, with "excluded_non_production"
 local-offload ledger --since 2 --include-test-traffic
 ```
+
+A bake that dispatches to a fleet node labels the node's row too: the asker sends its class as `X-Offload-Run-Class`
+(and its session as `X-Offload-Origin`), and a node that can authenticate the request stamps both (ADR 0085), so
+`local-offload ledger` on the node leaves the job out and counts it. A node built before this ignores the header; its
+row stays unlabelled.
+
+**Where a session's tokens ran.** `local-offload ledger --by-session` (optionally `--session <id>`) adds a `sessions`
+array to the JSON: per session, `remote_tokens` (card tokens of jobs that ran on a fleet node), `local_tokens` (on this
+box), `remote_share`, and `served_rows` / `served_tokens` (jobs this box ran for the session as a fleet node, never
+added to its own totals). `remote_share` is the card-side placement split, not the harness-share gate's
+cards/(cards+cloud), which needs the session's transcript. It is a floor: a chat-lane call routed to a node and a
+delegation whose dispatch marker failed to write read as local. It reads this box's ledger only; run it on each box
+for the fleet view.
 
 The harness-share gate and any other reader that sums the ledger itself should skip rows whose `run_class` is
 set (and, for rows written before the label, whose `origin_session` is `go-test`).
