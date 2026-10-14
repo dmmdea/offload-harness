@@ -389,6 +389,9 @@ node render/builder-drift.mjs record  --comfy-dir <comfyui-tree>   # re-pin, aft
 node render/builder-drift.mjs check --comfy-dir <comfyui-tree> --require-templates --strict   # upgrade runbook
 ```
 
+`--templates-dir` (and `COMFY_TEMPLATES_DIR`) takes the package's `templates/` folder, not the package root above it: a
+directory that holds a `templates/` folder and no top-level `.json` file is refused with exit 2 and the path to pass.
+
 The CLI fails closed. A flag that takes a value and gets none (an empty or unset shell variable, also `--flag=`), an
 argument that starts with `-` and is not a known flag (single-dash forms such as `-templates-dir` included), a value given
 to a switch (`--strict=1`) and a second positional after the verb all exit 2. A directory named only through
