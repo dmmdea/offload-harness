@@ -27,6 +27,15 @@ type vllmRuntimeFlags struct {
 	venv      string
 	seatDir   string
 	hfHome    string
+
+	// The windows-wsl half. A seat whose engine lives in a WSL distro under a Windows box is
+	// rendered with these (Runtime documents each); a linux-systemd seat reads none of them.
+	distro         string
+	wslSeatDir     string
+	lmcacheOverlay string
+	cacheMountSrc  string
+	cacheMountOpts string
+	hostPrefix     string
 }
 
 // resolve fills the path defaults from the install root. Empty user/proxyHost are
@@ -198,7 +207,15 @@ func runInstallVLLMSeat(args []string) error {
 	modelPath := fs.String("model-path", "", "exact HF snapshot directory, overriding resolution from the tier's model_repo (the hash differs per download, so --force needs this)")
 	force := fs.Bool("force", false, "write the artifacts even when the venv or the weights are absent")
 	cfgPath := fs.String("config", "", "harness config.json whose kv_cache_server binding FOR THIS SEAT overrides the tier's cache_server (per-seat store dir and key_prefix)")
+	distro := fs.String("distro", "", "launch windows-wsl: the WSL distribution the engine runs in (required)")
+	wslSeatDir := fs.String("wsl-seat-dir", "", "launch windows-wsl: the directory INSIDE the distro holding the seat env and wrapper scripts (default /opt/seat)")
+	overlay := fs.String("lmcache-overlay", "", "patched LMCache directory prepended to PYTHONPATH, a path the engine sees (required for an fp8-KV seat with a cache server)")
+	mountSrc := fs.String("cache-mount-src", "", "launch windows-wsl: the cache export the seat wrapper mounts before the MP server starts, e.g. //store.example/kvcache (empty = already mounted)")
+	mountOpts := fs.String("cache-mount-opts", "", "launch windows-wsl: mount options for that export (carries the credentials path)")
+	hostPrefix := fs.String("host-prefix", "", "launch windows-wsl: where this process reads the distro's filesystem for the prerequisite check, e.g. \\\\wsl.localhost\\<distro> (never written to a file)")
 	_ = fs.Parse(args)
+	// SEAM (red commit): the flags above are declared so a test can pass them, and wired in the next commit.
+	_, _, _, _, _, _ = distro, wslSeatDir, overlay, mountSrc, mountOpts, hostPrefix
 
 	if *home == "" {
 		return fmt.Errorf("--home is required: the unit's WorkingDirectory, log path and default venv all hang off it")
