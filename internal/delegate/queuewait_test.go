@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -280,6 +281,12 @@ func TestRunQueuedThenRunningStillHonoursTheExecutionDeadline(t *testing.T) {
 //     read, and the first `accepted` after the gap was read after it was
 //     answered). A give-up sooner than bound + gap therefore banked some of the
 //     gap, however slow the runner was;
+//   - the give-up is read where the node sees it, at the request that asks the
+//     node to take the job back, which the delegator sends the moment it
+//     decides, and not at the return of the call. The call returns after that
+//     request, the telemetry rows and the intent close-out, and a starved
+//     runner took over a second to do them: the old ceiling, measured at the
+//     return, failed with the last poll 1.6 s in and the call back at 3 s;
 //   - the contract is given 3 s, not 1 s, because the same arithmetic runs the
 //     other way: the execution deadline is the budget plus the credit, so the
 //     time the delegator spends OUTSIDE the backlog (the gap, the first poll, a
@@ -311,6 +318,7 @@ func TestRunQueuedCreditExcludesNonQueuedIntervals(t *testing.T) {
 		mu                                sync.Mutex
 		dispatchedAt, firstPoll, lastPoll time.Time // the node's own stamps: the dispatch, its first poll, its newest
 		gapFrom, gapTo                    time.Time // the gap's first 503, and the first `accepted` after it
+		withdrawAsked                     time.Time // when the node was asked to take the job back: the give-up, as the node sees it
 		gapAnswered                       int
 		silence                           time.Duration // the longest the node heard nothing from the delegator
 	)
@@ -345,7 +353,20 @@ func TestRunQueuedCreditExcludesNonQueuedIntervals(t *testing.T) {
 			return map[string]any{"state": "accepted"}, http.StatusOK
 		},
 	}
-	srv := node.server()
+	inner := node.server()
+	// The node has no withdraw route (an older node: 405), and notes when it was asked for one.
+	front := http.NewServeMux()
+	front.HandleFunc("DELETE /fleet/jobs/{id}", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		if withdrawAsked.IsZero() {
+			withdrawAsked = time.Now()
+		}
+		mu.Unlock()
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
+	front.Handle("/", inner.Config.Handler)
+	srv := httptest.NewServer(front)
+	t.Cleanup(srv.Close)
 
 	contract := remoteContract()
 	contract.TimeoutSec = timeoutSec // queued-wait bound = 3.02s of REAL queued time
@@ -363,7 +384,7 @@ func TestRunQueuedCreditExcludesNonQueuedIntervals(t *testing.T) {
 	r := results[0]
 
 	mu.Lock()
-	first, from, to, answered, quiet := firstPoll, gapFrom, gapTo, gapAnswered, silence
+	first, from, to, answered, quiet, gaveUp := firstPoll, gapFrom, gapTo, gapAnswered, silence, withdrawAsked
 	mu.Unlock()
 	if r.Err == "" && r.Result.Deferred && strings.HasPrefix(r.Result.Reason, "poll deadline") {
 		if quiet >= stalledFor {
@@ -381,8 +402,11 @@ func TestRunQueuedCreditExcludesNonQueuedIntervals(t *testing.T) {
 	// reach it after queuedBound of wall clock from the first answer; excluding
 	// it cannot get there before queuedBound plus the gap itself. The floor is
 	// that sum, from the node's own stamps (see the doc comment).
+	if gaveUp.IsZero() {
+		gaveUp = finished // never asked: the return of the call is the only mark of it left, and it is later
+	}
 	gap := to.Sub(from)
-	if since := finished.Sub(first); since < queuedBound+gap {
+	if since := gaveUp.Sub(first); since < queuedBound+gap {
 		t.Fatalf("gave up %v after the first poll, with a %v window of 5xx answers in it — less than the %v bound plus the window, so a window the node spent answering 5xx was banked as backlog wait", since, gap, queuedBound)
 	}
 }
