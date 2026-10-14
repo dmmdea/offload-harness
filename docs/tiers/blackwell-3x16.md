@@ -53,6 +53,8 @@ one declaration, so the seat and the lane routing to it cannot disagree.
 | launch | `windows-wsl` | which artifact set starts it |
 | fallback | `qwen3.8-27b` | the llama.cpp seat a box WITHOUT the vLLM venv serves instead |
 
+This seat starts through **WSL** (`windows-wsl`). The Windows installer binds the fallback seat; `local-offload install vllm-seat --profile <this tier>` renders this seat's env file and the Windows scripts that start it, from the box's own `--distro`, `--venv` and `--hf-home` (paths inside the distro), `--lmcache-overlay` (required with fp8 KV and a cache server) and `--host-prefix`. See [the operator guide](../OPERATOR-GUIDE.md); parity with a running box is a diff of its seat env against that render.
+
 ### Cache server
 
 This seat is backed by a KV **cache server**: a context that leaves VRAM comes back from

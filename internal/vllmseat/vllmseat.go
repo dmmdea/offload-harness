@@ -35,7 +35,9 @@ package vllmseat
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path"
@@ -462,7 +464,9 @@ type Runtime struct {
 	// SeatDir holds the rendered unit + wrapper scripts.
 	SeatDir string
 	// VenvDir is the hand-built vLLM virtualenv (vLLM 0.28, torch 2.13+cu130). The
-	// installer does not create it; Detect only reports whether it is there.
+	// installer does not create it; Detect only reports whether it is there. A windows-wsl
+	// seat's env carries it (SEAT_VENV, a distro path), so the venv the check looked in is the
+	// one the seat runs; the resolved model snapshot rides along as SEAT_MODEL.
 	VenvDir string
 	// HFHome is the HF cache root. KEEP IT SHORT: LMCache's fs_native page names embed
 	// the resolved model path, and the reference box's long path produced 268-byte
@@ -510,6 +514,9 @@ func (r Runtime) wslSeatDir() string {
 	}
 	return "/opt/seat"
 }
+
+// DistroSeatDir is the seat directory inside the WSL distro, defaulted (/opt/seat).
+func (r Runtime) DistroSeatDir() string { return r.wslSeatDir() }
 
 // ModelDir is the absolute HF repo directory for this deployment.
 func (r Runtime) ModelDir(s Spec) string {
@@ -712,6 +719,10 @@ func (s Spec) validate(tier string, lane bool) error {
 // than one means the box holds several revisions and the tier must pin which — both
 // are refusals, because picking one silently is how a seat comes up serving weights
 // nobody chose.
+//
+// The snapshots directory is READ through Runtime.HostPrefix (a windows-wsl seat's HF cache
+// is a distro path), but the ModelPath it returns is the engine's own path: it is what a
+// rendered file names, and bash inside the distro opens it.
 func (s Spec) Resolve(r Runtime) (Spec, error) {
 	if s.ModelPath != "" {
 		return s, nil
@@ -720,9 +731,9 @@ func (s Spec) Resolve(r Runtime) (Spec, error) {
 		return s, fmt.Errorf("vllm seat %s: neither model_repo nor model_path is set", s.ID)
 	}
 	snaps := filepath.Join(r.ModelDir(s), "snapshots")
-	entries, err := os.ReadDir(snaps)
+	entries, err := os.ReadDir(r.hostPath(snaps))
 	if err != nil {
-		return s, fmt.Errorf("vllm seat %s: cannot read %s: %w", s.ID, filepath.ToSlash(snaps), err)
+		return s, fmt.Errorf("vllm seat %s: cannot read %s: %w", s.ID, filepath.ToSlash(r.hostPath(snaps)), err)
 	}
 	var found []string
 	for _, e := range entries {
@@ -748,19 +759,68 @@ func (s Spec) Resolve(r Runtime) (Spec, error) {
 // point and exactly one resolvable model snapshot. A missing prerequisite is NOT an
 // error — it is the documented fallback path, and the reason is returned so the
 // installer can say WHY it fell back instead of silently shipping a lesser seat.
+//
+// The reason says WHY a probe failed, not only that it did: the operating system's own words
+// ride along, and a host prefix that cannot be read is named as the prefix. All of them used
+// to read "no vllm entry point", which sends an operator to build a venv that is already there.
 func (s Spec) Detect(r Runtime) (bool, string) {
 	vllm := r.hostPath(filepath.Join(r.VenvDir, "bin", "vllm"))
 	if fi, err := os.Stat(vllm); err != nil || fi.IsDir() {
-		return false, "no vllm entry point at " + filepath.ToSlash(vllm)
+		return false, r.probeFailure("vllm entry point", vllm, err, fi)
 	}
 	got, err := s.Resolve(r)
 	if err != nil {
 		return false, err.Error()
 	}
-	if fi, err := os.Stat(r.hostPath(got.ModelPath)); err != nil || !fi.IsDir() {
-		return false, "no model snapshot at " + filepath.ToSlash(r.hostPath(got.ModelPath))
+	model := r.hostPath(got.ModelPath)
+	if fi, err := os.Stat(model); err != nil || !fi.IsDir() {
+		return false, r.probeFailure("model snapshot", model, err, fi)
 	}
 	return true, ""
+}
+
+// probeFailure is the reason a Detect probe of path p failed. err is the stat error (nil when
+// the path exists but is the wrong kind of thing, fi then says what it is).
+func (r Runtime) probeFailure(what, p string, err error, fi os.FileInfo) string {
+	if why := r.HostPrefixProblem(); why != "" {
+		return why
+	}
+	cause := "it is not a directory"
+	switch {
+	case err != nil:
+		cause = statCause(err)
+	case fi != nil && fi.IsDir():
+		cause = "it is a directory, not a file"
+	}
+	return fmt.Sprintf("no %s at %s (%s)", what, filepath.ToSlash(p), cause)
+}
+
+// statCause is the operating system's reason for a failed stat, without the path a
+// *fs.PathError repeats.
+func statCause(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err.Error()
+	}
+	return err.Error()
+}
+
+// HostPrefixProblem says why HostPrefix cannot be used to look into the distro, or "" when no
+// prefix is set or it reads as a directory. A mistyped prefix, a distro this process cannot
+// reach and a share it may not read all make every probe through it fail, and all of them are
+// the prefix's fault, not the venv's.
+func (r Runtime) HostPrefixProblem() string {
+	if r.HostPrefix == "" {
+		return ""
+	}
+	fi, err := os.Stat(r.HostPrefix)
+	if err != nil {
+		return fmt.Sprintf("host prefix %s cannot be read (%s)", filepath.ToSlash(r.HostPrefix), statCause(err))
+	}
+	if !fi.IsDir() {
+		return fmt.Sprintf("host prefix %s is not a directory", filepath.ToSlash(r.HostPrefix))
+	}
+	return ""
 }
 
 // hostPath maps a path the ENGINE will see to one this process can stat.
@@ -773,10 +833,12 @@ func (s Spec) Detect(r Runtime) (bool, string) {
 // what gets statted. The RENDERED artifacts always carry the distro path, because that
 // is what bash inside the distro must open.
 func (r Runtime) hostPath(p string) string {
-	if r.HostPrefix == "" || !strings.HasPrefix(p, "/") {
-		return p
+	// The leading slash is looked for in the SLASH form: filepath.Join has already turned an
+	// engine path into backslashes on Windows, where this mapping is needed most.
+	if slash := filepath.ToSlash(p); r.HostPrefix != "" && strings.HasPrefix(slash, "/") {
+		return r.HostPrefix + filepath.FromSlash(slash)
 	}
-	return r.HostPrefix + filepath.FromSlash(p)
+	return p
 }
 
 // Bindings are the harness config keys this seat derives. Kept beside the seat so a
@@ -1251,6 +1313,15 @@ func (s Spec) artifactFiles() map[string]string {
 	}
 }
 
+// NeedsLMCacheOverlay reports whether this seat may only be rendered against a patched
+// LMCache: fp8 KV pages restore CORRUPT through a stock cache server (upstream PR #4253), so
+// the pair (an fp8 KV dtype and a cache_server) is refused without Runtime.LMCacheOverlay.
+// Artifacts enforces it; a caller that collects the overlay from an operator asks the same
+// question so the two cannot disagree on when the overlay is required.
+func (s Spec) NeedsLMCacheOverlay() bool {
+	return s.CacheServer != nil && strings.HasPrefix(strings.ToLower(s.KVCacheDtype), "fp8")
+}
+
 // Artifacts renders the systemd unit, the two llama-swap wrappers, the run script and
 // the polkit rule from the reference templates in templatesDir. It returns
 // installed-name -> content, and refuses to return a file that still holds a token:
@@ -1266,7 +1337,7 @@ func (s Spec) Artifacts(templatesDir string, r Runtime) (map[string]string, erro
 	// PR #4253) and nothing reports it: the store logs hits, the engine answers, and
 	// the recovered context is wrong. Refuse the combination rather than render a seat
 	// whose failure mode is bad text that looks like good text.
-	if s.CacheServer != nil && strings.HasPrefix(strings.ToLower(s.KVCacheDtype), "fp8") && r.LMCacheOverlay == "" {
+	if s.NeedsLMCacheOverlay() && r.LMCacheOverlay == "" {
 		return nil, fmt.Errorf("vllm seat %s: kv_cache_dtype %q with a cache_server needs an LMCache overlay "+
 			"(Runtime.LMCacheOverlay) — stock LMCache restores fp8 pages corrupt (upstream PR #4253) and reports "+
 			"success while doing it, so this pair would serve wrong context silently", s.ID, s.KVCacheDtype)
@@ -1287,6 +1358,15 @@ func (s Spec) Artifacts(templatesDir string, r Runtime) (map[string]string, erro
 			return nil, fmt.Errorf("vllm seat template %s: %w", src, err)
 		}
 		body := string(raw)
+		if strings.HasSuffix(dst, ".env") {
+			// The seat env is SOURCED by bash inside the distro (seat_fg.sh: `. "$CFG"`), where a
+			// CR before the newline is part of every value: SEAT_PP= becomes a non-empty string
+			// and a tensor-parallel seat starts as a pipeline seat. A Windows checkout with
+			// autocrlf hands this file over as CRLF, so the render ends its lines itself rather
+			// than trusting the checkout. (.gitattributes pins the template to LF as well.) The
+			// Windows scripts keep their endings: PowerShell and WSH read either.
+			body = strings.ReplaceAll(body, "\r\n", "\n")
+		}
 		for k, v := range tok {
 			body = strings.ReplaceAll(body, k, v)
 		}
