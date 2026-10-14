@@ -346,9 +346,12 @@ func evidenceServer(t *testing.T, home, ledgerPath string, local delegate.LocalR
 	return s
 }
 
-// RSI-OH-4#0: every early exit of the handler is sealed as a diff-less NOT_RUN. The refusal
-// reason is the outcome reason, the evidence binds to no bytes (zero diff_bytes, no fingerprint),
-// the seat is never contacted, and each refusal leaves its trace row.
+// Every early exit of the handler is sealed as a diff-less NOT_RUN. The refusal reason is the
+// outcome reason, the evidence binds to no bytes (zero diff_bytes, no fingerprint), the seat is
+// never contacted, and each refusal leaves its trace row. This test drives the exits a real
+// call can reach on every platform; the exits that depend on the working directory, on
+// filepath.Abs and on the confined reader returning no document are driven through the file
+// seam in TestReviewDiffEveryEarlyRefusalBehindTheFileSeamIsSealed.
 func TestReviewDiffEveryEarlyRefusalIsASealedNotRun(t *testing.T) {
 	root, elsewhere := t.TempDir(), t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "big.diff"), []byte(strings.Repeat("+x\n", 50000)), 0o600); err != nil {
@@ -368,30 +371,100 @@ func TestReviewDiffEveryEarlyRefusalIsASealedNotRun(t *testing.T) {
 		{"arguments that do not decode", `{"diff":123,"task":"t"}`, "bad arguments: "},
 	}
 	for _, c := range cases {
+		checkSealedRefusal(t, c.name, askTestServer(t, neverSeat(t)), c.args, c.wantReason)
+	}
+}
+
+// checkSealedRefusal runs one refused review through the handler and asserts the sealed shape.
+func checkSealedRefusal(t *testing.T, name string, s *Server, args, wantReason string) {
+	t.Helper()
+	res, err := s.handleReviewDiff(context.Background(), callReq(args))
+	if err != nil {
+		t.Fatalf("%s: handleReviewDiff: %v", name, err)
+	}
+	m := decodeResult(t, res)
+	reason, _ := m["reason"].(string)
+	if m["deferred"] != true || !strings.Contains(reason, wantReason) {
+		t.Errorf("%s: the refusal keeps its deferral shape and reason (want %q): %v", name, wantReason, m)
+		return
+	}
+	if m["outcome"] != reviewlane.OutcomeNotRun || m["outcome_reason"] != reason {
+		t.Errorf("%s: outcome = %v / %v, want NOT_RUN carrying the refusal reason", name, m["outcome"], m["outcome_reason"])
+	}
+	ev := evidenceOf(t, m)
+	if ev["refusal"] != reason || ev["diff_bytes"] != float64(0) || ev["diff_sha256"] != nil {
+		t.Errorf("%s: the evidence binds to no bytes and names the refusal: %v", name, ev)
+	}
+	if m["trace_error"] != nil {
+		t.Errorf("%s: trace_error = %v", name, m["trace_error"])
+	}
+	if rows := traceRowsOf(t, s); len(rows) != 1 || rows[0]["kind"] != "review" || rows[0]["outcome"] != reviewlane.OutcomeNotRun {
+		t.Errorf("%s: a refusal leaves its review row: %v", name, rows)
+	}
+}
+
+// The three early refusals of the diff_path branch that a real call cannot reach on every
+// platform: the working directory cannot be read (no read_root given), read_root cannot be made
+// absolute (reachable on Windows with a NUL byte, nowhere on Unix), and the confined reader
+// returns anything but exactly one document. Each is driven through the file seam, so each
+// is sealed as a diff-less NOT_RUN with its trace row and the seat is never contacted.
+func TestReviewDiffEveryEarlyRefusalBehindTheFileSeamIsSealed(t *testing.T) {
+	oneDoc := []core.ContextDoc{{Name: "a.diff", Text: reviewDiff}}
+	cases := []struct {
+		name, args, wantReason string
+		fs                     reviewDiffIO
+	}{
+		{"the working directory cannot be read", reviewArgs(t, map[string]any{"diff_path": "a.diff", "task": "t"}),
+			"cannot determine working dir for read_root: no cwd",
+			reviewDiffIO{Getwd: func() (string, error) { return "", errors.New("no cwd") }}},
+		{"read_root cannot be made absolute", reviewArgs(t, map[string]any{"diff_path": "a.diff", "read_root": "r", "task": "t"}),
+			"bad read_root: no abs",
+			reviewDiffIO{Abs: func(string) (string, error) { return "", errors.New("no abs") }}},
+		{"the confined read returns no document", reviewArgs(t, map[string]any{"diff_path": "a.diff", "read_root": "r", "task": "t"}),
+			"diff_path read returned no content",
+			reviewDiffIO{Read: func([]string, string) ([]core.ContextDoc, error) { return nil, nil }}},
+		{"the confined read returns two documents", reviewArgs(t, map[string]any{"diff_path": "a.diff", "read_root": "r", "task": "t"}),
+			"diff_path read returned no content",
+			reviewDiffIO{Read: func([]string, string) ([]core.ContextDoc, error) { return append(oneDoc, oneDoc...), nil }}},
+	}
+	for _, c := range cases {
 		s := askTestServer(t, neverSeat(t))
-		res, err := s.handleReviewDiff(context.Background(), callReq(c.args))
-		if err != nil {
-			t.Fatalf("%s: handleReviewDiff: %v", c.name, err)
+		fs := c.fs
+		s.reviewDiffFS = &fs
+		checkSealedRefusal(t, c.name, s, c.args, c.wantReason)
+	}
+
+	// A seam that breaks one call leaves the others real: a read that fails on the real file
+	// system still reports the reader's own reason.
+	s := askTestServer(t, neverSeat(t))
+	s.reviewDiffFS = &reviewDiffIO{Getwd: func() (string, error) { return "", errors.New("unused: read_root is given") }}
+	checkSealedRefusal(t, "an unset field is the real call", s,
+		reviewArgs(t, map[string]any{"diff_path": "nope.diff", "read_root": t.TempDir(), "task": "t"}), "nope.diff")
+}
+
+// The second read of a diff_path that returns no document is as loud as one that fails: the
+// result is STALE (the seat ran, and the bytes cannot be shown unchanged), never PASS.
+func TestReviewDiffASecondReadWithNoDocumentIsStale(t *testing.T) {
+	reads := 0
+	s := askTestServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
+		return seatFindings(), nil
+	})
+	s.reviewDiffFS = &reviewDiffIO{Read: func([]string, string) ([]core.ContextDoc, error) {
+		reads++
+		if reads == 1 {
+			return []core.ContextDoc{{Name: "a.diff", Text: reviewDiff}}, nil
 		}
-		m := decodeResult(t, res)
-		reason, _ := m["reason"].(string)
-		if m["deferred"] != true || !strings.Contains(reason, c.wantReason) {
-			t.Errorf("%s: the refusal keeps its deferral shape and reason (want %q): %v", c.name, c.wantReason, m)
-			continue
-		}
-		if m["outcome"] != reviewlane.OutcomeNotRun || m["outcome_reason"] != reason {
-			t.Errorf("%s: outcome = %v / %v, want NOT_RUN carrying the refusal reason", c.name, m["outcome"], m["outcome_reason"])
-		}
-		ev := evidenceOf(t, m)
-		if ev["refusal"] != reason || ev["diff_bytes"] != float64(0) || ev["diff_sha256"] != nil {
-			t.Errorf("%s: the evidence binds to no bytes and names the refusal: %v", c.name, ev)
-		}
-		if m["trace_error"] != nil {
-			t.Errorf("%s: trace_error = %v", c.name, m["trace_error"])
-		}
-		if rows := traceRowsOf(t, s); len(rows) != 1 || rows[0]["kind"] != "review" || rows[0]["outcome"] != reviewlane.OutcomeNotRun {
-			t.Errorf("%s: a refusal leaves its review row: %v", c.name, rows)
-		}
+		return nil, nil
+	}}
+	m := reviewCall(t, s, map[string]any{"diff_path": "a.diff", "read_root": "r", "task": "t"})
+	if m["outcome"] != reviewlane.OutcomeStale {
+		t.Fatalf("outcome = %v, want STALE: %v", m["outcome"], m)
+	}
+	if reads != 2 {
+		t.Errorf("the diff is read once before the seat and once before the seal, got %d reads", reads)
+	}
+	if ev := evidenceOf(t, m); ev["diff_sha256"] != reviewlane.Fingerprint(reviewDiff) || ev["stale"] != true {
+		t.Errorf("the evidence keeps the first fingerprint and marks the result stale: %v", ev)
 	}
 }
 

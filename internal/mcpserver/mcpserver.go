@@ -107,6 +107,9 @@ type Server struct {
 	// delegate.RunWith at call time; tests inject a fake so the handler is
 	// exercisable without a live fleet.
 	reviewFleet fleetDispatch
+	// reviewDiffFS is offload_review_diff's filesystem seam (reviewDiffIO): nil (production) is the real
+	// working directory, filepath.Abs and delegate.InlineContextPaths; tests break one call at a time.
+	reviewDiffFS *reviewDiffIO
 	// askSeatGuard is offload_ask's seam onto the seat guard (askOccupant): nil
 	// (production) resolves to the process-wide seatguard.Shared at call time.
 	askSeatGuard func(ctx context.Context, model string) seatguard.Verdict
