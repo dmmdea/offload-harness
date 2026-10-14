@@ -2138,6 +2138,9 @@ recorded as known offenders with their reason rather than silently skipped — a
   place such a graph keeps in the line while it is a ticket;
   [`internal/mediaremote/graph.go`](../../internal/mediaremote/graph.go) — the one-card rule, `min_vram_gb` and its default table, and
   what keeps a graph that reads input files on this machine
+- [`internal/mediaremote/named.go`](../../internal/mediaremote/named.go) — a call that names a node: the one candidate, the typed
+  refusals and what a row is read for (ADR 0082 Amendment 3); [`internal/mediacap/lane_rows.go`](../../internal/mediacap/lane_rows.go) and
+  [`internal/fleetnode/media_recipes.go`](../../internal/fleetnode/media_recipes.go) — the video, animation and audio family rows a node publishes
 - [`render/compose-hyperframes.mjs`](../../render/compose-hyperframes.mjs) — the composition runner:
   env allowlist, subcommand allowlist, `--json` everywhere, lint → check → render → ffprobe gate,
   typed `COMPOSE-FAIL` classes
