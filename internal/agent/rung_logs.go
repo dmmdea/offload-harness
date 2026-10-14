@@ -70,10 +70,17 @@ import (
 //   - A body that begins with logsPrefix is taken for an already collapsed
 //     body, because the prefix is the only idempotence marker there is: with
 //     the rung on, a raw body that merely quotes the header is skipped by this
-//     rung and a later rung's marker quotes the size its first line claims.
-//     With the rung off nothing here is consulted (logsMarkerSize,
-//     IsLogCollapseArtifact), so the default ladder treats that body as the
-//     ordinary content it is.
+//     rung. A later rung's marker believes the size in that first line only
+//     when this rung could have written it (logsOriginalSize: the exact
+//     spelling, a size strictly above the body's own length and inside the
+//     sizes the rung folds, a line count a fold needs); a malformed or
+//     impossible header is ignored and the marker names the body's own
+//     length. Nothing in the text separates a well-formed header with a
+//     plausible size from the real one, so a quoted header that passes those
+//     tests is still believed; carrying the size out of band would remove
+//     that, and no caller can yet. With the rung off nothing here is
+//     consulted (logsMarkerSize, IsLogCollapseArtifact), so the default
+//     ladder treats that body as the ordinary content it is.
 //   - A hex id made only of the letters a-f and shorter than eight characters
 //     is not masked, so two lines that differ only in such an id do not match.
 
@@ -153,15 +160,50 @@ func isLogCollapsed(content string) bool {
 	return len(content) >= len(logsPrefix) && content[:len(logsPrefix)] == logsPrefix
 }
 
+// logsHeader is the disclosure line that opens a collapsed body, newline
+// included. collapseLogs writes it and logsOriginalSize compares against it, so
+// the writer and the parser cannot drift apart.
+func logsHeader(origChars, origLines int) string {
+	return fmt.Sprintf("%s%d chars, %d lines]\n", logsPrefix, origChars, origLines)
+}
+
 // logsOriginalSize parses the original body size out of a collapsed body's
 // header, so a later rung's marker can name what was lost in total and not the
 // size the fold left behind (the same job skeletonOriginalSize does).
+//
+// The header is the only record of that size, and a body that merely quotes one
+// (a saved collapsed log read back, a search hit, a pasted transcript) would
+// otherwise hand any integer to the elide, dedupe and skeleton markers. So the
+// header is believed only when this rung could have written it:
+//
+//   - it is spelled exactly as logsHeader spells it (no sign, no leading zeros,
+//     no extra spaces, one newline);
+//   - the size is above len(content): a fold is kept only when strictly shorter
+//     than the body it replaced, and trimming or pruning only shortens it more;
+//   - the size is within [logsMinChars, logsMaxChars], the bodies logsEligible
+//     lets through;
+//   - the line count is at least the head, the tail and one run
+//     (logsHeadLines+logsTailLines+logsMinRun, what collapseLogs needs) and at
+//     most the size, since a line takes at least one byte.
+//
+// Anything else returns (0, false) and the caller falls back to the body's own
+// length. A well-formed header whose numbers are merely plausible is still
+// believed: nothing in the text can tell it from the real one.
 func logsOriginalSize(content string) (int, bool) {
 	if !isLogCollapsed(content) {
 		return 0, false
 	}
 	var n, lines int
 	if _, err := fmt.Sscanf(content[len(logsPrefix):], "%d chars, %d lines]", &n, &lines); err != nil {
+		return 0, false
+	}
+	if n <= len(content) || n < logsMinChars || n > logsMaxChars {
+		return 0, false
+	}
+	if lines < logsHeadLines+logsTailLines+logsMinRun || lines > n {
+		return 0, false
+	}
+	if !strings.HasPrefix(content, logsHeader(n, lines)) {
 		return 0, false
 	}
 	return n, true
@@ -172,7 +214,8 @@ func logsOriginalSize(content string) (int, bool) {
 // default ladder writes byte-identical to what it always wrote: a body that
 // merely quotes the rung's header is ordinary content there. With the rung on
 // it is what the body measured before any rung shrank it: the size in a
-// collapse header, or the size a skeleton recorded.
+// collapse header that logsOriginalSize believes, or the size a skeleton
+// recorded. A header it does not believe leaves the body's own length.
 func logsMarkerSize(content string, on bool) int {
 	if on {
 		if n, ok := logsOriginalSize(content); ok {
@@ -303,7 +346,7 @@ func collapseLogs(content string) (string, bool) {
 
 	footer := fmt.Sprintf("[log-collapse: folded %d run(s) of near-identical lines (%d lines hidden; digits are ignored when comparing lines); kept verbatim: the first %d and last %d lines and every line flagged as a problem or a test summary]",
 		runs, hidden, logsHeadLines, logsTailLines)
-	out := fmt.Sprintf("%s%d chars, %d lines]\n", logsPrefix, len(content), n) + body.String() + footer
+	out := logsHeader(len(content), n) + body.String() + footer
 	if len(out) >= len(content) {
 		return content, false
 	}

@@ -520,7 +520,12 @@ compacted. A tool body that merely quotes the header, such as a saved collapsed 
 `read_file`, is ordinary content to the default ladder, and a pinned set of digests over such
 transcripts holds that. With the rung on, the skeleton prefix, the elide marker (and the reactive
 last-resort marker) and the dedupe reference of a folded body name the size the body had before
-the fold, so a marker never says that less was lost than was.
+the fold, so a marker never says that less was lost than was. The header is believed only when the
+rung could have written it: the exact spelling, a size strictly above the body's own length and
+within the sizes the rung folds, and a line count a fold needs. A result that merely quotes a header
+with a negative, zero, oversized or too-small number is named by its own length instead. A quoted
+header whose numbers are merely plausible cannot be told from the real one in the text, so it is
+still believed; carrying the size outside the body would close that, and no caller can yet.
 
 No production surface enables the rung yet: the field is not wired to a flag, a `Loop` setter, the
 config or the replay seam (`ReplayOpts` does not expose it, so `CompactReplay` cannot measure it).

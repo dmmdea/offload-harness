@@ -19,7 +19,10 @@
 - **Honest markers.** With the rung on, the skeleton prefix, the elide marker, the reactive last-resort marker and the dedupe
   reference of a folded body name the size the body had before the fold (parsed from the header, as the skeleton's size already was),
   so a marker never says that less was lost than was. `emergencyShrinkWith` carries the ladder options to the last resort;
-  `emergencyShrink` keeps its signature and means "no optional rung".
+  `emergencyShrink` keeps its signature and means "no optional rung". The header is believed only when the rung could have
+  written it: its exact spelling, a size above the body's own length and within the sizes the rung folds, and a line count a fold
+  needs. A result that merely quotes a header with a negative, zero, oversized or too-small number is named by its own length. A
+  quoted header with merely plausible numbers is indistinguishable from the real one in the text and is still believed.
 - **Why.** Build, test and server output is mostly runs of lines that differ only in a timestamp, an id or a counter, and the line a
   later step needs is rarely inside one. This rung keeps every line the skeleton rung would keep and every distinct line besides, so
   it is gentler than a skeleton; because the ladder stops at the first rung that fits, turning it on keeps more of an older log
@@ -41,7 +44,9 @@
   check, the default) killed all 33 of the first version; each later fix was mutation-checked on its own (16 further edits: the
   ladder position both ways, the pin set, the stripped-line test, the error-name and failure-shape patterns, each size-reporting
   site, the option gate on the size parser, the header predicate in the harvest, the reused-id check, the restored artifact clause),
-  and the one that first survived (the last-resort pass over a body beyond the skeleton rung) got a test.
+  and the one that first survived (the last-resort pass over a body beyond the skeleton rung) got a test. The size parser's bounds
+  are pinned at each edge, and the skeleton branch of the size helper, which only the last resort's pass over a newest body that is
+  already a skeleton reaches, has a test that fails when the branch is deleted.
 - **What the evidence does and does not cover.** The savings figures printed by `TestLogCollapseMeasuredSavings` come from fixtures
   whose tool calls are renamed to `run`; the shipped mini replay corpus records call ids only, so the producer gate leaves it
   untouched and the rung is a no-op there. `ReplayOpts` does not expose the option, so the compaction eval cannot measure the rung
