@@ -465,8 +465,12 @@ every offender, and nothing is written:
    `local-offload audit-yaml` runs the same checker over a live file.
 2. **The spill ceiling (H-01, INV-1).** `--n-cpu-moe N` (every spelling, and the `LLAMA_ARG_N_CPU_MOE`
    twin) above the tier's `n_cpu_moe_max`, its MEASURED spill, is refused. A tier that recorded none
-   sanctions none, so any `N` above zero is refused. A tier that names `moe_26b: n_cpu_moe` with no `N`
-   is refused too, because that renders the every-expert `--cpu-moe` on a box with a card.
+   sanctions none, so any `N` above zero is refused. A tier that names `moe_26b: n_cpu_moe` with no `N`,
+   or `moe_26b: cpu_moe` on a backend with a card, is refused earlier still, at derive (`moeDefect`, at any
+   RAM tier), because it would put every expert in host RAM; the installer never writes the every-expert
+   `--cpu-moe` for a box with a card (0186 w4). A box off the tier matrix (`--fallback-backend cuda`,
+   `cuda-resident`, `dual-cuda`) renders no 26B at all: it has no measurement, so it is not claimed to fit.
+   The cpu backend, which has no card to overflow from, is the one exemption, in the gate and in the audit.
    `n_cpu_moe_max` is a separate number from `n_cpu_moe` on purpose: the placement a tier ships and the
    ceiling its measurement supports are two decisions, and one field cannot check itself. Only `ampere-6`
    declares one: `n_cpu_moe_max: 40`, the number its Qwen3.6-35B-A3B spill seat was measured at (the seat's
