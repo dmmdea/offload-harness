@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -183,5 +184,66 @@ func TestContextBenchDeliveryBudgetAndReserveReachTheRun(t *testing.T) {
 	r := tight.Results[0]
 	if r.Compactions == 0 || r.PeakSentTokens == 0 || r.PeakSentTokens > 8000-500 {
 		t.Fatalf("an 8000-token budget must compact and never send more than the usable 7500: %+v", r)
+	}
+}
+
+// A flag value the run would silently turn into a default is refused with the flag's name:
+// --reserve 0 would be read as the 2048 default, --pass-at 0 as 1.0, --max-out 0 as 4096,
+// and the report would then state a configuration nobody asked for.
+func TestContextBenchRefusesFlagValuesThatWouldBeSilentlyDefaulted(t *testing.T) {
+	calls := 0
+	withFakeContextBenchSeat(t, func(context.Context, []agent.Msg, int) (string, error) {
+		calls++
+		return compeval.CBAdvanceMarker, nil
+	})
+	for _, c := range []struct{ flag, value string }{
+		{"--budget", "0"}, {"--budget", "-5"},
+		{"--reserve", "0"}, {"--reserve", "-1"},
+		{"--pass-at", "0"}, {"--pass-at", "-0.5"}, {"--pass-at", "1.5"}, {"--pass-at", "NaN"},
+		{"--max-out", "0"}, {"--max-out", "-1"},
+		{"--max-turns", "-1"},
+		{"--request-timeout", "0"}, {"--request-timeout", "-5"},
+	} {
+		out := filepath.Join(t.TempDir(), "r.json")
+		err := runCompactionContextBench(contextBenchArgs(t, "--family", "kv_store", "--level", "R130", c.flag, c.value,
+			"--endpoint", "http://fake.invalid", "--model", "seat-x", "--out", out))
+		if err == nil || !strings.Contains(err.Error(), c.flag) {
+			t.Errorf("%s %s: want a refusal naming the flag, got %v", c.flag, c.value, err)
+		}
+		if _, serr := os.Stat(out); serr == nil {
+			t.Errorf("%s %s: a refused run writes no report", c.flag, c.value)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("the seat was called %d time(s) by runs that should have been refused", calls)
+	}
+	// The edges that are real values stay accepted.
+	for _, c := range []struct{ flag, value string }{{"--pass-at", "1"}, {"--pass-at", "0.5"}, {"--max-turns", "0"}, {"--reserve", "1"}} {
+		out := filepath.Join(t.TempDir(), "r.json")
+		if err := runCompactionContextBench(contextBenchArgs(t, "--family", "kv_store", "--level", "R130", c.flag, c.value,
+			"--endpoint", "http://fake.invalid", "--model", "seat-x", "--out", out)); err != nil {
+			t.Errorf("%s %s is a valid value: %v", c.flag, c.value, err)
+		}
+	}
+}
+
+// Every flag the verb defines is named in the usage block of its docs page.
+func TestContextBenchEveryFlagIsDocumented(t *testing.T) {
+	src, err := os.ReadFile("compaction_contextbench.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs, err := os.ReadFile(filepath.Join("docs", "systems", "coding-agent.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags := regexp.MustCompile(`fs\.(?:String|Int|Int64|Float64|Bool)\("([a-z-]+)"`).FindAllStringSubmatch(string(src), -1)
+	if len(flags) < 15 {
+		t.Fatalf("found only %d flag definitions in the verb: the pattern no longer matches how they are written", len(flags))
+	}
+	for _, m := range flags {
+		if !strings.Contains(string(docs), "--"+m[1]) {
+			t.Errorf("flag --%s is defined by the contextbench verb but not documented in docs/systems/coding-agent.md", m[1])
+		}
 	}
 }
