@@ -279,3 +279,17 @@ func TestSearchRungFooterExampleAppearsInTheDocs(t *testing.T) {
 		checkDocFooters(t, f, string(b))
 	}
 }
+
+func TestSearchRungDoesNotPairTwoEmptyIDs(t *testing.T) {
+	// A call and a result that both carry no id are not a pair: nothing says this
+	// result came from this call, so it is left alone.
+	grouped := prodGrouped(benignHits(57, 20, 90), true)
+	call := gateSearchCall()
+	call.ID = ""
+	msgs := gateMsgs(call, grouped, true)
+	msgs[3].ToolCallID = ""
+	searchRung(msgs, rungProtected, len(msgs)-rungKeep, 1, nil)
+	if msgs[3].Content != grouped {
+		t.Error("a result and a call that both have an empty id were paired and thinned")
+	}
+}
