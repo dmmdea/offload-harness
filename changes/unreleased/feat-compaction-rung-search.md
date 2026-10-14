@@ -13,8 +13,8 @@
   same older span as the skeleton rung: the protected preamble, the kept-recent tail and pinned bodies are never touched, only a tool
   message's body changes, and pairing is intact. The result opens with the skeleton disclosure line, so the existing idempotence
   check, the re-execute-on-repeat path (ADR 0016), the corpus harvest refusal and the elision marker's original size all treat it as
-  the compaction artifact it is, with no change to any of them. There is no CLI flag or loop setter yet; whether the rung ever
-  becomes a default is for the measurement gate to decide on a harvested corpus.
+  the compaction artifact it is, with no change to any of them. There is no CLI flag or loop setter yet, and `compaction-eval` cannot
+  replay the rung yet; whether it ever becomes a default is for the measurement gate to decide on a harvested corpus.
 - **Why.** A long listing is the commonest bulk tool result on a small window, and the generic skeleton keeps its first and last
   lines whatever the task asks. Ranking by the task keeps the lines the task is about. The idea is documented by the Headroom
   project (Apache-2.0); this is a clean-room implementation of that documented behaviour, credited in `NOTICE`.

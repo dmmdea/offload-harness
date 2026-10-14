@@ -501,8 +501,10 @@ files (the documented defaults of the idea), then written back in listing order 
 the re-execute-on-repeat path (ADR 0016) and the corpus harvest treat it as the compaction artifact it
 is, and a later elision marker still names the original size. It is deterministic, idempotent,
 monotonic (a result that is not strictly shorter is discarded) and fails closed: a body that is not,
-line for line, one of the accepted shapes comes back untouched. It has no CLI flag or loop setter yet:
-the option is reachable from the ladder's own options and from tests, the default ladder is pinned
+line for line, one of the accepted shapes comes back untouched. It has no CLI flag or loop setter yet,
+and `compaction-eval` does not replay it yet (the measurement that decides it first needs
+`agent.ReplayOpts`, `compeval.LadderOpts` and the verb's flag extended): the option is reachable from
+the ladder's own options and from tests, the default ladder is pinned
 byte for byte by `internal/agent/testdata/ladder_default_golden.json`, and whether the rung ever
 becomes a default is decided by the measurement gate on a harvested corpus, not by this page. Source:
 `internal/agent/rung_search.go`. The idea is documented by the Headroom project (Apache-2.0); this is a
