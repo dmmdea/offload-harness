@@ -397,14 +397,17 @@ func TestTraceCorpusRedactsPathSeats(t *testing.T) {
 	if harvested.Stats.Redactions["path"] != 6 {
 		t.Errorf("path redactions = %v, want 6 (one per path-shaped value: five seats and one stop reason)", harvested.Stats.Redactions)
 	}
-	// Defense in depth: the strict loader refuses a corpus that carries a path seat.
-	dirty := filepath.Join(dir, "dirty.jsonl")
-	line := `{"id":"dl-x","source":"delegation-log","seat":` + strconvQuote(rooted) + `,"trace_bearing":false,"steps":1,"pager":null,"prefill":null,"seat_tokens_in":null,"ladder_artifacts":null}` + "\n"
-	if err := os.WriteFile(dirty, []byte(line), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := tcRunVerb(t, "readout", "--corpus", dirty); err == nil || !strings.Contains(err.Error(), "path") {
-		t.Fatalf("a corpus holding a path seat must be refused, got %v", err)
+	// Defense in depth: the strict loader refuses a corpus that carries a path seat or stop reason.
+	for name, fields := range map[string][2]string{"seat": {rooted, "done"}, "stop reason": {"seat-a", rooted}} {
+		dirty := filepath.Join(dir, "dirty-"+strings.ReplaceAll(name, " ", "-")+".jsonl")
+		line := `{"id":"dl-x","source":"delegation-log","seat":` + strconvQuote(fields[0]) + `,"trace_bearing":false,"steps":1,"stop_reason":` + strconvQuote(fields[1]) +
+			`,"pager":null,"prefill":null,"seat_tokens_in":null,"ladder_artifacts":null}` + "\n"
+		if err := os.WriteFile(dirty, []byte(line), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := tcRunVerb(t, "readout", "--corpus", dirty); err == nil || !strings.Contains(err.Error(), "local path") {
+			t.Fatalf("a corpus holding a path as its %s must be refused, got %v", name, err)
+		}
 	}
 }
 

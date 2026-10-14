@@ -259,9 +259,13 @@ func tcHarvest(o tcHarvestOpts) ([]tcRun, tcHarvestStats, error) {
 	// Redact every string that will be written, then gate on the vet: a residual hit means the
 	// redactor and the vet have drifted, and nothing is written.
 	red := compeval.NewRedactor()
+	paths := tcPathRedactor{}
 	for i := range runs {
 		r := &runs[i]
-		r.ID, r.Seat, r.StopReason = red.Redact(r.ID), red.Redact(r.Seat), red.Redact(r.StopReason)
+		// A path-shaped value is replaced whole before the vet classes are applied: the vet table
+		// has no path class, and a seat or stop reason that names a file would otherwise become a
+		// by_seat key in every readout.
+		r.ID, r.Seat, r.StopReason = red.Redact(r.ID), red.Redact(paths.redact(r.Seat)), red.Redact(paths.redact(r.StopReason))
 	}
 	for _, r := range runs {
 		for _, s := range []string{r.ID, r.Source, r.Seat, r.Day, r.StopReason} {
@@ -270,7 +274,11 @@ func tcHarvest(o tcHarvestOpts) ([]tcRun, tcHarvestStats, error) {
 			}
 		}
 	}
-	if hits := red.Hits(); len(hits) > 0 {
+	hits := red.Hits()
+	if paths.hits > 0 {
+		hits["path"] = paths.hits
+	}
+	if len(hits) > 0 {
 		stats.Redactions = hits
 	}
 	sort.SliceStable(runs, func(i, j int) bool {
@@ -290,6 +298,33 @@ func tcHarvest(o tcHarvestOpts) ([]tcRun, tcHarvestStats, error) {
 		stats.Notes = nil
 	}
 	return runs, stats, nil
+}
+
+// tcPathRe matches a value that is a local filesystem path: a drive path, a rooted path, or
+// anything holding a backslash. A bare name or an org/model id with no leading slash is not one.
+var tcPathRe = regexp.MustCompile(`^[A-Za-z]:[\\/]|^/|\\`)
+
+// tcPathRedactor replaces path-shaped values with stable placeholders, numbered by first
+// appearance, so the same path is the same placeholder and a re-harvest is byte-identical.
+type tcPathRedactor struct {
+	seen map[string]string
+	hits int
+}
+
+func (p *tcPathRedactor) redact(s string) string {
+	if !tcPathRe.MatchString(s) {
+		return s
+	}
+	if p.seen == nil {
+		p.seen = map[string]string{}
+	}
+	ph, ok := p.seen[s]
+	if !ok {
+		ph = fmt.Sprintf("[redacted-path-%d]", len(p.seen)+1)
+		p.seen[s] = ph
+	}
+	p.hits++
+	return ph
 }
 
 func tcHarvestTraces(o tcHarvestOpts, stats *tcHarvestStats) ([]tcRun, error) {
@@ -570,6 +605,9 @@ func tcValidateRun(r tcRun) error {
 		if classes := compeval.PIIClasses(s); len(classes) > 0 {
 			return fmt.Errorf("corpus refused: %s (a corpus must be vetted, never scrubbed in place)", strings.Join(classes, ", "))
 		}
+	}
+	if tcPathRe.MatchString(r.Seat) || tcPathRe.MatchString(r.StopReason) {
+		return fmt.Errorf("corpus refused: a seat or stop reason is a local path (harvest replaces those with a placeholder)")
 	}
 	return nil
 }
