@@ -292,3 +292,41 @@ func TestPrimaryIntervalFalseAdoptRateOnTheStatedNulls(t *testing.T) {
 		})
 	}
 }
+
+// The sparse regime, exactly, with no simulation. A candidate that only ever loses tasks (every non-zero difference
+// is -1) and loses 5% of them sits exactly on a margin of 0.05: the number of losses K in n tasks is
+// binomial(n, 0.05), and the gate adopts when the interval of K losses and n - K ties has its lower end above -0.05.
+// The false-ADOPT rate is the sum of the probabilities of those K. These are the figures the docs and the ADR give
+// for the regime the score form is not calibrated in (a strong incumbent and a handful of disagreeing tasks, from
+// 61 tasks): the all-tied sample is the rule of three from 61 tasks, and one loss clears the margin from 62, so
+// the rate jumps from 0 at 60 to 4.4% at 61 and 17.7% at 62 and falls back as the sample grows until two losses
+// clear it. The expected values were computed outside the package (scipy.stats.t.ppf and exact binomial sums).
+// At 16 to 60 tasks no K clears the margin, which is why the always-on cells there read 0.0%.
+func TestNestedLossFalseAdoptRateIsTheBinomialSum(t *testing.T) {
+	const loss, margin = 0.05, 0.05
+	for _, tc := range []struct {
+		n    int
+		want float64
+	}{
+		{16, 0}, {24, 0}, {40, 0}, {60, 0},
+		{61, 0.043766}, {62, 0.177254}, {64, 0.163921}, {70, 0.129208}, {80, 0.086054}, {90, 0.056728},
+		{100, 0.118263}, {120, 0.057505}, {160, 0.093854}, {200, 0.062342},
+	} {
+		var rate float64
+		for k := 0; k <= tc.n; k++ {
+			inc, cand := repeatF(1, tc.n), repeatF(1, tc.n)
+			for i := 0; i < k; i++ {
+				cand[i] = 0
+			}
+			if _, lo, _ := primaryInterval(inc, cand, 1); lo > -margin+equalTolerance {
+				lg := func(x float64) float64 { v, _ := math.Lgamma(x); return v }
+				logP := lg(float64(tc.n+1)) - lg(float64(k+1)) - lg(float64(tc.n-k+1)) +
+					float64(k)*math.Log(loss) + float64(tc.n-k)*math.Log(1-loss)
+				rate += math.Exp(logP)
+			}
+		}
+		if math.Abs(rate-tc.want) > 2e-6 {
+			t.Errorf("n=%d: the false-ADOPT rate of a candidate that loses 5%% of the tasks is %.6f, want %.6f", tc.n, rate, tc.want)
+		}
+	}
+}
