@@ -37,27 +37,48 @@
   everywhere (the ctx probe, the cold-swap probe, step 3); step 3 and the `moe_full_offload` canary are retired to a fixed
   `skipped` receipt entry (the key stays, the shape does not change; the canary trial was unreachable on every shipped tier, since the
   only tier with the 26B and a non-gpu placement is `cpu`, whose backend skipped it). `receipt.remediations` keeps one writer, the ctx
-  downshift.
+  downshift. The ctx probe's downshift hangs on `Test-AllocFailure` and on the probe's whole-log scan, and neither recognised the
+  literal llama.cpp message `CUDA error: out of memory` (both patterns read `CUDA (error )?out of memory`, with no colon): both take
+  `(error:? )?` now, and `Test-AllocFailure` has a case table (it had no test after the remediation test was retired). The chat tiers
+  the selftest exercises are now the ones whose gguf is on disk AND which the active yaml defines (`Select-ServedTiers`): a box
+  re-rendered without the 26B keeps the 14 GB file, and the selftest used to ask llama-swap for the model it had dropped, print
+  advice that blames the card, and load the unserved file in the cold-swap probe.
 - **The fix, `install.ps1`.** The unknown-profile fallback table drops the `--cpu-moe -ngl 999` literal and the 26B include for `cuda`
   (`include_26b` false: the 14 GB download follows), mirroring `fallbackProfile`; a tier naming `cpu_moe` on a card backend, or
   `n_cpu_moe` with no N, throws by name at any RAM tier (mirroring `moeDefect`); and `Test-YamlHasEveryExpertFlag` joins the Step 6 SKIP
   probe, so re-running the installer over a yaml an older installer rendered (which passes every other probe) re-renders it instead of
   keeping the flag the audit refuses. The detector's pattern is a character class (`--cpu[-]moe`) so the source pin does not read the
-  detector as a writer. Comments only in `install.sh` and `detect.ps1`.
+  detector as a writer, and its comment guard is a negative lookahead: every serving template puts the placement token FIRST on its own
+  continuation line, so a yaml the old renderer wrote has the flag at the start of a line, and a guard that had to consume one
+  character before the flag never matched it (the first version of this probe was blind to exactly the yamls it exists for; it was
+  checked on a yaml rendered by a 0.185.1 binary built from the tagged source, where the first version answered no and this one yes).
+  A fresh `config.json` for a box off the tier matrix now gets `escalation_model` and `reasoning_model` set to `""`
+  (`Get-OffMatrixRungSeed`, merged by Step 8 when no profile row resolved and the render serves no 26B): the config template binds
+  both rungs to the 26B, every tier that drops the 26B reseeds them, and an unknown profile has no row to do it, so without this a
+  fresh install shipped two bindings its own yaml does not define. Comments only in `install.sh` and `detect.ps1`.
 - **Behaviour changes to know about.** An off-matrix CUDA box gets no 26B (and downloads none); `audit-yaml --against-render` on a render
-  made by 0.185.1 for such a box reports the `cpu-moe` violation with the re-render text and `STALE(params.include_26b, params.moe_26b)`.
+  made by 0.185.1 for such a box reports the `cpu-moe` violation with the re-render text and `STALE(params.include_26b, params.moe_26b)`,
+  and re-running the installer re-renders it (checked piecewise on a real 0.185.1 render, without a full install: the SKIP probe's
+  detector sees the flag, and `install render` over that file then passes `audit-yaml` with OK and MATCH). A fresh
+  `config.json` on such a box has `escalation_model` and `reasoning_model` blank, so the cascade has no escalation and no reasoning
+  tier there, as on `ampere-6` and `amd-gcn`. An EXISTING `config.json` is never rewritten, so a box that installed under 0.185.1 or
+  earlier keeps its two bindings to the 26B after the re-run: set both to `""` by hand (`doctor` names them otherwise).
   The Windows selftest's ctx probe now loads the card-resident 26B at the projected window on the nine tiers whose resident is the 26B,
   so it can OOM and take the downshift path (`remediations[]` then holds `downshift ctx a->b`, never an edit). A card too small for the
   26B (`amd-rdna3-dgpu` on 12 GB is the case the old `R4.2` text named) now fails its 26B tier with advice instead of limping on
   `--cpu-moe`; there is no automated path past it, and the advice says so.
 - **Docs.** `setup/SETUP-AGENT.md` (tier table cells, the AMD chapter without the `--cpu-moe` floor and the full-offload promotion row,
   the receipt schema, the failure tables), `docs/OPERATOR-GUIDE.md`, `README.md`, `docs/systems/setup-installer.md`, ADR 0043 (the W4
-  bullet is amended: no second exemption; "what stays open" is closed), and `_fields.moe_26b` in `profiles.json` (not rendered into
-  `docs/tiers`; no tier entry changed).
+  bullet is amended: no second exemption; "what stays open" is closed), `_fields.moe_26b` and `_fields.n_cpu_moe` in `profiles.json`
+  (not hashed, not rendered into `docs/tiers`; no tier entry changed), and in the fix round `docs/systems/setup-installer.md` (the
+  retired `moe_full_offload` canary) and a paragraph in `SETUP-AGENT.md` on what an unknown profile renders and the by-hand step
+  for an existing `config.json`.
 - **Not changed.** (1) The tier notes in `profiles.json` that still mention `cpu-moe` (`amd-rdna3-dgpu`, `dual-gpu`, `ampere-8`,
   `blackwell-8`, `ampere-6`, `amd-rdna3`, `cpu`) and the header prose of the `win-cuda`, `win-vulkan`, `win-dual-cuda`, `linux-vulkan`
   and `linux-cpu` templates: editing either re-stamps every file on that tier or template (STALE until `install render` is re-run) and
-  regenerates `docs/tiers`, so they ride a release that already touches them. (2) The `cpu` tier keeps `moe_26b: cpu_moe` and its inert
+  regenerates `docs/tiers`, so they ride a release that already touches them. Until then the generated `docs/tiers/amd-rdna3-dgpu.md`
+  page still carries the `amd-rdna3-dgpu` note's now-false sentence that selftest's standing remediation switches the 26B to the
+  every-expert flag (the remediation is gone; a 12 GB card now fails its 26B tier with advice). (2) The `cpu` tier keeps `moe_26b: cpu_moe` and its inert
   `--cpu-moe -ngl 999` stamp parameter; changing the string would STALE every stamped cpu-tier file. (3) The vulkan off-matrix fallback
   still keeps an unmeasured 26B at `-ngl 999` (never an expert flag; the same reasoning as the CUDA family, left for a decision).
   (4) `audit-yaml` still never applies the spill ceiling (`AuditSpill`) to a live file. (5) The fleet read-back of W4's own acceptance
@@ -72,7 +93,13 @@
   inverted last block of `TestInstallRenderRefusesNCPUMoEAboveTheTiersMeasuredSpill`; and in PowerShell `selftest-no-cpumoe.test.ps1`
   (renamed from `selftest-remediation.test.ps1`: 26 assertions) and 14 new assertions in `install-config-seed.test.ps1` (the unknown-profile
   fallback, both throws, the SKIP probe's detector against yaml fixtures, the selftest source pins), plus `render.tests.ps1` for the
-  unknown-profile render.
+  unknown-profile render. Review fix round, same order: the detector against every shipped serving template rendered with the
+  every-expert placement (9 assertions red against the first detector: the line-leading fixture and the 8 templates that carry the
+  token); the fresh-config rungs (`Get-OffMatrixRungSeed` seam first; 7 assertions in `install-config-seed.test.ps1` and the
+  `render.tests.ps1` property that every chat model the fresh config names is served by the rendered yaml, red for cuda, with the
+  vulkan and cpu fallbacks as controls); the selftest tier filter (`Select-ServedTiers` seam first; 8 assertions) and the
+  `Test-AllocFailure` case table plus the whole-log scan (red on `CUDA error: out of memory`). One assertion of the no-N refusal test
+  could never fail (every error return of `deriveRender` is a zero result) and was removed.
 - **Mutations.** Each rule has a single-line mutant proved RED with `scripts/mutation-check.sh` (the mutation lands on one line, the
   unmutated tree passes first): the CUDA fallback back to the literal plus the 26B; `moePlacement` returning the flag for `cpu_moe` on any
   backend, a flag for `n_cpu_moe` with N=0, and nothing for a named N; the `moeDefect` call deleted, each of its two conditions flipped and
@@ -80,4 +107,8 @@
   into a note and losing the off-matrix discriminator; a `-CpuMoe` argument, a `Invoke-Remediate26B` function and the `--cpu-moe` literal
   restored in the scripts (Go source pins); and in PowerShell the cuda fallback's include and flag restored, either throw disabled, the
   SKIP-probe clause removed or stripped of its cpu exemption, the detector reading comments, the advice call removed and the advice
-  naming the flag.
+  naming the flag. Fix round: the detector's consuming guard restored; the rung helper returning nothing, losing its `Include26B`
+  guard, losing its profile-row guard, the Step 8 call removed and the Step 8 merge removed; the tier filter removed, either fail-open
+  arm removed, the MAIN call removed, the skipped-tier note changed, the alias branch and the key anchor of `Test-YamlServesModel`
+  broken; and in the allocation classifier the colon removed from either copy, an alternative dropped and an over-broad `timed out`
+  added.
