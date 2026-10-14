@@ -520,6 +520,16 @@ strict-validated at ack time — a malformed fleet job dies at the 400 with a cl
 never mid-render. Typed run-graph defers (`VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `NODE_CLASS_MISSING`, …)
 surface in the job's `error` field as `code: detail`.
 
+**A fleet media job's lease window is its route's own timeout, read from the node's config.** A media task takes the
+node's machine-wide media lease for the timeout key of the route it runs (`imagegen_timeout_sec`, `videogen_timeout_sec`,
+`inpaint_timeout_sec`, `upscale_timeout_sec`, `gen_edit_timeout_sec`, `animategen_timeout_sec`, `audiogen_timeout_sec`; the
+payload carries none, so the delegator's keys play no part) and the render is killed at that same value, so a render never
+outlives the lease taken for it. A job that cannot get the card first queues for `gpu_wait_ms` (90 s by default; a queue
+wait, not a lease length) and then defers `gpu_busy`. The window is one lease term, so every timeout a node seeds stays
+under `gpu_max_term_min` (six hours by default; the longest tier seed is 7,200 s). Which keys a tier seeds, the code
+defaults and the `gpu reserve --for` rule are in the engine + lease row of the
+[timeout chain](OPERATOR-GUIDE.md#the-timeout-chain-and-walls-sized-from-the-seats-own-rate-011521-register-d-03).
+
 **A run-graph also checks the files it names, at the door** (ADR 0082, Amendment 1). Before it writes a temp file, takes a lease
 or starts ComfyUI, the node reads the graph for the model files its loaders open (any string input, under any key but
 `filename_prefix`, whose value ends `.safetensors`, `.gguf`, `.pth`, `.pt`, `.ckpt` or `.sft` and does not contain `://`; those
