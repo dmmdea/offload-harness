@@ -570,6 +570,10 @@ func TestLateActionAfterReleaseLeavesNoFile(t *testing.T) {
 	if got, _ := ReadYield(r.m.leaseDir(), r.l.Epoch()); got.Action != YieldActionRan {
 		t.Fatalf("the action was not recorded: %+v", got)
 	}
+	kept, err := os.ReadFile(r.yieldFile())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := r.l.Release(); err != nil {
 		t.Fatal(err)
 	}
@@ -579,6 +583,15 @@ func TestLateActionAfterReleaseLeavesNoFile(t *testing.T) {
 	}
 	if _, err := os.Stat(r.yieldFile() + ".tmp"); !os.IsNotExist(err) {
 		t.Errorf("a temporary file was left behind: %v", err)
+	}
+	// The window the lock closes: the sweep missed the file (it was written back after the sweep read the
+	// directory). The update still must not touch it, because the lease it belongs to is gone.
+	if err := os.WriteFile(r.yieldFile(), kept, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.m.RecordYieldAction(r.l.Epoch(), YieldActionFailed, 3)
+	if got := readFileOr(t, r.yieldFile()); got != string(kept) {
+		t.Fatalf("an action update rewrote the sidecar of a lease that is gone:\n before %s\n after  %s", kept, got)
 	}
 }
 
