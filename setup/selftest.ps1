@@ -51,10 +51,12 @@ else { $profilesJsonPath = Join-Path $scriptDir 'templates\profiles.json' }
 $detectJsonPath = if ($env:OFFLOAD_DETECT_JSON) { $env:OFFLOAD_DETECT_JSON } else { $null }
 
 # The chat tiers, in the fixed order we exercise them. Each maps a llama-swap model alias to the
-# gguf filename the rendered template references. A tier is "installed" iff its gguf is on disk.
-# (We check file existence, not installed.json: the Vulkan sandbox has no manifest, and the yaml
-# always lists all three group members regardless of which were downloaded - file existence is
-# the only ground truth for what can actually load.)
+# gguf filename the rendered template references. A tier is "installed" iff its gguf is on disk AND
+# the active yaml still defines it (Select-ServedTiers; a tier that drops the 26B keeps no entry for
+# it, and a gguf an earlier render wanted outlives that render).
+# (We check file existence, not installed.json: the Vulkan sandbox has no manifest, and a rendered
+# yaml lists every group member its tier serves regardless of which were downloaded - file existence
+# is the ground truth for what can actually load.)
 $TIER_SPEC = @(
   @{ id = 'offload-e4b';    file = 'gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf' }
   @{ id = 'gemma4-e2b';     file = 'gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf' }
@@ -183,14 +185,33 @@ function Get-MoEFailureAdvice {
     "If the failure is a device-lost or driver crash, update the GPU driver first.")
 }
 
-# Test-YamlServesModel / Select-ServedTiers: seam only (0186 w4 fix round), the bodies arrive with the fix.
+# Test-YamlServesModel: does the llama-swap.yaml text define $Id as a model (a key under models:, or an alias)?
+# A pure text check on the layout every shipped template uses: model keys at two spaces of indent, aliases as an
+# inline list. A comment that names the model, a longer key that shares its prefix and a gguf file name inside a
+# command are not the model.
 function Test-YamlServesModel {
   param([string]$YamlText, [string]$Id)
-  return $true
+  if (-not $YamlText -or -not $Id) { return $false }
+  $e = [regex]::Escape($Id)
+  if ([regex]::IsMatch($YamlText, "(?m)^ {2}[`"']?$e[`"']?[ \t]*:")) { return $true }
+  return [regex]::IsMatch($YamlText, "(?m)^[ \t]+aliases:[ \t]*\[[^\]\r\n]*(?<![\w.-])$e(?![\w.-])")
 }
+
+# Select-ServedTiers: of the chat tiers whose gguf is on disk ($Tiers), the ones the ACTIVE yaml still defines.
+# A gguf outlives the render that wanted it: the CUDA fallback served the 26B until 0186 w4, so a box that downloaded
+# it keeps the 14 GB file after a re-render that no longer defines the model. The file says what can load, the yaml
+# says what can be asked for; without this the selftest asks llama-swap for a model it does not know (and the failure
+# is blamed on the card), and the cold-swap probe loads the unserved gguf on the card. An unreadable yaml, or one that
+# defines none of the chat tiers, is not a verdict: every tier stays, as before.
 function Select-ServedTiers {
   param($Tiers, [string]$ConfigPath)
-  return $Tiers
+  $all = @($Tiers)
+  $text = $null
+  try { if ($ConfigPath -and (Test-Path -LiteralPath $ConfigPath)) { $text = [System.IO.File]::ReadAllText($ConfigPath) } } catch { $text = $null }
+  if (-not $text) { return $all }
+  $served = @($all | Where-Object { Test-YamlServesModel -YamlText $text -Id $_.id })
+  if ($served.Count -eq 0) { return $all }
+  return $served
 }
 
 # Read the served chat-tier --ctx-size from the ACTIVE rendered yaml (ground truth: what actually
@@ -796,6 +817,11 @@ try {
   $installedTiers = @(Select-ServedTiers -Tiers $tiersOnDisk -ConfigPath $yamlPath)
   if ($installedTiers.Count -eq 0) { throw "no chat-tier gguf found in $modelDir - nothing to exercise" }
   LogOk ("installed chat tiers: {0}" -f (($installedTiers | ForEach-Object { $_.id }) -join ', '))
+  $servedIds = @($installedTiers | ForEach-Object { $_.id })
+  $unservedTiers = @($tiersOnDisk | Where-Object { $servedIds -notcontains $_.id })
+  if ($unservedTiers.Count -gt 0) {
+    Log ("  NOTE: gguf on disk but not defined by the active yaml, so not exercised: {0} (an earlier render served it; the file is unused)" -f (($unservedTiers | ForEach-Object { $_.id }) -join ', '))
+  }
 
   # --- Expectations table (info only) -------------------------------------------------------
   Log ""
