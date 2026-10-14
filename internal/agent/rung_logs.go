@@ -499,7 +499,7 @@ func logsShellCommandIsBuild(command string) bool {
 	}
 	for _, st := range stages[1:] {
 		w := strings.Fields(st)
-		if len(w) == 0 || !logsPipeFilters[runBaseName(w[0])] {
+		if len(w) == 0 || !logsPipeFilters[runBaseName(w[0])] { // an empty stage is a "||" or a dangling pipe
 			return false
 		}
 	}
@@ -534,9 +534,10 @@ func logsProgramIsBuild(prog string, args []string, shell bool) bool {
 
 // logsSplitPipeline splits a shell command line into its pipeline stages, or
 // reports false when the line is not one pipeline: it runs a second command
-// after the first (an unquoted ";", "&&", "||", a lone "&", a newline or a
-// carriage return), has a pipe with nothing on one side, or leaves a quote
-// open. The redirections "2>&1", ">&2" and "&>f" are not a "&". It is a
+// after the first (an unquoted ";", "&&", a lone "&", a newline or a carriage
+// return) or leaves a quote open. The redirections "2>&1", ">&2" and "&>f" are
+// not a "&". A "||" yields an empty stage between its two bars, and so does a
+// pipe with nothing on one side: the caller rejects an empty stage. It is a
 // quote-aware scan, not a shell parser: single quotes take no escape, double
 // quotes take a backslash, and a backslash outside quotes hides the next byte.
 func logsSplitPipeline(command string) ([]string, bool) {
@@ -563,9 +564,6 @@ func logsSplitPipeline(command string) ([]string, bool) {
 		case c == ';' || c == '\n' || c == '\r':
 			return nil, false
 		case c == '|':
-			if i+1 < len(command) && command[i+1] == '|' {
-				return nil, false
-			}
 			stages = append(stages, command[start:i])
 			if i+1 < len(command) && command[i+1] == '&' {
 				i++ // "|&" is a pipe
@@ -582,13 +580,7 @@ func logsSplitPipeline(command string) ([]string, bool) {
 	if quote != 0 {
 		return nil, false
 	}
-	stages = append(stages, command[start:])
-	for _, st := range stages {
-		if strings.TrimSpace(st) == "" {
-			return nil, false
-		}
-	}
-	return stages, true
+	return append(stages, command[start:]), true
 }
 
 // logsCallsByID maps every non-empty tool-call id in msgs to its call. An id
