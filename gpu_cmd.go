@@ -1418,6 +1418,10 @@ var (
 // variable so a test can shorten it.
 var holdBoundGrace = 5 * time.Second
 
+// holdConfirmPause is the pause between the looks with which the hidden holder confirms that its lease is really gone before it
+// lets go of it. SEAM: not read yet.
+var holdConfirmPause = 50 * time.Millisecond
+
 // releaseHolderAtWaitEnd is the hidden holder's release of its own lease when the reserve that took it did not: the host-RAM
 // wait it began has passed its stamped end and the lease still asks for the host. It says why on the holder's stderr, warms the
 // seat back ONLY if the lease owes it (the wrapper form's guard: a seat nothing unloaded is never loaded by a release), and

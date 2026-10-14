@@ -18,6 +18,7 @@ import (
 	"flag"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -477,4 +478,39 @@ func TestTheStampedEndOfTheWaitIsWhicheverOfTheBoundAndWaitComesFirst(t *testing
 			}
 		})
 	}
+}
+
+// A FENCE READ THAT FAILS FOR A MOMENT IS NOT A LOST LEASE. The holder's exit releases its lease, and its fence (Lease.Check)
+// reads the record: a read that lands while a restamp replaces the record fails for a moment on Windows ("access denied"), and the
+// holder took that for "the lease is gone" and let go of a live lease. The reserve now restamps the record more often during a
+// host-RAM wait (the stamp, its clear, the push-out before its own release), and the holder polls it, so the race had to be closed:
+// the holder confirms a failed fence with further looks before it lets go. Found as a 1-in-60 flake of the test above.
+func TestTheHolderDoesNotLetGoOfALiveLeaseBecauseOneFenceReadFailed(t *testing.T) {
+	cfgPath, m, _ := holderFixture(t, false)
+	fastHolder(t)
+	var calls atomic.Int32
+	restore := gpulease.UseCheckFault(func(uint64) error {
+		if calls.Add(1) == 1 {
+			return errors.New("access denied: the record was being replaced")
+		}
+		return nil
+	})
+	t.Cleanup(restore)
+	done := runHolder(cfgPath)
+	waitForLeases(t, m, 1)
+	time.Sleep(500 * time.Millisecond) // many polls: the first fence read failed, the rest are fine
+	if !m.Inspect().Held {
+		t.Fatal("one fence read that failed while the record was being replaced released a live lease")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("the holder let go of its lease on one failed fence read: %v", err)
+	default:
+	}
+	if calls.Load() < 2 {
+		t.Fatalf("the holder never looked again: %d fence read(s)", calls.Load())
+	}
+	// A lease that really is gone still ends the holder promptly.
+	releaseAll(t, m)
+	holderEnds(t, done, 10*time.Second)
 }

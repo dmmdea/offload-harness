@@ -592,6 +592,18 @@ func (l *Lease) AwaitHostRAM(o AwaitHostRAMOptions) error {
 // returns. nil in production. UseRemoveFault is the way a test in another package reaches it.
 var removeClaimFault func(path string) error
 
+// checkFaultHook is a test seam: when set, Lease.Check fails with what it returns for the epoch. nil in production.
+var checkFaultHook func(epoch uint64) error
+
+// UseCheckFault makes Lease.Check fail with what fn returns for the epoch (nil from fn lets the fence run) until the returned
+// function is called: the way a test in another package provokes a fence read that fails for a moment, as a read of a record
+// that is being replaced does on Windows. Nothing in production calls it.
+func UseCheckFault(fn func(epoch uint64) error) (restore func()) {
+	old := checkFaultHook
+	checkFaultHook = fn
+	return func() { checkFaultHook = old }
+}
+
 // UseRemoveFault makes every lease-file removal in this process fail with what fn returns for the path (nil from fn lets it
 // through), until the returned function is called. A test seam, for a release that must fail where a portable test cannot
 // provoke a real filesystem error: nothing in production calls it.

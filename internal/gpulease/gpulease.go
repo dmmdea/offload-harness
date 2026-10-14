@@ -1996,6 +1996,11 @@ func (l *Lease) Check() error {
 	if l.done.Load() {
 		return errors.New("gpulease: lease already released")
 	}
+	if checkFaultHook != nil {
+		if err := checkFaultHook(l.epoch); err != nil {
+			return err
+		}
+	}
 	if l.v2 {
 		return l.checkV2()
 	}
