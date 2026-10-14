@@ -198,6 +198,16 @@ func TestAutoDisplayLeavesLiteralIndexAndUUIDBehaviourAlone(t *testing.T) {
 		t.Fatalf("the auto layer next to it follows the monitor to 0, got %q", reason)
 	}
 
+	// The seat-pin rule is the sentinel's alone. On a declared card a seat that declares a footprint but
+	// is pinned elsewhere is judged free - 0, as it always was.
+	offCard := litSeat
+	offCard.Device = "0"
+	live.ScreenCards = screenAt("1")
+	ok, reason, _ = LayerAdmissible(lit, offCard, live, nil)
+	if !ok || !strings.Contains(reason, "display_floor: free 15.0 GiB − footprint 0.0 = 15.0 ≥ floor 4.0 on display device 1 (index 1)") {
+		t.Fatalf("literal index, seat pinned off the card: got ok=%v %q", ok, reason)
+	}
+
 	// A UUID pin resolves through the probe and prints as itself.
 	uuid, uuidSeat := displayLayerAndSeat(t)
 	uuid.DisplayDevice = "GPU-8888bbbb"
