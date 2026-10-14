@@ -4,8 +4,11 @@
 // https://github.com/RulinShao/ContextBench at commit
 // fb533c18c78a82d3f1b2047a9c1700735cf829ae (Apache-2.0). The word table, the line and
 // sentinel construction and the order of random draws follow the original so the same
-// seed streams the same operations; the code and comments are written for this
-// repository and no upstream prose is carried over.
+// seed streams the same operations. The operation mix is ported: the texts of the
+// streamed operations (sentinel lines, headers, the needle and filler wording) are the
+// original's, byte for byte, because the stream digest has to match. The code and
+// comments are written for this repository and none of the upstream's documentation or
+// instruction prose is carried over.
 //
 // The task: each streamed chunk carries a few needle lines to keep verbatim and a
 // large filler block to let go. The grade is the share of needle lines still present

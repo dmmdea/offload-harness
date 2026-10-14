@@ -4,8 +4,11 @@
 // https://github.com/RulinShao/ContextBench at commit
 // fb533c18c78a82d3f1b2047a9c1700735cf829ae (Apache-2.0). The service, level and word
 // tables, the line construction and the order of random draws follow the original so
-// the same seed streams the same operations; the code and comments are written for
-// this repository and no upstream prose is carried over.
+// the same seed streams the same operations. The operation mix is ported: the texts of
+// the streamed operations (sentinel lines, headers, question wording) are the original's,
+// byte for byte, because the stream digest has to match. The code and comments are
+// written for this repository and none of the upstream's documentation or instruction
+// prose is carried over.
 //
 // The task: a service log streams in batches, then questions arrive. A lookup asks
 // for the message of the line with a given request id; a count asks how many lines

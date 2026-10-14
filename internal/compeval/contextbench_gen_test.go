@@ -14,6 +14,8 @@ import (
 // original generator at the commit named in the ported files' headers, run with the
 // same parameters; matching them byte for byte is what "seed 42 here is seed 42
 // there" means. Only digests are kept: no upstream output is committed.
+// scripts/contextbench_parity_regen.py regenerates them from a checkout of the pinned
+// upstream commit and reports any digest that no longer appears in these tables.
 var cbParityCases = []struct {
 	name   string
 	family string

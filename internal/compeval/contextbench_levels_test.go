@@ -15,6 +15,9 @@ import (
 // The digests of the four levels that cbParityCases also covers agree with those, which
 // were taken from the original generator; the rest were checked once against the original
 // generator for every level and every published seed (42 to 49) and are pinned as data.
+// scripts/contextbench_parity_regen.py regenerates the operations digests (opsSHA) from a
+// checkout of the pinned upstream commit; the gold digests are this port's own JSON and
+// guard the port, not the upstream.
 var cbLevelPins = []struct {
 	family, level string
 	nOps          int
