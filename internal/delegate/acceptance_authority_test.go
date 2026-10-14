@@ -25,7 +25,7 @@ func TestEvalAcceptanceGradesGroundedAgainstTheContractDocuments(t *testing.T) {
 	if f := EvalAcceptance(c, core.AgentWireResult{Output: "the cache is named pelican"}); len(f) != 0 {
 		t.Fatalf("a claim the documents carry must pass, got %v", f)
 	}
-	f := EvalAcceptance(c, core.AgentWireResult{Output: "the cache is named walrus"})
+	f := EvalAcceptance(authorityContract("contains:@grounded:walrus"), core.AgentWireResult{Output: "the cache is named walrus"})
 	if len(f) != 1 || !strings.Contains(f[0], "none of the 1 context documents") {
 		t.Fatalf("a claim no document carries must fail and say why, got %v", f)
 	}

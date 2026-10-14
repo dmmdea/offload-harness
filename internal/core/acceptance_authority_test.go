@@ -256,7 +256,9 @@ func TestAWeakerAuthorityNeverClosesAStrongerClaim(t *testing.T) {
 // weakest check, an unqualified check pulls it to none, and anything that did
 // not pass leaves it open.
 func TestClosedAtIsTheWeakestCheck(t *testing.T) {
-	o := func(auth Authority, v Verdict) AcceptanceOutcome { return AcceptanceOutcome{Authority: auth, Verdict: v} }
+	o := func(auth Authority, v Verdict) AcceptanceOutcome {
+		return AcceptanceOutcome{Authority: auth, Verdict: v}
+	}
 	tests := []struct {
 		name string
 		in   []AcceptanceOutcome

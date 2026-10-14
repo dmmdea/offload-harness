@@ -1116,6 +1116,13 @@ func normalizeDocName(name string) string {
 // result is still text-checkable. The field verbs REQUIRE Structured and
 // fail closed without it — quality-first: an unmet precondition is a failed
 // check, never a skipped one.
+//
+// contains:, regex: and not_contains: also take an optional AUTHORITY qualifier at
+// the head of the argument (contains:@grounded:<s>, regex:@field=<name>:<re>,
+// not_contains:@answer:<s>; acceptance_authority.go has the grammar and the
+// levels). It is not a verb: the verb set above stays closed, a node one release
+// behind still parses the line, and an unqualified check below behaves exactly as
+// it always did.
 
 // AcceptanceKind is the closed verb set of the v1 acceptance DSL.
 type AcceptanceKind string
@@ -1138,10 +1145,14 @@ const (
 // ParseAcceptanceCheck — a zero AcceptanceCheck fails every Eval.
 type AcceptanceCheck struct {
 	Kind AcceptanceKind
-	Arg  string // substring, or field name for the field verbs
+	Arg  string // substring, or field name for the field verbs (the authority qualifier is not part of it)
 	N    int    // min_items threshold
-	raw  string // the original DSL string, echoed in failure reasons
-	re   *regexp.Regexp
+	// Authority is the level of an authority-qualified contains:, regex: or
+	// not_contains: check (acceptance_authority.go); AuthNone for every other check.
+	Authority Authority
+	field     string // the structured field an AuthField check reads
+	raw       string // the original DSL string, echoed in failure reasons
+	re        *regexp.Regexp
 }
 
 // ParseAcceptanceCheck parses one DSL string. Unfalsifiable shapes are parse
@@ -1154,7 +1165,11 @@ func ParseAcceptanceCheck(s string) (AcceptanceCheck, error) {
 	if !found {
 		return AcceptanceCheck{}, fmt.Errorf("acceptance check %q: want <verb>:<args> with verb one of contains, not_contains, regex, min_items, nonempty", s)
 	}
-	c := AcceptanceCheck{Kind: AcceptanceKind(kind), Arg: rest, raw: s}
+	rest, auth, field, qerr := splitAuthority(AcceptanceKind(kind), rest)
+	if qerr != nil {
+		return AcceptanceCheck{}, fmt.Errorf("acceptance check %q: %w", s, qerr)
+	}
+	c := AcceptanceCheck{Kind: AcceptanceKind(kind), Arg: rest, Authority: auth, field: field, raw: s}
 	switch c.Kind {
 	case AccContains:
 		if rest == "" {
@@ -1244,6 +1259,9 @@ func (c AcceptanceCheck) Pattern() *regexp.Regexp { return c.re }
 // schema helpers (AcceptedFields) read the check the way Eval does instead of
 // splitting the argument a second time.
 func (c AcceptanceCheck) Fields() []string {
+	if c.field != "" {
+		return []string{c.field} // an AuthField check reads exactly the field it names
+	}
 	switch c.Kind {
 	case AccMinItems:
 		if c.Arg != "" {
@@ -1262,6 +1280,12 @@ func (c AcceptanceCheck) Fields() []string {
 // reasons surface verbatim in the delegator's merge decision and the
 // delegation ledger — "failed" without a why is unactionable telemetry.
 func (c AcceptanceCheck) Eval(res AgentWireResult) (pass bool, reason string) {
+	if c.Authority != AuthNone {
+		// A qualified check is graded by Grade; Eval has no context documents, so a
+		// grounded check can never close here, and an unknown is not a pass.
+		o := c.gradeQualified(res, nil)
+		return o.Verdict == VerdictPass, o.Reason
+	}
 	structured, output := res.Structured, res.Output
 	switch c.Kind {
 	case AccContains:

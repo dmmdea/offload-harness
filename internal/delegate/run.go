@@ -7218,19 +7218,18 @@ func (r *runner) pollOnce(ctx context.Context, base, jobID string) (jobPoll, err
 func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []string {
 	var failures []string
 	for _, a := range contract.Acceptance {
-		chk, err := core.ParseAcceptanceCheck(a)
-		if err != nil {
-			failures = append(failures, err.Error())
+		o, parsed := gradeCheck(a, contract, wire)
+		if o.Verdict == core.VerdictPass {
 			continue
 		}
-		if pass, reason := chk.Eval(wire); !pass {
-			// A digest that claims nothing and says the page does not carry what was asked restates none of the page's
-			// words, and is not about another document either (HonestAbsence reads the structure, not a phrase).
-			if strings.Contains(a, docAnchorTag) && HonestAbsence(wire.Structured) {
-				continue
-			}
-			failures = append(failures, reason)
+		// A digest that claims nothing and says the page does not carry what was asked restates none of the page's
+		// words, and is not about another document either (HonestAbsence reads the structure, not a phrase).
+		if parsed && strings.Contains(a, docAnchorTag) && HonestAbsence(wire.Structured) {
+			continue
 		}
+		// An unknown (empty or absent evidence at a qualified check's level) is a failed check here, never a pass;
+		// its reason says "unknown" so it is told apart from a wrong answer.
+		failures = append(failures, o.Reason)
 	}
 	// Beside the contract's own checks, the object is read against its answer (fidelity.go):
 	// no check names the lists a node's re-pack may have emptied. A no-op for a contract with no
@@ -7239,6 +7238,29 @@ func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 		failures = append(failures, why)
 	}
 	return failures
+}
+
+// gradeCheck grades one acceptance string against the result and the contract's context documents. parsed is false
+// when the string does not parse: that is a failed check carrying the parse error, as it always was.
+func gradeCheck(a string, contract core.AgentContract, wire core.AgentWireResult) (o core.AcceptanceOutcome, parsed bool) {
+	chk, err := core.ParseAcceptanceCheck(a)
+	if err != nil {
+		return core.AcceptanceOutcome{Check: a, Verdict: core.VerdictFail, Reason: err.Error()}, false
+	}
+	return chk.Grade(wire, contract.Context), true
+}
+
+// GradeAcceptance is EvalAcceptance's per-check reading: one outcome per acceptance string, in order, each pass, fail
+// or unknown, with the authority the check demanded. It is the same grading EvalAcceptance runs (gradeCheck), without
+// the document-fingerprint excuse and the list-fidelity read that EvalAcceptance adds, so a caller that wants to state
+// the authority a contract closed at passes the outcomes to core.ClosedAt.
+func GradeAcceptance(contract core.AgentContract, wire core.AgentWireResult) []core.AcceptanceOutcome {
+	out := make([]core.AcceptanceOutcome, 0, len(contract.Acceptance))
+	for _, a := range contract.Acceptance {
+		o, _ := gradeCheck(a, contract, wire)
+		out = append(out, o)
+	}
+	return out
 }
 
 // fetchViews probes every configured remote's /fleet/health, returning the
