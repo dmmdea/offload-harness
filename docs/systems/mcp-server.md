@@ -871,23 +871,29 @@ read-only unless deliberately widened. See
   (`inactive: ...` for the first, `unreadable: ...` for as long as the second lasts), beside and independent of `stale_binary`,
   and no such key while the guard is watching. The start-up capture takes the stamp from the path when the hash could not open
   the file, so a refused open does not leave the guard to stamp the file as of `mcpserver.New`.
-  **Every other door says it too (the in-band notice).** The three doors above carry `stale_binary` in their own answer, and a
-  session that called any other door (`offload_summarize`, `offload_ask`, a media door, `agent_run`) was never told that its
-  server runs an old image. `staleNotice` (`internal/mcpserver/stale_notice.go`, a receiving middleware registered after the
-  config gate, so that a config deferral carries it too) appends the same note as a **second text block** to the result of every
-  other `tools/call`, as `stale_binary: <the note>`. `Content[0]` is never touched, so a client that reads only the first block
+  **Every door says it, on every result (the in-band notice).** The three doors above carry `stale_binary` in their own answer
+  only on the path that ran the work: every refusal before it (bad arguments, no subtask, no url, a pin reason, a section that
+  does not exist) and the config gate's deferral answer with no key, and a session that called any other door
+  (`offload_summarize`, `offload_ask`, a media door, `agent_run`) was never told that its server runs an old image.
+  `staleNotice` (`internal/mcpserver/stale_notice.go`, a receiving middleware registered after the config gate, so that a config
+  deferral carries it too) appends the same note as a **second text block** to the result of every `tools/call` that does not
+  carry the signal already, as `stale_binary: <the note>`. It decides from the result, not from the door's name: a first block
+  that is a JSON object holding `stale_binary` or `stale_binary_guard` at its top level is the door's own signal and is passed
+  through with no check (the door already stat the file, and may have hashed it, for its answer, and the signal must be there
+  once); anything else gets the block, the early returns of those three doors included. A cheap substring test comes first and
+  the parse only settles an answer that has the text of a key in it, so a summary that quotes the key (nested, in a string, a
+  longer key, text that is not JSON) is still told. `Content[0]` is never touched, so a client that reads only the first block
   still gets the door's JSON, and the block is the very string `offload_status` carries under `stale_binary` (one definition, one
   cache, no way for the two to disagree). It rides on every call of a stale server, with no cap and no config key: a stale server
-  stays stale until it is reconnected, and a cap would bring the silent failure back. The three doors are passed through
-  before any check (they already stat the file, and may hash it, for their own answer), and a test pins that set against the
-  call sites in `mcpserver.go`, so a fourth door that gains the keys without being listed fails the build instead of carrying the
-  signal twice. A guard that is not watching rides the same way as `stale_binary_guard: ...`, on the first call that finds it so
+  stays stale until it is reconnected, and a cap would bring the silent failure back. A test reads the call sites in
+  `mcpserver.go` and keeps the list of the doors that carry the key in their own answer in step with them, so a fourth door that
+  gains the keys is given the same early-return and invalid-config cases in the same change. A guard that is not watching rides the same way as `stale_binary_guard: ...`, on the first call that finds it so
   and then on every 20th such call, because that is a standing condition of the process and not news. The result is copied before
   the block is appended (a handler may keep what it returned), a call that failed, a result with no content and a nil result pass
   through as they are, and the check runs after the handler finished, bounded as above (at most 2 s on the first call after a swap).
   A server that started before this release has no middleware: only a reconnect or a restart of the client puts it on the new
   image. How each client renders a second block is for the release's live check to record; the three doors above keep the key in
-  their own JSON, which does not depend on it. One limit is known from the client's documentation: a result larger than the
+  their own JSON on the path that ran the work, which does not depend on it. One limit is known from the client's documentation: a result larger than the
   client's output cap (`MAX_MCP_OUTPUT_TOKENS` in Claude Code) is stored in a file and the conversation sees a message naming it,
   so the notice of such a result lives in that file and not in the message.
   **The read does not block a rollback.** The installed file is opened through `gpulease.OpenShared`, which on Windows grants

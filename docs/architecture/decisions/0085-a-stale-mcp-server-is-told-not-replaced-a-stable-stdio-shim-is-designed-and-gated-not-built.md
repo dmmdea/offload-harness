@@ -13,10 +13,11 @@ running the old one. On the reference fleet 13 of 18 MCP processes were older th
 lost subtasks were traced to delegators that predated the fix that would have saved them (0.184.0, D-36).
 
 Detection has shipped in steps. 0.184.0: the `process` block of `offload_status`, `gpu doctor`'s older-than-installed
-marking, and a `stale_binary` string on three doors (`agent_delegate`, `offload_research`, `offload_status`). This change:
-the same note as a second text block on the result of every other door, on every call; a read of the installed image that
-cannot block a rename of it; and a line in the operator's deploy tooling that lists the MCP servers still on an older
-image after each Windows leg. None of that replaces a stale server. It tells the session, which then reconnects itself.
+marking, and a `stale_binary` string on three doors (`agent_delegate`, `offload_research`, `offload_status`), which those
+doors add only on the path that ran the work. This change: the same note as a second text block on every tool result that does
+not carry the key already, on every call (every other door, and the refusals and the config deferral of those three, decided
+from the result and not from the door's name); a read of the installed image that cannot block a rename of it; and a line in
+the operator's deploy tooling that lists the MCP servers still on an older image after each Windows leg. None of that replaces a stale server. It tells the session, which then reconnects itself.
 
 The server cannot replace itself. It must not exit or re-exec during a call (that would cut the jobs it holds), and on
 Windows there is no exec: a new process id breaks the stdio pipe the client holds. Per the Claude Code MCP documentation
@@ -50,7 +51,9 @@ no frozen binary, the client already reconnects it), the shim second.
   Windows grants only `FILE_SHARE_READ|FILE_SHARE_WRITE` (`src/syscall/syscall_windows.go`, go1.27.2). So any plain read of
   the installed image or a backup of it (a hash, a build-marker read, a shim's stat-and-read of the worker image) can make a
   rename fail on a sharing violation. This change reads the installed image through `gpulease.OpenShared` (`CreateFile` with
-  share-delete), and `internal/gpulease/openshared_test.go` shows the rename succeeding with it and failing without it.
+  share-delete). `internal/gpulease/openshared_test.go` shows the rename succeeding with it, and the Windows-only control in
+  `openshared_windows_test.go` shows it failing with a plain `os.Open` on this toolchain; that control goes red if a toolchain
+  ever grants share-delete there, which is the cue to revisit this paragraph.
   A shim must open every file it reads that way, and must never hold the worker image open without delete sharing.
 - The shim's own image is the one file no deploy may replace while any client runs it. It needs its own install path, apart
   from the swapped one, and it updates only by a client restart.
