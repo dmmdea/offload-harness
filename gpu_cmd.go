@@ -317,6 +317,9 @@ func runGPUStatus(args []string) error {
 	if info.Draining {
 		excl += "  (draining: new runs wait, in-flight runs complete)"
 	}
+	if info.HostRAMWaitGiB == 0 && !info.HolderGaveUp.IsZero() {
+		excl += "  (" + holderGaveUpNote(info.HolderGaveUp, info.HolderGaveUpWhy, info.Epoch, m.SeatWarmOwed() != "") + ")"
+	}
 	if info.HostRAMWaitGiB > 0 {
 		excl += "  (" + hostRAMAskedStatus(info.HostRAMWaitGiB, info.Age, info.HostRAMHoldUntil, time.Now(), true, info.Epoch, info.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "", info.HolderGaveUp, info.HolderGaveUpWhy) + ")"
 	}
@@ -362,6 +365,9 @@ func runGPUStatus(args []string) error {
 			declared := ""
 			if l.HostRAMGiB > 0 {
 				declared = fmt.Sprintf(", host RAM %.1f GiB", l.HostRAMGiB)
+			}
+			if l.HostRAMWaitGiB == 0 && !l.HolderGaveUp.IsZero() {
+				declared += ", " + holderGaveUpNote(l.HolderGaveUp, l.HolderGaveUpWhy, l.Epoch, m.SeatWarmOwed() != "")
 			}
 			if l.HostRAMWaitGiB > 0 {
 				declared = ", " + hostRAMAskedStatus(l.HostRAMWaitGiB, l.Age, l.HostRAMHoldUntil, time.Now(), false, l.Epoch, l.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "", l.HolderGaveUp, l.HolderGaveUpWhy)
@@ -1306,7 +1312,7 @@ func holdArgs(class string, dur, wait time.Duration, opts gpulease.Options, auto
 // runGPUHold is the detached holder itself (internal; spawned by --detach). It holds
 // the lease and exits as soon as the lease stops being ours — which is how
 // `gpu release` frees it without ever killing a process by pid.
-func runGPUHold(args []string) error {
+func runGPUHold(args []string) (retErr error) {
 	fs := flag.NewFlagSet("gpu hold", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	class := fs.String("class", "text", "lease class")
@@ -1376,8 +1382,17 @@ func runGPUHold(args []string) error {
 	defer func() {
 		// The instances kept under this lease go with it (gpu_instances.go).
 		stopInstancesOfLease(loadCfg(fs), lease, os.Stderr)
-		if rerr := lease.Release(); rerr != nil {
-			fmt.Fprintln(os.Stderr, leaseNotReleasedLine("gpu hold", lease.Epoch(), rerr, m.SeatWarmOwed() != ""))
+		if rerr := releaseHolderLease(m, lease); rerr != nil {
+			// The holder is about to exit with its lease still held: nothing polls it any more. Say so where somebody reads (the exit
+			// status, the record `gpu status` shows) and not only in the log in the temp directory.
+			warmOwed := m.SeatWarmOwed() != ""
+			fmt.Fprintln(os.Stderr, leaseNotReleasedLine("gpu hold", lease.Epoch(), rerr, warmOwed))
+			if merr := m.MarkHolderGaveUp(lease.Epoch(), rerr.Error()); merr != nil {
+				fmt.Fprintf(os.Stderr, "gpu hold: could not mark the lease record that the holder gave up (%v); `gpu status` will go on naming a holder that has gone\n", merr)
+			}
+			if retErr == nil {
+				retErr = fmt.Errorf("gpu hold: the lease (epoch %d) could not be released after %d tries and the holder is giving up: %w; run %s", lease.Epoch(), holdReleaseTries, rerr, releaseCommand(lease.Epoch(), warmOwed))
+			}
 		}
 	}()
 
@@ -1402,8 +1417,13 @@ func runGPUHold(args []string) error {
 			return nil // the old ending: the deferred Release lets the card go
 		}
 		time.Sleep(holdPollEvery)
-		if err := lease.Check(); err != nil && holderLeaseGone(lease) {
-			return nil // released or fenced out — exit quietly, the lease is not ours
+		if err := lease.Check(); err != nil {
+			if gone, last := holderLeaseGone(lease, err); gone {
+				// Released from outside, fenced out, or a record that stays unreadable: the lease is not ours (or cannot be shown to
+				// be). The holder says which it saw before it exits, since its stderr is a log nobody tails.
+				fmt.Fprintf(os.Stderr, "gpu hold: letting go of lease epoch %d: %v\n", lease.Epoch(), last)
+				return nil
+			}
 		}
 		// The reserve that took this lease enforces the host-RAM hold bound while it lives. If it died during its wait (a tool
 		// timeout, Ctrl-C, a closed terminal) nothing else would, and this process would renew the lease for ever: the incident of
@@ -1460,18 +1480,68 @@ var (
 	holdIORetryFor   = 30 * time.Second
 )
 
+// releaseHolderLease is the hidden holder's release of its own lease, tried up to holdReleaseTries times, holdReleasePause apart:
+// a release can fail for a moment (a file held open by a scanner, a sharing violation), and a holder that gives up on the first
+// failure leaves the cards held with nothing polling them. The first try is the lease's own release, the others go by epoch (a
+// lease that reports success and is still on the record is a failure, and a second Release of the same object would do nothing).
+// A lease that is not on the record any more, whatever the answers were, is released. nil on success, else the last failure.
+func releaseHolderLease(m *gpulease.Manager, lease *gpulease.Lease) error {
+	epoch := lease.Epoch()
+	var last error
+	for i := 0; i < holdReleaseTries; i++ {
+		if i > 0 {
+			time.Sleep(holdReleasePause)
+		}
+		var err error
+		if i == 0 {
+			err = lease.Release()
+		} else {
+			_, err = releaseByEpochFn(m, epoch)
+		}
+		if !leaseStillHeld(m, epoch) {
+			return nil
+		}
+		last = err
+		if last == nil {
+			last = fmt.Errorf("the release reported success, but epoch %d is still held", epoch)
+		}
+	}
+	return last
+}
+
 // holderLeaseGone confirms a failed fence before the hidden holder lets go. The holder's exit releases its lease, and its fence
 // reads the record: a read that lands while a restamp replaces the record fails for a moment on Windows, and one failed read is
 // not a lost lease. Three further looks, holdConfirmPause apart, must all fail before the lease is taken for gone; a lease that
 // really is gone (an operator release, a reclaim) costs the holder a fraction of a second more to notice.
-func holderLeaseGone(lease *gpulease.Lease) bool {
+func holderLeaseGone(lease *gpulease.Lease, first error) (bool, error) {
+	last := first
 	for i := 0; i < 3; i++ {
 		time.Sleep(holdConfirmPause)
-		if lease.Check() == nil {
-			return false
+		err := lease.Check()
+		if err == nil {
+			return false, nil
+		}
+		last = err
+	}
+	if !gpulease.IsRecordUnreadable(last) {
+		return true, last // a verdict (gone, fenced out): retrying changes nothing
+	}
+	// A READ that keeps failing (an access error, a sharing violation) passes more often than a verdict does: the lease may well be
+	// there, and the holder's exit releases it. Retry for a while, with one line, before letting go.
+	fmt.Fprintf(os.Stderr, "gpu hold: cannot read the record of lease epoch %d (%v); retrying for up to %s before letting go\n", lease.Epoch(), last, holdIORetryFor.Round(time.Second))
+	deadline := time.Now().Add(holdIORetryFor)
+	for time.Now().Before(deadline) {
+		time.Sleep(holdPollEvery)
+		err := lease.Check()
+		if err == nil {
+			return false, nil
+		}
+		last = err
+		if !gpulease.IsRecordUnreadable(err) {
+			return true, err // it became a verdict
 		}
 	}
-	return true
+	return true, last
 }
 
 // releaseHolderAtWaitEnd is the hidden holder's release of its own lease when the reserve that took it did not: the host-RAM

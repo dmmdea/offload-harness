@@ -2032,6 +2032,9 @@ func (l *Lease) Check() error {
 		return l.checkV2()
 	}
 	meta, err := l.mgr.readMeta()
+	if isIOFailure(err) {
+		return &RecordUnreadableError{Epoch: l.epoch, Err: err} // a read that failed, not a verdict
+	}
 	if err != nil || meta == nil {
 		return fmt.Errorf("gpulease: lease is gone (epoch %d); another holder has the GPU", l.epoch)
 	}

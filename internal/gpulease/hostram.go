@@ -711,7 +711,14 @@ func IsRecordUnreadable(err error) bool {
 // MarkHolderGaveUp records on the lease's record that its hidden holder gave up releasing it, and why (best effort, by a holder
 // that is about to exit with the lease still held).
 func (m *Manager) MarkHolderGaveUp(epoch uint64, why string) error {
-	return nil
+	if r := []rune(why); len(r) > 200 {
+		why = string(r[:199]) + "…"
+	}
+	at := m.now().UnixMilli()
+	return m.Restamp(epoch, func(mt *Meta) {
+		mt.HolderGaveUpMs = at
+		mt.HolderGaveUpWhy = why
+	})
 }
 
 // HostRAMHold is what this lease's OWN record says about its wait for the host: the figure it still asks for (0 = admitted, or

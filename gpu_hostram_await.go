@@ -395,7 +395,14 @@ func releaseAfterRAMWait(m *gpulease.Manager, epoch uint64, cfg config.Config, e
 // holderGaveUpNote is what `gpu status` adds to a lease whose hidden holder gave up releasing it: nothing polls the lease now, so
 // the text must not promise a release "at its next poll".
 func holderGaveUpNote(gaveUp time.Time, why string, epoch uint64, warmOwed bool) string {
-	return ""
+	if gaveUp.IsZero() {
+		return ""
+	}
+	reason := ""
+	if why != "" {
+		reason = " (" + why + ")"
+	}
+	return fmt.Sprintf("the holder gave up releasing it at %s%s and nothing polls the lease now; `%s` frees it", gaveUp.Format(time.Kitchen), reason, releaseCommand(epoch, warmOwed))
 }
 
 // hostRAMAskedStatus is what `gpu status` says about a lease that holds its cards while the host has not admitted the RAM it
@@ -411,6 +418,8 @@ func hostRAMAskedStatus(giB float64, held time.Duration, until, now time.Time, l
 	s := fmt.Sprintf("host RAM %.1f GiB asked, not yet admitted", giB)
 	heldFor := held.Round(time.Second)
 	switch {
+	case !gaveUp.IsZero():
+		return s + fmt.Sprintf(": held the cards for %s; %s", heldFor, holderGaveUpNote(gaveUp, gaveUpWhy, epoch, warmOwed))
 	case until.IsZero():
 		if long {
 			s += ": the seat is cleared first, then the host is asked"

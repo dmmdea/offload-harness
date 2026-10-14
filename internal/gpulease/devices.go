@@ -913,6 +913,9 @@ func (m *Manager) clearEpochMarkers(epoch uint64) {
 func (l *Lease) checkV2() error {
 	rec, err := readEpochRecord(l.mgr.leaseDir(), l.epoch)
 	if err != nil {
+		if isIOFailure(err) {
+			return &RecordUnreadableError{Epoch: l.epoch, Err: err} // a read that failed, not a verdict
+		}
 		return fmt.Errorf("gpulease: lease is gone (epoch %d); another holder may have the GPU", l.epoch)
 	}
 	if rec.State != stateActive {

@@ -120,10 +120,11 @@ func TestAHolderRetriesAFenceItCannotReadAndLetsGoOnlyAfterSayingWhy(t *testing.
 		cfgPath, m, _ := holderFixture(t, false)
 		fastHolder(t)
 		fastHolderRetries(t)
-		var failing atomic.Bool
-		failing.Store(true)
+		// The first read fails, the three confirming looks fail, and four more fail inside the retry window: the ninth works. Counted
+		// by reads and not by the clock, so no scheduler delay decides whether the holder reached the retry.
+		var reads atomic.Int32
 		restore := gpulease.UseCheckFault(func(uint64) error {
-			if failing.Load() {
+			if reads.Add(1) <= 8 {
 				return unreadable
 			}
 			return nil
@@ -133,9 +134,7 @@ func TestAHolderRetriesAFenceItCannotReadAndLetsGoOnlyAfterSayingWhy(t *testing.
 		stderr := captureStderr(t, func() {
 			done = runHolder(cfgPath)
 			waitForLeases(t, m, 1)
-			time.Sleep(150 * time.Millisecond) // inside the retry window
-			failing.Store(false)
-			time.Sleep(600 * time.Millisecond) // past the window: had the holder let go it would have by now
+			time.Sleep(900 * time.Millisecond) // past the retry window: had the holder let go it would have by now
 			if !m.Inspect().Held {
 				t.Error("a read that failed for a moment and then worked must not cost the holder its lease")
 			}
@@ -147,6 +146,9 @@ func TestAHolderRetriesAFenceItCannotReadAndLetsGoOnlyAfterSayingWhy(t *testing.
 		})
 		if n := strings.Count(stderr, "cannot read the record of lease epoch 1"); n != 1 {
 			t.Errorf("one line says the record cannot be read and that the holder retries, got %d:\n%s", n, stderr)
+		}
+		if strings.Contains(stderr, "letting go of lease epoch") {
+			t.Errorf("the holder did not let go:\n%s", stderr)
 		}
 		releaseAll(t, m)
 		holderEnds(t, done, 10*time.Second)
