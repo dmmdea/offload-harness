@@ -142,6 +142,55 @@ func TestSearchQueryTermsAreUniqueSortedAndBounded(t *testing.T) {
 	_ = searchQueryTerms(big)
 }
 
+// The cap on the query keeps the terms the objective names FIRST, in order of
+// appearance; the alphabet has no say in which terms survive. The kept terms are
+// then sorted, which only fixes the order every sum over them runs in.
+func TestSearchQueryTermsCapKeepsTheFirstOccurringTerms(t *testing.T) {
+	// 48 terms in a scrambled order (7 is coprime to 48, so i*7 mod 48 visits each
+	// number once), then 20 more that all sort BEFORE every one of them.
+	var words, first []string
+	for i := 0; i < searchRungMaxQueryTerms; i++ {
+		w := fmt.Sprintf("q%02d", (i*7)%searchRungMaxQueryTerms)
+		words = append(words, w)
+		first = append(first, w)
+	}
+	for i := 0; i < 20; i++ {
+		words = append(words, fmt.Sprintf("a%02d", i))
+	}
+	words = append(words, "q00", "q13") // a repeat of a kept term costs no slot and changes nothing
+	got := searchQueryTerms(strings.Join(words, " "))
+	want := append([]string(nil), first...)
+	sort.Strings(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("cap must keep the first %d terms of the objective, sorted:\n got  %v\n want %v", searchRungMaxQueryTerms, got, want)
+	}
+
+	// The decisive terms come first and a long, alphabetically earlier tail follows
+	// them: a cap by alphabet would push all three out.
+	var task []string
+	task = append(task, "retry", "backoff", "timeout")
+	for i := 0; i < 60; i++ {
+		task = append(task, fmt.Sprintf("aa%02d", i))
+	}
+	kept := map[string]bool{}
+	for _, term := range searchQueryTerms(strings.Join(task, " ")) {
+		kept[term] = true
+	}
+	for _, term := range []string{"retry", "backoff", "timeout"} {
+		if !kept[term] {
+			t.Errorf("%q opens the objective and must survive the cap", term)
+		}
+	}
+	if len(kept) != searchRungMaxQueryTerms || kept["aa47"] || kept["aa59"] {
+		t.Errorf("want exactly the first %d terms (3 named, then aa00..aa44), got %d terms", searchRungMaxQueryTerms, len(kept))
+	}
+
+	// Under the cap nothing is dropped and the output is sorted whatever the order of appearance.
+	if got := strings.Join(searchQueryTerms("timeout fetch alpha"), ","); got != "alpha,fetch,timeout" {
+		t.Errorf("terms under the cap must come back sorted, got %s", got)
+	}
+}
+
 func TestSearchRungTaskIsTheLastUserMessageOfThePreamble(t *testing.T) {
 	msgs := []Msg{
 		{Role: "system", Content: "sys"},
