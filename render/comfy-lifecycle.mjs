@@ -349,7 +349,7 @@ export function resolveIdleBound(env = process.env, log = () => {}) {
 export async function fetchIdleProbe(api) {
   try {
     const r = await fetch(api + "/offload/idle", { signal: AbortSignal.timeout(3000) });
-    if (!r.ok) return null;
+    if (!r.ok) return null; // a 404 is an instance without the pack
     const j = await r.json();
     return j && typeof j === "object" && !Array.isArray(j) ? j : null;
   } catch {
