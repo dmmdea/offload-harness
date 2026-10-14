@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/agent"
 )
 
 // cbLevelPins pin every published level at seed 42: the operation count, the sha256 of
@@ -83,5 +85,70 @@ func TestContextBenchEveryPublishedLevelIsPinned(t *testing.T) {
 				t.Fatalf("gold digest %s, want %s", got, p.goldSHA)
 			}
 		})
+	}
+}
+
+// cbUncompactedTokens is the size of the transcript a perfect agent builds when nothing is
+// compacted: the instruction, every operation delivered as a tool result and, for
+// sudoku_sketchpad, the whole board panel the task makes the agent print after each move.
+func cbUncompactedTokens(t *testing.T, in *CBInstance) int {
+	t.Helper()
+	msgs := cbPreamble(in, CBDeliveryToolResult)
+	var boards []map[string]string
+	var versions []int
+	if in.Family == CBFamilySudoku {
+		versions, boards = cbFold(in)
+	}
+	for i := range in.Ops {
+		msgs = append(msgs, cbOpMsgs(in, CBDeliveryToolResult, i)...)
+		if in.Family == CBFamilySudoku {
+			// Operation i produces gold version i+1; version 0 is the starting panel.
+			msgs = append(msgs, agent.Msg{Role: "assistant", Content: cbTestPanelText(in.Gold.Side, boards[i+1], versions[i+1])})
+		}
+	}
+	return agent.EstimateTokens(msgs)
+}
+
+// The default level is where the context has to be managed at all: the smallest published
+// level whose uncompacted transcript is over the usable budget of record. The sudoku stream
+// alone never gets there (12k tokens at t150); the panels the agent re-prints do.
+func TestContextBenchDefaultLevelIsTheSmallestOneThatOverflowsTheBudget(t *testing.T) {
+	usable := CBDefaultBudget - CBDefaultReserve
+	for _, family := range CBFamilies {
+		def, err := CBLookupLevel(family, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := CBLevelNames(family)
+		at := -1
+		for i, n := range names {
+			if n == def.Name {
+				at = i
+			}
+		}
+		if at < 0 {
+			t.Fatalf("%s: default level %s is not a published level", family, def.Name)
+		}
+		in, err := GenerateCB(family, def.Name, 42)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := cbUncompactedTokens(t, in)
+		t.Logf("%s/%s: %d tokens uncompacted (usable %d)", family, def.Name, got, usable)
+		if got <= usable {
+			t.Errorf("%s/%s: the default level's transcript is %d tokens, within the usable budget %d: nothing would be compacted", family, def.Name, got, usable)
+		}
+		if at == 0 {
+			continue
+		}
+		smaller, err := GenerateCB(family, names[at-1], 42)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = cbUncompactedTokens(t, smaller)
+		t.Logf("%s/%s: %d tokens uncompacted (the next smaller level)", family, names[at-1], got)
+		if got > usable {
+			t.Errorf("%s/%s: the next smaller level already overflows (%d > %d tokens), so %s is not the smallest default", family, names[at-1], got, usable, def.Name)
+		}
 	}
 }
