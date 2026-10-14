@@ -597,5 +597,5 @@ const DefaultKeepRecent = defaultKeepRecent
 // refuse already-compacted transcripts: replaying compaction-of-compacted text
 // would measure the ladder against its own output and bias every ratio toward 1.
 func IsCompactionArtifact(content string) bool {
-	return isElided(content) || strings.HasPrefix(content, skeletonPrefix) || isDeduped(content) || isLogCollapsed(content)
+	return isElided(content) || strings.HasPrefix(content, skeletonPrefix) || isDeduped(content)
 }

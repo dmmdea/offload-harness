@@ -130,6 +130,16 @@ func isLogCollapsed(content string) bool {
 	return len(content) >= len(logsPrefix) && content[:len(logsPrefix)] == logsPrefix
 }
 
+// IsLogCollapseArtifact reports whether a tool body is a PRODUCT of the
+// optional log-collapse rung. It is deliberately separate from
+// IsCompactionArtifact: that predicate also drives the default ladder (the
+// always-on dedupe rung) and the live loop's re-execute-versus-refuse decision,
+// and a rung that is off must not change either, even for a body that merely
+// quotes the header. The trace harvest, which refuses already-compacted
+// transcripts whichever ladder produced them, asks both questions. Wiring the
+// rung into the live loop later must also teach resultDestroyed this predicate.
+func IsLogCollapseArtifact(content string) bool { return isLogCollapsed(content) }
+
 // logsEligible is the fail-closed gate: only a plain-text body of sensible size
 // that no other rung has already rewritten may be folded.
 func logsEligible(content string) bool {

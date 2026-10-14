@@ -458,8 +458,11 @@ func TestLogCollapseIdempotent(t *testing.T) {
 		if ok2 || twice != once {
 			t.Errorf("body %d: second application changed the body (ok=%v)", i, ok2)
 		}
-		if !IsCompactionArtifact(once) {
-			t.Errorf("body %d: a collapsed body must count as a compaction artifact", i)
+		if !IsLogCollapseArtifact(once) {
+			t.Errorf("body %d: a collapsed body must count as a log-collapse artifact", i)
+		}
+		if IsCompactionArtifact(once) {
+			t.Errorf("body %d: IsCompactionArtifact must not change with the rung off or on", i)
 		}
 	}
 }
