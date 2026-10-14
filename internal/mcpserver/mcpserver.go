@@ -3714,8 +3714,21 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 		HeadSHA      string                   `json:"head_sha"`
 		GateReceipts []reviewlane.GateReceipt `json:"gate_receipts"`
 	}
-	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
-		return bad, nil
+	// The durable trace sits beside the ledger, wherever the operator put it (RSI-OH-4#6), and
+	// refuse seals every exit that comes before a diff was read (RSI-OH-4#0): a refusal is a
+	// diff-less NOT_RUN naming its reason, bound to no bytes, and it leaves its trace row like
+	// every other result of this door. The deferral shape and reason are the ones this door
+	// always gave; outcome, outcome_reason and evidence ride beside them.
+	cfg := s.p.Cfg()
+	tracePath := reviewlane.TracePathFor(cfg.LedgerPath, cfg.BaseDir())
+	refuse := func(reason string) (*mcp.CallToolResult, error) {
+		return jsonResult(reviewlane.Seal(map[string]any{"deferred": true, "reason": reason}, reviewlane.Refused(reason), reviewlane.Run{}, tracePath))
+	}
+	// Decoded here, not through parseArgs, so that arguments that do not decode are sealed too.
+	if raw := req.Params.Arguments; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return refuse("bad arguments: " + err.Error())
+		}
 	}
 	// EXACTLY one source. Accepting both and silently preferring one would let a
 	// caller review a diff it did not think it was reviewing — the review is only
@@ -3723,9 +3736,9 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	hasInline, hasPath := strings.TrimSpace(in.Diff) != "", strings.TrimSpace(in.DiffPath) != ""
 	switch {
 	case hasInline && hasPath:
-		return jsonResult(map[string]any{"deferred": true, "reason": "pass diff OR diff_path, not both — the review must be unambiguous about which bytes it judged"})
+		return refuse("pass diff OR diff_path, not both — the review must be unambiguous about which bytes it judged")
 	case !hasInline && !hasPath:
-		return jsonResult(map[string]any{"deferred": true, "reason": "one of diff (inline text) or diff_path (a file holding a unified diff) is required"})
+		return refuse("one of diff (inline text) or diff_path (a file holding a unified diff) is required")
 	}
 	diff := in.Diff
 	// The second fingerprint check re-reads the diff right before the result is returned. Held
@@ -3741,20 +3754,20 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 		if readRoot == "" {
 			wd, werr := os.Getwd()
 			if werr != nil {
-				return jsonResult(map[string]any{"deferred": true, "reason": "cannot determine working dir for read_root: " + werr.Error()})
+				return refuse("cannot determine working dir for read_root: " + werr.Error())
 			}
 			readRoot = wd
 		}
 		absRoot, aerr := filepath.Abs(readRoot)
 		if aerr != nil {
-			return jsonResult(map[string]any{"deferred": true, "reason": "bad read_root: " + aerr.Error()})
+			return refuse("bad read_root: " + aerr.Error())
 		}
 		docs, ierr := delegate.InlineContextPaths([]string{in.DiffPath}, absRoot)
 		if ierr != nil {
-			return jsonResult(map[string]any{"deferred": true, "reason": ierr.Error()})
+			return refuse(ierr.Error())
 		}
 		if len(docs) != 1 {
-			return jsonResult(map[string]any{"deferred": true, "reason": "diff_path read returned no content"})
+			return refuse("diff_path read returned no content")
 		}
 		diff = docs[0].Text
 		recheck = func() (string, error) {
@@ -3771,9 +3784,8 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// SHA-bound evidence (RSI-OH-4), built BEFORE the builder and before any seat: the diff's
 	// fingerprint and the deterministic gate receipts exist first, so even a refusal below is
 	// bound to the bytes it refused. seal stamps outcome + evidence on every exit from here on
-	// and leaves the durable trace beside the ledger.
+	// (the exits above it went through refuse) and leaves the durable trace beside the ledger.
 	ev, evErr := reviewlane.NewEvidence(diff, in.BaseSHA, in.HeadSHA, in.GateReceipts)
-	tracePath := filepath.Join(s.p.Cfg().BaseDir(), reviewlane.TraceFile)
 	seal := func(out map[string]any, run reviewlane.Run) (*mcp.CallToolResult, error) {
 		run.Recheck = recheck
 		return jsonResult(reviewlane.Seal(out, ev, run, tracePath))
@@ -3829,7 +3841,6 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// ForeignFence, not Fenced: the holder's own session (GPU_LEASE_EPOCH) keeps
 	// the local path exactly as it was. Its lease exists to keep this work on
 	// these cards.
-	cfg := s.p.Cfg()
 	var fleetNote map[string]any
 	// The local loop runs on the planner seat, so the fence is asked of that seat's cards
 	// (plan P4): a render on another card does not send the review off the box.
