@@ -486,16 +486,30 @@ can never make the retry re-send the bytes the server just refused.
 
 **Optional log-collapse rung (`compactOpts.LogCollapse`, default off).** An extra rung between GCF
 and skeleton, in `internal/agent/rung_logs.go`: it folds each run of three or more consecutive
-near-identical lines in an OLDER result of a command tool (`run`, `run_shell`) into its first
-line plus a count (`[... N similar lines folded ...]`). A file read, a search, a fetch, a result whose
-call is not in the transcript and a result whose tool-call id is declared by more than one call are
-never touched: an unknown or ambiguous producer fails closed. Two lines are near-identical when they
-match after every digit-bearing token (numbers, timestamp fields, counters, short hex ids), UUID, hex
-run of eight or more characters and terminal control sequence is masked and trailing whitespace is
-trimmed; indentation still counts. Because digits are masked, lines that differ only in a number (a
-status code, a port) fold into one, and the footer says so. Every blank line, every line that looks
-like an error, warning, failure or test summary and the first 8 and last 4 lines stay verbatim and
-never join a run, so a log made only of one repeated warning does not shrink. "Looks like" means the
+near-identical lines in an OLDER result of a build or test command into its first line, a count of
+the lines between (`[... N similar lines folded ...]`) and its last line. The gate reads the call
+that produced the result, not only the tool's name. A result is folded only when its call is a
+build or test invocation: `go test`, `go build` or `go vet`, `cargo build`, `cargo test` or
+`cargo check`, `npm test` or `npm run build`/`test`, `pytest` or `python -m pytest`, and (through
+`run_shell` only, since the `run` tool's allowlist has no `make`) `make`. Through `run_shell` the
+first word is found after any leading `NAME=value` words, and the command must be one pipeline: an
+unquoted `;`, `&&`, `||`, a lone `&`, a newline or a carriage return anywhere in it, such as
+`cd sub && go test ./...`, disqualifies it, and a pipe qualifies only into a grep-family program
+(`grep`, `egrep`, `fgrep`, `rg`, `ag`, `ack`) or a pass-through filter (`head`, `tail`, `sort`,
+`uniq`, `wc`, `cut`, `sed`, `awk`, `tee`, `cat`); `xargs` or any other program after a pipe
+disqualifies. Everything else is never touched: a search listing (`grep -rn`, `rg -n`, `git grep`),
+a `cat` or `sed` of a data file, a linter's diagnostics, a file read, a fetch, a result whose
+call is not in the transcript, a result whose tool-call id is declared by more than one call, and
+a call and result that both carry an empty id. An unknown or ambiguous producer fails closed. Two
+lines are near-identical when they match after every run of digits, `0x` hex literal, UUID, hex run
+of eight or more characters and terminal control sequence is masked and trailing whitespace is
+trimmed; indentation still counts and the letters around a digit run still count, so `worker7` and
+`worker12` match while `x1` and `y2`, or `md5` and `sha256`, do not. Because digit runs are masked,
+lines that differ only in a number (a status code, a port) fold into one, and the footer says so.
+Every blank line, every line that looks like an error, warning, failure or test summary, every line
+shaped like a `path:line` or `path:line:col` diagnostic (and rustc's `--> path:line:col`) and the
+first 8 and last 4 lines stay verbatim and never join a run, so a log made only of one repeated
+warning does not shrink and two different compiler errors never fold into one. "Looks like" means the
 skeleton rung's `signalLine` plus stack-frame, traceback and test-runner summary shapes, the
 CamelCase exception names that `signalLine`'s word boundary cannot see (`TypeError`, `KeyError`,
 `AssertionError`, `NullPointerException`), a killed process, a segfault, a non-zero `exit status` and

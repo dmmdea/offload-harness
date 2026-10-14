@@ -270,20 +270,24 @@ func TestLogCollapseRungLeavesSearchFileAndLinterOutputAlone(t *testing.T) {
 		what string
 		call ToolCall
 		body string
+		// shaped is true for a listing whose lines are file:line diagnostics: the
+		// line shape keeps them whatever the call, so the control that the fold
+		// would shorten the body does not apply.
+		shaped bool
 	}{
-		{"grep -rn listing", lcShellCall("grep -rn handle ."), lcListing("internal/pkg/file%d.go:%d: result := handle(req)", 90)},
-		{"grep -rl listing", lcShellCall("grep -rl handle ."), lcListing("internal/pkg/file%d_%d.go", 90)},
-		{"rg -n listing", lcShellCall("rg -n handle"), lcListing("internal/pkg/file%d.go:%d:    return handle(req)", 90)},
-		{"git grep listing through run", lcRunCall("git", "grep", "-n", "handle"), lcListing("internal/pkg/file%d.go:%d:    return handle(req)", 90)},
-		{"cat of a data file", lcShellCall("cat users.csv"), lcListing("alice,%d,active,%d,eu-west", 90)},
-		{"sed of a data file", lcShellCall("sed -n 1,200p users.csv"), lcListing("alice,%d,active,%d,eu-west", 90)},
-		{"flake8 output", lcShellCall("flake8 ."), lcListing("app/mod%d.py:%d:80: E501 line too long (95 > 79 characters)", 90)},
-		{"a linter's summary lines", lcShellCall("ruff check"), lcListing("app/mod%d.py: %d fixable files, style only", 90)},
-		{"a build piped into xargs", lcShellCall("go test ./... | xargs flake8"), lcListing("app/mod%d.py: unit %d", 90)},
-		{"a build chained to a linter", lcShellCall("go test ./... && flake8 ."), lcListing("app/mod%d.py: unit %d", 90)},
+		{"grep -rn listing", lcShellCall("grep -rn handle ."), lcListing("internal/pkg/file%d.go:%d: result := handle(req)", 90), true},
+		{"grep -rl listing", lcShellCall("grep -rl handle ."), lcListing("internal/pkg/file%d_%d.go", 90), false},
+		{"rg -n listing", lcShellCall("rg -n handle"), lcListing("internal/pkg/file%d.go:%d:    return handle(req)", 90), true},
+		{"git grep listing through run", lcRunCall("git", "grep", "-n", "handle"), lcListing("internal/pkg/file%d.go:%d:    return handle(req)", 90), true},
+		{"cat of a data file", lcShellCall("cat users.csv"), lcListing("alice,%d,active,%d,eu-west", 90), false},
+		{"sed of a data file", lcShellCall("sed -n 1,200p users.csv"), lcListing("alice,%d,active,%d,eu-west", 90), false},
+		{"flake8 output", lcShellCall("flake8 ."), lcListing("app/mod%d.py:%d:80: E501 line too long (95 > 79 characters)", 90), true},
+		{"a linter's summary lines", lcShellCall("ruff check"), lcListing("app/mod%d.py: %d fixable files, style only", 90), false},
+		{"a build piped into xargs", lcShellCall("go test ./... | xargs flake8"), lcListing("app/mod%d.py: unit %d", 90), false},
+		{"a build chained to a linter", lcShellCall("go test ./... && flake8 ."), lcListing("app/mod%d.py: unit %d", 90), false},
 	}
 	for _, c := range bodies {
-		if _, ok := logCollapse(c.body); !ok {
+		if _, ok := logCollapse(c.body); !ok && !c.shaped {
 			t.Fatalf("%s: control: the body is one the fold would shorten, or this test proves nothing", c.what)
 		}
 		if lcFolds(c.call, c.body) {
@@ -577,7 +581,7 @@ func TestLogCollapseKeepsTheFirstAndLastLineOfARun(t *testing.T) {
 		t.Errorf("the footer must count the hidden lines as N-2:\n%s", got)
 	}
 	// A run of three folds one line, and the marker says so in the singular.
-	long := "GET /export?format=csv&columns=all 200 %dms streamed through the worker pool without buffering, with the full column list echoed back to the caller so that the line is long enough to be worth folding"
+	long := lcLongLine
 	three := []string{fmt.Sprintf(long, 5), fmt.Sprintf(long, 6), fmt.Sprintf(long, 7)}
 	got, ok = logCollapse(lcJoin(lcHead, three, []string{"between", "the", "windows", "we", "check"}, lcTail))
 	if !ok || !strings.Contains(got, "[... 1 similar line folded ...]\n") {

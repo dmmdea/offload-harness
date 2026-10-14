@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/dmmdea/offload-harness/internal/gcf"
@@ -12,13 +13,13 @@ import (
 
 // Log-collapse rung — an OPTIONAL rung of the compaction ladder, default off
 // (compactOpts.LogCollapse). It sits after the lossless GCF rung and before
-// skeleton pruning: a tool result that is a build, test or server log is
-// mostly runs of lines that differ only in a timestamp, a request id or a
-// counter, and the line a later step needs (an error, a failing test, the
-// summary) is rarely inside such a run. The rung folds each run into its first
-// line plus a count, keeps every line that looks like a problem or a test
-// summary, keeps the first and last few lines, and appends a footer that says
-// what was folded. Strictly less destructive than a skeleton, which drops
+// skeleton pruning: a tool result that is a build or test log is mostly runs
+// of lines that differ only in a timestamp, a request id or a counter, and the
+// line a later step needs (an error, a failing test, the summary) is rarely
+// inside such a run. The rung folds each run into its first line, a count and
+// its last line, keeps every line that looks like a problem, a diagnostic or a
+// test summary, keeps the first and last few lines, and appends a footer that
+// says what was folded. Strictly less destructive than a skeleton, which drops
 // everything that is not a head, tail or signal line.
 //
 // Provenance. The idea of compressing build and test logs while keeping the
@@ -43,11 +44,12 @@ import (
 //     marker or a GCF block, or makes the rewrite panic, comes back unchanged.
 //   - Scoped like every other rung: logsRung only touches tool-role bodies in
 //     the window the ladder passes it ([protectedEnd, recentStart)), skips
-//     pinned call ids, folds only the output of the command tools (run,
-//     run_shell; an unknown, ambiguous or any other producer fails closed),
-//     rewrites Content only (never Role, ToolCallID or the assistant tool
-//     calls, so pairing is intact), works oldest-first and stops at the first
-//     fit. The protected preamble and the recent turns are therefore never
+//     pinned call ids, folds only the output of a build or test invocation
+//     (logsCallIsBuild: the call is read, not just the tool name; a search, a
+//     file read, a linter, a chained command, an unknown or ambiguous producer
+//     or an empty call id fails closed), rewrites Content only (never Role,
+//     ToolCallID or the assistant tool calls, so pairing is intact), works
+//     oldest-first and stops at the first fit. The protected preamble and the recent turns are therefore never
 //     edited, and the edit point only moves forward, which is what keeps the
 //     server's KV prefix as stable as the rest of the ladder (ADR 0017: any
 //     edit costs a re-prefill, so a rung must not scatter edits).
@@ -63,10 +65,18 @@ import (
 //     are identical: the cost is that a log made only of one repeated warning
 //     does not shrink. A count-preserving fold of signal runs is a later tune
 //     for the measurement gate, not a decision made here.
-//   - Matching ignores every digit-bearing token, so three consecutive lines
-//     such as "port 8080", "port 8081", "port 9090" fold to the first plus a
-//     count and the other two values are not recoverable from the transcript.
-//     The footer says what was folded, and the original size is in the header.
+//   - Matching ignores digit runs (the letters around them still count), so
+//     three consecutive lines such as "port 8080", "port 8081", "port 9090"
+//     fold to the first and the last plus a count and the middle value is not
+//     recoverable from the transcript. The footer says what was folded, and the
+//     original size is in the header.
+//   - Only a command that is, from its first word to its end, one build or test
+//     invocation (optionally piped into a pass-through filter) is folded.
+//     "cd sub && go test ./..." chains, so its result is left alone: the body
+//     may hold another command's output, and the scan is a quote-aware first-
+//     word test, not a shell parser.
+//   - A line shaped like a file:line or file:line:col diagnostic is kept
+//     verbatim and never joins a run, even when forty of them are identical.
 //   - A body that begins with logsPrefix is taken for an already collapsed
 //     body, because the prefix is the only idempotence marker there is: with
 //     the rung on, a raw body that merely quotes the header is skipped by this
@@ -105,11 +115,13 @@ const (
 	logsPrefix = "[log-collapse: original "
 )
 
-// logsVolatile matches the tokens that vary between otherwise identical log
-// lines: a UUID, a hex run of eight or more characters, and any alphanumeric
-// token containing a digit (numbers, timestamp fields, counters, short hex ids,
-// "worker7"). Alternatives are tried leftmost-first, so a UUID is masked whole.
-var logsVolatile = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|\b[0-9a-fA-F]{8,}\b|[A-Za-z0-9_]*[0-9][A-Za-z0-9_]*`)
+// logsVolatile matches what varies between otherwise identical log lines: a
+// UUID, a 0x hex literal, a hex run of eight or more characters, and any other
+// run of digits (numbers, timestamp fields, counters). Only the digits go: the
+// letters around them stay, so "worker7" and "worker12" match but "x1" and
+// "y2", or "md5" and "sha256", do not. Alternatives are tried leftmost-first, so
+// a UUID is masked whole.
+var logsVolatile = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|\b0[xX][0-9a-fA-F]+\b|\b[0-9a-fA-F]{8,}\b|[0-9]+`)
 
 // logsANSI matches a terminal control sequence (colours, cursor moves).
 var logsANSI = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
@@ -125,7 +137,7 @@ var logsANSI = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 var logsExtraKeep = regexp.MustCompile(`^\s+at\s+\S|^\s+File ".+", line \d+|^Traceback \(most recent call last\)|^goroutine \d+ \[|^(PASS|FAIL|SKIP)\b|^Ran \d+ tests?\b|^(Tests?|Test Suites?|Test Files?):|^test result:|\bpanicked at\b|\b\w*(Error|Exception)\b|(?i:\bsegmentation fault\b|\bkilled\b)|^exit status [1-9]|\bERR!`)
 
 // logsKey is the equality key of a line for run detection: terminal control
-// sequences removed, every volatile token replaced by NUL (which cannot occur
+// sequences removed, every volatile run replaced by NUL (which cannot occur
 // in a body logsEligible accepts), trailing whitespace and carriage return
 // trimmed. Indentation is kept: it carries structure.
 func logsKey(line string) string {
@@ -134,9 +146,33 @@ func logsKey(line string) string {
 	return strings.TrimRight(line, " \t\r")
 }
 
+// logsDiagnostic is the opening of a compiler, linter or test-failure line that
+// points at a source position: "path:line:", "path:line:col" (with or without a
+// trailing colon), and rustc's "--> path:line:col". Whether the path part is a
+// path is decided in code (logsIsDiagnostic): it must contain a separator or a
+// dot and a letter, so a clock time or an address never qualifies.
+var logsDiagnostic = regexp.MustCompile(`^\s*(?:-->\s+)?(\S+?):[1-9][0-9]*(?::[1-9][0-9]*)?(?::|\s*$)`)
+
+// logsIsDiagnostic reports whether a line is a file:line diagnostic. Two such
+// lines that differ only in their position or in a number are two different
+// diagnostics, so masking digits must never make them one run.
+func logsIsDiagnostic(line string) bool {
+	m := logsDiagnostic.FindStringSubmatch(line)
+	if m == nil || !strings.ContainsAny(m[1], `/\.`) {
+		return false
+	}
+	for _, r := range m[1] {
+		if unicode.IsLetter(r) {
+			return true
+		}
+	}
+	return false
+}
+
 // logsKeep reports whether a line must survive verbatim and never join a run:
 // a blank line, a line that looks like an error, warning, failure or test
-// summary (signalLine), or one of the extra shapes. Each test is made on the
+// summary (signalLine), a file:line diagnostic, or one of the extra shapes. Each
+// test is made on the
 // line as written AND with its terminal control sequences removed, as logsKey
 // does: an ESC [ 31 m colour code leaves no word boundary before the word it
 // colours, and a line of nothing but colour codes is blank to a reader.
@@ -148,10 +184,10 @@ func logsKeep(line string) bool {
 	if strings.TrimSpace(plain) == "" {
 		return true
 	}
-	if signalLine.MatchString(line) || logsExtraKeep.MatchString(line) {
+	if signalLine.MatchString(line) || logsExtraKeep.MatchString(line) || logsIsDiagnostic(line) {
 		return true
 	}
-	return plain != line && (signalLine.MatchString(plain) || logsExtraKeep.MatchString(plain))
+	return plain != line && (signalLine.MatchString(plain) || logsExtraKeep.MatchString(plain) || logsIsDiagnostic(plain))
 }
 
 // isLogCollapsed reports whether a body is already a collapsed log, so a
@@ -308,6 +344,14 @@ func logCollapse(content string) (out string, ok bool) {
 	return folded, true
 }
 
+// logsFoldMarker is the line that stands for n folded lines.
+func logsFoldMarker(n int) string {
+	if n == 1 {
+		return "[... 1 similar line folded ...]"
+	}
+	return fmt.Sprintf("[... %d similar lines folded ...]", n)
+}
+
 // collapseLogs does the work for logCollapse. Lines are split on "\n" only, so
 // a carriage return stays on its line and every kept line is byte-for-byte as
 // it was; one trailing newline is dropped (the footer is the new last line).
@@ -351,17 +395,20 @@ func collapseLogs(content string) (string, bool) {
 			j++
 		}
 		if run := j - i; run >= logsMinRun {
-			marker := fmt.Sprintf("[... %d similar lines folded ...]", run-1)
+			// First line, a count of the N-2 between, last line: the last line of a
+			// progress or retry run is often its final state.
+			marker := logsFoldMarker(run - 2)
 			runBytes := 0
 			for k := i; k < j; k++ {
 				runBytes += len(lines[k]) + 1
 			}
-			if len(lines[i])+1+len(marker)+1 < runBytes {
+			if len(lines[i])+1+len(marker)+1+len(lines[j-1])+1 < runBytes {
 				line(i)
 				body.WriteString(marker)
 				body.WriteByte('\n')
+				line(j - 1)
 				runs++
-				hidden += run - 1
+				hidden += run - 2
 				i = j
 				continue
 			}
@@ -378,7 +425,7 @@ func collapseLogs(content string) (string, bool) {
 		return content, false
 	}
 
-	footer := fmt.Sprintf("[log-collapse: folded %d run(s) of near-identical lines (%d lines hidden; digits are ignored when comparing lines); kept verbatim: the first %d and last %d lines and every line flagged as a problem or a test summary]",
+	footer := fmt.Sprintf("[log-collapse: folded %d run(s) of near-identical lines (%d lines hidden; digit runs are ignored when comparing lines); kept verbatim: the first %d and last %d lines and every line flagged as a problem or a test summary]",
 		runs, hidden, logsHeadLines, logsTailLines)
 	out := logsHeader(len(content), n) + body.String() + footer
 	if len(out) >= len(content) {
@@ -387,16 +434,193 @@ func collapseLogs(content string) (string, bool) {
 	return out, true
 }
 
-// logsCommandTools names the tools whose results are command output (build,
-// test and server logs): the only bodies this rung folds. A file read, a search
-// result, a fetched page or an API reply is content the model asked for
-// verbatim, and its near-identical lines (a table, a list of matches with
-// different line numbers) each carry information a fold would lose. A result
-// whose producing call cannot be found, is declared by more than one call, or
-// has any other name, is left alone: an unknown or ambiguous shape fails closed.
-var logsCommandTools = map[string]bool{"run": true, "run_shell": true}
+// The producer gate. A tool name is not enough to know what a body is: run and
+// run_shell print a build's log and also a grep listing, a cat of a data file
+// or a linter's diagnostics, and a fold would lose lines of those that differ in
+// a number only. So the rung reads the CALL that produced a body and folds it
+// only when that call is a build or test invocation (logsCallIsBuild). Anything
+// else, and anything the scan cannot read, is left alone.
 
-// logsRung folds OLDER command-output bodies in out[from:to], oldest-first,
+// logsPipeFilters are the programs a build's output may be piped into without
+// the body ceasing to be that build's output: the grep family and the
+// pass-through filters. A pipe into anything else (xargs, a linter, a script)
+// makes the body that program's output.
+var logsPipeFilters = map[string]bool{
+	"grep": true, "egrep": true, "fgrep": true, "rg": true, "ag": true, "ack": true,
+	"head": true, "tail": true, "sort": true, "uniq": true, "wc": true, "cut": true,
+	"sed": true, "awk": true, "tee": true, "cat": true,
+}
+
+// logsEnvAssign is a leading NAME=value word of a shell command.
+var logsEnvAssign = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// logsCallIsBuild reports whether a tool call is a build or test invocation:
+//
+//   - run_shell: a command line whose first word (after any NAME=value words)
+//     is go test/build/vet, cargo build/test/check, npm test or run build/test,
+//     pytest, python -m pytest/unittest, or make, with no second command after
+//     it (";", "&&", "||", "&", a newline or a carriage return outside quotes)
+//     and, if it is piped, only into logsPipeFilters programs;
+//   - run: the same programs but go, cargo, npm, pytest and python, the ones the
+//     run tool's allowlist holds (make is reachable through run_shell only).
+//
+// Arguments that are not JSON of the expected shape, or name a different key,
+// do not qualify.
+func logsCallIsBuild(c ToolCall) bool {
+	switch c.Name {
+	case "run_shell":
+		var in struct {
+			Command string `json:"command"`
+		}
+		return json.Unmarshal([]byte(c.Args), &in) == nil && logsShellCommandIsBuild(in.Command)
+	case "run":
+		var in struct {
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+		}
+		return json.Unmarshal([]byte(c.Args), &in) == nil && logsProgramIsBuild(strings.TrimSpace(in.Command), in.Args, false)
+	}
+	return false
+}
+
+// logsShellCommandIsBuild is logsCallIsBuild for a shell command line.
+func logsShellCommandIsBuild(command string) bool {
+	stages, ok := logsSplitPipeline(command)
+	if !ok {
+		return false
+	}
+	words := strings.Fields(stages[0])
+	for len(words) > 0 && logsEnvAssign.MatchString(words[0]) {
+		words = words[1:]
+	}
+	if len(words) == 0 || !logsProgramIsBuild(words[0], words[1:], true) {
+		return false
+	}
+	for _, st := range stages[1:] {
+		w := strings.Fields(st)
+		if len(w) == 0 || !logsPipeFilters[runBaseName(w[0])] {
+			return false
+		}
+	}
+	return true
+}
+
+// logsProgramIsBuild is the test on an already split program and arguments.
+// shell is true for a shell command line, where make is also a build.
+func logsProgramIsBuild(prog string, args []string, shell bool) bool {
+	if prog == "" || strings.ContainsAny(prog, " \t") {
+		return false
+	}
+	switch runBaseName(prog) {
+	case "go":
+		return len(args) > 0 && (args[0] == "test" || args[0] == "build" || args[0] == "vet")
+	case "cargo":
+		if len(args) > 0 && strings.HasPrefix(args[0], "+") { // a toolchain selector
+			args = args[1:]
+		}
+		return len(args) > 0 && (args[0] == "build" || args[0] == "test" || args[0] == "check")
+	case "npm":
+		if len(args) > 0 && (args[0] == "test" || args[0] == "t") {
+			return true
+		}
+		return len(args) > 1 && args[0] == "run" && (args[1] == "build" || args[1] == "test")
+	case "pytest":
+		return true
+	case "python", "python3":
+		return len(args) > 1 && args[0] == "-m" && (args[1] == "pytest" || args[1] == "unittest")
+	case "make":
+		return shell
+	}
+	return false
+}
+
+// logsSplitPipeline splits a shell command line into its pipeline stages, or
+// reports false when the line is not one pipeline: it runs a second command
+// after the first (an unquoted ";", "&&", "||", a lone "&", a newline or a
+// carriage return), has a pipe with nothing on one side, or leaves a quote
+// open. The redirections "2>&1", ">&2" and "&>f" are not a "&". It is a
+// quote-aware scan, not a shell parser: single quotes take no escape, double
+// quotes take a backslash, and a backslash outside quotes hides the next byte.
+func logsSplitPipeline(command string) ([]string, bool) {
+	var stages []string
+	var quote byte // 0, '\'' or '"'
+	start := 0
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		switch {
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			}
+		case quote == '"':
+			if c == '\\' {
+				i++ // the escaped byte cannot close the quote
+			} else if c == '"' {
+				quote = 0
+			}
+		case c == '\\':
+			i++
+		case c == '\'' || c == '"':
+			quote = c
+		case c == ';' || c == '\n' || c == '\r':
+			return nil, false
+		case c == '|':
+			if i+1 < len(command) && command[i+1] == '|' {
+				return nil, false
+			}
+			stages = append(stages, command[start:i])
+			if i+1 < len(command) && command[i+1] == '&' {
+				i++ // "|&" is a pipe
+			}
+			start = i + 1
+		case c == '&':
+			redirect := (i > 0 && (command[i-1] == '>' || command[i-1] == '<')) ||
+				(i+1 < len(command) && command[i+1] == '>')
+			if !redirect {
+				return nil, false
+			}
+		}
+	}
+	if quote != 0 {
+		return nil, false
+	}
+	stages = append(stages, command[start:])
+	for _, st := range stages {
+		if strings.TrimSpace(st) == "" {
+			return nil, false
+		}
+	}
+	return stages, true
+}
+
+// logsCallsByID maps every non-empty tool-call id in msgs to its call. An id
+// that more than one call declares (a backend that numbers its calls from 0 in
+// every turn, a model that invents ids) does not say which call produced a
+// result, so it is left out and such a result is unknown and fails closed. The
+// drop and cut rungs also assume unique ids; this is the same stance. An empty
+// id is no id: a call and a result that both carry one say nothing about each
+// other.
+func logsCallsByID(msgs []Msg) map[string]ToolCall {
+	calls := map[string]ToolCall{}
+	declared := map[string]int{}
+	for _, m := range msgs {
+		for _, c := range m.ToolCalls {
+			if c.ID == "" {
+				continue
+			}
+			calls[c.ID] = c
+			declared[c.ID]++
+		}
+	}
+	for id, n := range declared {
+		if n != 1 {
+			delete(calls, id)
+		}
+	}
+	return calls
+}
+
+// logsRung folds OLDER build and test output bodies in out[from:to], oldest-first,
 // until the transcript fits budget. The caller passes the ladder's own window
 // ([protectedEnd, recentStart)) and pin set, so the preamble, the recent turns
 // and every pinned result stay as they are; only Content is rewritten, never
@@ -412,21 +636,13 @@ func logsRung(out []Msg, from, to, budget int, pinned map[string]bool) {
 	if from >= to {
 		return
 	}
-	// An id that more than one call declares (a backend that numbers its calls
-	// from 0 in every turn, a model that invents ids) does not say which call
-	// produced a result, so such a result is unknown and fails closed. The
-	// drop and cut rungs also assume unique ids; this is the same stance.
-	producer := map[string]string{} // tool_call_id -> tool name
-	declared := map[string]int{}    // tool_call_id -> how many calls declare it
-	for _, m := range out {
-		for _, c := range m.ToolCalls {
-			producer[c.ID] = c.Name
-			declared[c.ID]++
-		}
-	}
+	calls := logsCallsByID(out)
 	for i := from; i < to && estimateTokens(out) > budget; i++ {
 		id := out[i].ToolCallID
-		if out[i].Role != "tool" || pinned[id] || declared[id] != 1 || !logsCommandTools[producer[id]] {
+		if out[i].Role != "tool" || id == "" || pinned[id] {
+			continue
+		}
+		if call, ok := calls[id]; !ok || !logsCallIsBuild(call) {
 			continue
 		}
 		if c, ok := logCollapse(out[i].Content); ok {
@@ -434,7 +650,3 @@ func logsRung(out []Msg, from, to, budget int, pinned map[string]bool) {
 		}
 	}
 }
-
-// logsCallIsBuild reports whether a call is a build or test invocation.
-// Stub: the gate is still the tool name alone.
-func logsCallIsBuild(c ToolCall) bool { return logsCommandTools[c.Name] }

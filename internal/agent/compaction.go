@@ -61,6 +61,12 @@ func estimateTokens(msgs []Msg) int {
 //     2a. (opts.GCF only, LOSSLESS) re-encode OLDER tool bodies that are
 //     eligible JSON arrays into GCF columnar form (internal/gcf) — states the
 //     repeated keys once, loses nothing; always tried before any lossy rung.
+//     2a'. (opts.LogCollapse only, lossy but gentler than 2b) fold each run of
+//     near-identical lines in the output of an OLDER build or test command
+//     into its first line, a count and its last line (see rung_logs.go),
+//     keeping every signal, diagnostic and summary line, oldest-first and
+//     stopping at the first fit. A search listing, a file read and a linter's
+//     output are not touched (the producer gate reads the call).
 //     2b. (opts.Skeleton only) SKELETONIZE the bodies of OLDER tool-role messages
 //     oldest-first until under budget: head/tail windows + buried signal lines
 //     kept, the rest elided to counted run markers (see skeleton.go). Strictly
@@ -98,9 +104,10 @@ func estimateTokens(msgs []Msg) int {
 type compactOpts struct {
 	GCF      bool // lossless: re-encode eligible JSON-array tool bodies (internal/gcf)
 	Skeleton bool // lossy-structural: reduce older tool bodies to signal skeletons
-	// LogCollapse (default off) folds runs of near-identical lines in OLDER tool
-	// bodies into one line plus a count, keeping every error/warning/summary line
-	// (rung_logs.go). It runs after the lossless GCF rung and before skeleton.
+	// LogCollapse (default off) folds runs of near-identical lines in OLDER build
+	// and test output into the first line, a count and the last line, keeping
+	// every error/warning/diagnostic/summary line (rung_logs.go). It runs after
+	// the lossless GCF rung and before skeleton.
 	LogCollapse bool
 	// Pinned marks tool_call_ids whose results the model DEMONSTRABLY re-requested
 	// (the circuit breaker refused an exact-repeat call for them) — the H8 ramp:
@@ -250,8 +257,8 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 	}
 
 	// Step 2a' (flag-gated, lossy but gentler than skeleton): fold runs of
-	// near-identical lines in OLDER tool bodies, oldest-first, stopping at the
-	// first fit (rung_logs.go). Same [protectedEnd, recentStart) window and pin
+	// near-identical lines in OLDER build and test output, oldest-first, stopping
+	// at the first fit (rung_logs.go; the producer gate reads the call). Same [protectedEnd, recentStart) window and pin
 	// check as every rung here, so the preamble, the recent turns and pairing stay.
 	if opts.LogCollapse {
 		logsRung(out, protectedEnd, recentStart, budget, pinned)

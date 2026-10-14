@@ -1,16 +1,25 @@
 ### Added - an optional log-collapse rung for the compaction ladder, default off
 
 - **What it does.** `compactOpts.LogCollapse` (default false) adds a rung between the GCF and skeleton rungs. In an OLDER result of
-  a command tool (`run`, `run_shell`) it folds each run of three or more consecutive near-identical lines into the first line plus
-  a count. Lines match after every digit-bearing token, UUID, long hex run and terminal control sequence is masked (the footer says
-  digits are ignored); every blank line, every line that looks like an error, warning, failure or test summary, and the first 8 and
-  last 4 lines stay verbatim. "Looks like" includes CamelCase exception names (`TypeError`, `AssertionError`,
+  a build or test command it folds each run of three or more consecutive near-identical lines into the first line, a count and the
+  last line. Lines match after every run of digits, `0x` literal, UUID, long hex run and terminal control sequence is masked (the
+  footer says digit runs are ignored) while the letters around a digit run still count (`x1` and `y2`, or `md5` and `sha256`, are
+  different lines); every blank line, every line that looks like an error, warning, failure or test summary, every `path:line` or
+  `path:line:col` diagnostic, and the first 8 and last 4 lines stay verbatim. "Looks like" includes CamelCase exception names (`TypeError`, `AssertionError`,
   `NullPointerException`), a killed process, a segfault, a non-zero `exit status` and npm's `ERR!`, and it is tested on the line as
   written and with its terminal colour removed. The body opens with `[log-collapse: original N chars, M lines]` and ends with a
   footer saying what was folded. A result whose tool-call id is declared by more than one call has no known producer and is left
   alone. The rung is one new file (`internal/agent/rung_logs.go`) plus, in `compaction.go`, a field, a call site and the
   original-size reporting described below. No flag, `Loop` setter, config key or replay option enables it yet, so nothing on a
   production path changes.
+- **The gate reads the call.** A result is folded only when the call that produced it is a build or test invocation: `go test`,
+  `go build`, `go vet`, `cargo build`/`test`/`check`, `npm test` or `npm run build`/`test`, `pytest` or `python -m pytest`, and `make`
+  through `run_shell` (the `run` tool's allowlist has no `make`). The first word is read after any `NAME=value` words and the command
+  must be one pipeline: an unquoted `;`, `&&`, `||`, a lone `&`, a newline or a carriage return disqualifies it, and a pipe
+  qualifies only into a grep-family program or a pass-through filter (`head`, `tail`, `sort`, `uniq`, `wc`, `cut`, `sed`, `awk`,
+  `tee`, `cat`), so `xargs` or a linter after a pipe disqualifies it. A search listing, a `cat` or `sed` of a data file, a
+  linter's output, a file read and a result whose call has an empty or reused id are left alone, so the docs' statement that search
+  and file reads are never touched is now true of the code.
 - **A rung that is off changes nothing.** `IsCompactionArtifact` keeps its three clauses; the always-on dedupe rung and the live
   loop's re-execute decision both ask it, so recognising the new header there would change the default ladder for any tool body that
   quotes it (a saved collapsed log read back with `read_file`). A separate `IsLogCollapseArtifact` recognises the header, and the

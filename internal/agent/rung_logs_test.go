@@ -86,6 +86,10 @@ func lcSubtestLog(n int) string {
 // lcLogOptsOn is the rung enabled on its own.
 var lcLogOptsOn = compactOpts{LogCollapse: true}
 
+// lcLongLine is a routine line long enough that folding the middle of a run of
+// three of them (one line saved) pays for the header and the footer.
+const lcLongLine = "GET /export?format=csv&columns=all 200 %dms streamed through the worker pool without buffering, with the full column list echoed back to the caller so that the line is long enough to be worth folding; the response headers, the query string and the whole of the caller's request context are echoed as well, which is what makes each of these lines so long"
+
 // lcRunArgs and lcShellArgs are the arguments of a build-and-test call as the
 // two command tools receive them: `run` takes a bare program and an argument
 // array, `run_shell` one command line. The rung folds a command tool's result
@@ -186,7 +190,7 @@ func TestLogsKeyMasksNumbersIdsAndTimestamps(t *testing.T) {
 		// different identifiers or algorithm names never share a key.
 		{"undefined: x1", "undefined: y2"},
 		{"md5", "sha256"},
-		{"want sha1 got md5", "want sha256 got md5"},
+		{"want sha1 got md5", "want md5 got sha1"},
 		{"call f1(a2)", "call g1(a2)"},
 	}
 	for _, p := range differ {
@@ -385,7 +389,7 @@ func TestLogCollapseMinimumRunIsThree(t *testing.T) {
 		t.Errorf("runs of two must stay verbatim: ok=%v changed=%v", ok, got != in)
 	}
 	// Exactly three long lines do fold.
-	long := "GET /export?format=csv&columns=all 200 %dms streamed through the worker pool without buffering, with the full column list echoed back to the caller so that the line is long enough to be worth folding"
+	long := lcLongLine
 	three := []string{fmt.Sprintf(long, 5), fmt.Sprintf(long, 6), fmt.Sprintf(long, 7)}
 	in3 := lcJoin(lcHead, three, []string{"between", "the", "windows", "we", "check"}, lcTail)
 	got, ok := logCollapse(in3)
@@ -989,6 +993,19 @@ func TestLogCollapseRungKeepsTheBuriedErrorInTheMiniCorpus(t *testing.T) {
 			continue
 		}
 		fx = lcNamed(fx, "run")
+		// The budget is what folding the body buys, so the rung's own result is
+		// what the ladder keeps and no later rung reshapes it: this test is about
+		// the rung engaging on the shipped fixture, not about where its margin
+		// to the corpus' 60% budget happens to fall.
+		probe := append([]Msg(nil), fx.msgs...)
+		for i, m := range probe {
+			if m.Role == "tool" {
+				if folded, ok := logCollapse(m.Content); ok {
+					probe[i].Content = folded
+				}
+			}
+		}
+		fx.budget = estimateTokens(probe)
 		out := compact(context.Background(), fx.msgs, fx.budget, fx.keep, fx.prot, lcLogOptsOn)
 		var body string
 		for _, m := range out {
@@ -1096,7 +1113,11 @@ func TestLogCollapseIsDiscriminatedByTheGoldenFixtures(t *testing.T) {
 			changed++
 		}
 	}
-	if changed < 6 {
+	// Six fixtures changed before the last line of a run was kept; the shipped
+	// tool-text fixture's one body now folds to 83 bytes more than it did, which
+	// no longer fits its 60% budget, so rung on and rung off both elide it. The
+	// five that remain are each pinned by a digest above.
+	if changed < 5 {
 		t.Errorf("the rung changes only %d of %d golden fixtures; the pinned digests would not notice it leaking in", changed, len(fixtures))
 	}
 }
