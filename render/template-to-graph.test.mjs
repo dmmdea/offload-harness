@@ -927,6 +927,100 @@ test("subgraph: a bypassed or muted node inside a definition is handled like a t
   assert.deepEqual(graphOf(convert(wf))["3"].inputs, { text: "x", clip: ["1", 1] });
 });
 
+// ---- limits and collisions -----------------------------------------------------------------------------------------------
+
+// a chain of `hops` Reroute nodes between a LoadImage (id 1) and an ImageInvert (id hops + 2), built as plain data: link i runs from
+// node i to node i + 1
+function rerouteChain(hops) {
+  const nodes = [{ id: 1, type: "LoadImage", mode: 0, inputs: [], outputs: [{ name: "IMAGE", type: "IMAGE", links: [1] }, { name: "MASK", type: "MASK", links: [] }], widgets_values: ["a.png", "image"] }];
+  const links = [];
+  for (let i = 1; i <= hops + 1; i++) links.push([i, i, 0, i + 1, 0, "IMAGE"]);
+  for (let id = 2; id <= hops + 1; id++) nodes.push({ id, type: "Reroute", mode: 0, inputs: [{ name: "", type: "IMAGE", link: id - 1 }], outputs: [{ name: "", type: "IMAGE", links: [id] }] });
+  nodes.push({ id: hops + 2, type: "ImageInvert", mode: 0, inputs: [{ name: "image", type: "IMAGE", link: hops + 1 }], outputs: [{ name: "IMAGE", type: "IMAGE", links: [] }] });
+  return { version: 0.4, nodes, links };
+}
+
+test("Reroute chains of any length resolve without a stack overflow and in time that does not grow with the square of the length", () => {
+  const hops = 100000;
+  const t0 = Date.now();
+  const r = convert(rerouteChain(hops));
+  const took = Date.now() - t0;
+  const g = graphOf(r);
+  assert.deepEqual(g[String(hops + 2)].inputs, { image: ["1", 0] }, "100k reroutes are the wire they carry");
+  assert.deepEqual(Object.keys(g).sort(), ["1", String(hops + 2)].sort());
+  assert.equal(r.stats.reroutes, hops);
+  assert.ok(took < 15000, `a 100k-hop chain took ${took} ms`); // loose on purpose: a copy of the visited set per hop is minutes, a walk is well under a second
+  // closed into a loop, a long chain is still a link_cycle and not a crash
+  const loop = rerouteChain(hops);
+  loop.links.push([hops + 2, hops + 1, 0, 2, 0, "IMAGE"]);
+  loop.nodes[1].inputs[0].link = hops + 2;
+  refusalOf(convert(loop), REFUSAL.LINK_CYCLE);
+});
+
+test("a long chain of bypassed nodes resolves to the wire it carries too", () => {
+  const hops = 20000;
+  const wf = rerouteChain(hops);
+  for (const n of wf.nodes) if (n.type === "Reroute") { n.type = "ImageInvert"; n.mode = 4; n.inputs[0].name = "image"; n.outputs[0].name = "IMAGE"; }
+  assert.deepEqual(graphOf(convert(wf))[String(hops + 2)].inputs, { image: ["1", 0] }, "bypassed ImageInvert nodes pass their input through");
+});
+
+test("expansion is bounded: a nested subgraph bomb is refused as graph_too_large, whether it ends in nodes or in nothing, and a template just under the bound converts", () => {
+  assert.equal(REFUSAL.GRAPH_TOO_LARGE, "graph_too_large");
+  const BG = (n) => `5c1b0000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  // level k holds two instances of level k - 1; level 0 holds `leaf` (one real node, or nothing)
+  const bomb = (levels, leaf) => {
+    const defs = [subdef(BG(0), { ins: [], outs: [], nodes: leaf ? [{ id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] }] : [] })];
+    for (let k = 1; k <= levels; k++) defs.push(subdef(BG(k), { ins: [], outs: [], nodes: [{ id: 1, type: BG(k - 1) }, { id: 2, type: BG(k - 1) }] }));
+    return withDefs(ui([{ id: 1, type: BG(levels) }]), ...defs);
+  };
+  const t0 = Date.now();
+  const nodes = refusalOf(convert(bomb(18, true)), "graph_too_large"); // 2^18 = 262,144 real nodes
+  assert.equal(nodes.details.limit, 100000);
+  assert.equal(typeof nodes.details.node, "string", "the details name where the limit was passed");
+  refusalOf(convert(bomb(18, false)), "graph_too_large"); // 2^18 instances and not one real node: instances count too
+  assert.ok(Date.now() - t0 < 15000, "refused at the limit, not after expanding it");
+  const ok = convert(bomb(16, true)); // 2^16 = 65,536 real nodes
+  assert.equal(graphOf(ok) !== undefined, true);
+  assert.equal(ok.stats.nodes, 65536);
+});
+
+test("expansion is bounded: subgraphs nested past 64 levels are refused as graph_too_large, tens of thousands deep included, not an internal_error from the stack", () => {
+  const BG = (n) => `5c1b0000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const depth = (levels) => {
+    const defs = [subdef(BG(0), { ins: [], outs: [], nodes: [{ id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] }] })];
+    for (let k = 1; k <= levels; k++) defs.push(subdef(BG(k), { ins: [], outs: [], nodes: [{ id: 1, type: BG(k - 1) }] }));
+    return withDefs(ui([{ id: 1, type: BG(levels) }]), ...defs);
+  };
+  const deep = refusalOf(convert(depth(20000)), "graph_too_large"); // the converter overflowed its stack somewhere past 5,000
+  assert.equal(deep.details.limit, 64);
+  assert.equal(deep.details.what, "subgraph depth");
+  // depth(L) nests L + 1 instances: 64 are allowed, a 65th is not
+  assert.equal(Object.hasOwn(graphOf(convert(depth(63))), Array(65).fill(1).join(":")), true, "64 levels of nesting convert; the leaf's id is the path through all of them");
+  refusalOf(convert(depth(64)), "graph_too_large");
+});
+
+test("ids that collide are refused as bad_template, never resolved to whichever came last", () => {
+  const def = subdef(SG(1), { ins: [], outs: [], nodes: [{ id: 5, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] }] });
+  // a root node whose string id is the path of an inner node: both would be the API node "2:5"
+  const live = ui([
+    { id: 2, type: SG(1) },
+    { id: "2:5", type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["b.png", "image"] },
+  ]);
+  const clash = refusalOf(convert(withDefs(live, def)), REFUSAL.BAD_TEMPLATE);
+  assert.equal(clash.details.id, "2:5");
+  // the same clash with a node that is never emitted still breaks the trail keys of the wires through it
+  const note = ui([{ id: 2, type: SG(1) }, { id: "2:5", type: "Note", wv: ["x"] }]);
+  assert.equal(refusalOf(convert(withDefs(note, def)), REFUSAL.BAD_TEMPLATE).details.id, "2:5");
+  // a clash between two instances' inner ids, through a string id that reads like a path
+  const twice = ui([{ id: "a", type: SG(1) }, { id: "a:5", type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["c.png", "image"] }]);
+  refusalOf(convert(withDefs(twice, def)), REFUSAL.BAD_TEMPLATE);
+  // no clash, no refusal: the ids differ
+  assert.deepEqual(Object.keys(graphOf(convert(withDefs(ui([{ id: 2, type: SG(1) }, { id: "2-5", type: "Note", wv: ["x"] }]), def)))), ["2:5"]);
+  // two subgraph definitions with one id
+  const dup = refusalOf(convert(withDefs(ui([{ id: 2, type: SG(1) }]), def, subdef(SG(1), { ins: [], outs: [], nodes: [] }))), REFUSAL.BAD_TEMPLATE);
+  assert.equal(dup.details.subgraph, SG(1));
+});
+
 // ---- refusals ------------------------------------------------------------------------------------------------------------
 
 test("an unknown node class is refused with every class named and where it sits, never guessed; muted and bypassed ones do not count", () => {
