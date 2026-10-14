@@ -129,9 +129,20 @@ func absenceOnly(v any, statements *int) bool {
 	}
 }
 
+// excusesFingerprint is the one reading of the honest-absence excuse, shared by the merge gate (EvalAcceptance) and the
+// quarantine (excusedAbsence) so the two cannot disagree: a check is excused only when it is a document fingerprint that
+// PARSED and was graded a FAIL, and the digest is an honest absence. An unknown is not excused (an unknown is never a pass,
+// and dropping it would read it as one), and neither is a parse error. o and parsed come from gradeCheck, the same grading
+// that decides the verdict.
+func excusesFingerprint(a string, o core.AcceptanceOutcome, parsed bool, wire core.AgentWireResult) bool {
+	return parsed && o.Verdict == core.VerdictFail && strings.Contains(a, docAnchorTag) && HonestAbsence(wire.Structured)
+}
+
 // excusedAbsence reports whether the result misses the contract's document fingerprint and is excused because its digest is
 // an honest absence (HonestAbsence). EvalAcceptance drops that failure; the quarantine reads this to count the result as
-// neither a strike nor a pass, since an absence says nothing about whether the node reads the right document.
+// neither a strike nor a pass, since an absence says nothing about whether the node reads the right document. The check is
+// graded the way EvalAcceptance grades it (gradeCheck, with the contract's context documents), never through Eval, which has
+// none: a grounded fingerprint the documents carry PASSES, and a passing result is a quarantine pass, not an excused absence.
 func excusedAbsence(contract core.AgentContract, wire core.AgentWireResult) bool {
 	if !HonestAbsence(wire.Structured) {
 		return false
@@ -140,11 +151,8 @@ func excusedAbsence(contract core.AgentContract, wire core.AgentWireResult) bool
 		if !strings.Contains(a, docAnchorTag) {
 			continue
 		}
-		chk, err := core.ParseAcceptanceCheck(a)
-		if err != nil {
-			continue
-		}
-		if pass, _ := chk.Eval(wire); !pass {
+		o, parsed := gradeCheck(a, contract, wire)
+		if excusesFingerprint(a, o, parsed, wire) {
 			return true
 		}
 	}

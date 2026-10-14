@@ -3,6 +3,7 @@ package delegate
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 )
@@ -15,7 +16,7 @@ func authorityWarnings(c core.AgentContract, raw string, chk core.AcceptanceChec
 	switch chk.Authority {
 	case core.AuthGrounded:
 		for _, d := range c.Context {
-			if d.Text != "" {
+			if strings.TrimSpace(d.Text) != "" { // the reading Grade takes: a blank document is no document
 				return nil
 			}
 		}

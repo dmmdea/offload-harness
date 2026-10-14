@@ -7223,8 +7223,9 @@ func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 			continue
 		}
 		// A digest that claims nothing and says the page does not carry what was asked restates none of the page's
-		// words, and is not about another document either (HonestAbsence reads the structure, not a phrase).
-		if parsed && strings.Contains(a, docAnchorTag) && HonestAbsence(wire.Structured) {
+		// words, and is not about another document either (HonestAbsence reads the structure, not a phrase). Only a
+		// FAILED fingerprint is excused (excusesFingerprint): an unknown stays a reported failure.
+		if excusesFingerprint(a, o, parsed, wire) {
 			continue
 		}
 		// An unknown (empty or absent evidence at a qualified check's level) is a failed check here, never a pass;
