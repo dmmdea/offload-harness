@@ -79,6 +79,21 @@ var compactKeep = []compactKeepEntry{
 		Why:      "pin_reason vocabulary: locality",
 	},
 	{
+		Tools:    []string{"agent_delegate", "offload_research"},
+		Sentence: "measurement: the call measures a specific place (a benchmark, a bake, a seat A/B); route local or remote.",
+		Why:      "pin_reason vocabulary: measurement, the call measures a specific place",
+	},
+	{
+		Tools:    []string{"agent_delegate", "offload_research"},
+		Sentence: "operator: the operator named this placement for this call; route local or remote.",
+		Why:      "pin_reason vocabulary: operator, the operator named this placement",
+	},
+	{
+		Tools:    []string{"agent_delegate"},
+		Sentence: "1 = urgent (claimed first on every node).",
+		Why:      "scheduling band 1 = urgent: the one priority value compact left unexplained, next to the kept -1 and 0",
+	},
+	{
 		Tools:    []string{"agent_delegate"},
 		Sentence: "A call can only narrow the fleet, never add a node: a URL outside delegate_remotes is refused and never dialled, and a box with no delegate_remotes accepts none.",
 		Why:      "trust boundary: a call can narrow the fleet and never add a node",

@@ -72,8 +72,13 @@ type droppedEnumValue struct {
 	Tool, Path, Value, Reason string
 }
 
-// droppedEnumValues may be empty, and is: every value the check found was kept instead.
-var droppedEnumValues = []droppedEnumValue{}
+// droppedEnumValues are the values the check found that compact may leave unexplained. The two lines of the transcribe route's own
+// description are explained once in the kept tool-level route sentence, which names all three values: the default auto, local pins
+// it to this box and remote forces a fleet node (the remote line stays too, because it carries the deferred:true protocol).
+var droppedEnumValues = []droppedEnumValue{
+	{Tool: "offload_transcribe", Path: "#/properties/route", Value: "auto", Reason: "the kept tool-level route sentence says route (default auto) places the work, on this box's whisper when it is free and on a fleet node's otherwise, and that the audio is sent as 16 kHz mono Opus"},
+	{Tool: "offload_transcribe", Path: "#/properties/route", Value: "local", Reason: "the kept tool-level route sentence says local pins the work to this box, which is all the parameter's own local line adds"},
+}
 
 func isDroppedEnumValue(tool, path, value string) bool {
 	for _, d := range droppedEnumValues {
