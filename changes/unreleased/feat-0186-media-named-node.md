@@ -101,7 +101,7 @@
   models/sub/wan-vae.safetensors t5.safetensors], want fastwan-q8.gguf,high.gguf,wan-vae.safetensors,t5.safetensors`; and `a node with
   no ComfyUI install published rows` (three rows with every file at -1), in `internal/mediacap` and in `internal/fleetnode`. **Not red
   first, and the history says so:** three pins were added green because the code already had the behaviour and no test held it: the
-  four weight roles of an sd.cpp row (dropping the high-noise expert or the T5 survived every earlier test and all 74 mutants above),
+  four weight roles of an sd.cpp row (dropping the high-noise expert, or the T5, was SURVIVED on the tree before this fix, so the whole earlier suite missed it),
   a named call on a machine with no fleet, and the cross-package family fold; each was then proved by a mutant. 17 more single-line
   mutants through `scripts/mutation-check.sh` on a `git archive` copy of the committed tree, each landed on one line, compiled, was
   restored byte for byte and ended RED: mediacap (9), the four sd.cpp roles one by one, the bare-name `path.Base`, the ComfyUI gate
