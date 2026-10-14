@@ -214,6 +214,26 @@ func gateTool(ft, ct *mcp.Tool, dropped map[string]droppedSentence) gateResult {
 	return res
 }
 
+// compactForGate is what a client receives for tool under the compact profile: compactTool's result with its schema decoded the way a
+// client decodes it (compactTool returns the schema as raw JSON, which descriptionsByPath cannot walk).
+func compactForGate(t *testing.T, tool *mcp.Tool) *mcp.Tool {
+	t.Helper()
+	c := compactTool(tool)
+	if c.InputSchema == nil {
+		return c
+	}
+	b, err := json.Marshal(c.InputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(b, &schema); err != nil {
+		t.Fatal(err)
+	}
+	c.InputSchema = schema
+	return c
+}
+
 // gateSurfaceProblems runs the gate over one surface and returns every problem and the totals. A tool that is in the full list and
 // not in the compact one is a problem too.
 func gateSurfaceProblems(t *testing.T, surface gateSurface, dropped map[string]map[string]droppedSentence, mutate func(*mcp.Tool) *mcp.Tool) (gateResult, []string) {
@@ -224,7 +244,7 @@ func gateSurfaceProblems(t *testing.T, surface gateSurface, dropped map[string]m
 		if mutate != nil {
 			ft = mutate(ft)
 		}
-		r := gateTool(ft, compactTool(ft), dropped[ft.Name])
+		r := gateTool(ft, compactForGate(t, ft), dropped[ft.Name])
 		total.kept += r.kept
 		total.dropped += r.dropped
 		total.leads += r.leads
@@ -400,11 +420,14 @@ func TestGateReportsEveryUnclassifiedProbeInALiveDescription(t *testing.T) {
 				}
 				return withToolDescription(tool, func(d string) string { return addSentence(d, probe) })
 			}},
-			{"parameter, at the end", func(tool *mcp.Tool) *mcp.Tool {
+			{"parameter, after the opening sentence", func(tool *mcp.Tool) *mcp.Tool {
 				if tool.Name != "offload_transcribe" {
 					return tool
 				}
-				return withParamDescription(t, tool, func(d string) string { return addSentence(d, probe) }, "route")
+				return withParamDescription(t, tool, func(d string) string {
+					sents := splitSentences(d)
+					return strings.Join(append([]string{sents[0], probe}, sents[1:]...), " ")
+				}, "route")
 			}},
 		} {
 			_, got := gateSurfaceProblems(t, surface, dropped, site.mutate)

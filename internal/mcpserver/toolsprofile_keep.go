@@ -507,6 +507,108 @@ var compactKeep = []compactKeepEntry{
 		Sentence: "On any failure (no upscale binding on this machine, missing file, half-given or out-of-range size, bad scale/method, render error, size mismatch) it returns deferred:true.",
 		Why:      "the deferral protocol: the lane hands the work back as deferred:true and the caller does it another way",
 	},
+	// Sentences found by the review of every non-opening sentence of every description (the gate reads them all): rules and warnings a
+	// caller must not be without that no keyword list had named. Same standard as above: kept verbatim, with the reason.
+	{
+		Tools:    []string{"agent_delegate"},
+		Sentence: "A list here REPLACES the roster for this call, so a one-node list confines every subtask of the call to that node.",
+		Why:      "a list in remotes REPLACES the roster, so a one-node list is how a call is confined to one node",
+	},
+	{
+		Tools:    []string{"agent_delegate"},
+		Sentence: "The grant pins the whole call to this box: its pin_reason is locality, implied when you give none",
+		Why:      "the allow_browse grant pins the whole call to this box (pin_reason locality, implied): a consequence of setting it on one subtask",
+	},
+	{
+		Tools:    []string{"agent_delegate"},
+		Sentence: "Use for digest / extract / summarize-shaped contracts where the measured fast seat is adequate (blind coverage 4.65 vs the default's 8.53 — judgment and coverage contracts stay on the default).",
+		Why:      "which contracts the fast layer is for: digest, extract and summarize shapes only, judgment and coverage contracts stay on the default (measured)",
+	},
+	{
+		Tools:    []string{"agent_run"},
+		Sentence: "NOTE the advertised set may be NARROWED: a box can set a default agent_profile (small-seat tiers do, because an un-narrowed tool list measurably collapses a small planner), and a narrowed profile such as \"research\" drops search_files and the whole offload_* cascade.",
+		Why:      "the advertised tool set may be narrowed by the box's agent_profile: do not assume the offload cascade is available inside the run",
+	},
+	{
+		Tools:    []string{"offload_animate_character", "offload_edit_image_generative", "offload_generate_audio", "offload_generate_video", "offload_inpaint_image", "offload_upscale_image"},
+		Sentence: "Re-send the SAME request with it within 10 minutes to resume that place with the arrival time it had; omit it on a first call.",
+		Why:      "how to resume a queued place: re-send the SAME request with the waiter_token within 10 minutes; omit it on a first call",
+	},
+	{
+		Tools:    []string{"offload_browse"},
+		Sentence: "A pinned sidecar (browser-use jev-ultrafast over browser-harness/CDP) opens a background tab in the operator's already-running, logged-in Chromium browser, observes the page as an indexed element table, and executes one CLICK / TYPE_TEXT / SELECT / SCROLL / WAIT per decision.",
+		Why:      "the run happens in the operator's already-running, logged-in browser: the privilege boundary behind the SAFETY and allow_hosts rules",
+	},
+	{
+		Tools:    []string{"offload_edit_image_generative"},
+		Sentence: "Note it re-renders everything, so fine detail outside the intended change will shift — prefer inpaint when a mask is possible.",
+		Why:      "a generative edit re-renders everything, so fine detail outside the intended change shifts: prefer inpaint when a mask is possible",
+	},
+	{
+		Tools:    []string{"offload_edit_image_generative"},
+		Sentence: "Address them in the prompt as <image2>..<image10>; image is <image1>",
+		Why:      "how a multi-reference edit addresses its images in the prompt: image is <image1>, images are <image2>..<image10>",
+	},
+	{
+		Tools:    []string{"offload_edit_image_generative"},
+		Sentence: "Prefer switching preset over setting steps/cfg by hand: half-overriding the pairing renders successfully and looks wrong",
+		Why:      "prefer switching preset over setting steps/cfg by hand: half-overriding the pairing renders successfully and looks wrong",
+	},
+	{
+		Tools:    []string{"offload_enhance_low_light"},
+		Sentence: "Preview-grade.",
+		Why:      "the enhancement is preview-grade, not a production pass (the same warning depth carries)",
+	},
+	{
+		Tools:    []string{"offload_extract"},
+		Sentence: "THE FIRST DOOR for one text + one schema (register A-102): seconds on the entry rung, grounding-checked, automatic climb on failure; agent_delegate is for extraction that needs reading across several documents.",
+		Why:      "door choice: the first door for one text and one schema; agent_delegate is for extraction across several documents",
+	},
+	{
+		Tools:    []string{"offload_generate_image"},
+		Sentence: "prompt is required (prose sentences beat tag lists on DiT models; quoted text renders as literal text); optional: negative (active on models served with real CFG), width/height (default = the model's native resolution), steps, seed, out.",
+		Why:      "how to write the prompt: prose beats tag lists on DiT models, and quoted text renders as literal text",
+	},
+	{
+		Tools:    []string{"offload_generate_image"},
+		Sentence: "Caveat: unpaired quote marks used as inch marks can pair into unintended spans and force the (safe) raw-prompt fallback — spell out inches when a prompt also quotes text.",
+		Why:      "unpaired quote marks used as inch marks can pair into spans and force the raw-prompt fallback: spell out inches when a prompt also quotes text",
+	},
+	{
+		Tools:    []string{"offload_generate_image", "offload_run_graph"},
+		Sentence: "The job goes on when the call returns; keep it under your client's tool-call timeout.",
+		Why:      "the job goes on when the call returns: keep wait_s under the client's tool-call timeout",
+	},
+	{
+		Tools:    []string{"offload_generate_image", "offload_run_graph"},
+		Sentence: "tk-...: a place in this machine's own line; re-send the SAME request with it within 10 minutes to resume that place, and the call brings the place into the cluster queue.",
+		Why:      "how to resume the tk- place: re-send the SAME request with the token within 10 minutes",
+	},
+	{
+		Tools:    []string{"offload_inpaint_image"},
+		Sentence: "Values well below 1.0 can produce muted/gray fill on the stock VAEEncodeForInpaint path — prefer 1.0 unless you know the tradeoff",
+		Why:      "denoise well below 1.0 can produce muted or gray fill on the stock inpaint path: prefer 1.0 unless the tradeoff is known",
+	},
+	{
+		Tools:    []string{"offload_research"},
+		Sentence: "Caps: 12 URLs per call, 2 MiB fetched / 96 KiB text per page, 30 s per fetch.",
+		Why:      "research caps: 12 URLs per call, 2 MiB fetched and 96 KiB text per page, 30 s per fetch",
+	},
+	{
+		Tools:    []string{"offload_status"},
+		Sentence: "To size or place a contract, pass section:\"brief\" (fleet + one-line gpu_lease/local verdicts + per-card gpu_cards + process, the stale-image signal); section:<block> returns one block.",
+		Why:      "how to size or place a contract: pass section:\"brief\"; section:<block> returns one block",
+	},
+	{
+		Tools:    []string{"offload_summarize"},
+		Sentence: "THE FIRST DOOR for one text + one mechanical question (register A-102): seconds on the entry rung, automatic climb to the escalation and reasoning rungs on a margin, schema or grounding failure; agent_delegate is for multi-document read-and-reason, and a contract whose goal is to summarize one file is the wrong door.",
+		Why:      "door choice: the first door for one text and one mechanical question; agent_delegate is for multi-document read-and-reason, and a contract to summarize one file is the wrong door",
+	},
+	{
+		Tools:    []string{"offload_video_watch"},
+		Sentence: "Slower than video_describe (one vision call per window); scale window_sec/fps for very long files.",
+		Why:      "video_watch is slower than video_describe (one vision call per window): scale window_sec and fps for very long files",
+	},
 	// The accelerator tables (acceltools.go). A box that lists a device as a FLEET accelerator advertises its tools as forwarders, and
 	// registerAccelTools appends the forwarding note to each description, after an opening sentence that says "LOCAL ... on-box": the
 	// note is the sentence that says the call goes to another node and the image bytes travel with it. The note names the device, so
