@@ -61,6 +61,9 @@ func estimateTokens(msgs []Msg) int {
 //     2a. (opts.GCF only, LOSSLESS) re-encode OLDER tool bodies that are
 //     eligible JSON arrays into GCF columnar form (internal/gcf) — states the
 //     repeated keys once, loses nothing; always tried before any lossy rung.
+//     2a'. (opts.SearchResults only, default off) THIN older search listings to the
+//     lines that matter for the objective (BM25, a per-file cap, an error boost, a
+//     counted footer; see rung_search.go), before 2b so the skeleton never sees one.
 //     2b. (opts.Skeleton only) SKELETONIZE the bodies of OLDER tool-role messages
 //     oldest-first until under budget: head/tail windows + buried signal lines
 //     kept, the rest elided to counted run markers (see skeleton.go). Strictly

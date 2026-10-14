@@ -3,8 +3,8 @@
 - **What it does.** `compactOpts.SearchResults` (internal option, off by default) adds a rung to the agent loop's compaction ladder
   that thins older search listings: the grouped `search_files` output and bare `path:line:text` lines (as `grep -rn` or ripgrep
   print), alone or inside the `exit=` / `--- stdout ---` / `--- stderr ---` framing of `run_shell` and `run`. Each line is scored
-  with BM25 against the objective (the last user message of the protected preamble; the line's own path counts as part of the
-  line), error-looking lines get a fixed boost, and up to 30 lines, 5 per file and 15 files are kept, chosen round-robin across files
+  with BM25 against the objective (the last user message of the protected preamble, taken as its first 48 distinct terms in order
+  of appearance; the line's own path counts as part of the line), error-looking lines get a fixed boost, and up to 30 lines, 5 per file and 15 files are kept, chosen round-robin across files
   and written back in listing order under a counted footer (`[... 74 of 100 lines elided, 12 of 30 files elided ...]`). The tool's
   own "more matches" or "truncated" note is kept. Anything that is not, line for line, one of those shapes (the `web_search` list,
   `mode:"files"` output, test output, an error result, binary or non-UTF-8 text) comes back untouched, and so does a result that is
@@ -25,8 +25,9 @@
   error boost), the caps, file diversity, the footer counts, the shell tools' real framing and truncation note, and the rung's place in
   the ladder (older tool bodies only, pins and the recent tail untouched, off by default, inert on the mini corpus). A 1,500-input
   mutated-listing sweep (a fuzz target runs the same properties) found one real defect before commit (a flat listing whose files
-  interleave was regrouped by file); 20 source mutations were each caught by a test, and every one was proved applied and restored
-  byte-clean.
+  interleave was regrouped by file); 27 source mutations were each caught by a test, and every one was proved applied and restored
+  byte-clean (one more, deleting the early return after the rung, changes no output, because every later rung guards on the budget
+  itself, so no test can tell it apart).
 - **Measured, side note only.** On the frozen fixtures the 20 listing bodies keep about 51% of their tokens under the rung and about 46%
   under the generic skeleton, so the rung is not a size win (`TestSearchRungBodySavingsReport`); its case is what it keeps: with three
   task-relevant lines planted in each of 40 listings, the rung kept 120 of 120 and the generic skeleton 48 of 120
