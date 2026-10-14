@@ -390,6 +390,7 @@ func TestTraceCorpusLoaderIsStrict(t *testing.T) {
 		"unknown source":        {strings.Replace(good, `agent-trace`, `elsewhere`, 1) + "\n", "unknown source"},
 		"negative steps":        {strings.Replace(good, `"steps":1`, `"steps":-1`, 1) + "\n", "negative steps"},
 		"empty":                 {"\n", "no runs"},
+		"zero seat tokens":      {strings.Replace(good, `"ladder_artifacts":null`, `"ladder_artifacts":null,"seat_tokens_in":0`, 1) + "\n", "seat_tokens_in must be positive"},
 		"inconsistent pager":    {strings.Replace(good, `"pager":null`, `"pager":{"basis":"measured","evictions":0,"evicted_bytes":0,"distinct_evicted":0,"refetched_distinct":0,"compaction_passes":0}`, 1) + "\n", "pager object is inconsistent"},
 		"prefill with no steps": {strings.Replace(good, `"prefill":null`, `"prefill":{"observed_steps":0,"prefill_tokens":5,"cache_tokens":0}`, 1) + "\n", "prefill object is inconsistent"},
 	}
