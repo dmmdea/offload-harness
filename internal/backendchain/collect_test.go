@@ -748,8 +748,11 @@ func TestCollectLaneActiveBackendIsTheBoundSeatsEngine(t *testing.T) {
 // running list that cannot be read, whether it answers a status or fails at the transport, a seat whose
 // health endpoint answers 503 or does not answer, a completion that fails, a completion skipped because
 // a vLLM seat holds the cards, a serving config that is missing or unparseable, no endpoint, no client).
-// Each scenario that depends on a clause also asserts the clause appeared, so a scenario that never
-// reaches it fails instead of passing for nothing.
+// The scenarios for the unreadable running list (by status, by transport and as a raw error), the skipped
+// completion, the seat that does not answer and the failed completion also assert that their clause
+// appeared, so each of those fails instead of passing for nothing if it never reaches it. The scenarios
+// for llama-swap down, a seat that answers 503, the serving config and no endpoint or client assert only
+// that some row exists and that no row carries an address, path or route.
 func TestBackendReasonsCarryNoPathOrURL(t *testing.T) {
 	ipv4 := regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
 	driveOrUNC := regexp.MustCompile(`[A-Za-z]:[\\/]|\\\\`)
