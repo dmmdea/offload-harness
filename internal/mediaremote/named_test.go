@@ -274,6 +274,24 @@ func TestANodeOutsideTheCallsRemotesIsUnknown(t *testing.T) {
 	}
 }
 
+// A URL typed with a credential in front of its host is redacted wherever the call prints or files it: the refusal's reason and data,
+// and the placement, the way every roster entry is.
+func TestAUrlNamedWithACredentialIsNeverEchoed(t *testing.T) {
+	a := startNode(t, nodeOpts{id: "render-a"})
+	cfg := namedClient(t, a)
+	for name, res := range map[string]core.Result{
+		"unknown":     Run(context.Background(), cfg, &recordingRunner{}, named("http://operator:hunter2@192.0.2.9:18811/", nil), "", nil),
+		"route local": Run(context.Background(), cfg, &recordingRunner{}, named("http://operator:hunter2@192.0.2.9:18811/", nil), "local", nil),
+	} {
+		if res.OK || strings.Contains(res.Reason+string(res.Data)+res.Meta.Placement, "hunter2") {
+			t.Errorf("%s: the credential is echoed: %+v", name, res)
+		}
+		if !strings.Contains(res.Reason, "192.0.2.9") {
+			t.Errorf("%s: the refusal still names the node it refused: %s", name, res.Reason)
+		}
+	}
+}
+
 func TestTheNodeThatIsThisMachineIsRefused(t *testing.T) {
 	a := startNode(t, nodeOpts{id: "render-a"})
 	cfg := namedClient(t, a)

@@ -219,7 +219,7 @@ func RunWith(ctx context.Context, cfg config.Config, runner Runner, req core.Req
 		return contractDefer(nerr.Error(), core.Meta{})
 	}
 	if named != "" && r == RouteLocal {
-		return contractDefer(fmt.Sprintf("node %q names a fleet node and route local runs this call on this machine: drop one of them", named), core.Meta{})
+		return contractDefer(fmt.Sprintf("node %q names a fleet node and route local runs this call on this machine: drop one of them", shownNode(named)), core.Meta{})
 	}
 	if r == RouteLocal {
 		return runner.Run(ctx, req)
@@ -244,7 +244,7 @@ func RunWith(ctx context.Context, cfg config.Config, runner Runner, req core.Req
 		placement = "remote: no " + laneName(req) + " lane on this machine"
 	}
 	if named != "" {
-		placement = "remote: named node " + named
+		placement = "remote: named node " + shownNode(named)
 	}
 	// The call is the remote lane's own from here on: it writes its asker ledger row and, once a node is
 	// chosen, its one PAIR card, like composeremote and the other remote lanes (0.165.0, D5-D11). The

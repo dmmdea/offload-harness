@@ -42,6 +42,15 @@ const (
 	refusalNodeBelowMinVRM = "node_below_min_vram"
 )
 
+// shownNode is a name as it is printed and filed: an id as typed, a URL redacted the way every roster entry is (no credential an
+// entry was pasted with reaches a message, a ledger row or an answer).
+func shownNode(name string) string {
+	if strings.Contains(name, "://") {
+		return rosterprobe.Members([]string{name})[0].Shown()
+	}
+	return name
+}
+
 // namedTask reports whether a call of this task may name a node: video, animation and audio.
 func namedTask(t core.TaskType) bool {
 	return t == core.TaskGenerateVideo || t == core.TaskAnimateCharacter || t == core.TaskGenerateAudio
@@ -122,10 +131,12 @@ func (p *namedPick) annotate(res core.Result) core.Result {
 // returns another node: a node that cannot take the call is a refusal or a capacity defer, and the caller decides what to do.
 func pickNamed(ctx context.Context, cfg config.Config, bases []string, name string, req core.Request, pl planned, doorTask string) (base, node string, pick *namedPick, err error) {
 	lane := pl.fleetTask
+	typed := name // what the caller typed; what is printed and filed is shownNode(typed)
+	name = shownNode(typed)
 	refuse := func(class string, noNode bool, word, msg, family string, missing []string) *namedRefusal {
 		return &namedRefusal{class: class, noNode: noNode, msg: msg, Refusal: word, Node: name, Lane: lane, Family: family, Missing: missing}
 	}
-	byURL := strings.Contains(name, "://")
+	byURL := strings.Contains(typed, "://")
 	var (
 		readings = rosterprobe.Probe(ctx, bases, cfg.FleetAuthToken, healthTimeout)
 		match    = -1
@@ -137,7 +148,7 @@ func pickNamed(ctx context.Context, cfg config.Config, bases []string, name stri
 		if r.Err == nil && strings.TrimSpace(r.View.NodeID) != "" {
 			id = r.View.NodeID
 		}
-		hit := (byURL && strings.EqualFold(normBase(name), r.Base)) || (!byURL && r.Err == nil && strings.EqualFold(strings.TrimSpace(r.View.NodeID), name))
+		hit := (byURL && strings.EqualFold(normBase(typed), r.Base)) || (!byURL && r.Err == nil && strings.EqualFold(strings.TrimSpace(r.View.NodeID), typed))
 		if hit && match < 0 {
 			match = i
 		}
