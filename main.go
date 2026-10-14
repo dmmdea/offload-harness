@@ -3607,6 +3607,9 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// config: pure config plus one file, informational like the skew and token rows, and silent without an
 	// agent seat.
 	writeFleetCapacitySection(w, cfg)
+	// Endpoints that name a box by a private-range IP literal instead of a tailnet name: pure config, a
+	// warning only (never an exit code), and silent on a config with none.
+	writeLANIPEndpointsSection(w, cfg)
 	// Fourth in the band, for the same reason: where the data lives is config plus a
 	// volume list, so a serving layer that is down must not hide it (register C-92).
 	dataOnOS := writeDataHomeSection(w, data)

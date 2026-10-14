@@ -2261,6 +2261,9 @@ recorded as known offenders with their reason rather than silently skipped — a
   readiness, node snapshots, candidate diff
 - [`render/templates-license-map.json`](../../render/templates-license-map.json) — the harness-owned
   licence map, keyed by Hugging Face repo id
+- [`render/builder-drift.mjs`](../../render/builder-drift.mjs), [`render/builder-drift-specs.mjs`](../../render/builder-drift-specs.mjs),
+  [`render/testdata/builder-drift.json`](../../render/testdata/builder-drift.json) — the builder drift guard:
+  which template widget each `wf-*.mjs` builder copied, and the hashes it was verified against
 - [`render/testdata/templates-catalog/`](../../render/testdata/templates-catalog/README.md) — its
   fixtures: trimmed upstream templates (MIT) and hand-written edge cases
 - [`render/template-to-graph.mjs`](../../render/template-to-graph.mjs) — the template-to-API converter:
@@ -3373,6 +3376,113 @@ rule files differ is scored with them anyway and `rules_check` says so, and `mai
 confined to it is not seen. An `extra_model_paths.yaml` entry that is rooted but has no drive letter
 (`/models/x`) under a drive-lettered `base_path` resolves onto that drive under Windows path join and is left as
 written here (measured against ComfyUI's own loader, not on a live file).
+
+### Builder drift guard
+
+`render/builder-drift.mjs` guards the `render/wf-*.mjs` builders that were copied from a template of the
+`comfyui-workflow-templates-json` package. A template widget that changes under a builder that copied it
+(upstream workflow_templates PR #1308: a pose-end percent wired to the pose-start input) goes unseen
+otherwise, because the builder keeps building the old recipe.
+
+- **What is recorded.** `render/testdata/builder-drift.json`, per builder and view (a preset or a template
+  variant): the template name, the package versions, `templateSha256` and `builderSha256` (sha256 of the recipe
+  widgets as the template and as the builder's output graph carry them) and one digest pair per widget with a
+  status: `same`; `deliberate` (the builder knowingly differs, the reason is in the spec); `unreviewed` (a
+  difference the first run found that nobody has judged yet); `template-only` (a wiring check, or a pinned
+  pass-through expression). Names and hashes only: no template JSON, text or widget value is stored in the
+  repository.
+- **Where each widget lives, and why a locator never reads a linked widget.** `render/builder-drift-specs.mjs`
+  pairs a template locator with a builder-graph locator per widget. A widget whose input is linked (to a subgraph
+  input, or to another node) keeps an old value in its own `widgets_values`; the value that runs comes through
+  the link. So `W` (a node's widget, by index and input name) and `I` (the widget a root subgraph instance
+  promotes) throw when the widget they point at is linked, naming the builder, the key and the fix, and the spec
+  points at the source instead: `I` for a subgraph input the root instance promotes, `W` on the primitive that
+  feeds it (a primitive behind a switch is read on the branch being checked), `P` for the legacy form in which the
+  interior widget is linked to a subgraph input, the root instance lists it in `proxyWidgets`, carries no value at
+  its position in that list (the instance's `widgets_values` follow the list, not the order of the subgraph's
+  inputs) and has nothing wired to its input for the widget, so the interior widget is the only place the value
+  lives (the extractor checks all four facts). A wiring is checked first and sends the spec to the source that
+  feeds it, whatever else the instance carries, because `I` throws on a wired input. A value the instance carries
+  is read by `I` only where its position in `proxyWidgets` is also its place among the subgraph's widget-typed
+  inputs, because `I` indexes by input order, not by `proxyWidgets`; the message says which case it is, and where
+  the two positions differ, or the input is not widget-typed (so `I` does not count it), it says that no locator
+  reads that position.
+  A math node that only passes a value through (the LTX frame rate) is pinned as a template-only item,
+  so a changed expression cannot hide behind the locator that skips it.
+- **Builder side, offline.** `node --test render/builder-drift.test.mjs` has one test per builder
+  (`builder drift: wf-krea2`): it rebuilds the graph with fixed arguments and compares every widget; a moved
+  widget fails `builder drift: <builder> [<view>]: recipe widget changed in the builder's output graph: <key>`.
+  A new `wf-*.mjs` file must be guarded or listed in `NOT_TEMPLATE_DERIVED` with a reason, or the coverage test
+  fails.
+- **Template side, with the package.** With the package's `templates` directory at hand (see the order below) the
+  same widgets are read from the template JSON; a change fails naming the builder, the template and the package
+  version the builder was last verified against, and with every widget unchanged the recorded `templateSha256`
+  must equal the recomputed hash (a hand-edited manifest fails). A newer package with every guarded widget
+  unchanged is a note. The package is not in this repository, so without a directory the template-side test is
+  skipped with that reason.
+- **CLI.** `node render/builder-drift.mjs check|explain|record [--templates-dir DIR | --comfy-dir DIR]`. `check` is
+  the same as the tests (the template side runs when a directory is given, so it can be pointed at a candidate
+  package extract before an upgrade); `explain` prints the template and builder values side by side;
+  `record` rewrites the manifest after a person has compared the builder with the template, and refuses a
+  builder/template difference the spec does not declare. The CLI fails closed: a flag that takes a value and gets
+  none (an empty or unset shell variable, `--templates-dir "$UNSET"` or `--templates-dir=`) exits 2, as does any
+  argument that starts with `-` and is not a known flag (`--template-dir`, and the single-dash `-templates-dir`
+  or `-x`), a value given to a switch (`--strict=1`) and a second positional after the verb. So neither a
+  mistyped flag nor an empty flag value can skip the template side. A directory named only through the
+  environment (`COMFY_TEMPLATES_DIR`, `COMFYUI_DIR`) that is unset, or names a tree without the package, still
+  leaves the template side skipped with a note: that is the case `check --require-templates` is for. It makes a
+  missing template side an error (exit 2) instead of a note, for an upgrade runbook. `check --strict` also fails (exit 1)
+  on every `unreviewed` manifest entry; a plain `check` leaves those green. Both flags belong to `check`.
+  **The runbook command `check --require-templates --strict` exits 1 on the committed manifest, by design,
+  until the two `unreviewed` entries are decided:** it prints exactly `2 failure(s)`, one for
+  `wf-qwen-image-edit` `[full]` `ksampler.cfg` and one for `wf-qwen-image-21` `[edit]` `encoder.resolution`.
+  Those two are the expected failures, with the template side unchanged. Any further line, or a template-side failure, is new and is the finding.
+  Use the command without `--strict` where a green gate is needed; it reports the same template side. A template
+  or manifest file may start with a byte-order mark; one that is not JSON, or a template with no `nodes` array,
+  fails with a message that names the file (the template side names the builder too).
+- **Which directory is read.** The CLI and the tests use one function, and the first source that is set decides:
+  `--templates-dir`, `--comfy-dir` (a ComfyUI tree), the `COMFY_TEMPLATES_DIR` environment variable (a `templates`
+  directory), the `COMFYUI_DIR` environment variable (a ComfyUI tree). A tree named on the command line that has no
+  package is an error; one named by the environment that has none means "no package here" and the template side
+  is skipped. `--templates-dir` and `COMFY_TEMPLATES_DIR` take the package's `templates/` folder: the package root
+  above it (a directory that holds a `templates/` folder and no top-level `.json` file) is refused with exit 2 and the
+  path to pass, because it matches no template and the manifest records which directory was read.
+- **Not guarded.** Seeds, prompts, model file names, sizes the caller sets, and the builders with no copied
+  widget (`wf-hunyuan15-i2v`, `wf-sdxl-inpaint`, `wf-upscale`, each with its reason in the spec).
+- **Known limits.** What a green run does not tell you:
+  - Node mode is never read. A bypassed or muted node, or a bypassed or muted subgraph instance, still reads as
+    live, so a template that bypasses a node the builder keeps (or the reverse) is not a difference to the guard.
+  - Wiring is mostly unguarded. One `D` item (the Wan Animate 2 pose start and end percent) keeps two inputs on
+    separate sources. The `wf-wan22-i2v` high and low pairs share one template locator each: the steps (node 128),
+    the cfg (node 126) and the step split (`high.end_at_step` and `low.start_at_step` both read node 127), so a
+    template that split any of the three would not be seen. A `feeds` locator (the source of an input, by node id and slot)
+    would cover both; it is not built, and the code for it comes later.
+  - `W` and `I` do not consult `proxyWidgets`; only `P` does. A widget a template starts promoting through
+    `proxyWidgets` is seen by a `W` or `I` locator only through the linked-widget refusal.
+  - The two `unreviewed` entries stay green in a plain `check` for good: a difference nobody judged does not
+    fail. `check --strict` fails them.
+
+First run, on package `comfyui-workflow-templates-json` 0.1.96: eleven builders, eighteen views, and every
+guarded widget equal except six entries, which the manifest records. Two are `unreviewed` (nobody has judged
+them): `wf-qwen-image-edit` full preset (template CFG 4, builder 3.0) and the `wf-qwen-image-21` edit encoder
+resolution (template 0, builder 1024). Four are `deliberate`, stated in the builder's header: the
+`wf-qwen-image-21` step count in both views (the model README's 40, template 25) and the `wf-wan-animate2`
+pose-cache device and dtype (pinned to cpu and default). The `wf-h3-av` turbo path equals its template: the
+steps, LoRA file and LoRA strength are read from the root instance that promotes them (the steps primitive's own
+widget is linked and is not the value that runs). `wf-ltx25-i2v` reads its frame rate and video fps the same way,
+from the root instance that promotes the frame-rate value (the primitive that holds it is linked to that input, so
+its own widget is stale); only the two i2v bypass switches are read from a primitive, the boolean one that feeds
+them, and the math expression that passes the frame rate through is pinned as a template-only item.
+`wf-wan-animate2` copies the `_distilled` template: its
+pose strength, start and end percent and reference strength equal the builder's, and the template feeds the
+start and the end percent from two separate subgraph inputs (a wiring check keeps it so).
+
+Open item: the `wf-qwen-image-edit` full preset runs CFG 3.0 where the template's effective non-LoRA CFG (the
+primitive that feeds the sampler) is 4. The 3.0 is the value of the sampler's own widget, which is stale because its
+input is linked to the switch, so this is probably a real builder defect and not a choice. It is recorded, not
+changed: the builder keeps its recipe in this change. Resolve it by setting the builder to the template's value
+(and re-recording) or by declaring the difference `deliberate` with a reason; the same goes for the
+`wf-qwen-image-21` edit encoder resolution. Until then `check --strict` is red on both.
 
 ## Template-to-API converter (`render/template-to-graph.mjs`)
 
