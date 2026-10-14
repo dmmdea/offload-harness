@@ -82,6 +82,23 @@ function refusalOf(r, code) {
 }
 const warned = (r, code) => r.warnings.filter((w) => w.code === code);
 
+// graphProblems: what is wrong with an API graph as a graph, whatever the template said: a node of a class the listing lacks, a
+// wire to a node that is not in the graph, a wire to an output slot the class does not have.
+const isRef = (v) => Array.isArray(v) && v.length === 2 && typeof v[0] === "string" && Number.isInteger(v[1]);
+function graphProblems(graph, oi) {
+  const out = [];
+  for (const [id, n] of Object.entries(graph)) {
+    if (!oi[n.class_type]) { out.push(`${id}: unknown class ${n.class_type}`); continue; }
+    for (const [k, v] of Object.entries(n.inputs)) {
+      if (!isRef(v)) continue;
+      const t = graph[v[0]];
+      if (!t) out.push(`${id}.${k}: wire to missing node ${v[0]}`);
+      else if (oi[t.class_type] && v[1] >= oi[t.class_type].output.length) out.push(`${id}.${k}: wire to slot ${v[1]} of ${v[0]} (${t.class_type} has ${oi[t.class_type].output.length})`);
+    }
+  }
+  return out;
+}
+
 // ---- goldens -------------------------------------------------------------------------------------------------------------
 
 test("golden: a plain text-to-image template converts to the hand-worked API graph, node by node", () => {
@@ -92,11 +109,18 @@ test("golden: a plain text-to-image template converts to the hand-worked API gra
   assert.equal(Object.keys(graph).includes("11"), false, "the muted LoRA loader is gone");
   assert.equal(r.stats.nodes, 7);
   assert.deepEqual(r.warnings, []);
+  assert.deepEqual(graphProblems(graph, OI), []);
+});
+
+test("graphProblems: names a missing node, an out-of-range slot and an unknown class", () => {
+  const g = { 1: { class_type: "LoadImage", inputs: {} }, 2: { class_type: "ImageInvert", inputs: { image: ["1", 5] } }, 3: { class_type: "ImageInvert", inputs: { image: ["9", 0] } }, 4: { class_type: "Nope", inputs: {} } };
+  assert.deepEqual(graphProblems(g, OI), ["2.image: wire to slot 5 of 1 (LoadImage has 2)", "3.image: wire to missing node 9", "4: unknown class Nope"]);
 });
 
 test("golden: the subgraph template expands to ids <instance>:<inner>, with its inputs and output rewired", () => {
   const r = convert(readJson("subgraph-i2v.workflow.json"));
   assert.deepEqual(compareApiGraphs(graphOf(r), readJson("subgraph-i2v.api.json")), []);
+  assert.deepEqual(graphProblems(r.graph, OI), []);
   assert.equal(r.stats.expandedSubgraphs, 1);
 });
 
@@ -237,6 +261,31 @@ test("a custom frontend widget (socketless, not a standard type), an autogrow wi
   assert.equal(grow.details.input, "floats");
   const future = refusalOf(convert(ui([{ id: 1, type: "FutureSchemaNode", outs: [["IMAGE", "IMAGE"]], wv: [] }])), REFUSAL.UNSUPPORTED_INPUT_TYPE);
   assert.equal(future.details.type, "COMFY_FUTURESLOT_V3");
+});
+
+test("a socketless input that is also forceInput is a socket (wired or empty), not a custom widget to refuse", () => {
+  const g = graphOf(convert(ui([{ id: 1, type: "ForceSocketNode", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]], wv: [8] }])));
+  assert.deepEqual(g["1"].inputs, { steps: 8 });
+});
+
+test("a custom widget that carries image_upload but is not a combo owns no upload slot, a COLOR widget is its stored string, hidden INT widgets keep their slots", () => {
+  const g = graphOf(convert(ui([{ id: 1, type: "PainterLike", outs: [["IMAGE", "IMAGE"]], wv: ["painter.png [input]", 1024, 768, "#102030"] }])));
+  assert.deepEqual(g["1"].inputs, { mask: "painter.png [input]", width: 1024, height: 768, bg_color: "#102030" });
+});
+
+test("display-only trailing values of a preview node are ignored with a warning, one more than the allowance is refused", () => {
+  const r = convert(ui([
+    { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+    { id: 2, type: "PreviewAny", ins: [["source", "*"]], wv: [null, null, false] },
+    { id: 3, type: "SaveGLB", ins: [["mesh", "MESH"]], wv: ["3d/x", ""] },
+  ], [[1, 0, 2, "source"]]));
+  const g = graphOf(r);
+  assert.deepEqual(g["2"].inputs, { source: ["1", 0] });
+  assert.deepEqual(g["3"].inputs, { filename_prefix: "3d/x" });
+  assert.deepEqual(warned(r, "display_values_ignored").map((w) => `${w.node}:${w.count}`), ["2:3", "3:1"]);
+  refusalOf(convert(ui([{ id: 2, type: "PreviewAny", ins: [["source", "*"]], wv: [null, null, false, 1] }])), REFUSAL.WIDGET_MISMATCH);
+  refusalOf(convert(ui([{ id: 3, type: "SaveGLB", ins: [["mesh", "MESH"]], wv: ["3d/x", "", ""] }])), REFUSAL.WIDGET_MISMATCH);
+  refusalOf(convert(ui([{ id: 4, type: "CLIPTextEncode", ins: [["clip", "CLIP"]], wv: ["a", null] }])), REFUSAL.WIDGET_MISMATCH);
 });
 
 // ---- dotted names --------------------------------------------------------------------------------------------------------
@@ -792,7 +841,8 @@ test("survey: over a templates folder the converter never throws and every refus
     for (const f of readdirSync(SURVEY_DIR).filter((x) => x.endsWith(".json") && x !== "index.json")) {
       const r = convertTemplate(JSON.parse(readFileSync(join(SURVEY_DIR, f), "utf8")), oi, {});
       const key = r.ok ? "ok" : r.refusal.code;
-      if (!r.ok) assert.ok(known.has(r.refusal.code), `${f}: ${r.refusal.code}`);
+      if (r.ok) assert.deepEqual(graphProblems(r.graph, oi), [], `${f}: the converted graph is not a graph`);
+      if (!r.ok) assert.ok(known.has(r.refusal.code) && r.refusal.code !== REFUSAL.INTERNAL_ERROR, `${f}: ${r.refusal.code} ${r.refusal.message}`);
       counts[key] = (counts[key] ?? 0) + 1;
     }
     console.log(`survey: ${JSON.stringify(counts)}`); // keep: the survey's one line of output

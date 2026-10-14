@@ -209,6 +209,44 @@
     "output": ["IMAGE"], "output_name": ["IMAGE"],
     "name": "CustomWidgetNode", "display_name": "Custom Widget Node", "output_node": false
   },
+  "PreviewAny": {
+    "input": { "required": { "source": ["*", {}] } },
+    "input_order": { "required": ["source"] },
+    "output": [], "output_name": [],
+    "name": "PreviewAny", "display_name": "Preview Any", "output_node": true
+  },
+  "SaveGLB": {
+    "input": {
+      "required": { "mesh": ["MESH,FILE_3D_GLB,FILE_3D", {}], "filename_prefix": ["STRING", { "default": "3d/ComfyUI", "multiline": false }] },
+      "hidden": { "prompt": ["PROMPT"], "extra_pnginfo": ["EXTRA_PNGINFO"] }
+    },
+    "input_order": { "required": ["mesh", "filename_prefix"], "hidden": ["prompt", "extra_pnginfo"] },
+    "output": [], "output_name": [],
+    "name": "SaveGLB", "display_name": "Save 3D Model", "output_node": true
+  },
+  "ForceSocketNode": {
+    "input": {
+      "required": { "image": ["IMAGE", {}], "steps": ["INT", { "default": 4 }] },
+      "optional": { "bboxes": ["BOUNDING_BOX", { "default": { "x": 0, "y": 0 }, "socketless": true, "forceInput": true }] }
+    },
+    "input_order": { "required": ["image", "steps"], "optional": ["bboxes"] },
+    "output": ["IMAGE"], "output_name": ["IMAGE"],
+    "name": "ForceSocketNode", "display_name": "Force Socket Node", "output_node": false
+  },
+  "PainterLike": {
+    "input": {
+      "required": {
+        "mask": ["STRING", { "widgetType": "PAINTER", "image_upload": true, "default": "", "socketless": true, "multiline": false }],
+        "width": ["INT", { "hidden": true, "default": 512, "socketless": true }],
+        "height": ["INT", { "hidden": true, "default": 512, "socketless": true }],
+        "bg_color": ["COLOR", { "default": "#000000", "socketless": true }]
+      },
+      "optional": { "image": ["IMAGE", {}] }
+    },
+    "input_order": { "required": ["mask", "width", "height", "bg_color"], "optional": ["image"] },
+    "output": ["IMAGE"], "output_name": ["IMAGE"],
+    "name": "PainterLike", "display_name": "Painter Like", "output_node": false
+  },
   "FutureSchemaNode": {
     "input": { "required": { "slots": ["COMFY_FUTURESLOT_V3", { "template": {} }] } },
     "input_order": { "required": ["slots"] },
