@@ -300,7 +300,8 @@ func TestPrimaryIntervalFalseAdoptRateOnTheStatedNulls(t *testing.T) {
 // for the regime the score form is not calibrated in (a strong incumbent and a handful of disagreeing tasks, from
 // 61 tasks): the all-tied sample is the rule of three from 61 tasks, and one loss clears the margin from 62, so
 // the rate jumps from 0 at 60 to 4.4% at 61 and 17.7% at 62 and falls back as the sample grows until two losses
-// clear it. The expected values were computed outside the package (scipy.stats.t.ppf and exact binomial sums).
+// clear it, a sawtooth whose peaks stay above 4% to about 1500 tasks (6.5% at 250, 5.6% at 500, 4.3% at 1000). The
+// expected values were computed outside the package (scipy.stats.t.ppf and exact binomial sums).
 // At 16 to 60 tasks no K clears the margin, which is why the always-on cells there read 0.0%.
 func TestNestedLossFalseAdoptRateIsTheBinomialSum(t *testing.T) {
 	const loss, margin = 0.05, 0.05
@@ -311,6 +312,7 @@ func TestNestedLossFalseAdoptRateIsTheBinomialSum(t *testing.T) {
 		{16, 0}, {24, 0}, {40, 0}, {60, 0},
 		{61, 0.043766}, {62, 0.177254}, {64, 0.163921}, {70, 0.129208}, {80, 0.086054}, {90, 0.056728},
 		{100, 0.118263}, {120, 0.057505}, {160, 0.093854}, {200, 0.062342},
+		{250, 0.064957}, {500, 0.055916}, {1000, 0.043348},
 	} {
 		var rate float64
 		for k := 0; k <= tc.n; k++ {

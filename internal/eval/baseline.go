@@ -65,8 +65,9 @@ const (
 // Floors that validate enforces. min_pairs: the primary interval's false-ADOPT rate was measured
 // from 16 tasks up (61 of the 63 null cells of the calibration grid, 16 to 80 tasks, are at most
 // 3.6% against a nominal 2.5%; the other two, a strong incumbent with a handful of disagreeing
-// tasks at 80 tasks, are 4.8% and 8.2%; at most 4% is tested end to end on 16 to 24 tasks), so 16
-// is the smallest sample the gate makes a claim about. bootstrap_b: the paired bootstrap reads the efficiency metrics, and an
+// tasks at 80 tasks, are 4.8% and 8.2%, and the same regime reaches 17.7% at 62 tasks for a
+// candidate that loses 5% of the incumbent's passes; at most 4% is tested end to end on 16 to 24
+// tasks), so 16 is the smallest sample the gate makes a claim about. bootstrap_b: the paired bootstrap reads the efficiency metrics, and an
 // interval read from a handful of resamples is mostly noise: on the cost nulls of the study at 16
 // tasks a metric falsely improved in 8% to 13% of runs at B = 10 and in 42% to 50% at B = 1,
 // against 3.5% to 5.9% at B = 2000, which is the B the existing callers of BootstrapDeltaMean use.

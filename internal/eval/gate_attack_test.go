@@ -586,15 +586,18 @@ func adoptRate(t *testing.T, mode string, n, trials int, gen pairGen) float64 {
 // The false-ADOPT rate of the gate on null data, measured end to end through Gate at the floors (16 tasks or
 // more, B = 2000), in the cells below and no others: the true difference is 0 (superiority) or exactly
 // -margin (non-inferiority, the worst case the rule must still refuse). Each cell must measure at most 4%
-// (a nominal 2.5% one-sided) over its stated trials, with fixed seeds. The percentile interval the gate used
-// to read measured 6.1% on the first non-inferiority cell, 10.0% on the second and 6.2% on the heavy-tailed
-// superiority cell, over 20000 datasets each; TestCalibrationStudy prints the whole grid.
+// (a nominal 2.5% one-sided) over its stated trials, with fixed seeds. The sampling error of a rate p over T
+// trials is sqrt(p (1 - p) / T): 0.25 points at 2.5% and 0.31 at 4% over 4000 trials, 0.16 and 0.20 over 10000,
+// so a cell that passes says "at most 4%" and not "2.5%". The percentile interval the gate used to read measured
+// 6.1% on the first non-inferiority cell, 10.0% on the second and 6.2% on the heavy-tailed superiority cell, over
+// 20000 datasets each; TestCalibrationStudy prints the whole grid.
 //
 // The strong-incumbent and nested-loss cells are where most samples have no pair that differs, and a sample
 // with no spread used to be read as its one value: pass rates .95 and .90 measured 9% at 16 tasks, .99 and .94
 // 32%, and a candidate that only loses 5% of the incumbent's passes 37% at 20 tasks. They are tested at 16 to
-// 24 tasks. They are not claimed at 60 tasks and more, where the score form is still above 4% in a few of them
-// (the ADR has the figures).
+// 24 tasks, where a sample of ties never certifies the margin (the rule of three needs 61). They are not
+// claimed from 61 tasks, where a sample with one loss in it clears the margin and the score form is above 4%
+// (TestNestedLossFalseAdoptRateIsTheBinomialSum has the exact figures; the ADR has the grid).
 func TestNullAdoptRateAtTheFloorsIsCalibrated(t *testing.T) {
 	if testing.Short() {
 		t.Skip("simulated gate runs; the cells below take a few seconds")
@@ -722,6 +725,22 @@ func TestAllTiedSuperiorityIsInconclusiveAndAConstantFarFromZeroStillDecides(t *
 	r = mustGate(t, bn, hn, inputFor(hn, arm("i", repeatF(0, n), repeatF(1000, n)), arm("c", repeatF(1, n), repeatF(500, n))))
 	if r.Verdict != VerdictAdopt {
 		t.Errorf("non-inferiority, every pair +1 and tokens halved: want ADOPT, got %s %s", r.Verdict, r.Reason)
+	}
+}
+
+// The price of the rule of three's upper end: a candidate that loses every task by the same amount cannot be
+// blocked until 3 R / n has shrunk below what the loss exceeds the margin by. Every task lost by 1.0 on a 0..10
+// scale against a margin of 0.5 is INCONCLUSIVE up to 60 tasks (the upper end is exactly -0.5 there) and a
+// BLOCK from 61, and never an ADOPT.
+func TestAConstantLossBlocksOnlyOnceTheRuleOfThreeClearsTheMargin(t *testing.T) {
+	for _, tc := range []struct {
+		n    int
+		want string
+	}{{16, VerdictInconclusive}, {60, VerdictInconclusive}, {61, VerdictBlock}, {80, VerdictBlock}} {
+		r := allTied(t, tc.n, niPre(tc.n), 8, 7)
+		if r.Margin != 0.5 || r.Verdict != tc.want || r.Delta != -1 {
+			t.Errorf("n=%d, every task lost by 1.0 on 0..10, margin %v: want %s, got %s %s (delta %v hi %v)", tc.n, r.Margin, tc.want, r.Verdict, r.Reason, r.Delta, r.Hi)
+		}
 	}
 }
 
