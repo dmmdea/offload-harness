@@ -207,6 +207,8 @@ func main() {
 		err = runEval(args)
 	case "compaction-eval":
 		err = runCompactionEval(args)
+	case "gate":
+		err = runGate(args)
 	case "stats":
 		err = runStats(args)
 	case "version", "--version", "-v":
@@ -360,6 +362,7 @@ Usage:
   local-offload models                   show configured offload model
   local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
   local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench> --corpus C   compaction ladder eval: trace→corpus harvest (redacting), ratio/retention report, tokens ratchet, gated A/B, KV-reuse bench
+  local-offload gate <freeze|check|verdict|schema> [flags]   the one measurement gate: freeze a pre-registration, check it, judge a candidate against the incumbent (ADOPT/BLOCK/INCONCLUSIVE, paired bootstrap over tasks); exit 0 a verdict was produced, 1 non-ADOPT under --require-adopt, 2 a refusal (docs/systems/measurement-gate.md)
   local-offload confhead-eval            out-of-fold adoption gate (AURC/AUGRC + paired-bootstrap CI)
   local-offload confhead-calibrate       per-task conformal p(correct) escalation thresholds (ADOPT tasks)
   local-offload stats                    observational per-task ledger telemetry
