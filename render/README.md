@@ -370,3 +370,25 @@ to the loader that reads it. `list` hides paid API templates and FLUX-family one
 is `render/templates-license-map.json`. Rules, fields and gaps:
 [`docs/systems/media-generation.md`](../docs/systems/media-generation.md#comfy-workflow-templates-catalog-phase-a).
 Tests: `node --test render/templates-catalog.test.mjs`.
+
+---
+
+# Builder drift guard (`builder-drift.mjs`)
+
+A `wf-*.mjs` builder that was copied from a ComfyUI workflow template carries the template's recipe widgets
+(steps, cfg, sampler, scheduler, shift, LoRA strength, ...) as literals. `testdata/builder-drift.json` records,
+per builder and view, the template name, the `comfyui-workflow-templates-json` version and sha256 hashes of those
+widgets as the template and as the builder's output graph carry them (names and hashes only; no template content).
+
+```bash
+node --test render/builder-drift.test.mjs                       # builder side, offline: one test per builder
+COMFYUI_DIR=<comfyui-tree> node --test render/builder-drift.test.mjs   # plus the template side against the installed package
+node render/builder-drift.mjs check   --templates-dir <extract>/comfyui_workflow_templates_json/templates   # a candidate package
+node render/builder-drift.mjs explain --comfy-dir <comfyui-tree>   # template and builder values side by side
+node render/builder-drift.mjs record  --comfy-dir <comfyui-tree>   # re-pin, after comparing the builder with the template
+```
+
+A moved widget fails `builder drift: <builder> [<view>]: ...` naming the builder. `builder-drift-specs.mjs` lists
+the widgets per builder; a new `wf-*.mjs` file must be guarded there or listed in `NOT_TEMPLATE_DERIVED` with a
+reason. Rules, statuses and the first run's findings:
+[`docs/systems/media-generation.md`](../docs/systems/media-generation.md#builder-drift-guard-enh-4).

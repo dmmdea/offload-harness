@@ -2261,6 +2261,9 @@ recorded as known offenders with their reason rather than silently skipped — a
   readiness, node snapshots, candidate diff
 - [`render/templates-license-map.json`](../../render/templates-license-map.json) — the harness-owned
   licence map, keyed by Hugging Face repo id
+- [`render/builder-drift.mjs`](../../render/builder-drift.mjs), [`render/builder-drift-specs.mjs`](../../render/builder-drift-specs.mjs),
+  [`render/testdata/builder-drift.json`](../../render/testdata/builder-drift.json) — the builder drift guard:
+  which template widget each `wf-*.mjs` builder copied, and the hashes it was verified against
 - [`render/testdata/templates-catalog/`](../../render/testdata/templates-catalog/README.md) — its
   fixtures: trimmed upstream templates (MIT) and hand-written edge cases
 
@@ -3369,3 +3372,48 @@ rule files differ is scored with them anyway and `rules_check` says so, and `mai
 confined to it is not seen. An `extra_model_paths.yaml` entry that is rooted but has no drive letter
 (`/models/x`) under a drive-lettered `base_path` resolves onto that drive under Windows path join and is left as
 written here (measured against ComfyUI's own loader, not on a live file).
+
+### Builder drift guard (ENH-4)
+
+`render/builder-drift.mjs` guards the `render/wf-*.mjs` builders that were copied from a template of the
+`comfyui-workflow-templates-json` package. A template widget that changes under a builder that copied it
+(upstream workflow_templates PR #1308: a pose-end percent wired to the pose-start input) goes unseen
+otherwise, because the builder keeps building the old recipe.
+
+- **What is recorded.** `render/testdata/builder-drift.json`, per builder and view (a preset or a template
+  variant): the template name, the package versions, `templateSha256` and `builderSha256` (sha256 of the recipe
+  widgets as the template and as the builder's output graph carry them) and one digest pair per widget with a
+  status: `same`; `deliberate` (the builder knowingly differs, the reason is in the spec); `unreviewed` (a
+  difference the first run found that nobody has judged yet); `template-only` (a wiring check). Names and hashes
+  only: no template JSON, text or widget value is stored in the repository.
+- **Where each widget lives.** `render/builder-drift-specs.mjs` pairs a template locator with a builder-graph
+  locator per widget. Where a template routes a value through a primitive behind a switch, or promotes it on a
+  subgraph instance, the locator points at the value that runs, not at the sampler's own serialized widget
+  (which is stale once its input is linked).
+- **Builder side, offline.** `node --test render/builder-drift.test.mjs` has one test per builder
+  (`builder drift: wf-krea2`): it rebuilds the graph with fixed arguments and compares every widget; a moved
+  widget fails `builder drift: <builder> [<view>]: recipe widget changed in the builder's output graph: <key>`.
+  A new `wf-*.mjs` file must be guarded or listed in `NOT_TEMPLATE_DERIVED` with a reason, or the coverage test
+  fails.
+- **Template side, with the package.** With `COMFY_TEMPLATES_DIR` (the package's `templates` directory) or
+  `COMFYUI_DIR` (a ComfyUI tree that has it installed) set, the same widgets are read from the template JSON; a
+  change fails naming the builder, the template and the package version the builder was last verified against. A
+  newer package with every guarded widget unchanged is a note. The package is not in this repository, so without
+  the variable the test is skipped with that reason.
+- **CLI.** `node render/builder-drift.mjs check|explain|record [--templates-dir DIR | --comfy-dir DIR]`. `check` is
+  the same as the tests (the template side runs when a directory is given, so it can be pointed at a candidate
+  package extract before an upgrade); `explain` prints the template and builder values side by side;
+  `record` rewrites the manifest after a person has compared the builder with the template, and refuses a
+  builder/template difference the spec does not declare.
+- **Not guarded.** Seeds, prompts, model file names, sizes the caller sets, and the builders with no copied
+  widget (`wf-hunyuan15-i2v`, `wf-sdxl-inpaint`, `wf-upscale`, each with its reason in the spec).
+
+First run, on package `comfyui-workflow-templates-json` 0.1.96: eleven builders, eighteen views, and every
+guarded widget equal except eight entries, which the manifest records. Four are `unreviewed` (nobody has judged
+them): `wf-h3-av` turbo path in both the t2v and the i2v view (template 6 steps, builder 8), `wf-qwen-image-edit`
+full preset (template CFG 4, builder 3.0) and the `wf-qwen-image-21` edit encoder resolution (template 0, builder
+1024). Four are `deliberate`, stated in the builder's header: the `wf-qwen-image-21` step count in both views
+(the model README's 40, template 25) and the `wf-wan-animate2` pose-cache device and dtype (pinned to cpu and
+default). `wf-wan-animate2` copies the `_distilled` template: its pose strength, start and end percent and
+reference strength equal the builder's, and the template feeds the start and the end percent from two separate
+subgraph inputs (a wiring check keeps it so).
