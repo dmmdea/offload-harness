@@ -565,6 +565,36 @@ test("mode 4 (bypassed): an unconnected input is not a candidate, so the one con
   assert.deepEqual(graphOf(onlyA)["4"].inputs, { image: ["1", 0] });
 });
 
+test("mode 4 (bypassed): two bypassed nodes wired to each other and read by a consumer are a link_cycle, not a hang or an internal_error", () => {
+  const pass = (id) => ({ id, type: "ImageInvert", mode: 4, ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] });
+  const r = convert(ui([
+    pass(2), pass(3),
+    { id: 4, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  ], [[2, 0, 3, "image"], [3, 0, 2, "image"], [3, 0, 4, "image"]]));
+  const refusal = refusalOf(r, REFUSAL.LINK_CYCLE);
+  assert.match(refusal.details.node, /^[23]$/);
+  // one bypassed node wired to itself is the same loop
+  refusalOf(convert(ui([pass(2), { id: 4, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] }], [[2, 0, 2, "image"], [2, 0, 4, "image"]])), REFUSAL.LINK_CYCLE);
+});
+
+test("mode 4 (bypassed): an unconnected input that has no link key at all (undefined, not null) is not a candidate either", () => {
+  const spec = [
+    { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+    { id: 3, type: "ImageMix", mode: 4, ins: [["image_a", "IMAGE"], ["image_b", "IMAGE"]], outs: [["IMAGE", "IMAGE"]], wv: [0.5] },
+    { id: 4, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  ];
+  const wf = ui(spec, [[1, 0, 3, "image_b"], [3, 0, 4, "image"]]);
+  delete wf.nodes[1].inputs[0].link; // image_a: { name, type } and nothing else
+  assert.equal("link" in wf.nodes[1].inputs[0], false);
+  assert.deepEqual(graphOf(convert(wf))["4"].inputs, { image: ["1", 0] }, "image_b is the one connected input");
+  const none = ui(spec, [[3, 0, 4, "image"]]);
+  delete none.nodes[1].inputs[0].link;
+  delete none.nodes[1].inputs[1].link;
+  const r = convert(none);
+  assert.deepEqual(graphOf(r)["4"].inputs, {}, "no connected input of the type: the wire is dropped");
+  assert.deepEqual(warned(r, "input_dropped"), [{ code: "input_dropped", node: "4", input: "image", reason: "bypass_no_match" }]);
+});
+
 // the nodes a bypass test needs: two prompts, a bypassed pair node (positive and negative conditioning in and out, like the
 // ControlNet apply nodes), a sampler that reads both outputs, and a checkpoint for a third type
 const cond = (...names) => names.map((n) => [n, "CONDITIONING"]);
@@ -732,6 +762,40 @@ test("subgraph: a nested instance gets the id path <outer>:<inner>:<node>, with 
   assert.deepEqual(g["2:5:7"], { class_type: "ImageInvert", inputs: { image: ["1", 0] } });
   assert.deepEqual(g["3"].inputs, { filename_prefix: "x", images: ["2:5:7", 0] });
   assert.equal(r.stats.expandedSubgraphs, 2);
+});
+
+test("subgraph: a consumer reading output slot N of an instance gets the inner wire that ends at slot N of the output node, whatever order the definition lists its links in", () => {
+  // three outputs of three different types; the inner links are listed in the reverse of the slot order, so the first link that
+  // ends at the output node is not the one for slot 0 and the one for slot 1 is not first either
+  const def = subdef(SG(1), {
+    ins: [], outs: [["model", "MODEL"], ["clip", "CLIP"], ["vae", "VAE"]],
+    nodes: [{ id: 7, type: "CheckpointLoaderSimple", outs: [["MODEL", "MODEL"], ["CLIP", "CLIP"], ["VAE", "VAE"]], wv: ["sd_a.safetensors"] }],
+    edges: [[7, 2, -20, "vae"], [7, 1, -20, "clip"], [7, 0, -20, "model"]],
+  });
+  const slots = [["model", "MODEL"], ["clip", "CLIP"], ["vae", "VAE"]];
+  const wf = withDefs(ui([
+    { id: 2, type: SG(1), outs: slots, wv: [] },
+    { id: 3, type: "CLIPTextEncode", ins: [["clip", "CLIP"]], outs: [["CONDITIONING", "CONDITIONING"]], wv: ["x"] },
+    { id: 4, type: "VAEDecode", ins: [["vae", "VAE"]], outs: [["IMAGE", "IMAGE"]] },
+    { id: 5, type: "LoraLoader", ins: [["model", "MODEL"]], outs: [["MODEL", "MODEL"], ["CLIP", "CLIP"]], wv: ["style_a.safetensors", 1, 1] },
+  ], [[2, 1, 3, "clip"], [2, 2, 4, "vae"], [2, 0, 5, "model"]]), def);
+  const r = convert(wf);
+  const g = graphOf(r);
+  assert.deepEqual(g["3"].inputs.clip, ["2:7", 1], "slot 1 is the CLIP, not the first link listed (the VAE)");
+  assert.deepEqual(g["4"].inputs.vae, ["2:7", 2], "slot 2 is the VAE");
+  assert.deepEqual(g["5"].inputs.model, ["2:7", 0], "slot 0 is the MODEL, not the first link listed (the VAE)");
+  assert.deepEqual(graphProblems(g, OI), [], "and every wire carries the type its input wants");
+  // a slot nothing in the definition ends at is an unconnected output, not the first link that ends anywhere
+  const short = subdef(SG(1), {
+    ins: [], outs: [["model", "MODEL"], ["clip", "CLIP"]],
+    nodes: [{ id: 7, type: "CheckpointLoaderSimple", outs: [["MODEL", "MODEL"], ["CLIP", "CLIP"], ["VAE", "VAE"]], wv: ["sd_a.safetensors"] }],
+    edges: [[7, 1, -20, "clip"]],
+  });
+  const gap = convert(withDefs(ui([
+    { id: 2, type: SG(1), outs: [["model", "MODEL"], ["clip", "CLIP"]], wv: [] },
+    { id: 5, type: "LoraLoader", ins: [["model", "MODEL"]], outs: [["MODEL", "MODEL"], ["CLIP", "CLIP"]], wv: ["style_a.safetensors", 1, 1] },
+  ], [[2, 0, 5, "model"]]), short));
+  assert.equal("model" in graphOf(gap)["5"].inputs, false, "the unconnected slot 0 leaves the input empty");
 });
 
 test("subgraph: an input wired straight to an output is the outer wire itself", () => {
