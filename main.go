@@ -160,7 +160,7 @@ func main() {
 	case "loupe":
 		err = runLoupe(args)
 	case "doctor":
-		err = runDoctor(args)
+		err = runDoctorBackends(args)
 	case "audit-yaml":
 		err = runAuditYAML(args)
 	case "audit-config":
