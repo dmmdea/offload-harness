@@ -48,4 +48,5 @@ byte for byte where the stream is concerned, so that a seed produces the same ta
 stream; the Go code and comments are written for this repository. Each ported file names
 the upstream file it comes from. The upstream's documentation, instruction scaffolds and
 dataset are not copied, and no upstream data is committed. The upstream repository has
-no NOTICE file at the pinned commit.
+no NOTICE file at the pinned commit, its source files carry no copyright header, and its
+LICENSE carries only the unfilled appendix line ("Copyright [yyyy] [name of copyright owner]").
