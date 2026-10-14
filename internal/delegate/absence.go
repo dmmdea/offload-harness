@@ -159,7 +159,50 @@ func excusedAbsence(contract core.AgentContract, wire core.AgentWireResult) bool
 	return false
 }
 
-// fingerprintFailedByNode: placeholder, the old reading (the tag alone).
+// contractDefectUnknown reports whether o is an unknown that follows from the CONTRACT and not from the result: the check is
+// one the intake lint already warns is unreachable (AUTHORITY-UNREACHABLE: a grounded check on a contract with no context
+// documents, a field check the output_schema does not declare or a contract without one), so no node's answer could have
+// closed it. The lint is the one definition of "this contract cannot reach that level", and this reads it, so the warning
+// and the classification cannot drift apart. An unknown the contract COULD have closed (an empty answer beside documents, a
+// field the schema asks for that the result lacks) is the result's, and stays so.
+func contractDefectUnknown(a string, o core.AcceptanceOutcome, contract core.AgentContract) bool {
+	if o.Verdict != core.VerdictUnknown {
+		return false
+	}
+	chk, err := core.ParseAcceptanceCheck(a)
+	return err == nil && len(authorityWarnings(contract, a, chk)) > 0
+}
+
+// fingerprintFailedByNode reports whether failures carry a document-fingerprint failure that is a fact about the node that
+// answered. The fingerprint tag is in the text of a failure and of an unknown alike (a reason opens with the check), so the
+// tag alone cannot tell a node that wrote about another document from a contract that no node could satisfy; this regrades
+// the tagged checks the way EvalAcceptance did (gradeCheck, with the contract's context documents) and drops the ones whose
+// unknown is the contract's (contractDefectUnknown). A failure it cannot match to a regraded check (the caller holds
+// failures from somewhere else) is read as the node's, which is the reading failsDocumentFingerprint always gave it.
+//
+// The quarantine (noteFingerprint) and the cross-seat retry (skipsRetryAsResearchAcceptanceOnly) both ask this, because both
+// are cures for a node: a contract-caused unknown is still a reported failure, but striking a node for it, or running the
+// contract again on another node that grades the same unknown, cures nothing.
 func fingerprintFailedByNode(contract core.AgentContract, wire core.AgentWireResult, failures []string) bool {
-	return failsDocumentFingerprint(failures)
+	var defects map[string]bool // the reasons of the contract-caused unknowns, built on the first tagged failure
+	for _, f := range failures {
+		if !strings.Contains(f, docAnchorTag) {
+			continue
+		}
+		if defects == nil {
+			defects = map[string]bool{}
+			for _, a := range contract.Acceptance {
+				if !strings.Contains(a, docAnchorTag) {
+					continue
+				}
+				if o, parsed := gradeCheck(a, contract, wire); parsed && contractDefectUnknown(a, o, contract) {
+					defects[o.Reason] = true
+				}
+			}
+		}
+		if !defects[f] {
+			return true
+		}
+	}
+	return false
 }

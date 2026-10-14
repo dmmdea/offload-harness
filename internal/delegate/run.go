@@ -4514,10 +4514,12 @@ func SeatDownDefer(r core.AgentWireResult) bool {
 // document, which is a fact about the node that wrote it (strikeOnFingerprint
 // quarantines a node for it), and another node is the cure. An abstention, an
 // admission-time defer (coherence, warm-up) and the seat-down defer are likewise
-// facts about the SEAT and keep their retry.
+// facts about the SEAT and keep their retry. A fingerprint the contract itself can
+// never close (an unknown the intake lint warns about: fingerprintFailedByNode)
+// is no such fact, and another node would grade the same unknown, so it is skipped.
 func skipsRetryAsResearchAcceptanceOnly(contract core.AgentContract, pr PlacedResult) bool {
 	return researchDoors[contract.Door] && pr.Err == "" && !pr.Result.Deferred &&
-		len(pr.AcceptanceFailures) > 0 && !failsDocumentFingerprint(pr.AcceptanceFailures)
+		len(pr.AcceptanceFailures) > 0 && !fingerprintFailedByNode(contract, pr.Result, pr.AcceptanceFailures)
 }
 
 // failsDocumentFingerprint reports whether any failed acceptance is the DOCUMENT
@@ -7314,7 +7316,8 @@ func GradeAcceptance(contract core.AgentContract, wire core.AgentWireResult) []c
 // strikeOnFingerprint strikes base in the caller's Quarantine when any failed
 // acceptance is a DOCUMENT FINGERPRINT check (research.DocFingerprint tags its
 // regex with the named group `docanchor`). Contract-caused failures — a
-// user's over-strict contains:, a thin page's min_items — never strike.
+// user's over-strict contains:, a thin page's min_items, a fingerprint the contract
+// can never close (noteFingerprint filters it, fingerprintFailedByNode) — never strike.
 func (r *runner) strikeOnFingerprint(base string, failures []string) {
 	if r.quarantine == nil || !failsDocumentFingerprint(failures) {
 		return
@@ -7329,14 +7332,19 @@ func (r *runner) strikeOnFingerprint(base string, failures []string) {
 // check and failed it is a strike against the node, one that carries it and PASSED is a pass (Quarantine.Pass), and one that
 // carries none says nothing about the node. A result the check missed that is an honest absence (excusedAbsence) is neither:
 // it did not fail the contract, but it restated nothing of the page either, so it is no evidence that the node reads the
-// right document and must not stand among its passes. The local seat has no call here, as for strikeOnFingerprint.
+// right document and must not stand among its passes. Nor is a fingerprint the contract can never close (an unknown the
+// intake lint warns about, as a grounded check on a contract with no context documents): it is a defect of the contract,
+// still reported as a failure, and no node could have passed it, so it neither strikes nor passes (fingerprintFailedByNode).
+// The local seat has no call here, as for strikeOnFingerprint.
 func (r *runner) noteFingerprint(base string, contract core.AgentContract, wire core.AgentWireResult, failures []string) {
 	if r.quarantine == nil {
 		return
 	}
 	switch {
 	case failsDocumentFingerprint(failures):
-		r.strikeOnFingerprint(base, failures)
+		if fingerprintFailedByNode(contract, wire, failures) {
+			r.strikeOnFingerprint(base, failures)
+		}
 	case failsDocumentFingerprint(contract.Acceptance):
 		// the check is on the contract (failsDocumentFingerprint reads the tag in either form) and did not fail
 		if !excusedAbsence(contract, wire) {
