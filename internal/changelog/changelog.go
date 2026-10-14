@@ -423,16 +423,26 @@ func strayEntries(root string) []string { return strayEntriesFS(os.DirFS(root)) 
 // directory is statted and a file there is named for what it is, not taken for an absent directory.
 func strayEntriesFS(fsys fs.FS) []string {
 	dir, fragDir := path.Dir(FragmentDir), path.Base(FragmentDir)
-	entries, err := fs.ReadDir(fsys, dir)
+	info, err := fs.Stat(fsys, dir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil // no changes/ at all holds no fragments
 	case err != nil:
 		return []string{dir + ": " + err.Error()}
+	case !info.IsDir():
+		return []string{dir + ": is not a directory, so no fragment in it can be read"}
+	}
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return []string{dir + ": cannot be listed: " + err.Error()}
 	}
 	var problems []string
 	for _, e := range entries {
-		if n := e.Name(); n != "README.md" && n != fragDir {
+		n := e.Name()
+		switch {
+		case n == fragDir && !e.IsDir():
+			problems = append(problems, FragmentDir+": is not a directory, so no fragment in it can be read")
+		case n != "README.md" && n != fragDir:
 			problems = append(problems, fmt.Sprintf("%s/%s: nothing reads this entry, so its text would never reach %s: fragments go in %s/ (spelled so) as <slug>.md, and %s/ holds only README.md and that directory", dir, n, ChangelogFile, FragmentDir, dir))
 		}
 	}
