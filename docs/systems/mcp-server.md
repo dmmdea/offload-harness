@@ -549,7 +549,7 @@ of the contract (a grounded check on a contract with no context documents, a fie
 declare: the `AUTHORITY-UNREACHABLE` lint warns about it) is still reported, but it neither strikes a node nor passes, and
 on the research door it is not retried, because another node would grade the same unknown; the same holds for an unknown
 over an honest absence. Only a FAILED fingerprint can be excused (by an honest absence): an unknown caused by the contract
-or by an honest absence strikes nothing and passes nothing, and an unknown the result caused (an empty answer beside the
+or by an honest absence strikes nothing and passes nothing, and otherwise an unknown the result caused (an empty answer beside the
 documents, a declared field missing from the result) strikes like a failure. The seats never gain
 network access; the agent loop's egress cage is untouched. Failed or refused fetches come
 back as `sources[].skipped` and produce no result — a broken page never reads as a digest.

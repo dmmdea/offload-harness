@@ -42,7 +42,7 @@
   contract with no context documents) is a defect of the contract: it is still reported as a failed check, but it is
   neither a strike nor a pass for the node (no quarantine) and is not retried on a second node. An unknown the
   contract could have closed, such as an empty answer beside the documents or a declared field missing from the result,
-  strikes like a failure. Only a FAILED fingerprint can be excused (by an honest absence). An unknown
+  strikes like a failure, unless the digest is an honest absence (below). Only a FAILED fingerprint can be excused (by an honest absence). An unknown
   over an honest-absence digest (a qualified field fingerprint on an empty field, the absence sentence in another
   field) strikes nothing either, since an honest absence is neither a pass nor a strike, and a fingerprint the node
   passed beside a contract-caused unknown is still recorded as its pass.

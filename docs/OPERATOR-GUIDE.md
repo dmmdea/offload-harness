@@ -1468,7 +1468,7 @@ misfires on an honest answer now and then, so a node that passed most of its wor
 reason appears among `probe_errors` as "quarantined until …"). Only a FAILED fingerprint can be excused (by an honest
 absence). An unknown fingerprint that the contract caused (a grounded check with no context documents, a field check the
 `output_schema` does not declare) or that sits over an honest-absence digest is reported as a failed check but strikes
-nothing, passes nothing and is not retried on the research door. An unknown the result caused (an empty answer beside the
+nothing, passes nothing and is not retried on the research door. Apart from those two cases, an unknown the result caused (an empty answer beside the
 documents, a declared field missing from the result) strikes like a failure.
 
 **Capacity is your step — the wait only makes contention honest.** The 429 exists because ten

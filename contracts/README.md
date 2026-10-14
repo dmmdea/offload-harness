@@ -96,7 +96,7 @@ when grading). Such an unknown is a defect of the contract, not of the node that
 document fingerprint (the wrong-document tripwire a node is quarantined for) it is still reported as a failed check,
 but it is neither a strike nor a pass for the node, and the contract is not retried on a second node, because no
 node's answer could close it. The same holds for an unknown over an honest-absence digest. Only a FAILED fingerprint can
-be excused (by an honest absence). An unknown the contract could have closed (an empty answer beside the documents, a
+be excused (by an honest absence). Apart from those two cases, an unknown the contract could have closed (an empty answer beside the documents, a
 declared field the result lacks) is the result's, and strikes like a failure.
 
 Spelling: only `@answer:`, `@grounded:` and `@field=<name>:` (on `contains:`, `regex:` and `not_contains:`) are read as
