@@ -344,8 +344,9 @@ const overflowMsg = "the scores or costs are too large to average: a sum overflo
 //	R2  superiority: ADOPT iff lo > 0, BLOCK iff hi < 0; non-inferiority with margin m: BLOCK iff
 //	    hi < -m, ADOPT iff lo > -m and a declared efficiency metric improves and none got
 //	    significantly worse or went unmeasured; else INCONCLUSIVE
-//	R3  a candidate attempt that did not finish scores the worst score, an incumbent's is
-//	    skipped, a cheat scores the worst score; excluded pairs and unusable attempts are counted
+//	R3  a candidate attempt that did not finish scores the worst score and still spends the cost
+//	    it recorded, an incumbent's is skipped (cost included), a cheat scores the worst score;
+//	    excluded pairs and unusable attempts are counted
 //	R4  the incumbent wins every tie and every INCONCLUSIVE; fewer than min_pairs usable pairs, or
 //	    too large an excluded share, is INCONCLUSIVE (the remedy is more tasks, not more attempts)
 //	R5  held-out pairs may veto an ADOPT, never rescue anything

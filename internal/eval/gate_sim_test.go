@@ -13,9 +13,17 @@ package eval
 // from the simulation index, never from goroutine order, so a run is reproducible whatever the
 // number of workers.
 //
+// The methods are the percentile interval the gate used to read (BootstrapDeltaMean's), the five candidates
+// the review named ((i) studentized bootstrap, (ii) BCa, (iii) the percentile widened about the estimate by
+// t/z and (iii') by t/z times sqrt(n/(n-1)), (iv) the paired t, (v) the lower of two), and (vi) the score
+// form of the t interval, the one added when none of the five cleared the bar and the one the gate reads
+// now (interval.go).
+//
 // The grid is large (minutes of CPU), so TestCalibrationStudy is off unless OFFLOAD_GATE_STUDY is
-// set; it prints the tables the docs and ADR quote. The small tests in this file run always: they
-// pin the harness's engine and its quantile functions to independent references and to the gate.
+// set; it prints the tables the docs and ADR quote, and TestEfficiencyCalibrationStudy, under the same
+// switch, prints the false-improvement rates of the efficiency reads. The small tests in this file run
+// always: they pin the harness's engine and its quantile functions to independent references and to the
+// gate.
 //
 //	OFFLOAD_GATE_STUDY=1 go test ./internal/eval/ -run TestCalibrationStudy -v -timeout 1h
 //
