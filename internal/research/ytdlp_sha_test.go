@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ytdlp_sha256: when the operator sets it, the file at ytdlp_path is hashed before every exec and a mismatch refuses
@@ -131,14 +132,20 @@ func TestYtDlpIsHashedBeforeEveryExecAndOnlyWhenPinned(t *testing.T) {
 	if *hashed != 1 {
 		t.Errorf("hashed %d times for one call, want 1", *hashed)
 	}
-	f, err := os.OpenFile(bin, os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
+	// The file is replaced, not written to: Linux refuses to open for writing a binary that was running a moment ago
+	// ("text file busy"), and the kernel lets go of it a little after the process is reaped.
+	replacement := bin + ".new"
+	if err := os.WriteFile(replacement, append(exe[:len(exe):len(exe)], "tampered"...), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, werr := f.WriteString("tampered")
-	f.Close()
-	if werr != nil {
-		t.Fatal(werr)
+	var rerr error
+	for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+		if rerr = os.Rename(replacement, bin); rerr == nil {
+			break
+		}
+	}
+	if rerr != nil {
+		t.Fatalf("replacing the binary: %v", rerr)
 	}
 	got := Fetch(context.Background(), "https://www.youtube.com/watch?v="+idPlain, opt)
 	if got.ErrKind != ErrKindYtDlpPath || got.Text != "" {
