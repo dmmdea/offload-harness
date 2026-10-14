@@ -2476,8 +2476,8 @@ The deferred answer's data is `{refusal, node, lane, family, missing[], roster[]
 | `node_below_min_vram` | `capacity`, `no_node_configured` | `min_vram_gb` was given (video and animation) and the node's largest card is smaller. |
 
 A node that does not answer, or holds a text lease, is an ordinary `capacity` defer with no err class, because it may take the call
-later; a name that no answering node has, while some roster entry did not answer, is that same defer, not `node_unknown`, because the
-name may be one of them. The four `capacity` refusals are a fact about the node that waiting does not change: the remedy is to name
+later; a node id that no answering node has, while some roster entry did not answer, is that same defer, not `node_unknown`, because
+the id may be one of them (a URL outside the roster is always `node_unknown`). The four `capacity` refusals are a fact about the node that waiting does not change: the remedy is to name
 another node (the pairing is the one `no_node_configured` already has). Nothing falls back: the named node refusing, another node
 or this machine could have run the call, and neither is tried.
 

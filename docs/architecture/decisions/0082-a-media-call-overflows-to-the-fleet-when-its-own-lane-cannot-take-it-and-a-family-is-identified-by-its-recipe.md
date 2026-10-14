@@ -384,8 +384,8 @@ a call for a weight the node lacks is refused before anything is sent. Every oth
    serve the lane or its route is not CONFIGURED (the answer names the route state and, when the node published its row, the files
    the row lacks). `node_lacks_media_job`: the call carries input files and the node has not opened the media-job door. `node_lacks_model`:
    see 4. `node_below_min_vram`: see 6. **A node that does not answer, or holds a text lease, is not refused:** it is an ordinary
-   `capacity` defer with no err class, because it may take the call later; and a name that no node which answered has, while some entry
-   did not answer, is that same defer (the name may be one of them), not `node_unknown`. The choice of `capacity` for the four
+   `capacity` defer with no err class, because it may take the call later; and a node id that no node which answered has, while some entry
+   did not answer, is that same defer (the id may be one of them), not `node_unknown`; a URL outside the roster is always `node_unknown`. The choice of `capacity` for the four
    configuration refusals is the pairing the code already has for `no_node_configured` (a test of the image batch pins it); the
    caller's remedy is to name another node, not to wait.
 3. **A node publishes the family rows of its video, animation and audio bindings.** `/fleet/health` gains `media_recipes[]`, additive
