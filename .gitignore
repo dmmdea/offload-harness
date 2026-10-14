@@ -93,3 +93,11 @@ write-door-gate-out/
 offload-harness.exe
 seat-contention-probe.json
 ~/
+
+# OpenSpec's generated tool files (openspec init / openspec update write them per coding tool). They are
+# regenerated from the tracked openspec/ tree, which stays tracked so the leak gate scans it; a tracked copy
+# would put tool prompt text into the public tree and drift from the tool version that wrote it.
+# Pinned by TestOpenSpecGeneratedToolFilesStayUntracked.
+/.claude/skills/openspec-*/
+/.claude/commands/opsx/
+/.opencode/

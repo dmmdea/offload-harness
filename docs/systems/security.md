@@ -80,6 +80,18 @@ A concern goes to the operator; the reviewer never resolves it. For an MCP serve
 server's command, package and version; for a desktop app it is the installer and the binaries it
 places.
 
+## Admitted third-party software
+
+Third-party software this repository itself uses or ships configuration for, admitted through the checklist above. One row per
+artifact and pinned version; a new version is a new admission. The evidence for each check (sources, hashes, the scanner
+lookup) lives in the operator's private admission record, which this table does not reproduce. Every row states how the tool's
+telemetry is switched off before its first run and where its data goes: nothing is written to the system drive except the
+program itself, and a tool whose data cannot be relocated by its own setting is not admitted.
+
+| Software | Pinned version and sha256 | Licence | Used for | Telemetry and network | Data location | Admitted |
+|---|---|---|---|---|---|---|
+| OpenSpec CLI (`@fission-ai/openspec`, always the scoped name: the unscoped npm `openspec` is another publisher) | 1.14.1, tarball sha256 `4a88e334938316db6916fd4f3aaf2213e6fc23b4fe327efd2afe7754c2d3b0bf` (npm sha512 and the SLSA provenance subject agree; built by the release workflow from the `v1.14.1` tag commit) | MIT | spec and plan artifacts under `openspec/`, validated with `openspec validate --all --strict`; no other workstream depends on it | usage telemetry is on by default; off with `OPENSPEC_TELEMETRY=0` and `DO_NOT_TRACK=1` (checked before any anonymous id is created); the registry version check is off with `OPENSPEC_NO_UPDATE_CHECK=1` | an npm `--prefix` on a data drive (never the user-level npm prefix); global config through `XDG_CONFIG_HOME` on a data drive. Its generated per-tool skills and commands are gitignored; the `openspec/` tree is tracked and scanned by the leak gate like every path | 2026-10-14 (checks 1-10 no finding; no scanner record, admitted on verified registry hashes and signed build provenance) |
+
 ## Named surfaces
 
 - **The research-digest channel.** `offload_research` digests are written by local seats from
