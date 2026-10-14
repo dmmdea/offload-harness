@@ -53,9 +53,9 @@ type Options struct {
 // serving, and to run on every /fleet/health refresh.
 //
 // Every row's starting state (loaded, not loaded, loading) comes from that one opening reading of the
-// running list, the snapshot. Only the explicit completion probe reads the list again, before it decides a
-// completion to a seat that is not running (see completionVerdict), and that later reading decides whether
-// a completion may be sent; it never rewrites what a row says about the state the report began with.
+// running list, the snapshot. Only the explicit completion probe reads the list again, immediately before
+// each completion (see completionVerdict), and that later reading decides whether a completion may be sent;
+// it never rewrites what a row says about the state the report began with.
 //
 // A seat has one engine kind wherever it is read. The kinds a lane's plan declares (the tier table's
 // preferred and fallback seats) are registered first, and every candidate of every lane and every seat row
@@ -92,8 +92,8 @@ type state struct {
 	// never replaced. Every row's starting state comes from it.
 	start    []seatload.Occupant
 	startErr error
-	// running / runErr are the live reading: the snapshot at first, read again before a completion to a
-	// seat that is not running is decided. They gate completions and feed nothing else.
+	// running / runErr are the live reading: the snapshot at first, read again immediately before each
+	// completion is decided. They gate completions and feed nothing else.
 	running []seatload.Occupant
 	runErr  error
 	// loadSent is the seat of the one completion this run sent to a seat that was not running ("" until
@@ -551,10 +551,13 @@ func (s *state) hasChatRoute(seat string) bool {
 //
 // Any other seat is not probed, and its row says over which running seat the load would have been. A
 // seat with no chat route (speech to text, an embedder) is never sent a chat completion: its row keeps
-// the reading default mode gives it. A seat that is not running is decided on a fresh reading of /running
-// taken just before, so a seat the run itself loaded (the completion may load it and then fail) or one
-// another client loaded meanwhile is seen. When the list cannot be read, whether a seat holds the cards
-// cannot be ruled out, and no seat that is not running is sent one.
+// the reading default mode gives it. Every seat is decided on a fresh reading of /running taken immediately
+// before its completion, because the list stored from an earlier reading can be behind: a seat it still
+// calls running may have stopped (another client unloaded it, or its idle ttl ran out), and a completion to
+// it would then load it over whatever runs now. A seat the run itself loaded (the completion may load it
+// and then fail) or one another client loaded meanwhile is likewise seen only on a fresh reading. A seat is
+// completed as a running seat only if it is running on that reading. When the list cannot be read, whether
+// a seat is running, or what holds the cards, cannot be ruled out, and no seat is sent a completion.
 //
 // A row says what the report found when it began (the snapshot); the readings taken here decide whether to
 // send, and the one clause they may add is that a seat was loaded since the report began.
@@ -563,18 +566,19 @@ func (s *state) completionVerdict(ctx context.Context, c Candidate, canon string
 		prior.Detail += "; not probed: not a chat seat"
 		return prior
 	}
+	// The list stored from an earlier reading is not what is running now: read it again immediately before
+	// this completion, whether or not the stored list calls the seat running.
+	hadRunErr := s.runErr != nil
+	s.refreshRunning(ctx)
 	resident := s.resident(canon)
-	if !resident {
-		hadRunErr := s.runErr != nil
-		s.refreshRunning(ctx)
-		resident = s.resident(canon)
-		switch {
-		case resident:
-			// Another client loaded it after the opening read: the cheap probe's "not loaded ... not asked" is stale.
-			prior.Detail = "in the roster, loaded since the report began"
-		case hadRunErr && s.runErr == nil:
-			prior.Detail = "in the roster" // the earlier "load state is unknown" no longer holds
-		}
+	began, inStart := s.occupant(canon)
+	beganRunning := s.startErr == nil && inStart && isRunning(began)
+	switch {
+	case resident && !beganRunning:
+		// Another client loaded it after the opening read: the cheap probe's "not loaded ... not asked" is stale.
+		prior.Detail = "in the roster, loaded since the report began"
+	case !resident && hadRunErr && s.runErr == nil:
+		prior.Detail = "in the roster" // the earlier "load state is unknown" no longer holds
 	}
 	if !resident {
 		if s.runErr != nil {
