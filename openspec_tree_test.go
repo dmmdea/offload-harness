@@ -224,7 +224,7 @@ func TestOpenSpecConfigCarriesTheStandingInvariants(t *testing.T) {
 
 // openspecTierIDAsMachineName matches the ways a sentence can say a machine is named by its tier id: "by tier id", the
 // paraphrases "by its/their/the tier id(s)", "as tier ids", and the pairings "tier id or node letter" either way round.
-var openspecTierIDAsMachineName = regexp.MustCompile(`(?i)(by tier ids?|as tier ids?|tier ids? or node letters?|node letters? or tier ids?)`)
+var openspecTierIDAsMachineName = regexp.MustCompile(`(?i)(by (its |their |the )?tier ids?|as tier ids?|tier ids? or node letters?|node letters? or tier ids?)`)
 
 // The pattern must catch the forms a rewrite of the sentence would take, and must leave alone the sentence the tree
 // carries today, where a tier id appears only inside "the <tier> reference box".
