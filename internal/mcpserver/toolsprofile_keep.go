@@ -8,11 +8,12 @@ package mcpserver
 // cannot express, the deferred-and-do-it-yourself protocol, a warning that a result is not a verdict. An entry carries the
 // sentences it cannot be read without (With) and says why it is kept (Why).
 //
-// What is NOT here is dropped, and the sentences that carry a constraint word are all accounted for: the review gate
-// (TestEveryConstraintSentenceIsKeptOrDroppedWithReason) reads the live full descriptions and fails for a sentence with such a
-// word that is neither kept by this list nor on the dropped-with-reason list in toolsprofile_dropped_test.go. So adding a rule
-// to a description means adding it to one of the two lists, and rewording a listed sentence means updating its entry: the entry
-// is the exact sentence, because a changed rule has to be read again. A tool with no entry keeps only its opening sentences.
+// What is NOT here is dropped, and the sentences that carry a constraint word, or say the data leaves the box, are all accounted
+// for: the review gate (TestEveryConstraintSentenceIsKeptOrDroppedWithReason) reads the live full descriptions of every surface
+// (each accelerator alone too, local and fleet) and fails for a sentence with such a word that is neither kept by this list nor
+// on the dropped-with-reason list in toolsprofile_dropped_test.go. So adding a rule to a description means adding it to one of
+// the two lists, and rewording a listed sentence means updating its entry: the entry is the exact sentence, because a changed
+// rule has to be read again. A tool with no entry keeps only its opening sentences.
 //
 // An entry need not carry a constraint word: a sentence a reviewer wants in the compact list can be named whatever it says.
 
@@ -169,6 +170,11 @@ var compactKeep = []compactKeepEntry{
 		Why:      "ask refuses (deferred:true) rather than hand back an answer nothing verified",
 	},
 	{
+		Tools:    []string{"offload_assess_image", "offload_ocr", "offload_vqa"},
+		Sentence: "The image is read on THIS box under vision_max_image_bytes and travels with the job; meta.node / meta.placement say where it ran",
+		Why:      "the image is read on this box and travels with the job to the fleet node that runs it: the sentence that says the bytes leave this box (route defaults to local, so only auto and remote move them)",
+	},
+	{
 		Tools:    []string{"offload_browse"},
 		Sentence: "SAFETY: controls labelled publish / send / post / delete / pay / buy / checkout / subscribe / confirm / sign out (and similar) are removed before the model sees them and re-checked at execution, so a run ends `denied` rather than clicking one; allow_labels lifts that for named labels on THIS attended door only.",
 		Why:      "browse SAFETY: publish/send-class controls are removed and a run ends denied",
@@ -187,6 +193,11 @@ var compactKeep = []compactKeepEntry{
 		Tools:    []string{"offload_browse"},
 		Sentence: "DONE is the decision model's claim, not proof: verify the outcome yourself.",
 		Why:      "DONE is the decision model's claim, not proof",
+	},
+	{
+		Tools:    []string{"offload_browse"},
+		Sentence: "Typed decisions come from the LOOPBACK decision endpoint the operator configured (browse_decision_url — the harness holds no key; that local service may itself front a cloud decision model, and the visible page text and element labels are sent to it); field values are written by the LOCAL seat under a grammar.",
+		Why:      "the visible page text and the element labels are sent to the decision endpoint, which may itself front a cloud model: why pages whose text must not leave the machine are never passed",
 	},
 	{
 		Tools:    []string{"offload_classify"},
@@ -324,6 +335,11 @@ var compactKeep = []compactKeepEntry{
 		Why:      "the lane defers (deferred:true) when it cannot answer confidently, and the caller does the work itself",
 	},
 	{
+		Tools:    []string{"offload_transcribe"},
+		Sentence: "route (default auto) places the work: this box's whisper when it is free, a fleet node's when a render or an exclusive hold would keep it waiting (every node serves the same whisper family, so that costs no quality; the audio is sent as 16 kHz mono Opus and the transcript files are written HERE, on this box); local pins it to this box, remote forces a fleet node.",
+		Why:      "the default route (auto) sends the audio, as 16 kHz mono Opus, to a fleet node when this box's whisper is held: the one default that moves the caller's bytes, and how to pin it (local)",
+	},
+	{
 		Tools:    []string{"offload_triage"},
 		Sentence: "THE FIRST DOOR for one text + one yes/no question (register A-102): seconds on the entry rung, automatic climb on a low decision margin; never write an agent_delegate contract for a single check.",
 		Why:      "door choice: never write an agent_delegate contract for a single check",
@@ -347,6 +363,37 @@ var compactKeep = []compactKeepEntry{
 		Tools:    []string{"offload_vqa"},
 		Sentence: "Returns {answer}; if it can't answer confidently it returns deferred:true and you should look at the image yourself.",
 		Why:      "the lane defers (deferred:true) when it cannot answer confidently, and the caller does the work itself",
+	},
+	// The accelerator tables (acceltools.go). A box that lists a device as a FLEET accelerator advertises its tools as forwarders, and
+	// registerAccelTools appends the forwarding note to each description, after an opening sentence that says "LOCAL ... on-box": the
+	// note is the sentence that says the call goes to another node and the image bytes travel with it. The note names the device, so
+	// there is one entry per device, each listing the tools that device's table has.
+	{
+		Tools:    []string{"offload_face_detect", "offload_face_embed", "offload_object_detect", "offload_person_embed", "offload_depth", "offload_enhance_low_light", "offload_image_embed", "offload_pose", "offload_segment", "offload_text_embed", "offload_zero_shot"},
+		Sentence: "[FLEET: this box has no hailo-8l — the call is forwarded to the fleet node that does; image_path is read HERE and its bytes travel with the job (cap 8 MiB); the result carries placement{node,wall_ms}]",
+		Why:      "the forwarding note of a fleet accelerator: the call is forwarded to another node and the image bytes travel with it, which the opening sentence (on-box, free) does not say",
+	},
+	{
+		Tools:    []string{"offload_classify_image", "offload_object_detect", "offload_semantic_segment", "offload_image_embed"},
+		Sentence: "[FLEET: this box has no coral-edgetpu — the call is forwarded to the fleet node that does; image_path is read HERE and its bytes travel with the job (cap 8 MiB); the result carries placement{node,wall_ms}]",
+		Why:      "the forwarding note of a fleet accelerator: the call is forwarded to another node and the image bytes travel with it, which the opening sentence (on-box, free) does not say",
+	},
+	{
+		Tools:    []string{"offload_classify_image", "offload_object_detect", "offload_image_embed"},
+		Sentence: "[FLEET: this box has no rknpu — the call is forwarded to the fleet node that does; image_path is read HERE and its bytes travel with the job (cap 8 MiB); the result carries placement{node,wall_ms}]",
+		Why:      "the forwarding note of a fleet accelerator: the call is forwarded to another node and the image bytes travel with it, which the opening sentence (on-box, free) does not say",
+	},
+	// offload_image_embed is a name all three devices share; a box that lists only the Coral or only the RKNPU advertises that
+	// device's own description, and the combined surfaces never show it (the shared-name rule gives the name to the first device).
+	{
+		Tools:    []string{"offload_image_embed"},
+		Sentence: "space=efficientnet-edgetpu-s — NOT a CLIP space: there is no text tower to pair it with (no offload_text_embed / offload_zero_shot on this device).",
+		Why:      "Coral image vectors are in a space with no text tower: they pair with no offload_text_embed or offload_zero_shot vector",
+	},
+	{
+		Tools:    []string{"offload_image_embed"},
+		Sentence: "space names the embedding space — NOT the Hailo's tinyclip and NOT the Coral's efficientnet-edgetpu-s, so vectors from different devices are never comparable, even at the same dimension.",
+		Why:      "vectors from different devices' embedding spaces are never comparable, even at the same dimension (the sibling of the siglip2 pairing rule)",
 	},
 }
 

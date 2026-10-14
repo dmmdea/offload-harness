@@ -17,9 +17,13 @@ package mcpserver
 //
 // No word list decides what is kept. A lexical rule was tried first and it lost sentences a caller relies on (an "ONLY" or a
 // "NOT" in capitals, "can't", the write door's caps) while keeping others by accident. Instead a test reads the live full
-// descriptions and fails for every sentence that carries a constraint word and is neither in the compact output nor on a
-// reviewed dropped-with-reason list (toolsprofile_gate_test.go, toolsprofile_dropped_test.go), so a rule added to a
-// description later turns it red until someone has read it and put it on one list or the other.
+// descriptions, exactly as tools/list emits them, and fails for every sentence that carries a constraint word or says the
+// caller's data leaves the box (it is forwarded, it travels with the job, it goes over the tailnet) and is neither in the compact
+// output nor on a reviewed dropped-with-reason list (toolsprofile_gate_test.go, toolsprofile_dropped_test.go), so a rule added to
+// a description later turns it red until someone has read it and put it on one list or the other. It reads every surface the
+// server can emit, including each accelerator alone, as a local and as a fleet device: the shared-name rule gives a tool name to
+// the first listed device, so the other devices' descriptions for that name are advertised only on a box that lists them alone,
+// and a fleet device's description carries a forwarding note appended after the table text.
 //
 // Only the advertised list is rewritten, by a receiving middleware on tools/list that is installed ONLY when the profile is
 // compact, so the default configuration has no middleware and its list is byte-identical to the list before the key existed.
@@ -41,10 +45,11 @@ import (
 
 // leadGuard marks text the lead cut must never drop. It is NOT what decides which sentences are kept (the reviewed keep-list does
 // that): it only stops shortenLead from cutting an opening sentence at a clause boundary when the part it would drop carries a
-// constraint word, so an opening sentence that holds a rule is kept whole. It is the same family of words the review gate
-// classifies sentences by (gateTrigger in toolsprofile_gate_test.go, written out separately there), and a test pins that every
-// word of the gate is a word of this guard.
-var leadGuard = regexp.MustCompile(`(?i)\b(never|refus\w*|only|must|not|\w+n't|cannot|required|denied|trusted|untrusted|unattended|sandbox\w*|safety|advisory|read-only|forbidden|irreversible|destructive|opt-in|without|no (?:delete|shell|run|network|cloud|write))\b`)
+// constraint word or says the caller's data leaves the box (forwarded, travels, over the tailnet, sent, cloud), so an opening
+// sentence that holds a rule is kept whole. It is the same family of words the review gate classifies sentences by (gateTrigger
+// in toolsprofile_gate_test.go, written out separately there), and a test pins that every word of the gate is a word of this
+// guard.
+var leadGuard = regexp.MustCompile(`(?i)\b(never|refus\w*|only|must|not|\w+n't|cannot|required|denied|trusted|untrusted|unattended|sandbox\w*|safety|advisory|read-only|forbidden|irreversible|destructive|opt-in|without|no (?:delete|shell|run|network|cloud|write)|forward\w*|travel\w*|tailnet|sent|cloud)\b`)
 
 // compactLeadMin is the shortest first "sentence" the cut accepts: a description that opens "OPTIONAL." or "Required." has
 // said nothing yet, so the next sentence is kept with it.
