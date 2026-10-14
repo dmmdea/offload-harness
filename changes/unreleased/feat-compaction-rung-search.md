@@ -25,9 +25,10 @@
   error boost), the caps, file diversity, the footer counts, the shell tools' real framing and truncation note, and the rung's place in
   the ladder (older tool bodies only, pins and the recent tail untouched, off by default, inert on the mini corpus). A 1,500-input
   mutated-listing sweep (a fuzz target runs the same properties) found one real defect before commit (a flat listing whose files
-  interleave was regrouped by file); 21 source mutations were each caught by a test, and every one was proved applied and restored
+  interleave was regrouped by file); 20 source mutations were each caught by a test, and every one was proved applied and restored
   byte-clean.
 - **Measured, side note only.** On the frozen fixtures the 20 listing bodies keep about 51% of their tokens under the rung and about 46%
-  under the generic skeleton, so the rung is not a size win; its case is what it keeps (a planted task-relevant line survived in 120 of
-  120 bodies, against 48 of 120 for the skeleton, a synthetic probe and not a corpus verdict). The committed mini corpus holds no
-  listing, so the rung changes none of its outputs.
+  under the generic skeleton, so the rung is not a size win (`TestSearchRungBodySavingsReport`); its case is what it keeps: with three
+  task-relevant lines planted in each of 40 listings, the rung kept 120 of 120 and the generic skeleton 48 of 120
+  (`TestSearchRungKeepsPlantedLinesReport`, a synthetic probe and not a corpus verdict). The committed mini corpus holds no listing, so
+  the rung changes none of its outputs.

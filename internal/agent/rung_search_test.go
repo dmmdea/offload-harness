@@ -1115,3 +1115,42 @@ func pct(a, b int) int {
 	}
 	return a * 100 / b
 }
+
+// TestSearchRungKeepsPlantedLinesReport plants three task-relevant lines in each of
+// 40 listings and counts how many survive the rung and, for comparison, the generic
+// skeleton. A synthetic probe, not a corpus verdict: it shows what the rung is for,
+// which is keeping the lines the task is about, not a smaller body.
+func TestSearchRungKeepsPlantedLinesReport(t *testing.T) {
+	planted := []string{
+		"const fetchTimeout = 30 // exceeded after this",
+		"return errRequestLarge // a large request",
+		"client.Timeout = fetchTimeout",
+	}
+	total, byRung, bySkeleton := 0, 0, 0
+	for seed := uint64(100); seed < 140; seed++ {
+		hits := benignHits(seed, 24, 96)
+		r := &fixtureRand{s: seed}
+		var marked []string
+		for k, p := range planted {
+			i := r.intn(len(hits))
+			hits[i].text = fmt.Sprintf("%s #%d", p, k) // the suffix keeps two plantings on one line distinct
+			marked = append(marked, hits[i].text)
+		}
+		body := prodGrouped(hits, false)
+		thin := mustThin(t, body, rungQuery())
+		sk, _ := skeletonize(body)
+		for _, line := range marked {
+			total++
+			if strings.Contains(thin, line) {
+				byRung++
+			}
+			if strings.Contains(sk, line) {
+				bySkeleton++
+			}
+		}
+	}
+	t.Logf("planted task-relevant lines kept: rung %d of %d, generic skeleton %d of %d", byRung, total, bySkeleton, total)
+	if byRung != total {
+		t.Errorf("the rung must keep every planted task-relevant line: %d of %d", byRung, total)
+	}
+}
