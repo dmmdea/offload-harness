@@ -153,6 +153,22 @@ test("argparse abbreviations of the two flags are read as the flags", () => {
   );
 });
 
+// The shortest abbreviations, measured against ComfyUI 0.38.0's own parser (comfy.cli_args.parser.parse_args, allow_abbrev on):
+// `--disable-al` is --disable-all-custom-nodes and `--wh` is --whitelist-custom-nodes; `--disable-a` (auto-launch, async-offload,
+// all-custom-nodes, api-nodes) and `--w` (windows-standalone-build, whitelist-custom-nodes) are refused as ambiguous.
+
+test("the shortest abbreviation ComfyUI accepts of --disable-all-custom-nodes is read as the flag", () => {
+  assert.deepEqual(
+    launchFlags({ idle: IDLE, extraArgs: "--disable-al --lowvram" }),
+    [...BASE, ...YAML_FLAG, "--disable-al", "--lowvram", "--whitelist-custom-nodes", EXT_IDLE_PACK],
+  );
+});
+
+test("a prefix ComfyUI refuses as ambiguous is not read as either flag", () => {
+  assert.deepEqual(launchFlags({ idle: IDLE, extraArgs: "--disable-a --lowvram" }), [...BASE, ...YAML_FLAG, "--disable-a", "--lowvram"]);
+  assert.deepEqual(launchFlags({ idle: IDLE, extraArgs: "--w x --lowvram" }), [...BASE, ...YAML_FLAG, "--w", "x", "--lowvram"]);
+});
+
 test("--disable-all-custom-nodes with no whitelist gets one that names the pack, at the end", () => {
   assert.deepEqual(
     launchFlags({ idle: IDLE, extraArgs: "--disable-all-custom-nodes --lowvram" }),
@@ -340,6 +356,30 @@ test("a probe that throws is said, and the launch still succeeds", async (t) => 
   assert.equal(r.result, r.child);
 });
 
+test("the COMFY-IDLE line states the bound the pack reports, which is the one that was asked for", async (t) => {
+  const r = await launch(t, { keep: true, env: { COMFY_IDLE_FREE_SEC: "120" }, probe: async () => ({ ...GOOD_ANSWER, limit_sec: 120 }) });
+  assert.equal(count(r.lines, /^COMFY-IDLE:/), 1, JSON.stringify(r.lines));
+  assert.match(r.lines.find((l) => /^COMFY-IDLE:/.test(l)), /after 120 s/);
+  assert.equal(count(r.lines, /COMFY-IDLE-WARN/), 0, JSON.stringify(r.lines));
+});
+
+test("a pack that reports another bound than the one asked for is a warning that names both, not a COMFY-IDLE line", async (t) => {
+  // OFFLOAD_IDLE_FREE_SEC=120 went to the child; a pack that ignored it (or read another variable) answers its own 300.
+  const r = await launch(t, { keep: true, env: { COMFY_IDLE_FREE_SEC: "120" } });
+  assert.equal(r.seen.opts.env.OFFLOAD_IDLE_FREE_SEC, "120");
+  assert.equal(count(r.lines, /^COMFY-IDLE-WARN/), 1, JSON.stringify(r.lines));
+  const line = r.lines.find((l) => /^COMFY-IDLE-WARN/.test(l));
+  assert.ok(line.includes("120") && line.includes("300"), `the warning names the bound asked for (120) and the one reported (300): ${line}`);
+  assert.equal(count(r.lines, /^COMFY-IDLE:/), 0, "not claimed as the bound that was asked for");
+  assert.equal(r.result, r.child, "the launch still succeeds");
+});
+
+test("an answer that does not carry limit_sec is taken to be the bound asked for", async (t) => {
+  const r = await launch(t, { keep: true, env: { COMFY_IDLE_FREE_SEC: "120" }, probe: async () => ({ ...GOOD_ANSWER, limit_sec: undefined }) });
+  assert.equal(count(r.lines, /COMFY-IDLE-WARN/), 0, JSON.stringify(r.lines));
+  assert.match(r.lines.find((l) => /^COMFY-IDLE:/.test(l)), /after 120 s/);
+});
+
 test("a pack that answers but reports it cannot run is said with its reason", async (t) => {
   const r = await launch(t, { keep: true, probe: async () => ({ ...GOOD_ANSWER, error: "no prompt queue" }) });
   assert.equal(count(r.lines, /^COMFY-IDLE-WARN/), 1, JSON.stringify(r.lines));
@@ -414,15 +454,19 @@ test("a keyed kept instance the marker proves is ours, launched without the pack
     "--temp-directory", join(dir, "instances", "side")];
   O.writeLaunchOwner(dir, { pid: 77, ownerPid: 5151, args: argv, profile: { cudaDevice: "", dynamicVram: "" }, key: "side", port: 8190, leaseEpoch: 5 });
   const lines = [];
+  let asked = 0;
   const result = await ensureComfy({
     keep: true, comfyDir: dir, env: { COMFY_INSTANCE: "side", GPU_LEASE_EPOCH: "5" }, api: "http://127.0.0.1:8190", py: "py", pollMs: 1,
-    log: (l) => lines.push(l), comfyUp: async () => true, systemArgv: async () => argv, alive: (p) => p === 77, envFor: () => ({}),
+    log: (l) => lines.push(l), comfyUp: async () => true, systemArgv: async () => { asked++; return argv; }, alive: (p) => p === 77, envFor: () => ({}),
     portFree: boom("an answering ComfyUI is never bind-probed"), mkdirs: boom("no directories for a reused instance"),
     spawn: boom("nothing is launched"), killPid: boom("never kill"), probeIdle: boom("a reused instance is not probed"),
   });
   assert.equal(result, null);
   assert.equal(count(lines, /^COMFY-IDLE-WARN/), 1, JSON.stringify(lines));
   assert.match(lines.find((l) => /^COMFY-IDLE-WARN/.test(l)), /side/);
+  // reuseVerdict already read /system_stats to prove the instance is this one; the warning reads the same answer, not a second request
+  // (each is an 8 s wait on an instance that answers slowly).
+  assert.equal(asked, 1, "one /system_stats request for the whole reuse decision");
 });
 
 // ---- fetchIdleProbe: the real request -------------------------------------------------------------------
