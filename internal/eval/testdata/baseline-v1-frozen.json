@@ -1,0 +1,48 @@
+{
+  "gate_version": "1",
+  "mode": "non_inferiority",
+  "primary": {
+    "name": "answer_quality",
+    "class": "judge_0_10",
+    "margin": 0.5,
+    "higher_is_better": true
+  },
+  "efficiency": [
+    {
+      "name": "forwarded_tokens",
+      "class": "tokens",
+      "lower_is_better": true
+    }
+  ],
+  "min_pairs": 16,
+  "bootstrap_b": 10000,
+  "seed": 1,
+  "max_excluded_share": 0.2,
+  "held_out": [
+    "task-019",
+    "task-020"
+  ],
+  "corpus_hash": "29f9845c97165d2e415575fff69e23dd7e37228598a21ee0a5a8f15c183ec741",
+  "tasks": [
+    "task-001",
+    "task-002",
+    "task-003",
+    "task-004",
+    "task-005",
+    "task-006",
+    "task-007",
+    "task-008",
+    "task-009",
+    "task-010",
+    "task-011",
+    "task-012",
+    "task-013",
+    "task-014",
+    "task-015",
+    "task-016",
+    "task-017",
+    "task-018",
+    "task-019",
+    "task-020"
+  ]
+}

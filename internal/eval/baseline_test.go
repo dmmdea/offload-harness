@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -402,5 +403,69 @@ func TestCheckBaselineRefusals(t *testing.T) {
 	}
 	if _, _, err := CheckBaseline(nulls); err == nil || !strings.Contains(err.Error(), "canonical form") {
 		t.Errorf("a null list must be refused as non-canonical, got %v", err)
+	}
+}
+
+// A baseline frozen by the version 1 gate, byte for byte as that binary wrote it (a small
+// non-inferiority pre-registration; version 1 had no judge). check must refuse it for what it is, a
+// baseline of another version that has to be re-frozen, and not for the form of its bytes: they are
+// the canonical form of another gate, so "edited by hand?" would send the operator to look for an
+// edit nobody made.
+func TestCheckBaselineRefusesARealVersionOneFileWithTheVersionReason(t *testing.T) {
+	raw, err := os.ReadFile("testdata/baseline-v1-frozen.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The raw bytes are the file this test is about: a checkout that converted its line endings would not be.
+	if got, want := BaselineHash(raw), "ed7876ddd9d294d239f896462b161c3d17f8758e58101a285151f4a285a637a6"; got != want {
+		t.Fatalf("testdata/baseline-v1-frozen.json hashes to %s, not %s: its bytes changed", got, want)
+	}
+	if !bytes.Contains(raw, []byte(`"gate_version": "1"`)) || bytes.Contains(raw, []byte("")) || bytes.Contains(raw, []byte(`"judge"`)) {
+		t.Fatal("the file must be a version 1 baseline, LF only, with no judge")
+	}
+	_, _, err = CheckBaseline(raw)
+	r := refusalOf(t, err)
+	for _, want := range []string{"gate_version", `"1"`, `"2"`, "re-frozen"} {
+		if !strings.Contains(r.Reason, want) {
+			t.Errorf("the refusal must say %s, got %q", want, r.Reason)
+		}
+	}
+	for _, bad := range []string{"canonical form", "edited by hand", "not a baseline document"} {
+		if strings.Contains(r.Reason, bad) {
+			t.Errorf("a version 1 file is refused for its version, not for %q: %q", bad, r.Reason)
+		}
+	}
+}
+
+// The version is read before anything else about the document: a file of another version is refused for
+// its version whatever else it holds, and a hand edit of a current file is still refused for its form.
+func TestCheckBaselineReadsTheVersionBeforeTheFormOfTheBytes(t *testing.T) {
+	_, current, _, err := FreezeBaseline(testPreReg(ModeNonInferiority), testCorpus, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A different version, with a field this gate has never heard of (a later gate's) and an odd layout.
+	for name, raw := range map[string][]byte{
+		"version 1, extra field":    []byte(`{"gate_version":"1","something_new":{"a":[1,2]},"mode":"superiority"}`),
+		"version 3, compact":        bytes.Replace(current, []byte(`"gate_version": "2"`), []byte(`"gate_version": "3"`), 1),
+		"version 0, trailing bytes": []byte(`{"gate_version":"0"} {"x":1}`),
+	} {
+		_, _, err := CheckBaseline(raw)
+		if err == nil {
+			t.Errorf("%s: must be refused", name)
+			continue
+		}
+		if r := refusalOf(t, err); !strings.Contains(r.Reason, "gate_version") || !strings.Contains(r.Reason, "re-frozen") || strings.Contains(r.Reason, "canonical form") {
+			t.Errorf("%s: the refusal must be the version one, got %q", name, r.Reason)
+		}
+	}
+	// The same version with a hand edit keeps its own refusal.
+	edited := bytes.Replace(current, []byte(`"mode": "non_inferiority"`), []byte(`"mode":  "non_inferiority"`), 1)
+	if _, _, err := CheckBaseline(edited); err == nil || !strings.Contains(err.Error(), "canonical form") {
+		t.Errorf("a current-version file edited by hand is refused for its form, got %v", err)
+	}
+	// A file with no version at all is not a baseline of this gate either.
+	if _, _, err := CheckBaseline([]byte(`{"mode":"superiority"}`)); err == nil {
+		t.Error("a document with no gate_version must be refused")
 	}
 }
