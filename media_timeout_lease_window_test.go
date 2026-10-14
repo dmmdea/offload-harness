@@ -76,7 +76,32 @@ func configTimeoutTags() []string {
 // mediaTimeoutKeyDrift compares the config's *_timeout_sec keys with the key list: a media key the config no longer declares,
 // and a config key that is in neither list.
 func mediaTimeoutKeyDrift(tags []string) []string {
-	return nil // red: not written yet
+	declared := map[string]bool{}
+	var out []string
+	for _, tag := range tags {
+		declared[tag] = true
+		_, media := mediaTimeoutKeys[tag]
+		_, other := notMediaLeaseTimeouts[tag]
+		if !media && !other {
+			out = append(out, tag+" is a config.Config *_timeout_sec key in neither mediaTimeoutKeys nor notMediaLeaseTimeouts: if it is a generation route's clock, add it to mediaTimeoutKeys so the seed test holds it to the lease term")
+		}
+	}
+	for _, key := range sortedMediaKeys() {
+		if !declared[key] {
+			out = append(out, key+" is in mediaTimeoutKeys but config.Config no longer declares it")
+		}
+	}
+	others := make([]string, 0, len(notMediaLeaseTimeouts))
+	for key := range notMediaLeaseTimeouts {
+		others = append(others, key)
+	}
+	sort.Strings(others)
+	for _, key := range others {
+		if !declared[key] {
+			out = append(out, key+" is in notMediaLeaseTimeouts but config.Config no longer declares it")
+		}
+	}
+	return out
 }
 
 func sortedMediaKeys() []string {
@@ -241,7 +266,7 @@ func TestSeededMediaTimeoutsFitTheLeaseWindowTheyRunUnder(t *testing.T) {
 		layers["profiles.json "+tier] = layer
 	}
 
-	explicit, seen := 0, map[string]bool{}
+	explicit := 0
 	names := make([]string, 0, len(layers))
 	for n := range layers {
 		names = append(names, n)
@@ -253,20 +278,12 @@ func TestSeededMediaTimeoutsFitTheLeaseWindowTheyRunUnder(t *testing.T) {
 		for _, p := range problems {
 			t.Error(p)
 		}
-		for path := range seededTimeouts(layers[name]) {
-			path = strings.TrimSuffix(path, " (code default)")
-			seen[path[strings.LastIndex(path, ".")+1:]] = true
-		}
 	}
 
-	// Blind-gate control: the walk found the seeds it is meant to judge.
+	// Blind-gate control: the walk found the seeds it is meant to judge. (That the key list is the config's own is
+	// TestTheMediaTimeoutKeyListMatchesTheConfig's job.)
 	if explicit < 20 {
 		t.Fatalf("only %d explicit media timeouts found across the seed files: the walk went blind", explicit)
-	}
-	for _, key := range sortedMediaKeys() {
-		if !seen[key] {
-			t.Errorf("no layer carries %s (explicit or default): the key list and the config drifted", key)
-		}
 	}
 
 	// Negative controls: the predicate fails for a video seed that outlives a one-hour term, and for a window above the

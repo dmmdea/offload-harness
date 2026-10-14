@@ -526,9 +526,11 @@ node's machine-wide media lease for the timeout key of the route it runs (`image
 payload carries none, so the delegator's keys play no part) and the render is killed at that same value, so a render never
 outlives the lease taken for it. A job that cannot get the card first queues for `gpu_wait_ms` (90 s by default; a queue
 wait, not a lease length) and then defers `gpu_busy`. The window is one lease term, so every timeout a node seeds stays
-under `gpu_max_term_min` (six hours by default; the longest tier seed is 7,200 s). Which keys a tier seeds, the code
-defaults and the `gpu reserve --for` rule are in the engine + lease row of the
-[timeout chain](OPERATOR-GUIDE.md#the-timeout-chain-and-walls-sized-from-the-seats-own-rate-011521-register-d-03).
+under `gpu_max_term_min` (six hours by default; the longest tier seed is 7,200 s). That bound is a single job's timeout: a
+node renders one job per ticket and there is no batch task on the fleet, so the one window that is a product of a timeout
+and a job count (the per-image timeout times the jobs of a local `generate-image --batch`, with no cap on the count) never
+reaches a node. Which keys a tier seeds, the code defaults, the batch case and the `gpu reserve --for` rule are in the
+engine + lease row of the timeout chain section of [OPERATOR-GUIDE.md](OPERATOR-GUIDE.md).
 
 **A run-graph also checks the files it names, at the door** (ADR 0082, Amendment 1). Before it writes a temp file, takes a lease
 or starts ComfyUI, the node reads the graph for the model files its loaders open (any string input, under any key but
