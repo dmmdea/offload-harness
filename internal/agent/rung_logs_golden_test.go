@@ -195,6 +195,35 @@ func lrSyntheticFixtures() []lrFixture {
 	return out
 }
 
+// lrLookalikeHeader is the first line of a tool body that merely QUOTES the
+// optional log rung's disclosure header: a file read of a saved collapsed log,
+// a search hit, a pasted transcript. The text is spelled out here on purpose:
+// these fixtures describe what the unmodified ladder does with such a body, and
+// must not depend on any symbol the rung adds.
+const lrLookalikeHeader = "[log-collapse: original 4096 chars, 120 lines]\n"
+
+// lrLookalikeFixtures are transcripts whose tool bodies open with that header.
+// The default ladder has never heard of the header, so it must treat these as
+// raw content: dedupe identical copies, skeletonise, elide and report each
+// body's true size. "identical" repeats one body so the always-on dedupe rung
+// engages; "distinct" gives every body its own text so the marker rungs do.
+func lrLookalikeFixtures() []lrFixture {
+	quote := func(body string) string { return lrLookalikeHeader + body }
+	build := func(name string, bodies ...string) []lrFixture {
+		msgs := lrTranscript(bodies...)
+		est := estimateTokens(msgs)
+		return []lrFixture{
+			{name: name + "/60", msgs: msgs, budget: est * 6 / 10, keep: 2, prot: 3},
+			{name: name + "/25", msgs: msgs, budget: est * 25 / 100, keep: 2, prot: 3},
+		}
+	}
+	same := quote(lrServerLog(150))
+	var out []lrFixture
+	out = append(out, build("lookalike/identical", same, same, quote(lrServerLog(170)))...)
+	out = append(out, build("lookalike/distinct", quote(lrServerLog(150)), quote(lrTestLog(80)), quote(lrServerLog(170)))...)
+	return out
+}
+
 // lrDigest hashes a transcript unambiguously: every field is length-prefixed so
 // no two different transcripts share a byte stream.
 func lrDigest(msgs []Msg) string {
@@ -257,6 +286,16 @@ var lrGolden = map[string]string{
 	"synthetic/repeat-only/60|gcf+skeleton": "3457dbf81a2e4eb024b8080fe34957007b3548d0b5e6e2bc02ccb213caa41005",
 	"synthetic/repeat-only/25|base":         "8885c4d592e2818f18d5f2b6a8af1278baf9a3ef27d9dd6e7a5dd25e3fa7d377",
 	"synthetic/repeat-only/25|gcf+skeleton": "8885c4d592e2818f18d5f2b6a8af1278baf9a3ef27d9dd6e7a5dd25e3fa7d377",
+	// Bodies that open with the rung's header text but are ordinary content,
+	// captured on the same unmodified ladder (the base commit of this branch).
+	"lookalike/identical/60|base":         "a7f3069217c222498b6520cff1ae7f13689f5cc26193ac7a484450280b7ab964",
+	"lookalike/identical/60|gcf+skeleton": "b2a451aa94be6882d377334690c1b6616b4aac3239a5c1e453880179bc6077da",
+	"lookalike/identical/25|base":         "03029e49d1c14e3833508e6f1e6a1b426b934a47cfcebfcaff9318131b402197",
+	"lookalike/identical/25|gcf+skeleton": "03029e49d1c14e3833508e6f1e6a1b426b934a47cfcebfcaff9318131b402197",
+	"lookalike/distinct/60|base":          "e5036b83640b6838fd34eb9145315c49aed54e766c5284ac5d63a748aca56c2c",
+	"lookalike/distinct/60|gcf+skeleton":  "e79efa867b90b36927555c4544550f7ee0a16a1fa372384a776e3eb873c32ce3",
+	"lookalike/distinct/25|base":          "b91d651386c0d34bd3336c0662e219e5e963eef9eba9f3c70493a9acda7923ca",
+	"lookalike/distinct/25|gcf+skeleton":  "b91d651386c0d34bd3336c0662e219e5e963eef9eba9f3c70493a9acda7923ca",
 }
 
 // TestLogsRungDefaultLadderBytesPinned replays every fixture through the
@@ -264,7 +303,7 @@ var lrGolden = map[string]string{
 // (GCF and skeleton on), and demands the exact bytes the unmodified ladder
 // produced. It is the proof that a rung which is off changes nothing.
 func TestLogsRungDefaultLadderBytesPinned(t *testing.T) {
-	fixtures := append(lrMiniCorpus(t), lrSyntheticFixtures()...)
+	fixtures := append(append(lrMiniCorpus(t), lrSyntheticFixtures()...), lrLookalikeFixtures()...)
 	ladders := []struct {
 		name string
 		opts compactOpts
@@ -277,10 +316,6 @@ func TestLogsRungDefaultLadderBytesPinned(t *testing.T) {
 			key := fx.name + "|" + ld.name
 			out := compact(context.Background(), fx.msgs, fx.budget, fx.keep, fx.prot, ld.opts)
 			got := lrDigest(out)
-			if len(lrGolden) == 0 {
-				t.Logf("GOLDEN %q: %q,", key, got)
-				continue
-			}
 			want, ok := lrGolden[key]
 			if !ok {
 				t.Errorf("no pinned digest for %s", key)
@@ -291,7 +326,7 @@ func TestLogsRungDefaultLadderBytesPinned(t *testing.T) {
 			}
 		}
 	}
-	if len(lrGolden) != 0 && len(lrGolden) != len(fixtures)*len(ladders) {
+	if len(lrGolden) != len(fixtures)*len(ladders) {
 		t.Errorf("pinned %d digests but %d fixture/ladder pairs exist", len(lrGolden), len(fixtures)*len(ladders))
 	}
 }

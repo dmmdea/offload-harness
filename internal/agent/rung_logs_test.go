@@ -955,3 +955,181 @@ func TestLogCollapseIsDiscriminatedByTheGoldenFixtures(t *testing.T) {
 		t.Errorf("the rung changes only %d of %d golden fixtures; the pinned digests would not notice it leaking in", changed, len(fixtures))
 	}
 }
+
+// --- review fixes: the default ladder, colour, language errors, sizes, ids -------
+
+// TestDefaultLadderTreatsALogCollapseLookalikeAsRawContent: with the rung off,
+// a body that merely opens with the rung's header is ordinary content. The
+// ladder must dedupe and elide it exactly as it would any other body and name
+// its true size; IsCompactionArtifact must not claim it. The expected values
+// here come from the ladder's own rules (dedupeMarker, elisionMarker), not from
+// the rung.
+func TestDefaultLadderTreatsALogCollapseLookalikeAsRawContent(t *testing.T) {
+	body := lrLookalikeHeader + lrServerLog(150)
+	if IsCompactionArtifact(body) {
+		t.Fatal("IsCompactionArtifact must stay the ladder's own three products; a quoted header is not one")
+	}
+	if isDeduped(body) || isElided(body) || isSkeletonized(body) {
+		t.Fatal("fixture control: the lookalike must not be any other rung's product")
+	}
+
+	// Two identical copies: the older one is deduped, whatever it says on line 1.
+	msgs := lrTranscript(body, body, lrServerLog(170))
+	budget := estimateTokens(msgs) * 6 / 10
+	out := compact(context.Background(), msgs, budget, 2, 3, compactOpts{})
+	if want := dedupeMarker("call-2", len(body)); out[4].Content != want {
+		t.Errorf("older identical copy should be a dedupe reference:\n got %.120q\nwant %.120q", out[4].Content, want)
+	}
+
+	// Distinct copies under a budget nothing meets: every older body is elided
+	// and the marker reports the real length, not the 4096 the header claims.
+	distinct := lrTranscript(lrLookalikeHeader+lrServerLog(150), lrLookalikeHeader+lrTestLog(80), lrServerLog(170))
+	tight := compact(context.Background(), distinct, 1, 2, 3, compactOpts{})
+	for _, i := range []int{4, 6} {
+		if want := elisionMarker(len(distinct[i].Content)); !strings.HasPrefix(tight[i].Content, want) {
+			t.Errorf("message %d: elide marker should name the true size:\n got %.120q\nwant prefix %q", i, tight[i].Content, want)
+		}
+	}
+}
+
+func TestLogsKeepSeesThroughTerminalColour(t *testing.T) {
+	keep := []string{
+		"\x1b[31mERROR\x1b[0m connection reset by peer",
+		"\x1b[1;33mWARN\x1b[0m  slow request took 2300ms",
+		"\x1b[31mFAIL\x1b[0m\texample.com/widget\t0.412s",
+		"\x1b[31m--- FAIL: TestWidget (0.01s)\x1b[0m",
+		"\x1b[90m    at com.example.Widget.render(Widget.java:88)\x1b[0m",
+		"\x1b[1mTraceback (most recent call last):\x1b[0m",
+		"\x1b[0m",
+		"\x1b[0m   ",
+	}
+	for _, l := range keep {
+		if !logsKeep(l) {
+			t.Errorf("a coloured problem or blank line must be kept verbatim: %q", l)
+		}
+	}
+	for _, l := range []string{"\x1b[32mGET\x1b[0m /health 200 4ms", "\x1b[36mdownloading\x1b[0m module.tgz 12/100 KB"} {
+		if logsKeep(l) {
+			t.Errorf("a coloured routine line must stay foldable: %q", l)
+		}
+	}
+
+	// In a run: forty near-identical coloured errors between routine runs all
+	// survive, and the routine lines around them still fold.
+	var mid []string
+	for i := 0; i < 40; i++ {
+		mid = append(mid, fmt.Sprintf("\x1b[31mERROR\x1b[0m request %d dropped by the proxy", i))
+	}
+	in := lcJoin(lcHead, lcAccessRun(30), mid, lcAccessRun(30), lcTail)
+	got, ok := logCollapse(in)
+	if !ok {
+		t.Fatal("the routine runs around the errors must still fold")
+	}
+	if n := strings.Count(got, "dropped by the proxy"); n != 40 {
+		t.Errorf("want all 40 coloured error lines kept, got %d", n)
+	}
+}
+
+func TestLogsKeepRecognisesLanguageErrorNamesAndFailureShapes(t *testing.T) {
+	keep := []string{
+		"TypeError: x is undefined",
+		"java.lang.NullPointerException",
+		"Exception in thread \"main\" java.lang.IllegalStateException: closed",
+		"E   AssertionError: assert 1 == 2",
+		"KeyError: 'x'",
+		"ValueError: invalid literal for int()",
+		"UnboundLocalError: referenced before assignment",
+		"Segmentation fault (core dumped)",
+		"Killed",
+		"exit status 1",
+		"exit status 137",
+		"npm ERR! code ELIFECYCLE",
+	}
+	for _, l := range keep {
+		if !logsKeep(l) {
+			t.Errorf("failure line must be kept verbatim: %q", l)
+		}
+	}
+	routine := []string{
+		"registering the ErrorHandler route",
+		"loaded ExceptionMapper table",
+		"exit status 0",
+		"GET /health 200 4ms",
+	}
+	for _, l := range routine {
+		if logsKeep(l) {
+			t.Errorf("routine line must stay foldable: %q", l)
+		}
+	}
+
+	// A parametrised failure: forty near-identical assertion lines between
+	// routine runs all survive.
+	var mid []string
+	for i := 0; i < 40; i++ {
+		mid = append(mid, fmt.Sprintf("AssertionError: expected 1 got %d in case %d of the suite", i, i))
+	}
+	in := lcJoin(lcHead, lcAccessRun(30), mid, lcAccessRun(30), lcTail)
+	got, ok := logCollapse(in)
+	if !ok {
+		t.Fatal("the routine runs around the failures must still fold")
+	}
+	if n := strings.Count(got, "AssertionError: expected 1 got"); n != 40 {
+		t.Errorf("want all 40 assertion lines kept, got %d", n)
+	}
+}
+
+// TestLogCollapseElideMarkerReportsTheOriginalSize: a body the rung folded and
+// a later rung elides is announced at the size it had BEFORE the fold: the
+// marker discloses what was lost, and what was lost is the whole original.
+func TestLogCollapseElideMarkerReportsTheOriginalSize(t *testing.T) {
+	msgs := lrTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170))
+	for name, opts := range map[string]compactOpts{
+		"logs":          {LogCollapse: true},
+		"logs+skeleton": {Skeleton: true, LogCollapse: true},
+		"production":    {GCF: true, Skeleton: true, LogCollapse: true},
+	} {
+		out := compact(context.Background(), msgs, 1, 2, 3, opts)
+		for _, i := range []int{4, 6} {
+			if want := elisionMarker(len(msgs[i].Content)); !strings.HasPrefix(out[i].Content, want) {
+				t.Errorf("%s: message %d: elide marker should name the original size:\n got %.100q\nwant prefix %q", name, i, out[i].Content, want)
+			}
+		}
+	}
+}
+
+// TestLogCollapseRungIgnoresAResultWhoseCallIdIsReused: a tool-call id declared
+// more than once in the transcript does not say which call produced a result,
+// so the rung must not guess: a file read must never be folded because a later
+// call happened to reuse its id for a command.
+func TestLogCollapseRungIgnoresAResultWhoseCallIdIsReused(t *testing.T) {
+	msgs := []Msg{
+		{Role: "system", Content: "You are a coding agent."},
+		{Role: "user", Content: "objective: read the log, then run the build"},
+		{Role: "user", Content: "exemplar"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "0", Name: "read_file", Args: `{"path":"server.log"}`}}},
+		{Role: "tool", ToolCallID: "0", Content: lrServerLog(150)},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "0", Name: "run", Args: `{"cmd":"make"}`}}},
+		{Role: "tool", ToolCallID: "0", Content: lrServerLog(160)},
+		{Role: "assistant", Content: "reading both"},
+	}
+	out := append([]Msg(nil), msgs...)
+	logsRung(out, 3, len(out)-1, 1, nil)
+	for _, i := range []int{4, 6} {
+		if out[i].Content != msgs[i].Content {
+			t.Errorf("message %d: a result under a reused call id was rewritten", i)
+		}
+	}
+	// Control: the same two bodies under distinct ids, the second a command,
+	// fold the command's body only.
+	fixed := append([]Msg(nil), msgs...)
+	fixed[5] = Msg{Role: "assistant", ToolCalls: []ToolCall{{ID: "1", Name: "run", Args: `{"cmd":"make"}`}}}
+	fixed[6] = Msg{Role: "tool", ToolCallID: "1", Content: msgs[6].Content}
+	out = append([]Msg(nil), fixed...)
+	logsRung(out, 3, len(out)-1, 1, nil)
+	if out[4].Content != fixed[4].Content {
+		t.Error("control: a file read was rewritten")
+	}
+	if !isLogCollapsed(out[6].Content) {
+		t.Error("control: the command's body should fold under a unique id")
+	}
+}
