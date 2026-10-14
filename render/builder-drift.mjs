@@ -42,13 +42,15 @@
 // error (exit 2) instead of a skipped template side; use it in an upgrade runbook. `--strict` also fails (exit 1) on every
 // `unreviewed` manifest entry; without it those entries stay green until a person judges them.
 // DIR is the `templates` directory of the wheel (or of a `pip download` extract); --comfy-dir finds it inside a
-// ComfyUI tree. The first source that is set decides, in this order: --templates-dir, --comfy-dir, the
+// ComfyUI tree. The package root (the folder that holds `templates/`) is refused with exit 2 and the path to pass,
+// through --templates-dir and COMFY_TEMPLATES_DIR alike. The first source that is set decides, in this order:
+// --templates-dir, --comfy-dir, the
 // `COMFY_TEMPLATES_DIR` environment variable (a templates directory), the `COMFYUI_DIR` environment variable (a ComfyUI
 // tree). The tests use the same function (`resolveTemplatesDir`). A tree named on the command line that has no package
 // is an error; one named by the environment that has none counts as "no package here" and the template side is
 // skipped. Read-only on the templates; `record` writes only the manifest.
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { joinPath, locateTemplates, nodeIo, readPackageVersions } from "./templates-catalog.mjs";
@@ -504,17 +506,35 @@ export function templateSource(templatesDir) {
   };
 }
 
+// refusePackageRoot: the package root (the folder of the wheel, or of a `pip download` extract, that holds `templates/`)
+// given where the templates directory belongs matches no template, so every guarded one would fail as "not in the
+// package" with "installed unknown", which blames the package instead of the argument. A directory with no top-level
+// `.json` file and a `templates` folder is refused with the path to pass, rather than followed into, because the
+// manifest records which package was read. A missing or unreadable directory and any directory that holds template
+// files are returned as given: the checks already name those. `via` says which source named the directory.
+function refusePackageRoot(dir, via) {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return dir; }
+  if (entries.some((e) => !e.isDirectory() && /\.json$/i.test(e.name))) return dir;
+  const shown = String(dir).replace(/\\/g, "/").replace(/\/+$/, "");
+  let hasTemplates = false;
+  try { hasTemplates = statSync(`${shown}/templates`).isDirectory(); } catch { /* none, or unreadable: not a package root */ }
+  if (!hasTemplates) return dir;
+  throw new Error(`${via} ${shown} is the package root (it holds a templates/ folder and no template .json files), not the templates directory; pass ${shown}/templates`);
+}
+
 // resolveTemplatesDir: the templates directory the checks read, or null when none is named. The first source that is
 // set decides: --templates-dir, --comfy-dir, COMFY_TEMPLATES_DIR, COMFYUI_DIR. A ComfyUI tree named by a flag that has
 // no package throws (it is a request); one named by the environment returns null (the package is not installed here).
+// A package root named by --templates-dir or COMFY_TEMPLATES_DIR throws too (see refusePackageRoot).
 export function resolveTemplatesDir(flags, env) {
-  if (typeof flags["templates-dir"] === "string") return flags["templates-dir"];
+  if (typeof flags["templates-dir"] === "string") return refusePackageRoot(flags["templates-dir"], "--templates-dir");
   if (typeof flags["comfy-dir"] === "string") {
     const found = locateTemplates(flags["comfy-dir"], nodeIo);
     if (!found) throw new Error(`--comfy-dir ${flags["comfy-dir"]} has no ${JSON_PKG} package (looked in .venv and venv under it)`);
     return found.templatesDir;
   }
-  if (env.COMFY_TEMPLATES_DIR) return env.COMFY_TEMPLATES_DIR;
+  if (env.COMFY_TEMPLATES_DIR) return refusePackageRoot(env.COMFY_TEMPLATES_DIR, "COMFY_TEMPLATES_DIR");
   if (env.COMFYUI_DIR) return locateTemplates(env.COMFYUI_DIR, nodeIo)?.templatesDir ?? null;
   return null;
 }

@@ -3440,7 +3440,9 @@ otherwise, because the builder keeps building the old recipe.
   `--templates-dir`, `--comfy-dir` (a ComfyUI tree), the `COMFY_TEMPLATES_DIR` environment variable (a `templates`
   directory), the `COMFYUI_DIR` environment variable (a ComfyUI tree). A tree named on the command line that has no
   package is an error; one named by the environment that has none means "no package here" and the template side
-  is skipped.
+  is skipped. `--templates-dir` and `COMFY_TEMPLATES_DIR` take the package's `templates/` folder: the package root
+  above it (a directory that holds a `templates/` folder and no top-level `.json` file) is refused with exit 2 and the
+  path to pass, because it matches no template and the manifest records which directory was read.
 - **Not guarded.** Seeds, prompts, model file names, sizes the caller sets, and the builders with no copied
   widget (`wf-hunyuan15-i2v`, `wf-sdxl-inpaint`, `wf-upscale`, each with its reason in the spec).
 - **Known limits.** What a green run does not tell you:
