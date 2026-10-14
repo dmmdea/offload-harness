@@ -1,10 +1,13 @@
 package changelog
 
 import (
+	"errors"
+	"io/fs"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // treeAt writes a repository root: CHANGELOG.md (when text is not empty) and one file per fragment.
@@ -119,6 +122,65 @@ func TestAnEntryOfChangesBesideTheFragmentDirectoryIsRefused(t *testing.T) {
 			writeFile(t, filepath.Join(root, "changes", filepath.FromSlash(tc.path)), fragFirst)
 			wantProblem(t, CheckTree(root), tc.want)
 			wantProblem(t, CheckForRelease(root), tc.want)
+		})
+	}
+}
+
+func TestAChangesPathThatIsNotADirectoryIsNamed(t *testing.T) {
+	// Not "no fragments": a file where the directory belongs is a tree that cannot be read, and saying nothing would be
+	// the same lost entry. Windows reports a file in a directory's place as "does not exist", so this is checked on the
+	// real file system and not left to the error text.
+	root := treeAt(t, baseLF(), nil)
+	writeFile(t, filepath.Join(root, "changes"), "not a directory\n")
+	wantProblem(t, CheckTree(root), "changes: is not a directory")
+}
+
+// brokenFS fails the Stat or the ReadDir of any path, as a directory the process may not read would.
+type brokenFS struct {
+	fs.FS
+	statErr, readErr error
+}
+
+func (b brokenFS) Stat(name string) (fs.FileInfo, error) {
+	if b.statErr != nil {
+		return nil, b.statErr
+	}
+	return fs.Stat(b.FS, name)
+}
+
+func (b brokenFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if b.readErr != nil {
+		return nil, b.readErr
+	}
+	return fs.ReadDir(b.FS, name)
+}
+
+func TestStrayEntriesNameWhatTheyCannotRead(t *testing.T) {
+	file := &fstest.MapFile{Data: []byte("x")}
+	boom := errors.New("boom")
+	for _, tc := range []struct {
+		name string
+		fsys fs.FS
+		want string
+	}{
+		{"changes is a file", fstest.MapFS{"changes": file}, "changes: is not a directory"},
+		{"changes/unreleased is a file", fstest.MapFS{"changes/README.md": file, "changes/unreleased": file}, "changes/unreleased: is not a directory"},
+		{"changes cannot be statted", brokenFS{FS: fstest.MapFS{"changes/README.md": file}, statErr: boom}, "changes: boom"},
+		{"changes cannot be listed", brokenFS{FS: fstest.MapFS{"changes/README.md": file}, readErr: boom}, "changes: cannot be listed: boom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantProblem(t, strayEntriesFS(tc.fsys), tc.want)
+		})
+	}
+	for name, fsys := range map[string]fs.FS{
+		"no changes at all":        fstest.MapFS{"CHANGELOG.md": file},
+		"README.md and unreleased": fstest.MapFS{"changes/README.md": file, "changes/unreleased/a.md": file},
+		"an empty unreleased":      fstest.MapFS{"changes/unreleased": &fstest.MapFile{Mode: fs.ModeDir | 0o755}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if p := strayEntriesFS(fsys); len(p) != 0 {
+				t.Errorf("problems for a clean layout: %v", p)
+			}
 		})
 	}
 }
