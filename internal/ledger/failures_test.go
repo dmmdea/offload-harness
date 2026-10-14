@@ -489,3 +489,76 @@ func TestFailureRegisterReportsKindsAndTheStackFaultShare(t *testing.T) {
 		t.Errorf("a register with no failure row: stack_fault_share = %v in %s, want null and an empty kinds list", empty.StackFaultShare, b)
 	}
 }
+
+// A line the register cannot decode is not a row, and silently dropping it makes a damaged ledger look like a
+// quiet one: a line cut off mid-file (a crash during an append, a copy that stopped), garbage, a line that is not a
+// JSON object, and a last line with no end are each counted in unparsed_lines. A blank line is not a line at all.
+func TestFailureRegisterCountsTheLinesItCouldNotRead(t *testing.T) {
+	path := writeFailureLedger(t,
+		`{"ts":1,"task":"agent_delegate","deferred":true,"reason_code":"budget","job_id":"a"}`,
+		`this is not json`,
+		`{"ts":2,"task":"agent_delegate","deferred":true,"reason_code":"budget","job_id":"b"`, // cut off mid-file
+		``,
+		`[1,2,3]`,
+		`{"ts":3,"task":"agent_delegate","deferred":true,"reason_code":"abstention","job_id":"c"}`,
+	)
+	// a last line the writer had not finished
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"ts":4,"task":"agent_delegate","defer`); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	reg, err := FailureRegisterFile(path, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reg.LedgerFound {
+		t.Errorf("ledger_found = false for a ledger that exists")
+	}
+	if reg.UnparsedLines != 4 {
+		t.Errorf("unparsed_lines = %d, want 4 (garbage, a line cut mid-file, a non-object, the unfinished last line; the blank line is none)", reg.UnparsedLines)
+	}
+	if reg.JobRows != 2 || reg.FailureRows != 2 {
+		t.Errorf("job_rows = %d, failure_rows = %d, want the 2 rows that decode", reg.JobRows, reg.FailureRows)
+	}
+	b, _ := json.Marshal(reg)
+	if !strings.Contains(string(b), `"unparsed_lines":4`) || !strings.Contains(string(b), `"ledger_found":true`) {
+		t.Errorf("the JSON lacks the two fields: %s", b)
+	}
+
+	clean, err := FailureRegisterFile(writeFailureLedger(t, `{"ts":1,"task":"agent_delegate","deferred":true,"reason_code":"budget","job_id":"a"}`), 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clean.UnparsedLines != 0 {
+		t.Errorf("a clean ledger: unparsed_lines = %d, want 0", clean.UnparsedLines)
+	}
+}
+
+// A ledger that is not there is not a ledger with no failures: the report says so (ledger_found false) beside its
+// zeros, and still exits clean, so a script that reads failure_rows has the second field to check.
+func TestFailureRegisterSaysWhenTheLedgerIsMissing(t *testing.T) {
+	reg, err := FailureRegisterFile(filepath.Join(t.TempDir(), "nope.jsonl"), 0, false)
+	if err != nil {
+		t.Fatalf("a missing ledger is a report, not an error: %v", err)
+	}
+	if reg.LedgerFound || reg.UnparsedLines != 0 || reg.FailureRows != 0 {
+		t.Errorf("missing ledger: %+v, want ledger_found false and nothing counted", reg)
+	}
+	b, _ := json.Marshal(reg)
+	if !strings.Contains(string(b), `"ledger_found":false`) {
+		t.Errorf("the JSON must carry ledger_found false, got %s", b)
+	}
+	// An empty ledger that exists is found.
+	empty := filepath.Join(t.TempDir(), "empty.jsonl")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if reg, err := FailureRegisterFile(empty, 0, false); err != nil || !reg.LedgerFound {
+		t.Errorf("an empty ledger that exists: found = %v, err = %v, want found", reg.LedgerFound, err)
+	}
+}
