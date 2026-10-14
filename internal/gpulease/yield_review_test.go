@@ -165,6 +165,47 @@ func TestALabelThatTheRecheckRenewsIsNeverAsked(t *testing.T) {
 	}
 }
 
+// A lease that was renewed and is later labelled again starts its settle interval again: the interval is about
+// the label in front of the holder, not about the first time the lease was ever overdue.
+func TestTheSettleIntervalStartsAgainWhenARenewedLeaseIsLabelledAgain(t *testing.T) {
+	yieldPolicy(t, "request")
+	r, prog := newLabelledYieldRig(t)
+	r.waiter(yieldWaiterA)
+	y, out := &yieldRun{}, &syncBuf{}
+	tk := r.l.NewYieldTicker(YieldTickerOptions{OnYield: "touch STOP", Run: y.run, Out: out, Label: "gpu reserve", Settle: time.Minute})
+	tk.Tick() // the tick that finds the first label
+
+	// The job resumes, the term check renews the lease, and the next tick sees a lease that is not overdue.
+	*r.now = r.now.Add(15 * time.Second)
+	_ = r.l.Renew()
+	touchProgress(t, prog, *r.now)
+	if res, err := r.l.AdvanceTerm(TermSignals{}); err != nil || res.Outcome != TermExtended {
+		t.Fatalf("setup: the term must be renewed: %+v, %v", res, err)
+	}
+	tk.Tick()
+
+	// Two hours on, the job is silent again and the term check labels the lease a second time.
+	*r.now = r.now.Add(2 * time.Hour)
+	_ = r.l.Renew()
+	if res, err := r.l.AdvanceTerm(TermSignals{}); err != nil || res.Outcome != TermExpired {
+		t.Fatalf("setup: the second label: %+v, %v", res, err)
+	}
+	tk.Tick() // the tick that finds the second label
+	for i := 0; i < 3; i++ {
+		r.holderTick(tk, 15*time.Second)
+		if r.asked() {
+			t.Fatalf("asked %d s after the second label, on the strength of a label that was seen two hours ago", (i+1)*15)
+		}
+	}
+	for i := 0; i < 3 && !r.asked(); i++ { // the control: the second label survives its own minute
+		r.holderTick(tk, 15*time.Second)
+	}
+	if !r.asked() {
+		t.Fatal("the second label survived a minute with a waiter on its cards and was never asked")
+	}
+	tk.Wait()
+}
+
 // ---------------------------------------------------------------------------
 // What the holder did about the request, and could not record
 // ---------------------------------------------------------------------------
@@ -183,16 +224,22 @@ func TestAFailedRecordOfTheFinalActionIsSaidOnceAndRetried(t *testing.T) {
 	r.tickUntilAsked(tk)
 	close(y.block)
 	tk.Wait()
+	endedMs := r.now.UnixMilli()
 	if got, _ := ReadYield(r.m.leaseDir(), r.l.Epoch()); got.Action != YieldActionRunning {
 		t.Fatalf("setup: the final write failed, so the sidecar still says %q, got %q", YieldActionRunning, got.Action)
 	}
 	if n := strings.Count(out.String(), "could not record what its --on-yield did"); n != 1 {
 		t.Errorf("the holder says once that the result of its on_yield could not be recorded, got %d:\n%s", n, out.String())
 	}
-	tk.Tick() // the next heartbeat tries again
+	*r.now = r.now.Add(7 * time.Second) // the next heartbeat tries again, a little later
+	tk.Tick()
 	tk.Wait()
-	if got, _ := ReadYield(r.m.leaseDir(), r.l.Epoch()); got.Action != YieldActionRan || got.ActedMs == 0 {
+	got, _ := ReadYield(r.m.leaseDir(), r.l.Epoch())
+	if got.Action != YieldActionRan {
 		t.Errorf("the retry did not record the result: %+v", got)
+	}
+	if got.ActedMs != endedMs {
+		t.Errorf("the retry records when the command ended (%d), not when the write finally succeeded: %d", endedMs, got.ActedMs)
 	}
 	if n := strings.Count(out.String(), "could not record what its --on-yield did"); n != 1 {
 		t.Errorf("the failure is not said again, got %d:\n%s", n, out.String())
