@@ -130,9 +130,6 @@ func TestBootstrapDeltaMeanIsByteIdenticalForTheExistingCallers(t *testing.T) {
 		}
 	}
 	// The guards are unchanged: nothing to conclude is zeros.
-	for _, z := range [][3]float64{} {
-		_ = z
-	}
 	if d, lo, hi := BootstrapDeltaMean(inc[:1], cand[:1], 2000, 1); d != 0 || lo != 0 || hi != 0 {
 		t.Errorf("n < 2 must give zeros, got %v %v %v", d, lo, hi)
 	}
@@ -480,7 +477,7 @@ func TestCheckBaselineRefusesAFileBelowTheFloors(t *testing.T) {
 	}
 }
 
-// The probe at n = 16 and B = 2000 measured a null ADOPT rate of 3.1% against a nominal 2.5%; at
+// A measurement at n = 16 and B = 2000 measured a null ADOPT rate of 3.1% against a nominal 2.5%; at
 // n = 8 it was 5.4%, and at B = 1 it was 45%. At the floors the rate must stay at or below 4%.
 func TestNullAdoptRateAtTheFloorsIsCalibrated(t *testing.T) {
 	if testing.Short() {
@@ -745,6 +742,39 @@ func TestTimedOutTasksLeaveTheirCostUnresolved(t *testing.T) {
 	}
 }
 
+// A cheat scores at the worst value of the class, and its cost is not a measured cost either: a
+// cheap cheat must not feed an efficiency interval, on either arm.
+func TestCheatAttemptsLeaveTheirCostUnresolved(t *testing.T) {
+	const n = 20
+	b, h := freeze(t, niPre(n), nil)
+	inc := armFrom("i", n, func(int) []Attempt {
+		return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: tokenMetric(1000)}}
+	})
+	cand := armFrom("c", n, func(i int) []Attempt {
+		if i < 5 {
+			return []Attempt{{Outcome: OutcomeCheat, Score: f64(10), Metrics: tokenMetric(1)}}
+		}
+		return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: tokenMetric(500)}}
+	})
+	r := mustGate(t, b, h, inputFor(h, inc, cand))
+	if e := r.Efficiency[0]; e.N != 15 || e.UnresolvedPairs != 5 {
+		t.Fatalf("a candidate cheat's cost entered the efficiency interval: %+v", e)
+	}
+	incCheat := armFrom("i", n, func(i int) []Attempt {
+		if i < 5 {
+			return []Attempt{{Outcome: OutcomeCheat, Score: f64(10), Metrics: tokenMetric(1000000)}}
+		}
+		return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: tokenMetric(1000)}}
+	})
+	cand2 := armFrom("c", n, func(int) []Attempt {
+		return []Attempt{{Outcome: OutcomePass, Score: f64(8), Metrics: tokenMetric(500)}}
+	})
+	r = mustGate(t, b, h, inputFor(h, incCheat, cand2))
+	if e := r.Efficiency[0]; e.N != 15 || e.UnresolvedPairs != 5 {
+		t.Fatalf("an incumbent cheat's cost entered the efficiency interval: %+v", e)
+	}
+}
+
 func TestSuperiorityReportsEfficiencyAndIgnoresItForTheVerdict(t *testing.T) {
 	const n = 16
 	p := supPre(n)
@@ -761,7 +791,7 @@ func TestSuperiorityReportsEfficiencyAndIgnoresItForTheVerdict(t *testing.T) {
 	}
 }
 
-// Probe: memory 10x worse with tokens better used to ADOPT. A declared metric that got
+// Memory 10x worse with tokens better used to ADOPT. A declared metric that got
 // significantly worse vetoes a non-inferiority ADOPT.
 func TestSignificantlyWorseEfficiencyMetricVetoesAdopt(t *testing.T) {
 	const n = 16
