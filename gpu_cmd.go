@@ -495,6 +495,11 @@ func runGPUReserve(args []string) error {
 	if err := owner.apply(&opts, os.Getenv); err != nil {
 		return err
 	}
+	if !*detach {
+		// This wrapper ticks the yield request below (gpu_yield.go); the record says so, so that no
+		// surface reads a holder of an older build as one that would answer.
+		opts.Yields = gpulease.YieldsWrapper
+	}
 	if w := progressFileWarning(opts.ProgressFile); w != "" {
 		fmt.Fprintln(os.Stderr, w)
 	}
@@ -798,6 +803,9 @@ func runGPUReserve(args []string) error {
 		"GPU_LEASE_CLASS="+string(lease.Class()),
 		// The cards the lease holds (lease ids, comma-separated; empty = the whole node).
 		"GPU_LEASE_DEVICES="+strings.Join(lease.Devices(), ","),
+		// Where the holder's yield request will appear if it is asked; the file exists only then, so a
+		// job can poll it between its items.
+		gpulease.YieldFileEnv+"="+gpulease.YieldFilePath(lease.Dir(), lease.Epoch()),
 	)
 	// The models the render lane's unload may take under a card lease (plan P5): the roster minus
 	// the memory stack minus the seats pinned to cards this lease does not hold. A whole-node
@@ -863,6 +871,7 @@ func runGPUReserve(args []string) error {
 	tick := time.NewTicker(wrapperTickEvery)
 	defer tick.Stop()
 	terms := newTermTicker(lease)
+	yields := newHolderYieldTicker(lease, opts.OnYield, "gpu reserve", os.Stderr)
 	sigDone := sw.Done() // set to nil once handled: a closed channel would be ready for ever
 	for {
 		select {
@@ -896,6 +905,9 @@ func runGPUReserve(args []string) error {
 				// The heartbeat is the proof the lease is still ours; only then is its term asked
 				// about. A term that ends is renewed or labelled, never a reason to stop the command.
 				terms.tick()
+				// An overdue lease with somebody waiting for its cards is asked to yield: the job's own on_yield runs,
+				// and nothing is stopped (internal/gpulease/yield.go).
+				yields.Tick()
 				// And the tree is recorded for a reader that finds this wrapper gone (only when the
 				// set of processes changed: the record rewrite takes the epoch lock).
 				recorder.record()
@@ -1141,24 +1153,7 @@ func detachHolder(fs *flag.FlagSet, class string, dur, wait time.Duration, opts 
 			}
 		}
 		if info.Held && info.PID == childPID {
-			if asJSON {
-				out := map[string]any{
-					"held": true, "class": info.Class, "epoch": info.Epoch,
-					"pid": info.PID, "expires_at": info.ExpiresAt.Format(time.RFC3339),
-				}
-				if len(info.Devices) > 0 {
-					out["devices"] = info.Devices
-				}
-				b, _ := json.Marshal(out)
-				fmt.Println(string(b))
-			} else {
-				cardsText := ""
-				if len(info.Devices) > 0 {
-					cardsText = ", cards " + strings.Join(info.Devices, ", ")
-				}
-				fmt.Printf("reserved: %s epoch %d (pid %d%s) until %s\n  release with: local-offload gpu release --epoch %d\n",
-					info.Class, info.Epoch, info.PID, cardsText, info.ExpiresAt.Format(time.Kitchen), info.Epoch)
-			}
+			fmt.Print(detachedReport(info, m.Dir(), asJSON))
 			reported = true // the holder is ours and reported; leave it running
 			return info.Epoch, nil
 		}
@@ -1293,6 +1288,10 @@ func runGPUHold(args []string) error {
 	if err := owner.apply(&holdOpts, os.Getenv); err != nil {
 		return err
 	}
+	if !*releaseAtExpiry {
+		// This holder ticks the yield request in its loop below; one that releases at its deadline does not.
+		holdOpts.Yields = gpulease.YieldsDetached
+	}
 	var lease *gpulease.Lease
 	if strings.TrimSpace(*cardsFlag) != "" {
 		min, max, perr := parseCardCount(*cardsFlag)
@@ -1336,6 +1335,7 @@ func runGPUHold(args []string) error {
 	deadline := time.Now().Add(*dur)
 	lastRenew := time.Now()
 	terms := newTermTicker(lease)
+	yields := newHolderYieldTicker(lease, holdOpts.OnYield, "gpu hold", os.Stderr)
 	for {
 		if *releaseAtExpiry && !time.Now().Before(deadline) {
 			return nil // the old ending: the deferred Release lets the card go
@@ -1349,6 +1349,10 @@ func runGPUHold(args []string) error {
 			lastRenew = time.Now()
 			if !*releaseAtExpiry {
 				terms.tick()
+				// Asked to yield, this holder runs the job's on_yield and goes on holding: the job is a separate
+				// process, and returning here would free the card under it (the 2026-09-07 incident above). Its
+				// driver ends the lease once the job has stopped.
+				yields.Tick()
 			}
 		}
 	}

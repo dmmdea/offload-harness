@@ -180,6 +180,9 @@ func TestWrapperRunsItsOwnOnYieldOnceAndTheJobSeesTheYieldFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the wrapper: %v\n%s", err, stderr)
 	}
+	// The helper runs in the holder's goroutine; the job may end before it has returned.
+	termWaitFor(t, "the holder's on_yield to have run", 10*time.Second, func() bool { return stub.count() >= 1 })
+	time.Sleep(200 * time.Millisecond) // and a second run, if there were one, would have started by now
 	if stub.count() != 1 {
 		t.Fatalf("on_yield ran %d times, want exactly once\n%s", stub.count(), stderr)
 	}
@@ -242,6 +245,7 @@ func TestWrapperNeverRunsTheRecordsOnYield(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, stderr)
 	}
+	termWaitFor(t, "the holder's on_yield to have run", 10*time.Second, func() bool { return stub.count() >= 1 })
 	if got := stub.first(t).line; got != "touch work/STOP" {
 		t.Fatalf("the holder ran %q: it must run its own in-memory value, never the shared record's", got)
 	}
