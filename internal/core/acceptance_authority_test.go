@@ -252,6 +252,52 @@ func TestAWeakerAuthorityNeverClosesAStrongerClaim(t *testing.T) {
 	}
 }
 
+// TestGroundedEvidenceIsReadInFull pins how much of the evidence the grounded level reads: every match of a pattern, every
+// context document, and every scalar kind a field can hold. Each case is one way a narrower reading would still pass the
+// tables above (they use one document, one match and string fields), so each is a pass that only the full reading gives.
+func TestGroundedEvidenceIsReadInFull(t *testing.T) {
+	twoDocs := []ContextDoc{
+		{Name: "a.md", Text: "nothing relevant is written here"},
+		{Name: "b.md", Text: "the cache is named pelican"},
+	}
+	tests := []struct {
+		name  string
+		check string
+		res   AgentWireResult
+		docs  []ContextDoc
+		want  Verdict
+		why   string
+	}{
+		// a pattern with two matches: the grounded one may be later or earlier, and one ungrounded match does not sink it
+		{"regex: only the second match is in a document", "regex:@grounded:[a-z]+", AgentWireResult{Output: "walrus pelican"}, authDocs, VerdictPass, ""},
+		{"regex: only the first match is in a document", "regex:@grounded:[a-z]+", AgentWireResult{Output: "pelican walrus"}, authDocs, VerdictPass, ""},
+		{"regex: an alternation matching one grounded and one not", "regex:@grounded:walrus|pelican", AgentWireResult{Output: "walrus pelican"}, authDocs, VerdictPass, ""},
+		{"regex: no match is in a document", "regex:@grounded:walrus|otter", AgentWireResult{Output: "walrus otter"}, authDocs, VerdictFail, "none of the 1 context documents"},
+		// a claim only the second of two documents carries
+		{"contains: the text is only in the second document", "contains:@grounded:pelican", AgentWireResult{Output: "the cache is named pelican"}, twoDocs, VerdictPass, ""},
+		{"contains: the text is in neither document", "contains:@grounded:walrus", AgentWireResult{Output: "walrus"}, twoDocs, VerdictFail, "none of the 2 context documents"},
+		{"regex: the match is only in the second document", "regex:@grounded:pel[a-z]+", AgentWireResult{Output: "pelican"}, twoDocs, VerdictPass, ""},
+		{"a blank first document does not hide the second", "contains:@grounded:pelican", AgentWireResult{Output: "pelican"}, []ContextDoc{{Name: "blank.md", Text: " \n"}, twoDocs[1]}, VerdictPass, ""},
+		// booleans and numbers are field values, with their literal spelling
+		{"field: a boolean true", "contains:@field=flag:true", AgentWireResult{Structured: json.RawMessage(`{"flag":true}`)}, nil, VerdictPass, ""},
+		{"field: a boolean false", "contains:@field=flag:false", AgentWireResult{Structured: json.RawMessage(`{"flag":false}`)}, nil, VerdictPass, ""},
+		{"field: a boolean is not the other one", "contains:@field=flag:false", AgentWireResult{Structured: json.RawMessage(`{"flag":true}`)}, nil, VerdictFail, "not found"},
+		{"field: a number keeps its spelling", "contains:@field=ratio:0.50", AgentWireResult{Structured: json.RawMessage(`{"ratio":0.50}`)}, nil, VerdictPass, ""},
+		{"grounded: a boolean in the structured answer is evidence", "contains:@grounded:true", AgentWireResult{Structured: json.RawMessage(`{"found":true}`)}, []ContextDoc{{Name: "d", Text: "it is true that the cache exists"}}, VerdictPass, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := mustParse(t, tt.check).Grade(tt.res, tt.docs)
+			if o.Verdict != tt.want {
+				t.Fatalf("verdict = %q (%s), want %q", o.Verdict, o.Reason, tt.want)
+			}
+			if tt.why != "" && !strings.Contains(o.Reason, tt.why) {
+				t.Fatalf("reason %q does not contain %q", o.Reason, tt.why)
+			}
+		})
+	}
+}
+
 // TestClosedAtIsTheWeakestCheck: a contract closes at the authority of its
 // weakest check, an unqualified check pulls it to none, and anything that did
 // not pass leaves it open.
