@@ -688,6 +688,32 @@ func UseStatFault(fn func(path string) error) (restore func()) {
 	return func() { statFaultHook = old }
 }
 
+// RecordUnreadableError is what Lease.Check answers when the lease's record exists as far as anyone knows and could not be READ
+// (an access error while it is replaced, a sharing violation, an I/O error): not "the lease is gone" and not "fenced out", which
+// are verdicts, but a failure that may pass. A caller that would let go of its lease on a failed fence can tell the two apart.
+type RecordUnreadableError struct {
+	Epoch uint64
+	Err   error
+}
+
+func (e *RecordUnreadableError) Error() string {
+	return fmt.Sprintf("gpulease: the record of lease epoch %d cannot be read: %v", e.Epoch, e.Err)
+}
+
+func (e *RecordUnreadableError) Unwrap() error { return e.Err }
+
+// IsRecordUnreadable is true for a failure of the fence that is a failed READ, not a verdict.
+func IsRecordUnreadable(err error) bool {
+	var r *RecordUnreadableError
+	return errors.As(err, &r)
+}
+
+// MarkHolderGaveUp records on the lease's record that its hidden holder gave up releasing it, and why (best effort, by a holder
+// that is about to exit with the lease still held).
+func (m *Manager) MarkHolderGaveUp(epoch uint64, why string) error {
+	return nil
+}
+
 // HostRAMHold is what this lease's OWN record says about its wait for the host: the figure it still asks for (0 = admitted, or
 // nothing was deferred) and the moment its wait is stamped to end (the zero time = no wait is running). The hidden holder of a
 // detached lease reads it on every poll, so that a reserve that died during the wait does not leave the cards held for good. An

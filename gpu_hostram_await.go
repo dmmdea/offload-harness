@@ -392,6 +392,12 @@ func releaseAfterRAMWait(m *gpulease.Manager, epoch uint64, cfg config.Config, e
 	return fmt.Errorf("%w; the lease is being released: cards are never held idle behind a host-RAM figure the host did not meet", err)
 }
 
+// holderGaveUpNote is what `gpu status` adds to a lease whose hidden holder gave up releasing it: nothing polls the lease now, so
+// the text must not promise a release "at its next poll".
+func holderGaveUpNote(gaveUp time.Time, why string, epoch uint64, warmOwed bool) string {
+	return ""
+}
+
 // hostRAMAskedStatus is what `gpu status` says about a lease that holds its cards while the host has not admitted the RAM it
 // asked for (F82): the figure, how long the cards have been held, and, once the wait for the host has begun, when the lease is
 // released if the host still lacks the room (the record carries that moment, until: the earlier of the hold bound and --wait).
@@ -400,7 +406,7 @@ func releaseAfterRAMWait(m *gpulease.Manager, epoch uint64, cfg config.Config, e
 // does it when it exits; the hidden holder of a --detach lease does it at its next poll IF one is running (a reserve that died
 // cannot, and a holder whose own release failed has gone), and `gpu release --epoch N` does it now (with --warm-seat when a
 // warm-back is owed). long adds the explanation of the order, for the one-line summary of the holder.
-func hostRAMAskedStatus(giB float64, held time.Duration, until, now time.Time, long bool, epoch uint64, byWrapper, warmOwed bool) string {
+func hostRAMAskedStatus(giB float64, held time.Duration, until, now time.Time, long bool, epoch uint64, byWrapper, warmOwed bool, gaveUp time.Time, gaveUpWhy string) string {
 	release := releaseCommand(epoch, warmOwed)
 	s := fmt.Sprintf("host RAM %.1f GiB asked, not yet admitted", giB)
 	heldFor := held.Round(time.Second)

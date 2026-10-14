@@ -152,7 +152,7 @@ func TestTheNotReleasedLineAdvisesAWarmBackOnlyWhenOneIsOwed(t *testing.T) {
 func TestStatusPastTheStampedEndNamesTheReleaseThatIsHonestWhetherOrNotAHolderIsRunning(t *testing.T) {
 	now := time.Now()
 	until := now.Add(-90 * time.Second)
-	holder := hostRAMAskedStatus(30, 12*time.Minute, until, now, false, 4, false, false)
+	holder := hostRAMAskedStatus(30, 12*time.Minute, until, now, false, 4, false, false, time.Time{}, "")
 	for _, want := range []string{"the holder, if one is running, releases the lease at its next poll", "`gpu release --epoch 4` frees it now"} {
 		if !strings.Contains(holder, want) {
 			t.Errorf("a --detach lease past its stamped end: the holder may be gone, so the text says %q:\n%s", want, holder)
@@ -161,7 +161,7 @@ func TestStatusPastTheStampedEndNamesTheReleaseThatIsHonestWhetherOrNotAHolderIs
 	if strings.Contains(holder, "--warm-seat") {
 		t.Errorf("no warm-back is owed, so --warm-seat is not advised:\n%s", holder)
 	}
-	wrapper := hostRAMAskedStatus(30, 12*time.Minute, until, now, true, 4, true, true)
+	wrapper := hostRAMAskedStatus(30, 12*time.Minute, until, now, true, 4, true, true, time.Time{}, "")
 	if !strings.Contains(wrapper, "`gpu release --warm-seat --epoch 4`") {
 		t.Errorf("a warm-back is owed: the wrapper's text advises --warm-seat:\n%s", wrapper)
 	}

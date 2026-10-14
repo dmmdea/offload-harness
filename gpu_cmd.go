@@ -318,7 +318,7 @@ func runGPUStatus(args []string) error {
 		excl += "  (draining: new runs wait, in-flight runs complete)"
 	}
 	if info.HostRAMWaitGiB > 0 {
-		excl += "  (" + hostRAMAskedStatus(info.HostRAMWaitGiB, info.Age, info.HostRAMHoldUntil, time.Now(), true, info.Epoch, info.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "") + ")"
+		excl += "  (" + hostRAMAskedStatus(info.HostRAMWaitGiB, info.Age, info.HostRAMHoldUntil, time.Now(), true, info.Epoch, info.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "", info.HolderGaveUp, info.HolderGaveUpWhy) + ")"
 	}
 	if info.Command != "" {
 		excl += "\n  running: " + info.Command
@@ -364,7 +364,7 @@ func runGPUStatus(args []string) error {
 				declared = fmt.Sprintf(", host RAM %.1f GiB", l.HostRAMGiB)
 			}
 			if l.HostRAMWaitGiB > 0 {
-				declared = ", " + hostRAMAskedStatus(l.HostRAMWaitGiB, l.Age, l.HostRAMHoldUntil, time.Now(), false, l.Epoch, l.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "")
+				declared = ", " + hostRAMAskedStatus(l.HostRAMWaitGiB, l.Age, l.HostRAMHoldUntil, time.Now(), false, l.Epoch, l.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "", l.HolderGaveUp, l.HolderGaveUpWhy)
 			}
 			fmt.Printf("  lease epoch %d: %s pid %d, %s%s%s\n", l.Epoch, l.Class, l.PID, scope, group, declared)
 		}
@@ -1451,6 +1451,14 @@ var holdBoundGrace = 30 * time.Second
 // holdConfirmPause is the pause between the looks with which the hidden holder confirms that its lease is really gone before it
 // lets go of it. A variable so a test can shorten it.
 var holdConfirmPause = 50 * time.Millisecond
+
+// The hidden holder's retries of its own release (a release that fails is tried again, about a second apart, before it gives up),
+// and how long it goes on retrying a fence it cannot READ before it lets go. Variables so a test need not stand in line.
+var (
+	holdReleaseTries = 4
+	holdReleasePause = time.Second
+	holdIORetryFor   = 30 * time.Second
+)
 
 // holderLeaseGone confirms a failed fence before the hidden holder lets go. The holder's exit releases its lease, and its fence
 // reads the record: a read that lands while a restamp replaces the record fails for a moment on Windows, and one failed read is

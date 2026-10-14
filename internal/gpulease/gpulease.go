@@ -292,6 +292,12 @@ type Meta struct {
 	// took it never releases it, since the bound can be a flag on one reserve and no other process sees that. Additive and
 	// omitempty: an older reader ignores it.
 	HostRAMHoldUntilMs int64 `json:"host_ram_hold_until_ms,omitempty"`
+	// HolderGaveUpMs is when the lease's hidden holder gave up releasing it (unix milliseconds; 0 = it has not), and
+	// HolderGaveUpWhy the clipped reason. Written best effort by a holder whose own release failed after its retries and which then
+	// exits: from then on nothing polls the lease, and `gpu status` says so instead of promising a release at "its next poll".
+	// Additive and omitempty: an older reader ignores both.
+	HolderGaveUpMs  int64  `json:"holder_gave_up_ms,omitempty"`
+	HolderGaveUpWhy string `json:"holder_gave_up_why,omitempty"`
 
 	// --- record v2 (card-scoped leases). Every field is omitempty and unknown to a
 	// pre-v2 reader, which ignores it: a record without Devices is whole-node. ---
@@ -399,8 +405,12 @@ type Info struct {
 	// HostRAMWaitGiB mirrors Meta.HostRAMWaitGiB: host RAM the holder asked for and the host has not admitted yet.
 	HostRAMWaitGiB float64
 	// HostRAMHoldUntil mirrors Meta.HostRAMHoldUntilMs: when the hold bound releases a lease that is waiting for the host
-	// with its cards held. Zero = no bound is running.
+	// with its cards held (the outer bound a detached reserve stamps before its drain, then the wait's own end). Zero = no bound
+	// is on the record.
 	HostRAMHoldUntil time.Time
+	// HolderGaveUp mirrors Meta.HolderGaveUpMs, with the reason: the moment the lease's hidden holder gave up releasing it.
+	HolderGaveUp    time.Time
+	HolderGaveUpWhy string
 	// HeartbeatAt is the holder's last renewal (the per-epoch heartbeat file,
 	// else the acquisition stamp). Zero when unknown.
 	HeartbeatAt time.Time
@@ -1269,6 +1279,9 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		ExpiredWhy:     meta.ExpiredWhy,
 
 		HostRAMHoldUntil: holdUntilOf(meta.HostRAMHoldUntilMs),
+
+		HolderGaveUp:    holdUntilOf(meta.HolderGaveUpMs),
+		HolderGaveUpWhy: meta.HolderGaveUpWhy,
 	}
 }
 
@@ -1293,16 +1306,15 @@ func cloneProgress(p *Progress) *Progress {
 // Leases narrow it.
 func (m *Manager) Inspect() Info { return m.reader().primary() }
 
-// isIOFailure is true for an error from reading a record that is neither "absent" nor "the bytes are not a record": the file may
-// well be there and be perfectly good, and the read failed (an access error while it is being replaced, a sharing violation, an
-// I/O error). Callers that read a failure as "nothing there" are wrong about it.
+// isIOFailure is true for an error from reading a record that is a failure of the file system's and neither "absent" nor "the bytes
+// are not a record": the file may well be there and be perfectly good, and the read failed (an access error while it is being
+// replaced, a sharing violation, an I/O error). Callers that read a failure as "nothing there" are wrong about it.
 func isIOFailure(err error) bool {
 	if err == nil || errors.Is(err, fs.ErrNotExist) {
 		return false
 	}
-	var syntax *json.SyntaxError
-	var kind *json.UnmarshalTypeError
-	return !errors.As(err, &syntax) && !errors.As(err, &kind)
+	var pe *fs.PathError
+	return errors.As(err, &pe)
 }
 
 func (m *Manager) readMeta() (*Meta, error) {
