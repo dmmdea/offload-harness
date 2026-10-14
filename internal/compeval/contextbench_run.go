@@ -16,11 +16,16 @@
 //     budget, exactly the call the production loop makes, and the production loop's
 //     habit of keeping the compacted transcript (the dropped content stays dropped).
 //   - Two snapshots per step: "sent" (what the seat was handed) and "turn" (the
-//     transcript right after the seat's reply, before the next compaction). The last
-//     "turn" snapshot is the retained context the needle grader reads.
+//     transcript right after the seat's reply, before the next compaction). A context
+//     the seat was never handed (one that stays over the budget) is not recorded, so a
+//     frame is always something the seat saw. The last frame is the retained context
+//     the needle grader reads.
 //   - A run ends when the last operation has been answered (stream_exhausted), the
 //     agent submits after the stream is drained (submit), the context cannot be made
-//     to fit (budget_wall), or the turn cap is reached (max_turns).
+//     to fit (budget_wall), or the turn cap is reached (max_turns). A budget_wall
+//     before the seat has answered once measured nothing (the budget cannot hold the
+//     instruction and the first operation) and is infra_error, not a graded failure.
+//     A cancelled context ends the task as not_run, also when it lands mid-request.
 //
 // The outcome word of a task is decided here and nowhere else; see classify.
 package compeval
@@ -200,6 +205,48 @@ func BuildCBTasks(family, level string, seed int64, n int) ([]*CBInstance, error
 	return out, nil
 }
 
+// preamble is the count of messages the ladder must never drop: the instruction
+// and the kickoff.
+const preamble = 2
+
+// cbPreamble is the transcript every run starts with.
+func cbPreamble(in *CBInstance, delivery string) []agent.Msg {
+	return []agent.Msg{
+		{Role: "system", Content: CBInstruction(in, delivery)},
+		{Role: "user", Content: "Begin. The first operation follows."},
+	}
+}
+
+// cbOpMsgs is the messages that deliver operation i under a delivery mode.
+func cbOpMsgs(in *CBInstance, delivery string, i int) []agent.Msg {
+	text := cbRenderOp(in.Ops[i], len(in.Ops)-(i+1))
+	if delivery == CBDeliveryUser {
+		return []agent.Msg{{Role: "user", Content: text}}
+	}
+	id := fmt.Sprintf("op-%d", i)
+	return []agent.Msg{
+		{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: id, Name: "next_op", Args: "{}"}}},
+		{Role: "tool", Content: text, ToolCallID: id},
+	}
+}
+
+// CBCheckBudget refuses a budget that cannot hold the first send of an instance: the
+// instruction plus the first operation, after the same compaction the run applies. Such a
+// run would never call the seat and would measure nothing.
+func CBCheckBudget(in *CBInstance, opts CBRunOpts) error {
+	o := opts.withDefaults(len(in.Ops))
+	usable := o.Budget - o.Reserve
+	msgs := cbPreamble(in, o.Delivery)
+	if len(in.Ops) > 0 {
+		msgs = append(msgs, cbOpMsgs(in, o.Delivery, 0)...)
+	}
+	msgs = agent.CompactReplay(msgs, usable, o.KeepRecent, preamble, agent.ReplayOpts{GCF: o.Ladder.GCF, Skeleton: o.Ladder.Skeleton})
+	if est := agent.EstimateTokens(msgs); est > usable {
+		return fmt.Errorf("%s: the instruction and the first operation need %d tokens but the usable budget (budget minus reserve) is %d", in.ID, est, usable)
+	}
+	return nil
+}
+
 func sameMsgs(a, b []agent.Msg) bool {
 	if len(a) != len(b) {
 		return false
@@ -218,11 +265,7 @@ func RunCBTask(ctx context.Context, in *CBInstance, seat CBSeat, opts CBRunOpts)
 	usable := o.Budget - o.Reserve
 	res := CBTaskResult{ID: in.ID, Family: in.Family, Level: in.Level, Seed: in.Seed, OpsTotal: len(in.Ops)}
 
-	msgs := []agent.Msg{
-		{Role: "system", Content: CBInstruction(in, o.Delivery)},
-		{Role: "user", Content: "Begin. The first operation follows."},
-	}
-	const preamble = 2
+	msgs := cbPreamble(in, o.Delivery)
 	var pager agent.PagerStats
 	var frames []CBFrame
 	record := func(kind string) {
@@ -231,15 +274,7 @@ func RunCBTask(ctx context.Context, in *CBInstance, seat CBSeat, opts CBRunOpts)
 		frames = append(frames, CBFrame{Kind: kind, Step: len(frames), Tokens: agent.EstimateTokens(cp), Messages: cp})
 	}
 	deliver := func(i int) {
-		text := cbRenderOp(in.Ops[i], len(in.Ops)-(i+1))
-		if o.Delivery == CBDeliveryUser {
-			msgs = append(msgs, agent.Msg{Role: "user", Content: text})
-		} else {
-			id := fmt.Sprintf("op-%d", i)
-			msgs = append(msgs,
-				agent.Msg{Role: "assistant", ToolCalls: []agent.ToolCall{{ID: id, Name: "next_op", Args: "{}"}}},
-				agent.Msg{Role: "tool", Content: text, ToolCallID: id})
-		}
+		msgs = append(msgs, cbOpMsgs(in, o.Delivery, i)...)
 		res.OpsDelivered = i + 1
 	}
 
@@ -261,15 +296,26 @@ loop:
 			res.Compactions++
 			pager.NoteCompaction(before, msgs)
 		}
-		record("sent")
 		if est := agent.EstimateTokens(msgs); est > usable {
 			end(CBTermBudgetWall)
+			if res.Turns == 0 {
+				res.Outcome = CBOutcomeInfraError
+				res.Detail = fmt.Sprintf("the budget cannot hold the instruction and the first operation (%d tokens against %d usable): the seat was never called, so nothing was measured; raise --budget", est, usable)
+			}
 			break loop
 		} else if est > res.PeakSentTokens {
 			res.PeakSentTokens = est
 		}
+		record("sent")
 		reply, err := seat(ctx, msgs, o.MaxOut)
 		if err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				// The run was interrupted while the request was in flight: not a seat fault.
+				end(CBTermCancelled)
+				res.Outcome = CBOutcomeNotRun
+				res.Detail = cerr.Error()
+				break loop
+			}
 			end(CBTermSeatError)
 			res.Outcome = CBOutcomeInfraError
 			res.Detail = err.Error()
@@ -333,9 +379,11 @@ loop:
 
 // classify turns a grade into the task's outcome word.
 //
-//	infra_error  the seat could not answer (set by the loop; never graded)
+//	infra_error  the seat could not answer, or the budget could not hold the first send
+//	             so the seat was never called (set by the loop; never graded)
 //	timeout      the turn cap was reached before the stream drained (never graded)
-//	not_run      the run was cancelled before the task finished or began
+//	not_run      the run was cancelled before the task finished or began, also while a
+//	             seat request was in flight
 //	judge_error  the grade could not be computed (grader_valid 0)
 //	pass         graded, reward >= PassAt
 //	task_fail    graded, reward < PassAt (the reward is kept: 0.958 is information)

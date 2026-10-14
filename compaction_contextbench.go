@@ -86,16 +86,22 @@ func runCompactionContextBench(args []string) error {
 		return err
 	}
 
+	opts := compeval.CBRunOpts{
+		Budget: *budget, Reserve: *reserve, MaxOut: *maxOut, MaxTurns: *maxTurns,
+		Ladder: compeval.LadderOpts{GCF: *gcf, Skeleton: *skeleton}, Delivery: *delivery, PassAt: *passAt,
+	}
+	for _, in := range instances {
+		if err := compeval.CBCheckBudget(in, opts); err != nil {
+			return fmt.Errorf("compaction-eval contextbench: --budget %d --reserve %d is too small: %w", *budget, *reserve, err)
+		}
+	}
+
 	cfg := loadCfg(fs)
 	if *endpoint == "" {
 		*endpoint = cfg.Endpoint
 	}
 	if *model == "" {
 		*model = cfg.Model
-	}
-	opts := compeval.CBRunOpts{
-		Budget: *budget, Reserve: *reserve, MaxOut: *maxOut, MaxTurns: *maxTurns,
-		Ladder: compeval.LadderOpts{GCF: *gcf, Skeleton: *skeleton}, Delivery: *delivery, PassAt: *passAt,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
