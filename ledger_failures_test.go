@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
@@ -28,7 +31,13 @@ const (
 // failureFixtureConfig writes a config that reads the fixture ledger.
 func failureFixtureConfig(t *testing.T) string {
 	t.Helper()
-	abs, err := filepath.Abs(filepath.FromSlash(failureFixtureLedger))
+	return failureConfigFor(t, filepath.FromSlash(failureFixtureLedger))
+}
+
+// failureConfigFor writes a config that reads the ledger at ledgerPath.
+func failureConfigFor(t *testing.T, ledgerPath string) string {
+	t.Helper()
+	abs, err := filepath.Abs(ledgerPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,5 +394,79 @@ func TestLedgerFailuresModeIsAdditive(t *testing.T) {
 		if ledgerFailuresRequested(args) {
 			t.Errorf("ledgerFailuresRequested(%v) = true", args)
 		}
+	}
+}
+
+// --since DAYS is a window in days back from now. The fixture rows are a year old, so the window the verb builds
+// is tested on a ledger written here, with rows stamped relative to the clock: one an hour old, one a day and a
+// half old and one thirty days old. A cutoff in the future, one counted in hours and one counted in seconds each
+// keep the wrong set of rows.
+func TestFailureRegisterSinceKeepsRowsFromThatManyDaysBack(t *testing.T) {
+	now := time.Now()
+	row := func(ts time.Time, class string) string {
+		return fmt.Sprintf(`{"ts":%d,"task":"agent_delegate","deferred":true,"reason_code":%q,"job_id":%q}`, ts.Unix(), class, class)
+	}
+	ledgerPath := filepath.Join(t.TempDir(), "ledger.jsonl")
+	body := strings.Join([]string{
+		row(now.Add(-time.Hour), "budget"),
+		row(now.Add(-36*time.Hour), "stall_decode"),
+		row(now.AddDate(0, 0, -30), "abstention"),
+	}, "\n") + "\n"
+	if err := os.WriteFile(ledgerPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := failureConfigFor(t, ledgerPath)
+	classesFor := func(since ...string) []string {
+		args := append([]string{"--failures", "--config", cfg, "--table", filepath.FromSlash(failureFixtureTable)}, since...)
+		names := classNames(decodeFailureReport(t, runLedgerModeOut(t, args...)))
+		sort.Strings(names)
+		return names
+	}
+	for _, c := range []struct {
+		since []string
+		want  []string
+	}{
+		{nil, []string{"abstention", "budget", "stall_decode"}},
+		{[]string{"--since", "1"}, []string{"budget"}},
+		{[]string{"--since", "2"}, []string{"budget", "stall_decode"}},
+		{[]string{"--since", "60"}, []string{"abstention", "budget", "stall_decode"}},
+	} {
+		if got := classesFor(c.since...); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("ledger --failures %v keeps classes %v, want %v", c.since, got, c.want)
+		}
+	}
+}
+
+// Without --table the verb reads the page embedded in the binary. The synthetic table the other tests pass leaves
+// capacity_wait, config and other undocumented; the real page documents every class the fixture ledger holds, with
+// the text of docs/systems/failure-register.md, so a default path that read nothing (or the wrong text) shows up here.
+func TestLedgerFailuresDefaultsToTheEmbeddedPage(t *testing.T) {
+	out := runLedgerModeOut(t, "--failures", "--config", failureFixtureConfig(t))
+	r := decodeFailureReport(t, out)
+	if len(r.Classes) == 0 {
+		t.Fatalf("the default path printed no classes:\n%s", out)
+	}
+	page, err := os.ReadFile(filepath.FromSlash("docs/systems/failure-register.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs, err := parseFailureTable(string(page))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.UndocumentedClasses) != 0 {
+		t.Errorf("undocumented_classes = %v: the embedded page documents every reason code", r.UndocumentedClasses)
+	}
+	for _, c := range r.Classes {
+		want, ok := docs[c.Class]
+		switch {
+		case !ok:
+			t.Errorf("class %q is not in the docs page's table", c.Class)
+		case !c.Documented || c.Meaning != want.Meaning || c.RootCause != want.RootCause || c.StructuralFix != want.StructuralFix || c.Meaning == "" || c.Meaning == undocumentedClass:
+			t.Errorf("class %q joined %+v, want the page's row %+v", c.Class, c, want)
+		}
+	}
+	if c := classByName(t, r, "capacity_wait"); !strings.Contains(c.Meaning, "placement wait") {
+		t.Errorf("capacity_wait meaning = %q, want the embedded page's text", c.Meaning)
 	}
 }

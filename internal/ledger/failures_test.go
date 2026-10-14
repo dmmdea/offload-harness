@@ -141,9 +141,10 @@ func TestFailureRegisterWindowKeepsTheParentIndexOfTheWholeFile(t *testing.T) {
 	}
 }
 
-// Door, seat and model: the door as recorded, the seat as model_tier is recorded (<node>:<seat> on a delegation
-// row, the model alias on a cascade row), the model the part after the last colon. Absent values are named, not
-// dropped, and the breakdowns and groups come out count-descending then by name.
+// Door, seat and model: the door as recorded, the seat as model_tier is recorded (<node>:<seat alias> on a delegation
+// row, the model alias on a cascade row), the model the part after the LAST colon (on a delegation row the seat
+// alias: the ledger holds no model name there). A second colon belongs to the seat, so only the final one cuts.
+// Absent values are named, not dropped, and the breakdowns and groups come out count-descending then by name.
 func TestFailureBreakdownsNameWhatIsMissingAndSortDeterministically(t *testing.T) {
 	path := writeFailureLedger(t,
 		`{"ts":1,"task":"agent_delegate","deferred":true,"reason_code":"budget","door":"agent_run","model_tier":"node-a:seat-1"}`,
@@ -152,6 +153,7 @@ func TestFailureBreakdownsNameWhatIsMissingAndSortDeterministically(t *testing.T
 		`{"ts":4,"task":"agent_delegate","deferred":true,"reason_code":"budget","model_tier":":seat-2"}`,
 		`{"ts":5,"task":"summarize","deferred":true,"reason_code":"budget","door":"cli:summarize","model_tier":"model-z"}`,
 		`{"ts":6,"task":"ocr","deferred":true,"reason_code":"budget"}`,
+		`{"ts":7,"task":"agent_delegate","deferred":true,"reason_code":"budget","door":"agent_run","model_tier":"node-c:extra:seat-4"}`,
 	)
 	reg, err := FailureRegisterFile(path, 0, false)
 	if err != nil {
@@ -165,17 +167,17 @@ func TestFailureBreakdownsNameWhatIsMissingAndSortDeterministically(t *testing.T
 		}
 		return strings.Join(parts, ",")
 	}
-	if got, want := nameCounts(c.Doors), "agent_run=3,(unknown)=2,cli:summarize=1"; got != want {
+	if got, want := nameCounts(c.Doors), "agent_run=4,(unknown)=2,cli:summarize=1"; got != want {
 		t.Errorf("doors = %s, want %s", got, want)
 	}
-	if got, want := nameCounts(c.Seats), "node-a:seat-1=2,(unrecorded)=1,model-z=1,node-b:seat-1=1,seat-2=1"; got != want {
+	if got, want := nameCounts(c.Seats), "node-a:seat-1=2,(unrecorded)=1,model-z=1,node-b:seat-1=1,node-c:extra:seat-4=1,seat-2=1"; got != want {
 		t.Errorf("seats = %s, want %s", got, want)
 	}
-	if got, want := nameCounts(c.Models), "seat-1=3,(unrecorded)=1,model-z=1,seat-2=1"; got != want {
-		t.Errorf("models = %s, want %s (the part after the last colon, so the same alias on two nodes is one model)", got, want)
+	if got, want := nameCounts(c.Models), "seat-1=3,(unrecorded)=1,model-z=1,seat-2=1,seat-4=1"; got != want {
+		t.Errorf("models = %s, want %s (the part after the LAST colon: the same alias on two nodes is one entry, and a second colon stays in the seat)", got, want)
 	}
-	if len(c.Groups) != 5 {
-		t.Fatalf("groups = %+v, want 5 distinct (door, seat, model)", c.Groups)
+	if len(c.Groups) != 6 {
+		t.Fatalf("groups = %+v, want 6 distinct (door, seat, model)", c.Groups)
 	}
 	first := c.Groups[0]
 	if first.Door != "agent_run" || first.Seat != "node-a:seat-1" || first.Model != "seat-1" || first.Count != 2 {
