@@ -130,6 +130,16 @@ var compactKeep = []compactKeepEntry{
 	},
 	{
 		Tools:    []string{"agent_run"},
+		Sentence: "A `model` this box does not serve is looked up on the fleet (register D-125): with no route, or route remote, it runs as ONE contract through the delegator on a node whose agent seat is that model (the response names node, placement, seat and executed_on, plus node_reported only when the node's own result named itself by another id, carries no sizing of this box, and notes read_root and judge, which do not travel), and a name no node runs is refused with the roster sentence and where the fleet looked (defer_class config when every node answered, infrastructure when one did not); a model on route auto, spread or queue is refused, because they place by capacity and not by seat name, and route local never asks the fleet.",
+		Why:      "a model this box does not serve is placed on a fleet node as ONE contract through the delegator: the goal and setup_actions leave the box (read_root and judge do not travel), and a name no node runs is refused",
+	},
+	{
+		Tools:    []string{"agent_run"},
+		Sentence: "A model this box does not serve is looked up on the fleet (register D-125): with no route, or route remote, it runs on a node whose agent seat is that model, else it is refused naming where the fleet looked; route local never asks the fleet",
+		Why:      "the model parameter's own statement of the same remote placement: with no route or route remote the run goes to a node whose agent seat is that model, else it is refused naming where the fleet looked; route local never asks the fleet",
+	},
+	{
+		Tools:    []string{"agent_run"},
 		Sentence: "Never gates anything.",
 		Why:      "the audit never gates anything (advisory)",
 	},
