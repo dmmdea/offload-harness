@@ -546,7 +546,10 @@ the fold, so a marker never says that less was lost than was. The header is beli
 rung could have written it: the exact spelling, a size strictly above the body's own length and
 within the sizes the rung folds, and a line count a fold needs. A result that merely quotes a header
 with a negative, zero, oversized or too-small number is named by its own length instead, and so is a
-result that quotes a skeleton header the skeleton rung could not have written. A quoted
+result that quotes a skeleton header the skeleton rung could not have written. A body the search
+rung thinned opens with the same skeleton header (the search rung writes it through the same
+`skeletonHeader`), so with both rungs on its later elision marker still names the size the listing
+had. A quoted
 header whose numbers are merely plausible cannot be told from the real one in the text, so it is
 still believed; carrying the size outside the body would close that, and no caller can yet.
 

@@ -624,48 +624,125 @@ func TestLogCollapseKeepsTheFirstAndLastLineOfARun(t *testing.T) {
 
 // --- both rungs on -------------------------------------------------------------------
 
-// lcBothRungsOpts is every optional rung that exists on this branch. When the
-// search-results rung is merged, add SearchResults: true here: nothing else in
-// the test below changes, except that the listing may then be thinned by the
-// search rung (it opens with the skeleton disclosure line), which the
-// assertion already allows.
-func lcBothRungsOpts() compactOpts { return compactOpts{LogCollapse: true} }
+// lcBothRungsOpts is every optional rung that exists: the log rung and the
+// search rung. The log rung runs first (compaction.go): it keeps every
+// distinct line, the search rung drops most of a listing.
+func lcBothRungsOpts() compactOpts { return compactOpts{LogCollapse: true, SearchResults: true} }
 
-// TestLogCollapseAndSearchRungsDoNotClaimTheSameOutput: a grep listing whose
-// lines differ only in a number is the search rung's, not this one's. With both
-// rungs on, the listing is left raw by the log rung (and thinned by the search
-// rung once that exists), and the build output beside it is folded.
-//
-// Two listings are older than the build log: a `grep -rl` one (paths only, which
-// no search rung parses either: neither rung claims it) and a `grep -rn` one of
-// path:line:text hits (the shape a search rung thins; the log rung must leave it
-// raw whether or not that rung is on).
-func TestLogCollapseAndSearchRungsDoNotClaimTheSameOutput(t *testing.T) {
+// lcBothRungsTranscript is the transcript the two rungs meet in: two older
+// listings (a `grep -rl` one of bare paths, which no search rung parses and no
+// log rung claims; a `grep -rn` one of path:line:text hits, the shape the search
+// rung thins) and an older `go test` log, all inside the ladder's window, then
+// one recent log. The folded build log and the thinned hits listing are
+// returned beside it, built by the rungs' own functions, so a test can set a
+// budget that needs exactly one rung's edit or both.
+func lcBothRungsTranscript(t *testing.T) (msgs []Msg, foldedBuild, thinnedHits string) {
+	t.Helper()
 	paths := lcListing("internal/pkg/file%d_%d.go", 90)
-	hits := lcListing("internal/pkg/file%d.go:%d:    return handle(req)", 90)
-	msgs := lcTranscript(paths, hits, lcSubtestLog(100), lrServerLog(170))
+	// Line numbers start at 1: a match on line 0 is no match the search rung accepts,
+	// and one such line would make the whole listing a shape it leaves alone.
+	var hb strings.Builder
+	for i := 0; i < 90; i++ {
+		fmt.Fprintf(&hb, "internal/pkg/file%d.go:%d:    return handle(req)\n", i, i+1)
+	}
+	hits := hb.String()
+	msgs = lcTranscript(paths, hits, lcSubtestLog(100), lrServerLog(170))
 	msgs[3].ToolCalls = []ToolCall{{ID: "call-1", Name: "run_shell", Args: `{"command":"grep -rl handle ."}`}}
 	msgs[5].ToolCalls = []ToolCall{{ID: "call-2", Name: "run_shell", Args: `{"command":"grep -rn handle ."}`}}
 	if _, ok := logCollapse(paths); !ok {
 		t.Fatal("control: the paths listing is one the fold would shorten")
 	}
-	folded, ok := logCollapse(msgs[8].Content)
+	if _, ok := searchRungBodyForm(paths, nil, searchFormAny); ok {
+		t.Fatal("control: the paths listing is not one the search rung parses")
+	}
+	foldedBuild, ok := logCollapse(msgs[8].Content)
 	if !ok {
 		t.Fatal("control: the build log must fold")
 	}
+	thinnedHits, ok = searchRungBodyForm(hits, searchQueryTerms(msgs[2].Content), searchFormFlat)
+	if !ok {
+		t.Fatal("control: the grep -rn listing must be one the search rung thins")
+	}
+	return msgs, foldedBuild, thinnedHits
+}
+
+// lcBudgetWith is the estimate of msgs with the bodies at the given indexes
+// replaced: the budget at which exactly those edits are enough.
+func lcBudgetWith(msgs []Msg, edits map[int]string) int {
 	probe := append([]Msg(nil), msgs...)
-	probe[8].Content = folded
-	out := compact(context.Background(), msgs, estimateTokens(probe), 2, 3, lcBothRungsOpts())
+	for i, body := range edits {
+		probe[i].Content = body
+	}
+	return estimateTokens(probe)
+}
+
+// TestLogCollapseAndSearchRungsDoNotClaimTheSameOutput: a grep listing whose
+// lines differ only in a number is the search rung's, not the log rung's, and
+// the build output beside it is the log rung's, not the search rung's. With both
+// rungs on, each edits only its own bodies, and the log rung, which runs first,
+// leaves the search rung nothing to do when the fold alone fits the budget.
+func TestLogCollapseAndSearchRungsDoNotClaimTheSameOutput(t *testing.T) {
+	msgs, foldedBuild, thinnedHits := lcBothRungsTranscript(t)
+
+	// The fold alone is enough: the log rung stops the ladder at the first fit,
+	// so both listings stay byte for byte as the tools printed them.
+	out := compact(context.Background(), msgs, lcBudgetWith(msgs, map[int]string{8: foldedBuild}), 2, 3, lcBothRungsOpts())
 	for _, i := range []int{4, 6} {
-		if isLogCollapsed(out[i].Content) {
-			t.Errorf("message %d: the log rung folded a grep listing", i)
-		}
-		if out[i].Content != msgs[i].Content && !isSkeletonized(out[i].Content) {
-			t.Errorf("message %d: the listing may only stay raw or be thinned by the search rung:\n%.200s", i, out[i].Content)
+		if out[i].Content != msgs[i].Content {
+			t.Errorf("message %d: a budget the fold meets must leave the listing raw:\n%.200s", i, out[i].Content)
 		}
 	}
-	if !isLogCollapsed(out[8].Content) {
+	if out[8].Content != foldedBuild {
 		t.Errorf("the build output was not folded:\n%.200s", out[8].Content)
 	}
 	pairing(t, out)
+
+	// The fold is not enough: the search rung thins the grep -rn listing, the
+	// bare-path listing stays raw (neither rung claims it), and the build log
+	// is the fold the log rung alone writes (the search rung left it alone).
+	out = compact(context.Background(), msgs, lcBudgetWith(msgs, map[int]string{6: thinnedHits, 8: foldedBuild}), 2, 3, lcBothRungsOpts())
+	if out[4].Content != msgs[4].Content {
+		t.Errorf("the bare-path listing is nobody's and must stay raw:\n%.200s", out[4].Content)
+	}
+	if out[6].Content != thinnedHits || isLogCollapsed(out[6].Content) {
+		t.Errorf("the grep -rn listing must be the search rung's thinned form, not folded:\n%.200s", out[6].Content)
+	}
+	if out[8].Content != foldedBuild {
+		t.Errorf("the build output must be the log rung's fold, untouched by the search rung:\n%.200s", out[8].Content)
+	}
+	pairing(t, out)
+}
+
+// TestLogCollapseAndSearchRungsKeepEachOthersMarkersHonest: a listing the
+// search rung thinned and a log the log rung folded each open with a disclosure
+// line that names the size the body had. With the log rung on, its size parser
+// believes the search rung's line (it is the skeleton header, which the search
+// rung writes through skeletonHeader), so under a budget nothing meets the
+// reactive last resort's marker names the original size of both, not the
+// smaller size the rung left.
+func TestLogCollapseAndSearchRungsKeepEachOthersMarkersHonest(t *testing.T) {
+	msgs, foldedBuild, thinnedHits := lcBothRungsTranscript(t)
+	hitsLen, buildLen := len(msgs[6].Content), len(msgs[8].Content)
+	if n, ok := logsSkeletonSize(thinnedHits); !ok || n != hitsLen {
+		t.Fatalf("the log rung's parser must believe the search rung's header: got %d, %v, want %d", n, ok, hitsLen)
+	}
+	if n, ok := logsOriginalSize(foldedBuild); !ok || n != buildLen {
+		t.Fatalf("control: the fold's header must name the build log's size: got %d, %v, want %d", n, ok, buildLen)
+	}
+	edited := append([]Msg(nil), msgs...)
+	edited[6].Content, edited[8].Content = thinnedHits, foldedBuild
+	// With the log rung off, the fold's header is plain text to the default
+	// ladder, so only the search rung's listing is named by its original size.
+	check := func(opts compactOpts, want map[int]int) {
+		t.Helper()
+		out := emergencyShrinkWith(edited, 1, 3, opts)
+		for i, n := range want {
+			if marker := elisionMarker(n); !strings.HasPrefix(out[i].Content, marker) {
+				t.Errorf("opts %+v, message %d: want a marker naming %d chars (%q), got %.120q", opts, i, n, marker, out[i].Content)
+			}
+		}
+		pairing(t, out)
+	}
+	check(lcBothRungsOpts(), map[int]int{6: hitsLen, 8: buildLen})
+	check(compactOpts{SearchResults: true}, map[int]int{6: hitsLen})
 }
