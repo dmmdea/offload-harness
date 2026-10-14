@@ -187,7 +187,21 @@ func TestEveryConstraintSentenceIsKeptOrDroppedWithReason(t *testing.T) {
 		for _, tool := range listTools(t, surface.cfg("compact")) {
 			compact[tool.Name] = tool
 		}
-		for _, ft := range listTools(t, surface.cfg("full")) {
+		fullTools := listTools(t, surface.cfg("full"))
+		if surface.name == "fleet accelerators" {
+			// The variant must really register the forwarders, or the pass over it is vacuous: every accelerator tool carries
+			// the "[FLEET: ...]" suffix there, and the surface is as large as the full one.
+			fleetTagged := 0
+			for _, ft := range fullTools {
+				if strings.Contains(ft.Description, "[FLEET:") {
+					fleetTagged++
+				}
+			}
+			if len(fullTools) < 44 || fleetTagged < 10 {
+				t.Fatalf("the fleet-accelerator surface has %d tools and %d with a [FLEET: ...] suffix: it no longer registers the forwarders", len(fullTools), fleetTagged)
+			}
+		}
+		for _, ft := range fullTools {
 			ct, ok := compact[ft.Name]
 			if !ok {
 				t.Errorf("%s: %s is in the full list and not in the compact one", surface.name, ft.Name)
