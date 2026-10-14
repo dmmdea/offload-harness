@@ -98,6 +98,11 @@ func yieldRootRig(t *testing.T, policy string) (cfg string, m *gpulease.Manager)
 	old := wrapperTickEvery
 	wrapperTickEvery = 150 * time.Millisecond
 	t.Cleanup(func() { wrapperTickEvery = old })
+	// A holder asks only about a label its term check has looked at again, and that look is a minute away
+	// by default: a test that watches a lease being asked moves it within the window of the test.
+	oldRecheck := termRecheckEvery
+	termRecheckEvery = 250 * time.Millisecond
+	t.Cleanup(func() { termRecheckEvery = oldRecheck })
 	cfg, m = leaseFixture(t)
 	// The policy is the config's: every gpu verb loads the config and Load installs what it says, so a
 	// policy installed by hand would be replaced by the unset default the moment the verb ran.
@@ -253,6 +258,31 @@ func TestWrapperNeverRunsTheRecordsOnYield(t *testing.T) {
 	termWaitFor(t, "the holder's on_yield to have run", 10*time.Second, func() bool { return stub.count() >= 1 })
 	if got := stub.first(t).line; got != "touch work/STOP" {
 		t.Fatalf("the holder ran %q: it must run its own in-memory value, never the shared record's", got)
+	}
+}
+
+// The ask cannot be taken back, so the wrapper does not make it on a label its own term check has not looked
+// at again. With that look an hour away, a lease that is overdue and labelled, with a waiter on its cards for
+// the whole of the command, is not asked; the tests above are the control (the same run with the look 250 ms
+// away asks within the second).
+func TestWrapperDoesNotAskALabelThatHasNotSurvivedARecheck(t *testing.T) {
+	cfg, m := yieldRootRig(t, "request")
+	termRecheckEvery = time.Hour
+	stub := stubYieldShell(t)
+	afterCommandStarts(t, func() { plantRootWaiter(t, m) })
+	t.Setenv("LO_HELPER_SLEEP_MS", "3500")
+	var err error
+	stderr := captureStderr(t, func() {
+		err = runGPUReserve(yieldReserveArgs(cfg, []string{"--on-yield", "touch work/STOP"}, "TestHelperSleepMs"))
+	})
+	if err != nil {
+		t.Fatalf("%v\n%s", err, stderr)
+	}
+	if !strings.Contains(stderr, "labelled expired") {
+		t.Fatalf("setup: the lease was never labelled expired, so the test proves nothing:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "asked to yield") || stub.count() != 0 {
+		t.Errorf("the holder was asked about a label that had not survived a recheck (%d runs):\n%s", stub.count(), stderr)
 	}
 }
 
@@ -436,10 +466,14 @@ func TestDetachHolderThatReleasesAtExpiryRunsNoRequest(t *testing.T) {
 // not carry the path (it is not a child of the holder).
 func TestDetachReportNamesTheYieldFile(t *testing.T) {
 	dir := t.TempDir()
-	info := gpulease.Info{Held: true, Class: gpulease.ClassMedia, Epoch: 9, PID: 4242, ExpiresAt: time.Now().Add(time.Hour), Yields: gpulease.YieldsDetached}
-	text := detachedReport(info, dir, false)
+	info := gpulease.Info{Held: true, Class: gpulease.ClassMedia, Epoch: 9, PID: 4242, ExpiresAt: time.Now().Add(time.Hour), Yields: gpulease.YieldsDetached, OnYield: "touch work/STOP"}
 	want := gpulease.YieldFilePath(dir, 9)
-	for _, s := range []string{"reserved: media", "epoch 9", "release with: local-offload gpu release --epoch 9", want, "only once the holder is asked"} {
+	t.Cleanup(func() { gpulease.SetDefaultOnOverdue("") })
+
+	// With the request policy the holder asks, and the report says who runs the command.
+	gpulease.SetDefaultOnOverdue("request")
+	text := detachedReport(info, dir, false)
+	for _, s := range []string{"reserved: media", "epoch 9", "release with: local-offload gpu release --epoch 9", want, "only once the holder is asked", "runs the --on-yield it was given"} {
 		if !strings.Contains(text, s) {
 			t.Errorf("the report lacks %q:\n%s", s, text)
 		}
@@ -451,7 +485,23 @@ func TestDetachReportNamesTheYieldFile(t *testing.T) {
 	if out["yield_file"] != want || out["epoch"] != float64(9) || out["held"] != true {
 		t.Errorf("json = %v", out)
 	}
+	// A job that recorded no command is told there is nothing to run, not that the holder runs one.
+	bare := info
+	bare.OnYield = ""
+	text = detachedReport(bare, dir, false)
+	if !strings.Contains(text, want) || !strings.Contains(text, "no --on-yield was recorded") || strings.Contains(text, "runs the --on-yield it was given") {
+		t.Errorf("a lease with no --on-yield: the holder runs nothing and the report says so:\n%s", text)
+	}
+	// Under the default policy (and hold, and an unrecognised value) nobody is asked: the report promises
+	// nothing and is what it was before the request existed.
+	for _, policy := range []string{"", "hold", "kill"} {
+		gpulease.SetDefaultOnOverdue(policy)
+		if strings.Contains(detachedReport(info, dir, false), "yield") || strings.Contains(detachedReport(info, dir, true), "yield") {
+			t.Errorf("gpu_on_overdue = %q asks nobody, and the report still talks of a yield request", policy)
+		}
+	}
 	// A holder that cannot be asked has no file to name, and the report is what it was.
+	gpulease.SetDefaultOnOverdue("request")
 	info.Yields = ""
 	if strings.Contains(detachedReport(info, dir, false), "yield") || strings.Contains(detachedReport(info, dir, true), "yield") {
 		t.Error("a holder that never asks reports no yield file")
