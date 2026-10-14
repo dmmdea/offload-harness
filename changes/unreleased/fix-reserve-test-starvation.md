@@ -27,3 +27,8 @@ Windows machine (`Succeeded:3 Deferred:2`, and "started 4 times, want 8"). Both 
   the same reason text, and is not the call-deadline cut. The barrier opens only inside the reserve, so a start of the
   fifth subtask (or of the third wave, or of the second chunk) is a failure on any runner; the start count can no longer be
   made right by a slow one.
+- **Proved under starvation.** A stress shape of 40 concurrent copies of the two tests, 6 CPU spinners and `GOMAXPROCS=2` on an
+  8-core idle machine: the old tests failed in 38 of 200 runs (all of them the first test; the second never failed in 200), where
+  3 and 8 copies (60 and 160 runs) never failed. The new tests passed 200 of 200, with 0 skips, and 20 of 20 on a Linux host. A
+  mutant that makes `noRoom` always report room (a subtask started inside the reserve) failed both new tests in 200 of 200 runs,
+  each on the "started N times" assertion and not on a skip.
