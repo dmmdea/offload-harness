@@ -340,3 +340,18 @@ func TestGPUStatusSaysHowLongAHeldLeaseHasHeldAndWhenTheBoundReleasesIt(t *testi
 		t.Errorf("the lease row carries the bound as host_ram_hold_until (RFC 3339): %v (parse error %v)", row["host_ram_hold_until"], perr)
 	}
 }
+
+// `--ram-hold-max` follows the same ceiling as the config key (7 days): a duration above it is refused before anything is
+// acquired, by name, and one at it is not.
+func TestARamHoldMaxAboveTheCeilingIsRefusedBeforeAnythingIsTaken(t *testing.T) {
+	cfgPath, m, f, epochFile, args := holdBoundReserve(t, true, false, "--ram-hold-max", "200h")
+	var err error
+	stderr := captureStderr(t, func() { err = runGPUReserve(args) })
+	if err == nil || !strings.Contains(err.Error(), "--ram-hold-max") || !strings.Contains(err.Error(), "7 days") {
+		t.Fatalf("200h is above the 7 day ceiling and is refused by name, got %v\n%s", err, stderr)
+	}
+	if m.Inspect().Held || fileExists(epochFile) || f.unloads.Load() != 0 {
+		t.Errorf("a refused flag takes nothing, runs nothing and unloads nothing: held=%v unloads=%d", m.Inspect().Held, f.unloads.Load())
+	}
+	_ = cfgPath
+}

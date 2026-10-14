@@ -73,3 +73,44 @@ func TestLoadReadsTheHoldBoundAndRefusesANegativeOne(t *testing.T) {
 		t.Errorf("a one-shot verb that goes on with the Config anyway must read a negative bound as the default, got %s", c.GPUHostRAMHoldMax())
 	}
 }
+
+// A value this large that is not 0 is a typo, and a huge number of seconds must never overflow time.Duration (past about
+// 9.2e9 seconds the product wraps negative or to zero, which the reserve would read as "no bound": the bound failing open).
+// Load refuses anything above MaxGPUHostRAMHoldMaxSec (7 days) by name; the accessor, which the one-shot verbs call on a
+// Config that Load returned beside its error, clamps to it, so the bound never fails open.
+func TestAHugeHoldBoundIsRefusedByNameAndNeverFailsOpen(t *testing.T) {
+	if MaxGPUHostRAMHoldMaxSec != 7*24*60*60 {
+		t.Fatalf("the ceiling is 7 days, got %d s", MaxGPUHostRAMHoldMaxSec)
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.json")
+	write := func(sec string) {
+		t.Helper()
+		body := `{"state_dir": "` + filepath.ToSlash(dir) + `", "gpu_hostram_hold_max_sec": ` + sec + `}`
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The ceiling itself is accepted.
+	write("604800")
+	if c, err := Load(p); err != nil || c.GPUHostRAMHoldMax() != 7*24*time.Hour {
+		t.Errorf("exactly 7 days is accepted: err=%v bound=%s", err, c.GPUHostRAMHoldMax())
+	}
+	// One second more, and values that wrap a Duration, are refused by name and read as the ceiling, never as no bound.
+	for _, sec := range []string{"604801", "9223372036", "9300000000", "9223372036854775807"} {
+		write(sec)
+		c, err := Load(p)
+		if err == nil || !strings.Contains(err.Error(), "gpu_hostram_hold_max_sec") || !strings.Contains(err.Error(), "7 days") {
+			t.Errorf("%s s is refused by name, with the ceiling stated, got %v", sec, err)
+		}
+		if got := c.GPUHostRAMHoldMax(); got != 7*24*time.Hour {
+			t.Errorf("%s s: a verb that goes on with the Config anyway must read the ceiling (7 days), never no bound or a wrapped value, got %s", sec, got)
+		}
+	}
+	// And a Config built by hand with the largest int cannot wrap either.
+	c := Default()
+	c.GPUHostRAMHoldMaxSec = intp(int(^uint(0) >> 1))
+	if got := c.GPUHostRAMHoldMax(); got != 7*24*time.Hour {
+		t.Errorf("the largest int clamps to 7 days, got %s", got)
+	}
+}

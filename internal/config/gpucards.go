@@ -32,6 +32,13 @@ func (c Config) GPUHostRAMHeadroom() float64 {
 // the host can never meet frees the cards for the queue behind it.
 const DefaultGPUHostRAMHoldMaxSec = 600
 
+// MaxGPUHostRAMHoldMaxSec is the largest gpu_hostram_hold_max_sec (and `--ram-hold-max`) accepted: 7 days. A chosen figure:
+// it is above the longest lease life the harness grants by default (gpu_max_total_min, 48 h) and the longest `--wait` anyone
+// uses (8 h by default), so no honest bound is refused, and a value this large that is not 0 is a typo. 0 is the explicit
+// "no bound". The ceiling is also what keeps the seconds-to-Duration conversion from wrapping: past about 9.2e9 seconds
+// time.Duration overflows and reads negative or zero, which would turn the bound off.
+const MaxGPUHostRAMHoldMaxSec = 7 * 24 * 60 * 60
+
 // GPUHostRAMHoldMax is gpu_hostram_hold_max_sec as a duration, with the default applied: 600 seconds when unset, and 0 (no
 // bound: the wait after the unload runs the whole --wait) only when the operator wrote 0. A negative value reads as the
 // default and never as no bound: Load refuses it by name, but it returns the Config beside that error and the one-shot
