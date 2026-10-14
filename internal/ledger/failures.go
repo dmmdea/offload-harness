@@ -170,13 +170,15 @@ func (r failureRow) tokensOf(class string) (n int64, measured bool) {
 // neverRanClasses are the classes whose reason code says no node ran the job: it was refused, never placed,
 // withdrawn before it started, or stopped by a check made before any model ran. A row of one of them that stores
 // 0 spent nothing, even when it names the node that refused it. Left out on purpose: queue_deadline (the node may
-// still run a job it never confirmed taking back) and canceled (the caller left after a node held the job, which
-// may already have worked), and every class that says a run happened (poll_deadline, remote_error, stalls, a failed
-// verification, budget, abstention, infrastructure): the work of those is on the node.
+// still run a job it never confirmed taking back), canceled (the caller left after a node held the job, which
+// may already have worked), write (a node refuses the write door either before a run, when agent_allow_write is
+// false, or after one, when the finished write set broke a door cap, and the class does not say which), and every
+// class that says a run happened (poll_deadline, remote_error, stalls, a failed verification, budget, abstention,
+// infrastructure): the work of those is on the node.
 var neverRanClasses = map[string]bool{
 	ReasonNodeBusy: true, ReasonCapacityWait: true, ReasonQueueFull: true, ReasonNoEligibleNode: true,
 	ReasonQueueWithdrawn: true, ReasonShed: true, ReasonDispatchRefused: true,
-	ReasonConfig: true, ReasonContract: true, ReasonWrite: true, ReasonBadInput: true,
+	ReasonConfig: true, ReasonContract: true, ReasonBadInput: true,
 }
 
 // zeroIsOwn reports whether a stored 0 on a failed row is that row's own measurement rather than a gap. Record
