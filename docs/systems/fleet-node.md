@@ -1161,7 +1161,7 @@ completion, any `/upstream` path or any POST (`internal/backendchain`, `internal
 
 **The 1-token completion probe exists only behind `doctor --probe-completion`.** A completion against a seat that is not
 running loads it, and a load can evict a vLLM seat that holds the cards (`cascade_seat_guard`, `internal/seatguard`), so it
-is a thing a person asks for, and `doctor -h` says so. It is refused, and the row says why, for any seat that is not running
+is a thing a person asks for, and `doctor -h` says so, as does the usage a mistyped flag prints (exit status 2, no check run). It is refused, and the row says why, for any seat that is not running
 while a vLLM seat is loaded or loading (a vLLM seat is no exception: loading one evicts another), and whenever llama-swap's
 running list cannot be read (a vLLM seat holding the cards cannot then be ruled out). The decision is made on a fresh read
 of the running list, and the list is read again after every completion, whether it succeeded or not, so a vLLM seat that
