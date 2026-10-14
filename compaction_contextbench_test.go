@@ -145,3 +145,43 @@ func TestContextBenchRefusesABudgetThatCannotHoldTheFirstOperation(t *testing.T)
 		t.Fatal("a refused run writes no report")
 	}
 }
+
+// --delivery, --budget and --reserve reach the run: the report names them, and a budget
+// this small makes the ladder compact where the default one would not.
+func TestContextBenchDeliveryBudgetAndReserveReachTheRun(t *testing.T) {
+	withFakeContextBenchSeat(t, func(context.Context, []agent.Msg, int) (string, error) {
+		return compeval.CBAdvanceMarker, nil
+	})
+	run := func(extra ...string) compeval.CBReport {
+		t.Helper()
+		out := filepath.Join(t.TempDir(), "r.json")
+		args := append(contextBenchArgs(t, "--family", "kv_store", "--level", "R130", "--endpoint", "http://fake.invalid", "--model", "seat-x", "--out", out), extra...)
+		if err := runCompactionContextBench(args); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rep compeval.CBReport
+		if err := json.Unmarshal(raw, &rep); err != nil {
+			t.Fatal(err)
+		}
+		return rep
+	}
+	roomy := run()
+	if roomy.Delivery != compeval.CBDeliveryToolResult || roomy.Budget != compeval.CBDefaultBudget || roomy.Reserve != compeval.CBDefaultReserve {
+		t.Fatalf("defaults = %+v", roomy)
+	}
+	if c := roomy.Results[0].Compactions; c != 0 {
+		t.Fatalf("with the default budget nothing is compacted, got %d", c)
+	}
+	tight := run("--delivery", "user", "--budget", "8000", "--reserve", "500")
+	if tight.Delivery != compeval.CBDeliveryUser || tight.Budget != 8000 || tight.Reserve != 500 {
+		t.Fatalf("the flags did not reach the report: %+v", tight)
+	}
+	r := tight.Results[0]
+	if r.Compactions == 0 || r.PeakSentTokens == 0 || r.PeakSentTokens > 8000-500 {
+		t.Fatalf("an 8000-token budget must compact and never send more than the usable 7500: %+v", r)
+	}
+}

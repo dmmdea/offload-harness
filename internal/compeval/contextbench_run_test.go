@@ -541,3 +541,41 @@ func TestBuildCBTasks(t *testing.T) {
 	}
 	_ = fmt.Sprint
 }
+
+// The harness tells the agent when a reply did not advance the stream, and says which
+// way it failed; and the report records the largest context it really sent.
+func TestRunCBNudgesAreSentAndThePeakContextIsTracked(t *testing.T) {
+	in := cbSmallInstance(t, CBFamilyKV)
+	for name, c := range map[string]struct {
+		reply string
+		nudge string
+	}{
+		"no marker":            {"thinking about it", cbNoMarkerText},
+		"marker inside text":   {"I will say " + CBAdvanceMarker + " later", cbNonStandaloneText},
+		"submit before the end": {CBSubmitMarker, cbRefuseSubmitText},
+	} {
+		var sent [][]agent.Msg
+		peak := 0
+		seat := func(ctx context.Context, msgs []agent.Msg, maxOut int) (string, error) {
+			cp := append([]agent.Msg(nil), msgs...)
+			sent = append(sent, cp)
+			if n := agent.EstimateTokens(msgs); n > peak {
+				peak = n
+			}
+			return c.reply, nil
+		}
+		o := cbRunOpts()
+		o.MaxTurns = 2
+		r := RunCBTask(context.Background(), in, seat, o)
+		if len(sent) != 2 {
+			t.Fatalf("%s: %d seat calls, want 2", name, len(sent))
+		}
+		last := sent[1][len(sent[1])-1]
+		if last.Role != "user" || last.Content != c.nudge {
+			t.Errorf("%s: the second call ended with %+v, want the nudge %q", name, last, c.nudge)
+		}
+		if r.PeakSentTokens == 0 || r.PeakSentTokens != peak {
+			t.Errorf("%s: PeakSentTokens = %d, the largest context the seat got was %d", name, r.PeakSentTokens, peak)
+		}
+	}
+}
