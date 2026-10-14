@@ -44,8 +44,36 @@ test("a wf-*.mjs file that is neither guarded nor classified fails, naming it", 
   const text = messages(failures);
   assert.match(text, /builder drift: wf-new-thing: is neither guarded/);
   assert.doesNotMatch(text, /wf-new-thing\.test/);
-  // names listed but absent from render/ fail too
-  assert.match(text, /builder drift: wf-krea2: is named in builder-drift-specs\.mjs but render\/ has no such builder|^$/m.test(text) ? /wf-krea2/ : /wf-new-thing/);
+  assert.equal(failures.length, 1, text);
+});
+
+test("a guarded or classified name that has no builder file in render/ fails, naming it", (t) => {
+  const dir = scratchDir(t, "bd-cov-gone-");
+  writeFileSync(join(dir, "wf-other.mjs"), "export {};\n");
+  const krea = BUILDER_SPECS.filter((s) => s.builder === "wf-krea2");
+  const gone = checkCoverage({ renderDir: dir, specs: krea, notDerived: { "wf-other": "a reason that is long enough to be a sentence" } });
+  assert.match(messages(gone), /^builder drift: wf-krea2: is named in builder-drift-specs\.mjs but render\/ has no such builder$/);
+  assert.equal(gone.length, 1);
+  const goneClassified = checkCoverage({ renderDir: dir, specs: [], notDerived: { "wf-other": "a reason that is long enough to be a sentence", "wf-ghost": "a reason that is long enough to be a sentence" } });
+  assert.match(messages(goneClassified), /^builder drift: wf-ghost: is named in builder-drift-specs\.mjs but render\/ has no such builder$/);
+  assert.equal(goneClassified.length, 1);
+});
+
+test("a builder that is both guarded and classified as not template-derived fails, naming it", (t) => {
+  const dir = scratchDir(t, "bd-cov-both-");
+  writeFileSync(join(dir, "wf-krea2.mjs"), "export {};\n");
+  const failures = checkCoverage({ renderDir: dir, specs: BUILDER_SPECS.filter((s) => s.builder === "wf-krea2"), notDerived: { "wf-krea2": "a reason that is long enough to be a sentence" } });
+  assert.match(messages(failures), /^builder drift: wf-krea2: is both guarded and listed as not template-derived; pick one$/);
+  assert.equal(failures.length, 1);
+});
+
+test("a not-template-derived entry needs a reason of at least a sentence (the function, not only the data)", (t) => {
+  const dir = scratchDir(t, "bd-cov-reason-");
+  for (const name of ["wf-a.mjs", "wf-b.mjs", "wf-c.mjs"]) writeFileSync(join(dir, name), "export {};\n");
+  const failures = checkCoverage({ renderDir: dir, specs: [], notDerived: { "wf-a": "short", "wf-b": 42, "wf-c": "     padded      " } });
+  const text = messages(failures);
+  for (const name of ["wf-a", "wf-b", "wf-c"]) assert.match(text, new RegExp(`builder drift: ${name}: NOT_TEMPLATE_DERIVED needs a reason of at least a sentence`));
+  assert.equal(failures.length, 3, text);
 });
 
 test("every not-template-derived builder carries a stated reason", () => {
@@ -306,6 +334,67 @@ test("recording refuses a delta declaration the data no longer needs", () => {
   const stale = { ...spec, views: [{ ...view, items: view.items.map((i) => (i.key === "pose.end_percent" ? { ...i, delta: { kind: "deliberate", reason: "stale" } } : i)) }] };
   const syn = synthTemplates({ specs: [spec] });
   assert.throws(() => buildManifest({ loadTemplate: syn.loadTemplate, versions: SYN_VERSIONS, specs: [stale] }), /wf-wan-animate2 \[default\] pose\.end_percent: declared as a deliberate delta but builder and template now agree/);
+});
+
+// shapeFailures: checkManifestShape on a copy of the committed manifest after `edit`.
+function shapeFailures(edit) {
+  const copy = structuredClone(manifest);
+  edit(copy.builders);
+  return messages(checkManifestShape(copy));
+}
+
+test("the manifest shape check catches each way a status can contradict its digests or the spec", () => {
+  // the status differs from what the spec says (here: the spec says same)
+  assert.equal(
+    shapeFailures((b) => { b["wf-krea2"].views.default.items["ksampler.steps"].status = "deliberate"; }),
+    "builder drift: wf-krea2 [default]: widget ksampler.steps is deliberate in the manifest, the spec says same\n" +
+      "builder drift: wf-krea2 [default]: widget ksampler.steps is marked deliberate but the digests agree",
+  );
+  // deliberate and unreviewed entries must have digests that differ
+  assert.match(
+    shapeFailures((b) => { const it = b["wf-qwen-image-21"].views.t2i.items["ksampler.steps"]; it.builder = it.template; }),
+    /^builder drift: wf-qwen-image-21 \[t2i\]: widget ksampler\.steps is marked deliberate but the digests agree$/,
+  );
+  assert.match(
+    shapeFailures((b) => { const it = b["wf-qwen-image-edit"].views.full.items["ksampler.cfg"]; it.builder = it.template; }),
+    /^builder drift: wf-qwen-image-edit \[full\]: widget ksampler\.cfg is marked unreviewed but the digests agree$/,
+  );
+  // a template-only entry carries no builder digest
+  assert.match(
+    shapeFailures((b) => { b["wf-wan-animate2"].views.default.items["wiring.pose_start_end_distinct"].builder = "0123456789abcdef"; }),
+    /^builder drift: wf-wan-animate2 \[default\]: widget wiring\.pose_start_end_distinct is template-only but carries a builder digest$/,
+  );
+  // a status that is not the spec's, in the other direction: the spec declares a delta the manifest calls same
+  const sameButDiffer = shapeFailures((b) => { const it = b["wf-qwen-image-21"].views.t2i.items["ksampler.steps"]; it.status = "same"; });
+  assert.match(sameButDiffer, /widget ksampler\.steps is same in the manifest, the spec says deliberate/);
+  assert.match(sameButDiffer, /widget ksampler\.steps is marked same but the digests differ/);
+});
+
+test("an instance's widget index counts only the widget-typed subgraph inputs", () => {
+  const tpl = {
+    nodes: [{ id: 9, type: "sg-x", widgets_values: ["a", 7, true], inputs: [] }],
+    links: [],
+    definitions: { subgraphs: [{ id: "sg-x", name: "Sub", nodes: [], links: [], inputs: [
+      { name: "image", type: "IMAGE" }, { name: "text", type: "STRING" }, { name: "mask", type: "MASK" }, { name: "steps", type: "INT" }, { name: "flag", type: "BOOLEAN" },
+    ] }] },
+  };
+  const read = (input) => templateValue({ builder: "wf-x" }, { name: "v", template: "t" }, tpl, { key: "k", b: null, t: { kind: "inst", sg: null, id: 9, type: "subgraph:Sub", input } });
+  assert.equal(read("text"), "a");
+  assert.equal(read("steps"), 7);
+  assert.equal(read("flag"), true);
+  assert.throws(() => read("image"), /has no promoted widget image/);
+  assert.throws(() => read("mask"), /has no promoted widget mask/);
+});
+
+test("a subgraph instance whose subgraph is not the one the spec names fails, naming the builder", () => {
+  const spec = BUILDER_SPECS.find((s) => s.builder === "wf-qwen-image-21");
+  const view = spec.views.find((v) => v.name === "t2i");
+  const item = view.items.find((i) => i.key === "ksampler.cfg");
+  const { syn } = synthManifest();
+  const tpl = structuredClone(syn.loadTemplate(view.template));
+  assert.equal(typeof templateValue(spec, view, tpl, item), "number"); // as written, it reads
+  tpl.definitions.subgraphs.find((s) => s.name === item.t.type.slice("subgraph:".length)).name = "Some Other Subgraph";
+  assert.throws(() => templateValue(spec, view, tpl, item), /wf-qwen-image-21 \[t2i\] ksampler\.cfg: template image_qwen_image_2_1_t2i node 459 is sg-\d+, the spec expects subgraph:Text to Image \(Qwen Image 2\.1\)/);
 });
 
 test("the manifest shape check catches a status that contradicts its digests, and a hand-edited hash", () => {
