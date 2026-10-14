@@ -32,15 +32,27 @@ The rules, all checked by `go run ./cmd/changelog check` and by `go test` (the r
   that is not a fragment; every other entry that is not a well-formed fragment is an error, because a skipped
   fragment is a lost entry.
 - The first non-blank line starts with `### ` and names the kind and the change: `### Added - ...`,
-  `### Changed - ...`, `### Fixed - ...`, `### Removed - ...` or `### Security - ...`. The kind words are a
-  convention, not a checked list. (Opening with `###` is a rule the old changelog did not have: a loose bullet
-  would be glued under the previous fragment's section when the fragments are joined.)
+  `### Changed - ...`, `### Fixed - ...`, `### Removed - ...` or `### Security - ...`. (Opening with `###` is a rule
+  the old changelog did not have: a loose bullet would be glued under the previous fragment's section when the
+  fragments are joined. The kind words are a convention, see below.)
 - Only `###` and deeper headings. **No line may start with `# ` or `## `**, even inside a code fence: a `## [x.y.z]`
   line in a fragment is the forged release heading the assembler exists to prevent.
-- No version number in a heading: the release gives the version, the fragment does not know it.
-- Valid UTF-8, no control character except tab, carriage return and line feed.
-- Machine names, personal names, local paths and LAN addresses stay out, as in every tracked file: the leak gate
-  reads fragments too. Use `node-a`, `192.0.2.x`, `GPU-00000000-...`.
+- No line may carry a release date between two separators (the shape ` - YYYY-MM-DD - `, or the same with em
+  dashes): only a release heading does, and `check` refuses such a line anywhere else in `CHANGELOG.md`. A fragment
+  that held one would be assembled, deleted, and then make the changelog fail its own check. Copying the release
+  heading's style into a `### Fixed` title, or quoting a release heading in a bullet, is the usual cause: write the
+  date with a word before it (`on 2026-10-14`) instead.
+- Valid UTF-8, no control character except tab and line feed, and a carriage return only as half of a CR LF pair.
+  A lone carriage return ends a line in Markdown, so a `## [x.y.z]` line could hide behind one from every rule
+  above.
+- Nothing else in `changes/` but this `README.md` and the `unreleased/` directory, spelled exactly so. A fragment
+  saved one level up (`changes/<slug>.md`), or in a directory spelled `Unreleased/` (a case-insensitive checkout
+  reads it, Linux does not), is read by nothing and would never reach `CHANGELOG.md`, so `check` names it.
+
+Conventions that no code checks: the kind words above, no version number in a heading (the release gives the
+version, the fragment does not know it), and keeping machine names, personal names, local paths and LAN addresses out,
+as in every tracked file (use `node-a`, `192.0.2.x`, `GPU-00000000-...`); the repository's leak gate reads fragments
+like any other tracked file.
 
 `CHANGELOG.md` keeps an **empty `## [Unreleased]` block**. `go test` fails if anything is written there, and says
 where the entry goes instead: `changes/unreleased/`. Only the root `CHANGELOG.md` is read or edited; the

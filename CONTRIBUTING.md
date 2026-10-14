@@ -154,7 +154,9 @@ bumped together, in the same commit:**
 
 `TestVersionSourcesAgree` (in `main_test.go`) fails the build if any of these disagree, so
 `go test ./...` catches a partial bump. When you change published behavior, add a changelog fragment in
-the same PR (below), and bump the version when the change is released. This repository is the canonical
+the same PR (below). The version is bumped where the change is released: a direct pull request to `main` is
+its own release, so it bumps and assembles the changelog as well; a feature branch that is merged into a
+release branch leaves the bump and the assembly to that branch. This repository is the canonical
 source of version authority.
 Never let the sources drift — a mismatch once made the version look lower than a separately-published
 copy and triggered a false "we lost work" fire drill.
@@ -163,7 +165,8 @@ copy and triggered a false "we lost work" fire drill.
 
 A change adds **one new file**, `changes/unreleased/<slug>.md` (the lower-case branch name with `/` written as
 `-`), and never edits `CHANGELOG.md`. The body is exactly the text that will appear in the changelog and opens
-with `### <Kind> - <title>`; no line may start with `# ` or `## `. Two branches add two files, so they cannot
+with `### <Kind> - <title>`; no line may start with `# ` or `## `, and no line may carry a release date between
+separators. Two branches add two files, so they cannot
 conflict on the changelog, and the `## [Unreleased]` block of `CHANGELOG.md` stays empty (`go test` fails if
 anything is written there). The format, the rules and the recovery steps are in
 [`changes/README.md`](changes/README.md); `go run ./cmd/changelog check` runs the same rules the tests do.
@@ -172,8 +175,10 @@ There are two ways a change reaches `main`, and the changelog takes part in the 
 
 * **A direct pull request to `main` that is also a release.** Add your fragment, bump the version in
   `VERSION`, `internal/buildinfo/buildinfo.go` and `.printing-press.json`, and run
-  `go run ./cmd/changelog assemble -title "<one line>"` as the **last** commit of the pull request. The fragment is
-  added and consumed inside the same pull request, so there is no `Deletes:` line to write.
+  `go run ./cmd/changelog assemble -title "<one line>"` as the **last** commit of the pull request. Your own fragment
+  is added and consumed inside the same pull request, so it needs no `Deletes:` line. But `assemble` consumes every
+  file in `changes/unreleased/`: if a fragment-only pull request left a fragment on `main` earlier, paste the
+  `Deletes:` line that `assemble` prints into the commit message, as in the next item.
 * **A release branch (`release/X.Y.Z`).** Feature branches add fragments only. On the release branch, merge them,
   then `git merge origin/main`, renumber the three version carriers, and run `assemble` **last**. Commit it with the
   printed `Deletes:` line only if some fragment reached `main` earlier through a fragment-only pull request that did
