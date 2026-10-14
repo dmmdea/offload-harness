@@ -47,9 +47,6 @@ func TestDoctorLANIPWarnsOnEveryDialedFieldWithoutPrintingTheAddress(t *testing.
 		{"delegate_remotes", func(c *config.Config) { c.DelegateRemotes = []string{"http://node-a:18811", base} }, "delegate_remotes[1]"},
 		{"fleet_queue_holder", func(c *config.Config) { c.FleetQueueHolder = base }, "fleet_queue_holder"},
 		{"pair_workloads_relay", func(c *config.Config) { c.PairWorkloadsRelay = []string{"off", base} }, "pair_workloads_relay[1]"},
-		{"kv_cache_server", func(c *config.Config) {
-			c.KVCacheServers = config.KVCacheServers{{Enabled: true, Seat: "seat-c", Address: lan + ":6379"}}
-		}, `kv_cache_server[0].address (seat "seat-c")`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -87,6 +84,7 @@ func TestDoctorLANIPClassifiesTheRanges(t *testing.T) {
 		{"unique-local v6", "[" + v6(0xfd, 0x00) + "]", "private-range"},
 		{"link-local v6", "[" + v6(0xfe, 0x80) + "]", "link-local"},
 		{"v4-mapped private", "[::ffff:" + v4(10, 9, 8, 7) + "]", "private-range"},
+		{"v4-mapped tailnet", "[::ffff:" + v4(100, 100, 1, 2) + "]", "MagicDNS name"},
 		{"tailnet CGNAT low edge", v4(100, 64, 0, 1), "MagicDNS name"},
 		{"tailnet CGNAT high edge", v4(100, 127, 255, 254), "MagicDNS name"},
 		{"just below CGNAT", v4(100, 63, 255, 255), ""},
@@ -187,17 +185,30 @@ func TestDoctorLANIPRowIsAbsentWhereNothingIsDialed(t *testing.T) {
 	}
 }
 
-// A valkey store on a name is fine; the row reads the host of host:port, bracketed IPv6 included.
-func TestDoctorLANIPRowReadsTheHostOfAStoreAddress(t *testing.T) {
-	cfg := config.Default()
-	cfg.KVCacheServers = config.KVCacheServers{{Enabled: true, Seat: "named", Address: "store-a:6379"}}
-	if got := lanIPRow(cfg); got != "" {
-		t.Fatalf("a store by name must say nothing, got:\n%q", got)
-	}
-	cfg.KVCacheServers = config.KVCacheServers{{Enabled: true, Address: "[" + v6(0xfd, 0x00) + "]:6379"}}
-	got := lanIPRow(cfg)
-	if !strings.Contains(got, "kv_cache_server[0].address (box default)") || !strings.Contains(got, "private-range") {
-		t.Fatalf("a bracketed IPv6 store address is not read:\n%q", got)
+// A cache-server store is not this row's business. The config documents a literal on the direct LAN
+// (or the tailnet) as a valid store address, and prefers it to a name: bulk KV over MagicDNS measured
+// several times slower, and a name turns off the status readback, which dials literals only. A row
+// that told the operator to rename it would push the binding onto the slower path with no way to
+// silence it, so a store address says nothing, whatever range it is in.
+func TestDoctorLANIPRowLeavesCacheStoreAddressesAlone(t *testing.T) {
+	for name, addr := range map[string]string{
+		"private v4":            v4(192, 168, 7, 9) + ":6379",
+		"private v6, bracketed": "[" + v6(0xfd, 0x00) + "]:6379",
+		"link-local v4":         v4(169, 254, 3, 4) + ":6379",
+		"tailnet v4":            v4(100, 100, 1, 2) + ":6379",
+		"tailnet v6, bracketed": "[" + v6(0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0) + "]:6379",
+		"name":                  "store-a:6379",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.KVCacheServers = config.KVCacheServers{
+				{Enabled: true, Seat: "seat-c", Address: addr},
+				{Enabled: true, Address: addr},
+			}
+			if got := lanIPRow(cfg); got != "" {
+				t.Fatalf("a cache-server store address must say nothing, got: %q", got)
+			}
+		})
 	}
 }
 
