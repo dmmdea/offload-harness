@@ -989,6 +989,70 @@ test("expansion is bounded: a nested subgraph bomb is refused as graph_too_large
   assert.equal(refusalOf(convert(flat(100001)), "graph_too_large").details.node, "100001");
 });
 
+// What a node costs the bound is not its kind: a definition stuffed with Notes, muted, bypassed, Reroute and primitive nodes expands
+// to as many nodes as a definition of live ones, and a few kilobytes of template stand for millions of them. FILLERS are the specs
+// of those nodes; stuffedBomb(levels, fill, kinds) is a chain of definitions in which level k holds two instances of level k - 1
+// plus `fill` nodes whose kinds rotate through `kinds` (level 0 holds only the fill): 2^(levels + 1) - 1 instances, each with its fill.
+const FILLERS = {
+  note: { type: "Note", wv: ["x"] },
+  markdown: { type: "MarkdownNote", wv: ["x"] },
+  muted: { type: "ImageInvert", mode: 2, ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  bypassed: { type: "ImageInvert", mode: 4, ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  reroute: { type: "Reroute", ins: [["", "IMAGE"]], outs: [["", "IMAGE"]] },
+  primitive: { type: "PrimitiveNode", outs: [["INT", "INT"]], wv: [1, "fixed"] },
+};
+function stuffedBomb(levels, fill, kinds) {
+  const id = (n) => `5c1b0000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const filler = (first) => Array.from({ length: fill }, (_v, i) => ({ id: first + i, ...FILLERS[kinds[i % kinds.length]] }));
+  const defs = [subdef(id(0), { ins: [], outs: [], nodes: filler(1) })];
+  for (let k = 1; k <= levels; k++) defs.push(subdef(id(k), { ins: [], outs: [], nodes: [{ id: 1, type: id(k - 1) }, { id: 2, type: id(k - 1) }, ...filler(3)] }));
+  return withDefs(ui([{ id: 1, type: id(levels) }]), ...defs);
+}
+
+test("expansion is bounded for every kind of node: a bomb of Notes (a few kilobytes standing for 300,000 of them) is refused as graph_too_large, not carried on until memory runs out", () => {
+  // 1,023 instances of a definition with 300 Notes each: no live node anywhere and fewer instances than the bound, 306,900 Notes
+  const t0 = Date.now();
+  const r = refusalOf(convert(stuffedBomb(9, 300, ["note"])), REFUSAL.GRAPH_TOO_LARGE);
+  const took = Date.now() - t0;
+  assert.equal(r.details.limit, 100000);
+  assert.equal(r.details.what, "nodes");
+  assert.equal(typeof r.details.node, "string", "the details name where the limit was passed");
+  assert.ok(took < 5000, `refused at the bound, not after expanding it: ${took} ms`);
+  // the same shape just under the bound converts, and the Notes are what it is made of: 255 instances of 300 Notes is 76,755 nodes
+  const under = convert(stuffedBomb(7, 300, ["note"]));
+  assert.deepEqual(graphOf(under), {});
+  assert.equal(under.stats.notes, 76500);
+  assert.equal(under.stats.expandedSubgraphs, 255);
+});
+
+test("expansion is bounded for every kind of node: Notes, MarkdownNotes, muted, bypassed, Reroute and primitive nodes each count, alone and mixed", () => {
+  // 511 instances with 300 of one kind each: 153,300 of them and 511 instances against the bound
+  for (const kind of [...Object.keys(FILLERS), "mixed"]) {
+    const kinds = kind === "mixed" ? Object.keys(FILLERS) : [kind];
+    const t0 = Date.now();
+    const r = refusalOf(convert(stuffedBomb(8, 300, kinds)), REFUSAL.GRAPH_TOO_LARGE);
+    assert.equal(r.details.limit, 100000, kind);
+    assert.ok(Date.now() - t0 < 5000, `${kind}: refused at the bound, not after expanding it`);
+  }
+});
+
+test("expansion is bounded: exactly 100,000 nodes of any mix of kinds convert, and one more is refused whatever its kind", () => {
+  const plain = { mode: 0, inputs: [], outputs: [] };
+  const KINDS = { note: { type: "Note" }, markdown: { type: "MarkdownNote" }, muted: { type: "ImageInvert", mode: 2 }, bypassed: { type: "ImageInvert", mode: 4 },
+    reroute: { type: "Reroute" }, primitive: { type: "PrimitiveNode" }, live: { type: "ImageInvert" } };
+  const names = Object.keys(KINDS);
+  const mix = (n, extra) => ({
+    version: 0.4, links: [],
+    nodes: [...Array.from({ length: n }, (_v, i) => ({ id: i + 1, ...plain, ...KINDS[names[i % names.length]] })), ...(extra ? [{ id: n + 1, ...plain, ...KINDS[extra] }] : [])],
+  });
+  const ok = convert(mix(100000));
+  assert.equal(ok.ok, true, JSON.stringify(ok.refusal));
+  const s = ok.stats;
+  assert.equal(s.notes + s.mutedNodes + s.bypassedNodes + s.reroutes + s.primitiveNodes + s.nodes, 100000, "every kind was met and none was left out");
+  assert.ok(s.nodes < 100000 / 2, "most of them are not live nodes");
+  for (const kind of names) assert.equal(refusalOf(convert(mix(100000, kind)), REFUSAL.GRAPH_TOO_LARGE).details.node, "100001", `a ${kind} node as the 100,001st`);
+});
+
 test("expansion is bounded: subgraphs nested past 64 levels are refused as graph_too_large, tens of thousands deep included, not an internal_error from the stack", () => {
   const BG = (n) => `5c1b0000-0000-4000-8000-${String(n).padStart(12, "0")}`;
   const depth = (levels) => {
