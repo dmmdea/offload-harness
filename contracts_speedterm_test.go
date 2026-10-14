@@ -1,11 +1,18 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -61,11 +68,32 @@ type acceptanceFinding struct {
 // deescapeRegexArg turns the arguments of a `regex:` check into the plain text the
 // speed-term pattern reads: whitespace and word-boundary escapes become a space,
 // an escaped dot becomes a dot, and the (?i) flag is dropped. Best effort only.
-func deescapeRegexArg(s string) string { return s }
+func deescapeRegexArg(s string) string { return deescapeReplacer.Replace(s) }
+
+// The multi-character escapes come first: a Replacer tries its old strings in
+// argument order at each position, so `\s*` is read before `\s`.
+var deescapeReplacer = strings.NewReplacer(
+	`(?i)`, ``,
+	`\s*`, ` `,
+	`\s+`, ` `,
+	`\s`, ` `,
+	`\b`, ` `,
+	`\.`, `.`,
+)
 
 // speedTermIn reports the first speed term in one acceptance string, scanning the
 // string as written and, for a `regex:` check, the de-escaped argument too.
-func speedTermIn(check string) (term string, ok bool) { return "", false }
+func speedTermIn(check string) (term string, ok bool) {
+	if m := speedTermRe.FindString(check); m != "" {
+		return m, true
+	}
+	if arg, isRegex := strings.CutPrefix(check, "regex:"); isRegex {
+		if m := speedTermRe.FindString(deescapeRegexArg(arg)); m != "" {
+			return m, true
+		}
+	}
+	return "", false
+}
 
 // scanAcceptanceDir walks every *.json under dir. For each `acceptance` key found
 // at any depth it records one finding per refusal reason: a value that is not an
@@ -73,15 +101,241 @@ func speedTermIn(check string) (term string, ok bool) { return "", false }
 // term. files lists the files that held at least one `acceptance` key (relative,
 // slash-separated, sorted) and strs counts the acceptance strings read.
 func scanAcceptanceDir(dir string) (findings []acceptanceFinding, files []string, strs int, err error) {
-	return nil, nil, 0, nil
+	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if d.IsDir() || !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
+			return nil
+		}
+		raw, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		rel, rerr := filepath.Rel(dir, p)
+		if rerr != nil {
+			return rerr
+		}
+		rel = filepath.ToSlash(rel)
+		var doc any
+		if jerr := json.Unmarshal(bytes.TrimPrefix(raw, utf8BOM), &doc); jerr != nil {
+			findings = append(findings, acceptanceFinding{File: rel, Why: "not valid JSON: " + jerr.Error()})
+			return nil
+		}
+		w := acceptanceWalker{file: rel}
+		w.walk(doc, "")
+		findings = append(findings, w.findings...)
+		strs += w.strs
+		if w.keys > 0 {
+			files = append(files, rel)
+		}
+		return nil
+	})
+	sort.Strings(files)
+	return findings, files, strs, err
+}
+
+var utf8BOM = []byte("\xef\xbb\xbf")
+
+// acceptanceWalker collects the findings of one file. It looks at the key
+// `acceptance` and nothing else: a context text that says "no speed term enters
+// the choice" must stay legal.
+type acceptanceWalker struct {
+	file     string
+	findings []acceptanceFinding
+	strs     int // acceptance strings read
+	keys     int // acceptance keys met
+}
+
+func (w *acceptanceWalker) add(path, check, why string) {
+	w.findings = append(w.findings, acceptanceFinding{File: w.file, Path: path, Check: check, Why: why})
+}
+
+func (w *acceptanceWalker) walk(v any, path string) {
+	switch x := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			p := k
+			if path != "" {
+				p = path + "." + k
+			}
+			if k == "acceptance" {
+				w.keys++
+				w.acceptance(x[k], p)
+				continue
+			}
+			w.walk(x[k], p)
+		}
+	case []any:
+		for i, e := range x {
+			w.walk(e, fmt.Sprintf("%s[%d]", path, i))
+		}
+	}
+}
+
+func (w *acceptanceWalker) acceptance(v any, path string) {
+	arr, ok := v.([]any)
+	if !ok {
+		w.add(path, "", fmt.Sprintf("acceptance is %s, not an array of strings", jsonKind(v)))
+		return
+	}
+	for i, e := range arr {
+		p := fmt.Sprintf("%s[%d]", path, i)
+		s, ok := e.(string)
+		if !ok {
+			w.add(p, "", fmt.Sprintf("acceptance element is %s, not a string", jsonKind(e)))
+			continue
+		}
+		w.strs++
+		if _, perr := core.ParseAcceptanceCheck(s); perr != nil {
+			w.add(p, s, "does not parse in the acceptance DSL: "+perr.Error())
+		}
+		if term, hit := speedTermIn(s); hit {
+			w.add(p, s, fmt.Sprintf("carries the speed term %q", term))
+		}
+	}
+}
+
+func jsonKind(v any) string {
+	switch v.(type) {
+	case nil:
+		return "null"
+	case string:
+		return "a string"
+	case float64:
+		return "a number"
+	case bool:
+		return "a boolean"
+	case map[string]any:
+		return "an object"
+	case []any:
+		return "an array"
+	}
+	return fmt.Sprintf("a %T", v)
 }
 
 // acceptanceVerbsInSource reads the Go source of the acceptance parser and returns
 // the verbs it declares (the string values of the constants typed AcceptanceKind)
 // and the verbs it accepts (the case labels of the switch inside
 // ParseAcceptanceCheck, whether written as a constant name or a string literal),
-// each sorted and without duplicates.
-func acceptanceVerbsInSource(src []byte) (consts, cases []string, err error) { return nil, nil, nil }
+// each sorted and without duplicates. A label it cannot resolve is an error, never
+// a skipped verb.
+func acceptanceVerbsInSource(src []byte) (consts, cases []string, err error) {
+	f, err := parser.ParseFile(token.NewFileSet(), "agentwire.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, nil, err
+	}
+	byName := map[string]string{}
+	declared := map[string]bool{}
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if id, typed := vs.Type.(*ast.Ident); !typed || id.Name != "AcceptanceKind" {
+				continue
+			}
+			for i, name := range vs.Names {
+				if i >= len(vs.Values) {
+					return nil, nil, fmt.Errorf("constant %s has no value", name.Name)
+				}
+				v, ok := verbLiteral(vs.Values[i])
+				if !ok {
+					return nil, nil, fmt.Errorf("constant %s is not a string literal", name.Name)
+				}
+				byName[name.Name] = v
+				declared[v] = true
+			}
+		}
+	}
+	var parse *ast.FuncDecl
+	for _, decl := range f.Decls {
+		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "ParseAcceptanceCheck" && fd.Body != nil {
+			parse = fd
+		}
+	}
+	if parse == nil {
+		return nil, nil, fmt.Errorf("no func ParseAcceptanceCheck in the source")
+	}
+	accepted := map[string]bool{}
+	switches := 0
+	var unresolved error
+	ast.Inspect(parse.Body, func(n ast.Node) bool {
+		sw, ok := n.(*ast.SwitchStmt)
+		if !ok {
+			return true
+		}
+		if sel, isSel := sw.Tag.(*ast.SelectorExpr); !isSel || sel.Sel.Name != "Kind" {
+			return true
+		}
+		switches++
+		for _, st := range sw.Body.List {
+			cc, ok := st.(*ast.CaseClause)
+			if !ok {
+				continue
+			}
+			for _, e := range cc.List {
+				if id, isIdent := e.(*ast.Ident); isIdent {
+					v, known := byName[id.Name]
+					if !known {
+						unresolved = fmt.Errorf("case label %s is not a constant typed AcceptanceKind", id.Name)
+						continue
+					}
+					accepted[v] = true
+					continue
+				}
+				v, ok := verbLiteral(e)
+				if !ok {
+					unresolved = fmt.Errorf("case label of kind %T cannot be read", e)
+					continue
+				}
+				accepted[v] = true
+			}
+		}
+		return true
+	})
+	if unresolved != nil {
+		return nil, nil, unresolved
+	}
+	if switches == 0 {
+		return nil, nil, fmt.Errorf("ParseAcceptanceCheck has no switch on the check's Kind")
+	}
+	return sortedSet(declared), sortedSet(accepted), nil
+}
+
+// verbLiteral reads "x" or AcceptanceKind("x").
+func verbLiteral(e ast.Expr) (string, bool) {
+	if call, ok := e.(*ast.CallExpr); ok && len(call.Args) == 1 {
+		if id, isIdent := call.Fun.(*ast.Ident); isIdent && id.Name == "AcceptanceKind" {
+			e = call.Args[0]
+		}
+	}
+	lit, ok := e.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	v, err := strconv.Unquote(lit.Value)
+	return v, err == nil
+}
+
+func sortedSet(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // TestSpeedTermVectors pins what counts as a speed term, and what must not.
 func TestSpeedTermVectors(t *testing.T) {
@@ -351,6 +605,7 @@ func TestContractAcceptanceCarriesNoSpeedTerm(t *testing.T) {
 	if strs == 0 {
 		t.Error("the scanner read no acceptance string at all")
 	}
+	t.Logf("scanned %d files holding %d acceptance strings", len(files), strs)
 }
 
 // reviewedAcceptanceVerbs is the closed verb set with the reason each verb is
