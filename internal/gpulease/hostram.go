@@ -478,7 +478,12 @@ func (m *Manager) StampHostRAMHold(epoch uint64, until time.Time) error {
 		}
 	}
 	ms := until.UnixMilli()
-	return m.Restamp(epoch, func(mt *Meta) { mt.HostRAMHoldUntilMs = ms })
+	return m.Restamp(epoch, func(mt *Meta) {
+		if mt.HostRAMWaitGiB <= 0 {
+			return // admitted (or nothing was deferred): no bound is running
+		}
+		mt.HostRAMHoldUntilMs = ms
+	})
 }
 
 // stampTries and stampRetryPause are how often, and how far apart, a stamp that RequireStamp binds the wait to is tried before the
@@ -533,10 +538,31 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 			// lease's hidden holder (other processes) read it. A reserve that dies before its first look has then still left a bound
 			// the holder can enforce. A stamp that cannot be written costs the status line and the holder's own enforcement, not the
 			// wait (the bound itself is the caller's Deadline): it is reported, tried again at the next look, and the wait goes on.
-			if err := m.StampHostRAMHold(epoch, o.HoldUntil); err == nil {
-				stamped = true
-			} else if o.OnStampError != nil {
-				o.OnStampError(err)
+			tries := 1
+			if o.RequireStamp {
+				tries = stampTries
+			}
+			var last error
+			for i := 0; i < tries && !stamped; i++ {
+				if i > 0 {
+					m.pauseOrCancel(stampRetryPause, o.Cancel)
+					if cancelled(o.Cancel) {
+						return ErrCancelled
+					}
+				}
+				if last = m.StampHostRAMHold(epoch, o.HoldUntil); last == nil {
+					stamped = true
+				} else if o.OnStampError != nil {
+					o.OnStampError(last)
+				}
+			}
+			if !stamped && o.RequireStamp {
+				if _, live := awaitedFigure(m.Leases(), epoch); !live {
+					return fmt.Errorf("gpulease: host RAM: the lease is gone (epoch %d)", epoch) // that, not the stamp, is what failed
+				}
+				// The caller's hidden holder is the only thing that releases this lease if the caller dies, and it can enforce only
+				// what is on the record: a wait it cannot see the end of must not run. The host has not been looked at.
+				return &ErrHoldStamp{Epoch: epoch, Tries: tries, Err: last}
 			}
 		}
 		reading := m.readHost(need) // before the lock, compared inside it (F57)

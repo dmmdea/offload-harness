@@ -210,7 +210,9 @@ func awaitHostRAMBounded(ctx context.Context, await func(gpulease.AwaitHostRAMOp
 		// The stamped end of the wait is whichever of the bound and --wait comes first: the lease is released then, by this
 		// process or, if it died, by the lease's hidden holder.
 		HoldUntil: effective,
-		Cancel:    ctx.Done(),
+		// The detached form requires its stamp: its hidden holder is the only thing that releases the lease if this process dies.
+		RequireStamp: h.failClosed,
+		Cancel:       ctx.Done(),
 		// A stamp that cannot be written is said once however often the library reports it (it retries at every look): it costs
 		// the status line and the hidden holder's own enforcement of the bound, never the wait.
 		OnStampError: func(serr error) {
@@ -237,6 +239,10 @@ func awaitHostRAMBounded(ctx context.Context, await func(gpulease.AwaitHostRAMOp
 		},
 	})
 	if err != nil {
+		var stampErr *gpulease.ErrHoldStamp
+		if errors.As(err, &stampErr) {
+			return holdStampError(stampErr, h.outer)
+		}
 		var short *gpulease.ErrHostRAM
 		if !boundAt.IsZero() && errors.As(err, &short) && !short.Impossible {
 			e := &errHostRAMHoldBound{short: short, bound: h.max, waited: time.Since(start), held: time.Since(h.heldSince), classDefault: h.classDefault}
@@ -256,6 +262,27 @@ func awaitHostRAMBounded(ctx context.Context, await func(gpulease.AwaitHostRAMOp
 
 // releaseByEpochFn is Manager.ReleaseByEpoch. A variable so a test can make it answer "nothing was held" for a lease that is.
 var releaseByEpochFn = func(m *gpulease.Manager, epoch uint64) (bool, error) { return m.ReleaseByEpoch(epoch) }
+
+// holdStampError is the failure of a detached wait whose stamp could not be written: the hold bound the hidden holder would enforce
+// if this process died is not on the record, so the wait does not run. An outer bound stamped before the drain, if it landed, stays
+// (nothing clears it): it is still a moment by which the holder releases the lease. The lease is released by the caller, and the
+// text says only that it is being released; the outcome is reported after it happens.
+func holdStampError(e *gpulease.ErrHoldStamp, outer time.Time) error {
+	kept := "no bound is on the record"
+	if !outer.IsZero() {
+		kept = fmt.Sprintf("the outer bound stamped before the drain (%s) stays on the record, so the holder still releases the lease then", outer.Format(time.Kitchen))
+	}
+	return &errHoldStampDetached{cause: e, text: fmt.Sprintf("the hold bound could not be written on the lease record after %d tries (%v): a detached hold whose end the hidden holder cannot see would be held for good if this process died, so the wait is not run and the lease is being released; %s", e.Tries, e.Err, kept)}
+}
+
+// errHoldStampDetached is holdStampError's error: the sentence for the operator, with the library's *ErrHoldStamp still reachable.
+type errHoldStampDetached struct {
+	cause *gpulease.ErrHoldStamp
+	text  string
+}
+
+func (e *errHoldStampDetached) Error() string { return e.text }
+func (e *errHoldStampDetached) Unwrap() error { return e.cause }
 
 // leaseNotReleasedLine is the one line printed when a release the harness just tried did not happen. The failure text of a
 // bound or a wait is built BEFORE the release runs and so says only that the lease is being released; this line is the report of
@@ -349,8 +376,7 @@ func releaseAfterRAMWait(m *gpulease.Manager, epoch uint64, cfg config.Config, e
 	if info := m.Inspect(); !info.Held || !info.HoldsEpoch(epoch) {
 		return detachedMaintainError(m, epoch, err) // the lease is not this reservation's any more: nothing to release
 	}
-	until := time.Now().Add(detachedReleaseGrace).UnixMilli()
-	if serr := m.Restamp(epoch, func(mt *gpulease.Meta) { mt.HostRAMHoldUntilMs = until }); serr != nil {
+	if serr := m.StampHostRAMHold(epoch, time.Now().Add(detachedReleaseGrace)); serr != nil {
 		fmt.Fprintf(os.Stderr, "gpu reserve: warning: could not push the lease's stamped end out before releasing it (%v); if this process dies during the warm-back the hidden holder may release the lease sooner than the warm-back finishes\n", serr)
 	}
 	stopKeptInstances(cfg, epoch, os.Stderr)

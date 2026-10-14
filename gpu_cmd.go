@@ -626,7 +626,20 @@ func runGPUReserve(args []string) (retErr error) {
 		if *drain || *unload {
 			var freed unloadOutcome
 			heldSince := time.Now() // the hidden holder took the cards just now
-			if err := detachMaintainReport(m, epoch, loadCfg(fs), *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, &freed); err != nil {
+			drainDL := drainDeadline(*drainTimeout, queuedAt, *wait)
+			// The outer bound (F82, review round 3): until the wait begins nothing says when the lease asking for the host should
+			// end, and a reserve killed during the drain or the unload would leave the holder with no stamp to act on. The drain
+			// ends by its deadline and the wait after it by the hold bound, so that moment is stamped now, not invented; the wait
+			// replaces it with its real end when it begins.
+			var outer time.Time
+			if awaitRAM > 0 && holdMax > 0 {
+				outer = drainDL.Add(holdMax)
+				if serr := m.StampHostRAMHold(epoch, outer); serr != nil {
+					fmt.Fprintf(os.Stderr, "gpu reserve: warning: could not stamp the outer hold bound on the lease record (%v); if this process dies during the drain the hidden holder has no moment at which to release the lease\n", serr)
+					outer = time.Time{}
+				}
+			}
+			if err := detachMaintainReport(m, epoch, loadCfg(fs), *drain, drainDL, *unload, exclusiveAfter, &freed); err != nil {
 				return detachedMaintainError(m, epoch, err)
 			}
 			// The seat is cleared and the cards are held: now the host is asked (F82). The hidden holder keeps the
@@ -636,7 +649,7 @@ func runGPUReserve(args []string) (retErr error) {
 			// the hidden holder releases the lease itself from the stamp the wait left on the record.
 			if awaitRAM > 0 {
 				await := func(o gpulease.AwaitHostRAMOptions) error { return m.AwaitHostRAM(epoch, o) }
-				hold := hostRAMHold{max: holdMax, heldSince: heldSince, freed: freed, classDefault: need.Source == hostneed.SourceClassDefault}
+				hold := hostRAMHold{max: holdMax, heldSince: heldSince, freed: freed, classDefault: need.Source == hostneed.SourceClassDefault, failClosed: true, outer: outer}
 				if err := awaitHostRAMBounded(context.Background(), await, hostRAMDeadline(queuedAt, *wait), *wait, hold, os.Stderr); err != nil {
 					return releaseAfterRAMWait(m, epoch, loadCfg(fs), err)
 				}
@@ -1729,6 +1742,13 @@ func requeueWait(queuedAt time.Time, wait time.Duration) time.Duration {
 // would release someone else's lease.
 func detachedMaintainError(m *gpulease.Manager, epoch uint64, err error) error {
 	if info := m.Inspect(); info.Held && info.HoldsEpoch(epoch) {
+		// A lease that asks for the host's RAM carries an outer bound from the moment the holder has it: past it the holder releases
+		// the lease whatever became of this reserve, and the operator is told so instead of "held on purpose".
+		for _, l := range m.Leases() {
+			if l.Epoch == epoch && l.HostRAMWaitGiB > 0 && !l.HostRAMHoldUntil.IsZero() {
+				return fmt.Errorf("%w (the lease is still held and its hold bound releases it at %s if nothing does sooner; `gpu release` frees it now)", err, l.HostRAMHoldUntil.Format(time.Kitchen))
+			}
+		}
 		return fmt.Errorf("%w (the lease is still held; `gpu release` frees it)", err)
 	}
 	return fmt.Errorf("%w (the lease is no longer this reservation's: it was released, or another holder took the card; reserve again to queue for it)", err)
