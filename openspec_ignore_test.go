@@ -40,6 +40,11 @@ func TestOpenSpecGeneratedToolFilesStayUntracked(t *testing.T) {
 		"openspec/specs/gate/spec.md",
 		"openspec/changes/add-gate/proposal.md",
 		".claude/settings.json",
+		".claude/commands/review.md",
+		".claude/skills/review/SKILL.md",
+		".opencode/agent/review.md",
+		".opencode/commands/review.md",
+		".opencode/skills/review/SKILL.md",
 	}
 	for _, p := range tracked {
 		if err := winexec.Command("git", "check-ignore", "-q", "--no-index", p).Run(); err == nil {
