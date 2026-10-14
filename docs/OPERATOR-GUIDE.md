@@ -1261,7 +1261,7 @@ is running: seat idle, cards quiet — the holder is draining, queued, loading, 
 `busy-outside` (no lease, cards busy with work the harness does not own), `stale-holder`, `free`, and for a held
 lease that is not healthy `held-stalled` (its progress file stopped moving), `held-orphaned` (its owner has been gone
 past `gpu_orphan_grace_min`), `held-overdue` (its declared window ended, its holder still heartbeats; a lease whose term was not renewed is labelled
-expired and says why) and `tree-orphan`
+expired and says why; with `gpu_on_overdue = request` its holder is also asked to yield when someone waits for its cards, and the note says what became of the request: see "An overdue lease's holder is asked to yield" in docs/systems/gpu-lease.md) and `tree-orphan`
 (the wrapper is gone, the job it started is still running, the card stays claimed until the job ends; `gpu release --epoch N` ends the claim at once and leaves the job running; `gpu reserve --die-with-wrapper` makes a Windows wrapper's death end its job instead, except an instance another lease took over, which is spared and the wrapper says so, and it is refused when the command cannot be put in the job) — see "Who asked for a lease" and "Terms" in docs/systems/gpu-lease.md — and an
 `activity` block with the seat's load state and in-flight count, every registered run (kind, pid, origin,
 goal excerpt, phase, step, tokens, age), a utilization/memory sample per card with the processes on them
