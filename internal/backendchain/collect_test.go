@@ -54,6 +54,16 @@ type fakeSwap struct {
 	evictOnLoad bool
 	// completionStatus, when set, is what a completion answers instead of a result (a seat that fails).
 	completionStatus int
+	// modelsStatus, when set, is what /v1/models answers instead of the roster; dropModels aborts it with no
+	// answer at all; modelsDelay holds the roster answer (a llama-swap that is slow to answer).
+	modelsStatus int
+	dropModels   bool
+	modelsDelay  time.Duration
+	// completionDelay holds a completion's answer.
+	completionDelay time.Duration
+	// cmdOf is the command /running reports for a seat (default "x", which names no engine), the process
+	// argv llama-swap actually spawned: it may differ from the serving config's text.
+	cmdOf map[string]string
 	// chatless lists the seats that have no chat route (a speech-to-text or an embedding seat): a
 	// completion for one answers 404 and loads nothing, as llama-swap's passthrough does for them.
 	chatless map[string]bool
@@ -84,7 +94,12 @@ func (f *fakeSwap) handle(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, r.Method+" "+r.URL.Path)
 	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/models" && f.dropModels:
+		panic(http.ErrAbortHandler)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/models" && f.modelsStatus != 0:
+		w.WriteHeader(f.modelsStatus)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
+		time.Sleep(f.modelsDelay)
 		var rows []string
 		for id, aliases := range f.roster {
 			a, _ := json.Marshal(aliases)
@@ -109,7 +124,11 @@ func (f *fakeSwap) handle(w http.ResponseWriter, r *http.Request) {
 			if p, ok := f.proxyOf[id]; ok {
 				proxy = p
 			}
-			rows = append(rows, fmt.Sprintf(`{"model":%q,"state":%q,"proxy":%q,"cmd":"x","ttl":0}`, id, state, proxy))
+			cmd := "x"
+			if c, ok := f.cmdOf[id]; ok {
+				cmd = c
+			}
+			rows = append(rows, fmt.Sprintf(`{"model":%q,"state":%q,"proxy":%q,"cmd":%q,"ttl":0}`, id, state, proxy, cmd))
 		}
 		fmt.Fprintf(w, `{"running":[%s]}`, strings.Join(rows, ","))
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/seat/"):
@@ -131,6 +150,7 @@ func (f *fakeSwap) handle(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.completions = append(f.completions, body)
+		time.Sleep(f.completionDelay)
 		if m, _ := body["model"].(string); f.chatless[f.canonicalLocked(m)] {
 			w.WriteHeader(http.StatusNotFound)
 			break
@@ -385,7 +405,7 @@ func TestCollectSeatRowsNameTheEngineFromTheServingConfig(t *testing.T) {
 	r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client()})
 	want := map[string]string{
 		"offload-e4b": EngineLlamaCpp, "small-cpp": EngineLlamaCpp, "big-vllm": EngineVLLM,
-		"npu-seat": EngineRKLLM, "ears": EngineUnknown,
+		"npu-seat": EngineRKLLM, "ears": EngineWhisperCpp,
 	}
 	for seat, kind := range want {
 		e := seatOf(t, r, seat)
@@ -1233,5 +1253,241 @@ func TestCompletionProbeSkipsSeatsWithNoChatRoute(t *testing.T) {
 		if !strings.Contains(c.got.BackendReason, why) || strings.Replace(c.got.BackendReason, why, "", 1) != c.want.BackendReason {
 			t.Errorf("%s reason = %q, want the default-mode reason %q plus %q", c.name, c.got.BackendReason, c.want.BackendReason, why)
 		}
+	}
+}
+
+// TestCompletionProbeSkipsAWhisperSeatNoMatterTheConfig: the speech-to-text seat is recognised from its own
+// command, not only from the stt_model setting, so a box whose config names it nowhere still does not get a
+// chat completion for it.
+func TestCompletionProbeSkipsAWhisperSeatNoMatterTheConfig(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	f.running["ears"] = "ready"
+	f.chatless = map[string]bool{"ears": true}
+	f.allowCompletion = true
+	cfg := testCfg(t, f)
+	cfg.STTModel, cfg.STTModelHQ = "", ""
+	r := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client(), ProbeCompletion: true})
+	for _, m := range f.completionModels() {
+		if m == "ears" {
+			t.Errorf("a chat completion was sent to the whisper seat")
+		}
+	}
+	if e := seatOf(t, r, "ears"); e.ActiveBackend != EngineWhisperCpp || e.BackendProbe != ProbeEndpoint || !strings.Contains(e.BackendReason, "not probed: not a chat seat") {
+		t.Errorf("ears = %+v, want the whisper.cpp seat at its endpoint, not probed with a completion", e)
+	}
+}
+
+// TestEngineComesFromTheLiveCommandWhenTheSeatIsLoaded: the serving config on disk says what the box was
+// told; /running says what llama-swap actually spawned. A seat that is loaded is classified from the live
+// command, so a config edited since the seat loaded does not misname the engine that is answering. An idle
+// seat has no live command and keeps the file's, and a live command that names no engine does not erase it.
+// The live command is read and never emitted.
+func TestEngineComesFromTheLiveCommandWhenTheSeatIsLoaded(t *testing.T) {
+	const marker = "livecmd-marker-7f3a"
+	f := newFakeSwap(t, fullRoster())
+	f.running["small-cpp"] = "ready"   // the file says llama-server, the live command says rkllm
+	f.running["offload-e4b"] = "ready" // the live command names no engine: the file's llama-server stands
+	f.cmdOf = map[string]string{"small-cpp": "/opt/rknpu/rkllm-serve.sh --port 9 --tag " + marker}
+	r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client()})
+
+	if e := seatOf(t, r, "small-cpp"); e.ActiveBackend != EngineRKLLM {
+		t.Errorf("small-cpp = %+v, want the engine its live command names (rkllm)", e)
+	}
+	if e := seatOf(t, r, "offload-e4b"); e.ActiveBackend != EngineLlamaCpp {
+		t.Errorf("offload-e4b = %+v, want the file's engine when the live command names none", e)
+	}
+	if e := seatOf(t, r, "gemma4-e2b"); e.ActiveBackend != EngineLlamaCpp {
+		t.Errorf("gemma4-e2b = %+v, want the file's engine for a seat that is not loaded", e)
+	}
+	for _, e := range append(append([]Entry{}, r.Lanes...), r.Seats...) {
+		raw, _ := json.Marshal(e)
+		if strings.Contains(string(raw), marker) || strings.Contains(string(raw), "rkllm-serve") {
+			t.Errorf("an entry carries the live command: %s", raw)
+		}
+	}
+}
+
+// TestHTTPStatusFailuresReadAsHTTPN: a non-2xx answer is named by its status, whichever read it came from,
+// instead of "unreachable", which says the opposite (something answered). A read that gets no answer at all
+// is "unreachable" once, not "unreachable (unreachable)".
+func TestHTTPStatusFailuresReadAsHTTPN(t *testing.T) {
+	t.Run("the running list answers 500", func(t *testing.T) {
+		f := newFakeSwap(t, fullRoster())
+		f.runningStatus = http.StatusInternalServerError
+		e := seatOf(t, Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client()}), "small-cpp")
+		if !strings.Contains(e.BackendReason, "running list could not be read (HTTP 500)") {
+			t.Errorf("small-cpp = %+v, want the status named", e)
+		}
+	})
+	t.Run("the roster answers 503", func(t *testing.T) {
+		f := newFakeSwap(t, fullRoster())
+		f.modelsStatus = http.StatusServiceUnavailable
+		r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client()})
+		for _, e := range append(append([]Entry{}, r.Lanes...), r.Seats...) {
+			if e.ActiveBackend != EngineNone || !strings.Contains(e.BackendReason, "(HTTP 503)") || strings.Contains(e.BackendReason, "unreachable") {
+				t.Errorf("%s %s = %+v, want none with the status named, and no claim that llama-swap is unreachable", e.Lane, e.Seat, e)
+			}
+		}
+	})
+	t.Run("the roster read gets no answer", func(t *testing.T) {
+		f := newFakeSwap(t, fullRoster())
+		f.dropModels = true
+		r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client()})
+		for _, e := range append(append([]Entry{}, r.Lanes...), r.Seats...) {
+			if e.ActiveBackend != EngineNone || e.BackendReason != "llama-swap is unreachable" {
+				t.Errorf("%s %s = %+v, want exactly \"llama-swap is unreachable\", the word once", e.Lane, e.Seat, e)
+			}
+		}
+	})
+	t.Run("the running list gets no answer", func(t *testing.T) {
+		f := newFakeSwap(t, fullRoster())
+		f.dropRunning = true
+		e := seatOf(t, Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client()}), "small-cpp")
+		if strings.Contains(e.BackendReason, "(unreachable)") || !strings.Contains(e.BackendReason, "running list could not be read (no answer)") {
+			t.Errorf("small-cpp = %+v, want the read named as unanswered, not \"unreachable\"", e)
+		}
+	})
+}
+
+// TestProbeTimeoutsReadAsUnknown: a probe that timed out saw nothing, which is not the same as seeing the
+// seat down. The row is "unknown" with the probe level reached, never "none". A refusal is still "none".
+func TestProbeTimeoutsReadAsUnknown(t *testing.T) {
+	t.Run("a loaded seat's health endpoint does not answer in time", func(t *testing.T) {
+		slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(2 * time.Second):
+			}
+		}))
+		defer slow.Close()
+		f := newFakeSwap(t, fullRoster())
+		f.running["small-cpp"] = "ready"
+		f.proxyOf = map[string]string{"small-cpp": slow.URL}
+		r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeTimeout: 150 * time.Millisecond})
+		e := seatOf(t, r, "small-cpp")
+		if e.ActiveBackend != EngineUnknown || e.BackendProbe != ProbeEndpoint || !strings.Contains(e.BackendReason, "timed out") {
+			t.Errorf("small-cpp = %+v, want unknown at the endpoint level, with the timeout named", e)
+		}
+		if got := laneOf(t, r, "agent"); got.ActiveBackend != EngineUnknown {
+			t.Errorf("agent lane = %+v, want unknown: its bound seat could not be confirmed", got)
+		}
+	})
+	t.Run("a refused health endpoint is still none", func(t *testing.T) {
+		f := newFakeSwap(t, fullRoster())
+		f.running["small-cpp"] = "ready"
+		f.proxyOf = map[string]string{"small-cpp": "http://127.0.0.1:1"}
+		e := seatOf(t, Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeTimeout: 2 * time.Second}), "small-cpp")
+		if e.ActiveBackend != EngineNone {
+			t.Errorf("small-cpp = %+v, want none for a seat that refuses the connection", e)
+		}
+	})
+	t.Run("the roster read does not answer in time", func(t *testing.T) {
+		f := newFakeSwap(t, fullRoster())
+		f.modelsDelay = 600 * time.Millisecond
+		r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeTimeout: 100 * time.Millisecond})
+		for _, e := range append(append([]Entry{}, r.Lanes...), r.Seats...) {
+			if e.ActiveBackend != EngineUnknown || !strings.Contains(e.BackendReason, "timed out") {
+				t.Errorf("%s %s = %+v, want unknown with the timeout named: nothing was seen", e.Lane, e.Seat, e)
+			}
+		}
+	})
+	t.Run("a completion does not answer in time", func(t *testing.T) {
+		f := newFakeSwap(t, fullRoster())
+		f.running["small-cpp"] = "ready"
+		f.allowCompletion = true
+		f.completionDelay = 800 * time.Millisecond
+		r := Collect(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client(), ProbeCompletion: true, CompletionTimeout: 150 * time.Millisecond})
+		e := seatOf(t, r, "small-cpp")
+		if e.ActiveBackend != EngineUnknown || e.BackendProbe != ProbeCompletion || !strings.Contains(e.BackendReason, "timed out") {
+			t.Errorf("small-cpp = %+v, want unknown at the completion level, with the timeout named", e)
+		}
+	})
+}
+
+// TestASeatPinnedToAnotherNodeReadsAsServedThere: seat_endpoints sends every call that names the seat to a
+// remote llama-swap, so the local roster never lists it and "not in the llama-swap roster" was a wrong
+// verdict: the seat serves, from somewhere this node does not read. The row says so, names no address, and
+// asks the local llama-swap nothing about the seat.
+func TestASeatPinnedToAnotherNodeReadsAsServedThere(t *testing.T) {
+	roster := fullRoster()
+	delete(roster, "gemma4-26b-a4b")
+	f := newFakeSwap(t, roster)
+	cfg := testCfg(t, f)
+	cfg.SeatEndpoints = map[string]string{"gemma4-26b-a4b": "http://remote-node.example.invalid:11436"}
+	r := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client()})
+	for _, lane := range []string{"escalation", "reasoning"} {
+		e := laneOf(t, r, lane)
+		if e.ActiveBackend == EngineNone || !strings.Contains(e.BackendReason, "served by another node") {
+			t.Errorf("%s lane = %+v, want it reported as served by another node", lane, e)
+		}
+		for _, leak := range []string{"example.invalid", "11436", "://"} {
+			if strings.Contains(e.BackendReason, leak) {
+				t.Errorf("%s lane reason %q carries %q", lane, e.BackendReason, leak)
+			}
+		}
+	}
+	if e := seatOf(t, r, "gemma4-26b-a4b"); e.ActiveBackend == EngineNone || !strings.Contains(e.BackendReason, "served by another node") {
+		t.Errorf("seat row = %+v, want it reported as served by another node", e)
+	}
+	if e := laneOf(t, r, "workhorse"); strings.Contains(e.BackendReason, "served by another node") {
+		t.Errorf("workhorse lane = %+v: a seat that is not pinned is read locally", e)
+	}
+}
+
+// TestProbeMemoIsKeyedBySeatAndEngine: two callers that name the same seat with different engine kinds get
+// their own verdicts. The "(engine kind unknown: ...)" clause is added for the caller whose engine is
+// unknown, and a memo keyed by the seat alone handed that clause to whichever caller came second.
+func TestProbeMemoIsKeyedBySeatAndEngine(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	s := newState(t.Context(), testCfg(t, f), Options{HTTP: f.srv.Client()})
+	unknown := s.Probe(t.Context(), Candidate{Seat: "small-cpp", Engine: EngineUnknown})
+	known := s.Probe(t.Context(), Candidate{Seat: "small-cpp", Engine: EngineLlamaCpp})
+	if !strings.Contains(unknown.Detail, "engine kind unknown") {
+		t.Fatalf("the unknown-engine caller must carry the clause: %+v", unknown)
+	}
+	if strings.Contains(known.Detail, "engine kind unknown") {
+		t.Errorf("the llama.cpp caller got the unknown-engine caller's verdict: %+v", known)
+	}
+}
+
+// TestALaneAndItsSeatAreClassifiedAlike: the tier table declares small-cpp the llama.cpp fallback, and its
+// command is a wrapper that names no engine. The agent lane read it as llama.cpp (the declaration) while the
+// seat's own row read unknown (the command), two answers for one seat. One rule now serves both: the box's
+// statements first, the tier's declaration when they say nothing.
+func TestALaneAndItsSeatAreClassifiedAlike(t *testing.T) {
+	withTier(t)
+	f := newFakeSwap(t, fullRoster())
+	cfg := testCfg(t, f)
+	yaml := strings.Replace(servingYAML, "cmd: /bin/llama-server -m agent.gguf ${common}", "cmd: /seats/small-cpp-cmd.sh", 1)
+	if err := os.WriteFile(cfg.ServingConfigPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client()})
+	agent, seat := laneOf(t, r, "agent"), seatOf(t, r, "small-cpp")
+	if agent.ActiveBackend != EngineLlamaCpp || seat.ActiveBackend != EngineLlamaCpp {
+		t.Errorf("agent lane = %+v, seat = %+v: both must read the engine the tier declares for the seat", agent, seat)
+	}
+}
+
+// TestAServingConfigTooLargeToReadIsNotRead: the serving config is read whole to be parsed, and a file of
+// any size at the configured path was read into memory. It is bounded: past the limit the file is not read
+// and the rows say why, as they do for a file that cannot be opened.
+func TestAServingConfigTooLargeToReadIsNotRead(t *testing.T) {
+	f := newFakeSwap(t, fullRoster())
+	cfg := testCfg(t, f)
+	big := strings.Repeat("# padding padding padding padding padding padding padding padding\n", 80000) + servingYAML
+	if len(big) <= maxServingConfigBytes {
+		t.Fatalf("the test file is %d bytes, not over the %d limit", len(big), maxServingConfigBytes)
+	}
+	if err := os.WriteFile(cfg.ServingConfigPath, []byte(big), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := Collect(t.Context(), cfg, Options{HTTP: f.srv.Client()})
+	e := laneOf(t, r, "workhorse")
+	if e.ActiveBackend != EngineUnknown || !strings.Contains(e.BackendReason, "the serving config is too large to read") {
+		t.Errorf("workhorse lane = %+v, want the engine unknown and the size named", e)
+	}
+	if strings.Contains(e.BackendReason, cfg.ServingConfigPath) {
+		t.Errorf("reason %q carries the config path", e.BackendReason)
 	}
 }

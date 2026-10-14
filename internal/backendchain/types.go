@@ -37,6 +37,8 @@ const (
 	// EngineStrata is reserved for the Strata seat. Nothing classifies into it yet: the seat registers by
 	// adding a row to engineRules, with no change to any field or schema.
 	EngineStrata = "strata"
+	// EngineWhisperCpp is the speech-to-text server.
+	EngineWhisperCpp = "whisper.cpp"
 	// EngineNone is active_backend when no backend of the chain can serve.
 	EngineNone = "none"
 	// EngineUnknown is the kind of a seat that can serve but whose engine the config does not say (an
@@ -98,6 +100,8 @@ type Lane struct {
 // Verdict is one candidate's probe result.
 type Verdict struct {
 	OK bool
+	// Unknown: the probe saw nothing (it timed out), so the candidate is neither up nor down. OK is false.
+	Unknown bool
 	// Probe is the deepest level the evidence reached; empty reads as ProbeProcess.
 	Probe string
 	// Detail is one short clause: what was seen. It never carries an address, a path or a command line,

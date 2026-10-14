@@ -167,12 +167,53 @@ func TestClassifyEngine(t *testing.T) {
 		{"declared vLLM wins over a wrapper command that names nothing", SeatFacts{DeclaredVLLM: true, Cmd: "/seats/x-cmd.sh"}, EngineVLLM},
 		{"llama-server in the command", SeatFacts{Cmd: `C:\llama\llama-server.exe -m a.gguf --port 1`}, EngineLlamaCpp},
 		{"an rkllm launcher", SeatFacts{Cmd: "/opt/rknpu/rkllm-serve.sh --port 1"}, EngineRKLLM},
-		{"a command that names no known engine", SeatFacts{Cmd: "/bin/whisper-server -m w.bin"}, EngineUnknown},
+		{"a speech-to-text server is its own kind, not a llama.cpp seat", SeatFacts{Cmd: "/bin/whisper-server -m w.bin --port 1"}, EngineWhisperCpp},
+		{"a command that names no known engine", SeatFacts{Cmd: "/seats/launch.sh --port 1"}, EngineUnknown},
 		{"no command and no declaration", SeatFacts{}, EngineUnknown},
 	}
 	for _, tc := range cases {
 		if got := ClassifyEngine(tc.f); got != tc.want {
 			t.Errorf("%s: ClassifyEngine = %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestResolveUnconfirmed: a probe that timed out saw nothing. The candidate is neither up nor down: a bound
+// seat that could not be confirmed makes the lane "unknown", not "none", and a preferred seat that could not
+// be confirmed is named and does not answer for a lane bound to another.
+func TestResolveUnconfirmed(t *testing.T) {
+	vllmPreferred := Candidate{Seat: "big-vllm", Engine: EngineVLLM}
+	cppBound := Candidate{Seat: "small-cpp", Engine: EngineLlamaCpp, Bound: true}
+	timedOut := Verdict{Unknown: true, Probe: ProbeEndpoint, Detail: "its health endpoint did not answer (timed out)"}
+	up := Verdict{OK: true, Probe: ProbeProcess, Detail: "not loaded"}
+	for _, tc := range []struct {
+		name       string
+		chain      []Candidate
+		verdicts   map[string]Verdict
+		wantActive string
+		wantProbe  string
+		inReason   []string
+	}{
+		{"the bound seat could not be confirmed", []Candidate{vllmPreferred, cppBound},
+			map[string]Verdict{"big-vllm": up, "small-cpp": timedOut}, EngineUnknown, ProbeEndpoint,
+			[]string{"llama.cpp seat small-cpp", "(timed out)"}},
+		{"a preferred seat that could not be confirmed does not answer for the bound one", []Candidate{vllmPreferred, cppBound},
+			map[string]Verdict{"big-vllm": timedOut, "small-cpp": up}, EngineLlamaCpp, ProbeProcess,
+			[]string{"not loaded", "vllm seat big-vllm could not be confirmed", "(timed out)"}},
+		{"a lane with no binding is answered by the first seat that is up or unconfirmed", []Candidate{{Seat: "big-vllm", Engine: EngineVLLM}, {Seat: "small-cpp", Engine: EngineLlamaCpp}},
+			map[string]Verdict{"big-vllm": timedOut, "small-cpp": up}, EngineUnknown, ProbeEndpoint,
+			[]string{"(timed out)"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := Resolve(t.Context(), Lane{Name: "agent", Chain: tc.chain}, stub(tc.verdicts))
+			if e.ActiveBackend != tc.wantActive || e.BackendProbe != tc.wantProbe {
+				t.Errorf("entry = %+v, want %s at %s", e, tc.wantActive, tc.wantProbe)
+			}
+			for _, want := range tc.inReason {
+				if !strings.Contains(e.BackendReason, want) {
+					t.Errorf("reason %q lacks %q", e.BackendReason, want)
+				}
+			}
+		})
 	}
 }

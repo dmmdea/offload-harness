@@ -22,6 +22,8 @@ import (
 const (
 	defaultProbeTimeout      = 3 * time.Second
 	defaultCompletionTimeout = 6 * time.Minute
+	// maxServingConfigBytes bounds the read of the serving config.
+	maxServingConfigBytes = 4 << 20
 )
 
 // Options tune one collection.
