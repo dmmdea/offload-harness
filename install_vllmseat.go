@@ -62,7 +62,77 @@ func (f vllmRuntimeFlags) resolve(home string) vllmseat.Runtime {
 		SeatDir:   pick(f.seatDir, path.Join(slash, "seat")),
 		VenvDir:   pick(f.venv, path.Join(slash, "vllm-env")),
 		HFHome:    pick(hf, path.Join(slash, "hf")),
+
+		// Passed through as given: empty means the Runtime's own default (/opt/seat) or "not
+		// used", and the render refuses the combinations that cannot work (check below).
+		Distro:         f.distro,
+		WSLSeatDir:     f.wslSeatDir,
+		LMCacheOverlay: f.lmcacheOverlay,
+		CacheMountSrc:  f.cacheMountSrc,
+		CacheMountOpts: f.cacheMountOpts,
+		HostPrefix:     f.hostPrefix,
 	}
+}
+
+// check refuses the flag combinations that cannot describe a working seat, naming the FLAG the
+// operator can pass. They are the facts vllmseat.Artifacts refuses by Runtime field name, caught
+// before anything is probed or written (Artifacts stays the backstop for every other caller),
+// plus the reverse: a windows-wsl-only flag given for a seat that starts through systemd is
+// refused rather than ignored, because a setting that reads as a decision and is never read is
+// how a box drifts from the tier it claims to be.
+func (f vllmRuntimeFlags) check(tier string, s vllmseat.Spec) error {
+	wsl := s.Launch == vllmseat.LaunchWindowsWSL
+	if !wsl {
+		var stray []string
+		for _, x := range []struct{ flag, val string }{
+			{"--distro", f.distro}, {"--wsl-seat-dir", f.wslSeatDir}, {"--host-prefix", f.hostPrefix},
+			{"--cache-mount-src", f.cacheMountSrc}, {"--cache-mount-opts", f.cacheMountOpts},
+		} {
+			if x.val != "" {
+				stray = append(stray, x.flag)
+			}
+		}
+		if len(stray) > 0 {
+			verb, them := "apply", "them"
+			if len(stray) == 1 {
+				verb, them = "applies", "it"
+			}
+			return fmt.Errorf("tier %s: %s %s to launch %s only, and this seat starts through %s — "+
+				"nothing would read %s", tier, strings.Join(stray, ", "), verb, vllmseat.LaunchWindowsWSL, vllmseat.LaunchLinuxSystemd, them)
+		}
+	}
+	if wsl && f.distro == "" {
+		return fmt.Errorf("tier %s: launch %s needs --distro, the WSL distribution the engine runs in — "+
+			"the scheduled tasks and the wrappers name it", tier, vllmseat.LaunchWindowsWSL)
+	}
+	if wsl {
+		// Everything the ENGINE reads is a path inside the distro. The defaults hang off --home (a
+		// Windows path here) and the HF cache falls back to $HF_HOME (also a Windows path), so a
+		// render that took either would write a Windows path into an env bash cannot open, and the
+		// seat would fail at its first start. Name them, as distro paths.
+		for _, x := range []struct{ flag, val string }{
+			{"--venv", f.venv}, {"--hf-home", f.hfHome}, {"--wsl-seat-dir", f.wslSeatDir}, {"--lmcache-overlay", f.lmcacheOverlay},
+		} {
+			if x.val == "" && (x.flag == "--wsl-seat-dir" || x.flag == "--lmcache-overlay") {
+				continue // defaulted (/opt/seat), or checked below when the pair needs it
+			}
+			if !strings.HasPrefix(x.val, "/") {
+				got := fmt.Sprintf("%q", x.val)
+				if x.val == "" {
+					got = "no value"
+				}
+				return fmt.Errorf("tier %s: launch %s needs %s as an absolute path INSIDE the distro %q (for example /hf), got %s — "+
+					"the engine and the seat env read it there, and a Windows path or a default under --home would not open",
+					tier, vllmseat.LaunchWindowsWSL, x.flag, f.distro, got)
+			}
+		}
+	}
+	if s.NeedsLMCacheOverlay() && f.lmcacheOverlay == "" {
+		return fmt.Errorf("tier %s: kv_cache_dtype %q with a cache_server needs --lmcache-overlay, the patched LMCache "+
+			"directory (a path the engine sees) — stock LMCache restores fp8 pages corrupt (upstream PR #4253) and "+
+			"reports success while doing it, so this pair would serve wrong context silently", tier, s.KVCacheDtype)
+	}
+	return nil
 }
 
 // vllmSeatFor decides whether THIS box renders the tier's vLLM agent seat.
@@ -200,10 +270,10 @@ func runInstallVLLMSeat(args []string) error {
 	root := fs.String("root", ".", "repo root holding setup/templates/profiles.json")
 	home := fs.String("home", "", "install root (the unit's WorkingDirectory and log location)")
 	outDir := fs.String("out", "", "directory to write the rendered artifacts into (default: <home>/seat)")
-	user := fs.String("user", "", "account llama-swap runs as; the polkit rule is scoped to it")
+	user := fs.String("user", "", "account llama-swap runs as; the polkit rule is scoped to it (launch windows-wsl: the interactive Windows account the seat tasks are registered for)")
 	proxy := fs.String("proxy-host", "", "LITERAL address the engine binds (an IP)")
-	venv := fs.String("venv", "", "hand-built vLLM virtualenv (default: <home>/vllm-env)")
-	hfHome := fs.String("hf-home", "", "HF cache root (default: $HF_HOME, else <home>/hf)")
+	venv := fs.String("venv", "", "hand-built vLLM virtualenv (default: <home>/vllm-env; launch windows-wsl: required, a path inside the distro)")
+	hfHome := fs.String("hf-home", "", "HF cache root (default: $HF_HOME, else <home>/hf; launch windows-wsl: required, a path inside the distro, e.g. /hf)")
 	modelPath := fs.String("model-path", "", "exact HF snapshot directory, overriding resolution from the tier's model_repo (the hash differs per download, so --force needs this)")
 	force := fs.Bool("force", false, "write the artifacts even when the venv or the weights are absent")
 	cfgPath := fs.String("config", "", "harness config.json whose kv_cache_server binding FOR THIS SEAT overrides the tier's cache_server (per-seat store dir and key_prefix)")
@@ -214,8 +284,6 @@ func runInstallVLLMSeat(args []string) error {
 	mountOpts := fs.String("cache-mount-opts", "", "launch windows-wsl: mount options for that export (carries the credentials path)")
 	hostPrefix := fs.String("host-prefix", "", "launch windows-wsl: where this process reads the distro's filesystem for the prerequisite check, e.g. \\\\wsl.localhost\\<distro> (never written to a file)")
 	_ = fs.Parse(args)
-	// SEAM (red commit): the flags above are declared so a test can pass them, and wired in the next commit.
-	_, _, _, _, _, _ = distro, wslSeatDir, overlay, mountSrc, mountOpts, hostPrefix
 
 	if *home == "" {
 		return fmt.Errorf("--home is required: the unit's WorkingDirectory, log path and default venv all hang off it")
@@ -252,14 +320,28 @@ func runInstallVLLMSeat(args []string) error {
 		}
 		s = applied
 	}
-	rt := vllmRuntimeFlags{user: *user, proxyHost: *proxy, venv: *venv, hfHome: *hfHome}.resolve(*home)
+	flags := vllmRuntimeFlags{user: *user, proxyHost: *proxy, venv: *venv, hfHome: *hfHome,
+		distro: *distro, wslSeatDir: *wslSeatDir, lmcacheOverlay: *overlay,
+		cacheMountSrc: *mountSrc, cacheMountOpts: *mountOpts, hostPrefix: *hostPrefix}
+	rt := flags.resolve(*home)
 	if err := rt.Validate(); err != nil {
+		return err
+	}
+	if err := flags.check(id, s); err != nil {
 		return err
 	}
 	if ok, why := s.Detect(rt); !ok {
 		if !*force {
+			hint := ""
+			if s.Launch == vllmseat.LaunchWindowsWSL && rt.HostPrefix == "" {
+				// The venv and the HF cache of a windows-wsl seat are paths INSIDE the distro; this
+				// process can only look at them through the distro's share of the host filesystem.
+				hint = ". The venv and the HF cache of a windows-wsl seat are paths inside the distro: if they are " +
+					"there, pass --host-prefix (the distro's filesystem as this machine sees it, a share under wsl.localhost) " +
+					"so this check can read them"
+			}
 			return fmt.Errorf("tier %s: %s — the box cannot run this seat, so the artifacts would describe a unit "+
-				"that fails at boot. Build the vLLM venv and fetch the weights first, or pass --force to write them anyway", id, why)
+				"that fails at boot. Build the vLLM venv and fetch the weights first, or pass --force to write them anyway%s", id, why, hint)
 		}
 		fmt.Fprintf(os.Stderr, "WARN  %s — writing anyway (--force)\n", why)
 		// --force skips the prerequisite CHECK, but the unit must still name a real
@@ -277,7 +359,7 @@ func runInstallVLLMSeat(args []string) error {
 	if dir == "" {
 		dir = filepath.Join(*home, "seat")
 	}
-	files, err := s.Artifacts(filepath.Join(*root, "setup", "templates", "vllm-seat", "linux-systemd"), rt)
+	files, err := s.Artifacts(s.TemplatesDir(*root), rt)
 	if err != nil {
 		return err
 	}
@@ -308,17 +390,21 @@ func runInstallVLLMSeat(args []string) error {
 		fmt.Printf("wrote %s\n", filepath.ToSlash(dst))
 	}
 
-	unit := s.Unit + ".service"
-	rules := "50-llama-swap-" + s.Unit + ".rules"
-	fmt.Printf("\nTWO ROOT STEPS REMAIN (this command runs unprivileged and does not take them):\n"+
-		"  sudo install -m 0644 %s/%s /etc/systemd/system/%s\n"+
-		"  sudo install -m 0644 -o root -g root %s/%s /etc/polkit-1/rules.d/%s\n"+
-		"  sudo systemctl daemon-reload && sudo systemctl enable --now %s\n"+
-		"Then verify WITHOUT changing state — as %s, `systemctl start %s` on the already-active unit must succeed;\n"+
-		"if it prompts for a password the polkit rule is not in effect and llama-swap (NoNewPrivileges) cannot drive the seat.\n",
-		filepath.ToSlash(dir), unit, unit,
-		filepath.ToSlash(dir), rules, rules,
-		unit, rt.User, unit)
+	if s.Launch == vllmseat.LaunchWindowsWSL {
+		fmt.Print(wslNextSteps(s, rt, dir, names))
+	} else {
+		unit := s.Unit + ".service"
+		rules := "50-llama-swap-" + s.Unit + ".rules"
+		fmt.Printf("\nTWO ROOT STEPS REMAIN (this command runs unprivileged and does not take them):\n"+
+			"  sudo install -m 0644 %s/%s /etc/systemd/system/%s\n"+
+			"  sudo install -m 0644 -o root -g root %s/%s /etc/polkit-1/rules.d/%s\n"+
+			"  sudo systemctl daemon-reload && sudo systemctl enable --now %s\n"+
+			"Then verify WITHOUT changing state — as %s, `systemctl start %s` on the already-active unit must succeed;\n"+
+			"if it prompts for a password the polkit rule is not in effect and llama-swap (NoNewPrivileges) cannot drive the seat.\n",
+			filepath.ToSlash(dir), unit, unit,
+			filepath.ToSlash(dir), rules, rules,
+			unit, rt.User, unit)
+	}
 	if strings.Contains(rt.HFHome, "/") && len(rt.HFHome) > 24 {
 		fmt.Printf("NOTE  hf-home %q is long: LMCache's fs_native page names embed the resolved model path and the\n"+
 			"      reference box's long path produced 268-byte names against NAME_MAX 255, failing every L2 store\n"+
@@ -326,6 +412,35 @@ func runInstallVLLMSeat(args []string) error {
 	}
 	fmt.Print(extraSeatsNote(p))
 	return nil
+}
+
+// wslNextSteps is what is left to do after a windows-wsl render, which writes files and takes no
+// step itself: nothing is copied into the distro and no task is registered. The engine starts
+// through a scheduled task in the operator's interactive session (a WSL distro belongs to that
+// user, and llama-swap runs as SYSTEM), so the steps are a copy into the distro, an elevated
+// registration, and the llama-swap entry that drives the stubs. names are the files this run wrote.
+func wslNextSteps(s vllmseat.Spec, rt vllmseat.Runtime, dir string, names []string) string {
+	into := fmt.Sprintf("  1. In the distro %s, put these in %s (copy; this command copies nothing into the distro):\n"+
+		"       %s/%s.env", rt.Distro, rt.DistroSeatDir(), filepath.ToSlash(dir), s.ID)
+	for _, n := range names {
+		if strings.HasPrefix(n, "templates/") {
+			into += fmt.Sprintf("\n       %s/templates/  (the whole directory: the env's --chat-template names the file in it)", filepath.ToSlash(dir))
+			break
+		}
+	}
+	into += "\n       setup/templates/vllm-seat/seat_fg.sh and seat_stop.sh  (shipped as they are, not rendered)\n"
+	where := "were written there"
+	if filepath.ToSlash(filepath.Clean(dir)) != path.Clean(rt.SeatDir) {
+		where = fmt.Sprintf("were written to %s: copy them there", filepath.ToSlash(dir))
+	}
+	return "\nSTEPS REMAIN (this command only writes files):\n" + into +
+		fmt.Sprintf("  2. The four Windows scripts (seat-cmd.ps1, seat-cmdstop.ps1, hidden.vbs, register-seat-tasks.ps1) belong in %s,\n"+
+			"     the directory the llama-swap entry runs them from; they %s. Run register-seat-tasks.ps1 once from an\n"+
+			"     elevated PowerShell: it registers the two interactive-session tasks for the account %s.\n"+
+			"  3. Add the seat's llama-swap entry from setup/templates/vllm-seat/llama-swap-entry.yaml: cmd and cmdStop run the\n"+
+			"     two PowerShell stubs, ttl is the 300 s idle window and concurrencyLimit equals max_num_seqs (%d).\n"+
+			"Then start the seat once and confirm its /health answers before binding the agent lane to it.\n",
+			rt.SeatDir, where, rt.User, s.MaxNumSeqs)
 }
 
 // extraSeatsNote says what this command did NOT render for the tier's extra vLLM seats, at the
