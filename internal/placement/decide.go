@@ -141,7 +141,9 @@ type Live struct {
 	// display_device that is not among them: the floor would be guarding a card that is not the
 	// desktop's. nil, or a nil/empty answer (no card flagged, or a reading that cannot say which),
 	// contradicts nothing, so a guard with no evidence trusts the declaration as it did before this
-	// reader existed. A remote row carries none: the node's own verdict already includes the check.
+	// reader existed. display_device "auto" reads it the other way round: the one card named IS the
+	// display card, and no reader, no card or several refuse. A remote row carries none: the node's
+	// own verdict already includes the check.
 	ScreenCards func() []string
 	// WatcherAlive says whether the display layer's post-admission watcher (internal/displaywatch) is
 	// checking on this box, from the heartbeat it leaves (internal/displaystate.Alive), and why not in

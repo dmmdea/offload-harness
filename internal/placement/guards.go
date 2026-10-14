@@ -26,7 +26,9 @@ import (
 // display device but declares no footprint refuses as "display footprint
 // undeclared" BEFORE any arithmetic; a seat pinned off the display card is
 // checked as free − 0 honestly. A UUID display pin is resolved to its index
-// through Live.DeviceIndex; unresolvable = refuse (the seat may be on it).
+// through Live.DeviceIndex; unresolvable = refuse (the seat may be on it). display_device "auto"
+// is the card the driver reports as the monitor's (Live.ScreenCards), refused unless it names exactly
+// one, and a seat that declares a footprint but is pinned off that card is refused (displayFloor).
 func LayerAdmissible(l config.LayerSpec, s config.LayerSeat, live Live, rowVerdict *bool) (ok bool, reason, guard string) {
 	if len(l.Guards) == 0 {
 		return true, "no guards", ""
@@ -77,10 +79,16 @@ func verdictOr(rowVerdict *bool, what string) (bool, string) {
 // own is loaded, so the guard refuses by naming both. It contradicts only on positive evidence: a
 // reader that is absent, or a reading that cannot say, trusts the declaration, and a second monitor
 // on another card never contradicts a declared card that also drives a display.
+//
+// display_device "auto" declares nothing, so there is nothing to trust: the card IS the driver's
+// reading (resolveAutoDisplay), and the guard refuses wherever that reading does not give exactly one.
 func resolveDisplay(l config.LayerSpec, live Live) (display, index, refusal string) {
 	display = strings.TrimSpace(l.DisplayDevice)
 	if display == "" {
 		return "", "", "display_device undeclared — refused"
+	}
+	if config.IsAutoDisplayDevice(display) {
+		return resolveAutoDisplay(live)
 	}
 	index = display
 	if !isCUDAIndex(display) {
@@ -100,6 +108,52 @@ func resolveDisplay(l config.LayerSpec, live Live) (display, index, refusal stri
 		}
 	}
 	return display, index, ""
+}
+
+// resolveAutoDisplay is display_device "auto": the card is the one the driver reports as the monitor's
+// (Live.ScreenCards, the reading the card table and the allocator's display cap are built on), and it
+// is returned as both the key the free-VRAM reader is asked and the CUDA index, so every number the
+// guard reads is the derived card's. It refuses, naming why, wherever the reading does not give
+// exactly one card: no reader, no card flagged (no NVIDIA card has a monitor attached: headless, or
+// a screen on an iGPU; a screen asleep on a driver that does not report display_attached; a
+// transient failure that left display_attached unknown) or several. It does not choose between
+// several: the multi-monitor tolerance of a DECLARED card is trust in the operator's word, and there
+// is none here, so the operator names the card the floor must guard.
+//
+// ScreenCards answers from ScreenCardIndexes, which does not carry the card table's own exclusions
+// (a box whose only card drives the monitor, or a screen card with no UUID, has no Card.Display
+// there). Auto follows the driver's reading either way.
+func resolveAutoDisplay(live Live) (display, index, refusal string) {
+	if live.ScreenCards == nil {
+		return "", "", "display_device auto follows the driver's reading of which card drives the monitor, and no reader is available — refused"
+	}
+	screens := live.ScreenCards()
+	if len(screens) == 0 {
+		return "", "", "display_device auto: the driver does not say which card drives the monitor (no card reports display_active / display_attached, or the reading cannot tell) — refused: name the card in display_device"
+	}
+	if len(screens) > 1 {
+		return "", "", fmt.Sprintf("display_device auto: the driver reports the monitor on indexes %s — refused: auto does not choose between cards, so display_device must name the one the floor guards",
+			strings.Join(screens, ", "))
+	}
+	return screens[0], screens[0], ""
+}
+
+// displayShown is how a message names the layer's display_device: the sentinel as "auto", in whatever
+// case it was written (a derived index is shown beside it), any other declaration as the text the
+// caller already prints, which is the operator's own word for the card.
+func displayShown(l config.LayerSpec, as string) string {
+	if config.IsAutoDisplayDevice(l.DisplayDevice) {
+		return config.DisplayDeviceAuto
+	}
+	return as
+}
+
+// seatLabel names a seat in a message: its model, or its role where it carries none (the router).
+func seatLabel(s config.LayerSeat) string {
+	if s.Model != "" {
+		return s.Model
+	}
+	return s.Role
 }
 
 func containsIndex(indexes []string, want string) bool {
@@ -136,19 +190,29 @@ func seatOnIndex(s config.LayerSeat, index string, live Live) bool {
 
 func displayFloor(l config.LayerSpec, s config.LayerSeat, live Live, rowVerdict *bool) (bool, string) {
 	if live.DeviceFree == nil {
-		return verdictOr(rowVerdict, fmt.Sprintf("free VRAM on display device %s", l.DisplayDevice))
+		return verdictOr(rowVerdict, fmt.Sprintf("free VRAM on display device %s", displayShown(l, l.DisplayDevice)))
 	}
 	display, index, refusal := resolveDisplay(l, live)
 	if refusal != "" {
 		return false, refusal
 	}
+	shown := displayShown(l, display)
 	onDisplay := seatOnIndex(s, index, live)
+	// With "auto" the floor follows the monitor but the seat's pin does not: a twin that declares a
+	// display footprint is meant to sit on the display card, and one pinned elsewhere would be judged
+	// free − 0 on the monitor's card while it loads on another, beside whatever that card is running.
+	// This refuses a harmless-looking admission on purpose: its job is to make a stale pin loud. It
+	// keys on the declared footprint, so a seat that declares none is judged as a seat off the card is.
+	if config.IsAutoDisplayDevice(l.DisplayDevice) && !onDisplay && s.DisplayFootprintGiB > 0 {
+		return false, fmt.Sprintf("seat %s declares display_footprint_gib %.1f, so it is meant to sit on the display card, but its pin %s does not include index %s, the card the driver reports for the monitor (display_device auto) — refused: re-pin the seat and its llama-swap entry to that card, or name the card the seat is on in display_device",
+			seatLabel(s), s.DisplayFootprintGiB, s.Device, index)
+	}
 	if onDisplay && s.DisplayFootprintGiB <= 0 {
-		return false, fmt.Sprintf("display footprint undeclared for seat %s pinned to %s (includes display device %s → index %s) — refused before any arithmetic", s.Model, s.Device, display, index)
+		return false, fmt.Sprintf("display footprint undeclared for seat %s pinned to %s (includes display device %s → index %s) — refused before any arithmetic", s.Model, s.Device, shown, index)
 	}
 	free, ok := live.DeviceFree(display)
 	if !ok {
-		return false, fmt.Sprintf("free VRAM on display device %s unreadable (card not in the probe) — refused", display)
+		return false, fmt.Sprintf("free VRAM on display device %s unreadable (card not in the probe) — refused", shown)
 	}
 	footprint := 0.0
 	if onDisplay {
@@ -156,9 +220,9 @@ func displayFloor(l config.LayerSpec, s config.LayerSeat, live Live, rowVerdict 
 	}
 	left := free - footprint
 	if left < l.DisplayFloorGiB {
-		return false, fmt.Sprintf("free %.1f GiB − footprint %.1f = %.1f < floor %.1f on display device %s (index %s)", free, footprint, left, l.DisplayFloorGiB, display, index)
+		return false, fmt.Sprintf("free %.1f GiB − footprint %.1f = %.1f < floor %.1f on display device %s (index %s)", free, footprint, left, l.DisplayFloorGiB, shown, index)
 	}
-	return true, fmt.Sprintf("free %.1f GiB − footprint %.1f = %.1f ≥ floor %.1f on display device %s (index %s)", free, footprint, left, l.DisplayFloorGiB, display, index)
+	return true, fmt.Sprintf("free %.1f GiB − footprint %.1f = %.1f ≥ floor %.1f on display device %s (index %s)", free, footprint, left, l.DisplayFloorGiB, shown, index)
 }
 
 // ResidentVerdict puts a layer's desktop guards to a seat that is ALREADY loaded: the admission
@@ -201,20 +265,21 @@ func ResidentVerdict(l config.LayerSpec, live Live) (ok bool, reasons []string) 
 // have its floor free? See ResidentVerdict for why the footprint is not subtracted.
 func displayFloorHeld(l config.LayerSpec, live Live) (bool, string) {
 	if live.DeviceFree == nil {
-		return false, fmt.Sprintf("free VRAM on display device %s unreadable (no reader) — refused", l.DisplayDevice)
+		return false, fmt.Sprintf("free VRAM on display device %s unreadable (no reader) — refused", displayShown(l, l.DisplayDevice))
 	}
 	display, index, refusal := resolveDisplay(l, live)
 	if refusal != "" {
 		return false, refusal
 	}
+	shown := displayShown(l, display)
 	free, ok := live.DeviceFree(display)
 	if !ok {
-		return false, fmt.Sprintf("free VRAM on display device %s unreadable (card not in the probe) — refused", display)
+		return false, fmt.Sprintf("free VRAM on display device %s unreadable (card not in the probe) — refused", shown)
 	}
 	if free < l.DisplayFloorGiB {
-		return false, fmt.Sprintf("free %.1f GiB < floor %.1f GiB on display device %s (index %s) with the layer's seats loaded", free, l.DisplayFloorGiB, display, index)
+		return false, fmt.Sprintf("free %.1f GiB < floor %.1f GiB on display device %s (index %s) with the layer's seats loaded", free, l.DisplayFloorGiB, shown, index)
 	}
-	return true, fmt.Sprintf("free %.1f GiB ≥ floor %.1f GiB on display device %s (index %s)", free, l.DisplayFloorGiB, display, index)
+	return true, fmt.Sprintf("free %.1f GiB ≥ floor %.1f GiB on display device %s (index %s)", free, l.DisplayFloorGiB, shown, index)
 }
 
 func hostRAM(s config.LayerSeat, live Live, rowVerdict *bool) (bool, string) {
