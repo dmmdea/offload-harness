@@ -58,14 +58,16 @@ type gpuLeaseCase struct {
 	name   string
 	runner string
 	setup  func(t *testing.T, cfg *config.Config, stub, dir string)
-	invoke func(t *testing.T, p *Pipeline, dir string)
+	// invoke runs the task and returns what the call answered when it did not succeed: the defer reason, or a batch's error
+	// text. It is empty when the call produced its output. Callers that only need the call to have run ignore it.
+	invoke func(t *testing.T, p *Pipeline, dir string) string
 }
 
 func gpuLeaseCases() []gpuLeaseCase {
-	genReq := func(task core.TaskType, params map[string]any) func(*testing.T, *Pipeline, string) {
-		return func(t *testing.T, p *Pipeline, _ string) {
+	genReq := func(task core.TaskType, params map[string]any) func(*testing.T, *Pipeline, string) string {
+		return func(t *testing.T, p *Pipeline, _ string) string {
 			t.Helper()
-			p.Run(context.Background(), core.Request{Task: task, Input: "a calm ocean at dawn", Params: params})
+			return p.Run(context.Background(), core.Request{Task: task, Input: "a calm ocean at dawn", Params: params}).Reason
 		}
 	}
 	return []gpuLeaseCase{
@@ -115,10 +117,10 @@ func gpuLeaseCases() []gpuLeaseCase {
 					t.Fatal(err)
 				}
 			},
-			invoke: func(t *testing.T, p *Pipeline, dir string) {
+			invoke: func(t *testing.T, p *Pipeline, dir string) string {
 				t.Helper()
-				p.Run(context.Background(), core.Request{Task: core.TaskEditImageGenerative,
-					Input: "make it snowing", Params: map[string]any{"image": filepath.Join(dir, "a.png")}})
+				return p.Run(context.Background(), core.Request{Task: core.TaskEditImageGenerative,
+					Input: "make it snowing", Params: map[string]any{"image": filepath.Join(dir, "a.png")}}).Reason
 			},
 		},
 		{
@@ -134,10 +136,10 @@ func gpuLeaseCases() []gpuLeaseCase {
 					}
 				}
 			},
-			invoke: func(t *testing.T, p *Pipeline, dir string) {
+			invoke: func(t *testing.T, p *Pipeline, dir string) string {
 				t.Helper()
-				p.Run(context.Background(), core.Request{Task: core.TaskInpaintImage, Input: "clean it",
-					Params: map[string]any{"image": filepath.Join(dir, "a.png"), "mask": filepath.Join(dir, "m.png")}})
+				return p.Run(context.Background(), core.Request{Task: core.TaskInpaintImage, Input: "clean it",
+					Params: map[string]any{"image": filepath.Join(dir, "a.png"), "mask": filepath.Join(dir, "m.png")}}).Reason
 			},
 		},
 		{
@@ -151,10 +153,10 @@ func gpuLeaseCases() []gpuLeaseCase {
 					t.Fatal(err)
 				}
 			},
-			invoke: func(t *testing.T, p *Pipeline, dir string) {
+			invoke: func(t *testing.T, p *Pipeline, dir string) string {
 				t.Helper()
-				p.Run(context.Background(), core.Request{Task: core.TaskUpscaleImage,
-					Params: map[string]any{"image": filepath.Join(dir, "a.png")}})
+				return p.Run(context.Background(), core.Request{Task: core.TaskUpscaleImage,
+					Params: map[string]any{"image": filepath.Join(dir, "a.png")}}).Reason
 			},
 		},
 		{
@@ -163,9 +165,12 @@ func gpuLeaseCases() []gpuLeaseCase {
 			setup: func(_ *testing.T, cfg *config.Config, stub, _ string) {
 				cfg.ImageGenScript = stub
 			},
-			invoke: func(t *testing.T, p *Pipeline, _ string) {
+			invoke: func(t *testing.T, p *Pipeline, _ string) string {
 				t.Helper()
-				_, _ = p.RunImageBatch(context.Background(), []ImageBatchJob{{Prompt: "a red bike"}})
+				if _, err := p.RunImageBatch(context.Background(), []ImageBatchJob{{Prompt: "a red bike"}}); err != nil {
+					return err.Error()
+				}
+				return ""
 			},
 		},
 		{
@@ -178,10 +183,10 @@ func gpuLeaseCases() []gpuLeaseCase {
 					t.Fatal(err)
 				}
 			},
-			invoke: func(t *testing.T, p *Pipeline, dir string) {
+			invoke: func(t *testing.T, p *Pipeline, dir string) string {
 				t.Helper()
-				p.Run(context.Background(), core.Request{Task: core.TaskRunGraph,
-					Params: map[string]any{"graph_path": filepath.Join(dir, "g.json"), "out_dir": dir}})
+				return p.Run(context.Background(), core.Request{Task: core.TaskRunGraph,
+					Params: map[string]any{"graph_path": filepath.Join(dir, "g.json"), "out_dir": dir}}).Reason
 			},
 		},
 		{
@@ -217,11 +222,11 @@ func gpuLeaseCases() []gpuLeaseCase {
 					}
 				}
 			},
-			invoke: func(t *testing.T, p *Pipeline, dir string) {
+			invoke: func(t *testing.T, p *Pipeline, dir string) string {
 				t.Helper()
-				p.Run(context.Background(), core.Request{Task: core.TaskAnimateCharacter,
+				return p.Run(context.Background(), core.Request{Task: core.TaskAnimateCharacter,
 					Input:  "a toy astronaut in a studio",
-					Params: map[string]any{"ref": filepath.Join(dir, "ref.png"), "driver": filepath.Join(dir, "drive.mp4")}})
+					Params: map[string]any{"ref": filepath.Join(dir, "ref.png"), "driver": filepath.Join(dir, "drive.mp4")}}).Reason
 			},
 		},
 		{
@@ -269,11 +274,11 @@ func gpuLeaseCases() []gpuLeaseCase {
 					}
 				}
 			},
-			invoke: func(t *testing.T, p *Pipeline, dir string) {
+			invoke: func(t *testing.T, p *Pipeline, dir string) string {
 				t.Helper()
-				p.Run(context.Background(), core.Request{Task: core.TaskAnimateCharacter,
+				return p.Run(context.Background(), core.Request{Task: core.TaskAnimateCharacter,
 					Input:  "a toy astronaut in a studio",
-					Params: map[string]any{"ref": filepath.Join(dir, "ref.png"), "driver": filepath.Join(dir, "drive.mp4")}})
+					Params: map[string]any{"ref": filepath.Join(dir, "ref.png"), "driver": filepath.Join(dir, "drive.mp4")}}).Reason
 			},
 		},
 		{
