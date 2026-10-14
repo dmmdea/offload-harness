@@ -34,41 +34,68 @@ import (
 // runDoctorBackends is the `doctor` verb: the unchanged doctor, then the backends section. It lives
 // beside the verb and not inside doctorRunChecked so that main.go carries one changed dispatch line (and
 // one usage line), and so the new flag is parsed here and never reaches runDoctor's own flag set.
+//
+// The flags are checked here too, before runDoctor runs. Its flag set knows only --config and exits the
+// process on anything else after printing a usage that omits --probe-completion, which is the flag a
+// person most needs to see after a typo (it is the only door to a completion, and a completion can load
+// an idle seat). A flag this verb does not accept is refused with the verb's own usage instead.
 func runDoctorBackends(args []string) error {
 	if doctorHelp(args, os.Stderr) {
 		return nil
 	}
 	rest, probe := splitProbeCompletion(args)
-	err := runDoctor(rest)
-	// runDoctor has already accepted `rest` (its flag set exits on a bad flag), so this parse only
-	// reads --config the way runDoctor read it, quietly: the loader's warnings were printed once.
-	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	cfgPath := fs.String("config", "", "config file path")
-	if fs.Parse(rest) != nil {
-		return err
+	fs := doctorFlags()
+	if perr := fs.Parse(rest); perr != nil {
+		return doctorUsageError(perr, fs)
 	}
-	cfg, _ := config.LoadWithSource(*cfgPath)
+	err := runDoctor(rest)
+	// runDoctor read --config the way this parse did; reading it quietly again means the loader's
+	// warnings were printed once, by runDoctor.
+	cfg, _ := config.LoadWithSource(fs.Lookup("config").Value.String())
 	writeBackendsSection(os.Stdout, cfg, probe)
 	return err
 }
 
-// doctorHelp prints the flags of the doctor verb, both of them, and reports true when args ask for help
-// (-h, -help or --help, read the way the flag package reads them). runDoctor's own flag set knows only
-// --config and exits the process on help, so help is answered here, before it runs: `doctor -h` is where
-// an operator learns that --probe-completion exists and that it can load idle seats.
-func doctorHelp(args []string, w io.Writer) bool {
+// doctorFlags is the flag set of the doctor verb, both flags, parsed quietly: it prints nothing itself, so
+// a caller decides what a person sees. It is the one place the flags are declared, and the help and the
+// refusal of a mistyped flag print its declarations, so neither can drift from what the verb accepts.
+func doctorFlags() *flag.FlagSet {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.String("config", "", "config file path")
 	fs.Bool("probe-completion", false, "also send a 1-token completion to each seat: this CAN LOAD idle seats (a cold load takes minutes), so it is for a person to run, and it is refused where it would evict a vLLM seat")
+	return fs
+}
+
+// writeDoctorUsage prints the usage of the doctor verb: the usage line, what it does, and each flag as
+// the flag package prints it.
+func writeDoctorUsage(w io.Writer, fs *flag.FlagSet) {
+	fmt.Fprintln(w, "usage: local-offload doctor [--config FILE] [--probe-completion]")
+	fmt.Fprintln(w, "  checks endpoint health and config, then prints which engine answers for each lane and seat")
+	fs.SetOutput(w)
+	fs.PrintDefaults()
+	fs.SetOutput(io.Discard)
+}
+
+// doctorUsageError is the refusal of a flag the verb does not accept: the flag package's own error line,
+// then the usage, with exit status 2 as the flag package's ExitOnError ends the process.
+func doctorUsageError(parseErr error, fs *flag.FlagSet) error {
+	var b strings.Builder
+	fmt.Fprintln(&b, parseErr)
+	writeDoctorUsage(&b, fs)
+	return &exitCodeError{code: 2, msg: strings.TrimSuffix(b.String(), "\n")}
+}
+
+// doctorHelp prints the usage of the doctor verb, both flags, and reports true when args ask for help
+// (-h, -help or --help, read the way the flag package reads them). runDoctor's own flag set knows only
+// --config and exits the process on help, so help is answered here, before it runs: `doctor -h` is where
+// an operator learns that --probe-completion exists and that it can load idle seats.
+func doctorHelp(args []string, w io.Writer) bool {
+	fs := doctorFlags()
 	if err := fs.Parse(args); !errors.Is(err, flag.ErrHelp) {
 		return false
 	}
-	fs.SetOutput(w)
-	fmt.Fprintln(w, "usage: local-offload doctor [--config FILE] [--probe-completion]")
-	fmt.Fprintln(w, "  checks endpoint health and config, then prints which engine answers for each lane and seat")
-	fs.PrintDefaults()
+	writeDoctorUsage(w, fs)
 	return true
 }
 
