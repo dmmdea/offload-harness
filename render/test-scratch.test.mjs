@@ -252,7 +252,7 @@ test("awaitTreeGone: at the bound it prints ONE line naming what is still alive 
 test("killTree + awaitTreeGone: a process and the child it started are both reported, killed and gone", async () => {
   // the parent starts a child of its own and tells us its pid; both would sleep for a minute
   const sleeper = "setTimeout(() => {}, 60000)";
-  const parent = spawn(process.execPath, ["-e", `const c = require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(sleeper)}], { stdio: 'ignore' }); process.stdout.write(String(c.pid)); ${sleeper};`], {
+  const parent = spawn(process.execPath, ["-e", `const c = require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(sleeper)}], { stdio: 'ignore', windowsHide: true }); process.stdout.write(String(c.pid)); ${sleeper};`], {
     stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
   });
   const exited = new Promise((r) => parent.once("exit", r));
