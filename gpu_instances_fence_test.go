@@ -124,23 +124,46 @@ func cfgOf(t *testing.T, cfgPath string) config.Config {
 //   - stopKeptInstances, directly, for a process that holds NO Lease object and acts for an epoch it has resolved or fenced first:
 //     the release verb (runGPURelease, which resolves its target with ReleaseTarget before it stops anything and stops for that
 //     target), and the detached reserve's release after a host-RAM wait (releaseAfterRAMWait, which returns before it stops
-//     anything unless the record still holds its epoch). The detached parent never holds the lease (its hidden holder does), so it
-//     has no object to check; an epoch is never reused and each instance's marker names the lease that launched it, so a stop by
-//     epoch leaves an instance that a later lease took over (comfyinst.stopInstance re-reads the marker at the moment of the stop).
+//     anything unless the lease is on the record, or its record exists and cannot be read, which is a lease that is held). The
+//     detached parent never holds the lease (its hidden holder does), so it has no object to check; an epoch is never reused and
+//     each instance's marker names the lease that launched it, so a stop by epoch leaves an instance that a later lease took over
+//     (comfyinst.stopInstance re-reads the marker at the moment of the stop).
+//   - comfyStopFn and comfyinst.StopForLease are the reads of the markers themselves: the first is called only by
+//     stopKeptInstances, the second only by the package-level initializer of comfyStopFn. The scan walks whole declarations
+//     (methods are keyed by their receiver, package-level initializers as "var NAME"), so a call in a function literal or an
+//     initializer is seen as well.
 //
 // Anything else is a stop nobody has examined.
 
 type stopSite struct {
-	file, fn, callee string
-	arg              string // the epoch (or lease) argument, as written
+	file, owner, callee string
+	arg                 string // the epoch (or lease) argument, as written
 }
 
-// packageStopCalls parses every non-test .go file of the package and returns each call of the stop functions with the function
+// stopRecvName is the type a method is declared on ("T" for both T and *T), "" for a plain function.
+func stopRecvName(fd *ast.FuncDecl) string {
+	if fd.Recv == nil || len(fd.Recv.List) == 0 {
+		return ""
+	}
+	t := fd.Recv.List[0].Type
+	if star, ok := t.(*ast.StarExpr); ok {
+		t = star.X
+	}
+	if id, ok := t.(*ast.Ident); ok {
+		return id.Name
+	}
+	return "?"
+}
+
+// packageStopCalls parses every non-test .go file of the package and returns each call of the stop functions with the declaration
 // that encloses it, any use of those names that is not a call (a function value would dodge a list of call sites), and the body of
-// every function by name.
+// every function by name. The owner of a call is the function it sits in ("name", or "Recv.name" for a method), and "var NAME" for a
+// package-level initializer: the scan walks whole declarations, so a function literal inside an initializer counts, and the
+// comfyinst package's own stop functions are named too (comfyinst.StopForLease is how the markers are read).
 func packageStopCalls(t *testing.T) (calls []stopSite, nonCalls []string, bodies map[string]string) {
 	t.Helper()
-	names := map[string]bool{"stopKeptInstances": true, "stopInstancesOfLease": true, "comfyStopFn": true}
+	plain := map[string]bool{"stopKeptInstances": true, "stopInstancesOfLease": true, "comfyStopFn": true}
+	qualified := map[string]bool{"comfyinst.StopForLease": true, "comfyinst.StopMarker": true}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
@@ -161,30 +184,76 @@ func packageStopCalls(t *testing.T) (calls []stopSite, nonCalls []string, bodies
 		}
 		text := func(a, b token.Pos) string { return string(src[fset.Position(a).Offset:fset.Position(b).Offset]) }
 		for _, d := range f.Decls {
-			fd, ok := d.(*ast.FuncDecl)
-			if !ok || fd.Body == nil {
+			var owner string
+			switch d := d.(type) {
+			case *ast.FuncDecl:
+				owner = d.Name.Name
+				if r := stopRecvName(d); r != "" {
+					owner = r + "." + d.Name.Name
+				}
+				if d.Body != nil {
+					bodies[owner] = text(d.Body.Pos(), d.Body.End())
+				}
+			case *ast.GenDecl:
+				owner = "var"
+				for _, sp := range d.Specs {
+					if vs, ok := sp.(*ast.ValueSpec); ok && len(vs.Names) > 0 {
+						owner = "var " + vs.Names[0].Name
+					}
+				}
+			default:
 				continue
 			}
-			bodies[fd.Name.Name] = text(fd.Body.Pos(), fd.Body.End())
-			called := map[*ast.Ident]bool{}
-			ast.Inspect(fd.Body, func(n ast.Node) bool {
+			called := map[ast.Node]bool{}
+			ast.Inspect(d, func(n ast.Node) bool {
 				c, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
 				}
-				if id, ok := c.Fun.(*ast.Ident); ok && names[id.Name] {
-					called[id] = true
-					arg := ""
-					if len(c.Args) > 1 {
-						arg = text(c.Args[1].Pos(), c.Args[1].End())
+				var callee string
+				switch fn := c.Fun.(type) {
+				case *ast.Ident:
+					if plain[fn.Name] {
+						callee = fn.Name
 					}
-					calls = append(calls, stopSite{file: name, fn: fd.Name.Name, callee: id.Name, arg: arg})
+				case *ast.SelectorExpr:
+					if x, ok := fn.X.(*ast.Ident); ok && qualified[x.Name+"."+fn.Sel.Name] {
+						callee = x.Name + "." + fn.Sel.Name
+					} else if plain[fn.Sel.Name] {
+						callee = fn.Sel.Name // a method value call
+					}
 				}
+				if callee == "" {
+					return true
+				}
+				called[c.Fun] = true
+				arg := ""
+				if len(c.Args) > 1 {
+					arg = text(c.Args[1].Pos(), c.Args[1].End())
+				}
+				calls = append(calls, stopSite{file: name, owner: owner, callee: callee, arg: arg})
 				return true
 			})
-			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				if id, ok := n.(*ast.Ident); ok && names[id.Name] && !called[id] {
-					nonCalls = append(nonCalls, fmt.Sprintf("%s: %s in %s", name, id.Name, fd.Name.Name))
+			ast.Inspect(d, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && plain[id.Name] && !called[id] {
+					// the declaration of the name itself is not a use
+					if fd, isFn := d.(*ast.FuncDecl); isFn && fd.Name == id {
+						return true
+					}
+					if gd, isGen := d.(*ast.GenDecl); isGen {
+						declares := false
+						for _, sp := range gd.Specs {
+							if vs, ok := sp.(*ast.ValueSpec); ok {
+								for _, nm := range vs.Names {
+									declares = declares || nm == id
+								}
+							}
+						}
+						if declares {
+							return true
+						}
+					}
+					nonCalls = append(nonCalls, fmt.Sprintf("%s: %s in %s", name, id.Name, owner))
 				}
 				return true
 			})
@@ -195,11 +264,12 @@ func packageStopCalls(t *testing.T) (calls []stopSite, nonCalls []string, bodies
 
 func TestInstancesAreStoppedOnlyByCallersThatFencedTheirEpoch(t *testing.T) {
 	calls, nonCalls, bodies := packageStopCalls(t)
-	// callee -> the functions that may call it
+	// callee -> the owners that may call it
 	allowed := map[string][]string{
-		"stopInstancesOfLease": {"runGPUReserve", "runGPUHold", "releaseHolderAtWaitEnd"},
-		"stopKeptInstances":    {"stopInstancesOfLease", "runGPURelease", "releaseAfterRAMWait"},
-		"comfyStopFn":          {"stopKeptInstances"},
+		"stopInstancesOfLease":   {"runGPUReserve", "runGPUHold", "releaseHolderAtWaitEnd"},
+		"stopKeptInstances":      {"stopInstancesOfLease", "runGPURelease", "releaseAfterRAMWait"},
+		"comfyStopFn":            {"stopKeptInstances"},
+		"comfyinst.StopForLease": {"var comfyStopFn"},
 	}
 	has := func(list []string, s string) bool {
 		for _, x := range list {
@@ -211,18 +281,18 @@ func TestInstancesAreStoppedOnlyByCallersThatFencedTheirEpoch(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for _, c := range calls {
-		seen[c.callee+" in "+c.fn] = true
-		if !has(allowed[c.callee], c.fn) {
-			t.Errorf("%s: %s calls %s, and nothing here shows it fenced the epoch first. Go through stopInstancesOfLease, or add the caller to this test WITH the reason it is safe", c.file, c.fn, c.callee)
+		seen[c.callee+" in "+c.owner] = true
+		if !has(allowed[c.callee], c.owner) {
+			t.Errorf("%s: %s calls %s, and nothing here shows it fenced the epoch first. Go through stopInstancesOfLease, or add the caller to this test WITH the reason it is safe", c.file, c.owner, c.callee)
 		}
 	}
 	for _, n := range nonCalls {
 		t.Errorf("a stop function used as a value cannot be pinned by its call sites: %s", n)
 	}
-	for callee, fns := range allowed {
-		for _, fn := range fns {
-			if !seen[callee+" in "+fn] {
-				t.Errorf("this test allows %s to call %s but it does not: the list is stale, and would pass a call added back there", fn, callee)
+	for callee, owners := range allowed {
+		for _, o := range owners {
+			if !seen[callee+" in "+o] {
+				t.Errorf("this test allows %s to call %s but it does not: the list is stale, and would pass a call added back there", o, callee)
 			}
 		}
 	}
@@ -231,10 +301,10 @@ func TestInstancesAreStoppedOnlyByCallersThatFencedTheirEpoch(t *testing.T) {
 	for _, c := range calls {
 		switch {
 		case c.callee == "stopInstancesOfLease" && c.arg != "lease":
-			t.Errorf("%s stops instances for %q, not for the lease object it holds", c.fn, c.arg)
-		case c.callee == "stopKeptInstances" && c.fn == "runGPURelease" && c.arg != "target":
+			t.Errorf("%s stops instances for %q, not for the lease object it holds", c.owner, c.arg)
+		case c.callee == "stopKeptInstances" && c.owner == "runGPURelease" && c.arg != "target":
 			t.Errorf("the release verb stops instances for %q, not for the epoch it resolved (target)", c.arg)
-		case c.callee == "stopKeptInstances" && c.fn == "releaseAfterRAMWait" && c.arg != "epoch":
+		case c.callee == "stopKeptInstances" && c.owner == "releaseAfterRAMWait" && c.arg != "epoch":
 			t.Errorf("the detached reserve's release stops instances for %q, not for the epoch it fenced", c.arg)
 		}
 	}
@@ -246,6 +316,6 @@ func TestInstancesAreStoppedOnlyByCallersThatFencedTheirEpoch(t *testing.T) {
 		}
 	}
 	fencedBefore("runGPURelease", "ReleaseTarget(", "stopKeptInstances")
-	fencedBefore("releaseAfterRAMWait", "HoldsEpoch(epoch)", "stopKeptInstances")
+	fencedBefore("releaseAfterRAMWait", "leaseStillHeld(m, epoch)", "stopKeptInstances")
 	fencedBefore("stopInstancesOfLease", "lease.Check()", "stopKeptInstances")
 }
