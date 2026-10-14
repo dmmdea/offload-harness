@@ -113,12 +113,12 @@ func TestDeriveRenderKeepsTheSpecificNoNRefusal(t *testing.T) {
 	e["moe_26b"] = "n_cpu_moe"
 	e["n_cpu_moe_max"] = 14
 	delete(e, "n_cpu_moe")
-	res, err := deriveRender(marshalTable(t, doc), renderReq("blackwell-16", "linux", &pinnedVLLM{}))
+	// Only the error is asserted: every error return of deriveRender hands back a zero renderResult, so a check that
+	// the refused tier "produced no config with the flag" would read an empty string and could never fail. The
+	// no-flag property itself is TestMoePlacementNeverReturnsTheEveryExpertFormOnABackendWithACard.
+	_, err := deriveRender(marshalTable(t, doc), renderReq("blackwell-16", "linux", &pinnedVLLM{}))
 	if err == nil || !strings.Contains(err.Error(), "no N") {
 		t.Fatalf("moe_26b n_cpu_moe with no N must be refused by deriveRender with its own message, got err=%v", err)
-	}
-	if strings.Contains(res.Config, "--cpu-moe") {
-		t.Fatalf("the refused tier still produced a config carrying the every-expert flag:\n%s", res.Config)
 	}
 }
 
