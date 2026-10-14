@@ -166,6 +166,17 @@ test("compareApiGraphs: reports a missing node, an extra node, a class change, a
   assert.notDeepEqual(compareApiGraphs({ 1: { class_type: "A", inputs: {}, _meta: { title: "x" } } }, { 1: { class_type: "A", inputs: {}, _meta: { title: "y" } } }, { meta: true }), []);
 });
 
+test("compareApiGraphs: an input only the actual graph has is an extra, and the mirror case is a missing one, on an otherwise equal node", () => {
+  const withW = { 1: { class_type: "A", inputs: { x: 1, w: 2 } } };
+  const without = { 1: { class_type: "A", inputs: { x: 1 } } };
+  assert.deepEqual(compareApiGraphs(withW, without), ["1.w: extra (2)"]);
+  assert.deepEqual(compareApiGraphs(without, withW), ["1.w: missing (expected 2)"]);
+  const multi = compareApiGraphs({ 1: { class_type: "A", inputs: { x: 1, w: ["3", 0] } }, 2: { class_type: "B", inputs: {} } }, { 1: { class_type: "A", inputs: { x: 1 } }, 2: { class_type: "B", inputs: {} } });
+  assert.match(multi.join("\n"), /1\.w: extra/);
+  assert.equal(multi.length, 1, "nothing else differs");
+  assert.deepEqual(compareApiGraphs(withW, withW), []);
+});
+
 // ---- the object_info: where the widget order comes from ------------------------------------------------------------------
 
 test("object_info order: input_order wins over the key order of the listing, and the key order is the fallback", () => {
@@ -223,6 +234,16 @@ test("upload widgets: a LoadImage owns one extra slot and a LoadAudio two", () =
   assert.deepEqual(g["2"].inputs, { audio: "x.mp3" });
   assert.deepEqual(g["3"].inputs, { audio: "y.wav" });
   refusalOf(convert(ui([{ id: 2, type: "LoadAudio", outs: [["AUDIO", "AUDIO"]], wv: ["x.mp3", null, null, 9] }])), REFUSAL.WIDGET_MISMATCH);
+});
+
+test("upload widgets: a video loader owns one extra slot like an image loader, stored or not, and one more value is refused", () => {
+  const g = graphOf(convert(ui([
+    { id: 1, type: "LoadVideo", outs: [["VIDEO", "VIDEO"]], wv: ["a.mp4", "image"] },
+    { id: 2, type: "LoadVideo", outs: [["VIDEO", "VIDEO"]], wv: ["b.mp4"] },
+  ])));
+  assert.deepEqual(g["1"].inputs, { file: "a.mp4" });
+  assert.deepEqual(g["2"].inputs, { file: "b.mp4" });
+  refusalOf(convert(ui([{ id: 1, type: "LoadVideo", outs: [["VIDEO", "VIDEO"]], wv: ["a.mp4", "image", "x"] }])), REFUSAL.WIDGET_MISMATCH);
 });
 
 test("a widget whose type is a union names its widgetType, and a forceInput STRING is a socket with no value slot", () => {
@@ -286,6 +307,20 @@ test("display-only trailing values of a preview node are ignored with a warning,
   refusalOf(convert(ui([{ id: 2, type: "PreviewAny", ins: [["source", "*"]], wv: [null, null, false, 1] }])), REFUSAL.WIDGET_MISMATCH);
   refusalOf(convert(ui([{ id: 3, type: "SaveGLB", ins: [["mesh", "MESH"]], wv: ["3d/x", "", ""] }])), REFUSAL.WIDGET_MISMATCH);
   refusalOf(convert(ui([{ id: 4, type: "CLIPTextEncode", ins: [["clip", "CLIP"]], wv: ["a", null] }])), REFUSAL.WIDGET_MISMATCH);
+});
+
+test("display-only trailing values: GetImageSize and Preview3D each allow one, a second is refused", () => {
+  const r = convert(ui([
+    { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+    { id: 2, type: "GetImageSize", ins: [["image", "IMAGE"]], outs: [["width", "INT"], ["height", "INT"], ["batch_size", "INT"]], wv: ["512x512"] },
+    { id: 3, type: "Preview3D", ins: [["model_file", "MESH,FILE_3D"]], wv: [""] },
+  ], [[1, 0, 2, "image"]]));
+  const g = graphOf(r);
+  assert.deepEqual(g["2"].inputs, { image: ["1", 0] });
+  assert.deepEqual(g["3"].inputs, {});
+  assert.deepEqual(warned(r, "display_values_ignored").map((w) => `${w.node}:${w.count}`), ["2:1", "3:1"]);
+  refusalOf(convert(ui([{ id: 2, type: "GetImageSize", ins: [["image", "IMAGE"]], wv: ["512x512", ""] }])), REFUSAL.WIDGET_MISMATCH);
+  refusalOf(convert(ui([{ id: 3, type: "Preview3D", ins: [["model_file", "MESH,FILE_3D"]], wv: ["", ""] }])), REFUSAL.WIDGET_MISMATCH);
 });
 
 // ---- dotted names --------------------------------------------------------------------------------------------------------
@@ -360,6 +395,34 @@ test("Reroute nodes are resolved: a chain of them is the wire it carries, and a 
   refusalOf(loop, REFUSAL.LINK_CYCLE);
 });
 
+test("an unconnected Reroute feeds nothing: a widget keeps its stored value, a socket stays empty, and nothing is warned", () => {
+  const r = convert(ui([
+    { id: 1, type: "Reroute", ins: [["", "INT"]], outs: [["", "INT"]] },
+    { id: 2, type: "EmptyLatentImage", ins: [["width", "INT", true]], outs: [["LATENT", "LATENT"]], wv: [512, 384, 1] },
+    { id: 3, type: "Reroute", ins: [["", "IMAGE"]], outs: [["", "IMAGE"]] },
+    { id: 4, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  ], [[1, 0, 2, "width"], [3, 0, 4, "image"]]));
+  const g = graphOf(r);
+  assert.deepEqual(g["2"].inputs, { width: 512, height: 384, batch_size: 1 });
+  assert.deepEqual(g["4"].inputs, {});
+  assert.deepEqual(r.warnings, [], "nothing was lost, so nothing is said (a muted Reroute, which cut a wire, does say so)");
+});
+
+test("stats count what the converter met: notes, reroutes, primitive nodes, muted and bypassed nodes, and the nodes of the graph", () => {
+  const r = convert(ui([
+    { id: 1, type: "Note", wv: ["x"] },
+    { id: 2, type: "MarkdownNote", wv: ["y"] },
+    { id: 3, type: "PrimitiveNode", outs: [["INT", "INT"]], wv: [640, "fixed"] },
+    { id: 4, type: "Reroute", ins: [["", "INT"]], outs: [["", "INT"]] },
+    { id: 5, type: "Reroute", ins: [["", "INT"]], outs: [["", "INT"]] },
+    { id: 6, type: "EmptyLatentImage", ins: [["width", "INT", true]], outs: [["LATENT", "LATENT"]], wv: [512, 512, 1] },
+    { id: 7, type: "LoraLoader", mode: 2 },
+    { id: 8, type: "LoraLoader", mode: 4 },
+  ], [[3, 0, 4, ""], [4, 0, 5, ""], [5, 0, 6, "width"]]));
+  assert.deepEqual(graphOf(r)["6"].inputs, { width: 640, height: 512, batch_size: 1 });
+  assert.deepEqual(r.stats, { nodes: 1, expandedSubgraphs: 0, mutedNodes: 1, bypassedNodes: 1, notes: 2, reroutes: 2, primitiveNodes: 1 });
+});
+
 test("PrimitiveNode feeds its value into every widget input it is wired to, and nothing of it reaches the graph", () => {
   const g = graphOf(convert(ui([
     { id: 1, type: "PrimitiveNode", outs: [["INT", "INT"]], wv: [640, "fixed"] },
@@ -413,7 +476,7 @@ test("mode 2 (muted): the node is dropped and an input wired to it is left out w
   assert.equal(r.stats.mutedNodes, 1);
 });
 
-test("mode 4 (bypassed): an output takes the first connected input of the same type; chains resolve; a union type matches", () => {
+test("mode 4 (bypassed): an output takes the connected input of its type; chains resolve; a union type matches", () => {
   const spec = [
     { id: 1, type: "CheckpointLoaderSimple", outs: [["MODEL", "MODEL"], ["CLIP", "CLIP"], ["VAE", "VAE"]], wv: ["sd_a.safetensors"] },
     { id: 2, type: "LoraLoader", mode: 4, ins: [["model", "MODEL"], ["clip", "CLIP"]], outs: [["MODEL", "MODEL"], ["CLIP", "CLIP"]], wv: ["style_a.safetensors", 1, 1] },
@@ -445,17 +508,91 @@ test("mode 4 (bypassed): no input of the output's type drops the wire with a typ
   assert.deepEqual(warned(r, "input_dropped"), [{ code: "input_dropped", node: "3", input: "images", reason: "bypass_no_match" }]);
 });
 
-test("mode 4 (bypassed): of two connected inputs of the output's type the first one, in input order, is passed through", () => {
-  const spec = (mode) => [
+test("mode 4 (bypassed): an unconnected input is not a candidate, so the one connected input of the output's type is passed through", () => {
+  const spec = [
     { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
     { id: 2, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["b.png", "image"] },
-    { id: 3, type: "ImageMix", mode, ins: [["image_a", "IMAGE"], ["image_b", "IMAGE"]], outs: [["IMAGE", "IMAGE"]], wv: [0.5] },
+    { id: 3, type: "ImageMix", mode: 4, ins: [["image_a", "IMAGE"], ["image_b", "IMAGE"]], outs: [["IMAGE", "IMAGE"]], wv: [0.5] },
     { id: 4, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
   ];
-  const both = convert(ui(spec(4), [[1, 0, 3, "image_a"], [2, 0, 3, "image_b"], [3, 0, 4, "image"]]));
-  assert.deepEqual(graphOf(both)["4"].inputs, { image: ["1", 0] }, "image_a is first");
-  const onlyB = convert(ui(spec(4), [[2, 0, 3, "image_b"], [3, 0, 4, "image"]]));
-  assert.deepEqual(graphOf(onlyB)["4"].inputs, { image: ["2", 0] }, "an unconnected first input is not a candidate");
+  const onlyB = convert(ui(spec, [[2, 0, 3, "image_b"], [3, 0, 4, "image"]]));
+  assert.deepEqual(graphOf(onlyB)["4"].inputs, { image: ["2", 0] }, "image_a is not connected");
+  const onlyA = convert(ui(spec, [[1, 0, 3, "image_a"], [3, 0, 4, "image"]]));
+  assert.deepEqual(graphOf(onlyA)["4"].inputs, { image: ["1", 0] });
+});
+
+// the nodes a bypass test needs: two prompts, a bypassed pair node (positive and negative conditioning in and out, like the
+// ControlNet apply nodes), a sampler that reads both outputs, and a checkpoint for a third type
+const cond = (...names) => names.map((n) => [n, "CONDITIONING"]);
+const pairSpecs = (ins, outs, mode = 4) => [
+  { id: 1, type: "CLIPTextEncode", ins: [["clip", "CLIP"]], outs: cond("CONDITIONING"), wv: ["a cat"] },
+  { id: 2, type: "CLIPTextEncode", ins: [["clip", "CLIP"]], outs: cond("CONDITIONING"), wv: ["blurry"] },
+  { id: 3, type: "ControlNetPair", mode, ins, outs },
+  { id: 4, type: "KSampler", ins: [["positive", "CONDITIONING"], ["negative", "CONDITIONING"]], outs: [["LATENT", "LATENT"]], wv: [1, "fixed", 20, 8, "euler", "normal", 1] },
+  { id: 5, type: "CheckpointLoaderSimple", outs: [["MODEL", "MODEL"], ["CLIP", "CLIP"], ["VAE", "VAE"]], wv: ["sd_a.safetensors"] },
+];
+const sampler = (r) => { const g = graphOf(r)["4"].inputs; return [g.positive, g.negative]; };
+
+test("mode 4 (bypassed): the i-th output of a type takes the i-th connected input of that type, so positive and negative pass straight through", () => {
+  const into = [[1, 0, 3, "positive"], [2, 0, 3, "negative"]];
+  const straight = convert(ui(pairSpecs(cond("positive", "negative"), cond("positive", "negative")), [...into, [3, 0, 4, "positive"], [3, 1, 4, "negative"]]));
+  assert.deepEqual(sampler(straight), [["1", 0], ["2", 0]], "slot 0 carries the first prompt and slot 1 the second");
+  const crossed = convert(ui(pairSpecs(cond("positive", "negative"), cond("positive", "negative")), [...into, [3, 1, 4, "positive"], [3, 0, 4, "negative"]]));
+  assert.deepEqual(sampler(crossed), [["2", 0], ["1", 0]], "the sampler reads slot 1 as positive: that is the second prompt, not the first");
+  const mixed = convert(ui(pairSpecs([["positive", "CONDITIONING"], ["vae", "VAE"], ["negative", "CONDITIONING"]], [["positive", "CONDITIONING"], ["negative", "CONDITIONING"], ["vae", "VAE"]]),
+    [...into, [5, 2, 3, "vae"], [3, 0, 4, "positive"], [3, 1, 4, "negative"]]));
+  assert.deepEqual(sampler(mixed), [["1", 0], ["2", 0]], "an input of another type between them does not shift the rank within a type");
+  assert.equal(graphOf(mixed)["5"].class_type, "CheckpointLoaderSimple");
+  assert.deepEqual(warned(mixed, "input_dropped"), []);
+});
+
+test("mode 4 (bypassed): a type whose outputs and connected inputs differ in number is ambiguous and refused as ambiguous_bypass, naming the node", () => {
+  assert.equal(REFUSAL.AMBIGUOUS_BYPASS, "ambiguous_bypass");
+  // two conditioning outputs, one connected conditioning input
+  const fewer = refusalOf(convert(ui(pairSpecs(cond("positive", "negative"), cond("positive", "negative")), [[1, 0, 3, "positive"], [3, 0, 4, "positive"]])), REFUSAL.AMBIGUOUS_BYPASS);
+  assert.equal(fewer.details.node, "3");
+  assert.equal(fewer.details.type, "CONDITIONING");
+  assert.deepEqual([fewer.details.outputs, fewer.details.inputs], [2, 1]);
+  assert.match(fewer.message, /\b3\b/, "the message names the node too");
+  // one image output, two connected image inputs
+  const spec = [
+    { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+    { id: 2, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["b.png", "image"] },
+    { id: 3, type: "ImageMix", mode: 4, ins: [["image_a", "IMAGE"], ["image_b", "IMAGE"]], outs: [["IMAGE", "IMAGE"]], wv: [0.5] },
+    { id: 4, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  ];
+  const more = refusalOf(convert(ui(spec, [[1, 0, 3, "image_a"], [2, 0, 3, "image_b"], [3, 0, 4, "image"]])), REFUSAL.AMBIGUOUS_BYPASS);
+  assert.equal(more.details.node, "3");
+  assert.deepEqual([more.details.type, more.details.outputs, more.details.inputs], ["IMAGE", 1, 2]);
+  // a bypassed node nobody reads is never resolved, so it cannot be ambiguous
+  const unread = convert(ui(pairSpecs(cond("positive", "negative"), cond("positive", "negative")), [[1, 0, 3, "positive"]]));
+  assert.equal(unread.ok, true);
+  assert.equal(unread.graph["3"], undefined);
+});
+
+test("mode 4 (bypassed): inside a subgraph the ambiguous node is named by its full id", () => {
+  const def = subdef(SG(1), {
+    ins: [["a", "IMAGE"], ["b", "IMAGE"]], outs: [["out", "IMAGE"]],
+    nodes: [{ id: 4, type: "ImageMix", mode: 4, ins: [["image_a", "IMAGE"], ["image_b", "IMAGE"]], outs: [["IMAGE", "IMAGE"]], wv: [0.5] }],
+    edges: [[-10, 0, 4, "image_a"], [-10, 1, 4, "image_b"], [4, 0, -20, "out"]],
+  });
+  const wf = withDefs(ui([
+    { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+    { id: 5, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["b.png", "image"] },
+    { id: 2, type: SG(1), ins: [["a", "IMAGE"], ["b", "IMAGE"]], outs: [["out", "IMAGE"]], wv: [] },
+    { id: 3, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  ], [[1, 0, 2, "a"], [5, 0, 2, "b"], [2, 0, 3, "image"]]), def);
+  assert.equal(refusalOf(convert(wf), REFUSAL.AMBIGUOUS_BYPASS).details.node, "2:4");
+});
+
+test("mode 4 (bypassed): a node typed * matches any type, in both directions", () => {
+  const g = graphOf(convert(ui([
+    { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+    { id: 2, type: "AnyIn", mode: 4, ins: [["in", "*"]], outs: [["out", "IMAGE"]] },
+    { id: 3, type: "AnyOut", mode: 4, ins: [["image", "IMAGE"]], outs: [["out", "*"]] },
+    { id: 4, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  ], [[1, 0, 2, "in"], [2, 0, 3, "image"], [3, 0, 4, "image"]])));
+  assert.deepEqual(g["4"].inputs, { image: ["1", 0] });
 });
 
 // ---- subgraphs -----------------------------------------------------------------------------------------------------------
@@ -524,6 +661,22 @@ test("subgraph: a wire on the instance wins over the widget value for that input
   const g = graphOf(convert(wf));
   assert.deepEqual(g["1:10"].inputs, { value: ["2", 0] });
   assert.deepEqual(g["1:11"].inputs, { value: 22 });
+});
+
+test("subgraph: an instance input whose name differs from the definition's is wired by position when both list as many inputs, and unwired otherwise", () => {
+  const def = (ins) => subdef(SG(1), {
+    ins, outs: [["out", "IMAGE"]],
+    nodes: [{ id: 7, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] }],
+    edges: [[-10, 0, 7, "image"], [7, 0, -20, "out"]],
+  });
+  const wf = (d, instIns) => withDefs(ui([
+    { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+    { id: 2, type: SG(1), ins: instIns, outs: [["out", "IMAGE"]], wv: [] },
+  ], [[1, 0, 2, "renamed"]]), d);
+  const same = graphOf(convert(wf(def([["img", "IMAGE"]]), [["renamed", "IMAGE"]])));
+  assert.deepEqual(same["2:7"].inputs, { image: ["1", 0] }, "one input each: the instance's wire belongs to the definition's input 0");
+  const differ = graphOf(convert(wf(def([["img", "IMAGE"], ["extra", "IMAGE"]]), [["renamed", "IMAGE"]])));
+  assert.deepEqual(differ["2:7"].inputs, {}, "one input against two and no shared name: nothing is guessed");
 });
 
 test("subgraph: properties.proxyWidgets name the inner widgets the instance's widgets_values belong to, control_after_generate entries included", () => {
@@ -618,11 +771,61 @@ test("an unknown node class is refused with every class named and where it sits,
 test("a group node and a malformed template are refused with their own typed reasons", () => {
   const g = refusalOf(convert(ui([{ id: 1, type: "workflow>My Group" }])), REFUSAL.GROUP_NODE_UNSUPPORTED);
   assert.equal(g.details.type, "workflow>My Group");
+  assert.equal(refusalOf(convert(ui([{ id: 1, type: "workflow/My Group" }])), REFUSAL.GROUP_NODE_UNSUPPORTED).details.type, "workflow/My Group", "the other group prefix too");
   for (const bad of [null, undefined, 5, "x", [], {}, { nodes: "no" }, { nodes: [null] }, { nodes: [{ type: "KSampler" }] }, { nodes: [{ id: 1 }] }]) {
     refusalOf(convert(bad), REFUSAL.BAD_TEMPLATE);
   }
   refusalOf(convert({ nodes: [{ id: 1, type: "Note" }, { id: 1, type: "Note" }] }), REFUSAL.BAD_TEMPLATE);
   refusalOf(convert({ nodes: [], links: [[1, 2]] }), REFUSAL.BAD_TEMPLATE);
+});
+
+test("a node whose inputs or outputs is not a list is a bad_template refusal wherever the converter would read it, never an internal_error", () => {
+  const nodes = (patch) => {
+    const wf = ui([
+      { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+      { id: 2, type: "ImageInvert", mode: 4, ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+      { id: 3, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+    ], [[1, 0, 2, "image"], [2, 0, 3, "image"]]);
+    Object.assign(wf.nodes[1], patch);
+    return wf;
+  };
+  const def = () => subdef(SG(1), {
+    ins: [["img", "IMAGE"]], outs: [["out", "IMAGE"]],
+    nodes: [{ id: 7, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] }],
+    edges: [[-10, 0, 7, "image"], [7, 0, -20, "out"]],
+  });
+  const instance = (patch) => {
+    const wf = withDefs(ui([
+      { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+      { id: 2, type: SG(1), ins: [["img", "IMAGE"]], outs: [["out", "IMAGE"]], wv: [] },
+      { id: 3, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+    ], [[1, 0, 2, "img"], [2, 0, 3, "image"]]), def());
+    Object.assign(wf.nodes[1], patch);
+    return wf;
+  };
+  for (const bad of [{}, "x", 5, true, { 0: { name: "image", link: 1 } }]) {
+    for (const field of ["inputs", "outputs"]) {
+      const msg = `${field} = ${JSON.stringify(bad)}`;
+      assert.equal(refusalOf(convert(nodes({ [field]: bad })), REFUSAL.BAD_TEMPLATE).details.node, "2", `a bypassed node, ${msg}`);
+      assert.equal(refusalOf(convert(instance({ [field]: bad })), REFUSAL.BAD_TEMPLATE).details.node, "2", `a subgraph instance, ${msg}`);
+    }
+  }
+  // a node inside a definition is checked as it is entered
+  const inner = withDefs(ui([{ id: 2, type: SG(1), wv: [] }]), def());
+  inner.definitions.subgraphs[0].nodes[0].inputs = { image: 1 };
+  const innerRefusal = refusalOf(convert(inner), REFUSAL.BAD_TEMPLATE);
+  assert.equal(innerRefusal.details.node, "2:7");
+  // the definition's own slot lists
+  for (const field of ["inputs", "outputs"]) {
+    const broken = withDefs(ui([{ id: 2, type: SG(1), wv: [] }]), def());
+    broken.definitions.subgraphs[0][field] = { 0: { name: "x" } };
+    assert.equal(refusalOf(convert(broken), REFUSAL.BAD_TEMPLATE).details.subgraph, SG(1), `definition ${field}`);
+  }
+  // absent and null are the same as empty: nothing wired through them, no refusal
+  for (const patch of [{ inputs: null }, { outputs: null }]) assert.equal(convert(nodes(patch)).ok, true, JSON.stringify(patch));
+  const absent = nodes({});
+  delete absent.nodes[1].inputs;
+  assert.equal(convert(absent).ok, true, "no inputs key");
 });
 
 test("link integrity: a link id the template does not list, a link that targets another node, an origin that is not there", () => {
@@ -640,6 +843,33 @@ test("link integrity: a link id the template does not list, a link that targets 
   const noOrigin = base();
   noOrigin.links[0][1] = 42;
   assert.equal(refusalOf(convert(noOrigin), REFUSAL.DANGLING_LINK).details.origin, 42);
+});
+
+test("ids may be strings: node ids, link ids and the link fields of an object-shaped link", () => {
+  const numeric = ui([
+    { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+    { id: 2, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  ], [[1, 0, 2, "image"]]);
+  const expected = { 1: { class_type: "LoadImage", inputs: { image: "a.png" } }, 2: { class_type: "ImageInvert", inputs: { image: ["1", 0] } } };
+  assert.deepEqual(compareApiGraphs(graphOf(convert(numeric)), expected), []);
+  const wf = ui([
+    { id: "n1", type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+    { id: "n2", type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  ], [["n1", 0, "n2", "image"]]);
+  // the link id as a string too, in the link list and on both ends
+  wf.links = wf.links.map(([id, ...rest]) => [`L${id}`, ...rest]);
+  for (const n of wf.nodes) {
+    for (const i of n.inputs ?? []) if (i.link !== null) i.link = `L${i.link}`;
+    for (const o of n.outputs ?? []) o.links = o.links.map((l) => `L${l}`);
+  }
+  const g = graphOf(convert(wf));
+  assert.deepEqual(compareApiGraphs(g, { n1: expected["1"], n2: { class_type: "ImageInvert", inputs: { image: ["n1", 0] } } }), []);
+  const objectLinks = clone(wf);
+  objectLinks.links = objectLinks.links.map(([id, from, fslot, to, tslot]) => ({ id, origin_id: from, origin_slot: fslot, target_id: to, target_slot: tslot }));
+  assert.deepEqual(graphOf(convert(objectLinks)).n2.inputs, { image: ["n1", 0] });
+  const empty = clone(wf);
+  empty.links[0][0] = "";
+  refusalOf(convert(empty), REFUSAL.BAD_TEMPLATE);
 });
 
 // ---- seeds ---------------------------------------------------------------------------------------------------------------
@@ -685,6 +915,23 @@ test("seed pinning: no seed option leaves every value as stored, a bad seed is r
   assert.equal(convert(readJson("basic-t2i.workflow.json"), { seed: null }).ok, true, "null is no seed option");
 });
 
+test("seed pinning: a seed-named input the option left alone is listed in a seed_not_pinned warning with the reason, none is said otherwise", () => {
+  const wired = convert(ui([
+    { id: 1, type: "PrimitiveInt", outs: [["INT", "INT"]], wv: [3, "fixed"] },
+    { id: 2, type: "RandomNoise", ins: [["noise_seed", "INT", true]], outs: [["NOISE", "NOISE"]], wv: [5, "fixed"] },
+  ], [[1, 0, 2, "noise_seed"]]), { seed: 9 });
+  assert.deepEqual(warned(wired, "seed_not_pinned"), [{ code: "seed_not_pinned", node: "2", input: "noise_seed", reason: "wired" }]);
+  const left = convert(ui([
+    { id: 1, type: "OldSampler", outs: [["LATENT", "LATENT"]], wv: [7, "randomize", 30] },
+    { id: 2, type: "SeedPlain", outs: [["LATENT", "LATENT"]], wv: [42, 0.5] },
+    { id: 3, type: "DynSampler", ins: [["clip", "CLIP"]], outs: [["generated_text", "STRING"]], wv: ["hi", 600, "on", 0.7, 64, 5, 0.1, false] },
+  ]), { seed: 0 });
+  assert.deepEqual(warned(left, "seed_not_pinned").map((w) => `${w.node}.${w.input}:${w.reason}`), ["2.seed:no_control", "3.mode.seed:no_control"], "the pinned seed of node 1 is not in it");
+  assert.deepEqual(left.pinnedSeeds.map((p) => p.node), ["1"]);
+  assert.deepEqual(warned(convert(readJson("basic-t2i.workflow.json"), { seed: 7 }), "seed_not_pinned"), [], "every seed was pinned");
+  assert.deepEqual(warned(convert(ui([{ id: 2, type: "SeedPlain", outs: [["LATENT", "LATENT"]], wv: [42, 0.5] }])), "seed_not_pinned"), [], "no seed option, nothing to say");
+});
+
 // ---- versions ------------------------------------------------------------------------------------------------------------
 
 test("versions: parse and compare dotted numbers of any length, ignore a v prefix and a pre-release suffix, refuse what is not a version", () => {
@@ -722,6 +969,34 @@ test("version refusal: a known minimum with no ComfyUI version given is a refusa
 
 test("version refusal comes first: a template that is both too new and unknown-class reports the version", () => {
   refusalOf(convert(ui([{ id: 1, type: "Mystery" }]), { minComfyUIVersion: "9.0.0", comfyVersion: "0.1.0" }), REFUSAL.COMFY_TOO_OLD);
+});
+
+test("version refusal comes before everything else the call carries: a bad seed, an empty listing or a file that is no workflow never hides a too-old ComfyUI", () => {
+  const wf = readJson("basic-t2i.workflow.json");
+  const old = { minComfyUIVersion: "0.37.0", comfyVersion: "0.1.0" };
+  refusalOf(convert(wf, { ...old, seed: -1 }), REFUSAL.COMFY_TOO_OLD);
+  refusalOf(convert(wf, old, {}), REFUSAL.COMFY_TOO_OLD);
+  refusalOf(convert({}, old), REFUSAL.COMFY_TOO_OLD);
+  refusalOf(convert(wf, { minComfyUIVersion: "0.37.0", seed: -1 }, {}), REFUSAL.COMFY_VERSION_UNKNOWN);
+  refusalOf(convert(wf, { minComfyUIVersion: "soon", comfyVersion: "0.1.0", seed: -1 }), REFUSAL.BAD_VERSION);
+  // with the version fine the other refusals are reached
+  const fine = { minComfyUIVersion: "0.1.0", comfyVersion: "0.37.0" };
+  refusalOf(convert(wf, { ...fine, seed: -1 }), REFUSAL.BAD_SEED);
+  refusalOf(convert(wf, fine, {}), REFUSAL.BAD_OBJECT_INFO);
+  refusalOf(convert({}, fine), REFUSAL.BAD_TEMPLATE);
+});
+
+test("version: a ComfyUI version given with no minimum to check it against is said so in a version_check_skipped warning, never silently accepted", () => {
+  const wf = readJson("basic-t2i.workflow.json");
+  const skipped = convert(wf, { comfyVersion: "0.1.0" });
+  assert.equal(skipped.ok, true);
+  const w = warned(skipped, "version_check_skipped");
+  assert.equal(w.length, 1);
+  assert.equal(w[0].comfyVersion, "0.1.0");
+  assert.equal(typeof w[0].reason, "string");
+  assert.deepEqual(warned(convert(wf, { minComfyUIVersion: "0.3.0", comfyVersion: "0.3.0" }), "version_check_skipped"), [], "a check that ran is not a skipped one");
+  assert.deepEqual(warned(convert(wf, {}), "version_check_skipped"), [], "no version given and none needed: nothing was skipped");
+  assert.deepEqual(warned(convert(wf, { minComfyUIVersion: null, comfyVersion: null }), "version_check_skipped"), []);
 });
 
 // ---- result shape --------------------------------------------------------------------------------------------------------
@@ -791,6 +1066,20 @@ test("CLI: --index reads the template's minimum from the packaged index by file 
   assert.equal(fine.status, 0, fine.stderr);
   const unlisted = cli("--template", T("basic-t2i.workflow.json"), "--object-info", T("object-info.synthetic.json"), "--index", T("index.synthetic.json"), "--name", "no-minimum");
   assert.equal(unlisted.status, 0, "a template the index lists with no minimum needs no ComfyUI version");
+});
+
+test("CLI: --comfy-version with no minimum source prints a version_check_skipped warning and still converts", () => {
+  const base = ["--template", T("basic-t2i.workflow.json"), "--object-info", T("object-info.synthetic.json"), "--comfy-version", "0.1.0"];
+  const skipped = (r) => (r.json?.warnings ?? []).filter((w) => w.code === "version_check_skipped").map((w) => w.comfyVersion);
+  const alone = cli(...base);
+  assert.equal(alone.status, 0, alone.stderr);
+  assert.deepEqual(skipped(alone), ["0.1.0"], "the JSON carries the warning");
+  const unlisted = cli(...base, "--index", T("index.synthetic.json"), "--name", "no-minimum");
+  assert.equal(unlisted.status, 0, unlisted.stderr);
+  assert.deepEqual(skipped(unlisted), ["0.1.0"], "an index that lists the template with no minimum is no minimum source either");
+  const checked = cli(...base, "--min-comfyui-version", "0.0.1");
+  assert.equal(checked.status, 0, checked.stderr);
+  assert.deepEqual(skipped(checked), []);
 });
 
 test("CLI: a call that cannot be read is exit 2 with a typed reason, never a stack trace", () => {

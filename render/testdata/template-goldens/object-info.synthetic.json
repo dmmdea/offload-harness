@@ -230,6 +230,24 @@
     "output": [], "output_name": [],
     "name": "SaveGLB", "display_name": "Save 3D Model", "output_node": true
   },
+  "LoadVideo": {
+    "input": { "required": { "file": [["a.mp4", "b.mp4"], { "video_upload": true }] } },
+    "input_order": { "required": ["file"] },
+    "output": ["VIDEO"], "output_name": ["VIDEO"],
+    "name": "LoadVideo", "display_name": "Load Video", "output_node": false
+  },
+  "GetImageSize": {
+    "input": { "required": { "image": ["IMAGE", {}] } },
+    "input_order": { "required": ["image"] },
+    "output": ["INT", "INT", "INT"], "output_name": ["width", "height", "batch_size"],
+    "name": "GetImageSize", "display_name": "Get Image Size", "output_node": false
+  },
+  "Preview3D": {
+    "input": { "required": { "model_file": ["MESH,FILE_3D", {}] } },
+    "input_order": { "required": ["model_file"] },
+    "output": [], "output_name": [],
+    "name": "Preview3D", "display_name": "Preview 3D", "output_node": true
+  },
   "ForceSocketNode": {
     "input": {
       "required": { "image": ["IMAGE", {}], "steps": ["INT", { "default": 4 }] },
