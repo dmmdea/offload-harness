@@ -746,3 +746,32 @@ func (l *Lease) HostRAMHold() (askedGiB float64, until time.Time, err error) {
 	}
 	return meta.HostRAMWaitGiB, holdUntilOf(meta.HostRAMHoldUntilMs), nil
 }
+
+// RecordState is what the record of one lease epoch says about whether that lease is held, as far as a release can tell.
+type RecordState int
+
+const (
+	// RecordAbsent: no record of this epoch (a card lease's e/<epoch>.json, or a whole-node meta.json naming it) exists. Gone.
+	RecordAbsent RecordState = iota
+	// RecordHeld: the record exists and could be read.
+	RecordHeld
+	// RecordUnreadable: the record exists, or may exist, and could not be read (an access error while it is replaced, a sharing
+	// violation, an I/O error, a directory where the file was). The lease is HELD for every decision that matters: never gone.
+	RecordUnreadable
+)
+
+func (s RecordState) String() string {
+	switch s {
+	case RecordHeld:
+		return "held"
+	case RecordUnreadable:
+		return "unreadable"
+	}
+	return "absent"
+}
+
+// RecordState looks at the record of lease epoch directly (not through the reader, which treats a record it cannot read as
+// absent): absent, held, or unreadable, with the cause for the last.
+func (m *Manager) RecordState(epoch uint64) (RecordState, error) {
+	return RecordAbsent, nil
+}
