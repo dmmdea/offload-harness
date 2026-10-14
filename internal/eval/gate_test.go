@@ -76,6 +76,7 @@ func supPre(n int) PreReg {
 	return PreReg{
 		Mode:    ModeSuperiority,
 		Primary: PreRegPrimary{Name: "goal_reached", Class: ClassUnitInterval},
+		Judge:   Judge{Kind: "deterministic", Identity: scorerID},
 		Tasks:   taskIDs(n),
 	}
 }
@@ -84,6 +85,7 @@ func niPre(n int) PreReg {
 	return PreReg{
 		Mode:       ModeNonInferiority,
 		Primary:    PreRegPrimary{Name: "answer_quality", Class: ClassJudge010},
+		Judge:      Judge{Kind: "deterministic", Identity: scorerID},
 		Efficiency: []PreRegEfficiency{{Name: tokensName, Class: EffTokens}},
 		Tasks:      taskIDs(n),
 	}
@@ -96,6 +98,16 @@ func freeze(t *testing.T, p PreReg, incumbent *Arm) (Baseline, string) {
 		t.Fatalf("freeze: %v", err)
 	}
 	return b, h
+}
+
+// withInfraErrors returns a copy of a whose tasks at the given positions hold one infra_error
+// attempt and nothing else.
+func withInfraErrors(a Arm, idx ...int) Arm {
+	out := cloneArm(a)
+	for _, i := range idx {
+		out.Tasks[i].Attempts = []Attempt{{Outcome: OutcomeInfraError}}
+	}
+	return out
 }
 
 func detJudge() Judge { return Judge{Kind: "deterministic", Identity: scorerID} }
@@ -195,15 +207,16 @@ func TestGateVerdictTable(t *testing.T) {
 			}},
 		{name: "6d non-inferior with the metric worse: INCONCLUSIVE", pre: niPre(sixteen),
 			inc: arm("i", repeatF(8.0, sixteen), tokens), can: arm("c", repeatF(7.75, sixteen), repeatF(1200, sixteen)),
-			verdict: VerdictInconclusive, reason: "no declared efficiency metric improved"},
-		{name: "7 n below min_pairs is INCONCLUSIVE", pre: supPre(10), inc: arm("i", repeatF(0, 10), nil), can: arm("c", repeatF(1, 10), nil),
-			verdict: VerdictInconclusive, reason: "n=10 below min_pairs=16"},
+			verdict: VerdictInconclusive, reason: "declared efficiency metric " + tokensName + " got significantly worse"},
+		{name: "7 n below min_pairs is INCONCLUSIVE (the incumbent lost 6 of 20 tasks)", pre: supPre(20),
+			inc: withInfraErrors(arm("i", repeatF(0, 20), nil), 0, 1, 2, 3, 4, 5), can: arm("c", repeatF(1, 20), nil),
+			verdict: VerdictInconclusive, reason: "n=14 below min_pairs=16"},
 		{name: "9 a missing efficiency metric: non-inferiority cannot ADOPT", pre: niPre(sixteen),
 			inc: arm("i", repeatF(8.0, sixteen), nil), can: arm("c", repeatF(8.0, sixteen), nil),
-			verdict: VerdictInconclusive, reason: "no declared efficiency metric improved", extra: func(t *testing.T, r GateResult) {
+			verdict: VerdictInconclusive, reason: "declared efficiency metric " + tokensName + " has 16 of 16 pairs unresolved", extra: func(t *testing.T, r GateResult) {
 				e := r.Efficiency[0]
-				if e.N != 0 || e.Improves || e.UnresolvedPairs != 16 {
-					t.Fatalf("an absent metric resolves nowhere and cannot improve: %+v", e)
+				if e.N != 0 || e.Improves || e.UnresolvedPairs != 16 || !e.OverUnresolvedCap {
+					t.Fatalf("an absent metric resolves nowhere, is over the unresolved cap and cannot improve: %+v", e)
 				}
 			}},
 		{name: "11 incumbent tie (identical arrays): INCONCLUSIVE and keep_incumbent", pre: supPre(sixteen),
@@ -247,7 +260,9 @@ func TestGateExcludedShareAboveThresholdIsInconclusive(t *testing.T) {
 	if r.Verdict != VerdictInconclusive || !strings.Contains(r.Reason, "excluded_share=0.4") || !strings.Contains(r.Reason, "max_excluded_share=0.2") {
 		t.Fatalf("want INCONCLUSIVE naming the share and the threshold, got %s: %s", r.Verdict, r.Reason)
 	}
-	if r.NUsed != 24 || r.ExcludedPairs != 16 || r.NDeclared != 40 || r.ExcludedShare != 0.4 {
+	// The 16 tasks the candidate never ran enter its arm at the worst score, so every declared task
+	// is a usable pair and the share is the candidate's unusable attempts over its attempts.
+	if r.NUsed != 40 || r.ExcludedPairs != 0 || r.NDeclared != 40 || r.ExcludedShare != 0.4 || r.ImputedAttempts != 16 {
 		t.Fatalf("counts wrong: %+v", r)
 	}
 	// Missing tasks are one not_run attempt each on that arm.
@@ -324,18 +339,27 @@ func TestGateEfficiencyMetricsUseTheSameBootstrap(t *testing.T) {
 	if len(r.Efficiency) != 3 {
 		t.Fatalf("want 3 efficiency rows in declared order, got %+v", r.Efficiency)
 	}
-	d, lo, hi := BootstrapDeltaMean(tokI, tokC, b.BootstrapB, b.Seed)
+	// Three metrics are declared, so each one is read on the two-sided 1 - 0.05/3 interval (a
+	// Bonferroni read): the same replicates as BootstrapDeltaMean, other percentiles.
+	d, lo, hi := refInterval(tokI, tokC, b.BootstrapB, b.Seed, 0.025/3)
+	pd, plo, phi := BootstrapDeltaMean(tokI, tokC, b.BootstrapB, b.Seed)
 	e0 := r.Efficiency[0]
-	if !(lo < hi) {
-		t.Fatalf("setup: the tokens interval must have width, got [%v, %v]: a point interval cannot tell one seed from another", lo, hi)
+	if !(lo < hi) || !(lo <= plo && hi >= phi) {
+		t.Fatalf("setup: the tokens interval must have width and contain the plain 95%% one, got [%v, %v] vs [%v, %v]", lo, hi, plo, phi)
+	}
+	if d != pd {
+		t.Fatalf("setup: the delta is the mean of the replicates whatever the level: %v vs %v", d, pd)
 	}
 	if e0.Name != tokensName || val(e0.Delta) != d || val(e0.Lo) != lo || val(e0.Hi) != hi || e0.N != n || e0.UnresolvedPairs != 0 || !e0.Improves || !e0.LowerIsBetter || e0.Class != EffTokens {
 		t.Fatalf("tokens row wrong: %+v (want %v %v %v)", e0, d, lo, hi)
 	}
+	if want := 1 - 0.05/3; math.Abs(e0.Level-want) > 1e-12 || e0.Level != r.Efficiency[1].Level || e0.Level != r.Efficiency[2].Level {
+		t.Fatalf("level must be 1 - 0.05/3 on every metric, got %v %v %v", e0.Level, r.Efficiency[1].Level, r.Efficiency[2].Level)
+	}
 	if e1 := r.Efficiency[1]; e1.Improves || e1.Delta == nil || *e1.Delta != 0 || e1.N != n {
 		t.Fatalf("an unchanged metric must not improve (and its zero is a measured zero, not a missing one): %+v", e1)
 	}
-	sd, slo, shi := BootstrapDeltaMean(savedI, savedC, b.BootstrapB, b.Seed)
+	sd, slo, shi := refInterval(savedI, savedC, b.BootstrapB, b.Seed, 0.025/3)
 	e2 := r.Efficiency[2]
 	if !(slo < shi) {
 		t.Fatalf("setup: the tokens_saved interval must have width, got [%v, %v]", slo, shi)
@@ -343,21 +367,23 @@ func TestGateEfficiencyMetricsUseTheSameBootstrap(t *testing.T) {
 	if !e2.Improves || e2.LowerIsBetter || !(val(e2.Lo) > 0) || val(e2.Delta) != sd || val(e2.Lo) != slo || val(e2.Hi) != shi {
 		t.Fatalf("a higher-is-better metric improves when lo > 0, with the same B and seed: %+v (want %v %v %v)", e2, sd, slo, shi)
 	}
-	// GATE-R2: ONE improving metric is enough. tokens and tokens_saved improve, peak_gib does not,
-	// and the primary (8 against 8) is inside the margin: ADOPT. "All must improve" would not.
+	// Rule R2: ONE improving metric is enough. tokens and tokens_saved improve, peak_gib does not
+	// (and does not regress), and the primary (8 against 8) is inside the margin: ADOPT. "All must
+	// improve" would not.
 	if r.Verdict != VerdictAdopt {
 		t.Fatalf("at least one improving metric adopts, whatever the others do: %s %s", r.Verdict, r.Reason)
 	}
-	// Reverse the direction of tokens_saved: it is now worse, not improved, and tokens alone adopts.
+	// Reverse the direction of tokens_saved: it is now worse, not improved. tokens still improves,
+	// but a declared metric that got significantly worse vetoes the ADOPT.
 	for i := range cand.Tasks {
 		cand.Tasks[i].Attempts[0].Metrics["tokens_saved"] = f64(50)
 	}
 	r2 := mustGate(t, b, h, inputFor(h, inc, cand))
-	if r2.Efficiency[2].Improves {
-		t.Fatalf("a higher-is-better metric that dropped must not improve: %+v", r2.Efficiency[2])
+	if r2.Efficiency[2].Improves || !r2.Efficiency[2].Regresses || !r2.Efficiency[0].Improves {
+		t.Fatalf("a higher-is-better metric that dropped must regress and not improve: %+v", r2.Efficiency)
 	}
-	if r2.Verdict != VerdictAdopt {
-		t.Fatalf("one improving metric (tokens) of three still adopts: %s %s", r2.Verdict, r2.Reason)
+	if r2.Verdict != VerdictInconclusive || r2.Reason != "declared efficiency metric tokens_saved got significantly worse" {
+		t.Fatalf("one improving metric does not pay for a regressing one: %s %s", r2.Verdict, r2.Reason)
 	}
 	// The converse: no declared metric improves (tokens dearer, tokens_saved down, peak_gib equal).
 	for i := range cand.Tasks {
@@ -369,8 +395,17 @@ func TestGateEfficiencyMetricsUseTheSameBootstrap(t *testing.T) {
 			t.Fatalf("setup: no metric may improve in this row: %+v", e)
 		}
 	}
-	if r3.Verdict != VerdictInconclusive || r3.Reason != "non-inferior but no declared efficiency metric improved" {
-		t.Fatalf("no improving metric: want INCONCLUSIVE naming it, got %s %s", r3.Verdict, r3.Reason)
+	if r3.Verdict != VerdictInconclusive || !strings.Contains(r3.Reason, "significantly worse") {
+		t.Fatalf("no improving metric and two regressing ones: want INCONCLUSIVE naming a regression, got %s %s", r3.Verdict, r3.Reason)
+	}
+	// The same row with the two regressions removed: nothing improves, nothing regresses.
+	for i := range cand.Tasks {
+		cand.Tasks[i].Attempts[0].Metrics[tokensName] = f64(tokI[i])
+		cand.Tasks[i].Attempts[0].Metrics["tokens_saved"] = f64(savedI[i])
+	}
+	r4 := mustGate(t, b, h, inputFor(h, inc, cand))
+	if r4.Verdict != VerdictInconclusive || r4.Reason != "non-inferior but no declared efficiency metric improved" {
+		t.Fatalf("no improving metric: want INCONCLUSIVE naming it, got %s %s", r4.Verdict, r4.Reason)
 	}
 }
 
@@ -446,8 +481,8 @@ func TestGateEfficiencyNeedsMinPairsResolved(t *testing.T) {
 	if e.N != 15 || e.UnresolvedPairs != 5 || e.Improves {
 		t.Fatalf("below min_pairs resolved pairs the metric is insufficient and does not improve: %+v", e)
 	}
-	if r.Verdict != VerdictInconclusive || !strings.Contains(r.Reason, "no declared efficiency metric improved") {
-		t.Fatalf("non-inferiority cannot ADOPT on an insufficient metric: %s %s", r.Verdict, r.Reason)
+	if r.Verdict != VerdictInconclusive || !e.OverUnresolvedCap || !strings.Contains(r.Reason, tokensName+" has 5 of 20 pairs unresolved") {
+		t.Fatalf("non-inferiority cannot ADOPT on an insufficiently measured metric: %s %s", r.Verdict, r.Reason)
 	}
 	// And an all-unresolved metric has no interval at all: delta, lo and hi are nil (null in the
 	// JSON), never the 0 BootstrapDeltaMean returns for "nothing to conclude".
@@ -461,9 +496,10 @@ func TestGateEfficiencyNeedsMinPairsResolved(t *testing.T) {
 	}
 }
 
-// GATE-R3 / R2: a task's efficiency value is the mean of the RESOLVED values over its USABLE
-// attempts. A nil value neither counts as 0 nor enters the divisor; an attempt that is not usable
-// (infra_error here) contributes nothing, whatever it carries and wherever it sits in the list.
+// Rules R3 and R2: a task's efficiency value is the mean of the RESOLVED values over its SCORED
+// attempts (pass, task_fail, cheat). A nil value neither counts as 0 nor enters the divisor; an
+// attempt that did not finish (infra_error here) contributes no cost, whatever it carries and
+// wherever it sits in the list, even though the candidate's primary score counts it at the worst.
 // Every task on the candidate arm has the same attempt list and every task on the incumbent costs
 // 1500, so each bootstrap replicate is exactly want-1500 and delta, lo and hi pin the task value.
 func TestGatePerTaskEfficiencyAggregation(t *testing.T) {
@@ -502,16 +538,13 @@ func TestGatePerTaskEfficiencyAggregation(t *testing.T) {
 	}
 }
 
-// GATE-R6 power note under non-inferiority: with fewer than two usable pairs there is no interval
+// The power note under non-inferiority: with fewer than two usable pairs there is no interval
 // to project from, so tasks_needed is "unbounded" (without the guard the margin yardstick would
 // turn a zero half-width into "0 tasks needed").
 func TestGatePowerNoteNonInferiorityBelowTwoPairs(t *testing.T) {
-	p := niPre(4)
-	p.MinPairs = 2
-	b, h := freeze(t, p, nil)
-	one := arm("c", repeatF(7.75, 4), repeatF(800, 4))
-	one.Tasks = one.Tasks[:1]
-	r := mustGate(t, b, h, inputFor(h, arm("i", repeatF(8, 4), repeatF(1000, 4)), one))
+	b, h := freeze(t, niPre(20), nil)
+	oneUsable := withInfraErrors(arm("i", repeatF(8, 20), repeatF(1000, 20)), 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)
+	r := mustGate(t, b, h, inputFor(h, oneUsable, arm("c", repeatF(7.75, 20), repeatF(800, 20))))
 	if r.NUsed != 1 {
 		t.Fatalf("setup: want one usable pair, got %d", r.NUsed)
 	}
@@ -523,7 +556,7 @@ func TestGatePowerNoteNonInferiorityBelowTwoPairs(t *testing.T) {
 	}
 }
 
-// GATE-R3: a metric with fewer than two resolved pairs has no interval, so its delta, lo and hi
+// Rule R3: a metric with fewer than two resolved pairs has no interval, so its delta, lo and hi
 // serialize as null, never as the 0 BootstrapDeltaMean returns for "nothing to conclude". A metric
 // with two or more resolved pairs always has numbers, and a measured 0 stays 0.
 func TestGateEfficiencyWithFewerThanTwoResolvedPairsIsNullNotZero(t *testing.T) {
@@ -664,30 +697,32 @@ func TestGateCheatCountedSeparatelyAndScoredZero(t *testing.T) {
 	}
 }
 
-// Row 17 and R3: only pass, task_fail and cheat score; a task's score is the mean of its usable
-// attempts; the other classes are counted and excluded.
-func TestGateInfraErrorsAreExcludedAndCounted(t *testing.T) {
+// Row 17 and R3: a candidate attempt that did not finish enters its task's mean at the worst
+// score; an incumbent attempt that did not finish is skipped, and a task with none left is an
+// excluded pair. Both are counted.
+func TestGateUnusableAttemptsAreImputedOnTheCandidateAndSkippedOnTheIncumbent(t *testing.T) {
 	const n = 20
 	b, h := freeze(t, supPre(n), nil)
 	inc := arm("i", repeatF(0.5, n), nil)
 	cand := arm("c", repeatF(1, n), nil)
-	// t000: the candidate's passing attempt is joined by an infra_error: score stays 1.0.
-	cand.Tasks[0].Attempts = append(cand.Tasks[0].Attempts, Attempt{Outcome: OutcomeInfraError, Score: f64(0)})
-	// t001: two usable attempts, 1.0 and 0.0: the task scores their mean, 0.5.
+	// t000: a passing attempt joined by an infra_error: the task scores (1 + 0) / 2.
+	cand.Tasks[0].Attempts = append(cand.Tasks[0].Attempts, Attempt{Outcome: OutcomeInfraError, Score: f64(1)})
+	// t001: two scored attempts, 1.0 and 0.0: the task scores their mean, 0.5.
 	cand.Tasks[1].Attempts = append(cand.Tasks[1].Attempts, Attempt{Outcome: OutcomeTaskFail, Score: f64(0)})
-	// t002: only an infra_error: the pair is unusable.
+	// t002: only an infra_error: the task scores the worst, 0.
 	cand.Tasks[2].Attempts = []Attempt{{Outcome: OutcomeInfraError}}
 	// t003 timeout, t004 judge_error, t005 not_run (each with a score that must be ignored).
 	cand.Tasks[3].Attempts = []Attempt{{Outcome: OutcomeTimeout, Score: f64(1)}}
 	cand.Tasks[4].Attempts = []Attempt{{Outcome: OutcomeJudgeError, Score: f64(1)}}
 	cand.Tasks[5].Attempts = []Attempt{{Outcome: OutcomeNotRun, Score: f64(1)}}
-	// t006: a task with an empty attempt list counts as not run.
+	// t006: a task with an empty attempt list counts as one not_run attempt.
 	cand.Tasks[6].Attempts = nil
-	// The incumbent lost t019 to an infra_error as well.
+	// The incumbent lost t019 to an infra_error as well, and t018 has a timeout beside a pass.
 	inc.Tasks[19].Attempts = []Attempt{{Outcome: OutcomeInfraError}}
+	inc.Tasks[18].Attempts = []Attempt{{Outcome: OutcomePass, Score: f64(0.5)}, {Outcome: OutcomeTimeout}}
 	r := mustGate(t, b, h, inputFor(h, inc, cand))
-	if r.ExcludedPairs != 6 || r.NUsed != 14 || r.NDeclared != 20 || r.ExcludedShare != 0.3 {
-		t.Fatalf("want 6 excluded of 20 (t002-t006 and t019), got %+v", r)
+	if r.ExcludedPairs != 1 || r.NUsed != 19 || r.NDeclared != 20 {
+		t.Fatalf("only t019 (no usable incumbent attempt) is an excluded pair: %+v", r)
 	}
 	wantCand := OutcomeCounts{"pass": 15, "task_fail": 1, "cheat": 0, "infra_error": 2, "timeout": 1, "judge_error": 1, "not_run": 2}
 	for k, v := range wantCand {
@@ -695,26 +730,33 @@ func TestGateInfraErrorsAreExcludedAndCounted(t *testing.T) {
 			t.Errorf("candidate %s = %d, want %d (%+v)", k, r.AttemptCounts.Candidate[k], v, r.AttemptCounts.Candidate)
 		}
 	}
-	if r.AttemptCounts.Incumbent["infra_error"] != 1 || r.AttemptCounts.Incumbent["pass"] != 19 {
+	if r.AttemptCounts.Incumbent["infra_error"] != 1 || r.AttemptCounts.Incumbent["timeout"] != 1 || r.AttemptCounts.Incumbent["pass"] != 19 {
 		t.Errorf("incumbent counts wrong: %+v", r.AttemptCounts.Incumbent)
 	}
 	if len(r.AttemptCounts.Candidate) != 7 || len(r.AttemptCounts.Incumbent) != 7 {
 		t.Errorf("every class must be present, even at zero: %+v", r.AttemptCounts)
 	}
-	// 6/20 = 0.3 > 0.2 and n = 14 < 16: the run is INCONCLUSIVE and says why.
-	if r.Verdict != VerdictInconclusive {
+	if r.ImputedAttempts != 6 || r.UnusableAttempts != (ArmCount{Incumbent: 2, Candidate: 6}) {
+		t.Errorf("imputed %d, unusable %+v: want 6 and {2 6}", r.ImputedAttempts, r.UnusableAttempts)
+	}
+	// 6 unusable candidate attempts of 22 (the missing t006 is a placeholder attempt) = 0.2727 is
+	// the largest of the three shares (1/20 excluded pairs, 2/21 incumbent attempts).
+	if want := 6.0 / 22.0; r.ExcludedShare != want {
+		t.Errorf("excluded_share %v, want the candidate's unusable share %v", r.ExcludedShare, want)
+	}
+	if r.Verdict != VerdictInconclusive || !strings.Contains(r.Reason, "excluded_share=0.2727") {
 		t.Fatalf("got %s %s", r.Verdict, r.Reason)
 	}
-	// Scores: the usable pairs, sorted by id, carry t000=1.0, t001=0.5 on the candidate.
+	// Scores: the 19 usable pairs in id order. The candidate carries t000=0.5, t001=0.5,
+	// t002..t006=0 and 1 elsewhere; the incumbent 0.5 everywhere (t018 is pass 0.5, the timeout skipped).
 	var incS, candS []float64
-	for i := 0; i < n; i++ {
-		if i >= 2 && i <= 6 || i == 19 {
-			continue
-		}
+	for i := 0; i < n-1; i++ {
 		incS = append(incS, 0.5)
-		switch i {
-		case 1:
+		switch {
+		case i == 0 || i == 1:
 			candS = append(candS, 0.5)
+		case i >= 2 && i <= 6:
+			candS = append(candS, 0)
 		default:
 			candS = append(candS, 1)
 		}
@@ -751,12 +793,13 @@ func TestGateHeldOutFailureTurnsAdoptIntoBlock(t *testing.T) {
 	if r2.Verdict != VerdictAdopt || r2.HeldOut == nil || r2.HeldOut.Failed || r2.HeldOut.Delta != 0 {
 		t.Fatalf("a held-out delta of 0 passes superiority: %+v %s", r2.HeldOut, r2.Verdict)
 	}
-	// No usable held-out pair at all: fails, "no held-out evidence" is not "held-out passed".
+	// The candidate never ran the held-out tasks: they enter its arm at the worst score (0), so the
+	// two held-out pairs exist and the check fails; it cannot be skipped by not running them.
 	none := arm("c", repeatF(1, 18), nil)
 	none.Tasks = none.Tasks[:16]
 	r3 := mustGate(t, b, h, inputFor(h, inc, none))
-	if r3.Verdict != VerdictBlock || r3.HeldOut == nil || r3.HeldOut.N != 0 || !r3.HeldOut.Failed {
-		t.Fatalf("no usable held-out pair must fail: %+v %s", r3.HeldOut, r3.Verdict)
+	if r3.Verdict != VerdictBlock || r3.HeldOut == nil || r3.HeldOut.N != 2 || r3.HeldOut.Delta != -1 || !r3.HeldOut.Failed || r3.HeldOut.Missing {
+		t.Fatalf("held-out tasks the candidate lacks must count as failed attempts: %+v %s", r3.HeldOut, r3.Verdict)
 	}
 	// A failed held-out does not touch a verdict that was not ADOPT, and is still reported.
 	tie := arm("c", incScores, nil)
@@ -805,55 +848,96 @@ func TestGateRefusals(t *testing.T) {
 		return b, h, inputFor(h, arm("i", repeatF(0, n), nil), arm("c", repeatF(1, n), nil))
 	}
 	modelJudge := Judge{Kind: "model", Identity: "judge-model-1"}
-	okReceipt := &JudgeReceipt{ScorerID: "judge-model-1", PairsHash: "abc", Passed: true, BuildSHA: "def"}
+	okReceipt := &JudgeReceipt{ScorerID: "judge-model-1", PairsHash: hex64("p"), Passed: true, BuildSHA: hex64("b")}
+	// goodModel is the same comparison under a baseline that froze the model judge.
+	goodModel := func() (Baseline, string, GateInput) {
+		p := supPre(n)
+		p.Judge = modelJudge
+		b, h := freeze(t, p, nil)
+		in := inputFor(h, arm("i", repeatF(0, n), nil), arm("c", repeatF(1, n), nil))
+		in.Judge, in.Receipt = modelJudge, okReceipt
+		return b, h, in
+	}
 	for _, tc := range []struct {
 		name   string
+		model  bool
 		mutate func(b *Baseline, h *string, in *GateInput)
 		want   string
 	}{
-		{"10 baseline hash mismatch (input)", func(b *Baseline, h *string, in *GateInput) { in.BaselineHash = strings.Repeat("0", 64) }, "baseline_hash"},
-		{"10b baseline hash mismatch (handed in)", func(b *Baseline, h *string, in *GateInput) { *h = strings.Repeat("0", 64) }, "baseline_hash"},
-		{"10c baseline edited after freeze", func(b *Baseline, h *string, in *GateInput) { b.MinPairs = 2 }, "does not match"},
-		{"13 model judge without a receipt", func(b *Baseline, h *string, in *GateInput) { in.Judge = modelJudge }, "receipt"},
-		{"14 model judge with a failing receipt", func(b *Baseline, h *string, in *GateInput) {
-			in.Judge = modelJudge
+		{"10 baseline hash mismatch (input)", false, func(b *Baseline, h *string, in *GateInput) { in.BaselineHash = strings.Repeat("0", 64) }, "baseline_hash"},
+		{"10b baseline hash mismatch (handed in)", false, func(b *Baseline, h *string, in *GateInput) { *h = strings.Repeat("0", 64) }, "baseline_hash"},
+		{"10c baseline edited after freeze", false, func(b *Baseline, h *string, in *GateInput) { b.Seed = 99 }, "does not match"},
+		{"13 model judge without a receipt", true, func(b *Baseline, h *string, in *GateInput) { in.Receipt = nil }, "receipt"},
+		{"14 model judge with a failing receipt", true, func(b *Baseline, h *string, in *GateInput) {
 			r := *okReceipt
 			r.Passed = false
 			in.Receipt = &r
 		}, "did not pass"},
-		{"14b model judge, receipt for another scorer", func(b *Baseline, h *string, in *GateInput) {
-			in.Judge = modelJudge
+		{"14b model judge, receipt for another scorer", true, func(b *Baseline, h *string, in *GateInput) {
 			r := *okReceipt
 			r.ScorerID = "another-model"
 			in.Receipt = &r
 		}, "scorer_id"},
-		{"unknown judge kind", func(b *Baseline, h *string, in *GateInput) { in.Judge.Kind = "ensemble" }, "judge kind"},
-		{"empty judge kind", func(b *Baseline, h *string, in *GateInput) { in.Judge.Kind = "" }, "judge kind"},
-		{"empty judge identity", func(b *Baseline, h *string, in *GateInput) { in.Judge.Identity = "" }, "identity"},
-		{"no incumbent anywhere", func(b *Baseline, h *string, in *GateInput) { in.Incumbent = nil }, "incumbent"},
-		{"task not in the baseline (candidate)", func(b *Baseline, h *string, in *GateInput) {
+		{"14c model judge, receipt with an empty pairs_hash", true, func(b *Baseline, h *string, in *GateInput) {
+			r := *okReceipt
+			r.PairsHash = ""
+			in.Receipt = &r
+		}, "pairs_hash"},
+		{"14d model judge, receipt with an empty build_sha256", true, func(b *Baseline, h *string, in *GateInput) {
+			r := *okReceipt
+			r.BuildSHA = ""
+			in.Receipt = &r
+		}, "build_sha256"},
+		{"14e model judge, receipt with upper-case hex", true, func(b *Baseline, h *string, in *GateInput) {
+			r := *okReceipt
+			r.PairsHash = strings.ToUpper(hex64("a"))
+			in.Receipt = &r
+		}, "pairs_hash"},
+		{"14f model judge, receipt with a short build_sha256", true, func(b *Baseline, h *string, in *GateInput) {
+			r := *okReceipt
+			r.BuildSHA = hex64("a")[:63]
+			in.Receipt = &r
+		}, "build_sha256"},
+		{"14g the input declares deterministic for a frozen model judge", true, func(b *Baseline, h *string, in *GateInput) {
+			in.Judge.Kind, in.Receipt = "deterministic", nil
+		}, "judge kind"},
+		{"14h the input declares a model judge for a frozen deterministic one", false, func(b *Baseline, h *string, in *GateInput) {
+			in.Judge.Kind, in.Receipt = "model", okReceipt
+		}, "judge kind"},
+		{"14i the input's judge identity is not the frozen one", false, func(b *Baseline, h *string, in *GateInput) {
+			in.Judge.Identity = "totally-different-scorer"
+		}, "judge identity"},
+		{"unknown judge kind", false, func(b *Baseline, h *string, in *GateInput) { in.Judge.Kind = "ensemble" }, "judge kind"},
+		{"empty judge kind", false, func(b *Baseline, h *string, in *GateInput) { in.Judge.Kind = "" }, "judge kind"},
+		{"empty judge identity", false, func(b *Baseline, h *string, in *GateInput) { in.Judge.Identity = "" }, "identity"},
+		{"no incumbent anywhere", false, func(b *Baseline, h *string, in *GateInput) { in.Incumbent = nil }, "incumbent"},
+		{"task not in the baseline (candidate)", false, func(b *Baseline, h *string, in *GateInput) {
 			in.Candidate.Tasks = append(in.Candidate.Tasks, Task{ID: "zzz-new", Attempts: []Attempt{{Outcome: OutcomePass, Score: f64(1)}}})
 		}, "not in the baseline"},
-		{"task not in the baseline (incumbent)", func(b *Baseline, h *string, in *GateInput) {
+		{"task not in the baseline (incumbent)", false, func(b *Baseline, h *string, in *GateInput) {
 			in.Incumbent.Tasks = append(in.Incumbent.Tasks, Task{ID: "zzz-new"})
 		}, "not in the baseline"},
-		{"scored attempt without a score", func(b *Baseline, h *string, in *GateInput) { in.Candidate.Tasks[0].Attempts[0].Score = nil }, "no score"},
-		{"task_fail without a score", func(b *Baseline, h *string, in *GateInput) {
+		{"scored attempt without a score", false, func(b *Baseline, h *string, in *GateInput) { in.Candidate.Tasks[0].Attempts[0].Score = nil }, "no score"},
+		{"task_fail without a score", false, func(b *Baseline, h *string, in *GateInput) {
 			in.Candidate.Tasks[0].Attempts[0] = Attempt{Outcome: OutcomeTaskFail}
 		}, "no score"},
-		{"invalid outcome", func(b *Baseline, h *string, in *GateInput) { in.Candidate.Tasks[0].Attempts[0].Outcome = "passed" }, "outcome"},
-		{"empty outcome", func(b *Baseline, h *string, in *GateInput) { in.Incumbent.Tasks[0].Attempts[0].Outcome = "" }, "outcome"},
-		{"repeated task id", func(b *Baseline, h *string, in *GateInput) {
+		{"invalid outcome", false, func(b *Baseline, h *string, in *GateInput) { in.Candidate.Tasks[0].Attempts[0].Outcome = "passed" }, "outcome"},
+		{"empty outcome", false, func(b *Baseline, h *string, in *GateInput) { in.Incumbent.Tasks[0].Attempts[0].Outcome = "" }, "outcome"},
+		{"repeated task id", false, func(b *Baseline, h *string, in *GateInput) {
 			in.Candidate.Tasks = append(in.Candidate.Tasks, in.Candidate.Tasks[0])
 		}, "twice"},
-		{"candidate stamps missing", func(b *Baseline, h *string, in *GateInput) { in.Candidate.Stamps.EngineBuild = "" }, "stamps"},
-		{"incumbent stamps missing", func(b *Baseline, h *string, in *GateInput) { in.Incumbent.Stamps = Stamps{} }, "stamps"},
-		{"score outside the class range", func(b *Baseline, h *string, in *GateInput) { in.Candidate.Tasks[3].Attempts[0].Score = f64(1.5) }, "outside"},
-		{"negative score", func(b *Baseline, h *string, in *GateInput) { in.Candidate.Tasks[3].Attempts[0].Score = f64(-0.1) }, "outside"},
-		{"non-finite score", func(b *Baseline, h *string, in *GateInput) { in.Candidate.Tasks[3].Attempts[0].Score = f64(math.NaN()) }, "non-finite"},
+		{"candidate stamps missing", false, func(b *Baseline, h *string, in *GateInput) { in.Candidate.Stamps.EngineBuild = "" }, "stamps"},
+		{"incumbent stamps missing", false, func(b *Baseline, h *string, in *GateInput) { in.Incumbent.Stamps = Stamps{} }, "stamps"},
+		{"score outside the class range", false, func(b *Baseline, h *string, in *GateInput) { in.Candidate.Tasks[3].Attempts[0].Score = f64(1.5) }, "outside"},
+		{"negative score", false, func(b *Baseline, h *string, in *GateInput) { in.Candidate.Tasks[3].Attempts[0].Score = f64(-0.1) }, "outside"},
+		{"non-finite score", false, func(b *Baseline, h *string, in *GateInput) { in.Candidate.Tasks[3].Attempts[0].Score = f64(math.NaN()) }, "non-finite"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b, h, in := good()
+			mk := good
+			if tc.model {
+				mk = goodModel
+			}
+			b, h, in := mk()
 			tc.mutate(&b, &h, &in)
 			r, err := Gate(b, h, in)
 			if err == nil {
@@ -870,8 +954,7 @@ func TestGateRefusals(t *testing.T) {
 	}
 	// A model judge with a passing receipt for the same scorer is accepted, and a deterministic
 	// judge ignores a receipt it does not need.
-	b, h, in := good()
-	in.Judge, in.Receipt = modelJudge, okReceipt
+	b, h, in := goodModel()
 	if _, err := Gate(b, h, in); err != nil {
 		t.Fatalf("a model judge with a passing receipt must be accepted: %v", err)
 	}
@@ -972,7 +1055,7 @@ func TestGateIsDeterministicAndPure(t *testing.T) {
 		t.Fatalf("unexpected leading fields: %.60s", r1)
 	}
 	order := []string{`"verdict"`, `"reason"`, `"keep_incumbent"`, `"mode"`, `"margin"`, `"delta"`, `"lo"`, `"hi"`, `"n_used"`,
-		`"n_declared"`, `"excluded_pairs"`, `"excluded_share"`, `"attempt_counts"`, `"cheats"`, `"efficiency"`, `"held_out"`,
+		`"n_declared"`, `"excluded_pairs"`, `"excluded_share"`, `"attempt_counts"`, `"cheats"`, `"imputed_attempts"`, `"unusable_attempts"`, `"efficiency"`, `"held_out"`,
 		`"power"`, `"stamps"`, `"judge"`, `"era_marker"`, `"gate_version"`, `"corpus_hash"`, `"baseline_hash"`, `"bootstrap_b"`, `"seed"`}
 	last := -1
 	for _, k := range order {
@@ -988,7 +1071,7 @@ func TestGateReportsBaselineIdentity(t *testing.T) {
 	const n = 16
 	b, h := freeze(t, supPre(n), nil)
 	r := mustGate(t, b, h, inputFor(h, arm("i", repeatF(0, n), nil), arm("c", repeatF(1, n), nil)))
-	if r.GateVersion != "1" || r.CorpusHash != b.CorpusHash || r.BaselineHash != h || r.Mode != ModeSuperiority || r.Margin != 0 {
+	if r.GateVersion != GateVersion || GateVersion != "2" || r.CorpusHash != b.CorpusHash || r.BaselineHash != h || r.Mode != ModeSuperiority || r.Margin != 0 {
 		t.Fatalf("identity fields wrong: %+v", r)
 	}
 	if r.Judge != detJudge() || r.Stamps.Candidate != testStamps("c") || r.Stamps.Incumbent != testStamps("i") {
@@ -999,7 +1082,7 @@ func TestGateReportsBaselineIdentity(t *testing.T) {
 	}
 }
 
-// GATE-R8: the era marker is the sha256 of the canonical JSON of the gate version, both stamps
+// Rule R8: the era marker is the sha256 of the canonical JSON of the gate version, both stamps
 // and the judge identity, and of nothing else.
 func TestGateEraMarker(t *testing.T) {
 	const n = 16
@@ -1012,7 +1095,7 @@ func TestGateEraMarker(t *testing.T) {
 			IncumbentStamps Stamps `json:"incumbent_stamps"`
 			CandidateStamps Stamps `json:"candidate_stamps"`
 			JudgeIdentity   string `json:"judge_identity"`
-		}{"1", inc, cand, identity}
+		}{GateVersion, inc, cand, identity}
 		j, _ := json.Marshal(doc)
 		s := sha256.Sum256(j)
 		return hex.EncodeToString(s[:])
@@ -1033,7 +1116,6 @@ func TestGateEraMarker(t *testing.T) {
 		"candidate harness": func(inc, cand *Arm, j *Judge) { cand.Stamps.HarnessBuildSHA256 = "x" },
 		"candidate seat":    func(inc, cand *Arm, j *Judge) { cand.Stamps.SeatConfigSHA256 = "x" },
 		"candidate engine":  func(inc, cand *Arm, j *Judge) { cand.Stamps.EngineBuild = "x" },
-		"judge identity":    func(inc, cand *Arm, j *Judge) { j.Identity = "another-scorer" },
 	} {
 		i2, c2, j2 := arm("i", repeatF(0, n), nil), arm("c", repeatF(1, n), nil), detJudge()
 		mut(&i2, &c2, &j2)
@@ -1043,16 +1125,32 @@ func TestGateEraMarker(t *testing.T) {
 			t.Errorf("changing the %s must change the era marker", name)
 		}
 	}
-	// The judge kind is not part of it (only the identity).
-	in := inputFor(h, inc, cand)
-	in.Judge = Judge{Kind: "model", Identity: scorerID}
-	in.Receipt = &JudgeReceipt{ScorerID: scorerID, Passed: true}
-	if mustGate(t, b, h, in).EraMarker != r.EraMarker {
+	// The judge is frozen: another identity is another baseline, and so another era; the judge kind
+	// is not part of the marker (only the identity).
+	for name, j := range map[string]Judge{
+		"judge identity": {Kind: "deterministic", Identity: "another-scorer"},
+	} {
+		p := supPre(n)
+		p.Judge = j
+		b2, h2 := freeze(t, p, nil)
+		in := inputFor(h2, inc, cand)
+		in.Judge = j
+		if got := mustGate(t, b2, h2, in).EraMarker; got == r.EraMarker {
+			t.Errorf("changing the %s must change the era marker", name)
+		}
+	}
+	pm := supPre(n)
+	pm.Judge = Judge{Kind: "model", Identity: scorerID}
+	bm, hm := freeze(t, pm, nil)
+	in := inputFor(hm, inc, cand)
+	in.Judge = pm.Judge
+	in.Receipt = &JudgeReceipt{ScorerID: scorerID, PairsHash: hex64("p"), BuildSHA: hex64("b"), Passed: true}
+	if mustGate(t, bm, hm, in).EraMarker != r.EraMarker {
 		t.Fatal("only the judge identity is in the era marker")
 	}
 }
 
-// GATE-R6 power note: the half-width of the main interval read three ways, and how many tasks to add.
+// The power note: the half-width of the main interval read three ways, and how many tasks to add.
 func TestGatePowerNote(t *testing.T) {
 	const n = 16
 	// A small effect on a small corpus: 2 of 16 tasks gain 1.0.
@@ -1110,10 +1208,8 @@ func TestGatePowerNote(t *testing.T) {
 		t.Fatalf("tasks_to_add %+v", rn.Power.TasksToAdd)
 	}
 	// Below two usable pairs there is no interval to project from.
-	bs, hs := freeze(t, func() PreReg { p := supPre(4); p.MinPairs = 2; return p }(), nil)
-	one := arm("c", repeatF(1, 4), nil)
-	one.Tasks = one.Tasks[:1]
-	rs := mustGate(t, bs, hs, inputFor(hs, arm("i", repeatF(0, 4), nil), one))
+	bs, hs := freeze(t, supPre(20), nil)
+	rs := mustGate(t, bs, hs, inputFor(hs, withInfraErrors(arm("i", repeatF(0, 20), nil), 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19), arm("c", repeatF(1, 20), nil)))
 	if rs.NUsed != 1 || !rs.Power.TasksNeeded.Unbounded || rs.Power.HalfWidth != 0 {
 		t.Fatalf("one usable pair projects nothing: %+v", rs.Power)
 	}

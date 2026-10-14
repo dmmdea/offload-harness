@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -78,6 +80,7 @@ func gateTaskList(n int) []string {
 const gatePrereg = `{
   "mode": "superiority",
   "primary": {"name": "goal_reached", "class": "unit_interval"},
+  "judge": {"kind": "deterministic", "identity": "acceptance-dsl"},
   "tasks": %s
 }`
 
@@ -86,15 +89,33 @@ func gatePreregFor(n int) string {
 	return fmt.Sprintf(gatePrereg, j)
 }
 
+// gateHex is a 64-character lower-case hex string made from a seed word.
+func gateHex(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:])
+}
+
 type frozen struct {
 	dir, baseline, hash, corpus string
 }
 
 func freezeSuperiority(t *testing.T, n int, incumbent *eval.Arm) frozen {
 	t.Helper()
+	return freezeWith(t, gatePreregFor(n), incumbent)
+}
+
+// freezeModelJudge freezes a 16-task superiority baseline whose pre-registered judge is a model.
+func freezeModelJudge(t *testing.T) frozen {
+	t.Helper()
+	j, _ := json.Marshal(gateTaskList(16))
+	return freezeWith(t, fmt.Sprintf(`{"mode":"superiority","primary":{"name":"goal_reached","class":"unit_interval"},"judge":{"kind":"model","identity":"m"},"tasks":%s}`, j), nil)
+}
+
+func freezeWith(t *testing.T, preregJSON string, incumbent *eval.Arm) frozen {
+	t.Helper()
 	dir := t.TempDir()
 	f := frozen{dir: dir, corpus: gateWrite(t, dir, "corpus.txt", "a redacted corpus\n")}
-	prereg := gateWrite(t, dir, "prereg.json", gatePreregFor(n))
+	prereg := gateWrite(t, dir, "prereg.json", preregJSON)
 	f.baseline = filepath.Join(dir, "baseline.json")
 	args := []string{"freeze", "--prereg", prereg, "--corpus", f.corpus, "--out", f.baseline}
 	if incumbent != nil {
@@ -203,15 +224,29 @@ func TestGateCmdExitCodeMapping(t *testing.T) {
 	}
 
 	// Refusals are 2, with or without --require-adopt, and print no result.
-	bad := map[string]eval.GateInput{
-		"bad hash":              {BaselineHash: strings.Repeat("0", 64), Candidate: gateArm("cand", 16, 1), Judge: judge},
-		"model without receipt": {BaselineHash: f.hash, Candidate: gateArm("cand", 16, 1), Judge: eval.Judge{Kind: "model", Identity: "m"}},
-		"model failing receipt": {BaselineHash: f.hash, Candidate: gateArm("cand", 16, 1), Judge: eval.Judge{Kind: "model", Identity: "m"}, Receipt: &eval.JudgeReceipt{ScorerID: "m", Passed: false}},
-		"unknown judge kind":    {BaselineHash: f.hash, Candidate: gateArm("cand", 16, 1), Judge: eval.Judge{Kind: "ensemble", Identity: "m"}},
+	fm := freezeModelJudge(t)
+	mj := eval.Judge{Kind: "model", Identity: "m"}
+	goodReceipt := eval.JudgeReceipt{ScorerID: "m", PairsHash: gateHex("pairs"), BuildSHA: gateHex("build"), Passed: true}
+	emptyHashes := goodReceipt
+	emptyHashes.PairsHash, emptyHashes.BuildSHA = "", ""
+	failing := goodReceipt
+	failing.Passed = false
+	type badCase struct {
+		f  frozen
+		in eval.GateInput
 	}
-	for name, in := range bad {
+	bad := map[string]badCase{
+		"bad hash":              {f, eval.GateInput{BaselineHash: strings.Repeat("0", 64), Candidate: gateArm("cand", 16, 1), Judge: judge}},
+		"model without receipt": {fm, eval.GateInput{BaselineHash: fm.hash, Candidate: gateArm("cand", 16, 1), Judge: mj}},
+		"model failing receipt": {fm, eval.GateInput{BaselineHash: fm.hash, Candidate: gateArm("cand", 16, 1), Judge: mj, Receipt: &failing}},
+		"model empty hashes":    {fm, eval.GateInput{BaselineHash: fm.hash, Candidate: gateArm("cand", 16, 1), Judge: mj, Receipt: &emptyHashes}},
+		"unknown judge kind":    {f, eval.GateInput{BaselineHash: f.hash, Candidate: gateArm("cand", 16, 1), Judge: eval.Judge{Kind: "ensemble", Identity: "m"}}},
+		"other judge identity":  {f, eval.GateInput{BaselineHash: f.hash, Candidate: gateArm("cand", 16, 1), Judge: eval.Judge{Kind: "deterministic", Identity: "another-scorer"}}},
+		"other judge kind":      {fm, eval.GateInput{BaselineHash: fm.hash, Candidate: gateArm("cand", 16, 1), Judge: eval.Judge{Kind: "deterministic", Identity: "m"}}},
+	}
+	for name, bc := range bad {
 		for _, extra := range [][]string{nil, {"--require-adopt"}} {
-			args := append([]string{"verdict", "--baseline", f.baseline, "--input", gateWrite(t, f.dir, "bad.json", in)}, extra...)
+			args := append([]string{"verdict", "--baseline", bc.f.baseline, "--input", gateWrite(t, bc.f.dir, "bad.json", bc.in)}, extra...)
 			out, errs, code := runGateCmd(t, args...)
 			if code != 2 || out != "" || !strings.Contains(errs, "gate: refused") {
 				t.Errorf("%s %v: want exit 2 with no stdout, got %d %q %q", name, extra, code, out, errs)
@@ -332,7 +367,7 @@ func TestGateCmdFreezeRefusalsAndWriteOnce(t *testing.T) {
 	}
 	// A different pre-registration at the same path is refused and the file is untouched.
 	before, _ := os.ReadFile(out)
-	different := gateWrite(t, dir, "different.json", fmt.Sprintf(`{"mode":"superiority","primary":{"name":"goal_reached","class":"unit_interval"},"min_pairs":8,"tasks":%s}`, tj))
+	different := gateWrite(t, dir, "different.json", fmt.Sprintf(`{"mode":"superiority","primary":{"name":"goal_reached","class":"unit_interval"},"judge":{"kind":"deterministic","identity":"acceptance-dsl"},"seed":2,"tasks":%s}`, tj))
 	_, errs, code = runGateCmd(t, "freeze", "--prereg", different, "--corpus", corpus, "--out", out)
 	after, _ := os.ReadFile(out)
 	if code != 2 || !strings.Contains(errs, "written once") || !bytes.Equal(before, after) {
@@ -342,7 +377,7 @@ func TestGateCmdFreezeRefusalsAndWriteOnce(t *testing.T) {
 	// INV-5: seconds, latency, wall, duration and time are refused as efficiency classes, citing it,
 	// and no baseline file is left behind.
 	for _, class := range []string{"seconds", "latency", "wall", "duration", "time"} {
-		pre := gateWrite(t, dir, "ni-"+class+".json", fmt.Sprintf(`{"mode":"non_inferiority","primary":{"name":"q","class":"judge_0_10"},"efficiency":[{"name":"cost","class":%q}],"tasks":%s}`, class, tj))
+		pre := gateWrite(t, dir, "ni-"+class+".json", fmt.Sprintf(`{"mode":"non_inferiority","primary":{"name":"q","class":"judge_0_10"},"judge":{"kind":"deterministic","identity":"acceptance-dsl"},"efficiency":[{"name":"cost","class":%q}],"tasks":%s}`, class, tj))
 		target := filepath.Join(dir, "never-"+class+".json")
 		_, errs, code := runGateCmd(t, "freeze", "--prereg", pre, "--corpus", corpus, "--out", target)
 		if code != 2 || !strings.Contains(errs, "INV-5") {
@@ -353,7 +388,7 @@ func TestGateCmdFreezeRefusalsAndWriteOnce(t *testing.T) {
 		}
 	}
 	// Unknown pre-registration fields are refused (a typo must not silently take a default).
-	typo := gateWrite(t, dir, "typo.json", fmt.Sprintf(`{"mode":"superiority","primary":{"name":"q","class":"unit_interval"},"min_pair":4,"tasks":%s}`, tj))
+	typo := gateWrite(t, dir, "typo.json", fmt.Sprintf(`{"mode":"superiority","primary":{"name":"q","class":"unit_interval"},"judge":{"kind":"deterministic","identity":"acceptance-dsl"},"min_pair":4,"tasks":%s}`, tj))
 	if _, _, code := runGateCmd(t, "freeze", "--prereg", typo, "--corpus", corpus, "--out", filepath.Join(dir, "typo-out.json")); code != 2 {
 		t.Errorf("an unknown pre-registration field must be refused, got %d", code)
 	}
@@ -465,8 +500,8 @@ func TestGateCmdAcceptsALeadingGlobalConfig(t *testing.T) {
 	}
 }
 
-// The ACCEPT line, worded exactly: a one-byte edit of a frozen baseline either fails `check` or
-// changes its hash, and `gate check --expect-hash` and the input's baseline_hash refuse it.
+// A one-byte edit of a frozen baseline either fails `check` or changes its hash, and
+// `gate check --expect-hash` and the input's baseline_hash refuse it.
 func TestGateCmdOneByteEditFailsCheckOrChangesTheHash(t *testing.T) {
 	f := freezeSuperiority(t, 16, nil)
 	raw, _ := os.ReadFile(f.baseline)
@@ -484,13 +519,13 @@ func TestGateCmdOneByteEditFailsCheckOrChangesTheHash(t *testing.T) {
 		return n
 	}
 
-	// 1. One byte that leaves a valid canonical document: min_pairs 16 -> 17. check accepts it and
+	// 1. One byte that leaves a valid canonical document: seed 1 -> 2. check accepts it and
 	// prints ANOTHER hash; --expect-hash and the bound input refuse it.
-	valid := bytes.Replace(raw, []byte(`"min_pairs": 16`), []byte(`"min_pairs": 17`), 1)
+	valid := bytes.Replace(raw, []byte(`"seed": 1`), []byte(`"seed": 2`), 1)
 	if differing(raw, valid) != 1 {
 		t.Fatal("setup: the edit must change exactly one byte")
 	}
-	p := gateWrite(t, f.dir, "min-pairs-17.json", valid)
+	p := gateWrite(t, f.dir, "seed-2.json", valid)
 	out, errs, code := runGateCmd(t, "check", "--baseline", p)
 	if code != 0 || len(strings.TrimSpace(out)) != 64 || strings.TrimSpace(out) == f.hash {
 		t.Fatalf("a valid one-byte edit changes the hash: code %d hash %q (frozen %s) err %q", code, out, f.hash, errs)

@@ -72,6 +72,10 @@ type EfficiencyResult struct {
 	N               int      `json:"n"`
 	UnresolvedPairs int      `json:"unresolved_pairs"`
 	Improves        bool     `json:"improves"`
+	// Stubs.
+	OverUnresolvedCap bool    `json:"over_unresolved_cap"`
+	Regresses         bool    `json:"regresses"`
+	Level             float64 `json:"level"`
 }
 
 // HeldOutResult is the point-estimate check on the held-out pairs (GATE-R5).
@@ -79,6 +83,8 @@ type HeldOutResult struct {
 	N      int     `json:"n"`
 	Delta  float64 `json:"delta"`
 	Failed bool    `json:"failed"`
+	// Missing is a stub.
+	Missing bool `json:"missing"`
 }
 
 // Projected is the half-width of the main interval projected to 16, 24 and 120 usable tasks.
@@ -113,31 +119,34 @@ type ResultStamps struct {
 // GateResult is the gate's whole output. Field order is the struct's, and nothing in it is a
 // timestamp: the same input twice gives byte-identical JSON.
 type GateResult struct {
-	Verdict       string             `json:"verdict"`
-	Reason        string             `json:"reason"`
-	KeepIncumbent bool               `json:"keep_incumbent"`
-	Mode          string             `json:"mode"`
-	Margin        float64            `json:"margin"`
-	Delta         float64            `json:"delta"`
-	Lo            float64            `json:"lo"`
-	Hi            float64            `json:"hi"`
-	NUsed         int                `json:"n_used"`
-	NDeclared     int                `json:"n_declared"`
-	ExcludedPairs int                `json:"excluded_pairs"`
-	ExcludedShare float64            `json:"excluded_share"`
-	AttemptCounts AttemptCounts      `json:"attempt_counts"`
-	Cheats        ArmCount           `json:"cheats"`
-	Efficiency    []EfficiencyResult `json:"efficiency"`
-	HeldOut       *HeldOutResult     `json:"held_out"`
-	Power         PowerNote          `json:"power"`
-	Stamps        ResultStamps       `json:"stamps"`
-	Judge         Judge              `json:"judge"`
-	EraMarker     string             `json:"era_marker"`
-	GateVersion   string             `json:"gate_version"`
-	CorpusHash    string             `json:"corpus_hash"`
-	BaselineHash  string             `json:"baseline_hash"`
-	BootstrapB    int                `json:"bootstrap_b"`
-	Seed          int64              `json:"seed"`
+	Verdict       string        `json:"verdict"`
+	Reason        string        `json:"reason"`
+	KeepIncumbent bool          `json:"keep_incumbent"`
+	Mode          string        `json:"mode"`
+	Margin        float64       `json:"margin"`
+	Delta         float64       `json:"delta"`
+	Lo            float64       `json:"lo"`
+	Hi            float64       `json:"hi"`
+	NUsed         int           `json:"n_used"`
+	NDeclared     int           `json:"n_declared"`
+	ExcludedPairs int           `json:"excluded_pairs"`
+	ExcludedShare float64       `json:"excluded_share"`
+	AttemptCounts AttemptCounts `json:"attempt_counts"`
+	Cheats        ArmCount      `json:"cheats"`
+	// Stubs.
+	ImputedAttempts  int                `json:"imputed_attempts"`
+	UnusableAttempts ArmCount           `json:"unusable_attempts"`
+	Efficiency       []EfficiencyResult `json:"efficiency"`
+	HeldOut          *HeldOutResult     `json:"held_out"`
+	Power            PowerNote          `json:"power"`
+	Stamps           ResultStamps       `json:"stamps"`
+	Judge            Judge              `json:"judge"`
+	EraMarker        string             `json:"era_marker"`
+	GateVersion      string             `json:"gate_version"`
+	CorpusHash       string             `json:"corpus_hash"`
+	BaselineHash     string             `json:"baseline_hash"`
+	BootstrapB       int                `json:"bootstrap_b"`
+	Seed             int64              `json:"seed"`
 	// GateBuildSHA256 is the hash of the binary that ran the gate, set by the verb (Gate itself
 	// is pure). It is not part of the era marker. Absent means unknown.
 	GateBuildSHA256 string `json:"gate_build_sha256,omitempty"`

@@ -60,6 +60,9 @@ func (o AttemptOutcome) Scored() bool {
 	return o == OutcomePass || o == OutcomeTaskFail || o == OutcomeCheat
 }
 
+// OutcomeFromRecord is a stub.
+func OutcomeFromRecord(s string) (AttemptOutcome, bool) { return "", false }
+
 // OutcomeFromCaliper maps the outcome word of a Caliper record to this taxonomy. The six
 // classes it shares with the gate map to themselves; its `not_checked` (the check never ran)
 // is the gate's `not_run`. Any other word is unknown (false): a record the gate cannot place

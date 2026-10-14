@@ -31,6 +31,7 @@ func testPreReg(mode string) PreReg {
 	p := PreReg{
 		Mode:    mode,
 		Primary: PreRegPrimary{Name: "answer_quality", Class: ClassJudge010},
+		Judge:   Judge{Kind: "deterministic", Identity: scorerID},
 		Tasks:   taskIDs(20),
 		HeldOut: []string{"t019", "t018"},
 	}
@@ -58,9 +59,8 @@ func testIncumbentArm() Arm {
 	}}
 }
 
-// ACCEPT (first half): freezing twice from the same inputs is byte-identical, and check of the
-// frozen bytes passes and reproduces them. The edit half is
-// TestOneByteEditOfAFrozenBaselineFailsCheckOrChangesItsHash.
+// Freezing twice from the same inputs is byte-identical, and check of the frozen bytes passes
+// and reproduces them. The edit half is TestOneByteEditOfAFrozenBaselineFailsCheckOrChangesItsHash.
 func TestFreezeThenCheckReproducesByteIdentically(t *testing.T) {
 	inc := testIncumbentArm()
 	b1, raw1, h1, err := FreezeBaseline(testPreReg(ModeNonInferiority), testCorpus, &inc)
@@ -121,8 +121,8 @@ func TestFreezeThenCheckReproducesByteIdentically(t *testing.T) {
 	}
 }
 
-// ACCEPT (second half), worded exactly: a one-byte edit of a frozen baseline either fails `check`
-// or changes its hash, and `gate check --expect-hash` and the input's baseline_hash refuse it.
+// A one-byte edit of a frozen baseline either fails `check` or changes its hash, and
+// `gate check --expect-hash` and the input's baseline_hash refuse it.
 //
 // check alone cannot refuse an edit that leaves a valid canonical document (a letter inside a
 // name, the value of min_pairs): that is another pre-registration, and it hashes to another hash.
@@ -186,7 +186,7 @@ func TestFreezeFillsDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := fmt.Sprintf("%x", sha256.Sum256(testCorpus))
-	if b.GateVersion != "1" || b.MinPairs != 16 || b.BootstrapB != 10000 || b.Seed != 1 || b.MaxExcludedShare != 0.20 {
+	if b.GateVersion != GateVersion || GateVersion != "2" || b.MinPairs != 16 || b.BootstrapB != 10000 || b.Seed != 1 || b.MaxExcludedShare != 0.20 {
 		t.Fatalf("defaults wrong: %+v", b)
 	}
 	if b.CorpusHash != want {
@@ -203,11 +203,11 @@ func TestFreezeFillsDefaults(t *testing.T) {
 	}
 	// Explicit values win over defaults, including zero ones that mean something.
 	p := testPreReg(ModeNonInferiority)
-	p.MinPairs, p.BootstrapB = 8, 500
+	p.MinPairs, p.BootstrapB = 17, 3000
 	seed, share := int64(0), 0.0
 	p.Seed, p.MaxExcludedShare = &seed, &share
 	b, _, _, err = FreezeBaseline(p, testCorpus, nil)
-	if err != nil || b.MinPairs != 8 || b.BootstrapB != 500 || b.Seed != 0 || b.MaxExcludedShare != 0 {
+	if err != nil || b.MinPairs != 17 || b.BootstrapB != 3000 || b.Seed != 0 || b.MaxExcludedShare != 0 {
 		t.Fatalf("explicit settings must be kept: %+v err %v", b, err)
 	}
 }
@@ -216,15 +216,16 @@ func TestFreezeMarginDefaultsAndSuperiority(t *testing.T) {
 	for _, tc := range []struct {
 		class  string
 		margin *float64
+		rng    []float64
 		want   float64
 	}{
-		{ClassUnitInterval, nil, 0.05},
-		{ClassJudge010, nil, 0.5},
-		{ClassCustom, f64(2.5), 2.5},
-		{ClassUnitInterval, f64(0.1), 0.1},
+		{ClassUnitInterval, nil, nil, 0.05},
+		{ClassJudge010, nil, nil, 0.5},
+		{ClassCustom, f64(2.5), []float64{0, 10}, 2.5},
+		{ClassUnitInterval, f64(0.1), nil, 0.1},
 	} {
 		p := testPreReg(ModeNonInferiority)
-		p.Primary.Class, p.Primary.Margin = tc.class, tc.margin
+		p.Primary.Class, p.Primary.Margin, p.Primary.Range = tc.class, tc.margin, tc.rng
 		b, _, _, err := FreezeBaseline(p, testCorpus, nil)
 		if err != nil || b.Primary.Margin != tc.want {
 			t.Errorf("class %s margin %v: got %v err %v, want %v", tc.class, tc.margin, b.Primary.Margin, err, tc.want)
@@ -239,13 +240,13 @@ func TestFreezeMarginDefaultsAndSuperiority(t *testing.T) {
 	}
 	// A custom class carries its own margin, in non-inferiority.
 	p = testPreReg(ModeNonInferiority)
-	p.Primary.Class = ClassCustom
+	p.Primary.Class, p.Primary.Range = ClassCustom, []float64{0, 10}
 	if _, _, _, err = FreezeBaseline(p, testCorpus, nil); err == nil || !strings.Contains(err.Error(), "own margin") {
 		t.Fatalf("custom without a margin must be refused, got %v", err)
 	}
-	// ... and a custom superiority needs none (the margin is ignored).
+	// ... and a custom superiority needs none (the margin is ignored), but it does need its range.
 	p = testPreReg(ModeSuperiority)
-	p.Primary.Class = ClassCustom
+	p.Primary.Class, p.Primary.Range = ClassCustom, []float64{0, 10}
 	if _, _, _, err = FreezeBaseline(p, testCorpus, nil); err != nil {
 		t.Fatalf("custom superiority needs no margin: %v", err)
 	}
@@ -373,7 +374,7 @@ func TestCheckBaselineRefusals(t *testing.T) {
 		"seconds class":       func(b *Baseline) { b.Efficiency[0].Class = "seconds" },
 		"higher_is_better":    func(b *Baseline) { b.Primary.HigherIsBetter = false },
 		"zero margin":         func(b *Baseline) { b.Primary.Margin = 0 },
-		"gate version":        func(b *Baseline) { b.GateVersion = "2" },
+		"gate version":        func(b *Baseline) { b.GateVersion = "99" },
 		"unsorted tasks":      func(b *Baseline) { b.Tasks[0], b.Tasks[1] = b.Tasks[1], b.Tasks[0] },
 		"short corpus hash":   func(b *Baseline) { b.CorpusHash = "abc" },
 		"held-out undeclared": func(b *Baseline) { b.HeldOut = []string{"zzz"} },

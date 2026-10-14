@@ -44,19 +44,21 @@ func TestOutcomeScored(t *testing.T) {
 	}
 }
 
-func TestOutcomeFromCaliper(t *testing.T) {
+// OutcomeFromRecord reads the outcome word of an external evaluation record: the six words it
+// shares with the gate map to themselves, and `not_checked` is `not_run`.
+func TestOutcomeFromRecord(t *testing.T) {
 	for _, s := range []string{"pass", "task_fail", "cheat", "infra_error", "timeout", "judge_error"} {
-		got, ok := OutcomeFromCaliper(s)
+		got, ok := OutcomeFromRecord(s)
 		if !ok || string(got) != s {
-			t.Errorf("OutcomeFromCaliper(%q) = %q, %v; want itself", s, got, ok)
+			t.Errorf("OutcomeFromRecord(%q) = %q, %v; want itself", s, got, ok)
 		}
 	}
-	if got, ok := OutcomeFromCaliper("not_checked"); !ok || got != OutcomeNotRun {
+	if got, ok := OutcomeFromRecord("not_checked"); !ok || got != OutcomeNotRun {
 		t.Errorf("not_checked must map to not_run, got %q, %v", got, ok)
 	}
 	for _, s := range []string{"", "not_run", "PASS", "skipped", "fail"} {
-		if got, ok := OutcomeFromCaliper(s); ok || got != "" {
-			t.Errorf("OutcomeFromCaliper(%q) = %q, %v; want unknown", s, got, ok)
+		if got, ok := OutcomeFromRecord(s); ok || got != "" {
+			t.Errorf("OutcomeFromRecord(%q) = %q, %v; want unknown", s, got, ok)
 		}
 	}
 }

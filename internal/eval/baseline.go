@@ -63,7 +63,12 @@ type Primary struct {
 	// Margin is the non-inferiority margin m (> 0); 0 in superiority mode, where it is ignored.
 	Margin         float64 `json:"margin"`
 	HigherIsBetter bool    `json:"higher_is_better"`
+	// Range is [lo, hi], the closed score range of a custom primary class; absent for the others.
+	Range []float64 `json:"range,omitempty"`
 }
+
+// worst is the bad end of the primary's score range given its direction. Stub.
+func (p Primary) worst() float64 { return 0 }
 
 // EfficiencyMetric is a cost a non-inferior candidate must improve to be adopted.
 type EfficiencyMetric struct {
@@ -77,6 +82,7 @@ type Baseline struct {
 	GateVersion      string             `json:"gate_version"`
 	Mode             string             `json:"mode"`
 	Primary          Primary            `json:"primary"`
+	Judge            Judge              `json:"judge"`
 	Efficiency       []EfficiencyMetric `json:"efficiency"`
 	MinPairs         int                `json:"min_pairs"`
 	BootstrapB       int                `json:"bootstrap_b"`
@@ -96,6 +102,7 @@ type Baseline struct {
 type PreReg struct {
 	Mode             string             `json:"mode"`
 	Primary          PreRegPrimary      `json:"primary"`
+	Judge            Judge              `json:"judge"`
 	Efficiency       []PreRegEfficiency `json:"efficiency"`
 	MinPairs         int                `json:"min_pairs"`
 	BootstrapB       int                `json:"bootstrap_b"`
@@ -108,10 +115,11 @@ type PreReg struct {
 // PreRegPrimary: Margin left out takes the class default; HigherIsBetter left out is true (the
 // only supported value for now).
 type PreRegPrimary struct {
-	Name           string   `json:"name"`
-	Class          string   `json:"class"`
-	Margin         *float64 `json:"margin"`
-	HigherIsBetter *bool    `json:"higher_is_better"`
+	Name           string    `json:"name"`
+	Class          string    `json:"class"`
+	Margin         *float64  `json:"margin"`
+	HigherIsBetter *bool     `json:"higher_is_better"`
+	Range          []float64 `json:"range,omitempty"`
 }
 
 // PreRegEfficiency: LowerIsBetter left out is true.
