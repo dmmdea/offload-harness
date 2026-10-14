@@ -43,6 +43,76 @@ Text verbs read the final `output`, falling back to the raw `structured` bytes w
 is empty; the field verbs require `structured` and fail closed without it. Unfalsifiable
 checks (`contains:`, `min_items:f:0`) are rejected at validation.
 
+### Authority-graded checks (optional qualifier)
+
+A check says what must hold; an authority says how far the evidence behind it can be trusted. `contains:`, `regex:`
+and `not_contains:` take an optional qualifier at the head of the argument. It is not a verb: the verb set above is
+closed and unchanged, an unqualified check behaves exactly as it always did, and a node one release behind reads the
+line as a plain substring (a node parses acceptance when it ACKs a contract and never evaluates it).
+
+| Check | Reads | Passes when |
+|---|---|---|
+| `contains:@answer:<s>` | the answer text the model wrote (`output` only: no fall back to `structured`) | `s` is in it |
+| `contains:@field=<name>:<s>` | the values inside structured field `<name>` (text, numbers and booleans, never keys) | `s` is in them |
+| `contains:@grounded:<s>` | the answer text and the values in `structured`, against the contract's context docs | `s` is in the answer AND verbatim in at least one context doc |
+| `regex:@answer:<re>`, `regex:@field=<name>:<re>` | as above | the pattern matches |
+| `regex:@grounded:<re>` | as above | a non-empty match in the answer is verbatim in at least one context doc |
+| `not_contains:@answer:<s>`, `not_contains:@field=<name>:<s>` | as above | `s` is absent from it. There is no grounded form: documents cannot corroborate an absence. |
+
+The levels are ordered, weakest first: `answer` (what the model wrote; only the model vouches for it), `field` (a value
+in the structured result, a slot the contract's own schema asked for) and `grounded` (text the answer carries that the
+delegator's own documents also carry: a corroborated mention, not proof the claim is true). Grounding compares the
+matched text verbatim and case-sensitively, so a case-insensitive pattern can match the answer and still fail the
+document check. Three rules follow.
+
+1. **Absent evidence is unknown, never a pass.** An empty answer, no structured result, an absent or empty field, no
+   answer at all, or no context docs for a grounded check leaves the check with nothing to read. It grades `unknown`:
+   the merge gate counts it as a failed check, and the reason says `unknown at <level> authority: ...` so an empty
+   answer is told apart from a wrong one. `not_contains:@answer:<s>` over an empty answer is therefore unknown, where
+   the unqualified `not_contains:<s>` passes.
+2. **A weaker authority never closes a stronger claim.** Each level reads exactly the evidence it names. An answer
+   that says `walrus` closes `contains:@answer:walrus`; it does not close `contains:@field=summary:walrus` (no field
+   carries it: unknown or fail) and it does not close `contains:@grounded:walrus` (no document vouches for it: fail, or
+   unknown when the contract has no documents). `core.ClosedAt` (and `delegate.GradeAcceptance`, the per-check
+   outcomes) report the authority a contract closed at: the weakest among its checks, and only when all passed, so one
+   unqualified check pulls it to none. The delegator publishes it as `results[].acceptance_authority` (`answer`, `field`
+   or `grounded`) and on the corpus row, only for a result accepted whole: with an unqualified check, a failed or
+   unknown check, a list-fidelity failure or an excused document fingerprint the key is absent, and the result
+   publishes as it always did.
+3. **Unqualified checks are untouched.** In particular `not_contains:<s>` over a fully empty result still passes. That
+   is the vacuous pass the qualifier avoids. It stays for the unqualified form because changing it would change the
+   verdict of contracts this repository cannot see, in a closed DSL every contract uses, and it is not shown
+   unreachable: an empty final answer is deferred before acceptance, so the case is rare, but results also arrive from
+   nodes, the queue and the rescue path. No file under `contracts/` (the write-door contracts included) uses
+   `not_contains:`, and the operator guide's example pairs it with `min_items:` and `nonempty:`, which already fail
+   closed on an empty result. A contract that cannot afford the vacuous pass writes the qualified form, or pairs the
+   `not_contains:` with a qualified `contains:` on the same evidence.
+
+A field-level check names its field, so the field joins the schema's `required` list the way `nonempty:` and
+`min_items:` fields do. The intake lint adds **AUTHORITY-UNREACHABLE** (`results[].acceptance_lint`, warn-only): a
+`@grounded:` check on a contract with no context docs, and an `@field=` check whose field the `output_schema` does not
+declare (or that has no `output_schema`), can only ever grade unknown (a blank document counts as none, as it does
+when grading). Such an unknown is a defect of the contract, not of the node that answered. On the research lane's
+document fingerprint (the wrong-document tripwire a node is quarantined for) it is still reported as a failed check,
+but it is neither a strike nor a pass for the node, and the contract is not retried on a second node, because no
+node's answer could close it. The same holds for an unknown over an honest-absence digest. Only a FAILED fingerprint can
+be excused (by an honest absence). Apart from those two cases, an unknown the contract could have closed (an empty answer beside the documents, a
+declared field the result lacks) is the result's, and strikes like a failure.
+
+Spelling: only `@answer:`, `@grounded:` and `@field=<name>:` (on `contains:`, `regex:` and `not_contains:`) are read as
+qualifiers. The reserved prefixes are exactly `@answer:`, `@grounded:`, `@field=` and `@field:` (the last is no
+qualifier: it is refused, because the field qualifier's separator is `=`). After a reserved prefix a missing field name
+(`@field=:x`), a missing colon after the name (`@field=summary`), an empty tail, or `@field:` itself is a parse error,
+and so is `not_contains:@grounded:`; lines like these were plain substrings before. A substring that starts with a
+reserved prefix is now read as a qualified check, so anchor on something else or write the first character as a class
+(`regex:[@]answer:`). Text that only begins with the letters `@field` is not a reserved prefix, so `contains:@field`,
+`contains:@fieldname:x` and `contains:@fieldx` are plain literal substrings, as is any other leading `@`, as before.
+A misspelt qualifier, and a qualified line read by
+a delegator one release behind, are a literal substring: for `contains:` and `regex:` no answer carries it, so the
+check fails closed. For `not_contains:` that delegator reads `not_contains:@answer:SECRET` as the literal string
+"@answer:SECRET", so the check passes even when the answer contains SECRET and the forbidden-content check never fires.
+Qualified checks need the whole fleet on 0.187 or later.
+
 Acceptance carries no wall-time term (INV-5, [ADR 0050](../docs/architecture/decisions/0050-placement-ranks-adequate-seats-by-expected-completion.md):
 "Acceptance criteria and pass rules stay wall-time-free"). No verb above reads a clock: each reads the answer text, a
 structured field or the write set, so a time criterion cannot be written as a check and a result is never judged by how
