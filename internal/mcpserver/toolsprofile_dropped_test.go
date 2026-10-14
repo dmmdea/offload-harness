@@ -5,17 +5,37 @@ package mcpserver
 // a sentence is on one of the two lists or the gate is red. An entry is the exact sentence in the tools named, so a reworded
 // sentence has to be read again.
 
-// The reasons a sentence is dropped. Each says why a caller that never saw the sentence is not worse off.
+// The reason classes. A dropped row names exactly one; each says why a caller that never saw the sentence is not worse off. A sentence
+// that carries a rule word (gateTrigger) also needs a reason of its own, in words, on the row: the class alone does not say why THIS
+// sentence is safe to drop.
 const (
-	dropResult    = "result-shape or result-reading description: the caller reads these fields from the result itself and no call depends on it"
-	dropMech      = "placement, queue or accounting mechanics the harness enforces; no caller action depends on it"
-	dropValid     = "call-time validation: refused before any side effect, and the refusal names the rule"
-	dropSchema    = "restated by the compact schema (required, enum, bounds) or by a kept parameter description"
-	dropEnum      = "enum-value explanation; its sibling values are dropped under the same rule"
-	dropRationale = "rationale or elaboration of a rule that is itself kept"
-	dropDescr     = "plain description of behaviour, not a constraint on the caller"
-	dropDefer     = "a typed defer that carries its own reason and has no side effect: the caller learns it when it happens"
+	dropResult    = "result"
+	dropMech      = "mech"
+	dropValid     = "valid"
+	dropSchema    = "schema"
+	dropRestated  = "restated"
+	dropEnum      = "enum"
+	dropRationale = "rationale"
+	dropDescr     = "descr"
+	dropDefer     = "defer"
+	dropChoice    = "choice"
+	dropAdvice    = "advice"
 )
+
+// dropClasses maps each class to what it claims. A row's explicit reason may not be one of these texts.
+var dropClasses = map[string]string{
+	dropResult:    "result shape or result reading: the fields come back in the answer and no call depends on the sentence",
+	dropMech:      "placement, queue, retry, budget or accounting mechanics the harness enforces: no caller action depends on it",
+	dropValid:     "call-time validation: the call is refused before any side effect and the refusal names the rule",
+	dropSchema:    "restated by the compact schema (type, enum, required, bounds) or by a parameter description the compact list keeps",
+	dropRestated:  "restated by a sentence the compact list keeps",
+	dropEnum:      "enum-value explanation: the values are in the compact schema and its sibling values are dropped under the same rule",
+	dropRationale: "rationale or elaboration of a rule that is itself kept",
+	dropDescr:     "plain description of behaviour or of a default: it constrains nothing the caller sends",
+	dropDefer:     "a typed defer that carries its own reason and has no side effect: the caller learns it when it happens",
+	dropChoice:    "when-to-use hint, trigger list, example or tool-selection pointer: the door is chosen by the client's dispatch rules and the opening sentence says what the tool does",
+	dropAdvice:    "prompting or tuning advice with no stated hazard: the call is valid and the result usable either way",
+}
 
 var compactDropped = []droppedSentence{
 	{Tools: []string{"agent_delegate"}, Sentence: "Placement is quality-first: an idle local box runs the work up to its run-cap line (fleet_max_concurrent_jobs, 4 by default) and the rest of a wider call goes to the remote nodes that have room; a remote node is also used whenever the local GPU is busy, and only when it passes the capability gate (route=auto; a local or remote route pins the call only with a pin_reason, and without one it is a hint placement may override).", Reason: dropMech},

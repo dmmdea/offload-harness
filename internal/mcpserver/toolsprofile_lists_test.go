@@ -71,14 +71,11 @@ func TestKeepListEntriesAreLive(t *testing.T) {
 	}
 }
 
-// TestDroppedEntriesAreLive: every dropped-with-reason entry is a constraint sentence a live description still has, in the tool
-// it names. A stale entry would let a reworded rule (a different sentence) in under an old reason.
+// TestDroppedEntriesAreLive: every dropped entry is a sentence a live description still has, outside an opening position, in the tool
+// it names. A stale entry would let a reworded sentence (a different sentence) in under an old reason.
 func TestDroppedEntriesAreLive(t *testing.T) {
 	live := liveSentences(t)
 	for i, d := range compactDropped {
-		if !gateTrigger.MatchString(d.Sentence) {
-			t.Errorf("dropped entry %d carries no constraint word, so it needs no entry: %.100q", i, d.Sentence)
-		}
 		for _, tool := range d.Tools {
 			sents, ok := live[tool]
 			if !ok {
@@ -97,8 +94,8 @@ func TestKeepAndDroppedListsAreDisjoint(t *testing.T) {
 	dropped := droppedIndex(t)
 	for i, e := range compactKeep {
 		for _, tool := range e.Tools {
-			if reason, both := dropped[tool][e.Sentence]; both {
-				t.Errorf("keep entry %d: %s both keeps and drops (%q) %.80q", i, tool, reason, e.Sentence)
+			if row, both := dropped[tool][e.Sentence]; both {
+				t.Errorf("keep entry %d: %s both keeps and drops (%q) %.80q", i, tool, row.Class, e.Sentence)
 			}
 		}
 	}

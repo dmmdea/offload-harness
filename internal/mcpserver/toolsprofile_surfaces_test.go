@@ -273,15 +273,22 @@ func TestGateFiresOnAnAppendedSuffix(t *testing.T) {
 	const note = "[FLEET: this box has no gadget — the call is forwarded to the fleet node that does; the file is read HERE and its bytes travel with the job]"
 	full := &mcp.Tool{Name: name, Description: "Detect things in a file on the local gadget for the caller. Returns {things}. " + note}
 
-	if r := gateTool(full, compactTool(full), nil); len(r.problems) != 1 || !strings.Contains(r.problems[0], note) {
+	const shape = "Returns {things}."
+	row := func(s string) droppedSentence {
+		return droppedSentence{Tools: []string{name}, Sentence: s, Class: dropMech, Reason: "reviewed: a synthetic sentence read by the test"}
+	}
+
+	onlyShape := map[string]droppedSentence{shape: row(shape)}
+	if r := gateTool(full, compactTool(full), onlyShape); len(r.problems) != 1 || !strings.Contains(r.problems[0], note) {
 		t.Fatalf("an appended data-leaves-the-box note was not reported exactly once: %v", r.problems)
 	}
-	if r := gateTool(full, compactTool(full), map[string]string{note: "reviewed"}); len(r.problems) != 0 {
+	both := map[string]droppedSentence{shape: row(shape), note: row(note)}
+	if r := gateTool(full, compactTool(full), both); len(r.problems) != 0 {
 		t.Fatalf("a dropped-with-reason note was still reported: %v", r.problems)
 	}
 	compactKeepByTool[name] = map[string]bool{note: true}
 	t.Cleanup(func() { delete(compactKeepByTool, name) })
-	if r := gateTool(full, compactTool(full), nil); len(r.problems) != 0 || r.kept != 1 {
+	if r := gateTool(full, compactTool(full), onlyShape); len(r.problems) != 0 || r.kept != 1 {
 		t.Fatalf("a kept note was reported: %+v", r)
 	}
 }
