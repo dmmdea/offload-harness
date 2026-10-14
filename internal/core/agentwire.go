@@ -1255,9 +1255,11 @@ func (c AcceptanceCheck) Pattern() *regexp.Regexp { return c.re }
 
 // Fields returns the structured fields the check reads, in the order named:
 // one for min_items and for a single-name nonempty, one per alternative for the
-// any-of nonempty, and none for every verb that reads no field. Exposed so the
-// schema helpers (AcceptedFields) read the check the way Eval does instead of
-// splitting the argument a second time.
+// any-of nonempty, one for a contains, regex or not_contains qualified
+// @field=<name>:, and none for every verb that reads no field (an unqualified
+// contains, regex or not_contains, the @answer: and @grounded: qualifiers,
+// diff_*). Exposed so the schema helpers (AcceptedFields) read the check the way
+// Eval does instead of splitting the argument a second time.
 func (c AcceptanceCheck) Fields() []string {
 	if c.field != "" {
 		return []string{c.field} // an AuthField check reads exactly the field it names

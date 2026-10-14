@@ -115,7 +115,8 @@ type AcceptanceOutcome struct {
 // counts as AuthNone, so a single one pulls the whole set down to none; a fail, an
 // unknown, or an empty set leaves it open (ok false). It is how a caller states
 // "this contract was closed at grounded authority" and has the claim refused
-// when its weakest check was only an answer.
+// when its weakest check was only an answer. The delegator states it on what it
+// publishes (delegate.EvalAcceptanceGraded: the result's acceptance_authority).
 func ClosedAt(outcomes []AcceptanceOutcome) (closed Authority, ok bool) {
 	if len(outcomes) == 0 {
 		return AuthNone, false

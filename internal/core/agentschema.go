@@ -26,9 +26,11 @@ import (
 // is pressure to invent items.
 
 // AcceptedFields returns the schema fields the acceptance checks read
-// (min_items and nonempty; the any-of nonempty reads every name it lists), in
-// check order, without repeats. Checks that do not parse, and checks that read
-// no field (contains, regex, diff_*), are skipped.
+// (min_items and nonempty; the any-of nonempty reads every name it lists; a
+// contains, regex or not_contains qualified @field=<name>: reads the one field it
+// names), in check order, without repeats. Checks that do not parse, and checks
+// that read no field (an unqualified contains, regex or not_contains, diff_*,
+// and the @answer: and @grounded: qualifiers), are skipped.
 func AcceptedFields(acceptance []string) []string {
 	var out []string
 	seen := map[string]bool{}

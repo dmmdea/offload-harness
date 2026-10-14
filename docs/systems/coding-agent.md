@@ -246,7 +246,11 @@ ahead of `timeout` because every wait bounded by the call words itself with the 
 re-ask: the reason carries `core.ForcedFinalToolCallReason`; ahead of `budget`, whose stop_reason and prefix it shares, so its
 remedy does not tell the reader to split a contract that had read everything it needed) → `budget` → `abstention` (an
 "output failed schema" reason is `schema-miss / invalid`) → `schema-miss` (min_items/nonempty; sub-axes
-`two-step-grounded` = context docs and ≤ 2 steps, `invalid`) → `anchor-miss` (contains/not_contains/regex; same sub-axis) →
+`two-step-grounded` = context docs and ≤ 2 steps, `invalid`) → `anchor-miss` (contains/not_contains/regex; same sub-axis;
+an authority-qualified check keeps its verb prefix, so its failure lands here too, an UNKNOWN verdict (empty or absent
+evidence: an empty answer, an absent field) included: the axis names which kind of check failed, and the empty-versus-wrong
+distinction is in the evidence column, `unknown at <level> authority`, which is why an empty answer under a qualified check
+reads as an anchor-miss while an absent field under an unqualified `nonempty:` reads as a schema-miss) →
 `loop` → `long-observation` → `tool-misuse` (the last three on trace-bearing rows only) → `unclassified`. The report gives
 per axis the hits over the rows ELIGIBLE for it (trace axes count only rows with a trace), up to five evidence job ids with
 the deciding fact, the most repeated reason for seat-infra/timeout/unclassified, and the pre-authored remedy where the

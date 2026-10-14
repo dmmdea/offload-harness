@@ -75,7 +75,10 @@ document check. Three rules follow.
    carries it: unknown or fail) and it does not close `contains:@grounded:walrus` (no document vouches for it: fail, or
    unknown when the contract has no documents). `core.ClosedAt` (and `delegate.GradeAcceptance`, the per-check
    outcomes) report the authority a contract closed at: the weakest among its checks, and only when all passed, so one
-   unqualified check pulls it to none.
+   unqualified check pulls it to none. The delegator publishes it as `results[].acceptance_authority` (`answer`, `field`
+   or `grounded`) and on the corpus row, only for a result accepted whole: with an unqualified check, a failed or
+   unknown check, a list-fidelity failure or an excused document fingerprint the key is absent, and the result
+   publishes as it always did.
 3. **Unqualified checks are untouched.** In particular `not_contains:<s>` over a fully empty result still passes. That
    is the vacuous pass the qualifier avoids. It stays for the unqualified form because changing it would change the
    verdict of contracts this repository cannot see, in a closed DSL every contract uses, and it is not shown
@@ -88,10 +91,13 @@ document check. Three rules follow.
 A field-level check names its field, so the field joins the schema's `required` list the way `nonempty:` and
 `min_items:` fields do. The intake lint adds **AUTHORITY-UNREACHABLE** (`results[].acceptance_lint`, warn-only): a
 `@grounded:` check on a contract with no context docs, and an `@field=` check whose field the `output_schema` does not
-declare (or that has no `output_schema`), can only ever grade unknown.
+declare (or that has no `output_schema`), can only ever grade unknown (a blank document counts as none, as it does
+when grading).
 
 Spelling: only `@answer:`, `@grounded:` and `@field=<name>:` (on `contains:`, `regex:` and `not_contains:`) are read as
-qualifiers, and `@field` without `=<name>:` is a parse error. A substring that starts with those exact spellings is
+qualifiers. After a reserved qualifier prefix (`@answer:`, `@grounded:`, `@field`) a missing field name, a missing colon
+or an empty tail is a parse error, and so is `not_contains:@grounded:`; lines like these were plain substrings before. A
+substring that starts with those exact spellings is
 now read as a qualified check, so anchor on something else or write the first character as a class
 (`regex:[@]answer:`); any other leading `@` is a literal as before. A misspelt qualifier, and a qualified line read by
 a delegator one release behind, are a literal substring: for `contains:` and `regex:` no answer carries it, so the
