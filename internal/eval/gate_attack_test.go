@@ -295,7 +295,7 @@ func TestIncumbentUnusableAttemptsAreSkippedAndExcludeThePair(t *testing.T) {
 	}
 	// t000..t002 score 1 (the timeout is skipped, not averaged in as 0); the other 15 score 0.
 	incS := append(repeatF(1, 3), repeatF(0, 15)...)
-	d, lo, hi := BootstrapDeltaMean(incS, repeatF(1, 18), b.BootstrapB, b.Seed)
+	d, lo, hi := primaryInterval(incS, repeatF(1, 18))
 	if r.Delta != d || r.Lo != lo || r.Hi != hi {
 		t.Fatalf("the incumbent's task scores are wrong: gate %v %v %v want %v %v %v", r.Delta, r.Lo, r.Hi, d, lo, hi)
 	}
@@ -349,6 +349,24 @@ func TestExcludedShareIsTheLargestOfTheThreeRatios(t *testing.T) {
 			t.Fatalf("want INCONCLUSIVE at share 1/3: %s", marshal(t, r))
 		}
 	})
+}
+
+// A constant difference exactly on a margin that is not a sum of floats is still exactly on it:
+// 0.1 - 0.2 is -0.1, the margin. The interval is that single value, taken from the data, so neither end
+// clears the margin and the verdict is INCONCLUSIVE. A mean computed as a sum reads -0.10000000000000002
+// (sixteen copies of -0.1 do not sum to -1.6) and would BLOCK.
+func TestGateConstantDifferenceExactlyOnTheMarginIsInconclusive(t *testing.T) {
+	const n = 16
+	p := niUnitPre(n)
+	p.Primary.Margin = f64(0.1)
+	b, h := freeze(t, p, nil)
+	r := mustGate(t, b, h, inputFor(h, arm("i", repeatF(0.2, n), repeatF(1000, n)), arm("c", repeatF(0.1, n), repeatF(800, n))))
+	if r.Delta != -0.1 || r.Lo != -0.1 || r.Hi != -0.1 {
+		t.Fatalf("every difference is exactly -0.1: want the one value, got %v %v %v", r.Delta, r.Lo, r.Hi)
+	}
+	if r.Verdict != VerdictInconclusive {
+		t.Fatalf("a difference exactly on the margin is neither ADOPT nor BLOCK: %s %s", r.Verdict, r.Reason)
+	}
 }
 
 // The held-out slice is scored the same way: a candidate cannot skip the held-out tasks it fails,

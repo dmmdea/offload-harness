@@ -65,9 +65,9 @@ type ArmCount struct {
 // resolved the metric (N < 2): there is no interval to read, and a 0 would say "no change" where
 // the truth is "no data". A measured zero is a number.
 //
-// With k declared metrics, Lo and Hi are the two-sided 1 - 0.05/k interval (Level), so that the
-// chance some metric falsely improves stays near 2.5%; Improves reads that interval. Regresses
-// reads the plain 95% interval.
+// With k declared metrics, Lo and Hi are the two-sided 1 - 0.05/k interval (Level), so that
+// declaring k metrics does not multiply the chance of a false improvement by k; Improves reads
+// that interval. Regresses reads the plain 95% interval.
 type EfficiencyResult struct {
 	Name            string   `json:"name"`
 	Class           string   `json:"class"`
@@ -114,7 +114,7 @@ type TaskCount struct {
 }
 
 // PowerNote says how far the corpus is from a conclusive size. It adds no statistic: it is the
-// half-width of the main bootstrap interval read three ways (the power note of rule R4).
+// half-width of the main interval read three ways (the power note of rule R4).
 type PowerNote struct {
 	HalfWidth   float64   `json:"half_width"`
 	Projected   Projected `json:"projected"`
@@ -331,15 +331,16 @@ func efficiencyQuantiles(k int) (qLo, qHi, level float64) {
 	return q, 1 - q, 1 - 0.05/float64(k)
 }
 
-// overflowMsg is the refusal for scores or costs whose bootstrap sums are not finite numbers.
-const overflowMsg = "the scores or costs are too large to average: a bootstrap sum overflowed to a number that is not finite (overflow), so the gate refuses rather than report a verdict about it"
+// overflowMsg is the refusal for scores or costs whose sums are not finite numbers.
+const overflowMsg = "the scores or costs are too large to average: a sum overflowed to a number that is not finite (overflow), so the gate refuses rather than report a verdict about it"
 
 // Gate is the one measurement gate. It is pure: no I/O, no clock, no randomness beyond the
 // baseline's seed. It returns a verdict or a refusal, never both.
 //
 // The rules (docs/systems/measurement-gate.md has them in plain words, numbered the same):
 //
-//	R1  the statistic is the paired bootstrap of the mean difference, resampling TASKS
+//	R1  the statistic is the mean paired difference over TASKS, read on the score form of its
+//	    95% t interval (interval.go); the paired bootstrap reads the efficiency metrics
 //	R2  superiority: ADOPT iff lo > 0, BLOCK iff hi < 0; non-inferiority with margin m: BLOCK iff
 //	    hi < -m, ADOPT iff lo > -m and a declared efficiency metric improves and none got
 //	    significantly worse or went unmeasured; else INCONCLUSIVE
@@ -475,16 +476,17 @@ func Gate(b Baseline, baselineHash string, in GateInput) (GateResult, error) {
 	for k, p := range pairs {
 		incScores[k], candScores[k] = p.inc.score, p.cand.score
 	}
-	res.Delta, res.Lo, res.Hi = BootstrapDeltaMean(incScores, candScores, b.BootstrapB, b.Seed)
+	res.Delta, res.Lo, res.Hi = primaryInterval(incScores, candScores)
 	if !finite(res.Delta) || !finite(res.Lo) || !finite(res.Hi) {
 		return GateResult{}, refusef("%s", overflowMsg)
 	}
 
 	// Efficiency (R2): one paired bootstrap per declared metric, over the pairs that resolved it
-	// on both arms, with the same B and seed as the primary. With k declared metrics each one is
-	// read on the two-sided 1 - 0.05/k interval (Bonferroni), so that "some metric improved"
-	// keeps a false-improve rate near 2.5% instead of k times that. A regression is read on the
-	// plain 95% interval of the same replicates: more vetoes is the conservative side.
+	// on both arms, with the baseline's B and seed. With k declared metrics each one is read on
+	// the two-sided 1 - 0.05/k interval (Bonferroni), so that declaring k metrics does not
+	// multiply the chance that "some metric improved" by k. A regression is read on the plain 95%
+	// interval of the same replicates, which is the narrower one: more vetoes is the conservative
+	// side. These reads stay on the percentile bootstrap; the ADR records why.
 	k := len(b.Efficiency)
 	qLo, qHi, level := efficiencyQuantiles(k)
 	res.Efficiency = make([]EfficiencyResult, 0, k)

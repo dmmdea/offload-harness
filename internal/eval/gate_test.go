@@ -278,9 +278,10 @@ func TestGateExcludedShareAboveThresholdIsInconclusive(t *testing.T) {
 	}
 }
 
-// The gate calls the existing paired bootstrap on the usable non-held-out pairs in sorted order,
-// and reports its numbers untouched.
-func TestGateUsesTheExistingBootstrapOnSortedPairs(t *testing.T) {
+// The gate reads the primary on the usable non-held-out pairs in sorted task order, through
+// primaryInterval, and reports its numbers untouched. The primary does not depend on the baseline's
+// bootstrap settings: they read the efficiency metrics.
+func TestGateReadsThePrimaryOnSortedPairs(t *testing.T) {
 	inc := []float64{0.1, 0.9, 0.4, 0.5, 0.7, 0.2, 0.8, 0.3, 0.6, 0.0, 1.0, 0.55, 0.45, 0.65, 0.35, 0.25, 0.75, 0.15}
 	cand := []float64{0.2, 0.95, 0.5, 0.5, 0.9, 0.1, 0.9, 0.5, 0.7, 0.1, 1.0, 0.6, 0.4, 0.8, 0.5, 0.3, 0.7, 0.3}
 	n := len(inc)
@@ -295,12 +296,25 @@ func TestGateUsesTheExistingBootstrapOnSortedPairs(t *testing.T) {
 		ca.Tasks[i], ca.Tasks[j] = ca.Tasks[j], ca.Tasks[i]
 	}
 	r := mustGate(t, b, h, inputFor(h, ia, ca))
-	d, lo, hi := BootstrapDeltaMean(inc, cand, 2000, 42)
+	d, lo, hi := primaryInterval(inc, cand)
 	if r.Delta != d || r.Lo != lo || r.Hi != hi {
-		t.Fatalf("gate (%v %v %v) != BootstrapDeltaMean (%v %v %v)", r.Delta, r.Lo, r.Hi, d, lo, hi)
+		t.Fatalf("gate (%v %v %v) != primaryInterval (%v %v %v)", r.Delta, r.Lo, r.Hi, d, lo, hi)
+	}
+	if !(lo < d && d < hi) {
+		t.Fatalf("setup: the interval must have width around the delta: %v %v %v", lo, d, hi)
 	}
 	if r.BootstrapB != 2000 || r.Seed != 42 {
 		t.Fatalf("bootstrap settings not reported: %d %d", r.BootstrapB, r.Seed)
+	}
+	// Another B and seed change nothing about the primary.
+	p2 := supPre(n)
+	p2.BootstrapB, p2.MinPairs = 7000, 16
+	seed2 := int64(9)
+	p2.Seed = &seed2
+	b2, h2 := freeze(t, p2, nil)
+	r2 := mustGate(t, b2, h2, inputFor(h2, ia, ca))
+	if r2.Delta != r.Delta || r2.Lo != r.Lo || r2.Hi != r.Hi {
+		t.Fatalf("the primary moved with the bootstrap settings: %v %v %v vs %v %v %v", r2.Delta, r2.Lo, r2.Hi, r.Delta, r.Lo, r.Hi)
 	}
 }
 
@@ -715,7 +729,7 @@ func TestGateCheatCountedSeparatelyAndScoredZero(t *testing.T) {
 	}
 	r := mustGate(t, b, h, inputFor(h, inc, cand))
 	candScores := append(repeatF(1, 8), repeatF(0, 8)...)
-	d, lo, hi := BootstrapDeltaMean(incScores, candScores, b.BootstrapB, b.Seed)
+	d, lo, hi := primaryInterval(incScores, candScores)
 	if r.Delta != d || r.Lo != lo || r.Hi != hi {
 		t.Fatalf("a cheat must enter as 0: gate %v %v %v want %v %v %v", r.Delta, r.Lo, r.Hi, d, lo, hi)
 	}
@@ -795,7 +809,7 @@ func TestGateUnusableAttemptsAreImputedOnTheCandidateAndSkippedOnTheIncumbent(t 
 			candS = append(candS, 1)
 		}
 	}
-	d, lo, hi := BootstrapDeltaMean(incS, candS, b.BootstrapB, b.Seed)
+	d, lo, hi := primaryInterval(incS, candS)
 	if r.Delta != d || r.Lo != lo || r.Hi != hi {
 		t.Fatalf("per-task scores wrong: gate %v %v %v want %v %v %v", r.Delta, r.Lo, r.Hi, d, lo, hi)
 	}

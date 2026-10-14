@@ -19,8 +19,12 @@ import (
 
 // GateVersion is the version of the rules this package implements. It rides in the baseline,
 // in every result and in the era marker. Version 2: unusable candidate attempts enter at the
-// worst score, the judge is frozen, bootstrap_b and min_pairs have floors, a declared efficiency
-// metric that got worse vetoes, and the margin is bounded by the class width.
+// worst score and an unfinished one's recorded cost is spent, the judge is frozen, bootstrap_b and
+// min_pairs have floors, a declared efficiency metric that got worse vetoes (read from two
+// resolved pairs), the margin is bounded by the class width, and the primary is read on the score
+// form of the t interval. Version 2 has never been released (the gate is new in the change that
+// carries it, and no version 2 baseline exists outside tests), so these rules landed in it
+// rather than in a version 3 nobody ran.
 const GateVersion = "2"
 
 // Modes.
@@ -58,11 +62,14 @@ const (
 	DefaultMarginJudge010     = 0.5
 )
 
-// Floors that validate enforces. At n = 8 pairs a null comparison (no real difference) adopted in
-// 5.4% of simulated runs and at n = 16 with B = 2000 in 3.1%, against a nominal 2.5% for a
-// one-sided 95% interval; with B = 10 it was 9% and with B = 1 45%. The floors are the smallest
-// settings measured to stay calibrated: 2000 is the B the existing callers of BootstrapDeltaMean
-// use, and 16 is the default sample.
+// Floors that validate enforces. min_pairs: the primary interval's false-ADOPT rate was measured
+// from 16 tasks up (at most 2.7% in every null cell of the calibration grid, 16 to 80 tasks,
+// against a nominal 2.5%, and at most 4% is tested end to end), so 16 is the smallest sample the
+// gate makes a claim about. bootstrap_b: the paired bootstrap reads the efficiency metrics, and an
+// interval read from a handful of resamples is mostly noise: on the cost nulls of the study at 16
+// tasks a metric falsely improved in 8% to 13% of runs at B = 10 and in 42% to 50% at B = 1,
+// against 3.5% to 5.9% at B = 2000, which is the B the existing callers of BootstrapDeltaMean use.
+// The figures are TestCalibrationStudy's and TestEfficiencyCalibrationStudy's (gate_sim_test.go).
 const (
 	MinBootstrapB = 2000
 	MinMinPairs   = 16
@@ -385,10 +392,10 @@ func (b *Baseline) validate() error {
 		seenEff[e.Name] = struct{}{}
 	}
 	if b.MinPairs < MinMinPairs {
-		return refusef("baseline refused: min_pairs %d is below the floor %d (a null comparison adopted in 5.4%% of runs at 8 pairs and 3.1%% at 16, against a nominal 2.5%%)", b.MinPairs, MinMinPairs)
+		return refusef("baseline refused: min_pairs %d is below the floor %d (the primary interval's false-ADOPT rate was measured from %d tasks up and nothing below that is claimed)", b.MinPairs, MinMinPairs, MinMinPairs)
 	}
 	if b.BootstrapB < MinBootstrapB {
-		return refusef("baseline refused: bootstrap_b %d is below the floor %d (a null comparison adopted in 9%% of runs at B = 10 and 45%% at B = 1)", b.BootstrapB, MinBootstrapB)
+		return refusef("baseline refused: bootstrap_b %d is below the floor %d (the efficiency intervals are read from the resamples, and a few of them are mostly noise: on null cost data a metric falsely improved in 8%% to 13%% of runs at B = 10 and in 42%% to 50%% at B = 1)", b.BootstrapB, MinBootstrapB)
 	}
 	if !finite(b.MaxExcludedShare) || b.MaxExcludedShare < 0 || b.MaxExcludedShare > 1 {
 		return refusef("baseline refused: max_excluded_share %g is outside [0,1]", b.MaxExcludedShare)
