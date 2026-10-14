@@ -567,3 +567,70 @@ func TestFailureReportCarriesItsWindow(t *testing.T) {
 		}
 	}
 }
+
+// "Documented" must not be the same as "someone looked": a row whose root-cause and structural-fix cells restate the
+// code's own comments makes every class read as covered and the gap detector (what has nobody investigated) is
+// defeated. A class is investigated when its row holds a root cause or a structural fix written by a person; a
+// cell that is empty, or reads the default the report would print for an empty one ("not recorded", "open"),
+// is not. uninvestigated_classes lists the classes in the ledger that are not, a class with no row at all among them.
+func TestFailureRegisterListsTheClassesNobodyInvestigated(t *testing.T) {
+	r := decodeFailureReport(t, runFailures(t))
+	want := []string{"capacity_wait", "config", "other", "stall_prefill"}
+	if !reflect.DeepEqual(r.UninvestigatedClasses, want) {
+		t.Errorf("uninvestigated_classes = %v, want %v (no row, or a row whose cells hold nothing a person wrote)", r.UninvestigatedClasses, want)
+	}
+	for name, investigated := range map[string]bool{
+		"node_busy": true, "abstention": true, "budget": true, "poll_deadline": true, "node_unreachable": true,
+		"failed_verification": true, // a structural fix and no root cause is still something a person wrote
+		"stall_prefill":       false, "capacity_wait": false, "config": false, "other": false,
+	} {
+		if got := classByName(t, r, name).Investigated; got != investigated {
+			t.Errorf("%s: investigated = %v, want %v", name, got, investigated)
+		}
+	}
+	// With the stall_prefill row's cells given real text, the class leaves the list.
+	docs, err := parseFailureTable("| class | meaning | root cause | structural fix |\n|---|---|---|---|\n| `stall_prefill` | m | the prompt is larger than the card can prefill | |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := ledger.FailureRegisterFile(filepath.FromSlash(failureFixtureLedger), 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range joinFailureDocs(reg, docs).Classes {
+		if c.Class == "stall_prefill" && !c.Investigated {
+			t.Errorf("a row with a written root cause is not investigated: %+v", c)
+		}
+	}
+}
+
+// The page the binary ships records no investigation it does not have. Its meaning cells state what each class IS (the
+// constants' own definitions); its root-cause and structural-fix cells are a person's findings about an observed
+// failure, and are shipped empty until one is written. A cell that restated a code comment as a finding made every
+// class look investigated. A class a person did investigate is named here with what the finding rests on, which is the
+// only way a non-empty cell gets onto the page.
+func TestEmbeddedFailureTableShipsOnlyInvestigatedCells(t *testing.T) {
+	investigated := map[string]string{
+		// "<class>": "what the root cause / fix cell rests on",
+	}
+	docs, err := parseFailureTable(failureRegisterDoc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for class, d := range docs {
+		if _, ok := investigated[class]; ok {
+			if !d.Investigated {
+				t.Errorf("%s is listed as investigated but its row holds no root cause or fix", class)
+			}
+			continue
+		}
+		if d.Investigated {
+			t.Errorf("%s: the page holds a root cause or structural fix, but this test names no investigation behind it (%q / %q)", class, d.RootCause, d.StructuralFix)
+		}
+	}
+	for class := range investigated {
+		if _, ok := docs[class]; !ok {
+			t.Errorf("%s is listed as investigated but has no row", class)
+		}
+	}
+}
