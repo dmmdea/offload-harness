@@ -6,6 +6,848 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.186.0] - 2026-10-14 - every tool result of a stale MCP server says so, a video, animation or audio call can name the node that runs it, a kept ComfyUI frees its models after 300 s idle, the installer stops writing the every-expert --cpu-moe, the display guard can read the monitor's card, the asker's session and run class ride the fleet wire, an overdue lease's holder can be asked to yield, a speed term in a contract's acceptance fails the build, and the changelog is one file per change
+
+### Added - the changelog is one file per change: `changes/unreleased/` fragments, assembled at the release step by `go run ./cmd/changelog`
+
+- **The defect.** Every branch edited `CHANGELOG.md`, so two branches could not meet without a conflict in it: 864 of the 2,566 commits since 2026-09-01 touched the file, the 0.184.0 release merged ten branches in a row, and the hand edits that resolved those conflicts overwrote the release heading above the new entry twice (`fa2e8866` restored the 0.185.0 heading, `8029f3d3` the 0.183.0 one) and once joined two entries with no blank line between them (`de777159`). A test that read only `## [Unreleased]` was also blinded by the bump that empties it (`387334a5`).
+- **The change.** A change adds one new file, `changes/unreleased/<branch-slug>.md`, whose body is exactly the text the changelog will carry (what changed, why, the red-first note, the mutation list, as the entries here are written), and never edits `CHANGELOG.md`. Two branches add two files and cannot conflict. The release step is one command that moves the files under the new heading and cannot eat the one above it. Format, rules, release order and recovery: `changes/README.md`; `CONTRIBUTING.md` (Versioning, the new "one file per change" section, the pull-request steps) and `CLAUDE.md` (two rows of "Where things live") say the same.
+- **A fragment.** The file name matches `[a-z0-9][a-z0-9._-]*.md` (`README.md` is the one non-fragment); the body is valid UTF-8 with no control byte but tab and LF, and a CR only as half of a CR LF pair (a lone CR ends a line in Markdown, and every line rule here splits on LF, so a forged heading could hide behind one); it is not empty; its first non-blank line starts `### ` (new: 121 of the 387 existing release entries open with a bullet or a lead paragraph, and a loose bullet would be glued under the previous fragment's section); no line starts `# ` or `## `, even inside a code fence (a `## [x.y.z]` line in a fragment is the forged heading the tool exists to prevent); and no line carries a release date between two separators (the shape ` - YYYY-MM-DD - `, or the same with em dashes), because the tree check refuses such a line anywhere but a release heading, and a `### Fixed` title or a bullet that copied that shape would otherwise be assembled, deleted, and then fail the changelog's own check. The kind words (`Added`, `Changed`, `Fixed`, `Removed`, `Security`) and the absence of a version number in a heading are conventions, not checked. Any other entry in the directory (a subdirectory, a `.txt`, an upper-case name) is an error that names the file, because a skipped fragment is a lost entry; so is anything in `changes/` but `README.md` and `unreleased/` spelled exactly so (a fragment saved one level up, or in an `Unreleased/` directory that a case-insensitive checkout reads and Linux does not), and a file where `changes/` or `changes/unreleased/` belongs; a directory that does not exist holds no fragments.
+- **The assembler.** `go run ./cmd/changelog assemble -title "<one line>" [-date YYYY-MM-DD] [-root DIR] [-dry-run]`. The version is the `VERSION` file's, so the order is bump the three carriers first and assemble LAST (it writes the top of the changelog; a merge of `main` or a renumbering after it conflicts in the hunk the tool wrote). `-title` is required; the date defaults to today; `-dry-run` prints the section and writes and deletes nothing. It reads and validates everything and splices and verifies in memory before it touches a file, writes `CHANGELOG.md` through a temp file in the same directory and a retried rename, deletes each consumed fragment with a retry (Windows holds files), and prints one line, `Deletes: changes/unreleased/a.md, ...` (forward slashes), for the release commit. The new section is `## [VERSION] - DATE - TITLE` under an emptied `## [Unreleased]`; fragments come in file-name byte order, one blank line between them; the line ending is the `## [Unreleased]` line's own (a Windows working tree is CRLF, the index and Linux are LF) and the rest of the file is never rewritten. It refuses a bad version, date or title, a version that already has a heading (the overwrite guard), zero or two `## [Unreleased]` headings and an empty release; the result is checked against the old file (bytes before the heading unchanged, everything from the old top release heading to the end byte for byte, the new heading exactly once, the block blank, and no line of the section it wrote that the tree check would refuse for carrying a release date) before it is returned. Any refusal before the write leaves the changelog and every fragment byte for byte as they were (exit 1); a usage error exits 2; `check` runs the tree rules (exit 0 or 1). If a delete still fails, it exits 1 and names the files, and the duplicate guard below then refuses the survivor until it is deleted. Whatever an old-style branch left under `## [Unreleased]` is moved to the top of the new section, unvalidated, never dropped: the 0.186.0 release itself depends on this path.
+- **The tree rules and the gate.** `internal/changelog.CheckTree` is the one rule set: the fragments are well formed and `changes/` holds nothing else but `README.md` and `unreleased/`; the `## [Unreleased]` block of `CHANGELOG.md` is blank ("entries go in changes/unreleased/"); no fragment's text is already in `CHANGELOG.md` (the duplicate a failed delete leaves behind); every semver release heading appears once; no line but a heading carries a release date between separators (a heading glued onto another line; the older em-dash separator counts too). The last two hold on the current file and would catch the incident class even when the tool is bypassed. `TestTheChangelogTreeRulesHoldOnTheRealTree` (root package) is a thin call of it, and `check` is the same call; the tracked-tree lints (conflict markers, control bytes, operator identity, the leak gate) already read every fragment. Only the root `CHANGELOG.md` is read or edited; the vendored `tools/*/CHANGELOG.md` ledgers never are.
+- **The prose gates see a fragment.** The four tests that read `CHANGELOG.md` for retired wording or a required sentence (`TestTheDocsQuoteTheSIGTERMCardTextTheCodeProduces`, `TestTheDocsDoNotClaimAnIdleBoxNeverTouchesTheServingConfig`, the CHANGELOG half of `TestTheDocsNameNodeReportedOnEveryDoorThatPublishesIt`, `TestTheProseSaysWhichNameSelectsWhichRows`) now read it through `changelog.Combined(root)`, the file with the fragments spliced into its `[Unreleased]` block, so a retired phrase that rides in on a fragment fails on the branch that wrote it and not first on the release branch after the assembly. Each check became a function of a root that returns its problems, so a test can run it on a root of its own.
+- **What this does not do.** Two releases still conflict on `VERSION`, `internal/buildinfo/buildinfo.go`, `.printing-press.json` and the top of the changelog: only the feature-branch-versus-feature-branch conflict and the heading overwrite are gone. Assemble does not bump the version carriers (`TestVersionSourcesAgree` already guards them). A stale branch that carries its own release heading still conflicts by hand. There is no ADR (a process rule, carried by `CONTRIBUTING.md` and `changes/README.md`), no CI step that demands a fragment per pull request, and no place yet for a release-level lead paragraph.
+- **Behaviour change.** `go test` now fails when anything is written under `## [Unreleased]`, and says to write a fragment instead. A branch written the old way goes red once it merges this change; the fix is mechanical (cut the text into a fragment), and if the release comes first the assembler absorbs the text. `CONTRIBUTING.md` states both ways a change reaches `main` (a direct pull request that is also a release, which adds its fragment, bumps and assembles as its last commit, and a release branch that merges the fragments, merges `main`, renumbers and assembles last) and the recovery when `main` moves after the assembly (revert the release commit, merge, renumber, assemble again). A `Deletes:` line is needed only when a fragment reached `main` earlier through a fragment-only pull request that did not bump the version.
+- **Tests, red first.** A seam commit added the exported surface returning zero values (and, in a second one, `readFragmentsFS`), then the tests, each failing on its assertion before the implementation (line numbers as of the red commit): `changelog_test.go:80: release text differs` (got ""), `changelog_test.go:166: no error, want one naming ["0.186.0" "already"]`, `changelog_test.go:381: "a.md" with body "" is accepted, want a problem naming "is empty"`, `changelog_test.go:423: order = [], want [0-x.md a-10.md a-2.md a.md b.md]`, `tree_test.go:113: no problem reported, want one naming [... "already in CHANGELOG.md"]`, `main_test.go:134` (the changelog unchanged), `main_test.go:250: exit 0, want 1`. A review of that build found three more holes, each fixed in its own red-then-fix pair: a release date between separators in a fragment line, which `assemble` wrote into the changelog and the next `check` refused with the fragment already deleted (`changelog_test.go:415: "a.md" with body "### Fixed - ..." is accepted, want a problem naming "release date"`, `main_test.go:258: exit 0, want 1`); a lone CR hiding a forged heading from every LF-based rule (`changelog_test.go:421`, `main_test.go:262`); and an entry of `changes/` beside the fragment directory, or a file where a directory belongs, which nothing read (`tree_test.go:120: no problem reported, want one naming ["changes/stray.md"]`, `main_test.go:265`, and, after a behaviour-free seam `strayEntriesFS`, `tree_test.go:172`). Fifty-two tests (175 with their subtests) across `internal/changelog` and `cmd/changelog`, on fixtures that spell out their CRLF, LF and mixed endings. The four prose gates took a seam commit (each check a function of a root, reading the plain file), then one fixture test each, red (`node_docs_fragments_test.go:39: a fragment carrying the retired wording is not refused`, `changelog_fragments_test.go:74`, `:82` and `:102`, `node_reported_fragments_test.go:36`), then the reader change. NOT red first: `TestTheChangelogTreeRulesHoldOnTheRealTree` passes on `main` by construction (the block is empty and no fragment exists), so it is proven by a named mutation (the call pointed at a directory with no changelog) and not by a red commit.
+- **Mutations.** One hundred and four one-line mutants through `scripts/mutation-check.sh`, each restored byte for byte, every one `MUTATION-VERDICT: RED`: the fragment reader (the README skip, the directory refusal, the absent directory, the sort), each fragment rule (name, UTF-8, the control-byte test and its tab, CR and DEL exemptions, the lone-CR test and its offset and line number, empty, the `### ` opening, the `#`/`##` pattern at each level and for a tab, the release-date test, its em dash and its line number), the entries of `changes/` (the README exemption, the exact-case directory name, the absent `changes/`, a file in place of `changes/` or `unreleased/`, a failing `Stat` and a failing `ReadDir`, the root they are read from), the block (exactly the heading, any bracket heading as the end, CR tolerance, the end moved one line down, which is the overwrite), `Splice` (one heading, the ending taken from the heading, legacy text, fragment normalisation, no blank line between sections, the empty release, the version, date and title checks and their spellings, a heading matched by prefix, the heading format, a heading at the end of the file), `verify` (each of its five checks, the release date among them, and the section it judges), `CheckTree` (the heading count, the blank-block test, the legacy allowance, the duplicate guard and its two normalisations, the repeated-heading count, the date rule and its exclusion and its em dash), `Combined` (the splice dropped), the assembler (dry run, validation, the version trim, the clock, the slash in the `Deletes:` line, the retry count and wait, the delete and rename failures, a fragment already gone, the title, the extra argument, `check`, `help`) and the readers (the root, `internal/mcpserver` and `internal/rig` gates back on a plain read, and the real-tree call). The first pass left two survivors (the release that vanished entirely was only caught together with another check; a dated non-semver heading was not in a fixture) and five spellings that did not compile; two test cases were added and the five respelled, and all seven then ran RED. The review's fixes left one more (a lone CR as the first byte of a fragment was in no row), also killed by a new row. Not mutated, and said so: the file mode kept on the rewritten changelog.
+- **Checked on a scratch repository.** Two branches that each append to `[Unreleased]` conflict on merge; two branches that each add a fragment merge clean into a release branch. After the bump, `check` passed and `assemble` printed the `Deletes:` line; the diff of `CHANGELOG.md` against `main` removed no line; `scripts/check-deletions.sh` against `main` exited 0 (the fragments never were on `main`). After `main` moved, reverting the release commit brought the fragments back, `main` merged without a conflict, and a second `assemble` under the renumbered version gave the right heading. A fragment that had reached `main` in a fragment-only change and was consumed by a later release made the guard exit 1 without the `Deletes:` line and 0 with it.
+
+### Added - The asker's session and run class ride the fleet wire, and `ledger --by-session` splits a session's tokens by where they ran
+
+- **The gap.** Every ledger row says which session asked (`origin_session`, ADR 0046) and whether the run was real work (`run_class`, register
+  F48), and both stopped at the box's edge: a job a delegator dispatches to a fleet node is run by the node's own process, whose row named
+  neither. A bake dispatched to a node wrote production-looking rows there, the node's ledger could not say whose work it ran beyond the asker's
+  box name (`requester`), and nothing could read a session's tokens by where they ran. The delegator's own ledger already holds that split (its
+  rows carry `origin_session`, `cards_tokens` and `fleet_job_id` or `node`); only the reader and the node-side stamp were missing.
+- **The wire.** Two request headers, `X-Offload-Origin` (the session label) and `X-Offload-Run-Class` (the class), sent only when non-empty, never
+  `production`, on every request that creates work on a node: `pairworkloads.Emitter.SetWireHeaders`, the one chokepoint the delegation dispatch,
+  the queue submit and the accelerator, compose, vision, text, media and stt lanes already pass. A header and not an envelope field, because the
+  dispatch envelope is a strict decoder and a new field would `400` on every node one release behind; a node that predates them ignores them and
+  an asker that predates them sends neither, so a mixed fleet behaves as before. A delegation pinned for `measurement` sends the class
+  `measurement` when its process has none of its own (the process class wins, as in the ledger's own `settleRunClass`), so the node's row for it is
+  a measurement too.
+- **One cleaning rule at both ends.** `ledger.CleanOrigin` (printable ASCII, at most 96 bytes, interior spaces allowed) and `ledger.CleanClass`
+  (a short `[a-z0-9_-]` token, lower-cased, `production` is no class) are exported. The sender sends only a value they accept; the node, the queue
+  holder and the claim loop keep only a value they accept. A label valid in the asker's own `Record` is therefore never dropped on the wire, and one
+  the ledger would refuse never reaches a row. A value over the cap is refused whole, not cut like the dispatch tenant is: a cut session id would
+  silently attribute the row to a different session.
+- **Both admission doors stamp them.** A pushed job: `admit`, which every lane joins, reads the headers and puts `Request.OriginSession` and
+  `RunClass` on the request the runner builds. A pulled job: the holder's submit handler stores them on the queued job (`fleetqueue.Job.Origin`,
+  `RunClass`, omitted when empty, so an old holder and a new one read each other's records), and the claim loop cleans them again, since they came
+  over the network, and stamps the same two fields. The pipeline carries them as `Meta.AskerSession` and `AskerClass` (named apart from the node's
+  own process origin) into the row. All four fields are `json:"-"`: a request body cannot name its own session or class, and `Meta`, which a node
+  marshals whole into its poll results, does not echo the asker's session id back.
+- **The class is believed only from a caller the node can authenticate.** A labelled row is left out of every production view, so a class from a
+  caller the node cannot identify would let any peer that reaches the port hide the node's rows. A token-gated lane has already passed its gate
+  (a bearer when a token is configured, else a loopback listener); a lane that is open on purpose (the media task types and the legacy
+  path-taking stt lane, which deployed tokenless clients use) is trusted only when a token is configured and the request presented it. For any
+  other caller the class is dropped, and so is a session label that carries a class of its own (`bake:run-7`, the `go-test` label), because
+  `ledger.ClassOf` reads a class off such a label when the row names none; a plain session label is kept. The queue submit route sits behind the
+  holder's own guard, so a class that reaches it is already authenticated.
+- **`stampOrigin` keeps a named session and fills the pids.** A caller that names only a session (the node writing a job's row for the asker's
+  session) used to get no pids; it now gets the pids of the process that recorded the row, which is what the columns mean. A caller that names a
+  pid keeps both, as before. A row whose asker sent no session falls back to the node process's own origin, as before.
+- **The reader.** `ledger.SessionShares` and `SessionSharesFile`, and `local-offload ledger --by-session` (optionally `--session <id>`, which implies
+  it): a `sessions` array added to the existing JSON (the default output is byte-identical), and a line saying what the number is. Per session:
+  `remote_tokens` (rows that carry a fleet job id or a node), `local_tokens`, `cards_tokens`, `remote_share`, and `served_rows` / `served_tokens` for
+  the rows this box ran as a fleet node (door `fleet`). Served rows are never added to the session's own totals, so a ledger shared by a delegator
+  and a node does not count a job twice. Production rows only unless `--include-test-traffic`, dispatch markers and inner rows are not jobs, and
+  rows with no session are one entry apart, never merged into a named one.
+- **What the share is.** It is the card-side placement split, not the share gate's cards/(cards+cloud), which needs the session's transcript and stays
+  in the hook; the fields are named apart (`remote_*`, not `fleet_*`) so the two are not confused. It is a floor on the remote part: a cascade call
+  routed to a node over the chat lane writes no node row and reads as local, and a delegation sent with `route: "queue"` writes no row on the asker's
+  ledger at all (the claiming node holds it, as a served row), so it is in neither number. A pushed delegation is not a floor: its finished row's
+  fleet job id comes from the node's ack, whatever becomes of its started marker. Tests pin both shapes. It reads one box's ledger; a view across the
+  fleet is a reader of several.
+- **Known limits, on purpose.** Accelerator rows served by a node stay unattributed (`RecordAccel` writes from no `Meta`); the `cli:fleet-measure`
+  door sends no class from a box with no process class, because the media and vision lanes know the config, not the door; the session id now
+  leaves the box, to every node the asker dispatches to, beside the asker's name, with no opt-out; and the share gate hook, which sums by session
+  with no door filter, would count a job twice on a box that is both session host and node (it is paused; the fix is one line there, outside this
+  repository).
+- **Docs.** ADR 0087 (Proposed; linked from the index and from ADR 0046's Consequences, which had named this change), the attribution header table and
+  the node's recording rules in `docs/systems/pair-workloads.md` and `docs/systems/fleet-node.md`, the `run_class` row of the delegation ledger table in
+  `docs/FLEET-NODE.md`, the ledger paragraph of `docs/systems/offload-pipeline.md`, and `docs/OPERATOR-GUIDE.md` (the `origin_session` column, a bake
+  dispatched to a node, and `ledger --by-session`).
+- **Red first.** A behaviour-free seam first (declarations, stubs, and the two flags registered and ignored, because the ledger flag set exits the
+  process on an unknown flag), then tests that failed on their assertions against it, for example: `X-Offload-Origin = "", want sess-abc`;
+  `originOf = ("", ""), want ("sess-abc", "bake")`; `queued job = origin "", class "", want sess-abc and bake`; `session-only row = session "sess-abc"
+  pid 0 ppid 0, want ... this process`; `written row = origin_session "" run_class "", want the asker's sess-abc and bake`; `no entry for session
+  "sess-abc" in []`; `--by-session printed no sessions key`. Then the behaviour. Three additions made after review are green at birth, because the
+  code they pin was already right: they are scored by the mutants named below, which turn each of them red (the windowed-index test in the ledger, the
+  empty-bearer case on a node with no token, and the queue lane writing no asker row).
+- **Mutation proofs.** 48 single-line mutants, each scored RED by `scripts/mutation-check.sh` (the mutant compiled, the named test failed, the file
+  was restored byte for byte). Ledger: `stampOrigin` restored to return early on a named session; the reader reading a fleet job id
+  or node as local, counting a served row as the asker's own, ignoring the run class filter, counting markers and inner rows as jobs, dividing by
+  zero for an idle session, reading a row without `cards_tokens` as free, ignoring `--since`, reversing the order, merging unattributed rows into a
+  named session, the parent index or the class index built from the rows inside `--since` instead of the whole ledger; `CleanOrigin` without its cap; `CleanClass` accepting `production`; `ClassOfSession` naming no class. Sender: the origin header
+  not sent, the class header not sent, either value not cleaned, the environment not read. Queue: the stored job dropping the origin or the class,
+  the submit handler storing either uncleaned, the origin key written when empty. Core: `Request` or `Meta` carrying the session on the wire. Node
+  (run on the remote gate runner): the stamp deleted on the push door and on the claim loop, the request always trusted, the bearer not checked, a
+  session cut to length tenant-style, a class-carrying label kept for an untrusted caller, the class not cleaned, the queued session or class not
+  cleaned again, the configured-token guard of the trust check deleted (an empty bearer then matches a node with no token), the token-gated arm of
+  the trust check made unreachable. Pipeline: the copy into `Meta` deleted, `entryFrom` dropping the session or the class. Delegate: a measurement
+  pin sending no class, overriding a process class, and the queue lane writing a row on the asker's ledger. `ledger`: `--session` not narrowing, not
+  implying `--by-session`, the array emitted unconditionally, the key losing `omitempty`.
+
+### Added - A video, animation or audio call can name the one fleet node that runs it, and a node publishes the family rows of those lanes
+
+- **What changed.** `offload_generate_video`, `offload_animate_character` and `offload_generate_audio` (CLI `--node` on `generate-video`,
+  `animate-character`, `generate-audio`) take `node`: a node id (the `node_id` its `/fleet/health` publishes, in any case) or one of the
+  `delegate_remotes` URLs. The named node is the only candidate. A box that has the lane itself still sends the call there, no other
+  node is tried and this machine's lane is not asked; `route local` with a node is refused, and so is a node on an image or a graph call made
+  through the library or the CLI (the image and graph verbs have no `--node`; the image and graph MCP tools list no `node` and drop one sent to
+  them like any unlisted argument, so no door advertises a parameter it would drop). A call with no `node` is placed
+  exactly as before and reads no row. `meta.placement` reads `remote: named node <name>`.
+- **Refused before anything is sent.** A node that cannot take the call is refused by a word in `data.refusal`, beside `node`, `lane`,
+  `family`, `missing[]` and `roster[]`, before the POST, so no job exists on it. `node_unknown` (it lists the ids that answered) and
+  `node_is_self` are `contract` defers. `node_lacks_route` (the lane is not served or its route is not CONFIGURED, naming the files of its
+  row), `node_lacks_media_job` (input files and the door is closed), `node_lacks_model` (the row of the family the call renders lists a file
+  with `bytes` -1, or no such row) and `node_below_min_vram` are `capacity` defers with `err_class` `no_node_configured`, the pairing that
+  err class already has, narrowed to the node the caller chose. A node that does not answer, or holds a text lease, is an ordinary
+  `capacity` defer with no err class (it may take the call later), and so is a node id that no answering node has while some roster entry
+  that was dialled did not answer. A roster entry the tailnet guard refuses is never dialled and has no id, so it does not count as
+  one: an id nobody has is `node_unknown` however many entries the guard refuses, and the reason names them; a URL named that is on the
+  roster but that the guard refuses is `capacity` with `err_class` `no_node_configured`, with no refusal word. A named call on a machine with
+  no `delegate_remotes` never reaches a roster and is the plain `config` defer, also with no refusal word. Nothing falls back to another
+  node or to a local run. A named call that ran on a node whose row judged it adds
+  `rendered_family` and `rendered_files` to the result.
+- **The rows.** `/fleet/health` gains `media_recipes[]`, additive: one row `{lane, name, default, engine, digest, files[{role, name,
+  bytes}], license, commercial_use}` per family a ComfyUI or sd.cpp binding of the node names (video: the default family always, another
+  only when `videogen_families` binds it or every file is on the node, an sd.cpp family by its own name; `wan-animate2`; `acestep`), with
+  `bytes` -1 for a file the node does not hold. The ComfyUI rows exist only on a node that has a ComfyUI install (`comfy_dir` is a directory
+  on it), because the shipped default config binds the three scripts on every machine: a node without the install and without an sd.cpp
+  video family omits the key, and one with the install lists every lane its config binds, with -1 for what it lacks. A row is a statement of
+  sizes, not an identity: no fingerprint, an empty `digest`, a stat per file, memoised for a minute; ComfyUI names keep their subfolders,
+  an absolute, drive-lettered or `..` name is published as its file name, and an sd.cpp file is published by its bare file name.
+  Voice, the audio.cpp engines and the sd.cpp animation lane publish no row, which a reader takes as unknown: a lane the node publishes no
+  row for goes to the node's own door, as a forced call does. A `model` is matched by row name exactly and otherwise folded the way the node
+  folds it (`mediacap.VideoBinding`), `ace` has no row. `delegate.NodeView.MediaRecipes` decodes it.
+- **`min_vram_gb` on video and animation** (`--min-vram-gb`): the caller's number filters the remote candidates of any placement that leaves
+  the machine by the node's largest card, as a graph's does; a malformed value is refused by name on every route. The Wan 720p default floor
+  of a graph is not applied here.
+- **Why.** The standing order for the fleet is that any machine holding the model takes a video, animation or audio call. That is three
+  releases of work, and naming a node needs no identity, so it comes first: a caller who knows which node has the weights can say so, and a
+  node that lacks them is refused in under a health read instead of by that node's own 503 after the job was sent. D2 is recorded as
+  decided in ADR 0082 Amendment 3 (these lanes overflow like images, on by default, `route local` the escape); the identity release (a
+  digest of the files' content and the settings that change pixels, the busy-lane probe, one-shot overflow) and the release for tickets with
+  input files are written down there and are not built here. A node that has not opened the media-job door stays as its operator left it: that is
+  a `node_lacks_media_job` for a call with input files, not something this change designs around.
+- **Tests, written first.** `internal/mediacap/lane_rows_test.go`, `internal/fleetnode/media_recipes_test.go`,
+  `internal/delegate/nodeview_mediarecipes_test.go`, `internal/mediaremote/named_test.go`, `internal/mcpserver/medianode_test.go` and
+  `main_node_cli_test.go`, committed red on behaviour-free seams before the fix. Red before: `one family bound and present, want one video row,
+  got []`; `rows per lane = map[] (rows []), want one video, one animate and one music row`; `rows = []` (the delegator's decoder);
+  `node "render-b": {OK:true ... "node":"render-a"` (the call went to another node); `a named node must take the call even when this machine
+  has the lane: {OK:true ... Data:{"local":true}}`; `want a deferred answer, got {OK:true ...` for every refusal; `min_vram_gb 24: ok=true,
+  want false`; `offload_generate_video: node advertised=false, want true`; `flag provided but not defined: -node`. On the tests as first
+  committed: 21 failing tests in `internal/mediaremote`, 11 in `internal/mediacap`, 3 in `internal/fleetnode`, 1 in `internal/delegate`, 4 in
+  `internal/mcpserver`, 5 in the root package. One of them (the fleetnode memo test) panicked on an empty list in its first red run; it was
+  changed to fail on its assertion and its changed form run red against the same seam. **Not red first, and the history says so:** the
+  test that exactly one default video row exists when the default family is sd.cpp was committed red before the fix; the pins that the
+  default row is the one marked default, that an older node is not judged for a model, and that an sd.cpp family is matched by its own
+  name were added green after the fix, to give three mutants a test to die on; the redaction of a URL typed with a credential was written
+  with its fix in one commit (its test is red under mutant `mr33`); and the task-list half of `node_lacks_route` got its test after a mutant
+  survived (`mr10`). Guards that pass before and after by design: a blank node is no node, a call with no node never reads a row, a node of an
+  older build decodes to nothing, a node with no lane publishes no key.
+- **Mutation checks.** 74 single-line mutants through `scripts/mutation-check.sh`, run on
+  `git archive` copies of the committed tree (each landed on exactly one line, compiled, and was restored byte for byte), the last verdict of each
+  `MUTATION-VERDICT: RED`; the 33 `internal/mediaremote` mutants were run again in full against the final Go code, all RED. First pass: 59 RED; 9 did not compile (`mc16`, `mr04`, `mr17`, `mr20`, `rt10`-`rt14`: a variable left unused) and 4 did
+  not land because the marker matched more than one line (`mcp02`, `rt07`-`rt09`), all replaced by mutants that do; 2 survived, `mr33` because the
+  run set omitted the new redaction test, and `mr10` (the task-list half of `node_lacks_route`) because no test held it, which a test now does.
+  By rule. mediacap (17): the size of a missing file (-1 to 0); the default family always listed; another family only when bound or complete
+  (guard removed, guard disabled; the all-files-present test disabled); an sd.cpp family replacing a ComfyUI one of its name; an absolute or
+  climbing name cut to its file name; a digest on a row; the animation and music engine guards; the music and video binding gates; the license
+  pair; the default flag; the sd.cpp default taking the ComfyUI default; the role prefix; an sd.cpp file published by path; the animation row
+  name. fleetnode (3): the minute memo, the publication, `omitempty`. delegate (1): the decode. mediaremote (33): `auto` with a node
+  bypassing a local lane; route local with a node; a node on an image or a graph call; a node that is not a string; this machine's own node
+  (case-sensitive); the id and URL match (case-sensitive, URL dropped); an id nobody answered to while an entry is down; the roster list; the
+  task and route refusal, the files it names, the media-job refusal, the model refusal; a lane with no row judged; the model fold, `ace`
+  judged, the exact-name match, the default row, the music-only rule; `min_vram_gb` on a named node, in `refuses`, on video and animation, and
+  its precheck; the text lease; `rendered_family`; the typed data, the err class and the defer class of a refusal; the named branch of
+  `callWith` and the placement string; the URL redaction. mcpserver (6): the `node` and `min_vram_gb` schemas, `node` on the image tool, the two
+  plumbing lines, `min_vram_gb` on the audio tool. Root (14): the two plumbing lines, the `--min-vram-gb` check, the value-flag entry of each
+  of the three verbs, the three usage lines, the parsed fields of each verb.
+- **Docs.** ADR 0082 Amendment 3 (the rules, the six refusals and their classes, what a row is and is not, the named limits, and the two
+  releases that follow), `docs/systems/media-generation.md` ("Naming a node"), `docs/systems/fleet-node.md`, `docs/FLEET-NODE.md`, the
+  glossary and the operator guide.
+- **Review fixes, before the merge.** A review of the first build found, and this entry's code now fixes, in order of weight:
+  (1) a roster entry the tailnet guard refuses was filed with the entries that did not answer, so a mistyped node id on a roster that
+  held one was a retryable `capacity` defer ("one of them may be it") on every attempt; it is `node_unknown` now, naming the refused
+  entries, and a dialled entry that did not answer still keeps the id a capacity defer; (2) every node that loaded the shipped default
+  config published a default `wan22`, `wan-animate2` and `acestep` row with every file at -1, nodes with no ComfyUI at all included (the
+  default binds the three scripts on every machine, and the docs and tests said a node without the lanes omits the key); the ComfyUI rows
+  are now built only when `comfy_dir` is a directory on the node, and the docs say what a node with the install publishes, an image-only
+  node included; (3) a named URL that is on the roster but that the guard refuses was filed under the `config` class, which no document
+  named; it is `capacity` with `err_class` `no_node_configured`, as `pickNodeFor` files such an entry; (4) an sd.cpp file was published
+  with the subfolders of a relative path though the contract is the bare file name; (5) the ADR called `mediacap.VideoBinding` the one
+  resolver of the video family, but three folds exist and nothing tied mediacap's copy of the runner's closed set to the pipeline's: a
+  pin test now does (`TestMediacapFoldsAVideoFamilyTheWayThePipelineRendersIt`, in `internal/pipeline`) and the ADR says so; (6) the CLI
+  prints a refusal's word only with `--json` (the DEFERRED line carries the reason), which the operator guide and the usage text now say;
+  (7) a named call on a machine with no `delegate_remotes` is the plain `config` defer with no refusal word, now stated and pinned;
+  (8) two comment fixes (the doc comment of `videoFlags` had been left above another function, and `vramTask` named a graph it does not
+  cover). Not changed: the image and graph MCP tools still list no `node` and drop one sent to them, a choice this entry documents and
+  the design left open; no door advertises a parameter it would drop.
+- **Review fixes: red first, and the mutants.** Four tests were committed first and failed on their assertions: `a refusal must carry
+  typed data, got "null"` (an id unknown on a roster with a refused entry came back as a capacity defer); `a refused entry is a
+  configuration fact: ... DeferClass:config ...` with an empty err class; `names = [models/sub/fastwan-q8.gguf high.gguf
+  models/sub/wan-vae.safetensors t5.safetensors], want fastwan-q8.gguf,high.gguf,wan-vae.safetensors,t5.safetensors`; and `a node with
+  no ComfyUI install published rows` (three rows with every file at -1), in `internal/mediacap` and in `internal/fleetnode`. **Not red
+  first, and the history says so:** three pins were added green because the code already had the behaviour and no test held it: the
+  four weight roles of an sd.cpp row (dropping the high-noise expert, or the T5, was SURVIVED on the tree before this fix, so the whole earlier suite missed it),
+  a named call on a machine with no fleet, and the cross-package family fold; each was then proved by a mutant. 17 more single-line
+  mutants through `scripts/mutation-check.sh` on a `git archive` copy of the committed tree, each landed on one line, compiled, was
+  restored byte for byte and ended RED: mediacap (9), the four sd.cpp roles one by one, the bare-name `path.Base`, the ComfyUI gate
+  (its definition, and its use on the video, the animation and the music lane); mediaremote (6), refused entries filed with the
+  silent ones, the refused entries left out of the reason, the class and the err class of a named URL the guard refuses, the class of
+  the no-fleet defer, a named call with no fleet running here; pipeline (2), `h3` removed from mediacap's closed set and `hunyuan`
+  removed from the pipeline's.
+
+### Added - An overdue lease's holder can be asked to yield (`gpu_on_overdue = request`): it runs the job's own `on_yield`, and nothing is killed, released or taken
+
+- **The gap.** A lease that outlives its declared window while its holder is alive is surfaced as `held-overdue` and nothing else
+  happens to it. Somebody waits for the card, the holder is overdue (its term was not renewed, or it reached the maximum total), and
+  the only recourse was a human running `gpu release --epoch N`. For a wrapper that command is a hazard: the claim goes, the
+  wrapper's next tick prints `LEASE LOST` and stops its own job within about 15 seconds while the card is already free and a second
+  job can be loading onto it. For a detached job it frees the claim and leaves the job running on the card. Jobs already record, at
+  the start, what they would like to happen when asked to stop (`--on-yield`, `--yield-grace`), and until now nothing read it.
+- **The policy.** One flat key, `gpu_on_overdue`. **Unset keeps today's behaviour: nobody is asked.** `request` asks the lease's
+  holder. `hold` says in words that nobody is. The value is trimmed and lower-cased; any other (`yield`, `kill`, `takeover`, a
+  typo) is refused by name when the config loads, and, because a one-shot verb goes on after a load error and the load installs
+  the policy on every exit, it is installed as `hold`, the direction that asks nobody; the holder's first tick says why no request
+  is made. **There is no automatic mode:** no timer, no daemon and no waiter acts on a lease; only the holder's own tick can ask. The
+  plan names `request` as the default; the operator decided that asking is opt-in, so the default stays what it was (ADR 0086 records
+  the deviation).
+- **Who asks, and when.** The holder's own tick (the wrapper of `gpu reserve`, and the detached holder of `gpu reserve --detach`),
+  not a blocked waiter. The preconditions are checked cheapest first, from the lease record alone: the policy is `request`; the
+  record is labelled expired or is past its declared end (a lease the same tick renewed is not asked); the holder was not asked
+  yet (an in-memory flag, so a vanished file cannot make it ask twice); the record says this holder runs the request; the lease has
+  read overdue, on every tick, for the holder's settle interval (below); and only then are the waiters read. Demand is a live waiter that is not the holder's own process, not waiting only on host RAM, and wants a
+  card the lease holds. **The same waiter (pid and start identity) must be seen on two consecutive ticks**, so a short probe
+  that comes and goes cannot stop a long job through its `on_yield`; the persistence is an in-memory counter on the holder's own
+  cadence and adds no time constant. **A label has to have survived a look.** The term check looks again at a lease it labelled
+  expired once a minute, and a look at the cards that fails (most likely when they are busiest) labels a lease that a second look
+  would renew; the ask cannot be taken back, so both holders settle for that same interval (the term check's own
+  `termRecheckEvery`, handed to the ticker, not a new constant) before they ask, and the waiter is counted from the first tick
+  after it. A lease the look renews is never asked, and a renewed lease that is labelled again settles again.
+- **The request.** A sidecar beside the lease record, `yield.<epoch>`: when it was asked, by which waiter pid, why (the basis in
+  words), up to three waiters and the queue length, the policy, the job's declared grace, and a second write of what the holder
+  did about it (`on_yield running`, `ran on_yield`, `on_yield failed` with the exit status, or `no on_yield recorded`). It is
+  written under the epoch lock after the writability probe and the liveness check the orphan marker uses, with tmp and rename; both
+  the ask and the later action update check the lease is still live, so a late update cannot bring the file back after a release;
+  both sweeps that end a lease remove it. A binary that predates the request ignores it (the preserved old-reader fixture pins that).
+  If the ask cannot be recorded nothing is run, and the holder says so once. What the holder did about it is written the same way;
+  a write that fails is said once (`could not record what its --on-yield did`) and tried again on the next heartbeat, with the
+  time of the event, and a request file that exists and cannot be read is an error, not "never asked".
+- **What the holder does.** It runs the `--on-yield` it was STARTED with, from memory, never the line the record holds (the record is
+  shared and can be rewritten), once, in its own working directory, through `sh -c` (or `cmd.exe /d /s /c` hidden on Windows), with
+  its output discarded (a wrapper's stdout is the job's), in a goroutine so the heartbeat goes on, and never waited out or cut short.
+  The wrapper's command is told `GPU_LEASE_YIELD_FILE`, the path of the sidecar (which exists only once the holder is asked), so a
+  job can poll it between items; the line itself gets `GPU_LEASE_EPOCH`, `GPU_LEASE_DIR` and `GPU_LEASE_YIELD_FILE`. A detached job is
+  not the holder's child, so under the request policy `gpu reserve --detach` prints the path (and `yield_file` under `--json`) and
+  says whether the holder runs an `--on-yield` or none was recorded, and `gpu status --json` carries it; under the default, `hold`
+  and an unrecognised value nobody is asked, and both are what they were before the key existed (a status call names the file once
+  a holder was asked, whatever the policy says by then). A waiter's reason is free text typed by any local process, so line breaks
+  and control characters in it become spaces before it reaches the holder's one-line stream. **A detached holder never returns on a yield:** its job is a separate process, and releasing would free the card under a live
+  job (the 2026-09-07 incident). A holder started with `--release-at-expiry` stamps nothing and is never asked.
+- **A record gains an additive `yields` stamp** (`wrapper` or `detached`), set at acquire by a holder that runs the request. The
+  version cannot say whether a holder would answer (none of the older builds ticks this), so a record without the stamp is never
+  asked and reads, on every surface, as "its holder does not run the yield request (a build from before it, or an in-process holder
+  such as the media pipeline's): ask whoever owns it". Two kinds of holder carry no stamp: every job started before the upgrade, and
+  the leases this build's own media pipeline takes in process, which never tick the request.
+- **What a waiter and a status call read.** Read-only everywhere (a test pins that no status surface writes the sidecar):
+  `ExplainHeld` (the refusal text of a blocked request), `gpu status` and its `holder.yield` object (asked at, waiters, grace, the
+  action, the exit status, whether the ask is unanswered), the one-line brief, and the overdue, stalled and orphaned notes all say
+  what became of the request. **No sentence aimed at a waiter names `gpu release --epoch N` for a lease whose wrapper is alive.** For a
+  wrapper the words are: nothing is killed; ask whoever owns it, or stop its job by hand (the wrapper's pid); the claim frees when
+  the wrapper ends. Only a detached holder's sentence names the release command, with what it does: it frees the claim at once, and
+  the job keeps running on the card until it ends. An ask is called unanswered once the lease still holds its cards past the job's
+  declared grace, or past a display-only ten minutes when the job declared none; nothing keys off that figure, which is chosen and
+  not measured. A lease that was asked and then renewed (the sidecar stays until the lease ends) is no longer overdue and is never
+  called unanswered: it reads "has since been renewed and is not overdue now".
+- **Not changed, on purpose.** Nothing is killed, signalled, released or taken over: a static test reads the source of the yield files
+  and fails on a kill, a signal, a process-tree stop, `taskkill`, `os.FindProcess` or a second process start. A claim whose holder
+  is alive is never freed by the harness. The term check still renews or labels and never frees. No `gpu yield` or `gpu takeover` verb
+  is added, and plan P12 (claim-until-dead routing, `--abandon-tree`, quarantine) is not part of this change.
+- **Limits, stated.** (1) A hung job that ignores the request keeps its card: the lease stays `held-overdue` with its heartbeat and
+  fence intact, and only its holder ending or a human acting frees it. (2) A progressing job is not asked: under the term rules a
+  renewal moves the declared end, so only a lease labelled expired or one that reached `gpu_max_total_min` is asked. (3) The request is
+  node-local: the fleet node's lease standing wire does not carry it. (4) A seat waiter registered for the whole node (the card table
+  was unreadable when it queued) conflicts with every lease and can ask an expired lease on a card it does not need; the two-tick
+  rule bounds that. (5) A holder started before the upgrade carries no stamp and is never asked, so a host is covered only once
+  its `gpu reserve` and `gpu hold` holders are this build; restart the long-lived processes so their surfaces say the same thing. The
+  leases this build's own media pipeline takes in process never carry the stamp and are never asked, before or after a restart.
+  (6) A holder whose command ends before its `on_yield` returns leaves the action at `on_yield running`; the file goes with the
+  lease. (7) The earliest ask comes about a minute and a half after the term ended: a label is asked about only after it survived
+  the term check's second look, and the waiter must then stay two ticks.
+- **Record and docs.** ADR 0086 (status Proposed) amends plan invariant I5 and the plan's description of the takeover: here the holder's
+  own tick runs the job's own pre-declared `on_yield`, instead of a takeover command running it. The file-only alternative (the holder
+  writes the sidecar and the job polls it) is a one-line change in the ticker, and the choice between the two is the operator's to
+  confirm. `docs/systems/gpu-lease.md` has the new section, the corrected `on_yield` / `yield_grace` rows (they were described as
+  read by the takeover command), the `yields` row, the source map and the held-overdue verdict row; `docs/OPERATOR-GUIDE.md` has the
+  sentence; `--on-yield` and `--yield-grace` help say who runs the line; `config.example.json` carries the key (the generator
+  and the file agree).
+- **Red first, then proofs.** A seam commit added only the types and signatures (the policy parser returning the unset value, the
+  asker never asking, the view empty, the shell runner doing nothing); the tests were committed next and failed on their
+  assertions, then the code followed. Recorded failures: `ParseOnOverdue("request") = "", <nil>; want "request"`, `ParseOnOverdue("kill")
+  accepted a value that is neither request nor hold`, `the holder of an overdue lease with a waiter on its cards was not asked after
+  two ticks`, `installed "kill" reads "", want hold`; in `internal/config` `request: Load installed "", want "request"` and `"yield"
+  was accepted: there is no automatic mode, and a typo must not pass`; in `internal/gpuactivity` `yield_file = "", want ...`, `note lacks
+  "was asked to yield"` and `note lacks "gpu release --epoch 41"`; in the root package `on_yield ran 0 times, want exactly once`,
+  `a detached holder stamps its form: ""`, `the report lacks "release with: local-offload gpu release --epoch 9"`, `--on-yield help lacks
+  "gpu_on_overdue"` and `exit 0, err <nil>: want the line's own status 3 and no error`; and in `internal/mcpserver`
+  `the assessed note carries the yield sentence verbatim`. Two fix-ups of the tests themselves came after the red run and are separate commits with their reasons (the wrapper
+  was queued behind the waiter the test planted too early; the policy has to come from the config file the verb loads, because every
+  `gpu` verb re-installs it). **Tests that were NOT red first, and the history says so.** Four absence assertions passed on the behaviour-free seam, as an
+  assertion that nothing happens must: `TestTickerSilentUnderTheDefaultPolicy`, `TestStatusNeverWritesTheYieldSidecar`,
+  `TestGPUOnOverdueUnsetKeepsTheBehaviourFromBeforeTheKey` and `TestDetachHolderThatReleasesAtExpiryRunsNoRequest`. Four more were
+  written after the red commit and passed on their first run against code that already did the right thing:
+  `TestAskedOnceEvenIfTheSidecarVanishes`, `TestATreeOrphanHasNoHolderToAsk`,
+  `TestGPUReserveUnderAnInvalidPolicyStillRunsAndAsksNobody`, and the strengthening of `TestLateActionAfterReleaseLeavesNoFile`
+  (it re-plants the file after the release, because the first version passed even with the liveness check removed). Each of the eight
+  is proven by a named mutation that makes the forbidden thing happen, below.
+  Sixty-six single-line mutations against the final tree, each run through `scripts/mutation-check.sh` (it proves the line landed alone,
+  that the unmutated tree passes first, that the mutant compiles, and that the file is restored byte for byte), and each `RED`: **in
+  `internal/gpulease` (37)** a lease still inside its window asked, a renewed lease asked, a waiter on another card counted as
+  demand, a host-RAM-only waiter counted, the holder's own pid counted, an unset policy asking (twice: by the sidecar tests and by the
+  ticker test), a hold or unrecognised policy asking, the ask repeated when its file vanished, two askers both writing, a holder
+  without the stamp asked, the two-tick rule dropped, the ask touching the claim, each of the two release sweeps leaving the
+  sidecar behind, a late action update bringing the file back, an ask made when it could not be recorded, the record's `on_yield`
+  run instead of the holder's own, `on_yield` run on every tick, run in line with the heartbeat, a failure not recorded, a missing
+  `on_yield` not said, the unrecognised-policy note said every tick, the failure-to-record note said every tick, a kill call added to
+  the request files (the source pin), the refusal text of a blocked request without the sentence, a live wrapper's sentence
+  naming `gpu release`, a detached holder's sentence naming it without what it does, the unanswered threshold ignoring the
+  declared grace and then the display figure, a holder without the stamp not said to predate the request, the hold policy not said,
+  the stamp not written to the record, not mirrored by `Info`, the parser accepting a value that is neither `request` nor `hold`, an
+  unrecognised value installed as unset, the value not trimmed and lower-cased, and an old reader tripping on the new field and
+  sidecar; **in `internal/config` (6)** the install behind another key's refusal, `Load` not installing, an unknown value not
+  refused by name, an unset key reading as `request` (by the accessor and by a stale earlier load), and the accessor not falling back
+  to `hold`; **in `internal/gpuactivity` and `internal/mcpserver` (7)** the holder without its yield file or sentence, the standing
+  notes without the sentence, `holder.yield` absent once asked, its `unanswered` flag, a tree-orphan reported as awaiting an answer,
+  the brief clipped over the sentence, and a status snapshot that writes the request; **in `internal/winexec` (1)** the runner
+  started through a raw `exec.Command`; **in the root package (15)** the wrapper's command not told the yield file, the wrapper not
+  ticking, the detached holder not ticking, the detached holder returning on a yield, the wrapper running the record's `on_yield`,
+  the wrapper not stamping its form, `--release-at-expiry` stamping, the detached form not stamped, a Windows command line that
+  mangles a quoted path, the lease environment missing, the line's exit status lost, the detach report (text and `--json`) without
+  the yield file, the help text not saying who runs the line, and a verb under an unrecognised `gpu_on_overdue` falling back to
+  `request`. First attempts that did not count: one mutant survived (the liveness check in the late action update was redundant
+  while the release sweep had already run, so the test was strengthened, see above), and three first attempts did not compile
+  (BAD-MUTANT) and were replaced by mutants that build; none of those is in the sixty-six. One redundancy was left alone on purpose: the unlocked stat
+  before the epoch lock in the asker is only a shortcut, and the in-lock re-check is what is pinned.
+- **Second pass, before it shipped.** A review of the first version found six defects in behaviour and wording, and tests that proved
+  less than they claimed. All are fixed, each with its test first. (1) An ask that a renewal had since answered was still called
+  unanswered, on every surface and on `holder.yield.unanswered`: it needs the lease to be overdue too, and reads "has since been
+  renewed". (2) A lease labelled on one tick could be asked about on the second, 15 seconds later, before the term check had
+  looked at the label again (a look at the cards that fails labels a lease that a second look renews): the holders now settle for
+  the term check's own recheck interval. (3) The three updates that record what the holder did discarded their errors, so a
+  sidecar could say "started its on_yield, which has not ended" for the life of a lease about a command that had finished: a
+  failed record is now said once and retried on the next heartbeat, with the time of the event. (4) A waiter's free-text reason
+  could split the holder's one-line stream or inject a terminal sequence into it: it is collapsed to one line. (5) A holder that
+  does not run the request was said to "predate" it, which is false of the media pipeline's in-process leases, and the rollout
+  sentence promised coverage that those leases can never have: the words now name the cause, and the rollout is narrowed to the
+  `gpu reserve` and `gpu hold` holders. (6) The default policy still printed, on `gpu reserve --detach` and on the status wire, that
+  a holder would run its `--on-yield`: the detach report and `yield_file` now appear only under `gpu_on_overdue = request` (or once
+  a holder was asked), and say there is nothing to run when no `--on-yield` was recorded. The status test that planted a waiter with
+  a pid nobody has (pruned as dead, so no demand ever existed) now plants a live one and shows the holder's own asker asks on that
+  same fixture.
+  **Red first, the second round.** Tests committed before the fixes and failing on their assertions: `a lease that is not overdue is
+  not an ask nobody answered`, `asked 15 s after the label, before the holder's term check looked at it again`, `a lease the recheck
+  renewed was asked`, `the holder says once that the result of its on_yield could not be recorded, got 0`, `an unreadable request
+  must be an error naming it, got <nil>`, `a clean ask is one line on the wrapping session's stream, got 2`, `the sentence must say
+  "does not run the yield request"` and `the default policy asks nobody and so advertises no yield file`; in the root package
+  `the holder was asked about a label that had not survived a recheck`, `a lease with no --on-yield: the holder runs nothing and the
+  report says so` and `gpu_on_overdue = "" asks nobody, and the report still talks of a yield request`. **Tests that were NOT red first,
+  proven by mutation instead:** the sidecar saying `on_yield running` while the command runs, the sentences for a failed command and
+  for one that cannot be started (exit -1), the waiters being read last (a dead waiter's record survives every tick that stops
+  earlier), the in-lock liveness check on the first write, the line's output never reaching the holder's streams, a shell that cannot
+  start being an error, the settle interval starting again for a renewed lease that is labelled again, the retried record carrying
+  the time of the event, the failed-look scenario of the settle rule, the live-waiter status test, and a test that a renewable
+  lease is never asked whichever of the holder's two checks runs first within a tick (the order is immaterial, because the asker never
+  asks on the first tick a lease reads overdue).
+  **Thirty more single-line mutations**, each run through `scripts/mutation-check.sh` and each `RED`: **in `internal/gpulease` (22)**
+  an unanswered ask by time alone, the sentence never learning the lease was renewed, the old "predates" wording, the settle interval
+  dropped (against the silent-progress label and against the failed-look label), the settle interval not starting again, a failed
+  record not said, a failed record not retried, the running action not written, an unreadable request file not an error, a retry
+  stamped with the time of the retry, the waiter's reason raw on the stream, control characters surviving, the waiters read before the
+  policy, the window, the once-flag, the form stamp and the settle interval (five), the ask not re-checking liveness under the lock,
+  a command that could not start not recorded as exit -1, and the running and failed sentences dropped; **in `internal/gpuactivity`
+  (3)** the default policy advertising the yield file, a request that was made not named once the policy changed, and a status
+  snapshot that ticks the real asker; **in the root package (5)** the holders passing no settle interval, the detach report
+  promising a request under every policy, the detach report claiming a command that was not recorded, the helper's output reaching
+  the holder's streams (on a Linux host and a Windows host), and a shell that cannot start reported as success (both hosts).
+
+### Added - a test refuses a speed term in any contract's acceptance array and pins the acceptance verb set as clock-free (H-03, INV-5)
+
+- **The rule and the gap.** INV-5 and ADR 0050 say quality outranks speed and that "Acceptance criteria and pass rules stay
+  wall-time-free". Nothing in the repository enforced that for the shipped contracts: `TestContractFixturesAreWellFormed` reads
+  three of the twelve JSON files under `contracts/`, and the four templates, the four write-door contracts and the node list were
+  parsed by no test. The eleven files that hold an `acceptance` key carry 87 strings and none has a speed term today (a scan of the
+  raw text and of the text with regex escapes undone), so this is a tripwire for the next edit, not the fix of a live violation. The
+  out-of-repo scan that did exist (a lint of the operator's measurement drivers and plan register) captured an `acceptance` array up
+  to its first `]`, so `["regex:[0-9]", "regex:within 90 s"]` showed it only `regex:[0-9` and the speed term went unseen.
+- **The gate.** One new root-package test file, `contracts_speedterm_test.go`; tests and docs only, no internal package is touched
+  and no node runs different code. `TestContractAcceptanceCarriesNoSpeedTerm` walks every `*.json` under `contracts/` with a real
+  JSON parse and reads the key `acceptance` at any depth and in any case (a single template, a top-level array of contracts, an object
+  with a nested `subtasks` list; `parseContractFile` decodes with `encoding/json`, which fills the field from `Acceptance` and
+  `ACCEPTANCE` too, so those are live lists and a gate that compared the key exactly would not see them). It fails on an `acceptance` value that is
+  not a list of strings, on a string `core.ParseAcceptanceCheck` does not
+  parse (the closed DSL has no time verb, so a pseudo-check such as `wall_ms:1500` is refused, and the parse coverage of the shipped
+  contracts goes from three files to all of them), on a string that carries a speed term, and on a file that is not valid JSON. Only the
+  key `acceptance` is read: ADR 0047's "No speed term enters the choice", quoted in a context text, stays legal. Non-vacuity: the
+  scanner must have read exactly the files that a separate, case-insensitive byte search for `"acceptance":` finds, and at least one
+  string, so a walk that reads nothing cannot pass.
+- **The pattern.** `speedTermPattern` is the pattern of the out-of-repo classifier, compiled under RE2 (the 30 vectors of
+  `TestSpeedTermVectors`, 16 positive and 14 negative, give the same result under Python's engine): `slower`, `faster`, `speedup`, `tok/s >`, `wall <= 1.5x`, `<= 1.5x
+  the`, `2x the K=1`, and a bare figure with a unit after `near`, `within`, `under`, `below` or `at most`. A `regex:` check is also read
+  with its escapes undone (`wall\s*<=\s*1\.5x` is `wall <= 1.5x`), so the escaped spellings do not hide. That is best effort and the
+  README says so: a figure spelled `\d+`, `[0-9]+` or `(?:a|b)` evades it. The literal is a raw string so the out-of-repo lint can read
+  it and fail when the two drift ("change both or neither").
+- **The verb pin, which does not depend on spelling.** `TestAcceptanceVerbSetIsReviewed` reads `internal/core/agentwire.go` with
+  `go/parser`: the constants typed `AcceptanceKind` and the case labels of `ParseAcceptanceCheck`'s switch (a constant name, a string
+  literal or an `AcceptanceKind("x")` conversion) must equal a reviewed set of seven verbs that gives each one the reason it reads no
+  clock, and so must the verb list in the unknown-verb message. Names a clock verb would carry (`wall`, `wall_ms`, `max_wall`,
+  `latency`, `ttft`, `tok_s`, `within`, `under`, `faster`, `slower`, `elapsed`, `duration`) must be refused as unknown. A label the
+  reader cannot resolve is an error, never a skipped verb. A change that adds a verb must add it to `reviewedAcceptanceVerbs` with its
+  reason. This replaces parsing the hand-kept error message alone (which is already stale in one place and would pass a verb added
+  without updating it).
+- **Not done, on purpose.** `core.ParseAcceptanceCheck` does not reject speed words (that would change what a node accepts when it
+  ACKs a contract, and rolling-upgrade compatibility with it); `delegate.LintAcceptance` gains no category (its comment says it is kept in
+  lockstep with a classifier outside the repository, so a new category would double the surface); there is no allowlist for a content
+  check that quotes a speed phrase: it anchors on the figure instead (`regex:90`), which `contracts/README.md` now says.
+- **Docs.** `contracts/README.md` states the rule beside the DSL table (no verb reads a clock, what the two tests refuse, that the scan
+  is a lint and the closed verb set is the real defence) and in the paragraph on `TestContractFixturesAreWellFormed`.
+- **Tests, red first.** A seam commit adds the pattern, the finding type and four helpers that return nothing; a test-only commit
+  follows and fails on its assertions (`speedTermIn("contains:faster") = ("", false), want a speed term` for all 16 positive vectors;
+  `got 0 findings, want 1` for each fixture; `the scanner read [], the byte search finds an acceptance key in 11 files`;
+  `AcceptanceKind constants = [], reviewed = [contains, diff_max_files, ...]`). Four subtests were green from the start by design: a
+  file with no `acceptance` key is not counted, only `.json` files are read, the unknown-verb message lists the reviewed set, and
+  clock-shaped names are refused (they pin behaviour that already held). The fix commit fills the helpers. A test-only commit
+  found while choosing mutants: the scanner and the byte search shared one extension-filter line, so it differs now; the scanner no
+  longer sorts a list nothing observed; and a parser with no switch on the kind got its fixture. A review round then found the key was
+  compared exactly while the production reader matches it without regard to case: four fixtures (`Acceptance`, an upper-case key in a
+  nested subtask, both spellings in one object, a capitalised bare string) failed on `got 0 findings [], want 1` and two byte-search
+  cases on `filesWithAcceptanceKey = "", want "c.json"`; `strings.EqualFold` and `(?i)` fixed them, and a premise test that runs the
+  real `parseContractFile` on three spellings (green from the start by design) records why.
+- **Mutation proofs (39, each one changed line, `scripts/mutation-check.sh`, all RED with the control arm green and the file restored).**
+  Pattern: `speed-?up` dropped, `near` dropped, the `tok/s` alternative, the `wall <= 1.5x` alternative, the `<= 1.5x the` alternative,
+  the `2x the K=1` alternative, the trailing word boundary of the time term, the trailing boundary of the first group. De-escape: the
+  regex argument scanned as written, `\s+` not read, `(?i)` not dropped, `\.` not read. Scanner: nested objects not walked, nested
+  arrays not walked, the parse step off, the speed step off, a bare-string `acceptance` not refused, a non-string element
+  stringified, the byte order mark not trimmed, invalid JSON skipped, non-`.json` files read, keys other than `acceptance` read, the key
+  compared exactly, the byte search without `(?i)`, the live
+  walk pointed at the wrong directory, subdirectories skipped, files never counted. Source reader: constants not collected,
+  conversion labels unread, an unresolved label accepted, a missing parser function tolerated, a missing switch tolerated. Verb pin on
+  the real parser: a literal `case ..., "budget_ms":` (the case arm only), a declared constant with no case (the constant arm only), a
+  clock name rewritten before the parse (the name probe only), a verb dropped from the error message (the message arm only). Live data:
+  `regex:within 90 s` in a template, `regex:near 22 s` in a nested write-door contract, `wall_ms:1500` in a template.
+- **Outside this repository.** The operator-side speed-term lint is now a hard gate on the same pattern (an untagged hit, an
+  `acceptance` list with a speed term read with a real JSON walk, or a drift from `speedTermPattern` fails the session-start audit, and
+  a surface that scanned zero files, a file it cannot read, or an acceptance directory in which it met no `acceptance` key is
+  unchecked, not clean; the key is matched in any case there too). Nothing in this release's code depends on it.
+
+### Added - Every tool result of a stale MCP server carries the stale-binary notice, a stale server's read no longer blocks a rollback, and the deploy report lists the sessions still on an old image
+
+- **The gap.** An MCP server keeps the executable image it started from, so a rename-swap deploy leaves every session that was
+  open before it on the old build. The stale-binary guard told a session on three doors only (`agent_delegate`,
+  `offload_research`, `offload_status`); a session that called `offload_summarize`, `offload_ask`, a media door or any other was
+  never told, and went on stamping ledger rows with old behaviour for as long as its client stayed open.
+- **The notice.** `staleNotice` (`internal/mcpserver/stale_notice.go`), a receiving middleware registered after the config gate,
+  appends the very note `offload_status` carries under `stale_binary` as a second text block (`stale_binary: <note>`) to the
+  result of every `tools/call` that does not carry the signal already, on every call (no cap, no config key), with `Content[0]`
+  untouched so the door's JSON still parses for a client that reads only the first block. The decision is the result's, not
+  the door's name: the three doors that carry the key in their own answer (`agent_delegate`, `offload_research`,
+  `offload_status`) do so only on the path that ran the work, so a first block that is a JSON object holding `stale_binary` or
+  `stale_binary_guard` at its top level is left alone with no check, and every other result gets the block, those three doors'
+  refusals (bad arguments, no subtask, no url, an unknown status section) and the config gate's deferral included. A summary
+  that merely quotes the key is still told. A test reads the call sites in `mcpserver.go` and keeps the list of the keyed doors
+  in step, the result is copied before the block is appended (a handler may keep what it returned), and a failed call, a result
+  with no content and a typed-nil result pass through as they are. A guard that is not watching rides the same way as `stale_binary_guard: ...`, on the first call that
+  finds it so and then on every 20th, because that is a standing condition of the process and not news. The note now names
+  `/mcp` (select `local-offload`, Reconnect) beside the restart, the way out that works for a stdio server the client does not
+  reconnect by itself. **Reach:** a server that started before this release has no middleware, so only a reconnect or a restart
+  of the client puts it on this one; the first real proof is two deploys away.
+- **The read.** The installed executable is hashed, and its build marker read, through `gpulease.OpenShared`, which grants
+  `FILE_SHARE_DELETE` on Windows (Go's `os.Open` grants only read and write sharing); the audit's own opener (`openAudited`, which
+  `gpu doctor` reads every backup through) is the same one. With the notice on every door, the first call of any door on a stale
+  server reads the freshly installed file, and a read that did not share delete made a rollback or a second swap landing in
+  that window fail on a sharing violation, with node-swap's holder diagnosis unable to see the stale server (its image path
+  had been renamed away).
+- **The record.** ADR 0085 (status Proposed) records the decision: the stale server is told, not replaced; a stable stdio shim
+  and a loopback HTTP endpoint the client reconnects by itself were weighed and neither is built, with the Windows rename and
+  lock facts, an acceptance matrix and a go/no-go gate (two deploys with sessions still stale after a day despite the notice).
+  `docs/systems/mcp-server.md` documents the notice, the shared read and the rule for counting a rollout: only ledger rows whose
+  `harness_build_sha256` equals the deployed build's hash. The operator's deploy script also reports, at the end of each Windows
+  leg and in its deploy record, the MCP servers it finds on an image older than the deployed build (pid, start time, session
+  when the registry names it); that report is information only, it never changes a node's verdict or stops a process, a check
+  that could not run says "not counted" and never 0, a Linux leg says "not probed", and a dry run says what a swap would leave.
+  It compares start times with the swap's own time (the `install-new` stamp node-swap writes, so a server started while the
+  node waited for idle, before the swap, is still told apart); only a result without that stamp falls back to the preflight
+  clock, and the report line then says its start-time check is partial. A deploy record's `summary.json` is written even if
+  the report's own file is unreadable (the field is null). The script lives outside this repository.
+- **Not changed.** Nothing is interrupted and nothing is killed. No tool is added or removed (`tools/list` is byte-identical on a
+  stale server, pinned), and a client that reads only the first content block sees exactly what it saw before. How each client
+  renders a second block is for the release's live check to record; it is not assumed.
+- **Red first, then proofs.** The tests were committed before the code and failed on their assertions, in two steps. The build:
+  eleven in `internal/mcpserver` (every other door answered with one block after a swap, for 28 doors; no notice on every call;
+  the error result, the shared result, the config deferral, the unreadable stamp, the guard cadence, the verbatim note, the
+  stalled read and the `/mcp` wording all missing), and on Windows two in `internal/gpulease` (the installed image could not be
+  renamed aside while a reader held it open, through `OpenShared` and through the audit's opener). The review of the build found
+  that the three keyed doors answered a stale server with no signal on every refusal before the line that adds the key and on
+  the config gate's deferral, because the middleware skipped them by name; its tests failed first (the eight early returns of
+  the three doors and the invalid-config deferral of two of them answered with one block where two were wanted, and a result
+  that carries the key at its top level was changed under another door's name), then the middleware was made to decide from
+  the result. The proofs: twenty-three single-line mutations on the final code, each run through `scripts/mutation-check.sh`
+  and each killed (RED): the registration dropped; the registration made conditional on a valid config; the key check removed;
+  its cheap test misspelled; the guard key alone not recognised; a mere mention of the key counted as the signal; a first block
+  that is not JSON counted as the signal; the old skip by name put back for one door; the stale condition removed; the notice
+  capped at the first three calls; the typed-nil guard removed; the no-content guard removed; the result appended to in place
+  instead of copied; the error flag lost in the copy; the guard block on every call; the guard block dropped; the note not
+  verbatim; the wording without `/mcp`; a note that ranks two builds of one version; the share-delete bit removed; the audit
+  opener back to `os.Open`; the installed-image opener back to `os.Open`; the hash opening the file directly. The Windows-only
+  control (a plain `os.Open` blocks the rename that `OpenShared` allows) tests the platform and has no mutant in the code; as a
+  test it dies when its opener is swapped.
+- **The deploy script (outside this repository).** Its mock tests were written against a behaviour-free seam of the old
+  script first and failed on their assertions (34), then passed against the edited one together with the whole existing mock
+  suite and the script's own `--selftest`, which also runs the snippet for real against a hidden dummy MCP server (listed by
+  image path, by start time and by neither; the session joined from an owners registry; a bad swap time answers `ok=false`).
+  The review round added tests that failed first (nine assertions: the swap time that rides, its classifier, the fallback
+  caveat, and a deploy record whose stale-mcp file is not JSON) and ran `write_record` for real, which no test had executed.
+  Twenty single-line mutations of the final script, each killed: the swap time reverted to the preflight clock on either leg;
+  the classifier reading node-swap's start, the wrong step, or leaving the fraction of a second in; the fallback caveat
+  dropped or always off on either leg; no swap time passed on either leg; a dry run handed a swap time; either leg's report
+  call dropped; either leg counting after a swap that did not complete; the record's merge raising on a bad file, writing
+  nothing, or keyed on the wrong name; the record's builder writing an empty object; the snippet's date parser narrowed to the
+  old offset-less format (killed by the `--selftest` lines that hand real PowerShell a stamp with an offset and one in UTC).
+
+### Fixed - a kept or warm ComfyUI frees its own models and caches after 300 s idle, from inside the engine
+
+- **The defect.** The rule is that no idle model stays loaded: every engine unloads after 5 minutes. llama-swap does it with its own
+  `ttl`; ComfyUI has no idle timer (its parser takes no idle or timeout argument), so a ComfyUI that nothing frees holds what it
+  keeps. The exposure is narrower than "a kept instance lives to the end of its lease" suggests, in two ways. Every runner POSTs
+  `/free` at the end of its job, kept or not (`render/gpu-lock.mjs`), the Go side frees after every run, and the holder of the lease
+  stops a kept instance at release. And the harness launches every ComfyUI with `--disable-smart-memory`, with which ComfyUI itself
+  calls `unload_all_models()` when a prompt ends, on success and on a handled error (`execution.py` after the node loop; read in
+  the ComfyUI checkout of the reference box, its version in `docs/systems/media-generation.md`), so a kept single-prompt instance (`--cache-none`) is already bare between jobs and the pack finds nothing to free
+  there (it does not fire and logs nothing). What survives is (a) a warm (`--batch`) session's executor cache, which keeps the
+  loader outputs (the weights the unload moved to host RAM) until a free resets the executor, so a runner killed before its cleanup
+  (a tree-kill skips it) or a session that stalls holds host RAM until the lease ends, and (b) a hand-started instance run without
+  `--disable-smart-memory`, which keeps its models in VRAM after a prompt. Both are read from ComfyUI's code and a fake queue, not
+  yet seen in a live ComfyUI.
+- **The fix, in the engine.** A kept (`--keep-comfy`) or warm launch now carries a harness-owned pack,
+  `render/comfyui-ext/idle-nodes/offload_idle`, standard library only. It exports an empty `NODE_CLASS_MAPPINGS`, because ComfyUI
+  reports a folder with neither that nor `comfy_entrypoint` as a custom node that failed to import. One daemon thread polls every
+  5 s. A poll is busy when a prompt is queued or running (`get_tasks_remaining`) or `task_counter` moved (a prompt that began and
+  ended between two polls); both are read under the queue's mutex. After 300 s of polls that were not busy, if the engine holds
+  something (a loaded model, or the executor cache is on, which is the warm case), it sets `unload_models` and `free_memory`, the two
+  flags `POST /free` sets, in ONE hold of the mutex after re-checking that nothing is queued and no prompt ran, once per busy period.
+  ComfyUI's own worker thread drains them (unload all models, reset the executor, collect garbage); the pack never touches a model. A
+  prompt that lands in the microsecond after the check runs first and the flags drain after it: one avoidable reload, never a
+  corrupted run. The pack never raises: a failure is logged once as `[offload_idle] NOT ACTIVE` and the next poll retries, and an
+  engine it cannot ask what it holds is freed anyway (a `/free` is always safe). It serves `GET /offload/idle` (`limit_sec`,
+  `idle_sec`, `armed`, `freed`, `last_free_unix`, `error`), registered at import, which ComfyUI serves because custom nodes import
+  before `add_routes`. This is the llama-swap `ttl` analogue: the clock belongs to the engine, the harness runs no timer or watcher
+  (plan I5) and acts on no other process.
+- **The fix, launcher** (`render/comfy-lifecycle.mjs`).
+  - `resolveIdleBound`: `COMFY_IDLE_FREE_SEC` unset is 300, `0` or `off` is none (one `COMFY-IDLE-OFF` line), a whole number of seconds
+    from 5 up is that, anything else is 300 with a `COMFY-IDLE-WARN` naming the value. It reaches the pack as `OFFLOAD_IDLE_FREE_SEC`
+    and is fixed when an instance is launched: a runner that reuses a running instance cannot change it.
+  - `launchFlags({ idle })` adds the idle yaml (`render/comfyui-ext/extra_model_paths_idle.yaml`, apart from `nodes/` so an ordinary kept
+    launch never imports the fail-closed Wan pack) to `--extra-model-paths-config` once, before the operator's args, and puts the pack
+    INTO the last `--whitelist-custom-nodes` value list. That flag is `nargs='+'` with no append action, so a second flag would replace
+    the multicard packs, and `--whitelist-custom-nodes=a b` reads `b` as a stray argument, so that spelling is rewritten to the space
+    form; argparse abbreviations are read as the flags, down to the shortest ComfyUI's own parser accepts (measured on the reference box's checkout: `--wh`,
+    `--disable-al`; `--w` and `--disable-a` are ambiguous there and stay unread); with `--disable-all-custom-nodes` and no whitelist
+    one is added; with neither, every custom node loads and nothing is. Only when the yaml and the pack file exist: ComfyUI exits at
+    boot on an `--extra-model-paths-config` file that does not, so a missing file is one `COMFY-IDLE-WARN` and a launch without it. With
+    `idle` null (the default single render, which its runner kills) the argv is byte for byte what it was.
+  - `ensureComfy` asks for the bound only for `keep` or `warm`, passes `OFFLOAD_IDLE_FREE_SEC` in a COPY of the child env made after
+    the multi-GPU identity check (the parent env and the pinned-memory decision are untouched), and after the instance answers asks it
+    once (`GET /offload/idle`): no answer, an `error`, or a `limit_sec` other than the one asked for (the pack never read
+    `OFFLOAD_IDLE_FREE_SEC`) is a `COMFY-IDLE-WARN` and the render goes on; an answer that agrees is one `COMFY-IDLE` line.
+  - A running instance reused under `keep` or `warm` whose argv lacks the idle yaml (hand-started, or kept by an older build) is
+    reused, never restarted or refused, with one `COMFY-IDLE-WARN` per runner start, from at most one `GET /system_stats` per runner
+    start (a keyed instance's ownership proof and the warning share the answer; the unkeyed default instance, which asked for none
+    before, asks once, up to 8 s on a slow instance); an argv ComfyUI does not report is unknown, not missing. A
+    hand-started instance opts in by adding the yaml to its own launch (`docs/OPERATOR-GUIDE.md`); the harness injects nothing into an
+    instance it did not start (ADR 0009).
+- **What this does not do.** It bounds models and executor caches, not the process: the Python process and its CUDA context live until
+  the lease holder stops the instance at release, and an instance whose holder died lives until an operator stops it. A self-exit
+  is deliberately not built: from inside ComfyUI a runner in a long step that is not ComfyUI's (ffmpeg, a QA pass, an LLM call) looks
+  the same as an abandoned instance, and a stopped instance breaks that runner's next prompt where a `/free` only costs a reload; a
+  pack-side check of the lease epoch is unsafe too (reuse re-stamps the marker while the child's env keeps the old epoch). So the
+  register rows that say a kept instance lives to the end of its lease (A-RAM-3, E-4, D-2d.4-5) stay `partly`: models and caches
+  bounded, process lease-bounded. Back-to-back batches are not touched: a running prompt, even a 550 s one, is never idle, the gaps
+  inside a batch are seconds, and a driver that pauses more than 5 minutes between items pays one reload, which is the rule.
+- **Docs.** `docs/systems/media-generation.md` (the new bullet with the live check, the log and "Who stops it" paragraphs, the source
+  map), `docs/systems/gpu-lease.md` (the sentence that said nothing here is a timer now says the harness runs none and the engine
+  carries its own), ADR 0009 (a dated "Extended" note), `docs/ROADMAP.md` (INV-2), `docs/OPERATOR-GUIDE.md` (the hand-started opt-in),
+  `render/README.md`, and the package comment of `internal/comfyinst` (comment only).
+- **Tests, red first.** `render/comfyui-ext/test_offload_idle.py` (standard library only, a fake queue with the signatures of ComfyUI's `PromptQueue` and a
+  real `RLock`, a hand-set clock, no sleep: 30 tests) and `render/comfy-idle.test.mjs` (43 tests: the argv, the whitelist splice, the
+  guard, the env copy, the reuse warning, the probe, the real `fetchIdleProbe` against a loopback server). They were committed
+  failing on their assertions against an inert seam before the fix (24 failures in the Python file; 30 in the JavaScript file plus the
+  test that runs the Python file, every one an `ERR_ASSERTION`). A review round then added five tests and changed two, again red
+  first: the shortest abbreviation `--disable-al` failed on its argv comparison (no whitelist for the pack), a pack that reports another
+  bound than the one asked for failed on `0 !== 1` warnings (it printed a plain `COMFY-IDLE` line), and the doubled `/system_stats`
+  request of a keyed reuse failed on `2 !== 1`. The already-carried-yaml test, which failed only in a checkout whose path has a space
+  (measured red from a copy under a folder named `sp ace`, 1 of 38), now builds its case from a path without whitespace, or says it
+  cannot. `render/comfyui-ext.test.mjs` runs the Python file under any Python 3 (the ComfyUI interpreter when it exists, else `python`,
+  else `python3`, each probed with `-I -c`), so CI runs it through `python3`. The three existing tests that reach the post-launch
+  probe now inject it, so none can ask whatever listens on the default port.
+- **Mutation proof.** 90 single-line mutants, run one at a time through `scripts/mutation-check.sh` (a syntax check first, so a mutant
+  that does not build is `BAD-MUTANT` and never a kill; the unmutated tree is the control; the file is restored byte for byte), every one
+  `RED`: 38 in the pack and 52 in the launcher. Pack: the limit comparison (`<` to `<=`, one second early, one second late); either
+  flag dropped; the once-per-busy-period latch; `task_counter` ignored; a running prompt ignored; the recheck under the mutex removed,
+  and its counter half removed; the fire, and the snapshot, made outside the mutex; the 5 s floor; the 300 s default; `0` not
+  disabling; the thread not a daemon; a bad value not 300; the cache gate and the loaded-models gate dropped; an engine that cannot be
+  asked held instead of freed; a tick that raises; an error logged on every tick; the route path; the poll clamp and the loop's wait;
+  a failed route registration made fatal; the missing-queue line; the counter baseline; `NODE_CLASS_MAPPINGS` not `{}`; `torch`
+  imported at module scope; `cache_on` and `models_loaded` inverted; the queue attribute; the status fields; the announce line.
+  Launcher: idle on by default; the existence guard (the yaml, then the pack file); idle requested always, never, for keep only, for warm
+  only, or still added under `COMFY_IDLE_FREE_SEC=0`; the yaml added twice, not looked for in the operator's args, or placed first; the
+  FIRST whitelist chosen instead of the last; the `=` spelling not rewritten; the pack listed twice or placed after later flags; a
+  whitelist always added; the abbreviations of the two flags unread; the child env built from `process.env`, written into the parent's,
+  or set when nothing was launched; "applied" decided without looking at the argv; the reuse check run always or never, refusing, or
+  warning on an unknown argv; the yaml's path spellings; the probe never or always asked, a probe that throws, an `error` answer not said,
+  a 404 or an array taken as an answer, the probe path; the 5 s floor, `off`, and the default of `resolveIdleBound`; the pack name,
+  the yaml name and the re-export in `wan-multicard.mjs`. The 24 mutants whose text carries quotes, backslashes or an empty
+  replacement were run again through generated scripts after a first pass in which Windows command-line quoting had altered them.
+  Review round (11 more, all `RED`, each killed by the test named for it): the `--disable-all-custom-nodes` floor 12 to 13 and to 11,
+  the `--whitelist-custom-nodes` floor 4 to 3, the reported-bound mismatch branch off, its comparison inverted, its number check
+  dropped, the asked bound left out of its warning, the `COMFY-IDLE` line printing another number, the shared `/system_stats` answer
+  removed, and either of its two readers given the raw request function; the "yaml already carried" mutant was run again against the
+  rewritten test.
+- **Not measured.** The tests use a fake queue; no ComfyUI was started and no card was used, so the whole mechanism is read from
+  the reference box's ComfyUI code (`main.py` `prompt_worker` drains the two flags, `execution.py` `PromptQueue` holds the mutex, the counter and
+  `get_tasks_remaining`, `server.py` `post_free` sets the same two flags) and not seen running. The live check is written out in
+  `docs/systems/media-generation.md`: it first confirms that a harness-launched kept instance is already bare in VRAM when a prompt
+  ends (so VRAM cannot show the bound there), then measures the warm case in the ComfyUI process's host RAM at t+0, t+240 s and
+  t+330 s, and the smart-memory case (a hand-started instance) in per-card memory. It also settles whether `/free` returns VRAM under
+  `--gpu-only` (the multicard Wan placement), where ComfyUI's own unload frees nothing and a weight leaves the cards when its patcher
+  loses its last reference. A warm launch now carries the pack, so the S3 batch acceptance is to be re-run. Other nodes' ComfyUI
+  versions were not read; the gate (a loaded model, or a cache that is on) reads the engine at run time and does not depend on it.
+
+### Fixed - the display layer's guard can read the card the driver reports for the monitor (`display_device: "auto"`), and the blackwell-3x16 seed ships it
+
+- **The defect.** `layers[].display_device` named a card: the seed said index `1`, a live box may pin a UUID. The `display_floor` guard
+  cross-checks that declaration against the driver's own reading of which card drives the monitor (`display_active` / `display_attached`)
+  and refuses on a contradiction, but it could only refuse. The 60 % display cap (`RowsWithCap`, the allocator) and the floor the
+  allocator holds an opened display card to already follow that same reading and carry no index, so the one place that could not follow
+  was the display layer's own guard: with the monitors moved to another card the layer refused forever on the seeded declaration
+  ("the driver reports the monitor on index 0"), and the display watcher in `fleet-serve`, which asks the same guard about a loaded
+  twin, unloaded any twin it found on every check.
+- **The fix, config.** `config.DisplayDeviceAuto` (`"auto"`) and `config.IsAutoDisplayDevice` (case and surrounding whitespace do not
+  matter). No new key and no new wire field: `layers[].display_device` already travels in `layers` rows and may now read `auto`. The
+  sentinel cannot be taken for the other forms: an index is all digits and a UUID pin starts `GPU-`. `ValidateLayers` is **not** given a
+  shape check on `display_device` on purpose: a load error strips every layer from the config `Load` hands back, and the runtime resolves
+  any prefix of a dashed GPU UUID (`gpuprobe.IndexOf`), so a stricter rule would turn a working UUID-pinned box into one with no composite
+  tier. A typo such as `atuo` is therefore not a load error; it fails closed where it is used, the display layer refusing by name.
+  The load-time footprint rule, which can only match a plain CUDA index, does not run for `auto` (admission enforces the same rule on the
+  card it derives, as it does for a UUID pin).
+- **The fix, guard.** With `auto`, `resolveDisplay` takes the card from `Live.ScreenCards` and returns it as both the key the free-VRAM
+  reader is asked and the CUDA index, so every number the guard reads is the derived card's; the admission guard, the node's published
+  layer rows and `ResidentVerdict` (the watcher) all read it through the one function. It refuses, saying why, when the reader is absent,
+  when the driver flags no card (no NVIDIA card has a monitor attached: a headless box, or a screen on an iGPU; a screen asleep on a
+  driver that does not report `display_attached`; a transient failure that left `display_attached` unknown), and when it reports the
+  monitor on more than one card: it does not choose, because the tolerance a declared card gets for a
+  second monitor is trust in the operator's word and there is none here. Reasons print `display device auto (index N)`.
+  **Seat-pin coherence, sentinel path only:** a seat that declares `display_footprint_gib` is meant to sit on the display card, so under
+  `auto` it is refused when its pin does not include the derived card, because a floor judged on the monitor's card while the twin loads on
+  another would guard nothing. This is a policy choice and it refuses a harmless-looking admission on purpose: its job is to make a stale
+  twin pin loud. It keys on the declared footprint, so a seat that declares none is judged free - 0 as a seat off a declared card always
+  was. The seat's own `device` stays a literal pin (an index or a UUID): the sentinel is only meaningful in `display_device`, because
+  `DeviceList()` feeds lease fencing and placement, where an unresolvable pin reads as every card.
+- **The literal and UUID paths are unchanged, byte for byte.** One label helper names the device in every message, including the two
+  no-reader messages that printed the raw config string; for a declared card it returns the text each site already printed. A characterization
+  test pins the old sentences word for word, a literal layer next to an `auto` layer in one config, a typo, and a seat pinned off a declared
+  card.
+- **The fix, seed.** `setup/templates/profiles.json`: the `blackwell-3x16` display layer ships `"display_device": "auto"`, and the `_fields`
+  text for `layers[].display_device` and `layers[].seats[].device` says so; `docs/tiers/blackwell-3x16.md` is regenerated (`go run
+  ./cmd/gentiers .`), and now reads "display device auto". The seeded twin seat pin stays `1` (and the template's
+  `CUDA_VISIBLE_DEVICES=1`): on the arrangement the table describes, a monitor on card 1, behaviour is the same; on a box whose monitor is
+  elsewhere the twins now refuse with their pin and the monitor's card named, a visible re-pin step, instead of the guard naming the wrong
+  card.
+- **What this does not do.** It does not make the layer follow the monitor on a live box. `config.json` is the operator's and the seed never
+  re-applies to it; the layer reads the driver's card only after the operator sets `display_device` to `auto` there **and** re-pins the
+  twins (the seat `device` in `layers`, and the pin on each twin in the llama-swap yaml, which the renderer takes from the template, not
+  from the layer). Until then a display layer declared with a literal card on a box whose monitor is elsewhere still refuses, with the
+  same sentence as before. Benchmark drivers outside this repository that pin the display card by index are not changed here.
+- **Behaviour changes to know about.** (1) `auto` is stricter than a declared card where the driver is silent: a literal card is trusted
+  when the driver cannot say which card has the monitor and tolerated when a second monitor sits on another card, so a fresh blackwell-3x16
+  install on a headless box, one whose screen is on an iGPU, one whose screen sleeps on a driver without `display_attached`, or one with
+  monitors on two cards now refuses the display layer at admission until `display_device` names a card. The strictness is not only at
+  admission: the display watcher in `fleet-serve` asks the same guard of a loaded twin on every check, dormant layer or not, so under `auto`
+  a reading that names no single card unloads a loaded twin on that check, however much VRAM is free and with no drain (a request in flight
+  on the twin ends with llama-swap's 502), where a declared card trusts its declaration through the same reading and keeps it. That is the
+  watcher's existing fail-closed rule (a missing device sample unloads a twin too) applied to a card the config no longer names. (2) The display layer's whole spec is hashed into the render stamp, so a blackwell-3x16 llama-swap config rendered and
+  stamped before this change reports `STALE` under `audit-yaml --against-render` until it is re-rendered (nothing served is wrong; the
+  stamp is behind). (3) On a box whose only card drives the monitor, or whose screen card reports no UUID, the card table flags no display
+  card while `auto` still follows the screen reading (the card table and the screen reading derive the display card with different
+  exclusions); a characterization test pins it. (4) The seed edit changes the `layers` value `audit-config` compares as a whole: a live
+  config whose `layers` were merged from the earlier table (`display_device` `1`) now reports `layers` as `DIFFERENT`, and `audit-config`
+  exits non-zero while any seed-owned key differs, until its display layer matches the seed's (a box whose twins are re-pinned off index 1
+  differs from the seed by those pins as well).
+- **Docs.** `docs/systems/composite-tier.md`: the `auto` paragraph under the `display_floor` guard (what it reads, the three refusals, the
+  seat-pin rule, the card-table edge) and the watcher's unload under `auto` (in "The guards keep holding after the load") and the seed step (the layer
+  arrives with `auto`, the twins are pinned to index 1 and must be re-pinned, the `STALE` stamp note, the `audit-config` drift).
+- **Tests, red first.** A behaviour-free seam commit (`IsAutoDisplayDevice` returning false), then the tests, which failed on their
+  assertions for the stated reason before any fix: `IsAutoDisplayDevice("auto") = false, want true`; every guard case refused with `display
+  device auto cannot be resolved to a CUDA index (not in the probe, or ambiguous)` where it should have admitted or named the monitor's card;
+  the watcher unloaded a twin whose monitor card held its floor, and for a low one gave the unresolvable-card refusal instead of naming
+  the card; the shipped table named `display_device "1"`; the docs lacked the paragraph. Cases that pass before and after by design are
+  the characterization tests above, no shape check at load (a dashed full UUID, a short UUID prefix and a typo all validate and a UUID or
+  `auto` config round-trips through `Load` with its layers), the delegator's carried verdict standing in where it holds no reader, and the
+  floor read by the allocator not depending on the device string. New: `internal/config/layers_auto_test.go`,
+  `internal/placement/guards_auto_test.go`, `resident_auto_test.go`, `auto_docs_test.go`, `internal/displaywatch/displaywatch_auto_test.go`,
+  `internal/tierseed/tierseed_displayauto_test.go`, and `audit_config_displayauto_test.go` in the root package.
+- **Tests added by review.** (a) The promise that the sentinel's case and surrounding whitespace do not matter was proved at the helper and at
+  the label only, so two mutants survived the placement and watcher suites: `resolveDisplay` and the seat-pin rule each comparing with
+  `== "auto"` (a layer written `Auto` then refused as an unresolvable UUID, or kept deriving the card while the stale-pin protection silently
+  dropped away). `TestAutoDisplayDeviceIsRecognisedInAnySpellingAtEveryDecision` runs `Auto`, `AUTO`, ` AUTO ` and `\tAuto\n` through the
+  derived card, the seat-pin rule, the no-card refusal and the resident verdict. Production was already right, so it is green; the proof
+  that it can fail is the two mutants, SURVIVED before it and RED with it (`"Auto" must read the monitor's card (index 0) and admit, got
+  ... display device Auto cannot be resolved to a CUDA index`; `"Auto" must keep the seat-pin rule ..., got an admit with footprint 0.0`).
+  (b) `TestTheWatcherReadsASilentDriverAsAViolationOnlyForAnAutoLayer` pins the watcher's unload under `auto` for a reading that names no
+  single card (nothing flagged, a sample that cannot tell, monitors on two cards), dormant layer or not, against a declared card that keeps
+  its twin through the same readings. (c) `TestAuditConfigReportsLayersMergedFromTheTableThatNamedTheDisplayCard` pins the `audit-config`
+  drift (exactly the `layers` key, exit non-zero) and a node carrying today's seed auditing clean. (d) The docs gate gained the retired
+  `remote-desktop` and eight required phrases (the probe's causes, the watcher's unload, the `audit-config` drift), red on their
+  assertions before the page was fixed. (e) Two test names that said the layer follows the monitor were renamed to say what is true, that
+  the guard reads the card the driver reports for the monitor.
+- **Mutation proofs** (`scripts/mutation-check.sh`, one changed line each, every one RED, file restored byte for byte): `IsAutoDisplayDevice`
+  without `TrimSpace`, case-sensitive, a different constant; `resolveAutoDisplay` returning card `1` for both the key and the index, or the
+  index of the derived card with card `1` as the key (placement tests and the watcher tests both), the multi-card threshold moved from more
+  than one to more than two, the empty-reading and no-reader checks removed; the seat-pin rule deleted, applied to declared cards too, or
+  keyed on a footprint of zero or more; the sentinel compared with `== "auto"` in `resolveDisplay` and in the seat-pin rule, and the seat-pin
+  rule comparing with a whitespace-sensitive `EqualFold`; the label helper returning the raw string, matching only the lower-case spelling,
+  or the raw string in either no-reader message; the auto branch in `resolveDisplay` disabled; the seat label losing its model; the
+  multi-monitor wording; the watcher skipping dormant layers; `ScreenCardIndexes` ignoring an unknown `display_attached` reading; the
+  shipped table's `display_device` put back to `"1"` (the tier-seed test, and in the root package the `audit-config` test and the generated
+  tier page's currency test); and each sentence the docs test requires removed, `remote-desktop` put back included.
+
+### Fixed - the installer stops writing the every-expert `--cpu-moe`: a CUDA box off the tier matrix renders no 26B, and the selftest no longer edits the yaml
+
+- **The defect.** INV-1: the cards do the inference and host RAM is overflow only, so the one sanctioned expert placement in RAM is a
+  MEASURED partial `--n-cpu-moe N` up to the tier's `n_cpu_moe_max`. The rule audit (`servingtmpl.AuditCPUMoE`, `renderGate`,
+  `audit-yaml`) shipped in 0.184.0 and refuses the bare `--cpu-moe` (every expert layer in host RAM), but the installer still wrote it in
+  five places, and said so under "Not changed (needs a decision)": (1) `fallbackProfile` rendered `--cpu-moe -ngl 999` plus the 26B for
+  every `--fallback-backend cuda|cuda-resident|dual-cuda` render, which is what `install.ps1` asks for on a box with no recognised tier;
+  (2) `moePlacement` returned the bare form for `moe_26b: cpu_moe` on any backend; (3) and for `n_cpu_moe` naming no N ("rather than emit
+  a broken flag"); (4) `selftest.ps1`'s `Invoke-Remediate26B` inserted ` --cpu-moe` into the live `llama-swap.yaml` on a 26B allocation
+  failure, the only one of the five that wrote onto a real file; (5) the selftest's `Invoke-ProbeLoad -CpuMoe` launched a standalone 26B
+  with the experts in RAM, from step 3 (the 26B decode number), the cold-swap probe and, unnoticed until now, the ctx probe of step 2:
+  `$residentIsMoe = ($residentId -eq 'gemma4-26b-a4b')` is true on the nine tiers whose resident is the 26B, so the Windows selftest
+  recorded "ctx MEASURED ok" for a placement the yaml does not serve. `install.ps1` held a dead PowerShell shadow of (1)-(3)
+  (`$defaults.cuda.moe`, `cpu_moe`, and `n_cpu_moe` with no N turned into `cpu_moe`) that nothing consumed except `include_26b`, which
+  decided a 14 GB download for a seat the render then served on the wrong terms.
+- **The decision (D1, option a, "stop").** An unmeasured placement gets no flag at all. An off-matrix CUDA box has no tier, no
+  measurement and no declared fit, so it is not claimed to hold the 26B on its card (the same outcome as `ampere-6`, `ampere-8` and
+  `blackwell-8`, which are `moe_26b: drop`); the alternative, `-ngl 999` with the 26B kept, is an entry that fails at load on any small
+  card. The cpu backend has no card to overflow from and keeps its exemption (its `--cpu-moe` text is inert: no cpu template carries the
+  token in a command). The tier notes and template header prose that still say `cpu-moe` are not touched, because editing a tier entry or
+  a template re-stamps every file on it (see Not changed).
+- **The fix, renderer (Go).** `fallbackProfile` returns `moe_26b: drop` for the CUDA family (ctx, KV and flash-attn unchanged); `vulkan`
+  keeps `-ngl 999` and `cpu` keeps its inert literal. `moePlacement` returns the every-expert form for the cpu backend only, and nothing
+  for `n_cpu_moe` with no N (it used to fall back to the every-expert form). New `moeDefect`, called in `deriveRender` before any flag is
+  computed, refuses a tier that includes the 26B and names `cpu_moe` on a backend with a card, or `n_cpu_moe` with no N, by tier name,
+  INV-1 and what to use instead, at any RAM tier (before: a `min` box silently lost the 26B, and the others were refused by the write gate
+  after the flag was computed). `spillViolations` loses its no-N clause (`moeDefect` owns it); `cpuMoeExempt` is the cpu backend only (the
+  `moeLiteral` half was a concession to the installer writing the literal); `auditCPUMoEFile` turns a verbatim off-matrix render that
+  still carries the flag, which only a binary at or before 0.185.1 wrote, from a `note:` into a violation whose text says to re-render.
+  The first walk of `win-cuda-resident` and `win-dual-cuda` with the 26B dropped (no table tier does that on those two templates) renders
+  cleanly. Comments only in `internal/servingtmpl` and `internal/hwdetect`.
+- **The fix, `selftest.ps1`.** `Invoke-Remediate26B` is deleted. A 26B tier that fails to load is recorded `status:"fail"` with
+  `tiers[].detail` (a new field, `null` on every other row, documented in `SETUP-AGENT.md`) from the pure `Get-MoEFailureAdvice`: RAM is
+  overflow only so selftest moves nothing and edits no yaml; set the tier's `moe_26b` to `drop` (a tier whose `resident_tier` or agent seat
+  is the 26B needs those changed too, or pick a tier whose resident is not the 26B, because `TestNo26BAgentSeatOnRAMDroppable26B` refuses
+  the drop alone), or declare a measured `n_cpu_moe` with `n_cpu_moe_max`, then re-run the install. `Invoke-ProbeLoad` loses `-CpuMoe`
+  everywhere (the ctx probe, the cold-swap probe, step 3); step 3 and the `moe_full_offload` canary are retired to a fixed
+  `skipped` receipt entry (the key stays, the shape does not change; the canary trial was unreachable on every shipped tier, since the
+  only tier with the 26B and a non-gpu placement is `cpu`, whose backend skipped it). `receipt.remediations` keeps one writer, the ctx
+  downshift. The ctx probe's downshift hangs on `Test-AllocFailure` and on the probe's whole-log scan, and neither recognised the
+  literal llama.cpp message `CUDA error: out of memory` (both patterns read `CUDA (error )?out of memory`, with no colon): both take
+  `(error:? )?` now, and `Test-AllocFailure` has a case table (it had no test after the remediation test was retired). The chat tiers
+  the selftest exercises are now the ones whose gguf is on disk AND which the active yaml defines (`Select-ServedTiers`): a box
+  re-rendered without the 26B keeps the 14 GB file, and the selftest used to ask llama-swap for the model it had dropped, print
+  advice that blames the card, and load the unserved file in the cold-swap probe.
+- **The fix, `install.ps1`.** The unknown-profile fallback table drops the `--cpu-moe -ngl 999` literal and the 26B include for `cuda`
+  (`include_26b` false: the 14 GB download follows), mirroring `fallbackProfile`; a tier naming `cpu_moe` on a card backend, or
+  `n_cpu_moe` with no N, throws by name at any RAM tier (mirroring `moeDefect`); and `Test-YamlHasEveryExpertFlag` joins the Step 6 SKIP
+  probe, so re-running the installer over a yaml an older installer rendered (which passes every other probe) re-renders it instead of
+  keeping the flag the audit refuses. The detector's pattern is a character class (`--cpu[-]moe`) so the source pin does not read the
+  detector as a writer, and its comment guard is a negative lookahead: every serving template puts the placement token FIRST on its own
+  continuation line, so a yaml the old renderer wrote has the flag at the start of a line, and a guard that had to consume one
+  character before the flag never matched it (the first version of this probe was blind to exactly the yamls it exists for; it was
+  checked on a yaml rendered by a 0.185.1 binary built from the tagged source, where the first version answered no and this one yes).
+  A fresh `config.json` for a box off the tier matrix now gets `escalation_model` and `reasoning_model` set to `""`
+  (`Get-OffMatrixRungSeed`, merged by Step 8 when no profile row resolved and the render serves no 26B): the config template binds
+  both rungs to the 26B, every tier that drops the 26B reseeds them, and an unknown profile has no row to do it, so without this a
+  fresh install shipped two bindings its own yaml does not define. Comments only in `install.sh` and `detect.ps1`.
+- **Behaviour changes to know about.** An off-matrix CUDA box gets no 26B (and downloads none); `audit-yaml --against-render` on a render
+  made by 0.185.1 for such a box reports the `cpu-moe` violation with the re-render text and `STALE(params.include_26b, params.moe_26b)`,
+  and re-running the installer re-renders it (checked piecewise on a real 0.185.1 render, without a full install: the SKIP probe's
+  detector sees the flag, and `install render` over that file then passes `audit-yaml` with OK and MATCH). A fresh
+  `config.json` on such a box has `escalation_model` and `reasoning_model` blank, so the cascade has no escalation and no reasoning
+  tier there, as on `ampere-6` and `amd-gcn`. An EXISTING `config.json` is never rewritten, so a box that installed under 0.185.1 or
+  earlier keeps its two bindings to the 26B after the re-run: set both to `""` by hand (`doctor` names them otherwise).
+  The Windows selftest's ctx probe now loads the card-resident 26B at the projected window on the nine tiers whose resident is the 26B,
+  so it can OOM and take the downshift path (`remediations[]` then holds `downshift ctx a->b`, never an edit). A card too small for the
+  26B (`amd-rdna3-dgpu` on 12 GB is the case the old `R4.2` text named) now fails its 26B tier with advice instead of limping on
+  `--cpu-moe`; there is no automated path past it, and the advice says so.
+- **Docs.** `setup/SETUP-AGENT.md` (tier table cells, the AMD chapter without the `--cpu-moe` floor and the full-offload promotion row,
+  the receipt schema, the failure tables), `docs/OPERATOR-GUIDE.md`, `README.md`, `docs/systems/setup-installer.md`, ADR 0043 (the W4
+  bullet is amended: no second exemption; "what stays open" is closed), `_fields.moe_26b` and `_fields.n_cpu_moe` in `profiles.json`
+  (not hashed, not rendered into `docs/tiers`; no tier entry changed), and in the fix round `docs/systems/setup-installer.md` (the
+  retired `moe_full_offload` canary) and a paragraph in `SETUP-AGENT.md` on what an unknown profile renders and the by-hand step
+  for an existing `config.json`.
+- **Not changed.** (1) The tier notes in `profiles.json` that still mention `cpu-moe` (`amd-rdna3-dgpu`, `dual-gpu`, `ampere-8`,
+  `blackwell-8`, `ampere-6`, `amd-rdna3`, `cpu`) and the header prose of the `win-cuda`, `win-vulkan`, `win-dual-cuda`, `linux-vulkan`
+  and `linux-cpu` templates: editing either re-stamps every file on that tier or template (STALE until `install render` is re-run) and
+  regenerates `docs/tiers`, so they ride a release that already touches them. Until then the generated `docs/tiers/amd-rdna3-dgpu.md`
+  page still carries the `amd-rdna3-dgpu` note's now-false sentence that selftest's standing remediation switches the 26B to the
+  every-expert flag (the remediation is gone; a 12 GB card now fails its 26B tier with advice). (2) The `cpu` tier keeps `moe_26b: cpu_moe` and its inert
+  `--cpu-moe -ngl 999` stamp parameter; changing the string would STALE every stamped cpu-tier file. (3) The vulkan off-matrix fallback
+  still keeps an unmeasured 26B at `-ngl 999` (never an expert flag; the same reasoning as the CUDA family, left for a decision).
+  (4) `audit-yaml` still never applies the spill ceiling (`AuditSpill`) to a live file. (5) The fleet read-back of W4's own acceptance
+  (re-running the audit over every node's live yaml with this binary) is not part of this branch and was not run.
+- **Tests, red first.** The seams (`Get-MoEFailureAdvice`, `Test-YamlHasEveryExpertFlag`) were committed behaviour-free, then the tests,
+  seen failing on their assertions against 0.185.1: `TestOffMatrixFallbacksRenderNoEveryExpertFlag` (the cuda family carried the flag and
+  the 26B on every OS and RAM tier), `TestMoePlacementNeverReturnsTheEveryExpertFormOnABackendWithACard`,
+  `TestDeriveRenderRefusesAPlacementThatWouldPutEveryExpertInRAM` and `TestDeriveRenderKeepsTheSpecificNoNRefusal` (derive accepted
+  both defects), `TestCPUMoeExemptIsTheCPUBackendOnly`, `TestRenderGateExemptsOnlyTheCPUBackend`, `TestRenderedTiersCarryNoBareCPUMoE`,
+  `TestAuditYAMLReadsTheExemptionFromTheStamp` (a legacy off-matrix render was a note and exited 0), the source pins
+  `TestInstallerSourcesWriteNoEveryExpertFlag` and `TestSelftestHasNoCpuMoeSwitchAndNoRemediator` (20 and 12 offending lines), the
+  inverted last block of `TestInstallRenderRefusesNCPUMoEAboveTheTiersMeasuredSpill`; and in PowerShell `selftest-no-cpumoe.test.ps1`
+  (renamed from `selftest-remediation.test.ps1`: 26 assertions) and 14 new assertions in `install-config-seed.test.ps1` (the unknown-profile
+  fallback, both throws, the SKIP probe's detector against yaml fixtures, the selftest source pins), plus `render.tests.ps1` for the
+  unknown-profile render. Review fix round, same order: the detector against every shipped serving template rendered with the
+  every-expert placement (9 assertions red against the first detector: the line-leading fixture and the 8 templates that carry the
+  token); the fresh-config rungs (`Get-OffMatrixRungSeed` seam first; 7 assertions in `install-config-seed.test.ps1` and the
+  `render.tests.ps1` property that every chat model the fresh config names is served by the rendered yaml, red for cuda, with the
+  vulkan and cpu fallbacks as controls); the selftest tier filter (`Select-ServedTiers` seam first; 8 assertions) and the
+  `Test-AllocFailure` case table plus the whole-log scan (red on `CUDA error: out of memory`). One assertion of the no-N refusal test
+  could never fail (every error return of `deriveRender` is a zero result) and was removed.
+- **Mutations.** Each rule has a single-line mutant proved RED with `scripts/mutation-check.sh` (the mutation lands on one line, the
+  unmutated tree passes first): the CUDA fallback back to the literal plus the 26B; `moePlacement` returning the flag for `cpu_moe` on any
+  backend, a flag for `n_cpu_moe` with N=0, and nothing for a named N; the `moeDefect` call deleted, each of its two conditions flipped and
+  its `Include26B` guard removed; `cpuMoeExempt` regaining the literal and losing the cpu backend; `audit-yaml` turning the finding back
+  into a note and losing the off-matrix discriminator; a `-CpuMoe` argument, a `Invoke-Remediate26B` function and the `--cpu-moe` literal
+  restored in the scripts (Go source pins); and in PowerShell the cuda fallback's include and flag restored, either throw disabled, the
+  SKIP-probe clause removed or stripped of its cpu exemption, the detector reading comments, the advice call removed and the advice
+  naming the flag. Fix round: the detector's consuming guard restored; the rung helper returning nothing, losing its `Include26B`
+  guard, losing its profile-row guard, the Step 8 call removed and the Step 8 merge removed; the tier filter removed, either fail-open
+  arm removed, the MAIN call removed, the skipped-tier note changed, the alias branch and the key anchor of `Test-YamlServesModel`
+  broken; and in the allocation classifier the colon removed from either copy, an alternative dropped and an over-broad `timed out`
+  added.
+
 ## [0.185.1] - 2026-10-13 - the TTS sampling flags reach the generalist engine and an unknown tts.mjs flag refuses
 
 ### Fixed — the sampling flags of `render/tts.mjs` reach the generalist engine, and an unknown or malformed flag refuses instead of vanishing (0.185.1)
