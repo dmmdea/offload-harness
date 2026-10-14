@@ -118,3 +118,41 @@ func TestAHolderThatGaveUpLeavesAMarkerOnTheRecordThatStatusCanRead(t *testing.T
 		t.Error("a lease that is not on the record cannot be marked")
 	}
 }
+
+// The same distinction on a whole-node lease, whose fence is meta.json.
+func TestCheckOfAWholeNodeLeaseSaysTheRecordCannotBeReadOnlyForAFailedRead(t *testing.T) {
+	m, _ := ramScoped(t, 10)
+	l, err := m.TryAcquire(ClassMedia, Options{Reason: "film", TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.v2 {
+		t.Skip("this manager grants card-scoped leases only")
+	}
+	defer func() { _ = l.Release() }()
+	path := m.metaPath()
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o777); err != nil { // exists, cannot be read as a file
+		t.Fatal(err)
+	}
+	err = l.Check()
+	_ = os.Remove(path)
+	if !IsRecordUnreadable(err) {
+		t.Errorf("a whole-node record that cannot be read is a failed read: %v", err)
+	}
+	if err := l.Check(); err == nil || IsRecordUnreadable(err) {
+		t.Errorf("an absent record is a verdict: %v", err)
+	}
+	if err := os.WriteFile(path, saved, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Check(); err != nil {
+		t.Errorf("the lease is fine again: %v", err)
+	}
+}
