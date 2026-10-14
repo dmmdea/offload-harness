@@ -52,7 +52,7 @@
   older build decodes to nothing, a node with no lane publishes no key.
 - **Mutation checks.** 74 single-line mutants through `scripts/mutation-check.sh`, run on
   `git archive` copies of the committed tree (each landed on exactly one line, compiled, and was restored byte for byte), the last verdict of each
-  `MUTATION-VERDICT: RED`. First pass: 59 RED; 9 did not compile (`mc16`, `mr04`, `mr17`, `mr20`, `rt10`-`rt14`: a variable left unused) and 4 did
+  `MUTATION-VERDICT: RED`; the 33 `internal/mediaremote` mutants were run again in full against the final Go code, all RED. First pass: 59 RED; 9 did not compile (`mc16`, `mr04`, `mr17`, `mr20`, `rt10`-`rt14`: a variable left unused) and 4 did
   not land because the marker matched more than one line (`mcp02`, `rt07`-`rt09`), all replaced by mutants that do; 2 survived, `mr33` because the
   run set omitted the new redaction test, and `mr10` (the task-list half of `node_lacks_route`) because no test held it, which a test now does.
   By rule. mediacap (17): the size of a missing file (-1 to 0); the default family always listed; another family only when bound or complete
