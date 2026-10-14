@@ -6,7 +6,8 @@
 //
 //	compaction-eval contextbench [--family all|kv_store|log_triage|needle_retention|sudoku_sketchpad]
 //	    [--level NAME] [--tasks N] [--seed S] [--endpoint URL] [--model ID] [--out results.json]
-//	    [--budget N] [--reserve N] [--delivery tool_result|user] [--gcf] [--skeleton] ...
+//	    [--budget N] [--reserve N] [--delivery tool_result|user] [--gcf] [--skeleton]
+//	    [--max-turns N] [--max-out N] [--pass-at X] [--request-timeout S] [--config FILE]
 //
 // It runs a model; the tests never do, they inject a fake seat. With no seat
 // reachable every task is infra_error, never task_fail.
@@ -43,6 +44,28 @@ var contextBenchSeat = func(endpoint, model string, timeout time.Duration) compe
 	}
 }
 
+// checkContextBenchFlags refuses a value the run would silently replace with a default (the
+// library reads a zero as "unset", so --reserve 0 would run, and be reported, as 2048) or that
+// cannot mean anything (a pass line above 1.0, a negative cap).
+func checkContextBenchFlags(budget, reserve, maxOut, maxTurns, requestTimeout int, passAt float64) error {
+	const verb = "compaction-eval contextbench: "
+	switch {
+	case budget < 1:
+		return fmt.Errorf(verb+"--budget must be at least 1 token, got %d", budget)
+	case reserve < 1:
+		return fmt.Errorf(verb+"--reserve must be at least 1 token (0 would be read as the default %d), got %d", compeval.CBDefaultReserve, reserve)
+	case !(passAt > 0 && passAt <= 1):
+		return fmt.Errorf(verb+"--pass-at must be above 0 and at most 1 (a reward never exceeds 1, and 0 would be read as the default 1.0), got %v", passAt)
+	case maxOut < 1:
+		return fmt.Errorf(verb+"--max-out must be at least 1 token (0 would be read as the default 4096), got %d", maxOut)
+	case maxTurns < 0:
+		return fmt.Errorf(verb+"--max-turns must be 0 (the default, 3 x ops + 10) or more, got %d", maxTurns)
+	case requestTimeout < 1:
+		return fmt.Errorf(verb+"--request-timeout must be at least 1 second, got %d", requestTimeout)
+	}
+	return nil
+}
+
 func runCompactionContextBench(args []string) error {
 	fs := flag.NewFlagSet("compaction-eval contextbench", flag.ExitOnError)
 	fs.String("config", "", "config file path (supplies the default endpoint and model)")
@@ -68,6 +91,9 @@ func runCompactionContextBench(args []string) error {
 
 	if *route != "local" {
 		return fmt.Errorf("compaction-eval contextbench: --route %q is not supported; the verb drives the one endpoint it is given (use --endpoint)", *route)
+	}
+	if err := checkContextBenchFlags(*budget, *reserve, *maxOut, *maxTurns, *reqTimeout, *passAt); err != nil {
+		return err
 	}
 	if *delivery != compeval.CBDeliveryToolResult && *delivery != compeval.CBDeliveryUser {
 		return fmt.Errorf("compaction-eval contextbench: --delivery must be %s or %s, got %q", compeval.CBDeliveryToolResult, compeval.CBDeliveryUser, *delivery)

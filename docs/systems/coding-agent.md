@@ -556,13 +556,20 @@ budget of record. `--tasks N` runs seeds `--seed` to `--seed + N - 1` for each c
 ```
 local-offload compaction-eval contextbench --family kv_store --tasks 8 --out results.json \
     [--endpoint URL] [--model ID] [--level R1000] [--budget 32768 --reserve 2048] \
-    [--delivery tool_result|user] [--gcf] [--skeleton] [--max-turns N] [--pass-at 1.0]
+    [--delivery tool_result|user] [--gcf] [--skeleton] [--max-turns N] [--pass-at 1.0] \
+    [--max-out 4096] [--request-timeout 600] [--config FILE]
 ```
 
-The endpoint and model default to the configured ones, as for `kvbench`. The other `compaction-eval`
-subcommands take no `--seat` or `--route`; here `--seat` is an alias of `--model`, and `--route` accepts only
-`local`, because the verb drives the one endpoint it is given and places nothing on the fleet. The verb runs
-a model and is never run by the test suite: the tests inject a fake seat through the same function-valued seam.
+The endpoint and model default to the configured ones, as for `kvbench`; `--config` names the config file that
+supplies them. The other `compaction-eval` subcommands take no `--seat` or `--route`; here `--seat` is an alias of
+`--model`, and `--route` accepts only `local`, because the verb drives the one endpoint it is given and places
+nothing on the fleet. `--max-out` caps one reply, in tokens (default 4096; a sudoku panel is about a thousand).
+`--request-timeout` is the transport deadline of one seat request, in seconds (default 600); a request that hits it
+ends the task as `infra_error`. `--max-turns` caps seat replies per task (default 3 x operations + 10). A value the run
+would silently replace with a default is refused instead, with the flag's name: `--budget`, `--reserve`, `--max-out`
+and `--request-timeout` must be at least 1, `--pass-at` must be above 0 and at most 1, `--max-turns` at least 0
+(0 is the default), and `--reserve` must be below `--budget`. The verb runs a model and is never run by the test
+suite: the tests inject a fake seat through the same function-valued seam.
 
 How a run works. The transcript starts with a short instruction written for this adapter (the original's
 scaffolds are prose and are not copied, so scores compare harness configurations with each other, not with
