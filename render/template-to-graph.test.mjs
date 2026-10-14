@@ -595,6 +595,57 @@ test("mode 4 (bypassed): a node typed * matches any type, in both directions", (
   assert.deepEqual(g["4"].inputs, { image: ["1", 0] });
 });
 
+test("mode 4 (bypassed): a union input matches an output on any of its members, not only the first", () => {
+  const spec = (inType) => [
+    { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+    { id: 2, type: "AnyIn", mode: 4, ins: [["in", inType]], outs: [["out", "IMAGE"]] },
+    { id: 3, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] },
+  ];
+  const edges = [[1, 0, 2, "in"], [2, 0, 3, "image"]];
+  // IMAGE is the second member of the input's union
+  const second = convert(ui(spec("MASK,IMAGE"), edges));
+  assert.deepEqual(graphOf(second)["3"].inputs, { image: ["1", 0] }, "MASK,IMAGE and IMAGE share IMAGE");
+  assert.deepEqual(warned(second, "input_dropped"), []);
+  // the control: a union with no member of the output's type matches nothing and the wire is dropped
+  const none = convert(ui(spec("MASK,LATENT"), edges));
+  assert.deepEqual(graphOf(none)["3"].inputs, {});
+  assert.deepEqual(warned(none, "input_dropped"), [{ code: "input_dropped", node: "3", input: "image", reason: "bypass_no_match" }]);
+});
+
+test("mode 4 (bypassed): outputs are grouped by their exact type, so a union or * output beside a concrete one does not join its group", () => {
+  const invert = (id) => ({ id, type: "ImageInvert", ins: [["image", "IMAGE"]], outs: [["IMAGE", "IMAGE"]] });
+  const loaders = [
+    { id: 1, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["a.png", "image"] },
+    { id: 2, type: "LoadImage", outs: [["IMAGE", "IMAGE"], ["MASK", "MASK"]], wv: ["b.png", "image"] },
+  ];
+  // one connected IMAGE input and three outputs: IMAGE, *, IMAGE,MASK. Each is the only output of its own type, so each is
+  // unambiguous (the * and the union output match the one connected input as well, which is the same single input)
+  const one = convert(ui([
+    ...loaders,
+    { id: 3, type: "Pass", mode: 4, ins: [["in", "IMAGE"]], outs: [["a", "IMAGE"], ["b", "*"], ["c", "IMAGE,MASK"]] },
+    invert(4), invert(5), invert(6),
+  ], [[1, 0, 3, "in"], [3, 0, 4, "image"], [3, 1, 5, "image"], [3, 2, 6, "image"]]));
+  const g1 = graphOf(one);
+  for (const id of ["4", "5", "6"]) assert.deepEqual(g1[id].inputs, { image: ["1", 0] }, `node ${id} reads its own group's output`);
+  // two connected IMAGE inputs and outputs IMAGE, IMAGE, *: the two IMAGE outputs pair with the two inputs by rank, and the *
+  // output beside them neither counts toward their group nor is read here
+  const two = convert(ui([
+    ...loaders,
+    { id: 3, type: "Pass", mode: 4, ins: [["x", "IMAGE"], ["y", "IMAGE"]], outs: [["a", "IMAGE"], ["b", "IMAGE"], ["c", "*"]] },
+    invert(4), invert(5),
+  ], [[1, 0, 3, "x"], [2, 0, 3, "y"], [3, 0, 4, "image"], [3, 1, 5, "image"]]));
+  const g2 = graphOf(two);
+  assert.deepEqual(g2["4"].inputs, { image: ["1", 0] });
+  assert.deepEqual(g2["5"].inputs, { image: ["2", 0] });
+  // the same exact type still counts: reading the * output itself, which matches both connected inputs, is ambiguous
+  const star = refusalOf(convert(ui([
+    ...loaders,
+    { id: 3, type: "Pass", mode: 4, ins: [["x", "IMAGE"], ["y", "IMAGE"]], outs: [["a", "IMAGE"], ["b", "IMAGE"], ["c", "*"]] },
+    invert(4),
+  ], [[1, 0, 3, "x"], [2, 0, 3, "y"], [3, 2, 4, "image"]])), REFUSAL.AMBIGUOUS_BYPASS);
+  assert.deepEqual([star.details.type, star.details.outputs, star.details.inputs], ["*", 1, 2]);
+});
+
 // ---- subgraphs -----------------------------------------------------------------------------------------------------------
 
 test("subgraph: a nested instance gets the id path <outer>:<inner>:<node>, with the outer wire reaching the innermost node", () => {
