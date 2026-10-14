@@ -133,6 +133,9 @@ func TestMediaRecipesAreMemoisedForAMinute(t *testing.T) {
 	t.Cleanup(func() { mediaClock = prev })
 	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
 	first, _ := readHealthMediaRecipes(t, s)
+	if len(first.Rows) == 0 || len(first.Rows[0].Files) != 4 {
+		t.Fatalf("a node with a video binding publishes its video row first: %+v", first.Rows)
+	}
 
 	if err := os.WriteFile(filepath.Join(cfg.ComfyDir, "models", "vae", "wan_2.1_vae.safetensors"), make([]byte, 999), 0o644); err != nil {
 		t.Fatal(err)
