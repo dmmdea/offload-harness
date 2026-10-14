@@ -62,8 +62,59 @@ func lcAccessRun(n int) []string {
 	return out
 }
 
+// lcSubtestLog is `go test -v` output for a table-driven test: the sequential
+// subtests announce themselves in a block, then the report lists them in a
+// block of indented pass lines with one failure among them.
+func lcSubtestLog(n int) string {
+	var b strings.Builder
+	b.WriteString("go test -v ./widget/...\n=== RUN   TestWidget\n")
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, "=== RUN   TestWidget/case_%03d\n", i)
+	}
+	b.WriteString("--- FAIL: TestWidget (0.02s)\n")
+	for i := 0; i < n; i++ {
+		if i == n/2 {
+			fmt.Fprintf(&b, "    --- FAIL: TestWidget/case_%03d (0.01s)\n        widget_test.go:88: got 3, want 4\n", i)
+			continue
+		}
+		fmt.Fprintf(&b, "    --- PASS: TestWidget/case_%03d (0.00s)\n", i)
+	}
+	b.WriteString("FAIL\nFAIL\texample.com/widget\t0.412s\n")
+	return b.String()
+}
+
 // lcLogOptsOn is the rung enabled on its own.
 var lcLogOptsOn = compactOpts{LogCollapse: true}
+
+// lcNamed returns a copy of a fixture whose assistant tool calls are all named
+// name (the shipped mini corpus carries call ids only).
+func lcNamed(fx lrFixture, name string) lrFixture {
+	msgs := make([]Msg, len(fx.msgs))
+	for i, m := range fx.msgs {
+		msgs[i] = m
+		if len(m.ToolCalls) > 0 {
+			calls := make([]ToolCall, len(m.ToolCalls))
+			for j, c := range m.ToolCalls {
+				c.Name = name
+				calls[j] = c
+			}
+			msgs[i].ToolCalls = calls
+		}
+	}
+	fx.msgs = msgs
+	return fx
+}
+
+// lcLadderFixtures is every golden fixture with its tool calls named as the
+// command tool, so the rung's producer gate lets the bodies through.
+func lcLadderFixtures(t *testing.T) []lrFixture {
+	t.Helper()
+	var out []lrFixture
+	for _, fx := range append(lrMiniCorpus(t), lrSyntheticFixtures()...) {
+		out = append(out, lcNamed(fx, "run"))
+	}
+	return out
+}
 
 // --- the matching rules ------------------------------------------------------
 
@@ -75,6 +126,8 @@ func TestLogsKeyMasksNumbersIdsAndTimestamps(t *testing.T) {
 		{"connected to 192.0.2.1 port 8080", "connected to 198.51.100.22 port 9090"},
 		{"commit 3f2a9c1d applied", "commit 0b77e4a5 applied"},
 		{"id 123e4567-e89b-12d3-a456-426614174000 ready", "id 9b2d4c6e-1a3f-4e5d-8c7b-0a1b2c3d4e5f ready"},
+		{"id cafebabe-cafe-face-feed-deadbeefcafe ready", "id 123e4567-e89b-12d3-a456-426614174000 ready"},
+		{"trace deadbeefcafe seen", "trace 0123456789ab seen"},
 		{"\x1b[32mok\x1b[0m step 3", "ok step 4"},
 		{"retrying build cache lookup   ", "retrying build cache lookup"},
 		{"retrying build cache lookup\r", "retrying build cache lookup"},
@@ -266,7 +319,7 @@ func TestLogCollapseMinimumRunIsThree(t *testing.T) {
 		t.Errorf("runs of two must stay verbatim: ok=%v changed=%v", ok, got != in)
 	}
 	// Exactly three long lines do fold.
-	long := "GET /export?format=csv&columns=all 200 %dms streamed through the worker pool without buffering"
+	long := "GET /export?format=csv&columns=all 200 %dms streamed through the worker pool without buffering, with the full column list echoed back to the caller so that the line is long enough to be worth folding"
 	three := []string{fmt.Sprintf(long, 5), fmt.Sprintf(long, 6), fmt.Sprintf(long, 7)}
 	in3 := lcJoin(lcHead, three, []string{"between", "the", "windows", "we", "check"}, lcTail)
 	got, ok := logCollapse(in3)
@@ -314,7 +367,7 @@ func TestLogCollapseKeepsMultibyteLinesIntact(t *testing.T) {
 // --- the properties every rung must have ------------------------------------
 
 func TestLogCollapseDeterministic(t *testing.T) {
-	bodies := []string{lrTestLog(60), lrServerLog(150), lrProgressLog(120), lrRepeatLog(80), lcJoin(lcHead, lcAccessRun(60), lcTail)}
+	bodies := []string{lrTestLog(60), lcSubtestLog(60), lrServerLog(150), lrProgressLog(120), lrRepeatLog(80), lcJoin(lcHead, lcAccessRun(60), lcTail)}
 	for i, b := range bodies {
 		o1, ok1 := logCollapse(b)
 		o2, ok2 := logCollapse(b)
@@ -325,7 +378,7 @@ func TestLogCollapseDeterministic(t *testing.T) {
 }
 
 func TestLogCollapseIdempotent(t *testing.T) {
-	for i, b := range []string{lrTestLog(60), lrServerLog(150), lrProgressLog(120), lrRepeatLog(80)} {
+	for i, b := range []string{lcSubtestLog(60), lrServerLog(150), lrProgressLog(120), lrRepeatLog(80)} {
 		once, ok := logCollapse(b)
 		if !ok {
 			t.Errorf("body %d: expected the rung to fire", i)
@@ -444,7 +497,7 @@ func lcFuzzBody(seed uint64) string {
 		"cache hit key=%x for the compiled module",
 		"ERROR boom code=%d in the upstream call",
 		"warning: slow call took %dms to answer",
-		"ok  \tpkg/%d\t0.%02ds",
+		"ok  \tpkg/%d\t0.311s",
 		"",
 		"   indented line %d of the report",
 		"plain text line without any digits at all",
@@ -666,7 +719,7 @@ func TestLogCollapseLadderIdempotentAndFloorMonotonic(t *testing.T) {
 		"logs with a pin":   {LogCollapse: true, Pinned: map[string]bool{"call-1": true}},
 		"production+logs+p": {GCF: true, Skeleton: true, LogCollapse: true, Pinned: map[string]bool{"call-2": true}},
 	}
-	fixtures := append(lrMiniCorpus(t), lrSyntheticFixtures()...)
+	fixtures := lcLadderFixtures(t)
 	for name, opts := range ladders {
 		for _, fx := range fixtures {
 			once := compact(context.Background(), fx.msgs, fx.budget, fx.keep, fx.prot, opts)
@@ -687,7 +740,16 @@ func TestLogCollapseLadderIdempotentAndFloorMonotonic(t *testing.T) {
 			if estimateTokens(once) > estimateTokens(fx.msgs) {
 				t.Errorf("%s / %s: the ladder made the transcript longer", name, fx.name)
 			}
-			pairing(t, once)
+			// The rung only rewrites Content, so it can add no orphan beyond what
+			// the same ladder without it already produces (the legacy drop rung
+			// can orphan a result when the keep-recent window starts between a
+			// call and its result, as two synthetic fixtures do on the base ladder).
+			without := opts
+			without.LogCollapse = false
+			base := compact(context.Background(), fx.msgs, fx.budget, fx.keep, fx.prot, without)
+			if lcOrphans(once) > lcOrphans(base) {
+				t.Errorf("%s / %s: the rung added orphaned tool results (%d vs %d without it)", name, fx.name, lcOrphans(once), lcOrphans(base))
+			}
 		}
 	}
 }
@@ -697,6 +759,7 @@ func TestLogCollapseRungKeepsTheBuriedErrorInTheMiniCorpus(t *testing.T) {
 		if fx.name != "mini/lg-1" && fx.name != "mini/tt-1" {
 			continue
 		}
+		fx = lcNamed(fx, "run")
 		out := compact(context.Background(), fx.msgs, fx.budget, fx.keep, fx.prot, lcLogOptsOn)
 		var body string
 		for _, m := range out {
@@ -713,11 +776,45 @@ func TestLogCollapseRungKeepsTheBuriedErrorInTheMiniCorpus(t *testing.T) {
 	}
 }
 
+// TestLogCollapseRungOnlyFoldsCommandOutput: a body produced by a file read, a
+// search, a fetch, an unknown tool or no recorded call at all is content the
+// model asked for or a shape the rung does not know; the ladder with the rung
+// on must return exactly what the ladder without it returns.
+func TestLogCollapseRungOnlyFoldsCommandOutput(t *testing.T) {
+	for _, producer := range []string{"read_file", "search_files", "web_fetch", "github_api", "bash", ""} {
+		fx := lcNamed(lrSyntheticFixtures()[2], producer) // server-only/60: bodies the rung folds when named "run"
+		off := compact(context.Background(), fx.msgs, fx.budget, fx.keep, fx.prot, compactOpts{})
+		on := compact(context.Background(), fx.msgs, fx.budget, fx.keep, fx.prot, lcLogOptsOn)
+		if lrDigest(off) != lrDigest(on) {
+			t.Errorf("producer %q: the rung rewrote a body it must not touch", producer)
+		}
+	}
+	for _, producer := range []string{"run", "run_shell"} {
+		fx := lcNamed(lrSyntheticFixtures()[2], producer)
+		off := compact(context.Background(), fx.msgs, fx.budget, fx.keep, fx.prot, compactOpts{})
+		on := compact(context.Background(), fx.msgs, fx.budget, fx.keep, fx.prot, lcLogOptsOn)
+		if lrDigest(off) == lrDigest(on) {
+			t.Errorf("producer %q: the rung should fold command output", producer)
+		}
+	}
+	// A result with no matching call in the transcript is also left alone.
+	msgs := lrTranscript(lrServerLog(150), lrServerLog(160), lrServerLog(170))
+	for i := range msgs {
+		msgs[i].ToolCalls = nil
+	}
+	budget := estimateTokens(msgs) * 6 / 10
+	off := compact(context.Background(), msgs, budget, 2, 3, compactOpts{})
+	on := compact(context.Background(), msgs, budget, 2, 3, lcLogOptsOn)
+	if lrDigest(off) != lrDigest(on) {
+		t.Error("a result with no recorded call must not be folded")
+	}
+}
+
 // TestLogCollapseMeasuredSavings logs (and asserts nothing about) the token
 // effect on the shipped fixtures, measured with the ladder's own estimator.
 // The adoption verdict belongs to the measurement gate, not to this test.
 func TestLogCollapseMeasuredSavings(t *testing.T) {
-	fixtures := append(lrMiniCorpus(t), lrSyntheticFixtures()...)
+	fixtures := lcLadderFixtures(t)
 	t.Logf("%-28s %7s %7s %7s %7s %7s", "fixture", "before", "base", "base+L", "prod", "prod+L")
 	for _, fx := range fixtures {
 		before := estimateTokens(fx.msgs)
@@ -737,5 +834,40 @@ func TestLogCollapseMeasuredSavings(t *testing.T) {
 				t.Logf("body %-26s %6d -> %6d chars (%.1f%%)", fx.name, len(m.Content), len(out), 100*float64(len(out))/float64(len(m.Content)))
 			}
 		}
+	}
+}
+
+// lcOrphans counts tool results whose call is absent from the transcript.
+func lcOrphans(msgs []Msg) int {
+	calls := map[string]bool{}
+	for _, m := range msgs {
+		for _, c := range m.ToolCalls {
+			calls[c.ID] = true
+		}
+	}
+	n := 0
+	for _, m := range msgs {
+		if m.Role == "tool" && !calls[m.ToolCallID] {
+			n++
+		}
+	}
+	return n
+}
+
+// TestLogCollapseIsDiscriminatedByTheGoldenFixtures keeps the default-ladder
+// digests honest: they only prove "off changes nothing" if the rung, once on,
+// would have changed something on the same fixtures.
+func TestLogCollapseIsDiscriminatedByTheGoldenFixtures(t *testing.T) {
+	changed := 0
+	fixtures := lcLadderFixtures(t)
+	for _, fx := range fixtures {
+		off := compact(context.Background(), fx.msgs, fx.budget, fx.keep, fx.prot, compactOpts{})
+		on := compact(context.Background(), fx.msgs, fx.budget, fx.keep, fx.prot, compactOpts{LogCollapse: true})
+		if lrDigest(off) != lrDigest(on) {
+			changed++
+		}
+	}
+	if changed < 6 {
+		t.Errorf("the rung changes only %d of %d golden fixtures; the pinned digests would not notice it leaking in", changed, len(fixtures))
 	}
 }
