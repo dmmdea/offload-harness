@@ -404,8 +404,15 @@ func writeYieldFile(path string, b []byte) error {
 
 // RecordYieldAction updates the sidecar of an epoch that was asked with what the holder did about it.
 // It takes the epoch lock and checks the lease is still live, like the ask: an update that races the
-// release leaves no file behind. An epoch that was never asked has nothing to update and is left alone.
+// release leaves no file behind. An epoch that was never asked has nothing to update and is left alone;
+// a request file that exists and cannot be read is an error.
 func (m *Manager) RecordYieldAction(epoch uint64, action string, exit int) error {
+	return m.recordYieldActionAt(epoch, action, exit, m.now().UnixMilli())
+}
+
+// recordYieldActionAt is RecordYieldAction for an action that happened at actedMs: a write that is retried
+// later still says when the holder did what it did.
+func (m *Manager) recordYieldActionAt(epoch uint64, action string, exit int, actedMs int64) error {
 	if err := m.canWrite(); err != nil {
 		return fmt.Errorf("yield action not recorded: the lease directory is not writable from here: %w", err)
 	}
@@ -417,9 +424,13 @@ func (m *Manager) RecordYieldAction(epoch uint64, action string, exit int) error
 		}
 		req, ok := ReadYield(m.leaseDir(), epoch)
 		if !ok {
+			// Never asked: nothing to update. A file that is there and cannot be read is not that.
+			if _, serr := os.Stat(path); serr == nil {
+				werr = fmt.Errorf("the request file %s exists but cannot be read", filepath.Base(path))
+			}
 			return nil
 		}
-		req.ActedMs, req.Action, req.Exit = m.now().UnixMilli(), action, exit
+		req.ActedMs, req.Action, req.Exit = actedMs, action, exit
 		b, merr := json.Marshal(req)
 		if merr != nil {
 			werr = merr
@@ -470,9 +481,21 @@ type YieldTicker struct {
 	m     *Manager
 	epoch uint64
 	opts  YieldTickerOptions
-	// noted: the unrecognised-policy sentence was said. unrecorded: the failure to record was said.
+	// noted: the unrecognised-policy sentence was said. unrecorded: the failure to record the ask was said.
 	noted, unrecorded bool
 	wg                sync.WaitGroup
+	// pending is what the holder did that could not be written to the sidecar yet, kept for the next tick;
+	// actionSaid: the failure to write it was said. The on_yield goroutine and the tick both use them.
+	mu         sync.Mutex
+	pending    *yieldAction
+	actionSaid bool
+}
+
+// yieldAction is one thing the holder did about the request, and when.
+type yieldAction struct {
+	action string
+	exit   int
+	atMs   int64
 }
 
 // NewYieldTicker binds a yield ticker to a lease this process holds.
@@ -489,8 +512,41 @@ func (t *YieldTicker) say(format string, args ...any) {
 	fmt.Fprintf(t.opts.Out, t.opts.Label+": "+format+"\n", args...)
 }
 
+// record writes what the holder did about the request. A write that fails is said once and kept for the
+// next tick, which tries again: a sidecar left saying "started its on_yield" about a command that had
+// ended would be read as true for the life of the lease.
+func (t *YieldTicker) record(action string, exit int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pending = &yieldAction{action: action, exit: exit, atMs: t.m.now().UnixMilli()}
+	t.flushLocked()
+}
+
+// flush retries a write that failed.
+func (t *YieldTicker) flush() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.flushLocked()
+}
+
+func (t *YieldTicker) flushLocked() {
+	p := t.pending
+	if p == nil {
+		return
+	}
+	if err := t.m.recordYieldActionAt(t.epoch, p.action, p.exit, p.atMs); err != nil {
+		if !t.actionSaid {
+			t.actionSaid = true
+			t.say("could not record what its --on-yield did (%v); the request file may be out of date, and the next heartbeat tries again", err)
+		}
+		return
+	}
+	t.pending, t.actionSaid = nil, false
+}
+
 // Tick is called on every holder tick, after the term check.
 func (t *YieldTicker) Tick() {
+	t.flush()
 	if !t.noted && InstalledOnOverdue() == OnOverdueHold {
 		if n := OnOverdueNote(); n != "" {
 			t.noted = true
@@ -523,11 +579,11 @@ func (t *YieldTicker) Tick() {
 	if line == "" || t.opts.Run == nil {
 		t.say("%s; no --on-yield was recorded, so there is nothing to run: the job can watch $%s (%s). The lease stays held; nothing is released or killed",
 			head, YieldFileEnv, YieldFilePath(t.m.leaseDir(), t.epoch))
-		_ = t.m.RecordYieldAction(t.epoch, YieldActionNone, 0)
+		t.record(YieldActionNone, 0)
 		return
 	}
 	t.say("%s; running its --on-yield %q. The job keeps running until it stops; nothing is released or killed", head, line)
-	_ = t.m.RecordYieldAction(t.epoch, YieldActionRunning, 0)
+	t.record(YieldActionRunning, 0)
 	env := []string{
 		"GPU_LEASE_EPOCH=" + strconv.FormatUint(t.epoch, 10),
 		"GPU_LEASE_DIR=" + t.m.leaseDir(),
@@ -544,7 +600,7 @@ func (t *YieldTicker) Tick() {
 				exit = -1
 			}
 		}
-		_ = t.m.RecordYieldAction(t.epoch, action, exit)
+		t.record(action, exit)
 		if action == YieldActionFailed {
 			detail := ""
 			if rerr != nil {
