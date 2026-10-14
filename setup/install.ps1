@@ -686,6 +686,14 @@ function Resolve-ProfileParams {
   }
 }
 
+# Test-YamlHasEveryExpertFlag: does the llama-swap.yaml at $Path carry the every-expert placement on a
+# NON-comment line? SEAM ONLY in this commit (it always answers $false); the fix commit gives it its body and
+# the Step 6 SKIP test uses it, so a yaml an older installer rendered is re-rendered instead of kept.
+function Test-YamlHasEveryExpertFlag {
+  param([string]$Path)
+  return $false
+}
+
 
 # ---------------------------------------------------------------------------
 # H4: choose the llama.cpp CUDA build from (profile, detected CUDA) — FLEXIBLE,
