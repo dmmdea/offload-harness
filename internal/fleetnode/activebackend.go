@@ -28,6 +28,9 @@ import (
 // activeBackendTTL is how long one collection backs health: the same window as the residency answer.
 const activeBackendTTL = agentResidencyTTL
 
+// activeBackendMaxStale is how old a cached report may be and still be published.
+const activeBackendMaxStale = 4 * activeBackendTTL
+
 // activeBackendBudget bounds one whole collection: the roster read, the running list, and each loaded
 // seat's health GET are 3 s each at worst, and a node has a handful of lanes and seats.
 const activeBackendBudget = 20 * time.Second

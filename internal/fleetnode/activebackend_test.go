@@ -209,3 +209,51 @@ func TestHealthRefreshNeverLoadsAModel(t *testing.T) {
 		}
 	}
 }
+
+// TestHealthPublishesNoActiveBackendReportOnceItIsTooOld: a report between the TTL and the max-stale age is
+// served while the next read is on its way (the handler never waits), but one older than that describes a
+// node that may no longer be in that state, and a refresh that is slow or stuck would otherwise leave it
+// published for as long as the process lives. Past the max-stale age the keys are absent (unknown, never
+// "none"), and they come back when the refresh lands.
+func TestHealthPublishesNoActiveBackendReportOnceItIsTooOld(t *testing.T) {
+	s, _ := newTestServer(t, config.Config{Endpoint: "http://llama-swap.invalid"}, &fakeRunner{}, nil)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	s.collectBackends = func(context.Context, config.Config) backendchain.Report {
+		n := calls.Add(1)
+		if n > 1 {
+			<-release
+		}
+		return backendchain.Report{Lanes: []backendchain.Entry{{Lane: "agent", ActiveBackend: "llama.cpp", BackendChain: []string{"llama.cpp"}, BackendProbe: "process", BackendReason: fmt.Sprintf("read %d", n)}}}
+	}
+	waitForHealthKey(t, s, "lane_backends")
+
+	age := func(d time.Duration) {
+		s.backends.mu.Lock()
+		s.backends.at = time.Now().Add(-d)
+		s.backends.mu.Unlock()
+	}
+	age(2 * activeBackendTTL) // stale, not too old: still published while the refresh runs
+	if _, ok := backendHealth(t, s)["lane_backends"]; !ok {
+		t.Fatal("a report older than the TTL but younger than the max-stale age must still be published")
+	}
+	age(2 * activeBackendMaxStale)
+	if m := backendHealth(t, s); m["lane_backends"] != nil || m["seat_backends"] != nil {
+		t.Errorf("a report older than %s was published: %v", activeBackendMaxStale, m["lane_backends"])
+	}
+	close(release)
+	m := waitForHealthKey(t, s, "lane_backends")
+	if r, _ := m["lane_backends"].([]any)[0].(map[string]any)["backend_reason"].(string); r == "read 1" {
+		t.Errorf("the refresh landed and the old report is still the one published: %q", r)
+	}
+}
+
+// TestNewTestServerNeverCollectsBackends: a test server's health refresh would read the llama-swap of its
+// config, and a default config names a real local port. The helper stands the collector down; a test that
+// wants it installs one.
+func TestNewTestServerNeverCollectsBackends(t *testing.T) {
+	s, _ := newTestServer(t, config.Default(), &fakeRunner{}, nil)
+	if s.collectBackends != nil {
+		t.Error("newTestServer left the production collector installed: a health request would probe the configured llama-swap")
+	}
+}
