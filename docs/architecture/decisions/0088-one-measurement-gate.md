@@ -114,7 +114,9 @@ The gate version is 2: a baseline written under another version is refused, firs
    passes at 900 tokens and a timeout that recorded nothing kept an efficiency win of -100 tokens a task on 20 tasks, and
    recorded 30000 tokens on the timeout it regressed (+1064). The attempt that did not finish is the one likely to have
    spent the most, so the attempts around it must not stand for the task; over the unresolved cap that blocks a
-   non-inferiority ADOPT, and an honest harness is told to record the cost of what timed out. A `not_run`, explicit or the
+   non-inferiority ADOPT, and an honest harness is told to record the cost of what timed out. The cap is the one lever
+   left: a candidate that records no cost on its unfinished attempts can leave up to `max_excluded_share` of its tasks
+   unresolved on that metric and keep its efficiency win on the rest. A `not_run`, explicit or the
    placeholder for a missing task, never ran and carries nothing; the incumbent's unfinished attempts are skipped, cost
    included.
 4. **R4, the incumbent wins.** The incumbent keeps every tie and every INCONCLUSIVE. The remedy for an INCONCLUSIVE at the
@@ -171,19 +173,29 @@ The gate version is 2: a baseline written under another version is refused, firs
     equal (to within a rounding error of the scores) there is no spread to read, and the interval was that one value, so
     16 ties ADOPTed a non-inferiority claim that carried an efficiency win: pass rates .95 and .90 falsely ADOPTed 9% of
     the time at 16 tasks, .99 and .94 32%, and a candidate that only loses 5% of the incumbent's passes 37% at 20 tasks.
-    `delta` and `hi` are now the one value, taken from the data and not from a sum, and `lo` is the true mean below which
-    the sample would be 2.5% likely, `q (w + c) - w` for `q = 0.025^(1/n)`, `c` the one value and `w` the width of the
-    primary's range. A distribution with mean `t` puts at most `(w + t) / (w + c)` of its mass on `c`, so `n` equal values
-    have at most that probability to the power `n`; the bound is exact, not a rule of thumb. A tie sits `0.206 w` below 0
-    at 16 tasks, `0.142 w` at 24, `0.088 w` at 40 and `0.045 w` at 80: a margin of 0.05 of the range is certified by 80
-    ties and not by 40. *Why only `lo`.* The incumbent wins every tie (R4), so only the end a candidate must clear is
-    widened; a symmetric widening also stopped a candidate that loses every task by the same amount from being BLOCKed
-    (every task lost by 1.0 on a 0..10 scale could not reject a mean of -0.5). *Why not INCONCLUSIVE for every tie.* A
-    consistent win (every task +1) is a clear ADOPT of a superiority claim and stays one (`lo` is 0.59 at 16 tasks).
-    A difference exactly on the margin is neither ADOPT nor BLOCK, and differences that are equal on paper but not to the
-    last bit (0.95 - 0.90 against 0.70 - 0.65) are treated as equal, which closes the float edge where
-    `-0.04999999999999993` cleared a margin of 0.05. With fewer than two pairs there is no interval and the numbers read
-    0. `c` is a table to 200 degrees of freedom and a three-term expansion beyond, so the gate needs no special function.
+    `delta` is now the one value `v`, taken from the data and not from a sum, and the interval is the **rule of three**
+    about it, `[v - 3w/n, v + 3w/n]` clipped to `[-w, w]`, `w` the width of the primary's range and `n` the usable pairs.
+    For pass/fail scores with no discordant pair among `n`, `3/n` is the one-sided 95% upper bound on the discordance
+    rate (`1 - 0.05^(1/n)`), so the mean difference can be as low as `-3/n`; on other scores it is the same allowance,
+    scaled by the range. A tie sits `0.1875 w` below 0 at 16 tasks, `0.125 w` at 24, `0.075 w` at 40, `0.05 w` at 60 and
+    `0.0375 w` at 80: a margin of 0.05 of the range is certified by 61 ties and not by 60, whose end sits exactly on it.
+    *Why both ends.* An exact one-sided bound on the lower end alone (`1 - 0.025^(1/n)`, the interval's own 2.5% tail,
+    with the upper end left at `c`) was tried first. It gives the same figure in every cell of the grid below, since it
+    differs from `3/n` only for ties at 61 to 71 pairs, and it needs 72 ties against 61. The decision is the symmetric
+    rule of three, the standard allowance for an event that did not occur in `n` trials, which makes a superiority tie
+    INCONCLUSIVE at any size without a special case and keeps a constant difference far from zero decisive: every pair a
+    win of the whole range is `[w - 3w/n, w]` and adopts, every pair a loss blocks. The cost of moving the upper end is
+    that a sample with no spread cannot BLOCK until its upper end clears the margin: every task lost by 1.0 on a 0..10
+    scale (margin 0.5) is INCONCLUSIVE up to 60 tasks and a BLOCK from 61. The incumbent keeps its place either way (R4).
+    *What it does not close.* `3/n` is a little looser than the interval's own tail: at 61 pairs a candidate that loses
+    5% of the incumbent's passes ties them all 4.4% of the time, so the nested-loss null reads 4.4% at 61 tasks (4.2%
+    measured), where it reads 0% up to 60. That is the first step of the sparse regime described under "Where it is not
+    calibrated", which is larger than this step. A difference exactly on the margin, or an interval end that lands on it
+    by float rounding (`0.1 + 0.2` against `0.3` at 60 pairs, or `0.55 - 0.5` at 30), is neither ADOPT nor BLOCK: the
+    verdict compares an end with its boundary to within 1e-9 of the score range, and differences that are equal on paper
+    but not to the last bit (0.95 - 0.90 against 0.70 - 0.65) are treated as equal. The gate version stays 2 for the
+    tolerance, which changes a verdict only for an end within 1e-9 of the range of its boundary.
+    With fewer than two pairs there is no interval and the numbers read 0. `c` is a table to 200 degrees of freedom and a three-term expansion beyond, so the gate needs no special function.
     `delta` is the observed mean difference, and `bootstrap_b` and `seed` no longer touch the primary.
     *What was measured.* `TestCalibrationStudy` (`internal/eval/gate_sim_test.go`, off unless `OFFLOAD_GATE_STUDY=1`)
     draws 20000 datasets per cell: 63 null cells, in which the true difference is 0 (superiority) or exactly `-0.05`
@@ -197,7 +209,7 @@ The gate version is 2: a baseline written under another version is refused, firs
     sample whose pairs are all equal is a point to every method but (vi), so the columns of the other methods are what they
     were before the fourth review and (vi) is the gate. Data
     seeds come from the cell and the dataset index, bootstrap seeds from the dataset index: the tables are identical at 24
-    and at 30 workers. The percentile interval reproduces the review's figures within simulation error (3.77, 3.81 and 4.12
+    and at 30 workers. The percentile interval reproduces the review's figures within simulation error (3.77, 3.69 and 4.12
     against its 3.86, 3.58 and 4.10 for uniform scores, tenths and x^3-skewed scores at 16 tasks, and 6.12 against 6.35 for
     the non-inferiority cell at 20 tasks; the standard error of a rate near 4% over 20000 datasets is 0.14 points).
     *Why not one of the five.* The review named five candidates: the studentized bootstrap, BCa, the percentile widened
@@ -238,11 +250,18 @@ The gate version is 2: a baseline written under another version is refused, firs
 
     The score form is the best single interval and does not clear the bar on the 63 cells: 61 are at most 3.6%, and two,
     both at 80 tasks, are not: pass rates .99/.94 (4.8%) and the nested-loss candidate (8.2%). Those two are the regime of
-    a strong incumbent and a handful of disagreeing tasks at 60 tasks and more, where the score form is still
-    anti-conservative (the stress table below runs it to 200 tasks: 4.1% to 5.5% at .97/.92 and .99/.94 from 60 tasks
-    in the cells where it exceeds 4%, and 5.8% to 8.9% at nested loss from 80 tasks). The lower of the score form and BCa
-    is the only combination that clears all 63 cells (0 over 4%, the worst 3.4% at `B = 2000` and 3.5% at `B = 10000`) and
-    all 18 stress cells (at most 3.4%), and it keeps the score form's power to within 0.7 points on every power cell. It
+    a strong incumbent and a handful of disagreeing tasks from 61 tasks, where the score form is still anti-conservative
+    and the rule of three certifies a sample of ties (the stress table below runs it from 60 to 200 tasks, with the sizes
+    61 and 64 where that starts: the nested-loss candidate 4.2% at 61 tasks, 16.8% at 64, 8.9% at 80, 5.8% at 120 and 6.3%
+    at 200, pass rates .99/.94 6.5% at 61 and 10.1% at 64, .97/.92 4.9% and 4.7%). The nested-loss rate is an exact
+    binomial sum, pinned by `TestNestedLossFalseAdoptRateIsTheBinomialSum`: 0% to 60 tasks, 4.4% at 61 (all ties), 17.7% at
+    62 (one loss clears the margin), 12.9% at 70, 8.6% at 80, 5.7% at 90, 11.8% at 100 (two losses), 9.4% at 160, 6.5% at
+    250, 5.6% at 500 and 4.3% at 1000, and the peaks of that sawtooth stay over 4% to about 1500 tasks. The lower of the
+    score form and BCa is the only combination that clears all 63 null cells (0 over 4%, the worst 3.4% at `B = 2000` and
+    3.5% at `B = 10000`) and the 18 stress cells at 16 to 60 and 80 to 200 tasks (at most 3.4%), and it keeps the score
+    form's power to within 0.7 points on every power cell. It does not clear the stress cells at 61 and 64 tasks: five of
+    those six are over 4% (the nested-loss candidate 4.2% at 61 and 3.7% at 64, .97/.92 4.9% and 4.2%, .99/.94 6.5% and
+    5.9%). It
     was **not adopted here**: BCa is a bootstrap, so it would couple the primary back to `bootstrap_b` and `seed`, which
     this decision made no longer touch it, and it changes the primary's algorithm in a repair that was asked to fix the
     all-tied case. That is the lead's decision, with these figures. The other lower-of-two rows with (vi) keep the score
@@ -250,8 +269,10 @@ The gate version is 2: a baseline written under another version is refused, firs
     *The price.* The interval is wider than the plain t by the factors above, so power falls. At 24 tasks a true gain of
     0.1 on a pass/fail score is adopted in 8.6% of superiority runs (the paired t 10.7%, the percentile 9.7%, which
     over-adopts) and a candidate truly equal to the incumbent in 7.9% of non-inferiority runs at margin 0.05 (the paired t
-    12.3%, the percentile 15.7%; the score form read 8.8% before a sample with no spread had its lower end held back, and
-    at 16 tasks it read 5.8% and now reads 1.6%, because 16 ties cannot certify a margin of 0.05). The power cells:
+    12.3%, the percentile 15.7%; the score form read 8.8% when a sample with no spread was a point, and at 16 tasks it
+    read 5.8% and now reads 1.6%, because 16 ties cannot certify a margin of 0.05; the exact one-sided bound tried
+    before the rule of three gave these figures to the digit, and every cell below, since the two differ only for ties at
+    61 to 71 pairs). The power cells:
 
     | cell | tasks | percentile (current) | (i) studentized | (ii) BCa | (iii) pctl x t/z | (iii') | (iv) paired t | (vi) score form |
     |---|---|---|---|---|---|---|---|---|
@@ -266,7 +287,8 @@ The gate version is 2: a baseline written under another version is refused, firs
 
     *Where it is not calibrated.* The stress cells of the same study, outside the bar: scores with a spike at zero, the
     heavy-tailed rare-large score, and a strong incumbent at the margin where the two arms disagree on a handful of tasks,
-    from 60 to 200 tasks (the last column is the lower of (vi) and BCa, for the reason above):
+    from 60 to 200 tasks, with the sizes 61 and 64 added after the rule of three because they are the first at which a
+    sample of ties certifies a margin of 0.05 (the last column is the lower of (vi) and BCa, for the reason above):
 
     | stress null | tasks | percentile (current) | (i) studentized | (ii) BCa | (iii) pctl x t/z | (iii') | (iv) paired t | (vi) score form | min(BCa, vi) |
     |---|---|---|---|---|---|---|---|---|---|
@@ -279,6 +301,12 @@ The gate version is 2: a baseline written under another version is refused, firs
     | stress ni binary .97/.92 | 60 | 3.44 | 5.19 | 3.82 | 3.44 | 3.44 | 5.06 | 4.41 | 3.23 |
     | stress ni binary .99/.94 | 60 | 3.69 | 6.96 | 3.73 | 3.69 | 3.69 | 6.96 | 5.47 | 2.26 |
     | stress ni nested loss 5% | 60 | 4.89 | 4.89 | 4.89 | 4.89 | 4.89 | 4.89 | 0.00 | 0.00 |
+    | stress ni binary .97/.92 | 61 | 7.14 | 4.99 | 6.66 | 3.83 | 3.24 | 5.55 | 4.87 | 4.87 |
+    | stress ni binary .99/.94 | 61 | 11.65 | 6.54 | 6.77 | 8.40 | 3.52 | 11.45 | 6.53 | 6.53 |
+    | stress ni nested loss 5% | 61 | 18.11 | 4.23 | 4.23 | 18.11 | 4.23 | 18.30 | 4.23 | 4.23 |
+    | stress ni binary .97/.92 | 64 | 6.20 | 5.58 | 5.79 | 6.20 | 6.20 | 4.66 | 4.66 | 4.17 |
+    | stress ni binary .99/.94 | 64 | 10.41 | 6.21 | 6.21 | 10.41 | 10.41 | 10.12 | 10.12 | 5.85 |
+    | stress ni nested loss 5% | 64 | 16.62 | 3.74 | 3.74 | 16.62 | 16.62 | 16.78 | 16.78 | 3.74 |
     | stress ni binary .97/.92 | 80 | 3.37 | 5.02 | 3.38 | 3.37 | 3.37 | 3.52 | 3.52 | 3.37 |
     | stress ni binary .99/.94 | 80 | 4.72 | 4.39 | 3.03 | 4.72 | 4.72 | 4.75 | 4.75 | 3.03 |
     | stress ni nested loss 5% | 80 | 8.79 | 1.94 | 1.94 | 8.79 | 8.79 | 8.87 | 8.87 | 1.94 |
@@ -291,13 +319,17 @@ The gate version is 2: a baseline written under another version is refused, firs
 
     A candidate that only ever loses tasks (the "nested loss" rows) and the strong incumbents were adopted in up to 44% of
     runs at 16 tasks, 36% at 20, 29% at 24 and 13% at 40 under every interval, because a sample with no spread had an
-    interval of one value. With the lower end held back (decision 12) the nested-loss candidate is at 0% from 16 to 60
-    tasks, and the strong incumbents are at most 3.3% at 16 to 40 tasks. At 80 tasks and more the sample has a loss or two
-    in it and the score form accepts it: 8.2% at 80 tasks (it accepts one loss in 80), 5.8% at 120 and 6.3% at 200 for the
-    nested-loss candidate, and up to 5.5% for pass rates .97/.92 and .99/.94 at 60 to 200 tasks. A zero-inflated score that
-    is non-inferior at exactly the margin is adopted in 3.7% of runs at 16 tasks with the score form and 3.4% at 24. The
-    remedy is more tasks, which the power note counts, a margin the corpus size can certify, or the lead's decision on the
-    lower of two above.
+    interval of one value. With the rule of three (decision 12) the nested-loss candidate is at 0% from 16 to 60 tasks, and
+    the strong incumbents are at most 3.3% at 16 to 40 tasks. From 61 tasks the sample of ties is certified, and from 62 a
+    sample with one loss in it is too, because the score form reads little spread in it: 4.2% at 61 tasks, 16.8% at 64 (one
+    loss in 64), 8.9% at 80 (one loss in 80), 5.8% at 120 (two) and 6.3% at 200 (five) for the nested-loss candidate, and up
+    to 10.1% for pass rates .99/.94 and 4.9% for .97/.92 at 60 to 200 tasks. The nested-loss figure falls and rises as the
+    number of losses the interval accepts steps up, and stays over 4% at its peaks to about 1500 tasks. A zero-inflated
+    score that is non-inferior at exactly the margin is adopted in 3.7% of runs at 16 tasks with the score form and 3.4% at
+    24. The remedy is more tasks, which the power note counts, a margin the corpus size can certify, or the lead's
+    decision on the interval for sparse disagreement: the lower of two above does not close 61 to 64 tasks, and what would
+    is an interval that takes its variance from the null mean, as the Wilson interval does for a rate, which the closed form
+    here does not for pass/fail scores.
 
 ## Consequences
 
@@ -316,9 +348,10 @@ The gate version is 2: a baseline written under another version is refused, firs
   version 2 means a baseline written under version 1 is re-frozen, with a judge and, for `custom`, a range.
 - **Version 2 absorbs these rules.** The gate is new in the change that carries it, version 2 has never been released,
   and no version 2 baseline exists outside tests, so the cost rule, the regression rule and the primary interval landed in
-  it rather than in a version 3 that nobody ran. The fourth review's two rules landed in it too: the lower end of a sample
+  it rather than in a version 3 that nobody ran. The fourth review's rules landed in it too: the rule of three for a sample
   with no spread, which changes the verdict of every all-tied non-inferiority comparison from ADOPT to INCONCLUSIVE below
-  80 tasks, and a candidate's unfinished attempt of unknown cost, which leaves its task unresolved on that metric. A
+  61 tasks, the verdict tolerance of 1e-9 of the score range, and a candidate's unfinished attempt of unknown cost, which
+  leaves its task unresolved on that metric. A
   baseline frozen at an earlier head of this branch has the same bytes and hash under this gate, because the format did not
   change, but its verdicts can: re-run any comparison made with it.
 - **The type for the attempt enum is `eval.AttemptOutcome`.** `eval.Outcome` is already the cascade eval's per-case struct,
@@ -335,8 +368,10 @@ The gate version is 2: a baseline written under another version is refused, firs
   4%: pass rates .99/.94 and the nested-loss candidate, both at 80 tasks), the eleven end-to-end cells of
   `TestNullAdoptRateAtTheFloorsIsCalibrated` (16 to 24 tasks, 0% to 3.0%) and the fifteen interval cells of
   `TestPrimaryIntervalFalseAdoptRateOnTheStatedNulls` (0% to 3.1%); nothing is claimed for a strong incumbent with a
-  handful of disagreeing tasks from 60 tasks up (stress cells, up to 9%), below 16 tasks, or for the efficiency reads
-  beyond the figures of decision 2.
+  handful of disagreeing tasks from 61 tasks up (the nested-loss candidate: 4.4% at 61 tasks, 17.7% at 62, 8.6% at 80,
+  6.2% at 200, over 4% at the peaks of a sawtooth to about 1500 tasks, exact binomial sums pinned by
+  `TestNestedLossFalseAdoptRateIsTheBinomialSum`; pass rates .99/.94, 10.1% at 64 tasks), below 16 tasks, or for the
+  efficiency reads beyond the figures of decision 2.
 - **No wall-time term enters through the gate.** Speed may be reported beside a verdict as a side column by a caller; the
   gate has no input for it and no rule that reads it.
 - **Reading the gate's inputs needs adapters.** A record from an external evaluation tool becomes a gate input outside this
@@ -346,26 +381,29 @@ The gate version is 2: a baseline written under another version is refused, firs
 ## Measured grid
 
 False ADOPT rate in per cent, 20000 datasets per cell, `B = 2000` (a nominal 2.5%; a star marks a cell over 4%). The
-closed forms, (iv) and (vi), do not depend on `B`.
+closed forms, (iv) and (vi), do not depend on `B`. The last column is the gate (the rule of three for a sample with no
+spread); the column before it is the score form with a sample of ties read as a point, as the gate did before the fourth
+review. The comparison with the margin is the gate's, to within 1e-9 of the score range, which moves a few bootstrap cells
+by 0.2 points or less where a replicate's end lands on the margin by float rounding.
 
-| null | tasks | all pairs equal | percentile | (i) studentized | (ii) BCa | (iii) pctl x t/z | (iii') x sqrt(n/(n-1)) | (iv) paired t | (vi) score form, ties as a point | (vi) score form, this change |
+| null | tasks | all pairs equal | percentile | (i) studentized | (ii) BCa | (iii) pctl x t/z | (iii') x sqrt(n/(n-1)) | (iv) paired t | (vi) score form, ties as a point | (vi) score form, the gate |
 |---|---|---|---|---|---|---|---|---|---|---|
 | sup binary p=.50 | 16 | 0.00 | 2.48 | 2.34 | 2.16 | 2.48 | 2.48 | 2.04 | 1.07 | 1.07 |
 | sup binary p=.85 | 16 | 0.97 | 2.44 | 4.98* | 4.87* | 2.44 | 2.44 | 2.35 | 0.81 | 0.81 |
 | sup uniform | 16 | 0.00 | 3.77 | 2.06 | 3.48 | 2.71 | 2.42 | 2.42 | 1.31 | 1.31 |
-| sup deciles 0..1 | 16 | 0.00 | 3.81 | 2.27 | 3.64 | 3.04 | 2.69 | 2.73 | 1.53 | 1.53 |
+| sup deciles 0..1 | 16 | 0.00 | 3.69 | 2.27 | 3.52 | 3.04 | 2.69 | 2.73 | 1.53 | 1.53 |
 | sup x^3 skewed | 16 | 0.00 | 4.12* | 3.06 | 4.33* | 3.16 | 2.79 | 2.56 | 1.39 | 1.39 |
 | sup two-point 0/10 | 16 | 0.00 | 2.56 | 2.57 | 2.33 | 2.56 | 2.56 | 2.10 | 1.10 | 1.10 |
 | sup binary p=.50 | 24 | 0.00 | 2.30 | 1.90 | 1.98 | 2.30 | 2.30 | 2.54 | 1.89 | 1.88 |
 | sup binary p=.85 | 24 | 0.04 | 2.51 | 3.45 | 3.71 | 2.51 | 2.51 | 2.38 | 1.56 | 1.56 |
 | sup uniform | 24 | 0.00 | 3.21 | 2.21 | 3.08 | 2.63 | 2.44 | 2.48 | 1.76 | 1.76 |
-| sup deciles 0..1 | 24 | 0.00 | 3.45 | 2.38 | 3.24 | 2.90 | 2.67 | 2.69 | 1.98 | 1.98 |
+| sup deciles 0..1 | 24 | 0.00 | 3.36 | 2.38 | 3.14 | 2.90 | 2.67 | 2.69 | 1.98 | 1.98 |
 | sup x^3 skewed | 24 | 0.00 | 3.50 | 2.70 | 3.65 | 2.86 | 2.56 | 2.41 | 1.67 | 1.67 |
 | sup two-point 0/10 | 24 | 0.00 | 2.19 | 1.86 | 2.00 | 2.19 | 2.19 | 2.43 | 1.87 | 1.87 |
 | sup binary p=.50 | 40 | 0.00 | 2.38 | 2.24 | 2.14 | 2.38 | 2.38 | 2.62 | 2.10 | 2.10 |
 | sup binary p=.85 | 40 | 0.00 | 2.30 | 3.44 | 2.80 | 2.30 | 2.30 | 2.19 | 2.07 | 2.07 |
 | sup uniform | 40 | 0.00 | 2.77 | 2.16 | 2.62 | 2.48 | 2.33 | 2.30 | 1.94 | 1.93 |
-| sup deciles 0..1 | 40 | 0.00 | 3.02 | 2.36 | 2.90 | 2.73 | 2.54 | 2.56 | 2.19 | 2.19 |
+| sup deciles 0..1 | 40 | 0.00 | 2.94 | 2.36 | 2.80 | 2.73 | 2.54 | 2.56 | 2.19 | 2.19 |
 | sup x^3 skewed | 40 | 0.00 | 3.14 | 2.62 | 3.16 | 2.79 | 2.62 | 2.56 | 2.10 | 2.10 |
 | sup two-point 0/10 | 40 | 0.00 | 2.35 | 2.27 | 2.15 | 2.35 | 2.35 | 2.59 | 2.15 | 2.15 |
 | ni binary .90/.85 | 16 | 1.80 | 9.96* | 9.95* | 9.93* | 9.96* | 9.96* | 3.74 | 2.48 | 0.68 |
@@ -377,12 +415,12 @@ closed forms, (iv) and (vi), do not depend on `B`.
 | ni binary .97/.92 | 16 | 17.42 | 27.93* | 27.93* | 27.93* | 27.93* | 27.93* | 17.79* | 17.45* | 0.03 |
 | ni binary .99/.94 | 16 | 31.90 | 37.43* | 37.43* | 37.43* | 37.43* | 37.43* | 31.91* | 31.90* | 0.00 |
 | ni nested loss 5% | 16 | 44.09 | 44.09* | 44.09* | 44.09* | 44.09* | 44.09* | 44.09* | 44.09* | 0.00 |
-| ni binary .90/.85 | 20 | 0.71 | 6.12* | 6.25* | 6.15* | 6.12* | 6.12* | 4.58* | 2.55 | 1.84 |
-| ni binary .70/.65 | 20 | 0.00 | 2.62 | 2.15 | 2.35 | 2.62 | 2.62 | 2.98 | 1.73 | 1.73 |
-| ni binary .55/.50 | 20 | 0.00 | 2.56 | 1.86 | 2.08 | 2.56 | 2.56 | 2.90 | 1.71 | 1.71 |
+| ni binary .90/.85 | 20 | 0.71 | 6.12* | 6.08* | 6.15* | 6.12* | 6.12* | 4.58* | 2.55 | 1.84 |
+| ni binary .70/.65 | 20 | 0.00 | 2.62 | 2.08 | 2.35 | 2.62 | 2.62 | 2.98 | 1.73 | 1.73 |
+| ni binary .55/.50 | 20 | 0.00 | 2.56 | 1.81 | 2.08 | 2.56 | 2.56 | 2.90 | 1.71 | 1.71 |
 | ni continuous uniform | 20 | 0.00 | 3.69 | 2.37 | 3.41 | 2.91 | 2.62 | 2.66 | 1.73 | 1.73 |
 | ni continuous x^3 skewed | 20 | 0.00 | 4.11* | 3.08 | 4.01* | 3.33 | 3.00 | 2.94 | 2.01 | 2.01 |
-| ni binary .95/.90 | 20 | 4.63 | 13.44* | 13.48* | 13.45* | 13.44* | 13.44* | 8.21* | 5.61* | 0.97 |
+| ni binary .95/.90 | 20 | 4.63 | 13.44* | 13.45* | 13.45* | 13.44* | 13.44* | 8.21* | 5.61* | 0.97 |
 | ni binary .97/.92 | 20 | 10.95 | 19.50* | 19.50* | 19.50* | 19.50* | 19.50* | 13.18* | 11.35* | 0.40 |
 | ni binary .99/.94 | 20 | 24.55 | 29.98* | 29.98* | 29.98* | 29.98* | 29.98* | 25.00* | 24.58* | 0.03 |
 | ni nested loss 5% | 20 | 35.77 | 35.77* | 35.77* | 35.77* | 35.77* | 35.77* | 35.77* | 35.77* | 0.00 |
@@ -396,8 +434,8 @@ closed forms, (iv) and (vi), do not depend on `B`.
 | ni binary .99/.94 | 24 | 18.37 | 23.39* | 23.38* | 23.41* | 23.38* | 23.37* | 23.37* | 18.91* | 0.53 |
 | ni nested loss 5% | 24 | 29.20 | 29.20* | 29.20* | 29.20* | 29.20* | 29.20* | 29.20* | 29.20* | 0.00 |
 | ni binary .90/.85 | 40 | 0.01 | 2.70 | 3.83 | 3.21 | 2.70 | 2.70 | 2.71 | 2.70 | 2.70 |
-| ni binary .70/.65 | 40 | 0.00 | 2.37 | 2.47 | 2.29 | 2.37 | 2.37 | 2.61 | 2.01 | 2.01 |
-| ni binary .55/.50 | 40 | 0.00 | 2.23 | 1.97 | 2.02 | 2.23 | 2.23 | 2.35 | 1.74 | 1.74 |
+| ni binary .70/.65 | 40 | 0.00 | 2.37 | 2.33 | 2.29 | 2.37 | 2.37 | 2.61 | 2.01 | 2.01 |
+| ni binary .55/.50 | 40 | 0.00 | 2.23 | 1.91 | 2.02 | 2.23 | 2.23 | 2.35 | 1.74 | 1.74 |
 | ni continuous uniform | 40 | 0.00 | 3.22 | 2.51 | 3.07 | 2.84 | 2.73 | 2.79 | 2.32 | 2.32 |
 | ni continuous x^3 skewed | 40 | 0.00 | 3.42 | 2.65 | 3.17 | 3.00 | 2.85 | 2.84 | 2.42 | 2.42 |
 | ni binary .95/.90 | 40 | 0.24 | 3.08 | 6.49* | 4.10* | 3.08 | 3.08 | 2.96 | 2.96 | 2.73 |

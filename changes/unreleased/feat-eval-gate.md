@@ -17,10 +17,12 @@
   are 64 lower-case hex. The primary is the mean of the paired task differences over the usable non-held-out pairs in
   sorted id order, with a 95% interval in the score form of the Student-t interval (`delta -+ c * sn / sqrt(n - c^2)`,
   `c = t(n-1, .975)` from a table, `sn` the divisor-n standard deviation; see Calibration). When every difference is equal
-  there is no spread to read, and `lo` is the true mean below which the sample would be 2.5% likely for scores in the
-  primary's range (`q (w + c) - w`, `q = 0.025^(1/n)`, `w` the range width, `c` the one value; exact for that bound), while
-  `delta` and `hi` stay the value: a margin of 0.05 of the range is certified by 80 ties and not by 40, a superiority tie is
-  INCONCLUSIVE, and a constant win still ADOPTs. `eval.BootstrapDeltaMean` is unchanged (its results are pinned by a test)
+  there is no spread to read, and the interval is the rule of three about the one value `v`, `[v - 3w/n, v + 3w/n]` clipped
+  to the primary's range (`w` its width, `n` the usable pairs; for pass/fail scores with no discordant pair `3/n` is the
+  one-sided 95% bound on the discordance rate): a margin of 0.05 of the range is certified by 61 ties and not by 60, a
+  superiority tie is INCONCLUSIVE at any size, and a constant win of the whole range still ADOPTs. An interval end within
+  1e-9 of the range of its boundary is neither an ADOPT nor a BLOCK, so float rounding cannot tip it.
+  `eval.BootstrapDeltaMean` is unchanged (its results are pinned by a test)
   and the paired bootstrap reads the efficiency metrics.
 - **Scoring.** Every candidate attempt enters its task's mean: a `pass` or `task_fail` with its score; a `cheat`, a
   `timeout`, an `infra_error`, a `judge_error` and a `not_run` at the worst score of the primary range (the bad end given
@@ -50,7 +52,7 @@
   adopts nothing alone. The gate has no effect-size floor: a caller's own bar stays that caller's rule. A model
   judge needs a passed receipt for the same scorer.
 - **Calibration of the primary.** The percentile interval of the paired bootstrap, which the gate read first, was measured
-  anti-conservative: over 20000 simulated datasets per cell it adopted in 3.8% (uniform scores), 3.8% (scores in tenths)
+  anti-conservative: over 20000 simulated datasets per cell it adopted in 3.8% (uniform scores), 3.7% (scores in tenths)
   and 4.1% (x^3-skewed scores) of superiority runs at 16 tasks and in 6.1% of non-inferiority runs at exactly -margin with
   20 tasks and pass rates .90 and .85 (10.0% with 16 tasks), against a nominal 2.5%. Five candidate intervals (studentized
   bootstrap, BCa, the percentile widened by t/z, the paired t, the lower of two) were run on the same datasets at
@@ -58,14 +60,20 @@
   score form of the t interval is the best single interval: of the 63 null cells of the study, 61 are at most 3.6%. A
   fourth review found that a sample whose pairs are all equal, read as one point, ADOPTed a non-inferiority claim that
   carried an efficiency win: pass rates .95 and .90 at 16 tasks 9% of the time, .99 and .94 32%, a candidate that only
-  loses 5% of the incumbent's passes 37% at 20 tasks. With the lower end held back those cells are 0.0% to 3.3% at 16 to 40
-  tasks (the 80-task cell of the .99/.94 incumbent, 4.8%, and of the nested-loss candidate, 8.2%, are not fixed: a strong
-  incumbent and a handful of disagreeing tasks at 60 tasks and more is still anti-conservative, up to 9% in the stress
-  cells, and the lower of the score form and BCa, 0 of 63 cells over 4% and 3.4% at worst, is left to the lead because it
-  couples the primary to `bootstrap_b` again). The price is power (at 24 tasks a true +0.1 gain on a pass/fail score is
+  loses 5% of the incumbent's passes 37% at 20 tasks. With the rule of three those cells are 0.0% to 3.3% at 16 to 40
+  tasks. Not fixed: a strong incumbent and a handful of disagreeing tasks from 61 tasks, where the interval is still
+  anti-conservative and a sample of ties is certified. The nested-loss candidate (it loses 5% of the incumbent's passes and
+  wins none) is adopted in 0% of runs up to 60 tasks, 4.4% at 61 (all ties), 17.7% at 62 (one loss clears the margin),
+  8.6% at 80, 11.8% at 100, 5.8% at 120, 6.2% at 200 and 5.6% at 500 (exact binomial sums over the gate's interval, pinned by
+  a test; the peaks stay over 4% to about 1500 tasks), and pass rates .99/.94 in 6.5% at 61 and 10.1% at 64 (study stress
+  cells); the 63 null cells keep their two cells over 4%, both at 80 tasks (4.8% and 8.2%). The lower of the score form and
+  BCa, 0 of 63 null cells over 4% and 3.4% at worst, does not close 61 to 64 tasks (up to 6.5%) and is left to the lead
+  because it couples the primary to `bootstrap_b` again; an interval that takes its variance from the null mean, as the
+  Wilson interval does for a rate, is what would. The price is power (at 24 tasks a true +0.1 gain on a pass/fail score is
   adopted in 8.6% of runs against 10.7% for the plain t; 16 ties no longer certify a margin of 0.05, so a candidate truly
-  equal to a .90 incumbent is adopted in 1.6% of runs at 16 tasks and 7.9% at 24). Not covered: the sparse regime above
-  and the efficiency reads. `TestCalibrationStudy` prints the grid and is off unless `OFFLOAD_GATE_STUDY=1`; its output is
+  equal to a .90 incumbent is adopted in 1.6% of runs at 16 tasks and 7.9% at 24, where the point rule gave 5.8% and 8.8%;
+  the eight power rows are the same under the rule of three as under the exact one-sided bound tried before it). Not
+  covered: the sparse regime above and the efficiency reads. `TestCalibrationStudy` prints the grid and is off unless `OFFLOAD_GATE_STUDY=1`; its output is
   identical at 24 and at 30 workers.
 - **Pre-registration floors and the frozen judge.** Freeze and check refuse `bootstrap_b` below 2000, `min_pairs` below 16
   or above the non-held-out tasks (the calibration was measured from 16 tasks up; on cost nulls at 16 tasks a metric
@@ -90,11 +98,13 @@
   the right one for the primary. `agent-trajectory-gate` and the compaction A/B
   (`compeval.RunAB`) keep `B = 2000`, `seed = 42` and are listed as legacy, not migrated. Docs:
   `docs/systems/measurement-gate.md` (new, linked from `docs/README.md`) and ADR 0088 (Proposed).
-- **Tests.** Red first, three times: the gate's types and a stub were committed with the rule tests failing, then the gate;
+- **Tests.** Red first, four times: the gate's types and a stub were committed with the rule tests failing, then the gate;
   after an adversarial review, a second red commit of attack tests (unfinished attempts, few resamples, a swapped judge, an
-  unmeasured or costlier metric, a wide margin) before the fixes; and after a third review, red tests for an unfinished
+  unmeasured or costlier metric, a wide margin) before the fixes; after a third review, red tests for an unfinished
   candidate attempt's cost, a regression on few resolved pairs, the false-ADOPT cells and the refusal a version 1 baseline
-  gets, each before its fix. `internal/eval` tests: a verdict table, boundary rows built from exactly representable
+  gets, each before its fix; and after a fourth, red tests for a sample with no spread (ties, constant wins and losses on
+  both score ranges and both modes, and the sizes 60 and 61 where the rule of three crosses a margin of 0.05) and, in a
+  second red commit, for an interval end that touches the margin by float rounding. `internal/eval` tests: a verdict table, boundary rows built from exactly representable
   numbers (16 pairs, scores 8.0, 7.5, 7.0), the refusal rows, imputation on every class and both arms, the cost of each
   attempt class on each arm, the three-ratio excluded share, held-out veto and missing evidence, the floors, the frozen
   judge and receipt shapes, the efficiency vetoes and the Bonferroni read, a byte-for-byte pin of `BootstrapDeltaMean`,
@@ -102,10 +112,11 @@
   schema's enum and properties pinned to the Go types, and a baseline as the version 1 gate wrote it (raw bytes, hash
   pinned, through `CheckBaseline` and through the verb). Calibration: `Gate` run end to end at the floors on eleven null cells
   (at most 4% over 4000 to 10000 trials, fixed seeds, skipped under `-short`; 0.0% to 3.0% measured), the interval itself
-  over 50000 datasets on fifteen cells (0.0% to 3.1% measured), the interval against numpy and scipy computations and against
+  over 50000 datasets on fifteen cells (0.0% to 3.1% measured), the nested-loss candidate's rate as an exact binomial sum from
+  16 to 1000 tasks (0% to 60 tasks, 17.7% at 62, pinned to scipy), the interval against numpy and scipy computations and against
   its own definition (the statistic equals the critical value at both ends), the t table against scipy, and the study
   harness pinned to `BootstrapDeltaMean` bit for bit, to scipy's quantiles and to the moments of its generators. The
-  `internal/eval` tests take about 6 s with the calibration cells (about 2 s with `-short`) on a 36-core machine; the cells
+  `internal/eval` tests take about 5 s with the calibration cells (about 1.4 s with `-short`) on a 36-core machine; the cells
   split their trials over `GOMAXPROCS`, so a 4-core runner takes a few times that. Root tests drive the verb
   in-process (freeze, check, verdict round trip, exit codes 0, 1 and 2, a failed write of the result on each verb, `-h`,
   write-once freeze, the INV-5 refusals, `schema`, the version 1 refusal). Mutation checks, each proved applied (`git diff
@@ -117,6 +128,7 @@
   counted as a zero in the divisor, a regression read only from `min_pairs`, the primary back on the percentile bootstrap, the zero-variance value read from a sum, the
   plain t interval, a nudged critical value, the version probe disabled, the version probe blind to trailing bytes, and
   three in the harness (percentile index, generator bias, quantile bisection): all 14 turned a test red; and in the fourth
-  round the zero-spread lower end off, compared by exact equality, at the wrong tail, with the wrong sign, with the range
-  width forgotten, and the unrecorded-cost rule off and its flag never set: all 7 turned a test red. Red first again: the
-  failing cells and tests came in their own commit.
+  round the zero-spread interval read as the point, with the range width forgotten, held one-sided, not clipped to the
+  range, and with a numerator of 4 and of 2; the verdict tolerance off, missing on the BLOCK side, missing on the ADOPT
+  side and missing in superiority; equal differences compared exactly; and the unrecorded-cost rule off and its flag never
+  set: all 13 turned a test red (each proved applied and restored with `git diff --quiet`).

@@ -65,23 +65,28 @@ and its output does not move with the platform's math library.
 
 When every difference is equal (to within a rounding error of the scores: zero variance, so no spread to measure) there is
 no standard error to read, and a point interval would certify anything: sixteen ties in a row are what a candidate that loses
-5% of the incumbent's passes produces 44% of the time. `delta` and `hi` are then the one value, taken from the data and not
-from a sum, and `lo` is the true mean below which the sample would be 2.5% likely, for scores in the primary's range
-(width `w`, `q = 0.025^(1/n)`):
+5% of the incumbent's passes produces 44% of the time. `delta` is then the one value `v`, taken from the data and not from a
+sum, and the interval is the **rule of three** about it, clipped to the range the mean cannot leave (`w` the width of the
+primary's score range, `n` the usable pairs):
 
 ```
-lo = q * (w + c) - w          (c is the one value; a tie has c = 0, so lo = -w * (1 - q))
+lo, hi = v - 3w/n, v + 3w/n          (-w <= lo, hi <= w)
 ```
 
-A distribution with mean `t` puts at most `(w + t) / (w + c)` of its mass on the value `c` (the rest, at best, at `-w`), so
-`n` equal values have probability at most that to the power `n`, and setting it to 0.025 gives the formula. It is the exact
-bound, not a rule of thumb. A tie sits `0.206 w` below 0 at 16 tasks, `0.142 w` at 24, `0.088 w` at 40 and `0.045 w` at 80,
-so a margin of 0.05 of the range is certified by 80 ties and not by 40, and a superiority tie is INCONCLUSIVE because `lo`
-is below 0. Only `lo` is widened: the incumbent wins every tie, so a sample with no spread is never read as proof against
-it, and a candidate that loses every task by the same amount is still blocked (`hi` is that amount). A difference exactly on
-the margin is neither ADOPT nor BLOCK. With fewer than two pairs there is no interval and `delta`, `lo` and `hi` read 0; the verdict is INCONCLUSIVE
-through `min_pairs`. Scores or costs so large that a sum overflows to a number that is not finite are refused
-("overflow"), never reported as a verdict about infinity.
+For pass/fail scores with no discordant pair among `n`, `3/n` is the one-sided 95% upper bound on the rate of discordant
+pairs (`1 - 0.05^(1/n)`, which is `ln 20 / n = 2.996/n` for large `n`), so the mean difference can be as low as `-3/n`; on
+other scores it is the same allowance scaled by the range. A tie sits `3w/n` either side of 0: 0.1875 `w` at 16 tasks, 0.125
+at 24, 0.075 at 40, 0.05 at 60 and 0.0375 at 80. A margin of 0.05 of the range is therefore certified by 61 ties and not by
+60, whose end sits exactly on it (an end on the margin is neither ADOPT nor BLOCK). A superiority tie is INCONCLUSIVE at any
+size, and a constant difference far from zero still decides: every pair a win of the whole range gives `[w - 3w/n, w]`, an
+ADOPT, and every pair a loss of it a BLOCK. Both ends move, so a sample with no spread cannot BLOCK before its upper end
+clears the margin either: every task lost by 1.0 on a 0..10 scale (margin 0.5) is INCONCLUSIVE up to 60 tasks and a BLOCK
+from 61. The incumbent keeps its place whichever it is. `3/n` is a little looser than the interval's own 2.5% tail
+(`1 - 0.025^(1/n)`, 3.69/n, which would need 72 ties): at 61 pairs a candidate that loses 5% of the incumbent's passes ties
+all of them 4.4% of the time (the study's stress cell at 61 tasks measures 4.2%); see "What this covers" below. With fewer
+than two pairs there is no interval and `delta`, `lo` and `hi` read 0; the verdict is INCONCLUSIVE through `min_pairs`.
+Scores or costs so large that a sum overflows to a number that is not finite are refused ("overflow"), never reported as a
+verdict about infinity.
 
 `bootstrap_b` and `seed` do not touch the primary. The paired bootstrap reads the efficiency metrics (below).
 `eval.BootstrapDeltaMean` is unchanged, to the bit, for its legacy callers, and a test pins it.
@@ -91,7 +96,7 @@ through `min_pairs`. Scores or costs so large that a sum overflows to a number t
 The percentile interval of the paired bootstrap, which the gate read first, is anti-conservative on the data the gate sees
 most: pass/fail scores on a handful of tasks, and skewed scores. Under a null (no real difference, or a true difference of
 exactly `-margin`) a one-sided 95% interval adopts in 2.5% of runs. Measured over 20000 simulated datasets per cell with
-fixed seeds, `B = 2000`, the percentile interval adopted in 3.8% (uniform scores), 3.8% (scores in tenths) and 4.1% (x^3
+fixed seeds, `B = 2000`, the percentile interval adopted in 3.8% (uniform scores), 3.7% (scores in tenths) and 4.1% (x^3
 skewed scores) of superiority runs at 16 tasks, and in 6.1% of non-inferiority runs at exactly `-margin` with 20 tasks and
 pass rates .90 and .85 (10.0% with 16 tasks). Five candidate intervals were run on the same datasets (the studentized
 bootstrap, BCa, the percentile widened about the estimate by `t/z`, the paired t, and the lower of two of them, at
@@ -112,7 +117,7 @@ point" is the gate before the fourth review; the last column is the gate:
 | null | tasks | percentile interval | score form, ties as a point | score form (the gate) |
 |---|---|---|---|---|
 | superiority, uniform scores | 16 | 3.77 | 1.31 | 1.31 |
-| superiority, scores in tenths | 16 | 3.81 | 1.53 | 1.53 |
+| superiority, scores in tenths | 16 | 3.69 | 1.53 | 1.53 |
 | superiority, x^3-skewed scores | 16 | 4.12 | 1.39 | 1.39 |
 | superiority, pass/fail p=.50 | 16 | 2.48 | 1.07 | 1.07 |
 | non-inferiority at exactly -margin, pass rates .90 and .85 | 16 | 9.96 | 2.48 | 0.68 |
@@ -132,13 +137,15 @@ point" is the gate before the fourth review; the last column is the gate:
 
 The percentile column reads an all-tied dataset as a point too. Those datasets are 1.8% of the draws with 16 tasks and pass
 rates .90 and .85, 8.9% at .95 and .90, 17% at .97 and .92, 32% at .99 and .94 and 44% for the nested-loss candidate.
+The last column is the same under the exact one-sided bound `1 - 0.025^(1/n)` that was tried before the rule of three: the
+two differ only for ties at 61 to 71 pairs, which no cell of the grid holds.
 
 `TestNullAdoptRateAtTheFloorsIsCalibrated` runs `Gate` end to end on eleven of these cells at the floors, with fixed seeds,
 and requires at most 4% over its stated trials (it measures 0.0% to 3.0%; skipped under `-short`): the cells at 16 to 24
 tasks, among them pass rates .95 and .90, .99 and .94 and the nested-loss candidate, which fail it on the point rule (9%,
 32% and 37%). `TestPrimaryIntervalFalseAdoptRateOnTheStatedNulls` does the same on the interval alone, which needs no
 bootstrap, over 50000 datasets in each of fifteen cells (0.0% to 3.1%), and fails the plain t interval, which measures
-4.6% on the cell with 20 tasks. The package's tests take about 6 s (2 s with `-short`) on a 36-core machine; the
+4.6% on the cell with 20 tasks. The package's tests take about 5 s (1.4 s with `-short`) on a 36-core machine; the
 simulated cells split their trials over `GOMAXPROCS`, so a 4-core runner takes a few times that. The grid, its power cells
 and its stress cells are `TestCalibrationStudy` in `internal/eval/gate_sim_test.go`, off unless `OFFLOAD_GATE_STUDY=1`
 (about 20 minutes on 30 workers):
@@ -149,14 +156,22 @@ OFFLOAD_GATE_STUDY=1 go test ./internal/eval/ -run TestCalibrationStudy -v -time
 
 **What this covers, and what it does not.** The cells above: both arms win and lose tasks, or most pairs tie, 16 to 80
 tasks, scores that are pass/fail, in tenths, uniform or right-skewed. It does not cover a strong incumbent at exactly the
-margin whose disagreements with the candidate are a handful of tasks in 60 or more. There the score form is still
-anti-conservative, because a sample with one loss in it has little spread to read: the nested-loss candidate is adopted in
-8.2% of runs at 80 tasks (it accepts one loss in 80), 5.8% at 120 and 6.3% at 200, and pass rates .97 and .92 or .99 and
-.94 in up to 5.5% at 60 to 200 tasks (stress cells of the same study, which run the score form to 200 tasks). A
-zero-inflated score that is non-inferior at exactly `-margin` is adopted in 3.7% of runs at 16 tasks and 3.4% at 24. The
-remedy is more tasks (the power note counts them) and a pre-registered margin that the corpus size can certify. The lower
-of the score form and BCa clears all 63 cells and all 18 stress cells (the worst is 3.4%) at the same power to within 0.7
-points; it is not the gate because it would bring the bootstrap back into the primary (ADR 0088, decision 12).
+margin whose disagreements with the candidate are a handful of tasks, from 61 tasks. There the interval is
+anti-conservative, because a sample with one loss in it has little spread to read, and a sample of ties is certified by the
+rule of three from 61 pairs. The nested-loss candidate (it loses 5% of the incumbent's passes and wins none) is adopted in
+0% of runs up to 60 tasks, 4.4% at 61 (all ties), 17.7% at 62 (one loss clears the margin), 12.9% at 70, 8.6% at 80, 5.7%
+at 90, then 11.8% at 100 (two losses), 5.8% at 120, 9.4% at 160 and 6.2% at 200, and the peaks of that sawtooth stay over
+4% to about 1500 tasks (6.5% at 250, 5.6% at 500, 4.3% at 1000): exact binomial sums over the gate's own interval
+(`TestNestedLossFalseAdoptRateIsTheBinomialSum`), which the study's stress cells match to within their sampling error (4.2%
+at 61, 16.8% at 64, 8.9% at 80, 5.8% at 120, 6.3% at 200). Pass rates .99 and .94 are adopted in 6.5% of runs at 61 tasks
+and 10.1% at 64, and .97 and .92 in 4.9% and 4.7%; from 80 to 200 tasks they are 4.1% to 4.8% and 3.2% to 3.6%, and at 60
+tasks 5.5% and 4.4%. A zero-inflated score that is non-inferior at exactly `-margin` is adopted in 3.7% of runs at 16 tasks
+and 3.4% at 24. The remedy is more tasks (the power note counts them) and a pre-registered margin that the corpus size can
+certify, and until the interval is made conservative for sparse disagreement, an ADOPT in that regime at exactly the margin
+carries an error rate of up to 18% (the 62-task peak), not 2.5%. The lower of the score form and BCa clears all 63 null cells and
+the stress cells at 16 to 60 and 80 to 200 tasks (the worst is 3.4%) at the same power to within 0.7 points, but not those
+at 61 and 64 tasks (4.2% to 6.5%); it is not the gate because it would bring the bootstrap back into the primary (ADR 0088,
+decision 12).
 
 **Floors.** `bootstrap_b` cannot be frozen below 2000 and `min_pairs` below 16 (the default), and `min_pairs` cannot exceed
 the number of non-held-out tasks. The calibration above was measured from 16 tasks up, so 16 is the smallest sample the
@@ -165,10 +180,14 @@ gate makes a claim about. The bootstrap reads the efficiency metrics, and 2000 i
 `B = 10` and in 42% to 50% at `B = 1`, against 3.5% to 5.9% at `B = 2000`
 (`TestEfficiencyCalibrationStudy`, same switch).
 
-Boundaries are strict: `lo > 0`, `hi < 0`, `lo > -m`, `hi < -m`. An interval that touches the line is INCONCLUSIVE. The
-tests build their boundary rows from exactly representable numbers (16 pairs, scores 8.0, 7.5, 7.0) so a mutation of a
-comparison flips a row on every platform; a constant difference is read from the data, not from a sum, so a difference of
-exactly `-0.1` against a margin of 0.1 is on the margin as well (and its lower end, held back as above, is below it).
+Boundaries are strict, to within a tolerance of 1e-9 of the score range: `lo > 0`, `hi < 0`, `lo > -m`, `hi < -m` each hold
+only if the end clears the line by more than that. An interval that touches the line is INCONCLUSIVE, whichever way the
+last bit of a float fell: the interval of a sample with no spread puts an end exactly on a margin of 0.05 at 60 pairs
+(`0.1 + 0.2` against `0.3` is 5.6e-17 apart there, and its lower end would clear the margin by the last bit), and 30 pairs
+that each gain `0.55 - 0.5 = 0.05000000000000004` put it there too. The tests build their boundary rows from exactly
+representable numbers (16 pairs, scores 8.0, 7.5, 7.0) so a mutation of a comparison flips a row on every platform, and
+the float rows are their own tests. A constant difference is read from the data, not from a sum, so a difference of
+exactly `-0.1` against a margin of 0.1 is on the margin as well.
 
 ## The efficiency metrics
 
@@ -191,7 +210,10 @@ attempts are skipped, cost included.
 - **Over the unresolved cap.** A metric whose `unresolved_pairs` over the usable pairs exceeds `max_excluded_share` has
   `over_unresolved_cap` true and cannot improve. In non-inferiority mode it also blocks the ADOPT (INCONCLUSIVE, the
   reason names the metric): a declared metric that was not measured cannot be traded away. A metric that no task
-  carries on both arms is the extreme case.
+  carries on both arms is the extreme case. The cap is also the one lever left on the candidate's side: a candidate whose
+  `timeout`, `infra_error` and `judge_error` attempts record no cost leaves those tasks unresolved on that metric and keeps
+  its efficiency win on the rest, for up to `max_excluded_share` of the tasks, so the adapter must record the cost of every
+  attempt that ran.
 - **Superiority mode** reports every metric's interval, `improves`, `regresses` and the cap, and ignores all of them for
   the verdict.
 
