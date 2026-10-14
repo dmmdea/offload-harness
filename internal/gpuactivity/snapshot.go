@@ -111,6 +111,33 @@ type Holder struct {
 	TermSec      int    `json:"term_s,omitempty"`
 	RequestedSec int    `json:"requested_s,omitempty"`
 	HardEnd      string `json:"hard_end,omitempty"`
+
+	// The yield request (plan P11, ADR 0086), read from the lease record and its yield sidecar by
+	// gpulease.YieldViewOf and never stored as a verdict. YieldFile is the path of the sidecar of a
+	// lease whose holder runs the request (it exists only once the holder was asked; a detached job
+	// can watch it), named while the policy is request or once the holder was asked and absent under
+	// the default policy; YieldNote is the sentence a waiter reads, empty when there is nothing to say;
+	// Yield is present only once the holder was asked. Under the default policy a lease nobody asked
+	// carries none of the three, so a consumer of the holder reads the bytes it read before.
+	YieldFile string      `json:"yield_file,omitempty"`
+	YieldNote string      `json:"yield_note,omitempty"`
+	Yield     *YieldState `json:"yield,omitempty"`
+}
+
+// YieldState is a yield request as a status call reports it.
+type YieldState struct {
+	AskedAt string `json:"asked_at"` // RFC 3339
+	ActedAt string `json:"acted_at,omitempty"`
+	// Action is what the holder did about it: "ran on_yield", "on_yield failed", "on_yield running",
+	// "no on_yield recorded", or empty when it has not acted yet.
+	Action  string `json:"action,omitempty"`
+	Exit    int    `json:"exit,omitempty"`
+	Waiters int    `json:"waiters,omitempty"`
+	// GraceSec is the time the job declared it needs to stop cleanly (--yield-grace); 0 = none declared.
+	GraceSec int `json:"grace_s,omitempty"`
+	// Unanswered: the lease still holds its cards past the job's grace (or past a display-only threshold
+	// when it declared none). Nothing is killed or taken because of it.
+	Unanswered bool `json:"unanswered,omitempty"`
 }
 
 // ProgressState is the reading of a lease's progress contract.

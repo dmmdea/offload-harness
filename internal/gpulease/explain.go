@@ -145,7 +145,12 @@ func (m *Manager) ExplainHeld(info Info, grace time.Duration) string {
 	if word == "tree-orphan" {
 		return s + "; nothing reclaims or kills it: " + TreeOrphanFreeing(info.Epoch)
 	}
-	return s + fmt.Sprintf("; nothing reclaims or kills it: a human-authorised session frees it with `%s` (not in this build yet: until it ships, ask whoever owns it or the operator)", TakeoverCommand(info.Epoch))
+	s += fmt.Sprintf("; nothing reclaims or kills it: a human-authorised session frees it with `%s` (not in this build yet: until it ships, ask whoever owns it or the operator)", TakeoverCommand(info.Epoch))
+	// What became of the request to its holder, if one was made (yield.go). Read-only like the rest.
+	if y := m.YieldViewOf(info).Sentence; y != "" {
+		s += "; " + y
+	}
+	return s
 }
 
 func roundDur(d time.Duration) string {

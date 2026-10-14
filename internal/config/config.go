@@ -1411,6 +1411,13 @@ type Config struct {
 	// renewed at all, in minutes. Past it a lease that is still held reads overdue however
 	// healthy its owner looks; it is still never freed by that. 0 or negative = 2880.
 	GPUMaxTotalMin int `json:"gpu_max_total_min,omitempty"`
+	// GPUOnOverdue (plan P11, ADR 0086) is what the harness does about a lease that outlived its
+	// declared window while someone waits for its cards: "" (unset) behaves as before the key existed
+	// and asks nobody; "request" asks the lease's HOLDER to yield, which runs the job's own recorded
+	// --on-yield, and nothing is ever killed, released or taken; "hold" says in words that nobody is
+	// asked. Matching trims and lower-cases. Anything else (yield, kill, takeover, a typo) is refused by
+	// name at load, and a one-shot verb that proceeds anyway is held, never asking. Load installs it.
+	GPUOnOverdue string `json:"gpu_on_overdue,omitempty"`
 	// ForeignGPUMinMiB overrides the per-process VRAM floor `gpu status`/`gpu
 	// reserve`'s foreign-GPU-memory warning (gpu_foreign.go) uses to decide a
 	// resident desktop process is worth a line — see foreignDefaultMinMiB for
@@ -2108,6 +2115,21 @@ func (c Config) GPUMaxTotal() time.Duration {
 	return time.Duration(c.GPUMaxTotalMin) * time.Minute
 }
 
+// OnOverduePolicy is gpu_on_overdue as the policy the lease holders read: unset is the behaviour
+// from before the key existed (nobody is asked), "request" asks the holder to yield, "hold" says so
+// in words. A value Load refused reads as hold: the permissive direction is never the fallback.
+func (c Config) OnOverduePolicy() gpulease.OnOverdue {
+	mode, _ := gpulease.ParseOnOverdue(c.GPUOnOverdue)
+	return mode
+}
+
+// validateOnOverdue refuses a gpu_on_overdue value by name. Matching trims and lower-cases, as the
+// other policy validators do, so a copy-pasted " Request " is accepted.
+func validateOnOverdue(v string) error {
+	_, err := gpulease.ParseOnOverdue(v)
+	return err
+}
+
 // AgentPlannerModel resolves the coding agent's planner seat. Precedence:
 // an explicit per-call/per-flag override > the configured AgentModel seat >
 // the workhorse Model. The chain is resolved at call time, never persisted —
@@ -2413,6 +2435,11 @@ func Load(path string) (Config, error) {
 // value without a call before each return.
 func loadArmed(path string) (Config, error) {
 	c, err := load(path)
+	// The policy for an overdue lease is installed before anything below can return early, on every exit
+	// and the error ones included: a one-shot verb proceeds on a config that failed to load, and a value
+	// that never got installed would leave it on the default for a key the operator did set. An
+	// unrecognised value installs as hold, so it never asks.
+	gpulease.SetDefaultOnOverdue(c.GPUOnOverdue)
 	// Arm the model-affinity LOAD gate here and nowhere else, for the same reason
 	// netguard.SetTailnetSuffix below is installed from inside a load: the GPU lease
 	// location is a property of the MACHINE decided by two config fields
@@ -2621,6 +2648,12 @@ func load(path string) (Config, error) {
 		return c, err
 	}
 	if err := validateAgentReadFloor(c.AgentReadFloor); err != nil {
+		return c, err
+	}
+	// A policy for an overdue lease nobody implements is refused by name: there is no automatic mode,
+	// and a typo must not read as one. (A one-shot verb goes on after this error; loadArmed has already
+	// installed the value, and an unrecognised one installs as hold.)
+	if err := validateOnOverdue(c.GPUOnOverdue); err != nil {
 		return c, err
 	}
 	// The WARN half of S-38, printed LAST so it can never be mistaken for the
