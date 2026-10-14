@@ -1256,8 +1256,8 @@ type healthPayload struct {
 	ImageRecipes []ImageRecipeHealth `json:"image_recipes,omitempty"`
 	// MediaRecipes is what each video, animation and audio binding of this node names: the family, the weight files and how big each
 	// is here (-1: not there), with no digest and no fingerprint in this release (media_recipes.go, ADR 0082 Amendment 3). Additive;
-	// omitted on a node that binds none of the three lanes through ComfyUI or sd.cpp, and on a node that predates it, which a reader
-	// takes as unknown, never as "no weights".
+	// omitted on a node with no ComfyUI install (comfy_dir is no directory on it) and no sd.cpp video family, and on a node that
+	// predates it, which a reader takes as unknown, never as "no weights".
 	MediaRecipes []MediaRecipeHealth `json:"media_recipes,omitempty"`
 	// RefineHonoured says this node's image-gen task carries `refine`: an explicit false reaches the pipeline and
 	// skips the node's prompt refiner. A delegator that sends refine=false requires it, so a node that predates it
@@ -1675,8 +1675,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	// The video, animation and audio family rows (ADR 0082 Amendment 3) come from a memo too; a node that binds none of the three
-	// through ComfyUI or sd.cpp has no rows and the key is omitted.
+	// The video, animation and audio family rows (ADR 0082 Amendment 3) come from a memo too. They are not gated on the tasks the node
+	// serves (a node whose weights are gone still lists them, with -1, so a refusal can name the files); a node with no ComfyUI
+	// install and no sd.cpp video family has none and the key is omitted (mediacap.LaneRows).
 	payload.MediaRecipes = s.mediaRecipeRows()
 	// GPU utilization: advertise the busiest device's utilization when known.
 	// Omitted when no device has published a known utilization — absent ≠ idle.

@@ -2,7 +2,7 @@ package fleetnode
 
 // The video, animation and audio family rows on the wire (ADR 0082 Amendment 3). A node publishes, per lane, which family each
 // of its bindings names and how big each weight file is here (-1: not there); a delegator that names the node reads it to refuse
-// a call for a weight the node lacks. The keys are additive: a node that binds none of the three lanes publishes none of them.
+// a call for a weight the node lacks. The keys are additive: a node with no ComfyUI install and no sd.cpp video family publishes none of them.
 
 import (
 	"context"
@@ -107,8 +107,9 @@ func TestHealthPublishesMediaRecipesForTheBoundLanes(t *testing.T) {
 	}
 }
 
-// The twin of "a node without image-gen publishes neither key": a node that binds none of the three lanes publishes no
-// media_recipes, so an older reader and an image-only node see the shape they always did.
+// The twin of "a node without image-gen publishes neither key": a node that has no ComfyUI install (and no sd.cpp video family)
+// publishes no media_recipes, whatever scripts its config binds (the shipped default binds all three on every machine), so an older
+// reader and a node that cannot render these lanes see the shape they always did. A node with the install lists every lane it binds.
 func TestHealthOmitsMediaRecipesOnANodeWithoutTheLanes(t *testing.T) {
 	// The shipped default binds the three ComfyUI scripts on every machine; a machine with no ComfyUI install is a node without the
 	// lanes all the same.

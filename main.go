@@ -316,7 +316,8 @@ Usage:
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F] [--fast] [--upscale] [--node ID|URL] [--min-vram-gb N]
   local-offload animate-character <out.mp4> <ref.png> <driver.mp4> "<prompt>" [--motion-prompt "..."] [--frames 81] [--seed N] [--node ID|URL] [--min-vram-gb N]
                                          --node names the ONE fleet node that runs a video, animation or audio call (its node_id, or a delegate_remotes URL): no other node
-                                         and not this machine is tried, and a node that cannot take the call is refused by a word before anything is sent; --min-vram-gb N
+                                         and not this machine is tried, and a node that cannot take the call is refused by a word before anything is sent (--json prints
+                                         it as data.refusal; without it the DEFERRED line carries the reason); --min-vram-gb N
                                          asks for a node whose largest card is at least N GB
   local-offload run-graph --graph <g.json> [--manifest <m.json>] [--out-dir <d>] [--reserve-vram F] [--min-vram-gb N] [--model-family wan22] [--route local|auto|remote] [--remote URL]... [--json]
                                          with a fleet, a whole-node graph goes to an idle node with ONE card that holds the files it names; --min-vram-gb N asks for a node whose largest card is at least N GB
@@ -1743,8 +1744,6 @@ func parseGenerateAudio(args []string, errorHandling flag.ErrorHandling) (genera
 	}, nil
 }
 
-// videoFlags is the parsed CLI input for `generate-video`. Factored out so the
-// param-building (buildVideoParams) is unit-testable without a live render.
 // laneTargetParams puts the --node and --min-vram-gb of a lane verb into the request's params, only when they were given (an
 // explicit 0 is a number the caller gave). generate-audio has no VRAM floor and passes nil.
 func laneTargetParams(params map[string]any, node string, minVRAM *float64) {
@@ -1770,6 +1769,8 @@ func parseMinVRAMFlag(verb, s string) (*float64, error) {
 	return &v, nil
 }
 
+// videoFlags is the parsed CLI input for `generate-video`. Factored out so the
+// param-building (buildVideoParams) is unit-testable without a live render.
 type videoFlags struct {
 	node        string
 	minVRAM     *float64
@@ -1859,7 +1860,7 @@ type generateVideoCLI struct {
 }
 
 const (
-	nodeFlagUsage    = "name the ONE fleet node that runs this call: a node_id its /fleet/health publishes (any case) or one of the delegate_remotes URLs. No other node and not this machine is tried; a node that cannot take the call is refused by a word before anything is sent; --route local with --node is refused"
+	nodeFlagUsage    = "name the ONE fleet node that runs this call: a node_id its /fleet/health publishes (any case) or one of the delegate_remotes URLs. No other node and not this machine is tried; a node that cannot take the call is refused by a word before anything is sent (with --json, data.refusal holds the word); --route local with --node is refused"
 	minVRAMFlagUsage = "only a fleet node whose LARGEST card is at least this many GB may take the call (a number of GB, 0 or more; a 16 GB card reads 15.92 GiB); filters nodes only"
 )
 

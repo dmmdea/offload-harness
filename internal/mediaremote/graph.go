@@ -227,7 +227,8 @@ type vramNeed struct {
 	why string
 }
 
-// vramTask reports whether a call of this task takes min_vram_gb: a graph, a video or an animation.
+// vramTask reports whether a call of this task takes this min_vram_gb: a video or an animation. A graph's floor is the graph
+// need's own (need.graph), read by the same largestCardRefuses.
 func vramTask(t core.TaskType) bool {
 	return t == core.TaskGenerateVideo || t == core.TaskAnimateCharacter
 }
