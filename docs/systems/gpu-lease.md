@@ -2033,8 +2033,10 @@ other three ways to the class default: no command, `--graph`, an unsizable helpe
 the declaring line: the figure is a guess about a command the lease could not read, it may hold the cards while the host cannot meet
 it, and `--ram <GiB>` states the real one. The figure itself is unchanged (host RAM is never overloaded).
 
-**Records.** F82 is recorded in no ADR (a search of `docs/architecture/decisions` for it finds nothing), so this section is its
-record and there is no ADR amendment: the hold bound is documented here, in the OPERATOR-GUIDE (config row and host-RAM paragraph)
+**Records.** F82 is recorded in no ADR: a search of `docs/architecture/decisions` for `F82`, `AwaitHostRAM`, `host_ram_wait` and
+"asked, not yet admitted" finds nothing, and the only ADR passages that put host RAM and an unload in one sentence (ADR 0009's
+2026-10-13 ComfyUI idle-free paragraph, ADR 0080's RAM-spill seat) are about other mechanisms. So this section is its record and
+there is no ADR amendment: the hold bound is documented here, in the OPERATOR-GUIDE (config row and host-RAM paragraph)
 and in the changelog fragment.
 
 **What a lease shows while it waits.** It is held, not queued: its record carries `host_ram_wait_gib`, it declares nothing

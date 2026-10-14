@@ -19,7 +19,8 @@
   `gpu status` says how long a waiting lease has held its cards and when the bound releases it (`host_ram_hold_until_ms` on the record,
   additive; `host_ram_hold_until` on the lease row).
 - **Docs.** `docs/systems/gpu-lease.md` (the F82 section: the order, the hold bound, each form, the third consequence), the OPERATOR-GUIDE
-  config row and host-RAM paragraph. F82 is recorded in no ADR, so there is no ADR amendment.
+  config row (in the guide's one key table; it has no GPU-key table) and host-RAM paragraph. F82 is recorded in no ADR (ADR 0009 and
+  ADR 0080 were checked: their host-RAM and unload passages are about other mechanisms), so there is no ADR amendment.
 - **Tests, red first.** The seams and failing tests were committed first (`test(gpulease): red - ...`): a fake host whose RAM never fits and a
   reserve with `--unload-seat` that must release the cards, warm the seat back, run nothing and exit non-zero inside a 200 ms bound (wrapper
   and detached forms), the same through the config key, bound 0 keeping the whole `--wait` (flag, config, and the flag beating a configured
