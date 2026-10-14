@@ -240,10 +240,14 @@ finds the script. When the only bash on the machine is that launcher, the test s
 
 1. Fork the repo and create a branch off `main`.
 2. Make your change, with `go build ./...`, `go vet ./...`, and `go test ./...` all green.
-3. If you changed published behavior, add a changelog fragment under `changes/unreleased/` (see "The
+3. If you changed anything under `openspec/` (see [docs/systems/openspec.md](docs/systems/openspec.md)), run the OpenSpec
+   validator too: install the pinned CLI with `scripts/openspec-install.sh <prefix>` (a directory on a data drive), then
+   `OPENSPEC_BIN=<prefix>/node_modules/.bin/openspec scripts/openspec-validate.sh`. `go test ./...` runs the real validator
+   only where `OPENSPEC_BIN` is set, and CI does not set it, so this step is yours.
+4. If you changed published behavior, add a changelog fragment under `changes/unreleased/` (see "The
    changelog is one file per change" above); do not edit `CHANGELOG.md`.
-4. Open a PR describing what changed and why. Link any related issue.
-5. If it removes any tracked file, say so with a `Deletes:` line (see above) — CI refuses an
+5. Open a PR describing what changed and why. Link any related issue.
+6. If it removes any tracked file, say so with a `Deletes:` line (see above) — CI refuses an
    undeclared deletion.
 
 By contributing, you agree that your contributions are licensed under the

@@ -55,6 +55,7 @@ func LintAcceptance(c core.AgentContract) []string {
 		if err != nil {
 			continue
 		}
+		warns = append(warns, authorityWarnings(c, raw, chk)...)
 		switch chk.Kind {
 		case core.AccContains:
 			content++

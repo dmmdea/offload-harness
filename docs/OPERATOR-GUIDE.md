@@ -1477,7 +1477,11 @@ under the run and did not come back (ADR 0066); `summary.batches` on research
 calls that ran more than 8 pages; `summary.quarantined` when a fleet node was blocked for 30 min
 after two off-document answers that outnumber its passes of the same window (0.184.0: the fingerprint is lexical and
 misfires on an honest answer now and then, so a node that passed most of its work is not quarantined by two misses; its
-reason appears among `probe_errors` as "quarantined until …").
+reason appears among `probe_errors` as "quarantined until …"). Only a FAILED fingerprint can be excused (by an honest
+absence). An unknown fingerprint that the contract caused (a grounded check with no context documents, a field check the
+`output_schema` does not declare) or that sits over an honest-absence digest is reported as a failed check but strikes
+nothing, passes nothing and is not retried on the research door. Apart from those two cases, an unknown the result caused (an empty answer beside the
+documents, a declared field missing from the result) strikes like a failure.
 
 **Capacity is your step — the wait only makes contention honest.** The 429 exists because ten
 reserved requests per model are shared by every session. Ready to paste into
@@ -2118,6 +2122,12 @@ fires), UNGROUNDED (`contains:`/`regex:` matching nothing in the contract's own 
 right answers), SHAPE-ONLY (`nonempty:`/`min_items:` alone — passes garbage). The run still
 happens; fix the acceptance before reusing the contract (authoring rule: anchor ≥1 check to
 content that appears in the docs but not in the goal; contracts/README.md).
+
+Closed-at authority: a contract whose checks all carry an authority qualifier (`@answer:`, `@field=<name>:`,
+`@grounded:`; contracts/README.md) and all passed publishes the weakest of them as
+`results[].acceptance_authority` (`answer`, `field` or `grounded`), and the delegation-log row carries the same
+key. It is absent for every other result (an unqualified check, a failure, an unknown), so a caller reads its
+presence as "every check of this contract was backed by at least this authority" and its absence as no claim.
 
 Experiment support (0.79.0–0.81.0): setting `OFFLOAD_DELEGATE_ARM=<label>` tags every
 delegation-log line **and every ledger row** the process records with `arm:<label>`, so an
