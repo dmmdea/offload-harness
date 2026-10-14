@@ -54,7 +54,8 @@ const (
 	// OutcomeGateFailed: the seat found nothing, but a deterministic gate is red or its
 	// receipt belongs to another commit, so PASS is not available. The review still ran.
 	OutcomeGateFailed = "GATE_FAILED"
-	// OutcomeNotRun: no clean seat reviewed this diff. A node deferral, a refused binding, an
+	// OutcomeNotRun: no clean seat reviewed this diff. A node deferral (including one the lane
+	// salvaged as a clean NONE), a refusal before any diff was read, a refused binding, an
 	// oversize diff, a seat that named nothing, an answer that contradicted itself.
 	OutcomeNotRun = "NOT_RUN"
 	// OutcomeStale: a seat ran, but the diff was not the same bytes when the result was
@@ -62,7 +63,8 @@ const (
 	OutcomeStale = "STALE"
 )
 
-// TraceFile is the sidecar every sealed review is appended to, beside the ledger.
+// TraceFile is the sidecar every sealed review is appended to, beside the ledger (see
+// TracePathFor). It is THE durable trace of a review: no ledger row is written for the verdict.
 //
 // It is a sidecar and not a ledger row on purpose. Every ledger reader counts rows as calls
 // and jobs (jobrows.go: the C-62 double-count was exactly a second row for one job), the
@@ -113,10 +115,13 @@ type GateReceipt struct {
 	HeadSHA string `json:"head_sha,omitempty"`
 	Source  string `json:"source,omitempty"` // lane | caller
 	Stale   bool   `json:"stale,omitempty"`
+	// Unbound marks a caller's receipt that names no commit while the review names one: there
+	// is nothing to show it belongs to the commit under review, so it cannot support a PASS.
+	Unbound bool `json:"unbound,omitempty"`
 }
 
 // Passed reports whether the receipt supports a PASS: green, and for the commit under review.
-func (g GateReceipt) Passed() bool { return g.Status == gatePass && !g.Stale }
+func (g GateReceipt) Passed() bool { return g.Status == gatePass && !g.Stale && !g.Unbound }
 
 // SeatReceipt names the seat that produced (or failed to produce) a review, by identity and
 // by the digest of its raw answer. It carries no timing: a receipt says who and what, and a
@@ -137,12 +142,13 @@ type SeatReceipt struct {
 	AnswerSHA256 string `json:"answer_sha256,omitempty"`
 }
 
-// Evidence is what a review result is bound to. DiffSHA256 and DiffBytes are always set;
+// Evidence is what a review result is bound to. DiffBytes is always set and DiffSHA256 is set
+// whenever a diff was read (a review refused before any diff was read has neither, see Refused);
 // everything else is additive and omitted while unknown.
 type Evidence struct {
 	BaseSHA    string `json:"base_sha,omitempty"`
 	HeadSHA    string `json:"head_sha,omitempty"`
-	DiffSHA256 string `json:"diff_sha256"`
+	DiffSHA256 string `json:"diff_sha256,omitempty"`
 	DiffBytes  int    `json:"diff_bytes"`
 	// PromptSHA256 is the digest of the exact prompt the seat is shown (task and diff), so a
 	// receipt proves what the seat was asked and not only which seat answered.
@@ -217,10 +223,16 @@ func NewEvidence(diff, base, head string, handed []GateReceipt) (Evidence, error
 		if rerr != nil {
 			return refuse(fmt.Errorf("%w: gate receipt %d: %v", ErrBadBinding, i+1, rerr))
 		}
-		// A receipt for another commit is evidence about a different change.
-		if r.HeadSHA != "" && ev.HeadSHA != "" && !sameCommit(r.HeadSHA, ev.HeadSHA) {
+		switch {
+		case r.HeadSHA != "" && ev.HeadSHA != "" && !sameCommit(r.HeadSHA, ev.HeadSHA):
+			// A receipt for another commit is evidence about a different change.
 			r.Stale = true
 			r.Detail = strings.TrimSpace(r.Detail + " [receipt is for commit " + capBytes(r.HeadSHA, 12) + ", the review is of " + capBytes(ev.HeadSHA, 12) + "]")
+		case r.HeadSHA == "" && ev.HeadSHA != "":
+			// Nothing shows this receipt belongs to the commit under review. A review that
+			// names no head has nothing to compare, and its receipts stand as given.
+			r.Unbound = true
+			r.Detail = strings.TrimSpace(r.Detail + " [receipt names no commit, the review is of " + capBytes(ev.HeadSHA, 12) + ": an unbound receipt cannot support a PASS]")
 		}
 		ev.Gates = append(ev.Gates, r)
 	}
@@ -285,11 +297,26 @@ func conflictMarkerLine(diff string) int {
 	return 0
 }
 
-// Refused is the evidence of a review refused before any diff was read (stub).
-func Refused(reason string) Evidence { return Evidence{} }
+// Refused is the evidence of a review refused before any diff was read: both diff and
+// diff_path passed, neither, a diff_path that cannot be read, arguments that do not decode.
+// It binds the result to nothing, on purpose: no bytes were chosen, so there is no fingerprint
+// to give (a fingerprint of nothing would read as a binding), no gate has anything to run on,
+// and DiffBytes is zero. The refusal reason is the whole of it, and Decide turns it into a
+// NOT_RUN that says why.
+func Refused(reason string) Evidence {
+	return Evidence{Refusal: reason}
+}
 
-// TracePathFor is where the durable trace lives (stub).
-func TracePathFor(ledgerPath, fallbackDir string) string { return "" }
+// TracePathFor is where the durable trace lives: TraceFile in the directory of the ledger
+// file, so it always sits beside the ledger however an operator has placed it. With no ledger
+// path configured it falls back to fallbackDir (the harness home), never the working directory.
+func TracePathFor(ledgerPath, fallbackDir string) string {
+	dir := fallbackDir
+	if ledgerPath != "" {
+		dir = filepath.Dir(ledgerPath)
+	}
+	return filepath.Join(dir, TraceFile)
+}
 
 // WithPrompt records the digest of the prompt the seat is shown.
 func (e Evidence) WithPrompt(goal string) Evidence {
@@ -314,6 +341,8 @@ func (e Evidence) failedGates() string {
 		switch {
 		case g.Stale:
 			names = append(names, g.Name+" (receipt is for another commit)")
+		case g.Unbound && g.Status == gatePass:
+			names = append(names, g.Name+" (receipt names no commit)")
 		case !g.Passed():
 			names = append(names, g.Name)
 		}
@@ -382,8 +411,9 @@ type Verdict struct {
 // Decide is the one place an outcome is chosen, in a fixed order so no result can reach a
 // better label than its worst fact allows:
 //
-//  1. a refused binding, an oversize diff, a run that was not delivered, a seat that named
-//     nothing, or an answer that contradicted itself: NOT_RUN;
+//  1. a refused binding or a refusal before any diff was read, an oversize diff, a run that
+//     was not delivered, a seat that named nothing, an answer that contradicted itself, or a
+//     run the node filed as a deferral that the lane read as a clean NONE: NOT_RUN;
 //  2. a diff that moved: STALE;
 //  3. a defect reported: FINDINGS;
 //  4. a red or stale gate: GATE_FAILED;
@@ -408,6 +438,11 @@ func Decide(ev Evidence, d Delivery) Verdict {
 		return Verdict{OutcomeNotRun, "no clean seat ran the review: the result carries no seat receipt naming the seat that produced it"}
 	case d.Findings == 0 && d.Filtered > 0:
 		return Verdict{OutcomeNotRun, fmt.Sprintf("no clean seat ran the review: the seat wrote %d finding-shaped lines and the lane's filters discarded every one, yet its answer read as NONE", d.Filtered)}
+	case ev.Seat.Deferred && d.Findings == 0:
+		// The lane may publish what a deferred run wrote (a salvage), and findings read from
+		// it are still findings. A clean NONE read from a run the node itself filed as a
+		// deferral is not a review that ran to its end, so it is never an all-clear.
+		return Verdict{OutcomeNotRun, "no clean seat ran the review: the node filed the run as a deferral and the lane read a clean NONE from what the seat had written, which is never a PASS"}
 	case ev.Stale:
 		return Verdict{OutcomeStale, ev.StaleReason + "; whatever the seat said is about bytes that no longer exist, so re-run the review on the current diff"}
 	case d.Findings > 0:
