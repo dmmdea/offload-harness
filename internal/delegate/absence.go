@@ -158,3 +158,8 @@ func excusedAbsence(contract core.AgentContract, wire core.AgentWireResult) bool
 	}
 	return false
 }
+
+// fingerprintFailedByNode: placeholder, the old reading (the tag alone).
+func fingerprintFailedByNode(contract core.AgentContract, wire core.AgentWireResult, failures []string) bool {
+	return failsDocumentFingerprint(failures)
+}
