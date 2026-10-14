@@ -489,8 +489,15 @@ for older tool bodies that are search listings: the grouped `search_files` outpu
 `  L<n>: text`) and bare `path:line:text` lines such as `grep -rn` or ripgrep print, alone or inside the
 `exit=` / `--- stdout ---` / `--- stderr ---` framing of `run_shell` and `run`. The rung is gated on the
 call that produced the body: the result's tool-call id is mapped to its call, and only `search_files`
-(grouped form) and a `run_shell` or `run` call whose command starts with `grep`, `rg`, `ag`, `ack` or
-`git grep` (flat form) qualify; a command that chains another one after the search (an unquoted `;`, `&&`, `||`, `&` or newline, found by a quote-aware scan) does not, because the body then holds that command's output too, while a plain pipe (`grep x f | head`) still does. A linter such as flake8, ruff, `shellcheck -f gcc` or rubocop prints the
+(grouped form) and a `run_shell` or `run` call whose command is a search (flat form) qualify. A search
+starts with `grep`, `rg`, `ag`, `ack` or `git grep`. The `run` tool's allowlist (`go`, `gofmt`, `python`,
+`python3`, `pytest`, `npm`, `node`, `cargo`, `git`) holds only `git` of those, so through `run` only
+`git grep` is reachable; `grep`, `rg`, `ag` and `ack` come through `run_shell`. A search piped through
+pass-through filters only (`head`, `tail`, `sort`, `uniq`, `wc`, `cut`, `sed`, `awk`, `tee`, `cat`, or
+another search) still qualifies (`grep x f | head`); a pipe into anything else does not (`rg -l x | xargs flake8`,
+`rg x | flake8 -`), because the last stage's output is the body and it may be a linter's. A command that
+chains another one after the search (an unquoted `;`, `&&`, `||`, `&` or newline, found by a quote-aware
+scan) does not either, because the body then holds that command's output too. A linter such as flake8, ruff, `shellcheck -f gcc` or rubocop prints the
 same `path:line:col:text` lines, and every one of its diagnostics is something the agent must fix, so
 its output, a body with no matching call and an id claimed by two different calls are left alone.
 Everything else (the `web_search` list, `mode:"files"` output, test output, an error result) is left
@@ -513,7 +520,7 @@ and `compaction-eval` does not replay it yet (the measurement that decides it fi
 the ladder's own options and from tests, the default ladder is pinned
 byte for byte by `internal/agent/testdata/ladder_default_golden.json`, and whether the rung ever
 becomes a default is decided by the measurement gate on a harvested corpus, not by this page. Three
-pieces of work must land, in a separate change, before any default flips: an adaptive cap (the fixed
+pieces of work must land, in a separate change, before the rung can be switched on by default: an adaptive cap (the fixed
 30/5/15 do not scale with the window), a production entry point (a CLI flag or loop setter), and the
 measurement of how the rung interacts with the generic skeleton rung. Source:
 `internal/agent/rung_search.go`. The idea is documented by the Headroom project (Apache-2.0); this is a

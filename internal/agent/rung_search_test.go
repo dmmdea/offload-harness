@@ -1073,9 +1073,9 @@ func TestSearchRungWeighsRareTermsAndLineLengthLikeBM25(t *testing.T) {
 	}
 }
 
-func TestSearchRungDefaultsAreTheDocumentedOnes(t *testing.T) {
+func TestSearchRungCapsAreTheConfigurationExampleValues(t *testing.T) {
 	if searchRungMaxLines != 30 || searchRungPerFileCap != 5 || searchRungMaxFiles != 15 {
-		t.Errorf("the caps are the documented defaults of the idea (30 lines, 5 per file, 15 files); got %d, %d, %d",
+		t.Errorf("the caps are the values shown in the upstream configuration example (30 lines, 5 per file, 15 files); got %d, %d, %d",
 			searchRungMaxLines, searchRungPerFileCap, searchRungMaxFiles)
 	}
 }
