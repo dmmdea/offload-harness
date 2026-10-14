@@ -165,7 +165,7 @@ func (e *errHostRAMHoldBound) Unwrap() error { return e.short }
 // held, what happened to the lease, and what to do about it.
 func (e *errHostRAMHoldBound) Error() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "the host RAM hold bound passed (%s): the lease held the cards for %s (%s of it waiting for the host after the unload) and the host never had the room: %s; the lease is released and nothing ran under it.",
+	fmt.Fprintf(&b, "the host RAM hold bound passed (%s): the lease held the cards for %s (%s of it waiting for the host after the unload) and the host never had the room: %s; nothing ran under it and the lease is being released.",
 		roundHold(e.bound), roundHold(e.held), roundHold(e.waited), e.short.Error())
 	if e.freedWhy != "" {
 		fmt.Fprintf(&b, " The unload freed nothing on these cards (%s), so the shortage is not the seat's.", e.freedWhy)
@@ -207,8 +207,10 @@ func awaitHostRAMBounded(ctx context.Context, await func(gpulease.AwaitHostRAMOp
 	told := false
 	var saidStamp, saidClear bool
 	err := await(gpulease.AwaitHostRAMOptions{
-		Deadline:  effective,
-		HoldUntil: boundAt,
+		Deadline: effective,
+		// The stamped end of the wait is whichever of the bound and --wait comes first: the lease is released then, by this
+		// process or, if it died, by the lease's hidden holder.
+		HoldUntil: effective,
 		Cancel:    ctx.Done(),
 		// A stamp that cannot be written, or taken off again, is said once per kind however often the library reports it: it
 		// costs the status line and the hidden holder's own enforcement of the bound, never the wait.
@@ -261,47 +263,68 @@ func awaitHostRAMBounded(ctx context.Context, await func(gpulease.AwaitHostRAMOp
 	return nil
 }
 
-// detachedHostRAMError is detachedMaintainError for a detached holder whose host-RAM wait failed (the host never had
-// the room inside --wait, or the wait was cancelled). The lease is kept, as after a failed drain: the cards stay
-// reserved and work keeps routing elsewhere. What a failed step must not keep is the stamp it left on the record: the
-// exclusive stamp is put on once the drain succeeded, before this wait, and left on it cordons the text lane on those
-// cards (and fences the seat that is now unloaded) for the rest of --for, which is how one failed drain became a box
-// refused for 8 hours (register C-50, S-31; the drain path clears DRAINING for the same reason). So it is taken off, and
-// the way out names the release that also warms the seat back, because the seat is cold.
-func detachedHostRAMError(m *gpulease.Manager, epoch uint64, err error) error {
-	if info := m.Inspect(); info.Held && info.HoldsEpoch(epoch) {
-		if serr := m.Restamp(epoch, func(mt *gpulease.Meta) { mt.Exclusive = false }); serr != nil {
-			fmt.Fprintf(os.Stderr, "gpu reserve: could not take the exclusive stamp off the lease after the failed wait for host RAM: %v\n", serr)
-		}
-		return fmt.Errorf("%w (the lease is still held and no longer exclusive; the seat is unloaded: `gpu release --warm-seat` frees the lease and warms the seat back, `gpu release` frees it and leaves the warm owed)", err)
-	}
-	return detachedMaintainError(m, epoch, err)
+// leaseNotReleasedLine is the one line printed when a release the harness just tried did not happen. The failure text of a
+// bound or a wait is built BEFORE the release runs and so says only that the lease is being released; this line is the report of
+// the outcome, and the way out.
+func leaseNotReleasedLine(prefix string, epoch uint64, err error) string {
+	return fmt.Sprintf("%s: LEASE NOT RELEASED (epoch %d): %v; run gpu release --warm-seat --epoch %d", prefix, epoch, err, epoch)
 }
 
-// releaseAfterHoldBound ends a detached hold whose host-RAM wait the hold bound ended: it does what `gpu release --warm-seat
-// --epoch N` does (the instances kept under the lease are stopped, the seat the unload took down is warmed back under the
-// release guards, the lease is released) and returns the bound's failure so the reserve exits non-zero. A detached hold is the
-// form that can sit on the cards longest (a hidden holder renews its term while its owner vouches for it), and the incident this
-// bound answers was cards held idle behind a wait that could not end; keeping the lease "so the operator can look" is what
-// failed there. A wait that --wait ended first keeps the lease (detachedHostRAMError), as it always did.
-func releaseAfterHoldBound(m *gpulease.Manager, epoch uint64, cfg config.Config, err error) error {
+// autoReleaseWarmGuard is releaseWarmGuard for a release the harness makes on its own, not one an operator asked for with
+// `gpu release --warm-seat`: the seat is warmed back only if the lease OWES it (the marker an unload leaves), exactly as the
+// wrapper form's guard does. Without it a seat that was never loaded (the incident of 2026-10-14) is loaded by the release of a
+// lease that never unloaded it, the 2026-09-23 defect: a seat came up on three cards with nothing asking for it.
+func autoReleaseWarmGuard(m *gpulease.Manager, epoch uint64) warmGuard {
+	g := releaseWarmGuard(m, epoch)
+	g.onlyIfOwed = true
+	return g
+}
+
+// detachedReleaseGrace is how far past now the parent of a detached hold pushes the stamped end of the wait when it starts to
+// release the lease itself (warming the seat back takes minutes): until the release is done the hidden holder sees a moment
+// still ahead and leaves the lease to its parent, and a parent that dies mid-release (a tool timeout lands at exactly the
+// default bound) leaves a moment the holder acts on. A variable so a test can watch it pass.
+var detachedReleaseGrace = 15 * time.Minute
+
+// releaseAfterRAMWait ends a detached hold whose host-RAM wait ended without admission, WHATEVER ended it (the hold bound,
+// --wait, an impossible figure): the cards are never held idle behind a RAM figure the host cannot meet. It does what `gpu
+// release --warm-seat --epoch N` does, except that the seat is warmed back only if the lease owes it (autoReleaseWarmGuard): the
+// instances kept under the lease are stopped, the seat the unload took down is warmed back under the release guards, the lease
+// is released. err is what ended the wait; it is returned (so the reserve exits non-zero) with the fact that the lease is being
+// released, and the OUTCOME of the release is reported after it happens: one stderr line when it did not.
+//
+// Before the slow part it pushes the stamped end of the wait out by detachedReleaseGrace. The hidden holder releases a lease
+// whose stamped end has passed and which still asks for the host; this reserve is releasing it itself and must not be raced by
+// the holder for the minutes a warm-back takes, yet if it dies in the middle the lease must not stay held for good: the pushed
+// stamp is the moment the holder takes over. The lease being gone already (the holder got there first) is not a failure.
+func releaseAfterRAMWait(m *gpulease.Manager, epoch uint64, cfg config.Config, err error) error {
 	if info := m.Inspect(); !info.Held || !info.HoldsEpoch(epoch) {
 		return detachedMaintainError(m, epoch, err) // the lease is not this reservation's any more: nothing to release
 	}
-	stopKeptInstances(cfg, epoch, os.Stderr)
-	warmBackGuarded(cfg, releaseWarmGuard(m, epoch), os.Stderr)
-	if _, rerr := m.ReleaseByEpoch(epoch); rerr != nil {
-		return fmt.Errorf("%w (and the lease could not be released: %v; `gpu release --warm-seat` frees it)", err, rerr)
+	until := time.Now().Add(detachedReleaseGrace).UnixMilli()
+	if serr := m.Restamp(epoch, func(mt *gpulease.Meta) { mt.HostRAMHoldUntilMs = until }); serr != nil {
+		fmt.Fprintf(os.Stderr, "gpu reserve: warning: could not push the lease's stamped end out before releasing it (%v); if this process dies during the warm-back the hidden holder may release the lease sooner than the warm-back finishes\n", serr)
 	}
-	return err
+	stopKeptInstances(cfg, epoch, os.Stderr)
+	warmBackGuarded(cfg, autoReleaseWarmGuard(m, epoch), os.Stderr)
+	if _, rerr := m.ReleaseByEpoch(epoch); rerr != nil {
+		fmt.Fprintln(os.Stderr, leaseNotReleasedLine("gpu reserve", epoch, rerr))
+	}
+	var bound *errHostRAMHoldBound
+	if errors.As(err, &bound) {
+		return err // it already says that the lease is being released
+	}
+	return fmt.Errorf("%w; the lease is being released: cards are never held idle behind a host-RAM figure the host did not meet", err)
 }
 
 // hostRAMAskedStatus is what `gpu status` says about a lease that holds its cards while the host has not admitted the RAM it
-// asked for (F82): the figure, how long the cards have been held, and, when the wait for the host runs under the hold bound
-// (the record carries the moment it ends, until), when the bound releases the lease. Without a stamp the wait has not begun
-// (the drain and the unload come first) or runs with no bound (--ram-hold-max 0): the sentence says only what is known.
-// long adds the explanation of the order, for the one-line summary of the holder.
-func hostRAMAskedStatus(giB float64, held time.Duration, until, now time.Time, long bool) string {
+// asked for (F82): the figure, how long the cards have been held, and, once the wait for the host has begun, when the lease is
+// released if the host still lacks the room (the record carries that moment, until: the earlier of the hold bound and --wait).
+// Without a stamp the wait has not begun (the drain and the unload come first) or has no end the record knows: the sentence
+// says only what is known. Past the stamped moment the lease is still there, so whoever releases it has not yet: a wrapper
+// does it when it exits; the hidden holder of a --detach lease does it at its next poll (a reserve that died cannot), and `gpu
+// release --warm-seat --epoch N` does it now. long adds the explanation of the order, for the one-line summary of the holder.
+func hostRAMAskedStatus(giB float64, held time.Duration, until, now time.Time, long bool, epoch uint64, byWrapper bool) string {
 	s := fmt.Sprintf("host RAM %.1f GiB asked, not yet admitted", giB)
 	heldFor := held.Round(time.Second)
 	switch {
@@ -311,20 +334,10 @@ func hostRAMAskedStatus(giB float64, held time.Duration, until, now time.Time, l
 		}
 		return s + fmt.Sprintf("; held the cards for %s", heldFor)
 	case until.After(now):
-		return s + fmt.Sprintf(": held the cards for %s; the hold bound releases the lease at %s, in %s", heldFor, until.Format(time.Kitchen), until.Sub(now).Round(time.Second))
+		return s + fmt.Sprintf(": held the cards for %s; the lease is released at %s, in %s, if the host still lacks the room (the hold bound, or --wait if that ends first)", heldFor, until.Format(time.Kitchen), until.Sub(now).Round(time.Second))
+	case byWrapper:
+		return s + fmt.Sprintf(": held the cards for %s; the wait ended at %s and the wrapper that holds the lease releases it when it exits (`gpu release --warm-seat --epoch %d` frees it now if that process is gone)", heldFor, until.Format(time.Kitchen), epoch)
 	default:
-		return s + fmt.Sprintf(": held the cards for %s; the hold bound passed at %s, and the reserve that holds the lease releases it at its next look (`gpu release --warm-seat` frees it now)", heldFor, until.Format(time.Kitchen))
+		return s + fmt.Sprintf(": held the cards for %s; the wait ended at %s and the holder releases the lease at its next poll (`gpu release --warm-seat --epoch %d` frees it now)", heldFor, until.Format(time.Kitchen), epoch)
 	}
-}
-
-// detachedReleaseGrace is how far past now the parent of a detached hold pushes the stamped end of the wait when it starts to
-// release the lease itself (warming the seat back takes minutes): until the release is done the hidden holder sees a moment
-// still ahead and leaves the lease to its parent, and a parent that dies mid-release leaves a moment the holder acts on.
-// SEAM: not read yet.
-var detachedReleaseGrace = 15 * time.Minute
-
-// releaseAfterRAMWait is the release of a detached hold whose host-RAM wait ended without admission, whatever ended it.
-// SEAM: until the fix it is releaseAfterHoldBound.
-func releaseAfterRAMWait(m *gpulease.Manager, epoch uint64, cfg config.Config, err error) error {
-	return releaseAfterHoldBound(m, epoch, cfg, err)
 }

@@ -318,7 +318,7 @@ func runGPUStatus(args []string) error {
 		excl += "  (draining: new runs wait, in-flight runs complete)"
 	}
 	if info.HostRAMWaitGiB > 0 {
-		excl += "  (" + hostRAMAskedStatus(info.HostRAMWaitGiB, info.Age, info.HostRAMHoldUntil, time.Now(), true) + ")"
+		excl += "  (" + hostRAMAskedStatus(info.HostRAMWaitGiB, info.Age, info.HostRAMHoldUntil, time.Now(), true, info.Epoch, info.Yields == gpulease.YieldsWrapper) + ")"
 	}
 	if info.Command != "" {
 		excl += "\n  running: " + info.Command
@@ -364,7 +364,7 @@ func runGPUStatus(args []string) error {
 				declared = fmt.Sprintf(", host RAM %.1f GiB", l.HostRAMGiB)
 			}
 			if l.HostRAMWaitGiB > 0 {
-				declared = ", " + hostRAMAskedStatus(l.HostRAMWaitGiB, l.Age, l.HostRAMHoldUntil, time.Now(), false)
+				declared = ", " + hostRAMAskedStatus(l.HostRAMWaitGiB, l.Age, l.HostRAMHoldUntil, time.Now(), false, l.Epoch, l.Yields == gpulease.YieldsWrapper)
 			}
 			fmt.Printf("  lease epoch %d: %s pid %d, %s%s%s\n", l.Epoch, l.Class, l.PID, scope, group, declared)
 		}
@@ -630,18 +630,15 @@ func runGPUReserve(args []string) error {
 				return detachedMaintainError(m, epoch, err)
 			}
 			// The seat is cleared and the cards are held: now the host is asked (F82). The hidden holder keeps the
-			// heartbeat meanwhile; a host that never has the room within --wait fails like a failed drain, the lease still
-			// held. A wait the hold bound ended releases the lease instead (releaseAfterHoldBound): cards held idle behind
-			// a figure the host cannot meet are what the bound exists to end.
+			// heartbeat meanwhile. A wait that ends without the host's admission, whether the hold bound or --wait ended it,
+			// releases the lease (releaseAfterRAMWait): cards held idle behind a figure the host cannot meet are the incident
+			// the bound exists to end, and a --wait shorter than the bound must not bring it back. If this process dies first,
+			// the hidden holder releases the lease itself from the stamp the wait left on the record.
 			if awaitRAM > 0 {
 				await := func(o gpulease.AwaitHostRAMOptions) error { return m.AwaitHostRAM(epoch, o) }
 				hold := hostRAMHold{max: holdMax, heldSince: heldSince, freed: freed, classDefault: need.Source == hostneed.SourceClassDefault}
 				if err := awaitHostRAMBounded(context.Background(), await, hostRAMDeadline(queuedAt, *wait), *wait, hold, os.Stderr); err != nil {
-					var bound *errHostRAMHoldBound
-					if errors.As(err, &bound) {
-						return releaseAfterHoldBound(m, epoch, loadCfg(fs), err)
-					}
-					return detachedHostRAMError(m, epoch, err)
+					return releaseAfterRAMWait(m, epoch, loadCfg(fs), err)
 				}
 			}
 		}
@@ -716,7 +713,11 @@ func runGPUReserve(args []string) error {
 		case *unload:
 			warmBackGuarded(cfg, leaseWarmGuard(m, lease), os.Stderr)
 		}
-		_ = lease.Release()
+		// A release that fails is said, never dropped: the failure text of a bound or a wait was built before this ran and says
+		// only that the lease is being released.
+		if rerr := lease.Release(); rerr != nil {
+			fmt.Fprintln(os.Stderr, leaseNotReleasedLine("gpu reserve", lease.Epoch(), rerr))
+		}
 	}
 	defer finish()
 	if *drain || *unload {
@@ -1352,7 +1353,9 @@ func runGPUHold(args []string) error {
 	defer func() {
 		// The instances kept under this lease go with it (gpu_instances.go).
 		stopInstancesOfLease(loadCfg(fs), lease, os.Stderr)
-		_ = lease.Release()
+		if rerr := lease.Release(); rerr != nil {
+			fmt.Fprintln(os.Stderr, leaseNotReleasedLine("gpu hold", lease.Epoch(), rerr))
+		}
 	}()
 
 	// Poll FAST but renew slowly. These are two different clocks and conflating them
@@ -1379,6 +1382,14 @@ func runGPUHold(args []string) error {
 		if err := lease.Check(); err != nil {
 			return nil // released or fenced out — exit quietly, the lease is not ours
 		}
+		// The reserve that took this lease enforces the host-RAM hold bound while it lives. If it died during its wait (a tool
+		// timeout, Ctrl-C, a closed terminal) nothing else would, and this process would renew the lease for ever: the incident of
+		// 2026-10-14 with nobody left to end it. So the holder reads its own record: a lease that STILL ASKS for the host's RAM whose
+		// stamped end of the wait has passed (by a grace that lets a live reserve release first) is released here.
+		if asked, until, herr := lease.HostRAMHold(); herr == nil && asked > 0 && !until.IsZero() && time.Now().After(until.Add(holdBoundGrace)) {
+			releaseHolderAtWaitEnd(loadCfg(fs), m, lease, asked, until)
+			return nil // the deferred function stops the instances and releases the lease
+		}
 		if time.Since(lastRenew) >= holdRenewEvery {
 			_ = lease.Renew()
 			lastRenew = time.Now()
@@ -1403,9 +1414,19 @@ var (
 )
 
 // holdBoundGrace is how long past the stamped end of a host-RAM wait the hidden holder waits before it releases its own
-// lease: the reserve that took the lease releases it at that moment itself, and the holder acts only when it has not.
-// SEAM: not read yet.
+// lease: the reserve that took the lease releases it at that moment itself, and the holder acts only when it has not. A
+// variable so a test can shorten it.
 var holdBoundGrace = 5 * time.Second
+
+// releaseHolderAtWaitEnd is the hidden holder's release of its own lease when the reserve that took it did not: the host-RAM
+// wait it began has passed its stamped end and the lease still asks for the host. It says why on the holder's stderr, warms the
+// seat back ONLY if the lease owes it (the wrapper form's guard: a seat nothing unloaded is never loaded by a release), and
+// leaves the instance stop and the release itself to the holder's deferred function.
+func releaseHolderAtWaitEnd(cfg config.Config, m *gpulease.Manager, lease *gpulease.Lease, asked float64, until time.Time) {
+	fmt.Fprintf(os.Stderr, "gpu hold: the host-RAM wait of this lease (%.1f GiB asked) ended at %s and the lease was not released: the reserve that took it is gone, or it died before it could. Releasing the lease here (the seat is warmed back only if this lease owes it)\n", asked, until.Format(time.Kitchen))
+	stopInstancesOfLease(cfg, lease, os.Stderr)
+	warmBackGuarded(cfg, leaseWarmGuard(m, lease), os.Stderr)
+}
 
 func runGPURelease(args []string) error {
 	fs := flag.NewFlagSet("gpu release", flag.ExitOnError)

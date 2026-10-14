@@ -436,10 +436,11 @@ type AwaitHostRAMOptions struct {
 	// there that the lease holds its cards and is waiting for the host. Once, because a line per poll is a
 	// notification per second in the session that wraps the reserve.
 	OnWait func(*ErrHostRAM)
-	// HoldUntil, when set, is the moment the caller's hold bound ends this wait (the CLI also passes it as Deadline, or
-	// Deadline is earlier): it is stamped on the lease's record (Meta.HostRAMHoldUntilMs) when the wait begins, so
-	// `gpu status` can say when the lease will be released, and cleared when the figure is admitted. It bounds nothing by
-	// itself; Deadline does.
+	// HoldUntil, when set, is the moment the caller releases the lease if the host still lacks the room (the CLI passes the
+	// earlier of its hold bound and its --wait deadline, which is also the Deadline): it is stamped on the lease's record
+	// (Meta.HostRAMHoldUntilMs) when the wait BEGINS, so `gpu status` can say when the lease will be released and the lease's
+	// hidden holder can release it itself if the caller died, and cleared when the figure is admitted or the wait ends. It
+	// bounds nothing by itself; Deadline does.
 	HoldUntil time.Time
 	// OnStampError, when set, is told when the bound's stamp could not be written (op StampOpSet) or taken off the record again
 	// (op StampOpClear). The wait does not fail on either: the stamp is what `gpu status` and the hidden holder read, not what
@@ -500,6 +501,18 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) (result erro
 		if cancelled(o.Cancel) {
 			return ErrCancelled
 		}
+		if !stamped && !o.HoldUntil.IsZero() {
+			// The wait BEGINS here, before the host is looked at: put the moment it ends on the record, where `gpu status` and the
+			// lease's hidden holder (other processes) read it. A reserve that dies before its first look has then still left a bound
+			// the holder can enforce. A stamp that cannot be written costs the status line and the holder's own enforcement, not the
+			// wait (the bound itself is the caller's Deadline): it is reported, tried again at the next look, and the wait goes on.
+			until := o.HoldUntil.UnixMilli()
+			if err := m.Restamp(epoch, func(mt *Meta) { mt.HostRAMHoldUntilMs = until }); err == nil {
+				stamped = true
+			} else {
+				report(StampOpSet, err)
+			}
+		}
 		reading := m.readHost(need) // before the lock, compared inside it (F57)
 		var refused *ErrHostRAM
 		var gone bool
@@ -536,17 +549,6 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) (result erro
 		remaining := o.Deadline.Sub(m.now())
 		if remaining <= 0 {
 			return refused
-		}
-		if !stamped && !o.HoldUntil.IsZero() {
-			// The wait will go on under a bound: put the moment it ends on the record, where `gpu status` (another process)
-			// reads it. A stamp that cannot be written costs the status line and the hidden holder's own enforcement, not the
-			// wait (the bound itself is the caller's Deadline): it is reported, tried again at the next look, and the wait goes on.
-			until := o.HoldUntil.UnixMilli()
-			if err := m.Restamp(epoch, func(mt *Meta) { mt.HostRAMHoldUntilMs = until }); err == nil {
-				stamped = true
-			} else {
-				report(StampOpSet, err)
-			}
 		}
 		if !told && o.OnWait != nil {
 			told = true
@@ -602,9 +604,25 @@ func UseRemoveFault(fn func(path string) error) (restore func()) {
 // HostRAMHold is what this lease's OWN record says about its wait for the host: the figure it still asks for (0 = admitted, or
 // nothing was deferred) and the moment its wait is stamped to end (the zero time = no wait is running). The hidden holder of a
 // detached lease reads it on every poll, so that a reserve that died during the wait does not leave the cards held for good. An
-// error means the record cannot be read (the lease is gone).
-//
-// SEAM: not read from the record yet.
+// error means the record cannot be read (the lease is gone, or another lease holds the cards now).
 func (l *Lease) HostRAMHold() (askedGiB float64, until time.Time, err error) {
-	return 0, time.Time{}, nil
+	if l.done.Load() {
+		return 0, time.Time{}, errors.New("gpulease: lease already released")
+	}
+	var meta *Meta
+	if l.v2 {
+		meta, err = readEpochRecord(l.mgr.leaseDir(), l.epoch)
+		if err != nil {
+			return 0, time.Time{}, fmt.Errorf("gpulease: lease is gone (epoch %d)", l.epoch)
+		}
+	} else {
+		meta, err = l.mgr.readMeta()
+		if err != nil || meta == nil {
+			return 0, time.Time{}, fmt.Errorf("gpulease: lease is gone (epoch %d)", l.epoch)
+		}
+		if meta.Epoch != l.epoch {
+			return 0, time.Time{}, fmt.Errorf("gpulease: fenced out: our epoch %d, current epoch %d", l.epoch, meta.Epoch)
+		}
+	}
+	return meta.HostRAMWaitGiB, holdUntilOf(meta.HostRAMHoldUntilMs), nil
 }
