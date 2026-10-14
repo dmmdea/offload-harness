@@ -95,8 +95,8 @@ func speedTermIn(check string) (term string, ok bool) {
 	return "", false
 }
 
-// scanAcceptanceDir walks every *.json under dir. For each `acceptance` key found
-// at any depth it records one finding per refusal reason: a value that is not an
+// scanAcceptanceDir walks every *.json under dir. For each `acceptance` key (in any
+// case) found at any depth it records one finding per refusal reason: a value that is not an
 // array of strings, a string the closed DSL does not parse, a string with a speed
 // term. files lists the files that held at least one `acceptance` key (relative,
 // slash-separated, in walk order) and strs counts the acceptance strings read.
@@ -138,7 +138,9 @@ var utf8BOM = []byte("\xef\xbb\xbf")
 
 // acceptanceWalker collects the findings of one file. It looks at the key
 // `acceptance` and nothing else: a context text that says "no speed term enters
-// the choice" must stay legal.
+// the choice" must stay legal. The key is matched without regard to case, because
+// the readers of a contract file (encoding/json into a struct tagged
+// `json:"acceptance"`) match it that way: {"Acceptance": [...]} is a live list.
 type acceptanceWalker struct {
 	file     string
 	findings []acceptanceFinding
@@ -163,7 +165,7 @@ func (w *acceptanceWalker) walk(v any, path string) {
 			if path != "" {
 				p = path + "." + k
 			}
-			if k == "acceptance" {
+			if strings.EqualFold(k, "acceptance") {
 				w.keys++
 				w.acceptance(x[k], p)
 				continue
@@ -579,9 +581,10 @@ func TestScanAcceptanceDirFixtures(t *testing.T) {
 	}
 }
 
-// acceptanceKeyRe finds an unescaped `"acceptance":` key in raw JSON bytes. An
-// ADR quoted inside a context text carries its quotes as \" and never matches.
-var acceptanceKeyRe = regexp.MustCompile(`"acceptance"\s*:`)
+// acceptanceKeyRe finds an unescaped `"acceptance":` key, in any case, in raw JSON
+// bytes. An ADR quoted inside a context text carries its quotes as \" and never
+// matches.
+var acceptanceKeyRe = regexp.MustCompile(`(?i)"acceptance"\s*:`)
 
 // filesWithAcceptanceKey is the second, independent way to learn which files hold
 // an acceptance key: a byte search, not a JSON walk.
