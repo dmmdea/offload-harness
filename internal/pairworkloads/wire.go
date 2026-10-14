@@ -9,6 +9,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
 // The attribution a request carries to the fleet node that will run its work (PAIR routing fixes,
@@ -56,7 +57,8 @@ func shortHostname() string {
 }
 
 // SetWireHeaders stamps the attribution headers on a request that creates work on a fleet node:
-// always the asker's name, and the node-carding signal only when this emitter will not card the job.
+// always the asker's name, the node-carding signal only when this emitter will not card the job, and
+// the session and run class of this process when it has them (core.OriginHeader, core.RunClassHeader).
 // A nil emitter is a disabled one.
 func (e *Emitter) SetWireHeaders(h http.Header) {
 	if name := e.AskerName(); name != "" {
@@ -67,6 +69,27 @@ func (e *Emitter) SetWireHeaders(h http.Header) {
 	if !e.Enabled() && !e.suppressed() {
 		h.Set(core.PairCardHeader, core.PairCardNode)
 	}
+	// The session this request is for and the run class of the process asking (ADR 0087), so the node's ledger
+	// row names them. Each goes only when non-empty and only when the ledger's own cleaner accepts it: the rule
+	// that decides what a row of this box may carry is the rule that decides what leaves the box, and a label
+	// over the cap is refused whole, never cut (a cut id would name another session). "production" is no class.
+	session, class := e.origin()
+	if s := ledger.CleanOrigin(session); s != "" {
+		h.Set(core.OriginHeader, s)
+	}
+	if c := ledger.CleanClass(class); c != "" {
+		h.Set(core.RunClassHeader, c)
+	}
+}
+
+// origin is the session and run class this box sends as core.OriginHeader and core.RunClassHeader: the
+// process's own, read from the environment by the resolvers the ledger stamps its rows with (no process-table
+// walk, which is slow on Windows and this runs on every request), unless a test swapped the seam. Nil-safe.
+func (e *Emitter) origin() (session, class string) {
+	if e != nil && e.originFn != nil {
+		return e.originFn()
+	}
+	return ledger.SessionFromEnv(os.Getenv), ledger.RunClassFromEnv(os.Getenv)
 }
 
 var (

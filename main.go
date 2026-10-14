@@ -3378,6 +3378,8 @@ func runLedger(args []string) error {
 	fs.String("config", "", "config file path")
 	since := fs.Int("since", 0, "only count entries from the last N days")
 	includeTraffic := includeTrafficFlag(fs)
+	bySession := fs.Bool("by-session", false, "add a sessions array: each session's card tokens split by where they ran (this box or a fleet node)")
+	sessionID := fs.String("session", "", "with --by-session, only this session's entry (implies --by-session)")
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
 	var sinceTS int64
@@ -3400,7 +3402,24 @@ func runLedger(args []string) error {
 	out := struct {
 		ledger.Summary
 		TopDeferReasons7d []ledger.ReasonCount `json:"top_defer_reasons_7d,omitempty"`
-	}{s, reasons}
+		// Sessions is present only with --by-session (or --session): the default output is byte-identical to what
+		// it was before the flag existed. A pointer, so a session the ledger does not hold prints [] and not nothing.
+		Sessions *[]ledger.SessionShare `json:"sessions,omitempty"`
+	}{s, reasons, nil}
+	wantSessions := *bySession || *sessionID != ""
+	if wantSessions {
+		shares, _, serr := ledger.SessionSharesFile(cfg.LedgerPath, sinceTS, *includeTraffic)
+		if serr != nil {
+			return serr
+		}
+		picked := []ledger.SessionShare{}
+		for _, sh := range shares {
+			if *sessionID == "" || sh.Session == *sessionID {
+				picked = append(picked, sh)
+			}
+		}
+		out.Sessions = &picked
+	}
 	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Println(string(b))
 	// LO-12: honest claim — this is the est. Opus VALUE of the work kept local,
@@ -3411,6 +3430,11 @@ func runLedger(args []string) error {
 		s.TokensSaved, s.TokensOut, s.EstValueKeptLocal)
 	if len(s.ExcludedNonProduction) > 0 {
 		fmt.Printf("left out: test, bake and measurement traffic (%s job(s)); --include-test-traffic counts it\n", describeExcluded(s.ExcludedNonProduction))
+	}
+	if wantSessions {
+		fmt.Println("sessions: remote_tokens ran on a fleet node and local_tokens on this box; remote_share is that card-side placement split, " +
+			"not the share gate's cards/(cards+cloud). A chat-lane call reads as local, and a route \"queue\" delegation writes no row on this box's ledger, so it is in neither number (a floor). " +
+			"served_* are jobs this box ran for the session as a fleet node.")
 	}
 	return nil
 }

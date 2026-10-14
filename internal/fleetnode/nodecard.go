@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
@@ -26,6 +27,39 @@ import (
 // so sanitized and bounded) and whether the asker asked this node to card the job.
 func askerOf(r *http.Request) (asker string, nodeCards bool) {
 	return core.SanitizeAsker(r.Header.Get(core.AskerHeader)), r.Header.Get(core.PairCardHeader) == core.PairCardNode
+}
+
+// originOf reads the origin headers of a request that creates work: the asker's session label and run class
+// (ADR 0087), each cleaned by the ledger's own rule, so a label valid in the asker's own Record is never dropped
+// here and one the ledger would refuse never lands on a row. A value over the cap is refused whole, not cut like
+// the tenant is: a cut session id would name another session.
+//
+// trustClass says the request is one this node can authenticate (trustsWire). Only then is the class honoured: a
+// labelled row is left out of every production view, so a class from a caller the node cannot identify would let
+// any peer that reaches the port hide this node's rows. The same caller's session is kept as a plain label, but
+// not one that carries a class of its own ("bake:run-7", the go-test label), because the ledger reads a class off
+// such a label when the row names none.
+func originOf(r *http.Request, trustClass bool) (session, class string) {
+	session = ledger.CleanOrigin(r.Header.Get(core.OriginHeader))
+	if !trustClass {
+		if session != "" && ledger.ClassOfSession(session) != "" {
+			session = ""
+		}
+		return session, ""
+	}
+	return session, ledger.CleanClass(r.Header.Get(core.RunClassHeader))
+}
+
+// trustsWire reports whether the request is one this node can authenticate, so the run class it carries may be
+// believed. A token-gated lane has already passed authorizeGated (a bearer when a token is configured, else a
+// loopback listener, the trust boundary of the local MCP surface); any other lane (the media task types and the
+// legacy path-taking stt lane are open on purpose, so deployed tokenless clients keep working) is trusted only
+// when a token is configured and the request presented it.
+func (s *Server) trustsWire(r *http.Request, taskType string) bool {
+	if tokenGated(s.opts.Cfg, taskType) {
+		return true
+	}
+	return s.opts.Cfg.FleetAuthToken != "" && bearerOK(r, s.opts.Cfg.FleetAuthToken)
 }
 
 // nodeCard is the serving node's one PAIR card for a job its asker will not card. Every method is a

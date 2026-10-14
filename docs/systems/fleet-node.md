@@ -678,7 +678,13 @@ running at start, terminal at finish; `fleetnode/nodecard.go`). Asking boxes sen
 `/fleet/vision`, `/fleet/text`, `/fleet/stt`, `/fleet/compose-project`, `/fleet/media-job` and `/fleet/queue/submit`; the queue holder stores both
 on the job (`fleetqueue.Job.Asker`, `PairCard`), so the claim loop applies them to a pulled job exactly as
 `admit` does to a pushed one — and now also stamps a pulled job's door `fleet` (`dispatchDoor`), which it did
-not before. A claim of a job the node already holds (a lease-expiry re-claim) opens no card, and a claim a
+not before. Two more headers carry the asker's session and run class (`X-Offload-Origin`, `X-Offload-Run-Class`,
+[ADR 0087](../architecture/decisions/0087-the-askers-origin-and-run-class-ride-the-fleet-wire.md)), sent only when non-empty:
+`admit` (and the claim loop, from `fleetqueue.Job.Origin` / `RunClass`) cleans them with the ledger's own rules
+(`ledger.CleanOrigin`, `CleanClass`; a session over 96 bytes is refused whole, where the tenant is truncated) and stamps them
+on the node's ledger row as `origin_session` and `run_class`, with the node process's own pids. The class is believed only
+for a request the node can authenticate (`trustsWire`: a token-gated lane that passed its gate, or a presented bearer), so
+a tokenless media dispatch keeps the session and loses the class. A claim of a job the node already holds (a lease-expiry re-claim) opens no card, and a claim a
 draining node refuses closes its card failed; a pushed dispatch gets the same guarantee against a racing
 duplicate (the id lookup, the queued frame and `Admit` run under one lock). Details and the rollout reasoning: [pair-workloads](pair-workloads.md).
 

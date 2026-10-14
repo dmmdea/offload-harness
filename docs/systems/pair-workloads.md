@@ -311,6 +311,8 @@ carry the attribution from the asker to the node:
 |---|---|---|
 | `X-Offload-Asker` | the asker's PAIR member name when its emitter is enabled and the box is a member (lowercased), else its short lowercase hostname | every asker, on every request that creates work: delegation dispatch and queue submit, compose (template and project), media (dispatch and media-job), vision, text, accelerator forwards |
 | `X-Offload-Pair-Card` | `node` | ONLY an asker whose emitter is not enabled (key off, PAIR not installed): nothing on that box will card the job |
+| `X-Offload-Origin` | the asker's session label (`ledger.CleanOrigin`: printable ASCII, at most 96 bytes, else not sent) | every asker that has one (`LOCAL_OFFLOAD_ORIGIN`, else the `CLAUDE_CODE_SESSION_ID` Claude Code exports), on the same requests as the asker header; sent only when non-empty (ADR 0087) |
+| `X-Offload-Run-Class` | the asker's run class (`ledger.CleanClass`: a short `[a-z0-9_-]` token, never `production`) | an asker whose process has a class (`LOCAL_OFFLOAD_RUN_CLASS`, a `bake:` origin), and a delegation pinned for `measurement` when the process has none; sent only when non-empty (ADR 0087) |
 
 The signal is inverted on purpose, for a staggered rollout: an older asker sends neither header, so it
 keeps today's behaviour (it cards the job, or nobody does) and can never be carded twice. The node
@@ -320,6 +322,15 @@ printable text of at most 64 characters (`core.SanitizeAsker`) before it is used
 
 - **The asker's name is recorded whenever the header is present**: the node's ledger row carries it as
   `requester` (`core.Request.Requester` → `Meta.Requester` → `ledger.Entry.Requester`).
+- **The asker's session and run class are recorded the same way** ([ADR 0087](../architecture/decisions/0087-the-askers-origin-and-run-class-ride-the-fleet-wire.md)):
+  `fleetnode.originOf` reads `X-Offload-Origin` and `X-Offload-Run-Class` with the ledger's own cleaners (a 97-byte
+  session is refused whole, not cut), the node stamps them on the request its runner builds
+  (`core.Request.OriginSession` / `RunClass` → `Meta.AskerSession` / `AskerClass` → `ledger.Entry.OriginSession` /
+  `RunClass`, all `json:"-"`), and the node's row therefore names the session it worked for and is labelled `bake`
+  or `measurement` when its asker was. The class is believed only from a request the node can authenticate (a
+  token-gated lane, or a bearer presented to a node with a token); a tokenless media dispatch keeps the session and
+  loses the class, and a session label that carries a class of its own (`bake:run-7`) is dropped with it. A pulled
+  job carries both on the queued job (`fleetqueue.Job.Origin`, `RunClass`).
 - **The card is emitted only on the signal.** From the node's own emitter (`fleetnode.Options.Pair`,
   `fleet-serve` builds it from the node's config, so an in-flight card of a killed `fleet-serve` still
   has an orphan marker and is closed): `queued` before the job is admitted (not after: the job can finish
@@ -819,8 +830,9 @@ fixture ingresses and assert their frames.
 
 - **A bake or measurement run has a card**: its process has no class (set `LOCAL_OFFLOAD_RUN_CLASS=bake` where the
   tool starts it), or `LOCAL_OFFLOAD_PAIR_TEST_CARDS` is set. A run that dispatches to a fleet node opens no card
-  there either: its asker sends no `X-Offload-Pair-Card`. The label does not ride the wire (yet), so the NODE's own
-  ledger row for that work carries no `run_class`.
+  there either: its asker sends no `X-Offload-Pair-Card`. Since ADR 0087 the label rides the wire
+  (`X-Offload-Run-Class`), so the NODE's own ledger row for that work carries the `run_class` too; an older node
+  ignores the header and its row stays unlabelled.
 - **Two cards for one job**: the in-flight and terminal frames named different
   models/engines. Source 1 pins the identity on the `PlacedResult` for exactly this reason;
   a new emit site must reuse `pairInflight` / `pairTerminal`, never build its own frame.

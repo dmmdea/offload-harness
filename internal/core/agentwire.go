@@ -285,6 +285,18 @@ const (
 	AskerMaxLen = 64
 )
 
+// Origin headers (register D-101, ADR 0087). Like the attribution headers above they ride the request that
+// creates work on a fleet node, are sent only when non-empty, and are ignored by a node that predates them.
+//
+//	OriginHeader    the asker's session label (ledger.CleanOrigin: printable ASCII, at most 96 bytes, else none).
+//	                The node stamps it on its own ledger row as origin_session.
+//	RunClassHeader  the asker's run class (ledger.CleanClass: a short [a-z0-9_-] token; "production" is never sent).
+//	                The node stamps it as run_class, and only for a request it can authenticate.
+const (
+	OriginHeader   = "X-Offload-Origin"
+	RunClassHeader = "X-Offload-Run-Class"
+)
+
 // SanitizeAsker reduces an untrusted asker name to printable text of at most AskerMaxLen characters:
 // control and non-printing characters are dropped, runs of whitespace fold to one space. "" = none.
 func SanitizeAsker(s string) string {

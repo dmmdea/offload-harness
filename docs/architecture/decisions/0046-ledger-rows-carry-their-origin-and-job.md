@@ -66,7 +66,9 @@ an `input_chars / 4` guess.
   session's own ledger; the hook prints the session figure and the fleet figure side by side.
 - A node's own rows carry pids and no session (a service inherits no Claude environment). Propagating
   the session through the dispatch envelope to the node's rows is a separate, additive change (a header,
-  like the tenant — the envelope is a strict decoder) and is not part of this decision.
+  like the tenant — the envelope is a strict decoder) and is not part of this decision. That change is
+  [ADR 0087](0087-the-askers-origin-and-run-class-ride-the-fleet-wire.md): the asker sends its session and run
+  class as two headers, and the node stamps them (and its own pids) on its row.
 - Rows grow by ~60–120 bytes; they stay one small O_APPEND-atomic line.
 - A process that changes its environment after start keeps its first origin; that is the intended
   reading (one process, one session), and a wrapper that needs to name itself sets

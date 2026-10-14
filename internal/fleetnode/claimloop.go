@@ -17,6 +17,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/fleetqueue"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
@@ -121,6 +122,10 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 	// row, and a job whose asker signalled that it will not card it gets its card from this node.
 	// The submitter's headers reached us on the queued job.
 	asker := core.SanitizeAsker(job.Asker)
+	// The submitter's session and run class (ADR 0087) came over the network on the queued job: cleaned again by
+	// the ledger's rule, as the asker's name is. The holder is reached with this node's bearer, so the class it
+	// hands over is one this node can authenticate (the submit route sits behind the holder's own guard).
+	originSession, runClass := ledger.CleanOrigin(job.Origin), ledger.CleanClass(job.RunClass)
 	spec := s.claimSpec(job.TaskType, cleanup)
 	// A job this node already holds (a lease-expiry re-claim of our own job) has its own card, or its
 	// own finished one: opening another would emit a queued frame that reopens a card its terminal
@@ -142,6 +147,7 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 		breq.FleetJobID = job.ID
 		breq.Door = dispatchDoor(breq.Door)
 		breq.Requester = asker
+		breq.OriginSession, breq.RunClass = originSession, runClass
 		// The same stt cap the push door applies (enterSTT): a pulled stt job waits its turn too.
 		releaseSTT, gerr := s.enterSTT(rctx, job.TaskType)
 		if gerr != nil {
