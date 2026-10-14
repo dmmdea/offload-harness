@@ -3416,9 +3416,13 @@ otherwise, because the builder keeps building the old recipe.
   package extract before an upgrade); `explain` prints the template and builder values side by side;
   `record` rewrites the manifest after a person has compared the builder with the template, and refuses a
   builder/template difference the spec does not declare. The CLI fails closed: a flag that takes a value and gets
-  none (an empty or unset shell variable, `--templates-dir "$UNSET"`) exits 2, as does a flag it does not know, so
-  neither a typo nor an unset variable can skip the template side. `check --require-templates` makes a missing
-  template side an error (exit 2) instead of a note, for an upgrade runbook. `check --strict` also fails (exit 1)
+  none (an empty or unset shell variable, `--templates-dir "$UNSET"` or `--templates-dir=`) exits 2, as does any
+  argument that starts with `-` and is not a known flag (`--template-dir`, and the single-dash `-templates-dir`
+  or `-x`), a value given to a switch (`--strict=1`) and a second positional after the verb. So neither a
+  mistyped flag nor an empty flag value can skip the template side. A directory named only through the
+  environment (`COMFY_TEMPLATES_DIR`, `COMFYUI_DIR`) that is unset, or names a tree without the package, still
+  leaves the template side skipped with a note: that is the case `check --require-templates` is for. It makes a
+  missing template side an error (exit 2) instead of a note, for an upgrade runbook. `check --strict` also fails (exit 1)
   on every `unreviewed` manifest entry; a plain `check` leaves those green. Both flags belong to `check`. A template
   or manifest file may start with a byte-order mark; one that is not JSON, or a template with no `nodes` array,
   fails with a message that names the file (the template side names the builder too).
@@ -3433,8 +3437,9 @@ otherwise, because the builder keeps building the old recipe.
   - Node mode is never read. A bypassed or muted node, or a bypassed or muted subgraph instance, still reads as
     live, so a template that bypasses a node the builder keeps (or the reverse) is not a difference to the guard.
   - Wiring is mostly unguarded. One `D` item (the Wan Animate 2 pose start and end percent) keeps two inputs on
-    separate sources. The `wf-wan22-i2v` high and low pairs (steps, cfg) share one template locator each, so a
-    template that split them would not be seen. A `feeds` locator (the source of an input, by node id and slot)
+    separate sources. The `wf-wan22-i2v` high and low pairs share one template locator each: the steps (node 128),
+    the cfg (node 126) and the step split (`high.end_at_step` and `low.start_at_step` both read node 127), so a
+    template that split any of the three would not be seen. A `feeds` locator (the source of an input, by node id and slot)
     would cover both; it is not built, and the code for it comes later.
   - `W` and `I` do not consult `proxyWidgets`; only `P` does. A widget a template starts promoting through
     `proxyWidgets` is seen by a `W` or `I` locator only through the linked-widget refusal.

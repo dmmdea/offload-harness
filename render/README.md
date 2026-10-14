@@ -389,8 +389,11 @@ node render/builder-drift.mjs record  --comfy-dir <comfyui-tree>   # re-pin, aft
 node render/builder-drift.mjs check --comfy-dir <comfyui-tree> --require-templates --strict   # upgrade runbook
 ```
 
-The CLI fails closed. A flag that takes a value and gets none (an empty or unset shell variable) and a flag it does not
-know both exit 2. `--require-templates` makes a missing template side an error (exit 2) instead of a skipped one.
+The CLI fails closed. A flag that takes a value and gets none (an empty or unset shell variable, also `--flag=`), an
+argument that starts with `-` and is not a known flag (single-dash forms such as `-templates-dir` included), a value given
+to a switch (`--strict=1`) and a second positional after the verb all exit 2. A directory named only through
+`COMFY_TEMPLATES_DIR` / `COMFYUI_DIR` that is unset still leaves the template side skipped; `--require-templates` makes
+that an error (exit 2) instead of a skipped side.
 `--strict` also fails (exit 1) on every `unreviewed` manifest entry; a plain `check` leaves them green. Both belong to
 `check`.
 
@@ -405,7 +408,8 @@ What a green run does not tell you:
 
 - Node mode is never read: a bypassed or muted node or instance still reads as live.
 - Wiring is mostly unguarded: one `D` item (Wan Animate 2 pose percents); the `wf-wan22-i2v` high and low pairs share
-  one template locator each. A `feeds` locator would cover it; it is not built.
+  one template locator each (steps, cfg and the step split, `high.end_at_step` / `low.start_at_step` both reading node
+  127). A `feeds` locator would cover it; it is not built.
 - `W` and `I` do not consult `proxyWidgets`; only `P` does.
 - The two `unreviewed` entries stay green in a plain `check`; `check --strict` fails them. One is probably a real
   builder defect (`wf-qwen-image-edit` full preset: CFG 3.0 against the template's effective 4), an open item recorded in

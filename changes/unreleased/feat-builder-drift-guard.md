@@ -17,9 +17,12 @@
   builder was last verified against; with every widget unchanged the recorded `templateSha256` must equal the
   recomputed hash, so a hand-edited manifest fails. A wiring item keeps the `_distilled` Wan Animate 2 template's
   start and end percent on separate subgraph inputs, the shape of the PR #1308 defect.
-- **Fails closed.** A flag that takes a value and gets none (`--templates-dir "$UNSET"`, `--comfy-dir`, `--manifest`)
-  exits 2, as does a flag the CLI does not know; neither can skip the template side. `check --require-templates`
-  makes a missing template side an error (exit 2) for upgrade runbooks. `check --strict` also fails (exit 1) on
+- **Fails closed.** A flag that takes a value and gets none (`--templates-dir "$UNSET"`, `--templates-dir=`, `--comfy-dir`,
+  `--manifest`) exits 2, as does any argument that starts with `-` and is not a known flag (`--template-dir`, and the
+  single-dash `-templates-dir` or `-x`), a value given to a switch (`--strict=1`) and a second positional after the verb;
+  none of them can skip the template side. A directory named only through `COMFY_TEMPLATES_DIR` or `COMFYUI_DIR` that is
+  unset still leaves it skipped, with a note. `check --require-templates` makes a missing template side an error (exit 2)
+  for upgrade runbooks. `check --strict` also fails (exit 1) on
   every `unreviewed` manifest entry. A template or manifest file with a byte-order mark reads; a file that is not
   JSON, a `null` file or a template with no `nodes` array fails with a message that names the file and, on the
   template side, the builder. A wiring check tells two sources apart by node id and output slot, not by node type
@@ -53,11 +56,15 @@
   widget locators; each new test was shown red against its mutant (key by node type, key by node id only, empty value
   accepted, missing value read as true, unknown flag accepted, each flag ignored, strict failing `deliberate` too,
   byte-order mark not stripped, nodes array or manifest shape unchecked, class check removed, name filter removed,
-  template-only locator renamed) and the file restored byte-clean. Red then green was shown with planted effective
+  template-only locator renamed) and the file restored byte-clean. The second round added tests for single-dash
+  arguments, extra positionals, a dash-led flag value, the empty `--flag=` form, a value on a switch, the reason `check
+  --strict` quotes, and the id/slot order of a wiring key (the pairs (node 1, slot 2) and (node 2, slot 1)), each shown red
+  against its mutant. Red then green was shown with planted effective
   values (root-instance steps, LoRA strength and frame rate) in a scratch copy of the package: the guard fails
   naming `wf-h3-av` and `wf-ltx25-i2v`, and a guard that read the stale widgets stays green on the same copy.
   `node --test "render/**/*.test.mjs"`.
 - **Known limits, stated in the docs.** Node mode is never read (a bypassed or muted node still reads as live); wiring
-  is mostly unguarded (one wiring item, the `wf-wan22-i2v` pairs share locators; a `feeds` locator would cover it);
+  is mostly unguarded (one wiring item; the `wf-wan22-i2v` pairs share locators, for the steps, the cfg and the
+  step split; a `feeds` locator would cover it);
   `W` and `I` ignore `proxyWidgets`; the two `unreviewed` entries are green in a plain `check`.
 - **Docs.** `docs/systems/media-generation.md` (Builder drift guard) and `render/README.md`.
