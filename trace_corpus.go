@@ -54,6 +54,9 @@ const (
 	// tcSeatUnrecorded keys the runs whose record names no seat (agent traces do not).
 	tcSeatUnrecorded = "(unrecorded)"
 
+	// tcSkipNeverRan is the harvest's reason for a delegation row whose agent never executed.
+	tcSkipNeverRan = "delegation row never ran (zero steps, nothing recorded)"
+
 	tcBasisMeasured     = "measured"
 	tcBasisInsufficient = "insufficient_data"
 
@@ -171,16 +174,28 @@ type tcDelegationIn struct {
 	Refusal *struct {
 		Status int `json:"status"`
 	} `json:"refusal"`
-	Result *struct {
-		Steps         int        `json:"steps"`
-		StopReason    string     `json:"stop_reason"`
-		Trace         []struct{} `json:"trace"`
-		PrefillSteps  int        `json:"prefill_steps"`
-		PrefillTokens int64      `json:"prefill_tokens"`
-		CacheTokens   int64      `json:"cache_tokens"`
-		SeatTokensIn  int64      `json:"seat_tokens_in"`
-		Pager         *tcPagerIn `json:"pager"`
-	} `json:"result"`
+	Result *tcDelegationResult `json:"result"`
+}
+
+// tcDelegationResult is the wire result inside a delegation-log row, as far as the harvest reads it.
+type tcDelegationResult struct {
+	Steps         int        `json:"steps"`
+	StopReason    string     `json:"stop_reason"`
+	Trace         []struct{} `json:"trace"`
+	PrefillSteps  int        `json:"prefill_steps"`
+	PrefillTokens int64      `json:"prefill_tokens"`
+	CacheTokens   int64      `json:"cache_tokens"`
+	SeatTokensIn  int64      `json:"seat_tokens_in"`
+	Pager         *tcPagerIn `json:"pager"`
+}
+
+// neverRan reports a logged subtask whose agent never executed: a deferral (capacity,
+// infrastructure, budget, config, contract) is written with zero steps and nothing else. Anything
+// recorded at all means an agent ran: a step trace (setup actions count), prefill or seat-token
+// accounting, or a pager object, which a run that reached the loop always carries (zeros
+// included). A row with none of those and no step never got there.
+func (r *tcDelegationResult) neverRan() bool {
+	return r.Steps == 0 && len(r.Trace) == 0 && r.PrefillSteps == 0 && r.SeatTokensIn == 0 && r.Pager == nil
 }
 
 // tcHarvestOpts selects what the harvest reads.
@@ -386,6 +401,10 @@ func tcHarvestDelegation(o tcHarvestOpts, stats *tcHarvestStats) ([]tcRun, error
 			res := in.Result
 			if res.Steps < 0 {
 				stats.Skipped["delegation row has negative steps"]++
+				continue
+			}
+			if res.neverRan() {
+				stats.Skipped[tcSkipNeverRan]++
 				continue
 			}
 			run := tcRun{
