@@ -104,6 +104,26 @@ try {
     Assert ($got -eq $c.want) "Test-AllocFailure [$($c.n)] -> $($c.want)"
   }
 
+  # Invoke-ProbeLoad scans the WHOLE server log for the same class (at -lv 10 the OOM line scrolls out of the 4-line tail)
+  # and prepends the line it finds to the detail that Test-AllocFailure then classifies. It runs inside the probe, which
+  # needs a real llama-server, so its pattern is read out of the source and run on the lines a dying server prints: a
+  # line it misses never reaches the classifier above.
+  $srcLines = @([System.IO.File]::ReadAllText($selftestPath, [System.Text.Encoding]::UTF8) -split "`r?`n")
+  $scanSrc  = @($srcLines | Where-Object { $_.TrimStart() -notmatch '^#' -and $_ -match '\[regex\]::Match\(\$whole,' })
+  Assert ($scanSrc.Count -eq 1) 'the probe has exactly one whole-log scan for the allocation class'
+  $scanPattern = if ($scanSrc.Count -eq 1) { [regex]::Match($scanSrc[0], "\[regex\]::Match\(\`$whole, '(?<p>[^']*)'\)").Groups['p'].Value } else { '' }
+  Assert ($scanPattern.Length -gt 20) 'the whole-log scan pattern could be read out of the source'
+  foreach ($line in @(
+      'ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory VK_ERROR_OUT_OF_DEVICE_MEMORY',
+      'CUDA error: out of memory',
+      'CUDA out of memory',
+      'cudaErrorMemoryAllocation',
+      'Device lost',
+      'failed to allocate',
+      'unable to allocate memory')) {
+    Assert ($scanPattern.Length -gt 0 -and [regex]::IsMatch("llama_init: starting`r`n$line`r`nexiting", $scanPattern)) "the probe's whole-log scan finds the line [$line]"
+  }
+
   Write-Host "== Select-ServedTiers: only a chat tier the ACTIVE yaml defines is exercised =="
   # A gguf outlives the render that wanted it. The CUDA fallback served the 26B until 0186 w4, so a box that downloaded
   # it keeps the 14 GB file after a re-render that no longer defines the model. File existence says what can load; the
