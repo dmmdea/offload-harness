@@ -294,15 +294,16 @@ func TestTraceCorpusSeatAndWindowFilters(t *testing.T) {
 func TestTraceCorpusRedactsAtHarvest(t *testing.T) {
 	email := "someone" + "@" + "example.invalid"
 	key := "ghp_" + strings.Repeat("d", 24)
+	nodeKey := "ghp_" + strings.Repeat("e", 24)
 	dir := t.TempDir()
 	tracesDir := filepath.Join(dir, "traces")
 	logDir := filepath.Join(dir, "log")
 	os.MkdirAll(tracesDir, 0o755)
 	os.MkdirAll(logDir, 0o755)
-	// The only free strings a run keeps are its file-derived id, seat and stop reason.
+	// The only free strings a run keeps are its file-derived id, seat, node and stop reason.
 	rec := `{"id":"x","stop_reason":"` + email + `","steps":1,"transcript":[{"Role":"user","Content":"hi"}]}`
 	os.WriteFile(filepath.Join(tracesDir, "run-"+email+".json"), []byte(rec), 0o644)
-	row := `{"seat":"` + key + `","result":{"steps":2,"stop_reason":"done","trace":[{}]}}` + "\n"
+	row := `{"seat":"` + key + `","node":"` + nodeKey + `","result":{"steps":2,"stop_reason":"done","trace":[{}]}}` + "\n"
 	os.WriteFile(filepath.Join(logDir, "2026-02-03.jsonl"), []byte(row), 0o644)
 
 	out := filepath.Join(dir, "corpus.jsonl")
@@ -311,7 +312,7 @@ func TestTraceCorpusRedactsAtHarvest(t *testing.T) {
 		t.Fatalf("harvest: %v", err)
 	}
 	b, _ := os.ReadFile(out)
-	for _, secret := range []string{email, key} {
+	for _, secret := range []string{email, key, nodeKey} {
 		if strings.Contains(string(b), secret) {
 			t.Fatalf("the corpus still holds %q:\n%s", secret, b)
 		}
@@ -325,8 +326,8 @@ func TestTraceCorpusRedactsAtHarvest(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &harvested); err != nil {
 		t.Fatal(err)
 	}
-	if harvested.Stats.Redactions["email"] < 2 || harvested.Stats.Redactions["github-token"] != 1 {
-		t.Errorf("redaction counts = %v, want the email twice (id and stop reason) and the token once", harvested.Stats.Redactions)
+	if harvested.Stats.Redactions["email"] < 2 || harvested.Stats.Redactions["github-token"] != 2 {
+		t.Errorf("redaction counts = %v, want the email twice (id and stop reason) and a token in the seat and one in the node", harvested.Stats.Redactions)
 	}
 	// The strict loader is the defense in depth: a corpus that still carries a vet class is refused.
 	dirty := filepath.Join(dir, "dirty.jsonl")

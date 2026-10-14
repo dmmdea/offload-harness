@@ -95,8 +95,12 @@ type tcPrefill struct {
 type tcRun struct {
 	ID     string `json:"id"`
 	Source string `json:"source"`
-	Seat   string `json:"seat"`
-	Day    string `json:"day,omitempty"`
+	// Seat is the seat the record names. A pool placement names the pool's ALIAS here, which is
+	// not a seat (see tcIsPoolAlias); Node is the one further identifier the row carries.
+	Seat string `json:"seat"`
+	// Node is the node id the delegation row names; "" when the record has none (agent traces).
+	Node string `json:"node,omitempty"`
+	Day  string `json:"day,omitempty"`
 	// TraceBearing: an agent trace with a transcript, or a delegation row whose step trace is
 	// not empty.
 	TraceBearing bool       `json:"trace_bearing"`
@@ -171,6 +175,7 @@ type tcTraceIn struct {
 // tcDelegationIn is the part of a delegation-log row the harvest reads.
 type tcDelegationIn struct {
 	Seat    string `json:"seat"`
+	Node    string `json:"node"`
 	Refusal *struct {
 		Status int `json:"status"`
 	} `json:"refusal"`
@@ -266,9 +271,10 @@ func tcHarvest(o tcHarvestOpts) ([]tcRun, tcHarvestStats, error) {
 		// has no path class, and a seat or stop reason that names a file would otherwise become a
 		// by_seat key in every readout.
 		r.ID, r.Seat, r.StopReason = red.Redact(r.ID), red.Redact(paths.redact(r.Seat)), red.Redact(paths.redact(r.StopReason))
+		r.Node = red.Redact(r.Node)
 	}
 	for _, r := range runs {
-		for _, s := range []string{r.ID, r.Source, r.Seat, r.Day, r.StopReason} {
+		for _, s := range []string{r.ID, r.Source, r.Seat, r.Node, r.Day, r.StopReason} {
 			if classes := compeval.PIIClasses(s); len(classes) > 0 {
 				return nil, stats, fmt.Errorf("harvest refused: a run still matches %s after redaction (redactor/vet drift, fix before harvesting; the value is not echoed)", strings.Join(classes, ", "))
 			}
@@ -446,6 +452,7 @@ func tcHarvestDelegation(o tcHarvestOpts, stats *tcHarvestStats) ([]tcRun, error
 				ID:           fmt.Sprintf("dl-%s-%06d", day, line),
 				Source:       tcSourceDelegation,
 				Seat:         in.Seat,
+				Node:         in.Node,
 				Day:          day,
 				TraceBearing: len(res.Trace) > 0,
 				Steps:        res.Steps,
@@ -601,7 +608,7 @@ func tcValidateRun(r tcRun) error {
 	if r.LadderArtifacts != nil && *r.LadderArtifacts < 0 {
 		return fmt.Errorf("negative ladder_artifacts")
 	}
-	for _, s := range []string{r.ID, r.Source, r.Seat, r.Day, r.StopReason} {
+	for _, s := range []string{r.ID, r.Source, r.Seat, r.Node, r.Day, r.StopReason} {
 		if classes := compeval.PIIClasses(s); len(classes) > 0 {
 			return fmt.Errorf("corpus refused: %s (a corpus must be vetted, never scrubbed in place)", strings.Join(classes, ", "))
 		}
@@ -616,14 +623,40 @@ func tcValidateRun(r tcRun) error {
 
 // tcReport is the readout. It has no timestamps and no paths, so the same corpus always yields
 // the same bytes. Every rate is a pointer: null means the data to compute it was not recorded.
+//
+// By seat: by_seat holds only the runs whose record names a seat. A pool placement logs the pool's
+// ALIAS as the seat (the node's real seat is in neither the row nor its result), so a run on one
+// cannot be attributed to a seat, and it is reported apart: pool_alias (the whole bucket) and
+// pool_alias_by_node (the same runs keyed by the node the row names, "(unrecorded)" when it names
+// none). attribution says how much of the corpus a per-seat reading cannot reach.
 type tcReport struct {
-	Schema     string             `json:"schema"`
-	CorpusHash string             `json:"corpus_hash"`
-	PagerGate  float64            `json:"pager_gate"`
-	All        tcStats            `json:"all"`
-	BySource   map[string]tcStats `json:"by_source"`
-	BySeat     map[string]tcStats `json:"by_seat"`
+	Schema          string             `json:"schema"`
+	CorpusHash      string             `json:"corpus_hash"`
+	PagerGate       float64            `json:"pager_gate"`
+	Attribution     tcAttribution      `json:"attribution"`
+	All             tcStats            `json:"all"`
+	BySource        map[string]tcStats `json:"by_source"`
+	BySeat          map[string]tcStats `json:"by_seat"`
+	PoolAlias       tcStats            `json:"pool_alias"`
+	PoolAliasByNode map[string]tcStats `json:"pool_alias_by_node"`
 }
+
+// tcAttribution splits the runs by how far a seat can be named for them: the record names a seat,
+// the record names a pool alias (a placement, not a seat), or the record names nothing. The
+// unattributed share is the last two over all runs, nil for no runs.
+type tcAttribution struct {
+	Runs               int      `json:"runs"`
+	SeatNamedRuns      int      `json:"seat_named_runs"`
+	PoolAliasRuns      int      `json:"pool_alias_runs"`
+	SeatUnrecordedRuns int      `json:"seat_unrecorded_runs"`
+	UnattributedShare  *float64 `json:"unattributed_share"`
+}
+
+// tcPoolAliasRe: a pool alias is a seat name in which "pool" is a whole hyphen-delimited token
+// (agent-pool, arm-pool, agent-pool-3card). "spool" and "carpool-a" are not aliases.
+var tcPoolAliasRe = regexp.MustCompile(`(^|-)pool(-|$)`)
+
+func tcIsPoolAlias(seat string) bool { return tcPoolAliasRe.MatchString(seat) }
 
 type tcStats struct {
 	Runs             int            `json:"runs"`
@@ -787,21 +820,39 @@ func tcStatsFor(runs []tcRun) tcStats {
 
 func tcBuildReport(runs []tcRun, hash string) tcReport {
 	rep := tcReport{Schema: tcSchema, CorpusHash: hash, PagerGate: agent.PagerGate,
-		All: tcStatsFor(runs), BySource: map[string]tcStats{}, BySeat: map[string]tcStats{}}
-	bySource, bySeat := map[string][]tcRun{}, map[string][]tcRun{}
+		All: tcStatsFor(runs), BySource: map[string]tcStats{}, BySeat: map[string]tcStats{}, PoolAliasByNode: map[string]tcStats{}}
+	bySource, bySeat, byNode := map[string][]tcRun{}, map[string][]tcRun{}, map[string][]tcRun{}
+	var pool []tcRun
 	for _, r := range runs {
 		bySource[r.Source] = append(bySource[r.Source], r)
-		seat := r.Seat
-		if seat == "" {
-			seat = tcSeatUnrecorded
+		switch {
+		case r.Seat == "":
+			rep.Attribution.SeatUnrecordedRuns++
+			bySeat[tcSeatUnrecorded] = append(bySeat[tcSeatUnrecorded], r)
+		case tcIsPoolAlias(r.Seat):
+			rep.Attribution.PoolAliasRuns++
+			pool = append(pool, r)
+			node := r.Node
+			if node == "" {
+				node = tcSeatUnrecorded
+			}
+			byNode[node] = append(byNode[node], r)
+		default:
+			rep.Attribution.SeatNamedRuns++
+			bySeat[r.Seat] = append(bySeat[r.Seat], r)
 		}
-		bySeat[seat] = append(bySeat[seat], r)
 	}
+	rep.Attribution.Runs = len(runs)
+	rep.Attribution.UnattributedShare = tcRate(float64(rep.Attribution.PoolAliasRuns+rep.Attribution.SeatUnrecordedRuns), float64(len(runs)))
+	rep.PoolAlias = tcStatsFor(pool)
 	for k, v := range bySource {
 		rep.BySource[k] = tcStatsFor(v)
 	}
 	for k, v := range bySeat {
 		rep.BySeat[k] = tcStatsFor(v)
+	}
+	for k, v := range byNode {
+		rep.PoolAliasByNode[k] = tcStatsFor(v)
 	}
 	return rep
 }
