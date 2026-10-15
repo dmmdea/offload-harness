@@ -50,6 +50,9 @@ type PagerStats struct {
 	refetched map[string]int
 	evictions int
 	bytes     int64
+	// passes counts compaction passes the loop ran: every NoteCompaction call over a
+	// non-empty transcript, whether or not it evicted a body the pager tracks.
+	passes int
 }
 
 // minPayloadBytes ignores trivia. A 40-byte tool result reappearing is not evidence for a
@@ -62,6 +65,14 @@ func payloadKey(s string) string {
 	// close the gate on an artefact of formatting rather than on agent behaviour.
 	h := sha256.Sum256([]byte(strings.Join(strings.Fields(s), " ")))
 	return hex.EncodeToString(h[:8])
+}
+
+// reset starts the instrument over: the next report covers only what is noted after it.
+func (p *PagerStats) reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.evicted, p.refetched = nil, nil
+	p.evictions, p.bytes, p.passes = 0, 0, 0
 }
 
 // NoteEvicted records that a payload left the transcript.
@@ -85,8 +96,11 @@ func (p *PagerStats) NoteEvicted(content string) {
 // Byte-identical is the right test and not a strict one: the rungs that collapse a body
 // to a dedupe marker, prune it to a skeleton, or drop it outright all leave the agent
 // without the content it had, which is precisely the state a pager would exist to undo.
-// A no-op compaction (the transcript was already under budget) evicts nothing and
-// records nothing, so the happy path stays invisible to the instrument.
+// The loop calls this only for a pass it ran: a transcript proactively over budget, or one
+// compacted again after a server overflow rejection. A run that needs neither never calls it
+// and the happy path stays invisible to the instrument. A call over a non-empty transcript
+// counts as one pass even when the pass left every tracked body in place and evicted
+// nothing.
 //
 // This is the caller the instrument shipped without. Between R2-13 landing and 0.117.7
 // nothing called NoteEvicted in production, so the gate read insufficient_data on every
@@ -95,6 +109,12 @@ func (p *PagerStats) NoteCompaction(before, after []Msg) {
 	if p == nil || len(before) == 0 {
 		return
 	}
+	// The ladder ran, so this is one fire, however little it took out. The counter is
+	// the only record of how often it ran: the final transcript keeps what the ladder
+	// left behind, not how many passes left it.
+	p.mu.Lock()
+	p.passes++
+	p.mu.Unlock()
 	kept := make(map[string]bool, len(after))
 	for _, m := range after {
 		if m.Role == "tool" && len(m.Content) >= minPayloadBytes {
@@ -148,10 +168,21 @@ type PagerReport struct {
 	RefetchRate *float64 `json:"refetch_rate"`
 	Basis       string   `json:"basis"` // "measured" | "insufficient_data"
 	Verdict     string   `json:"verdict"`
+	// CompactionPasses is how many times the compaction ladder ran in this run (a proactive
+	// pass, the harder pass after a context-overflow rejection, and the emergency shrink each
+	// count one). A POINTER for the same reason RefetchRate is: nil (JSON null) means no
+	// instrument recorded the run, and a measured zero is a real 0 — a run that never
+	// compacted. A trace written before this field existed has no key at all, and a reader
+	// treats that as unrecorded too.
+	CompactionPasses *int `json:"compaction_passes"`
 }
 
 // pagerGate is R2-13's stated threshold: below this, the pager family closes.
 const pagerGate = 0.10
+
+// PagerGate exports the threshold so a reader of recorded runs (the trace-corpus readout)
+// judges a pooled rate against the same number the instrument judges a single run against.
+const PagerGate = pagerGate
 
 func (p *PagerStats) Report() PagerReport {
 	if p == nil {
@@ -159,10 +190,11 @@ func (p *PagerStats) Report() PagerReport {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	passes := p.passes
 	r := PagerReport{
 		Evictions: p.evictions, EvictedBytes: p.bytes,
 		DistinctEvicted: len(p.evicted), Refetched: len(p.refetched),
-		Basis: "insufficient_data",
+		Basis: "insufficient_data", CompactionPasses: &passes,
 	}
 	if len(p.evicted) == 0 {
 		// Nothing was evicted, so the question was never posed. This is NOT "0% re-fetch".

@@ -756,7 +756,7 @@ var compactKeep = []compactKeepEntry{
 	},
 	{
 		Tools:    []string{"offload_ask"},
-		Sentence: "A REPEAT DOES NOT RE-ROLL THE SEAT: an identical call after a verified:false answer returns that same unverified answer again, cache_hit:true, with no new seat run — to get a second attempt, change the question, which is a different key and always a fresh run.",
+		Sentence: "A REPEAT DOES NOT RE-ROLL THE SEAT: an identical call after a verified:false answer returns that same unverified answer again, cache_hit:true, with no new seat run, and that answer already includes the one cross-seat retry a failed local first attempt gets when no route was named (retried_on, retry_note) — to get another attempt, change the question, which is a different key and always a fresh run.",
 		Why:      "an identical call after a verified:false answer returns that same unverified answer (cache_hit:true) with no new seat run; a second attempt needs a changed question",
 	},
 	{
