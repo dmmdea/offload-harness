@@ -296,7 +296,7 @@ func tcHarvest(o tcHarvestOpts) ([]tcRun, tcHarvestStats, error) {
 	}
 	for _, r := range runs {
 		for _, s := range []string{r.ID, r.Source, r.Seat, r.Node, r.Day, r.StopReason} {
-			if classes := compeval.PIIClasses(s); len(classes) > 0 {
+			if classes := red.Residual(s); len(classes) > 0 {
 				return nil, stats, fmt.Errorf("harvest refused: a run still matches %s after redaction (redactor/vet drift, fix before harvesting; the value is not echoed)", strings.Join(classes, ", "))
 			}
 		}

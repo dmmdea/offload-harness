@@ -89,6 +89,24 @@ func TestLoad_HashAndRefusals(t *testing.T) {
 	}
 }
 
+// An environment-style name (the key word after an underscore) refuses the corpus too.
+func TestVetPII_EnvStyleNameRefuses(t *testing.T) {
+	for _, content := range []string{
+		"GITHUB" + "_TOKEN=" + strings.Repeat("q7", 12),
+		"OPENAI" + "_API_KEY=" + strings.Repeat("q7", 12),
+		"DB" + "_PASSWORD=" + strings.Repeat("q7", 8),
+	} {
+		e := []Entry{{ID: "x", Kind: "logs", Turns: []Turn{{Role: "tool", ToolCallID: "c", Content: content}}}}
+		if f := VetPII(e); len(f) == 0 || f[0].Class != "api-key-assignment" {
+			t.Errorf("env-style name not refused: findings %v", f)
+		}
+	}
+	ok := []Entry{{ID: "x", Kind: "logs", Turns: []Turn{{Role: "tool", ToolCallID: "c", Content: "MAX_TOKENS=4096 token_count: 12"}}}}
+	if f := VetPII(ok); len(f) != 0 {
+		t.Errorf("settings line flagged: %v", f)
+	}
+}
+
 func TestVetPII_RefusalClasses(t *testing.T) {
 	// Every value below is a SYNTHETIC pattern probe for the refusal classes —
 	// documentation-grade placeholders, not credentials.
@@ -99,6 +117,8 @@ func TestVetPII_RefusalClasses(t *testing.T) {
 		"api-key-assignment": `api_key = "sk_abcdefghijklmnop"`, // secret-ok (placeholder)
 		"aws-access-key":     "AKIAIOSFODNN7EXAMPLE",            // secret-ok (AWS's own documentation example key)
 		"github-token":       "ghp_abcdefghijklmnopqrstuv0123456789", // secret-ok (placeholder)
+		"provider-key":       "key " + "s" + "k-proj-" + strings.Repeat("Ab9", 10),
+		"jwt":                "tok " + "ey" + "J" + strings.Repeat("h", 12) + ".ey" + "J" + strings.Repeat("p", 12) + "." + strings.Repeat("s", 20),
 	}
 	for class, content := range cases {
 		e := []Entry{{ID: "x", Kind: "logs", Turns: []Turn{{Role: "tool", ToolCallID: "c", Content: content}}}}
