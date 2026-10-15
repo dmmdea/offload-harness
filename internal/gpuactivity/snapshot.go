@@ -75,7 +75,7 @@ type Holder struct {
 	Draining  bool     `json:"draining"`
 	// GaveUpAt/GaveUpWhy: the moment the lease's hidden holder gave up releasing it, and why (the record's holder_gave_up_*). Set for
 	// a stale record only: the holder wrote it and exited, and nothing else says the release failed.
-	GaveUpAt        time.Time `json:"holder_gave_up_at,omitempty"`
+	GaveUpAt        time.Time `json:"holder_gave_up_at,omitzero"`
 	GaveUpWhy       string    `json:"holder_gave_up_why,omitempty"`
 	AgeSec          int       `json:"age_s"`
 	HeartbeatAgeSec int       `json:"heartbeat_age_s"`
