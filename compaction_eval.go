@@ -6,6 +6,7 @@
 //	compaction-eval freeze --corpus C [--gcf] [--skeleton] --out baseline.json
 //	compaction-eval check  --corpus C --baseline B [--tolerance 0.02]
 //	compaction-eval ab     --corpus C [--gcf] [--skeleton]   (needs the live endpoint)
+//	compaction-eval contextbench [--family F] [--tasks N] [--seed S] [--out results.json]   (needs the live endpoint)
 //
 // harvest builds a REAL replay corpus from standalone agent trace files with
 // redaction-at-harvest (see internal/compeval/harvest.go) — the produced file
@@ -34,9 +35,13 @@ import (
 
 func runCompactionEval(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench> [--corpus <corpus.jsonl>] [flags] (harvest takes --traces/--out instead of --corpus)")
+		return fmt.Errorf("usage: local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench|contextbench> [--corpus <corpus.jsonl>] [flags] (harvest takes --traces/--out instead of --corpus; contextbench takes its own flags and needs no corpus)")
 	}
 	mode := args[0]
+	if mode == "contextbench" {
+		// Generated tasks, not a pinned corpus: its own flags, handled before the corpus check.
+		return runCompactionContextBench(args[1:])
+	}
 	fs := flag.NewFlagSet("compaction-eval "+mode, flag.ExitOnError)
 	fs.String("config", "", "config file path (consumed by ab; run/freeze/check are model-free and ignore it)")
 	corpusPath := fs.String("corpus", "", "pinned corpus JSONL (compeval.Entry per line)")
@@ -255,7 +260,7 @@ func runCompactionEval(args []string) error {
 		fmt.Fprintf(os.Stderr, "[compaction-eval] kvbench ADMISSIBLE (corpus %.12s, %d samples)\n", hash, len(rep.Samples))
 		return nil
 	default:
-		return fmt.Errorf("compaction-eval: unknown mode %q (harvest|run|freeze|check|ab|kvbench)", mode)
+		return fmt.Errorf("compaction-eval: unknown mode %q (harvest|run|freeze|check|ab|kvbench|contextbench)", mode)
 	}
 }
 

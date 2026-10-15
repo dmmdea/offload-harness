@@ -1,0 +1,9 @@
+{
+  "name": "openspec-pin",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The install project of scripts/openspec-install.sh: the admitted OpenSpec CLI tarball and, in package-lock.json, the exact version and sha512 integrity of every package it depends on.",
+  "dependencies": {
+    "@fission-ai/openspec": "file:fission-ai-openspec-1.14.1.tgz"
+  }
+}

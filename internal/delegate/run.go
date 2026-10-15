@@ -118,7 +118,11 @@ type PlacedResult struct {
 	Seat               string
 	Result             core.AgentWireResult
 	AcceptanceFailures []string
-	JobID              string
+	// AcceptanceAuthority is the authority the contract closed at (core.ClosedAt, set by gradeAcceptance): the weakest
+	// authority among its checks, stated only when every check passed and nothing else failed the result. AuthNone says
+	// nothing (a contract with an unqualified check, a failure, an unknown, an excused fingerprint, or no answer).
+	AcceptanceAuthority core.Authority
+	JobID               string
 	// intentRecorded / orphanable steer the intent ledger (intent.go): the
 	// first says a "d" line exists for JobID; the second marks the exits
 	// (cancel, owned-job poll deadline, queued give-up) where the node may
@@ -4510,10 +4514,12 @@ func SeatDownDefer(r core.AgentWireResult) bool {
 // document, which is a fact about the node that wrote it (strikeOnFingerprint
 // quarantines a node for it), and another node is the cure. An abstention, an
 // admission-time defer (coherence, warm-up) and the seat-down defer are likewise
-// facts about the SEAT and keep their retry.
+// facts about the SEAT and keep their retry. A fingerprint the contract itself can
+// never close (an unknown the intake lint warns about: fingerprintFailedByNode)
+// is no such fact, and another node would grade the same unknown, so it is skipped.
 func skipsRetryAsResearchAcceptanceOnly(contract core.AgentContract, pr PlacedResult) bool {
 	return researchDoors[contract.Door] && pr.Err == "" && !pr.Result.Deferred &&
-		len(pr.AcceptanceFailures) > 0 && !failsDocumentFingerprint(pr.AcceptanceFailures)
+		len(pr.AcceptanceFailures) > 0 && !fingerprintFailedByNode(contract, pr.Result, pr.AcceptanceFailures)
 }
 
 // failsDocumentFingerprint reports whether any failed acceptance is the DOCUMENT
@@ -6293,7 +6299,7 @@ func (r *runner) runLocal(ctx context.Context, jobID string, contract core.Agent
 		// acceptance over it manufactures "failures" about content that was
 		// never claimed — turning an honest defer into a verification failure
 		// in the ledger and the corpus.
-		pr.AcceptanceFailures = EvalAcceptance(contract, wire)
+		pr.gradeAcceptance(contract, wire)
 		// No strikeOnFingerprint here ON PURPOSE: the local seat is the one
 		// placement always able to take a contract (replacementNode reserves it
 		// as the last resort), so quarantining it would strand every subtask.
@@ -6704,7 +6710,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			pr.Node = wire.NodeID
 			pr.Seat = wire.Seat
 			if !wire.Deferred {
-				pr.AcceptanceFailures = EvalAcceptance(contract, wire)
+				pr.gradeAcceptance(contract, wire)
 				r.noteFingerprint(base, contract, wire, pr.AcceptanceFailures)
 			}
 			return pr
@@ -7216,21 +7222,33 @@ func (r *runner) pollOnce(ctx context.Context, base, jobID string) (jobPoll, err
 // delegate.Run, evaluates acceptance by the SAME rules rather than a second
 // copy of them. An acceptance check nothing evaluates is decoration.
 func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []string {
-	var failures []string
+	failures, _ := EvalAcceptanceGraded(contract, wire)
+	return failures
+}
+
+// EvalAcceptanceGraded is EvalAcceptance plus the authority the contract closed at, from the same grading (so the two
+// cannot disagree about what passed). closedAt is core.ClosedAt over the graded checks: the weakest authority among them,
+// and only when every check passed. It is stated only for a result that was accepted whole: any failure (an unknown, a
+// list-fidelity failure included), a check that was excused instead of passed, and a single unqualified check all leave it
+// core.AuthNone, which says nothing. A weaker authority never closes a stronger claim, so a contract mixing a grounded
+// check with an answer check closes at answer, and one that also carries a plain check closes at none.
+func EvalAcceptanceGraded(contract core.AgentContract, wire core.AgentWireResult) (failures []string, closedAt core.Authority) {
+	outcomes := make([]core.AcceptanceOutcome, 0, len(contract.Acceptance))
 	for _, a := range contract.Acceptance {
-		chk, err := core.ParseAcceptanceCheck(a)
-		if err != nil {
-			failures = append(failures, err.Error())
+		o, parsed := gradeCheck(a, contract, wire)
+		outcomes = append(outcomes, o)
+		if o.Verdict == core.VerdictPass {
 			continue
 		}
-		if pass, reason := chk.Eval(wire); !pass {
-			// A digest that claims nothing and says the page does not carry what was asked restates none of the page's
-			// words, and is not about another document either (HonestAbsence reads the structure, not a phrase).
-			if strings.Contains(a, docAnchorTag) && HonestAbsence(wire.Structured) {
-				continue
-			}
-			failures = append(failures, reason)
+		// A digest that claims nothing and says the page does not carry what was asked restates none of the page's
+		// words, and is not about another document either (HonestAbsence reads the structure, not a phrase). Only a
+		// FAILED fingerprint is excused (excusesFingerprint): an unknown stays a reported failure.
+		if excusesFingerprint(a, o, parsed, wire) {
+			continue
 		}
+		// An unknown (empty or absent evidence at a qualified check's level) is a failed check here, never a pass;
+		// its reason says "unknown" so it is told apart from a wrong answer.
+		failures = append(failures, o.Reason)
 	}
 	// Beside the contract's own checks, the object is read against its answer (fidelity.go):
 	// no check names the lists a node's re-pack may have emptied. A no-op for a contract with no
@@ -7238,7 +7256,53 @@ func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 	if why := listFidelityFailure(contract, wire.Structured, wire.Output); why != "" {
 		failures = append(failures, why)
 	}
-	return failures
+	if len(failures) == 0 {
+		// An excused check is a fail outcome, so ClosedAt leaves such a contract open.
+		if at, ok := core.ClosedAt(outcomes); ok {
+			closedAt = at
+		}
+	}
+	return failures, closedAt
+}
+
+// gradeAcceptance records on the placed result what the delegator found when it graded the contract against wire: the
+// failures and the authority the contract closed at. It is the one call every site that grades a result makes, so the two
+// fields are always set together and a result that was not graded carries neither.
+func (pr *PlacedResult) gradeAcceptance(contract core.AgentContract, wire core.AgentWireResult) {
+	pr.AcceptanceFailures, pr.AcceptanceAuthority = EvalAcceptanceGraded(contract, wire)
+}
+
+// publishedAuthority is the wire spelling of the authority a result closed at: the level's name, and "" for none, so the
+// key is omitted and a result no qualified contract produced publishes byte-identically to before.
+func publishedAuthority(a core.Authority) string {
+	if a == core.AuthNone {
+		return ""
+	}
+	return a.String()
+}
+
+// gradeCheck grades one acceptance string against the result and the contract's context documents. parsed is false
+// when the string does not parse: that is a failed check carrying the parse error, as it always was.
+func gradeCheck(a string, contract core.AgentContract, wire core.AgentWireResult) (o core.AcceptanceOutcome, parsed bool) {
+	chk, err := core.ParseAcceptanceCheck(a)
+	if err != nil {
+		return core.AcceptanceOutcome{Check: a, Verdict: core.VerdictFail, Reason: err.Error()}, false
+	}
+	return chk.Grade(wire, contract.Context), true
+}
+
+// GradeAcceptance is EvalAcceptance's per-check reading: one outcome per acceptance string, in order, each pass, fail
+// or unknown, with the authority the check demanded. It is the same grading EvalAcceptance runs (gradeCheck), without
+// the document-fingerprint excuse and the list-fidelity read that EvalAcceptance adds, so it is the raw verdicts. The
+// authority a contract closed at, as the delegator publishes it, is EvalAcceptanceGraded's: it applies the excuse and the
+// fidelity read before it states one, which core.ClosedAt over these raw outcomes does not.
+func GradeAcceptance(contract core.AgentContract, wire core.AgentWireResult) []core.AcceptanceOutcome {
+	out := make([]core.AcceptanceOutcome, 0, len(contract.Acceptance))
+	for _, a := range contract.Acceptance {
+		o, _ := gradeCheck(a, contract, wire)
+		out = append(out, o)
+	}
+	return out
 }
 
 // fetchViews probes every configured remote's /fleet/health, returning the
@@ -7252,7 +7316,8 @@ func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 // strikeOnFingerprint strikes base in the caller's Quarantine when any failed
 // acceptance is a DOCUMENT FINGERPRINT check (research.DocFingerprint tags its
 // regex with the named group `docanchor`). Contract-caused failures — a
-// user's over-strict contains:, a thin page's min_items — never strike.
+// user's over-strict contains:, a thin page's min_items, a fingerprint the contract
+// can never close (noteFingerprint filters it, fingerprintFailedByNode) — never strike.
 func (r *runner) strikeOnFingerprint(base string, failures []string) {
 	if r.quarantine == nil || !failsDocumentFingerprint(failures) {
 		return
@@ -7267,20 +7332,43 @@ func (r *runner) strikeOnFingerprint(base string, failures []string) {
 // check and failed it is a strike against the node, one that carries it and PASSED is a pass (Quarantine.Pass), and one that
 // carries none says nothing about the node. A result the check missed that is an honest absence (excusedAbsence) is neither:
 // it did not fail the contract, but it restated nothing of the page either, so it is no evidence that the node reads the
-// right document and must not stand among its passes. The local seat has no call here, as for strikeOnFingerprint.
+// right document and must not stand among its passes. Nor is a fingerprint the contract can never close (an unknown the
+// intake lint warns about, as a grounded check on a contract with no context documents): it is a defect of the contract,
+// still reported as a failure, and no node could have passed it, so it neither strikes nor passes (fingerprintFailedByNode).
+// An unknown over an honest absence is the same: neither. A fingerprint the node PASSED beside such a failure is still a pass.
+// The local seat has no call here, as for strikeOnFingerprint.
 func (r *runner) noteFingerprint(base string, contract core.AgentContract, wire core.AgentWireResult, failures []string) {
 	if r.quarantine == nil {
 		return
 	}
 	switch {
 	case failsDocumentFingerprint(failures):
-		r.strikeOnFingerprint(base, failures)
+		if fingerprintFailedByNode(contract, wire, failures) {
+			r.strikeOnFingerprint(base, failures)
+		} else if passedFingerprint(contract, wire) && !excusedAbsence(contract, wire) {
+			// every reported fingerprint failure is the contract's or an honest absence (neither strikes), but a sibling
+			// fingerprint the node PASSED is still the pass it earned
+			r.quarantine.Pass(base)
+		}
 	case failsDocumentFingerprint(contract.Acceptance):
 		// the check is on the contract (failsDocumentFingerprint reads the tag in either form) and did not fail
 		if !excusedAbsence(contract, wire) {
 			r.quarantine.Pass(base)
 		}
 	}
+}
+
+// passedFingerprint reports whether the contract carries a document-fingerprint check that the result graded PASS.
+func passedFingerprint(contract core.AgentContract, wire core.AgentWireResult) bool {
+	for _, a := range contract.Acceptance {
+		if !strings.Contains(a, docAnchorTag) {
+			continue
+		}
+		if o, parsed := gradeCheck(a, contract, wire); parsed && o.Verdict == core.VerdictPass {
+			return true
+		}
+	}
+	return false
 }
 
 // probeSnapshot is ONE fleet probe, memoised on the runner (= on the Run) so
@@ -7898,6 +7986,9 @@ type delegationLogLine struct {
 	Contract           core.AgentContract    `json:"contract"`
 	Result             *core.AgentWireResult `json:"result,omitempty"`
 	AcceptanceFailures []string              `json:"acceptance_failures,omitempty"`
+	// AcceptanceAuthority is the authority the contract closed at (PlacedResult.AcceptanceAuthority), by name. Omitempty:
+	// absent on a row that claims none, and on every row written before the field.
+	AcceptanceAuthority string `json:"acceptance_authority,omitempty"`
 	// Arm labels which experimental arm produced this row.
 	//
 	// This is an ENABLER, not a convenience. The delegation log is append-only and is
@@ -7953,21 +8044,22 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 	placement := r.stampPin(pr).PlacementReason
 	pinReason, routeAsked := r.pinLedgerFields()
 	line := delegationLogLine{
-		TS:                 time.Now().Unix(),
-		JobID:              pr.JobID,
-		Node:               pr.Node,
-		Seat:               pr.Seat,
-		PlacementReason:    placement,
-		Deferred:           pr.Result.Deferred,
-		DeferClass:         pr.Result.DeferClass,
-		AcceptancePass:     pr.Err == "" && !pr.Result.Deferred && len(pr.AcceptanceFailures) == 0,
-		WallMs:             pr.wallMs,
-		EstTokens:          EstimateTokens(contract),
-		Error:              pr.Err,
-		Contract:           contract,
-		AcceptanceFailures: pr.AcceptanceFailures,
-		Arm:                strings.TrimSpace(os.Getenv("OFFLOAD_DELEGATE_ARM")),
-		DelegatorVersion:   buildinfo.Version,
+		TS:                  time.Now().Unix(),
+		JobID:               pr.JobID,
+		Node:                pr.Node,
+		Seat:                pr.Seat,
+		PlacementReason:     placement,
+		Deferred:            pr.Result.Deferred,
+		DeferClass:          pr.Result.DeferClass,
+		AcceptancePass:      pr.Err == "" && !pr.Result.Deferred && len(pr.AcceptanceFailures) == 0,
+		WallMs:              pr.wallMs,
+		EstTokens:           EstimateTokens(contract),
+		Error:               pr.Err,
+		Contract:            contract,
+		AcceptanceFailures:  pr.AcceptanceFailures,
+		AcceptanceAuthority: publishedAuthority(pr.AcceptanceAuthority),
+		Arm:                 strings.TrimSpace(os.Getenv("OFFLOAD_DELEGATE_ARM")),
+		DelegatorVersion:    buildinfo.Version,
 		// Computed once per process (sync.Once) — the per-row cost is a read.
 		DelegatorBuildSHA256: buildinfo.BuildSHA256(),
 		Placed:               pr.Placed,
