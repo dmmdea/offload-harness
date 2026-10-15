@@ -330,6 +330,30 @@ func TestRecipeAuditRefusesBadInputBeforeAnySeatCall(t *testing.T) {
 			e.freeze(t, func(p *eval.PreReg) { p.Judge = eval.Judge{Kind: "model", Identity: "some-judge"} })
 			return e.args()
 		}, refusalInput},
+		// The verb scores every run 1 or 0, so a primary on any other scale, and an efficiency class
+		// it cannot read off a run, are refused before the seat is asked and not found out afterwards.
+		{"a baseline whose primary is on the 0 to 10 scale", func(t *testing.T, e *raEnv) []string {
+			e.freeze(t, func(p *eval.PreReg) { p.Primary.Class = eval.ClassJudge010 })
+			return e.args()
+		}, refusalInput},
+		{"a baseline whose primary is a custom range", func(t *testing.T, e *raEnv) []string {
+			e.freeze(t, func(p *eval.PreReg) {
+				p.Primary.Class, p.Primary.Range = eval.ClassCustom, []float64{0.5, 1}
+			})
+			return e.args()
+		}, refusalInput},
+		{"a baseline that declares a money metric", func(t *testing.T, e *raEnv) []string {
+			e.freeze(t, func(p *eval.PreReg) {
+				p.Efficiency = []eval.PreRegEfficiency{{Name: "spend", Class: eval.EffMoney}}
+			})
+			return e.args()
+		}, refusalInput},
+		{"a baseline that declares a memory metric beside a tokens one", func(t *testing.T, e *raEnv) []string {
+			e.freeze(t, func(p *eval.PreReg) {
+				p.Efficiency = []eval.PreRegEfficiency{{Name: "forwarded_tokens", Class: eval.EffTokens}, {Name: "resident", Class: eval.EffMemoryGiB}}
+			})
+			return e.args()
+		}, refusalInput},
 		{"a baseline that is not the frozen bytes", func(t *testing.T, e *raEnv) []string {
 			raw, _ := os.ReadFile(e.baseline)
 			os.WriteFile(e.baseline, bytes.Replace(raw, []byte("\n"), []byte("\n\n"), 1), 0o644) // hand-edited: not the canonical bytes
