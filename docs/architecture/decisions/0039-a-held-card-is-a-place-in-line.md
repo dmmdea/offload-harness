@@ -252,3 +252,7 @@ a compute share. `--devices` still names any card on the operator's word. The ll
 Related code: `internal/gpulease/allocator.go`, `internal/gpualloc/input.go`, `internal/config/gpucards.go`,
 `internal/pipeline/mediaadmit.go`. Related docs: [media-generation.md](../../systems/media-generation.md) ("The
 allocator and the display card"), [ADR 0075](0075-the-display-layer-opens-under-the-presence-guard-and-leaves-when-the-operator-returns.md).
+
+## Amendment 2026-10-14 (the card rule is stated once)
+
+The place in line (clause 8), the per-card media door and the card-only placement (clause 7) and the display cap (clause 7, the allocator) above are collected with the rest of the card rule in [ADR 0094](0094-a-lease-names-its-cards-a-card-has-one-holder.md), which also lists what is not built: a media plan that always names its cards, and a local worker pool across cards.
