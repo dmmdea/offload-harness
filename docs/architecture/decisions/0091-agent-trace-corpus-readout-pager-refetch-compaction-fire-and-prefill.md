@@ -9,17 +9,17 @@ Release: unreleased
 
 ## Context
 
-Two questions stand in front of a planned measurement: would a model that edits its own context (the idea of a
+Three questions stand in front of a planned measurement: would a model that edits its own context (the idea of a
 published paper on context language models) beat the harness's fixed compaction ladder? How often does the ladder
 actually run in real agent runs, so that a measurement of it has something to measure? And is the pager re-fetch rate
 (distinct evicted payloads fetched back, over distinct payloads evicted) above the 10 % gate of R2-13, below which the
 pager family closes and above which an `edit_context` tool would be worth building? `edit_context` is the proposed tool
 that would let the agent seat drop or rewrite earlier turns of its own transcript; the measurement is its go or no-go.
 
-Neither could be read from anything on disk. The agent loop measured both (the pager report, and now the pass count of
-the ladder) and the two records that outlive a run dropped them: the standalone per-goal trace file carried no pager or
-prefill object, and the wire result the delegator stores in the delegation log carried no pager object. The pager
-family therefore sat at `insufficient_data`, and the compaction items had no baseline.
+None of the three could be read from anything on disk. The agent loop measured both (the pager report, and now the pass
+count of the ladder) and the two records that outlive a run dropped them: the standalone per-goal trace file carried no
+pager or prefill object, and the wire result the delegator stores in the delegation log carried no pager object. The
+pager family therefore sat at `insufficient_data`, and the compaction items had no baseline.
 
 A readout over those records needs three rules, each learned from reading the real log:
 
@@ -74,8 +74,12 @@ A readout over those records needs three rules, each learned from reading the re
    field: the node that served the run emits it, and the delegator that writes the row decodes the node's answer into
    its own wire result and encodes it again, so a delegator build without the field drops it. Rows logged before the
    recording, rows from a node that predates it and rows written by a delegator that predates it have none. The row's
-   `delegator_version` names the delegator build and the result's `harness_version` the node build (absent on a
-   deferral raised before the loop).
+   `delegator_version` names the delegator build and the result's `harness_version` the node build. The node stamps
+   `harness_version` once the loop has returned without an error and the write door has closed cleanly, so it is absent
+   on a deferral raised before the loop, on one the loop's own error raised (a refused lease, a seat that went down, a
+   stall, a wall or ceiling timeout, a cancellation, a parser mismatch, a contended seat), on one for a lost workspace
+   root and on a write-class deferral, which keeps its pager object but not the stamp. A run that ended on its step
+   budget, a cut tool call, an empty answer or an abstention carries both.
 6. **The corpus is machine-local and redacted at harvest.** The corpus keeps numbers and enums only, redacts its few
    strings with the same redactor and vet table as `compaction-eval`, and replaces a seat, node id or stop reason that is
    a local path with a stable placeholder. This ADR carries aggregates only.
@@ -135,7 +139,7 @@ A recommendation for the human decision on the planned context-editing measureme
 
 ## Consequences
 
-- The two questions now have a reproducible answer path: a hash-stamped corpus, a frozen readout and a byte-exact check.
+- The three questions now have a reproducible answer path: a hash-stamped corpus, a frozen readout and a byte-exact check.
   Until instrumented runs accumulate, the pager gate reads `NO_DATA` and the compaction fire rate is null, which is the
   honest value.
 - Runs executed is a smaller, truer denominator than rows logged. For runs from a build that carries the recording, the
@@ -143,8 +147,10 @@ A recommendation for the human decision on the planned context-editing measureme
   deferred runs and write-class deferrals included. Rows logged before the recording, rows from a node that predates it
   and rows written by a delegator that predates it stay unrecorded (both the delegator that writes the log and the
   serving node must carry the field; `delegator_version` on the row and `harness_version` on the result name the
-  builds), so a harvest over mixed logs reads zero only once the older rows are windowed out by day (`--since`) and
-  every node and delegator that wrote the rest runs the recording.
+  builds, but the node stamps `harness_version` only after a loop that returned without an error and a write door that
+  closed cleanly, so a pre-loop deferral, a loop-error deferral, a lost-workspace-root deferral and a write-class
+  deferral lack it even where they carry the pager object), so a harvest over mixed logs reads zero only once the older
+  rows are windowed out by day (`--since`) and every node and delegator that wrote the rest runs the recording.
 - The readout is per machine. Nothing pools delegation logs across machines, and a reader comparing machines compares
   separate readouts.
 - The readout carries node ids and seat names as the records write them, so it stays machine-local like the corpus; only

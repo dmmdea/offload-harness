@@ -564,10 +564,14 @@ demands the frozen report back byte for byte. With no source flag, harvest reads
   served the run emits the object, and the delegator that writes the log row decodes the node's answer into its own wire
   result and encodes it again, so a delegator build without the field drops it. Rows logged before the recording, rows from
   a node that predates it and rows written by a delegator that predates it have none; the row's `delegator_version` names
-  the delegator build and the result's `harness_version` the node build (absent on a deferral raised before the loop). The
-  pager and compaction unrecorded counts therefore reach zero for rows written by a recording delegator from a recording
-  node, and a mixed log reads zero only once the older rows are windowed out by day (`--since`) and every node and
-  delegator that wrote the rest runs the recording.
+  the delegator build and the result's `harness_version` the node build. The node stamps `harness_version` once the loop
+  has returned without an error and the write door has closed cleanly, so it is absent on a deferral raised before the
+  loop, on one the loop's own error raised (a refused lease, a seat that went down, a stall, a wall or ceiling timeout, a
+  cancellation, a parser mismatch, a contended seat), on one for a lost workspace root and on a write-class deferral,
+  which keeps its pager object but not the stamp; a run that ended on its step budget, a cut tool call, an empty answer or
+  an abstention carries both. The pager and compaction unrecorded counts therefore reach zero for rows written by a
+  recording delegator from a recording node, and a mixed log reads zero only once the older rows are windowed out by day
+  (`--since`) and every node and delegator that wrote the rest runs the recording.
 - **What it reports.** The trace-bearing run count (an agent trace with a transcript, or a delegation row with a step
   trace); the pager re-fetch rate pooled over the runs that evicted something (distinct payloads re-fetched over distinct
   payloads evicted) against the 10 % gate of R2-13 (`agent.PagerGate`); the compaction fire rate (runs that ran the ladder at

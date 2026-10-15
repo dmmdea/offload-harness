@@ -49,9 +49,11 @@
   the loop report), which the delegation log stores. Present means measured, zeros included. Absent means a record from
   before the field, from a node that predates it or from a delegator that predates it (the delegator that writes the log
   decodes the node's answer into its own wire result and encodes it again, so both ends must carry the field;
-  `delegator_version` on the row and `harness_version` on the result name the builds), or a run that never reached the
-  loop. The object is attached right after the loop returns, ahead of the write door, so a write-class deferral (the write
-  door did not close cleanly) keeps it. `internal/compeval` exports its
+  `delegator_version` on the row and `harness_version` on the result name the builds; the node stamps `harness_version`
+  only after a loop that returned without an error and a write door that closed cleanly, so a pre-loop deferral, a
+  loop-error deferral, a lost-workspace-root deferral and a write-class deferral lack it even where they carry the pager
+  object), or a run that never reached the loop. The object is attached right after the loop returns, ahead of the write
+  door, so a write-class deferral (the write door did not close cleanly) keeps it. `internal/compeval` exports its
   redactor (`NewRedactor`, `PIIClasses`) in a new file so a second harvester cannot redact a different set of classes.
 - **Fixed on the way.** One loop drains a whole queue and its pager and prefill instruments accumulate for the loop's life, so
   the stderr line and the new trace fields of goal N were the running total of goals 1 to N, and a payload evicted in an
