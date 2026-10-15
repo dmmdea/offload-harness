@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/eval"
@@ -173,6 +174,14 @@ func TestRecipeAuditMapsWireResultsToGateOutcomes(t *testing.T) {
 		{"capacity defer", deferred(core.DeferClassCapacity, "full", ""), nil, eval.OutcomeInfraError, -1},
 		{"step budget spent", deferred(core.DeferClassBudget, "step budget exhausted (12 steps)", "budget"), nil, eval.OutcomeTaskFail, 0},
 		{"wall spent", deferred(core.DeferClassBudget, "context deadline exceeded", "error"), nil, eval.OutcomeTimeout, -1},
+		// The seat spent its completion budget and did not finish: a verdict about the task, as a spent
+		// step budget is, so a recipe that fixes exactly these gets credit for it.
+		{"tool call cut at the completion budget", deferred(core.DeferClassBudget, "tool-call argument cut at the completion budget twice", agent.StopToolCallCut), nil, eval.OutcomeTaskFail, 0},
+		{"reasoning starved the final answer", deferred(core.DeferClassBudget, "empty final answer after 4 steps and 900 completion tokens: reasoning_starved", agent.StopReasoningStarved), nil, eval.OutcomeTaskFail, 0},
+		// A clock or a caller ended the run: nothing was learned about the task.
+		{"wall ceiling", deferred(core.DeferClassBudget, "wall timeout after 600s (the caller's deadline, not this node's ceiling)", ""), nil, eval.OutcomeTimeout, -1},
+		{"caller gave up", deferred(core.DeferClassBudget, "agent loop: canceled (the parent context ended, the caller gave up, or this box is draining)", ""), nil, eval.OutcomeTimeout, -1},
+		{"re-pack skipped for the clock", deferred(core.DeferClassBudget, "structured re-pack skipped: the wall's remaining time could not buy the answer", "final"), nil, eval.OutcomeTimeout, -1},
 		{"abstention", deferred(core.DeferClassAbstention, "output failed schema", "final"), nil, eval.OutcomeTaskFail, 0},
 		{"defer with no class", deferred("", "unknown", ""), nil, eval.OutcomeTaskFail, 0},
 	}
@@ -187,6 +196,29 @@ func TestRecipeAuditMapsWireResultsToGateOutcomes(t *testing.T) {
 		case tc.score >= 0 && (score == nil || *score != tc.score):
 			t.Errorf("%s: score %v, want %v", tc.name, score, tc.score)
 		}
+	}
+}
+
+// A recipe that fixes the runs on which the incumbent spent its completion budget without finishing
+// earns the credit: those runs are the incumbent's failures, not pairs the gate drops.
+func TestRecipeAuditCreditsARecipeThatFixesASpentCompletionBudget(t *testing.T) {
+	for name, stop := range map[string]string{"tool_call_cut": agent.StopToolCallCut, "reasoning_starved": agent.StopReasoningStarved} {
+		t.Run(name, func(t *testing.T) {
+			e := newRAEnv(t)
+			e.use(t, nil)
+			e.fake.script = func(arm string, _ core.AgentContract) (core.AgentWireResult, error) {
+				if arm == recipeArmCandidate {
+					return raOutcome(true, 3), nil
+				}
+				w := raOutcome(false, 5)
+				w.Output, w.Deferred, w.DeferClass, w.Reason, w.StopReason = "", true, core.DeferClassBudget, "the completion budget was spent", stop
+				return w, nil
+			}
+			rep := e.report(t)
+			if rep.Gate.Verdict != eval.VerdictAdopt || rep.Status != recipe.StatusPublished {
+				t.Fatalf("gate %s (%s), status %s: a candidate that passes 16 of 16 tasks the incumbent could not finish should be published", rep.Gate.Verdict, rep.Gate.Reason, rep.Status)
+			}
+		})
 	}
 }
 
