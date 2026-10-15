@@ -118,9 +118,7 @@ func seatDownPipeline(t *testing.T, base string, contentionSec int) *Pipeline {
 // silence in the reason — not four independent per-run stalls. Four runs share
 // the seat, as the four decode stalls of 2026-09-29 23:00:12 did.
 func TestRunAgentTaskWedgedSeatFilesSeatDownPrefix(t *testing.T) {
-	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
-	defer compressColdLoad(t, 50*time.Millisecond, 700*time.Millisecond)()
-	defer compressBusyHold(t, 300*time.Millisecond, 50*time.Millisecond)()
+	defer compressWedgedSeat(t)()
 	life := &seatLife{}
 	fake := &agentFake{
 		rosterIDs:   []string{agentTestSeat},
