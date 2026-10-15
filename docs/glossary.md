@@ -309,6 +309,15 @@ Two unrelated meanings, distinguished by context:
   filesystem export) on another machine's RAM behind LMCache MP's L1 staging buffer, declared by
   `kv_cache_server`, off by default, scored on capacity at parity cost (ADR 0033).
 
+## Recipe
+
+A candidate edit to a seat's `agent_env_rules` kept as a typed record in the recipe store (ADR 0036, amendment
+2026-10-15): an id, a seat-capability tag, a closed-vocabulary rule set, the acceptance-passing runs it was
+distilled from, and a status of `proposed`, `published` or `demoted`. Data, never code: the record is decoded strictly
+and a rule set outside the vocabulary is refused. Only `local-offload recipe-audit` publishes one, on a measurement-gate
+ADOPT with steps no worse than the incumbent's, and an operator applies it. See
+[systems/coding-agent.md](systems/coding-agent.md).
+
 ## Recordless path
 
 The pipeline construction the coding agent uses: nil cache, nil ledger, no shadow capture, no

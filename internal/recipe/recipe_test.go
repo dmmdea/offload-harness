@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -160,5 +161,31 @@ func TestPublishedStatusNeedsAPassingAudit(t *testing.T) {
 	p.Audit = &audit
 	if err := p.Validate(); err == nil {
 		t.Error("a proposed record with an audit validated: nothing has audited it")
+	}
+}
+
+// The fixtures carry no host, path or identity text. The banned words are assembled at run time so this
+// file never holds one itself: a literal here would be the one place the text reached a tracked file.
+func TestFixturesAreSynthetic(t *testing.T) {
+	drivePath := regexp.MustCompile(`(^|[^A-Za-z0-9])[A-Za-z]:[\/]`)
+	banned := []string{"/" + "home/", "/" + "Users/", "@", "Bearer ", "dev" + "-caches", "work" + "trees", "My" + " Drive", "GPU" + "-"}
+	files, err := filepath.Glob(filepath.Join("testdata", "*.json"))
+	if err != nil || len(files) < 6 {
+		t.Fatalf("fixtures: %v (%d files)", err, len(files))
+	}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(raw)
+		for _, b := range banned {
+			if strings.Contains(s, b) {
+				t.Errorf("%s carries %q", f, b)
+			}
+		}
+		if drivePath.MatchString(s) {
+			t.Errorf("%s carries a drive path", f)
+		}
 	}
 }

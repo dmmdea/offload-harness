@@ -114,6 +114,60 @@ on top of an unvalidated diagnosis would inherit every ambiguity. Decided:
   and were re-labelled blind (41/41 again). A validated remedy remains a measured A/B on the seat (P2's
   `setup_ab.py` is the model); P3b — proposer, validation gate, objectives — waits for a trace corpus in the hundreds.
 
+### Amendment 2026-10-15 — recipes: the rules P3b will be built under, and the store its output lands in
+
+P3b (the proposer, its validation gate, the objectives) is parked until the trace corpus numbers in the hundreds.
+Before any of it exists, this amendment fixes the rules it will be built under, and builds the two pieces that do
+not need the corpus: the record a proposal lands in (the recipe store, `internal/recipe`) and the audit that judges
+one (`local-offload recipe-audit`). Decided, with the reasons on record:
+
+- **Candidates are closed-vocabulary data, never code.** A candidate is an edit to `agent_env_rules`
+  (`core.AgentEnvRules`, the seven keys of decision 1) and nothing else. No rule class, expression language,
+  template or generated function enters the vocabulary for a proposer's sake, and `rules_code` stays refused. The
+  store holds a candidate as a typed record and decodes it as strictly as the `--env-rules` file: an unknown key
+  anywhere is refused, and so is every string that is not shaped like rule data (a lower-case identifier for a tool
+  or argument name, one line of plain ASCII for a `rewrite_error` text, a bounded pattern that does not match the
+  empty string). The shapes keep the store from holding anything a reviewer could not read as data; what keeps a
+  recipe harmless is decision 3: an env rule never grants or denies an effect.
+- **The proposer proposes and never applies.** Decision 5, now binding on any proposer: its whole output is a
+  `proposed` recipe in the store. Publishing is the audit's result and nothing else; applying a published recipe to
+  a seat's `agent_env_rules` is an operator's edit. A `published` record that does not carry the audit that earned
+  it does not decode, so a record cannot be published by editing one word.
+- **Only the branch, the parallelism and the stop class are replay-scorable.** A recorded trace holds, per step,
+  the tool, its fate, the bytes the model read and (for the run) the stop reason. A rule that only removes or caps
+  calls (`deny_tools`, `allow_tools`, `max_calls_per_tool`) can be read against it: which branch would have been
+  cut, how many calls of one tool a run made, and whether the run's stop class (budget, loop) is one such a cut can
+  move. Every other key changes an argument or what the seat reads, so every later step of the run changes with it
+  and no recording says what the seat would have done next. `internal/recipe` classifies each key of the vocabulary,
+  and a test fails when `core.AgentEnvRules` gains a key nobody classified.
+- **Rules that rewrite observations need a live A/B.** `max_observation_tokens`, `observation_strip` and
+  `rewrite_error` rewrite what the seat reads, and `arg_limits` rewrites what a call returns; none is scored by
+  replay. They are scored by running the seat with and without the recipe on the same contracts, which is what
+  `recipe-audit` does (below), under a GPU lease.
+- **Recipes are distilled only from acceptance-passing runs and carry a seat-capability tag.** A recipe names the
+  runs it was distilled from (`provenance`), all of which passed their contract's acceptance checks, and the
+  capability class of the seat they ran on (`seat_tag`, an operator-chosen slug: the harness checks its shape and
+  that an audit's `--seat-tag` equals it, it does not define a vocabulary). A recipe is audited only on a seat of
+  its class; `recipe-audit` refuses a mismatch before it asks the seat anything. The store checks the shape of the
+  provenance, not the runs: the delegation log is the evidence, and a proposer that distils from a failing run is
+  out of contract.
+- **The audit.** `recipe-audit` takes a frozen pre-registration (`gate freeze`, judge
+  `{deterministic, acceptance-dsl}`, no frozen incumbent) and a file of contracts, one per declared task. It runs
+  every task on one seat twice: the incumbent arm is the seat as it is, the candidate arm has the recipe's rule set
+  in place of the box's table. The acceptance DSL is the judge. The decision is the measurement gate's, built as
+  `gate verdict` builds it. The recipe is published only when the verdict is ADOPT and the candidate's mean steps,
+  over the tasks both arms finished, are no worse than the incumbent's; anything else demotes it, an INCONCLUSIVE and
+  a tie included, because the incumbent keeps every tie. Steps are the verb's own check beside the gate, because the
+  gate's efficiency classes are tokens, money and memory and never a count of steps. A demoted recipe stays in the
+  store with the audit that demoted it: nothing is deleted. The verb never takes a lease: with no `GPU_LEASE_EPOCH`
+  in its environment, or an epoch no live lease carries, it refuses with exit 2 before the seat is asked, and it asks
+  again before every seat call.
+- **No proposer is built until trace-bearing rows number in the hundreds.** The E4 count was 16, and a proposer over
+  that would inherit every ambiguity that stopped the full rigger. This amendment builds the store, the audit and
+  the rules; it builds none of the proposer, the replay scorer or the objectives. Reopen trigger: `trace-corpus
+  readout` reports trace-bearing runs in the hundreds, and the seat the proposer is for has a frozen pre-registration
+  to be audited against.
+
 ## Consequences
 
 - A nil/zero table is byte-identical to the pre-key loop; every field is additive and `omitempty`, and a
@@ -123,6 +177,8 @@ on top of an unvalidated diagnosis would inherit every ambiguity. Decided:
 - An operator can now express, per seat, the constraints the bake-offs found by hand — and read them back.
 - Cost: one more table to keep honest. Mitigation: validation at load, a summary line in build notes, the
   starter table in `examples/agent-env-rules.json`.
+- The recipe store and the audit add one typed record and one verb. Nothing reads a published recipe: an
+  operator copies its rule set into the seat's table, so a store that is empty or absent changes nothing.
 
 ## Alternatives considered
 
@@ -145,10 +201,14 @@ on top of an unvalidated diagnosis would inherit every ambiguity. Decided:
 - [`internal/pipeline/agenttask.go`](../../../internal/pipeline/agenttask.go) — `TraceFromEffects`, the wire fields
 - [`cmd/local-agent/main.go`](../../../cmd/local-agent/main.go) — `--env-rules`
 - [`examples/agent-env-rules.json`](../../../examples/agent-env-rules.json)
+- [`internal/recipe/recipe.go`](../../../internal/recipe/recipe.go) — the recipe record, strict decode, the closed-vocabulary shapes
+- [`internal/recipe/store.go`](../../../internal/recipe/store.go), [`scoring.go`](../../../internal/recipe/scoring.go) — the store; which keys replay can score
+- [`recipe_audit_cmd.go`](../../../recipe_audit_cmd.go) — the `recipe-audit` verb
 
 ## Related docs
 
 - [systems/coding-agent.md](../../systems/coding-agent.md) — "Environment rules"
 - [systems/fleet-node.md](../../systems/fleet-node.md) — the wire result fields
+- [systems/measurement-gate.md](../../systems/measurement-gate.md) — the gate `recipe-audit` decides with
 - [ADR 0003](0003-policy-broker-and-capability-flags-off-by-default.md) — the risk table this does not touch
 - [glossary: Environment rule](../../glossary.md#environment-rule)

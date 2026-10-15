@@ -1070,6 +1070,25 @@ gates** — the other two report:
   seat needs. These are NOT the risk rules (`--rules`), which gate effects; env rules never grant
   or deny an effect. ADR 0036; details in [systems/coding-agent.md](systems/coding-agent.md).
 
+**Auditing a recipe (ADR 0036, amendment 2026-10-15).** A recipe is a proposed `agent_env_rules` table kept as a file in
+the recipe store (`<data home>/recipes/<id>.json`, or `--store DIR`), strict like the `--env-rules` file and tagged with
+the capability class of the seat (`seat_tag`) it was distilled for. To find out whether it earns a place on a seat,
+freeze a pre-registration (`gate freeze`) with judge `{deterministic, acceptance-dsl}` and no incumbent, write a contracts
+file (a JSON array of `{"id": <a declared task>, "contract": <agent contract>}` where every contract carries acceptance
+checks), and run the audit under a lease, because it runs the seat and never takes one itself:
+
+```
+local-offload gpu reserve --wait 8h --drain --unload-seat --for 2h --reason "recipe audit" -- \
+  local-offload recipe-audit --recipe ID --seat ALIAS --seat-tag TAG \
+  --contracts tasks.json --baseline baseline.json --engine-build BUILD [--attempts N] [--input-out gate-input.json]
+```
+
+Each task runs on the seat as it is and with the recipe's rules in place of the box's table. The recipe is published only
+when the gate says ADOPT and the mean steps are no worse; otherwise it is demoted, and either way the store records the
+audit. Exit 0 means the store holds the result (read `status` in the printed report); exit 2 is a refusal that ran
+nothing: no lease (`no_lease`), a lease this process does not hold (`lease_not_held`) or lost mid-audit (`lease_lost`), a
+`--seat-tag` that is not the recipe's (`seat_tag_mismatch`), or input the store or gate will not take (`bad_input`).
+
 Details and rationale: [systems/coding-agent.md](systems/coding-agent.md).
 
 ### The timeout chain, and walls sized from the seat's own rate (0.115.21, register D-03)
