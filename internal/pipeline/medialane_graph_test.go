@@ -24,6 +24,9 @@ import (
 
 func graphLaneReq(params map[string]any) core.Request {
 	p := map[string]any{"graph_path": "g.json"}
+	if _, template := params["template"]; template {
+		delete(p, "graph_path") // a template run names a template and its manifest and no graph file
+	}
 	for k, v := range params {
 		p[k] = v
 	}
@@ -108,6 +111,16 @@ func graphLaneCases() []laneCase {
 		{name: "the same host, a graph that names a file the box does not hold (the class default)", spec: krea2, grants: false, mustSeeBusy: true,
 			setup:  func(t *testing.T, f *admitFixture) { f.useHost(t, func() gpuprobe.HostMemory { return shortHost(65) }) },
 			params: func(t *testing.T, f *admitFixture) map[string]any { return graphOnTheBox(t, f.p, "not_on_this_box.safetensors") }},
+		// A template run names no graph file: its lease declares the model files its runtime manifest names (graphRAM), and the probe
+		// reads the same manifest, so the two agree on the same host.
+		{name: "a host with room for the template's own files and not for the class default", spec: krea2, grants: true,
+			setup:  func(t *testing.T, f *admitFixture) { f.useHost(t, func() gpuprobe.HostMemory { return shortHost(65) }) },
+			params: func(t *testing.T, f *admitFixture) map[string]any { return templateOnTheBox(t, f.p, tplCkpt, tplClip) }},
+		{name: "the same host, a template that names a file the box does not hold (the class default)", spec: krea2, grants: false, mustSeeBusy: true,
+			setup: func(t *testing.T, f *admitFixture) { f.useHost(t, func() gpuprobe.HostMemory { return shortHost(65) }) },
+			params: func(t *testing.T, f *admitFixture) map[string]any {
+				return templateOnTheBox(t, f.p, tplCkpt, "models/text_encoders/not_on_this_box.safetensors")
+			}},
 		{name: "another lane is still loading the memory it declared", spec: krea2, grants: false, mustSeeBusy: true,
 			setup: func(t *testing.T, f *admitFixture) {
 				f.useHost(t, func() gpuprobe.HostMemory { return shortHost(40) })
