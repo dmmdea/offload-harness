@@ -192,7 +192,7 @@ superiority. For other scores nothing is claimed beyond the cells: a score set t
 shape, or a size between the cells, is not covered. Below 16 tasks nothing is claimed (`min_pairs` cannot be frozen lower), and
 the efficiency reads keep the calibration given under them.
 
-`TestPassFailFalseAdoptRateIsExactlyAtMostFourPercentWhereTheArmsBarelyDisagree` runs the exact sums on 32 sparse rows (61 to 250
+`TestPassFailFalseAdoptRateIsExactlyAtMostFourPercentWhereTheArmsBarelyDisagree` runs the exact sums on 30 sparse rows (61 to 250
 tasks and the margin-0.10 sizes) with the figures computed outside the package (scipy: the restricted likelihood maximised
 numerically, not by the closed form), and requires at most 4% and agreement to 2e-6; `TestNestedLossFalseAdoptRateIsTheBinomialSum`
 pins the nested-loss sawtooth at 20 sizes from 16 to 1000 tasks; `TestPrimaryIntervalOnPassFailPairsIsTangosScoreInterval` and
@@ -200,10 +200,10 @@ pins the nested-loss sawtooth at 20 sizes from 16 to 1000 tasks; `TestPrimaryInt
 `TestTangoIntervalEndsAreWhereTheStatisticIsPlusOrMinusZ` and `TestTangoVarianceIsTheRestrictedMaximumLikelihood` check the
 inversion and the variance against their definitions over thousands of draws; `TestNullAdoptRateAtTheFloorsIsCalibrated` runs `Gate` end
 to end on eleven null cells at the floors (0.0% to 2.5%; skipped under `-short`) and `TestPrimaryIntervalFalseAdoptRateOnTheStatedNulls`
-the interval alone over 50000 datasets on fifteen cells (0.0% to 2.5%). The package's tests take about 10 s (about 2 s with `-short`) on
+the interval alone over 50000 datasets on fifteen cells (0.0% to 2.5%). The package's tests take about 10 s (about 6 s with `-short`) on
 a 36-core machine; the simulated cells split their trials over `GOMAXPROCS`, so a 4-core runner takes a few times that. The grids, the power
 rows, the stress cells and the envelope are `TestCalibrationStudy` and `TestSparseCalibrationStudy` in `internal/eval`, off unless
-`OFFLOAD_GATE_STUDY=1` (about 25 minutes on 36 workers; the closed-form part alone, `TestSparseCalibrationStudy`, about 5):
+`OFFLOAD_GATE_STUDY=1` (1442 s, about 24 minutes, on 36 workers; the closed-form part alone, `TestSparseCalibrationStudy`, about 5):
 
 ```
 OFFLOAD_GATE_STUDY=1 go test ./internal/eval/ -run 'TestCalibrationStudy|TestSparseCalibrationStudy' -v -timeout 2h

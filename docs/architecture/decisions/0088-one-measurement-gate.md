@@ -178,7 +178,7 @@ The gate version is 3: a baseline written under another version (1 or 2) is refu
     range), the dataset is three counts and the interval is Tango's score interval for a paired difference (Tango 1998,
     Statistics in Medicine 17:891): the set of null differences `mu` whose statistic
     `(wins - losses - n*mu) / sqrt(n * (u + v - mu^2))` stays within +-1.96, with the probabilities of a win and a loss
-    `u` and `v` fitted under `u - v = mu` (the larger root of `2 n v^2 - B v - C = 0`, `tangoVar0`), inverted by 80
+    `u` and `v` fitted under `u - v = mu` (the larger root of a quadratic, `tangoVar0`), inverted by 80
     bisections. Its variance is the one the hypothesised difference would give, not the one the sample showed, which is what
     holds it where the arms disagree on a handful of tasks. With no discordant pair the ends are `+-w z^2/(n + z^2)`:
     a margin of 0.05 of the range is certified by 73 ties and not by 72 (the chance of 73 ties at a true loss rate of 5% is
@@ -228,7 +228,7 @@ The gate version is 3: a baseline written under another version (1 or 2) is refu
     | **Tango for pass/fail pairs, two pairs at each end otherwise (version 3)** | **3.04, none** | **2.44, none** | **3.21, none** | **3.01 / 3.11 / 2.71** |
 
     The decision rule was: the candidate with no cell over 4% and the best power. Two pairs at each end for every pair
-    clears the three grids but reaches 4.0% for a candidate that loses 5% of the incumbent's passes at 444 tasks, off the grids,
+    clears the three grids but reaches 4.01%, just over the bar, for a candidate that loses 5% of the incumbent's passes at 444 tasks, off the grids,
     and has the least power on pass/fail data (non-inferiority at pass rates .95/.95, 40 tasks: 3.3% against 12.5%). Tango's
     interval has no cell over 4% and the best power among those that clear. So pass/fail pairs go to it, and the augmented
     form with two pairs reads the rest, because the alternatives that do not augment fail on them: the version 2 score form
@@ -313,7 +313,7 @@ The gate version is 3: a baseline written under another version (1 or 2) is refu
   valid document (`gate check` alone prints that document's own hash, so a verdict adapter takes the baseline hash from
   `freeze`'s output and passes `--expect-hash`; the docs page says so).
 - **The calibration claim is scoped to what the tests measure.** For pass/fail pairs: the exact sums of
-  `TestPassFailFalseAdoptRateIsExactlyAtMostFourPercentWhereTheArmsBarelyDisagree` (32 rows, 61 to 250 tasks and the margin-0.10
+  `TestPassFailFalseAdoptRateIsExactlyAtMostFourPercentWhereTheArmsBarelyDisagree` (30 rows, 61 to 250 tasks and the margin-0.10
   sizes, each at most 2.3%, pinned to scipy), the nested-loss sawtooth of `TestNestedLossFalseAdoptRateIsTheBinomialSum` (20
   sizes, at most 2.4%) and the study's envelope (at most 3.1% over every size from 16 to 500 and every share of disagreeing
   tasks, at both margins and for superiority). For every other score: the 63 null cells, the 54 sparse cells and the 49 stress
@@ -341,8 +341,8 @@ Dated 2026-10-14, from the review that made the gate version 3. Open statistical
   lattice a score set actually has (steps of 1/k for k attempts, half credit) would put the pseudo-mass where the lattice
   forces it and leave a dense score set alone. The stress cells show the shape of the target: the version 2 score form is
   calibrated on means of 3 and 5 attempts (at most 3.4% at 24 to 250 tasks) and fails only on coarse sparse sets (a few half-credit
-  tasks, up to 15.5%). One variant was tried informally and is not a result: pseudo-pairs weighed by the share of tied pairs held 2.7%
-  at worst on the stress cells and kept 57.7% of the 0..10 judge power at 100 tasks (against 37.7% now, 62.9% at version 2),
+  tasks, up to 15.5%). One variant was tried informally and is not a result: pseudo-pairs weighed by the share of tied pairs held 3.2%
+  at worst on the stress shapes up to 1000 tasks and kept 57.7% of the 0..10 judge power at 100 tasks (against 37.7% now, 62.9% at version 2),
   but its weight was fitted to those cells and it has no derivation. It needs one before it is a candidate.
 - **The edge between the two constructions.** One half-credit task among a thousand sends a pass/fail dataset to the fallback and
   widens its interval (sixteen ties `+-0.194 w`, fifteen ties and a difference of 0.01 `+-0.237 w`). A mixed read, Tango's variance for the

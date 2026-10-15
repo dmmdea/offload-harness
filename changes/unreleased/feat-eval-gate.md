@@ -120,12 +120,12 @@
   pinned, through `CheckBaseline` and through the verb) and one as the version 2 gate wrote it. Calibration: `Gate` run end to
   end at the floors on eleven null cells (at most 4% over 4000 to 10000 trials, fixed seeds, skipped under `-short`; 0.0% to 2.5%
   measured), the interval itself over 50000 datasets on fifteen cells (0.0% to 2.5% measured), the exact sums of the false-ADOPT rate of
-  pass/fail pairs on 32 sparse rows (at most 2.3%, pinned to scipy), the nested-loss candidate's rate as an exact binomial sum at 20
+  pass/fail pairs on 30 sparse rows (at most 2.3%, pinned to scipy), the nested-loss candidate's rate as an exact binomial sum at 20
   sizes from 16 to 1000 tasks (0% to 72 tasks, 2.4% at 73, pinned to scipy), Tango's ends against scipy and the likelihood against a
   ternary search over thousands of draws, the augmented interval against numpy and against an explicitly augmented sample, the exact
   sum against simulation, the t table against scipy, and the study harness pinned to `BootstrapDeltaMean` bit for bit, to scipy's
   quantiles and to the moments of its generators. The `internal/eval` tests take about 10 s with the calibration cells (about
-  2 s with `-short`) on a 36-core machine; the cells
+  6 s with `-short`) on a 36-core machine; the cells
   split their trials over `GOMAXPROCS`, so a 4-core runner takes a few times that. Root tests drive the verb
   in-process (freeze, check, verdict round trip, exit codes 0, 1 and 2, a failed write of the result on each verb, `-h`,
   write-once freeze, the INV-5 refusals, `schema`, the version 1 refusal). Mutation checks, each proved applied (`git diff
