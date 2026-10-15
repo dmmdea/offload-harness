@@ -8146,6 +8146,8 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			RepackAttempts:   pr.Result.RepackAttempts,
 			QueuedMs:         pr.Result.QueuedMs,
 			AcceptanceResult: acceptanceResult(pr),
+			// The same mark the corpus line carries (delegationLogLine.Refusal): a place in line, not the subtask's outcome.
+			Refusal: pr.refusalRow,
 		}); err != nil {
 			r.ledgerLost.Add(1)
 			r.warnLedger.Do(func() {

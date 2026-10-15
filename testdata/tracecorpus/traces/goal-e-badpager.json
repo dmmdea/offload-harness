@@ -1,0 +1,40 @@
+{
+  "id": "goal-e-badpager",
+  "goal": "synthetic goal e",
+  "stop_reason": "done",
+  "steps": 2,
+  "output": "synthetic output",
+  "pager": {
+    "evictions": 0,
+    "evicted_bytes": 0,
+    "distinct_evicted": 0,
+    "refetched_distinct": 0,
+    "refetch_rate": null,
+    "basis": "measured",
+    "verdict": "inconsistent synthetic fixture",
+    "compaction_passes": 0
+  },
+  "transcript": [
+    {
+      "Role": "system",
+      "Content": "synthetic system prompt",
+      "ToolCalls": null,
+      "ToolCallID": "",
+      "IsError": false
+    },
+    {
+      "Role": "user",
+      "Content": "synthetic objective e",
+      "ToolCalls": null,
+      "ToolCallID": "",
+      "IsError": false
+    },
+    {
+      "Role": "assistant",
+      "Content": "synthetic final answer",
+      "ToolCalls": null,
+      "ToolCallID": "",
+      "IsError": false
+    }
+  ]
+}

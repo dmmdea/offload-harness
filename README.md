@@ -147,7 +147,7 @@ offload-harness shadow-label --oracle nim   # judge queued shadow items against 
 offload-harness mcp                      # run as an MCP server (stdio)
 offload-harness fleet-serve              # join the fleet-dispatcher fleet (health/dispatch/jobs on :18811)
 offload-harness fleet-measure            # prime the fleet footprint store (one minimal render per configured task)
-offload-harness ledger [--since DAYS]    # token-savings report
+offload-harness ledger [--since DAYS]    # token-savings report; add --failures for the failure-class register instead
 offload-harness doctor                   # endpoint health, model aliases, derived media routes
 offload-harness report [--out FILE]      # read-only capability report (tier, serving, media routes) — Markdown, safe to send
 offload-harness acceptance               # the gate: exercise every bound capability AS THIS IDENTITY (non-zero = do not hand it work)
