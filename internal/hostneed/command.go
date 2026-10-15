@@ -70,6 +70,12 @@ func ParseRenderCall(args []string) (RenderCall, bool) {
 // machine's config supplies only where the model files are (ComfyDir) and, for video, the family
 // bindings the runner receives from the harness.
 func (c RenderCall) Estimate(f Facts) (Need, bool) {
+	// --reserve-vram is the runner's margin on every route, a graph call's included: the card it fits against is the card less it.
+	if v := c.Flags["reserve-vram"]; v != "" {
+		if r, err := strconv.ParseFloat(v, 64); err == nil && r > 0 {
+			f.ReserveVRAMGiB = r
+		}
+	}
 	// --graph POSTS THE CALLER'S OWN WORKFLOW as it is ("any nodes, any model, any pipeline",
 	// comfy-render.mjs; comfy-video.mjs says the same): the family flags are not read, so the helper's
 	// default family says nothing about what it loads. Sizing it as that family declared 0 for a 40 GiB
@@ -79,11 +85,6 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 	// class default stands in, as it always did.
 	if c.RunsOwnGraph() {
 		return ForGraphFile(c.Flags["graph"], f)
-	}
-	if v := c.Flags["reserve-vram"]; v != "" {
-		if r, err := strconv.ParseFloat(v, 64); err == nil && r > 0 {
-			f.ReserveVRAMGiB = r
-		}
 	}
 	cfg := f.Cfg
 	switch c.Route {

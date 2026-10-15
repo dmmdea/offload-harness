@@ -283,3 +283,6 @@ func ModelFileSizes(roots []ModelRoot, names []string, stat func(path string) (s
 	}
 	return sizes, "", true
 }
+
+// ModelExtensions are the weight file extensions the scan reads a loader's file by (a copy: the list is the scan's own).
+func ModelExtensions() []string { return append([]string(nil), modelExts...) }

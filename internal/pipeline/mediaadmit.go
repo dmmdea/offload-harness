@@ -1406,8 +1406,14 @@ func containsString(list []string, s string) bool {
 // few KiB.
 func graphRAM(cfg config.Config, params map[string]any) func(float64) hostneed.Need {
 	graphPath := paramStr(params, "graph_path")
+	// reserve_vram goes to the runner as --reserve-vram, the margin it holds back on the card, so the graph is fitted with it; a value the
+	// runner would not take (not a number, 0 or less) leaves the config's, else the default.
+	var reserve float64
+	if r, err := strconv.ParseFloat(strings.TrimSpace(paramStr(params, "reserve_vram")), 64); err == nil && r > 0 {
+		reserve = r
+	}
 	return func(vram float64) hostneed.Need {
-		f := hostneed.Facts{Cfg: cfg, VRAMGiB: vram}
+		f := hostneed.Facts{Cfg: cfg, VRAMGiB: vram, ReserveVRAMGiB: reserve}
 		if n, ok := hostneed.ForGraphFile(graphPath, f); ok {
 			return n
 		}

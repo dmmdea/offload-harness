@@ -1,9 +1,12 @@
 package hostneed
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/mediacap"
@@ -16,8 +19,8 @@ import (
 // name the weight files. ForGraph reads those names with the reader the node door already uses (mediacap.ScanGraph), finds each
 // under the box's model roots (mediacap.ModelFileSizes, the lookup the door's own held-by-name check makes) and declares the sum.
 //
-// It declares a figure only when it can stand behind all of it. A graph it cannot read, one that names no weight file, or ONE file
-// it cannot find or size is not sized at all, and the caller keeps the class default exactly as before: a size that is not
+// It declares a figure only when it can stand behind all of it. A graph it cannot read, one that names no weight file, ONE file
+// it cannot find or size, or a weight-like name the scan did not list, is not sized at all, and the caller keeps the class default exactly as before: a size that is not
 // known must never shrink a declaration.
 
 // maxGraphBytes bounds the graph document ForGraphFile reads. A ComfyUI API-format graph is a few KiB, and a fleet node's dispatch
@@ -33,7 +36,11 @@ const graphDetailFiles = 8
 // they fit, because a set that fits streams nothing from RAM. The figure is an estimate from the files' sizes, not a measurement.
 //
 // ok is false, and the caller keeps the media class default, when graph is not a JSON object, names no weight file, or names one
-// that does not resolve under the box's model roots (or is empty). Facts.Stat sizes the files when set, as for every estimate.
+// that does not resolve under the box's model roots (or is empty), or when the document holds a weight-like name the sizing did not
+// cover (unsizedWeight: another extension, a nested widget object, a list). Facts.Stat sizes the files when set, as for every estimate.
+//
+// LIMIT: a weight is recognised by its extension (the scan's six and otherWeightExts) and a graph can name one by another, or load
+// a file whose name is built at run time; such a graph is sized by the files that were seen, an estimate that can be low.
 func ForGraph(graph []byte, f Facts) (Need, bool) {
 	files, err := mediacap.ScanGraph(graph)
 	if err != nil || len(files.Models) == 0 {
@@ -45,6 +52,16 @@ func ForGraph(graph []byte, f Facts) (Need, bool) {
 	}
 	sizes, _, ok := mediacap.ModelFileSizes(mediacap.ModelRoots(f.Cfg.ComfyDir), files.Models, stat)
 	if !ok || len(sizes) != len(files.Models) { // the second is the contract of ModelFileSizes; a figure is never built on a short list
+		return Need{}, false
+	}
+	// The scan lists only the top-level string inputs that end in one of its six extensions. A weight it did not list (another extension, a
+	// nested widget object, a list) is a file the sizes above do not cover, and a sum without it is a figure that shrinks: on a card the
+	// listed files fit it would declare 0 where the class default stood. Any such name keeps the class default.
+	sized := make(map[string]bool, len(files.Models))
+	for _, m := range files.Models {
+		sized[m] = true
+	}
+	if _, doubt := unsizedWeight(graph, sized); doubt {
 		return Need{}, false
 	}
 	var total float64
@@ -85,4 +102,62 @@ func ForGraphFile(path string, f Facts) (Need, bool) {
 		return Need{}, false
 	}
 	return ForGraph(raw, f)
+}
+
+// otherWeightExts are weight-like extensions beyond the scan's six that a loader of some custom node opens. The list is a floor, not
+// the set of every weight format: a file this does not recognise is not seen (a limit, named in the docs).
+var otherWeightExts = []string{".bin", ".pt2", ".pkl", ".pickle", ".onnx", ".engine", ".trt", ".npz", ".h5"}
+
+// weightLike reports whether a string value ends in a weight extension, the scan's or one of otherWeightExts (case-insensitive).
+func weightLike(v string) bool {
+	l := strings.ToLower(strings.TrimSpace(v))
+	for _, e := range mediacap.ModelExtensions() {
+		if strings.HasSuffix(l, e) {
+			return true
+		}
+	}
+	for _, e := range otherWeightExts {
+		if strings.HasSuffix(l, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// unsizedWeight walks the WHOLE document, not only the node inputs the scan reads, and returns the first string value that looks like
+// a weight file (weightLike) and is not among the names that were sized. An output prefix and a URL are not files, as for the scan.
+// doubt is also true when the document cannot be walked, which cannot happen to one the scan read.
+func unsizedWeight(graph []byte, sized map[string]bool) (name string, doubt bool) {
+	var doc any
+	if err := json.NewDecoder(bytes.NewReader(graph)).Decode(&doc); err != nil {
+		return "", true
+	}
+	var walk func(key string, v any) (string, bool)
+	walk = func(key string, v any) (string, bool) {
+		switch x := v.(type) {
+		case string:
+			if key != "filename_prefix" && !strings.Contains(x, "://") && weightLike(x) && !sized[x] {
+				return x, true
+			}
+		case []any:
+			for _, e := range x {
+				if n, d := walk(key, e); d {
+					return n, true
+				}
+			}
+		case map[string]any:
+			keys := make([]string, 0, len(x))
+			for k := range x {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				if n, d := walk(k, x[k]); d {
+					return n, true
+				}
+			}
+		}
+		return "", false
+	}
+	return walk("", doc)
 }

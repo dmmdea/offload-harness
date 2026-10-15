@@ -1626,8 +1626,10 @@ is given:
 **Host RAM.** A generation call also declares the host RAM its weights will stream from (the UNet or checkpoint and the
 text encoder of its binding, for a video call the family's binding with the request's own `transformer` put over it, counted
 in full when together they do not fit the card it runs on; 0 when they fit; the media
-class default for the audio.cpp lanes and for a `run-graph` (or a helper's `--graph`) whose graph cannot be read or sized; a graph that can is declared as the weight files its loaders name, by the same fit rule, `gpu-lease.md`: the largest
-ComfyUI family the box binds, an upper bound that is not their own size, and 0 on a box that binds none; **the sd.cpp lanes
+class default for the audio.cpp lanes and for a `run-graph` (or a helper's `--graph`) whose graph cannot be read or sized: the largest
+ComfyUI family the box binds, an upper bound that is not their own size, and 0 on a box that binds none; a graph that can be sized
+declares the weight files its loaders name, in full when they do not fit the card and 0 when they fit (the same fit rule, see
+`gpu-lease.md`); **the sd.cpp lanes
 declare the larger of that and the weights they park themselves** (the bound files in full when the lane's extra args carry
 `--offload-to-cpu`, an estimate from their sizes until three measured runs raise it, F60), so an sd.cpp-only node's spill is inside
 the guard; nothing for upscale and voice) and the grant admits it
