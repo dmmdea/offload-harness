@@ -1021,6 +1021,47 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// or not anything was evicted: an object of real zeros is a measurement, an absent key
 	// is "not recorded". Set later it would be lost on the door's early return.
 	wire.Pager = agentPagerWire(res.Pager)
+	// The loop's stop evidence and the seat's response shape ride the wire too, set HERE for the
+	// same reason as the pager object above: before every defer branch AND before the write door
+	// below, whose cap breach returns a write-class deferral. A copy made after the door is lost
+	// on that early return.
+	wire.StopNote = res.StopNote
+	wire.OutputTruncated = res.OutputTruncated
+	// The fit the loop actually ran at supersedes the run-start prediction, and
+	// the re-issue it made — same rule as the trace above: set before the write
+	// door and every defer branch, because a run that ended on the wall is the
+	// one whose budget arithmetic most needs reading.
+	if res.FinalBudgetFit > 0 {
+		wire.FinalBudgetFit, wire.BudgetNote = res.FinalBudgetFit, res.BudgetNote
+	}
+	wire.FinalReissue = res.FinalReissue
+	wire.ResponseShape = agent.ResponseShape(res.Calls)
+	// T2-B: capture the run's prefill accounting HERE, immediately after the loop and
+	// BEFORE the write door and the defer branches below. The door can return a
+	// write-class deferral, and every defer branch still records a ledger row via
+	// finish()/deferWire(); a budget-exhausted, timed-out or write-refused run is
+	// precisely where prefill is most interesting -- it burned the most steps. Reading
+	// it only on the success path would systematically exclude the expensive runs from
+	// the measurement, biasing the very number this exists to produce.
+	//
+	// meta is captured by reference by the finish/deferWire closures defined above, so
+	// mutating it now reaches every recording path.
+	if pf := res.Prefill; pf.ObservedSteps > 0 {
+		meta.PrefillSteps = pf.ObservedSteps
+		meta.PrefillTokens = pf.PrefillTokens
+		meta.CacheTokens = pf.CacheTokens
+		meta.PrefillMS = pf.PrefillMS
+		// Mirror onto the WIRE result too: the node's ledger row already had
+		// these, the delegator's corpus did not — a remote run's prefill
+		// economics were computed then discarded from the delegation log's
+		// point of view. `wire` is copied by finish/deferWire at call time, so
+		// every recording path below (write-class and budget defers included — the
+		// expensive runs) carries them.
+		wire.PrefillSteps = pf.ObservedSteps
+		wire.PrefillTokens = pf.PrefillTokens
+		wire.CacheTokens = pf.CacheTokens
+		wire.PrefillMS = pf.PrefillMS
+	}
 	// The seat's measured numbers from THIS run feed the next estimate: the
 	// effective decode rate over the ≥ 1,024-token completions and the cold
 	// load the warm-up waited for. Recorded on every branch — a timed-out run
@@ -1131,42 +1172,6 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			wire.WriteNote = derr.Error()
 			return deferWire(core.DeferClassWrite, derr.Error())
 		}
-	}
-	wire.StopNote = res.StopNote
-	wire.OutputTruncated = res.OutputTruncated
-	// The fit the loop actually ran at supersedes the run-start prediction, and
-	// the re-issue it made — same rule as the trace above: set before every
-	// defer branch, because a run that ended on the wall is the one whose
-	// budget arithmetic most needs reading.
-	if res.FinalBudgetFit > 0 {
-		wire.FinalBudgetFit, wire.BudgetNote = res.FinalBudgetFit, res.BudgetNote
-	}
-	wire.FinalReissue = res.FinalReissue
-	wire.ResponseShape = agent.ResponseShape(res.Calls)
-	// T2-B: capture the run's prefill accounting HERE, immediately after the loop and
-	// BEFORE the defer branches below. Every one of those branches still records a
-	// ledger row via finish()/deferWire(), and a budget-exhausted or timed-out run is
-	// precisely where prefill is most interesting -- it burned the most steps. Reading
-	// it only on the success path would systematically exclude the expensive runs from
-	// the measurement, biasing the very number this exists to produce.
-	//
-	// meta is captured by reference by the finish/deferWire closures defined above, so
-	// mutating it now reaches every recording path.
-	if pf := res.Prefill; pf.ObservedSteps > 0 {
-		meta.PrefillSteps = pf.ObservedSteps
-		meta.PrefillTokens = pf.PrefillTokens
-		meta.CacheTokens = pf.CacheTokens
-		meta.PrefillMS = pf.PrefillMS
-		// Mirror onto the WIRE result too: the node's ledger row already had
-		// these, the delegator's corpus did not — a remote run's prefill
-		// economics were computed then discarded from the delegation log's
-		// point of view. `wire` is copied by finish/deferWire at call time, so
-		// every recording path below (budget defers included — the expensive
-		// runs) carries them.
-		wire.PrefillSteps = pf.ObservedSteps
-		wire.PrefillTokens = pf.PrefillTokens
-		wire.CacheTokens = pf.CacheTokens
-		wire.PrefillMS = pf.PrefillMS
 	}
 	// The run's workspace root is gone (register C-79): its own file tools could not open it
 	// and the loop ended the run on the report, instead of letting the seat answer from
