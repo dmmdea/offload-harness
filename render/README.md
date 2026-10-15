@@ -370,3 +370,82 @@ to the loader that reads it. `list` hides paid API templates and FLUX-family one
 is `render/templates-license-map.json`. Rules, fields and gaps:
 [`docs/systems/media-generation.md`](../docs/systems/media-generation.md#comfy-workflow-templates-catalog-phase-a).
 Tests: `node --test render/templates-catalog.test.mjs`.
+
+---
+
+# Template-to-API converter (`template-to-graph.mjs`)
+
+Converts a ComfyUI UI-format workflow template (`nodes[]`, `links[]`, `definitions.subgraphs`, `widgets_values`) into the
+API-format prompt graph (`{"<id>": {"class_type", "inputs"}}`) that `POST /prompt` and the builders in this directory
+use. A pure function of the template, an `/object_info` listing the caller supplies and options: no ComfyUI, no GPU, no
+network, no file written. Dependency-free (`node:` builtins). Clean room: the GPL-3.0 frontend and ComfyUI's server code
+were not read as source.
+
+```bash
+node render/template-to-graph.mjs --template <template.json> --object-info <object_info.json> \
+    [--comfy-version X.Y.Z] [--seed N] [--min-comfyui-version X.Y.Z | --index <index.json> [--name NAME]] [--meta]
+```
+
+It prints the graph (`{"ok":true,"graph":{...},"warnings":[...],"warnings_dropped":0,"pinnedSeeds":[...],"stats":{...}}`, exit 0) or a typed
+refusal (`{"ok":false,"refusal":{"code","message","details"}}`, exit 1; exit 2 for a call that cannot be read). It drops
+muted nodes, passes bypassed nodes through by type (positionally, and refused as `ambiguous_bypass` when the counts differ), expands subgraphs (ids `<instance>:<inner>`) with their input and output
+rewiring, resolves `Reroute` and `PrimitiveNode`, skips `Note` and `MarkdownNote`, maps `widgets_values` to named inputs in
+the listing's input order (the hidden `control_after_generate` slot, upload slots, dotted dynamic-combo and autogrow names)
+and pins seeds with `--seed`. A template whose minimum ComfyUI version exceeds `--comfy-version` is refused
+(`comfyui_too_old`); a known minimum with no version given is a refusal too, because the version is never assumed, and a version given with no minimum to compare it with is a `version_check_skipped` warning. An
+unknown node class, a widget layout that does not add up and an input type with no rule are refusals as well, never a
+guess. It is meant for trusted template packages: its caps bound nodes, wires, hops, nesting depth, warnings and id length, not
+the work proportional to the size of a value (see the Known gaps of the system page linked below). Rules, refusal codes, evidence and the open frontend-golden comparison:
+[`docs/systems/media-generation.md`](../docs/systems/media-generation.md#template-to-api-converter-rendertemplate-to-graphmjs).
+Tests: `node --test render/template-to-graph.test.mjs`; fixtures in
+[`testdata/template-goldens/`](testdata/template-goldens/README.md).
+
+---
+
+# Builder drift guard (`builder-drift.mjs`)
+
+A `wf-*.mjs` builder that was copied from a ComfyUI workflow template carries the template's recipe widgets
+(steps, cfg, sampler, scheduler, shift, LoRA strength, ...) as literals. `testdata/builder-drift.json` records,
+per builder and view, the template name, the `comfyui-workflow-templates-json` version and sha256 hashes of those
+widgets as the template and as the builder's output graph carry them (names and hashes only; no template content).
+
+```bash
+node --test render/builder-drift.test.mjs                       # builder side, offline: one test per builder
+COMFYUI_DIR=<comfyui-tree> node --test render/builder-drift.test.mjs   # plus the template side against the installed package
+node render/builder-drift.mjs check   --templates-dir <extract>/comfyui_workflow_templates_json/templates   # a candidate package
+node render/builder-drift.mjs explain --comfy-dir <comfyui-tree>   # template and builder values side by side
+node render/builder-drift.mjs record  --comfy-dir <comfyui-tree>   # re-pin, after comparing the builder with the template
+node render/builder-drift.mjs check --comfy-dir <comfyui-tree> --require-templates --strict   # upgrade runbook
+```
+
+`--templates-dir` (and `COMFY_TEMPLATES_DIR`) takes the package's `templates/` folder, not the package root above it: a
+directory that holds a `templates/` folder and no top-level `.json` file is refused with exit 2 and the path to pass.
+
+The CLI fails closed. A flag that takes a value and gets none (an empty or unset shell variable, also `--flag=`), an
+argument that starts with `-` and is not a known flag (single-dash forms such as `-templates-dir` included), a value given
+to a switch (`--strict=1`) and a second positional after the verb all exit 2. A directory named only through
+`COMFY_TEMPLATES_DIR` / `COMFYUI_DIR` that is unset still leaves the template side skipped; `--require-templates` makes
+that an error (exit 2) instead of a skipped side.
+`--strict` also fails (exit 1) on every `unreviewed` manifest entry; a plain `check` leaves them green. Both belong to
+`check`. **The runbook command above (`--require-templates --strict`) exits 1 on the committed manifest by design:**
+exactly `2 failure(s)`, for `wf-qwen-image-edit [full] ksampler.cfg` and `wf-qwen-image-21 [edit] encoder.resolution`,
+the two `unreviewed` entries. Those are the expected failures; any other line is a new finding. Drop `--strict` for a
+green gate.
+
+A moved widget fails `builder drift: <builder> [<view>]: ...` naming the builder. `builder-drift-specs.mjs` lists
+the widgets per builder; a new `wf-*.mjs` file must be guarded there or listed in `NOT_TEMPLATE_DERIVED` with a
+reason. A locator never reads a widget whose input is linked (its serialized value is stale): it throws and the spec
+points at the source that feeds it. The templates directory is resolved in one order, by the CLI and the tests alike:
+`--templates-dir`, `--comfy-dir`, `COMFY_TEMPLATES_DIR`, `COMFYUI_DIR`. Rules, statuses and the first run's findings:
+[`docs/systems/media-generation.md`](../docs/systems/media-generation.md#builder-drift-guard).
+
+What a green run does not tell you:
+
+- Node mode is never read: a bypassed or muted node or instance still reads as live.
+- Wiring is mostly unguarded: one `D` item (Wan Animate 2 pose percents); the `wf-wan22-i2v` high and low pairs share
+  one template locator each (steps, cfg and the step split, `high.end_at_step` / `low.start_at_step` both reading node
+  127). A `feeds` locator would cover it; it is not built.
+- `W` and `I` do not consult `proxyWidgets`; only `P` does.
+- The two `unreviewed` entries stay green in a plain `check`; `check --strict` fails them. One is probably a real
+  builder defect (`wf-qwen-image-edit` full preset: CFG 3.0 against the template's effective 4), an open item recorded in
+  the system page.
