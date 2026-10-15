@@ -482,7 +482,7 @@ func (m *Monitor) onCeiling() {
 
 func (m *Monitor) onStall() {
 	m.mu.Lock()
-	if m.stopped || m.cause != nil || m.parked {
+	if m.stopped || m.cause != nil || m.parked || m.stallCallbackStaleLocked() {
 		m.mu.Unlock()
 		return
 	}

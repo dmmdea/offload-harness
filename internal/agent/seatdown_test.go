@@ -475,15 +475,21 @@ func TestParkedMonitorIgnoresATimerThatFiresAnyway(t *testing.T) {
 	m.Phase(PhaseDecoding, 0)
 	m.mu.Lock()
 	m.parkLocked()
+	m.last = m.last.Add(-time.Minute) // real silence, so only the park can be what stops the call
 	m.mu.Unlock()
 	m.onStall() // the callback that raced the Stop
 	if m.Cause() != nil || ctx.Err() != nil {
 		t.Fatalf("a parked monitor filed a verdict: %v", m.Cause())
 	}
-	// Control: the same call on an unparked monitor stalls it.
+	// Control: the same call on an unparked monitor stalls it once the silence is
+	// real (a callback that finds the allowance not yet spent belongs to an arm the
+	// timer has left behind and files nothing: stallCallbackStaleLocked).
 	ctx2, m2 := NewMonitor(context.Background(), msPolicy(), 5*time.Second)
 	defer m2.Stop()
 	m2.Phase(PhaseDecoding, 0)
+	m2.mu.Lock()
+	m2.last = m2.last.Add(-time.Minute) // the silence is real: a minute against a 200 ms allowance
+	m2.mu.Unlock()
 	m2.onStall()
 	var se *StallError
 	if !errors.As(m2.Cause(), &se) || ctx2.Err() == nil {
