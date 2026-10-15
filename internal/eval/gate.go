@@ -639,21 +639,47 @@ func Gate(b Baseline, baselineHash string, in GateInput) (GateResult, error) {
 	}
 	res.KeepIncumbent = res.Verdict != VerdictAdopt
 
-	res.Power = powerNote(res.NUsed, res.Delta, res.Lo, res.Hi, b)
+	pf := passFail{span: scoreHi - scoreLo}
+	pf.wins, pf.losses, pf.ok = winsAndLosses(incScores, candScores, pf.span)
+	res.Power = powerNote(res.NUsed, res.Delta, res.Lo, res.Hi, b, pf)
 	res.EraMarker = eraMarker(b.GateVersion, incArm.Stamps, in.Candidate.Stamps, in.Judge.Identity)
 	return res, nil
 }
 
-// powerNote reads the main interval three ways (the power note of rule R4). It adds no statistic.
-func powerNote(n int, delta, lo, hi float64, b Baseline) PowerNote {
+// passFail is the primary record's pass/fail shape, when it has one: every pair a tie, a win of the whole
+// range or a loss of it, so the gate read Tango's interval from the win and loss counts (primaryInterval).
+type passFail struct {
+	wins, losses int
+	ok           bool
+	span         float64
+}
+
+// halfWidthAt is the half-width of Tango's interval at m tasks with the observed shares of wins and losses
+// held (each count rounded to a whole task), in score units. At m = n it is the interval the gate read.
+func (pf passFail) halfWidthAt(n, m int) float64 {
+	w := int(math.Round(float64(pf.wins) * float64(m) / float64(n)))
+	l := int(math.Round(float64(pf.losses) * float64(m) / float64(n)))
+	if w+l > m { // two roundings up past the task count
+		l = m - w
+	}
+	lo, hi := tangoInterval(m, w, l)
+	return (hi - lo) / 2 * pf.span
+}
+
+// powerNote reads the main interval three ways (the power note of rule R4). It adds no statistic: it projects
+// with the interval the gate itself reads. A pass/fail record's half-width is Tango's at the projected size,
+// which shrinks about as 1/n where the record is all ties (z^2/(n+z^2)), so a 1/sqrt(n) curve would ask for
+// 240 tasks where 73 ties resolve a 0.05 margin; any other record's is hw*sqrt(n/n').
+func powerNote(n int, delta, lo, hi float64, b Baseline, pf passFail) PowerNote {
 	hw := (hi - lo) / 2
+	at := func(m int) float64 { return hw * math.Sqrt(float64(n)/float64(m)) }
+	tango := pf.ok && n >= 2
+	if tango {
+		at = func(m int) float64 { return pf.halfWidthAt(n, m) }
+	}
 	pn := PowerNote{
-		HalfWidth: hw,
-		Projected: Projected{
-			N16:  hw * math.Sqrt(float64(n)/16),
-			N24:  hw * math.Sqrt(float64(n)/24),
-			N120: hw * math.Sqrt(float64(n)/120),
-		},
+		HalfWidth:   hw,
+		Projected:   Projected{N16: at(16), N24: at(24), N120: at(120)},
 		TasksNeeded: TaskCount{Unbounded: true},
 		TasksToAdd:  TaskCount{Unbounded: true},
 	}
@@ -669,13 +695,46 @@ func powerNote(n int, delta, lo, hi float64, b Baseline) PowerNote {
 	if yard <= 0 {
 		return pn
 	}
-	need := math.Ceil(float64(n) * (hw / yard) * (hw / yard))
-	if !finite(need) || need > maxProjectedTasks {
-		return pn
+	var need float64
+	if tango {
+		m, ok := smallestTasks(func(m int) bool { return pf.halfWidthAt(n, m) < yard })
+		if !ok {
+			return pn
+		}
+		need = float64(m)
+	} else {
+		need = math.Ceil(float64(n) * (hw / yard) * (hw / yard))
+		if !finite(need) || need > maxProjectedTasks {
+			return pn
+		}
 	}
 	pn.TasksNeeded = TaskCount{N: int(need)}
 	pn.TasksToAdd = TaskCount{N: max(0, int(need)-n)}
 	return pn
+}
+
+// smallestTasks is the smallest task count from 2 to maxProjectedTasks for which resolved holds, found by
+// doubling and then halving (the half-width falls as the count grows), or false when none up to the cap does.
+func smallestTasks(resolved func(m int) bool) (int, bool) {
+	hi := 2
+	for !resolved(hi) {
+		if hi >= int(maxProjectedTasks) {
+			return 0, false
+		}
+		hi = min(2*hi, int(maxProjectedTasks))
+	}
+	lo := hi / 2 // resolved(lo) is false, or lo is below 2
+	if lo < 2 {
+		return hi, true
+	}
+	for hi-lo > 1 {
+		if mid := lo + (hi-lo)/2; resolved(mid) {
+			hi = mid
+		} else {
+			lo = mid
+		}
+	}
+	return hi, true
 }
 
 // eraMarker is the hex SHA-256 of the compact JSON of the gate version, both runs' stamps and the
