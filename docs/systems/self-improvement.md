@@ -29,7 +29,6 @@ measurement gate and the SHA-bound evidence on a review result.
 - The detail each part's own page owns: the failure classes ([failure-register.md](failure-register.md)), the agent
   loop and its pager ([coding-agent.md](coding-agent.md)), the gate's statistics ([measurement-gate.md](measurement-gate.md)),
   the review lane ([mcp-server.md](mcp-server.md)).
-- The evidence-preserving reducer rung. It is not merged, so it is described only by its intent.
 - Scheduling. Every command below runs when an operator or an agent calls it. None is a scheduled job, and none edits
   configuration, a seat binding or a rule.
 - What each command writes. `ledger --failures`, `trace-corpus check`, `gate check`, `gate verdict` and `gate schema`
@@ -225,12 +224,15 @@ Publishing sets the record's status and nothing else: no code path applies a pub
 built. [ADR 0036](../architecture/decisions/0036-the-agent-lane-is-a-harnessed-environment.md)'s amendment holds it back
 until trace-bearing runs number in the hundreds, and the readout above is what counts them.
 
-### Proposed, not on main yet
+### The evidence-preserving reducer, default off
 
-**The evidence-preserving reducer rung: not on main yet.** Proposed as a rung of the agent loop's context handling that
-shrinks large tool output while keeping the evidence checkable, and falls back to the raw output when it cannot. It stays
-off until its own measurement passes the gate above. [ADR 0090](../architecture/decisions/0090-capability-review-2026-10-dispositions-and-reopen-triggers.md)
-records it as a port; nothing of it is merged.
+With the config key `agent_evidence_reducer` set (default `false`), a build or test result of 4 KiB to 64 KiB from `run`
+or `run_shell` goes to a cascade seat, which writes a few claims, each over a one-line quote. The delegator looks every
+quote up in the output, and the transcript keeps a receipt (the tool's exit line copied verbatim, then each claim over the
+output's own span) in place of the log. Anything it cannot verify keeps the raw output, and output the credential check
+flags is kept raw without being shown to the seat. The key stays off until a seat A/B through the gate above passes; the
+[coding-agent page](coding-agent.md) owns the detail and states what the credential check does not cover.
+[ADR 0090](../architecture/decisions/0090-capability-review-2026-10-dispositions-and-reopen-triggers.md) records it as a port.
 
 ## Interfaces and entry points
 

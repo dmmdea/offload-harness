@@ -825,14 +825,15 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		WriteLimit:     writeLimit,
 		// Browse (ADR 0060): granted only with the lane, the audit trail and the
 		// contract's host list — Build refuses anything less and says why.
-		AllowBrowse:   contract.AllowBrowse,
-		BrowseHosts:   contract.BrowseHosts,
-		Browse:        browseFn,
-		BrowseTimeout: LoopBrowseTimeout(p.cfg),
-		AuditPath:     browseAudit,
-		AuditAdvisory: audit.Advisory,
-		ReadFloor:     p.cfg.AgentReadFloor,
-		AuditChain:    p.cfg.AuditChain,
+		AllowBrowse:     contract.AllowBrowse,
+		BrowseHosts:     contract.BrowseHosts,
+		Browse:          browseFn,
+		BrowseTimeout:   LoopBrowseTimeout(p.cfg),
+		AuditPath:       browseAudit,
+		AuditAdvisory:   audit.Advisory,
+		ReadFloor:       p.cfg.AgentReadFloor,
+		AuditChain:      p.cfg.AuditChain,
+		EvidenceReducer: p.cfg.AgentEvidenceReducer,
 
 		// SF-02: a denial the enforcing trail causes names audit_all_doors.
 		AuditEnforcedByKey: audit.Enforced,

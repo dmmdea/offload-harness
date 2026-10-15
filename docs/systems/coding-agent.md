@@ -640,6 +640,92 @@ measurement of how the rung interacts with the generic skeleton rung. Source:
 `internal/agent/rung_search.go`. The idea is documented by the Headroom project (Apache-2.0); this is a
 clean-room implementation of that documented behaviour (see `NOTICE`).
 
+**Evidence-preserving reducer (optional, default off: config `agent_evidence_reducer`).** Not a rung of the
+ladder above, which rewrites OLDER bodies under budget pressure and is model-free on purpose. This step runs
+once, when a build or test result is first produced, and costs one cascade call, in
+`internal/agent/rung_reducer.go`. For a `run` or `run_shell` result of 4 KiB to 64 KiB whose call is a build
+or test invocation (the log-collapse rung's producer gate, `logsCallIsBuild`) and whose body opens with the
+tool's `exit=` line, the cascade seat the agent's own offload tools use (`Build`'s `Offload`: one named tier
+through the recordless offload, the `extract` task, no new client and no ledger row) is asked for at most five
+claims, each with `claim` and a one-line `quote`. Every quote is looked up in the output with
+`quotecheck.Locate`, the lookup behind the research digest's quote check (`research.VerifyQuotes` calls it; it
+moved, verbatim, to `internal/quotecheck` because `internal/research` imports `internal/delegate`, whose tests
+import the agent): the output's bytes first, then case, spacing, quote
+marks and punctuation set aside, publishing the output's span; an elided quote (`first ... last`) is not a span and is refused. The transcript keeps a receipt instead of
+the log: `[evidence-receipt: original N chars, M lines; ...]`, the tool's exit line copied by code (never
+written by the seat), then each claim over its verified quote, and a closing line that says the rest is not
+kept and the command can be run again. The reducer sits at the tool-result boundary in the loop, after the
+per-result cap and the environment rules and before the read budget, the effect record and the pager, so each
+sees the bytes the transcript really carries; it applies only to a call that ran (`EffectCommitted`) and
+did not error.
+
+The raw output is kept, unchanged, whenever anything is off: no exit line, under 4 KiB or over 64 KiB, a
+call that is a read, a search, a listing, a fetch or any command the producer gate cannot read as a build or
+test (`cat`, `sed`, `grep`, a chained command, an unknown tool); output the corpus vet's table
+(`internal/piishape`, shared with `internal/compeval`: email, private-key block, bearer token, key assignment
+including environment-style names such as `GITHUB_TOKEN=` and `AWS_SECRET_ACCESS_KEY=`, AWS access key, GitHub
+token, bare `sk-` provider keys, JWTs) says looks like a credential or carries an email address, which is checked before the seat is shown anything and again on the receipt; a seat error,
+timeout (60 s), deferral or panic; an answer that is not the requested JSON, has no claims or more than eight;
+a claim without text or a quote that is not one line of 8 to 200 characters; any quote not in the output as one contiguous span; a
+receipt that is not strictly shorter than the output. A claim is collapsed to one line, so it cannot forge a
+receipt line. An exact repeat of a reduced call runs once more and that result is not reduced (the receipt
+counts as a destroyed result for the repeat breaker, and a pinned result is never reduced), so the model has a
+way back to the exact text. `IsEvidenceReceipt` recognises a receipt for that and for the trace harvest, which
+refuses a transcript that holds one, like any body a ladder already shortened. With the key off nothing
+changes, down to the repeat breaker.
+
+What it does not prove, stated plainly: a verified quote is in the output, not support for the claim next to it
+(the claim wording is the seat's, and the receipt says so), and a quote can be a framing line. The credential
+check is the vet table, not a detector of its own: it recognises a key word in a name (including after an
+underscore, a flag letter such as the `D` of `-Dpassword=`, a terminal color code, or a JSON escape such as the newline in
+escaped text before a line that starts with `PASSWORD=`; a color reset may also stand between the name and its colon)
+followed by a value of 12 or more characters that runs to the next whitespace, quote, comma,
+semicolon, ampersand, backslash or escape byte (so a JWT or a slash-bearing key after `access_token=` or `AWS_SECRET_ACCESS_KEY=` is
+matched whole, and the color reset behind a value is not eaten), a quoted literal of 12 or more characters behind a wider
+operator (`password := "..."`, a `==` comparison, `=>`, a type annotation as in `const token: string = "..."`, a string prefix as in
+`password = b"..."`, a subscript or hash as in `os.environ["API_TOKEN"] = "..."` and `{'password' => '...'}`, a quoted JSON
+key `"token": "..."`) or in a call that passes the name and the literal as two arguments right behind an opening paren
+(`t.Setenv("API_TOKEN", "...")`), a bearer token, a bare `sk-` provider key, a JWT, a Basic `Authorization` header (also in a
+printed Go header map, a `setHeader` or `Header.Set` call, a subscript or a hash: at most eight punctuation characters, one
+of them a separator, between the name and the scheme), a registry config's `"auth"` value and a `Cookie` or
+`Set-Cookie` header with a value of 12 or more characters; a quote in front of a value or a header name may carry any
+number of backslashes (JSON text inside a double-quoted shell string doubles them). The key words are api key,
+private, access and auth key, secret, token, passwd, password, `PGPASSWORD`, passphrase and credentials, plus `_PASS=`
+and `_PWD=` (the short words need the underscore and the equals sign, so `PASS: TestName` and `PWD` stay quiet). It still does NOT cover a camel-case name
+(`githubToken=`), a key name the table does not hold (`dbpassword=`, `sid=`), a command-line flag with a space
+(`--token value`, `curl -u user:pass`), URL userinfo
+(`scheme://user:pass@host`), an authorization scheme other than Bearer and Basic, a provider prefix the table does not list (`sk_live_`, `xoxb-`), an unsigned JWT, a
+high-entropy string that carries no key name or known prefix, a value that starts with `/`, `.`, `[` or `]`
+(a path after a key name is meant to stay quiet), the part of a value after a backslash inside it (a backslash
+is a JSON escape in tool-call arguments), an unquoted value after `:=`, `==` or `=>` (an identifier or a call; by design,
+because Go source assigns to token-named variables all day), a value passed apart from its name
+(`fmt.Sprintf("password=%s", v)`), a terminal control sequence other than escape, bracket, parameters and a letter (a charset
+switch, an operating-system command, the one-byte form of the bracket), or a Basic header whose name and scheme are more than
+eight punctuation characters apart or have a word between them; because the table is shared, widening it widens the
+corpus vet too. Run over the tracked tree, the assignment class matched 37 places before the quoted-literal forms and 64 after (counted before this text was written);
+the 27 added are quoted fake values in test files and one config example, not identifiers. The wider table costs time: about 1 s
+per MiB of text for all classes on one machine, against about 0.5 s for the table before it (three runs each, a shared and noisy
+machine; unverified elsewhere). The compaction-eval harvest redactor is derived from the same table and substitutes the email class
+last, so it replaces a whole credential value rather than its head; its exit gate also fails the harvest when 12 or
+more consecutive characters of a value it replaced are still in the text, in which case the harvest leaves that one trace
+out with a note and keeps the others (ordinary code that assigns to a name holding `token` can trip it). The seat call sits on the loop's critical path, seconds per qualifying result. Wiring: the key
+is read by the local agent CLI, the MCP front door and the fleet-node agent task; the prompt-replay builder
+takes no node policy. The measurement that decides whether the key is ever turned on is a seat A/B on the 9B
+and 27B agent seats through the gate's non-inferiority mode (tool-call reliability and pass rate), with
+forwarded prefill tokens as the efficiency metric and never seconds; until it passes the key stays off.
+
+What the credential check is for, and what it is not. It is a best-effort list of shapes, not a proof that a text
+carries no secret: the not-covered list above is open by nature, and widening the table trades precision and scan
+time for recall. On the seat path it is defense in depth: the reducer's seat is a cascade seat on the same box unless
+`cascade_remote_lanes` is configured, and even then it is another fleet node, never a hosted API. On the corpus path it
+is the only automatic credential layer: the tracked-tree leak gate looks for denied names and machine identifiers, not
+credentials, so a harvested corpus still needs a human read before it is committed anywhere public. Its precision on
+ordinary output was measured on 9.4 MB of real Go build and test logs cut into 4, 16 and 64 KiB pieces: no credential
+class matched any piece, and the email class matched 0.3 % of the 4 KiB pieces (all real addresses in git output),
+after the email pattern stopped reading a Go module version (`toolchain@v0.0.1-go1.27.2.linux-amd64`, in every stack
+trace) as an address; before that change it matched 67.6 % of them, so the reducer would have kept most Go logs raw.
+An address whose domain starts with a lowercase `v` and a digit is therefore not recognised.
+
 **Compaction eval harness (`compaction-eval`, `internal/compeval`).** Default flips for the ladder
 rungs are gated by MEASUREMENT, never estimates: the verb replays a pinned corpus (JSONL of
 transcript slices, sha256-hashed; a PII finding refuses the whole corpus) through the PRODUCTION
@@ -700,7 +786,8 @@ pressure mirrored exactly — `protected_prefix` = the real preamble (turns befo
 assistant turn), `keep_recent` = the live loop's `agent.DefaultKeepRecent`. Transcripts the
 ladder already compacted mid-run are refused (`agent.IsCompactionArtifact`): their raw content
 is unrecoverable and replaying them would measure the ladder against its own output. The
-redaction table derives from the vet's class table (parity by construction), the VetPII gate
+redaction table derives from the vet's class table (parity by construction; a class added to the table, such
+as the provider-key and JWT classes, is redacted and vetted without a second edit), the VetPII gate
 re-runs on the result — residual PII refuses the harvest — and the corpus is written atomically
 (temp + rename), round-trip-proven through the strict loader before it exists at its
 destination. Methodology harvested from the OmniRoute compression service's

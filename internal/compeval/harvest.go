@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
+	"github.com/dmmdea/offload-harness/internal/piishape"
 )
 
 // TraceRecord mirrors cmd/local-agent's on-disk trace shape: record fields are
@@ -102,27 +103,132 @@ type redactor struct {
 	assigned map[string]string // class \x00 matched-text → placeholder
 	counts   map[string]int    // class → next placeholder index
 	Hits     map[string]int    // class → total substitutions (stats)
+	tails    map[string]bool   // every tailWindow-byte window of every credential value replaced so far
 }
 
 func newRedactor() *redactor {
-	return &redactor{assigned: map[string]string{}, counts: map[string]int{}, Hits: map[string]int{}}
+	return &redactor{assigned: map[string]string{}, counts: map[string]int{}, Hits: map[string]int{}, tails: map[string]bool{}}
 }
 
+// tailWindow is the length of a credential value's piece that must not survive redaction.
+const tailWindow = 12
+
+// tailClasses are the classes whose matches are credential values. Email and private-key header
+// text are left out: a piece of an address (its domain) or of a PEM header is ordinary text
+// elsewhere, so a window of it would refuse harvests that hold no secret.
+var tailClasses = map[string]bool{
+	"bearer-token": true, "api-key-assignment": true, "aws-access-key": true,
+	"github-token": true, "provider-key": true, "jwt": true,
+	"basic-auth": true, "auth-field": true, "cookie-header": true,
+}
+
+// placeholderRe finds an earlier substitution inside a later class's match.
+var placeholderRe = regexp.MustCompile(`\[redacted-[a-z-]+-[0-9]+\]`)
+
+// credentialValue is the secret part of a match: the text after = or : for an assignment (the key
+// name is kept in the output and is not a secret), the text after the word for a bearer token, the
+// whole match for the bare-key classes; for a Basic header and a registry auth field the encoded
+// value, and for a cookie header the first long cookie value.
+func credentialValue(class, m string) string {
+	switch class {
+	case "api-key-assignment":
+		// The value follows the last character that cannot be part of one (whitespace, a quote, a
+		// comma, a semicolon, an ampersand, a backslash or the escape byte); NAME=value has none, and the
+		// value then follows the first = or :. Remembering the type annotation or the call in front of a
+		// quoted literal would make ordinary code that shares it look like a leftover.
+		if i := strings.LastIndexAny(m, " \t\r\n\f'\",;&\\\x1b"); i >= 0 {
+			return m[i+1:]
+		}
+		if i := strings.IndexAny(m, "=:"); i >= 0 {
+			return strings.TrimLeft(m[i+1:], " \t\n\f\r'\"\\")
+		}
+	case "auth-field":
+		if i := strings.IndexAny(m, "=:"); i >= 0 {
+			return strings.TrimLeft(m[i+1:], " \t\n\f\r'\"\\")
+		}
+	case "basic-auth":
+		if f := strings.Fields(m); len(f) > 0 {
+			return f[len(f)-1]
+		}
+	case "cookie-header":
+		if sub := cookieValueRe.FindStringSubmatch(m); sub != nil {
+			return sub[1]
+		}
+	case "bearer-token":
+		if f := strings.Fields(m); len(f) > 0 {
+			return f[len(f)-1]
+		}
+	}
+	return m
+}
+
+// cookieValueRe finds the first value of 12 or more characters in a cookie header; the header's other
+// pairs (a theme, a path) are ordinary text and are not remembered.
+var cookieValueRe = regexp.MustCompile(`=([^\s'",;&\\]{12,})`)
+
+// remember records every tailWindow-byte window of a replaced credential value.
+func (r *redactor) remember(class, m string) {
+	if !tailClasses[class] {
+		return
+	}
+	for _, seg := range placeholderRe.Split(credentialValue(class, m), -1) {
+		for i := 0; i+tailWindow <= len(seg); i++ {
+			r.tails[seg[i:i+tailWindow]] = true
+		}
+	}
+}
+
+// survivingTail reports whether s still holds tailWindow or more consecutive bytes of a credential
+// value this redactor replaced. A tail such as ".payload.signature" matches no vet class, so the
+// vet cannot see it; the redactor knows which values it was handed.
+func (r *redactor) survivingTail(s string) bool {
+	if len(r.tails) == 0 {
+		return false
+	}
+	for i := 0; i+tailWindow <= len(s); i++ {
+		if r.tails[s[i:i+tailWindow]] {
+			return true
+		}
+	}
+	return false
+}
+
+// redactLastClass is applied after every other class. An address-shaped piece can sit inside a
+// credential value (GITHUB_TOKEN: a@b.c:rest); replacing it first would split the value, leave a
+// placeholder where the value must start, and so hide the rest of it from the credential classes.
+// The vet table keeps its order; only the order of substitution differs.
+const redactLastClass = "email"
+
 func (r *redactor) redact(s string) string {
-	for _, p := range redactPatterns {
-		s = p.re.ReplaceAllStringFunc(s, func(m string) string {
-			r.Hits[p.name]++
-			key := p.name + "\x00" + m
-			if ph, ok := r.assigned[key]; ok {
-				return ph
+	for _, last := range [2]bool{false, true} {
+		for _, p := range redactPatterns {
+			if (p.name == redactLastClass) == last {
+				s = r.apply(p.name, p.re, s)
 			}
-			r.counts[p.name]++
-			ph := fmt.Sprintf("[redacted-%s-%d]", p.name, r.counts[p.name])
-			r.assigned[key] = ph
-			return ph
-		})
+		}
 	}
 	return s
+}
+
+// apply replaces every match of one class in s by its placeholder. A class may start right after a JSON
+// escape (the newline before a line that begins with a key word) or a terminal control sequence (a color
+// code), and the match then carries it. That lead is not part of the credential, so it is kept and the
+// placeholder follows it; replacing it would break the JSON of the Args it sits in.
+func (r *redactor) apply(name string, re *regexp.Regexp, s string) string {
+	return re.ReplaceAllStringFunc(s, func(m string) string {
+		lead := piishape.Lead(m)
+		m = m[len(lead):]
+		r.Hits[name]++
+		r.remember(name, m)
+		key := name + "\x00" + m
+		if ph, ok := r.assigned[key]; ok {
+			return lead + ph
+		}
+		r.counts[name]++
+		ph := fmt.Sprintf("[redacted-%s-%d]", name, r.counts[name])
+		r.assigned[key] = ph
+		return lead + ph
+	})
 }
 
 // ClassifyKind buckets an entry by what its TOOL payloads are made of — the
@@ -260,8 +366,9 @@ type HarvestStats struct {
 
 // HarvestTraces reads every *.json trace under dir (sorted by name — the
 // harvest is deterministic), converts, redacts, classifies, and gates. A trace
-// that cannot be parsed or is too short is skipped WITH a note; residual PII
-// after redaction fails the whole harvest.
+// that cannot be parsed or is too short, or that still holds a piece of a redacted
+// credential value, is skipped WITH a note; residual vet-class PII after
+// redaction fails the whole harvest.
 func HarvestTraces(dir string, opts HarvestOpts) ([]Entry, HarvestStats, error) {
 	opts = opts.withDefaults()
 	stats := HarvestStats{Redactions: map[string]int{}, Kinds: map[string]int{}}
@@ -317,13 +424,22 @@ func HarvestTraces(dir string, opts HarvestOpts) ([]Entry, HarvestStats, error) 
 				turns[i].ToolCalls[j].Args = red.redact(turns[i].ToolCalls[j].Args)
 			}
 		}
-		for class, n := range red.Hits {
-			stats.Redactions[class] += n
-		}
 		kind := ClassifyKind(turns)
 		// Entry id from the FILE name (unique on disk; already sanitized by the
 		// trace writer) — record ids can collide across goal queues.
 		base := strings.TrimSuffix(filepath.Base(p), ".json")
+		// Exit gate beside the vet: a piece of a redacted credential value that is
+		// still in the text means the redactor stopped short of the value, or that
+		// ordinary text (source code assigning to a name that holds "token") reuses a
+		// piece of what was taken as a value. Either way this trace is left out with
+		// a note; one such trace never costs the others.
+		if redactorLeftATail(red, turns) {
+			stats.Skipped = append(stats.Skipped, HarvestNote{File: filepath.Base(p), Reason: fmt.Sprintf("still holds %d or more characters of a redacted credential value after redaction (the text is not echoed)", tailWindow)})
+			continue
+		}
+		for class, n := range red.Hits {
+			stats.Redactions[class] += n
+		}
 		entries = append(entries, Entry{
 			ID:              opts.IDPrefix + base,
 			Kind:            kind,
@@ -344,13 +460,30 @@ func HarvestTraces(dir string, opts HarvestOpts) ([]Entry, HarvestStats, error) 
 	return entries, stats, nil
 }
 
+// redactorLeftATail reports whether any turn still holds a surviving piece of a credential value
+// the redactor replaced.
+func redactorLeftATail(red *redactor, turns []Turn) bool {
+	for _, t := range turns {
+		if red.survivingTail(t.Content) {
+			return true
+		}
+		for _, c := range t.ToolCalls {
+			if red.survivingTail(c.Name) || red.survivingTail(c.Args) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // countCompactionArtifacts counts tool turns whose body is a PRODUCT of the
 // production ladder (elision marker, skeleton, dedupe reference) or by the
-// optional log-collapse rung, rather than raw content.
+// optional log-collapse rung, or a receipt the optional evidence reducer wrote in
+// place of a command's output, rather than raw content.
 func countCompactionArtifacts(msgs []agent.Msg) int {
 	n := 0
 	for _, m := range msgs {
-		if m.Role == "tool" && (agent.IsCompactionArtifact(m.Content) || agent.IsLogCollapseArtifact(m.Content)) {
+		if m.Role == "tool" && (agent.IsCompactionArtifact(m.Content) || agent.IsLogCollapseArtifact(m.Content) || agent.IsEvidenceReceipt(m.Content)) {
 			n++
 		}
 	}

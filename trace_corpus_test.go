@@ -1156,3 +1156,25 @@ func TestTraceCorpusHarvestDefaultsToTheInstallRoot(t *testing.T) {
 		t.Fatalf("the install-root harvest differs from the explicit one:\n%s\n---\n%s", got, want)
 	}
 }
+
+// TestTraceCorpusHarvestRefusesAValueTailTheVetCannotSee: the harvest gate is the redactor's
+// Residual, not the vet alone. A run field that holds 12 characters of a credential value the
+// redactor replaced elsewhere matches no vet class, so only the tail check can refuse it.
+func TestTraceCorpusHarvestRefusesAValueTailTheVetCannotSee(t *testing.T) {
+	piece := "Qwertyuiop.Asdfghjkl+Zxcvbnm1"
+	dir := t.TempDir()
+	tracesDir := filepath.Join(dir, "traces")
+	os.MkdirAll(tracesDir, 0o755)
+	a := `{"id":"a","stop_reason":"api_` + `key=` + piece + `","steps":1,"transcript":[{"Role":"user","Content":"hi"}]}`
+	b := `{"id":"b","stop_reason":"note-` + piece + `","steps":1,"transcript":[{"Role":"user","Content":"hi"}]}`
+	os.WriteFile(filepath.Join(tracesDir, "run-a.json"), []byte(a), 0o644)
+	os.WriteFile(filepath.Join(tracesDir, "run-b.json"), []byte(b), 0o644)
+	out := filepath.Join(dir, "corpus.jsonl")
+	_, _, err := tcRunVerb(t, "harvest", "--traces", tracesDir, "--out", out)
+	if err == nil || !strings.Contains(err.Error(), "value-tail") {
+		t.Fatalf("a run holding a piece of a redacted value must be refused with value-tail, got %v", err)
+	}
+	if _, statErr := os.Stat(out); statErr == nil {
+		t.Errorf("a refused harvest left a corpus at %s", out)
+	}
+}
