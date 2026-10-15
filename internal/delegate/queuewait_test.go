@@ -1,8 +1,12 @@
 package delegate
 
 import (
+	"context"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -252,50 +256,157 @@ func TestRunQueuedThenRunningStillHonoursTheExecutionDeadline(t *testing.T) {
 // The assertion is on the give-up TIMING, because the credit is not otherwise
 // observable: with the gap excluded the queued-wait bound is reached only by
 // real queued time, so the run must outlast the gap it refused to count.
+//
+// The timing is read against the node's own answers, not against a clock the
+// test started before the call did. The gap used to open and close at 200 ms
+// and 700 ms from the moment the fixture was built, with the give-up held to a
+// 1350-2500 ms window from the start of the call. A runner that stalled before
+// the first poll played part of the gap before the delegator had asked anything,
+// and one that stalled between two polls near the gap made the stretch from the
+// last `accepted` to the next one longer, all of it uncredited, and rightly: the
+// give-up then landed past the 2500 ms ceiling ("the wait is no longer
+// bounded") although nothing was unbounded. Now:
+//   - the gap opens after queuedBefore `accepted` answers, and closes only once
+//     the node has answered it gapPolls times AND gapWidth has passed since its
+//     first 503, so the delegator always reads 5xx between its two sides, on
+//     any runner (a stall only makes the gap longer). One `accepted` before it
+//     is all the rule needs, an interval bracketed by two of them, and a longer
+//     lead-in would be a wall-clock dependency of its own: it would have to fit
+//     inside the bound for the gap to open before the call gave up;
+//   - the floor is exact, not a margin: from the first `accepted` it read to
+//     its give-up the delegator spent the credited time (at least the bound, or
+//     it would not have given up) plus every interval it did not credit, and
+//     the gap is one of those, at least as long on its side as the node's own
+//     stamps of it (its first 503 was asked for after the last `accepted` was
+//     read, and the first `accepted` after the gap was read after it was
+//     answered). A give-up sooner than bound + gap therefore banked some of the
+//     gap, however slow the runner was;
+//   - the give-up is read where the node sees it, at the request that asks the
+//     node to take the job back, which the delegator sends the moment it
+//     decides, and not at the return of the call. The call returns after that
+//     request, the telemetry rows and the intent close-out, and a starved
+//     runner took over a second to do them: the old ceiling, measured at the
+//     return, failed with the last poll 1.6 s in and the call back at 3 s;
+//   - the contract is given 3 s, not 1 s, because the same arithmetic runs the
+//     other way: the execution deadline is the budget plus the credit, so the
+//     time the delegator spends OUTSIDE the backlog (the gap, the first poll, a
+//     stall that lands next to either) must stay under the budget, or the
+//     execution deadline, correctly, beats the queued-wait bound. Half a second
+//     of gap in a 1.02 s budget left half a second for a stall to eat; in 3.02 s
+//     it leaves 2.5 s. A call that still ends on the execution deadline after
+//     the node saw the delegator go silent for stalledFor is a stall and skips,
+//     the way the reserve tests do; one that ends there with no such silence is
+//     a credit that was not banked, and fails;
+//   - the upper ceiling, which was wall clock too, is the call's context: a wait
+//     that is not bounded fails at that deadline with a message, and a bound
+//     that is wrong (too long, or not the queued one) fails on the words of the
+//     give-up, which name the bound it gave up at.
 func TestRunQueuedCreditExcludesNonQueuedIntervals(t *testing.T) {
-	compressPolls(t, 10*time.Millisecond, 20*time.Millisecond)
+	const (
+		grace        = 20 * time.Millisecond
+		timeoutSec   = 3
+		queuedBound  = timeoutSec*time.Second + grace // the queued-wait bound: the execution budget
+		queuedBefore = 1                              // `accepted` answers before the gap
+		gapPolls     = 5                              // 5xx answers the gap holds, at least
+		gapWidth     = 500 * time.Millisecond         // and the wall clock it holds them for, at least
+		stalledFor   = time.Second                    // a silence this long between two polls is the runner's
+		hang         = 30 * time.Second               // a call still polling after this is not bounded
+	)
+	compressPolls(t, 10*time.Millisecond, grace)
 
-	const gapStart = 200 * time.Millisecond
-	const gapEnd = 700 * time.Millisecond // a 500ms window of 5xx in the middle
-
-	start := time.Now()
-	var sawGap atomic.Int64
+	var (
+		mu                                sync.Mutex
+		dispatchedAt, firstPoll, lastPoll time.Time // the node's own stamps: the dispatch, its first poll, its newest
+		gapFrom, gapTo                    time.Time // the gap's first 503, and the first `accepted` after it
+		withdrawAsked                     time.Time // when the node was asked to take the job back: the give-up, as the node sees it
+		gapAnswered                       int
+		silence                           time.Duration // the longest the node heard nothing from the delegator
+	)
 	node := &fakeNode{
 		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
-		pollState: func(int64) (map[string]any, int) {
-			if e := time.Since(start); e >= gapStart && e < gapEnd {
-				sawGap.Add(1)
-				return map[string]any{"status": "error", "error": "scripted 503"}, http.StatusServiceUnavailable
+		onDispatch: func(string, core.AgentContract) {
+			mu.Lock()
+			defer mu.Unlock()
+			dispatchedAt = time.Now()
+		},
+		pollState: func(n int64) (map[string]any, int) {
+			mu.Lock()
+			defer mu.Unlock()
+			now := time.Now()
+			if firstPoll.IsZero() {
+				firstPoll = now
+				silence = max(silence, now.Sub(dispatchedAt))
+			} else {
+				silence = max(silence, now.Sub(lastPoll))
+			}
+			lastPoll = now
+			if n > queuedBefore && gapTo.IsZero() {
+				if gapFrom.IsZero() {
+					gapFrom = now
+				}
+				if gapAnswered < gapPolls || now.Sub(gapFrom) < gapWidth {
+					gapAnswered++
+					return map[string]any{"status": "error", "error": "scripted 503"}, http.StatusServiceUnavailable
+				}
+				gapTo = now
 			}
 			return map[string]any{"state": "accepted"}, http.StatusOK
 		},
 	}
-	srv := node.server()
+	inner := node.server()
+	// The node has no withdraw route (an older node: 405), and notes when it was asked for one.
+	front := http.NewServeMux()
+	front.HandleFunc("DELETE /fleet/jobs/{id}", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		if withdrawAsked.IsZero() {
+			withdrawAsked = time.Now()
+		}
+		mu.Unlock()
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
+	front.Handle("/", inner.Config.Handler)
+	srv := httptest.NewServer(front)
+	t.Cleanup(srv.Close)
 
 	contract := remoteContract()
-	contract.TimeoutSec = 1 // queued-wait bound = 1.02s of REAL queued time
+	contract.TimeoutSec = timeoutSec // queued-wait bound = 3.02s of REAL queued time
 
-	began := time.Now()
-	results, _, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL})
+	ctx, cancel := context.WithTimeout(t.Context(), hang)
+	defer cancel()
+	results, _, err := Run(ctx, testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL})
+	finished := time.Now()
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	elapsed := time.Since(began)
+	if ctx.Err() != nil {
+		t.Fatalf("the call was still waiting after %s — the wait is no longer bounded", hang)
+	}
 	r := results[0]
 
-	if sawGap.Load() < 5 {
-		t.Fatalf("only %d poll(s) hit the 5xx window — the fixture never produced a gap, so this test proved nothing", sawGap.Load())
+	mu.Lock()
+	first, from, to, answered, quiet, gaveUp := firstPoll, gapFrom, gapTo, gapAnswered, silence, withdrawAsked
+	mu.Unlock()
+	if r.Err == "" && r.Result.Deferred && strings.HasPrefix(r.Result.Reason, "poll deadline") {
+		if quiet >= stalledFor {
+			t.Skipf("the node heard nothing from the delegator for %v between two of its requests, and the time the call spent outside the node's backlog used up the whole %v execution budget: the execution deadline ended the call before the queued-wait bound could, and there is no give-up to time", quiet.Round(time.Millisecond), queuedBound)
+		}
+		t.Fatalf("the call ended on the execution deadline (%q) with no stall to blame: the time the node held the job queued was not banked as credit", r.Result.Reason)
 	}
-	if !strings.HasPrefix(r.Err, "queue deadline") {
-		t.Fatalf("err = %q, want the queued give-up (the node never started the job)", r.Err)
+	if to.IsZero() || answered < gapPolls {
+		t.Fatalf("the node answered the 5xx window %d time(s) and never closed it, the call ended first (err %q, result %+v) — the fixture never produced a gap, so this test proved nothing", answered, r.Err, r.Result)
 	}
-	// The bound is 1.02s of QUEUED time. Crediting the 500ms gap as backlog
-	// would reach it after ~1.02s of wall clock; excluding it cannot get there
-	// before ~1.52s. The floor sits between the two.
-	if elapsed < 1350*time.Millisecond {
-		t.Fatalf("gave up after %v — a window the node spent answering 5xx was banked as backlog wait", elapsed)
+	if want := fmt.Sprintf("queue deadline after %s:", queuedBound); !strings.HasPrefix(r.Err, want) {
+		t.Fatalf("err = %q (result %+v), want the queued give-up at the %s bound, %q (the node never started the job)", r.Err, r.Result, queuedBound, want)
 	}
-	if elapsed > 2500*time.Millisecond {
-		t.Fatalf("gave up after %v — the wait is no longer bounded", elapsed)
+	// The bound is queuedBound of QUEUED time. Crediting the gap as backlog would
+	// reach it after queuedBound of wall clock from the first answer; excluding
+	// it cannot get there before queuedBound plus the gap itself. The floor is
+	// that sum, from the node's own stamps (see the doc comment).
+	if gaveUp.IsZero() {
+		gaveUp = finished // never asked: the return of the call is the only mark of it left, and it is later
+	}
+	gap := to.Sub(from)
+	if since := gaveUp.Sub(first); since < queuedBound+gap {
+		t.Fatalf("gave up %v after the first poll, with a %v window of 5xx answers in it — less than the %v bound plus the window, so a window the node spent answering 5xx was banked as backlog wait", since, gap, queuedBound)
 	}
 }

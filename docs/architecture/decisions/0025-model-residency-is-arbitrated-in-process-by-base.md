@@ -134,3 +134,56 @@ rather than joining the running batch, and promotion always takes the model at t
 - [`docs/systems/coding-agent.md`](../../systems/coding-agent.md)
 - [`docs/systems/gpu-lease.md`](../../systems/gpu-lease.md)
 - [`docs/glossary.md`](../../glossary.md)
+
+## Amendment 2026-10-14 (the per-process limit is accepted: where it stops, and what would reopen it)
+
+The Consequences above call the process-local gate "a real limit" and name it rather than build around it. This
+amendment settles the question the other way on purpose: the limit stays, and it is written down with its edges and with
+the trigger that would reopen it.
+
+**What is per process, and what is not.** The gate's registry lives in one process, and so do the two things it does: the
+drain of a base's in-flight batch before a different model is admitted, and the batching of same-model requests. Two things
+around it are machine-wide today that were not when this ADR was written:
+
+- **The run cap and its line** (`internal/modelaffinity/seatslot.go`). An agent run registers itself in the run registry
+  under the lease state root (`internal/gpuactivity`), and a run waits while the registered runs on its seat, from every
+  process of the box, number the cap or more. The cap counts agent runs, not single cascade calls.
+- **The card fence** (`internal/modelaffinity/gpuwait.go` and `AwaitUpstream`, ADR [0026](0026-text-load-admissions-wait-for-the-media-lease.md)).
+  An admission that can change what llama-swap holds resident waits while a media or exclusive lease holds the card, read
+  from the lease directory by every process, so a text call in one process does not load a model into VRAM that a render in
+  another process was just given.
+
+A third piece, `internal/seatinflight`, counts in-flight requests across processes with one marker file per request (a
+create and a remove, armed only by `pair_seat_activity_enabled`). It exists so PAIR does not show a harness request twice;
+nothing reads it to admit or park a request.
+
+What stays per process is therefore the swap itself. Two harness processes on one box (an MCP server and a CLI call, or two
+servers under two editors) that name different models on one base do not see each other's in-flight set, and can still make
+llama-swap switch between them. "Exactly as before" in the Consequences holds for that, and only that.
+
+**Why it is accepted now.**
+
+- The cross-process harms the box has actually shown are the ones the machine-wide halves cover: runs piling onto one seat,
+  and a text load trampling a render. The swap between two processes is the part left, and it needs two processes naming
+  different models on one base inside the same window; processes naming the same model switch nothing.
+- Closing it costs what ADR [0018](0018-machine-wide-fenced-gpu-lease.md) refused for text. Every text call would read the
+  in-flight set of every process on its admission path (a directory read and a liveness check against the ~46 ms a call is
+  budgeted) and parking across processes would need the lease's fenced, pid-recycle-safe state. The seat markers show the
+  write half is cheap; they are deliberately never read on the request path.
+- No measurement of how often processes that cannot see each other cause a switch is recorded in this tree. The case for
+  building it so far is a count of concurrent processes, and a count of processes is not a count of switches.
+
+**What reopens it.** A measurement, not a process count: harness processes with in-flight requests that name different
+models on one base at the same time, read from the seat-inflight markers or the run registry, set against llama-swap's own
+model-load events for that base, showing that those overlaps cost a seat what the original incident cost the agent seat (a
+call several times slower than its solo rate). The threshold is whatever that comparison shows; this amendment does not
+invent one.
+
+**The shape, if it is reopened.** The in-flight model set kept machine-wide and keyed by the resolved base (the seat marker
+records the model, the pid and the start time, not the base), on the run registry or beside it, read on the admission path
+and measured against the ~46 ms text budget before it lands, with the in-process gate's own rules: a request for the
+resident model joins, a different model parks, nobody starves, the wait is bounded by the request budget and the caller's
+context. A delegator on another machine is not a process of this box and stays outside it either way.
+
+No code changes with this amendment. The `CROSS-PROCESS LIMIT` paragraph in `internal/modelaffinity/affinity.go` is
+rewritten to say the same thing, so a reader of either finds the limit, where it stops, and the trigger.

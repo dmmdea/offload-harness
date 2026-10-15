@@ -1,0 +1,11 @@
+{
+  "1": { "class_type": "LoadImage", "inputs": { "image": "a.png" } },
+  "3": { "class_type": "PrimitiveInt", "inputs": { "value": 1024 } },
+  "4": { "class_type": "SaveImage", "inputs": { "filename_prefix": "roof", "images": ["2:26", 0] } },
+  "2:20": { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": "sd_b.safetensors" } },
+  "2:21": { "class_type": "CLIPTextEncode", "inputs": { "text": "a fox on a roof", "clip": ["2:20", 1] } },
+  "2:22": { "class_type": "RandomNoise", "inputs": { "noise_seed": 4242 } },
+  "2:23": { "class_type": "PrimitiveInt", "inputs": { "value": 360 } },
+  "2:24": { "class_type": "EmptyLatentImage", "inputs": { "width": ["3", 0], "height": ["2:23", 0], "batch_size": 1 } },
+  "2:26": { "class_type": "ImageInvert", "inputs": { "image": ["1", 0] } }
+}

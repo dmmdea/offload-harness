@@ -218,11 +218,34 @@ func TestTheWithdrawBoundShrinksOnlyOnceTheCallDeadlineHasPassed(t *testing.T) {
 	}
 }
 
+// cutWindow is the call window of the cases that pin what a cut says: the time the delegator has to
+// probe the node, place the job, dispatch it, record the intent and read its first `accepted` before
+// the call's deadline cuts it. The cut can only ask the node to take back a job the node holds, so a
+// deadline that passes before the dispatch is acked leaves nothing to ask: no request reaches the
+// node and the reason says the subtask was never placed, which is a different outcome from the one
+// these cases pin. That start costs tens of milliseconds, and the window used to be 300 ms, so a
+// runner starved for a quarter of a second ended the call first and the case read a slow start as a
+// missing answer. Nothing the cases assert depends on how long the window is, because the job stays
+// queued on the node for as long as it is polled and the call always ends at its own deadline: 2 s
+// gives the start more than six times the time it had.
+const cutWindow = 2 * time.Second
+
 // TestTheCutSaysWhatTheNodeAnsweredToTheWithdraw: the withdraw is a request, and the published
 // reason carries the node's answer in words — a node with no route, one that refused a started
 // job and one that dropped the connection do not read alike, and a ghost job that survived the
 // request leaves a trace on the row. On the result and in the corpus row.
+//
+// Every case ends at its own deadline, so the cases run in parallel and the test takes about as long
+// as one of them (cutWindow) and not seven. What they change in the process (the unwind allowance
+// and the poll cadence) is set once, here, before they start, and restored by the cleanup that runs
+// after the last of them is done; no case touches either. The unwind allowance is 5 s for the reason
+// the window is wide: the withdraw's bound is three quarters of it, so a request the starved runner
+// answers late is still inside it, and the asking goroutine is not abandoned for want of a few
+// hundred milliseconds. A case that works returns as soon as the node answers, so the allowance
+// costs nothing unless it is needed.
 func TestTheCutSaysWhatTheNodeAnsweredToTheWithdraw(t *testing.T) {
+	widenUnwind(t, 5*time.Second)
+	compressPolls(t, 5*time.Millisecond, time.Second)
 	for _, tc := range []struct {
 		name   string
 		status int
@@ -238,13 +261,14 @@ func TestTheCutSaysWhatTheNodeAnsweredToTheWithdraw(t *testing.T) {
 		{"a job the node took back", http.StatusOK, withdrawnBody, "the node confirmed it took the job back"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			widenUnwind(t, 2*time.Second)
-			compressPolls(t, 5*time.Millisecond, time.Second)
+			t.Parallel()
 			_, inner := remoteQueuedForeverServer(t)
 			url, log := withWithdrawAnswer(t, inner, tc.status, tc.body)
 			cfg := testCfg(t)
-			results, sum, _ := runWithin(t, 4*time.Second, cfg, neverLocal(t),
-				[]core.AgentContract{remoteGoal("slow one")}, "remote", []string{url}, deadlineIn(300*time.Millisecond), nil)
+			// The limit is the hang guard (a call that does not return at its deadline), not a
+			// timing assertion: the window, the unwind and a slow runner all fit inside it.
+			results, sum, _ := runWithin(t, 30*time.Second, cfg, neverLocal(t),
+				[]core.AgentContract{remoteGoal("slow one")}, "remote", []string{url}, deadlineIn(cutWindow), nil)
 			r := results[0].Result
 			if sum != (Summary{Deferred: 1}) || !strings.HasPrefix(r.Reason, deadlinePrefix+"1 unfinished") {
 				t.Fatalf("summary %+v reason %q, want the ordinary call-deadline defer", sum, r.Reason)

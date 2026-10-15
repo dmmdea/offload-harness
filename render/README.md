@@ -373,6 +373,35 @@ Tests: `node --test render/templates-catalog.test.mjs`.
 
 ---
 
+# Template-to-API converter (`template-to-graph.mjs`)
+
+Converts a ComfyUI UI-format workflow template (`nodes[]`, `links[]`, `definitions.subgraphs`, `widgets_values`) into the
+API-format prompt graph (`{"<id>": {"class_type", "inputs"}}`) that `POST /prompt` and the builders in this directory
+use. A pure function of the template, an `/object_info` listing the caller supplies and options: no ComfyUI, no GPU, no
+network, no file written. Dependency-free (`node:` builtins). Clean room: the GPL-3.0 frontend and ComfyUI's server code
+were not read as source.
+
+```bash
+node render/template-to-graph.mjs --template <template.json> --object-info <object_info.json> \
+    [--comfy-version X.Y.Z] [--seed N] [--min-comfyui-version X.Y.Z | --index <index.json> [--name NAME]] [--meta]
+```
+
+It prints the graph (`{"ok":true,"graph":{...},"warnings":[...],"warnings_dropped":0,"pinnedSeeds":[...],"stats":{...}}`, exit 0) or a typed
+refusal (`{"ok":false,"refusal":{"code","message","details"}}`, exit 1; exit 2 for a call that cannot be read). It drops
+muted nodes, passes bypassed nodes through by type (positionally, and refused as `ambiguous_bypass` when the counts differ), expands subgraphs (ids `<instance>:<inner>`) with their input and output
+rewiring, resolves `Reroute` and `PrimitiveNode`, skips `Note` and `MarkdownNote`, maps `widgets_values` to named inputs in
+the listing's input order (the hidden `control_after_generate` slot, upload slots, dotted dynamic-combo and autogrow names)
+and pins seeds with `--seed`. A template whose minimum ComfyUI version exceeds `--comfy-version` is refused
+(`comfyui_too_old`); a known minimum with no version given is a refusal too, because the version is never assumed, and a version given with no minimum to compare it with is a `version_check_skipped` warning. An
+unknown node class, a widget layout that does not add up and an input type with no rule are refusals as well, never a
+guess. It is meant for trusted template packages: its caps bound nodes, wires, hops, nesting depth, warnings and id length, not
+the work proportional to the size of a value (see the Known gaps of the system page linked below). Rules, refusal codes, evidence and the open frontend-golden comparison:
+[`docs/systems/media-generation.md`](../docs/systems/media-generation.md#template-to-api-converter-rendertemplate-to-graphmjs).
+Tests: `node --test render/template-to-graph.test.mjs`; fixtures in
+[`testdata/template-goldens/`](testdata/template-goldens/README.md).
+
+---
+
 # Builder drift guard (`builder-drift.mjs`)
 
 A `wf-*.mjs` builder that was copied from a ComfyUI workflow template carries the template's recipe widgets
