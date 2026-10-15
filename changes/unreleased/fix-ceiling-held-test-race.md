@@ -8,10 +8,10 @@
   the look's latency: 795 ms on a quiet host, 394 ms on the CI runner. The product was right (the class was already capacity, the reason already
   said "held"); the test assumed a schedule.
 - **A second failure the same test had.** Under load on an idle node it failed two ways. Once as above (`queued_ms=267`, class right). Three
-  times as `ceiling 4s reached while producing (0 tok at 0.0 tok/s)` with `queued_ms=0` (the elapsed figure is the ceiling timer firing seconds
-  late): the process was starved for longer than the 1 s ceiling, so the stall timer and the ceiling were both overdue when it woke, and the
-  ceiling fired while the first look was still in flight, before the run's hold was entered. No assertion on queued time can hold there; the
-  ceiling needs room.
+  times as `ceiling 4s`, `2s` and `1s reached while producing (0 tok at 0.0 tok/s)` with `queued_ms=0`: the run's hold had not been entered when
+  the ceiling fired. In the first two the elapsed figure is above the 1 s ceiling, so the ceiling timer itself fired seconds late: the process was
+  starved for longer than the ceiling, the stall timer and the ceiling were both overdue when it woke, and the ceiling fired while the first look
+  was still in flight. No assertion on queued time can hold there; the ceiling needs room.
 - **The fix (test code only; no production code changed).**
   - The ceiling test's precondition is that the ceiling found the run in the hold, read from the job record (the last report is `queued`) and
     `queued_ms > 0`, never how much of the ceiling the hold took. The ceiling is 8 s, so the path to the hold has room, and the silent request now
