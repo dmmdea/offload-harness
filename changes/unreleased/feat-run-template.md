@@ -7,7 +7,9 @@
   `offload_run_graph` makes (route `local`: the same lease, ComfyUI lifecycle, satisfier and envelope), with the template **name**, a
   runtime manifest and optional `overrides` and `seed`. The runner (`comfy-run-graph.mjs --template NAME`) converts the template with the
   converter once ComfyUI is up, with that ComfyUI's own `/object_info` and version, and before preflight; a refusal is the typed defer
-  `TEMPLATE_CONVERT_REFUSED`. The manifest generator is `render/template-manifest.mjs` (templates to manifest entries: models as
+  `TEMPLATE_CONVERT_REFUSED`. An override sets values and never retargets a file: one that targets a model or input loader node, an input
+  that holds a model file name, or a value that is a model file name is refused as `override_is_file`, because the licence gate, the FLUX bar
+  and the trust-on-first-use check read only the models the template names. The manifest generator is `render/template-manifest.mjs` (templates to manifest entries: models as
   `models/<class>/<name>` with the source and the hash a template declares, node packs, licence class, API or not, input files read or not).
 - **The gate.** This release runs a template only if it is not a paid-API one, not FLUX-family, needs no custom node pack, is readable and
   has a permissive licence class (or no weights). A paid-API template is a Defer (`deferred:true`, class `api_paid`, never cloud). Every
@@ -56,5 +58,4 @@
   `comfy-run-graph.mjs`; the flow and the converter are tested with injected values, and the converter on saved listings). The time of a
   first sighting hash on a 20 GB file. The Go door's production path on a box's real tree (tested on a fixture tree and a canned script).
 - **Not built.** Fleet placement of a template; model downloads (a missing model is a refusal that lists it); an acknowledgement path for a
-  conditional or non-commercial template; staging a template's sample input files; custom node packs; overrides that retarget an input
-  file; a CLI verb and a fleet task for the tool.
+  conditional or non-commercial template; staging a template's sample input files; custom node packs; a CLI verb and a fleet task for the tool.

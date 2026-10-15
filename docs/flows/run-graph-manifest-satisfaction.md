@@ -114,7 +114,8 @@ in the nine steps above is unchanged:
   `/object_info` and version, which exist only once ComfyUI is up. The runner converts it there
   ([`template-run.mjs`](../../render/template-run.mjs), [the converter](../systems/media-generation.md#template-to-api-converter-rendertemplate-to-graphmjs)),
   applies the overrides, and hands the converted graph to the preflight of step 8 and to the POST of step 9. A refusal (an unknown
-  node class, a ComfyUI older than the template, an override that names a node or input the graph lacks) defers
+  node class, a ComfyUI older than the template, an override that names a node or input the graph lacks, or one that would retarget a
+  model or input file, which the gate never looked at) defers
   `TEMPLATE_CONVERT_REFUSED`, its `ref` the converter's own code, and the ComfyUI that was started is torn down as for any defer.
 
 The runtime manifest names each model by the path it was found at and has no `source_url`: step 4 therefore never downloads for a

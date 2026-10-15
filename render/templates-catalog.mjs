@@ -215,7 +215,10 @@ const LOADER_CLASS = {
   HypernetworkLoader: "hypernetworks", PhotoMakerLoader: "photomaker",
 };
 
-const hasModelExt = (s) => { const l = s.toLowerCase(); return MODEL_EXT.some((e) => l.endsWith(e)); };
+// The node classes that read a model file, and the test for a model file name: the override step (template-run.mjs) refuses to retarget
+// either, because the licence gate, the FLUX bar and the trust-on-first-use check read the models the template names.
+export const MODEL_LOADER_TYPES = Object.freeze(Object.keys(LOADER_CLASS));
+export const hasModelExt = (s) => { const l = s.toLowerCase(); return MODEL_EXT.some((e) => l.endsWith(e)); };
 const textOrNull = (v) => (typeof v === "string" && v !== "" ? v : null);
 
 // requiredModels: the files a template needs. `active` are the files of active nodes: the

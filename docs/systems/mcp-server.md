@@ -1125,9 +1125,11 @@ A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `c
    conversion needs the running ComfyUI's `/object_info` and version. `overrides` are applied to the converted graph: a key
    is `<node id>.<input name>` (a node inside a subgraph is `<instance>:<node>`), the node must be in the graph, the input
    must already be there as a value (an input the node lacks is never added, and one wired to another node is never cut), and a
-   value is a string, a number or a boolean. `seed` pins the seed inputs. A refusal of the conversion or of an override is the
+   value is a string, a number or a boolean. An override never retargets a file (`override_is_file`): the licence gate, the FLUX bar
+   and the trust-on-first-use check read the models the template names, so an input of a model or input loader node, an input that
+   holds a model file name, and a value that is a model file name are all refused. `seed` pins the seed inputs. A refusal of the conversion or of an override is the
    defer `TEMPLATE_CONVERT_REFUSED`, its `ref` the converter's own code (`unknown_node_class`, `comfyui_too_old`,
-   `override_unknown_input`, ...), and the ComfyUI that was started goes down with it.
+   `override_unknown_input`, `override_is_file`, ...), and the ComfyUI that was started goes down with it.
 4. The converted graph goes through the run-graph preflight and is posted. The result is the run-graph envelope with `template`,
    `license_class`, `reads_input`, `local_only` and `fleet_note` beside the outputs, and `tofu_first_seen` when a run recorded a
    model for the first time.
@@ -1175,7 +1177,8 @@ and that is what keeps templates in `license_unknown`. On one node (<node-a>, Co
 
 **Not built in this release.** Fleet placement of a template; model downloads (a missing model is a refusal that lists it); an
 acknowledgement path for a conditional or non-commercial template; staging of a template's sample input files; custom node
-packs; a CLI verb and a fleet task for it; overrides that retarget an input file (the gate checks the file the template names).
+packs; a CLI verb and a fleet task for it. An override that would retarget a model or input file is refused, not supported: the
+gate checks the file the template names, so a different file would run unchecked.
 One template running end to end under a GPU lease is the acceptance measurement of this tool, and it has not been run.
 
 ## Important flows

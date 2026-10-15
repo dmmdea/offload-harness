@@ -8,11 +8,14 @@
 //
 // Every refusal is `{ ok: false, refusal: { code, message, details } }`, the shape the converter refuses in.
 import { convertTemplate } from "./template-to-graph.mjs";
-import { flattenIndex, joinPath, locateTemplates, nodeIo } from "./templates-catalog.mjs";
+import { flattenIndex, hasModelExt, INPUT_LOADER_TYPES, joinPath, locateTemplates, MODEL_LOADER_TYPES, nodeIo } from "./templates-catalog.mjs";
 
 const refusal = (code, message, details = {}) => ({ ok: false, refusal: { code, message, details } });
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+
+// The classes whose file an override may not retarget.
+const LOADER_CLASSES = new Set([...MODEL_LOADER_TYPES, ...INPUT_LOADER_TYPES]);
 
 // A template name: the file name of a template of the package, letters, digits, dot, underscore and hyphen, and a letter or digit first.
 const TEMPLATE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -46,6 +49,11 @@ export function loadTemplate({ comfyDir, name, io = nodeIo }) {
 // input name may: `values.a`). The node must be in the graph and the input must already be there as a value: an input the node does not
 // have is never added, and one that is wired to another node is never cut. A value is a string, a number or a boolean. The graph handed in
 // is not changed.
+//
+// An override never retargets a file. The licence gate, the FLUX bar and the trust-on-first-use check read the models the template names,
+// and an input file is matched by name on the node that holds it, so an override that swapped a loader's file would run one that none of
+// them looked at. It is refused as `override_is_file` when the node is a model or input loader, when the input holds a model file name now,
+// or when the new value is a model file name.
 export function applyOverrides(graph, overrides) {
   if (overrides === undefined || overrides === null) return { ok: true, graph };
   if (!isObj(overrides)) return refusal("override_bad_key", "overrides is an object of <node id>.<input name> keys", {});
@@ -64,6 +72,10 @@ export function applyOverrides(graph, overrides) {
     if (!hasOwn(out, node) || !isObj(out[node]) || !isObj(out[node].inputs)) return refusal("override_unknown_node", `the converted graph has no node ${node}`, { key, node });
     if (!hasOwn(out[node].inputs, input)) return refusal("override_unknown_input", `node ${node} (${out[node].class_type}) has no input ${input}`, { key, node, input });
     if (Array.isArray(out[node].inputs[input])) return refusal("override_is_link", `input ${input} of node ${node} is wired to another node; an override sets values, it does not cut wires`, { key, node, input });
+    const current = out[node].inputs[input];
+    if (LOADER_CLASSES.has(out[node].class_type) || (typeof current === "string" && hasModelExt(current)) || (typeof value === "string" && hasModelExt(value))) {
+      return refusal("override_is_file", `input ${input} of node ${node} (${out[node].class_type}) names a file; an override sets values, it does not retarget a model or an input file`, { key, node, input });
+    }
     out[node].inputs[input] = value;
   }
   return { ok: true, graph: out };
