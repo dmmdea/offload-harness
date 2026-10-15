@@ -103,10 +103,11 @@ its gap list. A test fails for a non-empty cell until the class is named in it w
 ### The trace-corpus readout
 
 `local-offload trace-corpus` has four modes. `harvest` reads recorded agent runs, from the standalone agent traces and
-the delegation log and never the ledger, reduces each to numbers and enums, redacts the few strings left and writes
-the corpus to `--out`, printing its sha256, which every report then carries as `corpus_hash`. `readout` prints the report. `freeze` writes the report as a baseline.
-`check` demands the report back byte for byte and refuses a baseline taken from a different corpus. `readout`, `freeze`
-and `check` are deterministic and model-free, and the report carries no timestamp.
+the delegation log and never the ledger, reduces each to numbers and enums, redacts the few strings left and writes the
+corpus to `--out`, printing its sha256, which every report then carries as `corpus_hash`. `readout` prints the report.
+`freeze` writes the report as a baseline. `check` demands the report back byte for byte and refuses a baseline taken from
+a different corpus. `readout`, `freeze` and `check` are deterministic and model-free, and the report carries no
+timestamp.
 
 It reports, for the whole corpus, by source and by seat:
 
@@ -132,9 +133,9 @@ were recorded as unanswered rather than answered "rarely".
 ### The measurement gate
 
 `local-offload gate` is a pure function over a frozen baseline and one comparison, plus its verb. It reads scores that
-someone else produced and measures nothing itself, so it needs no model, GPU or network. The adapter that turns runs
-into arms is the trust boundary: the gate checks the task ids of each arm against the declared list, not the text of a
-task.
+someone else produced and measures nothing itself, so `freeze`, `check`, `verdict` and `schema` need no model, GPU or
+network; `selftest` alone can reach a seat, for the scorer it runs. The adapter that turns runs into arms is the trust
+boundary: the gate checks the task ids of each arm against the declared list, not the text of a task.
 
 | subcommand | does |
 |---|---|
@@ -236,8 +237,8 @@ trace-bearing runs.
 
 - The trace corpus keeps numbers and enums. It redacts its few strings with the same redactor and vet table as
   `compaction-eval harvest`, replaces a seat, node id or stop reason that is a local path with a placeholder, and is
-  machine-local data that is never committed. Seat and node names appear as the records wrote them, so a readout stays
-  on the machine that produced it.
+  machine-local data that is never committed. Seat and node names appear as the records wrote them, so a readout is
+  machine-local like the corpus.
 - `review-evidence.jsonl` holds short statements about someone's code (each claim and reason cut to 512 bytes). The file
   is created with an owner-only mode.
 - A real corpus, ledger or review trace is machine-local data and does not belong in the repository. The tracked-tree
@@ -262,8 +263,9 @@ trace-bearing runs.
 - [`trace_corpus_test.go`](../../trace_corpus_test.go) covers the harvest, the loader, the readout and the byte-exact
   check.
 - [`gate_cmd_test.go`](../../gate_cmd_test.go) and [`gate_selftest_cmd_test.go`](../../gate_selftest_cmd_test.go) drive
-  the verb and its exit codes. `internal/eval/gate_test.go` and `gate_attack_test.go` hold the verdict table and the
-  attacks a candidate that wants to be adopted would try.
+  the verb and its exit codes. [`internal/eval/gate_test.go`](../../internal/eval/gate_test.go) and
+  [`gate_attack_test.go`](../../internal/eval/gate_attack_test.go) hold the verdict table and the attacks a candidate that
+  wants to be adopted would try.
 - [`internal/reviewlane/evidence_test.go`](../../internal/reviewlane/evidence_test.go) and
   [`internal/mcpserver/reviewevidence_test.go`](../../internal/mcpserver/reviewevidence_test.go) cover the outcomes, the
   fingerprints, the gate receipts and the trace through the real door.
