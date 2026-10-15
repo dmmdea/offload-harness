@@ -144,3 +144,83 @@ test("a throw in POST becomes a typed RUN_ERROR defer (never an untyped exit-1)"
   assert.match(r.detail, /boom/);
   assert.ok(deps._calls.killComfy >= 1);           // teardown still ran in finally
 });
+
+// --- a template run: converted after ComfyUI is up, before preflight; trust on first use checked on every run ---
+
+const TEMPLATE_ARGS = { template: "tt_open", manifest: {}, outDir: "OUT", resultPath: "R", api: "A", comfyDir: "C" };
+const CONVERTED = { "1": { class_type: "SaveImage", inputs: { images: ["2", 0] } }, "2": { class_type: "EmptyImage", inputs: {} } };
+
+test("template run: the template is converted after ComfyUI is up and before preflight, and the converted graph is the one that runs", async () => {
+  const order = [];
+  let preflighted = null;
+  let posted = null;
+  const deps = baseDeps({
+    ensureComfy: async () => { order.push("start"); return { kill() {} }; },
+    convert: async (spec) => { order.push("convert:" + spec.template); return { ok: true, graph: CONVERTED }; },
+    preflight: async (g) => { order.push("preflight"); preflighted = g; return { ok: true, missing: [], unknownClasses: [] }; },
+    postGraph: async (g) => { order.push("post"); posted = g; return { prompt_id: "p1" }; },
+  });
+  const r = await runGraphFlow(TEMPLATE_ARGS, deps);
+  assert.equal(r.deferred, undefined);
+  assert.deepEqual(order, ["start", "convert:tt_open", "preflight", "post"]);
+  assert.deepEqual(preflighted, CONVERTED);
+  assert.deepEqual(posted, CONVERTED);
+});
+
+test("template run: the template's overrides and seed reach the converter", async () => {
+  let seen = null;
+  const deps = baseDeps({ convert: async (spec) => { seen = spec; return { ok: true, graph: CONVERTED }; } });
+  await runGraphFlow({ ...TEMPLATE_ARGS, overrides: { "6.text": "x" }, seed: 7 }, deps);
+  assert.deepEqual([seen.template, seen.overrides, seen.seed], ["tt_open", { "6.text": "x" }, 7]);
+});
+
+test("template run: a converter refusal is a typed defer TEMPLATE_CONVERT_REFUSED naming the refusal; nothing is posted and our ComfyUI is torn down", async () => {
+  const deps = baseDeps({
+    convert: async () => ({ ok: false, refusal: { code: "unknown_node_class", message: "no class FooNode in this ComfyUI", details: {} } }),
+    postGraph: async () => { throw new Error("POST must not run after a refused conversion"); },
+  });
+  const r = await runGraphFlow(TEMPLATE_ARGS, deps);
+  assert.deepEqual([r.deferred, r.code, r.ref], [true, "TEMPLATE_CONVERT_REFUSED", "unknown_node_class"]);
+  assert.match(r.detail, /FooNode/);
+  assert.ok(deps._calls.killComfy >= 1);
+  assert.equal(deps._calls.freeComfy, 1);
+});
+
+test("template run: a converter that throws is a typed RUN_ERROR defer, not an untyped exit", async () => {
+  const deps = baseDeps({ convert: async () => { throw new Error("object_info fetch failed"); } });
+  const r = await runGraphFlow(TEMPLATE_ARGS, deps);
+  assert.deepEqual([r.deferred, r.code], [true, "RUN_ERROR"]);
+  assert.match(r.detail, /object_info/);
+});
+
+test("a graph run does not convert: without a template the graph is posted as it came", async () => {
+  let converts = 0;
+  const deps = baseDeps({ convert: async () => { converts++; return { ok: true, graph: CONVERTED }; } });
+  let posted = null;
+  deps.postGraph = async (g) => { posted = g; return { prompt_id: "p1" }; };
+  await runGraphFlow(ARGS, deps);
+  assert.equal(converts, 0);
+  assert.deepEqual(posted, graph);
+});
+
+test("trust on first use is checked on EVERY run: a cache hit does not skip it, and a refusal comes before ComfyUI starts", async () => {
+  const deps = baseDeps({
+    readOwner: () => ({ manifestHash: "H", unverified: [] }),
+    satisfy: async () => { throw new Error("satisfy must NOT run on a cache hit"); },
+    tofuCheck: async () => ({ ok: false, defer: { code: "MODEL_SHA_MISMATCH", ref: "models/vae/v.safetensors", detail: "trust on first use: hash differs" } }),
+  });
+  const r = await runGraphFlow(TEMPLATE_ARGS, deps);
+  assert.deepEqual([r.deferred, r.code, r.ref], [true, "MODEL_SHA_MISMATCH", "models/vae/v.safetensors"]);
+  assert.equal(deps._calls.ensureComfy, 0, "no ComfyUI was started for a refused model");
+  assert.equal(deps._calls.lastResult.code, "MODEL_SHA_MISMATCH");
+});
+
+test("trust on first use: the files recorded for the first time are reported in the envelope, and only then", async () => {
+  const first = baseDeps({ tofuCheck: async () => ({ ok: true, first_seen: ["models/vae/v.safetensors"], matched: [] }) });
+  const r1 = await runGraphFlow(TEMPLATE_ARGS, first);
+  assert.deepEqual(r1.tofu_first_seen, ["models/vae/v.safetensors"]);
+  const again = baseDeps({ tofuCheck: async () => ({ ok: true, first_seen: [], matched: ["models/vae/v.safetensors"] }) });
+  assert.equal("tofu_first_seen" in (await runGraphFlow(TEMPLATE_ARGS, again)), false);
+  const plain = await runGraphFlow(ARGS, baseDeps());
+  assert.equal("tofu_first_seen" in plain, false, "a graph run's envelope is what it was");
+});

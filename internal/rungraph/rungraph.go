@@ -18,6 +18,8 @@ import (
 
 type Params struct {
 	GraphPath, ManifestPath, OutDir, ResultPath, ReserveVram string
+	// Template, OverridesPath and Seed (red-commit stub fields).
+	Template, OverridesPath, Seed string
 }
 
 type OutFile struct {
@@ -32,6 +34,7 @@ type Envelope struct {
 	Outputs          map[string][]OutFile `json:"outputs"`
 	ImagePath        string               `json:"image_path"`
 	UnverifiedModels []string             `json:"unverified_models"`
+	TofuFirstSeen    []string             `json:"-"`
 	// Typed DEFER (fix #4): the mjs now exits 0 and writes {deferred,code,ref,detail} to the
 	// result on any handled failure, so the code reaches the Go side as data (not a lost
 	// stderr line). runRunGraph turns Deferred==true into a pipeline defer carrying Code+Detail.
@@ -81,4 +84,10 @@ func Run(ctx context.Context, node, script, comfyDir string, p Params, timeout t
 		return Envelope{}, fmt.Errorf("rungraph: parsing result: %w", err)
 	}
 	return e, nil
+}
+
+// STUBS (red commit): the template steps are written in the next commit.
+func TemplateScript(runGraphScript string) (string, error) { return "", fmt.Errorf("not implemented") }
+func QueryTemplate(ctx context.Context, node, script, comfyDir string, args []string, timeout time.Duration) ([]byte, error) {
+	return nil, fmt.Errorf("not implemented")
 }

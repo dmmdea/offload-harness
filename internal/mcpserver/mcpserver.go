@@ -80,6 +80,9 @@ type Server struct {
 	// runHook is the seam the media doors run a request through: nil (production) is p.Run;
 	// tests inject one to see exactly what a door hands the pipeline.
 	runHook func(context.Context, core.Request) core.Result
+	// templateExec is the seam offload_run_template reaches the node-side catalog through (render/run-template.mjs: list, get,
+	// readiness, resolve): nil (production) runs the script on this machine's node runtime; tests inject the answers.
+	templateExec func(ctx context.Context, args []string) ([]byte, error)
 	// laneHook is the seam the lane question (core.LaneProber) is answered through: nil (production) is the pipeline's
 	// MediaLaneFree, or "free" when there is no pipeline; tests inject one to see that the question reaches the pipeline.
 	laneHook func(context.Context, core.Request) core.LaneVerdict

@@ -487,3 +487,7 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
     },
   };
 }
+
+// STUB (red commit): trust on first use is written in the next commit.
+export async function verifyTofuModels() { throw new Error("not implemented"); }
+export function defaultTofuDeps() { throw new Error("not implemented"); }

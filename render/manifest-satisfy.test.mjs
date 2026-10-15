@@ -637,3 +637,149 @@ test("defaultSatisfyDeps.resolveDeps leaves no host-constraints file or pack loc
   assert.ok(underDir(r.lock, r.priv), `uv had written the lock under the OS temp dir (${r.lock}) before it failed`);
   assert.deepEqual(r.left, []);
 });
+
+// --- trust on first use (the template run path) ---
+//
+// A model file with no hash declared is hashed the first time a template run meets it and the hash is recorded beside the file; later runs
+// refuse a file whose hash is not the recorded one. A declared sha256 is the satisfier's own business and is left to it.
+
+import { verifyTofuModels, defaultTofuDeps } from "./manifest-satisfy.mjs";
+
+const TOFU_FILE = join("C:/ComfyUI", "models/vae/v.safetensors");
+const TOFU_MODEL = { path: "models/vae/v.safetensors", source_url: "", sha256: null, trust: "tofu" };
+
+// A fake of the record store: records by file path, a stat per file, a hash per file, and a count of the hashes taken.
+function tofuDeps({ files = { [TOFU_FILE]: { size: 10, mtimeMs: 5, hash: "H1" } }, records = {}, over = {} } = {}) {
+  const state = { records: { ...records }, hashed: [], writes: [] };
+  const deps = {
+    comfyDir: "C:/ComfyUI",
+    extraRoots: {},
+    exists: (p) => Object.hasOwn(files, p),
+    now: () => "2026-10-14T00:00:00.000Z",
+    tofu: {
+      stat: (p) => ({ size: files[p].size, mtimeMs: files[p].mtimeMs }),
+      read: (p) => (Object.hasOwn(state.records, p) ? state.records[p] : null),
+      write: (p, rec) => { state.writes.push([p, rec]); state.records[p] = rec; },
+      sha256: async (p) => { state.hashed.push(p); return files[p].hash; },
+    },
+    ...over,
+  };
+  return { deps, state, files };
+}
+
+test("tofu: the first sighting hashes the file, records the hash beside it and reports it as first seen", async () => {
+  const { deps, state } = tofuDeps();
+  const r = await verifyTofuModels([TOFU_MODEL], deps);
+  assert.deepEqual(r, { ok: true, first_seen: ["models/vae/v.safetensors"], matched: [] });
+  assert.deepEqual(state.hashed, [TOFU_FILE]);
+  assert.deepEqual(state.writes, [[TOFU_FILE, { schema_version: 1, sha256: "H1", size: 10, mtime_ms: 5, first_seen: "2026-10-14T00:00:00.000Z" }]]);
+});
+
+test("tofu: a later run on the same file (same size and modification time) trusts the record and hashes nothing", async () => {
+  const rec = { schema_version: 1, sha256: "H1", size: 10, mtime_ms: 5, first_seen: "2026-10-01T00:00:00.000Z" };
+  const { deps, state } = tofuDeps({ records: { [TOFU_FILE]: rec } });
+  const r = await verifyTofuModels([TOFU_MODEL], deps);
+  assert.deepEqual(r, { ok: true, first_seen: [], matched: ["models/vae/v.safetensors"] });
+  assert.deepEqual(state.hashed, []);
+  assert.deepEqual(state.writes, []);
+});
+
+test("tofu: a file whose size or time changed is hashed again, and the same hash keeps the first-seen date", async () => {
+  const rec = { schema_version: 1, sha256: "H1", size: 10, mtime_ms: 5, first_seen: "2026-10-01T00:00:00.000Z" };
+  const { deps, state } = tofuDeps({ files: { [TOFU_FILE]: { size: 10, mtimeMs: 99, hash: "H1" } }, records: { [TOFU_FILE]: rec } });
+  const r = await verifyTofuModels([TOFU_MODEL], deps);
+  assert.equal(r.ok, true);
+  assert.deepEqual(state.hashed, [TOFU_FILE]);
+  assert.deepEqual(state.writes, [[TOFU_FILE, { ...rec, mtime_ms: 99 }]]);
+});
+
+test("tofu: a hash that is not the recorded one is refused as MODEL_SHA_MISMATCH, naming both, and the record is kept", async () => {
+  const rec = { schema_version: 1, sha256: "H1", size: 10, mtime_ms: 5, first_seen: "2026-10-01T00:00:00.000Z" };
+  const { deps, state } = tofuDeps({ files: { [TOFU_FILE]: { size: 11, mtimeMs: 6, hash: "H2" } }, records: { [TOFU_FILE]: rec } });
+  const r = await verifyTofuModels([TOFU_MODEL], deps);
+  assert.equal(r.ok, false);
+  assert.equal(r.defer.code, "MODEL_SHA_MISMATCH");
+  assert.equal(r.defer.ref, "models/vae/v.safetensors");
+  assert.match(r.defer.detail, /trust on first use/);
+  assert.match(r.defer.detail, /H1/);
+  assert.match(r.defer.detail, /H2/);
+  assert.match(r.defer.detail, /2026-10-01/);
+  assert.deepEqual(state.writes, [], "a mismatch never overwrites the record it was refused by");
+});
+
+test("tofu: a record that cannot be read, or cannot be written, refuses the model as MODEL_TOFU_RECORD", async () => {
+  const unreadable = tofuDeps();
+  unreadable.deps.tofu.read = () => { throw new Error("record is not JSON"); };
+  const a = await verifyTofuModels([TOFU_MODEL], unreadable.deps);
+  assert.deepEqual([a.ok, a.defer.code, a.defer.ref], [false, "MODEL_TOFU_RECORD", "models/vae/v.safetensors"]);
+  assert.match(a.defer.detail, /not JSON/);
+  const unwritable = tofuDeps();
+  unwritable.deps.tofu.write = () => { throw new Error("EROFS: read-only"); };
+  const b = await verifyTofuModels([TOFU_MODEL], unwritable.deps);
+  assert.deepEqual([b.ok, b.defer.code], [false, "MODEL_TOFU_RECORD"]);
+  assert.match(b.defer.detail, /EROFS/);
+});
+
+test("tofu: a model with a declared hash, or without the tofu trust, is left alone", async () => {
+  const { deps, state } = tofuDeps();
+  const r = await verifyTofuModels([{ ...TOFU_MODEL, sha256: "DECLARED", trust: "declared" }, { path: "models/vae/v.safetensors", source_url: "", sha256: null }], deps);
+  assert.deepEqual(r, { ok: true, first_seen: [], matched: [] });
+  assert.deepEqual(state.hashed, []);
+});
+
+test("tofu: a model that is not on the disk is refused as MODEL_DOWNLOAD_FAILED (a template run never downloads)", async () => {
+  const { deps } = tofuDeps({ files: {} });
+  const r = await verifyTofuModels([TOFU_MODEL], deps);
+  assert.deepEqual([r.ok, r.defer.code, r.defer.ref], [false, "MODEL_DOWNLOAD_FAILED", "models/vae/v.safetensors"]);
+  assert.match(r.defer.detail, /missing on disk/);
+});
+
+test("tofu: the record sits beside the file that was found, on a secondary tree too", async () => {
+  const onV = join("V:/m/vae", "v.safetensors");
+  const { deps, state } = tofuDeps({ files: { [onV]: { size: 4, mtimeMs: 1, hash: "HV" } }, over: { extraRoots: { vae: ["V:/m/vae"] } } });
+  const r = await verifyTofuModels([TOFU_MODEL], deps);
+  assert.equal(r.ok, true);
+  assert.equal(state.writes[0][0], onV);
+});
+
+test("tofu: every model in the list is checked", async () => {
+  const other = join("C:/ComfyUI", "models/loras/l.safetensors");
+  const { deps, state } = tofuDeps({ files: { [TOFU_FILE]: { size: 10, mtimeMs: 5, hash: "H1" }, [other]: { size: 3, mtimeMs: 2, hash: "HL" } } });
+  const r = await verifyTofuModels([TOFU_MODEL, { ...TOFU_MODEL, path: "models/loras/l.safetensors" }], deps);
+  assert.deepEqual(r.first_seen, ["models/vae/v.safetensors", "models/loras/l.safetensors"]);
+  assert.equal(state.writes.length, 2);
+});
+
+test("tofu: the default deps keep the record in <file>.tofu, notice a changed file and refuse it (real files)", async (t) => {
+  const dir = scratchDir(t, "tofu-");
+  const file = join(dir, "models/vae/v.safetensors");
+  mkdirSync(join(dir, "models/vae"), { recursive: true });
+  writeFileSync(file, "weights one");
+  const deps = { ...defaultSatisfyDeps({ comfyDir: dir, comfyPy: join(dir, "py"), api: "http://127.0.0.1:1", cmCli: "" }), tofu: defaultTofuDeps() };
+  const first = await verifyTofuModels([TOFU_MODEL], deps);
+  assert.deepEqual(first.first_seen, ["models/vae/v.safetensors"]);
+  assert.ok(existsSync(file + ".tofu"), "the record is beside the file");
+  assert.equal(JSON.parse(readFileSync(file + ".tofu", "utf8")).sha256.length, 64);
+  const again = await verifyTofuModels([TOFU_MODEL], deps);
+  assert.deepEqual(again.matched, ["models/vae/v.safetensors"]);
+  writeFileSync(file, "weights two!");
+  const swapped = await verifyTofuModels([TOFU_MODEL], deps);
+  assert.equal(swapped.ok, false);
+  assert.equal(swapped.defer.code, "MODEL_SHA_MISMATCH");
+});
+
+// --- the satisfier looks where ComfyUI looks: the legacy class directories ---
+
+test("modelCandidates: a diffusion_models path is also looked for under unet, and a text_encoders path under clip (ComfyUI reads both)", () => {
+  assert.deepEqual(modelCandidates("models/diffusion_models/w.gguf", "C:/ComfyUI", { unet: ["V:/m/unet"], diffusion_models: ["V:/m/dm"] }), [
+    join("C:/ComfyUI", "models/diffusion_models/w.gguf"),
+    join("V:/m/dm", "w.gguf"),
+    join("C:/ComfyUI", "models/unet/w.gguf"),
+    join("V:/m/unet", "w.gguf"),
+  ]);
+  assert.deepEqual(modelCandidates("models/text_encoders/t.safetensors", "C:/ComfyUI", { clip: ["V:/m/clip"] }), [
+    join("C:/ComfyUI", "models/text_encoders/t.safetensors"),
+    join("C:/ComfyUI", "models/clip/t.safetensors"),
+    join("V:/m/clip", "t.safetensors"),
+  ]);
+});
