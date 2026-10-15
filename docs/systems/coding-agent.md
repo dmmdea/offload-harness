@@ -656,7 +656,7 @@ whose older turns hold the shape it acts on (a search listing of more than 30 hi
 repetitive output of a build or test command that names its tool call), and the contrast between the
 incumbent and a candidate is two runs paired by entry id. `kvbench` takes `--arms on` to skip the raw
 arm, which a candidate comparison does not need, and `--nonce N` to give two runs the same salt. Every
-sample carries `sent_sha256`, the sha256 of the bytes it sent after the salt, so two runs that share a
+sample carries `sent_sha256`, the sha256 of the salted transcript as sent (its canonical encoding, not the HTTP body), so two runs that share a
 nonce and a ladder prove a pair a no-op when the hashes of a step are equal, and a rung that rewrote
 the transcript when they differ.
 

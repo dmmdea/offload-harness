@@ -117,7 +117,8 @@ type Sample struct {
 	EstTokens       int  `json:"est_tokens"`       // the ladder's own chars/4 estimate of what was sent
 	SentMsgs        int  `json:"sent_msgs"`
 	SentChars       int  `json:"sent_chars"`
-	// SentSHA256 is the sha256 of the bytes actually sent (after the nonce salt).
+	// SentSHA256 is the sha256 of the transcript as sent (after the nonce salt),
+	// taken over its canonical encoding, not over the HTTP request body.
 	SentSHA256 string `json:"sent_sha256"`
 
 	// Server facts (measured).
