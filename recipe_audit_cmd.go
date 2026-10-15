@@ -123,8 +123,9 @@ refuses (exit 2) to run without one.
   --recipe ID           the recipe to audit, by id, from the store (required)
   --seat ALIAS          the seat both arms run on (required)
   --seat-tag TAG        the capability class of that seat; it must be the recipe's seat_tag (required)
-  --contracts FILE      a JSON array of {"id": <task id of the baseline>, "contract": <agent contract>}; every
-                        contract carries at least one acceptance check (required)
+  --contracts FILE      a JSON array of {"id": <task id of the baseline>, "contract": <agent contract>}, one per
+                        task the baseline declares (held-out ones included); every contract carries at least one
+                        acceptance check (required)
   --baseline FILE       the frozen pre-registration (gate freeze), judge {deterministic, acceptance-dsl}, primary
                         class unit_interval, only tokens efficiency metrics and no frozen incumbent: the incumbent
                         is measured here (required)
@@ -265,6 +266,13 @@ func recipeAuditMain(args []string, stdout, stderr io.Writer) error {
 			return recipeRefuse(refusalInput, "efficiency metric %q is class %q and the verb can only read %q off a run (the forwarded prefill tokens): a metric it cannot resolve could never be traded away, so freeze the pre-registration without it", e.Name, e.Class, eval.EffTokens)
 		}
 	}
+	// The gate stamps the build that ran it and refuses a stamp that is not a 64-character lower-case
+	// hash (the check `gate selftest` makes before it does any work), so an unhashable build ends the
+	// audit here and not after the A/B.
+	build := gateBuildSHA()
+	if !isLowerHex64(build) {
+		return recipeRefuse(refusalInput, "the running build cannot be hashed (got %q): the gate stamps every arm with it and refuses a build_sha256 that is not 64 lower-case hex characters", build)
+	}
 	tasks, err := readRecipeTasks(*contractsPath, baseline.Tasks, cfg.AgentContextCapBytes())
 	if err != nil {
 		return err
@@ -301,7 +309,6 @@ func recipeAuditMain(args []string, stdout, stderr io.Writer) error {
 	}
 
 	// The gate, built the way `gate verdict` builds it.
-	build := gateBuildSHA()
 	incArm := recipeArmOf(recipeStamps(build, *seat, cfg.Endpoint, cfg.AgentEnvRules, *engineBuild), tasks, recs[recipeArmIncumbent])
 	ruleSet := rec.Rules
 	candArm := recipeArmOf(recipeStamps(build, *seat, cfg.Endpoint, &ruleSet, *engineBuild), tasks, recs[recipeArmCandidate])
@@ -404,7 +411,8 @@ func realRecipeAuditLease(cfg config.Config) error {
 
 // readRecipeTasks reads the contracts file: a JSON array of {id, contract}, strict. Every id must be
 // a task the baseline declared, once; every contract must decode and carry at least one acceptance
-// check (the acceptance DSL is the judge, so a contract without one has none).
+// check (the acceptance DSL is the judge, so a contract without one has none), and every declared
+// task must have its contract.
 func readRecipeTasks(path string, declared []string, capBytes int) ([]recipeTask, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -444,6 +452,17 @@ func readRecipeTasks(path string, declared []string, capBytes int) ([]recipeTask
 			return nil, recipeRefuse(refusalInput, "task %q: the contract has no acceptance check, so the acceptance DSL has nothing to judge", e.ID)
 		}
 		out = append(out, recipeTask{id: e.ID, contract: c})
+	}
+	// One contract per declared task, held-out ones included: a task with none is a pair the A/B never
+	// measures, and a short set only shows as "n below min_pairs" after the seat has run for nothing.
+	var missing []string
+	for _, id := range declared {
+		if !seen[id] {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, recipeRefuse(refusalInput, "contracts %s: the baseline declares %d task(s) with no contract: %s", path, len(missing), strings.Join(missing, ", "))
 	}
 	return out, nil
 }
