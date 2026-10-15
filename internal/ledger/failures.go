@@ -329,7 +329,7 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 		}
 		if !includeTraffic {
 			if c := classIn(e, jobs); c != "" {
-				if CountsAsJob(e, parents) && !e.Refusal {
+				if CountsAsJob(e, parents) {
 					if reg.ExcludedNonProduction == nil {
 						reg.ExcludedNonProduction = map[string]int{}
 					}
@@ -338,11 +338,11 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 				continue
 			}
 		}
-		if !CountsAsJob(e, parents) {
+		if isRefusedAttempt(e, parents) {
+			reg.RefusedAttempts++
 			continue
 		}
-		if e.Refusal {
-			reg.RefusedAttempts++
+		if !CountsAsJob(e, parents) {
 			continue
 		}
 		reg.JobRows++

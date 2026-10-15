@@ -272,8 +272,8 @@ type Entry struct {
 	// or the terminal row a lost subtask gets under a job id of its own). It is the ledger twin of the delegation
 	// log's refusal mark. ABSENT ON EVERY OTHER ROW, and on every row written before the column existed, so a reader
 	// that sees none reads the row as it always did: such a row may be an old refusal, and the column cannot say
-	// otherwise. A reader that counts jobs or failures (the failure register) sets a marked row aside and counts it
-	// as a refused attempt; the job counters of jobrows.go still count it, as they did.
+	// otherwise. A reader that counts jobs or failures sets a marked row aside: the job counters of jobrows.go skip
+	// it (CountsAsJob), and the failure register counts it as a refused attempt.
 	Refusal bool `json:"refusal,omitempty"`
 }
 
@@ -675,6 +675,10 @@ func SummarizeFileWith(path string, since int64, prices Prices, includeTraffic b
 			}
 		}
 		if !CountsAsJob(e, parents) {
+			// A refusal row did no work and saved nothing; it is no job and no inner row.
+			if e.Refusal {
+				continue
+			}
 			// An inner row (C-62): the parent `agent_delegate` row is the job —
 			// its call, its outcome, its TokensOut. The inner row contributes
 			// only what the parent leaves at 0 by design: the savings column.

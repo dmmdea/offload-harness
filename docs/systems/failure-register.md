@@ -55,7 +55,9 @@ of its own. Counting both read one subtask as two failures and inflated `queue_f
 a marked row aside and counts it in `refused_attempts`, with the same window and test-traffic rule as any row, so
 queue pressure stays visible without being a failure. The `queue_full` class below is therefore a subtask that ended
 refused, not a refusal seen on the way. A ledger written before the column existed has no row marked; its refusals
-count as the failures they were then recorded as. (The savings summary's job counters still count a marked row.)
+count as the failures they were then recorded as. No other job counter counts a marked row either: the savings
+summary and its top defer reasons, the session split and the stats reports skip it by the same rule
+(`ledger.CountsAsJob`).
 
 ### Kinds
 
