@@ -3631,3 +3631,54 @@ test("snapshot: a yaml at the root resolves its relative entries under the root,
 test("index: a group whose templates is an object or a number is skipped like one whose templates is a string", () => {
   assert.deepEqual(C.flattenIndex([{ templates: { name: "x" } }, { templates: 7 }, { templates: [{ name: "ok" }] }]).map((t) => t.name), ["ok"]);
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// A model file only the converter reads: an object-form widgets_values, and the values an active subgraph instance carries
+// ---------------------------------------------------------------------------------------------------------------------------------
+// The converter reads a loader's widgets_values in either form (a list, or an object keyed by input name) and routes an instance's own
+// widgets_values into an inner loader (properties.proxyWidgets, or the literal a subgraph input carries). A requirement list that reads only
+// the list form of the leaves misses the file such a template loads.
+
+test("models: a loader whose widgets_values is an object keyed by input name names its file as a requirement, as the list form does", () => {
+  const keyed = C.requiredModels({ nodes: [{ id: 1, type: "CheckpointLoaderSimple", mode: 0, widgets_values: { ckpt_name: "keyed.safetensors" } }] });
+  const listed = C.requiredModels({ nodes: [{ id: 1, type: "CheckpointLoaderSimple", mode: 0, widgets_values: ["keyed.safetensors"] }] });
+  assert.deepEqual(keyed.active, listed.active);
+  assert.deepEqual(keyed.active.map((m) => [m.directory, m.name, m.annotated]), [["checkpoints", "keyed.safetensors", false]]);
+});
+
+test("models: an object-form value of a muted loader, of a note, or one an annotation already covers adds no requirement", () => {
+  const annotated = loaderNode(3, "UNETLoader", { name: "a.safetensors", repo: "example-org/w", dir: "diffusion_models" }, { widgets_values: { unet_name: "sub/a.safetensors" } });
+  const r = C.requiredModels({ nodes: [
+    { id: 1, type: "CheckpointLoaderSimple", mode: 2, widgets_values: { ckpt_name: "muted.safetensors" } },
+    { id: 2, type: "MarkdownNote", mode: 0, widgets_values: { text: "see note.safetensors" } },
+    annotated,
+  ] });
+  assert.deepEqual(r.active.map((m) => m.name), ["a.safetensors"]);
+});
+
+const SG_ID = "00000001-1111-4111-8111-111111111111";
+const instanceWorkflow = (inst) => ({
+  nodes: [{ id: 2, type: SG_ID, mode: 0, ...inst }],
+  definitions: { subgraphs: [{ id: SG_ID, nodes: [loaderNode(11, "CheckpointLoaderSimple", { name: "inner.safetensors", repo: "example-org/w", dir: "checkpoints" }, { widgets_values: ["inner.safetensors"] })] }] },
+});
+const PROXIED = { widgets_values: ["outer.safetensors"], properties: { proxyWidgets: [["11", "ckpt_name"]] } };
+const LITERAL = { widgets_values: ["outer.safetensors"] };
+
+test("models: a model file an ACTIVE subgraph instance carries in its widgets_values (proxied into an inner loader, or the literal a subgraph input takes) is a requirement, filed under no class", () => {
+  for (const inst of [PROXIED, LITERAL]) {
+    const r = C.requiredModels(instanceWorkflow(inst));
+    assert.deepEqual(r.active.map((m) => m.name).sort(), ["inner.safetensors", "outer.safetensors"]);
+    const outer = r.active.find((m) => m.name === "outer.safetensors");
+    assert.deepEqual([outer.directory, outer.annotated], [null, false], "the loader that takes it is inside the subgraph, so the class is not known here");
+  }
+});
+
+test("models: a muted or bypassed instance's values are not requirements, and neither is a value an annotation covers or a string that is no model file", () => {
+  for (const mode of [2, 4]) {
+    const r = C.requiredModels(instanceWorkflow({ ...PROXIED, mode }));
+    assert.deepEqual(r.active.map((m) => m.name), [], `mode ${mode}`);
+    assert.deepEqual(r.inactive.map((m) => m.name), ["inner.safetensors"]);
+  }
+  assert.deepEqual(C.requiredModels(instanceWorkflow({ widgets_values: ["sub/inner.safetensors"] })).active.map((m) => m.name), ["inner.safetensors"], "covered by the inner annotation, by its base name");
+  assert.deepEqual(C.requiredModels(instanceWorkflow({ widgets_values: ["a prompt", 3, "notes.txt", null] })).active.map((m) => m.name), ["inner.safetensors"]);
+});

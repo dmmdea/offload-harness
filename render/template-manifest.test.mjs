@@ -425,3 +425,28 @@ test("list: a template nested past the catalog's reach is not runnable and is co
   assert.deepEqual(l.counts.by_class, { subgraph_unexpanded: 1 });
   assert.equal(M.listTemplates(nestCatalog({ tt_nest9: nestedWorkflow(9) }), { runnable: false }).templates[0].class, "subgraph_unexpanded");
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A model file only the converter reads is in the list the gate reads
+// ---------------------------------------------------------------------------------------------------------------------
+
+const instanceTemplate = (inst) => JSON.stringify({
+  version: 0.4,
+  nodes: [{ id: 2, type: nestId(1), mode: 0, ...inst }],
+  definitions: { subgraphs: [{ id: nestId(1), nodes: [nestLoader(11, "CheckpointLoaderSimple", "inner.safetensors", "checkpoints")] }] },
+});
+
+test("verdict: a file an active subgraph instance carries into an inner loader is in the list the gate reads, so the template is refused as license_unknown and not run on the inner file alone", () => {
+  for (const inst of [{ widgets_values: ["outer.safetensors"], properties: { proxyWidgets: [["11", "ckpt_name"]] } }, { widgets_values: ["outer.safetensors"] }]) {
+    const row = rowOf(nestCatalog({ tt_inst: instanceTemplate(inst) }), "tt_inst");
+    assert.deepEqual(row.models.map((m) => m.name).sort(), ["inner.safetensors", "outer.safetensors"]);
+    assert.deepEqual([M.verdictFor(row).outcome, M.verdictFor(row).class], ["refuse", "license_unknown"]);
+  }
+});
+
+test("verdict: a loader whose widgets_values is an object names its file too: refused as license_unknown, not read as a template with no weights", () => {
+  const wf = JSON.stringify({ version: 0.4, nodes: [{ id: 1, type: "CheckpointLoaderSimple", mode: 0, widgets_values: { ckpt_name: "keyed.safetensors" } }] });
+  const row = rowOf(nestCatalog({ tt_keyed: wf }), "tt_keyed");
+  assert.deepEqual(row.models.map((m) => m.name), ["keyed.safetensors"]);
+  assert.deepEqual([M.verdictFor(row).outcome, M.verdictFor(row).class], ["refuse", "license_unknown"]);
+});
