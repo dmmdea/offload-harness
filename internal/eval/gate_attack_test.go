@@ -658,21 +658,23 @@ func allTied(t *testing.T, n int, pre PreReg, inc, cand float64) GateResult {
 }
 
 // Sixteen ties say little about a margin of 0.05: a candidate that lost 5% of the incumbent's passes would
-// tie all sixteen pairs 44% of the time. A sample with no spread has no standard error to read, so its
-// interval is the rule of three: the one value plus and minus 3 R / n, R the width of the score range (for pass/fail
-// scores with no discordant pair among n, 3 / n is the one-sided 95% upper bound on the rate of discordant pairs, so
-// the mean difference can be as low as -3 / n). A margin of 0.05 of the range is certified from 61 ties; 60 ties
-// put the end exactly on it, and a difference exactly on the margin is not an ADOPT.
+// tie all sixteen pairs 44% of the time. The pairs are pass/fail, so the interval is Tango's score interval for a
+// paired difference, whose variance is the one the true difference would give: with no discordant pair among n
+// the ends are +-z^2 / (n + z^2) of the range (z = 1.96, so 3.84 / (n + 3.84)), the exact form of the "rule of
+// three" argument (3 / n) this gate used in version 2, whose one-sided level was 5% and not 2.5%. A margin of
+// 0.05 of the range is certified from 73 ties (the chance of 73 ties at a true loss rate of 5% is 2.4%) and not
+// from 72, whose end is -0.0507.
 func TestAllTiedNonInferiorityDoesNotCertifyTheMarginOnASmallSample(t *testing.T) {
+	const z2 = 1.959963984540054 * 1.959963984540054
 	for _, tc := range []struct {
 		n    int
 		want string
-	}{{16, VerdictInconclusive}, {24, VerdictInconclusive}, {40, VerdictInconclusive}, {60, VerdictInconclusive}, {61, VerdictAdopt}, {64, VerdictAdopt}, {80, VerdictAdopt}} {
+	}{{16, VerdictInconclusive}, {24, VerdictInconclusive}, {40, VerdictInconclusive}, {60, VerdictInconclusive}, {61, VerdictInconclusive}, {64, VerdictInconclusive}, {72, VerdictInconclusive}, {73, VerdictAdopt}, {80, VerdictAdopt}} {
 		r := allTied(t, tc.n, niUnitPre(tc.n), 0.5, 0.5)
 		if r.Delta != 0 || r.Verdict != tc.want {
 			t.Errorf("n=%d, every pair tied, tokens halved: want %s, got %s %s (delta %v lo %v hi %v)", tc.n, tc.want, r.Verdict, r.Reason, r.Delta, r.Lo, r.Hi)
 		}
-		if half := 3 / float64(tc.n); math.Abs(r.Lo+half) > 1e-12 || math.Abs(r.Hi-half) > 1e-12 {
+		if half := z2 / (float64(tc.n) + z2); math.Abs(r.Lo+half) > 1e-9 || math.Abs(r.Hi-half) > 1e-9 {
 			t.Errorf("n=%d: the interval of a tie is [%v, %v], got [%v, %v]", tc.n, -half, half, r.Lo, r.Hi)
 		}
 	}
@@ -681,15 +683,16 @@ func TestAllTiedNonInferiorityDoesNotCertifyTheMarginOnASmallSample(t *testing.T
 // The same on a 0..10 judge scale, where the margin is 0.5 and the interval is ten times as wide: a mutant that
 // forgot the width of the range would certify the margin from 16 ties.
 func TestAllTiedNonInferiorityScalesWithTheScoreRange(t *testing.T) {
+	const z2 = 1.959963984540054 * 1.959963984540054
 	for _, tc := range []struct {
 		n    int
 		want string
-	}{{16, VerdictInconclusive}, {40, VerdictInconclusive}, {60, VerdictInconclusive}, {61, VerdictAdopt}, {80, VerdictAdopt}} {
+	}{{16, VerdictInconclusive}, {40, VerdictInconclusive}, {61, VerdictInconclusive}, {72, VerdictInconclusive}, {73, VerdictAdopt}, {80, VerdictAdopt}} {
 		r := allTied(t, tc.n, niPre(tc.n), 8, 8)
 		if r.Margin != 0.5 || r.Verdict != tc.want {
 			t.Errorf("n=%d on 0..10 with margin %v: want %s, got %s %s (lo %v)", tc.n, r.Margin, tc.want, r.Verdict, r.Reason, r.Lo)
 		}
-		if half := 30 / float64(tc.n); math.Abs(r.Lo+half) > 1e-12 || math.Abs(r.Hi-half) > 1e-12 {
+		if half := 10 * z2 / (float64(tc.n) + z2); math.Abs(r.Lo+half) > 1e-8 || math.Abs(r.Hi-half) > 1e-8 {
 			t.Errorf("n=%d: the interval of a tie is [%v, %v], got [%v, %v]", tc.n, -half, half, r.Lo, r.Hi)
 		}
 	}

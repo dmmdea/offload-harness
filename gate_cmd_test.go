@@ -559,6 +559,22 @@ func TestGateCmdOneByteEditFailsCheckOrChangesTheHash(t *testing.T) {
 	}
 }
 
+// The same for a baseline frozen by the version 2 gate, the version before the primary interval changed.
+func TestGateCmdRefusesAVersionTwoBaselineWithTheVersionReason(t *testing.T) {
+	v2 := filepath.Join("internal", "eval", "testdata", "baseline-v2-frozen.json")
+	dir := t.TempDir()
+	input := gateWrite(t, dir, "input.json", map[string]any{"baseline_hash": strings.Repeat("0", 64)})
+	for name, args := range map[string][]string{
+		"check":   {"check", "--baseline", v2},
+		"verdict": {"verdict", "--baseline", v2, "--input", input},
+	} {
+		_, stderr, code := runGateCmd(t, args...)
+		if code != 2 || !strings.Contains(stderr, "gate_version") || !strings.Contains(stderr, `"2"`) || !strings.Contains(stderr, "re-frozen") || strings.Contains(stderr, "canonical form") {
+			t.Errorf("gate %s: want exit 2 and the version refusal for version 2, got %d %q", name, code, stderr)
+		}
+	}
+}
+
 // A baseline frozen by the version 1 gate gets the version refusal from every verb that reads a baseline,
 // with exit 2 and the advice to re-freeze it, not the "edited by hand?" of the canonical-form check.
 func TestGateCmdRefusesAVersionOneBaselineWithTheVersionReason(t *testing.T) {

@@ -437,6 +437,48 @@ func TestCheckBaselineRefusesARealVersionOneFileWithTheVersionReason(t *testing.
 	}
 }
 
+// A baseline frozen by the version 2 gate, byte for byte as that binary wrote it (the same small
+// non-inferiority pre-registration as the version 1 file, plus the frozen judge version 2 added). The version 2
+// primary interval was the score form of the t interval with the rule of three for a sample with no spread;
+// version 3 reads pass/fail pairs with Tango's score interval and every other score on the augmented sample, so
+// a verdict under one is not a verdict under the other. check must refuse the file for its version, first, as it
+// does a version 1 file, and the reason must tell the operator to re-freeze.
+func TestCheckBaselineRefusesARealVersionTwoFileWithTheVersionReason(t *testing.T) {
+	raw, err := os.ReadFile("testdata/baseline-v2-frozen.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := BaselineHash(raw), "5d975b7a5f2aed473f88584303aecc4bebc2e42b2d6e95c25db3c00c3c615598"; got != want {
+		t.Fatalf("testdata/baseline-v2-frozen.json hashes to %s, not %s: its bytes changed", got, want)
+	}
+	if !bytes.Contains(raw, []byte(`"gate_version": "2"`)) || bytes.Contains(raw, []byte("\r")) || !bytes.Contains(raw, []byte(`"judge"`)) {
+		t.Fatal("the file must be a version 2 baseline, LF only, with a judge")
+	}
+	_, _, err = CheckBaseline(raw)
+	if err == nil {
+		t.Fatal("check must refuse a version 2 baseline")
+	}
+	r := refusalOf(t, err)
+	for _, want := range []string{"gate_version", `"2"`, `"` + GateVersion + `"`, "re-frozen"} {
+		if !strings.Contains(r.Reason, want) {
+			t.Errorf("the refusal must say %s, got %q", want, r.Reason)
+		}
+	}
+	for _, bad := range []string{"canonical form", "edited by hand", "not a baseline document"} {
+		if strings.Contains(r.Reason, bad) {
+			t.Errorf("a version 2 file is refused for its version, not for %q: %q", bad, r.Reason)
+		}
+	}
+	// And the gate itself refuses it as the baseline of a verdict, whatever the input holds.
+	var b Baseline
+	if err := json.Unmarshal(raw, &b); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Gate(b, BaselineHash(raw), GateInput{BaselineHash: BaselineHash(raw)}); err == nil || !strings.Contains(err.Error(), "gate_version") {
+		t.Errorf("Gate must refuse a version 2 baseline for its version, got %v", err)
+	}
+}
+
 // The version is read before anything else about the document: a file of another version is refused for
 // its version whatever else it holds, and a hand edit of a current file is still refused for its form.
 func TestCheckBaselineReadsTheVersionBeforeTheFormOfTheBytes(t *testing.T) {
