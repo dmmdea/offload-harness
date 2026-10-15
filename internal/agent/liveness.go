@@ -517,8 +517,9 @@ func (m *Monitor) onStall() {
 		var hook func(Phase, time.Duration)
 		var ph Phase
 		var allow time.Duration
+		verdict := m.silenceVerdictLocked(loading)
 		switch {
-		case loading:
+		case verdict == verdictLoading:
 			hook, ph, allow = m.enterLoadingLocked(state)
 		case m.warming && perr != nil:
 			// Loaded for this run, and the seat cannot be read now: the short
@@ -527,7 +528,7 @@ func (m *Monitor) onStall() {
 			hook, ph, allow = m.enterPostReadyLocked(unreadableState(perr), false, m.last)
 		case m.warming:
 			hook, ph, allow = m.enterPostReadyLocked(warmupState, true, m.last)
-		case m.engineArmedLocked():
+		case verdict == verdictEngine:
 			// Loaded and not loading: before calling the silence a stall, ask
 			// whether the ENGINE is working for anyone (the busy hold).
 			m.checkEngineLocked() // releases the lock
@@ -541,12 +542,50 @@ func (m *Monitor) onStall() {
 		notify(hook, ph, allow)
 		return
 	}
-	if m.engineArmedLocked() && m.engineCheckablePhaseLocked() {
+	// A hold part that ran out, or a phase whose allowance did. The timer makes no
+	// seat read of its own here: the engine read it goes on to make reports a seat
+	// that is loading (checkEngineLocked enters the loading hold on it), which is
+	// the verdict the probe tick reaches from its own read of the same seat state.
+	if m.silenceVerdictLocked(false) == verdictEngine {
 		m.checkEngineLocked() // releases the lock
 		return
 	}
 	m.fileStallLocked()
 	m.mu.Unlock()
+}
+
+// silenceVerdict is what a request that has gone quiet past what it was allowed
+// becomes. The stall timer and the cold-load probe's tick both reach it, and for
+// the same state of the seat they must reach the same one: a request is not
+// stalled by whichever of the two happens to get there first.
+type silenceVerdict int
+
+const (
+	verdictStall   silenceVerdict = iota // file the stall
+	verdictLoading                       // the seat is loading: the cold-load ceiling bounds the wait
+	verdictEngine                        // the seat is loaded: ask the engine before calling it a stall
+)
+
+// silenceVerdictLocked decides it. loading is positive evidence, from a read of
+// the seat made now, that the seat is loading; an unreadable seat is not
+// evidence, so the caller passes false. The timer makes no seat read of its own
+// at a spent bound and passes false: the engine read it goes on to make carries
+// the seat's state (checkEngineLocked enters the loading hold on a Loading
+// reading), so it reaches the same verdict one read later. A cold-load ceiling
+// that has run out is the end of the load being waited for, and stalls whatever
+// the seat reads now; every other part (admission, prefill, re-pack, the
+// post-ready part) hands a load to the cold-load hold and a loaded seat to the
+// engine, when there is one to ask.
+func (m *Monitor) silenceVerdictLocked(loading bool) silenceVerdict {
+	switch {
+	case m.phase == PhaseColdLoad && !m.postReady:
+		return verdictStall
+	case loading && m.pol.ColdLoad > 0:
+		return verdictLoading
+	case m.engineArmedLocked() && m.engineCheckablePhaseLocked():
+		return verdictEngine
+	}
+	return verdictStall
 }
 
 // warmupState is the hold's state when the seat reads ready but has not
@@ -759,23 +798,29 @@ func (m *Monitor) onProbeTick() {
 	var allow time.Duration
 	switch {
 	case m.phase == PhaseColdLoad && m.holdLeftLocked(time.Now()) <= 0:
+		// The hold's current part ran out while this tick's read of the seat was
+		// in flight (the stall timer, finding the probe busy, left the decision to
+		// the tick). It decides what the timer would for the same seat state: a
+		// seat that is loading goes back to the loading hold, with the cold-load
+		// ceiling still counted from the first silence; a seat that is loaded, or
+		// cannot be read, is the engine's to judge before the silence is called a
+		// stall; a cold-load ceiling that has run out stalls.
 		if loading {
 			m.holdState = state
 		} else if err != nil {
 			m.holdState = unreadableState(err)
 		}
-		if m.postReady && !loading && m.engineArmedLocked() {
-			// The post-ready bound ran out while this tick's read of the seat
-			// was in flight (the stall timer, finding the probe busy, left the
-			// decision to the tick). A seat that is loaded and not loading is
-			// the engine's to judge, exactly as when the timer wins the race:
-			// read it before calling the silence a stall.
+		switch m.silenceVerdictLocked(loading) {
+		case verdictLoading:
+			hook, ph, allow = m.enterLoadingLocked(state)
+		case verdictEngine:
 			m.checkEngineLocked() // releases the lock
 			return
+		default:
+			m.fileStallLocked()
+			m.mu.Unlock()
+			return
 		}
-		m.fileStallLocked()
-		m.mu.Unlock()
-		return
 	case loading:
 		hook, ph, allow = m.enterLoadingLocked(state)
 	case m.phase == PhaseColdLoad && err != nil:
