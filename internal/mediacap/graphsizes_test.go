@@ -97,9 +97,9 @@ func TestModelFileSizesTreatsAnEmptyFileAsUnresolved(t *testing.T) {
 // the LARGER is the size (the smaller would shrink a declaration).
 func TestModelFileSizesTakesTheLargerOfTwoSameNamedFiles(t *testing.T) {
 	dir := sizedTree(t, map[string]int64{
-		"models/vae/ae.safetensors":              mib,
+		"models/checkpoints/ae.safetensors":      mib,
 		"models/diffusion_models/ae.safetensors": 6 * mib,
-		"models/loras/ae.safetensors":            2 * mib,
+		"models/vae/ae.safetensors":              2 * mib,
 	})
 	sizes, _, ok := ModelFileSizes(ModelRoots(dir), []string{"ae.safetensors"}, nil)
 	if !ok || !reflect.DeepEqual(sizes, []int64{6 * mib}) {

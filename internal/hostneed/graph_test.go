@@ -221,7 +221,7 @@ func TestAGraphThatNamesNoLoaderKeepsTheClassDefault(t *testing.T) {
 		"an empty object": `{}`,
 		"nodes without a file": `{"1":{"class_type":"EmptyLatentImage","inputs":{"width":512}},
 			"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"model.safetensors","images":["1",0]}}}`,
-		"only an input image":   `{"1":{"class_type":"LoadImage","inputs":{"image":"photo.png"}}}`,
+		"only an input image":    `{"1":{"class_type":"LoadImage","inputs":{"image":"photo.png"}}}`,
 		"a loader fed by a link": `{"1":{"class_type":"UNETLoader","inputs":{"unet_name":["9",0]}}}`,
 		"a builtin vae":          `{"1":{"class_type":"VAELoader","inputs":{"vae_name":"builtin"}}}`,
 	} {

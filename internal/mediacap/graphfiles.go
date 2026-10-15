@@ -5,7 +5,8 @@ package mediacap
 // A fleet node that is handed a graph (run-graph) used to find out it lacked a weight file only after it had taken its
 // lease and cold-started ComfyUI, and the preflight inside the runner then deferred. A node that checks the names at the
 // door (internal/fleetnode buildRunGraph) answers 503 before any job exists, so the delegator places the graph on the
-// next node instead. This file is the reading half: which names a graph carries, and which of them a tree does not hold.
+// next node instead. This file is the reading half: which names a graph carries, and which of them a tree does not hold (and,
+// for the host-RAM estimate of a graph, how large the ones it holds are: ModelFileSizes).
 //
 // The harness never interprets a graph's semantics (internal/rungraph), and this stays generic on purpose:
 //
@@ -245,7 +246,40 @@ func ManifestSourcedModels(manifest []byte) map[string]bool {
 	return out
 }
 
-// ModelFileSizes sizes the weight files a graph names. STUB: red first.
+// ModelFileSizes returns the size in bytes of each of names, in order: the reading of a graph's weight files for the one reader
+// that needs their SIZES, the host-RAM estimate of a graph (internal/hostneed.ForGraph). A name is looked up exactly as
+// MissingModelFiles looks it up, under every class directory of every root and only as a safe relative path (a graph carries no
+// class, see the top of this file), and the roots are listed once per call.
+//
+// It is all or nothing: the first name that does not resolve ends the look and is returned in missing, with ok false and no
+// sizes, because a sum that leaves a file out is a figure that shrinks, and the caller keeps what it had. A file of no length
+// is not a size and reads as unresolved. A name held under more than one class directory is sized as the LARGER of them: the
+// graph does not say which the loader opens, and the smaller would shrink the figure. stat is os.Stat unless a test supplies a
+// table.
 func ModelFileSizes(roots []ModelRoot, names []string, stat func(path string) (size int64, ok bool)) (sizes []int64, missing string, ok bool) {
-	return nil, "", false
+	if stat == nil {
+		stat = statModel
+	}
+	var dirs []string
+	for _, r := range roots {
+		for _, cd := range classDirs(r) {
+			dirs = append(dirs, cd[1])
+		}
+	}
+	for _, name := range names {
+		var largest int64
+		if rel, safe := safeRel(name); safe {
+			rel = filepath.FromSlash(rel)
+			for _, dir := range dirs {
+				if n, found := stat(filepath.Join(dir, rel)); found && n > largest {
+					largest = n
+				}
+			}
+		}
+		if largest <= 0 {
+			return nil, name, false
+		}
+		sizes = append(sizes, largest)
+	}
+	return sizes, "", true
 }

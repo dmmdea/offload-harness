@@ -19,6 +19,9 @@
 //     runner's --reserve-vram); 0 when they do. A file whose size cannot be read takes the
 //     documented per-family size in familySizes; a family with neither is unknown, and the call
 //     takes the class default.
+//     A helper run with `--graph <file>` posts the caller's own workflow and is sized by the weight files that
+//     graph's own loaders name (graph.go ForGraphFile): their sizes summed in full, when the graph can be read
+//     and every file it names resolves; any other graph takes the class default below.
 //  3. The media class default: the largest of the ComfyUI render families THIS BOX has bound (an sd.cpp binding counts nothing here, the
 //     pipeline's sd.cpp lanes add the weights they park themselves, ForSdcpp; its own
 //     imagegen_*, gen_edit_*, videogen_* bindings), so a 32 GiB node is not held to the numbers of a
@@ -55,7 +58,8 @@ const (
 	// SourceFamilyDefault: a recognised render call whose file sizes could not be read, so the
 	// documented per-family sizes stand in for at least one of them.
 	SourceFamilyDefault Source = "family default"
-	// SourceGraphLoaders: the sizes of the weight files a ComfyUI graph's own loaders name (ForGraph).
+	// SourceGraphLoaders: the weight files a ComfyUI graph's own loaders name, summed in full (ForGraph): a graph the lease
+	// could read, whose every named file it could size.
 	SourceGraphLoaders Source = "graph loaders"
 	// SourceClassDefault: the media class default, the largest family this box binds.
 	SourceClassDefault Source = "class default"
@@ -690,9 +694,9 @@ func Resolve(r Request, f Facts) Need {
 			return n
 		}
 	}
-	// A render helper whose weights cannot be sized (an arbitrary --graph, a family the table does not
-	// know) is media work whatever the lease is called: it takes the class default, not the 0 a text
-	// lease would.
+	// A render helper whose weights cannot be sized (a --graph the lease cannot read or size in full, a
+	// family the table does not know) is media work whatever the lease is called: it takes the class
+	// default, not the 0 a text lease would.
 	if recognised || r.Class == gpulease.ClassMedia {
 		return ClassDefault(f)
 	}
