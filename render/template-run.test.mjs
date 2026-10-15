@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { applyOverrides, convertForRun, loadTemplate } from "./template-run.mjs";
 import * as TR from "./template-run.mjs";
+import { requiredModels } from "./templates-catalog.mjs";
 import { COMFY, fixtureIo, fixtureFiles, memIo } from "./template-manifest-fixture.mjs";
 
 const GOLD = fileURLToPath(new URL("./testdata/template-goldens/", import.meta.url));
@@ -191,4 +192,16 @@ test("unlistedModels: a file matches the list by its name under the class direct
 test("unlistedModels: no list names nothing, and a graph with no model file names nothing", () => {
   assert.deepEqual(TR.unlistedModels({ "1": { class_type: "A", inputs: { f: "x.pt" } } }, undefined), ["x.pt"]);
   assert.deepEqual(TR.unlistedModels({ "1": { class_type: "A", inputs: { n: 3 } }, "2": { class_type: "B" } }, LISTED_MODELS), []);
+});
+
+test("unlistedModels: on the hand-written templates the converter's graph loads only files the catalog's list names (the two readers agree, so the check defers none of them)", () => {
+  for (const name of ["basic-t2i", "subgraph-i2v"]) {
+    const wf = json(`${name}.workflow.json`);
+    const r = convertForRun({ workflow: wf, objectInfo: objectInfo(), comfyVersion: "0.37.0", minComfyUIVersion: "0.3.0" });
+    assert.equal(r.ok, true, name);
+    const listed = requiredModels(wf).active.map((m) => ({ path: `models/${m.directory ?? "checkpoints"}/${m.name}` }));
+    assert.ok(listed.length > 0, `${name} names a model file`);
+    assert.deepEqual(TR.unlistedModels(r.graph, listed), [], name);
+    assert.equal(TR.unlistedModels(r.graph, []).length, listed.length, `${name}: with the list emptied each file is unlisted`);
+  }
 });

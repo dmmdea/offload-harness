@@ -241,7 +241,7 @@ export function modelCovered(names, file) {
 // bypassed or muted nodes reference: optional in practice (a Lightning LoRA on a bypassed loader),
 // so not required, and reported so nobody has to wonder where they went.
 export function requiredModels(workflow) {
-  const { leaves } = walkGraph(workflow);
+  const { leaves, instances } = walkGraph(workflow);
   const active = new Map();
   const inactive = new Map();
   const add = (map, req) => {
@@ -263,17 +263,25 @@ export function requiredModels(workflow) {
   }
   for (const key of active.keys()) inactive.delete(key);
   const annotated = new Set([...active.values()].map((m) => m.name.toLowerCase()));
-  for (const { node, active: on } of leaves) {
-    if (!on || !Array.isArray(node.widgets_values)) continue;
+  // An unannotated file a node names in its widget values. The converter reads widgets_values in either of its two forms, a list or an
+  // object keyed by input name, so both are read here; and it routes the widgets_values of a subgraph instance into an inner loader (the
+  // widgets a proxyWidgets entry names, or the literal a subgraph input takes), so an ACTIVE instance's own values are read as well. The
+  // class a proxied file is filed under is the inner loader's, which is not followed here: it is listed with no class (readiness finds the
+  // directory it sits in), and when the same name is also annotated inside the subgraph it is listed twice at most, never missed.
+  const addWidgetFiles = (node) => {
+    const raw = node.widgets_values;
+    const values = Array.isArray(raw) ? raw : raw !== null && typeof raw === "object" ? Object.values(raw) : [];
     const type = typeof node.type === "string" ? node.type : "";
-    if (NOTE_TYPES.has(type)) continue;
-    for (const v of node.widgets_values) {
+    if (NOTE_TYPES.has(type)) return;
+    for (const v of values) {
       if (typeof v !== "string" || !hasModelExt(v)) continue;
       const name = slash(v);
       if (modelCovered(annotated, name)) continue;
       add(active, { name, directory: Object.hasOwn(LOADER_CLASS, type) ? LOADER_CLASS[type] : null, url: null, hash: null, hash_type: null, annotated: false, node_types: [type] });
     }
-  }
+  };
+  for (const { node, active: on } of leaves) if (on) addWidgetFiles(node);
+  for (const { node, active: on } of instances) if (on) addWidgetFiles(node);
   return { active: [...active.values()], inactive: [...inactive.values()] };
 }
 
