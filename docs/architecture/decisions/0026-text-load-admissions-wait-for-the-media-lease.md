@@ -218,7 +218,7 @@ See [GPU lease](../../systems/gpu-lease.md), "Consumers read a seat's cards, not
 
 ## Extended 2026-10-14: the card rule is stated once
 
-The gate's reading of the seat's cards and the seat's yield (the extension of 2026-10-02) are collected with the other consumers' in [ADR 0094](0094-a-lease-names-its-cards-a-card-has-one-holder.md), clause 7. One correction of fact: media routes now pass their own timeout as the lease window and `DefaultTTL` is only the fallback for a lease acquired with no window, so the `DefaultTTL` remarks above and in Alternatives describe the state of 2026-08; the decision is unchanged.
+The gate's reading of the seat's cards (the first half of the extension of 2026-10-02) is collected with the other consumers' in [ADR 0094](0094-a-lease-names-its-cards-a-card-has-one-holder.md), clause 7. The seat's yield to a lease granted after the gate (the second half) is not collected there and stays as described above. One correction of fact: media routes now pass their own timeout as the lease window and `DefaultTTL` is only the fallback for a lease acquired with no window, so the `DefaultTTL` remarks above and in Alternatives describe the state of 2026-08; the decision is unchanged.
 
 ## Alternatives considered
 

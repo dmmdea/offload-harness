@@ -3099,9 +3099,16 @@ request posted straight to llama-swap by anything outside the harness is outside
 - **No policy for an overdue holder that ignores the request.** `gpu_on_overdue` is `request` or `hold`; there is no automatic mode,
   and a test pins that none exists (`internal/gpulease/yield.go:75-94`, `internal/gpulease/yield_test.go:1180`). Whether an
   unanswered request ends in a takeover is the operator's choice.
-- **The media door holds the whole node in five cases.** A card table that cannot be read, a ComfyUI device order the box has not
-  declared, a pin that names several cards, several devices in one call, and a host that does not write card leases
-  (`internal/pipeline/mediaadmit.go:467-470`, `477-486`, `515`, `795-799`).
+- **Several media paths hold the whole node.** By design: the lanes with no ComfyUI instance to bind to a card, which are the
+  audio-gen voice lane, the iGPU engines and the sd.cpp lanes (`internal/pipeline/pipeline.go:3489`,
+  `internal/pipeline/igpumedia.go:239`, `internal/pipeline/sdcppneed.go:85`, each a `wholeNeed`), and a `run-graph` that declares
+  no device (`internal/pipeline/mediaadmit.go:297-302`, `declaredNeed`). Because the plan cannot name a card: an unreadable or
+  empty card table (`mediaadmit.go:467-470`); a pin that names several cards, is not a ComfyUI device index, or is in a device
+  order the box has not declared (`477-486`); a pool key that is not a device or is in an undeclared order, and a pool of fewer
+  than two cards or on a box of more than three (`493`, `521-553`, `poolCards`, `poolMayBeScoped`); several declared devices
+  (`515`); and a host that does not write card leases (`795-799`). The card-only pair is the one placement that never falls back
+  to the whole node: a table it cannot read or a host that does not lease cards is refused with the reason
+  (`internal/pipeline/mediamulticard.go:145-160`, `171-177`, `planMulticard`, `noCardLeases`; `mediaadmit.go:795-799`).
 - **No pool of local workers across cards for one batch.** A local image batch renders through one warm session under one lease
   (`internal/pipeline/pipeline.go:2463-2481`); the fleet batch places jobs on nodes (`internal/mediaremote/batch.go:246`);
   `gpu reserve --cards N` queues on a fixed set and does not re-pick while it waits (`gpu_reserve_devices.go:25-29`).

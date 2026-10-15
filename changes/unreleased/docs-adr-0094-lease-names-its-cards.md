@@ -11,7 +11,8 @@
 - **What it does not decide.** A separate section lists what is not built and names the constraint the Accepted clauses put on
   it: a takeover that stops a job and then frees its claim (three status surfaces name `gpu takeover`, which is not a verb), a
   release that waits for a dead tree and a writer for the `quarantine.<id>` sidecars, an overdue policy beyond the request, a
-  media plan that always names its cards, a pool of local workers across cards, and a scripted acceptance of the whole path.
+  media plan that always names its cards (the voice, iGPU and sd.cpp lanes, a graph with no device, and every plan that cannot
+  name a card hold the whole node; the card-only pair is refused instead), a pool of local workers across cards, and a scripted acceptance of the whole path.
 - **Pointers.** ADRs 0018, 0026, 0039 and 0041 each get a dated amendment of one or two sentences pointing at it, in the
   convention of that file; their decisions are unchanged. The ADR index has the row. ADR 0055 is cross-referenced from the new
   record only.

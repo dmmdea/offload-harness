@@ -255,4 +255,4 @@ allocator and the display card"), [ADR 0075](0075-the-display-layer-opens-under-
 
 ## Amendment 2026-10-14 (the card rule is stated once)
 
-The place in line, the per-card media door, the card-only placement and the display cap above are collected with the rest of the card rule in [ADR 0094](0094-a-lease-names-its-cards-a-card-has-one-holder.md), which also lists what is not built: a media plan that always names its cards, and a local worker pool across cards.
+The place in line (clause 8), the per-card media door and the card-only placement (clause 7) and the display cap (clause 7, the allocator) above are collected with the rest of the card rule in [ADR 0094](0094-a-lease-names-its-cards-a-card-has-one-holder.md), which also lists what is not built: a media plan that always names its cards, and a local worker pool across cards.

@@ -99,10 +99,15 @@ for it (`devices.go:17-24`, `44-47`).
   the same free card do not both take it (`gpu_reserve_devices.go:30-32`).
 - The drain and the unload act on the seats that sit on the leased cards (`gpu_drain.go:784`, `maintainSeatScoped`; `696`,
   `unloadModelsFor`).
-- A media call leases the one card it uses when the host writes card leases and the card table can be read
-  (`internal/pipeline/mediaadmit.go:453-518`, `planMedia`; `786-815`, `acquireCardScoped`), for a window equal to the route's
-  own timeout (`internal/pipeline/pipeline.go:1683`, and the other `acquireMediaLease` calls); a plan that cannot name a card
-  holds the whole node (see "Not in this build").
+- A media call leases the card or cards it needs when the host writes card leases and the card table can be read: one card
+  (the allocator's pick, or the card an explicit pin names), a pooled route's set of two or more cards on a box of at most
+  three, or, for the card-only placement, the box's two non-display cards as a named pair
+  (`internal/pipeline/mediaadmit.go:453-518`, `planMedia`; `521-553`, `poolCards`, `poolMayBeScoped`;
+  `internal/pipeline/mediamulticard.go:145-160`, `planMulticard`; `mediaadmit.go:786-815`, `acquireCardScoped`), for a window
+  equal to the route's own timeout (`internal/pipeline/pipeline.go:1683`, and the other `acquireMediaLease` calls). A plan that
+  cannot name its cards holds the whole node (see "Not in this build"). The card-only pair is the exception: it is never
+  degraded to the whole node, and an unreadable card table or a host that does not write card leases is refused with the
+  reason (`mediamulticard.go:145-160`, `171-177`, `noCardLeases`; `mediaadmit.go:795-799`).
 - The fleet reads each live lease with the cards it holds, and a node refuses new work only when the leases that refuse it
   hold every card it has (`internal/fleetnode/leases.go:84`, `readLeases`; `173-203`, `closesNode`).
 
@@ -131,9 +136,16 @@ Accepted clauses above already require of whatever is built, so that the next re
 - **A policy for an overdue holder that ignores the request.** `gpu_on_overdue` has `request` and `hold` and no automatic mode,
   which a test pins as absent (`yield.go:75-94`; `internal/gpulease/yield_test.go:1180`, `TestNoAutomaticYieldModeExists`).
   Whether and when an unanswered request ends in a takeover is the operator's choice.
-- **A media plan that always names its cards.** Several devices in one call, an unreadable card table, a ComfyUI device order
-  the box has not declared, a pin that names several cards, and a host that does not write card leases all hold the whole
-  node (`internal/pipeline/mediaadmit.go:467-470`, `477-486`, `515`, `795-799`).
+- **A media plan that always names its cards.** Some media calls hold the whole node, by design or because the plan cannot
+  name a card. By design: the lanes with no ComfyUI instance to bind to a card, which are the audio-gen voice lane, the iGPU
+  engines and the sd.cpp lanes (`internal/pipeline/pipeline.go:3489`, `internal/pipeline/igpumedia.go:239`,
+  `internal/pipeline/sdcppneed.go:85`, each a `wholeNeed`), and a `run-graph` that declares no device
+  (`internal/pipeline/mediaadmit.go:297-302`, `declaredNeed`). Because the plan cannot name a card: an unreadable or empty card
+  table (`mediaadmit.go:467-470`); a pin that names several cards, is not a ComfyUI device index, or is in a device order the
+  box has not declared (`477-486`); a pool key that is not a device or is in an undeclared order, and a pool of fewer than two
+  cards or on a box of more than three (`493`, `521-553`, `poolCards`, `poolMayBeScoped`); several declared devices (`515`);
+  and a host that does not write card leases (`795-799`). The card-only pair never falls back to the whole node: it is
+  refused (clause 7).
 - **A pool of local workers across cards for one batch.** A local image batch renders through one warm session under one lease
   (`internal/pipeline/pipeline.go:2463-2481`, `RunImageBatchAs`); the fleet batch places jobs on nodes
   (`internal/mediaremote/batch.go:246`, `RunBatch`); `gpu reserve --cards N` holds a fixed set while it queues
@@ -184,8 +196,9 @@ Accepted clauses above already require of whatever is built, so that the next re
   amended 2026-10-02). The audit gate does its work, and the record can return without a format change.
 - **Compare epochs across leases.** With several live leases, a compare against one shared epoch would fence out every lease
   but the lowest (`devices.go:28-30`). The fence is per epoch.
-- **Free a card when a term ends, or after a grace.** This is the incident ADR 0018 exists to prevent: a detached holder released
-  the card at its window with the job still running behind it (`term.go:23-28`). A term ends in a renewal or a label.
+- **Free a card when a term ends, or after a grace.** This is the 2026-09-07 incident that terms close: a detached holder
+  released the card at its window with the job still running behind it (`internal/gpulease/term.go:23-28`; ADR 0070,
+  `0070-leases-have-terms-owners-renew-orphans-are-surfaced.md:108`). A term ends in a renewal or a label.
 - **Make the wrapper's death kill its tree by default.** It makes the wrapper a single point of failure for a long render; it
   is an opt-in (`--die-with-wrapper`, ADR 0084).
 - **Fold this rule into ADR 0018 by rewriting it.** An accepted ADR is not rewritten to describe a different decision, and the
