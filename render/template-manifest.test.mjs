@@ -349,3 +349,79 @@ test("fixture tree: the in-memory filesystem and the fixture files are what the 
   assert.ok(files[`${COMFY}/models/vae/v.safetensors`]);
   assert.equal(memIo({ "/a/b": "x" }).readText("/a/b"), "x");
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A template whose subgraphs the catalog could not expand is not run on the models it did read
+// ---------------------------------------------------------------------------------------------------------------------
+
+// A permissive UNET loader at the top level, then `levels` subgraph instances, one inside the next, and a permissive VAE loader in the
+// innermost definition. The catalog expands eight levels (MAX_SUBGRAPH_DEPTH); the converter expands more, so past that depth the
+// converted graph loads a file the catalog's list never named.
+const nestId = (k) => `${k.toString(16).padStart(8, "0")}-1111-4111-8111-111111111111`;
+const nestLoader = (id, type, name, directory) => ({
+  id, type, mode: 0, widgets_values: [name],
+  properties: { cnr_id: "comfy-core", models: [{ name, directory, url: `https://huggingface.co/example-org/weights-a/resolve/main/${name}` }] },
+});
+const nestedWorkflow = (levels) => JSON.stringify({
+  version: 0.4,
+  nodes: [nestLoader(1, "UNETLoader", "a.safetensors", "diffusion_models"), { id: 2, type: nestId(1), mode: 0 }],
+  definitions: {
+    subgraphs: Array.from({ length: levels }, (_, k) => ({
+      id: nestId(k + 1),
+      nodes: [k + 1 < levels ? { id: 10, type: nestId(k + 2), mode: 0 } : nestLoader(11, "VAELoader", "deep.safetensors", "vae")],
+    })),
+  },
+});
+const loopWorkflow = () => JSON.stringify({
+  version: 0.4,
+  nodes: [nestLoader(1, "UNETLoader", "a.safetensors", "diffusion_models"), { id: 2, type: nestId(1), mode: 0 }],
+  definitions: { subgraphs: [{ id: nestId(1), nodes: [nestLoader(11, "VAELoader", "deep.safetensors", "vae"), { id: 12, type: nestId(1), mode: 0 }] }] },
+});
+
+// A tree holding only the templates named, each with the workflow text given; the two models are on disk.
+function nestIo(templates) {
+  const index = JSON.stringify([{
+    moduleName: "default", category: "Fixture", title: "Fixture", type: "image",
+    templates: Object.keys(templates).map((name) => ({ name, mediaType: "image", mediaSubtype: "webp", openSource: true, title: name, tags: ["Image"], models: ["A"] })),
+  }]);
+  const extra = { [`${TEMPLATES}/index.json`]: index };
+  for (const [name, wf] of Object.entries(templates)) extra[`${TEMPLATES}/${name}.json`] = wf;
+  return memIo(fixtureFiles({ models: ["diffusion_models/a.safetensors", "vae/deep.safetensors"], extra }));
+}
+const nestCatalog = (templates) => catalogOf(nestIo(templates));
+
+test("verdict: a template nested one level past the catalog's reach is REFUSED as subgraph_unexpanded, not run on a manifest that names only the shallow file", () => {
+  const row = rowOf(nestCatalog({ tt_nest9: nestedWorkflow(9) }), "tt_nest9");
+  assert.equal(row.graph.unexpanded, 1, "the catalog left the ninth instance as a leaf");
+  assert.deepEqual(row.models.map((m) => m.name), ["a.safetensors"], "the hazard: the deep loader is not in the list the gate, the licence check and the host-RAM figure read");
+  const v = M.verdictFor(row);
+  assert.deepEqual([v.outcome, v.class, v.code], ["refuse", "subgraph_unexpanded", "TEMPLATE_SUBGRAPH_UNEXPANDED"]);
+  assert.match(v.detail, /unexpanded|nest/i);
+});
+
+test("verdict: a template nested exactly as deep as the catalog expands still runs, and its manifest names the deepest file", () => {
+  const row = rowOf(nestCatalog({ tt_nest8: nestedWorkflow(8) }), "tt_nest8");
+  assert.equal(row.graph.unexpanded, 0);
+  assert.deepEqual(M.manifestFor(row).models.map((m) => m.path), ["models/diffusion_models/a.safetensors", "models/vae/deep.safetensors"]);
+  assert.deepEqual([M.verdictFor(row).outcome, M.verdictFor(row).class], ["run", null]);
+});
+
+test("verdict: a subgraph that contains itself is refused as subgraph_unexpanded (the converter refuses it too)", () => {
+  const row = rowOf(nestCatalog({ tt_loop: loopWorkflow() }), "tt_loop");
+  assert.equal(row.graph.unexpanded, 1);
+  assert.deepEqual([M.verdictFor(row).outcome, M.verdictFor(row).class], ["refuse", "subgraph_unexpanded"]);
+});
+
+test("resolve: a template nested past the catalog's reach is refused before a manifest exists, whatever sits on the disk", () => {
+  const io = nestIo({ tt_nest9: nestedWorkflow(9) });
+  const r = M.resolveRun(rowOf(catalogOf(io), "tt_nest9"), snapshotOf(io), { io });
+  assert.deepEqual([r.ok, r.refused, r.class, r.code], [false, true, "subgraph_unexpanded", "TEMPLATE_SUBGRAPH_UNEXPANDED"]);
+  assert.equal(r.runtime_manifest, undefined);
+});
+
+test("list: a template nested past the catalog's reach is not runnable and is counted under its own class", () => {
+  const l = M.listTemplates(nestCatalog({ tt_nest8: nestedWorkflow(8), tt_nest9: nestedWorkflow(9) }), {});
+  assert.deepEqual(l.templates.map((t) => t.name), ["tt_nest8"]);
+  assert.deepEqual(l.counts.by_class, { subgraph_unexpanded: 1 });
+  assert.equal(M.listTemplates(nestCatalog({ tt_nest9: nestedWorkflow(9) }), { runnable: false }).templates[0].class, "subgraph_unexpanded");
+});
