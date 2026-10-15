@@ -290,3 +290,34 @@ func TestAFleetResultSurfacesTheRetryTheDelegatorRan(t *testing.T) {
 		}
 	}
 }
+
+// A caller who NAMED route:"local" said the material stays on this box: offload_ask has no
+// pin_reason channel, so the route is the only way to say it. A failed first attempt is then
+// published as it is, with no fleet call, and the note says why there was no retry.
+func TestOffloadAskNeverRetriesOnTheFleetWhenRouteLocalWasNamed(t *testing.T) {
+	s, fleet, localCalls := retryRig(t, 0, 20*time.Second, citing(t, "node-b"))
+	dir, p := askFixture(t)
+	var args map[string]any
+	if err := json.Unmarshal([]byte(askArgs("what is the queue cap", p, dir)), &args); err != nil {
+		t.Fatal(err)
+	}
+	args["route"] = "local"
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.handleAsk(context.Background(), callReq(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := decodeResult(t, res)
+	if *localCalls != 1 || fleet.calls != 0 {
+		t.Fatalf("local=%d fleet=%d: a named route local must never reach the fleet: %v", *localCalls, fleet.calls, out)
+	}
+	if out["verified"] != false || out["retried_on"] != nil {
+		t.Fatalf("the first attempt stands unverified and nothing was retried: %v", out)
+	}
+	if note, _ := out["retry_note"].(string); note != "retry skipped: route local was named; the ask stays on this box" {
+		t.Fatalf("retry_note = %q, want the named-route skip", note)
+	}
+}
