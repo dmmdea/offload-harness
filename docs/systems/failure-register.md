@@ -31,8 +31,10 @@ does not add to it, and the verb without the flag is unchanged.
 1. It reads the ledger lock-free (the MCP server may be appending) and takes the job rows: a dispatch marker, an
    inner row whose parent is present and a refused attempt (below) are not jobs. Test, bake and measurement traffic is
    left out and counted in `excluded_non_production`; `--include-test-traffic` counts it. A non-blank line that does
-   not decode as a ledger row is in no count and is counted in `unparsed_lines`; a ledger file that is not there reads
-   `ledger_found: false` with every count at 0, and a note on stderr.
+   not decode as a ledger row is in no count and is counted in `unparsed_lines`: a row is a JSON object, so garbage, a
+   cut-off line, a line holding `null` or any other non-object is unparsed, while `{}` is an object and so a row (a
+   job that did not fail). A ledger file that is not there reads `ledger_found: false` with every count at 0, and a
+   note on stderr.
 2. A job row is a **failure** when it deferred, or carries a failing reason code, or failed its acceptance check. A
    cache hit and a dispatch marker never are.
 3. Its **class** is its reason code, the closed set in `internal/ledger/reasoncode.go`. The set already holds the seven

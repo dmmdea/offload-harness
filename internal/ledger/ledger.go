@@ -12,6 +12,7 @@ package ledger
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -531,8 +532,19 @@ func (l *Ledger) Summarize(since int64, prices Prices) (Summary, error) {
 	return SummarizeFile(l.path, since, prices)
 }
 
+// isObjectLine reports whether a ledger line is shaped like a row: a JSON object. encoding/json decodes the literal
+// `null` into a struct without an error and without touching it, so Unmarshal alone reads a line holding only
+// `null` as a row with every field at its zero (a completed call of no task, a job that did not fail). It is a
+// damaged line, not a row. An object with no keys (`{}`) is a row: every column is optional, so a reader cannot
+// tell a minimal old row from an empty one by looking inside, and what an object must contain is not a parse rule.
+func isObjectLine(line []byte) bool {
+	line = bytes.TrimSpace(line)
+	return len(line) > 0 && line[0] == '{'
+}
+
 // ReadAll loads every parseable entry from a JSONL ledger (lock-free; skips
-// malformed/partial lines). Missing file => empty slice, no error.
+// malformed/partial lines, and a line that is not a JSON object, a literal null
+// among them). Missing file => empty slice, no error.
 func ReadAll(path string) ([]Entry, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -551,7 +563,7 @@ func ReadAll(path string) ([]Entry, error) {
 			continue
 		}
 		var e Entry
-		if json.Unmarshal(line, &e) == nil {
+		if isObjectLine(line) && json.Unmarshal(line, &e) == nil {
 			out = append(out, e)
 		}
 	}
@@ -657,8 +669,8 @@ func SummarizeFileWith(path string, since int64, prices Prices, includeTraffic b
 			continue
 		}
 		var e Entry
-		if json.Unmarshal(line, &e) != nil {
-			continue // malformed or a not-yet-complete trailing line
+		if !isObjectLine(line) || json.Unmarshal(line, &e) != nil {
+			continue // malformed, a literal null, or a not-yet-complete trailing line
 		}
 		if since > 0 && e.TS < since {
 			continue
