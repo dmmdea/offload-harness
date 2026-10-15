@@ -286,7 +286,7 @@ func (s *Server) runOnFleet(ctx context.Context, cfg config.Config, call agentRu
 		return jsonResult(map[string]any{"deferred": true, "defer_class": core.DeferClassContract, "route": route, "steps": 0,
 			"reason": "the call cannot ride a contract: " + perr.Error()})
 	}
-	wire, extra, note, ok := s.contractOnFleetAt(ctx, contract, route, "", fs.Bases)
+	wire, extra, note, ok := s.contractOnFleetAt(ctx, contract, route, "", fs.Bases, false)
 	notes := call.leftBehind()
 	if !ok {
 		// Nothing ran (the fleet could not be asked, or no node took it), or a node ran it and deferred: either way its own

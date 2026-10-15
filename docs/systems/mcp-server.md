@@ -246,8 +246,11 @@ leaves nothing anchorable at all.
 
 **A failed local first attempt is retried on another seat.** When the first attempt ran on this box's seat and
 failed its acceptance (`acceptance_failures` non-empty), the handler gives it the second chance `agent_delegate`
-gives a failed verification: the same contract goes once through the delegator at `route=remote`, which never
-places on this box's seat, so the retry runs on a different seat by construction. A routed ask (`auto`, `remote`,
+gives a failed verification: the same contract goes once through the delegator at `route=remote`, whose first
+placement never lands on this box's seat. The delegator's own retry inside that call is kept off the seat too
+(`RunOptions.RemoteRetryOnly`, which records no `pin_reason`, so `offload_status` still counts the call as
+`unreasoned`): when the fleet node's answer also fails, the engine tries another fleet node or none, and its skipped
+retry is named in the note, instead of running a third attempt on the seat where the first one failed. A routed ask (`auto`, `remote`,
 a named route) needs nothing added: the delegator's own engine already retries inside that call, and the response
 now says so (see the route paragraph below). The retry is decoded and graded exactly like the first attempt
 (`gradeAskWire`), and only a clean one is published:

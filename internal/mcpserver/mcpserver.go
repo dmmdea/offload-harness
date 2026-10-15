@@ -3766,9 +3766,13 @@ func askRetryFloorSec(cfg config.Config) int {
 }
 
 // askRetry gives a failed LOCAL first attempt the second chance agent_delegate gives a failed
-// verification: the same contract on the fleet, route "remote", which never places on this box's
-// seat, so the retry runs on a different seat by construction. It mirrors the delegator's retry
-// (mergeAttempts, runOne): the retry lives inside the contract's own wall, so it is handed what
+// verification: the same contract on the fleet, route "remote", whose first placement never lands
+// on this box's seat. The delegator's own retry inside that call is kept off the seat too
+// (RunOptions.RemoteRetryOnly, through contractOnFleetAt): a bare remote route would fall back to
+// this box when the fleet node's answer also fails, and the first attempt already failed here, so
+// a caller who did not name route local would get a third run on this box's GPU under a note that
+// still says "retry on <node>". The fleet's own skipped retry rides in that note instead. It
+// mirrors the delegator's retry (mergeAttempts, runOne): the retry lives inside the contract's own wall, so it is handed what
 // the first attempt left (timeout_sec, never auto) and is skipped under the floor; a clean retry
 // is published with retried_on and a note naming the first attempt's verdict; a retry that also
 // fails leaves the FIRST answer, unverified, with the retry's fate in the note; a fleet that took
@@ -3791,7 +3795,7 @@ func (s *Server) askRetry(ctx context.Context, contract core.AgentContract, firs
 	retry := contract
 	retry.TimeoutSec = remaining
 	retry.TimeoutAuto = false // a retry's wall is what is left: explicit, never auto
-	w, extra, why, ok := s.contractOnFleet(ctx, retry, "remote", "")
+	w, extra, why, ok := s.contractOnFleetAt(ctx, retry, "remote", "", nil, true)
 	node, _ := extra["node"].(string)
 	if !ok && node == "" {
 		return askRetryOutcome{note: "retry skipped: " + why}
@@ -4100,7 +4104,7 @@ func (s *Server) askOccupant(ctx context.Context) string {
 func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContract, route, fence string) (core.AgentWireResult, map[string]any, string, bool) {
 	// remotes nil: RunWith reads the configured delegate_remotes, which is the
 	// fleet this box is a delegator for. A review names no node of its own.
-	return s.contractOnFleetAt(ctx, contract, route, fence, nil)
+	return s.contractOnFleetAt(ctx, contract, route, fence, nil, false)
 }
 
 // contractOnFleetAt is contractOnFleet narrowed to remotes: the nodes the engine may
@@ -4116,7 +4120,13 @@ func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContrac
 // seat, a different model: the door then withholds that clean answer for a seat
 // mismatch and blames the node, after this box's GPU did the whole goal. Only the
 // retry changes; the first placement of route=remote already never falls back to local.
-func (s *Server) contractOnFleetAt(ctx context.Context, contract core.AgentContract, route, fence string, remotes []string) (core.AgentWireResult, map[string]any, string, bool) {
+//
+// remoteRetryOnly asks for the same stop without the pin: the engine's retry of this call goes to
+// another fleet node or is not run, and never to this box's seat (RunOptions.RemoteRetryOnly). It
+// records no pin_reason, so the call is still counted as unreasoned in offload_status. Only a door
+// whose caller already moved the work off this box says it (askRetry); every other door keeps the
+// bare route's remote -> local retry.
+func (s *Server) contractOnFleetAt(ctx context.Context, contract core.AgentContract, route, fence string, remotes []string, remoteRetryOnly bool) (core.AgentWireResult, map[string]any, string, bool) {
 	dispatch := s.reviewFleet // test seam
 	if dispatch == nil {
 		dispatch = delegate.RunWith
@@ -4125,7 +4135,7 @@ func (s *Server) contractOnFleetAt(ctx context.Context, contract core.AgentContr
 	if local == nil {
 		local = s.p.RunAgentContract
 	}
-	opts := &delegate.RunOptions{Quarantine: s.quarantine, Tenant: s.tenant, PinTally: s.pins, RosterOnly: len(remotes) > 0}
+	opts := &delegate.RunOptions{Quarantine: s.quarantine, Tenant: s.tenant, PinTally: s.pins, RosterOnly: len(remotes) > 0, RemoteRetryOnly: remoteRetryOnly}
 	if len(remotes) > 0 && route == "remote" {
 		opts.PinReason = delegate.PinOperator
 	}
