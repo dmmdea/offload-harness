@@ -383,7 +383,7 @@ func TestRunAgentTaskJobRecordLeavesQueuedOnTheFirstByte(t *testing.T) {
 }
 
 // DECISION TEST — RED at 427ec6b1. A run that spends its ceiling in the hold
-// (queued_ms ~ the ceiling) is filed as a BUDGET defer with the reason
+// is filed as a BUDGET defer with the reason
 // "ceiling 1s reached while producing (0 tok at 0.0 tok/s)". core/agentwire.go
 // defines budget as "a larger budget helps"; the run was simply not served
 // (capacity: "not this contract's turn"), and runAgentTask already refuses to
@@ -391,24 +391,61 @@ func TestRunAgentTaskJobRecordLeavesQueuedOnTheFirstByte(t *testing.T) {
 // poisons the delegator's contract sizing. Before this release a busy seat
 // killed such runs at the first stall (infrastructure); the hold moves them
 // into the ceiling path. Pick the class, then assert it.
+//
+// What the test sets up: a seat whose engine works for someone else on every
+// read, a first request that stays silent until the run is cancelled, and a
+// flat bound far beyond the ceiling, so only the ceiling can end the run. Its
+// precondition is that the ceiling found the run IN the hold: a "queued" report
+// on the job record, the last one it made, and queued_ms > 0. It is never how
+// much of the ceiling the hold took. The hold cannot begin until the request's
+// own allowance has run out and the monitor's first look at the engine has come
+// back (it books the hold from the moment that look returns), both on the
+// ceiling's clock, so a run held for the rest of its life reports a queued_ms
+// that falls with every delay in that path: 394 ms of a 1 s ceiling was seen on
+// a starved runner, with the right class. The same delay can also outlast the
+// ceiling itself: a process that is paused for a few seconds wakes with the
+// stall timer and a 1 s ceiling both overdue, and the ceiling then fires while
+// the first look is still in flight and files the run "while producing" with
+// no queued time, its hold not yet entered. The ceiling is 8 s so that the
+// path has room.
 func TestRunAgentTaskCeilingWhileHeldIsNotABudgetDefer(t *testing.T) {
-	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, 1)() // 1 s ceiling
+	const ceilingSec = 8
+	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, ceilingSec)()
 	defer compressColdLoad(t, 50*time.Millisecond, 5*time.Second)()
 	defer compressBusyHold(t, 30*time.Second, 50*time.Millisecond)()
 	var busy atomic.Bool
 	busy.Store(true)
-	fake, base := busySeatFake(6*time.Second, &busy)
+	fake, base := busySeatFake(0, &busy)
+	// The request is silent until its caller gives up (the ceiling cancels it),
+	// so the test ends with the run and not after a fixed sleep.
+	fake.loopStream = func(n int64, body map[string]any, w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(30 * time.Second):
+		}
+	}
 	srv := fake.server(t)
 	defer srv.Close()
 	base.Store(srv.URL)
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
-	wire := decodeWire(t, coldLoadTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract())))
-	if !wire.Deferred || wire.QueuedMs < 500 {
-		t.Fatalf("precondition: deferred=%v queued_ms=%d reason=%q", wire.Deferred, wire.QueuedMs, wire.Reason)
+	var mu sync.Mutex
+	var phases []string
+	ctx := core.WithProgressReport(context.Background(), func(p core.LiveProgress) { mu.Lock(); phases = append(phases, p.Phase); mu.Unlock() })
+	wire := decodeWire(t, coldLoadTestPipeline(t, srv.URL).Run(ctx, agentTestRequest(t, testContract())))
+	mu.Lock()
+	last := ""
+	if len(phases) > 0 {
+		last = phases[len(phases)-1]
+	}
+	nReports := len(phases)
+	mu.Unlock()
+	if !wire.Deferred || wire.QueuedMs <= 0 || last != "queued" {
+		t.Fatalf("precondition: the ceiling did not find the run in the busy hold: deferred=%v queued_ms=%d last of %d job-record reports=%q reason=%q",
+			wire.Deferred, wire.QueuedMs, nReports, last, wire.Reason)
 	}
 	if wire.DeferClass == core.DeferClassBudget || strings.Contains(wire.Reason, "while producing") {
-		t.Fatalf("a run held %d ms of its 1 s ceiling was filed class=%s reason=%q", wire.QueuedMs, wire.DeferClass, wire.Reason)
+		t.Fatalf("a run in the busy hold when its %d s ceiling fired (%d ms held) was filed class=%s reason=%q", ceilingSec, wire.QueuedMs, wire.DeferClass, wire.Reason)
 	}
 }
