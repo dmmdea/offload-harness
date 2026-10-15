@@ -456,8 +456,10 @@ local-offload gate schema
 Every failure of `verdict`, and every `selftest` run that did not reach a finding, is 2, so 1 can only mean a finding.
 Read the verdict from stdout, not the exit code alone (`-h` exits 0, and a refusal prints no verdict): 0 from `verdict`
 means a verdict was produced, whichever it is; use `--require-adopt` when the exit code has to mean ADOPT. Read a
-receipt's `passed`, not the exit code alone, before it goes into a gate input. The verb reads only the files it is named
-and writes only `freeze --out` and `selftest --out`.
+receipt's `passed`, not the exit code alone, before it goes into a gate input. The verb reads the files it is named
+and writes `freeze --out` and `selftest --out`. With its real scorer, `selftest` also reads the config and runs the
+scorer through the production pipeline, so it writes what any pipeline call writes: ledger rows and the result cache
+among them.
 
 ## The power note
 

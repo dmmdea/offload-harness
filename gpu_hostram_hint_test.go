@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -24,6 +26,57 @@ import (
 func classDefaultBox(t *testing.T) config.Config {
 	t.Helper()
 	return config.Config{ComfyDir: t.TempDir(), ImageGenScript: "render/comfy-generate.mjs", ImageGenFamily: "krea2", ImageGenCkpt: "krea2_turbo_bf16.safetensors"}
+}
+
+// A graph a `gpu reserve` can read and size: the two loaders of a small image graph, and the sparse model files they name (os.Truncate
+// sets the length, nothing is written; a few MiB each, so nothing here holds a real weight).
+const hintGraph = `{
+	"1": {"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":"graph_ckpt.safetensors"}},
+	"2": {"class_type":"CLIPLoader","inputs":{"clip_name":"graph_clip.safetensors","type":"qwen_image"}},
+	"3": {"class_type":"EmptyLatentImage","inputs":{"width":512,"height":512,"batch_size":1}}
+}`
+
+const (
+	hintGraphCkptBytes = 3 << 20
+	hintGraphClipBytes = 5 << 20
+)
+
+// sparseModelFile writes a sparse model file of n bytes under the box's ComfyUI models dir (rel is "<class>/<name>").
+func sparseModelFile(t *testing.T, cfg config.Config, rel string, n int64) {
+	t.Helper()
+	p := filepath.Join(cfg.ComfyDir, "models", filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(n); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// graphBox is classDefaultBox with the two files hintGraph names in its model tree.
+func graphBox(t *testing.T) config.Config {
+	t.Helper()
+	cfg := classDefaultBox(t)
+	sparseModelFile(t, cfg, "checkpoints/graph_ckpt.safetensors", hintGraphCkptBytes)
+	sparseModelFile(t, cfg, "text_encoders/graph_clip.safetensors", hintGraphClipBytes)
+	return cfg
+}
+
+// graphPath writes a graph document under a fresh temp dir and returns its path.
+func graphPath(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "graph.json")
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 // reserveSays resolves the need the way the verb does on a box that has not enabled card-scoped leases (no
@@ -112,10 +165,13 @@ func TestReserveNamesTheUnrecognisedWrapperWhenItDeclaresTheClassDefault(t *test
 	}
 }
 
-// A recognised helper that runs the caller's own graph loads what the graph says, which the lease cannot read:
-// it takes the class default too, and the line says that is why, naming the helper.
+// A recognised helper that runs the caller's own graph loads what the graph says. When the lease cannot read the graph and size
+// every file its loaders name, the figure is the class default too, and the line says that is why, naming the helper.
 func TestReserveNamesTheGraphWhenARecognisedHelperRunsOne(t *testing.T) {
-	cfg := classDefaultBox(t)
+	cfg := classDefaultBox(t) // its model tree holds neither file hintGraph names
+	notHeld := graphPath(t, hintGraph)
+	noLoader := graphPath(t, `{"1":{"class_type":"EmptyLatentImage","inputs":{"width":512}}}`)
+	notAGraph := graphPath(t, "not a graph")
 	for _, c := range []struct {
 		name   string
 		class  gpulease.Class
@@ -125,6 +181,10 @@ func TestReserveNamesTheGraphWhenARecognisedHelperRunsOne(t *testing.T) {
 		{"krea2 words plus --graph", gpulease.ClassMedia, append(krea2Words(), "--graph", "wf.json"), "comfy-generate.mjs"},
 		{"comfy-video --graph=", gpulease.ClassMedia, strings.Fields("node render/comfy-video.mjs out.mp4 --graph=wf.json"), "comfy-video.mjs"},
 		{"comfy-render --graph on a text lease", gpulease.ClassText, strings.Fields("node render/comfy-render.mjs out.png --graph wf.json"), "comfy-render.mjs"},
+		// a graph the lease CAN read, whose files it cannot size: still the class default, and the line says the graph was the reason
+		{"a graph that names files the box does not hold", gpulease.ClassMedia, append(strings.Fields("node render/comfy-render.mjs out.png"), "--graph", notHeld), "comfy-render.mjs"},
+		{"a graph that names no loader", gpulease.ClassMedia, append(strings.Fields("node render/comfy-render.mjs out.png"), "--graph", noLoader), "comfy-render.mjs"},
+		{"a file that is not a graph", gpulease.ClassText, append(strings.Fields("node render/comfy-video.mjs out.mp4"), "--graph", notAGraph), "comfy-video.mjs"},
 	} {
 		lines, need := reserveSays(t, false, 0, c.class, c.args, cfg)
 		if need.Source != hostneed.SourceClassDefault {
@@ -163,7 +223,8 @@ func TestReserveNamesTheEmptyCommandOfAHoldThatDeclaresTheClassDefault(t *testin
 // THE HINT CHANGES NO FIGURE. What the verb returns (and so what the lease declares, `gpu status` shows and the
 // grant admits) is what hostneed.Resolve says, hint or no hint.
 func TestTheHintChangesNoFigure(t *testing.T) {
-	cfg := classDefaultBox(t)
+	cfg := graphBox(t) // classDefaultBox plus the two files hintGraph names: no other case below reads them
+	sized := graphPath(t, hintGraph)
 	for _, c := range []struct {
 		name  string
 		class gpulease.Class
@@ -171,6 +232,7 @@ func TestTheHintChangesNoFigure(t *testing.T) {
 	}{
 		{"an unrecognised wrapper", gpulease.ClassMedia, []string{"python", "driver.py"}},
 		{"a graph call", gpulease.ClassMedia, strings.Fields("node render/comfy-render.mjs out.png --graph wf.json")},
+		{"a graph the lease sizes from its loaders", gpulease.ClassMedia, append(strings.Fields("node render/comfy-render.mjs out.png"), "--graph", sized)},
 		{"an unsized helper", gpulease.ClassMedia, strings.Fields("node render/comfy-video.mjs o.mp4 s.png prompt --model hunyuan")},
 		{"a hold", gpulease.ClassMedia, nil},
 		{"a recognised helper with an estimate", gpulease.ClassMedia, krea2Words()},
@@ -208,6 +270,25 @@ func TestReserveSaysNothingMoreWhenTheFigureIsNotTheClassDefault(t *testing.T) {
 		t.Errorf("a figure estimated from the helper's own files needs no hint, got %q", lines)
 	}
 	wantDeclaringFirst(t, lines, need)
+	// a recognised helper's own --graph, when the lease reads the graph and sizes every file its loaders name: the figure is
+	// theirs, summed, and the verb prints the declaring line and no hint (the class default is not what was declared)
+	gcfg := graphBox(t)
+	graph := graphPath(t, hintGraph)
+	for _, class := range []gpulease.Class{gpulease.ClassMedia, gpulease.ClassText} {
+		args := append(strings.Fields("node render/comfy-render.mjs out.png"), "--graph", graph)
+		lines, need := reserveSays(t, false, 0, class, args, gcfg)
+		want := float64(hintGraphCkptBytes+hintGraphClipBytes) / (1 << 30)
+		if need.Source != hostneed.SourceGraphLoaders || math.Abs(need.GiB-want) > 1e-9 {
+			t.Fatalf("%s lease around a graph the box can size = %v, want %.9f GiB from %q", class, need, want, hostneed.SourceGraphLoaders)
+		}
+		if len(lines) != 1 {
+			t.Errorf("%s lease: a figure sized from the graph's own loaders needs no hint, got %q", class, lines)
+		}
+		wantDeclaringFirst(t, lines, need)
+		if !strings.Contains(lines[0], "graph loaders") {
+			t.Errorf("the declaring line says where the figure came from, got %q", lines[0])
+		}
+	}
 	// a text lease declares nothing and says nothing
 	if lines, _ := reserveSays(t, false, 0, gpulease.ClassText, []string{"python", "bench.py"}, cfg); lines != nil {
 		t.Errorf("a text bench says nothing, got %q", lines)

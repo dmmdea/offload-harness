@@ -73,8 +73,9 @@ func resolveReserveHostRAMWith(ramGiven bool, ramGiB float64, class gpulease.Cla
 // that it is theirs to correct: a driver script that wrapped card-only renders declared 46.8 GiB for weights that sat on
 // two cards, and waited a queue cycle on it. Resolve reaches the class default for exactly four reasons, and the
 // line names the one that applies: nothing is wrapped (a hold), the wrapped command is not a render helper it knows (named
-// from the same table that recognises them), a recognised helper runs its own --graph, or a recognised helper's weight
-// files could not be sized. It is one line, and it never contains the word the declaring line is grepped by, so a script
+// from the same table that recognises them), a recognised helper runs its own --graph whose weight files the lease could
+// not read and size in full (a graph it can is sized from its own loaders, hostneed.ForGraphFile, and is not here), or a
+// recognised helper's weight files could not be sized. It is one line, and it never contains the word the declaring line is grepped by, so a script
 // that greps for the declaration still sees one. It is a WARNING since the 2026-10-14 incident: the figure is a guess about a
 // command the lease could not read, and a lease that unloads the seat took the cards on it and held them idle for about 50
 // minutes while the host could not meet it; the line says so (the hold bound is what ends that now) and that --ram is the fix.
@@ -90,7 +91,7 @@ func classDefaultHint(need hostneed.Need, cmdArgs []string, call hostneed.Render
 	case !recognised:
 		why = "the wrapped command is not a recognised render helper (" + strings.Join(hostneed.RenderHelpers(), ", ") + "), so its weights are not sized"
 	case call.RunsOwnGraph():
-		why = call.Script + " runs its own --graph, and what a graph loads is not known to the lease"
+		why = call.Script + " runs its own --graph, and the lease could not size the weight files that graph names (it is not a readable ComfyUI API-format graph, it names no weight file, or a file it names is not in the ComfyUI model tree)"
 	default:
 		why = "the weight files " + call.Script + " names could not be sized (a named file is not in the ComfyUI model tree and its family has no documented size)"
 	}
