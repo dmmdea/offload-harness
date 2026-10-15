@@ -222,6 +222,110 @@ func TestRecipeAuditCreditsARecipeThatFixesASpentCompletionBudget(t *testing.T) 
 	}
 }
 
+// A tie in steps is not worse: the policy is "no worse than the incumbent", so a candidate that wins
+// the gate on the same mean steps is published.
+func TestRecipeAuditPublishesWhenTheStepsTie(t *testing.T) {
+	e := newRAEnv(t)
+	e.use(t, nil)
+	e.fake.script = raScript(false, true, 3, 3)
+	rep := e.report(t)
+	if rep.Gate.Verdict != eval.VerdictAdopt {
+		t.Fatalf("the precondition is a gate ADOPT, got %s (%s)", rep.Gate.Verdict, rep.Gate.Reason)
+	}
+	if rep.Status != recipe.StatusPublished || !rep.Steps.NonWorse || rep.Steps.Incumbent != 3 || rep.Steps.Candidate != 3 {
+		t.Fatalf("status %s, steps %+v: want published on 3 against 3", rep.Status, rep.Steps)
+	}
+	if got := e.saved(t); got.Status != recipe.StatusPublished {
+		t.Fatalf("the store holds %+v", got)
+	}
+}
+
+// Steps are compared over the tasks both arms finished, and only a pass or a task_fail attempt is a
+// finished one: a run that ended in an infrastructure defer says nothing about how many steps the
+// task takes, however many steps it reports.
+func TestRecipeAuditComparesStepsOnlyOverFinishedAttempts(t *testing.T) {
+	infra := func() core.AgentWireResult {
+		w := raOutcome(false, 40)
+		w.Output, w.Deferred, w.DeferClass, w.Reason = "", true, core.DeferClassInfrastructure, "endpoint down"
+		return w
+	}
+	t.Run("a task one arm never finished is not a pair", func(t *testing.T) {
+		e := newRAEnv(t)
+		e.use(t, nil)
+		e.fake.script = func(arm string, c core.AgentContract) (core.AgentWireResult, error) {
+			if arm == recipeArmCandidate {
+				if c.Goal == "task-05" {
+					return infra(), nil
+				}
+				return raOutcome(true, 3), nil
+			}
+			return raOutcome(false, 5), nil
+		}
+		rep := e.report(t)
+		if rep.Steps.Pairs != 15 || rep.Steps.Incumbent != 5 || rep.Steps.Candidate != 3 {
+			t.Fatalf("steps %+v: want 5 against 3 over the 15 tasks both arms finished", rep.Steps)
+		}
+	})
+	t.Run("an attempt that did not finish does not count toward its task", func(t *testing.T) {
+		e := newRAEnv(t)
+		e.use(t, nil)
+		seen := map[string]int{}
+		e.fake.script = func(arm string, c core.AgentContract) (core.AgentWireResult, error) {
+			if arm == recipeArmIncumbent {
+				return raOutcome(false, 5), nil
+			}
+			seen[c.Goal]++
+			if seen[c.Goal] == 1 { // the first attempt of every task is an infrastructure defer
+				return infra(), nil
+			}
+			return raOutcome(true, 3), nil
+		}
+		rep := e.report(t, "--attempts", "2")
+		if rep.Steps.Pairs != 16 || rep.Steps.Incumbent != 5 || rep.Steps.Candidate != 3 {
+			t.Fatalf("steps %+v: want 5 against 3 over 16 tasks, the infrastructure defers not counted", rep.Steps)
+		}
+	})
+}
+
+// --attempts is honoured: every task runs that many times on each arm.
+func TestRecipeAuditRunsEveryAttemptOnBothArms(t *testing.T) {
+	e := newRAEnv(t)
+	e.use(t, nil)
+	e.fake.script = raScript(false, true, 5, 3)
+	e.report(t, "--attempts", "2")
+	if e.fake.count(recipeArmIncumbent) != 32 || e.fake.count(recipeArmCandidate) != 32 {
+		t.Fatalf("the arms ran %d and %d times, want 32 each (16 tasks, 2 attempts)", e.fake.count(recipeArmIncumbent), e.fake.count(recipeArmCandidate))
+	}
+	perTask := map[string]int{}
+	for _, c := range e.fake.calls {
+		perTask[c]++
+	}
+	for _, id := range raTaskIDs() {
+		for _, arm := range []string{recipeArmIncumbent, recipeArmCandidate} {
+			if n := perTask[arm+":"+id]; n != 2 {
+				t.Errorf("%s ran %s %d times, want 2", arm, id, n)
+			}
+		}
+	}
+}
+
+// Which arm goes first alternates by task and by attempt, so neither arm always has the seat warm.
+func TestRecipeAuditAlternatesWhichArmGoesFirst(t *testing.T) {
+	e := newRAEnv(t)
+	e.use(t, nil)
+	e.report(t, "--attempts", "2")
+	want := []string{
+		"incumbent:task-01", "candidate:task-01", "candidate:task-01", "incumbent:task-01", // task 1: attempt 0, then attempt 1
+		"candidate:task-02", "incumbent:task-02", "incumbent:task-02", "candidate:task-02", // task 2 starts with the other arm
+	}
+	if len(e.fake.calls) < len(want) {
+		t.Fatalf("only %d seat calls: %v", len(e.fake.calls), e.fake.calls)
+	}
+	if got := e.fake.calls[:len(want)]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the first calls ran in the order %v, want %v", got, want)
+	}
+}
+
 // Only a tokens metric can be read off a run, from the forwarded prefill tokens; the rest stay
 // unresolved, and an unmeasured run is never a zero.
 func TestRecipeAuditMetricsAreTokensOrUnresolved(t *testing.T) {
