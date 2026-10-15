@@ -126,3 +126,40 @@ test("loadTemplate: a listed template with no file or with invalid JSON is bad_t
   assert.equal(loadTemplate({ comfyDir: COMFY, name: "tt_open", io: broken }).refusal.code, "bad_template");
   assert.equal(loadTemplate({ comfyDir: "/srv/empty", name: "tt_open", io: memIo({}) }).refusal.code, "templates_package_missing");
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// An override sets values; it never retargets a file. The licence gate, the FLUX bar and the trust-on-first-use check read the models the
+// template declares, so a loader widget set to another file would run one that none of them looked at.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const fileGraph = () => ({
+  "1": { class_type: "UNETLoader", inputs: { unet_name: "wan2.2_ti2v_5B_fp16.safetensors", weight_dtype: "default" } },
+  "2": { class_type: "LoadImage", inputs: { image: "the_lily_veil.png" } },
+  "3": { class_type: "VAELoader", inputs: { vae_name: "wan2.2_vae.safetensors" } },
+  "4": { class_type: "CLIPTextEncode", inputs: { text: "a fox" } },
+});
+
+test("applyOverrides: a model loader's file is never retargeted (the gate looked at the file the template names)", () => {
+  for (const [key, value] of [["1.unet_name", "flux1-dev.safetensors"], ["3.vae_name", "other_vae.safetensors"]]) {
+    const r = applyOverrides(fileGraph(), { [key]: value });
+    assert.deepEqual([r.ok, r.refusal?.code, r.refusal?.details.node], [false, "override_is_file", key.split(".")[0]], key);
+  }
+});
+
+test("applyOverrides: an input loader's file is never retargeted (a node can match an input file only by name)", () => {
+  const r = applyOverrides(fileGraph(), { "2.image": "someone_else.png" });
+  assert.deepEqual([r.ok, r.refusal?.code], [false, "override_is_file"]);
+});
+
+test("applyOverrides: a model file name is refused wherever it lands, as the old value or as the new one", () => {
+  const g = { "9": { class_type: "SomeCustomLoader", inputs: { ckpt: "base.safetensors", note: "" } }, "4": { class_type: "CLIPTextEncode", inputs: { text: "a fox" } } };
+  assert.equal(applyOverrides(g, { "9.ckpt": "x" }).refusal?.code, "override_is_file", "the input holds a model file now");
+  assert.equal(applyOverrides(g, { "9.note": "flux1-dev.safetensors" }).refusal?.code, "override_is_file", "the new value is a model file");
+  assert.equal(applyOverrides(g, { "4.text": "model.gguf" }).refusal?.code, "override_is_file", "a prompt that names a model file is a retarget attempt too");
+});
+
+test("applyOverrides: the values a template is made to be tuned by still go through", () => {
+  const r = applyOverrides({ ...fileGraph(), "5": { class_type: "KSampler", inputs: { seed: 1, steps: 20, sampler_name: "euler" } } }, { "4.text": "a blue fox", "5.steps": 30, "5.sampler_name": "dpmpp_2m" });
+  assert.equal(r.ok, true);
+  assert.equal(r.graph["4"].inputs.text, "a blue fox");
+});
