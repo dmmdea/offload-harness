@@ -19,7 +19,7 @@ import (
 
 // GateVersion is the version of the rules this package implements. It rides in the baseline,
 // in every result and in the era marker. Version 3: the primary is read on Tango's score interval
-// for pass/fail pairs and on the score form of the t interval over a sample with one pseudo-pair at
+// for pass/fail pairs and on the score form of the t interval over a sample with two pseudo-pairs at
 // each end of the range for every other pair of scores (interval.go), where version 2 read the score
 // form of the t interval and the rule of three for a sample with no spread. Version 2: unusable
 // candidate attempts enter at the worst score and an unfinished one's recorded cost is spent, the

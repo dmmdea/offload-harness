@@ -352,7 +352,7 @@ const overflowMsg = "the scores or costs are too large to average: a sum overflo
 //
 //	R1  the statistic is the mean paired difference over TASKS, read on a 95% interval that is
 //	    Tango's score interval when every pair is a tie, a win or a loss of the whole range, and
-//	    the score form of the t interval over the sample with a pseudo-pair at each end of the
+//	    the score form of the t interval over the sample with two pseudo-pairs at each end of the
 //	    range otherwise (interval.go); the paired bootstrap reads the efficiency metrics
 //	R2  superiority: ADOPT iff lo > 0, BLOCK iff hi < 0; non-inferiority with margin m: BLOCK iff
 //	    hi < -m, ADOPT iff lo > -m and a declared efficiency metric improves and none got
