@@ -815,7 +815,7 @@ func runGPUReserve(args []string) (retErr error) {
 				case fenceLost:
 					lost = last
 				case fenceUnreadable:
-					fmt.Fprintf(os.Stderr, "gpu reserve: cannot read the lease record (%v); that is no verdict, so the lease is not released and the drain does not start over\n", last)
+					fmt.Fprintf(os.Stderr, "gpu reserve: the lease record could not be read for %s (%v); the lease can no longer be shown to be ours, so the reserve ends here and does not start over (the release below is tried; a record that stays unreadable is handed on once this process's heartbeat goes stale)\n", wrapperFenceWindow.Round(time.Second), last)
 					lost = nil
 				default:
 					lost = nil
@@ -991,10 +991,13 @@ func runGPUReserve(args []string) (retErr error) {
 					why = " (lease lost)"
 					stopWrappedTree(tree, cmd, cfg, lease.Epoch(), os.Stderr)
 				case fenceUnreadable:
-					if !fenceSaid {
-						fenceSaid = true
-						fmt.Fprintf(os.Stderr, "gpu reserve: cannot read the lease record (%v); that is no verdict, so the command keeps running and the lease is treated as held; looking again at every tick\n", last)
-					}
+					// Not a verdict, but not a licence either: this wrapper writes no heartbeat while it cannot read the record, and
+					// another reserve is handed the cards once that heartbeat is stale. The window is shorter than the TTL that decides it,
+					// so the command is stopped first.
+					fmt.Fprintf(os.Stderr,
+						"gpu reserve: the lease record cannot be read (%v) and has not been for %s — the lease can no longer be shown to be ours, and the cards may be handed to another reserve once this heartbeat is stale; stopping the command\n", last, wrapperFenceWindow.Round(time.Second))
+					why = " (lease record unreadable)"
+					stopWrappedTree(tree, cmd, cfg, lease.Epoch(), os.Stderr)
 				default:
 					if !fenceSaid {
 						fenceSaid = true
@@ -1455,6 +1458,10 @@ func runGPUHold(args []string) (retErr error) {
 			if gone, last := holderLeaseGone(lease, err); gone {
 				// Released from outside, fenced out, or a record that stays unreadable: the lease is not ours (or cannot be shown to
 				// be). The holder says which it saw before it exits, since its stderr is a log nobody tails.
+				if gpulease.IsRecordUnreadable(last) {
+					fmt.Fprintf(os.Stderr, "gpu hold: letting go of lease epoch %d: its record could not be read for %s (%v), so it can no longer be shown to be ours and its cards may be handed on once this heartbeat is stale\n", lease.Epoch(), holdIORetryFor.Round(time.Second), last)
+					return nil
+				}
 				fmt.Fprintf(os.Stderr, "gpu hold: letting go of lease epoch %d: %v\n", lease.Epoch(), last)
 				return nil
 			}
@@ -1944,11 +1951,15 @@ func renewWhile(l *gpulease.Lease, every time.Duration, onLost ...func(error)) (
 					return
 				}
 				if state == fenceUnreadable {
-					if !warned {
-						warned = true
-						fmt.Fprintf(os.Stderr, "gpu reserve: cannot read the lease record (%v); that is no verdict, so the lease is treated as held and the drain goes on, looking again every %s\n", cerr, every)
+					// Fail closed: the heartbeat is not written while the record cannot be read, and the window is shorter than the TTL after
+					// which another reserve is handed the cards, so the drain ends here like a lost lease, with the cause.
+					fmt.Fprintf(os.Stderr, "gpu reserve: the lease record could not be read for %s (%v) while draining; the lease can no longer be shown to be ours, so the drain ends\n", wrapperFenceWindow.Round(time.Second), cerr)
+					for _, fn := range onLost {
+						if fn != nil {
+							fn(cerr)
+						}
 					}
-					continue
+					return
 				}
 				if !warned {
 					warned = true

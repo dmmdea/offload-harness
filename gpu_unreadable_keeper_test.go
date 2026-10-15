@@ -115,3 +115,20 @@ func TestTheDrainHeartbeatEndsTheDrainOnceTheRecordHasBeenUnreadableForItsWindow
 		t.Fatal("the drain heartbeat went on for ever over a record it cannot read; it must fail closed once its window passes")
 	}
 }
+
+// The rule that makes the two sides agree: from its last heartbeat to the moment it stops, no keeper is silent for as long as the
+// heartbeat TTL the sweep judges a holder alive by, so a keeper has always stopped before an acquirer can be handed its cards.
+func TestEveryKeepersSilenceIsShorterThanTheHeartbeatStaleThreshold(t *testing.T) {
+	ttl := gpulease.DefaultHeartbeatTTL
+	confirm := 3 * holdConfirmPause // the looks before a read is called unreadable
+	silence := map[string]time.Duration{
+		"the wrapper (a tick, then its window)":                           wrapperTickEvery + wrapperFenceWindow + confirm,
+		"the drain heartbeat, then the drain loop (each its window)":      drainRenewEvery + 2*(wrapperFenceWindow+confirm),
+		"the hidden holder (a renewal, its window, its release attempts)": holdRenewEvery + holdIORetryFor + confirm + time.Duration(holdReleaseTries)*holdReleasePause,
+	}
+	for who, d := range silence {
+		if d >= ttl {
+			t.Errorf("%s is silent for up to %s before it stops, which is not shorter than the heartbeat TTL of %s: an acquirer could be handed its cards while it runs", who, d, ttl)
+		}
+	}
+}

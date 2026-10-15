@@ -1474,6 +1474,10 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 
 		// Someone else holds the claim.
 		meta, rerr := m.readMeta()
+		if isIOFailure(rerr) && m.keeperAlive(0, m.metaPath()) {
+			// Present and not readable, and its holder is alive: held, whatever the age of the record (keeper.go).
+			return nil, unreadableHeld(0)
+		}
 		if rerr != nil && m.claimIsFresh() {
 			// Present but not yet parseable: a claim caught mid-write. Treat it as
 			// held rather than stealing it — the alternative is a race where two
@@ -1530,6 +1534,9 @@ func (m *Manager) removeStaleClaim(judged *Meta) error {
 			// the caller applied before it judged.
 			if judged != nil || m.claimIsFresh() {
 				return nil
+			}
+			if isIOFailure(err) && m.keeperAlive(0, m.metaPath()) {
+				return nil // unreadable, not corrupt, and its holder is alive (keeper.go)
 			}
 		case !m.reclaimable(cur, m.now()):
 			return nil // no longer stale: a new holder's claim, or the old holder came back

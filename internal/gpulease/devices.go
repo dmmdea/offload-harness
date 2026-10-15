@@ -575,7 +575,11 @@ func (m *Manager) grantDevicesLocked(class Class, opts Options, devs []string, h
 		}
 	default:
 		if _, serr := os.Stat(m.metaPath()); serr == nil {
-			// Present but unparseable: a claim caught mid-write, or debris.
+			// Present but unreadable: a record that cannot be READ while its holder is alive is held (keeper.go); else a claim caught
+			// mid-write, or debris.
+			if _, rerr := m.readMeta(); isIOFailure(rerr) && m.keeperAlive(0, m.metaPath()) {
+				return nil, unreadableHeld(0), nil
+			}
 			if m.claimIsFresh() {
 				return nil, &ErrHeld{Info: Info{Held: true, Reason: "claim in progress"}}, nil
 			}
@@ -695,6 +699,13 @@ func (m *Manager) verifyNoDeviceLeases(epoch uint64) error {
 			}
 		}
 		if conflict == nil {
+			// A card lease whose record cannot be read is invisible to the reader and still held while its keeper is alive.
+			if kept := m.keptUnreadable(); len(kept) > 0 {
+				info := unreadableHeld(kept[0]).Info
+				conflict = &info
+			}
+		}
+		if conflict == nil {
 			return nil
 		}
 		// Withdraw our own claim, and only ours.
@@ -758,7 +769,10 @@ func (m *Manager) sweepDebrisLocked() {
 		keep[cur.Epoch] = true
 	}
 	m.sweepSeenLocked(keep)
-	// Unreadable records.
+	// Unreadable records. One that EXISTS and cannot be READ for an I/O reason (a scanner holds it open, a sharing violation) is held
+	// while its keeper is alive (keeper.go): its record and its claims stay, and the sweep takes them only once that liveness is gone.
+	// Corrupt bytes are not an I/O failure and are debris once old, as before.
+	kept := map[uint64]bool{}
 	if entries, err := os.ReadDir(m.v2Dir()); err == nil {
 		for _, e := range entries {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
@@ -768,7 +782,12 @@ func (m *Manager) sweepDebrisLocked() {
 			if perr != nil {
 				continue
 			}
-			if _, rerr := readEpochRecord(m.leaseDir(), epoch); rerr == nil {
+			_, rerr := readEpochRecord(m.leaseDir(), epoch)
+			if rerr == nil {
+				continue
+			}
+			if isIOFailure(rerr) && m.keeperAlive(epoch, epochRecordPath(m.leaseDir(), epoch)) {
+				kept[epoch] = true
 				continue
 			}
 			if fi, serr := e.Info(); serr == nil && m.now().Sub(fi.ModTime()) > claimGrace {
@@ -801,6 +820,9 @@ func (m *Manager) sweepDebrisLocked() {
 		if ok {
 			if rec := liveEpoch[c.Epoch]; rec != nil && containsString(rec.Devices, device) {
 				continue // a live lease's claim
+			}
+			if kept[c.Epoch] {
+				continue // the claim of a lease whose record cannot be read and whose keeper is alive
 			}
 		}
 		if age > claimGrace {
