@@ -113,6 +113,10 @@ type Server struct {
 	// askSeatGuard is offload_ask's seam onto the seat guard (askOccupant): nil
 	// (production) resolves to the process-wide seatguard.Shared at call time.
 	askSeatGuard func(ctx context.Context, model string) seatguard.Verdict
+	// askNow is the clock offload_ask times its first attempt with, to size what is left of the
+	// contract's wall for a cross-seat retry: nil (production) is time.Now; a test advances a
+	// fake one inside its seat so a long first attempt needs no real wait.
+	askNow func() time.Time
 	// sttRun is offload_transcribe's placement seam (ADR 0072): nil (production) resolves to
 	// sttremote.Run at call time; tests inject a fake so the handler is exercisable without a
 	// whisper, an ffmpeg or a fleet node.
@@ -3588,27 +3592,8 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 			"steps":       wire.Steps,
 		}, wire))
 	}
-	// The contracted deliverable is the structured pair. When the re-pack seat
-	// could not be reached the loop's prose still arrived, so it is published as
-	// the answer rather than thrown away — with evidence empty, which is exactly
-	// what nonempty:evidence then reports, so the caller is never handed
-	// unchecked prose under a green verdict.
-	var structured struct {
-		Answer   string `json:"answer"`
-		Evidence string `json:"evidence"`
-	}
-	if len(wire.Structured) > 0 {
-		// Error deliberately ignored, not swallowed: the re-pack only publishes
-		// Structured after validating it against this contract's own schema, so a
-		// decode failure here would mean a shape that cannot occur — and if it ever
-		// did, the fallback below still publishes the loop's prose rather than an
-		// empty answer, which is the right outcome either way.
-		_ = json.Unmarshal(wire.Structured, &structured)
-	}
-	if structured.Answer == "" {
-		structured.Answer = wire.Output
-	}
-	if strings.TrimSpace(structured.Answer) == "" {
+	answer, evidence, failures := gradeAskWire(contract, wire)
+	if strings.TrimSpace(answer) == "" {
 		// A non-deferred result with neither prose nor a structured answer has nothing
 		// to publish. Returning answer:"" with no deferred key would read to the caller
 		// as "the seat answered, and the answer is nothing" — the silent shape this
@@ -3623,40 +3608,9 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 			"steps":       wire.Steps,
 		})
 	}
-	// THE INVARIANT: grade exactly the text the caller is shown — the two fields placed
-	// in `out` below, nothing else. Everything about this line is that one rule.
-	//
-	// core.evalText prefers wire.Output whenever it is non-empty, and runAgentTask always
-	// sets Output before the re-pack, so grading the wire as it arrives grades the loop's
-	// final PROSE, which this handler never publishes. Both ways of getting that wrong
-	// have now been measured, one per direction:
-	//
-	//   - grading the prose: it is longer than the condensed pair and so likelier to
-	//     contain a frequent token, giving verified:true beside a published answer that
-	//     cites nothing — "reads as verified while nothing verified it";
-	//   - blanking Output to fall through to the raw bytes: when the re-pack emits
-	//     {"answer":"","evidence":"<text>"} — schema-legal, and its own system prompt
-	//     says "Use empty values when a field is absent" — the fallback above publishes
-	//     PROSE as the answer while only the JSON gets graded, giving verified:false on a
-	//     properly cited answer.
-	//
-	// Building the graded text from the DECODED fields closes both, and closes a third
-	// hole for free: the gbnf grammar permits \uXXXX escapes, so an anchor plainly
-	// readable in the published evidence could be invisible in the raw bytes.
-	//
-	// Joined with a newline so a match cannot span the seam between two fields, and
-	// Structured is left intact because nonempty:evidence reads it. With no Structured at
-	// all, Answer already holds the prose and Evidence is empty, so this degenerates to
-	// grading the prose — which is exactly what that path publishes.
-	//
-	// delegate.Run grades prose and PUBLISHES prose, so it is coherent and untouched;
-	// this is the first lane that publishes only the structured pair.
-	graded := wire
-	graded.Output = structured.Answer + "\n" + structured.Evidence
-	failures := delegate.EvalAcceptance(contract, graded)
 	out := map[string]any{
-		"answer":      structured.Answer,
-		"evidence":    structured.Evidence,
+		"answer":      answer,
+		"evidence":    evidence,
 		"verified":    len(failures) == 0,
 		"acceptance":  contract.Acceptance, // what "verified" actually means, published so it can be judged
 		"seat":        wire.Seat,
@@ -3684,6 +3638,65 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// a caller who wants another attempt changes the question, which is a different key.
 	s.askCache.Put(cacheKey, out)
 	return jsonResult(out)
+}
+
+// gradeAskWire decodes one attempt's wire result into the pair the caller is shown and grades
+// exactly that pair against the contract's acceptance. Every attempt of one ask goes through it,
+// so the cross-seat retry is decoded and graded exactly like the first attempt.
+//
+// The contracted deliverable is the structured pair. When the re-pack seat could not be reached
+// the loop's prose still arrived, so it is returned as the answer rather than thrown away — with
+// evidence empty, which is exactly what nonempty:evidence then reports, so the caller is never
+// handed unchecked prose under a green verdict. An answer that is blank after that has nothing to
+// publish: the caller checks for it (a blank pair is graded here like any other and fails).
+//
+// THE INVARIANT: grade exactly the text the caller is shown — the two fields returned, nothing
+// else. Everything about this function is that one rule.
+//
+// core.evalText prefers wire.Output whenever it is non-empty, and runAgentTask always
+// sets Output before the re-pack, so grading the wire as it arrives grades the loop's
+// final PROSE, which this handler never publishes. Both ways of getting that wrong
+// have now been measured, one per direction:
+//
+//   - grading the prose: it is longer than the condensed pair and so likelier to
+//     contain a frequent token, giving verified:true beside a published answer that
+//     cites nothing — "reads as verified while nothing verified it";
+//   - blanking Output to fall through to the raw bytes: when the re-pack emits
+//     {"answer":"","evidence":"<text>"} — schema-legal, and its own system prompt
+//     says "Use empty values when a field is absent" — the fallback to the prose would
+//     publish PROSE as the answer while only the JSON gets graded, giving verified:false
+//     on a properly cited answer.
+//
+// Building the graded text from the DECODED fields closes both, and closes a third
+// hole for free: the gbnf grammar permits \uXXXX escapes, so an anchor plainly
+// readable in the published evidence could be invisible in the raw bytes.
+//
+// Joined with a newline so a match cannot span the seam between two fields, and
+// Structured is left intact because nonempty:evidence reads it. With no Structured at
+// all, Answer already holds the prose and Evidence is empty, so this degenerates to
+// grading the prose — which is exactly what that path publishes.
+//
+// delegate.Run grades prose and PUBLISHES prose, so it is coherent and untouched;
+// this is the first lane that publishes only the structured pair.
+func gradeAskWire(contract core.AgentContract, wire core.AgentWireResult) (answer, evidence string, failures []string) {
+	var structured struct {
+		Answer   string `json:"answer"`
+		Evidence string `json:"evidence"`
+	}
+	if len(wire.Structured) > 0 {
+		// Error deliberately ignored, not swallowed: the re-pack only publishes
+		// Structured after validating it against this contract's own schema, so a
+		// decode failure here would mean a shape that cannot occur — and if it ever
+		// did, the fallback below still publishes the loop's prose rather than an
+		// empty answer, which is the right outcome either way.
+		_ = json.Unmarshal(wire.Structured, &structured)
+	}
+	if structured.Answer == "" {
+		structured.Answer = wire.Output
+	}
+	graded := wire
+	graded.Output = structured.Answer + "\n" + structured.Evidence
+	return structured.Answer, structured.Evidence, delegate.EvalAcceptance(contract, graded)
 }
 
 // handleReviewDiff is the MCP front door onto the clean-context review lane. It
