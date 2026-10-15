@@ -48,7 +48,7 @@ func TestReplayOptsSearchResultsReachesTheLadder(t *testing.T) {
 }
 
 func TestReplayOptsLogCollapseReachesTheLadder(t *testing.T) {
-	msgs := lcTranscript(lrServerLog(170), lrServerLog(170), "short")
+	msgs := lcTranscript(lrServerLog(170), lrServerLog(150), "short")
 	budget := estimateTokens(msgs) * 60 / 100
 
 	off := CompactReplay(msgs, budget, 2, 3, ReplayOpts{GCF: true, Skeleton: true})
