@@ -33,12 +33,13 @@
     six tests together.
   - Mutant, product: `CeilingError.Held` always false: the fixed test failed 40 of 40 on the decision line (filed `class=budget`, `while
     producing`). The pipeline filing every ceiling as budget while the reason still says held: 40 of 40 failed on the same line.
-  - Siblings, red: three of them unfixed under `--stress 4:40 --burn 6 --env GOMAXPROCS=2`: 6 failures in 160 runs (`queued_ms` 159, 213 and 0
-    against 800; 861, 696 and 602 against 900), and 14 to 36 of 120 each in a slow stretch of the node. With the late first read, `--stress 4:5`:
+  - Siblings, red: three of them unfixed under `--stress 4:40 --burn 6 --env GOMAXPROCS=2`: 7 failures in 160 runs, six of them `queued_ms`
+    misses (159, 213 and 0 against 800; 861, 696 and 602 against 900) and one the stall described last, and 14 to 36 of 120 each in a slow stretch
+    of the node. With the late first read, `--stress 4:5`:
     the 1.5 s test 20 of 20, the two-hold test 20 of 20, the job-record test 17 of 20. The 900 ms decoding test passes that stimulus (its
     `queued_ms` stays near 700, so the delay does not reach its hold) and failed under load only.
-  - Siblings, green: the same late read, 0 of 20; load, 0 of 160 and, with the ceiling test, 0 of 120 under `--stress 12:10 --burn 6 --env
-    GOMAXPROCS=1`. Mutants: the monitor reporting no queued time failed all four `queued_ms` tests, 12 of 12; a later hold replacing the booked time
+  - Siblings, green: the same late read, 0 of 20; load, 0 of 160 on the command above. Paired, the six tests together under `--stress 12:10 --burn 6
+    --env GOMAXPROCS=1`: unfixed 1 of 120 (the two-hold test, `queued_ms` 686 against 900), fixed 0 of 120. Mutants: the monitor reporting no queued time failed all four `queued_ms` tests, 12 of 12; a later hold replacing the booked time
     instead of adding to it failed the two-hold test, 12 of 12 (`queued_ms` 301 to 305 against 600).
 - **Same family, not changed.** `TestRunAgentTaskStallsAWedgedEngine`, `TestRunAgentTaskStallsAThrashingEngine` and
   `TestRunAgentTaskWithoutASeatAddressKeepsTheOldRule` keep a request silent for 6 s and fail only when the process is starved for more than that
