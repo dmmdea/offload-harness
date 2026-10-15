@@ -35,6 +35,9 @@ type ProbeFunc func(ctx context.Context, msgs []agent.Msg) (ProbeResult, error)
 // BenchOpts configures a bench run.
 type BenchOpts struct {
 	Ladder LadderOpts
+	// Arms names the arms to run, in order: "off" (raw, uncompacted) and "on"
+	// (the ladder). Empty means both.
+	Arms []string
 	// Rounds repeats the whole (controls + both arms) block; more rounds is
 	// the only honest defence against drift given rule 1 above.
 	Rounds int

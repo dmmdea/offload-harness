@@ -17,6 +17,10 @@ import (
 type LadderOpts struct {
 	GCF      bool `json:"gcf"`
 	Skeleton bool `json:"skeleton"`
+	// Search and Logs switch on the two default-off rungs (thin older search
+	// listings; fold runs of near-identical lines in older build and test output).
+	Search bool `json:"search"`
+	Logs   bool `json:"logs"`
 }
 
 // Label is the ladder id stamped into reports ("base", "gcf", "skeleton",
