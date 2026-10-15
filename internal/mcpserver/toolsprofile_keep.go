@@ -745,6 +745,11 @@ var compactKeep = []compactKeepEntry{
 		Why:      "a PARTIAL research result (some pages digested, some failed) is a successful call, the error flag is set only when nothing succeeded, and summary.failed and each result's reason say what is missing; the whole-call deadline defers the unfinished pages",
 	},
 	{
+		Tools:    []string{"offload_research"},
+		Sentence: "Two text sources are read as well as pages, both fetched here with no login and no cookies: an RSS or Atom feed (its items' titles, links, dates and summaries become the text; item links are not followed, list them yourself to read them) and, only when the operator has set ytdlp_path, a YouTube watch, youtu.be, shorts, live or embed URL (its subtitles, not its audio; sub_langs picks the languages; a video with none, or a yt-dlp failure, is a skipped source whose error_kind says which; a source with cleanup_error read fine but left its scratch folder behind).",
+		Why:      "the two text sources guide a call and bound what is read: a feed's item links are not followed (list them yourself to read them), a YouTube URL is read as subtitles only when the operator has set ytdlp_path, both are fetched with no login and no cookies, and a video with no subtitles or a yt-dlp failure is a skipped source whose error_kind says which while a source with cleanup_error was read fine",
+	},
+	{
 		Tools:    []string{"offload_ask"},
 		Sentence: "On verified:false read acceptance_failures (which names the check that did not match) and then the evidence — it is a prompt to look, not proof the answer is wrong, and a question whose subject is a short or question-named identifier can leave nothing anchorable at all.",
 		Why:      "on verified:false read acceptance_failures and the evidence: it is a prompt to look, not proof the answer is wrong",
