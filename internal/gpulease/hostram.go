@@ -488,6 +488,21 @@ func (m *Manager) StampHostRAMHold(epoch uint64, until time.Time) error {
 	})
 }
 
+// The phases of the moment a lease's hold stamp (Meta.HostRAMHoldUntilMs) stands for. Outer: a detached reserve's bound while it
+// still clears the seat (the drain, the unload); the host has not been asked, and a live reserve keeps moving it, so it is the
+// moment the hidden holder releases the lease only if the reserve DIES. Wait: the end of the wait for the host. Release: the
+// reserve is releasing the lease itself and has pushed the stamp out so the holder does not race it. An older writer leaves none.
+const (
+	HoldPhaseOuter   = "outer"
+	HoldPhaseWait    = "wait"
+	HoldPhaseRelease = "release"
+)
+
+// StampHostRAMHoldPhase is StampHostRAMHold saying which phase the stamped moment is.
+func (m *Manager) StampHostRAMHoldPhase(epoch uint64, until time.Time, phase string) error {
+	return m.StampHostRAMHold(epoch, until)
+}
+
 // stampTries and stampRetryPause are how often, and how far apart, a stamp that RequireStamp binds the wait to is tried before the
 // wait fails. Variables so a test need not stand in line for the pause.
 var (

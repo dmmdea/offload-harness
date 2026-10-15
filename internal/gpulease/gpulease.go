@@ -292,6 +292,11 @@ type Meta struct {
 	// took it never releases it, since the bound can be a flag on one reserve and no other process sees that. Additive and
 	// omitempty: an older reader ignores it.
 	HostRAMHoldUntilMs int64 `json:"host_ram_hold_until_ms,omitempty"`
+	// HostRAMHoldPhase says which moment HostRAMHoldUntilMs is: "outer" (a detached reserve's bound while it still clears the seat; the
+	// host has not been asked), "wait" (the end of the wait for the host) or "release" (the reserve is releasing the lease and pushed
+	// the stamp out). Empty = a stamp an older writer made, which was always the wait's. Taken off with the stamp by admission.
+	// Additive and omitempty: an older reader ignores it.
+	HostRAMHoldPhase string `json:"host_ram_hold_phase,omitempty"`
 	// HolderGaveUpMs is when the lease's hidden holder gave up releasing it (unix milliseconds; 0 = it has not), and
 	// HolderGaveUpWhy the clipped reason. Written best effort by a holder whose own release failed after its retries and which then
 	// exits: from then on nothing polls the lease, and `gpu status` says so instead of promising a release at "its next poll".
