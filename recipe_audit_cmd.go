@@ -14,8 +14,9 @@
 // contract passes and fails (score 0) otherwise. A run that did not reach a verdict about the task is
 // not scored: a runner error or an infrastructure, config, capacity or contract defer is
 // infra_error, and a wall timeout is timeout; the gate counts them and puts the candidate's at the
-// worst score. A spent step budget IS a verdict about the task (the seat used its steps and did not
-// finish), so it is task_fail on both arms.
+// worst score. A spent budget IS a verdict about the task when the seat spent it and did not finish
+// (the step budget, a tool call cut at the completion budget twice, a final answer starved by the
+// think block), so it is task_fail on both arms; a budget a clock or a caller ended is a timeout.
 //
 // The decision is the gate's, built exactly as `gate verdict` builds it: the baseline is the frozen
 // pre-registration (eval.CheckBaseline), the input is an eval.GateInput, the judgement is eval.Gate,
@@ -53,6 +54,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
@@ -478,7 +480,7 @@ func recipeJudge(c core.AgentContract, wire core.AgentWireResult, runErr error) 
 		case core.DeferClassInfrastructure, core.DeferClassConfig, core.DeferClassContract, core.DeferClassCapacity, core.DeferClassWrite:
 			return eval.OutcomeInfraError, nil
 		case core.DeferClassBudget:
-			if wire.StopReason == "budget" || strings.Contains(wire.Reason, "step budget exhausted") {
+			if recipeSeatSpentItsBudget(wire) {
 				return eval.OutcomeTaskFail, score(0)
 			}
 			return eval.OutcomeTimeout, nil
@@ -489,6 +491,20 @@ func recipeJudge(c core.AgentContract, wire core.AgentWireResult, runErr error) 
 		return eval.OutcomePass, score(1)
 	}
 	return eval.OutcomeTaskFail, score(0)
+}
+
+// recipeSeatSpentItsBudget reports whether a budget-class defer is the SEAT spending its own budget
+// and not finishing: the loop ran out of steps, the tool-call argument was cut at the completion
+// budget twice, or the think block ate the completion budget twice. Those are verdicts about the task,
+// the same shape as each other, and a recipe that fixes them must get the credit. Every other budget
+// defer is a clock or a caller ending the run (the wall, a ceiling, a canceled parent, a re-pack the
+// clock could not buy), which says nothing about the task.
+func recipeSeatSpentItsBudget(wire core.AgentWireResult) bool {
+	switch wire.StopReason {
+	case "budget", agent.StopToolCallCut, agent.StopReasoningStarved:
+		return true
+	}
+	return strings.Contains(wire.Reason, "step budget exhausted")
 }
 
 // recipeMetrics reads the declared efficiency metrics off one run. Only the tokens class can be read:
