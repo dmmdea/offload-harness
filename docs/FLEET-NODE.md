@@ -46,7 +46,10 @@ The serve log names the resolved source
 (`... via nvidia-smi|windows-generic|linux-amdgpu|linux-meminfo, vendor=... arch=...`). A **dual-route node**
 (ADR 0054: a tier with `alt_backends`, installed with `--llama-bin-cpu`; no tier declares the CPU route since 2026-09-24) advertises `backends`
 in health, primary first (`["vulkan","cpu"]`), and serves the CPU family as `<seat>-cpu` ids —
-a caller picks the route by seat id. Ctrl-C drains: dispatches for a
+a caller picks the route by seat id. `backends` is the hardware tag list and nothing else: which serving *engine* answers for
+each lane and seat (`llama.cpp`, `vllm`, `rkllm`, ...) is the separate `lane_backends` and `seat_backends` of the same payload,
+each row carrying `active_backend`, `backend_chain`, `backend_probe` and `backend_reason`; read from llama-swap's roster and
+running list without loading anything, and described in [systems/fleet-node.md](systems/fleet-node.md#which-engine-answers-for-each-lane-and-seat-active_backend). Ctrl-C drains: dispatches for a
 job_id this node has never seen get 503; a re-dispatch of a job_id this node already knows
 about (running, done, or previously failed) still re-acks 202 — or 409 if it previously
 failed — even mid-drain, since that's not new work. On a node with a `fleet_auth_token`, an agent or
