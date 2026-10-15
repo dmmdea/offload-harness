@@ -26,17 +26,27 @@ type nodeRunner struct {
 	defer_ string
 	// deferClass is the err_class the deferral carries (core.Meta.ErrClass); "" = none.
 	deferClass string
-	delay      time.Duration // how long a render takes (the poll sees the job running meanwhile)
-	lastReq    core.Request
-	sawFiles   []string
+	// hold, when set, keeps a render from finishing until it is closed (see node.holdUntilSeenRunning). A
+	// render that takes a fixed time is a race with the client's poll: whichever the scheduler favours wins.
+	hold     <-chan struct{}
+	lastReq  core.Request
+	sawFiles []string
 }
 
-func (n *nodeRunner) Run(_ context.Context, req core.Request) core.Result {
+// holdLimit bounds how long a held render waits for the client to be served a running poll. The client
+// polls every second, so this is generous: a client that never gets there fails its test, it does not hang it.
+const holdLimit = 20 * time.Second
+
+func (n *nodeRunner) Run(ctx context.Context, req core.Request) core.Result {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.lastReq = req
-	if n.delay > 0 {
-		time.Sleep(n.delay)
+	if n.hold != nil {
+		select {
+		case <-n.hold:
+		case <-time.After(holdLimit):
+		case <-ctx.Done():
+		}
 	}
 	if dir, _ := req.Params["project_dir"].(string); dir != "" {
 		_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
@@ -65,6 +75,66 @@ type node struct {
 	// lastPost is the header of the last POST the node received (the attribution headers ride it).
 	hdrMu    sync.Mutex
 	lastPost http.Header
+	// polls counts the job polls this node has answered. answerQueued, when set, is asked about each
+	// one with its 1-based number and the state the job really has; a true answer sends "accepted"
+	// instead. It is the one way a test makes the client's poll land before the node's scheduler has
+	// claimed the job, an order the real node produces only when the box is loaded.
+	polls        atomic.Int64
+	answerQueued func(poll int, state string) bool
+	// runningPolls counts the polls this node sent out saying "running"; seen is closed by the first
+	// (holdUntilSeenRunning).
+	runningPolls atomic.Int64
+	seen         chan struct{}
+	seenOnce     sync.Once
+}
+
+// holdUntilSeenRunning keeps the node's render going until the node has sent one poll answer saying
+// "running". The job is already running on the node's books while it is held, so a client that polls at
+// all is served that answer, and a client that polls only after the render would have ended (a slow box)
+// still gets it. This replaces a render that takes a fixed time, which only a quick first poll could see.
+func (n *node) holdUntilSeenRunning() {
+	n.seen = make(chan struct{})
+	n.runner.hold = n.seen
+}
+
+// jobNeverSeenRunning makes the node report a running job as still queued, every time: the client's polls
+// then see queued and, once the render is over, done, the way they do for a job that begins and ends
+// between two of them.
+func (n *node) jobNeverSeenRunning() {
+	n.answerQueued = func(_ int, state string) bool { return state == string(fleetnode.JobRunning) }
+}
+
+// firstPollReadsQueued makes the node answer the client's first poll as it would if the poll got there
+// before the scheduler claimed the job: queued, whatever the job's real state.
+func (n *node) firstPollReadsQueued() {
+	n.answerQueued = func(poll int, _ string) bool { return poll == 1 }
+}
+
+// serveJobPoll answers a poll of a job through the real handler, then lets answerQueued rewrite the state.
+func (n *node) serveJobPoll(h http.Handler, w http.ResponseWriter, req *http.Request) {
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.Bytes()
+	var j struct {
+		State string `json:"state"`
+	}
+	_ = json.Unmarshal(body, &j)
+	poll := int(n.polls.Add(1))
+	if rec.Code == http.StatusOK && n.answerQueued != nil && n.answerQueued(poll, j.State) {
+		body, _ = json.Marshal(map[string]string{"job_id": strings.TrimPrefix(req.URL.Path, "/fleet/jobs/"), "state": string(fleetnode.JobAccepted)})
+		j.State = string(fleetnode.JobAccepted)
+	}
+	if rec.Code == http.StatusOK && j.State == string(fleetnode.JobRunning) {
+		n.runningPolls.Add(1)
+		if n.seen != nil {
+			n.seenOnce.Do(func() { close(n.seen) })
+		}
+	}
+	for k, v := range rec.Header() {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(rec.Code)
+	_, _ = w.Write(body)
 }
 
 func (n *node) postHeader() http.Header {
@@ -100,6 +170,10 @@ func startNode(t *testing.T, openProjects bool) *node {
 			n.hdrMu.Lock()
 			n.lastPost = req.Header.Clone()
 			n.hdrMu.Unlock()
+		}
+		if req.Method == http.MethodGet && strings.HasPrefix(req.URL.Path, "/fleet/jobs/") {
+			n.serveJobPoll(h, w, req)
+			return
 		}
 		h.ServeHTTP(w, req)
 	}))
