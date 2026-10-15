@@ -125,8 +125,9 @@ refuses (exit 2) to run without one.
   --seat-tag TAG        the capability class of that seat; it must be the recipe's seat_tag (required)
   --contracts FILE      a JSON array of {"id": <task id of the baseline>, "contract": <agent contract>}; every
                         contract carries at least one acceptance check (required)
-  --baseline FILE       the frozen pre-registration (gate freeze), judge {deterministic, acceptance-dsl}, with no
-                        frozen incumbent: the incumbent is measured here (required)
+  --baseline FILE       the frozen pre-registration (gate freeze), judge {deterministic, acceptance-dsl}, primary
+                        class unit_interval, only tokens efficiency metrics and no frozen incumbent: the incumbent
+                        is measured here (required)
   --engine-build STR    the engine build the seat runs on; it pins the era of the comparison (required)
   --store DIR           the recipe store (default: <data home>/recipes)
   --attempts N          attempts per task and arm, 1 to 10 (default 1)
@@ -249,6 +250,20 @@ func recipeAuditMain(args []string, stdout, stderr io.Writer) error {
 	}
 	if baseline.Judge.Kind != "deterministic" || baseline.Judge.Identity != recipeAuditJudgeIdentity {
 		return recipeRefuse(refusalInput, "the acceptance DSL is the judge: the baseline must freeze the judge {deterministic, %s}, not {%s, %s}", recipeAuditJudgeIdentity, baseline.Judge.Kind, baseline.Judge.Identity)
+	}
+	// The verb scores a finished run 1 (every acceptance check passed) or 0 and reads only the tokens
+	// class off a run. A baseline on another scale would judge the same runs wrongly (a candidate that
+	// passes 16 of 16 against an incumbent that fails 16 of 16 is INCONCLUSIVE on the 0 to 10 scale)
+	// or be refused by the gate after the whole A/B; a declared money or memory metric can never be
+	// resolved, so a non-inferiority run on it is INCONCLUSIVE whatever the recipe did. All of that is
+	// refused here, before the seat is asked.
+	if baseline.Primary.Class != eval.ClassUnitInterval {
+		return recipeRefuse(refusalInput, "the verb scores every run 1 or 0, so the baseline's primary class must be %q, not %q: freeze the pre-registration on the unit interval", eval.ClassUnitInterval, baseline.Primary.Class)
+	}
+	for _, e := range baseline.Efficiency {
+		if e.Class != eval.EffTokens {
+			return recipeRefuse(refusalInput, "efficiency metric %q is class %q and the verb can only read %q off a run (the forwarded prefill tokens): a metric it cannot resolve could never be traded away, so freeze the pre-registration without it", e.Name, e.Class, eval.EffTokens)
+		}
 	}
 	tasks, err := readRecipeTasks(*contractsPath, baseline.Tasks, cfg.AgentContextCapBytes())
 	if err != nil {
