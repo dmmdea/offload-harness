@@ -614,6 +614,10 @@ func emergencyShrinkWith(msgs []Msg, budget, protectedPrefix int, opts compactOp
 type ReplayOpts struct {
 	GCF      bool
 	Skeleton bool
+	// SearchResults and LogCollapse switch on the two optional rungs that are
+	// default off in production; the compaction eval sets them to measure each.
+	SearchResults bool
+	LogCollapse   bool
 }
 
 // CompactReplay runs the production compaction ladder over msgs at budget with
