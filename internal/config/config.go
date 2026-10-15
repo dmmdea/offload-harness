@@ -1026,6 +1026,17 @@ type Config struct {
 	EditPython      string `json:"edit_python,omitempty"`
 	GimpConsolePath string `json:"gimp_console_path,omitempty"`
 	EditTimeoutSec  int    `json:"edit_timeout_sec,omitempty"`
+	// YtDlpPath is the absolute path to a yt-dlp executable, the subtitle adapter of offload_research. Empty (the
+	// default) = the adapter is OFF and a YouTube URL is read as an ordinary page: the harness never searches PATH for
+	// the binary and never installs it. The binary is invoked subtitles-only (--skip-download, no cookies, no config
+	// file, no retry) after the URL has passed the public-web guard; see docs/systems/delegation-client.md. On Windows
+	// it must name an .exe or a wrapper .cmd: the zipapp is a shebang script, launchable directly only on POSIX.
+	YtDlpPath string `json:"ytdlp_path,omitempty"`
+	// YtDlpSHA256 is the optional sha256 (64 hexadecimal digits) of the file at YtDlpPath. Empty (the default) = the
+	// path is trusted as written and nothing is hashed. When set, the file is hashed before every run and a mismatch
+	// refuses to run it. On Windows with a wrapper .cmd the hash covers the wrapper, not the interpreter or the
+	// script it calls.
+	YtDlpSHA256 string `json:"ytdlp_sha256,omitempty"`
 	// --- composition (offload_compose_video / compose-video; ADR 0059) ---
 	// A CPU-class lane: HyperFrames renders an HTML/CSS composition to video with
 	// headless Chrome in SOFTWARE GL + ffmpeg, so it takes NO GPU lease and no
@@ -2002,6 +2013,19 @@ type Config struct {
 	// Default false. Distinct from FleetAgentEnabled deliberately — a box can
 	// be a worker without being a delegator and vice versa.
 	AgentDelegationEnabled bool `json:"agent_delegation_enabled,omitempty"`
+	// ToolsSchemaProfile picks how much of each MCP tool's prose tools/list carries: "full" (the
+	// default, and what an unset key means) advertises every description and parameter description as written;
+	// "compact" keeps every tool, every parameter name, type, enum and required entry (so every call that is
+	// valid under "full" is valid under "compact") but cuts each description to its first sentence plus the
+	// sentences a reviewed per-tool keep-list names (prohibitions, trust and privacy boundaries, cost rules, the
+	// deferred-and-do-it-yourself protocol of every lane, acceptance-authoring rules; internal/mcpserver/toolsprofile_keep.go),
+	// and drops examples. It exists for clients that send every tool schema up front on every call and have no deferred
+	// tool search (opencode): a smaller schema is prompt tokens back on a small context window. The registered
+	// schema, the handlers and the call-time validation are unchanged; only the advertised list is rewritten.
+	// An unknown value fails the load; a hand-built Config with one reads as "full", never as a silent shrink.
+	// The profile is read once, when the MCP server is built (the rewrite is a middleware installed at that moment), so
+	// changing it takes an MCP server restart or a client reconnect, which starts a new server process.
+	ToolsSchemaProfile string `json:"tools_schema_profile,omitempty"`
 	// DelegateRemotes are the fleet node base URLs (tailnet-only, e.g.
 	// "http://node-b:18811") the delegator considers when a call passes no
 	// remotes of its own. Durable fleet membership belongs in config, not in every
@@ -2410,6 +2434,7 @@ func Default() Config {
 		FleetAuthToken:                "",                // "" = no agent-lane auth → agent dispatch loopback-only; media lane never auths (v1 scope)
 		FleetAgentEnabled:             false,             // node-side agent-lane worker role: explicit operator opt-in
 		AgentDelegationEnabled:        false,             // delegator-side surfaces (agent_delegate MCP + CLI placement): opt-in
+		ToolsSchemaProfile:            ToolsProfileFull,  // full|compact: how much prose tools/list carries (compact keeps every tool and parameter, cuts descriptions)
 		DelegateRemotes:               nil,               // fleet node base URLs the delegator considers by default (tailnet-only); per-call remotes replace it
 		FleetSampler:                  "auto",            // auto|pdh|pdh-shared|global (FLEET-NODE.md)
 		PrimaryGPUUUID:                "",                // "" = largest-total headline rule; set to pin by UUID (FLEET-NODE.md)
@@ -2661,6 +2686,9 @@ func load(path string) (Config, error) {
 	if err := validateAgentReadFloor(c.AgentReadFloor); err != nil {
 		return c, err
 	}
+	if err := validateToolsSchemaProfile(c.ToolsSchemaProfile); err != nil {
+		return c, err
+	}
 	// A policy for an overdue lease nobody implements is refused by name: there is no automatic mode,
 	// and a typo must not read as one. (A one-shot verb goes on after this error; loadArmed has already
 	// installed the value, and an unrecognised one installs as hold.)
@@ -2717,6 +2745,33 @@ func validateAuditAllDoors(v string) error {
 		return nil
 	}
 	return fmt.Errorf("audit_all_doors: unknown mode %q (valid: \"\" or \"off\" (default: no trail unless browse asks for one), \"warn\", \"enforce\")", v)
+}
+
+// The two tools_schema_profile values.
+const (
+	ToolsProfileFull    = "full"
+	ToolsProfileCompact = "compact"
+)
+
+// validateToolsSchemaProfile refuses a tools_schema_profile value by name: a profile nobody implements must
+// fail the load, never read as "full" (the tool list the operator meant to shrink stays large) or as
+// "compact" (descriptions the operator meant to keep are cut). Trimmed and lower-cased, as ToolsSchemaProfileMode.
+func validateToolsSchemaProfile(v string) error {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", ToolsProfileFull, ToolsProfileCompact:
+		return nil
+	}
+	return fmt.Errorf("tools_schema_profile: unknown profile %q (valid: \"full\" (default: every description as written) or \"compact\" (each description's opening sentence plus the sentences a reviewed keep list names; every tool, parameter, enum value and bound kept))", v)
+}
+
+// ToolsSchemaProfileMode resolves tools_schema_profile to "full" or "compact". An unset key is "full"; an unknown
+// value cannot reach here through Load (validateToolsSchemaProfile refuses it), and a Config built by hand
+// resolves to "full" rather than to a cut description.
+func (c Config) ToolsSchemaProfileMode() string {
+	if strings.ToLower(strings.TrimSpace(c.ToolsSchemaProfile)) == ToolsProfileCompact {
+		return ToolsProfileCompact
+	}
+	return ToolsProfileFull
 }
 
 // validateAgentReadFloor refuses an agent_read_floor value by name (SF-07).
@@ -3175,6 +3230,16 @@ func validatePipelines(pipelines map[string]PipelineSpec) error {
 	return nil
 }
 
+// EffectiveResearchScratchDir is the root under which offload_research makes its per-call scratch directories (the
+// subtitle adapter's yt-dlp output): <state_dir>/research-scratch, else a subdirectory of the OS temp dir. Each call's
+// directory is created beneath it and removed when the call ends; nothing else lives here.
+func (c Config) EffectiveResearchScratchDir() string {
+	if c.StateDir != "" {
+		return filepath.Join(c.StateDir, "research-scratch")
+	}
+	return filepath.Join(os.TempDir(), "local-offload-research")
+}
+
 // EffectiveUpscaleModel is the ESRGAN filename the upscale_image route binds:
 // UpscaleModel, else VideoGenUpscaleModel (the video route's post-decode upscaler is
 // the same kind of file), else "" = no route. Pipeline gate and capability report
@@ -3200,7 +3265,7 @@ func pathFields(c *Config) []*string {
 		&c.AudiocppScript, &c.AudiocppBin, &c.AudiocppVoiceModel, &c.AudiocppMusicModel,
 		&c.VideoGenScript, &c.AnimateGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath, &c.StateDir,
 		&c.VoiceGenRef, &c.VoiceGenFTModel, &c.VoiceGenFTBaseDir, &c.VoiceGenFTRef,
-		&c.EditPython, &c.GimpConsolePath,
+		&c.EditPython, &c.GimpConsolePath, &c.YtDlpPath,
 		&c.ComposeScript, &c.HyperframesDir, &c.HyperframesBrowserPath, &c.ComposeCacheDir,
 		&c.BrowsePython, &c.BrowseScript, &c.BrowseCaptureDir,
 		&c.CachePath, &c.LedgerPath,

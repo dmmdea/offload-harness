@@ -36,6 +36,21 @@ The workflow files there are trimmed excerpts of templates from Comfy-Org/workfl
 licensed under the MIT License. The licence text is kept beside them in
 LICENSE-comfy-workflow-templates.txt. They are test inputs only and are not shipped.
 
+ContextBench task generators and graders (internal/compeval/contextbench_*.go):
+The four task generators (kv_store, log_triage, needle_retention, sudoku_sketchpad),
+the four graders, the standalone-marker and operation-rendering rules, and the table of
+published levels are ported to Go from ContextBench
+(https://github.com/RulinShao/ContextBench), licensed under the Apache License,
+Version 2.0, pinned at commit fb533c18c78a82d3f1b2047a9c1700735cf829ae. The operation
+mix is ported: the logic, the data tables (word lists, level knobs) and the texts of the
+streamed operations (sentinel lines, headers, request and move wording) are carried over,
+byte for byte where the stream is concerned, so that a seed produces the same task
+stream; the Go code and comments are written for this repository. Each ported file names
+the upstream file it comes from. The upstream's documentation, instruction scaffolds and
+dataset are not copied, and no upstream data is committed. The upstream repository has
+no NOTICE file at the pinned commit, its source files carry no copyright header, and its
+LICENSE carries only the unfilled appendix line ("Copyright [yyyy] [name of copyright owner]").
+
 Search-results compaction rung (internal/agent/rung_search.go):
 The idea of thinning search results by relevance to the task (BM25 ranking, a cap per
 file, diversity across files, a boost for error lines) is documented by the Headroom
