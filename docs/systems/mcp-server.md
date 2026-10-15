@@ -252,7 +252,12 @@ placement never lands on this box's seat. The delegator's own retry inside that 
 `unreasoned`): when the fleet node's answer also fails, the engine tries another fleet node or none, and its skipped
 retry is named in the note, instead of running a third attempt on the seat where the first one failed. A routed ask (`auto`, `remote`,
 a named route) needs nothing added: the delegator's own engine already retries inside that call, and the response
-now says so (see the route paragraph below). The retry is decoded and graded exactly like the first attempt
+now says so (see the route paragraph below). An ask that names `route:"remote"` keeps that engine's `remote -> local`
+retry: `offload_ask` has no reason channel, so a named remote is unreasoned under
+[ADR 0078](../architecture/decisions/0078-a-placement-pin-needs-a-reason-without-one-it-is-a-hint.md): its first
+placement is a fleet node and the engine's retry may come back to this box's seat, like every other door without a
+reason channel; a caller that needs a strictly remote run
+uses `agent_delegate` with a `pin_reason`. The retry is decoded and graded exactly like the first attempt
 (`gradeAskWire`), and only a clean one is published:
 
 - **The retry verified:** it is the answer, with `verified: true`, the fleet block (`node`, `placement`, `seat`,
