@@ -33,7 +33,7 @@ scorer on a few control pairs to write the receipt a model judge needs; `freeze`
 | **R4 the incumbent wins** | The incumbent keeps every tie and every INCONCLUSIVE (`keep_incumbent` is true unless ADOPT). Fewer than `min_pairs` usable pairs is INCONCLUSIVE, and `min_pairs` cannot be frozen below 16. The remedy for an INCONCLUSIVE at the corpus size is **more tasks, not more attempts**, because attempts of one task are not independent; the power note says how many. |
 | **R5 held-out** | A held-out slice is declared at freeze and scored once, with the same scoring as the main slice. It cannot rescue a verdict. It can veto one: an ADOPT whose held-out point estimate fails becomes BLOCK, "reject without re-tuning". With no usable held-out pair (every held-out incumbent task unusable) an ADOPT becomes INCONCLUSIVE with the reason "held-out evidence missing", never BLOCK: no evidence is not a failed check. |
 | **R6 pre-registration** | The mode, the primary metric, its margin and (for `custom`) its range, the judge, the efficiency metrics, `min_pairs`, the bootstrap size and seed, the held-out ids and the declared tasks are written into a baseline file and hashed before the first candidate run. A verdict names that hash and the gate refuses an input that names another one. |
-| **R7 judge integrity** | The judge (kind and identity) is part of the baseline, and the input must name the same one: a scorer swapped after the freeze is refused, and a model judge cannot be declared deterministic to skip its receipt. A model judge is allowed only with a passed self-test receipt for the same scorer: `scorer_id` equal to the identity, `passed` true, and `pairs_hash` and `build_sha256` each 64 lower-case hex characters. Until a scorer has a receipt, only deterministic checks (the acceptance DSL, exact match) judge. The gate only reads the receipt; `gate selftest` produces it (see Verbs and exit codes). |
+| **R7 judge integrity** | The judge (kind and identity) is part of the baseline, and the input must name the same one: a scorer swapped after the freeze is refused, and a model judge cannot be declared deterministic to skip its receipt. A model judge is allowed only with a passed self-test receipt for the same scorer: `scorer_id` equal to the identity, `passed` true, and `pairs_hash` and `build_sha256` each 64 lower-case hex characters. Until a scorer has a receipt, only deterministic checks (the acceptance DSL, exact match) judge. The gate only reads the receipt and checks its shape, not what its two hashes are hashes of; `gate selftest` produces it (see Verbs and exit codes). |
 | **R8 eras** | Every result carries the stamps of the two runs, the judge identity and an **era marker**. Results with different era markers are never compared; a comparison re-runs the incumbent in the new era. |
 
 The gate has **no effect-size floor**: the verdict is the interval alone. A caller that also wants a minimum effect keeps
@@ -432,8 +432,15 @@ local-offload gate schema
     older passing receipt behind.
   - Scorers: `compaction-outcome`, the outcome scorer of `compaction-eval ab` (accept, then entity recall over a summary
     of the transcript, through the configured seat). It reads `--config`. A seat that is down scores every side 0, which
-    is a tie, so it fails the self-test rather than erroring. The receipt binds the scorer id, the pairs and the
-    harness build; it does not say which model answered, which the stamps of the runs carry (`seat_config_sha256`).
+    is a tie, so it fails the self-test rather than erroring. The receipt records the scorer id, the pairs and the
+    harness build that ran the self-test; it does not say which model answered, which the stamps of the runs carry
+    (`seat_config_sha256`).
+  - What the gate checks of a receipt: that its `scorer_id` is the judge identity, that `passed` is true, and that both
+    hashes are 64 lower-case hex characters. It does not compare `pairs_hash` with any pairs file or `build_sha256`
+    with any build, so a receipt written by an older build still certifies a scorer that kept its id. A scorer whose
+    behaviour changes is given a new receipt, or a new id, by convention; the gate does not enforce it. Comparing
+    `build_sha256` with the runs' `harness_build_sha256` would need the build that scores to be the build that ran the
+    record, which it is not today (a model scorer can run from another build).
 - `schema` prints the embedded input schema.
 - A global `--config <path>` (or `--config=<path>`) before the subcommand, as in `local-offload --config x.json gate
   schema`, is accepted by every subcommand. `selftest` reads it, to reach the seat of a scorer that calls one; the
