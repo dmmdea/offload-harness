@@ -1166,7 +1166,8 @@ via `node render/run-template.mjs list`; the research's 246 was a heuristic on t
 
 Of 578 templates in the index, 80 are runnable: 5 with no weights, and 75 whose 247 model entries are 237 trusted on first use and
 10 with a declared hash. 55 of the 80 read input files. `custom_nodes` is 0 because this package version marks no template as needing a
-pack (an earlier head measured 50).
+pack (an earlier head measured 50). "Carried by" counts every kind, paid-API templates included; among the 236 local templates
+that need weights the catalog's own licence tally is 75 permissive, 63 conditional, 29 non-commercial and 69 unknown.
 
 Among the local templates that need weights, 85 of 135 repositories are not in the licence map (the research counted 83 of 133),
 and that is what keeps templates in `license_unknown`. On one node (<node-a>, ComfyUI 0.38.0) 4 of the 80 were ready to run that day
