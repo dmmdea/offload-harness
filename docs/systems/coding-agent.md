@@ -488,6 +488,85 @@ preamble is never touched and no turn is dropped. The retry's shrink target is r
 just-rejected transcript's own estimate, not only the budget, so a dense-content estimate error
 can never make the retry re-send the bytes the server just refused.
 
+**Optional log-collapse rung (`compactOpts.LogCollapse`, default off).** An extra rung after GCF
+and before the search-results rung (next paragraph) and skeleton, in `internal/agent/rung_logs.go`: it folds each run of three or more consecutive
+near-identical lines in an OLDER result of a build or test command into its first line, a count of
+the lines between (`[... N similar lines folded ...]`) and its last line. The gate reads the call
+that produced the result, not only the tool's name. A result is folded only when its call is a
+build or test invocation: `go test`, `go build` or `go vet`, `cargo build`, `cargo test` or
+`cargo check`, `npm test` (or `npm t`) or `npm run build`/`test`, `pytest`, `python -m pytest` or
+`python -m unittest` (also as `python3`), and (through
+`run_shell` only, since the `run` tool's allowlist has no `make`) `make`. Through `run_shell` the
+first word is found after any leading `NAME=value` words, and the command must be one pipeline: an
+unquoted `;`, `&&`, `||`, a lone `&`, a newline or a carriage return anywhere in it, such as
+`cd sub && go test ./...`, disqualifies it, and a pipe qualifies only into a grep-family program
+(`grep`, `egrep`, `fgrep`, `rg`, `ag`, `ack`) or a pass-through filter (`head`, `tail`, `sort`,
+`uniq`, `wc`, `cut`, `sed`, `awk`, `tee`, `cat`); `xargs` or any other program after a pipe
+disqualifies. A later pipe stage is judged by its program name alone, so a filter that is handed a
+file operand and reads that file instead of the pipe (`go test ./... | cat data.csv`,
+`| head -n 5 data.csv`) still qualifies, and its output would be folded as if it were the build's;
+operands cannot simply be refused, because `| tee out.log` is a pass-through with one. Everything
+else is never touched: a search listing (`grep -rn`, `rg -n`, `git grep`; those are the search
+rung's, below, which does not touch build or test output either), a `cat` or `sed` of a data file, a
+linter's diagnostics, a file read, a fetch, a result whose
+call is not in the transcript, a result whose tool-call id is declared by more than one call, and
+a call and result that both carry an empty id. An unknown or ambiguous producer fails closed. Two
+lines are near-identical when they match after every run of digits, `0x` hex literal, UUID, hex run
+of eight or more characters and terminal control sequence is masked and trailing whitespace is
+trimmed; indentation still counts and the letters around a digit run still count, so `worker7` and
+`worker12` match while `x1` and `y2`, or `md5` and `sha256`, do not. Because digit runs are masked,
+lines that differ only in a number (a status code, a port) fold into one, and the footer says so.
+Every blank line, every line that looks like an error, warning, failure or test summary, every line
+shaped like a `path:line` or `path:line:col` diagnostic (and rustc's `--> path:line:col`) and the
+first 8 and last 4 lines stay verbatim and never join a run, so a log made only of one repeated
+warning does not shrink and two different compiler errors never fold into one. "Looks like" means the
+skeleton rung's `signalLine` plus stack-frame, traceback and test-runner summary shapes, the
+CamelCase exception names that `signalLine`'s word boundary cannot see (`TypeError`, `KeyError`,
+`AssertionError`, `NullPointerException`), a killed process, a segfault, a non-zero `exit status` and
+npm's `ERR!` prefix; each test is made on the line as written and with its terminal colour removed,
+so a coloured `ERROR` is kept and a line of nothing but colour codes counts as blank. The body opens
+with `[log-collapse: original N chars, M lines]` (the idempotence marker) and ends with a footer that
+says how many runs and lines were folded. Like every rung it works only on the ladder's own window
+(never the protected preamble or the recent turns), skips pinned results (including the body a
+pinned dedupe reference points at), rewrites `Content` only (tool-call pairing is untouched), goes
+oldest-first and stops at the first fit. It is deterministic, idempotent, never makes a body longer
+(the original string comes back unless the result is strictly shorter) and fails closed to the
+original on a body that is too small or too large, is not valid UTF-8, holds a NUL byte, parses as
+a JSON document, already carries another rung's marker or a GCF block, or makes the rewrite
+panic. Because it stops at the first fit, enabling it keeps more of an older log than the rungs
+after it would at the same budget. With the search rung on as well, this rung runs first and the
+search rung only if the transcript is still over budget; no body is eligible for both, because each
+reads the call that produced the body (a build or test invocation here, a search there).
+
+A rung that is off changes nothing, down to the byte. `IsCompactionArtifact` keeps its three
+clauses (elision marker, skeleton, dedupe reference), because the always-on dedupe rung and the live
+loop's re-execute decision both ask it; a separate `IsLogCollapseArtifact` recognises the rung's
+header, and the trace harvest asks both so it still refuses a transcript the rung has already
+compacted. A tool body that merely quotes the header, such as a saved collapsed log read back with
+`read_file`, is ordinary content to the default ladder, and a pinned set of digests over such
+transcripts holds that. With the rung on, the skeleton prefix, the elide marker (and the reactive
+last-resort marker) and the dedupe reference of a folded body name the size the body had before
+the fold, so a marker never says that less was lost than was. The header is believed only when the
+rung could have written it: the exact spelling, a size strictly above the body's own length and
+within the sizes the rung folds, and a line count a fold needs. A result that merely quotes a header
+with a negative, zero, oversized or too-small number is named by its own length instead, and so is a
+result that quotes a skeleton header the skeleton rung could not have written. A body the search
+rung thinned opens with the same skeleton header (the search rung writes it through the same
+`skeletonHeader`), so with both rungs on its later elision marker still names the size the listing
+had. A quoted
+header whose numbers are merely plausible cannot be told from the real one in the text, so it is
+still believed; carrying the size outside the body would close that, and no caller can yet.
+
+No production surface enables the rung yet: the field is not wired to a flag, a `Loop` setter, the
+config or the replay seam (`ReplayOpts` does not expose it, so `CompactReplay` cannot measure it).
+Wiring it into the live loop must also teach `resultDestroyed` the new predicate. Whether to adopt
+it is the measurement gate's call, not this page's, and that call needs a corpus whose tool calls
+carry tool names: the shipped mini corpus records call ids only, so the producer gate leaves it
+untouched, and the savings figures printed by the rung's tests come from fixtures whose calls are
+renamed to `run`. The idea of compressing build and test output while keeping the failures and the
+boundary lines is the documented behavior of the Headroom project (Apache-2.0); the mechanism here
+is this repository's own, written without reading that project's source (see `NOTICE`).
+
 **Search-results rung (optional, default off: `compactOpts.SearchResults`).** One more lossy rung,
 for older tool bodies that are search listings: the grouped `search_files` output (`path:` then
 `  L<n>: text`) and bare `path:line:text` lines such as `grep -rn` or ripgrep print, alone or inside the
@@ -507,9 +586,9 @@ only and is not a shell parser: a filter that runs a command itself (`tee >(...)
 ANSI-C `$'...'` quoting is not seen. A linter such as flake8, ruff, `shellcheck -f gcc` or rubocop prints the
 same `path:line:col:text` lines, and every one of its diagnostics is something the agent must fix, so
 its output, a body with no matching call and an id claimed by two different calls are left alone.
-Everything else (the `web_search` list, `mode:"files"` output, test output, an error result) is left
-alone too. It runs after
-dedupe and GCF and before the generic skeleton, over the same older span as that rung (never the
+Everything else (the `web_search` list, `mode:"files"` output, an error result, and the output of a build or
+test command, which is the log-collapse rung's above, never this one's) is left alone too. It runs after
+dedupe, GCF and the log-collapse rung and before the generic skeleton, over the same older span as that rung (never the
 protected preamble or the kept-recent tail), skips pinned bodies, and rewrites only a tool message's
 body. Each line is scored with BM25 against the objective (the last user message of the protected
 preamble, the one task text that is the same on every step; the line's own path counts as part of the
@@ -1137,7 +1216,7 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - [`internal/agent/runtool.go`](../../internal/agent/runtool.go) — allowlist, direct exec
 - [`internal/agent/writetools.go`](../../internal/agent/writetools.go) — `os.Root` scoping
 - [`internal/agent/builder.go`](../../internal/agent/builder.go) — capability grants, audit-path check
-- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`rung_search.go`](../../internal/agent/rung_search.go), [`internal/compeval/`](../../internal/compeval/)
+- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`rung_logs.go`](../../internal/agent/rung_logs.go), [`rung_search.go`](../../internal/agent/rung_search.go), [`internal/compeval/`](../../internal/compeval/)
 - [`compaction_contextbench.go`](../../compaction_contextbench.go) — the `compaction-eval contextbench` verb;
   [`internal/compeval/contextbench_run.go`](../../internal/compeval/contextbench_run.go) (driver, outcomes),
   `contextbench_gen_*.go` and `contextbench_grade_*.go` in [`internal/compeval/`](../../internal/compeval/) (ported generators and graders)

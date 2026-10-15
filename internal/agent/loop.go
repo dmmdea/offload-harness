@@ -1471,7 +1471,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 				// just refused to drop, on evidence the real tokenizer refutes.
 				if rv != fitReal && estimateTokens(msgs) > target {
 					beforeShrink := msgs
-					msgs = emergencyShrink(msgs, target, preambleLen)
+					msgs = emergencyShrinkWith(msgs, target, preambleLen, ropts)
 					l.pager.NoteCompaction(beforeShrink, msgs)
 				}
 				if rv == overReal {
