@@ -345,12 +345,23 @@ func (s *Server) registerAccelTools(srv *mcp.Server, cfg config.Config) map[stri
 				log.Printf("fleet accelerator %s: %s is served by %s on this box; skipped (shared-name rule)", id, t.name, owner[t.name])
 				continue
 			}
-			desc := t.desc + " [FLEET: this box has no " + id + " — the call is forwarded to the fleet node that does; image_path is read HERE and its bytes travel with the job (cap 8 MiB); the result carries placement{node,wall_ms}]"
+			desc := t.desc + fleetAccelNote(id, t.arg)
 			registered[t.name] = true
 			srv.AddTool(&mcp.Tool{Name: t.name, Description: desc, InputSchema: json.RawMessage(t.schema)}, s.handleFleetAccelTool(id, t.sidecar, t.arg))
 		}
 	}
 	return owner
+}
+
+// fleetAccelNote is the note appended to a forwarded accelerator tool's description: the call goes to another node, and the
+// tool's own required argument says what travels with it. An image tool reads image_path on THIS box and its bytes go with the job
+// (the cap is accelremote's); a text tool has no file, so its text goes. The argument named is the table row's, never a fixed one.
+func fleetAccelNote(id, requiredArg string) string {
+	carried := requiredArg + " travels with the job"
+	if requiredArg == "image_path" {
+		carried = "image_path is read HERE and its bytes travel with the job (cap 8 MiB)"
+	}
+	return " [FLEET: this box has no " + id + " — the call is forwarded to the fleet node that does; " + carried + "; the result carries placement{node,wall_ms}]"
 }
 
 // FleetOwnerSuffix marks a forwarded owner in registerAccelTools' owner map.
