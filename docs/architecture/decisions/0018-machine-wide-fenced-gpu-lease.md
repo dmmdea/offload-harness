@@ -264,3 +264,4 @@ Two further facts shaped the design:
   `freeLlamaSwap` keeps the stack by name wherever it runs, and the lease's own unload step now does the same:
   `gpu reserve --unload-seat` leaves the configured `memory_stack` resident, because mem0 never yields to a lease.
   See [GPU lease](../../systems/gpu-lease.md).
+- **Amended 2026-10-14: the card-naming amendments are stated once, as the code does them, in [ADR 0094](0094-a-lease-names-its-cards-a-card-has-one-holder.md).** It records the rule they share (a lease names its cards, a card has one holder) and lists what is not built, among it the takeover this ADR's "nothing frees it but its holder or a takeover" refers to.
