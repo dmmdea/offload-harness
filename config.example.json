@@ -353,6 +353,7 @@
   "kvslot_cap_gib": 0,
   "fleet_agent_enabled": false,
   "agent_delegation_enabled": false,
+  "tools_schema_profile": "full",
   "delegate_remotes": null,
   "fleet_sampler": "auto",
   "primary_gpu_uuid": "",
