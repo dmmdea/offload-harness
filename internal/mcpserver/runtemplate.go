@@ -57,6 +57,9 @@ func (s *Server) queryTemplate(ctx context.Context, args []string) ([]byte, erro
 	if strings.TrimSpace(cfg.ComfyDir) == "" {
 		return nil, errors.New("comfy_dir is not configured on this machine, so there is no templates package to read")
 	}
+	if strings.TrimSpace(cfg.RunGraphScript) == "" {
+		return nil, errors.New("no run-graph route is configured (run_graph_script), so there is no run-template script beside it")
+	}
 	runner, err := gpugen.ResolveScript(cfg.RunGraphScript)
 	if err != nil {
 		return nil, err

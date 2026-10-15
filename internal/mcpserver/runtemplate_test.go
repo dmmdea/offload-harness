@@ -381,3 +381,23 @@ func TestRunTemplateNoNodeScriptIsATypedDeferNotACrash(t *testing.T) {
 		t.Errorf("want a deferral that names comfy_dir: %s", out)
 	}
 }
+
+// The tool is called over the protocol as a client calls it: the schema the server advertises accepts the arguments a caller sends
+// (filters, an integer seed, an overrides object of strings, numbers and booleans), and they reach the handler.
+func TestRunTemplateThroughTheProtocolAcceptsItsOwnSchema(t *testing.T) {
+	h := newTplHarness(t, map[string]string{"list": `{"ok":true,"templates":[]}`, "resolve": resolveOK})
+	if _, text := callOverTransport(t, h.s, "offload_run_template", `{"action":"list","kind":"local","runnable":false,"limit":5,"offset":0,"reads_input":true}`); !strings.Contains(text, `"templates"`) {
+		t.Fatalf("list over the protocol: %s", text)
+	}
+	if want := []string{"list", "--kind", "local", "--runnable", "false", "--reads-input", "true", "--limit", "5", "--offset", "0"}; !reflect.DeepEqual(h.calls[0], want) {
+		t.Errorf("node call = %v, want %v", h.calls[0], want)
+	}
+	callOverTransport(t, h.s, "offload_run_template", `{"action":"run","template":"tt_open","seed":7,"overrides":{"6.text":"a blue fox","3.steps":30,"1.on":true},"out_dir":"D:/o"}`)
+	if len(h.requests) != 1 || h.requests[0].Params["seed"] != "7" || h.requests[0].Params["template"] != "tt_open" {
+		t.Fatalf("run over the protocol: %v", h.requests)
+	}
+	var ov map[string]any
+	if err := json.Unmarshal([]byte(h.overridesAtRun), &ov); err != nil || ov["1.on"] != true || ov["3.steps"] != float64(30) {
+		t.Errorf("overrides = %q (%v)", h.overridesAtRun, err)
+	}
+}
