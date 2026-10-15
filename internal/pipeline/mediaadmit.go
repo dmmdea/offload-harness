@@ -1399,3 +1399,8 @@ func containsString(list []string, s string) bool {
 	}
 	return false
 }
+
+// graphRAM is for a run_graph call. STUB: red first.
+func graphRAM(cfg config.Config, params map[string]any) func(float64) hostneed.Need {
+	return classDefaultRAM(cfg)
+}

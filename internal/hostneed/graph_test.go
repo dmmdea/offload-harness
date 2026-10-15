@@ -16,6 +16,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 )
 
 const mib = 1 << 20
@@ -113,15 +114,13 @@ func TestAGraphNamingTwoLoaderFilesDeclaresTheirSum(t *testing.T) {
 	}
 }
 
-// The figure is counted in full whatever the card holds: a graph's placement and load order are its own, so the lease cannot say
-// its files sit on a card (the family estimate may, it knows the family's recipe). Nor does a file counted twice by two nodes
+// On a card that is not known the figure is counted in full (nothing is assumed to fit). A file named by two nodes does not
 // count twice, and a VAE or a LoRA is counted: the graph names it.
 func TestAGraphIsCountedInFullDeduplicatedAndWithItsSmallFiles(t *testing.T) {
 	const ckpt, vae, lora = 6 * mib, 1 * mib, 2 * mib
 	f := sparseTree(t, map[string]int64{
 		"checkpoints/ck.safetensors": ckpt, "vae/ae.safetensors": vae, "loras/sub/style.safetensors": lora,
 	})
-	f.VRAMGiB = 96 // a card these files would sit on, ten thousand times over
 	graph := `{
 		"1": {"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":"ck.safetensors"}},
 		"2": {"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":"ck.safetensors"}},
@@ -280,4 +279,74 @@ func TestTheIncidentsGraphIsItsOwnFilesNotTheLargestFamilyOfTheBox(t *testing.T)
 // space in it is one argument, as the shell would pass it.
 func graphCall(helper string, graphArgs ...string) []string {
 	return append(strings.Fields("node render/"+helper+" out"), graphArgs...)
+}
+
+// A graph is sized by the family estimate's own rule (fitToCard): the set is counted in full when together it does not fit the
+// card (the largest card of the lease, less the runner's reserve), and a set that fits streams nothing from RAM and declares 0,
+// with the same wording. The incident's 6.76 + 16.33 GiB graph is 23.09 GiB.
+func TestAGraphThatFitsTheCardDeclaresZeroAndOneThatDoesNotDeclaresItsSum(t *testing.T) {
+	dir, stat := comfyTree(t, map[string]float64{"qwen_image_fp8.safetensors": 6.76, "qwen_2.5_vl_7b.safetensors": 16.33})
+	f := Facts{Cfg: config.Config{ComfyDir: dir}, Stat: stat}
+
+	f.VRAMGiB = 32 // 31 usable: 23.09 fits
+	n, ok := ForGraph([]byte(twoLoaderGraph), f)
+	if !ok || n.Source != SourceGraphLoaders || n.GiB != 0 {
+		t.Fatalf("on a 32 GiB card the graph fits: got %v %v, want 0 GiB from %q", n, ok, SourceGraphLoaders)
+	}
+	for _, want := range []string{"fits the 32.0 GiB card", "no weights stream from RAM", "qwen_image_fp8.safetensors"} {
+		if !strings.Contains(n.Detail, want) {
+			t.Errorf("the detail says %q, got %q", want, n.Detail)
+		}
+	}
+
+	f.VRAMGiB = 16 // 15 usable: 23.09 does not
+	n, ok = ForGraph([]byte(twoLoaderGraph), f)
+	if !ok || n.Source != SourceGraphLoaders || !near(n.GiB, 6.76+16.33) {
+		t.Fatalf("on a 16 GiB card the graph does not fit: got %v %v, want %.2f GiB", n, ok, 6.76+16.33)
+	}
+	for _, want := range []string{"does not fit the 16.0 GiB card", "so the weights stream from RAM"} {
+		if !strings.Contains(n.Detail, want) {
+			t.Errorf("the detail says %q, got %q", want, n.Detail)
+		}
+	}
+
+	f.VRAMGiB = 0 // an unknown card counts everything
+	if n, _ := ForGraph([]byte(twoLoaderGraph), f); !near(n.GiB, 6.76+16.33) {
+		t.Errorf("an unknown card counts the sum, got %v", n)
+	}
+}
+
+// The edge is the family estimate's: a set that EQUALS the usable VRAM fits, and the reserve is the runner's (--reserve-vram, else 1.0).
+func TestAGraphFitsTheCardExactlyAtItsUsableVRAM(t *testing.T) {
+	dir, stat := comfyTree(t, map[string]float64{"qwen_image_fp8.safetensors": 6, "qwen_2.5_vl_7b.safetensors": 10})
+	f := Facts{Cfg: config.Config{ComfyDir: dir}, Stat: stat, VRAMGiB: 17} // 17 - 1.0 reserve = 16 = the set
+	if n, ok := ForGraph([]byte(twoLoaderGraph), f); !ok || n.GiB != 0 {
+		t.Errorf("a 16 GiB set on 16 GiB usable fits: got %v %v", n, ok)
+	}
+	f.VRAMGiB = 16.9
+	if n, ok := ForGraph([]byte(twoLoaderGraph), f); !ok || !near(n.GiB, 16) {
+		t.Errorf("a 16 GiB set on 15.9 GiB usable does not fit: got %v %v", n, ok)
+	}
+	f.VRAMGiB, f.ReserveVRAMGiB = 17, 2 // the runner holds back 2 GiB: 15 usable
+	if n, ok := ForGraph([]byte(twoLoaderGraph), f); !ok || !near(n.GiB, 16) {
+		t.Errorf("with --reserve-vram 2 the set does not fit: got %v %v", n, ok)
+	}
+}
+
+// The graph and the family estimate give one verdict on the same files: there is one rule, not a copy of it.
+func TestAGraphAndTheFamilyEstimateAgreeOnTheSameFiles(t *testing.T) {
+	dir, stat := comfyTree(t, map[string]float64{"a.safetensors": 6, "b.safetensors": 10})
+	graph := []byte(`{"1":{"class_type":"UNETLoader","inputs":{"unet_name":"a.safetensors"}},"2":{"class_type":"CLIPLoader","inputs":{"clip_name":"b.safetensors"}}}`)
+	files := []mediacap.ModelFile{
+		{Label: "unet", Name: "a.safetensors", Classes: []string{"diffusion_models", "unet"}, Role: mediacap.RoleDiffusion},
+		{Label: "clip", Name: "b.safetensors", Classes: []string{"text_encoders", "clip"}, Role: mediacap.RoleTextEncoder},
+	}
+	for _, vram := range []float64{0, 12, 16.9, 17, 40} {
+		f := Facts{Cfg: config.Config{ComfyDir: dir}, Stat: stat, VRAMGiB: vram}
+		g, gok := ForGraph(graph, f)
+		e, eok := estimate("x", files, f)
+		if !gok || !eok || g.GiB != e.GiB {
+			t.Errorf("on a %.1f GiB card the graph says %v %v and the family estimate %v %v: they must agree", vram, g.GiB, gok, e.GiB, eok)
+		}
+	}
 }
