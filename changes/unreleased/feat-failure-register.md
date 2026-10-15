@@ -27,7 +27,7 @@
   a mark that a reader sets aside. The column is absent on old rows, so a ledger written before it counts its refusals as the
   failures they were then recorded as. `ledger_readers_lint_test.go` only governs callers of `ledger.ReadAll` and says
   nothing about columns; what a new column owes is `omitempty`, a comment on what absence means, and a row in the ledger-row
-  table of `docs/FLEET-NODE.md`, all done. The other job counters still count a refusal row; that is not changed here.
+  table of `docs/FLEET-NODE.md`, all done. The other job counters set a refusal row aside as well; see "A refusal row is not a job" in this release.
 - **Kinds.** Capacity, caller and policy defers sat in `failure_rows` beside stack faults, against `reasoncode.go` (congestion
   is a place in line, not a failure) and `agentwire.go` (the defer classes keep a node's capacity, the caller's contract and a
   broken stack apart). Every class now has a kind, closed and written in code (`internal/ledger/failurekinds.go`): `stack_fault`,
