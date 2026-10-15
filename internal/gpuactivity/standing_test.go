@@ -666,3 +666,32 @@ func TestAStaleHolderThatGaveUpReleasingItSaysSoAndWhy(t *testing.T) {
 		t.Errorf("no marker, no word of one:\n%s", n)
 	}
 }
+
+// A time.Time is a struct, and omitempty never omits a struct: the field must be omitzero, or every
+// holder of the status JSON carries a year-one time and the published verdict schema changes.
+func TestAHolderThatNeverGaveUpHasNoGaveUpKeyInItsJSON(t *testing.T) {
+	root, _ := leaseFixture(t, nil)
+	got := snap(root, 0, nil)
+	if got.Holder == nil {
+		t.Fatalf("the fixture lease must have a holder: %s (%s)", got.Verdict, got.Note)
+	}
+	b, err := json.Marshal(got.Holder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"holder_gave_up_at", "holder_gave_up_why"} {
+		if strings.Contains(string(b), key) {
+			t.Errorf("a holder that never gave up must not carry %q:\n%s", key, b)
+		}
+	}
+	gaveUp := time.Now().Add(-time.Minute).Truncate(time.Second)
+	h := *got.Holder
+	h.GaveUpAt, h.GaveUpWhy = gaveUp, "why"
+	b, err = json.Marshal(&h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"holder_gave_up_at"`) || !strings.Contains(string(b), `"holder_gave_up_why":"why"`) {
+		t.Errorf("a holder that gave up must say so in its JSON:\n%s", b)
+	}
+}
