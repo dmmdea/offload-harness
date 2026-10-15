@@ -75,8 +75,16 @@ type traceRecord struct {
 	// downgrade outlives a goal (one Loop drains the whole queue), so without
 	// this field the traces could not show WHICH goal degraded the process
 	// (review finding 2026-08-14).
-	TokenizerPath string      `json:"tokenizer_path,omitempty"`
-	Transcript    []agent.Msg `json:"transcript"`
+	TokenizerPath string `json:"tokenizer_path,omitempty"`
+	// Pager and Prefill are the run's own instrument reports, written beside the
+	// transcript because the transcript alone cannot reproduce them: the final transcript
+	// keeps what the ladder left behind, not what it took out or how many times it ran.
+	// Pointers with omitempty: a trace written before these existed has neither key, and a
+	// reader treats that as UNRECORDED. A run that recorded nothing notable still writes the
+	// object (basis "insufficient_data", compaction_passes 0), which is a measurement.
+	Pager      *agent.PagerReport   `json:"pager,omitempty"`
+	Prefill    *agent.PrefillReport `json:"prefill,omitempty"`
+	Transcript []agent.Msg          `json:"transcript"`
 }
 
 // safeID sanitizes a goal id for use as a trace filename. The id is operator-
@@ -252,6 +260,10 @@ func runStandalone(ctx context.Context, loop *agent.Loop, o standaloneOpts) erro
 			continue
 		}
 		gctx, cancel := context.WithTimeout(ctx, o.goalTimeout)
+		// One loop drains the whole queue and its instruments accumulate for its life: start
+		// them over so this goal's pager, compaction and prefill report (the stderr lines and
+		// the trace file) describe this goal and not the running total.
+		loop.ResetRunInstruments()
 		res, rerr := loop.Run(gctx, g.Goal)
 		cancel()
 
@@ -310,7 +322,8 @@ func runStandalone(ctx context.Context, loop *agent.Loop, o standaloneOpts) erro
 		// be visible in BOTH the live stderr and the after-the-fact audit
 		// trail (review finding 2026-08-14).
 		noteTokenizerDegradeOnce(res.TokenizerPath)
-		tr := traceRecord{ID: gid, Goal: g.Goal, StopReason: res.StopReason, Steps: res.Steps, Output: res.Output, TokenizerPath: res.TokenizerPath, Transcript: res.Transcript}
+		pagerReport, prefillReport := res.Pager, res.Prefill
+		tr := traceRecord{ID: gid, Goal: g.Goal, StopReason: res.StopReason, Steps: res.Steps, Output: res.Output, TokenizerPath: res.TokenizerPath, Pager: &pagerReport, Prefill: &prefillReport, Transcript: res.Transcript}
 		if rerr != nil {
 			tr.Error = rerr.Error()
 		}

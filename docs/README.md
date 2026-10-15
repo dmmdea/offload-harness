@@ -58,6 +58,8 @@ where the code lives.
   (freeze, check, verdict, schema), the ADOPT/BLOCK/INCONCLUSIVE rules over a paired interval (Tango's score interval for pass/fail pairs, an
   augmented score form for the rest), the baseline and
   input formats, the exit codes, the power note, the era marker, and the legacy callers it does not migrate
+- [systems/failure-register.md](systems/failure-register.md) — `ledger --failures`: the ledger's failed jobs grouped into
+  failure classes with counts, joined by name to a human-maintained table of meaning, root cause and structural fix
 - [systems/openspec.md](systems/openspec.md) — the `openspec/` spec-and-plan tree: the forked `harness-change`
   schema with an optional ADR artifact, the hash-pinned install script, the strict validate gate
 

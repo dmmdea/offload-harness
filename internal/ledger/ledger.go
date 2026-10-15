@@ -267,6 +267,14 @@ type Entry struct {
 	// key at all. Every production view skips a labelled row by default and reports how many it skipped
 	// (Summary.ExcludedNonProduction); a reader that must see them all asks (ReadAll, SummarizeFileWith).
 	RunClass string `json:"run_class,omitempty"`
+	// Refusal marks a row that is a node's capacity refusal AT DISPATCH (a 503 or 429), a place in line and not an
+	// outcome: the delegator outwaits it and re-places the subtask, whose outcome is another row (the one that landed,
+	// or the terminal row a lost subtask gets under a job id of its own). It is the ledger twin of the delegation
+	// log's refusal mark. ABSENT ON EVERY OTHER ROW, and on every row written before the column existed, so a reader
+	// that sees none reads the row as it always did: such a row may be an old refusal, and the column cannot say
+	// otherwise. A reader that counts jobs or failures (the failure register) sets a marked row aside and counts it
+	// as a refused attempt; the job counters of jobrows.go still count it, as they did.
+	Refusal bool `json:"refusal,omitempty"`
 }
 
 // Label provenance values for Entry.LabelSource. Constants rather than string literals so
