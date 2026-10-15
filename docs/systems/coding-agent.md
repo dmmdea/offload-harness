@@ -659,6 +659,84 @@ re-runs on the result — residual PII refuses the harvest — and the corpus is
 destination. Methodology harvested from the OmniRoute compression service's
 eval approach (MIT); metrics and signals are this harness's own.
 
+`trace-corpus` is the read-only readout over RECORDED agent runs, shaped like `compaction-eval`
+(harvest, freeze, check) and kept apart from it. `trace-corpus harvest --traces DIR --delegation-log DIR --out corpus.jsonl`
+reduces every run to numbers and enums (no goal, output, transcript or tool text), redacts the few strings that remain with
+the same redactor and vet table `compaction-eval harvest` uses, and stamps the corpus with its sha256; the corpus is
+machine-local and never committed. `readout`, `freeze` and `check` are deterministic and carry no timestamps, and `check`
+demands the frozen report back byte for byte. With no source flag, harvest reads the install root's `agent-traces` and
+`delegation-log` directories. It reads those two records and never the ledger.
+
+- **What counts as a run.** A delegation row is a run only if an agent executed: a deferral (capacity, infrastructure,
+  budget, config, contract) is logged with zero steps and nothing else, and harvest skips it under the named reason
+  `delegation row never ran (zero steps, nothing recorded)` instead of counting it. Any record at all (a step, a step
+  trace, prefill or seat-token accounting, or a pager object) keeps the row a run, so the unrecorded counts are counts of
+  runs. Before the pager recording existed, a deferral raised before the loop ran and a run the loop returned from in zero
+  steps with nothing else wrote the same row, so "never reached the loop" is an inference for the older rows and the
+  skipped count is an upper bound on pre-loop deferrals; a row from a build with the recording carries a pager object when
+  the loop ran. A row without a result, a capacity refusal and the harness's own test seat are skipped as before, and every
+  skip is counted in the harvest stats. A file in the traces directory is a run only if it is shaped like an agent trace
+  (a transcript, and either steps or a stop reason); any other JSON object there is skipped under the named reason
+  `trace record has no transcript, or neither steps nor a stop reason` and counted.
+- **Why a zero-step row with a trace is a run.** A deferred row (budget or infrastructure) can carry zero steps and a
+  step trace made only of setup actions. The setup actions execute inside the agent loop, before its first model turn and
+  without spending a step, so such a row did reach the loop, and the trace is the loop's own effect ledger. A budget or
+  infrastructure deferral takes the loop's pager report, so once the recording ships the row carries a pager object and is
+  not unrecorded. The compaction ladder also runs before the first model call and again when that call is rejected for
+  context size, so a run can end at zero steps with passes counted.
+- **Which rows carry a pager object.** From a build that carries the recording: a run the loop returned from carries one,
+  zeros included, whether it finished or was deferred after the loop returned (a budget, infrastructure, abstention or
+  write-class deferral, for example); the object is attached right after the loop returns, ahead of the write door, so a
+  write-class deferral (defer class `write`: the write door did not close cleanly) keeps it; a deferral raised before the
+  loop ran has none and no other record either, and is skipped as never ran. Both ends must carry the field: the node that
+  served the run emits the object, and the delegator that writes the log row decodes the node's answer into its own wire
+  result and encodes it again, so a delegator build without the field drops it. Rows logged before the recording, rows from
+  a node that predates it and rows written by a delegator that predates it have none; the row's `delegator_version` names
+  the delegator build and the result's `harness_version` the node build. The node stamps `harness_version` once the loop
+  has returned without an error and the write door has closed cleanly, so it is absent on a deferral raised before the
+  loop, on one the loop's own error raised (a refused lease, a seat that went down, a stall, a wall or ceiling timeout, a
+  cancellation, a parser mismatch, a contended seat), on one for a lost workspace root and on a write-class deferral,
+  which keeps its pager object but not the stamp; a run that ended on its step budget, a cut tool call, an empty answer or
+  an abstention carries both. The pager and compaction unrecorded counts therefore reach zero for rows written by a
+  recording delegator from a recording node, and a mixed log reads zero only once the older rows are windowed out by day
+  (`--since`) and every node and delegator that wrote the rest runs the recording.
+- **What it reports.** The trace-bearing run count (an agent trace with a transcript, or a delegation row with a step
+  trace); the pager re-fetch rate pooled over the runs that evicted something (distinct payloads re-fetched over distinct
+  payloads evicted) against the 10 % gate of R2-13 (`agent.PagerGate`); the compaction fire rate (runs that ran the ladder at
+  least once over runs that recorded a pass count) and passes per run and per step; prefill tokens, cached tokens and KV
+  reuse, with the per-run spread (nearest-rank p50, p90 and max) of prefilled tokens over the measured runs and of the mean
+  prompt size per step over the runs that reported seat input tokens. Each is given for the whole corpus, by source and by
+  seat.
+- **Which runs a seat can be named for.** A pool placement logs the pool's ALIAS as the seat (a seat name in which `pool` is
+  a whole hyphen-delimited token); the node's real seat is in neither the row nor its result. Those runs cannot be
+  attributed to a seat, so `by_seat` holds the runs a seat can be named for (each seat the record names, and under the
+  key `(unrecorded)` the runs whose record names no seat, which is every agent trace) and not the alias runs. The alias
+  runs are their own bucket: `pool_alias` (the bucket's statistics) and `pool_alias_by_node` (the same runs keyed by the
+  node id the row carries, `(unrecorded)` when it names none). The `attribution` block counts the three classes
+  (`seat_named_runs`, `pool_alias_runs`, `seat_unrecorded_runs`) and gives `unattributed_share`, the last two over all
+  runs, so a reader sees how much of the corpus a per-seat reading cannot reach. Test seats other than the
+  default-excluded one stay in `by_seat` until named with `--exclude-seat`. The corpus and the readout carry node ids and
+  seat names as the records write them, so both are machine-local like the corpus; only a path-shaped seat, node id or
+  stop reason is replaced (below).
+- **Paths are redacted.** The shared vet table has no path class, so harvest replaces a seat, node id or stop reason that
+  is a local path (a drive path, a rooted path, anything with a backslash) with a stable `[redacted-path-N]` placeholder,
+  counted under `redactions.path`, and the strict loader refuses a corpus that still carries one.
+- **Unrecorded is not zero.** Before the pager report and the pass count were recorded, neither record kept them: the loop measured both
+  and the trace and the wire dropped them. Every rate is a pointer that serializes as `null` when nothing was recorded, and a
+  count of unrecorded runs sits beside it, so a corpus of older rows reads `NO_DATA` on the gate and cannot close the pager
+  family by reading as 0 %. A run that DID record a pass count of 0 is a real 0. A pager object that contradicts itself is
+  read as unrecorded and noted in the harvest stats.
+- **What is recorded now.** A standalone trace file carries `pager` (the loop's `PagerReport`, now with `compaction_passes`)
+  and `prefill`; the queue drainer resets the loop's instruments before each goal, because they accumulate for the loop's
+  life and a goal's trace would otherwise be the running total of the queue. The agent wire result carries `pager` (the
+  delegation log stores it) on every run the loop returned from (see "Which rows carry a pager object" above). Rows
+  written before that have neither, and the transcript in an older trace gives
+  only a lower bound on the ladder (tool turns that are elision markers or skeletons).
+- **No token counts is not a measured zero.** An engine that reports no prefill timings still ticks the observed-step
+  counter, so a run with steps observed and zero prefilled and zero cached tokens is counted apart (`no_token_counts_runs`)
+  and adds nothing to the token sums; the seat's own input-token figure (`seat_tokens_in`) is reported beside it for the runs
+  that carry one.
+
 ### The `contextbench` task bench (`compaction-eval contextbench`)
 
 `compaction-eval contextbench` is the instrument for the context-editing decision: it drives long-horizon
@@ -1197,6 +1275,9 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 ## Source map
 
 - [`internal/agent/loop.go`](../../internal/agent/loop.go) — loop, budget, `dispatchOrThrottle`
+- [`trace_corpus.go`](../../trace_corpus.go) — the `trace-corpus` verb (harvest, readout, freeze, check)
+  over recorded agent runs; [`internal/agent/contextpager.go`](../../internal/agent/contextpager.go) — the pager
+  instrument and the compaction pass count it records
 - [`internal/agent/policy.go`](../../internal/agent/policy.go) — broker, `.git` denial, audit append
 - [`internal/agent/rules.go`](../../internal/agent/rules.go) — the tighten-only risk-rule table and
   the built-in `defaultRules()` secret-material floor

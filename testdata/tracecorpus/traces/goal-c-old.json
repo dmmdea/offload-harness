@@ -1,0 +1,50 @@
+{
+  "id": "goal-c-old",
+  "goal": "synthetic goal c",
+  "stop_reason": "done",
+  "steps": 4,
+  "output": "synthetic output",
+  "transcript": [
+    {
+      "Role": "system",
+      "Content": "synthetic system prompt",
+      "ToolCalls": null,
+      "ToolCallID": "",
+      "IsError": false
+    },
+    {
+      "Role": "user",
+      "Content": "synthetic objective c",
+      "ToolCalls": null,
+      "ToolCallID": "",
+      "IsError": false
+    },
+    {
+      "Role": "assistant",
+      "Content": "",
+      "ToolCalls": [
+        {
+          "ID": "c1",
+          "Name": "read",
+          "Args": "{}"
+        }
+      ],
+      "ToolCallID": "",
+      "IsError": false
+    },
+    {
+      "Role": "tool",
+      "Content": "[earlier result elided to fit context \u2014 8192 chars]",
+      "ToolCalls": null,
+      "ToolCallID": "c1",
+      "IsError": false
+    },
+    {
+      "Role": "assistant",
+      "Content": "synthetic final answer",
+      "ToolCalls": null,
+      "ToolCallID": "",
+      "IsError": false
+    }
+  ]
+}
