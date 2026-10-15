@@ -29,8 +29,7 @@ measurement gate and the SHA-bound evidence on a review result.
 - The detail each part's own page owns: the failure classes ([failure-register.md](failure-register.md)), the agent
   loop and its pager ([coding-agent.md](coding-agent.md)), the gate's statistics ([measurement-gate.md](measurement-gate.md)),
   the review lane ([mcp-server.md](mcp-server.md)).
-- The evidence-preserving reducer rung and the recipe store. Neither is merged, so neither is described beyond its
-  intent.
+- The evidence-preserving reducer rung. It is not merged, so it is described only by its intent.
 - Scheduling. Every command below runs when an operator or an agent calls it. None is a scheduled job, and none edits
   configuration, a seat binding or a rule.
 - What each command writes. `ledger --failures`, `trace-corpus check`, `gate check`, `gate verdict` and `gate schema`
@@ -212,6 +211,20 @@ payload it returns, deferrals and early refusals included, carries an `outcome` 
 
 The lane stays advisory: an outcome is a label a lead reads, and nothing here blocks a merge or a commit.
 
+### The recipe store and its audit verb
+
+**The store.** `internal/recipe` keeps a recipe as a typed record: a candidate edit to a seat's `agent_env_rules` in the
+closed rule vocabulary, the seat-capability tag it was distilled for, the acceptance-passing runs it came from, and a
+status (`proposed`, `published` or `demoted`) with the audit that set it. The decoder refuses any other key, so a recipe
+is data, never code. Each recipe is one file, replaced by an atomic rename.
+
+**The audit.** `local-offload recipe-audit` runs a set of contracts on one seat twice, with and without the recipe, under
+the GPU lease, judged by the acceptance DSL. It publishes the recipe only on a measurement-gate ADOPT with the candidate's
+mean steps no worse than the incumbent's, and demotes it otherwise; a demoted recipe stays in the store with its audit.
+Publishing sets the record's status and nothing else: no code path applies a published recipe to a seat. No proposer is
+built. [ADR 0036](../architecture/decisions/0036-the-agent-lane-is-a-harnessed-environment.md)'s amendment holds it back
+until trace-bearing runs number in the hundreds, and the readout above is what counts them.
+
 ### Proposed, not on main yet
 
 **The evidence-preserving reducer rung: not on main yet.** Proposed as a rung of the agent loop's context handling that
@@ -219,18 +232,14 @@ shrinks large tool output while keeping the evidence checkable, and falls back t
 off until its own measurement passes the gate above. [ADR 0090](../architecture/decisions/0090-capability-review-2026-10-dispositions-and-reopen-triggers.md)
 records it as a port; nothing of it is merged.
 
-**The recipe store and its audit verb: not on main yet.** Proposed to keep recipes (data, never code) distilled from runs
-that passed their acceptance checks, with an audit verb that runs a contract with and without a recipe on one seat, so a
-recipe is published only when the gate passes. It stays off until its own gate measurement passes. [ADR 0036](../architecture/decisions/0036-the-agent-lane-is-a-harnessed-environment.md)
-already holds the proposer side back until there is a trace corpus in the hundreds, and the readout above is what counts
-trace-bearing runs.
-
 ## Interfaces and entry points
 
 - `local-offload ledger --failures [--since DAYS] [--include-test-traffic] [--table FILE]`
 - `local-offload trace-corpus harvest [--traces DIR] [--delegation-log DIR] --out FILE`, then
   `readout|freeze|check --corpus FILE` (`check` also takes `--baseline FILE`)
 - `local-offload gate freeze|check|verdict|schema|selftest`
+- `local-offload recipe-audit --recipe ID --seat ALIAS --seat-tag TAG --contracts TASKS.json --baseline BASELINE.json
+  --engine-build STR [--store DIR] [--attempts N] [--input-out FILE]`
 - `offload_review_diff`, with the optional inputs `base_sha`, `head_sha` and `gate_receipts`
 
 ## Invariants and assumptions
