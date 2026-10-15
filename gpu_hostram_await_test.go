@@ -112,7 +112,7 @@ func TestAwaitHostRAMHeldTellsOnceAndAdmits(t *testing.T) {
 	}
 	deadline := time.Now().Add(time.Hour)
 	var out bytes.Buffer
-	if err := awaitHostRAMHeld(context.Background(), await, deadline, time.Hour, &out); err != nil {
+	if err := awaitHostRAMBounded(context.Background(), await, deadline, time.Hour, hostRAMHold{}, &out); err != nil {
 		t.Fatalf("an admitted wait returns nil: %v", err)
 	}
 	if !gotDeadline.Equal(deadline) {
@@ -135,7 +135,7 @@ func TestAwaitHostRAMHeldTellsOnceAndAdmits(t *testing.T) {
 
 	// A host that has the room at the first look says nothing at all.
 	out.Reset()
-	if err := awaitHostRAMHeld(context.Background(), func(gpulease.AwaitHostRAMOptions) error { return nil }, deadline, time.Hour, &out); err != nil || out.Len() != 0 {
+	if err := awaitHostRAMBounded(context.Background(), func(gpulease.AwaitHostRAMOptions) error { return nil }, deadline, time.Hour, hostRAMHold{}, &out); err != nil || out.Len() != 0 {
 		t.Errorf("an immediate admission is silent: err=%v out=%q", err, out.String())
 	}
 }
@@ -146,7 +146,7 @@ func TestAwaitHostRAMHeldReturnsTheGrantsRefusalWithTheFlagThatWaitsLonger(t *te
 	short := &gpulease.ErrHostRAM{}
 	short.Why = "waiting for host RAM: needs 30.0 GiB, committed 90.0 of 100.0 GiB physical, 8.0 GiB headroom"
 	var out bytes.Buffer
-	err := awaitHostRAMHeld(context.Background(), func(gpulease.AwaitHostRAMOptions) error { return short }, time.Now(), 4*time.Second, &out)
+	err := awaitHostRAMBounded(context.Background(), func(gpulease.AwaitHostRAMOptions) error { return short }, time.Now(), 4*time.Second, hostRAMHold{}, &out)
 	var got *gpulease.ErrHostRAM
 	if !errors.As(err, &got) {
 		t.Fatalf("the refusal stays an *ErrHostRAM: %v", err)
@@ -162,10 +162,10 @@ func TestAwaitHostRAMHeldReturnsTheGrantsRefusalWithTheFlagThatWaitsLonger(t *te
 
 	impossible := &gpulease.ErrHostRAM{}
 	impossible.Why, impossible.Impossible = "can never admit 99.0 GiB: pass --ram", true
-	if err := awaitHostRAMHeld(context.Background(), func(gpulease.AwaitHostRAMOptions) error { return impossible }, time.Now(), time.Minute, &out); !errors.Is(err, impossible) {
+	if err := awaitHostRAMBounded(context.Background(), func(gpulease.AwaitHostRAMOptions) error { return impossible }, time.Now(), time.Minute, hostRAMHold{}, &out); !errors.Is(err, impossible) {
 		t.Errorf("an impossible figure is returned as it is: %v", err)
 	}
-	if err := awaitHostRAMHeld(context.Background(), func(gpulease.AwaitHostRAMOptions) error { return gpulease.ErrCancelled }, time.Now(), time.Minute, &out); !errors.Is(err, gpulease.ErrCancelled) {
+	if err := awaitHostRAMBounded(context.Background(), func(gpulease.AwaitHostRAMOptions) error { return gpulease.ErrCancelled }, time.Now(), time.Minute, hostRAMHold{}, &out); !errors.Is(err, gpulease.ErrCancelled) {
 		t.Errorf("a cancelled wait stays ErrCancelled so the caller can say which signal ended it: %v", err)
 	}
 }

@@ -2,7 +2,12 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -104,35 +109,213 @@ func cfgOf(t *testing.T, cfgPath string) config.Config {
 	return loadCfg(fs)
 }
 
-// The wrapper form cannot be driven in-process (it ends in os.Exit when its command fails), so the
-// wiring is pinned at the source: gpu_cmd.go stops instances through stopInstancesOfLease wherever
-// the process holds a Lease object, and calls stopKeptInstances directly only in the release verb,
-// which acts for an operator on an epoch it has just resolved.
-func TestOnlyTheReleaseVerbStopsInstancesWithoutALeaseObject(t *testing.T) {
-	src, err := os.ReadFile("gpu_cmd.go")
+// The wrapper form cannot be driven in-process (it ends in os.Exit when its command fails), and the detached parent's release needs
+// a process of its own, so the wiring is pinned at the source. The invariant: the ComfyUI instances kept under a lease are stopped
+// only by a caller that has FENCED THE EPOCH it stops them for. The test names each allowed caller by the function that holds the
+// call, in every non-test file of the package (it used to count lines in gpu_cmd.go alone, so a call added in another file, and a
+// third call added in this one, passed or failed for the wrong reason). Two kinds of caller qualify:
+//
+//   - stopInstancesOfLease, for a process that holds a *Lease: it checks the fence itself (Lease.Check) before it stops anything.
+//     Allowed callers are the wrapper form (runGPUReserve), the detached holder (runGPUHold) and its release at the end of a
+//     host-RAM wait (releaseHolderAtWaitEnd). The holder's release stops the instances AND its deferred function does too: the
+//     first is needed because the instances hold VRAM the seat's warm-back wants and the warm-back comes before the release; the
+//     deferred one finds no marker of an instance the first one stopped, so it is redundant and harmless, and it stays because it
+//     is the only stop on every other way the holder ends.
+//   - stopKeptInstances, directly, for a process that holds NO Lease object and acts for an epoch it has resolved or fenced first:
+//     the release verb (runGPURelease, which resolves its target with ReleaseTarget before it stops anything and stops for that
+//     target), and the detached reserve's release after a host-RAM wait (releaseAfterRAMWait, which returns before it stops
+//     anything unless the lease is on the record, or its record exists and cannot be read, which is a lease that is held). The
+//     detached parent never holds the lease (its hidden holder does), so it has no object to check; an epoch is never reused and
+//     each instance's marker names the lease that launched it, so a stop by epoch leaves an instance that a later lease took over
+//     (comfyinst.stopInstance re-reads the marker at the moment of the stop).
+//   - comfyStopFn and comfyinst.StopForLease are the reads of the markers themselves: the first is called only by
+//     stopKeptInstances, the second only by the package-level initializer of comfyStopFn. The scan walks whole declarations
+//     (methods are keyed by their receiver, package-level initializers as "var NAME"), so a call in a function literal or an
+//     initializer is seen as well.
+//
+// Anything else is a stop nobody has examined.
+
+type stopSite struct {
+	file, owner, callee string
+	arg                 string // the epoch (or lease) argument, as written
+}
+
+// stopRecvName is the type a method is declared on ("T" for both T and *T), "" for a plain function.
+func stopRecvName(fd *ast.FuncDecl) string {
+	if fd.Recv == nil || len(fd.Recv.List) == 0 {
+		return ""
+	}
+	t := fd.Recv.List[0].Type
+	if star, ok := t.(*ast.StarExpr); ok {
+		t = star.X
+	}
+	if id, ok := t.(*ast.Ident); ok {
+		return id.Name
+	}
+	return "?"
+}
+
+// packageStopCalls parses every non-test .go file of the package and returns each call of the stop functions with the declaration
+// that encloses it, any use of those names that is not a call (a function value would dodge a list of call sites), and the body of
+// every function by name. The owner of a call is the function it sits in ("name", or "Recv.name" for a method), and "var NAME" for a
+// package-level initializer: the scan walks whole declarations, so a function literal inside an initializer counts, and the
+// comfyinst package's own stop functions are named too (comfyinst.StopForLease is how the markers are read).
+func packageStopCalls(t *testing.T) (calls []stopSite, nonCalls []string, bodies map[string]string) {
+	t.Helper()
+	plain := map[string]bool{"stopKeptInstances": true, "stopInstancesOfLease": true, "comfyStopFn": true}
+	qualified := map[string]bool{"comfyinst.StopForLease": true, "comfyinst.StopMarker": true}
+	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var direct, viaLease int
-	for _, line := range strings.Split(string(src), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "//") {
+	fset := token.NewFileSet()
+	bodies = map[string]string{}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		if strings.Contains(line, "stopKeptInstances(") {
-			direct++
-			if !strings.Contains(line, "target") {
-				t.Errorf("gpu_cmd.go stops instances for something other than the epoch the release verb resolved:\n\t%s", trimmed)
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := parser.ParseFile(fset, name, src, 0)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		text := func(a, b token.Pos) string { return string(src[fset.Position(a).Offset:fset.Position(b).Offset]) }
+		for _, d := range f.Decls {
+			var owner string
+			switch d := d.(type) {
+			case *ast.FuncDecl:
+				owner = d.Name.Name
+				if r := stopRecvName(d); r != "" {
+					owner = r + "." + d.Name.Name
+				}
+				if d.Body != nil {
+					bodies[owner] = text(d.Body.Pos(), d.Body.End())
+				}
+			case *ast.GenDecl:
+				owner = "var"
+				for _, sp := range d.Specs {
+					if vs, ok := sp.(*ast.ValueSpec); ok && len(vs.Names) > 0 {
+						owner = "var " + vs.Names[0].Name
+					}
+				}
+			default:
+				continue
+			}
+			called := map[ast.Node]bool{}
+			ast.Inspect(d, func(n ast.Node) bool {
+				c, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				var callee string
+				switch fn := c.Fun.(type) {
+				case *ast.Ident:
+					if plain[fn.Name] {
+						callee = fn.Name
+					}
+				case *ast.SelectorExpr:
+					if x, ok := fn.X.(*ast.Ident); ok && qualified[x.Name+"."+fn.Sel.Name] {
+						callee = x.Name + "." + fn.Sel.Name
+					} else if plain[fn.Sel.Name] {
+						callee = fn.Sel.Name // a method value call
+					}
+				}
+				if callee == "" {
+					return true
+				}
+				called[c.Fun] = true
+				arg := ""
+				if len(c.Args) > 1 {
+					arg = text(c.Args[1].Pos(), c.Args[1].End())
+				}
+				calls = append(calls, stopSite{file: name, owner: owner, callee: callee, arg: arg})
+				return true
+			})
+			ast.Inspect(d, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && plain[id.Name] && !called[id] {
+					// the declaration of the name itself is not a use
+					if fd, isFn := d.(*ast.FuncDecl); isFn && fd.Name == id {
+						return true
+					}
+					if gd, isGen := d.(*ast.GenDecl); isGen {
+						declares := false
+						for _, sp := range gd.Specs {
+							if vs, ok := sp.(*ast.ValueSpec); ok {
+								for _, nm := range vs.Names {
+									declares = declares || nm == id
+								}
+							}
+						}
+						if declares {
+							return true
+						}
+					}
+					nonCalls = append(nonCalls, fmt.Sprintf("%s: %s in %s", name, id.Name, owner))
+				}
+				return true
+			})
+		}
+	}
+	return calls, nonCalls, bodies
+}
+
+func TestInstancesAreStoppedOnlyByCallersThatFencedTheirEpoch(t *testing.T) {
+	calls, nonCalls, bodies := packageStopCalls(t)
+	// callee -> the owners that may call it
+	allowed := map[string][]string{
+		"stopInstancesOfLease":   {"runGPUReserve", "runGPUHold", "releaseHolderAtWaitEnd"},
+		"stopKeptInstances":      {"stopInstancesOfLease", "runGPURelease", "releaseAfterRAMWait"},
+		"comfyStopFn":            {"stopKeptInstances"},
+		"comfyinst.StopForLease": {"var comfyStopFn"},
+	}
+	has := func(list []string, s string) bool {
+		for _, x := range list {
+			if x == s {
+				return true
 			}
 		}
-		if strings.Contains(line, "stopInstancesOfLease(") {
-			viaLease++
+		return false
+	}
+	seen := map[string]bool{}
+	for _, c := range calls {
+		seen[c.callee+" in "+c.owner] = true
+		if !has(allowed[c.callee], c.owner) {
+			t.Errorf("%s: %s calls %s, and nothing here shows it fenced the epoch first. Go through stopInstancesOfLease, or add the caller to this test WITH the reason it is safe", c.file, c.owner, c.callee)
 		}
 	}
-	if direct != 1 {
-		t.Errorf("stopKeptInstances is called %d times in gpu_cmd.go, want exactly the release verb's one", direct)
+	for _, n := range nonCalls {
+		t.Errorf("a stop function used as a value cannot be pinned by its call sites: %s", n)
 	}
-	if viaLease != 2 {
-		t.Errorf("stopInstancesOfLease is called %d times in gpu_cmd.go, want the wrapper form's and the detached holder's", viaLease)
+	for callee, owners := range allowed {
+		for _, o := range owners {
+			if !seen[callee+" in "+o] {
+				t.Errorf("this test allows %s to call %s but it does not: the list is stale, and would pass a call added back there", o, callee)
+			}
+		}
 	}
+
+	// What makes each caller safe is part of the pin: the epoch it stops for, and the fence that precedes the stop.
+	for _, c := range calls {
+		switch {
+		case c.callee == "stopInstancesOfLease" && c.arg != "lease":
+			t.Errorf("%s stops instances for %q, not for the lease object it holds", c.owner, c.arg)
+		case c.callee == "stopKeptInstances" && c.owner == "runGPURelease" && c.arg != "target":
+			t.Errorf("the release verb stops instances for %q, not for the epoch it resolved (target)", c.arg)
+		case c.callee == "stopKeptInstances" && c.owner == "releaseAfterRAMWait" && c.arg != "epoch":
+			t.Errorf("the detached reserve's release stops instances for %q, not for the epoch it fenced", c.arg)
+		}
+	}
+	fencedBefore := func(fn, fence, callee string) {
+		body := bodies[fn]
+		f, k := strings.Index(body, fence), strings.Index(body, callee+"(")
+		if f < 0 || k < 0 || f > k {
+			t.Errorf("%s must fence the epoch (%s) before it calls %s", fn, fence, callee)
+		}
+	}
+	fencedBefore("runGPURelease", "ReleaseTarget(", "stopKeptInstances")
+	fencedBefore("releaseAfterRAMWait", "leaseStillHeld(m, epoch)", "stopKeptInstances")
+	fencedBefore("stopInstancesOfLease", "lease.Check()", "stopKeptInstances")
 }

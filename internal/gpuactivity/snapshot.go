@@ -63,16 +63,20 @@ type Options struct {
 type Holder struct {
 	// Devices are the cards the lease sits on as seats read it (lease ids): the declared
 	// devices, else the inferred ones; empty = the whole node.
-	Devices         []string  `json:"devices,omitempty"`
-	PID             int       `json:"pid"`
-	Alive           bool      `json:"alive"`
-	Class           string    `json:"class"`
-	Epoch           uint64    `json:"epoch"`
-	Reason          string    `json:"reason,omitempty"`
-	Origin          string    `json:"origin,omitempty"`
-	Command         string    `json:"command,omitempty"`
-	Exclusive       bool      `json:"exclusive"`
-	Draining        bool      `json:"draining"`
+	Devices   []string `json:"devices,omitempty"`
+	PID       int      `json:"pid"`
+	Alive     bool     `json:"alive"`
+	Class     string   `json:"class"`
+	Epoch     uint64   `json:"epoch"`
+	Reason    string   `json:"reason,omitempty"`
+	Origin    string   `json:"origin,omitempty"`
+	Command   string   `json:"command,omitempty"`
+	Exclusive bool     `json:"exclusive"`
+	Draining  bool     `json:"draining"`
+	// GaveUpAt/GaveUpWhy: the moment the lease's hidden holder gave up releasing it, and why (the record's holder_gave_up_*). Set for
+	// a stale record only: the holder wrote it and exited, and nothing else says the release failed.
+	GaveUpAt        time.Time `json:"holder_gave_up_at,omitzero"`
+	GaveUpWhy       string    `json:"holder_gave_up_why,omitempty"`
 	AgeSec          int       `json:"age_s"`
 	HeartbeatAgeSec int       `json:"heartbeat_age_s"`
 	ExpiresAt       time.Time `json:"-"`
@@ -320,6 +324,9 @@ func Snapshot(ctx context.Context, opts Options) View {
 		case meta != nil && reclaimable:
 			v.Stale = true
 			v.Holder = &Holder{PID: meta.Holder.PID, Alive: gpulease.PIDAlive(meta.Holder.PID), Class: string(meta.Class), Epoch: meta.Epoch, Reason: meta.Reason, Command: meta.Command}
+			if meta.HolderGaveUpMs > 0 {
+				v.Holder.GaveUpAt, v.Holder.GaveUpWhy = time.UnixMilli(meta.HolderGaveUpMs), meta.HolderGaveUpWhy
+			}
 		}
 		reg := OpenAt(DirBeside(leaseDir))
 		v.Runs = reg.List(now)
@@ -444,7 +451,7 @@ func Assess(v View) (verdict, note string) {
 	// and is the verdict only when nothing else is.
 	staleTail := ""
 	if v.Stale && v.Holder != nil {
-		staleTail = fmt.Sprintf("; a lease record left over from a holder that is gone (pid %d, reason %q) sits beside it — the next `gpu reserve` reclaims it", v.Holder.PID, v.Holder.Reason)
+		staleTail = fmt.Sprintf("; a lease record left over from a holder that is gone (pid %d, reason %q) sits beside it — the next `gpu reserve` reclaims it%s", v.Holder.PID, v.Holder.Reason, gaveUpTail(v.Holder))
 	}
 	h := v.Holder
 	progressAdvancing := v.Held && h != nil && h.Progress != nil && h.Progress.State == "advancing"
@@ -491,7 +498,7 @@ func Assess(v View) (verdict, note string) {
 		if v.Holder != nil {
 			who = fmt.Sprintf(" (pid %d, reason %q)", v.Holder.PID, v.Holder.Reason)
 		}
-		return VerdictStaleHolder, "a lease record is left over from a holder that is gone" + who + "; the next `gpu reserve` reclaims it — nothing is running under it"
+		return VerdictStaleHolder, "a lease record is left over from a holder that is gone" + who + "; the next `gpu reserve` reclaims it — nothing is running under it" + gaveUpTail(v.Holder)
 	case cardsBusy:
 		return VerdictBusyOutside, "no lease and the seat is idle, but the cards are busy — " + busyCard + "; that is work the harness does not own" + processTail(v) + staleTail
 	case v.Seat.Stopping:
@@ -843,4 +850,18 @@ func (v View) Lines() []string {
 		out = append(out, v.DriverEventsNote)
 	}
 	return out
+}
+
+// gaveUpTail is the sentence that carries the hidden holder's give-up marker into a stale-holder line: the holder tried to release
+// its lease, could not, wrote the marker and exited, so the record is the only place that says the release failed and why. "" when
+// the holder left no marker (or there is no holder to ask).
+func gaveUpTail(h *Holder) string {
+	if h == nil || h.GaveUpAt.IsZero() {
+		return ""
+	}
+	why := ""
+	if h.GaveUpWhy != "" {
+		why = " (" + h.GaveUpWhy + ")"
+	}
+	return fmt.Sprintf("; the holder gave up releasing it at %s%s, so the release failed: the next `gpu reserve` reclaims it, or `gpu release --epoch %d` frees it now", h.GaveUpAt.Format(time.Kitchen), why, h.Epoch)
 }

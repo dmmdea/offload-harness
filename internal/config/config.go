@@ -1391,6 +1391,12 @@ type Config struct {
 	// bounds declarations, not what a lane then commits (gpu-lease.md, "Known limits").
 	// 0 = DefaultGPUHostRAMHeadroomGiB (8).
 	GPUHostRAMHeadroomGiB float64 `json:"gpu_host_ram_headroom_gib,omitempty"`
+	// GPUHostRAMHoldMaxSec (F82, 2026-10-14 incident) bounds how long a `gpu reserve --unload-seat` lease may hold its
+	// cards while it waits for the host to have the room for its declared RAM AFTER the unload: past it the lease is
+	// released (the seat warmed back as for any release), the command never runs and the reserve exits non-zero. Seconds;
+	// a pointer because unset (600, a chosen figure) and 0 (no bound: the wait runs the whole --wait, as before the bound)
+	// must differ. `gpu reserve --ram-hold-max` overrides it for one reserve.
+	GPUHostRAMHoldMaxSec *int `json:"gpu_hostram_hold_max_sec,omitempty"`
 	// GPUDisplayCapPct (A-RAM-15, default 60) is how much of the display card's total VRAM jobs may use, the
 	// desktop's own memory included: the card allocator (`gpu reserve --cards`, the media admission path) takes the
 	// screen's card only while the VRAM in use now plus the job's declared footprint stays at or under this share of
@@ -2613,6 +2619,10 @@ func load(path string) (Config, error) {
 	}
 	// The display card's share of the allocator (A-RAM-15): a value that is not a share is refused here, by name.
 	if err := validateGPUDisplayCap(c); err != nil {
+		return c, err
+	}
+	// The hold bound on a lease that waits for the host's RAM with its cards held (F82): a negative value is refused by name.
+	if err := validateGPUHostRAMHold(c); err != nil {
 		return c, err
 	}
 	// Install the operator's tailnet zones BEFORE any endpoint is vetted — the

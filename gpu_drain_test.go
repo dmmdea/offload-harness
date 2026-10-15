@@ -305,6 +305,10 @@ type multiSeatSwap struct {
 	// v208/v242 builds) ignores ?model= and unloads EVERYTHING. bulkCalls counts it.
 	perModelMissing bool
 	bulkCalls       int
+	// failUnload makes POST /api/models/unload/<model> answer 500 for the models named here (a model that will not go), and
+	// failBulk makes the legacy GET /unload answer 500 too, so the caller has no route left for it.
+	failUnload map[string]bool
+	failBulk   bool
 	// agentSeat, when set, is the one model whose warm-back (GET /upstream/<it>/health) the
 	// stand-in serves: it loads the model and counts the request in warms. Every other
 	// /upstream route stays the foreign-resident tripwire. A test that runs the wrapper form
@@ -347,6 +351,10 @@ func (f *multiSeatSwap) handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		if f.failUnload[model] {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		f.loaded[model] = false
 		f.unloadCalls = append(f.unloadCalls, model)
 		w.WriteHeader(200)
@@ -355,6 +363,10 @@ func (f *multiSeatSwap) handler() http.Handler {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.bulkCalls++
+		if f.failBulk {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		for m := range f.loaded {
 			f.loaded[m] = false // total, whatever ?model= says
 		}

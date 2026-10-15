@@ -636,3 +636,62 @@ func TestTreeOrphanLeaseIsAVerdictNeverStale(t *testing.T) {
 		t.Fatalf("a dead wrapper whose members are gone is a stale holder, got %s (%s)", got.Verdict, got.Note)
 	}
 }
+
+// Round 4, item 4. The hidden holder that gave up releasing its lease writes holder_gave_up_ms/_why on the record and exits; from
+// then on the lease is reclaimable (its holder is gone) and `gpu status` reads it as stale-holder, which said nothing of the marker.
+// The marker is the operator's only word that the release FAILED and why, so the stale line carries it.
+func TestAStaleHolderThatGaveUpReleasingItSaysSoAndWhy(t *testing.T) {
+	gaveUp := time.Now().Add(-3 * time.Minute)
+	root, _ := leaseFixture(t, func(rec map[string]any) {
+		rec["holder"] = map[string]any{"pid": deadOwnerPID, "start_time_ms": 0}
+		rec["expires_at_ms"] = time.Now().Add(-time.Hour).UnixMilli()
+		rec["holder_gave_up_ms"] = gaveUp.UnixMilli()
+		rec["holder_gave_up_why"] = "access denied: the record is held open"
+	})
+	got := snap(root, 0, nil)
+	if got.Verdict != VerdictStaleHolder {
+		t.Fatalf("a dead holder is stale: %s (%s)", got.Verdict, got.Note)
+	}
+	for _, want := range []string{"the holder gave up releasing it at " + gaveUp.Format(time.Kitchen), "access denied: the record is held open", "the next `gpu reserve` reclaims it", "`gpu release --epoch 41`"} {
+		if !strings.Contains(got.Note, want) {
+			t.Errorf("the stale-holder line must say %q:\n%s", want, got.Note)
+		}
+	}
+	// Without the marker the line is what it always was.
+	root2, _ := leaseFixture(t, func(rec map[string]any) {
+		rec["holder"] = map[string]any{"pid": deadOwnerPID, "start_time_ms": 0}
+		rec["expires_at_ms"] = time.Now().Add(-time.Hour).UnixMilli()
+	})
+	if n := snap(root2, 0, nil).Note; strings.Contains(n, "gave up") {
+		t.Errorf("no marker, no word of one:\n%s", n)
+	}
+}
+
+// A time.Time is a struct, and omitempty never omits a struct: the field must be omitzero, or every
+// holder of the status JSON carries a year-one time and the published verdict schema changes.
+func TestAHolderThatNeverGaveUpHasNoGaveUpKeyInItsJSON(t *testing.T) {
+	root, _ := leaseFixture(t, nil)
+	got := snap(root, 0, nil)
+	if got.Holder == nil {
+		t.Fatalf("the fixture lease must have a holder: %s (%s)", got.Verdict, got.Note)
+	}
+	b, err := json.Marshal(got.Holder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"holder_gave_up_at", "holder_gave_up_why"} {
+		if strings.Contains(string(b), key) {
+			t.Errorf("a holder that never gave up must not carry %q:\n%s", key, b)
+		}
+	}
+	gaveUp := time.Now().Add(-time.Minute).Truncate(time.Second)
+	h := *got.Holder
+	h.GaveUpAt, h.GaveUpWhy = gaveUp, "why"
+	b, err = json.Marshal(&h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"holder_gave_up_at"`) || !strings.Contains(string(b), `"holder_gave_up_why":"why"`) {
+		t.Errorf("a holder that gave up must say so in its JSON:\n%s", b)
+	}
+}
