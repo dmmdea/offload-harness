@@ -18,9 +18,10 @@ func RenderHelpers() []string {
 }
 
 // RunsOwnGraph says the call POSTS THE CALLER'S OWN WORKFLOW (`--graph <file>`): what such a call loads is
-// whatever the graph names, which the lease cannot read, so it is sized by the media class default and not
-// as the helper's default family (Estimate). The hint `gpu reserve` prints when it declares that default
-// reads this same rule, so the two cannot disagree about which calls are graph calls.
+// whatever the graph names, so it is sized by the weight files the graph's own loaders name when the lease can
+// read the graph and size every one (ForGraphFile), else by the media class default, and never as the helper's
+// default family (Estimate). The hint `gpu reserve` prints when it declares that default reads this same rule,
+// so the two cannot disagree about which calls are graph calls.
 func (c RenderCall) RunsOwnGraph() bool {
 	return strings.TrimSpace(c.Flags["graph"]) != ""
 }
