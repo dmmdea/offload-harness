@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 )
@@ -24,7 +25,8 @@ import (
 //	seat down: the seat's engine did no work for 0s while this request waited in admission (allowed 0s; ...)
 //
 // The setup is not the seat's silence and the compressed floor was never meant to
-// bound it. The pipeline these tests run through gives admission its own budget.
+// bound it: the admission phase has a floor of its own (livenessAdmissionFloor),
+// which a test that compresses livenessFloor leaves alone.
 func TestSeatDownPipelineAdmissionOutlastsTheCompressedFloor(t *testing.T) {
 	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
 	p := seatDownPipeline(t, "http://127.0.0.1:1", 0)
@@ -36,5 +38,25 @@ func TestSeatDownPipelineAdmissionOutlastsTheCompressedFloor(t *testing.T) {
 	}
 	if got := pol.Allowance(agent.PhaseAdmission, 0); got < 10*time.Second {
 		t.Fatalf("the admission phase may be silent for %s with the floor at %s, want at least 10 s: a run's setup before its first request must not race the compressed floor", got, pol.Floor)
+	}
+}
+
+// The same two numbers in production are one: the admission floor is the 60 s the
+// liveness floor is, and an admission budget longer than it still wins, so the
+// phase is allowed exactly what it was.
+func TestLivenessPolicyAdmissionAllowanceIsUnchangedInProduction(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		budget time.Duration
+		want   time.Duration
+	}{
+		{"the admission gate off (budget 0)", 0, 60 * time.Second},
+		{"a budget under the floor", 5 * time.Second, 60 * time.Second},
+		{"the default 300 s budget", 300 * time.Second, 300 * time.Second},
+	} {
+		pol := LivenessPolicyFor(config.Config{}, seatrate.Seat{}, tc.budget)
+		if got := pol.Allowance(agent.PhaseAdmission, 0); got != tc.want {
+			t.Errorf("%s: admission allowance = %s, want %s", tc.name, got, tc.want)
+		}
 	}
 }
