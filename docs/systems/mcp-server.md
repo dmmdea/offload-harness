@@ -35,7 +35,7 @@ The server runs over **stdio** and registers its tools at startup. A calling age
 calls them with JSON arguments, and receives JSON results — including Defers, which are successful
 results, not errors.
 
-**Twenty-nine tools** are registered on every box, in families. `.printing-press.json` lists all 31
+**Thirty tools** are registered on every box, in families. `.printing-press.json` lists all 33
 the code can register, and a drift test holds the two together. The advertised set is per-box:
 `agent_delegate` and `offload_research` are gated on `agent_delegation_enabled`, and a box listing
 an accelerator registers its own — 11 for the Hailo-8L, 4 for the Coral, 3 for the RKNPU (see [accelerators.md](accelerators.md)). Read `tools/list` rather
@@ -50,6 +50,7 @@ than any number written down:
 | Media editing | `offload_edit_image`, `offload_inpaint_image`, `offload_edit_image_generative`, `offload_upscale_image`, `offload_media` |
 | Composition (CPU-class, no GPU lock; ADR 0059) | `offload_compose_video` |
 | Graph execution | `offload_run_graph` |
+| Workflow templates | `offload_run_template` |
 | Agent | `agent_run`, `offload_ask`, `offload_review_diff`, `agent_rig` |
 | Delegation (opt-in: `agent_delegation_enabled`) | `agent_delegate`, `offload_research` |
 | Browser (opt-in lane; registered only when configured; ADR 0060) | `offload_browse` |
@@ -58,7 +59,7 @@ than any number written down:
 
 **A place in line (`waiter_token`, GPU routing P13b).** Every media tool (`offload_generate_image`,
 `offload_edit_image_generative`, `offload_inpaint_image`, `offload_upscale_image`, `offload_generate_video`,
-`offload_animate_character`, `offload_generate_audio`, `offload_run_graph`) takes an optional `waiter_token`. On a
+`offload_animate_character`, `offload_generate_audio`, `offload_run_graph`, and `offload_run_template` for its `run` action) takes an optional `waiter_token`. On a
 host that leases cards, a call that has no card after its `gpu_wait_ms` does not fail with `gpu busy`: it answers
 `deferred`, `err_class: gpu_queued`, `defer_class: capacity`, with `waiter_token`, `queue_position`, `eta_s` (the
 declared window left on the lease in the way: a ceiling), `devices` and `held_by` in its data. Re-send the same
@@ -1212,7 +1213,7 @@ errors it will try to work around.
 ## Invariants and assumptions
 
 1. **The manifest and the registered tools must agree.** A drift test enforces it, so adding a tool
-   without updating `.printing-press.json` fails the build. Currently 32 declared (measured 2026-09-28), one per `Name:` literal in `mcpserver.go` (some register only behind their config gate — `offload_browse` only on a box that configured the browse lane);
+   without updating `.printing-press.json` fails the build. Currently 33 declared, one per `Name:` literal in `mcpserver.go` (some register only behind their config gate — `offload_browse` only on a box that configured the browse lane);
    the manifest's `version` tracks `VERSION` release by release. This test arrived via an outside
    contribution after the manifest had silently drifted to claiming four tools.
 2. A Defer is a successful result. Do not map it to an MCP error.
