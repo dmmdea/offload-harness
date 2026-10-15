@@ -55,8 +55,11 @@
     hash of the seat alias, its endpoint, that pin and the env-rule table the arm ran under, so a model, quant or window
     swapped behind the alias moves the stamps and the gate's era marker, and the arms differ by the table. The pin must be the
     same on every served run of both arms: one that moves mid-audit, a served run with none, and an audit in which nothing
-    was served are `seat_pin` refusals (exit 2, nothing recorded), the first two at the run that shows it. A defer carries no
-    pin by design and is not held to one. `--engine-build` stays required: it names the engine in the operator's words.
+    was served are `seat_pin` refusals (exit 2, nothing recorded), the first two at the run that shows it. A run that is
+    scored as a verdict about the task counts as served, a spent budget and an abstention included, because the harness
+    stamps the pin before every terminal branch; a run that ended before the seat served it (a runner error, an
+    infrastructure defer, a ceiling or a canceled parent) carries none by design and is not held to one. `--engine-build`
+    stays required: it names the engine in the operator's words.
   - `--seat-tag` is required and must equal the recipe's: a recipe is evidence about one class of seat. The tag is a slug the
     operator chooses; the harness checks its shape and the match, not a vocabulary.
 - **Tests.** Red first, each committed failing before the code that fixed it: the unknown top-level key, `rules_code` inside

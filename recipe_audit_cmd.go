@@ -313,10 +313,10 @@ func recipeAuditMain(args []string, stdout, stderr io.Writer) error {
 					return err
 				}
 				wire, rerr := runner.Run(ctx, arm, task.contract)
-				if err := recipeNotePin(&pin, arm, task.id, wire, rerr); err != nil {
+				outcome, score := recipeJudge(task.contract, wire, rerr)
+				if err := recipeNotePin(&pin, arm, task.id, wire, outcome); err != nil {
 					return err
 				}
-				outcome, score := recipeJudge(task.contract, wire, rerr)
 				recs[arm][task.id] = append(recs[arm][task.id], recipeAttemptRec{
 					outcome: outcome, score: score, steps: wire.Steps, metrics: recipeMetrics(baseline.Efficiency, wire),
 				})
@@ -545,12 +545,15 @@ func recipeMetrics(effs []eval.EfficiencyMetric, wire core.AgentWireResult) map[
 // a run (weights, quant, engine build, window, template: agent.ProbeSeatPin) and puts the hash on the
 // run's wire result; the audit's era is that pin, not the alias it asked for. The first pin seen is the
 // seat's; a later run with another pin means the seat changed under the audit (a model swapped behind
-// the alias), so the two arms were not measured on one seat, and a run that was served and carries no
-// pin cannot be shown to be on it (the harness's own rule is that an unpinned row does not enter a
-// paired experiment). Either ends the audit with exit 2 and records nothing. A defer carries no pin by
-// design when the seat never served (the probe would cold-start it), so it is not held to one; a runner
-// error returns no result at all.
-func recipeNotePin(pin *string, arm, task string, wire core.AgentWireResult, runErr error) error {
+// the alias), so the two arms were not measured on one seat. A run that counts as a verdict about the
+// task (a pass or a task_fail) was served, and the harness stamps the pin after the loop and before
+// every terminal branch, so a spent budget and an abstention carry one as a finished run does; one
+// that carries none cannot be shown to be on the seat (the harness's own rule is that an unpinned row
+// does not enter a paired experiment). Either ends the audit with exit 2 and records nothing. A run
+// that ended before the seat served it (a runner error, an infrastructure defer, a ceiling or a
+// canceled parent) carries no pin by design, since the probe would cold-start a seat that is not
+// resident; it is no verdict about the task either, so it is not held to one.
+func recipeNotePin(pin *string, arm, task string, wire core.AgentWireResult, outcome eval.AttemptOutcome) error {
 	switch {
 	case wire.SeatConfigSHA256 != "":
 		if *pin == "" {
@@ -560,7 +563,7 @@ func recipeNotePin(pin *string, arm, task string, wire core.AgentWireResult, run
 		if *pin != wire.SeatConfigSHA256 {
 			return recipeRefuse(refusalSeatPin, "the seat changed under the audit: the %s arm's run of task %q reports the seat pin %s where the earlier runs reported %s, so the arms were not measured on one seat and nothing is recorded", arm, task, wire.SeatConfigSHA256, *pin)
 		}
-	case runErr == nil && !wire.Deferred:
+	case outcome == eval.OutcomePass || outcome == eval.OutcomeTaskFail:
 		return recipeRefuse(refusalSeatPin, "the %s arm's run of task %q was served and carries no seat pin (the harness could not read the seat's config after it): without one it cannot be shown to be on the same seat as the other runs, and nothing is recorded", arm, task)
 	}
 	return nil
