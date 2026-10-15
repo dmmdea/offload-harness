@@ -11,6 +11,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
 
 // offload_run_template: one tool with an action enum (list, get, readiness, run). list, get and readiness read the node's own
@@ -399,5 +400,22 @@ func TestRunTemplateThroughTheProtocolAcceptsItsOwnSchema(t *testing.T) {
 	var ov map[string]any
 	if err := json.Unmarshal([]byte(h.overridesAtRun), &ov); err != nil || ov["1.on"] != true || ov["3.steps"] != float64(30) {
 		t.Errorf("overrides = %q (%v)", h.overridesAtRun, err)
+	}
+}
+
+// A template run is dispatched on route local, whatever fleet the box is configured with: route auto with a fleet and a busy lane plans
+// from graph_path, which a template run does not have. The mutant that sent "auto" survived every other test because the harness server
+// has no fleet; this one does, and a reachable-looking roster that is never contacted is the proof.
+func TestRunTemplateDispatchesOnRouteLocalEvenWithAFleetConfigured(t *testing.T) {
+	cfg := config.Default()
+	cfg.DelegateRemotes = []string{"http://192.0.2.10:18811"} // documentation address: nothing answers
+	h := newTplHarness(t, map[string]string{"resolve": resolveOK})
+	h.s.p = pipeline.New(cfg, nil, nil, nil)
+	out := h.call(t, `{"action":"run","template":"tt_open"}`)
+	if len(h.requests) != 1 {
+		t.Fatalf("the run reached the run seam %d times, want 1 (a route other than local goes to the fleet planner, which has no graph_path to plan from): %s", len(h.requests), out)
+	}
+	if strings.Contains(out, "graph_path or graph_json required") || strings.Contains(out, "192.0.2.10") {
+		t.Errorf("the fleet was consulted: %s", out)
 	}
 }
