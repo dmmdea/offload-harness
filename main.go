@@ -364,7 +364,7 @@ Usage:
   local-offload models                   show configured offload model
   local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
   local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench> --corpus C | contextbench   compaction ladder eval: trace→corpus harvest (redacting), ratio/retention report, tokens ratchet, gated A/B, KV-reuse bench, ContextBench tasks
-  local-offload gate <freeze|check|verdict|schema> [flags]   the one measurement gate: freeze a pre-registration, check it, judge a candidate against the incumbent (ADOPT/BLOCK/INCONCLUSIVE, paired interval over tasks); exit 0 a verdict was produced, 1 non-ADOPT under --require-adopt, 2 a refusal (docs/systems/measurement-gate.md)
+  local-offload gate <freeze|check|verdict|selftest|schema> [flags]   the one measurement gate: freeze a pre-registration, check it, judge a candidate against the incumbent (ADOPT/BLOCK/INCONCLUSIVE, paired interval over tasks), write a model judge's self-test receipt (selftest); exit 0 a verdict was produced, 1 non-ADOPT under --require-adopt or a scorer that failed its self-test, 2 a refusal (docs/systems/measurement-gate.md)
   local-offload confhead-eval            out-of-fold adoption gate (AURC/AUGRC + paired-bootstrap CI)
   local-offload confhead-calibrate       per-task conformal p(correct) escalation thresholds (ADOPT tasks)
   local-offload stats                    observational per-task ledger telemetry

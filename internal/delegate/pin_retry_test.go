@@ -218,8 +218,10 @@ func TestAReasonedRemotePinNamesThePinAndNotTheLeaseWhenTheLocalSeatIsReserved(t
 
 // TestARemoteHintAndTheBareRemoteRouteStillRetryOnTheLocalSeat: the controls the pin's guard must not break. A reasonless
 // remote hint is placed as auto and a bare remote route (a caller with no reason channel: fleet-smoke, the review lane,
-// offload_ask, agent_run) is a pin without a reason; both keep the retry they always had, remote -> local, which the
-// system doc states and TestRunRetryRemoteFailureFallsBackToLocal pins for the bare route.
+// offload_ask with a named route, agent_run) is a pin without a reason; both keep the retry they always had,
+// remote -> local, which the system doc states and TestRunRetryRemoteFailureFallsBackToLocal pins for the bare route.
+// (offload_ask's own cross-seat retry is the exception: it asks the engine to stay off the seat without a reason,
+// RunOptions.RemoteRetryOnly, and has its own test in the mcpserver package.)
 func TestARemoteHintAndTheBareRemoteRouteStillRetryOnTheLocalSeat(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

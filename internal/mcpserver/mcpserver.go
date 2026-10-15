@@ -3766,9 +3766,13 @@ func askRetryFloorSec(cfg config.Config) int {
 }
 
 // askRetry gives a failed LOCAL first attempt the second chance agent_delegate gives a failed
-// verification: the same contract on the fleet, route "remote", which never places on this box's
-// seat, so the retry runs on a different seat by construction. It mirrors the delegator's retry
-// (mergeAttempts, runOne): the retry lives inside the contract's own wall, so it is handed what
+// verification: the same contract on the fleet, route "remote", whose first placement never lands
+// on this box's seat. The delegator's own retry inside that call is kept off the seat too
+// (RunOptions.RemoteRetryOnly, through contractOnFleetAt): a bare remote route would fall back to
+// this box when the fleet node's answer also fails, and the first attempt already failed here, so
+// a caller who did not name route local would get a third run on this box's GPU under a note that
+// still says "retry on <node>". The fleet's own skipped retry rides in that note instead. It
+// mirrors the delegator's retry (mergeAttempts, runOne): the retry lives inside the contract's own wall, so it is handed what
 // the first attempt left (timeout_sec, never auto) and is skipped under the floor; a clean retry
 // is published with retried_on and a note naming the first attempt's verdict; a retry that also
 // fails leaves the FIRST answer, unverified, with the retry's fate in the note; a fleet that took
@@ -3791,7 +3795,7 @@ func (s *Server) askRetry(ctx context.Context, contract core.AgentContract, firs
 	retry := contract
 	retry.TimeoutSec = remaining
 	retry.TimeoutAuto = false // a retry's wall is what is left: explicit, never auto
-	w, extra, why, ok := s.contractOnFleet(ctx, retry, "remote", "")
+	w, extra, why, ok := s.contractOnFleetAt(ctx, retry, "remote", "", nil, true)
 	node, _ := extra["node"].(string)
 	if !ok && node == "" {
 		return askRetryOutcome{note: "retry skipped: " + why}
@@ -3986,10 +3990,11 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	}
 	// THE FENCE CHECK (register D-110), before any local loop is built. Under a
 	// lease this process does not hold and that refuses new runs — an exclusive
-	// text hold, a draining cordon, a media render — the local loop below does
-	// not fail fast: it waits the whole agent_lease_wait_sec at the affinity
-	// cordon and is then filed as a capacity defer (agenttask.go, "gpu busy: ").
-	// For the lease's ENTIRE length, the one lane a lead reaches for at the
+	// text hold, a draining cordon, a media render — the local loop below cannot
+	// answer: its own in-run fence check (agenttask.go, register S-26) defers
+	// `capacity` at once ("gpu busy: ... until it is released"); before that check
+	// landed it first waited the whole agent_lease_wait_sec at the cordon. Either
+	// way, for the lease's ENTIRE length the one lane a lead reaches for at the
 	// moment of deciding answered nothing, however idle the fleet was. The
 	// verdict is on disk before the dial, so the review is offered to the fleet
 	// first — the same sentence register D-94 wrote about the retry path.
@@ -4008,20 +4013,21 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 		}
 		// A fleet seat that WROTE the review and was stopped by the clock on its
 		// structuring (F20: a cut final, a re-pack with no wall left) deferred it, and the
-		// fallthrough below would wait out this very fence to answer nothing. Its lines are
-		// worth more than that wait, so they get the same read a local review's would:
+		// local leg below can only defer `capacity` on this very fence. Its lines are worth
+		// more than that defer, so they get the same read a local review's would:
 		// published, with the fleet's provenance, only when they survive the filters.
-		// Anything else — and a salvage that comes to no review — falls through exactly
-		// as before.
+		// Anything else — and a salvage that comes to no review — falls through to the
+		// local leg as before.
 		if wire.Deferred {
 			if out, delivered := reviewPayload(wire, diff, in.MaxFindings, extra); delivered {
 				return seal(out, reviewlane.Run{Delivered: true, Wire: &wire, Extra: extra})
 			}
 		}
-		// Nothing out there took it. Today's path stands — the wait, then the
-		// capacity defer — and the note says the fleet WAS asked, so a caller
-		// reading "gpu busy" does not have to wonder whether the fallthrough
-		// exists.
+		// Nothing out there took it. The local leg runs as it would have: while the
+		// fence holds it defers `capacity` at once, naming the holder (only a fence
+		// taken after its check meets the cordon's wait), and the note says the fleet
+		// WAS asked, so a caller reading "gpu busy" does not have to wonder whether
+		// the fleet was tried.
 		fleetNote = map[string]any{"fleet": note}
 	}
 	run := s.localAgent // test seam, shared with agent_delegate and offload_ask
@@ -4100,7 +4106,7 @@ func (s *Server) askOccupant(ctx context.Context) string {
 func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContract, route, fence string) (core.AgentWireResult, map[string]any, string, bool) {
 	// remotes nil: RunWith reads the configured delegate_remotes, which is the
 	// fleet this box is a delegator for. A review names no node of its own.
-	return s.contractOnFleetAt(ctx, contract, route, fence, nil)
+	return s.contractOnFleetAt(ctx, contract, route, fence, nil, false)
 }
 
 // contractOnFleetAt is contractOnFleet narrowed to remotes: the nodes the engine may
@@ -4116,7 +4122,13 @@ func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContrac
 // seat, a different model: the door then withholds that clean answer for a seat
 // mismatch and blames the node, after this box's GPU did the whole goal. Only the
 // retry changes; the first placement of route=remote already never falls back to local.
-func (s *Server) contractOnFleetAt(ctx context.Context, contract core.AgentContract, route, fence string, remotes []string) (core.AgentWireResult, map[string]any, string, bool) {
+//
+// remoteRetryOnly asks for the same stop without the pin: the engine's retry of this call goes to
+// another fleet node or is not run, and never to this box's seat (RunOptions.RemoteRetryOnly). It
+// records no pin_reason, so the call is still counted as unreasoned in offload_status. Only a door
+// whose caller already moved the work off this box says it (askRetry); every other door keeps the
+// bare route's remote -> local retry.
+func (s *Server) contractOnFleetAt(ctx context.Context, contract core.AgentContract, route, fence string, remotes []string, remoteRetryOnly bool) (core.AgentWireResult, map[string]any, string, bool) {
 	dispatch := s.reviewFleet // test seam
 	if dispatch == nil {
 		dispatch = delegate.RunWith
@@ -4125,7 +4137,7 @@ func (s *Server) contractOnFleetAt(ctx context.Context, contract core.AgentContr
 	if local == nil {
 		local = s.p.RunAgentContract
 	}
-	opts := &delegate.RunOptions{Quarantine: s.quarantine, Tenant: s.tenant, PinTally: s.pins, RosterOnly: len(remotes) > 0}
+	opts := &delegate.RunOptions{Quarantine: s.quarantine, Tenant: s.tenant, PinTally: s.pins, RosterOnly: len(remotes) > 0, RemoteRetryOnly: remoteRetryOnly}
 	if len(remotes) > 0 && route == "remote" {
 		opts.PinReason = delegate.PinOperator
 	}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -114,5 +115,67 @@ func TestWriteClassDeferralKeepsItsTraceAndItsPagerObject(t *testing.T) {
 	}
 	if wire.Pager.Basis != "insufficient_data" || wire.Pager.Evictions != 0 || wire.Pager.CompactionPasses != 0 {
 		t.Errorf("a run that evicted nothing and never compacted must carry real zeros, got %+v", wire.Pager)
+	}
+}
+
+// withServerTimings adds llama.cpp's own `timings` block to a scripted chat completion, so the loop
+// counts the step as one the server measured (the prefill accounting reads nothing else).
+func withServerTimings(body string) string {
+	return strings.TrimSuffix(body, "}") + `,"timings":{"prompt_n":120,"prompt_ms":60,"cache_n":30,"predicted_n":5,"predicted_ms":10}}`
+}
+
+// TestWriteClassDeferralKeepsTheRunsStopNoteResponseShapeAndPrefill pins that a run the write door
+// refuses still carries what the loop measured, on the wire result and on the ledger row. A run
+// whose write set breaches the cap is usually a long one, and the long runs are the ones whose
+// prefill accounting, stop evidence and response shape the measurement exists for: dropping them
+// on the refusal would leave the corpus with only the cheap runs.
+//
+// The scripted seat makes one real write_file call while eight other files appear in the write
+// root, then answers every later turn (the forced final step and its single re-ask) with a tool
+// call, so the loop ends on its step budget with a stop note. Every turn carries server timings.
+func TestWriteClassDeferralKeepsTheRunsStopNoteResponseShapeAndPrefill(t *testing.T) {
+	c := writeContract(".")
+	c.MaxSteps = 2
+	req := agentTestRequest(t, c)
+	root, _ := req.Params["context_dir"].(string)
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop: func(n int64) string {
+			if n != 1 {
+				return withServerTimings(toolChat(n))
+			}
+			for i := 0; i < core.AgentWriteMaxFiles; i++ {
+				if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("unasked%d.txt", i)), []byte("x\n"), 0o644); err != nil {
+					t.Errorf("planting an unasked file: %v", err)
+				}
+			}
+			return withServerTimings(writeCallChat("w1", "asked.txt", "x\n"))
+		},
+		repack: func(int64) string { return `{"answer":"x"}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	res := writeDoorPipeline(t, srv.URL, true).Run(context.Background(), req)
+	wire := decodeWire(t, res)
+	if !wire.Deferred || wire.DeferClass != core.DeferClassWrite {
+		t.Fatalf("deferred=%v class=%q reason=%q, want a write-class deferral for %d files over the %d-file cap",
+			wire.Deferred, wire.DeferClass, wire.Reason, core.AgentWriteMaxFiles+1, core.AgentWriteMaxFiles)
+	}
+	if !strings.Contains(wire.StopNote, "forced final") {
+		t.Errorf("stop_note = %q, want the loop's forced-final evidence on a write-class deferral", wire.StopNote)
+	}
+	if !strings.Contains(wire.ResponseShape, "completions=") {
+		t.Errorf("response_shape = %q, want the seat's observed answer shape on a write-class deferral", wire.ResponseShape)
+	}
+	if wire.PrefillSteps == 0 || wire.PrefillTokens == 0 || wire.CacheTokens == 0 || wire.PrefillMS == 0 {
+		t.Errorf("wire prefill = steps %d, prefill tokens %d, cache tokens %d, prefill ms %v; want the measured accounting of a run whose every step reported timings",
+			wire.PrefillSteps, wire.PrefillTokens, wire.CacheTokens, wire.PrefillMS)
+	}
+	m := res.Meta
+	if m.PrefillSteps == 0 || m.PrefillSteps != wire.PrefillSteps || m.PrefillTokens != wire.PrefillTokens || m.CacheTokens != wire.CacheTokens || m.PrefillMS != wire.PrefillMS {
+		t.Errorf("ledger meta prefill = steps %d, prefill tokens %d, cache tokens %d, prefill ms %v; want the same non-zero accounting as the wire (steps %d, tokens %d, cache %d, ms %v)",
+			m.PrefillSteps, m.PrefillTokens, m.CacheTokens, m.PrefillMS,
+			wire.PrefillSteps, wire.PrefillTokens, wire.CacheTokens, wire.PrefillMS)
 	}
 }

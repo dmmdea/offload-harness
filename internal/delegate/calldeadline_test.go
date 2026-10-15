@@ -33,6 +33,29 @@ import (
 // deadlineIn is an absolute deadline d from now.
 func deadlineIn(d time.Duration) *RunOptions { return &RunOptions{Deadline: time.Now().Add(d)} }
 
+// startWindow is the call window of the cases whose subject is what a call publishes at its
+// deadline (the rows, the ids, the count of what was left), not the deadline's own timing. They
+// need the subtasks they expect to be finished by then to BE finished, and a subtask is not
+// finished when its seat returns: it counts as answered only after its corpus line and its ledger
+// row are written (the first row of a process hashes the whole test binary first), and a chunk of
+// sixteen of them contends for the cores a starved runner has. A call that looks at its deadline
+// before a subtask has answered counts it, correctly, as unfinished, so a window that is short
+// next to that start turns a slow runner into a different outcome from the one the case pins.
+//
+// The old windows were 300 and 400 ms. Under CPU starvation (CPU spinners and GOMAXPROCS=2 on an
+// 8-core idle machine, 24 copies of the test at once) they failed 146 to 183 runs of 192, and
+// timing the start there gave, over 192 runs each: the last of 15 pages answered at a median of
+// 0.3 s and a worst of 1.6 s, and the one page of a two-subtask call at a median of 0.3 s and a
+// worst of 1.4 s. 4 s is two and a half times the worst start seen. Nothing asserted depends on how
+// long the window is: the slow subtask in each case ends only at the deadline, so a case takes
+// about as long as its window and no longer.
+const startWindow = 4 * time.Second
+
+// hangGuard bounds a call or a wait that must end by itself: a regression that stops the call from
+// returning fails with a message after this long instead of holding the suite. It is not a timing
+// assertion, so it is far wider than any window a case gives its call.
+const hangGuard = 30 * time.Second
+
 // runWithin runs RunWith in a goroutine and FAILS the test when it has not
 // returned inside limit: the shape of the bug is "returns only when every
 // subtask ends", which must fail fast rather than hang the suite. unblock (may
@@ -636,6 +659,11 @@ func TestCutByDeadlineNeverRewritesAFinishedAnswer(t *testing.T) {
 // must not start after it, the pages it held are published as unfinished (not
 // skipped, not an error — the finished digests keep their order), and the count
 // in every reason spans both chunks.
+//
+// The count is a snapshot of what had no result when the call first looked at its deadline, so the
+// 15 pages of chunk one that are meant to finish must have answered by then: the call window is
+// startWindow, sized for a starved start, not the 400 ms this case used to give it (183 of 192
+// runs failed under starvation, with the count anywhere from 3 to 17).
 func TestRunBatchedDefersLaterChunksAtTheDeadline(t *testing.T) {
 	cfg := testCfg(t)
 	var ran atomic.Int64
@@ -661,14 +689,14 @@ func TestRunBatchedDefersLaterChunksAtTheDeadline(t *testing.T) {
 	}
 	ch := make(chan outcome, 1)
 	go func() {
-		r, s, e := RunBatched(t.Context(), cfg, local, contracts, "local", nil, deadlineIn(400*time.Millisecond))
+		r, s, e := RunBatched(t.Context(), cfg, local, contracts, "local", nil, deadlineIn(startWindow))
 		ch <- outcome{r, s, e}
 	}()
 	var o outcome
 	select {
 	case o = <-ch:
-	case <-time.After(5 * time.Second):
-		t.Fatal("RunBatched had not returned after 5s: it does not honour the call deadline")
+	case <-time.After(hangGuard):
+		t.Fatalf("RunBatched had not returned after %s: it does not honour the call deadline", hangGuard)
 	}
 	if o.err != nil {
 		t.Fatalf("RunBatched: %v", o.err)

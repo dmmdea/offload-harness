@@ -1493,7 +1493,9 @@ the authoritative pin it always had. Everything this document says of `route=loc
   retry goes to another fleet node or is skipped, never to the local seat (`runner.remotePinned`, asked first in `alternativeNode`).
   The `retry_note` names the pin when no other node exists and when the retry ran; a skip for the retry budget floor, an empty final,
   the call deadline or a busy retry seat keeps that skip's own note. The bare remote route of a caller with no
-  reason channel keeps `remote -> local`. Its reason is on every ledger row (`pin_reason`, with `route_asked`) and on every result (`results[].pin_reason`). A call that
+  reason channel keeps `remote -> local`; the one exception is the cross-seat retry of `offload_ask`, which sets
+  `RunOptions.RemoteRetryOnly` so that its retry goes to another fleet node or is skipped, with no `pin_reason` and the call still counted as
+  `unreasoned`. Its reason is on every ledger row (`pin_reason`, with `route_asked`) and on every result (`results[].pin_reason`). A call that
   carries a browse grant (`allow_browse`, ADR 0060) is pinned under the implied reason `locality` when it gives none: the browse tool drives
   this machine's own browser, which a hint must not move.
 - **A reasonless `local`** is applied as `auto` (`resolvePin` rebinds the run's route, and `runner.pin` keeps what the caller asked, so

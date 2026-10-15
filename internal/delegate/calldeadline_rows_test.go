@@ -133,6 +133,15 @@ func TestASettledOutcomeThatIsNotACutIsClosedByARowOfItsOwnToo(t *testing.T) {
 // wire and could not be reconciled with it. The result now carries the id of the attempt
 // that had not returned, the call records its own row under it at return, and the
 // goroutine's late row is the SAME id: the caller can find both.
+//
+// Two things here used to depend on how fast a starved runner was. The call window was 300 ms, and
+// the fast subtask had to have answered inside it for the summary to read one success (47 of 192
+// runs under starvation read two defers); it is startWindow now. And the call's own row was found
+// by the wording "1 unfinished", a count the call freezes when it first looks at its deadline: a
+// fast subtask still writing its rows at that moment is counted as unfinished (the row read "2
+// unfinished" in 99 runs of 192, with the fast subtask's pass row written all the same), and the
+// call published that same count on the result. The row is found by what the caller was told
+// instead: it is the row that says the words of the published reason, whatever count they carry.
 func TestAnAbandonedSubtaskIsPublishedWithAJobIDAndARow(t *testing.T) {
 	cfg := testCfg(t)
 	release := make(chan struct{})
@@ -145,8 +154,8 @@ func TestAnAbandonedSubtaskIsPublishedWithAJobIDAndARow(t *testing.T) {
 		}
 		return localOK(), nil
 	}
-	results, sum, _ := runWithin(t, 4*time.Second, cfg, local,
-		[]core.AgentContract{{Goal: "fast one"}, {Goal: "slow one"}}, "local", nil, deadlineIn(300*time.Millisecond), unblock)
+	results, sum, _ := runWithin(t, hangGuard, cfg, local,
+		[]core.AgentContract{{Goal: "fast one"}, {Goal: "slow one"}}, "local", nil, deadlineIn(startWindow), unblock)
 	if sum != (Summary{Succeeded: 1, Deferred: 1}) {
 		t.Fatalf("summary %+v, want one success and one abandoned subtask", sum)
 	}
@@ -163,7 +172,7 @@ func TestAnAbandonedSubtaskIsPublishedWithAJobIDAndARow(t *testing.T) {
 			if row.JobID != ab.JobID {
 				continue
 			}
-			if row.Deferred && strings.HasPrefix(row.Reason, deadlinePrefix+"1 unfinished") {
+			if row.Deferred && row.Reason == ab.Result.Reason {
 				deferred++
 			}
 			if row.AcceptanceResult == "pass" {
@@ -176,7 +185,7 @@ func TestAnAbandonedSubtaskIsPublishedWithAJobIDAndARow(t *testing.T) {
 		t.Fatalf("at return: %d call-deadline row(s) and %d pass row(s) under the abandoned job id, want the call's own row and nothing else yet", d, p)
 	}
 	unblock()
-	for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+	for end := time.Now().Add(hangGuard); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
 		if _, p := rowsFor(); p >= 1 {
 			break
 		}
