@@ -282,9 +282,9 @@ func TestRecipeAuditRefusesASeatTagThatIsNotTheRecipes(t *testing.T) {
 // Whatever is wrong with the inputs is found before the seat is asked.
 func TestRecipeAuditRefusesBadInputBeforeAnySeatCall(t *testing.T) {
 	cases := []struct {
-		name  string
-		break_ func(t *testing.T, e *raEnv) []string
-		kind  string
+		name   string
+		mutate func(t *testing.T, e *raEnv) []string
+		kind   string
 	}{
 		{"no recipe flag", func(t *testing.T, e *raEnv) []string {
 			return []string{"--store", e.store, "--seat", "seat-a", "--seat-tag", "seat-class-a", "--contracts", e.tasks, "--baseline", e.baseline, "--engine-build", "e"}
@@ -340,7 +340,7 @@ func TestRecipeAuditRefusesBadInputBeforeAnySeatCall(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			e := newRAEnv(t)
 			e.use(t, nil)
-			_, _, err := e.run(c.break_(t, e))
+			_, _, err := e.run(c.mutate(t, e))
 			e.wantRefusal(t, err, c.kind)
 		})
 	}
