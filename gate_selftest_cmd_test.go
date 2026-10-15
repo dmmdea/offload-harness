@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -442,5 +443,21 @@ func TestGateSelftestReceiptRoundTripsThroughVerdict(t *testing.T) {
 	other := parseReceipt(t, out)
 	if _, errs, code := verdictWith(&other); code != 2 || !strings.Contains(errs, "is not the judge identity") {
 		t.Fatalf("a receipt for another scorer must be refused: %d %q", code, errs)
+	}
+}
+
+// A receipt that could not be written is a gate failure like any other: exit 2 with a "gate: " line, even
+// when the self-test itself failed, so that exit 1 stays the finding and a receipt nobody got is never one.
+func TestGateSelftestWriteErrorExitsWithTheGateCode(t *testing.T) {
+	useScorers(t, map[string]compeval.Scorer{"ranker": rankerScorer, "inverted": invertedScorer})
+	pairs := gateWrite(t, t.TempDir(), "pairs.json", selftestPairs)
+	for _, scorer := range []string{"ranker", "inverted"} {
+		err := gateMain([]string{"selftest", "--pairs", pairs, "--scorer", scorer}, brokenWriter{}, io.Discard)
+		if err == nil {
+			t.Fatalf("%s: a failed write must be an error", scorer)
+		}
+		if code, line := exitStatus(err); code != 2 || !strings.HasPrefix(line, "gate: ") {
+			t.Errorf("%s: want exit 2 and a \"gate: \" line, got %d %q", scorer, code, line)
+		}
 	}
 }
