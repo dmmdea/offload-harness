@@ -70,7 +70,7 @@ func (s *spentBoundSeat) probe(context.Context) (bool, string, error) {
 func (s *spentBoundSeat) requireStraddled(t *testing.T, ctx context.Context) {
 	t.Helper()
 	if !s.slowed.Load() {
-		t.Fatal("the test never made a cold-load seat read slow; it proves nothing")
+		t.Fatalf("the test never made a cold-load seat read slow; it proves nothing (phase %s, cause %v)", s.m.CurrentPhase(), context.Cause(ctx))
 	}
 	if !s.spent.Load() && ctx.Err() == nil {
 		t.Fatal("the hold's bound never ran out during the seat read; it proves nothing")
@@ -342,6 +342,43 @@ func TestSpentHoldBoundTickDecidesLikeTheStallTimer(t *testing.T) {
 			timer.onStall()
 			if via, viaCause := outcomeOf(timer); via != got {
 				t.Fatalf("the timer decided %+v (cause %q) where the tick decided %+v for the same seat state", via, viaCause, got)
+			}
+		})
+	}
+}
+
+// The stall timer's callback can be on its way, waiting for the monitor's lock,
+// when the probe tick takes the request back to the loading part of the hold
+// (re-arming the timer for the longer ceiling). It then finds the part with time
+// left. It is not due: acting on it would stall a request the tick has just held
+// with most of the cold-load ceiling unspent.
+func TestStallTimerCallbackFindingTimeLeftInTheHoldIsNotDue(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		postReady bool
+		want      spentOutcome
+	}{
+		{"loading part with ceiling left", false, spentOutcome{false, PhaseColdLoad, false}},
+		{"post-ready part with bound left", true, spentOutcome{false, PhaseColdLoad, true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := &scriptedEngine{}
+			eng.advance.Store(true)
+			m := newSpentHold(t, tc.postReady, true, eng, func(context.Context) (bool, string, error) { return false, "ready", nil })
+			m.mu.Lock()
+			now := time.Now()
+			if tc.postReady {
+				m.readyAt = now.Add(-10 * time.Second) // the bound is 2 min
+			} else {
+				m.holdStart = now.Add(-10 * time.Minute) // the ceiling is 1 h
+			}
+			m.mu.Unlock()
+			m.onStall()
+			if got, cause := outcomeOf(m); got != tc.want {
+				t.Fatalf("a timer callback that found time left in the hold decided %+v, want %+v (cause %q)", got, tc.want, cause)
+			}
+			if n := eng.reads.Load(); n != 0 {
+				t.Fatalf("the engine was read %d times for a callback that was not due", n)
 			}
 		})
 	}
