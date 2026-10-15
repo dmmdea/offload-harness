@@ -117,6 +117,9 @@ in the nine steps above is unchanged:
   node class, a ComfyUI older than the template, an override that names a node or input the graph lacks, or one that would retarget a
   model or input file, which the gate never looked at) defers
   `TEMPLATE_CONVERT_REFUSED`, its `ref` the converter's own code, and the ComfyUI that was started is torn down as for any defer.
+  The converted graph is then compared with the manifest: a model file it loads that the manifest does not name (the catalog and the converter
+  are two readers of the template, and the licence gate, the FLUX bar and trust on first use read only the manifest) defers
+  `TEMPLATE_MODEL_UNLISTED`, its `ref` the first such file, before preflight and before anything is posted.
 
 The runtime manifest names each model by the path it was found at and has no `source_url`: step 4 therefore never downloads for a
 template run, and a model that went missing defers `MODEL_DOWNLOAD_FAILED` ("missing on disk and no source_url"). Step 4 looks for
@@ -146,7 +149,7 @@ and are therefore `0` for non-PNG outputs.
 A typed Defer: `{ "deferred": true, "code": …, "ref": …, "detail": … }`. Codes emitted by this path:
 `MODEL_DOWNLOAD_FAILED`, `MODEL_SHA_MISMATCH`, `SATISFIER_UNAVAILABLE`, `COMFY_VERSION_BELOW_MIN`,
 `VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `EXTERNAL_COMFY_NEEDS_PACKS`, `COMFY_START_FAILED`, `NODE_CLASS_MISSING`,
-`PREFLIGHT_MISSING_INPUTS`, `RUN_ERROR`, and, on a template run only, `TEMPLATE_CONVERT_REFUSED` and `MODEL_TOFU_RECORD`. A failure on the Go side of the call (rather than in the
+`PREFLIGHT_MISSING_INPUTS`, `RUN_ERROR`, and, on a template run only, `TEMPLATE_CONVERT_REFUSED`, `TEMPLATE_MODEL_UNLISTED` and `MODEL_TOFU_RECORD`. A failure on the Go side of the call (rather than in the
 runner) defers with a free-form `run-graph failed: …` reason and a lowercase `err_class`, not a typed
 code — the `GPU_BUSY` and `TIMEOUT` tokens in the MCP tool description are advisory text, not codes
 this path emits.

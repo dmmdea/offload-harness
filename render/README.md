@@ -424,7 +424,8 @@ its own typed class. `resolve` is the gate in front of a run: that verdict, then
 it was found at and carries no `source_url`, so a run never downloads. `template-run.mjs` is the run side: it finds a template by
 name in the node's own package, converts it with the converter above and the running ComfyUI's listing, and applies the
 overrides. The run-graph runner takes it as `comfy-run-graph.mjs --template NAME [--overrides FILE] [--seed N]`: the template is
-converted after ComfyUI is up and before preflight (`TEMPLATE_CONVERT_REFUSED` on a refusal). Trust on first use for models with
+converted after ComfyUI is up and before preflight (`TEMPLATE_CONVERT_REFUSED` on a refusal, `TEMPLATE_MODEL_UNLISTED` when the converted graph
+loads a model file the manifest does not name). Trust on first use for models with
 no declared hash is `verifyTofuModels` in `manifest-satisfy.mjs` (a record `<file>.tofu` beside the file). Rules, classes, the
 measured catalog and what is not built:
 [`docs/systems/mcp-server.md`](../docs/systems/mcp-server.md#workflow-templates-offload_run_template).

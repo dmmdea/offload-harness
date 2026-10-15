@@ -11,12 +11,15 @@ import (
 // A TEMPLATE run (`comfy-run-graph.mjs --template NAME --manifest FILE`, offload_run_template) carries no graph file: the runner converts the
 // template once ComfyUI is up. What it loads is the model files of its runtime manifest, the list the readiness check and the licence gate
 // already read: `models/<class>/<name>` per entry, each found on the node before the run starts. An override sets values and never
-// retargets a model (the door refuses one that tries). The manifest's set is the final graph's when the walk that wrote it expanded every
-// subgraph instance: the catalog walk reads fewer levels than the converter expands, so the gate in front of a run (render/template-manifest.mjs
-// verdictFor) refuses a template the walk left an instance unexpanded in (nested past its depth, or a subgraph that contains itself) and
-// resolves no manifest for it. A manifest that reaches this function therefore names every model file the template's active nodes name.
-// That is a property of the producer, not of the file: the manifest carries no completeness mark, so one written by hand that leaves a
-// loader out is sized as written. ForManifestModels sizes that set with the reader ForGraph uses (mediacap.ModelFileSizes under the box's
+// retargets a model (the door refuses one that tries). The manifest is the catalog's static reading of the template and the graph is the
+// converter's, two readers of one file, so the manifest's set is the final graph's only as far as they agree. The gate in front of a run
+// (render/template-manifest.mjs verdictFor) refuses a template the catalog walk left a subgraph instance unexpanded in, and the catalog reads
+// the widget values the converter routes into a loader (both forms of widgets_values, and an active instance's own), but neither makes the
+// list complete by construction. The check that does is the runner's: before it posts a template run, comfy-run-graph.mjs compares the model
+// files of the converted graph with the manifest (render/template-run.mjs unlistedModels) and defers TEMPLATE_MODEL_UNLISTED for any the
+// manifest does not name, whatever the cause. A figure summed here from a short list can therefore be declared for a run that is then
+// deferred, and never for one that loads the file the list lacked. The manifest carries no completeness mark, so one written by hand that
+// leaves a loader out is sized as written. ForManifestModels sizes that set with the reader ForGraph uses (mediacap.ModelFileSizes under the box's
 // model roots) and declares it by the same rule (fitToCard), source SourceGraphLoaders: it is the same kind of figure, the weight files a
 // ComfyUI graph loads, read from the manifest and not from a document.
 //
@@ -24,8 +27,8 @@ import (
 // (a null path included), or ONE file it cannot find or size is not sized at all, and the caller keeps the class default. There is no walk
 // for a weight the list did not name, because the list is the set the gate, the licence check and the satisfier read, and an override cannot
 // add a file to it. There is no Go-side backstop for an incomplete list (the class default kept when the manifest says so): the manifest has
-// no field that could say so, and the refusal above means the one producer of a template run's manifest never writes such a list; a new
-// field would change a file the satisfier reads too, for a state the gate cannot produce.
+// no field that could say so, and the runner's check above stops a run on a list that is short before anything is posted; a new field would
+// change a file the satisfier reads too.
 //
 // LIMIT: the lookup is by name under every class directory of every root (ModelFileSizes: the graph path has no class to go by), so a name
 // held under two classes is sized as the larger. The manifest does name the class, which would be exact; the larger can only raise the figure.

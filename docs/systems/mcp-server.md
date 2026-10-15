@@ -1120,9 +1120,12 @@ A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `c
    lifecycle, satisfier and result envelope. A busy lane answers as a run-graph call on this machine does (a place in this
    machine's line, resumable with `waiter_token`). The lane declares the host RAM the run needs from the model files that manifest
    names (`hostneed.ForManifestFile`, fitted to the card as a graph's files are, on a box that binds no ComfyUI render family too),
-   and keeps the media class default for a manifest it cannot read or a file it cannot size; the lane probe reads the same figure. A manifest
-   this tool resolves is complete by construction, and not by a mark in the file: a template the catalog's walk left a subgraph instance
-   unexpanded in is refused (`subgraph_unexpanded`) before any manifest exists, so the figure is never summed from a short list.
+   and keeps the media class default for a manifest it cannot read or a file it cannot size; the lane probe reads the same figure. The
+   figure is summed from the files the manifest names, and the manifest carries no mark that says it is complete: it is the catalog's reading of
+   the template and the graph is the converter's, so two things keep a short list from becoming a load. The gate refuses a template the
+   catalog's walk left a subgraph instance unexpanded in (`subgraph_unexpanded`) before any manifest exists, and the runner compares the
+   converted graph with the manifest before it posts (step 3), so a file the graph loads that the manifest lacks defers the run. A figure
+   summed from a short list can be declared for a run that is then deferred, and never for one that loads the file the list lacked.
 2. The runner satisfies the manifest. Every model is named by the path it was found at and carries no `source_url`, so a
    model that went missing since the check is a typed defer and never a download. Models trusted on first use are checked
    (below) before ComfyUI is started, on every run.
@@ -1135,7 +1138,13 @@ A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `c
    and the trust-on-first-use check read the models the template names, so an input of a model or input loader node, an input that
    holds a model file name, and a value that is a model file name are all refused. `seed` pins the seed inputs. A refusal of the conversion or of an override is the
    defer `TEMPLATE_CONVERT_REFUSED`, its `ref` the converter's own code (`unknown_node_class`, `comfyui_too_old`,
-   `override_unknown_input`, `override_is_file`, ...), and the ComfyUI that was started goes down with it.
+   `override_unknown_input`, `override_is_file`, ...), and the ComfyUI that was started goes down with it. The converted graph is then
+   compared with the manifest: a model file it loads that the manifest does not name defers `TEMPLATE_MODEL_UNLISTED`, its `ref` the first such
+   file, before preflight and before anything is posted. The catalog and the converter are two readers of the template and can differ (a value an
+   instance carries into an inner loader, a loader whose `widgets_values` is an object, a loader that stores no value and takes the listing's
+   default), and the licence gate, the FLUX bar, trust on first use and the host-RAM figure read only the manifest. A file matches an entry by
+   its name under the class directory or by its base name, without regard to case or slash direction, as the catalog matches an annotation to
+   a widget. A graph run is not compared.
 4. The converted graph goes through the run-graph preflight and is posted. The result is the run-graph envelope with `template`,
    `license_class`, `reads_input`, `local_only` and `fleet_note` beside the outputs, and `tofu_first_seen` when a run recorded a
    model for the first time.

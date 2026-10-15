@@ -7,7 +7,8 @@
   `offload_run_graph` makes (route `local`: the same lease, ComfyUI lifecycle, satisfier and envelope), with the template **name**, a
   runtime manifest and optional `overrides` and `seed`. The runner (`comfy-run-graph.mjs --template NAME`) converts the template with the
   converter once ComfyUI is up, with that ComfyUI's own `/object_info` and version, and before preflight; a refusal is the typed defer
-  `TEMPLATE_CONVERT_REFUSED`. An override sets values and never retargets a file: one that targets a model or input loader node, an input
+  `TEMPLATE_CONVERT_REFUSED`, and a model file the converted graph loads that the manifest does not name is `TEMPLATE_MODEL_UNLISTED`. An
+  override sets values and never retargets a file: one that targets a model or input loader node, an input
   that holds a model file name, or a value that is a model file name is refused as `override_is_file`, because the licence gate, the FLUX bar
   and the trust-on-first-use check read only the models the template names. The manifest generator is `render/template-manifest.mjs` (templates to manifest entries: models as
   `models/<class>/<name>` with the source and the hash a template declares, node packs, licence class, API or not, input files read or not).
@@ -42,8 +43,25 @@
   what keeps it small; a template nested deeper than eight is refused rather than run, though the converter could convert it. No template of a
   602-template copy of a newer package (`json 0.1.108`, 203 with subgraphs) has an unexpanded instance; that is evidence for the counts below, not a
   re-scan of the package they were measured on. The runtime
-  manifest carries no completeness mark and the Go side has no backstop for one: the refusal comes before any manifest is written, so the one
-  producer never writes a short list (`hostneed/manifest.go` says so).
+  manifest carries no completeness mark and the Go side has no backstop for one; the refusal stops a short list from the case above, and the
+  runner's comparison (next bullet) stops it whatever its cause (`hostneed/manifest.go` says so).
+- **Model files only the converter reads.** The manifest is the catalog's static reading of a template and the graph is the converter's, two
+  readers of one file, and the licence gate, the FLUX bar, trust on first use and the host-RAM figure read only the manifest. Three ways they
+  differed: an active subgraph instance's own `widgets_values` (the converter routes them into an inner loader, through `proxyWidgets` or as
+  the literal a subgraph input takes), a loader whose `widgets_values` is an object keyed by input name (the converter reads both forms, the
+  list was read only in its list form), and a loader that stores fewer values than it has widgets and takes the listing's default. A template
+  with the first or the second resolved to `run` with the licence class of its other files (or none), and loaded the file the list lacked.
+  Two changes close them. The catalog now reads both forms of `widgets_values` and the values of an active instance, so such a file reaches
+  the licence class, the FLUX bar and readiness before a run (an unmapped one refuses the template as `license_unknown`; a value of a muted
+  or bypassed instance is not read, and one an annotation covers is not listed twice). And the runner compares the converted graph with the
+  manifest before preflight (`unlistedModels`, `template-run.mjs`): a model file the graph loads that the manifest does not name defers
+  `TEMPLATE_MODEL_UNLISTED` (the first such file is the `ref`) and nothing is posted. The comparison reads the graph that will run, so it
+  covers the third way, which the catalog cannot see, and any other. A file matches an entry as the catalog matches an annotation to a widget
+  (by the name under the class directory or by its base name, ignoring case and slash direction, `modelCovered`); a graph run is not compared.
+  The proxied value is listed with no class, and its precedence over the inner loader's own annotation is not modelled: when both name
+  a file, both are required, which can ask for one file more than the graph loads and never one fewer. Measured on the installed package
+  (`json 0.1.96`, 578 templates, read only): the catalog lists the same 897 model entries, with the same licence class, FLUX flag and verdict
+  per template, before and after this change.
 - **Why a tool and not a `template=` argument on `offload_run_graph`.** Measured at 0.186.0: an average tool costs 1,019 tokens in the full
   profile and 672 compact, so one more tool is about +3.2% of the 31-tool full list. The registered design accepts that cost, and the
   `template=` argument was only its fallback for a cost that proved unacceptable. The new tool's own entry is 2,833 bytes of `tools/list` in
@@ -78,7 +96,16 @@
 - **Subgraph depth tests.** Written red first: 4 of 5 new tests of `render/template-manifest.test.mjs` failed (a template nested nine deep, and one whose
   subgraph contains itself, were run instead of refused; resolve and list agreed); the fifth, a template nested exactly eight deep, passed before the
   change and pins the boundary.
+- **Model-file tests.** Written red first: the runner test (a converted graph that loads a file the manifest does not name was posted, not
+  deferred) and the three `unlistedModels` tests of `render/comfy-run-graph.test.mjs` and `render/template-run.test.mjs`; then two tests of
+  `render/templates-catalog.test.mjs` and two of `render/template-manifest.test.mjs` (the list lacked the instance's file and the object-form
+  file, and both templates were `run`). The guards that passed before the change pin what must not move: a graph run is not compared, a file
+  is matched by path, base name and case, a muted or bypassed instance is not read, and on the two hand-written templates the converter's graph
+  loads only files the catalog names.
 - **Not verified here.** The package the counts below were measured on, re-scanned for unexpanded subgraph instances (only the newer copy was).
+  The runner's comparison against the converter's output for the real templates under a live ComfyUI: it is tested on injected graphs, on the
+  two hand-written templates with their saved listing, and by unit, and the real package was only read by the catalog (a template the
+  converter loads a file for that the catalog did not name would show as a `TEMPLATE_MODEL_UNLISTED` defer on a live run).
   One template running end to end under a GPU lease, the acceptance measurement of this tool, queued after this
   change. The production wiring of the conversion against a live ComfyUI (the `/object_info` and `/system_stats` reads in
   `comfy-run-graph.mjs`; the flow and the converter are tested with injected values, and the converter on saved listings). The time of a

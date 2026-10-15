@@ -3293,7 +3293,7 @@ is not a figure.
 | field | rule |
 |---|---|
 | active nodes | subgraph instances are expanded; a node is active only if its mode is not 2 (muted) or 4 (bypassed) and every instance around it is active; a self-instantiating or dangling subgraph is flagged, never hidden |
-| model files | `properties.models` of active nodes (class, URL, hash), plus loader widget files nobody annotated; files that only bypassed nodes reference are reported apart and not required |
+| model files | `properties.models` of active nodes (class, URL, hash), plus widget files nobody annotated (a node's `widgets_values` as a list or as an object keyed by input name, and an active subgraph instance's own `widgets_values`, listed with no class); files that only bypassed nodes reference are reported apart and not required |
 | `kind` | `api` (paid partner nodes) beats `custom_nodes` (a node pack core does not carry) beats `local` (core nodes only) |
 | API flag | three signals, each reported: a node type in the node's own `comfy_api_nodes` ids (read from `node_id="X"`, a `NODE_ID = "X"` class attribute and the first argument of `_cloud_schema`), the `api_` name prefix, the index's `openSource: false`; any one is enough, and the summary counts the templates where they disagree |
 | parameter surface | the `proxyWidgets` of its subgraph instances, the widgets a caller could override |
@@ -3496,7 +3496,7 @@ A workflow template is a UI-format graph (`nodes[]`, `links[]`, `definitions.sub
 `{"<id>": {"class_type", "inputs"}}`. `render/template-to-graph.mjs` converts the first into the second. It is the
 converter the templates catalog (phase A, above) did not contain. The run-graph runner calls it for a template run
 (`comfy-run-graph.mjs --template NAME`, behind `offload_run_template`): once ComfyUI is up, with the running ComfyUI's own
-`/object_info` and version, before preflight, so a refusal is the defer `TEMPLATE_CONVERT_REFUSED` and the graph that is
+`/object_info` and version, before preflight, so a refusal is the defer `TEMPLATE_CONVERT_REFUSED` (and a model file the converted graph loads that the run's manifest does not name is the defer `TEMPLATE_MODEL_UNLISTED`, `unlistedModels` in `template-run.mjs`) and the graph that is
 checked and posted is the converted one. `render/template-run.mjs` finds the template by name in the node's own package
 (a name the node's index does not list is an unknown template, never a file read), passes the index's `minComfyUIVersion`
 and applies the caller's overrides to the converted graph. The converter itself is still a pure function, there is no
