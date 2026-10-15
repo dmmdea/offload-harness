@@ -3554,6 +3554,7 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	}
 	var started, ended time.Time // the local attempt's span, which sizes what a retry may spend
 	route := strings.TrimSpace(in.Route)
+	namedRoute := route // what the caller asked for, before the occupied-seat fallback below
 	// An ask names no route most of the time, and "no route" meant this box's agent seat
 	// even when loading it would unload another vLLM seat holding the cards: on the
 	// reference box, opencode's three-card seat, whose session then paid a cold load
@@ -3621,8 +3622,14 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// was terminal here, while agent_delegate retries a failed verification on another seat. The
 	// fleet path needs nothing added: its engine already retried inside the call, and
 	// contractOnFleetAt now says so (retried_on, retry_note).
+	//
+	// Only when the caller named NO route: a named route:"local" is the caller saying the material stays
+	// on this box (offload_ask has no pin_reason channel), so its failed first attempt is published as it
+	// is and the goal and the inlined files never leave for a retry.
 	retriedOn, retryNote := "", ""
-	if len(failures) > 0 && fleetExtra == nil {
+	if len(failures) > 0 && fleetExtra == nil && namedRoute == "local" {
+		retryNote = "retry skipped: route local was named; the ask stays on this box"
+	} else if len(failures) > 0 && fleetExtra == nil {
 		r := s.askRetry(ctx, contract, wire, failures, ended.Sub(started))
 		retriedOn, retryNote = r.node, r.note
 		if r.won {

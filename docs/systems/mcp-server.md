@@ -261,6 +261,9 @@ now says so (see the route paragraph below). The retry is decoded and graded exa
 - **The fleet took nothing** (declined, no eligible node, could not be asked) or **the budget is short:** the first
   answer stands with `retry_note: retry skipped: <why>` and no `retried_on`, which would name a node that never ran
   it.
+- **The caller named `route: "local"`:** no retry, ever. A named local route is how an ask says its material stays
+  on this box (the tool has no `pin_reason`), so the first answer stands with `retry_note: retry skipped: route local
+  was named; the ask stays on this box`. The retry applies only to an ask that named no route.
 
 The retry lives inside the contract's own `timeout_sec`, as the delegator's does. An ask never names its wall, so its
 contract is auto-sized and owns the 900 s cap; the retry is skipped when what the first attempt left is under the

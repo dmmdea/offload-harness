@@ -24,3 +24,6 @@
   `retry skipped` and no `retried_on`; a verified first attempt never reaches the fleet (the guard, green before); the
   retry floor skips a retry with a note and lets a configured floor through when enough is left; the fleet's own retry
   note is kept after the ask's; and a routed fleet result carrying a retry surfaces both fields.
+- **A named `route: "local"` never retries.** It is how an ask says its material stays on this box (the tool has no
+  `pin_reason`), so a failed first attempt then stands with `retry_note: retry skipped: route local was named; the ask
+  stays on this box`; the retry applies only to an ask that named no route.
