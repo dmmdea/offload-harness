@@ -152,7 +152,7 @@ func main() {
 	case "top":
 		err = runTop(args)
 	case "ledger":
-		err = runLedger(args)
+		err = runLedgerMode(args)
 	// `loupe` is the identity-aware ledger view (memory-frontier Phase 0.1b).
 	// Deliberately a SEPARATE command from `stats`: `stats` emits a stable
 	// report.Summarize JSON that callers may already script against, and
@@ -336,7 +336,7 @@ Usage:
   local-offload fleet-smoke [--remote URL]... [--timeout 120] [--json]   send one grounded one-step contract to EVERY node and print where each landed (node, seat, placement, wall, verdict); non-zero unless all PASS
   local-offload top [--ui http://127.0.0.1:18813] [--interval 5s]   terminal view of the fleet overview (for headless boxes; reads a running fleet-ui)
   local-offload rig --seat <alias> [--since 7d] [--node ID] [--out report.json] [--json]   the seat rigger (ADR 0036 P3a): classify this box's delegation-log failures for a seat onto ONE axis each (published precedence), weights over eligible rows, evidence job ids, the pre-authored remedy per axis — proposes and applies nothing
-  local-offload ledger [--since DAYS]    token-savings report
+  local-offload ledger [--since DAYS] [--failures]    token-savings report; --failures prints the failure-class register instead (docs/systems/failure-register.md)
   local-offload doctor                   check endpoint health + config
   local-offload audit-yaml [--against-render] [--other-box] FILE...
                                          check live llama-swap config(s) against the operator rules (INV-1/INV-2: no -ngl 0, no empty CUDA_VISIBLE_DEVICES, ttl 300 everywhere, no persistent group, no preload).
