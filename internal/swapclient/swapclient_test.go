@@ -215,3 +215,24 @@ func TestFetchRosterGuardedReadsALoopbackRoster(t *testing.T) {
 		t.Fatalf("path = %q, serves alias = %v", path, r.Serves("offload-e4b"))
 	}
 }
+
+// TestHTTPStatusSeparatesAnAnswerFromNoAnswer: a roster read that llama-swap answered with a non-2xx status
+// names the status; one that got no answer at all (the server is gone) does not, so a caller never reports
+// "unreachable" for a server that did answer.
+func TestHTTPStatusSeparatesAnAnswerFromNoAnswer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	_, err := FetchRosterWith(context.Background(), srv.Client(), srv.URL, time.Second)
+	if status, ok := HTTPStatus(err); err == nil || !ok || status != http.StatusServiceUnavailable {
+		t.Errorf("HTTPStatus(%v) = %d, %v, want 503 and true", err, status, ok)
+	}
+	srv.Close()
+	_, err = FetchRosterWith(context.Background(), srv.Client(), srv.URL, time.Second)
+	if status, ok := HTTPStatus(err); err == nil || ok {
+		t.Errorf("HTTPStatus(%v) = %d, %v, want false for a server that is gone", err, status, ok)
+	}
+	if _, ok := HTTPStatus(nil); ok {
+		t.Error("HTTPStatus(nil) reported a status")
+	}
+}

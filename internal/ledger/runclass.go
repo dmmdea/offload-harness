@@ -219,7 +219,7 @@ func classIn(e Entry, jobs map[string]string) string {
 }
 
 // ProductionRows is entries without the non-production rows, and how many JOBS it skipped per class (a dispatch
-// marker and an inner row are not jobs: CountsAsJob). The input is not modified. A ledger with no test traffic
+// marker, a refusal row and an inner row are not jobs: CountsAsJob). The input is not modified. A ledger with no test traffic
 // comes back whole with a nil map.
 func ProductionRows(entries []Entry) (kept []Entry, excluded map[string]int) {
 	jobs := jobClasses(entries)

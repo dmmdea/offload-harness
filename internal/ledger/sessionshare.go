@@ -26,8 +26,8 @@ type SessionShare struct {
 	// Session is the origin_session of the rows; "" is every row that carries none (unattributed), never merged
 	// into a named session.
 	Session string `json:"session"`
-	// Rows is the number of jobs the session asked for that this ledger holds (a dispatch marker and an inner
-	// row are not jobs).
+	// Rows is the number of jobs the session asked for that this ledger holds (a dispatch marker, a refusal row
+	// and an inner row are not jobs).
 	Rows int `json:"rows"`
 	// CardsTokens is the card work of those jobs, RemoteTokens + LocalTokens.
 	CardsTokens int `json:"cards_tokens"`
@@ -47,8 +47,8 @@ type SessionShare struct {
 // dispatchDoor). It is only as good as that stamp: a node keeps a door a payload supplies, and today none does.
 const servedDoor = "fleet"
 
-// SessionShares groups entries by session (see SessionShare). Dispatch markers and inner rows are not jobs and are
-// skipped; the caller decides which run classes to keep (SessionSharesFile applies the production rule).
+// SessionShares groups entries by session (see SessionShare). Dispatch markers, refusal rows and inner rows are not
+// jobs and are skipped; the caller decides which run classes to keep (SessionSharesFile applies the production rule).
 func SessionShares(entries []Entry) []SessionShare {
 	return sessionSharesFrom(entries, ParentJobIDs(entries))
 }

@@ -52,3 +52,8 @@ render/testdata/*.log -text
 
 # Patches are applied with `patch` on Linux nodes: a CRLF checkout would break them.
 setup/patches/*.patch text eol=lf
+
+# A baseline frozen by the version 1 gate and one frozen by the version 2 gate, kept byte for byte (internal/eval/baseline_test.go reads the raw bytes
+# and pins their hash): no line-ending conversion on any checkout.
+internal/eval/testdata/baseline-v1-frozen.json -text
+internal/eval/testdata/baseline-v2-frozen.json -text

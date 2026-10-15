@@ -160,7 +160,7 @@ func main() {
 	case "loupe":
 		err = runLoupe(args)
 	case "doctor":
-		err = runDoctor(args)
+		err = runDoctorBackends(args)
 	case "audit-yaml":
 		err = runAuditYAML(args)
 	case "audit-config":
@@ -207,6 +207,8 @@ func main() {
 		err = runEval(args)
 	case "compaction-eval":
 		err = runCompactionEval(args)
+	case "gate":
+		err = runGate(args)
 	case "stats":
 		err = runStats(args)
 	case "trace-corpus":
@@ -339,7 +341,7 @@ Usage:
   local-offload top [--ui http://127.0.0.1:18813] [--interval 5s]   terminal view of the fleet overview (for headless boxes; reads a running fleet-ui)
   local-offload rig --seat <alias> [--since 7d] [--node ID] [--out report.json] [--json]   the seat rigger (ADR 0036 P3a): classify this box's delegation-log failures for a seat onto ONE axis each (published precedence), weights over eligible rows, evidence job ids, the pre-authored remedy per axis — proposes and applies nothing
   local-offload ledger [--since DAYS] [--failures]    token-savings report; --failures prints the failure-class register instead (docs/systems/failure-register.md)
-  local-offload doctor                   check endpoint health + config
+  local-offload doctor [--config FILE] [--probe-completion]   check endpoint health + config, then the engine answering each lane and seat (--probe-completion sends a 1-token completion and can load one idle seat on an idle box)
   local-offload audit-yaml [--against-render] [--other-box] FILE...
                                          check live llama-swap config(s) against the operator rules (INV-1/INV-2: no -ngl 0, no empty CUDA_VISIBLE_DEVICES, ttl 300 everywhere, no persistent group, no preload).
                                          --against-render also re-derives each file from THIS binary's tier seeds and reports MATCH / STALE(keys) / UNSTAMPED / HAND-EDITED.
@@ -362,6 +364,7 @@ Usage:
   local-offload models                   show configured offload model
   local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
   local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench> --corpus C | contextbench   compaction ladder eval: trace→corpus harvest (redacting), ratio/retention report, tokens ratchet, gated A/B, KV-reuse bench, ContextBench tasks
+  local-offload gate <freeze|check|verdict|schema> [flags]   the one measurement gate: freeze a pre-registration, check it, judge a candidate against the incumbent (ADOPT/BLOCK/INCONCLUSIVE, paired interval over tasks); exit 0 a verdict was produced, 1 non-ADOPT under --require-adopt, 2 a refusal (docs/systems/measurement-gate.md)
   local-offload confhead-eval            out-of-fold adoption gate (AURC/AUGRC + paired-bootstrap CI)
   local-offload confhead-calibrate       per-task conformal p(correct) escalation thresholds (ADOPT tasks)
   local-offload stats                    observational per-task ledger telemetry
