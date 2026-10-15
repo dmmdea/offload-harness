@@ -3459,7 +3459,9 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 // handleAsk is the MCP front door onto the one-call ask lane. It authors the
 // contract (internal/askjob), runs it on the local seat through the SAME entry
 // a local delegation placement takes (Pipeline.RunAgentContract), evaluates the
-// generated acceptance, and returns {answer, evidence} plus the verdict.
+// generated acceptance, and returns {answer, evidence} plus the verdict. A first
+// attempt that ran on this box's seat and failed that acceptance gets the second
+// chance agent_delegate gives a failed verification, on another seat (askRetry).
 //
 // House style throughout: every failure path is a deferred-shape result, never
 // an MCP error (see handleAgentRun) — a caller told "the call failed" discards
@@ -3546,6 +3548,11 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// run two budgets that could disagree.
 	var wire core.AgentWireResult
 	var fleetExtra map[string]any
+	now := s.askNow // test seam
+	if now == nil {
+		now = time.Now
+	}
+	var started, ended time.Time // the local attempt's span, which sizes what a retry may spend
 	route := strings.TrimSpace(in.Route)
 	// An ask names no route most of the time, and "no route" meant this box's agent seat
 	// even when loading it would unload another vLLM seat holding the cards: on the
@@ -3577,7 +3584,9 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		}
 		wire, fleetExtra = w, extra
 	} else {
+		started = now()
 		w, rerr := run(ctx, contract, delegate.LocalOptions{})
+		ended = now()
 		if rerr != nil {
 			return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
 		}
@@ -3608,6 +3617,18 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 			"steps":       wire.Steps,
 		})
 	}
+	// THE CROSS-SEAT RETRY. A first attempt that ran on this box's seat and failed its acceptance
+	// was terminal here, while agent_delegate retries a failed verification on another seat. The
+	// fleet path needs nothing added: its engine already retried inside the call, and
+	// contractOnFleetAt now says so (retried_on, retry_note).
+	retriedOn, retryNote := "", ""
+	if len(failures) > 0 && fleetExtra == nil {
+		r := s.askRetry(ctx, contract, wire, failures, ended.Sub(started))
+		retriedOn, retryNote = r.node, r.note
+		if r.won {
+			wire, answer, evidence, failures, fleetExtra = r.wire, r.answer, r.evidence, nil, r.extra
+		}
+	}
 	out := map[string]any{
 		"answer":      answer,
 		"evidence":    evidence,
@@ -3624,6 +3645,14 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		"cache_hit": false,
 	}
 	out = withReviewExtra(out, fleetExtra)
+	// Set after the fleet block, so the ask's own account of its two attempts is the one published
+	// when the fleet's engine retried inside the retry as well (askRetry keeps that note inside its own).
+	if retriedOn != "" {
+		out["retried_on"] = retriedOn
+	}
+	if retryNote != "" {
+		out["retry_note"] = retryNote
+	}
 	if len(failures) > 0 {
 		out["acceptance_failures"] = failures
 	}
@@ -3636,6 +3665,8 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// simply did not match — so an identical repeat returns the same unverified answer
 	// instead of re-rolling the seat. That is the deliberate cost of caching by content:
 	// a caller who wants another attempt changes the question, which is a different key.
+	// The entry is the answer as published, so one that went through the cross-seat retry
+	// carries retried_on and retry_note as they are: a repeat never retries again.
 	s.askCache.Put(cacheKey, out)
 	return jsonResult(out)
 }
@@ -3697,6 +3728,99 @@ func gradeAskWire(contract core.AgentContract, wire core.AgentWireResult) (answe
 	graded := wire
 	graded.Output = structured.Answer + "\n" + structured.Evidence
 	return structured.Answer, structured.Evidence, delegate.EvalAcceptance(contract, graded)
+}
+
+// askRetryOutcome is what the cross-seat retry of one ask came to. won means the retry is clean
+// and its wire, pair and fleet block replace the first attempt's; otherwise the first attempt
+// stands and only note (and node, when a node ran the retry) rides it.
+type askRetryOutcome struct {
+	won              bool
+	wire             core.AgentWireResult
+	answer, evidence string
+	extra            map[string]any
+	node, note       string
+}
+
+// askRetryFloorSec is the least wall a cross-seat retry of an ask is worth starting with: the
+// floor agent_delegate applies to its verification retry before it picks a node, the configured
+// agent_retry_min_sec and never under delegate's 10 s minimum. (The seat-aware floor delegate
+// applies after choosing a node belongs to the engine, which applies it to its own retry inside
+// the call.)
+func askRetryFloorSec(cfg config.Config) int {
+	if cfg.AgentRetryMinSec > 10 {
+		return cfg.AgentRetryMinSec
+	}
+	return 10
+}
+
+// askRetry gives a failed LOCAL first attempt the second chance agent_delegate gives a failed
+// verification: the same contract on the fleet, route "remote", which never places on this box's
+// seat, so the retry runs on a different seat by construction. It mirrors the delegator's retry
+// (mergeAttempts, runOne): the retry lives inside the contract's own wall, so it is handed what
+// the first attempt left (timeout_sec, never auto) and is skipped under the floor; a clean retry
+// is published with retried_on and a note naming the first attempt's verdict; a retry that also
+// fails leaves the FIRST answer, unverified, with the retry's fate in the note; a fleet that took
+// nothing leaves a "retry skipped" note and no retried_on, which would name a node that never ran it.
+// The retry's wire is decoded and graded by gradeAskWire, exactly like the first attempt's.
+func (s *Server) askRetry(ctx context.Context, contract core.AgentContract, first core.AgentWireResult, firstFailures []string, elapsed time.Duration) askRetryOutcome {
+	// The budget is the one delegate charges the same contract (executionBudgetSec): an ask never
+	// names its wall, so its contract is auto-sized and owns the cap.
+	budget := contract.TimeoutSec
+	switch {
+	case contract.TimeoutAuto:
+		budget = core.AgentTimeoutSecCap
+	case budget <= 0:
+		budget = core.AgentTimeoutSecDefault
+	}
+	remaining := budget - int((elapsed.Milliseconds()+999)/1000)
+	if floor := askRetryFloorSec(s.p.Cfg()); remaining < floor {
+		return askRetryOutcome{note: fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after the first attempt (floor %ds)", remaining, budget, floor)}
+	}
+	retry := contract
+	retry.TimeoutSec = remaining
+	retry.TimeoutAuto = false // a retry's wall is what is left: explicit, never auto
+	w, extra, why, ok := s.contractOnFleet(ctx, retry, "remote", "")
+	node, _ := extra["node"].(string)
+	if !ok && node == "" {
+		return askRetryOutcome{note: "retry skipped: " + why}
+	}
+	// What the fleet's own engine did inside the retry rides after the ask's account of it.
+	inner, _ := extra["retry_note"].(string)
+	withInner := func(note string) string {
+		if inner == "" {
+			return note
+		}
+		return note + "; the fleet's own retry: " + inner
+	}
+	label := node
+	if label == "" {
+		label = "(unnamed node)"
+	}
+	outcome := ""
+	switch {
+	case !ok:
+		outcome = fmt.Sprintf("deferred (%s): %s", w.DeferClass, w.Reason)
+	default:
+		answer, evidence, failures := gradeAskWire(contract, w)
+		switch {
+		case strings.TrimSpace(answer) == "":
+			outcome = "returned no answer (stop_reason " + w.StopReason + ")"
+		case len(failures) > 0:
+			outcome = fmt.Sprintf("failed_verification: %v", failures)
+		default:
+			return askRetryOutcome{won: true, wire: w, answer: answer, evidence: evidence, extra: extra, node: node,
+				note: withInner(fmt.Sprintf("first attempt on %s failed_verification: %v; this result is the retry", askSeatLabel(first), firstFailures))}
+		}
+	}
+	return askRetryOutcome{node: node, note: withInner("retry on " + label + " also " + outcome + "; this result is the first attempt")}
+}
+
+// askSeatLabel names the seat a first attempt ran on for the retry note.
+func askSeatLabel(w core.AgentWireResult) string {
+	if w.Seat == "" {
+		return "the local seat"
+	}
+	return w.Seat
 }
 
 // handleReviewDiff is the MCP front door onto the clean-context review lane. It
@@ -4019,6 +4143,15 @@ func (s *Server) contractOnFleetAt(ctx context.Context, contract core.AgentContr
 	}
 	if pr.Seat != "" {
 		extra["seat"] = pr.Seat
+	}
+	// A second attempt the delegator ran inside this call (a failed verification retried on another
+	// node): said here, so every door that publishes the block says it too. Both are omitted when no
+	// retry ran, and a retry that was considered and skipped carries a note and no node.
+	if pr.RetriedOn != "" {
+		extra["retried_on"] = pr.RetriedOn
+	}
+	if pr.RetryNote != "" {
+		extra["retry_note"] = pr.RetryNote
 	}
 	if pr.Result.Deferred {
 		// The ordinary shape: "route=remote: no eligible remote" — nothing out

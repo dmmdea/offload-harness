@@ -111,8 +111,8 @@ func TestOffloadAskRetriesAFailedLocalAttemptOnTheFleet(t *testing.T) {
 		t.Fatalf("the retry must go through route remote (never the local seat), got %q", fleet.route)
 	}
 	// The retry lives inside the contract's own wall: what the first attempt left, never a second full wall.
-	if fleet.contract.TimeoutSec != 200 || fleet.contract.TimeoutAuto {
-		t.Fatalf("the retry contract carries timeout_sec %d (auto %v), want the 200 s the first attempt left", fleet.contract.TimeoutSec, fleet.contract.TimeoutAuto)
+	if fleet.contract.TimeoutSec != 800 || fleet.contract.TimeoutAuto {
+		t.Fatalf("the retry contract carries timeout_sec %d (auto %v), want the 800 s the first attempt left of the 900 s wall", fleet.contract.TimeoutSec, fleet.contract.TimeoutAuto)
 	}
 	if out["verified"] != true || out["answer"] != "the cap is 32" {
 		t.Fatalf("a clean retry is the published answer: %v", out)
@@ -207,10 +207,10 @@ func TestOffloadAskDoesNotRetryAVerifiedFirstAttempt(t *testing.T) {
 	}
 }
 
-// The retry has to fit what the first attempt left of the contract's wall. The floor is the one
-// agent_delegate applies (the configured agent_retry_min_sec, at least 10 s), held to at most
-// half of the ask's fixed 300 s wall: a floor sized for a delegation's wall would otherwise
-// switch the lane off.
+// The retry has to fit what the first attempt left of the contract's wall (an ask never names its
+// wall, so it is auto-sized and owns the 900 s cap, as agent_delegate charges it). The floor is the
+// one agent_delegate applies before it picks a retry node: the configured agent_retry_min_sec,
+// at least 10 s.
 func TestOffloadAskSkipsTheRetryPastTheTimeFloor(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -219,9 +219,9 @@ func TestOffloadAskSkipsTheRetryPastTheTimeFloor(t *testing.T) {
 		wantRetry   bool
 		wantNote    string
 	}{
-		{"default floor, wall nearly gone", 0, 295 * time.Second, false, "retry skipped: 5s of the 300s timeout_sec budget left after the first attempt (floor 10s)"},
-		{"configured floor above the ask's wall, half left", 400, 100 * time.Second, true, ""},
-		{"configured floor above the ask's wall, under half left", 400, 160 * time.Second, false, "retry skipped: 140s of the 300s timeout_sec budget left after the first attempt (floor 150s)"},
+		{"default floor, wall nearly gone", 0, 895 * time.Second, false, "retry skipped: 5s of the 900s timeout_sec budget left after the first attempt (floor 10s)"},
+		{"configured floor, enough left", 300, 500 * time.Second, true, ""},
+		{"configured floor, too little left", 300, 700 * time.Second, false, "retry skipped: 200s of the 900s timeout_sec budget left after the first attempt (floor 300s)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, fleet, _ := retryRig(t, tc.retryMinSec, tc.spent, citing(t, "node-b"))
