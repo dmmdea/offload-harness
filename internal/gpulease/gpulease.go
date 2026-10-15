@@ -2099,7 +2099,7 @@ func (m *Manager) Restamp(epoch uint64, fn func(*Meta)) error {
 			return err
 		}
 	}
-	if _, serr := os.Stat(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
+	if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
 		return m.restampV2(epoch, fn)
 	}
 	return m.withEpochLock(func() error { return m.restampWholeLocked(epoch, fn) })
@@ -2112,7 +2112,7 @@ var restampFaultHook func(epoch uint64) error
 // reads the leases, decides and writes the record in ONE critical section, so the stamp that turns a waiting
 // need into a declared one cannot be separated from the comparison that admitted it.
 func (m *Manager) restampLocked(epoch uint64, fn func(*Meta)) error {
-	if _, serr := os.Stat(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
+	if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
 		return m.restampV2Locked(epoch, fn)
 	}
 	return m.restampWholeLocked(epoch, fn)

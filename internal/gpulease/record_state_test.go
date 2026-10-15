@@ -7,6 +7,7 @@ package gpulease
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -167,4 +168,43 @@ func TestAnUnreadableRecordIsNotTheLeaseIsGoneInRestampAndInTheWait(t *testing.T
 		err = l.AwaitHostRAM(AwaitHostRAMOptions{Deadline: time.Now().Add(1500 * time.Millisecond)})
 		asHostRAM(t, err) // the host never had the room; not "the lease is gone"
 	})
+}
+
+// Restamp picks between a card lease's record and a whole-node lease's by looking at e/<epoch>.json. A look that FAILS for any reason
+// but the file being absent (an access error while it is replaced) is no evidence of a whole-node lease: the dispatch must go to
+// the card path, which reads the record and says "cannot be read" when it cannot, and never "the lease is gone" for a lease it
+// could not even look at.
+func TestRestampOfACardLeaseWhoseRecordCannotBeExaminedIsNeverTheLeaseIsGone(t *testing.T) {
+	m, _ := ramScoped(t, 70)
+	l, err := m.TryAcquire(ClassMedia, Options{Reason: "film", TTL: time.Hour, Devices: []string{card0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Release() }()
+	rec := epochRecordPath(m.leaseDir(), l.Epoch())
+	defer UseStatFault(func(p string) error {
+		if p == rec {
+			return &fs.PathError{Op: "CreateFile", Path: p, Err: os.ErrPermission}
+		}
+		return nil
+	})()
+
+	stamp := func(reason string) func(*Meta) { return func(mt *Meta) { mt.Reason = reason } }
+	for name, run := range map[string]func(reason string) error{
+		"Restamp": func(reason string) error { return m.Restamp(l.Epoch(), stamp(reason)) },
+		"restampLocked": func(reason string) error {
+			return m.withEpochLock(func() error { return m.restampLocked(l.Epoch(), stamp(reason)) })
+		},
+	} {
+		err := run(name)
+		if err != nil && (strings.Contains(err.Error(), "is gone") || !IsRecordUnreadable(err)) {
+			t.Errorf("%s over a record that could not be examined must not call the lease gone: %v", name, err)
+		}
+		if err == nil {
+			// The card path read the record itself, and it is readable: the stamp lands.
+			if got, rerr := readEpochRecord(m.leaseDir(), l.Epoch()); rerr != nil || got.Reason != name {
+				t.Errorf("%s reported success but the record was not stamped: %v %+v", name, rerr, got)
+			}
+		}
+	}
 }
