@@ -33,10 +33,18 @@
 // moved on mid-audit ends it with the same exit and records nothing. The verb never acquires a
 // lease: run it as `local-offload gpu reserve ... -- local-offload recipe-audit ...`.
 //
+// The seat. The era of the comparison is the seat that served the runs: the harness pins it (weights,
+// quant, engine build, window, template) on every served run's wire result, and the verb stamps both
+// arms with that pin beside the env-rule table each ran under. The pin must be the same on every
+// served run of both arms: one that moves mid-audit (a model swapped behind the alias), a served run
+// with none, or an audit in which nothing was served ends it with exit 2 and records nothing.
+//
 // Exit codes: 0 the audit ran to the end and the store records its result (published or demoted);
 // 1 the audit ran but its result could not be recorded or the seat could not be opened; 2 a refusal
 // (usage, no lease, a lease not held or lost, a seat tag that is not the recipe's, input the gate
-// or the store will not take).
+// or the store will not take, a seat whose pin moved or is missing). No refusal records anything. Only
+// lease_lost and seat_pin can come after a seat call (and the gate's own refusal of the runs, which
+// the checks before the A/B leave nothing to trigger); every other refusal comes before the first.
 package main
 
 import (
@@ -77,6 +85,7 @@ const (
 	refusalLeaseNotHeld = "lease_not_held"
 	refusalLeaseLost    = "lease_lost"
 	refusalSeatTag      = "seat_tag_mismatch"
+	refusalSeatPin      = "seat_pin"
 	refusalInput        = "bad_input"
 )
 
@@ -140,8 +149,9 @@ refuses (exit 2) to run without one.
 Exit codes:
   0  the audit ran to the end and the store records the result (published or demoted)
   1  the audit ran but the store could not record it, or the seat could not be opened
-  2  a refusal: usage, no lease, a lease not held or lost, a seat tag that is not the recipe's, or input
-     the store or the gate will not take
+  2  a refusal, which records nothing: usage, no lease, a lease not held or lost, a seat tag that is not
+     the recipe's, input the store or the gate will not take, or a seat whose pin moved or is missing.
+     Only a lost lease and a seat pin can come after a seat call; the rest come before the first
 `
 
 func runRecipeAudit(args []string) error { return recipeAuditMain(args, os.Stdout, os.Stderr) }
@@ -291,6 +301,7 @@ func recipeAuditMain(args []string, stdout, stderr io.Writer) error {
 	// The A/B.
 	recs := map[string]map[string][]recipeAttemptRec{recipeArmIncumbent: {}, recipeArmCandidate: {}}
 	ctx := context.Background()
+	pin := "" // the seat's pin, as the first served run reported it; every other served run must match
 	for ti, task := range tasks {
 		for a := 0; a < *attempts; a++ {
 			arms := []string{recipeArmIncumbent, recipeArmCandidate}
@@ -302,6 +313,9 @@ func recipeAuditMain(args []string, stdout, stderr io.Writer) error {
 					return err
 				}
 				wire, rerr := runner.Run(ctx, arm, task.contract)
+				if err := recipeNotePin(&pin, arm, task.id, wire, rerr); err != nil {
+					return err
+				}
 				outcome, score := recipeJudge(task.contract, wire, rerr)
 				recs[arm][task.id] = append(recs[arm][task.id], recipeAttemptRec{
 					outcome: outcome, score: score, steps: wire.Steps, metrics: recipeMetrics(baseline.Efficiency, wire),
@@ -310,10 +324,14 @@ func recipeAuditMain(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 
+	if pin == "" {
+		return recipeRefuse(refusalSeatPin, "no run of the audit was served by the seat, so there is no seat to name in the era: nothing was measured and the recipe is unchanged")
+	}
+
 	// The gate, built the way `gate verdict` builds it.
-	incArm := recipeArmOf(recipeStamps(build, *seat, cfg.Endpoint, cfg.AgentEnvRules, *engineBuild), tasks, recs[recipeArmIncumbent])
+	incArm := recipeArmOf(recipeStamps(build, *seat, cfg.Endpoint, pin, cfg.AgentEnvRules, *engineBuild), tasks, recs[recipeArmIncumbent])
 	ruleSet := rec.Rules
-	candArm := recipeArmOf(recipeStamps(build, *seat, cfg.Endpoint, &ruleSet, *engineBuild), tasks, recs[recipeArmCandidate])
+	candArm := recipeArmOf(recipeStamps(build, *seat, cfg.Endpoint, pin, &ruleSet, *engineBuild), tasks, recs[recipeArmCandidate])
 	in := eval.GateInput{BaselineHash: baselineHash, Incumbent: &incArm, Candidate: candArm, Judge: baseline.Judge}
 	if *inputOut != "" {
 		raw, merr := json.MarshalIndent(in, "", "  ")
@@ -523,14 +541,42 @@ func recipeMetrics(effs []eval.EfficiencyMetric, wire core.AgentWireResult) map[
 	return out
 }
 
-// recipeStamps pins the era of one arm. The seat config hash covers the seat, its endpoint and the
-// env-rule table the arm ran under, so the two arms differ exactly by what the recipe changes.
-func recipeStamps(build, seat, endpoint string, rules *core.AgentEnvRules, engineBuild string) eval.Stamps {
+// recipeNotePin keeps the seat's identity steady across the audit. The harness pins the seat that served
+// a run (weights, quant, engine build, window, template: agent.ProbeSeatPin) and puts the hash on the
+// run's wire result; the audit's era is that pin, not the alias it asked for. The first pin seen is the
+// seat's; a later run with another pin means the seat changed under the audit (a model swapped behind
+// the alias), so the two arms were not measured on one seat, and a run that was served and carries no
+// pin cannot be shown to be on it (the harness's own rule is that an unpinned row does not enter a
+// paired experiment). Either ends the audit with exit 2 and records nothing. A defer carries no pin by
+// design when the seat never served (the probe would cold-start it), so it is not held to one; a runner
+// error returns no result at all.
+func recipeNotePin(pin *string, arm, task string, wire core.AgentWireResult, runErr error) error {
+	switch {
+	case wire.SeatConfigSHA256 != "":
+		if *pin == "" {
+			*pin = wire.SeatConfigSHA256
+			return nil
+		}
+		if *pin != wire.SeatConfigSHA256 {
+			return recipeRefuse(refusalSeatPin, "the seat changed under the audit: the %s arm's run of task %q reports the seat pin %s where the earlier runs reported %s, so the arms were not measured on one seat and nothing is recorded", arm, task, wire.SeatConfigSHA256, *pin)
+		}
+	case runErr == nil && !wire.Deferred:
+		return recipeRefuse(refusalSeatPin, "the %s arm's run of task %q was served and carries no seat pin (the harness could not read the seat's config after it): without one it cannot be shown to be on the same seat as the other runs, and nothing is recorded", arm, task)
+	}
+	return nil
+}
+
+// recipeStamps pins the era of one arm. The seat config hash covers the seat alias, its endpoint, the
+// pin of the seat that served the runs (agent.ProbeSeatPin, off the wire results) and the env-rule
+// table the arm ran under, so a seat swapped behind the alias moves the era, and the two arms differ
+// exactly by what the recipe changes.
+func recipeStamps(build, seat, endpoint, seatPin string, rules *core.AgentEnvRules, engineBuild string) eval.Stamps {
 	doc := struct {
 		Seat     string              `json:"seat"`
 		Endpoint string              `json:"endpoint"`
+		SeatPin  string              `json:"seat_pin"`
 		Rules    *core.AgentEnvRules `json:"agent_env_rules"`
-	}{seat, endpoint, rules}
+	}{seat, endpoint, seatPin, rules}
 	j, _ := json.Marshal(doc) // strings and a struct of plain fields cannot fail to marshal
 	sum := sha256.Sum256(j)
 	return eval.Stamps{HarnessBuildSHA256: build, SeatConfigSHA256: hex.EncodeToString(sum[:]), EngineBuild: strings.TrimSpace(engineBuild)}
