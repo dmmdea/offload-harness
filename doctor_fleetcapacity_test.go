@@ -416,3 +416,46 @@ func TestDoctorCapacityRowNamesNoVLLMTierItCannotProve(t *testing.T) {
 		})
 	}
 }
+
+// A manifest recorded under an older layout must not hide the seat the config's own tier declares. The installer's
+// tier wins wherever it explains the agent seat; when it does not (dual-gpu declares no vLLM seat, and was what a
+// three-card box classified as before blackwell-3x16 existed), the config's tier_profile is tried next, because the
+// row only ever names a tier whose declared seat the box's agent_model actually is.
+func TestDoctorCapacityRowKeepsTheConfigTierSeatWhenTheManifestRecordsAnOlderLayout(t *testing.T) {
+	spec := tierSeat(t, "blackwell-3x16")
+	for _, recorded := range []string{"dual-gpu", "blackwell-2x16"} {
+		t.Run(recorded, func(t *testing.T) {
+			cfg := capacityCfg(t, llamaEntryYAML(spec.Fallback, "1"), spec.Fallback, 0)
+			cfg.TierProfile = "blackwell-3x16"
+			cfg.Tiers = []string{"blackwell-16", "blackwell-2x16", "blackwell-3x16"}
+			installedAs(t, recorded)
+			got := capacityRow(cfg)
+			for _, w := range []string{
+				"declares the vLLM agent seat " + spec.ID + fmt.Sprintf(" (max_num_seqs %d)", spec.MaxNumSeqs),
+				"serves its llama.cpp fallback " + spec.Fallback,
+				fmt.Sprintf("raise fleet_max_concurrent_jobs to %d when %s takes over", spec.MaxNumSeqs, spec.ID),
+			} {
+				if !strings.Contains(got, w) {
+					t.Errorf("manifest recorded as %s, config tier_profile blackwell-3x16: the row lacks %q:\n%s", recorded, w, got)
+				}
+			}
+		})
+	}
+
+	// The same older manifest with a config that names no tier proves nothing: dual-gpu declares no vLLM seat, and the
+	// row does not borrow one.
+	cfg := capacityCfg(t, llamaEntryYAML(spec.Fallback, "1"), spec.Fallback, 0)
+	installedAs(t, "dual-gpu")
+	got := capacityRow(cfg)
+	if !strings.Contains(got, "capacity:   WARN") || strings.Contains(got, "declares the vLLM agent seat") {
+		t.Errorf("dual-gpu with no tier_profile must name no tier:\n%s", got)
+	}
+
+	// A config tier that does not own the agent seat is not a reason to name it either.
+	cfg = capacityCfg(t, llamaEntryYAML("custom-agent", "1"), "custom-agent", 0)
+	cfg.TierProfile = "blackwell-3x16"
+	installedAs(t, "dual-gpu")
+	if got := capacityRow(cfg); strings.Contains(got, "declares the vLLM agent seat") {
+		t.Errorf("an agent seat that is not the config tier's must name no tier:\n%s", got)
+	}
+}
