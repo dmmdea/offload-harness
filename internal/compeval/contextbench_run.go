@@ -257,7 +257,7 @@ func CBCheckBudget(in *CBInstance, opts CBRunOpts) error {
 	if len(in.Ops) > 0 {
 		msgs = append(msgs, cbOpMsgs(in, o.Delivery, 0)...)
 	}
-	msgs = agent.CompactReplay(msgs, usable, o.KeepRecent, preamble, agent.ReplayOpts{GCF: o.Ladder.GCF, Skeleton: o.Ladder.Skeleton})
+	msgs = agent.CompactReplay(msgs, usable, o.KeepRecent, preamble, o.Ladder.replayOpts())
 	if est := agent.EstimateTokens(msgs); est > usable {
 		return fmt.Errorf("%s: the instruction and the first operation need %d tokens but the usable budget (budget minus reserve) is %d", in.ID, est, usable)
 	}
@@ -308,7 +308,7 @@ loop:
 			break loop
 		}
 		before := msgs
-		msgs = agent.CompactReplay(msgs, usable, o.KeepRecent, preamble, agent.ReplayOpts{GCF: o.Ladder.GCF, Skeleton: o.Ladder.Skeleton})
+		msgs = agent.CompactReplay(msgs, usable, o.KeepRecent, preamble, o.Ladder.replayOpts())
 		if !sameMsgs(before, msgs) {
 			res.Compactions++
 			pager.NoteCompaction(before, msgs)

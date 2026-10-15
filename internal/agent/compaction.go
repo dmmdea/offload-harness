@@ -614,6 +614,10 @@ func emergencyShrinkWith(msgs []Msg, budget, protectedPrefix int, opts compactOp
 type ReplayOpts struct {
 	GCF      bool
 	Skeleton bool
+	// SearchResults and LogCollapse switch on the two optional rungs that are
+	// default off in production; the compaction eval sets them to measure each.
+	SearchResults bool
+	LogCollapse   bool
 }
 
 // CompactReplay runs the production compaction ladder over msgs at budget with
@@ -623,7 +627,7 @@ type ReplayOpts struct {
 // exercises the legacy drop rung — the same path a tokenizer-less production
 // run takes.
 func CompactReplay(msgs []Msg, budget, keepRecent, protectedPrefix int, opts ReplayOpts) []Msg {
-	return compact(context.Background(), msgs, budget, keepRecent, protectedPrefix, compactOpts{GCF: opts.GCF, Skeleton: opts.Skeleton})
+	return compact(context.Background(), msgs, budget, keepRecent, protectedPrefix, compactOpts{GCF: opts.GCF, Skeleton: opts.Skeleton, SearchResults: opts.SearchResults, LogCollapse: opts.LogCollapse})
 }
 
 // EstimateTokens exposes the ladder's own token estimator so replay callers
