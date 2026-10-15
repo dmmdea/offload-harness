@@ -354,6 +354,18 @@ func TestRecipeAuditRefusesBadInputBeforeAnySeatCall(t *testing.T) {
 			})
 			return e.args()
 		}, refusalInput},
+		// The gate stamps the build it ran under and refuses a stamp that is not a 64-character hash, and a
+		// task with no contract is a pair the A/B never measures: both are known before the first seat call.
+		{"a build that cannot be hashed", func(t *testing.T, e *raEnv) []string {
+			prev := gateBuildSHA
+			gateBuildSHA = func() string { return "" }
+			t.Cleanup(func() { gateBuildSHA = prev })
+			return e.args()
+		}, refusalInput},
+		{"a contracts file that covers only some of the declared tasks", func(t *testing.T, e *raEnv) []string {
+			e.writeTasks(t, raTaskIDs()[:10])
+			return e.args()
+		}, refusalInput},
 		{"a baseline that is not the frozen bytes", func(t *testing.T, e *raEnv) []string {
 			raw, _ := os.ReadFile(e.baseline)
 			os.WriteFile(e.baseline, bytes.Replace(raw, []byte("\n"), []byte("\n\n"), 1), 0o644) // hand-edited: not the canonical bytes
@@ -367,6 +379,25 @@ func TestRecipeAuditRefusesBadInputBeforeAnySeatCall(t *testing.T) {
 			_, _, err := e.run(c.mutate(t, e))
 			e.wantRefusal(t, err, c.kind)
 		})
+	}
+}
+
+// A refusal for a contract set that leaves tasks out names them, so the operator can add them.
+func TestRecipeAuditNamesTheDeclaredTasksWithoutAContract(t *testing.T) {
+	e := newRAEnv(t)
+	e.use(t, nil)
+	e.writeTasks(t, raTaskIDs()[:14]) // task-15 and task-16 have none
+	_, _, err := e.run(e.args())
+	e.wantRefusal(t, err, refusalInput)
+	var ref *recipeRefusal
+	errors.As(err, &ref)
+	for _, id := range []string{"task-15", "task-16"} {
+		if !strings.Contains(ref.Detail, id) {
+			t.Errorf("the refusal %q does not name the task %s that has no contract", ref.Detail, id)
+		}
+	}
+	if strings.Contains(ref.Detail, "task-14") {
+		t.Errorf("the refusal %q names task-14, which has a contract", ref.Detail)
 	}
 }
 
