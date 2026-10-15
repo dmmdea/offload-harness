@@ -17,8 +17,8 @@ slices share, so a reader has to assemble it, and the assembly hides two things:
 frees a card from a holder that may still be using it, except by an explicit command that checks nothing), and how much of
 what the status text promises is not built (a command it tells a waiter to run does not exist).
 
-This record states the rule once, as the code stands at commit `3be61a3c` of the main branch on 2026-10-14, and lists what is
-not built. It was written from the code first. Where an older ADR, the system guide or a comment disagrees with the code,
+This record states the rule once, as the code stands at commit `3be61a3c` of the main branch on 2026-10-14 (the 0.187.0 release
+commit that followed changes no file cited here), and lists what is not built. It was written from the code first. Where an older ADR, the system guide or a comment disagrees with the code,
 the code is what is recorded here, and each disagreement is listed under Consequences for the owner of that text to decide.
 Every behaviour below carries `path:line (symbol)`; lines drift, symbols are what to search for.
 

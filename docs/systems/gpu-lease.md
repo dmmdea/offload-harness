@@ -3080,7 +3080,7 @@ request posted straight to llama-swap by anything outside the harness is outside
 
 ## Known gaps
 
-*Read against the code at commit `3be61a3c` (2026-10-14) for [ADR 0094](../architecture/decisions/0094-a-lease-names-its-cards-a-card-has-one-holder.md). Where this section and the code disagree, the code is right and the section is corrected. Each gap says where it lives. First what is not built, then the windows the changelog entry for the host-RAM hold bound (fragment `fix-0187-hostram-hold`) lists as open, then text that disagrees with the code; the older gaps follow and still stand.*
+*Read against the code at commit `3be61a3c` (2026-10-14) for [ADR 0094](../architecture/decisions/0094-a-lease-names-its-cards-a-card-has-one-holder.md). Where this section and the code disagree, the code is right and the section is corrected. Each gap says where it lives. First what is not built, then the windows the 0.187.0 changelog entry for the host-RAM hold bound lists as open, then text that disagrees with the code; the older gaps follow and still stand.*
 
 **Not built**
 
