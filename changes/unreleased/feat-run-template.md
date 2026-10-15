@@ -40,7 +40,8 @@
   itself) is now refused as `subgraph_unexpanded`, ahead of the checks that read the graph, in `list`, `get`, `readiness` and `run`. The two depth
   limits are kept apart on purpose: the converter bounds a branching nest by counting nodes, and the catalog walk has no such count, so its depth is
   what keeps it small; a template nested deeper than eight is refused rather than run, though the converter could convert it. No template of a
-  602-template copy of the package at `json 0.1.108` (203 with subgraphs) has an unexpanded instance, so the counts below do not move. The runtime
+  602-template copy of a newer package (`json 0.1.108`, 203 with subgraphs) has an unexpanded instance; that is evidence for the counts below, not a
+  re-scan of the package they were measured on. The runtime
   manifest carries no completeness mark and the Go side has no backstop for one: the refusal comes before any manifest is written, so the one
   producer never writes a short list (`hostneed/manifest.go` says so).
 - **Why a tool and not a `template=` argument on `offload_run_graph`.** Measured at 0.186.0: an average tool costs 1,019 tokens in the full
@@ -77,7 +78,8 @@
 - **Subgraph depth tests.** Written red first: 4 of 5 new tests of `render/template-manifest.test.mjs` failed (a template nested nine deep, and one whose
   subgraph contains itself, were run instead of refused; resolve and list agreed); the fifth, a template nested exactly eight deep, passed before the
   change and pins the boundary.
-- **Not verified here.** One template running end to end under a GPU lease, the acceptance measurement of this tool, queued after this
+- **Not verified here.** The package the counts below were measured on, re-scanned for unexpanded subgraph instances (only the newer copy was).
+  One template running end to end under a GPU lease, the acceptance measurement of this tool, queued after this
   change. The production wiring of the conversion against a live ComfyUI (the `/object_info` and `/system_stats` reads in
   `comfy-run-graph.mjs`; the flow and the converter are tested with injected values, and the converter on saved listings). The time of a
   first sighting hash on a 20 GB file. The Go door's production path on a box's real tree (tested on a fixture tree and a canned script). The template run's host-RAM
