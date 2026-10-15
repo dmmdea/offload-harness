@@ -4,9 +4,11 @@
 
 One gate decides every adoption in the program: a seat bake, a compaction change, a cascade cut, a skill proposal. A
 candidate is compared with the incumbent on the same declared tasks: the mean of the paired task differences with a 95%
-interval, under rules that were written down and hashed before the first candidate ran. The interval is the score form
-of the Student-t interval ([the statistic](#the-statistic)), which was measured to stay calibrated on the data the gate
-sees most; the paired bootstrap the repository already had (`eval.BootstrapDeltaMean`) reads the efficiency metrics.
+interval, under rules that were written down and hashed before the first candidate ran. The interval is Tango's score
+interval for pass/fail pairs and a score form of the Student-t interval over an augmented sample for every other score
+([the statistic](#the-statistic)), measured to keep its false-ADOPT rate at or under 4% in every null cell of the grids below,
+the strong-incumbent cells included; the paired bootstrap the repository already had (`eval.BootstrapDeltaMean`) reads the
+efficiency metrics.
 The gate returns **ADOPT**, **BLOCK** or **INCONCLUSIVE**, and the incumbent keeps its place unless the verdict is
 ADOPT.
 
@@ -47,131 +49,165 @@ in tokens, money or resident memory in GiB, and the baseline refuses any other c
 ## The statistic
 
 For the usable, non-held-out pairs in sorted task-id order, with `inc[i]` and `cand[i]` the task scores, the primary is the
-mean of the paired differences `d[i] = cand[i] - inc[i]` with a two-sided 95% interval, the **score form** of the
-Student-t interval:
+mean of the paired differences `d[i] = cand[i] - inc[i]`, reported as `delta`, with a two-sided 95% interval. `w` is the
+width of the primary's score range (1 for `unit_interval`, 10 for `judge_0_10`, `hi - lo` for `custom`), and every `d[i]` lies
+in `[-w, w]`. Two constructions read the interval, and the data alone decides which.
+
+**Pass/fail pairs: Tango's score interval.** When every difference is a tie (0), a win of the whole range (`+w`) or a loss of
+it (`-w`), to within 1e-9 of the range, the dataset is three counts, and the interval is the set of null differences `mu` (in
+units of the range) whose score statistic stays within +-1.96 of zero (Tango 1998):
 
 ```
-delta  = mean(d)                      sn   = sqrt(sum((d - delta)^2) / n)
-c      = t(n-1, .975)                 half = c * sn / sqrt(n - c^2)
-lo, hi = delta - half, delta + half
+z(mu) = (wins - losses - n*mu) / sqrt(n * (u + v - mu^2))        u - v = mu, u and v at their maximum-likelihood values
 ```
 
-`delta` is the observed mean difference. The interval is the confidence set of the statistic
-`(delta - mu) / sqrt(mean((d - mu)^2) / n)`, which takes its variance at the boundary `mu` instead of at the estimate.
-Read against the plain t interval it is the same interval with the critical value multiplied by
-`sqrt((n-1) / (n - c^2))`: 1.14 at 16 tasks, 1.10 at 20, 1.08 at 24, 1.04 at 40 and 1.02 at 80. `c` comes from a table
-(exact to float64 up to 200 degrees of freedom, then the normal-quantile expansion), so the gate needs no special function
-and its output does not move with the platform's math library.
+`u` and `v`, the probabilities of a win and of a loss, are fitted to the counts under the constraint `u - v = mu` (the root
+of a quadratic, `tangoVar0`), so the variance is the one the hypothesised difference would give and not the one the sample
+happened to show. That is what holds the interval where the arms disagree on a handful of tasks, where a variance read from
+the sample is small and noisy. The ends are found by bisection (80 halvings of `[-1, 1]`), so the result depends on nothing
+but IEEE arithmetic and a square root, never on the platform's math library. With no discordant pair the ends are
+`+-w * z^2 / (n + z^2)`, `z` = 1.96: 0.194 w at 16 tasks, 0.138 at 24, 0.088 at 40, 0.060 at 60, 0.050 at 73 and 0.046 at 80.
+A margin of 0.05 of the range is certified by 73 ties and not by 72 (the chance of 73 ties when the candidate truly loses 5% of
+the incumbent's passes is 2.4%, and of 61 ties 4.4%). A superiority tie is INCONCLUSIVE at any size, and a constant win of the
+whole range still ADOPTs (`[0.613 w, w]` at 16 tasks).
 
-When every difference is equal (to within a rounding error of the scores: zero variance, so no spread to measure) there is
-no standard error to read, and a point interval would certify anything: sixteen ties in a row are what a candidate that loses
-5% of the incumbent's passes produces 44% of the time. `delta` is then the one value `v`, taken from the data and not from a
-sum, and the interval is the **rule of three** about it, clipped to the range the mean cannot leave (`w` the width of the
-primary's score range, `n` the usable pairs):
+**Every other pair of scores: the score form on an augmented sample.** Partial credit, a mean of several attempts, a judge's
+integer scale: there is no lattice to put a null variance on. The interval is the score form of the Student-t interval of the
+`n` differences with four pseudo-pairs added, two at `+w` and two at `-w`:
 
 ```
-lo, hi = v - 3w/n, v + 3w/n          (-w <= lo, hi <= w)
+N      = n + 4                       the n differences and the four pseudo-pairs
+m      = mean of the N values        sn = sqrt(sum((x - m)^2) / N) over the N values
+c      = t(N-1, .975)                half = c * sn / sqrt(N - c^2)
+lo, hi = delta - half, delta + half  (clipped to [-w, w], the range the mean cannot leave)
 ```
 
-For pass/fail scores with no discordant pair among `n`, `3/n` is the one-sided 95% upper bound on the rate of discordant
-pairs (`1 - 0.05^(1/n)`, which is `ln 20 / n = 2.996/n` for large `n`), so the mean difference can be as low as `-3/n`; on
-other scores it is the same allowance scaled by the range. A tie sits `3w/n` either side of 0: 0.1875 `w` at 16 tasks, 0.125
-at 24, 0.075 at 40, 0.05 at 60 and 0.0375 at 80. A margin of 0.05 of the range is therefore certified by 61 ties and not by
-60, whose end sits exactly on it (an end on the margin is neither ADOPT nor BLOCK). A superiority tie is INCONCLUSIVE at any
-size, and a constant difference far from zero still decides: every pair a win of the whole range gives `[w - 3w/n, w]`, an
-ADOPT, and every pair a loss of it a BLOCK. Both ends move, so a sample with no spread cannot BLOCK before its upper end
-clears the margin either: every task lost by 1.0 on a 0..10 scale (margin 0.5) is INCONCLUSIVE up to 60 tasks and a BLOCK
-from 61. The incumbent keeps its place whichever it is. `3/n` is a little looser than the interval's own 2.5% tail
-(`1 - 0.025^(1/n)`, 3.69/n, which would need 72 ties): at 61 pairs a candidate that loses 5% of the incumbent's passes ties
-all of them 4.4% of the time (the study's stress cell at 61 tasks measures 4.2%); see "What this covers" below. With fewer
-than two pairs there is no interval and `delta`, `lo` and `hi` read 0; the verdict is INCONCLUSIVE through `min_pairs`.
-Scores or costs so large that a sum overflows to a number that is not finite are refused ("overflow"), never reported as a
-verdict about infinity.
+The score form takes its variance at the boundary `mu` instead of at the estimate (the augmented sample's interval is the
+confidence set of `(m - mu) / sqrt(mean((x - mu)^2) / N)`); `c` comes from a table (exact to float64 up to 200 degrees of
+freedom, then the normal-quantile expansion). The pseudo-pairs are the idea of Agresti and Caffo (2000, two successes and two failures) and
+Agresti and Min (2005, half an observation in each cell of the 2x2 table of a matched pair) of adding pseudo-observations to a
+small count, generalised to bounded scores: they inflate the variance when the differences are few, vanish as `n` grows, and give
+a sample whose differences are all equal a standard error of its own, so no special case remains. Their weight is not a
+published form, it is the smallest of the variants measured that stays at or under 4% in every stress null below: half a pair
+at each of the four cells (Agresti-Min's weights) reads a candidate that loses 5% of the incumbent's passes at 8.6% over 80
+tasks, and one pair at each end leaves a mostly pass/fail score set with a few half-credit tasks at 4.4% over 160. The
+centre is the observed mean `delta` and not `m`, which would shrink it toward zero by `n/N`: a real gain keeps its size, a loss at
+the margin is not flattered, and `delta` always lies inside the interval.
 
-`bootstrap_b` and `seed` do not touch the primary. The paired bootstrap reads the efficiency metrics (below).
-`eval.BootstrapDeltaMean` is unchanged, to the bit, for its legacy callers, and a test pins it.
+The two meet at an edge. A dataset is pass/fail only if every pair is, so one half-credit task among a thousand sends the whole
+dataset to the second construction, whose interval is wider: sixteen ties read `+-0.194 w`, fifteen ties and one difference of
+0.01 read `+-0.237 w`. That discontinuity is the price of not guessing a lattice for the scores. A scorer that is meant to be
+pass/fail should be exactly so.
 
-### Why the score form
+With fewer than two pairs there is no interval and `delta`, `lo` and `hi` read 0; the verdict is INCONCLUSIVE through
+`min_pairs`. Scores or costs so large that a sum overflows to a number that is not finite are refused ("overflow"), never
+reported as a verdict about infinity. `bootstrap_b` and `seed` do not touch the primary: the paired bootstrap reads the
+efficiency metrics (below). `eval.BootstrapDeltaMean` is unchanged, to the bit, for its legacy callers, and a test pins it.
 
-The percentile interval of the paired bootstrap, which the gate read first, is anti-conservative on the data the gate sees
-most: pass/fail scores on a handful of tasks, and skewed scores. Under a null (no real difference, or a true difference of
-exactly `-margin`) a one-sided 95% interval adopts in 2.5% of runs. Measured over 20000 simulated datasets per cell with
-fixed seeds, `B = 2000`, the percentile interval adopted in 3.8% (uniform scores), 3.7% (scores in tenths) and 4.1% (x^3
-skewed scores) of superiority runs at 16 tasks, and in 6.1% of non-inferiority runs at exactly `-margin` with 20 tasks and
-pass rates .90 and .85 (10.0% with 16 tasks). Five candidate intervals were run on the same datasets (the studentized
-bootstrap, BCa, the percentile widened about the estimate by `t/z`, the paired t, and the lower of two of them, at
-`B = 2000` and `B = 10000`). None of them stays at or under 4% in every null cell: the best, the paired t, measures 4.6%
-in the cell with 20 tasks, because "two wins and no loss in 20 tasks" gives a lower end above `-0.05` although the true
-loss rate was 13.5%, and a variance taken at the estimate cannot see that. The score form is the best single interval: 61
-of the 63 null cells of the study are at most 3.6%. The two others, both at 80 tasks, are a strong incumbent (pass rates
-.99 and .94, 4.8%) and a candidate that only loses 5% of the incumbent's passes (8.2%): see "What this covers" below. The
-ADR has the whole grid, the power at a moderate effect and the reasons.
+### Why this interval
 
-A sample whose pairs are all equal has its own rule (above), and it matters most where the incumbent is strong, because
-most samples then have few pairs that differ. Read as a single point, as the gate first did, 16 ties ADOPTed a
-non-inferiority claim that carried an efficiency win.
+**What was replaced.** The percentile interval of the paired bootstrap, which the gate read first, is anti-conservative on the
+data the gate sees most. Under a null (no real difference, or a true difference of exactly `-margin`) a one-sided 95% interval
+adopts in 2.5% of runs; over 20000 simulated datasets per cell, `B = 2000`, the percentile interval adopted in 3.8% (uniform
+scores), 3.7% (scores in tenths) and 4.1% (x^3-skewed scores) of superiority runs at 16 tasks and in 6.1% of non-inferiority
+runs at exactly `-margin` with 20 tasks and pass rates .90 and .85. Five candidate bootstrap and t intervals (the studentized
+bootstrap, BCa, the percentile widened about the estimate by `t/z`, the paired t, the lower of two of them) were run on the same
+datasets, and none stayed at or under 4% in every null cell. The score form of the Student-t interval, which gate version 2
+read with the rule of three for a sample whose differences are all equal, was the best of them: 61 of the 63 null cells of the
+study at most 3.6%. Its two failures and a fifth review's cells were the same regime, **a strong incumbent and a handful of
+disagreeing tasks**, where an interval built on the observed variance cannot see the tasks that did not disagree: one loss in
+62 tasks cleared a margin of 0.05, so a candidate that loses 5% of the incumbent's passes and wins none was adopted in 0% of
+runs up to 60 tasks, 4.4% at 61, 17.7% at 62, 16.4% at 64, 8.6% at 80, 11.8% at 100, 9.4% at 160, 6.5% at 250, 5.6% at 500 and
+4.3% at 1000 (exact binomial sums), pass rates .99 and .94 in 6.6% of runs at 61 tasks and 11.1% at 62, and the same shapes
+at a margin of 0.10 in 15.6% at 32 tasks. Version 3 closes it.
 
-False-ADOPT rate, per cent (a nominal 2.5%), the cells the reviews named and the extremes. "Score form, ties as a
-point" is the gate before the fourth review; the last column is the gate:
+**What was compared for version 3.** Pseudo-pair augmentation, for every pair of scores and in three weights (half a pair at each
+of the four cells; one pair at each end; two pairs at each end), and Tango's score interval, which applies to pass/fail pairs and
+falls back to the augmented form on every other score. Each was measured on three null grids and on the power rows, on the same
+datasets. Pass/fail cells are exact multinomial sums (a dataset of pass/fail pairs is three counts; there is no sampling
+error, and the sum skips the datasets under 1e-14 probability, under 1e-9 in total); the other cells are 20000 simulated
+datasets with fixed seeds, a standard error of 0.11 to 0.14 points near 2.5% to 4%. The grids: the 63 null cells of the earlier
+study (superiority nulls at 16, 24 and 40 tasks, non-inferiority nulls at exactly `-0.05` at 16, 20, 24, 40 and 80); a sparse grid
+of 54 cells (a candidate that only loses tasks and loses 5% of them, pass rates .99 and .94, and .97 and .92, each at 16, 24,
+40, 60, 61, 62, 64, 80, 100, 160, 250, 500 and 1000 tasks, and the same shapes moved to sit at a margin of 0.10 at 16, 31, 32, 40
+and 80); and 49 stress cells for scores that are not pass/fail with few and coarse disagreements (a few half-credit tasks, losses to
+half credit, losses of mixed size, means of 3 and 5 attempts). False-ADOPT rate, per cent, worst cell and cells over 4%:
 
-| null | tasks | percentile interval | score form, ties as a point | score form (the gate) |
+| interval | 63 cells | 54 sparse cells | 49 stress cells | worst over every size 16 to 500 and every share of disagreeing tasks (margin 0.05 / 0.10 / superiority) |
 |---|---|---|---|---|
-| superiority, uniform scores | 16 | 3.77 | 1.31 | 1.31 |
-| superiority, scores in tenths | 16 | 3.69 | 1.53 | 1.53 |
-| superiority, x^3-skewed scores | 16 | 4.12 | 1.39 | 1.39 |
-| superiority, pass/fail p=.50 | 16 | 2.48 | 1.07 | 1.07 |
-| non-inferiority at exactly -margin, pass rates .90 and .85 | 16 | 9.96 | 2.48 | 0.68 |
-| non-inferiority at exactly -margin, pass rates .90 and .85 | 20 | 6.12 | 2.55 | 1.84 |
-| non-inferiority at exactly -margin, pass rates .90 and .85 | 24 | 5.50 | 2.71 | 2.41 |
-| non-inferiority at exactly -margin, uniform scores | 24 | 3.24 | 1.78 | 1.79 |
-| non-inferiority at exactly -margin, pass rates .95 and .90 | 16 | 20.33 | 9.05 | 0.18 |
-| non-inferiority at exactly -margin, pass rates .95 and .90 | 24 | 9.99 | 5.92 | 3.23 |
-| non-inferiority at exactly -margin, pass rates .99 and .94 | 16 | 37.43 | 31.90 | 0.00 |
-| non-inferiority at exactly -margin, pass rates .99 and .94 | 40 | 8.77 | 8.76 | 2.87 |
-| non-inferiority at exactly -margin, pass rates .99 and .94 | 80 | 4.78 | 4.83 | 4.83 |
-| non-inferiority at exactly -margin, a candidate that only loses 5% of the incumbent's passes | 20 | 35.77 | 35.77 | 0.00 |
-| non-inferiority at exactly -margin, a candidate that only loses 5% of the incumbent's passes | 40 | 12.61 | 12.61 | 0.00 |
-| non-inferiority at exactly -margin, a candidate that only loses 5% of the incumbent's passes | 80 | 8.13 | 8.23 | 8.23 |
-| worst of 63 cells (16 to 80 tasks) | | 44.09 | 44.09 | 8.23 |
-| cells over 4% of 63 | | 25 | 17 | 2 |
+| version 2: score form, rule of three | 8.61, 2 over | 17.73, 29 over | 15.48, 25 over | 17.73 / 15.64 / 2.48 |
+| half a pair at each of four cells (Agresti-Min) | 8.61, 2 over | 8.61, 12 over | 7.20, 18 over | 12.21 / 9.85 / 2.47 |
+| one pair at each end | 2.88, none | 4.61, 3 over | 4.42, 2 over | 5.97 / 5.30 / 2.50 |
+| two pairs at each end, for every pair | 2.25, none | 3.43, none | 3.22, none | 4.01 / 3.83 / 2.61 |
+| **Tango for pass/fail pairs, two pairs at each end otherwise (version 3)** | **3.04, none** | **2.44, none** | **3.21, none** | **3.01 / 3.11 / 2.71** |
 
-The percentile column reads an all-tied dataset as a point too. Those datasets are 1.8% of the draws with 16 tasks and pass
-rates .90 and .85, 8.9% at .95 and .90, 17% at .97 and .92, 32% at .99 and .94 and 44% for the nested-loss candidate.
-The last column is the same under the exact one-sided bound `1 - 0.025^(1/n)` that was tried before the rule of three: the
-two differ only for ties at 61 to 71 pairs, which no cell of the grid holds.
+Two pairs at each end for every pair clears the three grids but not the envelope (4.0% for a candidate that loses 5% of the
+incumbent's passes at 444 tasks), and it costs the most power on pass/fail data. Tango's interval is the best calibrated
+and, on pass/fail data, the most powerful of the ones that clear the grids, so pass/fail pairs go to it. The other scores keep
+the augmented form because the alternatives that do not augment fail on them: the version 2 score form reads a few half-credit
+tasks at up to 15.5% (`stress partial-credit nested loss 5%`, 62 tasks). No minimum-disagreement floor was needed, because a
+candidate clears every cell without one.
 
-`TestNullAdoptRateAtTheFloorsIsCalibrated` runs `Gate` end to end on eleven of these cells at the floors, with fixed seeds,
-and requires at most 4% over its stated trials (it measures 0.0% to 3.0%; skipped under `-short`): the cells at 16 to 24
-tasks, among them pass rates .95 and .90, .99 and .94 and the nested-loss candidate, which fail it on the point rule (9%,
-32% and 37%). `TestPrimaryIntervalFalseAdoptRateOnTheStatedNulls` does the same on the interval alone, which needs no
-bootstrap, over 50000 datasets in each of fifteen cells (0.0% to 3.1%), and fails the plain t interval, which measures
-4.6% on the cell with 20 tasks. The package's tests take about 5 s (1.4 s with `-short`) on a 36-core machine; the
-simulated cells split their trials over `GOMAXPROCS`, so a 4-core runner takes a few times that. The grid, its power cells
-and its stress cells are `TestCalibrationStudy` in `internal/eval/gate_sim_test.go`, off unless `OFFLOAD_GATE_STUDY=1`
-(about 20 minutes on 30 workers):
+False-ADOPT rate, per cent, version 2 against version 3, for the shapes the review named (exact sums; nominal 2.5%):
+
+| null at exactly the margin | tasks | version 2 | version 3 |
+|---|---|---|---|
+| a candidate that only loses 5% of the incumbent's passes | 61 / 62 / 64 | 4.38 / 17.73 / 16.39 | 0.00 / 0.00 / 0.00 |
+| the same | 80 / 100 / 160 | 8.61 / 11.83 / 9.39 | 1.65 / 0.59 / 1.22 |
+| the same | 250 / 500 / 1000 | 6.50 / 5.59 / 4.33 | 1.31 / 1.99 / 2.12 |
+| pass rates .99 and .94 | 61 / 62 / 64 | 6.60 / 11.09 / 10.07 | 1.30 / 1.25 / 1.15 |
+| pass rates .97 and .92 | 61 / 62 / 64 | 4.81 / 5.13 / 4.71 | 1.93 / 1.86 / 1.73 |
+| margin 0.10, a candidate that only loses 10% | 31 / 32 / 40 / 80 | 3.82 / 15.64 / 8.05 / 8.80 | 0.00 / 0.00 / 1.48 / 1.07 |
+| margin 0.10, pass rates .99 and .89 | 31 / 32 / 40 / 80 | 3.19 / 12.27 / 5.92 / 5.80 | 0.79 / 0.72 / 1.28 / 1.56 |
+| margin 0.10, pass rates .97 and .87 | 31 / 32 / 40 / 80 | 3.10 / 7.55 / 3.86 / 3.77 | 1.36 / 1.26 / 1.52 / 1.96 |
+
+**The price: power.** ADOPT rate, per cent, at a true effect (exact for pass/fail rows; simulated for the rest). The gate asks
+more of a sample than version 2 did where version 2 over-adopted, and less where its interval was needlessly wide:
+
+| row | tasks | version 2 | version 3 |
+|---|---|---|---|
+| superiority, pass rates .50 to .60 | 16 / 24 / 40 | 4.21 / 8.46 / 12.64 | 6.92 / 8.93 / 14.69 |
+| non-inferiority, pass rates .90 and .90 | 16 / 24 / 40 / 100 / 250 | 1.47 / 7.85 / 10.81 / 20.46 / 45.44 | 4.63 / 6.31 / 10.66 / 19.20 / 45.29 |
+| non-inferiority, pass rates .95 and .95 | 16 / 40 / 100 / 250 | 0.32 / 16.39 / 36.47 / 71.56 | 1.96 / 12.51 / 29.72 / 68.45 |
+| non-inferiority, identical outputs (every pair a tie) | 16 / 40 / 73 / 100 | 0 / 0 / 100 / 100 | 0 / 0 / 100 / 100 |
+| superiority, uniform scores, a true +0.10 | 24 | 19.45 | 6.73 |
+| non-inferiority, uniform scores, equal arms | 24 | 6.19 | 2.04 |
+| non-inferiority, 0..10 judge integers, equal arms (margin 0.5) | 40 / 61 / 100 / 250 | 27.78 / 42.05 / 62.87 / 95.99 | 2.67 / 12.07 / 37.72 / 92.67 |
+| superiority, 0..10 judge integers, a true +1 point | 40 / 61 / 100 | 79.03 / 93.69 / 99.52 | 27.02 / 69.75 / 97.23 |
+| non-inferiority, means of 5 attempts, mixed difficulty, equal arms | 40 / 61 / 100 / 250 | 60.22 / 76.48 / 92.11 / 99.94 | 0.52 / 10.20 / 58.44 / 99.74 |
+
+Identical outputs now need 73 tasks and not 61 (a sample of 61 to 72 ties was the version 2 ADOPT that carried 4.4% to 5% of
+false ones). On pass/fail scores version 3 has more power at 16 tasks, where version 2 was nearly blind, and a little less from
+24 to 250 tasks for a strong incumbent (up to 7 points at pass rates .95 and .95). On every other score it has **much** less below
+100 tasks, because two pseudo-pairs at each end of a 0..10 range weigh against differences of a point or two: at 40 tasks a judge
+scale that is truly non-inferior is adopted in 2.7% of runs against 27.8%, and a mean of 5 attempts in 0.5% against 60.2%. That
+cost is real, and the ADR states it as an open follow-up (an interval for coarse lattices that does not pay it). Until then a
+primary that can be scored pass/fail should be.
+
+**What this covers, and what it does not.** The cells above: both arms win and lose tasks, or most pairs tie, 16 to 1000 tasks,
+margins 0.05 and 0.10, pass/fail scores, scores in tenths, uniform, right-skewed, judge integers, attempt means and a few
+half-credit tasks. For pass/fail data the figure is over every size from 16 to 500 and every share of disagreeing tasks, not only
+the cells: at most 3.0% at margin 0.05 (at 20 tasks, with 35% of the tasks disagreeing), 3.1% at margin 0.10 and 2.7% for
+superiority. For other scores nothing is claimed beyond the cells: a score set that is nearly pass/fail with a different coarse
+shape, or a size between the cells, is not covered. Below 16 tasks nothing is claimed (`min_pairs` cannot be frozen lower), and
+the efficiency reads keep the calibration given under them.
+
+`TestPassFailFalseAdoptRateIsExactlyAtMostFourPercentWhereTheArmsBarelyDisagree` runs the exact sums on 32 sparse rows (61 to 250
+tasks and the margin-0.10 sizes) with the figures computed outside the package (scipy: the restricted likelihood maximised
+numerically, not by the closed form), and requires at most 4% and agreement to 2e-6; `TestNestedLossFalseAdoptRateIsTheBinomialSum`
+pins the nested-loss sawtooth at 20 sizes from 16 to 1000 tasks; `TestPrimaryIntervalOnPassFailPairsIsTangosScoreInterval` and
+`TestPrimaryIntervalOnOtherScoresIsTheAugmentedScoreForm` pin the interval to scipy and numpy references;
+`TestTangoIntervalEndsAreWhereTheStatisticIsPlusOrMinusZ` and `TestTangoVarianceIsTheRestrictedMaximumLikelihood` check the
+inversion and the variance against their definitions over thousands of draws; `TestNullAdoptRateAtTheFloorsIsCalibrated` runs `Gate` end
+to end on eleven null cells at the floors (0.0% to 2.5%; skipped under `-short`) and `TestPrimaryIntervalFalseAdoptRateOnTheStatedNulls`
+the interval alone over 50000 datasets on fifteen cells (0.0% to 2.5%). The package's tests take about 10 s (about 2 s with `-short`) on
+a 36-core machine; the simulated cells split their trials over `GOMAXPROCS`, so a 4-core runner takes a few times that. The grids, the power
+rows, the stress cells and the envelope are `TestCalibrationStudy` and `TestSparseCalibrationStudy` in `internal/eval`, off unless
+`OFFLOAD_GATE_STUDY=1` (about 25 minutes on 36 workers; the closed-form part alone, `TestSparseCalibrationStudy`, about 5):
 
 ```
-OFFLOAD_GATE_STUDY=1 go test ./internal/eval/ -run TestCalibrationStudy -v -timeout 1h
+OFFLOAD_GATE_STUDY=1 go test ./internal/eval/ -run 'TestCalibrationStudy|TestSparseCalibrationStudy' -v -timeout 2h
 ```
-
-**What this covers, and what it does not.** The cells above: both arms win and lose tasks, or most pairs tie, 16 to 80
-tasks, scores that are pass/fail, in tenths, uniform or right-skewed. It does not cover a strong incumbent at exactly the
-margin whose disagreements with the candidate are a handful of tasks, from 61 tasks. There the interval is
-anti-conservative, because a sample with one loss in it has little spread to read, and a sample of ties is certified by the
-rule of three from 61 pairs. The nested-loss candidate (it loses 5% of the incumbent's passes and wins none) is adopted in
-0% of runs up to 60 tasks, 4.4% at 61 (all ties), 17.7% at 62 (one loss clears the margin), 12.9% at 70, 8.6% at 80, 5.7%
-at 90, then 11.8% at 100 (two losses), 5.8% at 120, 9.4% at 160 and 6.2% at 200, and the peaks of that sawtooth stay over
-4% to about 1500 tasks (6.5% at 250, 5.6% at 500, 4.3% at 1000): exact binomial sums over the gate's own interval
-(`TestNestedLossFalseAdoptRateIsTheBinomialSum`), which the study's stress cells match to within their sampling error (4.2%
-at 61, 16.8% at 64, 8.9% at 80, 5.8% at 120, 6.3% at 200). Pass rates .99 and .94 are adopted in 6.5% of runs at 61 tasks
-and 10.1% at 64, and .97 and .92 in 4.9% and 4.7%; from 80 to 200 tasks they are 4.1% to 4.8% and 3.2% to 3.6%, and at 60
-tasks 5.5% and 4.4%. A zero-inflated score that is non-inferior at exactly `-margin` is adopted in 3.7% of runs at 16 tasks
-and 3.4% at 24. The remedy is more tasks (the power note counts them) and a pre-registered margin that the corpus size can
-certify, and until the interval is made conservative for sparse disagreement, an ADOPT in that regime at exactly the margin
-carries an error rate of up to 18% (the 62-task peak), not 2.5%. The lower of the score form and BCa clears all 63 null cells and
-the stress cells at 16 to 60 and 80 to 200 tasks (the worst is 3.4%) at the same power to within 0.7 points, but not those
-at 61 and 64 tasks (4.2% to 6.5%); it is not the gate because it would bring the bootstrap back into the primary (ADR 0088,
-decision 12).
 
 **Floors.** `bootstrap_b` cannot be frozen below 2000 and `min_pairs` below 16 (the default), and `min_pairs` cannot exceed
 the number of non-held-out tasks. The calibration above was measured from 16 tasks up, so 16 is the smallest sample the
@@ -182,12 +218,11 @@ gate makes a claim about. The bootstrap reads the efficiency metrics, and 2000 i
 
 Boundaries are strict, to within a tolerance of 1e-9 of the score range: `lo > 0`, `hi < 0`, `lo > -m`, `hi < -m` each hold
 only if the end clears the line by more than that. An interval that touches the line is INCONCLUSIVE, whichever way the
-last bit of a float fell: the interval of a sample with no spread puts an end exactly on a margin of 0.05 at 60 pairs
-(`0.1 + 0.2` against `0.3` is 5.6e-17 apart there, and its lower end would clear the margin by the last bit), and 30 pairs
-that each gain `0.55 - 0.5 = 0.05000000000000004` put it there too. The tests build their boundary rows from exactly
-representable numbers (16 pairs, scores 8.0, 7.5, 7.0) so a mutation of a comparison flips a row on every platform, and
-the float rows are their own tests. A constant difference is read from the data, not from a sum, so a difference of
-exactly `-0.1` against a margin of 0.1 is on the margin as well.
+last bit of a float fell, and pass/fail pairs that are off by rounding (a tie that is `0.1 + 0.2` against `0.3`, 5.6e-17 apart)
+are still pass/fail pairs. The test sets the margin from the interval the gate itself computed, to the bit and 1e-12 of the
+range either side of it, on both ends and both score ranges, and 1e-6 past it for the contrast. The other tests build their
+boundary rows from exactly representable numbers (16 pairs, scores 8.0, 7.5, 7.0) so a mutation of a comparison flips a row on
+every platform.
 
 ## The efficiency metrics
 
@@ -227,8 +262,8 @@ primary `delta`, `lo` and `hi`, and the held-out `delta`, are plain numbers and 
 cost nulls with no real difference (independent lognormal and exponential costs, and a paired multiplicative cost; 16, 24
 and 40 tasks; `TestEfficiencyCalibrationStudy`) the plain 95% read says "improves" in 3.5% to 5.9% of runs at 16 tasks, 2.1%
 to 4.9% at 24 and 1.5% to 4.8% at 40 (a nominal 2.5%); read for three metrics at `1 - 0.05/3` it is 0.6% to 3.0% per
-metric, not measured jointly. The primary's score form on the same cost data is 0.3% to 1.3% at 16 tasks. Moving the
-efficiency reads to it was considered and not done, for three reasons. A false improvement adopts nothing alone: the
+metric, not measured jointly. The score form of the t interval (the primary's form in gate version 2) on the same cost data is
+0.3% to 1.3% at 16 tasks. Moving the efficiency reads to a closed form was considered and not done, for three reasons. A false improvement adopts nothing alone: the
 primary has to clear the margin as well, and the false-ADOPT cells above are measured with an efficiency metric that truly
 improves, so they bound what a false improvement adds, which is a non-inferior candidate that is not cheaper. The veto side
 is the conservative one: a regression is read on the narrower plain interval, so a wrong veto costs a rerun and never an
@@ -287,14 +322,17 @@ are refused. The `judge` is required.
 ```
 
 **Baseline** (what freeze writes; `internal/eval/baseline.go`). The canonical bytes are `json.MarshalIndent(b, "", "  ")`
-plus one newline, LF only, and the baseline hash is the SHA-256 of those bytes. Fields: `gate_version` ("2"), `mode`,
+plus one newline, LF only, and the baseline hash is the SHA-256 of those bytes. Fields: `gate_version` ("3"), `mode`,
 `primary {name, class, margin, higher_is_better, range}`, `judge {kind, identity}`,
 `efficiency [{name, class, lower_is_better}]`, `min_pairs`, `bootstrap_b`, `seed`, `max_excluded_share`, `held_out`,
 `corpus_hash`, `tasks` and an optional frozen `incumbent` arm. `tasks`, `held_out` and the incumbent's tasks are sorted.
-`corpus_hash` is the SHA-256 of the corpus file given to freeze. The gate version is 2: a baseline of another version is
+`corpus_hash` is the SHA-256 of the corpus file given to freeze. The gate version is 3: a baseline of another version is
 refused, first and for its version, with the advice to re-freeze it (a version 1 file has no `judge`, so its bytes are not
-this gate's canonical form, and it was not edited by hand). Version 2 has not been released and no version 2 baseline
-exists outside tests, so the rules of this page landed in it rather than in a version 3.
+this gate's canonical form; a version 2 file has this gate's fields but its verdicts were read with another primary
+interval; neither was edited by hand). The version moved from 2 to 3 because the primary interval changed and verdicts moved on
+data that is not sparse too: a judge-scale comparison of 16 to 40 tasks that cleared a margin of 0.5 under version 2 by a
+narrow primary no longer does. `internal/eval/testdata` holds a baseline as the version 1 gate wrote it and one as the version 2
+gate wrote it, for the refusal tests.
 
 | field | default | notes |
 |---|---|---|
@@ -443,12 +481,14 @@ and the lease and ledger measurements decide the rest.
 - [`internal/eval/outcome.go`](../../internal/eval/outcome.go) — `AttemptOutcome`, `AllOutcomes`, `OutcomeFromRecord`, `Refusal`
 - [`internal/eval/gate_input.go`](../../internal/eval/gate_input.go) — `Attempt`, `Task`, `Arm`, `Stamps`, arm validation, the INV-5 name check, the embedded schema
 - [`internal/eval/gate-input.schema.json`](../../internal/eval/gate-input.schema.json) — the gate input JSON Schema
-- [`internal/eval/interval.go`](../../internal/eval/interval.go) — `primaryInterval`, the primary's score-form interval, and the Student-t critical values it reads
+- [`internal/eval/interval.go`](../../internal/eval/interval.go) — `primaryInterval`, Tango's score interval for pass/fail pairs and the augmented score form for every other score, and the Student-t critical values it reads
 - [`internal/eval/paireddelta.go`](../../internal/eval/paireddelta.go) — `BootstrapDeltaMean` (the legacy callers' statistic, unchanged) and the replicate and percentile helpers the efficiency read shares
 - [`internal/eval/gate_test.go`](../../internal/eval/gate_test.go), [`baseline_test.go`](../../internal/eval/baseline_test.go), [`outcome_test.go`](../../internal/eval/outcome_test.go), [`interval_test.go`](../../internal/eval/interval_test.go) — the verdict table, boundary rows, refusals, determinism, the interval against independent computations
 - [`internal/eval/gate_attack_test.go`](../../internal/eval/gate_attack_test.go) — the attacks a candidate that wants to be adopted would try: unfinished attempts and the cost they burned, a metric resolved on few pairs, a swapped judge, a costlier metric; and the end-to-end false-ADOPT cells
-- [`internal/eval/gate_sim_test.go`](../../internal/eval/gate_sim_test.go) — the calibration harness: the nulls, the candidate intervals, the study that prints the grid
-- [`internal/eval/testdata/baseline-v1-frozen.json`](../../internal/eval/testdata/baseline-v1-frozen.json) — a baseline as the version 1 gate wrote it, for the refusal test
+- [`internal/eval/gate_exact_test.go`](../../internal/eval/gate_exact_test.go) — the exact multinomial sums of the false-ADOPT rate on pass/fail pairs, and the interval pinned to scipy and numpy references
+- [`internal/eval/gate_sim_test.go`](../../internal/eval/gate_sim_test.go) — the bootstrap calibration harness: the nulls, the candidate intervals, the study that prints the grid
+- [`internal/eval/gate_sparse_sim_test.go`](../../internal/eval/gate_sparse_sim_test.go) — the closed-form study: the sparse-regime grid, the stress nulls, the power rows and the envelope
+- [`internal/eval/testdata/baseline-v1-frozen.json`](../../internal/eval/testdata/baseline-v1-frozen.json), [`baseline-v2-frozen.json`](../../internal/eval/testdata/baseline-v2-frozen.json) — baselines as the version 1 and version 2 gates wrote them, for the refusal tests
 - [`gate_cmd.go`](../../gate_cmd.go), [`gate_cmd_test.go`](../../gate_cmd_test.go), [`gate_cmd_attack_test.go`](../../gate_cmd_attack_test.go) — the `gate` verb and its exit codes
 - [`main.go`](../../main.go) — the `gate` case and its help line
 - [`compaction_eval.go`](../../compaction_eval.go), [`internal/compeval/ratchet.go`](../../internal/compeval/ratchet.go) — the freeze/check shape the baseline copies
