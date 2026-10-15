@@ -156,7 +156,8 @@ local-offload report --out capability-report.md      # Windows
 ```
 
 One read-only Markdown document: harness version and platform, which config file is actually
-loaded, the hardware tier from the installer manifest, every configured model alias measured
+loaded, the hardware tier from the installer manifest (when the config's `tier_profile` names another tier, the line shows both and says they
+disagree), every configured model alias measured
 against the live `/v1/models` (matched against canonical ids **and** `meta.llamaswap.aliases`),
 and every media route with its derived verdict — plus a
 **Needs attention** section that lists only the genuinely broken ones (a route this box never
@@ -1773,7 +1774,9 @@ be read. The cap follows the seat the box serves NOW. A box of a vLLM tier (`amp
 `blackwell-3x16`) whose vLLM venv is not installed serves the tier's llama.cpp fallback at `--parallel 1`: the row warns, and says
 which vLLM seat the tier declares, its `max_num_seqs`, and that the cap goes up to it when that seat takes over, so setting 1 now
 does not strand the box at 1 after the venv is installed. The tier is the installer's (`installed.json`), else the config's
-`tier_profile`; with neither, or with an agent seat that is not the tier's, the row names no tier. It never changes doctor's
+`tier_profile`; when the installer's tier does not own the agent seat the box serves (a manifest recorded under an older layout:
+`dual-gpu` declares no vLLM seat, and is what three Blackwell cards classified as before `blackwell-3x16` existed), the config's
+`tier_profile` is tried next. With neither, or with an agent seat that is not the tier's, the row names no tier. It never changes doctor's
 exit code.
 
 **A name, not a LAN address (`lan ip:` row).** Cross-machine reach uses tailnet names, because an IP literal works until the box it

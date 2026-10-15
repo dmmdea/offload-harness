@@ -230,6 +230,14 @@ whatever `home` it names and is told, with a NOTE, when it names none. Templates
 carry placeholders substituted at install time; the config template spells no data path, because a
 path written in the file is an explicit value that `home` does not rebase.
 
+**The manifest across a layout change.** `install.ps1` rebuilds `installed.json` whole on every run from a fresh detection, so a box
+recorded as `dual-gpu` or `blackwell-2x16` that gained a third Blackwell card is recorded as `blackwell-3x16` on its next run (only
+`data_home` and its reason are carried forward from the old file). `install.sh` writes the file once and keeps the recorded profile.
+An existing `config.json` is never rewritten on either path, so the seats a box already binds stay and the new tier's composite keys
+(`tier_profile`, `tiers`, `layers`) are seeded only into a regenerated config. The readers tolerate the disagreement this can leave:
+a manifest of any recorded layout reads clean, `doctor`'s `capacity:` row tries the config's `tier_profile` when the manifest's tier
+does not own the agent seat, and `report` names both ids.
+
 ## Interfaces and entry points
 
 `pwsh -NoProfile -File setup/detect.ps1` (add `-SelfTest` for the assertion suite), then
