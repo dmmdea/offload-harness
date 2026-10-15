@@ -109,4 +109,13 @@ func TestOffloadAskRetryNeverReturnsToThisBoxWhenTheFleetNodeAlsoFails(t *testin
 	if !strings.HasPrefix(note, "retry on node-a also failed_verification: [") || !strings.Contains(note, "the fleet's own retry: retry skipped: ") {
 		t.Fatalf("retry_note = %q, want the node's failure and the fleet's own skipped retry", note)
 	}
+	// The retry stays off this box without claiming a pin: the tally still counts the call as unreasoned.
+	st := s.pins.Snapshot()
+	reasoned := 0
+	for _, n := range st.Reasoned {
+		reasoned += n
+	}
+	if st.Unreasoned != 1 || reasoned != 0 || st.Hints != 0 {
+		t.Fatalf("pin tally = %+v, want the one retry counted as unreasoned and nothing reasoned", st)
+	}
 }

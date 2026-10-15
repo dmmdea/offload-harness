@@ -31,7 +31,9 @@
 // unreasoned, so that part of the gap is visible in offload_status. An explicit route local on offload_ask or agent_run
 // runs on this box's seat without reaching the engine, and is counted nowhere. One call of those carries a reason: an
 // agent_run that names a model to run on a fleet node (register D-125) hands the engine PinOperator, because the caller
-// chose the placement, and its retry stays on a node that runs the name (remotePinned).
+// chose the placement, and its retry stays on a node that runs the name (remotePinned). The cross-seat retry of an
+// offload_ask is the other exception, and it carries no reason: it hands the engine RunOptions.RemoteRetryOnly, which
+// keeps its second chance off this box's seat (retryOffLocal) and leaves the call counted as unreasoned.
 
 package delegate
 
@@ -182,11 +184,29 @@ func (r *runner) remoteHint() bool { return r.pin.hint && r.pin.asked == "remote
 // fleet node and on no other place, and that holds for its second chance as much as for its first (alternativeNode).
 // It is the reason that makes the pin one this box obeys to the end, because a reasoned pin is what the ledger rows and
 // offload_status say placement obeyed. It is not the route: the bare remote route of a caller with no reason channel
-// (fleet-smoke, the review lane's fallthrough, offload_ask, agent_run with no model) keeps the retry it has always had,
+// (fleet-smoke, the review lane's fallthrough, agent_run with no model) keeps the retry it has always had,
 // remote -> local, and a reasonless remote hint is placed as auto and may retry on the seat (ADR 0078 decisions 3 and 5).
 // An agent_run that names a model is reasoned (PinOperator): it asked for a fleet node's seat, and the local seat is no
 // place for its second chance.
 func (r *runner) remotePinned() bool { return r.pin.reason != "" && r.pin.asked == "remote" }
+
+// retryOffLocal reports a remote call whose second chance may not land on the local seat: a reasoned remote pin
+// (remotePinned), or a bare remote route whose caller set RunOptions.RemoteRetryOnly. The second is a request and not a
+// pin. It has no reason, so it stamps no pin_reason, the ledger rows and the result keep saying what the caller gave, and
+// the pin tally counts the call as unreasoned, which is what it is. It means nothing for a route other than remote, and
+// nothing for a remote hint (placed as auto, so the seat is a place it may run).
+func (r *runner) retryOffLocal() bool {
+	return r.remotePinned() || (r.remoteRetryOnly && r.pin.asked == "remote" && !r.pin.hint)
+}
+
+// retryOffLocalWhy is remotePinWhy for a retry kept off the local seat by retryOffLocal: the pin's words when there is
+// a pin, and the caller's request when there is only that.
+func (r *runner) retryOffLocalWhy() string {
+	if r.remotePinned() {
+		return r.remotePinWhy()
+	}
+	return "route=remote was asked to keep its retry on a fleet node (no pin_reason), which places nothing on the local seat"
+}
 
 // remotePinWhy is the words a reasoned remote pin adds to a retry that has nowhere to go, or to a retry that went to a
 // fleet node, so the note names the pin and not only the absence of a node.

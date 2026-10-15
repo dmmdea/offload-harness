@@ -729,6 +729,14 @@ type RunOptions struct {
 	// The zero value keeps today's authoritative pin for every caller that has no reason channel (fleet-smoke, the
 	// review lane's remote fallthrough, offload_ask and agent_run).
 	PinNeedsReason bool
+	// RemoteRetryOnly keeps the second chance of a route=remote call (a failed verification, an abstention, a seat-down
+	// re-issue) on a fleet node: another node takes it or it is not run, and it never lands on this box's seat. It is
+	// the narrow half of a reasoned remote pin and no more: it records no pin_reason, so the call stays counted as
+	// unreasoned, which is what it is. It is for a door with no reason channel whose own caller already moved the work
+	// off this box (offload_ask's cross-seat retry), where the bare remote route's retry would hand it straight back.
+	// It does nothing for a route other than remote, for a remote hint (a hint is placed as auto), or beside a
+	// PinReason, which already says it.
+	RemoteRetryOnly bool
 	// PinTally, when set, is the accounting the call's pins are added to (the MCP server's, which offload_status
 	// publishes). nil = not counted: the CLI verbs and fleet-smoke are one-call processes with nobody to report to.
 	PinTally *PinTally
@@ -961,6 +969,7 @@ func runWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		r.tenant = opts.Tenant
 		r.decider = opts.LocalDecider
 		r.rescue = opts.Rescue
+		r.remoteRetryOnly = opts.RemoteRetryOnly
 	}
 	// route=spread probes the fleet ONCE per run: every subtask deals itself
 	// across the same roster, so per-subtask probing would be N identical GETs
@@ -1235,6 +1244,8 @@ type runner struct {
 	pin pinCall
 	// tally is RunOptions.PinTally; nil = the call's pins are not counted.
 	tally *PinTally
+	// remoteRetryOnly is RunOptions.RemoteRetryOnly; retryOffLocal is what reads it.
+	remoteRetryOnly bool
 	// hintSeatFree is, for a remote hint, whether the local seat read free (no lease, no full line, no load in
 	// progress, no vLLM seat to evict) when the deal was made, before the hint dealt it as unavailable: the deal
 	// may fall back to the seat only then. Written once before any goroutine starts, read-only after.
@@ -1603,12 +1614,13 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 				what = "the seat on " + nodeLabel(first) + " wrote a tool call as its final answer"
 			}
 			first.RetryNote = fmt.Sprintf("retry skipped: %s and no other node could take the contract (%s)", what, why)
-		case r.remotePinned():
-			// A reasoned remote pin retries on another fleet node or not at all (alternativeNode): when there is no other
-			// node, a failed verification, an abstention or an admission defer would otherwise be published with no note
-			// and read as a retry nobody considered. The pin is the reason there is no local retry, so the note names it.
+		case r.retryOffLocal():
+			// A reasoned remote pin, or a remote call that asked for its retry to stay on a fleet node, retries on another
+			// fleet node or not at all (alternativeNode): when there is no other node, a failed verification, an abstention
+			// or an admission defer would otherwise be published with no note and read as a retry nobody considered. The
+			// pin or the request is the reason there is no local retry, so the note names it.
 			first.RetryNote = fmt.Sprintf("retry skipped: no other fleet node could take the contract after the first attempt on %s (%s); %s",
-				nodeLabel(first), attemptOutcome(first), r.remotePinWhy())
+				nodeLabel(first), attemptOutcome(first), r.retryOffLocalWhy())
 		default:
 			// Every other skip says why too (the operator's rule: a job's trouble is logged, not silent). A wrong answer or an
 			// abstention with nowhere to go used to be published with an empty note, which reads as a retry nobody
@@ -1696,10 +1708,10 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	retryContract.TimeoutAuto = false // a retry's wall is what is left — explicit, never auto (D-03)
 	second := r.placeAndRun(ctx, i, retryContract, &alt, start, budget, pl)
 	merged := mergeAttempts(first, second)
-	if r.remotePinned() {
-		// The retry ran on a fleet node because the pin allows no other place (alternativeNode), and the note says so whichever
-		// attempt is published: the first attempt it annotates, or the retry that recovered it.
-		merged.RetryNote += "; " + r.remotePinWhy()
+	if r.retryOffLocal() {
+		// The retry ran on a fleet node because the pin, or the caller's request, allows no other place (alternativeNode), and
+		// the note says so whichever attempt is published: the first attempt it annotates, or the retry that recovered it.
+		merged.RetryNote += "; " + r.retryOffLocalWhy()
 	}
 	return merged
 }
@@ -1788,8 +1800,8 @@ func (r *runner) noRetryNodeWhy() string {
 	switch {
 	case r.route == "local":
 		why = "route local places nothing on another node"
-	case r.remotePinned():
-		why += "; " + r.remotePinWhy()
+	case r.retryOffLocal():
+		why += "; " + r.retryOffLocalWhy()
 	}
 	return why
 }
@@ -4676,10 +4688,12 @@ func retryHeldWhy(clause string) string {
 // take the contract, and a second remote hop would need a fresh gate pass
 // mid-timeout), but it is a real cost, not a free retry.
 //
-// The one exception is a REASONED remote pin (remotePinned, ADR 0078 decision 3): the caller
-// said why this call runs on a fleet node, and the ledger rows and offload_status say placement
-// obeyed it, so its second chance is another fleet node or none, never the local seat. The bare
-// remote route of a caller with no reason channel keeps the asymmetry above.
+// The one exception is a remote call whose retry is kept off the local seat (retryOffLocal). A
+// REASONED remote pin (remotePinned, ADR 0078 decision 3) is one: the caller said why this call
+// runs on a fleet node, and the ledger rows and offload_status say placement obeyed it, so its
+// second chance is another fleet node or none, never the local seat. RunOptions.RemoteRetryOnly is
+// the other, for a caller that has no reason to give and still must not get the work back on the
+// box it moved it from. The bare remote route of any other caller keeps the asymmetry above.
 //
 // It consults the SUBTASK's placement ledger, which is what makes "a DIFFERENT
 // node" true rather than merely intended: a seat the first attempt already RAN
@@ -4693,14 +4707,15 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 	localView := r.localView()
 	why := attemptOutcome(first)
 	if !first.ranLocal {
-		// A reasoned remote pin never retries on the local seat (ADR 0078 decision 3). Checked before the layer, fence and
+		// A reasoned remote pin never retries on the local seat (ADR 0078 decision 3), and neither does a remote call that
+		// asked for its retry to stay on a fleet node (RunOptions.RemoteRetryOnly). Checked before the layer, fence and
 		// reservation questions, which are all about a seat this call may not use: the retry is the best untried remote, and
-		// with none there is no retry (runOne words the note). Keyed on the reasoned pin and not on r.route == "remote": the
+		// with none there is no retry (runOne words the note). Keyed on those two and not on r.route == "remote": the
 		// bare remote route keeps remote -> local (retry_reserved_test.go, TestRunRetryRemoteFailureFallsBackToLocal).
-		if r.remotePinned() {
+		if r.retryOffLocal() {
 			if chosen, base, found := r.remoteAlternative(ctx, st, pl); found {
 				return placement{view: chosen, base: base,
-					reason: "retry on " + chosen.NodeID + " after " + nodeLabel(first) + " " + why + " — " + r.remotePinWhy()}, "", true
+					reason: "retry on " + chosen.NodeID + " after " + nodeLabel(first) + " " + why + " — " + r.retryOffLocalWhy()}, "", true
 			}
 			return placement{}, "", false
 		}
