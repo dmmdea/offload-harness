@@ -120,22 +120,69 @@ func TestRecipeAuditRefusesASeatThatChangesMidAudit(t *testing.T) {
 }
 
 // A run that served and carries no pin cannot be shown to be on the same seat as the others: the
-// harness's own rule is that an unpinned row does not enter a paired experiment.
+// harness's own rule is that an unpinned row does not enter a paired experiment. The harness stamps the
+// pin after the loop and before every terminal branch, so a run that finished and a run that spent its
+// budget or abstained are both served runs and both carry one; only a run that ended before that point
+// (a ceiling, a canceled parent, an infrastructure defer) legitimately carries none.
 func TestRecipeAuditRefusesAServedRunWithNoPin(t *testing.T) {
-	e := newRAEnv(t)
-	e.use(t, nil)
-	base := raScript(false, true, 5, 3)
-	n := 0
-	e.fake.script = func(arm string, c core.AgentContract) (core.AgentWireResult, error) {
-		n++
-		w, err := base(arm, c)
-		if n == 7 {
+	cases := map[string]func(w core.AgentWireResult) core.AgentWireResult{
+		"a finished run": func(w core.AgentWireResult) core.AgentWireResult {
 			w.SeatConfigSHA256 = ""
-		}
-		return w, err
+			return w
+		},
+		"a spent step budget": func(w core.AgentWireResult) core.AgentWireResult {
+			return core.AgentWireResult{Steps: 12, StopReason: "budget", Deferred: true, DeferClass: core.DeferClassBudget, Reason: "step budget exhausted (12 steps)"}
+		},
+		"an abstention": func(w core.AgentWireResult) core.AgentWireResult {
+			return core.AgentWireResult{Steps: 3, StopReason: "final", Deferred: true, DeferClass: core.DeferClassAbstention, Reason: "output failed schema"}
+		},
 	}
-	_, _, err := e.run(e.args())
-	e.wantSeatPinRefusal(t, err, 7)
+	for name, unpin := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newRAEnv(t)
+			e.use(t, nil)
+			base := raScript(false, true, 5, 3)
+			n := 0
+			e.fake.script = func(arm string, c core.AgentContract) (core.AgentWireResult, error) {
+				n++
+				w, err := base(arm, c)
+				if n == 7 {
+					w = unpin(w)
+				}
+				return w, err
+			}
+			_, _, err := e.run(e.args())
+			e.wantSeatPinRefusal(t, err, 7)
+		})
+	}
+}
+
+// A run that ended before the seat finished serving it carries no pin by design (the probe would
+// cold-start a seat that is not resident), and that is not a reason to end the audit: it is not a
+// verdict about the task either, so the gate counts it and the audit goes on.
+func TestRecipeAuditToleratesRunsThatEndedBeforeTheSeatServedThem(t *testing.T) {
+	for name, w := range map[string]core.AgentWireResult{
+		"an infrastructure defer": {Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: "endpoint down"},
+		"a wall ceiling":          {Deferred: true, DeferClass: core.DeferClassBudget, Reason: "wall timeout after 600s (the caller's deadline, not this node's ceiling)"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newRAEnv(t)
+			e.use(t, nil)
+			base := raScript(false, true, 5, 3)
+			n := 0
+			e.fake.script = func(arm string, c core.AgentContract) (core.AgentWireResult, error) {
+				n++
+				if n == 7 {
+					return w, nil
+				}
+				return base(arm, c)
+			}
+			rep := e.report(t)
+			if rep.Gate.Stamps.Incumbent.SeatConfigSHA256 == "" {
+				t.Fatalf("the audit ended without a seat stamp: %+v", rep.Gate.Stamps)
+			}
+		})
+	}
 }
 
 // An audit in which no run was served has no seat to name in the era: nothing was measured, and the
