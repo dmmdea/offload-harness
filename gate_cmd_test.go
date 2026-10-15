@@ -15,7 +15,9 @@ import (
 	"github.com/dmmdea/offload-harness/internal/eval"
 )
 
-const gateTestBuild = "0123456789abcdef"
+// gateTestBuild is 64 lower-case hex characters, the form the gate requires of a receipt's build hash,
+// so a receipt made in-process under this pin is one the gate can read.
+const gateTestBuild = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func init() {
 	// The verb reports the hash of its own binary; a test pins it so output is comparable.

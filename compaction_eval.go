@@ -122,52 +122,7 @@ func runCompactionEval(args []string) error {
 			return err
 		}
 		defer cleanup()
-		// Outcome scorer — accept + ENTITY RECALL over a summarize of the
-		// rendered transcript: 0.0 deferred; else 0.2 plus up to 0.8 for how
-		// many of the source's FORCE_PRESERVE entities the summary actually
-		// carries (capped at 8). Two dead ends were measured live before this
-		// shape and are why grounding is deliberately NOT a term: (a) pure
-		// self-grounding scores a degraded, entity-free source 1.0 (nothing
-		// falsifiable), and (b) as a gate it INVERTS the ranking — the
-		// entity-dense good side fails strict number-grounding on benign
-		// paraphrase while the empty side passes trivially. Recall pays only
-		// for preserved signal, which is the thing compaction can destroy.
-		// The control-pair gate still decides admissibility on THIS box.
-		scorer := func(ctx context.Context, rendered string) (float64, error) {
-			res := p.Run(ctx, core.Request{Task: core.TaskSummarize, Input: rendered})
-			if !res.OK {
-				return 0, nil
-			}
-			var payload struct {
-				Summary string `json:"summary"`
-			}
-			_ = json.Unmarshal(res.Data, &payload)
-			summary := payload.Summary
-			if summary == "" {
-				summary = string(res.Data)
-			}
-			src := compeval.Entities(rendered)
-			if len(src) == 0 {
-				return 0.2, nil // accepted, but an entity-free source proves nothing more
-			}
-			sum := compeval.Entities(summary)
-			hits := 0
-			for e := range sum {
-				if _, ok := src[e]; ok {
-					hits++
-				}
-			}
-			denom := len(src)
-			if denom > 8 {
-				denom = 8
-			}
-			recall := float64(hits) / float64(denom)
-			if recall > 1 {
-				recall = 1
-			}
-			return 0.2 + 0.8*recall, nil
-		}
-		rep, err := compeval.RunAB(context.Background(), scorer, entries, hash, opts, builtinControlPairs(), []string{cfg.Model, cfg.EscalationModel})
+		rep, err := compeval.RunAB(context.Background(), compactionOutcomeScorer(p.Run), entries, hash, opts, builtinControlPairs(), []string{cfg.Model, cfg.EscalationModel})
 		if err != nil {
 			return err
 		}
@@ -315,6 +270,53 @@ func builtinControlPairs() []compeval.ControlPair {
 		"tool: finished at in Service version rolled to nodes checks passed on all latency was error rate " +
 		"One node restarted twice before window closes at deploy the report the the\n"
 	return []compeval.ControlPair{{Name: "deploy-report-intact-vs-stripped", Good: good, Degraded: degraded}}
+}
+
+// compactionOutcomeScorer is the outcome scorer the `ab` mode and `gate selftest` share: accept +
+// ENTITY RECALL over a summarize of the rendered transcript. run is the pipeline's Run (a test passes
+// a fake). 0.0 deferred; else 0.2 plus up to 0.8 for how many of the source's FORCE_PRESERVE entities
+// the summary actually carries (capped at 8). Two dead ends were measured live before this shape and
+// are why grounding is deliberately NOT a term: (a) pure self-grounding scores a degraded, entity-free
+// source 1.0 (nothing falsifiable), and (b) as a gate it INVERTS the ranking — the entity-dense good
+// side fails strict number-grounding on benign paraphrase while the empty side passes trivially.
+// Recall pays only for preserved signal, which is the thing compaction can destroy. The control-pair
+// gate still decides admissibility on THIS box. It never returns an error: a run that did not finish
+// is a score of 0, so a seat that is down shows as a tie, which the self-test fails.
+func compactionOutcomeScorer(run func(context.Context, core.Request) core.Result) compeval.Scorer {
+	return func(ctx context.Context, rendered string) (float64, error) {
+		res := run(ctx, core.Request{Task: core.TaskSummarize, Input: rendered})
+		if !res.OK {
+			return 0, nil
+		}
+		var payload struct {
+			Summary string `json:"summary"`
+		}
+		_ = json.Unmarshal(res.Data, &payload)
+		summary := payload.Summary
+		if summary == "" {
+			summary = string(res.Data)
+		}
+		src := compeval.Entities(rendered)
+		if len(src) == 0 {
+			return 0.2, nil // accepted, but an entity-free source proves nothing more
+		}
+		sum := compeval.Entities(summary)
+		hits := 0
+		for e := range sum {
+			if _, ok := src[e]; ok {
+				hits++
+			}
+		}
+		denom := len(src)
+		if denom > 8 {
+			denom = 8
+		}
+		recall := float64(hits) / float64(denom)
+		if recall > 1 {
+			recall = 1
+		}
+		return 0.2 + 0.8*recall, nil
+	}
 }
 
 func plural(n int, one, many string) string {

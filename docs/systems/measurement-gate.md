@@ -20,7 +20,8 @@ sets a 0.5 effect-size bar on a 0 to 10 judge scale with no interval at all. [AD
 records the decision.
 
 The gate is a pure function plus a verb. It reads scores that someone else produced, so it measures nothing itself and
-needs no model, no GPU and no network.
+needs no model, no GPU and no network. The one subcommand that can reach a model is `gate selftest`, which runs a model
+scorer on a few control pairs to write the receipt a model judge needs; `freeze`, `check`, `verdict` and `schema` never do.
 
 ## The rules
 
@@ -32,7 +33,7 @@ needs no model, no GPU and no network.
 | **R4 the incumbent wins** | The incumbent keeps every tie and every INCONCLUSIVE (`keep_incumbent` is true unless ADOPT). Fewer than `min_pairs` usable pairs is INCONCLUSIVE, and `min_pairs` cannot be frozen below 16. The remedy for an INCONCLUSIVE at the corpus size is **more tasks, not more attempts**, because attempts of one task are not independent; the power note says how many. |
 | **R5 held-out** | A held-out slice is declared at freeze and scored once, with the same scoring as the main slice. It cannot rescue a verdict. It can veto one: an ADOPT whose held-out point estimate fails becomes BLOCK, "reject without re-tuning". With no usable held-out pair (every held-out incumbent task unusable) an ADOPT becomes INCONCLUSIVE with the reason "held-out evidence missing", never BLOCK: no evidence is not a failed check. |
 | **R6 pre-registration** | The mode, the primary metric, its margin and (for `custom`) its range, the judge, the efficiency metrics, `min_pairs`, the bootstrap size and seed, the held-out ids and the declared tasks are written into a baseline file and hashed before the first candidate run. A verdict names that hash and the gate refuses an input that names another one. |
-| **R7 judge integrity** | The judge (kind and identity) is part of the baseline, and the input must name the same one: a scorer swapped after the freeze is refused, and a model judge cannot be declared deterministic to skip its receipt. A model judge is allowed only with a passed self-test receipt for the same scorer: `scorer_id` equal to the identity, `passed` true, and `pairs_hash` and `build_sha256` each 64 lower-case hex characters. Until a scorer has a receipt, only deterministic checks (the acceptance DSL, exact match) judge. The gate only reads the receipt; the verb that produces it (`gate selftest`) is a later change. |
+| **R7 judge integrity** | The judge (kind and identity) is part of the baseline, and the input must name the same one: a scorer swapped after the freeze is refused, and a model judge cannot be declared deterministic to skip its receipt. A model judge is allowed only with a passed self-test receipt for the same scorer: `scorer_id` equal to the identity, `passed` true, and `pairs_hash` and `build_sha256` each 64 lower-case hex characters. Until a scorer has a receipt, only deterministic checks (the acceptance DSL, exact match) judge. The gate only reads the receipt; `gate selftest` produces it (see Verbs and exit codes). |
 | **R8 eras** | Every result carries the stamps of the two runs, the judge identity and an **era marker**. Results with different era markers are never compared; a comparison re-runs the incumbent in the new era. |
 
 The gate has **no effect-size floor**: the verdict is the interval alone. A caller that also wants a minimum effect keeps
@@ -360,7 +361,7 @@ machine-local and never committed; `freeze` and `check` reproduce from the hash,
 **Gate input** (what `gate verdict --input` reads; `gate schema` prints its JSON Schema, draft 2020-12). `baseline_hash`;
 `incumbent` (an arm; required unless the baseline froze one; when both exist they must be equal); `candidate` (an arm);
 `judge {kind, identity}`, which must be the judge the baseline froze; `receipt {scorer_id, pairs_hash, passed, build_sha256}`
-for a model judge (the two hashes are 64 lower-case hex characters). An arm is
+for a model judge (`gate selftest` prints it; the two hashes are 64 lower-case hex characters). An arm is
 `{stamps {harness_build_sha256, seat_config_sha256, engine_build}, tasks [{id, attempts [{outcome, score, metrics}]}]}`.
 Stamps come from the runs that produced the scores, never from the gate binary. A metric value is finite and not
 negative. A metric value of `null` (or an absent key) is **unresolved**: it stays unresolved end to end, the pair is
@@ -396,9 +397,10 @@ an outcome word outside the seven; incomplete stamps on either arm. A refusal ex
 ## Verbs and exit codes
 
 ```
-local-offload gate freeze  --prereg P --corpus C [--incumbent ARM] --out BASELINE
-local-offload gate check   --baseline BASELINE [--expect-hash SHA256]
-local-offload gate verdict --baseline BASELINE --input INPUT [--require-adopt]
+local-offload gate freeze   --prereg P --corpus C [--incumbent ARM] --out BASELINE
+local-offload gate check    --baseline BASELINE [--expect-hash SHA256]
+local-offload gate verdict  --baseline BASELINE --input INPUT [--require-adopt]
+local-offload gate selftest --pairs PAIRS --scorer ID [--out RECEIPT]
 local-offload gate schema
 ```
 
@@ -414,21 +416,41 @@ local-offload gate schema
   adapter takes `baseline_hash` from `freeze`'s output (or a hash it recorded then), never from a later `gate check` of
   the file, and passes `--expect-hash` when it wants `check` itself to refuse.
 - `verdict` runs the gate and prints the result as indented JSON.
+- `selftest` ranks a file of control pairs with a named scorer and prints the receipt a model judge needs (rule R7), in
+  the shape of the gate input's `receipt`: `{"scorer_id", "pairs_hash", "passed", "build_sha256"}`.
+  - `--pairs` is a JSON array of `{name, good, degraded}`, the control pairs of the compaction eval. Unknown fields and
+    trailing data are refused, and so is an empty array: a self-test with nothing to rank proves nothing.
+  - `pairs_hash` is the SHA-256 of the pairs file's bytes, so the same pairs in another file are another hash.
+    `build_sha256` is the SHA-256 of the executable that ran the self-test (the hash `verdict` prints as
+    `gate_build_sha256`). `scorer_id` is the `--scorer` id, and the judge identity the baseline freezes is that id.
+  - The scorer must score every pair's good side above its degraded side. A tie is a failure, and the first
+    mis-ranking ends the run. A failed self-test still prints the receipt, with `passed` false, writes the mis-ranking
+    to stderr and exits 1; the gate refuses that receipt. A run that never reached a finding (an unreadable, malformed or
+    empty pairs file, an unknown scorer, a scorer that returned an error, a build that cannot be hashed) prints no
+    receipt and exits 2.
+  - `--out` also writes the receipt to a file and replaces one that is there, so that a failing run does not leave an
+    older passing receipt behind.
+  - Scorers: `compaction-outcome`, the outcome scorer of `compaction-eval ab` (accept, then entity recall over a summary
+    of the transcript, through the configured seat). It reads `--config`. A seat that is down scores every side 0, which
+    is a tie, so it fails the self-test rather than erroring. The receipt binds the scorer id, the pairs and the
+    harness build; it does not say which model answered, which the stamps of the runs carry (`seat_config_sha256`).
 - `schema` prints the embedded input schema.
 - A global `--config <path>` (or `--config=<path>`) before the subcommand, as in `local-offload --config x.json gate
-  schema`, is accepted and ignored: the gate reads no config.
+  schema`, is accepted by every subcommand. `selftest` reads it, to reach the seat of a scorer that calls one; the
+  others ignore it: the gate reads no config.
 - `-h` and `--help` print the usage and exit 0, as the other verbs do whose flags are parsed with `flag.ExitOnError`.
 
 | exit | meaning |
 |---|---|
-| 0 | the command ran; for `verdict`, a verdict was produced (ADOPT, BLOCK or INCONCLUSIVE); also `-h` |
-| 1 | `verdict --require-adopt` and the verdict is not ADOPT (the result is still printed) |
-| 2 | a refusal (bad hash, bad receipt, malformed or unreadable input, a baseline that is not the frozen bytes, a freeze the gate cannot honour), a result that could not be written, or a usage error |
+| 0 | the command ran; for `verdict`, a verdict was produced (ADOPT, BLOCK or INCONCLUSIVE); for `selftest`, the scorer ranked every pair; also `-h` |
+| 1 | `verdict --require-adopt` and the verdict is not ADOPT; `selftest` and the scorer mis-ranked a pair (the result, the receipt with `passed` false, is still printed) |
+| 2 | a refusal (bad hash, bad receipt, malformed or unreadable input, a baseline that is not the frozen bytes, a freeze the gate cannot honour; for `selftest`, no pairs, an unknown scorer, a scorer that returned an error, or a build that cannot be hashed), a result that could not be written, or a usage error |
 
-Every failure of `verdict` is 2, so 1 can only mean a verdict. Read the verdict from stdout, not the exit code alone
-(`-h` exits 0, and a refusal prints no verdict): 0 from `verdict` means a verdict was produced, whichever it is; use
-`--require-adopt` when the exit code has to mean ADOPT. The verb reads only the files it is named and writes only
-`freeze --out`.
+Every failure of `verdict`, and every `selftest` run that did not reach a finding, is 2, so 1 can only mean a finding.
+Read the verdict from stdout, not the exit code alone (`-h` exits 0, and a refusal prints no verdict): 0 from `verdict`
+means a verdict was produced, whichever it is; use `--require-adopt` when the exit code has to mean ADOPT. Read a
+receipt's `passed`, not the exit code alone, before it goes into a gate input. The verb reads only the files it is named
+and writes only `freeze --out` and `selftest --out`.
 
 ## The power note
 

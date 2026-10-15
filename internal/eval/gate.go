@@ -25,9 +25,9 @@ type Judge struct {
 	Identity string `json:"identity"` // scorer id, e.g. "acceptance-dsl" or a model id
 }
 
-// JudgeReceipt is the self-test receipt `gate selftest` (a later change) produces for a model
-// judge. Data only here: the gate checks that the scorer matches and that both hashes are 64
-// lower-case hex characters, not what they hash.
+// JudgeReceipt is the self-test receipt `gate selftest` produces for a model judge. Data only
+// here: the gate checks that the scorer matches and that both hashes are 64 lower-case hex
+// characters, not what they hash.
 type JudgeReceipt struct {
 	ScorerID  string `json:"scorer_id"`
 	PairsHash string `json:"pairs_hash"`
