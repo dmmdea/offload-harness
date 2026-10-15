@@ -307,8 +307,25 @@ func TestRecipeAuditRefusesBadInputBeforeAnySeatCall(t *testing.T) {
 			return e.args()
 		}, refusalInput},
 		{"a contract with no acceptance check", func(t *testing.T, e *raEnv) []string {
-			raw := `[{"id":"task-01","contract":{"schema_version":1,"goal":"g"}}]`
-			if err := os.WriteFile(e.tasks, []byte(raw), 0o644); err != nil {
+			// Every declared task has its contract and only the fifth has no acceptance check, so no other
+			// refusal can stand in for the acceptance guard.
+			type entry struct {
+				ID       string             `json:"id"`
+				Contract core.AgentContract `json:"contract"`
+			}
+			var list []entry
+			for i, id := range raTaskIDs() {
+				c := core.AgentContract{SchemaVersion: core.AgentWireSchemaVersion, Goal: id, Acceptance: []string{"contains:DONE"}}
+				if i == 4 {
+					c.Acceptance = nil
+				}
+				list = append(list, entry{ID: id, Contract: c})
+			}
+			raw, err := json.Marshal(list)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(e.tasks, raw, 0o644); err != nil {
 				t.Fatal(err)
 			}
 			return e.args()
