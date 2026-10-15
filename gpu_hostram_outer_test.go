@@ -348,3 +348,52 @@ func TestADrainErrorSaysWhenTheOuterBoundReleasedTheLease(t *testing.T) {
 		t.Errorf("a bound that has not passed did not release anything: %v", future)
 	}
 }
+
+// Round 5. With the hold bound off (--ram-hold-max 0) the wait for the host is ended by --wait alone, and so is a reserve that dies
+// during the drain or the unload: the outer stamp is the --wait deadline, kept ahead of a live reserve by the same ticker (never
+// behind now plus the slack), and the stamp says it is the outer phase. Before, there was no stamp: a dead parent left the holder
+// nothing to act on until `gpu release`.
+func TestAReserveWithNoHoldBoundStampsTheWaitDeadlineAsItsOuterBound(t *testing.T) {
+	f := &orderedSwap{drainSwap: &drainSwap{}}
+	f.loaded.Store(true)
+	f.inflight.Store(1) // the drain waits: the reserve is "dying" in it
+	cfgPath, m := handoffFixture(t, f)
+	useSeatBackedHost(t, f.loaded.Load, 95, 70)
+	shortFloor(t, time.Second)
+	fastHolder(t)
+	advance := heldHolderClock(t)
+	holderDone := detachWithRealHolder(t)
+
+	started := time.Now()
+	args := append([]string{"--config", cfgPath, "--ram-hold-max", "0"}, strings.Fields("--detach --for 1h --wait 1h --drain --unload-seat --ram 30 --reason film")...)
+	reserveDone := make(chan error, 1)
+	go func() { reserveDone <- runGPUReserve(args) }()
+	t.Cleanup(func() {
+		f.inflight.Store(0)
+		releaseAll(t, m)
+		select {
+		case <-reserveDone:
+		case <-time.After(40 * time.Second):
+		}
+		select {
+		case <-holderDone:
+		case <-time.After(10 * time.Second):
+		}
+	})
+
+	l := firstStamp(t, m)
+	want := started.Add(time.Hour) // the --wait deadline: no bound, so --wait alone ends it
+	if d := l.HostRAMHoldUntil.Sub(want); d < -5*time.Second || d > 30*time.Second {
+		t.Errorf("with no hold bound the outer stamp is the --wait deadline (%s), got %s", want, l.HostRAMHoldUntil)
+	}
+	if l.HostRAMHoldPhase != gpulease.HoldPhaseOuter {
+		t.Errorf("the stamp is the outer phase: %q", l.HostRAMHoldPhase)
+	}
+
+	// The reserve never comes back from the drain (dead, for this purpose): the holder sees the moment pass and releases the lease.
+	advance(l.HostRAMHoldUntil.Add(holdBoundGrace + time.Second))
+	holderEnds(t, holderDone, 20*time.Second)
+	if m.Inspect().Held {
+		t.Errorf("the holder ended but the lease is still held: %+v", m.Inspect())
+	}
+}

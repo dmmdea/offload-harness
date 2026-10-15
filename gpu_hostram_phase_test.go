@@ -39,7 +39,7 @@ func TestStatusDuringTheDrainAndTheUnloadDoesNotPromiseAReleaseForAHostThatWasNe
 	}
 
 	// The outer bound: a reserve that is draining and unloading keeps it moving.
-	outer := startOuterBound(m, l.Epoch(), true, 10*time.Minute, io.Discard)
+	outer := startOuterBound(m, l.Epoch(), true, 10*time.Minute, time.Time{}, io.Discard)
 	out := statusText()
 	at := outer.Stop()
 	if at.IsZero() {

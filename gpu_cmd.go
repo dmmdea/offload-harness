@@ -644,7 +644,7 @@ func runGPUReserve(args []string) (retErr error) {
 			// of now + the hold bound + a slack on the record, re-stamped every few seconds while the drain and the unload run (the
 			// unload is covered by the same ticker). A reserve that dies stops re-stamping and the holder releases the lease within
 			// about the bound plus the slack; the wait replaces it with its real end when it begins.
-			outerB := startOuterBound(m, epoch, awaitRAM > 0 && holdMax > 0, holdMax, os.Stderr)
+			outerB := startOuterBound(m, epoch, awaitRAM > 0 && holdMax > 0, holdMax, hostRAMDeadline(queuedAt, *wait), os.Stderr)
 			merr := detachMaintainReport(m, epoch, loadCfg(fs), *drain, drainDL, *unload, exclusiveAfter, &freed)
 			outer := outerB.Stop() // the last moment on the record, for the message if the wait's own stamp fails
 			if merr != nil {
@@ -1520,7 +1520,7 @@ type outerBound struct {
 
 // startOuterBound stamps the outer bound at once and starts refreshing it. With on false it does nothing and returns nil (Stop of a
 // nil outerBound answers the zero time). A stamp that cannot be written is said once; the refresh goes on trying.
-func startOuterBound(m *gpulease.Manager, epoch uint64, on bool, holdMax time.Duration, warn io.Writer) *outerBound {
+func startOuterBound(m *gpulease.Manager, epoch uint64, on bool, holdMax time.Duration, waitEnd time.Time, warn io.Writer) *outerBound {
 	if !on {
 		return nil
 	}
