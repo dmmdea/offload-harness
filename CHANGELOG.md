@@ -6,6 +6,362 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.188.0] - 2026-10-15 - a graph job declares the weight files its own loaders name instead of the largest family the box binds, doctor says whether the boot-time GPU power profile was applied this boot, a recipe audit verb scores every stored recipe with the measurement gate, ADR 0094 (a lease names its cards, a card has one holder), compaction-eval switches for the two optional rungs, a self-improvement chapter, and four timing-flake fixes
+
+### Added - ADR 0094, a lease names its cards and a card has one holder; dated pointers in ADRs 0018, 0026, 0039 and 0041; the lease guide's Known gaps located and corrected
+
+- **What it records.** One decision record for the rule the card-naming changes share, written from the code at commit `3be61a3c`
+  and not from the older records. A lease names its cards or the whole node; two leases conflict when either is whole-node or
+  their card lists share a card; the grant creates each card's claim exclusively under the epoch lock, and a whole-node grant
+  verifies the other side; the fence is per epoch; nothing frees a card from a holder that may still be using it except an
+  explicit release by epoch, which checks no liveness; the writer is a per-host switch behind a green reader audit; every
+  consumer asks about its own cards and a doubt reads as every card; a busy card is a place in line. Every behaviour cites
+  `path:line` and a symbol. Status Accepted covers only that part. The decisions README keeps the move to Accepted with the
+  operator, so the release review may set the status back to Proposed.
+- **What it does not decide.** A separate section lists what is not built and names the constraint the Accepted clauses put on
+  it: a takeover that stops a job and then frees its claim (three status surfaces name `gpu takeover`, which is not a verb), a
+  release that waits for a dead tree and a writer for the `quarantine.<id>` sidecars, an overdue policy beyond the request, a
+  media plan that always names its cards (the voice, iGPU and sd.cpp lanes, a graph with no device, and every plan that cannot
+  name a card hold the whole node; the card-only pair is refused instead), a pool of local workers across cards, and a scripted acceptance of the whole path.
+- **Pointers.** ADRs 0018, 0026, 0039 and 0041 each get a dated amendment of one or two sentences pointing at it, in the
+  convention of that file; their decisions are unchanged. The ADR index has the row. ADR 0055 is cross-referenced from the new
+  record only.
+- **The lease guide.** `docs/systems/gpu-lease.md` keeps its one Known gaps section and puts three groups in front of the older
+  gaps: what is not built, the windows the host-RAM hold bound's entry lists as open (each now with the file and symbol it lives
+  in), and the text that disagrees with the code. Where the guide and the code disagreed, the guide was corrected: it said the
+  session registry's writer was not wired in, and the MCP server writes it when it starts (`registerSession`); what stays
+  unverified is whether a given Claude Code build hands its MCP server the session id.
+- **Disagreements found and left for their owners** (they sit in code comments and accepted ADRs, which this change does not
+  edit): `devices.go` still calls the dropped whole-node record "pending acceptance"; `term.go` and ADR 0070 repeat the registry
+  sentence; `proctree/stop.go` says the yield request uses the stop primitives, and nothing does; ADR 0026 says the default
+  lease window is stamped on nearly every media lease, and the routes pass their own timeout; ADR 0055's out-of-scope note on the
+  reclaim rule reads as if progress played no part, and it decides a term's label.
+- **Tests.** Documents only, no code. The existing number-and-index test (`TestADRNumbersAreUnique`) was red on the commit that
+  added the record alone ("not linked from docs/architecture/decisions/README.md") and is green with the index row; the docs lint
+  and the leak gate run in the root package.
+
+### Fixed - the gate page says what a judge receipt does and does not bind
+
+- **The receipt is checked for its shape, not for what it hashes.** `gate verdict` accepts a model judge's receipt when
+  its scorer id is the judge identity, `passed` is true and both hashes are 64 lower-case hex characters. It does not
+  compare `pairs_hash` with a pairs file or `build_sha256` with any build, so a receipt written by an older build still
+  certifies a scorer that kept its id. The page said the receipt "binds" the build; it now says the receipt records it,
+  states what the gate checks, and says that a scorer whose behaviour changes gets a new receipt or a new id by
+  convention, which the gate does not enforce. Docs only.
+
+### Added - `docs/systems/self-improvement.md`: how the harness improves itself on evidence, one page that maps the discipline, the failure register, the trace-corpus readout, the measurement gate and SHA-bound review evidence
+
+- **The gap.** Four pieces of the evidence loop each have a page of their own, and nothing said how they fit: that a readout never decides, that only the measurement gate adopts, that a rate nobody measured is `null` (and a trace-corpus total reads 0 with the recorded count beside it), and which of the pieces is the one that can say "better". A reader met `BELOW_GATE` in the trace-corpus report and could take it for an ADOPT.
+- **What the page holds.** The discipline (measure, gate, adopt or keep the incumbent; quality is the only gate and no pass rule carries a wall-time term), then one section per part that is on main, each naming the verb or tool that runs it, what it answers, the rules that keep it honest, and the code and the page that own the detail: `local-offload ledger --failures` (the six closed kinds, refused attempts set aside, unparsed lines and a missing ledger counted, the cause and fix kept as a person's), `local-offload trace-corpus` (harvest, readout, freeze, check; the pager re-fetch rate against its 10 % gate; the compaction pass count; every rate reads `null` when unrecorded and a total reads 0 beside `recorded_runs` and `unrecorded_runs`), `local-offload gate` (freeze, check, verdict, schema, selftest; the rules in short; the judge receipt), and `offload_review_diff` (the diff fingerprint, the optional base and head commits echoed and never resolved, gates first, the five outcomes with `NOT_RUN` never a PASS, the second fingerprint check, the durable trace beside the ledger). It also says what each command writes (nothing, only its `--out` file, or, for `gate selftest` with its real scorer and for a review, what a pipeline call writes: ledger rows and the result cache, the run's ledger row and the review trace), and lists the entry points, the invariants, the privacy notes, the tests and the pitfalls.
+- **Two parts marked "not on main yet".** The evidence-preserving reducer rung and the recipe store with its audit verb each get one short paragraph: proposed, what it will do in one sentence, and that it stays off until its own gate measurement passes. Their code is not described because it is not merged.
+- **The index.** `docs/README.md` links the page under Systems. `docs/architecture/decisions/README.md` is not touched.
+- **Every claim was read against the code at this head**, not carried over from another page: the closed kinds and reason codes, the refusal rule, `PagerGate` and the verdict names, `NoteCompaction`'s three call sites, the gate's constants (version 3, `min_pairs` 16, `max_excluded_share` 0.20), the receipt fields, the exit codes, `Decide`'s order, `MaxDiffBytes` and the trace file mode. Where an ADR is the only source of a figure (the first trace-corpus readout) the page says so and does not re-measure it.
+- **Tests.** Red first: the index line was committed alone and `TestDocsLint` failed with `docs\README.md: broken relative link "systems/self-improvement.md"`; the page turns it green. A review then found the page wider than the code in two places, and each got a failing test before its fix (`self_improvement_docs_test.go`, the only Go file on this branch): the page said every command but `ledger --failures` writes only its `--out` file, when `gate selftest` with its real scorer also writes ledger rows and the result cache; and it said the trace-corpus readout's totals read `null`, when only its rates do (its totals are sums that read 0). Each test pairs a page check with a pin on the code (a stub seat for `gate selftest`, a run that recorded nothing for the readout), so a later change to the code fails the test instead of leaving the page wrong. `docs/systems/measurement-gate.md` carried the same writes sentence and is corrected with its own test; the header comment of `gate_cmd.go` carries it too and is left for a Go change.
+- **Checks.** `TestDocsLint`, `TestADRNumbersAreUnique`, the changelog and fragment tests, `TestOpenSpec`, `go run ./cmd/changelog check`, the docs-tier currency test, and the keyed leak gate scans over the new page and this fragment.
+- **Not verified here.** Nothing on this branch needs a GPU lease or a live seat, and none was taken. The page cites `gate selftest` (which reaches a seat for its scorer), a live `ledger --failures` run and a `trace-corpus harvest` over real logs, and none of the three was run for this change; what the page says about them comes from reading the code and the tests. The `gate selftest` pin runs the real scorer against a stub seat with every path redirected to a temp dir, so it shows the ledger and cache writes without a seat; a live selftest was not run.
+
+### Added - compaction-eval can switch on the search-results and log-collapse rungs
+
+- **The verb can now measure the two rungs.** `compaction-eval run`, `freeze`, `ab` and `kvbench` take `--search-results` and
+  `--log-collapse`, added to `--gcf --skeleton`. They flow through `agent.ReplayOpts` and `compeval.LadderOpts` into the same
+  production ladder every other flag reaches, and the report's `ladder` names the arm (`gcf+skeleton+search`,
+  `gcf+skeleton+logs`, `gcf+skeleton+search+logs`). Until now neither rung could be replayed, so neither could be judged by the
+  measurement gate.
+- **No default or production path changes.** The rungs stay off in the live loop, `compact()` is untouched, and the pinned
+  default-ladder golden is unchanged. Without a rung flag, `compaction-eval run` prints the same bytes as before; two golden
+  outputs recorded from the verb before the change pin that.
+- **`kvbench --arms on`** runs only the ladder arm and skips the raw arm, which a candidate-versus-incumbent comparison does not
+  need (an unknown or repeated arm is refused; with one arm there is nothing to pair, so the paired totals stay empty).
+- **`kvbench`** samples now carry **`sent_sha256`**, the sha256 of the transcript the ladder produced, taken before the nonce salt
+  (its canonical encoding, not the HTTP body). It does not depend on the run's nonce, so two runs with their own fresh nonces
+  prove a pair a no-op when the hashes of a step are equal, and a different hash proves the rung rewrote the request.
+  `--nonce N` sets the body salt; reuse it only on a cold seat, since a warm seat serves the second run's unchanged prompts from
+  the first run's cache. The calibration controls draw their own nonce every run (`control_nonce` in the report), so a reused
+  `--nonce` no longer replays the first run's negative control into the cache and fails the second run.
+- Each behaviour has a test that failed first: the replay options (not passed to the ladder), the labels, the rung
+  turning on in `run`, `ab` and `kvbench` on transcripts whose older turns hold a search listing or a repetitive build log, the
+  other rung's entry staying unchanged, `--arms on`, a no-op pair with equal `sent_sha256` and a changed pair with a different
+  one, one body nonce and one control nonce across the requests of a run, the same `sent_sha256` for one transcript under two nonces,
+  and a second run on a multi-prompt-cache seat that reuses the first run's nonce staying admissible.
+
+### Not verified here
+
+- No model-backed run: `ab` was exercised with a fake scorer and `kvbench` with a fake serving endpoint, so no accuracy or
+  forwarded-token result for either rung exists yet. That needs a corpus whose older turns carry search listings and build logs,
+  and a seat.
+- `ab` was not driven through the verb itself (it opens the live pipeline); its flag reaches `RunAB` through the same options
+  value `run` and `kvbench` use, and `RunAB` is tested with both rungs.
+
+### Added - doctor says whether the boot-time GPU power profile was applied this boot
+
+- **The defect.** A box can apply a GPU power limit and a clock lock at boot with a separate tool. When that step is
+  skipped, refused or blocked the card runs at stock limits, and the only record was in the tool's own log. Nothing in
+  `doctor` or the fleet view said so, so a box could run for days at stock limits with every row green.
+- **What it does.** `doctor` prints one `power:` row from the state record the tool writes on every run (refusals
+  included). `OK` says a profile was applied since this boot began, how long ago and how many steps returned success.
+  `WARN` says no profile was applied this boot (once the box has been up ten minutes; a box just started gets a `SKIP`
+  that says the boot apply is not yet due), or names the outcome that left the profile out (dry run, refusal, failure,
+  empty plan, the tool's crash guard, which says only that the run applied nothing and how each kind of cookie ends,
+  never that the card is at stock limits), or says the apply was partial (a step short of the plan, a lever skipped
+  other than by the tool's own design, a driver that differs from the profile's stamp). `UNKNOWN` names why the file
+  cannot be trusted (unreadable, not JSON, another schema, no usable time) and is never reported as absent. No state
+  file is one `SKIP` line saying nothing is recorded, not an error. The file is found only by
+  `LOCAL_OFFLOAD_POWER_PROFILE_STATE`, which holds the path of the tool's state file; there is no platform default, so
+  a box sets the variable and reads `SKIP` until it does.
+- **What it does not do.** It reads the record, not the card: it does not compare the recorded limit and lock with the
+  driver's live values, because the harness has no reader of a card's power limit or clock lock. That comparison, and a
+  `power_profile` block on `/fleet/health` so the delegator and `offload_status` can show it for every node, are the
+  follow-ups. The row is informational like the capacity row and never changes doctor's exit code. It prints no path,
+  host name, card id or the tool's free-form detail.
+- **Tests.** Written red first (a stub row that prints nothing, 12 failing tests), one per behaviour: absent file, whole
+  apply this boot, last record older than the boot, boot apply not yet due, every outcome that leaves the profile out,
+  partial applies and skips by design, unknown boot time, untrustworthy files, the record shape the tool really writes,
+  the path resolver, the boot-time reader on Windows and Linux, the age text, and the doctor registration. Seven mutations
+  of the row (age truncated not rounded, by-design skips counted, boot check off, grace off, absent read as unknown,
+  driver mismatch ignored, dry-run flag ignored) each fail at least one test. A second pass added tests for the
+  `cookie_blocked` wording, the filter that keeps a record's free text and control characters out of the row, the skip
+  list read as an array, a bare string and null, the clock slack (inside it, at its edge and past it), a record with no
+  `schema_version`, a timestamp with stray whitespace, the ten-minute boot-apply boundary and the read-failure reason;
+  nine more mutations of the row (outcome filter off, plain list decoder, slack zero, slack widened, slack bound
+  exclusive, schema-less message folded, timestamp trim off, grace bound inclusive, permission message dropped) each
+  fail at least one of them.
+- **Docs.** `docs/OPERATOR-GUIDE.md`, next to the capacity and `lan ip:` rows.
+
+### Added - `recipe-audit` and the recipe store: ADR 0036's rules for what a proposer may build, and the audit that publishes or demotes a candidate rule set
+
+- **What it does.** A recipe is a candidate edit to a seat's `agent_env_rules`, kept as a typed record (`internal/recipe`):
+  `id`, `seat_tag` (the capability class of the seat it was distilled for), `rules` (the closed vocabulary), `provenance`
+  (the acceptance-passing runs it came from) and `status` (`proposed | published | demoted`), plus the `audit` that set the
+  status. `local-offload recipe-audit` (one `case` line and one usage line in `main.go`) runs a set of contracts on one seat
+  twice, with and without the recipe, under the GPU lease, judged by the acceptance DSL, and publishes the recipe only on a
+  measurement-gate ADOPT with the candidate's mean steps no worse than the incumbent's. Anything else demotes it; a demoted
+  recipe stays in the store with its audit. No proposer is built.
+- **The amendment (ADR 0036, "Amendment 2026-10-15").** Candidates are closed-vocabulary data, never code. The proposer
+  proposes and never applies. Only the branch, the parallelism and the stop class are replay-scorable (`deny_tools`,
+  `allow_tools`, `max_calls_per_tool`); rules that rewrite what the seat reads (`max_observation_tokens`,
+  `observation_strip`, `rewrite_error`, and `arg_limits`, which changes what a call returns) need a live A/B. Recipes are
+  distilled only from acceptance-passing runs and carry a seat-capability tag. No proposer is built until trace-bearing rows
+  number in the hundreds; the amendment says so and builds none. The ADR index row is unchanged: its text is the ADR's title.
+- **Strict decoding.** The record has six keys and refuses any other, in the rule set and the audit too, so `rules_code` is an
+  unknown key. A rule set that changes nothing is refused, so is a recipe with no provenance, a duplicate run id, an id that
+  is not a slug (the id is the file name, so it cannot name a path) and a `published` record that does not carry an ADOPT
+  audit with steps no worse. Every string must be shaped like rule data: lower-case identifiers for tool and argument
+  names, one line of plain ASCII (letters, digits, spaces and `. , : ' _ / -`, at most 160 bytes) for a `rewrite_error`
+  text, and a printable-ASCII pattern of at most 200 bytes that does not match the empty string (such a pattern fires on
+  every result). The shapes keep the store from holding anything that is not data; what keeps a recipe harmless is that an
+  env rule never grants or denies an effect.
+- **The store.** One `<id>.json` per recipe (default `<data home>/recipes`, or `--store`), canonical bytes, written to a
+  temporary name and renamed over the old file. A file whose record names another id than its name is refused, and a listing
+  fails by file name on a bad record. `internal/recipe/scoring.go` classifies every key of the vocabulary as replay-scorable
+  or live-A/B; a reflection test fails when `core.AgentEnvRules` gains a key nobody classified.
+- **The verb.** `recipe-audit --recipe ID --seat ALIAS --seat-tag TAG --contracts TASKS.json --baseline BASELINE.json
+  --engine-build STR [--store DIR] [--attempts N] [--input-out FILE]`. It refuses with a typed refusal and exit 2, before any
+  seat call, when there is no `GPU_LEASE_EPOCH`, when the epoch is not a live lease in the lease directory
+  (`gpulease.EpochIsCurrent`), when `--seat-tag` is not the recipe's, and on input the store or the gate will not take (an
+  undeclared or repeated task, a declared task with no contract, a contract with no acceptance check, a baseline that froze
+  an incumbent or a judge other than `{deterministic, acceptance-dsl}`, a primary class other than `unit_interval`, an
+  efficiency class other than `tokens`, a baseline that is not the frozen bytes, a build the gate cannot stamp). It never
+  takes a lease and asks again before every seat call: a lease that moves on mid-audit ends it with exit 2 and records
+  nothing, and so does a seat whose pin moves or is missing (`seat_pin`, below). The gate input is built as
+  `gate verdict` builds it (`eval.CheckBaseline`, `eval.Gate`, the build hash on the result); `--input-out` writes it, and a
+  test pins that `gate verdict` on that file gives the printed result byte for byte. gate_cmd.go is not edited.
+- **Decisions taken, with the default.**
+  - The candidate arm replaces the box's table with the recipe's rules (the semantics of `local-agent --env-rules`); the
+    incumbent arm is the box's own table, untouched. Each task runs on both arms, attempt after attempt, and which arm goes
+    first alternates by task.
+  - A finished run is judged by the acceptance DSL (pass scores 1, fail scores 0), which is why the primary must be on the
+    unit interval. A runner error and an infrastructure, config, contract, capacity or write defer are `infra_error`. A budget
+    the seat itself spent without finishing is `task_fail`, because the seat used it and did not finish: the step budget, a
+    tool call cut at the completion budget twice, a final answer the think block starved twice. A budget a clock or a
+    caller ended (the wall, a ceiling, a canceled parent, a re-pack the clock could not buy) is `timeout`. The gate imputes
+    the candidate's unfinished attempts at the worst score and skips the incumbent's.
+  - Steps are the verb's own check beside the gate: the mean over the tasks that finished on both arms, candidate no greater
+    than incumbent, at least one such task. The gate's efficiency classes are tokens, money and memory, never a count of
+    steps. A declared `tokens` metric is read from the run's forwarded prefill tokens and is unresolved when the run has no
+    prefill accounting. A money or memory metric could never be resolved, so a baseline that declares one is refused.
+  - The era is the seat that served the runs. The harness pins the served seat on every served run
+    (`wire.SeatConfigSHA256`, from `agent.ProbeSeatPin`); both arms' stamps carry the harness build, the engine build and a
+    hash of the seat alias, its endpoint, that pin and the env-rule table the arm ran under, so a model, quant or window
+    swapped behind the alias moves the stamps and the gate's era marker, and the arms differ by the table. The pin must be the
+    same on every served run of both arms: one that moves mid-audit, a served run with none, and an audit in which nothing
+    was served are `seat_pin` refusals (exit 2, nothing recorded), the first two at the run that shows it. A run that is
+    scored as a verdict about the task counts as served, a spent budget and an abstention included, because the harness
+    stamps the pin before every terminal branch; a run that ended before the seat served it (a runner error, an
+    infrastructure defer, a ceiling or a canceled parent) carries none by design and is not held to one. `--engine-build`
+    stays required: it names the engine in the operator's words.
+  - `--seat-tag` is required and must equal the recipe's: a recipe is evidence about one class of seat. The tag is a slug the
+    operator chooses; the harness checks its shape and the match, not a vocabulary.
+- **Tests.** Red first, each committed failing before the code that fixed it: the unknown top-level key, `rules_code` inside
+  the rules, free text and code outside the vocabulary (18 cases), the empty rule set and missing provenance, the published
+  record without the audit its status needs (seven cases), the store and the scoring partition; then the verb's refusals (no lease, a lease
+  this process does not hold, a lease lost between runs, a seat-tag mismatch, 19 kinds of bad input), publish on an ADOPT
+  with fewer steps, demote when the steps got worse, demote on a block and on a tie, the gate-input parity, the outcome
+  mapping and the metric mapping. A review then found more to pin: a primary off the unit interval, a money or
+  memory metric, an unhashable build and a short contracts file (each refused before the seat is asked); a spent completion
+  budget read as a timeout; a seat swapped behind the alias (the pin in the stamps, a pin that moves, a served run with no
+  pin, nothing served); and the steps rule's tie, its unfinished attempts, `--attempts` and the arm order, which five
+  surviving one-line mutants had left unpinned. A fake seat stands in for the model; one test runs the verb against a real lease taken in a
+  temporary lease directory and again after it is released. Mutations run and killed: the up-front and the per-run lease
+  checks removed, the seat-tag check removed, the steps check removed from the publish rule, publish on any verdict, the steps
+  comparison inverted, a tie in steps demoting, a pair that needs only one arm, an unfinished attempt counted as steps,
+  `--attempts` ignored, the arm order never alternating, the candidate arm stamped with the incumbent's rule table, an
+  unmeasured run read as zero tokens, a spent step budget read as a timeout, a frozen incumbent
+  allowed, an undeclared task allowed, a contract without acceptance allowed, the candidate arm running the box's table,
+  unknown fields allowed, the text charset widened to code characters, the empty-match pattern allowed, a record published
+  without an audit or with worse steps, a proposed record carrying an audit, tool names unchecked, duplicate provenance
+  allowed, a record accepted from the wrong file, and a replay key reclassified.
+- **Not verified here.**
+  - A real audit. Nothing in this change ran a model, took a lease or loaded a seat: the seat is a fake, and the real seat
+    (`recipePipelineSeat`, one pipeline per arm through `RunAgentContract`) is covered only by the unit test of the config
+    each arm runs under. The first real audit has to run under `gpu reserve` on a live seat and read the printed report.
+  - That the 16-task floor of the gate is reachable with contracts a recipe actually changes the behaviour of, and what
+    `--attempts` above 1 does to the cost of an audit on a real seat.
+  - That the forwarded prefill tokens of a real run are present on the wire result of the seat in question; the metric is
+    tested on scripted results.
+  - That a real seat's pin reaches `wire.SeatConfigSHA256` on every served run, and how often the probe's three-second
+    bound misses it: an unpinned served run ends the audit, so a flaky probe costs a re-run. The pin check is tested on a
+    fake seat that stamps or withholds the field.
+  - That the budget-class split (the seat's own spent budget against a clock or a caller) matches live defers: it is read
+    from the defer sites in `internal/pipeline/agenttask.go` and tested on scripted results.
+  - That a provenance run id names an acceptance-passing run. The store checks the shape of the ids; the delegation log is
+    the evidence and nothing here reads it.
+  - That a published recipe helps in use: nothing applies one. An operator copies its rule set into the seat's table.
+
+### Fixed - the busy-hold tests no longer fail on a starved host: they keep the fake's request silent until the run is in the hold, and the ceiling test asserts the hold instead of a share of its ceiling
+
+- **The flake.** `TestRunAgentTaskCeilingWhileHeldIsNotABudgetDefer` failed in CI on a change that touched only `internal/eval`
+  (`precondition: deferred=true queued_ms=394 reason="ceiling 1s reached while held behind the seat's other work ..."`). It required
+  `queued_ms >= 500` of a 1 s ceiling. `queued_ms` is the time booked in the busy hold, and the hold cannot begin until the request's own allowance
+  has run out (200 ms in the test) and the monitor's first look at the engine (the seat probe, then the engine probe's two reads) has returned;
+  the hold is booked from the moment that look returns. A run held for the rest of its life therefore reports about ceiling minus allowance minus
+  the look's latency: 795 ms on a quiet host, 394 ms on the CI runner. The product was right (the class was already capacity, the reason already
+  said "held"); the test assumed a schedule.
+- **A second failure the same test had.** Under load on an idle node it failed two ways. Once as above (`queued_ms=267`, class right). Three
+  times as `ceiling 4s`, `2s` and `1s reached while producing (0 tok at 0.0 tok/s)` with `queued_ms=0`: the run's hold had not been entered when
+  the ceiling fired. In the first two the elapsed figure is above the 1 s ceiling, so the ceiling timer itself fired seconds late: the process was
+  starved for longer than the ceiling, the stall timer and the ceiling were both overdue when it woke, and the ceiling fired while the first look
+  was still in flight. No assertion on queued time can hold there; the ceiling needs room.
+- **The fix (test code only; no production code changed).**
+  - The ceiling test's precondition is that the ceiling found the run in the hold, read from the job record (the last report is `queued`) and
+    `queued_ms > 0`, never how much of the ceiling the hold took. The ceiling is 8 s, so the path to the hold has room, and the silent request now
+    waits on its own context, so the test ends with the run and no longer sleeps 6 s. The decision it pins is unchanged: a run held when its
+    ceiling fires is not a budget defer and does not say "while producing".
+  - Five more tests had the same shape: a fixed silence (1.5 s, 2 x 800 ms, 900 ms, 800 ms, 600 ms) followed by an assertion that the hold booked a fixed
+    share of it (`queued_ms` at least 800, 900 and 400) or that the job record showed the hold at all. They fail the same way when the first look is
+    late. A `holdWatch` reads the job record, and the fake keeps the request silent until the record has said `queued` and then for a stated time
+    (600 ms, 2 x 300 ms, 400 ms, 100 ms, 350 ms); the tests assert at least that time. `TestRunAgentTaskHeldRunDoesNotFeedTheSeatRates` gets the same wait on
+    its held arm; its control arm is unchanged.
+- **Proved** (stress mode of the remote gate runner on an idle node: W concurrent copies of the compiled test binary by N runs each).
+  - Red under load, the ceiling test unfixed: `--stress 4:20 --burn 6 --env GOMAXPROCS=2 --test-args '-test.run=^TestRunAgentTaskCeilingWhileHeld'`,
+    4 of 80 failed (one `queued_ms=267`, three `while producing` with `queued_ms=0`), all inside a stretch where the node ran slow (runs of 11 to 29 s
+    against 6 s). Load alone is not a reliable red; the same command on the fixed test passed 80 of 80, but the node had no slow stretch that time,
+    so the rows below carry the proof.
+  - Red, deterministic: the unfixed test with its first engine read answered 600 ms late (a scratch commit, not on the branch), `--stress 4:10`:
+    40 of 40 failed with `queued_ms` 192 to 196 and the reason still saying held, which is the CI message.
+  - Green: the fixed test with the same late read, 0 of 40; with the read 3 s late, 0 of 40; on a Linux node under `--burn 4`, 0 of 32 for the
+    six tests together.
+  - Mutant, product: `CeilingError.Held` always false: the fixed test failed 40 of 40 on the decision line (filed `class=budget`, `while
+    producing`). The pipeline filing every ceiling as budget while the reason still says held: 40 of 40 failed on the same line.
+  - Siblings, red: three of them unfixed under `--stress 4:40 --burn 6 --env GOMAXPROCS=2`: 7 failures in 160 runs, six of them `queued_ms`
+    misses (159, 213 and 0 against 800; 861, 696 and 602 against 900) and one the stall described last, and 14 to 36 of 120 each in a slow stretch
+    of the node. With the late first read, `--stress 4:5`:
+    the 1.5 s test 20 of 20, the two-hold test 20 of 20, the job-record test 17 of 20. The 900 ms decoding test passes that stimulus (its
+    `queued_ms` stays near 700, so the delay does not reach its hold) and failed under load only.
+  - Siblings, green: the same late read, 0 of 20; load, 0 of 160 on the command above. Paired, the six tests together under `--stress 12:10 --burn 6
+    --env GOMAXPROCS=1`: unfixed 1 of 120 (the two-hold test, `queued_ms` 686 against 900), fixed 0 of 120. Mutants: the monitor reporting no queued time failed all four `queued_ms` tests, 12 of 12; a later hold replacing the booked time
+    instead of adding to it failed the two-hold test, 12 of 12 (`queued_ms` 301 to 305 against 600).
+- **Same family, not changed.** `TestRunAgentTaskStallsAWedgedEngine`, `TestRunAgentTaskStallsAThrashingEngine` and
+  `TestRunAgentTaskWithoutASeatAddressKeepsTheOldRule` keep a request silent for 6 s and fail only when the process is starved for more than that
+  (they failed in the same slow stretch and not otherwise); the control arm of `TestRunAgentTaskHeldRunDoesNotFeedTheSeatRates` needs a stall of
+  seconds to be held. A fixed silence is the point of those tests, so they are left as they are. One two-hold run in the red set ended `stalled: no
+  progress for 0s in tool (allowed 120s; 1 tok so far)`: a stall filed with no silence at all, which looks like a stall timer that fired for the
+  phase before. It is not a test matter and is not changed here.
+
+### Fixed - the gate's power note projects a pass/fail record with the interval the gate reads it on
+
+- **73 ties, not 240.** The power note projected every record's half-width as `hw * sqrt(n / n')`. A pass/fail record
+  (every pair a tie, a win or a loss of the whole range) is read on Tango's interval, whose half-width for an all-tie
+  record is `z^2 / (n + z^2)` and shrinks about as `1 / n`. So 16 tied tasks read +-0.194, the gate resolves a 0.05 margin
+  at 73 ties, and the note asked for 240, more than three times what a saturated pair needs. For a pass/fail record the
+  note now projects with Tango's interval at the projected size, holding the observed shares of wins and losses, and
+  `tasks_needed` is the smallest count whose half-width is below the margin (or the observed effect in superiority). Every
+  other record keeps the `1 / sqrt(n)` form. No verdict changes: the note adds no statistic.
+- `TestGatePowerNoteAllTiePassFailUsesTheGatesOwnInterval` (16 ties, margin 0.05) failed on the parent with
+  `tasks_needed = {N:240}, want 73`; `TestGatePowerNote` now pins the Tango projection for its pass/fail superiority record
+  and the `1 / sqrt(n)` projection for its non-pass/fail record. A mutant that turns the Tango branch off fails both.
+
+### Fixed - the iGPU deadline tests and the compose deadline test no longer measure the host's schedule: clocks held still, a ceiling that holds on every schedule, and a marker instead of a wall clock
+
+- **The defect.** `render/igpu-deadline.test.mjs` and `render/compose-hyperframes.test.mjs` each failed once in a full `node --test "render/**/*.test.mjs"` run on a loaded machine and passed alone. Which test failed in each, and with what message, was not recorded, and load alone did not bring either failure back (see "Not reproduced by load alone"). Reading the two files found four assertions whose outcome depends on the schedule and not on the rule they pin. Each was made to fail on demand with an injected stall (see "Red"):
+  - `processStartMs: the moment this process started`: `Math.abs(Date.now() - start - process.uptime() * 1000) < 100` and the `makeDeadline` plus or minus 50 ms check. `processStartMs` subtracts two clocks read one after the other, so a thread that loses its slice between the two reads moves the result by the length of the stall.
+  - `a hanging engine is killed at what is LEFT of the budget`: `timeout after [2-6]s` (video, audio) and `[3-9]s` (animate). The ceiling of those ranges is the rule (the runner spent at least the injected 3 s before it spawned the engine, so the timer is armed for at most the budget minus 3 s; a deadline counted from `main()` would say the whole budget). The floor is not: it holds only while the runner starts within 3.5 s (6.5 s for animate), and node's own start, module loading, an antivirus scan of the stub and a starved CPU all spend budget.
+  - `render: the deadline kills the step and fails TIMEOUT`: `Date.now() - t0 < 7000` around the whole run, which also measures a runner that starts slowly and a test process that is descheduled after the run returned.
+- **The change (test code only; no production code changed).**
+  - The arithmetic of `processStartMs` and `makeDeadline` is pinned over clocks the test holds still (`Date.now` and `process.uptime` replaced inside one synchronous block and restored in `finally`): the start is the clock minus the rounded uptime, the default deadline is 10 s after that start, `remainingMs` is never 0 while active, `enforce` throws exactly at the deadline, an explicit start is used as given. The real clocks are asked only what holds on any schedule: the process started before the test began, and at least 300 ms ago after a 300 ms sleep.
+  - The hanging-engine test keeps the ceiling (budget minus the 3 s slow start: 5 s for video and audio, 9 s for animate) and drops the floor. The one thing the floor caught that matters, an engine that never ran, is now told apart explicitly: the message must be the engine's `timeout after Ns (killed)`, so a start-up that spent the whole budget reads "the engine was never killed by its timer" and not a regex mismatch.
+  - The compose test no longer reads a wall clock. The stub `check` step sleeps 20 s against the 2 s deadline and writes `check.slept` after the sleep; a step that is killed in its sleep never writes it. The marker could only appear if the kill came 18 s late (it was a 5 s margin before).
+- **Red (deterministic; the stalls are throwaway preloads, not committed).** Each command is one test run with `NODE_OPTIONS=--require <hook>`, on an idle Linux node and again on an idle Windows node.
+  - Unit test, a 150 ms stall inside `processStartMs` between the two reads (a preload that wraps `process.uptime`): `node --test --test-name-pattern=processStartMs render/igpu-deadline.test.mjs` failed 5 of 5 runs on Linux and 3 of 3 on Windows, at the `< 100` assertion; 0 of 3 failed without the hook.
+  - Hanging engine, video and audio, 3600 ms of extra start-up in the runner on top of the 3 s the test injects (a preload that busy-waits before the runner's own code): `node --test --test-name-pattern="a hanging engine is killed" render/igpu-deadline.test.mjs` failed 3 of 3 (Linux) and 2 of 2 (Windows) with `sd-cli timeout after 1s (killed)` against `[2-6]`; the runner was right, 1 s is what was left.
+  - Hanging engine, animate, 6500 ms of extra start-up in the animate runner only: failed 3 of 3 (Linux) and 2 of 2 (Windows) with `depth-anything timeout after 2s (killed)` against `[3-9]`.
+  - Compose, the test process stalled 5000 ms after every runner call that carries `--timeout-sec` (a preload that wraps `spawnSync`): `node --test --test-name-pattern="the deadline kills the step" render/compose-hyperframes.test.mjs` failed 3 of 3 (both systems) at `Date.now() - t0 < 7000`; 0 of 2 failed without the hook.
+- **Green.** The same four commands on the changed tests, hooks kept: 0 failures in 5, 3, 3 and 3 runs on Linux (and 0 in 3, 2, 2 and 3 on Windows); without the hooks 0 failures in 3 and 3 runs. Under the load of the next bullet, with the changed tests: 0 failures in 16 runs of `igpu-deadline` and 0 in 30 runs of `compose-hyperframes`.
+- **Mutant.** On a copy of the production code: `processStartMs` returning `Date.now()` (the deadline counted from the call) made the changed `igpu-deadline` file fail in 3 of 3 runs on Linux and 2 of 2 on Windows, on six tests (both unit tests, the hanging-engine test and the three "a start that already spent the budget" tests); only `makeDeadline`'s default start changed to `Date.now()` failed the exact unit test (the real-clock unit test still passed). `runProcess` ignoring the deadline (`const ms = 2147483647`) failed the compose test in 3 of 3 (Linux) and 2 of 2 (Windows) runs; `killTree` made a no-op, so the step is reported as timed out but not killed, failed it in 2 of 2. All mutations were restored byte for byte.
+- **Not reproduced by load alone.**
+  - Windows, 8 cores, Node 24: concurrent copies of one file with no CPU spinner (the first spinners launched exited at once, a quoting defect in the rig): `compose-hyperframes` 98 runs and `igpu-deadline` 28 runs, 0 failures, at up to 16 concurrent copies. With 16 real spinners (CPU at 100 %) and 8 copies: `compose-hyperframes` 24 runs, 0 failures. With 8 spinners at High priority and 8 copies the 8 loaded runs all failed: five tests per run took 90 to 330 s instead of under a second and ended on the helper's own `spawnSync` `timeout: 60000` (`null == 1`, `actual: null`), the other 61 passed (the deadline test among them); the 16 runs after the spinners expired passed. That is a hang guard met at a slow-down of about 100 times, not the field failure, and it is left alone.
+  - Linux, 12 cores, Node 24 (load average 28 to 29, 24 spinners plus the copies): `igpu-deadline` 16 runs and `compose-hyperframes` 30 runs, 0 failures.
+  - The full render suite, one idle run and six runs two at a time: the same two to three failures every time, none in these files (two tests that need a llama-swap the test node does not have and one `comfy-render` test killed by a libuv assertion in that Node 24 build); they are properties of that node.
+- **Left alone, no evidence.** The helper's 60 s `spawnSync` limit (above). `runCompose`'s `finally { rmSync(work) }` has no retry, so an EBUSY or EPERM on Windows would replace a typed `ComposeError` with an untyped one; no run produced it (660 kill-then-remove cycles of a child holding the folder as its working directory on an idle Windows node, 60 alone and 600 four at a time: 0 failures), so it is noted and not changed. `sandbox().done()` in `igpu-testkit.mjs` removes with `rmSync` and no back-off, the shape the comfy-keep fix retired in `scratchDir`; also not seen. `processStartMs` could read `performance.timeOrigin`, one constant with no subtraction, which would make the unit exact on the real clocks; that is a production change and was not made here.
+
+### Fixed - a graph's host-RAM need is the weight files its own loaders name, for a helper's `--graph` and for the `run-graph` lane, not the largest family the box binds
+
+- **What.** `gpu reserve -- node render/comfy-render.mjs ... --graph <file>` (and `comfy-video`) and the pipeline's `run-graph` lane
+  (`local-offload run-graph --graph`) posted the caller's own workflow, so the lease could not size it and declared the media class
+  default: the largest ComfyUI family the box binds. They now read the graph. `hostneed.ForGraphFile` lists the weight files the graph's
+  loaders name with the reader the node door already uses (`mediacap.ScanGraph`), finds each under the box's ComfyUI model roots (new
+  `mediacap.ModelFileSizes`, the lookup of the door's held-by-name check, returning sizes) and sizes the set by **the family estimate's own
+  rule**, now one function both use (`hostneed.fitToCard`): the **sum, each file once, in full when together the files do not fit the card**
+  (the largest card of the lease, less the runner's reserve; a card that is not known counts everything), **0 when they fit**, with the same
+  wording and the new source `graph loaders`. The lane's closure is `pipeline.graphRAM`, used by the real admission (`runRunGraph`) and by
+  the lane probe (`graphLaneFree`). An explicit `--ram` still wins. The card is fitted with the call's own reserve (`--reserve-vram` of a helper call, `reserve_vram` of the lane; a value the runner would not
+  take is the default). Doubt keeps the class default exactly as before: a graph that is not a JSON object (a UI-format workflow
+  included), a file over 8 MiB or not a regular file, a graph that names no weight file, ONE named file that is not in the model tree, is
+  empty, or is not a safe relative path, or a weight-like name anywhere in the document that the sizing did not cover (the whole JSON is
+  walked, nested objects and lists included, for a string ending in the scan's six weight extensions or `.bin .pt2 .pkl .pickle .onnx
+  .engine .trt .npz .h5`; the scan itself is unchanged). A size that is not known never shrinks a declaration.
+- **Why.** Measured on a 64 GiB node that binds a Wan 2.2 video pair: a 512x512 qwen-image graph that loads about 23 GiB (6.76 GiB
+  checkpoint, 16.33 GiB text encoder) was declared 32.89 GiB, and the host-RAM brake held it ("waiting for host RAM: needs 32.9 GiB";
+  23.0 committed + 32.89 > 63.7 - 8.0 headroom) although the box could run it. With the loaders' own sum the declaration is 23.09 GiB.
+- **Shape.** `internal/hostneed/graph.go` (`ForGraph`, `ForGraphFile`, `SourceGraphLoaders`), wired in `RenderCall.Estimate`'s `--graph`
+  branch; `fitToCard` factored out of `estimateWith` (no change to a family's figure); `mediacap.ModelFileSizes` beside
+  `MissingModelFilesUpTo` (a name held under two class directories counts as the larger; an empty file is unresolved);
+  `pipeline.graphRAM` replaces `classDefaultRAM` at the two graph call sites (`runRunGraph`, `graphLaneFree`) and nowhere else;
+  `classDefaultHint` says the lease could not size the graph's files. No change to the lease record, the grant or the queue.
+- **Tests.** Red first (two stub commits, tests failing on their assertions): a graph naming two resolvable loader files declares their
+  sum with the new source, through `ForGraph`, `ForGraphFile` and `Resolve` on a media and a text lease; the same files declare 0 on a card
+  they fit and their sum on one they do not, at the family estimate's edge (a set equal to the usable VRAM fits), and the graph and the
+  family estimate agree on the same files at every card size; one unresolved file, an empty file, a name that climbs out of the tree, a
+  non-graph document, an oversized one, a graph with no loader and a box with no ComfyUI install keep the class default unchanged; `--ram`
+  wins; the incident's two files sum to 23.09 GiB against a 33.1 GiB class default. In the pipeline, the graph lane declares those 23.09 GiB
+  (not the class default) through `declaredRAM`, declares 0 on a 32 GiB card, keeps the class default for a file the box does not hold or
+  a graph that is not there, the real `runRunGraph` path admits the incident's graph on a host that cannot take the class default and holds one it cannot size, and two new cases of the lane probe's differential test against the real wait-0 admission (a host with room
+  for the graph's files and not for the class default is served; the same host with a graph naming a missing file is refused). Fixtures
+  are sparse files (`os.Truncate`) of a few MiB, or a size table for the incident's GiB figures; no test starts a process. Mutants run and
+  killed: an unresolved name skipped, no-loader graphs declaring 0, no size cap, first match instead of the larger, no safe-relative check, the reserve not read on the graph path or in the lane, the whole-document walk off (a partial sum declared).
+- **Docs.** `docs/systems/gpu-lease.md` (the "What a lease declares" table, the hint paragraph, the admission paragraph, the warning
+  paragraph) and `docs/systems/media-generation.md` (Host RAM, the graph lane question).
+
+#### Not verified here
+
+- No real graph was run and no ComfyUI was started; the sizes are those of sparse fixtures and of a table that stands for the measured files.
+- Known gap, left as it is: a measured host peak does not raise a run-graph declaration, today or after this change. The lane sets no
+  footprint key (`withFootprint`), so `calibratedRAM` returns it unchanged; no key was added here.
+- Limits of the sizing: a weight is recognised by its extension, so a graph that names one by an extension outside the list above, or builds a
+  name at run time, is sized by the files that were seen and can be low. The declared figure is an estimate from file sizes, not a
+  measurement of the resident memory of a run.
+- Known gap: the pipeline lane's family routes (image, edit, video) are still fitted with the config's reserve and not the request's
+  `reserve_vram`, which reaches only the runner; the fix needs their call sites in `pipeline.go`, outside this change.
+
 ## [0.187.0] - 2026-10-14 - a lease that unloaded the seat no longer holds its cards idle while the host cannot meet its RAM, one measurement gate decides what is adopted, the compact tool schema cuts the advertised tool prose by a third, doctor names the engine answering each lane and warns on LAN-literal endpoints, offload_ask retries on another seat, offload_research reads feeds and subtitles, an ingress guard fronts the fleet node, two optional compaction rungs and a long-horizon context bench, a failure register and a trace-corpus readout, and a template-to-graph converter beside the builder drift guard
 
 ### Changed - the model-affinity gate's per-process limit is recorded as accepted in ADR 0025, with where it stops and what reopens it
