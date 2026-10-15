@@ -25,7 +25,11 @@
   is covered too). The same re-stamp closes the too-EARLY direction: an unload is not bounded by the drain's deadline (the maintenance
   client allows 15 minutes per request), and a long unload used to make the holder release a live reserve's lease mid-unload, leaving the
   seat owed and cold; a live reserve now loses its lease to its holder only if it cannot re-stamp for more than the bound + 60 s + 30 s. A failed drain's lease, which the detach form keeps held, is released by the holder at the last stamped moment unless the
-  operator frees it sooner, and the error says when. The hidden `gpu hold` reads its record
+  operator frees it sooner, and the error says when. With the hold bound at 0 the outer stamp is the `--wait` deadline (moved ahead of a live
+  reserve whenever it would fall behind), so a dead parent's lease ends at `--wait` instead of being held until `gpu release`; the stamp
+  carries its phase (`host_ram_hold_phase`: `outer`, `wait`, `release`; none = an older writer's, the wait's), and `gpu status` and the lease
+  row say it, so the drain and the unload no longer read as "released at HH:MM if the host still lacks the room" when the host has not been
+  asked and a live reserve never releases then. The hidden `gpu hold` reads its record
   on every poll and releases its lease 30 s after that moment if the lease still asks for the host (instances stopped, the seat warmed back
   only if the lease owes it); a live reserve pushes the moment out before its own minutes-long release so the two never race or double the
   warm-back, and a reserve that dies in the middle of that release is still covered. The detached wait **fails closed** on its stamp: tried
@@ -38,12 +42,22 @@
   (`holder_gave_up_ms`, additive), and exits non-zero instead of exiting 0 into a log in the temp directory, and `gpu status` says that
   nothing polls the lease any more, also once the holder has exited and the record reads as a stale holder (`gpu status` printed "free"
   and the stale-holder line with no word of the marker).
-- **A wrapper no longer kills its command over a record it cannot read.** On Windows under load a heartbeat that raced an atomic replace
+- **A wrapper no longer kills its command over a record it cannot read for a moment.** On Windows under load a heartbeat that raced an atomic replace
   of the lease record read the lease as gone: the wrapper's tick printed `LEASE LOST` and killed the wrapped command, the drain's
   heartbeat cancelled the drain, and the drain loop released the lease and queued again. One shared helper (`confirmFence`, the hidden
   holder's, now used by the wrapper's tick, the drain heartbeat and the drain loop) looks again, tells a verdict from a failed read, and
-  waits out a window; on a record it still cannot read the wrapper says so once, keeps the command running and the drain going, and
-  releases and requeues nothing. A heartbeat write that fails while the lease is still ours no longer kills the command either.
+  waits out a window; within the window nothing is killed, released or requeued. A heartbeat write that fails while the lease is still ours
+  no longer kills the command either (a persistent heartbeat-write failure with a readable record is tolerated, and the lease then goes
+  stale and is reclaimed by the ordinary rule).
+- **An unreadable record is held while its keeper is alive, and the keeper gives up first.** The acquirer side and the keeper side used to
+  disagree about a record that exists and cannot be read for an I/O reason (not corrupt bytes): the sweep removed it, with its claims,
+  once it was ten seconds old, and the whole-node path treated an unreadable `meta.json` as debris, while the wrapper in its retry window
+  kept running its command and wrote no heartbeat, so the next reserve got the cards with about 25 s of overlap. Now the sweep, the
+  whole-node and card grants and `verifyNoDeviceLeases` leave such a record and its claims alone while its holder's heartbeat (or the
+  record's own write) is within the heartbeat TTL (120 s), and take it only once that liveness is gone; and the wrapper, the drain
+  heartbeat, the drain loop and the hidden holder FAIL CLOSED once their window passes with the record still unreadable (the wrapper stops
+  its command, the drain ends, the holder lets go), each with one line saying why, each within a silence shorter than that TTL (pinned by
+  a test), so a keeper has stopped before the sweep can hand its cards out.
 - **A record that exists but cannot be read is a held lease.** `Inspect()` and `Leases()` judge who holds the cards and skip a record they
   cannot read, and the release paths believed them (reproduced on Windows by replacing the record with a directory). `Manager.RecordState`
   looks at the record itself (absent, held, unreadable; unreadable is held) and now decides every "the lease is gone": the release
@@ -64,11 +78,18 @@
   figure may hold the cards while the host cannot meet it, naming `--ram <GiB>` (the figure itself is unchanged). `gpu status` says how long
   a waiting lease has held its cards and when it is released if the host still lacks the room; past that moment it says "the holder, if one
   is running, releases the lease at its next poll; `gpu release --epoch N` frees it now" for a detached lease (`host_ram_hold_until_ms` on
-  the record, additive; `host_ram_hold_until` and `holder_gave_up` on the lease row). The ComfyUI instances kept under a lease are stopped
+  the record, additive; `host_ram_hold_until`, `host_ram_hold_phase` and `holder_gave_up` on the lease row; `holder_gave_up_at` is
+  `omitzero` in the status JSON, since `omitempty` never omits a struct and the published verdict schema had changed). `Restamp` and
+  `restampLocked` choose between a card record and a whole-node one through the same stat as every other check, so a stat that fails for a
+  reason other than absence goes to the card path and says "cannot be read", never "the lease is gone". The ComfyUI instances kept under a lease are stopped
   only by a caller that fenced the epoch first, and a source test now pins each caller by the function that holds the call across the whole
   package.
 - **Open, stated.** A reserve that dies in the few milliseconds between the holder taking the lease and the first outer stamp leaves no
-  stamp; with the hold bound at 0 there is no outer bound (only `--wait` ends the wait); a holder cannot write its give-up marker onto a
+  stamp; with the hold bound at 0 the backstop is `--wait` itself (the operator's choice), so a dead parent's lease is held until then;
+  the reader still reads an unreadable record as absent, so `gpu status` shows the card free while a reserve is refused for it, and a
+  keeper that dies leaves its unreadable record held for up to the heartbeat TTL after its last sign of life; the windows (10 s, 30 s)
+  and the TTL are chosen figures, not measurements; `confirmFence` has no cancel channel (a window runs to its end when the process is told
+  to stop) and `readCardClaim` does not map an I/O error from a claim read; a holder cannot write its give-up marker onto a
   record it cannot read, so over such a record the exit status and its log are the only word; the reserve measures its wait on a monotonic
   clock and the holder compares wall-clock milliseconds, so after a suspend the holder can release sooner (never later) than the stamp
   says; the warm-back's guard still abandons a warm on a failed `Check` (it kills and releases nothing; the seat stays owed); the
@@ -85,7 +106,9 @@
   `--wait`-ended detached waits, a cold seat never warmed, a failed release reported, `gpu status` after the stamp passes, the fence
   confirmation), and the third round (the outer bound, the fail-closed stamp, the holder's failure paths, the confirmed release, the
   production grace, the clamp line), and the fourth (the unreadable-record round: `RecordState`, bare `gpu release`, the wait and restamp,
-  the stale-holder line, the live outer bound, and an instance-stop scan over whole declarations). The two tests that pit the holder
+  the stale-holder line, the live outer bound, and an instance-stop scan over whole declarations), and the fifth (the status JSON
+  schema, the restamp dispatch, the hold stamp's phase, the unreadable-record rule with a real wrapper, the `--wait` backstop at bound 0).
+  The two tests that pit the holder
   against a live parent hold the holder's clock back and hold the reserve AT its push-out (a hook, not a poll of the record), and the
   holder reads its clock before its record, so no scheduler delay can decide them.
 - **Mutations** (each compiled, was proved applied by a changed sha256, turned a named test red, and was restored byte-for-byte): bound

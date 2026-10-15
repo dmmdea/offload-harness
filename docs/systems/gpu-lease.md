@@ -2034,18 +2034,31 @@ behind a RAM figure the host cannot meet; the failure names what ended the wait 
 before the wait begins, used to leave the lease asking for the host with no stamp, and the holder acts only on a stamp. The first
 version stamped the drain's deadline plus the hold bound, and the drain's deadline is `--wait` away (8 h by default): a default
 detached reserve killed a minute into its drain, the incident's own command shape, left the holder holding the cards for hours. Now,
-as soon as the holder has the lease, a reserve whose lease defers its host RAM and whose hold bound is on stamps **now + the hold
+as soon as the holder has the lease, a reserve whose lease defers its host RAM stamps **now + the hold
 bound + a slack (`outerSlack`, 60 s)** and **re-stamps it every `outerRefreshEvery` (30 s)** while the drain and the unload run (the
 unload is under the same ticker); the wait replaces it with its real end when it begins, and admission clears it as before. A reserve
 that dies stops re-stamping, so the holder releases the lease within about the bound plus the slack plus its own grace, whatever
 `--wait` says, and does not touch a lease whose reserve is alive and still draining
 (`TestADetachedReserveWhoseParentDiesDuringALongWaitDrainIsReleasedWithinTheBoundNotAtWait`,
-`TestADetachedReserveStampsAnOuterBoundBeforeTheDrainSoAParentThatDiesThereIsStillCovered`). It is off when the bound is off (`0`:
-nothing says when the lease should end but `--wait`, which is the operator's choice) and when nothing was deferred
-(`TestNoOuterBoundIsStampedWhenThereIsNoBoundOrNothingWasDeferred`). A failed drain leaves its lease held (the exit code tells the
+`TestADetachedReserveStampsAnOuterBoundBeforeTheDrainSoAParentThatDiesThereIsStillCovered`). With the hold bound off (`0`) the stamp is
+the **`--wait` deadline** (`hostRAMDeadline`), moved ahead of now + the slack whenever it would fall behind that (a long unload can run past
+it), so a live reserve is never released by its holder and a dead one ends at `--wait`, the operator's own choice
+(`TestAReserveWithNoHoldBoundStampsTheWaitDeadlineAsItsOuterBound`; before, there was no stamp and a dead parent left the holder nothing
+to act on until `gpu release`). It is off only when nothing was deferred (`TestNoOuterBoundIsStampedWhenNothingWasDeferred`). A failed drain leaves its lease held (the exit code tells the
 caller not to start), and that lease now ends by itself too: the holder releases it at the last moment the reserve stamped, and the
 error says when (`detachedMaintainError`); `gpu release --epoch N` frees it sooner. Open, and stated: a reserve that dies in the few
-milliseconds between the holder taking the lease and the first stamp leaves no stamp; and with the bound at 0 there is no backstop.
+milliseconds between the holder taking the lease and the first stamp leaves no stamp.
+
+**The stamp says which moment it is.** The one field, `host_ram_hold_until_ms`, is three different moments, and `gpu status` read all of
+them as "released at HH:MM if the host still lacks the room", which during the drain and the unload is false on both counts (the host has
+not been asked, and a live reserve never lets the lease go then). The record now carries `host_ram_hold_phase` (additive, omitempty):
+`outer` (the live reserve's rolling bound while it clears the seat), `wait` (the end of the wait for the host) or `release` (the push-out
+of a reserve that is letting the lease go), written by `Manager.StampHostRAMHoldPhase` (`StampHostRAMHold` is the wait's) and taken off
+with the stamp by admission; a stamp an older binary wrote carries none and is read as the wait's. `gpu status` says, for `outer`, "the seat
+is cleared first, then the host is asked; if the reserve dies the holder releases about HH:MM" (and, past the moment, that the reserve has
+stopped moving its bound), for `release` "the reserve is releasing the lease; if it dies the holder releases about HH:MM", and only for
+`wait` the old sentence; the lease row carries `host_ram_hold_phase` beside `host_ram_hold_until`
+(`TestStatusDuringTheDrainAndTheUnloadDoesNotPromiseAReleaseForAHostThatWasNeverAsked`).
 
 The first outer bound was wrong in the other direction too: it was the drain's deadline plus the hold bound, and the UNLOAD is not
 bounded by the drain's deadline (the maintenance client allows 15 minutes per request), so a drain that ended near its deadline,
@@ -2095,18 +2108,46 @@ I/O failure that is neither absence nor corrupt bytes): a verdict is let go of a
 go, and whatever it lets go on it says (`gpu hold: letting go of lease epoch N: <error>`), since the holder's stderr is a log nobody
 tails (`TestAHolderRetriesAFenceItCannotReadAndLetsGoOnlyAfterSayingWhy`, `TestAHolderThatLetsGoOfALeaseThatIsGoneSaysWhatItSaw`).
 
-**Every holder confirms a failed fence the same way, and a wrapper never kills on a record it cannot read (`confirmFence`).** On
+**Every holder confirms a failed fence the same way (`confirmFence`), and a record it cannot read is held while its keeper is alive: the keeper gives up first.** On
 Windows under load a heartbeat `Renew`/`Check` that races an atomic replace of the lease record reads the lease as gone; the wrapper's
 tick printed `LEASE LOST` and killed the wrapped command, `renewWhile` cancelled the drain, and the drain loop released the lease and
 queued again, so a long GPU job could die to a record write. The helper is the holder's: three more looks, `holdConfirmPause` apart; a
 verdict (gone, fenced out) on all of them is lost; a record that could not be READ is retried for a window and then is neither lost nor
 fine. The hidden holder uses it with its 30 s window and lets go as before; the wrapper's tick, `renewWhile` and the drain loop use a
-10 s window (`wrapperFenceWindow`, looking every 250 ms) and, if the record still cannot be read, say so once, keep the command running,
-keep the drain going and release and requeue nothing, looking again at every tick. A heartbeat that cannot be written while the fence
-passes no longer kills the command either (it says so once). One out-of-process test replaces a running wrapper's record with a
+10 s window (`wrapperFenceWindow`, looking every 250 ms). Within the window nothing is killed, released or requeued; **past it, with the
+record still unreadable, each FAILS CLOSED with one line saying why**: the wrapper stops its command (`gpu reserve: the lease record cannot
+be read (...) and has not been for 10s ... stopping the command`), `renewWhile` ends the drain like a lost lease (cancelling it, with the
+cause), the drain loop ends the reserve without releasing-and-queueing again, and the hidden holder lets go (`gpu hold: letting go of lease
+epoch N: its record could not be read for 30s ...`). A heartbeat that cannot be written while the fence passes does not kill the command
+(it says so once): a persistent heartbeat-WRITE failure with a readable record is tolerated, and the lease then goes stale and is reclaimed
+by the ordinary rule (a stale heartbeat AND an expired window). One out-of-process test replaces a running wrapper's record with a
 directory for several ticks and checks that the command, what it started and the wrapper are alive afterwards and no `LEASE LOST` was
 said (`TestAWrapperWhoseRecordReadFailsForAMomentDoesNotKillItsCommand`). Left as it was, and stated: the warm-back's guard
 (`leaseWarmGuard`) still abandons a warm on a plain `Check` failure (it kills and releases nothing; the seat stays owed).
+
+**The rule, and the two sides that must agree (`keeper.go`).** A record that EXISTS and cannot be READ for an I/O reason (a scanner holds it
+open, a sharing violation, an access error while it is replaced; not corrupt bytes, which stay debris once old) is **held while its keeper
+is alive, and the keeper gives up first**. Before, the acquirer side and the keeper side disagreed: `sweepDebrisLocked` removed an
+unreadable `e/<epoch>.json` older than `claimGrace` (10 s) together with its claims, the whole-node path treated an unreadable `meta.json`
+as debris (`reclaimable(nil)`, `removeStaleClaim`), and the orphan-claim sweep removed the claims of an epoch whose record the reader
+skipped, while the wrapper in its retry window kept running its command and wrote no heartbeat: the next reserve got the cards with about
+25 s of overlap. Now (a) the acquirer side leaves such a record, and its claims, alone while its keeper shows a sign of life within the
+heartbeat TTL (`DefaultHeartbeatTTL`, 120 s, the threshold the reader judges every record's heartbeat by): the epoch's `hb.<epoch>` file
+(its content is the moment of the last renewal; every `hb.*` counts for a `meta.json`, whose epoch is not known) or the record's own
+modification time. The whole-node grant, the card grant over a whole-node record and `verifyNoDeviceLeases` (a whole-node grant over a
+card lease whose record cannot be read) refuse with "the lease record cannot be read, and its holder is alive"; the sweep takes the
+record only once that liveness is gone. (b) The keepers above fail closed once their window passes, and every keeper's longest silence
+(its tick or renewal interval plus its window plus the confirming looks, and for the holder its release attempts) is shorter than that
+TTL, so a keeper has always stopped before an acquirer can be handed its cards: wrapper 15 s + 10 s, the drain heartbeat 15 s + two
+10 s windows, the hidden holder 15 s + 30 s + 4 s (`TestEveryKeepersSilenceIsShorterThanTheHeartbeatStaleThreshold`).
+`TestAnUnreadableRecordWithALiveWrapperIsNotSweptAndTheWrapperStopsBeforeAnyoneElseGetsTheCards` runs a real wrapper whose record
+cannot be read (a read fault on a flag file, installed in the wrapper and in the test; the record is old and removable) and a second
+reserve that tries every 100 ms: it is never granted, the record is never swept, and the command is stopped;
+`TestAnUnreadableCardRecordWhoseHolderIsAliveIsNotSweptAndItsClaimsStay` does the card form and then ages the keeper's heartbeat until the
+record is debris; `TestTheDrainHeartbeatEndsTheDrainOnceTheRecordHasBeenUnreadableForItsWindow` the drain's. Stated limits: the reader
+still reads an unreadable record as absent, so `gpu status` shows the card free while a reserve is refused for it; a keeper that dies
+leaves the record held for up to the heartbeat TTL (120 s) after its last sign of life; the windows and the TTL are chosen figures, not
+measurements.
 
 Which writers atomically replace a held lease's record (`meta.json`, or `e/<epoch>.json`), read from the callers of `renameReplacing`
 and `writeEpochRecord`: every `Manager.Restamp` (the temp file renamed over the record) and so (a) the holder's own restamps (the
@@ -2225,6 +2266,8 @@ and in the changelog fragment.
 cards yet). `gpu status` says `host RAM N GiB asked, not yet admitted` on the lease line, followed by how long the cards have been
 held (`held the cards for 12m3s`) and, once the wait for the host has begun, when the lease is released if the host still lacks the
 room (`the lease is released at 8:55AM, in 9m59s, if the host still lacks the room (the hold bound, or --wait if that ends first)`).
+During the drain and the unload, when the stamp is the reserve's rolling outer bound, it says instead `the seat is cleared first, then the
+host is asked; if the reserve dies the holder releases about 8:55AM` (see "The stamp says which moment it is").
 Past that moment, while the lease is still there, it says who releases it: `the wait ended at 8:55AM: the holder, if one is running,
 releases the lease at its next poll; `gpu release --epoch N` frees it now` for a `--detach` lease (the reserve that took it may be gone,
 and so may the holder, so the text promises neither; `--warm-seat` appears only when a warm-back is owed), `the wrapper that holds the
