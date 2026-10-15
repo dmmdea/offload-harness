@@ -387,28 +387,51 @@ func TestPostReadyHoldReadsTheEngineBeforeStalling(t *testing.T) {
 // The expiry must then read the engine like the stall timer does, never file
 // the stall from the probe tick: a request whose engine works for its siblings
 // is waiting its turn. Deterministic form of the race the test above hit once
-// in a few hundred runs on a loaded runner: the first read made in the
-// post-ready part outlasts the bound, so the tick always lands after it.
+// in a few hundred runs on a loaded runner. The bound is long next to the
+// prefill allowance, so the first seat read made in the cold-load phase starts
+// well inside the post-ready part however late the scheduler runs the timer,
+// and that read returns only once the bound is spent (it waits on the monitor's
+// own state, not on a sleep), so the tick always lands after the bound.
 func TestPostReadyBoundExpiringDuringASeatReadReadsTheEngine(t *testing.T) {
 	eng := &scriptedEngine{}
 	eng.advance.Store(true)
 	p := busyPolicy()
-	p.ColdLoad, p.ColdLoadBasis, p.ColdLoadPoll, p.PostReady = 2*time.Second, "test ceiling", 10*time.Millisecond, 100*time.Millisecond
-	ctx, m := NewMonitor(context.Background(), p, 10*time.Second)
+	p.ColdLoad, p.ColdLoadBasis, p.ColdLoadPoll, p.PostReady = 5*time.Second, "test ceiling", 10*time.Millisecond, time.Second
+	ctx, m := NewMonitor(context.Background(), p, 20*time.Second)
 	defer m.Stop()
-	var slowed atomic.Bool
+	var slowed, spent atomic.Bool
 	m.WithEngineProbe(eng.probe)
 	m.WithSeatProbe(func(context.Context) (bool, string, error) {
 		if m.CurrentPhase() == PhaseColdLoad && slowed.CompareAndSwap(false, true) {
-			time.Sleep(250 * time.Millisecond) // the read straddles the 100 ms bound
+			// The read straddles the bound: it returns when the hold's
+			// post-ready part has run out, however long that takes.
+			deadline := time.Now().Add(10 * time.Second)
+			for time.Now().Before(deadline) {
+				m.mu.Lock()
+				left, post := m.holdLeftLocked(time.Now()), m.postReady
+				m.mu.Unlock()
+				if post && left <= 0 {
+					spent.Store(true)
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
 		}
 		return false, "ready", nil
 	}, nil)
 	m.MarkSeatLoaded()
 	m.Phase(PhasePrefill, 10)
-	time.Sleep(700 * time.Millisecond)
+	// Wait for the outcome, not for a fixed time: the slow read has finished
+	// and the busy hold has begun (or the run was stalled).
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) && ctx.Err() == nil && !(spent.Load() && m.CurrentPhase() == PhaseQueued) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if !slowed.Load() {
 		t.Fatal("the test never made the post-ready seat read slow; it proves nothing")
+	}
+	if !spent.Load() && ctx.Err() == nil {
+		t.Fatal("the post-ready bound never ran out during the seat read; it proves nothing")
 	}
 	if ctx.Err() != nil {
 		t.Fatalf("a post-ready bound that expired during a seat read stalled a request whose engine works for its siblings: %v", context.Cause(ctx))
