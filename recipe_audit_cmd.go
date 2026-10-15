@@ -12,6 +12,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/eval"
 )
 
 // The arms of the A/B.
@@ -58,6 +59,38 @@ var recipeAuditDeps = recipeAuditSeams{
 	seat: func(config.Config, string, core.AgentEnvRules) (recipeSeat, func(), error) {
 		return nil, nil, errors.New("recipe-audit: no seat")
 	},
+}
+
+// recipeAuditReport is what the verb prints.
+type recipeAuditReport struct {
+	Recipe       string           `json:"recipe"`
+	Seat         string           `json:"seat"`
+	SeatTag      string           `json:"seat_tag"`
+	StatusBefore string           `json:"status_before"`
+	Status       string           `json:"status"`
+	Decision     string           `json:"decision"`
+	Steps        recipeAuditSteps `json:"steps"`
+	LiveABKeys   []string         `json:"live_ab_keys"`
+	Gate         eval.GateResult  `json:"gate"`
+}
+
+// recipeAuditSteps is the verb's own check beside the gate: mean steps of the two arms over the
+// tasks both finished.
+type recipeAuditSteps struct {
+	Incumbent float64 `json:"incumbent"`
+	Candidate float64 `json:"candidate"`
+	Pairs     int     `json:"pairs"`
+	NonWorse  bool    `json:"non_worse"`
+}
+
+// recipeJudge turns one run into a gate outcome.
+func recipeJudge(c core.AgentContract, wire core.AgentWireResult, runErr error) (eval.AttemptOutcome, *float64) {
+	return "", nil
+}
+
+// recipeMetrics reads the declared efficiency metrics off one run.
+func recipeMetrics(effs []eval.EfficiencyMetric, wire core.AgentWireResult) map[string]*float64 {
+	return nil
 }
 
 // realRecipeAuditLease is the lease check the verb runs with.

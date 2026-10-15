@@ -67,6 +67,8 @@ func raOutcome(pass bool, steps int) core.AgentWireResult {
 type raEnv struct {
 	store, baseline, tasks, inputOut string
 	fake                             *raFake
+	seatAsked                        string             // the --seat the factory was handed
+	candidateRules                   core.AgentEnvRules // the rule set the factory was handed for the candidate arm
 }
 
 func newRAEnv(t *testing.T) *raEnv {
@@ -163,7 +165,8 @@ func (e *raEnv) use(t *testing.T, lease func(config.Config) error) {
 	recipeAuditDeps = recipeAuditSeams{
 		config: func(*flag.FlagSet) config.Config { return config.Default() },
 		lease:  lease,
-		seat: func(_ config.Config, _ string, _ core.AgentEnvRules) (recipeSeat, func(), error) {
+		seat: func(_ config.Config, seat string, candidate core.AgentEnvRules) (recipeSeat, func(), error) {
+			e.seatAsked, e.candidateRules = seat, candidate
 			return e.fake, func() {}, nil
 		},
 	}
