@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -187,5 +189,48 @@ func TestReportNamesTheTierFromConfigWhenInstalledJSONIsAbsent(t *testing.T) {
 	}
 	if got := renderReport(in); !strings.Contains(got, "UNKNOWN") {
 		t.Fatalf("no manifest and no tier_profile must still say UNKNOWN:\n%s", got)
+	}
+}
+
+// TestReportDisclosesAConfigTierThatDisagreesWithTheManifest: the manifest still answers the tier line (it records what
+// the installer put on the box), but a box whose installer ran under an older layout (dual-gpu, before the third card
+// was classified) and whose config declares blackwell-3x16 used to report only the old id and never mention what the
+// config says. The line now carries both, and says they disagree; where they agree, or the config names no tier, it
+// reads exactly as before.
+func TestReportDisclosesAConfigTierThatDisagreesWithTheManifest(t *testing.T) {
+	tierLine := func(t *testing.T, recorded string, cfg config.Config) string {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("OFFLOAD_HOME", home)
+		if recorded != "" {
+			if err := os.WriteFile(filepath.Join(home, "installed.json"), []byte(`{"profile":"`+recorded+`","backend":"cuda"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cfg.Endpoint = "http://127.0.0.1:1" // the tier identity must not need a live seat
+		for _, l := range strings.Split(renderReport(gatherReport(cfg, config.Source{}, nil, fixedTime)), "\n") {
+			if strings.HasPrefix(l, "| hardware tier |") {
+				return l
+			}
+		}
+		t.Fatal("the report has no hardware tier line")
+		return ""
+	}
+
+	for _, recorded := range []string{"dual-gpu", "blackwell-2x16"} {
+		got := tierLine(t, recorded, config.CompositeFixture())
+		for _, want := range []string{recorded, "backend cuda", "blackwell-3x16", "composes blackwell-16, blackwell-2x16", "disagree"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("manifest %s, config blackwell-3x16: the tier line lacks %q:\n%s", recorded, want, got)
+			}
+		}
+	}
+
+	// Agreement, and a config that names no tier, are unchanged.
+	if got := tierLine(t, "blackwell-3x16", config.CompositeFixture()); got != "| hardware tier | blackwell-3x16 (backend cuda) |" {
+		t.Errorf("a manifest that agrees with the config:\n%s", got)
+	}
+	if got := tierLine(t, "dual-gpu", config.Default()); got != "| hardware tier | dual-gpu (backend cuda) |" {
+		t.Errorf("a config that names no tier:\n%s", got)
 	}
 }

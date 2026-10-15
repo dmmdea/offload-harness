@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -155,5 +156,41 @@ func TestResolveProvider_NilGeneric(t *testing.T) {
 	_, err := ResolveProvider(failProbe("smi dead"), nil, nil, InstalledInfo{})
 	if err == nil || !strings.Contains(err.Error(), "not available on this platform") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// A manifest recorded under an older layout reads clean: the three-card box classified as dual-gpu before
+// blackwell-3x16 existed, and a two-card box that later gained a card is recorded as blackwell-2x16. Nothing in the
+// read refuses the old id, drops a key the node advertises (the alternate backends, the accelerators) or changes the
+// identity the node resolves, so the upgrade to blackwell-3x16 is a change of the recorded id and nothing else.
+func TestOlderLayoutManifestsReadWithEverythingTheNodeAdvertises(t *testing.T) {
+	for _, profile := range []string{"dual-gpu", "blackwell-2x16", "blackwell-3x16"} {
+		t.Run(profile, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "installed.json")
+			body := `{"profile":"` + profile + `","backend":"cuda","accelerators":["hailo-8l"],"alt_backends":["cpu"],` +
+				`"components":{"llama-swap":"v1"},"models":[{"name":"seat-a","sha256":"00"},{"name":"seat-b","sha256":"11"}]}`
+			if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			info, err := ReadInstalledInfo(p)
+			if err != nil {
+				t.Fatalf("a manifest recorded as %s must read: %v", profile, err)
+			}
+			if info.Profile != profile {
+				t.Errorf("profile = %q, want %q", info.Profile, profile)
+			}
+			if got := info.Backends(); !slices.Equal(got, []string{"cuda", "cpu"}) {
+				t.Errorf("backends = %v, want the primary and the alternate the install rendered", got)
+			}
+			if !slices.Equal(info.Accelerators, []string{"hailo-8l"}) {
+				t.Errorf("accelerators = %v, want the list the manifest records", info.Accelerators)
+			}
+			if vendor, arch := VendorArchFromProfile(profile); vendor != "nvidia" || arch != "blackwell" {
+				t.Errorf("VendorArchFromProfile(%q) = %s/%s, want nvidia/blackwell", profile, vendor, arch)
+			}
+			if uma, ok := UMAFromProfile(profile); uma || !ok {
+				t.Errorf("UMAFromProfile(%q) = (%v, %v), want a discrete NVIDIA class (false, true)", profile, uma, ok)
+			}
+		})
 	}
 }

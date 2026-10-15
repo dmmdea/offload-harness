@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -68,7 +69,7 @@ func writeFleetCapacitySection(w io.Writer, cfg config.Config) {
 		return
 	}
 	slots := read.N
-	tier := vllmTierOf(cfg, seat)
+	tier := vllmTierOf(cfg, seat, servingtmpl.SeatEntryName(string(text), seat))
 	where := fmt.Sprintf("%s %s (%s)", seat, slotLabel(read, tier), path)
 	note := tier.note(limit, slots)
 	switch {
@@ -142,40 +143,66 @@ type vllmTier struct {
 }
 
 // vllmTierOf finds the vLLM seat the tier of this box declares and whether the box serves it or its
-// fallback. The tier is the one the installer recorded (installed.json, the source the report row reads
-// first), else the config's tier_profile, which tierseed seeds for composite tiers only. A box whose
-// tier is unknown, declares no vLLM seat, or whose agent_model is neither the seat nor its fallback (the
-// operator chose another) gets no tier clause: the row never guesses a tier.
-func vllmTierOf(cfg config.Config, agent string) vllmTier {
-	id := cfg.TierProfile
-	if info, err := fleetnode.ReadInstalledInfo(fleetnode.InstalledJSONPath()); err == nil && info.Profile != "" {
-		id = info.Profile
+// fallback. Two tiers can speak for a box: the one the installer recorded (installed.json, the source the
+// report row reads first) and the config's tier_profile, which tierseed seeds for composite tiers only.
+// They disagree on a box recorded under an older layout (dual-gpu declares no vLLM seat, and is what three
+// Blackwell cards classified as before blackwell-3x16 existed) or on one that gained or lost a card since the
+// config was seeded. A tier counts only when the box's agent_model is its declared seat or its fallback.
+// Among the tiers that count, the one whose declared seat is the entry of the serving config that agent_model
+// resolves to (entry) wins, because that entry is what the box runs; an alias several tiers share (agent-pool)
+// cannot tell them apart by itself. When the entry names neither, the config's tier_profile wins over the
+// manifest's, as the identity the box routes on. A box whose tier is unknown, declares no vLLM seat, or
+// whose agent_model is neither the seat nor its fallback (the operator chose another) gets no tier clause: the
+// row never guesses a tier.
+func vllmTierOf(cfg config.Config, agent, entry string) vllmTier {
+	var ids []string
+	if cfg.TierProfile != "" {
+		ids = append(ids, cfg.TierProfile)
 	}
-	if id == "" {
+	if info, err := fleetnode.ReadInstalledInfo(fleetnode.InstalledJSONPath()); err == nil && info.Profile != "" && !slices.Contains(ids, info.Profile) {
+		ids = append(ids, info.Profile)
+	}
+	if len(ids) == 0 {
 		return vllmTier{}
 	}
 	profiles, err := tierseed.Parse(embeddedProfiles)
 	if err != nil {
 		return vllmTier{}
 	}
-	p, ok := profiles[id]
-	if !ok || p.VLLMSeat == nil {
-		return vllmTier{}
-	}
-	t := vllmTier{tier: id, seat: *p.VLLMSeat}
-	switch {
-	case agent == t.seat.ID:
-		t.serving = true
-	case agent == t.seat.Fallback:
-		t.fallback = true
-	default:
-		for _, a := range t.seat.Aliases {
-			if agent == a {
-				t.serving = true
+	var explains, declared vllmTier
+	for _, id := range ids {
+		p, ok := profiles[id]
+		if !ok || p.VLLMSeat == nil {
+			continue
+		}
+		t := vllmTier{tier: id, seat: *p.VLLMSeat}
+		switch {
+		case agent == t.seat.ID:
+			t.serving = true
+		case agent == t.seat.Fallback:
+			t.fallback = true
+		default:
+			for _, a := range t.seat.Aliases {
+				if agent == a {
+					t.serving = true
+				}
 			}
 		}
+		switch {
+		case !t.serving && !t.fallback:
+			if declared.tier == "" {
+				declared = t
+			}
+		case entry != "" && entry == t.seat.ID:
+			return t
+		case explains.tier == "":
+			explains = t
+		}
 	}
-	return t
+	if explains.tier != "" {
+		return explains
+	}
+	return declared
 }
 
 // note is the tier clause appended to the row, empty when there is nothing to add. On the fallback it

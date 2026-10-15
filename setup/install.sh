@@ -308,17 +308,35 @@ else
   fi
 fi
 
-# The install manifest the fleet node reads (installed.json: profile + accelerators).
-# Written once; the node falls back to config.json's list when it is absent (Coral D6).
+# The install manifest the fleet node reads (installed.json: profile + accelerators). The node falls
+# back to config.json's list when it is absent (Coral D6). Written when absent. When one exists it
+# keeps what it recorded, except that a profile other than the tier this run detected (and rendered
+# the serving config for) is rewritten together with its backend: install.ps1 rebuilds the file
+# whole on every run, and without this a box that gained a card kept its older layout in the
+# manifest for good, next to a serving config rendered for the newer one. Accelerators, alt_backends
+# and every other key stay as recorded.
 MANIFEST="$PREFIX/installed.json"
-if [ ! -f "$MANIFEST" ] && [ "$DRY_RUN" -eq 0 ]; then
-  # backend from the tier table; alt_backends lists only what THIS install rendered (the CPU family
-  # needs --llama-bin-cpu), so health never advertises a route the box cannot serve.
-  BACKEND="$("$BIN" install tier-info --profile "$TIER" --json | jq -r .backend)"
-  ALT=""; [ -n "$LLAMA_BIN_CPU" ] && ALT="cpu"
-  jq -n --arg profile "$TIER" --arg accel "$ACCELERATORS" --arg backend "$BACKEND" --arg alt "$ALT" \
-    '{profile: $profile, backend: $backend, accelerators: ($accel | if . == "" then [] else split(",") end), alt_backends: ($alt | if . == "" then [] else split(",") end)}' > "$MANIFEST"
-  say "manifest:  $MANIFEST written"
+if [ ! -f "$MANIFEST" ]; then
+  if [ "$DRY_RUN" -eq 0 ]; then
+    # backend from the tier table; alt_backends lists only what THIS install rendered (the CPU family
+    # needs --llama-bin-cpu), so health never advertises a route the box cannot serve.
+    BACKEND="$("$BIN" install tier-info --profile "$TIER" --json | jq -r .backend)"
+    ALT=""; [ -n "$LLAMA_BIN_CPU" ] && ALT="cpu"
+    jq -n --arg profile "$TIER" --arg accel "$ACCELERATORS" --arg backend "$BACKEND" --arg alt "$ALT" \
+      '{profile: $profile, backend: $backend, accelerators: ($accel | if . == "" then [] else split(",") end), alt_backends: ($alt | if . == "" then [] else split(",") end)}' > "$MANIFEST"
+    say "manifest:  $MANIFEST written"
+  fi
+elif ! RECORDED="$(jq -r '.profile // empty' "$MANIFEST" 2>/dev/null)"; then
+  say "NOTE  manifest: $MANIFEST is not readable JSON — left untouched"
+elif [ "$RECORDED" != "$TIER" ]; then
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "manifest:  would rewrite $MANIFEST profile ${RECORDED:-(none)} -> $TIER (backend from the tier table, other keys kept)"
+  else
+    BACKEND="$("$BIN" install tier-info --profile "$TIER" --json | jq -r .backend)"
+    jq --arg profile "$TIER" --arg backend "$BACKEND" '. + {profile: $profile, backend: $backend}' "$MANIFEST" > "$MANIFEST.new"
+    mv "$MANIFEST.new" "$MANIFEST"
+    say "manifest:  $MANIFEST profile ${RECORDED:-(none)} -> $TIER, backend $BACKEND (other keys kept)"
+  fi
 fi
 
 # ---- 5. the serving config --------------------------------------------------

@@ -35,6 +35,9 @@ case "$1 $2" in
     [ "${STUB_BACKEND:-}" = "fail" ] && exit 1
     echo "{\"profile\":\"stub-tier\",\"backend\":\"${STUB_BACKEND:-cuda}\"}" ;;
   "install seed") printf '%s\n' "$*" >"$SEED_LOG"; echo '{}' ;;
+  "install render") ;;
+  "install vllm-seat") exit 1 ;;
+  "--config "*) ;;
   *) echo "stub: unexpected call: $*" >&2; exit 99 ;;
 esac
 STUBEOF
@@ -115,6 +118,50 @@ printf '%s' "$render_call" | grep -q -- '${LLAMA_BIN_EG2:+--llama-bin-eg2 "$LLAM
 
 bash "$INSTALL" --help 2>&1 | grep -q -- "--llama-bin-eg2 DIR" \
   && pass "--help documents --llama-bin-eg2" || fail "--help documents --llama-bin-eg2" "$(bash "$INSTALL" --help 2>&1 | head -20)"
+
+# 13-16. the install manifest follows the tier this run detected and rendered for. install.ps1 rebuilds
+#        installed.json whole on every run; install.sh wrote it once and kept the recorded profile for good, so a
+#        box that gained a card carried the older layout in its manifest beside a serving config rendered for the
+#        newer one. A differing profile is now rewritten (profile and backend only: accelerators, alt_backends and
+#        every other key stay), an equal one leaves the file byte for byte, an absent one is written as before, and
+#        a dry run says what it would do. The live runs use the stub for the binary and a stub node too old for the
+#        compose lane, so nothing is installed and no package manager is started.
+mkdir -p "$TMP/nodebin"
+printf '#!/usr/bin/env bash\necho v0.0.0\n' >"$TMP/nodebin/node"; chmod +x "$TMP/nodebin/node"
+# run_live PREFIX BACKEND: a real (not dry) run against PREFIX; sets OUT and RC.
+run_live() {
+  local prefix="$1" backend="$2"
+  OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND="$backend" bash "$INSTALL" --bin "$STUB" --prefix "$prefix" --no-service --llama-bin "$TMP/llama" 2>&1)"
+  RC=$?
+}
+OLD_MANIFEST='{"profile":"old-tier","backend":"vulkan","accelerators":["coral"],"alt_backends":["cpu"],"install_date":"2026-01-01"}'
+
+mkdir -p "$TMP/live-old"; printf '%s' "$OLD_MANIFEST" >"$TMP/live-old/installed.json"
+run_live "$TMP/live-old" cuda
+if [ "$RC" -eq 0 ] \
+  && [ "$(jq -r '.profile' "$TMP/live-old/installed.json")" = "stub-tier" ] \
+  && [ "$(jq -r '.backend' "$TMP/live-old/installed.json")" = "cuda" ] \
+  && [ "$(jq -c '[.accelerators, .alt_backends, .install_date]' "$TMP/live-old/installed.json")" = '[["coral"],["cpu"],"2026-01-01"]' ] \
+  && printf '%s' "$OUT" | grep -q "manifest:.*old-tier.*stub-tier"; then
+  pass "a manifest recorded under another tier is rewritten to the detected tier, other keys kept"
+else
+  fail "a manifest recorded under another tier is rewritten to the detected tier, other keys kept" "rc=$RC manifest=$(cat "$TMP/live-old/installed.json" 2>/dev/null) out=$OUT"
+fi
+
+mkdir -p "$TMP/live-same"; printf '{"profile":"stub-tier","backend":"vulkan","extra":1}' >"$TMP/live-same/installed.json"
+run_live "$TMP/live-same" cuda
+[ "$RC" -eq 0 ] && [ "$(cat "$TMP/live-same/installed.json")" = '{"profile":"stub-tier","backend":"vulkan","extra":1}' ] \
+  && pass "a manifest already recorded for the detected tier is left byte for byte" || fail "a manifest already recorded for the detected tier is left byte for byte" "rc=$RC manifest=$(cat "$TMP/live-same/installed.json" 2>/dev/null) out=$OUT"
+
+run_live "$TMP/live-new" cuda
+[ "$RC" -eq 0 ] && [ "$(jq -r '[.profile, .backend] | join(",")' "$TMP/live-new/installed.json" 2>/dev/null)" = "stub-tier,cuda" ] \
+  && pass "an absent manifest is written for the detected tier" || fail "an absent manifest is written for the detected tier" "rc=$RC out=$OUT"
+
+mkdir -p "$TMP/dry-old"; printf '%s' "$OLD_MANIFEST" >"$TMP/dry-old/installed.json"
+OUT="$(STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/dry-old" --no-service --dry-run --llama-bin "$TMP/llama" 2>&1)"; RC=$?
+[ "$RC" -eq 0 ] && [ "$(cat "$TMP/dry-old/installed.json")" = "$OLD_MANIFEST" ] \
+  && printf '%s' "$OUT" | grep -q "manifest:.*would rewrite.*old-tier.*stub-tier" \
+  && pass "a dry run names the manifest rewrite and writes nothing" || fail "a dry run names the manifest rewrite and writes nothing" "rc=$RC manifest=$(cat "$TMP/dry-old/installed.json") out=$OUT"
 
 # --client: a delegation client (ADR 0071) needs no tier, no llama.cpp build and no service.
 OUT="$(bash "$INSTALL" --bin "$STUB" --prefix "$TMP/client" --client --dry-run 2>&1)"; RC=$?

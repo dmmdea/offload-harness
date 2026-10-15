@@ -81,6 +81,23 @@ func SeatSlotsWhy(text, alias string) (SeatSlots, string) {
 	return readSeatSlots(text, alias, true)
 }
 
+// SeatEntryName is the key of the model entry that answers to alias (the key itself, else the one entry whose
+// `aliases` list names it): the entry the box runs when its agent_model is an alias several seats share. It is
+// empty when the config does not parse, no entry answers, or two claim the alias.
+func SeatEntryName(text, alias string) string {
+	var doc struct {
+		Models map[string]map[string]any `yaml:"models"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
+		return ""
+	}
+	name, _, why := seatEntry(doc.Models, strings.TrimSpace(alias))
+	if why != "" {
+		return ""
+	}
+	return name
+}
+
 func readSeatSlots(text, alias string, limitOK bool) (SeatSlots, string) {
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
