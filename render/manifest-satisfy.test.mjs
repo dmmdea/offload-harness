@@ -693,6 +693,16 @@ test("tofu: a file whose size or time changed is hashed again, and the same hash
   assert.deepEqual(state.writes, [[TOFU_FILE, { ...rec, mtime_ms: 99 }]]);
 });
 
+test("tofu: a file whose SIZE changed at the recorded modification time is hashed again, and a different hash is refused", async () => {
+  const rec = { schema_version: 1, sha256: "H1", size: 10, mtime_ms: 5, first_seen: "2026-10-01T00:00:00.000Z" };
+  const { deps, state } = tofuDeps({ files: { [TOFU_FILE]: { size: 11, mtimeMs: 5, hash: "H2" } }, records: { [TOFU_FILE]: rec } });
+  const r = await verifyTofuModels([TOFU_MODEL], deps);
+  assert.equal(r.ok, false, "the time alone does not vouch for a file whose size moved");
+  assert.equal(r.defer.code, "MODEL_SHA_MISMATCH");
+  assert.deepEqual(state.hashed, [TOFU_FILE]);
+  assert.deepEqual(state.writes, [], "the record is kept");
+});
+
 test("tofu: a hash that is not the recorded one is refused as MODEL_SHA_MISMATCH, naming both, and the record is kept", async () => {
   const rec = { schema_version: 1, sha256: "H1", size: 10, mtime_ms: 5, first_seen: "2026-10-01T00:00:00.000Z" };
   const { deps, state } = tofuDeps({ files: { [TOFU_FILE]: { size: 11, mtimeMs: 6, hash: "H2" } }, records: { [TOFU_FILE]: rec } });
