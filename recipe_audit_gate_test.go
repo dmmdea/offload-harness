@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/eval"
 	"github.com/dmmdea/offload-harness/internal/recipe"
@@ -205,5 +206,31 @@ func TestRecipeAuditMetricsAreTokensOrUnresolved(t *testing.T) {
 	}
 	if v := recipeMetrics(effs, core.AgentWireResult{})["forwarded_tokens"]; v != nil {
 		t.Errorf("a run with no prefill accounting read as %v tokens, want unresolved", *v)
+	}
+}
+
+// The two arms differ by the env-rule table alone: the incumbent runs the box's own, the candidate the
+// recipe's in its place, and the box's config is not changed by building either.
+func TestRecipeAuditArmsDifferByTheEnvRuleTableAlone(t *testing.T) {
+	box := &core.AgentEnvRules{MaxObservationTokens: 100}
+	base := config.Default()
+	base.AgentEnvRules = box
+	recipeRules := core.AgentEnvRules{DenyTools: []string{"web_fetch"}}
+
+	inc := recipeArmConfig(base, recipeArmIncumbent, recipeRules)
+	if inc.AgentEnvRules != box {
+		t.Fatalf("the incumbent arm runs %+v, want the box's own table", inc.AgentEnvRules)
+	}
+	cand := recipeArmConfig(base, recipeArmCandidate, recipeRules)
+	if cand.AgentEnvRules == nil || !reflect.DeepEqual(*cand.AgentEnvRules, recipeRules) {
+		t.Fatalf("the candidate arm runs %+v, want the recipe's rule set", cand.AgentEnvRules)
+	}
+	if base.AgentEnvRules != box || box.MaxObservationTokens != 100 {
+		t.Fatal("building the arms changed the box's config")
+	}
+	want := cand
+	want.AgentEnvRules = box
+	if !reflect.DeepEqual(want, inc) {
+		t.Fatal("the two arms differ by more than agent_env_rules")
 	}
 }

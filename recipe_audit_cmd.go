@@ -561,12 +561,7 @@ func (s *recipePipelineSeat) pipelineFor(arm string) (*pipeline.Pipeline, error)
 	if p := s.pipes[arm]; p != nil {
 		return p, nil
 	}
-	cfg := s.cfg
-	if arm == recipeArmCandidate {
-		rules := s.candidate
-		cfg.AgentEnvRules = &rules
-	}
-	p, cleanup, err := openPipeline(cfg)
+	p, cleanup, err := openPipeline(recipeArmConfig(s.cfg, arm, s.candidate))
 	if err != nil {
 		return nil, err
 	}
@@ -575,6 +570,17 @@ func (s *recipePipelineSeat) pipelineFor(arm string) (*pipeline.Pipeline, error)
 	}
 	s.pipes[arm] = p
 	return p, nil
+}
+
+// recipeArmConfig is the config one arm runs under: the box's own for the incumbent, and for the
+// candidate the same config with the recipe's rule set in place of agent_env_rules (the semantics of
+// local-agent --env-rules, which replaces the table). cfg is a copy; the box's table is not touched.
+func recipeArmConfig(cfg config.Config, arm string, candidate core.AgentEnvRules) config.Config {
+	if arm == recipeArmCandidate {
+		rules := candidate
+		cfg.AgentEnvRules = &rules
+	}
+	return cfg
 }
 
 func (s *recipePipelineSeat) Run(ctx context.Context, arm string, contract core.AgentContract) (core.AgentWireResult, error) {
