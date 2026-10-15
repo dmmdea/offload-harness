@@ -51,9 +51,15 @@ type reportInput struct {
 	// the installer manifest ("from config; composes …"), so a reader can
 	// tell a recorded install from a configured identity. "" = the manifest.
 	ProfileSource string
-	Backend       string // serving backend, e.g. "vulkan"
-	ManifestPath  string
-	ManifestNote  string // why the manifest is absent, when it is
+	// ConfigTier is the config's tier_profile when the manifest answered Profile and the
+	// two differ (a manifest recorded under an older layout, or a config seeded for a
+	// different one); ConfigComposes is what that config says it also is. The manifest
+	// still answers the line, and the line says the config disagrees.
+	ConfigTier     string
+	ConfigComposes string
+	Backend        string // serving backend, e.g. "vulkan"
+	ManifestPath   string
+	ManifestNote   string // why the manifest is absent, when it is
 }
 
 // renderReport turns the gathered facts into the Markdown a collaborator sends
@@ -70,7 +76,7 @@ func renderReport(in reportInput) string {
 	if in.Profile != "" && in.ProfileSource != "" {
 		fmt.Fprintf(&b, "| hardware tier | %s (%s) |\n", in.Profile, in.ProfileSource)
 	} else if in.Profile != "" {
-		fmt.Fprintf(&b, "| hardware tier | %s (backend %s) |\n", in.Profile, orNA(in.Backend))
+		fmt.Fprintf(&b, "| hardware tier | %s (backend %s%s) |\n", in.Profile, orNA(in.Backend), configTierClause(in))
 	} else {
 		fmt.Fprintf(&b, "| hardware tier | UNKNOWN — %s |\n", orNA(in.ManifestNote))
 	}
@@ -114,6 +120,20 @@ func renderReport(in reportInput) string {
 	fmt.Fprintf(&b, "\n---\n\nSend this file back as-is. It is read-only output: no model was loaded, "+
 		"no GPU work was queued, and nothing on this machine changed.\n")
 	return b.String()
+}
+
+// configTierClause is the tail of the tier line when the config names a different tier
+// than the manifest: both ids are shown and the disagreement is stated, so a manifest
+// recorded under an older layout is never read as the whole answer.
+func configTierClause(in reportInput) string {
+	if in.ConfigTier == "" {
+		return ""
+	}
+	composes := ""
+	if in.ConfigComposes != "" {
+		composes = " (composes " + in.ConfigComposes + ")"
+	}
+	return "; config tier_profile is " + in.ConfigTier + composes + ", so the manifest and the config disagree"
 }
 
 // mdEscape keeps a path with a pipe from breaking the table.
@@ -166,6 +186,11 @@ func gatherReport(cfg config.Config, src config.Source, routes []mediacap.Route,
 	in.ManifestPath = manifest
 	if info, err := fleetnode.ReadInstalledInfo(manifest); err == nil {
 		in.Profile, in.Backend = info.Profile, info.Backend
+		// The manifest answers, but a config that names another tier is said out loud: the
+		// installer writes the manifest and the seed writes the config, at different times.
+		if info.Profile != "" && cfg.TierProfile != "" && cfg.TierProfile != info.Profile {
+			in.ConfigTier, in.ConfigComposes = cfg.TierProfile, composedTiers(cfg)
+		}
 	} else {
 		// A hand-built box legitimately has no manifest; say which, don't guess a tier.
 		in.ManifestNote = "no installer manifest at that path (" + err.Error() + ")"

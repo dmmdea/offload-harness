@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -143,39 +144,55 @@ type vllmTier struct {
 
 // vllmTierOf finds the vLLM seat the tier of this box declares and whether the box serves it or its
 // fallback. The tier is the one the installer recorded (installed.json, the source the report row reads
-// first), else the config's tier_profile, which tierseed seeds for composite tiers only. A box whose
-// tier is unknown, declares no vLLM seat, or whose agent_model is neither the seat nor its fallback (the
-// operator chose another) gets no tier clause: the row never guesses a tier.
+// first), else the config's tier_profile, which tierseed seeds for composite tiers only. The manifest is
+// tried first; when its tier does not explain the agent seat (a manifest recorded under an older layout:
+// dual-gpu declares no vLLM seat, and is what three Blackwell cards classified as before blackwell-3x16
+// existed), the config's tier_profile is tried next. Either way the row names a tier only when the box's
+// agent_model is that tier's declared seat or its fallback. A box whose tier is unknown, declares no vLLM
+// seat, or whose agent_model is neither the seat nor its fallback (the operator chose another) gets no
+// tier clause: the row never guesses a tier.
 func vllmTierOf(cfg config.Config, agent string) vllmTier {
-	id := cfg.TierProfile
+	var ids []string
 	if info, err := fleetnode.ReadInstalledInfo(fleetnode.InstalledJSONPath()); err == nil && info.Profile != "" {
-		id = info.Profile
+		ids = append(ids, info.Profile)
 	}
-	if id == "" {
+	if cfg.TierProfile != "" && !slices.Contains(ids, cfg.TierProfile) {
+		ids = append(ids, cfg.TierProfile)
+	}
+	if len(ids) == 0 {
 		return vllmTier{}
 	}
 	profiles, err := tierseed.Parse(embeddedProfiles)
 	if err != nil {
 		return vllmTier{}
 	}
-	p, ok := profiles[id]
-	if !ok || p.VLLMSeat == nil {
-		return vllmTier{}
-	}
-	t := vllmTier{tier: id, seat: *p.VLLMSeat}
-	switch {
-	case agent == t.seat.ID:
-		t.serving = true
-	case agent == t.seat.Fallback:
-		t.fallback = true
-	default:
-		for _, a := range t.seat.Aliases {
-			if agent == a {
-				t.serving = true
+	var declared vllmTier
+	for _, id := range ids {
+		p, ok := profiles[id]
+		if !ok || p.VLLMSeat == nil {
+			continue
+		}
+		t := vllmTier{tier: id, seat: *p.VLLMSeat}
+		switch {
+		case agent == t.seat.ID:
+			t.serving = true
+		case agent == t.seat.Fallback:
+			t.fallback = true
+		default:
+			for _, a := range t.seat.Aliases {
+				if agent == a {
+					t.serving = true
+				}
 			}
 		}
+		if t.serving || t.fallback {
+			return t
+		}
+		if declared.tier == "" {
+			declared = t
+		}
 	}
-	return t
+	return declared
 }
 
 // note is the tier clause appended to the row, empty when there is nothing to add. On the fallback it
