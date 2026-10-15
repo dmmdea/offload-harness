@@ -2,9 +2,8 @@ package pipeline
 
 // MediaLaneFree for a whole-node run_graph (P0 plan, S4). A graph the operator did not pin to cards holds the WHOLE node, so
 // the question is the whole-node one: any lease, in-process slot or place in line is in its way, and so is a host that
-// cannot take what the call declares (the media class default, the largest family the box binds: the lease is taken for the
-// graph as a whole before anything reads the weights it names, so what it declares is not the size of those files, though
-// the node's door does resolve them). The contract is the one the image probe has, held by the same kind of differential
+// cannot take what the call declares (the weight files the graph's own loaders name, by the family estimate's fit rule, or the
+// media class default, the largest family the box binds, when the graph cannot be read or sized: graphRAM). The contract is the one the image probe has, held by the same kind of differential
 // test against the REAL wait-0 admission: a lane the grant would serve is never called busy.
 
 import (
@@ -33,7 +32,7 @@ func graphLaneReq(params map[string]any) core.Request {
 
 // graphGrant is what the real admission does for that graph request at wait 0: the oracle.
 func graphGrant(f *admitFixture, req core.Request) (bool, error) {
-	need := declaredNeed(declaredDevices(req.Params), paramStr(req.Params, "waiter_token")).declaresRAM(classDefaultRAM(f.p.cfg)).resumableBy(req)
+	need := declaredNeed(declaredDevices(req.Params), paramStr(req.Params, "waiter_token")).declaresRAM(graphRAM(f.p.cfg, req.Params)).resumableBy(req)
 	g, err := f.p.acquireMediaLease(context.Background(), "run-graph", time.Hour, 0, need)
 	if err == nil {
 		g.Release()
@@ -101,6 +100,14 @@ func graphLaneCases() []laneCase {
 					return gpuprobe.HostMemory{PhysicalGiB: 128, AvailableGiB: 100, CommitUsedGiB: 20, CommitLimitGiB: 200}
 				})
 			}},
+		// The graph's own files are what the lease declares (graphRAM): on a host with room for the 23.09 GiB the incident's graph
+		// loads and not for the 32.8 GiB class default, the graph is served; a graph the box cannot size keeps the class default.
+		{name: "a host with room for the graph's own files and not for the class default", spec: krea2, grants: true,
+			setup:  func(t *testing.T, f *admitFixture) { f.useHost(t, func() gpuprobe.HostMemory { return shortHost(65) }) },
+			params: func(t *testing.T, f *admitFixture) map[string]any { return graphOnTheBox(t, f.p, "qwen_image_fp8.safetensors") }},
+		{name: "the same host, a graph that names a file the box does not hold (the class default)", spec: krea2, grants: false, mustSeeBusy: true,
+			setup:  func(t *testing.T, f *admitFixture) { f.useHost(t, func() gpuprobe.HostMemory { return shortHost(65) }) },
+			params: func(t *testing.T, f *admitFixture) map[string]any { return graphOnTheBox(t, f.p, "not_on_this_box.safetensors") }},
 		{name: "another lane is still loading the memory it declared", spec: krea2, grants: false, mustSeeBusy: true,
 			setup: func(t *testing.T, f *admitFixture) {
 				f.useHost(t, func() gpuprobe.HostMemory { return shortHost(40) })

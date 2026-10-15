@@ -1626,8 +1626,10 @@ is given:
 **Host RAM.** A generation call also declares the host RAM its weights will stream from (the UNet or checkpoint and the
 text encoder of its binding, for a video call the family's binding with the request's own `transformer` put over it, counted
 in full when together they do not fit the card it runs on; 0 when they fit; the media
-class default for an arbitrary graph (`run-graph`, or a helper run with `--graph`) and the audio.cpp lanes: the largest
-ComfyUI family the box binds, an upper bound that is not their own size, and 0 on a box that binds none; **the sd.cpp lanes
+class default for the audio.cpp lanes and for a `run-graph` (or a helper's `--graph`) whose graph cannot be read or sized: the largest
+ComfyUI family the box binds, an upper bound that is not their own size, and 0 on a box that binds none; a graph that can be sized
+declares the weight files its loaders name, in full when they do not fit the card and 0 when they fit (the same fit rule, see
+`gpu-lease.md`); **the sd.cpp lanes
 declare the larger of that and the weights they park themselves** (the bound files in full when the lane's extra args carry
 `--offload-to-cpu`, an estimate from their sizes until three measured runs raise it, F60), so an sd.cpp-only node's spill is inside
 the guard; nothing for upscale and voice) and the grant admits it
@@ -3066,10 +3068,8 @@ client's `auto` pick a node by the same health fields and refuse a node that run
 (they do not read the media lease; the node's own grant refuses a job it cannot take). A fleet part-way through an upgrade
 therefore cannot place a graph on a node that is not yet on this release. The
 lane question is the whole-node reading of `Pipeline.MediaLaneFree` (`internal/pipeline/medialane_graph.go`: any lease,
-in-process slot or place in line, and the host's memory against the media class default, the largest family the box binds: the
-lease is taken for the graph as a whole before anything reads the weights it names, so that is an upper bound for the families the
-box binds and not the graph's own size, and a graph that names weights bigger than every bound family can be under-counted, a
-named limit), under the same relaxation contract as the image's (`TestMediaLaneFreeGraphNeverRefusesAGrant`,
+in-process slot or place in line, and the host's memory against what the graph declares: the weight files its own loaders name
+(`pipeline.graphRAM`), or the media class default, the largest family the box binds, when the graph cannot be read or sized), under the same relaxation contract as the image's (`TestMediaLaneFreeGraphNeverRefusesAGrant`,
 `TestMediaLaneFreeGraphWritesNothing`). The graph travels as it is: no family, no digest, no seed, `out_dir` and `min_vram_gb` never. A node's
 503 for a file it lacks moves the ticket to the next lane and marks that node not-capable for that ticket (above); any other 503 (a
 full node, a route that is not CONFIGURED) is the placer's, as for an image: a node that names no `Retry-After` is left alone for about
