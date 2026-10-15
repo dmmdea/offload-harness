@@ -179,6 +179,25 @@ func TestCardAllocatorKeysDefaultAndLoad(t *testing.T) {
 	}
 }
 
+// ytdlp_sha256 is optional: empty by default (the path is trusted as written, nothing is hashed), and read as written.
+func TestYtDlpSHA256DefaultsEmptyAndLoads(t *testing.T) {
+	if got := Default().YtDlpSHA256; got != "" {
+		t.Fatalf("ytdlp_sha256 default = %q, want empty", got)
+	}
+	const sum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	p := filepath.Join(t.TempDir(), "cfg.json")
+	if err := os.WriteFile(p, []byte(`{"ytdlp_path": "/opt/tools/yt-dlp", "ytdlp_sha256": "`+sum+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.YtDlpSHA256 != sum {
+		t.Fatalf("ytdlp_sha256 = %q, want %q", c.YtDlpSHA256, sum)
+	}
+}
+
 func TestInpaintFieldsRoundTrip(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "cfg.json")
 	js := `{"inpaint_script":"render/comfy-inpaint.mjs","inpaint_ckpt":"some-sdxl.safetensors",` +
@@ -457,7 +476,7 @@ func pathFieldJSONNames(t *testing.T) []string {
 		"audiocpp_script", "audiocpp_bin", "audiocpp_voice_model", "audiocpp_music_model",
 		"videogen_script", "animategen_script", "run_graph_script", "voicegen_script", "musicgen_script", "gpu_lock_path", "state_dir",
 		"voicegen_ref", "voicegen_ft_model", "voicegen_ft_base_dir", "voicegen_ft_ref",
-		"edit_python", "gimp_console_path",
+		"edit_python", "gimp_console_path", "ytdlp_path",
 		"compose_script", "hyperframes_dir", "hyperframes_browser_path", "compose_cache_dir",
 		"browse_python", "browse_script", "browse_capture_dir",
 		"cache_path", "ledger_path",
@@ -981,5 +1000,27 @@ func TestLoadInstallsTheHostRAMHeadroomForEveryGrant(t *testing.T) {
 	}
 	if got := gpulease.DefaultHostRAMHeadroom(); got != DefaultGPUHostRAMHeadroomGiB {
 		t.Fatalf("an unset key means the default %v, got %v", DefaultGPUHostRAMHeadroomGiB, got)
+	}
+}
+
+// TestYtDlpPathDefaultsOffAndScratchFollowsTheStateRoot: the subtitle adapter of offload_research is off until an
+// operator names a binary (empty by default, never a PATH search), and its per-call scratch lives under the state
+// root when one is set, else under the OS temp dir.
+func TestYtDlpPathDefaultsOffAndScratchFollowsTheStateRoot(t *testing.T) {
+	c := Default()
+	if c.YtDlpPath != "" {
+		t.Fatalf("YtDlpPath default = %q, want empty (adapter off)", c.YtDlpPath)
+	}
+	c.StateDir = filepath.Join("state", "root")
+	if got, want := c.EffectiveResearchScratchDir(), filepath.Join("state", "root", "research-scratch"); got != want {
+		t.Errorf("scratch with a state dir = %q, want %q", got, want)
+	}
+	c.StateDir = ""
+	tmp := t.TempDir()
+	t.Setenv("TMP", tmp)
+	t.Setenv("TEMP", tmp)
+	t.Setenv("TMPDIR", tmp)
+	if got, want := c.EffectiveResearchScratchDir(), filepath.Join(tmp, "local-offload-research"); got != want {
+		t.Errorf("scratch without a state dir = %q, want %q", got, want)
 	}
 }

@@ -51,7 +51,7 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/text v0.42.0
 	kernel.org/pub/linux/libs/security/libcap/psx v1.2.77 // indirect
 	llamaswap-pp-cli v0.0.0
 )

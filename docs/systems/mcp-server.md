@@ -496,6 +496,84 @@ name through a bare `http.Client`, so a hostile record with a one-second TTL cou
 as public and then resolve to `127.0.0.1` at connect time; `internal/research/fetch_rebind_test.go`
 is that regression, and it asserts ZERO accepts on a loopback listener.
 
+**Two more text sources: RSS/Atom feeds and YouTube subtitles.** Both are fetched delegator-side with no login and no cookies,
+and both end where a fetched page ends: the text goes through the same digest path, the digest through the same
+`internal/untrusted` fencing, and the URL through the same public-web guard.
+
+- *Feeds.* A response whose content type is `application/rss+xml`, `application/atom+xml` or `application/rdf+xml`, or whose
+  body sniffs as a feed (a generic XML, plain-text or untyped response whose root element is `rss`, an RDF root that declares
+  the RSS 1.0 namespace, or an Atom `feed`), is parsed with `encoding/xml` (`research.FeedToText`; the only added dependency is `golang.org/x/text`'s windows-1252 table, already in the module graph). Each item's title, link, date and summary
+  become the text, at most `research.MaxFeedItems` (50) items and 1,000 bytes of summary each, inside the ordinary 2 MiB read
+  cap and 96 KiB text cap; a feed cut by either, or one whose document stops before its end (a body that ends inside an
+  item), says so first in its own header (`Items: 2 (the feed document was cut off here; later items are not included)`),
+  is marked `truncated` on its source row, and does not count the item it stopped in. Item links are text only and are never followed: a
+  caller who wants an item lists its URL; a relative link is shown resolved against the feed's own `xml:base` (on the feed,
+  the entry or the link) and otherwise against the address the feed was fetched from, after redirects. The text is read in
+  the encoding the response's `charset` parameter names, else the one the XML declaration names, else UTF-8: windows-1252
+  and cp1252 are decoded, and so are iso-8859-1 and latin1, read as windows-1252 the way browsers do (bytes 0x80-0x9F are
+  curly quotes, the euro sign and dashes, never control characters, in a real feed); any other encoding leaves the document
+  to the ordinary path. Before parsing, an invalid UTF-8 byte becomes U+FFFD and a character XML forbids becomes a space,
+  so one bad byte costs one character and not every later item. A document that does not parse as a feed, or that parses with no item or entry
+  (an empty channel, or an RDF/XML, OWL or SKOS file served as `application/rdf+xml`), is read exactly as it was before.
+- *YouTube subtitles.* A video URL is routed by `research.ClassifyURL` to the yt-dlp executable named by the config key
+  `ytdlp_path`: `youtube.com/watch?v=`, and `/shorts/<id>`, `/live/<id>` and `/embed/<id>`, on exactly `youtube.com`, `www.`,
+  `m.` and `music.youtube.com`; `/embed/<id>` on `youtube-nocookie.com` and `www.youtube-nocookie.com`; and `youtu.be/<id>`.
+  Over http or https only, on the default port, with no userinfo and an 11-character id (`/embed/videoseries`, a playlist,
+  is a page). Whichever shape was written, the binary is given the canonical `https://www.youtube.com/watch?v=<id>`. The key
+  is **empty by default, which means the adapter is off** and the URL is read as an ordinary page. The harness never searches
+  `PATH` for the binary and never installs it: the value must be an absolute path to an executable file (the admitted
+  versions are in [security.md](security.md#admitted-third-party-software)). **`ytdlp_path` is trusted as written**, with
+  nothing checking the file, **unless the optional key `ytdlp_sha256` is set** (64 hexadecimal digits, either case): the file
+  is then hashed before every run, and a mismatch, an unreadable file or a malformed value fails the source as `ytdlp_path`
+  and starts nothing, while unset nothing is hashed. A file replaced between the hash and the start is not caught: the pin
+  is against a wrong or changed binary, not against a writer who races each call. On Windows the file must be launchable by
+  the system itself, an `.exe` or a wrapper `.cmd` that starts the interpreter: the admitted zipapp is a
+  `#!/usr/bin/env python3` script, which runs directly only on a POSIX host with `python3` on `PATH`, and a Windows host that
+  names it gets a `ytdlp_path` error at call time. **With a wrapper `.cmd` the hash covers the wrapper, not the interpreter or
+  the script it calls**; those are the operator's to admit and pin. The binary runs once per URL with `--skip-download
+  --write-subs --write-auto-subs --sub-langs=<sub_langs> --sub-format=vtt/srv3/best --no-cookies --no-cookies-from-browser
+  --ignore-config --no-playlist --no-cache-dir --socket-timeout 15` and zero retries, given the canonical URL after a literal
+  `--`. Warnings are not suppressed (`--quiet` stays, `--no-warnings` does not). `sub_langs` is an `offload_research` input
+  (default `en.*`; letters, digits and `. * _ - ,` only, else the source fails as `bad_sub_langs` before anything runs, so no
+  `cmd.exe` metacharacter, `& | < > ^ %`, a double quote or a space, can reach a `.cmd` wrapper). It runs in a per-call
+  directory under `<state_dir>/research-scratch` (else a directory under the OS temp dir), with a scrubbed environment (home
+  and temp point at that directory), bounded by the call's deadline and the per-fetch timeout (one run is capped at 15
+  minutes whatever `fetch_timeout_sec` asks for), with no retry and no scheduling. **A deadline or a cancellation ends the
+  whole process tree the binary started**, not only the program launched, because a wrapper `.cmd` leaves its interpreter
+  running as a grandchild that would otherwise hold the per-call directory: `taskkill /T /F`, started hidden, on Windows,
+  and `SIGKILL` to the process group the binary leads on POSIX (`winexec.KillTreeOnCancel`). The per-call directory is
+  removed with a bounded retry of a few hundred milliseconds (a process that has just been ended takes a moment to let go of
+  it). A removal that still fails is not dropped: it is recorded as `cleanup_error` on the source row, beside the text when
+  there is one, and each call first sweeps `ytdlp-*` directories directly under its own scratch root that nothing can still
+  be using (last changed more than 20 minutes ago, the longest run plus slack). The limit: the tree is found through the
+  parent chain, so a child whose parent had already exited when the run ended is out of reach of `taskkill` on Windows. A
+  binary that exits 0 while a child still holds the output pipe is read as a success once the pipe wait runs out, and that
+  child's hold on the directory shows as `cleanup_error` until the sweep takes the directory. Of the files it writes, a
+  readable format wins (WebVTT, SRV3, SubRip), then the shortest name, so the plain `en` track beats `en-orig`. The subtitle
+  file is converted to plain text: header and NOTE/STYLE/REGION blocks, cue ids, timestamps, cue settings and tags are
+  removed, entities decoded, and the rolling duplication automatic captions carry is removed (a line equal to the one before
+  it is dropped, and a line that only extends it replaces it). A srv3 track that ends inside a cue, cut by the 2 MiB read
+  bound or interrupted, yields the cues read before the cut and is marked `truncated`. Subtitle text and the same words
+  pasted as a page therefore reach the digest stage as the same bytes (pinned by
+  `TestSubtitleTextAndPastedPageGiveTheSameDigestInput`; no model is called). A site break degrades to a skipped source with a
+  typed `error_kind` and no retry: `subtitle_site_break` (the binary exited non-zero), `no_subtitles` (exit zero and no file;
+  the reason ends with the last line yt-dlp printed, because it reports a refused subtitle download, an HTTP 429 rate limit
+  included, as a warning and exits 0), `unsupported_subtitle_format`, `empty_subtitles` (a subtitle file was read and held
+  only blank cues), `subtitle_timeout`, `ytdlp_path` (not absolute, missing, not matching `ytdlp_sha256`, or will not
+  start), `bad_sub_langs` or `url_refused` (the canonical URL did not pass the public-web guard). A relative `state_dir` is
+  made absolute before the scratch directory is built.
+- *Security.* Every URL passes `research.ValidateURL` before anything is fetched or run, the subtitle path included: a hostname
+  that resolves to a private, loopback, link-local or CGNAT address is refused before any process starts (the tests drive it
+  through the `netguard.LookupIP` resolution seam). The canonical URL handed to the binary is validated too, because its host
+  is the one the binary will actually contact, and it is a fixed YouTube host rather than anything the caller wrote. The
+  matcher is exact, so a lookalike host (`youtube.com.evil.example`, a userinfo trick, another port) is an ordinary page under
+  the ordinary guard and never reaches the binary. The adapters build no HTTP client (the bare-client allowlist in
+  `bare_http_client_allowlist_test.go` still lists one in this package; `TestAdaptersBuildNoHTTPClientOfTheirOwn` pins it). One
+  limit is stated plainly: yt-dlp opens its own connection, outside `netguard.PublicTransport`, so for this path the guard is
+  a pre-flight name check (the resolve-and-check on the two hosts above, made before anything starts), after which the child resolves and dials on its own, plus the fixed canonical URL, which is why the adapter is off until an operator
+  names a binary. Audio transcription is not part of this change: a video with no subtitles is a `no_subtitles` source, and
+  nothing downloads audio or video.
+
 Two contract rules are baked in because they were measured on the seats (2026-08-28): the
 goal names the context document as *already provided* (a goal that says "read the document"
 sends a small seat hunting for a file and fails acceptance), and acceptance is ONE any-of
@@ -1119,6 +1197,11 @@ keep the stamp and say so, a path that is gone is stale without a comparison, an
 - [`internal/mcpserver/reviewdiffio.go`](../../internal/mcpserver/reviewdiffio.go) — the file seam of
   `offload_review_diff`'s `diff_path` branch (working directory, absolute path, confined read), so the refusals behind
   those calls are tested
+- [`internal/research`](../../internal/research/fetch.go) — `offload_research`'s fetch and guard; the text sources:
+  [`feed.go`](../../internal/research/feed.go) (RSS and Atom) and [`subtitles.go`](../../internal/research/subtitles.go)
+  (the URL matcher, the yt-dlp subtitle adapter and the caption-to-text conversion); the tree kill the adapter uses on a
+  deadline is [`internal/winexec/tree_windows.go`](../../internal/winexec/tree_windows.go) and
+  [`tree_other.go`](../../internal/winexec/tree_other.go)
 - [`internal/mcpserver/status_section.go`](../../internal/mcpserver/status_section.go) —
   `offload_status`'s block table, `section` parsing and the brief lines
 - [`internal/mcpserver/stale_image.go`](../../internal/mcpserver/stale_image.go) — the `process` block: the
