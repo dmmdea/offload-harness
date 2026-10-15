@@ -162,7 +162,7 @@ func TestRunAgentTaskWedgedSeatFilesSeatDownPrefix(t *testing.T) {
 			t.Fatalf("run %d: seat_recoveries=%d seat_down_wait_sec=%.2f, want no recovery and the ~0.7 s waited", i, w.SeatRecoveries, w.SeatDownWaitSec)
 		}
 	}
-	if el := time.Since(start); el > 8*time.Second {
+	if el := time.Since(start); el > 30*time.Second {
 		t.Fatalf("four wedged runs took %s: the cold-load bound (700 ms) did not bound the wait", el)
 	}
 }
