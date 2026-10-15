@@ -32,11 +32,11 @@
 - **Comment only.** `dispatch_refused` files a 401 or 403 answer as the caller's (`internal/ledger/failurekinds.go`). A comment
   at that line now says a credential refusal between the fleet's own nodes, such as a stale fleet token after a rollout, is a
   configuration fault, and that splitting 401 and 403 into a class of their own is a possible later change. No behaviour changes.
-- **Tests.** Each fails on the parent commit. `TestARefusalRowIsNotAJobInAnyJobCounter` (a ledger with three real jobs, one
+- **Tests.** The red tests fail on the parent commit. `TestARefusalRowIsNotAJobInAnyJobCounter` (a ledger with three real jobs, one
   refusal row and a test-class pair) reports 4 calls and 2 deferred where 3 and 1 are right, lists the 503 among the top defer
   reasons, counts 2 excluded test jobs where 1 is right, and gives the refused-only session a row; the same test holds the
   register's refused-attempt, job and failure counts as they were. `TestStatsDoNotCountARefusalRowAsAJob` is the stats report.
-  `TestAnInnerRefusalRowIsNeitherAJobNorARefusedAttempt` holds the inner-row case. `TestALiteralNullLineIsUnparsedAndAnEmptyObjectIsARow`
-  (a ledger holding `null`, `{}`, a valid failure row and a truncated line) read `unparsed_lines` 1 where 2 is right and 3 job rows
-  where 2 is right; `TestTheOtherLedgerReadersSkipANullLineToo` read 3 calls and 3 rows where 2 is right. `docs/systems/failure-register.md`
-  and the `refusal` row of `docs/FLEET-NODE.md` say the new rule.
+  `TestALiteralNullLineIsUnparsedAndAnEmptyObjectIsARow` (a ledger holding `null`, `{}`, a valid failure row and a truncated line) read `unparsed_lines` 1 where 2 is right and 3 job rows
+  where 2 is right; `TestTheOtherLedgerReadersSkipANullLineToo` read 3 calls and 3 rows where 2 is right. Two guards passed on the
+  parent and pin what must not move: `TestAnInnerRefusalRowIsNeitherAJobNorARefusedAttempt` and the register's refused-attempt
+  subtest. `docs/systems/failure-register.md` and the `refusal` row of `docs/FLEET-NODE.md` say the new rule.
