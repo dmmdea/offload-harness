@@ -474,18 +474,7 @@ func (e *ErrHoldStamp) Unwrap() error { return e.Err }
 // StampHostRAMHold puts the moment a host-RAM wait ends on the record of lease epoch (Meta.HostRAMHoldUntilMs). It does it only
 // while the lease still asks for the host: on an admitted lease the stamp would be a bound nothing is running.
 func (m *Manager) StampHostRAMHold(epoch uint64, until time.Time) error {
-	if stampFaultHook != nil {
-		if err := stampFaultHook(epoch); err != nil {
-			return err
-		}
-	}
-	ms := until.UnixMilli()
-	return m.Restamp(epoch, func(mt *Meta) {
-		if mt.HostRAMWaitGiB <= 0 {
-			return // admitted (or nothing was deferred): no bound is running
-		}
-		mt.HostRAMHoldUntilMs = ms
-	})
+	return m.StampHostRAMHoldPhase(epoch, until, HoldPhaseWait)
 }
 
 // The phases of the moment a lease's hold stamp (Meta.HostRAMHoldUntilMs) stands for. Outer: a detached reserve's bound while it
@@ -500,7 +489,19 @@ const (
 
 // StampHostRAMHoldPhase is StampHostRAMHold saying which phase the stamped moment is.
 func (m *Manager) StampHostRAMHoldPhase(epoch uint64, until time.Time, phase string) error {
-	return m.StampHostRAMHold(epoch, until)
+	if stampFaultHook != nil {
+		if err := stampFaultHook(epoch); err != nil {
+			return err
+		}
+	}
+	ms := until.UnixMilli()
+	return m.Restamp(epoch, func(mt *Meta) {
+		if mt.HostRAMWaitGiB <= 0 {
+			return // admitted (or nothing was deferred): no bound is running
+		}
+		mt.HostRAMHoldUntilMs = ms
+		mt.HostRAMHoldPhase = phase
+	})
 }
 
 // stampTries and stampRetryPause are how often, and how far apart, a stamp that RequireStamp binds the wait to is tried before the
@@ -609,6 +610,7 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 				mt.HostRAMGiB = cur
 				mt.HostRAMWaitGiB = 0
 				mt.HostRAMHoldUntilMs = 0
+				mt.HostRAMHoldPhase = ""
 			})
 		})
 		switch {
@@ -665,6 +667,17 @@ func (m *Manager) leaseMissing(epoch uint64) error {
 		return fmt.Errorf("gpulease: host RAM: the record of epoch %d cannot be read, so the lease is not known to be gone: %w", epoch, cause)
 	}
 	return fmt.Errorf("gpulease: host RAM: the lease is gone (epoch %d)", epoch)
+}
+
+// holdPhaseOf is the phase a record's hold stamp is in: none without a stamp, and the wait's for a stamp an older writer made.
+func holdPhaseOf(meta *Meta) string {
+	switch {
+	case meta.HostRAMHoldUntilMs <= 0:
+		return ""
+	case meta.HostRAMHoldPhase == "":
+		return HoldPhaseWait
+	}
+	return meta.HostRAMHoldPhase
 }
 
 // holdUntilOf is Meta.HostRAMHoldUntilMs as a time (the zero Time when no bound is running).

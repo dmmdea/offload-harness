@@ -322,7 +322,7 @@ func runGPUStatus(args []string) error {
 		excl += "  (" + holderGaveUpNote(info.HolderGaveUp, info.HolderGaveUpWhy, info.Epoch, m.SeatWarmOwed() != "") + ")"
 	}
 	if info.HostRAMWaitGiB > 0 {
-		excl += "  (" + hostRAMAskedStatus(info.HostRAMWaitGiB, info.Age, info.HostRAMHoldUntil, time.Now(), true, info.Epoch, info.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "", info.HolderGaveUp, info.HolderGaveUpWhy) + ")"
+		excl += "  (" + hostRAMAskedStatus(info.HostRAMWaitGiB, info.Age, info.HostRAMHoldUntil, info.HostRAMHoldPhase, time.Now(), true, info.Epoch, info.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "", info.HolderGaveUp, info.HolderGaveUpWhy) + ")"
 	}
 	if info.Command != "" {
 		excl += "\n  running: " + info.Command
@@ -371,7 +371,7 @@ func runGPUStatus(args []string) error {
 				declared += ", " + holderGaveUpNote(l.HolderGaveUp, l.HolderGaveUpWhy, l.Epoch, m.SeatWarmOwed() != "")
 			}
 			if l.HostRAMWaitGiB > 0 {
-				declared = ", " + hostRAMAskedStatus(l.HostRAMWaitGiB, l.Age, l.HostRAMHoldUntil, time.Now(), false, l.Epoch, l.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "", l.HolderGaveUp, l.HolderGaveUpWhy)
+				declared = ", " + hostRAMAskedStatus(l.HostRAMWaitGiB, l.Age, l.HostRAMHoldUntil, l.HostRAMHoldPhase, time.Now(), false, l.Epoch, l.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "", l.HolderGaveUp, l.HolderGaveUpWhy)
 			}
 			fmt.Printf("  lease epoch %d: %s pid %d, %s%s%s\n", l.Epoch, l.Class, l.PID, scope, group, declared)
 		}
@@ -1521,7 +1521,7 @@ func startOuterBound(m *gpulease.Manager, epoch uint64, on bool, holdMax time.Du
 	said := false
 	stamp := func() {
 		at := time.Now().Add(holdMax + outerSlack)
-		if err := m.StampHostRAMHold(epoch, at); err != nil {
+		if err := m.StampHostRAMHoldPhase(epoch, at, gpulease.HoldPhaseOuter); err != nil {
 			if !said {
 				said = true
 				fmt.Fprintf(warn, "gpu reserve: warning: could not stamp the outer hold bound on the lease record (%v); if this process dies during the drain the hidden holder has no moment at which to release the lease\n", err)

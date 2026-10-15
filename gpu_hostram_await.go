@@ -395,7 +395,7 @@ func releaseAfterRAMWait(m *gpulease.Manager, epoch uint64, cfg config.Config, e
 	// Else it is on the record, or its record exists and cannot be read, which is a lease that is held: proceed to stop the
 	// instances, warm the seat back and release, and report the release if it fails.
 	pushedTo := time.Now().Add(detachedReleaseGrace)
-	if serr := m.StampHostRAMHold(epoch, pushedTo); serr == nil {
+	if serr := m.StampHostRAMHoldPhase(epoch, pushedTo, gpulease.HoldPhaseRelease); serr == nil {
 		if pushedOutHook != nil {
 			pushedOutHook(epoch, pushedTo)
 		}
@@ -436,7 +436,10 @@ func holderGaveUpNote(gaveUp time.Time, why string, epoch uint64, warmOwed bool)
 // does it when it exits; the hidden holder of a --detach lease does it at its next poll IF one is running (a reserve that died
 // cannot, and a holder whose own release failed has gone), and `gpu release --epoch N` does it now (with --warm-seat when a
 // warm-back is owed). long adds the explanation of the order, for the one-line summary of the holder.
-func hostRAMAskedStatus(giB float64, held time.Duration, until, now time.Time, long bool, epoch uint64, byWrapper, warmOwed bool, gaveUp time.Time, gaveUpWhy string) string {
+// The stamp is one of three moments (phase, the record's Meta.HostRAMHoldPhase): the OUTER bound a live detached reserve keeps moving
+// while it clears the seat (the host has not been asked, nothing releases the lease unless the reserve dies), the end of the WAIT
+// for the host (the sentence above), or the RELEASE push-out of a reserve that is letting the lease go. Without a phase it is the wait's.
+func hostRAMAskedStatus(giB float64, held time.Duration, until time.Time, phase string, now time.Time, long bool, epoch uint64, byWrapper, warmOwed bool, gaveUp time.Time, gaveUpWhy string) string {
 	release := releaseCommand(epoch, warmOwed)
 	s := fmt.Sprintf("host RAM %.1f GiB asked, not yet admitted", giB)
 	heldFor := held.Round(time.Second)
@@ -448,6 +451,14 @@ func hostRAMAskedStatus(giB float64, held time.Duration, until, now time.Time, l
 			s += ": the seat is cleared first, then the host is asked"
 		}
 		return s + fmt.Sprintf("; held the cards for %s", heldFor)
+	case phase == gpulease.HoldPhaseOuter && until.After(now):
+		// The detached reserve is clearing the seat (the drain, the unload) and keeps this moment ahead while it lives: the host has
+		// not been asked, and a live reserve never lets the lease go now. The holder releases it only if the reserve dies.
+		return s + fmt.Sprintf(": held the cards for %s; the seat is cleared first, then the host is asked; if the reserve dies the holder releases about %s", heldFor, until.Format(time.Kitchen))
+	case phase == gpulease.HoldPhaseOuter:
+		return s + fmt.Sprintf(": held the cards for %s; the reserve that was clearing the seat has stopped moving its bound (it passed at %s), so it is gone or stalled: the holder, if one is running, releases the lease at its next poll; `%s` frees it now", heldFor, until.Format(time.Kitchen), release)
+	case phase == gpulease.HoldPhaseRelease && until.After(now):
+		return s + fmt.Sprintf(": held the cards for %s; the reserve is releasing the lease; if it dies the holder releases about %s", heldFor, until.Format(time.Kitchen))
 	case until.After(now):
 		return s + fmt.Sprintf(": held the cards for %s; the lease is released at %s, in %s, if the host still lacks the room (the hold bound, or --wait if that ends first)", heldFor, until.Format(time.Kitchen), until.Sub(now).Round(time.Second))
 	case byWrapper:

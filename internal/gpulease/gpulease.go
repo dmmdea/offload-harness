@@ -413,6 +413,9 @@ type Info struct {
 	// with its cards held (the outer bound a detached reserve stamps before its drain, then the wait's own end). Zero = no bound
 	// is on the record.
 	HostRAMHoldUntil time.Time
+	// HostRAMHoldPhase mirrors Meta.HostRAMHoldPhase, normalised: HoldPhaseOuter, HoldPhaseWait or HoldPhaseRelease while a stamp is on
+	// the record (a stamp without a phase is the wait's), empty without one.
+	HostRAMHoldPhase string
 	// HolderGaveUp mirrors Meta.HolderGaveUpMs, with the reason: the moment the lease's hidden holder gave up releasing it.
 	HolderGaveUp    time.Time
 	HolderGaveUpWhy string
@@ -1284,6 +1287,7 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		ExpiredWhy:     meta.ExpiredWhy,
 
 		HostRAMHoldUntil: holdUntilOf(meta.HostRAMHoldUntilMs),
+		HostRAMHoldPhase: holdPhaseOf(meta),
 
 		HolderGaveUp:    holdUntilOf(meta.HolderGaveUpMs),
 		HolderGaveUpWhy: meta.HolderGaveUpWhy,

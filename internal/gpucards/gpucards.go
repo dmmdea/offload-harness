@@ -224,6 +224,10 @@ func LeaseRows(leases []gpulease.Info) []map[string]any {
 		// stamps before its drain, then the wait's own end; present until the host admits the figure.
 		if !l.HostRAMHoldUntil.IsZero() {
 			row["host_ram_hold_until"] = l.HostRAMHoldUntil.Format(time.RFC3339)
+			if l.HostRAMHoldPhase != "" {
+				// outer (a detached reserve still clearing the seat: the host has not been asked), wait, or release.
+				row["host_ram_hold_phase"] = l.HostRAMHoldPhase
+			}
 		}
 		// A lease whose hidden holder gave up releasing it: nothing polls it any more.
 		if !l.HolderGaveUp.IsZero() {
