@@ -13,7 +13,7 @@
   fence taken after the door looked, a full run line, a seat unfit to answer, a failed stack, an abstention, a ceiling and a refused
   call. A cold seat is stated as not a defer, with the reason the lane neither keeps a seat warm nor warms one ahead of a call.
   A plain text reservation is stated as not a fence, so the review runs on the seat.
-- **Where the code is behind the policy.** The page says so, in the page's own "not built" idiom: a local-leg defer that is a fact about
+- **Where the code is behind the policy.** The page says so, stated as not built: a local-leg defer that is a fact about
   the seat or its cards is not offered once to the fleet the way a fence seen on entry is, and the review's result carries no admission
   block. No code changed.
 - **Tests.** `review_policy_docs_test.go`, red before the page changed: the policy block must exist with one row per defer shape and
