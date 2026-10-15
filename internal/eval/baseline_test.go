@@ -187,7 +187,7 @@ func TestFreezeFillsDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := fmt.Sprintf("%x", sha256.Sum256(testCorpus))
-	if b.GateVersion != GateVersion || GateVersion != "2" || b.MinPairs != 16 || b.BootstrapB != 10000 || b.Seed != 1 || b.MaxExcludedShare != 0.20 {
+	if b.GateVersion != GateVersion || GateVersion != "3" || b.MinPairs != 16 || b.BootstrapB != 10000 || b.Seed != 1 || b.MaxExcludedShare != 0.20 {
 		t.Fatalf("defaults wrong: %+v", b)
 	}
 	if b.CorpusHash != want {
@@ -425,7 +425,7 @@ func TestCheckBaselineRefusesARealVersionOneFileWithTheVersionReason(t *testing.
 	}
 	_, _, err = CheckBaseline(raw)
 	r := refusalOf(t, err)
-	for _, want := range []string{"gate_version", `"1"`, `"2"`, "re-frozen"} {
+	for _, want := range []string{"gate_version", `"1"`, `"` + GateVersion + `"`, "re-frozen"} {
 		if !strings.Contains(r.Reason, want) {
 			t.Errorf("the refusal must say %s, got %q", want, r.Reason)
 		}
@@ -489,7 +489,7 @@ func TestCheckBaselineReadsTheVersionBeforeTheFormOfTheBytes(t *testing.T) {
 	// A different version, with a field this gate has never heard of (a later gate's) and an odd layout.
 	for name, raw := range map[string][]byte{
 		"version 1, extra field":    []byte(`{"gate_version":"1","something_new":{"a":[1,2]},"mode":"superiority"}`),
-		"version 3, compact":        bytes.Replace(current, []byte(`"gate_version": "2"`), []byte(`"gate_version": "3"`), 1),
+		"version 4, compact":        bytes.Replace(current, []byte(`"gate_version": "3"`), []byte(`"gate_version": "4"`), 1),
 		"version 0, trailing bytes": []byte(`{"gate_version":"0"} {"x":1}`),
 	} {
 		_, _, err := CheckBaseline(raw)

@@ -42,26 +42,31 @@ func passTok(score, tokens float64) Attempt {
 	return Attempt{Outcome: OutcomePass, Score: f64(score), Metrics: tokenMetric(tokens)}
 }
 
-// passOnly is a passing attempt with a score and no cost.
-// incScore is the incumbent's score on task i in the tests that are about something other than the primary: a
-// little spread (1 and 0.98), because a sample whose pairs all differ by the same amount has no spread to read
-// and its lower end is held back.
+// incScore is the incumbent's score on task i in the tests that are about something other than the primary: 0.90
+// and 0.88, a little spread, against a candidate that scores 1. On the unit interval the interval of 40 pairs
+// carries two pseudo-pairs at each end of the range (interval.go), 0.1 wide, so a primary that is to clear a margin
+// of 0.05 at this size has to be about 0.1 ahead.
 func incScore(i int) float64 {
 	if i%2 == 1 {
-		return 0.98
+		return 0.88
 	}
-	return 1
+	return 0.9
 }
 
 // armScore is the 0..10 score of task i for the efficiency tests: the incumbent ("i") has a little spread
-// (8.0 and 8.1), the candidate scores 8.
+// (6.0 and 6.1) and the candidate scores 9, three points above it, so that the primary clears a margin of 0.5 at
+// 16 to 20 tasks even though the interval of so few pairs carries two pseudo-pairs at each end of the range.
 func armScore(tag string, i int) float64 {
-	if tag == "i" && i%2 == 1 {
-		return 8.1
+	if tag == "i" {
+		if i%2 == 1 {
+			return 6.1
+		}
+		return 6
 	}
-	return 8
+	return 9
 }
 
+// passOnly is a passing attempt with a score and no cost.
 func passOnly(score float64) Attempt { return Attempt{Outcome: OutcomePass, Score: f64(score)} }
 
 // failOnly is a task_fail attempt with a score and no cost.
@@ -225,11 +230,14 @@ func TestImputationUsesTheWorstScoreOfTheClass(t *testing.T) {
 		pre       PreReg
 		incScore  float64
 		wantDelta float64
-		width     float64 // the width of the score range
+		// The interval of twenty differences that are all the same, computed outside the package: Tango's score
+		// interval for twenty losses of the whole range (unit_interval), and the augmented score form for the
+		// other two classes (numpy and scipy), clipped to the range.
+		wantLo, wantHi float64
 	}{
-		{"unit_interval", func() PreReg { p := supPre(n); return p }(), 1, -1, 1},
-		{"judge_0_10", func() PreReg { p := supPre(n); p.Primary.Class = ClassJudge010; return p }(), 8, -8, 10},
-		{"custom [-5, 20]", customPre(ModeSuperiority, n, -5, 20), 7, -12, 25},
+		{"unit_interval", func() PreReg { p := supPre(n); return p }(), 1, -1, -1, -0.6777496838943612},
+		{"judge_0_10", func() PreReg { p := supPre(n); p.Primary.Class = ClassJudge010; return p }(), 8, -8, -10, -5.645110120705128},
+		{"custom [-5, 20]", customPre(ModeSuperiority, n, -5, 20), 7, -12, -17.190754045490742, -6.80924595450926},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, h := freeze(t, tc.pre, nil)
@@ -240,11 +248,8 @@ func TestImputationUsesTheWorstScoreOfTheClass(t *testing.T) {
 			cand := armFrom("c", n, func(i int) []Attempt { return []Attempt{noScore(outcomes[i%len(outcomes)])} })
 			cand.Tasks = cand.Tasks[:n-5] // the last five are never listed
 			r := mustGate(t, b, h, inputFor(h, inc, cand))
-			// Every pair differs by the same amount, so the interval is the rule of three about it, clipped to the range.
-			half := 3 * tc.width / n
-			wantLo, wantHi := math.Max(-tc.width, tc.wantDelta-half), math.Min(tc.width, tc.wantDelta+half)
-			if r.NUsed != n || r.Delta != tc.wantDelta || math.Abs(r.Lo-wantLo) > 1e-12 || math.Abs(r.Hi-wantHi) > 1e-12 {
-				t.Fatalf("every candidate task scores the worst: want delta %v on [%v, %v], got n=%d %v [%v, %v]", tc.wantDelta, wantLo, wantHi, r.NUsed, r.Delta, r.Lo, r.Hi)
+			if r.NUsed != n || r.Delta != tc.wantDelta || math.Abs(r.Lo-tc.wantLo) > 1e-8 || math.Abs(r.Hi-tc.wantHi) > 1e-8 {
+				t.Fatalf("every candidate task scores the worst: want delta %v on [%v, %v], got n=%d %v [%v, %v]", tc.wantDelta, tc.wantLo, tc.wantHi, r.NUsed, r.Delta, r.Lo, r.Hi)
 			}
 			if r.ImputedAttempts != n || r.AttemptCounts.Candidate["not_run"] != 3+5 {
 				t.Fatalf("all %d candidate attempts are imputed (5 are placeholders): %+v %d", n, r.AttemptCounts.Candidate, r.ImputedAttempts)
@@ -375,16 +380,16 @@ func TestExcludedShareIsTheLargestOfTheThreeRatios(t *testing.T) {
 }
 
 // A constant difference exactly on a margin that is not a sum of floats is still exactly on it:
-// 0.1 - 0.2 is -0.1, the margin. The delta is that single value, taken from the data, and the interval is the
-// rule of three about it, which spans the margin: the verdict is INCONCLUSIVE. A mean computed as a sum reads
-// -0.10000000000000002 (sixteen copies of -0.1 do not sum to -1.6).
+// 0.1 - 0.2 is -0.1, the margin. The interval is the one the pseudo-pairs give a sample whose differences are
+// all the same, and it spans the margin: the verdict is INCONCLUSIVE. The delta is the mean of the differences, to
+// the last bit of their sum (sixteen copies of -0.1 do not sum to -1.6).
 func TestGateConstantDifferenceExactlyOnTheMarginIsInconclusive(t *testing.T) {
 	const n = 16
 	p := niUnitPre(n)
 	p.Primary.Margin = f64(0.1)
 	b, h := freeze(t, p, nil)
 	r := mustGate(t, b, h, inputFor(h, arm("i", repeatF(0.2, n), repeatF(1000, n)), arm("c", repeatF(0.1, n), repeatF(800, n))))
-	if r.Delta != -0.1 || !(r.Lo < -0.1) || !(r.Hi > -0.1) {
+	if math.Abs(r.Delta+0.1) > 1e-12 || !(r.Lo < -0.1) || !(r.Hi > -0.1) {
 		t.Fatalf("every difference is exactly -0.1: want the one value inside its interval, got %v %v %v", r.Delta, r.Lo, r.Hi)
 	}
 	if r.Verdict != VerdictInconclusive {
@@ -698,26 +703,28 @@ func TestAllTiedNonInferiorityScalesWithTheScoreRange(t *testing.T) {
 	}
 }
 
-// A superiority tie is INCONCLUSIVE because its interval spans 0, and it stays so at any size: the incumbent wins
-// ties. A constant difference far from zero still decides, in both directions and in both modes: every pair a win
-// of the whole range is an ADOPT, every pair a loss of it is a BLOCK, and the interval stops at the range.
+// A superiority tie is INCONCLUSIVE because its interval (Tango's, +-z^2 / (n + z^2)) spans 0, and it stays so at
+// any size: the incumbent wins ties. A constant difference far from zero still decides, in both directions and in
+// both modes: every pair a win of the whole range is an ADOPT, every pair a loss of it is a BLOCK, and the
+// interval stops at the range.
 func TestAllTiedSuperiorityIsInconclusiveAndAConstantFarFromZeroStillDecides(t *testing.T) {
 	const n = 16
 	b, h := freeze(t, supPre(n), nil)
+	const z2 = 1.959963984540054 * 1.959963984540054
 	for _, size := range []int{16, 80, 200} {
 		bs, hs := freeze(t, supPre(size), nil)
 		r := mustGate(t, bs, hs, inputFor(hs, arm("i", repeatF(0.5, size), nil), arm("c", repeatF(0.5, size), nil)))
-		if half := 3 / float64(size); r.Verdict != VerdictInconclusive || r.Delta != 0 || math.Abs(r.Lo+half) > 1e-12 || math.Abs(r.Hi-half) > 1e-12 || !r.KeepIncumbent {
+		if half := z2 / (float64(size) + z2); r.Verdict != VerdictInconclusive || r.Delta != 0 || math.Abs(r.Lo+half) > 1e-9 || math.Abs(r.Hi-half) > 1e-9 || !r.KeepIncumbent {
 			t.Errorf("n=%d: a tie keeps the incumbent with an interval about 0: %s delta %v [%v, %v] keep %v", size, r.Verdict, r.Delta, r.Lo, r.Hi, r.KeepIncumbent)
 		}
 	}
 	r := mustGate(t, b, h, inputFor(h, arm("i", repeatF(0, n), nil), arm("c", repeatF(1, n), nil)))
-	if r.Verdict != VerdictAdopt || r.Delta != 1 || math.Abs(r.Lo-(1-3.0/n)) > 1e-12 || r.Hi != 1 {
-		t.Errorf("every pair +1: want ADOPT on [0.8125, 1], got %s [%v, %v]", r.Verdict, r.Lo, r.Hi)
+	if r.Verdict != VerdictAdopt || r.Delta != 1 || math.Abs(r.Lo-0.612784638931127) > 1e-9 || r.Hi != 1 {
+		t.Errorf("every pair +1: want ADOPT on [0.6128, 1], got %s [%v, %v]", r.Verdict, r.Lo, r.Hi)
 	}
 	r = mustGate(t, b, h, inputFor(h, arm("i", repeatF(1, n), nil), arm("c", repeatF(0, n), nil)))
-	if r.Verdict != VerdictBlock || r.Delta != -1 || r.Lo != -1 || math.Abs(r.Hi-(-1+3.0/n)) > 1e-12 {
-		t.Errorf("every pair -1: want BLOCK on [-1, -0.8125], got %s [%v, %v]", r.Verdict, r.Lo, r.Hi)
+	if r.Verdict != VerdictBlock || r.Delta != -1 || r.Lo != -1 || math.Abs(r.Hi+0.612784638931127) > 1e-9 {
+		t.Errorf("every pair -1: want BLOCK on [-1, -0.6128], got %s [%v, %v]", r.Verdict, r.Lo, r.Hi)
 	}
 	// Non-inferiority: every pair a loss of the whole range is a BLOCK, and a win of it with tokens halved an ADOPT.
 	bn, hn := freeze(t, niUnitPre(n), nil)
@@ -731,15 +738,15 @@ func TestAllTiedSuperiorityIsInconclusiveAndAConstantFarFromZeroStillDecides(t *
 	}
 }
 
-// The price of the rule of three's upper end: a candidate that loses every task by the same amount cannot be
-// blocked until 3 R / n has shrunk below what the loss exceeds the margin by. Every task lost by 1.0 on a 0..10
-// scale against a margin of 0.5 is INCONCLUSIVE up to 60 tasks (the upper end is exactly -0.5 there) and a
-// BLOCK from 61, and never an ADOPT.
-func TestAConstantLossBlocksOnlyOnceTheRuleOfThreeClearsTheMargin(t *testing.T) {
+// The price of the pseudo-pairs' upper end: a candidate that loses every task by the same amount that is not a loss
+// of the whole range is not pass/fail data, so its interval is the augmented one, whose upper end stays above the
+// loss until the pseudo-pairs at each end have stopped mattering. Every task lost by 1.0 on a 0..10 scale against
+// a margin of 0.5 is INCONCLUSIVE up to 77 tasks and a BLOCK from 78, and never an ADOPT.
+func TestAConstantLossBlocksOnlyOncePseudoPairsStopMattering(t *testing.T) {
 	for _, tc := range []struct {
 		n    int
 		want string
-	}{{16, VerdictInconclusive}, {60, VerdictInconclusive}, {61, VerdictBlock}, {80, VerdictBlock}} {
+	}{{16, VerdictInconclusive}, {60, VerdictInconclusive}, {77, VerdictInconclusive}, {78, VerdictBlock}, {80, VerdictBlock}} {
 		r := allTied(t, tc.n, niPre(tc.n), 8, 7)
 		if r.Margin != 0.5 || r.Verdict != tc.want || r.Delta != -1 {
 			t.Errorf("n=%d, every task lost by 1.0 on 0..10, margin %v: want %s, got %s %s (delta %v hi %v)", tc.n, r.Margin, tc.want, r.Verdict, r.Reason, r.Delta, r.Hi)
@@ -749,7 +756,7 @@ func TestAConstantLossBlocksOnlyOnceTheRuleOfThreeClearsTheMargin(t *testing.T) 
 
 // A constant difference that is exactly the margin on paper is -0.04999999999999993 (0.95 - 0.90) or
 // -0.05000000000000004 in floats; the single value used to decide it by the last bit. It is a constant loss of
-// the margin, with no spread to read, and it never ADOPTs, at any size.
+// the margin, whose interval the pseudo-pairs spread about it, and it never ADOPTs, at any size.
 func TestConstantDifferenceAtTheMarginByFloatArithmeticIsNotAdopted(t *testing.T) {
 	for _, n := range []int{16, 80, 200} {
 		for _, tc := range []struct{ inc, cand float64 }{{0.95, 0.90}, {0.70, 0.65}, {0.50, 0.45}, {0.60, 0.55}} {
@@ -763,32 +770,58 @@ func TestConstantDifferenceAtTheMarginByFloatArithmeticIsNotAdopted(t *testing.T
 
 // An end of the interval that sits on the line by arithmetic and a bit off it by float rounding is on the line.
 // The verdict compares the ends to the boundary with a tolerance of 1e-9 of the score range, so an interval
-// that touches the margin (or 0) is neither an ADOPT nor a BLOCK whichever way the last bit of a sum fell:
-//   - 60 ties that are not exactly ties (0.1 + 0.2 against 0.3, 5.6e-17 apart): lo = -0.04999999999999995;
-//   - 30 pairs that each gain 0.05 as 0.55 - 0.5 = 0.05000000000000004: lo = -0.04999999999999996;
-//   - 60 pairs that each lose 0.1 as 0.7 - 0.8 = -0.10000000000000009: hi = -0.050000000000000086;
-//   - the same gain of 0.05 at 60 pairs against 0 in superiority: lo = 4.2e-17.
+// that touches the margin is neither an ADOPT nor a BLOCK whichever way the last bit of a sum fell. The margin
+// is set from the interval the gate itself computed, to the bit and a rounding error either side of it: an end
+// 1e-12 of the range inside the margin is still on it, and one 1e-6 inside is not. Both ends and both score
+// ranges are covered (a mutant without the tolerance flips the 1e-12 rows).
 func TestAnIntervalEndOnTheLineByFloatArithmeticIsNeitherAdoptNorBlock(t *testing.T) {
-	x, y := 0.1, 0.2 // not constants: a constant 0.1 + 0.2 is exactly 0.3
-	for _, tc := range []struct {
+	for _, sp := range []struct {
 		name      string
+		class     string
+		width     float64
 		n         int
 		inc, cand float64
+		lower     bool   // the end under test is the lower one (against -margin for an ADOPT), else the upper one (a BLOCK)
+		beyond    string // the verdict when the end is 1e-6 of the range past the margin
 	}{
-		{"60 ties that are not exact", 60, 0.3, x + y},
-		{"30 pairs that gain 0.05", 30, 0.5, 0.55},
-		{"60 pairs that lose 0.1", 60, 0.8, 0.7},
+		{"unit interval, 80 ties: the lower end", ClassUnitInterval, 1, 80, 0.5, 0.5, true, VerdictAdopt},
+		{"0..10, 80 ties: the lower end", ClassJudge010, 10, 80, 8, 8, true, VerdictAdopt},
+		{"unit interval, 80 losses of the whole range: the upper end", ClassUnitInterval, 1, 80, 1, 0, false, VerdictBlock},
+		{"0..10, 80 losses of the whole range: the upper end", ClassJudge010, 10, 80, 10, 0, false, VerdictBlock},
 	} {
-		r := allTied(t, tc.n, niUnitPre(tc.n), tc.inc, tc.cand)
-		if r.Verdict != VerdictInconclusive {
-			t.Errorf("%s: an interval end on -margin is INCONCLUSIVE, got %s %s (lo %v hi %v)", tc.name, r.Verdict, r.Reason, r.Lo, r.Hi)
+		pre := func(margin float64) PreReg {
+			p := niPre(sp.n)
+			if sp.class == ClassUnitInterval {
+				p = niUnitPre(sp.n)
+			}
+			p.Primary.Margin = f64(margin)
+			return p
 		}
-	}
-	const n = 60
-	b, h := freeze(t, supPre(n), nil)
-	r := mustGate(t, b, h, inputFor(h, arm("i", repeatF(0.5, n), nil), arm("c", repeatF(0.55, n), nil)))
-	if r.Verdict != VerdictInconclusive {
-		t.Errorf("superiority, 60 pairs that gain 0.05: lo is 0 by arithmetic, got %s %s (lo %v)", r.Verdict, r.Reason, r.Lo)
+		// The interval the gate computes for these scores does not depend on the margin.
+		probe := allTied(t, sp.n, pre(0.01*sp.width), sp.inc, sp.cand)
+		end := probe.Hi
+		if sp.lower {
+			end = probe.Lo
+		}
+		// margin(k) puts -margin at k of the range inside the end's side: k = 0 is on it to the bit.
+		margin := func(k float64) float64 {
+			if sp.lower {
+				return -(end - k*sp.width) // -margin = end - k*width: the end is k*width above -margin
+			}
+			return -(end + k*sp.width) // -margin = end + k*width: the end is k*width below -margin
+		}
+		for _, k := range []float64{0, 1e-12, -1e-12} {
+			m := margin(k)
+			if !(m > 0 && m < sp.width) {
+				t.Fatalf("%s: setup: margin %v is out of range", sp.name, m)
+			}
+			if r := allTied(t, sp.n, pre(m), sp.inc, sp.cand); r.Verdict != VerdictInconclusive {
+				t.Errorf("%s, %v of the range inside the margin: an end on the line is INCONCLUSIVE, got %s %s (lo %v hi %v margin %v)", sp.name, k, r.Verdict, r.Reason, r.Lo, r.Hi, m)
+			}
+		}
+		if r := allTied(t, sp.n, pre(margin(1e-6)), sp.inc, sp.cand); r.Verdict != sp.beyond {
+			t.Errorf("%s: 1e-6 of the range past the margin is %s, got %s %s", sp.name, sp.beyond, r.Verdict, r.Reason)
+		}
 	}
 }
 
@@ -877,15 +910,19 @@ func TestPreRegistrationMustFreezeTheJudge(t *testing.T) {
 	}
 }
 
-func TestGateVersionIsTwoAndAnOlderBaselineIsRefused(t *testing.T) {
-	if GateVersion != "2" {
-		t.Fatalf("the rules changed (imputation, floors, frozen judge, vetoes): GateVersion = %q, want 2", GateVersion)
+// The primary interval changed (Tango's score interval for pass/fail pairs, the augmented score form for every
+// other score), so a baseline frozen under version 1 or version 2 is refused for its version, whatever else it holds.
+func TestGateVersionIsThreeAndAnOlderBaselineIsRefused(t *testing.T) {
+	if GateVersion != "3" {
+		t.Fatalf("the primary interval changed (Tango's score interval, the augmented fallback): GateVersion = %q, want 3", GateVersion)
 	}
 	b, _ := freeze(t, supPre(16), nil)
-	b.GateVersion = "1"
-	raw, _ := canonicalBaseline(b)
-	if _, _, err := CheckBaseline(raw); err == nil || !strings.Contains(err.Error(), "gate_version") {
-		t.Fatalf("a version 1 baseline must be refused, got %v", err)
+	for _, old := range []string{"1", "2"} {
+		b.GateVersion = old
+		raw, _ := canonicalBaseline(b)
+		if _, _, err := CheckBaseline(raw); err == nil || !strings.Contains(err.Error(), "gate_version") || !strings.Contains(err.Error(), "re-frozen") {
+			t.Fatalf("a version %s baseline must be refused for its version, got %v", old, err)
+		}
 	}
 }
 
@@ -1086,15 +1123,16 @@ func TestTimedOutTasksWithNullCostStayUnresolved(t *testing.T) {
 // Probe P3, the cost lever. 20 tasks of 25 attempts: the incumbent passes all 25 at 1000 tokens, the
 // candidate passes 24 at 900 and its 25th attempt times out after burning 20000. Its true spend per task is
 // (24 x 900 + 20000) / 25 = 1664 tokens, 1.66 times the incumbent's. The timeout scores the worst (0.96
-// against 1.0, inside the 0.05 margin), and it used to carry no cost, so the gate saw 900 tokens and
-// ADOPTed an efficiency win that was a loss.
+// against an incumbent that scores about 0.7, so the primary is clear of the 0.05 margin and only the cost
+// decides), and it used to carry no cost, so the gate saw 900 tokens and ADOPTed an efficiency win that
+// was a loss.
 func TestAnUnfinishedAttemptsRecordedCostIsSpentNotHidden(t *testing.T) {
 	const n, k = 20, 25
 	b, h := freeze(t, niUnitPre(n), nil)
 	inc := armFrom("i", n, func(i int) []Attempt {
 		as := make([]Attempt, k)
 		for j := range as {
-			as[j] = passTok(incScore(i), 1000)
+			as[j] = passTok(incScore(i)-0.2, 1000)
 		}
 		return as
 	})
@@ -1408,15 +1446,15 @@ func TestMarginAtOrAboveTheClassWidthIsRefused(t *testing.T) {
 }
 
 // A candidate that fails every task cannot ADOPT on cost: the widest margin that can be frozen is
-// still inside the range, and a delta of the whole range is below it. Every pair loses the whole range,
-// so there is no spread and the interval is the rule of three about -1: 16 tasks cannot put its upper end
-// (-0.8125) below a margin of 0.99, and 400 can (3/400 = 0.0075).
+// still inside the range, and a delta of the whole range is below it. Every pair loses the whole range, so
+// the interval is Tango's about -1, whose upper end is -1 + 0.0190 at 400 tasks and -1 + 0.0077 at 1000: 16 and
+// 400 tasks cannot put it below a margin of 0.99, and 1000 can.
 func TestAFailingCandidateIsNeverAdoptedUnderTheWidestMargin(t *testing.T) {
 	for _, tc := range []struct {
 		n      int
 		margin float64
 		want   string
-	}{{16, 0.99, VerdictInconclusive}, {16, 0.5, VerdictBlock}, {400, 0.99, VerdictBlock}} {
+	}{{16, 0.99, VerdictInconclusive}, {16, 0.5, VerdictBlock}, {400, 0.99, VerdictInconclusive}, {1000, 0.99, VerdictBlock}} {
 		p := niUnitPre(tc.n)
 		p.Primary.Margin = f64(tc.margin)
 		b, h := freeze(t, p, nil)

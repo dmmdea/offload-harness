@@ -16,8 +16,8 @@ package eval
 // The methods are the percentile interval the gate used to read (BootstrapDeltaMean's), the five candidates
 // the review named ((i) studentized bootstrap, (ii) BCa, (iii) the percentile widened about the estimate by
 // t/z and (iii') by t/z times sqrt(n/(n-1)), (iv) the paired t, (v) the lower of two), and (vi) the score
-// form of the t interval, the one added when none of the five cleared the bar and the one the gate reads
-// now (interval.go).
+// form of the t interval, the one added when none of the five cleared the bar and the one gate version 2 read, and
+// (vii) the primary interval the gate reads now (interval.go), called directly.
 //
 // The grid is large (minutes of CPU), so TestCalibrationStudy is off unless OFFLOAD_GATE_STUDY is
 // set; it prints the tables the docs and ADR quote, and TestEfficiencyCalibrationStudy, under the same
@@ -374,7 +374,8 @@ const (
 	mPctW         // (iii) the percentile widened about the point estimate by t(n-1, .975) / z(.975)
 	mPctW2        // (iii') the same, times sqrt(n / (n-1)): the factor the bootstrap's own variance lacks
 	mT            // (iv) the paired t interval
-	mScore        // (vi) the score form of the t interval: the standard error taken at the boundary
+	mScore        // (vi) the score form of the t interval: the standard error taken at the boundary (gate version 2)
+	mProd         // (vii) the production primary: Tango's score interval for pass/fail pairs, the augmented score form otherwise
 	nBase
 )
 
@@ -385,7 +386,8 @@ var baseNames = [nBase]string{
 	mPctW:  "(iii) pctl x t/z",
 	mPctW2: "(iii') pctl x t/z x sqrt(n/(n-1))",
 	mT:     "(iv) paired t",
-	mScore: "(vi) score-form t",
+	mScore: "(vi) score-form t, rule of three (version 2)",
+	mProd:  "(vii) production",
 }
 
 // composites are (v): the lower of two bases (so the verdict needs both to clear the boundary).
@@ -427,7 +429,7 @@ func newSimBuf(B int) *simBuf {
 
 // simLowers returns the lower end of every method (bases, then composites) on one dataset, with B
 // resamples drawn from seed in the order bootstrapReps draws them. degenerate reports a dataset
-// whose paired differences are all equal: its interval is the point for every method but (vi).
+// whose paired differences are all equal: its interval is the point for every method but (vi) and (vii).
 func simLowers(inc, cand []float64, B int, seed int64, buf *simBuf, span float64) (lows []float64, degenerate bool) {
 	n := len(inc)
 	fn := float64(n)
@@ -448,13 +450,14 @@ func simLowers(inc, cand []float64, B int, seed int64, buf *simBuf, span float64
 	}
 	if degenerate {
 		// A sample with no spread: every candidate interval is the point, as it was when the methods
-		// were compared, so their columns stay what they were; the gate's own method (vi) reads the
-		// lower end of the rule of three about the value (zeroSpreadInterval), and a composite takes
-		// the lower of its two parts.
+		// were compared, so their columns stay what they were; method (vi), the version 2 rule, reads
+		// the lower end of the rule of three about the value (zeroSpreadV2), the production method (vii)
+		// its own interval, and a composite takes the lower of its two parts.
 		for k := 0; k < nBase; k++ {
 			lows[k] = dbar
 		}
-		lows[mScore], _ = zeroSpreadInterval(d[0], n, span)
+		lows[mScore], _ = zeroSpreadV2(d[0], n, span)
+		_, lows[mProd], _ = primaryInterval(inc, cand, span)
 		for i, c := range composites {
 			lows[nBase+i] = math.Min(lows[c.a], lows[c.b])
 		}
@@ -561,10 +564,56 @@ func simLowers(inc, cand []float64, B int, seed int64, buf *simBuf, span float64
 	den := math.Max(fn-tq*tq, 1)
 	lows[mScore] = dbar - tq*sn/math.Sqrt(den)
 
+	_, lows[mProd], _ = primaryInterval(inc, cand, span)
+
 	for i, c := range composites {
 		lows[nBase+i] = math.Min(lows[c.a], lows[c.b])
 	}
 	return lows, false
+}
+
+// intervalV2 is the primary interval gate version 2 read, on n paired differences each in [-span, span]: the score
+// form of the t interval, and the rule of three (zeroSpreadV2) for a sample whose differences are all equal. The
+// study keeps it as the column it compares the production interval with.
+func intervalV2(d []float64, span float64) (lo, hi float64) {
+	n := len(d)
+	if n < 2 {
+		return 0, 0
+	}
+	fn := float64(n)
+	var sum float64
+	for _, v := range d {
+		sum += v
+	}
+	delta := sum / fn
+	same := true
+	for _, v := range d {
+		if math.Abs(v-d[0]) > equalTolerance*span {
+			same = false
+		}
+	}
+	if same {
+		return zeroSpreadV2(d[0], n, span)
+	}
+	var ss float64
+	for _, v := range d {
+		ss += (v - delta) * (v - delta)
+	}
+	c := tCritical975(n - 1)
+	half := c * math.Sqrt(ss/fn) / math.Sqrt(math.Max(fn-c*c, 1))
+	return delta - half, delta + half
+}
+
+// zeroSpreadV2 is the interval gate version 2 gave a sample whose n differences all equal c, each in
+// [-span, span]: the rule of three, [c - 3 span / n, c + 3 span / n] clipped to the range. The production
+// interval no longer has this case (a sample with no spread is Tango's with no discordant pair, or an
+// augmented sample with a standard error of its own); the study keeps the rule as the column it compares with.
+func zeroSpreadV2(c float64, n int, span float64) (lo, hi float64) {
+	if !(span > 0) || !finite(span) || !finite(c) || n < 1 {
+		return c, c
+	}
+	half := 3 * span / float64(n)
+	return math.Min(c, math.Max(-span, c-half)), math.Max(c, math.Min(span, c+half))
 }
 
 func maxAbs(v []float64) float64 {

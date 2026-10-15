@@ -7,59 +7,130 @@ import (
 	"testing"
 )
 
-// The reference values below were computed outside the package (numpy and scipy) from the formula in
-// interval.go, so they pin the arithmetic and the t table, not the code against itself.
-func TestPrimaryIntervalMatchesAnIndependentComputation(t *testing.T) {
-	near := func(got, want float64) bool { return math.Abs(got-want) <= 1e-12*math.Max(1, math.Abs(want)) }
-
-	// 20 tasks, differences +-0.5 on 8 of them and 0 on 12: mean 0.025.
-	d := []float64{0.5, 0, -0.5, 0, 0, 0.5, 0, 0, -0.5, 0, 0, 0, 0.5, 0, -0.5, 0, 0, 0, 0, 0.5}
-	inc, cand := repeatF(0.25, len(d)), make([]float64, len(d))
-	for i := range d {
-		cand[i] = 0.25 + d[i]
-	}
-	delta, lo, hi := primaryInterval(inc, cand, 1)
-	if !near(delta, 0.025) || !near(lo, -0.13109591433944429) || !near(hi, 0.18109591433944427) {
-		t.Fatalf("n=20: got %v %v %v", delta, lo, hi)
-	}
-
-	// 16 tasks of continuous scores.
-	inc16 := []float64{0.805, 0.808, 0.515, 0.286, 0.054, 0.383, 0.408, 0.045, 0.049, 0.999, 0.652, 0.235, 0.435, 0.974, 0.898, 0.844}
-	cand16 := []float64{0.838, 0.625, 0.439, 0.238, 0.0, 0.544, 0.445, 0.0, 0.181, 1.0, 0.373, 0.234, 0.289, 0.989, 0.69, 0.898}
-	delta, lo, hi = primaryInterval(inc16, cand16, 1)
-	if !near(delta, -0.037937500000000006) || !near(lo, -0.1109080595568126) || !near(hi, 0.03503305955681258) {
-		t.Fatalf("n=16: got %v %v %v", delta, lo, hi)
-	}
-}
-
-// The interval is the confidence set of the self-normalized statistic: at either end the statistic
-// (delta - mu) / sqrt(mean((d - mu)^2) / n) is +-c, the critical value of the t distribution.
-func TestPrimaryIntervalIsTheScoreFormOfTheTInterval(t *testing.T) {
+// The augmented fallback is the score form of the t interval on the sample with two pseudo-pairs at each end of
+// the range, centred on the observed mean: rebuilt here by appending the pseudo-pairs to the differences and
+// reading the divisor-N standard deviation of the whole, a different path from the closed form in the code.
+func TestPrimaryIntervalOnOtherScoresMatchesAnExplicitlyAugmentedSample(t *testing.T) {
 	rng := rand.New(rand.NewSource(11))
-	for trial := 0; trial < 200; trial++ {
+	for trial := 0; trial < 300; trial++ {
 		n := 16 + rng.Intn(60)
 		inc, cand := make([]float64, n), make([]float64, n)
 		for i := range inc {
 			inc[i], cand[i] = rng.Float64(), rng.Float64()*0.9
 		}
 		delta, lo, hi := primaryInterval(inc, cand, 1)
-		c := tCritical975(n - 1)
-		stat := func(mu float64) float64 {
-			var m2 float64
-			for i := range inc {
-				e := cand[i] - inc[i] - mu
-				m2 += e * e
-			}
-			return (delta - mu) * math.Sqrt(float64(n)) / math.Sqrt(m2/float64(n))
+		aug := make([]float64, 0, n+4)
+		var mean float64
+		for i := range inc {
+			aug = append(aug, cand[i]-inc[i])
+			mean += cand[i] - inc[i]
 		}
-		if got := stat(lo); math.Abs(got-c) > 1e-9 {
-			t.Fatalf("n=%d: the statistic at lo is %v, want c=%v", n, got, c)
+		mean /= float64(n)
+		aug = append(aug, 1, 1, -1, -1)
+		big := float64(len(aug))
+		var m float64
+		for _, v := range aug {
+			m += v
 		}
-		if got := stat(hi); math.Abs(got+c) > 1e-9 {
-			t.Fatalf("n=%d: the statistic at hi is %v, want -c=%v", n, got, -c)
+		m /= big
+		var ss float64
+		for _, v := range aug {
+			ss += (v - m) * (v - m)
+		}
+		c := tCritical975(len(aug) - 1)
+		half := c * math.Sqrt(ss/big) / math.Sqrt(big-c*c)
+		if math.Abs(delta-mean) > 1e-12 || math.Abs(lo-(mean-half)) > 1e-12 || math.Abs(hi-(mean+half)) > 1e-12 {
+			t.Fatalf("n=%d: got %v [%v, %v], want %v [%v, %v]", n, delta, lo, hi, mean, mean-half, mean+half)
 		}
 		if !(lo < delta && delta < hi) {
 			t.Fatalf("n=%d: the interval %v %v must contain the delta %v", n, lo, hi, delta)
+		}
+	}
+}
+
+// Tango's statistic is the one the interval inverts: at either end it is +-1.96, and the interval contains the
+// sample's own mean. Checked over many (n, wins, losses), the sparse ones included. An end at the edge of the
+// range (all losses, or all wins) has a nil variance there and is the range's end.
+func TestTangoIntervalEndsAreWhereTheStatisticIsPlusOrMinusZ(t *testing.T) {
+	rng := rand.New(rand.NewSource(13))
+	for trial := 0; trial < 3000; trial++ {
+		n := 2 + rng.Intn(300)
+		// Mostly sparse disagreement: the regime this interval exists for.
+		var w, l int
+		switch trial % 3 {
+		case 0:
+			w, l = rng.Intn(n/10+1), rng.Intn(n/10+1)
+		case 1:
+			w, l = rng.Intn(n+1), 0
+		default:
+			w = rng.Intn(n + 1)
+			l = rng.Intn(n - w + 1)
+		}
+		lo, hi := tangoInterval(n, w, l)
+		mean := float64(w-l) / float64(n)
+		if !(lo <= mean && mean <= hi) || lo < -1 || hi > 1 {
+			t.Fatalf("n=%d w=%d l=%d: [%v, %v] must contain the mean %v and stay in [-1, 1]", n, w, l, lo, hi, mean)
+		}
+		if lo > -1 {
+			if z := tangoZ(n, w, l, lo); math.Abs(z-normal975) > 1e-8 && !(w == n) {
+				t.Fatalf("n=%d w=%d l=%d: the statistic at lo=%v is %v, want %v", n, w, l, lo, z, normal975)
+			}
+		}
+		if hi < 1 {
+			if z := tangoZ(n, w, l, hi); math.Abs(z+normal975) > 1e-8 && !(l == n) {
+				t.Fatalf("n=%d w=%d l=%d: the statistic at hi=%v is %v, want %v", n, w, l, hi, z, -normal975)
+			}
+		}
+	}
+}
+
+// The variance the statistic uses is the restricted maximum-likelihood one: the likelihood of w wins, l losses and
+// the rest ties is maximised over the probability v of a loss under u - v = delta (u the probability of a win),
+// by a ternary search of the concave log-likelihood, a path that shares nothing with the quadratic the code solves.
+func TestTangoVarianceIsTheRestrictedMaximumLikelihood(t *testing.T) {
+	rng := rand.New(rand.NewSource(17))
+	for trial := 0; trial < 2000; trial++ {
+		n := 2 + rng.Intn(200)
+		w := rng.Intn(n + 1)
+		l := rng.Intn(n - w + 1)
+		if trial%2 == 0 {
+			w, l = rng.Intn(n/8+1), rng.Intn(n/8+1)
+		}
+		delta := -0.6 + 1.2*rng.Float64()
+		ties := n - w - l
+		loglik := func(v float64) float64 {
+			u, z := v+delta, 1-2*v-delta
+			var s float64
+			for _, c := range []struct {
+				cnt int
+				p   float64
+			}{{w, u}, {l, v}, {ties, z}} {
+				if c.cnt > 0 {
+					if c.p <= 0 {
+						return math.Inf(-1)
+					}
+					s += float64(c.cnt) * math.Log(c.p)
+				}
+			}
+			return s
+		}
+		lo, hi := math.Max(0, -delta), (1-delta)/2
+		for i := 0; i < 300; i++ {
+			a, b := lo+(hi-lo)/3, hi-(hi-lo)/3
+			if loglik(a) < loglik(b) {
+				lo = a
+			} else {
+				hi = b
+			}
+		}
+		// The search converges to the interior optimum or to the edge u = 0 (v = -delta), whichever the likelihood prefers.
+		v := (lo + hi) / 2
+		if edge := math.Max(0, -delta); loglik(edge) > loglik(v) {
+			v = edge
+		}
+		want := 2*v + delta - delta*delta
+		if got := tangoVar0(n, w, l, delta); math.Abs(got-want) > 1e-7 {
+			t.Fatalf("n=%d w=%d l=%d delta=%v: variance %v, the maximum-likelihood one is %v", n, w, l, delta, got, want)
 		}
 	}
 }
@@ -95,56 +166,74 @@ func TestPrimaryIntervalInvariances(t *testing.T) {
 	if !near(d, -d0) || !near(lo, -hi0) || !near(hi, -lo0) {
 		t.Errorf("swapping the arms must negate the interval: %v %v %v vs %v %v %v", d, lo, hi, -d0, -hi0, -lo0)
 	}
+	// The same for pass/fail pairs (Tango's interval): shifting by a constant that keeps them pass/fail is the
+	// identity, the range scales the interval, and swapping the arms negates it.
+	pinc, pcand := make([]float64, 40), make([]float64, 40)
+	for i := range pinc {
+		pinc[i], pcand[i] = float64(rng.Intn(2)), float64(rng.Intn(2))
+	}
+	d0, lo0, hi0 = primaryInterval(pinc, pcand, 1)
+	d, lo, hi = primaryInterval(scale(pinc, 10), scale(pcand, 10), 10)
+	if !near(d, 10*d0) || !near(lo, 10*lo0) || !near(hi, 10*hi0) {
+		t.Errorf("pass/fail on a 0..10 scale must give ten times the 0..1 interval: %v %v %v vs %v %v %v", d, lo, hi, 10*d0, 10*lo0, 10*hi0)
+	}
+	d, lo, hi = primaryInterval(pcand, pinc, 1)
+	if !near(d, -d0) || !near(lo, -hi0) || !near(hi, -lo0) {
+		t.Errorf("pass/fail: swapping the arms must negate the interval: %v %v %v vs %v %v %v", d, lo, hi, -d0, -hi0, -lo0)
+	}
 }
 
-// With no spread to measure the delta is the one value, taken from the data and not from a sum, and the
-// interval is the value plus and minus 3 R / n (the rule of three, R the width of the score range), clipped to
-// [-R, R] (see zeroSpreadInterval). The reference ends were computed outside the package. With nothing to
-// conclude the result is zeros; a sum that overflows is not finite, for the caller to refuse.
+// Samples with no spread, and the edges. A sample of ties, wins and losses of the whole range has no standard
+// error to read, and its interval is Tango's: with no pair that differs it is +-z^2 / (n + z^2) of the range
+// (computed here from the formula). Any other constant difference is not pass/fail data, and the pseudo-pairs give
+// it a spread of its own; the reference ends of those were computed outside the package. With nothing to
+// conclude the result is zeros; a sum that overflows is not finite, for the caller to refuse; a range that is not
+// a positive number has no pseudo-pair to scale, so no interval.
 func TestPrimaryIntervalDegenerateInputs(t *testing.T) {
-	near := func(got, want float64) bool { return math.Abs(got-want) <= 1e-12*math.Max(1, math.Abs(want)) }
+	const z2 = 1.959963984540054 * 1.959963984540054
+	near := func(got, want float64) bool { return math.Abs(got-want) <= 1e-9*math.Max(1, math.Abs(want)) }
+	tie := func(n int, span float64) float64 { return span * z2 / (float64(n) + z2) }
 	for _, tc := range []struct {
-		name      string
-		inc, cand []float64
-		span      float64
-		delta     float64 // the one value
-		lo, hi    float64
+		name          string
+		inc, cand     []float64
+		span          float64
+		delta, lo, hi float64
 	}{
-		{"every difference zero (a tie), 16 tasks", repeatF(0.5, 16), repeatF(0.5, 16), 1, 0, -0.1875, 0.1875},
-		{"a tie, 40 tasks", repeatF(0.5, 40), repeatF(0.5, 40), 1, 0, -0.075, 0.075},
-		{"a tie, 60 tasks: 3/60 is the margin 0.05", repeatF(0.5, 60), repeatF(0.5, 60), 1, 0, -0.05, 0.05},
-		{"a tie, 80 tasks", repeatF(0.5, 80), repeatF(0.5, 80), 1, 0, -0.0375, 0.0375},
-		{"a tie on a 0..10 range, 24 tasks", repeatF(5, 24), repeatF(5, 24), 10, 0, -1.25, 1.25},
-		{"every difference +0.25", repeatF(0.5, 16), repeatF(0.75, 16), 1, 0.25, 0.0625, 0.4375},
-		{"every difference -0.5 on a 0..10 range", repeatF(8, 16), repeatF(7.5, 16), 10, -0.5, -2.375, 1.375},
+		{"every difference zero (a tie), 16 tasks", repeatF(0.5, 16), repeatF(0.5, 16), 1, 0, -tie(16, 1), tie(16, 1)},
+		{"a tie, 40 tasks", repeatF(0.5, 40), repeatF(0.5, 40), 1, 0, -tie(40, 1), tie(40, 1)},
+		{"a tie, 73 tasks: the end is -0.04999", repeatF(0.5, 73), repeatF(0.5, 73), 1, 0, -tie(73, 1), tie(73, 1)},
+		{"a tie on a 0..10 range, 24 tasks", repeatF(5, 24), repeatF(5, 24), 10, 0, -tie(24, 10), tie(24, 10)},
+		{"every candidate score perfect, every incumbent score 0", repeatF(0, 16), repeatF(1, 16), 1, 1, 0.612784638931127, 1},
+		{"every candidate score zero, every incumbent score perfect", repeatF(1, 16), repeatF(0, 16), 1, -1, -1, -0.612784638931127},
+		// Not pass/fail: the pseudo-pairs spread the interval about the one value.
+		{"every difference +0.25", repeatF(0.5, 16), repeatF(0.75, 16), 1, 0.25, 0.007308942236025517, 0.4926910577639745},
+		{"every difference -0.5 on a 0..10 range", repeatF(8, 16), repeatF(7.5, 16), 10, -0.5, -2.8707894489395795, 1.8707894489395795},
+		// Sixteen copies of -0.1 sum to -1.6000000000000003 (the sum's rounding is not a spread): the delta is -0.1 to 1e-12.
+		{"every difference -0.1 (not a sum of floats)", repeatF(0.2, 16), repeatF(0.1, 16), 1, -0.1, -0.3377877026632221, 0.13778770266322207},
 		// The mean of a difference cannot leave [-R, R]: the interval stops at the end of the range.
 		{"two tasks, the same difference: clipped at both ends", []float64{0.5, 0.25}, []float64{1, 0.75}, 1, 0.5, -1, 1},
-		// Sixteen copies of -0.1 sum to -1.6000000000000003, whose sixteenth is not -0.1: the delta
-		// must come from the data, not from the sum.
-		{"every difference -0.1 (not a sum of floats)", repeatF(0.2, 16), repeatF(0.1, 16), 1, -0.1, -0.2875, 0.0875},
-		// The largest possible difference on every task is a win to the end of the range, and it is
-		// clipped there.
-		{"every candidate score perfect, every incumbent score 0", repeatF(0, 16), repeatF(1, 16), 1, 1, 0.8125, 1},
-		{"every candidate score zero, every incumbent score perfect", repeatF(1, 16), repeatF(0, 16), 1, -1, -1, -0.8125},
 	} {
 		d, lo, hi := primaryInterval(tc.inc, tc.cand, tc.span)
-		if d != tc.delta || !near(lo, tc.lo) || !near(hi, tc.hi) {
+		if math.Abs(d-tc.delta) > 1e-12 || !near(lo, tc.lo) || !near(hi, tc.hi) {
 			t.Errorf("%s: got %v %v %v, want %v %v %v", tc.name, d, lo, hi, tc.delta, tc.lo, tc.hi)
 		}
 	}
-	// Differences that are equal on paper but not to the last bit (0.3-0.2 against 0.2-0.1) are not a
-	// spread: they get the interval of a sample with none.
-	if d, lo, hi := primaryInterval([]float64{0.2, 0.1, 0.2, 0.1}, []float64{0.3, 0.2, 0.3, 0.2}, 1); !finite(d) || math.Abs(d-0.1) > 1e-9 || math.Abs(lo+0.65) > 1e-8 || math.Abs(hi-0.85) > 1e-8 {
-		t.Errorf("near-equal differences: %v %v %v", d, lo, hi)
+	// Differences that are equal on paper but not to the last bit (0.3-0.2 against 0.2-0.1) are the same
+	// difference: the interval is the one of exactly equal differences, to within the rounding.
+	_, wantLo, wantHi := primaryInterval(repeatF(0.2, 4), repeatF(0.3, 4), 1)
+	if d, lo, hi := primaryInterval([]float64{0.2, 0.1, 0.2, 0.1}, []float64{0.3, 0.2, 0.3, 0.2}, 1); !finite(d) || math.Abs(d-0.1) > 1e-9 || math.Abs(lo-wantLo) > 1e-9 || math.Abs(hi-wantHi) > 1e-9 {
+		t.Errorf("near-equal differences: %v %v %v, want [%v, %v]", d, lo, hi, wantLo, wantHi)
 	}
-	// A difference that is not rounding is a spread, however small a share of the range it is.
-	if _, lo, hi := primaryInterval(repeatF(0.5, 16), append(repeatF(0.5, 15), 0.51), 1); hi-lo > 0.01 || hi <= 0 {
-		t.Errorf("a difference of 0.01 on one task is a spread, and a small one: %v %v", lo, hi)
+	// A difference that is not rounding is not a tie, however small a share of the range it is: sixteen pairs, fifteen
+	// of them ties and one of 0.01, are not pass/fail data, and their interval is the augmented one (wider than the
+	// interval of sixteen ties, which is Tango's: the price of the two constructions meeting, stated in the docs).
+	if d, lo, hi := primaryInterval(repeatF(0.5, 16), append(repeatF(0.5, 15), 0.51), 1); math.Abs(d-0.000625) > 1e-12 || !near(lo, -0.23622003346049442) || !near(hi, 0.2374700334604944) {
+		t.Errorf("a difference of 0.01 on one task: %v %v %v", d, lo, hi)
 	}
-	// A range that is not a positive number leaves the single value.
+	// A range that is not a positive number has no interval.
 	for _, span := range []float64{0, -1, math.NaN(), math.Inf(1)} {
-		if d, lo, hi := primaryInterval(repeatF(0.5, 16), repeatF(0.25, 16), span); d != -0.25 || lo != d || hi != d {
-			t.Errorf("span %v: got %v %v %v, want the single value", span, d, lo, hi)
+		if d, lo, hi := primaryInterval(repeatF(0.5, 16), repeatF(0.25, 16), span); d != -0.25 || finite(lo) || finite(hi) {
+			t.Errorf("span %v: got %v %v %v, want the delta and no interval", span, d, lo, hi)
 		}
 	}
 	for _, tc := range []struct {
@@ -168,14 +257,21 @@ func TestPrimaryIntervalDegenerateInputs(t *testing.T) {
 	if _, lo, hi := primaryInterval(repeatF(0, 16), spread, 1); finite(lo) && finite(hi) {
 		t.Errorf("a sum of squares that overflows must not come back finite: %v %v", lo, hi)
 	}
-	// The smallest sizes have no room for the form (n <= c^2 + 1): they still get a finite, wider interval.
+	// The smallest sizes have no room for the form (N <= c^2 + 1): they still get a finite, wider interval, for
+	// pass/fail pairs (Tango's) and for scores that are not.
 	for n := 2; n <= 8; n++ {
 		inc, cand := make([]float64, n), make([]float64, n)
 		for i := range cand {
 			cand[i] = float64(i % 2)
 		}
 		if d, lo, hi := primaryInterval(inc, cand, 1); !finite(lo) || !finite(hi) || !(lo < d && d < hi) {
-			t.Errorf("n=%d: %v %v %v", n, d, lo, hi)
+			t.Errorf("n=%d, pass/fail: %v %v %v", n, d, lo, hi)
+		}
+		for i := range cand {
+			cand[i] = 0.5 * float64(i%2)
+		}
+		if d, lo, hi := primaryInterval(inc, cand, 1); !finite(lo) || !finite(hi) || !(lo < d && d < hi) {
+			t.Errorf("n=%d, half-credit: %v %v %v", n, d, lo, hi)
 		}
 	}
 }
@@ -226,9 +322,9 @@ func TestTCritical975(t *testing.T) {
 	}
 }
 
-// The harness's score-form method is the production interval (its lower end), so the figures the study
-// prints are the gate's.
-func TestSimHarnessScoreFormIsThePrimaryInterval(t *testing.T) {
+// The harness's production column is the production interval (its lower end), so the figures the study prints are
+// the gate's, and its score-form column is the interval gate version 2 read, kept as the column the study compares with.
+func TestSimHarnessProductionColumnIsThePrimaryInterval(t *testing.T) {
 	buf := newSimBuf(50)
 	for s := 0; s < 300; s++ {
 		rng := rand.New(rand.NewSource(int64(500 + s)))
@@ -237,10 +333,20 @@ func TestSimHarnessScoreFormIsThePrimaryInterval(t *testing.T) {
 		if s%3 == 1 {
 			inc, cand = genUniform(0, 1, 0, .9)(rng, n)
 		}
+		if s%3 == 2 {
+			inc, cand = genNested(.9, .05/.9)(rng, n)
+		}
 		lows, deg := simLowers(inc, cand, 50, 1, buf, 1)
 		_, lo, _ := primaryInterval(inc, cand, 1)
-		if math.Abs(lows[mScore]-lo) > 1e-9 {
-			t.Fatalf("dataset %d (n=%d, degenerate %v): harness %v, production %v", s, n, deg, lows[mScore], lo)
+		if lows[mProd] != lo {
+			t.Fatalf("dataset %d (n=%d, degenerate %v): harness %v, production %v", s, n, deg, lows[mProd], lo)
+		}
+		d := make([]float64, n)
+		for i := range d {
+			d[i] = cand[i] - inc[i]
+		}
+		if v2, _ := intervalV2(d, 1); math.Abs(lows[mScore]-v2) > 1e-9 {
+			t.Fatalf("dataset %d (n=%d, degenerate %v): the harness's version 2 column %v, the reference %v", s, n, deg, lows[mScore], v2)
 		}
 	}
 }
@@ -249,7 +355,8 @@ func TestSimHarnessScoreFormIsThePrimaryInterval(t *testing.T) {
 // bootstrap, so 50000 datasets take well under a second): the share of simulated comparisons whose lower
 // end clears the boundary when the truth is the boundary (0 for superiority, -0.05 for non-inferiority).
 // Each cell must stay at or under 4%, the nominal being 2.5%. The plain t interval measures 4.6% on the
-// third cell, so this test, unlike the end-to-end ones, also refuses a simplification back to it.
+// third cell, so this test, unlike the end-to-end ones, also refuses a simplification back to it. The binomial
+// sampling error of a rate p over 50000 datasets is sqrt(p (1 - p) / 50000): 0.07 points at 2.5%.
 func TestPrimaryIntervalFalseAdoptRateOnTheStatedNulls(t *testing.T) {
 	const trials = 50000
 	for _, tc := range []struct {
@@ -296,23 +403,21 @@ func TestPrimaryIntervalFalseAdoptRateOnTheStatedNulls(t *testing.T) {
 // The sparse regime, exactly, with no simulation. A candidate that only ever loses tasks (every non-zero difference
 // is -1) and loses 5% of them sits exactly on a margin of 0.05: the number of losses K in n tasks is
 // binomial(n, 0.05), and the gate adopts when the interval of K losses and n - K ties has its lower end above -0.05.
-// The false-ADOPT rate is the sum of the probabilities of those K. These are the figures the docs and the ADR give
-// for the regime the score form is not calibrated in (a strong incumbent and a handful of disagreeing tasks, from
-// 61 tasks): the all-tied sample is the rule of three from 61 tasks, and one loss clears the margin from 62, so
-// the rate jumps from 0 at 60 to 4.4% at 61 and 17.7% at 62 and falls back as the sample grows until two losses
-// clear it, a sawtooth whose peaks stay above 4% to about 1500 tasks (6.5% at 250, 5.6% at 500, 4.3% at 1000). The
-// expected values were computed outside the package (scipy.stats.t.ppf and exact binomial sums).
-// At 16 to 60 tasks no K clears the margin, which is why the always-on cells there read 0.0%.
+// The false-ADOPT rate is the sum of the probabilities of those K. With Tango's interval that is the lower tail of
+// a binomial proportion read with its null variance: no K clears the margin before 73 tasks (the chance of 73 ties at
+// a true loss rate of 5% is 2.4%), and from there the rate sits between 0.6% and 2.4%, a sawtooth of the binomial's
+// discreteness. The version 2 interval read the same cells at 0 up to 60 tasks, 4.4% at 61, 17.7% at 62, 16.4% at
+// 64, 8.6% at 80, 11.8% at 100, 6.5% at 250, 5.6% at 500 and 4.3% at 1000. The expected values were computed outside
+// the package (scipy: the restricted maximum-likelihood estimate by numerical maximisation, exact binomial sums).
 func TestNestedLossFalseAdoptRateIsTheBinomialSum(t *testing.T) {
 	const loss, margin = 0.05, 0.05
 	for _, tc := range []struct {
 		n    int
 		want float64
 	}{
-		{16, 0}, {24, 0}, {40, 0}, {60, 0},
-		{61, 0.043766}, {62, 0.177254}, {64, 0.163921}, {70, 0.129208}, {80, 0.086054}, {90, 0.056728},
-		{100, 0.118263}, {120, 0.057505}, {160, 0.093854}, {200, 0.062342},
-		{250, 0.064957}, {500, 0.055916}, {1000, 0.043348},
+		{16, 0}, {24, 0}, {40, 0}, {60, 0}, {61, 0}, {62, 0}, {64, 0}, {70, 0}, {72, 0},
+		{73, 0.023650}, {74, 0.022467}, {80, 0.016515}, {90, 0.009888}, {100, 0.005921}, {120, 0.015527},
+		{160, 0.012180}, {200, 0.009048}, {250, 0.013086}, {500, 0.019858}, {1000, 0.021155},
 	} {
 		var rate float64
 		for k := 0; k <= tc.n; k++ {
@@ -329,6 +434,9 @@ func TestNestedLossFalseAdoptRateIsTheBinomialSum(t *testing.T) {
 		}
 		if math.Abs(rate-tc.want) > 2e-6 {
 			t.Errorf("n=%d: the false-ADOPT rate of a candidate that loses 5%% of the tasks is %.6f, want %.6f", tc.n, rate, tc.want)
+		}
+		if rate > 0.04 {
+			t.Errorf("n=%d: the false-ADOPT rate %.6f is above 0.04", tc.n, rate)
 		}
 	}
 }

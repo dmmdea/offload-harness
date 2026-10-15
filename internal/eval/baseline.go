@@ -18,14 +18,16 @@ import (
 // reproduces), with one more rule: the file is the canonical bytes, byte for byte.
 
 // GateVersion is the version of the rules this package implements. It rides in the baseline,
-// in every result and in the era marker. Version 2: unusable candidate attempts enter at the
-// worst score and an unfinished one's recorded cost is spent, the judge is frozen, bootstrap_b and
-// min_pairs have floors, a declared efficiency metric that got worse vetoes (read from two
-// resolved pairs), the margin is bounded by the class width, and the primary is read on the score
-// form of the t interval. Version 2 has never been released (the gate is new in the change that
-// carries it, and no version 2 baseline exists outside tests), so these rules landed in it
-// rather than in a version 3 nobody ran.
-const GateVersion = "2"
+// in every result and in the era marker. Version 3: the primary is read on Tango's score interval
+// for pass/fail pairs and on the score form of the t interval over a sample with one pseudo-pair at
+// each end of the range for every other pair of scores (interval.go), where version 2 read the score
+// form of the t interval and the rule of three for a sample with no spread. Version 2: unusable
+// candidate attempts enter at the worst score and an unfinished one's recorded cost is spent, the
+// judge is frozen, bootstrap_b and min_pairs have floors, a declared efficiency metric that got worse
+// vetoes (read from two resolved pairs), and the margin is bounded by the class width. A version 2
+// baseline is refused for its version, as a version 1 one is: its verdicts were read with another
+// interval, so the pre-registration has to be written again.
+const GateVersion = "3"
 
 // Modes.
 const (
@@ -293,7 +295,7 @@ func FreezeBaseline(p PreReg, corpus []byte, incumbent *Arm) (Baseline, []byte, 
 // bytes are those of another gate, so the form of the file says nothing useful about it, and the
 // only remedy is to write the pre-registration again.
 func versionRefusal(got string) error {
-	return refusef("baseline refused: gate_version %q, this gate implements %q: a baseline frozen under another version (a version 1 file, for one) must be re-frozen under the current version, because its rules and its canonical bytes are those of another gate", got, GateVersion)
+	return refusef("baseline refused: gate_version %q, this gate implements %q: a baseline frozen under another version (a version 1 or a version 2 file, for example) must be re-frozen under the current version, because its rules and its canonical bytes are those of another gate", got, GateVersion)
 }
 
 // CheckBaseline parses a baseline file, re-marshals it canonically and refuses when the bytes

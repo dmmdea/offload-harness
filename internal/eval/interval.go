@@ -4,110 +4,191 @@ import "math"
 
 // The gate's primary interval.
 //
-// The primary is the mean of the paired task differences (candidate - incumbent) with a two-sided
-// 95% interval, read in the SCORE FORM of the Student-t interval:
+// The primary is the mean of the paired task differences d = candidate - incumbent, each in [-R, R] (R is the
+// width of the primary's score range: 1 for the unit interval, 10 for the 0/10 judge class), with a two-sided
+// 95% interval. Two constructions read it, and the data alone decides which.
 //
-//	delta = mean(d)                  sn = sqrt(sum((d - delta)^2) / n)
-//	c     = t(n-1, .975)             half = c * sn / sqrt(n - c^2)
-//	lo, hi = delta -+ half
+// Pass/fail pairs. When every difference is a tie (0), a win of the whole range (+R) or a loss of it (-R), the
+// dataset is three counts and the interval is Tango's score interval for a paired difference (Tango 1998,
+// Statistics in Medicine 17:891). It is the set of differences mu whose score statistic
 //
-// It is the confidence set of the statistic (delta - mu) / sqrt(mean((d - mu)^2) / n), whose
-// variance is taken at the boundary mu instead of at the estimate. The plain t interval takes the
-// standard error at the estimate, and on the data the gate sees most (pass/fail scores where the
-// two arms differ on a handful of tasks) that standard error is both small and noisy: a record of
-// "two wins and no losses in 20 tasks" gives a lower end above -0.05 although the true loss rate
-// was 13.5%. The score form is the t interval with its critical value multiplied by
-// sqrt((n-1) / (n-c^2)), 1.14 at 16 tasks, 1.10 at 20, 1.08 at 24, 1.04 at 40 and 1.02 at 80. The
-// measured false-ADOPT rates of this and of the four other candidate intervals, on the same
-// datasets, are in the ADR and reproduce with TestCalibrationStudy (gate_sim_test.go). The form
-// has nothing to read when every difference is equal, and zeroSpreadInterval takes that case.
+//	(wins - losses - n mu) / sqrt(n * (u + v - mu^2)),
 //
-// Where it is not calibrated: a strong incumbent and a candidate at exactly the margin whose
-// disagreements are a handful of tasks in 60 or more (pass rates .99 and .94 at 80 tasks measure
-// 4.8%, a candidate that only loses 5% of the incumbent's passes 8.2% at 80). The ADR has the
-// figures and the interval that does clear them.
+// stays within +-1.96, where u and v, the probabilities of a win and a loss, are the maximum-likelihood values
+// under the constraint u - v = mu. The variance is the one the hypothesised difference would give, not the one
+// the sample happened to show. That is the point of the construction: when the arms disagree on a handful of
+// tasks the observed variance is small and noisy, and an interval built on it certifies a candidate that loses
+// 5% of the incumbent's passes at a margin of 0.05 in up to 18% of samples (one loss in 62 tasks cleared the
+// margin of the gate's version 2). With nothing disagreeing at all the ends are +-1.96^2 / (n + 1.96^2) of the
+// range: a margin of 0.05 needs 73 ties, the chance of which at a true loss rate of 5% is 2.4%.
 //
-// BootstrapDeltaMean (the percentile bootstrap, B and seed from the call site) is unchanged for
-// its legacy callers; the gate reads the efficiency metrics with it, not the primary.
+// Every other pair of scores (partial credit, a mean of several attempts, a judge's integer scale) has no
+// such lattice to constrain the variance with. Its interval is the score form of the t interval
+//
+//	delta = mean(d)    sn = sqrt(sum((d - m)^2) / N)    c = t(N-1, .975)    half = c * sn / sqrt(N - c^2)
+//
+// taken on the sample with two pseudo-pairs added at each end of the difference range, +R and -R (N = n + 4 and
+// m the mean of the augmented sample), centred on the observed mean and clipped to [-R, R]. It is the
+// Agresti-Caffo / Agresti-Min idea of adding pseudo-observations to a small count (Agresti and Caffo 2000 add
+// two successes and two failures), generalised to bounded scores: the pseudo-pairs inflate the variance when
+// the differences are few and vanish as n grows, and they leave a sample whose differences are all equal with
+// a standard error, so no special case remains. The weights are the smallest of the variants tried that keeps
+// every sparse stress null at or under 4%, and not the published form: half a pair at each of the four cells
+// of the 2x2 table (Agresti-Min) would read a candidate that loses 5% of the incumbent's passes at 8.6% over
+// 80 tasks, and one pair at each end leaves a mostly pass/fail score set with a few half-credit tasks at 4.4%.
+//
+// The measured false-ADOPT rate of these and of the other intervals considered, on the same datasets, is in the
+// ADR and reproduces with TestCalibrationStudy (gate_sim_test.go and gate_sparse_sim_test.go).
+//
+// BootstrapDeltaMean (the percentile bootstrap, B and seed from the call site) is unchanged for its legacy
+// callers; the gate reads the efficiency metrics with it, not the primary.
 
-// primaryInterval returns the mean paired difference and the lower and upper ends of its 95%
-// interval over aligned per-task scores, which lie in a range of width span (the primary's score
-// range). With fewer than two tasks, or unaligned input, there is nothing to conclude and it
-// returns zeros, as BootstrapDeltaMean does. A sum that overflows gives a number that is not
-// finite, which the caller refuses.
-//
-// When every difference is equal (to within a rounding error of the scores) there is no spread to
-// read a standard error from, and a point interval would certify anything: sixteen ties in a row
-// are what a candidate that loses 5% of the incumbent's passes produces 44% of the time. The
-// interval is then the rule of three, see zeroSpreadInterval.
+// primaryInterval returns the mean paired difference and the lower and upper ends of its 95% interval over
+// aligned per-task scores, which lie in a range of width span (the primary's score range). With fewer than two
+// tasks, or unaligned input, there is nothing to conclude and it returns zeros, as BootstrapDeltaMean does. A
+// sum that overflows gives a number that is not finite, which the caller refuses, and so does a span that is
+// not a positive number (there is no range to scale a pseudo-pair by).
 func primaryInterval(inc, cand []float64, span float64) (delta, lo, hi float64) {
 	n := len(inc)
 	if n != len(cand) || n < 2 {
 		return 0, 0, 0
 	}
 	fn := float64(n)
-	var tol float64
-	if span > 0 && finite(span) {
-		tol = equalTolerance * span
-	}
 	var sum float64
-	first := cand[0] - inc[0]
-	same := true
 	for i := range inc {
-		d := cand[i] - inc[i]
-		sum += d
-		if math.Abs(d-first) > tol {
-			same = false
-		}
+		sum += cand[i] - inc[i]
 	}
 	delta = sum / fn
 	if !finite(delta) {
 		return delta, delta, delta
 	}
-	if same {
-		lo, hi = zeroSpreadInterval(first, n, span)
-		return first, lo, hi
+	if !(span > 0) || !finite(span) {
+		return delta, math.NaN(), math.NaN()
 	}
-	var ss float64
-	for i := range inc {
-		e := cand[i] - inc[i] - delta
-		ss += e * e
+	if wins, losses, ok := winsAndLosses(inc, cand, span); ok {
+		// The delta is read from the counts: a sum of floats such as 0.1 is not its sixteenth part.
+		lo, hi = tangoInterval(n, wins, losses)
+		return float64(wins-losses) * span / fn, lo * span, hi * span
 	}
-	c := tCritical975(n - 1)
-	// For n <= c^2 + 1 (six tasks or fewer) the form has no room: the denominator is held at 1.
-	half := c * math.Sqrt(ss/fn) / math.Sqrt(math.Max(fn-c*c, 1))
-	return delta, delta - half, delta + half
+	lo, hi = augmentedInterval(inc, cand, sum, span)
+	return delta, lo, hi
 }
 
-// equalTolerance is how far apart, as a share of the score range, two paired differences can be and
-// still count as the same one: the rounding of float scores (0.3 - 0.2 against 0.2 - 0.1) is not a
-// spread.
+// equalTolerance is how far apart, as a share of the score range, two paired differences can be and still
+// count as the same one (a tie, a win of the whole range): the rounding of float scores (0.3 - 0.2 against
+// 0.2 - 0.1) is not a difference.
 const equalTolerance = 1e-9
 
-// ruleOfThree is the numerator of the rule of three: with no event in n trials, the one-sided 95%
-// upper bound on the rate of events is 1 - 0.05^(1/n), which is 3/n to within 1% from 60 trials.
-const ruleOfThree = 3.0
-
-// zeroSpreadInterval is the interval of n paired differences that all equal c, each lying in
-// [-span, span], where span is the width of the score range: [c - 3 span / n, c + 3 span / n],
-// clipped to [-span, span], the range the mean of such differences cannot leave.
-//
-// It is the rule of three. For pass/fail scores with no discordant pair among n, 3/n is the
-// one-sided 95% upper bound on the rate of discordant pairs, so the mean difference can be as low
-// as -3/n (every discordant pair a loss) or as high as +3/n. For any other score the same width is
-// the usual allowance for a sample that cannot show its own spread, scaled by the range. A tie
-// (c = 0) at 16 pairs is therefore [-0.1875, 0.1875] on a unit range, [-0.075, 0.075] at 40 and
-// [-0.0375, 0.0375] at 80: a margin of 0.05 is certified from 61 ties and not from 60, whose end
-// sits exactly on it. Both ends move, so a superiority tie (c = 0) is INCONCLUSIVE at any size and
-// the incumbent keeps every tie, while a constant difference far from zero still decides: every
-// pair a win of the whole range (c = span) is [span - 3 span / n, span] and adopts, every pair a
-// loss of it blocks. A span that is not a positive number leaves the single value.
-func zeroSpreadInterval(c float64, n int, span float64) (lo, hi float64) {
-	if !(span > 0) || !finite(span) || !finite(c) || n < 1 {
-		return c, c
+// winsAndLosses counts the pairs that are a win of the whole range (+span) and a loss of it (-span), to within
+// equalTolerance of the range, and reports whether every pair is one of those or a tie (0).
+func winsAndLosses(inc, cand []float64, span float64) (wins, losses int, ok bool) {
+	tol := equalTolerance * span
+	for i := range inc {
+		switch d := cand[i] - inc[i]; {
+		case math.Abs(d) <= tol:
+		case math.Abs(d-span) <= tol:
+			wins++
+		case math.Abs(d+span) <= tol:
+			losses++
+		default:
+			return 0, 0, false
+		}
 	}
-	half := ruleOfThree * span / float64(n)
-	return math.Min(c, math.Max(-span, c-half)), math.Max(c, math.Min(span, c+half))
+	return wins, losses, true
+}
+
+// augmentedInterval is the score form of the t interval on the n differences and two pseudo-pairs at each of
+// +span and -span, centred on the observed mean and clipped to [-span, span], the range the mean of such
+// differences cannot leave. sum is the sum of the n differences, which the pseudo-pairs leave unchanged. An
+// interval whose sum of squares overflows is returned as (-Inf, +Inf), which the caller refuses.
+func augmentedInterval(inc, cand []float64, sum, span float64) (lo, hi float64) {
+	n := len(inc)
+	big := float64(n + pseudoPairs)
+	m := sum / big
+	ss := float64(pseudoPairs/2) * ((span-m)*(span-m) + (span+m)*(span+m))
+	for i := range inc {
+		e := cand[i] - inc[i] - m
+		ss += e * e
+	}
+	if !finite(ss) {
+		return math.Inf(-1), math.Inf(1)
+	}
+	c := tCritical975(n + pseudoPairs - 1)
+	// For N <= c^2 + 1 (the smallest samples) the form has no room: the denominator is held at 1.
+	half := c * math.Sqrt(ss/big) / math.Sqrt(math.Max(big-c*c, 1))
+	delta := sum / float64(n)
+	return math.Max(-span, delta-half), math.Min(span, delta+half)
+}
+
+// pseudoPairs is the number of pseudo-pairs the augmented interval adds: half at +R and half at -R.
+const pseudoPairs = 4
+
+// normal975 is the 97.5% point of the standard normal distribution.
+const normal975 = 1.959963984540054
+
+// tangoVar0 is the variance of one pair difference, in units of the range, when the true mean difference is
+// delta: u + v - delta^2, with u and v the probabilities of a win and a loss at the maximum-likelihood values
+// under u - v = delta (Tango 1998). With v the loss probability the likelihood's stationary point solves
+// 2 n v^2 - B v - C = 0, B = (w + l)(1 - delta) - 2 delta (l + t), C = l delta (1 - delta) for w wins, l
+// losses and t ties; the likelihood is concave, so its maximum is the larger root, or the edge u = 0 (v =
+// -delta for a negative delta) when the root lies beyond it.
+func tangoVar0(n, wins, losses int, delta float64) float64 {
+	fn := float64(n)
+	ties := fn - float64(wins) - float64(losses)
+	b := float64(wins+losses)*(1-delta) - 2*delta*(float64(losses)+ties)
+	c := float64(losses) * delta * (1 - delta)
+	disc := b*b + 8*fn*c
+	if disc < 0 {
+		disc = 0
+	}
+	v := (b + math.Sqrt(disc)) / (4 * fn)
+	if edge := math.Max(0, -delta); v < edge {
+		v = edge
+	}
+	return 2*v + delta - delta*delta
+}
+
+// tangoZ is Tango's score statistic for the null difference delta (in units of the range). It falls as delta
+// rises. A null whose variance is nil (delta = +-1) is infinitely far from a sample that differs from it.
+func tangoZ(n, wins, losses int, delta float64) float64 {
+	num := float64(wins-losses) - float64(n)*delta
+	v0 := tangoVar0(n, wins, losses, delta)
+	if !(v0 > 0) {
+		switch {
+		case num > 0:
+			return math.Inf(1)
+		case num < 0:
+			return math.Inf(-1)
+		}
+		return 0
+	}
+	return num / math.Sqrt(float64(n)*v0)
+}
+
+// tangoInterval inverts the score test by bisection: the lower end is the delta at which the statistic is
+// +1.96 and the upper end the one at which it is -1.96, in units of the range. The statistic is monotone in
+// delta on [-1, 1], so 80 halvings of the two-unit range land on the end to the last bit of a float64, and the
+// result depends on nothing but IEEE arithmetic and a square root.
+func tangoInterval(n, wins, losses int) (lo, hi float64) {
+	mean := float64(wins-losses) / float64(n)
+	a, b := -1.0, mean
+	for i := 0; i < 80; i++ {
+		if m := (a + b) / 2; tangoZ(n, wins, losses, m) > normal975 {
+			a = m
+		} else {
+			b = m
+		}
+	}
+	lo = (a + b) / 2
+	a, b = mean, 1.0
+	for i := 0; i < 80; i++ {
+		if m := (a + b) / 2; tangoZ(n, wins, losses, m) < -normal975 {
+			b = m
+		} else {
+			a = m
+		}
+	}
+	return lo, (a + b) / 2
 }
 
 // tCritical975 is t(df, .975), the two-sided 95% critical value of Student's t with df degrees of

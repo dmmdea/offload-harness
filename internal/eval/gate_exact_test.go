@@ -191,7 +191,7 @@ func TestPrimaryIntervalOnPassFailPairsIsTangosScoreInterval(t *testing.T) {
 	}
 }
 
-// Any other pair of scores gets the score form of the t interval on the sample with one pseudo-pair at each
+// Any other pair of scores gets the score form of the t interval on the sample with two pseudo-pairs at each
 // end of the difference range added, centred on the observed mean and clipped to the range. The reference
 // ends were computed outside the package (numpy and scipy) from that sentence.
 func TestPrimaryIntervalOnOtherScoresIsTheAugmentedScoreForm(t *testing.T) {
@@ -206,13 +206,13 @@ func TestPrimaryIntervalOnOtherScoresIsTheAugmentedScoreForm(t *testing.T) {
 		span          float64
 		delta, lo, hi float64
 	}{
-		{"20 tasks, +-0.5 on 8 of them", repeatF(0.25, 20), plus(d20, 0.25), 1, 0.025, -0.17891338182693925, 0.22891338182693924},
-		{"16 tasks of continuous scores", inc16, cand16, 1, -0.037937500000000006, -0.23911645349106925, 0.16324145349106922},
-		{"every difference +0.25", repeatF(0.5, 16), repeatF(0.75, 16), 1, 0.25, 0.05370224917831759, 0.44629775082168244},
-		{"every difference -0.5 on a 0..10 range", repeatF(8, 16), repeatF(7.5, 16), 10, -0.5, -2.4127437414364654, 1.4127437414364654},
-		{"every difference -0.05, 80 tasks", repeatF(0.95, 80), repeatF(0.90, 80), 1, -0.05, -0.08521760704790185, -0.014782392952098149},
+		{"20 tasks, +-0.5 on 8 of them", repeatF(0.25, 20), plus(d20, 0.25), 1, 0.025, -0.2028046065805601, 0.2528046065805601},
+		{"16 tasks of continuous scores", inc16, cand16, 1, -0.037937500000000006, -0.28118998520066724, 0.20531498520066724},
+		{"every difference +0.25", repeatF(0.5, 16), repeatF(0.75, 16), 1, 0.25, 0.007308942236025517, 0.4926910577639745},
+		{"every difference -0.5 on a 0..10 range", repeatF(8, 16), repeatF(7.5, 16), 10, -0.5, -2.8707894489395795, 1.8707894489395795},
+		{"every difference -0.05, 80 tasks", repeatF(0.95, 80), repeatF(0.90, 80), 1, -0.05, -0.09857001739744174, -0.0014299826025582496},
 		{"two tasks, the same difference: clipped at both ends", []float64{0.5, 0.25}, []float64{1, 0.75}, 1, 0.5, -1, 1},
-		{"3 losses, 2 half-credit losses and 55 ties", repeatF(0, 60), dp, 1, -0.06666666666666667, -0.143011316633242, 0.009677983299908696},
+		{"3 losses, 2 half-credit losses and 55 ties", repeatF(0, 60), dp, 1, -0.06666666666666667, -0.1534924837072477, 0.02015915037391436},
 	} {
 		d, lo, hi := primaryInterval(tc.inc, tc.cand, tc.span)
 		if math.Abs(d-tc.delta) > 1e-12 || !near(lo, tc.lo) || !near(hi, tc.hi) {

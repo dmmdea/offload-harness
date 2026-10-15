@@ -350,9 +350,10 @@ const overflowMsg = "the scores or costs are too large to average: a sum overflo
 //
 // The rules (docs/systems/measurement-gate.md has them in plain words, numbered the same):
 //
-//	R1  the statistic is the mean paired difference over TASKS, read on the score form of its
-//	    95% t interval (interval.go), the rule of three about the value when every difference is equal;
-//	    the paired bootstrap reads the efficiency metrics
+//	R1  the statistic is the mean paired difference over TASKS, read on a 95% interval that is
+//	    Tango's score interval when every pair is a tie, a win or a loss of the whole range, and
+//	    the score form of the t interval over the sample with a pseudo-pair at each end of the
+//	    range otherwise (interval.go); the paired bootstrap reads the efficiency metrics
 //	R2  superiority: ADOPT iff lo > 0, BLOCK iff hi < 0; non-inferiority with margin m: BLOCK iff
 //	    hi < -m, ADOPT iff lo > -m and a declared efficiency metric improves and none got
 //	    significantly worse or went unmeasured; else INCONCLUSIVE
@@ -563,8 +564,7 @@ func Gate(b Baseline, baselineHash string, in GateInput) (GateResult, error) {
 	// Verdict (R2, R4). Superiority reports the efficiency metrics and ignores them here. An end
 	// of the primary's interval is compared with its boundary (0, or -m) to within a tolerance of
 	// 1e-9 of the score range, so an interval that touches the boundary on paper is neither an
-	// ADOPT nor a BLOCK whichever way the last bit of a float fell (the interval of a sample with
-	// no spread lands on the margin at 60 pairs).
+	// ADOPT nor a BLOCK whichever way the last bit of a float fell.
 	var tol float64
 	if w := scoreHi - scoreLo; w > 0 && finite(w) {
 		tol = equalTolerance * w
