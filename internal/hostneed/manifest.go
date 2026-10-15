@@ -11,14 +11,21 @@ import (
 // A TEMPLATE run (`comfy-run-graph.mjs --template NAME --manifest FILE`, offload_run_template) carries no graph file: the runner converts the
 // template once ComfyUI is up. What it loads is the model files of its runtime manifest, the list the readiness check and the licence gate
 // already read: `models/<class>/<name>` per entry, each found on the node before the run starts. An override sets values and never
-// retargets a model (the door refuses one that tries), so the manifest's set is the final graph's. ForManifestModels sizes that set with the
-// reader ForGraph uses (mediacap.ModelFileSizes under the box's model roots) and declares it by the same rule (fitToCard), source
-// SourceGraphLoaders: it is the same kind of figure, the weight files a ComfyUI graph loads, read from the manifest and not from a document.
+// retargets a model (the door refuses one that tries). The manifest's set is the final graph's when the walk that wrote it expanded every
+// subgraph instance: the catalog walk reads fewer levels than the converter expands, so the gate in front of a run (render/template-manifest.mjs
+// verdictFor) refuses a template the walk left an instance unexpanded in (nested past its depth, or a subgraph that contains itself) and
+// resolves no manifest for it. A manifest that reaches this function therefore names every model file the template's active nodes name.
+// That is a property of the producer, not of the file: the manifest carries no completeness mark, so one written by hand that leaves a
+// loader out is sized as written. ForManifestModels sizes that set with the reader ForGraph uses (mediacap.ModelFileSizes under the box's
+// model roots) and declares it by the same rule (fitToCard), source SourceGraphLoaders: it is the same kind of figure, the weight files a
+// ComfyUI graph loads, read from the manifest and not from a document.
 //
 // It declares a figure only when it can stand behind all of it, as ForGraph does: an empty list, an entry that is not `models/<class>/<name>`
 // (a null path included), or ONE file it cannot find or size is not sized at all, and the caller keeps the class default. There is no walk
 // for a weight the list did not name, because the list is the set the gate, the licence check and the satisfier read, and an override cannot
-// add a file to it.
+// add a file to it. There is no Go-side backstop for an incomplete list (the class default kept when the manifest says so): the manifest has
+// no field that could say so, and the refusal above means the one producer of a template run's manifest never writes such a list; a new
+// field would change a file the satisfier reads too, for a state the gate cannot produce.
 //
 // LIMIT: the lookup is by name under every class directory of every root (ModelFileSizes: the graph path has no class to go by), so a name
 // held under two classes is sized as the larger. The manifest does name the class, which would be exact; the larger can only raise the figure.

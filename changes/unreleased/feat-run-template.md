@@ -15,7 +15,7 @@
   has a permissive licence class (or no weights). A paid-API template is a Defer (`deferred:true`, class `api_paid`, never cloud). Every
   other case is refused with a typed class: `flux_barred`, `custom_nodes`, `license_unknown` (a repository the map does not list, a weights
   file with no Hugging Face source, or a map entry that was inferred from a sibling and not read: unknown is not permissive),
-  `license_conditional`, `license_non_commercial`, `template_unreadable`, `bad_model_path`, and what the node lacks with the exact list:
+  `license_conditional`, `license_non_commercial`, `template_unreadable`, `subgraph_unexpanded`, `bad_model_path`, and what the node lacks with the exact list:
   `models_missing`, `inputs_missing`, `comfyui_too_old`. Nothing is leased, started or sent for a refused template. A run never downloads a
   model: the runtime manifest names each model by the path it was found at and carries no source.
 - **Where it runs.** On this machine's lane only. The fleet door takes an API-format graph and a template is converted on the node that
@@ -33,6 +33,16 @@
   partial sum). The lane probe reads the same figure through the same function, so it agrees with the admission. A name is looked up
   under every class directory, as a graph's is, so a name held under two classes is sized as the larger. An estimate from the files'
   sizes, not a measurement.
+- **Subgraph depth.** The catalog expands eight levels of subgraph instances and the converter up to sixty-four, and a template's models, licence
+  class, FLUX bar and host-RAM figure are read from the catalog's walk. A template with one loader within eight levels and another at a deeper
+  level got a manifest naming only the shallow file while the converted graph loaded both (reproduced at nine nested instances), and the host-RAM
+  figure summed the short list. A template with an instance the walk left unexpanded (nested past eight levels, or a subgraph that contains
+  itself) is now refused as `subgraph_unexpanded`, ahead of the checks that read the graph, in `list`, `get`, `readiness` and `run`. The two depth
+  limits are kept apart on purpose: the converter bounds a branching nest by counting nodes, and the catalog walk has no such count, so its depth is
+  what keeps it small; a template nested deeper than eight is refused rather than run, though the converter could convert it. No template of a
+  602-template copy of the package at `json 0.1.108` (203 with subgraphs) has an unexpanded instance, so the counts below do not move. The runtime
+  manifest carries no completeness mark and the Go side has no backstop for one: the refusal comes before any manifest is written, so the one
+  producer never writes a short list (`hostneed/manifest.go` says so).
 - **Why a tool and not a `template=` argument on `offload_run_graph`.** Measured at 0.186.0: an average tool costs 1,019 tokens in the full
   profile and 672 compact, so one more tool is about +3.2% of the 31-tool full list. The registered design accepts that cost, and the
   `template=` argument was only its fallback for a cost that proved unacceptable. The new tool's own entry is 2,833 bytes of `tools/list` in
@@ -64,6 +74,9 @@
   `internal/mcpserver/runtemplate_test.go` and `toolsprofile_runtemplate_test.go` (the compact keep-list test covers the tool), and a Go test
   that runs the real script on a tree built from the catalog fixtures. Docs: `docs/systems/mcp-server.md` ("Workflow templates"),
   `docs/flows/run-graph-manifest-satisfaction.md` ("Template runs"), `docs/systems/media-generation.md`, `render/README.md`.
+- **Subgraph depth tests.** Written red first: 4 of 5 new tests of `render/template-manifest.test.mjs` failed (a template nested nine deep, and one whose
+  subgraph contains itself, were run instead of refused; resolve and list agreed); the fifth, a template nested exactly eight deep, passed before the
+  change and pins the boundary.
 - **Not verified here.** One template running end to end under a GPU lease, the acceptance measurement of this tool, queued after this
   change. The production wiring of the conversion against a live ComfyUI (the `/object_info` and `/system_stats` reads in
   `comfy-run-graph.mjs`; the flow and the converter are tested with injected values, and the converter on saved listings). The time of a

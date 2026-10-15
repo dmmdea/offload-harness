@@ -142,7 +142,12 @@ export function walkFiles(root, io, { follow = true, excludeDirs = [] } = {}) {
 export const MODE_MUTED = 2;
 export const MODE_BYPASSED = 4;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MAX_SUBGRAPH_DEPTH = 8;
+// The levels of subgraph instances this walk expands. The converter expands more (template-to-graph.mjs LIMITS.maxSubgraphDepth, 64),
+// and the two are deliberately not one constant: the converter bounds a nest that branches by counting nodes (LIMITS.maxNodes), and this
+// walk has no such count, so its depth is what keeps it small. What it does not expand it flags (`unexpanded`), and the verdict refuses
+// a template with one (template-manifest.mjs, subgraph_unexpanded): the models, licence and API signals of a template are read from
+// this walk, and a walk that stopped short must not stand in for the graph the converter would build.
+export const MAX_SUBGRAPH_DEPTH = 8;
 
 // walkGraph: a UI-format workflow is a graph whose nodes may be instances of subgraphs defined in
 // `definitions.subgraphs`. A node is ACTIVE only when its mode is not muted (2) or bypassed (4)

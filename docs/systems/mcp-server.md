@@ -1093,8 +1093,8 @@ full profile and 2,671 in the compact one, against means of 4,102 and 2,631 over
 
 **The gate: what a run is allowed for.** `run` asks the script to resolve the template first
 (`render/template-manifest.mjs`, `resolveRun`). Nothing is leased, started or sent for a template this release will not run;
-the typed answer is the tool's answer. The class is the first that applies in the order `template_unreadable`, `api_paid`,
-`flux_barred`, `custom_nodes`, `bad_model_path`, then the licence class, and `reasons` lists every one that applies; what the
+the typed answer is the tool's answer. The class is the first that applies in the order `template_unreadable`, `subgraph_unexpanded`,
+`api_paid`, `flux_barred`, `custom_nodes`, `bad_model_path`, then the licence class, and `reasons` lists every one that applies; what the
 node lacks is checked after them.
 
 | class | outcome | when |
@@ -1106,6 +1106,7 @@ node lacks is checked after them.
 | `license_conditional` | refused | the weights carry conditions on use, the third licence state ([ADR 0058](../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md), accepted 2026-10-14) |
 | `license_non_commercial` | refused | the weights are non-commercial |
 | `template_unreadable`, `bad_model_path` | refused | the index lists a file that cannot be read; a model name or class directory that would leave its class directory |
+| `subgraph_unexpanded` | refused | the catalog's walk left a subgraph instance unexpanded: it is nested more than 8 levels deep (the converter expands 64), or its subgraph contains itself (the converter refuses that too). The models, the licence class, the FLUX bar and the host-RAM figure are all read from that walk, so a template it could not finish is refused instead of run on a list that may be short |
 | `models_missing`, `inputs_missing`, `comfyui_too_old` | refused | what this node lacks, with the exact list (`missing`) or both versions |
 | `unknown_template` | refused | no template of that name in this node's package |
 
@@ -1119,7 +1120,9 @@ A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `c
    lifecycle, satisfier and result envelope. A busy lane answers as a run-graph call on this machine does (a place in this
    machine's line, resumable with `waiter_token`). The lane declares the host RAM the run needs from the model files that manifest
    names (`hostneed.ForManifestFile`, fitted to the card as a graph's files are, on a box that binds no ComfyUI render family too),
-   and keeps the media class default for a manifest it cannot read or a file it cannot size; the lane probe reads the same figure.
+   and keeps the media class default for a manifest it cannot read or a file it cannot size; the lane probe reads the same figure. A manifest
+   this tool resolves is complete by construction, and not by a mark in the file: a template the catalog's walk left a subgraph instance
+   unexpanded in is refused (`subgraph_unexpanded`) before any manifest exists, so the figure is never summed from a short list.
 2. The runner satisfies the manifest. Every model is named by the path it was found at and carries no `source_url`, so a
    model that went missing since the check is a typed defer and never a download. Models trusted on first use are checked
    (below) before ComfyUI is started, on every run.

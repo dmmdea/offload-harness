@@ -19,12 +19,14 @@
 //           license_conditional            the weights carry conditions on use (the third licence state)
 //           license_non_commercial         the weights are non-commercial
 //           template_unreadable            the index lists it and the file cannot be read
+//           subgraph_unexpanded            the catalog's walk left a subgraph instance unexpanded (nested past its depth, or a subgraph that
+//                                          contains itself), so the models, licence and API signals were read from an incomplete graph
 //           bad_model_path                 a model name or class that would leave its class directory
 //           models_missing / inputs_missing / comfyui_too_old     (resolve only) what the node lacks, as an exact list
 //
 // A model downloaded by the satisfier would be a model the harness chose to fetch; this module never produces a source for one: the
 // runtime manifest (runtimeManifest) names every model by path and leaves `source_url` empty.
-import { INPUT_LOADER_TYPES, mapLegacyClass, readiness as modelReadiness } from "./templates-catalog.mjs";
+import { INPUT_LOADER_TYPES, MAX_SUBGRAPH_DEPTH, mapLegacyClass, readiness as modelReadiness } from "./templates-catalog.mjs";
 import { compareVersions } from "./template-to-graph.mjs";
 
 export { INPUT_LOADER_TYPES };
@@ -37,6 +39,7 @@ export const CLASS = Object.freeze({
   LICENSE_CONDITIONAL: "license_conditional",
   LICENSE_NON_COMMERCIAL: "license_non_commercial",
   TEMPLATE_UNREADABLE: "template_unreadable",
+  SUBGRAPH_UNEXPANDED: "subgraph_unexpanded",
   BAD_MODEL_PATH: "bad_model_path",
   UNKNOWN_TEMPLATE: "unknown_template",
   MODELS_MISSING: "models_missing",
@@ -130,13 +133,18 @@ const DETAIL = {
   [CLASS.LICENSE_CONDITIONAL]: "the weights carry conditions on use (the conditional licence state); this release runs permissive weights only",
   [CLASS.LICENSE_NON_COMMERCIAL]: "the weights are non-commercial (ADR 0058); this release runs permissive weights only",
   [CLASS.TEMPLATE_UNREADABLE]: "the template is listed in the index and its file cannot be read",
+  [CLASS.SUBGRAPH_UNEXPANDED]: `the template nests a subgraph more than ${MAX_SUBGRAPH_DEPTH} levels deep, or has a subgraph that contains itself: the catalog did not expand it, so the template's models, licence and API signals were read from an incomplete graph, and this release refuses it rather than run on a list that may be short`,
   [CLASS.BAD_MODEL_PATH]: "a model name or class directory of the template would leave its class directory",
 };
 
 // verdictFor: what this release does with the template. `reasons` lists every class that applies, in this order; `class` is the first.
+// A graph the walk could not finish comes right after an unreadable file and before every check that reads the graph: the API, FLUX,
+// custom-pack, model-path and licence answers below were all computed from a leaf set that may lack a loader.
 export function verdictFor(row) {
   const reasons = [];
+  const unexpanded = row.graph?.unexpanded ?? 0;
   if (row.load_error) reasons.push(CLASS.TEMPLATE_UNREADABLE);
+  if (unexpanded > 0) reasons.push(CLASS.SUBGRAPH_UNEXPANDED);
   if (row.kind === "api" || row.api?.flag) reasons.push(CLASS.API_PAID);
   if (row.flux?.barred) reasons.push(CLASS.FLUX_BARRED);
   if (row.kind === "custom_nodes" || (row.custom_packs ?? []).length > 0 || (row.requires_custom_nodes ?? []).length > 0) reasons.push(CLASS.CUSTOM_NODES);
@@ -145,7 +153,7 @@ export function verdictFor(row) {
   if (lic !== "permitted") reasons.push(lic);
   if (reasons.length === 0) return { outcome: "run", class: null, code: null, reasons: [], detail: "" };
   const cls = reasons[0];
-  const detail = cls === CLASS.TEMPLATE_UNREADABLE ? `${DETAIL[cls]}: ${row.load_error}` : cls === CLASS.CUSTOM_NODES && (row.custom_packs ?? []).length > 0 ? `${DETAIL[cls]} (the template needs ${row.custom_packs.join(", ")})` : DETAIL[cls];
+  const detail = cls === CLASS.TEMPLATE_UNREADABLE ? `${DETAIL[cls]}: ${row.load_error}` : cls === CLASS.SUBGRAPH_UNEXPANDED ? `${DETAIL[cls]} (${unexpanded} subgraph instance(s) left unexpanded)` : cls === CLASS.CUSTOM_NODES && (row.custom_packs ?? []).length > 0 ? `${DETAIL[cls]} (the template needs ${row.custom_packs.join(", ")})` : DETAIL[cls];
   return { outcome: cls === CLASS.API_PAID ? "defer" : "refuse", class: cls, code: codeOf(cls), reasons, detail };
 }
 
