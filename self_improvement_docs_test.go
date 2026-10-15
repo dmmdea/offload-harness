@@ -100,3 +100,86 @@ func TestGateSelftestWithTheRealScorerWritesALedgerRowAndTheCache(t *testing.T) 
 		t.Errorf("selftest left no result cache at %s (%v); the page says it does", cfg.CachePath, err)
 	}
 }
+
+// The page also said that a value nobody measured reads null, never 0, and that the register and the trace-corpus readout
+// keep this "for every total and rate". The readout keeps it for every rate only: its totals (tcPagerStats.Evictions,
+// tcCompaction.Passes, tcPrefillStats.PrefillTokens and the rest) are plain int64 sums over the recorded runs, so they read
+// 0 when nothing was recorded, with the recorded and unrecorded run counts beside them. The register keeps null for its card
+// work (cards_tokens). A reader who took a 0 pass count for "measured, none fired" would be wrong, and so would one who
+// waited for a null total.
+func TestSelfImprovementPageKeepsNullForRatesAndCardWorkOnly(t *testing.T) {
+	text := selfImprovementText(t)
+
+	selfImprovementRetired(t, text, map[string]string{
+		"keep this for every total and rate":                     "the readout's totals read 0, not null; only its rates and the register's cards_tokens read null",
+		"In the register, the readout and the gate's efficiency": "the same overclaim, in the invariants",
+		"A register total, a trace-corpus rate":                  "the register's nullable figure is cards_tokens, and a trace-corpus total that reads 0 is not proof of a measurement",
+	})
+
+	unrecorded := strings.Join(strings.Fields(docSpan(t, selfImprovementPage, "- **Unrecorded.**", "- **Failure class and kind.**")), " ")
+	docNeeds(t, "the page's Unrecorded concept", unrecorded,
+		"every rate", "`cards_tokens`", "totals", "read 0", "`recorded_runs`", "`unrecorded_runs`", "`unmeasured_runs`")
+
+	invariants := strings.Join(strings.Fields(docSpan(t, selfImprovementPage, "## Invariants and assumptions", "## Security and privacy notes")), " ")
+	docNeeds(t, "the page's invariants", invariants, "`cards_tokens`", "a rate", "totals", "read 0", "`recorded_runs`")
+
+	pitfall := strings.Join(strings.Fields(docSpan(t, selfImprovementPage, "- **`null` and `NO_DATA` are not zero.**", "- **A review PASS")), " ")
+	docNeeds(t, "the page's null pitfall", pitfall, "`cards_tokens`", "total", "`recorded_runs`")
+}
+
+// The behaviour half: one run that recorded no pager object and no prefill accounting. The rates are null, the totals are 0,
+// and the counts beside them say nothing was recorded.
+func TestTraceCorpusTotalsReadZeroAndRatesReadNullWhenNothingWasRecorded(t *testing.T) {
+	runs := []tcRun{{ID: "dl-2026-10-14-000001", Source: tcSourceDelegation, Seat: "seat-a", TraceBearing: true, Steps: 3}}
+	b, err := tcMarshalReport(tcBuildReport(runs, "h"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep struct {
+		All struct {
+			Pager struct {
+				RecordedRuns    int `json:"recorded_runs"`
+				UnrecordedRuns  int `json:"unrecorded_runs"`
+				Evictions       any `json:"evictions"`
+				DistinctEvicted any `json:"distinct_evicted"`
+				Refetched       any `json:"refetched_distinct"`
+				RefetchRate     any `json:"refetch_rate"`
+			} `json:"pager"`
+			Compaction struct {
+				RecordedRuns   int `json:"recorded_runs"`
+				UnrecordedRuns int `json:"unrecorded_runs"`
+				Passes         any `json:"passes"`
+				FireRate       any `json:"fire_rate"`
+			} `json:"compaction"`
+			Prefill struct {
+				UnmeasuredRuns int `json:"unmeasured_runs"`
+				PrefillTokens  any `json:"prefill_tokens"`
+				CacheTokens    any `json:"cache_tokens"`
+				ObservedSteps  any `json:"observed_steps"`
+				KVReusePct     any `json:"kv_reuse_pct"`
+			} `json:"prefill"`
+		} `json:"all"`
+	}
+	if err := json.Unmarshal(b, &rep); err != nil {
+		t.Fatal(err)
+	}
+	p, c, f := rep.All.Pager, rep.All.Compaction, rep.All.Prefill
+	for name, v := range map[string]any{
+		"pager.evictions": p.Evictions, "pager.distinct_evicted": p.DistinctEvicted, "pager.refetched_distinct": p.Refetched,
+		"compaction.passes": c.Passes, "prefill.prefill_tokens": f.PrefillTokens, "prefill.cache_tokens": f.CacheTokens,
+		"prefill.observed_steps": f.ObservedSteps,
+	} {
+		if n, ok := v.(float64); !ok || n != 0 {
+			t.Errorf("%s = %v for a run that recorded nothing; the page says a trace-corpus total reads 0", name, v)
+		}
+	}
+	for name, v := range map[string]any{"pager.refetch_rate": p.RefetchRate, "compaction.fire_rate": c.FireRate, "prefill.kv_reuse_pct": f.KVReusePct} {
+		if v != nil {
+			t.Errorf("%s = %v for a run that recorded nothing; the page says a rate reads null", name, v)
+		}
+	}
+	if p.RecordedRuns != 0 || p.UnrecordedRuns != 1 || c.RecordedRuns != 0 || c.UnrecordedRuns != 1 || f.UnmeasuredRuns != 1 {
+		t.Errorf("the counts beside the totals must say nothing was recorded: pager %d/%d, compaction %d/%d, prefill unmeasured %d",
+			p.RecordedRuns, p.UnrecordedRuns, c.RecordedRuns, c.UnrecordedRuns, f.UnmeasuredRuns)
+	}
+}
