@@ -1227,17 +1227,27 @@ func TestGatePowerNote(t *testing.T) {
 	if r.Power.HalfWidth != hw {
 		t.Fatalf("half_width %v != (hi-lo)/2 %v", r.Power.HalfWidth, hw)
 	}
+	// The record is pass/fail (2 wins of the whole range, 14 ties), so the gate read Tango's interval and the
+	// note projects with it: the 2-in-16 share of wins held, each count rounded to a whole task.
+	tangoHW := func(m int) float64 {
+		lo, hi := tangoInterval(m, int(math.Round(2*float64(m)/n)), 0)
+		return (hi - lo) / 2
+	}
 	for _, c := range []struct {
-		n    float64
+		m    int
 		got  float64
 		name string
 	}{{16, r.Power.Projected.N16, "16"}, {24, r.Power.Projected.N24, "24"}, {120, r.Power.Projected.N120, "120"}} {
-		if want := hw * math.Sqrt(float64(n)/c.n); c.got != want {
-			t.Errorf("projected[%s] = %v, want %v", c.name, c.got, want)
+		if want := tangoHW(c.m); math.Abs(c.got-want) > 1e-12 {
+			t.Errorf("projected[%s] = %v, want Tango's half-width at %d tasks %v", c.name, c.got, c.m, want)
 		}
 	}
-	// Superiority: the observed |delta| stands in for the margin.
-	wantNeeded := int(math.Ceil(float64(n) * (hw / math.Abs(r.Delta)) * (hw / math.Abs(r.Delta))))
+	// Superiority: the observed |delta| stands in for the margin, and the count is the first one, counted up
+	// from 2 here (the note searches by doubling and halving), whose half-width is below it.
+	wantNeeded := 2
+	for tangoHW(wantNeeded) >= math.Abs(r.Delta) {
+		wantNeeded++
+	}
 	if r.Power.TasksNeeded.Unbounded || r.Power.TasksNeeded.N != wantNeeded {
 		t.Fatalf("tasks_needed %+v, want %d", r.Power.TasksNeeded, wantNeeded)
 	}
@@ -1262,6 +1272,16 @@ func TestGatePowerNote(t *testing.T) {
 	bn, hn := freeze(t, niPre(n), nil)
 	rn := mustGate(t, bn, hn, inputFor(hn, arm("i", repeatF(8, n), repeatF(1000, n)), arm("c", alternate(8, 7, n), repeatF(800, n))))
 	hwn := (rn.Hi - rn.Lo) / 2
+	// This record is not pass/fail (a difference of 1 on a 0 to 10 scale), so the note keeps the 1/sqrt(n) form.
+	for _, c := range []struct {
+		m    float64
+		got  float64
+		name string
+	}{{16, rn.Power.Projected.N16, "16"}, {24, rn.Power.Projected.N24, "24"}, {120, rn.Power.Projected.N120, "120"}} {
+		if want := hwn * math.Sqrt(float64(n)/c.m); c.got != want {
+			t.Errorf("non-inferiority projected[%s] = %v, want %v", c.name, c.got, want)
+		}
+	}
 	wantN := int(math.Ceil(float64(n) * (hwn / 0.5) * (hwn / 0.5)))
 	if rn.Power.TasksNeeded.Unbounded || rn.Power.TasksNeeded.N != wantN {
 		t.Fatalf("non-inferiority tasks_needed %+v, want %d (hw %v)", rn.Power.TasksNeeded, wantN, hwn)
