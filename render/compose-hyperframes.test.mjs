@@ -54,7 +54,7 @@ if (sub === "lint") {
 }
 if (sub === "check") {
   const c = b.check || {};
-  if (c.sleepMs) sleep(c.sleepMs);
+  if (c.sleepMs) { sleep(c.sleepMs); writeFileSync(join(here, "check.slept"), "slept its full time"); } // a step killed in its sleep never gets here
   const rep = c.report || { ok: (c.code || 0) === 0, strict: false, lint: { ok: true, errorCount: 0, warningCount: 0, infoCount: 0, findings: [] }, runtime: { ok: true, findings: [] }, layout: { ok: true, findings: [] }, motion: { ok: true, findings: [] }, contrast: { ok: true, findings: [] } };
   console.log(JSON.stringify(rep, null, 2));
   process.exit(c.code || 0);
@@ -324,11 +324,14 @@ test("render: spawn EBUSY is retried ONCE (#4058); twice fails SPAWN_EBUSY", (t)
 });
 
 test("render: the deadline kills the step and fails TIMEOUT", (t) => {
-  const fx = fixture(t, { check: { sleepMs: 8000 } });
-  const t0 = Date.now();
+  // "Killed at the deadline, not waited out" is read off the step itself: the check step sleeps 20 s against a
+  // 2 s deadline, and a step that is killed in its sleep never writes check.slept. A wall clock around the whole
+  // run would measure the host as well (a runner that starts slowly, a test process that is descheduled after
+  // the run returned) and fail a correct kill; the marker can only appear if the kill came 18 s late.
+  const fx = fixture(t, { check: { sleepMs: 20000 } });
   const r = fx.run(renderArgs(fx, ["--timeout-sec", "2"]));
   assert.equal(r.last.class, "TIMEOUT", r.stdout);
-  assert.ok(Date.now() - t0 < 7000, "the child must be killed at the deadline, not waited out");
+  assert.ok(!existsSync(join(fx.bin, "check.slept")), "the child must be killed at the deadline, not waited out");
 });
 
 test("render: missing browser / ffmpeg / CLI are typed before anything spawns", (t) => {

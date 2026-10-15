@@ -13,7 +13,8 @@ other on a single shared card.
   (opt-in, [below](#card-scoped-leases-record-v2)) lives in `lease/e/<epoch>.json` and `lease/cards/<id>.claim`
   instead, and the first one writes `gpu/FORMAT`. The same root holds the media ticket queue (`media-queue/`, ADR 0083), so a
   machine's tickets, node claims and place tokens share the root this resolves, with no config key.
-- **Decision record:** [ADR 0018](../architecture/decisions/0018-machine-wide-fenced-gpu-lease.md)
+- **Decision record:** [ADR 0018](../architecture/decisions/0018-machine-wide-fenced-gpu-lease.md); the rule that a lease names its cards and a card has one holder, with what is not built, is
+  [ADR 0094](../architecture/decisions/0094-a-lease-names-its-cards-a-card-has-one-holder.md)
 
 ## Source map
 
@@ -1406,8 +1407,10 @@ renews nothing). Otherwise it stamps the lease **expired**. The renewal is one t
 back); a holder that slept through whole terms is renewed one term from now, so a lease that was just renewed never reads
 overdue. Readings: an owner is alive by the same rule `gpu status` uses (a registered process of its session, or its
 recorded pid, by pid and start time). An owner who **cannot be told** (a lease that records no owner, a session the
-registry never held, or a registry that could not be read; today that is every attended lease taken from a Claude
-session, because the registry writer is not wired into the session hooks yet) is not an objection and is not shown
+registry never held, or a registry that could not be read; the MCP server writes the registry when it starts
+(`internal/mcpserver/mcpserver.go`, `registerSession`), so this is a session whose server never ran, a server older than the
+registry, or a caller that is not a Claude session, and whether a given Claude Code build hands its MCP server the session id
+is unverified) is not an objection and is not shown
 present: an advancing progress file, which the job itself writes, vouches for the lease alone, as it does for an
 unattended one. What such an owner does **not** get is the weaker leg: a busy card proves a process, not that anyone
 wants the result, so a lease of an owner who cannot be told, with no progress contract or a stalled one, is labelled at
@@ -3080,6 +3083,81 @@ request posted straight to llama-swap by anything outside the harness is outside
 
 ## Known gaps
 
+*Read against the code at commit `3be61a3c` (2026-10-14) for [ADR 0094](../architecture/decisions/0094-a-lease-names-its-cards-a-card-has-one-holder.md). Where this section and the code disagree, the code is right and the section is corrected. Each gap says where it lives. First what is not built, then the windows the 0.187.0 changelog entry for the host-RAM hold bound lists as open, then text that disagrees with the code; the older gaps follow and still stand.*
+
+**Not built**
+
+- **The status text names a command that does not exist.** A waiter is told to run `local-offload gpu takeover --epoch N`, with
+  "not in this build yet", for a stalled, orphaned or overdue lease (`internal/gpuactivity/holders.go:128-133`,
+  `internal/gpulease/explain.go:64-66` and `148`, `internal/mcpserver/status_section.go:326`; the end-of-term line in
+  `gpu_terms.go:90` says "open to a takeover"). The verb list has no such verb (`gpu_cmd.go:56`, `gpuVerbs`). The stop primitives
+  a takeover would use have no caller outside tests: `proctree.PlanStop`, `Stop` and `AllGone` (`internal/proctree/stop.go:38`,
+  `111`, `158`) and `comfyinst.StopMarker` (`internal/comfyinst/comfyinst.go:356`).
+- **`gpu release --epoch N` checks no liveness.** It removes the lease and stops only the ComfyUI instances kept under it
+  (`gpu_cmd.go:1734-1802`, `internal/gpulease/gpulease.go:2228-2256`, `internal/gpulease/devices.go:962-966` and `997-1033`). A wrapper
+  whose claim was removed stops its own command on its next tick (`gpu_cmd.go:986-992`); a detached job keeps running on a card that
+  is free to the next lease; and for a tree-orphan the waiter's one named command is this one (`internal/gpuactivity/holders.go:135-139`).
+  There is no release that waits for a dead tree and no opt-in to abandon one. Nothing writes the `quarantine.<id>` sidecars the
+  allocator reads to keep such a card from being handed out (`internal/gpulease/allocator.go:398-421`, a reader only).
+- **No policy for an overdue holder that ignores the request.** `gpu_on_overdue` is `request` or `hold`; there is no automatic mode,
+  and a test pins that none exists (`internal/gpulease/yield.go:75-94`, `internal/gpulease/yield_test.go:1180`). Whether an
+  unanswered request ends in a takeover is the operator's choice.
+- **Several media paths hold the whole node.** By design: the lanes with no ComfyUI instance to bind to a card, which are the
+  audio-gen voice lane, the iGPU engines and the sd.cpp lanes (`internal/pipeline/pipeline.go:3489`,
+  `internal/pipeline/igpumedia.go:239`, `internal/pipeline/sdcppneed.go:85`, each a `wholeNeed`), and a `run-graph` that declares
+  no device (`internal/pipeline/mediaadmit.go:297-302`, `declaredNeed`). Because the plan cannot name a card: an unreadable or
+  empty card table (`mediaadmit.go:467-470`); a pin that names several cards, is not a ComfyUI device index, or is in a device
+  order the box has not declared (`477-486`); a pool key that is not a device or is in an undeclared order, and a pool of fewer
+  than two cards or on a box of more than three (`493`, `521-553`, `poolCards`, `poolMayBeScoped`); several declared devices
+  (`515`); and a host that does not write card leases (`795-799`). The card-only pair is the one placement that never falls back
+  to the whole node: a table it cannot read or a host that does not lease cards is refused with the reason
+  (`internal/pipeline/mediamulticard.go:145-160`, `171-177`, `planMulticard`, `noCardLeases`; `mediaadmit.go:795-799`).
+- **No pool of local workers across cards for one batch.** A local image batch renders through one warm session under one lease
+  (`internal/pipeline/pipeline.go:2463-2481`); the fleet batch places jobs on nodes (`internal/mediaremote/batch.go:246`);
+  `gpu reserve --cards N` queues on a fixed set and does not re-pick while it waits (`gpu_reserve_devices.go:25-29`).
+- **No scripted acceptance of the whole path.** A batch holding two cards, a text seat loading on a free card, a launcher that dies
+  and a waiter that takes the card over, and the status screens throughout have no script in the tree. One would run against a
+  scratch lease root and never the live one.
+
+**Open windows of the host-RAM hold bound**
+
+- **Readers treat an unreadable record as absent.** `gpu status` shows a card free while a reserve is refused for it
+  (`internal/gpulease/devices.go:232-234` and `276-279`); the grant side holds such a record while its keeper has shown life
+  within the 120 s heartbeat TTL, so a keeper that dies leaves it held for up to that long (`internal/gpulease/keeper.go:71-74`,
+  `87-106`).
+- **A failed read of a claim file is a fence verdict.** `readCardClaim` does not tell an I/O error from "no claim"
+  (`internal/gpulease/devices.go:147-153`, `935-956`), and the holders' confirmation is three looks 50 ms apart
+  (`gpu_cmd.go:1594`, `1685-1697`), so a claim that cannot be read for about 150 ms reads as lost and the wrapper stops its
+  command (`gpu_cmd.go:986-992`).
+- **`confirmFence` has no cancel channel.** A window runs to its end when the process is told to stop (`gpu_cmd.go:1685-1719`).
+- **A holder cannot write its give-up marker onto a record it cannot read.** `MarkHolderGaveUp` goes through `Restamp`
+  (`internal/gpulease/hostram.go:803-812`, `internal/gpulease/devices.go:975-981`), so over such a record the exit status and the
+  log are the only word.
+- **A reserve that dies before its first outer stamp leaves none**, and with the hold bound at 0 the backstop is `--wait` itself
+  (`gpu_cmd.go:1521-1551`, `startOuterBound`).
+- **The reserve measures its wait on a monotonic clock and the holder compares wall-clock milliseconds**, so after a suspend the
+  holder can release sooner, never later, than the stamp says (`gpu_cmd.go:1478`).
+- **The warm-back abandons a warm on any failed check.** It kills and releases nothing and the seat stays owed
+  (`gpu_drain.go:1237-1256`).
+- **The hidden holder is exercised in process, not as a spawned child** (`gpu_hostram_holder_test.go`).
+- **The windows are chosen figures, not measurements:** the fence window of 10 s (`gpu_cmd.go:1675`), the holder's grace of 30 s
+  (`gpu_cmd.go:1590`), the heartbeat TTL of 120 s (`internal/gpulease/gpulease.go:112`), the claim grace of 10 s
+  (`gpulease.go:1818`), the token grace of 30 s and life of 10 minutes (`internal/gpulease/tokens.go:49-52`).
+
+**Text that disagrees with the code** (the code wins; this change edits only documents)
+
+- **Code comments.** `internal/gpulease/devices.go:17-19` calls dropping the whole-node record "pending acceptance"; ADR 0018
+  records it accepted on 2026-10-12 and the code does not write it. `internal/gpulease/term.go:16-18` says the session registry's
+  writer is not wired into the session hooks (see the Terms bullet below). `internal/proctree/stop.go:3` says the stop primitives
+  are used by the yield request; it uses none.
+- **ADRs.** ADR 0026 says `DefaultTTL` is stamped on essentially every media lease; the routes pass their own timeout and
+  `DefaultTTL` is the fallback (`internal/pipeline/pipeline.go:1683` and the other `acquireMediaLease` calls,
+  `internal/gpulease/gpulease.go:114-116`, `1835`). ADR 0070 carries the registry sentence of `term.go:16-18`. ADR 0055 says the
+  lease's reclaim rule has no job-liveness input: true of the reclaim rule (`gpulease.go:1152-1172`), while progress decides a
+  term's renewal or label (`internal/gpulease/term.go:3-15`) and never frees a card.
+
+**Older gaps**
+
 - **A tree-orphan is held until its members are gone, and nothing yet stops one.** The tree record, the `tree-orphan` verdict and the
   stop primitives exist (see [A dead wrapper with a live tree](#a-dead-wrapper-with-a-live-tree-keeps-its-claim-plan-p10-adr-0084)),
   but the takeover that stops a tree and frees the claim is a later change (`gpu_on_overdue = request` asks the holder to yield and
@@ -3099,8 +3177,10 @@ request posted straight to llama-swap by anything outside the harness is outside
   not shown present, so a busy card alone does not renew it (a card in use proves a process, not that anyone wants the
   result) and it is labelled at the end of its `--for` unless it declares a progress contract that is advancing: that
   alone keeps it renewing, as it does an unattended lease (operator decision 4: a progress contract renews by progress).
-  Until the registry writer is wired into the session hooks, that is every attended lease taken from a Claude session, so
-  an attended job without a progress file reads `expired` at the end of its first term even while its cards are busy
+  The MCP server writes the registry when it starts (`internal/mcpserver/mcpserver.go`, `registerSession`), so that is a
+  session whose server never ran or a caller that is not a Claude session, and whether a given Claude Code build hands its MCP
+  server the session id is not verified. For such an owner an attended job without a progress file reads `expired` at the
+  end of its first term even while its cards are busy
   (the `held-overdue` verdict was already true from that moment; the label adds the sentence and the takeover
   eligibility, and a takeover of an unknown owner will need `--force` anyway). The wrapper form now closes that for a
   wrapped render helper, or a script that runs one, which is the case that was accused while healthy (F8): it declares

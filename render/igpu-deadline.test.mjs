@@ -21,15 +21,51 @@ const lastLine = (stderr) => stderr.trim().split(/\r?\n/).pop();
 
 // -------------------------------------------------------------- units
 
+// processStartMs subtracts process.uptime() from Date.now(): two clocks read one after the other, and a
+// thread can lose its time slice between the two reads (tens of milliseconds on a busy box, seconds on a
+// starved one). No bound on "now - start - uptime" holds on every schedule, so the arithmetic is pinned over
+// clocks the test holds still, and the real clocks are asked only what a process that has already been up for
+// a while must satisfy whatever the schedule.
+function withClocks(clock, fn) {
+  const realNow = Date.now;
+  const realUptime = process.uptime;
+  Date.now = () => clock.nowMs;
+  process.uptime = () => clock.uptimeSec;
+  try {
+    return fn();
+  } finally {
+    Date.now = realNow;
+    process.uptime = realUptime;
+  }
+}
+
 test("processStartMs: the moment this process started, not the moment it was asked", async () => {
+  const before = Date.now();
   await new Promise((r) => setTimeout(r, 300));
   const start = processStartMs();
+  assert.ok(start <= before, "the process was already running when this test began, so it started before then");
   assert.ok(Date.now() - start >= 300, "uptime is counted: a process that has run for 300 ms started at least 300 ms ago");
-  assert.ok(Math.abs(Date.now() - start - process.uptime() * 1000) < 100);
-  const d = makeDeadline(10);
-  assert.ok(d.atMs <= start + 10000 + 50 && d.atMs >= start + 10000 - 50, "makeDeadline counts from the process start by default");
-  assert.equal(makeDeadline(0).active, false);
-  assert.equal(makeDeadline(0).remainingMs(), 0);
+});
+
+test("processStartMs and makeDeadline: exact over clocks held still", () => {
+  const clock = { nowMs: 1_800_000_000_000, uptimeSec: 2.5004 };
+  withClocks(clock, () => {
+    assert.equal(processStartMs(), 1_800_000_000_000 - 2500, "the clock minus the uptime, rounded to the millisecond");
+    const d = makeDeadline(10);
+    assert.equal(d.atMs, 1_800_000_000_000 + 7500, "makeDeadline counts from the process start by default: 10 s after a start 2.5 s ago");
+    assert.equal(d.remainingMs(), 7500);
+    d.enforce("a step"); // 7.5 s left: it may start
+    clock.nowMs += 7499;
+    assert.equal(d.remainingMs(), 1);
+    d.enforce("a step");
+    clock.nowMs += 1; // exactly at the deadline
+    assert.throws(() => d.enforce("a step"), /a step timeout: the 10s budget \(counted from the runner's start\) was spent before it could start/);
+    clock.nowMs += 5000;
+    assert.equal(d.remainingMs(), 1, "never 0 while active: 0 is what runEngine reads as unbounded");
+    assert.equal(makeDeadline(10, 5000).atMs, 15000, "an explicit start is used as given");
+    assert.equal(makeDeadline(0).active, false);
+    assert.equal(makeDeadline(0).remainingMs(), 0);
+  });
 });
 
 // -------------------------------------------------------------- a slow start spends the budget
@@ -71,6 +107,26 @@ test("audiocpp main: a start that already spent the budget refuses the engine", 
   } finally { sb.done(); }
 });
 
+// killedAfter: the N of "<engine> timeout after Ns (killed)": the seconds the engine's timer was armed for,
+// which is what was left of the budget when the engine started. null = the engine never ran to that point.
+// The runner spent at least the injected slow start (the preload busy-waits it, and the deadline counts from
+// the process start) before it spawned the engine, so the timer is armed for AT MOST budget - slow start; a
+// deadline counted from main() instead would arm it for about the whole budget. That ceiling holds on every
+// schedule. A floor does not: node's own start, module loading, an antivirus scan of the stub and a starved
+// CPU all spend budget too, so a floor such as "4-5 s" only pins how fast the host was that day. A host slow
+// enough to spend the rest of the budget before the engine starts is told apart by the null.
+const SLOW_START_MS = 3000;
+function killedAfter(stderr) {
+  const m = /timeout after (\d+)s \(killed\)/.exec(stderr);
+  return m ? Number(m[1]) : null;
+}
+function assertKilledAtWhatWasLeft(script, stderr, budgetSec) {
+  const n = killedAfter(stderr);
+  const ceiling = budgetSec - SLOW_START_MS / 1000;
+  assert.notEqual(n, null, `${script}: the engine was never killed by its timer (the start-up alone spent the ${budgetSec}s budget, or the run failed some other way): ${stderr.slice(-300)}`);
+  assert.ok(n <= ceiling, `${script}: killed after ${n}s, but a ${SLOW_START_MS / 1000}s slow start leaves at most ${ceiling}s of the ${budgetSec}s budget: ${stderr.slice(-300)}`);
+}
+
 test("a hanging engine is killed at what is LEFT of the budget after a slow start, not at the full budget", opts, async () => {
   for (const [script, mk] of [
     ["sdcpp-video.mjs", (sb) => videoSetup(sb, { log: GOOD_SD_HEADER, hang: true }, ["--timeout-sec", "8"])],
@@ -79,18 +135,18 @@ test("a hanging engine is killed at what is LEFT of the budget after a slow star
     const sb = sandbox();
     try {
       const v = mk(sb);
-      const r = await runNode(script, v.args, sb, { preload, env: { IGPU_TEST_DELAY_MS: "3000" } });
+      const r = await runNode(script, v.args, sb, { preload, env: { IGPU_TEST_DELAY_MS: String(SLOW_START_MS) } });
       assert.equal(r.status, 1, r.stderr);
-      // about 8 - 3 (the slow start) - node's own start = 4-5 s; counting from main() it would say 8
-      assert.match(r.stderr, /timeout after [2-6]s \(killed\)/, `${script}: ${r.stderr.slice(-300)}`);
+      assertKilledAtWhatWasLeft(script, r.stderr, 8); // counting from main() it would say 8
     } finally { sb.done(); }
   }
   const sb = sandbox();
   try {
     const a = animateSetup(sb, { depth: { hang: true }, extra: ["--timeout-sec", "12"] });
-    const r = await runNode("sdcpp-animate.mjs", a.args, sb, { preload, env: { IGPU_TEST_DELAY_MS: "3000" } });
+    const r = await runNode("sdcpp-animate.mjs", a.args, sb, { preload, env: { IGPU_TEST_DELAY_MS: String(SLOW_START_MS) } });
     assert.equal(r.status, 1, r.stderr);
-    assert.match(r.stderr, /depth-anything timeout after [3-9]s \(killed\)/, r.stderr.slice(-300));
+    assertKilledAtWhatWasLeft("sdcpp-animate.mjs (depth-anything)", r.stderr, 12);
+    assert.match(r.stderr, /depth-anything timeout after \d+s \(killed\)/, r.stderr.slice(-300));
   } finally { sb.done(); }
 });
 
