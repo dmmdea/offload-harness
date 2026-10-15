@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -99,7 +98,9 @@ func TestRemoteComposeNodeDeferClosesTheCardFailed(t *testing.T) {
 // composition took, or the card) is a call held back, not a failure: the err_class rides the node's poll
 // back to the asker (fleetnode `err_class`), whose card closes quiet, completed with the reason in
 // `error` and no failed frame. A composition that ran and broke, with a class that is not a held one,
-// still closes failed.
+// still closes failed. Each class runs both ways a poll can meet the job, and the node fixes which one:
+// held until a poll has found it running (the card turned running, and the close keeps that start), or
+// begun and ended between two polls (no running frame, so a held call has no start and a broken one does).
 func TestRemoteComposeNodeHeldDeferClosesTheCardQuiet(t *testing.T) {
 	reason := "compose_video: busy — another composition in this process still holds the compose slot after 90s"
 	for _, tc := range []struct {
@@ -111,40 +112,49 @@ func TestRemoteComposeNodeHeldDeferClosesTheCardQuiet(t *testing.T) {
 		{core.ErrClassGPUBusy, "gpu busy: another generation job holds the card", "completed"},
 		{"timeout", "compose_video: RENDER_TIMEOUT: the render passed its window", "failed"},
 	} {
-		t.Run(tc.class, func(t *testing.T) {
-			n := startNode(t, false)
-			n.runner.delay = 300 * time.Millisecond // the first poll sees the job running, as a held one does
-			n.runner.defer_, n.runner.deferClass = tc.reason, tc.class
-			rig := newPairRig(t, true, dispatchHost(t, n))
-			res := Run(context.Background(), clientCfg(t, n), rig.p, core.Request{Task: core.TaskComposeVideo, Params: map[string]any{"template": "title-card"}}, "remote")
-			if res.OK || !res.Deferred || res.Meta.ErrClass != tc.class {
-				t.Fatalf("Run: %+v, want the node's deferral with its class", res)
-			}
-			cards := rig.cards()
-			other := map[string]string{"completed": "failed", "failed": "completed"}[tc.want]
-			if cards[tc.want] == nil || cards[other] != nil || cards[tc.want]["error"] != tc.reason {
-				t.Fatalf("cards = %v, want one %s card carrying the reason and no %s frame", cards, tc.want, other)
-			}
-			// The start: the one the running frame showed when the poll saw the job running; otherwise a held
-			// call has none (it never ran) and a call that ran and broke is shown to have started.
-			switch started := cards[tc.want]["startedAt"]; {
-			case cards["running"] != nil:
-				if started != cards["running"]["startedAt"] {
-					t.Fatalf("the close must keep the start the running frame showed: %v", cards)
+		for _, polledRunning := range []bool{true, false} {
+			mode := map[bool]string{true: "a poll finds it running", false: "over between two polls"}[polledRunning]
+			t.Run(tc.class+"/"+mode, func(t *testing.T) {
+				n := startNode(t, false)
+				if polledRunning {
+					n.holdUntilSeenRunning()
+				} else {
+					n.jobNeverSeenRunning()
 				}
-			case core.CardHeld(tc.class):
-				if started != nil {
-					t.Fatalf("a held call that was never seen running has no start: %v", cards)
+				n.runner.defer_, n.runner.deferClass = tc.reason, tc.class
+				rig := newPairRig(t, true, dispatchHost(t, n))
+				res := Run(context.Background(), clientCfg(t, n), rig.p, core.Request{Task: core.TaskComposeVideo, Params: map[string]any{"template": "title-card"}}, "remote")
+				if res.OK || !res.Deferred || res.Meta.ErrClass != tc.class {
+					t.Fatalf("Run: %+v, want the node's deferral with its class", res)
 				}
-			default:
-				if started == nil {
-					t.Fatalf("a call that ran and broke has a start: %v", cards)
+				cards := rig.cards()
+				other := map[string]string{"completed": "failed", "failed": "completed"}[tc.want]
+				if cards[tc.want] == nil || cards[other] != nil || cards[tc.want]["error"] != tc.reason {
+					t.Fatalf("cards = %v, want one %s card carrying the reason and no %s frame", cards, tc.want, other)
 				}
-			}
-			if rows := rig.rows(); len(rows) != 1 || !rows[0].Deferred || rows[0].ErrClass != tc.class || rows[0].Node == "" {
-				t.Fatalf("rows = %+v, the asker's row keeps the class", rows)
-			}
-		})
+				// The start: the one the running frame showed when a poll saw the job running; otherwise a held
+				// call has none (it never ran) and a call that ran and broke is shown to have started.
+				switch started := cards[tc.want]["startedAt"]; {
+				case polledRunning:
+					if cards["running"] == nil || started != cards["running"]["startedAt"] {
+						t.Fatalf("the close must keep the start the running frame showed (%d running polls served): %v", n.runningPolls.Load(), cards)
+					}
+				case cards["running"] != nil:
+					t.Fatalf("no poll saw the job running, yet the card turned running: %v", cards)
+				case core.CardHeld(tc.class):
+					if started != nil {
+						t.Fatalf("a held call that was never seen running has no start: %v", cards)
+					}
+				default:
+					if started == nil {
+						t.Fatalf("a call that ran and broke has a start: %v", cards)
+					}
+				}
+				if rows := rig.rows(); len(rows) != 1 || !rows[0].Deferred || rows[0].ErrClass != tc.class || rows[0].Node == "" {
+					t.Fatalf("rows = %+v, the asker's row keeps the class", rows)
+				}
+			})
+		}
 	}
 }
 
@@ -278,18 +288,34 @@ type localOnly struct{}
 
 func (localOnly) Run(context.Context, core.Request) core.Result { return core.Result{OK: true} }
 
-// A render the node is still working on reads "running" on the first poll: the card turns running,
-// once, between queued and the terminal frame.
+// A render the node is still working on reads "running" on a poll: the card turns running, once, between
+// queued and the terminal frame. The node holds the render until it has sent that answer, so how quick this
+// box is cannot decide whether a poll finds the job running. The first poll can also reach the node before
+// its scheduler has claimed the job, which a loaded box does: the card must then turn running on a later
+// poll, and the second case makes that happen on every run.
 func TestRemoteComposeCardTurnsRunningWhenTheNodeSaysTheJobStarted(t *testing.T) {
-	n := startNode(t, false)
-	n.runner.delay = 600 * time.Millisecond
-	rig := newPairRig(t, true, dispatchHost(t, n))
-	res := Run(context.Background(), clientCfg(t, n), rig.p, core.Request{Task: core.TaskComposeVideo, Params: map[string]any{"template": "title-card"}}, "remote")
-	if !res.OK {
-		t.Fatalf("Run: %+v", res)
-	}
-	cards := rig.cards()
-	if cards["queued"] == nil || cards["running"] == nil || cards["completed"] == nil || rig.frameCount() != 3 {
-		t.Fatalf("cards = %v (%d frames), want queued, running, completed", cards, rig.frameCount())
+	for _, tc := range []struct {
+		name            string
+		firstPollQueued bool
+	}{
+		{"polls as they come", false},
+		{"the first poll reads queued", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := startNode(t, false)
+			n.holdUntilSeenRunning()
+			if tc.firstPollQueued {
+				n.firstPollReadsQueued()
+			}
+			rig := newPairRig(t, true, dispatchHost(t, n))
+			res := Run(context.Background(), clientCfg(t, n), rig.p, core.Request{Task: core.TaskComposeVideo, Params: map[string]any{"template": "title-card"}}, "remote")
+			if !res.OK {
+				t.Fatalf("Run: %+v", res)
+			}
+			cards := rig.cards()
+			if cards["queued"] == nil || cards["running"] == nil || cards["completed"] == nil || rig.frameCount() != 3 {
+				t.Fatalf("cards = %v (%d frames, %d running polls served), want queued, running, completed", cards, rig.frameCount(), n.runningPolls.Load())
+			}
+		})
 	}
 }
