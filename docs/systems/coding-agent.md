@@ -793,7 +793,9 @@ because the local seat is the one another session's lease fences, and a rescue t
 that very lease (the lane instead reads a skipped or cut re-pack's raw lines itself, through its own
 filters and without a second completion: `reviewlane.Salvage`, see [mcp-server.md](mcp-server.md)); and `offload_ask` at a named remote route keeps its own handling of a finished answer
 (its prose still reaches the caller: a deferred `offload_ask` carries it as `output`, flagged `schema_miss`), which the security review records as deliberate, so wiring it is
-outside this change. The seam is one field, `RunOptions.Rescue`, if any of them should be wired later.
+outside this change. The same holds for the cross-seat retry an `offload_ask` gives a failed local first attempt
+(the single-contract path at `route=remote`, [mcp-server.md](mcp-server.md)): a retry that defers keeps no rescue and
+none of its prose, and the first answer stands with the retry's fate in `retry_note`. The seam is one field, `RunOptions.Rescue`, if any of them should be wired later.
 
 **A re-pack is read against its answer.** The schema validator says an object has the right shape,
 not that it kept the content, and the acceptance checks read fields (`contains:` the answer's text,

@@ -102,11 +102,12 @@ var identRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]{` + strconv.Itoa(anchorM
 //
 // Betting the whole check on ONE token was measured wrong three separate ways (see
 // pickAnchors): the single highest-ranked token is frequently something a correct answer
-// had no reason to quote, and with no cross-seat retry on this lane a false negative is
-// terminal — the caller simply learns not to trust the verdict, which is the exact failure
-// offload_ask exists to prevent. Three alternatives turn the check into the question
-// actually worth asking ("did the answer cite ANYTHING that appears only in these files?")
-// while staying ONE content check, still grounded, still non-parrot, and still deterministic.
+// had no reason to quote, and a false negative costs the caller its trust in the verdict —
+// the exact failure offload_ask exists to prevent. (A failed local first attempt now gets one
+// cross-seat retry from the handler, so a false negative is no longer terminal, but the retry
+// is a whole second run.) Three alternatives turn the check into the question actually worth
+// asking ("did the answer cite ANYTHING that appears only in these files?") while staying ONE
+// content check, still grounded, still non-parrot, and still deterministic.
 const anchorAlternatives = 3
 
 // askOutputSchema is the flat {answer, evidence} shape. Flat and string-only because two fields

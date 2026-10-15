@@ -244,6 +244,31 @@ cites nothing, and grading the bytes gives `verified: false` when the re-pack re
 case is a question whose subject is a SHORT (<8-character) or question-named identifier, which
 leaves nothing anchorable at all.
 
+**A failed local first attempt is retried on another seat.** When the first attempt ran on this box's seat and
+failed its acceptance (`acceptance_failures` non-empty), the handler gives it the second chance `agent_delegate`
+gives a failed verification: the same contract goes once through the delegator at `route=remote`, which never
+places on this box's seat, so the retry runs on a different seat by construction. A routed ask (`auto`, `remote`,
+a named route) needs nothing added: the delegator's own engine already retries inside that call, and the response
+now says so (see the route paragraph below). The retry is decoded and graded exactly like the first attempt
+(`gradeAskWire`), and only a clean one is published:
+
+- **The retry verified:** it is the answer, with `verified: true`, the fleet block (`node`, `placement`, `seat`,
+  `executed_on`), `retried_on` (the node) and `retry_note` (`first attempt on <seat> failed_verification: [...]; this
+  result is the retry`).
+- **The retry also failed** (a failed verification, no answer, or a defer from a node that took it): the FIRST answer
+  stands, `verified: false` with its `acceptance_failures`, plus `retried_on` and `retry_note` (`retry on <node> also
+  <outcome>; this result is the first attempt`).
+- **The fleet took nothing** (declined, no eligible node, could not be asked) or **the budget is short:** the first
+  answer stands with `retry_note: retry skipped: <why>` and no `retried_on`, which would name a node that never ran
+  it.
+
+The retry lives inside the contract's own `timeout_sec`, as the delegator's does. An ask never names its wall, so its
+contract is auto-sized and owns the 900 s cap; the retry is skipped when what the first attempt left is under the
+retry floor (the configured `agent_retry_min_sec`, at least 10 s), and otherwise it is handed what is left as an
+explicit `timeout_sec`. When the fleet's engine retried inside the retry too, its own note follows the ask's, after
+`the fleet's own retry:`. A deferred first attempt is not retried (it did not fail a verification), and neither is a
+verified one.
+
 A deferred `offload_ask` keeps the finished answer (register C-80). When the node says the loop FINISHED and only
 its structuring failed (`schema_miss`: the re-pack was skipped because the wall had no time left, was cut by the clock, or
 stalled), the deferred payload carries the loop's prose as `output` with `schema_miss: true`, beside the defer's own
@@ -288,7 +313,10 @@ the old behaviour exactly, and so does an omitted route on `agent_run`, unless i
 runs local too, except when loading the agent seat would unload another vLLM seat that holds the cards
 (the seat guard's verdict; 0.165.2): the ask then takes `auto`, and the response carries a `route_note`
 naming that seat. The ask is self-contained, so nothing is lost by moving it; `agent_run` reads its
-`read_root` on this box and stays.
+`read_root` on this box and stays. A routed response also carries `retried_on` and `retry_note` when the delegator
+retried a failed verification (or considered one and skipped it) inside the call: both fields were dropped before
+this block surfaced them, and they are absent when no retry was considered. The review lane and `agent_run` share the
+block, so they carry the same two fields.
 
 #### A seat only the fleet runs: `agent_run(model: <seat>)` (register D-125)
 
@@ -574,7 +602,9 @@ seat again, and the response says so with `cache_hit: true`. A fresh run publish
 `cache_hit: false`; an absent field would read as unknown, and "was this answer computed just
 now" is not something a caller or the adoption instrument should have to guess at. A
 **deferred** result carries no `cache_hit` at all, by design rather than omission: a defer is
-never stored, so it is always a fresh run.
+never stored, so it is always a fresh run. The stored entry is the answer as it was published, so a cached
+unverified answer already includes its cross-seat retry (`retried_on` and `retry_note` ride the entry as they
+are): a repeat never retries again.
 
 **Say what this buys, and no more.** It pays on an exact repeat and on nothing else. A
 *different* question over the same files still pays full seat time (46–75 s measured), because
