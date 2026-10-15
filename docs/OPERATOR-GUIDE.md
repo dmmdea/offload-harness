@@ -1773,11 +1773,14 @@ to the seat, a non-llama.cpp entry states no `concurrencyLimit`, or a llama.cpp 
 be read. The cap follows the seat the box serves NOW. A box of a vLLM tier (`ampere-16`, `blackwell-16`, `blackwell-2x16`,
 `blackwell-3x16`) whose vLLM venv is not installed serves the tier's llama.cpp fallback at `--parallel 1`: the row warns, and says
 which vLLM seat the tier declares, its `max_num_seqs`, and that the cap goes up to it when that seat takes over, so setting 1 now
-does not strand the box at 1 after the venv is installed. The tier is the installer's (`installed.json`), else the config's
-`tier_profile`; when the installer's tier does not own the agent seat the box serves (a manifest recorded under an older layout:
-`dual-gpu` declares no vLLM seat, and is what three Blackwell cards classified as before `blackwell-3x16` existed), the config's
-`tier_profile` is tried next. With neither, or with an agent seat that is not the tier's, the row names no tier. It never changes doctor's
-exit code.
+does not strand the box at 1 after the venv is installed. Two places can name the tier, the installer's (`installed.json`) and
+the config's `tier_profile`, and a tier counts only when the box's agent seat is its declared vLLM seat or that seat's fallback, so a
+manifest recorded under an older layout (`dual-gpu` declares no vLLM seat, and is what three Blackwell cards classified as before
+`blackwell-3x16` existed) never hides the seat the config's tier owns. When both tiers count (the alias `agent-pool` is declared by
+`blackwell-16`, `blackwell-2x16` and `blackwell-3x16`), the row names the one whose declared seat is the entry of the serving config
+that `agent_model` resolves to, because that entry is what the box runs; when the entry names neither, the config's `tier_profile` wins
+over the manifest's. With no tier that counts, or with an agent seat that is not a tier's, the row names no tier. It never changes
+doctor's exit code.
 
 **A name, not a LAN address (`lan ip:` row).** Cross-machine reach uses tailnet names, because an IP literal works until the box it
 names moves or its firewall is scoped to the tailnet, and then the endpoint is dead with nothing in the file that says why. `doctor`

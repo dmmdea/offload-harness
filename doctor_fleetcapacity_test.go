@@ -417,10 +417,10 @@ func TestDoctorCapacityRowNamesNoVLLMTierItCannotProve(t *testing.T) {
 	}
 }
 
-// A manifest recorded under an older layout must not hide the seat the config's own tier declares. The installer's
-// tier wins wherever it explains the agent seat; when it does not (dual-gpu declares no vLLM seat, and was what a
-// three-card box classified as before blackwell-3x16 existed), the config's tier_profile is tried next, because the
-// row only ever names a tier whose declared seat the box's agent_model actually is.
+// A manifest recorded under an older layout must not hide the seat the config's own tier declares. A manifest tier
+// that does not own the agent seat (dual-gpu declares no vLLM seat, and was what a three-card box classified as before
+// blackwell-3x16 existed) does not count, so the config's tier_profile names it; the row only ever names a tier whose
+// declared seat the box's agent_model actually is. When both tiers own the seat, the table test below decides.
 func TestDoctorCapacityRowKeepsTheConfigTierSeatWhenTheManifestRecordsAnOlderLayout(t *testing.T) {
 	spec := tierSeat(t, "blackwell-3x16")
 	for _, recorded := range []string{"dual-gpu", "blackwell-2x16"} {
