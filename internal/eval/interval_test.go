@@ -84,6 +84,41 @@ func TestTangoIntervalEndsAreWhereTheStatisticIsPlusOrMinusZ(t *testing.T) {
 	}
 }
 
+// Pass/fail pairs that are off by float rounding are still pass/fail pairs: a tie that is 5.6e-17 from 0
+// (0.1 + 0.2 against 0.3), a win of the whole range that is a hair short of it, a loss likewise, get the interval of
+// exact ties, wins and losses, not the (much wider) one of scores that are not pass/fail.
+func TestPassFailPairsOffByRoundingAreStillPassFail(t *testing.T) {
+	x, y := 0.1, 0.2 // not constants: a constant 0.1 + 0.2 is exactly 0.3
+	const n = 60
+	inc, cand := make([]float64, n), make([]float64, n)
+	exactInc, exactCand := make([]float64, n), make([]float64, n)
+	rounded := 0
+	for i := range inc {
+		switch {
+		case i < 4: // wins
+			inc[i], cand[i] = 0.25, math.Nextafter(1.25, 0)
+			exactInc[i], exactCand[i] = 0, 1
+		case i < 9: // losses
+			inc[i], cand[i] = 1.25, math.Nextafter(math.Nextafter(0.25, 1), 1)
+			exactInc[i], exactCand[i] = 1, 0
+		default: // ties that are not bit-equal
+			inc[i], cand[i] = 0.3, x+y
+			exactInc[i], exactCand[i] = 0.5, 0.5
+		}
+		if d := cand[i] - inc[i]; d != 1 && d != -1 && d != 0 {
+			rounded++
+		}
+	}
+	if rounded != n {
+		t.Fatalf("setup: every pair must be off by rounding, %d of %d are", rounded, n)
+	}
+	d, lo, hi := primaryInterval(inc, cand, 1)
+	wd, wlo, whi := primaryInterval(exactInc, exactCand, 1)
+	if math.Abs(d-wd) > 1e-12 || math.Abs(lo-wlo) > 1e-12 || math.Abs(hi-whi) > 1e-12 {
+		t.Errorf("pairs off by rounding: %v [%v, %v], the exact pass/fail pairs give %v [%v, %v]", d, lo, hi, wd, wlo, whi)
+	}
+}
+
 // The variance the statistic uses is the restricted maximum-likelihood one: the likelihood of w wins, l losses and
 // the rest ties is maximised over the probability v of a loss under u - v = delta (u the probability of a win),
 // by a ternary search of the concave log-likelihood, a path that shares nothing with the quadratic the code solves.

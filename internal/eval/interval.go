@@ -130,8 +130,10 @@ const normal975 = 1.959963984540054
 // delta: u + v - delta^2, with u and v the probabilities of a win and a loss at the maximum-likelihood values
 // under u - v = delta (Tango 1998). With v the loss probability the likelihood's stationary point solves
 // 2 n v^2 - B v - C = 0, B = (w + l)(1 - delta) - 2 delta (l + t), C = l delta (1 - delta) for w wins, l
-// losses and t ties; the likelihood is concave, so its maximum is the larger root, or the edge u = 0 (v =
-// -delta for a negative delta) when the root lies beyond it.
+// losses and t ties; the likelihood is concave, so its maximum is the larger root. With no win observed the
+// quadratic has the edge u = 0 (v = -delta for a negative delta) as its other root, so the larger root is also the
+// edge when the likelihood prefers it, which is how a null difference of -0.05 gets its variance from a sample
+// with nothing in it that differs.
 func tangoVar0(n, wins, losses int, delta float64) float64 {
 	fn := float64(n)
 	ties := fn - float64(wins) - float64(losses)
@@ -142,9 +144,6 @@ func tangoVar0(n, wins, losses int, delta float64) float64 {
 		disc = 0
 	}
 	v := (b + math.Sqrt(disc)) / (4 * fn)
-	if edge := math.Max(0, -delta); v < edge {
-		v = edge
-	}
 	return 2*v + delta - delta*delta
 }
 
