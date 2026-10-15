@@ -764,6 +764,15 @@ func (m *Monitor) onProbeTick() {
 		} else if err != nil {
 			m.holdState = unreadableState(err)
 		}
+		if m.postReady && !loading && m.engineArmedLocked() {
+			// The post-ready bound ran out while this tick's read of the seat
+			// was in flight (the stall timer, finding the probe busy, left the
+			// decision to the tick). A seat that is loaded and not loading is
+			// the engine's to judge, exactly as when the timer wins the race:
+			// read it before calling the silence a stall.
+			m.checkEngineLocked() // releases the lock
+			return
+		}
 		m.fileStallLocked()
 		m.mu.Unlock()
 		return
