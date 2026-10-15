@@ -230,6 +230,19 @@ whatever `home` it names and is told, with a NOTE, when it names none. Templates
 carry placeholders substituted at install time; the config template spells no data path, because a
 path written in the file is an explicit value that `home` does not rebase.
 
+**The manifest across a layout change.** Both installers bring `installed.json` to the tier the run detected. `install.ps1`
+rebuilds it whole on every run from a fresh detection (only `data_home` and its reason are carried forward from the old file).
+`install.sh` writes it when absent; when the recorded `profile` differs from the detected tier it rewrites `profile` and `backend` in
+place and keeps every other key (`accelerators`, `alt_backends`, whatever else the file holds), leaves an equal profile byte for byte,
+leaves an unreadable file alone with a note, and under `--dry-run` prints the rewrite it would make. So a box recorded as `dual-gpu`
+or `blackwell-2x16` that gained a third Blackwell card reads `blackwell-3x16` after its next run on either path. An existing
+`config.json` is never rewritten on either path, so the seats a box already binds stay and the new tier's composite keys
+(`tier_profile`, `tiers`, `layers`) are seeded only into a regenerated config. The readers tolerate the disagreement that can leave
+between the two files: a manifest of any recorded layout reads clean, `doctor`'s `capacity:` row names the tier whose declared seat the
+box serves (the tier whose seat is the serving config's own entry first, then the config's `tier_profile`, then the manifest's), and
+`report` keeps the manifest on its tier line and names both ids. `selftest.ps1` reads the manifest as written; on Windows the
+installer has just rebuilt it.
+
 ## Interfaces and entry points
 
 `pwsh -NoProfile -File setup/detect.ps1` (add `-SelfTest` for the assertion suite), then

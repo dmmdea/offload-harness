@@ -154,7 +154,8 @@ The gate version is 3: a baseline written under another version (1 or 2) is refu
    one. Without that, a frozen incumbent could be re-scored by another scorer, and a model id could be declared
    `deterministic` to skip the receipt. A model judge needs a passed self-test receipt for the same scorer, with
    `pairs_hash` and `build_sha256` each 64 lower-case hex characters, or the gate refuses. Receipts are plain data in
-   `internal/eval` (which must not import `internal/compeval`); the verb that produces them is a separate change.
+   `internal/eval` (which must not import `internal/compeval`); `gate selftest`, in the root package, runs
+   `compeval.SelfTest` and produces them.
    `corpus_hash` stays an echo of the corpus file given to freeze: the adapter that turns runs into arms is the trust
    boundary for corpus content, and the gate checks task ids against the declared list, not the text of a task.
 8. **R8, eras.** The result carries both runs' stamps (harness build, seat configuration, engine build), the judge identity
@@ -328,8 +329,8 @@ The gate version is 3: a baseline written under another version (1 or 2) is refu
 - **No wall-time term enters through the gate.** Speed may be reported beside a verdict as a side column by a caller; the
   gate has no input for it and no rule that reads it.
 - **Reading the gate's inputs needs adapters.** A record from an external evaluation tool becomes a gate input outside this
-  repository (`OutcomeFromRecord` and the schema are what that adapter reads), and the self-test receipt for a model judge
-  is a later verb.
+  repository (`OutcomeFromRecord` and the schema are what that adapter reads). The self-test receipt for a model judge is
+  written by `gate selftest`.
 
 ## Follow-ups
 

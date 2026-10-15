@@ -416,3 +416,83 @@ func TestDoctorCapacityRowNamesNoVLLMTierItCannotProve(t *testing.T) {
 		})
 	}
 }
+
+// A manifest recorded under an older layout must not hide the seat the config's own tier declares. A manifest tier
+// that does not own the agent seat (dual-gpu declares no vLLM seat, and was what a three-card box classified as before
+// blackwell-3x16 existed) does not count, so the config's tier_profile names it; the row only ever names a tier whose
+// declared seat the box's agent_model actually is. When both tiers own the seat, the table test below decides.
+func TestDoctorCapacityRowKeepsTheConfigTierSeatWhenTheManifestRecordsAnOlderLayout(t *testing.T) {
+	spec := tierSeat(t, "blackwell-3x16")
+	for _, recorded := range []string{"dual-gpu", "blackwell-2x16"} {
+		t.Run(recorded, func(t *testing.T) {
+			cfg := capacityCfg(t, llamaEntryYAML(spec.Fallback, "1"), spec.Fallback, 0)
+			cfg.TierProfile = "blackwell-3x16"
+			cfg.Tiers = []string{"blackwell-16", "blackwell-2x16", "blackwell-3x16"}
+			installedAs(t, recorded)
+			got := capacityRow(cfg)
+			for _, w := range []string{
+				"declares the vLLM agent seat " + spec.ID + fmt.Sprintf(" (max_num_seqs %d)", spec.MaxNumSeqs),
+				"serves its llama.cpp fallback " + spec.Fallback,
+				fmt.Sprintf("raise fleet_max_concurrent_jobs to %d when %s takes over", spec.MaxNumSeqs, spec.ID),
+			} {
+				if !strings.Contains(got, w) {
+					t.Errorf("manifest recorded as %s, config tier_profile blackwell-3x16: the row lacks %q:\n%s", recorded, w, got)
+				}
+			}
+		})
+	}
+
+	// The same older manifest with a config that names no tier proves nothing: dual-gpu declares no vLLM seat, and the
+	// row does not borrow one.
+	cfg := capacityCfg(t, llamaEntryYAML(spec.Fallback, "1"), spec.Fallback, 0)
+	installedAs(t, "dual-gpu")
+	got := capacityRow(cfg)
+	if !strings.Contains(got, "capacity:   WARN") || strings.Contains(got, "declares the vLLM agent seat") {
+		t.Errorf("dual-gpu with no tier_profile must name no tier:\n%s", got)
+	}
+
+	// A config tier that does not own the agent seat is not a reason to name it either.
+	cfg = capacityCfg(t, llamaEntryYAML("custom-agent", "1"), "custom-agent", 0)
+	cfg.TierProfile = "blackwell-3x16"
+	installedAs(t, "dual-gpu")
+	if got := capacityRow(cfg); strings.Contains(got, "declares the vLLM agent seat") {
+		t.Errorf("an agent seat that is not the config tier's must name no tier:\n%s", got)
+	}
+}
+
+// When the installer's tier and the config's tier_profile both explain the agent seat (an alias several tiers share,
+// "agent-pool" here) the row names exactly one of them. The seat the box runs is the entry of the serving config that
+// agent_model resolves to, so the tier whose declared seat id is that entry wins, and the manifest can be the stale one
+// (a card was added) or the config can (a card was removed). When the entry names neither seat, the config's tier_profile
+// is the identity the box routes on and wins over the manifest.
+func TestDoctorCapacityRowNamesOneTierWhenTwoExplainTheAgentSeat(t *testing.T) {
+	older := tierSeat(t, "blackwell-16")
+	newer := tierSeat(t, "blackwell-3x16")
+	const shared = "agent-pool"
+	for _, tc := range []struct {
+		name     string
+		entry    string // the id of the serving config's entry that carries the shared alias
+		aliases  []string
+		limit    int
+		want     string // the tier named
+		wantSeat string
+		not      string // the tier the row must not name
+	}{
+		{"the entry is the config tier's seat, the manifest is older", newer.ID, newer.Aliases, newer.MaxNumSeqs, "blackwell-3x16", newer.ID, "blackwell-16"},
+		{"the entry is the manifest tier's seat, the config is older", older.ID, older.Aliases, older.MaxNumSeqs, "blackwell-16", older.ID, "blackwell-3x16"},
+		{"the entry names neither seat, so the config's tier wins", "custom-pool", []string{shared}, 32, "blackwell-3x16", newer.ID, "blackwell-16"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := capacityCfg(t, vllmEntryYAML(tc.entry, tc.aliases, tc.limit), shared, 1)
+			cfg.TierProfile = "blackwell-3x16"
+			installedAs(t, "blackwell-16")
+			got := capacityRow(cfg)
+			if want := tc.wantSeat + " is tier " + tc.want + "'s vLLM seat"; !strings.Contains(got, want) {
+				t.Errorf("the row lacks %q:\n%s", want, got)
+			}
+			if strings.Contains(got, "tier "+tc.not+"'s") {
+				t.Errorf("the row names tier %s as well:\n%s", tc.not, got)
+			}
+		})
+	}
+}

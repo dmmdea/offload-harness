@@ -3990,10 +3990,11 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	}
 	// THE FENCE CHECK (register D-110), before any local loop is built. Under a
 	// lease this process does not hold and that refuses new runs — an exclusive
-	// text hold, a draining cordon, a media render — the local loop below does
-	// not fail fast: it waits the whole agent_lease_wait_sec at the affinity
-	// cordon and is then filed as a capacity defer (agenttask.go, "gpu busy: ").
-	// For the lease's ENTIRE length, the one lane a lead reaches for at the
+	// text hold, a draining cordon, a media render — the local loop below cannot
+	// answer: its own in-run fence check (agenttask.go, register S-26) defers
+	// `capacity` at once ("gpu busy: ... until it is released"); before that check
+	// landed it first waited the whole agent_lease_wait_sec at the cordon. Either
+	// way, for the lease's ENTIRE length the one lane a lead reaches for at the
 	// moment of deciding answered nothing, however idle the fleet was. The
 	// verdict is on disk before the dial, so the review is offered to the fleet
 	// first — the same sentence register D-94 wrote about the retry path.
@@ -4012,20 +4013,21 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 		}
 		// A fleet seat that WROTE the review and was stopped by the clock on its
 		// structuring (F20: a cut final, a re-pack with no wall left) deferred it, and the
-		// fallthrough below would wait out this very fence to answer nothing. Its lines are
-		// worth more than that wait, so they get the same read a local review's would:
+		// local leg below can only defer `capacity` on this very fence. Its lines are worth
+		// more than that defer, so they get the same read a local review's would:
 		// published, with the fleet's provenance, only when they survive the filters.
-		// Anything else — and a salvage that comes to no review — falls through exactly
-		// as before.
+		// Anything else — and a salvage that comes to no review — falls through to the
+		// local leg as before.
 		if wire.Deferred {
 			if out, delivered := reviewPayload(wire, diff, in.MaxFindings, extra); delivered {
 				return seal(out, reviewlane.Run{Delivered: true, Wire: &wire, Extra: extra})
 			}
 		}
-		// Nothing out there took it. Today's path stands — the wait, then the
-		// capacity defer — and the note says the fleet WAS asked, so a caller
-		// reading "gpu busy" does not have to wonder whether the fallthrough
-		// exists.
+		// Nothing out there took it. The local leg runs as it would have: while the
+		// fence holds it defers `capacity` at once, naming the holder (only a fence
+		// taken after its check meets the cordon's wait), and the note says the fleet
+		// WAS asked, so a caller reading "gpu busy" does not have to wonder whether
+		// the fleet was tried.
 		fleetNote = map[string]any{"fleet": note}
 	}
 	run := s.localAgent // test seam, shared with agent_delegate and offload_ask
