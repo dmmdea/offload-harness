@@ -219,7 +219,7 @@ here. Both are cited as the nearest precedent, not as dependencies.
     silently.
 
 11. **The DeepGEMM cross-link.** The spike's NVFP4 arm carries the checklist question: does the checkpoint use FP8-block or NVFP4 on
-    sm_120? Strata's ggml NVFP4 path does not use DeepGEMM; the reopen trigger is in ADR 0090.
+    sm_120? Strata's ggml NVFP4 path does not use DeepGEMM; the reopen trigger is in [ADR 0090](0090-capability-review-2026-10-dispositions-and-reopen-triggers.md).
 
 ## Consequences
 
@@ -273,8 +273,8 @@ here. Both are cited as the nearest precedent, not as dependencies.
   [ADR 0058](0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md),
   [ADR 0080](0080-a-ram-spill-moe-is-the-agent-seat-when-it-earns-it.md), [ADR 0002](0002-grammar-reliable-serving-flags.md),
   [ADR 0069](0069-an-unconstrained-seat-runs-classify-and-extract-from-the-prompt-and-the-text-lane-ships-dark.md)
-- [ADR 0088](0088-one-measurement-gate.md) (the one measurement gate); ADR 0090 (the DeepGEMM reopen trigger) lands in a sibling
-  pull request and is cited by number
+- [ADR 0088](0088-one-measurement-gate.md) (the one measurement gate) and [ADR 0090](0090-capability-review-2026-10-dispositions-and-reopen-triggers.md)
+  (the DeepGEMM reopen trigger)
 - [The frozen roadmap](../../ROADMAP-2026-08-26-frozen.md), [the roadmap](../../ROADMAP.md), the 0.115.4 entry in the
   [CHANGELOG](../../../CHANGELOG.md), [the `blackwell-3x16` tier](../../tiers/blackwell-3x16.md), and
   [the security doc](../../systems/security.md) for third-party admission
