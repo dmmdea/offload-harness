@@ -60,6 +60,9 @@ where the code lives.
   input formats, the exit codes, the power note, the era marker, and the legacy callers it does not migrate
 - [systems/failure-register.md](systems/failure-register.md) — `ledger --failures`: the ledger's failed jobs grouped into
   failure classes with counts, joined by name to a human-maintained table of meaning, root cause and structural fix
+- [systems/self-improvement.md](systems/self-improvement.md) — how the harness improves itself on evidence: the discipline
+  (measure, gate, adopt or keep the incumbent) and the parts that carry it, the failure register, the trace-corpus
+  readout, the measurement gate and SHA-bound review evidence, with the two proposed parts marked not on main yet
 - [systems/openspec.md](systems/openspec.md) — the `openspec/` spec-and-plan tree: the forked `harness-change`
   schema with an optional ADR artifact, the hash-pinned install script, the strict validate gate
 
