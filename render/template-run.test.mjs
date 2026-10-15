@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { applyOverrides, convertForRun, loadTemplate } from "./template-run.mjs";
+import * as TR from "./template-run.mjs";
 import { COMFY, fixtureIo, fixtureFiles, memIo } from "./template-manifest-fixture.mjs";
 
 const GOLD = fileURLToPath(new URL("./testdata/template-goldens/", import.meta.url));
@@ -162,4 +163,32 @@ test("applyOverrides: the values a template is made to be tuned by still go thro
   const r = applyOverrides({ ...fileGraph(), "5": { class_type: "KSampler", inputs: { seed: 1, steps: 20, sampler_name: "euler" } } }, { "4.text": "a blue fox", "5.steps": 30, "5.sampler_name": "dpmpp_2m" });
   assert.equal(r.ok, true);
   assert.equal(r.graph["4"].inputs.text, "a blue fox");
+});
+
+// unlistedModels: the model files a converted graph loads that a manifest does not name (the runner's check before it posts a template run).
+const LISTED_MODELS = [{ path: "models/checkpoints/ok.safetensors" }, { path: "models/diffusion_models/sub/u.gguf" }];
+
+test("unlistedModels: a model file the list does not name is reported once, in graph order; a link, a number and a non-model string are not files", () => {
+  const graph = {
+    "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "ok.safetensors" } },
+    "2": { class_type: "VAELoader", inputs: { vae_name: "b.safetensors" } },
+    "3": { class_type: "LoraLoader", inputs: { model: ["1", 0], lora_name: "a.safetensors", strength_model: 1, text: "notes.txt" } },
+    "4": { class_type: "VAELoader", inputs: { vae_name: "b.safetensors" } },
+  };
+  assert.deepEqual(TR.unlistedModels(graph, LISTED_MODELS), ["b.safetensors", "a.safetensors"]);
+});
+
+test("unlistedModels: a file matches the list by its name under the class directory, by its base name, and without regard to case or slash direction", () => {
+  const graph = {
+    "1": { class_type: "A", inputs: { f: "OK.safetensors" } },
+    "2": { class_type: "B", inputs: { f: "elsewhere\ok.safetensors" } },
+    "3": { class_type: "C", inputs: { f: "sub/u.gguf" } },
+  };
+  assert.deepEqual(TR.unlistedModels(graph, LISTED_MODELS), [], "the first two by base name of the listed name, the third by the whole name");
+  assert.deepEqual(TR.unlistedModels({ "1": { class_type: "C", inputs: { f: "u.gguf" } } }, LISTED_MODELS), ["u.gguf"], "a listed name that is nested is not matched by its base name alone");
+});
+
+test("unlistedModels: no list names nothing, and a graph with no model file names nothing", () => {
+  assert.deepEqual(TR.unlistedModels({ "1": { class_type: "A", inputs: { f: "x.pt" } } }, undefined), ["x.pt"]);
+  assert.deepEqual(TR.unlistedModels({ "1": { class_type: "A", inputs: { n: 3 } }, "2": { class_type: "B" } }, LISTED_MODELS), []);
 });

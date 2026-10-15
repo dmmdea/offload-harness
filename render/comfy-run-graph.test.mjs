@@ -224,3 +224,56 @@ test("trust on first use: the files recorded for the first time are reported in 
   const plain = await runGraphFlow(ARGS, baseDeps());
   assert.equal("tofu_first_seen" in plain, false, "a graph run's envelope is what it was");
 });
+
+// --- a template run: the converted graph may load only the model files the manifest names ---
+// The manifest is written from the catalog's static reading of the template and the graph from the converter's, two readers of one file.
+// The runner compares what the converter produced against the list before anything is posted, so a file one reader saw and the other did
+// not (a value an instance carries into an inner loader, a loader that stores no value and takes the listing's default) is a typed defer.
+
+const LISTED = {
+  schema_version: 1, workflow: "tt_open", node_packs: [],
+  models: [
+    { path: "models/checkpoints/ok.safetensors", source_url: "", sha256: null, trust: "tofu" },
+    { path: "models/vae/sub/v.safetensors", source_url: "", sha256: null, trust: "tofu" },
+  ],
+};
+const loaderGraph = (file) => ({
+  "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: file } },
+  "2": { class_type: "SaveImage", inputs: { images: ["1", 0] } },
+});
+
+test("template run: a converted graph that loads a model file the manifest does not name is a typed defer TEMPLATE_MODEL_UNLISTED; nothing is preflighted or posted and our ComfyUI is torn down", async () => {
+  const deps = baseDeps({
+    convert: async () => ({ ok: true, graph: loaderGraph("other.safetensors") }),
+    preflight: async () => { throw new Error("preflight must not run for a graph that loads an unlisted file"); },
+    postGraph: async () => { throw new Error("POST must not run for a graph that loads an unlisted file"); },
+  });
+  const r = await runGraphFlow({ ...TEMPLATE_ARGS, manifest: LISTED }, deps);
+  assert.deepEqual([r.deferred, r.code, r.ref], [true, "TEMPLATE_MODEL_UNLISTED", "other.safetensors"]);
+  assert.match(r.detail, /other\.safetensors/);
+  assert.deepEqual(deps._calls.lastResult, { deferred: true, code: "TEMPLATE_MODEL_UNLISTED", ref: "other.safetensors", detail: r.detail });
+  assert.ok(deps._calls.killComfy >= 1);
+  assert.equal(deps._calls.freeComfy, 1);
+});
+
+test("template run: a converted graph whose every model file the manifest names is posted, by the file's path, its base name or its case", async () => {
+  for (const file of ["ok.safetensors", "OK.SafeTensors", "somewhere/else/ok.safetensors", "sub\v.safetensors"]) {
+    let posted = null;
+    const deps = baseDeps({
+      convert: async () => ({ ok: true, graph: loaderGraph(file) }),
+      postGraph: async (g) => { posted = g; return { prompt_id: "p1" }; },
+    });
+    const r = await runGraphFlow({ ...TEMPLATE_ARGS, manifest: LISTED }, deps);
+    assert.equal(r.deferred, undefined, `${file} is listed`);
+    assert.equal(posted["1"].inputs.ckpt_name, file);
+  }
+});
+
+test("a graph run is not checked against its manifest: only a template run compares the converted graph with the list", async () => {
+  let posted = null;
+  const deps = baseDeps({ postGraph: async (g) => { posted = g; return { prompt_id: "p1" }; } });
+  const g = loaderGraph("other.safetensors");
+  const r = await runGraphFlow({ ...ARGS, graph: g, manifest: LISTED }, deps);
+  assert.equal(r.deferred, undefined);
+  assert.deepEqual(posted, g);
+});
