@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 date: "2026-09-22"
 ---
 
@@ -108,6 +108,18 @@ required, no gate), read from the family's own entry for every family including 
 A `generate_video` result, its ledger row, `offload_status` (`media.video_family_bindings`) and `doctor`
 publish it, with no warning text. No video family has a shipped value: the repo holds the licence names
 only in `render/templates-license-map.json`, and its `conditional` class is not a bool.
+
+## Acceptance 2026-10-14
+
+The operator accepted this record on 2026-10-14, with a third licence state, `conditional`, beside permissive and non-commercial.
+The boolean `commercial_use` above cannot say "usable under conditions" (a community licence that is free below a revenue
+threshold, say), so the harness's licence map (`render/templates-license-map.json`) classes a repository as `permissive`,
+`conditional`, `non_commercial` or `unknown`, and `unknown` is never read as permissive. The template tool
+(`offload_run_template`) is the first reader of the four states: a template runs only when every repository its active nodes
+download from is `permissive`; a `conditional`, `non_commercial` or `unknown` class is refused with its own typed class, and so
+is a map entry that was inferred from a sibling repository and not read. Its first release has no acknowledgement path that lets a
+caller opt a conditional or non-commercial template in: the named family overlays above remain the only opt-in. The record was
+Proposed from 2026-09-22 to this date.
 
 ## Alternatives considered
 

@@ -2644,20 +2644,39 @@ func (p *Pipeline) RunImageBatchWaiting(ctx context.Context, family string, jobs
 	return items, nil
 }
 
+// runGraphTemplateName is what a template name looks like: the file name of a template of the package, never a path or a flag.
+var runGraphTemplateName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
 // buildRunGraphParams maps request params → rungraph.Params. A missing graph path is a
-// hard error (mapped to a clean defer upstream), never a silent empty run.
+// hard error (mapped to a clean defer upstream), never a silent empty run. A run names its
+// graph (graph_path) or a template of the node's installed package (template; with overrides_path
+// and seed), never both: the runner converts the template once ComfyUI is up.
 func buildRunGraphParams(req core.Request) (rungraph.Params, error) {
 	gp := paramStr(req.Params, "graph_path")
-	if gp == "" {
+	tpl := paramStr(req.Params, "template")
+	if tpl != "" {
+		if gp != "" {
+			return rungraph.Params{}, fmt.Errorf("run_graph: graph_path and template are exclusive")
+		}
+		if !runGraphTemplateName.MatchString(tpl) || strings.Contains(tpl, "..") {
+			return rungraph.Params{}, fmt.Errorf("run_graph: template must be a template name (letters, digits, . _ -), got %q", tpl)
+		}
+	} else if gp == "" {
 		return rungraph.Params{}, fmt.Errorf("run_graph: graph_path required")
 	}
-	return rungraph.Params{
+	p := rungraph.Params{
 		GraphPath:    gp,
 		ManifestPath: paramStr(req.Params, "manifest_path"),
 		OutDir:       paramStr(req.Params, "out_dir"),
 		ResultPath:   paramStr(req.Params, "result_path"),
 		ReserveVram:  paramStr(req.Params, "reserve_vram"),
-	}, nil
+	}
+	if tpl != "" {
+		p.Template = tpl
+		p.OverridesPath = paramStr(req.Params, "overrides_path")
+		p.Seed = paramStr(req.Params, "seed")
+	}
+	return p, nil
 }
 
 // resolveOutDir picks the run-graph output directory — the caller's out_dir if given,
@@ -4304,6 +4323,10 @@ func videoModelLabel(renderFamily string) string {
 func runGraphFootprintFamily(params map[string]any) string {
 	if fam := paramStr(params, "model_family"); fam != "" {
 		return fam
+	}
+	// A template run is the same template every time, so its footprint is learnt per template name.
+	if tpl := paramStr(params, "template"); tpl != "" {
+		return "comfy-template-" + tpl
 	}
 	return "comfy-graph"
 }

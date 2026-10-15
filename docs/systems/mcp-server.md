@@ -1065,6 +1065,118 @@ contract's own `timeout_sec` has left and under the same floor as the fleet's re
 and the review lane should not be the door that does not. Not built. The admission block above is not on the review's
 result either. Not built.
 
+### Workflow templates (`offload_run_template`)
+
+`offload_run_template` looks up and runs the ComfyUI workflow templates that a machine's installed
+`comfyui-workflow-templates` package carries. It is one tool with an `action`:
+
+| `action` | What it answers |
+|---|---|
+| `list` | The catalog, sorted by name and paged (`limit` 50 by default, 500 at most, `offset`), filtered by `kind`, `tag`, `text`, `license_class`, `reads_input` and `runnable`. `runnable` is true unless the call says otherwise (the templates this release can run); false lists the refused ones. `counts` holds the whole catalog's totals by refusal class, so a filter never hides how many templates a class holds. |
+| `get` | One template's manifest and verdict: its models as `models/<class>/<name>` with the source the template names and the hash it declares, its input files, node packs and minimum ComfyUI version, and its licence class with the repositories behind it. |
+| `readiness` | Whether this node holds what the template needs: each model present or missing (directory-aware, so a file counts only where ComfyUI would offer it to the loader, and the answer says where a misplaced one is), each input file in the input directory, the node packs, ComfyUI's version against the template's minimum, and the licence verdict. `ready` is true only when nothing blocks. |
+| `run` | The gate below, then the run-graph path with the template converted on this machine's ComfyUI. |
+
+`list`, `get` and `readiness` are read-only answers of `render/run-template.mjs` over the node's own tree
+(`comfy_dir`): no lease, no ComfyUI, no network, no file written, the same bytes for the same tree.
+
+**Why a tool and not a `template=` argument on `offload_run_graph`.** A new tool costs schema on every call of every
+client. The cost was measured at 0.186.0: an average tool costs 1,019 tokens in the full profile and 672 in the compact one,
+so one more tool is about +3.2% of the 31-tool full list. That is a cost the registered design accepts, and the
+`template=` argument was only ever its fallback for a cost that proved unacceptable; a template is also a different object
+from a graph (a UI-format workflow, converted on the node that runs it with that node's own listing of its nodes, and gated
+by licence), and the run-graph schema is already the longest of the media doors. The tool has a reviewed entry in the compact
+profile's keep-list, and a test (`toolsprofile_runtemplate_test.go`) pins the three sentences that carry its rules. Measured
+in bytes of the `tools/list` JSON on the default box at this head (tokens not counted), its own entry is 2,833 bytes in the
+full profile and 2,671 in the compact one, against means of 4,102 and 2,631 over the 32 tools.
+
+**The gate: what a run is allowed for.** `run` asks the script to resolve the template first
+(`render/template-manifest.mjs`, `resolveRun`). Nothing is leased, started or sent for a template this release will not run;
+the typed answer is the tool's answer. The class is the first that applies in the order `template_unreadable`, `api_paid`,
+`flux_barred`, `custom_nodes`, `bad_model_path`, then the licence class, and `reasons` lists every one that applies; what the
+node lacks is checked after them.
+
+| class | outcome | when |
+|---|---|---|
+| `api_paid` | Defer (`deferred:true`) | the template calls a paid partner node: it spends money, so it is deferred and never falls back to cloud ([ADR 0001](../architecture/decisions/0001-defer-never-cloud-fallback.md)) |
+| `flux_barred` | refused | FLUX-family weights ([ADR 0011](../architecture/decisions/0011-flux-family-license-prohibition.md)) |
+| `custom_nodes` | refused | the template needs a custom node pack; this release provisions none |
+| `license_unknown` | refused | a repository the licence map does not list, a weights file with no Hugging Face source, or a map entry that was inferred from a sibling and not read: unknown is not permissive |
+| `license_conditional` | refused | the weights carry conditions on use, the third licence state ([ADR 0058](../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md), accepted 2026-10-14) |
+| `license_non_commercial` | refused | the weights are non-commercial |
+| `template_unreadable`, `bad_model_path` | refused | the index lists a file that cannot be read; a model name or class directory that would leave its class directory |
+| `models_missing`, `inputs_missing`, `comfyui_too_old` | refused | what this node lacks, with the exact list (`missing`) or both versions |
+| `unknown_template` | refused | no template of that name in this node's package |
+
+A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `class`, `code` (`TEMPLATE_<CLASS>`), `template` and a
+`detail`, and no manifest. A template with no weights at all (licence class `none`) is permitted.
+
+**What `run` does once the gate passes.**
+
+1. The door writes the resolved runtime manifest (and the overrides, if any) to temp files and sends a `run_graph` task with
+   the template **name**, through the same call `offload_run_graph` makes, on route `local`: the same lease, ComfyUI
+   lifecycle, satisfier and result envelope. A busy lane answers as a run-graph call on this machine does (a place in this
+   machine's line, resumable with `waiter_token`).
+2. The runner satisfies the manifest. Every model is named by the path it was found at and carries no `source_url`, so a
+   model that went missing since the check is a typed defer and never a download. Models trusted on first use are checked
+   (below) before ComfyUI is started, on every run.
+3. ComfyUI is started, and only then is the template converted
+   ([`template-to-graph.mjs`](media-generation.md#template-to-api-converter-rendertemplate-to-graphmjs)), because the
+   conversion needs the running ComfyUI's `/object_info` and version. `overrides` are applied to the converted graph: a key
+   is `<node id>.<input name>` (a node inside a subgraph is `<instance>:<node>`), the node must be in the graph, the input
+   must already be there as a value (an input the node lacks is never added, and one wired to another node is never cut), and a
+   value is a string, a number or a boolean. `seed` pins the seed inputs. A refusal of the conversion or of an override is the
+   defer `TEMPLATE_CONVERT_REFUSED`, its `ref` the converter's own code (`unknown_node_class`, `comfyui_too_old`,
+   `override_unknown_input`, ...), and the ComfyUI that was started goes down with it.
+4. The converted graph goes through the run-graph preflight and is posted. The result is the run-graph envelope with `template`,
+   `license_class`, `reads_input`, `local_only` and `fleet_note` beside the outputs, and `tofu_first_seen` when a run recorded a
+   model for the first time.
+
+**Where it runs.** Every run stays on this machine's lane. The fleet door takes an API-format graph, and a template is
+converted on the node that runs it with that node's own listing, so there is no `route`, `remotes` or `node` parameter, and a
+call that passes one is refused as `fleet_not_offered` with the reason. A template that reads input files (an active
+`LoadImage`, `LoadImageMask`, `LoadImageOutput`, `LoadVideo` or `LoadAudio`) is local for a reason of its own, and the
+answer says so (`local_only:true`, `fleet_note`): input files carry generic names that two machines share with different
+bytes, so a node holding a same-named file would run the template on the wrong bytes. Staging an input file under the name the
+template reads is the caller's step; `readiness` and the gate name any that is missing.
+
+**Trust on first use.** Most template annotations carry no hash (10 of the 1,135 in the index do, in the measurement below), so a model file
+has nothing to be checked against. The first run that meets a model with no declared hash hashes it and records the sha256, the
+size and the modification time in `<file>.tofu`, beside the file wherever ComfyUI finds it. A later run whose file has the same
+size and modification time trusts the record without hashing (a 20 GB file takes minutes to hash on every run). A file whose
+size or time moved is hashed again, and only the recorded hash passes: another hash is refused as `MODEL_SHA_MISMATCH`, naming
+both hashes and the record to delete. The first sighting of a large file pays the hash once. A model whose annotation does
+declare a sha256 is left to the satisfier's own check. The record is not the `.sha-ok` sentinel (which means "matched a pinned
+hash") and never makes a pinned model skip its check. The limits: bytes replaced under an unchanged size and time are not seen,
+and a record is the first sighting's word for a file, not a statement about where it came from. A record that cannot be read or
+written refuses the model as `MODEL_TOFU_RECORD` (a read-only model directory cannot be trusted this way).
+
+**Measured catalog at this head** (2026-10-14; installed package `comfyui-workflow-templates 0.11.70`, `core 0.3.361`, `json 0.1.96`,
+via `node render/run-template.mjs list`; the research's 246 was a heuristic on the upstream index):
+
+| class | first class of | carried by |
+|---|---|---|
+| `api_paid` (all three API signals agree) | 337 | 337 |
+| `flux_barred` | 25 | 39 |
+| `license_conditional` | 63 | 64 |
+| `license_non_commercial` | 10 | 30 |
+| `license_unknown` | 63 | 71 |
+| `custom_nodes` | 0 | 0 |
+| **runnable by this release** | **80** | |
+
+Of 578 templates in the index, 80 are runnable: 5 with no weights, and 75 whose 247 model entries are 237 trusted on first use and
+10 with a declared hash. 55 of the 80 read input files. `custom_nodes` is 0 because this package version marks no template as needing a
+pack (an earlier head measured 50).
+
+Among the local templates that need weights, 85 of 135 repositories are not in the licence map (the research counted 83 of 133),
+and that is what keeps templates in `license_unknown`. On one node (<node-a>, ComfyUI 0.38.0) 4 of the 80 were ready to run that day
+(three with no weights, and `audio_ace_step1_5_xl_turbo`): 73 lacked a model file and 52 lacked an input file they read.
+
+**Not built in this release.** Fleet placement of a template; model downloads (a missing model is a refusal that lists it); an
+acknowledgement path for a conditional or non-commercial template; staging of a template's sample input files; custom node
+packs; a CLI verb and a fleet task for it; overrides that retarget an input file (the gate checks the file the template names).
+One template running end to end under a GPU lease is the acceptance measurement of this tool, and it has not been run.
+
 ## Important flows
 
 Every tool ultimately enters the Cascade or a media backend — see

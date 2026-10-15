@@ -3273,10 +3273,12 @@ one line per delegating machine, a CLI ticket dies with the CLI, a late-binding 
 carries: the `comfyui-workflow-templates` package that ComfyUI itself pins, a checkout of the upstream
 repository, or a `pip download` extract of a candidate version. It lists and classifies. It never runs a
 template, downloads a model, installs a package, changes a config or touches the network, and the only
-file it writes is the one named by `--out`. There is no MCP tool, config key, fleet task or route for it
-yet. A template is a UI-format graph and `run-graph` takes API-format graphs only (the tool description
-says so, and `preflight-graph-file.mjs` reads each node's `class_type`), so running one needs a converter
-that this phase does not contain.
+file it writes is the one named by `--out`. The `offload_run_template` tool reads the same catalog (see
+[the tool's section](mcp-server.md#workflow-templates-offload_run_template) for what it lists, gates and
+runs); there is still no config key, fleet task or route for the catalog itself. A template is a UI-format
+graph and `run-graph` takes API-format graphs only (the tool description says so, and
+`preflight-graph-file.mjs` reads each node's `class_type`), so running one needs the converter
+([below](#template-to-api-converter-rendertemplate-to-graphmjs)), which this phase does not contain.
 
 **Class: none.** No GPU slot, no lease, no ComfyUI process. It is one dependency-free file (`node:`
 builtins only), so the whole file can be piped to `node --input-type=module - snapshot --comfy-dir <tree>`
@@ -3306,7 +3308,7 @@ or date, and the summary's evidence range ignores it. A template takes the worst
 conditional > unknown > permissive), so an unlisted repo never hides a known restriction, and a file with no
 Hugging Face source counts as unknown. The boolean `commercial_use` of
 [ADR 0058](../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md)
-(status Proposed) cannot say `conditional`, which is why the map has a third class. The map's 50 entries
+(Accepted 2026-10-14, together with the third state) cannot say `conditional`, which is why the map has a third class. The map's 50 entries
 were seeded from repo-level licence tags digested on 2026-09-30 and none was re-fetched when it was written;
 a tag is not a per-file licence, and the conditions text comes from digests of licence texts that were not
 read in full. The gate: a paid API template is `blocked` (it spends money,
@@ -3319,7 +3321,10 @@ instead, while any other class from that repo, a file with no class and the make
 Non-commercial, conditional and unknown licences are `ack_required` (an explicit acknowledgement that names the
 class); permissive or weightless is `open`. A FLUX-named weights file from another repo is only a warning. `list`
 hides blocked templates unless `--include-hidden`; naming `--kind api` lists the paid API ones without it, and
-the FLUX-family ones stay hidden.
+the FLUX-family ones stay hidden. The catalog reports this gate and runs nothing; the run-template tool applies a
+stricter one in its first release ([its section](mcp-server.md#workflow-templates-offload_run_template)): a template runs only
+when its class is permissive (or it has no weights), an `ack_required` template is refused under its own class, and nothing
+acknowledges it. The catalog row also names the input files the template's active loaders read (`input_files`).
 
 **Readiness is directory-aware.** A file is usable by a template only if ComfyUI would offer it to the
 loader that reads it, and that is a question about directories, not names: a VAE loader lists the `vae`
@@ -3489,8 +3494,13 @@ changed: the builder keeps its recipe in this change. Resolve it by setting the 
 A workflow template is a UI-format graph (`nodes[]`, `links[]`, `definitions.subgraphs`, `widgets_values`).
 `POST /prompt`, the `run-graph` door and the render builders take API-format graphs only:
 `{"<id>": {"class_type", "inputs"}}`. `render/template-to-graph.mjs` converts the first into the second. It is the
-converter the templates catalog (phase A, above) did not contain. Nothing calls it yet: no MCP tool, config key, fleet
-task or route, and the ComfyUI lifecycle module is untouched.
+converter the templates catalog (phase A, above) did not contain. The run-graph runner calls it for a template run
+(`comfy-run-graph.mjs --template NAME`, behind `offload_run_template`): once ComfyUI is up, with the running ComfyUI's own
+`/object_info` and version, before preflight, so a refusal is the defer `TEMPLATE_CONVERT_REFUSED` and the graph that is
+checked and posted is the converted one. `render/template-run.mjs` finds the template by name in the node's own package
+(a name the node's index does not list is an unknown template, never a file read), passes the index's `minComfyUIVersion`
+and applies the caller's overrides to the converted graph. The converter itself is still a pure function, there is no
+config key or fleet task for it, and the ComfyUI lifecycle module is untouched.
 
 **Class: none.** No GPU slot, no lease, no ComfyUI process. It is a pure function of three inputs: the template, an
 `/object_info` listing and options. The listing is never fetched here: the caller passes the one a running ComfyUI served

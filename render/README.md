@@ -402,6 +402,37 @@ Tests: `node --test render/template-to-graph.test.mjs`; fixtures in
 
 ---
 
+# Template manifests and the run-template command line (`template-manifest.mjs`, `run-template.mjs`, `template-run.mjs`)
+
+The node-side half of the `offload_run_template` tool. Read-only over a ComfyUI tree: no lease, no ComfyUI, no network, nothing
+written, one compact JSON object on stdout, the same bytes for the same tree.
+
+```bash
+node render/run-template.mjs list      --comfy-dir <comfyui-tree> [--kind K] [--tag T] [--text WORDS] [--license-class C] \
+    [--runnable true|false] [--reads-input true|false] [--limit N] [--offset N]
+node render/run-template.mjs get       <name> --comfy-dir <comfyui-tree>
+node render/run-template.mjs readiness <name> --comfy-dir <comfyui-tree> [--snapshot node.json]
+node render/run-template.mjs resolve   <name> --comfy-dir <comfyui-tree> [--snapshot node.json]
+```
+
+`template-manifest.mjs` turns a catalog row into a manifest entry (models as `models/<class>/<name>` with the source the
+template names and the hash it declares, node packs, licence class, API or not, input files it reads) and decides what the
+first release of the tool will run: not a paid API template (a Defer, `api_paid`), not FLUX-family, no custom node pack, readable,
+and a permissive licence class (or none); every other licence, `unknown` and an inferred map entry included, is refused under
+its own typed class. `resolve` is the gate in front of a run: that verdict, then what the node lacks (`models_missing`,
+`inputs_missing`, `comfyui_too_old`, each with the exact list), then the runtime manifest, which names every model by the path
+it was found at and carries no `source_url`, so a run never downloads. `template-run.mjs` is the run side: it finds a template by
+name in the node's own package, converts it with the converter above and the running ComfyUI's listing, and applies the
+overrides. The run-graph runner takes it as `comfy-run-graph.mjs --template NAME [--overrides FILE] [--seed N]`: the template is
+converted after ComfyUI is up and before preflight (`TEMPLATE_CONVERT_REFUSED` on a refusal). Trust on first use for models with
+no declared hash is `verifyTofuModels` in `manifest-satisfy.mjs` (a record `<file>.tofu` beside the file). Rules, classes, the
+measured catalog and what is not built:
+[`docs/systems/mcp-server.md`](../docs/systems/mcp-server.md#workflow-templates-offload_run_template).
+Tests: `node --test render/template-manifest.test.mjs render/run-template.test.mjs render/template-run.test.mjs`; the fixture tree is
+`template-manifest-fixture.mjs` (in memory, every repository `example-org/...`).
+
+---
+
 # Builder drift guard (`builder-drift.mjs`)
 
 A `wf-*.mjs` builder that was copied from a ComfyUI workflow template carries the template's recipe widgets

@@ -12,7 +12,8 @@ owns execution.
 ## Trigger
 
 `offload_run_graph` (MCP) or `run-graph` (CLI), with `graph_path` or `graph_json`, `manifest_path` or
-`manifest_json`, an `out_dir`, and an optional VRAM reservation.
+`manifest_json`, an `out_dir`, and an optional VRAM reservation. `offload_run_template` (MCP, action `run`) enters the same flow
+with a template **name** in place of the graph (see [Template runs](#template-runs)).
 
 ## Participants
 
@@ -96,6 +97,30 @@ environment.
 
 9. **Execute, poll, and fetch outputs**, then tear down through the same GPU lifecycle.
 
+## Template runs
+
+`offload_run_template` runs a ComfyUI workflow template through this same flow: the door resolves the template (the gate and the
+runtime manifest, [the tool's section](../systems/mcp-server.md#workflow-templates-offload_run_template)) and sends a `run_graph`
+task with the template name, the manifest and optional overrides and seed, on route `local`. Two steps differ, and everything else
+in the nine steps above is unchanged:
+
+- **Trust on first use, between steps 4 and 5, on every run.** A manifest model that declares no hash and asks for `trust: "tofu"`
+  is checked by `verifyTofuModels`: the first run hashes it and records the sha256, size and modification time in `<file>.tofu`
+  beside the file; a later run with the same size and time trusts the record, a changed file is hashed again, and a hash that is not
+  the recorded one defers `MODEL_SHA_MISMATCH`. It runs when the environment marker says the manifest was already satisfied, too,
+  because the marker says the environment was provisioned, not that a file is still the one that was trusted. A record that cannot be
+  read or written defers `MODEL_TOFU_RECORD`. A graph run's manifest asks for none of this and is checked as before.
+- **Conversion, between steps 7 and 8.** A template is a UI-format workflow, and its API graph needs the running ComfyUI's
+  `/object_info` and version, which exist only once ComfyUI is up. The runner converts it there
+  ([`template-run.mjs`](../../render/template-run.mjs), [the converter](../systems/media-generation.md#template-to-api-converter-rendertemplate-to-graphmjs)),
+  applies the overrides, and hands the converted graph to the preflight of step 8 and to the POST of step 9. A refusal (an unknown
+  node class, a ComfyUI older than the template, an override that names a node or input the graph lacks) defers
+  `TEMPLATE_CONVERT_REFUSED`, its `ref` the converter's own code, and the ComfyUI that was started is torn down as for any defer.
+
+The runtime manifest names each model by the path it was found at and has no `source_url`: step 4 therefore never downloads for a
+template run, and a model that went missing defers `MODEL_DOWNLOAD_FAILED` ("missing on disk and no source_url"). Step 4 looks for
+a `diffusion_models` file under `models/unet` and a `text_encoders` file under `models/clip` too, as ComfyUI does.
+
 ## Data and state changes
 
 Node packs cloned into ComfyUI's custom-nodes directory at pinned commits; Python packages installed
@@ -120,7 +145,7 @@ and are therefore `0` for non-PNG outputs.
 A typed Defer: `{ "deferred": true, "code": …, "ref": …, "detail": … }`. Codes emitted by this path:
 `MODEL_DOWNLOAD_FAILED`, `MODEL_SHA_MISMATCH`, `SATISFIER_UNAVAILABLE`, `COMFY_VERSION_BELOW_MIN`,
 `VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `EXTERNAL_COMFY_NEEDS_PACKS`, `COMFY_START_FAILED`, `NODE_CLASS_MISSING`,
-`PREFLIGHT_MISSING_INPUTS`, `RUN_ERROR`. A failure on the Go side of the call (rather than in the
+`PREFLIGHT_MISSING_INPUTS`, `RUN_ERROR`, and, on a template run only, `TEMPLATE_CONVERT_REFUSED` and `MODEL_TOFU_RECORD`. A failure on the Go side of the call (rather than in the
 runner) defers with a free-form `run-graph failed: …` reason and a lowercase `err_class`, not a typed
 code — the `GPU_BUSY` and `TIMEOUT` tokens in the MCP tool description are advisory text, not codes
 this path emits.
@@ -201,6 +226,8 @@ Run the Node suites with `node --test render/*.test.mjs` from the repo root.
 - [`render/manifest-satisfy.mjs`](../../render/manifest-satisfy.mjs) — satisfier, host pins, tripwire
 - [`render/manifest.mjs`](../../render/manifest.mjs) — schema normalization and hashing
 - [`render/comfy-run-graph.mjs`](../../render/comfy-run-graph.mjs) — orchestration and envelope
+- [`render/template-run.mjs`](../../render/template-run.mjs) — a template by name, its conversion and overrides (template runs)
+- [`render/template-manifest.mjs`](../../render/template-manifest.mjs) — the gate and the runtime manifest of a template run
 - [`render/preflight-graph-file.mjs`](../../render/preflight-graph-file.mjs) — node-class gate
 - [`internal/rungraph/`](../../internal/rungraph/) — Go entry and result types
 
