@@ -99,7 +99,7 @@ func RunAB(ctx context.Context, score Scorer, entries []Entry, corpusHash string
 	for _, e := range entries {
 		msgs := e.Msgs()
 		budget, keep, prot := entryParams(e, msgs)
-		compacted := agent.CompactReplay(msgs, budget, keep, prot, agent.ReplayOpts{GCF: opts.GCF, Skeleton: opts.Skeleton})
+		compacted := agent.CompactReplay(msgs, budget, keep, prot, opts.replayOpts())
 		sf, err := score(ctx, Render(msgs))
 		if err != nil {
 			return rep, fmt.Errorf("entry %q: scoring full: %w", e.ID, err)

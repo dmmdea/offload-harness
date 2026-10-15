@@ -2,10 +2,11 @@
 // Phase-B harness over a pinned transcript corpus (internal/compeval).
 //
 //	compaction-eval harvest --traces DIR --out corpus.jsonl [--min-turns N] [--max-entries N]
-//	compaction-eval run    --corpus C [--gcf] [--skeleton] [--json]
-//	compaction-eval freeze --corpus C [--gcf] [--skeleton] --out baseline.json
+//	compaction-eval run    --corpus C [--gcf] [--skeleton] [--search-results] [--log-collapse] [--json]
+//	compaction-eval freeze --corpus C [--gcf] [--skeleton] [--search-results] [--log-collapse] --out baseline.json
 //	compaction-eval check  --corpus C --baseline B [--tolerance 0.02]
-//	compaction-eval ab     --corpus C [--gcf] [--skeleton]   (needs the live endpoint)
+//	compaction-eval ab     --corpus C [--gcf] [--skeleton] [--search-results] [--log-collapse]   (needs the live endpoint)
+//	compaction-eval kvbench --corpus C [--gcf] [--skeleton] [--search-results] [--log-collapse] [--arms off,on] [--nonce N] [--out report.json]   (needs the live endpoint)
 //	compaction-eval contextbench [--family F] [--tasks N] [--seed S] [--out results.json]   (needs the live endpoint)
 //
 // harvest builds a REAL replay corpus from standalone agent trace files with
@@ -26,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
@@ -47,6 +49,8 @@ func runCompactionEval(args []string) error {
 	corpusPath := fs.String("corpus", "", "pinned corpus JSONL (compeval.Entry per line)")
 	gcf := fs.Bool("gcf", false, "enable the lossless GCF rung in the replayed ladder")
 	skeleton := fs.Bool("skeleton", false, "enable the skeleton rung in the replayed ladder")
+	searchResults := fs.Bool("search-results", false, "enable the search-results rung (thin older search listings; default off in production) in the replayed ladder")
+	logCollapse := fs.Bool("log-collapse", false, "enable the log-collapse rung (fold runs of near-identical lines in older build and test output; default off in production) in the replayed ladder")
 	baselinePath := fs.String("baseline", "", "check: frozen baseline JSON")
 	outPath := fs.String("out", "", "freeze/harvest: where to write the output file")
 	tolerance := fs.Float64("tolerance", compeval.DefaultTolerance, "check: allowed per-entry token drift (fraction)")
@@ -55,6 +59,8 @@ func runCompactionEval(args []string) error {
 	maxEntries := fs.Int("max-entries", 0, "harvest: cap harvested entries (0 = all)")
 	kvEndpoint := fs.String("endpoint", "", "kvbench: serving endpoint (default: the configured endpoint)")
 	kvModel := fs.String("model", "", "kvbench: model id to measure (default: the configured workhorse)")
+	kvArms := fs.String("arms", compeval.ArmOff+","+compeval.ArmOn, "kvbench: comma-separated arms to run, 'off' (raw transcript) and 'on' (the ladder); 'on' skips the raw arm")
+	kvNonce := fs.String("nonce", "", "kvbench: nonce salted into every body request (default: a fresh one per run). sent_sha256 is taken before the salt, so a pair of runs is provably a no-op when its hashes match whatever the nonces; reuse a value only on a cold seat, because on a warm one the second run is served from the first run's cache. The calibration controls always draw their own nonce")
 	kvRounds := fs.Int("rounds", 1, "kvbench: repeat the whole controls+arms block N times")
 	kvStride := fs.Int("step-stride", 1, "kvbench: measure every Nth transcript step (the final step is always measured)")
 	kvTimeoutSec := fs.Int("timeout", 300, "kvbench: per-request timeout in seconds")
@@ -79,7 +85,7 @@ func runCompactionEval(args []string) error {
 		}
 		return fmt.Errorf("corpus refused: %d PII finding(s) — a replay corpus must be vetted, never scrubbed in place", len(findings))
 	}
-	opts := compeval.LadderOpts{GCF: *gcf, Skeleton: *skeleton}
+	opts := compeval.LadderOpts{GCF: *gcf, Skeleton: *skeleton, Search: *searchResults, Logs: *logCollapse}
 
 	switch mode {
 	case "run":
@@ -134,6 +140,10 @@ func runCompactionEval(args []string) error {
 		// openPipeline: that path is task-shaped and layers a bbolt cache over
 		// the call — a cache hit returns in ~0ms and silently destroys the
 		// measurement.
+		arms, err := parseBenchArms(*kvArms)
+		if err != nil {
+			return err
+		}
 		cfg := loadCfg(fs)
 		endpoint := *kvEndpoint
 		if endpoint == "" {
@@ -185,10 +195,10 @@ func runCompactionEval(args []string) error {
 			}
 			return pr, nil
 		}
-		fmt.Fprintf(os.Stderr, "[compaction-eval] kvbench: endpoint=%s model=%s ctx=%d entries=%d rounds=%d ladder=%s\n",
-			endpoint, model, ctxTokens, len(entries), *kvRounds, opts.Label())
+		fmt.Fprintf(os.Stderr, "[compaction-eval] kvbench: endpoint=%s model=%s ctx=%d entries=%d rounds=%d ladder=%s arms=%s\n",
+			endpoint, model, ctxTokens, len(entries), *kvRounds, opts.Label(), strings.Join(arms, ","))
 		rep, runErr := compeval.RunBench(ctx, probe, entries, hash, compeval.BenchOpts{
-			Ladder: opts, Rounds: *kvRounds, StepStride: *kvStride,
+			Ladder: opts, Arms: arms, RunNonce: *kvNonce, Rounds: *kvRounds, StepStride: *kvStride,
 			MaxEntries: *maxEntries, CtxTokens: ctxTokens, MaxOut: *kvMaxOut,
 			BudgetMode: *kvBudgetMode,
 		})
@@ -217,6 +227,20 @@ func runCompactionEval(args []string) error {
 	default:
 		return fmt.Errorf("compaction-eval: unknown mode %q (harvest|run|freeze|check|ab|kvbench|contextbench)", mode)
 	}
+}
+
+// parseBenchArms reads --arms: a comma-separated list of the arms kvbench runs.
+func parseBenchArms(s string) ([]string, error) {
+	var arms []string
+	for _, a := range strings.Split(s, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			arms = append(arms, a)
+		}
+	}
+	if len(arms) == 0 {
+		return nil, fmt.Errorf("compaction-eval kvbench: --arms is empty (want %q, %q or %q)", compeval.ArmOn, compeval.ArmOff, compeval.ArmOff+","+compeval.ArmOn)
+	}
+	return arms, nil
 }
 
 // runCompactionHarvest builds a real replay corpus from standalone agent
