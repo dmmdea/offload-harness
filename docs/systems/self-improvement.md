@@ -32,8 +32,14 @@ measurement gate and the SHA-bound evidence on a review result.
 - The evidence-preserving reducer rung and the recipe store. Neither is merged, so neither is described beyond its
   intent.
 - Scheduling. Every command below runs when an operator or an agent calls it. None is a scheduled job, and none edits
-  configuration, a seat binding or a rule. `ledger --failures` writes nothing; the others write only the file they are
-  told to (`--out`) and, for a review, the trace beside the ledger.
+  configuration, a seat binding or a rule.
+- What each command writes. `ledger --failures`, `trace-corpus check`, `gate check`, `gate verdict` and `gate schema`
+  write nothing. `trace-corpus harvest|readout|freeze` (`readout` only when it is given `--out`) and `gate freeze` write
+  only the file they are told to. Two do more. `gate selftest` writes its receipt to `--out` when given, and with its real scorer
+  (the only one today) it runs that scorer through the production pipeline, so it also writes what any pipeline call
+  writes: ledger rows for the scorer's calls and the result cache among them. A review that reaches an agent run writes
+  that run's own ledger row the same way, and every sealed review appends to the `review-evidence.jsonl` trace beside
+  the ledger.
 
 ## Key concepts
 
@@ -234,7 +240,9 @@ trace-bearing runs.
 - No pass rule, verdict or ranking carries a wall-time term.
 - The rules of a comparison are frozen and hashed before the first candidate runs, and a verdict names the hash.
 - Cause and fix in the register are written by a person. A review is advisory, and its head commit is the caller's word.
-- Each reader writes only what it is told to write.
+- A command writes what Non-scope names: an `--out` file or nothing, except that `gate selftest` and a review's agent
+  run write what any pipeline call writes (ledger rows and the result cache among them) and a review also appends its
+  trace. None changes configuration, a seat binding or a rule.
 
 ## Security and privacy notes
 
