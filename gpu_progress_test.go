@@ -176,7 +176,9 @@ func TestSweepMintedProgressRemovesOnlyOldMintedFiles(t *testing.T) {
 
 // TestHelperBeatProgress is the wrapped command of the tests below. It plays the part of a render helper:
 // it writes the variable it was handed to LO_HELPER_ENV_OUT, then for LO_HELPER_RUN_MS it appends a line to
-// that file every LO_HELPER_BEAT_MS (0 = never: a hung helper).
+// that file every LO_HELPER_BEAT_MS (0 = never: a hung helper). When LO_HELPER_STOP_FILE names a file, the
+// helper runs until that file exists (LO_HELPER_RUN_MS is then only the safety cap), appends one last line
+// and exits at once: the test, not a stopwatch, decides how long the helper lives.
 func TestHelperBeatProgress(t *testing.T) {
 	run, _ := strconv.Atoi(os.Getenv("LO_HELPER_RUN_MS"))
 	if run <= 0 {
@@ -191,13 +193,24 @@ func TestHelperBeatProgress(t *testing.T) {
 		_ = os.WriteFile(out, []byte(body), 0o644)
 	}
 	beat, _ := strconv.Atoi(os.Getenv("LO_HELPER_BEAT_MS"))
+	stopFile := os.Getenv("LO_HELPER_STOP_FILE")
 	end := time.Now().Add(time.Duration(run) * time.Millisecond)
 	for time.Now().Before(end) {
+		stopping := false
+		if stopFile != "" {
+			_, err := os.Stat(stopFile)
+			stopping = err == nil
+		}
 		if beat > 0 && file != "" {
 			if f, err := os.OpenFile(file, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o644); err == nil {
 				_, _ = f.WriteString(`{"detail":"ComfyUI is running prompt p1"}` + "\n")
 				_ = f.Close()
 			}
+		}
+		if stopping {
+			return // the last beat is written; out at once
+		}
+		if beat > 0 && file != "" {
 			time.Sleep(time.Duration(beat) * time.Millisecond)
 			continue
 		}
@@ -253,47 +266,116 @@ func progressTestFixture(t *testing.T, stall time.Duration) (cfg string, m *gpul
 	return leaseFixture(t)
 }
 
-// THE DEFECT, END TO END: a healthy helper under a lease with a 1 s window, nobody to vouch for it but its
-// own progress file. The lease must renew at the end of its term and never be labelled expired.
+// waitLimit is the instant a wait must give up: max from now, and never past the test binary's own deadline
+// (less a margin for the cleanup), so a regression fails with a message instead of a package timeout.
+// t.Deadline reports none when the binary runs without -test.timeout, hence the cap.
+func waitLimit(t *testing.T, max time.Duration) time.Time {
+	t.Helper()
+	limit := time.Now().Add(max)
+	if d, ok := t.Deadline(); ok {
+		if e := d.Add(-10 * time.Second); e.Before(limit) {
+			limit = e
+		}
+	}
+	return limit
+}
+
+// THE DEFECT, END TO END: a healthy helper under a lease, nobody to vouch for it but its own progress file.
+// The lease must renew at the end of its term and never be labelled expired while the helper keeps beating.
+//
+// WHY IT IS BUILT THIS WAY (it was a load flake, and widening windows around a fixed run made it worse):
+//   - The helper lives as long as the TEST needs, not for a stopwatch. A helper that ran a fixed 3.5 s ended
+//     while the wrapper, another process on a starved host, had not yet reaped the exit; a term check landed in
+//     that gap, read a file nobody wrote to any more, and labelled the healthy lease. So the helper beats until
+//     the test has seen what it needs and writes a stop file, and the lease is judged only up to that moment,
+//     while the helper is beating. What the wrapper does with the silence after the helper is gone is the
+//     rule of TestWrapperLabelsTheLeaseOfAHelperThatStoppedBeating, not of this one.
+//   - A renewal must prove the beats moved the file. The progress file's mtime is its creation, so a helper
+//     that wrote nothing still reads fresh until one stall window has passed. The term (5.5 s) is longer than
+//     the window (3 s) and the test waits until the record shows a term end that came from a check made more
+//     than one window after the file was created (a term end E is stamped by a check at or after E minus the
+//     term, in both branches of nextEnd): that check had to find a file written to after its creation, which a
+//     helper that never beats cannot give. It is labelled instead, and the wait ends in a failure.
+//   - The window is thirty beats of the 100 ms helper, so a beat or two held up by a starved host is no stall.
+//     Every wait is bounded, so a regression fails with a message.
 func TestWrapperRenewsTheLeaseOfAHelperThatKeepsBeating(t *testing.T) {
-	// A stall window short enough that the lease is vouched for only by the file MOVING: with the production
-	// 15 minutes the file would read advancing for the whole test whether or not the helper wrote to it.
-	cfg, m := progressTestFixture(t, 1500*time.Millisecond)
+	const (
+		stall = 3 * time.Second         // thirty beats
+		term  = 5500 * time.Millisecond // longer than the window by more than the wrapper takes to start the helper
+		slack = 250 * time.Millisecond  // timestamp granularity and clock reads
+	)
+	cfg, m := progressTestFixture(t, stall)
 	envOut := filepath.Join(t.TempDir(), "env.txt")
+	stopFile := filepath.Join(t.TempDir(), "stop")
 	t.Setenv("LO_HELPER_ENV_OUT", envOut)
-	t.Setenv("LO_HELPER_RUN_MS", "3500")
+	t.Setenv("LO_HELPER_STOP_FILE", stopFile)
+	t.Setenv("LO_HELPER_RUN_MS", "50000") // only the safety cap: the stop file ends the helper
 	t.Setenv("LO_HELPER_BEAT_MS", "100")
-	done := startReserve(t, cfg, append([]string{"--for", "1s"}, helperBeatCmd("render/comfy-render.mjs")...)...)
+	done := startReserve(t, cfg, append([]string{"--for", term.String()}, helperBeatCmd("render/comfy-render.mjs")...)...)
+
+	// finish stops the helper (once, whatever path got here) and collects the wrapper: it also runs when the
+	// test fails half way, so no wrapper is left running with os.Stderr redirected into the next test.
+	var r reserveRun
+	finished := false
+	finish := func() {
+		_ = os.WriteFile(stopFile, []byte("stop"), 0o644)
+		if finished {
+			return
+		}
+		select {
+		case r = <-done:
+			finished = true
+		case <-time.After(30 * time.Second):
+			t.Error("the wrapped helper never finished after it was told to stop")
+		}
+	}
+	t.Cleanup(finish)
 
 	waitForLeases(t, m, 1)
 	in := m.Inspect()
 	if in.Progress == nil || in.Progress.StallMs != autoProgressStall.Milliseconds() {
 		t.Fatalf("the wrapper must declare the contract on the lease record: %+v", in.Progress)
 	}
+	if in.Term != term {
+		t.Fatalf("the lease records a term of %s, want the %s it was asked for", in.Term, term)
+	}
 	minted := in.Progress.File
 	if !filepath.IsAbs(minted) || filepath.Dir(minted) != gpulease.ProgressDir(m.Root()) {
 		t.Fatalf("the minted file %q is not under %s", minted, gpulease.ProgressDir(m.Root()))
 	}
-	// Watch the whole run: the lease of a healthy helper is never labelled.
-	var r reserveRun
-	expired := false
+
+	// Watch the lease while the helper beats, until a renewal proves the beats (see above).
+	limit := waitLimit(t, 45*time.Second)
+	var created time.Time // the file's mtime when first seen: no earlier than its creation, and what the term check reads
 	tick := time.NewTicker(25 * time.Millisecond)
 	defer tick.Stop()
-	for finished := false; !finished; {
+	for proven := false; !proven; {
 		select {
 		case r = <-done:
 			finished = true
+			t.Fatalf("the wrapped helper ended before the test stopped it: %v\n%s", r.err, r.stderr)
 		case <-tick.C:
-			if m.Inspect().Expired {
-				expired = true
-			}
-		case <-time.After(60 * time.Second):
-			t.Fatal("the wrapped helper never finished")
 		}
+		in = m.Inspect()
+		if in.Expired {
+			finish()
+			t.Fatalf("the lease of a helper that kept beating was labelled expired (the F8 incident): %s\n%s", in.ExpiredWhy, r.stderr)
+		}
+		if time.Now().After(limit) {
+			finish()
+			t.Fatalf("no term end was renewed after the stall window passed since the progress file was created (file seen at %s, term ends %s):\n%s",
+				created.Format(time.RFC3339Nano), in.ExpiresAt.Format(time.RFC3339Nano), r.stderr)
+		}
+		if created.IsZero() {
+			if fi, err := os.Stat(minted); err == nil {
+				created = fi.ModTime()
+			}
+			continue
+		}
+		proven = in.ExpiresAt.Add(-in.Term).After(created.Add(stall + slack))
 	}
-	if expired {
-		t.Error("the lease of a helper that kept beating was labelled expired (the F8 incident)")
-	}
+	finish()
+
 	if r.err != nil {
 		t.Fatalf("the wrapped helper failed: %v\n%s", r.err, r.stderr)
 	}
@@ -301,9 +383,6 @@ func TestWrapperRenewsTheLeaseOfAHelperThatKeepsBeating(t *testing.T) {
 		if !strings.Contains(r.stderr, want) {
 			t.Errorf("the wrapper's stderr lacks %q:\n%s", want, r.stderr)
 		}
-	}
-	if strings.Contains(r.stderr, "not renewed") {
-		t.Errorf("a healthy helper's term was not renewed:\n%s", r.stderr)
 	}
 	body, _ := os.ReadFile(envOut)
 	if string(body) != "set:"+minted {

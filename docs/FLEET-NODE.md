@@ -523,6 +523,19 @@ strict-validated at ack time — a malformed fleet job dies at the 400 with a cl
 never mid-render. Typed run-graph defers (`VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `NODE_CLASS_MISSING`, …)
 surface in the job's `error` field as `code: detail`.
 
+**A fleet media job's lease window is its route's own timeout, read from the node's config.** A media task takes the
+node's machine-wide media lease for the timeout key of the route it runs (`imagegen_timeout_sec`, `videogen_timeout_sec`,
+`inpaint_timeout_sec`, `upscale_timeout_sec`, `gen_edit_timeout_sec`, `animategen_timeout_sec`, `audiogen_timeout_sec`; the
+payload carries none, so the delegator's keys play no part) and the render is killed at that same value, so a render never
+outlives the lease taken for it. The window is granted whole, whatever its length, and the lease is kept by the job's
+heartbeat (renewed every 15 s while the render runs): no term check runs on it, so nothing labels it expired or asks it to
+yield while the render is inside its window, and `gpu_max_term_min` does not bound it (that cap is the renewal term of a
+`gpu reserve` hold, renewed by the hold's own holder). A job that cannot get the card first queues for `gpu_wait_ms` (90 s by
+default; a queue wait, not a lease length) and then defers `gpu_busy`. A long seeded timeout therefore costs one thing: how
+long a wedged render holds the node's lease. Which keys a tier seeds, the code defaults and the rule for sizing a
+`gpu reserve --for` window (from the key of the route it wraps) are in the engine + lease row of the timeout chain section
+of [OPERATOR-GUIDE.md](OPERATOR-GUIDE.md).
+
 **A run-graph also checks the files it names, at the door** (ADR 0082, Amendment 1). Before it writes a temp file, takes a lease
 or starts ComfyUI, the node reads the graph for the model files its loaders open (any string input, under any key but
 `filename_prefix`, whose value ends `.safetensors`, `.gguf`, `.pth`, `.pt`, `.ckpt` or `.sft` and does not contain `://`; those

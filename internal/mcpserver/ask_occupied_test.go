@@ -33,10 +33,12 @@ func TestOffloadAskWithoutARouteSparesAnOccupiedLocalSeat(t *testing.T) {
 	cfg.AgentModel = "agent-pool"
 	localCalls := 0
 	s := New(pipeline.New(cfg, nil, nil, nil))
+	// The local answer cites the anchor, so it verifies: a local answer that failed its acceptance
+	// would now be retried on the fleet, which these arms count.
 	s.localAgent = func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 		localCalls++
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Output: "local",
-			Structured: json.RawMessage(`{"answer":"300","evidence":"The seat unloads after 300 idle seconds."}`)}, nil
+			Structured: json.RawMessage(`{"answer":"300","evidence":"seat_idle_unload_ttl_seconds: the seat unloads after 300 idle seconds."}`)}, nil
 	}
 	verdict := seatguard.Verdict{Protect: true, Seat: "opencode-seat"}
 	var asked string
