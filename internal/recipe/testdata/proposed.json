@@ -1,0 +1,30 @@
+{
+  "id": "recipe-cap-listing-01",
+  "seat_tag": "seat-class-a",
+  "rules": {
+    "max_calls_per_tool": {
+      "list_dir": 2
+    },
+    "arg_limits": {
+      "read_file": {
+        "limit": 400
+      }
+    },
+    "max_observation_tokens": 600,
+    "observation_strip": [
+      "(?m)^Cookie notice.*$"
+    ],
+    "rewrite_error": [
+      {
+        "match": "no such file",
+        "text": "That file does not exist. List the directory first."
+      }
+    ]
+  },
+  "provenance": [
+    "run-0001",
+    "run-0002",
+    "run-0003"
+  ],
+  "status": "proposed"
+}

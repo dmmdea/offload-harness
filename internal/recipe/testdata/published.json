@@ -1,0 +1,25 @@
+{
+  "id": "recipe-deny-search-02",
+  "seat_tag": "seat-class-a",
+  "rules": {
+    "deny_tools": [
+      "web_fetch"
+    ],
+    "max_calls_per_tool": {
+      "grep": 3
+    }
+  },
+  "provenance": [
+    "run-0101",
+    "run-0102"
+  ],
+  "status": "published",
+  "audit": {
+    "seat": "seat-a",
+    "baseline_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "era_marker": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+    "verdict": "ADOPT",
+    "steps_incumbent": 6.5,
+    "steps_candidate": 5.25
+  }
+}

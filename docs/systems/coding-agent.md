@@ -194,6 +194,33 @@ CLI file, a name with surrounding whitespace, a fractional cap — fails the BUI
 how a weak seat behaves inside the loop and can neither grant nor deny an effect. envharness's
 LLM-written rule code (`rules_code`) is deliberately not ported — rules are data here.
 
+**Recipes (ADR 0036, amendment 2026-10-15).** A recipe is a candidate edit to the env-rule table, kept as a typed
+record in a store (`internal/recipe`: one `<id>.json` per recipe, by default under `<data home>/recipes`). The record
+has six keys and refuses any other: `id`, `seat_tag` (the capability class of the seat it was distilled for), `rules`
+(the vocabulary above, decoded as strictly as the `--env-rules` file, so `rules_code` is an unknown key; every string
+in it must be shaped like rule data: lower-case identifiers for tool and argument names, one line of plain ASCII,
+at most 160 bytes, for a `rewrite_error` text, a pattern of at most 200 printable characters that does not match
+the empty string), `provenance` (the acceptance-passing runs it was distilled from) and `status`
+(`proposed | published | demoted`), plus, once audited, the `audit` that set the status. A `published` record
+without an ADOPT audit whose steps are no worse does not decode. Only `deny_tools`, `allow_tools` and
+`max_calls_per_tool` can be scored by replaying a recorded trace (branch, parallelism, stop class); the other four
+keys change what the seat reads and need a live A/B.
+
+`local-offload recipe-audit --recipe ID --seat ALIAS --seat-tag TAG --contracts TASKS.json --baseline BASELINE.json
+--engine-build STR` is that A/B. It runs each contract of a frozen pre-registration on one seat twice (the seat as it
+is, then with the recipe's rules in place of the box's table), judged by the acceptance DSL, and publishes the recipe
+only on a measurement-gate ADOPT with mean steps no worse than the incumbent's; anything else demotes it, with the
+audit kept in the record. It never takes a lease: with no `GPU_LEASE_EPOCH`, or an epoch no live lease carries, it
+refuses with exit 2 before the seat is asked, so it runs under `gpu reserve ... -- local-offload recipe-audit ...`.
+Its baseline must put the primary on the unit interval (every run scores 1 or 0) and declare tokens-class efficiency
+metrics only, and its contracts file must cover every declared task; those are refused before the seat is asked, and so
+is a build the gate cannot stamp. Both arms are stamped with the pin of the seat that served the runs (the one the
+harness puts on every served run's wire result) beside the rule table each ran under, so a model swapped behind the
+alias moves the gate's era, and a pin that moves mid-audit ends the audit with nothing recorded.
+`--input-out FILE` writes the gate input, and `gate verdict --baseline B --input FILE` gives the printed result
+again. No proposer exists: a recipe enters the store as a file an operator writes, and the proposer waits for a
+trace corpus in the hundreds.
+
 **The step trace.** Every agent wire result and `agent_run` response carries `trace`: per tool
 call the tool, its effect status, `obs_chars` and `rule` — no transcript bytes — plus
 `rules_fired`. It is set before the defer branches (the budget/timeout runs are the ones a
@@ -1312,6 +1339,8 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - [`internal/agent/envrules.go`](../../internal/agent/envrules.go) — the environment-rule
   interceptors (ADR 0036); [`internal/core/agentenvrules.go`](../../internal/core/agentenvrules.go)
   — the vocabulary, `Validate`, the trace step; [`examples/agent-env-rules.json`](../../examples/agent-env-rules.json)
+- [`internal/recipe/`](../../internal/recipe/) — the recipe record, store and scoring classes (ADR 0036 amendment);
+  [`recipe_audit_cmd.go`](../../recipe_audit_cmd.go) — the `recipe-audit` verb
 - [`internal/agent/batchjudge.go`](../../internal/agent/batchjudge.go) — the advisory end-of-run
   judge
 - [`internal/agent/runtool.go`](../../internal/agent/runtool.go) — allowlist, direct exec

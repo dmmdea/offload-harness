@@ -1,0 +1,19 @@
+{
+  "id": "recipe-trim-obs-03",
+  "seat_tag": "seat-class-b",
+  "rules": {
+    "max_observation_tokens": 128
+  },
+  "provenance": [
+    "run-0201"
+  ],
+  "status": "demoted",
+  "audit": {
+    "seat": "seat-b",
+    "baseline_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "era_marker": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+    "verdict": "BLOCK",
+    "steps_incumbent": 4,
+    "steps_candidate": 7.5
+  }
+}
