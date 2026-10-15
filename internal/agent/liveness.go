@@ -486,6 +486,19 @@ func (m *Monitor) onStall() {
 		m.mu.Unlock()
 		return
 	}
+	if m.phase == PhaseColdLoad {
+		// In the hold the timer is armed for what is left of its current part, so a
+		// callback that finds time left was already on its way, waiting for this
+		// lock, when a tick re-armed the timer (it took the request back to the
+		// loading part, whose ceiling is longer): not due. Acting on it would stall
+		// a request the tick has just held. Arm for what is left and let the
+		// part's own end decide.
+		if left := m.holdLeftLocked(time.Now()); left > 0 {
+			m.timer.Reset(left)
+			m.mu.Unlock()
+			return
+		}
+	}
 	// A request still waiting for its first byte may be waiting for its seat
 	// to LOAD (a cold start after the idle unload, another model's swap
 	// evicting the seat between steps), or for the first completion after a
