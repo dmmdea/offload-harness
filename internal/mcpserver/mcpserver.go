@@ -113,6 +113,10 @@ type Server struct {
 	// askSeatGuard is offload_ask's seam onto the seat guard (askOccupant): nil
 	// (production) resolves to the process-wide seatguard.Shared at call time.
 	askSeatGuard func(ctx context.Context, model string) seatguard.Verdict
+	// askNow is the clock offload_ask times its first attempt with, to size what is left of the
+	// contract's wall for a cross-seat retry: nil (production) is time.Now; a test advances a
+	// fake one inside its seat so a long first attempt needs no real wait.
+	askNow func() time.Time
 	// sttRun is offload_transcribe's placement seam (ADR 0072): nil (production) resolves to
 	// sttremote.Run at call time; tests inject a fake so the handler is exercisable without a
 	// whisper, an ffmpeg or a fleet node.
@@ -3460,7 +3464,9 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 // handleAsk is the MCP front door onto the one-call ask lane. It authors the
 // contract (internal/askjob), runs it on the local seat through the SAME entry
 // a local delegation placement takes (Pipeline.RunAgentContract), evaluates the
-// generated acceptance, and returns {answer, evidence} plus the verdict.
+// generated acceptance, and returns {answer, evidence} plus the verdict. A first
+// attempt that ran on this box's seat and failed that acceptance gets the second
+// chance agent_delegate gives a failed verification, on another seat (askRetry).
 //
 // House style throughout: every failure path is a deferred-shape result, never
 // an MCP error (see handleAgentRun) — a caller told "the call failed" discards
@@ -3547,7 +3553,13 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// run two budgets that could disagree.
 	var wire core.AgentWireResult
 	var fleetExtra map[string]any
+	now := s.askNow // test seam
+	if now == nil {
+		now = time.Now
+	}
+	var started, ended time.Time // the local attempt's span, which sizes what a retry may spend
 	route := strings.TrimSpace(in.Route)
+	namedRoute := route // what the caller asked for, before the occupied-seat fallback below
 	// An ask names no route most of the time, and "no route" meant this box's agent seat
 	// even when loading it would unload another vLLM seat holding the cards: on the
 	// reference box, opencode's three-card seat, whose session then paid a cold load
@@ -3578,7 +3590,9 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		}
 		wire, fleetExtra = w, extra
 	} else {
+		started = now()
 		w, rerr := run(ctx, contract, delegate.LocalOptions{})
+		ended = now()
 		if rerr != nil {
 			return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
 		}
@@ -3593,11 +3607,121 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 			"steps":       wire.Steps,
 		}, wire))
 	}
-	// The contracted deliverable is the structured pair. When the re-pack seat
-	// could not be reached the loop's prose still arrived, so it is published as
-	// the answer rather than thrown away — with evidence empty, which is exactly
-	// what nonempty:evidence then reports, so the caller is never handed
-	// unchecked prose under a green verdict.
+	answer, evidence, failures := gradeAskWire(contract, wire)
+	if strings.TrimSpace(answer) == "" {
+		// A non-deferred result with neither prose nor a structured answer has nothing
+		// to publish. Returning answer:"" with no deferred key would read to the caller
+		// as "the seat answered, and the answer is nothing" — the silent shape this
+		// lane's defer-not-crash posture exists to avoid. It should not be reachable
+		// (the loop defers on an empty final message), which is exactly why it must not
+		// be the one path that fails quietly if it ever becomes reachable.
+		return jsonResult(map[string]any{
+			"deferred":    true,
+			"reason":      "the seat returned no answer (stop_reason " + wire.StopReason + ")",
+			"defer_class": core.DeferClassAbstention,
+			"seat":        wire.Seat,
+			"steps":       wire.Steps,
+		})
+	}
+	// THE CROSS-SEAT RETRY. A first attempt that ran on this box's seat and failed its acceptance
+	// was terminal here, while agent_delegate retries a failed verification on another seat. The
+	// fleet path needs nothing added: its engine already retried inside the call, and
+	// contractOnFleetAt now says so (retried_on, retry_note).
+	//
+	// Only when the caller named NO route: a named route:"local" is the caller saying the material stays
+	// on this box (offload_ask has no pin_reason channel), so its failed first attempt is published as it
+	// is and the goal and the inlined files never leave for a retry.
+	retriedOn, retryNote := "", ""
+	if len(failures) > 0 && fleetExtra == nil && namedRoute == "local" {
+		retryNote = "retry skipped: route local was named; the ask stays on this box"
+	} else if len(failures) > 0 && fleetExtra == nil {
+		r := s.askRetry(ctx, contract, wire, failures, ended.Sub(started))
+		retriedOn, retryNote = r.node, r.note
+		if r.won {
+			wire, answer, evidence, failures, fleetExtra = r.wire, r.answer, r.evidence, nil, r.extra
+		}
+	}
+	out := map[string]any{
+		"answer":      answer,
+		"evidence":    evidence,
+		"verified":    len(failures) == 0,
+		"acceptance":  contract.Acceptance, // what "verified" actually means, published so it can be judged
+		"seat":        wire.Seat,
+		"steps":       wire.Steps,
+		"stop_reason": wire.StopReason,
+		// Published as FALSE rather than omitted: an absent field reads as unknown, and
+		// "was this answer computed just now" is exactly the question a caller — and the
+		// adoption instrument — must never have to guess at. It rides the ANSWER shape
+		// only; a deferred result carries no cache_hit because a defer is never stored,
+		// so it is always a fresh run and the field would have nothing to distinguish.
+		"cache_hit": false,
+	}
+	out = withReviewExtra(out, fleetExtra)
+	// Set after the fleet block, so the ask's own account of its two attempts is the one published
+	// when the fleet's engine retried inside the retry as well (askRetry keeps that note inside its own).
+	if retriedOn != "" {
+		out["retried_on"] = retriedOn
+	}
+	if retryNote != "" {
+		out["retry_note"] = retryNote
+	}
+	if len(failures) > 0 {
+		out["acceptance_failures"] = failures
+	}
+	// Only a SUCCESSFUL, non-deferred result is stored, and every other exit from this
+	// handler returned above: a defer, a refusal and a runner error are all statements
+	// about this minute rather than about these files, and caching one would turn a
+	// transient seat failure into a lane that stays dead for the rest of the connection.
+	//
+	// A verified:false answer IS cached — the seat ran and answered, the citation check
+	// simply did not match — so an identical repeat returns the same unverified answer
+	// instead of re-rolling the seat. That is the deliberate cost of caching by content:
+	// a caller who wants another attempt changes the question, which is a different key.
+	// The entry is the answer as published, so one that went through the cross-seat retry
+	// carries retried_on and retry_note as they are: a repeat never retries again.
+	s.askCache.Put(cacheKey, out)
+	return jsonResult(out)
+}
+
+// gradeAskWire decodes one attempt's wire result into the pair the caller is shown and grades
+// exactly that pair against the contract's acceptance. Every attempt of one ask goes through it,
+// so the cross-seat retry is decoded and graded exactly like the first attempt.
+//
+// The contracted deliverable is the structured pair. When the re-pack seat could not be reached
+// the loop's prose still arrived, so it is returned as the answer rather than thrown away — with
+// evidence empty, which is exactly what nonempty:evidence then reports, so the caller is never
+// handed unchecked prose under a green verdict. An answer that is blank after that has nothing to
+// publish: the caller checks for it (a blank pair is graded here like any other and fails).
+//
+// THE INVARIANT: grade exactly the text the caller is shown — the two fields returned, nothing
+// else. Everything about this function is that one rule.
+//
+// core.evalText prefers wire.Output whenever it is non-empty, and runAgentTask always
+// sets Output before the re-pack, so grading the wire as it arrives grades the loop's
+// final PROSE, which this handler never publishes. Both ways of getting that wrong
+// have now been measured, one per direction:
+//
+//   - grading the prose: it is longer than the condensed pair and so likelier to
+//     contain a frequent token, giving verified:true beside a published answer that
+//     cites nothing — "reads as verified while nothing verified it";
+//   - blanking Output to fall through to the raw bytes: when the re-pack emits
+//     {"answer":"","evidence":"<text>"} — schema-legal, and its own system prompt
+//     says "Use empty values when a field is absent" — the fallback to the prose would
+//     publish PROSE as the answer while only the JSON gets graded, giving verified:false
+//     on a properly cited answer.
+//
+// Building the graded text from the DECODED fields closes both, and closes a third
+// hole for free: the gbnf grammar permits \uXXXX escapes, so an anchor plainly
+// readable in the published evidence could be invisible in the raw bytes.
+//
+// Joined with a newline so a match cannot span the seam between two fields, and
+// Structured is left intact because nonempty:evidence reads it. With no Structured at
+// all, Answer already holds the prose and Evidence is empty, so this degenerates to
+// grading the prose — which is exactly what that path publishes.
+//
+// delegate.Run grades prose and PUBLISHES prose, so it is coherent and untouched;
+// this is the first lane that publishes only the structured pair.
+func gradeAskWire(contract core.AgentContract, wire core.AgentWireResult) (answer, evidence string, failures []string) {
 	var structured struct {
 		Answer   string `json:"answer"`
 		Evidence string `json:"evidence"`
@@ -3613,82 +3737,102 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	if structured.Answer == "" {
 		structured.Answer = wire.Output
 	}
-	if strings.TrimSpace(structured.Answer) == "" {
-		// A non-deferred result with neither prose nor a structured answer has nothing
-		// to publish. Returning answer:"" with no deferred key would read to the caller
-		// as "the seat answered, and the answer is nothing" — the silent shape this
-		// lane's defer-not-crash posture exists to avoid. It should not be reachable
-		// (the loop defers on an empty final message), which is exactly why it must not
-		// be the one path that fails quietly if it ever becomes reachable.
-		return jsonResult(map[string]any{
-			"deferred":    true,
-			"reason":      "the seat returned no answer (stop_reason " + wire.StopReason + ")",
-			"defer_class": core.DeferClassAbstention,
-			"seat":        wire.Seat,
-			"steps":       wire.Steps,
-		})
-	}
-	// THE INVARIANT: grade exactly the text the caller is shown — the two fields placed
-	// in `out` below, nothing else. Everything about this line is that one rule.
-	//
-	// core.evalText prefers wire.Output whenever it is non-empty, and runAgentTask always
-	// sets Output before the re-pack, so grading the wire as it arrives grades the loop's
-	// final PROSE, which this handler never publishes. Both ways of getting that wrong
-	// have now been measured, one per direction:
-	//
-	//   - grading the prose: it is longer than the condensed pair and so likelier to
-	//     contain a frequent token, giving verified:true beside a published answer that
-	//     cites nothing — "reads as verified while nothing verified it";
-	//   - blanking Output to fall through to the raw bytes: when the re-pack emits
-	//     {"answer":"","evidence":"<text>"} — schema-legal, and its own system prompt
-	//     says "Use empty values when a field is absent" — the fallback above publishes
-	//     PROSE as the answer while only the JSON gets graded, giving verified:false on a
-	//     properly cited answer.
-	//
-	// Building the graded text from the DECODED fields closes both, and closes a third
-	// hole for free: the gbnf grammar permits \uXXXX escapes, so an anchor plainly
-	// readable in the published evidence could be invisible in the raw bytes.
-	//
-	// Joined with a newline so a match cannot span the seam between two fields, and
-	// Structured is left intact because nonempty:evidence reads it. With no Structured at
-	// all, Answer already holds the prose and Evidence is empty, so this degenerates to
-	// grading the prose — which is exactly what that path publishes.
-	//
-	// delegate.Run grades prose and PUBLISHES prose, so it is coherent and untouched;
-	// this is the first lane that publishes only the structured pair.
 	graded := wire
 	graded.Output = structured.Answer + "\n" + structured.Evidence
-	failures := delegate.EvalAcceptance(contract, graded)
-	out := map[string]any{
-		"answer":      structured.Answer,
-		"evidence":    structured.Evidence,
-		"verified":    len(failures) == 0,
-		"acceptance":  contract.Acceptance, // what "verified" actually means, published so it can be judged
-		"seat":        wire.Seat,
-		"steps":       wire.Steps,
-		"stop_reason": wire.StopReason,
-		// Published as FALSE rather than omitted: an absent field reads as unknown, and
-		// "was this answer computed just now" is exactly the question a caller — and the
-		// adoption instrument — must never have to guess at. It rides the ANSWER shape
-		// only; a deferred result carries no cache_hit because a defer is never stored,
-		// so it is always a fresh run and the field would have nothing to distinguish.
-		"cache_hit": false,
+	return structured.Answer, structured.Evidence, delegate.EvalAcceptance(contract, graded)
+}
+
+// askRetryOutcome is what the cross-seat retry of one ask came to. won means the retry is clean
+// and its wire, pair and fleet block replace the first attempt's; otherwise the first attempt
+// stands and only note (and node, when a node ran the retry) rides it.
+type askRetryOutcome struct {
+	won              bool
+	wire             core.AgentWireResult
+	answer, evidence string
+	extra            map[string]any
+	node, note       string
+}
+
+// askRetryFloorSec is the least wall a cross-seat retry of an ask is worth starting with: the
+// floor agent_delegate applies to its verification retry before it picks a node, the configured
+// agent_retry_min_sec and never under delegate's 10 s minimum. (The seat-aware floor delegate
+// applies after choosing a node belongs to the engine, which applies it to its own retry inside
+// the call.)
+func askRetryFloorSec(cfg config.Config) int {
+	if cfg.AgentRetryMinSec > 10 {
+		return cfg.AgentRetryMinSec
 	}
-	out = withReviewExtra(out, fleetExtra)
-	if len(failures) > 0 {
-		out["acceptance_failures"] = failures
+	return 10
+}
+
+// askRetry gives a failed LOCAL first attempt the second chance agent_delegate gives a failed
+// verification: the same contract on the fleet, route "remote", which never places on this box's
+// seat, so the retry runs on a different seat by construction. It mirrors the delegator's retry
+// (mergeAttempts, runOne): the retry lives inside the contract's own wall, so it is handed what
+// the first attempt left (timeout_sec, never auto) and is skipped under the floor; a clean retry
+// is published with retried_on and a note naming the first attempt's verdict; a retry that also
+// fails leaves the FIRST answer, unverified, with the retry's fate in the note; a fleet that took
+// nothing leaves a "retry skipped" note and no retried_on, which would name a node that never ran it.
+// The retry's wire is decoded and graded by gradeAskWire, exactly like the first attempt's.
+func (s *Server) askRetry(ctx context.Context, contract core.AgentContract, first core.AgentWireResult, firstFailures []string, elapsed time.Duration) askRetryOutcome {
+	// The budget is the one delegate charges the same contract (executionBudgetSec): an ask never
+	// names its wall, so its contract is auto-sized and owns the cap.
+	budget := contract.TimeoutSec
+	switch {
+	case contract.TimeoutAuto:
+		budget = core.AgentTimeoutSecCap
+	case budget <= 0:
+		budget = core.AgentTimeoutSecDefault
 	}
-	// Only a SUCCESSFUL, non-deferred result is stored, and every other exit from this
-	// handler returned above: a defer, a refusal and a runner error are all statements
-	// about this minute rather than about these files, and caching one would turn a
-	// transient seat failure into a lane that stays dead for the rest of the connection.
-	//
-	// A verified:false answer IS cached — the seat ran and answered, the citation check
-	// simply did not match — so an identical repeat returns the same unverified answer
-	// instead of re-rolling the seat. That is the deliberate cost of caching by content:
-	// a caller who wants another attempt changes the question, which is a different key.
-	s.askCache.Put(cacheKey, out)
-	return jsonResult(out)
+	remaining := budget - int((elapsed.Milliseconds()+999)/1000)
+	if floor := askRetryFloorSec(s.p.Cfg()); remaining < floor {
+		return askRetryOutcome{note: fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after the first attempt (floor %ds)", remaining, budget, floor)}
+	}
+	retry := contract
+	retry.TimeoutSec = remaining
+	retry.TimeoutAuto = false // a retry's wall is what is left: explicit, never auto
+	w, extra, why, ok := s.contractOnFleet(ctx, retry, "remote", "")
+	node, _ := extra["node"].(string)
+	if !ok && node == "" {
+		return askRetryOutcome{note: "retry skipped: " + why}
+	}
+	// What the fleet's own engine did inside the retry rides after the ask's account of it.
+	inner, _ := extra["retry_note"].(string)
+	withInner := func(note string) string {
+		if inner == "" {
+			return note
+		}
+		return note + "; the fleet's own retry: " + inner
+	}
+	label := node
+	if label == "" {
+		label = "(unnamed node)"
+	}
+	outcome := ""
+	switch {
+	case !ok:
+		outcome = fmt.Sprintf("deferred (%s): %s", w.DeferClass, w.Reason)
+	default:
+		answer, evidence, failures := gradeAskWire(contract, w)
+		switch {
+		case strings.TrimSpace(answer) == "":
+			outcome = "returned no answer (stop_reason " + w.StopReason + ")"
+		case len(failures) > 0:
+			outcome = fmt.Sprintf("failed_verification: %v", failures)
+		default:
+			return askRetryOutcome{won: true, wire: w, answer: answer, evidence: evidence, extra: extra, node: node,
+				note: withInner(fmt.Sprintf("first attempt on %s failed_verification: %v; this result is the retry", askSeatLabel(first), firstFailures))}
+		}
+	}
+	return askRetryOutcome{node: node, note: withInner("retry on " + label + " also " + outcome + "; this result is the first attempt")}
+}
+
+// askSeatLabel names the seat a first attempt ran on for the retry note.
+func askSeatLabel(w core.AgentWireResult) string {
+	if w.Seat == "" {
+		return "the local seat"
+	}
+	return w.Seat
 }
 
 // handleReviewDiff is the MCP front door onto the clean-context review lane. It
@@ -4011,6 +4155,15 @@ func (s *Server) contractOnFleetAt(ctx context.Context, contract core.AgentContr
 	}
 	if pr.Seat != "" {
 		extra["seat"] = pr.Seat
+	}
+	// A second attempt the delegator ran inside this call (a failed verification retried on another
+	// node): said here, so every door that publishes the block says it too. Both are omitted when no
+	// retry ran, and a retry that was considered and skipped carries a note and no node.
+	if pr.RetriedOn != "" {
+		extra["retried_on"] = pr.RetriedOn
+	}
+	if pr.RetryNote != "" {
+		extra["retry_note"] = pr.RetryNote
 	}
 	if pr.Result.Deferred {
 		// The ordinary shape: "route=remote: no eligible remote" — nothing out
