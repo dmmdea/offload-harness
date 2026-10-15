@@ -43,7 +43,9 @@ measurement gate and the SHA-bound evidence on a review result.
   list), written into a baseline file and hashed before the first candidate run. A verdict names that hash.
 - **Verdict.** ADOPT, BLOCK or INCONCLUSIVE. Only ADOPT lets a candidate replace the incumbent.
 - **Unrecorded.** A value nobody measured. It reads `null`, never 0, and the count of unrecorded cases sits beside it.
-  The register, the trace-corpus readout and the gate all keep this rule.
+  The register and the trace-corpus readout keep this for every total and rate, and the gate keeps it for an efficiency
+  metric resolved on fewer than two pairs. The gate's primary interval reads 0 below two pairs, and the verdict is then
+  INCONCLUSIVE through `min_pairs`.
 - **Failure class and kind.** The class of a failed job is its reason code. Its kind says whose failure it is (below).
 - **Outcome.** The closed label on a review result: `PASS`, `FINDINGS`, `GATE_FAILED`, `NOT_RUN` or `STALE`.
 
@@ -226,7 +228,8 @@ trace-bearing runs.
 
 - Only the gate adopts. A readout, a register row or a review outcome is input to a person or to a gate run, never a
   verdict.
-- A missing measurement is `null` and is counted beside the value, never read as 0.
+- In the register, the readout and the gate's efficiency metrics, a missing measurement is `null` and is counted beside
+  the value, never read as 0.
 - The incumbent keeps every tie and every INCONCLUSIVE.
 - No pass rule, verdict or ranking carries a wall-time term.
 - The rules of a comparison are frozen and hashed before the first candidate runs, and a verdict names the hash.
