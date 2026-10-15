@@ -13,7 +13,8 @@ other on a single shared card.
   (opt-in, [below](#card-scoped-leases-record-v2)) lives in `lease/e/<epoch>.json` and `lease/cards/<id>.claim`
   instead, and the first one writes `gpu/FORMAT`. The same root holds the media ticket queue (`media-queue/`, ADR 0083), so a
   machine's tickets, node claims and place tokens share the root this resolves, with no config key.
-- **Decision record:** [ADR 0018](../architecture/decisions/0018-machine-wide-fenced-gpu-lease.md)
+- **Decision record:** [ADR 0018](../architecture/decisions/0018-machine-wide-fenced-gpu-lease.md); the rule that a lease names its cards and a card has one holder, with what is not built, is
+  [ADR 0094](../architecture/decisions/0094-a-lease-names-its-cards-a-card-has-one-holder.md)
 
 ## Source map
 
@@ -30,7 +31,7 @@ other on a single shared card.
 | `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmits` (the ONE admission rule), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
 | `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases (what the processes below the holder hold RESIDENT, the unit a declaration is in), `Manager.HostRAMPending`; and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
 | `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMBounded`), the hold bound that ends that wait and releases the lease (`errHostRAMHoldBound`, `releaseAfterRAMWait`, `autoReleaseWarmGuard`; [the hold bound](#the-hold-bound-gpu_hostram_hold_max_sec-the-incident-of-2026-10-14)), `gpu status`'s sentence for a lease that is waiting (`hostRAMAskedStatus`, `holderGaveUpNote`), the line for a release that did not happen and the command that frees it (`leaseNotReleasedLine`, `releaseCommand`), the confirmation of a release's answer (`releaseConfirmed`, `releaseLeaseConfirmed`) and the failure of a wait whose stamp could not be written (`holdStampError`) |
-| `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card, else the media class default (see "Host RAM") |
+| `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card (for its own `--graph`, the files that graph's loaders name), else the media class default (see "Host RAM") |
 | `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
 | `internal/gpucards` | the per-card view (`RowsWithCap`, `LeaseRows`, `QueueRows`, `Table`, `Section`) that `gpu status`, `gpu cards` and `offload_status` brief all render; the display card's `DisplayCap` verdict is computed in `RowsWithCap` and nowhere else |
 | `internal/servingtmpl/audit_displaycap.go` | the **display-cap-unseen note** of `audit-yaml` (`AuditDisplayCapUnseen`, `HasProxyEntry`): names the llama-swap entries that may sit on the display card, judges none (see "The display card is allocatable up to a cap") |
@@ -1406,8 +1407,10 @@ renews nothing). Otherwise it stamps the lease **expired**. The renewal is one t
 back); a holder that slept through whole terms is renewed one term from now, so a lease that was just renewed never reads
 overdue. Readings: an owner is alive by the same rule `gpu status` uses (a registered process of its session, or its
 recorded pid, by pid and start time). An owner who **cannot be told** (a lease that records no owner, a session the
-registry never held, or a registry that could not be read; today that is every attended lease taken from a Claude
-session, because the registry writer is not wired into the session hooks yet) is not an objection and is not shown
+registry never held, or a registry that could not be read; the MCP server writes the registry when it starts
+(`internal/mcpserver/mcpserver.go`, `registerSession`), so this is a session whose server never ran, a server older than the
+registry, or a caller that is not a Claude session, and whether a given Claude Code build hands its MCP server the session id
+is unverified) is not an objection and is not shown
 present: an advancing progress file, which the job itself writes, vouches for the lease alone, as it does for an
 unattended one. What such an owner does **not** get is the weaker leg: a busy card proves a process, not that anyone
 wants the result, so a lease of an owner who cannot be told, with no progress contract or a stalled one, is labelled at
@@ -1617,7 +1620,8 @@ binary ignores it, and a record without it declares nothing). Where the number c
 | source | what it is |
 |---|---|
 | `gpu reserve --ram <GiB>` | the operator's word. **0 is allowed** and means "needs no host RAM". A negative value is refused. |
-| a recognised render helper call | `render/comfy-generate.mjs`, `comfy-render`, `comfy-edit`, `comfy-inpaint` or `comfy-video`, wherever it sits in the wrapped command (either path-separator style). The UNet or checkpoint and the text-encoder files the family loads are sized through the configured ComfyUI model paths (`mediacap.ModelRoots`, the same tables `doctor` reads) and counted **in full when together they do not fit the largest card of the lease** less the runner's `--reserve-vram`; a set that fits declares 0. A krea2 bf16 call on a 16 GiB card is 24.48 + 8.27 = 32.75 GiB. A video call is sized from the files its flags name (`--transformer`, `--high-unet`, `--low-unet`, `--text-encoder`) and the builder's default for each it is not given, because a hand-run helper gets nothing from the machine's config: a bf16 LTX-2.5 `--transformer` is 39.13 + 14.32 = 53.45 GiB where the int8 default is 20.03 + 14.32 (`TestAVideoCallIsSizedFromTheFilesItsFlagsName`). `run-graph` is not recognised, and neither is a helper run with `--graph` (`comfy-render`, `comfy-video`): both post the caller's own workflow, so what they load is unknown and they take the class default below, on a text lease too (`TestAGraphCallIsSizedByTheClassDefaultNotItsDefaultFamily`). |
+| a recognised render helper call | `render/comfy-generate.mjs`, `comfy-render`, `comfy-edit`, `comfy-inpaint` or `comfy-video`, wherever it sits in the wrapped command (either path-separator style). The UNet or checkpoint and the text-encoder files the family loads are sized through the configured ComfyUI model paths (`mediacap.ModelRoots`, the same tables `doctor` reads) and counted **in full when together they do not fit the largest card of the lease** less the runner's `--reserve-vram`; a set that fits declares 0. A krea2 bf16 call on a 16 GiB card is 24.48 + 8.27 = 32.75 GiB. A video call is sized from the files its flags name (`--transformer`, `--high-unet`, `--low-unet`, `--text-encoder`) and the builder's default for each it is not given, because a hand-run helper gets nothing from the machine's config: a bf16 LTX-2.5 `--transformer` is 39.13 + 14.32 = 53.45 GiB where the int8 default is 20.03 + 14.32 (`TestAVideoCallIsSizedFromTheFilesItsFlagsName`). `run-graph` (`comfy-run-graph.mjs`) is not recognised and takes the class default below. A helper run with `--graph` (`comfy-render`, `comfy-video`) posts the caller's own workflow, so its family flags say nothing about what it loads and it is never sized as the helper's default family: it is sized by the next row, and takes the class default only when that cannot be done, on a text lease too (`TestAGraphCallIsSizedByTheClassDefaultNotItsDefaultFamily`). |
+| a helper's own `--graph <file>` | the **weight files the graph's own loaders name** (`hostneed.ForGraphFile`, source `graph loaders`). The file must be a regular file of at most 8 MiB holding a ComfyUI API-format graph. `mediacap.ScanGraph` (the reader the node door's held-by-name check uses: any string input that ends in a weight extension, whatever the loader calls it) lists the names, each once, and `mediacap.ModelFileSizes` finds each under any class directory of any ComfyUI model root, as that check does (a name held under two class directories counts as the larger). The figure is the **sum of their sizes**, by the family estimate's own rule (`hostneed.fitToCard`, one function both use): a VAE or a LoRA counts with the checkpoint, the sum is declared **in full when together the files do not fit the card** (the largest card of the lease, less the runner's reserve; a card that is not known counts everything) and **0 when they fit**, with the same wording ("does not fit the N GiB card, so the weights stream from RAM", "fits the N GiB card ..., so no weights stream from RAM"). A 512x512 qwen-image graph of a 6.76 GiB checkpoint and a 16.33 GiB text encoder is 23.09 GiB on a 16 GiB card, where the class default of a node that binds a Wan 2.2 video pair is 32.89 GiB (`TestTheIncidentsGraphIsItsOwnFilesNotTheLargestFamilyOfTheBox`, `TestAGraphNamingTwoLoaderFilesDeclaresTheirSum`, `TestAGraphThatFitsTheCardDeclaresZeroAndOneThatDoesNotDeclaresItsSum`, `TestAGraphAndTheFamilyEstimateAgreeOnTheSameFiles`). **Any doubt keeps the class default, exactly as before**, because a size that is not known must never shrink a declaration: a document that is not a JSON object (a UI-format workflow included), a graph that names no weight file, ONE named file that is not in the model tree, is empty, or is not a safe relative path, or a weight-like name anywhere in the document that the sizing did not cover (the whole JSON is walked, nested objects and lists included, for a string ending in a weight extension: the scan's six and `.bin .pt2 .pkl .pickle .onnx .engine .trt .npz .h5`; a partial sum would be low) (`TestAGraphWithOneUnresolvedFileKeepsTheClassDefault`, `TestAGraphThatCannotBeReadKeepsTheClassDefault`, `TestAGraphThatNamesNoLoaderKeepsTheClassDefault`, `TestAGraphNamingAWeightItCouldNotSizeKeepsTheClassDefault`). The card is fitted with the call's own `--reserve-vram` (a helper call) or `reserve_vram` (the `run-graph` lane), a value the runner would not take being the default (`TestAGraphIsFittedWithTheReserveVRAMTheCallStates`, `TestTheGraphLaneFitsTheGraphWithTheReserveVRAMOfTheCall`). **Limits:** it is an estimate from the files' sizes, not a measurement; it counts only weight files, so an input image or a custom node's own data file is not in it; a weight is recognised by its extension, so one named by another extension, or built at run time, is not seen and the figure can be low; and the family routes of the pipeline lane (image, edit, video) are still fitted with the config's reserve, not the request's `reserve_vram`, which only the runner receives. |
 | a file whose size cannot be read | the documented per-family size (`hostneed.familySizes`: the files the reference box binds, rounded up; Qwen-Image 2512 bf16 is the incident's ~38 GiB stream). A family with neither has no estimate and takes the class default. |
 | the **media class default** | for a media lease with no `--ram` and no recognised call: the largest estimate over the render families **this box binds** (`imagegen_*`, `gen_edit_*`, `videogen_*`, named families; a binding on the sd.cpp engine is not counted, on whichever route it is, a video family included), so a 32 GiB node is not held to a 128 GiB node's numbers; 0 when nothing is bound. It is never clamped to fit the box: a default that cannot be admitted is refused with the reason and `--ram` as the way out. |
 | a text lease | 0: the harness cannot size an arbitrary wrapped command, so a text reservation declares nothing unless `--ram` says (the agent seat's own reload is sized where the harness does it, below). |
@@ -1630,8 +1634,8 @@ weights sit on the cards that it is theirs to correct: a driver script around ca
 two cards and waited a queue cycle for host RAM it never used. So when the declared figure is the class default and `--ram` was not given,
 ONE more line follows the declaring line and names how the call reached the default: nothing is wrapped (a `--detach` hold); the wrapped
 command is not a recognised render helper (a driver script, a Python wrapper, `comfy-run-graph.mjs`; the helpers that are recognised are
-named, from the same table that recognises them); a recognised helper runs its own `--graph`; or a recognised helper's weight files could
-not be sized. The line ends with the way out: `--ram <GiB>` states the real figure, and `--ram 0` is the answer when the weights sit on the
+named, from the same table that recognises them); a recognised helper runs its own `--graph` that the lease could not read and size in
+full (a graph it can is declared from its loaders, above, and gets no hint); or a recognised helper's weight files could not be sized. The line ends with the way out: `--ram <GiB>` states the real figure, and `--ram 0` is the answer when the weights sit on the
 cards. It is printed for none of: an explicit `--ram` (0 or any figure), a figure estimated from the helper's own files, a text lease that
 wraps no render helper, or a box whose class default is 0. The declaring line stays one line (the new one never contains the word a script
 greps it by), and no figure, lease record or queue behaviour changes.
@@ -1642,7 +1646,9 @@ and its RAM-pressure cache keeps it there between prompts. The same principle sa
 from RAM, so it declares nothing. The media admission (`internal/pipeline`) asks the same estimate per route, from the
 binding it is about to render with, once the card it will run on is known: image, edit, inpaint, video (by the family that
 will render, with the request's own `transformer` put over the family's binding, because that is the file the runner
-loads: `TestAVideoRequestsOwnTransformerIsWhatTheAdmissionDeclares`), animate and music read their files; `run-graph` and the audio.cpp lanes take the class default (the largest ComfyUI
+loads: `TestAVideoRequestsOwnTransformerIsWhatTheAdmissionDeclares`), animate and music read their files; the `run-graph` lane declares the weight files its graph's loaders name, as `gpu reserve` does for a helper's `--graph`, above
+(`pipeline.graphRAM`, read from `graph_path`; `TestTheGraphLaneDeclaresTheFilesItsGraphNamesNotTheClassDefault`, and the lane probe's
+differential test), and keeps the class default for a graph it cannot read or size; the audio.cpp lanes take the class default (the largest ComfyUI
 family the box binds, an upper bound that is not their own size; a box that binds no ComfyUI family, an sd.cpp-only node, has
 a class default of 0, `TestAnSdcppOnlyBoxDeclaresNothing`). **The sd.cpp lanes (image, video, animate) declare the larger of that
 default and the weights they park themselves** (F60, `hostneed.ForSdcpp`, `pipeline.sdcppDeclared`): the bound files in full
@@ -2251,7 +2257,7 @@ film shape (the third consequence, below), and one reading of residency taken af
 move in the next minutes. A reading that cannot tell (an ambiguous `/running`) counts the seat as unloaded, never as freed-nothing.
 
 **The class-default figure is warned about when it is declared.** A wrapped command that is not a recognised render helper (and the
-other three ways to the class default: no command, `--graph`, an unsizable helper) prints a `gpu reserve: WARNING:` line right after
+other three ways to the class default: no command, a `--graph` the lease could not read and size in full, an unsizable helper) prints a `gpu reserve: WARNING:` line right after
 the declaring line: the figure is a guess about a command the lease could not read, it may hold the cards while the host cannot meet
 it, and `--ram <GiB>` states the real one. The figure itself is unchanged (host RAM is never overloaded).
 
@@ -3077,6 +3083,81 @@ request posted straight to llama-swap by anything outside the harness is outside
 
 ## Known gaps
 
+*Read against the code at commit `3be61a3c` (2026-10-14) for [ADR 0094](../architecture/decisions/0094-a-lease-names-its-cards-a-card-has-one-holder.md). Where this section and the code disagree, the code is right and the section is corrected. Each gap says where it lives. First what is not built, then the windows the 0.187.0 changelog entry for the host-RAM hold bound lists as open, then text that disagrees with the code; the older gaps follow and still stand.*
+
+**Not built**
+
+- **The status text names a command that does not exist.** A waiter is told to run `local-offload gpu takeover --epoch N`, with
+  "not in this build yet", for a stalled, orphaned or overdue lease (`internal/gpuactivity/holders.go:128-133`,
+  `internal/gpulease/explain.go:64-66` and `148`, `internal/mcpserver/status_section.go:326`; the end-of-term line in
+  `gpu_terms.go:90` says "open to a takeover"). The verb list has no such verb (`gpu_cmd.go:56`, `gpuVerbs`). The stop primitives
+  a takeover would use have no caller outside tests: `proctree.PlanStop`, `Stop` and `AllGone` (`internal/proctree/stop.go:38`,
+  `111`, `158`) and `comfyinst.StopMarker` (`internal/comfyinst/comfyinst.go:356`).
+- **`gpu release --epoch N` checks no liveness.** It removes the lease and stops only the ComfyUI instances kept under it
+  (`gpu_cmd.go:1734-1802`, `internal/gpulease/gpulease.go:2228-2256`, `internal/gpulease/devices.go:962-966` and `997-1033`). A wrapper
+  whose claim was removed stops its own command on its next tick (`gpu_cmd.go:986-992`); a detached job keeps running on a card that
+  is free to the next lease; and for a tree-orphan the waiter's one named command is this one (`internal/gpuactivity/holders.go:135-139`).
+  There is no release that waits for a dead tree and no opt-in to abandon one. Nothing writes the `quarantine.<id>` sidecars the
+  allocator reads to keep such a card from being handed out (`internal/gpulease/allocator.go:398-421`, a reader only).
+- **No policy for an overdue holder that ignores the request.** `gpu_on_overdue` is `request` or `hold`; there is no automatic mode,
+  and a test pins that none exists (`internal/gpulease/yield.go:75-94`, `internal/gpulease/yield_test.go:1180`). Whether an
+  unanswered request ends in a takeover is the operator's choice.
+- **Several media paths hold the whole node.** By design: the lanes with no ComfyUI instance to bind to a card, which are the
+  audio-gen voice lane, the iGPU engines and the sd.cpp lanes (`internal/pipeline/pipeline.go:3489`,
+  `internal/pipeline/igpumedia.go:239`, `internal/pipeline/sdcppneed.go:85`, each a `wholeNeed`), and a `run-graph` that declares
+  no device (`internal/pipeline/mediaadmit.go:297-302`, `declaredNeed`). Because the plan cannot name a card: an unreadable or
+  empty card table (`mediaadmit.go:467-470`); a pin that names several cards, is not a ComfyUI device index, or is in a device
+  order the box has not declared (`477-486`); a pool key that is not a device or is in an undeclared order, and a pool of fewer
+  than two cards or on a box of more than three (`493`, `521-553`, `poolCards`, `poolMayBeScoped`); several declared devices
+  (`515`); and a host that does not write card leases (`795-799`). The card-only pair is the one placement that never falls back
+  to the whole node: a table it cannot read or a host that does not lease cards is refused with the reason
+  (`internal/pipeline/mediamulticard.go:145-160`, `171-177`, `planMulticard`, `noCardLeases`; `mediaadmit.go:795-799`).
+- **No pool of local workers across cards for one batch.** A local image batch renders through one warm session under one lease
+  (`internal/pipeline/pipeline.go:2463-2481`); the fleet batch places jobs on nodes (`internal/mediaremote/batch.go:246`);
+  `gpu reserve --cards N` queues on a fixed set and does not re-pick while it waits (`gpu_reserve_devices.go:25-29`).
+- **No scripted acceptance of the whole path.** A batch holding two cards, a text seat loading on a free card, a launcher that dies
+  and a waiter that takes the card over, and the status screens throughout have no script in the tree. One would run against a
+  scratch lease root and never the live one.
+
+**Open windows of the host-RAM hold bound**
+
+- **Readers treat an unreadable record as absent.** `gpu status` shows a card free while a reserve is refused for it
+  (`internal/gpulease/devices.go:232-234` and `276-279`); the grant side holds such a record while its keeper has shown life
+  within the 120 s heartbeat TTL, so a keeper that dies leaves it held for up to that long (`internal/gpulease/keeper.go:71-74`,
+  `87-106`).
+- **A failed read of a claim file is a fence verdict.** `readCardClaim` does not tell an I/O error from "no claim"
+  (`internal/gpulease/devices.go:147-153`, `935-956`), and the holders' confirmation is three looks 50 ms apart
+  (`gpu_cmd.go:1594`, `1685-1697`), so a claim that cannot be read for about 150 ms reads as lost and the wrapper stops its
+  command (`gpu_cmd.go:986-992`).
+- **`confirmFence` has no cancel channel.** A window runs to its end when the process is told to stop (`gpu_cmd.go:1685-1719`).
+- **A holder cannot write its give-up marker onto a record it cannot read.** `MarkHolderGaveUp` goes through `Restamp`
+  (`internal/gpulease/hostram.go:803-812`, `internal/gpulease/devices.go:975-981`), so over such a record the exit status and the
+  log are the only word.
+- **A reserve that dies before its first outer stamp leaves none**, and with the hold bound at 0 the backstop is `--wait` itself
+  (`gpu_cmd.go:1521-1551`, `startOuterBound`).
+- **The reserve measures its wait on a monotonic clock and the holder compares wall-clock milliseconds**, so after a suspend the
+  holder can release sooner, never later, than the stamp says (`gpu_cmd.go:1478`).
+- **The warm-back abandons a warm on any failed check.** It kills and releases nothing and the seat stays owed
+  (`gpu_drain.go:1237-1256`).
+- **The hidden holder is exercised in process, not as a spawned child** (`gpu_hostram_holder_test.go`).
+- **The windows are chosen figures, not measurements:** the fence window of 10 s (`gpu_cmd.go:1675`), the holder's grace of 30 s
+  (`gpu_cmd.go:1590`), the heartbeat TTL of 120 s (`internal/gpulease/gpulease.go:112`), the claim grace of 10 s
+  (`gpulease.go:1818`), the token grace of 30 s and life of 10 minutes (`internal/gpulease/tokens.go:49-52`).
+
+**Text that disagrees with the code** (the code wins; this change edits only documents)
+
+- **Code comments.** `internal/gpulease/devices.go:17-19` calls dropping the whole-node record "pending acceptance"; ADR 0018
+  records it accepted on 2026-10-12 and the code does not write it. `internal/gpulease/term.go:16-18` says the session registry's
+  writer is not wired into the session hooks (see the Terms bullet below). `internal/proctree/stop.go:3` says the stop primitives
+  are used by the yield request; it uses none.
+- **ADRs.** ADR 0026 says `DefaultTTL` is stamped on essentially every media lease; the routes pass their own timeout and
+  `DefaultTTL` is the fallback (`internal/pipeline/pipeline.go:1683` and the other `acquireMediaLease` calls,
+  `internal/gpulease/gpulease.go:114-116`, `1835`). ADR 0070 carries the registry sentence of `term.go:16-18`. ADR 0055 says the
+  lease's reclaim rule has no job-liveness input: true of the reclaim rule (`gpulease.go:1152-1172`), while progress decides a
+  term's renewal or label (`internal/gpulease/term.go:3-15`) and never frees a card.
+
+**Older gaps**
+
 - **A tree-orphan is held until its members are gone, and nothing yet stops one.** The tree record, the `tree-orphan` verdict and the
   stop primitives exist (see [A dead wrapper with a live tree](#a-dead-wrapper-with-a-live-tree-keeps-its-claim-plan-p10-adr-0084)),
   but the takeover that stops a tree and frees the claim is a later change (`gpu_on_overdue = request` asks the holder to yield and
@@ -3096,8 +3177,10 @@ request posted straight to llama-swap by anything outside the harness is outside
   not shown present, so a busy card alone does not renew it (a card in use proves a process, not that anyone wants the
   result) and it is labelled at the end of its `--for` unless it declares a progress contract that is advancing: that
   alone keeps it renewing, as it does an unattended lease (operator decision 4: a progress contract renews by progress).
-  Until the registry writer is wired into the session hooks, that is every attended lease taken from a Claude session, so
-  an attended job without a progress file reads `expired` at the end of its first term even while its cards are busy
+  The MCP server writes the registry when it starts (`internal/mcpserver/mcpserver.go`, `registerSession`), so that is a
+  session whose server never ran or a caller that is not a Claude session, and whether a given Claude Code build hands its MCP
+  server the session id is not verified. For such an owner an attended job without a progress file reads `expired` at the
+  end of its first term even while its cards are busy
   (the `held-overdue` verdict was already true from that moment; the label adds the sentence and the takeover
   eligibility, and a takeover of an unknown owner will need `--force` anyway). The wrapper form now closes that for a
   wrapped render helper, or a script that runs one, which is the case that was accused while healthy (F8): it declares

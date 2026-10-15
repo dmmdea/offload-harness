@@ -10,12 +10,11 @@ package pipeline
 // of the real wait-0 admission that never calls busy a lane the grant would serve (TestMediaLaneFreeGraphNeverRefusesAGrant
 // drives the real admission over a table of states) and creates and removes nothing (TestMediaLaneFreeGraphWritesNothing).
 //
-// What a graph declares for the host is the media class default: the lease is taken for the graph as a whole, before anything
-// reads the weights it names, so the guard sizes it as the largest ComfyUI family the box binds (classDefaultRAM; a box that
-// binds none declares nothing). The node's door does resolve the files a dispatched graph names (fleetnode/graph_files.go),
-// but their sizes are not what the lease declares. So the declaration is an upper bound for the families the box binds and
-// not the graph's own size: a graph that names weights bigger than every bound family can be under-counted. That is a named
-// limit of this step (S0's G3 owns the numbers), not a measurement.
+// What a graph declares for the host is the weight files its own loaders name (graphRAM, hostneed.ForGraphFile: the family
+// estimate's rule, 0 when they fit the card and their sum when they do not), read from the graph file the request names. A graph
+// the lease cannot read, one that names no weight file and one with a file the box cannot size keep the media class default, the
+// largest ComfyUI family the box binds (classDefaultRAM; a box that binds none declares nothing), an upper bound that is not the
+// graph's own size. The figure is an estimate from the files' sizes, not a measurement.
 //
 // A graph with operator-declared devices is a card-scoped graph the delegator never places on another node (request.go in
 // mediaremote refuses to carry devices), so the question is not asked for it, and neither is it for a process under a lease it
@@ -46,7 +45,7 @@ func (p *Pipeline) graphLaneFree(ctx context.Context, req core.Request) core.Lan
 		return notJudged("the graph names devices ("+strings.Join(devs, ", ")+"), so it is card-scoped and stays on this machine", false)
 	}
 	token := paramStr(req.Params, "waiter_token")
-	need := declaredNeed(nil, token).declaresRAM(classDefaultRAM(p.cfg))
+	need := declaredNeed(nil, token).declaresRAM(graphRAM(p.cfg, req.Params))
 
 	// A call that runs under a lease its parent holds has a lane chosen for it.
 	if inherited, ierr := ambientLeaseEnv(); ierr != nil || inherited != nil {

@@ -38,7 +38,11 @@ func slowFirstDeltaLoop(wait time.Duration) func(int64, map[string]any, http.Res
 // seat-rates.json would lower the measured rate and inflate every later
 // allowance, ceiling and placement ETA on that seat. The same run with an
 // allowance long enough that no hold happens (the control) records its sample.
-// Both arms wait the same 600 ms for the first delta; only the hold differs.
+// Both arms wait about 600 ms for the first delta; only the hold differs. The
+// control waits that long outright. The held arm waits until the job record
+// shows the run in the hold, then 350 ms more: how soon the hold begins depends
+// on the runner (the request's allowance, then the monitor's first look at the
+// engine), and a first delta that came before it would test nothing.
 func TestRunAgentTaskHeldRunDoesNotFeedTheSeatRates(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -53,6 +57,7 @@ func TestRunAgentTaskHeldRunDoesNotFeedTheSeatRates(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			defer compressLiveness(t, tc.floor, 100*time.Millisecond, core.AgentCeilingSecCap)()
+			var hold holdWatch
 			var srvURL string
 			fake := &agentFake{
 				rosterIDs: []string{agentTestSeat},
@@ -65,7 +70,14 @@ func TestRunAgentTaskHeldRunDoesNotFeedTheSeatRates(t *testing.T) {
 						strconv.FormatInt(100*n, 10) + "\nvllm:generation_tokens_total " + strconv.FormatInt(40*n, 10) +
 						"\nvllm:prompt_tokens_total 9000\nvllm:num_preemptions_total 0\nvllm:kv_cache_usage_perc 0.5\n"
 				},
-				loopStream: slowFirstDeltaLoop(600 * time.Millisecond),
+				loopStream: func(n int64, body map[string]any, w http.ResponseWriter, r *http.Request) {
+					if tc.wantHeld {
+						hold.wait(350 * time.Millisecond)
+						slowFirstDeltaLoop(0)(n, body, w, r)
+						return
+					}
+					slowFirstDeltaLoop(600*time.Millisecond)(n, body, w, r)
+				},
 			}
 			srv := fake.server(t)
 			defer srv.Close()
@@ -73,7 +85,7 @@ func TestRunAgentTaskHeldRunDoesNotFeedTheSeatRates(t *testing.T) {
 			p := coldLoadTestPipeline(t, srv.URL)
 			contract := testContract()
 			contract.OutputSchema = nil // the loop is under test, not the re-pack
-			wire := decodeWire(t, p.Run(context.Background(), agentTestRequest(t, contract)))
+			wire := decodeWire(t, p.Run(core.WithProgressReport(context.Background(), hold.report), agentTestRequest(t, contract)))
 			if wire.Deferred {
 				t.Fatalf("deferred: %s (%s)", wire.Reason, wire.DeferClass)
 			}

@@ -584,8 +584,9 @@ had. A quoted
 header whose numbers are merely plausible cannot be told from the real one in the text, so it is
 still believed; carrying the size outside the body would close that, and no caller can yet.
 
-No production surface enables the rung yet: the field is not wired to a flag, a `Loop` setter, the
-config or the replay seam (`ReplayOpts` does not expose it, so `CompactReplay` cannot measure it).
+No production surface enables the rung yet: the field is not wired to a flag, a `Loop` setter or the
+config. The replay seam exposes it (`ReplayOpts.LogCollapse`), so `compaction-eval ... --log-collapse`
+measures it.
 Wiring it into the live loop must also teach `resultDestroyed` the new predicate. Whether to adopt
 it is the measurement gate's call, not this page's, and that call needs a corpus whose tool calls
 carry tool names: the shipped mini corpus records call ids only, so the producer gate leaves it
@@ -627,10 +628,10 @@ that survive, and a test pins this exact line); the tool's own "more matches" or
 the re-execute-on-repeat path (ADR 0016) and the corpus harvest treat it as the compaction artifact it
 is, and a later elision marker still names the original size. It is deterministic, idempotent,
 monotonic (a result that is not strictly shorter is discarded) and fails closed: a body that is not,
-line for line, one of the accepted shapes comes back untouched. It has no CLI flag or loop setter yet,
-and `compaction-eval` does not replay it yet (the measurement that decides it first needs
-`agent.ReplayOpts`, `compeval.LadderOpts` and the verb's flag extended): the option is reachable from
-the ladder's own options and from tests, the default ladder is pinned
+line for line, one of the accepted shapes comes back untouched. It has no production flag or loop
+setter yet; `compaction-eval ... --search-results` replays it (through `ReplayOpts.SearchResults`), so the
+measurement that decides it can be run. The option is reachable from the ladder's own options, from
+tests and from that flag, the default ladder is pinned
 byte for byte by `internal/agent/testdata/ladder_default_golden.json`, and whether the rung ever
 becomes a default is decided by the measurement gate on a harvested corpus, not by this page. Three
 pieces of work must land, in a separate change, before the rung can be switched on by default: an adaptive cap (the fixed
@@ -671,7 +672,26 @@ mode is stamped in the report. Measured finding
 BINARY — appends reuse everything, any edit anywhere discards the whole cache — so a compaction
 fire always costs a full re-prefill, and the ladder is justified by the size win and by requests
 completing at all, not by cache friendliness. A committed mini-corpus lives at `testdata/compeval/`;
-real replay corpora are machine-local and never committed. `compaction-eval harvest --traces DIR --out corpus.jsonl`
+real replay corpora are machine-local and never committed.
+
+The two default-off rungs can be switched on in `run`, `freeze`, `ab` and `kvbench` with
+`--search-results` (the search-results rung) and `--log-collapse` (the log-collapse rung), added to
+`--gcf --skeleton`; the report's `ladder` names the arm (`gcf+skeleton+search`, `gcf+skeleton+logs`,
+`gcf+skeleton+search+logs`). They change only the measurement: the production loop does not set them,
+and without either flag the output is byte for byte what it was. A rung can only be judged on a corpus
+whose older turns hold the shape it acts on (a search listing of more than 30 hits, or the long
+repetitive output of a build or test command that names its tool call), and the contrast between the
+incumbent and a candidate is two runs paired by entry id. `kvbench` takes `--arms on` to skip the raw
+arm, which a candidate comparison does not need, and `--nonce N` to set the salt of the body requests
+(default: a fresh one per run). Every sample carries `sent_sha256`, the sha256 of the transcript the
+ladder produced, taken before the salt (its canonical encoding, not the HTTP body), so it does not depend on the nonce: two runs with
+the same corpus prove a pair a no-op when the hashes of a step are equal, and a rung that rewrote the
+transcript when they differ. Leave the nonce at its default. Reusing one on a warm seat lets the
+second run's unchanged prompts hit the first run's multi-prompt cache, which inflates its reuse and
+shrinks its prefill; the calibration controls always draw their own nonce (`control_nonce` in the
+report), so a reused body nonce cannot fail the second run's negative control.
+
+`compaction-eval harvest --traces DIR --out corpus.jsonl`
 builds a real corpus from the standalone agent's trace files with REDACTION-AT-HARVEST:
 deterministic placeholder substitution over the exact vet refusal classes (git output alone
 carries author emails; the private-key class redacts the whole block, not just the header),

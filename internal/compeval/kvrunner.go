@@ -20,6 +20,9 @@ package compeval
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strconv"
@@ -35,6 +38,9 @@ type ProbeFunc func(ctx context.Context, msgs []agent.Msg) (ProbeResult, error)
 // BenchOpts configures a bench run.
 type BenchOpts struct {
 	Ladder LadderOpts
+	// Arms names the arms to run, in order: "off" (raw, uncompacted) and "on"
+	// (the ladder). Empty means both.
+	Arms []string
 	// Rounds repeats the whole (controls + both arms) block; more rounds is
 	// the only honest defence against drift given rule 1 above.
 	Rounds int
@@ -63,14 +69,28 @@ type BenchOpts struct {
 	// Margin is the production safety margin (agent's compactionMargin) used
 	// by production budget mode.
 	Margin int
-	// RunNonce makes every request unique to this run+arm so the server's
+	// RunNonce makes every body request unique to this run+arm so the server's
 	// MULTI-PROMPT cache cannot serve one arm from another arm's entries, or
 	// this run from a previous run's. Auto-generated when empty; recorded in
 	// the report. See salt().
+	//
+	// Give two runs the SAME value only on a cold seat: a body prompt the
+	// ladder leaves unchanged is then byte-identical across the runs, so the
+	// second run is served from the first run's cache and its prefill and reuse
+	// numbers are inflated. Proving a pair a no-op does not need it:
+	// Sample.SentSHA256 is taken before the salt.
 	RunNonce string
+	// ControlNonce salts the calibration controls. It is drawn fresh for every
+	// run and is deliberately independent of RunNonce, so reusing a RunNonce
+	// never replays a previous run's negative control into a warm cache. Set
+	// it only to make a test deterministic.
+	ControlNonce string
 }
 
 func (o BenchOpts) withDefaults() BenchOpts {
+	if len(o.Arms) == 0 {
+		o.Arms = []string{ArmOff, ArmOn}
+	}
 	if o.Rounds <= 0 {
 		o.Rounds = 1
 	}
@@ -92,7 +112,44 @@ func (o BenchOpts) withDefaults() BenchOpts {
 	if o.RunNonce == "" {
 		o.RunNonce = strconv.FormatInt(time.Now().UnixNano(), 36)
 	}
+	if o.ControlNonce == "" {
+		o.ControlNonce = "c" + randomHex(8)
+	}
 	return o
+}
+
+// randomHex returns 2n hex characters of entropy, falling back to the clock
+// if the entropy source fails (a collision is then only as likely as two runs
+// starting in the same nanosecond).
+func randomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(b)
+}
+
+// The two arms of a bench run: ArmOff sends the raw uncompacted transcript,
+// ArmOn sends what the ladder produces.
+const (
+	ArmOff = "off"
+	ArmOn  = "on"
+)
+
+// validateArms refuses an arm list the bench cannot run: an unknown name (a
+// typo would silently run nothing, or the wrong arm) or a repeated one.
+func validateArms(arms []string) error {
+	seen := map[string]bool{}
+	for _, a := range arms {
+		if a != ArmOff && a != ArmOn {
+			return fmt.Errorf("kvbench: unknown arm %q (want %q or %q)", a, ArmOff, ArmOn)
+		}
+		if seen[a] {
+			return fmt.Errorf("kvbench: arm %q listed twice", a)
+		}
+		seen[a] = true
+	}
+	return nil
 }
 
 // Budget modes — see BenchOpts.BudgetMode.
@@ -122,10 +179,14 @@ type KVReport struct {
 	// BudgetMode records how the on-arm ladder budget was derived — the fire
 	// COUNT is a direct consequence of it and means nothing without it.
 	BudgetMode string `json:"budget_mode"`
-	// RunNonce is the per-run marker that isolates this run (and each arm
-	// within it) from the server's multi-prompt cache. Two reports with the
-	// same nonce came from the same run.
+	// RunNonce is the per-run marker that isolates this run's body requests
+	// (and each arm within it) from the server's multi-prompt cache. A report
+	// repeating a nonce is not proof of the same run: --nonce can hand one
+	// value to two runs.
 	RunNonce string `json:"run_nonce"`
+	// ControlNonce is the marker on the calibration controls. It is fresh per
+	// run, whatever RunNonce was set to.
+	ControlNonce string `json:"control_nonce"`
 
 	// Verdict is ADMISSIBLE or INCONCLUSIVE. On INCONCLUSIVE the samples are
 	// still emitted (they are evidence about the environment) but no headline
@@ -409,14 +470,21 @@ func runArm(ctx context.Context, probe ProbeFunc, entries []Entry, arm string, r
 			}
 			if arm == "on" {
 				sent = agent.CompactReplay(msgs, budget, keep, prot,
-					agent.ReplayOpts{GCF: opts.Ladder.GCF, Skeleton: opts.Ladder.Skeleton})
+					opts.Ladder.replayOpts())
 				s.Fired = !SameTranscript(sent, msgs)
 				s.DropFired = len(sent) < len(msgs)
 				s.Exhausted = agent.EstimateTokens(sent) > budget
 			}
+			// The hash is taken BEFORE the salt, so it describes what the
+			// ladder produced and not the per-run, per-arm marker: equal
+			// hashes for one step across two runs (or across the arms of one
+			// run) prove the rung left the transcript alone, whatever nonces
+			// the runs drew.
+			sum := sha256.Sum256([]byte(renderWire(sent)))
+			s.SentSHA256 = hex.EncodeToString(sum[:])
 			// Salt AFTER the ladder ran (so compaction sees the real
-			// transcript) and BEFORE anything is measured or compared, so the
-			// relation annotations describe the bytes actually sent.
+			// transcript) and BEFORE anything else is measured or compared, so
+			// the relation annotations describe the bytes actually sent.
 			sent = salt(sent, opts.RunNonce, arm)
 			s.EstTokens = agent.EstimateTokens(sent)
 			s.SentMsgs = len(sent)
@@ -459,6 +527,9 @@ func runArm(ctx context.Context, probe ProbeFunc, entries []Entry, arm string, r
 // number without an admissible instrument.
 func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash string, opts BenchOpts) (KVReport, error) {
 	opts = opts.withDefaults()
+	if err := validateArms(opts.Arms); err != nil {
+		return KVReport{}, err
+	}
 	if len(entries) == 0 {
 		return KVReport{}, fmt.Errorf("kvbench: empty corpus")
 	}
@@ -477,22 +548,23 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 		EntriesReplayed: len(entries),
 		BudgetMode:      opts.BudgetMode,
 		RunNonce:        opts.RunNonce,
+		ControlNonce:    opts.ControlNonce,
 	}
 
 	for round := 1; round <= opts.Rounds; round++ {
-		pre, err := RunControls(ctx, probe, "pre", opts.RunNonce)
+		pre, err := RunControls(ctx, probe, "pre", opts.ControlNonce)
 		rep.Controls = append(rep.Controls, pre...)
 		if err != nil {
 			return rep, err
 		}
-		for _, arm := range []string{"off", "on"} { // BLOCKS, never interleaved — one KV slot
+		for _, arm := range opts.Arms { // BLOCKS, never interleaved — one KV slot
 			ss, err := runArm(ctx, probe, entries, arm, round, opts)
 			rep.Samples = append(rep.Samples, ss...)
 			if err != nil {
 				return rep, err
 			}
 		}
-		post, err := RunControls(ctx, probe, "post", opts.RunNonce)
+		post, err := RunControls(ctx, probe, "post", opts.ControlNonce)
 		rep.Controls = append(rep.Controls, post...)
 		if err != nil {
 			return rep, err
@@ -543,8 +615,14 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 			okOn[key] = s
 		}
 	}
-	// Paired comparison over steps that succeeded in BOTH arms.
+	// Paired comparison over steps that succeeded in BOTH arms. With one arm
+	// skipped there is nothing to pair, and counting every sample of the arm
+	// that ran as "unpaired" would be noise.
+	bothArms := len(opts.Arms) == 2
 	for key, o := range okOff {
+		if !bothArms {
+			break
+		}
 		n, ok := okOn[key]
 		if !ok {
 			rep.Paired.UnpairedOff++
@@ -557,6 +635,9 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 		rep.Paired.OnPrefilled += n.Probe.PromptN
 	}
 	for key := range okOn {
+		if !bothArms {
+			break
+		}
 		if _, ok := okOff[key]; !ok {
 			rep.Paired.UnpairedOn++
 		}
@@ -564,7 +645,13 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 	rep.Paired.SizeEffectTokens = rep.Paired.OffRealPromptTokens - rep.Paired.OnRealPromptTokens
 	rep.Paired.PrefillDeltaTokens = rep.Paired.OnPrefilled - rep.Paired.OffPrefilled
 	offStats, onStats := Summarize("off", off), Summarize("on", on)
-	rep.Arms = []ArmStats{offStats, onStats}
+	for _, arm := range opts.Arms {
+		if arm == ArmOff {
+			rep.Arms = append(rep.Arms, offStats)
+		} else {
+			rep.Arms = append(rep.Arms, onStats)
+		}
+	}
 	rep.SizeVsCache = SizeVsCache{
 		OffRealPromptTokensUnpaired: offStats.TotalRealTokens,
 		OnRealPromptTokensUnpaired:  onStats.TotalRealTokens,

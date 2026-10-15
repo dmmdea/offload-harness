@@ -19,6 +19,9 @@
 //     runner's --reserve-vram); 0 when they do. A file whose size cannot be read takes the
 //     documented per-family size in familySizes; a family with neither is unknown, and the call
 //     takes the class default.
+//     A helper run with `--graph <file>` posts the caller's own workflow and is sized by the weight files that
+//     graph's own loaders name (graph.go ForGraphFile): their sizes summed, by the same fit rule, when the graph can be read
+//     and every file it names resolves; any other graph takes the class default below.
 //  3. The media class default: the largest of the ComfyUI render families THIS BOX has bound (an sd.cpp binding counts nothing here, the
 //     pipeline's sd.cpp lanes add the weights they park themselves, ForSdcpp; its own
 //     imagegen_*, gen_edit_*, videogen_* bindings), so a 32 GiB node is not held to the numbers of a
@@ -55,6 +58,9 @@ const (
 	// SourceFamilyDefault: a recognised render call whose file sizes could not be read, so the
 	// documented per-family sizes stand in for at least one of them.
 	SourceFamilyDefault Source = "family default"
+	// SourceGraphLoaders: the weight files a ComfyUI graph's own loaders name, summed and fitted to the card as a family's are (ForGraph): a graph the lease
+	// could read, whose every named file it could size.
+	SourceGraphLoaders Source = "graph loaders"
 	// SourceClassDefault: the media class default, the largest family this box binds.
 	SourceClassDefault Source = "class default"
 	// SourceNone: a text or seat lease, or a box that binds no render family: nothing declared.
@@ -364,15 +370,23 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 			sageNote = fmt.Sprintf("; --use-sage-attention in COMFY_EXTRA_ARGS sizes the activations at the film's %.1f GiB for any clip, so a smaller clip's partial share is declared the ordinary set here: --ram 0 states the real figure (it is not seen when COMFY_EXTRA_ARGS is set by an `env` prefix inside the wrapped command)", wanActivationsSageGiB)
 		}
 	}
+	return fitToCard(src, family, set, total, f, sageNote), true
+}
+
+// fitToCard is the one rule every weight-file estimate ends in (estimateWith, ForGraph): a set of files that together fit the
+// card (the largest card of the lease, less the runner's reserve; equal fits) streams nothing from RAM and declares 0, and one that
+// does not, or a card that is not known, declares the whole set, because ComfyUI stages the full file. label names what was sized
+// (a family, the graph), set lists the files with their sizes, tail is appended to the does-not-fit detail.
+func fitToCard(src Source, label, set string, total float64, f Facts, tail string) Need {
 	usable := f.VRAMGiB - f.reserve()
 	if f.VRAMGiB > 0 && total <= usable {
-		return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: %s = %.1f GiB fits the %.1f GiB card (%.1f GiB usable), so no weights stream from RAM", family, set, total, f.VRAMGiB, usable)}, true
+		return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: %s = %.1f GiB fits the %.1f GiB card (%.1f GiB usable), so no weights stream from RAM", label, set, total, f.VRAMGiB, usable)}
 	}
 	card := "an unknown card"
 	if f.VRAMGiB > 0 {
 		card = fmt.Sprintf("the %.1f GiB card (%.1f GiB usable)", f.VRAMGiB, usable)
 	}
-	return Need{GiB: total, Source: src, Detail: fmt.Sprintf("%s: %s = %.1f GiB does not fit %s, so the weights stream from RAM%s", family, set, total, card, sageNote)}, true
+	return Need{GiB: total, Source: src, Detail: fmt.Sprintf("%s: %s = %.1f GiB does not fit %s, so the weights stream from RAM%s", label, set, total, card, tail)}
 }
 
 func roleWord(r mediacap.ModelRole) string {
@@ -688,9 +702,9 @@ func Resolve(r Request, f Facts) Need {
 			return n
 		}
 	}
-	// A render helper whose weights cannot be sized (an arbitrary --graph, a family the table does not
-	// know) is media work whatever the lease is called: it takes the class default, not the 0 a text
-	// lease would.
+	// A render helper whose weights cannot be sized (a --graph the lease cannot read or size in full, a
+	// family the table does not know) is media work whatever the lease is called: it takes the class
+	// default, not the 0 a text lease would.
 	if recognised || r.Class == gpulease.ClassMedia {
 		return ClassDefault(f)
 	}

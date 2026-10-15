@@ -18,8 +18,8 @@ type RenderCall struct {
 }
 
 // helperRoute maps the render helpers to the route whose files they load. comfy-run-graph.mjs is
-// deliberately absent: it runs an arbitrary graph, so what it loads is unknown to the caller. The
-// same helpers run in --graph mode (comfy-render, comfy-video) are the same case, handled in Estimate.
+// deliberately absent: it takes the graph as a positional argument, not a flag, so its wrapped command is not read here. The
+// same helpers run in --graph mode (comfy-render, comfy-video) post the caller's own graph, handled in Estimate.
 var helperRoute = map[string]Route{
 	"comfy-generate.mjs": RouteImage,
 	"comfy-render.mjs":   RouteImage,
@@ -70,18 +70,21 @@ func ParseRenderCall(args []string) (RenderCall, bool) {
 // machine's config supplies only where the model files are (ComfyDir) and, for video, the family
 // bindings the runner receives from the harness.
 func (c RenderCall) Estimate(f Facts) (Need, bool) {
-	// --graph POSTS THE CALLER'S OWN WORKFLOW as it is ("any nodes, any model, any pipeline",
-	// comfy-render.mjs; comfy-video.mjs says the same): the family flags are not read, so what it
-	// loads is as unknown to the caller as what run-graph loads, and the media class default stands in.
-	// Sizing it as the helper's default family declared 0 for a 40 GiB graph (SDXL fits the card) and
-	// the wrong family for a video one (review of 2026-10-10).
-	if c.RunsOwnGraph() {
-		return Need{}, false
-	}
+	// --reserve-vram is the runner's margin on every route, a graph call's included: the card it fits against is the card less it.
 	if v := c.Flags["reserve-vram"]; v != "" {
 		if r, err := strconv.ParseFloat(v, 64); err == nil && r > 0 {
 			f.ReserveVRAMGiB = r
 		}
+	}
+	// --graph POSTS THE CALLER'S OWN WORKFLOW as it is ("any nodes, any model, any pipeline",
+	// comfy-render.mjs; comfy-video.mjs says the same): the family flags are not read, so the helper's
+	// default family says nothing about what it loads. Sizing it as that family declared 0 for a 40 GiB
+	// graph (SDXL fits the card) and the wrong family for a video one (review of 2026-10-10). What it
+	// loads is what the graph's own loaders name: when the lease can read the graph and size every file
+	// they name, that sum is the need (ForGraphFile); otherwise the call is not sized and the media
+	// class default stands in, as it always did.
+	if c.RunsOwnGraph() {
+		return ForGraphFile(c.Flags["graph"], f)
 	}
 	cfg := f.Cfg
 	switch c.Route {

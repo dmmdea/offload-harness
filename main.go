@@ -3617,6 +3617,9 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// config: pure config plus one file, informational like the skew and token rows, and silent without an
 	// agent seat.
 	writeFleetCapacitySection(w, cfg)
+	// Whether the GPU power limit and clock lock a box applies at boot were applied this boot, from the state record the applier
+	// writes: one file, informational (a WARN or UNKNOWN never changes the exit code), and one line where nothing is recorded.
+	writePowerProfileRow(w)
 	// Endpoints that name a box by a private-range IP literal instead of a tailnet name: pure config, a
 	// warning only (never an exit code), and silent on a config with none.
 	writeLANIPEndpointsSection(w, cfg)

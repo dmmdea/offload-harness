@@ -682,14 +682,18 @@ func TestRunBenchSaltsEveryRequest(t *testing.T) {
 		return f.probe(ctx, msgs)
 	}
 	if _, err := RunBench(context.Background(), probe, benchCorpus(t), "h",
-		BenchOpts{Rounds: 1, CtxTokens: 8192, MaxOut: 1024, RunNonce: "NONCE7"}); err != nil {
+		BenchOpts{Rounds: 1, CtxTokens: 8192, MaxOut: 1024, RunNonce: "NONCE7", ControlNonce: "CTL7"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(sent) == 0 {
 		t.Fatal("no requests captured")
 	}
 	for i, msgs := range sent {
-		if len(msgs) == 0 || !strings.Contains(msgs[0].Content, "NONCE7") {
+		want := "NONCE7"
+		if len(msgs) > 0 && strings.HasPrefix(msgs[0].Content, "[kvbench CTL7/ctl]") {
+			want = "CTL7" // the calibration controls carry their own nonce
+		}
+		if len(msgs) == 0 || !strings.Contains(msgs[0].Content, want) {
 			t.Fatalf("request %d was sent UNSALTED — it can be served from another run's or arm's cache entry: %.60q",
 				i, msgs[0].Content)
 		}
