@@ -181,7 +181,7 @@ What `"compact"` does, per tool and per parameter at every depth:
 - Cuts each description to its first sentence (grown to the next sentence when the first is under 28 characters, and
   shortened at a clause boundary when it runs past 320 characters for a tool or 200 for a parameter and the dropped part
   carries no rule word and does not say the data leaves the box), plus the sentences a reviewed per-tool keep-list
-  names ([`toolsprofile_keep.go`](../../internal/mcpserver/toolsprofile_keep.go), 143 entries), verbatim and in the order
+  names ([`toolsprofile_keep.go`](../../internal/mcpserver/toolsprofile_keep.go), 144 entries), verbatim and in the order
   the description has them. An entry is a sentence a caller must not be without: a prohibition, a trust or privacy
   boundary, the statement that a call is forwarded to another node and its image or audio bytes travel with it, a cost
   rule, a limit the schema cannot express, the "if it cannot, it returns `deferred:true` and you do the work yourself"
@@ -243,7 +243,12 @@ that the enhancement is preview-grade, the first-door sentences of `offload_extr
 the client's timeout, the quote and inch caveat and the prompt-writing sentence of `offload_generate_image`, the research caps,
 how to size a contract with `section:"brief"`, and the cost of `offload_video_watch` on a long file. Thirteen more were
 moved by the two later checks described below (the sentences that explain an enum value, and the result-reading sentences
-that stop a misreading), which is why the keep-list is longer and the dropped list shorter than the counts above say.
+that stop a misreading), which is why the keep-list is longer and the dropped list shorter than the counts above say. One
+more, `offload_research`'s text-sources sentence, was classified when main's research change was merged in (see the
+measurement below): it is kept, because it tells a caller that a feed's item links are not followed, that a YouTube URL is
+read only when the operator has set `ytdlp_path`, that nothing is fetched with a login or a cookie, and what a skipped source's
+`error_kind` and a source's `cleanup_error` mean. The `Returns {...}` shape of that tool, reworded for the two new field names,
+stays a dropped result-shape row, so the count of rows is the same and the keep-list has the one extra entry.
 
 The trigger words are the second check, not the first. They are the constraint words (`never`, `refuse*`, `only`, `must`, `not`
 (which covers `do not`, `may not` and `NOT`), any `n't` contraction, `cannot`, `required`, `without`, `opt-in`,
@@ -309,7 +314,7 @@ for both is to split the source text, and the gate cannot find either by itself.
 
 ### Measured
 
-Measured at 0.186.0 with the review lane's SHA-bound evidence, plus this change. Surface: the MCP server built with `agent_delegation_enabled` on (so the
+Measured at 0.186.0 with the review lane's SHA-bound evidence and main's research text-sources change, plus this change. Surface: the MCP server built with `agent_delegation_enabled` on (so the
 delegation pair, `agent_delegate` and `offload_research`, is advertised), no browse lane and no accelerator: 31 tools,
 the surface the plugin's `recon` set is drawn from. Tokenizer: the llama.cpp b11146 `llama-tokenize` in vocab-only mode
 (`--show-count --ids --log-disable`; no weights loaded, no GPU) over the Qwen3.8-27B GGUF, no BOS token. Two renderings:
@@ -321,22 +326,22 @@ the surface the plugin's `recon` set is drawn from. Tokenizer: the llama.cpp b11
   `{"type": "function", "function": {"name", "description", "parameters"}}` per line, `</tools>`, with Python-style
   `, ` and `: ` separators. This is the rendering the 0.137.0 figures used, so it is the column to compare with them. The
   fixed template text around the block (the header and the call-format instructions) is identical under both profiles
-  and is not counted. With compact separators (`,` and `:`) the same lists count 29,456 (full) and 18,711 (compact), so the
+  and is not counted. With compact separators (`,` and `:`) the same lists count 29,652 (full) and 18,902 (compact), so the
   ratio, not the absolute figure, is what carries across renderers.
 
 | Tool set | Tools | JSON, full | JSON, compact | Template, full | Template, compact | Saved (template) |
 |---|---|---|---|---|---|---|
-| Every advertised tool | 31 | 29,272 | 18,527 | 31,381 | 20,634 | 10,747 (34.2%) |
-| The plugin's `recon` set | 12 | 11,157 | 7,397 | 11,867 | 8,106 | 3,761 (31.7%) |
+| Every advertised tool | 31 | 29,468 | 18,718 | 31,582 | 20,830 | 10,752 (34.0%) |
+| The plugin's `recon` set | 12 | 11,353 | 7,588 | 12,068 | 8,302 | 3,766 (31.2%) |
 | The other tools (the `offload-media` set) | 19 | 18,155 | 11,170 | 19,521 | 12,535 | 6,986 (35.8%) |
 | The four Tier-1 tools | 4 | 1,125 | 886 | 1,232 | 993 | 239 (19.4%) |
-| Largest surface: the 31 plus the browse lane and three accelerators | 45 | 31,799 | 20,629 | 34,376 | 23,204 | 11,172 (32.5%) |
+| Largest surface: the 31 plus the browse lane and three accelerators | 45 | 31,995 | 20,820 | 34,577 | 23,400 | 11,177 (32.3%) |
 
 The 45-tool row is measured the same way over the config the review gate uses (it is not an estimate), and the `recon` set
 and the four Tier-1 tools are the same tools in it. The full column is the unchanged default: the same bytes as before the
 profile existed (see below), so only the compact columns depend on the keep-list.
 
-This round (the enum check widened to the tool-level description and to parameters that list their values, and the seven
+The previous round (the enum check widened to the tool-level description and to parameters that list their values, and the seven
 result-reading sentences kept) took the compact columns (tools/list JSON, then template rendering) from 17,766 and 19,873 for the 31 tools to 18,527 and 20,634 (+761
 tokens in the template rendering, 3.8%), from 6,953 and 7,662 for `recon` to 7,397 and 8,106, from 10,853 and 12,218 for the other
 nineteen to 11,170 and 12,535, and from 19,797 and 22,372 for the 45 tools to 20,629 and 23,204; the Tier-1 tools did not move.
@@ -345,6 +350,19 @@ tools: the enum-value explanations are +310 (`offload_generate_svg` +98, `offloa
 +82 for the `ran_on` sentence, `offload_compose_video` +23, `agent_run` +20; the classify-image domains and the zero-shot spaces
 add 71 more on the 45-tool surface), and the six other result-reading sentences are +451 (`agent_delegate` +121, `offload_ask`
 +116, `offload_transcribe` +109, `offload_research` +105).
+
+Merging main's research text-sources change (an RSS or Atom feed, and a YouTube URL when the operator has set `ytdlp_path`,
+read as text; the `error_kind` and `cleanup_error` result fields; the `sub_langs` parameter and a longer `fetch_timeout_sec`
+description) grew one tool, `offload_research`, in both lists. The full columns moved by 201 tokens in the template
+rendering (31,381 to 31,582 for the 31 tools, 0.6%; 196 in the `tools/list` JSON, 29,272 to 29,468) and the compact columns by
+196 (20,634 to 20,830, 0.9%; 191 in the JSON, 18,527 to 18,718): `offload_research` went from 1,163 to 1,364 tokens in full and
+from 754 to 950 compact, and the per-tool counts of the other thirty did not move. By change, 131 tokens are the text-sources
+sentence (kept by compact, so the same in both lists), 65 are the `sub_langs` parameter and the longer `fetch_timeout_sec`
+text (a parameter's opening sentence is always kept, so the same in both), and 5 are the two new field names in the
+`Returns {...}` shape, in the full list only because compact drops that shape. The same 201 and 196 show in the `recon` set,
+the 45 tools and the fleet variant, and the other nineteen and the Tier-1 tools did not move. The pre-merge figures were
+reproduced to the token with the same tokenizer before the new ones were measured (31,381 and 20,634 for the 31 tools,
+11,867 and 8,106 for `recon`, 34,376 and 23,204 for the 45 tools, 35,081 and 23,911 for the fleet variant).
 
 Before the review of every sentence (an earlier measurement of this change) the compact columns were 15,901 and 18,007 for
 the 31 tools, 5,974 and 6,682 for `recon`, 9,967 and 11,332 for the other nineteen, 740 and 847 for the Tier-1 tools, and 17,797
@@ -357,15 +375,15 @@ By tool the compact growth is `agent_run` +381, `agent_delegate` +267, `offload_
 `offload_edit_image_generative` +146, `offload_inpaint_image` +92, `offload_status` +90 (44 for the `section:"brief"` sentence the review kept, 46 for the three clauses), `offload_research` +72,
 `offload_summarize` +69, and 2 to 67 for the other seventeen that moved; the Tier-1 tools grew by 146 because `offload_summarize`
 and `offload_extract` keep their first-door sentence. On the variant whose three accelerators are fleet accelerators (45 tools, 13
-of them forwarders carrying the note) the lists measure 35,081 full and 23,911 compact in the template rendering (23,080 before this round, 21,079 before the review of every sentence).
+of them forwarders carrying the note) the lists measure 35,282 full and 24,107 compact in the template rendering (23,911 before the merge with main, 23,080 before the previous round, 21,079 before the review of every sentence).
 
 Against the 0.137.0 figures, which this document recorded before this build (template rendering; 35 tools: 20,868; the
 `recon` twelve: 8,265; the four Tier-1 tools: 847): the full list has grown since, and the comparison is not like for like
 except where the tools are the same.
 
-- **The same twelve tools (the `recon` set), the comparison to lead with:** 8,265 at 0.137.0, 11,867 now in full, 8,106 compact, still below the old full figure.
+- **The same twelve tools (the `recon` set), the comparison to lead with:** 8,265 at 0.137.0, 12,068 now in full, 8,302 compact, which is 37 above the old full figure (it was 159 below, at 8,106, before main's research change was merged in).
 - **All tools, not the same set:** 0.137.0 counted 35 (the set is per-box), this build's delegation-enabled box
-  advertises 31. Per tool, that is 596 tokens (20,868 / 35) then; now 1,012 in full (31,381 / 31) and 666 compact (20,634 / 31). On the largest surface, 45 tools, compact is 23,204 (516 per tool), which is above the 20,868 of the old 35-tool full list (an earlier measurement of this change was below it, at 20,371). The all-tools statement is
+  advertises 31. Per tool, that is 596 tokens (20,868 / 35) then; now 1,019 in full (31,582 / 31) and 672 compact (20,830 / 31). On the largest surface, 45 tools, compact is 23,400 (520 per tool), which is above the 20,868 of the old 35-tool full list (an earlier measurement of this change was below it, at 20,371). The all-tools statement is
   therefore a statement about these two box shapes, and only the twelve-tool row is the same set.
 - **Per tool, where 0.137.0 recorded one** (then in full; now in full and compact): `agent_delegate` 2,903; 4,173 and 3,154. `offload_status` 660; 1,074 and 328. `offload_compose_video` 991; 1,153 and 886. The four Tier-1 tools 847; 1,232
   and 993. The other tools of the 0.137.0 list have no recorded per-tool figure, so they cannot be compared one by one.
@@ -377,13 +395,15 @@ with its three guidance clauses) and is larger only where it adds the sentences 
 The default is unchanged except for one tool. The `tools/list` result of the shipped default, of `"full"` and of an unset key
 is still the same bytes as each other, and differs from the list main advertises in exactly one tool, `offload_status`, by three
 characters: a closing brace moved and two semicolons became full stops, so that three guidance clauses are sentences of their
-own (see above). The SHA-256 of the delegation-enabled default list moves from `81c5bc5e06868cbd...` (main's, and this branch's
-until this change) to `8b340c5629c73f58...`; the token count of that list is 31,381 before and after. Checked on ten surfaces
-(the bare default box, the delegation-enabled box, the 45-tool surface, the fleet-accelerator variant, and each of the three
-devices alone as a local and as a fleet accelerator): with those three characters put back, every one of them is byte-identical to
-the list before this change, and eight of the ten to main's; the two fleet surfaces that list the Hailo-8L differ from main by
-the forwarding-note fix that `offload_text_embed` already carried on this branch (it names its own argument, `text`, instead of
-`image_path`).
+own (see above). The SHA-256 of the delegation-enabled default list is `8505e9ca79f68602...` on main (main's research text-sources
+change moved it from `81c5bc5e06868cbd...`) and `8eb5f938438ad426...` on this branch (`8b340c5629c73f58...` before main's change was
+merged in); the token count of that list is 31,582 on both. Checked again after the merge on ten surfaces (the bare default box,
+the delegation-enabled box, the 45-tool surface, the fleet-accelerator variant, and each of the three devices alone as a local and
+as a fleet accelerator): in each of them `offload_status` is the only tool whose bytes differ from main's, except on the two fleet
+surfaces that list the Hailo-8L, where `offload_text_embed` differs too (the forwarding-note fix that tool already carried on this
+branch: it names its own argument, `text`, instead of `image_path`). With those three characters put back, and on those two surfaces
+that note, every one of the ten lists is byte-identical to main's. `offload_research`, the one description main changed in the
+range, is byte-identical to main's on all ten.
 
 To re-measure: `OFFLOAD_TOOLS_DUMP_DIR=<dir> OFFLOAD_TOOLS_DUMP_PROFILE=<full|compact> go test ./internal/mcpserver -run TestToolsListDump`
 writes the wire bytes of one profile (the test is skipped without the variable and asserts nothing; add
@@ -394,7 +414,7 @@ the JSON column, and render its tools through the template for the other.
 
 - opencode inlines every enabled MCP tool schema per call; the 35 harness tools of 0.137.0 are
   20,868 tokens. `primaryTools: "tier1"` and `offloadTools: "recon"` are the default mitigations
-  (the offload subagent's measured fixed prompt was 24,680 tokens before the recon split). On 0.186.0 the full list of a 31-tool box is 31,381 tokens; `tools_schema_profile: "compact"` on the harness config brings it to 20,634 (see [Tool schema size](#tool-schema-size)).
+  (the offload subagent's measured fixed prompt was 24,680 tokens before the recon split). On 0.186.0 the full list of a 31-tool box is 31,582 tokens; `tools_schema_profile: "compact"` on the harness config brings it to 20,830 (see [Tool schema size](#tool-schema-size)).
 - Prefix-cache reuse on a vLLM hybrid-attention seat is block-granular: cached prompt tokens come
   in whole blocks of the seat's block size (1,568 tokens on the Qwen3.8 fp8 seat; measured
   10,976 = 7 blocks, 12,544 = 8, 25,088 = 16), so every request recomputes its trailing partial
