@@ -164,7 +164,7 @@ func parseCardClaim(b []byte) (cardClaim, bool) {
 }
 
 func readEpochRecord(leaseDir string, epoch uint64) (*Meta, error) {
-	b, err := os.ReadFile(epochRecordPath(leaseDir, epoch))
+	b, err := readRecordFile(epochRecordPath(leaseDir, epoch))
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +229,7 @@ type liveLease struct {
 // legacy reads meta.json: the record (nil when absent or unparseable) and whether it is
 // a live lease (not reclaimable by the shared rule).
 func (r reader) legacy() (*Meta, bool, treeReading) {
-	b, err := os.ReadFile(filepath.Join(r.dir, metaFileName))
+	b, err := readRecordFile(filepath.Join(r.dir, metaFileName))
 	if err != nil {
 		return nil, false, treeReading{}
 	}

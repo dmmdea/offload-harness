@@ -732,6 +732,29 @@ func UseRemoveFault(fn func(path string) error) (restore func()) {
 	return func() { removeClaimFault = old }
 }
 
+// readFaultHook, when set, is consulted by readRecordFile before the real read: a test seam (UseReadFault).
+var readFaultHook func(path string) error
+
+// readRecordFile is os.ReadFile of a lease record (meta.json, e/<epoch>.json), with the test seam in front of it.
+func readRecordFile(path string) ([]byte, error) {
+	if readFaultHook != nil {
+		if err := readFaultHook(path); err != nil {
+			return nil, err
+		}
+	}
+	return os.ReadFile(path)
+}
+
+// UseReadFault makes the READ of a lease record fail with what fn returns for the path (nil from fn lets the real read run), until the
+// returned function is called: the way a test provokes a record that EXISTS and can be removed but cannot be read, as one is while
+// a scanner or another process holds it open on Windows. The file itself is untouched, so the record is still there for the fault to
+// be lifted. Nothing in production calls it.
+func UseReadFault(fn func(path string) error) (restore func()) {
+	old := readFaultHook
+	readFaultHook = fn
+	return func() { readFaultHook = old }
+}
+
 // statFaultHook, when set, is consulted by statRecord before the real stat: a test seam (UseStatFault).
 var statFaultHook func(path string) error
 

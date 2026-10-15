@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -207,4 +208,64 @@ func TestRestampOfACardLeaseWhoseRecordCannotBeExaminedIsNeverTheLeaseIsGone(t *
 			}
 		}
 	}
+}
+
+// Round 5, item 2. A record that EXISTS and cannot be READ (an I/O failure, not corrupt bytes) is held while its keeper is alive:
+// the acquirer's sweep leaves the record and its claims alone while the holder's heartbeat is fresh, and sweeps them once that
+// liveness is gone. A corrupt record is still debris after the grace window, as before.
+func TestAnUnreadableCardRecordWhoseHolderIsAliveIsNotSweptAndItsClaimsStay(t *testing.T) {
+	m := scopedRealClock(t)
+	l, err := m.TryAcquire(ClassMedia, Options{Reason: "film", TTL: time.Hour, Devices: []string{card0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Renew(); err != nil {
+		t.Fatal(err)
+	}
+	epoch := l.Epoch()
+	rec := epochRecordPath(m.leaseDir(), epoch)
+	old := time.Now().Add(-time.Minute) // older than the grace a claim in progress gets
+	if err := os.Chtimes(rec, old, old); err != nil {
+		t.Fatal(err)
+	}
+	defer UseReadFault(func(p string) error {
+		if p == rec {
+			return &fs.PathError{Op: "open", Path: p, Err: os.ErrPermission}
+		}
+		return nil
+	})()
+
+	other, err := m.TryAcquire(ClassMedia, Options{Reason: "second", TTL: time.Hour, Devices: []string{card0}})
+	if err == nil {
+		_ = other.Release()
+		t.Fatal("a second lease was granted on a card whose holder is alive and whose record merely cannot be read")
+	}
+	if _, serr := os.Stat(rec); serr != nil {
+		t.Errorf("the record of a live holder was swept: %v", serr)
+	}
+	if len(m.ClaimsOf(epoch)) == 0 {
+		t.Error("the claims of a live holder were swept")
+	}
+	// A whole-node request is refused too: the lease is invisible to the reader, but it is there.
+	if w, werr := m.TryAcquire(ClassMedia, Options{Reason: "whole node", TTL: time.Hour}); werr == nil {
+		_ = w.Release()
+		t.Error("a whole-node lease was granted over a card lease whose holder is alive and whose record cannot be read")
+	}
+
+	// The keeper's liveness goes: its heartbeat is stale and the record has not been written for minutes. Now it is debris.
+	stale := time.Now().Add(-10 * time.Minute)
+	if err := os.WriteFile(m.heartbeatPath(epoch), []byte(strconv.FormatInt(stale.UnixMilli(), 10)), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(m.heartbeatPath(epoch), stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(rec, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	next, err := m.TryAcquire(ClassMedia, Options{Reason: "after", TTL: time.Hour, Devices: []string{card0}})
+	if err != nil {
+		t.Fatalf("once its keeper's heartbeat is stale the unreadable record is debris and the card is free: %v", err)
+	}
+	_ = next.Release()
 }

@@ -1327,7 +1327,7 @@ func isIOFailure(err error) bool {
 }
 
 func (m *Manager) readMeta() (*Meta, error) {
-	b, err := os.ReadFile(m.metaPath())
+	b, err := readRecordFile(m.metaPath())
 	if err != nil {
 		return nil, err
 	}

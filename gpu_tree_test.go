@@ -38,6 +38,14 @@ func TestHelperRunWrapper(t *testing.T) {
 	if ms, err := strconv.Atoi(os.Getenv("LO_WRAPPER_TICK_MS")); err == nil && ms > 0 {
 		wrapperTickEvery = time.Duration(ms) * time.Millisecond
 	}
+	// A test that needs the wrapper's window for a record it cannot read to be short names it; and a flag file makes the wrapper's
+	// reads of the lease record fail (as one does while a scanner holds it open) for as long as the flag exists.
+	if ms, err := strconv.Atoi(os.Getenv("LO_WRAPPER_FENCE_MS")); err == nil && ms > 0 {
+		wrapperFenceWindow, wrapperFencePoll = time.Duration(ms)*time.Millisecond, 50*time.Millisecond
+	}
+	if flag := os.Getenv("LO_WRAPPER_UNREADABLE_FLAG"); flag != "" {
+		gpulease.UseReadFault(unreadableWhileFlagged(flag))
+	}
 	if err := runGPUReserve(args); err != nil {
 		os.Stderr.WriteString("wrapper error: " + err.Error() + "\n")
 		os.Exit(91)
