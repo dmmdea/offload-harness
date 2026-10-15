@@ -54,6 +54,8 @@ where the code lives.
   observer), the `pair_workloads_*` keys, and the patched PAIR worker the ingress needs
 - [systems/leak-gate.md](systems/leak-gate.md) — the privacy gate: a keyed list of denied names, the
   tests that fail the build on a hit, the key and CI wiring, and what it does not cover
+- [systems/openspec.md](systems/openspec.md) — the `openspec/` spec-and-plan tree: the forked `harness-change`
+  schema with an optional ADR artifact, the hash-pinned install script, the strict validate gate
 
 ## Hardware tiers — what YOUR machine gets
 

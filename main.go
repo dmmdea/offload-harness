@@ -361,7 +361,7 @@ Usage:
   local-offload data migrate [--from DIR] [--to DIR] [--apply] [--stopped] [--json]   COPY the data tree to a data drive (never a move, never a junction, source untouched; dry run unless --apply; bbolt stores only with --stopped), then print the "home" line to set
   local-offload models                   show configured offload model
   local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
-  local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench> --corpus C   compaction ladder eval: trace→corpus harvest (redacting), ratio/retention report, tokens ratchet, gated A/B, KV-reuse bench
+  local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench> --corpus C | contextbench   compaction ladder eval: trace→corpus harvest (redacting), ratio/retention report, tokens ratchet, gated A/B, KV-reuse bench, ContextBench tasks
   local-offload confhead-eval            out-of-fold adoption gate (AURC/AUGRC + paired-bootstrap CI)
   local-offload confhead-calibrate       per-task conformal p(correct) escalation thresholds (ADOPT tasks)
   local-offload stats                    observational per-task ledger telemetry
@@ -3610,6 +3610,9 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// config: pure config plus one file, informational like the skew and token rows, and silent without an
 	// agent seat.
 	writeFleetCapacitySection(w, cfg)
+	// Endpoints that name a box by a private-range IP literal instead of a tailnet name: pure config, a
+	// warning only (never an exit code), and silent on a config with none.
+	writeLANIPEndpointsSection(w, cfg)
 	// Fourth in the band, for the same reason: where the data lives is config plus a
 	// volume list, so a serving layer that is down must not hide it (register C-92).
 	dataOnOS := writeDataHomeSection(w, data)

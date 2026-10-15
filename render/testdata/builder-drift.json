@@ -1,0 +1,399 @@
+{
+  "schema": 1,
+  "builders": {
+    "wf-acestep": {
+      "module": "render/wf-acestep.mjs",
+      "views": {
+        "default": {
+          "template": "audio_ace_step1_5_xl_turbo",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "04bf9d5acb46ebec2c4f9464a9e367f57237f87cf62335471277f1a2721fc793",
+          "builderSha256": "04bf9d5acb46ebec2c4f9464a9e367f57237f87cf62335471277f1a2721fc793",
+          "items": {
+            "ksampler.steps": { "template": "2c624232cdd22177", "builder": "2c624232cdd22177", "status": "same" },
+            "ksampler.cfg": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "ksampler.sampler_name": { "template": "4d60ecd334f3c87d", "builder": "4d60ecd334f3c87d", "status": "same" },
+            "ksampler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "ksampler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "model_sampling.shift": { "template": "4e07408562bedb8b", "builder": "4e07408562bedb8b", "status": "same" },
+            "encoder.timesignature": { "template": "2bf175f9655e7bb7", "builder": "2bf175f9655e7bb7", "status": "same" },
+            "encoder.language": { "template": "50eac10e7966a04e", "builder": "50eac10e7966a04e", "status": "same" },
+            "encoder.generate_audio_codes": { "template": "b5bea41b6c623f7c", "builder": "b5bea41b6c623f7c", "status": "same" },
+            "encoder.cfg_scale": { "template": "d4735e3a265e16ee", "builder": "d4735e3a265e16ee", "status": "same" },
+            "encoder.temperature": { "template": "1e181f0934d44144", "builder": "1e181f0934d44144", "status": "same" },
+            "encoder.top_p": { "template": "8139b33952401b3e", "builder": "8139b33952401b3e", "status": "same" },
+            "encoder.top_k": { "template": "5feceb66ffc86f38", "builder": "5feceb66ffc86f38", "status": "same" },
+            "encoder.min_p": { "template": "5feceb66ffc86f38", "builder": "5feceb66ffc86f38", "status": "same" }
+          }
+        }
+      }
+    },
+    "wf-h3-av": {
+      "module": "render/wf-h3-av.mjs",
+      "views": {
+        "t2v-turbo": {
+          "template": "video_minimax_h3_t2v",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "9d9fc9e4d2c18faaa29a38fdd11086f558f04de63ab0afcbdf639e429f79c454",
+          "builderSha256": "9d9fc9e4d2c18faaa29a38fdd11086f558f04de63ab0afcbdf639e429f79c454",
+          "items": {
+            "sampler.sampler_name": { "template": "dfc4ec22cd4ab1a3", "builder": "dfc4ec22cd4ab1a3", "status": "same" },
+            "scheduler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "scheduler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "scheduler.steps": { "template": "2c624232cdd22177", "builder": "2c624232cdd22177", "status": "same" },
+            "lora.name": { "template": "b4e7aeb69c889f04", "builder": "b4e7aeb69c889f04", "status": "same" },
+            "lora.strength": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" }
+          }
+        },
+        "t2v-hero": {
+          "template": "video_minimax_h3_t2v",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "bc6013d98d5c76513e2fb4f5bb8903ae7080597c33058e974cd40a1b7ccd7427",
+          "builderSha256": "bc6013d98d5c76513e2fb4f5bb8903ae7080597c33058e974cd40a1b7ccd7427",
+          "items": {
+            "sampler.sampler_name": { "template": "dfc4ec22cd4ab1a3", "builder": "dfc4ec22cd4ab1a3", "status": "same" },
+            "scheduler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "scheduler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "scheduler.steps": { "template": "f5ca38f748a1d6ea", "builder": "f5ca38f748a1d6ea", "status": "same" }
+          }
+        },
+        "i2v-turbo": {
+          "template": "video_minimax_h3_i2v",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "9d9fc9e4d2c18faaa29a38fdd11086f558f04de63ab0afcbdf639e429f79c454",
+          "builderSha256": "9d9fc9e4d2c18faaa29a38fdd11086f558f04de63ab0afcbdf639e429f79c454",
+          "items": {
+            "sampler.sampler_name": { "template": "dfc4ec22cd4ab1a3", "builder": "dfc4ec22cd4ab1a3", "status": "same" },
+            "scheduler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "scheduler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "scheduler.steps": { "template": "2c624232cdd22177", "builder": "2c624232cdd22177", "status": "same" },
+            "lora.name": { "template": "b4e7aeb69c889f04", "builder": "b4e7aeb69c889f04", "status": "same" },
+            "lora.strength": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" }
+          }
+        },
+        "i2v-hero": {
+          "template": "video_minimax_h3_i2v",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "bc6013d98d5c76513e2fb4f5bb8903ae7080597c33058e974cd40a1b7ccd7427",
+          "builderSha256": "bc6013d98d5c76513e2fb4f5bb8903ae7080597c33058e974cd40a1b7ccd7427",
+          "items": {
+            "sampler.sampler_name": { "template": "dfc4ec22cd4ab1a3", "builder": "dfc4ec22cd4ab1a3", "status": "same" },
+            "scheduler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "scheduler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "scheduler.steps": { "template": "f5ca38f748a1d6ea", "builder": "f5ca38f748a1d6ea", "status": "same" }
+          }
+        }
+      }
+    },
+    "wf-hidream-o1": {
+      "module": "render/wf-hidream-o1.mjs",
+      "views": {
+        "base": {
+          "template": "image_hidream_o1",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "05a40166f38b6590cc5e57a53a5b0a1f7002580b18598c48fc634bea59f63b26",
+          "builderSha256": "05a40166f38b6590cc5e57a53a5b0a1f7002580b18598c48fc634bea59f63b26",
+          "items": {
+            "sampler.add_noise": { "template": "b5bea41b6c623f7c", "builder": "b5bea41b6c623f7c", "status": "same" },
+            "sampler.cfg": { "template": "ef2d127de37b942b", "builder": "ef2d127de37b942b", "status": "same" },
+            "scheduler.scheduler": { "template": "82fbb169e7983248", "builder": "82fbb169e7983248", "status": "same" },
+            "scheduler.steps": { "template": "d59eced1ded07f84", "builder": "d59eced1ded07f84", "status": "same" },
+            "scheduler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "model_noise_scale": { "template": "2c624232cdd22177", "builder": "2c624232cdd22177", "status": "same" },
+            "sampler_select.sampler_name": { "template": "b259355fb892edd9", "builder": "b259355fb892edd9", "status": "same" },
+            "seam.start_percent": { "template": "1e9d7c27c8bbc8dd", "builder": "1e9d7c27c8bbc8dd", "status": "same" },
+            "seam.end_percent": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "seam.pattern": { "template": "c56474f12a683265", "builder": "c56474f12a683265", "status": "same" },
+            "seam.passes": { "template": "fa65fb2e410812f6", "builder": "fa65fb2e410812f6", "status": "same" },
+            "seam.blend": { "template": "4759bee99ff089a5", "builder": "4759bee99ff089a5", "status": "same" },
+            "seam.strength": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" }
+          }
+        },
+        "dev": {
+          "template": "image_hidream_o1_dev",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "00571e67bb4785e9482822a24ab0a3d93c9e0ff53f56bb7b4444992825bfe043",
+          "builderSha256": "00571e67bb4785e9482822a24ab0a3d93c9e0ff53f56bb7b4444992825bfe043",
+          "items": {
+            "sampler.add_noise": { "template": "b5bea41b6c623f7c", "builder": "b5bea41b6c623f7c", "status": "same" },
+            "sampler.cfg": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "scheduler.scheduler": { "template": "82fbb169e7983248", "builder": "82fbb169e7983248", "status": "same" },
+            "scheduler.steps": { "template": "59e19706d51d39f6", "builder": "59e19706d51d39f6", "status": "same" },
+            "scheduler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "model_noise_scale": { "template": "3bc77bf96558e814", "builder": "3bc77bf96558e814", "status": "same" },
+            "sampler_lcm.s_noise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "sampler_lcm.s_noise_end": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "sampler_lcm.noise_clip_std": { "template": "b8736b9999090496", "builder": "b8736b9999090496", "status": "same" }
+          }
+        }
+      }
+    },
+    "wf-krea2": {
+      "module": "render/wf-krea2.mjs",
+      "views": {
+        "default": {
+          "template": "image_krea2_turbo_t2i",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "cdb6702e8d6e25e654521f31477781812a71ffa297a52f9d143f308ba1790598",
+          "builderSha256": "cdb6702e8d6e25e654521f31477781812a71ffa297a52f9d143f308ba1790598",
+          "items": {
+            "ksampler.steps": { "template": "2c624232cdd22177", "builder": "2c624232cdd22177", "status": "same" },
+            "ksampler.cfg": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "ksampler.sampler_name": { "template": "4d60ecd334f3c87d", "builder": "4d60ecd334f3c87d", "status": "same" },
+            "ksampler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "ksampler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "clip_loader.type": { "template": "54c375c559e1d8f5", "builder": "54c375c559e1d8f5", "status": "same" }
+          }
+        }
+      }
+    },
+    "wf-ltx25-i2v": {
+      "module": "render/wf-ltx25-i2v.mjs",
+      "views": {
+        "default": {
+          "template": "video_ltx2_5_i2v",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "b25f2b772eacf28d9c2a2a118a911529c8290afcdd969d12cf04c85cbdef1467",
+          "builderSha256": "67dfdd28a7422693f04c02fad015250ecb84ebd8f4ebe9e9d7008548514b5288",
+          "items": {
+            "preprocess.img_compression": { "template": "4ec9599fc203d176", "builder": "4ec9599fc203d176", "status": "same" },
+            "resize.longer_size": { "template": "b51e45a12fbae3d0", "builder": "b51e45a12fbae3d0", "status": "same" },
+            "resize.scale_method": { "template": "c0d417b917f242dd", "builder": "c0d417b917f242dd", "status": "same" },
+            "negative.text": { "template": "c9fbd8bab9bb6955", "builder": "c9fbd8bab9bb6955", "status": "same" },
+            "conditioning.frame_rate": { "template": "c2356069e9d1e79c", "builder": "c2356069e9d1e79c", "status": "same" },
+            "conditioning.frame_rate_expression": { "template": "ac8d8342bbb2362d", "builder": null, "status": "template-only" },
+            "base.i2v_strength": { "template": "973b372a514f91db", "builder": "973b372a514f91db", "status": "same" },
+            "base.i2v_bypass": { "template": "fcbcf165908dd18a", "builder": "fcbcf165908dd18a", "status": "same" },
+            "base.guider_video_cfg": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "base.guider_audio_cfg": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "base.sampler_name": { "template": "3995739a61016cd5", "builder": "3995739a61016cd5", "status": "same" },
+            "base.sigmas": { "template": "1a651b2e29b6fe02", "builder": "1a651b2e29b6fe02", "status": "same" },
+            "refine.i2v_strength": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "refine.i2v_bypass": { "template": "fcbcf165908dd18a", "builder": "fcbcf165908dd18a", "status": "same" },
+            "refine.guider_video_cfg": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "refine.guider_audio_cfg": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "refine.sampler_name": { "template": "3995739a61016cd5", "builder": "3995739a61016cd5", "status": "same" },
+            "refine.sigmas": { "template": "6d432efa3d4a6c83", "builder": "6d432efa3d4a6c83", "status": "same" },
+            "decode.tile_size": { "template": "94f8607915dff25f", "builder": "94f8607915dff25f", "status": "same" },
+            "decode.overlap": { "template": "a68b412c4282555f", "builder": "a68b412c4282555f", "status": "same" },
+            "decode.temporal_size": { "template": "a68b412c4282555f", "builder": "a68b412c4282555f", "status": "same" },
+            "decode.temporal_overlap": { "template": "b17ef6d19c7a5b1e", "builder": "b17ef6d19c7a5b1e", "status": "same" },
+            "video.fps": { "template": "c2356069e9d1e79c", "builder": "c2356069e9d1e79c", "status": "same" },
+            "video.bit_depth": { "template": "2c624232cdd22177", "builder": "2c624232cdd22177", "status": "same" }
+          }
+        }
+      }
+    },
+    "wf-qwen-image": {
+      "module": "render/wf-qwen-image.mjs",
+      "views": {
+        "full": {
+          "template": "image_qwen_Image_2512",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "fac9a55c6450af1d4c16913dc8c25ba67618466ac52f8889bf509d7a1b50739f",
+          "builderSha256": "fac9a55c6450af1d4c16913dc8c25ba67618466ac52f8889bf509d7a1b50739f",
+          "items": {
+            "ksampler.steps": { "template": "1a6562590ef19d10", "builder": "1a6562590ef19d10", "status": "same" },
+            "ksampler.cfg": { "template": "4b227777d4dd1fc6", "builder": "4b227777d4dd1fc6", "status": "same" },
+            "ksampler.sampler_name": { "template": "4d60ecd334f3c87d", "builder": "4d60ecd334f3c87d", "status": "same" },
+            "ksampler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "ksampler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "model_sampling.shift": { "template": "35efc6ded4e13f29", "builder": "35efc6ded4e13f29", "status": "same" }
+          }
+        },
+        "lightning4": {
+          "template": "image_qwen_Image_2512",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "4b0ece52d6ad66e37c6826560bd985aff69b7017240f4297c882b571f114c18e",
+          "builderSha256": "4b0ece52d6ad66e37c6826560bd985aff69b7017240f4297c882b571f114c18e",
+          "items": {
+            "ksampler.steps": { "template": "4b227777d4dd1fc6", "builder": "4b227777d4dd1fc6", "status": "same" },
+            "ksampler.cfg": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "ksampler.sampler_name": { "template": "4d60ecd334f3c87d", "builder": "4d60ecd334f3c87d", "status": "same" },
+            "ksampler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "ksampler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "model_sampling.shift": { "template": "35efc6ded4e13f29", "builder": "35efc6ded4e13f29", "status": "same" },
+            "lora.name": { "template": "f71425ee41c521a6", "builder": "f71425ee41c521a6", "status": "same" },
+            "lora.strength": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" }
+          }
+        }
+      }
+    },
+    "wf-qwen-image-21": {
+      "module": "render/wf-qwen-image-21.mjs",
+      "views": {
+        "t2i": {
+          "template": "image_qwen_image_2_1_t2i",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "0728e4af6c2e617eaac856fae3a559b7c51f1e7ba76953cadad8fcbb4cd23668",
+          "builderSha256": "beb788fa035cfbfbb856d5f2aa37a8c721dcce70342fce81b8590800d32ad51b",
+          "items": {
+            "ksampler.steps": { "template": "b7a56873cd771f2c", "builder": "d59eced1ded07f84", "status": "deliberate" },
+            "ksampler.cfg": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "ksampler.sampler_name": { "template": "4d60ecd334f3c87d", "builder": "4d60ecd334f3c87d", "status": "same" },
+            "ksampler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "ksampler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "encoder.resolution": { "template": "e39eef82f61b21e2", "builder": "e39eef82f61b21e2", "status": "same" }
+          }
+        },
+        "edit": {
+          "template": "image_qwen_image_2_1_image_edit",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "ab782b2908f9cf392c9767bc5885a792f2d2d8e82560cbd6529732643fd38ffb",
+          "builderSha256": "2a647ae25601b5bed1a263e3f3106d52d6dd1a345128e976b372c72e73496649",
+          "items": {
+            "ksampler.steps": { "template": "b7a56873cd771f2c", "builder": "d59eced1ded07f84", "status": "deliberate" },
+            "ksampler.cfg": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "ksampler.sampler_name": { "template": "4d60ecd334f3c87d", "builder": "4d60ecd334f3c87d", "status": "same" },
+            "ksampler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "ksampler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "encoder.resolution": { "template": "5feceb66ffc86f38", "builder": "e39eef82f61b21e2", "status": "unreviewed" },
+            "cache.device": { "template": "634635a2166efa2a", "builder": "634635a2166efa2a", "status": "same" },
+            "cache.dtype": { "template": "1080a60800d9e5bd", "builder": "1080a60800d9e5bd", "status": "same" }
+          }
+        }
+      }
+    },
+    "wf-qwen-image-edit": {
+      "module": "render/wf-qwen-image-edit.mjs",
+      "views": {
+        "full": {
+          "template": "image_qwen_image_edit_2511",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "0e7fd1ba721e724ffc49d444bd326fe3057a24b94595c6b14b9f493ae5512c2b",
+          "builderSha256": "6c47f5b79d92b8406271290731b13f651c6a4ed6b6ab5c63870364a07135a00f",
+          "items": {
+            "ksampler.steps": { "template": "d59eced1ded07f84", "builder": "d59eced1ded07f84", "status": "same" },
+            "ksampler.cfg": { "template": "4b227777d4dd1fc6", "builder": "4e07408562bedb8b", "status": "unreviewed" },
+            "ksampler.sampler_name": { "template": "4d60ecd334f3c87d", "builder": "4d60ecd334f3c87d", "status": "same" },
+            "ksampler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "ksampler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "model_sampling.shift": { "template": "35efc6ded4e13f29", "builder": "35efc6ded4e13f29", "status": "same" }
+          }
+        },
+        "lightning4": {
+          "template": "image_qwen_image_edit_2511",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "b5056947b731cf469e7e81884c0367ac6cdda4f8b28d22dc756f02575e0bb479",
+          "builderSha256": "b5056947b731cf469e7e81884c0367ac6cdda4f8b28d22dc756f02575e0bb479",
+          "items": {
+            "ksampler.steps": { "template": "4b227777d4dd1fc6", "builder": "4b227777d4dd1fc6", "status": "same" },
+            "ksampler.cfg": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "ksampler.sampler_name": { "template": "4d60ecd334f3c87d", "builder": "4d60ecd334f3c87d", "status": "same" },
+            "ksampler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "ksampler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "model_sampling.shift": { "template": "35efc6ded4e13f29", "builder": "35efc6ded4e13f29", "status": "same" },
+            "lora.name": { "template": "1d0874ea7d3e2e15", "builder": "1d0874ea7d3e2e15", "status": "same" },
+            "lora.strength": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" }
+          }
+        }
+      }
+    },
+    "wf-qwen-inpaint": {
+      "module": "render/wf-qwen-inpaint.mjs",
+      "views": {
+        "full": {
+          "template": "image_qwen_image_controlnet_patch",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "fc62d13ec27ed51445f1a321febc8476e356ed25ef46a7f6dd98920e4452c3d1",
+          "builderSha256": "fc62d13ec27ed51445f1a321febc8476e356ed25ef46a7f6dd98920e4452c3d1",
+          "items": {
+            "ksampler.steps": { "template": "f5ca38f748a1d6ea", "builder": "f5ca38f748a1d6ea", "status": "same" },
+            "ksampler.cfg": { "template": "b8736b9999090496", "builder": "b8736b9999090496", "status": "same" },
+            "ksampler.sampler_name": { "template": "4d60ecd334f3c87d", "builder": "4d60ecd334f3c87d", "status": "same" },
+            "ksampler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "ksampler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "model_sampling.shift": { "template": "35efc6ded4e13f29", "builder": "35efc6ded4e13f29", "status": "same" },
+            "controlnet.strength": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" }
+          }
+        }
+      }
+    },
+    "wf-wan-animate2": {
+      "module": "render/wf-wan-animate2.mjs",
+      "views": {
+        "default": {
+          "template": "video_wan_animate2_distilled",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "ca801fef41548aea2f3da56ebbe13f9f0640c350802ea0916461aaeece63091a",
+          "builderSha256": "bed887b710bd7ff7d9df099b6c766af96d95bc3c12db0d11ac85cc8a5bda24bf",
+          "items": {
+            "scheduler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "scheduler.steps": { "template": "4a44dc15364204a8", "builder": "4a44dc15364204a8", "status": "same" },
+            "scheduler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "model_sampling.shift": { "template": "ef2d127de37b942b", "builder": "ef2d127de37b942b", "status": "same" },
+            "sampler.sampler_name": { "template": "f0a70d2f45a4d599", "builder": "f0a70d2f45a4d599", "status": "same" },
+            "sampler.add_noise": { "template": "b5bea41b6c623f7c", "builder": "b5bea41b6c623f7c", "status": "same" },
+            "sampler.cfg": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "negative.text": { "template": "aaf43b562e043b3f", "builder": "aaf43b562e043b3f", "status": "same" },
+            "clip_vision.crop": { "template": "30a0924a3360be68", "builder": "30a0924a3360be68", "status": "same" },
+            "clip_vision_pose.crop": { "template": "30a0924a3360be68", "builder": "30a0924a3360be68", "status": "same" },
+            "resize.crop": { "template": "12da735a79522578", "builder": "12da735a79522578", "status": "same" },
+            "resize.scale_method": { "template": "e8eb40a6e863c145", "builder": "e8eb40a6e863c145", "status": "same" },
+            "resize.width": { "template": "d4679c618f1af07e", "builder": "d4679c618f1af07e", "status": "same" },
+            "resize.height": { "template": "f0cbba2470c7c870", "builder": "f0cbba2470c7c870", "status": "same" },
+            "video.length": { "template": "5316ca1c5ddca8e6", "builder": "5316ca1c5ddca8e6", "status": "same" },
+            "video.batch_size": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "video.frame_offset": { "template": "5feceb66ffc86f38", "builder": "5feceb66ffc86f38", "status": "same" },
+            "pose.strength": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "pose.start_percent": { "template": "5feceb66ffc86f38", "builder": "5feceb66ffc86f38", "status": "same" },
+            "pose.end_percent": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "reference.strength": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "pose_cache.device": { "template": "24ca687b236a1fec", "builder": "c4fc787d1d3b4cac", "status": "deliberate" },
+            "pose_cache.dtype": { "template": "0a2ac225fd44a466", "builder": "1080a60800d9e5bd", "status": "deliberate" },
+            "wiring.pose_start_end_distinct": { "template": "b5bea41b6c623f7c", "builder": null, "status": "template-only" }
+          }
+        }
+      }
+    },
+    "wf-wan22-i2v": {
+      "module": "render/wf-wan22-i2v.mjs",
+      "views": {
+        "native": {
+          "template": "video_wan2_2_14B_i2v",
+          "json_version": "0.1.96",
+          "meta_version": "0.11.70",
+          "templateSha256": "2e583b0071ceedc085e33b6239ceb7cd3d9c8edb4b22548eae316601c8a75d0e",
+          "builderSha256": "2e583b0071ceedc085e33b6239ceb7cd3d9c8edb4b22548eae316601c8a75d0e",
+          "items": {
+            "high.steps": { "template": "f5ca38f748a1d6ea", "builder": "f5ca38f748a1d6ea", "status": "same" },
+            "low.steps": { "template": "f5ca38f748a1d6ea", "builder": "f5ca38f748a1d6ea", "status": "same" },
+            "high.cfg": { "template": "8a199b120cf400d6", "builder": "8a199b120cf400d6", "status": "same" },
+            "low.cfg": { "template": "8a199b120cf400d6", "builder": "8a199b120cf400d6", "status": "same" },
+            "high.end_at_step": { "template": "4a44dc15364204a8", "builder": "4a44dc15364204a8", "status": "same" },
+            "low.start_at_step": { "template": "4a44dc15364204a8", "builder": "4a44dc15364204a8", "status": "same" },
+            "high.sampler_name": { "template": "4d60ecd334f3c87d", "builder": "4d60ecd334f3c87d", "status": "same" },
+            "high.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "high.add_noise": { "template": "a1eddd25f596e29c", "builder": "a1eddd25f596e29c", "status": "same" },
+            "high.return_with_leftover_noise": { "template": "a1eddd25f596e29c", "builder": "a1eddd25f596e29c", "status": "same" },
+            "low.sampler_name": { "template": "4d60ecd334f3c87d", "builder": "4d60ecd334f3c87d", "status": "same" },
+            "low.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "low.add_noise": { "template": "c33216a8daf0ffc1", "builder": "c33216a8daf0ffc1", "status": "same" },
+            "low.return_with_leftover_noise": { "template": "c33216a8daf0ffc1", "builder": "c33216a8daf0ffc1", "status": "same" },
+            "high.shift": { "template": "ef2d127de37b942b", "builder": "ef2d127de37b942b", "status": "same" },
+            "low.shift": { "template": "ef2d127de37b942b", "builder": "ef2d127de37b942b", "status": "same" },
+            "negative.text": { "template": "aaf43b562e043b3f", "builder": "aaf43b562e043b3f", "status": "same" },
+            "video.batch_size": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" }
+          }
+        }
+      }
+    }
+  }
+}

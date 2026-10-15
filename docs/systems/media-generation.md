@@ -2261,8 +2261,15 @@ recorded as known offenders with their reason rather than silently skipped — a
   readiness, node snapshots, candidate diff
 - [`render/templates-license-map.json`](../../render/templates-license-map.json) — the harness-owned
   licence map, keyed by Hugging Face repo id
+- [`render/builder-drift.mjs`](../../render/builder-drift.mjs), [`render/builder-drift-specs.mjs`](../../render/builder-drift-specs.mjs),
+  [`render/testdata/builder-drift.json`](../../render/testdata/builder-drift.json) — the builder drift guard:
+  which template widget each `wf-*.mjs` builder copied, and the hashes it was verified against
 - [`render/testdata/templates-catalog/`](../../render/testdata/templates-catalog/README.md) — its
   fixtures: trimmed upstream templates (MIT) and hand-written edge cases
+- [`render/template-to-graph.mjs`](../../render/template-to-graph.mjs) — the template-to-API converter:
+  a UI-format workflow in, the API-format prompt graph out, typed refusals, a JSON CLI
+- [`render/testdata/template-goldens/`](../../render/testdata/template-goldens/README.md) — its
+  fixtures: a synthetic `/object_info` listing, hand-worked goldens and a stand-in index
 
 ## Related docs
 
@@ -3369,3 +3376,216 @@ rule files differ is scored with them anyway and `rules_check` says so, and `mai
 confined to it is not seen. An `extra_model_paths.yaml` entry that is rooted but has no drive letter
 (`/models/x`) under a drive-lettered `base_path` resolves onto that drive under Windows path join and is left as
 written here (measured against ComfyUI's own loader, not on a live file).
+
+### Builder drift guard
+
+`render/builder-drift.mjs` guards the `render/wf-*.mjs` builders that were copied from a template of the
+`comfyui-workflow-templates-json` package. A template widget that changes under a builder that copied it
+(upstream workflow_templates PR #1308: a pose-end percent wired to the pose-start input) goes unseen
+otherwise, because the builder keeps building the old recipe.
+
+- **What is recorded.** `render/testdata/builder-drift.json`, per builder and view (a preset or a template
+  variant): the template name, the package versions, `templateSha256` and `builderSha256` (sha256 of the recipe
+  widgets as the template and as the builder's output graph carry them) and one digest pair per widget with a
+  status: `same`; `deliberate` (the builder knowingly differs, the reason is in the spec); `unreviewed` (a
+  difference the first run found that nobody has judged yet); `template-only` (a wiring check, or a pinned
+  pass-through expression). Names and hashes only: no template JSON, text or widget value is stored in the
+  repository.
+- **Where each widget lives, and why a locator never reads a linked widget.** `render/builder-drift-specs.mjs`
+  pairs a template locator with a builder-graph locator per widget. A widget whose input is linked (to a subgraph
+  input, or to another node) keeps an old value in its own `widgets_values`; the value that runs comes through
+  the link. So `W` (a node's widget, by index and input name) and `I` (the widget a root subgraph instance
+  promotes) throw when the widget they point at is linked, naming the builder, the key and the fix, and the spec
+  points at the source instead: `I` for a subgraph input the root instance promotes, `W` on the primitive that
+  feeds it (a primitive behind a switch is read on the branch being checked), `P` for the legacy form in which the
+  interior widget is linked to a subgraph input, the root instance lists it in `proxyWidgets`, carries no value at
+  its position in that list (the instance's `widgets_values` follow the list, not the order of the subgraph's
+  inputs) and has nothing wired to its input for the widget, so the interior widget is the only place the value
+  lives (the extractor checks all four facts). A wiring is checked first and sends the spec to the source that
+  feeds it, whatever else the instance carries, because `I` throws on a wired input. A value the instance carries
+  is read by `I` only where its position in `proxyWidgets` is also its place among the subgraph's widget-typed
+  inputs, because `I` indexes by input order, not by `proxyWidgets`; the message says which case it is, and where
+  the two positions differ, or the input is not widget-typed (so `I` does not count it), it says that no locator
+  reads that position.
+  A math node that only passes a value through (the LTX frame rate) is pinned as a template-only item,
+  so a changed expression cannot hide behind the locator that skips it.
+- **Builder side, offline.** `node --test render/builder-drift.test.mjs` has one test per builder
+  (`builder drift: wf-krea2`): it rebuilds the graph with fixed arguments and compares every widget; a moved
+  widget fails `builder drift: <builder> [<view>]: recipe widget changed in the builder's output graph: <key>`.
+  A new `wf-*.mjs` file must be guarded or listed in `NOT_TEMPLATE_DERIVED` with a reason, or the coverage test
+  fails.
+- **Template side, with the package.** With the package's `templates` directory at hand (see the order below) the
+  same widgets are read from the template JSON; a change fails naming the builder, the template and the package
+  version the builder was last verified against, and with every widget unchanged the recorded `templateSha256`
+  must equal the recomputed hash (a hand-edited manifest fails). A newer package with every guarded widget
+  unchanged is a note. The package is not in this repository, so without a directory the template-side test is
+  skipped with that reason.
+- **CLI.** `node render/builder-drift.mjs check|explain|record [--templates-dir DIR | --comfy-dir DIR]`. `check` is
+  the same as the tests (the template side runs when a directory is given, so it can be pointed at a candidate
+  package extract before an upgrade); `explain` prints the template and builder values side by side;
+  `record` rewrites the manifest after a person has compared the builder with the template, and refuses a
+  builder/template difference the spec does not declare. The CLI fails closed: a flag that takes a value and gets
+  none (an empty or unset shell variable, `--templates-dir "$UNSET"` or `--templates-dir=`) exits 2, as does any
+  argument that starts with `-` and is not a known flag (`--template-dir`, and the single-dash `-templates-dir`
+  or `-x`), a value given to a switch (`--strict=1`) and a second positional after the verb. So neither a
+  mistyped flag nor an empty flag value can skip the template side. A directory named only through the
+  environment (`COMFY_TEMPLATES_DIR`, `COMFYUI_DIR`) that is unset, or names a tree without the package, still
+  leaves the template side skipped with a note: that is the case `check --require-templates` is for. It makes a
+  missing template side an error (exit 2) instead of a note, for an upgrade runbook. `check --strict` also fails (exit 1)
+  on every `unreviewed` manifest entry; a plain `check` leaves those green. Both flags belong to `check`.
+  **The runbook command `check --require-templates --strict` exits 1 on the committed manifest, by design,
+  until the two `unreviewed` entries are decided:** it prints exactly `2 failure(s)`, one for
+  `wf-qwen-image-edit` `[full]` `ksampler.cfg` and one for `wf-qwen-image-21` `[edit]` `encoder.resolution`.
+  Those two are the expected failures, with the template side unchanged. Any further line, or a template-side failure, is new and is the finding.
+  Use the command without `--strict` where a green gate is needed; it reports the same template side. A template
+  or manifest file may start with a byte-order mark; one that is not JSON, or a template with no `nodes` array,
+  fails with a message that names the file (the template side names the builder too).
+- **Which directory is read.** The CLI and the tests use one function, and the first source that is set decides:
+  `--templates-dir`, `--comfy-dir` (a ComfyUI tree), the `COMFY_TEMPLATES_DIR` environment variable (a `templates`
+  directory), the `COMFYUI_DIR` environment variable (a ComfyUI tree). A tree named on the command line that has no
+  package is an error; one named by the environment that has none means "no package here" and the template side
+  is skipped. `--templates-dir` and `COMFY_TEMPLATES_DIR` take the package's `templates/` folder: the package root
+  above it (a directory that holds a `templates/` folder and no top-level `.json` file) is refused with exit 2 and the
+  path to pass, because it matches no template and the manifest records which directory was read.
+- **Not guarded.** Seeds, prompts, model file names, sizes the caller sets, and the builders with no copied
+  widget (`wf-hunyuan15-i2v`, `wf-sdxl-inpaint`, `wf-upscale`, each with its reason in the spec).
+- **Known limits.** What a green run does not tell you:
+  - Node mode is never read. A bypassed or muted node, or a bypassed or muted subgraph instance, still reads as
+    live, so a template that bypasses a node the builder keeps (or the reverse) is not a difference to the guard.
+  - Wiring is mostly unguarded. One `D` item (the Wan Animate 2 pose start and end percent) keeps two inputs on
+    separate sources. The `wf-wan22-i2v` high and low pairs share one template locator each: the steps (node 128),
+    the cfg (node 126) and the step split (`high.end_at_step` and `low.start_at_step` both read node 127), so a
+    template that split any of the three would not be seen. A `feeds` locator (the source of an input, by node id and slot)
+    would cover both; it is not built, and the code for it comes later.
+  - `W` and `I` do not consult `proxyWidgets`; only `P` does. A widget a template starts promoting through
+    `proxyWidgets` is seen by a `W` or `I` locator only through the linked-widget refusal.
+  - The two `unreviewed` entries stay green in a plain `check` for good: a difference nobody judged does not
+    fail. `check --strict` fails them.
+
+First run, on package `comfyui-workflow-templates-json` 0.1.96: eleven builders, eighteen views, and every
+guarded widget equal except six entries, which the manifest records. Two are `unreviewed` (nobody has judged
+them): `wf-qwen-image-edit` full preset (template CFG 4, builder 3.0) and the `wf-qwen-image-21` edit encoder
+resolution (template 0, builder 1024). Four are `deliberate`, stated in the builder's header: the
+`wf-qwen-image-21` step count in both views (the model README's 40, template 25) and the `wf-wan-animate2`
+pose-cache device and dtype (pinned to cpu and default). The `wf-h3-av` turbo path equals its template: the
+steps, LoRA file and LoRA strength are read from the root instance that promotes them (the steps primitive's own
+widget is linked and is not the value that runs). `wf-ltx25-i2v` reads its frame rate and video fps the same way,
+from the root instance that promotes the frame-rate value (the primitive that holds it is linked to that input, so
+its own widget is stale); only the two i2v bypass switches are read from a primitive, the boolean one that feeds
+them, and the math expression that passes the frame rate through is pinned as a template-only item.
+`wf-wan-animate2` copies the `_distilled` template: its
+pose strength, start and end percent and reference strength equal the builder's, and the template feeds the
+start and the end percent from two separate subgraph inputs (a wiring check keeps it so).
+
+Open item: the `wf-qwen-image-edit` full preset runs CFG 3.0 where the template's effective non-LoRA CFG (the
+primitive that feeds the sampler) is 4. The 3.0 is the value of the sampler's own widget, which is stale because its
+input is linked to the switch, so this is probably a real builder defect and not a choice. It is recorded, not
+changed: the builder keeps its recipe in this change. Resolve it by setting the builder to the template's value
+(and re-recording) or by declaring the difference `deliberate` with a reason; the same goes for the
+`wf-qwen-image-21` edit encoder resolution. Until then `check --strict` is red on both.
+
+## Template-to-API converter (`render/template-to-graph.mjs`)
+
+A workflow template is a UI-format graph (`nodes[]`, `links[]`, `definitions.subgraphs`, `widgets_values`).
+`POST /prompt`, the `run-graph` door and the render builders take API-format graphs only:
+`{"<id>": {"class_type", "inputs"}}`. `render/template-to-graph.mjs` converts the first into the second. It is the
+converter the templates catalog (phase A, above) did not contain. Nothing calls it yet: no MCP tool, config key, fleet
+task or route, and the ComfyUI lifecycle module is untouched.
+
+**Class: none.** No GPU slot, no lease, no ComfyUI process. It is a pure function of three inputs: the template, an
+`/object_info` listing and options. The listing is never fetched here: the caller passes the one a running ComfyUI served
+(or a saved copy of it), and a listing from an older or newer ComfyUI than the one that will run the graph is a mismatch
+for the caller to avoid. It imports only `node:` builtins, opens no network, starts no process and writes no file (a test
+fails if it does).
+
+**Clean room.** It was written from the public descriptions of the two formats, the MIT-licensed template files, the
+harness's own builders under `render/` and the shape of an `/object_info` listing. The GPL-3.0 frontend (which has its own
+graph-to-prompt code) and ComfyUI's server code were not opened or read as source. The frontend is a black box: its own
+export of a template is the golden the converter is compared with.
+
+```bash
+node render/template-to-graph.mjs --template <template.json> --object-info <object_info.json> \
+    [--comfy-version X.Y.Z] [--seed N] [--min-comfyui-version X.Y.Z | --index <index.json> [--name NAME]] [--meta]
+```
+
+It prints one JSON document. Exit 0: `{"ok":true,"graph":{...},"warnings":[...],"warnings_dropped":0,"pinnedSeeds":[...],"stats":{...}}`. Exit 1:
+`{"ok":false,"refusal":{"code","message","details"}}`, a typed refusal of a call that was well formed. Exit 2: the same
+shape with code `usage` or `unreadable_input`, a call that could not be read. `--index` reads the template's minimum from
+the templates package's `index.json` (the file that carries `minComfyUIVersion`; a template file does not) by the template's
+file name, or by `--name`; a template the index does not list has no known minimum, and a ComfyUI version given when no minimum is known is neither refused nor silent: the graph is printed with a `version_check_skipped` warning. From code:
+`convertTemplate(template, objectInfo, { comfyVersion, minComfyUIVersion, seed, meta })`, and
+`compareApiGraphs(actual, expected)`, which lists the differences between two API graphs node by node (class and inputs;
+key order and `_meta` are not differences unless asked).
+
+**What it does.**
+
+| rule | behaviour |
+|---|---|
+| muted (mode 2) | the node is dropped; an input wired to it is left out with an `input_dropped` warning, and a widget input keeps its stored value (`widget_link_dropped`) |
+| bypassed (mode 4) | the node is not emitted; the i-th output of a type takes the i-th connected input of that type, so the positive and negative conditioning of a bypassed ControlNet apply node pass straight through (a union such as `IMAGE,MASK` matches when the two share a member, `*` matches any); chains resolve; no connected input of the type drops the wire (`bypass_no_match`); a type with a different number of outputs and connected inputs is refused (`ambiguous_bypass`), because which input an output takes would be a guess. Only an output something reads is resolved, so a bypassed node nobody reads is never refused |
+| subgraph instances | expanded; inner nodes get the id `<instance>:<inner>` (nested: `<a>:<b>:<inner>`); a wire into the instance reaches the inner nodes through the definition's input node (id -10); an inner wire into its output node (id -20) is what leaves the instance; a bypassed or muted instance is handled as a node |
+| instance widget values | `properties.proxyWidgets` (`[innerNodeId, widgetName]` pairs) when the instance has them: its `widgets_values` belong to those inner widgets, in order. Otherwise they align with the definition's widget inputs, not with the instance's own `inputs` array, which can list fewer; an instance wire wins over its widget value |
+| `Reroute`, `PrimitiveNode` | resolved into the inputs they feed (a primitive's first value is a literal on every consumer); neither reaches the graph |
+| `Note`, `MarkdownNote` | skipped, also when muted |
+| link beats widget | a widget input that is wired takes the wire, whatever value it stored |
+| widget values | mapped to named inputs in the listing's `input_order` (the key order when a class has none), `required` then `optional`; `hidden` inputs are not inputs. An input is a widget when its type is INT, FLOAT, STRING, BOOLEAN, COMBO or COLOR, a list of options, or a union type with a `widgetType`, unless `forceInput` makes it a socket |
+| `control_after_generate` | a flagged INT owns one hidden slot after it (flag `true` or a string such as `fixed`), which must hold one of the four control words. A listing that has no flag at all is read by the data: a seed-named INT followed by a control word owns the slot, one followed by anything else does not |
+| upload slots | after a COMBO with `image_upload` or `video_upload` one extra value, after one with `audio_upload` two (counted from the template files) |
+| dotted dynamic-combo names | the selected option's widgets follow the combo as `<combo>.<child>`, nested to any depth, in the option's input order |
+| dotted autogrow names | the children (`values.a`, `values.b`) are wires named by the node's own input slots; an autogrow group of widgets is refused |
+| display-only values | `PreviewAny`, `GetImageSize`, `SaveGLB` and `Preview3D` store trailing values of frontend-only display widgets; up to 3, 1, 1 and 1 of them are ignored (`display_values_ignored`), one more is a refusal |
+| seeds | with `seed`, an input is pinned when it is named `seed` or `noise_seed`, the listing's control makes it a seed, and it holds a stored or primitive value. A wired seed, a generic INT that shares the control (a `PrimitiveInt`) and a sampling seed with no control are left alone, each as a `seed_not_pinned` warning naming the node and input with its reason (`wired`, or `no_control`); the change is listed in `pinnedSeeds` |
+| fewer values than widgets | the listing's `default` fills the input and says so (`default_filled`); with no default the input is left out (`widget_value_missing`) |
+| long chains | `Reroute`, bypassed and nested-instance chains are followed in a loop with one visited set, so a chain as long as the limit below allows (99,998 `Reroute` nodes between two live nodes) resolves without a stack overflow and without a copy of the trail per hop; a loop in the wires through them is `link_cycle`, found by the visited set where it closes (the details name that node). Behind the set, one resolution may take no more hops than the wires of every scope entered, because a wire met twice is a loop: a longer walk is refused as `link_cycle` too, with `what: "hops"` in the details, so a defect in the set cannot become a hang |
+| limits | every node met in every scope that is entered is counted as it is met, whatever its kind (live, muted, bypassed, `Note`, `MarkdownNote`, `Reroute`, primitive, and each subgraph instance), before any work is done for it: past 100,000 the call is refused (`graph_too_large`, `what: "nodes"`); the links of every scope entered (the root's and each instance's) are counted as the scope is entered, and past 1,000,000 the call is refused the same way (`what: "wires"`); subgraphs nested more than 64 levels deep are refused the same way (`what: "subgraph depth"`); a node id longer than 256 characters is a `bad_template`; at most 1,000 warnings are kept, and the ones past that are counted in the result's `warnings_dropped`. Real templates use a handful of nodes per level and three levels |
+| id collisions | a node whose final id (`<instance>:<inner>` path included) is also another node's, in any scope and of any kind, and a subgraph definition id that appears twice, are `bad_template`, never resolved to whichever came last |
+
+**What it refuses, with a code and the details that locate it, and no graph.** `bad_template` (a file that is no workflow, a node or a subgraph definition whose `inputs` or `outputs` is not a list, a node id longer than 256 characters, a node id two scopes both give and a subgraph definition id that appears twice), `bad_object_info`,
+`bad_seed`, `bad_version` (a malformed version); `comfyui_too_old` (the template's minimum exceeds the given ComfyUI;
+both versions are in the details) and `comfy_version_unknown` (a minimum is known and no ComfyUI version was given: the
+version is passed in, never assumed); `unknown_node_class` (every class the listing lacks, with the node ids; muted and
+bypassed nodes do not count); `graph_too_large` (more than 100,000 nodes of any kind, subgraph instances included, counted over every expanded scope, more than 1,000,000 links over every scope entered, or subgraphs nested more than 64 levels; the details give the limit, what it counts and where it was passed); `ambiguous_bypass` (a bypassed node with a different number of outputs and connected inputs of one type; the details give the node, the type and both counts); `group_node_unsupported`; `subgraph_definition_missing`, `subgraph_cycle`,
+`subgraph_widget_mismatch`; `dangling_link`, `link_mismatch`, `link_cycle` (a loop in the wires, or a resolution that used one wire twice); `widget_mismatch` (more values than widgets, a
+flagged INT not followed by a control word, a dynamic combo's value that is no option of it); `unsupported_input_type` (a
+custom frontend widget such as an image comparer or a file-upload viewer, an autogrow of widgets, an input type with no
+rule); `primitive_without_value`; `internal_error` (a defect in the converter, never a template's fault). The version check
+runs first, before the seed, the listing and the template are looked at, so a too-old ComfyUI is never hidden behind another refusal. A refusal is a typed answer, and the converter does not try the next best reading.
+
+**What it does not do.** It does not check that a required input is wired (`preflight-graph-file.mjs` does, against a live
+listing), that a model file exists (the manifest satisfier does), or that a node pack is installed. It does not submit
+anything.
+
+**Evidence and status.**
+
+- `node --test render/template-to-graph.test.mjs`: one test per behaviour on small hand-built UI-format graphs, a synthetic
+  listing and two hand-worked goldens in `render/testdata/template-goldens/` (see its README: none of it is a frontend
+  export). A mutated widget order turns the golden red (a swap of two inputs, a swap of two combos, a type-breaking move).
+  A mutation run of 24 one-line changes to the converter, each applied to a copy and proved applied, turned the suite red
+  every time. A review then found twelve one-line changes that survived it; the fixes for its findings were written red first, and a
+  later run of 34 one-line changes (those twelve and the rules added since) turned the suite red every time too. A second independent check found the expansion cap charged only live nodes and subgraph instances: a template of a few hundred kilobytes, nested definitions each stuffed with `Note` nodes, stayed under the cap (65,535 instances) and ended in an `internal_error` after the walk had used gigabytes of memory. Every node met is now charged first, and tests pin the `Note`-, muted-, bypassed-, `Reroute`- and primitive-heavy bombs and an exact boundary of mixed kinds; the three undefined-link guards (a `Reroute`'s input, an instance's input, a live node's input) have a test each; the cycle tests assert which guard found a loop, so the hop bound behind the visited set cannot hide a set that stopped working; and the 99,998-hop chain test runs on a worker thread under a test-runner timeout, which a test body on the runner's own thread is never held to. A last independent check found that a hostile template could still exhaust memory or time in ways the node cap does not see; one test each, written red first, pins the wire cap (a definition of one `Note` and 2,000 links instanced 501 times is refused, 500 convert), the 1,000 kept warnings with the rest counted in `warnings_dropped`, and the 256-character node id.
+- The value-for-value comparison with the frontend's own export is `TEMPLATE_GOLDEN_DIR` (a folder with `object_info.json`
+  and `<name>.workflow.json` / `<name>.api.json` pairs); the test skips without it. It was run privately on two saved
+  workflows with an API-format file beside each (the shape of the frontend's Save (API Format) export, `_meta` titles
+  included; that the frontend wrote them is unverified): 50 of 50 and 20 of 20 nodes matched, inputs included, one of them a
+  subgraph template with dynamic combos. Neither file is in the repository.
+- A survey over a templates package (`TEMPLATE_SURVEY_DIR`) shows what refuses and why. On `comfyui-workflow-templates-json`
+  0.1.96 (593 files) with an `/object_info` listing saved on 2026-08-14, which is older than the package: 405 convert, and
+  every converted graph passes the graph check (each wire reaches a node that is in the graph and an output slot its class
+  has, and the output's type, from the listing's `output` list, shares a member with the type the target input declares;
+  5,055 nodes). The type check exists because the slot-matching rule for a subgraph's outputs was once pinned by no test:
+  dropping it left the suite green and put 37 wrong wires into 9 converted templates (a VAE into a MODEL input, a mesh into
+  an image input), which the type check flags and the new synthetic test, with three outputs of three types read in crossed order, turns red. The refusals: 86 `unknown_node_class` (classes newer than the listing), 45 `widget_mismatch`
+  (mostly schema skew between package and listing, and display widgets of nodes such as `CustomCombo`), 40
+  `unsupported_input_type` (mostly the image comparer), 2 `ambiguous_bypass` (a bypassed node with one output and two connected inputs of its type, which the earlier first-of-type reading converted), 15 `bad_template` (files that are not workflows). With `seed` set, 18 of the 405 leave at least one seed-named input alone and say so (`seed_not_pinned`: 6 wired seeds, 15 seeds with no control). The counts
+  describe that pair of package and listing and nothing else.
+- A malformed-field fuzz over the 405 convertible templates (29,928 cases: `inputs`, `outputs`, `widgets_values` and `properties` of the first nodes and of every bypassed node and subgraph instance replaced by an object, a string or a number, and the slot lists, nodes and links of each definition) ends every case in a graph or a typed refusal, never in `internal_error`; the same fuzz on the converter as first written ended 921 of its cases in one.
+
+**Known gaps.** The acceptance run, at least 10 non-API templates compared node by node with frontend-exported goldens, is
+a follow-up (the two private pairs are API-format files placed beside the workflows; that the frontend wrote them is unverified, so
+"frontend-exported" is a description of intent, not a checked fact). It needs a running ComfyUI to serve a current `/object_info` and a scripted frontend export of each template,
+which is GPU-lease work (ComfyUI is started only as a lease-wrapped command and stopped when it ends), so it was not run
+here; two matching pairs are not ten, and no template class is claimed beyond those. Every node in both private pairs is mode 0, so
+no comparison with a frontend export covers a bypassed or a muted node. Untested against a frontend export:
+the bypass pairing rule (positional by type; two templates of the survey above, which the earlier first-of-type reading converted, are now refused for it), the display-only counts, COLOR widgets and the upload slot counts (read
+from the template files). A class with a custom frontend widget is refused, not guessed; each such class is a candidate for
+the follow-up to decide. The caps bound the nodes of every kind, the wires, the hops of one wire resolution, the nesting depth, the warnings kept and the length of a node id. They do not bound the `widgets_values` copied per instance, nor the scans of a definition's inputs and links that each instance, and each read of one of its outputs, makes, so a hostile template can still use time and memory in proportion to the size of its values and definitions times the number of instances. The converter is meant for trusted template packages.

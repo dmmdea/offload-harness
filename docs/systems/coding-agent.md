@@ -246,7 +246,11 @@ ahead of `timeout` because every wait bounded by the call words itself with the 
 re-ask: the reason carries `core.ForcedFinalToolCallReason`; ahead of `budget`, whose stop_reason and prefix it shares, so its
 remedy does not tell the reader to split a contract that had read everything it needed) → `budget` → `abstention` (an
 "output failed schema" reason is `schema-miss / invalid`) → `schema-miss` (min_items/nonempty; sub-axes
-`two-step-grounded` = context docs and ≤ 2 steps, `invalid`) → `anchor-miss` (contains/not_contains/regex; same sub-axis) →
+`two-step-grounded` = context docs and ≤ 2 steps, `invalid`) → `anchor-miss` (contains/not_contains/regex; same sub-axis;
+an authority-qualified check keeps its verb prefix, so its failure lands here too, an UNKNOWN verdict (empty or absent
+evidence: an empty answer, an absent field) included: the axis names which kind of check failed, and the empty-versus-wrong
+distinction is in the evidence column, `unknown at <level> authority`, which is why an empty answer under a qualified check
+reads as an anchor-miss while an absent field under an unqualified `nonempty:` reads as a schema-miss) →
 `loop` → `long-observation` → `tool-misuse` (the last three on trace-bearing rows only) → `unclassified`. The report gives
 per axis the hits over the rows ELIGIBLE for it (trace axes count only rows with a trace), up to five evidence job ids with
 the deciding fact, the most repeated reason for seat-infra/timeout/unclassified, and the pre-authored remedy where the
@@ -484,6 +488,51 @@ preamble is never touched and no turn is dropped. The retry's shrink target is r
 just-rejected transcript's own estimate, not only the budget, so a dense-content estimate error
 can never make the retry re-send the bytes the server just refused.
 
+**Search-results rung (optional, default off: `compactOpts.SearchResults`).** One more lossy rung,
+for older tool bodies that are search listings: the grouped `search_files` output (`path:` then
+`  L<n>: text`) and bare `path:line:text` lines such as `grep -rn` or ripgrep print, alone or inside the
+`exit=` / `--- stdout ---` / `--- stderr ---` framing of `run_shell` and `run`. The rung is gated on the
+call that produced the body: the result's tool-call id is mapped to its call, and only `search_files`
+(grouped form) and a `run_shell` or `run` call whose command is a search (flat form) qualify. A search
+starts with `grep`, `rg`, `ag`, `ack` or `git grep`. The `run` tool's allowlist (`go`, `gofmt`, `python`,
+`python3`, `pytest`, `npm`, `node`, `cargo`, `git`) holds only `git` of those, so through `run` only
+`git grep` is reachable; `grep`, `rg`, `ag` and `ack` come through `run_shell`, which is Linux-only, so on
+another host only `git grep` qualifies at all. A search piped through
+pass-through filters only (`head`, `tail`, `sort`, `uniq`, `wc`, `cut`, `sed`, `awk`, `tee`, `cat`, or
+another search) still qualifies (`grep x f | head`); a pipe into anything else does not (`rg -l x | xargs flake8`,
+`rg x | flake8 -`), because the last stage's output is the body and it may be a linter's. A command that
+chains another one after the search (an unquoted `;`, `&&`, `||`, `&` or newline, found by a quote-aware
+scan) does not either, because the body then holds that command's output too. The check reads first words
+only and is not a shell parser: a filter that runs a command itself (`tee >(...)`, awk's `system()`, sed's `e`) or
+ANSI-C `$'...'` quoting is not seen. A linter such as flake8, ruff, `shellcheck -f gcc` or rubocop prints the
+same `path:line:col:text` lines, and every one of its diagnostics is something the agent must fix, so
+its output, a body with no matching call and an id claimed by two different calls are left alone.
+Everything else (the `web_search` list, `mode:"files"` output, test output, an error result) is left
+alone too. It runs after
+dedupe and GCF and before the generic skeleton, over the same older span as that rung (never the
+protected preamble or the kept-recent tail), skips pinned bodies, and rewrites only a tool message's
+body. Each line is scored with BM25 against the objective (the last user message of the protected
+preamble, the one task text that is the same on every step; the line's own path counts as part of the
+line), lines that look like errors (`error`, `fail`, `panic`, `exception`, `fatal`) get a fixed boost, and
+the survivors are chosen round-robin across files, best score first, up to 30 lines, 5 per file and 15
+files (chosen to match the values shown in the upstream configuration example), then written back in listing order under a
+footer (a 100-match listing over 20 files ends `[... 70 of 100 lines elided, 5 of 20 files elided ...]`: 30 lines and 15 files are the most
+that survive, and a test pins this exact line); the tool's own "more matches" or "truncated" note is kept. The result opens with the skeleton disclosure line, so the rest of the ladder,
+the re-execute-on-repeat path (ADR 0016) and the corpus harvest treat it as the compaction artifact it
+is, and a later elision marker still names the original size. It is deterministic, idempotent,
+monotonic (a result that is not strictly shorter is discarded) and fails closed: a body that is not,
+line for line, one of the accepted shapes comes back untouched. It has no CLI flag or loop setter yet,
+and `compaction-eval` does not replay it yet (the measurement that decides it first needs
+`agent.ReplayOpts`, `compeval.LadderOpts` and the verb's flag extended): the option is reachable from
+the ladder's own options and from tests, the default ladder is pinned
+byte for byte by `internal/agent/testdata/ladder_default_golden.json`, and whether the rung ever
+becomes a default is decided by the measurement gate on a harvested corpus, not by this page. Three
+pieces of work must land, in a separate change, before the rung can be switched on by default: an adaptive cap (the fixed
+30/5/15 do not scale with the window), a production entry point (a CLI flag or loop setter), and the
+measurement of how the rung interacts with the generic skeleton rung. Source:
+`internal/agent/rung_search.go`. The idea is documented by the Headroom project (Apache-2.0); this is a
+clean-room implementation of that documented behaviour (see `NOTICE`).
+
 **Compaction eval harness (`compaction-eval`, `internal/compeval`).** Default flips for the ladder
 rungs are gated by MEASUREMENT, never estimates: the verb replays a pinned corpus (JSONL of
 transcript slices, sha256-hashed; a PII finding refuses the whole corpus) through the PRODUCTION
@@ -609,6 +658,124 @@ demands the frozen report back byte for byte. With no source flag, harvest reads
   and adds nothing to the token sums; the seat's own input-token figure (`seat_tokens_in`) is reported beside it for the runs
   that carry one.
 
+### The `contextbench` task bench (`compaction-eval contextbench`)
+
+`compaction-eval contextbench` is the instrument for the context-editing decision: it drives long-horizon
+tasks against one agent seat and grades what the harness kept, so the compaction ladder and the context pager
+can be measured on work whose input does not fit the window. It ports the task generators and graders of
+[ContextBench](https://github.com/RulinShao/ContextBench) (Apache-2.0; credited in `NOTICE`, and each ported
+file names its upstream file and commit). It is unrelated to `kvbench`, which measures KV-prefix reuse.
+
+| Family | What streams | What is asked | Reward |
+|---|---|---|---|
+| `kv_store` | batches of `SET key = value`, values random and unguessable | `GET key` for keys not announced in advance | share of GETs answered with the right value (memory: nothing can be summarised or guessed) |
+| `log_triage` | batches of service log lines | exact-message lookups and level-and-service counts | share of questions answered correctly (needs the exact log) |
+| `needle_retention` | chunks of a few needle lines plus a large filler block | nothing: the agent keeps the needles | share of needle lines still present, verbatim, in the final context (retention) |
+| `sudoku_sketchpad` | one fully specified move per turn | the agent re-prints the whole board after each move | share of gold board versions it displayed exactly (in-context state maintenance) |
+
+Tasks are generated, not downloaded. Each generator reproduces the original's random stream (the Mersenne
+Twister, `choice`, `sample`, `shuffle` and `choices` of CPython), and a test pins the digest of every family's
+operation stream against the original generator's output, so `--seed 42` is the published seed-42 instance;
+`scripts/contextbench_parity_regen.py` regenerates those digests from a checkout of the pinned upstream commit and
+reports any that the tests no longer pin.
+The published levels are the `--level` names (`R130` to `R16000`, `L160` to `L12800`, `K4-C4` to `K2-C224`,
+`t4` to `t150`); without one, each family runs its smallest level whose uncompacted transcript (the instruction,
+every operation and, for `sudoku_sketchpad`, the whole board panel the agent prints after each move) exceeds the
+usable budget of record, 32768 tokens minus the 2048 reserved. That is `R1000`, `L1600`, `K4-C24` and `t60`: the
+sudoku stream alone is small (about 12k estimated tokens even at `t150`), so it is the panels that overflow, from
+`t60` (about 41k) on, where `t30` is about 21k. A test pins each default as the smallest level over the line.
+`--tasks N` runs seeds `--seed` to `--seed + N - 1` for each chosen family.
+
+```
+local-offload compaction-eval contextbench --family kv_store --tasks 8 --out results.json \
+    [--endpoint URL] [--model ID] [--level R1000] [--budget 32768 --reserve 2048] \
+    [--delivery tool_result|user] [--gcf] [--skeleton] [--max-turns N] [--pass-at 1.0] \
+    [--max-out 4096] [--request-timeout 600] [--config FILE]
+```
+
+The endpoint and model default to the configured ones, as for `kvbench`; `--config` names the config file that
+supplies them. The other `compaction-eval` subcommands take no `--seat` or `--route`; here `--seat` is an alias of
+`--model`, and `--route` accepts only `local`, because the verb drives the one endpoint it is given and places
+nothing on the fleet. `--max-out` caps one reply, in tokens (default 4096; a sudoku panel is about a thousand).
+`--request-timeout` is the transport deadline of one seat request, in seconds (default 600); a request that hits it
+ends the task as `infra_error`. `--max-turns` caps seat replies per task (default 3 x operations + 10). A value the run
+would silently replace with a default is refused instead, with the flag's name: `--budget`, `--reserve`, `--max-out`
+and `--request-timeout` must be at least 1, `--pass-at` must be above 0 and at most 1, `--max-turns` at least 0
+(0 is the default), and `--reserve` must be below `--budget`. The verb runs a model and is never run by the test
+suite: the tests inject a fake seat through the same function-valued seam.
+
+How a run works. The transcript starts with a short instruction written for this adapter (the original's
+scaffolds are prose and are not copied, so scores compare harness configurations with each other, not with
+published numbers). Each operation is delivered as the result of a synthetic `next_op` tool call
+(`--delivery tool_result`, the default) because the ladder shrinks tool-result bodies (dedupe, skeleton,
+elision) before it drops whole turns; with `--delivery user` operations are user messages, as upstream
+delivers them, and only the last rung (dropping older bare messages) can act. Before every send the
+transcript goes through `agent.CompactReplay` at `budget - reserve`, estimated with the ladder's own
+chars-divided-by-four estimator (the report stamps `size_estimator`), and the compacted transcript is kept,
+as the production loop keeps it. The agent advances the stream with `READY_FOR_NEXT_OP` on a line of its own;
+the run ends when the last operation has been answered. Every compaction is passed to `agent.PagerStats`,
+whose eviction counts are stored per task. In this reply-only setting the agent has no tool to fetch evicted content,
+so the stored pager report has basis `not_exercised` and a null `refetch_rate`: it shows what was evicted and never a
+re-fetch rate or a gate verdict.
+
+Which snapshot the grade uses. A snapshot is the `[]agent.Msg` transcript at one moment. The run records two per
+step: `sent` (what the seat was handed, after compaction) and `turn` (the transcript right after the seat's
+reply, before the next compaction). A context that stays over the budget is never handed to the seat and is never
+recorded, so every snapshot is something the seat saw. A grader reads one field of a snapshot, `Msg.Content` of every message,
+joined by newlines; roles and tool-call arguments are not scanned. `kv_store`, `log_triage` and
+`sudoku_sketchpad` scan every snapshot, so a reply is credited once it appeared, even if the ladder
+removed it afterwards. `needle_retention` scans only the last snapshot, the context the agent still holds at the
+end (when the budget wall stops a run, that is the last snapshot before the wall, so operations the seat never
+received earn no credit). The instruction text sits in the scanned context, so it carries placeholders only, never an example
+that could pass for an answer (a test pins that the bare instruction scores nothing).
+
+Per-task outcomes use the measurement gate's seven words, and only these:
+
+| Word | When |
+|---|---|
+| `pass` | graded, reward at or above `--pass-at` (default 1.0: every item right) |
+| `task_fail` | graded, reward below it; the reward is kept (0.958 of the needles is a `task_fail` and the number the bench exists to produce) |
+| `infra_error` | the seat could not answer: connection refused, no endpoint, a reset mid-run; or the budget cannot hold the instruction plus the first operation, so the seat was never called (the detail says so). Never graded, never a `task_fail` |
+| `timeout` | the attempt hit its budget and was not graded: `--max-turns` reached before the stream drained, or (`kv_store`, `log_triage`) the context stopped fitting the token budget before the seat was handed any query, recorded as `term_reason` `budget_wall_before_query`; no reward. Under the default delivery the production ladder cannot hold `log_triage` at `L12800` (its preserve guard keeps every signal-bearing tool result), so a perfect agent ends that published cell here: a deliberate signal about the ladder, explained below the table |
+| `judge_error` | the grade could not be computed (no snapshots, empty gold, a sudoku gold without its board side) |
+| `not_run` | the run was interrupted before the task finished or began, including an interrupt that lands while a seat request is in flight |
+| `cheat` | reserved for the gate's vocabulary; this adapter has no check for gaming a grader and never emits it |
+
+A task whose context stops fitting the budget (`terminated_by` `budget_wall`) ends one of three ways. Before the
+seat has answered once, nothing was measured: `infra_error`; the verb refuses a budget too small for the instruction
+plus the first operation before any seat call, and driven as a library such a task ends `infra_error`. After that,
+and before the seat was handed a single query (the operations from `query_start` on, in `kv_store` and
+`log_triage`), no frame can hold an answer, so grading it would score the agent zero for questions it was never
+asked: the task is `timeout` with `term_reason` `budget_wall_before_query` and no reward. Once a query has been
+handed over, and in the two families that ask nothing (`needle_retention`, `sudoku_sketchpad`), the wall is graded
+on the frames the task has. The results JSON holds, per task, the outcome word, the reward (null unless graded),
+how the run ended and the term reason if any, turns, operations delivered (appended to the transcript, the one
+that did not fit at a wall included) and operations sent (those the seat was handed), compaction count, the largest
+context sent (estimated tokens) and the pager report, plus the outcome counts and the mean reward per family; it
+has no timestamps. With no seat reachable every task is `infra_error` and the verb exits non-zero saying nothing
+was measured.
+
+One published cell ends as a `timeout` for a perfect agent, on purpose. Under the default `tool_result` delivery the
+production ladder cannot hold `log_triage` at `L12800`: its preserve guard keeps every tool result that still
+matches a signal word (error, fail, warn, timeout, refused and the like), the synthetic log lines carry `[WARN]`,
+`timeout` and `refused`, and tool messages are almost the whole transcript, so collapsing old pairs makes no room.
+An oracle that answers every query from the gold stops at the wall after 221 or 222 of the 262 operations were
+sent (all eight published seeds), and the task ends `timeout` / `budget_wall_before_query`. The level is left as
+published rather than regenerated to dodge the guard: the cell is a signal about the ladder, not a score, and a test
+pins it. Every other family's largest level passes the oracle under the same delivery. `--delivery user` reaches
+only the drop rung and passes that cell, which is why the choice of delivery is reported beside every result.
+
+Four of the graders' rules are stricter or more forgiving than a literal reading of the answer block, and each has a
+test. A `kv_store` answer is matched on its key without surrounding quotes or case, and its value must stand as a
+whole (the characters around it are not letters or digits), so the same words with a longer tag do not count. A
+`log_triage` count answer is read after a repeated `Query N` or `qid=N` label is removed and digit groups such as
+`12,800` are joined, and it still must state exactly one number.
+
+What it does not do. It is not a measurement: no run is recorded in this repository and no decision follows from
+the bench alone; the context-editing decision record comes after a leased measurement run. Instance bytes
+match the original; the instruction wording and the operation delivery (`tool_result`) do not, so a published
+score is not comparable with one from this bench.
+
 ### The `browse` tool (opt-in, 0.141.0, ADR 0060)
 
 `browse` (`url`, `goal`, `max_actions`, `security_risk`) drives the operator's own running,
@@ -704,7 +871,9 @@ because the local seat is the one another session's lease fences, and a rescue t
 that very lease (the lane instead reads a skipped or cut re-pack's raw lines itself, through its own
 filters and without a second completion: `reviewlane.Salvage`, see [mcp-server.md](mcp-server.md)); and `offload_ask` at a named remote route keeps its own handling of a finished answer
 (its prose still reaches the caller: a deferred `offload_ask` carries it as `output`, flagged `schema_miss`), which the security review records as deliberate, so wiring it is
-outside this change. The seam is one field, `RunOptions.Rescue`, if any of them should be wired later.
+outside this change. The same holds for the cross-seat retry an `offload_ask` gives a failed local first attempt
+(the single-contract path at `route=remote`, [mcp-server.md](mcp-server.md)): a retry that defers keeps no rescue and
+none of its prose, and the first answer stands with the retry's fate in `retry_note`. The seam is one field, `RunOptions.Rescue`, if any of them should be wired later.
 
 **A re-pack is read against its answer.** The schema validator says an object has the right shape,
 not that it kept the content, and the acceptance checks read fields (`contains:` the answer's text,
@@ -1049,7 +1218,10 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - [`internal/agent/runtool.go`](../../internal/agent/runtool.go) — allowlist, direct exec
 - [`internal/agent/writetools.go`](../../internal/agent/writetools.go) — `os.Root` scoping
 - [`internal/agent/builder.go`](../../internal/agent/builder.go) — capability grants, audit-path check
-- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`internal/compeval/`](../../internal/compeval/)
+- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`rung_search.go`](../../internal/agent/rung_search.go), [`internal/compeval/`](../../internal/compeval/)
+- [`compaction_contextbench.go`](../../compaction_contextbench.go) — the `compaction-eval contextbench` verb;
+  [`internal/compeval/contextbench_run.go`](../../internal/compeval/contextbench_run.go) (driver, outcomes),
+  `contextbench_gen_*.go` and `contextbench_grade_*.go` in [`internal/compeval/`](../../internal/compeval/) (ported generators and graders)
 - [`internal/delegate/`](../../internal/delegate/) — delegator-side placement, intake, execution
   engine, acceptance evaluation
 - [`internal/pipeline/agenttask.go`](../../internal/pipeline/agenttask.go) — contract execution

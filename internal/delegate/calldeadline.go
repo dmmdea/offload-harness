@@ -457,7 +457,7 @@ func (r *runner) cutOutcome(pr PlacedResult, quote bool) PlacedResult {
 	}
 	pr.Result = r.call.stamp(wire, where)
 	pr.Err = ""
-	pr.AcceptanceFailures = nil
+	pr.AcceptanceFailures, pr.AcceptanceAuthority = nil, core.AuthNone
 	pr.refused, pr.refusalStatus = false, 0
 	pr.deadlineCut = true
 	return pr
@@ -784,7 +784,7 @@ func lookAnswer(contract core.AgentContract, holder string, p jobPoll, pr *Place
 		}
 		pr.takeQueueAnswer(wire, holder)
 		if !wire.Deferred {
-			pr.AcceptanceFailures = EvalAcceptance(contract, wire)
+			pr.gradeAcceptance(contract, wire)
 		}
 	case "error":
 		pr.Err = "queue job failed: " + p.JobErr

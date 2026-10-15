@@ -35,6 +35,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 )
 
 // ---- 1. the long poll -------------------------------------------------------
@@ -151,18 +152,51 @@ func serveOn(t *testing.T, s *Server, blanket time.Duration) string {
 // write deadline at header-read, so a 30 s blanket bounds a handler that
 // budgets ChatProxyTimeout = 10 minutes: the answer is cut mid-write and the
 // caller reads a healthy node as broken infrastructure.
+//
+// THE HANG THIS TEST USED TO HAVE. The lane forwards through the GPU-lease fence
+// (modelaffinity.AwaitModelRoute), and a request for a model llama-swap does not list as
+// ready waits at that fence, up to ChatProxyTimeout (ten minutes), for any media lease the
+// host holds. The fence is process-wide state that config.Load arms at the machine's real
+// lease directory, and an earlier test in this binary loaded a config and left it armed: on
+// a host that was holding a lease the forward sat in awaitLease until the package timeout
+// panicked the whole run (alone, nothing armed the fence and the test took 0.76 s). This test
+// is about the write deadline, not the fence, so it runs unfenced, and its blocking read has a
+// bound of its own, so a lane that never answers fails here with a message.
 func TestChatLaneOutlivesTheBlanketWriteTimeout(t *testing.T) {
+	restoreGPUFence(t)
+	modelaffinity.DisarmGPULease()
 	up := slowSwap(t, 700*time.Millisecond)
 	s := servingNode(t, chatCfg(up.URL, ""), true, "gemma-4-e4b")
 	base := serveOn(t, s, 250*time.Millisecond)
 
-	resp, err := http.Post(base+ChatLanePath, "application/json", strings.NewReader(chatBody))
+	// The bound on every blocking read below. The answer takes 0.7 s; the bound is far past that so a
+	// starved host still passes, and well inside the test binary's own deadline so a hang fails here.
+	bound := 30 * time.Second
+	if dl, ok := t.Deadline(); ok {
+		if room := time.Until(dl) - 5*time.Second; room < bound {
+			bound = room
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), bound)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+ChatLanePath, strings.NewReader(chatBody))
 	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			t.Fatalf("the chat lane gave no answer within %s: it is blocked (a GPU-lease fence armed by an earlier test, or a handler that never writes), and a 0.7 s upstream answer must come back", bound)
+		}
 		t.Fatalf("chat forward died at the blanket write timeout: %v — the handler must extend its own deadline to ChatProxyTimeout", err)
 	}
 	defer resp.Body.Close()
 	body, rerr := io.ReadAll(resp.Body)
 	if rerr != nil {
+		if ctx.Err() != nil {
+			t.Fatalf("the chat lane stopped answering within %s while the body was being read (got %q)", bound, body)
+		}
 		t.Fatalf("reading the forwarded answer: %v (got %q)", rerr, body)
 	}
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "complete") {

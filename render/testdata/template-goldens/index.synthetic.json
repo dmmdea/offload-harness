@@ -1,0 +1,13 @@
+[
+  {
+    "moduleName": "synthetic",
+    "category": "Synthetic",
+    "title": "Synthetic fixtures",
+    "type": "image",
+    "templates": [
+      { "name": "basic-t2i", "title": "Basic text to image", "minComfyUIVersion": "0.3.0" },
+      { "name": "subgraph-i2v", "title": "Subgraph image to image", "minComfyUIVersion": "0.99.0" },
+      { "name": "no-minimum", "title": "No declared minimum" }
+    ]
+  }
+]

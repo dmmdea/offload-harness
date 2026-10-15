@@ -43,6 +43,20 @@ func fencedChatSwap(t *testing.T, running string, chats *atomic.Int64) *httptest
 	return srv
 }
 
+// restoreGPUFence puts the process-wide GPU-lease fence back as it is now when the test ends. The fence is
+// armed by config.Load and by SetGPULease, and neither is undone by the test that did it, so a test that
+// arms it leaves every later test in this binary fenced behind the host's real lease directory.
+func restoreGPUFence(t *testing.T) {
+	t.Helper()
+	prev := modelaffinity.GPULeaseDir()
+	t.Cleanup(func() {
+		modelaffinity.DisarmGPULease()
+		if prev != "" {
+			_ = modelaffinity.SetGPULease(prev, "")
+		}
+	})
+}
+
 func holdMediaLease(t *testing.T) {
 	t.Helper()
 	root := t.TempDir()

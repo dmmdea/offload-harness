@@ -47,16 +47,29 @@
 // not an epoch bump, so the carve-out's reasoning is untouched. Details, and the
 // ClassText and pid decisions, live in gpuwait.go.
 //
-// CROSS-PROCESS LIMIT — STATED PLAINLY. The registry lives in this process. Two
-// harness processes on one box (an MCP server and a CLI invocation, two MCP
-// servers under two editors) still thrash each other exactly as before: neither
-// can see the other's in-flight set. Making it machine-wide would require the
-// same fenced, pid-recycle-safe, machine-wide state root gpulease uses — an
-// acquire/release round trip through the filesystem on EVERY text call, which is
-// the cost gpulease refused for text. Nothing here narrows that gap; it only
-// fixes the common case, which is one harness process with several concurrent
-// lanes inside it (delegate's fan-out, the MCP server's concurrent tool calls,
-// the agent loop running beside a cascade call).
+// CROSS-PROCESS LIMIT — STATED PLAINLY, AND ACCEPTED (ADR 0025, Amendment
+// 2026-10-14). This gate's registry lives in this process, so the swap itself
+// stays per process: two harness processes on one box (an MCP server and a CLI
+// invocation, two MCP servers under two editors) that name different models on
+// one base cannot see each other's in-flight set, and can still make llama-swap
+// switch between them. Making that machine-wide would put the fenced,
+// pid-recycle-safe, machine-wide state root gpulease uses on EVERY text call's
+// admission path, the cost gpulease refused for text. It is not built, and it
+// reopens on a measurement, not a process count: processes with in-flight
+// requests naming different models on one base at once, set against the
+// switches llama-swap logged for it (the amendment names the sources and the
+// shape).
+//
+// Two halves of this package do answer to the machine, and the limit stops at
+// them: the run cap and its line (seatslot.go, over the gpuactivity run
+// registry) counts the agent runs of every process on a seat, and the card
+// fence (gpuwait.go) reads the lease directory, so a text load waits instead of
+// landing on a card a render in another process holds. internal/seatinflight
+// counts in-flight requests across processes too, but only for PAIR's display;
+// nothing admits or parks on it. What the gate fixes by itself is the common
+// case: one harness process with several concurrent lanes inside it (delegate's
+// fan-out, the MCP server's concurrent tool calls, the agent loop running beside
+// a cascade call).
 //
 // THE /upstream ROUTES. llama-swap's per-model passthrough (/upstream/{model}/…)
 // starts the model it names, and the probes that use it — internal/agent's
