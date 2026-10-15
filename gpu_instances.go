@@ -36,6 +36,14 @@ var comfyStopFn = func(ctx context.Context, comfyDir string, epoch uint64) []com
 // or by the next lease on its card.
 func stopInstancesOfLease(cfg config.Config, lease *gpulease.Lease, out io.Writer) {
 	if err := lease.Check(); err != nil {
+		if gpulease.IsRecordUnreadable(err) {
+			// A record that cannot be read does not show that the lease is anyone else's: nothing is stopped (a lease that may be
+			// ours is not proved ours), and the line says what is true.
+			if strings.TrimSpace(cfg.ComfyDir) != "" {
+				fmt.Fprintf(out, "gpu: leaving the ComfyUI instances kept under lease epoch %d running: its record cannot be read (%v), so the lease is not shown to be ours; stop them by hand, or release the lease, when it can be read\n", lease.Epoch(), err)
+			}
+			return
+		}
 		if strings.TrimSpace(cfg.ComfyDir) != "" {
 			fmt.Fprintf(out, "gpu: leaving the ComfyUI instances kept under lease epoch %d running: the lease is no longer ours (%v), so the card, and any instance on it, may be another lease's now; stop them by hand if they are not\n", lease.Epoch(), err)
 		}

@@ -461,10 +461,14 @@ and writes only `freeze --out` and `selftest --out`.
 
 ## The power note
 
-`power` is the half-width `hw = (hi - lo) / 2` of the main interval read three ways, with no extra statistic:
-`projected` is `hw * sqrt(n / n')` for `n' = 16, 24, 120` usable tasks (the sizes of the digest contract set, a blind
-pack and the confidence-calibration probe); `tasks_needed` is `ceil(n * (hw / m)^2)` where `m` is the margin
-(non-inferiority) or the observed `|delta|` (superiority); `tasks_to_add` is `max(0, tasks_needed - n)`. `tasks_needed` and
+`power` is the half-width `hw = (hi - lo) / 2` of the main interval read three ways, with no extra statistic and with
+the interval the gate itself reads. For a pass/fail record (every pair a tie, a win or a loss of the whole range, read on
+Tango's interval) `projected` is that interval's half-width at `n' = 16, 24, 120` usable tasks with the observed shares
+of wins and losses held, and `tasks_needed` is the smallest count whose half-width is below `m`: an all-tie record's
+half-width is `z^2 / (n + z^2)`, so a 0.05 margin is resolved at 73 ties, where a `1 / sqrt(n)` curve asked for 240. For
+any other record `projected` is `hw * sqrt(n / n')` (the sizes of the digest contract set, a blind pack and the
+confidence-calibration probe) and `tasks_needed` is `ceil(n * (hw / m)^2)`. `m` is the margin (non-inferiority) or the
+observed `|delta|` (superiority); `tasks_to_add` is `max(0, tasks_needed - n)`. `tasks_needed` and
 `tasks_to_add` are numbers, or the word `"unbounded"` when no finite answer follows (superiority with `delta` of 0, fewer
 than two usable pairs, or a projection past a billion tasks). It is the corpus-growth step rule R4 prescribes: add tasks,
 not attempts. It does not make `n_used` reach `min_pairs`; the verdict's reason says that separately.

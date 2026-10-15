@@ -45,8 +45,11 @@ package gpulease
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
+	"os"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -436,6 +439,88 @@ type AwaitHostRAMOptions struct {
 	// there that the lease holds its cards and is waiting for the host. Once, because a line per poll is a
 	// notification per second in the session that wraps the reserve.
 	OnWait func(*ErrHostRAM)
+	// HoldUntil, when set, is the moment the caller releases the lease if the host still lacks the room (the CLI passes the
+	// earlier of its hold bound and its --wait deadline, which is also the Deadline): it is stamped on the lease's record
+	// (Meta.HostRAMHoldUntilMs) when the wait BEGINS, so `gpu status` can say when the lease will be released and the lease's
+	// hidden holder can release it itself if the caller died. It is taken off the record only by admission, in the same
+	// critical section that declares the figure: a wait that ends any other way leaves it, because a lease that still asks for
+	// the host and carries no moment is one nobody is bound to release, and clearing it on the way out left a window of
+	// milliseconds in which a caller that died stranded the cards. It bounds nothing by itself; Deadline does.
+	HoldUntil time.Time
+	// OnStampError, when set, is told when the bound's stamp could not be written. The wait does not fail on it: the stamp is
+	// what `gpu status` and the hidden holder read, not what ends the wait, so a failed write costs the status line and the
+	// holder's own enforcement, and the CLI says so once.
+	OnStampError func(err error)
+	// RequireStamp makes a stamp that cannot be written a failure of the wait: the stamp is tried a few times, and if it still has
+	// not landed the wait ends with *ErrHoldStamp before the host is looked at. The caller that sets it is one whose hidden holder
+	// is the only thing that can release the lease if the caller dies, so a wait the holder cannot see the end of must not run.
+	RequireStamp bool
+}
+
+// ErrHoldStamp is the failure of a wait that RequireStamp bound to its stamp: the moment the wait ends could not be put on the
+// lease's record, after Tries attempts. The record is left as it was (an earlier, outer stamp stays).
+type ErrHoldStamp struct {
+	Epoch uint64
+	Tries int
+	Err   error
+}
+
+func (e *ErrHoldStamp) Error() string {
+	return fmt.Sprintf("gpulease: host RAM: the moment the wait ends could not be written on the record of epoch %d after %d tries: %v", e.Epoch, e.Tries, e.Err)
+}
+
+func (e *ErrHoldStamp) Unwrap() error { return e.Err }
+
+// StampHostRAMHold puts the moment a host-RAM wait ends on the record of lease epoch (Meta.HostRAMHoldUntilMs). It does it only
+// while the lease still asks for the host: on an admitted lease the stamp would be a bound nothing is running.
+func (m *Manager) StampHostRAMHold(epoch uint64, until time.Time) error {
+	return m.StampHostRAMHoldPhase(epoch, until, HoldPhaseWait)
+}
+
+// The phases of the moment a lease's hold stamp (Meta.HostRAMHoldUntilMs) stands for. Outer: a detached reserve's bound while it
+// still clears the seat (the drain, the unload); the host has not been asked, and a live reserve keeps moving it, so it is the
+// moment the hidden holder releases the lease only if the reserve DIES. Wait: the end of the wait for the host. Release: the
+// reserve is releasing the lease itself and has pushed the stamp out so the holder does not race it. An older writer leaves none.
+const (
+	HoldPhaseOuter   = "outer"
+	HoldPhaseWait    = "wait"
+	HoldPhaseRelease = "release"
+)
+
+// StampHostRAMHoldPhase is StampHostRAMHold saying which phase the stamped moment is.
+func (m *Manager) StampHostRAMHoldPhase(epoch uint64, until time.Time, phase string) error {
+	if stampFaultHook != nil {
+		if err := stampFaultHook(epoch); err != nil {
+			return err
+		}
+	}
+	ms := until.UnixMilli()
+	return m.Restamp(epoch, func(mt *Meta) {
+		if mt.HostRAMWaitGiB <= 0 {
+			return // admitted (or nothing was deferred): no bound is running
+		}
+		mt.HostRAMHoldUntilMs = ms
+		mt.HostRAMHoldPhase = phase
+	})
+}
+
+// stampTries and stampRetryPause are how often, and how far apart, a stamp that RequireStamp binds the wait to is tried before the
+// wait fails. Variables so a test need not stand in line for the pause.
+var (
+	stampTries      = 4
+	stampRetryPause = 250 * time.Millisecond
+)
+
+// stampFaultHook is a test seam: when set, StampHostRAMHold fails with what it returns for the epoch. nil in production.
+var stampFaultHook func(epoch uint64) error
+
+// UseStampFault makes every StampHostRAMHold in this process fail with what fn returns for the epoch (nil from fn lets it
+// through), until the returned function is called: the way a test in another package provokes a stamp that cannot be written
+// while the other restamps of the lease (the drain's, the exclusive one) still work. Nothing in production calls it.
+func UseStampFault(fn func(epoch uint64) error) (restore func()) {
+	old := stampFaultHook
+	stampFaultHook = fn
+	return func() { stampFaultHook = old }
 }
 
 // AwaitHostRAM admits the host RAM a lease asked for after it cleared the seat (Options.HostRAMWaitGiB) and
@@ -454,16 +539,55 @@ type AwaitHostRAMOptions struct {
 // so a grant on other cards that fits is admitted ahead of it and the lease then waits for that grant's load.
 func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 	told := false
+	stamped := false
 	for {
 		need, found := awaitedFigure(m.Leases(), epoch)
 		if !found {
-			return fmt.Errorf("gpulease: host RAM: the lease is gone (epoch %d)", epoch)
+			if err := m.leaseMissing(epoch); err != nil {
+				return err
+			}
+			continue // it turned up again: a read that failed for a moment
 		}
 		if need <= 0 {
 			return nil // admitted already (or nothing was deferred)
 		}
 		if cancelled(o.Cancel) {
 			return ErrCancelled
+		}
+		if !stamped && !o.HoldUntil.IsZero() {
+			// The wait BEGINS here, before the host is looked at: put the moment it ends on the record, where `gpu status` and the
+			// lease's hidden holder (other processes) read it. A reserve that dies before its first look has then still left a bound
+			// the holder can enforce. A stamp that cannot be written costs the status line and the holder's own enforcement, not the
+			// wait (the bound itself is the caller's Deadline): it is reported, tried again at the next look, and the wait goes on.
+			tries := 1
+			if o.RequireStamp {
+				tries = stampTries
+			}
+			var last error
+			for i := 0; i < tries && !stamped; i++ {
+				if i > 0 {
+					m.pauseOrCancel(stampRetryPause, o.Cancel)
+					if cancelled(o.Cancel) {
+						return ErrCancelled
+					}
+				}
+				if last = m.StampHostRAMHold(epoch, o.HoldUntil); last == nil {
+					stamped = true
+				} else if o.OnStampError != nil {
+					o.OnStampError(last)
+				}
+			}
+			if !stamped && o.RequireStamp {
+				if _, live := awaitedFigure(m.Leases(), epoch); !live {
+					if err := m.leaseMissing(epoch); err != nil {
+						return err // that, not the stamp, is what failed
+					}
+					continue
+				}
+				// The caller's hidden holder is the only thing that releases this lease if the caller dies, and it can enforce only
+				// what is on the record: a wait it cannot see the end of must not run. The host has not been looked at.
+				return &ErrHoldStamp{Epoch: epoch, Tries: tries, Err: last}
+			}
 		}
 		reading := m.readHost(need) // before the lock, compared inside it (F57)
 		var refused *ErrHostRAM
@@ -485,13 +609,18 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 			return m.restampLocked(epoch, func(mt *Meta) {
 				mt.HostRAMGiB = cur
 				mt.HostRAMWaitGiB = 0
+				mt.HostRAMHoldUntilMs = 0
+				mt.HostRAMHoldPhase = ""
 			})
 		})
 		switch {
 		case err != nil:
 			return err
 		case gone:
-			return fmt.Errorf("gpulease: host RAM: the lease is gone (epoch %d)", epoch)
+			if err := m.leaseMissing(epoch); err != nil {
+				return err
+			}
+			continue
 		case refused == nil:
 			return nil
 		case refused.Impossible:
@@ -512,6 +641,53 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 	}
 }
 
+// The wait looks for a lease that is not among the live ones this many more times, this far apart, before it believes the lease is
+// gone: a record read that fails for a moment (a rename that replaces it, a scanner holding it) shows the lease as absent.
+var (
+	missingRechecks     = 3
+	missingRecheckPause = 100 * time.Millisecond
+)
+
+// leaseMissing is what AwaitHostRAM answers when the lease it waits for is not among the live ones. It looks again, and returns nil
+// if the lease turned up. Otherwise it says why it is missing from the record itself: the lease is gone, or its record cannot be read
+// (which is not the same, and keeps its cause).
+func (m *Manager) leaseMissing(epoch uint64) error {
+	var st RecordState
+	var cause error
+	for i := 0; i <= missingRechecks; i++ {
+		if i > 0 {
+			m.pause(missingRecheckPause)
+		}
+		if _, found := awaitedFigure(m.Leases(), epoch); found {
+			return nil
+		}
+		st, cause = m.RecordState(epoch)
+	}
+	if st == RecordUnreadable {
+		return fmt.Errorf("gpulease: host RAM: the record of epoch %d cannot be read, so the lease is not known to be gone: %w", epoch, cause)
+	}
+	return fmt.Errorf("gpulease: host RAM: the lease is gone (epoch %d)", epoch)
+}
+
+// holdPhaseOf is the phase a record's hold stamp is in: none without a stamp, and the wait's for a stamp an older writer made.
+func holdPhaseOf(meta *Meta) string {
+	switch {
+	case meta.HostRAMHoldUntilMs <= 0:
+		return ""
+	case meta.HostRAMHoldPhase == "":
+		return HoldPhaseWait
+	}
+	return meta.HostRAMHoldPhase
+}
+
+// holdUntilOf is Meta.HostRAMHoldUntilMs as a time (the zero Time when no bound is running).
+func holdUntilOf(ms int64) time.Time {
+	if ms <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms)
+}
+
 // awaitedFigure is the host RAM the live lease with this epoch is waiting to have admitted (0 = none), and whether the
 // lease is live at all.
 func awaitedFigure(live []Info, epoch uint64) (float64, bool) {
@@ -529,4 +705,221 @@ func (l *Lease) AwaitHostRAM(o AwaitHostRAMOptions) error {
 		return errors.New("gpulease: lease already released")
 	}
 	return l.mgr.AwaitHostRAM(l.epoch, o)
+}
+
+// removeClaimFault is a test seam: when set, removeClaim (every lease and claim removal goes through it) fails with what it
+// returns. nil in production. UseRemoveFault is the way a test in another package reaches it.
+var removeClaimFault func(path string) error
+
+// checkFaultHook is a test seam: when set, Lease.Check fails with what it returns for the epoch. nil in production.
+var checkFaultHook func(epoch uint64) error
+
+// UseCheckFault makes Lease.Check fail with what fn returns for the epoch (nil from fn lets the fence run) until the returned
+// function is called: the way a test in another package provokes a fence read that fails for a moment, as a read of a record
+// that is being replaced does on Windows. Nothing in production calls it.
+func UseCheckFault(fn func(epoch uint64) error) (restore func()) {
+	old := checkFaultHook
+	checkFaultHook = fn
+	return func() { checkFaultHook = old }
+}
+
+// UseRemoveFault makes every lease-file removal in this process fail with what fn returns for the path (nil from fn lets it
+// through), until the returned function is called. A test seam, for a release that must fail where a portable test cannot
+// provoke a real filesystem error: nothing in production calls it.
+func UseRemoveFault(fn func(path string) error) (restore func()) {
+	old := removeClaimFault
+	removeClaimFault = fn
+	return func() { removeClaimFault = old }
+}
+
+// readFaultHook, when set, is consulted by readRecordFile before the real read: a test seam (UseReadFault).
+var readFaultHook func(path string) error
+
+// readRecordFile is os.ReadFile of a lease record (meta.json, e/<epoch>.json), with the test seam in front of it.
+func readRecordFile(path string) ([]byte, error) {
+	if readFaultHook != nil {
+		if err := readFaultHook(path); err != nil {
+			return nil, err
+		}
+	}
+	return os.ReadFile(path)
+}
+
+// UseReadFault makes the READ of a lease record fail with what fn returns for the path (nil from fn lets the real read run), until the
+// returned function is called: the way a test provokes a record that EXISTS and can be removed but cannot be read, as one is while
+// a scanner or another process holds it open on Windows. The file itself is untouched, so the record is still there for the fault to
+// be lifted. Nothing in production calls it.
+func UseReadFault(fn func(path string) error) (restore func()) {
+	old := readFaultHook
+	readFaultHook = fn
+	return func() { readFaultHook = old }
+}
+
+// statFaultHook, when set, is consulted by statRecord before the real stat: a test seam (UseStatFault).
+var statFaultHook func(path string) error
+
+// statRecord is os.Stat of a lease record, with the test seam in front of it.
+func statRecord(path string) error {
+	if statFaultHook != nil {
+		if err := statFaultHook(path); err != nil {
+			return err
+		}
+	}
+	_, err := os.Stat(path)
+	return err
+}
+
+// UseStatFault makes the examination of a lease record before its release fail with what fn returns for the path (nil from fn
+// lets the real stat run), until the returned function is called: the way a test provokes a stat that fails for a reason
+// other than the record being absent, as one does on Windows while the record is being replaced. Nothing in production calls it.
+func UseStatFault(fn func(path string) error) (restore func()) {
+	old := statFaultHook
+	statFaultHook = fn
+	return func() { statFaultHook = old }
+}
+
+// RecordUnreadableError is what Lease.Check answers when the lease's record exists as far as anyone knows and could not be READ
+// (an access error while it is replaced, a sharing violation, an I/O error): not "the lease is gone" and not "fenced out", which
+// are verdicts, but a failure that may pass. A caller that would let go of its lease on a failed fence can tell the two apart.
+type RecordUnreadableError struct {
+	Epoch uint64
+	Err   error
+}
+
+func (e *RecordUnreadableError) Error() string {
+	return fmt.Sprintf("gpulease: the record of lease epoch %d cannot be read: %v", e.Epoch, e.Err)
+}
+
+func (e *RecordUnreadableError) Unwrap() error { return e.Err }
+
+// IsRecordUnreadable is true for a failure of the fence that is a failed READ, not a verdict.
+func IsRecordUnreadable(err error) bool {
+	var r *RecordUnreadableError
+	return errors.As(err, &r)
+}
+
+// MarkHolderGaveUp records on the lease's record that its hidden holder gave up releasing it, and why (best effort, by a holder
+// that is about to exit with the lease still held).
+func (m *Manager) MarkHolderGaveUp(epoch uint64, why string) error {
+	if r := []rune(why); len(r) > 200 {
+		why = string(r[:199]) + "…"
+	}
+	at := m.now().UnixMilli()
+	return m.Restamp(epoch, func(mt *Meta) {
+		mt.HolderGaveUpMs = at
+		mt.HolderGaveUpWhy = why
+	})
+}
+
+// HostRAMHold is what this lease's OWN record says about its wait for the host: the figure it still asks for (0 = admitted, or
+// nothing was deferred) and the moment its wait is stamped to end (the zero time = no wait is running). The hidden holder of a
+// detached lease reads it on every poll, so that a reserve that died during the wait does not leave the cards held for good. An
+// error means the record cannot be read (the lease is gone, or another lease holds the cards now).
+func (l *Lease) HostRAMHold() (askedGiB float64, until time.Time, err error) {
+	if l.done.Load() {
+		return 0, time.Time{}, errors.New("gpulease: lease already released")
+	}
+	var meta *Meta
+	if l.v2 {
+		meta, err = readEpochRecord(l.mgr.leaseDir(), l.epoch)
+		if err != nil {
+			return 0, time.Time{}, fmt.Errorf("gpulease: lease is gone (epoch %d)", l.epoch)
+		}
+	} else {
+		meta, err = l.mgr.readMeta()
+		if err != nil || meta == nil {
+			return 0, time.Time{}, fmt.Errorf("gpulease: lease is gone (epoch %d)", l.epoch)
+		}
+		if meta.Epoch != l.epoch {
+			return 0, time.Time{}, fmt.Errorf("gpulease: fenced out: our epoch %d, current epoch %d", l.epoch, meta.Epoch)
+		}
+	}
+	return meta.HostRAMWaitGiB, holdUntilOf(meta.HostRAMHoldUntilMs), nil
+}
+
+// RecordState is what the record of one lease epoch says about whether that lease is held, as far as a release can tell.
+type RecordState int
+
+const (
+	// RecordAbsent: no record of this epoch (a card lease's e/<epoch>.json, or a whole-node meta.json naming it) exists. Gone.
+	RecordAbsent RecordState = iota
+	// RecordHeld: the record exists and could be read.
+	RecordHeld
+	// RecordUnreadable: the record exists, or may exist, and could not be read (an access error while it is replaced, a sharing
+	// violation, an I/O error, a directory where the file was). The lease is HELD for every decision that matters: never gone.
+	RecordUnreadable
+)
+
+func (s RecordState) String() string {
+	switch s {
+	case RecordHeld:
+		return "held"
+	case RecordUnreadable:
+		return "unreadable"
+	}
+	return "absent"
+}
+
+// RecordState looks at the record of lease epoch directly (not through the reader, which treats a record it cannot read as
+// absent): absent, held, or unreadable, with the cause for the last.
+func (m *Manager) RecordState(epoch uint64) (RecordState, error) {
+	if epoch == 0 {
+		return RecordAbsent, nil
+	}
+	// A card lease keeps its record in e/<epoch>.json: look at that file itself.
+	if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
+		if _, rerr := readEpochRecord(m.leaseDir(), epoch); rerr != nil {
+			return RecordUnreadable, &RecordUnreadableError{Epoch: epoch, Err: rerr}
+		}
+		return RecordHeld, nil
+	} else if !errors.Is(serr, fs.ErrNotExist) {
+		return RecordUnreadable, &RecordUnreadableError{Epoch: epoch, Err: serr}
+	}
+	// Else a whole-node lease: meta.json names the epoch. The epoch counter is shared, so an epoch that is not meta.json's is not a
+	// whole-node lease; a meta.json that cannot be read cannot say, and so counts as holding this epoch.
+	meta, err := m.readMeta()
+	switch {
+	case err == nil && meta.Epoch == epoch:
+		return RecordHeld, nil
+	case err == nil, errors.Is(err, fs.ErrNotExist):
+		return RecordAbsent, nil
+	case isIOFailure(err):
+		return RecordUnreadable, &RecordUnreadableError{Epoch: epoch, Err: err}
+	}
+	return RecordAbsent, nil // corrupt bytes: debris that an acquirer sweeps, as every other reader treats it
+}
+
+// ClaimsOf lists the cards (lease ids) whose claim names this epoch. A card lease's release removes its record and then its claims;
+// a release that removed the record and failed on a claim has left the lease half released, and the record being absent does not
+// say so.
+func (m *Manager) ClaimsOf(epoch uint64) []string {
+	entries, err := os.ReadDir(m.cardsDir())
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".claim") {
+			continue
+		}
+		device := strings.TrimSuffix(e.Name(), ".claim")
+		if c, ok := readCardClaim(m.leaseDir(), device); ok && c.Epoch == epoch {
+			out = append(out, device)
+		}
+	}
+	return out
+}
+
+// ErrLeaseMovedOn is the refusal for releasing an epoch that is no longer the current lease.
+type ErrLeaseMovedOn struct{ Asked, Current uint64 }
+
+func (e *ErrLeaseMovedOn) Error() string {
+	return fmt.Sprintf("gpulease: lease has moved on (asked for epoch %d, current is %d)", e.Asked, e.Current)
+}
+
+// IsLeaseMovedOn is true for the refusal to release an epoch that is no longer the current lease: the one release error that says
+// the lease is NOT this caller's any more, so there is nothing of its own left to release.
+func IsLeaseMovedOn(err error) bool {
+	var e *ErrLeaseMovedOn
+	return errors.As(err, &e)
 }

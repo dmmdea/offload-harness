@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
@@ -23,6 +24,42 @@ func (c Config) GPUHostRAMHeadroom() float64 {
 		return c.GPUHostRAMHeadroomGiB
 	}
 	return DefaultGPUHostRAMHeadroomGiB
+}
+
+// DefaultGPUHostRAMHoldMaxSec is how long a lease that unloaded the seat may hold its cards waiting for the host to have the
+// room for its declared RAM, when gpu_hostram_hold_max_sec is unset. A chosen figure, not a measurement: ten minutes is
+// several times the minutes a seat's memory takes to come back after its unload, and short enough that a lease whose figure
+// the host can never meet frees the cards for the queue behind it.
+const DefaultGPUHostRAMHoldMaxSec = 600
+
+// MaxGPUHostRAMHoldMaxSec is the largest gpu_hostram_hold_max_sec (and `--ram-hold-max`) accepted: 7 days. A chosen figure:
+// it is above the longest lease life the harness grants by default (gpu_max_total_min, 48 h) and the longest `--wait` anyone
+// uses (8 h by default), so no honest bound is refused, and a value this large that is not 0 is a typo. 0 is the explicit
+// "no bound". The ceiling is also what keeps the seconds-to-Duration conversion from wrapping: past about 9.2e9 seconds
+// time.Duration overflows and reads negative or zero, which would turn the bound off.
+const MaxGPUHostRAMHoldMaxSec = 7 * 24 * 60 * 60
+
+// GPUHostRAMHoldMax is gpu_hostram_hold_max_sec as a duration, with the default applied: 600 seconds when unset, and 0 (no
+// bound: the wait after the unload runs the whole --wait) only when the operator wrote 0. A negative value reads as the
+// default and never as no bound: Load refuses it by name, but it returns the Config beside that error and the one-shot
+// verbs (gpu reserve among them) go on with it, so a typo must not turn the bound off.
+func (c Config) GPUHostRAMHoldMax() time.Duration {
+	if c.GPUHostRAMHoldMaxSec != nil && *c.GPUHostRAMHoldMaxSec >= 0 {
+		// Clamped to the ceiling BEFORE the multiplication: time.Duration(sec)*time.Second wraps past about 9.2e9 seconds.
+		return time.Duration(min(*c.GPUHostRAMHoldMaxSec, MaxGPUHostRAMHoldMaxSec)) * time.Second
+	}
+	return DefaultGPUHostRAMHoldMaxSec * time.Second
+}
+
+// validateGPUHostRAMHold refuses a gpu_hostram_hold_max_sec below 0 or above the ceiling (7 days), by name.
+func validateGPUHostRAMHold(c Config) error {
+	if c.GPUHostRAMHoldMaxSec != nil && *c.GPUHostRAMHoldMaxSec > MaxGPUHostRAMHoldMaxSec {
+		return fmt.Errorf("gpu_hostram_hold_max_sec: %d s is more than 7 days (%d s), longer than any lease or --wait in use, so it is a typo; 0 = no bound, the wait after the unload runs the whole --wait", *c.GPUHostRAMHoldMaxSec, MaxGPUHostRAMHoldMaxSec)
+	}
+	if c.GPUHostRAMHoldMaxSec != nil && *c.GPUHostRAMHoldMaxSec < 0 {
+		return fmt.Errorf("gpu_hostram_hold_max_sec: %d is not a number of seconds (0 = no bound, the wait after the unload runs the whole --wait; unset = %d)", *c.GPUHostRAMHoldMaxSec, DefaultGPUHostRAMHoldMaxSec)
+	}
+	return nil
 }
 
 // DefaultGPUDisplayCapPct is the share of the display card's VRAM the card allocator may fill when
