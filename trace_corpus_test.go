@@ -593,7 +593,7 @@ func TestTraceCorpusPoolAliasRunsAreABucketKeyedByNode(t *testing.T) {
 		t.Errorf("attribution = %+v, want 9 runs = 4 seat-named + 4 pool alias + 1 with no seat", at)
 	}
 	if at.UnattributedShare == nil || *at.UnattributedShare != 0.555556 {
-		t.Errorf("unattributed share = %v, want (4 aliases + 1 no seat) / 9 = 0.555556", at.UnattributedShare)
+		t.Errorf("unattributed share = %s, want (4 aliases + 1 no seat) / 9 = 0.555556", tcShow(at.UnattributedShare))
 	}
 	if rep.PoolAlias.Runs != 4 {
 		t.Errorf("pool_alias bucket holds %d runs, want 4", rep.PoolAlias.Runs)
@@ -602,7 +602,7 @@ func TestTraceCorpusPoolAliasRunsAreABucketKeyedByNode(t *testing.T) {
 		t.Errorf("pool_alias_by_node = %v, want node-1:2 node-2:1 and 1 under %s (the row names no node)", rep.PoolAliasByNode, tcSeatUnrecorded)
 	}
 	if got := rep.PoolAliasByNode["node-1"].Pager.RefetchRate; got == nil || *got != 0.25 {
-		t.Errorf("node-1 pool-alias re-fetch rate = %v, want 1 of 4 = 0.25", got)
+		t.Errorf("node-1 pool-alias re-fetch rate = %s, want 1 of 4 = 0.25", tcShow(got))
 	}
 	// by_seat names only runs a seat can be attributed to: no alias is a key.
 	want := map[string]int{"seat-a": 1, "spool": 1, "poolside": 1, "carpool-a": 1, tcSeatUnrecorded: 1}
@@ -955,7 +955,7 @@ func TestTraceCorpusPagerGateBoundary(t *testing.T) {
 		t.Errorf("10 of 100 (the gate itself) = %s, want %s: the instrument treats `rate < gate` as below", v, tcVerdictAbove)
 	}
 	if got := pooled(100, 0).RefetchRate; got == nil || *got != 0 {
-		t.Errorf("a measured run that re-fetched nothing is a real 0, got %v", got)
+		t.Errorf("a measured run that re-fetched nothing is a real 0, got %s", tcShow(got))
 	}
 }
 

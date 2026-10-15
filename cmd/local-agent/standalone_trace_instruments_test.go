@@ -93,8 +93,11 @@ func TestTraceFileCarriesThePagerReport(t *testing.T) {
 	if pg.Basis != "insufficient_data" {
 		t.Fatalf("pager basis = %q on a run that evicted nothing, want insufficient_data", pg.Basis)
 	}
-	if pg.CompactionPasses == nil || *pg.CompactionPasses != 0 {
-		t.Fatalf("compaction_passes = %v, want a present 0", pg.CompactionPasses)
+	if pg.CompactionPasses == nil {
+		t.Fatalf("compaction_passes is absent from the pager object, want a present 0")
+	}
+	if *pg.CompactionPasses != 0 {
+		t.Fatalf("compaction_passes = %d, want 0 on a run that never compacted", *pg.CompactionPasses)
 	}
 }
 
