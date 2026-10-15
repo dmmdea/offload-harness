@@ -39,7 +39,7 @@ stops accepting work while remaining readable.
 
 | Route | Purpose |
 |---|---|
-| `GET /fleet/health` | Node identity, GPU vendor and architecture, live total and free VRAM, supported task types, loadable model families, measured footprints, queue depth, the node's job capacity (running / queued / both limits), GPU utilization, host CPU/RAM, and the agent lane's served-models roster (0.113.0) |
+| `GET /fleet/health` | Node identity, GPU vendor and architecture, live total and free VRAM, supported task types, loadable model families, measured footprints, queue depth, the node's job capacity (running / queued / both limits), GPU utilization, host CPU/RAM, the agent lane's served-models roster (0.113.0), and which engine answers for each lane and seat (`lane_backends`, `seat_backends`; below) |
 | `POST /fleet/dispatch` | Submit a job; returns `202` with an ack |
 | `GET /fleet/jobs/{id}` | Poll one job's state and result; `?wait=<seconds>` (≤ 12) long-polls until the job is terminal |
 | `GET /fleet/jobs` | Cluster jobs feed: recent jobs across this node, newest first, payload-free (0.113.0) |
@@ -1120,6 +1120,105 @@ copy-back slack, the long poll to its wait + 2 s. A `ResponseWriter` that cannot
 (a recorder, a wrapper that does not unwrap) is not a failure — the handler just runs under the
 blanket, as before.
 
+## Which engine answers for each lane and seat (`active_backend`)
+
+A lane (workhorse, agent, triage, ...) is bound to a seat, and a seat is run by an engine (llama.cpp, vLLM, an NPU
+runtime). Nothing said which engine was answering, or why a box whose tier prefers a vLLM agent seat was serving the
+tier's llama.cpp fallback. The report below says it, per lane and per seat, with the evidence. The idea is the ordered
+backend chain with a real probe and an `active_backend` field that a source-adapter `doctor` reports; it is rebuilt here
+with none of that tool's dependencies and stays engine-neutral: a field names an engine KIND, never a product path.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `active_backend` | string | The engine kind answering: `llama.cpp`, `vllm`, `rkllm`, `whisper.cpp`, `unknown` (the seat can serve but nothing says its engine: the config does not name it, a probe timed out before the seat answered, or another node serves the seat), or `none`. On a lane it is the engine of the seat the lane is BOUND to, because the lane routes there: a preferred seat the lane is not bound to never becomes the active backend, however healthy it is. |
+| `backend_chain` | string list | The engine kinds the lane or seat may use, in preference order. |
+| `backend_probe` | string | How deep the evidence goes: `process` (llama-swap's own state: the roster and the running list), `endpoint` (the seat was loaded and its own health endpoint answered), `completion` (a 1-token completion ran; only with the flag below). When nothing answers, the deepest level any candidate reached. |
+| `backend_reason` | string | Why that backend was chosen, or why none was. A preferred seat that failed is named before the answer (`vllm seat X unavailable: not in the llama-swap roster; fell to llama.cpp seat Y: ...`); a preferred seat that is up while the lane is bound to another is named after it (`...; the preferred vllm seat X is available (...) but does not answer for this lane, which is bound to Y`); a bound seat that fails is `none`, and the reason says whether another seat of the chain is available. Seat names, llama-swap states, HTTP status numbers and fixed phrases only: no address, path, URL or command line, because it is published to every node that reads health. A test pins that for every failure clause of the collector. |
+
+Each row also names the lane (`lane`, the config's status key) or the seat (`seat`, the seat answering, or when none is,
+the lane's bound seat). The chain of a lane is its one bound seat, except the agent lane of a box installed as a tier that
+declares a vLLM agent seat: the tier prefers that seat and serves its llama.cpp fallback when the vLLM prerequisites are
+missing, so the chain is `[vllm seat, llama.cpp fallback]`, and the engine that answers is the one of whichever the lane's
+`agent_model` is bound to. A box whose vLLM venv is installed while `agent_model` still names the fallback therefore reads
+`llama.cpp` on the agent lane and says in the reason that the vLLM seat is available but not bound; a lane bound to a vLLM
+seat that fails reads `none`, not the fallback, because the lane would call the failing seat. This reports what answers
+for the lane as it is configured; it does not route anything. A lane exists for each route `doctor` diffs against the
+roster (`config.ModelRoutes`) that has an effective seat: a route with no effective seat is not a lane, `embed_model` is
+never one (doctor does not diff it), and `agent` and `ocr` report the seat they fall back to when their own model is unset
+(the workhorse seat and the vision seat). The lanes are workhorse, agent, triage, escalation, reasoning, vision, ocr, stt and
+stt_hq. Image, video and music generation are not llama-swap seats, so they have no lane and no seat row here. Seat rows are one
+per entry of the serving config plus any roster id it does not carry. An engine is classified from the box's own statements,
+never guessed, by one rule for a lane's candidate and for the seat's own row, so one seat has one kind wherever it is read:
+`vllm_seats` (or the tier table) for a vLLM entry, whose command is a wrapper script; then, for a seat that is loaded, the
+command llama-swap reports it spawned (what is true when the file on disk has changed since; a live command that names no
+engine does not erase the file's), and for one that is not, the command the serving config runs for it (as configured),
+naming `llama-server`, `rkllm` or `whisper-server`; then the kind the tier table declares for the seat; else `unknown`. The
+live command is read to tell the engine apart and is never emitted. A new engine registers by adding one row to
+`engineRules` in `internal/backendchain/classify.go`, and changes no field.
+
+**The default probe loads nothing.** It reads llama-swap's roster (`/v1/models`) and its running list (`/running`), and a
+seat that is already loaded and ready is asked for its own health endpoint (the entry's `checkEndpoint`, `/health` when it
+states none, `none` skipping it) at the seat's own address, never through `/upstream/<seat>/...`, which loads a model on
+demand and resets the idle unload timer (`internal/seatload`). A seat that is in the roster and not loaded is available on
+demand and is not asked anything: asking would load it. A seat llama-swap lists as starting or stopping is not asked either.
+No code path of the default probe sends a completion. The tests run it against a llama-swap that fails the test on any
+completion, any `/upstream` path or any POST (`internal/backendchain`, `internal/fleetnode`, `doctor_backends_test.go`).
+
+**What a row says when the probe could not see.** A non-2xx answer is named by its status (`HTTP 503`), whichever read it came
+from, and a read that got no answer says `unreachable` once. A probe that timed out saw nothing, so the row reads `unknown`
+with the timeout named (`backend_probe` is the deepest level it reached), never `none`: nothing was seen to be down. A refused
+connection is still `none`. A seat that `seat_endpoints` sends to another node's llama-swap is not in this node's roster by
+design, so its lane and its row read `unknown` with `served by another node`: its engine is read on that node, and this
+node's serving config is not used to name it. The serving config is read up to 4 MiB; a larger file is not read, and the
+rows say `the serving config is too large to read`.
+
+**The 1-token completion probe exists only behind `doctor --probe-completion`.** A completion against a seat that is not
+running loads it, and llama-swap unloads whatever else holds the cards to make room: a vLLM seat, or the llama.cpp seat a lane
+is bound to (`cascade_seat_guard`, `internal/seatguard`). So it is a thing a person asks for, and `doctor -h` says so, as does
+the usage a mistyped flag prints (exit status 2, no check run). A completion goes only to a seat that is already running,
+which loads nothing and so evicts nothing, or, on a box where nothing is running, to at most ONE seat in the run, however
+that completion ends (the first seat the report reaches: the workhorse lane's). Whether a seat is running is read from
+llama-swap's running list immediately before each completion, never taken from an earlier reading: a seat can stop between
+two readings (another client unloads it, or its idle timer runs out), and a completion to it would then load it over
+whatever runs now, so a seat that is not running on that reading is judged like any other seat that is not. Any other seat is
+not probed, and its row says over which running seat the load would have been (`not probed: would load over llama.cpp seat
+X`, naming the seat the way the rest of the report does, by engine kind and id), or that the run's one load was already
+spent. No seat is sent a completion whenever llama-swap's running list cannot be read just before it: whether the seat is
+running, or what holds the cards, cannot then be ruled out. A seat with no chat route is never sent a chat completion, because llama-swap answers one with a 404, which
+says nothing about whether the seat is up: the configured embedder and speech-to-text seats, a seat whose own command carries
+`--embedding`, `--embeddings`, `--rerank` or `--reranking`, and a whisper server. Its row keeps the reading the default probe
+gives it and says `not probed: not a chat seat`. Every row's starting state (loaded, not loaded, loading) comes from the one
+reading of the running list taken before any completion; a later reading, taken immediately before each completion is
+decided, only decides whether a completion may be sent, and the one thing it adds to a row is that another client loaded the
+seat since the report began. A row that ran a completion on an idle box says the completion loaded it. Seats it loads unload
+on their own idle timer like any other load. `/fleet/health` never runs it.
+
+**Where it appears.**
+
+- `local-offload doctor` prints a `backends:` section after its own checks, whatever they returned (an unreachable
+  llama-swap still gets rows, `none`, with the reason): one row per lane and per seat. It is informational and never changes
+  doctor's exit code, and it prints nothing on a box with no local model (a delegation client). `doctor` has no JSON mode:
+  doctor prints these rows as text, and the JSON of the same four fields is the `lane_backends` and `seat_backends` of
+  `GET /fleet/health` below.
+- `GET /fleet/health` gains `lane_backends` and `seat_backends`, lists of `{lane|seat, active_backend, backend_chain,
+  backend_probe, backend_reason}`. Additive and `omitempty`: a reader that predates them ignores the keys, and the existing
+  `backends` key (the hardware tags of the install, ADR 0054: `vulkan`, `cpu`) is a different thing and is unchanged. The
+  read is cached like the residency answer: the handler never waits on llama-swap, the first request after start-up answers
+  without the keys (absent means unknown, never `none`) and kicks one background read, and a cached answer older than 30 s
+  is refreshed behind the next request and published while it is. One older than two minutes is no longer published (the
+  keys are absent until the refresh lands), so a refresh that is slow or stuck cannot leave a stale answer up for as long as
+  the process lives. A node with no llama-swap endpoint publishes nothing.
+- Who can read the new keys, and what they expose. `GET /fleet/health` is unauthenticated on every node: `fleet_auth_token`
+  gates dispatches to the agent, vision, text and speech-to-text lanes and the polls of the jobs they create, not the health
+  route, and the ingress guard is not authentication. Under its default `warn` mode the guard serves even the requests it
+  would refuse, so a stock node answers any peer that can reach its port, and under `enforce` it still admits a non-browser
+  peer that names the node. The new keys reach exactly those readers. Against `backends` (hardware tags and nothing else) they
+  add no host name, path, URL or IP, but they do add the status key of each lane, engine kinds and probe levels (a fixed
+  vocabulary), and seat names (model ids and aliases from llama-swap's roster and the serving config). `served_models` already
+  publishes seat names on a node with the agent or chat lane on; on any other node these keys are the first thing to publish
+  them. A seat's address and command line (the serving config's, and the live one `/running` reports) are read and never
+  emitted.
+
 ## The acceptance gate (`local-offload acceptance`)
 
 A node must pass this before it is handed work. It is deliberately NOT `doctor`: doctor
@@ -2172,6 +2271,16 @@ died is still on the node under its job id; the next identical call from that ma
   alias it)
 - [`fleet_reclaim.go`](../../fleet_reclaim.go) — `oursLoaded` / `anyReclaimable`: the keep-set
   and memory-stack classification above, over `pkg/llamaswap`'s `Running()` + `IsProtected()`
+- [`internal/backendchain/`](../../internal/backendchain/) — the active-backend report: the chain resolver, the engine
+  classification table, the lane plan and the cheap probe (roster, running list, a loaded seat's own health endpoint)
+- [`internal/fleetnode/activebackend.go`](../../internal/fleetnode/activebackend.go) — the cached read behind
+  `lane_backends` / `seat_backends`
+- [`internal/servingtmpl/seatentries.go`](../../internal/servingtmpl/seatentries.go) — what a serving config states for
+  each seat (command, proxy, `checkEndpoint`)
+- [`internal/seatload/seatload.go`](../../internal/seatload/seatload.go) — `Occupants`: the opening reading of `/running`,
+  with the command llama-swap spawned for each loaded seat
+- [`doctor_backends.go`](../../doctor_backends.go) — the `backends:` section and `--probe-completion` of `doctor`, and
+  the tier-table reader the lane plan uses
 - [`main.go`](../../main.go) — `fleet-serve` / `fleet-measure` verbs
 
 ## Related docs

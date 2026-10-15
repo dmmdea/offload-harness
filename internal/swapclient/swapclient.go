@@ -17,6 +17,7 @@ package swapclient
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -145,6 +146,16 @@ func FetchRosterWith(ctx context.Context, client *http.Client, endpoint string, 
 		return Roster{}, err
 	}
 	return Roster{models: models}, nil
+}
+
+// HTTPStatus reports the HTTP status llama-swap answered with when err is a failed read that got an
+// answer (a non-2xx), and false for a failure that got none (a refused connection, a timeout).
+func HTTPStatus(err error) (int, bool) {
+	var he *llamaswap.HTTPError
+	if errors.As(err, &he) {
+		return he.Status, true
+	}
+	return 0, false
 }
 
 // NewRoster wraps an already-fetched model list. For callers that hold a client.

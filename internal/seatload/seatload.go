@@ -415,7 +415,17 @@ type Occupant struct {
 	Model string `json:"model"`
 	State string `json:"state"`
 	Proxy string `json:"proxy"`
+	// Cmd is the process argv llama-swap actually spawned for the seat, which is what is true of a loaded
+	// seat when the serving config on disk has changed since. It carries paths and flags: a reader uses it
+	// to tell an engine apart and never prints, logs or publishes it.
+	Cmd string `json:"cmd"`
 }
+
+// StatusError is a non-2xx answer to GET /running. It is a typed error so a reader can say which status
+// answered (the text is unchanged).
+type StatusError struct{ Status int }
+
+func (e *StatusError) Error() string { return fmt.Sprintf("llama-swap /running: status %d", e.Status) }
 
 // Occupants reads llama-swap's /running ONCE and returns every row, whatever
 // its state. It is the read behind Running and Inflight (their first half),
@@ -444,7 +454,7 @@ func Occupants(ctx context.Context, client *http.Client, endpoint string) ([]Occ
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 		resp.Body.Close()
-		return nil, fmt.Errorf("llama-swap /running: status %d", resp.StatusCode)
+		return nil, &StatusError{Status: resp.StatusCode}
 	}
 	var listed struct {
 		Running json.RawMessage `json:"running"`

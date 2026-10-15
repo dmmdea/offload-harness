@@ -51,6 +51,13 @@ var failureKinds = map[string]string{
 	// or the credentials, not capacity. write: the node will not open the write door (agent_allow_write is false, or
 	// the write set broke a door cap): a decision about the contract, fixed by an opt-in or a smaller change, and
 	// agentwire.go says it is neither a broken stack nor an unplaceable contract, so it is the caller's.
+	//
+	// dispatch_refused files a 401 or 403 answer as the caller's. Between the fleet's own nodes that is a different
+	// thing: a credential refusal there, such as a stale fleet token after a rollout, is a configuration fault, the
+	// operator's to fix and not the request's. The kind is decided by the class, and the class is the reason code,
+	// so the register cannot tell such a refusal from a 400 or a 409 that really is the request (the status is
+	// only in the reason text, which it never reads). Splitting 401 and 403 into a class of their own is a
+	// possible later change; nothing here does it.
 	ReasonCanceled: KindCaller, ReasonDispatchRefused: KindCaller, ReasonContract: KindCaller, ReasonBadInput: KindCaller,
 	ReasonWrite: KindCaller,
 

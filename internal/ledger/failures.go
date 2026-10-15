@@ -89,8 +89,9 @@ type FailureKindCount struct {
 type FailureRegister struct {
 	// LedgerFound is false when the ledger file does not exist: the zeros beside it then mean "nothing was read",
 	// not "nothing failed". UnparsedLines is the non-blank lines that did not decode as a ledger row (garbage, a
-	// line cut off mid-file, a non-object, a last line the writer had not finished) and so are in none of the
-	// counts below: a ledger that is partly unreadable must not look like a quiet one.
+	// line cut off mid-file, a non-object, a literal null, a last line the writer had not finished) and so are in
+	// none of the counts below: a ledger that is partly unreadable must not look like a quiet one. A row is a JSON
+	// object, so `{}` is a row (a job that did not fail), not an unparsed line.
 	LedgerFound   bool `json:"ledger_found"`
 	UnparsedLines int  `json:"unparsed_lines"`
 	// JobRows is the job rows the register looked at, after the window and the run-class rule: a dispatch marker,
@@ -136,9 +137,12 @@ type failureRow struct {
 	Declared *int `json:"cards_tokens"`
 }
 
+// decodeFailureRow decodes one non-blank line. A row is a JSON object (isObjectLine): a line holding `null` is
+// unparsed, because encoding/json would otherwise hand back an empty row for it; `{}` is an object and so a row,
+// counted as a job that did not fail.
 func decodeFailureRow(line []byte) (failureRow, bool) {
 	var r failureRow
-	if json.Unmarshal(line, &r) != nil {
+	if !isObjectLine(line) || json.Unmarshal(line, &r) != nil {
 		return r, false
 	}
 	if r.Declared != nil {
@@ -329,7 +333,7 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 		}
 		if !includeTraffic {
 			if c := classIn(e, jobs); c != "" {
-				if CountsAsJob(e, parents) && !e.Refusal {
+				if CountsAsJob(e, parents) {
 					if reg.ExcludedNonProduction == nil {
 						reg.ExcludedNonProduction = map[string]int{}
 					}
@@ -338,11 +342,11 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 				continue
 			}
 		}
-		if !CountsAsJob(e, parents) {
+		if isRefusedAttempt(e, parents) {
+			reg.RefusedAttempts++
 			continue
 		}
-		if e.Refusal {
-			reg.RefusedAttempts++
+		if !CountsAsJob(e, parents) {
 			continue
 		}
 		reg.JobRows++
