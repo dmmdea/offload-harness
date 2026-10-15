@@ -68,8 +68,9 @@
   a test; the peaks stay over 4% to about 1500 tasks), and pass rates .99/.94 in 6.5% at 61 and 10.1% at 64 (study stress
   cells); the 63 null cells keep their two cells over 4%, both at 80 tasks (4.8% and 8.2%). The lower of the score form and
   BCa, 0 of 63 null cells over 4% and 3.4% at worst, does not close 61 to 64 tasks (up to 6.5%) and is left to the lead
-  because it couples the primary to `bootstrap_b` again; an interval that takes its variance from the null mean, as the
-  Wilson interval does for a rate, is what would. The price is power (at 24 tasks a true +0.1 gain on a pass/fail score is
+  because it couples the primary to `bootstrap_b` again; an interval whose variance comes from a parametric null (for
+  pass/fail scores the Bernoulli discordance at the boundary, as the Wilson interval does for a rate) in place of the
+  sample's second moment about the boundary is what would. The price is power (at 24 tasks a true +0.1 gain on a pass/fail score is
   adopted in 8.6% of runs against 10.7% for the plain t; 16 ties no longer certify a margin of 0.05, so a candidate truly
   equal to a .90 incumbent is adopted in 1.6% of runs at 16 tasks and 7.9% at 24, where the point rule gave 5.8% and 8.8%;
   the eight power rows are the same under the rule of three as under the exact one-sided bound tried before it). Not

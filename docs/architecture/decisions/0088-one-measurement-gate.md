@@ -328,8 +328,9 @@ The gate version is 2: a baseline written under another version is refused, firs
     score that is non-inferior at exactly the margin is adopted in 3.7% of runs at 16 tasks with the score form and 3.4% at
     24. The remedy is more tasks, which the power note counts, a margin the corpus size can certify, or the lead's
     decision on the interval for sparse disagreement: the lower of two above does not close 61 to 64 tasks, and what would
-    is an interval that takes its variance from the null mean, as the Wilson interval does for a rate, which the closed form
-    here does not for pass/fail scores.
+    is an interval whose variance comes from a parametric null (for pass/fail scores the Bernoulli discordance at the
+    boundary, as the Wilson interval does for a rate) in place of the sample's second moment about the boundary, which is
+    what the score form reads and is small when the sample holds one loss.
 
 ## Consequences
 
