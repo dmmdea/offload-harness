@@ -8,6 +8,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,8 +51,21 @@ func TestCompactionEvalRunWithoutRungFlagsIsByteIdentical(t *testing.T) {
 				t.Fatalf("%s: %v", c.name, err)
 			}
 		})
+		// corpus_hash is the sha256 of the corpus bytes as checked out, which differ between a
+		// CRLF and an LF checkout; it is checked against those bytes, and the golden file holds
+		// a placeholder for it.
+		raw, err := os.ReadFile(corpus)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(raw)
+		hash := hex.EncodeToString(sum[:])
+		if !strings.Contains(out, `"corpus_hash": "`+hash+`"`) {
+			t.Errorf("%s: `run` output does not carry the corpus file's sha256 %s", c.name, hash)
+		}
+		got := strings.ReplaceAll(strings.ReplaceAll(out, "\r\n", "\n"), hash, "<corpus-sha256>")
 		want := ceReadNormalized(t, filepath.Join("testdata", "compeval", c.golden))
-		if strings.ReplaceAll(out, "\r\n", "\n") != want {
+		if got != want {
 			t.Errorf("%s: `run` output changed from %s", c.name, c.golden)
 		}
 	}
