@@ -55,6 +55,8 @@ const (
 	// SourceFamilyDefault: a recognised render call whose file sizes could not be read, so the
 	// documented per-family sizes stand in for at least one of them.
 	SourceFamilyDefault Source = "family default"
+	// SourceGraphLoaders: the sizes of the weight files a ComfyUI graph's own loaders name (ForGraph).
+	SourceGraphLoaders Source = "graph loaders"
 	// SourceClassDefault: the media class default, the largest family this box binds.
 	SourceClassDefault Source = "class default"
 	// SourceNone: a text or seat lease, or a box that binds no render family: nothing declared.

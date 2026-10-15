@@ -244,3 +244,8 @@ func ManifestSourcedModels(manifest []byte) map[string]bool {
 	}
 	return out
 }
+
+// ModelFileSizes sizes the weight files a graph names. STUB: red first.
+func ModelFileSizes(roots []ModelRoot, names []string, stat func(path string) (size int64, ok bool)) (sizes []int64, missing string, ok bool) {
+	return nil, "", false
+}
