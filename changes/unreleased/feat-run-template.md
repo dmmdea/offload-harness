@@ -22,6 +22,17 @@
   runs it, so a call that names a route beyond local, remotes or a node is refused as `fleet_not_offered`. A template that reads input files
   (an active `LoadImage`, `LoadImageMask`, `LoadImageOutput`, `LoadVideo` or `LoadAudio`) is a local-only ticket for its own reason, and the
   answer says so (`local_only`, `fleet_note`): a node can match an input file only by name.
+- **Host RAM.** A template run carries `template` and `manifest_path` and no graph file, so the run-graph lane read nothing and declared
+  the media class default: the largest family the box binds (33.1 GiB on a box that binds a Wan 2.2 pair) for a template whose files
+  are 23.1 GiB, held by the host-RAM brake though the box could run it, and on a box that binds no ComfyUI render family, 0 (source
+  `none`), so a big template got no host-RAM check at all. The lane now declares the model files the runtime manifest names
+  (`models/<class>/<name>`, sized under the ComfyUI model roots; `hostneed.ForManifestModels` and `ForManifestFile`), by the rule
+  a graph's loader files get: the sum, each file once, in full when together they do not fit the card (less the call's
+  `reserve_vram`), 0 when they fit, source `graph loaders`. Any doubt keeps the class default exactly as before: no manifest, one that
+  cannot be read, one that names nothing, an entry that is not `models/<class>/<name>`, or one file the box cannot find or size (no
+  partial sum). The lane probe reads the same figure through the same function, so it agrees with the admission. A name is looked up
+  under every class directory, as a graph's is, so a name held under two classes is sized as the larger. An estimate from the files'
+  sizes, not a measurement.
 - **Why a tool and not a `template=` argument on `offload_run_graph`.** Measured at 0.186.0: an average tool costs 1,019 tokens in the full
   profile and 672 compact, so one more tool is about +3.2% of the 31-tool full list. The registered design accepts that cost, and the
   `template=` argument was only its fallback for a cost that proved unacceptable. The new tool's own entry is 2,833 bytes of `tools/list` in
@@ -56,6 +67,7 @@
 - **Not verified here.** One template running end to end under a GPU lease, the acceptance measurement of this tool, queued after this
   change. The production wiring of the conversion against a live ComfyUI (the `/object_info` and `/system_stats` reads in
   `comfy-run-graph.mjs`; the flow and the converter are tested with injected values, and the converter on saved listings). The time of a
-  first sighting hash on a 20 GB file. The Go door's production path on a box's real tree (tested on a fixture tree and a canned script).
+  first sighting hash on a 20 GB file. The Go door's production path on a box's real tree (tested on a fixture tree and a canned script). The template run's host-RAM
+  declaration against a real template under a lease on a node (tested on stat tables and sparse files through the real admission).
 - **Not built.** Fleet placement of a template; model downloads (a missing model is a refusal that lists it); an acknowledgement path for a
   conditional or non-commercial template; staging a template's sample input files; custom node packs; a CLI verb and a fleet task for the tool.

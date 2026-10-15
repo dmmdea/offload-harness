@@ -1117,7 +1117,9 @@ A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `c
 1. The door writes the resolved runtime manifest (and the overrides, if any) to temp files and sends a `run_graph` task with
    the template **name**, through the same call `offload_run_graph` makes, on route `local`: the same lease, ComfyUI
    lifecycle, satisfier and result envelope. A busy lane answers as a run-graph call on this machine does (a place in this
-   machine's line, resumable with `waiter_token`).
+   machine's line, resumable with `waiter_token`). The lane declares the host RAM the run needs from the model files that manifest
+   names (`hostneed.ForManifestFile`, fitted to the card as a graph's files are, on a box that binds no ComfyUI render family too),
+   and keeps the media class default for a manifest it cannot read or a file it cannot size; the lane probe reads the same figure.
 2. The runner satisfies the manifest. Every model is named by the path it was found at and carries no `source_url`, so a
    model that went missing since the check is a typed defer and never a download. Models trusted on first use are checked
    (below) before ComfyUI is started, on every run.

@@ -59,7 +59,8 @@ const (
 	// documented per-family sizes stand in for at least one of them.
 	SourceFamilyDefault Source = "family default"
 	// SourceGraphLoaders: the weight files a ComfyUI graph's own loaders name, summed and fitted to the card as a family's are (ForGraph): a graph the lease
-	// could read, whose every named file it could size.
+	// could read, whose every named file it could size. A template run's model files, as its runtime manifest names them, are the same
+	// kind of figure (ForManifestModels).
 	SourceGraphLoaders Source = "graph loaders"
 	// SourceClassDefault: the media class default, the largest family this box binds.
 	SourceClassDefault Source = "class default"
