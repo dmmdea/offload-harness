@@ -267,7 +267,8 @@ export function requiredModels(workflow) {
   // object keyed by input name, so both are read here; and it routes the widgets_values of a subgraph instance into an inner loader (the
   // widgets a proxyWidgets entry names, or the literal a subgraph input takes), so an ACTIVE instance's own values are read as well. The
   // class a proxied file is filed under is the inner loader's, which is not followed here: it is listed with no class (readiness finds the
-  // directory it sits in), and when the same name is also annotated inside the subgraph it is listed twice at most, never missed.
+  // directory it sits in). Which of the two files the converter loads (the instance's value replaces the inner loader's own) is not modelled
+  // either: when they differ both are required, which can ask for one file more than the graph loads and never one fewer.
   const addWidgetFiles = (node) => {
     const raw = node.widgets_values;
     const values = Array.isArray(raw) ? raw : raw !== null && typeof raw === "object" ? Object.values(raw) : [];
