@@ -574,28 +574,49 @@ func TestWarmAsksItsGateBeforeEachResend(t *testing.T) {
 // and one /running poll fails in the middle of it. That poll says nothing about the load: the
 // watch keeps waiting for the seat it last saw starting instead of calling the state unknown,
 // which would end the warm while the load still lands, under whoever takes the card next.
+//
+// The test needs two polls of the starting seat, the second of them failing. The stand-in holds
+// the load until it has answered both (holdPolls), so the host's scheduling decides how long the
+// test takes and never whether it proves anything; a fixed hold did (a watch that was polled once
+// in the hold made the test vacuous). The slow cadence is that starved host on purpose: the watch
+// polls less often than any fixed hold the load could have had.
 func TestWarmKeepsWaitingForALoadItSawStartingThroughOneUnreadableRunningAfterAReload(t *testing.T) {
-	notes := fastWarmRetry(t, 5*time.Second)
-	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1, healthFails: true, visibleLoad: true, warmHold: 300 * time.Millisecond}
-	var polls atomic.Int32
-	f.runningDown = func() bool {
-		// The second poll that finds the seat starting fails, once; the first one read it fine.
-		return f.starting.Load() && polls.Add(1) == 2
-	}
-	srv := reloadingSwap(t, f)
-	if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
-		t.Fatalf("a load that finishes is a warm, whatever one poll said in the middle of it: %v", err)
-	}
-	if polls.Load() < 2 {
-		t.Fatalf("the stand-in never failed a poll mid-load (polls while starting=%d): the test proved nothing", polls.Load())
-	}
-	// One reload answer, then the one load. A watch that gave up on the unreadable poll would
-	// have sent the load a third time.
-	if hits, warms := f.healthHits.Load(), f.warms.Load(); hits != 2 || warms != 1 {
-		t.Fatalf("health requests=%d (want 2) loads=%d (want 1)", hits, warms)
-	}
-	if got := notes.all(); len(got) != 1 {
-		t.Fatalf("the reload was announced once: %q", got)
+	for _, tc := range []struct {
+		name  string
+		every time.Duration
+	}{
+		{"polling every 10ms", 10 * time.Millisecond},
+		{"polling every 400ms, slower than a fixed hold would last", 400 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			notes := fastWarmRetry(t, 5*time.Second)
+			warmWatch, warmWatchEvery = 20*time.Second, tc.every
+			f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1, healthFails: true, visibleLoad: true, holdPolls: 2}
+			var polls, failed atomic.Int32
+			f.runningDown = func() bool {
+				// The second poll that finds the seat starting fails, once; the first one read it fine.
+				if f.starting.Load() && polls.Add(1) == 2 {
+					failed.Add(1)
+					return true
+				}
+				return false
+			}
+			srv := reloadingSwap(t, f)
+			if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
+				t.Fatalf("a load that finishes is a warm, whatever one poll said in the middle of it: %v", err)
+			}
+			if failed.Load() != 1 {
+				t.Fatalf("the stand-in never failed a poll mid-load (polls while starting=%d): the test proved nothing", polls.Load())
+			}
+			// One reload answer, then the one load. A watch that gave up on the unreadable poll would
+			// have sent the load a third time.
+			if hits, warms := f.healthHits.Load(), f.warms.Load(); hits != 2 || warms != 1 {
+				t.Fatalf("health requests=%d (want 2) loads=%d (want 1)", hits, warms)
+			}
+			if got := notes.all(); len(got) != 1 {
+				t.Fatalf("the reload was announced once: %q", got)
+			}
+		})
 	}
 }
 
