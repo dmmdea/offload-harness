@@ -154,6 +154,13 @@ the roster was READ: a roster that could not be read makes no list at all, and t
 stack, because nothing then says what is resident and a list built from the config alone could leave a resident model on the leased
 card. The decision above is unchanged: the drain waits for runs on the leased cards.
 
+## Amendment 2026-10-14: the review lane's fenced fallthrough defers at once
+
+The 2026-09-15 note above says the wait-then-`capacity` path remains for the case where no remote qualifies. It does not, for a foreign
+fence: since the in-run fence check (ADR 0032, amended 2026-09-17), a local leg that finds a fencing hold defers `capacity` at once,
+naming the holder and its declared expiry, and waits for nothing. Only a fence taken after that check meets the cordon wait this ADR
+bounds. An inherited lease is not a fence: the holder's own review stays on the cards its lease cleared. The decision above is unchanged.
+
 ## Evidence
 
 llama-swap log 2026-09-14 (two drain windows of 61 polls at 7 ms each, the 3m26.9s

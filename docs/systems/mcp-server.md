@@ -899,7 +899,7 @@ These design choices are load-bearing rather than incidental:
   when it carries a good answer in `output`. The raw prose is still never published, only what
   survives the filters. The same read applies on the fenced-seat fleet path: a deferred fleet
   review is salvaged with the fleet's provenance (`node`, `placement`, `fence`) instead of falling
-  through to a local wait behind the very lease that fenced it; a salvage that comes to no review
+  through to a local run that defers at once behind the lease that fenced it; a salvage that comes to no review
   falls through exactly as before. `internal/pipeline`'s `TestReviewLaneReadsWhatTheRunnerFiles`
   runs the lane's real contract through the real runner so the node and the lane cannot drift
   apart. The pipeline's own ledger row still records the run as the defer it was; the salvage is
@@ -1008,11 +1008,19 @@ the engine's rules); `agent_delegate` has the whole engine (`retryable` and `run
 | A foreign lease fences the seat | `capacity`: `gpu busy: …; no new run is admitted on this box until it is released (gpu lease class=… expires=HH:MM:SS)` | Seen on entry, the review is offered once to the fleet at route `remote` (above). If the fleet declines or fails, the local leg re-reads the lease: while the fence holds it defers at once, and if the lease has cleared it runs. **Retried:** once, on a different place and never on this seat. No backoff, because the verdict was on disk before the call and nothing the call does releases another process's lease. | Review the diff yourself now. Re-call once after `expires=` if you still want the clean-context review; that is not a poll. |
 | A fence taken after the door looked | `capacity`: `gpu busy:` with `declared until …`, or `… the seat yielded the cards and this contract is re-placeable` | A lease taken between the check and the cordon is waited for up to the admission budget, then deferred. A lease claimed while the seat was cold-loading makes the seat unload itself and defer at once. The fleet is not asked: it is asked only about a fence the door saw on entry. **Retried:** no. The "re-placeable" is the delegation door's word; nothing re-places a review. | As above. |
 | The seat's run line is full | `capacity`: `seat busy:` | Waits in line, first come first served, up to the run's own wall, then defers. **Retried:** no; the wait was the retry. | Re-call later, or review the diff yourself. |
-| The seat is unfit to answer | `infrastructure`: `seat incoherent at warm:`, a failed warm-up, `seat down:` | The local leg publishes it as it came. On the fleet leg the delegator's one retry (above) applies. **Retried:** once on the fleet leg, never on the local leg. | Review the diff yourself. A seat that does this twice is the operator's to look at (`offload_status`). |
+| The seat is unfit to answer | `infrastructure`: `seat incoherent at warm:`, a failed warm-up, `seat down:`, and `stalled:` (the seat stopped producing inside its allowance; behind a re-pack it reads `structured re-pack unreachable: stalled: …`) | The local leg publishes it as it came. On the fleet leg the delegator's one retry (above) applies to the first three; a plain stall is not one of them. **Retried:** once on the fleet leg for those three, never for a stall and never on the local leg. | Review the diff yourself. A seat that does this twice is the operator's to look at (`offload_status`). |
 | The stack failed or the seat is misconfigured | `infrastructure` other than the above (endpoint unreachable, transport died, `seat contended:`), and `config` (no seat resolvable, seat not served) | Published as it came. **Retried:** no, by the door or by the delegator: another try meets the same stack, and an operator has to act. | Review the diff yourself; tell whoever runs the box. |
 | The seat answered and nothing usable came of it | `abstention`: `the seat returned no structured findings`, `none of the seat's N findings survived the lane's filters …`, a re-pack of the wrong shape | Published with the drop counts, after the salvage kept what the filters could keep (above). **Retried:** on the fleet leg the delegator retries a node-filed abstention once. The door's own filter verdict is raised after the engine returned and is never retried, and the local leg retries nothing. Nothing in this repository measures a second seat curing a hollow review, and a retry costs a second full wall inside a call someone is waiting on. | Review the diff yourself, or send it in pieces by path (`git diff -- <dir>`). |
-| A ceiling stopped the run | `budget`: the wall, a stall, the step budget, a cut completion | The lines the seat wrote are salvaged when the cut was the structuring's (above); otherwise deferred. **Retried:** no; a second run on the leftover wall repeats the shape. | Send a smaller diff; the wall is `agent_timeout_sec`, capped at 900 s. |
+| A ceiling stopped the run | `budget`: the liveness ceiling (`ceiling … reached while producing`), `step budget exhausted`, a completion cut at its token budget, a re-pack the clock skipped or cut (`structured re-pack skipped:`). `capacity`, when the ceiling found the run held behind the seat's other work (`ceiling … reached while held behind the seat's other work`) | The door imposes no deadline of its own (see what ends a run, below). The lines the seat wrote are salvaged when the clock cut the structuring (published with `salvaged` set to `wall` or `output_truncated`, above); otherwise deferred. **Retried:** no; a second run repeats the shape. The exception is a step budget that ended on a tool call written as the final answer, which the fleet leg retries once (above). | A `budget` defer: send a smaller diff, by path. A `capacity` one says nothing about the diff: re-call later, or review it yourself. |
 | The call cannot be run as asked | `contract`, and this door's own refusals: both or neither diff source, no task, a diff over the byte ceiling, a malformed commit id | Refused before any seat is contacted and sealed as a `NOT_RUN`. **Retried:** never; the same input gets the same answer. | Fix the input. |
+
+**What ends a run is not the wall.** The wall (the contract's 300 s by default or sized from the seat's rate, raised to
+`agent_timeout_sec` when that is larger, capped at 900 s) is what a run is expected to fit in. It is not a deadline: the
+door imposes none, and the node holds only the structured re-pack to it. A run ends when it finishes; when the seat
+stops producing inside its allowance (a stall: `infrastructure`, reason `stalled: …`); or when the liveness ceiling
+passes, max(3 x the seat's estimated run time, 2 x the wall, 1800 s) and never above 14400 s (`budget`, or `capacity`
+when the run spent its time held behind the seat's other work). A review that is still producing its answer is not cut
+at 300 s or at 900 s; only the re-pack that structures the answer is held to the wall.
 
 **A cold seat is not a defer.** A seat that is not resident is loaded by the run's own admission, outside the wall and
 inside the admission budget above (a vLLM seat's cold load measures 125 to 250 s on the reference fleet), and the wall
@@ -1033,9 +1041,12 @@ failure, and it is never a clean verdict.
 
 - Do not loop. The waits are already inside the call, so a re-call is warranted once, for a fence after its `expires=` or
   for a full run line later, and for nothing else.
-- Size the client's patience to the call. A review can spend the admission budget before its wall starts and then the
-  wall itself (`agent_timeout_sec`, capped at 900 s), so a client timeout tuned to the 30 to 90 s a review measures in
-  practice can cut a cold one.
+- Size the client's patience to the call, which has no fixed upper bound at the wall. It can spend the admission budget
+  (`agent_admission_wait_sec`) before the wall starts, when the seat is cold or the cordon is held; then, when the seat
+  is at its run cap, its place in the run line, up to a further wall; then the run itself, which ends on a stall or at
+  the liveness ceiling, at least 1800 s and higher on a slow seat (above). A run that is still producing is not cut at
+  the wall, so a client timeout sized from the wall can cut a legitimate long review, and so can one tuned to the 30 to
+  90 s that `offload_ask` quotes for its own lane.
 - The review is still owed whatever the defer says: read the diff yourself.
 
 **Where the door does not follow this yet.** A local-leg defer that is a fact about this seat or its cards, meaning a
