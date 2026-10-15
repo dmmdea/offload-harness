@@ -82,7 +82,7 @@ func TestTheGraphLaneDeclaresZeroWhenTheGraphFitsTheCard(t *testing.T) {
 	if n := need.RAM(32); n.GiB != 0 || n.Source != hostneed.SourceGraphLoaders || !strings.Contains(n.Detail, "fits the 32.0 GiB card") {
 		t.Errorf("on a 32 GiB card the 23.09 GiB graph fits: got %v, want 0 GiB with the fit wording", n)
 	}
-	if n := need.RAM(16); !strings.Contains(n.Detail, "does not fit the 16.0 GiB card, so the weights stream from RAM") {
+	if n := need.RAM(16); !strings.Contains(n.Detail, "does not fit the 16.0 GiB card") || !strings.Contains(n.Detail, "so the weights stream from RAM") {
 		t.Errorf("on a 16 GiB card it does not fit and says so: %v", n)
 	}
 }
@@ -90,14 +90,40 @@ func TestTheGraphLaneDeclaresZeroWhenTheGraphFitsTheCard(t *testing.T) {
 // Any doubt keeps the class default, unchanged: a file the box does not hold, a graph that is not there.
 func TestTheGraphLaneKeepsTheClassDefaultWhenItCannotSizeTheGraph(t *testing.T) {
 	p := krea2Pipeline()
+	notHeld := graphOnTheBox(t, p, "not_on_this_box.safetensors") // sets the box up (its model tree and sizes) before the control is read
 	want := classDefaultRAM(p.cfg)(16)
 	for name, params := range map[string]map[string]any{
-		"a file the box does not hold": graphOnTheBox(t, p, "not_on_this_box.safetensors"),
+		"a file the box does not hold": notHeld,
 		"a graph that is not there":    {"graph_path": filepath.Join(t.TempDir(), "absent.json")},
 		"no graph_path at all":         {},
 	} {
 		if got := graphRAM(p.cfg, params)(16); got != want {
 			t.Errorf("%s: declared %v, want the class default %v", name, got, want)
 		}
+	}
+}
+
+// THE LANE ITSELF, through the real run-graph path (runRunGraph, not a copy of its need): on a host with room for the 23.09 GiB the
+// incident's graph loads and not for the 33.1 GiB class default, the graph is admitted and its runner starts; the same host holds a
+// graph whose file the box cannot size at the class default, with the reason.
+func TestTheRunGraphLaneIsAdmittedOnTheFilesItsGraphNames(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: krea2Binding})
+	f.useHost(t, func() gpuprobe.HostMemory { return shortHost(65) })
+	params := graphOnTheBox(t, f.p, "qwen_image_fp8.safetensors")
+	ch := f.graph(params)
+	f.waitStarted(1) // admitted: the runner was started
+	f.letRunnersGo()
+	if r := f.await(ch); !r.OK {
+		t.Fatalf("the graph lane was not admitted on the files its graph names: %+v", r)
+	}
+}
+
+func TestTheRunGraphLaneHoldsAGraphItCannotSizeAtTheClassDefault(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: krea2Binding})
+	f.useHost(t, func() gpuprobe.HostMemory { return shortHost(65) })
+	params := graphOnTheBox(t, f.p, "not_on_this_box.safetensors")
+	r := f.await(f.graph(params))
+	if r.OK || !strings.Contains(r.Reason, "waiting for host RAM") {
+		t.Fatalf("want a hold on host RAM for the class default, got ok=%v: %s", r.OK, r.Reason)
 	}
 }

@@ -2736,7 +2736,7 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	// fleet dispatch path threads it) else the generic comfy-graph bucket.
 	// run-graph holds the whole node unless the operator DECLARES devices: the caller's graph owns
 	// its placement, so nothing here can know which cards it will use.
-	grant, lerr := p.acquireMediaLease(ctx, "run-graph", timeout, p.gpuWait(), declaredNeed(declaredDevices(req.Params), paramStr(req.Params, "waiter_token")).declaresRAM(classDefaultRAM(p.cfg)).resumableBy(req))
+	grant, lerr := p.acquireMediaLease(ctx, "run-graph", timeout, p.gpuWait(), declaredNeed(declaredDevices(req.Params), paramStr(req.Params, "waiter_token")).declaresRAM(graphRAM(p.cfg, req.Params)).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}

@@ -27,10 +27,10 @@ const maxGraphBytes = 8 << 20
 // graphDetailFiles is how many files the detail names before it says "and N more".
 const graphDetailFiles = 8
 
-// ForGraph sizes a ComfyUI API-format graph by the weight files its own loaders name: the SUM of their sizes, each file once, in
-// full. Every file counts, a VAE and a LoRA with the checkpoint, because the graph names them; and none is excused for fitting a
-// card (the family estimate does that, estimateWith), because where a graph places its weights and in what order it loads them are
-// its own, so the lease cannot say they sit on a card. The figure is an estimate from the files' sizes, not a measurement.
+// ForGraph sizes a ComfyUI API-format graph by the weight files its own loaders name: the SUM of their sizes, each file once.
+// Every file counts, a VAE and a LoRA with the checkpoint, because the graph names them. The sum goes through the family
+// estimate's own rule (fitToCard): in full when together the files do not fit the card (or the card is not known), and 0 when
+// they fit, because a set that fits streams nothing from RAM. The figure is an estimate from the files' sizes, not a measurement.
 //
 // ok is false, and the caller keeps the media class default, when graph is not a JSON object, names no weight file, or names one
 // that does not resolve under the box's model roots (or is empty). Facts.Stat sizes the files when set, as for every estimate.
@@ -60,7 +60,7 @@ func ForGraph(graph []byte, f Facts) (Need, bool) {
 	if more := len(files.Models) - graphDetailFiles; more > 0 {
 		set += fmt.Sprintf(" + %d more", more)
 	}
-	return Need{GiB: total, Source: SourceGraphLoaders, Detail: fmt.Sprintf("the graph's own loaders name %d weight file(s): %s = %.1f GiB, counted in full: where the graph places them and when it loads them are its own, so none is assumed to sit on a card (an estimate from the files' sizes, not a measurement)", len(files.Models), set, total)}, true
+	return fitToCard(SourceGraphLoaders, fmt.Sprintf("the graph's own loaders name %d weight file(s)", len(files.Models)), set, total, f, " (an estimate from the files' sizes, not a measurement)"), true
 }
 
 // ForGraphFile is ForGraph for the graph at path (`--graph <file>`). A path that is empty, not a regular file, larger than

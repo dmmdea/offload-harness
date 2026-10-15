@@ -215,7 +215,7 @@ func videoRAM(cfg config.Config, renderFamily string, over hostneed.VideoOverrid
 	}
 }
 
-// classDefaultRAM is for a call whose weights the pipeline cannot name (an arbitrary graph, the audio.cpp lanes): the media class
+// classDefaultRAM is for a call whose weights the pipeline cannot name (the audio.cpp lanes, a graph graphRAM cannot size): the media class
 // default, the largest ComfyUI render family this box binds. A box that binds none (sd.cpp only) gets 0 (hostneed.ClassDefault says
 // why). The sd.cpp lanes start from it and add the weights they park themselves (sdcppDeclared, F60).
 func classDefaultRAM(cfg config.Config) func(float64) hostneed.Need {
@@ -1400,7 +1400,17 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
-// graphRAM is for a run_graph call. STUB: red first.
+// graphRAM is for a run_graph call: the weight files the graph's own loaders name (hostneed.ForGraphFile, by the family estimate's
+// fit rule), and the media class default when the graph cannot be read or one of its files cannot be sized, as routeRAM falls back.
+// The graph is read at each call of the closure (the grant, the allocator's pre-filter and the lane probe each ask), and it is a
+// few KiB.
 func graphRAM(cfg config.Config, params map[string]any) func(float64) hostneed.Need {
-	return classDefaultRAM(cfg)
+	graphPath := paramStr(params, "graph_path")
+	return func(vram float64) hostneed.Need {
+		f := hostneed.Facts{Cfg: cfg, VRAMGiB: vram}
+		if n, ok := hostneed.ForGraphFile(graphPath, f); ok {
+			return n
+		}
+		return hostneed.ClassDefault(f)
+	}
 }
