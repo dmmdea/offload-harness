@@ -1,0 +1,12 @@
+{
+  "id": "recipe-code-05",
+  "seat_tag": "seat-class-a",
+  "rules": {
+    "max_observation_tokens": 600,
+    "rules_code": "class Rules:\n    def filter_action(self, a):\n        return a"
+  },
+  "provenance": [
+    "run-0401"
+  ],
+  "status": "proposed"
+}
