@@ -1070,6 +1070,32 @@ gates** — the other two report:
   seat needs. These are NOT the risk rules (`--rules`), which gate effects; env rules never grant
   or deny an effect. ADR 0036; details in [systems/coding-agent.md](systems/coding-agent.md).
 
+**Auditing a recipe (ADR 0036, amendment 2026-10-15).** A recipe is a proposed `agent_env_rules` table kept as a file in
+the recipe store (`<data home>/recipes/<id>.json`, or `--store DIR`), strict like the `--env-rules` file and tagged with
+the capability class of the seat (`seat_tag`) it was distilled for. To find out whether it earns a place on a seat,
+freeze a pre-registration (`gate freeze`) with judge `{deterministic, acceptance-dsl}`, the primary on the unit interval
+(the verb scores every run 1 or 0), at most tokens-class efficiency metrics (the only class it can read off a run) and no
+incumbent, write a contracts file (a JSON array of `{"id": <a declared task>, "contract": <agent contract>}`, one for every
+task the baseline declares, held-out ones included, where every contract carries acceptance checks), and run the audit
+under a lease, because it runs the seat and never takes one itself:
+
+```
+local-offload gpu reserve --wait 8h --drain --unload-seat --for 2h --reason "recipe audit" -- \
+  local-offload recipe-audit --recipe ID --seat ALIAS --seat-tag TAG \
+  --contracts tasks.json --baseline baseline.json --engine-build BUILD [--attempts N] [--input-out gate-input.json]
+```
+
+Each task runs on the seat as it is and with the recipe's rules in place of the box's table. The recipe is published only
+when the gate says ADOPT and the mean steps are no worse; otherwise it is demoted, and either way the store records the
+audit. Both arms are stamped with the pin the harness takes of the seat that served the runs, so the gate's era is the seat
+and not its alias. Exit 0 means the store holds the result (read `status` in the printed report). Exit 2 is a refusal and
+records nothing. Most refusals come before the first seat call: no lease (`no_lease`), a lease this process does not hold
+(`lease_not_held`), a `--seat-tag` that is not the recipe's (`seat_tag_mismatch`), or input the store or gate will not take
+(`bad_input`: a baseline on another scale or with a money or memory metric, a contracts file that leaves a declared task
+out, a build that cannot be hashed). Two end an audit that already ran some seat calls, so re-run it under a fresh lease:
+a lease that moved on mid-audit (`lease_lost`), and a seat whose pin moved or is missing (`seat_pin`: a model swapped
+behind the alias mid-audit, a served run the harness could not pin, or an audit in which nothing was served).
+
 Details and rationale: [systems/coding-agent.md](systems/coding-agent.md).
 
 ### The timeout chain, and walls sized from the seat's own rate (0.115.21, register D-03)

@@ -209,6 +209,8 @@ func main() {
 		err = runCompactionEval(args)
 	case "gate":
 		err = runGate(args)
+	case "recipe-audit":
+		err = runRecipeAudit(args)
 	case "stats":
 		err = runStats(args)
 	case "trace-corpus":
@@ -365,6 +367,8 @@ Usage:
   local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
   local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench> --corpus C | contextbench   compaction ladder eval: trace→corpus harvest (redacting), ratio/retention report, tokens ratchet, gated A/B, KV-reuse bench, ContextBench tasks
   local-offload gate <freeze|check|verdict|selftest|schema> [flags]   the one measurement gate: freeze a pre-registration, check it, judge a candidate against the incumbent (ADOPT/BLOCK/INCONCLUSIVE, paired interval over tasks), write a model judge's self-test receipt (selftest); exit 0 a verdict was produced, 1 non-ADOPT under --require-adopt or a scorer that failed its self-test, 2 a refusal (docs/systems/measurement-gate.md)
+  local-offload recipe-audit --recipe ID --seat ALIAS --seat-tag TAG --contracts TASKS.json --baseline BASELINE.json --engine-build STR [--store DIR] [--attempts N] [--input-out FILE]
+                                         run the contracts with and without a recipe (ADR 0036 amendment) on one seat UNDER a GPU lease, judged by the acceptance DSL; publish the recipe only on a gate ADOPT with steps no worse, else demote it; exit 2 without a lease (run it under gpu reserve), 0 once the store records the result
   local-offload confhead-eval            out-of-fold adoption gate (AURC/AUGRC + paired-bootstrap CI)
   local-offload confhead-calibrate       per-task conformal p(correct) escalation thresholds (ADOPT tasks)
   local-offload stats                    observational per-task ledger telemetry

@@ -1,0 +1,12 @@
+{
+  "id": "recipe-note-04",
+  "seat_tag": "seat-class-a",
+  "notes": "free text that no field of the record is allowed to carry",
+  "rules": {
+    "max_observation_tokens": 600
+  },
+  "provenance": [
+    "run-0301"
+  ],
+  "status": "proposed"
+}
