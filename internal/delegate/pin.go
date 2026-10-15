@@ -184,8 +184,8 @@ func (r *runner) remoteHint() bool { return r.pin.hint && r.pin.asked == "remote
 // fleet node and on no other place, and that holds for its second chance as much as for its first (alternativeNode).
 // It is the reason that makes the pin one this box obeys to the end, because a reasoned pin is what the ledger rows and
 // offload_status say placement obeyed. It is not the route: the bare remote route of a caller with no reason channel
-// (fleet-smoke, the review lane's fallthrough, agent_run with no model) keeps the retry it has always had,
-// remote -> local, and a reasonless remote hint is placed as auto and may retry on the seat (ADR 0078 decisions 3 and 5).
+// (fleet-smoke, the review lane's fallthrough, offload_ask with a named route, agent_run with no model) keeps the retry
+// it has always had, remote -> local, and a reasonless remote hint is placed as auto and may retry on the seat (ADR 0078 decisions 3 and 5).
 // An agent_run that names a model is reasoned (PinOperator): it asked for a fleet node's seat, and the local seat is no
 // place for its second chance.
 func (r *runner) remotePinned() bool { return r.pin.reason != "" && r.pin.asked == "remote" }
