@@ -29,36 +29,51 @@
   --engine-build STR [--store DIR] [--attempts N] [--input-out FILE]`. It refuses with a typed refusal and exit 2, before any
   seat call, when there is no `GPU_LEASE_EPOCH`, when the epoch is not a live lease in the lease directory
   (`gpulease.EpochIsCurrent`), when `--seat-tag` is not the recipe's, and on input the store or the gate will not take (an
-  undeclared or repeated task, a contract with no acceptance check, a baseline that froze an incumbent or a judge other than
-  `{deterministic, acceptance-dsl}`, a baseline that is not the frozen bytes). It never takes a lease and asks again before
-  every seat call: a lease that moves on mid-audit ends it with exit 2 and records nothing. The gate input is built as
+  undeclared or repeated task, a declared task with no contract, a contract with no acceptance check, a baseline that froze
+  an incumbent or a judge other than `{deterministic, acceptance-dsl}`, a primary class other than `unit_interval`, an
+  efficiency class other than `tokens`, a baseline that is not the frozen bytes, a build the gate cannot stamp). It never
+  takes a lease and asks again before every seat call: a lease that moves on mid-audit ends it with exit 2 and records
+  nothing, and so does a seat whose pin moves or is missing (`seat_pin`, below). The gate input is built as
   `gate verdict` builds it (`eval.CheckBaseline`, `eval.Gate`, the build hash on the result); `--input-out` writes it, and a
   test pins that `gate verdict` on that file gives the printed result byte for byte. gate_cmd.go is not edited.
 - **Decisions taken, with the default.**
   - The candidate arm replaces the box's table with the recipe's rules (the semantics of `local-agent --env-rules`); the
     incumbent arm is the box's own table, untouched. Each task runs on both arms, attempt after attempt, and which arm goes
     first alternates by task.
-  - A finished run is judged by the acceptance DSL (pass scores 1, fail scores 0). A runner error and an infrastructure,
-    config, contract, capacity or write defer are `infra_error`; a wall timeout is `timeout`; a spent step budget is
-    `task_fail`, because the seat used its steps and did not finish. The gate imputes the candidate's unfinished attempts at
-    the worst score and skips the incumbent's.
+  - A finished run is judged by the acceptance DSL (pass scores 1, fail scores 0), which is why the primary must be on the
+    unit interval. A runner error and an infrastructure, config, contract, capacity or write defer are `infra_error`. A budget
+    the seat itself spent without finishing is `task_fail`, because the seat used it and did not finish: the step budget, a
+    tool call cut at the completion budget twice, a final answer the think block starved twice. A budget a clock or a
+    caller ended (the wall, a ceiling, a canceled parent, a re-pack the clock could not buy) is `timeout`. The gate imputes
+    the candidate's unfinished attempts at the worst score and skips the incumbent's.
   - Steps are the verb's own check beside the gate: the mean over the tasks that finished on both arms, candidate no greater
     than incumbent, at least one such task. The gate's efficiency classes are tokens, money and memory, never a count of
     steps. A declared `tokens` metric is read from the run's forwarded prefill tokens and is unresolved when the run has no
-    prefill accounting; the other classes are always unresolved.
-  - Both arms' stamps carry the harness build, the engine build and a hash of the seat, its endpoint and the env-rule table
-    the arm ran under. `--engine-build` is required because nothing in the tree reads an engine version from a seat.
+    prefill accounting. A money or memory metric could never be resolved, so a baseline that declares one is refused.
+  - The era is the seat that served the runs. The harness pins the served seat on every served run
+    (`wire.SeatConfigSHA256`, from `agent.ProbeSeatPin`); both arms' stamps carry the harness build, the engine build and a
+    hash of the seat alias, its endpoint, that pin and the env-rule table the arm ran under, so a model, quant or window
+    swapped behind the alias moves the stamps and the gate's era marker, and the arms differ by the table. The pin must be the
+    same on every served run of both arms: one that moves mid-audit, a served run with none, and an audit in which nothing
+    was served are `seat_pin` refusals (exit 2, nothing recorded), the first two at the run that shows it. A defer carries no
+    pin by design and is not held to one. `--engine-build` stays required: it names the engine in the operator's words.
   - `--seat-tag` is required and must equal the recipe's: a recipe is evidence about one class of seat. The tag is a slug the
     operator chooses; the harness checks its shape and the match, not a vocabulary.
 - **Tests.** Red first, each committed failing before the code that fixed it: the unknown top-level key, `rules_code` inside
   the rules, free text and code outside the vocabulary (18 cases), the empty rule set and missing provenance, the published
   record without the audit its status needs (seven cases), the store and the scoring partition; then the verb's refusals (no lease, a lease
-  this process does not hold, a lease lost between runs, a seat-tag mismatch, 13 kinds of bad input), publish on an ADOPT
+  this process does not hold, a lease lost between runs, a seat-tag mismatch, 19 kinds of bad input), publish on an ADOPT
   with fewer steps, demote when the steps got worse, demote on a block and on a tie, the gate-input parity, the outcome
-  mapping and the metric mapping. A fake seat stands in for the model; one test runs the verb against a real lease taken in a
+  mapping and the metric mapping. A review then found more to pin: a primary off the unit interval, a money or
+  memory metric, an unhashable build and a short contracts file (each refused before the seat is asked); a spent completion
+  budget read as a timeout; a seat swapped behind the alias (the pin in the stamps, a pin that moves, a served run with no
+  pin, nothing served); and the steps rule's tie, its unfinished attempts, `--attempts` and the arm order, which five
+  surviving one-line mutants had left unpinned. A fake seat stands in for the model; one test runs the verb against a real lease taken in a
   temporary lease directory and again after it is released. Mutations run and killed: the up-front and the per-run lease
   checks removed, the seat-tag check removed, the steps check removed from the publish rule, publish on any verdict, the steps
-  comparison inverted, an unmeasured run read as zero tokens, a spent step budget read as a timeout, a frozen incumbent
+  comparison inverted, a tie in steps demoting, a pair that needs only one arm, an unfinished attempt counted as steps,
+  `--attempts` ignored, the arm order never alternating, the candidate arm stamped with the incumbent's rule table, an
+  unmeasured run read as zero tokens, a spent step budget read as a timeout, a frozen incumbent
   allowed, an undeclared task allowed, a contract without acceptance allowed, the candidate arm running the box's table,
   unknown fields allowed, the text charset widened to code characters, the empty-match pattern allowed, a record published
   without an audit or with worse steps, a proposed record carrying an audit, tool names unchecked, duplicate provenance
@@ -71,6 +86,11 @@
     `--attempts` above 1 does to the cost of an audit on a real seat.
   - That the forwarded prefill tokens of a real run are present on the wire result of the seat in question; the metric is
     tested on scripted results.
+  - That a real seat's pin reaches `wire.SeatConfigSHA256` on every served run, and how often the probe's three-second
+    bound misses it: an unpinned served run ends the audit, so a flaky probe costs a re-run. The pin check is tested on a
+    fake seat that stamps or withholds the field.
+  - That the budget-class split (the seat's own spent budget against a clock or a caller) matches live defers: it is read
+    from the defer sites in `internal/pipeline/agenttask.go` and tested on scripted results.
   - That a provenance run id names an acceptance-passing run. The store checks the shape of the ids; the delegation log is
     the evidence and nothing here reads it.
   - That a published recipe helps in use: nothing applies one. An operator copies its rule set into the seat's table.

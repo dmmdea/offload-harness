@@ -212,6 +212,11 @@ is, then with the recipe's rules in place of the box's table), judged by the acc
 only on a measurement-gate ADOPT with mean steps no worse than the incumbent's; anything else demotes it, with the
 audit kept in the record. It never takes a lease: with no `GPU_LEASE_EPOCH`, or an epoch no live lease carries, it
 refuses with exit 2 before the seat is asked, so it runs under `gpu reserve ... -- local-offload recipe-audit ...`.
+Its baseline must put the primary on the unit interval (every run scores 1 or 0) and declare tokens-class efficiency
+metrics only, and its contracts file must cover every declared task; those are refused before the seat is asked, and so
+is a build the gate cannot stamp. Both arms are stamped with the pin of the seat that served the runs (the one the
+harness puts on every served run's wire result) beside the rule table each ran under, so a model swapped behind the
+alias moves the gate's era, and a pin that moves mid-audit ends the audit with nothing recorded.
 `--input-out FILE` writes the gate input, and `gate verdict --baseline B --input FILE` gives the printed result
 again. No proposer exists: a recipe enters the store as a file an operator writes, and the proposer waits for a
 trace corpus in the hundreds.

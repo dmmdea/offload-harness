@@ -152,14 +152,19 @@ one (`local-offload recipe-audit`). Decided, with the reasons on record:
   provenance, not the runs: the delegation log is the evidence, and a proposer that distils from a failing run is
   out of contract.
 - **The audit.** `recipe-audit` takes a frozen pre-registration (`gate freeze`, judge
-  `{deterministic, acceptance-dsl}`, no frozen incumbent) and a file of contracts, one per declared task. It runs
+  `{deterministic, acceptance-dsl}`, the primary on the unit interval because every run scores 1 or 0, tokens-class
+  efficiency metrics only because nothing else can be read off a run, no frozen incumbent) and a file of contracts, one
+  per declared task. It runs
   every task on one seat twice: the incumbent arm is the seat as it is, the candidate arm has the recipe's rule set
   in place of the box's table. The acceptance DSL is the judge. The decision is the measurement gate's, built as
   `gate verdict` builds it. The recipe is published only when the verdict is ADOPT and the candidate's mean steps,
   over the tasks both arms finished, are no worse than the incumbent's; anything else demotes it, an INCONCLUSIVE and
   a tie included, because the incumbent keeps every tie. Steps are the verb's own check beside the gate, because the
   gate's efficiency classes are tokens, money and memory and never a count of steps. A demoted recipe stays in the
-  store with the audit that demoted it: nothing is deleted. The verb never takes a lease: with no `GPU_LEASE_EPOCH`
+  store with the audit that demoted it: nothing is deleted. Both arms are stamped with the pin the harness takes of the
+  seat that served the runs (weights, quant, engine build, window, template), beside the rule table each arm ran under,
+  so the gate's era is the seat and not the alias it was asked for; a seat whose pin moves mid-audit ends the audit and
+  nothing is recorded. The verb never takes a lease: with no `GPU_LEASE_EPOCH`
   in its environment, or an epoch no live lease carries, it refuses with exit 2 before the seat is asked, and it asks
   again before every seat call.
 - **No proposer is built until trace-bearing rows number in the hundreds.** The E4 count was 16, and a proposer over
