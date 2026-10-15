@@ -183,3 +183,20 @@ func TestTraceCorpusTotalsReadZeroAndRatesReadNullWhenNothingWasRecorded(t *test
 			p.RecordedRuns, p.UnrecordedRuns, c.RecordedRuns, c.UnrecordedRuns, f.UnmeasuredRuns)
 	}
 }
+
+// The gate's own page carried the same sentence before the chapter did: "The verb reads only the files it is named and
+// writes only `freeze --out` and `selftest --out`". With its real scorer `gate selftest` also reads the config and writes
+// what a pipeline call writes (TestGateSelftestWithTheRealScorerWritesALedgerRowAndTheCache), so the chapter and the page
+// it links as the owner must not disagree.
+func TestTheGatePageDoesNotClaimTheVerbWritesOnlyItsOutFiles(t *testing.T) {
+	const page = "docs/systems/measurement-gate.md"
+	text, err := docText(".", page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	if phrase := "writes only `freeze --out` and `selftest --out`"; strings.Contains(text, phrase) {
+		t.Errorf("%s still says %q: gate selftest with its real scorer also writes ledger rows and the result cache", page, phrase)
+	}
+	docNeeds(t, page, text, "production pipeline", "result cache")
+}
