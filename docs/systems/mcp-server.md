@@ -766,11 +766,15 @@ route is what makes an accepted result provably off-box. The published result na
 id than `node`) and the fence that moved it, and the findings go
 through the SAME filters as a local review (one `publish` step in the handler serves both, so the two cannot drift).
 An INHERITED lease is not a fence: `gpu reserve … -- <session>` sets `GPU_LEASE_EPOCH`, and the
-holder's own review stays on the cards its lease cleared. When the fleet takes nothing, today's path
-stands — the wait, then the capacity defer — and the result carries a `fleet` note saying the fleet
-was asked and why it declined. That defer's reason now also carries the holder's DECLARED window
-(`, declared until 11:40PM (~37m0s left)` — `modelaffinity.LeaseError`), so "gpu busy" finally
-answers *when to retry*.
+holder's own review stays on the cards its lease cleared. When the fleet takes nothing, the local leg
+runs, and it asks the same question again before it admits anything (the in-run fence check of ADR 0032's 2026-09-17
+amendment): while the fence holds it defers `capacity` AT ONCE and waits for nothing, naming the holder and its declared
+expiry (`gpu lease class=… expires=HH:MM:SS`), and if the lease cleared while the fleet was being asked it simply runs.
+Either way the result carries a `fleet` note saying the fleet was asked and why it declined. A fence taken in the
+moments after that check meets the cordon instead, which waits out the admission budget and files a defer whose reason
+carries the holder's DECLARED window (`, declared until 11:40PM (~37m0s left)` — `modelaffinity.LeaseError`), so
+"gpu busy" answers *when to retry*. What each defer gets, and what a caller does with it, is the policy block that
+closes this lane's section.
 
 On the evidence for it, keep two things apart. Cognition **reports** a dedicated reviewer in
 their Fusion setup catching ~2 bugs per PR, ~58% of them severe; that is the vendor's own
@@ -964,6 +968,83 @@ final does-it-actually-work verification, which stays with the caller — as do 
 architecture judgement, and any call the caller is accountable for. Findings are triage input;
 a `severe` label from a small local model is a prompt to read those lines, not proof. It shares
 the ask lane's ledger gap above: `RunAgentContract` writes no delegation corpus row.
+
+**What a defer means here: retry, backoff and the warm seat.** The lane is one synchronous call, and every defer it
+returns leaves its caller the same next action: review the diff yourself (the handler's own comment says so). So its
+policy is the narrowest one that stays honest. It waits only where a wait can end. It retries only what a different place
+can cure, and only inside the budget the caller is already waiting on. It says on the result what it did. And a retry
+goes elsewhere, **never on the same seat**. The door itself has no retry loop and no backoff of its own: its local leg is one
+`RunAgentContract` call, `internal/reviewlane` retries, sleeps and warms nothing, and a defer comes back published as it
+came, with the `fleet` note when the fleet was asked. What can look like a retry is one of four bounded things that live
+elsewhere, listed here so that nobody stacks a fifth on them:
+
+1. **Admission, before the wall starts.** One budget, `agent_admission_wait_sec`, 300 s by default (negative switches it
+   off), pays for the fence check (instant), the cordon, the swap pre-flight, the cold load of the seat and the probes
+   after it. The seat's run line (`fleet_max_concurrent_jobs`) is separate: a run waits in it for up to its own wall, outside the wall and
+   outside that budget.
+2. **Contention, inside the run.** `internal/seatwait` re-sends a request that llama-swap answered with 429, 503
+   "process is not ready" or 500 on a health-check timeout, after 1, 2, 4, 8, then 15 s (a server `Retry-After` wins),
+   out of one budget per run, `seat_contention_wait_sec`, 90 s by default. A budget that runs out files
+   `seat contended:` (`infrastructure`).
+3. **The fleet's capacity wait, on the fleet leg only.** The delegator re-places a review a node refused and waits for
+   capacity for `agent_placement_wait_sec`, 120 s by default (a review carries no whole-call deadline, so nothing else
+   bounds it).
+4. **The fleet's one retry, on the fleet leg only.** Of the results a different node can cure, the delegator retries
+   these once: a node-filed abstention, a seat found incoherent at warm, a failed warm-up (a defer only with
+   `agent_warm_failure_defer` on, which it is not by default), a seat that went down, a lost workspace root, and a tool
+   call written as the final answer. The retry runs on another node (on this box's own seat
+   only once the fence has lifted), inside what is left of the contract's own `timeout_sec`, and is skipped with a
+   `retry_note` under `agent_retry_min_sec` (at least 10 s) or when no other node can take it; a retry that ran is
+   published as `retried_on` and `retry_note`. A failed verification, the delegator's commonest retry, never applies
+   here: the lane has no acceptance check.
+
+Next to its siblings: `offload_ask` retries once, a failed acceptance of a local first attempt and never after
+`route: "local"`, and publishes a defer of any class as it came; `agent_run` retries nothing itself (a `route`d one rides
+the engine's rules); `agent_delegate` has the whole engine (`retryable` and `runOne` in
+[`internal/delegate`](../../internal/delegate/run.go)). What each defer shape of the review lane gets:
+
+| Shape | Class and the words of the reason | What the door does, and whether it retries | What the caller does |
+|---|---|---|---|
+| A foreign lease fences the seat | `capacity`: `gpu busy: …; no new run is admitted on this box until it is released (gpu lease class=… expires=HH:MM:SS)` | Seen on entry, the review is offered once to the fleet at route `remote` (above). If the fleet declines or fails, the local leg re-reads the lease: while the fence holds it defers at once, and if the lease has cleared it runs. **Retried:** once, on a different place and never on this seat. No backoff, because the verdict was on disk before the call and nothing the call does releases another process's lease. | Review the diff yourself now. Re-call once after `expires=` if you still want the clean-context review; that is not a poll. |
+| A fence taken after the door looked | `capacity`: `gpu busy:` with `declared until …`, or `… the seat yielded the cards and this contract is re-placeable` | A lease taken between the check and the cordon is waited for up to the admission budget, then deferred. A lease claimed while the seat was cold-loading makes the seat unload itself and defer at once. The fleet is not asked: it is asked only about a fence the door saw on entry. **Retried:** no. The "re-placeable" is the delegation door's word; nothing re-places a review. | As above. |
+| The seat's run line is full | `capacity`: `seat busy:` | Waits in line, first come first served, up to the run's own wall, then defers. **Retried:** no; the wait was the retry. | Re-call later, or review the diff yourself. |
+| The seat is unfit to answer | `infrastructure`: `seat incoherent at warm:`, a failed warm-up, `seat down:` | The local leg publishes it as it came. On the fleet leg the delegator's one retry (above) applies. **Retried:** once on the fleet leg, never on the local leg. | Review the diff yourself. A seat that does this twice is the operator's to look at (`offload_status`). |
+| The stack failed or the seat is misconfigured | `infrastructure` other than the above (endpoint unreachable, transport died, `seat contended:`), and `config` (no seat resolvable, seat not served) | Published as it came. **Retried:** no, by the door or by the delegator: another try meets the same stack, and an operator has to act. | Review the diff yourself; tell whoever runs the box. |
+| The seat answered and nothing usable came of it | `abstention`: `the seat returned no structured findings`, `none of the seat's N findings survived the lane's filters …`, a re-pack of the wrong shape | Published with the drop counts, after the salvage kept what the filters could keep (above). **Retried:** on the fleet leg the delegator retries a node-filed abstention once. The door's own filter verdict is raised after the engine returned and is never retried, and the local leg retries nothing. Nothing in this repository measures a second seat curing a hollow review, and a retry costs a second full wall inside a call someone is waiting on. | Review the diff yourself, or send it in pieces by path (`git diff -- <dir>`). |
+| A ceiling stopped the run | `budget`: the wall, a stall, the step budget, a cut completion | The lines the seat wrote are salvaged when the cut was the structuring's (above); otherwise deferred. **Retried:** no; a second run on the leftover wall repeats the shape. | Send a smaller diff; the wall is `agent_timeout_sec`, capped at 900 s. |
+| The call cannot be run as asked | `contract`, and this door's own refusals: both or neither diff source, no task, a diff over the byte ceiling, a malformed commit id | Refused before any seat is contacted and sealed as a `NOT_RUN`. **Retried:** never; the same input gets the same answer. | Fix the input. |
+
+**A cold seat is not a defer.** A seat that is not resident is loaded by the run's own admission, outside the wall and
+inside the admission budget above (a vLLM seat's cold load measures 125 to 250 s on the reference fleet), and the wall
+starts when the seat reads ready. A seat the call has just loaded is by default also asked one bounded coherence question before
+the wall starts (`agent_coherence_probe`). The cost of a cold seat is the latency of the call that finds it. The lane keeps nothing warm and warms
+nothing ahead of a call: an idle seat unloads after 5 minutes, and a keep-warm ping or a pre-warm call
+would be a scheduler this project does not run. Two reviews sent while the seat's idle timeout has not run out find it
+resident for the second. The review's result does not carry the admission block (`admission_wait_sec`, `admission_note`)
+that `agent_run`'s does, so a long call cannot be told from its result alone to have been a cold load or a long review.
+
+**A plain text reservation is not a fence.** `gpu reserve --class text` without `--drain` or `--unload-seat` steers the
+delegator's placement off this box's seat but refuses no run at the gate, and this door does not consult it: the review
+runs on the seat, on the cards the holder reserved. The delegation door's `auto` and `spread` routes, and its retry,
+avoid those cards. It is not a defer, so nothing in the table applies to it.
+
+**What the caller does.** Read `defer_class` and `reason`: a deferred review is a result with its reason and not a
+failure, and it is never a clean verdict.
+
+- Do not loop. The waits are already inside the call, so a re-call is warranted once, for a fence after its `expires=` or
+  for a full run line later, and for nothing else.
+- Size the client's patience to the call. A review can spend the admission budget before its wall starts and then the
+  wall itself (`agent_timeout_sec`, capped at 900 s), so a client timeout tuned to the 30 to 90 s a review measures in
+  practice can cut a cold one.
+- The review is still owed whatever the defer says: read the diff yourself.
+
+**Where the door does not follow this yet.** A local-leg defer that is a fact about this seat or its cards, meaning a
+fence taken after the door looked, a seat that yielded the cards, a seat found incoherent, a failed warm-up or a seat that
+went down, is published as it came instead of being offered once to the fleet at route `remote` the way a review fenced
+on entry is. The policy is one offer, made at once with no backoff, through the same `publish` step, inside what the
+contract's own `timeout_sec` has left and under the same floor as the fleet's retry; a delegation retries these defers,
+and the review lane should not be the door that does not. Not built. The admission block above is not on the review's
+result either. Not built.
 
 ## Important flows
 
