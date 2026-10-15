@@ -48,10 +48,12 @@ measurement gate and the SHA-bound evidence on a review result.
 - **Pre-registration.** The rules of one comparison (mode, primary metric and margin, judge, efficiency metrics, task
   list), written into a baseline file and hashed before the first candidate run. A verdict names that hash.
 - **Verdict.** ADOPT, BLOCK or INCONCLUSIVE. Only ADOPT lets a candidate replace the incumbent.
-- **Unrecorded.** A value nobody measured. It reads `null`, never 0, and the count of unrecorded cases sits beside it.
-  The register and the trace-corpus readout keep this for every total and rate, and the gate keeps it for an efficiency
-  metric resolved on fewer than two pairs. The gate's primary interval reads 0 below two pairs, and the verdict is then
-  INCONCLUSIVE through `min_pairs`.
+- **Unrecorded.** A value nobody measured. Where the code can say so it reads `null`, never 0, with the count of cases
+  that did or did not record it beside it: every rate of the trace-corpus readout, the register's card work
+  (`cards_tokens`, beside `rows_with_tokens`) and a gate efficiency metric resolved on fewer than two pairs. The
+  readout's totals (passes, evictions, prefill tokens) are sums over the recorded runs, so they read 0 when no run
+  recorded them, with `recorded_runs` and `unrecorded_runs` beside them (`unmeasured_runs` for prefill). The gate's
+  primary interval reads 0 below two pairs, and the verdict is then INCONCLUSIVE through `min_pairs`.
 - **Failure class and kind.** The class of a failed job is its reason code. Its kind says whose failure it is (below).
 - **Outcome.** The closed label on a review result: `PASS`, `FINDINGS`, `GATE_FAILED`, `NOT_RUN` or `STALE`.
 
@@ -127,11 +129,12 @@ It reports, for the whole corpus, by source and by seat:
   harder pass after a server overflow rejection, or the emergency shrink;
 - **prefill** tokens, cached tokens and KV reuse, with the per-run spread.
 
-Its rules are the register's rules again. Every rate is `null` when nothing was recorded, with the unrecorded count
-beside it. A delegation row is a run only if an agent executed, so a deferral logged with zero steps and nothing else is
-skipped under a named reason and counted. A pager object that contradicts itself is read as unrecorded and noted. A
-pool placement logs the pool's alias and not the node's real seat, so those runs are reported apart (`pool_alias`) and
-`attribution` says how much of the corpus a per-seat reading cannot reach.
+Its rules follow the register's: nothing is guessed. Every rate is `null` when nothing was recorded, with the unrecorded
+count beside it, and a total is a sum over the recorded runs, so it reads 0 then. A delegation row is a run only if an
+agent executed, so a deferral logged with zero steps and nothing else is skipped under a named reason and counted. A
+pager object that contradicts itself is read as unrecorded and noted. A pool placement logs the pool's alias and not the
+node's real seat, so those runs are reported apart (`pool_alias`) and `attribution` says how much of the corpus a
+per-seat reading cannot reach.
 
 The first readout, in [ADR 0091](../architecture/decisions/0091-agent-trace-corpus-readout-pager-refetch-compaction-fire-and-prefill.md)
 (status Proposed at this head, a snapshot of one machine's log on 2026-10-14 and not re-measured here), found no run that
@@ -234,8 +237,9 @@ trace-bearing runs.
 
 - Only the gate adopts. A readout, a register row or a review outcome is input to a person or to a gate run, never a
   verdict.
-- In the register, the readout and the gate's efficiency metrics, a missing measurement is `null` and is counted beside
-  the value, never read as 0.
+- A missing measurement is `null` for a rate (every trace-corpus rate), for the register's `cards_tokens` and for a gate
+  efficiency metric, and is counted beside the value. The trace-corpus totals are sums over the recorded runs and read 0
+  when none recorded, with `recorded_runs` and `unrecorded_runs` beside them; read those before reading a 0 as a finding.
 - The incumbent keeps every tie and every INCONCLUSIVE.
 - No pass rule, verdict or ranking carries a wall-time term.
 - The rules of a comparison are frozen and hashed before the first candidate runs, and a verdict names the hash.
@@ -286,8 +290,10 @@ trace-bearing runs.
 
 - **`BELOW_GATE` is not ADOPT.** The pager's 10 % gate is a threshold on one rate in the trace-corpus report. It is
   unrelated to the measurement gate's verdicts.
-- **`null` and `NO_DATA` are not zero.** A register total, a trace-corpus rate or an efficiency delta that reads `null` was
-  never measured. An empty root-cause cell means nobody has looked, not that nothing is wrong.
+- **`null` and `NO_DATA` are not zero.** The register's `cards_tokens`, a trace-corpus rate or an efficiency delta that
+  reads `null` was never measured. A trace-corpus total that reads 0 (a pass count, an eviction count) may only mean no
+  run recorded it: read `recorded_runs` beside it. An empty root-cause cell means nobody has looked, not that nothing is
+  wrong.
 - **A review PASS is not an approval.** It says a clean seat read these bytes and found nothing, with gates green for the
   named head. It does not block or allow a merge, and the lane cannot show the head belongs to the diff.
 - **Bind a verdict to the hash `freeze` printed**, not to a later `gate check` of the file: an edit that leaves a valid
