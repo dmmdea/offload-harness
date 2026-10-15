@@ -44,7 +44,7 @@ func TestHelperRunWrapper(t *testing.T) {
 		wrapperFenceWindow, wrapperFencePoll = time.Duration(ms)*time.Millisecond, 50*time.Millisecond
 	}
 	if flag := os.Getenv("LO_WRAPPER_UNREADABLE_FLAG"); flag != "" {
-		gpulease.UseReadFault(unreadableWhileFlagged(flag))
+		gpulease.UseReadFault(unreadableWhileFlagged(flag, ""))
 	}
 	if err := runGPUReserve(args); err != nil {
 		os.Stderr.WriteString("wrapper error: " + err.Error() + "\n")

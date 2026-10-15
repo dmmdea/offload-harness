@@ -25,9 +25,13 @@ import (
 )
 
 // unreadableWhileFlagged is a read fault for the lease records (meta.json and e/<epoch>.json) that is on while the flag file exists:
-// the record is still there and can be removed, but cannot be read. The wrapper process and the test both install it.
-func unreadableWhileFlagged(flag string) func(path string) error {
+// the record is still there and can be removed, but cannot be read. The wrapper process and the test both install it; scope, when not
+// empty, is the lease directory it applies to (the in-process installs name theirs, so no other lease in the test binary is touched).
+func unreadableWhileFlagged(flag, scope string) func(path string) error {
 	return func(path string) error {
+		if scope != "" && !strings.HasPrefix(path, scope) {
+			return nil
+		}
 		if _, err := os.Stat(flag); err != nil {
 			return nil
 		}
@@ -44,7 +48,7 @@ func TestAnUnreadableRecordWithALiveWrapperIsNotSweptAndTheWrapperStopsBeforeAny
 	t.Setenv("LO_WRAPPER_FENCE_MS", "1500") // the wrapper's window for a record it cannot read, short for the test
 	t.Setenv("LO_WRAPPER_UNREADABLE_FLAG", flag)
 	run := startTreeRun(t, "")
-	defer gpulease.UseReadFault(unreadableWhileFlagged(flag))() // the second reserve, in this process, cannot read it either
+	defer gpulease.UseReadFault(unreadableWhileFlagged(flag, run.m.Dir()))() // the second reserve, in this process, cannot read it either
 	record := filepath.Join(run.m.Dir(), "meta.json")
 	// The record is older than the grace the sweep gives a claim in progress, as a long job's is.
 	old := time.Now().Add(-time.Minute)
@@ -94,7 +98,7 @@ func TestTheDrainHeartbeatEndsTheDrainOnceTheRecordHasBeenUnreadableForItsWindow
 	}
 	defer func() { _ = lease.Release() }()
 	flag := filepath.Join(t.TempDir(), "unreadable.flag")
-	defer gpulease.UseReadFault(unreadableWhileFlagged(flag))()
+	defer gpulease.UseReadFault(unreadableWhileFlagged(flag, m.Dir()))()
 	oldWindow, oldPoll := wrapperFenceWindow, wrapperFencePoll
 	wrapperFenceWindow, wrapperFencePoll = 400*time.Millisecond, 50*time.Millisecond
 	defer func() { wrapperFenceWindow, wrapperFencePoll = oldWindow, oldPoll }()
