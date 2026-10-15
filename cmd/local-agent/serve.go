@@ -11,11 +11,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
@@ -84,9 +86,9 @@ func newChatCompletion(id, model, content string, created int64) openAIChatRespo
 	}
 }
 
-// serveOpenAI starts the HTTP server. loop is the shared agent loop; modelID is
+// openAIMux builds the OpenAI-compatible routes. loop is the shared agent loop; modelID is
 // the name advertised to the client (what the user picks in the GUI).
-func serveOpenAI(listen string, loop *agent.Loop, modelID string) error {
+func openAIMux(loop *agent.Loop, modelID string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
@@ -144,13 +146,54 @@ func serveOpenAI(listen string, loop *agent.Loop, modelID string) error {
 		_, _ = w.Write([]byte("local-agent OpenAI-compatible server\n"))
 	})
 
-	srv := &http.Server{
+	return mux
+}
+
+// guardedOpenAIHandler puts the SF-16 ingress guard in front of the OpenAI routes. The agent
+// behind them drives write and GitHub tools, so a cross-site text/plain POST (which needs no
+// CORS preflight) must never reach it: a POST must be application/json, any Origin header and
+// a Host outside loopback, the tailnet and every zone in tailnet_suffix / tailnet_suffixes are
+// refused under enforce.
+func guardedOpenAIHandler(mux http.Handler, mode string, logf func(string, ...any)) http.Handler {
+	return netguard.IngressGuard(netguard.IngressOptions{Mode: mode, RequireJSONPost: true, Key: "fleet_ingress_guard", Logf: logf}, mux)
+}
+
+// newOpenAIServer is the server serveOpenAI runs: the OpenAI routes behind the ingress guard.
+func newOpenAIServer(listen string, loop *agent.Loop, modelID, guardMode string) *http.Server {
+	return &http.Server{
 		Addr:              listen,
-		Handler:           mux,
+		Handler:           guardedOpenAIHandler(openAIMux(loop, modelID), guardMode, log.Printf),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	fmt.Printf("[local-agent] OpenAI server on http://%s  (model=%q)\n", listen, modelID)
-	return srv.ListenAndServe()
+}
+
+// serveConfigError refuses --serve on a config that failed to load: the guard's mode comes
+// from that config, and a broken file would otherwise fall back to the default without a word.
+func serveConfigError(src config.Source) error {
+	if src.LoadErr != nil {
+		return fmt.Errorf("--serve refuses to start: the config %s failed to load (%v), so its fleet_ingress_guard would silently fall back to the default", src.Path, src.LoadErr)
+	}
+	return nil
+}
+
+// runServe is --serve's start: a config that failed to load is refused before anything
+// listens, then start runs.
+func runServe(src config.Source, start func() error) error {
+	if err := serveConfigError(src); err != nil {
+		return err
+	}
+	return start()
+}
+
+// listenAndServe runs a server; tests replace it to inspect the server serveOpenAI built.
+var listenAndServe = func(srv *http.Server) error { return srv.ListenAndServe() }
+
+// serveOpenAI starts the HTTP server: the OpenAI routes behind the ingress guard (guardMode is
+// fleet_ingress_guard: warn by default, enforce, off).
+func serveOpenAI(listen string, loop *agent.Loop, modelID, guardMode string) error {
+	srv := newOpenAIServer(listen, loop, modelID, guardMode)
+	fmt.Printf("[local-agent] OpenAI server on http://%s  (model=%q, fleet_ingress_guard=%s)\n", listen, modelID, guardMode)
+	return listenAndServe(srv)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

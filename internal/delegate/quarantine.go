@@ -28,7 +28,9 @@ import (
 //
 // Only fingerprint failures strike. A user's over-strict `contains:` or a
 // thin page's `min_items` is the CONTRACT's fault and must never quarantine
-// the seat that answered honestly.
+// the seat that answered honestly; the same goes for a fingerprint the contract
+// can never close (a grounded check on a contract with no context documents grades
+// unknown for every node, and the intake lint warns about it).
 //
 // A stated limit, on purpose: a node that answers about the wrong document less often than about the right one (4 misses
 // beside 6 passes in the window) is not quarantined. The tripwire fails the RESULT, and a failed fingerprint keeps its

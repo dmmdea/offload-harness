@@ -371,6 +371,7 @@ source, which has no `gpu_devices[]` to match against. Implementation:
 | `fleet_agent_enabled` | `false` | Opts this node into executing fleet **agent** jobs (see [The agent task](#the-agent-task-task_type-agent)). Explicit opt-in: the binding (an agent seat) exists on every tier, the worker ROLE is a per-box decision. Off = the task is not advertised and health is byte-identical to a pre-0.65 node. |
 | `fleet_poll_lease_sec` | `0` (= 60) | How long a pushed agent job may sit `accepted` with nobody polling it before the node treats its delegator as gone: the job is never started and is reaped, and a run that finishes after its poller left stops feeding `recent_agent_wall_sec` and Retry-After. Negative = off; a value under 15 is raised to 15 (the delegator's own gap between polls must fit inside it). A running job is never reaped. See [Taking a job back](#taking-a-job-back-withdraw-and-the-poll-lease). |
 | `fleet_auth_token` | `""` | Bearer token for the **agent lane only** (agent dispatches + polls of agent-created jobs; media stays tokenless in v1). Same value on every node and in the delegator's config. Empty + non-loopback listener = agent dispatches refused 403. |
+| `fleet_ingress_guard` | `""` (= `warn`) | The ingress guard in front of every route (register SF-16), against a web page in a browser reaching the node (a cross-site `text/plain` POST, DNS rebinding). `warn` (the default) logs a request `enforce` would refuse and serves it; `enforce` refuses a `Host` that is not loopback, a tailnet address, a dotless MagicDNS name or a name under a zone in `tailnet_suffix` / `tailnet_suffixes` (421), any `Origin` header (403) and a POST that is not `application/json` (415); `off` skips the checks. A mistyped mode fails the config load. The node prints `ingress guard: <mode>` at start. Detail and the edges to know before `enforce`: [systems/fleet-node.md](systems/fleet-node.md). |
 | `agent_ctx_tokens` | `0` | The agent seat's served context window, advertised in health for the delegator's placement arithmetic. From config, never probed (a live probe could cold-start a multi-GB model on the health cadence). `0` = not advertised = this node is never chosen for remote agent work. |
 | `kvslot_cap_gib` | `0` (= 8 GiB) | Cap on the node's `kvslots/` directory, the KV-slot files `POST /fleet/kvslot/save` writes (ADR 0056 Layer 2). An LRU sweep after every save deletes the least recently modified files past the cap. The directory is created by the installer; without it the lane answers `501` and the delegator falls through. |
 
@@ -393,6 +394,12 @@ rules as `local-agent --serve` apply, enforced by the same shared guard:
   the port beyond the tailnet.
 - Port **18811** per the house port discipline; update the machine's port file in
   the operator's port ledger when you stand a node up.
+- **The ingress guard (`fleet_ingress_guard`) is not authentication, and its default does not refuse.** The default,
+  `warn`, logs a request that `enforce` would refuse and serves it, so a node you bind beyond loopback is open to a
+  browser page until you run `warn`, read the log and set `enforce`. The node prints `ingress guard: <mode>` at start
+  (and `doctor` prints it), so read that line. `enforce` stops a browser page and a DNS-rebinding name; a tailnet peer
+  that is not a browser still reaches the media lane. A node shared in from another tailnet needs that tailnet's zone in
+  `tailnet_suffixes` first. See [systems/fleet-node.md](systems/fleet-node.md) for the three rules and the edges.
 
 ## Footprints — measured, not guessed
 
@@ -512,6 +519,19 @@ run-graph payloads carry `graph` and `manifest` as **raw nested JSON** (no base6
 strict-validated at ack time — a malformed fleet job dies at the 400 with a clear reason,
 never mid-render. Typed run-graph defers (`VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `NODE_CLASS_MISSING`, …)
 surface in the job's `error` field as `code: detail`.
+
+**A fleet media job's lease window is its route's own timeout, read from the node's config.** A media task takes the
+node's machine-wide media lease for the timeout key of the route it runs (`imagegen_timeout_sec`, `videogen_timeout_sec`,
+`inpaint_timeout_sec`, `upscale_timeout_sec`, `gen_edit_timeout_sec`, `animategen_timeout_sec`, `audiogen_timeout_sec`; the
+payload carries none, so the delegator's keys play no part) and the render is killed at that same value, so a render never
+outlives the lease taken for it. The window is granted whole, whatever its length, and the lease is kept by the job's
+heartbeat (renewed every 15 s while the render runs): no term check runs on it, so nothing labels it expired or asks it to
+yield while the render is inside its window, and `gpu_max_term_min` does not bound it (that cap is the renewal term of a
+`gpu reserve` hold, renewed by the hold's own holder). A job that cannot get the card first queues for `gpu_wait_ms` (90 s by
+default; a queue wait, not a lease length) and then defers `gpu_busy`. A long seeded timeout therefore costs one thing: how
+long a wedged render holds the node's lease. Which keys a tier seeds, the code defaults and the rule for sizing a
+`gpu reserve --for` window (from the key of the route it wraps) are in the engine + lease row of the timeout chain section
+of [OPERATOR-GUIDE.md](OPERATOR-GUIDE.md).
 
 **A run-graph also checks the files it names, at the door** (ADR 0082, Amendment 1). Before it writes a temp file, takes a lease
 or starts ComfyUI, the node reads the graph for the model files its loaders open (any string input, under any key but

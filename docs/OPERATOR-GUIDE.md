@@ -98,6 +98,7 @@ resolve.
 | Failure | Fix |
 |---|---|
 | `refusing to bind --listen` | Non-loopback address without `--listen-trusted-network`. Use loopback, or add the flag for the Tailscale bind only. |
+| HTTP `421` / `403` / `415` from the node, `fleet-ui` or `local-agent --serve` | `fleet_ingress_guard` set to `enforce` refused the request: 421 a `Host` that is not loopback, a tailnet address, a dotless name or a name under a zone in `tailnet_suffix` / `tailnet_suffixes`; 403 an `Origin` header (a browser); 415 a POST without `Content-Type: application/json`. The log line names which and from where. `warn` (the default) logs the same and serves it; `off` skips the checks. |
 | `GPU probe failed` at startup | `nvidia-smi` missing/broken. By design — a node that can't report VRAM would be treated as broken by the dispatcher. Fix the driver first. |
 | footprints look wrong vs Afterburner | Run the PDH-vs-Afterburner validation in `docs/FLEET-NODE.md`; >15% off → set `"fleet_sampler":"global"`. |
 
@@ -801,13 +802,23 @@ local-agent --root . --base http://127.0.0.1:11436 --max-steps 4 \
 
 ```bash
 local-agent --serve --listen 127.0.0.1:18808 --base http://127.0.0.1:11436
-# [local-agent] OpenAI server on http://127.0.0.1:18808  (model="offload-e4b")
+# [local-agent] OpenAI server on http://127.0.0.1:18808  (model="offload-e4b", fleet_ingress_guard=warn)
 curl -s http://127.0.0.1:18808/v1/models
 # {"data":[{"id":"offload-e4b","object":"model","owned_by":"local-offload"}],"object":"list"}
 ```
 
 Each `/v1/chat/completions` POST runs the **full agent loop** over the last user message and returns
 the final answer. The endpoint is **unauthenticated** — keep it loopback-only.
+
+**The ingress guard in front of it (`fleet_ingress_guard`, register SF-16).** The banner prints the mode in
+force. The default, `warn`, logs a request that `enforce` would refuse and serves it anyway, so a stock install is
+not guarded until you set `enforce`. Under `enforce` the endpoint refuses a `Host` outside loopback, the tailnet and
+every zone in `tailnet_suffix` / `tailnet_suffixes` (421), any `Origin` header (403), and a POST that is not
+`Content-Type: application/json` (415). So a hand-made `curl -X POST` needs `-H 'Content-Type: application/json'`, a
+GUI whose browser makes the request itself sends an `Origin` and is refused, and a GUI in a container that reaches
+this host as `host.docker.internal:18808` fails the Host rule. Run `warn` until the log shows no client you use
+tripping it. `--serve` refuses to start on a config that failed to load, because the guard's mode comes from it. The
+guard stops a web page and a DNS-rebinding name; it is not authentication.
 
 ### Capability flags (all OFF by default)
 
@@ -1066,7 +1077,7 @@ does NOT contain:
 | **seat-down recovery** (ADR 0066) | the node, when the seat's engine goes down under a running call | a seat is DOWN when its engine's counters stayed flat for the flat bound while llama-swap still lists it ready (**wedged**), or when it left `/running` inside an established hold, or a call failed like a dead seat (stream cut, 5xx, refused connection) and a fresh read shows the seat starting, stopping, unlisted or refusing connections (**died**). The node cancels only that call and waits for the seat in phase `cold-load` as ONE episode, bounded by the cold-load ceiling counted from the first verdict (and the run's ceiling), then re-issues the same step; a recovery spends no step. A wedged seat must show a change (counters moving, or a restart) before the re-issue. A seat llama-swap does not list is started by the re-issue itself; if that start fails (the launcher refusing, every request an instant 500) the node waits one poll and triggers again until the bound, and a start that never succeeds is filed at the bound naming the attempts. A seat seen serving again earns exactly one re-issue: a second failure before the answer ends the run. A recovery is counted (`seat_recoveries`) when the re-issued call's first byte arrives, and `seat_down_wait_sec` books the whole episode; a run recovers at most twice. What does not recover is filed `seat down: …` as **infrastructure** (a seat lost during the structured re-pack files the same prefix, with `(during the structured re-pack)` appended and the finished answer flagged `schema_miss`: the delegator re-packs that answer itself first, and only when it cannot), and the delegator re-places that contract on another node with the wait credited back (and, after a failed rescue, the wall the rescue spent), even when the alternative node is busy (a full node answers 503 and the contract waits for room in the bounded, credited capacity wait; while this box's own run-cap line is full an untried remote is preferred to it) | a failed call on a seat that reads ready and readable (an ordinary error), a cut tool call (the engine answered), a thrash (the engine steps but produces no token: still the plain `stalled:` of ADR 0061), and absence from `/running` on the first look of a silent request (the ADR 0055 rule) |
 | **ceiling** (0.131.0) | the node: `max(3 × estimate, 2 × wall, 1800 s)`, cap 4 h (`ceiling_sec`) | the safety net over everything; a run still producing when it passes is filed `ceiling Ns reached while producing (T tok at R tok/s)` as **budget** — the sizing signal | — |
 | loop budgets | `agent_max_tokens` per step (default 1,024; 4,096 on a thinking seat), the final answer at 4× (cap 8,192) **narrowed to what the remaining wall can decode** (0.122.1, D-95), 12 steps (`max_steps`, cap 12 remote), the forced final step (D-89), the `read_file` character budget (D-103: sized to the steps, so it never refuses one read per step) | one completion each | the stall allowance and the ceiling — a step that generates for minutes is progress, and only silence or the ceiling ends it (0.131.0) |
-| engine + lease | the client's request timeout (split into connect / first token / stream, `llamaclient`), the GPU lease TTL (3,600 s default) against the media timeouts (`imagegen_timeout_sec` 600, `videogen_timeout_sec` 5,400, `gpu_wait_ms` 600,000 — C-33: a 5,400 s video run outlives the default lease; size the lease `--for` window to the job) | one request / one lease | — |
+| engine + lease | the client's request timeout (split into connect / first token / stream, `llamaclient`); the media lease. The generation routes (image, edit, inpaint, upscale, batch, run-graph, video, animate, audio) take the media lease, except the `tts_endpoint` voice lane (the speech server owns its card) and a `pipeline-job` (it holds only the in-process media slot; the stages it runs lease for themselves). A route that takes the lease takes it for the call's own timeout, read from that route's own key (`imagegen_timeout_sec` for image, sdcpp image, batch and run-graph calls; `videogen_timeout_sec`; `inpaint_timeout_sec`; `upscale_timeout_sec`; `gen_edit_timeout_sec`; `animategen_timeout_sec`; `audiogen_timeout_sec`), and the render is killed at that same value, so a render never outlives the lease the pipeline took for it (a batch takes the per-image timeout times its jobs). The code defaults are `imagegen_timeout_sec` 720 and `videogen_timeout_sec` 1,500; the tier seeds in `setup/templates/profiles.json` raise them, to as much as 3,600 s for an image and 7,200 s for a video (a seed that sets a video timeout of 5,400 s gives a 5,400 s window and a 5,400 s kill), so on a seeded install a wedged render holds the machine-wide media lease for that long: size a resize from the seeded figure, not the default. That window is granted whole, whatever its length (a batch of any number of images takes the per-image timeout times its jobs, whole too): `gpu_max_term_min` (default 360, six hours) does not bound it. That cap is the renewal term of a `gpu reserve` hold, renewed by that hold's own holder; a media call's lease runs no term check, so while the render is inside its window nothing labels the lease overdue or expired or asks it to yield, and it is kept by its heartbeat (renewed every 15 s while the render runs). Past the window the same timeout is the call's own deadline, so the render is killed there and the lease released; a takeover by the operator, or the death of the process that holds the lease, is what frees the card sooner. A long timeout therefore costs one thing: how long a wedged render holds the machine-wide lease. The lease library's 3,600 s window (`DefaultTTL`) is only the fallback for a lease acquired with no window, which no generation route does. `gpu_wait_ms` 90,000 (code default) is the queue wait, how long a call waits behind a holder before it defers, not a lease length. The one place a window can be shorter than the job is a `gpu reserve` wrapper: a call run inside it inherits the wrapper's lease and its `--for` window (default 45 min), and a window that ends first is renewed or labeled expired, never a release; size the wrapper's `--for` from the same key as the route it wraps (a seeded 5,400 s video wants `--for 90m`) so the lease is never labeled overdue while the render is inside its own timeout | one request / one lease | — |
 
 **Reading a run while it runs (0.131.0).** `gpu status` and `offload_status.gpu_lease.activity.runs[]` carry one
 liveness line per run — `producing 3.4 tok/s, last token 2s ago (allowed 60s in decoding)` while the seat streams,
@@ -1091,7 +1102,7 @@ post-ready bound: a seat that wedged right after its load.
 
 **`doctor` names a clock that has drifted.** `local-offload doctor` prints a `config findings` section — one
 `FAIL` row and a non-zero exit per value that loads and then cannot do what it says — and two of its rows are
-clocks from this table: `gpu_wait_ms` more than 3x `vision_gpu_wait_sec` (register C-33: the deployed 600,000 ms
+clocks from this table: `gpu_wait_ms` more than 3x `vision_gpu_wait_sec` (register C-33: a deployed 600,000 ms
 against a 90 s vision wait is ten minutes of blocking on every image/video/audio/run-graph call, against that
 key’s own documented 90 s design), and one row per RETIRED key the file still carries — `videogen_wait_ms`,
 `audiogen_wait_ms` — which until now was a single stderr note at startup that scrolls past every command.
@@ -1443,7 +1454,9 @@ re-pack (ADR 0066); a 429 is contention by definition and is never second-guesse
 | `audit_chain` | `false` | HASH-CHAIN each agent run's rows on the broker audit trail (register SF-08): `run_id`, `seq`, `prev_sha256` on every row and a closing `run_end` row (a run with no decision writes nothing). `local-offload agent-audit verify [--file PATH] [--json] [--strict]` exits 1 naming the run and seq of an edited, removed or reordered row inside a run; an OPEN run (no `run_end`: a crash or a cut tail) is reported, and failed with `--strict`; LATE rows (chained, after the close) are reported. Unkeyed: it does not see a whole run removed or a re-chained edit; an off-node head witness (S-08) is not built |
 | `agent_read_floor` | `""` → `warn` | the READ FLOOR on every agent tool that reads file content (register SF-07): `read_file`, `summarize_file`, `search_files`, `edit_file`, `github_upload_file`. Secret material (`.env*` except `.env.example`/`.env.sample`, keys and certificates, `.npmrc`/`.netrc`/`.pypirc`, `.git-credentials`, `.claude.json`, anything under `.ssh`/`.aws`/`.gnupg`/`.kube`/`.env`) and a rule table's `read` rules, checked as given AND resolved (symlinks, Windows 8.3 short names). `warn` = the read goes through and a `warn` row is recorded (refused when an enforcing trail cannot record it); `enforce` = refused, and `search_files` never opens such a file and says nothing about it; `off` = nothing checked. `--rules off` also turns it off. Not covered: the run/shell cage, hard links, media tools reading absolute paths |
 | `audit_all_doors` | `""` → `off` | the broker decision AUDIT TRAIL on every agent door (register SF-02): `off` = a trail only when browse asks for one (unchanged); `warn` = `agent_run`, `agent_delegate` and fleet contracts all write `~/.local-offload/agent-audit.jsonl`, a failed write is logged once and never changes a decision; `enforce` = a failed write denies the action and a door with no resolvable trail defers `config`. An unknown value refuses the config load (and a verb that runs on past the load error refuses the door). Rows come only from brokered actions (write, delete, fetch, shell, run, browse), so a read-only run attaches the trail and writes no broker rows (read-floor rows aside, see `agent_read_floor`). Move to `enforce` only after a clean window under `warn` |
+| `fleet_ingress_guard` | `""` → `warn` | the INGRESS GUARD on the fleet node, `fleet-ui` and `local-agent --serve` (register SF-16): a `Host` outside loopback, the tailnet CGNAT range, a dotless MagicDNS name and every zone listed in `tailnet_suffix` / `tailnet_suffixes` (the rule a `seat_endpoints` URL takes; a node shared in from another tailnet is named under that tailnet's zone, so list it in `tailnet_suffixes` before you set `enforce`), any `Origin` header (`fleet-ui`: other than its own page's), and (fleet node, local-agent) a POST that is not `application/json`. `warn` logs what `enforce` would refuse and serves it (bounded: each offender once per 5 minute window, at most 64 per peer and 4096 in all, values clipped, a summary line a minute for the rest), `enforce` refuses (421 / 403 / 415; the body does not name your tailnet zones), `off` skips; `fleet-serve`, `fleet-ui` and `doctor` print `ingress guard: <mode>`, and `local-agent --serve` prints the mode in its banner; a mistyped mode fails the load, and `fleet-ui` and `local-agent --serve` refuse a config that failed to load |
 | `agent_coherence_probe` | `""` → `cold` | post-warm SEAT COHERENCE probe (register D-118): after a cold load, ask the seat one ≤ 96-token question BEFORE the wall starts and defer `infrastructure` if it answers with the NaN shape. `cold` = only when this run loaded the seat, `always` = every run warm or cold, `off` = never. `coherence_note` on the wire reports the verdict |
+| `tools_schema_profile` | `"full"` | how much prose the MCP `tools/list` carries. `full` (the default, and what an unset key means) advertises every description as written. `compact` keeps every tool and every parameter name, type, enum, `required` entry and bound, so any call valid under `full` is valid under `compact`, and cuts each description (a tool's and each parameter's) to its opening sentence plus the sentences a reviewed per-tool keep-list names (prohibitions, trust and privacy boundaries, cost rules, the "if it cannot, it returns deferred:true and you do the work yourself" protocol of every lane, the acceptance-authoring rules, how to read `offload_status`, warnings that a result is not a verdict, the result-reading sentences that stop a misreading such as a partial result being a successful call), and drops examples. A test reads every sentence of every description, exactly as `tools/list` emits them (each accelerator alone too, as a local and as a fleet device), and fails for any sentence outside the opening ones that is neither on the keep-list nor on the reviewed dropped list (one row per sentence, with a reason class), whatever words the sentence holds: a rule reworded as "Always ...", "You should ..." or "Make sure ..." is caught as much as one with "never" in it. A dropped sentence that carries a rule word (`never`, `only`, `must`, `should`, `always`, `avoid`, `defer`, `forwarded`, `travels`, `sent`, `cloud`, ...) needs a reason of its own on its row; the acceptance-authoring sentences cannot be dropped at all; and an enum value the full list explains (in the parameter's description or the tool's) is explained in the compact list unless it is on a short reviewed list. The forwarding note of a fleet accelerator is on the keep-list. Meant for a client that sends every tool schema up front on every call and has no deferred tool search (opencode), where the advertised list is prompt tokens on every turn; the measured table is in [opencode-integration.md](systems/opencode-integration.md). Only the advertised list changes: the registered schema, the handlers and the call-time checks are untouched. A value other than `full` or `compact` fails the config load by name. The profile is read once, when the MCP server starts (the rewrite is a middleware installed at that moment): changing it takes an MCP server restart or a client reconnect |
 
 What you will see on the wire and in the ledger: `contention_wait_sec` and `admission_wait_sec`
 on every agent result; a defer whose reason starts with **`seat contended:`** when a 429 outlived the budget
@@ -1453,7 +1466,11 @@ under the run and did not come back (ADR 0066); `summary.batches` on research
 calls that ran more than 8 pages; `summary.quarantined` when a fleet node was blocked for 30 min
 after two off-document answers that outnumber its passes of the same window (0.184.0: the fingerprint is lexical and
 misfires on an honest answer now and then, so a node that passed most of its work is not quarantined by two misses; its
-reason appears among `probe_errors` as "quarantined until …").
+reason appears among `probe_errors` as "quarantined until …"). Only a FAILED fingerprint can be excused (by an honest
+absence). An unknown fingerprint that the contract caused (a grounded check with no context documents, a field check the
+`output_schema` does not declare) or that sits over an honest-absence digest is reported as a failed check but strikes
+nothing, passes nothing and is not retried on the research door. Apart from those two cases, an unknown the result caused (an empty answer beside the
+documents, a declared field missing from the result) strikes like a failure.
 
 **Capacity is your step — the wait only makes contention honest.** The 429 exists because ten
 reserved requests per model are shared by every session. Ready to paste into
@@ -1569,6 +1586,47 @@ second device exists:
   namespace, L1 size and chunk into `seat.env`; the tier keeps the mount point, the write floor, the
   prune target, the writer count and the cap, which are properties of the share rather than the
   namespace.
+- **Rendering a Windows/WSL seat (`launch: windows-wsl`: the blackwell-2x16 and blackwell-3x16 tiers):** the command
+  takes its templates from the seat's launch, so these tiers render `<seat id>.env` (plus `templates/<name>` when the
+  tier names a shipped chat template) and the four Windows scripts (`seat-cmd.ps1`, `seat-cmdstop.ps1`, `hidden.vbs`,
+  `register-seat-tasks.ps1`), and never a systemd unit or a polkit rule. The tier states the operating point; the box
+  supplies its own half as flags, none of them hardened into the tier:
+
+  | flag | meaning |
+  |---|---|
+  | `--distro` | the WSL distribution the engine runs in (required) |
+  | `--venv`, `--hf-home` | the vLLM virtualenv and the HF cache, required, as paths INSIDE the distro (`/opt/seat/vllm-env`, `/hf`); the defaults hang off `--home` and `$HF_HOME`, which are Windows paths here, so they are refused. `--venv` is written to `SEAT_VENV`, so the seat runs the venv the check looked in |
+  | `--model-path` | optional: pin the exact HF snapshot directory, a distro path (a Windows path is refused). Without it the one snapshot under the tier's `model_repo` is used, and two snapshots are an error. Either way the snapshot is written to `SEAT_MODEL`, so the seat serves the weights the check resolved and not whichever revision `seat_fg.sh`'s default repo id would pick |
+  | `--wsl-seat-dir` | the seat directory inside the distro (default `/opt/seat`) |
+  | `--lmcache-overlay` | the patched LMCache directory, a distro path; required for an fp8 KV seat with a cache server, because stock LMCache restores fp8 pages corrupt (upstream PR #4253). windows-wsl only: a seat that starts through systemd has no LMCache wiring, so the flag is refused there |
+  | `--cache-mount-src`, `--cache-mount-opts` | the export the wrapper mounts before the MP server starts (`//store.example/kvcache`) and its mount options; empty = already mounted. Refused for a seat with no cache server (the tier declares none, or `--config` binds it storeless), where nothing would mount it |
+  | `--host-prefix` | where this machine reads the distro's filesystem for the prerequisite check (`//wsl.localhost/<distro>`); never written to a file. When it is a `wsl.localhost` or `wsl$` share its name must be `--distro`; when it cannot be read the error says so instead of asking for a venv |
+
+  ```sh
+  local-offload install vllm-seat --profile blackwell-3x16 --root <repo> --home C:/llama-swap --user <account> \
+    --proxy-host 127.0.0.1 --distro <distro> --venv /opt/seat/vllm-env --hf-home /hf \
+    --lmcache-overlay /opt/seat/lmcache-overlay --host-prefix //wsl.localhost/<distro> [--config <config.json>]
+  ```
+
+  The command only writes files: it copies nothing into the distro and registers no task, and it says so in its
+  output. Copy `<seat id>.env` (and `templates/`) with the shipped `seat_fg.sh` and `seat_stop.sh` into the distro's
+  seat directory, keep the four Windows scripts in the Windows seat directory the llama-swap entry runs them from, and
+  run `register-seat-tasks.ps1` once, elevated. The llama-swap entry is not written by this command (the Windows
+  installer binds the tier's fallback seat); `setup/templates/vllm-seat/llama-swap-entry.yaml` is its reference, kept
+  equal to what the renderer writes by `TestVLLMSeatReferenceEntryDeclaresWhatEntryRenders`: `ttl: 300`,
+  `concurrencyLimit` equal to `max_num_seqs`, `useModelName`, and the two PowerShell stubs as `cmd` and `cmdStop`.
+  Parity is a diff, not a belief: render the tier and compare the box's seat env with the result
+  (`TestCommittedTiersRenderTheirMeasuredSeatEnv` pins what each committed tier renders, cache-server lines
+  included). The rendered env always ends its lines with LF, whatever the checkout holds (bash in the distro reads
+  a CR as part of every value), so a byte diff against the box's file is meaningful. It carries `SEAT_VENV` and
+  `SEAT_MODEL`, which a hand-kept env usually leaves to `seat_fg.sh`'s defaults (`<seat dir>/vllm-env` and the
+  hard-coded repo id): expect those two lines to show in the first diff. LMCache's fs_native page names embed the
+  resolved model path (the command prints a NOTE about long `--hf-home` values for that reason), so after the first start with a rendered env confirm that
+  the store still hits the pages written before (unverified here: the render has only been compared with the tier).
+  `--user` and `--proxy-host` are still required (`--user` is the interactive Windows account the tasks are registered
+  for). The windows-wsl-only flags (`--distro`, `--wsl-seat-dir`, `--host-prefix`, `--lmcache-overlay`,
+  `--cache-mount-*`) are an error, not a silent no-op, on a seat that starts through systemd. An fp8 KV seat bound to a
+  cache server cannot be rendered for systemd at all (its unit carries no LMCache wiring); the error says so.
 - **A seat that names a shipped chat template (`chat_template`, e.g. the blackwell-3x16 seat's
   `qwen3-fold-system.jinja`):** the render includes `templates/<name>` beside `<seat id>.env`, and
   `SEAT_EXTRA_ARGS` passes `--chat-template <WSL seat dir>/templates/<name>`. Copy the whole render —
@@ -1718,6 +1776,24 @@ which vLLM seat the tier declares, its `max_num_seqs`, and that the cap goes up 
 does not strand the box at 1 after the venv is installed. The tier is the installer's (`installed.json`), else the config's
 `tier_profile`; with neither, or with an agent seat that is not the tier's, the row names no tier. It never changes doctor's
 exit code.
+
+**A name, not a LAN address (`lan ip:` row).** Cross-machine reach uses tailnet names, because an IP literal works until the box it
+names moves or its firewall is scoped to the tailnet, and then the endpoint is dead with nothing in the file that says why. `doctor`
+prints one `lan ip:     WARN` row for each endpoint the harness dials whose host is an IP literal instead of a name: a
+private-range literal (RFC 1918 or an IPv6 unique-local address), a link-local one, or a tailnet CGNAT one (the row then says to use
+the MagicDNS name). Loopback is fine, every name is fine, and a public literal is left to the tailnet guard. The fields read are
+`endpoint`, `seat_endpoints`, `cascade_remote_lanes`, `delegate_remotes`, `fleet_queue_holder`, the explicit entries of
+`pair_workloads_relay`. `nim_endpoint` and `nim_bases` are not read, because a self-hosted NIM on the LAN is what that allowlist is
+for, and neither is a `kv_cache_server` address: a literal on the direct LAN or the tailnet is a valid store address and the
+preferred one (bulk KV over MagicDNS measured several times slower, and the `offload_status` reachability readback of a store dials
+literals only, so a name switches it off), which a row asking for a name would undo. A store that moves is the operator's call to
+rename. The row names the field, with its list index or map key, and never prints the address. It is configuration only,
+so a serving layer that is down does not hide it, a config with nothing to warn about prints nothing, and it never changes
+doctor's exit code. A literal outside loopback and the tailnet range was already refused when the config loads in
+`seat_endpoints`, `cascade_remote_lanes` and `fleet_queue_holder`, and is a `config findings` FAIL in `delegate_remotes`; the
+row is what says why, and it is the only word on a tailnet literal and on the fields that load clean (`endpoint`,
+`pair_workloads_relay`). Fix the warning by writing the node's dotless MagicDNS name (or a name under a
+zone listed in `tailnet_suffix` / `tailnet_suffixes`) in the field.
 
 **A pin needs a reason (ADR 0078).** `route: local` and `route: remote` pin a call to this box's seat or to a fleet node, and a
 call that does that must say why: `pin_reason` (`--pin-reason` on the `delegate` and `research` verbs) is `privacy` (the material
@@ -2053,6 +2129,12 @@ fires), UNGROUNDED (`contains:`/`regex:` matching nothing in the contract's own 
 right answers), SHAPE-ONLY (`nonempty:`/`min_items:` alone — passes garbage). The run still
 happens; fix the acceptance before reusing the contract (authoring rule: anchor ≥1 check to
 content that appears in the docs but not in the goal; contracts/README.md).
+
+Closed-at authority: a contract whose checks all carry an authority qualifier (`@answer:`, `@field=<name>:`,
+`@grounded:`; contracts/README.md) and all passed publishes the weakest of them as
+`results[].acceptance_authority` (`answer`, `field` or `grounded`), and the delegation-log row carries the same
+key. It is absent for every other result (an unqualified check, a failure, an unknown), so a caller reads its
+presence as "every check of this contract was backed by at least this authority" and its absence as no claim.
 
 Experiment support (0.79.0–0.81.0): setting `OFFLOAD_DELEGATE_ARM=<label>` tags every
 delegation-log line **and every ledger row** the process records with `arm:<label>`, so an

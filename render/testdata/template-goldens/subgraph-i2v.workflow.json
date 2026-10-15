@@ -1,0 +1,138 @@
+{
+  "id": "00000000-0000-4000-8000-000000000002",
+  "revision": 0,
+  "last_node_id": 5,
+  "last_link_id": 3,
+  "nodes": [
+    {
+      "id": 1, "type": "LoadImage", "pos": [0, 0], "size": [315, 314], "flags": {}, "order": 0, "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "IMAGE", "type": "IMAGE", "links": [1], "slot_index": 0 },
+        { "name": "MASK", "type": "MASK", "links": [], "slot_index": 1 }
+      ],
+      "properties": {}, "widgets_values": ["a.png", "image"]
+    },
+    {
+      "id": 3, "type": "PrimitiveInt", "pos": [0, 340], "size": [270, 82], "flags": {}, "order": 1, "mode": 0,
+      "inputs": [],
+      "outputs": [{ "name": "INT", "type": "INT", "links": [2], "slot_index": 0 }],
+      "properties": {}, "widgets_values": [1024, "fixed"]
+    },
+    {
+      "id": 2, "type": "5c1b0000-0000-4000-8000-000000000001", "pos": [400, 0], "size": [315, 200], "flags": {}, "order": 2, "mode": 0,
+      "inputs": [
+        { "name": "image_in", "type": "IMAGE", "link": 1 },
+        { "name": "prompt", "type": "STRING", "widget": { "name": "prompt" }, "link": null },
+        { "name": "width", "type": "INT", "widget": { "name": "width" }, "link": 2 }
+      ],
+      "outputs": [{ "name": "IMAGE", "type": "IMAGE", "links": [3] }],
+      "properties": {}, "widgets_values": ["a fox on a roof", 640, 360, 4242]
+    },
+    {
+      "id": 4, "type": "SaveImage", "pos": [800, 0], "size": [315, 270], "flags": {}, "order": 3, "mode": 0,
+      "inputs": [{ "name": "images", "type": "IMAGE", "link": 3 }],
+      "outputs": [],
+      "properties": {}, "widgets_values": ["roof"]
+    },
+    {
+      "id": 5, "type": "MarkdownNote", "pos": [0, 500], "size": [300, 120], "flags": {}, "order": 4, "mode": 0,
+      "inputs": [], "outputs": [], "properties": {}, "widgets_values": ["a markdown note the converter must skip"]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "IMAGE"],
+    [2, 3, 0, 2, 2, "INT"],
+    [3, 2, 0, 4, 0, "IMAGE"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "5c1b0000-0000-4000-8000-000000000001",
+        "version": 1,
+        "state": { "lastGroupId": 0, "lastNodeId": 26, "lastLinkId": 19, "lastRerouteId": 0 },
+        "revision": 0,
+        "config": {},
+        "name": "Image to Image (synthetic)",
+        "inputNode": { "id": -10, "bounding": [0, 0, 100, 100] },
+        "outputNode": { "id": -20, "bounding": [900, 0, 100, 100] },
+        "inputs": [
+          { "id": "i0", "name": "image_in", "type": "IMAGE", "linkIds": [11] },
+          { "id": "i1", "name": "prompt", "type": "STRING", "linkIds": [12] },
+          { "id": "i2", "name": "width", "type": "INT", "linkIds": [13] },
+          { "id": "i3", "name": "height", "type": "INT", "linkIds": [14] },
+          { "id": "i4", "name": "noise_seed", "type": "INT", "linkIds": [15] }
+        ],
+        "outputs": [{ "id": "o0", "name": "IMAGE", "type": "IMAGE", "linkIds": [19] }],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 20, "type": "CheckpointLoaderSimple", "mode": 0, "inputs": [],
+            "outputs": [
+              { "name": "MODEL", "type": "MODEL", "links": [] },
+              { "name": "CLIP", "type": "CLIP", "links": [16] },
+              { "name": "VAE", "type": "VAE", "links": [] }
+            ],
+            "properties": {}, "widgets_values": ["sd_b.safetensors"]
+          },
+          {
+            "id": 21, "type": "CLIPTextEncode", "mode": 0,
+            "inputs": [
+              { "name": "text", "type": "STRING", "widget": { "name": "text" }, "link": 12 },
+              { "name": "clip", "type": "CLIP", "link": 16 }
+            ],
+            "outputs": [{ "name": "CONDITIONING", "type": "CONDITIONING", "links": [] }],
+            "properties": {}, "widgets_values": ["stale inner text"]
+          },
+          {
+            "id": 22, "type": "RandomNoise", "mode": 0,
+            "inputs": [{ "name": "noise_seed", "type": "INT", "widget": { "name": "noise_seed" }, "link": 15 }],
+            "outputs": [{ "name": "NOISE", "type": "NOISE", "links": [] }],
+            "properties": {}, "widgets_values": [111, "randomize"]
+          },
+          {
+            "id": 23, "type": "PrimitiveInt", "mode": 0,
+            "inputs": [{ "name": "value", "type": "INT", "widget": { "name": "value" }, "link": 14 }],
+            "outputs": [{ "name": "INT", "type": "INT", "links": [17] }],
+            "properties": {}, "widgets_values": [999, "fixed"]
+          },
+          {
+            "id": 24, "type": "EmptyLatentImage", "mode": 0,
+            "inputs": [
+              { "name": "width", "type": "INT", "widget": { "name": "width" }, "link": 13 },
+              { "name": "height", "type": "INT", "widget": { "name": "height" }, "link": 17 }
+            ],
+            "outputs": [{ "name": "LATENT", "type": "LATENT", "links": [] }],
+            "properties": {}, "widgets_values": [512, 512, 1]
+          },
+          {
+            "id": 26, "type": "ImageInvert", "mode": 0,
+            "inputs": [{ "name": "image", "type": "IMAGE", "link": 11 }],
+            "outputs": [{ "name": "IMAGE", "type": "IMAGE", "links": [19] }],
+            "properties": {}
+          },
+          {
+            "id": 27, "type": "MarkdownNote", "mode": 0, "inputs": [], "outputs": [],
+            "properties": {}, "widgets_values": ["a note inside the subgraph"]
+          }
+        ],
+        "groups": [],
+        "links": [
+          { "id": 11, "origin_id": -10, "origin_slot": 0, "target_id": 26, "target_slot": 0, "type": "IMAGE" },
+          { "id": 12, "origin_id": -10, "origin_slot": 1, "target_id": 21, "target_slot": 0, "type": "STRING" },
+          { "id": 13, "origin_id": -10, "origin_slot": 2, "target_id": 24, "target_slot": 0, "type": "INT" },
+          { "id": 14, "origin_id": -10, "origin_slot": 3, "target_id": 23, "target_slot": 0, "type": "INT" },
+          { "id": 15, "origin_id": -10, "origin_slot": 4, "target_id": 22, "target_slot": 0, "type": "INT" },
+          { "id": 16, "origin_id": 20, "origin_slot": 1, "target_id": 21, "target_slot": 1, "type": "CLIP" },
+          { "id": 17, "origin_id": 23, "origin_slot": 0, "target_id": 24, "target_slot": 1, "type": "INT" },
+          { "id": 19, "origin_id": 26, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "IMAGE" }
+        ],
+        "extra": {}
+      }
+    ]
+  }
+}

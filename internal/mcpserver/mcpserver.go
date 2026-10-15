@@ -107,9 +107,16 @@ type Server struct {
 	// delegate.RunWith at call time; tests inject a fake so the handler is
 	// exercisable without a live fleet.
 	reviewFleet fleetDispatch
+	// reviewDiffFS is offload_review_diff's filesystem seam (reviewDiffIO): nil (production) is the real
+	// working directory, filepath.Abs and delegate.InlineContextPaths; tests break one call at a time.
+	reviewDiffFS *reviewDiffIO
 	// askSeatGuard is offload_ask's seam onto the seat guard (askOccupant): nil
 	// (production) resolves to the process-wide seatguard.Shared at call time.
 	askSeatGuard func(ctx context.Context, model string) seatguard.Verdict
+	// askNow is the clock offload_ask times its first attempt with, to size what is left of the
+	// contract's wall for a cross-seat retry: nil (production) is time.Now; a test advances a
+	// fake one inside its seat so a long first attempt needs no real wait.
+	askNow func() time.Time
 	// sttRun is offload_transcribe's placement seam (ADR 0072): nil (production) resolves to
 	// sttremote.Run at call time; tests inject a fake so the handler is exercisable without a
 	// whisper, an ffmpeg or a fleet node.
@@ -426,6 +433,11 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	}
 	// After the gate, so it wraps outside it: every door's result, a config deferral included, carries the stale notice (stale_notice.go).
 	srv.AddReceivingMiddleware(s.staleNotice)
+	// tools_schema_profile=compact (toolsprofile.go) rewrites the ADVERTISED list only. Installed only for compact, so the
+	// default configuration has no extra middleware and its tools/list is byte-identical to the list before the key existed.
+	if s.p != nil && s.p.Cfg().ToolsSchemaProfileMode() == config.ToolsProfileCompact {
+		srv.AddReceivingMiddleware(compactToolsMiddleware)
+	}
 
 	// Discovery FIRST (LO-18): before this tool existed, offload_nim was the only
 	// tool that named or listed any model, so an agent inspecting the harness
@@ -435,7 +447,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// + which media engines this machine has + the (only) remote surface.
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_status",
-		Description: "Discover this harness's capability — call this FIRST when inspecting what the harness can do. To size or place a contract, pass section:\"brief\" (fleet + one-line gpu_lease/local verdicts + per-card gpu_cards + process, the stale-image signal); section:<block> returns one block. Returns {local:{endpoint, roster{workhorse,agent,triage,escalation,reasoning,vision,ocr,stt,stt_hq,embed}, served_now[...] (live model ids from the LOCAL llama-swap endpoint)}, fleet:{delegation_enabled, local_agent_seat{model, loaded, ctx_tokens?}, nodes[{base, reachable, node_id, agent_enabled, agent_seat, agent_ctx_tokens, agent_seat_resident, queue_depth}], agent_capable_nodes, idle_agent_nodes} — the LIVE delegation roster, probed at call time: who the delegation seats are, their real context ceilings, and how deep their queues run. Trust it over any rules file or written figure; idle_agent_nodes > 0 means paid-for capacity is sitting unused; fleet.pins counts, since this server started, the subtasks callers pinned to route local or remote by pin_reason, the hints (a local or remote route with no pin_reason) and how many of those placement overrode, media:{...this machine's configured generation engines}, remote:{nim_endpoint, nim_default_model, nim_key_present}, accelerators:{...} (present only when this box lists an accelerator device, e.g. hailo-8l: its endpoint, sidecar config, owned tools and a live health probe), pair:{mode, relay?, reason?} (present only with pair_workloads_enabled: how this box reports its PAIR cards, `local ingress` | `node-info fallback` | `relay` | `off`), process:{version, build_sha256, installed_version?, stale_image?, note?} (the image THIS server process started from - the version and build hash it stamps on its rows - and whether the installed build has moved on since: stale_image true means a deploy replaced the binary and this server still runs the old image, so reconnect it with /mcp to run the installed one; stale_image is absent, with a note, when the installed file cannot be read), gpu_lease:{held, verdict, activity, queue_with} — verdict is ONE WORD for what this box's cards are doing right now: working | held-working | held-idle (a lease held over idle cards: the holder is draining, queued, loading or stalled) | held-stalled (a progress contract exists and its file stopped moving) | held-orphaned (an attended lease whose owner has been gone past the grace) | held-overdue (the declared window ended, the holder still renews) | tree-orphan (the wrapper is gone, its job still holds the cards) | loaded-idle | busy-outside | stale-holder | free (the held-stalled, held-orphaned, held-overdue and tree-orphan verdicts lead the brief line in capitals and name the takeover command; nothing reclaims or kills a lease on them); activity carries the seat's in-flight count and load state, the registered agent runs (kind, pid, origin, step, tokens), a per-card utilization sample with the processes on them (gpu_processes; the Windows desktop on a display card, whose memory nvidia-smi cannot size, is one count per card in display_card_processes_unknown instead of dozens of rows), and the holder's command. Read verdict before concluding anything from \"held\"; a held card is queued behind with queue_with, never refused}. Every offload_* tool except offload_nim and offload_browse runs LOCAL — the GPU roster or a listed accelerator (free, on-box, no cloud); offload_nim is the only remote MODEL surface, and offload_browse (opt-in, present only when configured) drives the operator's own local browser with typed choices from a loopback decision endpoint the operator runs. An empty roster entry means that capability defers on this machine. On a composite box (ADR 0039) local carries tier_profile, tiers and layers[] rows (spec + live occupancy + admissibility, including a dormant display layer the operator may enable), nodes[] carry layers[] when the node publishes them, and every agent_run/agent_delegate result carries `placed` {tier, layer, role, seat, devices, reason, evicts}.",
+		Description: "Discover this harness's capability — call this FIRST when inspecting what the harness can do. To size or place a contract, pass section:\"brief\" (fleet + one-line gpu_lease/local verdicts + per-card gpu_cards + process, the stale-image signal); section:<block> returns one block. Returns {local:{endpoint, roster{workhorse,agent,triage,escalation,reasoning,vision,ocr,stt,stt_hq,embed}, served_now[...] (live model ids from the LOCAL llama-swap endpoint)}, fleet:{delegation_enabled, local_agent_seat{model, loaded, ctx_tokens?}, nodes[{base, reachable, node_id, agent_enabled, agent_seat, agent_ctx_tokens, agent_seat_resident, queue_depth}], agent_capable_nodes, idle_agent_nodes} — the LIVE delegation roster, probed at call time: who the delegation seats are, their real context ceilings, and how deep their queues run}. Trust it over any rules file or written figure. idle_agent_nodes > 0 means paid-for capacity is sitting unused. fleet.pins counts, since this server started, the subtasks callers pinned to route local or remote by pin_reason, the hints (a local or remote route with no pin_reason) and how many of those placement overrode, media:{...this machine's configured generation engines}, remote:{nim_endpoint, nim_default_model, nim_key_present}, accelerators:{...} (present only when this box lists an accelerator device, e.g. hailo-8l: its endpoint, sidecar config, owned tools and a live health probe), pair:{mode, relay?, reason?} (present only with pair_workloads_enabled: how this box reports its PAIR cards, `local ingress` | `node-info fallback` | `relay` | `off`), process:{version, build_sha256, installed_version?, stale_image?, note?} (the image THIS server process started from - the version and build hash it stamps on its rows - and whether the installed build has moved on since: stale_image true means a deploy replaced the binary and this server still runs the old image, so reconnect it with /mcp to run the installed one; stale_image is absent, with a note, when the installed file cannot be read), gpu_lease:{held, verdict, activity, queue_with} — verdict is ONE WORD for what this box's cards are doing right now: working | held-working | held-idle (a lease held over idle cards: the holder is draining, queued, loading or stalled) | held-stalled (a progress contract exists and its file stopped moving) | held-orphaned (an attended lease whose owner has been gone past the grace) | held-overdue (the declared window ended, the holder still renews) | tree-orphan (the wrapper is gone, its job still holds the cards) | loaded-idle | busy-outside | stale-holder | free (the held-stalled, held-orphaned, held-overdue and tree-orphan verdicts lead the brief line in capitals and name the takeover command; nothing reclaims or kills a lease on them); activity carries the seat's in-flight count and load state, the registered agent runs (kind, pid, origin, step, tokens), a per-card utilization sample with the processes on them (gpu_processes; the Windows desktop on a display card, whose memory nvidia-smi cannot size, is one count per card in display_card_processes_unknown instead of dozens of rows), and the holder's command. Read verdict before concluding anything from \"held\"; a held card is queued behind with queue_with, never refused. Every offload_* tool except offload_nim and offload_browse runs LOCAL — the GPU roster or a listed accelerator (free, on-box, no cloud); offload_nim is the only remote MODEL surface, and offload_browse (opt-in, present only when configured) drives the operator's own local browser with typed choices from a loopback decision endpoint the operator runs. An empty roster entry means that capability defers on this machine. On a composite box (ADR 0039) local carries tier_profile, tiers and layers[] rows (spec + live occupancy + admissibility, including a dormant display layer the operator may enable), nodes[] carry layers[] when the node publishes them, and every agent_run/agent_delegate result carries `placed` {tier, layer, role, seat, devices, reason, evicts}.",
 		InputSchema: statusInputSchema(),
 	}, s.handleStatus)
 
@@ -641,8 +653,8 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// else (internal/reviewlane).
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_review_diff",
-		Description: "Review a code DIFF on a FREE local seat with CLEAN context — the reviewer sees only the diff and the task statement, never this conversation's history. That isolation is the mechanism: a reviewer without the author's accumulated context catches defects the author's own judgement has stopped seeing (long-window context degradation is the well-studied effect this exploits). Pass diff (inline) or diff_path (a file holding a unified diff) — exactly one — plus task, which is what the change was SUPPOSED to do: without stated intent a reviewer cannot tell a defect from a decision. Returns {findings:[{severity,file,line,claim,why,also?}] ranked severe|moderate|minor first, reviewed_bytes, seat, steps, stop_reason, note?, salvaged?, dropped_ungrounded?, dropped_echo?, dropped_hollow?, dropped_duplicate?, truncated_by_cap?}. note explains an EMPTY findings list in words — read it, the two cases mean different things — and a SALVAGED list (below). The five counts say what is not in the list: dropped_ungrounded named a file the diff never touched, dropped_echo handed the prompt's own template back, dropped_hollow had no severity, no file and no why (a bare claim, usually restating the diff), dropped_duplicate merges the same defect reported more than once, including findings that cite the same file and line in different words (the most severe is kept and the others' claims ride in its also[] so every claim stays readable; merging runs BEFORE the cap, so repeats never crowd out a unique finding), truncated_by_cap is what your max_findings hid. HOW TO USE THE RESULT: findings are TRIAGE INPUT, not verdicts. Read the flagged lines yourself and decide — never apply a finding unread, and treat a `severe` label from a small local model as a prompt to look, not as proof anything is wrong. Equally, an EMPTY findings list means this reviewer found nothing; it is not a verification that the change works. ADVISORY ONLY: this lane never gates a merge and never substitutes for the final does-it-actually-work check, which stays yours — as do security review, architecture judgement, and any call you are accountable for. dropped_ungrounded counts findings naming a file the diff never touched (an invented path is how a small seat fails here); they are removed and reported rather than silently kept. If NO finding survives filtering — the seat wrote nothing, or every line it wrote was hollow, echoed or ungrounded — and its raw answer does not read as an explicit clean NONE verdict, this DEFERS (defer_class abstention) rather than reporting an empty list, and the deferral carries the counts and a reason naming them: a broken or hollow run must never arrive looking like a clean diff, so review the diff yourself. Only the seat's own NONE earns an empty findings list. SALVAGE: when the seat DID write its review and only the clock ended the structuring step — its final answer was cut at the completion budget (salvaged:\"output_truncated\"), or the wall had no time left for the structured re-pack (salvaged:\"wall\") — the lane reads the complete lines of the raw answer itself (a final line cut mid-way is dropped), runs them through the same filters, and publishes what survives with the flag and a note: an output_truncated list may be INCOMPLETE (whatever the seat had not yet written is unreviewed), a wall list is the seat's whole answer. If nothing survives it defers as above. READING (salvaged:\"repack_flattened\"): the structured re-pack of a seat's answer can FLATTEN it — small seats were seen to split a severity | file:line | claim | why line into bare fields, or to answer in JSON objects after a cut-final re-issue whose re-pack kept only each claim — so the lane also reads the seat's own answer (its pipe lines, or such JSON objects) and publishes whichever reading keeps more findings through the filters; when they tie the re-pack stands. Every other deferral (gpu busy, a seat or stack failure, a re-pack that answered the wrong shape) is unchanged. Caps: at most 10 findings (max_findings only narrows it), a diff of <=256 KiB inline or <=128 KiB via diff_path — split a larger one by path (git diff -- <dir>), which also keeps each review inside the seat's context window. On any failure it returns deferred:true with a reason and you review the diff yourself.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"diff":{"type":"string","description":"the unified diff text, inline (mutually exclusive with diff_path; <=256 KiB)"},"diff_path":{"type":"string","description":"path to a file holding the unified diff, read by the HARNESS under read_root so your context never pays for it (<=128 KiB)"},"task":{"type":"string","description":"what this change was SUPPOSED to accomplish — the intent the reviewer judges the diff against"},"max_findings":{"type":"integer","description":"cap on returned findings (default 10, which is also the ceiling: the seat is never asked for more)"},"read_root":{"type":"string","description":"absolute directory diff_path is read from; nothing outside it can be read (default: the server working dir)"}},"required":["task"]}`),
+		Description: "Review a code DIFF on a FREE local seat with CLEAN context — the reviewer sees only the diff and the task statement, never this conversation's history. That isolation is the mechanism: a reviewer without the author's accumulated context catches defects the author's own judgement has stopped seeing (long-window context degradation is the well-studied effect this exploits). Pass diff (inline) or diff_path (a file holding a unified diff) — exactly one — plus task, which is what the change was SUPPOSED to do: without stated intent a reviewer cannot tell a defect from a decision. Returns {findings:[{severity,file,line,claim,why,also?}] ranked severe|moderate|minor first, reviewed_bytes, seat, steps, stop_reason, note?, salvaged?, dropped_ungrounded?, dropped_echo?, dropped_hollow?, dropped_duplicate?, truncated_by_cap?, outcome, outcome_reason?, evidence, trace_error?}. note explains an EMPTY findings list in words — read it, the two cases mean different things — and a SALVAGED list (below). The five counts say what is not in the list: dropped_ungrounded named a file the diff never touched, dropped_echo handed the prompt's own template back, dropped_hollow had no severity, no file and no why (a bare claim, usually restating the diff), dropped_duplicate merges the same defect reported more than once, including findings that cite the same file and line in different words (the most severe is kept and the others' claims ride in its also[] so every claim stays readable; merging runs BEFORE the cap, so repeats never crowd out a unique finding), truncated_by_cap is what your max_findings hid. HOW TO USE THE RESULT: findings are TRIAGE INPUT, not verdicts. Read the flagged lines yourself and decide — never apply a finding unread, and treat a `severe` label from a small local model as a prompt to look, not as proof anything is wrong. Equally, an EMPTY findings list means this reviewer found nothing; it is not a verification that the change works. ADVISORY ONLY: this lane never gates a merge and never substitutes for the final does-it-actually-work check, which stays yours — as do security review, architecture judgement, and any call you are accountable for. dropped_ungrounded counts findings naming a file the diff never touched (an invented path is how a small seat fails here); they are removed and reported rather than silently kept. If NO finding survives filtering — the seat wrote nothing, or every line it wrote was hollow, echoed or ungrounded — and its raw answer does not read as an explicit clean NONE verdict, this DEFERS (defer_class abstention) rather than reporting an empty list, and the deferral carries the counts and a reason naming them: a broken or hollow run must never arrive looking like a clean diff, so review the diff yourself. Only the seat's own NONE earns an empty findings list. SALVAGE: when the seat DID write its review and only the clock ended the structuring step — its final answer was cut at the completion budget (salvaged:\"output_truncated\"), or the wall had no time left for the structured re-pack (salvaged:\"wall\") — the lane reads the complete lines of the raw answer itself (a final line cut mid-way is dropped), runs them through the same filters, and publishes what survives with the flag and a note: an output_truncated list may be INCOMPLETE (whatever the seat had not yet written is unreviewed), a wall list is the seat's whole answer. If nothing survives it defers as above. READING (salvaged:\"repack_flattened\"): the structured re-pack of a seat's answer can FLATTEN it — small seats were seen to split a severity | file:line | claim | why line into bare fields, or to answer in JSON objects after a cut-final re-issue whose re-pack kept only each claim — so the lane also reads the seat's own answer (its pipe lines, or such JSON objects) and publishes whichever reading keeps more findings through the filters; when they tie the re-pack stands. Every other deferral (gpu busy, a seat or stack failure, a re-pack that answered the wrong shape) is unchanged. Caps: at most 10 findings (max_findings only narrows it), a diff of <=256 KiB inline or <=128 KiB via diff_path — split a larger one by path (git diff -- <dir>), which also keeps each review inside the seat's context window. OUTCOME AND EVIDENCE: every result, early refusals included, carries outcome (PASS | FINDINGS | GATE_FAILED | NOT_RUN | STALE) and evidence binding it to the exact diff judged: diff_sha256, diff_bytes (a refusal before any diff was read carries diff_bytes 0 and no fingerprint), base_sha?/head_sha? (pass them if you have them: echoed, never resolved), gates (the lane's own diff-size and conflict-markers, then your gate_receipts [{name, status pass|fail, detail?, head_sha?}], attached BEFORE the seat runs), seat (the seat's receipt), recheck_sha256 (the diff fingerprint checked again right before returning: a diff_path is re-read through the same confined reader, but for an inline diff the check compares the string with itself, so it can never detect movement), head_unbound? (true when you passed no head_sha). THE LANE RUNS NO LINTS OR TESTS ITSELF: gate_receipts are results you ran and hand over, and the lane cannot verify them. When you pass head_sha, a receipt for another commit, or one that names no commit, cannot support a PASS. A review with no head_sha is tied to no commit: head_unbound is true, a receipt that names a commit is unbound (so a clean seat gives GATE_FAILED), and a clean PASS carries outcome_reason no head_sha: gates not tied to a commit. Even with head_sha nothing ties the head to the diff bytes: the fingerprint binds the bytes, the head is your word. PASS needs a seat that said NONE, a diff fingerprint with a second check that agrees, a diff inside the ceiling, green gates for the reviewed commit and an unchanged diff. NOT_RUN means no clean seat reviewed it (every result with deferred:true, an early refusal, an oversize diff, a refused binding, evidence with no diff fingerprint, and a run the node filed as a deferral whose answer the lane read as a clean NONE) and is never a PASS; findings read from such a deferred run stay FINDINGS; STALE means the diff changed during the review, so re-run it; GATE_FAILED is a clean seat beside a red, wrong-commit or unbound gate. Each review leaves a durable trace, review-evidence.jsonl in the same directory as the ledger file (no ledger row is written for the verdict), whether or not you act on it; trace_error says when that failed. On any failure it returns deferred:true with a reason and you review the diff yourself.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"diff":{"type":"string","description":"the unified diff text, inline (mutually exclusive with diff_path; <=256 KiB)"},"diff_path":{"type":"string","description":"path to a file holding the unified diff, read by the HARNESS under read_root so your context never pays for it (<=128 KiB)"},"task":{"type":"string","description":"what this change was SUPPOSED to accomplish — the intent the reviewer judges the diff against"},"max_findings":{"type":"integer","description":"cap on returned findings (default 10, which is also the ceiling: the seat is never asked for more)"},"read_root":{"type":"string","description":"absolute directory diff_path is read from; nothing outside it can be read (default: the server working dir)"},"base_sha":{"type":"string","description":"optional: the hex id (7-64 characters) of the commit the diff is against; echoed into the result's evidence, never resolved"},"head_sha":{"type":"string","description":"optional: the hex id (7-64 characters) of the commit the diff ends at; echoed into the evidence, never resolved or checked against the diff bytes. A gate receipt for another commit, or one that names no commit, cannot support a PASS. Without it the review is tied to no commit (head_unbound) and a receipt that names a commit cannot support a PASS"},"gate_receipts":{"type":"array","maxItems":16,"items":{"type":"object","properties":{"name":{"type":"string"},"status":{"type":"string","enum":["pass","fail"]},"detail":{"type":"string"},"head_sha":{"type":"string","description":"the commit the gate ran on; without it the receipt cannot support a PASS once the review has a head_sha, and naming one on a review with no head_sha cannot support a PASS either"}},"required":["name","status"]},"description":"optional: receipts of deterministic gates (lints, tests) YOU already ran on this change and hand over; the lane runs no lints or tests itself and cannot verify a receipt. Attached to the evidence before the seat reviews"}},"required":["task"]}`),
 	}, s.handleReviewDiff)
 
 	// agent_delegate (multi-node delegation, Task 6): registration is GATED on
@@ -662,8 +674,8 @@ func (s *Server) buildServer(version string) *mcp.Server {
 		// so tools/list stays byte-identical when the delegator role is off.
 		srv.AddTool(&mcp.Tool{
 			Name:        "offload_research",
-			Description: "RESEARCH on the FREE local seats: hand over URLs + a goal; the harness fetches each page DELEGATOR-side (public http/https only — loopback, private, tailnet hosts are refused), strips it to text, and fans one digest contract per page across the fleet (route spread by default; a local or remote route pins the call only with a pin_reason, and without one it is a hint placement may override). The seats never touch the network; your context never pays for the pages. This is the lane for any leg that would otherwise be a cloud research subagent — WebSearch to find URLs, then call this. Each contract is written the way the seats pass (the document is named as already provided) and acceptance is anchored to a token that appears only in the page, so an echoed goal cannot pass as verified. Returns {summary, partial?, error?, results:[...agent_delegate result rows, one per usable source, in source order], result_sources:[source index per result], sources:[{index,url,final_url,title,status,bytes,text_bytes,truncated,error,doc_name,anchor,skipped}]} — the digests come before the sources on purpose. Read summary FIRST; a PARTIAL result (some pages digested, some failed) is a successful call — the error flag is set only when nothing succeeded — so read summary.failed and each result's reason for what is missing; the same whole-call deadline as agent_delegate applies (the page fetch included): at it the finished digests come back and the unfinished pages are `call deadline reached` budget defers; a source with `skipped` produced no result (fetch failed, non-public host, unsupported content type). A page whose contract fails intake is deferred alone the same way (defer_class contract, reason opening `source N:`) and keeps its place in results and result_sources. Default output_schema {key_facts[],numbers[],quotes[],verdict} — pass your own to shape the digest; pass questions to add per-page asks. Each digest's quotes are looked up in the page they came from: a quote found only once case, spacing, quote marks and dashes are set aside is replaced by the page's own wording, and a quote not on the page is listed in the row's quote_check.unverified (flagged, never failed or dropped). Caps: 12 URLs per call, 2 MiB fetched / 96 KiB text per page, 30 s per fetch.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string","description":"what to extract from EVERY page, self-contained (the seat sees only this + the page text)"},"urls":{"type":"array","minItems":1,"maxItems":12,"items":{"type":"string"},"description":"public http(s) URLs to fetch delegator-side"},"questions":{"type":"array","items":{"type":"string"},"description":"optional extra asks appended to the goal for every page"},"output_schema":{"type":"object","description":"JSON Schema with a properties map for the per-page digest (default: key_facts/numbers/quotes/verdict)"},"acceptance":{"type":"array","items":{"type":"string"},"description":"optional extra delegator-side checks (contains:/not_contains:/regex:/min_items:/nonempty:) appended to the grounded default"},"route":{"type":"string","enum":["auto","spread","local","remote"],"description":"placement (default spread: pages are dealt across the local seat and every eligible fleet node). local and remote are a PIN only with a pin_reason; without one they are hints that placement may override (local is placed as auto places it, so the idle local seat takes its run-cap line and the rest of the pages go to the fleet; remote is placed fleet-first with the local seat as the fallback), and each result's placement says whether the hint was honoured or overridden"},"pin_reason":{"type":"string","enum":["privacy","locality","measurement","operator"],"description":"why this call is pinned to route local or remote; without it those routes are only hints. Only a pin can have a reason: route auto and spread refuse one, and so does a reason the route does not take. privacy: the material may not leave this box (credentials, unreleased or brand-isolated data); route local only. locality: the work needs something only this box has (a local service, files the contract cannot carry inline, this box's own seat as the thing under comparison); route local only. measurement: the call measures a specific place (a benchmark, a bake, a seat A/B); route local or remote. operator: the operator named this placement for this call; route local or remote. A pin is authoritative to the end of the subtask (a remote pin's retry stays on a fleet node) and its reason is recorded on the ledger row and on every result"},"timeout_sec":{"type":"integer","description":"per-page contract budget (default 300, cap 900)"},"fetch_timeout_sec":{"type":"integer","description":"per-page fetch timeout (default 30)"}},"required":["goal","urls"]}`),
+			Description: "RESEARCH on the FREE local seats: hand over URLs + a goal; the harness fetches each page DELEGATOR-side (public http/https only — loopback, private, tailnet hosts are refused), strips it to text, and fans one digest contract per page across the fleet (route spread by default; a local or remote route pins the call only with a pin_reason, and without one it is a hint placement may override). The seats never touch the network; your context never pays for the pages. This is the lane for any leg that would otherwise be a cloud research subagent — WebSearch to find URLs, then call this. Each contract is written the way the seats pass (the document is named as already provided) and acceptance is anchored to a token that appears only in the page, so an echoed goal cannot pass as verified. Returns {summary, partial?, error?, results:[...agent_delegate result rows, one per usable source, in source order], result_sources:[source index per result], sources:[{index,url,final_url,title,status,bytes,text_bytes,truncated,error,error_kind,cleanup_error,doc_name,anchor,skipped}]} — the digests come before the sources on purpose. Read summary FIRST; a PARTIAL result (some pages digested, some failed) is a successful call — the error flag is set only when nothing succeeded — so read summary.failed and each result's reason for what is missing; the same whole-call deadline as agent_delegate applies (the page fetch included): at it the finished digests come back and the unfinished pages are `call deadline reached` budget defers; a source with `skipped` produced no result (fetch failed, non-public host, unsupported content type). Two text sources are read as well as pages, both fetched here with no login and no cookies: an RSS or Atom feed (its items' titles, links, dates and summaries become the text; item links are not followed, list them yourself to read them) and, only when the operator has set ytdlp_path, a YouTube watch, youtu.be, shorts, live or embed URL (its subtitles, not its audio; sub_langs picks the languages; a video with none, or a yt-dlp failure, is a skipped source whose error_kind says which; a source with cleanup_error read fine but left its scratch folder behind). A page whose contract fails intake is deferred alone the same way (defer_class contract, reason opening `source N:`) and keeps its place in results and result_sources. Default output_schema {key_facts[],numbers[],quotes[],verdict} — pass your own to shape the digest; pass questions to add per-page asks. Each digest's quotes are looked up in the page they came from: a quote found only once case, spacing, quote marks and dashes are set aside is replaced by the page's own wording, and a quote not on the page is listed in the row's quote_check.unverified (flagged, never failed or dropped). Caps: 12 URLs per call, 2 MiB fetched / 96 KiB text per page, 30 s per fetch.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string","description":"what to extract from EVERY page, self-contained (the seat sees only this + the page text)"},"urls":{"type":"array","minItems":1,"maxItems":12,"items":{"type":"string"},"description":"public http(s) URLs to fetch delegator-side"},"questions":{"type":"array","items":{"type":"string"},"description":"optional extra asks appended to the goal for every page"},"output_schema":{"type":"object","description":"JSON Schema with a properties map for the per-page digest (default: key_facts/numbers/quotes/verdict)"},"acceptance":{"type":"array","items":{"type":"string"},"description":"optional extra delegator-side checks (contains:/not_contains:/regex:/min_items:/nonempty:) appended to the grounded default"},"route":{"type":"string","enum":["auto","spread","local","remote"],"description":"placement (default spread: pages are dealt across the local seat and every eligible fleet node). local and remote are a PIN only with a pin_reason; without one they are hints that placement may override (local is placed as auto places it, so the idle local seat takes its run-cap line and the rest of the pages go to the fleet; remote is placed fleet-first with the local seat as the fallback), and each result's placement says whether the hint was honoured or overridden"},"pin_reason":{"type":"string","enum":["privacy","locality","measurement","operator"],"description":"why this call is pinned to route local or remote; without it those routes are only hints. Only a pin can have a reason: route auto and spread refuse one, and so does a reason the route does not take. privacy: the material may not leave this box (credentials, unreleased or brand-isolated data); route local only. locality: the work needs something only this box has (a local service, files the contract cannot carry inline, this box's own seat as the thing under comparison); route local only. measurement: the call measures a specific place (a benchmark, a bake, a seat A/B); route local or remote. operator: the operator named this placement for this call; route local or remote. A pin is authoritative to the end of the subtask (a remote pin's retry stays on a fleet node) and its reason is recorded on the ledger row and on every result"},"timeout_sec":{"type":"integer","description":"per-page contract budget (default 300, cap 900)"},"fetch_timeout_sec":{"type":"integer","description":"per-page fetch timeout (default 30; 60 for a YouTube subtitle fetch, which is capped at 900)"},"sub_langs":{"type":"string","description":"YouTube subtitle languages, comma separated, a regex allowed per entry (default en.*); used only for YouTube URLs when the operator has set ytdlp_path"}},"required":["goal","urls"]}`),
 		}, s.handleResearch)
 	}
 
@@ -3452,7 +3464,9 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 // handleAsk is the MCP front door onto the one-call ask lane. It authors the
 // contract (internal/askjob), runs it on the local seat through the SAME entry
 // a local delegation placement takes (Pipeline.RunAgentContract), evaluates the
-// generated acceptance, and returns {answer, evidence} plus the verdict.
+// generated acceptance, and returns {answer, evidence} plus the verdict. A first
+// attempt that ran on this box's seat and failed that acceptance gets the second
+// chance agent_delegate gives a failed verification, on another seat (askRetry).
 //
 // House style throughout: every failure path is a deferred-shape result, never
 // an MCP error (see handleAgentRun) — a caller told "the call failed" discards
@@ -3539,7 +3553,13 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// run two budgets that could disagree.
 	var wire core.AgentWireResult
 	var fleetExtra map[string]any
+	now := s.askNow // test seam
+	if now == nil {
+		now = time.Now
+	}
+	var started, ended time.Time // the local attempt's span, which sizes what a retry may spend
 	route := strings.TrimSpace(in.Route)
+	namedRoute := route // what the caller asked for, before the occupied-seat fallback below
 	// An ask names no route most of the time, and "no route" meant this box's agent seat
 	// even when loading it would unload another vLLM seat holding the cards: on the
 	// reference box, opencode's three-card seat, whose session then paid a cold load
@@ -3570,7 +3590,9 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		}
 		wire, fleetExtra = w, extra
 	} else {
+		started = now()
 		w, rerr := run(ctx, contract, delegate.LocalOptions{})
+		ended = now()
 		if rerr != nil {
 			return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
 		}
@@ -3585,11 +3607,121 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 			"steps":       wire.Steps,
 		}, wire))
 	}
-	// The contracted deliverable is the structured pair. When the re-pack seat
-	// could not be reached the loop's prose still arrived, so it is published as
-	// the answer rather than thrown away — with evidence empty, which is exactly
-	// what nonempty:evidence then reports, so the caller is never handed
-	// unchecked prose under a green verdict.
+	answer, evidence, failures := gradeAskWire(contract, wire)
+	if strings.TrimSpace(answer) == "" {
+		// A non-deferred result with neither prose nor a structured answer has nothing
+		// to publish. Returning answer:"" with no deferred key would read to the caller
+		// as "the seat answered, and the answer is nothing" — the silent shape this
+		// lane's defer-not-crash posture exists to avoid. It should not be reachable
+		// (the loop defers on an empty final message), which is exactly why it must not
+		// be the one path that fails quietly if it ever becomes reachable.
+		return jsonResult(map[string]any{
+			"deferred":    true,
+			"reason":      "the seat returned no answer (stop_reason " + wire.StopReason + ")",
+			"defer_class": core.DeferClassAbstention,
+			"seat":        wire.Seat,
+			"steps":       wire.Steps,
+		})
+	}
+	// THE CROSS-SEAT RETRY. A first attempt that ran on this box's seat and failed its acceptance
+	// was terminal here, while agent_delegate retries a failed verification on another seat. The
+	// fleet path needs nothing added: its engine already retried inside the call, and
+	// contractOnFleetAt now says so (retried_on, retry_note).
+	//
+	// Only when the caller named NO route: a named route:"local" is the caller saying the material stays
+	// on this box (offload_ask has no pin_reason channel), so its failed first attempt is published as it
+	// is and the goal and the inlined files never leave for a retry.
+	retriedOn, retryNote := "", ""
+	if len(failures) > 0 && fleetExtra == nil && namedRoute == "local" {
+		retryNote = "retry skipped: route local was named; the ask stays on this box"
+	} else if len(failures) > 0 && fleetExtra == nil {
+		r := s.askRetry(ctx, contract, wire, failures, ended.Sub(started))
+		retriedOn, retryNote = r.node, r.note
+		if r.won {
+			wire, answer, evidence, failures, fleetExtra = r.wire, r.answer, r.evidence, nil, r.extra
+		}
+	}
+	out := map[string]any{
+		"answer":      answer,
+		"evidence":    evidence,
+		"verified":    len(failures) == 0,
+		"acceptance":  contract.Acceptance, // what "verified" actually means, published so it can be judged
+		"seat":        wire.Seat,
+		"steps":       wire.Steps,
+		"stop_reason": wire.StopReason,
+		// Published as FALSE rather than omitted: an absent field reads as unknown, and
+		// "was this answer computed just now" is exactly the question a caller — and the
+		// adoption instrument — must never have to guess at. It rides the ANSWER shape
+		// only; a deferred result carries no cache_hit because a defer is never stored,
+		// so it is always a fresh run and the field would have nothing to distinguish.
+		"cache_hit": false,
+	}
+	out = withReviewExtra(out, fleetExtra)
+	// Set after the fleet block, so the ask's own account of its two attempts is the one published
+	// when the fleet's engine retried inside the retry as well (askRetry keeps that note inside its own).
+	if retriedOn != "" {
+		out["retried_on"] = retriedOn
+	}
+	if retryNote != "" {
+		out["retry_note"] = retryNote
+	}
+	if len(failures) > 0 {
+		out["acceptance_failures"] = failures
+	}
+	// Only a SUCCESSFUL, non-deferred result is stored, and every other exit from this
+	// handler returned above: a defer, a refusal and a runner error are all statements
+	// about this minute rather than about these files, and caching one would turn a
+	// transient seat failure into a lane that stays dead for the rest of the connection.
+	//
+	// A verified:false answer IS cached — the seat ran and answered, the citation check
+	// simply did not match — so an identical repeat returns the same unverified answer
+	// instead of re-rolling the seat. That is the deliberate cost of caching by content:
+	// a caller who wants another attempt changes the question, which is a different key.
+	// The entry is the answer as published, so one that went through the cross-seat retry
+	// carries retried_on and retry_note as they are: a repeat never retries again.
+	s.askCache.Put(cacheKey, out)
+	return jsonResult(out)
+}
+
+// gradeAskWire decodes one attempt's wire result into the pair the caller is shown and grades
+// exactly that pair against the contract's acceptance. Every attempt of one ask goes through it,
+// so the cross-seat retry is decoded and graded exactly like the first attempt.
+//
+// The contracted deliverable is the structured pair. When the re-pack seat could not be reached
+// the loop's prose still arrived, so it is returned as the answer rather than thrown away — with
+// evidence empty, which is exactly what nonempty:evidence then reports, so the caller is never
+// handed unchecked prose under a green verdict. An answer that is blank after that has nothing to
+// publish: the caller checks for it (a blank pair is graded here like any other and fails).
+//
+// THE INVARIANT: grade exactly the text the caller is shown — the two fields returned, nothing
+// else. Everything about this function is that one rule.
+//
+// core.evalText prefers wire.Output whenever it is non-empty, and runAgentTask always
+// sets Output before the re-pack, so grading the wire as it arrives grades the loop's
+// final PROSE, which this handler never publishes. Both ways of getting that wrong
+// have now been measured, one per direction:
+//
+//   - grading the prose: it is longer than the condensed pair and so likelier to
+//     contain a frequent token, giving verified:true beside a published answer that
+//     cites nothing — "reads as verified while nothing verified it";
+//   - blanking Output to fall through to the raw bytes: when the re-pack emits
+//     {"answer":"","evidence":"<text>"} — schema-legal, and its own system prompt
+//     says "Use empty values when a field is absent" — the fallback to the prose would
+//     publish PROSE as the answer while only the JSON gets graded, giving verified:false
+//     on a properly cited answer.
+//
+// Building the graded text from the DECODED fields closes both, and closes a third
+// hole for free: the gbnf grammar permits \uXXXX escapes, so an anchor plainly
+// readable in the published evidence could be invisible in the raw bytes.
+//
+// Joined with a newline so a match cannot span the seam between two fields, and
+// Structured is left intact because nonempty:evidence reads it. With no Structured at
+// all, Answer already holds the prose and Evidence is empty, so this degenerates to
+// grading the prose — which is exactly what that path publishes.
+//
+// delegate.Run grades prose and PUBLISHES prose, so it is coherent and untouched;
+// this is the first lane that publishes only the structured pair.
+func gradeAskWire(contract core.AgentContract, wire core.AgentWireResult) (answer, evidence string, failures []string) {
 	var structured struct {
 		Answer   string `json:"answer"`
 		Evidence string `json:"evidence"`
@@ -3605,82 +3737,102 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	if structured.Answer == "" {
 		structured.Answer = wire.Output
 	}
-	if strings.TrimSpace(structured.Answer) == "" {
-		// A non-deferred result with neither prose nor a structured answer has nothing
-		// to publish. Returning answer:"" with no deferred key would read to the caller
-		// as "the seat answered, and the answer is nothing" — the silent shape this
-		// lane's defer-not-crash posture exists to avoid. It should not be reachable
-		// (the loop defers on an empty final message), which is exactly why it must not
-		// be the one path that fails quietly if it ever becomes reachable.
-		return jsonResult(map[string]any{
-			"deferred":    true,
-			"reason":      "the seat returned no answer (stop_reason " + wire.StopReason + ")",
-			"defer_class": core.DeferClassAbstention,
-			"seat":        wire.Seat,
-			"steps":       wire.Steps,
-		})
-	}
-	// THE INVARIANT: grade exactly the text the caller is shown — the two fields placed
-	// in `out` below, nothing else. Everything about this line is that one rule.
-	//
-	// core.evalText prefers wire.Output whenever it is non-empty, and runAgentTask always
-	// sets Output before the re-pack, so grading the wire as it arrives grades the loop's
-	// final PROSE, which this handler never publishes. Both ways of getting that wrong
-	// have now been measured, one per direction:
-	//
-	//   - grading the prose: it is longer than the condensed pair and so likelier to
-	//     contain a frequent token, giving verified:true beside a published answer that
-	//     cites nothing — "reads as verified while nothing verified it";
-	//   - blanking Output to fall through to the raw bytes: when the re-pack emits
-	//     {"answer":"","evidence":"<text>"} — schema-legal, and its own system prompt
-	//     says "Use empty values when a field is absent" — the fallback above publishes
-	//     PROSE as the answer while only the JSON gets graded, giving verified:false on a
-	//     properly cited answer.
-	//
-	// Building the graded text from the DECODED fields closes both, and closes a third
-	// hole for free: the gbnf grammar permits \uXXXX escapes, so an anchor plainly
-	// readable in the published evidence could be invisible in the raw bytes.
-	//
-	// Joined with a newline so a match cannot span the seam between two fields, and
-	// Structured is left intact because nonempty:evidence reads it. With no Structured at
-	// all, Answer already holds the prose and Evidence is empty, so this degenerates to
-	// grading the prose — which is exactly what that path publishes.
-	//
-	// delegate.Run grades prose and PUBLISHES prose, so it is coherent and untouched;
-	// this is the first lane that publishes only the structured pair.
 	graded := wire
 	graded.Output = structured.Answer + "\n" + structured.Evidence
-	failures := delegate.EvalAcceptance(contract, graded)
-	out := map[string]any{
-		"answer":      structured.Answer,
-		"evidence":    structured.Evidence,
-		"verified":    len(failures) == 0,
-		"acceptance":  contract.Acceptance, // what "verified" actually means, published so it can be judged
-		"seat":        wire.Seat,
-		"steps":       wire.Steps,
-		"stop_reason": wire.StopReason,
-		// Published as FALSE rather than omitted: an absent field reads as unknown, and
-		// "was this answer computed just now" is exactly the question a caller — and the
-		// adoption instrument — must never have to guess at. It rides the ANSWER shape
-		// only; a deferred result carries no cache_hit because a defer is never stored,
-		// so it is always a fresh run and the field would have nothing to distinguish.
-		"cache_hit": false,
+	return structured.Answer, structured.Evidence, delegate.EvalAcceptance(contract, graded)
+}
+
+// askRetryOutcome is what the cross-seat retry of one ask came to. won means the retry is clean
+// and its wire, pair and fleet block replace the first attempt's; otherwise the first attempt
+// stands and only note (and node, when a node ran the retry) rides it.
+type askRetryOutcome struct {
+	won              bool
+	wire             core.AgentWireResult
+	answer, evidence string
+	extra            map[string]any
+	node, note       string
+}
+
+// askRetryFloorSec is the least wall a cross-seat retry of an ask is worth starting with: the
+// floor agent_delegate applies to its verification retry before it picks a node, the configured
+// agent_retry_min_sec and never under delegate's 10 s minimum. (The seat-aware floor delegate
+// applies after choosing a node belongs to the engine, which applies it to its own retry inside
+// the call.)
+func askRetryFloorSec(cfg config.Config) int {
+	if cfg.AgentRetryMinSec > 10 {
+		return cfg.AgentRetryMinSec
 	}
-	out = withReviewExtra(out, fleetExtra)
-	if len(failures) > 0 {
-		out["acceptance_failures"] = failures
+	return 10
+}
+
+// askRetry gives a failed LOCAL first attempt the second chance agent_delegate gives a failed
+// verification: the same contract on the fleet, route "remote", which never places on this box's
+// seat, so the retry runs on a different seat by construction. It mirrors the delegator's retry
+// (mergeAttempts, runOne): the retry lives inside the contract's own wall, so it is handed what
+// the first attempt left (timeout_sec, never auto) and is skipped under the floor; a clean retry
+// is published with retried_on and a note naming the first attempt's verdict; a retry that also
+// fails leaves the FIRST answer, unverified, with the retry's fate in the note; a fleet that took
+// nothing leaves a "retry skipped" note and no retried_on, which would name a node that never ran it.
+// The retry's wire is decoded and graded by gradeAskWire, exactly like the first attempt's.
+func (s *Server) askRetry(ctx context.Context, contract core.AgentContract, first core.AgentWireResult, firstFailures []string, elapsed time.Duration) askRetryOutcome {
+	// The budget is the one delegate charges the same contract (executionBudgetSec): an ask never
+	// names its wall, so its contract is auto-sized and owns the cap.
+	budget := contract.TimeoutSec
+	switch {
+	case contract.TimeoutAuto:
+		budget = core.AgentTimeoutSecCap
+	case budget <= 0:
+		budget = core.AgentTimeoutSecDefault
 	}
-	// Only a SUCCESSFUL, non-deferred result is stored, and every other exit from this
-	// handler returned above: a defer, a refusal and a runner error are all statements
-	// about this minute rather than about these files, and caching one would turn a
-	// transient seat failure into a lane that stays dead for the rest of the connection.
-	//
-	// A verified:false answer IS cached — the seat ran and answered, the citation check
-	// simply did not match — so an identical repeat returns the same unverified answer
-	// instead of re-rolling the seat. That is the deliberate cost of caching by content:
-	// a caller who wants another attempt changes the question, which is a different key.
-	s.askCache.Put(cacheKey, out)
-	return jsonResult(out)
+	remaining := budget - int((elapsed.Milliseconds()+999)/1000)
+	if floor := askRetryFloorSec(s.p.Cfg()); remaining < floor {
+		return askRetryOutcome{note: fmt.Sprintf("retry skipped: %ds of the %ds timeout_sec budget left after the first attempt (floor %ds)", remaining, budget, floor)}
+	}
+	retry := contract
+	retry.TimeoutSec = remaining
+	retry.TimeoutAuto = false // a retry's wall is what is left: explicit, never auto
+	w, extra, why, ok := s.contractOnFleet(ctx, retry, "remote", "")
+	node, _ := extra["node"].(string)
+	if !ok && node == "" {
+		return askRetryOutcome{note: "retry skipped: " + why}
+	}
+	// What the fleet's own engine did inside the retry rides after the ask's account of it.
+	inner, _ := extra["retry_note"].(string)
+	withInner := func(note string) string {
+		if inner == "" {
+			return note
+		}
+		return note + "; the fleet's own retry: " + inner
+	}
+	label := node
+	if label == "" {
+		label = "(unnamed node)"
+	}
+	outcome := ""
+	switch {
+	case !ok:
+		outcome = fmt.Sprintf("deferred (%s): %s", w.DeferClass, w.Reason)
+	default:
+		answer, evidence, failures := gradeAskWire(contract, w)
+		switch {
+		case strings.TrimSpace(answer) == "":
+			outcome = "returned no answer (stop_reason " + w.StopReason + ")"
+		case len(failures) > 0:
+			outcome = fmt.Sprintf("failed_verification: %v", failures)
+		default:
+			return askRetryOutcome{won: true, wire: w, answer: answer, evidence: evidence, extra: extra, node: node,
+				note: withInner(fmt.Sprintf("first attempt on %s failed_verification: %v; this result is the retry", askSeatLabel(first), firstFailures))}
+		}
+	}
+	return askRetryOutcome{node: node, note: withInner("retry on " + label + " also " + outcome + "; this result is the first attempt")}
+}
+
+// askSeatLabel names the seat a first attempt ran on for the retry note.
+func askSeatLabel(w core.AgentWireResult) string {
+	if w.Seat == "" {
+		return "the local seat"
+	}
+	return w.Seat
 }
 
 // handleReviewDiff is the MCP front door onto the clean-context review lane. It
@@ -3709,9 +3861,26 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 		Task        string `json:"task"`
 		MaxFindings int    `json:"max_findings"`
 		ReadRoot    string `json:"read_root"`
+		// SHA-bound evidence: optional, echoed and bound, never resolved.
+		BaseSHA      string                   `json:"base_sha"`
+		HeadSHA      string                   `json:"head_sha"`
+		GateReceipts []reviewlane.GateReceipt `json:"gate_receipts"`
 	}
-	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
-		return bad, nil
+	// The durable trace sits beside the ledger, wherever the operator put it, and
+	// refuse seals every exit that comes before a diff was read: a refusal is a
+	// diff-less NOT_RUN naming its reason, bound to no bytes, and it leaves its trace row like
+	// every other result of this door. The deferral shape and reason are the ones this door
+	// always gave; outcome, outcome_reason and evidence ride beside them.
+	cfg := s.p.Cfg()
+	tracePath := reviewlane.TracePathFor(cfg.LedgerPath, cfg.BaseDir())
+	refuse := func(reason string) (*mcp.CallToolResult, error) {
+		return jsonResult(reviewlane.Seal(map[string]any{"deferred": true, "reason": reason}, reviewlane.Refused(reason), reviewlane.Run{}, tracePath))
+	}
+	// Decoded here, not through parseArgs, so that arguments that do not decode are sealed too.
+	if raw := req.Params.Arguments; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return refuse("bad arguments: " + err.Error())
+		}
 	}
 	// EXACTLY one source. Accepting both and silently preferring one would let a
 	// caller review a diff it did not think it was reviewing — the review is only
@@ -3719,37 +3888,66 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	hasInline, hasPath := strings.TrimSpace(in.Diff) != "", strings.TrimSpace(in.DiffPath) != ""
 	switch {
 	case hasInline && hasPath:
-		return jsonResult(map[string]any{"deferred": true, "reason": "pass diff OR diff_path, not both — the review must be unambiguous about which bytes it judged"})
+		return refuse("pass diff OR diff_path, not both — the review must be unambiguous about which bytes it judged")
 	case !hasInline && !hasPath:
-		return jsonResult(map[string]any{"deferred": true, "reason": "one of diff (inline text) or diff_path (a file holding a unified diff) is required"})
+		return refuse("one of diff (inline text) or diff_path (a file holding a unified diff) is required")
 	}
 	diff := in.Diff
+	// The second fingerprint check re-reads the diff right before the result is returned. Held
+	// inline it cannot have moved; a diff_path file can, and is re-read the way it was first.
+	recheck := func() (string, error) { return diff, nil }
 	if hasPath {
 		// read_root defaulting mirrors handleAsk and handleAgentRun: the server
 		// working dir. The diff file goes through delegate.InlineContextPaths —
 		// the ONE delegator-side confined reader (os.Root containment, 128 KiB
 		// cap, an error naming the offending path) — rather than a bare ReadFile,
 		// so this lane cannot become the one door that reads outside read_root.
+		//
+		// The three calls go through the reviewDiffIO seam (the real ones in production), so
+		// the refusals behind them are exercised rather than assumed.
+		fsio := s.reviewIO()
 		readRoot := in.ReadRoot
 		if readRoot == "" {
-			wd, werr := os.Getwd()
+			wd, werr := fsio.Getwd()
 			if werr != nil {
-				return jsonResult(map[string]any{"deferred": true, "reason": "cannot determine working dir for read_root: " + werr.Error()})
+				return refuse("cannot determine working dir for read_root: " + werr.Error())
 			}
 			readRoot = wd
 		}
-		absRoot, aerr := filepath.Abs(readRoot)
+		absRoot, aerr := fsio.Abs(readRoot)
 		if aerr != nil {
-			return jsonResult(map[string]any{"deferred": true, "reason": "bad read_root: " + aerr.Error()})
+			return refuse("bad read_root: " + aerr.Error())
 		}
-		docs, ierr := delegate.InlineContextPaths([]string{in.DiffPath}, absRoot)
+		docs, ierr := fsio.Read([]string{in.DiffPath}, absRoot)
 		if ierr != nil {
-			return jsonResult(map[string]any{"deferred": true, "reason": ierr.Error()})
+			return refuse(ierr.Error())
 		}
 		if len(docs) != 1 {
-			return jsonResult(map[string]any{"deferred": true, "reason": "diff_path read returned no content"})
+			return refuse("diff_path read returned no content")
 		}
 		diff = docs[0].Text
+		recheck = func() (string, error) {
+			again, rerr := fsio.Read([]string{in.DiffPath}, absRoot)
+			if rerr != nil {
+				return "", rerr
+			}
+			if len(again) != 1 {
+				return "", fmt.Errorf("diff_path read returned no content")
+			}
+			return again[0].Text, nil
+		}
+	}
+	// SHA-bound evidence, built BEFORE the builder and before any seat: the diff's
+	// fingerprint and the deterministic gate receipts exist first, so even a refusal below is
+	// bound to the bytes it refused. seal stamps outcome + evidence on every exit from here on
+	// (the exits above it went through refuse) and leaves the durable trace beside the ledger.
+	ev, evErr := reviewlane.NewEvidence(diff, in.BaseSHA, in.HeadSHA, in.GateReceipts)
+	seal := func(out map[string]any, run reviewlane.Run) (*mcp.CallToolResult, error) {
+		run.Recheck = recheck
+		return jsonResult(reviewlane.Seal(out, ev, run, tracePath))
+	}
+	if evErr != nil {
+		return seal(map[string]any{"deferred": true, "reason": evErr.Error()}, reviewlane.Run{})
 	}
 	// Every caller-input refusal — no task, an empty diff, a diff over the byte
 	// ceiling — arrives as one typed error from the builder, so the reason the
@@ -3757,7 +3955,17 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	contract, berr := reviewlane.BuildContract(in.Task, diff)
 	contract.Door = "offload_review_diff"
 	if berr != nil {
-		return jsonResult(map[string]any{"deferred": true, "reason": berr.Error()})
+		return seal(map[string]any{"deferred": true, "reason": berr.Error()}, reviewlane.Run{})
+	}
+	ev = ev.WithPrompt(contract.Goal)
+	// publish turns ONE seat's wire result into the lane's published answer (reviewPayload) and
+	// seals it. It is shared by the local path and the fenced-seat fleet path on purpose: the
+	// filters are the whole reason this lane's output is worth reading, and a remote review is
+	// produced by a SMALLER seat than the local one more often than not, so a second copy of
+	// these rules for the fleet path would be the copy that drifted.
+	publish := func(wire core.AgentWireResult, extra map[string]any) (*mcp.CallToolResult, error) {
+		out, delivered := reviewPayload(wire, diff, in.MaxFindings, extra)
+		return seal(out, reviewlane.Run{Delivered: delivered, Wire: &wire, Extra: extra})
 	}
 	// The review's wall is the box's agent_timeout_sec when that is larger than
 	// the wire default (0.115.21, register D-03 — the wall half of D-09): the
@@ -3789,7 +3997,6 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// ForeignFence, not Fenced: the holder's own session (GPU_LEASE_EPOCH) keeps
 	// the local path exactly as it was. Its lease exists to keep this work on
 	// these cards.
-	cfg := s.p.Cfg()
 	var fleetNote map[string]any
 	// The local loop runs on the planner seat, so the fence is asked of that seat's cards
 	// (plan P4): a render on another card does not send the review off the box.
@@ -3797,7 +4004,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	if fenced, why := delegate.ForeignFenceFor(delegate.LocalLease(cfg.GPULockPath, cfg.StateDir), reviewSeatPins); fenced {
 		wire, extra, note, ok := s.reviewOnFleet(ctx, contract, why)
 		if ok {
-			return s.publishReview(wire, diff, in.MaxFindings, extra)
+			return publish(wire, extra)
 		}
 		// A fleet seat that WROTE the review and was stopped by the clock on its
 		// structuring (F20: a cut final, a re-pack with no wall left) deferred it, and the
@@ -3808,7 +4015,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 		// as before.
 		if wire.Deferred {
 			if out, delivered := reviewPayload(wire, diff, in.MaxFindings, extra); delivered {
-				return jsonResult(out)
+				return seal(out, reviewlane.Run{Delivered: true, Wire: &wire, Extra: extra})
 			}
 		}
 		// Nothing out there took it. Today's path stands — the wait, then the
@@ -3827,9 +4034,9 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// run two budgets that could disagree.
 	wire, rerr := run(ctx, contract, delegate.LocalOptions{})
 	if rerr != nil {
-		return jsonResult(withReviewExtra(map[string]any{"deferred": true, "reason": rerr.Error()}, fleetNote))
+		return seal(withReviewExtra(map[string]any{"deferred": true, "reason": rerr.Error()}, fleetNote), reviewlane.Run{})
 	}
-	return s.publishReview(wire, diff, in.MaxFindings, fleetNote)
+	return publish(wire, fleetNote)
 }
 
 // reviewOnFleet offers ONE review to the fleet at route=remote (register D-110),
@@ -3949,6 +4156,15 @@ func (s *Server) contractOnFleetAt(ctx context.Context, contract core.AgentContr
 	if pr.Seat != "" {
 		extra["seat"] = pr.Seat
 	}
+	// A second attempt the delegator ran inside this call (a failed verification retried on another
+	// node): said here, so every door that publishes the block says it too. Both are omitted when no
+	// retry ran, and a retry that was considered and skipped carries a note and no node.
+	if pr.RetriedOn != "" {
+		extra["retried_on"] = pr.RetriedOn
+	}
+	if pr.RetryNote != "" {
+		extra["retry_note"] = pr.RetryNote
+	}
 	if pr.Result.Deferred {
 		// The ordinary shape: "route=remote: no eligible remote" — nothing out
 		// there fits the diff, or nothing is up. Verbatim, because the reason
@@ -3995,21 +4211,7 @@ func withReviewExtra(out map[string]any, extra map[string]any) map[string]any {
 	return out
 }
 
-// publishReview turns ONE seat's wire result into the lane's published answer (see
-// reviewPayload for what that comprises).
-//
-// It is shared by the local path and the fenced-seat fleet path on purpose. The
-// filters are the whole reason this lane's output is worth reading — a finding
-// naming a file the diff never touched is the ordinary way a small seat fails —
-// and a remote review is produced by a SMALLER seat than the local one more often
-// than not. A second copy of these rules for the fleet path would have been the
-// copy that drifted.
-func (s *Server) publishReview(wire core.AgentWireResult, diff string, maxFindings int, extra map[string]any) (*mcp.CallToolResult, error) {
-	out, _ := reviewPayload(wire, diff, maxFindings, extra)
-	return jsonResult(out)
-}
-
-// reviewPayload is publishReview's decision, apart from the transport so the fenced-seat fleet
+// reviewPayload is the review lane's publish decision, apart from the transport so the fenced-seat fleet
 // path can put the same question to a deferred result. It reads the seat's findings — from the
 // structured object, or, for a deferral the CLOCK caused on an answer the seat had written,
 // straight from its raw lines (reviewlane.Salvage) — then drops hollow lines, grounds, dedupes,
@@ -4755,6 +4957,7 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 		PinReason       string          `json:"pin_reason"`
 		TimeoutSec      int             `json:"timeout_sec"`
 		FetchTimeoutSec int             `json:"fetch_timeout_sec"`
+		SubLangs        string          `json:"sub_langs"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -4777,7 +4980,10 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 	if err := delegate.CheckPinReason(route, in.PinReason); err != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": err.Error()})
 	}
-	opt := research.Options{}
+	// The subtitle adapter is the operator's: ytdlp_path names the binary (empty = off), and the scratch root is where
+	// each call's temporary directory is made. The caller chooses only the languages.
+	rcfg := s.p.Cfg()
+	opt := research.Options{YtDlpPath: rcfg.YtDlpPath, YtDlpSHA256: rcfg.YtDlpSHA256, SubLangs: in.SubLangs, ScratchRoot: rcfg.EffectiveResearchScratchDir()}
 	if in.FetchTimeoutSec > 0 {
 		opt.Timeout = time.Duration(in.FetchTimeoutSec) * time.Second
 	}

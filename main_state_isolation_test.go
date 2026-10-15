@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -46,7 +50,8 @@ func TestMain(m *testing.M) {
 	// A copy of this test binary that a test re-launched (the helper processes of the gpu verb tests: a wrapped command the parent
 	// kills, or one that ends by os.Exit from inside a test) never reaches the removal in runIsolated, so a root of its own was left in
 	// the OS temp dir by every launch. It shares the root of the suite that launched it, through the environment it inherited, and
-	// runs on the same known host.
+	// runs on the same known host. A copy whose environment no longer agrees (a test took LOCAL_OFFLOAD_STATE_DIR out of it on purpose)
+	// keeps a root of its own, but runIsolated makes that one inside the suite's root (relaunchRootParent), which the suite removes.
 	if _, ok := inheritedSuiteRoot(os.Getenv); ok {
 		os.Exit(runOnTestHost(m))
 	}
@@ -87,6 +92,49 @@ func inheritedSuiteRoot(getenv func(string) string) (string, bool) {
 	return root, true
 }
 
+// relaunchRootFolder is the folder, inside the throwaway root of the suite that launched a copy, where that copy keeps its own root.
+const relaunchRootFolder = "relaunch"
+
+// relaunchRootParent is where runIsolated makes its root: the OS temp dir ("") for the suite itself, and for a copy of the test binary
+// that the suite re-launched but that could not share the suite's root (inheritedSuiteRoot said no, because the test that launched it had
+// taken LOCAL_OFFLOAD_STATE_DIR out of the environment or emptied it, as treeEnv and isolateFromMachineState do), a folder inside the
+// suite's root. The copy still gets a root of its own, which pins everything for it as before, so the net is the same. But a copy that
+// ends by os.Exit from inside a test, or is killed by its parent, never reaches the removal in runIsolated, and a root in the OS temp dir
+// was left behind by every such launch (13 empty ones from the gpu tests alone, one run); a root inside the suite's own is removed with
+// it when the suite ends. The suite's variable must name a throwaway root of this package that is still on disk, as inheritedSuiteRoot
+// requires, or the answer is "" and the root goes to the OS temp dir as it always did: the net fails closed. A variable that names a
+// throwaway root that cannot be used (gone, not a folder, no room for the relaunch folder) says why on isolationStderr (relaunchFallback);
+// an unset one, or one that names something that is not a throwaway root, is not a suite's copy and stays quiet.
+func relaunchRootParent(getenv func(string) string) string {
+	owner := getenv(suiteStateRootEnv)
+	if owner == "" || !strings.HasPrefix(filepath.Base(owner), stateIsolationPrefix) {
+		return ""
+	}
+	fi, err := os.Stat(owner)
+	if err != nil {
+		return relaunchFallback(owner+" (named by "+suiteStateRootEnv+") cannot be read", err)
+	}
+	if !fi.IsDir() {
+		return relaunchFallback(owner+" (named by "+suiteStateRootEnv+") is not a folder", nil)
+	}
+	parent := filepath.Join(filepath.Clean(owner), relaunchRootFolder)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return relaunchFallback("could not make "+parent, err)
+	}
+	return parent
+}
+
+// relaunchFallback says why a root that could have gone inside the suite's goes to the OS temp dir instead, and answers "" for it. The
+// fallback keeps the isolation (the root is still the process's own) but brings back the leak the nesting closes, and it would otherwise
+// show only as folders in the temp dir.
+func relaunchFallback(why string, err error) string {
+	if err != nil {
+		why += ": " + err.Error()
+	}
+	fmt.Fprintf(isolationStderr, "root tests: %s; this process keeps its state root in the OS temp dir, where a kill or an os.Exit leaves it behind\n", why)
+	return ""
+}
+
 // suiteRunner is what TestMain runs: *testing.M, or a stub in the fail-closed test.
 type suiteRunner interface{ Run() int }
 
@@ -95,14 +143,21 @@ type suiteRunner interface{ Run() int }
 // variable cannot be set up it returns 1 without running a single test, because
 // a suite that fell back to the machine-wide state root would be exposed to the
 // live data this net exists to protect. The three effects are parameters so
-// TestRunIsolatedFailsClosed can make each one fail.
-func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, error), setenv func(key, value string) error, removeAll func(string) error) int {
-	dir, err := mkdirTemp("", stateIsolationPrefix)
+// TestRunIsolatedFailsClosed can make each one fail. A root it cannot remove
+// (removeStateRoot) turns a passing suite's code 0 into 1.
+func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, error), setenv func(key, value string) error, removeAll func(string) error) (code int) {
+	dir, err := mkdirTemp(relaunchRootParent(os.Getenv), stateIsolationPrefix)
 	if err != nil {
 		os.Stderr.WriteString("root tests: could not isolate the state root: " + err.Error() + "\n")
 		return 1
 	}
-	defer func() { _ = removeAll(dir) }()
+	// A root that stays behind fails a passing suite (exit 1) and leaves a failing suite's own code alone: the tests ran, but the isolation net did
+	// not clean up after them, and the line removeStateRoot writes is hidden by `go test ./...` for a package that passed.
+	defer func() {
+		if removeStateRoot(dir, removeAll) != nil && code == 0 {
+			code = 1
+		}
+	}()
 	if err := setenv("LOCAL_OFFLOAD_STATE_DIR", filepath.Clean(dir)); err != nil {
 		os.Stderr.WriteString("root tests: could not set LOCAL_OFFLOAD_STATE_DIR: " + err.Error() + "\n")
 		return 1
@@ -133,10 +188,36 @@ func runOnTestHost(m suiteRunner) int {
 	return m.Run()
 }
 
-// stubRunner records whether the suite was run.
-type stubRunner struct{ ran bool }
+// isolationStderr is where runIsolated reports a throwaway root it could not remove; os.Stderr, except in the test of that report.
+var isolationStderr io.Writer = os.Stderr
 
-func (s *stubRunner) Run() int { s.ran = true; return 0 }
+// removeRetryDelay is how long runIsolated waits before it tries a removal that failed once more. On Windows a process that has just
+// ended (or a scanner) can still hold a file of the folder, or the folder itself as its working directory, for a moment.
+const removeRetryDelay = 250 * time.Millisecond
+
+// removeStateRoot removes the suite's throwaway state root. A removal that fails is tried once more after removeRetryDelay, and a root
+// that is still there after that is named on isolationStderr with the error, so that a leak is seen where it is made and not found later as
+// a folder in the OS temp dir, and the error is answered so that runIsolated can fail the package: `go test ./...` shows the stderr of a
+// package that passed only with -v, so the line alone reaches no one.
+func removeStateRoot(dir string, removeAll func(string) error) error {
+	err := removeAll(dir)
+	if err == nil {
+		return nil
+	}
+	time.Sleep(removeRetryDelay)
+	if err = removeAll(dir); err != nil {
+		fmt.Fprintf(isolationStderr, "root tests: could not remove the throwaway state root %s: %v (a process may still hold it open; remove it by hand); the package fails so that this is not missed\n", filepath.Clean(dir), err)
+	}
+	return err
+}
+
+// stubRunner records whether the suite was run, and answers code as the suite's own result.
+type stubRunner struct {
+	ran  bool
+	code int
+}
+
+func (s *stubRunner) Run() int { s.ran = true; return s.code }
 
 // TestRunIsolatedFailsClosed pins the fail-closed rule: a directory or variable
 // that cannot be set up ends the suite with a non-zero code and no test run.
@@ -164,6 +245,67 @@ func TestRunIsolatedFailsClosed(t *testing.T) {
 			}
 			if c.wantRan && removed == "" {
 				t.Fatal("the throwaway directory must be removed after the run")
+			}
+		})
+	}
+}
+
+// TestRunIsolatedRetriesARemovalOnceAndReportsWhatStaysBehind pins the removal of the throwaway root: a removal that fails (on
+// Windows a process that has not yet let go of a file or of the folder as its working directory) is tried once more, and a root that
+// is still there after the second attempt is named on stderr with the error, so that a leak is seen, never dropped. A root that stays
+// behind also ends a passing suite with exit code 1, because `go test ./...` hides the stderr of a package that passed and the report alone
+// would not reach anyone; a suite that failed keeps its own code, and a root that went on the retry reports nothing.
+func TestRunIsolatedRetriesARemovalOnceAndReportsWhatStaysBehind(t *testing.T) {
+	boom := errors.New("sharing violation")
+	for _, c := range []struct {
+		name       string
+		failures   int
+		suiteCode  int
+		wantCalls  int
+		wantReport bool
+		wantCode   int
+	}{
+		{"it works at once", 0, 0, 1, false, 0},
+		{"the retry works", 1, 0, 2, false, 0},
+		{"it fails both times, the suite passed", 99, 0, 2, true, 1},
+		{"it fails both times, the suite failed", 99, 3, 2, true, 3},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var report bytes.Buffer
+			was := isolationStderr
+			isolationStderr = &report
+			t.Cleanup(func() { isolationStderr = was })
+			var tried []string
+			removeAll := func(p string) error {
+				tried = append(tried, p)
+				if len(tried) <= c.failures {
+					return boom
+				}
+				return nil
+			}
+			stub := stubRunner{code: c.suiteCode}
+			code := runIsolated(&stub, func(string, string) (string, error) { return dir, nil }, func(string, string) error { return nil }, removeAll)
+			if code != c.wantCode || !stub.ran {
+				t.Fatalf("code = %d, ran = %v; want %d, true (a root that stays behind fails a passing suite and leaves a failing one's code alone)", code, stub.ran, c.wantCode)
+			}
+			if len(tried) != c.wantCalls {
+				t.Fatalf("the removal was tried %d times, want %d (once, and once more only when it failed)", len(tried), c.wantCalls)
+			}
+			for _, p := range tried {
+				if p != dir {
+					t.Fatalf("the removal was asked for %q, want the throwaway root %q", p, dir)
+				}
+			}
+			got := report.String()
+			if c.wantReport {
+				for _, want := range []string{"root tests:", filepath.Clean(dir), boom.Error()} {
+					if !strings.Contains(got, want) {
+						t.Fatalf("the report %q should contain %q", got, want)
+					}
+				}
+			} else if got != "" {
+				t.Fatalf("nothing is left behind, so nothing is reported, got %q", got)
 			}
 		})
 	}

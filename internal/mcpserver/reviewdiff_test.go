@@ -19,6 +19,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
+	"github.com/dmmdea/offload-harness/internal/reviewlane"
 )
 
 // reviewDiff is a small unified diff over one file, used by every case below.
@@ -369,6 +370,12 @@ func TestReviewDiffCleanVerdictBesideDroppedLinesStaysAnEmptyResult(t *testing.T
 	}
 	if !strings.Contains(note, "survived filtering") || !strings.Contains(note, "no severity, file or why") {
 		t.Errorf("the note must say what actually happened: %q", note)
+	}
+	// The same self-contradicting answer must seal as NOT_RUN, never PASS: the
+	// payload's dropped_* counts are what Seal turns into the filtered-everything rule.
+	reason, _ := m["outcome_reason"].(string)
+	if m["outcome"] != reviewlane.OutcomeNotRun || !strings.Contains(reason, "the seat wrote 2 finding-shaped lines and the lane's filters discarded every one") {
+		t.Errorf("a clean NONE beside two discarded lines is NOT_RUN naming the count: %v / %q", m["outcome"], reason)
 	}
 }
 

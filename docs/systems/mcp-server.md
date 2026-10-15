@@ -244,6 +244,34 @@ cites nothing, and grading the bytes gives `verified: false` when the re-pack re
 case is a question whose subject is a SHORT (<8-character) or question-named identifier, which
 leaves nothing anchorable at all.
 
+**A failed local first attempt is retried on another seat.** When the first attempt ran on this box's seat and
+failed its acceptance (`acceptance_failures` non-empty), the handler gives it the second chance `agent_delegate`
+gives a failed verification: the same contract goes once through the delegator at `route=remote`, which never
+places on this box's seat, so the retry runs on a different seat by construction. A routed ask (`auto`, `remote`,
+a named route) needs nothing added: the delegator's own engine already retries inside that call, and the response
+now says so (see the route paragraph below). The retry is decoded and graded exactly like the first attempt
+(`gradeAskWire`), and only a clean one is published:
+
+- **The retry verified:** it is the answer, with `verified: true`, the fleet block (`node`, `placement`, `seat`,
+  `executed_on`), `retried_on` (the node) and `retry_note` (`first attempt on <seat> failed_verification: [...]; this
+  result is the retry`).
+- **The retry also failed** (a failed verification, no answer, or a defer from a node that took it): the FIRST answer
+  stands, `verified: false` with its `acceptance_failures`, plus `retried_on` and `retry_note` (`retry on <node> also
+  <outcome>; this result is the first attempt`).
+- **The fleet took nothing** (declined, no eligible node, could not be asked) or **the budget is short:** the first
+  answer stands with `retry_note: retry skipped: <why>` and no `retried_on`, which would name a node that never ran
+  it.
+- **The caller named `route: "local"`:** no retry, ever. A named local route is how an ask says its material stays
+  on this box (the tool has no `pin_reason`), so the first answer stands with `retry_note: retry skipped: route local
+  was named; the ask stays on this box`. The retry applies only to an ask that named no route.
+
+The retry lives inside the contract's own `timeout_sec`, as the delegator's does. An ask never names its wall, so its
+contract is auto-sized and owns the 900 s cap; the retry is skipped when what the first attempt left is under the
+retry floor (the configured `agent_retry_min_sec`, at least 10 s), and otherwise it is handed what is left as an
+explicit `timeout_sec`. When the fleet's engine retried inside the retry too, its own note follows the ask's, after
+`the fleet's own retry:`. A deferred first attempt is not retried (it did not fail a verification), and neither is a
+verified one.
+
 A deferred `offload_ask` keeps the finished answer (register C-80). When the node says the loop FINISHED and only
 its structuring failed (`schema_miss`: the re-pack was skipped because the wall had no time left, was cut by the clock, or
 stalled), the deferred payload carries the loop's prose as `output` with `schema_miss: true`, beside the defer's own
@@ -288,7 +316,10 @@ the old behaviour exactly, and so does an omitted route on `agent_run`, unless i
 runs local too, except when loading the agent seat would unload another vLLM seat that holds the cards
 (the seat guard's verdict; 0.165.2): the ask then takes `auto`, and the response carries a `route_note`
 naming that seat. The ask is self-contained, so nothing is lost by moving it; `agent_run` reads its
-`read_root` on this box and stays.
+`read_root` on this box and stays. A routed response also carries `retried_on` and `retry_note` when the delegator
+retried a failed verification (or considered one and skipped it) inside the call: both fields were dropped before
+this block surfaced them, and they are absent when no retry was considered. The review lane and `agent_run` share the
+block, so they carry the same two fields.
 
 #### A seat only the fleet runs: `agent_run(model: <seat>)` (register D-125)
 
@@ -465,6 +496,84 @@ name through a bare `http.Client`, so a hostile record with a one-second TTL cou
 as public and then resolve to `127.0.0.1` at connect time; `internal/research/fetch_rebind_test.go`
 is that regression, and it asserts ZERO accepts on a loopback listener.
 
+**Two more text sources: RSS/Atom feeds and YouTube subtitles.** Both are fetched delegator-side with no login and no cookies,
+and both end where a fetched page ends: the text goes through the same digest path, the digest through the same
+`internal/untrusted` fencing, and the URL through the same public-web guard.
+
+- *Feeds.* A response whose content type is `application/rss+xml`, `application/atom+xml` or `application/rdf+xml`, or whose
+  body sniffs as a feed (a generic XML, plain-text or untyped response whose root element is `rss`, an RDF root that declares
+  the RSS 1.0 namespace, or an Atom `feed`), is parsed with `encoding/xml` (`research.FeedToText`; the only added dependency is `golang.org/x/text`'s windows-1252 table, already in the module graph). Each item's title, link, date and summary
+  become the text, at most `research.MaxFeedItems` (50) items and 1,000 bytes of summary each, inside the ordinary 2 MiB read
+  cap and 96 KiB text cap; a feed cut by either, or one whose document stops before its end (a body that ends inside an
+  item), says so first in its own header (`Items: 2 (the feed document was cut off here; later items are not included)`),
+  is marked `truncated` on its source row, and does not count the item it stopped in. Item links are text only and are never followed: a
+  caller who wants an item lists its URL; a relative link is shown resolved against the feed's own `xml:base` (on the feed,
+  the entry or the link) and otherwise against the address the feed was fetched from, after redirects. The text is read in
+  the encoding the response's `charset` parameter names, else the one the XML declaration names, else UTF-8: windows-1252
+  and cp1252 are decoded, and so are iso-8859-1 and latin1, read as windows-1252 the way browsers do (bytes 0x80-0x9F are
+  curly quotes, the euro sign and dashes, never control characters, in a real feed); any other encoding leaves the document
+  to the ordinary path. Before parsing, an invalid UTF-8 byte becomes U+FFFD and a character XML forbids becomes a space,
+  so one bad byte costs one character and not every later item. A document that does not parse as a feed, or that parses with no item or entry
+  (an empty channel, or an RDF/XML, OWL or SKOS file served as `application/rdf+xml`), is read exactly as it was before.
+- *YouTube subtitles.* A video URL is routed by `research.ClassifyURL` to the yt-dlp executable named by the config key
+  `ytdlp_path`: `youtube.com/watch?v=`, and `/shorts/<id>`, `/live/<id>` and `/embed/<id>`, on exactly `youtube.com`, `www.`,
+  `m.` and `music.youtube.com`; `/embed/<id>` on `youtube-nocookie.com` and `www.youtube-nocookie.com`; and `youtu.be/<id>`.
+  Over http or https only, on the default port, with no userinfo and an 11-character id (`/embed/videoseries`, a playlist,
+  is a page). Whichever shape was written, the binary is given the canonical `https://www.youtube.com/watch?v=<id>`. The key
+  is **empty by default, which means the adapter is off** and the URL is read as an ordinary page. The harness never searches
+  `PATH` for the binary and never installs it: the value must be an absolute path to an executable file (the admitted
+  versions are in [security.md](security.md#admitted-third-party-software)). **`ytdlp_path` is trusted as written**, with
+  nothing checking the file, **unless the optional key `ytdlp_sha256` is set** (64 hexadecimal digits, either case): the file
+  is then hashed before every run, and a mismatch, an unreadable file or a malformed value fails the source as `ytdlp_path`
+  and starts nothing, while unset nothing is hashed. A file replaced between the hash and the start is not caught: the pin
+  is against a wrong or changed binary, not against a writer who races each call. On Windows the file must be launchable by
+  the system itself, an `.exe` or a wrapper `.cmd` that starts the interpreter: the admitted zipapp is a
+  `#!/usr/bin/env python3` script, which runs directly only on a POSIX host with `python3` on `PATH`, and a Windows host that
+  names it gets a `ytdlp_path` error at call time. **With a wrapper `.cmd` the hash covers the wrapper, not the interpreter or
+  the script it calls**; those are the operator's to admit and pin. The binary runs once per URL with `--skip-download
+  --write-subs --write-auto-subs --sub-langs=<sub_langs> --sub-format=vtt/srv3/best --no-cookies --no-cookies-from-browser
+  --ignore-config --no-playlist --no-cache-dir --socket-timeout 15` and zero retries, given the canonical URL after a literal
+  `--`. Warnings are not suppressed (`--quiet` stays, `--no-warnings` does not). `sub_langs` is an `offload_research` input
+  (default `en.*`; letters, digits and `. * _ - ,` only, else the source fails as `bad_sub_langs` before anything runs, so no
+  `cmd.exe` metacharacter, `& | < > ^ %`, a double quote or a space, can reach a `.cmd` wrapper). It runs in a per-call
+  directory under `<state_dir>/research-scratch` (else a directory under the OS temp dir), with a scrubbed environment (home
+  and temp point at that directory), bounded by the call's deadline and the per-fetch timeout (one run is capped at 15
+  minutes whatever `fetch_timeout_sec` asks for), with no retry and no scheduling. **A deadline or a cancellation ends the
+  whole process tree the binary started**, not only the program launched, because a wrapper `.cmd` leaves its interpreter
+  running as a grandchild that would otherwise hold the per-call directory: `taskkill /T /F`, started hidden, on Windows,
+  and `SIGKILL` to the process group the binary leads on POSIX (`winexec.KillTreeOnCancel`). The per-call directory is
+  removed with a bounded retry of a few hundred milliseconds (a process that has just been ended takes a moment to let go of
+  it). A removal that still fails is not dropped: it is recorded as `cleanup_error` on the source row, beside the text when
+  there is one, and each call first sweeps `ytdlp-*` directories directly under its own scratch root that nothing can still
+  be using (last changed more than 20 minutes ago, the longest run plus slack). The limit: the tree is found through the
+  parent chain, so a child whose parent had already exited when the run ended is out of reach of `taskkill` on Windows. A
+  binary that exits 0 while a child still holds the output pipe is read as a success once the pipe wait runs out, and that
+  child's hold on the directory shows as `cleanup_error` until the sweep takes the directory. Of the files it writes, a
+  readable format wins (WebVTT, SRV3, SubRip), then the shortest name, so the plain `en` track beats `en-orig`. The subtitle
+  file is converted to plain text: header and NOTE/STYLE/REGION blocks, cue ids, timestamps, cue settings and tags are
+  removed, entities decoded, and the rolling duplication automatic captions carry is removed (a line equal to the one before
+  it is dropped, and a line that only extends it replaces it). A srv3 track that ends inside a cue, cut by the 2 MiB read
+  bound or interrupted, yields the cues read before the cut and is marked `truncated`. Subtitle text and the same words
+  pasted as a page therefore reach the digest stage as the same bytes (pinned by
+  `TestSubtitleTextAndPastedPageGiveTheSameDigestInput`; no model is called). A site break degrades to a skipped source with a
+  typed `error_kind` and no retry: `subtitle_site_break` (the binary exited non-zero), `no_subtitles` (exit zero and no file;
+  the reason ends with the last line yt-dlp printed, because it reports a refused subtitle download, an HTTP 429 rate limit
+  included, as a warning and exits 0), `unsupported_subtitle_format`, `empty_subtitles` (a subtitle file was read and held
+  only blank cues), `subtitle_timeout`, `ytdlp_path` (not absolute, missing, not matching `ytdlp_sha256`, or will not
+  start), `bad_sub_langs` or `url_refused` (the canonical URL did not pass the public-web guard). A relative `state_dir` is
+  made absolute before the scratch directory is built.
+- *Security.* Every URL passes `research.ValidateURL` before anything is fetched or run, the subtitle path included: a hostname
+  that resolves to a private, loopback, link-local or CGNAT address is refused before any process starts (the tests drive it
+  through the `netguard.LookupIP` resolution seam). The canonical URL handed to the binary is validated too, because its host
+  is the one the binary will actually contact, and it is a fixed YouTube host rather than anything the caller wrote. The
+  matcher is exact, so a lookalike host (`youtube.com.evil.example`, a userinfo trick, another port) is an ordinary page under
+  the ordinary guard and never reaches the binary. The adapters build no HTTP client (the bare-client allowlist in
+  `bare_http_client_allowlist_test.go` still lists one in this package; `TestAdaptersBuildNoHTTPClientOfTheirOwn` pins it). One
+  limit is stated plainly: yt-dlp opens its own connection, outside `netguard.PublicTransport`, so for this path the guard is
+  a pre-flight name check (the resolve-and-check on the two hosts above, made before anything starts), after which the child resolves and dials on its own, plus the fixed canonical URL, which is why the adapter is off until an operator
+  names a binary. Audio transcription is not part of this change: a video with no subtitles is a `no_subtitles` source, and
+  nothing downloads audio or video.
+
 Two contract rules are baked in because they were measured on the seats (2026-08-28): the
 goal names the context document as *already provided* (a goal that says "read the document"
 sends a small seat hunting for a file and fails acceptance), and acceptance is ONE any-of
@@ -485,7 +594,9 @@ statement (60 words at most) that the page does not carry what was asked ("not o
 "not documented/stated/…"), at least one such statement, no number or boolean, no second sentence that says what the page does
 hold, no contrast word ("but", "however", …), and no report of a failure to read the file ("could not read", "not found", "the
 file is missing": an error, not a finding). A stock phrase beside a claim, the goal echoed back, and "I could not read the file,
-so the page does not address it" still fail it. The excuse counts for the node as neither a strike nor a pass
+so the page does not address it" still fail it. Only a FAILED fingerprint can be excused: an unknown (as a qualified field
+fingerprint over an empty field grades) is never dropped and stays a reported failure, but over an honest absence it is no
+fact about the node, so it strikes nothing and passes nothing. The excuse counts for the node as neither a strike nor a pass
 (`Quarantine.Pass`): an absence is no evidence that the node reads the right document. What no lexical rule can tell is a seat
 that did not read the page and reports "the page does not address it" without saying that it failed; that is delivered as an
 absence, as an honest one is, and only a second seat would tell them apart.
@@ -542,7 +653,13 @@ A research page that fails only its own checks (a shape, an item count) is not r
 node: a second seat given the same page mostly repeats the verdict at the cost of a whole second
 run, and the result's `retry_note` says so. A failed document fingerprint (`docanchor`) is a
 different fact: the answer is about another document, which is a property of the node (two of
-them quarantine it), so that failure keeps its one retry on another node. The seats never gain
+them quarantine it), so that failure keeps its one retry on another node. A fingerprint that grades unknown for a reason
+of the contract (a grounded check on a contract with no context documents, a field check the `output_schema` does not
+declare: the `AUTHORITY-UNREACHABLE` lint warns about it) is still reported, but it neither strikes a node nor passes, and
+on the research door it is not retried, because another node would grade the same unknown; the same holds for an unknown
+over an honest absence. Only a FAILED fingerprint can be excused (by an honest absence): an unknown caused by the contract
+or by an honest absence strikes nothing and passes nothing, and otherwise an unknown the result caused (an empty answer beside the
+documents, a declared field missing from the result) strikes like a failure. The seats never gain
 network access; the agent loop's egress cage is untouched. Failed or refused fetches come
 back as `sources[].skipped` and produce no result — a broken page never reads as a digest.
 
@@ -566,7 +683,9 @@ seat again, and the response says so with `cache_hit: true`. A fresh run publish
 `cache_hit: false`; an absent field would read as unknown, and "was this answer computed just
 now" is not something a caller or the adoption instrument should have to guess at. A
 **deferred** result carries no `cache_hit` at all, by design rather than omission: a defer is
-never stored, so it is always a fresh run.
+never stored, so it is always a fresh run. The stored entry is the answer as it was published, so a cached
+unverified answer already includes its cross-seat retry (`retried_on` and `retry_note` ride the entry as they
+are): a repeat never retries again.
 
 **Say what this buys, and no more.** It pays on an exact repeat and on nothing else. A
 *different* question over the same files still pays full seat time (46–75 s measured), because
@@ -645,7 +764,7 @@ of that floor: `auto` would fall back to the fenced local seat when nothing qual
 route is what makes an accepted result provably off-box. The published result names where it ran
 (`executed_on`, `node`, `placement`, `seat`, plus `node_reported` (0.185.0) only when the node's own result named itself by another
 id than `node`) and the fence that moved it, and the findings go
-through the SAME filters as a local review (`publishReview` is shared, so the two cannot drift).
+through the SAME filters as a local review (one `publish` step in the handler serves both, so the two cannot drift).
 An INHERITED lease is not a fence: `gpu reserve … -- <session>` sets `GPU_LEASE_EPOCH`, and the
 holder's own review stays on the cards its lease cleared. When the fleet takes nothing, today's path
 stands — the wait, then the capacity defer — and the result carries a `fleet` note saying the fleet
@@ -761,7 +880,7 @@ These design choices are load-bearing rather than incidental:
   them away. The answer format is line-oriented and `ParseFindings` already reads raw lines, so the
   re-pack is a convenience here, not a requirement: `reviewlane.Salvage` takes the raw answer's
   complete lines (a finished answer is read with `RawLines`, below, so JSON finding objects count;
-  a cut one is split on newlines and loses its last line) and `publishReview` runs them through the
+  a cut one is split on newlines and loses its last line) and `reviewPayload` runs them through the
   normal `Report` path (echo, hollow, grounding, dedupe, same-line fold, cap). It keys on structure, never on prose: the node's own
   `output_truncated` flag, or `schema_miss` with the `budget` class (a finished answer whose
   re-pack the clock skipped, clamped or cut; a canceled re-pack is excluded because nobody is
@@ -781,6 +900,64 @@ These design choices are load-bearing rather than incidental:
   runs the lane's real contract through the real runner so the node and the lane cannot drift
   apart. The pipeline's own ledger row still records the run as the defer it was; the salvage is
   the door's.
+
+**Every result is bound to the diff it judged.** A review used to say what a seat thought and
+nothing about what it thought it about, and a finding the caller skipped left no record. Now every
+payload, deferrals and early refusals included, carries an `outcome` and an `evidence` block, all additive
+(a reader written before them keeps working; the deferral shape and the findings are untouched):
+
+- **The binding is the diff's sha256**, plus `base_sha` and `head_sha` when the caller passes them (hex,
+  7 to 64 characters, echoed and never resolved: the lane has no git access, and a commit id the caller
+  typed can be wrong where the bytes cannot). `prompt_sha256` binds the exact prompt the seat was shown and
+  `seat.answer_sha256` its raw answer; the seat receipt (`seat`, `node_id`, `node`, `executed_on`, `steps`,
+  `stop_reason`, `salvaged`, `deferred`) names who answered and carries no timing. A review refused before
+  any diff was read (both sources, neither, a `diff_path` that cannot be read or is over its cap, a bad
+  `read_root`, a working directory that cannot be read, arguments that do not decode) is sealed as a diff-less `NOT_RUN`: `diff_bytes` is 0, there is no
+  `diff_sha256` (no bytes were chosen, so there is nothing to fingerprint), and the refusal is both
+  `evidence.refusal` and `outcome_reason`. The deferral shape and reason are the ones the door always gave.
+- **Gates run first.** `evidence.gates` is built before the seat is contacted, so a refusal is bound too:
+  the lane's own `diff-size` and `conflict-markers` (a merge-conflict marker on an added line) and then the
+  `gate_receipts` the caller handed over, the results of the lints and tests it ran itself (`name`,
+  `status` `pass`|`fail`, `detail?`, `head_sha?`; at most 16). **The lane runs no lints or tests itself**: the
+  receipts are results the caller ran and hands over, and the lane cannot verify them. It executes nothing a
+  caller names, which keeps the review door from becoming a command-execution surface. A receipt whose
+  `head_sha` is not the review's head is marked `stale` and cannot support a PASS; when the review names a head,
+  a receipt that names no commit is marked `unbound` and cannot either. A review with no `head_sha` is tied to no
+  commit: `evidence.head_unbound` is true, a receipt that names a commit is marked `unbound` (nothing shows the diff
+  is that commit's), and a receipt that names none stands as given. **Even with a `head_sha`, nothing ties the head
+  to the diff bytes**: the lane has no git access, the fingerprint binds the bytes, and the head is the caller's
+  word, echoed. A red gate does not stop the seat: the lane is advisory, and the
+  findings of a diff that fails a lint are still worth reading.
+- **One outcome, decided in one place** (`reviewlane.Decide`). `NOT_RUN`: no clean seat reviewed the diff,
+  which covers every result with `deferred: true`, a runner error, an early refusal, a refused binding
+  (malformed commit id or receipt), a diff over `MaxDiffBytes` (refused even if a caller skipped the builder), a
+  result with no seat receipt, a result with no diff fingerprint, an answer that read as NONE while every line it wrote was discarded, and a run the
+  node filed as a deferral whose answer the lane read as a clean NONE (the salvage still publishes what it read,
+  and findings read from such a run are `FINDINGS`, but a clean NONE from it is never a PASS: `seat.deferred`
+  records the attempt). `STALE`: the diff was not the same bytes at the second check. `FINDINGS`: an advisory
+  list. `GATE_FAILED`: a clean seat beside a red, wrong-commit or unbound gate.
+  `PASS`: a seat with a receipt, a diff fingerprint and a second check equal to it, an in-bound diff, every gate
+  green and for the reviewed commit, an unchanged diff, and the seat's own NONE. A PASS on a review that named no
+  `head_sha` carries `outcome_reason` "no head_sha: gates not tied to a commit" beside `evidence.head_unbound`, so it
+  does not read as a PASS bound to a commit. `outcome_reason` says why for everything but FINDINGS and a PASS tied
+  to a commit.
+- **A second fingerprint check right before returning** (`reviewlane.Seal`). A `diff_path` is re-read through
+  the same confined reader and compared with the fingerprint taken first; `recheck_sha256` shows the second
+  value, and a difference (or a file that cannot be re-read) makes the result `STALE`. For an inline diff the
+  check compares the string with itself: it is held in memory and cannot move, so `recheck_sha256` equals
+  `diff_sha256` by construction there. A review that never reached a seat has nothing to re-check.
+- **Every review leaves a durable trace**: `review-evidence.jsonl` in the same directory as the configured
+  ledger file (derived from `ledger_path`, so it sits beside the ledger wherever the operator put it; the harness
+  home when no ledger path is set), one `review` row (outcome, evidence, counts of what was shown and what the filters and the cap took out)
+  and one `finding` row per published finding (severity, file, line, the claim and why cut to 512 bytes, and a
+  digest of the whole finding), joined by `review_id`. It is written whether or not the caller reads or applies
+  the findings, and a write that fails is reported as `trace_error` on the result. This sidecar is the durable
+  trace of the review: no ledger row is written for the verdict, on purpose, because every ledger reader counts
+  a row as a call, the pipeline already writes the run's own row (door `offload_review_diff`) before the outcome
+  is known, and the ledger keeps hashes where this trace keeps the short finding text. The ledger row is the
+  run record, this file the verdict record.
+- **Stays advisory.** An outcome is a label on a result a lead reads; nothing here
+  blocks a merge or a commit.
 
 Everything the lane returns is ADVISORY: it never gates a merge and never substitutes for the
 final does-it-actually-work verification, which stays with the caller — as do security review,
@@ -1017,6 +1194,14 @@ keep the stamp and say so, a path that is gone is stale without a comparison, an
 
 - [`internal/mcpserver/mcpserver.go`](../../internal/mcpserver/mcpserver.go) — registration and
   handlers
+- [`internal/mcpserver/reviewdiffio.go`](../../internal/mcpserver/reviewdiffio.go) — the file seam of
+  `offload_review_diff`'s `diff_path` branch (working directory, absolute path, confined read), so the refusals behind
+  those calls are tested
+- [`internal/research`](../../internal/research/fetch.go) — `offload_research`'s fetch and guard; the text sources:
+  [`feed.go`](../../internal/research/feed.go) (RSS and Atom) and [`subtitles.go`](../../internal/research/subtitles.go)
+  (the URL matcher, the yt-dlp subtitle adapter and the caption-to-text conversion); the tree kill the adapter uses on a
+  deadline is [`internal/winexec/tree_windows.go`](../../internal/winexec/tree_windows.go) and
+  [`tree_other.go`](../../internal/winexec/tree_other.go)
 - [`internal/mcpserver/status_section.go`](../../internal/mcpserver/status_section.go) —
   `offload_status`'s block table, `section` parsing and the brief lines
 - [`internal/mcpserver/stale_image.go`](../../internal/mcpserver/stale_image.go) — the `process` block: the
@@ -1032,7 +1217,8 @@ keep the stamp and say so, a path that is gone is stale without a comparison, an
 - [`internal/askcache`](../../internal/askcache/askcache.go) — `offload_ask`’s content-addressed,
   bounded, per-process result cache (the `cache_hit` field)
 - [`internal/reviewlane`](../../internal/reviewlane/review.go) — `offload_review_diff`’s contract
-  builder, finding parser, diff-grounding filter and severity ranking
+  builder, finding parser, diff-grounding filter and severity ranking; [`evidence.go`](../../internal/reviewlane/evidence.go)
+  binds a result to the diff it judged (outcome, gate and seat receipts, second fingerprint check, durable trace)
 - [`internal/swapclient`](../../internal/swapclient/swapclient.go) — the harness's single
   alias-aware llama-swap roster reader, over `tools/llamaswap`'s `pkg/llamaswap`
   ([systems/printed-clis.md](printed-clis.md#the-one-exception-the-harness-consumes-pkgllamaswap))

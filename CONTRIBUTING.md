@@ -75,6 +75,14 @@ binary once left 22,434 folders and about 70 GB in under two hours. Two things g
   `relaunchExempt` with the reason a started copy leaves nothing. Prefer `t.TempDir()` to a new entry. To regenerate the
   keys, run `TEMPDIR_LINT_PRINT=1 go test . -run 'TestTestsReachForTheOSTempDirOnlyWhereItsRemovalIsOnEveryPath|TestEveryRelaunchingPackageProvesItLeavesNothing' -v`
   and write the reasons after reading the code.
+
+  Six suites make a throwaway state root in their `TestMain` (the root package, `internal/delegate`, `internal/mcpserver`,
+  `internal/mediaremote`, `internal/pairworkloads` and `internal/pipeline`), and the same two rules hold for all six. A
+  removal that fails is tried once more after 250 ms; a root that is still there is named on stderr with the error, and a
+  suite that passed then exits 1, because `go test ./...` shows the stderr of a package that passed only with `-v` (a
+  suite that failed keeps its own exit code). In the root package, a copy of the test binary that a test starts with
+  `LOCAL_OFFLOAD_STATE_DIR` taken out of its environment (the `gpu reserve` tests) keeps its own state root inside the
+  suite's root, which the suite removes, and says on stderr when it has to fall back to the OS temp dir.
 - **The tripwire, `scripts/test-temp-tripwire.sh`** (PowerShell twin `scripts/test-temp-tripwire.ps1`). A lint cannot see a
   temp file made by production code that a test calls, or a copy of the test binary that exits before its cleanup. The
   tripwire points `TMP`, `TEMP`, `TMPDIR` and `GOTMPDIR` at a fresh folder, runs `go test -count=1`, and ends with a
@@ -232,10 +240,14 @@ finds the script. When the only bash on the machine is that launcher, the test s
 
 1. Fork the repo and create a branch off `main`.
 2. Make your change, with `go build ./...`, `go vet ./...`, and `go test ./...` all green.
-3. If you changed published behavior, add a changelog fragment under `changes/unreleased/` (see "The
+3. If you changed anything under `openspec/` (see [docs/systems/openspec.md](docs/systems/openspec.md)), run the OpenSpec
+   validator too: install the pinned CLI with `scripts/openspec-install.sh <prefix>` (a directory on a data drive), then
+   `OPENSPEC_BIN=<prefix>/node_modules/.bin/openspec scripts/openspec-validate.sh`. `go test ./...` runs the real validator
+   only where `OPENSPEC_BIN` is set, and CI does not set it, so this step is yours.
+4. If you changed published behavior, add a changelog fragment under `changes/unreleased/` (see "The
    changelog is one file per change" above); do not edit `CHANGELOG.md`.
-4. Open a PR describing what changed and why. Link any related issue.
-5. If it removes any tracked file, say so with a `Deletes:` line (see above) — CI refuses an
+5. Open a PR describing what changed and why. Link any related issue.
+6. If it removes any tracked file, say so with a `Deletes:` line (see above) — CI refuses an
    undeclared deletion.
 
 By contributing, you agree that your contributions are licensed under the

@@ -13,7 +13,7 @@ installed by its own mode rather than by a profile.
 | work | how it reaches the fleet |
 |---|---|
 | agent contracts (read, reason, write a diff) | `agent_delegate`. This box has no agent seat, so it is never a placement: the default `auto` route and `spread` send every subtask to `delegate_remotes`, ranked as on any delegator |
-| web research | `offload_research`: pages are fetched here and digested by contracts on the fleet's seats |
+| web research | `offload_research`: pages are fetched here and digested by contracts on the fleet's seats. RSS and Atom feeds are read as items, and a YouTube URL is read as its subtitles when `ytdlp_path` names a yt-dlp on this box (empty by default, which leaves the adapter off; trusted as written unless the optional `ytdlp_sha256` pins the file's hash); see [the research lane](mcp-server.md#the-research-lane-offload_research) |
 | a vetted template rendered to video | `offload_compose_video` with the default `route` auto: this box has no lane, so the template goes through a node's template door (`compose-video` over `/fleet/dispatch`) and the video and snapshots come back into this box's media dir |
 | a whole HyperFrames project or an inline composition | the same call with `project_dir` or `html`: packed into a bundle, checked here, sent to a node's token-gated project door ([ADR 0071](../architecture/decisions/0071-a-fleet-token-holder-may-send-a-whole-composition-project-to-render.md)); the video and snapshots come back |
 | an image, a clip, a character animation, a voice or music clip, a ComfyUI graph | `offload_generate_image`, `offload_generate_video`, `offload_animate_character`, `offload_generate_audio`, `offload_run_graph` with the default `route` auto: this box has no lane, so the job goes to a node from `delegate_remotes`; a still, a reference and driver or a clone sample travels in a hash-checked bundle to the node's media-job door ([ADR 0077](../architecture/decisions/0077-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md)), and the output comes back verified against the sha256 the node published |
@@ -28,6 +28,9 @@ What stays out of reach:
   `offload_transcribe` on the fleet, so it defers here. A video that needs word-timed captions gets its
   transcript made on a machine with that lane, or it arrives with the project; the render itself still goes
   through the project door. Voice synthesis is placeable (`offload_generate_audio`, above).
+- Audio transcription of a video found by research. `offload_research` reads a YouTube video's subtitles through the configured
+  yt-dlp and never its audio: a video with no subtitles is a source that failed as `no_subtitles`, and the transcription lane
+  above is a separate door that this source does not call.
 - `offload_video_watch` and the browse lane are local only and defer here.
 - The HyperFrames Studio preview is not part of the harness on any machine.
 

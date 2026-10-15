@@ -426,6 +426,66 @@ implications.
 
 ## Security and privacy notes
 
+**Ingress guard (register SF-16, `fleet_ingress_guard`).** Every route of the node, and the `fleet-ui` page,
+sits behind one guard against requests a browser page could make. There are two ways in:
+- **A cross-site "simple" request.** A POST with `Content-Type: text/plain` needs no CORS preflight, so a page
+  can fire one blind. The lanes' own Content-Type checks are uneven (the queue lane has none).
+- **DNS rebinding.** A page whose own name is re-pointed at the node becomes same-origin, so it can send JSON
+  and read the answer.
+
+The guard checks three things:
+1. `Host` passes the rule a configured endpoint passes: loopback, a `100.64/10` (tailnet CGNAT) address, a dotless MagicDNS
+   name, or a name under any zone listed in `tailnet_suffix` or `tailnet_suffixes` (the bare zone itself names no
+   node and does not pass, unless another listed zone contains it). It is the same name test `seat_endpoints` URLs
+   take, so a second trailing dot or a port that is not a number fails here as it does there. An IP-literal `Host`
+   equal to the address the connection arrived on also passes, so a node bound to a LAN address can still be probed by
+   its own tooling.
+2. No `Origin` is present. The `fleet-ui` page admits its own origin only.
+3. A POST is `application/json`.
+
+`warn` (the default) logs what `enforce` would refuse, once per kind of violation, peer and offending value in each
+5 minutes, then serves the request. `enforce` refuses with 421, 403 or 415, naming the key. `off` skips the checks.
+The `enforce` body says which `Host` it refused (clipped) and which key relaxes the guard. It does not name the tailnet zones,
+because the requester may be a rebound page that can read it; the zone list is in the log line. Measured before the
+guard (2026-10-03): the node answered 200 to `Host: attacker.example`, to a foreign `Origin`, and to a cross-site
+`text/plain` POST on the queue lane. Run `warn` until the log shows no legitimate client tripping it, then set
+`enforce`.
+
+Because the default serves what it would refuse, a stock install is not guarded. `fleet-serve` and `fleet-ui` print
+`ingress guard: <mode>` at start, and `doctor` prints it too; `local-agent --serve` prints the mode in its banner. A
+node that starts on a missing `--config` file runs on the defaults, so it shows `warn` there beside the built-in
+defaults banner.
+
+`local-agent --serve` takes the same key, because the agent behind it drives write and GitHub tools. It and
+`fleet-ui` refuse to start on a config that failed to load, as `fleet-serve` does.
+
+The warn log is bounded and does not go blind. Each offending value is clipped to 200 bytes and each line to 1 KB, and
+the dedupe key is a hash of the whole value. The dedupe set empties every 5 minutes, so a client still tripping the
+rule is written again each window and a flood cannot silence the log for good. One peer gets at most 64 of the 4096
+slots in a window, so a page that varies the `Host` on every request cannot use up the slots the rest of the tailnet
+logs from. What does not fit is counted: one summary line a minute says how many and quotes the latest, and a count
+left when a burst ends is written when the minute ends, without waiting for another violation.
+
+Before setting `enforce`, know four edges:
+- **A dotless `Host` is admitted**, because MagicDNS short names are dotless. A single-label name that a LAN resolver
+  steers (LLMNR, mDNS) can therefore reach the node's GET routes. A browser POST still carries an `Origin` and is
+  refused.
+- **A POST without a `Content-Type` is refused (415)**, although the lanes themselves accept one. A hand-made `curl`
+  call needs `-H 'Content-Type: application/json'`.
+- **A node shared from another tailnet** is reached by its full name on that tailnet, because its short name does not
+  resolve here. Such a node needs that tailnet's zone listed in `tailnet_suffixes` (beside your own in
+  `tailnet_suffix`), or remote callers fail the Host rule.
+- **`local-agent --serve` clients can trip it.** A client on loopback that is not a browser passes. A chat GUI that
+  runs in a container reaches the host by a dotted name such as `host.docker.internal`, which is neither loopback nor a
+  tailnet name, so it gets 421; a GUI whose browser makes the request itself sends an `Origin` and gets 403. Run
+  `warn` and read the log first. The only relaxers are `fleet_ingress_guard` itself (`warn` or `off`, for the whole
+  guard) or pointing the GUI at the loopback address or a tailnet name. Do not list such a name in `tailnet_suffixes`:
+  it is a tailnet zone, and a `seat_endpoints` URL under it would pass the endpoint rule too.
+
+This guard is not authentication. It stops a browser page and a DNS-rebinding name from reaching the node; a tailnet
+peer that is not a browser (no `Origin`, a JSON POST, a `Host` that names the node's address) is admitted as before,
+so the media lane stays unauthenticated on a non-loopback bind. Per-node tokens and tailnet grants are separate work.
+
 The **media** contract is unauthenticated and assumes a trusted network — in practice a tailnet.
 That assumption is acknowledged by the explicit `--listen-trusted-network` flag. Since 0.65.0
 the **agent lane** is the deliberate exception: bearer-gated when `fleet_auth_token` is set,
@@ -1479,7 +1539,7 @@ decode error is an ack-time 400 with the decoder's reason.
 | `goal` | string | Required. The self-contained task; the sub-agent sees only this plus the context docs. |
 | `context` | `[{name, text}]` | Inline documents: ≤ 16 docs, ≤ 256 KiB total (name+text bytes — a transport bound, not a context-fit promise). Each `name` must be a flat filename because it becomes a file under the job's context dir — see [Context doc names](#context-doc-names) for the exact rules. |
 | `output_schema` | object | JSON Schema for the structured result. Must yield at least one grammar-compilable property — a `properties` map of string / number / integer / boolean / `enum` fields, lists of strings, and objects and lists of objects nested to any depth. A list of numbers, booleans or enum values is written by the grammar as a list of quoted strings and converted back to the schema's type; a type list, `anyOf`, `oneOf` or `$ref` reads as a string; every property the schema lists is required by the grammar, at every depth. **Required for remote execution**: without it the dispatch is refused at ack, because the delegator would have no mechanical check before merging. |
-| `acceptance` | `[string]` | Machine-checkable checks, parsed at validation and **evaluated by the delegator**, never the node: `contains:<s>`, `not_contains:<s>`, `regex:<re>`, `min_items:<field>:<n>` (n ≥ 1), `nonempty:<field>`, `nonempty:<f1>\|<f2>\|…` (any-of: passes when at least one named field is present and non-empty, an absent field counting as empty; an empty alternative or a repeated name is a parse error, and a node one release behind admits the spelling because its parser accepts any non-empty argument), and (0.122.0) `diff_touches:<path-prefix>` / `diff_max_files:<n>` over the write set. Unfalsifiable shapes (empty substrings, a zero minimum, an empty diff prefix, a negative file bound) are parse errors. Text verbs read `output`, falling back to the raw `structured` bytes when `output` is empty; field verbs require `structured` and fail closed without it. |
+| `acceptance` | `[string]` | Machine-checkable checks, parsed at validation and **evaluated by the delegator**, never the node: `contains:<s>`, `not_contains:<s>`, `regex:<re>`, `min_items:<field>:<n>` (n ≥ 1), `nonempty:<field>`, `nonempty:<f1>\|<f2>\|…` (any-of: passes when at least one named field is present and non-empty, an absent field counting as empty; an empty alternative or a repeated name is a parse error, and a node one release behind admits the spelling because its parser accepts any non-empty argument), and (0.122.0) `diff_touches:<path-prefix>` / `diff_max_files:<n>` over the write set. Unfalsifiable shapes (empty substrings, a zero minimum, an empty diff prefix, a negative file bound) are parse errors. Text verbs read `output`, falling back to the raw `structured` bytes when `output` is empty; field verbs require `structured` and fail closed without it. `contains:`, `regex:` and `not_contains:` also take an optional authority qualifier at the head of the argument, `@answer:` (the answer text), `@field=<name>:` (one structured field) or `@grounded:` (in the answer and verbatim in a context doc; no grounded form of `not_contains:`), ordered answer < field < grounded; it is not a verb, so the verb set is unchanged and a node one release behind reads the spelling as a plain substring. A qualified check whose evidence set is empty or absent grades unknown, which fails the check with a reason that says so, and a weaker level's evidence never closes a stronger level's claim; an unqualified check is exactly as before, including `not_contains:` passing over an empty result. Grammar, rules and the reserved spellings: [`contracts/README.md`](../../contracts/README.md#authority-graded-checks-optional-qualifier). |
 | `profile` | string | Agent task profile; empty = `research`. An unknown name defers loudly, naming the valid set. |
 | `max_steps` | int | Loop step budget. Default 12, clamped to 12 — an over-ask is clamped, not rejected. |
 | `setup_actions` | `[{tool, args}]` | Optional (0.113.24, ADR 0036 P2). ≤ 8 tool calls the node REPLAYS before the model's first turn, through the seat's env rules and dispatch, spending no step; validated at decode (bare tool name, args a JSON object ≤ 4 KiB) — a bad list is a 400 naming `setup_actions`. Whether the tool exists on this seat is answered as an observation. A node with `agent_seed_context_reads: true` prepends one `read_file` per context doc on its own; seeded reads plus the contract's actions are one list clamped to 8 per run (seeded first). A node one release behind IGNORES the field (unknown fields are kept for the mixed fleet) and reports no `setup_ran`. Since 0.115.12 a committed replay feeds the exact-repeat breaker (a model call repeating it byte for byte is refused with "you already have that result" — one copy of the document in the transcript, not two) and a replayed `read_file` that reached EOF ends with a `(complete file: N lines …)` footer instead of a continuation hint. |
