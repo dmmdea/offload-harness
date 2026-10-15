@@ -64,6 +64,16 @@ type warmOrderSwap struct {
 	events []seatEvent
 	// warmHold is how long a warm (a model load) takes.
 	warmHold time.Duration
+	// holdPolls, when positive, also holds a load that outlives its health request (healthFails)
+	// until that many reads of /running have been answered while the seat was starting. A test
+	// that needs the watch to poll a load N times then gets its N polls however slowly the host
+	// schedules the watch, which a fixed warmHold cannot promise. holdCap bounds the wait (10 s
+	// when zero): a watch that never polls ends the load there and the test fails on what it saw
+	// instead of hanging.
+	holdPolls int32
+	holdCap   time.Duration
+	// startingPolls counts the /running reads answered while the seat was starting.
+	startingPolls atomic.Int32
 	// visibleLoad lists the seat as `starting` while the load runs, which is what
 	// llama-swap does once the swap reached it. Left false the seat is NOT listed
 	// until it lands: the worst case, where an acquirer's drain cannot see the
@@ -193,6 +203,12 @@ func (f *warmOrderSwap) handler(model string) http.Handler {
 		inner.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
+		if f.starting.Load() {
+			// Counted once the read is answered (this runs when the handler returns), whatever
+			// the answer was: a load held for polls must not land before the poll that decides
+			// the test has been served, or that poll would read a different seat.
+			defer f.startingPolls.Add(1)
+		}
 		if f.healthHits.Load() < f.runningDownUntilHit || (f.runningDown != nil && f.runningDown()) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
@@ -230,7 +246,7 @@ func (f *warmOrderSwap) handler(model string) http.Handler {
 		}
 		if f.healthFails {
 			go func() {
-				time.Sleep(f.warmHold)
+				f.holdTheLoad()
 				land()
 			}()
 			w.WriteHeader(http.StatusInternalServerError)
@@ -248,6 +264,21 @@ func (f *warmOrderSwap) handler(model string) http.Handler {
 	})
 	mux.Handle("/", inner)
 	return mux
+}
+
+// holdTheLoad is how long a load that outlives its health request goes on: warmHold, then, when
+// holdPolls is set, until the watch has had that many reads of the starting seat answered, or
+// holdCap has passed.
+func (f *warmOrderSwap) holdTheLoad() {
+	limit := f.holdCap
+	if limit == 0 {
+		limit = 10 * time.Second
+	}
+	end := time.Now().Add(limit)
+	time.Sleep(f.warmHold)
+	for f.startingPolls.Load() < f.holdPolls && time.Now().Before(end) {
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // probeSeat is the wrapped command of these tests: it reports its start, stays
