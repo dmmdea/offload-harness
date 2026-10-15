@@ -20,8 +20,8 @@ package eval
 // (vii) the primary interval the gate reads now (interval.go), called directly.
 //
 // The grid is large (minutes of CPU), so TestCalibrationStudy is off unless OFFLOAD_GATE_STUDY is
-// set; it prints the tables the docs and ADR quote, and TestEfficiencyCalibrationStudy, under the same
-// switch, prints the false-improvement rates of the efficiency reads. The small tests in this file run
+// set; it prints the tables the docs and ADR quote (the closed-form tables of gate_sparse_sim_test.go last), and
+// TestEfficiencyCalibrationStudy, under the same switch, prints the false-improvement rates of the efficiency reads. The small tests in this file run
 // always: they pin the harness's engine and its quantile functions to independent references and to the
 // gate.
 //
@@ -815,6 +815,8 @@ func TestCalibrationStudy(t *testing.T) {
 		}
 		printStudy(fmt.Sprintf("power: ADOPT rate (%%) at a moderate true effect, B = %d", B), pruns, names, false)
 	}
+	// The closed-form tables: the sparse-regime grid, the stress nulls, the power rows and the envelope.
+	runClosedFormStudy()
 }
 
 func envOr(name, def string) string {
