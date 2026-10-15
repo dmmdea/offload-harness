@@ -21,7 +21,9 @@ export function parseManifest(input) {
   });
   const models = (m.models || []).map((x, i) => {
     if (!x.path) throw new Error(`model #${i} missing path`);
-    return { path: x.path, source_url: x.source_url || "", sha256: x.sha256 ?? null };
+    // `trust` is the template run path's: "tofu" asks for trust on first use of a file that declares no hash (verifyTofuModels in
+    // manifest-satisfy.mjs). It is carried only when given, so a manifest that names none parses to what it always did.
+    return { path: x.path, source_url: x.source_url || "", sha256: x.sha256 ?? null, ...(typeof x.trust === "string" && x.trust !== "" ? { trust: x.trust } : {}) };
   });
   return {
     schema_version: m.schema_version ?? 1,

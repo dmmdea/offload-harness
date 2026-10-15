@@ -14,7 +14,8 @@ import { withGpuSlot, freeComfy as _freeComfy } from "./gpu-lock.mjs";
 import { comfyUp as _comfyUp, ensureComfy as _ensureComfy, resolveComfyDir, resolveComfyPy, comfyApi, resolveInstance, DEFAULT_COMFY_PORT, fetchSystemArgv } from "./comfy-lifecycle.mjs";
 import { freeHarnessInstance } from "./comfy-family.mjs";
 import { parseManifest as _parse, manifestHash as _hash } from "./manifest.mjs";
-import { satisfyManifest, defaultSatisfyDeps } from "./manifest-satisfy.mjs";
+import { satisfyManifest, defaultSatisfyDeps, verifyTofuModels, defaultTofuDeps } from "./manifest-satisfy.mjs";
+import { convertForRun, loadTemplate } from "./template-run.mjs";
 import { leaseBeat } from "./lease-progress.mjs";
 import { preflightGraph } from "./preflight-graph-file.mjs";
 import { allOutputsByNode } from "./comfy-output.mjs";
@@ -37,14 +38,25 @@ export function pngSize(buf) {
 
 // runGraphFlow: provision BEFORE start. Deps are injectable for tests; production wiring
 // is in main(). Order (spec §3/§4, reshaped): parse → is-comfy-already-up? → cache check →
-// satisfy (disk only) → external-needs-packs guard → start ComfyUI (only if we must) →
-// write ownership → preflight (now that packs are loaded) → POST → collect → envelope.
+// satisfy (disk only) → trust on first use → external-needs-packs guard → start ComfyUI (only if we
+// must) → write ownership → convert a template (only when one is named) → preflight (now that
+// packs are loaded) → POST → collect → envelope.
+//
+// A TEMPLATE run names a template (args.template) instead of carrying a graph: a template is a UI-format
+// workflow, and turning it into the API graph needs the running ComfyUI's /object_info, which exists only
+// once ComfyUI is up. So the convert step sits after the start and before preflight, and the graph that
+// preflight checks and POST sends is the converted one. Everything around it is this same flow.
 export async function runGraphFlow(args, deps) {
-  const { graph, manifest, outDir, resultPath, api, comfyDir, reserveVram } = args;
+  const { manifest, outDir, resultPath, api, comfyDir, reserveVram, template, overrides, seed } = args;
+  let { graph } = args;
   const {
     parseManifest = _parse, manifestHash = _hash,
     readOwner = _readOwner, writeOwner = _writeOwner,
     comfyUp, ensureComfy, killComfy, freeComfy, satisfy,
+    // convert: a template run's step from a template name to the API graph, once ComfyUI is up ({ok, graph} or {ok:false, refusal}).
+    // tofuCheck: trust on first use for the models that ask for it, on EVERY run (a cached one too): the cache says the environment
+    // was provisioned, not that a file is still the one that was trusted. ({ok, first_seen[]} or {ok:false, defer}.)
+    convert, tofuCheck,
     // freeKept: free what the graph left on an instance that was ALREADY UP when this run began, if it
     // is one this harness launched (a kept per-card instance). Without it an arbitrary graph's models
     // stayed in that instance for the next lease's family to be loaded beside (comfy-family.mjs).
@@ -82,6 +94,15 @@ export async function runGraphFlow(args, deps) {
     if (sat.warning) console.error("SATISFY WARN", sat.warning);
   }
 
+  // Trust on first use: a file that declares no hash is checked against the hash the first run recorded. Before ComfyUI starts, so a
+  // refused file costs no start, and whether or not satisfy ran.
+  let tofuFirstSeen = [];
+  if (tofuCheck) {
+    const t = await tofuCheck(m);
+    if (!t.ok) return await writeDefer(t.defer);
+    tofuFirstSeen = t.first_seen || [];
+  }
+
   // Packs changed under an EXTERNAL ComfyUI we don't own → we can't reload it: DEFER.
   if (sat.changed && wasUp) {
     return await writeDefer({
@@ -104,6 +125,16 @@ export async function runGraphFlow(args, deps) {
     // Persist the ownership marker (manifest hash + unverified models — NO pid).
     writeOwner(comfyDir, { manifestHash: wantHash, unverified: sat.unverified || [] });
 
+    // A template becomes its API graph here, against the live /object_info of this ComfyUI. A refusal (an unknown node class, a ComfyUI
+    // older than the template, an override that names nothing) is a typed defer, and the ComfyUI we started goes down with it.
+    if (template) {
+      const converted = await convert({ template, overrides, seed });
+      if (!converted.ok) {
+        return await writeDefer({ code: "TEMPLATE_CONVERT_REFUSED", ref: converted.refusal.code, detail: converted.refusal.message });
+      }
+      graph = converted.graph;
+    }
+
     // Preflight now runs against the live /object_info WITH the packs loaded, so it catches
     // missing node classes (NODE_CLASS_MISSING) and unwired required inputs.
     const pf = await preflight(graph);
@@ -121,6 +152,7 @@ export async function runGraphFlow(args, deps) {
 
     // Fetch every output file to outDir; build the envelope (with width/height per file).
     const envelope = { outputs: {}, image_path: null, unverified_models: sat.unverified || [] };
+    if (tofuFirstSeen.length > 0) envelope.tofu_first_seen = tofuFirstSeen;
     for (const [nodeId, files] of Object.entries(outputs)) {
       envelope.outputs[nodeId] = [];
       for (const f of files) {
@@ -183,7 +215,29 @@ async function main() {
     return;
   }
   const comfyDir = resolveComfyDir();
-  const graph = JSON.parse(readFileSync(flags.graph, "utf8"));
+  // A run names a graph (--graph, an API-format file) or a template (--template, a name in this node's installed templates package,
+  // converted once ComfyUI is up, with optional --overrides FILE and --seed N). Both is a contradiction.
+  const template = flags.template || null;
+  if (template && flags.graph) {
+    const out = { deferred: true, code: "RUN_ERROR", ref: "", detail: "--graph and --template are exclusive" };
+    writeFileAtomic(flags.result || "run-graph-result.json", JSON.stringify(out));
+    console.error("RUN-GRAPH DEFER", JSON.stringify(out));
+    return;
+  }
+  let overrides; let seed;
+  try {
+    if (flags.overrides) overrides = JSON.parse(readFileSync(flags.overrides, "utf8"));
+    if (flags.seed !== undefined) {
+      seed = Number(flags.seed);
+      if (!/^\d+$/.test(String(flags.seed)) || !Number.isSafeInteger(seed)) throw new Error(`--seed is a whole number from 0, not ${JSON.stringify(flags.seed)}`);
+    }
+  } catch (e) {
+    const out = { deferred: true, code: "RUN_ERROR", ref: "", detail: String(e.message || e) };
+    writeFileAtomic(flags.result || "run-graph-result.json", JSON.stringify(out));
+    console.error("RUN-GRAPH DEFER", JSON.stringify(out));
+    return;
+  }
+  const graph = template ? null : JSON.parse(readFileSync(flags.graph, "utf8"));
   const manifest = flags.manifest ? JSON.parse(readFileSync(flags.manifest, "utf8")) : { node_packs: [], models: [] };
   const reserveVram = flags["reserve-vram"];
 
@@ -196,7 +250,7 @@ async function main() {
   const satDeps = { ...defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }), beat: (line) => leaseBeat(line, { force: true }) };
 
   const run = () => runGraphFlow(
-    { graph, manifest, outDir: flags["out-dir"] || ".", resultPath: flags.result || "run-graph-result.json", api, comfyDir, reserveVram },
+    { graph, manifest, outDir: flags["out-dir"] || ".", resultPath: flags.result || "run-graph-result.json", api, comfyDir, reserveVram, template, overrides, seed },
     {
       comfyUp: _comfyUp,
       ensureComfy: deps.ensureComfy,
@@ -207,6 +261,16 @@ async function main() {
         free: () => deps.freeComfy(), systemArgv: fetchSystemArgv,
       }),
       satisfy: (mm) => satisfyManifest(mm, satDeps),
+      // Trust on first use for the models that ask for it (a template run's manifest does); a graph run's manifest asks for none.
+      tofuCheck: (mm) => verifyTofuModels(mm.models, { ...satDeps, tofu: defaultTofuDeps() }),
+      // A template becomes its API graph against THIS ComfyUI's own /object_info and version, which exist only once it is up.
+      convert: async ({ template: name, overrides: ov, seed: sd }) => {
+        const t = loadTemplate({ comfyDir, name });
+        if (!t.ok) return t;
+        const [objectInfo, stats] = await Promise.all([getJson(`${api}/object_info`), getJson(`${api}/system_stats`)]);
+        const comfyVersion = stats?.system?.comfyui_version ?? stats?.comfyui_version ?? null;
+        return convertForRun({ workflow: t.workflow, objectInfo, comfyVersion, minComfyUIVersion: t.min_comfyui_version, seed: sd, overrides: ov });
+      },
       preflight: preflightGraph,
       // Submission/polling via the shared comfy-submit.mjs layer: CLI-preferred submit
       // (idempotent lease, typed outcomes, provenance) with byte-identical raw fallback;
@@ -235,6 +299,13 @@ async function main() {
   // Only a truly unexpected throw (caught by main().catch below) exits non-zero.
   if (res.deferred) console.error("RUN-GRAPH DEFER", JSON.stringify(res));
   else console.log("WROTE", flags.result);
+}
+
+// getJson: one GET of the running ComfyUI as JSON; a non-2xx answer throws (the flow turns a throw into a typed RUN_ERROR defer).
+async function getJson(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`GET ${url} answered ${r.status}`);
+  return r.json();
 }
 
 // pollHistoryShared: the shared hardened poll loop, returning the outputs map (the shape

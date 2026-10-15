@@ -196,6 +196,11 @@ export function flattenActiveNodes(workflow, opts) {
 const MODEL_EXT = [".safetensors", ".gguf", ".pth", ".pt", ".ckpt", ".bin", ".sft", ".onnx"];
 const NOTE_TYPES = new Set(["MarkdownNote", "Note"]);
 
+// The node classes that read a file from the input (or output) directory: the loader list the graph door's file check reads
+// (internal/mediacap/graphfiles.go), so a template and the graph it becomes agree on what "reads input files" means. Input files do not
+// travel with a graph, which is why a graph that reads one stays on the machine whose directory holds it.
+export const INPUT_LOADER_TYPES = Object.freeze(["LoadImage", "LoadImageMask", "LoadImageOutput", "LoadVideo", "LoadAudio"]);
+
 // The model class a core loader node reads its file from. Only used for a file that appears as a
 // loader widget value and carries no `properties.models` annotation; an annotated file names its
 // own class.
@@ -687,6 +692,15 @@ function emptyGraph() {
   };
 }
 
+// inputFiles: the files the ACTIVE input loaders of a template name, in walk order. A loader keeps its file as the first widget value
+// ("ref.png", or "ref.png [output]" for a file in the output directory); a loader that names none is listed with a null name, so a
+// template that reads an unnamed file still counts as one that reads input.
+function inputFiles(leaves) {
+  return leaves
+    .filter((l) => l.active && INPUT_LOADER_TYPES.includes(l.node.type))
+    .map((l) => ({ node_type: l.node.type, name: textOrNull(Array.isArray(l.node.widgets_values) ? l.node.widgets_values[0] : null) }));
+}
+
 function buildRow(entry, { templatesDir, apiSet, licenseMap, io }) {
   const name = String(entry.name ?? "");
   const requires = Array.isArray(entry.requiresCustomNodes) ? entry.requiresCustomNodes : [];
@@ -698,6 +712,7 @@ function buildRow(entry, { templatesDir, apiSet, licenseMap, io }) {
   let noteSizes = {};
   let customPacks = [];
   let nodeTypes = [];
+  let inputs = [];
   if (workflow && typeof workflow === "object") {
     const walked = walkGraph(workflow);
     const leaves = walked.leaves;
@@ -714,6 +729,7 @@ function buildRow(entry, { templatesDir, apiSet, licenseMap, io }) {
       if (active && typeof cnr === "string" && cnr !== "" && cnr !== "comfy-core") packs.add(cnr);
     }
     customPacks = [...packs].sort();
+    inputs = inputFiles(leaves);
     nodeTypes = leaves.map((l) => (typeof l.node.type === "string" ? l.node.type : ""));
     const req = requiredModels(workflow);
     noteSizes = parseNoteSizes(workflow);
@@ -760,6 +776,7 @@ function buildRow(entry, { templatesDir, apiSet, licenseMap, io }) {
     kind,
     api,
     custom_packs: customPacks,
+    input_files: inputs,
     graph,
     models,
     models_inactive: inactive,
@@ -1451,7 +1468,7 @@ list filters: --kind local|api|custom_nodes  --group TITLE  --type TYPE  --tag T
 readiness: --candidate (answer for a node whose package differs from the catalog's, labelled) --detail (per-template results in --json)
 `;
 
-function resolveSource(flags, io) {
+export function resolveSource(flags, io) {
   const comfyDir = typeof flags["comfy-dir"] === "string" ? flags["comfy-dir"] : null;
   let templatesDir = typeof flags["templates-dir"] === "string" ? flags["templates-dir"] : null;
   if (!templatesDir && comfyDir) {
@@ -1474,7 +1491,7 @@ function resolveSource(flags, io) {
   return { templatesDir, basis, apiIds: new Set(scan.ids), apiScan: scan, apiDir, licenseMap };
 }
 
-function loadCatalog(flags, io) {
+export function loadCatalog(flags, io) {
   const src = resolveSource(flags, io);
   if (src.error) return src;
   const stamp = stampFor({ templatesDir: src.templatesDir, basis: src.basis, io });

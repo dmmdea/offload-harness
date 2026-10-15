@@ -217,10 +217,10 @@ test("trust on first use is checked on EVERY run: a cache hit does not skip it, 
 
 test("trust on first use: the files recorded for the first time are reported in the envelope, and only then", async () => {
   const first = baseDeps({ tofuCheck: async () => ({ ok: true, first_seen: ["models/vae/v.safetensors"], matched: [] }) });
-  const r1 = await runGraphFlow(TEMPLATE_ARGS, first);
+  const r1 = await runGraphFlow(ARGS, first);
   assert.deepEqual(r1.tofu_first_seen, ["models/vae/v.safetensors"]);
   const again = baseDeps({ tofuCheck: async () => ({ ok: true, first_seen: [], matched: ["models/vae/v.safetensors"] }) });
-  assert.equal("tofu_first_seen" in (await runGraphFlow(TEMPLATE_ARGS, again)), false);
+  assert.equal("tofu_first_seen" in (await runGraphFlow(ARGS, again)), false);
   const plain = await runGraphFlow(ARGS, baseDeps());
   assert.equal("tofu_first_seen" in plain, false, "a graph run's envelope is what it was");
 });
