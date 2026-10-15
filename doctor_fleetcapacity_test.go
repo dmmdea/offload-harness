@@ -459,3 +459,40 @@ func TestDoctorCapacityRowKeepsTheConfigTierSeatWhenTheManifestRecordsAnOlderLay
 		t.Errorf("an agent seat that is not the config tier's must name no tier:\n%s", got)
 	}
 }
+
+// When the installer's tier and the config's tier_profile both explain the agent seat (an alias several tiers share,
+// "agent-pool" here) the row names exactly one of them. The seat the box runs is the entry of the serving config that
+// agent_model resolves to, so the tier whose declared seat id is that entry wins, and the manifest can be the stale one
+// (a card was added) or the config can (a card was removed). When the entry names neither seat, the config's tier_profile
+// is the identity the box routes on and wins over the manifest.
+func TestDoctorCapacityRowNamesOneTierWhenTwoExplainTheAgentSeat(t *testing.T) {
+	older := tierSeat(t, "blackwell-16")
+	newer := tierSeat(t, "blackwell-3x16")
+	const shared = "agent-pool"
+	for _, tc := range []struct {
+		name     string
+		entry    string // the id of the serving config's entry that carries the shared alias
+		aliases  []string
+		limit    int
+		want     string // the tier named
+		wantSeat string
+		not      string // the tier the row must not name
+	}{
+		{"the entry is the config tier's seat, the manifest is older", newer.ID, newer.Aliases, newer.MaxNumSeqs, "blackwell-3x16", newer.ID, "blackwell-16"},
+		{"the entry is the manifest tier's seat, the config is older", older.ID, older.Aliases, older.MaxNumSeqs, "blackwell-16", older.ID, "blackwell-3x16"},
+		{"the entry names neither seat, so the config's tier wins", "custom-pool", []string{shared}, 32, "blackwell-3x16", newer.ID, "blackwell-16"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := capacityCfg(t, vllmEntryYAML(tc.entry, tc.aliases, tc.limit), shared, 1)
+			cfg.TierProfile = "blackwell-3x16"
+			installedAs(t, "blackwell-16")
+			got := capacityRow(cfg)
+			if want := tc.wantSeat + " is tier " + tc.want + "'s vLLM seat"; !strings.Contains(got, want) {
+				t.Errorf("the row lacks %q:\n%s", want, got)
+			}
+			if strings.Contains(got, "tier "+tc.not+"'s") {
+				t.Errorf("the row names tier %s as well:\n%s", tc.not, got)
+			}
+		})
+	}
+}
