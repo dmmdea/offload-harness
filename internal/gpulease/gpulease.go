@@ -2099,7 +2099,9 @@ func (m *Manager) Restamp(epoch uint64, fn func(*Meta)) error {
 			return err
 		}
 	}
-	if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
+	if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr == nil || !errors.Is(serr, fs.ErrNotExist) {
+		// A look that failed for any reason but the file being absent says nothing about which kind of lease this is; the card path reads
+		// the record itself and answers "cannot be read" when it cannot, where the whole-node path would answer "gone".
 		return m.restampV2(epoch, fn)
 	}
 	return m.withEpochLock(func() error { return m.restampWholeLocked(epoch, fn) })
@@ -2112,7 +2114,9 @@ var restampFaultHook func(epoch uint64) error
 // reads the leases, decides and writes the record in ONE critical section, so the stamp that turns a waiting
 // need into a declared one cannot be separated from the comparison that admitted it.
 func (m *Manager) restampLocked(epoch uint64, fn func(*Meta)) error {
-	if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
+	if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr == nil || !errors.Is(serr, fs.ErrNotExist) {
+		// A look that failed for any reason but the file being absent says nothing about which kind of lease this is; the card path reads
+		// the record itself and answers "cannot be read" when it cannot, where the whole-node path would answer "gone".
 		return m.restampV2Locked(epoch, fn)
 	}
 	return m.restampWholeLocked(epoch, fn)
