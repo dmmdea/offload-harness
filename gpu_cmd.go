@@ -644,7 +644,7 @@ func runGPUReserve(args []string) (retErr error) {
 			// of now + the hold bound + a slack on the record, re-stamped every few seconds while the drain and the unload run (the
 			// unload is covered by the same ticker). A reserve that dies stops re-stamping and the holder releases the lease within
 			// about the bound plus the slack; the wait replaces it with its real end when it begins.
-			outerB := startOuterBound(m, epoch, awaitRAM > 0 && holdMax > 0, holdMax, hostRAMDeadline(queuedAt, *wait), os.Stderr)
+			outerB := startOuterBound(m, epoch, awaitRAM > 0, holdMax, hostRAMDeadline(queuedAt, *wait), os.Stderr)
 			merr := detachMaintainReport(m, epoch, loadCfg(fs), *drain, drainDL, *unload, exclusiveAfter, &freed)
 			outer := outerB.Stop() // the last moment on the record, for the message if the wait's own stamp fails
 			if merr != nil {
@@ -1518,7 +1518,8 @@ type outerBound struct {
 	last time.Time
 }
 
-// startOuterBound stamps the outer bound at once and starts refreshing it. With on false it does nothing and returns nil (Stop of a
+// startOuterBound stamps the outer bound at once and starts refreshing it. With the hold bound off (holdMax 0) the stamp is waitEnd,
+// the --wait deadline, which the refresh keeps from falling behind now plus the slack. With on false it does nothing and returns nil (Stop of a
 // nil outerBound answers the zero time). A stamp that cannot be written is said once; the refresh goes on trying.
 func startOuterBound(m *gpulease.Manager, epoch uint64, on bool, holdMax time.Duration, waitEnd time.Time, warn io.Writer) *outerBound {
 	if !on {
@@ -1528,6 +1529,14 @@ func startOuterBound(m *gpulease.Manager, epoch uint64, on bool, holdMax time.Du
 	said := false
 	stamp := func() {
 		at := time.Now().Add(holdMax + outerSlack)
+		if holdMax <= 0 {
+			// No hold bound: --wait alone ends the wait, so it is also the backstop for a reserve that dies here. It is never behind a
+			// live reserve: the deadline can pass during a long unload, and a stamp behind now plus the slack is moved ahead of it.
+			at = waitEnd
+			if floor := time.Now().Add(outerSlack); at.Before(floor) {
+				at = floor
+			}
+		}
 		if err := m.StampHostRAMHoldPhase(epoch, at, gpulease.HoldPhaseOuter); err != nil {
 			if !said {
 				said = true

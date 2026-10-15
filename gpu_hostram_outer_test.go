@@ -82,13 +82,12 @@ func TestADetachedReserveStampsAnOuterBoundBeforeTheDrainSoAParentThatDiesThereI
 	}
 }
 
-func TestNoOuterBoundIsStampedWhenThereIsNoBoundOrNothingWasDeferred(t *testing.T) {
+func TestNoOuterBoundIsStampedWhenNothingWasDeferred(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		extra []string
 		film  string
 	}{
-		{"the hold bound is off", []string{"--ram-hold-max", "0"}, detachedFilmDraining},
 		{"nothing is deferred: no --unload-seat", nil, "--detach --for 1h --wait 20s --drain --ram 30 --reason film"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
