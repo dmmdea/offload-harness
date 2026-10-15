@@ -12,6 +12,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/backendchain"
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/servingtmpl"
 )
 
 // The active-backend section of `doctor`: for every lane and every seat, which serving engine
@@ -174,7 +175,16 @@ func writeBackendRows(w io.Writer, rep backendchain.Report, probeCompletion bool
 // and its fallback. It is the same reading the capacity row makes (vllmTierOf), so doctor, the capacity
 // row and /fleet/health agree on which tier a box is.
 func tierVLLMSeat(cfg config.Config, agentSeat string) (backendchain.TierSeat, bool) {
-	t := vllmTierOf(cfg, agentSeat)
+	// The capacity row breaks a tie between two tiers that both explain agentSeat by the serving config's
+	// own entry for it; read the same file here, so both readers settle on the same tier. An unset or
+	// unreadable file leaves the entry empty, and the tier_profile-then-manifest order decides.
+	entry := ""
+	if path := strings.TrimSpace(cfg.ServingConfigPath); path != "" {
+		if text, err := os.ReadFile(path); err == nil {
+			entry = servingtmpl.SeatEntryName(string(text), agentSeat)
+		}
+	}
+	t := vllmTierOf(cfg, agentSeat, entry)
 	if !t.serving && !t.fallback {
 		return backendchain.TierSeat{}, false
 	}
