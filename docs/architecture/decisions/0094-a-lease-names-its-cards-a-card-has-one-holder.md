@@ -165,9 +165,10 @@ Accepted clauses above already require of whatever is built, so that the next re
     `227-228`). The media routes pass their own timeout as the window (`pipeline.go:1683` and the other calls), and
     `DefaultTTL` is the fallback for an acquisition with no window (`gpulease.go:114-116`, `1835`). The conclusion of ADR 0026
     stands, since the wait is bounded by the caller's budget and not by the holder's window.
-  - `term.go:16-18`, and the same sentence in the system guide, say the session registry's writer is "not wired into the
-    session hooks". The MCP server writes the registry when it starts (`internal/mcpserver/mcpserver.go:393-423`,
-    `registerSession`). What stays unverified is whether a given Claude Code build gives its MCP server the session id.
+  - `term.go:16-18`, ADR 0070 (`0070-leases-have-terms-owners-renew-orphans-are-surfaced.md:128-129`) and the system guide
+    say the session registry's writer is "not wired into the session hooks". The MCP server writes the registry when it
+    starts (`internal/mcpserver/mcpserver.go:393-423`, `registerSession`). What stays unverified is whether a given Claude
+    Code build gives its MCP server the session id.
   - `internal/proctree/stop.go:3` says the stop primitives are used by the yield request. The request uses none of them
     (`yield.go:3-12`); they have no caller.
   - ADR 0055 says the media lease's reclaim rule has no job-liveness input (`0055-walls-are-ceilings-liveness-is-progress.md:449-450`).

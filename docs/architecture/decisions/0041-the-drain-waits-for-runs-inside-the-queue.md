@@ -161,6 +161,10 @@ fence: since the in-run fence check (ADR 0032, amended 2026-09-17), a local leg 
 naming the holder and its declared expiry, and waits for nothing. Only a fence taken after that check meets the cordon wait this ADR
 bounds. An inherited lease is not a fence: the holder's own review stays on the cards its lease cleared. The decision above is unchanged.
 
+## Amendment 2026-10-14: the card rule is stated once
+
+The drain and the unload on the leased cards (the extension of 2026-10-02 and the amendment of 2026-10-11) are collected with the other consumers' in [ADR 0094](0094-a-lease-names-its-cards-a-card-has-one-holder.md), clause 7. The decision above is unchanged.
+
 ## Evidence
 
 llama-swap log 2026-09-14 (two drain windows of 61 polls at 7 ms each, the 3m26.9s
