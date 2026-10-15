@@ -382,6 +382,45 @@ func TestPostReadyHoldReadsTheEngineBeforeStalling(t *testing.T) {
 	}
 }
 
+// The post-ready bound can run out while the cold-load probe's own read of the
+// seat is still in flight (a /running read takes as long as the host lets it).
+// The expiry must then read the engine like the stall timer does, never file
+// the stall from the probe tick: a request whose engine works for its siblings
+// is waiting its turn. Deterministic form of the race the test above hit once
+// in a few hundred runs on a loaded runner: the first read made in the
+// post-ready part outlasts the bound, so the tick always lands after it.
+func TestPostReadyBoundExpiringDuringASeatReadReadsTheEngine(t *testing.T) {
+	eng := &scriptedEngine{}
+	eng.advance.Store(true)
+	p := busyPolicy()
+	p.ColdLoad, p.ColdLoadBasis, p.ColdLoadPoll, p.PostReady = 2*time.Second, "test ceiling", 10*time.Millisecond, 100*time.Millisecond
+	ctx, m := NewMonitor(context.Background(), p, 10*time.Second)
+	defer m.Stop()
+	var slowed atomic.Bool
+	m.WithEngineProbe(eng.probe)
+	m.WithSeatProbe(func(context.Context) (bool, string, error) {
+		if m.CurrentPhase() == PhaseColdLoad && slowed.CompareAndSwap(false, true) {
+			time.Sleep(250 * time.Millisecond) // the read straddles the 100 ms bound
+		}
+		return false, "ready", nil
+	}, nil)
+	m.MarkSeatLoaded()
+	m.Phase(PhasePrefill, 10)
+	time.Sleep(700 * time.Millisecond)
+	if !slowed.Load() {
+		t.Fatal("the test never made the post-ready seat read slow; it proves nothing")
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("a post-ready bound that expired during a seat read stalled a request whose engine works for its siblings: %v", context.Cause(ctx))
+	}
+	if m.CurrentPhase() != PhaseQueued {
+		t.Fatalf("phase = %s, want the busy hold after the post-ready bound", m.CurrentPhase())
+	}
+	if eng.reads.Load() == 0 {
+		t.Fatal("the engine was never read")
+	}
+}
+
 // A tool call runs off the seat: its own cap governs even while the engine
 // works for others.
 func TestBusyHoldDoesNotExtendAToolCall(t *testing.T) {
