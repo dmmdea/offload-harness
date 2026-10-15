@@ -56,13 +56,17 @@ func (f *raFake) count(arm string) int {
 	return n
 }
 
+// raPin is the pin the fake seat stamps on every run it serves: the harness probes the seat after the
+// loop and puts the hash on the wire result (wire.SeatConfigSHA256), so a served run carries one.
+const raPin = "seat-pin-a"
+
 // raOutcome scripts a finished run: DONE when it passes (the contracts check for it), with steps.
 func raOutcome(pass bool, steps int) core.AgentWireResult {
 	out := "no answer"
 	if pass {
 		out = "DONE"
 	}
-	return core.AgentWireResult{Output: out, Steps: steps, StopReason: "final"}
+	return core.AgentWireResult{Output: out, Steps: steps, StopReason: "final", SeatConfigSHA256: raPin}
 }
 
 // raEnv is one audit's files: a store holding the proposed recipe, a frozen baseline over the 16
