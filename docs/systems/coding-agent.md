@@ -655,10 +655,14 @@ and without either flag the output is byte for byte what it was. A rung can only
 whose older turns hold the shape it acts on (a search listing of more than 30 hits, or the long
 repetitive output of a build or test command that names its tool call), and the contrast between the
 incumbent and a candidate is two runs paired by entry id. `kvbench` takes `--arms on` to skip the raw
-arm, which a candidate comparison does not need, and `--nonce N` to give two runs the same salt. Every
-sample carries `sent_sha256`, the sha256 of the salted transcript as sent (its canonical encoding, not the HTTP body), so two runs that share a
-nonce and a ladder prove a pair a no-op when the hashes of a step are equal, and a rung that rewrote
-the transcript when they differ.
+arm, which a candidate comparison does not need, and `--nonce N` to set the salt of the body requests
+(default: a fresh one per run). Every sample carries `sent_sha256`, the sha256 of the transcript the
+ladder produced, taken before the salt (its canonical encoding, not the HTTP body), so it does not depend on the nonce: two runs with
+the same corpus prove a pair a no-op when the hashes of a step are equal, and a rung that rewrote the
+transcript when they differ. Leave the nonce at its default. Reusing one on a warm seat lets the
+second run's unchanged prompts hit the first run's multi-prompt cache, which inflates its reuse and
+shrinks its prefill; the calibration controls always draw their own nonce (`control_nonce` in the
+report), so a reused body nonce cannot fail the second run's negative control.
 
 `compaction-eval harvest --traces DIR --out corpus.jsonl`
 builds a real corpus from the standalone agent's trace files with REDACTION-AT-HARVEST:

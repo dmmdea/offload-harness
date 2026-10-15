@@ -60,7 +60,7 @@ func runCompactionEval(args []string) error {
 	kvEndpoint := fs.String("endpoint", "", "kvbench: serving endpoint (default: the configured endpoint)")
 	kvModel := fs.String("model", "", "kvbench: model id to measure (default: the configured workhorse)")
 	kvArms := fs.String("arms", compeval.ArmOff+","+compeval.ArmOn, "kvbench: comma-separated arms to run, 'off' (raw transcript) and 'on' (the ladder); 'on' skips the raw arm")
-	kvNonce := fs.String("nonce", "", "kvbench: run nonce salted into every request (default: a fresh one per run); give two runs the same value so a pair whose sent_sha256 values match is provably a no-op")
+	kvNonce := fs.String("nonce", "", "kvbench: nonce salted into every body request (default: a fresh one per run). sent_sha256 is taken before the salt, so a pair of runs is provably a no-op when its hashes match whatever the nonces; reuse a value only on a cold seat, because on a warm one the second run is served from the first run's cache. The calibration controls always draw their own nonce")
 	kvRounds := fs.Int("rounds", 1, "kvbench: repeat the whole controls+arms block N times")
 	kvStride := fs.Int("step-stride", 1, "kvbench: measure every Nth transcript step (the final step is always measured)")
 	kvTimeoutSec := fs.Int("timeout", 300, "kvbench: per-request timeout in seconds")

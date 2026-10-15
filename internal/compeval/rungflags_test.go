@@ -385,37 +385,32 @@ func TestSentSHA256ProvesANoOpPairAndCatchesAChangedOne(t *testing.T) {
 	}
 }
 
-func TestSentSHA256CoversTheSaltedBytes(t *testing.T) {
-	s, _, _ := rungEntries()
-	a, _ := capture(t, []Entry{s}, BenchOpts{Rounds: 1, RunNonce: "ONE", Ladder: incumbent(), Arms: []string{"on"}})
-	b, _ := capture(t, []Entry{s}, BenchOpts{Rounds: 1, RunNonce: "TWO", Ladder: incumbent(), Arms: []string{"on"}})
-	ka, kb := samplesByStep(a), samplesByStep(b)
-	if len(ka) == 0 {
-		t.Fatal("no samples")
-	}
-	for k := range ka {
-		if ka[k].SentSHA256 == kb[k].SentSHA256 {
-			t.Fatalf("%s: runs with different nonces report the same sent_sha256, so it is not the hash of the bytes sent", k)
-		}
-	}
-}
-
-func TestOneNonceCoversEveryRequestOfARun(t *testing.T) {
+func TestOneNonceCoversEveryBodyRequestOfARun(t *testing.T) {
 	s, l, _ := rungEntries()
 	rep, sent := capture(t, []Entry{s, l}, BenchOpts{Rounds: 2, Ladder: incumbent()})
-	if rep.RunNonce == "" {
-		t.Fatal("the report carries no nonce")
+	if rep.RunNonce == "" || rep.ControlNonce == "" {
+		t.Fatalf("the report carries no nonce: run %q, control %q", rep.RunNonce, rep.ControlNonce)
 	}
-	re := regexp.MustCompile(`^\[kvbench ([^/\]]+)/`)
-	seen := map[string]bool{}
+	if rep.RunNonce == rep.ControlNonce {
+		t.Fatalf("the controls reuse the body nonce %q", rep.RunNonce)
+	}
+	re := regexp.MustCompile(`^\[kvbench ([^/\]]+)/([a-z]+)\]`)
+	body, ctl := map[string]bool{}, map[string]bool{}
 	for i, msgs := range sent {
 		m := re.FindStringSubmatch(msgs[0].Content)
 		if m == nil {
 			t.Fatalf("request %d carries no kvbench marker: %.60q", i, msgs[0].Content)
 		}
-		seen[m[1]] = true
+		if m[2] == "ctl" {
+			ctl[m[1]] = true
+		} else {
+			body[m[1]] = true
+		}
 	}
-	if len(seen) != 1 || !seen[rep.RunNonce] {
-		t.Fatalf("requests carry nonces %v, the report says %q", seen, rep.RunNonce)
+	if len(body) != 1 || !body[rep.RunNonce] {
+		t.Fatalf("body requests carry nonces %v, the report says %q", body, rep.RunNonce)
+	}
+	if len(ctl) != 1 || !ctl[rep.ControlNonce] {
+		t.Fatalf("control requests carry nonces %v, the report says %q", ctl, rep.ControlNonce)
 	}
 }
