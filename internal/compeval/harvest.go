@@ -345,11 +345,12 @@ func HarvestTraces(dir string, opts HarvestOpts) ([]Entry, HarvestStats, error) 
 }
 
 // countCompactionArtifacts counts tool turns whose body is a PRODUCT of the
-// production ladder (elision marker or skeleton) rather than raw content.
+// production ladder (elision marker, skeleton, dedupe reference) or by the
+// optional log-collapse rung, rather than raw content.
 func countCompactionArtifacts(msgs []agent.Msg) int {
 	n := 0
 	for _, m := range msgs {
-		if m.Role == "tool" && agent.IsCompactionArtifact(m.Content) {
+		if m.Role == "tool" && (agent.IsCompactionArtifact(m.Content) || agent.IsLogCollapseArtifact(m.Content)) {
 			n++
 		}
 	}

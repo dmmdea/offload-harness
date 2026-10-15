@@ -340,6 +340,24 @@ func TestHarvestRefusesPreCompactedTranscripts(t *testing.T) {
 	}
 }
 
+// The optional log-collapse rung's output is a ladder product too: a trace
+// holding it is refused, however the rung came to run.
+func TestHarvestRefusesLogCollapsedTranscripts(t *testing.T) {
+	dir := t.TempDir()
+	writeTraceFile(t, dir, "folded.json", sampleTrace("f", "[log-collapse: original 4096 chars, 120 lines]\nboot: ready\n[... 99 similar lines folded ...]"))
+	writeTraceFile(t, dir, "clean.json", sampleTrace("c", "raw payload"))
+	entries, stats, err := HarvestTraces(dir, HarvestOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].ID != "hv-clean" {
+		t.Fatalf("expected only the clean trace, got %+v", entries)
+	}
+	if stats.PreCompacted != 1 {
+		t.Fatalf("pre_compacted count %d, want 1", stats.PreCompacted)
+	}
+}
+
 // A malformed trace (tool turn without a tool_call_id) becomes a per-file skip
 // note — never a whole-harvest abort at write time.
 func TestHarvestSkipsStructurallyInvalidTraces(t *testing.T) {

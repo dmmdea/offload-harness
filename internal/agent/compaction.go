@@ -61,9 +61,19 @@ func estimateTokens(msgs []Msg) int {
 //     2a. (opts.GCF only, LOSSLESS) re-encode OLDER tool bodies that are
 //     eligible JSON arrays into GCF columnar form (internal/gcf) — states the
 //     repeated keys once, loses nothing; always tried before any lossy rung.
-//     2a'. (opts.SearchResults only, default off) THIN older search listings to the
+//     2a-i. (opts.LogCollapse only, lossy but gentler than 2b) fold each run of
+//     near-identical lines in the output of an OLDER build or test command
+//     into its first line, a count and its last line (see rung_logs.go),
+//     keeping every signal, diagnostic and summary line, oldest-first and
+//     stopping at the first fit. A search listing, a file read and a linter's
+//     output are not touched (the producer gate reads the call).
+//     2a-ii. (opts.SearchResults only, default off) THIN older search listings to the
 //     lines that matter for the objective (BM25, a per-file cap, an error boost, a
 //     counted footer; see rung_search.go), before 2b so the skeleton never sees one.
+//     The two rungs never claim the same body (each reads the call that produced it:
+//     a build or test invocation is 2a-i, a search is 2a-ii); 2a-i runs first because it
+//     keeps every distinct line and 2a-ii drops most of a listing, so with both on the
+//     gentler edit gets the first chance to fit the budget.
 //     2b. (opts.Skeleton only) SKELETONIZE the bodies of OLDER tool-role messages
 //     oldest-first until under budget: head/tail windows + buried signal lines
 //     kept, the rest elided to counted run markers (see skeleton.go). Strictly
@@ -101,8 +111,14 @@ func estimateTokens(msgs []Msg) int {
 type compactOpts struct {
 	GCF      bool // lossless: re-encode eligible JSON-array tool bodies (internal/gcf)
 	Skeleton bool // lossy-structural: reduce older tool bodies to signal skeletons
+	// LogCollapse (default off) folds runs of near-identical lines in OLDER build
+	// and test output into the first line, a count and the last line, keeping
+	// every error/warning/diagnostic/summary line (rung_logs.go). It runs after
+	// the lossless GCF rung and before the search rung and skeleton.
+	LogCollapse bool
 	// SearchResults (default OFF) thins older search listings (rung_search.go): BM25
-	// against the objective, a per-file cap, an error boost, a counted footer.
+	// against the objective, a per-file cap, an error boost, a counted footer. It
+	// runs after the log rung and before skeleton.
 	SearchResults bool
 	// Pinned marks tool_call_ids whose results the model DEMONSTRABLY re-requested
 	// (the circuit breaker refused an exact-repeat call for them) — the H8 ramp:
@@ -225,7 +241,7 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 		if j, ok := latest[out[i].Content]; ok && j > i {
 			// Guard against GROWTH: a long call id can make the marker larger
 			// than a smallish body — collapsing must always shrink.
-			if m := dedupeMarker(out[j].ToolCallID, len(out[i].Content)); len(m) < len(out[i].Content) {
+			if m := dedupeMarker(out[j].ToolCallID, logsMarkerSize(out[i].Content, opts.LogCollapse)); len(m) < len(out[i].Content) {
 				out[i].Content = m
 			}
 		}
@@ -251,7 +267,20 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 		}
 	}
 
-	// Step 2a' (flag-gated, default OFF): thin older search listings by relevance
+	// Step 2a-i (flag-gated, lossy but gentler than skeleton): fold runs of
+	// near-identical lines in OLDER build and test output, oldest-first, stopping
+	// at the first fit (rung_logs.go; the producer gate reads the call). Same [protectedEnd, recentStart) window and pin
+	// check as every rung here, so the preamble, the recent turns and pairing stay.
+	// Before the search rung: it keeps every distinct line, the search rung drops most
+	// of a listing, so the gentler edit gets the first chance to fit the budget.
+	if opts.LogCollapse {
+		logsRung(out, protectedEnd, recentStart, budget, pinned)
+		if estimateTokens(out) <= budget {
+			return out, fitUnknown
+		}
+	}
+
+	// Step 2a-ii (flag-gated, default OFF): thin older search listings by relevance
 	// to the objective (rung_search.go). Before the generic skeleton on purpose: a
 	// skeletonized listing is no longer one, and this rung would never see it.
 	if opts.SearchResults {
@@ -267,7 +296,7 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 	if opts.Skeleton {
 		for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
 			if out[i].Role == "tool" && !pinned[out[i].ToolCallID] {
-				if sk, ok := skeletonize(out[i].Content); ok {
+				if sk, ok := skeletonizeAs(out[i].Content, logsMarkerSize(out[i].Content, opts.LogCollapse)); ok {
 					out[i].Content = sk
 				}
 			}
@@ -280,7 +309,9 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 	// Step 3: elide OLDER tool-result bodies to markers, oldest-first. A
 	// skeleton falls through to a bare marker here under harder pressure; its
 	// marker reports the ORIGINAL body size (parsed from the skeleton's own
-	// prefix), not the skeleton's — the marker discloses what was lost.
+	// prefix), not the skeleton's — the marker discloses what was lost. With the
+	// log rung on, that prefix is believed only when the skeleton rung could have
+	// written it (logsSkeletonSize, reached through logsMarkerSize).
 	// FORCE_PRESERVE guard: a body whose remaining content still carries signal
 	// lines (errors/failures/warnings — the class every OmniRoute intensity
 	// preserves) keeps up to a bounded residue of those lines under the marker
@@ -288,9 +319,9 @@ func compactWithVerdict(ctx context.Context, msgs []Msg, budget int, keepRecent 
 	// already tiny, and eliding one would sever the reference for no gain.
 	for i := protectedEnd; i < recentStart && estimateTokens(out) > budget; i++ {
 		if out[i].Role == "tool" && !isElided(out[i].Content) && !isDeduped(out[i].Content) && !pinned[out[i].ToolCallID] {
-			n := len(out[i].Content)
-			if orig, ok := skeletonOriginalSize(out[i].Content); ok {
-				n = orig
+			n := logsMarkerSize(out[i].Content, opts.LogCollapse)
+			if orig, ok := skeletonOriginalSize(out[i].Content); ok && !opts.LogCollapse {
+				n = orig // rung on: logsMarkerSize already weighed the skeleton's header
 			}
 			out[i].Content = elideWithSignal(out[i].Content, n)
 		}
@@ -488,6 +519,14 @@ func isElided(content string) bool {
 // server will reject again). Deterministic; returns msgs unchanged when
 // already within budget.
 func emergencyShrink(msgs []Msg, budget, protectedPrefix int) []Msg {
+	return emergencyShrinkWith(msgs, budget, protectedPrefix, compactOpts{})
+}
+
+// emergencyShrinkWith is emergencyShrink for a loop whose ladder has optional
+// rungs on. Only LogCollapse matters here: it makes the markers name the size a
+// folded body had before the fold (logsMarkerSize); everything else is
+// emergencyShrink as documented above.
+func emergencyShrinkWith(msgs []Msg, budget, protectedPrefix int, opts compactOpts) []Msg {
 	if estimateTokens(msgs) <= budget {
 		return msgs
 	}
@@ -512,7 +551,7 @@ func emergencyShrink(msgs []Msg, budget, protectedPrefix int) []Msg {
 		if out[i].Role != "tool" || i == lastTool || isElided(out[i].Content) {
 			continue
 		}
-		if sk, ok := skeletonize(out[i].Content); ok && len(sk) < len(out[i].Content) {
+		if sk, ok := skeletonizeAs(out[i].Content, logsMarkerSize(out[i].Content, opts.LogCollapse)); ok && len(sk) < len(out[i].Content) {
 			out[i].Content = sk
 		}
 	}
@@ -534,10 +573,10 @@ func emergencyShrink(msgs []Msg, budget, protectedPrefix int) []Msg {
 			}
 			continue
 		}
-		if orig, ok := skeletonOriginalSize(out[i].Content); ok {
+		if orig, ok := skeletonOriginalSize(out[i].Content); ok && !opts.LogCollapse {
 			out[i].Content = elisionMarker(orig)
 		} else {
-			out[i].Content = elisionMarker(len(out[i].Content))
+			out[i].Content = elisionMarker(logsMarkerSize(out[i].Content, opts.LogCollapse))
 		}
 	}
 	// Pass 3: the newest tool body is what still keeps the estimate over
@@ -550,6 +589,7 @@ func emergencyShrink(msgs []Msg, budget, protectedPrefix int) []Msg {
 	// contract.
 	if lastTool >= 0 && estimateTokens(out) > budget {
 		size := len(out[lastTool].Content)
+		reported := logsMarkerSize(out[lastTool].Content, opts.LogCollapse)
 		rest := estimateTokens(out) - size/bytesPerToken
 		roomChars := (budget - rest) * bytesPerToken
 		if roomChars < 256 {
@@ -557,7 +597,7 @@ func emergencyShrink(msgs []Msg, budget, protectedPrefix int) []Msg {
 		}
 		out[lastTool].Content, _ = contextbudget.Trim(out[lastTool].Content, roomChars)
 		if estimateTokens(out) > budget {
-			out[lastTool].Content = elisionMarker(size)
+			out[lastTool].Content = elisionMarker(reported)
 		}
 	}
 	return out

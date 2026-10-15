@@ -1,0 +1,51 @@
+{
+  "id": "goal-b",
+  "goal": "synthetic goal b",
+  "stop_reason": "done",
+  "steps": 3,
+  "output": "synthetic output",
+  "pager": {
+    "evictions": 0,
+    "evicted_bytes": 0,
+    "distinct_evicted": 0,
+    "refetched_distinct": 0,
+    "refetch_rate": null,
+    "basis": "insufficient_data",
+    "verdict": "nothing evicted this run (synthetic)",
+    "compaction_passes": 0
+  },
+  "prefill": {
+    "observed_steps": 3,
+    "cache_tokens": 100,
+    "prefill_tokens": 300,
+    "prefill_ms": 0,
+    "generated_tokens": 40,
+    "kv_reuse_pct": 25,
+    "basis": "measured",
+    "avg_prefill_tokens_per_step": 100,
+    "avg_prefill_ms_per_step": 0
+  },
+  "transcript": [
+    {
+      "Role": "system",
+      "Content": "synthetic system prompt",
+      "ToolCalls": null,
+      "ToolCallID": "",
+      "IsError": false
+    },
+    {
+      "Role": "user",
+      "Content": "synthetic objective b",
+      "ToolCalls": null,
+      "ToolCallID": "",
+      "IsError": false
+    },
+    {
+      "Role": "assistant",
+      "Content": "synthetic final answer",
+      "ToolCalls": null,
+      "ToolCallID": "",
+      "IsError": false
+    }
+  ]
+}

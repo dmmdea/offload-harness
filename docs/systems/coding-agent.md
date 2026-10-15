@@ -488,6 +488,85 @@ preamble is never touched and no turn is dropped. The retry's shrink target is r
 just-rejected transcript's own estimate, not only the budget, so a dense-content estimate error
 can never make the retry re-send the bytes the server just refused.
 
+**Optional log-collapse rung (`compactOpts.LogCollapse`, default off).** An extra rung after GCF
+and before the search-results rung (next paragraph) and skeleton, in `internal/agent/rung_logs.go`: it folds each run of three or more consecutive
+near-identical lines in an OLDER result of a build or test command into its first line, a count of
+the lines between (`[... N similar lines folded ...]`) and its last line. The gate reads the call
+that produced the result, not only the tool's name. A result is folded only when its call is a
+build or test invocation: `go test`, `go build` or `go vet`, `cargo build`, `cargo test` or
+`cargo check`, `npm test` (or `npm t`) or `npm run build`/`test`, `pytest`, `python -m pytest` or
+`python -m unittest` (also as `python3`), and (through
+`run_shell` only, since the `run` tool's allowlist has no `make`) `make`. Through `run_shell` the
+first word is found after any leading `NAME=value` words, and the command must be one pipeline: an
+unquoted `;`, `&&`, `||`, a lone `&`, a newline or a carriage return anywhere in it, such as
+`cd sub && go test ./...`, disqualifies it, and a pipe qualifies only into a grep-family program
+(`grep`, `egrep`, `fgrep`, `rg`, `ag`, `ack`) or a pass-through filter (`head`, `tail`, `sort`,
+`uniq`, `wc`, `cut`, `sed`, `awk`, `tee`, `cat`); `xargs` or any other program after a pipe
+disqualifies. A later pipe stage is judged by its program name alone, so a filter that is handed a
+file operand and reads that file instead of the pipe (`go test ./... | cat data.csv`,
+`| head -n 5 data.csv`) still qualifies, and its output would be folded as if it were the build's;
+operands cannot simply be refused, because `| tee out.log` is a pass-through with one. Everything
+else is never touched: a search listing (`grep -rn`, `rg -n`, `git grep`; those are the search
+rung's, below, which does not touch build or test output either), a `cat` or `sed` of a data file, a
+linter's diagnostics, a file read, a fetch, a result whose
+call is not in the transcript, a result whose tool-call id is declared by more than one call, and
+a call and result that both carry an empty id. An unknown or ambiguous producer fails closed. Two
+lines are near-identical when they match after every run of digits, `0x` hex literal, UUID, hex run
+of eight or more characters and terminal control sequence is masked and trailing whitespace is
+trimmed; indentation still counts and the letters around a digit run still count, so `worker7` and
+`worker12` match while `x1` and `y2`, or `md5` and `sha256`, do not. Because digit runs are masked,
+lines that differ only in a number (a status code, a port) fold into one, and the footer says so.
+Every blank line, every line that looks like an error, warning, failure or test summary, every line
+shaped like a `path:line` or `path:line:col` diagnostic (and rustc's `--> path:line:col`) and the
+first 8 and last 4 lines stay verbatim and never join a run, so a log made only of one repeated
+warning does not shrink and two different compiler errors never fold into one. "Looks like" means the
+skeleton rung's `signalLine` plus stack-frame, traceback and test-runner summary shapes, the
+CamelCase exception names that `signalLine`'s word boundary cannot see (`TypeError`, `KeyError`,
+`AssertionError`, `NullPointerException`), a killed process, a segfault, a non-zero `exit status` and
+npm's `ERR!` prefix; each test is made on the line as written and with its terminal colour removed,
+so a coloured `ERROR` is kept and a line of nothing but colour codes counts as blank. The body opens
+with `[log-collapse: original N chars, M lines]` (the idempotence marker) and ends with a footer that
+says how many runs and lines were folded. Like every rung it works only on the ladder's own window
+(never the protected preamble or the recent turns), skips pinned results (including the body a
+pinned dedupe reference points at), rewrites `Content` only (tool-call pairing is untouched), goes
+oldest-first and stops at the first fit. It is deterministic, idempotent, never makes a body longer
+(the original string comes back unless the result is strictly shorter) and fails closed to the
+original on a body that is too small or too large, is not valid UTF-8, holds a NUL byte, parses as
+a JSON document, already carries another rung's marker or a GCF block, or makes the rewrite
+panic. Because it stops at the first fit, enabling it keeps more of an older log than the rungs
+after it would at the same budget. With the search rung on as well, this rung runs first and the
+search rung only if the transcript is still over budget; no body is eligible for both, because each
+reads the call that produced the body (a build or test invocation here, a search there).
+
+A rung that is off changes nothing, down to the byte. `IsCompactionArtifact` keeps its three
+clauses (elision marker, skeleton, dedupe reference), because the always-on dedupe rung and the live
+loop's re-execute decision both ask it; a separate `IsLogCollapseArtifact` recognises the rung's
+header, and the trace harvest asks both so it still refuses a transcript the rung has already
+compacted. A tool body that merely quotes the header, such as a saved collapsed log read back with
+`read_file`, is ordinary content to the default ladder, and a pinned set of digests over such
+transcripts holds that. With the rung on, the skeleton prefix, the elide marker (and the reactive
+last-resort marker) and the dedupe reference of a folded body name the size the body had before
+the fold, so a marker never says that less was lost than was. The header is believed only when the
+rung could have written it: the exact spelling, a size strictly above the body's own length and
+within the sizes the rung folds, and a line count a fold needs. A result that merely quotes a header
+with a negative, zero, oversized or too-small number is named by its own length instead, and so is a
+result that quotes a skeleton header the skeleton rung could not have written. A body the search
+rung thinned opens with the same skeleton header (the search rung writes it through the same
+`skeletonHeader`), so with both rungs on its later elision marker still names the size the listing
+had. A quoted
+header whose numbers are merely plausible cannot be told from the real one in the text, so it is
+still believed; carrying the size outside the body would close that, and no caller can yet.
+
+No production surface enables the rung yet: the field is not wired to a flag, a `Loop` setter, the
+config or the replay seam (`ReplayOpts` does not expose it, so `CompactReplay` cannot measure it).
+Wiring it into the live loop must also teach `resultDestroyed` the new predicate. Whether to adopt
+it is the measurement gate's call, not this page's, and that call needs a corpus whose tool calls
+carry tool names: the shipped mini corpus records call ids only, so the producer gate leaves it
+untouched, and the savings figures printed by the rung's tests come from fixtures whose calls are
+renamed to `run`. The idea of compressing build and test output while keeping the failures and the
+boundary lines is the documented behavior of the Headroom project (Apache-2.0); the mechanism here
+is this repository's own, written without reading that project's source (see `NOTICE`).
+
 **Search-results rung (optional, default off: `compactOpts.SearchResults`).** One more lossy rung,
 for older tool bodies that are search listings: the grouped `search_files` output (`path:` then
 `  L<n>: text`) and bare `path:line:text` lines such as `grep -rn` or ripgrep print, alone or inside the
@@ -507,9 +586,9 @@ only and is not a shell parser: a filter that runs a command itself (`tee >(...)
 ANSI-C `$'...'` quoting is not seen. A linter such as flake8, ruff, `shellcheck -f gcc` or rubocop prints the
 same `path:line:col:text` lines, and every one of its diagnostics is something the agent must fix, so
 its output, a body with no matching call and an id claimed by two different calls are left alone.
-Everything else (the `web_search` list, `mode:"files"` output, test output, an error result) is left
-alone too. It runs after
-dedupe and GCF and before the generic skeleton, over the same older span as that rung (never the
+Everything else (the `web_search` list, `mode:"files"` output, an error result, and the output of a build or
+test command, which is the log-collapse rung's above, never this one's) is left alone too. It runs after
+dedupe, GCF and the log-collapse rung and before the generic skeleton, over the same older span as that rung (never the
 protected preamble or the kept-recent tail), skips pinned bodies, and rewrites only a tool message's
 body. Each line is scored with BM25 against the objective (the last user message of the protected
 preamble, the one task text that is the same on every step; the line's own path counts as part of the
@@ -579,6 +658,84 @@ re-runs on the result — residual PII refuses the harvest — and the corpus is
 (temp + rename), round-trip-proven through the strict loader before it exists at its
 destination. Methodology harvested from the OmniRoute compression service's
 eval approach (MIT); metrics and signals are this harness's own.
+
+`trace-corpus` is the read-only readout over RECORDED agent runs, shaped like `compaction-eval`
+(harvest, freeze, check) and kept apart from it. `trace-corpus harvest --traces DIR --delegation-log DIR --out corpus.jsonl`
+reduces every run to numbers and enums (no goal, output, transcript or tool text), redacts the few strings that remain with
+the same redactor and vet table `compaction-eval harvest` uses, and stamps the corpus with its sha256; the corpus is
+machine-local and never committed. `readout`, `freeze` and `check` are deterministic and carry no timestamps, and `check`
+demands the frozen report back byte for byte. With no source flag, harvest reads the install root's `agent-traces` and
+`delegation-log` directories. It reads those two records and never the ledger.
+
+- **What counts as a run.** A delegation row is a run only if an agent executed: a deferral (capacity, infrastructure,
+  budget, config, contract) is logged with zero steps and nothing else, and harvest skips it under the named reason
+  `delegation row never ran (zero steps, nothing recorded)` instead of counting it. Any record at all (a step, a step
+  trace, prefill or seat-token accounting, or a pager object) keeps the row a run, so the unrecorded counts are counts of
+  runs. Before the pager recording existed, a deferral raised before the loop ran and a run the loop returned from in zero
+  steps with nothing else wrote the same row, so "never reached the loop" is an inference for the older rows and the
+  skipped count is an upper bound on pre-loop deferrals; a row from a build with the recording carries a pager object when
+  the loop ran. A row without a result, a capacity refusal and the harness's own test seat are skipped as before, and every
+  skip is counted in the harvest stats. A file in the traces directory is a run only if it is shaped like an agent trace
+  (a transcript, and either steps or a stop reason); any other JSON object there is skipped under the named reason
+  `trace record has no transcript, or neither steps nor a stop reason` and counted.
+- **Why a zero-step row with a trace is a run.** A deferred row (budget or infrastructure) can carry zero steps and a
+  step trace made only of setup actions. The setup actions execute inside the agent loop, before its first model turn and
+  without spending a step, so such a row did reach the loop, and the trace is the loop's own effect ledger. A budget or
+  infrastructure deferral takes the loop's pager report, so once the recording ships the row carries a pager object and is
+  not unrecorded. The compaction ladder also runs before the first model call and again when that call is rejected for
+  context size, so a run can end at zero steps with passes counted.
+- **Which rows carry a pager object.** From a build that carries the recording: a run the loop returned from carries one,
+  zeros included, whether it finished or was deferred after the loop returned (a budget, infrastructure, abstention or
+  write-class deferral, for example); the object is attached right after the loop returns, ahead of the write door, so a
+  write-class deferral (defer class `write`: the write door did not close cleanly) keeps it; a deferral raised before the
+  loop ran has none and no other record either, and is skipped as never ran. Both ends must carry the field: the node that
+  served the run emits the object, and the delegator that writes the log row decodes the node's answer into its own wire
+  result and encodes it again, so a delegator build without the field drops it. Rows logged before the recording, rows from
+  a node that predates it and rows written by a delegator that predates it have none; the row's `delegator_version` names
+  the delegator build and the result's `harness_version` the node build. The node stamps `harness_version` once the loop
+  has returned without an error and the write door has closed cleanly, so it is absent on a deferral raised before the
+  loop, on one the loop's own error raised (a refused lease, a seat that went down, a stall, a wall or ceiling timeout, a
+  cancellation, a parser mismatch, a contended seat), on one for a lost workspace root and on a write-class deferral,
+  which keeps its pager object but not the stamp; a run that ended on its step budget, a cut tool call, an empty answer or
+  an abstention carries both. The pager and compaction unrecorded counts therefore reach zero for rows written by a
+  recording delegator from a recording node, and a mixed log reads zero only once the older rows are windowed out by day
+  (`--since`) and every node and delegator that wrote the rest runs the recording.
+- **What it reports.** The trace-bearing run count (an agent trace with a transcript, or a delegation row with a step
+  trace); the pager re-fetch rate pooled over the runs that evicted something (distinct payloads re-fetched over distinct
+  payloads evicted) against the 10 % gate of R2-13 (`agent.PagerGate`); the compaction fire rate (runs that ran the ladder at
+  least once over runs that recorded a pass count) and passes per run and per step; prefill tokens, cached tokens and KV
+  reuse, with the per-run spread (nearest-rank p50, p90 and max) of prefilled tokens over the measured runs and of the mean
+  prompt size per step over the runs that reported seat input tokens. Each is given for the whole corpus, by source and by
+  seat.
+- **Which runs a seat can be named for.** A pool placement logs the pool's ALIAS as the seat (a seat name in which `pool` is
+  a whole hyphen-delimited token); the node's real seat is in neither the row nor its result. Those runs cannot be
+  attributed to a seat, so `by_seat` holds the runs a seat can be named for (each seat the record names, and under the
+  key `(unrecorded)` the runs whose record names no seat, which is every agent trace) and not the alias runs. The alias
+  runs are their own bucket: `pool_alias` (the bucket's statistics) and `pool_alias_by_node` (the same runs keyed by the
+  node id the row carries, `(unrecorded)` when it names none). The `attribution` block counts the three classes
+  (`seat_named_runs`, `pool_alias_runs`, `seat_unrecorded_runs`) and gives `unattributed_share`, the last two over all
+  runs, so a reader sees how much of the corpus a per-seat reading cannot reach. Test seats other than the
+  default-excluded one stay in `by_seat` until named with `--exclude-seat`. The corpus and the readout carry node ids and
+  seat names as the records write them, so both are machine-local like the corpus; only a path-shaped seat, node id or
+  stop reason is replaced (below).
+- **Paths are redacted.** The shared vet table has no path class, so harvest replaces a seat, node id or stop reason that
+  is a local path (a drive path, a rooted path, anything with a backslash) with a stable `[redacted-path-N]` placeholder,
+  counted under `redactions.path`, and the strict loader refuses a corpus that still carries one.
+- **Unrecorded is not zero.** Before the pager report and the pass count were recorded, neither record kept them: the loop measured both
+  and the trace and the wire dropped them. Every rate is a pointer that serializes as `null` when nothing was recorded, and a
+  count of unrecorded runs sits beside it, so a corpus of older rows reads `NO_DATA` on the gate and cannot close the pager
+  family by reading as 0 %. A run that DID record a pass count of 0 is a real 0. A pager object that contradicts itself is
+  read as unrecorded and noted in the harvest stats.
+- **What is recorded now.** A standalone trace file carries `pager` (the loop's `PagerReport`, now with `compaction_passes`)
+  and `prefill`; the queue drainer resets the loop's instruments before each goal, because they accumulate for the loop's
+  life and a goal's trace would otherwise be the running total of the queue. The agent wire result carries `pager` (the
+  delegation log stores it) on every run the loop returned from (see "Which rows carry a pager object" above). Rows
+  written before that have neither, and the transcript in an older trace gives
+  only a lower bound on the ladder (tool turns that are elision markers or skeletons).
+- **No token counts is not a measured zero.** An engine that reports no prefill timings still ticks the observed-step
+  counter, so a run with steps observed and zero prefilled and zero cached tokens is counted apart (`no_token_counts_runs`)
+  and adds nothing to the token sums; the seat's own input-token figure (`seat_tokens_in`) is reported beside it for the runs
+  that carry one.
 
 ### The `contextbench` task bench (`compaction-eval contextbench`)
 
@@ -1118,6 +1275,9 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 ## Source map
 
 - [`internal/agent/loop.go`](../../internal/agent/loop.go) — loop, budget, `dispatchOrThrottle`
+- [`trace_corpus.go`](../../trace_corpus.go) — the `trace-corpus` verb (harvest, readout, freeze, check)
+  over recorded agent runs; [`internal/agent/contextpager.go`](../../internal/agent/contextpager.go) — the pager
+  instrument and the compaction pass count it records
 - [`internal/agent/policy.go`](../../internal/agent/policy.go) — broker, `.git` denial, audit append
 - [`internal/agent/rules.go`](../../internal/agent/rules.go) — the tighten-only risk-rule table and
   the built-in `defaultRules()` secret-material floor
@@ -1137,7 +1297,7 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - [`internal/agent/runtool.go`](../../internal/agent/runtool.go) — allowlist, direct exec
 - [`internal/agent/writetools.go`](../../internal/agent/writetools.go) — `os.Root` scoping
 - [`internal/agent/builder.go`](../../internal/agent/builder.go) — capability grants, audit-path check
-- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`rung_search.go`](../../internal/agent/rung_search.go), [`internal/compeval/`](../../internal/compeval/)
+- [`internal/agent/twotier.go`](../../internal/agent/twotier.go), [`profiles.go`](../../internal/agent/profiles.go), [`compaction.go`](../../internal/agent/compaction.go), [`skeleton.go`](../../internal/agent/skeleton.go), [`rung_logs.go`](../../internal/agent/rung_logs.go), [`rung_search.go`](../../internal/agent/rung_search.go), [`internal/compeval/`](../../internal/compeval/)
 - [`compaction_contextbench.go`](../../compaction_contextbench.go) — the `compaction-eval contextbench` verb;
   [`internal/compeval/contextbench_run.go`](../../internal/compeval/contextbench_run.go) (driver, outcomes),
   `contextbench_gen_*.go` and `contextbench_grade_*.go` in [`internal/compeval/`](../../internal/compeval/) (ported generators and graders)

@@ -12,6 +12,7 @@ package ledger
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -267,6 +268,14 @@ type Entry struct {
 	// key at all. Every production view skips a labelled row by default and reports how many it skipped
 	// (Summary.ExcludedNonProduction); a reader that must see them all asks (ReadAll, SummarizeFileWith).
 	RunClass string `json:"run_class,omitempty"`
+	// Refusal marks a row that is a node's capacity refusal AT DISPATCH (a 503 or 429), a place in line and not an
+	// outcome: the delegator outwaits it and re-places the subtask, whose outcome is another row (the one that landed,
+	// or the terminal row a lost subtask gets under a job id of its own). It is the ledger twin of the delegation
+	// log's refusal mark. ABSENT ON EVERY OTHER ROW, and on every row written before the column existed, so a reader
+	// that sees none reads the row as it always did: such a row may be an old refusal, and the column cannot say
+	// otherwise. A reader that counts jobs or failures sets a marked row aside: the job counters of jobrows.go skip
+	// it (CountsAsJob), and the failure register counts it as a refused attempt.
+	Refusal bool `json:"refusal,omitempty"`
 }
 
 // Label provenance values for Entry.LabelSource. Constants rather than string literals so
@@ -523,8 +532,19 @@ func (l *Ledger) Summarize(since int64, prices Prices) (Summary, error) {
 	return SummarizeFile(l.path, since, prices)
 }
 
+// isObjectLine reports whether a ledger line is shaped like a row: a JSON object. encoding/json decodes the literal
+// `null` into a struct without an error and without touching it, so Unmarshal alone reads a line holding only
+// `null` as a row with every field at its zero (a completed call of no task, a job that did not fail). It is a
+// damaged line, not a row. An object with no keys (`{}`) is a row: every column is optional, so a reader cannot
+// tell a minimal old row from an empty one by looking inside, and what an object must contain is not a parse rule.
+func isObjectLine(line []byte) bool {
+	line = bytes.TrimSpace(line)
+	return len(line) > 0 && line[0] == '{'
+}
+
 // ReadAll loads every parseable entry from a JSONL ledger (lock-free; skips
-// malformed/partial lines). Missing file => empty slice, no error.
+// malformed/partial lines, and a line that is not a JSON object, a literal null
+// among them). Missing file => empty slice, no error.
 func ReadAll(path string) ([]Entry, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -543,7 +563,7 @@ func ReadAll(path string) ([]Entry, error) {
 			continue
 		}
 		var e Entry
-		if json.Unmarshal(line, &e) == nil {
+		if isObjectLine(line) && json.Unmarshal(line, &e) == nil {
 			out = append(out, e)
 		}
 	}
@@ -649,8 +669,8 @@ func SummarizeFileWith(path string, since int64, prices Prices, includeTraffic b
 			continue
 		}
 		var e Entry
-		if json.Unmarshal(line, &e) != nil {
-			continue // malformed or a not-yet-complete trailing line
+		if !isObjectLine(line) || json.Unmarshal(line, &e) != nil {
+			continue // malformed, a literal null, or a not-yet-complete trailing line
 		}
 		if since > 0 && e.TS < since {
 			continue
@@ -667,6 +687,10 @@ func SummarizeFileWith(path string, since int64, prices Prices, includeTraffic b
 			}
 		}
 		if !CountsAsJob(e, parents) {
+			// A refusal row did no work and saved nothing; it is no job and no inner row.
+			if e.Refusal {
+				continue
+			}
 			// An inner row (C-62): the parent `agent_delegate` row is the job —
 			// its call, its outcome, its TokensOut. The inner row contributes
 			// only what the parent leaves at 0 by design: the savings column.

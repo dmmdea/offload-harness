@@ -54,6 +54,12 @@ where the code lives.
   observer), the `pair_workloads_*` keys, and the patched PAIR worker the ingress needs
 - [systems/leak-gate.md](systems/leak-gate.md) — the privacy gate: a keyed list of denied names, the
   tests that fail the build on a hit, the key and CI wiring, and what it does not cover
+- [systems/measurement-gate.md](systems/measurement-gate.md) — the one measurement gate: `local-offload gate`
+  (freeze, check, verdict, schema), the ADOPT/BLOCK/INCONCLUSIVE rules over a paired interval (Tango's score interval for pass/fail pairs, an
+  augmented score form for the rest), the baseline and
+  input formats, the exit codes, the power note, the era marker, and the legacy callers it does not migrate
+- [systems/failure-register.md](systems/failure-register.md) — `ledger --failures`: the ledger's failed jobs grouped into
+  failure classes with counts, joined by name to a human-maintained table of meaning, root cause and structural fix
 - [systems/openspec.md](systems/openspec.md) — the `openspec/` spec-and-plan tree: the forked `harness-change`
   schema with an optional ADR artifact, the hash-pinned install script, the strict validate gate
 
