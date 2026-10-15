@@ -9,12 +9,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/eval"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/recipe"
 )
 
@@ -241,7 +244,7 @@ func TestRecipeAuditChecksTheLeaseBeforeEveryRun(t *testing.T) {
 	asked := 0
 	e.use(t, func(config.Config) error {
 		asked++
-		if asked > 5 {
+		if asked > 6 { // the up-front check and five per-run checks pass
 			return &recipeRefusal{Kind: refusalLeaseNotHeld, Detail: "the lease moved on"}
 		}
 		return nil
@@ -329,7 +332,7 @@ func TestRecipeAuditRefusesBadInputBeforeAnySeatCall(t *testing.T) {
 		}, refusalInput},
 		{"a baseline that is not the frozen bytes", func(t *testing.T, e *raEnv) []string {
 			raw, _ := os.ReadFile(e.baseline)
-			os.WriteFile(e.baseline, bytes.Replace(raw, []byte("goal_reached"), []byte("goal_reachedX"), 1), 0o644)
+			os.WriteFile(e.baseline, bytes.Replace(raw, []byte("\n"), []byte("\n\n"), 1), 0o644) // hand-edited: not the canonical bytes
 			return e.args()
 		}, refusalInput},
 	}
@@ -360,4 +363,44 @@ func TestRecipeAuditIsRegisteredInMain(t *testing.T) {
 	if n := strings.Count(src, "local-offload recipe-audit "); n != 1 {
 		t.Fatalf("main.go usage has %d recipe-audit lines, want 1", n)
 	}
+}
+
+// The real lease check, end to end: an epoch that a live lease carries lets the audit run, and the
+// same environment after the lease is released is a lease this process no longer holds.
+func TestRecipeAuditRunsOnlyUnderALiveLease(t *testing.T) {
+	e := newRAEnv(t)
+	e.use(t, nil)
+	recipeAuditDeps.lease = realRecipeAuditLease
+	m, err := gpulease.OpenAt("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := m.TryAcquire(gpulease.ClassText, gpulease.Options{Reason: "recipe-audit test", TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			_ = l.Release()
+		}
+	})
+	t.Setenv("GPU_LEASE_DIR", l.Dir())
+	t.Setenv("GPU_LEASE_EPOCH", strconv.FormatUint(l.Epoch(), 10))
+	e.fake.script = raScript(false, true, 5, 3)
+	if rep := e.report(t); rep.Status != recipe.StatusPublished {
+		t.Fatalf("under a live lease the audit ended %s (%s), want published", rep.Status, rep.Decision)
+	}
+	if err := l.Release(); err != nil {
+		t.Fatal(err)
+	}
+	released = true
+	e.fake.calls = nil
+	r := e.saved(t)
+	r.Status, r.Audit = recipe.StatusProposed, nil
+	if err := (recipe.Store{Dir: e.store}).Save(r); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = e.run(e.args())
+	e.wantRefusal(t, err, refusalLeaseNotHeld)
 }
