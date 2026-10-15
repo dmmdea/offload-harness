@@ -127,3 +127,23 @@ func TestTheRunGraphLaneHoldsAGraphItCannotSizeAtTheClassDefault(t *testing.T) {
 		t.Fatalf("want a hold on host RAM for the class default, got ok=%v: %s", r.OK, r.Reason)
 	}
 }
+
+// The run-graph runner holds back reserve_vram (the param goes to the runner as --reserve-vram), so the lane fits the graph with it:
+// on a 25 GiB card the 23.09 GiB graph fits the default 1.0 GiB margin and not a 6 GiB one. A value the runner would not take
+// (not a number, 0, negative) is the default.
+func TestTheGraphLaneFitsTheGraphWithTheReserveVRAMOfTheCall(t *testing.T) {
+	p := krea2Pipeline()
+	params := graphOnTheBox(t, p, "qwen_image_fp8.safetensors")
+	for _, c := range []struct {
+		reserve string
+		want    float64
+	}{{"", 0}, {"6", 6.76 + 16.33}, {"lots", 0}, {"0", 0}, {"-3", 0}} {
+		pr := map[string]any{"graph_path": params["graph_path"]}
+		if c.reserve != "" {
+			pr["reserve_vram"] = c.reserve
+		}
+		if n := graphRAM(p.cfg, pr)(25); n.Source != hostneed.SourceGraphLoaders || math.Abs(n.GiB-c.want) > 0.01 {
+			t.Errorf("reserve_vram %q on a 25 GiB card: %v, want %.2f GiB", c.reserve, n, c.want)
+		}
+	}
+}

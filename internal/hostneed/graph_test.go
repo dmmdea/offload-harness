@@ -350,3 +350,64 @@ func TestAGraphAndTheFamilyEstimateAgreeOnTheSameFiles(t *testing.T) {
 		}
 	}
 }
+
+// --reserve-vram is the runner's own margin, and a graph call is fitted with it like every other helper call: a 25 GiB card holds
+// the incident's 23.09 GiB set with the default 1.0 GiB held back (24 usable), and not with --reserve-vram 6 (19 usable), where
+// 4 GiB would stream from RAM undeclared.
+func TestAGraphIsFittedWithTheReserveVRAMTheCallStates(t *testing.T) {
+	dir, stat := comfyTree(t, map[string]float64{"qwen_image_fp8.safetensors": 6.76, "qwen_2.5_vl_7b.safetensors": 16.33})
+	f := Facts{Cfg: config.Config{ComfyDir: dir}, Stat: stat, VRAMGiB: 25}
+	graph := writeGraph(t, twoLoaderGraph)
+	for _, c := range []struct {
+		name string
+		args []string
+		want float64
+	}{
+		{"no flag: 24 GiB usable, the set fits", graphCall("comfy-render.mjs", "--graph", graph), 0},
+		{"--reserve-vram 6: 19 usable, it does not", graphCall("comfy-render.mjs", "--graph", graph, "--reserve-vram", "6"), 6.76 + 16.33},
+		{"--reserve-vram=6 and --graph= forms", graphCall("comfy-render.mjs", "--graph="+graph, "--reserve-vram=6"), 6.76 + 16.33},
+		{"a reserve that is not a number is the default", graphCall("comfy-render.mjs", "--graph", graph, "--reserve-vram", "lots"), 0},
+		{"a reserve of 0 is the default", graphCall("comfy-render.mjs", "--graph", graph, "--reserve-vram", "0"), 0},
+	} {
+		n := Resolve(Request{Class: gpulease.ClassMedia, Args: c.args}, f)
+		if n.Source != SourceGraphLoaders || !near(n.GiB, c.want) {
+			t.Errorf("%s: %v, want %.2f GiB from %q", c.name, n, c.want, SourceGraphLoaders)
+		}
+	}
+}
+
+// The doubt check. ScanGraph lists only the top-level string inputs that end in one of six weight extensions, so a graph can name a
+// weight it does not list: a file of another extension, or one inside a nested widget object. Sizing the files it DID list would
+// declare a partial sum, and on a card they fit that is 0 where the class default stood. Any weight-like name in the whole
+// document that was not sized keeps the class default.
+func TestAGraphNamingAWeightItCouldNotSizeKeepsTheClassDefault(t *testing.T) {
+	f := sparseTree(t, map[string]int64{"vae/ae.safetensors": mib, "checkpoints/big.bin": 6 * mib, "loras/style.safetensors": mib})
+	f.VRAMGiB = 24 // the sized part fits this card (a partial sum would be 0); the class default (32.8 GiB) does not
+	want := ClassDefault(f)
+	for name, graph := range map[string]string{
+		"a .bin weight beside a VAE": `{"1":{"class_type":"VAELoader","inputs":{"vae_name":"ae.safetensors"}},
+			"2":{"class_type":"SomeLoader","inputs":{"model":"big.bin"}}}`,
+		"a weight inside a nested widget object": `{"1":{"class_type":"VAELoader","inputs":{"vae_name":"ae.safetensors"}},
+			"2":{"class_type":"PowerLoraLoader","inputs":{"lora_1":{"on":true,"lora":"style.safetensors","strength":1}}}}`,
+		"a weight in a list": `{"1":{"class_type":"VAELoader","inputs":{"vae_name":"ae.safetensors"}},
+			"2":{"class_type":"MultiLoader","inputs":{"models":["a.pt2","b.pkl"]}}}`,
+		"an onnx file": `{"1":{"class_type":"VAELoader","inputs":{"vae_name":"ae.safetensors"}},
+			"2":{"class_type":"Detector","inputs":{"detector":"face.ONNX"}}}`,
+	} {
+		if n, ok := ForGraph([]byte(graph), f); ok {
+			t.Errorf("%s: sized as %v, want no figure (the class default)", name, n)
+		}
+		got := Resolve(Request{Class: gpulease.ClassMedia, Args: graphCall("comfy-render.mjs", "--graph", writeGraph(t, graph))}, f)
+		if got != want {
+			t.Errorf("%s: Resolve = %v, want the class default %v", name, got, want)
+		}
+	}
+	// the controls: a nested name that is also a sized top-level input is not a doubt, and an output prefix or a URL is not a file
+	ok := `{"1":{"class_type":"VAELoader","inputs":{"vae_name":"ae.safetensors"}},
+		"2":{"class_type":"Note","inputs":{"meta":{"uses":"ae.safetensors"}}},
+		"3":{"class_type":"SaveImage","inputs":{"filename_prefix":"out.bin"}},
+		"4":{"class_type":"Fetch","inputs":{"url":"https://example.invalid/m.bin"}}}`
+	if n, good := ForGraph([]byte(ok), f); !good || n.Source != SourceGraphLoaders {
+		t.Errorf("the control graph is sized, got %v %v", n, good)
+	}
+}
