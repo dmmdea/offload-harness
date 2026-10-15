@@ -98,3 +98,21 @@ func TestOccupantsRefusesANon2xxOrShapelessAnswer(t *testing.T) {
 		}
 	}
 }
+
+// TestOccupantsReadsTheCommandLlamaSwapSpawned: /running names the process argv llama-swap actually spawned
+// for each seat, which is what is true of a loaded seat when the serving config on disk has changed since.
+// A row without one decodes with an empty command.
+func TestOccupantsReadsTheCommandLlamaSwapSpawned(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A test fake of llama-swap's JSON API; nothing renders it as HTML.
+		_, _ = w.Write([]byte(`{"running":[{"model":"a","state":"ready","proxy":"http://127.0.0.1:9","cmd":"/bin/llama-server -m x.gguf --port 9"},{"model":"b","state":"starting"}]}`)) // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter
+	}))
+	defer srv.Close()
+	rows, err := Occupants(context.Background(), srv.Client(), srv.URL)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("rows = %+v err = %v", rows, err)
+	}
+	if rows[0].Cmd != "/bin/llama-server -m x.gguf --port 9" || rows[1].Cmd != "" {
+		t.Errorf("commands = %q and %q, want the spawned argv and none", rows[0].Cmd, rows[1].Cmd)
+	}
+}

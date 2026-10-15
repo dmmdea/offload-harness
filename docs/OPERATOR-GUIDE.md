@@ -265,6 +265,18 @@ local, and a `route: "queue"` delegation writes no row on the asker's ledger at 
 row, as `served_*`), so it is in neither number. It reads this box's ledger only; run it on each box for the fleet
 view.
 
+**Why jobs failed.** `local-offload ledger --failures` (with `--since DAYS`, `--include-test-traffic` and
+`--table FILE`) prints the failure-class register in place of the savings summary: one JSON object that groups the
+ledger's failed jobs by reason code, with each class's count, share and kind (stack fault, capacity, caller,
+ceiling, work, or unclassified for a class no kind names), the doors, seats and model aliases they came through (on a delegation row the "model" is the seat
+alias), the card work they spent (`null` where no row measured it, never `0`), and the meaning, root cause and
+structural fix that the table in [systems/failure-register.md](systems/failure-register.md) holds for the class
+(`undocumented` for a class with no row; a class whose root cause and fix nobody has written is listed in
+`uninvestigated_classes`). The share of failures that are the stack itself failing is `stack_fault_share`; a refusal
+a node gave at dispatch that the delegator waited out is `refused_attempts`, not a failure; `unparsed_lines` and
+`ledger_found` say when the ledger was damaged or missing. It reads the ledger and the table and nothing else; the
+root cause and the fix are written by a person, not derived.
+
 The harness-share gate and any other reader that sums the ledger itself should skip rows whose `run_class` is
 set (and, for rows written before the label, whose `origin_session` is `go-test`).
 
@@ -1794,6 +1806,18 @@ doctor's exit code. A literal outside loopback and the tailnet range was already
 row is what says why, and it is the only word on a tailnet literal and on the fields that load clean (`endpoint`,
 `pair_workloads_relay`). Fix the warning by writing the node's dotless MagicDNS name (or a name under a
 zone listed in `tailnet_suffix` / `tailnet_suffixes`) in the field.
+
+`doctor` also prints a `backends:` section after its checks, whatever they returned: one row per lane and per seat saying which
+serving engine answers (`active_backend`: `llama.cpp`, `vllm`, `rkllm`, `whisper.cpp`, `unknown` (the engine is not named, a probe timed out, or another node serves the seat), or `none`; on a lane, the engine of the seat the
+lane is bound to), the chain it was picked from, how deep the evidence goes (`process`: llama-swap's roster and running list;
+`endpoint`: a loaded seat's own health endpoint), and why. A box whose tier prefers a vLLM agent seat while `agent_model` is bound to
+the llama.cpp fallback reads `llama.cpp` on the agent lane and says in the row that the vLLM seat is available but not bound. The
+default probe loads nothing and sends no completion. `doctor --probe-completion` (listed by `doctor -h` and by the usage a mistyped flag prints) adds a 1-token completion
+to each seat that is already running and, on a box where nothing is running, to ONE idle seat, which it loads (a cold vLLM load takes minutes). It never
+loads a seat over a running one: every other seat is reported as `not probed: would load over <seat>`, and a seat with no chat route (an embedder, a
+speech-to-text seat) as `not probed: not a chat seat`. It never runs unless you pass the flag; run it deliberately, not from a script that runs every few minutes.
+The section is informational and never changes the exit code. `doctor` has no JSON mode: it prints these rows as text, and the JSON
+of the same four fields is `lane_backends` and `seat_backends` on `/fleet/health` (docs/systems/fleet-node.md).
 
 **A pin needs a reason (ADR 0078).** `route: local` and `route: remote` pin a call to this box's seat or to a fleet node, and a
 call that does that must say why: `pin_reason` (`--pin-reason` on the `delegate` and `research` verbs) is `privacy` (the material

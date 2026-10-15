@@ -68,7 +68,9 @@ reasons are for the surfaces where a session decides.
    note). The guard is keyed on the
    reason and not on the route: the bare remote route of a caller with no reason channel (`fleet-smoke`, the review lane,
    `offload_ask`, `agent_run`) and a reasonless remote hint keep the `remote -> local` retry that `alternativeNode` documents as
-   accepted, and a route-keyed guard would have changed every one of them. Its reason is on
+   accepted, and a route-keyed guard would have changed every one of them. The one exception that carries no reason is the
+   cross-seat retry of `offload_ask`: it sets `RunOptions.RemoteRetryOnly`, which keeps that call's retry on a fleet node
+   (`runner.retryOffLocal`) and leaves it counted as unreasoned. Its reason is on
    every ledger row (`pin_reason`) and on every result (`results[].pin_reason`). A call that carries a browse grant (`allow_browse`,
    [ADR 0060](0060-opt-in-browse-lane-drives-the-operators-browser.md)) is pinned whatever it says: the browse tool drives THIS machine's
    own browser, which is why the door admits it only on `route: local`, and a hint could have placed it on another node's. The grant is

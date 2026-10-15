@@ -71,6 +71,13 @@ type PrefillStats struct {
 	PredictedN int64
 }
 
+// reset starts the accumulator over: the next report covers only what is observed after it.
+func (p *PrefillStats) reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Observed, p.CacheN, p.PromptN, p.PredictedN, p.PromptMS = 0, 0, 0, 0, 0
+}
+
 // Observe folds one completion's server accounting into the run total.
 //
 // A nil ServeStats is IGNORED rather than counted as a zero-token step. Counting it

@@ -10,6 +10,13 @@ package ledger
 // ORPHAN inner row, whose parent row never landed (a failed write, a process
 // killed between the two writes, a delegator whose ledger could not open), is
 // the only record of that job and counts as the job itself.
+//
+// A REFUSAL row (Entry.Refusal) is not a job either: it is a node's capacity refusal at dispatch, a place in
+// line. The refused placement did no work, the delegator waited and placed the subtask again, and the subtask's
+// outcome is another row, so every job counter skips the refusal row the way it skips a marker. The failure
+// register counts it apart, as a refused attempt (isRefusedAttempt), so queue pressure stays visible without
+// reading as a job or a failure. ParentJobIDs still lists a refusal row's id: no inner row names one, because
+// the writer marks only a parentless `agent_delegate` row.
 
 // PhaseStarted is Entry.Phase on the dispatch marker a delegator writes when it
 // hands a job to a seat (ADR 0064). A marker is a record that a job BEGAN, not a
@@ -33,8 +40,21 @@ func ParentJobIDs(entries []Entry) map[string]bool {
 }
 
 // CountsAsJob reports whether a row is a job for a counter: every row except a
-// dispatch marker and an inner row whose parent is present.
+// dispatch marker, a refusal row and an inner row whose parent is present.
 func CountsAsJob(e Entry, parents map[string]bool) bool {
+	return !e.Refusal && isOwnRecord(e, parents)
+}
+
+// isRefusedAttempt reports whether a row is a refused attempt for the reader that counts those apart (the
+// failure register): a refusal row that is a record of its own. An inner row is never counted, whatever else it
+// carries, so a refusal mark on one does not make it a refused attempt.
+func isRefusedAttempt(e Entry, parents map[string]bool) bool {
+	return e.Refusal && isOwnRecord(e, parents)
+}
+
+// isOwnRecord is the job rule without the refusal mark: every row except a dispatch marker and an inner row
+// whose parent is present.
+func isOwnRecord(e Entry, parents map[string]bool) bool {
 	if e.Phase == PhaseStarted {
 		return false
 	}

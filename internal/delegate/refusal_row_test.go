@@ -296,3 +296,76 @@ func TestAnAttemptThatLandedClearsTheRefusalMark(t *testing.T) {
 		t.Fatalf("after a landing: lastRowRefusal %v attempts %d, want the mark cleared and two attempts", pl.lastRowRefusal, pl.attempts)
 	}
 }
+
+// ledgerWire reads the ledger back as generic JSON objects, in write order: the keys a delegator wrote, not the
+// ledger package's own struct, so a reader that predates a column sees exactly what was on disk.
+func ledgerWire(t *testing.T, cfg config.Config) []map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(cfg.LedgerPath)
+	if err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	var out []map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatalf("ledger line: %v (%s)", err, l)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// TestARefusedAttemptsLedgerRowCarriesTheRefusalMark: the delegation log marks a refused dispatch as a place in line,
+// and the ledger row the same attempt writes must say it too. Without the column a ledger reader (the failure
+// register) counts the refusal as a failed job of its own beside the subtask's real outcome: one subtask that
+// landed elsewhere read as two failures. The row of the attempt that landed carries no mark, and neither does
+// a dispatch marker or any row the log did not mark.
+func TestARefusedAttemptsLedgerRowCarriesTheRefusalMark(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 20*time.Millisecond, 0)
+	_, url := acceptingNode(t, "node-busy", "zorblax after the wait", func(f *fakeNode) {
+		f.dispatchHook = freesAfter(2, http.StatusServiceUnavailable)
+		f.dispatchRetryAfter = "1"
+	})
+	cfg := testCfg(t)
+	cfg.AgentPlacementWaitSec = 5
+
+	if _, sum, err := Run(t.Context(), cfg, neverLocal(t), []core.AgentContract{remoteContract()}, "remote", []string{url}); err != nil || sum.Succeeded != 1 {
+		t.Fatalf("summary %+v err %v, want the subtask landed", sum, err)
+	}
+
+	marked := map[string]bool{}
+	for _, m := range wireRows(t, cfg) {
+		if _, ok := m["refusal"].(map[string]any); ok {
+			marked[str(m, "job_id")] = true
+		}
+	}
+	if len(marked) < 1 {
+		t.Fatalf("the corpus marked no refusal: the scenario did not refuse anything")
+	}
+	var refusedRows, otherRows int
+	for _, m := range ledgerWire(t, cfg) {
+		if str(m, "task") != "agent_delegate" || str(m, "phase") != "" {
+			continue
+		}
+		ref, has := m["refusal"]
+		if marked[str(m, "job_id")] {
+			refusedRows++
+			if b, _ := ref.(bool); !has || !b {
+				t.Errorf("the ledger row of refused attempt %q has refusal = %v (present %v), want true: %v", str(m, "job_id"), ref, has, m)
+			}
+			continue
+		}
+		otherRows++
+		if has {
+			t.Errorf("a ledger row of an attempt the corpus did not mark as a refusal carries refusal = %v: %v", ref, m)
+		}
+	}
+	if refusedRows != len(marked) || otherRows != 1 {
+		t.Fatalf("%d refused ledger row(s) for %d marked attempt(s) and %d other row(s), want one row per refused attempt and exactly one landing", refusedRows, len(marked), otherRows)
+	}
+}

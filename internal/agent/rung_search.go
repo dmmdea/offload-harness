@@ -520,7 +520,7 @@ func searchRungBodyForm(content string, query []string, want searchForm) (string
 	scoreSearchListing(l, query)
 	body := renderSearchListing(l, selectSearchHits(l))
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s%d chars]\n", skeletonPrefix, len(content))
+	b.WriteString(skeletonHeader(len(content))) // the one writer the log rung's size parser checks against
 	b.WriteString(head)
 	b.WriteString(body)
 	if hadNL {
@@ -594,8 +594,17 @@ func searchProgramIsFilter(prog string) bool {
 // return. The redirections "2>&1", ">&2", "<&3" and "&>f" are not separators. It is a
 // quote-aware scan, not a shell parser: single quotes take no escape at all, double
 // quotes honour a backslash, and outside quotes a backslash hides the next byte;
-// nothing else hides a separator.
+// nothing else hides a separator. The search gate does not look at a quote left open at
+// the end (searchCommandStages drops that report); the log rung does (searchCommandScan).
 func searchCommandStages(command string) (stages []string, chained bool) {
+	stages, chained, _ = searchCommandScan(command)
+	return stages, chained
+}
+
+// searchCommandScan is searchCommandStages with one more report: quoteOpen is true when
+// the scan reached the end of the line inside a quote, so the text after the quote is not
+// something it could split. The log rung shares this scanner and refuses such a command.
+func searchCommandScan(command string) (stages []string, chained, quoteOpen bool) {
 	var quote byte // 0, '\'' or '"'
 	start := 0
 	for i := 0; i < len(command); i++ {
@@ -616,10 +625,10 @@ func searchCommandStages(command string) (stages []string, chained bool) {
 		case c == '\'' || c == '"':
 			quote = c
 		case c == ';' || c == '\n' || c == '\r':
-			return nil, true
+			return nil, true, false
 		case c == '|':
 			if i+1 < len(command) && command[i+1] == '|' {
-				return nil, true
+				return nil, true, false
 			}
 			stages = append(stages, command[start:i])
 			if i+1 < len(command) && command[i+1] == '&' {
@@ -630,11 +639,11 @@ func searchCommandStages(command string) (stages []string, chained bool) {
 			redirect := (i > 0 && (command[i-1] == '>' || command[i-1] == '<')) ||
 				(i+1 < len(command) && command[i+1] == '>')
 			if !redirect {
-				return nil, true
+				return nil, true, false
 			}
 		}
 	}
-	return append(stages, command[start:]), false
+	return append(stages, command[start:]), false, quote != 0
 }
 
 // searchProgramIsGrep is the same test on an already split program and arguments.

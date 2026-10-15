@@ -73,7 +73,11 @@ func newTestServer(t *testing.T, cfg config.Config, r Runner, opts *Options) (*S
 		o = *opts
 		o.Cfg = cfg
 	}
-	return New(r, jobs, o), jobs
+	s := New(r, jobs, o)
+	// The active-backend report would read the llama-swap of the test's config, and a default config names a
+	// real local port: a test that wants the report installs its own collector (see activebackend_test.go).
+	s.collectBackends = nil
+	return s, jobs
 }
 
 // do runs one request through the routed handler.

@@ -639,7 +639,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// only question + paths.
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_ask",
-		Description: "Ask a bounded question ABOUT SPECIFIC FILES and have a FREE local seat answer it — the one-call form of agent_delegate. You supply question + paths and nothing else: the harness builds the whole contract (goal, {answer,evidence} output schema, and an acceptance check ANCHORED to distinctive tokens mined from the files themselves) and runs it on the local agent seat. REACH FOR IT THE MOMENT YOU ARE ABOUT TO OPEN MORE THAN TWO FILES to answer something bounded — that is exactly where reading them yourself costs more than asking. The files are read and inlined by the HARNESS under read_root, so your own context never pays for them. Good fits: \"which key sets the queue cap\" over three config files; \"which function does this handler call before dispatch\" over a handler plus its helpers; \"what changed between these two versions of the spec\". NOT this tool: unbounded exploration with no file list (use agent_run — it searches for its own files); anything that writes or runs (this lane is read-only); a multi-part job needing several contracts (agent_delegate); and above all anything whose answer is a JUDGEMENT rather than a fact the files state — security or credential review, an architecture decision, or the final does-it-actually-work verification. A free seat reports what the files say; it does not own a call you are accountable for. Returns {answer, evidence, verified, acceptance, acceptance_failures?, seat, steps, stop_reason, cache_hit} — evidence is the exact lines the seat relied on so you can spot-check instead of re-reading. verified is a CITATION check, not a correctness verdict: it asks whether the published answer quoted one of a few distinctive tokens mined from these files, never whether the answer is right. Those tokens are chosen to be things only these files would say — real identifiers wherever the files have them — but it is a heuristic, so treat verified:true as \"this answer demonstrably read the files\", not as proof of a verbatim quotation. On verified:false read acceptance_failures (which names the check that did not match) and then the evidence — it is a prompt to look, not proof the answer is wrong, and a question whose subject is a short or question-named identifier can leave nothing anchorable at all. Typical latency is 30-90 s: this buys back the context those files would have cost you, not wall-clock. cache_hit tells you how the answer was obtained: an IDENTICAL repeat within the same session — same question, same read_root, and the same file BYTES — returns the stored answer without spending the seat again, and reports cache_hit:true. A REPEAT DOES NOT RE-ROLL THE SEAT: an identical call after a verified:false answer returns that same unverified answer again, cache_hit:true, with no new seat run — to get a second attempt, change the question, which is a different key and always a fresh run. It is keyed on CONTENT, so editing any attached file also makes the next call a fresh run automatically; a stale answer cannot be served. Do NOT read this as a general speedup: a DIFFERENT question over the same files pays full seat time, because nothing keeps a warm model context between calls. Caps: at most 16 files, 128 KiB per file, 256 KiB total. It REFUSES (deferred:true) when the files hold no token distinctive enough to ground the check, rather than handing back an answer nothing verified. On any failure it returns deferred:true with a reason and you read the files yourself.",
+		Description: "Ask a bounded question ABOUT SPECIFIC FILES and have a FREE local seat answer it — the one-call form of agent_delegate. You supply question + paths and nothing else: the harness builds the whole contract (goal, {answer,evidence} output schema, and an acceptance check ANCHORED to distinctive tokens mined from the files themselves) and runs it on the local agent seat. REACH FOR IT THE MOMENT YOU ARE ABOUT TO OPEN MORE THAN TWO FILES to answer something bounded — that is exactly where reading them yourself costs more than asking. The files are read and inlined by the HARNESS under read_root, so your own context never pays for them. Good fits: \"which key sets the queue cap\" over three config files; \"which function does this handler call before dispatch\" over a handler plus its helpers; \"what changed between these two versions of the spec\". NOT this tool: unbounded exploration with no file list (use agent_run — it searches for its own files); anything that writes or runs (this lane is read-only); a multi-part job needing several contracts (agent_delegate); and above all anything whose answer is a JUDGEMENT rather than a fact the files state — security or credential review, an architecture decision, or the final does-it-actually-work verification. A free seat reports what the files say; it does not own a call you are accountable for. Returns {answer, evidence, verified, acceptance, acceptance_failures?, seat, steps, stop_reason, cache_hit, retried_on?, retry_note?} — evidence is the exact lines the seat relied on so you can spot-check instead of re-reading. verified is a CITATION check, not a correctness verdict: it asks whether the published answer quoted one of a few distinctive tokens mined from these files, never whether the answer is right. Those tokens are chosen to be things only these files would say — real identifiers wherever the files have them — but it is a heuristic, so treat verified:true as \"this answer demonstrably read the files\", not as proof of a verbatim quotation. On verified:false read acceptance_failures (which names the check that did not match) and then the evidence — it is a prompt to look, not proof the answer is wrong, and a question whose subject is a short or question-named identifier can leave nothing anchorable at all. Typical latency is 30-90 s: this buys back the context those files would have cost you, not wall-clock. cache_hit tells you how the answer was obtained: an IDENTICAL repeat within the same session — same question, same read_root, and the same file BYTES — returns the stored answer without spending the seat again, and reports cache_hit:true. A REPEAT DOES NOT RE-ROLL THE SEAT: an identical call after a verified:false answer returns that same unverified answer again, cache_hit:true, with no new seat run, and that answer already includes the one cross-seat retry a failed local first attempt gets when no route was named (retried_on, retry_note) — to get another attempt, change the question, which is a different key and always a fresh run. It is keyed on CONTENT, so editing any attached file also makes the next call a fresh run automatically; a stale answer cannot be served. Do NOT read this as a general speedup: a DIFFERENT question over the same files pays full seat time, because nothing keeps a warm model context between calls. Caps: at most 16 files, 128 KiB per file, 256 KiB total. It REFUSES (deferred:true) when the files hold no token distinctive enough to ground the check, rather than handing back an answer nothing verified. On any failure it returns deferred:true with a reason and you read the files yourself.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"route":{"type":"string","enum":["","local","auto","remote","spread","queue"],"description":"WHERE the question runs (register C-46): local = this box's agent seat; omitted = the same, unless loading it would unload another loaded vLLM seat (then auto, and route_note names the seat); remote/auto/spread/queue = the delegator's placement (the files ride inline in the contract, so any node can answer); the response names node, placement and seat, plus node_reported only when the node's own result named itself by another id"},"question":{"type":"string","description":"the bounded question to answer FROM THESE FILES — one question, answerable from what you attach"},"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":16,"description":"the files to answer from, relative to read_root or absolute inside it (<=16 files, <=128 KiB each, <=256 KiB total)"},"read_root":{"type":"string","description":"absolute directory the paths are read from; nothing outside it can be read (default: the server working dir)"}},"required":["question","paths"]}`),
 	}, s.handleAsk)
 
@@ -3766,9 +3766,13 @@ func askRetryFloorSec(cfg config.Config) int {
 }
 
 // askRetry gives a failed LOCAL first attempt the second chance agent_delegate gives a failed
-// verification: the same contract on the fleet, route "remote", which never places on this box's
-// seat, so the retry runs on a different seat by construction. It mirrors the delegator's retry
-// (mergeAttempts, runOne): the retry lives inside the contract's own wall, so it is handed what
+// verification: the same contract on the fleet, route "remote", whose first placement never lands
+// on this box's seat. The delegator's own retry inside that call is kept off the seat too
+// (RunOptions.RemoteRetryOnly, through contractOnFleetAt): a bare remote route would fall back to
+// this box when the fleet node's answer also fails, and the first attempt already failed here, so
+// a caller who did not name route local would get a third run on this box's GPU under a note that
+// still says "retry on <node>". The fleet's own skipped retry rides in that note instead. It
+// mirrors the delegator's retry (mergeAttempts, runOne): the retry lives inside the contract's own wall, so it is handed what
 // the first attempt left (timeout_sec, never auto) and is skipped under the floor; a clean retry
 // is published with retried_on and a note naming the first attempt's verdict; a retry that also
 // fails leaves the FIRST answer, unverified, with the retry's fate in the note; a fleet that took
@@ -3791,7 +3795,7 @@ func (s *Server) askRetry(ctx context.Context, contract core.AgentContract, firs
 	retry := contract
 	retry.TimeoutSec = remaining
 	retry.TimeoutAuto = false // a retry's wall is what is left: explicit, never auto
-	w, extra, why, ok := s.contractOnFleet(ctx, retry, "remote", "")
+	w, extra, why, ok := s.contractOnFleetAt(ctx, retry, "remote", "", nil, true)
 	node, _ := extra["node"].(string)
 	if !ok && node == "" {
 		return askRetryOutcome{note: "retry skipped: " + why}
@@ -4100,7 +4104,7 @@ func (s *Server) askOccupant(ctx context.Context) string {
 func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContract, route, fence string) (core.AgentWireResult, map[string]any, string, bool) {
 	// remotes nil: RunWith reads the configured delegate_remotes, which is the
 	// fleet this box is a delegator for. A review names no node of its own.
-	return s.contractOnFleetAt(ctx, contract, route, fence, nil)
+	return s.contractOnFleetAt(ctx, contract, route, fence, nil, false)
 }
 
 // contractOnFleetAt is contractOnFleet narrowed to remotes: the nodes the engine may
@@ -4116,7 +4120,13 @@ func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContrac
 // seat, a different model: the door then withholds that clean answer for a seat
 // mismatch and blames the node, after this box's GPU did the whole goal. Only the
 // retry changes; the first placement of route=remote already never falls back to local.
-func (s *Server) contractOnFleetAt(ctx context.Context, contract core.AgentContract, route, fence string, remotes []string) (core.AgentWireResult, map[string]any, string, bool) {
+//
+// remoteRetryOnly asks for the same stop without the pin: the engine's retry of this call goes to
+// another fleet node or is not run, and never to this box's seat (RunOptions.RemoteRetryOnly). It
+// records no pin_reason, so the call is still counted as unreasoned in offload_status. Only a door
+// whose caller already moved the work off this box says it (askRetry); every other door keeps the
+// bare route's remote -> local retry.
+func (s *Server) contractOnFleetAt(ctx context.Context, contract core.AgentContract, route, fence string, remotes []string, remoteRetryOnly bool) (core.AgentWireResult, map[string]any, string, bool) {
 	dispatch := s.reviewFleet // test seam
 	if dispatch == nil {
 		dispatch = delegate.RunWith
@@ -4125,7 +4135,7 @@ func (s *Server) contractOnFleetAt(ctx context.Context, contract core.AgentContr
 	if local == nil {
 		local = s.p.RunAgentContract
 	}
-	opts := &delegate.RunOptions{Quarantine: s.quarantine, Tenant: s.tenant, PinTally: s.pins, RosterOnly: len(remotes) > 0}
+	opts := &delegate.RunOptions{Quarantine: s.quarantine, Tenant: s.tenant, PinTally: s.pins, RosterOnly: len(remotes) > 0, RemoteRetryOnly: remoteRetryOnly}
 	if len(remotes) > 0 && route == "remote" {
 		opts.PinReason = delegate.PinOperator
 	}
