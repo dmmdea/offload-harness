@@ -20,6 +20,8 @@ package compeval
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strconv"
@@ -74,6 +76,9 @@ type BenchOpts struct {
 }
 
 func (o BenchOpts) withDefaults() BenchOpts {
+	if len(o.Arms) == 0 {
+		o.Arms = []string{ArmOff, ArmOn}
+	}
 	if o.Rounds <= 0 {
 		o.Rounds = 1
 	}
@@ -96,6 +101,29 @@ func (o BenchOpts) withDefaults() BenchOpts {
 		o.RunNonce = strconv.FormatInt(time.Now().UnixNano(), 36)
 	}
 	return o
+}
+
+// The two arms of a bench run: ArmOff sends the raw uncompacted transcript,
+// ArmOn sends what the ladder produces.
+const (
+	ArmOff = "off"
+	ArmOn  = "on"
+)
+
+// validateArms refuses an arm list the bench cannot run: an unknown name (a
+// typo would silently run nothing, or the wrong arm) or a repeated one.
+func validateArms(arms []string) error {
+	seen := map[string]bool{}
+	for _, a := range arms {
+		if a != ArmOff && a != ArmOn {
+			return fmt.Errorf("kvbench: unknown arm %q (want %q or %q)", a, ArmOff, ArmOn)
+		}
+		if seen[a] {
+			return fmt.Errorf("kvbench: arm %q listed twice", a)
+		}
+		seen[a] = true
+	}
+	return nil
 }
 
 // Budget modes — see BenchOpts.BudgetMode.
@@ -412,7 +440,7 @@ func runArm(ctx context.Context, probe ProbeFunc, entries []Entry, arm string, r
 			}
 			if arm == "on" {
 				sent = agent.CompactReplay(msgs, budget, keep, prot,
-					agent.ReplayOpts{GCF: opts.Ladder.GCF, Skeleton: opts.Ladder.Skeleton})
+					opts.Ladder.replayOpts())
 				s.Fired = !SameTranscript(sent, msgs)
 				s.DropFired = len(sent) < len(msgs)
 				s.Exhausted = agent.EstimateTokens(sent) > budget
@@ -424,6 +452,8 @@ func runArm(ctx context.Context, probe ProbeFunc, entries []Entry, arm string, r
 			s.EstTokens = agent.EstimateTokens(sent)
 			s.SentMsgs = len(sent)
 			s.SentChars = charsOf(sent)
+			sum := sha256.Sum256([]byte(renderWire(sent)))
+			s.SentSHA256 = hex.EncodeToString(sum[:])
 			s.DivergenceIndex = DivergenceIndex(prevSent, sent)
 			rel, shared, frac := Relation(prevSent, sent)
 			s.PrefixRelation, s.PrefixSharedChars, s.PrefixSharedFrac = string(rel), shared, frac
@@ -462,6 +492,9 @@ func runArm(ctx context.Context, probe ProbeFunc, entries []Entry, arm string, r
 // number without an admissible instrument.
 func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash string, opts BenchOpts) (KVReport, error) {
 	opts = opts.withDefaults()
+	if err := validateArms(opts.Arms); err != nil {
+		return KVReport{}, err
+	}
 	if len(entries) == 0 {
 		return KVReport{}, fmt.Errorf("kvbench: empty corpus")
 	}
@@ -488,7 +521,7 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 		if err != nil {
 			return rep, err
 		}
-		for _, arm := range []string{"off", "on"} { // BLOCKS, never interleaved — one KV slot
+		for _, arm := range opts.Arms { // BLOCKS, never interleaved — one KV slot
 			ss, err := runArm(ctx, probe, entries, arm, round, opts)
 			rep.Samples = append(rep.Samples, ss...)
 			if err != nil {
@@ -546,8 +579,14 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 			okOn[key] = s
 		}
 	}
-	// Paired comparison over steps that succeeded in BOTH arms.
+	// Paired comparison over steps that succeeded in BOTH arms. With one arm
+	// skipped there is nothing to pair, and counting every sample of the arm
+	// that ran as "unpaired" would be noise.
+	bothArms := len(opts.Arms) == 2
 	for key, o := range okOff {
+		if !bothArms {
+			break
+		}
 		n, ok := okOn[key]
 		if !ok {
 			rep.Paired.UnpairedOff++
@@ -560,6 +599,9 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 		rep.Paired.OnPrefilled += n.Probe.PromptN
 	}
 	for key := range okOn {
+		if !bothArms {
+			break
+		}
 		if _, ok := okOff[key]; !ok {
 			rep.Paired.UnpairedOn++
 		}
@@ -567,7 +609,13 @@ func RunBench(ctx context.Context, probe ProbeFunc, entries []Entry, corpusHash 
 	rep.Paired.SizeEffectTokens = rep.Paired.OffRealPromptTokens - rep.Paired.OnRealPromptTokens
 	rep.Paired.PrefillDeltaTokens = rep.Paired.OnPrefilled - rep.Paired.OffPrefilled
 	offStats, onStats := Summarize("off", off), Summarize("on", on)
-	rep.Arms = []ArmStats{offStats, onStats}
+	for _, arm := range opts.Arms {
+		if arm == ArmOff {
+			rep.Arms = append(rep.Arms, offStats)
+		} else {
+			rep.Arms = append(rep.Arms, onStats)
+		}
+	}
 	rep.SizeVsCache = SizeVsCache{
 		OffRealPromptTokensUnpaired: offStats.TotalRealTokens,
 		OnRealPromptTokensUnpaired:  onStats.TotalRealTokens,
