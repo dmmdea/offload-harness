@@ -80,9 +80,8 @@ publishes an unknown licence as unknown. [ADR 0080](0080-a-ram-spill-moe-is-the-
 spill seat built on the 2026-10-07 rule: three measured gates, and one predicate used for render and seed.
 [ADR 0002](0002-grammar-reliable-serving-flags.md) and
 [ADR 0069](0069-an-unconstrained-seat-runs-classify-and-extract-from-the-prompt-and-the-text-lane-ships-dark.md) decide how a
-seat that cannot take a grammar is asked for structure. ADR 0080 is still Proposed. ADR 0058 is Proposed in this tree; the operator accepted it on 2026-10-14
-together with a third licence state, `conditional`, and the edit to ADR 0058 itself lands with the template-route change, not
-here. Both are cited as the nearest precedent, not as dependencies.
+seat that cannot take a grammar is asked for structure. ADR 0080 is still Proposed. ADR 0058 was accepted by the operator on 2026-10-14
+together with a third licence state, `conditional`, and its status was flipped with the template-route change. Both are cited as the nearest precedent, not as dependencies.
 
 ## Decision
 
