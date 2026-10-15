@@ -181,7 +181,7 @@ test("unlistedModels: a model file the list does not name is reported once, in g
 test("unlistedModels: a file matches the list by its name under the class directory, by its base name, and without regard to case or slash direction", () => {
   const graph = {
     "1": { class_type: "A", inputs: { f: "OK.safetensors" } },
-    "2": { class_type: "B", inputs: { f: "elsewhere\ok.safetensors" } },
+    "2": { class_type: "B", inputs: { f: "elsewhere\\ok.safetensors" } },
     "3": { class_type: "C", inputs: { f: "sub/u.gguf" } },
   };
   assert.deepEqual(TR.unlistedModels(graph, LISTED_MODELS), [], "the first two by base name of the listed name, the third by the whole name");

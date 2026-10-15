@@ -226,6 +226,15 @@ export const MODEL_LOADER_TYPES = Object.freeze(Object.keys(LOADER_CLASS));
 export const hasModelExt = (s) => { const l = s.toLowerCase(); return MODEL_EXT.some((e) => l.endsWith(e)); };
 const textOrNull = (v) => (typeof v === "string" && v !== "" ? v : null);
 
+// modelCovered: does a set of lower-cased model names cover the file a widget (or a converted graph's input) carries? The whole name does,
+// and so does its base name: an annotation names `x.safetensors` where a loader's widget holds `sub/x.safetensors`. One rule for both
+// readers of a template: the catalog (an unannotated widget file is a requirement only when no annotation covers it) and the runner (a
+// file the converted graph loads must be one the manifest names), so neither is stricter or looser than the other.
+export function modelCovered(names, file) {
+  const name = slash(file).toLowerCase();
+  return names.has(name) || names.has(baseName(name));
+}
+
 // requiredModels: the files a template needs. `active` are the files of active nodes: the
 // annotated ones (`properties.models`, which name a class, a download URL and sometimes a hash) and
 // any loader widget file the author never annotated. `inactive` are annotated files that only
@@ -261,7 +270,7 @@ export function requiredModels(workflow) {
     for (const v of node.widgets_values) {
       if (typeof v !== "string" || !hasModelExt(v)) continue;
       const name = slash(v);
-      if (annotated.has(name.toLowerCase()) || annotated.has(baseName(name).toLowerCase())) continue;
+      if (modelCovered(annotated, name)) continue;
       add(active, { name, directory: Object.hasOwn(LOADER_CLASS, type) ? LOADER_CLASS[type] : null, url: null, hash: null, hash_type: null, annotated: false, node_types: [type] });
     }
   }

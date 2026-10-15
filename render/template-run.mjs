@@ -8,7 +8,7 @@
 //
 // Every refusal is `{ ok: false, refusal: { code, message, details } }`, the shape the converter refuses in.
 import { convertTemplate } from "./template-to-graph.mjs";
-import { flattenIndex, hasModelExt, INPUT_LOADER_TYPES, joinPath, locateTemplates, MODEL_LOADER_TYPES, nodeIo } from "./templates-catalog.mjs";
+import { flattenIndex, hasModelExt, INPUT_LOADER_TYPES, joinPath, locateTemplates, modelCovered, MODEL_LOADER_TYPES, nodeIo } from "./templates-catalog.mjs";
 
 const refusal = (code, message, details = {}) => ({ ok: false, refusal: { code, message, details } });
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
@@ -91,4 +91,26 @@ export function convertForRun({ workflow, objectInfo, comfyVersion = null, minCo
   const applied = applyOverrides(converted.graph, overrides);
   if (!applied.ok) return applied;
   return { ...converted, graph: applied.graph };
+}
+
+// unlistedModels: the model files a converted graph loads that the manifest does not name, each once, in graph order. The manifest is
+// written from the catalog's static reading of the template and the graph from the converter's, two readers of one file, and they can
+// differ: a value an instance carries into an inner loader, a loader whose widgets_values is an object, a loader that stores no value and
+// takes the listing's default. The licence gate, the FLUX bar, the trust-on-first-use check and the host-RAM figure read only the manifest,
+// so the runner compares before it posts, whatever the cause of the difference. A file matches a manifest entry as the catalog matches an
+// annotation to a widget (modelCovered): by the name under the class directory or by its base name, without regard to case or slash
+// direction. A link (an array) and a value that is not a string are not files.
+export function unlistedModels(graph, manifestModels) {
+  const names = new Set();
+  for (const m of Array.isArray(manifestModels) ? manifestModels : []) {
+    if (typeof m?.path === "string") names.add(m.path.replace(/\\/g, "/").replace(/^models\/[^/]+\//i, "").toLowerCase());
+  }
+  const out = [];
+  for (const node of Object.values(isObj(graph) ? graph : {})) {
+    if (!isObj(node) || !isObj(node.inputs)) continue;
+    for (const v of Object.values(node.inputs)) {
+      if (typeof v === "string" && hasModelExt(v) && !modelCovered(names, v) && !out.includes(v)) out.push(v);
+    }
+  }
+  return out;
 }

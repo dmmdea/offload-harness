@@ -15,7 +15,7 @@ import { comfyUp as _comfyUp, ensureComfy as _ensureComfy, resolveComfyDir, reso
 import { freeHarnessInstance } from "./comfy-family.mjs";
 import { parseManifest as _parse, manifestHash as _hash } from "./manifest.mjs";
 import { satisfyManifest, defaultSatisfyDeps, verifyTofuModels, defaultTofuDeps } from "./manifest-satisfy.mjs";
-import { convertForRun, loadTemplate } from "./template-run.mjs";
+import { convertForRun, loadTemplate, unlistedModels } from "./template-run.mjs";
 import { leaseBeat } from "./lease-progress.mjs";
 import { preflightGraph } from "./preflight-graph-file.mjs";
 import { allOutputsByNode } from "./comfy-output.mjs";
@@ -133,6 +133,16 @@ export async function runGraphFlow(args, deps) {
         return await writeDefer({ code: "TEMPLATE_CONVERT_REFUSED", ref: converted.refusal.code, detail: converted.refusal.message });
       }
       graph = converted.graph;
+      // The manifest and the graph are two readers' answers (the catalog's and the converter's). A model file the graph loads that the manifest
+      // does not name is one the licence gate, the FLUX bar, trust on first use and the host-RAM figure never saw: defer before preflight, and
+      // before anything is posted.
+      const unlisted = unlistedModels(graph, m.models);
+      if (unlisted.length > 0) {
+        return await writeDefer({
+          code: "TEMPLATE_MODEL_UNLISTED", ref: unlisted[0],
+          detail: `the converted template loads ${unlisted.length} model file(s) its manifest does not name (${unlisted.join(", ")}); the licence gate, the FLUX bar and the trust-on-first-use check read only the files the manifest names, so it is not run`,
+        });
+      }
     }
 
     // Preflight now runs against the live /object_info WITH the packs loaded, so it catches

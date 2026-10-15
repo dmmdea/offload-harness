@@ -257,7 +257,7 @@ test("template run: a converted graph that loads a model file the manifest does 
 });
 
 test("template run: a converted graph whose every model file the manifest names is posted, by the file's path, its base name or its case", async () => {
-  for (const file of ["ok.safetensors", "OK.SafeTensors", "somewhere/else/ok.safetensors", "sub\v.safetensors"]) {
+  for (const file of ["ok.safetensors", "OK.SafeTensors", "somewhere/else/ok.safetensors", "sub\\v.safetensors"]) {
     let posted = null;
     const deps = baseDeps({
       convert: async () => ({ ok: true, graph: loaderGraph(file) }),
