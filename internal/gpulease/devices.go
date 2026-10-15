@@ -50,6 +50,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -163,7 +164,7 @@ func parseCardClaim(b []byte) (cardClaim, bool) {
 }
 
 func readEpochRecord(leaseDir string, epoch uint64) (*Meta, error) {
-	b, err := os.ReadFile(epochRecordPath(leaseDir, epoch))
+	b, err := readRecordFile(epochRecordPath(leaseDir, epoch))
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +229,7 @@ type liveLease struct {
 // legacy reads meta.json: the record (nil when absent or unparseable) and whether it is
 // a live lease (not reclaimable by the shared rule).
 func (r reader) legacy() (*Meta, bool, treeReading) {
-	b, err := os.ReadFile(filepath.Join(r.dir, metaFileName))
+	b, err := readRecordFile(filepath.Join(r.dir, metaFileName))
 	if err != nil {
 		return nil, false, treeReading{}
 	}
@@ -574,7 +575,11 @@ func (m *Manager) grantDevicesLocked(class Class, opts Options, devs []string, h
 		}
 	default:
 		if _, serr := os.Stat(m.metaPath()); serr == nil {
-			// Present but unparseable: a claim caught mid-write, or debris.
+			// Present but unreadable: a record that cannot be READ while its holder is alive is held (keeper.go); else a claim caught
+			// mid-write, or debris.
+			if _, rerr := m.readMeta(); isIOFailure(rerr) && m.keeperAlive(0, m.metaPath()) {
+				return nil, unreadableHeld(0), nil
+			}
 			if m.claimIsFresh() {
 				return nil, &ErrHeld{Info: Info{Held: true, Reason: "claim in progress"}}, nil
 			}
@@ -694,6 +699,13 @@ func (m *Manager) verifyNoDeviceLeases(epoch uint64) error {
 			}
 		}
 		if conflict == nil {
+			// A card lease whose record cannot be read is invisible to the reader and still held while its keeper is alive.
+			if kept := m.keptUnreadable(); len(kept) > 0 {
+				info := unreadableHeld(kept[0]).Info
+				conflict = &info
+			}
+		}
+		if conflict == nil {
 			return nil
 		}
 		// Withdraw our own claim, and only ours.
@@ -757,7 +769,10 @@ func (m *Manager) sweepDebrisLocked() {
 		keep[cur.Epoch] = true
 	}
 	m.sweepSeenLocked(keep)
-	// Unreadable records.
+	// Unreadable records. One that EXISTS and cannot be READ for an I/O reason (a scanner holds it open, a sharing violation) is held
+	// while its keeper is alive (keeper.go): its record and its claims stay, and the sweep takes them only once that liveness is gone.
+	// Corrupt bytes are not an I/O failure and are debris once old, as before.
+	kept := map[uint64]bool{}
 	if entries, err := os.ReadDir(m.v2Dir()); err == nil {
 		for _, e := range entries {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
@@ -767,7 +782,12 @@ func (m *Manager) sweepDebrisLocked() {
 			if perr != nil {
 				continue
 			}
-			if _, rerr := readEpochRecord(m.leaseDir(), epoch); rerr == nil {
+			_, rerr := readEpochRecord(m.leaseDir(), epoch)
+			if rerr == nil {
+				continue
+			}
+			if isIOFailure(rerr) && m.keeperAlive(epoch, epochRecordPath(m.leaseDir(), epoch)) {
+				kept[epoch] = true
 				continue
 			}
 			if fi, serr := e.Info(); serr == nil && m.now().Sub(fi.ModTime()) > claimGrace {
@@ -800,6 +820,9 @@ func (m *Manager) sweepDebrisLocked() {
 		if ok {
 			if rec := liveEpoch[c.Epoch]; rec != nil && containsString(rec.Devices, device) {
 				continue // a live lease's claim
+			}
+			if kept[c.Epoch] {
+				continue // the claim of a lease whose record cannot be read and whose keeper is alive
 			}
 		}
 		if age > claimGrace {
@@ -912,6 +935,9 @@ func (m *Manager) clearEpochMarkers(epoch uint64) {
 func (l *Lease) checkV2() error {
 	rec, err := readEpochRecord(l.mgr.leaseDir(), l.epoch)
 	if err != nil {
+		if isIOFailure(err) {
+			return &RecordUnreadableError{Epoch: l.epoch, Err: err} // a read that failed, not a verdict
+		}
 		return fmt.Errorf("gpulease: lease is gone (epoch %d); another holder may have the GPU", l.epoch)
 	}
 	if rec.State != stateActive {
@@ -948,7 +974,10 @@ func (m *Manager) restampV2(epoch uint64, fn func(*Meta)) error {
 func (m *Manager) restampV2Locked(epoch uint64, fn func(*Meta)) error {
 	rec, err := readEpochRecord(m.leaseDir(), epoch)
 	if err != nil {
-		return fmt.Errorf("gpulease: restamp: the lease is gone (epoch %d)", epoch)
+		if isIOFailure(err) {
+			return fmt.Errorf("gpulease: restamp: %w", &RecordUnreadableError{Epoch: epoch, Err: err}) // not gone: it could not be read
+		}
+		return fmt.Errorf("gpulease: restamp: the lease is gone (epoch %d): %w", epoch, err)
 	}
 	if !claimsNameEpoch(m.leaseDir(), rec) {
 		return fmt.Errorf("gpulease: restamp: fenced out — a card of epoch %d is claimed by another holder", epoch)
@@ -967,8 +996,13 @@ func (m *Manager) restampV2Locked(epoch uint64, fn func(*Meta)) error {
 // epoch is not a device lease (the caller falls through to the whole-node path).
 func (m *Manager) releaseByEpochV2(epoch uint64) (released, handled bool, err error) {
 	if epoch != 0 {
-		if _, serr := os.Stat(epochRecordPath(m.leaseDir(), epoch)); serr != nil {
-			return false, false, nil
+		if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr != nil {
+			if errors.Is(serr, fs.ErrNotExist) {
+				return false, false, nil // no card-scoped record: not a device lease (the whole-node path decides)
+			}
+			// The record may well be there: it could not be examined (an access error while it is replaced, an I/O error). "Nothing was
+			// held" would be a claim about a lease nobody looked at.
+			return false, true, fmt.Errorf("gpulease: releasing lease: the record of epoch %d cannot be examined: %w", epoch, serr)
 		}
 		if err := m.releaseV2(epoch); err != nil {
 			return false, true, err
@@ -979,6 +1013,11 @@ func (m *Manager) releaseByEpochV2(epoch uint64) (released, handled bool, err er
 	// device leases it is only unambiguous when exactly one is live.
 	if meta, _ := m.readMeta(); meta != nil {
 		return false, false, nil
+	}
+	// A card record that exists and cannot be read is not a lease that is not there: the reader skips it, so "whatever is held" would
+	// be answered over it. It is an error that names it.
+	if bad := m.unreadableCardRecords(); len(bad) > 0 {
+		return false, true, errUnreadableCardRecord(bad[0])
 	}
 	switch live := m.liveCardLeaseEpochs(); len(live) {
 	case 0:
@@ -991,6 +1030,35 @@ func (m *Manager) releaseByEpochV2(epoch uint64) (released, handled bool, err er
 	default:
 		return false, true, errSeveralCardLeases(live)
 	}
+}
+
+// unreadableCardRecords lists, lowest epoch first, the card-lease records (e/<epoch>.json) that exist and cannot be READ: an I/O
+// failure, a directory where the file was. The reader skips them ("the sweep deals with it once it is old"), which is right for a
+// judgement of who holds the cards and wrong for a question of whether anything is held.
+func (m *Manager) unreadableCardRecords() []uint64 {
+	entries, err := os.ReadDir(filepath.Join(m.leaseDir(), v2DirName))
+	if err != nil {
+		return nil
+	}
+	var bad []uint64
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		epoch, perr := strconv.ParseUint(strings.TrimSuffix(e.Name(), ".json"), 10, 64)
+		if perr != nil {
+			continue
+		}
+		if _, rerr := readEpochRecord(m.leaseDir(), epoch); rerr != nil && isIOFailure(rerr) {
+			bad = append(bad, epoch)
+		}
+	}
+	sort.Slice(bad, func(i, j int) bool { return bad[i] < bad[j] })
+	return bad
+}
+
+func errUnreadableCardRecord(epoch uint64) error {
+	return fmt.Errorf("gpulease: epoch %d: its record cannot be read; run again or pass --epoch %d", epoch, epoch)
 }
 
 // liveCardLeaseEpochs lists the epochs of the live card-scoped leases, lowest first.

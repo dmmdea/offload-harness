@@ -75,7 +75,10 @@ func resolveReserveHostRAMWith(ramGiven bool, ramGiB float64, class gpulease.Cla
 // line names the one that applies: nothing is wrapped (a hold), the wrapped command is not a render helper it knows (named
 // from the same table that recognises them), a recognised helper runs its own --graph, or a recognised helper's weight
 // files could not be sized. It is one line, and it never contains the word the declaring line is grepped by, so a script
-// that greps for the declaration still sees one. It changes no figure.
+// that greps for the declaration still sees one. It is a WARNING since the 2026-10-14 incident: the figure is a guess about a
+// command the lease could not read, and a lease that unloads the seat took the cards on it and held them idle for about 50
+// minutes while the host could not meet it; the line says so (the hold bound is what ends that now) and that --ram is the fix.
+// It changes no figure.
 func classDefaultHint(need hostneed.Need, cmdArgs []string, call hostneed.RenderCall, recognised bool) string {
 	if need.Source != hostneed.SourceClassDefault {
 		return ""
@@ -91,5 +94,5 @@ func classDefaultHint(need hostneed.Need, cmdArgs []string, call hostneed.Render
 	default:
 		why = "the weight files " + call.Script + " names could not be sized (a named file is not in the ComfyUI model tree and its family has no documented size)"
 	}
-	return "gpu reserve: that is the class default, not a measure of this command: " + why + ". Pass --ram <GiB> to state the real figure (--ram 0 when the weights sit on the cards)"
+	return "gpu reserve: WARNING: that is the class default, not a measure of this command: " + why + ". Declared as it stands, the figure may hold the cards while the host cannot meet it (a lease that unloads the seat takes the cards first and holds them up to gpu_hostram_hold_max_sec, then releases them). Pass --ram <GiB> to state the real figure (--ram 0 when the weights sit on the cards)"
 }

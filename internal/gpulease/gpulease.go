@@ -43,6 +43,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -283,6 +284,25 @@ type Meta struct {
 	// lock, the same admission rule at the same point in every other lease's view. Additive and omitempty:
 	// an older reader ignores it and reads a lease that declares nothing yet.
 	HostRAMWaitGiB float64 `json:"host_ram_wait_gib,omitempty"`
+	// HostRAMHoldUntilMs (F82 hold bound) is when the hold bound ends the wait of a lease that holds its cards while the
+	// host is asked for HostRAMWaitGiB: unix milliseconds, stamped when that wait begins and taken off only by admission (a
+	// wait that ends any other way leaves it: a lease that still asks for the host must carry a moment by which somebody
+	// releases it). 0 = no bound is known (the wait has not begun, or the bound is off and --wait alone ends it). It is what
+	// `gpu status` reads to say when the lease will be released, and what the lease's hidden holder acts on if the reserve that
+	// took it never releases it, since the bound can be a flag on one reserve and no other process sees that. Additive and
+	// omitempty: an older reader ignores it.
+	HostRAMHoldUntilMs int64 `json:"host_ram_hold_until_ms,omitempty"`
+	// HostRAMHoldPhase says which moment HostRAMHoldUntilMs is: "outer" (a detached reserve's bound while it still clears the seat; the
+	// host has not been asked), "wait" (the end of the wait for the host) or "release" (the reserve is releasing the lease and pushed
+	// the stamp out). Empty = a stamp an older writer made, which was always the wait's. Taken off with the stamp by admission.
+	// Additive and omitempty: an older reader ignores it.
+	HostRAMHoldPhase string `json:"host_ram_hold_phase,omitempty"`
+	// HolderGaveUpMs is when the lease's hidden holder gave up releasing it (unix milliseconds; 0 = it has not), and
+	// HolderGaveUpWhy the clipped reason. Written best effort by a holder whose own release failed after its retries and which then
+	// exits: from then on nothing polls the lease, and `gpu status` says so instead of promising a release at "its next poll".
+	// Additive and omitempty: an older reader ignores both.
+	HolderGaveUpMs  int64  `json:"holder_gave_up_ms,omitempty"`
+	HolderGaveUpWhy string `json:"holder_gave_up_why,omitempty"`
 
 	// --- record v2 (card-scoped leases). Every field is omitempty and unknown to a
 	// pre-v2 reader, which ignores it: a record without Devices is whole-node. ---
@@ -389,6 +409,16 @@ type Info struct {
 	HostRAMGiB float64
 	// HostRAMWaitGiB mirrors Meta.HostRAMWaitGiB: host RAM the holder asked for and the host has not admitted yet.
 	HostRAMWaitGiB float64
+	// HostRAMHoldUntil mirrors Meta.HostRAMHoldUntilMs: when the hold bound releases a lease that is waiting for the host
+	// with its cards held (the outer bound a detached reserve stamps before its drain, then the wait's own end). Zero = no bound
+	// is on the record.
+	HostRAMHoldUntil time.Time
+	// HostRAMHoldPhase mirrors Meta.HostRAMHoldPhase, normalised: HoldPhaseOuter, HoldPhaseWait or HoldPhaseRelease while a stamp is on
+	// the record (a stamp without a phase is the wait's), empty without one.
+	HostRAMHoldPhase string
+	// HolderGaveUp mirrors Meta.HolderGaveUpMs, with the reason: the moment the lease's hidden holder gave up releasing it.
+	HolderGaveUp    time.Time
+	HolderGaveUpWhy string
 	// HeartbeatAt is the holder's last renewal (the per-epoch heartbeat file,
 	// else the acquisition stamp). Zero when unknown.
 	HeartbeatAt time.Time
@@ -1255,6 +1285,12 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		HardEnd:        hardEndOf(meta),
 		Expired:        meta.Expired,
 		ExpiredWhy:     meta.ExpiredWhy,
+
+		HostRAMHoldUntil: holdUntilOf(meta.HostRAMHoldUntilMs),
+		HostRAMHoldPhase: holdPhaseOf(meta),
+
+		HolderGaveUp:    holdUntilOf(meta.HolderGaveUpMs),
+		HolderGaveUpWhy: meta.HolderGaveUpWhy,
 	}
 }
 
@@ -1279,8 +1315,19 @@ func cloneProgress(p *Progress) *Progress {
 // Leases narrow it.
 func (m *Manager) Inspect() Info { return m.reader().primary() }
 
+// isIOFailure is true for an error from reading a record that is a failure of the file system's and neither "absent" nor "the bytes
+// are not a record": the file may well be there and be perfectly good, and the read failed (an access error while it is being
+// replaced, a sharing violation, an I/O error). Callers that read a failure as "nothing there" are wrong about it.
+func isIOFailure(err error) bool {
+	if err == nil || errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	var pe *fs.PathError
+	return errors.As(err, &pe)
+}
+
 func (m *Manager) readMeta() (*Meta, error) {
-	b, err := os.ReadFile(m.metaPath())
+	b, err := readRecordFile(m.metaPath())
 	if err != nil {
 		return nil, err
 	}
@@ -1427,6 +1474,10 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 
 		// Someone else holds the claim.
 		meta, rerr := m.readMeta()
+		if isIOFailure(rerr) && m.keeperAlive(0, m.metaPath()) {
+			// Present and not readable, and its holder is alive: held, whatever the age of the record (keeper.go).
+			return nil, unreadableHeld(0)
+		}
 		if rerr != nil && m.claimIsFresh() {
 			// Present but not yet parseable: a claim caught mid-write. Treat it as
 			// held rather than stealing it — the alternative is a race where two
@@ -1483,6 +1534,9 @@ func (m *Manager) removeStaleClaim(judged *Meta) error {
 			// the caller applied before it judged.
 			if judged != nil || m.claimIsFresh() {
 				return nil
+			}
+			if isIOFailure(err) && m.keeperAlive(0, m.metaPath()) {
+				return nil // unreadable, not corrupt, and its holder is alive (keeper.go)
 			}
 		case !m.reclaimable(cur, m.now()):
 			return nil // no longer stale: a new holder's claim, or the old holder came back
@@ -1924,6 +1978,11 @@ func createClaim(path string) (*os.File, error) {
 // reclaim rule fire, blocking the card behind nobody. Measured under six concurrent
 // acquire/release cycles. The overlap is microseconds wide, so retrying clears it.
 func removeClaim(path string) error {
+	if removeClaimFault != nil {
+		if err := removeClaimFault(path); err != nil {
+			return err
+		}
+	}
 	for attempt := 0; ; attempt++ {
 		err := os.Remove(path)
 		if err == nil || os.IsNotExist(err) {
@@ -1980,10 +2039,18 @@ func (l *Lease) Check() error {
 	if l.done.Load() {
 		return errors.New("gpulease: lease already released")
 	}
+	if checkFaultHook != nil {
+		if err := checkFaultHook(l.epoch); err != nil {
+			return err
+		}
+	}
 	if l.v2 {
 		return l.checkV2()
 	}
 	meta, err := l.mgr.readMeta()
+	if isIOFailure(err) {
+		return &RecordUnreadableError{Epoch: l.epoch, Err: err} // a read that failed, not a verdict
+	}
 	if err != nil || meta == nil {
 		return fmt.Errorf("gpulease: lease is gone (epoch %d); another holder has the GPU", l.epoch)
 	}
@@ -2043,17 +2110,29 @@ func (l *Lease) Renew() error {
 // stops existing (a concurrent TryAcquire still meets an existing file). The
 // epoch itself is never moved by this path.
 func (m *Manager) Restamp(epoch uint64, fn func(*Meta)) error {
-	if _, serr := os.Stat(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
+	if restampFaultHook != nil {
+		if err := restampFaultHook(epoch); err != nil {
+			return err
+		}
+	}
+	if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr == nil || !errors.Is(serr, fs.ErrNotExist) {
+		// A look that failed for any reason but the file being absent says nothing about which kind of lease this is; the card path reads
+		// the record itself and answers "cannot be read" when it cannot, where the whole-node path would answer "gone".
 		return m.restampV2(epoch, fn)
 	}
 	return m.withEpochLock(func() error { return m.restampWholeLocked(epoch, fn) })
 }
 
+// restampFaultHook is a test seam: when set, Restamp calls it first and fails with what it returns. nil in production.
+var restampFaultHook func(epoch uint64) error
+
 // restampLocked is Restamp for a caller that already holds the epoch lock: the check-and-stamp of AwaitHostRAM
 // reads the leases, decides and writes the record in ONE critical section, so the stamp that turns a waiting
 // need into a declared one cannot be separated from the comparison that admitted it.
 func (m *Manager) restampLocked(epoch uint64, fn func(*Meta)) error {
-	if _, serr := os.Stat(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
+	if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr == nil || !errors.Is(serr, fs.ErrNotExist) {
+		// A look that failed for any reason but the file being absent says nothing about which kind of lease this is; the card path reads
+		// the record itself and answers "cannot be read" when it cannot, where the whole-node path would answer "gone".
 		return m.restampV2Locked(epoch, fn)
 	}
 	return m.restampWholeLocked(epoch, fn)
@@ -2066,7 +2145,13 @@ var restampWholeHook func()
 // restampWholeLocked is the whole-node half of Restamp; the caller holds the epoch lock.
 func (m *Manager) restampWholeLocked(epoch uint64, fn func(*Meta)) error {
 	meta, err := m.readMeta()
-	if err != nil || meta == nil {
+	if isIOFailure(err) {
+		return fmt.Errorf("gpulease: restamp: %w", &RecordUnreadableError{Epoch: epoch, Err: err}) // not gone: it could not be read
+	}
+	if err != nil {
+		return fmt.Errorf("gpulease: restamp: the lease is gone (epoch %d): %w", epoch, err)
+	}
+	if meta == nil {
 		return fmt.Errorf("gpulease: restamp: the lease is gone (epoch %d)", epoch)
 	}
 	if meta.Epoch != epoch {
@@ -2149,8 +2234,11 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 	var released bool
 	lerr := m.withEpochLock(func() error {
 		meta, err := m.readMeta()
+		if err != nil && isIOFailure(err) {
+			return fmt.Errorf("gpulease: releasing lease: the record cannot be read: %w", err) // it may well be there
+		}
 		if err != nil || meta == nil {
-			return nil // nothing held
+			return nil // nothing held (absent, or corrupt and treated as stale)
 		}
 		if epoch != 0 && meta.Epoch != epoch {
 			return errLeaseMovedOn(epoch, meta.Epoch)
@@ -2180,10 +2268,13 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 // held (or the named epoch is not): there is nothing to end. It reads and never writes.
 func (m *Manager) ReleaseTarget(epoch uint64) (uint64, error) {
 	if epoch != 0 {
-		if _, serr := os.Stat(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
-			return epoch, nil
+		if serr := statRecord(epochRecordPath(m.leaseDir(), epoch)); serr == nil || !errors.Is(serr, fs.ErrNotExist) {
+			return epoch, nil // there, or there and not examinable: the release reports which
 		}
 		meta, err := m.readMeta()
+		if isIOFailure(err) {
+			return epoch, nil // may be this lease: the release reports it
+		}
 		if err != nil || meta == nil {
 			return 0, nil
 		}
@@ -2192,11 +2283,15 @@ func (m *Manager) ReleaseTarget(epoch uint64) (uint64, error) {
 		}
 		return epoch, nil
 	}
-	if meta, err := m.readMeta(); meta != nil {
-		if err != nil {
-			return 0, nil
-		}
+	meta, err := m.readMeta()
+	if isIOFailure(err) {
+		return 0, fmt.Errorf("gpulease: the whole-node lease record cannot be read: %w; run again", &RecordUnreadableError{Err: err})
+	}
+	if meta != nil {
 		return meta.Epoch, nil
+	}
+	if bad := m.unreadableCardRecords(); len(bad) > 0 {
+		return 0, errUnreadableCardRecord(bad[0])
 	}
 	switch live := m.liveCardLeaseEpochs(); len(live) {
 	case 0:
@@ -2210,7 +2305,7 @@ func (m *Manager) ReleaseTarget(epoch uint64) (uint64, error) {
 
 // errLeaseMovedOn is the refusal for releasing an epoch that is no longer the current lease.
 func errLeaseMovedOn(asked, current uint64) error {
-	return fmt.Errorf("gpulease: lease has moved on (asked for epoch %d, current is %d)", asked, current)
+	return &ErrLeaseMovedOn{Asked: asked, Current: current}
 }
 
 // Release drops the lease — but ONLY if we still hold it. Releasing unconditionally
@@ -2230,6 +2325,12 @@ func (l *Lease) Release() error {
 		return nil
 	}
 	meta, err := l.mgr.readMeta()
+	if isIOFailure(err) {
+		// The record may well be there and be ours: it could not be read. "Already gone" would be a claim about a lease nobody
+		// looked at, and a holder that believed it would exit over a held lease. Leave it releasable: the caller was told.
+		l.done.Store(false)
+		return fmt.Errorf("gpulease: releasing lease: %w", &RecordUnreadableError{Epoch: l.epoch, Err: err})
+	}
 	if err != nil || meta == nil {
 		return nil // already gone
 	}
