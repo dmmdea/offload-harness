@@ -8,6 +8,7 @@ package compeval
 import (
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
 )
@@ -17,21 +18,35 @@ import (
 type LadderOpts struct {
 	GCF      bool `json:"gcf"`
 	Skeleton bool `json:"skeleton"`
+	// Search and Logs switch on the two default-off rungs (thin older search
+	// listings; fold runs of near-identical lines in older build and test output).
+	Search bool `json:"search"`
+	Logs   bool `json:"logs"`
 }
 
-// Label is the ladder id stamped into reports ("base", "gcf", "skeleton",
-// "gcf+skeleton").
+// Label is the ladder id stamped into reports: the enabled rungs joined by "+"
+// in the fixed order gcf, skeleton, search, logs ("gcf+skeleton+search"), or
+// "base" when none is on.
 func (o LadderOpts) Label() string {
-	switch {
-	case o.GCF && o.Skeleton:
-		return "gcf+skeleton"
-	case o.GCF:
-		return "gcf"
-	case o.Skeleton:
-		return "skeleton"
-	default:
+	var on []string
+	for _, r := range []struct {
+		on   bool
+		name string
+	}{{o.GCF, "gcf"}, {o.Skeleton, "skeleton"}, {o.Search, "search"}, {o.Logs, "logs"}} {
+		if r.on {
+			on = append(on, r.name)
+		}
+	}
+	if len(on) == 0 {
 		return "base"
 	}
+	return strings.Join(on, "+")
+}
+
+// replayOpts is the option set every replay site hands the production ladder,
+// so run, ab, kvbench and contextbench can never replay different rungs.
+func (o LadderOpts) replayOpts() agent.ReplayOpts {
+	return agent.ReplayOpts{GCF: o.GCF, Skeleton: o.Skeleton, SearchResults: o.Search, LogCollapse: o.Logs}
 }
 
 // EntryResult is one entry's replay measurement.
@@ -105,7 +120,7 @@ func Evaluate(entries []Entry, corpusHash string, opts LadderOpts) Report {
 		msgs := e.Msgs()
 		before := agent.EstimateTokens(msgs)
 		budget, keep, prot := entryParams(e, msgs)
-		after := agent.CompactReplay(msgs, budget, keep, prot, agent.ReplayOpts{GCF: opts.GCF, Skeleton: opts.Skeleton})
+		after := agent.CompactReplay(msgs, budget, keep, prot, opts.replayOpts())
 		afterTokens := agent.EstimateTokens(after)
 		ret, lost := Retention(msgs, after)
 		ratio := 1.0
