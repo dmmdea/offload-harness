@@ -428,6 +428,13 @@ func TestQueueRouteCountsEveryCutJob(t *testing.T) {
 // still answered, and its ledger row is the one the caller was told about: the same job
 // id, the same call-deadline wording. A row under a different id could not be found from
 // the result.
+//
+// What is pinned is that the row and the result agree, not what the count in the wording is: that
+// count is how many subtasks had no result when the call first looked at its deadline, which is
+// the same in every reason of the call and depends on how fast a starved runner finished chunk one
+// (TestRunBatchedDefersLaterChunksAtTheDeadline pins its value, with a window sized for that).
+// The case used to expect "2 unfinished" in a 400 ms window and read a slow start as a wrong row:
+// 178 of 192 runs failed under starvation, 112 of them with the count at 17.
 func TestNeverStartedRowCarriesTheJobIDTheCallerWasGiven(t *testing.T) {
 	cfg := testCfg(t)
 	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
@@ -443,22 +450,33 @@ func TestNeverStartedRowCarriesTheJobIDTheCallerWasGiven(t *testing.T) {
 		contracts[i] = core.AgentContract{Goal: "fast one"}
 	}
 	contracts[MaxBatchSubtasks-1] = core.AgentContract{Goal: "slow one"}
-	res, _, err := RunBatched(t.Context(), cfg, local, contracts, "local", nil, deadlineIn(400*time.Millisecond))
+	// The slow page waits for its context and nothing else, so a call deadline that does not end the
+	// call would hold the suite: the context ends it, with a message.
+	ctx, cancel := context.WithTimeout(t.Context(), hangGuard)
+	defer cancel()
+	res, _, err := RunBatched(ctx, cfg, local, contracts, "local", nil, deadlineIn(startWindow))
+	if ctx.Err() != nil {
+		t.Fatalf("the call was still running after %s: the call deadline did not end it", hangGuard)
+	}
 	if err != nil {
 		t.Fatal(err)
+	}
+	never := res[pages-1]
+	if !strings.HasPrefix(never.Result.Reason, deadlinePrefix) || !strings.Contains(never.Result.Reason, "never started") {
+		t.Fatalf("the never-started page's result reads %q, want the call-deadline wording for a page that never started", never.Result.Reason)
 	}
 	rows, _ := ledger.ReadAll(cfg.LedgerPath)
 	found := false
 	for _, row := range rows {
-		if row.JobID == res[pages-1].JobID {
+		if row.JobID == never.JobID {
 			found = true
-			if !strings.HasPrefix(row.Reason, deadlinePrefix+"2 unfinished") {
-				t.Fatalf("the never-started page's row reads %q, want the call-deadline wording", row.Reason)
+			if row.Reason != never.Result.Reason {
+				t.Fatalf("the never-started page's row reads %q, but the caller was told %q: want the same call-deadline wording", row.Reason, never.Result.Reason)
 			}
 		}
 	}
 	if !found {
-		t.Fatalf("no ledger row carries the job id (%q) the caller was given for the never-started page", res[pages-1].JobID)
+		t.Fatalf("no ledger row carries the job id (%q) the caller was given for the never-started page", never.JobID)
 	}
 }
 
