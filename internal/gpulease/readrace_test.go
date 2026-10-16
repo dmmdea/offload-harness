@@ -26,9 +26,10 @@ import (
 // rename cannot replace an entry that has one open (renameReplacing gives up after 2 s), so on a loaded host the writer starved:
 // that is the writer's business and not the subject, so a starved rewrite is tried again.
 //
-// A few stray misses are allowed (strayMisses). With the shared open in, a run under 30 busy-loop processes showed one miss in about
-// 8,000 to 26,000 reads in 2 runs of about 80, which this change does not explain; the defect misses dozens to hundreds per run, so
-// the allowance cannot hide it (the mutant, os.Open in place of OpenShared, fails every run by a factor of more than ten).
+// No miss is allowed. With the shared open alone, a run under 30 busy-loop processes still showed one miss in about 8,000 to 26,000
+// reads, in 2 runs of about 80, and the test then allowed 3 a run. That was the instant a rename has marked the old entry for deletion:
+// every open of the name fails with ERROR_ACCESS_DENIED, shared or not. readSharedFile now waits it out (readretry_test.go), and 150
+// runs under 30 busy-loop processes (about 280,000 Leases() reads and 480,000 EpochIsCurrent reads) missed none.
 func TestAHeldLeaseNeverReadsAbsentWhileItsRecordIsRewritten(t *testing.T) {
 	m := scopedRealClock(t)
 	l := mustDevices(t, m, card0)
@@ -36,9 +37,8 @@ func TestAHeldLeaseNeverReadsAbsentWhileItsRecordIsRewritten(t *testing.T) {
 	epoch := l.Epoch()
 
 	const (
-		rewrites    = 150
-		strayMisses = 3
-		readPause   = 100 * time.Microsecond
+		rewrites  = 150
+		readPause = 100 * time.Microsecond
 	)
 	stop := make(chan struct{})
 	var readers sync.WaitGroup
@@ -89,10 +89,11 @@ func TestAHeldLeaseNeverReadsAbsentWhileItsRecordIsRewritten(t *testing.T) {
 	if leaseReads.Load() == 0 || fenceReads.Load() == 0 {
 		t.Fatalf("the readers never ran (Leases %d reads, EpochIsCurrent %d reads): the test proved nothing", leaseReads.Load(), fenceReads.Load())
 	}
-	if n := leaseMisses.Load(); n > strayMisses {
+	t.Logf("Leases() missed %d of %d reads; EpochIsCurrent missed %d of %d reads", leaseMisses.Load(), leaseReads.Load(), fenceMisses.Load(), fenceReads.Load())
+	if n := leaseMisses.Load(); n > 0 {
 		t.Errorf("Leases() did not report one live lease on %d of %d reads while the held lease's record was rewritten %d times", n, leaseReads.Load(), rewrites)
 	}
-	if n := fenceMisses.Load(); n > strayMisses {
+	if n := fenceMisses.Load(); n > 0 {
 		t.Errorf("EpochIsCurrent(%d) called the held lease not current on %d of %d reads while its record was rewritten %d times", epoch, n, fenceReads.Load(), rewrites)
 	}
 }
