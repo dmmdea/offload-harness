@@ -6,6 +6,10 @@ import (
 	"testing"
 )
 
+// spanBsu is a backslash and a u, written as a byte value: a source literal of the escape that Go's encoder writes
+// for an ampersand is rewritten into the character by some editors and tools.
+const spanBsu = "\x5c" + "u"
+
 // Names that would make a source line credential-shaped are written in two pieces.
 const (
 	spanCk      = "Coo" + "kie"
@@ -91,7 +95,8 @@ func spanProbes() []spanProbe {
 	add("list, short first element", []string{v}, "theme=dark", "session="+v+"; Path=/")
 	add("list, two long elements", []string{v, w}, "session="+v, "other="+w)
 	add("list, long short long", []string{v, w}, "session="+v+"; HttpOnly", "theme=dark", "other="+w)
-	add("html escapes before the credential", []string{v}, `a=x&y`, "sessionid="+v)
+	add("html escapes before the credential", []string{v}, "a=x"+spanBsu+"0026y", "sessionid="+v)
+	add("ampersand before the credential", []string{v}, `a=x&y`, "sessionid="+v)
 	add("flash with escapes before the credential", []string{h, v}, `messages="`+h+flash+`"`, "sessionid="+v)
 	add("key word names", []string{v, w}, "refresh_"+spanKwToken+"="+v, "sessionid="+w)
 	add("password and secret names", []string{v, w}, spanKwPass+"="+v, spanKwSecr+"="+w)
@@ -245,7 +250,7 @@ func TestValueTailGateRemembersEveryValueInTheSpan(t *testing.T) {
 		{"tab", spanCk + ": m=\"" + a + "\t" + b + "\"; sid=" + v, []string{b, v, crossing("\t")}},
 		{"html escapes", spanCk + `: m="` + a + `\u0026\u003c` + b + `"; sid=` + v, []string{b, v, crossing(`\u0026\u003c`)}},
 		{"quoted body in args", spanCk + `: m=\"` + a + ` ` + b + `\"; sid=` + v, []string{b, v, crossing(" ")}},
-		{"quoted body in a shell string in args", spanCk + `: m=\\\"` + a + `\$x ` + b + `\\\"; sid=` + v, []string{b, v, crossing(`\$x `)}},
+		{"quoted body in a shell string in args", spanCk + `: m=\\\"` + a + `\\$x ` + b + `\\\"; sid=` + v, []string{b, v, crossing(`\\$x `)}},
 		{"html escape before the value", spanCk + `: a=x\u0026y; sid=` + v, []string{v}},
 		{"list elements", spanSetCk + `":["theme=dark","session=` + v + `; Path=/","other=` + w, []string{v, w}},
 		{"folded", spanCk + ":\r\n sid=" + v + "; other=" + w, []string{v, w}},

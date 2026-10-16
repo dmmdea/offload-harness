@@ -7,6 +7,10 @@ import (
 	"testing"
 )
 
+// bsu is a backslash and a u, written as a byte value: a source literal of the escape that Go's encoder writes for
+// an ampersand is rewritten into the character by some editors and tools, and the test would then pin nothing.
+const bsu = "\x5c" + "u"
+
 // Names that would make a source line credential-shaped are written in two pieces.
 const (
 	ckName   = "Coo" + "kie"
@@ -37,7 +41,7 @@ func cookieShapes() []cookieShape {
 	A, B := al(815, 16), al(816, 16)
 	flash := `$[[\"__json_message\"\0540\05425\054\"Saved\"]]`
 	quoted := func(mid string) string { return `m="` + A + mid + B + `"` }
-	return []cookieShape{
+	shapes := []cookieShape{
 		{"bare long", "sid=" + V, []string{V}, true},
 		{"bare long, other name", "csrf=" + X, []string{X}, true},
 		{"short", "theme=dark", nil, false},
@@ -58,17 +62,46 @@ func cookieShapes() []cookieShape {
 		{"quoted body with a dollar sign", quoted("$HOME"), []string{A, B}, true},
 		{"quoted body with a backtick", quoted("`id`"), []string{A, B}, true},
 		{"quoted body with HTML characters", quoted("<b>&"), []string{A, B}, true},
-		{"literal HTML escapes in a quoted body", quoted(`&<>`), []string{A, B}, true},
+		{"literal HTML escapes in a quoted body", quoted(bsu + "0026" + bsu + "003c" + bsu + "003e"), []string{A, B}, true},
 		{"django saved", `m="Saved ok"`, []string{"Saved ok"}, false},
 		{"django apostrophe", `m="Can't save"`, []string{"Can't save"}, false},
 		{"django ampersand", `m="Tom&Jerry"`, []string{"Tom&Jerry"}, false},
-		{"literal HTML escape, bare", `a=x&y`, nil, false},
+		{"literal HTML escape, bare", "a=x" + bsu + "0026y", nil, false},
 		{"ampersand, bare", `a=x&y`, nil, false},
 		{"refresh key word", "refresh_" + kwToken + "=" + V, []string{V}, true},
 		{"auth key word", "auth_" + kwToken + "=" + W, []string{W}, true},
 		{"password key word", kwPass + "=" + V, []string{V}, true},
 		{"secret key word", kwSecret + "=" + W, []string{W}, true},
+		{"tab in a bare value", "a=x\ty", nil, false},
+		{"white space in the first characters of a quoted value", `e="ab cdefghijklmnopqrstuvwxyz"`, []string{"cdefghijklmnopqrstuvwxyz"}, false},
 	}
+	return append(shapes, edgeShapes()...)
+}
+
+// edgeShapes are values at the edge of the count that starts a match: 12 characters with no white space from the
+// start of a value, an escape counting as one. Each kind comes as a value of 12 (the class takes the line) and as
+// one of 11 (it does not), bare and quoted, so a rule that counts an escape as more or less than one character
+// is caught in every wrapping.
+func edgeShapes() []cookieShape {
+	var out []cookieShape
+	for _, k := range []struct{ name, esc string }{
+		{"unicode escape", bsu + "0026"},
+		{"octal escape", `\054`},
+		{"escaped quote", `\"`},
+		{"escaped backslash", `\\`},
+		{"escaped character", `\;`},
+		{"dollar sign", "$"},
+		{"backtick", "`"},
+	} {
+		long, short := "abcdef"+k.esc+"ghijk", "abcdef"+k.esc+"ghij"
+		out = append(out,
+			cookieShape{"quoted, 12 characters with an " + k.name, `e="` + long + `"`, []string{long}, true},
+			cookieShape{"quoted, 11 characters with an " + k.name, `e="` + short + `"`, []string{short}, false})
+	}
+	long, short := "abcdef"+bsu+"0026ghijk", "abcdef"+bsu+"0026ghij"
+	return append(out,
+		cookieShape{"bare, 12 characters with a unicode escape", "e=" + long, []string{long}, true},
+		cookieShape{"bare, 11 characters with a unicode escape", "e=" + short, []string{short}, false})
 }
 
 // enc is s as it stands inside a JSON string, the way Go's encoder writes it (an ampersand, a less-than and a
@@ -340,5 +373,5 @@ func TestCookieHeaderSpanIsWholeInEveryWrapping(t *testing.T) {
 	if len(failing) > 0 {
 		t.Errorf("%d cases in %d wrappings, %d wrappings break the contract:\n%s", len(cases), len(order), len(failing), strings.Join(failing, "\n"))
 	}
-	t.Logf("%d cases in %d wrappings", len(cases), len(order))
+	t.Logf("%d cases from %d cookie shapes in %d wrappings", len(cases), len(cookieShapes()), len(order))
 }

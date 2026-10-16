@@ -123,9 +123,9 @@ func TestCookieSpanTakesEveryElementOfAList(t *testing.T) {
 func TestCookieSpanTakesHTMLEscapesAheadOfTheCredential(t *testing.T) {
 	v, _, _, _ := spanValues()
 	for _, body := range []string{
+		"a=x" + bsu + "0026y; sessionid=" + v,
 		`a=x&y; sessionid=` + v,
-		`a=x<y>; sessionid=` + v,
-		`a=x&y; sessionid=` + v,
+		"a=x" + bsu + "003cy" + bsu + "003e; sessionid=" + v,
 		`a=x<y>z&; sessionid=` + v,
 	} {
 		for _, wn := range []string{"header line", "args", "args of args", "folded header in args"} {
@@ -152,6 +152,36 @@ func TestCookieSpanTakesAFoldedHeader(t *testing.T) {
 		assertSpan(t, "raw, "+c.name, text, c.line, false, v, a, b)
 		args := argsOf("one\n" + c.line + "\nthree")
 		assertSpan(t, "args, "+c.name, args, enc(c.line), true, v, a, b)
+	}
+}
+
+// TestCookieSpanTakesAFoldedList: a list can be folded too: a line break before the opening bracket, after it, or
+// between the name and the colon. The span still ends at the closing bracket.
+func TestCookieSpanTakesAFoldedList(t *testing.T) {
+	v, w, _, _ := spanValues()
+	tail := `], "Other": "x=` + w + `"`
+	for _, c := range []struct{ name, span string }{
+		{"line break before the bracket", sckName + ":\r\n [\"sid=" + v + "\""},
+		{"line break after the bracket", sckName + ": [\r\n  \"sid=" + v + "\"\r\n"},
+		{"fold before the colon", sckName + "\r\n : [\"sid=" + v + "\""},
+	} {
+		assertSpan(t, "raw, "+c.name, "x "+c.span+tail, c.span, false, v)
+		assertSpan(t, "args, "+c.name, argsOf("x "+c.span+tail), enc(c.span), true, v)
+	}
+}
+
+// TestCookieSpanEndsAtAnEscapedLineBreakInsideAQuote: a quoted value does not run over a line break, a raw one on a
+// header line or the JSON escape of one in Args; the quote is then not a pair and ends the span.
+func TestCookieSpanEndsAtAnEscapedLineBreakInsideAQuote(t *testing.T) {
+	v, _, _, _ := spanValues()
+	span := ckName + ": sid=" + v + "; m="
+	line := span + `"short` + "\n" + `rest"; z=1`
+	if m := cookieMatch("one\n" + line); m[len(Lead(m)):] != span {
+		t.Errorf("raw: matched %q, want %q", m, span)
+	}
+	m := cookieMatch(argsOf("one\n" + line + "\nthree"))
+	if got := m[len(Lead(m)):]; got != enc(span) {
+		t.Errorf("args: matched %q, want %q", got, enc(span))
 	}
 }
 
@@ -234,6 +264,9 @@ func TestCookieSpanStaysQuietWithoutALongValue(t *testing.T) {
 		ckName + `: messages="Saved ok"; theme=dark`,
 		ckName + `: m="Can't save"; lang=en`,
 		ckName + `: m="Tom&Jerry"`,
+		ckName + ": session=\" + fixtureJWT() + \"; path=/",
+		ckName + `: m="Your changes were saved successfully"`,
+		ckName + ": a=x" + bsu + "0026y; b=z",
 		ckName + `: a=x&y; b=z`,
 		ckName + ":\r\n theme=dark",
 		sckName + `: id=a3fWa; Expires=Wed, 21 Oct 2015 07:28:00 GMT; Secure; HttpOnly`,

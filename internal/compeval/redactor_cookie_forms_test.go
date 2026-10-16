@@ -16,8 +16,8 @@ func TestRedactorTakesACookieInCodeAndDumps(t *testing.T) {
 		sck = "Set-Coo" + "kie"
 	)
 	for _, c := range []struct{ name, text, after string }{
-		{"json set-cookie list", `{"` + sck + `":["session=` + v + `; Path=/"]} end`, `"]} end`},
-		{"json cookie list", `"` + ck + `": [ "sid=` + v + `" ] end`, `" ] end`},
+		{"json set-cookie list", `{"` + sck + `":["session=` + v + `; Path=/"]} end`, `]} end`},
+		{"json cookie list", `"` + ck + `": [ "sid=` + v + `" ] end`, `] end`},
 		{"go Header.Set", `req.Header.Set("` + ck + `", "sid=` + v + `") end`, `") end`},
 		{"js setRequestHeader", `xhr.setRequestHeader('` + ck + `','sid=` + v + `') end`, `') end`},
 		{"subscript", `headers["` + ck + `"] = "sid=` + v + `" end`, `" end`},
