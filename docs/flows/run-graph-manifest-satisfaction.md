@@ -115,11 +115,12 @@ in the nine steps above is unchanged:
   ([`template-run.mjs`](../../render/template-run.mjs), [the converter](../systems/media-generation.md#template-to-api-converter-rendertemplate-to-graphmjs)),
   applies the overrides, and hands the converted graph to the preflight of step 8 and to the POST of step 9. A refusal (an unknown
   node class, a ComfyUI older than the template, an override that names a node or input the graph lacks, or one that would retarget a
-  model or input file, which the gate never looked at) defers
+  model or input file or name an embedding, which the gate never looked at) defers
   `TEMPLATE_CONVERT_REFUSED`, its `ref` the converter's own code, and the ComfyUI that was started is torn down as for any defer.
   The converted graph is then compared with the manifest: a model file it loads that the manifest does not name (the catalog and the converter
   are two readers of the template, and the licence gate, the FLUX bar and trust on first use read only the manifest) defers
-  `TEMPLATE_MODEL_UNLISTED`, its `ref` the first such file, before preflight and before anything is posted.
+  `TEMPLATE_MODEL_UNLISTED`, its `ref` the first such file, before preflight and before anything is posted. An embedding the prompt text
+  names (`embedding:<name>`) is such a file, as `models/embeddings/<name>`.
 
 The runtime manifest names each model by the path it was found at and has no `source_url`: step 4 therefore never downloads for a
 template run, and a model that went missing defers `MODEL_DOWNLOAD_FAILED` ("missing on disk and no source_url"). Step 4 looks for

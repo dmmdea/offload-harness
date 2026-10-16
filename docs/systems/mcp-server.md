@@ -1134,9 +1134,11 @@ A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `c
    conversion needs the running ComfyUI's `/object_info` and version. `overrides` are applied to the converted graph: a key
    is `<node id>.<input name>` (a node inside a subgraph is `<instance>:<node>`), the node must be in the graph, the input
    must already be there as a value (an input the node lacks is never added, and one wired to another node is never cut), and a
-   value is a string, a number or a boolean. An override never retargets a file (`override_is_file`): the licence gate, the FLUX bar
-   and the trust-on-first-use check read the models the template names, so an input of a model or input loader node, an input that
-   holds a model file name, and a value that is a model file name are all refused. `seed` pins the seed inputs. A refusal of the conversion or of an override is the
+   value is a string, a number or a boolean. An override never retargets a file or names an embedding (`override_is_file`): the licence
+   gate, the FLUX bar and the trust-on-first-use check read the models the template names, so an input of a model or input loader node, an
+   input that holds a model file name, a value that is a model file name, and a string value with `embedding:` in it (in any letter case:
+   ComfyUI loads a file of its embeddings directory from that word of the prompt text, with no loader node and no extension in the value)
+   are all refused. `seed` pins the seed inputs. A refusal of the conversion or of an override is the
    defer `TEMPLATE_CONVERT_REFUSED`, its `ref` the converter's own code (`unknown_node_class`, `comfyui_too_old`,
    `override_unknown_input`, `override_is_file`, ...), and the ComfyUI that was started goes down with it. The converted graph is then
    compared with the manifest: a model file it loads that the manifest does not name defers `TEMPLATE_MODEL_UNLISTED`, its `ref` the first such
@@ -1144,7 +1146,15 @@ A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `c
    instance carries into an inner loader, a loader whose `widgets_values` is an object, a loader that stores no value and takes the listing's
    default), and the licence gate, the FLUX bar, trust on first use and the host-RAM figure read only the manifest. A file matches an entry by
    its name under the class directory or by its base name, without regard to case or slash direction, as the catalog matches an annotation to
-   a widget. A graph run is not compared.
+   a widget. An embedding the prompt text names is a model file too. A string input with `embedding:<name>` in it is read as text, not as a
+   file name, and each name it asks for is reported as `models/embeddings/<name>` unless the manifest names, under `models/embeddings/`,
+   that name as written or with `.safetensors`, `.pt` or `.bin` appended, the files ComfyUI tries (the whole path, no base-name match). A
+   name runs to the next whitespace, `<`, `[` or `)` or the end of the text, and a trailing `,` or `)` and a `:<weight>` come off. The
+   catalog lists a name its own prompt gives under the `embeddings` class, unless an annotation of that class covers it, so the licence gate
+   and trust on first use read it like any weights file (a name with no source is `license_unknown`); readiness finds the file the way
+   ComfyUI does (each directory of the class in its order, the name as written and then with the three extensions) and the runtime
+   manifest names the file it found, extension and all; a node that holds none is `models_missing`, listed by the name the text gives. A
+   graph run is not compared.
 4. The converted graph goes through the run-graph preflight and is posted. The result is the run-graph envelope with `template`,
    `license_class`, `reads_input`, `local_only` and `fleet_note` beside the outputs, and `tofu_first_seen` when a run recorded a
    model for the first time.
@@ -1192,8 +1202,8 @@ and that is what keeps templates in `license_unknown`. On one node (<node-a>, Co
 
 **Not built in this release.** Fleet placement of a template; model downloads (a missing model is a refusal that lists it); an
 acknowledgement path for a conditional or non-commercial template; staging of a template's sample input files; custom node
-packs; a CLI verb and a fleet task for it. An override that would retarget a model or input file is refused, not supported: the
-gate checks the file the template names, so a different file would run unchecked.
+packs; a CLI verb and a fleet task for it. An override that would retarget a model or input file, or name an embedding, is refused, not
+supported: the gate checks the file the template names, so a different file would run unchecked.
 One template running end to end under a GPU lease is the acceptance measurement of this tool, and it has not been run.
 
 ## Important flows

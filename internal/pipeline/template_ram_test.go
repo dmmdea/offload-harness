@@ -4,7 +4,7 @@ package pipeline
 // and no graph_path, so the graph reader found nothing to read and the lane declared the media class default: the largest family the
 // box binds (33.1 GiB on a box that binds a Wan 2.2 pair) for a template whose files are 23 GiB, held by the host-RAM brake though the
 // box could run it, and on a box that binds no ComfyUI render family, 0 (source none), so a big template got no host-RAM check at all.
-// The runtime manifest names the model files the final graph loads (an override sets values and never retargets a file), as
+// The runtime manifest names the model files the final graph loads (an override sets values and never retargets a file or names an embedding), as
 // `models/<class>/<name>`; those are what the lane sizes, by the family estimate's rule.
 
 import (

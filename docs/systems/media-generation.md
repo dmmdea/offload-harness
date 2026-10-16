@@ -3496,7 +3496,7 @@ A workflow template is a UI-format graph (`nodes[]`, `links[]`, `definitions.sub
 `{"<id>": {"class_type", "inputs"}}`. `render/template-to-graph.mjs` converts the first into the second. It is the
 converter the templates catalog (phase A, above) did not contain. The run-graph runner calls it for a template run
 (`comfy-run-graph.mjs --template NAME`, behind `offload_run_template`): once ComfyUI is up, with the running ComfyUI's own
-`/object_info` and version, before preflight, so a refusal is the defer `TEMPLATE_CONVERT_REFUSED` (and a model file the converted graph loads that the run's manifest does not name is the defer `TEMPLATE_MODEL_UNLISTED`, `unlistedModels` in `template-run.mjs`) and the graph that is
+`/object_info` and version, before preflight, so a refusal is the defer `TEMPLATE_CONVERT_REFUSED` (and a model file the converted graph loads that the run's manifest does not name is the defer `TEMPLATE_MODEL_UNLISTED`, `unlistedModels` in `template-run.mjs`; an embedding the prompt text names counts as one) and the graph that is
 checked and posted is the converted one. `render/template-run.mjs` finds the template by name in the node's own package
 (a name the node's index does not list is an unknown template, never a file read), passes the index's `minComfyUIVersion`
 and applies the caller's overrides to the converted graph. The converter itself is still a pure function, there is no

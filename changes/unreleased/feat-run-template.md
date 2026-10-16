@@ -8,9 +8,9 @@
   runtime manifest and optional `overrides` and `seed`. The runner (`comfy-run-graph.mjs --template NAME`) converts the template with the
   converter once ComfyUI is up, with that ComfyUI's own `/object_info` and version, and before preflight; a refusal is the typed defer
   `TEMPLATE_CONVERT_REFUSED`, and a model file the converted graph loads that the manifest does not name is `TEMPLATE_MODEL_UNLISTED`. An
-  override sets values and never retargets a file: one that targets a model or input loader node, an input
-  that holds a model file name, or a value that is a model file name is refused as `override_is_file`, because the licence gate, the FLUX bar
-  and the trust-on-first-use check read only the models the template names. The manifest generator is `render/template-manifest.mjs` (templates to manifest entries: models as
+  override sets values and never retargets a file or names an embedding: one that targets a model or input loader node, an input
+  that holds a model file name, a value that is a model file name, or a string value with `embedding:` in it is refused as `override_is_file`,
+  because the licence gate, the FLUX bar and the trust-on-first-use check read only the models the template names. The manifest generator is `render/template-manifest.mjs` (templates to manifest entries: models as
   `models/<class>/<name>` with the source and the hash a template declares, node packs, licence class, API or not, input files read or not).
 - **The gate.** This release runs a template only if it is not a paid-API one, not FLUX-family, needs no custom node pack, is readable and
   has a permissive licence class (or no weights). A paid-API template is a Defer (`deferred:true`, class `api_paid`, never cloud). Every
@@ -62,6 +62,34 @@
   a file, both are required, which can ask for one file more than the graph loads and never one fewer. Measured on the installed package
   (`json 0.1.96`, 578 templates, read only): the catalog lists the same 897 model entries, with the same licence class, FLUX flag and verdict
   per template, before and after this change.
+- **Embeddings named by the prompt text.** ComfyUI's CLIP tokenizer loads `models/embeddings/<name>`, then `<name>.safetensors`, `.pt` and
+  `.bin`, from a word of the prompt that starts with `embedding:` (`comfy/sd1_clip.py`, `load_embed`, read in ComfyUI 0.38.0). No loader node
+  and no file extension is involved, so a text override such as `embedding:evil_ti, a cat`, `embedding:evil_ti.pt, a cat` or
+  `(embedding:evil_ti:1.2) cat` was accepted (only a value ending in `.safetensors` was refused), the runner's comparison saw no file, and the
+  licence gate and trust on first use never read it, which contradicted "an override never retargets a file". One reading of the reference
+  (`embeddingRefs`, `embeddingCovered`, `mentionsEmbedding` in `templates-catalog.mjs`) now serves three surfaces.
+  - Override: any string value that contains `embedding:`, in any letter case, is refused as `override_is_file`. ComfyUI matches a lower-case
+    word that starts with the identifier; matching it anywhere and in any case is the fail-closed side.
+  - Runner: a string input of the converted graph that contains the identifier is read as text and no longer as a file name. Each name it asks
+    for is reported as `models/embeddings/<name>` (the first is the `ref` of `TEMPLATE_MODEL_UNLISTED`) unless the manifest names, under
+    `models/embeddings/`, that name as written or with `.safetensors`, `.pt` or `.bin` appended: the whole path, case and slash direction
+    ignored, no base-name match (the file ComfyUI opens is the one at that path), and a name that is empty, absolute or has a `..` segment is
+    never covered. A manifest entry under another class does not cover it.
+  - Catalog: a prompt widget of an active node (or an active subgraph instance's own values; not a note, not a muted or bypassed node) that
+    names an embedding is a requirement under the `embeddings` class with no source, unless an annotation of that class covers it by the
+    name or with one of the three extensions. A template whose own prompt names an unannotated embedding is therefore `license_unknown` and
+    refused; an annotated one is read by the licence gate like any weights file. Readiness resolves the extension the way ComfyUI does: each
+    directory of the class in its order, the name as written and then with the three extensions, the first file found. The runtime manifest
+    names that file (`models/embeddings/<name>.<ext>`, which the host-RAM figure can size, and the satisfier and the trust check can find);
+    a node with none is `models_missing`, listed by the name the text gives.
+  - Grammar: a name runs to the next whitespace, `<`, `[` or `)`, or the end of the text; a trailing `,` or `)` and a `:<weight>` (a number,
+    possibly signed or starting with a point) come off, repeatedly; an empty name is kept and refused. Edge cases: `embedding:,name` (ComfyUI
+    strips a leading comma on a second try) is reported unlisted under the comma-led name, which fails closed; a name with a trailing comma
+    whose comma-suffixed file exists is credited as the stripped name (ComfyUI tries the comma-suffixed file first); the readiness lookup is
+    case-exact like the other classes, so a file in another case is `case_mismatch`, not found.
+  - Measured read only on the installed package (`json 0.1.96`, 578 templates): 897 model entries before and after, 3 of them annotations of
+    the embeddings class, and no row differs in kind, licence class, FLUX flag, outcome or model list. The only `embedding:` text in the
+    package is in the markdown notes of four `video_minimax_h3_*` templates, which are not read (they are refused as `license_conditional`).
 - **Why a tool and not a `template=` argument on `offload_run_graph`.** Measured at 0.186.0: an average tool costs 1,019 tokens in the full
   profile and 672 compact, so one more tool is about +3.2% of the 31-tool full list. The registered design accepts that cost, and the
   `template=` argument was only its fallback for a cost that proved unacceptable. The new tool's own entry is 2,833 bytes of `tools/list` in
@@ -102,10 +130,25 @@
   file, and both templates were `run`). The guards that passed before the change pin what must not move: a graph run is not compared, a file
   is matched by path, base name and case, a muted or bypassed instance is not read, and on the two hand-written templates the converter's graph
   loads only files the catalog names.
+- **Embedding tests.** Written red first: 18 tests failed on the code before the change (the three override shapes and the letter-case one,
+  six of `unlistedModels`, `embeddingRefs`, the catalog requirement, annotation coverage and the subgraph instance, three readiness ones,
+  and the verdict of a template with a baked-in embedding). The guards that already passed pin what must not move: a prompt that only
+  talks about embeddings goes through, a muted node and a note add nothing, and an annotated embedding runs. Mutations of the new code in a
+  scratch copy, each red: matching the identifier in lower case only (3 fail), candidate-major instead of directory-major resolution
+  (1), a class-agnostic manifest match (1), the weight left on the name (4).
+- **Manifest-side normalisation tests.** `unlistedModels` lower-cases the manifest path, turns its backslashes into slashes and drops the
+  `models/<class>/` prefix, and every test manifest was lower case with forward slashes, so no test could fail on that step. Both fixtures
+  (`LISTED_MODELS` in `template-run.test.mjs`, `LISTED` in `comfy-run-graph.test.mjs`) now hold a mixed-case entry
+  (`Qwen-Image-Lightning-8steps-V1.0.safetensors`) and a backslash entry under a mixed-case folder, with a graph that names each exactly,
+  as four separate tests. Production was already right, so they pass; each was shown to bite by mutating the step in a scratch copy of
+  `render/`: without the lower-casing 5 fail, without the slash normalisation 2 fail (both backslash ones), and no pre-existing test fails
+  under either.
 - **Not verified here.** The package the counts below were measured on, re-scanned for unexpanded subgraph instances (only the newer copy was).
   The runner's comparison against the converter's output for the real templates under a live ComfyUI: it is tested on injected graphs, on the
   two hand-written templates with their saved listing, and by unit, and the real package was only read by the catalog (a template the
   converter loads a file for that the catalog did not name would show as a `TEMPLATE_MODEL_UNLISTED` defer on a live run).
+  An embedding loaded by a live ComfyUI: the load order is read from ComfyUI's source (0.38.0), not run, and no template of the installed
+  package names one in an active prompt, so the new catalog path has no real template to be measured on.
   One template running end to end under a GPU lease, the acceptance measurement of this tool, queued after this
   change. The production wiring of the conversion against a live ComfyUI (the `/object_info` and `/system_stats` reads in
   `comfy-run-graph.mjs`; the flow and the converter are tested with injected values, and the converter on saved listings). The time of a
