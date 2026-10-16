@@ -768,13 +768,25 @@ var openSharedFile = OpenShared
 // a listing. A heartbeat that cannot be read falls back to the stamp written at acquisition, which for a lease past its declared window
 // is stale: the reclaim rule (stale heartbeat AND expired window) then calls a live lease debris, the acquirer's sweep removes it, and
 // the card is granted to a second job while the first still runs on it.
+//
+// An open that fails with a permission error is tried again, removeAttempts times at removePause (about 100 ms in all, the bound the
+// claim removal uses), and any other failure is returned at once. The shared open takes the sharing violation away, but not the
+// instant the rename has marked the old entry for deletion and the new one has not taken its name: the file is delete-pending, and
+// every open of the name fails with ERROR_ACCESS_DENIED until the rename ends, a few milliseconds. Measured on a loaded host, with the
+// shared open in, that was 5 failed reads in about 124,000 of a heartbeat that was renewed in a loop. A file that stays unreadable
+// (a real permission fault) costs one bounded wait and then the error, as before.
 func readSharedFile(path string) ([]byte, error) {
-	f, err := openSharedFile(path)
-	if err != nil {
-		return nil, err
+	for attempt := 0; ; attempt++ {
+		f, err := openSharedFile(path)
+		if err == nil {
+			defer f.Close()
+			return io.ReadAll(f)
+		}
+		if !errors.Is(err, os.ErrPermission) || attempt >= removeAttempts {
+			return nil, err
+		}
+		time.Sleep(removePause)
 	}
-	defer f.Close()
-	return io.ReadAll(f)
 }
 
 // UseReadFault makes the READ of a lease record fail with what fn returns for the path (nil from fn lets the real read run), until the
