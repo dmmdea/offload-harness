@@ -282,6 +282,11 @@ test("unlistedModels: text that is not an embedding reference to ComfyUI names n
   }
 });
 
+test("unlistedModels: a string input that is a model file name is still compared when the text holds an identifier-like word the reader does not take", () => {
+  const g = { "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "Embedding:x.safetensors" } } };
+  assert.deepEqual(TR.unlistedModels(g, LISTED_MODELS), ["Embedding:x.safetensors"]);
+});
+
 test("unlistedModels: text that mentions embeddings without the `embedding:` identifier names no file", () => {
   assert.deepEqual(TR.unlistedModels(embeddingGraph("an embedding of a cat, embeddings, embedding"), undefined), []);
 });

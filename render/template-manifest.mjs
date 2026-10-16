@@ -283,7 +283,9 @@ function resolvedPath(m, req) {
 export function readinessFor(row, snapshot, { io }) {
   const manifest = manifestFor(row);
   const verdict = verdictFor(row);
-  const checked = modelReadiness(manifest.models.map((m) => ({ name: m.name, directory: m.directory })), snapshot.inventory, { mode: "directory-aware" });
+  // embedding_refs are the prompt names an annotation of the embeddings class covers (the catalog records them): readiness checks that the
+  // annotated file is the one ComfyUI opens for each. The manifest and the row list the same models in the same order.
+  const checked = modelReadiness(manifest.models.map((m, i) => ({ name: m.name, directory: m.directory, embedding_refs: row.models?.[i]?.embedding_refs })), snapshot.inventory, { mode: "directory-aware" });
   const models = manifest.models.map((m, i) => {
     const req = checked.requirements[i];
     return {
@@ -354,7 +356,11 @@ export function resolveRun(row, snapshot, { io }) {
   if (verdict.outcome !== "run") return verdictAnswer(verdict, row.name);
   const ready = readinessFor(row, snapshot, { io });
   if (ready.models_missing.length > 0) {
-    return typed("refuse", CLASS.MODELS_MISSING, row.name, `${ready.models_missing.length} model file(s) are not where ComfyUI would load them from; this release never downloads a model`, { missing: ready.models_missing });
+    // An embedding the node holds more than once, or one a file ComfyUI tries first shadows, is not missing; it is refused because the file
+    // ComfyUI opens for it is not the one file the manifest would name (it picks the directory by set order), and the entry says which.
+    const unclear = ready.models.filter((m) => m.status === "ambiguous" || m.status === "shadowed");
+    const why = unclear.length === 0 ? "" : `; ${unclear.length} of them ${unclear.length === 1 ? "is" : "are"} held in more than one directory or shadowed by a file ComfyUI tries first, so the file ComfyUI opens is not the one file the manifest would name (${unclear.map((m) => m.path ?? m.name).join(", ")})`;
+    return typed("refuse", CLASS.MODELS_MISSING, row.name, `${ready.models_missing.length} model file(s) are not where ComfyUI would load them from; this release never downloads a model${why}`, { missing: ready.models_missing });
   }
   if (ready.inputs_missing.length > 0) {
     return typed("refuse", CLASS.INPUTS_MISSING, row.name, `${ready.inputs_missing.length} input file(s) the template reads are not staged in the input directory`, { missing: ready.inputs_missing });

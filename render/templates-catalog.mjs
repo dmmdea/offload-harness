@@ -237,41 +237,167 @@ export function modelCovered(names, file) {
 }
 
 // Embeddings. ComfyUI's CLIP tokenizer loads a file named in the PROMPT TEXT: a word that starts with `embedding:` names a file of the
-// embeddings class, tried as written and then with .safetensors, .pt and .bin appended, in each directory of the class in turn, and the
-// first file found is loaded (comfy/sd1_clip.py load_embed). No loader node and no file extension is involved, so neither the loader
-// classes nor the suffix test (hasModelExt) see it. The three functions below are the one reading of it, shared by the override step
-// (template-run.mjs), the runner's comparison with the manifest (unlistedModels) and the catalog (requiredModels).
+// embeddings class, tried as written and then with .safetensors, .pt and .bin appended (comfy/sd1_clip.py load_embed, read in 0.38.0). No
+// loader node and no file extension is involved, so neither the loader classes nor the suffix test (hasModelExt) see it.
+//
+// WHERE it looks is not a walk through the directories of the class one after the other. expand_directory_list puts every embeddings root
+// and every subdirectory below it (os.walk, links followed) into one Python set(), and load_embed takes the first directory of list(set)
+// that holds the name: the directory that answers is chosen by hash order, which differs from one process to the next. So a file that sits
+// only in a subfolder is found by the bare name, and a name that more than one directory holds is not one file at all. checkEmbedding
+// turns that into `present` (exactly one directory holds it) or `ambiguous`.
+//
+// WHAT it reads from a prompt is the tokenizer's, and embeddingRefs ports that path. The override step (template-run.mjs) does not use
+// it: it refuses on mentionsEmbedding, a deliberately wider matcher, so that what it lets through is never something the reader finds a
+// file in. The runner's comparison with the manifest (unlistedModels) and the catalog (requiredModels) use embeddingRefs and
+// embeddingCovered, which is the one reading of the reference.
 export const EMBEDDING_EXTS = Object.freeze([".safetensors", ".pt", ".bin"]);
 export const mentionsEmbedding = (s) => typeof s === "string" && /embedding:/i.test(s);
 
-// embeddingRefs: the file names a text asks ComfyUI to load, each once, in order of appearance. The identifier is matched anywhere in the
-// text and in any letter case (ComfyUI matches a word that starts with it, in lower case: reading more is the fail-closed side). A name
-// runs to the next whitespace, `<`, `[` or `)`, or the end of the text; a trailing `,` or `)` and a `:<weight>` are then taken off,
-// repeatedly (`name:1.2),`). An empty name is kept as "" so that the caller refuses it. A value that is not a string names nothing.
-export function embeddingRefs(text) {
-  if (typeof text !== "string") return [];
-  const out = [];
-  for (const m of text.matchAll(/embedding:([^\s<[)]*)/gi)) {
-    let name = m[1];
-    for (let before = null; before !== name;) {
-      before = name;
-      name = name.replace(/[,)]+$/, "").replace(/:-?(?:\d+\.?\d*|\.\d+)$/, "");
+const EMBEDDING_ID = "embedding:";
+// Python's str.isspace set: what re's \s and str.split() match on a str. JavaScript's \s is another set (it holds U+FEFF and lacks U+001C
+// to U+001F and U+0085), so the tokenizer's whitespace is spelled out.
+const PY_SPACE = "\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
+const AFTER_SPACE_ID = new RegExp(`(?<=[${PY_SPACE}])${EMBEDDING_ID}`);
+const SPACE_RUN = new RegExp(`[${PY_SPACE}]+`);
+// What Python's float() accepts, which is what decides whether the tail of a group is its weight: a sign, digits with single underscores
+// between them, a point, an exponent, inf, infinity and nan in any case, spaces around, and any Unicode decimal digit. Its spaces are the
+// ASCII ones and the Unicode ones above U+007F, not U+001C to U+001F, which str.split() also counts (found by comparing with ComfyUI's code).
+const PY_FLOAT_SPACE = "\\t\\n\\v\\f\\r \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
+const PY_DIGITS = "\\p{Nd}(?:_?\\p{Nd})*";
+const PY_FLOAT = new RegExp(`^[${PY_FLOAT_SPACE}]*[+-]?(?:(?:${PY_DIGITS}(?:\\.(?:${PY_DIGITS})?)?|\\.${PY_DIGITS})(?:e[+-]?${PY_DIGITS})?|inf(?:inity)?|nan)[${PY_FLOAT_SPACE}]*$`, "iu");
+
+// A text nested deeper than this is not read (embeddingRefs gives the empty name). token_weights recurses once per nested group and
+// Python stops at its recursion limit (measured: about nine hundred groups deep inside ComfyUI), so no real prompt comes near it; the bound
+// keeps the quadratic cost of a hostile text small.
+const MAX_GROUP_DEPTH = 500;
+class UnreadableText extends Error {}
+
+const escapeImportant = (t) => t.replaceAll("\\)", "\u0000\u0001").replaceAll("\\(", "\u0000\u0002");
+const unescapeImportant = (t) => t.replaceAll("\u0000\u0001", ")").replaceAll("\u0000\u0002", "(");
+
+// parse_parentheses of sd1_clip.py, as written: the text cut into the pieces outside parentheses and the closed groups (nested ones kept
+// whole). A stray `)` pushes the level below zero and nothing closes a group after it; an unclosed `(` ends the last piece unclosed.
+function parseParentheses(string) {
+  const result = [];
+  let current = "";
+  let level = 0;
+  for (const ch of string) {
+    if (ch === "(") {
+      if (level === 0) {
+        if (current) result.push(current);
+        current = "(";
+      } else {
+        current += ch;
+      }
+      level++;
+    } else if (ch === ")") {
+      level--;
+      if (level === 0) {
+        result.push(current + ")");
+        current = "";
+      } else {
+        current += ch;
+      }
+    } else {
+      current += ch;
     }
-    if (!out.includes(name)) out.push(name);
+  }
+  if (current) result.push(current);
+  return result;
+}
+
+// token_weights of sd1_clip.py without the weights (only the text of each piece matters here): a closed group is opened, its tail after
+// the last colon is taken off when float() reads it (a colon at index 0 does not count), and the inside is cut again.
+function tokenSegments(string, depth = 0) {
+  if (depth > MAX_GROUP_DEPTH) throw new UnreadableText("nested too deep");
+  const out = [];
+  for (let x of parseParentheses(string)) {
+    if (x.length >= 2 && x[x.length - 1] === ")" && x[0] === "(") {
+      x = x.slice(1, -1);
+      const colon = x.lastIndexOf(":");
+      if (colon > 0 && PY_FLOAT.test(x.slice(colon + 1))) x = x.slice(0, colon);
+      for (const inner of tokenSegments(x, depth + 1)) out.push(inner); // not a spread: a group of many thousand groups would overflow the call stack
+    } else {
+      out.push(x);
+    }
   }
   return out;
 }
 
-// embeddingCovered: does a set of lower-cased names under the embeddings class directory cover the file a reference loads? The name as
-// written does, and so does the name with any of the three extensions ComfyUI appends. The whole path only: the file ComfyUI opens is the
-// one at that path, so a base name that matches a file elsewhere in the directory is not it. A name that would leave the directory is
-// never covered: a drive letter, or an empty, `.` or `..` segment (an empty name, a leading slash, a doubled slash and a trailing slash each
-// leave an empty segment).
-export function embeddingCovered(names, ref) {
-  const name = slash(ref).toLowerCase();
-  if (/^[a-z]:/.test(name) || name.split("/").some((seg) => seg === "" || seg === "." || seg === "..")) return false;
-  return [name, ...EMBEDDING_EXTS.map((e) => name + e)].some((c) => names.has(c));
+// The deepest run of unclosed `(` in a text: an upper bound of the depth token_weights recurses to, found in one pass so that a hostile
+// text is refused before it is cut.
+function maxNesting(string) {
+  let level = 0;
+  let max = 0;
+  for (let i = 0; i < string.length; i++) {
+    const ch = string[i];
+    if (ch === "(") { level++; if (level > max) max = level; } else if (ch === ")" && level > 0) level--;
+  }
+  return max;
 }
+
+// _try_get_embedding of sd1_clip.py: what follows the identifier is split on whitespace, the first word is the name, it is cut at the first
+// `<` or `[`, and a retry strips commas from both ends. An empty rest or word is the empty name.
+function embeddingNameIn(rest) {
+  const first = rest.split(SPACE_RUN).find((w) => w !== "");
+  if (first === undefined) return "";
+  const cut = first.search(/[<[]/);
+  return (cut >= 0 ? first.slice(0, cut) : first).replace(/^,+|,+$/g, "");
+}
+
+// embeddingRefs: the file names a text asks ComfyUI to load, each once, in order of appearance. This is ComfyUI's reading, ported from
+// tokenize_with_weights and the functions it calls (comfy/sd1_clip.py, 0.38.0): the text is cut at parentheses and a closed group loses a
+// numeric tail (a bare `:1.2` stays in the name); each piece is split where whitespace precedes `embedding:`, which must also be the
+// start of a piece or follow whitespace; the identifier is lower case only; `\(` and `\)` are literal characters of the name. The names were
+// checked against the extracted functions of that file on a corpus of generated texts.
+//
+// Where it differs from ComfyUI, and why:
+//  - The name returned is the one after the comma retry (commas off both ends). ComfyUI asks for the name as it stands first, so a file
+//    whose own name ends in a comma, which it would open before the stripped one, is not looked for.
+//  - `embedding:` with nothing readable after it, and a text nested more than MAX_GROUP_DEPTH groups deep, are the empty name. ComfyUI
+//    raises on the first (and asks for a file named after the directory on a name cut to nothing) and reads the second up to about nine
+//    hundred groups. The empty name is refused by every caller, which is the side that fails closed.
+//  - Tokenizers built with disable_weights (the LLM-based text encoders) do not cut the text at parentheses, so `embedding:foo(bar)` is the
+//    name `foo(bar)` there and `(embedding:foo)` is no reference. This reads the CLIP tokenizer's way, the one embeddings are made for.
+//  - A tokenizer without an embeddings directory loads nothing; the file is still listed (the side that lists more).
+// A value that is not a string names nothing.
+export function embeddingRefs(text) {
+  if (typeof text !== "string" || !text.includes(EMBEDDING_ID)) return [];
+  const escaped = escapeImportant(text);
+  let segments;
+  try {
+    if (maxNesting(escaped) > MAX_GROUP_DEPTH) throw new UnreadableText("nested too deep");
+    segments = tokenSegments(escaped);
+  } catch (e) {
+    if (e instanceof UnreadableText) return [""];
+    throw e;
+  }
+  const out = [];
+  const add = (name) => { if (!out.includes(name)) out.push(name); };
+  for (const segment of segments) {
+    const pieces = unescapeImportant(segment).split(AFTER_SPACE_ID);
+    if (pieces[0].startsWith(EMBEDDING_ID)) add(embeddingNameIn(pieces[0].slice(EMBEDDING_ID.length)));
+    for (let i = 1; i < pieces.length; i++) add(embeddingNameIn(pieces[i]));
+  }
+  return out;
+}
+
+// embeddingCoveringNames: of a set of lower-cased names under the embeddings class (annotations, or a manifest's paths), those that cover the
+// file a reference loads. The name as written does, and so does the name with any of the three extensions ComfyUI appends; a file in a
+// subfolder does too, because ComfyUI searches every subfolder, so a name covers a reference when it ends in `/` and the candidate (whole
+// path segments, not a base name that merely ends alike). A name that would leave the directory is never covered: a drive letter, or an
+// empty, `.` or `..` segment (an empty name, a leading slash, a doubled slash and a trailing slash each leave an empty segment).
+export function embeddingCoveringNames(names, ref) {
+  const name = slash(ref).toLowerCase();
+  if (/^[a-z]:/.test(name) || name.split("/").some((seg) => seg === "" || seg === "." || seg === "..")) return [];
+  const candidates = [name, ...EMBEDDING_EXTS.map((e) => name + e)];
+  return [...names].filter((n) => candidates.some((c) => n === c || n.endsWith("/" + c)));
+}
+
+// embeddingCovered: does any name of the set cover the reference (embeddingCoveringNames)? That says a file of the right name is listed, not
+// that it is the file ComfyUI opens on a node: readiness checks that (checkEmbedding), and for an annotation it checks the reference
+// requiredModels records on it.
+export const embeddingCovered = (names, ref) => embeddingCoveringNames(names, ref).length > 0;
 
 // requiredModels: the files a template needs. `active` are the files of active nodes: the
 // annotated ones (`properties.models`, which name a class, a download URL and sometimes a hash) and
@@ -301,7 +427,15 @@ export function requiredModels(workflow) {
   }
   for (const key of active.keys()) inactive.delete(key);
   const annotated = new Set([...active.values()].map((m) => m.name.toLowerCase()));
-  const annotatedEmbeddings = new Set([...active.values()].filter((m) => mapLegacyClass(m.directory ?? "") === "embeddings").map((m) => slash(m.name).toLowerCase()));
+  // The annotations of the embeddings class, by lower-cased name. A prompt reference one of them covers is recorded on it (embedding_refs),
+  // so that readiness can check that the annotated file is the one ComfyUI opens for that reference on the node.
+  const annotatedEmbeddings = new Map();
+  for (const m of active.values()) {
+    if (mapLegacyClass(m.directory ?? "") !== "embeddings") continue;
+    const key = slash(m.name).toLowerCase();
+    if (annotatedEmbeddings.has(key)) annotatedEmbeddings.get(key).push(m);
+    else annotatedEmbeddings.set(key, [m]);
+  }
   // An unannotated file a node names in its widget values. The converter reads widgets_values in either of its two forms, a list or an
   // object keyed by input name, so both are read here; and it routes the widgets_values of a subgraph instance into an inner loader (the
   // widgets a proxyWidgets entry names, or the literal a subgraph input takes), so an ACTIVE instance's own values are read as well. The
@@ -315,13 +449,25 @@ export function requiredModels(workflow) {
     if (NOTE_TYPES.has(type)) return;
     for (const v of values) {
       if (typeof v !== "string") continue;
-      // A prompt that names an embedding needs that file, which no loader widget carries and no extension ends in: it is listed under the
-      // embeddings class by the name the text gives, unless an annotation of that class already covers it. The extension is resolved against
-      // a node's directories by the readiness check, which is the one place that knows them.
-      if (mentionsEmbedding(v)) {
-        for (const ref of embeddingRefs(v)) {
-          if (embeddingCovered(annotatedEmbeddings, ref)) continue;
-          add(active, { name: ref, directory: "embeddings", url: null, hash: null, hash_type: null, annotated: false, node_types: [type] });
+      // A prompt that names an embedding the way ComfyUI reads it needs that file, which no loader widget carries and no extension ends in:
+      // it is listed under the embeddings class by the name the text gives, unless an annotation of that class already covers it, and then
+      // the annotation records the name (embedding_refs). The extension and the directory are resolved against a node's files by the
+      // readiness check, which is the one place that knows them. A text that only looks like a reference to a wider matcher (another letter
+      // case, glued to a word) names nothing here, and a value with no reference goes on to the file-name test below.
+      const refs = embeddingRefs(v);
+      if (refs.length > 0) {
+        for (const ref of refs) {
+          const covering = embeddingCoveringNames(annotatedEmbeddings.keys(), ref);
+          if (covering.length === 0) {
+            add(active, { name: ref, directory: "embeddings", url: null, hash: null, hash_type: null, annotated: false, node_types: [type] });
+            continue;
+          }
+          for (const key of covering) {
+            for (const entry of annotatedEmbeddings.get(key)) {
+              if (!entry.embedding_refs) entry.embedding_refs = [];
+              if (!entry.embedding_refs.includes(ref)) entry.embedding_refs.push(ref);
+            }
+          }
         }
         continue;
       }
@@ -1224,7 +1370,7 @@ function indexInventory(inv) {
       pushTo(base, baseName(f.rel).toLowerCase(), f);
       pushTo(allBase, baseName(f.rel).toLowerCase(), { class: cls, rel: f.rel });
     }
-    byClass.set(cls, { exact, lower, base, exts: c.exts ?? null, dirs: c.dirs ?? [] });
+    byClass.set(cls, { exact, lower, base, files: c.files ?? [], exts: c.exts ?? null, dirs: c.dirs ?? [] });
   }
   const index = { byClass, allBase };
   indexCache.set(inv, index);
@@ -1239,6 +1385,8 @@ function indexInventory(inv) {
 //   case_mismatch       the right class, another spelling of the name
 //   extension_not_listed  the class's core loaders do not accept this file type (a .gguf in a core loader)
 //   class_unregistered  no directory is registered for the class
+//   ambiguous           (embeddings) more than one directory holds a file for the name: ComfyUI opens one of them by set order
+//   shadowed            (embeddings) the annotated file is not the one ComfyUI opens for the name a prompt gives
 // A file with no class (an unannotated widget file) is met by its exact name in any class.
 function checkRequirement(req, inv, mode, asFile = false) {
   const name = String(req.name);
@@ -1257,7 +1405,7 @@ function checkRequirement(req, inv, mode, asFile = false) {
   const cls = mapLegacyClass(directory);
   const c = idx.byClass.get(cls);
   if (!c) { result.status = "class_unregistered"; return result; }
-  if (cls === "embeddings" && !asFile) return checkEmbedding(name, directory, c, inv, mode, result);
+  if (cls === "embeddings" && !asFile) return checkEmbedding(name, directory, c, inv, mode, result, Array.isArray(req.embedding_refs) ? req.embedding_refs : []);
   if (!extListed(name, c.exts)) { result.status = "extension_not_listed"; return result; }
   if (c.exact.has(name)) { result.status = "present"; return result; }
   const cased = c.lower.get(name.toLowerCase());
@@ -1276,21 +1424,68 @@ function checkRequirement(req, inv, mode, asFile = false) {
 
 const MET = new Set(["present", "present_class_unknown"]);
 
-// checkEmbedding: an embedding is named by the text that loads it, not by a file: ComfyUI tries the name as written and then with
-// .safetensors, .pt and .bin appended, in each directory of the class in turn, and loads the first file it finds. The file found is
-// `resolved`, the name a manifest must carry. A file under the wrong spelling, in a subfolder or in another class is reported as for any
-// other class, by the first candidate that has such a finding.
-function checkEmbedding(name, directory, c, inv, mode, result) {
-  const candidates = [name, ...EMBEDDING_EXTS.map((e) => name + e)];
-  for (const dir of c.dirs) {
-    for (const cand of candidates) {
-      if (c.exact.get(cand)?.dirs.includes(dir)) { result.status = "present"; result.resolved = cand; return result; }
+// embeddingHits: the directories of the class in which ComfyUI would find `name`, and the file each answers with. ComfyUI's directories are
+// every embeddings root and every subdirectory below it (a set, see the top of this section). A file whose path under a root is
+// `<sub>/<candidate>` is what the directory `<root>/<sub>` holds for that candidate, and a path equal to the candidate is the root's own; a
+// candidate is the name as written, then the name with .safetensors, .pt and .bin appended, and one directory answers with the first of
+// those it holds. The match is on whole path segments. `fold` compares in lower case, for the diagnosis of a name in another case.
+// A file that several roots hold under one path is several directories: the inventory lists it once and cannot tell a link from a copy.
+function embeddingHits(files, name, fold = false) {
+  const norm = fold ? (s) => s.toLowerCase() : (s) => s;
+  const candidates = [name, ...EMBEDDING_EXTS.map((e) => name + e)].map(norm);
+  const byDir = new Map();
+  for (const f of files) {
+    const rel = norm(f.rel);
+    const rank = candidates.findIndex((c) => rel === c || rel.endsWith("/" + c));
+    if (rank < 0) continue;
+    const sub = rel.slice(0, rel.length - candidates[rank].length);
+    for (const root of f.dirs) {
+      const key = `${root}\u0000${sub}`;
+      const prev = byDir.get(key);
+      if (!prev || rank < prev.rank) byDir.set(key, { rank, rel: f.rel, dir: sub === "" ? root : `${root}/${sub.slice(0, -1)}` });
     }
   }
-  for (const cand of candidates) {
+  const order = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  return [...byDir.values()].sort((a, b) => order(a.rel, b.rel) || order(a.dir, b.dir));
+}
+
+// resolveEmbedding: what ComfyUI does with one name on this node: `present` (exactly one directory holds a file for it: `resolved` is
+// that file's path under the class directory, the name a manifest must carry), `ambiguous` (more than one does, so which one it opens
+// varies from run to run: the files are listed, and no file may be named), `case_mismatch` (only a file in another case, which a Linux
+// ComfyUI does not find) or `missing`.
+function resolveEmbedding(c, name) {
+  const hits = embeddingHits(c.files, name);
+  if (hits.length === 1) return { status: "present", resolved: hits[0].rel };
+  if (hits.length > 1) {
+    return { status: "ambiguous", found: [...new Set(hits.map((h) => h.rel))].sort(), found_in: hits.map((h) => ({ class: "embeddings", rel: h.rel, dir: h.dir })) };
+  }
+  const folded = embeddingHits(c.files, name, true);
+  if (folded.length > 0) return { status: "case_mismatch", found: [...new Set(folded.map((h) => h.rel))].sort() };
+  return { status: "missing" };
+}
+
+// checkEmbedding: an embedding is named by the text that loads it, not by a file: ComfyUI tries the name as written and then with
+// .safetensors, .pt and .bin appended, in the embeddings roots and every subfolder of them, and opens the file of whichever of those
+// directories its set lists first (embeddingHits). The file found is `resolved`, the name a manifest must carry. An annotation whose file
+// answers a name that a prompt gives (`embedding_refs`, recorded by requiredModels) must also be the file ComfyUI opens for that name
+// here: a file it tries first in the same directory is `shadowed`, a name held by several directories is `ambiguous`, and another case is
+// `case_mismatch`, because the licence, the hash and the trust record attach to the annotated file and not to the one that gets loaded.
+// A name no file answers is reported as for any other class when a file of another class does.
+function checkEmbedding(name, directory, c, inv, mode, result, refs = []) {
+  let found = resolveEmbedding(c, name);
+  if (found.status === "present") {
+    for (const ref of refs) {
+      const r = resolveEmbedding(c, ref);
+      if (r.status === "present" && r.resolved === found.resolved) continue;
+      found = r.status === "present" ? { status: "shadowed", found: [r.resolved] } : r;
+      break;
+    }
+  }
+  if (found.status !== "missing") return { ...result, ...found };
+  for (const cand of [name, ...EMBEDDING_EXTS.map((e) => name + e)]) {
     if (!extListed(cand, c.exts)) continue;
     const r = checkRequirement({ name: cand, directory }, inv, mode, true);
-    if (r.status !== "missing") return { ...result, status: r.status, ...(MET.has(r.status) ? { resolved: cand } : {}), ...(r.found ? { found: r.found } : {}), ...(r.found_in ? { found_in: r.found_in } : {}) };
+    if (r.status === "wrong_class") return { ...result, status: r.status, found_in: r.found_in };
   }
   return result;
 }

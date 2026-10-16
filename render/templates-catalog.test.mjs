@@ -3720,6 +3720,9 @@ test("embeddingRefs: a weight comes off a closed parenthesis group only; written
     ["(embedding:evil_ti:-1)", ["evil_ti"]],
     ["((embedding:evil_ti:1.2):0.8)", ["evil_ti"]],
     ["(embedding:evil_ti:1e1)", ["evil_ti"]],
+    ["(embedding:evil_ti:inf)", ["evil_ti"]],
+    ["(embedding:evil_ti:1_0)", ["evil_ti"]],
+    ["(embedding:evil_ti: 2 )", ["evil_ti"]],
     ["embedding:evil_ti:1.2, embedding:other", ["evil_ti:1.2", "other"]],
     ["(embedding:evil_ti:1.2, a cat)", ["evil_ti:1.2"]],
     ["(embedding:evil_ti:abc)", ["evil_ti:abc"]],
@@ -3732,6 +3735,9 @@ test("embeddingRefs: only the lower-case identifier at the start of the text, af
   refsOf([
     ["EMBEDDING:x", []],
     ["Embedding: a primer on vectors", []],
+    ["a cat Embedding:x", []],
+    ["embedding:a Embedding:b", ["a"]], // a second reference in another case is leftover text to ComfyUI
+    ["embedding:a EMBEDDING:b", ["a"]],
     ["wordembedding:vec", []],
     ["text-embedding:3 small", []],
     ["a,embedding:x", []],
@@ -3742,6 +3748,20 @@ test("embeddingRefs: only the lower-case identifier at the start of the text, af
     ["(a)embedding:z", ["z"]],
     ["a (embedding:q)", ["q"]],
     ["a embedding:b (c embedding:d) embedding:e", ["b", "d", "e"]],
+  ]);
+});
+
+test("embeddingRefs: whitespace is Python's set, not JavaScript's: U+001C, U+0085 and U+00A0 separate words, U+FEFF and U+200B do not", () => {
+  refsOf([
+    ["embedding:\u001cfoo", ["foo"]],
+    ["embedding:foo\ufeffbar", ["foo\ufeffbar"]],
+    ["a\u0085embedding:b", ["b"]],
+    ["a\u001cembedding:x", ["x"]],
+    ["a\ufeffembedding:y", []],
+    ["embedding:foo\u00a0bar", ["foo"]],
+    ["embedding:foo\u200bbar", ["foo\u200bbar"]],
+    ["(embedding:evil_ti:1.2\u001c)", ["evil_ti:1.2"]], // float() does not strip U+001C, str.split() does
+    ["(embedding:evil_ti:\u00a01.2\u00a0)", ["evil_ti"]],
   ]);
 });
 
@@ -3785,6 +3805,10 @@ test("embeddingRefs: a text nested too deep to read is the empty name (refused),
   assert.deepEqual(C.embeddingRefs(nested(400)), ["x"], "ComfyUI reads a prompt nested this deep (its recursion limit is about a thousand frames)");
   assert.deepEqual(C.embeddingRefs(nested(600)), [""], "past the reader's own limit the text is refused");
   assert.deepEqual(C.embeddingRefs(nested(200000)), [""]);
+});
+
+test("embeddingRefs: a text of very many groups is read, not a stack overflow", () => {
+  assert.deepEqual(C.embeddingRefs("(" + "(a)".repeat(150000) + " embedding:x)"), ["x"]);
 });
 
 // The override step refuses on a wider matcher than the reader above (any case, anywhere), so a text the reader finds a file in is always
@@ -3845,6 +3869,11 @@ test("models: the prompt names an annotation of the embeddings class covers are 
   assert.deepEqual(r.active.map((m) => [m.name, m.embedding_refs ?? null]), [["evil_ti.pt", ["evil_ti"]], ["other", null]]);
 });
 
+test("models: a loader widget whose value is a model file name is listed even when the text holds an identifier-like word the reader does not take", () => {
+  const r = C.requiredModels({ nodes: [{ id: 1, type: "CheckpointLoaderSimple", mode: 0, widgets_values: ["Embedding:x.safetensors"] }] });
+  assert.deepEqual(r.active.map((m) => [m.directory, m.name]), [["checkpoints", "Embedding:x.safetensors"]]);
+});
+
 test("models: an embedding an ACTIVE subgraph instance carries in its widgets_values is a requirement too", () => {
   const r = C.requiredModels(instanceWorkflow({ widgets_values: ["embedding:from_instance"] }));
   assert.deepEqual(r.active.map((m) => [m.directory, m.name]).sort(), [["checkpoints", "inner.safetensors"], ["embeddings", "from_instance"]]);
@@ -3887,6 +3916,11 @@ test("readiness: an embedding held only in a subfolder of the embeddings directo
   assert.deepEqual(embGot([EMB("a/sd15/e.pt")], "sd15/e"), ["present", "a/sd15/e.pt", null], "and under any subfolder");
   assert.equal(embGot([EMB("sd15/e.pt")], "other/e")[0], "missing", "a path that no directory holds is missing");
   assert.equal(embGot([EMB("sd15/xe.pt")], "e")[0], "missing", "the match is on whole path segments");
+});
+
+test("readiness: an embedding that exists only under another class is wrong_class, naming where", () => {
+  const r = embCheck(["D:/x/comfy/models/loras/e.safetensors"], "e");
+  assert.deepEqual([r.status, r.found_in], ["wrong_class", [{ class: "loras", rel: "e.safetensors" }]]);
 });
 
 test("readiness: one embedding name held in more than one directory is ambiguous, listing the files, because ComfyUI picks the directory by set order", () => {

@@ -56,6 +56,9 @@ export function loadTemplate({ comfyDir, name, io = nodeIo }) {
 // its embeddings directory, with no loader node and no extension in the value. It is refused as `override_is_file` when the node is a
 // model or input loader, when the input holds a model file name now, when the new value is a model file name, or when the new value is a
 // string that contains `embedding:` in any letter case.
+//
+// LIMIT: this check and unlistedModels (below) both read the string values of the graph, so an embedding assembled while the graph runs by
+// string nodes (a concatenation of two overrides, for example) is seen by neither.
 export function applyOverrides(graph, overrides) {
   if (overrides === undefined || overrides === null) return { ok: true, graph };
   if (!isObj(overrides)) return refusal("override_bad_key", "overrides is an object of <node id>.<input name> keys", {});
@@ -106,10 +109,12 @@ export function convertForRun({ workflow, objectInfo, comfyVersion = null, minCo
 // annotation to a widget (modelCovered): by the name under the class directory or by its base name, without regard to case or slash
 // direction. A link (an array) and a value that is not a string are not files.
 //
-// An embedding is a file the text names. A string input that contains `embedding:` (any letter case) is read as text, not as a file name:
-// each name it asks for (embeddingRefs) is reported as `models/embeddings/<name>` unless the manifest names, under models/embeddings, that
-// name or the name with .safetensors, .pt or .bin appended (the files ComfyUI tries; embeddingCovered). The manifest of a run carries the
-// file readiness found on the node, extension and all, so a name that no file of the node answers to is not in it and is reported.
+// An embedding is a file the text names. A string input that names one the way ComfyUI reads a prompt (embeddingRefs, a port of its
+// tokenizer path, so another letter case or an identifier glued to a word names nothing) is read as text, not as a file name: each name it
+// asks for is reported as `models/embeddings/<name>` unless the manifest names, under models/embeddings, a file for it (embeddingCovered):
+// the name or the name with .safetensors, .pt or .bin appended, at the top of the directory or in any subfolder, because ComfyUI searches
+// them all. The manifest of a run carries the one file readiness found on the node, subfolder and extension included (a name that more than
+// one directory holds is refused before this point), so a name that no file of the node answers to is not in it and is reported.
 export function unlistedModels(graph, manifestModels) {
   const names = new Set();
   const embeddings = new Set();
@@ -126,8 +131,9 @@ export function unlistedModels(graph, manifestModels) {
     if (!isObj(node) || !isObj(node.inputs)) continue;
     for (const v of Object.values(node.inputs)) {
       if (typeof v !== "string") continue;
-      if (mentionsEmbedding(v)) {
-        for (const ref of embeddingRefs(v)) if (!embeddingCovered(embeddings, ref)) report(`models/embeddings/${ref}`);
+      const refs = embeddingRefs(v);
+      if (refs.length > 0) {
+        for (const ref of refs) if (!embeddingCovered(embeddings, ref)) report(`models/embeddings/${ref}`);
       } else if (hasModelExt(v) && !modelCovered(names, v)) {
         report(v);
       }

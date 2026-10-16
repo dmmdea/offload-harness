@@ -528,6 +528,7 @@ test("resolve: an embedding the node holds in the root and in a subfolder is ref
   const row = rowOf(catalogOf(io), "tt_emb");
   const gone = M.resolveRun(row, snapshotOf(io), { io });
   assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/evil_ti.safetensors"]]);
+  assert.match(gone.detail, /held in more than one directory or shadowed/, "the refusal says why the file is not missing");
   const m = M.readinessFor(row, snapshotOf(io), { io }).models.find((x) => x.name === "evil_ti.safetensors");
   assert.deepEqual([m.status, m.resolved_path, m.found], ["ambiguous", null, ["evil_ti.safetensors", "sd15/evil_ti.safetensors"]]);
 });
