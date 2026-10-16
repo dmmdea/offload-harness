@@ -1,4 +1,4 @@
-### Fixed - a held lease no longer reads as absent while its record is rewritten: the lease records are read through a handle that shares delete (the media-route lease test flake)
+### Fixed - a held lease no longer reads as absent, or as stale, while its record or its heartbeat is rewritten: the lease files are read through a handle that shares delete (the media-route lease test flake, and a double-booking found behind it)
 
 - **The flake.** `TestEveryMediaRouteLeasesForItsOwnTimeoutAndIsKilledThere` failed on a loaded Windows host with
   `mediaadmit_lease_routes_test.go:210: want one live lease while the render runs, got []`, in a full `./internal/pipeline` run (659 s) and once more
@@ -24,9 +24,25 @@
   `Info.Age`, two samples of the clock taken at different moments, so a stall of the test between them read as a shorter window (a 900 ms stall reads
   1.099 s against 2 s). It now takes `ExpiresAtMs - AcquiredAtMs` from the record, the window the acquirer stamped. Its single-lease check and message are
   unchanged, so the test still fails on a lease that reads as absent. `mediaadmit_lease_routes_test.go` is unchanged.
-- **What was tried first and dropped.** A bounded retry of the failed read. Under saturating load the failure lasted a median 11 to 22 ms, a p90 of 85
-  to 168 ms and up to 1.4 s, and 14 to 22 percent of the failures outlasted an 80 ms bound, so a bound short enough for a status call still left misses.
-  The open is the cause, so the retry and its test were removed.
+- **What was tried first and dropped.** A bounded retry of the failed plain read. Under saturating load the sharing violation lasted a median 11 to 22 ms,
+  a p90 of 85 to 168 ms and up to 1.4 s, and 14 to 22 percent of the failures outlasted an 80 ms bound, so a bound short enough for a status call still
+  left misses. The open is the cause, so that retry and its test were removed. (A different, much shorter retry is back for the delete-pending refusal
+  below.)
+- **The heartbeat had the same defect, and it is a double-booking, not a missed status read.** A review of the fix found it.
+  - `hb.<epoch>` is rewritten by `Renew` with the same rename over the live name. `heartbeatAt` (the reader behind `Leases()`, `Inspect` and the acquirer's
+    sweep), `lastHeartbeat` and `keeperSignOfLife` read it with `os.ReadFile`. A read that lost to the rename fell back to the stamp written at acquisition.
+  - The reclaim rule needs a stale heartbeat AND an expired window, so once a lease is past its declared window the heartbeat is the only thing that keeps
+    it. Past the window the acquisition stamp is stale, so the fallback made a live lease reclaimable, the sweep of the next acquirer removed it, and the
+    card was granted to a second job while the first still ran on it.
+  - Leases past their window are ordinary: a `gpu reserve` command that runs longer than its `--for`, a detached hold past its window. A waiter polls
+    `TryAcquire` once a second. A render the pipeline starts leases for its own timeout and is killed there (the route test above checks it), so it is not
+    past its window while it lives.
+  - `readSharedFile` (`internal/gpulease/hostram.go`) is the shared open plus read; `readRecordFile` calls it after its fault seam, and the three heartbeat
+    readers call it directly, without that seam (a record that cannot be read is when the heartbeat is the evidence of life, `keeper.go`).
+- **A shared open still meets one refusal: delete-pending.** For the instant a rename has marked the old entry for deletion and the new one has not taken
+  its name, an open of the name fails with `ERROR_ACCESS_DENIED`, however it shares. This is the stray miss the first round could not explain (3 allowed per
+  run in `readrace_test.go`). `readSharedFile` retries a permission error `removeAttempts` times at `removePause` (the claim removal's bound, about 100 ms)
+  and returns every other failure at once; a file that stays unreadable costs one bounded wait and then the error as before.
 - **Proved** (a 36-thread Windows host; 30 busy-loop node processes started for each run and killed by pid afterwards; scratch paths shown as `<scratch>`).
   - Red under load, the test unfixed: `go test -c -o <scratch>/pipeline.test.exe ./internal/pipeline/`, then 4 concurrent copies of
     `<scratch>/pipeline.test.exe -test.run '^TestEveryMediaRouteLeasesForItsOwnTimeoutAndIsKilledThere$' -test.count=2 -test.cpu 1,2,4 -test.v`
@@ -51,15 +67,37 @@
     10 of 10 each; the stress test alone under the 30 burners, `<scratch>/gpulease.test.exe -test.run '^TestAHeldLeaseNeverReadsAbsentWhileItsRecordIsRewritten$' -test.count=30`,
     30 of 30.
   - The same rewrite stress with plain `os.ReadFile` against `OpenShared`: 2,714 of 239,868 reads failed, 0 of 491,323.
+  - **The heartbeat, red** (`heartbeatread_windows_test.go`, Windows only). A lease with a 50 ms window, the clock moved 10 minutes on, `Renew` called, and a
+    `DELETE`-access handle held on `hb.<epoch>` (the control asserts `os.ReadFile` of it fails with `ERROR_SHARING_VIOLATION`). Unfixed, 3 of 3 runs, both tests
+    red: `heartbeatAt` and `lastHeartbeat` returned the acquisition stamp, `keeperSignOfLife` the zero time, `Leases() = [] while the holder renews, want [1]`,
+    `the card of a live lease was granted to a second job (epoch 2)`, and the holder's next `Renew` returned `gpulease: lease is gone (epoch 1)`.
+  - **The heartbeat, green and mutants.** Both tests pass 3 of 3 with the fix, the second one also checking that the holder's next `Renew` and `Check` succeed
+    once the handle is closed. One mutant per reader, each reverted to `os.ReadFile` alone: `heartbeatAt` red on its own line and on the second job being
+    granted; `lastHeartbeat` red on its line; `keeperSignOfLife` red on its line. All three readers back on `os.Open`: both tests and the record test red.
+  - **The delete-pending refusal, measured** (a scratch test, not committed: a held lease past its window, four goroutines reading `hb.<epoch>` through
+    `readSharedFile` in a tight loop while `Renew` rewrote it in a loop for 40 s). Without the wait, on the 36-thread host, 30 busy-loop processes running, 4
+    concurrent copies: 5 `ERROR_ACCESS_DENIED` in 124,206 reads and 664 renewals, at least one in each of the 4 copies; no sharing violation. Quiet host, 3
+    copies: 0 in 718,272 reads. With the wait, 4 copies under the same load: 0 in 108,680 reads and 477 renewals.
+  - **The wait, red, green and mutants** (`readretry_test.go`, portable, with the `openSharedFile` seam refusing the open as the system does; and
+    `readretry_windows_test.go`, the control: a delete-pending file fails `OpenShared` with `ERROR_ACCESS_DENIED`, a permission error). Unfixed, 3 failing
+    tests: `heartbeatAt after three access-denied opens = "1000", want the file's content 424242`, `readSharedFile ... permission denied`, `made 1 opens, want 21`;
+    the two guards and the control pass. Fixed: all pass, 3 of 3. Mutants: retrying every error fails the guard (`a missing file was opened 21 times, want 1`);
+    no retry fails as unfixed; one retry short fails the bound (`made 20 opens, want 21`).
+  - **The stress test now allows no miss** (`strayMisses` is gone). Fixed, 150 runs of the stress test under the 30 burners (the first about 280 s of them
+    loaded, the rest quieter as the burners expired): 0 misses of `Leases()` in 282,230 reads and 0 of `EpochIsCurrent` in 480,285, 150 of 150 passed. With the
+    open reverted to `os.Open`, 3 of 3 runs red: `Leases()` missed 23, 28 and 31 reads and `EpochIsCurrent` 62, 55 and 53.
 - **Not verified here.**
   - No GPU job, lease on a real card or seat was used: every lease in these runs is in a scratch lease root, with the stub runner.
-  - A stray miss remains possible under extreme load. With the shared open in, `EpochIsCurrent` missed 1 read in 25,939 in one of 6 runs and 1 in 8,242 in
-    one of 20 under the 30 burners (the stress test then ran four spinning readers, which also starved the writer's rename once); none of 25 runs with
-    the read errors logged, and none at any stage of `EpochIsCurrent` in 40 runs, so the cause is not found. The stress test allows 3 misses a run for it;
-    the defect misses dozens.
+  - The double-booking was shown with a held `DELETE`-access handle in a scratch lease root, which models the instant of the rename, and by a tight `Renew`
+    loop in a review. It was not seen with a real `gpu reserve` command that outran its window, with a waiter queued, on a real card. The chance in
+    production per renewal (every 15 s) with a waiter polling once a second was estimated, not measured.
+  - The delete-pending wait is sized by the claim removal's bound (about 100 ms), not by a measured duration of the instant. Zero misses in the runs above
+    says the bound covers what was seen; a stall of the renaming process longer than that, under a heavier load, would still lose a read.
+  - An unreadable heartbeat still falls back to the acquisition stamp (after the wait). That is the safe answer for a heartbeat that is absent, and the unsafe
+    one for a heartbeat that exists and cannot be read for longer than the wait; the acquirer's sweep also asks `keeperAlive` for a record it cannot read, but
+    not for a heartbeat it cannot read. Not changed here.
   - Linux: the reader there is `os.Open` as before (`GOOS=linux go vet ./internal/gpulease/ ./internal/pipeline/`); the race is Windows-only and no Linux
     host ran the stress.
-  - The other files the package renames over (the heartbeat `hb.<epoch>`, the epoch counter, the tokens, the waiters) are still read with `os.ReadFile`.
-    A heartbeat read that fails falls back to the acquisition stamp, which matters only past the heartbeat window; it was not measured and is not changed.
+  - The epoch counter, the tokens and the waiters are still read with `os.ReadFile`; no finding covers them.
   - `windowAndKill` still reads the lease twice. A lease that ended between the two reads (the 2 s render killed and released) would also show
     `got []`; it needs a stall of seconds between two adjacent statements and was not seen.

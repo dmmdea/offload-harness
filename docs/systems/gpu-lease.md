@@ -404,7 +404,7 @@ concurrency test rather than by reading:
   the rest of its window) or drop a heartbeat renewal.
 - **A rename-over blocks a reader, too.** Windows checks sharing both ways. While the rename runs, the
   system holds a handle on the old entry with `DELETE` access, so an open whose own share mode lacks
-  `FILE_SHARE_DELETE` fails with `ERROR_SHARING_VIOLATION` (rarely `ERROR_ACCESS_DENIED`), and
+  `FILE_SHARE_DELETE` fails with `ERROR_SHARING_VIOLATION`, and
   `os.ReadFile` is such an open. A reader that took that failure for "no record" answered "no lease" for
   a lease that was held: `reader.v2` skips a record it cannot read, so `Leases()` came back empty and
   `EpochIsCurrent`, the fence a render child asks, said the lease was not its own. A media route's own
@@ -415,10 +415,28 @@ concurrency test rather than by reading:
   does. Measured under a concurrent rewrite
   (`TestAHeldLeaseNeverReadsAbsentWhileItsRecordIsRewritten`, `internal/gpulease/readrace_test.go`): with
   `os.ReadFile`, `Leases()` missed 1 read in 30 to 60 and `EpochIsCurrent` about 1 in 15; through
-  `OpenShared`, none. A bounded retry of the failed read was tried first and dropped: under saturating
-  load the failure lasted up to 1.4 s, so a bound short enough for a status call left misses, and the open
-  is the cause. The other files the package renames over (the heartbeat, the epoch counter, the tokens
-  and the waiters) are still read with `os.ReadFile`; this change covers the lease records.
+  `OpenShared`, none. A bounded retry of the failed plain read was tried first and dropped: under
+  saturating load the sharing violation lasted up to 1.4 s, so a bound short enough for a status call
+  left misses, and the open is the cause.
+  - **The heartbeat is read the same way, and it matters more.** `hb.<epoch>` is rewritten by `Renew`
+    with the same rename over the live name, and `heartbeatAt`, `lastHeartbeat` and `keeperSignOfLife`
+    read it through `readSharedFile`. Once a lease is past its declared window the heartbeat is the only
+    thing that keeps it: the reclaim rule needs a stale heartbeat AND an expired window. A heartbeat
+    read that failed fell back to the stamp written at acquisition, so a live lease past its window (a
+    `gpu reserve` command that outran its `--for`, a detached hold past its window) read as reclaimable,
+    an acquirer's sweep removed it, and the card was granted to a second job while the first still ran
+    on it. A record that cannot be read is only skipped; a heartbeat that cannot be read is the
+    dangerous case. `TestALiveLeasePastItsWindowIsNotHandedToAnotherJobWhileItsHeartbeatIsBeingRenewed`
+    holds a `DELETE`-access handle on the heartbeat and asks for the card from a second process.
+  - **A shared open still meets one more refusal.** For the instant the rename has marked the old entry
+    for deletion and the new one has not taken its name, the file is delete-pending and every open of
+    the name fails with `ERROR_ACCESS_DENIED`, whoever shares what. `readSharedFile` waits that out: a
+    permission error is retried `removeAttempts` times at `removePause` (about 100 ms, the claim
+    removal's bound) and any other failure is returned at once. Measured on a loaded host with a
+    heartbeat renewed in a loop: 5 failed reads in about 124,000 without the wait, none in about
+    108,000 with it. A file that stays unreadable costs one bounded wait and then the error.
+  - The epoch counter, the tokens and the waiters are still read with `os.ReadFile`; no finding covers
+    them yet.
 
 Neither of the first two is defensive padding: with waiters polling once a second, both races are
 ordinary traffic. Measured under six concurrent acquire/release workers, 1 in 48 cycles failed
