@@ -1,4 +1,4 @@
-### Fixed - a held lease no longer reads as absent, or as stale, while its record or its heartbeat is rewritten: the lease files are read through a handle that shares delete (the media-route lease test flake, and a double-booking found behind it)
+### Fixed - a held lease no longer reads as absent, or as stale, while its record or its heartbeat is rewritten: the Go readers share delete and wait out the delete-pending refusal, and the Node readers wait it out too (the media-route lease test flake, a double-booking found behind it, and the Node fence)
 
 - **The flake.** `TestEveryMediaRouteLeasesForItsOwnTimeoutAndIsKilledThere` failed on a loaded Windows host with
   `mediaadmit_lease_routes_test.go:210: want one live lease while the render runs, got []`, in a full `./internal/pipeline` run (659 s) and once more
@@ -110,7 +110,75 @@
     through a build overlay, the tree untouched): the gate removed from `readSharedFile`, 20 of 20 subtests red with `made 21 opens, want 1`, the
     three portable wait tests still green; the constant set to `false` in the Windows build, `TestWindowsWaitsOutADeniedOpenByDefault` red 3 of 3
     (`deniedOpenMayClear is false in a Windows build`), the others green.
+- **The Node readers had the same defect** (`render/lease-read.mjs`, new).
+  - `readLease`, `readEpochRecord` and `readCardClaim` (`render/gpu-lock.mjs`) and the lease-progress reader (`render/lease-progress.mjs`) read the files Go
+    replaces by rename-over with `readFileSync` and turned every error into `null`. `checkInheritedLease`, the fence before an irreversible action, uses the
+    first three. A `null` record for a card-scoped lease falls through to `meta.json`, which a card lease never writes, so a refused open of the rename's instant
+    read as "this lease is not current" and the render aborted.
+  - libuv opens with `FILE_SHARE_DELETE`, so the sharing violation of the Go reader cannot happen to Node; the delete-pending instant can. A scratch Go helper made a
+    file delete-pending (a handle with delete access, the disposition set) and held it: `readFileSync` threw `EPERM` (errno -4048, syscall `open`) in 0.2 ms, and once the
+    last handle closed, `ENOENT`. So the codes to wait out are `EPERM` and its POSIX twin `EACCES`.
+  - `readSharedSync` / `readSharedJson` retry those two and nothing else, until a 100 ms deadline (pausing 5 ms with `Atomics.wait`, which `atomic-out.mjs` and
+    `igpu-engine.mjs` already use on the main thread), and return `null` at once for a missing file or any other error, so a released lease still reads absent with no
+    wait. The wait runs only on Windows (`policy.waitsOutDenied`), for the reason the Go side gave up the wait elsewhere. The three Node readers, `checkInheritedLease` and
+    `leaseProgressFile` all go through it.
+  - **The bound is a deadline, not 20 pauses.** The first form copied the Go side's count (20 x 5 ms). `Atomics.wait(5)` sleeps a whole timer tick on Windows (15.4 ms
+    for 1, 2, 5 and 10 ms alike, measured), so that was 308 ms. Red: with a fake clock whose pause is 15.4 ms the helper took `20 pauses of 15.4 ms, want 7`; in real time
+    `gave up after 299 ms (20 pauses), want about 100 ms and not the 308 ms that 20 timer ticks cost`. Fixed, against a file held delete-pending for 1.5 s the helper gave up at
+    102 to 111 ms (3 runs); against one held for 40 ms it returned `null` (the file was then gone) at 43 to 67 ms.
+  - **Node miss counts, before and after.** A writer in another process renamed files over `e/7.json`, `meta.json` and `cards/<card>.claim` of 40 scratch lease roots in
+    rotation: a Go process with the write pattern of `renameReplacing` (write beside, rename over, retry a refused rename), and a Node process with the same; in half the runs
+    a hard link of a seed file instead of a fresh file, which is the same rename at tens of times the rate (a fresh file costs tens of milliseconds on this host). 4 or 8
+    reader processes called the real `readEpochRecord`, `readLease`, `readCardClaim`, `checkInheritedLease` and `leaseProgressFile` in a tight loop, with a raw
+    `readFileSync` of the same paths beside them to record error codes. 40 s a run; four configurations a matrix (quiet; 30 busy-loop processes with a Go writer and 4 readers,
+    with a Node writer and 4, with a Go writer and 8); a 36-thread Windows host that other work was also loading.
+    - Plain `readFileSync` (before): 8 runs, 1,048,185 file reads against 55,218 renames (1,651 of the writer's renames met an open reader and were retried): **0 misses** of
+      any of the five readers, and not one error code of any kind on the raw reads.
+    - Through `lease-read.mjs` (after): 8 runs, 499,320 file reads against 20,726 renames (512 retried): **0 misses**, 0 error codes.
+    - So Node misses nothing in this setup, loaded or not. A Node open costs about 0.65 ms here, so each reader holds its file long enough that a rename mostly waits for it (the
+      retried renames), and the delete-pending instant is microseconds wide. The helper is a guard against an instant this setup could not provoke; it is shown by the injected
+      refusal and by the held delete-pending file above, not by a natural miss.
+  - **Tests** (`render/lease-read.test.mjs`, 17; `render/lease-read-stress.test.mjs`, 1).
+    - Red, before any wait (the helper was the plain read): 9 of the 17 failed on their assertions, among them `refused opens are waited out` (`+ null  - '{"epoch":7}'`),
+      `a refusal that never ends ...` (`1 reads, want the first and 20 retries`), and, through the real readers, `the fence holds a held card lease current through refused reads
+      of its record and of its claim` (`a null record for a card lease falls through to meta.json ... actual: false, expected: true`). Green and meant to stay so: a missing file is read
+      once with no pause, any other error code is not retried, a permission error is returned at once off Windows, a released lease reads absent through every reader with each file
+      opened once, and the stress. The stress test cannot be red on the old readers (above); it is a guard.
+    - The stress test is sized by work, not by the clock: the writer makes 600 renames and stops once the reader has made 150 loops. A first form that ran the writer for 3 s failed on a
+      loaded host (`the writer made 1 renames in 3000 ms`); the same work took 1.4 s, 8.4 s and 26 s in the same hour.
+    - Mutants of the helper, one at a time, each caught: every error retried (3 tests red, among them `a file that is not there is read once ...`); one pause short of the bound (1);
+      the platform gate ignored (`off Windows a permission refusal is returned at once`); `EACCES` not retried (1); no pause between reads (4; a first run of this mutant hung the
+      test, so the scripted read now ends a runaway loop and fails). `node --test` on `lease-read.test.mjs`, `lease-read-stress.test.mjs`, `gpu-lock.test.mjs`,
+      `lease-progress.test.mjs` and `no-visible-windows.test.mjs`: 97 tests, all pass.
+- **The release lane's checks, on the Go side.** The wait of `readSharedFile` is for a file that is there and passes in milliseconds. It must not be paid for a file that is not there,
+  and no read under the epoch lock may multiply it. These are guards: the code was already in place, so none could be red first; each was shown red against a mutant. They run with the
+  wait forced on (`waitOutDeniedOpens`), so a read that waited on a missing file shows on every platform.
+  - `TestAReleasedLeaseReadsAbsentAtOnceAndNoReadWaitsForIt`: after `Release`, `Leases()` opens `meta.json` once, `EpochIsCurrent` opens `e/<epoch>.json` and `meta.json` once each,
+    `Inspect()` `meta.json` once, `heartbeatAt`, `lastHeartbeat` and `keeperSignOfLife` `hb.<epoch>` once each; every one answers absent with 0 pauses. 0 to 0.6 ms each on Windows, 5 to 35 us on Linux.
+  - `TestAMissingOrDeletedRecordCostsOneOpenAndNoWaitUnderTheEpochLock`: three leases held, a fourth card asked for, and the first open of each record under the epoch lock deletes it (the
+    holder releasing between the sweep's listing and its read). Each deleted record is opened once under the lock; 17 opens in all, 7 under the lock, 0 pauses; 3.6 to 5.0 ms on Windows, 0.5 ms on Linux.
+    The grant asks for the absent `meta.json` five times and each ask is one open.
+  - `TestReleasingUnderTheEpochLockReadsNoRecordMoreThanOnce`: three releases and a `Leases()` over the rest, 0 pauses, no missing file opened more than the asks name (the listing and the judge both
+    ask for the one live lease's heartbeat: two opens, each answered at once).
+  - Mutant (`readSharedFile` also retrying a missing file, through a build overlay): all three red. `Leases() opened ...meta.json 21 times, want at most 1`, `Leases() waited 20 times for a file that is
+    not there, want 0`, `the deleted record 1.json was opened 21 times under the lock, want exactly 1`; the six asks about the released lease took 760 ms and the grant 1.55 s with 280 pauses.
+  - A path that does pay under the lock is a file that exists and is refused (a delete-pending heartbeat of a live lease under a sweep): one bounded wait per such read. It is the wait that keeps the sweep
+    from calling a live lease stale, so it stays under the lock. Nothing that is missing or deleted pays it, which was the cost to rule out: it would have grown by about 100 ms per released lease.
+    A released record held open by a foreign handle that shares delete was measured too: the name was gone at once on this Windows build, so `Leases()` answered absent in 0.5 ms with 0 pauses and
+    the grant of another card took 4.9 ms (a scratch test, not committed). `gpu status` goes through `Leases()` and `InspectDir`, which these tests cover in the package.
+- **The Linux pin.** `TestOnLinuxConcurrentRenameOverOfARecordAndItsHeartbeatIsNeverMissedAndNeverWaitedFor` (`readrace_linux_test.go`, Linux only): `Restamp` rewrites the held lease's record and
+  `Renew` its heartbeat, 3,000 each, concurrently, while two goroutines of each of `Leases()`, `EpochIsCurrent` and a heartbeat read poll. It asserts 0 misses, 0 refused opens and
+  `readRetries` (a counter of the pauses `readSharedFile` takes, added as the seam) at 0. The test binary was built with `GOOS=linux go test -c` and run in a Linux environment under WSL2 as an
+  unprivileged user, with a memory-backed temp dir (a drvfs rename is not an ext4 rename): 50 of 50 passed, 118,283 `Leases()` reads, 138,177 `EpochIsCurrent` reads and 196,607 heartbeat reads,
+  1,246,093 opens, 0 misses, 0 refused, 0 pauses. It has no red on the code as it is, because `rename(2)` is atomic; mutants: the heartbeat rewritten in place (truncate, then write) failed 3 of 3 with
+  `the heartbeat could not be read on 265 of 3290 reads` (and 300 of 3330, 277 of 3255); a pause counted on every read failed with `readSharedFile paused 23845 times on Linux, want 0`.
 - **Not verified here.**
+  - Node: the retry was never exercised by a natural refusal. Plain `readFileSync` missed nothing in about a million reads, so that Node can meet `EPERM` from a rename rests on the delete-pending probe and not
+    on a miss, and the wait is shown by the injected refusal and a file held delete-pending, not by a natural rename-over. The 15.4 ms timer tick is one host's; a host where another process has raised the
+    timer resolution ticks faster, and the deadline holds either way.
+  - A copy of `gpu-lock.mjs` outside this tree (a media repository's own, which `gpu doctor` audits) now needs `lease-read.mjs` beside it, as it already needs `lease-progress.mjs` and
+    `comfy-lifecycle.mjs`; a copy that has the format signature but not the new module fails at import. Not checked against any such copy.
+  - Go: the claim files (`cards/<card>.claim`) are still read with `os.ReadFile`, as the epoch counter, the tokens and the waiters are; the Node side reads claims through the helper.
   - No GPU job, lease on a real card or seat was used: every lease in these runs is in a scratch lease root, with the stub runner.
   - The double-booking was shown with a held `DELETE`-access handle in a scratch lease root, which models the instant of the rename, and by a tight `Renew`
     loop in a review. It was not seen with a real `gpu reserve` command that outran its window, with a waiter queued, on a real card. The chance in
@@ -121,9 +189,9 @@
   - An unreadable heartbeat still falls back to the acquisition stamp (after the wait). That is the safe answer for a heartbeat that is absent, and the unsafe
     one for a heartbeat that exists and cannot be read for longer than the wait; the acquirer's sweep also asks `keeperAlive` for a record it cannot read, but
     not for a heartbeat it cannot read. Not changed here.
-  - Linux: the reader there is `os.Open`, and a permission error on it is returned at once (the gate above). The gate was shown in a cross-compiled test
-    binary of `internal/gpulease` run in a Linux environment under WSL2, only with the tests named above and a measurement script, not with the whole
-    package, `internal/pipeline` or the reader stress; those were compiled and vetted for Linux (`GOOS=linux go vet ./internal/gpulease/
+  - Linux: the reader there is `os.Open`, and a permission error on it is returned at once (the gate above). The gate and the pin were shown in a cross-compiled test
+    binary of `internal/gpulease` run in a Linux environment under WSL2, as an unprivileged user with a memory-backed temp dir, with the tests named in this fragment and a
+    measurement script, not with the whole package or `internal/pipeline`, which were compiled and vetted for Linux (`GOOS=linux go vet ./internal/gpulease/
     ./internal/pipeline/`), not run there. The race itself is Windows-only. No lease on a real card and no live lease directory was used.
   - The claim file has the same two retries with no platform gate: `createClaim` retries a permission error and `removeClaim` retries any error,
     `removeAttempts` times at `removePause`. They are older than this branch, concern the claim file and not a lease record, no finding covers them, and

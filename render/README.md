@@ -87,6 +87,11 @@ zero-always-warm (it shares the 8 GB with llama-swap, so it must coordinate). Ta
   `held-stalled`. It appends (the file may be a log the caller keeps), never throws, and does nothing when no file is
   declared. It cannot see a sampler wedged inside a ComfyUI that still answers HTTP (no polled step counter): that
   stays bounded by `COMFY_WAIT_SEC`. See [GPU lease](../docs/systems/gpu-lease.md).
+- **`lease-read.mjs`** — the one way `render/` reads a lease file the Go side owns (`readLease`, `readEpochRecord`,
+  `readCardClaim` and so the fence `checkInheritedLease`, and the record reader of `lease-progress.mjs`). Go replaces
+  those files by rename-over; on Windows an open that meets the instant of the rename fails with `EPERM`, so the read
+  waits that out (`EPERM` and `EACCES` only, a 100 ms deadline, Windows only) and reads a missing file once, so a
+  released lease still reads absent at once. See [GPU lease](../docs/systems/gpu-lease.md).
 - **`preflight-graph.mjs`** — validates a built graph against the live `/object_info` (all
   required inputs present) **before** spending a GPU cycle.
 

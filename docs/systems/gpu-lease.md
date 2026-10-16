@@ -45,6 +45,7 @@ other on a single shared card.
 | `internal/gpulease/yield.go`, `gpu_yield*.go` | **the yield request (plan P11, ADR 0086)**: the policy (`ParseOnOverdue`, `SetDefaultOnOverdue`), the asker, the `yield.<epoch>` sidecar, the holder's ticker, the read-only `YieldViewOf` every surface words from; the root files hold the shell runner (`sh -c`, `cmd.exe /d /s /c`, hidden) and the `--detach` report |
 | `gpu_terms.go` | the holders' side of terms: the tick the wrapper form and the detached holder run at the end of a term, the over-cap warning, and the argv of the hidden holder (`--release-at-expiry`) |
 | `gpu_progress.go`, `internal/gpulease/progressdir.go`, `render/lease-progress.mjs` | the progress contract of a wrapped render helper (F8): the helpers the wrapper declares one for, the minted file and its sweep, `GPU_LEASE_PROGRESS_FILE`, and the helper-side heartbeat |
+| `render/lease-read.mjs`, `render/gpu-lock.mjs` | **the Node readers of the lease**: `readSharedSync` / `readSharedJson` (a refused open waited out to a 100 ms deadline, on Windows only; a missing file read once), behind `readLease`, `readEpochRecord`, `readCardClaim`, the fence `checkInheritedLease`, and the `render/lease-progress.mjs` record reader. Node never writes these files |
 | `gpu_reserve_devices.go`, `gpu_cards.go`, `gpu_doctor.go` | which cards a reserve holds (`--devices`, `--cards`, derivation, the queue), `gpu cards` and the status table, `gpu doctor` |
 | `internal/gpulease/owner.go` | **ownership (ADR 0070)**: who asked for a lease (`Owner`), the session registry, the first-observer orphan marker, the progress contract and `Standing`, the derived reading every status surface shares |
 | `internal/gpulease/explain.go` | the sentence a waiter reads when the lease it is queued behind is stalled, orphaned or overdue, and the installed orphan grace. READ-ONLY: it reads the orphan marker a status surface recorded and never writes it or takes the epoch lock |
@@ -443,6 +444,32 @@ concurrency test rather than by reading:
     such record, and an acquirer, which reads the records under the epoch lock, 4.2 s with eight,
     enough for a second acquirer to give up on the lock's 2 s. Those figures are from a scratch
     measurement in a Linux environment, recorded in the change fragment, not from a test in the tree.
+  - **The Node readers wait the same refusal out** (`render/lease-read.mjs`). `readLease`, `readEpochRecord` and
+    `readCardClaim` (`render/gpu-lock.mjs`; the three behind `checkInheritedLease`, the fence a render runs before an
+    irreversible action) and the lease-progress reader read these files through `readSharedSync` / `readSharedJson`.
+    libuv opens with `FILE_SHARE_DELETE`, so Node never meets the sharing violation; it does meet the delete-pending
+    instant, as `EPERM` (a file held delete-pending reads exactly that, and `ENOENT` once the last handle closes). A
+    `null` record for a card lease falls through to `meta.json`, which a card lease never writes, so a refused open read
+    as "this lease is not current" and the render aborted. The helper retries `EPERM` and `EACCES` until a 100 ms deadline,
+    pausing 5 ms with `Atomics.wait`, and returns `null` at once for a missing file or any other error; the wait is on
+    only on Windows (`policy.waitsOutDenied`). The bound is a deadline and not a count of pauses because
+    `Atomics.wait(5)` sleeps a whole timer tick on Windows (15.4 ms measured), so 20 pauses were 308 ms. Plain
+    `readFileSync` missed nothing in about a million reads against 55,000 renames, so the helper guards an instant that
+    measurement could not provoke. `render/lease-read.test.mjs` (the helper and the five readers, with the refusal
+    injected) and `render/lease-read-stress.test.mjs` (a rename-over writer in another process, no miss allowed) pin it.
+  - **A file that is not there is never waited on, on any platform, and no read under the epoch lock multiplies a
+    wait.** `readSharedFile` retries a permission error only; a missing file is one open and the error. After a release,
+    `Leases()` opens `meta.json` once, `EpochIsCurrent` opens `e/<epoch>.json` and `meta.json` once each, and the
+    heartbeat readers open `hb.<epoch>` once, with no pause
+    (`TestAReleasedLeaseReadsAbsentAtOnceAndNoReadWaitsForIt`); a grant whose sweep finds the three records it reads deleted
+    under the lock opens each once and pauses never (`TestAMissingOrDeletedRecordCostsOneOpenAndNoWaitUnderTheEpochLock`).
+    The one read that does wait under the lock is of a file that exists and is refused: the heartbeat of a live lease at
+    the instant `Renew` swaps it (`Renew` does not take the epoch lock). That is one bounded wait, and it is what keeps
+    the sweep from judging a live lease stale. `readRetries` counts the pauses, as a test seam.
+  - **Linux.** Nothing is delete-pending, so no read waits and none is missed.
+    `TestOnLinuxConcurrentRenameOverOfARecordAndItsHeartbeatIsNeverMissedAndNeverWaitedFor` rewrites a held lease's record
+    (`Restamp`) and heartbeat (`Renew`) in loops while `Leases()`, `EpochIsCurrent` and the heartbeat read poll: 50 runs
+    in a Linux environment, 0 misses in about 450,000 reads, 0 refused opens, 0 pauses.
   - The epoch counter, the tokens and the waiters are still read with `os.ReadFile`; no finding covers
     them yet.
 
