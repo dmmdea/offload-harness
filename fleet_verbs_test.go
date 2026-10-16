@@ -71,7 +71,7 @@ func TestFleetServeParams(t *testing.T) {
 	})
 
 	t.Run("non-loopback refused without the trusted flag", func(t *testing.T) {
-		_, _, err := fleetServeParams("100.64.0.10:18811", "", false, config.Default(), hostNodeA)
+		_, _, err := fleetServeParams("192.0.2.7:18811", "", false, config.Default(), hostNodeA)
 		if err == nil || !strings.Contains(err.Error(), "refusing to bind") {
 			t.Fatalf("err = %v, want the netguard refusal", err)
 		}
@@ -92,11 +92,11 @@ func TestFleetServeParams(t *testing.T) {
 	})
 
 	t.Run("trusted flag allows the Tailscale bind; explicit flags win", func(t *testing.T) {
-		listen, nodeID, err := fleetServeParams("100.64.0.10:18811", "node-a", true, config.Default(), hostNodeA)
+		listen, nodeID, err := fleetServeParams("192.0.2.7:18811", "node-a", true, config.Default(), hostNodeA)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if listen != "100.64.0.10:18811" || nodeID != "node-a" {
+		if listen != "192.0.2.7:18811" || nodeID != "node-a" {
 			t.Fatalf("got (%q, %q), want the explicit flag values", listen, nodeID)
 		}
 	})

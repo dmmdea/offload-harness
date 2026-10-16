@@ -25,7 +25,7 @@ local-offload fleet-serve
 curl http://127.0.0.1:18811/fleet/health
 
 # Production: bind the TAILSCALE address so the dispatcher (on another box) can reach it
-local-offload fleet-serve --listen 100.64.0.10:18811 --listen-trusted-network
+local-offload fleet-serve --listen 192.0.2.7:18811 --listen-trusted-network
 ```
 
 Startup resolves a **GPU memory provider** (J3): `nvidia-smi` first (a working NVIDIA node
@@ -392,7 +392,7 @@ rules as `local-agent --serve` apply, enforced by the same shared guard:
   address (`:18811` with an empty host, `0.0.0.0`, `[::]`) is refused even with it (0.144.1), so a
   unit whose `$(tailscale ip -4)` is still empty at boot fails and its restart retries instead of
   serving on every interface.
-- Production binding is the machine's **Tailscale address** (e.g. `100.64.0.10:18811` on
+- Production binding is the machine's **Tailscale address** (e.g. `192.0.2.7:18811` on
   your workstation) — the tailnet is the trust boundary. **NEVER bind `0.0.0.0`**, and never expose
   the port beyond the tailnet.
 - Port **18811** per the house port discipline; update the machine's port file in
