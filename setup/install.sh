@@ -338,6 +338,12 @@ if [ "$KEY_SOURCE" = "file" ]; then
       || { rm -f "$CONFIG.new"; die "could not store fleet_auth_token in $CONFIG"; }
     chmod 600 "$CONFIG.new"
     mv "$CONFIG.new" "$CONFIG"
+    # Readable by its owner only, and the unit and the acceptance gate run as the service identity: when that is not the
+    # installing user, the file is handed to it (the installer escalates with sudo for the unit and the gate already).
+    if [ "$SERVICE_USER" != "$(id -un)" ]; then
+      sudo chown "$SERVICE_USER" "$CONFIG" \
+        || die "could not hand $CONFIG to $SERVICE_USER: it holds fleet_auth_token and is readable by its owner only, and the fleet node and the acceptance gate run as $SERVICE_USER"
+    fi
     say "config:    fleet_auth_token stored in $CONFIG from --token-file (the value is not shown)"
   fi
 elif [ "$KEY_SOURCE" = "config" ]; then

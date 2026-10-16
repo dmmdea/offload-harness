@@ -50,8 +50,9 @@
   (the previous entry pins it). The delegator change is deployed fleet-wide first; before the node change is deployed to a
   node, `fleet_auth_token` must be present in the config its `fleet-serve` reads. A node that listens beyond loopback with no
   token will not start after the upgrade, so give it the token first. `setup/install.sh` takes `--token-file PATH` on a node
-  install, stores the key in the node's config (owner-readable, never printed) and refuses, before it writes anything, to
-  register the unit without one, so a fresh install no longer crash-loops; the Windows launcher template says the key must
+  install, stores the key in the node's config (readable by its owner only, handed to the `--user` account with `sudo chown`
+  when that is not the installing user, never printed) and refuses, before it writes anything, to register the unit without
+  one, so a fresh install no longer crash-loops; the Windows launcher template says the key must
   be in the config before the task is registered. ADR 0023 carries the amendment, and `docs/FLEET-NODE.md` and
   `docs/OPERATOR-GUIDE.md` the new rule.
 - **A node swap refuses a node that could not start afterwards.** `node-swap` reads the config it resolves and records only

@@ -875,7 +875,8 @@ The rule is one rule for every route that does work or returns a result. Three c
   `fleet_auth_token` must be present in the config its `fleet-serve` reads (the same value on every delegator and every node).
   A node that listens beyond loopback with no token will not start after the upgrade, and its refusal names the key and the
   config file it read. A node installed by `setup/install.sh` takes the key with `--token-file PATH` (stored in the node's
-  config, never printed) and the installer refuses to register the unit without one; on Windows put the key in the config the
+  config, readable by its owner only and handed to the `--user` account with `sudo chown` when that is not the installing user,
+  never printed) and the installer refuses to register the unit without one; on Windows put the key in the config the
   scheduled task's `fleet-serve` reads before registering the task.
 
 ### Health advertisement (only when the lane is admissible)
