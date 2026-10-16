@@ -753,6 +753,19 @@ func readRecordFile(path string) ([]byte, error) {
 			return nil, err
 		}
 	}
+	return readSharedFile(path)
+}
+
+// readSharedFile reads a whole file through a handle that shares delete (OpenShared), for a file its writer replaces by a rename over
+// the live name: a lease record (through readRecordFile) and the heartbeat hb.<epoch> (Renew). It does not pass through the record's
+// read fault seam (UseReadFault): the heartbeat is read without the record's on purpose, because a record that cannot be read is
+// exactly when the heartbeat is the evidence of life (keeper.go).
+//
+// The heartbeat matters more than the record here. A record that cannot be read is skipped, and the lease is only briefly missing from
+// a listing. A heartbeat that cannot be read falls back to the stamp written at acquisition, which for a lease past its declared window
+// is stale: the reclaim rule (stale heartbeat AND expired window) then calls a live lease debris, the acquirer's sweep removes it, and
+// the card is granted to a second job while the first still runs on it.
+func readSharedFile(path string) ([]byte, error) {
 	f, err := OpenShared(path)
 	if err != nil {
 		return nil, err

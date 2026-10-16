@@ -1225,8 +1225,11 @@ func inspectDirDetailAt(leaseDir string, now time.Time, hbTTL time.Duration) (In
 
 // heartbeatAt reads the per-epoch heartbeat beside a lease record, falling back to the
 // value stamped at acquisition when nothing has renewed yet.
+//
+// It reads through a handle that shares delete (readSharedFile). Renew replaces the file by a rename over the live name, and a plain
+// read that meets that rename fails on Windows; the fallback would then call a lease past its window stale and let it be reclaimed.
 func heartbeatAt(leaseDir string, meta *Meta) int64 {
-	b, err := os.ReadFile(filepath.Join(leaseDir, "hb."+strconv.FormatUint(meta.Epoch, 10)))
+	b, err := readSharedFile(filepath.Join(leaseDir, "hb."+strconv.FormatUint(meta.Epoch, 10)))
 	if err != nil {
 		return meta.RenewedAtMs
 	}
@@ -2206,7 +2209,7 @@ func (m *Manager) heartbeatPath(epoch uint64) string {
 // lastHeartbeat returns the most recent heartbeat for this epoch, falling back to the
 // value stamped into the record at acquisition when nothing has renewed yet.
 func (m *Manager) lastHeartbeat(meta *Meta) int64 {
-	b, err := os.ReadFile(m.heartbeatPath(meta.Epoch))
+	b, err := readSharedFile(m.heartbeatPath(meta.Epoch))
 	if err != nil {
 		return meta.RenewedAtMs
 	}
