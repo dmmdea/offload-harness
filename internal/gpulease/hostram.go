@@ -756,6 +756,9 @@ func readRecordFile(path string) ([]byte, error) {
 	return readSharedFile(path)
 }
 
+// openSharedFile is OpenShared, as a variable so a test can make the open fail the way it fails while a rename replaces the file.
+var openSharedFile = OpenShared
+
 // readSharedFile reads a whole file through a handle that shares delete (OpenShared), for a file its writer replaces by a rename over
 // the live name: a lease record (through readRecordFile) and the heartbeat hb.<epoch> (Renew). It does not pass through the record's
 // read fault seam (UseReadFault): the heartbeat is read without the record's on purpose, because a record that cannot be read is
@@ -766,7 +769,7 @@ func readRecordFile(path string) ([]byte, error) {
 // is stale: the reclaim rule (stale heartbeat AND expired window) then calls a live lease debris, the acquirer's sweep removes it, and
 // the card is granted to a second job while the first still runs on it.
 func readSharedFile(path string) ([]byte, error) {
-	f, err := OpenShared(path)
+	f, err := openSharedFile(path)
 	if err != nil {
 		return nil, err
 	}
