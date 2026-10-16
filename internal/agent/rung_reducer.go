@@ -88,10 +88,15 @@ import (
 //     bearer token (the same value rule, 16 or more characters), a bare
 //     provider key (sk-..., sk-proj-..., sk-ant-...), a JWT, a Basic
 //     Authorization header, a registry config's "auth" value and a Cookie or
-//     Set-Cookie header with a value of 12 or more characters (the whole line
-//     goes with it, a double-quoted pair is stepped over with the escapes
-//     inside it, as in Django's messages cookie, and a single quote or
-//     an apostrophe ends the match). It does NOT
+//     Set-Cookie header with a value of 12 or more characters (the whole span
+//     goes with it, from the header name to the end of the line, the closing
+//     quote of the string the header sits in or the closing bracket of its
+//     list, whatever the cookies hold: a quoted value with a space, an
+//     apostrophe, an ampersand, a comma, a semicolon or a tab, a shell escape,
+//     one of Go's HTML escapes. Over-redacting a cookie line is accepted: it is
+//     evidence of a header, not of the build. An apostrophe in an unquoted
+//     value ends the span, and so does a quote with two backslashes in front of
+//     it, or four or more). It does NOT
 //     cover: a camel-case name (githubToken=...), a key name the table does
 //     not hold (dbpassword=, sid=), a
 //     command-line flag (--token value, curl -u user:pass), URL userinfo

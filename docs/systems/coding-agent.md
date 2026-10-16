@@ -689,11 +689,7 @@ key `"token": "..."`) or in a call that passes the name and the literal as two a
 (`t.Setenv("API_TOKEN", "...")`), a bearer token, a bare `sk-` provider key, a JWT, a Basic `Authorization` header (also in a
 printed Go header map, a `setHeader` or `Header.Set` call, a subscript or a hash: at most eight punctuation characters, one
 of them a separator, between the name and the scheme), a registry config's `"auth"` value and a `Cookie` or
-`Set-Cookie` header with a value of 12 or more characters (the other cookies on the line go with the first long value, a
-double-quoted pair is stepped over before and after it with the escapes inside it (an escaped quote, a doubled backslash and an
-octal escape such as `\054`, as Django's messages cookie carries them, with no backslash in front of the quotes on a header line,
-one in JSON text or in a shell string, three in JSON text inside one), and the header name and the cookies may be separated by the
-punctuation a Basic header takes or by a comma followed by a quote, as in `req.Header.Set("Cookie", "...")`);
+`Set-Cookie` header with a value of 12 or more characters (taken as one whole span, described below);
 a quote in front of a value or a header name may carry any
 number of backslashes (JSON text inside a double-quoted shell string doubles them). The key words are api key,
 private, access and auth key, secret, token, passwd, password, `PGPASSWORD`, passphrase and credentials, plus `_PASS=`
@@ -714,11 +710,16 @@ corpus vet too. Run over the tracked tree, the assignment class matched 67 place
 tracked text files, counted before this text was written); the 15 added are prose in quotes after a key name
 (`checks["credentials"] = "present, not verified. ..."`), a placeholder with spaces in a doc example, and a string literal's
 closing quote read as an opening one (`... token: ", x`), none a credential, and the cookie class matched nowhere in the tree before or
-after. That is the price of the quoted rule: a quoted value after a key name now runs to its closing quote, spaces included, so
+after (a scan of the text files under `internal/` and `docs/`, 2,273 files and 27 MB, and of the `go test -v` output of two packages;
+in the Go standard library's `net/http` source, 158 files and 2.8 MB, the whole-span class below matches four places and the older
+class three, and all four hold a real cookie value; the extra one is a `Set-Cookie` test fixture whose value of 12 or more characters
+stands behind a JSON-escaped line break and indent). That is the price of the quoted rule: a quoted value after a key name now runs to its closing quote, spaces included, so
 quoted prose after a key name is read as a value, in the safe direction. The table costs time: measured on one machine over 1 MiB of
 text that matches no class, all eleven classes took 1.51, 1.54 and 1.54 s (three runs), about 1.5 s per MiB, of which the assignment class
 is 0.6 s and each other class 0.1 to 0.2 s; the same input took 1.53, 1.53 and 1.55 s before the quoted-value and cookie changes, so those
-changes did not move it measurably. A result is scanned only between 4 KiB and 64 KiB, so one scan costs at most about 0.1 s
+changes did not move it measurably. The whole-span cookie class alone scans 1 MiB of Go source in 85 ms, as the older class did, and a
+1 MiB of text built to be slow for it (one header line of short cookies, an unclosed list, openers with no value) took 0.2 to 1.3 s, against
+0.2 to 0.5 s for the older class. A result is scanned only between 4 KiB and 64 KiB, so one scan costs at most about 0.1 s
 (a shared and noisy machine; unverified elsewhere). The compaction-eval harvest redactor is derived from the same table and substitutes the email class
 last, so it replaces a whole credential value rather than its head; its exit gate also fails the harvest when 12 or
 more consecutive characters of a value it replaced are still in the text, in which case the harvest leaves that one trace
@@ -727,6 +728,30 @@ is read by the local agent CLI, the MCP front door and the fleet-node agent task
 takes no node policy. The measurement that decides whether the key is ever turned on is a seat A/B on the 9B
 and 27B agent seats through the gate's non-inferiority mode (tool-call reliability and pass rate), with
 forwarded prefill tokens as the efficiency metric and never seconds; until it passes the key stays off.
+
+The cookie class takes a whole span, not a cookie at a time. Once the name of a `Cookie` or `Set-Cookie` header and an opener
+fire (the punctuation a Basic header takes, a comma followed by a quote as in `req.Header.Set("Cookie", "...")`, and a header fold,
+a line break, on either side of it) and the span holds a cookie value of 12 or more characters, the match runs from the header name
+to the first of three ends: the end of the line (a line break, its JSON escape or the end of the text); the closing quote of the
+string the header sits in, which is a quote that opens no quoted cookie value (a bare quote, a backslash and a quote, or three
+backslashes and a quote: a header line or a shell command, JSON text, and JSON text inside either; a single quote ends it too); and
+the closing bracket of a list (`"Set-Cookie": [ ... ]`, a printed Go header, a Python list), one span however many elements and
+lines it has, a bracket inside a string element not ending it. The closing quote and the bracket are not part of the match, so the
+redacted text keeps its quoting and a tool call's Args stay valid JSON (the text before the header name is untouched, so a JSON
+document that held the header as a key is not valid JSON by itself once redacted). Nothing inside the span is read for an alphabet:
+a quoted value with a space, an apostrophe, an ampersand, a comma, a semicolon, a tab, an escaped quote, a shell escape (an escaped
+dollar sign or backtick) or one of Go's HTML escapes for `&`, `<` and `>` (a backslash and u0026, u003c, u003e) is inside it, and so
+is every other cookie and attribute on the line. Over-redacting a cookie line is the accepted price: it is evidence of a header, not
+of the build. What starts a match stays precise, so code and prose that handle cookies stay quiet: some value in the span must have 12
+characters with no white space from its start (a bare value, or a quoted one from its opening quote; an escape counts as one
+character), which leaves `http.Cookie{...}` literals, `Header.Get("Cookie")`, a Go string concatenation such as `"Cookie: sid=" +
+f(x)`, Django's short messages (`Saved ok`, `Can't save`, `Tom&Jerry`) and the HTTP reference's example header quiet. The
+compaction-eval harvest redactor runs this class before every other, so a cookie named like a credential (`refresh_token=`,
+`password=`, `secret=`) is one substitution of this class and not half of an assignment one, and its value-tail gate remembers every
+value in the span, a quoted body whole with its spaces and escapes. The gaps are named: an apostrophe in an unquoted value ends the
+span (it cannot be told from the quote that closes a header written in single quotes), a quoted cookie whose quotes carry two
+backslashes or four or more is not read as a pair, a header folded again after its first cookie ends at that line break, and a
+cookie passed apart from its header name (`curl -b`, a cookie jar) is not covered.
 
 What the credential check is for, and what it is not. It is a best-effort list of shapes, not a proof that a text
 carries no secret: the not-covered list above is open by nature, and widening the table trades precision and scan

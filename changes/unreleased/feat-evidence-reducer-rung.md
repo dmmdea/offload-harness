@@ -87,10 +87,10 @@
 - **Basic authorization, registry auth and cookies.** Three classes are appended after the existing eight: `basic-auth` (an
   `Authorization` or `Proxy-Authorization` header, or a quoted JSON key, with the Basic scheme and a value of 12 or more
   characters), `auth-field` (a quoted `auth` key with an encoded quoted value, the shape of a container registry's config) and
-  `cookie-header` (a `Cookie` or `Set-Cookie` header holding a value of 12 or more characters; the match runs to the end of the
-  line or the closing quote, so the other cookies on the line are replaced with it, the safe direction). Each match ends before
+  `cookie-header` (a `Cookie` or `Set-Cookie` header holding a value of 12 or more characters, replaced as one whole span: see
+  the cookie bullet below). Each match ends before
   the closing quote or backslash, so redacted text keeps its quoting and Args stay valid JSON, and the residual gate remembers the
-  credential part of each (the encoded value, or every long cookie value on the line but not its attributes, not the header name). The words alone ("Basic
+  credential part of each (the encoded value, or every cookie value in the span, a quoted one whole, but not its attributes, not the header name). The words alone ("Basic
   authentication", `Authorization: Basic` with no value, `{"auth":"none"}`, `Cookie: theme=dark`) stay quiet. The corpus vet and
   the harvest redactor derive from the table, so both refuse and redact the new shapes.
 - **A terminal control sequence before a key word is recognised.** The `m` that ends a color code is a word character, so a
@@ -104,10 +104,11 @@
   that opens a match, like a JSON escape (`piishape.Lead` names it; the redactor no longer carries its own copy of the escape
   pattern). The cookie class does not stop at the escape byte: a color reset inside a cookie line goes with the rest of the line, as
   that class already takes the whole line. Quiet cases are pinned: `PASS: TestName`, `token_count=1234`, `MAX_TOKENS=4096` and the word `password` in colored prose.
-- **A quote may carry any number of backslashes.** The assignment, Basic, registry auth and cookie classes took one optional
+- **A quote may carry any number of backslashes.** The assignment, Basic and registry auth classes took one optional
   backslash before a quote. JSON text inside a double-quoted shell string doubles them again, so `bash -c "export API_KEY=\"<value>\""`
   as Args has three backslashes in front of the value's quote and the value was neither redacted nor seen by the residual gate. The
-  prefix is now any number of backslashes; the redacted Args stay valid JSON with the text after the value intact.
+  prefix is now any number of backslashes; the redacted Args stay valid JSON with the text after the value intact. The cookie class
+  has no back-references to count with either, so it writes out the three levels it reads (none, one and three), as its bullet below says.
 - **More assignment shapes, quoted literals only.** The assignment class put nothing but `=` or `:` between the key word and a
   value, so Go's `password := "<value>"`, `const token: string = "<value>"`, `var token string = "<value>"`, `password: str = "<value>"`,
   `if password == "<value>"`, `password = b"<value>"` and `r'<value>'`, `os.environ["API_TOKEN"] = "<value>"`, `{'password' => '<value>'}` and a quoted
@@ -148,38 +149,42 @@
   examples, and a Go string literal's closing quote read as an opening one (`... token: ", tailJWT(), ...`); none is a credential, and the
   cookie class matched nowhere in the tree. Quiet cases are pinned (a literal under 12 characters, a name that only contains the key word,
   a leading `/`, blank padding, a bare word run with no quote, a literal that continues on the next line).
-- **The cookie header steps over quoted pairs.** The walk to the first long cookie value and the tail behind it both stopped at the first
-  double quote. `Cookie: messages="ok"; sessionid=<value>` (Django's quoted messages cookie), `Set-Cookie: a=b; Path="/"; sessionid=<value>`,
-  `Set-Cookie: messages="<value>"; HttpOnly` and `Cookie: a="<value>"; b=<short>` matched nothing, so the value went to the seat and to
-  the corpus, and `Cookie: sid=<v1>; theme="dark"; extra=<v2>` ended the match at the quote and wrote `extra=<v2>` out verbatim, which
-  made the note above (the other cookies on the line go with it) false. A double-quoted pair (an octal escape such as Django's `\054` is
-  allowed inside it, and in JSON text the quotes carry backslashes) is now stepped over before and after the first long value, the quoted
-  pair tried first; a double-quoted long value is matched with its closing quote; a header in a curl command still ends before the quote that
-  closes the string. A single quote or an apostrophe still ends the match (`name=O'Brien` cannot be told from the quote that closes a header
-  written in single quotes), which is named as a gap in the class notes and the docs. The redactor now remembers EVERY long cookie value
-  on the line for the value-tail gate and not only the first, except the Set-Cookie attributes `Domain`, `Path`, `Expires`, `Max-Age` and
-  `SameSite`, which are ordinary text.
-- **A quoted cookie with escapes no longer hides the cookies behind it.** A quoted pair and a quoted long value took a backslash only
-  in front of three octal digits, so the first escaped quote ended the walk. Django's messages cookie, a long quoted value with an
-  escaped quote and octal escapes in it (the way Python's http.cookies writes it), was matched only up to its first backslash: the
-  session cookie behind it stayed in the output and went to the seat and the corpus verbatim, and the residual gate did not see it,
-  because the value had never been inside a match. A quoted pair and a quoted long value now take an escaped quote, a doubled backslash
-  and an octal escape (in JSON text also a JSON escape such as `\u0026`) as part of the value, and a long value is taken whole, with its
-  closing quote. The quotes carry no backslash on a header line, one in JSON text and in the double-quoted string of a command or of
-  code, and three in JSON text inside such a string; the pattern has no back-references, so each of the three is written out and the
-  escapes inside the value shift with them. Quotes with two backslashes, or four or more, are named as a gap in the class notes and the
-  chapter. A generated check over ten cookie shapes in lines of two or three cookies (1100 lines) wrapped five ways (a header line, a
-  Set-Cookie line, Args, a curl command, Args holding a curl command) left a long value outside the match in 578 lines of each wrapping with
-  the old pattern and in none with the new one, and no line without a long value matched. The scan cost of the cookie class is
-  unchanged (about 0.12 s per MiB of text that matches nothing, before and after), and the class matches the same places as before in the
-  tracked tree (none) and in 19.7 MB of Go standard library text (four).
-- **The cookie header takes the Basic header's openers.** The class took a colon or an equals sign, with an optional quote, straight after
-  the header name, so `{"Set-Cookie":["session=<value>; Path=/"]}`, `req.Header.Set("Cookie", "sid=<value>")`,
-  `xhr.setRequestHeader('Cookie','sid=<value>')`, `"Cookie": [ "sid=<value>" ]`, a subscript, a hash literal, a printed Go header and the
-  JSON-escaped forms of these in Args matched nothing. Between the name and the cookies it now takes up to eight non-word characters, a colon,
-  an equals sign, a hash rocket or an opening bracket, and up to eight more, or a comma followed by a quote, so prose such as `the cookie,
-  path=/some/long/path` stays quiet. Pinned quiet: `Header.Get("Cookie")`, `Header.Set("Cookie", c.String())`, `http.SetCookie(...)` with a
-  `&http.Cookie{...}` literal, a cookie jar's method names, and the HTTP reference's `Set-Cookie: id=a3fWa; Expires=Wed, 21 Oct 2015 ...`.
+- **The cookie header takes a whole span, not a cookie at a time.** The release lane's reading found seven defects of one design, three of
+  them high: the class walked the line cookie by cookie, with a fine-grained rule for what a cookie value may hold, and every value
+  outside that alphabet ended the match with the credentials behind it going to the seat and the corpus verbatim. A quoted value with a
+  space, an apostrophe, an ampersand, a comma, a semicolon, a tab, a shell escape (an escaped dollar sign or backtick at the third level)
+  or one of Go's HTML escapes for `&`, `<` and `>`; a Set-Cookie list whose first element was short or whose later elements held the
+  credential; a header folded after the colon; and a cookie named like a credential (`refresh_token=`, `password=`) that the assignment
+  class half-took first were each a way out. The design changes instead of a seventh patch. Once the header name and an opener fire (the
+  Basic header's punctuation, a comma followed by a quote as in `req.Header.Set("Cookie", "...")`, a header fold on either side) and the
+  span holds a cookie value of 12 or more characters, the match runs from the header name to the first of the end of the line (a line
+  break, its JSON escape or the end of the text), the closing quote of the string the header sits in (a quote that opens no quoted
+  cookie value: bare, with one backslash or with three; a single quote ends it too, so a curl command's header ends before the shell's
+  closing quote) and the closing bracket of a list (`"Set-Cookie": [ ... ]`, a printed Go header, a Python list: one span however many
+  elements and lines it has, a bracket inside a string element not ending it). The closing quote and the bracket stay out of the match, so
+  the redacted Args stay valid JSON (a JSON document that held the header as a key does not, since the match starts at the key's name).
+  Nothing inside the span is read for an alphabet. Over-redacting a cookie line is accepted by design: it is evidence of a header, not of
+  the build. What starts a match stays precise: some value in the span has 12 characters with no white space from its start (an escape
+  counts as one), so `http.Cookie{...}` literals, `Header.Get("Cookie")`, a Go string concatenation such as `"Cookie: sid=" + f(x)`,
+  Django's short messages and the HTTP reference's example header stay quiet. The fine-grained value grammar now lives only in the harvest
+  redactor, which remembers every value in the span for the value-tail gate (a quoted body whole, with its spaces, quotes, escapes and
+  the characters above, the closing quote found by the number of backslashes in front of it) and runs the cookie class before every
+  other, so a key-word cookie is one cookie-header substitution. The apostrophe gap stays and applies to an unquoted value only
+  (`name=O'Brien` cannot be told from the quote that closes a header written in single quotes); quotes with two backslashes or four or
+  more, a header folded again after its first cookie and a cookie passed apart from its header (`curl -b`) are named gaps.
+  Measured: a generated check of 17,057 lines (48 cookie shapes, 18 wrappings, one to three cookies or list elements, folds, quotes with none,
+  one and three backslashes, Go's HTML escapes, key-word names, and values at the edge of the 12-character rule) breaks the contract in all 18
+  wrappings with the old class and in none with the new one; the class matches nowhere in `internal/` and `docs/` (2,273 files, 27 MB) or in
+  the `go test -v` output of two packages, and in Go's `net/http` source (158 files, 2.8 MB) it matches four places, each with a real
+  cookie value in it (the older class matched three); the cookie class alone scans 1 MiB of Go source in 85 ms before and after, and 1 MiB
+  built to be slow for it takes 0.2 to 1.3 s (0.2 to 0.5 s before; one noisy shared machine). A mutation pass over the class and the
+  harvest code (63 mutations: each fold, opener, level, escape, count and list rule, the closing-quote arithmetic, the class order) first
+  left 22 alive. Seven were dead code, now deleted: the JSON-escaped forms of a header fold, the white space behind a fold and behind a list's
+  opening bracket (the opener gaps and the list steps already take them), and the equals sign among a cookie name's delimiters. One was a
+  second bare-value pattern for lists, now merged into the line's. Thirteen were rules no test pinned (a fold before a list, a line break
+  before its bracket, an escaped line break inside a quote, an escape counted as one character bare or quoted at each level, a tab in a bare
+  value), and each has a case in the generator or a test now. One (the email class last) was only missed by the filtered test run. The final
+  table of 74 mutations, one per delimiter of a cookie name among them, is killed in full.
 - **A Go module version is not an email address.** The email pattern read `toolchain@v0.0.1-go1.27.2.linux-amd64`, which every Go stack
   trace and module-cache path carries, as an address. Measured on 9.4 MB of real Go build and test logs cut into 4, 16 and 64 KiB pieces,
   it matched 67.6 % of the 4 KiB pieces (55.7 % of the 64 KiB ones), so the reducer would have kept most Go logs raw; a domain may no
@@ -223,7 +228,11 @@
   well, a red commit before each fix commit; the value-tail test for every cookie value landed with the harvest code of the first fix, and
   was run red against the older harvest file. The value-tail test for the session value behind a quoted cookie with escapes was already
   green at its red commit (the harvest finds that value once it is inside a match); the red one is the redactor test for the
-  session cookie behind a quoted cookie with escapes.
+  session cookie behind a quoted cookie with escapes. The whole-span change of the cookie class is red first as well, one red commit
+  with the generator and the probes, run against the old class: all 18 wrappings broke the contract, with 10,130 of the generator's
+  17,057 lines matched to the wrong span, 8,642 leaking a value and 326 matching with no long value in them; then the change. The
+  redactor probe for a key-word cookie is red on its class-order assertion only: the assertions that both values are gone were green
+  against the old order.
 - **Not verified here.** Nothing in this change ran against a live seat. The acceptance measurement is a seat A/B on the 9B and
   27B agent seats through the gate's non-inferiority mode (tool-call reliability and pass rate), with forwarded prefill tokens as
   the efficiency metric and never seconds; until it passes the key stays off. Also open: how often real seats return a usable
@@ -233,7 +242,8 @@
   path; and the planner-seat render of the cascade call (the offload closure renders on the planner seat without thinking when
   the planner is not the workhorse). Fall-back reasons are logged per attempt (`agent evidence reducer: kept the raw output of ...`)
   and not yet counted on the run result.
-  The widened value class and the tail gate were tested on fixtures only; no real harvested trace was re-run through the redactor here.
+  The whole-span cookie class was tested on fixtures built from pieces, on this repository's tracked text and on the Go standard
+  library's `net/http` source; no real harvested trace went through it. The widened value class and the tail gate were tested on fixtures only; no real harvested trace was re-run through the redactor here.
   The same holds for the control-sequence, quoted-literal and header shapes: the fixtures are built from pieces, and no real colored
   build log or real harvested trace was run through them. The scan cost (about 1.5 s per MiB; 1.51, 1.54 and 1.54 s) is one series of three
   runs on a noisy shared machine, and the 67-to-82 count of assignment matches is one scan of this repository's tracked text.
