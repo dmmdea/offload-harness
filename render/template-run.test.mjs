@@ -293,3 +293,24 @@ test("unlistedModels: a manifest entry written with backslashes lists the file a
   assert.deepEqual(TR.unlistedModels({ "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "Sub\\Mixed.safetensors" } } }, LISTED_MODELS), [], "and so does the same name written with a backslash");
   assert.deepEqual(TR.unlistedModels(graph, LISTED_MODELS.slice(0, 3)), ["Sub/Mixed.safetensors"], "and it is the entry that lists it");
 });
+
+// The embeddings branch of the manifest side reads the same normalised path (lower case, forward slashes) and is anchored to the start of
+// it: a class directory written in another case or with backslashes lists the file, and a longer path that only contains `models/embeddings/`
+// does not. Each test fails if one of those steps is dropped from the embeddings branch alone.
+
+test("unlistedModels: an embeddings manifest entry in another case, or written with backslashes, lists the embedding the prompt names", () => {
+  const g = embeddingGraph("a cat, embedding:Evil_TI");
+  const both = "Models\\Embeddings\\EVIL_TI.pt";
+  assert.equal(both.split("\\").length, 3, "the fixture holds two real backslashes, not escapes that dropped out");
+  for (const path of [both, "models\\embeddings\\evil_ti.safetensors", "Models/Embeddings/EVIL_TI.bin"]) {
+    assert.deepEqual(TR.unlistedModels(g, [{ path }]), [], path);
+  }
+  assert.deepEqual(TR.unlistedModels(g, [{ path: "Models\\Embeddings\\OTHER.pt" }]), ["models/embeddings/Evil_TI"], "and it is the entry that lists it");
+});
+
+test("unlistedModels: a manifest path that only contains models/embeddings/ further along, or after a longer directory name, does not list an embedding", () => {
+  const g = embeddingGraph("embedding:evil_ti");
+  for (const path of ["models/loras/models/embeddings/evil_ti.safetensors", "elsewhere/models/embeddings/evil_ti.pt", "models/embeddings-old/evil_ti.pt"]) {
+    assert.deepEqual(TR.unlistedModels(g, [{ path }]), ["models/embeddings/evil_ti"], path);
+  }
+});

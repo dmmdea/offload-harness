@@ -3770,3 +3770,26 @@ test("readiness: of two directories that hold an embedding, the first one in Com
   const heldBy = (rel) => inv.classes.embeddings.files.find((f) => f.rel === rel).dirs[0];
   assert.equal(heldBy(r.resolved), dirs[0], `the file reported (${r.resolved}) is the first directory's`);
 });
+
+// embeddingCovered, directly. Each set below holds the very names under test, so the guard or the normalisation named in the message is
+// the only thing that decides the answer.
+
+test("embeddingCovered: the name as written, or with .safetensors, .pt or .bin, covers it whatever its case or slash direction, and only the whole path does", () => {
+  const names = new Set(["evil_ti.pt", "sub/deep.bin", "plain", "x.safetensors"]);
+  for (const ref of ["evil_ti", "EVIL_TI", "Evil_TI.PT", "Sub\\Deep", "SUB/DEEP.bin", "plain", "x"]) assert.equal(C.embeddingCovered(names, ref), true, ref);
+  for (const ref of ["deep", "evil_ti.bin", "sub/evil_ti", "other", "plain/x"]) assert.equal(C.embeddingCovered(names, ref), false, ref);
+});
+
+test("embeddingCovered: a name that would leave the embeddings directory is never covered, even by a set that holds it", () => {
+  const refs = ["", "/etc/evil", "\\share\\evil", "C:/evil", "C:\\evil", "c:evil", "../up", "a/../b", "..", ".", "./here", "a/./b", "a//b", "a/"];
+  const names = new Set([...refs.map((r) => r.replace(/\\/g, "/").toLowerCase()), ".pt"]);
+  for (const ref of refs) assert.equal(C.embeddingCovered(names, ref), false, JSON.stringify(ref));
+  assert.equal(C.embeddingCovered(new Set(["sub/ok.pt"]), "sub/ok"), true, "a nested name inside the directory is still covered");
+});
+
+test("models: an annotation of the embeddings class covers the embedding a prompt names whatever its case or slash direction", () => {
+  const annotated = (name) => promptNode(1, "embedding:sub/evil_ti, a cat", { properties: { models: [{ name, url: hf("example-org/w", name), directory: "embeddings" }] } });
+  for (const name of ["Sub\\EVIL_TI.SafeTensors", "SUB/Evil_TI.pt", "sub/evil_ti"]) {
+    assert.deepEqual(C.requiredModels({ nodes: [annotated(name)] }).active.map((m) => m.name), [name], name);
+  }
+});

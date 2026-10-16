@@ -309,3 +309,36 @@ test("template run: a manifest entry written with backslashes lists the model fi
   assert.equal(r.deferred, undefined, "Sub/Mixed.safetensors is listed by the backslash entry");
   assert.equal(posted["1"].inputs.ckpt_name, "Sub/Mixed.safetensors");
 });
+
+// The same for an embedding the prompt names: the manifest's embeddings entry is matched after the same normalisation and is anchored to the
+// start of the path. Each test fails if one of those steps is dropped from the embeddings branch alone.
+
+const embeddingRunGraph = (text) => ({
+  "1": { class_type: "CLIPTextEncode", inputs: { text } },
+  "2": { class_type: "SaveImage", inputs: { images: ["1", 0] } },
+});
+const listedWith = (path) => ({ ...LISTED, models: [...LISTED.models, { path, source_url: "", sha256: null, trust: "tofu" }] });
+
+test("template run: an embeddings manifest entry in another case, or written with backslashes, lists the embedding the converted graph's prompt names", async () => {
+  const both = "Models\\Embeddings\\EVIL_TI.pt";
+  assert.equal(both.split("\\").length, 3, "the fixture holds two real backslashes, not escapes that dropped out");
+  for (const path of [both, "models\\embeddings\\evil_ti.safetensors", "Models/Embeddings/EVIL_TI.bin"]) {
+    let posted = null;
+    const deps = baseDeps({
+      convert: async () => ({ ok: true, graph: embeddingRunGraph("a cat, embedding:Evil_TI") }),
+      postGraph: async (g) => { posted = g; return { prompt_id: "p1" }; },
+    });
+    const r = await runGraphFlow({ ...TEMPLATE_ARGS, manifest: listedWith(path) }, deps);
+    assert.equal(r.deferred, undefined, `${path} lists the embedding`);
+    assert.equal(posted["1"].inputs.text, "a cat, embedding:Evil_TI");
+  }
+});
+
+test("template run: a manifest path that only contains models/embeddings/ further along does not list an embedding, so the run is a typed defer", async () => {
+  const deps = baseDeps({
+    convert: async () => ({ ok: true, graph: embeddingRunGraph("a cat, embedding:evil_ti") }),
+    postGraph: async () => { throw new Error("POST must not run for a graph that loads an unlisted embedding"); },
+  });
+  const r = await runGraphFlow({ ...TEMPLATE_ARGS, manifest: listedWith("models/loras/models/embeddings/evil_ti.safetensors") }, deps);
+  assert.deepEqual([r.deferred, r.code, r.ref], [true, "TEMPLATE_MODEL_UNLISTED", "models/embeddings/evil_ti"]);
+});
