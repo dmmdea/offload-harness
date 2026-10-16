@@ -179,6 +179,9 @@ const okDeps = {
   satisfierAvailable: () => true, comfyVersion: async () => "0.23.5",
   resolveDeps: async () => {}, ensurePack: async () => ({ changed: false }),
   pipCheck: async () => ({ ok: true }),
+  // These tests use stand-in packs ("r", "c"): the pinned-pack allowlist is exercised, with the real table,
+  // in the tests at the end of this file and in node-packs.test.mjs.
+  packAllowed: () => null,
 };
 const M = parseManifest({
   comfyui_min_version: "0.23.0",
@@ -484,7 +487,7 @@ test("buildClonePackCmd inserts -- so a leading-dash repo is a positional, not a
 test("makeEnsurePack: HEAD moved on checkout → changed:true", async () => {
   let head = "aaaaaaa";
   const ep = makeEnsurePack({
-    comfyDir: "C:/ComfyUI", exists: () => true,
+    comfyDir: "C:/ComfyUI", exists: () => true, packAllowed: () => null,
     gitHead: async () => head,
     gitRun: async (cmd) => { if (cmd.includes("checkout")) head = "bbbbbbb"; }, // checkout moves HEAD
   });
@@ -493,7 +496,7 @@ test("makeEnsurePack: HEAD moved on checkout → changed:true", async () => {
 });
 test("makeEnsurePack: HEAD unchanged (same-commit checkout) → changed:false", async () => {
   const ep = makeEnsurePack({
-    comfyDir: "C:/ComfyUI", exists: () => true,
+    comfyDir: "C:/ComfyUI", exists: () => true, packAllowed: () => null,
     gitHead: async () => "samehead", gitRun: async () => {},
   });
   const r = await ep({ name: "A", repo: "r", commit: "samehead" });
@@ -502,7 +505,7 @@ test("makeEnsurePack: HEAD unchanged (same-commit checkout) → changed:false", 
 test("makeEnsurePack: fresh clone (dir absent) → changed:true, clones once", async () => {
   let cloned = 0;
   const ep = makeEnsurePack({
-    comfyDir: "C:/ComfyUI", exists: () => false,
+    comfyDir: "C:/ComfyUI", exists: () => false, packAllowed: () => null,
     gitHead: async () => "h", gitRun: async (cmd) => { if (cmd.includes("clone")) cloned++; },
   });
   const r = await ep({ name: "A", repo: "r", commit: "c" });
@@ -636,4 +639,83 @@ test("defaultSatisfyDeps.resolveDeps leaves no host-constraints file or pack loc
   assert.ok(r.outcome instanceof Error && /exit 1/.test(r.outcome.message), "the uv failure still reaches the caller: " + r.outcome);
   assert.ok(underDir(r.lock, r.priv), `uv had written the lock under the OS temp dir (${r.lock}) before it failed`);
   assert.deepEqual(r.left, []);
+});
+
+// --- the pinned-pack allowlist (the real table; no stand-in policy) ---
+// A manifest that names a pack makes the node clone its repository and pip-install its requirements, so it
+// runs the caller's code. Only a pack whose repository AND commit are in render/node-packs.json is taken;
+// anything else is refused before the first git command, whatever the models and the tooling say.
+const VHS = { name: "ComfyUI-VideoHelperSuite", repo: "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite", commit: "4d907bee61e92c2e65af3bd6383a4e4d356126d1" };
+const HOSTILE = { name: "payload", repo: "https://example.invalid/payload", commit: "0".repeat(40) };
+const realPolicy = { ...okDeps, packAllowed: undefined };
+
+function spies() {
+  const calls = [];
+  return {
+    calls,
+    deps: {
+      ...realPolicy,
+      satisfierAvailable: () => { calls.push("satisfierAvailable"); return true; },
+      download: async () => { calls.push("download"); },
+      exists: () => false,
+      ensurePack: async () => { calls.push("ensurePack"); return { changed: false }; },
+      resolveDeps: async () => { calls.push("resolveDeps"); },
+      pipCheck: async () => { calls.push("pipCheck"); return { ok: true }; },
+    },
+  };
+}
+
+test("satisfyManifest refuses an unpinned pack before anything is downloaded, cloned or installed", async () => {
+  const { calls, deps } = spies();
+  const m = parseManifest({ node_packs: [HOSTILE], models: [{ path: "models/checkpoints/x.safetensors", source_url: "https://example.invalid/x", sha256: null }] });
+  const r = await satisfyManifest(m, deps);
+  assert.equal(r.ok, false);
+  assert.equal(r.defer.code, "NODE_PACK_NOT_ALLOWED");
+  assert.equal(r.defer.ref, "payload", "the refusal names the pack");
+  assert.deepEqual(calls, [], "nothing ran: no tooling probe, no model download, no checkout, no install");
+});
+
+test("satisfyManifest refuses a pinned repository at another commit, and a pinned pair under another directory name", async () => {
+  for (const pack of [{ ...VHS, commit: "1".repeat(40) }, { ...VHS, name: "ComfyUI-Manager" }, { ...VHS, name: "../../x" }]) {
+    const { calls, deps } = spies();
+    const r = await satisfyManifest(parseManifest({ node_packs: [pack], models: [] }), deps);
+    assert.equal(r.defer && r.defer.code, "NODE_PACK_NOT_ALLOWED", JSON.stringify(pack));
+    assert.deepEqual(calls, []);
+  }
+});
+
+test("satisfyManifest refuses the whole manifest when one of its packs is unpinned", async () => {
+  const { calls, deps } = spies();
+  const r = await satisfyManifest(parseManifest({ node_packs: [VHS, HOSTILE], models: [] }), deps);
+  assert.equal(r.defer && r.defer.code, "NODE_PACK_NOT_ALLOWED");
+  assert.deepEqual(calls, [], "the pinned pack was not checked out ahead of the refusal");
+});
+
+test("satisfyManifest takes a manifest that names only pinned packs", async () => {
+  const { calls, deps } = spies();
+  const r = await satisfyManifest(parseManifest({ node_packs: [VHS], models: [] }), deps);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(calls.includes("ensurePack"));
+});
+
+test("makeEnsurePack refuses an unpinned pack before it asks git anything, and never builds a clone command", async () => {
+  const touched = [];
+  const ep = makeEnsurePack({
+    comfyDir: "C:/ComfyUI",
+    exists: (d) => { touched.push(["exists", d]); return false; },
+    gitHead: async () => { touched.push(["gitHead"]); return "h"; },
+    gitRun: async (cmd) => { touched.push(["gitRun", cmd]); },
+    buildClone: (...a) => { touched.push(["buildClone", a]); return ["git", "clone"]; },
+  });
+  await assert.rejects(() => ep(HOSTILE), (e) => e.code === "NODE_PACK_NOT_ALLOWED" && /payload/.test(e.message));
+  assert.deepEqual(touched, [], "the clone command was built or run for a pack that is not pinned");
+  const r = await ep(VHS);
+  assert.equal(r.changed, true);
+  assert.ok(touched.some((t) => t[0] === "buildClone"), "a pinned pack is cloned");
+});
+
+test("a refusal from the checkout stage is the same typed defer, not a broken venv", async () => {
+  const ep = makeEnsurePack({ comfyDir: "C:/ComfyUI", exists: () => false, gitHead: async () => "h", gitRun: async () => {} });
+  const r = await satisfyManifest(parseManifest({ node_packs: [VHS], models: [] }), { ...realPolicy, ensurePack: (p) => ep({ ...p, commit: "2".repeat(40) }) });
+  assert.equal(r.defer && r.defer.code, "NODE_PACK_NOT_ALLOWED");
 });

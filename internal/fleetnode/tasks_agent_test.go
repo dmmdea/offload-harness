@@ -303,7 +303,7 @@ func TestAgentLaneAdvertisementMatchesAdmission(t *testing.T) {
 				t.Errorf("supported_task_types lists agent = %v but dispatch admitted = %v", advertisedTask, admitted)
 			}
 			if !tc.want {
-				wantErrorShape(t, rec, http.StatusForbidden, agentLaneTokenRequired)
+				wantErrorShape(t, rec, http.StatusForbidden, fleetTokenRequired)
 			}
 		})
 	}

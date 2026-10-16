@@ -18,10 +18,10 @@ import (
 	"strings"
 )
 
-// agentLaneTokenRequired is the 403 refusal for an agent dispatch on a
+// fleetTokenRequired is the 403 refusal for an agent dispatch on a
 // non-loopback listener with no fleet_auth_token configured — a loud
 // misconfiguration signal, spec'd verbatim (the delegator client keys on it).
-const agentLaneTokenRequired = "agent lane requires fleet_auth_token on a non-loopback listener"
+const fleetTokenRequired = "agent lane requires fleet_auth_token on a non-loopback listener"
 
 // bearerOK reports whether r carries `Authorization: Bearer <token>`. Both
 // sides are SHA-256 hashed before subtle.ConstantTimeCompare: the hash makes

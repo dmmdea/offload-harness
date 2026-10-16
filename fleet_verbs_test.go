@@ -91,13 +91,47 @@ func TestFleetServeParams(t *testing.T) {
 		}
 	})
 
-	t.Run("trusted flag allows the Tailscale bind; explicit flags win", func(t *testing.T) {
-		listen, nodeID, err := fleetServeParams("192.0.2.7:18811", "node-a", true, config.Default(), hostNodeA)
+	t.Run("trusted flag allows the Tailscale bind with a token; explicit flags win", func(t *testing.T) {
+		cfg := config.Default()
+		cfg.FleetAuthToken = "a-token"
+		listen, nodeID, err := fleetServeParams("192.0.2.7:18811", "node-a", true, cfg, hostNodeA)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if listen != "192.0.2.7:18811" || nodeID != "node-a" {
 			t.Fatalf("got (%q, %q), want the explicit flag values", listen, nodeID)
+		}
+	})
+
+	// Every lane of a node requires the fleet bearer, so a node that listens beyond loopback with none
+	// configured has no credential that could authorize any caller: it must not start, and it must say why.
+	t.Run("a listener beyond loopback with no fleet_auth_token refuses to start", func(t *testing.T) {
+		for _, listen := range []string{"192.0.2.7:18811", "192.0.2.7:18811", "[2001:db8::7]:18811"} {
+			_, _, err := fleetServeParams(listen, "node-a", true, config.Default(), hostNodeA)
+			if err == nil || !strings.Contains(err.Error(), "fleet_auth_token") {
+				t.Fatalf("listen %q: err = %v, want a refusal that names fleet_auth_token", listen, err)
+			}
+		}
+	})
+
+	t.Run("a loopback listener needs no token", func(t *testing.T) {
+		for _, listen := range []string{"127.0.0.1:18811", "localhost:18811", "[::1]:18811"} {
+			if _, _, err := fleetServeParams(listen, "node-a", false, config.Default(), hostNodeA); err != nil {
+				t.Fatalf("listen %q: %v", listen, err)
+			}
+		}
+	})
+
+	t.Run("a token on a node whose fleet_listen is beyond loopback is enough", func(t *testing.T) {
+		cfg := config.Default()
+		cfg.FleetListen = "192.0.2.7:18811"
+		cfg.FleetAuthToken = "a-token"
+		if _, _, err := fleetServeParams("", "node-a", true, cfg, hostNodeA); err != nil {
+			t.Fatal(err)
+		}
+		cfg.FleetAuthToken = ""
+		if _, _, err := fleetServeParams("", "node-a", true, cfg, hostNodeA); err == nil {
+			t.Fatal("a non-loopback fleet_listen with no token started")
 		}
 	})
 

@@ -1593,6 +1593,9 @@ type healthPayload struct {
 	HostRAMTotalGb float64 `json:"host_ram_total_gb,omitempty"`
 }
 
+// withoutPrivateFields is the view of the health payload served to a caller that does not hold the bearer.
+func (p healthPayload) withoutPrivateFields() healthPayload { return p }
+
 // handleHealth assembles the contract health JSON from cached/cheap reads
 // only. A missing snapshot (sampler never succeeded) is a FAILED probe → 503:
 // emitting zeros would advertise a broken node as an empty GPU.
@@ -2367,7 +2370,7 @@ func (s *Server) authorizeGated(w http.ResponseWriter, r *http.Request, taskType
 			// loopback drives a coding-agent loop over an open port, an RCE-class
 			// surface. Misconfiguration must fail here, visibly, at ack time.)
 			if !AgentLaneSafelyReachable(s.opts.Cfg, s.opts.LoopbackListener) {
-				writeError(w, http.StatusForbidden, agentLaneTokenRequired)
+				writeError(w, http.StatusForbidden, fleetTokenRequired)
 				return false
 			}
 			// Loopback + no token: the agent lane is reachable only from this
