@@ -73,3 +73,9 @@ export function checkNodePack(pack, pins = PINNED_NODE_PACKS) {
   }
   return null;
 }
+
+// The models a manifest may name (see internal/mediacap/manifestmodels.go): nothing here yet.
+export const PINNED_MODEL_HOSTS = Object.freeze([]);
+export function loadModelHosts() { return Object.freeze([]); }
+export function normalizeModelPath(path) { return String(path); }
+export function checkModelEntry() { return null; }

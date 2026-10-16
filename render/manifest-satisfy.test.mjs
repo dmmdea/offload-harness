@@ -17,34 +17,34 @@ const base = {
 };
 
 test("present + sentinel-ok model is skipped", async () => {
-  const r = await satisfyModels([{ path: "m/x", source_url: "u", sha256: "HASH" }],
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }],
     { ...base, exists: () => true, sentinelOk: () => true });
   assert.deepEqual(r, { ok: true, unverified: [] });
 });
 
 test("missing model with matching sha downloads + verifies", async () => {
   let dl = 0;
-  const r = await satisfyModels([{ path: "m/x", source_url: "u", sha256: "HASH" }],
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }],
     { ...base, download: async () => { dl++; }, sha256: async () => "HASH" });
   assert.equal(dl, 1); assert.equal(r.ok, true);
 });
 
 test("sha mismatch DEFERs MODEL_SHA_MISMATCH", async () => {
-  const r = await satisfyModels([{ path: "m/x", source_url: "u", sha256: "WANT" }],
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "WANT" }],
     { ...base, sha256: async () => "GOT" });
   assert.equal(r.ok, false);
   assert.equal(r.defer.code, "MODEL_SHA_MISMATCH");
-  assert.equal(r.defer.ref, "m/x");
+  assert.equal(r.defer.ref, "models/checkpoints/x.safetensors");
 });
 
 test("null-sha model downloads and is reported unverified", async () => {
-  const r = await satisfyModels([{ path: "m/x", source_url: "u", sha256: null }], base);
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: null }], base);
   assert.equal(r.ok, true);
-  assert.deepEqual(r.unverified, ["m/x"]);
+  assert.deepEqual(r.unverified, ["models/checkpoints/x.safetensors"]);
 });
 
 test("no source_url for a missing model DEFERs MODEL_DOWNLOAD_FAILED", async () => {
-  const r = await satisfyModels([{ path: "m/x", source_url: "", sha256: null }], base);
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "", sha256: null }], base);
   assert.equal(r.defer.code, "MODEL_DOWNLOAD_FAILED");
 });
 
@@ -104,7 +104,7 @@ test("model present ONLY under an extra root is NOT re-downloaded", async () => 
   // The exact CMP defect: file lives on V:, absent from C: — must be seen as present.
   const onV = join("V:/m/unet", "x.gguf");
   let dl = 0;
-  const r = await satisfyModels([{ path: "models/unet/x.gguf", source_url: "u", sha256: "HASH" }], {
+  const r = await satisfyModels([{ path: "models/unet/x.gguf", source_url: "https://huggingface.co/x/y", sha256: "HASH" }], {
     ...base,
     extraRoots: { unet: ["V:/m/unet"] },
     exists: (p) => p === onV,
@@ -122,7 +122,7 @@ test("model present ONLY under an extra root is NOT re-downloaded", async () => 
 
 test("present pinned-sha file WITHOUT a sentinel is adopted, not re-downloaded", async () => {
   let dl = 0, wrote = null;
-  const r = await satisfyModels([{ path: "m/x", source_url: "u", sha256: "HASH" }], {
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }], {
     ...base,
     exists: () => true,
     sentinelOk: () => false,          // pre-provisioned: no sidecar
@@ -131,14 +131,14 @@ test("present pinned-sha file WITHOUT a sentinel is adopted, not re-downloaded",
     writeSentinel: (p, h) => { wrote = [p, h]; },
   });
   assert.equal(dl, 0, "a byte-correct present file must be adopted, never re-downloaded");
-  assert.deepEqual(wrote, [join("C:/ComfyUI", "m/x"), "HASH"], "adoption writes the sentinel");
+  assert.deepEqual(wrote, [join("C:/ComfyUI", "models/checkpoints/x.safetensors"), "HASH"], "adoption writes the sentinel");
   assert.equal(r.ok, true);
 });
 
 test("adoption writes the sentinel BESIDE the file it actually found (extra root)", async () => {
   const onV = join("V:/m/vae", "v.safetensors");
   let wrote = null;
-  await satisfyModels([{ path: "models/vae/v.safetensors", source_url: "u", sha256: "HASH" }], {
+  await satisfyModels([{ path: "models/vae/v.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }], {
     ...base,
     extraRoots: { vae: ["V:/m/vae"] },
     exists: (p) => p === onV,
@@ -151,7 +151,7 @@ test("adoption writes the sentinel BESIDE the file it actually found (extra root
 
 test("present file whose hash MISMATCHES the pin is re-downloaded", async () => {
   let dl = 0, calls = 0;
-  const r = await satisfyModels([{ path: "m/x", source_url: "u", sha256: "WANT" }], {
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "WANT" }], {
     ...base,
     exists: () => true,
     sentinelOk: () => false,
@@ -164,7 +164,7 @@ test("present file whose hash MISMATCHES the pin is re-downloaded", async () => 
 });
 
 test("present mismatching file with NO source_url DEFERs MODEL_SHA_MISMATCH", async () => {
-  const r = await satisfyModels([{ path: "m/x", source_url: "", sha256: "WANT" }], {
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "", sha256: "WANT" }], {
     ...base, exists: () => true, sentinelOk: () => false, sha256: async () => "GOT",
   });
   assert.equal(r.ok, false);
@@ -186,7 +186,7 @@ const okDeps = {
 const M = parseManifest({
   comfyui_min_version: "0.23.0",
   node_packs: [{ name: "A", repo: "r", commit: "c" }],
-  models: [{ path: "m/x", source_url: "u", sha256: "HASH" }],
+  models: [{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }],
 });
 
 test("fully satisfied → ok, no change", async () => {
@@ -235,7 +235,7 @@ test("empty manifest (no packs) skips the satisfier entirely — no cm-cli", asy
 });
 
 test("models-only manifest satisfies without the pack satisfier present", async () => {
-  const mo = parseManifest({ node_packs: [], models: [{ path: "m/y", source_url: "u", sha256: "HASH" }] });
+  const mo = parseManifest({ node_packs: [], models: [{ path: "models/checkpoints/y.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }] });
   const r = await satisfyManifest(mo, { ...okDeps, satisfierAvailable: () => false });
   assert.equal(r.ok, true);
 });
@@ -718,4 +718,103 @@ test("a refusal from the checkout stage is the same typed defer, not a broken ve
   const ep = makeEnsurePack({ comfyDir: "C:/ComfyUI", exists: () => false, gitHead: async () => "h", gitRun: async () => {} });
   const r = await satisfyManifest(parseManifest({ node_packs: [VHS], models: [] }), { ...realPolicy, ensurePack: (p) => ep({ ...p, commit: "2".repeat(40) }) });
   assert.equal(r.defer && r.defer.code, "NODE_PACK_NOT_ALLOWED");
+});
+
+// --- a model lands under models/<class>/ and nowhere else ---------------------------------------------------------
+// A holder of the fleet bearer can have the node render, not write a file of its choosing: the entries are checked
+// before the first download, before any file is looked for, and before a pack is cloned. The table is the one
+// internal/mediacap/manifestmodels_test.go reads.
+const modelCases = JSON.parse(readFileSync(new URL("./testdata/manifest-model-cases.json", import.meta.url), "utf8")).cases;
+
+function spyDeps(extra = {}) {
+  const calls = [];
+  const note = (name) => (...a) => { calls.push([name, ...a]); };
+  return {
+    calls,
+    deps: {
+      comfyDir: "/opt/comfy",
+      exists: (p) => { calls.push(["exists", p]); return false; },
+      sentinelOk: () => { calls.push(["sentinelOk"]); return false; },
+      writeSentinel: note("writeSentinel"),
+      download: async (url, dest) => { calls.push(["download", url, dest]); },
+      sha256: async () => "HASH",
+      ...extra,
+    },
+  };
+}
+
+for (const c of modelCases) {
+  test(`satisfyModels: ${c.name}`, async () => {
+    const { calls, deps } = spyDeps();
+    const r = await satisfyModels([{ path: c.path, source_url: c.source_url, sha256: null }], deps);
+    if (c.ok) {
+      assert.notEqual(r.defer && r.defer.code, "MODEL_NOT_ALLOWED", "refused an entry the node provisions");
+      if (c.source_url) {
+        const dl = calls.find((x) => x[0] === "download");
+        assert.ok(dl, "a listed source was not downloaded");
+        assert.ok(resolve(dl[2]).startsWith(resolve("/opt/comfy", "models") + sep), `the file lands at ${dl[2]}, outside models/`);
+      }
+      return;
+    }
+    assert.equal(r.ok, false);
+    assert.equal(r.defer.code, "MODEL_NOT_ALLOWED");
+    assert.deepEqual(calls, [], "a refused entry must touch nothing: no lookup, no download, no sentinel");
+  });
+}
+
+test("satisfyModels refuses a hostile entry even when the file is already on disk (no adoption, no sentinel)", async () => {
+  const { calls, deps } = spyDeps({ exists: () => true });
+  const r = await satisfyModels([{ path: "custom_nodes/evil/__init__.py", source_url: "", sha256: "HASH" }], deps);
+  assert.equal(r.defer.code, "MODEL_NOT_ALLOWED");
+  assert.deepEqual(calls, []);
+});
+
+test("satisfyModels checks every entry before it provisions the first", async () => {
+  const { calls, deps } = spyDeps();
+  const r = await satisfyModels([
+    { path: "models/vae/ok.safetensors", source_url: "https://huggingface.co/x/y", sha256: null },
+    { path: "custom_nodes/evil/__init__.py", source_url: "https://huggingface.co/x/y", sha256: null },
+  ], deps);
+  assert.equal(r.defer.code, "MODEL_NOT_ALLOWED");
+  assert.equal(r.defer.ref, "custom_nodes/evil/__init__.py");
+  assert.deepEqual(calls, [], "the first, valid entry was provisioned before the second was refused");
+});
+
+test("satisfyModels does not throw on an entry whose path is not a string", async () => {
+  for (const path of [5, ["models/vae/x.safetensors"], { a: 1 }]) {
+    const { deps } = spyDeps();
+    const r = await satisfyModels([{ path, source_url: "", sha256: null }], deps);
+    assert.equal(r.defer.code, "MODEL_NOT_ALLOWED");
+  }
+});
+
+test("satisfyManifest refuses a hostile model before the tooling probe, the version read, a download or a clone", async () => {
+  const called = [];
+  const mark = (n, v) => () => { called.push(n); return v; };
+  const m = parseManifest({
+    comfyui_min_version: "0.23.0",
+    node_packs: [{ name: "A", repo: "r", commit: "c" }],
+    models: [{ path: "custom_nodes/evil/__init__.py", source_url: "https://huggingface.co/x/y", sha256: null }],
+  });
+  const r = await satisfyManifest(m, {
+    ...okDeps,
+    exists: mark("exists", false), sentinelOk: mark("sentinelOk", false),
+    download: async () => { called.push("download"); },
+    satisfierAvailable: mark("satisfierAvailable", true),
+    comfyVersion: async () => { called.push("comfyVersion"); return "0.23.5"; },
+    ensurePack: async () => { called.push("ensurePack"); return { changed: false }; },
+    resolveDeps: async () => { called.push("resolveDeps"); },
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.defer.code, "MODEL_NOT_ALLOWED");
+  assert.deepEqual(called, []);
+});
+
+test("a manifest of the shipped shape (a model under models/, a listed source) still provisions", async () => {
+  const { calls, deps } = spyDeps();
+  const r = await satisfyManifest(parseManifest({ node_packs: [], models: [{ path: "models/unet/x.gguf", source_url: "https://huggingface.co/x/y/resolve/main/x.gguf", sha256: null }] }),
+    { ...deps, satisfierAvailable: () => true, comfyVersion: async () => "0.23.5" });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.unverified, ["models/unet/x.gguf"]);
+  assert.equal(calls.filter((x) => x[0] === "download").length, 1);
 });

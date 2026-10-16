@@ -2418,6 +2418,7 @@ func (s *Server) authorizeGated(w http.ResponseWriter, r *http.Request, taskType
 type refusalLog struct {
 	mu   sync.Mutex
 	last map[string]time.Time
+	now  func() time.Time // the clock; nil = time.Now (a test sets it)
 }
 
 const (

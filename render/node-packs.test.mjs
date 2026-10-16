@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { PINNED_NODE_PACKS, loadPinnedPacks, checkNodePack } from "./node-packs.mjs";
+import { PINNED_NODE_PACKS, loadPinnedPacks, checkNodePack, PINNED_MODEL_HOSTS, loadModelHosts, checkModelEntry, normalizeModelPath } from "./node-packs.mjs";
 import { NODE_PACKS } from "./comfy-nodes.mjs";
 
 const VHS = "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite";
@@ -78,4 +78,49 @@ test("a malformed row is dropped, not trusted", () => {
   // a table whose only row has a short commit loads as empty
   const rows = loadPinnedPacks(new URL("./testdata/node-packs-short-commit.json", import.meta.url));
   assert.deepEqual([...rows], []);
+});
+
+// --- the models a manifest may name -----------------------------------------------------------------------------
+// The same rows drive internal/mediacap/manifestmodels_test.go, so the node's door and this satisfier take and
+// refuse the same entries.
+const cases = JSON.parse(readFileSync(new URL("./testdata/manifest-model-cases.json", import.meta.url), "utf8")).cases;
+
+test("node-packs.json lists the hosts a model may be fetched from, and the module reads them", () => {
+  assert.ok(Array.isArray(file.model_hosts) && file.model_hosts.length > 0, "the table lists no model_hosts");
+  for (const h of file.model_hosts) assert.match(h, /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/, `${h} is not a plain lower-case host name`);
+  assert.deepEqual([...PINNED_MODEL_HOSTS], file.model_hosts);
+});
+
+for (const c of cases) {
+  test(`checkModelEntry: ${c.name}`, () => {
+    const r = checkModelEntry({ path: c.path, source_url: c.source_url, sha256: null });
+    if (c.ok) {
+      assert.equal(r, null, `refused an entry the node provisions: ${JSON.stringify(r)}`);
+    } else {
+      assert.ok(r, `took path ${JSON.stringify(c.path)} from ${JSON.stringify(c.source_url)}`);
+      assert.equal(r.code, "MODEL_NOT_ALLOWED");
+      assert.equal(r.ref, c.path);
+    }
+  });
+}
+
+test("checkModelEntry refuses an entry that is not a path and a source, without throwing", () => {
+  for (const entry of [null, undefined, "models/vae/x.safetensors", 5, { path: 5 }, { path: ["models/vae/x.safetensors"] }, { path: { toString: () => "models/vae/x.safetensors" } },
+    { path: "models/vae/x.safetensors", source_url: 5 }, { path: "models/vae/x.safetensors", source_url: ["https://huggingface.co/x"] }]) {
+    const r = checkModelEntry(entry);
+    assert.ok(r, `${JSON.stringify(entry)} was accepted`);
+    assert.equal(r.code, "MODEL_NOT_ALLOWED");
+  }
+});
+
+test("normalizeModelPath is the path the check read: backslashes are separators", () => {
+  assert.equal(normalizeModelPath("models\\vae\\ae.safetensors"), "models/vae/ae.safetensors");
+  assert.equal(normalizeModelPath("models/vae/ae.safetensors"), "models/vae/ae.safetensors");
+});
+
+test("an unreadable table lists no host: every download is refused, a model already on disk is not", () => {
+  const hosts = loadModelHosts(new URL("./no-such-node-packs.json", import.meta.url));
+  assert.deepEqual([...hosts], []);
+  assert.ok(checkModelEntry({ path: "models/vae/x.safetensors", source_url: "https://huggingface.co/x/y" }, hosts));
+  assert.equal(checkModelEntry({ path: "models/vae/x.safetensors", source_url: "" }, hosts), null);
 });

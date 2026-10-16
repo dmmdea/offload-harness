@@ -2886,7 +2886,7 @@ func nvidiaSmiGPUName() string {
 // the bearer, so a node that listens beyond loopback with none has no credential
 // that could authorize any caller: it fails to start, naming the key, instead of
 // serving a port that refuses everything (or, before this rule, serving it open).
-func fleetServeParams(listenFlag, nodeIDFlag string, trusted bool, cfg config.Config, hostname func() (string, error)) (listen, nodeID string, err error) {
+func fleetServeParams(listenFlag, nodeIDFlag string, trusted bool, cfg config.Config, src config.Source, hostname func() (string, error)) (listen, nodeID string, err error) {
 	listen = listenFlag
 	if listen == "" {
 		listen = cfg.FleetListen
@@ -3020,7 +3020,7 @@ func runFleetServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d expired stt transcript file(s)\n", n)
 	}
 
-	listen, nodeID, err := fleetServeParams(*listenFlag, *nodeIDFlag, *trusted, cfg, os.Hostname)
+	listen, nodeID, err := fleetServeParams(*listenFlag, *nodeIDFlag, *trusted, cfg, config.Source{}, os.Hostname)
 	if err != nil {
 		return err
 	}
