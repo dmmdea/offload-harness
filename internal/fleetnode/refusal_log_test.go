@@ -89,3 +89,29 @@ func TestTheRefusalLogStillSpeaksForEachCaller(t *testing.T) {
 		t.Fatalf("wrote %d lines for 3 distinct (caller, reason) pairs, want 3; log = %q", n, buf.String())
 	}
 }
+
+// Many callers cannot grow the journal either: at most refusalLogBudget lines are written a window across all of them, and
+// the first refusal after the window counts the rest.
+func TestTheRefusalLogCapsWhatManyCallersWrite(t *testing.T) {
+	var l refusalLog
+	clock := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	l.now = func() time.Time { return clock }
+	buf := captureLog(t)
+	note := func(addr string) {
+		r := httptest.NewRequest(http.MethodPost, "/fleet/dispatch", nil)
+		r.RemoteAddr = addr
+		l.note(r, "run-graph", "no fleet bearer presented")
+	}
+	for i := 0; i < 250; i++ {
+		note(fmt.Sprintf("192.0.2.%d:5000", i))
+	}
+	if n := refusalLines(buf.String()); n == 0 || n > refusalLogBudget {
+		t.Fatalf("250 callers wrote %d lines in one window, want between 1 and %d", n, refusalLogBudget)
+	}
+	clock = clock.Add(2 * refusalLogWindow)
+	note("198.51.100.7:5000")
+	logged := buf.String()
+	if !strings.Contains(logged, fmt.Sprintf("%d more refusal(s) were not logged one by one", 250-refusalLogBudget)) {
+		t.Fatalf("the window ended with %d refusals unwritten and no summary naming that count; log = %q", 250-refusalLogBudget, logged)
+	}
+}
