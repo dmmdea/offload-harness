@@ -769,12 +769,16 @@ var openSharedFile = OpenShared
 // is stale: the reclaim rule (stale heartbeat AND expired window) then calls a live lease debris, the acquirer's sweep removes it, and
 // the card is granted to a second job while the first still runs on it.
 //
-// An open that fails with a permission error is tried again, removeAttempts times at removePause (about 100 ms in all, the bound the
-// claim removal uses), and any other failure is returned at once. The shared open takes the sharing violation away, but not the
-// instant the rename has marked the old entry for deletion and the new one has not taken its name: the file is delete-pending, and
+// On Windows an open that fails with a permission error is tried again, removeAttempts times at removePause (about 100 ms in all, the
+// bound the claim removal uses), and any other failure is returned at once. The shared open takes the sharing violation away, but not
+// the instant the rename has marked the old entry for deletion and the new one has not taken its name: the file is delete-pending, and
 // every open of the name fails with ERROR_ACCESS_DENIED until the rename ends, a few milliseconds. Measured on a loaded host, with the
 // shared open in, that was 5 failed reads in about 124,000 of a heartbeat that was renewed in a loop. A file that stays unreadable
 // (a real permission fault) costs one bounded wait and then the error, as before.
+//
+// Off Windows there is no such instant, so a permission error is returned at once (sharedOpenMeetsDeletePending, beside OpenShared).
+// It is a lasting refusal there, a record written with a mode the reader cannot read, and the wait cost about 108 ms per unreadable
+// record per read: Leases() and the acquirer, which reads the records under the epoch lock, paid it for every one.
 func readSharedFile(path string) ([]byte, error) {
 	for attempt := 0; ; attempt++ {
 		f, err := openSharedFile(path)
@@ -782,12 +786,16 @@ func readSharedFile(path string) ([]byte, error) {
 			defer f.Close()
 			return io.ReadAll(f)
 		}
-		if !errors.Is(err, os.ErrPermission) || attempt >= removeAttempts {
+		if !deniedOpenMayClear || !errors.Is(err, os.ErrPermission) || attempt >= removeAttempts {
 			return nil, err
 		}
 		time.Sleep(removePause)
 	}
 }
+
+// deniedOpenMayClear says whether a permission error on the open is worth waiting out: sharedOpenMeetsDeletePending on the build, as a
+// variable so a test can run the wait off Windows and the refusal on it (readretry_test.go).
+var deniedOpenMayClear = sharedOpenMeetsDeletePending
 
 // UseReadFault makes the READ of a lease record fail with what fn returns for the path (nil from fn lets the real read run), until the
 // returned function is called: the way a test provokes a record that EXISTS and can be removed but cannot be read, as one is while

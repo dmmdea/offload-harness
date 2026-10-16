@@ -36,9 +36,19 @@ func failingOpens(t *testing.T, n int, err error) *atomic.Int64 {
 	return &calls
 }
 
+// waitOutDeniedOpens makes the read wait out a refused open whatever the build, so the wait itself (its count, its bound, what it
+// retries) is tested on every platform. On Windows that is the default; off it the default is no wait (readretry_other_test.go).
+func waitOutDeniedOpens(t *testing.T) {
+	t.Helper()
+	old := deniedOpenMayClear
+	deniedOpenMayClear = true
+	t.Cleanup(func() { deniedOpenMayClear = old })
+}
+
 // TestAReadThatMeetsAnAccessDeniedOpenWaitsForTheFile: three refusals, then the file. Every reader of a replaced lease file must get
 // the new content, not the refusal and not the fallback.
 func TestAReadThatMeetsAnAccessDeniedOpenWaitsForTheFile(t *testing.T) {
+	waitOutDeniedOpens(t)
 	dir := t.TempDir()
 	meta := &Meta{Epoch: 7, RenewedAtMs: 1000}
 	hb := filepath.Join(dir, "hb."+strconv.FormatUint(meta.Epoch, 10))
@@ -70,6 +80,7 @@ func TestAReadThatMeetsAnAccessDeniedOpenWaitsForTheFile(t *testing.T) {
 // TestAnAccessDeniedOpenThatNeverEndsIsGivenUpOnAfterABoundedWait: a file that stays unreadable is reported as it was, after
 // removeAttempts retries and no more, so a status call is slowed by a bounded time and not hung.
 func TestAnAccessDeniedOpenThatNeverEndsIsGivenUpOnAfterABoundedWait(t *testing.T) {
+	waitOutDeniedOpens(t)
 	path := filepath.Join(t.TempDir(), "1.json")
 	if err := os.WriteFile(path, []byte("{}"), 0o666); err != nil {
 		t.Fatal(err)
@@ -91,6 +102,7 @@ func TestAnAccessDeniedOpenThatNeverEndsIsGivenUpOnAfterABoundedWait(t *testing.
 // TestAFailureThatIsNotAnAccessDeniedIsNotRetried: a missing file is an answer ("no heartbeat yet", "lease gone") and any other
 // failure is not known to pass; neither is waited on.
 func TestAFailureThatIsNotAnAccessDeniedIsNotRetried(t *testing.T) {
+	waitOutDeniedOpens(t)
 	missing := filepath.Join(t.TempDir(), "gone.json")
 	calls := failingOpens(t, 0, nil)
 	if _, err := readSharedFile(missing); !errors.Is(err, fs.ErrNotExist) {

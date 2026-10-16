@@ -43,3 +43,23 @@ func TestAnOpenOfADeletePendingFileFailsWithAccessDeniedEvenWhenItSharesDelete(t
 		t.Errorf("OpenShared of a delete-pending file returned %v, want ERROR_ACCESS_DENIED (a permission error)", err)
 	}
 }
+
+// TestWindowsWaitsOutADeniedOpenByDefault: the wait is on in a Windows build without a test switching it on, so the gate that took it
+// off for other systems (sharedOpenMeetsDeletePending) cannot have taken it off here. Three refusals, then the file.
+func TestWindowsWaitsOutADeniedOpenByDefault(t *testing.T) {
+	if !deniedOpenMayClear {
+		t.Fatal("deniedOpenMayClear is false in a Windows build: a read would give up on the delete-pending refusal of a live lease's file")
+	}
+	path := filepath.Join(t.TempDir(), "hb.7")
+	if err := os.WriteFile(path, []byte("424242"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	calls := failingOpens(t, 3, os.ErrPermission)
+	got, err := readSharedFile(path)
+	if err != nil || string(got) != "424242" {
+		t.Errorf("after three access-denied opens readSharedFile = %q, %v, want the file's content 424242", got, err)
+	}
+	if n := calls.Load(); n != 4 {
+		t.Errorf("made %d opens, want 4 (three refused, one through)", n)
+	}
+}
