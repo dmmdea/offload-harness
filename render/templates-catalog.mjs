@@ -265,10 +265,11 @@ export function embeddingRefs(text) {
 // embeddingCovered: does a set of lower-cased names under the embeddings class directory cover the file a reference loads? The name as
 // written does, and so does the name with any of the three extensions ComfyUI appends. The whole path only: the file ComfyUI opens is the
 // one at that path, so a base name that matches a file elsewhere in the directory is not it. A name that would leave the directory is
-// never covered.
+// never covered: a drive letter, or an empty, `.` or `..` segment (an empty name, a leading slash, a doubled slash and a trailing slash each
+// leave an empty segment).
 export function embeddingCovered(names, ref) {
   const name = slash(ref).toLowerCase();
-  if (name === "" || name.startsWith("/") || /^[a-z]:/.test(name) || name.split("/").some((seg) => seg === "" || seg === "." || seg === "..")) return false;
+  if (/^[a-z]:/.test(name) || name.split("/").some((seg) => seg === "" || seg === "." || seg === "..")) return false;
   return [name, ...EMBEDDING_EXTS.map((e) => name + e)].some((c) => names.has(c));
 }
 
