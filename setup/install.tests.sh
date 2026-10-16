@@ -250,6 +250,29 @@ OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB"
 bash "$INSTALL" --help 2>&1 | grep -A2 -- "--token-file" | grep -q "fleet_auth_token" \
   && pass "--help documents --token-file for a node install" || fail "--help documents --token-file for a node install" "$(bash "$INSTALL" --help 2>&1 | grep -A2 -- '--token-file')"
 
+# A node installed for another service identity: the config the key lands in is readable by its owner only, and the unit and
+# the acceptance gate run as that account, so the file is handed to it (sudo chown; the installer escalates for the unit and
+# the gate already). For the installing user itself there is nothing to hand over. A stand-in sudo records what it was asked.
+export SUDO_LOG="$TMP/sudo-log"; : >"$SUDO_LOG"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >>"$SUDO_LOG"' >"$TMP/nodebin/sudo"; chmod +x "$TMP/nodebin/sudo"
+mkdir -p "$TMP/live-user/etc"; printf '{"home":"/srv/x"}' >"$TMP/live-user/etc/config.json"
+OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-user" --no-service --llama-bin "$TMP/llama" --token-file "$NODE_KEY" --user svc-account 2>&1)"; RC=$?
+[ "$RC" -eq 0 ] && grep -q -- "chown svc-account $TMP/live-user/etc/config.json" "$SUDO_LOG" \
+  && pass "the config that holds the key is handed to another service identity" || fail "the config that holds the key is handed to another service identity" "rc=$RC sudo=$(cat "$SUDO_LOG") out=$OUT"
+
+: >"$SUDO_LOG"
+mkdir -p "$TMP/live-self/etc"; printf '{"home":"/srv/x"}' >"$TMP/live-self/etc/config.json"
+OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-self" --no-service --llama-bin "$TMP/llama" --token-file "$NODE_KEY" 2>&1)"; RC=$?
+[ "$RC" -eq 0 ] && ! grep -q "chown" "$SUDO_LOG" \
+  && pass "the installing user's own config is not handed over" || fail "the installing user's own config is not handed over" "rc=$RC sudo=$(cat "$SUDO_LOG") out=$OUT"
+
+# A hand-over that fails is not left unsaid.
+printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *chown*) exit 1 ;; esac' >"$TMP/nodebin/sudo"
+mkdir -p "$TMP/live-fail/etc"; printf '{"home":"/srv/x"}' >"$TMP/live-fail/etc/config.json"
+OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-fail" --no-service --llama-bin "$TMP/llama" --token-file "$NODE_KEY" --user svc-account 2>&1)"; RC=$?
+[ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "could not hand" && printf '%s' "$OUT" | grep -q "svc-account" \
+  && pass "a failed hand-over of the config stops the install, naming the account" || fail "a failed hand-over of the config stops the install, naming the account" "rc=$RC: $OUT"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "ALL PASS"
   exit 0
