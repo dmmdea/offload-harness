@@ -43,8 +43,9 @@
   for, hashes or downloads any file, with the typed defer `MODEL_NOT_ALLOWED`, having read every entry before provisioning the
   first. One table of paths and sources drives both tests. A `sha256` is not required, because the manifest carries its own hash
   and one the caller supplies authenticates nothing. A workflow whose models come from another host is refused until the file
-  gains a row. Left open: a holder can still put model bytes in any weight format (the pickle-based ones included) under
-  `models/`, and the node follows redirects from a listed host.
+  gains a row. A `models[]` entry with no `path` is refused at the door as well (the runner's parser already refused it).
+  Left open: a holder can still put a file of any type under `models/<class>/` (a weight file in a pickle-based format is
+  code when ComfyUI loads it), and the node follows redirects from a listed host.
 - **Rollout.** Delegators first, then nodes: every fleet client already sends the bearer whenever a token is configured
   (the previous entry pins it). The delegator change is deployed fleet-wide first; before the node change is deployed to a
   node, `fleet_auth_token` must be present in the config its `fleet-serve` reads. A node that listens beyond loopback with no
@@ -74,6 +75,7 @@
   an in-process loopback listener, and the runner's satisfier ran against injected git, tooling and filesystem fakes. A
   workflow whose manifest names a pack outside the table, or a model outside `models/` or from a host outside the list, is now
   refused until the table gains a row. The installer's key handling ran against a stub binary and a temporary prefix; no unit
-  was registered, and no node was swapped (the swap check ran against fakes, and the launchers' forwarding is a source test). A node that was installed before this change has its unit and config as they were: the token has to be in
-  its config before it is upgraded, or it will not start. That a ComfyUI imports a `custom_nodes` package at start-up was not
-  run here; the model rule closes the write whatever it does.
+  was registered, and no node was swapped (the swap check ran against fakes, and the launchers' forwarding is a source test).
+  A node that was installed before this change has its unit and config as they were: the token has to be in its config before
+  it is upgraded, or it will not start. That a ComfyUI imports a `custom_nodes` package at start-up was not run here; the model
+  rule closes the write whatever it does.

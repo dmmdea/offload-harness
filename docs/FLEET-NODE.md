@@ -866,8 +866,9 @@ The rule is one rule for every route that does work or returns a result. Three c
   entry (`mediacap.CheckManifestModels`, called by `buildRunGraph`), and the runner refuses again before it looks for, hashes or
   fetches any file (typed defer `MODEL_NOT_ALLOWED`; every entry is read before the first is provisioned). One table of paths and
   sources (`render/testdata/manifest-model-cases.json`) drives both tests. A `sha256` is not required: the manifest carries its
-  own hash, so one the caller supplies authenticates nothing. What remains: a holder can still put model bytes in any weight
-  format (the pickle-based ones included) under `models/`, and the node follows redirects from a listed host.
+  own hash, so one the caller supplies authenticates nothing. What remains: a holder can still put a file of any type under
+  `models/<class>/` (a weight file in a pickle-based format is code when ComfyUI loads it), and the node follows redirects from
+  a listed host. A `models[]` entry with no `path` is refused at the door too (the runner's parser refuses it as well).
 - **Rollout order: delegators first, then nodes.** Every fleet client already sends the bearer whenever `fleet_auth_token` is
   set (a per-package test and a source test pin it), so a delegator needs nothing new; a node that gains the rule refuses a
   caller that has no token. The delegator change is deployed fleet-wide first; before the node change is deployed to a node,

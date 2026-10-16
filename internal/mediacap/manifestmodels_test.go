@@ -75,12 +75,13 @@ func TestAManifestModelLandsUnderTheModelsTreeFromAListedHost(t *testing.T) {
 
 func TestAManifestWithBadModelsIsRefused(t *testing.T) {
 	for name, body := range map[string]string{
-		"models is not a list":           `{"models":{"path":"models/vae/x.safetensors"}}`,
-		"an entry that is not an object": `{"models":["models/vae/x.safetensors"]}`,
-		"a path that is not a string":    `{"models":[{"path":5}]}`,
-		"a path that is a list":          `{"models":[{"path":["models/vae/x.safetensors"]}]}`,
-		"a source that is not a string":  `{"models":[{"path":"models/vae/x.safetensors","source_url":5}]}`,
-		"a path in the second entry":     `{"models":[{"path":"models/vae/ok.safetensors"},{"path":"custom_nodes/x/__init__.py"}]}`,
+		"models is not a list":             `{"models":{"path":"models/vae/x.safetensors"}}`,
+		"an entry that is not an object":   `{"models":["models/vae/x.safetensors"]}`,
+		"a path that is not a string":      `{"models":[{"path":5}]}`,
+		"a path that is a list":            `{"models":[{"path":["models/vae/x.safetensors"]}]}`,
+		"a source that is not a string":    `{"models":[{"path":"models/vae/x.safetensors","source_url":5}]}`,
+		"a path in the second entry":       `{"models":[{"path":"models/vae/ok.safetensors"},{"path":"custom_nodes/x/__init__.py"}]}`,
+		"an entry with a name and no path": `{"models":[{"name":"x"}]}`,
 	} {
 		var refused *ManifestModelRefusedError
 		if err := CheckManifestModels([]byte(body)); !errors.As(err, &refused) {
