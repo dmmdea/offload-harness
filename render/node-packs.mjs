@@ -74,8 +74,79 @@ export function checkNodePack(pack, pins = PINNED_NODE_PACKS) {
   return null;
 }
 
-// The models a manifest may name (see internal/mediacap/manifestmodels.go): nothing here yet.
-export const PINNED_MODEL_HOSTS = Object.freeze([]);
-export function loadModelHosts() { return Object.freeze([]); }
-export function normalizeModelPath(path) { return String(path); }
-export function checkModelEntry() { return null; }
+// --- the models a manifest may name -----------------------------------------------------------------------------
+// A manifest's models[] makes the node download each entry's source_url into the ComfyUI tree at its path before
+// ComfyUI starts. The fleet bearer lets a caller run renders, not write files of its choosing: a path that leaves
+// models/<class>/ (custom_nodes/, a ".." climb, an absolute path, a drive, a stream name) would drop code where
+// ComfyUI loads it, and a source that is not an https address on a listed host would make the node fetch from where
+// the caller chose. So an entry is taken only when
+//   - its path, with backslashes read as separators, is models/<class>/<file> (at least three segments, the first
+//     exactly "models"), no segment empty, "." or "..", none beginning or ending with a space or ending with a dot,
+//     none holding a control character or one of : * ? " < > |;
+//   - its source_url, when it has one, is https://<host>/<rest> with a plain DNS host name (no user name, port,
+//     bracket or IP-literal form) that is, or is a subdomain of, a host of node-packs.json (model_hosts).
+// internal/mediacap/manifestmodels.go makes the same checks, and render/testdata/manifest-model-cases.json drives both
+// tests. No sha256 is required: the entry carries its own hash, so a hash the caller supplies authenticates nothing.
+const HOST = /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/;
+const SOURCE = /^https:\/\/([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)(\/[^\x00-\x20\x7f\\]*)?$/;
+
+// loadModelHosts: the model_hosts of a table file; a host that is not a plain lower-case name is dropped, and an
+// unreadable file lists none (every download is then refused; a model that needs none still provisions).
+export function loadModelHosts(url = new URL("./node-packs.json", import.meta.url)) {
+  try {
+    const file = JSON.parse(readFileSync(url, "utf8"));
+    const hosts = Array.isArray(file && file.model_hosts) ? file.model_hosts.filter((h) => typeof h === "string" && HOST.test(h)) : [];
+    return Object.freeze(hosts);
+  } catch {
+    return Object.freeze([]);
+  }
+}
+
+export const PINNED_MODEL_HOSTS = loadModelHosts();
+
+// normalizeModelPath: the path the check reads and the satisfier joins, backslashes read as separators.
+export function normalizeModelPath(path) {
+  return String(path).replace(/\\/g, "/");
+}
+
+function modelPathProblem(path) {
+  if (/[\x00-\x1f\x7f]/.test(path)) return "the path holds a control character";
+  const segs = normalizeModelPath(path).split("/");
+  if (segs.length < 3 || segs[0] !== "models") return "the path is not models/<class>/<file>";
+  for (const s of segs) {
+    if (s === "" || s === "." || s === "..") return 'the path has an empty, "." or ".." segment';
+    if (s.endsWith(".") || s.startsWith(" ") || s.endsWith(" ")) return "a segment of the path begins with a space or ends with a space or a dot";
+    if (/[:*?"<>|]/.test(s)) return "a segment of the path holds a character a file name cannot";
+  }
+  return "";
+}
+
+function modelSourceProblem(source, hosts) {
+  const m = SOURCE.exec(source);
+  if (!m) return "the source is not an https address of the form https://host/path";
+  const host = m[1].toLowerCase();
+  if (!hosts.some((h) => host === h || host.endsWith("." + h))) return `the source host ${host} is not a listed model host`;
+  return "";
+}
+
+// checkModelEntry: null when entry ({path, source_url?}) lands under models/<class>/ and is fetched, if at all, over
+// https from a listed host, else the typed defer {code, ref, detail} naming the entry. It never throws: an entry whose
+// path or source is not a string is a refusal.
+export function checkModelEntry(entry, hosts = PINNED_MODEL_HOSTS) {
+  const refuse = (ref, why) => ({
+    code: "MODEL_NOT_ALLOWED",
+    ref,
+    detail: `${why}; a manifest model lands under models/<class>/ and is fetched over https from a host listed in render/node-packs.json only`,
+  });
+  if (!entry || typeof entry !== "object") return refuse("#", "the model entry is not an object");
+  const { path, source_url: source } = entry;
+  if (typeof path !== "string") return refuse("#", "the model entry has no path, or its path is not a string");
+  const badPath = modelPathProblem(path);
+  if (badPath) return refuse(path, badPath);
+  if (source !== undefined && source !== null && source !== "") {
+    if (typeof source !== "string") return refuse(path, "source_url is not a string");
+    const badSource = modelSourceProblem(source, hosts);
+    if (badSource) return refuse(path, badSource);
+  }
+  return null;
+}

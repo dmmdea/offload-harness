@@ -72,8 +72,8 @@ Logs: `/tmp/agent-server.log`, `/tmp/openwebui.log`.
 Full guide: `docs/FLEET-NODE.md`. The short operating loop:
 
 **Start** (loopback for a local check; the **Tailscale address** for production — the
-endpoints are unauthenticated, so the tailnet is the trust boundary; port **18811**,
-**never `0.0.0.0`**):
+lanes all require the fleet bearer, so a node there needs `fleet_auth_token` in its config or it will not
+start; port **18811**, **never `0.0.0.0`**):
 
 ```powershell
 local-offload fleet-serve                                                    # loopback smoke
@@ -475,7 +475,7 @@ younger calls on this machine's lane queue behind it. A call that must leave thi
 `auto` on a machine with no graph lane) still sends it, with the node's check by name only. On every route that sends a graph to
 a node, the node must run this machine's own release (the file check ships with it): a node on another release, or one that
 publishes none, is skipped by name, so a fleet part-way through an upgrade takes graphs only on the nodes already upgraded. The **node manifest** (`node_packs[{name,repo,commit}]` + `models[{path,source_url,sha256}]`)
-is satisfied BEFORE ComfyUI starts (a pack is taken only at a repository and commit pinned in `render/node-packs.json`; anything else is refused before the first clone): packs cloned at their pinned commits with all deps
+is satisfied BEFORE ComfyUI starts (a pack is taken only at a repository and commit pinned in `render/node-packs.json`, and a model only under `models/<class>/` from a listed https host; anything else is refused before the first clone or download): packs cloned at their pinned commits with all deps
 resolved **together** (uv) under **host-torch constraints** (provisioning never replaces the
 installed CUDA torch — an unsatisfiable pack set defers instead), models downloaded and
 sha-verified when a hash is given (`sha256: null` downloads are reported in
@@ -2000,11 +2000,14 @@ bytes. With the token set, a request without it is `401`; with none set, a node 
 boundary), refuses everything with `403` on any other listener, and `fleet-serve` will not start there. `/fleet/health` and the
 jobs feed stay readable without the token, with the lease's free-text reason, the store path and the weight-file rows (and a
 job's error text) left out. A run-graph manifest may name a node pack only at a pinned repository and commit
-(`render/node-packs.json`): a token holder can have the node render, not run code of its choosing.
+(`render/node-packs.json`), and a model only under `models/<class>/` from an https host listed there (`model_hosts`): a token
+holder can have the node render, not run code of its choosing or write files where it chooses.
 **Roll it out in this order: every delegator first** (they already send the token whenever it is set, so this changes nothing
-for them), **then every node**, each with the same value. A node that already listens beyond loopback with no token will not
-start after the upgrade, so give it the token before it. `local-offload doctor`'s `fleet token` rows show a mismatch before a
-call is spent.
+for them), **then every node**, each with the same value. The delegator change is deployed fleet-wide first; before the node
+change is deployed to a node, `fleet_auth_token` must be present in the config its `fleet-serve` reads. A node that already
+listens beyond loopback with no token will not start after the upgrade, so give it the token before it; its refusal names the
+key and the config file it read. `setup/install.sh --token-file PATH` stores the key in a Linux node's config and refuses to
+register the unit without one. `local-offload doctor`'s `fleet token` rows show a mismatch before a call is spent.
 
 **One token goes to every node you list.** `fleet_auth_token` is a single value, and every request to a roster node
 (`delegate_remotes`, and the nodes named per call) carries it as the bearer, whichever tailnet zone the entry sits
@@ -2224,7 +2227,7 @@ a terminal line under a job id of its own (a capacity defer, or the "placement r
 
 | Failure | Fix |
 |---|---|
-| `403 fleet lanes require fleet_auth_token on a non-loopback listener` | The node is bound beyond loopback with no token, so it refuses every lane (a current `fleet-serve` will not start in that state and says so: `refusing to serve on ...: ... fleet_auth_token is not set`). Set `fleet_auth_token` (same value) on both sides and restart `fleet-serve`. |
+| `403 fleet lanes require fleet_auth_token on a non-loopback listener` | The node is bound beyond loopback with no token, so it refuses every lane (a current `fleet-serve` will not start in that state and says so, naming the config file it read: `refusing to serve on ...: ... fleet_auth_token is not set (the config this node read is ...)`). Set `fleet_auth_token` (same value) in that file and on the delegators, and restart `fleet-serve`. |
 | `401 unauthorized` on dispatch or poll | Token mismatch between delegator and worker configs. `local-offload doctor` shows it before a call is spent: its `fleet token` rows ask each reachable node whether it accepts this box's token (`OK`, `MISMATCH` = the node has another token, `NO-TOKEN` = the node listens beyond loopback with none, `UNKNOWN`, `UNCHECKED` = refused or unreachable, not asked), one row per `delegate_remotes` slot, never printing a token; a box with no `fleet_auth_token` prints one `NOT SET` line instead. `/fleet/health` ignores the token, so every other row reads healthy either way. |
 | `agent delegation is disabled on this box` | Set `"agent_delegation_enabled": true` in the **delegator's** config. |
 | Everything places local although a remote exists | Usually correct — idle-local always wins. Force `--route remote --pin-reason operator` to surface the gate's verdict (without a reason `remote` is a hint and the idle local seat takes what no remote can): the defer reason now names the actual cause — no remotes configured, every remote failing its health probe (each error quoted), or a healthy remote failing the gate (`agent_enabled` + `agent_seat_resident` + `output_schema` + the ctx arithmetic above). |

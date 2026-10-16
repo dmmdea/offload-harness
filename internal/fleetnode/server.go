@@ -2412,18 +2412,29 @@ func (s *Server) authorizeGated(w http.ResponseWriter, r *http.Request, taskType
 	return true
 }
 
-// refusalLog writes one line per refused request, at most one per (caller, task type, reason) every refusalLogEvery:
-// a node that is being probed says so without the probe filling its journal. The line carries the caller's address
-// and the task type as quoted text, never the credential presented and never the payload.
+// refusalLog writes the journal line for a refused request. A caller with no credential must not be able to grow the
+// journal, so what throttles it is never a field the caller chooses (the task type is the caller's own text):
+//   - one line per (caller address, reason) every refusalLogEvery, the first request's task type in it;
+//   - at most refusalLogBudget lines per refusalLogWindow across all callers;
+//   - what a window kept out of the journal is counted, and the first refusal after the window ends writes one line
+//     saying how many (there is no timer: a node nobody probes writes nothing).
+//
+// The line carries the caller's address and the task type as quoted text, never the credential presented and never the
+// payload.
 type refusalLog struct {
-	mu   sync.Mutex
-	last map[string]time.Time
-	now  func() time.Time // the clock; nil = time.Now (a test sets it)
+	mu      sync.Mutex
+	last    map[string]time.Time // (caller, reason) -> when its line was last written
+	winFrom time.Time            // when the current window began
+	written int                  // lines written in the window
+	skipped int                  // refusals the window kept out of the journal
+	now     func() time.Time     // the clock; nil = time.Now (a test sets it)
 }
 
 const (
-	refusalLogEvery = 10 * time.Second
-	refusalLogKeys  = 256
+	refusalLogEvery  = 10 * time.Second
+	refusalLogKeys   = 256
+	refusalLogWindow = time.Minute
+	refusalLogBudget = 20
 )
 
 func (l *refusalLog) note(r *http.Request, taskType, why string) {
@@ -2431,20 +2442,37 @@ func (l *refusalLog) note(r *http.Request, taskType, why string) {
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	key := host + "|" + taskType + "|" + why
+	key := host + "|" + why
 	now := time.Now()
+	if l.now != nil {
+		now = l.now()
+	}
+	var summary string
 	l.mu.Lock()
+	if l.winFrom.IsZero() || now.Sub(l.winFrom) >= refusalLogWindow {
+		if l.skipped > 0 {
+			summary = fmt.Sprintf("fleetnode: %d more refusal(s) were not logged one by one in the last %s (at most %d lines per window)", l.skipped, refusalLogWindow, refusalLogBudget)
+		}
+		l.winFrom, l.written, l.skipped = now, 0, 0
+	}
 	if l.last == nil || len(l.last) >= refusalLogKeys {
 		l.last = map[string]time.Time{}
 	}
 	prev, seen := l.last[key]
-	if seen && now.Sub(prev) < refusalLogEvery {
-		l.mu.Unlock()
-		return
+	quiet := (seen && now.Sub(prev) < refusalLogEvery) || l.written >= refusalLogBudget
+	if quiet {
+		l.skipped++
+	} else {
+		l.last[key] = now
+		l.written++
 	}
-	l.last[key] = now
 	l.mu.Unlock()
-	log.Printf("fleetnode: refused a %q request from %q: %s", clipLog(taskType), clipLog(host), why)
+	if summary != "" {
+		log.Print(summary)
+	}
+	if !quiet {
+		log.Printf("fleetnode: refused a %q request from %q: %s", clipLog(taskType), clipLog(host), why)
+	}
 }
 
 // clipLog bounds a caller-supplied string before it is written to the journal (the quoting is the caller's %q).

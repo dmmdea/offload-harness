@@ -155,6 +155,10 @@ box, 2026-08-25):
   boot trigger, so an unattended reboot leaves the node down until someone logs in. S4U runs
   as the user with no interactive session and no stored password.
 - **Trigger: `-AtStartup`** (with the launcher's own readiness loop absorbing early-boot races).
+- **The config the task reads holds `fleet_auth_token`.** Every lane requires the fleet bearer, and `fleet-serve` will not
+  start on the Tailscale address without the key: put it in that config before registering the task (the same value on every
+  delegator that calls the node). A node started without it exits at once, and the launcher's "exited immediately" line carries
+  the refusal, which names the key and the config file it read.
 
 Three measured gotchas the template encodes — do not "simplify" them away:
 
@@ -380,21 +384,21 @@ source, which has no `gpu_devices[]` to match against. Implementation:
 
 ## Binding guidance (read before exposing anything)
 
-The **media** endpoints are unauthenticated by design (matching the dispatcher's posture):
-anyone who can reach them can run renders on this GPU. The **agent lane is the exception**
-since 0.65.0 — it executes caller-supplied agent contracts, so beyond loopback it requires
-`fleet_auth_token` (details in [The agent task](#the-agent-task-task_type-agent)). The same
+**Every lane requires the fleet bearer** (see [Auth](#auth-every-lane-needs-the-fleet-bearer)):
+the media lanes run renders on this GPU and the agent lane executes caller-supplied agent
+contracts (details in [The agent task](#the-agent-task-task_type-agent)), so a node that
+listens beyond loopback will not start without a `fleet_auth_token`. The same binding
 rules as `local-agent --serve` apply, enforced by the same shared guard:
 
 - **Loopback is the default** and needs no flag.
 - A non-loopback `--listen` is **refused** unless you pass `--listen-trusted-network`
-  (which prints a loud warning). The flag permits ONE specific address: an all-interfaces
+  (and then `fleet_auth_token` must be set, or the node refuses to start). The flag permits ONE specific address: an all-interfaces
   address (`:18811` with an empty host, `0.0.0.0`, `[::]`) is refused even with it (0.144.1), so a
   unit whose `$(tailscale ip -4)` is still empty at boot fails and its restart retries instead of
   serving on every interface.
 - Production binding is the machine's **Tailscale address** (e.g. `192.0.2.7:18811` on
-  your workstation) — the tailnet is the trust boundary. **NEVER bind `0.0.0.0`**, and never expose
-  the port beyond the tailnet.
+  your workstation) — the tailnet is the network boundary and the fleet bearer is the credential.
+  **NEVER bind `0.0.0.0`**, and never expose the port beyond the tailnet.
 - Port **18811** per the house port discipline; update the machine's port file in
   the operator's port ledger when you stand a node up.
 - **The ingress guard (`fleet_ingress_guard`) is not authentication, and its default does not refuse.** The default,
@@ -552,7 +556,7 @@ it is not full and not out of route but cannot run THIS graph (a route that is n
 delegator marks the node not-capable for that ticket alone and puts no pause on it (ADR 0083 Amendment 1); it places the graph on
 the next node instead of this one cold-starting ComfyUI to defer. **Input files do not travel with a graph** (`/fleet/dispatch` carries JSON, and the
 media-job door carries no input for `run-graph`), so a file the node does not hold cannot be sent to it; the refusal says so. A
-model the graph's manifest tells the node to fetch (a `models[]` entry with a `source_url`) is not refused. The check is by name
+model the graph's manifest tells the node to fetch (a `models[]` entry with a `source_url`) is not refused (a manifest whose models leave `models/<class>/` or come from a host that is not listed is refused at the door, see [Auth](#auth-every-lane-needs-the-fleet-bearer)). The check is by name
 (a same-named file of other bytes is held; a delegator therefore never offers a graph that reads an input file to a node, though a
 call that must leave its machine anyway, `route remote` or `auto` on a machine with no graph lane, reaches this check with one) and a name that is absolute or climbs with `..` is never looked up.
 Health gains no key for it: a delegator requires the node to run its own release, on every remote placement of a graph (the
@@ -821,7 +825,7 @@ The rule is one rule for every route that does work or returns a result. Three c
 |---|---|---|
 | set | any | `Authorization: Bearer <token>` (constant-time compared) is required: `401` with the standard error envelope (`"error": "unauthorized"`) without it |
 | empty | loopback | open: the same trust boundary as the local MCP surface |
-| empty | anything else | refused `403 fleet lanes require fleet_auth_token on a non-loopback listener`, and `fleet-serve` **will not start** in this state (it names `fleet_auth_token` and the listen address) |
+| empty | anything else | refused `403 fleet lanes require fleet_auth_token on a non-loopback listener`, and `fleet-serve` **will not start** in this state (it names `fleet_auth_token`, the listen address and the config file it read) |
 
 - **Every task type is gated**, not the agent lane alone: `agent`, `vision`, `text`, `stt`, `stt-upload`, `compose-project`,
   `media-job`, the PAIR relay and every media task (`image-gen`, `video-gen`, `animate`, `audio-gen`, `run-graph`, `accel`,
@@ -831,8 +835,10 @@ The rule is one rule for every route that does work or returns a result. Three c
 - **The check runs first.** It precedes the job_id validation, the known-job lookup and the task validation, so an
   unauthorized caller can neither probe field validation nor learn job state, and a task type the node does not serve is
   refused for the credential before it is refused for being unserved. Each refusal is logged (the caller's address, the task
-  type, which of "no bearer", "wrong bearer" or "no token configured" it was; never the credential or the payload), at most
-  once per caller, task type and reason every ten seconds.
+  type, which of "no bearer", "wrong bearer" or "no token configured" it was; never the credential or the payload). What
+  throttles the journal is never a field the caller chooses (the task type is the caller's own text): one line per caller
+  address and reason every ten seconds, at most twenty lines a minute across callers, and the first refusal after that
+  minute writes one line counting the rest.
 - **Jobs and artifacts follow the dispatch.** A poll or withdraw of any job answers `401` without the bearer before any of the
   job's state crosses the wire, a re-dispatch of a known job id gets the same verdict, `GET /fleet/media/{name}` needs the
   bearer for every name (the outputs of a plain dispatch included; the check precedes the file lookup, so the answer never
@@ -850,10 +856,26 @@ The rule is one rule for every route that does work or returns a result. Three c
   command. The table holds the packs the shipped graph builders need: VideoHelperSuite, ComfyUI-MultiGPU at its documented
   archival commit (upstream and mirror) and ComfyUI-GGUF; adding a pack is a reviewed change to that file and to its copy in
   `internal/mediacap/nodepacks.go`, which a test pins.
+- **A run-graph manifest's models land under `models/` and come from a listed host.** A manifest's `models[]` makes the node
+  download each `source_url` to `path` inside the ComfyUI tree before ComfyUI starts, so a path that leaves `models/<class>/`
+  (a `custom_nodes/` drop, a `..` climb, an absolute path, a drive, a stream name) would place code where ComfyUI loads it. An
+  entry is taken only when its path (backslashes read as separators) is `models/<class>/<file>`, no segment empty, `.` or `..`,
+  none beginning with a space or ending with a space or a dot, and none holding a control character or one of `:*?"<>|`; and its
+  `source_url`, when it has one, is `https://<host>/...` on a plain DNS name that is, or is a subdomain of, a `model_hosts`
+  entry of `render/node-packs.json` (no user name, port or IP literal). The node refuses at the door with `400` naming the
+  entry (`mediacap.CheckManifestModels`, called by `buildRunGraph`), and the runner refuses again before it looks for, hashes or
+  fetches any file (typed defer `MODEL_NOT_ALLOWED`; every entry is read before the first is provisioned). One table of paths and
+  sources (`render/testdata/manifest-model-cases.json`) drives both tests. A `sha256` is not required: the manifest carries its
+  own hash, so one the caller supplies authenticates nothing. What remains: a holder can still put model bytes in any weight
+  format (the pickle-based ones included) under `models/`, and the node follows redirects from a listed host.
 - **Rollout order: delegators first, then nodes.** Every fleet client already sends the bearer whenever `fleet_auth_token` is
   set (a per-package test and a source test pin it), so a delegator needs nothing new; a node that gains the rule refuses a
-  caller that has no token. Set the same `fleet_auth_token` on every delegator, then on every node, then upgrade the nodes.
-  A node that listens beyond loopback with no token will not start after the upgrade.
+  caller that has no token. The delegator change is deployed fleet-wide first; before the node change is deployed to a node,
+  `fleet_auth_token` must be present in the config its `fleet-serve` reads (the same value on every delegator and every node).
+  A node that listens beyond loopback with no token will not start after the upgrade, and its refusal names the key and the
+  config file it read. A node installed by `setup/install.sh` takes the key with `--token-file PATH` (stored in the node's
+  config, never printed) and the installer refuses to register the unit without one; on Windows put the key in the config the
+  scheduled task's `fleet-serve` reads before registering the task.
 
 ### Health advertisement (only when the lane is admissible)
 

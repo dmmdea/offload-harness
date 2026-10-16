@@ -840,6 +840,13 @@ func buildRunGraph(cfg config.Config, payload json.RawMessage) (core.Request, fu
 		if err := mediacap.CheckManifestNodePacks(in.Manifest); err != nil {
 			return core.Request{}, noop, err
 		}
+		// A models[] entry makes the node download its source_url into the ComfyUI tree at its path before ComfyUI
+		// starts: a path outside models/<class>/ would place a file where ComfyUI loads code (or above the tree), and
+		// a source that is not a listed https host is a fetch from where the caller chose. Refused here on the same
+		// grounds, again with the entry named, and again in the runner's satisfier.
+		if err := mediacap.CheckManifestModels(in.Manifest); err != nil {
+			return core.Request{}, noop, err
+		}
 	}
 	if nre := graphFilesRefusal(cfg, in.Graph, in.Manifest); nre != nil {
 		return core.Request{}, noop, nre

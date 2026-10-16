@@ -231,12 +231,18 @@ token. A scope that was a compatibility concession became a hole once a media ta
   already sends the bearer whenever a token is configured, and tests pin it), then nodes.
 - **Loopback stays open; everything else fails closed.** With no token, a loopback listener serves as before (the local MCP
   trust boundary) and any other listener refuses every task type with `403`. `fleet-serve` does not start on a non-loopback
-  address with no `fleet_auth_token`, naming the key, rather than serve a port that refuses everything.
+  address with no `fleet_auth_token`, naming the key, the listen address and the config file it read, rather than serve a
+  port that refuses everything. The node installers store the key (`setup/install.sh --token-file`) or refuse to register
+  the unit, so an install no longer produces a node that cannot start.
 - **Health and the jobs feed stay readable without the bearer**, with their private fields withheld (a lease's free-text
   reason, the store steward's status and root path, the weight-file rows of the recipes; a job's error text), so a roster read
   works before it holds a credential.
 - **A token holder is trusted to run renders, not code.** A run-graph manifest may name a node pack only at a repository and
   commit pinned in `render/node-packs.json`; the node refuses anything else before a job or a clone exists, and the runner's
-  satisfier refuses again before its first git command.
+  satisfier refuses again before its first git command. The same holds for a manifest's `models[]`: an entry is taken only
+  under `models/<class>/`, fetched over https from a host listed in the same file (`model_hosts`), so the download that runs
+  before ComfyUI starts cannot place a file where ComfyUI loads code or outside the install.
+- **The refusal journal cannot be grown by a caller.** Its throttle is keyed on the caller's address and the reason, never on
+  a field the caller chooses, with a cap on lines per minute and one summary line for the rest.
 
 The two accepted weaknesses above (one shared token, no rotation) stand.

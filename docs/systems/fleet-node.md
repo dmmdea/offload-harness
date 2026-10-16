@@ -483,16 +483,16 @@ Before setting `enforce`, know four edges:
   it is a tailnet zone, and a `seat_endpoints` URL under it would pass the endpoint rule too.
 
 This guard is not authentication. It stops a browser page and a DNS-rebinding name from reaching the node; a tailnet
-peer that is not a browser (no `Origin`, a JSON POST, a `Host` that names the node's address) is admitted as before,
-so the media lane stays unauthenticated on a non-loopback bind. Per-node tokens and tailnet grants are separate work.
+peer that is not a browser (no `Origin`, a JSON POST, a `Host` that names the node's address) is admitted by it as before.
+What keeps such a peer out is the fleet bearer, which every lane requires.
 
-The **media** contract is unauthenticated and assumes a trusted network — in practice a tailnet.
-That assumption is acknowledged by the explicit `--listen-trusted-network` flag. Since 0.65.0
-the **agent lane** is the deliberate exception: bearer-gated when `fleet_auth_token` is set,
-refused outright beyond loopback without one, because it executes caller-supplied agent
-contracts rather than renders (see [The agent task](#the-agent-task-task_type-agent) and
-[ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)). Node
-identity defaults to the hostname, so operator documentation uses placeholders rather than real
+Every lane of a node requires the fleet bearer: with a `fleet_auth_token` a request without it is refused `401`, a node
+that listens beyond loopback with none refuses every lane `403` and will not start, and only a loopback node with no token
+is open (the same trust boundary as the local MCP surface). The network is still assumed to be a tailnet, acknowledged by
+the explicit `--listen-trusted-network` flag. The agent lane was the first to be gated (0.65.0), because it executes
+caller-supplied agent contracts rather than renders (see [The agent task](#the-agent-task-task_type-agent) and
+[ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md), whose amendment carries the
+every-lane rule). Node identity defaults to the hostname, so operator documentation uses placeholders rather than real
 names.
 
 ## Observability and debugging
@@ -1207,9 +1207,9 @@ on their own idle timer like any other load. `/fleet/health` never runs it.
   is refreshed behind the next request and published while it is. One older than two minutes is no longer published (the
   keys are absent until the refresh lands), so a refresh that is slow or stuck cannot leave a stale answer up for as long as
   the process lives. A node with no llama-swap endpoint publishes nothing.
-- Who can read the new keys, and what they expose. `GET /fleet/health` is unauthenticated on every node: `fleet_auth_token`
-  gates dispatches to the agent, vision, text and speech-to-text lanes and the polls of the jobs they create, not the health
-  route, and the ingress guard is not authentication. Under its default `warn` mode the guard serves even the requests it
+- Who can read the new keys, and what they expose. `GET /fleet/health` answers without the bearer on every node (with the
+  lease reason, the store status and the weight-file rows withheld from a caller that lacks it): `fleet_auth_token`
+  gates every dispatch and the polls of the jobs they create, not the health route, and the ingress guard is not authentication. Under its default `warn` mode the guard serves even the requests it
   would refuse, so a stock node answers any peer that can reach its port, and under `enforce` it still admits a non-browser
   peer that names the node. The new keys reach exactly those readers. Against `backends` (hardware tags and nothing else) they
   add no host name, path, URL or IP, but they do add the status key of each lane, engine kinds and probe levels (a fixed

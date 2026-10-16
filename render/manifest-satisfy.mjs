@@ -3,7 +3,7 @@
 // gate); this file starts with the models leg. All side-effecting deps are injected so
 // the whole satisfier is testable with zero network/disk.
 import { join, dirname } from "node:path";
-import { checkNodePack } from "./node-packs.mjs";
+import { checkNodePack, checkModelEntry, normalizeModelPath } from "./node-packs.mjs";
 
 const defer = (code, ref, detail) => ({ ok: false, defer: { code, ref, detail } });
 
@@ -59,6 +59,15 @@ export function modelCandidates(relPath, comfyDir, extraRoots) {
 
 export async function satisfyModels(models, deps) {
   const { comfyDir, exists, download, sha256, sentinelOk, writeSentinel, extraRoots = {} } = deps;
+  // FIRST, before any file is looked for, hashed or fetched: every entry must land under models/<class>/ and come, if
+  // from anywhere, over https from a listed host (node-packs.json). The path is joined onto the ComfyUI directory and
+  // the source is fetched into it before ComfyUI starts, so an entry the caller chose freely is a file the caller
+  // placed where ComfyUI loads code, or anywhere above it. All entries are read before the first is provisioned, so a
+  // refusal leaves nothing downloaded.
+  for (const m of models || []) {
+    const refusal = checkModelEntry(m);
+    if (refusal) return defer(refusal.code, refusal.ref, refusal.detail);
+  }
   // beat (optional) tells the lease's progress file which model the satisfier is on (lease-progress.mjs): this
   // step runs before ComfyUI exists, so no poll loop is beating, and a manifest of several large models is the one
   // place a run-graph job is quiet for longer than a lease's stall window. One model's download or hash can still
@@ -67,12 +76,13 @@ export async function satisfyModels(models, deps) {
   const unverified = [];
   for (const m of models || []) {
     beat(`manifest: checking ${m.path}`);
-    const abs = join(comfyDir, m.path);
+    const rel = normalizeModelPath(m.path);
+    const abs = join(comfyDir, rel);
     // Presence resolves across ComfyUI's FULL search path, not just comfyDir. A model that
     // lives only on a secondary tree (e.g. the V: Optane drive registered via
     // extra_model_paths.yaml) otherwise reads as MISSING and is re-downloaded to C: — 15GB
     // per run for a big GGUF, which is exactly what the scene-swap consumer hit live.
-    const found = modelCandidates(m.path, comfyDir, extraRoots).find((p) => exists(p)) || null;
+    const found = modelCandidates(rel, comfyDir, extraRoots).find((p) => exists(p)) || null;
     if (found) {
       if (!m.sha256) continue;            // present but unverifiable — trust on-disk
       if (sentinelOk(found)) continue;    // already verified once
@@ -174,6 +184,12 @@ export async function satisfyManifest(manifest, deps) {
   const packAllowed = deps.packAllowed || checkNodePack;
   for (const pack of manifest.node_packs || []) {
     const refusal = packAllowed(pack);
+    if (refusal) return defer(refusal.code, refusal.ref, refusal.detail);
+  }
+  // Models too: a path that leaves models/<class>/ or a source that is not a listed https host is refused here, before
+  // the tooling probe, the version read, a download or a clone (satisfyModels checks again for a caller that reaches it directly).
+  for (const m of manifest.models || []) {
+    const refusal = checkModelEntry(m);
     if (refusal) return defer(refusal.code, refusal.ref, refusal.detail);
   }
 

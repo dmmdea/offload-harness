@@ -293,7 +293,7 @@ func TestRunGraphAFileTheManifestFetchesIsNotMissing(t *testing.T) {
 	cfg := graphNode(t, "models/text_encoders/umt5.safetensors", "models/vae/wan_vae.safetensors")
 	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
 
-	fetched := `{"models":[{"path":"models/diffusion_models/wan/high.safetensors","source_url":"https://example.invalid/high.safetensors"}]}`
+	fetched := `{"models":[{"path":"models/diffusion_models/wan/high.safetensors","source_url":"https://huggingface.co/Org/Repo/resolve/main/high.safetensors"}]}`
 	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", graphDispatch("g-man-ok", wanGraph, fetched), nil); rec.Code != http.StatusAccepted {
 		t.Fatalf("a file the manifest fetches must not be refused, got %d: %s", rec.Code, rec.Body.String())
 	}

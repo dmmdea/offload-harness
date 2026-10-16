@@ -2884,8 +2884,9 @@ func nvidiaSmiGPUName() string {
 // netguard loopback refusal unless --listen-trusted-network, and the rule that
 // a listener beyond loopback needs a fleet_auth_token. Every lane of a node requires
 // the bearer, so a node that listens beyond loopback with none has no credential
-// that could authorize any caller: it fails to start, naming the key, instead of
-// serving a port that refuses everything (or, before this rule, serving it open).
+// that could authorize any caller: it fails to start, naming the key and the config
+// file it read (src), instead of serving a port that refuses everything (or, before
+// this rule, serving it open).
 func fleetServeParams(listenFlag, nodeIDFlag string, trusted bool, cfg config.Config, src config.Source, hostname func() (string, error)) (listen, nodeID string, err error) {
 	listen = listenFlag
 	if listen == "" {
@@ -2898,9 +2899,10 @@ func fleetServeParams(listenFlag, nodeIDFlag string, trusted bool, cfg config.Co
 		return "", "", err
 	}
 	if !netguard.LoopbackAddr(listen) && cfg.FleetAuthToken == "" {
-		return "", "", fmt.Errorf("refusing to serve on %q: it is not a loopback address and fleet_auth_token is not set. "+
+		where, fix := fleetServeConfigWhere(src)
+		return "", "", fmt.Errorf("refusing to serve on %q: it is not a loopback address and fleet_auth_token is not set (%s). "+
 			"Every fleet lane requires the fleet bearer on a node that listens beyond loopback, so with no token no caller could be "+
-			"authorized. Set fleet_auth_token (the same value on this node and on every delegator that calls it), or listen on a loopback address", listen)
+			"authorized. %s (the same value on this node and on every delegator that calls it), or listen on a loopback address", listen, where, fix)
 	}
 	nodeID = nodeIDFlag
 	if nodeID == "" {
@@ -2914,6 +2916,23 @@ func fleetServeParams(listenFlag, nodeIDFlag string, trusted bool, cfg config.Co
 		}
 	}
 	return listen, nodeID, nil
+}
+
+// fleetServeConfigWhere says which config the node read and what to do about it, for the refusal that a listener beyond
+// loopback has no fleet_auth_token: a node that will not start must name the file to fix, because a box can hold two
+// (LOCAL_OFFLOAD_CONFIG against the default, --config against both).
+func fleetServeConfigWhere(src config.Source) (where, fix string) {
+	switch {
+	case src.Path == "":
+		return "no config file was found, so this node runs on built-in defaults",
+			"Put fleet_auth_token in a config file and point --config or LOCAL_OFFLOAD_CONFIG at it"
+	case src.NotFound:
+		return fmt.Sprintf("the config file %s was named but does not exist", src.Path),
+			fmt.Sprintf("Create %s with fleet_auth_token set, or point --config or LOCAL_OFFLOAD_CONFIG at this node's config", src.Path)
+	default:
+		return fmt.Sprintf("the config this node read is %s", src.Path),
+			fmt.Sprintf("Set fleet_auth_token in %s", src.Path)
+	}
 }
 
 // fleetServeAuthNote is the startup line that says which lanes require the fleet bearer. Only two states can reach it,
@@ -3020,7 +3039,7 @@ func runFleetServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d expired stt transcript file(s)\n", n)
 	}
 
-	listen, nodeID, err := fleetServeParams(*listenFlag, *nodeIDFlag, *trusted, cfg, config.Source{}, os.Hostname)
+	listen, nodeID, err := fleetServeParams(*listenFlag, *nodeIDFlag, *trusted, cfg, src, os.Hostname)
 	if err != nil {
 		return err
 	}
