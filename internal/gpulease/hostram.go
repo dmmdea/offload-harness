@@ -45,6 +45,7 @@ package gpulease
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"os"
@@ -735,14 +736,28 @@ func UseRemoveFault(fn func(path string) error) (restore func()) {
 // readFaultHook, when set, is consulted by readRecordFile before the real read: a test seam (UseReadFault).
 var readFaultHook func(path string) error
 
-// readRecordFile is os.ReadFile of a lease record (meta.json, e/<epoch>.json), with the test seam in front of it.
+// readRecordFile reads a lease record (meta.json, e/<epoch>.json), with the test seam in front of the real read.
+//
+// It reads through a handle that shares delete (openRecordShared), and that is what makes the READ side of a record rewrite safe.
+// A record is replaced in place while its lease is held (the grant's granting-to-active write, every Restamp), by a rename over
+// the live name. On Windows a plain os.ReadFile that meets that rename fails with ERROR_SHARING_VIOLATION (rarely ERROR_ACCESS_DENIED)
+// although the record is there and good a moment later, and a handle opened without FILE_SHARE_DELETE is also what makes the
+// writer's rename fail and retry (renameReplacing), which stretches the window. A reader that gave up on that failure answered "no
+// lease" for a lease that was held: v2() dropped the record, so Leases() was empty and EpochIsCurrent said the render child's lease
+// was not its own. A reader that shares delete neither fails nor blocks the rename, and sees the old record whole until the new one
+// is in place, as a POSIX reader does. Off Windows this is os.ReadFile.
 func readRecordFile(path string) ([]byte, error) {
 	if readFaultHook != nil {
 		if err := readFaultHook(path); err != nil {
 			return nil, err
 		}
 	}
-	return os.ReadFile(path)
+	f, err := openRecordShared(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
 }
 
 // UseReadFault makes the READ of a lease record fail with what fn returns for the path (nil from fn lets the real read run), until the
