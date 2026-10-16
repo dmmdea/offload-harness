@@ -2,9 +2,10 @@
 // goes through it: gpu-lock.mjs (readLease, readEpochRecord, readCardClaim, and so checkInheritedLease, the fence before an
 // irreversible action) and lease-progress.mjs (the record behind GPU_LEASE_PROGRESS_FILE). Node never writes these files.
 //
-// WHY A READ IS NOT JUST readFileSync. The Go side replaces a lease record (e/<epoch>.json, meta.json), a card claim and the
-// heartbeat by a rename over the live name. On Windows, for the instant a rename has marked the old entry for deletion and the new
-// one has not taken its name, the file is delete-pending and EVERY open of the name fails with ERROR_ACCESS_DENIED, whoever
+// WHY A READ IS NOT JUST readFileSync. The Go side replaces a lease record (e/<epoch>.json, meta.json) and the heartbeat by a
+// rename over the live name (a card claim is not replaced: it is created once and deleted, never renamed, so a claim meets the
+// state below only while its removal is pending). On Windows, for the instant a rename has marked the old entry for deletion
+// and the new one has not taken its name, the file is delete-pending and EVERY open of the name fails with ERROR_ACCESS_DENIED, whoever
 // shares what. libuv spells that EPERM (a probe with a delete-pending file reads exactly that; EACCES is its POSIX twin). A reader
 // that took the failure for "no record" answered null for a record that is there a moment later, and a null record for a card
 // lease falls through to meta.json, which a card lease never writes: the fence called a held lease not current and the render

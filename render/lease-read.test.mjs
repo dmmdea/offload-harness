@@ -115,8 +115,9 @@ test("the bound in real time: a permanent refusal costs about 100 ms and then re
   const t0 = performance.now();
   assert.equal(readSharedSync("meta.json", { read: s.read, sleep: realSleep }), null, "the real clock is used when none is injected");
   const took = performance.now() - t0;
-  assert.ok(took >= DENIED_BUDGET_MS - 5, `gave up after ${took.toFixed(0)} ms, want the bound (about ${DENIED_BUDGET_MS} ms)`);
-  assert.ok(took < 250, `gave up after ${took.toFixed(0)} ms (${s.seen.pauses.length} pauses), want about ${DENIED_BUDGET_MS} ms and not the 308 ms that 20 timer ticks cost`);
+  assert.ok(took >= DENIED_BUDGET_MS - 5, `gave up after ${took.toFixed(0)} ms (${s.seen.pauses.length} pauses), want the bound (about ${DENIED_BUDGET_MS} ms)`);
+  // No upper bound on the wall clock: a loaded runner stalls a test for longer than the 308 ms this once guarded against. That
+  // failure (20 pauses of a 15.4 ms tick) is pinned without a clock by the fake-clock test above, which wants 7 pauses.
 });
 
 test("off Windows a permission refusal is returned at once: nothing there is delete-pending, so a wait only delays the answer", (t) => {

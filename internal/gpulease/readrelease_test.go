@@ -198,7 +198,6 @@ func TestAReleasedLeaseReadsAbsentAtOnceAndNoReadWaitsForIt(t *testing.T) {
 			return ""
 		}},
 	}
-	all := time.Now()
 	for _, a := range asks {
 		log.reset()
 		readRetries.Store(0)
@@ -216,10 +215,8 @@ func TestAReleasedLeaseReadsAbsentAtOnceAndNoReadWaitsForIt(t *testing.T) {
 		}
 		t.Logf("%-17s %d opens (%s), %d pauses, %v", a.name, log.total(), log.describe(m.leaseDir()), readRetries.Load(), took)
 	}
-	// The sum of the six asks stays far under what one wait on one missing file costs on top of everything else (about 100 ms each).
-	if took := time.Since(all); took > 2*time.Duration(removeAttempts)*removePause {
-		t.Errorf("the six asks about a released lease took %v: a missing file is being waited on (one wait is about %v)", took, time.Duration(removeAttempts)*removePause)
-	}
+	// No bound on the wall clock here: a loaded runner stalls a test for longer than one wait costs. The opens and the pauses counted
+	// above are the proof that no ask waited on a missing file; the times are logged for the reader.
 }
 
 func describeEpochs(infos []Info) string {
@@ -283,10 +280,7 @@ func TestAMissingOrDeletedRecordCostsOneOpenAndNoWaitUnderTheEpochLock(t *testin
 	if n := readRetries.Load(); n != 0 {
 		t.Errorf("%d pauses were taken under the lock for records that were gone, want 0", n)
 	}
-	if took > 2*time.Duration(removeAttempts)*removePause {
-		t.Errorf("the grant took %v with three records deleted under it: a deleted record is being waited on (one wait is about %v, three would be %v)",
-			took, time.Duration(removeAttempts)*removePause, 3*time.Duration(removeAttempts)*removePause)
-	}
+	// The time is logged and not bounded: the opens (exactly one each under the lock) and the pauses (none) are the proof.
 	t.Logf("grant of card3 with three records deleted under the sweep: %d opens in all (%s), %d of them under the lock, %d pauses, %v",
 		log.total(), log.describe(m.leaseDir()), sumValues(log.underLock), readRetries.Load(), took)
 }
@@ -341,8 +335,6 @@ func TestReleasingUnderTheEpochLockReadsNoRecordMoreThanOnce(t *testing.T) {
 	if n := readRetries.Load(); n != 0 {
 		t.Errorf("Leases() took %d pauses, want 0", n)
 	}
-	if releaseTook+listTook > 2*time.Duration(removeAttempts)*removePause {
-		t.Errorf("three releases and a listing took %v: a missing file is being waited on", releaseTook+listTook)
-	}
+	// The times are logged and not bounded: the opens and the pauses above are the proof that no missing file was waited on.
 	t.Logf("three releases %v; Leases() with one record left: %d opens (%s), %v", releaseTook, log.total(), log.describe(m.leaseDir()), listTook)
 }
