@@ -738,7 +738,7 @@ var readFaultHook func(path string) error
 
 // readRecordFile reads a lease record (meta.json, e/<epoch>.json), with the test seam in front of the real read.
 //
-// It reads through a handle that shares delete (openRecordShared), and that is what makes the READ side of a record rewrite safe.
+// It reads through a handle that shares delete (OpenShared), and that is what makes the READ side of a record rewrite safe.
 // A record is replaced in place while its lease is held (the grant's granting-to-active write, every Restamp), by a rename over
 // the live name. On Windows a plain os.ReadFile that meets that rename fails with ERROR_SHARING_VIOLATION (rarely ERROR_ACCESS_DENIED)
 // although the record is there and good a moment later, and a handle opened without FILE_SHARE_DELETE is also what makes the
@@ -752,7 +752,7 @@ func readRecordFile(path string) ([]byte, error) {
 			return nil, err
 		}
 	}
-	f, err := openRecordShared(path)
+	f, err := OpenShared(path)
 	if err != nil {
 		return nil, err
 	}

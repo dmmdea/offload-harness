@@ -402,6 +402,23 @@ concurrency test rather than by reading:
   `TestReserveRenewsTheLeaseWhileDraining` / `TestReserveRenewsTheLeaseWhileWarmingBack` (~1 run in
   24) and, in production, could leave the `draining` stamp on a held lease (cordoning the seat for
   the rest of its window) or drop a heartbeat renewal.
+- **A rename-over blocks a reader, too.** Windows checks sharing both ways. While the rename runs, the
+  system holds a handle on the old entry with `DELETE` access, so an open whose own share mode lacks
+  `FILE_SHARE_DELETE` fails with `ERROR_SHARING_VIOLATION` (rarely `ERROR_ACCESS_DENIED`), and
+  `os.ReadFile` is such an open. A reader that took that failure for "no record" answered "no lease" for
+  a lease that was held: `reader.v2` skips a record it cannot read, so `Leases()` came back empty and
+  `EpochIsCurrent`, the fence a render child asks, said the lease was not its own. A media route's own
+  test saw `want one live lease while the render runs, got []` on a loaded box, 2 runs in 24 under
+  30 busy-loop processes. `readRecordFile` (`internal/gpulease/hostram.go`) now opens the lease records
+  (`meta.json`, `e/<epoch>.json`) with `OpenShared`, which shares read, write and delete: it does not fail
+  against the rename, and it reads the old record whole until the new one is in place, as a POSIX reader
+  does. Measured under a concurrent rewrite
+  (`TestAHeldLeaseNeverReadsAbsentWhileItsRecordIsRewritten`, `internal/gpulease/readrace_test.go`): with
+  `os.ReadFile`, `Leases()` missed 1 read in 30 to 60 and `EpochIsCurrent` about 1 in 15; through
+  `OpenShared`, none. A bounded retry of the failed read was tried first and dropped: under saturating
+  load the failure lasted up to 1.4 s, so a bound short enough for a status call left misses, and the open
+  is the cause. The other files the package renames over (the heartbeat, the epoch counter, the tokens
+  and the waiters) are still read with `os.ReadFile`; this change covers the lease records.
 
 Neither of the first two is defensive padding: with waiters polling once a second, both races are
 ordinary traffic. Measured under six concurrent acquire/release workers, 1 in 48 cycles failed
