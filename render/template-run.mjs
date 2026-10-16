@@ -8,7 +8,7 @@
 //
 // Every refusal is `{ ok: false, refusal: { code, message, details } }`, the shape the converter refuses in.
 import { convertTemplate } from "./template-to-graph.mjs";
-import { flattenIndex, hasModelExt, INPUT_LOADER_TYPES, joinPath, locateTemplates, modelCovered, MODEL_LOADER_TYPES, nodeIo } from "./templates-catalog.mjs";
+import { embeddingCovered, embeddingRefs, flattenIndex, hasModelExt, INPUT_LOADER_TYPES, joinPath, locateTemplates, mentionsEmbedding, modelCovered, MODEL_LOADER_TYPES, nodeIo } from "./templates-catalog.mjs";
 
 const refusal = (code, message, details = {}) => ({ ok: false, refusal: { code, message, details } });
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
@@ -50,10 +50,12 @@ export function loadTemplate({ comfyDir, name, io = nodeIo }) {
 // have is never added, and one that is wired to another node is never cut. A value is a string, a number or a boolean. The graph handed in
 // is not changed.
 //
-// An override never retargets a file. The licence gate, the FLUX bar and the trust-on-first-use check read the models the template names,
-// and an input file is matched by name on the node that holds it, so an override that swapped a loader's file would run one that none of
-// them looked at. It is refused as `override_is_file` when the node is a model or input loader, when the input holds a model file name now,
-// or when the new value is a model file name.
+// An override never retargets a file, and never names an embedding. The licence gate, the FLUX bar and the trust-on-first-use check read the
+// models the template names, and an input file is matched by name on the node that holds it, so an override that swapped a loader's file
+// would run one that none of them looked at. An embedding is a file too: a text with `embedding:<name>` in it makes ComfyUI load a file of
+// its embeddings directory, with no loader node and no extension in the value. It is refused as `override_is_file` when the node is a
+// model or input loader, when the input holds a model file name now, when the new value is a model file name, or when the new value is a
+// string that contains `embedding:` in any letter case.
 export function applyOverrides(graph, overrides) {
   if (overrides === undefined || overrides === null) return { ok: true, graph };
   if (!isObj(overrides)) return refusal("override_bad_key", "overrides is an object of <node id>.<input name> keys", {});
@@ -74,7 +76,10 @@ export function applyOverrides(graph, overrides) {
     if (Array.isArray(out[node].inputs[input])) return refusal("override_is_link", `input ${input} of node ${node} is wired to another node; an override sets values, it does not cut wires`, { key, node, input });
     const current = out[node].inputs[input];
     if (LOADER_CLASSES.has(out[node].class_type) || (typeof current === "string" && hasModelExt(current)) || (typeof value === "string" && hasModelExt(value))) {
-      return refusal("override_is_file", `input ${input} of node ${node} (${out[node].class_type}) names a file; an override sets values, it does not retarget a model or an input file`, { key, node, input });
+      return refusal("override_is_file", `input ${input} of node ${node} (${out[node].class_type}) names a file; an override sets values, it does not retarget a model or an input file or name an embedding`, { key, node, input });
+    }
+    if (mentionsEmbedding(value)) {
+      return refusal("override_is_file", `input ${input} of node ${node} (${out[node].class_type}) would name an embedding, a file ComfyUI loads from the prompt text; an override sets values, it does not retarget a file or name an embedding`, { key, node, input });
     }
     out[node].inputs[input] = value;
   }
@@ -100,16 +105,32 @@ export function convertForRun({ workflow, objectInfo, comfyVersion = null, minCo
 // so the runner compares before it posts, whatever the cause of the difference. A file matches a manifest entry as the catalog matches an
 // annotation to a widget (modelCovered): by the name under the class directory or by its base name, without regard to case or slash
 // direction. A link (an array) and a value that is not a string are not files.
+//
+// An embedding is a file the text names. A string input that contains `embedding:` (any letter case) is read as text, not as a file name:
+// each name it asks for (embeddingRefs) is reported as `models/embeddings/<name>` unless the manifest names, under models/embeddings, that
+// name or the name with .safetensors, .pt or .bin appended (the files ComfyUI tries; embeddingCovered). The manifest of a run carries the
+// file readiness found on the node, extension and all, so a name that no file of the node answers to is not in it and is reported.
 export function unlistedModels(graph, manifestModels) {
   const names = new Set();
+  const embeddings = new Set();
   for (const m of Array.isArray(manifestModels) ? manifestModels : []) {
-    if (typeof m?.path === "string") names.add(m.path.replace(/\\/g, "/").replace(/^models\/[^/]+\//i, "").toLowerCase());
+    if (typeof m?.path !== "string") continue;
+    const path = m.path.replace(/\\/g, "/").toLowerCase();
+    names.add(path.replace(/^models\/[^/]+\//, ""));
+    const emb = /^models\/embeddings\/(.+)$/.exec(path);
+    if (emb) embeddings.add(emb[1]);
   }
   const out = [];
+  const report = (file) => { if (!out.includes(file)) out.push(file); };
   for (const node of Object.values(isObj(graph) ? graph : {})) {
     if (!isObj(node) || !isObj(node.inputs)) continue;
     for (const v of Object.values(node.inputs)) {
-      if (typeof v === "string" && hasModelExt(v) && !modelCovered(names, v) && !out.includes(v)) out.push(v);
+      if (typeof v !== "string") continue;
+      if (mentionsEmbedding(v)) {
+        for (const ref of embeddingRefs(v)) if (!embeddingCovered(embeddings, ref)) report(`models/embeddings/${ref}`);
+      } else if (hasModelExt(v) && !modelCovered(names, v)) {
+        report(v);
+      }
     }
   }
   return out;

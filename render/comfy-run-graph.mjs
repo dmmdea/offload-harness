@@ -135,7 +135,7 @@ export async function runGraphFlow(args, deps) {
       graph = converted.graph;
       // The manifest and the graph are two readers' answers (the catalog's and the converter's). A model file the graph loads that the manifest
       // does not name is one the licence gate, the FLUX bar, trust on first use and the host-RAM figure never saw: defer before preflight, and
-      // before anything is posted.
+      // before anything is posted. An embedding the prompt text names (`embedding:<name>`) is such a file too, as models/embeddings/<name>.
       const unlisted = unlistedModels(graph, m.models);
       if (unlisted.length > 0) {
         return await writeDefer({

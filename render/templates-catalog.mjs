@@ -221,7 +221,8 @@ const LOADER_CLASS = {
 };
 
 // The node classes that read a model file, and the test for a model file name: the override step (template-run.mjs) refuses to retarget
-// either, because the licence gate, the FLUX bar and the trust-on-first-use check read the models the template names.
+// either, and refuses a text that names an embedding (mentionsEmbedding, below), because the licence gate, the FLUX bar and the
+// trust-on-first-use check read the models the template names.
 export const MODEL_LOADER_TYPES = Object.freeze(Object.keys(LOADER_CLASS));
 export const hasModelExt = (s) => { const l = s.toLowerCase(); return MODEL_EXT.some((e) => l.endsWith(e)); };
 const textOrNull = (v) => (typeof v === "string" && v !== "" ? v : null);
@@ -233,6 +234,42 @@ const textOrNull = (v) => (typeof v === "string" && v !== "" ? v : null);
 export function modelCovered(names, file) {
   const name = slash(file).toLowerCase();
   return names.has(name) || names.has(baseName(name));
+}
+
+// Embeddings. ComfyUI's CLIP tokenizer loads a file named in the PROMPT TEXT: a word that starts with `embedding:` names a file of the
+// embeddings class, tried as written and then with .safetensors, .pt and .bin appended, in each directory of the class in turn, and the
+// first file found is loaded (comfy/sd1_clip.py load_embed). No loader node and no file extension is involved, so neither the loader
+// classes nor the suffix test (hasModelExt) see it. The three functions below are the one reading of it, shared by the override step
+// (template-run.mjs), the runner's comparison with the manifest (unlistedModels) and the catalog (requiredModels).
+export const EMBEDDING_EXTS = Object.freeze([".safetensors", ".pt", ".bin"]);
+export const mentionsEmbedding = (s) => typeof s === "string" && /embedding:/i.test(s);
+
+// embeddingRefs: the file names a text asks ComfyUI to load, each once, in order of appearance. The identifier is matched anywhere in the
+// text and in any letter case (ComfyUI matches a word that starts with it, in lower case: reading more is the fail-closed side). A name
+// runs to the next whitespace, `<`, `[` or `)`, or the end of the text; a trailing `,` or `)` and a `:<weight>` are then taken off,
+// repeatedly (`name:1.2),`). An empty name is kept as "" so that the caller refuses it. A value that is not a string names nothing.
+export function embeddingRefs(text) {
+  if (typeof text !== "string") return [];
+  const out = [];
+  for (const m of text.matchAll(/embedding:([^\s<[)]*)/gi)) {
+    let name = m[1];
+    for (let before = null; before !== name;) {
+      before = name;
+      name = name.replace(/[,)]+$/, "").replace(/:-?(?:\d+\.?\d*|\.\d+)$/, "");
+    }
+    if (!out.includes(name)) out.push(name);
+  }
+  return out;
+}
+
+// embeddingCovered: does a set of lower-cased names under the embeddings class directory cover the file a reference loads? The name as
+// written does, and so does the name with any of the three extensions ComfyUI appends. The whole path only: the file ComfyUI opens is the
+// one at that path, so a base name that matches a file elsewhere in the directory is not it. A name that would leave the directory is
+// never covered.
+export function embeddingCovered(names, ref) {
+  const name = slash(ref).toLowerCase();
+  if (name === "" || name.startsWith("/") || /^[a-z]:/.test(name) || name.split("/").some((seg) => seg === "" || seg === "." || seg === "..")) return false;
+  return [name, ...EMBEDDING_EXTS.map((e) => name + e)].some((c) => names.has(c));
 }
 
 // requiredModels: the files a template needs. `active` are the files of active nodes: the
@@ -263,6 +300,7 @@ export function requiredModels(workflow) {
   }
   for (const key of active.keys()) inactive.delete(key);
   const annotated = new Set([...active.values()].map((m) => m.name.toLowerCase()));
+  const annotatedEmbeddings = new Set([...active.values()].filter((m) => mapLegacyClass(m.directory ?? "") === "embeddings").map((m) => slash(m.name).toLowerCase()));
   // An unannotated file a node names in its widget values. The converter reads widgets_values in either of its two forms, a list or an
   // object keyed by input name, so both are read here; and it routes the widgets_values of a subgraph instance into an inner loader (the
   // widgets a proxyWidgets entry names, or the literal a subgraph input takes), so an ACTIVE instance's own values are read as well. The
@@ -275,7 +313,18 @@ export function requiredModels(workflow) {
     const type = typeof node.type === "string" ? node.type : "";
     if (NOTE_TYPES.has(type)) return;
     for (const v of values) {
-      if (typeof v !== "string" || !hasModelExt(v)) continue;
+      if (typeof v !== "string") continue;
+      // A prompt that names an embedding needs that file, which no loader widget carries and no extension ends in: it is listed under the
+      // embeddings class by the name the text gives, unless an annotation of that class already covers it. The extension is resolved against
+      // a node's directories by the readiness check, which is the one place that knows them.
+      if (mentionsEmbedding(v)) {
+        for (const ref of embeddingRefs(v)) {
+          if (embeddingCovered(annotatedEmbeddings, ref)) continue;
+          add(active, { name: ref, directory: "embeddings", url: null, hash: null, hash_type: null, annotated: false, node_types: [type] });
+        }
+        continue;
+      }
+      if (!hasModelExt(v)) continue;
       const name = slash(v);
       if (modelCovered(annotated, name)) continue;
       add(active, { name, directory: Object.hasOwn(LOADER_CLASS, type) ? LOADER_CLASS[type] : null, url: null, hash: null, hash_type: null, annotated: false, node_types: [type] });
@@ -1174,7 +1223,7 @@ function indexInventory(inv) {
       pushTo(base, baseName(f.rel).toLowerCase(), f);
       pushTo(allBase, baseName(f.rel).toLowerCase(), { class: cls, rel: f.rel });
     }
-    byClass.set(cls, { exact, lower, base, exts: c.exts ?? null });
+    byClass.set(cls, { exact, lower, base, exts: c.exts ?? null, dirs: c.dirs ?? [] });
   }
   const index = { byClass, allBase };
   indexCache.set(inv, index);
@@ -1190,7 +1239,7 @@ function indexInventory(inv) {
 //   extension_not_listed  the class's core loaders do not accept this file type (a .gguf in a core loader)
 //   class_unregistered  no directory is registered for the class
 // A file with no class (an unannotated widget file) is met by its exact name in any class.
-function checkRequirement(req, inv, mode) {
+function checkRequirement(req, inv, mode, asFile = false) {
   const name = String(req.name);
   const directory = req.directory ?? null;
   const result = { name, directory, status: "missing" };
@@ -1207,6 +1256,7 @@ function checkRequirement(req, inv, mode) {
   const cls = mapLegacyClass(directory);
   const c = idx.byClass.get(cls);
   if (!c) { result.status = "class_unregistered"; return result; }
+  if (cls === "embeddings" && !asFile) return checkEmbedding(name, directory, c, inv, mode, result);
   if (!extListed(name, c.exts)) { result.status = "extension_not_listed"; return result; }
   if (c.exact.has(name)) { result.status = "present"; return result; }
   const cased = c.lower.get(name.toLowerCase());
@@ -1224,6 +1274,25 @@ function checkRequirement(req, inv, mode) {
 }
 
 const MET = new Set(["present", "present_class_unknown"]);
+
+// checkEmbedding: an embedding is named by the text that loads it, not by a file: ComfyUI tries the name as written and then with
+// .safetensors, .pt and .bin appended, in each directory of the class in turn, and loads the first file it finds. The file found is
+// `resolved`, the name a manifest must carry. A file under the wrong spelling, in a subfolder or in another class is reported as for any
+// other class, by the first candidate that has such a finding.
+function checkEmbedding(name, directory, c, inv, mode, result) {
+  const candidates = [name, ...EMBEDDING_EXTS.map((e) => name + e)];
+  for (const dir of c.dirs) {
+    for (const cand of candidates) {
+      if (c.exact.get(cand)?.dirs.includes(dir)) { result.status = "present"; result.resolved = cand; return result; }
+    }
+  }
+  for (const cand of candidates) {
+    if (!extListed(cand, c.exts)) continue;
+    const r = checkRequirement({ name: cand, directory }, inv, mode, true);
+    if (r.status !== "missing") return { ...result, status: r.status, ...(MET.has(r.status) ? { resolved: cand } : {}), ...(r.found ? { found: r.found } : {}), ...(r.found_in ? { found_in: r.found_in } : {}) };
+  }
+  return result;
+}
 
 // readiness: whether every file a template needs is usable. `directory-aware` (the default) is the
 // method above. `basename-only` is the older shortcut, kept so its numbers can be reproduced and

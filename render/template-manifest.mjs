@@ -268,8 +268,11 @@ function comfyStatus(row, snapshot) {
 }
 
 // resolvedPath: where the satisfier is told to look for a model: the class directory the template names, else the class directory the
-// file was found in (an unannotated loader widget names none).
+// file was found in (an unannotated loader widget names none). An embedding the prompt text names is the file ComfyUI would load for
+// that name on this node (`resolved`: the name as written, else with .safetensors, .pt or .bin appended), so the runtime manifest names a
+// real file the satisfier, the trust-on-first-use check and the host-RAM figure can find, and the runner's comparison can match.
 function resolvedPath(m, req) {
+  if (req.resolved) return `models/${m.directory}/${req.resolved}`;
   if (m.path) return m.path;
   const hit = req.status === "present_class_unknown" ? req.found_in?.[0] : null;
   return hit ? `models/${hit.class}/${hit.rel}` : null;
