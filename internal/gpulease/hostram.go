@@ -741,11 +741,12 @@ var readFaultHook func(path string) error
 // It reads through a handle that shares delete (OpenShared), and that is what makes the READ side of a record rewrite safe.
 // A record is replaced in place while its lease is held (the grant's granting-to-active write, every Restamp), by a rename over
 // the live name. On Windows a plain os.ReadFile that meets that rename fails with ERROR_SHARING_VIOLATION (rarely ERROR_ACCESS_DENIED)
-// although the record is there and good a moment later, and a handle opened without FILE_SHARE_DELETE is also what makes the
-// writer's rename fail and retry (renameReplacing), which stretches the window. A reader that gave up on that failure answered "no
-// lease" for a lease that was held: v2() dropped the record, so Leases() was empty and EpochIsCurrent said the render child's lease
-// was not its own. A reader that shares delete neither fails nor blocks the rename, and sees the old record whole until the new one
-// is in place, as a POSIX reader does. Off Windows this is os.ReadFile.
+// although the record is there and good a moment later. The rename holds a handle with DELETE access on the old entry, and an open
+// whose own share mode lacks FILE_SHARE_DELETE collides with it. A reader that gave up on that failure answered "no lease" for a
+// lease that was held: v2() dropped the record, so Leases() was empty and EpochIsCurrent said the render child's lease was not its
+// own. A reader that shares delete does not collide, and reads the old record whole until the new one is in place, as a POSIX reader
+// does. (A rename still waits for any handle open on the old entry, this one included, which is why renameReplacing retries; a
+// record read is short.) Off Windows this is os.Open.
 func readRecordFile(path string) ([]byte, error) {
 	if readFaultHook != nil {
 		if err := readFaultHook(path); err != nil {
