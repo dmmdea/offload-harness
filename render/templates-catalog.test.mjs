@@ -3688,28 +3688,118 @@ test("models: a muted or bypassed instance's values are not requirements, and ne
 // starts with `embedding:`, so a template whose own prompt names one needs a file no loader widget carries and no extension ends in
 // ---------------------------------------------------------------------------------------------------------------------------------
 
-test("embeddingRefs: the names a text asks ComfyUI to load, with the delimiters, the weight and the trailing punctuation taken off", () => {
-  const cases = [
-    ["embedding:evil_ti, a cat", ["evil_ti"]],
-    ["embedding:evil_ti.pt, a cat", ["evil_ti.pt"]],
+// ComfyUI reads a prompt in two steps (comfy/sd1_clip.py, 0.38.0). token_weights cuts the text at parentheses and takes a `:<weight>` off a
+// CLOSED group only (rfind on the group, then float()). tokenize_with_weights then splits each piece where whitespace precedes the
+// identifier, and the rest of a word that starts with `embedding:` is split on whitespace: its first word, cut at `<` or `[`, is the name
+// load_embed is asked for (a second try strips commas from both ends). embeddingRefs reads a text the same way. Every expected list below
+// was produced by the extracted functions of that file (a recorder in place of load_embed), taking the name of the last try.
+
+const refsOf = (cases) => { for (const [text, want] of cases) assert.deepEqual(C.embeddingRefs(text), want, JSON.stringify(text)); };
+
+test("embeddingRefs: whitespace between the identifier and the name is skipped, because ComfyUI takes the first word of what follows", () => {
+  refsOf([
+    ["embedding: evil_ti, a cat", ["evil_ti"]],
+    ["embedding:\n\tevil_ti", ["evil_ti"]],
+    ["an embedding: soft light", ["soft"]], // prose, and a real load attempt: ComfyUI looks for a file named soft
+  ]);
+});
+
+test("embeddingRefs: a name ends at an opening parenthesis, where the tokenizer cuts the text", () => {
+  refsOf([
+    ["embedding:evil_ti(blue:1.2) cat", ["evil_ti"]],
+    ["embedding:evil_ti(blue)", ["evil_ti"]],
+    ["a cat embedding:evil_ti(", ["evil_ti"]],
+    ["embedding:a(embedding:b)", ["a", "b"]],
+  ]);
+});
+
+test("embeddingRefs: a weight comes off a closed parenthesis group only; written bare, or in a group whose tail is not a number, it stays in the name", () => {
+  refsOf([
     ["(embedding:evil_ti:1.2) cat", ["evil_ti"]],
     ["(embedding:evil_ti:.5)", ["evil_ti"]],
     ["(embedding:evil_ti:-1)", ["evil_ti"]],
-    ["embedding:evil_ti:1.2, embedding:other", ["evil_ti", "other"]],
+    ["((embedding:evil_ti:1.2):0.8)", ["evil_ti"]],
+    ["(embedding:evil_ti:1e1)", ["evil_ti"]],
+    ["embedding:evil_ti:1.2, embedding:other", ["evil_ti:1.2", "other"]],
+    ["(embedding:evil_ti:1.2, a cat)", ["evil_ti:1.2"]],
+    ["(embedding:evil_ti:abc)", ["evil_ti:abc"]],
+    ["embedding:evil_ti:1.2),", ["evil_ti:1.2)"]],
+    ["(embedding:1.2)", []], // the group's weight is 1.2 and what is left is the word `embedding`
+  ]);
+});
+
+test("embeddingRefs: only the lower-case identifier at the start of the text, after whitespace or after a parenthesis names a file", () => {
+  refsOf([
+    ["EMBEDDING:x", []],
+    ["Embedding: a primer on vectors", []],
+    ["wordembedding:vec", []],
+    ["text-embedding:3 small", []],
+    ["a,embedding:x", []],
+    ["x(embedding:y", []], // an unclosed group is not a group: the word starts with the parenthesis
+    ["a)embedding:foo", []],
+    ["embedding:s", ["s"]],
+    ["x\tembedding:y", ["y"]],
+    ["(a)embedding:z", ["z"]],
+    ["a (embedding:q)", ["q"]],
+    ["a embedding:b (c embedding:d) embedding:e", ["b", "d", "e"]],
+  ]);
+});
+
+test("embeddingRefs: an escaped parenthesis is part of the name, and an unescaped closing one with no group to close is too", () => {
+  refsOf([
+    ["embedding:foo\\(1\\) cat", ["foo(1)"]],
+    ["embedding:foo\\)", ["foo)"]],
+    ["embedding:evil_ti)", ["evil_ti)"]],
+  ]);
+});
+
+test("embeddingRefs: commas are taken off both ends of a name, each name is listed once, and a delimiter ends a name", () => {
+  refsOf([
+    ["embedding:evil_ti, a cat", ["evil_ti"]],
+    ["embedding:evil_ti,,", ["evil_ti"]],
+    ["embedding:,evil_ti", ["evil_ti"]],
+    ["embedding:evil_ti.pt, a cat", ["evil_ti.pt"]],
     ["a cat embedding:sub/one.safetensors<lora:x:1>", ["sub/one.safetensors"]],
     ["a cat embedding:one[blue]", ["one"]],
-    ["EMBEDDING:Mixed_Case", ["Mixed_Case"]],
     ["embedding:one embedding:one", ["one"]],
-    ["embedding:evil_ti,,", ["evil_ti"]],
-    ["embedding:evil_ti:1.2),", ["evil_ti"]],
-    ["embedding: a cat", [""]],
+    ["embedding:a embedding:b", ["a", "b"]],
+  ]);
+});
+
+test("embeddingRefs: a reference with no readable name is the empty name, which every caller refuses, and a text with none names nothing", () => {
+  refsOf([
     ["embedding:", [""]],
+    ["embedding: ", [""]],
+    ["(embedding:)", [""]],
+    ["embedding:<lora:x>", [""]],
+    ["embedding:,,", [""]],
     ["no identifier here: an embedding of a cat, embeddings", []],
     ["", []],
-  ];
-  for (const [text, want] of cases) assert.deepEqual(C.embeddingRefs(text), want, JSON.stringify(text));
+  ]);
   assert.deepEqual(C.embeddingRefs(7), [], "a value that is not a string names nothing");
   assert.deepEqual(C.embeddingRefs(null), []);
+});
+
+test("embeddingRefs: a text nested too deep to read is the empty name (refused), not a crash or a long parse", () => {
+  const nested = (depth) => "(".repeat(depth) + "embedding:x" + ")".repeat(depth);
+  assert.deepEqual(C.embeddingRefs(nested(400)), ["x"], "ComfyUI reads a prompt nested this deep (its recursion limit is about a thousand frames)");
+  assert.deepEqual(C.embeddingRefs(nested(600)), [""], "past the reader's own limit the text is refused");
+  assert.deepEqual(C.embeddingRefs(nested(200000)), [""]);
+});
+
+// The override step refuses on a wider matcher than the reader above (any case, anywhere), so a text the reader finds a file in is always
+// a text the override step refuses. This holds the two together: the reader must never find what the matcher passes.
+test("embeddingRefs: a text it reads a file from is always a text mentionsEmbedding flags (the override check is at least as wide)", () => {
+  const corpus = [
+    "embedding:a", "x embedding:a", "(embedding:a)", "(embedding:a:1.2)", "a)embedding:z", "embedding: a", "\tembedding:a", "((x))(embedding:a)",
+    "embedding:foo\\(1\\)", "EMBEDDING:a", "Embedding: a", "wordembedding:a", "a,embedding:a", "embedding:", "(embedding:1.2)",
+    "no identifier", "an embedding of a cat", "embeddings", "embedding", "embedding :a", "embedding:a", "embedding​:a",
+  ];
+  let read = 0;
+  for (const t of corpus) {
+    if (C.embeddingRefs(t).length > 0) { read++; assert.equal(C.mentionsEmbedding(t), true, JSON.stringify(t)); }
+  }
+  assert.ok(read >= 10, "the corpus has texts the reader reads, so the loop is not vacuous");
 });
 
 const promptNode = (id, text, extra = {}) => ({ id, type: "CLIPTextEncode", mode: 0, widgets_values: [text], ...extra });
@@ -3740,6 +3830,21 @@ test("models: an embedding in a muted node, in a note, or in text without the id
   assert.deepEqual(r.active, []);
 });
 
+test("models: text that is not an embedding reference to ComfyUI adds no requirement, though a wider matcher would flag it", () => {
+  const r = C.requiredModels({ nodes: [
+    promptNode(1, "Embedding: a primer on vectors"),
+    promptNode(2, "wordembedding:vec, text-embedding:3 small"),
+    promptNode(3, "EMBEDDING:Evil_TI and a,embedding:glued"),
+  ] });
+  assert.deepEqual(r.active, []);
+});
+
+test("models: the prompt names an annotation of the embeddings class covers are recorded on that annotated entry, to be checked against the node", () => {
+  const annotated = promptNode(1, "embedding:evil_ti, (embedding:other:1.2)", { properties: { models: [{ name: "evil_ti.pt", url: hf("example-org/w", "evil_ti.pt"), directory: "embeddings" }] } });
+  const r = C.requiredModels({ nodes: [annotated] });
+  assert.deepEqual(r.active.map((m) => [m.name, m.embedding_refs ?? null]), [["evil_ti.pt", ["evil_ti"]], ["other", null]]);
+});
+
 test("models: an embedding an ACTIVE subgraph instance carries in its widgets_values is a requirement too", () => {
   const r = C.requiredModels(instanceWorkflow({ widgets_values: ["embedding:from_instance"] }));
   assert.deepEqual(r.active.map((m) => [m.directory, m.name]).sort(), [["checkpoints", "inner.safetensors"], ["embeddings", "from_instance"]]);
@@ -3760,15 +3865,46 @@ test("readiness: an embedding is found the way ComfyUI loads it, as written and 
   assert.equal(run([emb("E.pt")], "e")[0], "case_mismatch");
 });
 
-test("readiness: of two directories that hold an embedding, the first one in ComfyUI's order decides, whichever extension each holds", () => {
-  const yaml = [{ text: "p:\n  base_path: E:/x/overflow\n  embeddings: embeddings\n", dir: "D:/x/comfy" }];
-  const files = { ...TREE, "D:/x/comfy/models/embeddings/e.pt": { size: 5 }, "E:/x/overflow/embeddings/e.safetensors": { size: 6 } };
-  const inv = invFrom(files, yaml);
-  const dirs = inv.classes.embeddings.dirs;
-  assert.equal(dirs.length, 2);
-  const r = C.readiness([req("embeddings", "e", { annotated: false })], inv).requirements[0];
-  const heldBy = (rel) => inv.classes.embeddings.files.find((f) => f.rel === rel).dirs[0];
-  assert.equal(heldBy(r.resolved), dirs[0], `the file reported (${r.resolved}) is the first directory's`);
+// ComfyUI does not look in "each directory of the class in its order". expand_directory_list puts every embeddings root and every
+// subdirectory below it (os.walk) into one set(), and load_embed takes the first directory of list(set) that holds the name, so the
+// directory is chosen by hash order, which differs from one process to the next (a verbatim copy of the loop, over seeds 0 to 11, picked the
+// root file 5 times, sd15/ 4 times and sdxl/ 3 times). A name held by more than one directory is ambiguous; held by one, it is that file.
+
+const EMB = (name) => `D:/x/comfy/models/embeddings/${name}`;
+const EMB2 = (name) => `E:/x/overflow/embeddings/${name}`;
+const OVERFLOW = [{ text: "p:\n  base_path: E:/x/overflow\n  embeddings: embeddings\n", dir: "D:/x/comfy" }];
+const embCheck = (files, name, extra = {}, yamls = []) => {
+  const inv = invFrom({ ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) }, yamls);
+  return C.readiness([req("embeddings", name, { annotated: false, ...extra })], inv).requirements[0];
+};
+const embGot = (files, name, extra, yamls) => { const r = embCheck(files, name, extra, yamls); return [r.status, r.resolved ?? null, r.found ?? null]; };
+
+test("readiness: an embedding held only in a subfolder of the embeddings directory is the file ComfyUI loads, because it searches every subfolder", () => {
+  assert.deepEqual(embGot([EMB("sd15/e.safetensors")], "e"), ["present", "sd15/e.safetensors", null]);
+  assert.deepEqual(embGot([EMB("sd15/deep/e.pt")], "e"), ["present", "sd15/deep/e.pt", null]);
+  assert.deepEqual(embGot([EMB("sd15/e.pt"), EMB("sd15/e.bin")], "e"), ["present", "sd15/e.pt", null], "within one directory the extension order decides");
+  assert.deepEqual(embGot([EMB("sd15/e.pt")], "sd15/e"), ["present", "sd15/e.pt", null], "a name with a path is that path under the directory");
+  assert.deepEqual(embGot([EMB("a/sd15/e.pt")], "sd15/e"), ["present", "a/sd15/e.pt", null], "and under any subfolder");
+  assert.equal(embGot([EMB("sd15/e.pt")], "other/e")[0], "missing", "a path that no directory holds is missing");
+  assert.equal(embGot([EMB("sd15/xe.pt")], "e")[0], "missing", "the match is on whole path segments");
+});
+
+test("readiness: one embedding name held in more than one directory is ambiguous, listing the files, because ComfyUI picks the directory by set order", () => {
+  assert.deepEqual(embGot([EMB("e.pt"), EMB("sd15/e.safetensors")], "e"), ["ambiguous", null, ["e.pt", "sd15/e.safetensors"]], "the root and a subfolder");
+  assert.deepEqual(embGot([EMB("a/e.pt"), EMB("b/e.pt")], "e"), ["ambiguous", null, ["a/e.pt", "b/e.pt"]], "two subfolders");
+  assert.deepEqual(embGot([EMB("e.pt"), EMB2("e.safetensors")], "e", {}, OVERFLOW), ["ambiguous", null, ["e.pt", "e.safetensors"]], "two registered roots");
+  assert.deepEqual(embGot([EMB("e.pt"), EMB2("e.pt")], "e", {}, OVERFLOW), ["ambiguous", null, ["e.pt"]], "one name in both roots: the inventory lists it once and cannot tell a link from a copy");
+  assert.deepEqual(embGot([EMB("e.pt"), EMB("e.safetensors")], "e"), ["present", "e.safetensors", null], "one directory holding two extensions is not ambiguous: the order decides");
+});
+
+test("readiness: an annotated embedding is met only when it is the file ComfyUI opens for the name the prompt gives", () => {
+  const covers = { annotated: true, embedding_refs: ["evil_ti"] };
+  assert.deepEqual(embGot([EMB("evil_ti.pt")], "evil_ti.pt", covers), ["present", "evil_ti.pt", null]);
+  assert.deepEqual(embGot([EMB("evil_ti.pt"), EMB("evil_ti.safetensors")], "evil_ti.pt", covers), ["shadowed", null, ["evil_ti.safetensors"]], "ComfyUI tries .safetensors first in one directory");
+  assert.deepEqual(embGot([EMB("evil_ti.pt"), EMB("evil_ti.safetensors")], "evil_ti.safetensors", covers), ["present", "evil_ti.safetensors", null], "the annotation names the file ComfyUI opens");
+  assert.deepEqual(embGot([EMB("evil_ti.pt"), EMB("evil_ti.safetensors")], "evil_ti.pt", { annotated: true }), ["present", "evil_ti.pt", null], "an annotation that covers no prompt name is checked as before");
+  assert.equal(embGot([EMB("evil_ti.pt"), EMB("sd15/evil_ti.bin")], "evil_ti.pt", covers)[0], "ambiguous", "another directory holds a file for the name");
+  assert.equal(embGot([EMB("Evil_TI.pt")], "Evil_TI.pt", covers)[0], "case_mismatch", "the prompt's name is not that file's spelling");
 });
 
 // embeddingCovered, directly. Each set below holds the very names under test, so the guard or the normalisation named in the message is
@@ -3777,7 +3913,13 @@ test("readiness: of two directories that hold an embedding, the first one in Com
 test("embeddingCovered: the name as written, or with .safetensors, .pt or .bin, covers it whatever its case or slash direction, and only the whole path does", () => {
   const names = new Set(["evil_ti.pt", "sub/deep.bin", "plain", "x.safetensors"]);
   for (const ref of ["evil_ti", "EVIL_TI", "Evil_TI.PT", "Sub\\Deep", "SUB/DEEP.bin", "plain", "x"]) assert.equal(C.embeddingCovered(names, ref), true, ref);
-  for (const ref of ["deep", "evil_ti.bin", "sub/evil_ti", "other", "plain/x"]) assert.equal(C.embeddingCovered(names, ref), false, ref);
+  for (const ref of ["evil_ti.bin", "sub/evil_ti", "other", "plain/x"]) assert.equal(C.embeddingCovered(names, ref), false, ref);
+});
+
+test("embeddingCovered: a file in a subfolder covers a bare name, because ComfyUI searches every subfolder, and only on whole path segments", () => {
+  const names = new Set(["sd15/deep.bin", "a/b/evil_ti.pt", "sub/xplain.pt"]);
+  for (const ref of ["deep", "deep.bin", "evil_ti", "b/evil_ti", "a/b/evil_ti", "Deep"]) assert.equal(C.embeddingCovered(names, ref), true, ref);
+  for (const ref of ["sd15", "plain", "other/deep", "eep", "sd15/evil_ti", "xevil_ti"]) assert.equal(C.embeddingCovered(names, ref), false, ref);
 });
 
 test("embeddingCovered: a name that would leave the embeddings directory is never covered, even by a set that holds it", () => {

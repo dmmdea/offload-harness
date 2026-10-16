@@ -506,3 +506,40 @@ test("readiness: an embedding the prompt names without an extension is met by th
   assert.deepEqual([m.status, m.resolved_path], ["missing", null]);
   assert.ok(r.models_missing.includes("models/embeddings/evil_ti"));
 });
+
+test("readiness: an embedding the prompt names that the node holds only in a subfolder of the embeddings directory is met, and the manifest path names that file", () => {
+  const io = embeddingIo(null, ["diffusion_models/a.safetensors", "embeddings/sd15/evil_ti.safetensors"]);
+  const r = M.readinessFor(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
+  const m = r.models.find((x) => x.name === "evil_ti");
+  assert.deepEqual([m.status, m.resolved_path], ["present", "models/embeddings/sd15/evil_ti.safetensors"]);
+});
+
+test("resolve: an annotated embedding the node holds in a subfolder runs, and the runtime manifest names the file where it sits", () => {
+  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+  const io = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/sd15/evil_ti.safetensors"]);
+  const ok = M.resolveRun(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.runtime_manifest.models.map((m) => m.path), ["models/diffusion_models/a.safetensors", "models/embeddings/sd15/evil_ti.safetensors"]);
+});
+
+test("resolve: an embedding the node holds in the root and in a subfolder is refused, because ComfyUI opens one of them by set order and the manifest would name only one", () => {
+  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+  const io = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors", "embeddings/sd15/evil_ti.safetensors"]);
+  const row = rowOf(catalogOf(io), "tt_emb");
+  const gone = M.resolveRun(row, snapshotOf(io), { io });
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/evil_ti.safetensors"]]);
+  const m = M.readinessFor(row, snapshotOf(io), { io }).models.find((x) => x.name === "evil_ti.safetensors");
+  assert.deepEqual([m.status, m.resolved_path, m.found], ["ambiguous", null, ["evil_ti.safetensors", "sd15/evil_ti.safetensors"]]);
+});
+
+test("resolve: an annotated embedding that another file of the node shadows is refused, because ComfyUI would open the other file and the licence and hash are the annotated one's", () => {
+  const annotation = { name: "evil_ti.pt", directory: "embeddings", url: WEIGHTS_A("evil_ti.pt") };
+  const io = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.pt", "embeddings/evil_ti.safetensors"]);
+  const row = rowOf(catalogOf(io), "tt_emb");
+  const gone = M.resolveRun(row, snapshotOf(io), { io });
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/evil_ti.pt"]]);
+  const m = M.readinessFor(row, snapshotOf(io), { io }).models.find((x) => x.name === "evil_ti.pt");
+  assert.deepEqual([m.status, m.found], ["shadowed", ["evil_ti.safetensors"]]);
+  const alone = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.pt"]);
+  assert.equal(M.resolveRun(rowOf(catalogOf(alone), "tt_emb"), snapshotOf(alone), { io: alone }).ok, true, "with only the annotated file the run is allowed");
+});

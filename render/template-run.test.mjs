@@ -255,7 +255,8 @@ test("unlistedModels: an embedding is listed by the file ComfyUI would load, as 
   }
   assert.deepEqual(TR.unlistedModels(g, [{ path: "models/embeddings/evil_ti.ckpt" }]), ["models/embeddings/evil_ti"], "an extension ComfyUI does not try");
   assert.deepEqual(TR.unlistedModels(g, [{ path: "models/loras/evil_ti.safetensors" }]), ["models/embeddings/evil_ti"], "another class directory is not the one it loads from");
-  assert.deepEqual(TR.unlistedModels(g, [{ path: "models/embeddings/sub/evil_ti.safetensors" }]), ["models/embeddings/evil_ti"], "a nested listed name is not matched by its base name alone");
+  assert.deepEqual(TR.unlistedModels(g, [{ path: "models/embeddings/sub/evil_ti.safetensors" }]), [], "a listed file in a subfolder is a file ComfyUI finds for the bare name: it searches every subfolder");
+  assert.deepEqual(TR.unlistedModels(embeddingGraph("embedding:other/evil_ti"), [{ path: "models/embeddings/sub/evil_ti.safetensors" }]), ["models/embeddings/other/evil_ti"], "and the match is on whole path segments, not on the base name");
 });
 
 test("unlistedModels: a name written with its extension is that file, and the extension is not appended to it", () => {
@@ -267,9 +268,18 @@ test("unlistedModels: a name written with its extension is that file, and the ex
 test("unlistedModels: every embedding a graph names is reported once, in graph order, whatever string input carries it", () => {
   const g = {
     "1": { class_type: "CLIPTextEncode", inputs: { text: "embedding:b, (embedding:a:0.8) embedding:b" } },
-    "2": { class_type: "SomePromptNode", inputs: { positive: "x EMBEDDING:c.", seed: 3, n: ["1", 0] } },
+    "2": { class_type: "SomePromptNode", inputs: { positive: "x embedding:c.", seed: 3, n: ["1", 0] } },
   };
   assert.deepEqual(TR.unlistedModels(g, undefined), ["models/embeddings/b", "models/embeddings/a", "models/embeddings/c."]);
+});
+
+test("unlistedModels: text that is not an embedding reference to ComfyUI names no file, in another letter case or glued to a word, though the override check still refuses it", () => {
+  for (const text of ["Embedding: a primer on vectors", "EMBEDDING:Evil_TI a cat", "wordembedding:vec", "a,embedding:glued", "(embedding:1.2)"]) {
+    assert.deepEqual(TR.unlistedModels(embeddingGraph(text), undefined), [], text);
+  }
+  for (const text of ["Embedding: a primer on vectors", "EMBEDDING:Evil_TI a cat", "wordembedding:vec"]) {
+    assert.equal(applyOverrides(fileGraph(), { "4.text": text }).refusal?.code, "override_is_file", text);
+  }
 });
 
 test("unlistedModels: text that mentions embeddings without the `embedding:` identifier names no file", () => {
