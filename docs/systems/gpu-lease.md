@@ -438,10 +438,11 @@ concurrency test rather than by reading:
   - **The wait is Windows only.** Off Windows nothing is delete-pending (`rename(2)` is atomic and an
     open descriptor never holds one up), so a permission error on a record is a lasting refusal and
     `readSharedFile` returns it at once. The choice is the constant `sharedOpenMeetsDeletePending`
-    beside `OpenShared`. With the wait on, a mode-000 record cost about 108 ms per read: `Leases()`
-    108 ms per such record, and an acquirer, which reads the records under the epoch lock, 4.2 s with
-    eight, enough for a second acquirer to give up on the lock's 2 s
-    (`TestOffWindowsAPermissionErrorIsReturnedAtOnce`).
+    beside `OpenShared`, and `TestOffWindowsAPermissionErrorIsReturnedAtOnce` pins that the open is
+    made once. With the wait on, a mode-000 record cost about 108 ms per read: `Leases()` 108 ms per
+    such record, and an acquirer, which reads the records under the epoch lock, 4.2 s with eight,
+    enough for a second acquirer to give up on the lock's 2 s. Those figures are from a scratch
+    measurement in a Linux environment, recorded in the change fragment, not from a test in the tree.
   - The epoch counter, the tokens and the waiters are still read with `os.ReadFile`; no finding covers
     them yet.
 

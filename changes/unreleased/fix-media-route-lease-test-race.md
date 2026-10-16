@@ -105,7 +105,7 @@
     Windows tests on the Windows host). Red, before the gate: `TestOffWindowsAPermissionErrorIsReturnedAtOnce`, 5 runs of 4 subtests, 20 of 20 failed,
     `made 21 opens, want 1 (took 104ms)` for both readers, with the refusal supplied by the open seam and with a real mode-000 file. Green, after: the same
     5 runs, 20 of 20 subtests passed, with the three portable wait tests (forced on, 15 of 15) and the Windows default test (3 of 3 on the Windows
-    host). The same measurement after the gate, same method: one read of an unreadable record microseconds; `Leases()` 12, 11, 15 and 106 us with 1, 2, 4
+    host). The same measurement after the gate, same method: `Leases()` 12, 11, 15 and 106 us with 1, 2, 4
     and 8 unreadable records; a lone acquire 191, 196, 362 and 384 us; two acquirers with 8 records both granted, 5.9 ms and 0.38 ms. Mutants (applied
     through a build overlay, the tree untouched): the gate removed from `readSharedFile`, 20 of 20 subtests red with `made 21 opens, want 1`, the
     three portable wait tests still green; the constant set to `false` in the Windows build, `TestWindowsWaitsOutADeniedOpenByDefault` red 3 of 3
