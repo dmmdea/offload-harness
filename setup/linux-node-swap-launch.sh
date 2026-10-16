@@ -31,6 +31,7 @@
 #     [--config /path/to/config.json] \
 #     [--backup-suffix pre-<sha>] [--render-tarball render.tar.gz --render-dir /opt/offload/render] \
 #     [--wait-idle-timeout 10m] [--verify-timeout 90s] [--dry-run] [--skip-hash-check] \
+#     [--skip-fleet-key-check  (node-swap refuses a node whose health URL is beyond loopback when the config it resolves holds no fleet_auth_token; pass --config, or this when this box's config is not the node's)] \
 #     [--cards 0,GPU-uuid-prefix  (standalone node: the cards this deploy touches, each an nvidia-smi index, a GPU UUID or an unambiguous UUID prefix; default = the whole node)] \
 #     [--runner-exe /opt/offload/bin/local-offload] [--log-dir /opt/offload/bin] [--node-swap-bin local-offload]
 #
@@ -167,7 +168,7 @@ main() {
   local STAGED="" TARGET="" SHA256="" BACKUP_SUFFIX="" HEALTH_URL="" CONFIG_PATH=""
   local RESTART_COMMAND="" RENDER_TARBALL="" RENDER_DIR=""
   local WAIT_IDLE_TIMEOUT="10m" VERIFY_TIMEOUT="90s" CARDS=""
-  local DRY_RUN=0 SKIP_HASH_CHECK=0
+  local DRY_RUN=0 SKIP_HASH_CHECK=0 SKIP_FLEET_KEY_CHECK=0
   local RUNNER_EXE="" LOG_DIR="" NODE_SWAP_BIN=""
 
   while [ $# -gt 0 ]; do
@@ -186,6 +187,7 @@ main() {
       --verify-timeout) VERIFY_TIMEOUT="$2"; shift 2 ;;
       --dry-run) DRY_RUN=1; shift ;;
       --skip-hash-check) SKIP_HASH_CHECK=1; shift ;;
+      --skip-fleet-key-check) SKIP_FLEET_KEY_CHECK=1; shift ;;
       --runner-exe) RUNNER_EXE="$2"; shift 2 ;;
       --log-dir) LOG_DIR="$2"; shift 2 ;;
       --node-swap-bin) NODE_SWAP_BIN="$2"; shift 2 ;;
@@ -239,6 +241,7 @@ main() {
   fi
   [ "$DRY_RUN" = 1 ] && ARGS+=(--dry-run)
   [ "$SKIP_HASH_CHECK" = 1 ] && ARGS+=(--skip-hash-check)
+  [ "$SKIP_FLEET_KEY_CHECK" = 1 ] && ARGS+=(--skip-fleet-key-check)
 
   echo "[node-swap-launch] command: $NODE_SWAP_BIN ${ARGS[*]}"
   echo "[node-swap-launch] log:    $LOG_PATH"

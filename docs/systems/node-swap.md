@@ -136,6 +136,15 @@ OS operation — hashing, health reads, CIM process enumeration, renames, tarbal
 `Start`/`Stop-ScheduledTask` — is a function value, so the whole state machine including every
 rollback branch is unit-tested with fakes, no real Windows box required):
 
+0. **Check the fleet key** — a node whose health URL is beyond loopback runs a fleet-serve that
+   listens there, and every lane of the new binary requires the fleet bearer: fleet-serve will
+   not start on a non-loopback address without a `fleet_auth_token` in the config it reads.
+   `node-swap` reads the config it resolves (`--config`, `LOCAL_OFFLOAD_CONFIG`, the working
+   directory, the home directory), records only whether the key is there (never its value), and
+   the engine refuses with the step `fleet-key` before it hashes, waits, stops or renames
+   anything, on a dry run as on a real one. A loopback or standalone node (no health URL) is not
+   checked. `--skip-fleet-key-check` (`-SkipFleetKeyCheck` on the Windows launcher) leaves the
+   check out, for a box whose config is not the node's; the Linux launcher forwards `--config`.
 1. **Verify hash** — the staged binary's sha256 must equal `--sha256` before anything is
    touched.
 2. **Wait idle** — poll `--health-url`'s `/fleet/health` until `running=0, queued=0` (skipped
@@ -194,7 +203,7 @@ when step 4 itself failed — nothing was ever moved, so the original binary is 
 
 - `local-offload node-swap --staged NEW.exe --target LIVE.exe --sha256 HEX [--restart-task
   NAME | --restart-command "..."] [--health-url URL] [--render-tarball t.tar.gz --render-dir
-  DIR] [--dry-run] [--result out.json] [--log out.log] [--json]` — the engine; runs
+  DIR] [--dry-run] [--skip-fleet-key-check] [--result out.json] [--log out.log] [--json]` — the engine; runs
   synchronously, returns its own exit code.
 - [`setup/windows-node-swap-launch.ps1`](../../setup/windows-node-swap-launch.ps1) — the
   Windows detached launcher: registers the above via `Win32_Process.Create`, prints the

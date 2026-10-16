@@ -52,6 +52,9 @@ param(
   [string]$VerifyTimeout = '90s',
   [switch]$DryRun,
   [switch]$SkipHashCheck,
+  # node-swap refuses a node whose health URL is beyond loopback when the config it resolves holds no
+  # fleet_auth_token (the new binary would not start). Pass this when this box's config is not the node's.
+  [switch]$SkipFleetKeyCheck,
   # The exe used to RUN `node-swap` itself. Defaults to STAGED — the NEW
   # engine, verified by hash before it ever runs (Resolve-RunnerExe below) —
   # not Target, the currently-installed binary. This inverts the tool's
@@ -458,6 +461,7 @@ if ($Cards)           { $argList += @('-cards', $Cards) }
 if ($VerifyTimeout)   { $argList += @('-verify-timeout', $VerifyTimeout) }
 if ($DryRun)          { $argList += '-dry-run' }
 if ($SkipHashCheck)   { $argList += '-skip-hash-check' }
+if ($SkipFleetKeyCheck) { $argList += '-skip-fleet-key-check' }
 
 # Win32_Process.Create takes ONE command-line string, not an argv array - encode every
 # value (paths and restart commands routinely contain spaces AND, for a restart command

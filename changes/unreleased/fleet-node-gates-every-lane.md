@@ -53,6 +53,11 @@
   register the unit without one, so a fresh install no longer crash-loops; the Windows launcher template says the key must
   be in the config before the task is registered. ADR 0023 carries the amendment, and `docs/FLEET-NODE.md` and
   `docs/OPERATOR-GUIDE.md` the new rule.
+- **A node swap refuses a node that could not start afterwards.** `node-swap` reads the config it resolves and records only
+  whether `fleet_auth_token` is there; the engine refuses, as its first step and on a dry run too, a node whose health URL is
+  beyond loopback and whose config holds no key (the step is named `fleet-key`, the message names the key and the config). A
+  loopback or standalone node is not checked; `--skip-fleet-key-check` (`-SkipFleetKeyCheck` on the Windows launcher) leaves
+  the check out for a box whose config is not the node's.
 - **Tests, red first.** The failing tests were committed before the change: tokenless remote `run-graph` (401, logged), the
   fail-closed `403` for every task type, loopback with no token allowed, the bearer holder admitted with unchanged bytes,
   unpinned and wrongly-pinned packs refused before any clone (Go and Node, the satisfier asserted never to reach the checkout
@@ -61,7 +66,7 @@
   file, the refusal journal bounded against a caller who varies the task type, and the installer's key precondition. Mutants
   each turn their test red: the `tokenGated` widening removed, the Go pack check removed, the Node pack check removed, the
   startup refusal removed, the Go model check removed, the Node model check removed, the config path dropped from the refusal,
-  the journal's task-type key restored.
+  the journal's task-type key restored, the node-swap key check removed.
 - **Pins to confirm.** The MultiGPU pin is the documented one. The VideoHelperSuite and GGUF commits are the ones one reference
   node's checkout was at, not documented anywhere (`"pin": "unverified"` in the file); confirm them against the fleet before a
   workflow depends on them, and add a row for any other pack a workflow needs.
@@ -69,6 +74,6 @@
   an in-process loopback listener, and the runner's satisfier ran against injected git, tooling and filesystem fakes. A
   workflow whose manifest names a pack outside the table, or a model outside `models/` or from a host outside the list, is now
   refused until the table gains a row. The installer's key handling ran against a stub binary and a temporary prefix; no unit
-  was registered. A node that was installed before this change has its unit and config as they were: the token has to be in
+  was registered, and no node was swapped (the swap check ran against fakes, and the launchers' forwarding is a source test). A node that was installed before this change has its unit and config as they were: the token has to be in
   its config before it is upgraded, or it will not start. That a ComfyUI imports a `custom_nodes` package at start-up was not
   run here; the model rule closes the write whatever it does.
