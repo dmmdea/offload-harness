@@ -38,6 +38,8 @@ function scripted(plan, { tick = null } = {}) {
     read: (path) => {
       const step = plan[Math.min(seen.reads, plan.length - 1)];
       seen.reads += 1;
+      // a helper that never pauses never moves the fake clock: end its loop here, as a failure and not as a hang
+      if (seen.reads > 1000) throw new Error("runaway: more than 1000 reads without the clock moving");
       if (typeof step === "string") return step;
       throw fsError(step.code, path);
     },
