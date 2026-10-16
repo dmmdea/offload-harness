@@ -11,8 +11,10 @@
 // with a scanner). The writer retries a refused rename like renameReplacing does, so a rename that lost to an open reader
 // is tried again and not counted.
 //
-// Several lease roots are rotated so a reader holding one file open does not hold the whole loop up. The test is bounded
-// (a few seconds) and its writer is a child that is killed by pid if the test ends early.
+// Several lease roots are rotated so a reader holding one file open does not hold the whole loop up. The test is sized by WORK,
+// not by the clock, so a loaded host (the gate hosts are) makes it longer and not vacuous: the writer makes MIN_RENAMES renames
+// and stops only once the reader has made MIN_LOOPS loops (a marker file says so), and the reader loops until the writer says it
+// is done; a cap of CAP_MS ends a run that cannot get there. The writer is a child that is killed by pid if the test ends early.
 //
 // MEASURED (a 36-thread Windows host; the same loop, 40 s per run, with 4 reader processes and a Go or a Node writer, the
 // readers as they were before lease-read.mjs and as they are now) is in the change fragment. On a quiet host the plain
@@ -20,32 +22,36 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { awaitTreeGone, killTree, scratchDir } from "./test-scratch.mjs";
 import { checkInheritedLease, readCardClaim, readEpochRecord, readLease } from "./gpu-lock.mjs";
 import { leaseProgressFile } from "./lease-progress.mjs";
 
 const ROOTS = 6;
-const RUN_MS = 3000;
+const MIN_RENAMES = 600;
+const MIN_LOOPS = 150;
+const CAP_MS = 60_000;
 const nap = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// argv: root, roots, ms. Prints {renames, retries, fails} when the time is up.
+// argv: root, roots, minRenames, capMs. Stops when it has made minRenames renames AND the reader has left <root>/enough, or at the cap.
+// Writes <root>/done, then prints {renames, retries, fails, capped}.
 const WRITER = `
-const { linkSync, renameSync, unlinkSync } = require("node:fs");
+const { linkSync, renameSync, unlinkSync, existsSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
-const [root, rootsArg, msArg] = process.argv.slice(1);
+const [root, rootsArg, minArg, capArg] = process.argv.slice(1);
 const files = [];
 for (let r = 1; r <= Number(rootsArg); r++) {
   const d = join(root, String(r));
   files.push(join(d, "e", "7.json"), join(d, "meta.json"), join(d, "cards", "gpu-test-0.claim"));
 }
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-let renames = 0, retries = 0, fails = 0;
-const end = Date.now() + Number(msArg);
-while (Date.now() < end) {
+let renames = 0, retries = 0, fails = 0, capped = false;
+const cap = Date.now() + Number(capArg);
+for (;;) {
+  if (renames >= Number(minArg) && existsSync(join(root, "enough"))) break;
+  if (Date.now() >= cap) { capped = true; break; }
   for (const path of files) {
-    if (Date.now() >= end) break;
     linkSync(path + ".seed", path + ".tmp");
     let done = false;
     for (let attempt = 0; attempt < 400 && !done; attempt++) {
@@ -59,7 +65,8 @@ while (Date.now() < end) {
     if (!done) { fails++; try { unlinkSync(path + ".tmp"); } catch {} }
   }
 }
-process.stdout.write(JSON.stringify({ renames, retries, fails }) + "\\n");
+writeFileSync(join(root, "done"), "");
+process.stdout.write(JSON.stringify({ renames, retries, fails, capped }) + "\\n");
 `;
 
 function seedRoot(dir) {
@@ -87,7 +94,7 @@ test("the readers never answer null for a lease file that is there while a write
     seedRoot(d);
     dirs.push(d);
   }
-  child = spawn(process.execPath, ["-e", WRITER, root, String(ROOTS), String(RUN_MS)], { stdio: ["ignore", "pipe", "inherit"], windowsHide: true });
+  child = spawn(process.execPath, ["-e", WRITER, root, String(ROOTS), String(MIN_RENAMES), String(CAP_MS)], { stdio: ["ignore", "pipe", "inherit"], windowsHide: true });
   let out = "";
   child.stdout.on("data", (d) => { out += d; });
   const closed = new Promise((resolve) => child.on("close", resolve));
@@ -95,8 +102,9 @@ test("the readers never answer null for a lease file that is there while a write
 
   const miss = { readEpochRecord: 0, readLease: 0, readCardClaim: 0, checkInheritedLease: 0, leaseProgressFile: 0 };
   let loops = 0;
-  const stop = Date.now() + RUN_MS - 500;
-  while (Date.now() < stop) {
+  let enough = false;
+  const cap = Date.now() + CAP_MS;
+  while (Date.now() < cap) {
     loops += 1;
     const dir = dirs[loops % dirs.length];
     if (!readEpochRecord(dir, 7)) miss.readEpochRecord += 1;
@@ -104,13 +112,19 @@ test("the readers never answer null for a lease file that is there while a write
     if (!readCardClaim(dir, "gpu-test-0")) miss.readCardClaim += 1;
     if (!checkInheritedLease({ dir, epoch: 7 })) miss.checkInheritedLease += 1;
     if (!leaseProgressFile({ GPU_LEASE_DIR: dir, GPU_LEASE_EPOCH: "7" })) miss.leaseProgressFile += 1;
+    if (!enough && loops >= MIN_LOOPS) {
+      writeFileSync(join(root, "enough"), "");
+      enough = true;
+    }
+    if (enough && existsSync(join(root, "done"))) break;
   }
   await closed;
   const w = JSON.parse(out.trim());
   t.diagnostic(`${loops} loops of the five readers (about ${loops * 12} file reads) against ${w.renames} renames (${w.retries} refused and retried, ${w.fails} given up): ${JSON.stringify(miss)}`);
 
-  assert.ok(w.renames >= 20, `the writer made ${w.renames} renames in ${RUN_MS} ms: the test proved nothing`);
-  assert.ok(loops >= 100, `the readers made ${loops} loops: the test proved nothing`);
+  assert.equal(w.capped, false, `the writer hit the ${CAP_MS} ms cap with ${w.renames} of ${MIN_RENAMES} renames: the host is too slow for the test to prove anything`);
+  assert.ok(w.renames >= MIN_RENAMES, `the writer made ${w.renames} renames, want ${MIN_RENAMES}`);
+  assert.ok(loops >= MIN_LOOPS, `the readers made ${loops} loops, want ${MIN_LOOPS}`);
   assert.deepEqual(miss, { readEpochRecord: 0, readLease: 0, readCardClaim: 0, checkInheritedLease: 0, leaseProgressFile: 0 },
     `a reader answered null for a lease file that exists, in ${loops} loops against ${w.renames} renames`);
 });
