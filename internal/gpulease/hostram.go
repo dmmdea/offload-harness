@@ -789,9 +789,14 @@ func readSharedFile(path string) ([]byte, error) {
 		if !deniedOpenMayClear || !errors.Is(err, os.ErrPermission) || attempt >= removeAttempts {
 			return nil, err
 		}
+		readRetries.Add(1)
 		time.Sleep(removePause)
 	}
 }
+
+// readRetries counts the pauses readSharedFile has taken waiting out a refused open, since the process started: a test seam, not a
+// metric (readrace_linux_test.go asserts it stays 0 where no rename can cause a refusal; readrelease_test.go, that a missing file never adds to it).
+var readRetries atomic.Int64
 
 // deniedOpenMayClear says whether a permission error on the open is worth waiting out: sharedOpenMeetsDeletePending on the build, as a
 // variable so a test can run the wait off Windows and the refusal on it (readretry_test.go).
