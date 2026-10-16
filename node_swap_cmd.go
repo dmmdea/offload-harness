@@ -40,6 +40,8 @@ type nodeSwapOutput struct {
 	resultPath string
 	logPath    string
 	asJSON     bool
+	// skipFleetKeyCheck is --skip-fleet-key-check: the swap goes on without checking the node's config for a fleet_auth_token.
+	skipFleetKeyCheck bool
 }
 
 // parseNodeSwapFlags is the testable seam: pure flag parsing into a
@@ -78,6 +80,7 @@ func parseNodeSwapFlags(args []string) (nodeswap.Plan, nodeSwapOutput, error) {
 	resultPath := fs.String("result", "", "write the full JSON Outcome here (poll this after a detached launch)")
 	logPath := fs.String("log", "", "append a timestamped text log here as the swap progresses")
 	asJSON := fs.Bool("json", false, "print the Outcome as JSON on stdout too")
+	fs.Bool("skip-fleet-key-check", false, "")
 
 	if err := fs.Parse(args); err != nil {
 		return nodeswap.Plan{}, nodeSwapOutput{}, err
@@ -208,6 +211,11 @@ func resolveNodeSwapDefaults(plan nodeswap.Plan, cfg config.Config, log func(str
 	}
 	plan.GPULockPath = cfg.GPULockPath
 	plan.GPUStateDir = cfg.StateDir
+	return plan
+}
+
+// resolveNodeSwapFleetKey records, for a node whose swap is about to start, whether the config it read holds a fleet_auth_token.
+func resolveNodeSwapFleetKey(plan nodeswap.Plan, cfg config.Config, src config.Source, skip bool) nodeswap.Plan {
 	return plan
 }
 

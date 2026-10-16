@@ -131,6 +131,18 @@ type Plan struct {
 	// NoRollback is for tests exercising the failure path itself; production
 	// callers never set it.
 	NoRollback bool
+
+	// FleetKey is what the caller read of the config the node's fleet-serve reads; nil = not checked.
+	FleetKey *FleetKeyCheck
+}
+
+// FleetKeyCheck is whether the node's config holds a fleet_auth_token, and which config that was. The value itself is
+// never read out into the plan.
+type FleetKeyCheck struct {
+	// Config is the path of the config the caller read.
+	Config string
+	// Present is true when that config holds a non-empty fleet_auth_token.
+	Present bool
 }
 
 // Outcome is the full, JSON-serializable record of one run — written to the
