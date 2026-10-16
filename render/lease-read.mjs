@@ -10,9 +10,12 @@
 // lease falls through to meta.json, which a card lease never writes: the fence called a held lease not current and the render
 // aborted. The refusal lasts milliseconds, so the read waits it out.
 //
-//   - Only EPERM and EACCES are retried, DENIED_RETRIES times at DENIED_PAUSE_MS (about 100 ms in all: the bound
-//     internal/gpulease uses, removeAttempts x removePause). Anything else, a MISSING FILE above all, is read once and is null
-//     at once: a missing file is an answer ("no such lease"), so a released lease still reads absent without a wait.
+//   - Only EPERM and EACCES are retried, pausing DENIED_PAUSE_MS between reads until DENIED_BUDGET_MS have passed (about 100 ms:
+//     the bound internal/gpulease uses, removeAttempts x removePause). Anything else, a MISSING FILE above all, is read once and
+//     is null at once: a missing file is an answer ("no such lease"), so a released lease still reads absent without a wait.
+//   - The bound is a DEADLINE, not a count of pauses. Atomics.wait(5) sleeps one timer tick on Windows, measured 15.4 ms (1, 2, 5
+//     and 10 all come back in 15 ms), so 20 pauses of 5 ms would have been 308 ms. The deadline holds the wait to about 100 ms
+//     (seven pauses) whatever the tick.
 //   - Only where a rename can cause the refusal: Windows. Elsewhere rename(2) is atomic, nothing is delete-pending, and a
 //     permission error is a lasting refusal (a file the caller cannot read), which a wait only delays reporting. The Go side
 //     makes the same choice (sharedOpenMeetsDeletePending). `policy` carries it so a test can run the wait on any platform.
@@ -22,11 +25,9 @@
 // No npm dependencies.
 import { readFileSync } from "node:fs";
 
-/** Retries after the first read, and the pause between them: 20 x 5 ms, the Go side's removeAttempts x removePause. */
-export const DENIED_RETRIES = 20;
-export const DENIED_PAUSE_MS = 5;
-/** The bound as a time (not yet used: the wait below still counts pauses). */
+/** How long a refused open is waited out, and the pause asked for between reads: the Go side's removeAttempts x removePause (20 x 5 ms). */
 export const DENIED_BUDGET_MS = 100;
+export const DENIED_PAUSE_MS = 5;
 
 /** waitsOutDenied: is a permission refusal of an open worth waiting out here? Windows only (see above). */
 export const policy = { waitsOutDenied: process.platform === "win32" };
@@ -36,14 +37,17 @@ const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),
 
 /**
  * readSharedSync: the text of `path`, or null when it cannot be read. A permission refusal is waited out (Windows, above);
- * every other failure, a missing file included, is null at once. `read` and `sleep` are seams for the tests.
+ * every other failure, a missing file included, is null at once. `read`, `sleep` and `now` are seams for the tests.
  */
-export function readSharedSync(path, { read = (p) => readFileSync(p, "utf8"), sleep = sleepSync } = {}) {
-  for (let attempt = 0; ; attempt += 1) {
+export function readSharedSync(path, { read = (p) => readFileSync(p, "utf8"), sleep = sleepSync, now = () => performance.now() } = {}) {
+  let started = null;
+  for (;;) {
     try {
       return read(path);
     } catch (e) {
-      if (!policy.waitsOutDenied || !REFUSALS.has(e && e.code) || attempt >= DENIED_RETRIES) return null;
+      if (!policy.waitsOutDenied || !REFUSALS.has(e && e.code)) return null;
+      if (started === null) started = now();
+      if (now() - started >= DENIED_BUDGET_MS) return null;
       sleep(DENIED_PAUSE_MS);
     }
   }
