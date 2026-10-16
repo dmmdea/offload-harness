@@ -140,3 +140,117 @@ func TestAFileRefusedForGoodIsWaitedOutOnceNotOnEveryRead(t *testing.T) {
 		t.Errorf("%d reads of one refused file took %d pauses in all, want %d (one wait)", reads, got, removeAttempts)
 	}
 }
+
+// refusalSwitch makes the shared open fail with a permission error for the path while the switch is on, and counts every open.
+func refusalSwitch(t *testing.T, path string) (on *bool, opens *int) {
+	t.Helper()
+	on, opens = new(bool), new(int)
+	old := openSharedFile
+	openSharedFile = func(p string) (*os.File, error) {
+		if p == path {
+			*opens++
+			if *on {
+				return nil, &fs.PathError{Op: "open", Path: p, Err: os.ErrPermission}
+			}
+		}
+		return old(p)
+	}
+	t.Cleanup(func() { openSharedFile = old })
+	return on, opens
+}
+
+// TestAFileThatIsRepairedIsReadAtOnceAndWaitedOutAgainIfRefusedAgain: remembering a refusal must not hide the repair, and must not
+// outlive it. Every read of a remembered file still opens it once, so a repaired file is read on the next read, with no pause, and
+// the memory ends with that read: a refusal that begins afterwards gets the whole wait again.
+func TestAFileThatIsRepairedIsReadAtOnceAndWaitedOutAgainIfRefusedAgain(t *testing.T) {
+	waitOutDeniedOpens(t)
+	path := filepath.Join(t.TempDir(), "e.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	on, opens := refusalSwitch(t, path)
+	read := func() (string, int64, int) {
+		before, pauses := *opens, readRetries.Load()
+		b, err := readSharedFile(path)
+		if err != nil {
+			return "error", readRetries.Load() - pauses, *opens - before
+		}
+		return string(b), readRetries.Load() - pauses, *opens - before
+	}
+
+	*on = true
+	if got, pauses, n := read(); got != "error" || pauses != int64(removeAttempts) || n != removeAttempts+1 {
+		t.Fatalf("first read of a refused file = %q, %d pauses, %d opens; want an error, %d pauses, %d opens", got, pauses, n, removeAttempts, removeAttempts+1)
+	}
+	*on = false
+	if got, pauses, n := read(); got != "{}" || pauses != 0 || n != 1 {
+		t.Errorf("read after the repair = %q, %d pauses, %d opens; want the content, 0 pauses, 1 open", got, pauses, n)
+	}
+	*on = true
+	if got, pauses, n := read(); got != "error" || pauses != int64(removeAttempts) || n != removeAttempts+1 {
+		t.Errorf("a refusal that began after the repair = %q, %d pauses, %d opens; want an error after the whole wait: %d pauses, %d opens", got, pauses, n, removeAttempts, removeAttempts+1)
+	}
+}
+
+// TestAnotherFilesPassingRefusalIsStillWaitedOutAfterOneGaveUp: the memory is per file. One that outlasted its wait does not take the
+// protection from a heartbeat that is refused for the few milliseconds of a rename: that one still gets its pauses and its content.
+func TestAnotherFilesPassingRefusalIsStillWaitedOutAfterOneGaveUp(t *testing.T) {
+	waitOutDeniedOpens(t)
+	dir := t.TempDir()
+	lasting, passing := filepath.Join(dir, "hb.1"), filepath.Join(dir, "hb.2")
+	for _, p := range []string{lasting, passing} {
+		if err := os.WriteFile(p, []byte("424242"), 0o666); err != nil {
+			t.Fatal(err)
+		}
+	}
+	passingRefusals := 3
+	old := openSharedFile
+	openSharedFile = func(p string) (*os.File, error) {
+		switch {
+		case p == lasting:
+			return nil, &fs.PathError{Op: "open", Path: p, Err: os.ErrPermission}
+		case p == passing && passingRefusals > 0:
+			passingRefusals--
+			return nil, &fs.PathError{Op: "open", Path: p, Err: os.ErrPermission}
+		}
+		return old(p)
+	}
+	t.Cleanup(func() { openSharedFile = old })
+
+	if _, err := readSharedFile(lasting); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("the lasting file returned %v, want the permission error", err)
+	}
+	readRetries.Store(0)
+	b, err := readSharedFile(passing)
+	if err != nil || string(b) != "424242" {
+		t.Errorf("a file refused three times, after another gave up: %q, %v; want its content", b, err)
+	}
+	if got := readRetries.Load(); got != 3 {
+		t.Errorf("the passing refusal took %d pauses, want 3", got)
+	}
+}
+
+// TestARefusedFileIsWaitedOutAgainOnceTheMemoryRunsOut: the memory is short, so a fault that is still there later is paid for again,
+// once, and a refusal that starts again much later is not mistaken for the old one.
+func TestARefusedFileIsWaitedOutAgainOnceTheMemoryRunsOut(t *testing.T) {
+	waitOutDeniedOpens(t)
+	old := refusedMemory
+	refusedMemory = 40 * time.Millisecond
+	t.Cleanup(func() { refusedMemory = old })
+	path := filepath.Join(t.TempDir(), "hb.9")
+	if err := os.WriteFile(path, []byte("1"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	failingOpens(t, 1<<30, os.ErrPermission)
+
+	readRetries.Store(0)
+	_, _ = readSharedFile(path)
+	if got := readRetries.Load(); got != int64(removeAttempts) {
+		t.Fatalf("first read took %d pauses, want %d", got, removeAttempts)
+	}
+	time.Sleep(3 * refusedMemory)
+	_, _ = readSharedFile(path)
+	if got := readRetries.Load(); got != int64(2*removeAttempts) {
+		t.Errorf("a read after the memory ran out brought the pauses to %d, want %d (a whole wait again)", got, 2*removeAttempts)
+	}
+}

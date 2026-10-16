@@ -51,6 +51,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -773,8 +774,15 @@ var openSharedFile = OpenShared
 // bound the claim removal uses), and any other failure is returned at once. The shared open takes the sharing violation away, but not
 // the instant the rename has marked the old entry for deletion and the new one has not taken its name: the file is delete-pending, and
 // every open of the name fails with ERROR_ACCESS_DENIED until the rename ends, a few milliseconds. Measured on a loaded host, with the
-// shared open in, that was 5 failed reads in about 124,000 of a heartbeat that was renewed in a loop. A file that stays unreadable
-// (a real permission fault) costs one bounded wait and then the error, as before.
+// shared open in, that was 5 failed reads in about 124,000 of a heartbeat that was renewed in a loop.
+//
+// A file that is still refused when the wait ends is not a rename in flight but a lasting fault (a deny-read ACL, a foreign delete
+// whose handle never closes), and it is waited out ONCE: refusedFiles remembers it for refusedMemory, and a read of it in that time
+// opens it once, so a repair is seen at once, and takes no pause if it is still refused. Without that the cost is per read, not per
+// file: a grant reads each record five times and each heartbeat seven inside one hold of the epoch lock (the sweep, the scan for the
+// unreadable and the verify each go over them), so one refused record held the lock for about 500 ms, and eight refused files for 4.4
+// s, longer than the 2 s a second acquirer's spin allows. A refusal that passes inside the wait (the rename case) is never
+// remembered, so it keeps the full wait.
 //
 // Off Windows there is no such instant, so a permission error is returned at once (sharedOpenMeetsDeletePending, beside OpenShared).
 // It is a lasting refusal there, a record written with a mode the reader cannot read, and the wait cost about 108 ms per unreadable
@@ -783,10 +791,18 @@ func readSharedFile(path string) ([]byte, error) {
 	for attempt := 0; ; attempt++ {
 		f, err := openSharedFile(path)
 		if err == nil {
+			forgetRefusedFile(path)
 			defer f.Close()
 			return io.ReadAll(f)
 		}
-		if !deniedOpenMayClear || !errors.Is(err, os.ErrPermission) || attempt >= removeAttempts {
+		if !deniedOpenMayClear || !errors.Is(err, os.ErrPermission) {
+			return nil, err
+		}
+		if attempt == 0 && refusedFileRemembered(path) {
+			return nil, err // it outlasted a whole wait a moment ago: this open was the look at whether it has been repaired
+		}
+		if attempt >= removeAttempts {
+			rememberRefusedFile(path)
 			return nil, err
 		}
 		readRetries.Add(1)
@@ -801,6 +817,58 @@ var readRetries atomic.Int64
 // deniedOpenMayClear says whether a permission error on the open is worth waiting out: sharedOpenMeetsDeletePending on the build, as a
 // variable so a test can run the wait off Windows and the refusal on it (readretry_test.go).
 var deniedOpenMayClear = sharedOpenMeetsDeletePending
+
+// refusedMemory is how long a file that outlasted the whole wait is read without a new wait. Long enough to cover the grants and
+// the polls of a burst of acquirers that meet one lasting fault, short enough that a refusal which starts again much later is a
+// new thing to wait for.
+var refusedMemory = 5 * time.Second
+
+// refusedFiles holds the files readSharedFile gave up waiting for, with the time its memory of each ends. refusedCount mirrors the
+// size of the map, so the common read (nothing remembered) takes no lock.
+var (
+	refusedFilesMu sync.Mutex
+	refusedFiles   = map[string]time.Time{}
+	refusedCount   atomic.Int64
+)
+
+func rememberRefusedFile(path string) {
+	now := time.Now()
+	refusedFilesMu.Lock()
+	defer refusedFilesMu.Unlock()
+	for p, until := range refusedFiles { // drop what has run out, so files that are never read again do not pile up
+		if !now.Before(until) {
+			delete(refusedFiles, p)
+		}
+	}
+	refusedFiles[path] = now.Add(refusedMemory)
+	refusedCount.Store(int64(len(refusedFiles)))
+}
+
+func refusedFileRemembered(path string) bool {
+	if refusedCount.Load() == 0 {
+		return false
+	}
+	refusedFilesMu.Lock()
+	defer refusedFilesMu.Unlock()
+	until, ok := refusedFiles[path]
+	if ok && !time.Now().Before(until) {
+		delete(refusedFiles, path)
+		refusedCount.Store(int64(len(refusedFiles)))
+		return false
+	}
+	return ok
+}
+
+// forgetRefusedFile is called on every open that succeeds: a file that can be read again is no longer a lasting fault.
+func forgetRefusedFile(path string) {
+	if refusedCount.Load() == 0 {
+		return
+	}
+	refusedFilesMu.Lock()
+	defer refusedFilesMu.Unlock()
+	delete(refusedFiles, path)
+	refusedCount.Store(int64(len(refusedFiles)))
+}
 
 // UseReadFault makes the READ of a lease record fail with what fn returns for the path (nil from fn lets the real read run), until the
 // returned function is called: the way a test provokes a record that EXISTS and can be removed but cannot be read, as one is while
