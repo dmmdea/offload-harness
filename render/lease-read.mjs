@@ -25,6 +25,8 @@ import { readFileSync } from "node:fs";
 /** Retries after the first read, and the pause between them: 20 x 5 ms, the Go side's removeAttempts x removePause. */
 export const DENIED_RETRIES = 20;
 export const DENIED_PAUSE_MS = 5;
+/** The bound as a time (not yet used: the wait below still counts pauses). */
+export const DENIED_BUDGET_MS = 100;
 
 /** waitsOutDenied: is a permission refusal of an open worth waiting out here? Windows only (see above). */
 export const policy = { waitsOutDenied: process.platform === "win32" };

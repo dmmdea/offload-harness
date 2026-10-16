@@ -19,7 +19,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { scratchDir } from "./test-scratch.mjs";
 import {
-  DENIED_PAUSE_MS, DENIED_RETRIES, policy, readSharedJson, readSharedSync,
+  DENIED_BUDGET_MS, DENIED_PAUSE_MS, policy, readSharedJson, readSharedSync,
 } from "./lease-read.mjs";
 import {
   checkInheritedLease, readCardClaim, readEpochRecord, readLease,
@@ -29,9 +29,10 @@ import { leaseProgressFile } from "./lease-progress.mjs";
 const fsError = (code, path = "x") => Object.assign(new Error(`${code}: open '${path}'`), { code, syscall: "open", path });
 
 // A scripted read: each call takes the next outcome of `plan` (the last one repeats). An outcome that is a string is the
-// file's content; an `{ code }` is an error with that code. Counts the reads and the pauses asked for.
-function scripted(plan) {
-  const seen = { reads: 0, pauses: [] };
+// file's content; an `{ code }` is an error with that code. Counts the reads and the pauses asked for, on a fake clock that a
+// pause advances by `tick` ms (the pause asked for by default; Windows sleeps a whole timer tick, 15.4 ms measured, whatever is asked).
+function scripted(plan, { tick = null } = {}) {
+  const seen = { reads: 0, pauses: [], clock: 0 };
   return {
     seen,
     read: (path) => {
@@ -40,7 +41,8 @@ function scripted(plan) {
       if (typeof step === "string") return step;
       throw fsError(step.code, path);
     },
-    sleep: (ms) => { seen.pauses.push(ms); },
+    sleep: (ms) => { seen.pauses.push(ms); seen.clock += tick === null ? ms : tick; },
+    now: () => seen.clock,
   };
 }
 
@@ -55,7 +57,7 @@ function withWait(t, value = true) {
 test("a file that is not there is read once and reads as absent, with no pause (a released lease stays absent at once)", (t) => {
   withWait(t);
   const s = scripted([{ code: "ENOENT" }]);
-  assert.equal(readSharedSync("gone.json", { read: s.read, sleep: s.sleep }), null);
+  assert.equal(readSharedSync("gone.json", { read: s.read, sleep: s.sleep, now: s.now }), null);
   assert.equal(s.seen.reads, 1, "a missing file is an answer, not a refusal to wait out");
   assert.deepEqual(s.seen.pauses, []);
 });
@@ -64,7 +66,7 @@ test("an error that is not a permission refusal is not retried", (t) => {
   withWait(t);
   for (const code of ["EBUSY", "EISDIR", "EIO", "EMFILE", "ENOTDIR", "ELOOP"]) {
     const s = scripted([{ code }]);
-    assert.equal(readSharedSync("x.json", { read: s.read, sleep: s.sleep }), null, code);
+    assert.equal(readSharedSync("x.json", { read: s.read, sleep: s.sleep, now: s.now }), null, code);
     assert.equal(s.seen.reads, 1, `${code} was read ${s.seen.reads} times, want 1`);
     assert.deepEqual(s.seen.pauses, [], code);
   }
@@ -73,7 +75,7 @@ test("an error that is not a permission refusal is not retried", (t) => {
 test("refused opens are waited out: the first N reads fail with EPERM, then the file's content comes back", (t) => {
   withWait(t);
   const s = scripted([{ code: "EPERM" }, { code: "EPERM" }, { code: "EPERM" }, "{\"epoch\":7}"]);
-  assert.equal(readSharedSync("e/7.json", { read: s.read, sleep: s.sleep }), "{\"epoch\":7}");
+  assert.equal(readSharedSync("e/7.json", { read: s.read, sleep: s.sleep, now: s.now }), "{\"epoch\":7}");
   assert.equal(s.seen.reads, 4, "three refused, one through");
   assert.deepEqual(s.seen.pauses, [DENIED_PAUSE_MS, DENIED_PAUSE_MS, DENIED_PAUSE_MS], "one pause between reads");
 });
@@ -81,34 +83,44 @@ test("refused opens are waited out: the first N reads fail with EPERM, then the 
 test("EACCES is waited out like EPERM", (t) => {
   withWait(t);
   const s = scripted([{ code: "EACCES" }, { code: "EPERM" }, "ok"]);
-  assert.equal(readSharedSync("meta.json", { read: s.read, sleep: s.sleep }), "ok");
+  assert.equal(readSharedSync("meta.json", { read: s.read, sleep: s.sleep, now: s.now }), "ok");
   assert.equal(s.seen.reads, 3);
 });
 
 test("a refusal that never ends is given up on after the bound, with the pauses that make up about 100 ms, and does not hang", (t) => {
   withWait(t);
   const s = scripted([{ code: "EPERM" }]);
-  assert.equal(readSharedSync("meta.json", { read: s.read, sleep: s.sleep }), null);
-  assert.equal(s.seen.reads, 1 + DENIED_RETRIES, `${s.seen.reads} reads, want the first and ${DENIED_RETRIES} retries`);
-  assert.equal(s.seen.pauses.length, DENIED_RETRIES);
-  const total = s.seen.pauses.reduce((a, b) => a + b, 0);
-  assert.ok(total >= 80 && total <= 150, `the pauses add up to ${total} ms, want about 100`);
+  assert.equal(readSharedSync("meta.json", { read: s.read, sleep: s.sleep, now: s.now }), null);
+  const pauses = DENIED_BUDGET_MS / DENIED_PAUSE_MS;
+  assert.equal(s.seen.pauses.length, pauses, `${s.seen.pauses.length} pauses, want ${pauses}`);
+  assert.equal(s.seen.reads, 1 + pauses, `${s.seen.reads} reads, want the first and ${pauses} retries`);
+  assert.equal(s.seen.clock, DENIED_BUDGET_MS, "the pauses add up to the bound");
+});
+
+test("the bound is a deadline, not a count of pauses: a timer that sleeps a whole 15.4 ms tick still gives up after about 100 ms", (t) => {
+  withWait(t);
+  // Atomics.wait(5) comes back after one timer tick on Windows (measured 15.4 ms for 1, 2, 5 and 10 alike): 20 pauses would be 308 ms.
+  const s = scripted([{ code: "EPERM" }], { tick: 15.4 });
+  assert.equal(readSharedSync("meta.json", { read: s.read, sleep: s.sleep, now: s.now }), null);
+  assert.equal(s.seen.pauses.length, 7, `${s.seen.pauses.length} pauses of 15.4 ms, want 7 (the first that reaches 100 ms ends it)`);
+  assert.ok(s.seen.clock >= DENIED_BUDGET_MS && s.seen.clock < DENIED_BUDGET_MS + 16, `gave up at ${s.seen.clock.toFixed(1)} ms, want the first tick past ${DENIED_BUDGET_MS}`);
 });
 
 test("the bound in real time: a permanent refusal costs about 100 ms and then reads as absent", (t) => {
   withWait(t);
   const s = scripted([{ code: "EPERM" }]);
+  const realSleep = (ms) => { s.seen.pauses.push(ms); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
   const t0 = performance.now();
-  assert.equal(readSharedSync("meta.json", { read: s.read }), null, "the real pause is used when none is injected");
+  assert.equal(readSharedSync("meta.json", { read: s.read, sleep: realSleep }), null, "the real clock is used when none is injected");
   const took = performance.now() - t0;
-  assert.ok(took >= 80, `gave up after ${took.toFixed(0)} ms, want at least the pauses (about 100 ms)`);
-  assert.ok(took < 5000, `gave up after ${took.toFixed(0)} ms, want a bounded wait and not a hang`);
+  assert.ok(took >= DENIED_BUDGET_MS - 5, `gave up after ${took.toFixed(0)} ms, want the bound (about ${DENIED_BUDGET_MS} ms)`);
+  assert.ok(took < 250, `gave up after ${took.toFixed(0)} ms (${s.seen.pauses.length} pauses), want about ${DENIED_BUDGET_MS} ms and not the 308 ms that 20 timer ticks cost`);
 });
 
 test("off Windows a permission refusal is returned at once: nothing there is delete-pending, so a wait only delays the answer", (t) => {
   withWait(t, false);
   const s = scripted([{ code: "EACCES" }]);
-  assert.equal(readSharedSync("meta.json", { read: s.read, sleep: s.sleep }), null);
+  assert.equal(readSharedSync("meta.json", { read: s.read, sleep: s.sleep, now: s.now }), null);
   assert.equal(s.seen.reads, 1);
   assert.deepEqual(s.seen.pauses, []);
 });
@@ -117,8 +129,8 @@ test("the default wait is on exactly where a rename can cause a refusal: Windows
   assert.equal(policy.waitsOutDenied, process.platform === "win32");
 });
 
-test("the wait has the Go side's bound: DENIED_RETRIES x DENIED_PAUSE_MS is 100 ms (internal/gpulease removeAttempts x removePause)", () => {
-  assert.equal(DENIED_RETRIES, 20);
+test("the wait has the Go side's bound: DENIED_BUDGET_MS is 100 ms at DENIED_PAUSE_MS 5 (internal/gpulease removeAttempts x removePause)", () => {
+  assert.equal(DENIED_BUDGET_MS, 100);
   assert.equal(DENIED_PAUSE_MS, 5);
 });
 
