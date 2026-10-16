@@ -235,6 +235,10 @@ const LISTED = {
   models: [
     { path: "models/checkpoints/ok.safetensors", source_url: "", sha256: null, trust: "tofu" },
     { path: "models/vae/sub/v.safetensors", source_url: "", sha256: null, trust: "tofu" },
+    // Written the way a hand-made or another machine's manifest can write them: mixed case, and backslashes under a mixed-case folder
+    // (`models\checkpoints\Sub\Mixed.safetensors`; the backslashes are doubled in the source).
+    { path: "models/loras/Qwen-Image-Lightning-8steps-V1.0.safetensors", source_url: "", sha256: null, trust: "tofu" },
+    { path: "models\\checkpoints\\Sub\\Mixed.safetensors", source_url: "", sha256: null, trust: "tofu" },
   ],
 };
 const loaderGraph = (file) => ({
@@ -276,4 +280,32 @@ test("a graph run is not checked against its manifest: only a template run compa
   const r = await runGraphFlow({ ...ARGS, graph: g, manifest: LISTED }, deps);
   assert.equal(r.deferred, undefined);
   assert.deepEqual(posted, g);
+});
+
+// The manifest side of the match is normalised too: a manifest entry that is not lower case or not written with forward slashes still lists
+// the file a graph names exactly. Each test fails if that step is dropped.
+
+test("template run: a manifest entry in mixed case lists the model file the converted graph names exactly as the entry spells it", async () => {
+  const file = "Qwen-Image-Lightning-8steps-V1.0.safetensors";
+  assert.equal(LISTED.models[2].path, `models/loras/${file}`);
+  let posted = null;
+  const deps = baseDeps({
+    convert: async () => ({ ok: true, graph: loaderGraph(file) }),
+    postGraph: async (g) => { posted = g; return { prompt_id: "p1" }; },
+  });
+  const r = await runGraphFlow({ ...TEMPLATE_ARGS, manifest: LISTED }, deps);
+  assert.equal(r.deferred, undefined, `${file} is listed by its mixed-case entry`);
+  assert.equal(posted["1"].inputs.ckpt_name, file);
+});
+
+test("template run: a manifest entry written with backslashes lists the model file the converted graph names exactly as it sits under the class directory", async () => {
+  assert.equal(LISTED.models[3].path.split("\\").length, 4, "the fixture holds three real backslashes, not escapes that dropped out");
+  let posted = null;
+  const deps = baseDeps({
+    convert: async () => ({ ok: true, graph: loaderGraph("Sub/Mixed.safetensors") }),
+    postGraph: async (g) => { posted = g; return { prompt_id: "p1" }; },
+  });
+  const r = await runGraphFlow({ ...TEMPLATE_ARGS, manifest: LISTED }, deps);
+  assert.equal(r.deferred, undefined, "Sub/Mixed.safetensors is listed by the backslash entry");
+  assert.equal(posted["1"].inputs.ckpt_name, "Sub/Mixed.safetensors");
 });

@@ -167,7 +167,12 @@ test("applyOverrides: the values a template is made to be tuned by still go thro
 });
 
 // unlistedModels: the model files a converted graph loads that a manifest does not name (the runner's check before it posts a template run).
-const LISTED_MODELS = [{ path: "models/checkpoints/ok.safetensors" }, { path: "models/diffusion_models/sub/u.gguf" }];
+// The last two entries are written the way a hand-made or another machine's manifest can write them: a name in mixed case, and a path with
+// backslashes under a mixed-case folder (`models\checkpoints\Sub\Mixed.safetensors`; the backslashes are doubled in the source).
+const LISTED_MODELS = [
+  { path: "models/checkpoints/ok.safetensors" }, { path: "models/diffusion_models/sub/u.gguf" },
+  { path: "models/loras/Qwen-Image-Lightning-8steps-V1.0.safetensors" }, { path: "models\\checkpoints\\Sub\\Mixed.safetensors" },
+];
 
 test("unlistedModels: a model file the list does not name is reported once, in graph order; a link, a number and a non-model string are not files", () => {
   const graph = {
@@ -269,4 +274,22 @@ test("unlistedModels: every embedding a graph names is reported once, in graph o
 
 test("unlistedModels: text that mentions embeddings without the `embedding:` identifier names no file", () => {
   assert.deepEqual(TR.unlistedModels(embeddingGraph("an embedding of a cat, embeddings, embedding"), undefined), []);
+});
+
+// The manifest side of the match is normalised too (lower case, forward slashes, the `models/<class>/` prefix off): a manifest entry that is
+// not lower case or not written with forward slashes still lists the file a graph names exactly. These two fail if that step is dropped.
+
+test("unlistedModels: a manifest entry in mixed case lists the file a graph names exactly as the entry spells it", () => {
+  assert.equal(LISTED_MODELS[2].path, "models/loras/Qwen-Image-Lightning-8steps-V1.0.safetensors");
+  const graph = { "1": { class_type: "LoraLoaderModelOnly", inputs: { lora_name: "Qwen-Image-Lightning-8steps-V1.0.safetensors" } } };
+  assert.deepEqual(TR.unlistedModels(graph, LISTED_MODELS), []);
+  assert.deepEqual(TR.unlistedModels(graph, LISTED_MODELS.slice(0, 2)), ["Qwen-Image-Lightning-8steps-V1.0.safetensors"], "and it is the entry that lists it");
+});
+
+test("unlistedModels: a manifest entry written with backslashes lists the file a graph names exactly as it sits under the class directory", () => {
+  assert.equal(LISTED_MODELS[3].path.split("\\").length, 4, "the fixture holds three real backslashes, not escapes that dropped out");
+  const graph = { "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "Sub/Mixed.safetensors" } } };
+  assert.deepEqual(TR.unlistedModels(graph, LISTED_MODELS), []);
+  assert.deepEqual(TR.unlistedModels({ "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "Sub\\Mixed.safetensors" } } }, LISTED_MODELS), [], "and so does the same name written with a backslash");
+  assert.deepEqual(TR.unlistedModels(graph, LISTED_MODELS.slice(0, 3)), ["Sub/Mixed.safetensors"], "and it is the entry that lists it");
 });
