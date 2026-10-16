@@ -435,7 +435,7 @@ concurrency test rather than by reading:
     permission error is retried `removeAttempts` times at `removePause` (about 100 ms, the claim
     removal's bound) and any other failure is returned at once. Measured on a loaded host with a
     heartbeat renewed in a loop: 5 failed reads in about 124,000 without the wait, none in about
-    108,000 with it. A file that stays unreadable costs one bounded wait and then the error.
+    108,000 with it. A file that stays unreadable is waited out once, not once per read (below).
   - **The wait is Windows only.** Off Windows nothing is delete-pending (`rename(2)` is atomic and an
     open descriptor never holds one up), so a permission error on a record is a lasting refusal and
     `readSharedFile` returns it at once. The choice is the constant `sharedOpenMeetsDeletePending`
@@ -444,6 +444,7 @@ concurrency test rather than by reading:
     such record, and an acquirer, which reads the records under the epoch lock, 4.2 s with eight,
     enough for a second acquirer to give up on the lock's 2 s. Those figures are from a scratch
     measurement in a Linux environment, recorded in the change fragment, not from a test in the tree.
+    On Windows the same lasting refusal is waited out once per file (the bullet after next).
   - **The Node readers wait the same refusal out** (`render/lease-read.mjs`). `readLease`, `readEpochRecord` and
     `readCardClaim` (`render/gpu-lock.mjs`; the three behind `checkInheritedLease`, the fence a render runs before an
     irreversible action) and the lease-progress reader read these files through `readSharedSync` / `readSharedJson`.
@@ -457,15 +458,32 @@ concurrency test rather than by reading:
     `readFileSync` missed nothing in about a million reads against 55,000 renames, so the helper guards an instant that
     measurement could not provoke. `render/lease-read.test.mjs` (the helper and the five readers, with the refusal
     injected) and `render/lease-read-stress.test.mjs` (a rename-over writer in another process, no miss allowed) pin it.
-  - **A file that is not there is never waited on, on any platform, and no read under the epoch lock multiplies a
-    wait.** `readSharedFile` retries a permission error only; a missing file is one open and the error. After a release,
+  - **A file that is not there is never waited on, on any platform, and no read of one under the epoch lock
+    multiplies a wait.** `readSharedFile` retries a permission error only; a missing file is one open and the error. After a release,
     `Leases()` opens `meta.json` once, `EpochIsCurrent` opens `e/<epoch>.json` and `meta.json` once each, and the
     heartbeat readers open `hb.<epoch>` once, with no pause
     (`TestAReleasedLeaseReadsAbsentAtOnceAndNoReadWaitsForIt`); a grant whose sweep finds the three records it reads deleted
     under the lock opens each once and pauses never (`TestAMissingOrDeletedRecordCostsOneOpenAndNoWaitUnderTheEpochLock`).
-    The one read that does wait under the lock is of a file that exists and is refused: the heartbeat of a live lease at
-    the instant `Renew` swaps it (`Renew` does not take the epoch lock). That is one bounded wait, and it is what keeps
-    the sweep from judging a live lease stale. `readRetries` counts the pauses, as a test seam.
+    The only reads that wait under the lock are of a file that exists and is refused. For the instant `Renew` swaps a
+    live lease's heartbeat (`Renew` does not take the epoch lock) that is one wait that clears, and it is what keeps the
+    sweep from judging a live lease stale. `readRetries` counts the pauses, as a test seam.
+  - **A file refused for good is waited out once, not once per read.** A refusal still there when the wait ends is a
+    lasting fault (a deny-read ACL on a lease file, a foreign delete whose handle never closes), not a rename in flight.
+    A grant reads each record five times and each heartbeat seven inside one hold of the epoch lock (the sweep, the scan
+    for the unreadable and the verify each go over them), so the wait paid per read held the lock for about 500 ms per
+    refused record. `readSharedFile` therefore remembers a file that outlasted its wait for `refusedMemory` (5 s): a read
+    of it in that time opens it once, so a repair is read at once, and takes no pause if it is still refused; the first
+    open that succeeds forgets it. The memory is per file, and a refusal that clears inside the wait is never remembered,
+    so the heartbeat of a live lease keeps its whole wait. Pauses for a grant of a free card with three leases held,
+    the refusal injected at the open seam: one refused record 100 before and 20 after, one refused heartbeat 140 and 20,
+    six refused files 360 and 120 (654 ms). With real deny-read ACLs on a scratch root and two acquirers 30 ms apart: one
+    record 541 ms and 958 ms before, 113 ms and 111 ms after; six files 1.97 s and 3.57 s before, 648 ms and 624 ms
+    after. What remains is one wait (about 110 ms) for each refused file, so a second acquirer's 2 s spin is reached
+    at about eighteen files refused at once. `TestALastingRefusalOfOneRecordIsWaitedOutOnceByAGrant`,
+    `TestALastingRefusalOfOneHeartbeatIsWaitedOutOnceByAGrant`,
+    `TestEveryRecordAndHeartbeatThatIsLastingRefusedIsWaitedOutOnceByAGrant` and
+    `TestAFileRefusedForGoodIsWaitedOutOnceNotOnEveryRead` pin the counts; three more pin that a repair is seen at once,
+    that the memory is per file, and that it runs out.
   - **Linux.** Nothing is delete-pending, so no read waits and none is missed.
     `TestOnLinuxConcurrentRenameOverOfARecordAndItsHeartbeatIsNeverMissedAndNeverWaitedFor` rewrites a held lease's record
     (`Restamp`) and heartbeat (`Renew`) in loops while `Leases()`, `EpochIsCurrent` and the heartbeat read poll: 50 runs

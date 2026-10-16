@@ -43,7 +43,7 @@
 - **A shared open still meets one refusal: delete-pending.** For the instant a rename has marked the old entry for deletion and the new one has not taken
   its name, an open of the name fails with `ERROR_ACCESS_DENIED`, however it shares. This is the stray miss the first round could not explain (3 allowed per
   run in `readrace_test.go`). On Windows `readSharedFile` retries a permission error `removeAttempts` times at `removePause` (the claim removal's bound,
-  about 100 ms) and returns every other failure at once; a file that stays unreadable costs one bounded wait and then the error as before.
+  about 100 ms) and returns every other failure at once; a file that stays unreadable is waited out once, not once per read (the last bullet of this group).
   - **Windows only.** The first form of the wait ran on every platform, and a review measured what that cost where the instant does not exist. Off Windows
     `OpenShared` is `os.Open`, POSIX has no delete-pending state (`rename(2)` is atomic and an open descriptor never holds one up), so a permission error
     there is a lasting refusal (a record written with a mode the reader cannot read) and the wait only delayed reporting it. Measured in a Linux
@@ -162,10 +162,34 @@
     ask for the one live lease's heartbeat: two opens, each answered at once).
   - Mutant (`readSharedFile` also retrying a missing file, through a build overlay): all three red. `Leases() opened ...meta.json 21 times, want at most 1`, `Leases() waited 20 times for a file that is
     not there, want 0`, `the deleted record 1.json was opened 21 times under the lock, want exactly 1`; the six asks about the released lease took 760 ms and the grant 1.55 s with 280 pauses.
-  - A path that does pay under the lock is a file that exists and is refused (a delete-pending heartbeat of a live lease under a sweep): one bounded wait per such read. It is the wait that keeps the sweep
+  - The only reads that wait under the lock are of a file that exists and is refused. For the instant `Renew` swaps a live lease's heartbeat that is one wait that clears, and it is what keeps the sweep
     from calling a live lease stale, so it stays under the lock. Nothing that is missing or deleted pays it, which was the cost to rule out: it would have grown by about 100 ms per released lease.
     A released record held open by a foreign handle that shares delete was measured too: the name was gone at once on this Windows build, so `Leases()` answered absent in 0.5 ms with 0 pauses and
     the grant of another card took 4.9 ms (a scratch test, not committed). `gpu status` goes through `Leases()` and `InspectDir`, which these tests cover in the package.
+  - A file that is refused and STAYS refused did multiply the wait under the lock, and a review found it: the first form of this bullet called it one bounded wait, and it was one per read. That is
+    the next bullet.
+- **A file refused for good is waited out once, not once per read.** A review of the release lane's checks found that a lasting refusal (a deny-read ACL on a lease file, a foreign delete whose handle
+  never closes) paid the whole wait on every read of the file, and a grant reads each record five times and each heartbeat seven inside one hold of the epoch lock (the sweep, the scan for the
+  unreadable and the verify each go over them).
+  - **Red, then fix** (`readrefused_test.go`; the refusal is the open seam's, permanent for chosen paths; three leases held and renewed in a scratch root, a fourth card asked for; Windows, the wait on
+    as in production). Before: one refused record, `the grant took 100 pauses for 1 refused file(s), want at most 20` (545 ms, the record opened 105 times, 84 of them under the lock); one refused
+    heartbeat 140 pauses (769 ms); six refused files 360 pauses (1.96 s); and five reads of one refused file `took 100 pauses in all, want 20 (one wait)`, reads 2 to 5 each `made 21 opens, want 1`.
+    After: 20, 20 and 120 pauses (117 ms, 120 ms and 654 ms), and 20 for the five reads.
+  - **The fix** (`internal/gpulease/hostram.go`). A file still refused when the wait ends is remembered for `refusedMemory` (5 s). A read of it in that time opens it once, so a repair is read at once, and takes
+    no pause if it is still refused; the first open that succeeds forgets it. The memory is per file, and a refusal that clears inside the wait is never remembered, so a heartbeat refused for the
+    milliseconds of a rename keeps its whole wait and the sweep still cannot call a live lease stale because of it. Where the wait is off (not Windows) nothing is ever remembered. A read that finds nothing
+    remembered takes no lock.
+  - **Tests.** The red tests above, and three guards: a repaired file is read at once and a refusal that begins after the repair gets the whole wait again; another file's passing refusal (three refused
+    opens) is still waited out and read after one file gave up; a file is waited out again once the memory runs out (shortened to 40 ms for the test). Mutants, one at a time, each caught: no memory
+    (the 4 count tests red), the memory not forgotten by a good read (the repair test), the memory not per file (6 red), a memory that never runs out (the expiry test). The same tests pass in a
+    cross-compiled test binary on Linux (WSL2, unprivileged user, memory-backed temp dir), beside the Linux pin.
+  - **Real faults, not injected** (a scratch test run through a build overlay, not committed; Windows; `icacls` deny-read on files of a scratch lease root; two acquirers, the second 30 ms after the first).
+    Before the fix (the overlay putting the previous `hostram.go` back): one refused record, first acquirer 541 ms and second 958 ms, 200 pauses, `Leases()` 110 ms with the file still denied; three
+    records and three heartbeats refused, 1.97 s and 3.57 s, 720 pauses, `Leases()` 326 ms. After: 113 ms and 111 ms, 40 pauses, `Leases()` 0.5 ms; and 648 ms and 624 ms, 180 pauses, `Leases()` 0.6 ms.
+    (The pauses are two waits, not one, because the second acquirer reads the file while the first is still in its wait: nothing is remembered until a wait ends.)
+  - **What it leaves.** Each refused file still costs one wait (about 110 ms) the first time it is read in a window, wherever the read is, under the lock included. A second acquirer's 2 s spin is reached
+    when about eighteen files are refused at once, against four before. A refusal that begins again within the 5 s, with no successful read of the file in between, is read without a wait; the
+    refusal that began it had just outlasted a whole wait, and the next read's own open still looks.
 - **The Linux pin.** `TestOnLinuxConcurrentRenameOverOfARecordAndItsHeartbeatIsNeverMissedAndNeverWaitedFor` (`readrace_linux_test.go`, Linux only): `Restamp` rewrites the held lease's record and
   `Renew` its heartbeat, 3,000 each, concurrently, while two goroutines of each of `Leases()`, `EpochIsCurrent` and a heartbeat read poll. It asserts 0 misses, 0 refused opens and
   `readRetries` (a counter of the pauses `readSharedFile` takes, added as the seam) at 0. The test binary was built with `GOOS=linux go test -c` and run in a Linux environment under WSL2 as an
@@ -173,6 +197,9 @@
   1,246,093 opens, 0 misses, 0 refused, 0 pauses. It has no red on the code as it is, because `rename(2)` is atomic; mutants: the heartbeat rewritten in place (truncate, then write) failed 3 of 3 with
   `the heartbeat could not be read on 265 of 3290 reads` (and 300 of 3330, 277 of 3255); a pause counted on every read failed with `readSharedFile paused 23845 times on Linux, want 0`.
 - **Not verified here.**
+  - The 5 s memory of a refused file is a choice (long enough for the polls of a burst of acquirers, short enough that a new fault is waited on), not a measured figure, and the arithmetic of eighteen files
+    is from the 110 ms a wait costs here. The real-ACL before and after runs are one host, a scratch test not committed, and they refuse a file for good; a foreign delete whose handle lingers was not
+    reproduced (the harness's own deletes do not make one).
   - Node: the retry was never exercised by a natural refusal. Plain `readFileSync` missed nothing in about a million reads, so that Node can meet `EPERM` from a rename rests on the delete-pending probe and not
     on a miss, and the wait is shown by the injected refusal and a file held delete-pending, not by a natural rename-over. The 15.4 ms timer tick is one host's; a host where another process has raised the
     timer resolution ticks faster, and the deadline holds either way.
