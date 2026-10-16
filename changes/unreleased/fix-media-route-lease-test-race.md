@@ -26,8 +26,9 @@
   unchanged, so the test still fails on a lease that reads as absent. `mediaadmit_lease_routes_test.go` is unchanged.
 - **What was tried first and dropped.** A bounded retry of the failed plain read. Under saturating load the sharing violation lasted a median 11 to 22 ms,
   a p90 of 85 to 168 ms and up to 1.4 s, and 14 to 22 percent of the failures outlasted an 80 ms bound, so a bound short enough for a status call still
-  left misses. The open is the cause, so that retry and its test were removed. (A different, much shorter retry is back for the delete-pending refusal
-  below.)
+  left misses. The open is the cause, so that retry and its test were removed. A retry is back below, and it is not that one: that retry bounded a
+  sharing violation that happened on every rename and lasted up to 1.4 s, and the shared open removes it. This one bounds a delete-pending instant of a few
+  milliseconds that no share mode avoids, and it retries a permission error only.
 - **The heartbeat had the same defect, and it is a double-booking, not a missed status read.** A review of the fix found it.
   - `hb.<epoch>` is rewritten by `Renew` with the same rename over the live name. `heartbeatAt` (the reader behind `Leases()`, `Inspect` and the acquirer's
     sweep), `lastHeartbeat` and `keeperSignOfLife` read it with `os.ReadFile`. A read that lost to the rename fell back to the stamp written at acquisition.
@@ -43,6 +44,10 @@
   its name, an open of the name fails with `ERROR_ACCESS_DENIED`, however it shares. This is the stray miss the first round could not explain (3 allowed per
   run in `readrace_test.go`). `readSharedFile` retries a permission error `removeAttempts` times at `removePause` (the claim removal's bound, about 100 ms)
   and returns every other failure at once; a file that stays unreadable costs one bounded wait and then the error as before.
+  - A behaviour change to note: `readRecordFile` now inherits that wait for a lease record that fails with a permission error, on every platform, Linux
+    included (where `OpenShared` is `os.Open`). It is bounded to about 100 ms per read and applies only to a permission error; the fault seam
+    (`UseReadFault`) sits in front of the wait, so the tests that simulate an unreadable record are not slowed.
+  - `lastHeartbeat` has no caller outside a test; it reads through `readSharedFile` too, so the three readers of `hb.<epoch>` stay alike.
 - **Proved** (a 36-thread Windows host; 30 busy-loop node processes started for each run and killed by pid afterwards; scratch paths shown as `<scratch>`).
   - Red under load, the test unfixed: `go test -c -o <scratch>/pipeline.test.exe ./internal/pipeline/`, then 4 concurrent copies of
     `<scratch>/pipeline.test.exe -test.run '^TestEveryMediaRouteLeasesForItsOwnTimeoutAndIsKilledThere$' -test.count=2 -test.cpu 1,2,4 -test.v`
@@ -92,7 +97,8 @@
     loop in a review. It was not seen with a real `gpu reserve` command that outran its window, with a waiter queued, on a real card. The chance in
     production per renewal (every 15 s) with a waiter polling once a second was estimated, not measured.
   - The delete-pending wait is sized by the claim removal's bound (about 100 ms), not by a measured duration of the instant. Zero misses in the runs above
-    says the bound covers what was seen; a stall of the renaming process longer than that, under a heavier load, would still lose a read.
+    says the bound covers what was seen; a stall of the renaming process longer than that, under a heavier load, would still lose a read, and the stress
+    test, which now allows no miss, would fail on it rather than hide it.
   - An unreadable heartbeat still falls back to the acquisition stamp (after the wait). That is the safe answer for a heartbeat that is absent, and the unsafe
     one for a heartbeat that exists and cannot be read for longer than the wait; the acquirer's sweep also asks `keeperAlive` for a record it cannot read, but
     not for a heartbeat it cannot read. Not changed here.
