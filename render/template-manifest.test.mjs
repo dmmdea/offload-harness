@@ -450,3 +450,59 @@ test("verdict: a loader whose widgets_values is an object names its file too: re
   assert.deepEqual(row.models.map((m) => m.name), ["keyed.safetensors"]);
   assert.deepEqual([M.verdictFor(row).outcome, M.verdictFor(row).class], ["refuse", "license_unknown"]);
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// An embedding the template's own prompt names is a model file the gate reads
+// ---------------------------------------------------------------------------------------------------------------------
+
+const embeddingTemplate = (annotation) => JSON.stringify({
+  version: 0.4,
+  nodes: [
+    nestLoader(1, "UNETLoader", "a.safetensors", "diffusion_models"),
+    { id: 2, type: "CLIPTextEncode", mode: 0, widgets_values: ["embedding:evil_ti, a cat"], properties: { cnr_id: "comfy-core", ...(annotation ? { models: [annotation] } : {}) } },
+  ],
+});
+// A tree holding the one template, with the model files given (paths under models/).
+const embeddingIo = (annotation, models = ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors"]) => {
+  const index = JSON.stringify([{ moduleName: "default", category: "Fixture", title: "Fixture", type: "image", templates: [{ name: "tt_emb", mediaType: "image", mediaSubtype: "webp", openSource: true, title: "tt_emb", tags: ["Image"], models: ["A"] }] }]);
+  return memIo(fixtureFiles({ models, extra: { [`${TEMPLATES}/index.json`]: index, [`${TEMPLATES}/tt_emb.json`]: embeddingTemplate(annotation) } }));
+};
+const WEIGHTS_A = (name) => `https://huggingface.co/example-org/weights-a/resolve/main/${name}`;
+
+test("verdict: a template whose own prompt names an embedding is refused as license_unknown when nothing annotates the file (the manifest must list it, with a source the map knows)", () => {
+  const row = rowOf(catalogOf(embeddingIo(null)), "tt_emb");
+  assert.deepEqual(row.models.map((m) => [m.directory, m.name]), [["diffusion_models", "a.safetensors"], ["embeddings", "evil_ti"]]);
+  assert.deepEqual([M.verdictFor(row).outcome, M.verdictFor(row).class], ["refuse", "license_unknown"]);
+});
+
+test("verdict: the same template runs when an annotation of the embeddings class names the file and its source is in the map; the manifest lists that file once", () => {
+  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+  const row = rowOf(catalogOf(embeddingIo(annotation)), "tt_emb");
+  assert.deepEqual([M.verdictFor(row).outcome, M.verdictFor(row).class], ["run", null]);
+  assert.deepEqual(M.manifestFor(row).models.map((m) => m.path), ["models/diffusion_models/a.safetensors", "models/embeddings/evil_ti.safetensors"]);
+});
+
+test("resolve: an embedding is named in the runtime manifest by the file ComfyUI would load, and a node that holds none is refused by name", () => {
+  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+  const io = embeddingIo(annotation);
+  const ok = M.resolveRun(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.runtime_manifest.models.map((m) => m.path), ["models/diffusion_models/a.safetensors", "models/embeddings/evil_ti.safetensors"]);
+  const bare = embeddingIo(annotation, ["diffusion_models/a.safetensors"]);
+  const gone = M.resolveRun(rowOf(catalogOf(bare), "tt_emb"), snapshotOf(bare), { io: bare });
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/evil_ti.safetensors"]]);
+});
+
+test("readiness: an embedding the prompt names without an extension is met by the file of the node that ComfyUI would load, and the manifest path says which", () => {
+  for (const [file, want] of [["evil_ti.pt", "models/embeddings/evil_ti.pt"], ["evil_ti.bin", "models/embeddings/evil_ti.bin"]]) {
+    const io = embeddingIo(null, ["diffusion_models/a.safetensors", `embeddings/${file}`]);
+    const r = M.readinessFor(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
+    const m = r.models.find((x) => x.name === "evil_ti");
+    assert.deepEqual([m.status, m.resolved_path], ["present", want], file);
+  }
+  const none = embeddingIo(null, ["diffusion_models/a.safetensors"]);
+  const r = M.readinessFor(rowOf(catalogOf(none), "tt_emb"), snapshotOf(none), { io: none });
+  const m = r.models.find((x) => x.name === "evil_ti");
+  assert.deepEqual([m.status, m.resolved_path], ["missing", null]);
+  assert.ok(r.models_missing.includes("models/embeddings/evil_ti"));
+});

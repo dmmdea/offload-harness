@@ -3682,3 +3682,91 @@ test("models: a muted or bypassed instance's values are not requirements, and ne
   assert.deepEqual(C.requiredModels(instanceWorkflow({ widgets_values: ["sub/inner.safetensors"] })).active.map((m) => m.name), ["inner.safetensors"], "covered by the inner annotation, by its base name");
   assert.deepEqual(C.requiredModels(instanceWorkflow({ widgets_values: ["a prompt", 3, "notes.txt", null] })).active.map((m) => m.name), ["inner.safetensors"]);
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// An embedding the prompt text names: ComfyUI loads models/embeddings/<name>, <name>.safetensors, <name>.pt or <name>.bin from a word that
+// starts with `embedding:`, so a template whose own prompt names one needs a file no loader widget carries and no extension ends in
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+test("embeddingRefs: the names a text asks ComfyUI to load, with the delimiters, the weight and the trailing punctuation taken off", () => {
+  const cases = [
+    ["embedding:evil_ti, a cat", ["evil_ti"]],
+    ["embedding:evil_ti.pt, a cat", ["evil_ti.pt"]],
+    ["(embedding:evil_ti:1.2) cat", ["evil_ti"]],
+    ["(embedding:evil_ti:.5)", ["evil_ti"]],
+    ["(embedding:evil_ti:-1)", ["evil_ti"]],
+    ["embedding:evil_ti:1.2, embedding:other", ["evil_ti", "other"]],
+    ["a cat embedding:sub/one.safetensors<lora:x:1>", ["sub/one.safetensors"]],
+    ["a cat embedding:one[blue]", ["one"]],
+    ["EMBEDDING:Mixed_Case", ["Mixed_Case"]],
+    ["embedding:one embedding:one", ["one"]],
+    ["embedding:evil_ti,,", ["evil_ti"]],
+    ["embedding:evil_ti:1.2),", ["evil_ti"]],
+    ["embedding: a cat", [""]],
+    ["embedding:", [""]],
+    ["no identifier here: an embedding of a cat, embeddings", []],
+    ["", []],
+  ];
+  for (const [text, want] of cases) assert.deepEqual(C.embeddingRefs(text), want, JSON.stringify(text));
+  assert.deepEqual(C.embeddingRefs(7), [], "a value that is not a string names nothing");
+  assert.deepEqual(C.embeddingRefs(null), []);
+});
+
+const promptNode = (id, text, extra = {}) => ({ id, type: "CLIPTextEncode", mode: 0, widgets_values: [text], ...extra });
+
+test("models: a prompt widget that names an embedding is a requirement under the embeddings class, with no source and no annotation", () => {
+  const r = C.requiredModels({ nodes: [promptNode(1, "embedding:evil_ti, a cat")] });
+  assert.deepEqual(r.active.map((m) => [m.directory, m.name, m.annotated, m.url]), [["embeddings", "evil_ti", false, null]]);
+  assert.deepEqual(r.active[0].node_types, ["CLIPTextEncode"]);
+  const weighted = C.requiredModels({ nodes: [promptNode(1, "(embedding:evil_ti:1.2) cat"), promptNode(2, "embedding:evil_ti.pt, embedding:evil_ti")] });
+  assert.deepEqual(weighted.active.map((m) => m.name), ["evil_ti", "evil_ti.pt"], "one requirement per name, however many nodes name it");
+});
+
+test("models: an embedding an annotation of the embeddings class already covers is not listed twice, with or without the extension the annotation names", () => {
+  const annotated = (name, directory = "embeddings") => promptNode(1, "embedding:evil_ti, a cat", { properties: { models: [{ name, url: hf("example-org/w", name), directory }] } });
+  for (const name of ["evil_ti.safetensors", "evil_ti.pt", "evil_ti.bin"]) {
+    assert.deepEqual(C.requiredModels({ nodes: [annotated(name)] }).active.map((m) => m.name), [name], name);
+  }
+  assert.deepEqual(C.requiredModels({ nodes: [annotated("evil_ti.ckpt")] }).active.map((m) => m.name).sort(), ["evil_ti", "evil_ti.ckpt"], "an extension ComfyUI does not try does not cover it");
+  assert.deepEqual(C.requiredModels({ nodes: [annotated("evil_ti.safetensors", "loras")] }).active.map((m) => m.name).sort(), ["evil_ti", "evil_ti.safetensors"], "a file of another class is not the one it loads");
+});
+
+test("models: an embedding in a muted node, in a note, or in text without the identifier adds no requirement", () => {
+  const r = C.requiredModels({ nodes: [
+    promptNode(1, "embedding:muted", { mode: 2 }),
+    { id: 2, type: "MarkdownNote", mode: 0, widgets_values: ["put `embedding:minimaxh3_art` in the prompt"] },
+    promptNode(3, "an embedding of a cat"),
+  ] });
+  assert.deepEqual(r.active, []);
+});
+
+test("models: an embedding an ACTIVE subgraph instance carries in its widgets_values is a requirement too", () => {
+  const r = C.requiredModels(instanceWorkflow({ widgets_values: ["embedding:from_instance"] }));
+  assert.deepEqual(r.active.map((m) => [m.directory, m.name]).sort(), [["checkpoints", "inner.safetensors"], ["embeddings", "from_instance"]]);
+});
+
+test("readiness: an embedding is found the way ComfyUI loads it, as written and then with .safetensors, .pt and .bin, and the file found is reported", () => {
+  const emb = (name) => `D:/x/comfy/models/embeddings/${name}`;
+  const run = (files, name) => {
+    const r = C.readiness([req("embeddings", name, { annotated: false })], invFrom({ ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) })).requirements[0];
+    return [r.status, r.resolved ?? null];
+  };
+  assert.deepEqual(run([emb("e.safetensors"), emb("e.pt"), emb("e.bin")], "e"), ["present", "e.safetensors"], ".safetensors is tried first");
+  assert.deepEqual(run([emb("e.pt"), emb("e.bin")], "e"), ["present", "e.pt"], "then .pt");
+  assert.deepEqual(run([emb("e.bin")], "e"), ["present", "e.bin"], "then .bin");
+  assert.deepEqual(run([emb("e.pt"), emb("e")], "e.pt"), ["present", "e.pt"], "a name written with its extension is that file");
+  assert.deepEqual(run([emb("sub/e.pt")], "sub/e"), ["present", "sub/e.pt"], "a nested name");
+  assert.equal(run([emb("other.pt")], "e")[0], "missing", "no file by that name: missing, not an extension complaint");
+  assert.equal(run([emb("E.pt")], "e")[0], "case_mismatch");
+});
+
+test("readiness: of two directories that hold an embedding, the first one in ComfyUI's order decides, whichever extension each holds", () => {
+  const yaml = [{ text: "p:\n  base_path: E:/x/overflow\n  embeddings: embeddings\n", dir: "D:/x/comfy" }];
+  const files = { ...TREE, "D:/x/comfy/models/embeddings/e.pt": { size: 5 }, "E:/x/overflow/embeddings/e.safetensors": { size: 6 } };
+  const inv = invFrom(files, yaml);
+  const dirs = inv.classes.embeddings.dirs;
+  assert.equal(dirs.length, 2);
+  const r = C.readiness([req("embeddings", "e", { annotated: false })], inv).requirements[0];
+  const heldBy = (rel) => inv.classes.embeddings.files.find((f) => f.rel === rel).dirs[0];
+  assert.equal(heldBy(r.resolved), dirs[0], `the file reported (${r.resolved}) is the first directory's`);
+});

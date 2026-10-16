@@ -205,3 +205,68 @@ test("unlistedModels: on the hand-written templates the converter's graph loads 
     assert.equal(TR.unlistedModels(r.graph, []).length, listed.length, `${name}: with the list emptied each file is unlisted`);
   }
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// An embedding is a file too. ComfyUI's CLIP tokenizer loads models/embeddings/<name>, then <name>.safetensors, <name>.pt and <name>.bin,
+// from a word of the prompt text that starts with `embedding:`: no loader node and no file extension is involved, so a text override
+// could name any file of that directory past the licence gate and the trust-on-first-use check.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const EMBEDDING_SHAPES = [
+  ["a bare name", "embedding:evil_ti, a cat", "evil_ti"],
+  ["a name written with an extension the suffix test does not reach", "embedding:evil_ti.pt, a cat", "evil_ti.pt"],
+  ["a weighted group", "(embedding:evil_ti:1.2) cat", "evil_ti"],
+];
+
+for (const [label, text] of EMBEDDING_SHAPES) {
+  test(`applyOverrides: a text override that names an embedding is refused as override_is_file (${label})`, () => {
+    const r = applyOverrides(fileGraph(), { "4.text": text });
+    assert.deepEqual([r.ok, r.refusal?.code, r.refusal?.details.node], [false, "override_is_file", "4"], text);
+  });
+}
+
+test("applyOverrides: the embedding identifier is matched in any letter case, as the fail-closed reading", () => {
+  const r = applyOverrides(fileGraph(), { "4.text": "EMBEDDING:Evil_TI a cat" });
+  assert.equal(r.refusal?.code, "override_is_file");
+});
+
+test("applyOverrides: a prompt that merely talks about embeddings, with no `embedding:` in it, still goes through", () => {
+  const r = applyOverrides(fileGraph(), { "4.text": "an embedding of a cat, embeddings everywhere, embedding - a cat" });
+  assert.equal(r.ok, true);
+});
+
+const embeddingGraph = (text) => ({ "4": { class_type: "CLIPTextEncode", inputs: { text, clip: ["1", 1] } } });
+
+for (const [label, text, ref] of EMBEDDING_SHAPES) {
+  test(`unlistedModels: a prompt that names an embedding is a model file under models/embeddings, unlisted unless the manifest names it (${label})`, () => {
+    assert.deepEqual(TR.unlistedModels(embeddingGraph(text), LISTED_MODELS), [`models/embeddings/${ref}`], text);
+  });
+}
+
+test("unlistedModels: an embedding is listed by the file ComfyUI would load, as written or with .safetensors, .pt or .bin, under models/embeddings only", () => {
+  const g = embeddingGraph("embedding:evil_ti, a cat");
+  for (const file of ["evil_ti.safetensors", "evil_ti.pt", "evil_ti.bin", "EVIL_TI.SafeTensors", "evil_ti"]) {
+    assert.deepEqual(TR.unlistedModels(g, [{ path: `models/embeddings/${file}` }]), [], file);
+  }
+  assert.deepEqual(TR.unlistedModels(g, [{ path: "models/embeddings/evil_ti.ckpt" }]), ["models/embeddings/evil_ti"], "an extension ComfyUI does not try");
+  assert.deepEqual(TR.unlistedModels(g, [{ path: "models/loras/evil_ti.safetensors" }]), ["models/embeddings/evil_ti"], "another class directory is not the one it loads from");
+  assert.deepEqual(TR.unlistedModels(g, [{ path: "models/embeddings/sub/evil_ti.safetensors" }]), ["models/embeddings/evil_ti"], "a nested listed name is not matched by its base name alone");
+});
+
+test("unlistedModels: a name written with its extension is that file, and the extension is not appended to it", () => {
+  const g = embeddingGraph("embedding:evil_ti.pt, a cat");
+  assert.deepEqual(TR.unlistedModels(g, [{ path: "models/embeddings/evil_ti.pt" }]), []);
+  assert.deepEqual(TR.unlistedModels(g, [{ path: "models/embeddings/evil_ti.safetensors" }]), ["models/embeddings/evil_ti.pt"]);
+});
+
+test("unlistedModels: every embedding a graph names is reported once, in graph order, whatever string input carries it", () => {
+  const g = {
+    "1": { class_type: "CLIPTextEncode", inputs: { text: "embedding:b, (embedding:a:0.8) embedding:b" } },
+    "2": { class_type: "SomePromptNode", inputs: { positive: "x EMBEDDING:c.", seed: 3, n: ["1", 0] } },
+  };
+  assert.deepEqual(TR.unlistedModels(g, undefined), ["models/embeddings/b", "models/embeddings/a", "models/embeddings/c."]);
+});
+
+test("unlistedModels: text that mentions embeddings without the `embedding:` identifier names no file", () => {
+  assert.deepEqual(TR.unlistedModels(embeddingGraph("an embedding of a cat, embeddings, embedding"), undefined), []);
+});
