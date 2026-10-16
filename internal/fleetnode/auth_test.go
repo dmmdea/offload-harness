@@ -74,8 +74,8 @@ func TestAgentDispatchAuthMatrix(t *testing.T) {
 		{"no token, loopback", "", true, "", http.StatusBadRequest, "unsupported task_type", false},
 		// No token + non-loopback: loud refusal, header or not — there is no
 		// credential that COULD authorize this listener.
-		{"no token, non-loopback", "", false, "", http.StatusForbidden, "agent lane requires fleet_auth_token on a non-loopback listener", true},
-		{"no token, non-loopback, header presented", "", false, "Bearer anything", http.StatusForbidden, "agent lane requires fleet_auth_token on a non-loopback listener", true},
+		{"no token, non-loopback", "", false, "", http.StatusForbidden, fleetTokenRequired, true},
+		{"no token, non-loopback, header presented", "", false, "Bearer anything", http.StatusForbidden, fleetTokenRequired, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -118,12 +118,13 @@ func TestAgentAuthPrecedesEnvelopeValidation(t *testing.T) {
 // unauthorized caller cannot use the agent lane to probe job existence/state.
 func TestAgentAuthPrecedesKnownJobReack(t *testing.T) {
 	s, _ := newTestServer(t, tokenCfg("s3cret"), &fakeRunner{}, authOpts(true))
+	holder := map[string]string{"Authorization": "Bearer s3cret"}
 	rec := do(t, s, http.MethodPost, "/fleet/dispatch",
-		`{"job_id":"reack-1","task_type":"image-gen","payload":{"prompt":"hi"}}`, nil)
+		`{"job_id":"reack-1","task_type":"image-gen","payload":{"prompt":"hi"}}`, holder)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("media dispatch status = %d, want 202 (body %s)", rec.Code, rec.Body.String())
 	}
-	pollJob(t, s, "reack-1", JobDone)
+	pollJobWith(t, s, "reack-1", JobDone, holder)
 
 	rec = do(t, s, http.MethodPost, "/fleet/dispatch",
 		`{"job_id":"reack-1","task_type":"agent","payload":{}}`, nil)

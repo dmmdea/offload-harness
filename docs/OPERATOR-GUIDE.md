@@ -475,7 +475,7 @@ younger calls on this machine's lane queue behind it. A call that must leave thi
 `auto` on a machine with no graph lane) still sends it, with the node's check by name only. On every route that sends a graph to
 a node, the node must run this machine's own release (the file check ships with it): a node on another release, or one that
 publishes none, is skipped by name, so a fleet part-way through an upgrade takes graphs only on the nodes already upgraded. The **node manifest** (`node_packs[{name,repo,commit}]` + `models[{path,source_url,sha256}]`)
-is satisfied BEFORE ComfyUI starts: packs cloned at their pinned commits with all deps
+is satisfied BEFORE ComfyUI starts (a pack is taken only at a repository and commit pinned in `render/node-packs.json`; anything else is refused before the first clone): packs cloned at their pinned commits with all deps
 resolved **together** (uv) under **host-torch constraints** (provisioning never replaces the
 installed CUDA torch — an unsatisfiable pack set defers instead), models downloaded and
 sha-verified when a hash is given (`sha256: null` downloads are reported in
@@ -1994,6 +1994,18 @@ there REPLACES the roster for that call rather than merging with it, so a one-no
 subtask to that node. The CLI's `--remote` (repeatable) is the operator's own: it names any tailnet node,
 which is how a node that has not joined the roster yet is smoke-tested (`fleet-smoke --remote`).
 
+**`fleet_auth_token` covers every lane of a node** (a dispatch of any task type, media and `run-graph` included, the poll and
+withdraw of any job, and the read of any rendered file); it used to cover only the agent lane and the doors that take a caller's
+bytes. With the token set, a request without it is `401`; with none set, a node answers only on loopback (the box's own trust
+boundary), refuses everything with `403` on any other listener, and `fleet-serve` will not start there. `/fleet/health` and the
+jobs feed stay readable without the token, with the lease's free-text reason, the store path and the weight-file rows (and a
+job's error text) left out. A run-graph manifest may name a node pack only at a pinned repository and commit
+(`render/node-packs.json`): a token holder can have the node render, not run code of its choosing.
+**Roll it out in this order: every delegator first** (they already send the token whenever it is set, so this changes nothing
+for them), **then every node**, each with the same value. A node that already listens beyond loopback with no token will not
+start after the upgrade, so give it the token before it. `local-offload doctor`'s `fleet token` rows show a mismatch before a
+call is spent.
+
 **One token goes to every node you list.** `fleet_auth_token` is a single value, and every request to a roster node
 (`delegate_remotes`, and the nodes named per call) carries it as the bearer, whichever tailnet zone the entry sits
 under. A node shared in from another tailnet, admitted by listing that tailnet's zone in `tailnet_suffixes`, is sent the
@@ -2212,7 +2224,7 @@ a terminal line under a job id of its own (a capacity defer, or the "placement r
 
 | Failure | Fix |
 |---|---|
-| `403 agent lane requires fleet_auth_token on a non-loopback listener` | The worker is bound beyond loopback with no token. Set `fleet_auth_token` (same value) on both sides and restart `fleet-serve`. |
+| `403 fleet lanes require fleet_auth_token on a non-loopback listener` | The node is bound beyond loopback with no token, so it refuses every lane (a current `fleet-serve` will not start in that state and says so: `refusing to serve on ...: ... fleet_auth_token is not set`). Set `fleet_auth_token` (same value) on both sides and restart `fleet-serve`. |
 | `401 unauthorized` on dispatch or poll | Token mismatch between delegator and worker configs. `local-offload doctor` shows it before a call is spent: its `fleet token` rows ask each reachable node whether it accepts this box's token (`OK`, `MISMATCH` = the node has another token, `NO-TOKEN` = the node listens beyond loopback with none, `UNKNOWN`, `UNCHECKED` = refused or unreachable, not asked), one row per `delegate_remotes` slot, never printing a token; a box with no `fleet_auth_token` prints one `NOT SET` line instead. `/fleet/health` ignores the token, so every other row reads healthy either way. |
 | `agent delegation is disabled on this box` | Set `"agent_delegation_enabled": true` in the **delegator's** config. |
 | Everything places local although a remote exists | Usually correct — idle-local always wins. Force `--route remote --pin-reason operator` to surface the gate's verdict (without a reason `remote` is a hint and the idle local seat takes what no remote can): the defer reason now names the actual cause — no remotes configured, every remote failing its health probe (each error quoted), or a healthy remote failing the gate (`agent_enabled` + `agent_seat_resident` + `output_schema` + the ctx arithmetic above). |

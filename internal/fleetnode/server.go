@@ -190,6 +190,8 @@ type Server struct {
 	runner Runner
 	jobs   *Jobs
 	opts   Options
+	// refusals throttles the journal line written for each request authorizeGated refuses.
+	refusals refusalLog
 	// cardAdmitMu makes a pushed dispatch's id lookup, its node card's queued frame and its Admit one
 	// step (handleDispatch), so a racing duplicate emits no frame of its own.
 	cardAdmitMu sync.Mutex
@@ -1047,15 +1049,12 @@ func (s *Server) Handler() http.Handler {
 	// withdraw here" and falls back to today's behaviour on.
 	mux.HandleFunc("DELETE /fleet/jobs/{id}", s.handleWithdraw)
 	// GET /fleet/jobs (no {id}) is a distinct ServeMux pattern from the one
-	// above — unauthenticated is deliberate: unlike /fleet/jobs/{id}, this
+	// above — readable without the bearer is deliberate: unlike /fleet/jobs/{id}, this
 	// route never carries a payload (Data is never set; see Jobs.Recent), so
-	// there is nothing here for the per-job bearer gate to protect on a MEDIA
-	// row. An AGENT row is different: its `error` string can echo contract
-	// content (the goal, a tool result fragment) the way a media job's never
-	// does, so handleJobs applies the SAME bearer check handleJob does and
-	// omits `error` on agent rows for a caller that fails it — id/task/
-	// model/state/timestamps stay unauthenticated on every row, exactly like
-	// before; only an agent row's `error` text is gated.
+	// the rows are an id, a task type, a model, a state and timestamps. A row's
+	// `error` string is different: it can echo a caller's content (the goal, a
+	// tool result fragment, a path), so handleJobs applies the SAME bearer check
+	// handleJob does and omits `error` on every row for a caller that fails it.
 	mux.HandleFunc("GET /fleet/jobs", s.handleJobs)
 	// {filename...} (not {filename}) is deliberate: it's a multi-segment
 	// wildcard, so a caller-supplied "/" or a %2F-hidden one still reaches the
@@ -1593,8 +1592,24 @@ type healthPayload struct {
 	HostRAMTotalGb float64 `json:"host_ram_total_gb,omitempty"`
 }
 
-// withoutPrivateFields is the view of the health payload served to a caller that does not hold the bearer.
-func (p healthPayload) withoutPrivateFields() healthPayload { return p }
+// withoutPrivateFields is the view of the health payload served to a caller that does not hold the bearer, on a
+// node that has a token. Health stays open to them (a roster read has to work before it holds a credential, and a
+// cascade lane reads it to learn whether a base is a fleet node), so what stays is what describes the node: its
+// identity, versions, capacity, counts, lanes and model names. What goes is what is the operator's or a job's:
+// the lease's free-text reason, the store steward's status (its root is a path on this node's disk), and the
+// weight-file rows of the image, video, animation and audio bindings. The receiver is a copy; the full payload is
+// not changed.
+func (p healthPayload) withoutPrivateFields() healthPayload {
+	p.ImageRecipes = nil
+	p.MediaRecipes = nil
+	p.Store = nil
+	if p.Lease != nil {
+		l := *p.Lease
+		l.Reason = ""
+		p.Lease = &l
+	}
+	return p
+}
 
 // handleHealth assembles the contract health JSON from cached/cheap reads
 // only. A missing snapshot (sampler never succeeded) is a FAILED probe → 503:
@@ -1860,6 +1875,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Store != nil {
 		st := s.opts.Store()
 		payload.Store = &st
+	}
+	// A caller without the bearer, on a node that has a token, gets the node's description and not its operator's
+	// words or its disk (withoutPrivateFields). A node with no token is a loopback node (fleet-serve refuses to
+	// start otherwise), where the caller is this box.
+	if tok := s.opts.Cfg.FleetAuthToken; tok != "" && !bearerOK(r, tok) {
+		payload = payload.withoutPrivateFields()
 	}
 	writeJSON(w, http.StatusOK, payload)
 }
@@ -2354,11 +2375,12 @@ func (s *Server) handleText(w http.ResponseWriter, r *http.Request) {
 	s.admit(w, r, dispatchEnvelope{JobID: p.JobID, TaskType: TextTask, Payload: body})
 }
 
-// authorizeGated is the token-gated lanes' auth, in one place so the doors that must check the bearer
-// before they read a large body (the stt upload door, the project door) run the SAME rule admit applies
-// to every job: fleet_auth_token required beyond loopback, loopback with no token stays open. It writes
-// the 401/403 itself and reports whether the request may go on. A task type that is not token-gated
-// passes untouched (media dispatch stays tokenless so deployed media clients keep working).
+// authorizeGated is the lanes' auth, in one place so the doors that must check the bearer before they
+// read a large body (the stt upload door, the project door) run the SAME rule admit applies to every job:
+// fleet_auth_token required (401 without it), and with none configured a loopback listener stays open while
+// any other is refused with 403. It writes the 401/403 itself, logs the refusal, and reports whether the
+// request may go on. Every task type is gated (tokenGated): a task type the node does not serve is refused for
+// the credential before it is refused for being unserved, so a stranger learns nothing about the node's lanes.
 func (s *Server) authorizeGated(w http.ResponseWriter, r *http.Request, taskType string) bool {
 	if tokenGated(s.opts.Cfg, taskType) {
 		if s.opts.Cfg.FleetAuthToken == "" {
@@ -2367,20 +2389,69 @@ func (s *Server) authorizeGated(w http.ResponseWriter, r *http.Request, taskType
 			// applies to the same resolved listener, so this refusal can never
 			// disagree with what health advertised. (With no token configured it
 			// reduces to "is the listener loopback?" — a tokenless lane beyond
-			// loopback drives a coding-agent loop over an open port, an RCE-class
-			// surface. Misconfiguration must fail here, visibly, at ack time.)
+			// loopback runs renders, installs node packs and drives a coding-agent loop
+			// for whoever can reach the port, an RCE-class surface. Misconfiguration must
+			// fail here, visibly, at ack time; fleet-serve refuses to start in this state.)
 			if !AgentLaneSafelyReachable(s.opts.Cfg, s.opts.LoopbackListener) {
+				s.refusals.note(r, taskType, "no fleet_auth_token is set on this non-loopback listener")
 				writeError(w, http.StatusForbidden, fleetTokenRequired)
 				return false
 			}
-			// Loopback + no token: the agent lane is reachable only from this
+			// Loopback + no token: the lanes are reachable only from this
 			// box — the same trust boundary as the local MCP surface.
 		} else if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
+			why := "no fleet bearer presented"
+			if r.Header.Get("Authorization") != "" {
+				why = "the fleet bearer presented is not this node's"
+			}
+			s.refusals.note(r, taskType, why)
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return false
 		}
 	}
 	return true
+}
+
+// refusalLog writes one line per refused request, at most one per (caller, task type, reason) every refusalLogEvery:
+// a node that is being probed says so without the probe filling its journal. The line carries the caller's address
+// and the task type as quoted text, never the credential presented and never the payload.
+type refusalLog struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+const (
+	refusalLogEvery = 10 * time.Second
+	refusalLogKeys  = 256
+)
+
+func (l *refusalLog) note(r *http.Request, taskType, why string) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	key := host + "|" + taskType + "|" + why
+	now := time.Now()
+	l.mu.Lock()
+	if l.last == nil || len(l.last) >= refusalLogKeys {
+		l.last = map[string]time.Time{}
+	}
+	prev, seen := l.last[key]
+	if seen && now.Sub(prev) < refusalLogEvery {
+		l.mu.Unlock()
+		return
+	}
+	l.last[key] = now
+	l.mu.Unlock()
+	log.Printf("fleetnode: refused a %q request from %q: %s", clipLog(taskType), clipLog(host), why)
+}
+
+// clipLog bounds a caller-supplied string before it is written to the journal (the quoting is the caller's %q).
+func clipLog(s string) string {
+	if r := []rune(s); len(r) > 64 {
+		return string(r[:64]) + "..."
+	}
+	return s
 }
 
 // admit is the shared ack path behind /fleet/dispatch, /fleet/vision and /fleet/text: the
@@ -2389,14 +2460,13 @@ func (s *Server) authorizeGated(w http.ResponseWriter, r *http.Request, taskType
 // differ ONLY in how they read and cap their body; everything a node decides
 // about a job happens here, once.
 func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvelope) {
-	// TOKEN-GATED LANES' AUTH (v1 scope: the agent lane ONLY — the delegation
-	// plan's reshape delta 10 — joined by the vision lane in 0.116.0, see
-	// tokenGated; media task types skip this block entirely so deployed
-	// tokenless media clients stay byte-identical, pinned in auth_test.go).
+	// EVERY LANE'S AUTH (see tokenGated: the agent lane was the first lane gated,
+	// and every task type is now, media dispatch included; the rule is pinned in
+	// bearer_every_lane_test.go).
 	// Ordering: the check needs the DECODED task_type, so it cannot precede
 	// the body decode; it sits immediately AFTER decode and BEFORE everything
 	// else — the job_id check, the known-job re-ack/409 lookup, the drain
-	// gate, BuildRequest — so an unauthorized agent caller gets only the auth
+	// gate, BuildRequest — so an unauthorized caller gets only the auth
 	// verdict (401/403), never a validation 400 to probe the envelope with
 	// and never a re-ack/409 that discloses job existence or state.
 	if !s.authorizeGated(w, r, env.TaskType) {
@@ -3015,16 +3085,14 @@ type jobFeedRow struct {
 }
 
 // handleJobs is the cluster jobs feed: GET /fleet/jobs?limit=N, newest first,
-// capped at 500 rows. The route itself is unauthenticated — id/task/model/
-// state/timestamps never carried anything worth gating (see the route
-// comment in Handler) — but an AGENT row's `error` string can echo contract
-// content (the goal text, a tool-result fragment), unlike a media row's,
-// which never does. So this handler applies the SAME bearer check handleJob
+// capped at 500 rows. The route itself is readable without the bearer — id/task/model/
+// state/timestamps carry nothing worth gating (see the route comment in Handler) —
+// but a row's `error` string can echo a caller's content (the goal text, a tool-result
+// fragment, a path on the node). So this handler applies the SAME bearer check handleJob
 // uses on /fleet/jobs/{id}: when a token is configured and the request does
-// not carry it, every agent row's `error` is omitted while the rest of the
-// row (and every media row, error included) is unchanged. `error` is
-// truncated to 200 runes so one runaway error string cannot blow up the feed
-// response.
+// not carry it, every row's `error` is omitted while the rest of the row is
+// unchanged. `error` is truncated to 200 runes so one runaway error string
+// cannot blow up the feed response.
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	if q := r.URL.Query().Get("limit"); q != "" {
@@ -3040,7 +3108,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	for _, v := range s.jobs.Recent(limit) {
 		errStr := v.Error
 		if (v.Agent || v.Gated) && !authed {
-			errStr = "" // agent/vision error text may echo caller content; media rows are unaffected
+			errStr = "" // error text may echo caller content or a path on this node
 		}
 		row := jobFeedRow{
 			ID: v.ID, Task: v.Task, Model: v.Model, State: string(v.State), Agent: v.Agent,
@@ -3092,12 +3160,11 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "filename must be a bare name")
 		return
 	}
-	// The outputs of the token-gated lanes (stt upload transcripts, the legacy stt lane's transcripts,
-	// project renders, media-job renders: gatedMediaName) need the bearer on a node that has a token;
-	// checked before the file is looked up, so the answer never says whether the name exists. Every
-	// other name, and every name on a tokenless node, is as it was.
-	if tok := s.opts.Cfg.FleetAuthToken; tok != "" && gatedMediaName(name) && !bearerOK(r, tok) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+	// A rendered artifact is the node's output, whatever task made it: the bearer is required on a node that
+	// has a token, and a node that listens beyond loopback with none refuses the read (authorizeGated, the
+	// rule every lane runs). Checked before the file is looked up, so the answer never says whether the name
+	// exists. A loopback node with no token serves as it always did.
+	if !s.authorizeGated(w, r, "media-file") {
 		return
 	}
 	// A dot name is this node's own bookkeeping (the stt upload directory, the compose cache): never

@@ -3,6 +3,7 @@
 // gate); this file starts with the models leg. All side-effecting deps are injected so
 // the whole satisfier is testable with zero network/disk.
 import { join, dirname } from "node:path";
+import { checkNodePack } from "./node-packs.mjs";
 
 const defer = (code, ref, detail) => ({ ok: false, defer: { code, ref, detail } });
 
@@ -166,6 +167,16 @@ export async function satisfyManifest(manifest, deps) {
 
   const hasPacks = (manifest.node_packs || []).length > 0;
 
+  // FIRST, before any tooling probe, model download or git command: a pack is taken only at a pinned repository
+  // and commit (node-packs.json). Naming one makes this node run the caller's code, and a manifest that gets
+  // that far with a model download already done has spent the node's disk on a request it was going to refuse.
+  // deps.packAllowed is a seam for tests that use stand-in packs; production leaves it unset, which is the table.
+  const packAllowed = deps.packAllowed || checkNodePack;
+  for (const pack of manifest.node_packs || []) {
+    const refusal = packAllowed(pack);
+    if (refusal) return defer(refusal.code, refusal.ref, refusal.detail);
+  }
+
   // The satisfier tooling (uv) is ONLY needed to install PACKS. A models-only or
   // empty manifest (a graph using only built-in nodes) must NOT require it.
   if (hasPacks && !satisfierAvailable()) return defer("SATISFIER_UNAVAILABLE", "uv", "uv not found in the ComfyUI venv (pip install uv)");
@@ -207,7 +218,11 @@ export async function satisfyManifest(manifest, deps) {
     for (const pack of manifest.node_packs) {
       let res;
       try { res = await ensurePack(pack); }
-      catch (e) { return spawnOrVenv(e, pack.name); }
+      catch (e) {
+        // The checkout stage refuses an unpinned pack too (makeEnsurePack): the same typed answer, never "the venv is broken".
+        if (e && e.code === "NODE_PACK_NOT_ALLOWED") return defer(e.code, e.ref || pack.name, e.detail || String(e.message || e));
+        return spawnOrVenv(e, pack.name);
+      }
       if (res.changed) changed = true;
     }
     // 2. ONE unified resolve+install over all packs' on-disk requirements (under the
@@ -343,12 +358,19 @@ async function runOut(cmd, opts = {}) {
 // step from injectable primitives so it is unit-testable without spawning git. #3: `changed`
 // is decided by the git HEAD before-vs-after (a fresh clone, or a checkout that MOVED HEAD),
 // NOT merely "did the dir exist" — a same-commit checkout is correctly a no-op.
-export function makeEnsurePack({ comfyDir, exists = existsSync, gitHead, gitRun }) {
+export function makeEnsurePack({ comfyDir, exists = existsSync, gitHead, gitRun, packAllowed = checkNodePack, buildClone = buildClonePackCmd }) {
   return async (pack) => {
+    // The last stop before git: the directory, the clone and the checkout all come from the pack, so a pack that is
+    // not pinned is refused before any of them is looked at (satisfyManifest has refused it already; this is for a
+    // caller that reaches the checkout stage another way).
+    const refusal = packAllowed(pack);
+    if (refusal) {
+      throw Object.assign(new Error(`node pack ${refusal.ref} refused: ${refusal.detail}`), refusal);
+    }
     const dir = `${comfyDir}/custom_nodes/${pack.name}`;
     const existed = exists(dir);
     const headBefore = existed ? await gitHead(dir) : null;
-    if (!existed) await gitRun(buildClonePackCmd(pack, { comfyDir }));
+    if (!existed) await gitRun(buildClone(pack, { comfyDir }));
     await gitRun(buildEnsurePackCmd(pack, { comfyDir }));
     const headAfter = await gitHead(dir);
     return { changed: !existed || headBefore !== headAfter };

@@ -373,7 +373,7 @@ source, which has no `gpu_devices[]` to match against. Implementation:
 | `uma_reserve_gib` | `0` | RAM (GiB) a unified-memory SoC node (the `rockchip-rk3588` tier, whose GPU and NPU share system RAM) holds back from inference for the box's own workload. Health advertises `MemTotal − uma_reserve_gib` as `vram_total_gb` and `MemAvailable − uma_reserve_gib` as `vram_free_gb` (the linux-meminfo source). `0` = advertise all of RAM; the tier seeds `3`. Inert on every other tier, which reads a real VRAM counter. A reserve that leaves no capacity makes `fleet-serve` refuse to start, and a negative one is refused by name. |
 | `fleet_agent_enabled` | `false` | Opts this node into executing fleet **agent** jobs (see [The agent task](#the-agent-task-task_type-agent)). Explicit opt-in: the binding (an agent seat) exists on every tier, the worker ROLE is a per-box decision. Off = the task is not advertised and health is byte-identical to a pre-0.65 node. |
 | `fleet_poll_lease_sec` | `0` (= 60) | How long a pushed agent job may sit `accepted` with nobody polling it before the node treats its delegator as gone: the job is never started and is reaped, and a run that finishes after its poller left stops feeding `recent_agent_wall_sec` and Retry-After. Negative = off; a value under 15 is raised to 15 (the delegator's own gap between polls must fit inside it). A running job is never reaped. See [Taking a job back](#taking-a-job-back-withdraw-and-the-poll-lease). |
-| `fleet_auth_token` | `""` | Bearer token for the **agent lane only** (agent dispatches + polls of agent-created jobs; media stays tokenless in v1). Same value on every node and in the delegator's config. Empty + non-loopback listener = agent dispatches refused 403. |
+| `fleet_auth_token` | `""` | Bearer token for **every lane** of the node (a dispatch of any task type, the poll and withdraw of any job, the read of any artifact; `401` without it). Same value on every node and in every delegator's config. Empty = open on a loopback listener only; any other listener refuses everything with `403`, and `fleet-serve` will not start. See [Auth](#auth-every-lane-needs-the-fleet-bearer). |
 | `fleet_ingress_guard` | `""` (= `warn`) | The ingress guard in front of every route (register SF-16), against a web page in a browser reaching the node (a cross-site `text/plain` POST, DNS rebinding). `warn` (the default) logs a request `enforce` would refuse and serves it; `enforce` refuses a `Host` that is not loopback, a tailnet address, a dotless MagicDNS name or a name under a zone in `tailnet_suffix` / `tailnet_suffixes` (421), any `Origin` header (403) and a POST that is not `application/json` (415); `off` skips the checks. A mistyped mode fails the config load. The node prints `ingress guard: <mode>` at start. Detail and the edges to know before `enforce`: [systems/fleet-node.md](systems/fleet-node.md). |
 | `agent_ctx_tokens` | `0` | The agent seat's served context window, advertised in health for the delegator's placement arithmetic. From config, never probed (a live probe could cold-start a multi-GB model on the health cadence). `0` = not advertised = this node is never chosen for remote agent work. |
 | `kvslot_cap_gib` | `0` (= 8 GiB) | Cap on the node's `kvslots/` directory, the KV-slot files `POST /fleet/kvslot/save` writes (ADR 0056 Layer 2). An LRU sweep after every save deletes the least recently modified files past the cap. The directory is created by the installer; without it the lane answers `501` and the delegator falls through. |
@@ -812,31 +812,48 @@ earn the "node accepted the job" defer — after the bounded re-dispatches it is
 
 No transcript field exists — remote reasoning never crosses the wire.
 
-### Auth — the one token-gated lane
+### Auth: every lane needs the fleet bearer
 
-- `fleet_auth_token` set → agent dispatches **and** polls of agent-created jobs require
-  `Authorization: Bearer <token>` (constant-time compared); wrong/missing → `401` with the
-  standard error envelope (`"error": "unauthorized"`), answered before the job_id validation
-  and the known-job lookup, so an unauthorized caller can neither probe field validation nor
-  learn job state.
-- Token empty + non-loopback listener → agent dispatches are refused
-  `403 agent lane requires fleet_auth_token on a non-loopback listener`, and `agent` is
-  withheld from the advertised `supported_task_types`. Loopback + no token stays open (same
-  trust boundary as the local MCP surface).
-- **Media dispatch, media job polls, `/fleet/media/*`, and health never check the token** —
-  deployed tokenless media clients keep working byte-identically (the one media door that carries a caller's private input files,
-  `POST /fleet/media-job`, is token-gated like the project door: see
-  [the media-job door](systems/fleet-node.md#the-media-job-door-artifacts-and-honest-advertisement-adr-0077)) — **except** that on a node with a token,
-  `GET /fleet/media/{name}` needs the bearer for the outputs of the token-gated lanes: an stt upload's transcripts
-  (`stt-<digits>-<8 hex>.*`), the legacy path-taking `stt` lane's transcripts (`<basename>-<8 hex>.srt|txt|segments.json`,
-  because that lane is gated and its stem can carry the node's own file names), a project render's files
-  (`composeproj-<16 hex>.*`, the project door's own stem; the vetted `compose-video` lane keeps `compose-<hash8>` and stays
-  tokenless) and a media-job's renders (`mediajob-<16 hex>.*`, the media-job door's own stem, set after the inner builder: they
-  are rendered from the caller's private still, driver video or voice sample; a job of the tokenless `/fleet/dispatch` door
-  keeps the pipeline's `render-<hash8>` / `video-<hash8>` names and is still read by bare name). The gate fails closed on spellings a Windows filesystem folds onto the same file: the name is matched
-  lower-cased with trailing dots and spaces removed, and a name that is not plain ASCII or carries `~` or `:` is treated as
-  gated (media this node writes is plain lower-case ASCII, so no tokenless lane is caught). Whole-fleet enforcement is a
-  recorded follow-up for a coordinated whole-fleet deploy window (ADR 0023).
+The rule is one rule for every route that does work or returns a result. Three cells, by whether the node has a
+`fleet_auth_token` and where it listens:
+
+| token | listener | every dispatch, poll, withdraw and artifact read |
+|---|---|---|
+| set | any | `Authorization: Bearer <token>` (constant-time compared) is required: `401` with the standard error envelope (`"error": "unauthorized"`) without it |
+| empty | loopback | open: the same trust boundary as the local MCP surface |
+| empty | anything else | refused `403 fleet lanes require fleet_auth_token on a non-loopback listener`, and `fleet-serve` **will not start** in this state (it names `fleet_auth_token` and the listen address) |
+
+- **Every task type is gated**, not the agent lane alone: `agent`, `vision`, `text`, `stt`, `stt-upload`, `compose-project`,
+  `media-job`, the PAIR relay and every media task (`image-gen`, `video-gen`, `animate`, `audio-gen`, `run-graph`, `accel`,
+  `compose-video`), and any task type a later release adds (`tokenGated` returns true for all of them). Before this rule
+  a media task was admitted with no check at all, so any peer that could reach a listener beyond loopback could dispatch a
+  `run-graph` whose manifest names node packs for the node to clone and install.
+- **The check runs first.** It precedes the job_id validation, the known-job lookup and the task validation, so an
+  unauthorized caller can neither probe field validation nor learn job state, and a task type the node does not serve is
+  refused for the credential before it is refused for being unserved. Each refusal is logged (the caller's address, the task
+  type, which of "no bearer", "wrong bearer" or "no token configured" it was; never the credential or the payload), at most
+  once per caller, task type and reason every ten seconds.
+- **Jobs and artifacts follow the dispatch.** A poll or withdraw of any job answers `401` without the bearer before any of the
+  job's state crosses the wire, a re-dispatch of a known job id gets the same verdict, `GET /fleet/media/{name}` needs the
+  bearer for every name (the outputs of a plain dispatch included; the check precedes the file lookup, so the answer never
+  says whether a name exists), and the jobs feed (`GET /fleet/jobs`) omits every row's `error` text without it.
+- **Health stays open**, so a roster read works before it holds a credential and a cascade lane can tell whether a base is a
+  fleet node. Without the bearer, on a node that has a token, it still carries the node's identity, versions, capacity, counts,
+  lanes and model names, and withholds the lease's free-text `reason`, the store steward's status (its `root` is a path on the
+  node's disk) and the weight-file rows (`image_recipes`, `media_recipes`). A holder of the bearer, and any caller of a loopback
+  node with no token, reads the whole answer.
+- **A run-graph manifest names only pinned node packs.** The bearer lets a caller run renders, not code. A manifest's
+  `node_packs` makes the node `git clone` each repository, check out each commit and pip-install the pack's requirements, so
+  a pack is taken only when its `repo` AND `commit` are a row of `render/node-packs.json` (exact strings, a full 40-digit
+  commit, the row's directory name or the one the repository gives it). Anything else is refused `400`, naming the pack,
+  before a job, a temp file or a lease exists (`buildRunGraph`), and again by the runner's satisfier before its first git
+  command. The table holds the packs the shipped graph builders need: VideoHelperSuite, ComfyUI-MultiGPU at its documented
+  archival commit (upstream and mirror) and ComfyUI-GGUF; adding a pack is a reviewed change to that file and to its copy in
+  `internal/mediacap/nodepacks.go`, which a test pins.
+- **Rollout order: delegators first, then nodes.** Every fleet client already sends the bearer whenever `fleet_auth_token` is
+  set (a per-package test and a source test pin it), so a delegator needs nothing new; a node that gains the rule refuses a
+  caller that has no token. Set the same `fleet_auth_token` on every delegator, then on every node, then upgrade the nodes.
+  A node that listens beyond loopback with no token will not start after the upgrade.
 
 ### Health advertisement (only when the lane is admissible)
 
@@ -1384,7 +1401,7 @@ upload of a recording the pipeline's cache already holds keeps the first job's f
 cache hit whose files are gone as a miss). On a node that has a `fleet_auth_token`, `GET /fleet/media/{name}` serves those
 names only to a bearer holder (a `401` otherwise, before the file is looked up, and for any case, trailing-dot or
 trailing-space spelling of the name, which a Windows node would open as the same file); the asker's fetch already sends the
-bearer. A node with no token serves them as it always did.
+bearer. A loopback node with no token serves them as it always did.
 
 **Advertisement.** `stt-upload` is in `supported_task_types`, with the additive, omitempty health fields `stt_hq` (the
 node has an hq model; `false` is published, so an asker can tell it from a node that predates the door) and
@@ -1392,12 +1409,13 @@ node has an hq model; `false` is published, so an asker can tell it from a node 
 (loopback, or a `fleet_auth_token`). `stt` is NOT the signal: every node with a whisper model lists it.
 
 **Auth.** `stt-upload` is token-gated like the vision lane (`tokenGated`), on dispatch and on poll (`JobView.Gated`).
-The legacy `stt` task joins the bearer rule **when the node has a `fleet_auth_token`** (0.164.0, D17): a tailnet peer can
-no longer make the node convert and transcribe any file it can read. A node with no token keeps its legacy lane open.
+The legacy `stt` task joined the bearer rule **when the node had a `fleet_auth_token`** (0.164.0, D17): a tailnet peer can
+no longer make the node convert and transcribe any file it can read. It is now gated like every lane (the special case is
+gone: a node with no token that listens beyond loopback refuses it with `403`, a loopback node with no token takes it).
 Compatibility: the only external dispatcher known to send `stt` jobs sends no bearer token; no production use through it
 was found (its web console form sends an empty payload; the jobs seen on one node on 2026-10-01 were a test burst), so it
-keeps working against a tokenless node and needs the bearer against one that has a token. The legacy lane's transcripts
-(`<basename>-<8 hex>.srt|txt|segments.json` in `media_dir`) are bearer-gated on `GET /fleet/media` on such a node too; unlike an
+needs the bearer against a node that has a token. The legacy lane's transcripts
+(`<basename>-<8 hex>.srt|txt|segments.json` in `media_dir`) need the bearer on `GET /fleet/media` like every artifact; unlike an
 upload's they are the pipeline's content-keyed cache, shared with local transcriptions, so the node's transcript sweep and
 eviction removal never touch them.
 
@@ -1464,7 +1482,7 @@ what an operator of the node needs:
   field addition needs a node upgrade first. (The agent contract **inside** the envelope is
   the deliberate exception — its payload decoder ignores unknown fields so staggered node
   deploys interoperate; version skew is caught by its explicit `schema_version` instead.)
-- **A remote media task never chooses where the node writes.** Media dispatch carries no token,
+- **A remote media task never chooses where the node writes.** Media dispatch does not take the caller's word for a path,
   so a caller's `out` (image-gen, video-gen, animate, audio-gen, compose-video) or `out_dir`
   (run-graph) is ignored. It is not refused, so an older payload keeps working. The node writes
   its own `<media_dir>/<task>-<hash8>.<ext>` (run-graph: `<media_dir>`), and the result names that

@@ -28,6 +28,14 @@ environment.
    are required per pack; `name` is derived from the repository when absent. Only `path` is required
    per model — `sha256` defaults to null.
 
+1a. **Refuse any pack that is not pinned.** A pack makes the node clone its repository and install its requirements, which is
+   the caller's code running on the node, so a pack is taken only when its `repo` AND `commit` are a row of
+   `render/node-packs.json` (exact strings, a full 40-digit commit, the row's directory name or the one the repository gives
+   it). A fleet node refuses an unpinned pack at the door (`400` naming the pack, before a job or a temp file exists:
+   `mediacap.CheckManifestNodePacks`), and the satisfier refuses again before the first tooling probe, model download or git
+   command with the typed defer `NODE_PACK_NOT_ALLOWED` (`ref` = the pack). The table holds the packs the shipped graph builders
+   need; a workflow that needs another adds a reviewed row to the file and to its Go copy.
+
 2. **Check tooling.** The satisfier's hard requirement is `uv` alongside the ComfyUI virtual
    environment's Python. Missing → `SATISFIER_UNAVAILABLE`. Skipped entirely for models-only or empty
    manifests.

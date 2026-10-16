@@ -28,7 +28,7 @@ func TestDispatchCarriesTheFleetJobIDToTheRunner(t *testing.T) {
 	s, _ := newTestServer(t, cfg, runner, authOpts(true))
 
 	if rec := do(t, s, http.MethodPost, "/fleet/dispatch",
-		`{"job_id":"media-42","task_type":"image-gen","payload":{"prompt":"hi"}}`, nil); rec.Code != http.StatusAccepted {
+		`{"job_id":"media-42","task_type":"image-gen","payload":{"prompt":"hi"}}`, withdrawAuth); rec.Code != http.StatusAccepted {
 		t.Fatalf("media dispatch = %d (body %s)", rec.Code, rec.Body.String())
 	}
 	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", agentLaneBody("agd-77"), withdrawAuth); rec.Code != http.StatusAccepted {

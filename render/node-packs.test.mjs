@@ -56,7 +56,7 @@ test("checkNodePack accepts a pinned pack and refuses everything else, with the 
     [{ name: "ComfyUI-VideoHelperSuite", repo: VHS, commit: MGPU_PIN }, "ComfyUI-VideoHelperSuite"],
     [{ name: "../../x", repo: VHS, commit: VHS_PIN }, "../../x"],
     [{ name: "ComfyUI-Manager", repo: VHS, commit: VHS_PIN }, "ComfyUI-Manager"],
-    [{ repo: "--upload-pack=evil", commit: VHS_PIN }, "--upload-pack=evil"],
+    [{ repo: "--upload-pack=evil", commit: VHS_PIN }, "upload-pack-evil"],
     [{ name: "x", commit: VHS_PIN }, "x"],
     [null, "#"],
   ];

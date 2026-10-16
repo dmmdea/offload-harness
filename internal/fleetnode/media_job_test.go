@@ -424,9 +424,9 @@ func TestMediaJobJobsAreMaskedWithoutTheBearer(t *testing.T) {
 	if got := s.claimSpec(MediaJobTask, func() {}); !got.Gated || !got.Uncapped {
 		t.Errorf("a pulled media-job must be gated and uncapped like a dispatched one: %+v", got)
 	}
-	// The five inner media tasks stay tokenless over /fleet/dispatch.
-	if s.claimSpec("video-gen", func() {}).Gated {
-		t.Error("video-gen over /fleet/dispatch must stay tokenless")
+	// The five inner media tasks are gated over /fleet/dispatch too: every lane is.
+	if !s.claimSpec("video-gen", func() {}).Gated {
+		t.Error("video-gen over /fleet/dispatch must be gated like every other lane")
 	}
 }
 

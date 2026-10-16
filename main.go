@@ -2880,8 +2880,12 @@ func nvidiaSmiGPUName() string {
 
 // fleetServeParams resolves + validates fleet-serve's identity/binding args —
 // the testable seam (mirrors runGraphParams): flag > config for the listen
-// address and node id, hostname fallback for an empty id, and the shared
-// netguard loopback refusal unless --listen-trusted-network.
+// address and node id, hostname fallback for an empty id, the shared
+// netguard loopback refusal unless --listen-trusted-network, and the rule that
+// a listener beyond loopback needs a fleet_auth_token. Every lane of a node requires
+// the bearer, so a node that listens beyond loopback with none has no credential
+// that could authorize any caller: it fails to start, naming the key, instead of
+// serving a port that refuses everything (or, before this rule, serving it open).
 func fleetServeParams(listenFlag, nodeIDFlag string, trusted bool, cfg config.Config, hostname func() (string, error)) (listen, nodeID string, err error) {
 	listen = listenFlag
 	if listen == "" {
@@ -2892,6 +2896,11 @@ func fleetServeParams(listenFlag, nodeIDFlag string, trusted bool, cfg config.Co
 	}
 	if err := netguard.Validate(listen, trusted); err != nil {
 		return "", "", err
+	}
+	if !netguard.LoopbackAddr(listen) && cfg.FleetAuthToken == "" {
+		return "", "", fmt.Errorf("refusing to serve on %q: it is not a loopback address and fleet_auth_token is not set. "+
+			"Every fleet lane requires the fleet bearer on a node that listens beyond loopback, so with no token no caller could be "+
+			"authorized. Set fleet_auth_token (the same value on this node and on every delegator that calls it), or listen on a loopback address", listen)
 	}
 	nodeID = nodeIDFlag
 	if nodeID == "" {
@@ -2905,6 +2914,20 @@ func fleetServeParams(listenFlag, nodeIDFlag string, trusted bool, cfg config.Co
 		}
 	}
 	return listen, nodeID, nil
+}
+
+// fleetServeAuthNote is the startup line that says which lanes require the fleet bearer. Only two states can reach it,
+// because fleetServeParams refuses the third (a listener beyond loopback with no token): a loopback node with no
+// token, where every lane is open to this box and nobody else, and a node with a token, where every lane requires it.
+func fleetServeAuthNote(listen string, cfg config.Config) string {
+	if cfg.FleetAuthToken == "" {
+		return fmt.Sprintf("loopback only: every fleet lane is tokenless on %s (set fleet_auth_token to require the bearer)", listen)
+	}
+	where := "on loopback"
+	if !netguard.LoopbackAddr(listen) {
+		where = fmt.Sprintf("beyond loopback on %q", listen)
+	}
+	return fmt.Sprintf("every lane requires the fleet bearer (fleet_auth_token is set; this node listens %s): a request without it is refused with 401; health and the jobs feed answer without it, with their private fields withheld", where)
 }
 
 // fleetServeConfig returns cfg with the node id fleet-serve resolved (fleetServeParams) set as the id the pipeline stamps
@@ -2945,7 +2968,7 @@ func runFleetServe(args []string) error {
 	fs := flag.NewFlagSet("fleet-serve", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	listenFlag := fs.String("listen", "", "listen address (default: config fleet_listen, 127.0.0.1:18811)")
-	trusted := fs.Bool("listen-trusted-network", false, "allow --listen to bind beyond loopback (the Tailscale address). The fleet endpoints are UNAUTHENTICATED; set this ONLY on a network you fully trust — and NEVER bind 0.0.0.0.")
+	trusted := fs.Bool("listen-trusted-network", false, "allow --listen to bind beyond loopback (the Tailscale address). Every lane then requires the fleet bearer, and the node will not start without fleet_auth_token set; use this ONLY on a network you trust — and NEVER bind 0.0.0.0.")
 	nodeIDFlag := fs.String("node-id", "", "node id advertised in /fleet/health, stamped on this node's results and used in its queue claims (default: config fleet_node_id, else the hostname)")
 	_ = fs.Parse(args)
 	cfg, src := loadCfgWithSource(fs)
@@ -3004,10 +3027,8 @@ func runFleetServe(args []string) error {
 	// The pipeline stamps cfg.FleetNodeID on every result envelope, and /fleet/health and the queue claim take nodeID: one
 	// name for the node in all three, whichever way the id was given (the installers pass --node-id and write no fleet_node_id).
 	cfg = fleetServeConfig(cfg, nodeID)
-	if *trusted {
-		fmt.Fprintf(os.Stderr, "[fleet-serve] WARNING: --listen-trusted-network set — the UNAUTHENTICATED fleet "+
-			"endpoints are exposed beyond loopback on %q. Anyone who can reach them can run renders on this GPU.\n", listen)
-	}
+	// Which lanes are open, said plainly, on every start (not only with --listen-trusted-network).
+	fmt.Fprintf(os.Stderr, "[fleet-serve] %s\n", fleetServeAuthNote(listen, cfg))
 
 	// Startup GPU probe (J3: provider resolution, not an nvidia-smi assumption).
 	// nvidia-smi is tried first — a working NVIDIA node behaves exactly as
@@ -3835,7 +3856,7 @@ func writeFleetTokenSection(w io.Writer, cfg config.Config, roster []rosterprobe
 		return
 	}
 	if cfg.FleetAuthToken == "" {
-		fmt.Fprintln(w, "fleet token: NOT SET here (fleet_auth_token) — a node that listens beyond loopback refuses the agent, vision, text, stt-upload and compose-project lanes without it (403, or 401 when it has one); only the media lanes stay open")
+		fmt.Fprintln(w, "fleet token: NOT SET here (fleet_auth_token) — every lane of a node requires the bearer (401 when the node has a token, 403 when it listens beyond loopback with none), so this box's calls to a node fail until the same token is set here; only a node on loopback with no token is open")
 		return
 	}
 	type verdict struct {
@@ -3870,9 +3891,9 @@ func writeFleetTokenSection(w io.Writer, cfg config.Config, roster []rosterprobe
 		case v.state == rosterprobe.TokenAccepted:
 			fmt.Fprintf(w, "  OK           %s — the node accepts this box's token\n", base)
 		case v.state == rosterprobe.TokenMismatch:
-			fmt.Fprintf(w, "  MISMATCH     %s — the node answered 401: its fleet_auth_token is not this box's, so every agent, vision, text, stt-upload and compose-project call to it fails until the two match\n", base)
+			fmt.Fprintf(w, "  MISMATCH     %s — the node answered 401: its fleet_auth_token is not this box's, so every call to it (every lane) fails until the two match\n", base)
 		case v.state == rosterprobe.TokenNodeHasNone:
-			fmt.Fprintf(w, "  NO-TOKEN     %s — the node answered 403: it listens beyond loopback with no fleet_auth_token, so it refuses those lanes for every caller; set the same token on the node\n", base)
+			fmt.Fprintf(w, "  NO-TOKEN     %s — the node answered 403: it listens beyond loopback with no fleet_auth_token, so it refuses every lane for every caller (a current fleet-serve will not start so); set the same token on the node\n", base)
 		default:
 			fmt.Fprintf(w, "  UNKNOWN      %s — the node answered %d to the token probe, which does not say whether the token is right (an older node?)\n", base, v.status)
 		}

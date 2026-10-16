@@ -1,9 +1,11 @@
 package fleetnode
 
-// The media of the token-gated lanes (ADR 0072 follow-up, D26's companion).
+// The media the gated lanes write (ADR 0072 follow-up, D26's companion).
 //
-// GET /fleet/media/{name} is tokenless on purpose: a media client (the image lane's callers) reads a
-// render by bare name. But the gated lanes put their OUTPUTS in the same directory, and a file there
+// GET /fleet/media/{name} used to be tokenless, so that a media client could read a render by bare name; every
+// artifact now needs the bearer on a node that has a token (handleMedia, through authorizeGated), and a node that
+// listens beyond loopback with none refuses the read. What follows is why some NAMES carry more than a hash, and
+// the shapes a name has. The gated lanes put their OUTPUTS in the same directory as the others, and a file there
 // was readable by anyone who learned its name:
 //
 //   - the stt upload door's transcripts: stt-<digits>-<8 hex>.srt|txt|segments.json. The stem is the
@@ -23,10 +25,12 @@ package fleetnode
 //     lane is token-gated on a node with a token, so its outputs ride the bearer too (they are never
 //     swept: the pipeline's content-keyed cache, shared with local transcription, owns them).
 //
-// The match fails closed on the spellings a Windows filesystem folds onto one file (gatedMediaName).
+// Because no name is served without the bearer on a node with a token, the spellings a Windows filesystem folds
+// onto one file (another case, trailing dots and spaces, an 8.3 short name, a ":stream" suffix) need no
+// classifier of their own: they are refused with the rest. The shapes below are still the contract between the
+// builders that name a lane's outputs and the code that sweeps them, and tests pin both.
 //
-// On a node WITH a fleet_auth_token those names need the bearer; a node with no token, and every
-// other name, answer as they always did. The transcripts are also removed: when the job record is
+// The transcripts are also removed: when the job record is
 // evicted, and once older than fleet_stt_transcript_ttl_min (default 30), swept at fleet-serve start
 // and on the job store's janitor tick. The project renders are not swept (a render is the product the
 // asker came for, and it is already kept as long as any media output); nor are the media-job renders.
@@ -66,29 +70,6 @@ const projectOutputPrefix = "composeproj-"
 
 // mediaJobOutputPrefix is the stem every media-job render's output starts with.
 const mediaJobOutputPrefix = "mediajob-"
-
-// legacySTTOutputRe is what the LEGACY path-taking stt lane names its transcripts:
-// <sanitized-basename>-<8 hex of the content identity>.srt|txt|segments.json (pipeline's mediaBase).
-// That lane is token-gated on a node with a token, so its outputs ride the bearer too (the stem can
-// carry the node's own file names). It is deliberately NOT used by the sweep or the eviction removal:
-// those files are the pipeline's content-keyed cache, which a local transcription shares.
-var legacySTTOutputRe = regexp.MustCompile(`^.+-[0-9a-f]{8}\.(srt|txt|segments\.json)$`)
-
-// gatedMediaName reports whether a file in media_dir is an output of a token-gated lane. It fails
-// closed: a Windows filesystem resolves one file under several spellings (another case, trailing
-// dots and spaces, an 8.3 short name, a ":stream" suffix, the case folding of non-ASCII letters), so
-// the name is matched in its folded form and any name that is not plain ASCII, or that carries a
-// "~" or ":", is treated as gated rather than guessed at. Media this node writes is plain lower-case
-// ASCII, so no tokenless lane's file is caught by that.
-func gatedMediaName(name string) bool {
-	for i := 0; i < len(name); i++ {
-		if c := name[i]; c < 0x20 || c > 0x7e || c == '~' || c == ':' {
-			return true
-		}
-	}
-	n := strings.ToLower(strings.TrimRight(name, ". "))
-	return sttOutputRe.MatchString(n) || projectOutputRe.MatchString(n) || mediaJobOutputRe.MatchString(n) || legacySTTOutputRe.MatchString(n)
-}
 
 // SweepSTTTranscripts removes the transcript files of stt upload jobs that are older than the node's
 // transcript TTL (fleet_stt_transcript_ttl_min; a negative value keeps them for good). Only names

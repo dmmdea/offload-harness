@@ -1,13 +1,11 @@
-// Agent-lane bearer auth (multi-node delegation, Task 3; scope per the plan's
-// reshape delta 10): ONLY the agent lane is token-gated in v1 — dispatches
-// whose decoded task_type is "agent", and /fleet/jobs/{id} polls of jobs an
-// agent dispatch created. Every media path (dispatch, job poll, media files,
-// health) ignores the token entirely, so already-deployed tokenless media
-// clients keep working byte-identically; whole-fleet token enforcement is a
-// recorded follow-up for a coordinated whole-fleet deploy window. The guards
-// themselves live at the two decision points in server.go (handleDispatch /
-// handleJob) because their PLACEMENT in the handler sequence is load-bearing
-// and documented there; this file holds the shared credential check.
+// Fleet bearer auth. The agent lane was the first lane gated (multi-node delegation, Task 3, whose v1 scope was
+// that lane alone); every lane is now: a dispatch of ANY task type, the poll and withdraw of any job, and the
+// read of any rendered artifact need the fleet bearer on a node that has a fleet_auth_token, and a node that
+// listens beyond loopback with none refuses them all. A loopback node with no token stays open (the trust
+// boundary of the local MCP surface). Health and the jobs feed stay readable without it, with the private
+// fields of each withheld (healthPayload.withoutPrivateFields, handleJobs). The guards themselves live at the
+// decision points in server.go (authorizeGated, handleJob, handleMedia) because their PLACEMENT in the handler
+// sequence is load-bearing and documented there; this file holds the shared credential check.
 
 package fleetnode
 
@@ -18,10 +16,10 @@ import (
 	"strings"
 )
 
-// fleetTokenRequired is the 403 refusal for an agent dispatch on a
+// fleetTokenRequired is the 403 refusal for a dispatch of any task type on a
 // non-loopback listener with no fleet_auth_token configured — a loud
-// misconfiguration signal, spec'd verbatim (the delegator client keys on it).
-const fleetTokenRequired = "agent lane requires fleet_auth_token on a non-loopback listener"
+// misconfiguration signal. Callers key on the status (403), not the words.
+const fleetTokenRequired = "fleet lanes require fleet_auth_token on a non-loopback listener"
 
 // bearerOK reports whether r carries `Authorization: Bearer <token>`. Both
 // sides are SHA-256 hashed before subtle.ConstantTimeCompare: the hash makes

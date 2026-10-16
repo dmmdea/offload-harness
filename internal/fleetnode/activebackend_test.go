@@ -64,7 +64,7 @@ func waitForHealthKey(t *testing.T, s *Server, key string) map[string]any {
 // lands, the keys appear; and a burst of requests inside the TTL is one read, not one per request.
 func TestHealthPublishesActiveBackendsFromACachedRead(t *testing.T) {
 	cfg := config.Config{Endpoint: "http://llama-swap.invalid"}
-	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
+	s, _ := newTestServer(t, cfg, &fakeRunner{}, authOpts(false))
 	release := make(chan struct{})
 	var calls atomic.Int32
 	s.collectBackends = func(ctx context.Context, c config.Config) backendchain.Report {
@@ -108,7 +108,7 @@ func TestHealthPublishesActiveBackendsFromACachedRead(t *testing.T) {
 // as it is (the handler never waits) and kicks the next read behind itself, so a node that refreshed only
 // once would not publish stale engine state forever. The cache is aged by moving its timestamp.
 func TestHealthRefreshesAStaleActiveBackendReportBehindTheNextRequest(t *testing.T) {
-	s, _ := newTestServer(t, config.Config{Endpoint: "http://llama-swap.invalid"}, &fakeRunner{}, nil)
+	s, _ := newTestServer(t, config.Config{Endpoint: "http://llama-swap.invalid"}, &fakeRunner{}, authOpts(false))
 	var calls atomic.Int32
 	s.collectBackends = func(context.Context, config.Config) backendchain.Report {
 		n := calls.Add(1)
@@ -153,7 +153,7 @@ func TestHealthRefreshesAStaleActiveBackendReportBehindTheNextRequest(t *testing
 
 // TestHealthPublishesNothingWithoutAnEndpoint: no llama-swap endpoint, no collection.
 func TestHealthPublishesNothingWithoutAnEndpoint(t *testing.T) {
-	s, _ := newTestServer(t, config.Config{}, &fakeRunner{}, nil)
+	s, _ := newTestServer(t, config.Config{}, &fakeRunner{}, authOpts(false))
 	s.collectBackends = func(context.Context, config.Config) backendchain.Report {
 		t.Error("the collector ran on a node with no llama-swap endpoint")
 		return backendchain.Report{}
@@ -190,7 +190,7 @@ func TestHealthRefreshNeverLoadsAModel(t *testing.T) {
 	defer srv.Close()
 	cfg := config.Default()
 	cfg.Endpoint = srv.URL
-	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
+	s, _ := newTestServer(t, cfg, &fakeRunner{}, authOpts(false))
 	s.collectBackends = swapCollectBackends // the production collector: this test is about what it sends
 	m := waitForHealthKey(t, s, "lane_backends")
 	var workhorse map[string]any
@@ -217,7 +217,7 @@ func TestHealthRefreshNeverLoadsAModel(t *testing.T) {
 // published for as long as the process lives. Past the max-stale age the keys are absent (unknown, never
 // "none"), and they come back when the refresh lands.
 func TestHealthPublishesNoActiveBackendReportOnceItIsTooOld(t *testing.T) {
-	s, _ := newTestServer(t, config.Config{Endpoint: "http://llama-swap.invalid"}, &fakeRunner{}, nil)
+	s, _ := newTestServer(t, config.Config{Endpoint: "http://llama-swap.invalid"}, &fakeRunner{}, authOpts(false))
 	release := make(chan struct{})
 	var calls atomic.Int32
 	s.collectBackends = func(context.Context, config.Config) backendchain.Report {
@@ -253,7 +253,7 @@ func TestHealthPublishesNoActiveBackendReportOnceItIsTooOld(t *testing.T) {
 // config, and a default config names a real local port. The helper stands the collector down; a test that
 // wants it installs one.
 func TestNewTestServerNeverCollectsBackends(t *testing.T) {
-	s, _ := newTestServer(t, config.Default(), &fakeRunner{}, nil)
+	s, _ := newTestServer(t, config.Default(), &fakeRunner{}, authOpts(false))
 	if s.collectBackends != nil {
 		t.Error("newTestServer left the production collector installed: a health request would probe the configured llama-swap")
 	}

@@ -5,7 +5,7 @@ package fleetnode
 // legacy stt lane) was admitted with no check at all, so any peer that could reach a listener beyond
 // loopback could dispatch a run-graph whose manifest names node packs for the node to clone and install.
 //
-// The rule, in four cells of (token configured, listener):
+// The rule, in three cells of (token configured, listener):
 //
 //	token set, any listener   the bearer is required: 401 without it, with it the task is admitted
 //	no token,  loopback       open, as the local MCP surface is (the loopback trust boundary)
@@ -20,6 +20,14 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 )
+
+// asHolder is the request header of a caller that holds the node's token (none when the node has none).
+func asHolder(cfg config.Config) map[string]string {
+	if cfg.FleetAuthToken == "" {
+		return nil
+	}
+	return map[string]string{"Authorization": "Bearer " + cfg.FleetAuthToken}
+}
 
 // everyTaskType is a media task of each kind, the legacy lanes and a name no node serves: the bearer
 // check precedes task validation, so an unserved task type is refused for the credential first.

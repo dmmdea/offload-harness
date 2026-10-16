@@ -451,7 +451,7 @@ func TestDispatchLeasesOnlyPushedAgentJobs(t *testing.T) {
 	if rec := do(t, s, http.MethodPost, "/fleet/vision", visionBody("vis-queued", "ocr", tinyPNG(), nil), withdrawAuth); rec.Code != http.StatusAccepted {
 		t.Fatalf("dispatch vis-queued = %d (body %s)", rec.Code, rec.Body.String())
 	}
-	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", `{"job_id":"media-1","task_type":"image-gen","payload":{"prompt":"hi"}}`, nil); rec.Code != http.StatusAccepted {
+	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", `{"job_id":"media-1","task_type":"image-gen","payload":{"prompt":"hi"}}`, withdrawAuth); rec.Code != http.StatusAccepted {
 		t.Fatalf("dispatch media-1 = %d (body %s)", rec.Code, rec.Body.String())
 	}
 	waitJobState(t, jobs, "media-1", JobRunning)

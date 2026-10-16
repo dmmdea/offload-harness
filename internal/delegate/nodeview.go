@@ -620,11 +620,11 @@ type healthWire struct {
 
 // FetchNodeView reads one node's /fleet/health into a NodeView (Local=false —
 // a fetched view is by definition a remote node). token, when non-empty, is
-// sent as a bearer credential; health is open today (capability advertisement
-// is not sensitive, and the deployed media dispatcher must keep decoding it
-// tokenless), so the parameter is RESERVED for a future health-auth posture
-// rather than required now — callers thread the fleet token through so they
-// need no signature change on that day.
+// sent as a bearer credential. Health answers without it, but a node that has a
+// token withholds the private fields of the answer (the lease's free-text reason,
+// the store steward's status, the weight-file rows of its recipes) from a caller
+// that does not present it, so a caller that holds the token sends it and reads
+// the whole view.
 func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/fleet/health"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
