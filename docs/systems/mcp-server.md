@@ -1138,7 +1138,9 @@ A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `c
    gate, the FLUX bar and the trust-on-first-use check read the models the template names, so an input of a model or input loader node, an
    input that holds a model file name, a value that is a model file name, and a string value with `embedding:` in it (in any letter case:
    ComfyUI loads a file of its embeddings directory from that word of the prompt text, with no loader node and no extension in the value)
-   are all refused. `seed` pins the seed inputs. A refusal of the conversion or of an override is the
+   are all refused. The check reads the string values of the graph: an embedding assembled while the graph runs by string nodes (a
+   concatenation of two overrides, for example) is neither refused nor compared with the manifest (below), so the licence gate, the hash and
+   the trust record never see the file it loads. `seed` pins the seed inputs. A refusal of the conversion or of an override is the
    defer `TEMPLATE_CONVERT_REFUSED`, its `ref` the converter's own code (`unknown_node_class`, `comfyui_too_old`,
    `override_unknown_input`, `override_is_file`, ...), and the ComfyUI that was started goes down with it. The converted graph is then
    compared with the manifest: a model file it loads that the manifest does not name defers `TEMPLATE_MODEL_UNLISTED`, its `ref` the first such
@@ -1146,15 +1148,24 @@ A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `c
    instance carries into an inner loader, a loader whose `widgets_values` is an object, a loader that stores no value and takes the listing's
    default), and the licence gate, the FLUX bar, trust on first use and the host-RAM figure read only the manifest. A file matches an entry by
    its name under the class directory or by its base name, without regard to case or slash direction, as the catalog matches an annotation to
-   a widget. An embedding the prompt text names is a model file too. A string input with `embedding:<name>` in it is read as text, not as a
-   file name, and each name it asks for is reported as `models/embeddings/<name>` unless the manifest names, under `models/embeddings/`,
-   that name as written or with `.safetensors`, `.pt` or `.bin` appended, the files ComfyUI tries (the whole path, no base-name match). A
-   name runs to the next whitespace, `<`, `[` or `)` or the end of the text, and a trailing `,` or `)` and a `:<weight>` come off. The
-   catalog lists a name its own prompt gives under the `embeddings` class, unless an annotation of that class covers it, so the licence gate
-   and trust on first use read it like any weights file (a name with no source is `license_unknown`); readiness finds the file the way
-   ComfyUI does (each directory of the class in its order, the name as written and then with the three extensions) and the runtime
-   manifest names the file it found, extension and all; a node that holds none is `models_missing`, listed by the name the text gives. A
-   graph run is not compared.
+   a widget. An embedding the prompt text names is a model file too. A string input that names an embedding the way ComfyUI reads the
+   text (`embedding:<name>`, below) is read as text, not as a file name, and each name it asks for is reported as
+   `models/embeddings/<name>` unless the manifest names, under `models/embeddings/`, a file for it: the name as written or with
+   `.safetensors`, `.pt` or `.bin` appended, at the top of the directory or in any subfolder (ComfyUI searches every subfolder; whole path
+   segments, never a base name that only ends alike). ComfyUI does not walk the embeddings directories in order: `expand_directory_list` puts
+   every embeddings root and every subfolder below it into a Python `set`, and `load_embed` opens the file of the first directory of that set
+   that holds the name, so the directory that answers is chosen by hash order and differs from one process to the next. A name is read as the
+   tokenizer reads it (`embeddingRefs`, a port of `token_weights`, `tokenize_with_weights` and `_try_get_embedding` in `comfy/sd1_clip.py`):
+   the text is cut at parentheses and a closed group loses a numeric tail, so `(embedding:name:1.2)` is `name` and a bare `embedding:name:1.2`
+   is the name `name:1.2`; the lower-case identifier starts the text or follows whitespace or a parenthesis; whitespace after it is skipped;
+   the name ends at whitespace, `(`, `<` or `[`; commas come off both ends. The catalog lists a name its own prompt gives under the
+   `embeddings` class, unless an annotation of that class covers it (the annotation records the name), so the licence gate and trust on first
+   use read it like any weights file (a name with no source is `license_unknown`). Readiness resolves it the way ComfyUI does: exactly one
+   directory that holds a file for the name is `present` and the runtime manifest names that file, subfolder and extension included; more than
+   one (the root and a subfolder, two subfolders, two registered roots) is `ambiguous`, refused as `models_missing` because the file ComfyUI
+   opens varies from run to run and the manifest would name only one; an annotated file that is not the one ComfyUI opens for the name the
+   prompt gives (a `.safetensors` beside an annotated `.pt`) is `shadowed`; a node that holds none is `models_missing`, listed by the name
+   the text gives. A graph run is not compared.
 4. The converted graph goes through the run-graph preflight and is posted. The result is the run-graph envelope with `template`,
    `license_class`, `reads_input`, `local_only` and `fleet_note` beside the outputs, and `tofu_first_seen` when a run recorded a
    model for the first time.
@@ -1203,7 +1214,8 @@ and that is what keeps templates in `license_unknown`. On one node (<node-a>, Co
 **Not built in this release.** Fleet placement of a template; model downloads (a missing model is a refusal that lists it); an
 acknowledgement path for a conditional or non-commercial template; staging of a template's sample input files; custom node
 packs; a CLI verb and a fleet task for it. An override that would retarget a model or input file, or name an embedding, is refused, not
-supported: the gate checks the file the template names, so a different file would run unchecked.
+supported: the gate checks the file the template names, so a different file would run unchecked (text that string nodes assemble while
+the graph runs is the one thing the checks do not see; step 3).
 One template running end to end under a GPU lease is the acceptance measurement of this tool, and it has not been run.
 
 ## Important flows

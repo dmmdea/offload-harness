@@ -11,7 +11,7 @@ import (
 // A TEMPLATE run (`comfy-run-graph.mjs --template NAME --manifest FILE`, offload_run_template) carries no graph file: the runner converts the
 // template once ComfyUI is up. What it loads is the model files of its runtime manifest, the list the readiness check and the licence gate
 // already read: `models/<class>/<name>` per entry, each found on the node before the run starts. An override sets values and never
-// retargets a model or names an embedding (the runner refuses one that tries). The manifest is the catalog's static reading of the template and the graph is the
+// retargets a model or names an embedding (the runner refuses one that tries; text that string nodes assemble while the graph runs is not seen, see docs/systems/mcp-server.md). The manifest is the catalog's static reading of the template and the graph is the
 // converter's, two readers of one file, so the manifest's set is the final graph's only as far as they agree. The gate in front of a run
 // (render/template-manifest.mjs verdictFor) refuses a template the catalog walk left a subgraph instance unexpanded in, and the catalog reads
 // the widget values the converter routes into a loader (both forms of widgets_values, and an active instance's own), but neither makes the

@@ -10,7 +10,7 @@
   `TEMPLATE_CONVERT_REFUSED`, and a model file the converted graph loads that the manifest does not name is `TEMPLATE_MODEL_UNLISTED`. An
   override sets values and never retargets a file or names an embedding: one that targets a model or input loader node, an input
   that holds a model file name, a value that is a model file name, or a string value with `embedding:` in it is refused as `override_is_file`,
-  because the licence gate, the FLUX bar and the trust-on-first-use check read only the models the template names. The manifest generator is `render/template-manifest.mjs` (templates to manifest entries: models as
+  because the licence gate, the FLUX bar and the trust-on-first-use check read only the models the template names (one limit is stated with the embeddings, below: text that string nodes assemble while the graph runs is not seen). The manifest generator is `render/template-manifest.mjs` (templates to manifest entries: models as
   `models/<class>/<name>` with the source and the hash a template declares, node packs, licence class, API or not, input files read or not).
 - **The gate.** This release runs a template only if it is not a paid-API one, not FLUX-family, needs no custom node pack, is readable and
   has a permissive licence class (or no weights). A paid-API template is a Defer (`deferred:true`, class `api_paid`, never cloud). Every
@@ -67,29 +67,58 @@
   and no file extension is involved, so a text override such as `embedding:evil_ti, a cat`, `embedding:evil_ti.pt, a cat` or
   `(embedding:evil_ti:1.2) cat` was accepted (only a value ending in `.safetensors` was refused), the runner's comparison saw no file, and the
   licence gate and trust on first use never read it, which contradicted "an override never retargets a file". One reading of the reference
-  (`embeddingRefs`, `embeddingCovered`, `mentionsEmbedding` in `templates-catalog.mjs`) now serves three surfaces.
+  (`embeddingRefs` and `embeddingCovered` in `templates-catalog.mjs`) serves the catalog and the runner's comparison; the override check keeps
+  its own, wider matcher (`mentionsEmbedding`), so that what it lets through is never a text the reader finds a file in.
+  - Where ComfyUI looks. Not in the directories of the class one after the other: `expand_directory_list` puts every embeddings root and every
+    subfolder below it (links followed) into a Python `set`, and `load_embed` opens the file of the first directory of that set that holds the
+    name, so the directory that answers is chosen by hash order and differs from one process to the next (a verbatim copy of the loop, over
+    hash seeds 0 to 11, opened `e.pt` of the root 5 times, `sd15/e.safetensors` 2 times and `sdxl/e.safetensors` 5 times). Two things follow. A
+    file that sits only in a subfolder (`sd15/foo.safetensors`, a common layout) is the file `embedding:foo` loads. And a name that more than one
+    directory holds (the root and a subfolder, two subfolders, two registered roots) is not one file: the trust record, the hash and the licence
+    approval would attach to a file ComfyUI may not open.
   - Override: any string value that contains `embedding:`, in any letter case, is refused as `override_is_file`. ComfyUI matches a lower-case
     word that starts with the identifier; matching it anywhere and in any case is the fail-closed side.
-  - Runner: a string input of the converted graph that contains the identifier is read as text and no longer as a file name. Each name it asks
-    for is reported as `models/embeddings/<name>` (the first is the `ref` of `TEMPLATE_MODEL_UNLISTED`) unless the manifest names, under
-    `models/embeddings/`, that name as written or with `.safetensors`, `.pt` or `.bin` appended: the whole path, case and slash direction
-    ignored, no base-name match (the file ComfyUI opens is the one at that path), and a name that is empty, absolute or has a `..` segment is
-    never covered. A manifest entry under another class does not cover it.
+  - Runner: a string input of the converted graph that names an embedding the way ComfyUI reads it is read as text and no longer as a file
+    name. Each name it asks for is reported as `models/embeddings/<name>` (the first is the `ref` of `TEMPLATE_MODEL_UNLISTED`) unless the
+    manifest names, under `models/embeddings/`, a file for it: the name as written or with `.safetensors`, `.pt` or `.bin` appended, at the top
+    of the directory or in any subfolder (whole path segments, never a base name that only ends alike; case and slash direction ignored), and a
+    name that is empty, absolute or has a `..` segment is never covered. A manifest entry under another class does not cover it.
   - Catalog: a prompt widget of an active node (or an active subgraph instance's own values; not a note, not a muted or bypassed node) that
     names an embedding is a requirement under the `embeddings` class with no source, unless an annotation of that class covers it by the
-    name or with one of the three extensions. A template whose own prompt names an unannotated embedding is therefore `license_unknown` and
-    refused; an annotated one is read by the licence gate like any weights file. Readiness resolves the extension the way ComfyUI does: each
-    directory of the class in its order, the name as written and then with the three extensions, the first file found. The runtime manifest
-    names that file (`models/embeddings/<name>.<ext>`, which the host-RAM figure can size, and the satisfier and the trust check can find);
-    a node with none is `models_missing`, listed by the name the text gives.
-  - Grammar: a name runs to the next whitespace, `<`, `[` or `)`, or the end of the text; a trailing `,` or `)` and a `:<weight>` (a number,
-    possibly signed or starting with a point) come off, repeatedly; an empty name is kept and refused. Edge cases: `embedding:,name` (ComfyUI
-    strips a leading comma on a second try) is reported unlisted under the comma-led name, which fails closed; a name with a trailing comma
-    whose comma-suffixed file exists is credited as the stripped name (ComfyUI tries the comma-suffixed file first); the readiness lookup is
-    case-exact like the other classes, so a file in another case is `case_mismatch`, not found.
-  - Measured read only on the installed package (`json 0.1.96`, 578 templates): 897 model entries before and after, 3 of them annotations of
-    the embeddings class, and no row differs in kind, licence class, FLUX flag, outcome or model list. The only `embedding:` text in the
-    package is in the markdown notes of four `video_minimax_h3_*` templates, which are not read (they are refused as `license_conditional`).
+    name or with one of the three extensions, in the root or a subfolder; the annotation then records the name it covers (`embedding_refs`). A
+    template whose own prompt names an unannotated embedding is therefore `license_unknown` and refused; an annotated one is read by the
+    licence gate like any weights file. Text that only looks like a reference to the override's wider matcher (`Embedding: a primer`,
+    `wordembedding:vec`) names nothing here.
+  - Readiness resolves a name the way ComfyUI does, directory by directory: the candidates are the name as written and then with the three
+    extensions, in the roots and every subfolder. One directory that holds a file is `present` and the runtime manifest names that file
+    (`models/embeddings/<sub>/<name>.<ext>` for one in a subfolder, which the host-RAM figure can size and the satisfier and the trust check
+    can find); within one directory the order is as written, `.safetensors`, `.pt`, `.bin`. More than one directory is the new status
+    `ambiguous`, listing the files, and the run is refused as `models_missing` with the entry named, so the manifest never names a file ComfyUI
+    might not open (a link that shows one file under two registered roots reads the same, because the inventory cannot tell a link from a
+    copy: register one root). An annotated file that is not the one ComfyUI opens for the name a prompt gives (a `.safetensors` beside an
+    annotated `.pt`) is the new status `shadowed`. The lookup is case-exact like the other classes, so a file in another case is
+    `case_mismatch`; a node with none is `models_missing`, listed by the name the text gives.
+  - Grammar: the reader is a port of the tokenizer path of `comfy/sd1_clip.py` (`token_weights`, `tokenize_with_weights`,
+    `_try_get_embedding`), compared with the extracted functions of that file on 150,000 generated texts with no difference. The text is cut
+    at parentheses and a closed group loses a numeric tail, so `(embedding:name:1.2)` is `name` and a bare `embedding:name:1.2` is the name
+    `name:1.2`, which ComfyUI fails to find; the identifier is lower case and starts the text or follows whitespace or a parenthesis, so
+    `Embedding:`, `wordembedding:` and `a,embedding:x` are not references, while `an embedding: soft light` is (ComfyUI looks for a file named
+    `soft`); whitespace after the identifier is skipped; the name ends at whitespace, `(`, `<` or `[` (an unescaped `)` with no group to
+    close stays in it); commas come off both ends; `\(` and `\)` are characters of the name. Deviations from ComfyUI, each named: the name
+    returned is the one after the comma retry, so a file whose own name ends in a comma, which ComfyUI opens first, is not looked for;
+    `embedding:` with no readable name, and a text nested more than 500 groups deep (ComfyUI reads about 900), are the empty name, which every
+    caller refuses; the LLM-based text encoders (built with `disable_weights`) do not cut the text at parentheses, and the reader follows the
+    CLIP tokenizer, the one embeddings are made for; the inventory skips `.git` directories (ComfyUI's walk enters them) and lists only the
+    class's extensions, so an extension-less file that ComfyUI would try first is not seen.
+  - Limit: the override check and the runner's comparison both read the string values of the graph, so an embedding assembled while the graph
+    runs by string nodes (a concatenation of two overrides, for example) is neither refused nor compared with the manifest, and the licence
+    gate, the hash and the trust record never see the file it loads. "An override never retargets a file or names an embedding" is true of the
+    values an override sets, not of text built from them.
+  - Measured read only on the installed package (`json 0.1.96`, 578 templates): the catalog is byte-identical before and after this round
+    (897 model entries, 3 of them annotations of the embeddings class), and so are the per-template verdicts and the readiness counts on a
+    snapshot of the measuring machine (649 requirements missing, 214 present). The only `embedding:` text in the package is in the markdown notes
+    of four `video_minimax_h3_*` templates, which are not read (they are refused as `license_conditional`). That snapshot holds no embedding
+    file, so the resolver was measured on fixture trees and on random trees on a real file system (see the tests below).
 - **Why a tool and not a `template=` argument on `offload_run_graph`.** Measured at 0.186.0: an average tool costs 1,019 tokens in the full
   profile and 672 compact, so one more tool is about +3.2% of the 31-tool full list. The registered design accepts that cost, and the
   `template=` argument was only its fallback for a cost that proved unacceptable. The new tool's own entry is 2,833 bytes of `tools/list` in
@@ -133,9 +162,28 @@
 - **Embedding tests.** Written red first: 18 tests failed on the code before the change (the three override shapes and the letter-case one,
   six of `unlistedModels`, `embeddingRefs`, the catalog requirement, annotation coverage and the subgraph instance, three readiness ones,
   and the verdict of a template with a baked-in embedding). The guards that already passed pin what must not move: a prompt that only
-  talks about embeddings goes through, a muted node and a note add nothing, and an annotated embedding runs. Mutations of the new code in a
-  scratch copy, each red: matching the identifier in lower case only (3 fail), candidate-major instead of directory-major resolution
-  (1), a class-agnostic manifest match (1), the weight left on the name (4).
+  talks about embeddings goes through, a muted node and a note add nothing, and an annotated embedding runs. The reading and the
+  resolution those tests first pinned were corrected afterwards; their tests and mutation checks are in the next bullet.
+- **Embedding lookup and grammar tests.** Written red first, one per behaviour: 13 tests of `render/templates-catalog.test.mjs` (seven of the
+  grammar, two of the catalog, three of readiness and one of `embeddingCovered`), 4 of `render/template-manifest.test.mjs` (an embedding held
+  only in a subfolder, an annotated one in a subfolder, a name held in the root and in a subfolder, an annotated file another file shadows), 2 of
+  `render/template-run.test.mjs`, and the root prose test `run_template_docs_test.go` (the docs say how ComfyUI finds an embedding and name the
+  string-node limit; it refuses the first wording of the lookup, a walk through the class directories in order that matched a whole path only). The tests that pinned the
+  old premise were replaced: "the first one in ComfyUI's order decides" (two roots) became the two-root ambiguous case, and "a nested listed name
+  is not matched by its base name alone" became its opposite. Guards written with them pass on the new code and bite under mutation: the
+  override check is at least as wide as the reader (a corpus), Python's whitespace set and float() rules, a text of 150,000 groups, a text
+  nested 600 deep, a model file name that holds an identifier-like word, and a file under another class. Two comparisons were run in a scratch
+  directory and are not committed: the reader against the extracted functions of `comfy/sd1_clip.py` on 150,000 generated texts (27,440 with a
+  reference), no difference (it found one: float() does not strip U+001C, which `str.split()` does); and the resolver against a verbatim copy of
+  `load_embed` over every order the directory set can take, on 600 random trees on a real file system (6,000 name checks: 1,457 present, 565
+  ambiguous, 3,978 missing), no difference. Thirty mutations of the new code, one per scratch copy of `render/`, each fail at least one test: the
+  suffix match of the resolver and of the coverage test, merging the subfolders of a root into one directory, merging the roots (one entry
+  per file), the last candidate winning, only the first root of a file, case-exact coverage, the directory-escape guard, an annotation not
+  verified against its names, not recorded, not passed to readiness, no case diagnosis, no wrong-class diagnosis, the ambiguous listing
+  emptied, no explanation of an unclear embedding in the refusal, a case-insensitive identifier (twice), a bare weight stripped, no cut at
+  parentheses, no skip of whitespace, any group tail as a weight, float() without `inf`, `nan` or digit underscores or with the wrong
+  whitespace, JavaScript's whitespace, escapes not honoured, no depth bound, a spread of a group's pieces, and a gate on the wide matcher in
+  the catalog and in the runner.
 - **Manifest-side normalisation tests.** `unlistedModels` lower-cases the manifest path, turns its backslashes into slashes and drops the
   `models/<class>/` prefix, and every test manifest was lower case with forward slashes, so no test could fail on that step. Both fixtures
   (`LISTED_MODELS` in `template-run.test.mjs`, `LISTED` in `comfy-run-graph.test.mjs`) now hold a mixed-case entry
@@ -147,8 +195,10 @@
   The runner's comparison against the converter's output for the real templates under a live ComfyUI: it is tested on injected graphs, on the
   two hand-written templates with their saved listing, and by unit, and the real package was only read by the catalog (a template the
   converter loads a file for that the catalog did not name would show as a `TEMPLATE_MODEL_UNLISTED` defer on a live run).
-  An embedding loaded by a live ComfyUI: the load order is read from ComfyUI's source (0.38.0), not run, and no template of the installed
-  package names one in an active prompt, so the new catalog path has no real template to be measured on.
+  An embedding loaded by a live ComfyUI: the directory set and the tokenizer path are read from ComfyUI's source (0.38.0) and compared with
+  its extracted functions in Python, not run in a live ComfyUI, and no template of the installed package names one in an active prompt, so the
+  catalog path has no real template to be measured on. The resolver on the real model tree of a node: the measuring machine's snapshot holds
+  no embedding file.
   One template running end to end under a GPU lease, the acceptance measurement of this tool, queued after this
   change. The production wiring of the conversion against a live ComfyUI (the `/object_info` and `/system_stats` reads in
   `comfy-run-graph.mjs`; the flow and the converter are tested with injected values, and the converter on saved listings). The time of a

@@ -3338,7 +3338,9 @@ and the models directory); and a class listing that is recursive, follows links,
 the extensions its core loaders accept, by path relative to the directory (so `sub/name` is not `name`, and a
 `.gguf` is not offered by a core loader). A requirement is `present` (or `present_class_unknown`: a loader
 file nobody annotated, met by its exact name in any class) or says why not: `missing`, `wrong_class` (and
-where the file is), `in_subfolder`, `case_mismatch`, `extension_not_listed`, `class_unregistered`.
+where the file is), `in_subfolder`, `case_mismatch`, `extension_not_listed`, `class_unregistered`, and, for an embedding (which
+ComfyUI finds in the roots and every subfolder through a set, so the directory that answers is chosen by hash order), `ambiguous` (more than
+one directory holds a file for the name) and `shadowed` (the annotated file is not the one ComfyUI opens for the name a prompt gives).
 `--mode basename-only` is the older shortcut (any file with that name, anywhere), kept so its numbers can be
 reproduced and compared. Only `local` templates are evaluated. A snapshot records the node's ComfyUI version
 and the hashes of `folder_paths.py` and `utils/extra_config.py`; `readiness` compares the hashes with the
