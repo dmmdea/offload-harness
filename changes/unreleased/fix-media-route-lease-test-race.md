@@ -42,11 +42,20 @@
     readers call it directly, without that seam (a record that cannot be read is when the heartbeat is the evidence of life, `keeper.go`).
 - **A shared open still meets one refusal: delete-pending.** For the instant a rename has marked the old entry for deletion and the new one has not taken
   its name, an open of the name fails with `ERROR_ACCESS_DENIED`, however it shares. This is the stray miss the first round could not explain (3 allowed per
-  run in `readrace_test.go`). `readSharedFile` retries a permission error `removeAttempts` times at `removePause` (the claim removal's bound, about 100 ms)
-  and returns every other failure at once; a file that stays unreadable costs one bounded wait and then the error as before.
-  - A behaviour change to note: `readRecordFile` now inherits that wait for a lease record that fails with a permission error, on every platform, Linux
-    included (where `OpenShared` is `os.Open`). It is bounded to about 100 ms per read and applies only to a permission error; the fault seam
-    (`UseReadFault`) sits in front of the wait, so the tests that simulate an unreadable record are not slowed.
+  run in `readrace_test.go`). On Windows `readSharedFile` retries a permission error `removeAttempts` times at `removePause` (the claim removal's bound,
+  about 100 ms) and returns every other failure at once; a file that stays unreadable costs one bounded wait and then the error as before.
+  - **Windows only.** The first form of the wait ran on every platform, and a review measured what that cost where the instant does not exist. Off Windows
+    `OpenShared` is `os.Open`, POSIX has no delete-pending state (`rename(2)` is atomic and an open descriptor never holds one up), so a permission error
+    there is a lasting refusal (a record written with a mode the reader cannot read) and the wait only delayed reporting it. Measured in a Linux
+    environment (WSL2, an unprivileged user, a memory-backed temp dir, mode-000 lease records, scratch lease roots), before the gate: one read of such a
+    record 106 ms, against microseconds for the plain read it replaced; `Leases()` 107, 214, 424 and 851 ms with 1, 2, 4 and 8 unreadable records; a lone
+    `TryAcquire` on a free card, which reads the records under the epoch lock, 537 ms, 1.08 s, 2.14 s and 4.22 s; and with 8 records two acquirers at
+    once, one granted after 4.23 s and the other refused after 2.98 s with `gpulease: the epoch lock at ... did not clear in 2s`. Nothing was
+    double-booked: it was latency and a lock timeout, never wrong data, and it needs a record the reader cannot read, which a hardened service writing
+    with a restrictive umask for a different reader would produce.
+  - The gate is a constant beside `OpenShared`, `sharedOpenMeetsDeletePending` (`true` in `openshared_windows.go`, `false` in `openshared_other.go`), read
+    through a variable (`deniedOpenMayClear`) so the wait itself is still tested on every platform. `readRecordFile` inherits the choice: off Windows a
+    permission error is one open and the error, as at the start of this branch. The fault seam (`UseReadFault`) sits in front of the read either way.
   - `lastHeartbeat` has no caller outside a test; it reads through `readSharedFile` too, so the three readers of `hb.<epoch>` stay alike.
 - **Proved** (a 36-thread Windows host; 30 busy-loop node processes started for each run and killed by pid afterwards; scratch paths shown as `<scratch>`).
   - Red under load, the test unfixed: `go test -c -o <scratch>/pipeline.test.exe ./internal/pipeline/`, then 4 concurrent copies of
@@ -91,6 +100,16 @@
   - **The stress test now allows no miss** (`strayMisses` is gone). Fixed, 150 runs of the stress test under the 30 burners (the first about 280 s of them
     loaded, the rest quieter as the burners expired): 0 misses of `Leases()` in 282,230 reads and 0 of `EpochIsCurrent` in 480,285, 150 of 150 passed. With the
     open reverted to `os.Open`, 3 of 3 runs red: `Leases()` missed 23, 28 and 31 reads and `EpochIsCurrent` 62, 55 and 53.
+  - **The gate, red, green and mutants** (`readretry_other_test.go`, off Windows; `readretry_windows_test.go`; the test binary built with
+    `GOOS=linux go test -c -o <scratch>/gpulease.test ./internal/gpulease/` and run in the Linux environment above as an unprivileged user, the
+    Windows tests on the Windows host). Red, before the gate: `TestOffWindowsAPermissionErrorIsReturnedAtOnce`, 5 runs of 4 subtests, 20 of 20 failed,
+    `made 21 opens, want 1 (took 104ms)` for both readers, with the refusal supplied by the open seam and with a real mode-000 file. Green, after: the same
+    5 runs, 20 of 20 subtests passed, with the three portable wait tests (forced on, 15 of 15) and the Windows default test (3 of 3 on the Windows
+    host). The same measurement after the gate, same method: one read of an unreadable record microseconds; `Leases()` 12, 11, 15 and 106 us with 1, 2, 4
+    and 8 unreadable records; a lone acquire 191, 196, 362 and 384 us; two acquirers with 8 records both granted, 5.9 ms and 0.38 ms. Mutants (applied
+    through a build overlay, the tree untouched): the gate removed from `readSharedFile`, 20 of 20 subtests red with `made 21 opens, want 1`, the
+    three portable wait tests still green; the constant set to `false` in the Windows build, `TestWindowsWaitsOutADeniedOpenByDefault` red 3 of 3
+    (`deniedOpenMayClear is false in a Windows build`), the others green.
 - **Not verified here.**
   - No GPU job, lease on a real card or seat was used: every lease in these runs is in a scratch lease root, with the stub runner.
   - The double-booking was shown with a held `DELETE`-access handle in a scratch lease root, which models the instant of the rename, and by a tight `Renew`
@@ -102,8 +121,13 @@
   - An unreadable heartbeat still falls back to the acquisition stamp (after the wait). That is the safe answer for a heartbeat that is absent, and the unsafe
     one for a heartbeat that exists and cannot be read for longer than the wait; the acquirer's sweep also asks `keeperAlive` for a record it cannot read, but
     not for a heartbeat it cannot read. Not changed here.
-  - Linux: the reader there is `os.Open` as before (`GOOS=linux go vet ./internal/gpulease/ ./internal/pipeline/`); the race is Windows-only and no Linux
-    host ran the stress.
+  - Linux: the reader there is `os.Open`, and a permission error on it is returned at once (the gate above). The gate was shown in a cross-compiled test
+    binary of `internal/gpulease` run in a Linux environment under WSL2, only with the tests named above and a measurement script, not with the whole
+    package, `internal/pipeline` or the reader stress; those were compiled and vetted for Linux (`GOOS=linux go vet ./internal/gpulease/
+    ./internal/pipeline/`), not run there. The race itself is Windows-only. No lease on a real card and no live lease directory was used.
+  - The claim file has the same two retries with no platform gate: `createClaim` retries a permission error and `removeClaim` retries any error,
+    `removeAttempts` times at `removePause`. They are older than this branch, concern the claim file and not a lease record, no finding covers them, and
+    they were left as they were.
   - The epoch counter, the tokens and the waiters are still read with `os.ReadFile`; no finding covers them.
   - `windowAndKill` still reads the lease twice. A lease that ended between the two reads (the 2 s render killed and released) would also show
     `got []`; it needs a stall of seconds between two adjacent statements and was not seen.
