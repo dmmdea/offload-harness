@@ -40,18 +40,8 @@ func readHostMemory() (HostMemory, bool) {
 	var m memoryStatusEx
 	m.Length = uint32(unsafe.Sizeof(m))
 	r, _, _ := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&m)))
-	if r == 0 || m.TotalPhys == 0 {
+	if r == 0 {
 		return HostMemory{}, false
 	}
-	const gib = 1 << 30
-	used := uint64(0)
-	if m.TotalPageFile > m.AvailPageFile {
-		used = m.TotalPageFile - m.AvailPageFile
-	}
-	return HostMemory{
-		PhysicalGiB:    float64(m.TotalPhys) / gib,
-		AvailableGiB:   float64(m.AvailPhys) / gib,
-		CommitUsedGiB:  float64(used) / gib,
-		CommitLimitGiB: float64(m.TotalPageFile) / gib,
-	}, true
+	return hostMemoryFromStatus(m.TotalPhys, m.AvailPhys, m.TotalPageFile, m.AvailPageFile)
 }
