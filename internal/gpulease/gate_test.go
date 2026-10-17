@@ -301,3 +301,32 @@ func TestWithTheGateOffAMissingNameIsAnsweredAtOnce(t *testing.T) {
 		t.Errorf("a read with the gate off paused %d times, want 0", got)
 	}
 }
+
+// A name the look finds but the open does not (the open keeps answering "not there" for a file that is) is read again only until the
+// same deadline: it ends as an I/O failure and not as a spin, and not as an absence for a file that is there.
+func TestANameTheLookFindsButTheOpenDoesNotIsReadAgainOnlyUntilTheDeadline(t *testing.T) {
+	onGateClock(t)
+	path := filepath.Join(t.TempDir(), "hb.7")
+	if err := os.WriteFile(path, []byte("42"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	var opens atomic.Int64
+	old := openSharedFile
+	openSharedFile = func(p string) (*os.File, error) {
+		if opens.Add(1) > 1000 {
+			return nil, errors.New("runaway: the read is still looping") // ends a loop with no deadline as a failure and not as a hang
+		}
+		return nil, &fs.PathError{Op: "open", Path: p, Err: fs.ErrNotExist}
+	}
+	t.Cleanup(func() { openSharedFile = old })
+	_, err := readSharedFile(path)
+	if !errors.Is(err, errRenameInFlight) || errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("readSharedFile = %v, want an I/O-class errRenameInFlight after the deadline (opens: %d)", err, opens.Load())
+	}
+	if got, want := gatePauses.Load(), int64(absentBudget/absentPause); got != want {
+		t.Errorf("the read paused %d times, want %d (the first look is free, the rest are paced to the deadline)", got, want)
+	}
+	if got := gateExpiries.Load(); got != 1 {
+		t.Errorf("gateExpiries = %d, want 1", got)
+	}
+}
