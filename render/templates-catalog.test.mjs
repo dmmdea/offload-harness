@@ -4054,6 +4054,14 @@ test("readiness: an annotation that names a file by one path of a link inside th
   assert.deepEqual(annotatedGot(files, links, "alias/e.pt", { embedding_refs: ["e"] }), ["present", null]);
 });
 
+test("readiness: an inventory that records no real paths compares an annotation with a prompt's name by the path", () => {
+  const inv = invFrom({ ...TREE, [EMB("evil_ti.pt")]: { size: 7 }, [EMB("evil_ti.safetensors")]: { size: 7 } });
+  for (const f of [...inv.classes.embeddings.files, ...inv.classes.embeddings.unlisted_files]) { delete f.reals; delete f.ids; }
+  const status = (name) => C.readiness([req("embeddings", name, { annotated: true, embedding_refs: ["evil_ti"] })], inv).requirements[0].status;
+  assert.equal(status("evil_ti.pt"), "shadowed", "the file ComfyUI tries first in the directory is another path");
+  assert.equal(status("evil_ti.safetensors"), "present");
+});
+
 test("readiness: a registered root inside another registered root is the same directory string, which ComfyUI's set holds once", () => {
   const nested = [{ text: "p:\n  base_path: D:/x/comfy/models\n  embeddings: embeddings/s2\n", dir: "D:/x/comfy" }];
   const [status, resolved] = linkedGot([EMB("s2/foo.bin")], {}, "foo", nested);

@@ -1568,14 +1568,21 @@ function embeddingHits(files, name, fold = false, folding = new Set()) {
 // varies from run to run: the files are listed, and no file may be named), `case_mismatch` (only a file in another case, under a root
 // whose volume is case-sensitive, where ComfyUI does not find it) or `missing`.
 function resolveEmbedding(c, name) {
+  return lookupEmbedding(c, name).result;
+}
+
+// lookupEmbedding: resolveEmbedding with the file a `present` answer opened, as the key of its hit (`file`: the file system's id for it, or its
+// real path, or null when the inventory records neither). One file can have two paths under the roots (a root registered inside another, a
+// link inside a root) and the answer names it by the first-sorted one, so two answers are about the same file when their keys are equal.
+function lookupEmbedding(c, name) {
   const hits = embeddingHits(c.candidates, name, false, c.folding);
-  if (hits.length === 1) return { status: "present", resolved: hits[0].rel };
+  if (hits.length === 1) return { result: { status: "present", resolved: hits[0].rel }, file: hits[0].real };
   if (hits.length > 1) {
-    return { status: "ambiguous", found: [...new Set(hits.map((h) => h.rel))].sort(), found_in: hits.map((h) => ({ class: "embeddings", rel: h.rel, dir: h.dir })) };
+    return { result: { status: "ambiguous", found: [...new Set(hits.map((h) => h.rel))].sort(), found_in: hits.map((h) => ({ class: "embeddings", rel: h.rel, dir: h.dir })) }, file: null };
   }
   const folded = embeddingHits(c.candidates, name, true, c.folding);
-  if (folded.length > 0) return { status: "case_mismatch", found: [...new Set(folded.map((h) => h.rel))].sort() };
-  return { status: "missing" };
+  if (folded.length > 0) return { result: { status: "case_mismatch", found: [...new Set(folded.map((h) => h.rel))].sort() }, file: null };
+  return { result: { status: "missing" }, file: null };
 }
 
 // checkEmbedding: an embedding is named by the text that loads it, not by a file: ComfyUI tries the name as written and then with
@@ -1586,11 +1593,13 @@ function resolveEmbedding(c, name) {
 // `case_mismatch`, because the licence, the hash and the trust record attach to the annotated file and not to the one that gets loaded.
 // A name no file answers is reported as for any other class when a file of another class does.
 function checkEmbedding(name, directory, c, inv, mode, result, refs = []) {
-  let found = resolveEmbedding(c, name);
+  const looked = lookupEmbedding(c, name);
+  let found = looked.result;
   if (found.status === "present") {
     for (const ref of refs) {
-      const r = resolveEmbedding(c, ref);
-      if (r.status === "present" && r.resolved === found.resolved) continue;
+      const { result: r, file } = lookupEmbedding(c, ref);
+      // the same file: by its key when the inventory records one (it does for every file or for none), else by the path both answers name
+      if (r.status === "present" && (looked.file === null ? r.resolved === found.resolved : file === looked.file)) continue;
       found = r.status === "present" ? { status: "shadowed", found: [r.resolved] } : r;
       break;
     }
