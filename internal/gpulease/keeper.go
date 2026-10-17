@@ -36,7 +36,7 @@ func (m *Manager) keeperSignOfLife(epoch uint64, record string) time.Time {
 		note(fi.ModTime())
 	}
 	noteHeartbeat := func(path string) {
-		b, err := os.ReadFile(path)
+		b, err := readSharedFile(path)
 		if err != nil {
 			return
 		}

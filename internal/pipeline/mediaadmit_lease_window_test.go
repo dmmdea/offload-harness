@@ -34,15 +34,21 @@ var leaseWindowHosts = []struct {
 	{"whole-node host", true},
 }
 
-// theOneLeaseWindow is the declared window of the single live lease: its end minus its acquisition, read from the record.
-// The two readings are taken a moment apart, so the result is the stamped TTL less a few milliseconds.
+// theOneLeaseWindow is the declared window of the single live lease: its end minus its acquisition, both stamped on the record by
+// the acquirer. It is read from the record, not from the clock: an earlier form added time.Until(ExpiresAt) to Info.Age, which are
+// two readings of the clock taken at different moments, and a stall of the test between them (a loaded host) came out as a
+// shorter window ("the lease window is 1.046s; the call's own timeout is 2s").
 func theOneLeaseWindow(t *testing.T, f *admitFixture) time.Duration {
 	t.Helper()
 	leases := f.m.Leases()
 	if len(leases) != 1 {
 		t.Fatalf("want one live lease while the render runs, got %+v", leases)
 	}
-	return time.Until(leases[0].ExpiresAt) + leases[0].Age
+	info, rec, _ := f.m.InspectDetail()
+	if !info.Held || rec == nil {
+		t.Fatalf("the one live lease %+v could not be read back as a record while the render runs: %+v", leases, info)
+	}
+	return time.Duration(rec.ExpiresAtMs-rec.AcquiredAtMs) * time.Millisecond
 }
 
 // wantWindow fails unless got is want, to the second (the stamp is in milliseconds, the reads are a moment apart).

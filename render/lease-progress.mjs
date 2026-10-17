@@ -35,10 +35,12 @@
 // evidence, it must never cost the render.
 //
 // Dependency-free, Node 18+. Standalone on purpose (it does not import gpu-lock.mjs, which imports half the
-// render layer, and comfy-submit.mjs imports this): the lease-record reader below is the same two paths
-// gpu-lock.mjs readEpochRecord / readLease read, pinned by lease-progress.test.mjs.
-import { appendFileSync, readFileSync } from "node:fs";
+// render layer, and comfy-submit.mjs imports this; its one import is lease-read.mjs, a leaf with no imports of its
+// own): the lease-record reader below is the same two paths gpu-lock.mjs readEpochRecord / readLease read, pinned by
+// lease-progress.test.mjs.
+import { appendFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { readSharedJson } from "./lease-read.mjs";
 
 /** The env var `gpu reserve` sets on the command it wraps: the absolute path of the lease's progress file. */
 export const PROGRESS_FILE_ENV = "GPU_LEASE_PROGRESS_FILE";
@@ -51,9 +53,10 @@ export const PROGRESS_FILE_ENV = "GPU_LEASE_PROGRESS_FILE";
 export const BEAT_EVERY_MS = 30_000;
 
 // The lease record the Go side wrote for this epoch: a card-scoped lease keeps e/<epoch>.json, a whole-node
-// lease meta.json (internal/gpulease; render/gpu-lock.mjs readEpochRecord / readLease read the same two).
+// lease meta.json (internal/gpulease; render/gpu-lock.mjs readEpochRecord / readLease read the same two). It reads
+// through lease-read.mjs, as they do: Go replaces both by rename-over, and a refused open of that instant is waited out there.
 function readJson(path) {
-  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
+  return readSharedJson(path);
 }
 
 function recordProgressFile(env, readFile) {

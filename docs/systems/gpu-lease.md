@@ -45,6 +45,7 @@ other on a single shared card.
 | `internal/gpulease/yield.go`, `gpu_yield*.go` | **the yield request (plan P11, ADR 0086)**: the policy (`ParseOnOverdue`, `SetDefaultOnOverdue`), the asker, the `yield.<epoch>` sidecar, the holder's ticker, the read-only `YieldViewOf` every surface words from; the root files hold the shell runner (`sh -c`, `cmd.exe /d /s /c`, hidden) and the `--detach` report |
 | `gpu_terms.go` | the holders' side of terms: the tick the wrapper form and the detached holder run at the end of a term, the over-cap warning, and the argv of the hidden holder (`--release-at-expiry`) |
 | `gpu_progress.go`, `internal/gpulease/progressdir.go`, `render/lease-progress.mjs` | the progress contract of a wrapped render helper (F8): the helpers the wrapper declares one for, the minted file and its sweep, `GPU_LEASE_PROGRESS_FILE`, and the helper-side heartbeat |
+| `render/lease-read.mjs`, `render/gpu-lock.mjs` | **the Node readers of the lease**: `readSharedSync` / `readSharedJson` (a refused open waited out to a 100 ms deadline, on Windows only; a missing file read once), behind `readLease`, `readEpochRecord`, `readCardClaim`, the fence `checkInheritedLease`, and the `render/lease-progress.mjs` record reader. Node never writes these files |
 | `gpu_reserve_devices.go`, `gpu_cards.go`, `gpu_doctor.go` | which cards a reserve holds (`--devices`, `--cards`, derivation, the queue), `gpu cards` and the status table, `gpu doctor` |
 | `internal/gpulease/owner.go` | **ownership (ADR 0070)**: who asked for a lease (`Owner`), the session registry, the first-observer orphan marker, the progress contract and `Standing`, the derived reading every status surface shares |
 | `internal/gpulease/explain.go` | the sentence a waiter reads when the lease it is queued behind is stalled, orphaned or overdue, and the installed orphan grace. READ-ONLY: it reads the orphan marker a status surface recorded and never writes it or takes the epoch lock |
@@ -402,6 +403,102 @@ concurrency test rather than by reading:
   `TestReserveRenewsTheLeaseWhileDraining` / `TestReserveRenewsTheLeaseWhileWarmingBack` (~1 run in
   24) and, in production, could leave the `draining` stamp on a held lease (cordoning the seat for
   the rest of its window) or drop a heartbeat renewal.
+- **A rename-over blocks a reader, too.** Windows checks sharing both ways. While the rename runs, the
+  system holds a handle on the old entry with `DELETE` access, so an open whose own share mode lacks
+  `FILE_SHARE_DELETE` fails with `ERROR_SHARING_VIOLATION`, and
+  `os.ReadFile` is such an open. A reader that took that failure for "no record" answered "no lease" for
+  a lease that was held: `reader.v2` skips a record it cannot read, so `Leases()` came back empty and
+  `EpochIsCurrent`, the fence a render child asks, said the lease was not its own. A media route's own
+  test saw `want one live lease while the render runs, got []` on a loaded box, 2 runs in 24 under
+  30 busy-loop processes. `readRecordFile` (`internal/gpulease/hostram.go`) now opens the lease records
+  (`meta.json`, `e/<epoch>.json`) with `OpenShared`, which shares read, write and delete: it does not fail
+  against the rename, and it reads the old record whole until the new one is in place, as a POSIX reader
+  does. Measured under a concurrent rewrite
+  (`TestAHeldLeaseNeverReadsAbsentWhileItsRecordIsRewritten`, `internal/gpulease/readrace_test.go`): with
+  `os.ReadFile`, `Leases()` missed 1 read in 30 to 60 and `EpochIsCurrent` about 1 in 15; through
+  `OpenShared`, none. A bounded retry of the failed plain read was tried first and dropped: under
+  saturating load the sharing violation lasted up to 1.4 s, so a bound short enough for a status call
+  left misses, and the open is the cause.
+  - **The heartbeat is read the same way, and it matters more.** `hb.<epoch>` is rewritten by `Renew`
+    with the same rename over the live name, and `heartbeatAt`, `lastHeartbeat` and `keeperSignOfLife`
+    read it through `readSharedFile`. Once a lease is past its declared window the heartbeat is the only
+    thing that keeps it: the reclaim rule needs a stale heartbeat AND an expired window. A heartbeat
+    read that failed fell back to the stamp written at acquisition, so a live lease past its window (a
+    `gpu reserve` command that outran its `--for`, a detached hold past its window) read as reclaimable,
+    an acquirer's sweep removed it, and the card was granted to a second job while the first still ran
+    on it. A record that cannot be read is only skipped; a heartbeat that cannot be read is the
+    dangerous case. `TestALiveLeasePastItsWindowIsNotHandedToAnotherJobWhileItsHeartbeatIsBeingRenewed`
+    holds a `DELETE`-access handle on the heartbeat and asks for the card from a second process.
+  - **A shared open still meets one more refusal.** For the instant the rename has marked the old entry
+    for deletion and the new one has not taken its name, the file is delete-pending and every open of
+    the name fails with `ERROR_ACCESS_DENIED`, whoever shares what. `readSharedFile` waits that out: a
+    permission error is retried `removeAttempts` times at `removePause` (about 100 ms, the claim
+    removal's bound) and any other failure is returned at once. Measured on a loaded host with a
+    heartbeat renewed in a loop: 5 failed reads in about 124,000 without the wait, none in about
+    108,000 with it. A file that stays unreadable is waited out once, not once per read (below).
+  - **The wait is Windows only.** Off Windows nothing is delete-pending (`rename(2)` is atomic and an
+    open descriptor never holds one up), so a permission error on a record is a lasting refusal and
+    `readSharedFile` returns it at once. The choice is the constant `sharedOpenMeetsDeletePending`
+    beside `OpenShared`, and `TestOffWindowsAPermissionErrorIsReturnedAtOnce` pins that the open is
+    made once. With the wait on, a mode-000 record cost about 108 ms per read: `Leases()` 108 ms per
+    such record, and an acquirer, which reads the records under the epoch lock, 4.2 s with eight,
+    enough for a second acquirer to give up on the lock's 2 s. Those figures are from a scratch
+    measurement in a Linux environment, recorded in the change fragment, not from a test in the tree.
+    On Windows the same lasting refusal is waited out once per file (the bullet after next).
+  - **The Node readers wait the same refusal out** (`render/lease-read.mjs`). `readLease`, `readEpochRecord` and
+    `readCardClaim` (`render/gpu-lock.mjs`; the three behind `checkInheritedLease`, the fence a render runs before an
+    irreversible action) and the lease-progress reader read these files through `readSharedSync` / `readSharedJson`.
+    libuv opens with `FILE_SHARE_DELETE`, so Node never meets the sharing violation; it does meet the delete-pending
+    instant, as `EPERM` (a file held delete-pending reads exactly that, and `ENOENT` once the last handle closes). A
+    `null` record for a card lease falls through to `meta.json`, which a card lease never writes, so a refused open read
+    as "this lease is not current" and the render aborted. The helper retries `EPERM` and `EACCES` until a 100 ms deadline,
+    pausing 5 ms with `Atomics.wait`, and returns `null` at once for a missing file or any other error; the wait is on
+    only on Windows (`policy.waitsOutDenied`). The bound is a deadline and not a count of pauses because
+    `Atomics.wait(5)` sleeps a whole timer tick on Windows (15.4 ms measured), so 20 pauses were 308 ms. Plain
+    `readFileSync` missed nothing in about a million reads against 55,000 renames issued (half of those runs renamed a link of one
+    seed file, which replaces nothing after the first pass; the fragment says so), so the helper guards an instant that
+    measurement could not provoke. `render/lease-read.test.mjs` (the helper and the five readers, with the refusal
+    injected) and `render/lease-read-stress.test.mjs` pin it. The stress test runs a writer in another process that renames a
+    different inode over each of three lease files in turn (two seeds per file, alternated; the writer counts the replacements and
+    the test wants every rename to be one) while the five readers loop, and allows no miss. It also wants some of the writer's
+    renames refused on Windows (the readers and the rename really met: 1 to 6 per 600 to 740 renames measured) and none elsewhere,
+    where `rename(2)` is atomic, so it cannot pass without having raced. Its first form linked one seed, which on Linux died on
+    `EEXIST` at the second pass and on Windows renamed a link onto itself (9 real replacements in 4,761 renames, nothing refused).
+    It ran three times on Windows (every rename a replacement) and three times on Linux under WSL (about 16,000 renames a run, 0
+    refused, 0 misses).
+  - **A file that is not there is never waited on, on any platform, and no read of one under the epoch lock
+    multiplies a wait.** `readSharedFile` retries a permission error only; a missing file is one open and the error. After a release,
+    `Leases()` opens `meta.json` once, `EpochIsCurrent` opens `e/<epoch>.json` and `meta.json` once each, and the
+    heartbeat readers open `hb.<epoch>` once, with no pause
+    (`TestAReleasedLeaseReadsAbsentAtOnceAndNoReadWaitsForIt`); a grant whose sweep finds the three records it reads deleted
+    under the lock opens each once and pauses never (`TestAMissingOrDeletedRecordCostsOneOpenAndNoWaitUnderTheEpochLock`).
+    The only reads that wait under the lock are of a file that exists and is refused. For the instant `Renew` swaps a
+    live lease's heartbeat (`Renew` does not take the epoch lock) that is one wait that clears, and it is what keeps the
+    sweep from judging a live lease stale. `readRetries` counts the pauses, as a test seam.
+  - **A file refused for good is waited out once, not once per read.** A refusal still there when the wait ends is a
+    lasting fault (a deny-read ACL on a lease file, a foreign delete whose handle never closes), not a rename in flight.
+    A grant reads each record five times and each heartbeat seven inside one hold of the epoch lock (the sweep, the scan
+    for the unreadable and the verify each go over them), so the wait paid per read held the lock for about 500 ms per
+    refused record. `readSharedFile` therefore remembers a file that outlasted its wait for `refusedMemory` (5 s): a read
+    of it in that time opens it once, so a repair is read at once, and takes no pause if it is still refused; the first
+    open that succeeds forgets it. The memory is per file, and a refusal that clears inside the wait is never remembered,
+    so the heartbeat of a live lease keeps its whole wait. Pauses for a grant of a free card with three leases held,
+    the refusal injected at the open seam: one refused record 100 before and 20 after, one refused heartbeat 140 and 20,
+    six refused files 360 and 120 (654 ms). With real deny-read ACLs on a scratch root and two acquirers 30 ms apart: one
+    record 541 ms and 958 ms before, 113 ms and 111 ms after; six files 1.97 s and 3.57 s before, 648 ms and 624 ms
+    after. What remains is one wait (about 110 ms) for each refused file, so a second acquirer's 2 s spin is reached
+    at about eighteen files refused at once. `TestALastingRefusalOfOneRecordIsWaitedOutOnceByAGrant`,
+    `TestALastingRefusalOfOneHeartbeatIsWaitedOutOnceByAGrant`,
+    `TestEveryRecordAndHeartbeatThatIsLastingRefusedIsWaitedOutOnceByAGrant` and
+    `TestAFileRefusedForGoodIsWaitedOutOnceNotOnEveryRead` pin the counts; three more pin that a repair is seen at once,
+    that the memory is per file, and that it runs out.
+  - **Linux.** Nothing is delete-pending, so no read waits and none is missed.
+    `TestOnLinuxConcurrentRenameOverOfARecordAndItsHeartbeatIsNeverMissedAndNeverWaitedFor` rewrites a held lease's record
+    (`Restamp`) and heartbeat (`Renew`) in loops while `Leases()`, `EpochIsCurrent` and the heartbeat read poll: 50 runs
+    in a Linux environment, 0 misses in about 450,000 reads, 0 refused opens, 0 pauses. The Node readers on Linux are covered by
+    `render/lease-read-stress.test.mjs` (above), which wants no refused rename there.
+  - The epoch counter, the tokens and the waiters are still read with `os.ReadFile`; no finding covers
+    them yet.
 
 Neither of the first two is defensive padding: with waiters polling once a second, both races are
 ordinary traffic. Measured under six concurrent acquire/release workers, 1 in 48 cycles failed
