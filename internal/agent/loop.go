@@ -308,6 +308,7 @@ type Loop struct {
 	skeletonPrune  bool                          // enable the skeleton rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
 	gcfCompact     bool                          // enable the lossless GCF rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
 	toolResultCap  int                           // max chars of ONE tool result kept in the transcript (0 => derive from window)
+	reducer        *evidenceReducer              // the optional evidence-preserving reducer for build/test results (rung_reducer.go); nil = off
 	// tokenCal corrects the compaction budget using the server's own token
 	// counts — the fix for the estimator defect that let three real
 	// transcripts be rejected while the ladder declined to compact (ADR 0017).
@@ -1825,6 +1826,16 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			// serialized into the MCP response, so an untrimmed note would smuggle
 			// the very bytes this cap exists to bound past the loop boundary.
 			content, _ = contextbudget.Trim(content, l.toolResultCapChars())
+			// Evidence reducer (rung_reducer.go, default off): a build or test result of
+			// 4 KiB or more becomes a receipt whose every quote was found in the output,
+			// or stays exactly as it is. After the cap and the rules, so it compares with
+			// the bytes the transcript would otherwise carry; before the read budget, the
+			// effect record and the pager, so each of them sees what is really kept. Tool
+			// output only (a command that ran and succeeded as a call), never a refusal or
+			// an error, and never the re-run of a call the model asked for again (pinned).
+			if l.reducer != nil && eff == EffectCommitted && !isErr && !pinned[call.ID] {
+				content = l.reduceEvidence(ctx, call, content)
+			}
 			// The read budget is charged HERE, at the length the transcript keeps
 			// and the effect ledger records as obs_chars (D-103).
 			reads.note(call, content, eff, isErr)
@@ -1958,7 +1969,7 @@ func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg
 		// or its unit dropped), "use the result you already have" would be a
 		// lie with no way out. Re-execute ONCE per pair and pin the fresh
 		// result; every later repeat is refused as usual.
-		if id != "" && !reExecuted[key] && resultDestroyed(msgs, id) {
+		if id != "" && !reExecuted[key] && (resultDestroyed(msgs, id) || (l.reducer != nil && resultIsReceipt(msgs, id))) {
 			reExecuted[key] = true
 			pinned[call.ID] = true
 			return l.dispatch(ctx, call)

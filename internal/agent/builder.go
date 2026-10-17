@@ -52,6 +52,10 @@ type BuildConfig struct {
 	// AuditChain (register SF-08, config audit_chain): hash-chain this run's rows on the
 	// trail (run_id, seq, prev_sha256) and close the run with EndAudit.
 	AuditChain bool
+	// EvidenceReducer (config agent_evidence_reducer) installs the evidence-preserving
+	// reducer for build and test results over Offload, the cascade seam. Off by
+	// default; with no Offload it cannot be installed and Build says so in Notes.
+	EvidenceReducer bool
 	// AuditEnforcedByKey (SF-02): the trail is enforcing because audit_all_doors=enforce
 	// asked for it; a denial it causes then names the key and the way out.
 	AuditEnforcedByKey bool
@@ -470,6 +474,14 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	}
 	if cfg.Memory != nil {
 		loop = loop.WithMemory(cfg.Memory)
+	}
+	if cfg.EvidenceReducer {
+		if cfg.Offload == nil {
+			res.Notes = append(res.Notes, "agent_evidence_reducer is on but this build has no cascade seam (Offload), so the evidence reducer is not installed")
+		} else {
+			loop = loop.WithEvidenceReducer(cfg.Offload)
+			res.Notes = append(res.Notes, "evidence reducer: build and test results of 4 KiB or more become receipts whose quotes were found in the output, or stay raw")
+		}
 	}
 	if !cfg.EnvRules.IsZero() {
 		compiled, cerr := CompileEnvRules(cfg.EnvRules)
