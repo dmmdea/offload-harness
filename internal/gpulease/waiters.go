@@ -246,7 +246,7 @@ func (m *Manager) registerWaiter(class Class, opts Options) (Waiter, func()) {
 		since, resumed = tok.Since(), tok.ID
 	}
 	w := Waiter{PID: pid, Class: class, Reason: clipCommand(opts.Reason), SinceMs: since.UnixMilli(), Devices: opts.Devices, Token: resumed,
-		HostRAMGiB: max(opts.HostRAMGiB, 0)}
+		HostRAMGiB: max(opts.hostLoad().TouchGiB, opts.hostLoad().CommitGiB)}
 	if opts.Wait > 0 {
 		// The wait is the record's own: the debris cap is derived from it, not from the longest
 		// wait anyone is expected to pass (waiterOutlived).

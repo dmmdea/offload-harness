@@ -9,7 +9,7 @@ package gpulease
 // (AllocInput.DisplayCapPct 0) and not one the reading could not place, not claimed by a live
 // lease (a whole-node lease claims every card), not busy under a foreign compute process, and
 // its free VRAM fits the footprint; and the HOST's memory admits the RAM the job declares
-// (gpuprobe.HostRAMAdmits, the rule the lease grant itself applies, hostram.go).
+// (gpuprobe.HostRAMAdmitsLoad, the rule the lease grant itself applies, hostram.go).
 // The display card is open to the allocator at all times, up to a share of its total VRAM
 // (A-RAM-15, the operator's 60 percent rule): the VRAM in use now, the desktop's included, plus
 // the job's declared footprint must stay at or under DisplayCapPct of the card (fitsCard).
@@ -100,13 +100,16 @@ type AllocInput struct {
 	DisplayFloorGiB float64
 	// FootprintGiB is the VRAM the job needs free on EACH card (0 = not declared).
 	FootprintGiB float64
-	// Host RAM term, the one rule the lease grant applies (gpuprobe.HostRAMAdmits): the host's memory
-	// now, the job's declared need, the part of the leases ALREADY GRANTED that has not loaded yet
-	// (Manager.HostRAMPending) and the headroom to keep. Here it is advisory (it keeps the allocator
+	// Host RAM term, the one rule the lease grant applies (gpuprobe.HostRAMAdmitsLoad): the host's memory
+	// now, the job's declared need (HostNeedGiB the working set it touches, HostNeedCommitGiB the commit it is charged, 0 =
+	// the same figure), the part of the leases ALREADY GRANTED that has not loaded yet in both quantities (HostPending,
+	// Manager.HostRAMPendingLoad) and the headroom to keep. Here it is advisory (it keeps the allocator
 	// from picking cards a grant would then refuse); the grant, under the epoch lock, is the authority.
-	HostMem                                      gpuprobe.HostMemory
-	HostMemOK                                    bool
-	HostNeedGiB, HostPendingGiB, HostHeadroomGiB float64
+	HostMem                        gpuprobe.HostMemory
+	HostMemOK                      bool
+	HostNeedGiB, HostNeedCommitGiB float64
+	HostPending                    gpuprobe.HostLoad
+	HostHeadroomGiB                float64
 	// Min and Max bound how many cards to take (1 <= Min <= Max).
 	Min, Max int
 }
@@ -221,7 +224,11 @@ func Allocate(in AllocInput) (Allocation, error) {
 	sort.SliceStable(claimedFit, func(i, j int) bool { return less(claimedFit[i], claimedFit[j]) })
 	sort.SliceStable(skipped, func(i, j int) bool { return skipped[i].Index < skipped[j].Index })
 
-	host := gpuprobe.HostRAMAdmits(in.HostMem, in.HostMemOK, in.HostNeedGiB, in.HostPendingGiB, in.HostHeadroomGiB)
+	hostNeed := gpuprobe.HostLoad{TouchGiB: in.HostNeedGiB, CommitGiB: in.HostNeedCommitGiB}
+	if hostNeed.CommitGiB <= 0 {
+		hostNeed.CommitGiB = hostNeed.TouchGiB
+	}
+	host := gpuprobe.HostRAMAdmitsLoad(in.HostMem, in.HostMemOK, hostNeed, in.HostPending, in.HostHeadroomGiB)
 	if !host.OK || len(ok) < in.Min {
 		err := &NoCardsError{Want: in.Min, Have: len(ok), Skipped: skipped}
 		if !host.OK {

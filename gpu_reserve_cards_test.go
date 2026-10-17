@@ -237,7 +237,7 @@ func TestResolveAutoCardsWaitsForAShortSupplyThenRefusesAtTheDeadline(t *testing
 	build := func() (gpulease.AllocInput, error) {
 		polls++
 		// Host RAM is short for the first two reads (committed 99 of 100 GiB), then recovers.
-		host := gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 1, CommitUsedGiB: 99, CommitLimitGiB: 160}
+		host := gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 1, CommitUsedGiB: 99, CommitLimitGiB: 100}
 		if polls >= 3 {
 			host = roomyTestHost
 		}

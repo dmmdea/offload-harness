@@ -2,7 +2,7 @@ package gpualloc
 
 // F58 (c): the allocator's pre-filter applies the grant's host-RAM rule before it picks a card, and the rule's
 // third term is the part of the leases ALREADY GRANTED that has not loaded yet (gpuprobe.HostRAMAdmits: committed + need +
-// pending). BuildInput feeds it from Manager.HostRAMPending. Deleting that one line (HostPendingGiB) left every test green,
+// pending). BuildInput feeds it from Manager.HostRAMPending. Deleting that one line (HostPending) left every test green,
 // so the allocator would pick a card for a job the grant is about to refuse because a lane granted a moment earlier was
 // still loading its weights: the very second-lane-into-the-gap the term exists to stop.
 
@@ -34,15 +34,15 @@ func TestBuildInputCarriesWhatGrantedLeasesHaveYetToLoadAndTheAllocatorUsesIt(t 
 	// holder has yet to load it does not (30 + 40 + 40 > 92).
 	deps := hostDeps(cards)
 	deps.HostMemory = func() (gpuprobe.HostMemory, bool) {
-		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 85, CommitUsedGiB: 30, CommitLimitGiB: 160}, true
+		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 85, CommitUsedGiB: 30, CommitLimitGiB: 100}, true
 	}
 	cfg := config.Config{}
 	in, err := BuildInput(context.Background(), m, cfg, Need{RAMGiB: 40}, deps)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if in.HostPendingGiB < 39 || in.HostPendingGiB > 40.001 {
-		t.Fatalf("HostPendingGiB = %.2f, want the 40 GiB the granted lease has not loaded (Manager.HostRAMPending)", in.HostPendingGiB)
+	if in.HostPending.TouchGiB < 39 || in.HostPending.TouchGiB > 40.001 || in.HostPending.CommitGiB < 39 || in.HostPending.CommitGiB > 40.001 {
+		t.Fatalf("HostPending = %+v, want the 40 GiB the granted lease has not loaded, in both quantities (Manager.HostRAMPendingLoad)", in.HostPending)
 	}
 	in.Min, in.Max = 1, 1
 	_, aerr := gpulease.Allocate(in)
@@ -57,8 +57,8 @@ func TestBuildInputCarriesWhatGrantedLeasesHaveYetToLoadAndTheAllocatorUsesIt(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if in2.HostPendingGiB != 0 {
-		t.Fatalf("no lease is granted any more, so nothing is pending: %.2f", in2.HostPendingGiB)
+	if in2.HostPending != (gpuprobe.HostLoad{}) {
+		t.Fatalf("no lease is granted any more, so nothing is pending: %+v", in2.HostPending)
 	}
 	in2.Min, in2.Max = 1, 1
 	if _, err := gpulease.Allocate(in2); err != nil {

@@ -534,7 +534,7 @@ func (m *Manager) tryAcquireDevices(class Class, opts Options, devs []string) (*
 	}
 	// The host's readings come BEFORE the lock (F57): the walk of each declaring holder's process tree does not belong in a
 	// critical section every other acquirer on the machine spins on for two seconds. They are compared inside it.
-	reading := m.readHost(opts.HostRAMGiB)
+	reading := m.readHost(opts.hostLoad())
 	if m.afterHostReadHook != nil {
 		m.afterHostReadHook()
 	}

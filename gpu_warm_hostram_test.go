@@ -28,7 +28,7 @@ import (
 func useWarmHost(t *testing.T, commit float64) {
 	t.Helper()
 	restore := gpuprobe.UseHostMemoryReader(func() (gpuprobe.HostMemory, bool) {
-		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - commit/2, CommitUsedGiB: commit, CommitLimitGiB: 160}, true
+		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - commit/2, CommitUsedGiB: commit, CommitLimitGiB: 100}, true
 	})
 	t.Cleanup(restore)
 }

@@ -432,30 +432,36 @@ func TestHostRAMOnTheRecordIsAdditive(t *testing.T) {
 	}
 }
 
-// pendingGiB pools leases that share a holder (the pipeline's one server process holds one lease per
+// pendingLoad pools leases that share a holder (the pipeline's one server process holds one lease per
 // card, and all their runners are below it), never goes below zero, and counts the whole declared
-// need of a holder whose memory cannot be read.
+// need of a holder whose memory cannot be read. Each quantity is its own sum: the working set against the
+// resident figure, the commit against the private one.
 func TestPendingPoolsLeasesByHolder(t *testing.T) {
-	held := func(m map[int]float64, unreadable ...int) func(Info) (float64, bool) {
+	held := func(m map[int]gpuprobe.HostLoad, unreadable ...int) func(Info) (gpuprobe.HostLoad, bool) {
 		bad := map[int]bool{}
 		for _, p := range unreadable {
 			bad[p] = true
 		}
-		return func(l Info) (float64, bool) { return m[l.PID], !bad[l.PID] }
+		return func(l Info) (gpuprobe.HostLoad, bool) { return m[l.PID], !bad[l.PID] }
 	}
 	live := []Info{
 		{Epoch: 1, PID: 100, HostRAMGiB: 20},
 		{Epoch: 2, PID: 100, HostRAMGiB: 20}, // same holder: the runners below pid 100 are both jobs
 		{Epoch: 3, PID: 200, HostRAMGiB: 10},
-		{Epoch: 4, PID: 300, HostRAMGiB: 0}, // declares nothing
-		{Epoch: 5, PID: 400, HostRAMGiB: 8}, // holder unreadable
+		{Epoch: 4, PID: 300, HostRAMGiB: 0},                        // declares nothing
+		{Epoch: 5, PID: 400, HostRAMGiB: 8},                        // holder unreadable
+		{Epoch: 6, PID: 500, HostRAMGiB: 10, HostRAMCommitGiB: 50}, // a commit declared apart from the working set
+		{Epoch: 7, PID: 600, HostRAMCommitGiB: 12},                 // a commit and no working set
 	}
-	got := pendingGiB(live, held(map[int]float64{100: 25, 200: 30}, 400))
-	// holder 100: 40 declared - 25 held = 15; holder 200: 10 - 30 -> 0; holder 400 unreadable: all 8.
-	if got != 15+0+8 {
-		t.Fatalf("pending = %.1f, want 23", got)
+	got := pendingLoad(live, held(map[int]gpuprobe.HostLoad{
+		100: {TouchGiB: 25, CommitGiB: 25}, 200: {TouchGiB: 30, CommitGiB: 30}, 500: {TouchGiB: 10, CommitGiB: 20}, 600: {TouchGiB: 0, CommitGiB: 4},
+	}, 400))
+	// working set: holder 100: 40 declared - 25 held = 15; 200: 10 - 30 -> 0; 400 unreadable: all 8; 500: 10 - 10 = 0; 600: none.
+	// commit: 100: 15; 200: 0; 400: 8; 500: 50 - 20 = 30; 600: 12 - 4 = 8.
+	if want := (gpuprobe.HostLoad{TouchGiB: 15 + 0 + 8, CommitGiB: 15 + 0 + 8 + 30 + 8}); got != want {
+		t.Fatalf("pending = %+v, want %+v", got, want)
 	}
-	if pendingGiB(nil, held(nil)) != 0 {
+	if pendingLoad(nil, held(nil)) != (gpuprobe.HostLoad{}) {
 		t.Fatal("no leases, nothing pending")
 	}
 }

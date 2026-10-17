@@ -735,13 +735,45 @@ type Manager struct {
 	// process-wide one config.Load installed (SetDefaultHostRAMHeadroom).
 	hostHeadroomGiB float64
 	// hostMem and workload are test seams for the host-RAM term: the host's memory reading (nil = the
-	// real reader, gpuprobe.ReadHostMemory) and what the processes below a holder pid hold RESIDENT
-	// (nil = the real process-tree reader, descendantsResidentGiB). Production never sets them.
+	// real reader, gpuprobe.ReadHostMemory) and what the processes below a holder pid hold: TouchGiB is their
+	// working set (resident) and CommitGiB their private bytes (nil = the real process-tree reader,
+	// descendantsHeld). Production never sets them.
 	hostMem  func() (gpuprobe.HostMemory, bool)
 	workload func(holderPID int) (gpuprobe.HostLoad, bool)
 	// readOnly marks a view made by ReadOnly: the readers that prune a record they find dead or expired leave it.
 	readOnly bool
 }
+
+// effectiveCommit is the commit a declaration stands for: the commit when one was declared, else the touched figure (a holder
+// that declared one figure declared it for both quantities).
+func effectiveCommit(touch, commit float64) float64 {
+	if commit > 0 {
+		return commit
+	}
+	return max(touch, 0)
+}
+
+// storedCommit is what goes on a record for a commit: nothing when it is the touched figure (the reader takes that default),
+// so a record of a holder that declared one figure is the record it always was.
+func storedCommit(touch, commit float64) float64 {
+	if commit > 0 && commit != touch {
+		return commit
+	}
+	return 0
+}
+
+// hostLoad is what the options declare of the host's memory: the working set, and the commit (the touched figure when no
+// commit was declared).
+func (o Options) hostLoad() gpuprobe.HostLoad {
+	return gpuprobe.HostLoad{TouchGiB: max(o.HostRAMGiB, 0), CommitGiB: effectiveCommit(o.HostRAMGiB, o.HostRAMCommitGiB)}
+}
+
+// DeclaresHostRAM says the lease declared any host memory (either quantity).
+func (i Info) DeclaresHostRAM() bool { return i.HostRAMGiB > 0 || i.HostRAMCommitGiB > 0 }
+
+// AsksForHostRAM says the lease waits to have host memory admitted (either quantity): it holds its cards and has not yet
+// declared the figure (Meta.HostRAMWaitGiB).
+func (i Info) AsksForHostRAM() bool { return i.HostRAMWaitGiB > 0 || i.HostRAMWaitCommitGiB > 0 }
 
 // ErrCardScopedOff is returned by an acquisition that names devices on a host that
 // has not enabled card-scoped leases.
@@ -1286,9 +1318,11 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		Exclusive:  meta.Exclusive,
 		Draining:   meta.Draining,
 		Command:    meta.Command,
-		HostRAMGiB: meta.HostRAMGiB,
+		HostRAMGiB:       meta.HostRAMGiB,
+		HostRAMCommitGiB: effectiveCommit(meta.HostRAMGiB, meta.HostRAMCommitGiB),
 
-		HostRAMWaitGiB: meta.HostRAMWaitGiB,
+		HostRAMWaitGiB:       meta.HostRAMWaitGiB,
+		HostRAMWaitCommitGiB: effectiveCommit(meta.HostRAMWaitGiB, meta.HostRAMWaitCommitGiB),
 		Devices:        append([]string(nil), meta.Devices...),
 		Epochs:         []uint64{meta.Epoch},
 		Group:          meta.Group,
@@ -1859,9 +1893,9 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 	now := m.now()
 	start, _ := m.procStart(m.pid)
 	// A need the grant admits (HostRAMGiB) is not also one to await: the admitted figure wins.
-	awaiting := 0.0
-	if opts.HostRAMGiB <= 0 {
-		awaiting = max(opts.HostRAMWaitGiB, 0)
+	awaiting, awaitingCommit := 0.0, 0.0
+	if !opts.hostLoad().Declares() {
+		awaiting, awaitingCommit = max(opts.HostRAMWaitGiB, 0), max(opts.HostRAMWaitCommitGiB, 0)
 	}
 	meta := Meta{
 		Epoch:        epoch,
@@ -1878,7 +1912,9 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 		Command:      clipCommand(opts.Command),
 		HostRAMGiB:   max(opts.HostRAMGiB, 0),
 
-		HostRAMWaitGiB: awaiting,
+		HostRAMCommitGiB:     storedCommit(opts.HostRAMGiB, opts.HostRAMCommitGiB),
+		HostRAMWaitGiB:       awaiting,
+		HostRAMWaitCommitGiB: storedCommit(awaiting, awaitingCommit),
 		Group:          strings.TrimSpace(opts.Group),
 		WrapperVersion: strings.TrimSpace(opts.WrapperVersion),
 		Yields:         strings.TrimSpace(opts.Yields),

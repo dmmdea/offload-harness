@@ -530,7 +530,7 @@ func TestPickAutoDoesNotPollForAnImpossibleHostNeed(t *testing.T) {
 	build := func() (gpulease.AllocInput, error) {
 		return gpulease.AllocInput{
 			Cards:     cards,
-			HostMemOK: true, HostMem: gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 50, CommitUsedGiB: 20, CommitLimitGiB: 160},
+			HostMemOK: true, HostMem: gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 50, CommitUsedGiB: 20, CommitLimitGiB: 100},
 			HostNeedGiB: 99, HostHeadroomGiB: 8, // 99 > 100 - 8: no state of this host admits it
 		}, nil
 	}
