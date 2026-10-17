@@ -4379,3 +4379,57 @@ test("readiness: a file that answers a probe name is a file ComfyUI may open in 
   assert.deepEqual(run([EMB("evil_ti.safetensors"), EMB("sd15/evil_ti,.pt")], ["evil_ti,"]), [false, 1, [["evil_ti,", "shadowed", ["sd15/evil_ti,.pt"]]]], "in a subfolder too");
   assert.equal(C.readiness([req("embeddings", "evil_ti", { annotated: false })], invFrom({ ...TREE, [EMB("evil_ti,.pt")]: { size: 1 } }), { mode: "basename-only", probes: ["evil_ti,"] }).requirements.length, 1, "the older shortcut does not look at probes");
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// The rules of the case probe, one by one (foldsCase): the first file whose name has a letter a swap changes is asked about in the other case;
+// a name with no such letter says nothing; a folder that holds both spellings is case-sensitive; and the answer is per root.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+test("inventory: a folder that holds both spellings of a name is a case-sensitive one, whichever is listed first", () => {
+  const dirs = (files) => foldInv(files, { fold: false }).classes.embeddings.case_insensitive_dirs;
+  assert.deepEqual(dirs([EMB("foo.safetensors"), EMB("FOO.SAFETENSORS")]), [], "the twin of the first name is a file of its own");
+  assert.deepEqual(dirs([EMB("FOO.SAFETENSORS"), EMB("foo.safetensors")]), [], "and in the other order");
+  assert.deepEqual(foldGot([EMB("foo.safetensors"), EMB("FOO.SAFETENSORS")], "Foo", {}, { fold: false }), ["case_mismatch", null, ["FOO.SAFETENSORS"]], "neither spelling is Foo, on a volume that tells them apart");
+  assert.deepEqual(foldGot([EMB("foo.safetensors"), EMB("FOO.SAFETENSORS")], "foo", {}, { fold: false }), ["present", "foo.safetensors", null], "and foo is the file of that name");
+});
+
+test("inventory: a name with no letter a case swap changes says nothing, and the probe goes on to the next file", () => {
+  const root = EMB("").slice(0, -1);
+  const dirs = (files) => foldInv(files).classes.embeddings.case_insensitive_dirs;
+  assert.deepEqual(dirs([EMB("01"), EMB("FOO.pt")]), [root], "an extension-less 01 first");
+  assert.deepEqual(foldGot([EMB("01"), EMB("FOO.pt")], "foo"), ["present", "FOO.pt", null]);
+  assert.deepEqual(dirs([EMB("2023/01")]), [], "no file with a letter: no answer, so the root is not recorded as folding");
+  assert.deepEqual(dirs([EMB("2023/01"), EMB("2023/9/x.pt")]), [root], "the first file with a letter, however deep, decides");
+});
+
+test("inventory: the probe swaps the case of each letter, so an all-capital name and an all-lower-case name both have a twin", () => {
+  const root = EMB("").slice(0, -1);
+  assert.deepEqual(foldInv([EMB("BAR.PT")]).classes.embeddings.case_insensitive_dirs, [root], "all capitals: the twin is bar.pt");
+  assert.deepEqual(foldInv([EMB("foo.pt")]).classes.embeddings.case_insensitive_dirs, [root], "all lower case: the twin is FOO.PT");
+  assert.deepEqual(foldGot([EMB("BAR.PT")], "bar"), ["present", "BAR.PT", null]);
+  assert.deepEqual(foldGot([EMB("foo.pt")], "FOO"), ["present", "foo.pt", null]);
+});
+
+// An io whose volume folds case under one prefix only, as a node with a second root on another volume (or another folder with the flag set).
+const foldUnder = (files, prefix) => {
+  const full = foldIo(files);
+  const plain = memIo(files);
+  const under = (p) => String(p).replace(/\\/g, "/").toLowerCase().startsWith(prefix.toLowerCase());
+  return { ...plain, stat: (p) => (under(p) ? full.stat(p) : plain.stat(p)), exists: (p) => (under(p) ? full.exists(p) : plain.exists(p)) };
+};
+const perRootGot = (files, prefix, name) => {
+  const tree = { ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) };
+  const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls: OVERFLOW }), foldUnder(tree, prefix));
+  const r = C.readiness([req("embeddings", name, { annotated: false })], inv).requirements[0];
+  return [r.status, r.resolved ?? null, inv.classes.embeddings.case_insensitive_dirs];
+};
+
+test("readiness: the case rule is the root's own: a case variant is a hit in a root that folds and not in one that does not", () => {
+  const second = EMB2("").slice(0, -1);
+  const first = EMB("").slice(0, -1);
+  assert.deepEqual(perRootGot([EMB2("Bar.pt")], "E:/x", "bar"), ["present", "Bar.pt", [second]], "only the second root folds, and it holds the file");
+  assert.deepEqual(perRootGot([EMB("Bar.pt"), EMB2("Bar.pt")], "E:/x", "bar"), ["present", "Bar.pt", [second]], "the same name in both: the first root, case-sensitive, does not answer bar");
+  assert.deepEqual(perRootGot([EMB("Bar.pt"), EMB2("Bar.pt")], "D:/x", "bar"), ["present", "Bar.pt", [first]], "and the other way round");
+  assert.deepEqual(perRootGot([EMB("Bar.pt"), EMB2("zzz.pt")], "E:/x", "bar"), ["case_mismatch", null, [second]], "the file is in the root that does not fold");
+  assert.equal(perRootGot([EMB("Bar.pt"), EMB2("Bar.pt")], "", "bar")[0], "ambiguous", "both fold: two files answer");
+});
