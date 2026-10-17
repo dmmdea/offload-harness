@@ -111,7 +111,7 @@
   - A loader widget's embeddings file is not a prompt name. An annotated entry of the embeddings class that records no prompt name is the
     file a `ConditioningLoader` widget carries (three templates of the installed package, the Marigold depth, albedo and surface-normal
     ones). That node lists the directories by relative path (a subfolder file is `sd15/x`) and opens its value with the exact path under the
-    first root, so it is met like a file of any other class: a subfolder-only file is `in_subfolder`, and a root file with a copy in a
+    first root that holds it, so it is met like a file of any other class: a subfolder-only file is `in_subfolder`, and a root file with a copy in a
     subfolder is `present`. The prompt lookup applies to an unannotated requirement and to an annotation that records the prompt names it
     covers (`embedding_refs`); `readinessFor` forwards `annotated` so the run gate makes the same split.
   - Other names ComfyUI may try (`embedding_probes`). Two readings of a prompt open files the requirement does not name. `_try_get_embedding`

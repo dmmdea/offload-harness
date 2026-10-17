@@ -256,7 +256,7 @@ export function modelCovered(names, file) {
 // as written is asked of isfile first, with no extension filter and under the file system's own case rule (embeddingHits, the scan).
 //
 // A file a loader widget names (ConditioningLoader) is a different lookup: the node lists the directories by relative path and opens its
-// value with get_full_path, the exact path under the first root. checkRequirement gives it the rule of every other class.
+// value with get_full_path, the exact path under the first root that holds it. checkRequirement gives it the rule of every other class.
 //
 // WHAT it reads from a prompt is the tokenizer's, and embeddingRefs ports that path. Names ComfyUI may try beyond the ones it returns
 // (embeddingProbes: the name as written before its commas come off, and what the encoders that read a prompt without weights take) are
@@ -1502,7 +1502,7 @@ function checkRequirement(req, inv, mode, asFile = false) {
   if (!c) { result.status = "class_unregistered"; return result; }
   // The prompt tokenizer's lookup is for a name a prompt gives: an unannotated requirement, or an annotation that records the names it covers.
   // An annotation with none is a file a loader widget names (ConditioningLoader): the node lists the directories by relative path and opens
-  // the value with get_full_path, the exact path under the first root, which is the rule of every other class and the code below.
+  // the value with get_full_path, the exact path under the first root that holds it, which is the rule of every other class and the code below.
   const refs = Array.isArray(req.embedding_refs) ? req.embedding_refs : [];
   if (cls === "embeddings" && !asFile && (req.annotated !== true || refs.length > 0)) return checkEmbedding(name, directory, c, inv, mode, result, refs);
   if (!extListed(name, c.exts)) { result.status = "extension_not_listed"; return result; }

@@ -634,7 +634,7 @@ test("resolve: on a volume that folds case, a file in another case in another di
 });
 
 // A loader widget that names an embeddings file (ConditioningLoader) is read by ComfyUI's plain loader rule: the exact relative path under
-// the first root, no subfolder search. The prompt lookup (a set of directories, a subfolder file found by the bare name) is not its rule.
+// the first root that holds it, no subfolder search. The prompt lookup (a set of directories, a subfolder file found by the bare name) is not its rule.
 const conditioningIo = (models) => {
   const index = JSON.stringify([{ moduleName: "default", category: "Fixture", title: "Fixture", type: "image", templates: [{ name: "tt_emb", mediaType: "image", mediaSubtype: "webp", openSource: true, title: "tt_emb", tags: ["Image"], models: ["A"] }] }]);
   const wf = JSON.stringify({
