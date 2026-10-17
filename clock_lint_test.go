@@ -33,10 +33,10 @@ package main
 // test requires is not seen: `elapsed < C` is overwhelmingly a LOWER bound ("it waited at least C"), which a slow runner
 // only makes truer. The lint does not tell a ceiling from the lower edge of a sampling window (`el > lo && el < hi`, a
 // classification of samples); such a site is listed with that reason. A fixed time.Sleep before an assertion, a short call
-// or context window handed to the code under test, and a helper that takes a sub-second timeout are not seen either; those
-// are the other shapes of the same fault and are fixed, as before, by waiting on the event the product signals (a channel,
-// a barrier, a held fake) instead of on a clock. `case <-time.After(C): t.Fatal(...)` ceilings were counted when this lint
-// was written: none is under one second.
+// or context window handed to the code under test, a poll deadline taken from time.Now().Add(C), and a helper that takes a
+// sub-second timeout are not seen either; those are the other shapes of the same fault and are fixed, as before, by waiting
+// on the event the product signals (a channel, a barrier, a held fake) instead of on a clock. `case <-time.After(C):
+// t.Fatal(...)` ceilings were counted when this lint was written: none is under one second.
 //
 // REGENERATING THE LIST. CLOCK_LINT_PRINT=1 go test . -run TestTestsPutNoSubSecondCeilingOnMeasuredTime -v
 // prints the entries the current tree needs, with an empty reason. The reason is the review: write it only after reading
