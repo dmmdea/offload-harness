@@ -4433,3 +4433,37 @@ test("readiness: the case rule is the root's own: a case variant is a hit in a r
   assert.deepEqual(perRootGot([EMB("Bar.pt"), EMB2("zzz.pt")], "E:/x", "bar"), ["case_mismatch", null, [second]], "the file is in the root that does not fold");
   assert.equal(perRootGot([EMB("Bar.pt"), EMB2("Bar.pt")], "", "bar")[0], "ambiguous", "both fold: two files answer");
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Probe names (embeddingProbes, requiredModels, probeFindings): the cases the first tests left out. A probe is a name ComfyUI may try for a
+// prompt; a file that answers it is a file the manifest does not name, and which of several answers it is varies from run to run.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+test("readiness: a probe name that more than one directory holds is a file ComfyUI may open, and none of them is named, so the template is not ready", () => {
+  const run = (files) => {
+    const inv = invFrom({ ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) });
+    const r = C.readiness([req("embeddings", "evil_ti", { annotated: false })], inv, { probes: ["evil_ti,"] });
+    return [r.ready, r.not_ready_count, r.requirements.slice(1).map((x) => [x.name, x.status, x.found])];
+  };
+  assert.deepEqual(run([EMB("evil_ti.safetensors"), EMB("evil_ti,.pt"), EMB("sd15/evil_ti,.pt")]), [false, 1, [["evil_ti,", "shadowed", ["evil_ti,.pt", "sd15/evil_ti,.pt"]]]], "the root and a subfolder");
+  assert.deepEqual(run([EMB("evil_ti.safetensors"), EMB("sd15/evil_ti,.pt"), EMB("sd16/evil_ti,.bin")]), [false, 1, [["evil_ti,", "shadowed", ["sd15/evil_ti,.pt", "sd16/evil_ti,.bin"]]]], "two subfolders");
+});
+
+test("models: a name only the reading without weights takes is a probe though the CLIP reading names nothing in the text", () => {
+  const r = C.requiredModels({ nodes: [promptNode(1, "a cat ( embedding:1.2 )")] });
+  assert.deepEqual(r.active, [], "the CLIP reading reads 1.2 as the weight of the group");
+  assert.deepEqual(r.embedding_probes, ["1.2"]);
+  const ready = C.readiness([], invFrom({ ...TREE, [EMB("1.2.safetensors")]: { size: 1 } }), { probes: r.embedding_probes });
+  assert.deepEqual([ready.ready, ready.requirements.map((x) => [x.name, x.status, x.found])], [false, [["1.2", "shadowed", ["1.2.safetensors"]]]], "a file of that name is a file those encoders open");
+});
+
+test("readiness: a probe keeps the case the prompt gives: a case-sensitive node opens Evil_TI,.pt for it and does not open evil_ti,.pt", () => {
+  const probes = C.requiredModels({ nodes: [promptNode(1, "embedding:Evil_TI, a cat")] }).embedding_probes;
+  assert.deepEqual(probes, ["Evil_TI,"]);
+  const run = (file) => {
+    const r = C.readiness([req("embeddings", "Evil_TI", { annotated: false })], invFrom({ ...TREE, [EMB("Evil_TI.safetensors")]: { size: 1 }, [EMB(file)]: { size: 1 } }), { probes });
+    return [r.ready, r.requirements.slice(1).map((x) => [x.name, x.status, x.found])];
+  };
+  assert.deepEqual(run("Evil_TI,.pt"), [false, [["Evil_TI,", "shadowed", ["Evil_TI,.pt"]]]]);
+  assert.deepEqual(run("evil_ti,.pt"), [true, []], "another case is another name there");
+});

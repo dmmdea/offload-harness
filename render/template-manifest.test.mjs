@@ -662,3 +662,28 @@ test("resolve: a conditioning file a loader widget names runs from the root even
   assert.equal(ok.ok, true, JSON.stringify(ok));
   assert.deepEqual(ok.runtime_manifest.models.map((m) => m.path), ["models/diffusion_models/a.safetensors", "models/embeddings/cond.safetensors"]);
 });
+
+// A probe name that more than one directory holds, and a name only the reading without weights takes, at the run gate.
+
+test("resolve: a probe name that two directories hold refuses the run, and the refusal lists both files", () => {
+  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+  const io = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors", "embeddings/sd15/evil_ti,.pt", "embeddings/sd16/evil_ti,.bin"]);
+  const row = rowOf(catalogOf(io), "tt_emb");
+  const gone = M.resolveRun(row, snapshotOf(io), { io });
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/evil_ti,"]]);
+  const r = M.readinessFor(row, snapshotOf(io), { io });
+  assert.deepEqual(r.embedding_probes.map((p) => [p.name, p.status, p.found]), [["evil_ti,", "shadowed", ["sd15/evil_ti,.pt", "sd16/evil_ti,.bin"]]]);
+});
+
+test("resolve: a name only the reading without weights takes (`a cat ( embedding:1.2 )`) is a probe, and a file of that name refuses the run", () => {
+  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+  const prompt = "a cat ( embedding:1.2 )";
+  const files = ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors"];
+  const ok = embeddingIo(annotation, files, prompt);
+  assert.deepEqual(rowOf(catalogOf(ok), "tt_emb").embedding_probes, ["1.2"]);
+  assert.equal(M.resolveRun(rowOf(catalogOf(ok), "tt_emb"), snapshotOf(ok), { io: ok }).ok, true, "no file answers 1.2: the run is allowed");
+  const io = embeddingIo(annotation, [...files, "embeddings/1.2.safetensors"], prompt);
+  const gone = M.resolveRun(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/1.2"]]);
+  assert.equal(C.catalogReadiness(catalogOf(io), snapshotOf(io).inventory).tt_emb.ready, false, "and the readiness table agrees");
+});
