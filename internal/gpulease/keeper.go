@@ -56,7 +56,7 @@ func (m *Manager) keeperSignOfLife(epoch uint64, record string) time.Time {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, "hb.") || strings.HasSuffix(name, ".tmp") {
+		if e.IsDir() || !strings.HasPrefix(name, "hb.") || isStagedName(name) {
 			continue
 		}
 		if _, perr := strconv.ParseUint(strings.TrimPrefix(name, "hb."), 10, 64); perr != nil {

@@ -45,6 +45,33 @@ func stagingPath(path string) string {
 	return path + ".tmp"
 }
 
+// stagedSuffixes are the suffixes stagingPath appends, read from it so that one place names them. A reader that lists a directory and has
+// to tell a staged file from a live one, or a release that clears a lease's staged files, asks here and does not spell a suffix.
+var stagedSuffixes = []string{
+	strings.TrimPrefix(stagingPath("x"), "x"),
+	strings.TrimPrefix(stagingPath(metaFileName), metaFileName),
+}
+
+// isStagedName says whether a directory entry is some writer's staged file and not a live one.
+func isStagedName(name string) bool {
+	for _, s := range stagedSuffixes {
+		if strings.HasSuffix(name, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutStagedSuffix is name with a staged suffix taken off, if it has one.
+func withoutStagedSuffix(name string) string {
+	for _, s := range stagedSuffixes {
+		if strings.HasSuffix(name, s) {
+			return strings.TrimSuffix(name, s)
+		}
+	}
+	return name
+}
+
 // stagedInFlight says whether a staged file stands beside path that its writer may still be installing: it exists, is a regular
 // file (a writer stages a file) and is younger than stagingFresh. A negative age (a clock that stepped back, a timestamp from the future) counts as fresh, and so does a staged file
 // that cannot be examined for any reason but being absent. None of those is evidence that nothing is in flight.

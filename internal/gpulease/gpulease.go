@@ -2053,7 +2053,7 @@ func (m *Manager) readEpoch() (uint64, error) {
 
 // writeEpoch publishes a counter value atomically. Callers must hold the epoch lock.
 func (m *Manager) writeEpoch(v uint64) error {
-	tmp := m.epochPath() + ".tmp"
+	tmp := stagingPath(m.epochPath())
 	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(v, 10)), 0o666); err != nil {
 		return fmt.Errorf("gpulease: writing epoch: %w", err)
 	}
@@ -2204,7 +2204,7 @@ func (m *Manager) restampWholeLocked(epoch uint64, fn func(*Meta)) error {
 	if merr != nil {
 		return fmt.Errorf("gpulease: encoding lease record: %w", merr)
 	}
-	tmp := m.metaPath() + ".restamp"
+	tmp := stagingPath(m.metaPath())
 	if werr := os.WriteFile(tmp, b, 0o666); werr != nil {
 		return fmt.Errorf("gpulease: restamp: %w", werr)
 	}

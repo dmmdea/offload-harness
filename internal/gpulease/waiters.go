@@ -410,7 +410,7 @@ func (m *Manager) refreshWaiter(self Waiter) {
 	if err != nil {
 		return
 	}
-	tmp := self.path + ".tmp"
+	tmp := stagingPath(self.path)
 	if err := os.WriteFile(tmp, b, 0o666); err != nil {
 		return
 	}

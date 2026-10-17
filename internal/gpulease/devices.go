@@ -186,7 +186,7 @@ func writeEpochRecord(leaseDir string, rec *Meta) error {
 		return fmt.Errorf("gpulease: encoding lease record: %w", err)
 	}
 	path := epochRecordPath(leaseDir, rec.Epoch)
-	tmp := path + ".tmp"
+	tmp := stagingPath(path)
 	if err := os.WriteFile(tmp, b, 0o666); err != nil {
 		return fmt.Errorf("gpulease: writing lease record: %w", err)
 	}
@@ -866,7 +866,7 @@ func (m *Manager) staleSeen(keep map[uint64]bool) []string {
 		if e.IsDir() || !strings.HasPrefix(name, seenPrefix) {
 			continue
 		}
-		rest := strings.TrimSuffix(strings.TrimPrefix(name, seenPrefix), ".tmp")
+		rest := withoutStagedSuffix(strings.TrimPrefix(name, seenPrefix))
 		epoch, perr := strconv.ParseUint(rest, 10, 64)
 		if perr != nil || keep[epoch] {
 			continue
@@ -925,8 +925,12 @@ func (m *Manager) removeLeaseFilesLocked(epoch uint64) error {
 // sibling's heartbeat and make it reclaimable.
 func (m *Manager) clearEpochMarkers(epoch uint64) {
 	e := strconv.FormatUint(epoch, 10)
-	for _, name := range []string{"unloaded." + e, "hb." + e, "hb." + e + ".tmp", orphanMarkPrefix + e, orphanMarkPrefix + e + ".tmp", yieldPrefix + e, yieldPrefix + e + ".tmp"} {
-		_ = m.remove(filepath.Join(m.leaseDir(), name))
+	unloaded := filepath.Join(m.leaseDir(), "unloaded."+e)
+	hb := filepath.Join(m.leaseDir(), "hb."+e)
+	orphan := filepath.Join(m.leaseDir(), orphanMarkPrefix+e)
+	yield := filepath.Join(m.leaseDir(), yieldPrefix+e)
+	for _, path := range []string{unloaded, hb, stagingPath(hb), orphan, stagingPath(orphan), yield, stagingPath(yield)} {
+		_ = m.remove(path)
 	}
 }
 

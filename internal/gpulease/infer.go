@@ -732,7 +732,7 @@ func (s *Scoper) commit(epoch uint64, mine seenRecord, cur []string, source stri
 			return err
 		}
 		path := s.seenPath(epoch)
-		tmp := path + ".tmp"
+		tmp := stagingPath(path)
 		if err := os.WriteFile(tmp, b, 0o666); err != nil {
 			return err
 		}

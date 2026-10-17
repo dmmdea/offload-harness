@@ -397,7 +397,7 @@ func (a *YieldAsker) write(req YieldRequest) (bool, error) {
 
 // writeYieldFile is tmp and rename, the way every sidecar of this package is written.
 func writeYieldFile(path string, b []byte) error {
-	tmp := path + ".tmp"
+	tmp := stagingPath(path)
 	if err := os.WriteFile(tmp, b, 0o666); err != nil {
 		return err
 	}

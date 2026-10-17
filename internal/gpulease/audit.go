@@ -479,7 +479,7 @@ func (m *Manager) WriteReaderAudit(r AuditReport) error {
 	if err := os.MkdirAll(m.gpuDir(), 0o777); err != nil {
 		return err
 	}
-	tmp := m.readerAuditPath() + ".tmp"
+	tmp := stagingPath(m.readerAuditPath())
 	if err := os.WriteFile(tmp, b, 0o666); err != nil {
 		return fmt.Errorf("gpulease: writing the reader audit marker: %w", err)
 	}
