@@ -86,6 +86,12 @@
   body and exactly one journal line, with the throttle shared across the doors. Mutants each turn their test red: the check
   taken out of the text route, the withdraw's and the queue's and the no-token refusal's line dropped, the throttle keyed on
   the door again, `admit`'s backstop removed.
+  Two more tests pass on the code as it stands and are pinned by mutants instead: the jobs feed shows a failed media job's
+  error text only to a reader with the bearer (the job goes through the real dispatch door; narrowing the mask to agent runs
+  turns the test red), and no door copies a presented credential into its journal line (a wrong bearer and two malformed
+  headers sent to every route of the door table, to a node with no token beyond loopback and to the re-dispatch of a known
+  job, with the line and the answer searched for the presented value and for the node's key; appending the header to the line
+  turns every case red).
 - **Pins to confirm.** The MultiGPU pin is the documented one. The VideoHelperSuite and GGUF commits are the ones one reference
   node's checkout was at, not documented anywhere (`"pin": "unverified"` in the file); confirm them against the fleet before a
   workflow depends on them, and add a row for any other pack a workflow needs.
