@@ -658,6 +658,82 @@ const half = poll / 2
 func f(start time.Time) bool { return time.Since(start) > half }`, "p/a.go": `package p
 import "time"
 const poll = 800 * time.Millisecond`}, map[string]int{"p/a_test.go:elapsed>400ms": 1}},
+		{"arithmetic on the elapsed time: a product", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return 2*time.Since(start) > 210*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>105ms": 1}},
+		{"arithmetic on the elapsed time: a quotient", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return time.Since(start)/2 > 200*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>400ms": 1}},
+		{"a conversion of the elapsed time to a count of milliseconds", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return time.Since(start)/time.Millisecond > 106 }`}, map[string]int{"p/a_test.go:elapsed>106ms": 1}},
+		{"a conversion through int", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return int(time.Since(start)/time.Millisecond) > 107 }`}, map[string]int{"p/a_test.go:elapsed>107ms": 1}},
+		{"a conversion through float64", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return float64(time.Since(start))/float64(time.Millisecond) > 108 }`}, map[string]int{"p/a_test.go:elapsed>108ms": 1}},
+		{"a conversion back through time.Duration", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return time.Duration(float64(time.Since(start))) > 111*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>111ms": 1}},
+		{"rounding the elapsed time", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return time.Since(start).Round(time.Millisecond) > 109*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>109ms": 1}},
+		{"truncating the elapsed time", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { el := time.Since(start).Truncate(10 * time.Millisecond); return el > 110*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>110ms": 1}},
+		{"a helper that returns the time it measured, called in the comparison", map[string]string{"p/a_test.go": `package p
+import "time"
+func measure(f func()) time.Duration { s := time.Now(); f(); return time.Since(s) }
+func g() bool { return measure(func() {}) > 113*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>113ms": 1}},
+		{"a helper that returns the time it measured, kept in a variable", map[string]string{"p/a_test.go": `package p
+import "time"
+func g() bool { d := measure(func() {}); return d > 114*time.Millisecond }`, "p/h_test.go": `package p
+import "time"
+func measure(f func()) time.Duration { s := time.Now(); f(); return time.Since(s) }`}, map[string]int{"p/a_test.go:elapsed>114ms": 1}},
+		{"a helper whose last of three results is the elapsed time", map[string]string{"p/a_test.go": `package p
+import "time"
+func g() bool {
+	results, sum, elapsed := runWithin(3)
+	_, _ = results, sum
+	return elapsed > 130*time.Millisecond
+}`, "p/h_test.go": `package p
+import "time"
+func runWithin(n int) ([]int, int, time.Duration) {
+	start := time.Now()
+	return nil, n, time.Since(start)
+}`}, map[string]int{"p/a_test.go:elapsed>130ms": 1}},
+		{"a helper that returns zero on its error path and the elapsed time on the other", map[string]string{"p/a_test.go": `package p
+import "time"
+func run() (time.Duration, error) {
+	start := time.Now()
+	if err := work(); err != nil {
+		return 0, err
+	}
+	return time.Since(start), nil
+}
+func work() error { return nil }
+func g() bool { d, err := run(); _ = err; return d > 131*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>131ms": 1}},
+		{"a helper with a named result and a bare return", map[string]string{"p/a_test.go": `package p
+import "time"
+func timed() (d time.Duration) { s := time.Now(); d = time.Since(s); return }
+func g() bool { return timed() > 132*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>132ms": 1}},
+		{"a helper that returns another helper's elapsed time", map[string]string{"p/a_test.go": `package p
+import "time"
+func measure(f func()) time.Duration { s := time.Now(); f(); return time.Since(s) }
+func outer() time.Duration { return measure(func() {}) }
+func g() bool { return outer() > 133*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>133ms": 1}},
+		{"a method that returns the elapsed time, called through a value", map[string]string{"p/a_test.go": `package p
+import "time"
+type rig struct{ started time.Time }
+func (r *rig) took() time.Duration { return time.Since(r.started) }
+func g(r *rig) bool { return r.took() > 134*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>134ms": 1}},
+		{"a helper in a file of the package that is not a test", map[string]string{"p/a_test.go": `package p
+import "time"
+func g() bool { return Elapsed() > 135*time.Millisecond }`, "p/a.go": `package p
+import "time"
+var begun = time.Now()
+func Elapsed() time.Duration { return time.Since(begun) }`}, map[string]int{"p/a_test.go:elapsed>135ms": 1}},
 		// The controls: none of these is a sub-second upper bound on measured time.
 		{"a const of the package is not a const of its external test package", map[string]string{"p/a.go": `package p
 import "time"
@@ -682,6 +758,43 @@ import "time"
 const poll = time.Second`, "p/a_windows.go": `package p
 import "time"
 const poll = 2 * time.Second`}, map[string]int{}},
+		{"a helper that returns a stored duration is not a measurement", map[string]string{"p/a_test.go": `package p
+import "time"
+func budget() time.Duration { return 500 * time.Millisecond }
+func g() bool { return budget() > 100*time.Millisecond }`}, map[string]int{}},
+		{"a helper with one return that is not elapsed time is not trusted", map[string]string{"p/a_test.go": `package p
+import "time"
+func took(s time.Time, fast bool, cfg time.Duration) time.Duration {
+	if fast {
+		return cfg
+	}
+	return time.Since(s)
+}
+func g(s time.Time) bool { return took(s, true, 0) > 100*time.Millisecond }`}, map[string]int{}},
+		{"a helper name declared twice with different results is not trusted", map[string]string{"p/a_test.go": `package p
+import "time"
+type a struct{}
+type b struct{}
+func (a) took() time.Duration { return time.Since(time.Now()) }
+func (b) took() time.Duration { return 5 * time.Millisecond }
+func g(x a) bool { return x.took() > 100*time.Millisecond }`}, map[string]int{}},
+		{"a function of another package with the name of a local helper is not the helper", map[string]string{"p/a_test.go": `package p
+import (
+	"time"
+	"other/measure"
+)
+func measure2() time.Duration { return time.Since(time.Now()) }
+func g() bool { return measure.measure2() > 100*time.Millisecond }`}, map[string]int{}},
+		{"a result at a position the helper does not measure is not elapsed time", map[string]string{"p/a_test.go": `package p
+import "time"
+func run() (int, time.Duration) { return 7, time.Since(time.Now()) }
+func g() bool { n, d := run(); _ = d; return time.Duration(n) > 100*time.Millisecond }`}, map[string]int{}},
+		{"a product with a value that is not a constant is not read", map[string]string{"p/a_test.go": `package p
+import "time"
+func g(start time.Time, n int) bool { return time.Since(start)*time.Duration(n) > 100*time.Millisecond }`}, map[string]int{}},
+		{"a multi-value call of a function that is not in the package is not read", map[string]string{"p/a_test.go": `package p
+import "time"
+func g() bool { _, _, elapsed := runElsewhere(); return elapsed > 100*time.Millisecond }`}, map[string]int{}},
 		{"a lower bound is clean", map[string]string{"p/a_test.go": `package p
 import "time"
 func f(start time.Time) bool { return time.Since(start) < 500*time.Millisecond }`}, map[string]int{}},
